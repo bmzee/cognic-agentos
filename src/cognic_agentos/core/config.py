@@ -20,10 +20,10 @@ import sys
 from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from cognic_agentos import __version__
 
@@ -124,13 +124,66 @@ class Settings(BaseSettings):
         description="Path the Prometheus instrumentator exposes the scrape endpoint at "
         "(joined under api_prefix).",
     )
-    cors_allowed_origins: list[str] = Field(
+    # ``NoDecode`` tells pydantic-settings NOT to JSON-decode the env value
+    # into a list before field validators run. Without it, the
+    # ``EnvSettingsSource`` parses the raw string as JSON at source-read
+    # time and an empty/comma-separated value raises ``SettingsError``
+    # before any validator can normalise it. With ``NoDecode`` the raw
+    # string lands in the ``mode="before"`` validator below, which
+    # accepts comma-separated, JSON-array, and empty-string forms.
+    cors_allowed_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=list,
         description=(
             "Allow-list of origins permitted by the CORS middleware. The literal "
-            "string `*` is forbidden (per Phase-1 'CORS allow-list-only' principle)."
+            "string `*` is forbidden (per Phase-1 'CORS allow-list-only' principle). "
+            "Env-var input may be either a comma-separated string "
+            "(`https://a.example,https://b.example`) or a JSON array "
+            '(`["https://a.example","https://b.example"]`); empty string = empty list.'
         ),
     )
+
+    @field_validator("cors_allowed_origins", mode="before")
+    @classmethod
+    def _split_cors_origins(cls, value: object) -> list[str]:
+        """Normalize env-var input to a list of trimmed, non-empty origins.
+
+        Pydantic-Settings 2.x parses ``list[str]`` env values as JSON by
+        default, which means a comma-separated env value (the most
+        operator-friendly form) raises ``SettingsError`` at startup. This
+        before-validator accepts:
+
+        - ``None`` / empty string → ``[]``
+        - JSON array string → parse as JSON
+        - Comma-separated string → split + strip
+        - Already-a-list (programmatic construction in tests) → identity
+
+        Whatever shape arrives, the post-normalisation list goes through
+        the wildcard-refusal validator below.
+        """
+
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()]
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return []
+            if stripped.startswith("["):
+                # JSON array — let pydantic-settings' default parser handle
+                # it by returning the string unchanged. (Falls through to
+                # the standard list-of-str coercion.)
+                import json as _json
+
+                parsed = _json.loads(stripped)
+                if not isinstance(parsed, list):
+                    raise ValueError("cors_allowed_origins JSON value must be a list of strings")
+                return [str(item).strip() for item in parsed if str(item).strip()]
+            return [origin.strip() for origin in stripped.split(",") if origin.strip()]
+        raise ValueError(
+            f"cors_allowed_origins must be list, JSON array, or comma-separated "
+            f"string; got {type(value).__name__}"
+        )
 
     @field_validator("cors_allowed_origins")
     @classmethod
