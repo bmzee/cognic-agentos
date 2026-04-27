@@ -52,7 +52,7 @@ The Sprint 1C contracts make this straightforward: the new adapters self-registe
 | `src/cognic_agentos/db/migrations/__init__.py` | Empty package init. |
 | `src/cognic_agentos/db/migrations/oracle/.gitkeep` | Reserves `db/migrations/oracle/` for Sprint 2 Alembic migrations (Oracle dialect). |
 | `infra/dev/docker-compose.oracle.yml` | Opt-in compose overlay. Single service: `gvenzl/oracle-xe:21-slim`. Activated via `docker compose -f docker-compose.yml -f docker-compose.oracle.yml up -d`. Most devs run Postgres locally; Oracle compose only when testing the Oracle adapter or running `@pytest.mark.oracle`. |
-| `infra/dev/docker-compose.vllm.yml` | Opt-in compose overlay for a single-GPU vLLM node (`vllm/vllm-openai:latest`). nvidia runtime; CI runs without; only GPU machines activate. |
+| `infra/dev/docker-compose.vllm.yml` | Opt-in compose overlay for a single-GPU vLLM node (`vllm/vllm-openai:v0.6.6` — intentionally conservative pin; operators bump to a current stable after testing against their CUDA driver). nvidia runtime; CI runs without; only GPU machines activate. |
 | `docs/INFERENCE-BACKENDS.md` | Operator guide: when to pick Ollama (dev) vs vLLM (prod, fast inference) vs SGLang (prod, throughput-optimised) vs cloud (OpenAI/Azure/Bedrock). Deployment topology examples. References ADR-009 §"LLM serving" for the LiteLLM tier-alias scheme. |
 | `tests/unit/db/test_oracle_adapter.py` | Protocol conformance via `unittest.mock.patch` on `sqlalchemy.ext.asyncio.create_async_engine`; integration test against the live overlay marked `@pytest.mark.oracle`. |
 | `tests/unit/db/test_dynatrace_adapter.py` | respx-mocked HTTP probes — health check OK / unreachable / 5xx; emit_metric body shape (line protocol); emit_trace no-raise; flush no-raise; protocol conformance. |
@@ -171,7 +171,7 @@ Append at end of file:
 # COGNIC_DYNATRACE_TENANT_URL=https://abc12345.live.dynatrace.com
 # COGNIC_DYNATRACE_API_TOKEN=dt0c01.YOUR_API_TOKEN_HERE  # dev-only direct env; prod sources via Vault (Sprint 10)
 # COGNIC_DYNATRACE_API_TOKEN_VAULT_PATH=secret/dynatrace/cognic  # reserved; Sprint 10 wires runtime resolution
-# Required Dynatrace API token scopes: metrics.read (health probe) + metrics.write (emit_metric).
+# Required Dynatrace API token scopes: metrics.read (health probe) + metrics.ingest (emit_metric).
 
 # OpenAI-compat embedding (vLLM / SGLang / OpenAI / Cohere / Azure-OAI-via-shim / Bedrock-via-shim):
 # COGNIC_EMBED_DRIVER=openai_compat
@@ -356,7 +356,7 @@ class TestEnterpriseAdapterSettings:
 uv run pytest tests/unit/test_config.py::TestEnterpriseAdapterSettings -v
 ```
 
-Expected: 5 failures (default + env-load + provider-label-default + 7 parametrised + unknown).
+Expected: 14 failures (dynatrace defaults + dynatrace env-load + provider-label-default + 7 parametrised known values + provider-label unknown-accepted + openai_compat auth defaults + openai_compat auth env-load + openai_compat Azure shape).
 
 - [ ] **Step 2.3: Add Dynatrace + OpenAI-compat settings to `Settings`**
 
@@ -1013,7 +1013,7 @@ Driver name: ``dynatrace``. Auto-registers into ``bundled_registry`` on import.
 **Required Dynatrace API token scopes** (operator must grant when
 provisioning the token in the Dynatrace UI):
   - ``metrics.read`` — for the ``health_check`` probe
-  - ``metrics.write`` — for ``emit_metric`` POST to ``/api/v2/metrics/ingest``
+  - ``metrics.ingest`` — for ``emit_metric`` POST to ``/api/v2/metrics/ingest``
   - (no ``traces.write`` needed — trace export rides the Sprint 1B OTel
     pipeline configured separately via ``OTEL_EXPORTER_OTLP_ENDPOINT``)
 
@@ -1980,11 +1980,14 @@ Opt-in single-GPU vLLM node. CI runs without; only GPU machines activate.
 services:
   vllm:
     # Pin: avoid `latest` so a vLLM upstream-image change can't silently
-    # break the overlay between local-dev sessions. Operators should
-    # update this pin to match their cluster's CUDA capability when
-    # productionising. v0.6.6 was the current stable on vLLM's release
-    # track at Sprint-1D plan time (April 2026); verify against
-    # https://github.com/vllm-project/vllm/releases before pinning.
+    # break the overlay between local-dev sessions. v0.6.6 is an
+    # **intentionally conservative** pin used as a known-shape baseline
+    # for the dev-stack contract (the OpenAI-compat /v1/embeddings +
+    # /v1/models endpoints have been stable since v0.5.x). Operators
+    # productionising on real GPU hardware should bump to a current
+    # stable (recent vLLM releases are tracked at
+    # https://github.com/vllm-project/vllm/releases) and re-verify
+    # against their CUDA driver before locking the production pin.
     image: vllm/vllm-openai:v0.6.6
     container_name: cognic-agentos-vllm
     runtime: nvidia
@@ -2252,6 +2255,10 @@ Append after the `image-size-budget` job:
 
       - name: Run @pytest.mark.oracle tests
         env:
+          # COGNIC_RUN_ORACLE_INTEGRATION is the env-gate the test
+          # uses via @pytest.mark.skipif. Without this set the live
+          # tests self-skip even when -m oracle selects them.
+          COGNIC_RUN_ORACLE_INTEGRATION: "1"
           COGNIC_DB_DRIVER: oracle
           COGNIC_DATABASE_URL: oracle+oracledb://cognic:cognic_dev_only@localhost:1521/?service_name=XEPDB1
         run: uv run pytest -m oracle -v
@@ -2398,7 +2405,7 @@ Round 1 (six review blockers + workspace state — applied 2026-04-27):
 - a: Added Step 1.0 — commit the plan + a small BUILD_PLAN amendment to `main` BEFORE branching, so the preflight clean-tree check passes (Sprint-1C T1 precedent). The amendment clarifies Oracle URL handling, Dynatrace + OpenAI-compat auth surface, provider_label audit deferral to Sprint 2, and CI-strategy language.
 - b: Replaced the Oracle pytest-marker auto-skip assumption with `@pytest.mark.skipif(not os.environ.get("COGNIC_RUN_ORACLE_INTEGRATION"), ...)`. Pytest markers do NOT auto-skip; `--strict-markers` only validates registration. The CI `oracle-integration` job sets `COGNIC_RUN_ORACLE_INTEGRATION=1`; default `pytest` runs self-skip.
 - c: Extended `OpenAICompatEmbeddingAdapter` with real auth: `api_key` + `api_key_header` (default `Authorization` with implicit `Bearer ` prefix; raw key for `api-key` and other custom headers — covers Azure-OpenAI proxy shape) + `extra_headers` (Azure `api-version`, custom proxy headers) + reserved `embedding_api_key_vault_path` setting (Sprint 10 wires runtime resolution). Tests now cover three auth modes: vLLM no-auth, OpenAI Bearer, Azure api-key + extra_headers. `_embedding_args` factory helper grows from a 4-tuple to a 7-tuple.
-- d: Replaced Dynatrace health endpoint `/api/v2/cluster` (not a documented health path) with `/api/v2/metrics/query?metricSelector=builtin:host.cpu.usage&pageSize=1` — token-validating (requires `metrics.read` scope) and reachability-validating in one probe. Module docstring documents required token scopes (`metrics.read` for health, `metrics.write` for ingest).
+- d: Replaced Dynatrace health endpoint `/api/v2/cluster` (not a documented health path) with `/api/v2/metrics/query?metricSelector=builtin:host.cpu.usage&pageSize=1` — token-validating (requires `metrics.read` scope) and reachability-validating in one probe. Module docstring documents required token scopes (`metrics.read` for health, `metrics.ingest` for the Metric Ingest API per Dynatrace docs — initial Round-2 wording said `metrics.write`; corrected in Round-3).
 - e: Fixed stale Sprint-1C `TestPerDriverArgs` "unknown driver" tests in Step 6.3a — `openai_compat` and `dynatrace` were used as "unknown" placeholders in Sprint 1C tests; Sprint 1D makes them bundled drivers, so the tests would now assert wrong behaviour. Updated to use `cohere_native` (embed) and `splunk` (obs) which remain genuinely-unbundled per ADR-009 alternative-adapter list.
 - f: Pinned `vllm/vllm-openai:v0.6.6` (was `latest`) so vLLM upstream-image changes don't silently break the overlay. Operators bump the pin alongside CUDA-capability changes.
 - g: Added reserved `dynatrace_api_token_vault_path` and `embedding_api_key_vault_path` settings in Task 2 — fields exist now so Sprint 10 runtime Vault resolution doesn't need a config-schema bump; Sprint 1D adapters take resolved tokens directly via the non-vault fields.
@@ -2407,6 +2414,14 @@ BUILD_PLAN amendments committed alongside the plan in Step 1.0:
 - L162 (`core/config.py extension`): Oracle URL clarification + Dynatrace + OpenAI-compat auth-surface listing.
 - L165 (`openai_compat_embedding_adapter`): provider_label storage in 1D / audit emission deferred to Sprint 2; Azure direct-URL adapter deferred.
 - L178 (CI matrix): replaced cross-product matrix language with the actual Sprint-1D strategy (unit tests for all drivers + Oracle integration job + operator-side dynatrace/openai_compat live verification).
+
+Round 3 (five Round-2 review followups — applied 2026-04-27, post-T2 stop-gate):
+
+- α: CI `oracle-integration` job now sets `COGNIC_RUN_ORACLE_INTEGRATION: "1"` in the env block (Round-2 added the skipif gate but the workflow snippet missed the env var, so live tests would have been collected by `-m oracle` and immediately self-skipped).
+- β: BUILD_PLAN exit criterion + test-deliverable wording (L175 + L180) stopped claiming audit emission for Sprint 1D — corrected to match the L165 deliverable text. Sprint 1D ships storage; Sprint 2 emits.
+- γ: Dynatrace Metric Ingest scope `metrics.write` → `metrics.ingest` per Dynatrace docs. Updated in plan adapter docstring, plan tests, plan patch log (Round-2 entry annotated with the correction), AND `.env.example` (Sprint 1D T1 had committed `metrics.write` in the operator-facing scope list).
+- δ: vLLM file-structure table previously said `vllm/vllm-openai:latest`; updated to match the overlay snippet's `v0.6.6` pin. The `current stable` claim in the overlay's pin comment was rewritten as `intentionally conservative pin` with a note pointing operators at the upstream releases page for production bumps.
+- ε: Stale "Expected: 5 failures" in Step 2.2 → "Expected: 14 failures" with the breakdown matching the actual `TestEnterpriseAdapterSettings` test count.
 
 ---
 

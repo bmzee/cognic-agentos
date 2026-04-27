@@ -172,12 +172,12 @@ Sprint 1 is split into four focused sub-sprints for a clean bootstrap. Each ship
 - `docs/INFERENCE-BACKENDS.md` — operator guide: when to pick Ollama vs vLLM vs SGLang vs cloud; deployment topology examples
 - `tests/unit/db/test_oracle_adapter.py` — protocol conformance via mock + integration test against Oracle XE marked `@pytest.mark.oracle` (CI matrix has an "oracle" job that brings up the overlay)
 - `tests/unit/db/test_dynatrace_adapter.py` — OTLP path uses configured ingest endpoint + API token; metric ingest API emits Dynatrace-shape metric lines
-- `tests/unit/db/test_openai_compat_embedding_adapter.py` — vLLM-shape and SGLang-shape mock servers; `provider_label` propagates into emitted audit events
+- `tests/unit/db/test_openai_compat_embedding_adapter.py` — vLLM-shape and SGLang-shape mock servers; `provider_label` is exposed as an adapter property (Sprint 1D storage-only); per-embed audit-event emission lands with Sprint 2 `core/audit` wiring
 
 **Exit criteria:**
 - `COGNIC_DB_DRIVER=oracle` + Oracle compose overlay → `/readyz` shows `relational: {driver: oracle, status: ok}`
 - `COGNIC_OBS_DRIVER=dynatrace` + API token resolved by operator (env or secret-mount in Sprint 1D; native runtime Vault resolution lands in Sprint 10) → `/readyz` shows `observability: {driver: dynatrace, status: ok}`
-- `COGNIC_EMBED_DRIVER=openai_compat` + `EMBED_BASE_URL` + `EMBED_PROVIDER_LABEL=vllm` → adapter embeds; audit event records `provider_label=vllm`. Switch label to `sglang` → audit records `sglang`.
+- `COGNIC_EMBED_DRIVER=openai_compat` + `EMBED_BASE_URL` + `EMBED_PROVIDER_LABEL=vllm` → adapter embeds; `adapter.provider_label == "vllm"` (storage-only in Sprint 1D). Per-embed audit-event emission of the label lands with Sprint 2 `core/audit` wiring; the Sprint 1D contract is the storage + factory plumbing, not the audit-event side.
 - `uv run pytest -v` green (CI runs unit tests for all bundled drivers — postgres / qdrant / vault / ollama / langfuse_otel / oracle / dynatrace / openai_compat — without external dependencies; the `oracle-integration` job exercises the live Oracle XE compose overlay via env-gated `@pytest.mark.skipif(not COGNIC_RUN_ORACLE_INTEGRATION)` tests; dynatrace + openai_compat live-stack verification is operator-side, not CI, since Dynatrace requires a real tenant + API token and openai_compat live verification needs either a GPU-resident vLLM or external API keys).
 
 
