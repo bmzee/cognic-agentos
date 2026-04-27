@@ -124,3 +124,23 @@ def test_observability_defaults_match_phase1_principles() -> None:
     assert settings.cors_allowed_origins == []  # default-deny
     assert settings.otel_exporter_endpoint is None  # set in stage/prod overlay
     assert settings.prometheus_metrics_path == "/metrics"
+    assert settings.otel_exporter_insecure is False  # default secure
+
+
+def test_otel_mtls_pair_must_be_set_together() -> None:
+    """Half-set client cert/key is a misconfiguration; reject it loudly."""
+
+    with pytest.raises(ValueError, match="must be set together"):
+        Settings(otel_exporter_client_cert_path=Path("/tmp/cert.pem"))
+
+    with pytest.raises(ValueError, match="must be set together"):
+        Settings(otel_exporter_client_key_path=Path("/tmp/key.pem"))
+
+
+def test_otel_mtls_pair_accepted_when_both_set() -> None:
+    settings = Settings(
+        otel_exporter_client_cert_path=Path("/tmp/cert.pem"),
+        otel_exporter_client_key_path=Path("/tmp/key.pem"),
+    )
+    assert settings.otel_exporter_client_cert_path == Path("/tmp/cert.pem")
+    assert settings.otel_exporter_client_key_path == Path("/tmp/key.pem")

@@ -70,7 +70,7 @@ Sprint 1 is split into four focused sub-sprints for a clean bootstrap. Each ship
 
 - `pyproject.toml` extension — observability deps:
   - OpenTelemetry: `opentelemetry-api>=1.28`, `opentelemetry-sdk>=1.28`, `opentelemetry-instrumentation-fastapi>=0.49`, `opentelemetry-exporter-otlp>=1.28`
-  - Prometheus: `prometheus-client>=0.26`, `prometheus-fastapi-instrumentator>=7.1`
+  - Prometheus: `prometheus-client>=0.25`, `prometheus-fastapi-instrumentator>=7.1` *(prometheus-client floor was 0.26 in the original draft; lowered to match latest stable on PyPI at Sprint 1B time — 0.26 was not yet released. Bump back when upstream ships 0.26 stable.)*
   - Logging: `python-json-logger>=3.2`
 - `core/config.py` extension — observability settings group: `log_format` (json/text), `otel_exporter_endpoint`, `prometheus_metrics_path`, `cors_allowed_origins` (list, no `*`)
 - `src/cognic_agentos/observability/__init__.py`, `observability/logging.py` — JSON logger setup; `request_id` + OTel `trace_id` bound to log context

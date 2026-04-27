@@ -76,3 +76,90 @@ def test_configure_logging_is_idempotent() -> None:
     configure_logging(settings)
     handlers = [h for h in logging.getLogger().handlers if h.get_name() == "cognic-agentos"]
     assert len(handlers) == 1
+
+
+# --- P0 closure: actual HTTP request emits a JSON access line with request_id + trace_id
+
+
+def _capture_access_logs() -> tuple[io.StringIO, logging.Handler]:
+    """Attach a buffer-backed handler to the access logger; return (buffer, handler).
+
+    The handler carries its own copy of the JSON formatter AND its own
+    instance of the context filter (filters do not propagate from the
+    root logger to handlers attached lower in the hierarchy, so we must
+    install one directly on the buffer handler).
+    """
+
+    from cognic_agentos.observability.logging import _ContextFilter
+    from cognic_agentos.observability.middleware import ACCESS_LOGGER_NAME
+
+    configure_logging(Settings(log_format="json"))
+    buffer = io.StringIO()
+    formatter = next(
+        h for h in logging.getLogger().handlers if h.get_name() == "cognic-agentos"
+    ).formatter
+    handler = logging.StreamHandler(buffer)
+    handler.setFormatter(formatter)
+    handler.addFilter(_ContextFilter())
+    access_logger = logging.getLogger(ACCESS_LOGGER_NAME)
+    access_logger.addHandler(handler)
+    access_logger.setLevel(logging.INFO)
+    return buffer, handler
+
+
+def test_actual_request_emits_json_access_line_with_request_id_and_trace_id() -> None:
+    """End-to-end: send a request through the app; the access log line must be
+    valid JSON, carry the request id from the response header, and carry an
+    OTel trace id captured while the span was still active.
+
+    This is the closure test for the Phase-1 principle "JSON logs from
+    request 1" + the BUILD_PLAN.md exit criterion that "JSON log line
+    during a request shows request_id + trace_id populated."
+    """
+
+    from fastapi.testclient import TestClient
+
+    from cognic_agentos.observability.middleware import REQUEST_ID_HEADER
+    from cognic_agentos.portal.api.app import create_app
+
+    buffer, handler = _capture_access_logs()
+    try:
+        app = create_app(Settings(runtime_profile="prod", log_format="json"))
+        client = TestClient(app)
+        response = client.get("/api/v1/healthz")
+        assert response.status_code == 200
+        observed_request_id = response.headers[REQUEST_ID_HEADER]
+
+        lines = [line for line in buffer.getvalue().splitlines() if line.strip()]
+        assert lines, "no access log line emitted"
+        access = json.loads(lines[-1])
+
+        assert access["message"] == "http_request"
+        assert access["http_method"] == "GET"
+        assert access["http_path"] == "/api/v1/healthz"
+        assert access["http_status_code"] == 200
+        assert isinstance(access["duration_ms"], (int, float))
+        assert access["request_id"] == observed_request_id
+        # The trace_id must be populated — the access log emits inside the
+        # OTel span, so the context filter sees a valid span context.
+        assert access["trace_id"] is not None, (
+            "trace_id MUST be populated in access log (span is alive at http.response.start)"
+        )
+        assert isinstance(access["trace_id"], str)
+        assert len(access["trace_id"]) == 32, "trace id should be 32-hex chars"
+    finally:
+        from cognic_agentos.observability.middleware import ACCESS_LOGGER_NAME
+
+        logging.getLogger(ACCESS_LOGGER_NAME).removeHandler(handler)
+
+
+def test_uvicorn_access_logger_silenced_after_create_app() -> None:
+    """create_app() must disable uvicorn.access so we don't double-log."""
+
+    from cognic_agentos.portal.api.app import create_app
+
+    create_app(Settings(runtime_profile="prod"))
+    uvicorn_access = logging.getLogger("uvicorn.access")
+    assert uvicorn_access.disabled is True
+    assert uvicorn_access.propagate is False
+    assert uvicorn_access.handlers == []

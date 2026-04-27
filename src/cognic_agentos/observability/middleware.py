@@ -1,13 +1,16 @@
-"""HTTP middleware: request-id, CORS allow-list, OTel instrumentation.
+"""HTTP middleware: request-id, structured access log, CORS allow-list, OTel instrumentation.
 
 Layer classification: **observability**.
 """
 
 from __future__ import annotations
 
+import logging
+import time
 import uuid
 
 from fastapi import FastAPI, Request, Response
+from opentelemetry import trace
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from starlette.middleware.cors import CORSMiddleware
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -17,6 +20,9 @@ from cognic_agentos.observability.logging import bind_request_id
 
 REQUEST_ID_HEADER = "X-Request-Id"
 """Inbound + outbound header name. Mixed-case to match common conventions."""
+
+ACCESS_LOGGER_NAME = "cognic_agentos.access"
+"""Dedicated logger so operators can route access logs separately if needed."""
 
 # Maximum length of a caller-supplied request id we'll trust verbatim.
 # Anything longer or that fails the UUID parse is replaced with a fresh
@@ -74,6 +80,99 @@ def install_request_id_middleware(app: FastAPI) -> None:
     app.add_middleware(RequestIdMiddleware)
 
 
+class StructuredAccessLogMiddleware:
+    """Emit one JSON access-log line per HTTP request.
+
+    Critical timing: the log line is emitted **inside** the
+    ``http.response.start`` ASGI callback, while the OTel span is still
+    active. The ``_ContextFilter`` in :mod:`cognic_agentos.observability.logging`
+    therefore captures the correct ``trace_id`` / ``span_id`` automatically.
+
+    This middleware replaces uvicorn's default plain-text access log
+    (which fires after the response is sent and after the OTel span has
+    closed, so it never sees a trace id). The portal app silences
+    ``uvicorn.access`` propagation; this middleware is the canonical
+    source of HTTP request log lines.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+        self._logger = logging.getLogger(ACCESS_LOGGER_NAME)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        start = time.perf_counter()
+        method = str(scope.get("method", "?"))
+        path = str(scope.get("path", "?"))
+        query_bytes = scope.get("query_string", b"")
+        if isinstance(query_bytes, bytes | bytearray):
+            query_string = query_bytes.decode("latin-1")
+        else:
+            query_string = ""
+        client = scope.get("client")
+        client_addr = client[0] if isinstance(client, list | tuple) and client else "?"
+        access_logger = self._logger
+        emitted = False
+
+        async def send_wrapper(message: Message) -> None:
+            nonlocal emitted
+            if message["type"] == "http.response.start" and not emitted:
+                emitted = True
+                duration_ms = (time.perf_counter() - start) * 1000.0
+                access_logger.info(
+                    "http_request",
+                    extra={
+                        "http_method": method,
+                        "http_path": path,
+                        "http_query": query_string,
+                        "http_status_code": int(message.get("status", 0)),
+                        "duration_ms": round(duration_ms, 3),
+                        "client_addr": client_addr,
+                    },
+                )
+            await send(message)
+
+        await self.app(scope, receive, send_wrapper)
+
+
+def install_access_log_middleware(app: FastAPI) -> None:
+    app.add_middleware(StructuredAccessLogMiddleware)
+
+
+def silence_uvicorn_access_log() -> None:
+    """Suppress uvicorn's built-in plain-text access log.
+
+    AgentOS uses :class:`StructuredAccessLogMiddleware` for the canonical
+    JSON access line. Leaving uvicorn's default access logger live would
+    duplicate every request line in plain text and corrupt the JSON log
+    pipeline.
+    """
+
+    uvicorn_access = logging.getLogger("uvicorn.access")
+    uvicorn_access.handlers = []
+    uvicorn_access.propagate = False
+    uvicorn_access.disabled = True
+
+
+def _capture_trace_context() -> tuple[str | None, str | None]:
+    """Return ``(trace_id_hex, span_id_hex)`` for the active OTel span.
+
+    Returned only for tests that want to assert the span context that
+    will be observed by the access-log filter at log emission time.
+    """
+
+    span = trace.get_current_span()
+    if span is None:
+        return None, None
+    ctx = span.get_span_context()
+    if not ctx.is_valid:
+        return None, None
+    return format(ctx.trace_id, "032x"), format(ctx.span_id, "016x")
+
+
 def install_cors_middleware(app: FastAPI, settings: Settings) -> None:
     """Mount the CORS middleware with the configured allow-list.
 
@@ -100,11 +199,15 @@ def install_otel_instrumentation(app: FastAPI) -> None:
 
 
 __all__ = [
+    "ACCESS_LOGGER_NAME",
     "REQUEST_ID_HEADER",
     "RequestIdMiddleware",
+    "StructuredAccessLogMiddleware",
+    "install_access_log_middleware",
     "install_cors_middleware",
     "install_otel_instrumentation",
     "install_request_id_middleware",
+    "silence_uvicorn_access_log",
 ]
 
 

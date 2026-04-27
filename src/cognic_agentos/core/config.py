@@ -19,6 +19,7 @@ import platform
 import sys
 from datetime import UTC, datetime
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 from pydantic import Field, field_validator
@@ -82,10 +83,40 @@ class Settings(BaseSettings):
     otel_exporter_endpoint: str | None = Field(
         default=None,
         description=(
-            "OTLP gRPC endpoint for trace export (e.g. http://otel-collector:4317). "
+            "OTLP gRPC endpoint for trace export (e.g. otel-collector:4317). "
             "When unset, the OTel tracer falls back to a console exporter in dev "
             "and a no-op exporter in prod (so traces are silently dropped rather "
             "than printed to stdout)."
+        ),
+    )
+    otel_exporter_insecure: bool = Field(
+        default=False,
+        description=(
+            "When True, OTLP traffic skips TLS — only safe for local-collector "
+            "dev work. Bank-grade default is False (TLS required). Operators "
+            "must explicitly opt in to insecure transport via env var."
+        ),
+    )
+    otel_exporter_ca_cert_path: Path | None = Field(
+        default=None,
+        description=(
+            "Path to a PEM-encoded CA certificate bundle to verify the OTLP "
+            "collector's TLS certificate. Typically a Vault-mounted secret in "
+            "prod. When set, mTLS is implied if client cert/key are also set."
+        ),
+    )
+    otel_exporter_client_cert_path: Path | None = Field(
+        default=None,
+        description=(
+            "Path to a PEM-encoded client certificate for mTLS to the OTLP "
+            "collector. Set together with otel_exporter_client_key_path."
+        ),
+    )
+    otel_exporter_client_key_path: Path | None = Field(
+        default=None,
+        description=(
+            "Path to a PEM-encoded client private key for mTLS to the OTLP "
+            "collector. Set together with otel_exporter_client_cert_path."
         ),
     )
     prometheus_metrics_path: str = Field(
@@ -110,6 +141,18 @@ class Settings(BaseSettings):
                 "principle in BUILD_PLAN.md. Declare each origin explicitly."
             )
         return value
+
+    def model_post_init(self, __context: object) -> None:
+        # mTLS pair check — client cert AND key must be set together; one
+        # without the other is a misconfiguration that would silently fall
+        # back to plain TLS.
+        cert = self.otel_exporter_client_cert_path
+        key = self.otel_exporter_client_key_path
+        if (cert is None) != (key is None):
+            raise ValueError(
+                "otel_exporter_client_cert_path and "
+                "otel_exporter_client_key_path must be set together (mTLS pair)."
+            )
 
     # --- Build metadata ----------------------------------------------
     # Wired by the Dockerfile / CI at image-build time; defaults make
