@@ -60,6 +60,8 @@ adapters = [
     "cryptography>=45",
     # Observability adapter (Sprint 1C, per ADR-009)
     "langfuse>=3.0",
+    # Enterprise relational (Sprint 1D, per ADR-009)
+    "oracledb>=2.5",
 ]
 
 [project.urls]
@@ -93,6 +95,7 @@ addopts = ["-ra", "--strict-markers", "--strict-config"]
 asyncio_mode = "auto"
 markers = [
     "integration: integration tests requiring external services",
+    "oracle: tests requiring the live Oracle XE compose overlay (env-gated via COGNIC_RUN_ORACLE_INTEGRATION=1)",
 ]
 
 [tool.ruff]
