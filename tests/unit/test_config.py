@@ -318,3 +318,136 @@ class TestAdapterSettings:
 
         with pytest.raises(ValueError):
             build_settings_without_env_file()
+
+
+# ---------------------------------------------------------------------------
+# Sprint 1D — enterprise adapter settings (Oracle / Dynatrace / OpenAI-compat)
+# ---------------------------------------------------------------------------
+
+
+class TestEnterpriseAdapterSettings:
+    """Sprint 1D enterprise adapter settings — Dynatrace + OpenAI-compat
+    auth surface. Oracle uses the existing ``database_url`` field with
+    the ``oracle+oracledb://...`` SQLAlchemy URL shape (no Oracle-specific
+    config field needed in 1D — see BUILD_PLAN amendment)."""
+
+    def test_dynatrace_defaults_are_none(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("COGNIC_RUNTIME_PROFILE", "prod")
+        s = build_settings_without_env_file()
+
+        assert s.dynatrace_tenant_url is None
+        assert s.dynatrace_api_token is None
+        assert s.dynatrace_api_token_vault_path is None
+
+    def test_dynatrace_settings_load_from_env(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("COGNIC_RUNTIME_PROFILE", "prod")
+        monkeypatch.setenv("COGNIC_DYNATRACE_TENANT_URL", "https://abc12345.live.dynatrace.com")
+        monkeypatch.setenv("COGNIC_DYNATRACE_API_TOKEN", "dt0c01.test-token")
+        monkeypatch.setenv("COGNIC_DYNATRACE_API_TOKEN_VAULT_PATH", "secret/dynatrace/cognic")
+
+        s = build_settings_without_env_file()
+        assert s.dynatrace_tenant_url == "https://abc12345.live.dynatrace.com"
+        assert s.dynatrace_api_token == "dt0c01.test-token"
+        # Reserved field for Sprint 10 runtime Vault resolution; 1D stores
+        # but does not consume.
+        assert s.dynatrace_api_token_vault_path == "secret/dynatrace/cognic"
+
+    def test_embed_provider_label_default(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Default is ``openai_compat`` so misconfigured deployments emit
+        a label that's clearly the no-op placeholder rather than
+        misattributing to a specific backend."""
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("COGNIC_RUNTIME_PROFILE", "prod")
+        s = build_settings_without_env_file()
+
+        assert s.embed_provider_label == "openai_compat"
+
+    @pytest.mark.parametrize(
+        "label",
+        ["vllm", "sglang", "openai", "azure_oai", "bedrock", "cohere", "openai_compat"],
+    )
+    def test_embed_provider_label_accepts_known_values(
+        self,
+        label: str,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("COGNIC_RUNTIME_PROFILE", "prod")
+        monkeypatch.setenv("COGNIC_EMBED_PROVIDER_LABEL", label)
+
+        s = build_settings_without_env_file()
+        assert s.embed_provider_label == label
+
+    def test_embed_provider_label_unknown_value_accepted(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Mirroring the str-typed driver-field rationale: accept unknown
+        labels at the config layer so future providers don't require a
+        config-schema bump."""
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("COGNIC_RUNTIME_PROFILE", "prod")
+        monkeypatch.setenv("COGNIC_EMBED_PROVIDER_LABEL", "future_provider")
+
+        s = build_settings_without_env_file()
+        assert s.embed_provider_label == "future_provider"
+
+    def test_openai_compat_auth_defaults(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Defaults: no API key (vLLM/SGLang no-auth path); header name
+        defaults to Authorization (the OpenAI Bearer convention)."""
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("COGNIC_RUNTIME_PROFILE", "prod")
+        s = build_settings_without_env_file()
+
+        assert s.embedding_api_key is None
+        assert s.embedding_api_key_header == "Authorization"
+        assert s.embedding_api_key_vault_path is None
+        assert s.embedding_extra_headers == {}
+
+    def test_openai_compat_auth_loads_from_env(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("COGNIC_RUNTIME_PROFILE", "prod")
+        monkeypatch.setenv("COGNIC_EMBEDDING_API_KEY", "sk-test-openai-key")
+        monkeypatch.setenv("COGNIC_EMBEDDING_API_KEY_HEADER", "Authorization")
+        monkeypatch.setenv("COGNIC_EMBEDDING_API_KEY_VAULT_PATH", "secret/openai/embedding")
+        monkeypatch.setenv(
+            "COGNIC_EMBEDDING_EXTRA_HEADERS",
+            '{"api-version": "2024-02-15-preview"}',
+        )
+
+        s = build_settings_without_env_file()
+        assert s.embedding_api_key == "sk-test-openai-key"
+        assert s.embedding_api_key_header == "Authorization"
+        assert s.embedding_api_key_vault_path == "secret/openai/embedding"
+        assert s.embedding_extra_headers == {"api-version": "2024-02-15-preview"}
+
+    def test_openai_compat_auth_azure_shape(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Azure-OpenAI proxies use ``api-key: <key>`` instead of
+        ``Authorization: Bearer <key>``. The header-name override covers
+        that shape without needing an Azure-specific adapter."""
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("COGNIC_RUNTIME_PROFILE", "prod")
+        monkeypatch.setenv("COGNIC_EMBEDDING_API_KEY", "azure-key-value")
+        monkeypatch.setenv("COGNIC_EMBEDDING_API_KEY_HEADER", "api-key")
+
+        s = build_settings_without_env_file()
+        assert s.embedding_api_key == "azure-key-value"
+        assert s.embedding_api_key_header == "api-key"

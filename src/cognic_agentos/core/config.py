@@ -302,6 +302,88 @@ class Settings(BaseSettings):
         description=("Langfuse secret API key. Dev-only when set in source; prod uses Vault."),
     )
 
+    # --- Sprint 1D enterprise-adapter settings -----------------------
+    # Dynatrace observability: tenant URL + API token + reserved
+    # vault-path field. Sprint 1D takes the API token via direct env
+    # (or operator-side secret-mount); native runtime Vault resolution
+    # of `dynatrace_api_token_vault_path` lands in Sprint 10 alongside
+    # Vault credential leasing.
+    dynatrace_tenant_url: str | None = Field(
+        default=None,
+        description="Dynatrace tenant URL (e.g. https://abc12345.live.dynatrace.com).",
+    )
+    dynatrace_api_token: str | None = Field(
+        default=None,
+        description=(
+            "Dynatrace API token (header form: Api-Token <value>). "
+            "Dev-only when set in source; prod sources via Vault (Sprint 10). "
+            "Required scopes: metrics.read (health probe) + metrics.write (emit_metric)."
+        ),
+    )
+    dynatrace_api_token_vault_path: str | None = Field(
+        default=None,
+        description=(
+            "Reserved Vault path for the Dynatrace API token. "
+            "Sprint 1D does NOT consume this — adapter takes the resolved "
+            "token directly via ``dynatrace_api_token``. Sprint 10 wires "
+            "runtime Vault resolution from this path."
+        ),
+    )
+
+    # OpenAI-compat embedding: provider_label declares which backend the
+    # configured base_url actually points at. Storage-only in Sprint 1D;
+    # per-embed audit emission lands with Sprint 2 ``core/audit``.
+    embed_provider_label: str = Field(
+        default="openai_compat",
+        description=(
+            "Audit label for OpenAI-compat embedding backend. "
+            "Known values: vllm, sglang, openai, azure_oai, bedrock, cohere, openai_compat. "
+            "Unknown values accepted at config layer (str-typed) — the adapter forwards "
+            "the label verbatim to audit emissions."
+        ),
+    )
+
+    # OpenAI-compat embedding auth surface. Default = no auth (vLLM /
+    # SGLang local). Set ``embedding_api_key`` for cloud providers; the
+    # ``embedding_api_key_header`` toggles between ``Authorization`` (with
+    # implicit ``Bearer `` prefix — OpenAI/Cohere) and a custom header
+    # name (e.g. ``api-key`` for Azure-OpenAI proxies). ``extra_headers``
+    # carries provider-specific quirks like Azure's ``api-version``.
+    embedding_api_key: str | None = Field(
+        default=None,
+        description=(
+            "OpenAI-compat embedding API key. None = no-auth (vLLM/SGLang local). "
+            "Dev-only when set in source; prod sources via Vault (Sprint 10)."
+        ),
+    )
+    embedding_api_key_header: str = Field(
+        default="Authorization",
+        description=(
+            "Header name to send the embedding API key under. Defaults to "
+            "``Authorization`` (adapter prefixes value with ``Bearer ``). "
+            "Set to ``api-key`` for Azure OpenAI proxies (raw value, no prefix)."
+        ),
+    )
+    embedding_api_key_vault_path: str | None = Field(
+        default=None,
+        description=(
+            "Reserved Vault path for the embedding API key. "
+            "Sprint 1D does NOT consume this — adapter takes the resolved "
+            "key directly via ``embedding_api_key``. Sprint 10 wires "
+            "runtime Vault resolution from this path."
+        ),
+    )
+    embedding_extra_headers: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Optional extra headers to send on every /v1/embeddings + "
+            "/v1/models request. Common uses: Azure ``api-version``, "
+            "custom proxy auth tokens, observability correlation IDs. "
+            "Env-var form is JSON-encoded (e.g. "
+            '\'{"api-version": "2024-02-15-preview"}\').'
+        ),
+    )
+
     # --- Build metadata ----------------------------------------------
     # Wired by the Dockerfile / CI at image-build time; defaults make
     # local-dev introspection useful without requiring an explicit env.
