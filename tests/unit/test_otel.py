@@ -6,6 +6,7 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import (
     BatchSpanProcessor,
     ConsoleSpanExporter,
+    SimpleSpanProcessor,
 )
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
     InMemorySpanExporter,
@@ -28,17 +29,18 @@ def _processors(provider: TracerProvider) -> list[object]:
     return list(multi._span_processors)
 
 
-def test_dev_profile_without_endpoint_uses_console_exporter() -> None:
+def test_dev_profile_without_endpoint_uses_synchronous_console_exporter() -> None:
+    """Dev console output uses the **synchronous** SimpleSpanProcessor so
+    there's no flush thread to race interpreter / pytest stdout teardown."""
+
     provider = configure_tracing(Settings(runtime_profile="dev"))
     try:
         procs = _processors(provider)
         assert len(procs) == 1
         proc = procs[0]
-        assert isinstance(proc, BatchSpanProcessor)
+        assert isinstance(proc, SimpleSpanProcessor)
         assert isinstance(proc.span_exporter, ConsoleSpanExporter)
     finally:
-        # Drain the BatchSpanProcessor before pytest closes stdout, otherwise
-        # the background flush thread races teardown and prints a stack trace.
         provider.shutdown()
 
 
@@ -55,13 +57,40 @@ def test_endpoint_set_installs_otlp_exporter() -> None:
     )
 
     provider = configure_tracing(
-        Settings(runtime_profile="prod", otel_exporter_endpoint="http://localhost:4317")
+        Settings(
+            runtime_profile="prod",
+            otel_exporter_endpoint="otel-collector:4317",
+            otel_exporter_insecure=True,  # opt-in for the localhost test stub
+        )
     )
-    procs = _processors(provider)
-    assert len(procs) == 1
-    proc = procs[0]
-    assert isinstance(proc, BatchSpanProcessor)
-    assert isinstance(proc.span_exporter, OTLPSpanExporter)
+    try:
+        procs = _processors(provider)
+        assert len(procs) == 1
+        proc = procs[0]
+        assert isinstance(proc, BatchSpanProcessor)
+        assert isinstance(proc.span_exporter, OTLPSpanExporter)
+    finally:
+        provider.shutdown()
+
+
+def test_otlp_exporter_defaults_to_secure_when_endpoint_set() -> None:
+    """Bank-grade default: OTLP traffic must be TLS-encrypted unless explicitly opted out."""
+
+    from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
+        OTLPSpanExporter,
+    )
+
+    provider = configure_tracing(
+        Settings(runtime_profile="prod", otel_exporter_endpoint="otel-collector:4317")
+    )
+    try:
+        proc = _processors(provider)[0]
+        assert isinstance(proc, BatchSpanProcessor)
+        # configure_tracing did NOT pass insecure=True when the setting was
+        # at its default (False) — the exporter is constructed in TLS mode.
+        assert isinstance(proc.span_exporter, OTLPSpanExporter)
+    finally:
+        provider.shutdown()
 
 
 def test_configure_tracing_returns_new_provider_each_call() -> None:

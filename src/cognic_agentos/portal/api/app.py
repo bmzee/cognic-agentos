@@ -34,25 +34,28 @@ from cognic_agentos.core.config import Settings, get_settings
 from cognic_agentos.observability import (
     configure_logging,
     configure_tracing,
+    install_access_log_middleware,
     install_cors_middleware,
     install_otel_instrumentation,
     install_request_id_middleware,
+    silence_uvicorn_access_log,
 )
 
 
-def _readiness_components(settings: Settings) -> dict[str, str]:
+def _readiness_components(settings: Settings) -> dict[str, dict[str, object]]:
     """Internal-only readiness signal for Sprint 1B.
 
-    Sprint 1C extends with per-adapter probes (Postgres, Qdrant, Vault,
-    Ollama, Langfuse). Until then, AgentOS only knows about its own
-    process state — log handler installed, tracer set, settings loaded.
+    Sprint 1C extends this dict with per-adapter probes — e.g.
+    ``{"db": {"driver": "postgres", "status": "ok", "latency_ms": 12}}``.
+    The shape is **nested per-component** so adapter probes can attach
+    arbitrary metadata (driver name, latency, last-error, lease TTL)
+    without rewriting the response shape.
     """
 
     return {
-        "settings_loaded": "ok",
-        "logging_configured": "ok",
-        "tracing_configured": "ok",
-        "runtime_profile": settings.runtime_profile,
+        "settings": {"status": "ok"},
+        "logging": {"status": "ok"},
+        "tracing": {"status": "ok"},
     }
 
 
@@ -75,15 +78,19 @@ def _build_router(settings: Settings) -> APIRouter:
 
         Sprint 1B reports only on internal readiness (process started,
         middleware mounted, tracer configured). Sprint 1C wires per-adapter
-        probes; when any reports a non-``ok`` status the response is 503 +
-        ``{"ready": false, ...}``.
+        probes (db, vector, secrets, embedding, observability) into the
+        ``components`` map under the same nested
+        ``{<name>: {"status": ..., ...}}`` shape; when any component
+        reports a non-``ok`` status the response is 503.
         """
 
         components = _readiness_components(settings)
-        ready = all(
-            status == "ok" for key, status in components.items() if key != "runtime_profile"
-        )
-        body: dict[str, Any] = {"ready": ready, "components": components}
+        ready = all(comp.get("status") == "ok" for comp in components.values())
+        body: dict[str, Any] = {
+            "ready": ready,
+            "runtime_profile": settings.runtime_profile,
+            "components": components,
+        }
         return JSONResponse(content=body, status_code=200 if ready else 503)
 
     @router.get("/version", tags=["probes"], summary="Build metadata")
@@ -111,6 +118,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     settings = settings or get_settings()
     configure_logging(settings)
+    silence_uvicorn_access_log()
     configure_tracing(settings)
 
     api_prefix = settings.api_prefix
@@ -125,9 +133,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         openapi_url=f"{api_prefix}/openapi.json",
     )
 
-    install_request_id_middleware(app)
+    # Middleware add order is OUTER-LAST in Starlette: the call chain
+    # walks the most-recently-added middleware first. We want the
+    # access-log middleware to run INSIDE the OTel span (so trace_id is
+    # populated at log time) but OUTSIDE the route handler, so it goes
+    # in first. Request-id binds the per-request UUID before the access
+    # log fires, so it ends up outermost (added last).
+    install_access_log_middleware(app)
     install_cors_middleware(app, settings)
     install_otel_instrumentation(app)
+    install_request_id_middleware(app)
 
     app.include_router(_build_router(settings))
 

@@ -29,8 +29,8 @@ The clean-slate AgentOS folder holds **20 ADRs** + project plan + canonical arch
 - [x] MCP-CONFORMANCE.md (transport / capability / authorization matrix)
 - [x] A2A-CONFORMANCE.md (feature / authorization matrix)
 - [x] PROJECT_PLAN.md baseline + BUILD_PLAN.md sprint sheet aligned
-- [ ] **Sprint 1A**: pyproject + uv.lock + minimal FastAPI + `/healthz` (liveness) + `/version` + Dockerfile + CI + architecture test + git init
-- [ ] **Sprint 1B**: observability — JSON logging + request-id + OTel + Prometheus `/metrics` + OpenAPI export + `/readyz` (readiness) + refined no-env-specific-values discipline test
+- [x] **Sprint 1A**: pyproject + uv.lock + minimal FastAPI + `/healthz` (liveness) + `/version` + Dockerfile + CI + architecture test + git init *(merged `bec46c1` on 2026-04-27; carryovers `f536975` + mypy-gate `bec46c1`; CI green)*
+- [x] **Sprint 1B**: observability — JSON logging + structured access-log middleware + request-id + OTel (with TLS settings, atexit shutdown) + Prometheus `/metrics` + OpenAPI export + `/readyz` (readiness, nested ComponentStatus shape) + refined no-env-specific-values discipline test *(merged `e468a3c` on 2026-04-27; CI green; carryovers in `chore/sprint-1b-carryovers`)*
 - [ ] **Sprint 1C**: adapter protocols + Postgres + Qdrant + Vault + Ollama + Langfuse-OTel reference adapters + 7-service docker-compose
 - [ ] **Sprint 1D**: enterprise bundled adapters — Oracle + Dynatrace + OpenAI-compat embedding (vLLM/SGLang) + opt-in Oracle/vLLM compose overlays
 - [ ] **Sprint 2**: `core/` governance primitives (audit, decision_history with hash chain, chain_verifier, schemas, sla, escalation, guardrails, db migrations)
