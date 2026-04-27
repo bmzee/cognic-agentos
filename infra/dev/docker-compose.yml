@@ -1,9 +1,14 @@
 # Cognic AgentOS — local development compose stack.
 #
-# Sprint 1A ships only the Postgres placeholder so the file exists for 1C/1D
-# to extend with Qdrant, Vault, Ollama, Langfuse, Dynatrace, Oracle, vLLM.
-# AgentOS itself runs on the host via `uv run uvicorn ...` during 1A; the
-# container runtime joins this network in 1C once adapter bootstrap is in.
+# Sprint 1C: 7 services (Postgres, Qdrant, Redis, Vault, LiteLLM, Langfuse,
+# Temporal). All ports env-driven via ${VAR:-default} so an operator can
+# avoid host-port collisions without editing the file.
+#
+# Brittleness flagged in the Sprint 1C plan (Task 13): Langfuse v3,
+# Temporal auto-setup, and LiteLLM config validation can each fail on
+# cold start in ways the YAML can't predict. If a default-profile `up`
+# fails twice, profile-gate non-readiness-critical services
+# (LiteLLM/Redis/Temporal) — see plan Task 13.
 
 name: cognic-agentos-dev
 
@@ -16,7 +21,7 @@ services:
       POSTGRES_USER: cognic
       POSTGRES_PASSWORD: cognic_dev_only  # NEVER used outside dev
     ports:
-      - "5432:5432"
+      - "${COGNIC_POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -25,5 +30,103 @@ services:
       timeout: 3s
       retries: 10
 
+  qdrant:
+    image: qdrant/qdrant:v1.17.4
+    container_name: cognic-agentos-qdrant
+    ports:
+      - "${COGNIC_QDRANT_HTTP_PORT:-6333}:6333"
+      - "${COGNIC_QDRANT_GRPC_PORT:-6334}:6334"
+    volumes:
+      - qdrant-data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:6333/readyz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: cognic-agentos-redis
+    ports:
+      - "${COGNIC_REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  vault:
+    image: hashicorp/vault:1.18
+    container_name: cognic-agentos-vault
+    cap_add:
+      - IPC_LOCK
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: dev-only-root
+      VAULT_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+    ports:
+      - "${COGNIC_VAULT_PORT:-8200}:8200"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8200/v1/sys/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  litellm:
+    image: ghcr.io/berriai/litellm:main-stable
+    container_name: cognic-agentos-litellm
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    volumes:
+      - ../litellm/config.yaml:/app/config.yaml:ro
+    environment:
+      LITELLM_MASTER_KEY: dev-only-litellm
+    ports:
+      - "${COGNIC_LITELLM_PORT:-4000}:4000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:4000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  langfuse:
+    image: langfuse/langfuse:3
+    container_name: cognic-agentos-langfuse
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://cognic:cognic_dev_only@postgres:5432/cognic_agentos
+      NEXTAUTH_SECRET: dev-only-nextauth
+      SALT: dev-only-salt
+      NEXTAUTH_URL: http://localhost:${COGNIC_LANGFUSE_PORT:-3000}
+      TELEMETRY_ENABLED: "false"
+    ports:
+      - "${COGNIC_LANGFUSE_PORT:-3000}:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/public/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  temporal:
+    image: temporalio/auto-setup:1.25
+    container_name: cognic-agentos-temporal
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB: postgres12
+      DB_PORT: "5432"
+      POSTGRES_USER: cognic
+      POSTGRES_PWD: cognic_dev_only
+      POSTGRES_SEEDS: postgres
+    ports:
+      - "${COGNIC_TEMPORAL_PORT:-7233}:7233"
+    healthcheck:
+      test: ["CMD-SHELL", "tctl --ad 127.0.0.1:7233 cluster health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
 volumes:
   postgres-data:
+  qdrant-data:
