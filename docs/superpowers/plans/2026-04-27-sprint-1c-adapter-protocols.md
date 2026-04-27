@@ -16,11 +16,19 @@ Sprint 1A bootstrapped FastAPI + healthz + version + image-size-budget CI gate a
 
 Per ADR-009 §"Implementation phases" — Sprint 1 ships protocol definitions + Postgres + Qdrant + Vault + Ollama + Langfuse-OTel adapters + factory + memory adapters for tests. Sprint 1D adds Oracle/Dynatrace/OpenAI-compat. Sprint 4 wires alternative adapter packs through the trust gate.
 
-**Critical-controls rule check:** Sprint 1C touches `core/config.py` (extension only — settings groups, not governance), `portal/api/app.py` (lifespan + `/readyz` extension), and adds new adapter modules. None of these are in the AGENTS.md critical-controls list. Build proceeds in **autonomous low-risk mode** with normal test discipline — no `core-controls-engineer` / `/critical-module-mode`. Plan still demands TDD + negative-path tests per Sprint 1A/1B precedent.
+**Operating-mode + stop-rule check:**
+
+- Most of Sprint 1C is **autonomous low-risk build mode** — adapter modules, registry, factory, `tests/support/` fixtures, docker-compose, LiteLLM presets, Dockerfile split, CI image-budget extension. None of these touch the AGENTS.md critical-controls list (audit / decision_history / guardrails / approval / policy / emergency / plugin_registry / trust_gate / supply_chain / mcp_authz / a2a_authz / sandbox / subagent / memory / llm-gateway / data_governance / models).
+
+- **Task 2 — `core/config.py` extension — gets a stop-for-review gate.** AGENTS.md §"Stop rules" says **"Stop for human review when touching: Anything in `core/`"**. Even though the change is settings-only (driver fields + per-driver paths) and not a governance primitive, the rule is "anything in core/." Executor halts after Task 2's commit and surfaces the diff to the user before T3 begins. The user's explicit `yes`/`go` advances past T2; otherwise the loop pauses there.
+
+- **Task 12 — `portal/api/app.py` lifespan + `/readyz` extension** is portal-surface work, not core/, so it does NOT trigger the core stop rule. Standard TDD + per-task review at READY FOR GATE applies.
+
+- No `core-controls-engineer` / `/critical-module-mode` invocation is required because the touched core/ surface (config) is settings-only, but the stop rule is honoured nonetheless.
 
 **Memory governance is OUT OF SCOPE for Sprint 1C.** Per ADR-009 the Sprint-1C protocol surface is exactly: `RelationalAdapter`, `VectorAdapter`, `SecretAdapter`, `EmbeddingAdapter`, `ObjectStoreAdapter`, `ObservabilityAdapter`. `MemoryAdapter` is an ADR-019 concern that ships with Sprint 11.5 alongside `core/memory/`. The `AdapterRegistry` does not constrain its set of `kind` strings, so Sprint 11.5 can add `"memory"` without a structural migration — but the protocol class itself, the `MemoryRecordId` type, and any `Adapters.memory` slot all wait for Sprint 11.5.
 
-**Production-grade rule:** every adapter's main runtime path is real (asyncpg / qdrant-client / hvac / httpx / langfuse SDK). In-memory variants live ONLY under `tests/support/adapter_fixtures.py` and are imported only from test modules; production code paths never fall back to them.
+**Production-grade rule:** every adapter's main runtime path is real (asyncpg / qdrant-client / hvac / httpx / OpenTelemetry + Langfuse HTTP health probe). In-memory variants live ONLY under `tests/support/adapter_fixtures.py` and are imported only from test modules; production code paths never fall back to them. (Full Langfuse SDK integration is out of scope for Sprint 1C — see ADR-007 alignment notes; Sprint 2/3 wires the real SDK alongside `core/decision_history` + the LLM gateway.)
 
 ---
 
@@ -410,6 +418,18 @@ Expected: passes. (Adapter settings are declared inside `Settings`; no operation
 git add src/cognic_agentos/core/config.py tests/unit/test_config.py
 git commit -m "feat(sprint-1c): add adapter settings groups to core/config (ADR-009)"
 ```
+
+- [ ] **Step 2.7: STOP for human review (AGENTS.md `core/` stop rule)**
+
+Per AGENTS.md §"Stop rules" — "Stop for human review when touching: **Anything in `core/`**". Even though this change is settings-only (no governance primitive), the rule applies.
+
+After the commit lands, surface to the user:
+
+- the diff against `main` (`git diff main..HEAD -- src/cognic_agentos/core/config.py tests/unit/test_config.py`)
+- the test result (`uv run pytest tests/unit/test_config.py -v`)
+- the discipline-test confirmation (`uv run pytest tests/unit/architecture/test_no_env_specific_values_in_source.py -v`)
+
+Wait for explicit `yes` / `go` before starting Task 3. If the user requests changes, apply them inside Task 2 (additional commits on the same branch are fine), then re-surface.
 
 ---
 
@@ -876,8 +896,6 @@ Create `tests/unit/db/test_memory_adapters.py`:
 Lives under ``tests/`` per AGENTS.md test-fixture-placement rule."""
 
 from __future__ import annotations
-
-import pytest
 
 from cognic_agentos.db.adapters import protocols as P
 from tests.support.adapter_fixtures import (
@@ -3748,6 +3766,11 @@ Round 3 (five lint / hygiene / safety hardening fixes):
 - c: Removed unused `import pytest` from test_postgres_adapter, test_ollama_embedding_adapter, test_langfuse_otel_adapter snippets (no `pytest.*` usage in those blocks → ruff F401). Removed unused `from unittest.mock import patch` from test_adapter_factory.py snippet (the new kernel-resilience tests use the built-in `monkeypatch` fixture, not unittest.mock).
 - d: `load_bundled_adapters()` narrowed `ImportError` handling: introduced `_BUNDLED_ADAPTER_OPTIONAL_DEPS` map of `{module → allowlisted top-level packages}`, inspect `ImportError.name` (PEP 451) to decide skip-or-reraise. Allowlisted misses skip silently with a log; anything else (typos in adapter modules, broken transitive deps, missing internal symbols) re-raises so real bugs surface. Empty allowlist for the Ollama adapter (httpx is always present) means any ImportError from that module is a bug.
 - e: Added `test_load_bundled_adapters_reraises_unexpected_import_error` to verify the narrowed handling propagates non-allowlisted ImportError. Updated existing `test_load_bundled_adapters_kernel_resilience` to use `ModuleNotFoundError(..., name=...)` so the loader's `.name` introspection matches the simulated path.
+
+Round 4 (three precision fixes):
+- i: Operating-mode header rewritten — Sprint 1C as a whole stays autonomous low-risk, BUT Task 2 (`core/config.py`) now carries an explicit stop-for-review gate (Step 2.7) per AGENTS.md "Stop for human review when touching: Anything in `core/`". Executor commits T2 then halts for `yes`/`go` before starting T3.
+- ii: Production-grade-rule line corrected — Langfuse runtime path described as "OpenTelemetry + Langfuse HTTP health probe" (the actual Sprint 1C scope), not "langfuse SDK" (which won't be wired until Sprint 2/3 alongside core/decision_history + LLM gateway).
+- iii: Removed unused `import pytest` from the `test_memory_adapters.py` snippet (no `pytest.*` references in that block; ruff F401 would have failed at execution).
 
 ---
 
