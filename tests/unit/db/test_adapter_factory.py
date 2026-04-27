@@ -86,7 +86,6 @@ class TestRegistry:
         r.register("vector", "x", InMemoryVectorAdapter)
         assert r.kinds() == {"relational", "vector"}
 
-    @pytest.mark.skip(reason="real bundled adapters land in T6-T10; re-enabled in T11")
     def test_bundled_registry_lists_real_drivers(self) -> None:
         """``load_bundled_adapters()`` registers the five Sprint-1C drivers
         in any image where their optional deps are installed (test env =
@@ -112,7 +111,6 @@ class TestRegistry:
         assert bundled_registry.has("embedding", "ollama")
         assert bundled_registry.has("observability", "langfuse_otel")
 
-    @pytest.mark.skip(reason="real bundled adapters land in T6-T10; re-enabled in T11")
     def test_load_bundled_adapters_kernel_resilience(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Simulate kernel-image behaviour: one bundled module's optional
         dep is missing. ``ModuleNotFoundError.name`` matches the loader's
@@ -138,7 +136,6 @@ class TestRegistry:
         assert "qdrant_client" in results["cognic_agentos.db.adapters.qdrant_adapter"]
         assert results["cognic_agentos.db.adapters.postgres_adapter"] == "loaded"
 
-    @pytest.mark.skip(reason="real bundled adapters land in T6-T10; re-enabled in T11")
     def test_load_bundled_adapters_reraises_unexpected_import_error(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
