@@ -71,7 +71,11 @@ secrets/
 attestations/local/
 
 # Editor sandboxes / agent worktrees
-.claude/
+# Track shared Claude Code configuration (settings.json + hook scripts);
+# ignore everything else under .claude/ (session caches, project state, etc.)
+.claude/*
+!.claude/settings.json
+!.claude/hooks/
 
 # Docker artefacts
 .docker/

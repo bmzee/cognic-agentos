@@ -1,0 +1,33 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(.env)",
+      "Read(secrets/**)",
+      "Bash(curl:*)",
+      "WebFetch"
+    ]
+  },
+  "hooks": {
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "prompt",
+            "prompt": "Before compacting: preserve current sprint number and objective, files changed, tests run and results, open risks, ADR status, and the next concrete step."
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "Edit|Write|MultiEdit|Bash",
+        "hooks": [
+          {
+            "type": "prompt",
+            "prompt": "Before stopping: summarize files changed, tests run, remaining risks, whether an ADR is needed, whether brick evidence or checklist updates are still missing, and whether the current state should be committed. If the work is at a logical checkpoint with passing checks for the touched scope, propose or create a commit using a conventional message."
+          }
+        ]
+      }
+    ]
+  }
+}
