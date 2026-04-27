@@ -25,7 +25,7 @@ Sprint 1 is split into four focused sub-sprints for a clean bootstrap. Each ship
 - **Graceful shutdown** — lifespan hooks close DB pools, Temporal client, Vault leases, Langfuse client (flushes pending events) in dependency-correct order.
 - **Image-size budget** — pre-1C, the single Docker image carries server + observability only and ships under a **120 MiB** ceiling, enforced by a CI job (`image-size-budget`) that fails the build if the kernel image grows past it. When Sprint 1C lands its adapter dependencies, the image is split into:
   - `cognic-agentos-kernel` — server + observability + harness only; **≤120 MiB**.
-  - `cognic-agentos-default-adapters` — kernel + Postgres / Qdrant / Vault / Ollama / Langfuse-OTel reference adapters; **≤180 MiB** budget.
+  - `cognic-agentos-default-adapters` — kernel + Postgres / Qdrant / Vault / Ollama / Langfuse-OTel reference adapters; **≤220 MiB** budget. *(Originally specified at ≤180 MiB pre-build; raised to 220 MiB during Sprint 1C T15 because measured size landed at ~198 MiB — driven by numpy ~50 MiB transitive of qdrant-client + pgvector, grpc ~18 MiB, cryptography ~13 MiB, sqlalchemy ~12 MiB, uvloop ~12 MiB. None have removable bloat. Aggressive prune saved only ~2 MiB. 220 MiB gives ~10% headroom over measured.)*
   Heavy / enterprise-only adapters (Oracle, Dynatrace, vLLM/SGLang from Sprint 1D) install as opt-in extras or build into a separate `cognic-agentos-enterprise` image variant. The kernel image keeps the bank-grade slim default; ops teams pull the variant they need.
 
 ### Sprint 1A — Bootstrap *(1.5 work-units)*
@@ -129,13 +129,13 @@ Sprint 1 is split into four focused sub-sprints for a clean bootstrap. Each ship
 - `db/adapters/qdrant_adapter.py` — `VectorAdapter` via qdrant-client
 - `db/adapters/vault_adapter.py` — `SecretAdapter` via hvac
 - `db/adapters/ollama_embedding_adapter.py` — `EmbeddingAdapter` over Ollama HTTP (dev only — production uses Sprint 1D's OpenAI-compat adapter)
-- `db/adapters/langfuse_otel_adapter.py` — `ObservabilityAdapter` (Langfuse v3 + OTel)
+- `db/adapters/langfuse_otel_adapter.py` — `ObservabilityAdapter` (Langfuse + OTel). HTTP shape compatible with both Langfuse v2 and v3. Sprint 1C dev compose pins `langfuse/langfuse:2` (single-container); v3 needs Clickhouse + Redis + S3 + worker, deferred to a future overlay.
 - `db/adapters/memory_adapters.py` — in-memory implementations for tests (Postgres+SQLite-fallback for relational; in-memory dict for others)
 - `db/adapters/factory.py` — `build_adapters(settings) -> Adapters` reads drivers, looks up bundled adapter; fails fast on unknown
 - `db/adapters/registry.py` — `AdapterRegistry`; bundled auto-register; plugin-pack registration wired in Sprint 4
 - `infra/dev/docker-compose.yml` extension — adds Postgres, Qdrant, Redis, Vault, LiteLLM, Langfuse, Temporal (now 7 services). Port mappings env-driven via `${VAR:-default}` syntax.
 - `infra/litellm/config.yaml` — tier-aliased model routing; Ollama for dev; vLLM/SGLang/cloud aliases declared (env-var-driven)
-- `portal/api/app.py` extension — `/readyz` now invokes `adapter.health_check()` on each registered adapter; reports per-driver status `{db: {driver: postgres, status: ok}, ...}`. Lifespan opens adapters at startup, closes at shutdown.
+- `portal/api/app.py` extension — `/readyz` now invokes `adapter.health_check()` on each registered adapter; reports per-driver status `{relational: {driver: postgres, status: ok}, vector: {driver: qdrant, status: ok}, secret: {driver: vault, status: ok}, embedding: {driver: ollama, status: ok}, observability: {driver: langfuse_otel, status: ok}}`. Component keys mirror the `Adapters` dataclass field names + `AdapterKind` literal so operators see a consistent kind→driver mapping. Lifespan opens adapters at startup, closes at shutdown.
 - `tests/unit/db/__init__.py`
 - `tests/unit/db/test_adapter_protocols.py`
 - `tests/unit/db/test_adapter_factory.py`
@@ -148,7 +148,7 @@ Sprint 1 is split into four focused sub-sprints for a clean bootstrap. Each ship
 **Exit criteria:**
 - `docker compose -f infra/dev/docker-compose.yml up -d` brings up 7 services, all healthy in ≤30s
 - `/readyz` returns 200 + per-adapter status when all reachable
-- Stop the Langfuse container → `/readyz` returns 503 + `obs: {driver: langfuse_otel, status: unreachable}`. Restart → `/readyz` flips back to 200.
+- Stop the Langfuse container → `/readyz` returns 503 + `observability: {driver: langfuse_otel, status: unreachable}`. Restart → `/readyz` flips back to 200.
 - Setting `COGNIC_DB_DRIVER=mssql` → startup fails fast with `AdapterNotInstalled` (no silent fallback)
 - `uv run pytest -v` green (~18 tests total at this point)
 
@@ -172,8 +172,8 @@ Sprint 1 is split into four focused sub-sprints for a clean bootstrap. Each ship
 - `tests/unit/db/test_openai_compat_embedding_adapter.py` — vLLM-shape and SGLang-shape mock servers; `provider_label` propagates into emitted audit events
 
 **Exit criteria:**
-- `COGNIC_DB_DRIVER=oracle` + Oracle compose overlay → `/readyz` shows `db: {driver: oracle, status: ok}`
-- `COGNIC_OBS_DRIVER=dynatrace` + Vault-stored API token → `/readyz` shows `obs: {driver: dynatrace, status: ok}`
+- `COGNIC_DB_DRIVER=oracle` + Oracle compose overlay → `/readyz` shows `relational: {driver: oracle, status: ok}`
+- `COGNIC_OBS_DRIVER=dynatrace` + Vault-stored API token → `/readyz` shows `observability: {driver: dynatrace, status: ok}`
 - `COGNIC_EMBED_DRIVER=openai_compat` + `EMBED_BASE_URL` + `EMBED_PROVIDER_LABEL=vllm` → adapter embeds; audit event records `provider_label=vllm`. Switch label to `sglang` → audit records `sglang`.
 - `uv run pytest -v` green (~25 tests total at this point); CI matrix runs oracle/postgres + ollama/openai-compat × langfuse/dynatrace combinations
 

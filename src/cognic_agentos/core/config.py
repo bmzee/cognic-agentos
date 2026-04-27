@@ -207,6 +207,101 @@ class Settings(BaseSettings):
                 "otel_exporter_client_key_path must be set together (mTLS pair)."
             )
 
+    # --- Adapters (Sprint 1C, per ADR-009) ---------------------------
+    # Drivers are plain ``str`` so unknown values flow to the factory's
+    # ``AdapterNotInstalled`` error path. The bundled set lives in
+    # ``cognic_agentos.db.adapters.registry``; alternative drivers install
+    # as plugin packs (per ADR-002) and self-register on import.
+
+    db_driver: str = Field(
+        default="postgres",
+        description=(
+            "Relational adapter driver. Bundled: postgres. "
+            "Plugin packs: oracle (Sprint 1D), mssql, mysql."
+        ),
+    )
+    database_url: str | None = Field(
+        default=None,
+        description="SQLAlchemy URL (e.g. postgresql+asyncpg://user:pass@host:5432/db).",
+    )
+
+    vector_driver: str = Field(
+        default="qdrant",
+        description=(
+            "Vector adapter driver. Bundled: qdrant. "
+            "Plugin packs: chroma, weaviate, pgvector, milvus."
+        ),
+    )
+    qdrant_url: str | None = Field(
+        default=None,
+        description="Qdrant HTTP endpoint (e.g. http://qdrant:6333).",
+    )
+    qdrant_collection: str = Field(
+        default="cognic_default",
+        description="Default Qdrant collection name for upsert/search.",
+    )
+
+    secret_driver: str = Field(
+        default="vault",
+        description=("Secrets adapter driver. Bundled: vault. Plugin packs: aws, azure, cyberark."),
+    )
+    vault_addr: str | None = Field(
+        default=None,
+        description="Vault address (e.g. http://vault:8200).",
+    )
+    vault_token: str | None = Field(
+        default=None,
+        description=(
+            "Vault token. Dev-only when set in source; prod uses Kubernetes auth "
+            "or AppRole and never leaves Vault."
+        ),
+    )
+    vault_namespace: str | None = Field(
+        default=None,
+        description="Vault Enterprise namespace (None = default namespace).",
+    )
+
+    embed_driver: str = Field(
+        default="ollama",
+        description=(
+            "Embedding adapter driver. Bundled (dev): ollama. "
+            "Bundled (prod, Sprint 1D): openai_compat."
+        ),
+    )
+    embedding_model: str = Field(
+        default="qwen3-embedding:8b",
+        description=("Embedding model identifier (Ollama model tag or OpenAI-compat model name)."),
+    )
+    embedding_base_url: str | None = Field(
+        default=None,
+        description="Embedding service HTTP endpoint (e.g. http://ollama:11434).",
+    )
+    embedding_dimensions: int = Field(
+        default=1024,
+        ge=1,
+        description="Vector dimensions emitted by the embedding model. Operators set per model.",
+    )
+
+    obs_driver: str = Field(
+        default="langfuse_otel",
+        description=(
+            "Observability adapter driver. Bundled: langfuse_otel. "
+            "Bundled (Sprint 1D): dynatrace. Plugin packs: splunk, datadog, newrelic."
+        ),
+    )
+    langfuse_host: str | None = Field(
+        default=None,
+        description="Langfuse host (e.g. http://langfuse:3000).",
+    )
+    langfuse_public_key: str | None = Field(
+        default=None,
+        description="Langfuse public API key.",
+    )
+    langfuse_secret_key: str | None = Field(
+        default=None,
+        description=("Langfuse secret API key. Dev-only when set in source; prod uses Vault."),
+    )
+
     # --- Build metadata ----------------------------------------------
     # Wired by the Dockerfile / CI at image-build time; defaults make
     # local-dev introspection useful without requiring an explicit env.

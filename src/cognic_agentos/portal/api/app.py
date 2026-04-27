@@ -18,19 +18,33 @@ Sprint 1B adds:
 - Prometheus metrics scrape endpoint at ``{api_prefix}{prometheus_metrics_path}``.
 - OpenAPI 3 schema exported at ``{api_prefix}/openapi.json``.
 
-Sprint 1C extends ``/readyz`` with per-adapter health probes.
+Sprint 1C extends ``/readyz`` with per-adapter health probes wired
+through the FastAPI ``lifespan``. Adapter wiring is **opt-in** via the
+``adapter_registry`` kwarg on ``create_app`` so Sprint 1A/1B tests stay
+unchanged. Production launchers go through ``create_prod_app()`` which
+defaults to the process-wide ``bundled_registry``.
 """
 
 from __future__ import annotations
 
+import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import APIRouter, FastAPI
+from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import JSONResponse
 from prometheus_fastapi_instrumentator import Instrumentator
 
 from cognic_agentos import __version__
 from cognic_agentos.core.config import Settings, get_settings
+from cognic_agentos.db.adapters import (
+    AdapterRegistry,
+    Adapters,
+    build_adapters,
+    bundled_registry,
+    load_bundled_adapters,
+)
 from cognic_agentos.observability import (
     configure_logging,
     configure_tracing,
@@ -41,15 +55,15 @@ from cognic_agentos.observability import (
     silence_uvicorn_access_log,
 )
 
+logger = logging.getLogger(__name__)
+
 
 def _readiness_components(settings: Settings) -> dict[str, dict[str, object]]:
     """Internal-only readiness signal for Sprint 1B.
 
-    Sprint 1C extends this dict with per-adapter probes — e.g.
-    ``{"db": {"driver": "postgres", "status": "ok", "latency_ms": 12}}``.
-    The shape is **nested per-component** so adapter probes can attach
-    arbitrary metadata (driver name, latency, last-error, lease TTL)
-    without rewriting the response shape.
+    Sprint 1C ATTACHES adapter components to this dict at the route
+    handler boundary (not here) so monkeypatch-based test fixtures can
+    still inject failures into the internal triplet.
     """
 
     return {
@@ -57,6 +71,37 @@ def _readiness_components(settings: Settings) -> dict[str, dict[str, object]]:
         "logging": {"status": "ok"},
         "tracing": {"status": "ok"},
     }
+
+
+async def _adapter_components(adapters: Adapters) -> dict[str, dict[str, object]]:
+    """Probe each registered adapter and return per-driver status entries.
+
+    Each entry has the shape ``{"driver": <name>, "status": <ok|degraded|
+    unreachable>, "latency_ms"?: <float>, "detail"?: <str>}``. The
+    response keys (``relational`` / ``vector`` / ``secret`` / ``embedding``
+    / ``observability``) align with the ``Adapters`` dataclass fields so
+    operators see a consistent kind→driver mapping in /readyz output.
+    """
+
+    out: dict[str, dict[str, object]] = {}
+    for kind, adapter in (
+        ("relational", adapters.relational),
+        ("vector", adapters.vector),
+        ("secret", adapters.secret),
+        ("embedding", adapters.embedding),
+        ("observability", adapters.observability),
+    ):
+        health = await adapter.health_check()
+        comp: dict[str, object] = {
+            "driver": health.driver,
+            "status": health.status,
+        }
+        if health.detail is not None:
+            comp["detail"] = health.detail
+        if health.latency_ms is not None:
+            comp["latency_ms"] = round(health.latency_ms, 2)
+        out[kind] = comp
+    return out
 
 
 def _build_router(settings: Settings) -> APIRouter:
@@ -73,18 +118,20 @@ def _build_router(settings: Settings) -> APIRouter:
         return {"alive": True, "version": __version__}
 
     @router.get("/readyz", tags=["probes"], summary="Readiness probe")
-    async def readyz() -> JSONResponse:
+    async def readyz(request: Request) -> JSONResponse:
         """Kubernetes-style readiness probe.
 
         Sprint 1B reports only on internal readiness (process started,
-        middleware mounted, tracer configured). Sprint 1C wires per-adapter
-        probes (db, vector, secrets, embedding, observability) into the
-        ``components`` map under the same nested
-        ``{<name>: {"status": ..., ...}}`` shape; when any component
-        reports a non-``ok`` status the response is 503.
+        middleware mounted, tracer configured). Sprint 1C extends this
+        with per-adapter probes when ``app.state.adapters`` is populated
+        (i.e. the app was constructed with ``adapter_registry`` set);
+        when any component reports a non-``ok`` status the response is 503.
         """
 
         components = _readiness_components(settings)
+        adapters: Adapters | None = getattr(request.app.state, "adapters", None)
+        if adapters is not None:
+            components.update(await _adapter_components(adapters))
         ready = all(comp.get("status") == "ok" for comp in components.values())
         body: dict[str, Any] = {
             "ready": ready,
@@ -107,13 +154,27 @@ def _build_router(settings: Settings) -> APIRouter:
     return router
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    *,
+    adapter_registry: AdapterRegistry | None = None,
+) -> FastAPI:
     """Build and return the FastAPI application.
 
     Sprint 1B: configures the observability stack before mounting routes
     so the very first request emits a structured log line with
-    ``request_id`` + ``trace_id``. Sprint 1C extends the lifespan with
-    adapter-pool wiring; Sprint 4+ extends with the plugin registry.
+    ``request_id`` + ``trace_id``.
+
+    Sprint 1C: when ``adapter_registry`` is provided, the lifespan
+    invokes :func:`load_bundled_adapters` (kernel-resilient on optional-
+    dep misses) and :func:`build_adapters`, then attaches the resulting
+    :class:`Adapters` container to ``app.state.adapters`` so ``/readyz``
+    can probe each driver. When ``adapter_registry`` is None (Sprint
+    1A/1B test default), no adapters are built and ``/readyz`` reports
+    only the internal triplet — preserving Sprint 1B test behaviour.
+
+    Production launchers go through :func:`create_prod_app` to default
+    ``adapter_registry`` to the process-wide ``bundled_registry``.
     """
 
     settings = settings or get_settings()
@@ -122,6 +183,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     configure_tracing(settings)
 
     api_prefix = settings.api_prefix
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        if adapter_registry is None:
+            app.state.adapters = None
+            yield
+            return
+
+        # Trigger bundled-adapter registration side-effects. In the
+        # default-adapters image this loads all five drivers; in the
+        # kernel image (no `adapters` extras installed) every module
+        # ImportErrors quietly per its allowlist and any configured
+        # driver fails fast at build_adapters().
+        if adapter_registry is bundled_registry:
+            load_bundled_adapters()
+
+        adapters = build_adapters(settings, registry=adapter_registry)
+        await adapters.open_all()
+        app.state.adapters = adapters
+        try:
+            yield
+        finally:
+            await adapters.close_all()
+            app.state.adapters = None
+
     app = FastAPI(
         title="Cognic AgentOS",
         version=__version__,
@@ -131,6 +217,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         docs_url=None,
         redoc_url=None,
         openapi_url=f"{api_prefix}/openapi.json",
+        lifespan=lifespan,
     )
 
     # Middleware add order is OUTER-LAST in Starlette: the call chain
@@ -161,3 +248,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
 
     return app
+
+
+def create_prod_app() -> FastAPI:
+    """Production-launcher entry point.
+
+    Wraps ``create_app`` with ``adapter_registry=bundled_registry`` so
+    uvicorn's ``--factory`` invocation (configured in the Dockerfile CMD)
+    builds the default adapter set. Splitting this out keeps
+    ``create_app`` a pure factory that doesn't side-effect adapter
+    construction unless asked.
+    """
+
+    return create_app(adapter_registry=bundled_registry)

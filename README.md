@@ -1,8 +1,8 @@
 # Cognic AgentOS
 
-> **Status: pre-code.** This folder holds the doctrine. Source code is built from scratch starting from these documents — no copy-over from prior repos.
+> **Status: Phase 1 Foundation in progress.** Sprints 1A (bootstrap), 1B (observability), and 1C (adapter protocols + reference adapters) are landed; Sprint 1D (enterprise adapters) and Sprints 2-3 (governance primitives + LLM gateway) are next. Build plan in [`docs/BUILD_PLAN.md`](docs/BUILD_PLAN.md). Project plan + execution baseline in [`docs/PROJECT_PLAN.md`](docs/PROJECT_PLAN.md).
 >
-> **Sprint 1A ready to start.** Build plan in [`docs/BUILD_PLAN.md`](docs/BUILD_PLAN.md). Project plan + execution baseline in [`docs/PROJECT_PLAN.md`](docs/PROJECT_PLAN.md).
+> **Per ADR-001 + ADR-009:** AgentOS ships the kernel + adapter contracts only. Tools, skills, agents, and bank overlays install as separately-versioned plugin packs (per ADR-002). Adapter implementations are bundled for the default driver set (Postgres / Qdrant / Vault / Ollama / Langfuse-OTel) and pluggable via `[project.optional-dependencies] adapters` extras + the `AdapterRegistry`.
 
 The hardened, governance-first agent operating system for regulated banking deployments. Deployed once per bank; tools, skills, and agents install on top as separately-versioned plugin packs. Banks, the Cognic team, and the wider MCP ecosystem can author packs using the bundled SDK + CLI.
 
@@ -64,8 +64,7 @@ Conformance references: [`docs/MCP-CONFORMANCE.md`](docs/MCP-CONFORMANCE.md), [`
 
 ## What this folder is NOT
 
-- Not the source code yet. There is no `src/` here. All code is built from scratch using these docs as the contract.
-- Not the parent Cognic monorepo (`bmzee/cognic`) — that continues hosting the legacy bundled monolith + agents + UI until the plugin migration completes.
+- Not the parent Cognic monorepo (`bmzee/cognic`) — that monorepo is **frozen** as of 2026-04-27; cognic-agentos is the only active workspace. Source code in `src/cognic_agentos/` is built from scratch using these docs as the contract; the legacy bundled monolith + agents + UI in the parent repo stay untouched and will be migrated as plugin packs in subsequent sprints.
 
 ## What we will NOT add to this folder
 

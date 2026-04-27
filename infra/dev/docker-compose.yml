@@ -1,9 +1,14 @@
 # Cognic AgentOS — local development compose stack.
 #
-# Sprint 1A ships only the Postgres placeholder so the file exists for 1C/1D
-# to extend with Qdrant, Vault, Ollama, Langfuse, Dynatrace, Oracle, vLLM.
-# AgentOS itself runs on the host via `uv run uvicorn ...` during 1A; the
-# container runtime joins this network in 1C once adapter bootstrap is in.
+# Sprint 1C: 7 services (Postgres, Qdrant, Redis, Vault, LiteLLM, Langfuse,
+# Temporal). All ports env-driven via ${VAR:-default} so an operator can
+# avoid host-port collisions without editing the file.
+#
+# Brittleness flagged in the Sprint 1C plan (Task 13): Langfuse v3,
+# Temporal auto-setup, and LiteLLM config validation can each fail on
+# cold start in ways the YAML can't predict. If a default-profile `up`
+# fails twice, profile-gate non-readiness-critical services
+# (LiteLLM/Redis/Temporal) — see plan Task 13.
 
 name: cognic-agentos-dev
 
@@ -16,7 +21,7 @@ services:
       POSTGRES_USER: cognic
       POSTGRES_PASSWORD: cognic_dev_only  # NEVER used outside dev
     ports:
-      - "5432:5432"
+      - "${COGNIC_POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -25,5 +30,126 @@ services:
       timeout: 3s
       retries: 10
 
+  qdrant:
+    image: qdrant/qdrant:v1.17.1  # matches qdrant-client>=1.17 dep floor; v1.17.4 not on Docker Hub
+    container_name: cognic-agentos-qdrant
+    ports:
+      - "${COGNIC_QDRANT_HTTP_PORT:-6333}:6333"
+      - "${COGNIC_QDRANT_GRPC_PORT:-6334}:6334"
+    volumes:
+      - qdrant-data:/qdrant/storage
+    # NOTE: Qdrant ships as a distroless image — no shell, no wget/curl/nc.
+    # Container-internal healthcheck is therefore not feasible. Operators
+    # verify externally: `curl http://localhost:6333/readyz`. The
+    # AgentOS-side QdrantAdapter.health_check() does the in-process probe
+    # for /readyz roll-up.
+
+  redis:
+    image: redis:7-alpine
+    container_name: cognic-agentos-redis
+    ports:
+      - "${COGNIC_REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  vault:
+    image: hashicorp/vault:1.18
+    container_name: cognic-agentos-vault
+    cap_add:
+      - IPC_LOCK
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: dev-only-root
+      VAULT_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+      VAULT_ADDR: http://127.0.0.1:8200
+    ports:
+      - "${COGNIC_VAULT_PORT:-8200}:8200"
+    # `vault status` ships in the image; exits 0 when unsealed
+    # (dev-mode auto-unseals on boot).
+    healthcheck:
+      test: ["CMD", "vault", "status"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  litellm:
+    image: ghcr.io/berriai/litellm:main-stable
+    container_name: cognic-agentos-litellm
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    volumes:
+      - ../litellm/config.yaml:/app/config.yaml:ro
+    environment:
+      LITELLM_MASTER_KEY: dev-only-litellm
+    ports:
+      - "${COGNIC_LITELLM_PORT:-4000}:4000"
+    # LITELLM = NON-READINESS-GATED DEV SIDECAR (Sprint 1C scope).
+    # The container runs and serves the LLM-routing API, but its own
+    # /health endpoint returns 400 ("No connected db") without a
+    # configured DATABASE_URL — LiteLLM uses the DB for usage tracking
+    # and master-key audit, neither of which Sprint 1C exercises. The
+    # AgentOS LLM gateway is wired in Sprint 3, at which point LiteLLM
+    # gets DB-configured + readiness-gated. Until then:
+    #   * No internal healthcheck (slim image lacks wget/curl anyway).
+    #   * Nothing in this stack `depends_on` litellm with a
+    #     service_healthy condition.
+    #   * Operator-side liveness probe (no auth, no DB):
+    #         curl http://localhost:4000/health/liveliness
+    #     /health/liveliness returns 200 once the process is up; the
+    #     full /health endpoint with DB checks is Sprint 3 territory.
+
+  langfuse:
+    # Pin: Langfuse v2 (single-container, Postgres-only). Langfuse v3
+    # split its analytics store and requires Clickhouse + Redis + S3 +
+    # a separate `langfuse-worker` container — a 4-service expansion
+    # that's out of scope for the Sprint 1C dev compose. The
+    # AgentOS-side LangfuseOtelAdapter only does an HTTP health probe
+    # against `/api/public/health` (present on both v2 and v3), so the
+    # adapter contract is unaffected by this pin. When a bank deployment
+    # genuinely needs v3 (S3 blob storage / Clickhouse-backed traces),
+    # they swap to a v3-compatible compose overlay.
+    image: langfuse/langfuse:2
+    container_name: cognic-agentos-langfuse
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://cognic:cognic_dev_only@postgres:5432/cognic_agentos
+      NEXTAUTH_SECRET: dev-only-nextauth
+      SALT: dev-only-salt
+      NEXTAUTH_URL: http://localhost:${COGNIC_LANGFUSE_PORT:-3000}
+      TELEMETRY_ENABLED: "false"
+    ports:
+      - "${COGNIC_LANGFUSE_PORT:-3000}:3000"
+    # NOTE: Langfuse v2 image is node-based (no wget/curl in the
+    # container). Operators verify externally:
+    # `curl http://localhost:3000/api/public/health`. The adapter-side
+    # health probe lives in LangfuseOtelAdapter.health_check().
+
+  temporal:
+    image: temporalio/auto-setup:1.25
+    container_name: cognic-agentos-temporal
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB: postgres12
+      DB_PORT: "5432"
+      POSTGRES_USER: cognic
+      POSTGRES_PWD: cognic_dev_only
+      POSTGRES_SEEDS: postgres
+    ports:
+      - "${COGNIC_TEMPORAL_PORT:-7233}:7233"
+    # tctl defaults to 127.0.0.1 but Temporal binds on the container's
+    # external interface, not loopback. Use the service-name address so
+    # the probe goes through Docker DNS to the right interface.
+    healthcheck:
+      test: ["CMD-SHELL", "tctl --address temporal:7233 cluster health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
 volumes:
   postgres-data:
+  qdrant-data:

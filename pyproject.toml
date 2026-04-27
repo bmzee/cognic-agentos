@@ -43,6 +43,23 @@ dev = [
     "ruff>=0.9",
     "mypy>=1.14",
     "types-PyYAML",
+    # Sprint 1C — test infra for adapter unit tests
+    "aiosqlite>=0.20",
+    "respx>=0.22",
+]
+adapters = [
+    # Persistence (Sprint 1C, per ADR-009).
+    "sqlalchemy[asyncio]>=2.0",   # spec floor was >=2.1; lowered to PyPI reality (2.1 is beta-only; latest stable 2.0.x). Same carryover pattern as Sprint 1B's prometheus-client/httpx adjustments. Bump back when 2.1 ships stable.
+    "alembic>=1.16",
+    "asyncpg>=0.31",
+    "pgvector>=0.4",
+    "qdrant-client>=1.17",        # spec floor was >=1.18; lowered to PyPI reality (1.18 not yet released — latest stable 1.17.1). Bump back when 1.18 ships.
+    "redis>=5.3",
+    # Secrets (Sprint 1C, per ADR-009)
+    "hvac>=2.4",
+    "cryptography>=45",
+    # Observability adapter (Sprint 1C, per ADR-009)
+    "langfuse>=3.0",
 ]
 
 [project.urls]
@@ -65,6 +82,9 @@ dev-dependencies = [
     "ruff>=0.9",
     "mypy>=1.14",
     "types-PyYAML",
+    # Sprint 1C — test infra for adapter unit tests
+    "aiosqlite>=0.20",
+    "respx>=0.22",
 ]
 
 [tool.pytest.ini_options]
@@ -112,6 +132,14 @@ check_untyped_defs = true
 [[tool.mypy.overrides]]
 module = ["tests.*"]
 disallow_untyped_defs = false
+
+# Adapter third-party libs that don't ship type stubs (Sprint 1C).
+# Adding ``types-hvac`` etc. to dev deps is the alternative; ignoring
+# missing imports keeps the dep set lean since hvac's own surface is
+# small and exercised end-to-end by adapter tests.
+[[tool.mypy.overrides]]
+module = ["hvac.*"]
+ignore_missing_imports = true
 
 [tool.coverage.run]
 source = ["src/cognic_agentos"]

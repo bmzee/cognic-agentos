@@ -187,3 +187,134 @@ def test_otel_mtls_pair_accepted_when_both_set() -> None:
     )
     assert settings.otel_exporter_client_cert_path == Path("/tmp/cert.pem")
     assert settings.otel_exporter_client_key_path == Path("/tmp/key.pem")
+
+
+# ---------------------------------------------------------------------------
+# Sprint 1C — adapter settings (per ADR-009)
+# ---------------------------------------------------------------------------
+
+
+class TestAdapterSettings:
+    """Adapter driver fields + per-driver paths (Sprint 1C, ADR-009).
+
+    Drivers are typed as plain ``str`` so an unknown value (e.g.
+    ``COGNIC_DB_DRIVER=mssql`` — a planned plugin pack, not bundled in
+    Sprint 1C) flows past Pydantic and surfaces at the factory as
+    ``AdapterNotInstalled`` with a precise message — not as a generic
+    Pydantic ``ValueError`` that lists allowed values (which would leak
+    the bundled-adapter list into config-error UX).
+    """
+
+    def test_default_drivers_match_bundled_set(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # Strip any user .env so we measure class defaults
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("COGNIC_RUNTIME_PROFILE", "prod")  # forces .env=None
+        s = build_settings_without_env_file()
+
+        assert s.db_driver == "postgres"
+        assert s.vector_driver == "qdrant"
+        assert s.secret_driver == "vault"
+        assert s.embed_driver == "ollama"
+        assert s.obs_driver == "langfuse_otel"
+
+    def test_driver_fields_typed_as_strings(self) -> None:
+        """Drivers must be ``str`` (not ``Literal``) so unknown values
+        reach the factory's ``AdapterNotInstalled`` rather than getting
+        rejected at config-validation time."""
+
+        fields = Settings.model_fields
+        for name in (
+            "db_driver",
+            "vector_driver",
+            "secret_driver",
+            "embed_driver",
+            "obs_driver",
+        ):
+            assert fields[name].annotation is str, (
+                f"{name} should be plain str; was {fields[name].annotation!r}"
+            )
+
+    def test_per_driver_paths_load_from_env(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("COGNIC_RUNTIME_PROFILE", "prod")
+        monkeypatch.setenv("COGNIC_DATABASE_URL", "postgresql+asyncpg://u:p@h/db")
+        monkeypatch.setenv("COGNIC_QDRANT_URL", "http://qdrant:6333")
+        monkeypatch.setenv("COGNIC_QDRANT_COLLECTION", "demo_col")
+        monkeypatch.setenv("COGNIC_VAULT_ADDR", "http://vault:8200")
+        monkeypatch.setenv("COGNIC_VAULT_TOKEN", "dev-token")
+        monkeypatch.setenv("COGNIC_VAULT_NAMESPACE", "ns/a")
+        monkeypatch.setenv("COGNIC_EMBEDDING_MODEL", "test-embed:1b")
+        monkeypatch.setenv("COGNIC_EMBEDDING_BASE_URL", "http://ollama:11434")
+        monkeypatch.setenv("COGNIC_EMBEDDING_DIMENSIONS", "512")
+        monkeypatch.setenv("COGNIC_LANGFUSE_HOST", "http://lf:3000")
+        monkeypatch.setenv("COGNIC_LANGFUSE_PUBLIC_KEY", "pk-test")
+        monkeypatch.setenv("COGNIC_LANGFUSE_SECRET_KEY", "sk-test")
+
+        s = build_settings_without_env_file()
+
+        assert s.database_url == "postgresql+asyncpg://u:p@h/db"
+        assert s.qdrant_url == "http://qdrant:6333"
+        assert s.qdrant_collection == "demo_col"
+        assert s.vault_addr == "http://vault:8200"
+        assert s.vault_token == "dev-token"
+        assert s.vault_namespace == "ns/a"
+        assert s.embedding_model == "test-embed:1b"
+        assert s.embedding_base_url == "http://ollama:11434"
+        assert s.embedding_dimensions == 512
+        assert s.langfuse_host == "http://lf:3000"
+        assert s.langfuse_public_key == "pk-test"
+        assert s.langfuse_secret_key == "sk-test"
+
+    def test_unknown_driver_value_accepted_at_config_layer(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """``mssql`` is a planned plugin pack (per ADR-009 alternative
+        adapters). Config must not refuse it. The factory, not config,
+        surfaces the miss as ``AdapterNotInstalled``."""
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("COGNIC_RUNTIME_PROFILE", "prod")
+        monkeypatch.setenv("COGNIC_DB_DRIVER", "mssql")
+
+        s = build_settings_without_env_file()
+        assert s.db_driver == "mssql"
+
+    def test_default_collection_and_dimensions(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Sensible defaults are declared on the field; only the
+        operator-specific URLs / tokens / model names are required."""
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("COGNIC_RUNTIME_PROFILE", "prod")
+        s = build_settings_without_env_file()
+
+        assert s.qdrant_collection == "cognic_default"
+        assert s.embedding_model == "qwen3-embedding:8b"
+        assert s.embedding_dimensions == 1024
+        assert s.database_url is None
+        assert s.qdrant_url is None
+        assert s.vault_addr is None
+        assert s.vault_token is None
+        assert s.vault_namespace is None
+        assert s.embedding_base_url is None
+        assert s.langfuse_host is None
+        assert s.langfuse_public_key is None
+        assert s.langfuse_secret_key is None
+
+    def test_negative_embedding_dimensions_refused(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """``embedding_dimensions`` must be ≥ 1 — a 0 or negative
+        dimensionality cannot represent a real embedding."""
+
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("COGNIC_RUNTIME_PROFILE", "prod")
+        monkeypatch.setenv("COGNIC_EMBEDDING_DIMENSIONS", "0")
+
+        with pytest.raises(ValueError):
+            build_settings_without_env_file()
