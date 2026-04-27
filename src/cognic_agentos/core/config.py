@@ -21,7 +21,7 @@ from datetime import UTC, datetime
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from cognic_agentos import __version__
@@ -68,8 +68,48 @@ class Settings(BaseSettings):
     )
     log_level: str = Field(
         default="INFO",
-        description="Default logging level for the structured-logging stack (Sprint 1B).",
+        description="Default logging level for the structured-logging stack.",
     )
+    log_format: Literal["json", "text"] = Field(
+        default="json",
+        description=(
+            "`json` is the production default — structured logs flow into the audit "
+            "+ SIEM pipeline. `text` is a developer convenience only."
+        ),
+    )
+
+    # --- Observability (Sprint 1B) -----------------------------------
+    otel_exporter_endpoint: str | None = Field(
+        default=None,
+        description=(
+            "OTLP gRPC endpoint for trace export (e.g. http://otel-collector:4317). "
+            "When unset, the OTel tracer falls back to a console exporter in dev "
+            "and a no-op exporter in prod (so traces are silently dropped rather "
+            "than printed to stdout)."
+        ),
+    )
+    prometheus_metrics_path: str = Field(
+        default="/metrics",
+        description="Path the Prometheus instrumentator exposes the scrape endpoint at "
+        "(joined under api_prefix).",
+    )
+    cors_allowed_origins: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Allow-list of origins permitted by the CORS middleware. The literal "
+            "string `*` is forbidden (per Phase-1 'CORS allow-list-only' principle)."
+        ),
+    )
+
+    @field_validator("cors_allowed_origins")
+    @classmethod
+    def _refuse_cors_wildcard(cls, value: list[str]) -> list[str]:
+        if any(origin.strip() == "*" for origin in value):
+            raise ValueError(
+                "CORS allow-list rejects `*` per Phase-1 'CORS allow-list-only' "
+                "principle in BUILD_PLAN.md. Declare each origin explicitly."
+            )
+        return value
 
     # --- Build metadata ----------------------------------------------
     # Wired by the Dockerfile / CI at image-build time; defaults make
