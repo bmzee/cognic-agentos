@@ -1,0 +1,40 @@
+# Source-control + IDE
+.git/
+.github/
+.idea/
+.vscode/
+.claude/
+
+# Python build/cache
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.uv-cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Tests + dev infra (image runs prod code only; tests run in CI before build)
+tests/
+infra/dev/
+
+# Docs (image is runtime; docs ship separately)
+docs/
+*.md
+!README.md
+
+# Secrets
+.env
+.env.*
+!.env.example
+secrets/
+*.pem
+*.key
