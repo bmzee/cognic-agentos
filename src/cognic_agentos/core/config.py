@@ -93,6 +93,21 @@ class Settings(BaseSettings):
         return f"{platform.system()}-{platform.machine()}"
 
 
+def build_settings_without_env_file() -> Settings:
+    """Construct ``Settings`` while suppressing ``.env`` loading.
+
+    Pydantic-Settings accepts ``_env_file=None`` at construction time as the
+    documented escape hatch to override the class-level ``env_file`` setting,
+    but its public type signature uses ``**values: Any`` and does not expose
+    ``_env_file`` as a typed parameter. The single narrow ``type: ignore``
+    here is the only place that knowledge bleeds into the codebase; every
+    caller (``get_settings`` and the dedicated test) routes through this
+    helper so neither has to repeat the ignore.
+    """
+
+    return Settings(_env_file=None)  # type: ignore[call-arg]
+
+
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     """Return the process-wide settings instance.
@@ -104,5 +119,5 @@ def get_settings() -> Settings:
     """
 
     if os.environ.get(_PROD_PROFILE_ENV_VAR, "dev").lower() == "prod":
-        return Settings(_env_file=None)
+        return build_settings_without_env_file()
     return Settings()

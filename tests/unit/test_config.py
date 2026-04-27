@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
 from cognic_agentos.core import config as config_module
-from cognic_agentos.core.config import Settings, get_settings
+from cognic_agentos.core.config import (
+    Settings,
+    build_settings_without_env_file,
+    get_settings,
+)
 
 
 @pytest.fixture(autouse=True)
-def _clear_settings_cache() -> None:
+def _clear_settings_cache() -> Iterator[None]:
     get_settings.cache_clear()
     yield
     get_settings.cache_clear()
@@ -70,14 +75,19 @@ def test_settings_class_constants() -> None:
     assert config_module._PROD_PROFILE_ENV_VAR == "COGNIC_RUNTIME_PROFILE"
 
 
-def test_direct_settings_construction_with_no_env_file_skips_dotenv(
+def test_build_settings_without_env_file_helper_skips_dotenv(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The escape hatch used by get_settings() in prod must work in isolation."""
+    """The escape hatch used by get_settings() in prod must work in isolation.
+
+    Test routes through ``build_settings_without_env_file`` so the narrow
+    ``# type: ignore[call-arg]`` lives in exactly one place (the helper).
+    """
 
     _write_env(tmp_path, "COGNIC_PORT=9001\n")
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("COGNIC_PORT", raising=False)
 
-    settings = Settings(_env_file=None)
+    settings = build_settings_without_env_file()
+    assert isinstance(settings, Settings)
     assert settings.port == 8000
