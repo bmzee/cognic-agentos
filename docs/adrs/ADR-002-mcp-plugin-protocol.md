@@ -1,0 +1,161 @@
+# ADR-002 — MCP-based Plugin Protocol for Tools / Skills / Agents
+
+## Status
+**APPROVED for implementation** on 2026-04-26.
+
+## Context
+
+Per ADR-001 this repo ships AgentOS only; tools, skills, and agents are separately-versioned plugin packs. We need a discovery + invocation protocol that:
+
+- Doesn't require Cognic-specific glue per pack
+- Is signature-verifiable for bank trust requirements
+- Interoperates with the wider agent ecosystem (Claude, ChatGPT, Cursor, etc.)
+- Survives architectural drift (the standard outlives the implementation)
+
+## Decision
+
+Adopt **MCP (Model Context Protocol)** as the tool/resource invocation protocol and **Python entry points** as the discovery mechanism.
+
+### Discovery
+
+A pack registers in its `pyproject.toml`:
+
+```toml
+[project.entry-points."cognic.tools"]
+search_circulars = "cognic_tool_search:SearchCircularsTool"
+
+[project.entry-points."cognic.skills"]
+kyc_expiry = "cognic_skill_kyc:KYCExpirySkill"
+
+[project.entry-points."cognic.agents"]
+policy_qa = "cognic_agent_policyqa:PolicyQAAgent"
+```
+
+`cognic_agentos.protocol.plugin_registry.discover()` walks `importlib.metadata.entry_points` for the three groups, populates the registry, and exposes `require(kind, name)` and `load(kind, name)`.
+
+### Invocation
+
+- **Tools**: ship as MCP servers. **Streamable HTTP is the production default transport.** STDIO is a restricted escape hatch — see "MCP STDIO threat model" below.
+- **Skills**: MCP-composing services that call tools deterministically (no LLM).
+- **Agents**: A2A-speaking services (see ADR-003).
+
+The `cognic_agentos.protocol.mcp_host.MCPHost` opens sessions and routes calls. Every call is audit-logged via the governance kernel.
+
+### MCP STDIO threat model (mandatory before MCPHost is implemented)
+
+Per the April 2026 MCP supply-chain disclosures (OX Security and others), unsafe STDIO command configuration in MCP hosts has been demonstrated to become **remote code execution** in real deployments. Any string controlled by a model, a remote pack, a config file, or a user input that flows into a process-launch command is an RCE vector.
+
+AgentOS therefore enforces:
+
+1. **Streamable HTTP MCP is the production default.** Production deployments treat STDIO as opt-in only.
+2. **STDIO is allowed only when ALL of the following are true:**
+   - Pack ships a **signed static manifest** declaring its launch command + arguments + env vars
+   - The launch command is on a **per-tenant static command allow-list** (operator-curated, RBAC-gated to change)
+   - The launch happens inside a **sandbox profile** (per ADR-004) with bounded filesystem, bounded egress, bounded resource caps
+   - **Bounded environment variables** — no `os.environ` passthrough; only the explicit allow-list from the manifest
+   - **Audit event emitted for every launch** — pack identity, command, arguments, sandbox-id, outcome — chained into `decision_history`
+3. **No user-, model-, or remote-pack-controlled command or argument may reach process execution.** The host validates the manifest against the allow-list at registration, then ignores any subsequent attempt to override.
+4. **Any STDIO launch failing any of (1)-(3) is refused at registration.** No silent fallback to permissive behavior.
+
+The threat model document `docs/MCP-STDIO-THREAT-MODEL.md` accompanies the implementation. Negative-path tests prove that user-controllable inputs cannot reach a process launch.
+
+OWASP Agentic Top 10 / Agentic Skills supply-chain checks (per PROJECT_PLAN.md §5) are part of pack conformance — covered in the Sprint 7B pack lifecycle workflow.
+
+### MCP Authorization (Streamable HTTP transport)
+
+The MCP spec (April 2026 revision) defines OAuth-based authorization for HTTP transports including **Protected Resource Metadata (PRM)** discovery. AgentOS implements this for all production-default Streamable HTTP MCP traffic:
+
+1. **Resource-metadata discovery via three paths in priority order** (the spec mandates supporting all three):
+   - **Primary signal** — `WWW-Authenticate: Bearer resource_metadata="<url>"` header on a 401 response; client follows the URL the server advertises
+   - **Endpoint-specific well-known fallback** — when the 401 lacks `WWW-Authenticate`, client probes the endpoint-specific PRM path first. For an MCP endpoint at `https://server.example/public/mcp`, that's `https://server.example/.well-known/oauth-protected-resource/public/mcp`. This per-resource convention lets a single host expose multiple MCP servers under different paths each with their own PRM (and their own AS allow-list / scopes).
+   - **Root well-known fallback** — if the endpoint-specific path 404s, the client falls back to host-level `/.well-known/oauth-protected-resource`
+   - All three paths produce the same Protected Resource Metadata document (authorization servers + supported scopes); whichever returns first wins
+2. **AgentOS as MCP host** acts as an OAuth resource client: discovers PRM at first contact (via either path), requests tokens with the minimum scopes the manifest declares, includes `Authorization: Bearer ...` on every MCP request
+3. **Per-tenant authorization-server allow-list** in Vault — only AS endpoints on the list will be contacted (prevents an attacker-controlled MCP server from redirecting AgentOS to a malicious AS)
+4. **RFC 8707 resource indicator** (`resource=<server URL>`) on every token request — the AS binds the issued token to the specific MCP server; tokens are never reused across servers
+5. **Audience validation** on every received token — `aud` claim MUST match the MCP server's resource indicator. Mismatched audience → token rejected, server treated as 401, fresh discovery + token request triggered
+6. **Insufficient-scope step-up** — per the MCP authorization spec, **runtime insufficient scope is signalled by `403 Forbidden`** (not 401). The server returns `403 WWW-Authenticate: Bearer error="insufficient_scope", scope="<wider>"`; the client requests a fresh token covering the wider scope **only if** (a) the manifest declares the wider scope AND (b) tenant policy permits. The step-up is audit-logged with prior + requested-additional scopes. Manifest does not declare the wider scope → call fails closed with `mcp_step_up_unauthorised`. This forbids servers from silently widening their privilege footprint at runtime. (Initial missing/invalid auth still returns `401`; the 401-vs-403 distinction matters because clients treat 401 as "discover + acquire token" and 403 as "step up the scope of the token I already have".)
+7. **Token cache + refresh** — tokens cached per (server, scope, resource) tuple; refreshed before expiry; `audit.mcp_token_refresh` event per refresh
+8. **Failed auth = registration refused** — at pack registration time, AgentOS performs a probe MCP request; if auth fails, the pack stays in `proposed` state with the auth failure as evidence
+9. **Audit linkage** — every MCP call records the token's `client_id` + scopes used + AS issuer + resource indicator in `decision_history` so examiners can prove which authorisation context performed which tool call against which resource
+
+For backward compatibility with MCP servers that don't declare PRM (older revisions), AgentOS supports a manifest-declared API-key fallback (key sourced from per-tenant Vault path). This is a **Wave 1 escape hatch**; Wave 2 deprecates the fallback path.
+
+### AGNTCY/OASF-compatible manifest fields
+
+AGNTCY (Cisco → Linux Foundation Internet of Agents) and OASF (Open Agent Service Framework) define identity + directory-publication schemas for agent packs that AgentOS will integrate in Wave 2. To avoid a manifest migration, **Wave 1 manifests must already declare the AGNTCY/OASF-compatible fields**:
+
+```toml
+[tool.cognic.identity]  # AGNTCY/OASF compat — lives in pack manifest, NOT in the A2A AgentCard
+agent_id = "urn:cognic:agent:policy_qa:0.5.0"  # URN form per AGNTCY
+display_name = "Policy QA"
+provider_organization = "Cognic"  # populates the A2A AgentCard `provider.organization` (spec-optional, AgentOS-profile mandatory)
+provider_url = "https://cognic.ai"  # populates the A2A AgentCard `provider.url`
+agent_card_url = "https://packs.cognic.ai/agent_cards/policy_qa.json"  # URL of the published A2A AgentCard (validated against upstream A2A schema + AgentOS profile)
+agent_card_jws_path = "agent_cards/policy_qa.jws"  # detached JWS signature over the card (mandatory, per A2A-CONFORMANCE.md)
+verifiable_credentials_path = "credentials/policy_qa.vc.jsonld"  # for Wave 2 VC publication
+oasf_capability_set = ["regulatory_qa", "citation_grounded"]  # OASF capability vocabulary
+```
+
+**Important: the manifest's identity block is Cognic-specific governance metadata; the published A2A AgentCard at `agent_card_url` is validated in two passes** — first against the **upstream A2A 1.0 schema** (a card that fails this isn't A2A at all), then against the **AgentOS bank-grade profile** that requires several spec-optional fields to be populated (`provider`, `securitySchemes`, `securityRequirements`, `signatures`, at least one `supportedInterfaces` entry). **Endpoint URLs live inside `supportedInterfaces[].url`, NOT as a top-level AgentCard field.** Cognic-specific fields like `agent_id` URN and `oasf_capability_set` do NOT appear at the AgentCard top level — the AgentOS profile requires *more* of the spec's existing optional fields, never adds non-spec fields, so any A2A 1.0 caller can still consume the card. The trust gate consumes the manifest; the card stays consumable by any A2A-conformant caller. Sprint 7A `agentos validate` enforces both passes (and the manifest); Sprint 6 verifies card spec-shape against upstream schema and AgentOS profile separately.
+
+### Wave 1 identity-field strictness (mandatory vs deferred)
+
+| Field | Wave 1 status |
+|---|---|
+| `agent_id` (URN) | **Mandatory** — registration refused without it |
+| `display_name` | **Mandatory** — registration refused without it |
+| `provider_organization` + `provider_url` | **Mandatory** (both) — needed to populate the AgentCard's `provider` object, which is spec-optional but AgentOS-profile mandatory |
+| `agent_card_url` | **Mandatory** — Sprint 6 outbound A2A and trust gate need it to fetch + verify the card |
+| `agent_card_jws_path` | **Mandatory for agent packs** — signed cards are mandatory per A2A-CONFORMANCE.md; no JWS path → registration refused. (Tool/skill packs that don't publish A2A cards skip this.) |
+| `oasf_capability_set` | **Optional** in Wave 1 (warning logged if absent); becomes mandatory in Wave 2 |
+| `verifiable_credentials_path` | **Optional / reserved** — Wave 3 VC sprint flips this mandatory. Wave 1 registration accepts manifests without it; the field, if present, is validated for path resolvability only |
+
+`agentos validate` (Sprint 7A) enforces this matrix; Wave 2 / Wave 3 sprint headers will tighten the optional fields to mandatory with explicit migration windows.
+
+### Trust
+
+Every pack distribution is **cosign-verified** against the per-tenant trust root before the registry registers it. Verification result is recorded with the pack identity (signature digest) and surfaced in evidence packs.
+
+Per-tenant **allow-list** is loaded from a Vault path (`secret/cognic/<tenant>/plugin-allowlist`). A signed pack that is not on the tenant's allow-list is **not** registered. AgentOS startup logs every (registered, unregistered, rejected) outcome.
+
+### Why MCP specifically
+
+- 97M+ installs by April 2026
+- Adopted by Anthropic, OpenAI, Google DeepMind, Microsoft, Cloudflare, Salesforce, ServiceNow, Workday, Accenture, Deloitte
+- Open standard, Linux Foundation governance candidate (per 2026 roadmap)
+- Adopting it means every tool a Cognic-installed bank writes is interoperable with the wider ecosystem; conversely every MCP-spec tool from the ecosystem is installable on Cognic AgentOS
+
+## Consequences
+
+### Positive
+- **Future-proof**: betting on the standard, not a Cognic-specific invention
+- **Interop**: bank-written tools work with Claude Code, Cursor, ChatGPT
+- **Independent release**: each pack ships at its own velocity
+- **Bank-extensible**: banks can write their own MCP server packs (CBS adapters, internal-data tools)
+- **Signature-verified**: cosign + Vault allow-list means banks audit one pack once
+
+### Negative
+- **MCP SDK dependency**: pinning to MCP commits Cognic to the Anthropic ecosystem direction
+- **CI cost**: every pack needs cosign signing in its build pipeline; trust-root rotation playbook
+- **Schema drift**: MCP protocol updates may force AgentOS host upgrade
+- **Plugin debugging**: cross-process boundaries make traces harder; mitigated by OpenTelemetry trace context propagation through MCP envelope
+
+### Neutral
+- Skills (Layer B) are an internal abstraction; whether they ship as separate MCP servers or as stdlib helpers inside agent packs is a tactical choice — the registry supports both
+
+## Implementation phases
+
+1. **Phase 2.1**: implement `plugin_registry.discover()` (entry-point walker; no signature verification yet)
+2. **Phase 2.2**: implement `mcp_host.MCPHost` (session management, tool listing, call routing)
+3. **Phase 2.3**: extract `tools/search/` from this repo into a separate `cognic-tool-search` pack as POC
+4. **Phase 2.4**: cosign signing in CI, trust-root provisioning, per-tenant allow-list config schema
+5. **Phase 2.5**: extract remaining tool categories (`tools/documents`, `tools/document_intel`, `tools/bank_readiness`, `tools/urdu_*`)
+6. **Phase 2.6**: CI test that confirms zero `from cognic_agentos.tools.X` imports remain in OS-tier code (replaces parent's ADR-009 import-discipline test)
+
+## References
+- [Model Context Protocol — 2026 roadmap](https://blog.modelcontextprotocol.io/posts/2026-mcp-roadmap/)
+- [MCP — Wikipedia](https://en.wikipedia.org/wiki/Model_Context_Protocol)
+- ADR-001 (this repo's OS-only premise)
+- ADR-003 (A2A for inter-agent comms — complements this)
+- Parent repo `bmzee/cognic` ADR-009 (import-discipline test as foundation)

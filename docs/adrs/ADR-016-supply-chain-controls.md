@@ -1,0 +1,131 @@
+# ADR-016 — Supply-Chain Controls (SLSA / in-toto / Sigstore Bundles / Vulnerability + License Policy)
+
+## Status
+**APPROVED for implementation** on 2026-04-26.
+
+## Context
+
+ADR-002 specifies cosign signature verification + per-tenant allow-list as the trust gate for plugin packs. That's necessary but insufficient for bank-grade supply-chain assurance. Modern banking + EU AI Act + US Executive Order 14028 expectations:
+
+- **SLSA (Supply-chain Levels for Software Artefacts)** Level 3+ provenance attestations — the artefact came from a hardened build pipeline with non-falsifiable provenance
+- **in-toto** layout attestations — the build steps were performed in the declared order by the declared parties
+- **Retained Sigstore bundles** per artefact — tamper-evident transparency-log entries that can be re-verified offline years later
+- **Vulnerability policy** — each pack scanned for CVEs against bank-tenant-specific severity threshold; fails approval if violated
+- **License policy** — each pack's transitive dependency licenses screened against bank's allowed-license list (e.g. some banks refuse AGPL, GPL3, or anything not OSI-approved)
+- **Dependency pinning + reproducibility** — every pack ships a lockfile; rebuilds are byte-identical from the same source
+
+Without these, a "signed pack" only proves *who* built it, not *how it was built, what it depends on, what vulnerabilities it carries, or whether the dependency licenses are acceptable*.
+
+## Decision
+
+Extend the trust gate (ADR-002) and pack lifecycle (ADR-012) with a **layered supply-chain assurance model**. Every pack version registered in AgentOS must carry, and the trust gate must verify:
+
+### Required attestations per pack version
+
+| Attestation | What it proves | Tooling |
+|---|---|---|
+| **cosign signature** (existing per ADR-002) | Identity of publisher | `cosign sign` keyless via OIDC |
+| **SLSA provenance v1+** | Artefact built in hardened pipeline matching the declared one (build-id, source ref, builder, materials) | `slsa-github-generator` or equivalent |
+| **in-toto layout** | Build steps performed by declared parties in declared order | `in-toto-attest` |
+| **SBOM** (existing) | Full transitive dependency inventory in CycloneDX or SPDX | `syft` |
+| **Vulnerability scan** | Each dep scanned against current CVE DB at build time + at registration | `grype` or `trivy` |
+| **License audit** | Transitive license list with policy match | `syft` + bank's allowed-license JSON |
+| **Sigstore bundle** | Combined cosign + Rekor transparency log entry that re-verifies offline | `cosign attest --bundle` |
+| **Reproducibility manifest** | Lockfile (uv.lock / package-lock.json / etc.) + builder image digest | pack CI |
+
+All of these are **bundled into a single pack-attestation directory** that travels with the artefact. AgentOS trust gate verifies each at pack registration time.
+
+### Per-tenant policy gates (delegated to ADR-015 Rego policies)
+
+Banks set their thresholds via Rego policy:
+
+```rego
+# packs.rego excerpt
+package cognic.packs
+
+# Reject any pack with a CVSS ≥ 7.0 unfixed vulnerability
+deny[msg] {
+    some vuln in input.attestations.vuln_scan.findings
+    vuln.cvss >= 7.0
+    not vuln.has_fix
+    msg := sprintf("vulnerability %s exceeds CVSS threshold", [vuln.id])
+}
+
+# Reject any pack with non-allowlisted license
+deny[msg] {
+    some lib in input.attestations.sbom.dependencies
+    not data.cognic.licenses.allowed[lib.license]
+    msg := sprintf("dependency %s has disallowed license %s", [lib.name, lib.license])
+}
+
+# Require SLSA Level 3+ provenance
+deny[msg] {
+    input.attestations.slsa.level < 3
+    msg := "SLSA Level 3+ required"
+}
+```
+
+Bank security team owns the policy bundle; bank operations team configures per-tenant tolerance (e.g. dev tenant allows CVSS 7.0, prod tenant requires 4.0).
+
+### Retention + offline re-verification
+
+- Sigstore bundles **retained for 7 years** in ObjectStoreAdapter (per ADR-009; longest expected regulator retention window). Pack records never lose their attestation pointer.
+- Re-verification is offline — bundles are self-contained (Rekor entry + signed metadata). Works even if Sigstore.dev is down or the project sunsets.
+- Annual integrity sweep: a scheduled job picks 1% of registered packs at random, re-verifies their bundles, alerts on failure.
+
+### Reproducibility commitment
+
+Pack manifests declare a `reproducible: true` flag if the publisher commits to byte-identical rebuilds. Reviewers can re-run the published build pipeline against the recorded source ref and verify the resulting artefact digest matches. This is **opt-in**, not mandatory — but tenants can require `reproducible: true` via policy.
+
+### Pack-side tooling (Sprint 7A SDK extension)
+
+`agentos sign` (Sprint 7A) extends to:
+- `agentos sign --bundle vault://...` — produces cosign signature + SLSA provenance + in-toto layout + SBOM + vuln-scan-baseline + license audit, all attached as the pack-attestation bundle
+- `agentos verify <pack-path>` — local verification before submission (catches issues before they hit reviewer)
+
+### What this is NOT
+
+- **Not a runtime check.** Supply-chain attestations are verified at **registration** (pack lifecycle `submitted → approved` transition). Once approved, the runtime trusts the registered signature + SBOM; it doesn't re-scan on every invocation.
+- **Not a substitute for adversarial testing** (ADR-011) or eval (ADR-010). Supply-chain proves the *build*; eval/adversarial prove the *behaviour*.
+- **Not vendored Sigstore infra.** Banks who run their own Sigstore-compatible transparency log substitute via config; AgentOS verifies bundles, doesn't host them.
+
+## Consequences
+
+### Positive
+- **EU AI Act / Executive Order 14028 / FedRAMP-style supply-chain expectations** are met by construction
+- **Offline re-verification** survives Sigstore-the-service going down or sunsetting
+- **Per-tenant policy** lets dev tenants iterate fast (loose CVSS) while prod tenants enforce strictly (tight CVSS)
+- **License hygiene** — banks know exactly which deps they're shipping; AGPL accidents caught at registration
+- **Reviewer evidence** — Sprint 7B reviewer dashboard shows the full attestation bundle in one view; approval is data-driven
+
+### Negative
+- **Significant CI burden on pack authors** — `agentos sign --bundle` runs ~5-10 minutes for a full bundle. Mitigation: cache slow steps (SBOM, license scan); incremental for dep-only changes.
+- **Bundle storage** — SLSA + in-toto + Sigstore bundles add ~5-10 MB per pack version. ObjectStoreAdapter handles this; retention cost is negligible.
+- **Vuln DB drift** — a pack vuln-scanned at registration may have new CVEs by deployment time. Mitigation: scheduled re-scan job emits `pack.vuln_drift` events when a registered pack's deps gain a new CVE that exceeds policy.
+- **Reproducibility ambition** — "byte-identical rebuilds" is hard. Most packs won't claim it. Acceptable; opt-in flag.
+
+### Neutral
+- Cognic Forge (Wave 2 — fine-tuning) inherits the same supply-chain controls for model artefacts: SLSA provenance on training run, attested data manifest, Sigstore bundle for the model weights file.
+
+## Implementation phases
+
+| Sprint | Work |
+|---|---|
+| **Sprint 4** (extended) | Trust gate verifies SLSA + in-toto + SBOM + vuln scan + license audit + Sigstore bundle. Bundle parsing + verification helpers. Wave 1 ships strict cosign + SBOM + Sigstore bundle as **mandatory**; SLSA L3 + in-toto + vuln + license declared **mandatory but with grace-period**: packs without these can register but show `attestation_grade: partial` in the registry; tenants can require `attestation_grade: full` via policy. |
+| **Sprint 7A** | `agentos sign --bundle` produces full attestation set; `agentos verify` runs offline check |
+| **Sprint 7B** | Reviewer evidence view includes attestation summary; approval gates check policy thresholds (delegated to ADR-015 Rego) |
+| **Sprint 14 (deployment kit)** | Per-tenant policy bundle templates for vuln/license thresholds |
+| **Wave 2** | Annual integrity sweep job; reproducibility verifier; vuln-drift alerting |
+
+Sprint 4 grows from ~3 wu to ~3.5 wu. Sprint 7A grows from 2 wu to ~2.5 wu.
+
+## References
+- ADR-002 (cosign signing — extended here)
+- ADR-009 (ObjectStoreAdapter — bundle retention)
+- ADR-012 (pack lifecycle — registration is the verification point)
+- ADR-015 (Rego policy decides per-tenant thresholds)
+- [SLSA framework](https://slsa.dev/)
+- [in-toto specification](https://in-toto.io/)
+- [Sigstore](https://www.sigstore.dev/)
+- [Syft / Grype — SBOM + vuln scanning](https://github.com/anchore)
+- [US Executive Order 14028](https://www.whitehouse.gov/briefing-room/presidential-actions/2021/05/12/executive-order-on-improving-the-nations-cybersecurity/)
