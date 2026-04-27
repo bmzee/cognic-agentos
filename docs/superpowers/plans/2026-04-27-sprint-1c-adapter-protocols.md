@@ -3674,7 +3674,11 @@ COGNIC_VAULT_TOKEN='dev-only-root' \
 COGNIC_EMBEDDING_BASE_URL='http://localhost:11434' \
 COGNIC_LANGFUSE_HOST='http://localhost:3000' \
 COGNIC_LANGFUSE_PUBLIC_KEY='dev' COGNIC_LANGFUSE_SECRET_KEY='dev' \
-uv run uvicorn cognic_agentos.portal.api.app:create_app --factory --port 8000 &
+uv run uvicorn cognic_agentos.portal.api.app:create_prod_app --factory --port 8000 &
+# create_prod_app wires bundled_registry so the lifespan probes adapters.
+# create_app (no kwarg) deliberately skips adapter probing and would
+# falsely report /readyz green without checking Postgres/Qdrant/Vault/
+# Ollama/Langfuse — that's the Sprint 1B-back-compat factory.
 
 sleep 3
 curl -s http://localhost:8000/api/v1/readyz | jq .

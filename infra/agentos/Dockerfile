@@ -11,10 +11,14 @@
 #
 #   2. default-adapters     — kernel + bundled default adapters (Postgres /
 #                             Qdrant / Vault / Ollama / Langfuse-OTel).
-#                             ≤180 MiB. Built via `--extra adapters` so the
+#                             ≤220 MiB. Built via `--extra adapters` so the
 #                             [project.optional-dependencies] adapters group
 #                             lands in /opt/venv. Uvicorn factory:
 #                             create_prod_app (lifespan probes adapters).
+#                             Budget raised from BUILD_PLAN's original
+#                             180 MiB during Sprint 1C T15 — measured size
+#                             198 MiB after dependency pruning; numpy/grpc/
+#                             cryptography compiled libs dominate.
 #
 # Build args wire git SHA + build timestamp into the image so /version is
 # truthful in deployed environments.

@@ -202,11 +202,189 @@ class TestFactory:
         assert h.status == "unreachable"
 
     async def test_bundled_registry_default_used_when_registry_none(self) -> None:
-        """Smoke: when ``registry`` is None, the factory falls back to the
-        process-wide ``bundled_registry``. Bundled drivers won't be present
-        in this T5 run (T6-T10 land them), so the default-postgres lookup
-        raises AdapterNotInstalled — proving the fallback path runs."""
+        """Smoke: when ``registry`` is None the factory falls back to the
+        process-wide ``bundled_registry``. ``vector_driver=memory`` is not
+        registered there → AdapterNotInstalled — proving the fallback path
+        runs (rather than silently picking up some other registry)."""
 
-        s = _memory_settings().model_copy(update={"db_driver": "postgres"})
+        s = _memory_settings()  # vector_driver="memory" is not bundled
         with pytest.raises(AdapterNotInstalled):
             build_adapters(s)  # no registry kwarg → uses bundled_registry
+
+
+class TestPerDriverArgs:
+    """Coverage for the private per-driver argument helpers.
+
+    The factory's ``_relational_args`` / ``_vector_args`` / ``_secret_args``
+    / ``_embedding_args`` / ``_observability_args`` helpers translate
+    Settings fields into adapter constructor positional args. They're
+    private but worth direct coverage so the bundled-driver branches
+    (postgres / qdrant / vault / ollama / langfuse_otel) are exercised
+    independently of the live builders, and so the unknown-driver
+    fallback path (returning empty tuple, letting the registry surface
+    AdapterNotInstalled) is locked in.
+    """
+
+    @pytest.fixture
+    def base_settings(self) -> Any:
+        """Settings with all per-driver paths populated."""
+
+        from cognic_agentos.core.config import build_settings_without_env_file
+
+        return build_settings_without_env_file().model_copy(
+            update={
+                "database_url": "postgresql+asyncpg://u:p@h/d",
+                "qdrant_url": "http://q:6333",
+                "qdrant_collection": "mycol",
+                "vault_addr": "http://v:8200",
+                "vault_token": "tok",
+                "vault_namespace": "ns",
+                "embedding_base_url": "http://o:11434",
+                "embedding_model": "qwen3-embedding:8b",
+                "embedding_dimensions": 1024,
+                "langfuse_host": "http://l:3000",
+                "langfuse_public_key": "pk",
+                "langfuse_secret_key": "sk",
+            }
+        )
+
+    def test_relational_postgres_args(self, base_settings: Any) -> None:
+        from cognic_agentos.db.adapters.factory import _relational_args
+
+        assert _relational_args(base_settings) == ("postgresql+asyncpg://u:p@h/d",)
+
+    def test_relational_memory_returns_empty(self, base_settings: Any) -> None:
+        from cognic_agentos.db.adapters.factory import _relational_args
+
+        s = base_settings.model_copy(update={"db_driver": "memory"})
+        assert _relational_args(s) == ()
+
+    def test_relational_unknown_returns_empty(self, base_settings: Any) -> None:
+        """Plugin-pack drivers (e.g. mssql) return empty here — their own
+        helper or pack-supplied factory provides the args."""
+
+        from cognic_agentos.db.adapters.factory import _relational_args
+
+        s = base_settings.model_copy(update={"db_driver": "mssql"})
+        assert _relational_args(s) == ()
+
+    def test_vector_qdrant_args(self, base_settings: Any) -> None:
+        from cognic_agentos.db.adapters.factory import _vector_args
+
+        s = base_settings.model_copy(update={"vector_driver": "qdrant"})
+        assert _vector_args(s) == ("http://q:6333", "mycol")
+
+    def test_vector_memory_returns_empty(self, base_settings: Any) -> None:
+        from cognic_agentos.db.adapters.factory import _vector_args
+
+        s = base_settings.model_copy(update={"vector_driver": "memory"})
+        assert _vector_args(s) == ()
+
+    def test_vector_unknown_returns_empty(self, base_settings: Any) -> None:
+        from cognic_agentos.db.adapters.factory import _vector_args
+
+        s = base_settings.model_copy(update={"vector_driver": "chroma"})
+        assert _vector_args(s) == ()
+
+    def test_secret_vault_args(self, base_settings: Any) -> None:
+        from cognic_agentos.db.adapters.factory import _secret_args
+
+        s = base_settings.model_copy(update={"secret_driver": "vault"})
+        assert _secret_args(s) == ("http://v:8200", "tok", "ns")
+
+    def test_secret_memory_returns_empty(self, base_settings: Any) -> None:
+        from cognic_agentos.db.adapters.factory import _secret_args
+
+        s = base_settings.model_copy(update={"secret_driver": "memory"})
+        assert _secret_args(s) == ()
+
+    def test_secret_unknown_returns_empty(self, base_settings: Any) -> None:
+        from cognic_agentos.db.adapters.factory import _secret_args
+
+        s = base_settings.model_copy(update={"secret_driver": "aws"})
+        assert _secret_args(s) == ()
+
+    def test_embedding_ollama_args(self, base_settings: Any) -> None:
+        from cognic_agentos.db.adapters.factory import _embedding_args
+
+        s = base_settings.model_copy(update={"embed_driver": "ollama"})
+        assert _embedding_args(s) == ("http://o:11434", "qwen3-embedding:8b", 1024)
+
+    def test_embedding_memory_returns_empty(self, base_settings: Any) -> None:
+        from cognic_agentos.db.adapters.factory import _embedding_args
+
+        s = base_settings.model_copy(update={"embed_driver": "memory"})
+        assert _embedding_args(s) == ()
+
+    def test_embedding_unknown_returns_empty(self, base_settings: Any) -> None:
+        from cognic_agentos.db.adapters.factory import _embedding_args
+
+        s = base_settings.model_copy(update={"embed_driver": "openai_compat"})
+        assert _embedding_args(s) == ()
+
+    def test_observability_langfuse_otel_args(self, base_settings: Any) -> None:
+        from cognic_agentos.db.adapters.factory import _observability_args
+
+        s = base_settings.model_copy(update={"obs_driver": "langfuse_otel"})
+        assert _observability_args(s) == ("http://l:3000", "pk", "sk")
+
+    def test_observability_memory_returns_empty(self, base_settings: Any) -> None:
+        from cognic_agentos.db.adapters.factory import _observability_args
+
+        s = base_settings.model_copy(update={"obs_driver": "memory"})
+        assert _observability_args(s) == ()
+
+    def test_observability_unknown_returns_empty(self, base_settings: Any) -> None:
+        from cognic_agentos.db.adapters.factory import _observability_args
+
+        s = base_settings.model_copy(update={"obs_driver": "dynatrace"})
+        assert _observability_args(s) == ()
+
+    async def test_close_all_swallows_per_adapter_errors(self, base_settings: Any) -> None:
+        """``close_all`` uses contextlib.suppress so one adapter raising
+        on close cannot prevent the others from closing. This locks the
+        behaviour against future regressions."""
+
+        from cognic_agentos.db.adapters.factory import Adapters
+
+        class FlakyClose:
+            driver = "flaky"
+            closed = False
+
+            async def connect(self) -> None: ...
+
+            async def close(self) -> None:
+                raise RuntimeError("flaky close")
+
+            async def health_check(self) -> Any:
+                from cognic_agentos.db.adapters.protocols import AdapterHealth
+
+                return AdapterHealth(status="ok", driver=self.driver)
+
+        class CleanClose:
+            driver = "clean"
+            closed = False
+
+            async def connect(self) -> None: ...
+
+            async def close(self) -> None:
+                self.__class__.closed = True
+
+            async def health_check(self) -> Any:
+                from cognic_agentos.db.adapters.protocols import AdapterHealth
+
+                return AdapterHealth(status="ok", driver=self.driver)
+
+        flaky = FlakyClose()
+        clean = CleanClose()
+        adapters = Adapters(
+            relational=clean,  # type: ignore[arg-type]
+            vector=flaky,  # type: ignore[arg-type]
+            secret=clean,  # type: ignore[arg-type]
+            embedding=clean,  # type: ignore[arg-type]
+            observability=clean,  # type: ignore[arg-type]
+        )
+
+        # Must not raise; flaky's close() error is swallowed
+        await adapters.close_all()
+        assert CleanClose.closed is True

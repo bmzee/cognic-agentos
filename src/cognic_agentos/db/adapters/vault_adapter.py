@@ -63,7 +63,14 @@ class VaultAdapter:
     async def write(self, path: str, value: dict[str, Any]) -> None:
         def _write() -> None:
             client = self._ensure_client()
-            client.write(path, **value)
+            # KV v2 paths look like "<mount>/data/<key>" and require a
+            # ``data={...}`` envelope on the request body. KV v1 paths
+            # take the value as raw kwargs. Symmetric with read(): same
+            # detection rule (presence of ``/data/`` segment).
+            if "/data/" in path:
+                client.write(path, data=value)
+            else:
+                client.write(path, **value)
 
         await asyncio.to_thread(_write)
 

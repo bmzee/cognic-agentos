@@ -70,13 +70,27 @@ class TestReadWrite:
             with pytest.raises(KeyError):
                 await a.read("secret/data/missing")
 
-    async def test_write(self) -> None:
+    async def test_write_kv_v2(self) -> None:
+        """KV v2 paths (``<mount>/data/<key>``) require a ``data={...}``
+        envelope. The adapter must wrap; passing **value directly is
+        wrong for KV v2."""
+
         with patch("cognic_agentos.db.adapters.vault_adapter.hvac.Client") as cls:
             mock = MagicMock()
             cls.return_value = mock
             a = VaultAdapter(VAULT_ADDR, token="dev", namespace=None)
             await a.write("secret/data/p/q", {"k": "v"})
-            mock.write.assert_called_once_with("secret/data/p/q", k="v")
+            mock.write.assert_called_once_with("secret/data/p/q", data={"k": "v"})
+
+    async def test_write_kv_v1(self) -> None:
+        """KV v1 paths take raw kwargs; no ``data=`` envelope."""
+
+        with patch("cognic_agentos.db.adapters.vault_adapter.hvac.Client") as cls:
+            mock = MagicMock()
+            cls.return_value = mock
+            a = VaultAdapter(VAULT_ADDR, token="dev", namespace=None)
+            await a.write("secret/p/q", {"k": "v"})
+            mock.write.assert_called_once_with("secret/p/q", k="v")
 
 
 class TestLeaseRevoke:
