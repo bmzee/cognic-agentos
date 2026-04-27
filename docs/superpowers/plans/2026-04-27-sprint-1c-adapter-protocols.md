@@ -2663,8 +2663,8 @@ class TestHealth:
     async def test_health_unreachable_when_host_down(self) -> None:
         """Per BUILD_PLAN Sprint 1C exit criterion (line ~151): stopping
         the Langfuse container makes /readyz return **503** with
-        ``obs: {driver: langfuse_otel, status: unreachable}``. Restart →
-        /readyz flips back to 200.
+        ``observability: {driver: langfuse_otel, status: unreachable}``.
+        Restart → /readyz flips back to 200.
 
         That criterion is binding for Sprint 1C. ``health_check()`` therefore
         returns ``unreachable`` (not ``degraded``) on host outage so the
@@ -2724,9 +2724,11 @@ does not ship. This adapter therefore satisfies the ObservabilityAdapter
 **contract** without claiming a full Langfuse trace integration.
 
 Per BUILD_PLAN Sprint 1C exit criterion: stopping the Langfuse container
-makes /readyz return 503 with ``obs: {driver: langfuse_otel, status:
-unreachable}``. ``health_check()`` returns ``unreachable`` on host outage
-so the /readyz roll-up collapses to 503 exactly as spec'd.
+makes /readyz return 503 with ``observability: {driver: langfuse_otel,
+status: unreachable}``. ``health_check()`` returns ``unreachable`` on host
+outage so the /readyz roll-up collapses to 503 exactly as spec'd. (The
+``observability`` key matches the ``Adapters`` dataclass field +
+``AdapterKind`` literal used throughout the codebase.)
 
 emit/flush remain non-raising — losing individual traces is acceptable
 runtime behaviour; a sustained outage surfaces via the next /readyz probe,

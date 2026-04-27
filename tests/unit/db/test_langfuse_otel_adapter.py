@@ -43,13 +43,14 @@ class TestHealth:
     @respx.mock
     async def test_health_unreachable_when_host_down(self) -> None:
         """Per BUILD_PLAN Sprint 1C exit criterion: stopping the Langfuse
-        container makes /readyz return 503 with ``obs: {driver:
+        container makes /readyz return 503 with ``observability: {driver:
         langfuse_otel, status: unreachable}``. Restart → /readyz flips
         back to 200.
 
         ``health_check()`` therefore returns ``unreachable`` (not
         ``degraded``) on host outage so the /readyz roll-up collapses
-        to 503 as specified."""
+        to 503 as specified. The ``observability`` key matches the
+        ``Adapters`` dataclass field + ``AdapterKind`` literal."""
 
         respx.get(f"{HOST}/api/public/health").mock(side_effect=ConnectError("nope"))
         a = LangfuseOtelAdapter(HOST, public_key="pk", secret_key="sk")
