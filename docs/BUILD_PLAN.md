@@ -23,6 +23,10 @@ Sprint 1 is split into four focused sub-sprints for a clean bootstrap. Each ship
 - **OpenAPI schema exposed** at `/api/v1/openapi.json` (Sprint 1B).
 - **CORS allow-list-only** — no `*` wildcards.
 - **Graceful shutdown** — lifespan hooks close DB pools, Temporal client, Vault leases, Langfuse client (flushes pending events) in dependency-correct order.
+- **Image-size budget** — pre-1C, the single Docker image carries server + observability only and ships under a **120 MiB** ceiling, enforced by a CI job (`image-size-budget`) that fails the build if the kernel image grows past it. When Sprint 1C lands its adapter dependencies, the image is split into:
+  - `cognic-agentos-kernel` — server + observability + harness only; **≤120 MiB**.
+  - `cognic-agentos-default-adapters` — kernel + Postgres / Qdrant / Vault / Ollama / Langfuse-OTel reference adapters; **≤180 MiB** budget.
+  Heavy / enterprise-only adapters (Oracle, Dynatrace, vLLM/SGLang from Sprint 1D) install as opt-in extras or build into a separate `cognic-agentos-enterprise` image variant. The kernel image keeps the bank-grade slim default; ops teams pull the variant they need.
 
 ### Sprint 1A — Bootstrap *(1.5 work-units)*
 

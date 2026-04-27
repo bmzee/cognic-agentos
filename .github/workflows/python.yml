@@ -22,10 +22,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6  # Node 24 — checkout@v4 was Node 20 (deprecated)
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v7  # Node 24 — setup-uv@v5 was Node 20 (deprecated)
         with:
           version: "0.5.29"
           enable-cache: true
@@ -35,7 +35,7 @@ jobs:
         run: echo "version=$(cat .python-version)" >> "$GITHUB_OUTPUT"
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6  # Node 24 — setup-python@v5 was Node 20 (deprecated)
         with:
           python-version: ${{ steps.python-version.outputs.version }}
 
@@ -53,3 +53,44 @@ jobs:
 
       - name: pytest
         run: uv run pytest -v
+
+  image-size-budget:
+    # Pre-Sprint-1C: AgentOS ships a single "kernel" image (server + observability,
+    # no adapter clients). The doctrine ceiling for that image is **120 MiB**.
+    # When Sprint 1C lands its adapter dependencies, this job will be split into
+    # a "kernel" target (still ≤120 MiB) and a "default-adapters" target with
+    # its own ≤180 MiB budget — see docs/BUILD_PLAN.md for the decision when
+    # 1C ships.
+    name: image size budget (kernel ≤120 MiB)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build kernel image
+        run: |
+          docker build \
+            -f infra/agentos/Dockerfile \
+            --build-arg BUILD_SHA=${{ github.sha }} \
+            --build-arg PACKAGE_VERSION=ci \
+            -t cognic-agentos:ci \
+            .
+
+      - name: Enforce kernel image budget (≤120 MiB)
+        run: |
+          set -euo pipefail
+          BUDGET_MIB=120
+          size_bytes=$(docker image inspect cognic-agentos:ci --format='{{.Size}}')
+          size_mib=$(( size_bytes / 1024 / 1024 ))
+          echo "Kernel image size: ${size_mib} MiB (budget ${BUDGET_MIB} MiB)"
+          if [ "${size_mib}" -gt "${BUDGET_MIB}" ]; then
+            echo "::error::Kernel image ${size_mib} MiB exceeds ${BUDGET_MIB} MiB budget. \
+          Either trim deps or split into kernel + default-adapters images per Sprint 1C plan."
+            exit 1
+          fi
+          echo "::notice::Kernel image ${size_mib} MiB is within ${BUDGET_MIB} MiB budget"
