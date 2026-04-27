@@ -84,3 +84,75 @@ def test_readyz_component_metadata_passes_through(monkeypatch) -> None:  # type:
     assert body["ready"] is True
     assert body["components"]["db"]["driver"] == "postgres"
     assert body["components"]["db"]["latency_ms"] == 12
+
+
+# ---------------------------------------------------------------------------
+# Sprint 1C — /readyz with adapter integration
+# ---------------------------------------------------------------------------
+
+
+class TestReadyzWithAdapters:
+    """Lifespan-attached adapters surface in /readyz under per-kind keys.
+
+    Uses the conftest ``memory_registry`` + ``memory_settings`` fixtures so
+    the test does not require a live Postgres / Qdrant / Vault / Ollama /
+    Langfuse process.
+    """
+
+    def test_readyz_reports_per_adapter(self, memory_registry, memory_settings) -> None:  # type: ignore[no-untyped-def]
+        from cognic_agentos.portal.api.app import create_app
+
+        app = create_app(memory_settings, adapter_registry=memory_registry)
+        with TestClient(app) as client:
+            resp = client.get("/api/v1/readyz")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["ready"] is True
+        comps = body["components"]
+        for name in ("relational", "vector", "secret", "embedding", "observability"):
+            assert comps[name]["driver"] == "memory"
+            assert comps[name]["status"] == "ok"
+
+    def test_readyz_503_when_adapter_unreachable(  # type: ignore[no-untyped-def]
+        self, memory_registry, memory_settings, monkeypatch
+    ) -> None:
+        """Force one adapter's health_check to report unreachable; the
+        roll-up must collapse to 503 and the bad component must be
+        labelled in the response."""
+
+        from cognic_agentos.db.adapters.protocols import AdapterHealth
+        from cognic_agentos.portal.api.app import create_app
+
+        app = create_app(memory_settings, adapter_registry=memory_registry)
+        with TestClient(app) as client:
+            adapters = app.state.adapters
+            assert adapters is not None
+
+            async def fake_health() -> AdapterHealth:
+                return AdapterHealth(status="unreachable", driver="memory", detail="forced")
+
+            monkeypatch.setattr(adapters.relational, "health_check", fake_health)
+            resp = client.get("/api/v1/readyz")
+
+        assert resp.status_code == 503
+        body = resp.json()
+        assert body["ready"] is False
+        assert body["components"]["relational"]["status"] == "unreachable"
+        assert body["components"]["relational"]["detail"] == "forced"
+
+    def test_readyz_without_adapter_registry_keeps_sprint_1b_shape(  # type: ignore[no-untyped-def]
+        self, memory_settings
+    ) -> None:
+        """Backward-compat: when adapter_registry is omitted, /readyz still
+        reports only the internal Sprint 1B triplet (no adapter keys)."""
+
+        from cognic_agentos.portal.api.app import create_app
+
+        app = create_app(memory_settings)  # no adapter_registry
+        with TestClient(app) as client:
+            resp = client.get("/api/v1/readyz")
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert set(body["components"].keys()) == {"settings", "logging", "tracing"}
