@@ -20,7 +20,7 @@ Per ADR-009 §"Implementation phases" — Sprint 1 ships protocol definitions + 
 
 **Memory governance is OUT OF SCOPE for Sprint 1C.** Per ADR-009 the Sprint-1C protocol surface is exactly: `RelationalAdapter`, `VectorAdapter`, `SecretAdapter`, `EmbeddingAdapter`, `ObjectStoreAdapter`, `ObservabilityAdapter`. `MemoryAdapter` is an ADR-019 concern that ships with Sprint 11.5 alongside `core/memory/`. The `AdapterRegistry` does not constrain its set of `kind` strings, so Sprint 11.5 can add `"memory"` without a structural migration — but the protocol class itself, the `MemoryRecordId` type, and any `Adapters.memory` slot all wait for Sprint 11.5.
 
-**Production-grade rule:** every adapter's main runtime path is real (asyncpg / qdrant-client / hvac / httpx / langfuse SDK). In-memory variants live ONLY in `memory_adapters.py` for tests; production code paths never fall back to them.
+**Production-grade rule:** every adapter's main runtime path is real (asyncpg / qdrant-client / hvac / httpx / langfuse SDK). In-memory variants live ONLY under `tests/support/adapter_fixtures.py` and are imported only from test modules; production code paths never fall back to them.
 
 ---
 
@@ -580,39 +580,62 @@ logger = logging.getLogger(__name__)
 # `bundled_registry.register(kind, driver_name, cls)` call at import time;
 # `load_bundled_adapters()` triggers those side-effects in a single,
 # audit-able call site.
-_BUNDLED_ADAPTER_MODULES: tuple[str, ...] = (
-    "cognic_agentos.db.adapters.postgres_adapter",
-    "cognic_agentos.db.adapters.qdrant_adapter",
-    "cognic_agentos.db.adapters.vault_adapter",
-    "cognic_agentos.db.adapters.ollama_embedding_adapter",
-    "cognic_agentos.db.adapters.langfuse_otel_adapter",
-)
+#
+# The value side of this map is the **allowlist of top-level packages whose
+# absence is legitimate in the kernel image** (which omits the `adapters`
+# optional-dep group). Any other ImportError — typo inside the module, a
+# transitive dep that the adapter module itself imports unexpectedly, broken
+# package post-install — re-raises so operators see real bugs immediately.
+# Empty frozenset means "this adapter has no kernel-image-acceptable misses,
+# so any ImportError is a bug."
+_BUNDLED_ADAPTER_OPTIONAL_DEPS: dict[str, frozenset[str]] = {
+    "cognic_agentos.db.adapters.postgres_adapter": frozenset({"sqlalchemy", "asyncpg"}),
+    "cognic_agentos.db.adapters.qdrant_adapter": frozenset({"qdrant_client"}),
+    "cognic_agentos.db.adapters.vault_adapter": frozenset({"hvac"}),
+    # Ollama adapter only depends on httpx (always present); no kernel-image misses.
+    "cognic_agentos.db.adapters.ollama_embedding_adapter": frozenset(),
+    "cognic_agentos.db.adapters.langfuse_otel_adapter": frozenset({"langfuse"}),
+}
 
 
 def load_bundled_adapters() -> dict[str, str]:
     """Import each bundled adapter module so its driver registers.
 
-    Per-module ``ImportError`` is caught + logged so the kernel image
-    (which intentionally excludes the ``adapters`` optional-dep group) can
-    safely call this. The configured-but-missing driver case fails later
-    via ``AdapterNotInstalled`` from the factory — the surface that
-    actually matters for the operator.
+    On ``ImportError``, inspect ``.name`` (PEP 451) — if the missing
+    top-level package is on the adapter's optional-deps allowlist, log
+    + skip (kernel image legitimately lacks it). Otherwise re-raise so
+    real bugs are not silently buried.
 
     Returns a diagnostic map ``{module_name: 'loaded' | 'skipped: <reason>'}``.
+    Configured-but-missing drivers later surface via ``AdapterNotInstalled``
+    from the factory.
     """
 
     results: dict[str, str] = {}
-    for fqmn in _BUNDLED_ADAPTER_MODULES:
+    for fqmn in _BUNDLED_ADAPTER_OPTIONAL_DEPS:
         try:
             importlib.import_module(fqmn)
             results[fqmn] = "loaded"
         except ImportError as exc:
-            results[fqmn] = f"skipped: {type(exc).__name__}: {exc}"
-            logger.info(
-                "bundled adapter %s skipped (optional dep absent: %s)",
-                fqmn,
-                exc,
-            )
+            missing_module = (exc.name or "").split(".")[0]
+            allowlist = _BUNDLED_ADAPTER_OPTIONAL_DEPS[fqmn]
+            if missing_module and missing_module in allowlist:
+                results[fqmn] = (
+                    f"skipped: optional dep {missing_module!r} not installed"
+                )
+                logger.info(
+                    "bundled adapter %s skipped: optional dep %r absent (kernel image)",
+                    fqmn, missing_module,
+                )
+            else:
+                # Real bug — typo, broken package, missing internal symbol.
+                # Do not bury it.
+                logger.error(
+                    "bundled adapter %s failed to load with unexpected ImportError "
+                    "(missing module=%r, allowlist=%s): %s",
+                    fqmn, missing_module, sorted(allowlist), exc,
+                )
+                raise
     return results
 
 
@@ -960,15 +983,17 @@ uv run pytest tests/unit/db/test_memory_adapters.py -v
 
 Expected: import error — `cannot import name 'InMemoryRelationalAdapter'`.
 
-- [ ] **Step 4.3: Create `memory_adapters.py`**
+- [ ] **Step 4.3: Create `tests/support/__init__.py` (empty) and `tests/support/adapter_fixtures.py`**
+
+`tests/support/__init__.py` is an empty file. The fixtures themselves go in `tests/support/adapter_fixtures.py`:
 
 ```python
 """In-memory adapter implementations — TEST FIXTURES ONLY.
 
-Per the BUILD_PLAN production-grade rule: these are never wired as default
-drivers in production. They live in the production source tree because
-several test modules import them, but the factory's bundled registry uses
-the real adapters (postgres / qdrant / vault / ollama / langfuse_otel).
+Lives under ``tests/support/`` per AGENTS.md "test-only mocks, fixtures,
+and demo-safe sample data are allowed only under clearly separated
+test/demo paths." Never wired as a default driver; the bundled registry
+uses the real adapters (postgres / qdrant / vault / ollama / langfuse_otel).
 
 The relational variant uses ``aiosqlite`` so SQLAlchemy machinery can
 exercise the adapter contract without a live Postgres. The other variants
@@ -1211,7 +1236,6 @@ driver name in the message — no silent fallback.
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import patch
 
 import pytest
 
@@ -1222,7 +1246,7 @@ from cognic_agentos.db.adapters import (
     bundled_registry,
     protocols as P,
 )
-from cognic_agentos.db.adapters.memory_adapters import (
+from tests.support.adapter_fixtures import (
     InMemoryEmbeddingAdapter,
     InMemoryObservabilityAdapter,
     InMemoryRelationalAdapter,
@@ -1306,9 +1330,12 @@ class TestRegistry:
     def test_load_bundled_adapters_kernel_resilience(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Simulate kernel-image behaviour: one bundled module raises
-        ImportError because its optional dep is absent. The loader must
-        log + skip + continue — never propagate the error."""
+        """Simulate kernel-image behaviour: one bundled module's optional
+        dep is missing. ``ModuleNotFoundError.name`` matches the loader's
+        per-adapter allowlist, so the loader logs + skips and the rest
+        continue. ``ModuleNotFoundError`` is the standard library subclass
+        of ``ImportError`` Python raises when a top-level package is absent,
+        and it carries the missing module's name in ``.name``."""
 
         import importlib as _importlib
 
@@ -1318,17 +1345,50 @@ class TestRegistry:
 
         def fake_import(name: str, package: object = None) -> object:
             if name == "cognic_agentos.db.adapters.qdrant_adapter":
-                raise ImportError("simulated: qdrant-client not installed")
+                # Simulate "qdrant_client not installed" — name= is the PEP-451
+                # attribute the loader inspects against its allowlist.
+                raise ModuleNotFoundError(
+                    "No module named 'qdrant_client'", name="qdrant_client"
+                )
             return real_import(name, package)
 
         monkeypatch.setattr(_importlib, "import_module", fake_import)
 
-        # Must not raise
+        # Allowlisted miss → log + skip, no exception.
         results = load_bundled_adapters()
 
         assert "skipped" in results["cognic_agentos.db.adapters.qdrant_adapter"]
+        assert "qdrant_client" in results["cognic_agentos.db.adapters.qdrant_adapter"]
         # Other modules still load
         assert results["cognic_agentos.db.adapters.postgres_adapter"] == "loaded"
+
+    def test_load_bundled_adapters_reraises_unexpected_import_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When the missing module is NOT on the adapter's allowlist (e.g.
+        a typo bug inside the adapter's own code or an unexpected transitive
+        miss), the loader must re-raise so the bug is visible — never bury
+        it as 'skipped'."""
+
+        import importlib as _importlib
+
+        from cognic_agentos.db.adapters import load_bundled_adapters
+
+        real_import = _importlib.import_module
+
+        def fake_import(name: str, package: object = None) -> object:
+            if name == "cognic_agentos.db.adapters.qdrant_adapter":
+                # qdrant_client IS allowlisted; "definitely_a_typo" is NOT.
+                raise ModuleNotFoundError(
+                    "No module named 'definitely_a_typo'",
+                    name="definitely_a_typo",
+                )
+            return real_import(name, package)
+
+        monkeypatch.setattr(_importlib, "import_module", fake_import)
+
+        with pytest.raises(ModuleNotFoundError, match="definitely_a_typo"):
+            load_bundled_adapters()
 
 
 class TestFactory:
@@ -1696,8 +1756,6 @@ Per BUILD_PLAN exit criterion this sprint covers `health_check` + lifecycle
 only; full integration tests come with Sprint 1C compose stack."""
 
 from __future__ import annotations
-
-import pytest
 
 from cognic_agentos.db.adapters import bundled_registry, protocols as P
 from cognic_agentos.db.adapters.postgres_adapter import PostgresAdapter
@@ -2392,7 +2450,6 @@ Real adapter via httpx against Ollama's `/api/embed`. Tests mock via respx.
 
 from __future__ import annotations
 
-import pytest
 import respx
 from httpx import ConnectError, Response
 
@@ -2554,7 +2611,6 @@ Combines Langfuse v3 client + OpenTelemetry. Tests assert graceful degrade when 
 
 from __future__ import annotations
 
-import pytest
 import respx
 from httpx import ConnectError, Response
 
@@ -2806,7 +2862,7 @@ class TestReadyzWithAdapters:
     @pytest.fixture
     def memory_app(self, monkeypatch: pytest.MonkeyPatch) -> FastAPI:
         from cognic_agentos.db.adapters import AdapterRegistry
-        from cognic_agentos.db.adapters.memory_adapters import (
+        from tests.support.adapter_fixtures import (
             InMemoryEmbeddingAdapter,
             InMemoryObservabilityAdapter,
             InMemoryRelationalAdapter,
@@ -3076,7 +3132,7 @@ import pytest
 
 from cognic_agentos.core.config import Settings, build_settings_without_env_file
 from cognic_agentos.db.adapters import AdapterRegistry
-from cognic_agentos.db.adapters.memory_adapters import (
+from tests.support.adapter_fixtures import (
     InMemoryEmbeddingAdapter,
     InMemoryObservabilityAdapter,
     InMemoryRelationalAdapter,
@@ -3651,7 +3707,7 @@ Do NOT push, merge, or open a PR. Per the per-action authorization rule and AGEN
 - db/adapters/vault_adapter.py (hvac, per ADR-009) → Task 8
 - db/adapters/ollama_embedding_adapter.py → Task 9
 - db/adapters/langfuse_otel_adapter.py (`unreachable` on host outage so /readyz collapses to 503 per BUILD_PLAN exit) → Task 10
-- db/adapters/memory_adapters.py (test fixtures only) → Task 4
+- tests/support/adapter_fixtures.py (test fixtures only — relocated out of src/ per AGENTS.md) → Task 4
 - db/adapters/factory.py → Task 5
 - db/adapters/registry.py → Task 5
 - infra/dev/docker-compose.yml extension (7 services, with image-version verification + profile-gating fallback) → Task 13
@@ -3685,6 +3741,13 @@ Round 2 (eight implementation traps):
 - 6: `PostgresAdapter.run_migrations()` now raises `NotImplementedError` citing Sprint 2 + ADR-009 §"Migration policy" (was a silent no-op — violated CLAUDE.md production-grade rule)
 - 7: `QdrantAdapter.search()` and `InMemoryVectorAdapter.search()` raise `NotImplementedError` on non-None `filter` (was silently dropping the argument). Filter translation deferred to Sprint 11.5 + ADR-017 governance work. Negative-path test added.
 - 8: `LangfuseOtelAdapter` module docstring + plan-header Tech-Stack line narrowed to honest Sprint 1C scope (OTel-bridged sink + HTTP health probe). Full Langfuse SDK trace lifecycle deferred to Sprint 2/3 alongside `core/decision_history` + LLM gateway.
+
+Round 3 (five lint / hygiene / safety hardening fixes):
+- a: Three stale `from cognic_agentos.db.adapters.memory_adapters import …` import sites (test_adapter_factory.py, test_readyz.py memory_app fixture, conftest.py) updated to `from tests.support.adapter_fixtures import …`. Round-2 fixture relocation is now consistent across all consumers.
+- b: Task 4 step heading + module docstring updated — "Create `memory_adapters.py`" → "Create `tests/support/__init__.py` (empty) and `tests/support/adapter_fixtures.py`". Production-grade-rule paragraph in Context updated to reference the test path.
+- c: Removed unused `import pytest` from test_postgres_adapter, test_ollama_embedding_adapter, test_langfuse_otel_adapter snippets (no `pytest.*` usage in those blocks → ruff F401). Removed unused `from unittest.mock import patch` from test_adapter_factory.py snippet (the new kernel-resilience tests use the built-in `monkeypatch` fixture, not unittest.mock).
+- d: `load_bundled_adapters()` narrowed `ImportError` handling: introduced `_BUNDLED_ADAPTER_OPTIONAL_DEPS` map of `{module → allowlisted top-level packages}`, inspect `ImportError.name` (PEP 451) to decide skip-or-reraise. Allowlisted misses skip silently with a log; anything else (typos in adapter modules, broken transitive deps, missing internal symbols) re-raises so real bugs surface. Empty allowlist for the Ollama adapter (httpx is always present) means any ImportError from that module is a bug.
+- e: Added `test_load_bundled_adapters_reraises_unexpected_import_error` to verify the narrowed handling propagates non-allowlisted ImportError. Updated existing `test_load_bundled_adapters_kernel_resilience` to use `ModuleNotFoundError(..., name=...)` so the loader's `.name` introspection matches the simulated path.
 
 ---
 
