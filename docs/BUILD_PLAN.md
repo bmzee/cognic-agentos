@@ -31,7 +31,7 @@ Sprint 1 is split into four focused sub-sprints for a clean bootstrap. Each ship
 **Deliverables:**
 
 - `pyproject.toml` — distribution `cognic-agentos` v0.0.1; minimum-version declarations targeting April-2026 current releases (full dep list in Sprint 1B/1C as those subsystems land):
-  - Web: `fastapi>=0.116`, `uvicorn[standard]>=0.35`, `httpx>=0.29`
+  - Web: `fastapi>=0.116`, `uvicorn[standard]>=0.35`, `httpx>=0.28` *(floor was 0.29 in the original draft; lowered to match the latest stable on PyPI at the time of Sprint 1A — 0.29 was pre-release-only. Bump back when upstream ships 0.29 stable.)*
   - Settings: `pydantic>=2.11`, `pydantic-settings>=2.8`, `pyyaml>=6.0.2`
   - Dev: `pytest>=8.4`, `pytest-asyncio>=1.0`, `pytest-cov>=6.1`, `ruff>=0.9`, `mypy>=1.14`, `types-PyYAML`
 - `uv.lock` — committed; CI uses `uv sync` (consumes lock; does NOT resolve latest)
@@ -59,7 +59,7 @@ Sprint 1 is split into four focused sub-sprints for a clean bootstrap. Each ship
 - `uv run pytest -v` is green (3 tests: architecture-discipline + healthz + version)
 - `uv run ruff check .` and `uv run ruff format --check .` clean
 - `docker build -f infra/agentos/Dockerfile .` succeeds in ≤90s; image ≤120 MB (smaller without observability/adapter deps)
-- `git init` + initial commit on `main`; `git log --oneline` shows one commit
+- `git init` on `main`; doctrine baseline + Sprint 1A scaffold commits land; Sprint 1A merges into `main` via a feature branch (one merge bubble per sprint). Exact commit count is not pinned — the original "one commit" wording was a pre-baseline simplification.
 - Sanity check: deliberately add `from cognic_agent_test import X` → architecture test fails; revert.
 
 ### Sprint 1B — Observability stack *(1.5 work-units)*
