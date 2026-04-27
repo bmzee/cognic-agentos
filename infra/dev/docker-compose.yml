@@ -1,0 +1,29 @@
+# Cognic AgentOS — local development compose stack.
+#
+# Sprint 1A ships only the Postgres placeholder so the file exists for 1C/1D
+# to extend with Qdrant, Vault, Ollama, Langfuse, Dynatrace, Oracle, vLLM.
+# AgentOS itself runs on the host via `uv run uvicorn ...` during 1A; the
+# container runtime joins this network in 1C once adapter bootstrap is in.
+
+name: cognic-agentos-dev
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: cognic-agentos-postgres
+    environment:
+      POSTGRES_DB: cognic_agentos
+      POSTGRES_USER: cognic
+      POSTGRES_PASSWORD: cognic_dev_only  # NEVER used outside dev
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cognic -d cognic_agentos"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  postgres-data:
