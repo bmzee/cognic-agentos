@@ -147,6 +147,68 @@ def test_actual_request_emits_json_access_line_with_request_id_and_trace_id() ->
         )
         assert isinstance(access["trace_id"], str)
         assert len(access["trace_id"]) == 32, "trace id should be 32-hex chars"
+        # Query-string-free request: signals must say so.
+        assert access["http_has_query"] is False
+        assert access["http_query_param_count"] == 0
+    finally:
+        from cognic_agentos.observability.middleware import ACCESS_LOGGER_NAME
+
+        logging.getLogger(ACCESS_LOGGER_NAME).removeHandler(handler)
+
+
+def test_access_log_never_records_query_string_values_or_names() -> None:
+    """Bank-grade: query parameters can carry tokens, account numbers, PII,
+    regulator IDs. The access log must NEVER log values or names — only
+    the boolean ``http_has_query`` and the integer ``http_query_param_count``.
+
+    Sends a request with deliberately sensitive-looking parameter names AND
+    values; asserts none of them appear anywhere in the captured log line
+    (full-string substring search across the serialized JSON).
+    """
+
+    from fastapi.testclient import TestClient
+
+    from cognic_agentos.portal.api.app import create_app
+
+    buffer, handler = _capture_access_logs()
+    try:
+        app = create_app(Settings(runtime_profile="prod", log_format="json"))
+        client = TestClient(app)
+        response = client.get(
+            "/api/v1/healthz?token=BEARER-TOPSECRET-9999&account=PK36ABL0000123456789&ssn=000-00-1234"
+        )
+        assert response.status_code == 200
+
+        lines = [line for line in buffer.getvalue().splitlines() if line.strip()]
+        assert lines, "no access log line emitted"
+        raw_line = lines[-1]
+        access = json.loads(raw_line)
+
+        # Signal-only fields populated correctly.
+        assert access["http_has_query"] is True
+        assert access["http_query_param_count"] == 3
+
+        # The legacy http_query field MUST be gone.
+        assert "http_query" not in access, (
+            "http_query field leaks raw query string — must be removed in favour of "
+            "http_has_query + http_query_param_count"
+        )
+
+        # And critically: no value or name from the query string may appear
+        # anywhere in the serialized log line. This is the substring-style
+        # check that catches accidental reintroduction via any future field.
+        forbidden = (
+            "BEARER-TOPSECRET-9999",
+            "PK36ABL0000123456789",
+            "000-00-1234",
+            "token",
+            "account",
+            "ssn",
+        )
+        for needle in forbidden:
+            assert needle not in raw_line, (
+                f"sensitive query content {needle!r} leaked into access log: {raw_line!r}"
+            )
     finally:
         from cognic_agentos.observability.middleware import ACCESS_LOGGER_NAME
 

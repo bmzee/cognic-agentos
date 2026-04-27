@@ -118,6 +118,49 @@ def test_cors_allowlist_accepts_explicit_origins() -> None:
     ]
 
 
+def test_cors_allowlist_env_accepts_comma_separated_string(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Most operator-friendly env shape: comma-separated origins."""
+
+    monkeypatch.setenv(
+        "COGNIC_CORS_ALLOWED_ORIGINS",
+        "https://a.example, https://b.example , https://c.example",
+    )
+    settings = Settings()
+    assert settings.cors_allowed_origins == [
+        "https://a.example",
+        "https://b.example",
+        "https://c.example",
+    ]
+
+
+def test_cors_allowlist_env_accepts_empty_string(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Empty value (e.g. ``COGNIC_CORS_ALLOWED_ORIGINS=``) → empty list, no startup error."""
+
+    monkeypatch.setenv("COGNIC_CORS_ALLOWED_ORIGINS", "")
+    settings = Settings()
+    assert settings.cors_allowed_origins == []
+
+
+def test_cors_allowlist_env_accepts_json_array_string(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("COGNIC_CORS_ALLOWED_ORIGINS", '["https://a.example","https://b.example"]')
+    settings = Settings()
+    assert settings.cors_allowed_origins == ["https://a.example", "https://b.example"]
+
+
+def test_cors_allowlist_env_rejects_wildcard_in_comma_separated(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The wildcard refusal must still fire after the comma-split normalisation."""
+
+    monkeypatch.setenv("COGNIC_CORS_ALLOWED_ORIGINS", "https://a.example, *")
+    with pytest.raises(ValueError, match="CORS allow-list rejects"):
+        Settings()
+
+
 def test_observability_defaults_match_phase1_principles() -> None:
     settings = Settings()
     assert settings.log_format == "json"  # JSON from request 1

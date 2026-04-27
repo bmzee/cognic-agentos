@@ -107,11 +107,22 @@ class StructuredAccessLogMiddleware:
         start = time.perf_counter()
         method = str(scope.get("method", "?"))
         path = str(scope.get("path", "?"))
+        # SECURITY: do NOT log raw query strings. Banking APIs may receive
+        # tokens, account numbers, dates of birth, regulator IDs, and other
+        # PII via query parameters; emitting those into the SIEM/audit
+        # pipeline is a data-leak class on its own. We log only two safe
+        # signals: a boolean and a count. Operators who want richer query
+        # diagnostics can attach their own filtered handler — the names
+        # and values stay out of the canonical access line.
         query_bytes = scope.get("query_string", b"")
         if isinstance(query_bytes, bytes | bytearray):
-            query_string = query_bytes.decode("latin-1")
+            query_param_count = (
+                0 if not query_bytes else query_bytes.decode("latin-1").count("&") + 1
+            )
+            has_query = bool(query_bytes)
         else:
-            query_string = ""
+            query_param_count = 0
+            has_query = False
         client = scope.get("client")
         client_addr = client[0] if isinstance(client, list | tuple) and client else "?"
         access_logger = self._logger
@@ -127,7 +138,8 @@ class StructuredAccessLogMiddleware:
                     extra={
                         "http_method": method,
                         "http_path": path,
-                        "http_query": query_string,
+                        "http_has_query": has_query,
+                        "http_query_param_count": query_param_count,
                         "http_status_code": int(message.get("status", 0)),
                         "duration_ms": round(duration_ms, 3),
                         "client_addr": client_addr,
