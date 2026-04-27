@@ -129,7 +129,7 @@ Sprint 1 is split into four focused sub-sprints for a clean bootstrap. Each ship
 - `db/adapters/qdrant_adapter.py` — `VectorAdapter` via qdrant-client
 - `db/adapters/vault_adapter.py` — `SecretAdapter` via hvac
 - `db/adapters/ollama_embedding_adapter.py` — `EmbeddingAdapter` over Ollama HTTP (dev only — production uses Sprint 1D's OpenAI-compat adapter)
-- `db/adapters/langfuse_otel_adapter.py` — `ObservabilityAdapter` (Langfuse v3 + OTel)
+- `db/adapters/langfuse_otel_adapter.py` — `ObservabilityAdapter` (Langfuse + OTel). HTTP shape compatible with both Langfuse v2 and v3. Sprint 1C dev compose pins `langfuse/langfuse:2` (single-container); v3 needs Clickhouse + Redis + S3 + worker, deferred to a future overlay.
 - `db/adapters/memory_adapters.py` — in-memory implementations for tests (Postgres+SQLite-fallback for relational; in-memory dict for others)
 - `db/adapters/factory.py` — `build_adapters(settings) -> Adapters` reads drivers, looks up bundled adapter; fails fast on unknown
 - `db/adapters/registry.py` — `AdapterRegistry`; bundled auto-register; plugin-pack registration wired in Sprint 4

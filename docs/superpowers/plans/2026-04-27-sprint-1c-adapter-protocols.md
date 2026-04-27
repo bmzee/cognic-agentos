@@ -49,7 +49,7 @@ Per ADR-009 §"Implementation phases" — Sprint 1 ships protocol definitions + 
 | `src/cognic_agentos/db/adapters/qdrant_adapter.py` | `QdrantAdapter` via `AsyncQdrantClient` |
 | `src/cognic_agentos/db/adapters/vault_adapter.py` | `VaultAdapter` via hvac (sync client wrapped with `asyncio.to_thread`) |
 | `src/cognic_agentos/db/adapters/ollama_embedding_adapter.py` | `OllamaEmbeddingAdapter` via httpx async |
-| `src/cognic_agentos/db/adapters/langfuse_otel_adapter.py` | `LangfuseOtelAdapter` (Langfuse v3 + OTel emit/flush) |
+| `src/cognic_agentos/db/adapters/langfuse_otel_adapter.py` | `LangfuseOtelAdapter` — OTel-bridged emit + Langfuse HTTP health probe (v2/v3-compatible shape; dev compose pins v2). |
 | `infra/litellm/config.yaml` | tier-aliased model routing presets |
 | `tests/unit/db/__init__.py` | package init |
 | `tests/unit/db/test_adapter_protocols.py` | structural conformance for the six ADR-009 protocols + ObjectStore declared-only |
@@ -825,7 +825,7 @@ class ObjectStoreAdapter(Protocol):
 
 @runtime_checkable
 class ObservabilityAdapter(Protocol):
-    """Observability sink — Sprint 1C ships langfuse_otel (Langfuse v3 + OTel)."""
+    """Observability sink — Sprint 1C ships langfuse_otel (OTel-bridged + Langfuse HTTP health probe; dev compose pins Langfuse v2)."""
 
     async def emit_trace(self, name: str, attributes: dict[str, Any]) -> None: ...
     async def emit_metric(self, name: str, value: float, attributes: dict[str, Any]) -> None: ...
@@ -2616,7 +2616,7 @@ git commit -m "feat(sprint-1c): OllamaEmbeddingAdapter (dev embedding default)"
 
 ### Task 10: Langfuse-OTel observability adapter
 
-Combines Langfuse v3 client + OpenTelemetry. Tests assert graceful degrade when Langfuse host is unreachable (per BUILD_PLAN exit criterion).
+OTel-bridged observability sink with a Langfuse HTTP health probe (v2/v3-compatible shape; dev compose pins v2). Tests assert graceful degrade when Langfuse host is unreachable (per BUILD_PLAN exit criterion).
 
 **Files:**
 - Create: `src/cognic_agentos/db/adapters/langfuse_otel_adapter.py`
@@ -3713,7 +3713,7 @@ Hand the user a concise status:
 - N commits, all CI gates locally green
 - Suite size grew from 63 → ~95 (≈18 new tests per BUILD_PLAN exit + ~14 protocol/factory/readyz/conftest assertions)
 - Both Docker images measured locally; sizes vs budgets
-- Compose stack: all 7 services up; postgres/redis/vault/temporal report `healthy` via internal probes; qdrant/litellm/langfuse have no internal healthchecks (distroless / image lacks wget+curl) — verified externally via host-side `curl`. Documented in compose comments.
+- Compose stack: all 7 services up. Internal healthchecks: postgres / redis / vault / temporal → `healthy`. No internal healthcheck (distroless or wget-less image): qdrant / langfuse — verified externally via host-side `curl http://localhost:.../readyz` or `/api/public/health` returning 200. **LiteLLM is a non-readiness-gated dev sidecar in Sprint 1C** — its own `/health` requires DB + master-key auth and returns 400 without a configured `DATABASE_URL`; LiteLLM gets DB-configured + readiness-gated when Sprint 3 wires the LLM gateway. Operator-side liveness probe meanwhile is `curl http://localhost:4000/health/liveliness` (no auth, no DB).
 - Negative-path verifications: AdapterNotInstalled on `mssql`; Langfuse-down → /readyz 503 with `obs.status: unreachable`; Postgres-down → /readyz 503
 
 Do NOT push, merge, or open a PR. Per the per-action authorization rule and AGENTS.md sprint discipline, the user holds those decisions explicitly.

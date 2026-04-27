@@ -84,12 +84,20 @@ services:
       LITELLM_MASTER_KEY: dev-only-litellm
     ports:
       - "${COGNIC_LITELLM_PORT:-4000}:4000"
-    # NOTE: LiteLLM /health requires master-key auth and the slim image
-    # doesn't reliably ship wget/curl. Container-internal healthcheck is
-    # not viable as a Sprint-1C dev convenience. Operators verify
-    # externally with `curl -H "Authorization: Bearer $LITELLM_MASTER_KEY"
-    # http://localhost:4000/health`. Nothing in this stack `depends_on`
-    # litellm with a service_healthy condition.
+    # LITELLM = NON-READINESS-GATED DEV SIDECAR (Sprint 1C scope).
+    # The container runs and serves the LLM-routing API, but its own
+    # /health endpoint returns 400 ("No connected db") without a
+    # configured DATABASE_URL — LiteLLM uses the DB for usage tracking
+    # and master-key audit, neither of which Sprint 1C exercises. The
+    # AgentOS LLM gateway is wired in Sprint 3, at which point LiteLLM
+    # gets DB-configured + readiness-gated. Until then:
+    #   * No internal healthcheck (slim image lacks wget/curl anyway).
+    #   * Nothing in this stack `depends_on` litellm with a
+    #     service_healthy condition.
+    #   * Operator-side liveness probe (no auth, no DB):
+    #         curl http://localhost:4000/health/liveliness
+    #     /health/liveliness returns 200 once the process is up; the
+    #     full /health endpoint with DB checks is Sprint 3 territory.
 
   langfuse:
     # Pin: Langfuse v2 (single-container, Postgres-only). Langfuse v3

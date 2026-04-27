@@ -63,7 +63,7 @@ Ship in `cognic_agentos.db.adapters.{name}.py`:
 - `s3_adapter.py` — ObjectStoreAdapter (boto3 / MinIO-compatible) — added Sprint 8 alongside evidence-pack export
 
 **Observability:**
-- `langfuse_otel_adapter.py` — ObservabilityAdapter combining Langfuse v3 + OpenTelemetry (default — Langfuse for LLM-trace UI, OTel for distributed tracing)
+- `langfuse_otel_adapter.py` — ObservabilityAdapter combining Langfuse + OpenTelemetry (default — Langfuse for LLM-trace UI, OTel for distributed tracing). The adapter speaks the Langfuse v2/v3-compatible HTTP shape (`/api/public/health` + `/api/public/ingestion`); the bundled dev compose pins `langfuse/langfuse:2` (single-container, Postgres-only). Banks that need v3 features (Clickhouse-backed traces, S3 blob storage) ship a v3-compatible compose overlay alongside the dev stack — see Sprint 1C plan note. Sprint 2/3 wires the full Langfuse SDK trace lifecycle alongside `core/decision_history` + the LLM gateway.
 - `dynatrace_adapter.py` — ObservabilityAdapter for Dynatrace tenants. Two integration paths supported: (a) OTLP export to Dynatrace's ingest endpoint (no Dynatrace SDK needed; uses native OTel pipe), (b) Dynatrace Metric Ingest API for custom Cognic governance metrics with Dynatrace-specific dimensions. Authentication via `DYNATRACE_API_TOKEN` Vault path.
 
 ### LLM serving — LiteLLM gateway handles routing (no separate "LLM adapter")
