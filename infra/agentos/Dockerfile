@@ -84,5 +84,6 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 url='http://127.0.0.1:'+os.environ.get('COGNIC_PORT','8000')+os.environ.get('COGNIC_API_PREFIX','/api/v1')+'/healthz'; \
 sys.exit(0 if urllib.request.urlopen(url, timeout=3).status==200 else 1)"
 
-CMD ["uvicorn", "cognic_agentos.portal.api.app:create_app", "--factory", \
-     "--host", "0.0.0.0", "--port", "8000"]
+# Shell-form CMD so $COGNIC_HOST / $COGNIC_PORT are interpolated at container
+# start. `exec` makes uvicorn PID 1 so SIGTERM/SIGKILL flow correctly.
+CMD ["sh", "-c", "exec uvicorn cognic_agentos.portal.api.app:create_app --factory --host \"$COGNIC_HOST\" --port \"$COGNIC_PORT\""]

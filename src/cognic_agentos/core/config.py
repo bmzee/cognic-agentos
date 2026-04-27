@@ -14,6 +14,7 @@ adapter, and gateway groups under additional ``Settings`` subclasses or fields.
 
 from __future__ import annotations
 
+import os
 import platform
 import sys
 from datetime import UTC, datetime
@@ -27,19 +28,26 @@ from cognic_agentos import __version__
 
 RuntimeProfile = Literal["dev", "stage", "prod"]
 
+# Sentinel used by ``get_settings()`` to suppress the ``.env`` lookup in the
+# ``prod`` profile. Pydantic-Settings treats ``_env_file=None`` at construction
+# time as "ignore the class-level ``env_file`` setting".
+_PROD_PROFILE_ENV_VAR = "COGNIC_RUNTIME_PROFILE"
+
 
 class Settings(BaseSettings):
     """Top-level settings container.
 
-    Loaded from environment with the ``COGNIC_`` prefix or from a local
-    ``.env`` file in dev. Production deployments pass values via the
-    container runtime; ``.env`` is not read in ``prod`` profile (see
-    ``model_config`` ordering below — env always wins over ``.env``).
+    Loaded from environment variables with the ``COGNIC_`` prefix. In ``dev``
+    and ``stage`` profiles a local ``.env`` file is also read (env vars always
+    win over ``.env``). In ``prod`` profile ``.env`` is **not** read at all —
+    operators must pass every value via the container runtime. The profile is
+    detected from the environment in ``get_settings()`` *before* this class is
+    instantiated, and the suppression is applied via ``_env_file=None``.
     """
 
     model_config = SettingsConfigDict(
         env_prefix="COGNIC_",
-        env_file=".env",
+        env_file=".env",  # overridden to None in prod by get_settings()
         env_file_encoding="utf-8",
         extra="ignore",
         case_sensitive=False,
@@ -90,7 +98,11 @@ def get_settings() -> Settings:
     """Return the process-wide settings instance.
 
     Cached so that every code path observes a single Settings object;
-    tests reset the cache via ``get_settings.cache_clear()``.
+    tests reset the cache via ``get_settings.cache_clear()``. In ``prod``
+    profile the ``.env`` file is suppressed (per the ``Settings``
+    docstring) so an accidental file in CWD cannot influence runtime.
     """
 
+    if os.environ.get(_PROD_PROFILE_ENV_VAR, "dev").lower() == "prod":
+        return Settings(_env_file=None)
     return Settings()
