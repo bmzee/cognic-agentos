@@ -38,11 +38,11 @@ services:
       - "${COGNIC_QDRANT_GRPC_PORT:-6334}:6334"
     volumes:
       - qdrant-data:/qdrant/storage
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:6333/readyz || exit 1"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
+    # NOTE: Qdrant ships as a distroless image — no shell, no wget/curl/nc.
+    # Container-internal healthcheck is therefore not feasible. Operators
+    # verify externally: `curl http://localhost:6333/readyz`. The
+    # AgentOS-side QdrantAdapter.health_check() does the in-process probe
+    # for /readyz roll-up.
 
   redis:
     image: redis:7-alpine
@@ -63,10 +63,13 @@ services:
     environment:
       VAULT_DEV_ROOT_TOKEN_ID: dev-only-root
       VAULT_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+      VAULT_ADDR: http://127.0.0.1:8200
     ports:
       - "${COGNIC_VAULT_PORT:-8200}:8200"
+    # `vault status` ships in the image; exits 0 when unsealed
+    # (dev-mode auto-unseals on boot).
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:8200/v1/sys/health || exit 1"]
+      test: ["CMD", "vault", "status"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -81,14 +84,24 @@ services:
       LITELLM_MASTER_KEY: dev-only-litellm
     ports:
       - "${COGNIC_LITELLM_PORT:-4000}:4000"
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:4000/health || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+    # NOTE: LiteLLM /health requires master-key auth and the slim image
+    # doesn't reliably ship wget/curl. Container-internal healthcheck is
+    # not viable as a Sprint-1C dev convenience. Operators verify
+    # externally with `curl -H "Authorization: Bearer $LITELLM_MASTER_KEY"
+    # http://localhost:4000/health`. Nothing in this stack `depends_on`
+    # litellm with a service_healthy condition.
 
   langfuse:
-    image: langfuse/langfuse:3
+    # Pin: Langfuse v2 (single-container, Postgres-only). Langfuse v3
+    # split its analytics store and requires Clickhouse + Redis + S3 +
+    # a separate `langfuse-worker` container — a 4-service expansion
+    # that's out of scope for the Sprint 1C dev compose. The
+    # AgentOS-side LangfuseOtelAdapter only does an HTTP health probe
+    # against `/api/public/health` (present on both v2 and v3), so the
+    # adapter contract is unaffected by this pin. When a bank deployment
+    # genuinely needs v3 (S3 blob storage / Clickhouse-backed traces),
+    # they swap to a v3-compatible compose overlay.
+    image: langfuse/langfuse:2
     container_name: cognic-agentos-langfuse
     depends_on:
       postgres:
@@ -101,11 +114,10 @@ services:
       TELEMETRY_ENABLED: "false"
     ports:
       - "${COGNIC_LANGFUSE_PORT:-3000}:3000"
-    healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/public/health || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
+    # NOTE: Langfuse v2 image is node-based (no wget/curl in the
+    # container). Operators verify externally:
+    # `curl http://localhost:3000/api/public/health`. The adapter-side
+    # health probe lives in LangfuseOtelAdapter.health_check().
 
   temporal:
     image: temporalio/auto-setup:1.25
@@ -121,8 +133,11 @@ services:
       POSTGRES_SEEDS: postgres
     ports:
       - "${COGNIC_TEMPORAL_PORT:-7233}:7233"
+    # tctl defaults to 127.0.0.1 but Temporal binds on the container's
+    # external interface, not loopback. Use the service-name address so
+    # the probe goes through Docker DNS to the right interface.
     healthcheck:
-      test: ["CMD-SHELL", "tctl --ad 127.0.0.1:7233 cluster health || exit 1"]
+      test: ["CMD-SHELL", "tctl --address temporal:7233 cluster health || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 12
