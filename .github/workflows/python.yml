@@ -48,5 +48,8 @@ jobs:
       - name: ruff format --check
         run: uv run ruff format --check .
 
+      - name: mypy (strict)
+        run: uv run mypy src tests
+
       - name: pytest
         run: uv run pytest -v
