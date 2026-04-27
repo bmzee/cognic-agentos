@@ -91,3 +91,36 @@ def test_build_settings_without_env_file_helper_skips_dotenv(
     settings = build_settings_without_env_file()
     assert isinstance(settings, Settings)
     assert settings.port == 8000
+
+
+# --- Sprint 1B observability settings -------------------------------------
+
+
+def test_cors_allowlist_rejects_wildcard() -> None:
+    """Phase-1 'CORS allow-list-only' principle: refuse ``*`` outright."""
+
+    with pytest.raises(ValueError, match="CORS allow-list rejects"):
+        Settings(cors_allowed_origins=["*"])
+
+
+def test_cors_allowlist_rejects_wildcard_amongst_real_origins() -> None:
+    with pytest.raises(ValueError, match="CORS allow-list rejects"):
+        Settings(cors_allowed_origins=["https://bank.example", "*"])
+
+
+def test_cors_allowlist_accepts_explicit_origins() -> None:
+    settings = Settings(
+        cors_allowed_origins=["https://bank.example", "https://reviewer.bank.example"]
+    )
+    assert settings.cors_allowed_origins == [
+        "https://bank.example",
+        "https://reviewer.bank.example",
+    ]
+
+
+def test_observability_defaults_match_phase1_principles() -> None:
+    settings = Settings()
+    assert settings.log_format == "json"  # JSON from request 1
+    assert settings.cors_allowed_origins == []  # default-deny
+    assert settings.otel_exporter_endpoint is None  # set in stage/prod overlay
+    assert settings.prometheus_metrics_path == "/metrics"
