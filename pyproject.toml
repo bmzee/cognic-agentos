@@ -133,6 +133,14 @@ check_untyped_defs = true
 module = ["tests.*"]
 disallow_untyped_defs = false
 
+# Adapter third-party libs that don't ship type stubs (Sprint 1C).
+# Adding ``types-hvac`` etc. to dev deps is the alternative; ignoring
+# missing imports keeps the dep set lean since hvac's own surface is
+# small and exercised end-to-end by adapter tests.
+[[tool.mypy.overrides]]
+module = ["hvac.*"]
+ignore_missing_imports = true
+
 [tool.coverage.run]
 source = ["src/cognic_agentos"]
 branch = true
