@@ -1,0 +1,51 @@
+# Cognic AgentOS — LiteLLM router presets (Sprint 1C).
+#
+# Production banks set COGNIC_TIER1_MODEL / COGNIC_TIER2_MODEL to one of
+# the alias names below. Per ADR-009 §"LLM serving" the alias resolves
+# through LiteLLM to the bank's actual inference endpoint. AgentOS code
+# never references upstream model checkpoints directly — only aliases.
+
+model_list:
+  # --- Dev: Ollama local --------------------------------------------------
+  - model_name: cognic-tier1-dev
+    litellm_params:
+      model: ollama/qwen3:8b
+      api_base: ${OLLAMA_BASE_URL:-http://ollama:11434}
+
+  - model_name: cognic-tier2-dev
+    litellm_params:
+      model: ollama/qwen3:32b
+      api_base: ${OLLAMA_BASE_URL:-http://ollama:11434}
+
+  # --- Production: vLLM (Sprint 1D wires the OpenAI-compat adapter) -------
+  - model_name: cognic-tier1-vllm
+    litellm_params:
+      model: openai/${COGNIC_TIER1_VLLM_MODEL}
+      api_base: ${VLLM_BASE_URL}
+      api_key: ${VLLM_API_KEY}
+
+  - model_name: cognic-tier2-vllm
+    litellm_params:
+      model: openai/${COGNIC_TIER2_VLLM_MODEL}
+      api_base: ${VLLM_BASE_URL}
+      api_key: ${VLLM_API_KEY}
+
+  # --- Production: SGLang -------------------------------------------------
+  - model_name: cognic-tier1-sglang
+    litellm_params:
+      model: openai/${COGNIC_TIER1_SGLANG_MODEL}
+      api_base: ${SGLANG_BASE_URL}
+      api_key: ${SGLANG_API_KEY}
+
+  - model_name: cognic-tier2-sglang
+    litellm_params:
+      model: openai/${COGNIC_TIER2_SGLANG_MODEL}
+      api_base: ${SGLANG_BASE_URL}
+      api_key: ${SGLANG_API_KEY}
+
+litellm_settings:
+  drop_params: true
+  set_verbose: false
+
+general_settings:
+  master_key: ${LITELLM_MASTER_KEY}
