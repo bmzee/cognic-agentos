@@ -119,7 +119,17 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     UV_PROJECT_ENVIRONMENT=/opt/venv
 
 WORKDIR /build
-RUN apk add --no-cache ca-certificates curl
+# ca-certificates + curl: uv installer prerequisites.
+# gcc + musl-dev + linux-headers: oracledb (Sprint 1D) does NOT ship a
+# musllinux wheel as of v3.4.2, so uv builds from source. Without these
+# the build fails with `error: command 'gcc' failed: No such file or
+# directory`. Build tools live in this builder stage only — the runtime
+# `default-adapters` image copies /opt/venv and never sees gcc.
+# binutils: provides `strip`. Source-built .so files retain debug
+# symbols by default; stripping oracledb's four compiled extensions
+# alone reclaims ~22 MiB and is what brings the image under the
+# 220 MiB ceiling.
+RUN apk add --no-cache ca-certificates curl gcc musl-dev linux-headers binutils
 ADD https://astral.sh/uv/0.5.29/install.sh /uv-install.sh
 RUN sh /uv-install.sh && rm /uv-install.sh
 ENV PATH="/root/.local/bin:${PATH}"
@@ -128,10 +138,10 @@ COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
 
 # --no-dev keeps test deps out; --extra adapters opts INTO the
-# optional-deps group so asyncpg/qdrant-client/hvac/langfuse etc. land
-# in the venv. Without --extra adapters the default-adapters image
-# would be byte-identical to the kernel image and break the runtime
-# contract for default drivers.
+# optional-deps group so asyncpg/qdrant-client/hvac/langfuse/oracledb
+# etc. land in the venv. Without --extra adapters the default-adapters
+# image would be byte-identical to the kernel image and break the
+# runtime contract for default drivers.
 RUN uv sync --frozen --no-dev --no-editable --extra adapters \
  && find /opt/venv -depth \( \
         -type d -name __pycache__ \
@@ -142,7 +152,8 @@ RUN uv sync --frozen --no-dev --no-editable --extra adapters \
    \) -exec rm -rf {} + \
  && find /opt/venv -name "*.dist-info" -exec sh -c 'rm -rf "$1"/RECORD "$1"/WHEEL "$1"/METADATA.bak' _ {} \; \
  && find /opt/venv -name "*.pyc" -delete \
- && find /opt/venv -name "*.pyi" -delete
+ && find /opt/venv -name "*.pyi" -delete \
+ && find /opt/venv -name "*.so" -exec strip --strip-unneeded {} + 2>/dev/null || true
 
 # ---------- default-adapters runtime ---------------------------------
 FROM python:${PYTHON_VERSION}-alpine AS default-adapters
