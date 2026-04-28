@@ -207,5 +207,7 @@ url='http://127.0.0.1:'+os.environ.get('COGNIC_PORT','8000')+os.environ.get('COG
 sys.exit(0 if urllib.request.urlopen(url, timeout=3).status==200 else 1)"
 
 # default-adapters image: create_prod_app wires bundled_registry so the
-# lifespan probes Postgres / Qdrant / Vault / Ollama / Langfuse-OTel.
+# lifespan probes the bundled adapters — Sprint 1C: Postgres / Qdrant /
+# Vault / Ollama / Langfuse-OTel; Sprint 1D: + Oracle / Dynatrace /
+# OpenAI-compat embedding (vLLM/SGLang/OpenAI/Azure-via-shim).
 CMD ["sh", "-c", "exec uvicorn cognic_agentos.portal.api.app:create_prod_app --factory --host \"$COGNIC_HOST\" --port \"$COGNIC_PORT\""]

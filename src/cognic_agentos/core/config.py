@@ -216,8 +216,8 @@ class Settings(BaseSettings):
     db_driver: str = Field(
         default="postgres",
         description=(
-            "Relational adapter driver. Bundled: postgres. "
-            "Plugin packs: oracle (Sprint 1D), mssql, mysql."
+            "Relational adapter driver. Bundled: postgres, oracle (Sprint 1D). "
+            "Plugin packs: mssql, mysql."
         ),
     )
     database_url: str | None = Field(
