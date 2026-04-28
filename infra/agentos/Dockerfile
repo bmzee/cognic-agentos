@@ -9,8 +9,13 @@
 #                             prefer the slimmer kernel for a custom build).
 #                             Uvicorn factory: create_app (no adapter probing).
 #
-#   2. default-adapters     — kernel + bundled default adapters (Postgres /
-#                             Qdrant / Vault / Ollama / Langfuse-OTel).
+#   2. default-adapters     — kernel + bundled default adapters:
+#                             Sprint 1C: Postgres / Qdrant / Vault /
+#                             Ollama / Langfuse-OTel.
+#                             Sprint 1D: + Oracle (oracledb thin) /
+#                             Dynatrace (Metric Ingest API) /
+#                             OpenAI-compat embedding (vLLM / SGLang /
+#                             OpenAI / Azure-via-shim).
 #                             ≤220 MiB. Built via `--extra adapters` so the
 #                             [project.optional-dependencies] adapters group
 #                             lands in /opt/venv. Uvicorn factory:
@@ -18,7 +23,11 @@
 #                             Budget raised from BUILD_PLAN's original
 #                             180 MiB during Sprint 1C T15 — measured size
 #                             198 MiB after dependency pruning; numpy/grpc/
-#                             cryptography compiled libs dominate.
+#                             cryptography compiled libs dominate. Sprint
+#                             1D added oracledb (~40 MiB unstripped) but
+#                             a `strip --strip-unneeded` pass over the
+#                             builder venv brought the final image to
+#                             ~174 MiB.
 #
 # Build args wire git SHA + build timestamp into the image so /version is
 # truthful in deployed environments.
@@ -163,7 +172,7 @@ ARG BUILD_TIME=unknown
 ARG PACKAGE_VERSION=0.0.1
 
 LABEL org.opencontainers.image.title="cognic-agentos-default-adapters" \
-      org.opencontainers.image.description="Cognic AgentOS kernel + bundled default adapters (Postgres/Qdrant/Vault/Ollama/Langfuse-OTel)" \
+      org.opencontainers.image.description="Cognic AgentOS kernel + bundled default adapters (Postgres/Qdrant/Vault/Ollama/Langfuse-OTel + Oracle/Dynatrace/OpenAI-compat-embedding)" \
       org.opencontainers.image.vendor="Cognic" \
       org.opencontainers.image.source="https://github.com/bmzee/cognic-agentos" \
       org.opencontainers.image.version="${PACKAGE_VERSION}" \
