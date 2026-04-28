@@ -23,6 +23,7 @@ Sprint 1 is split into four focused sub-sprints for a clean bootstrap. Each ship
 - **OpenAPI schema exposed** at `/api/v1/openapi.json` (Sprint 1B).
 - **CORS allow-list-only** — no `*` wildcards.
 - **Graceful shutdown** — lifespan hooks close DB pools, Temporal client, Vault leases, Langfuse client (flushes pending events) in dependency-correct order.
+- **Append-only governance tables** *(Sprint 2 onward)* — the runtime DB role used by AgentOS at runtime holds `INSERT, SELECT` only on `audit_event` + `decision_history`, and `INSERT, SELECT, UPDATE` on `governance_chain_heads` (the chain-head row is the only legitimately-mutated state in the governance tier). UPDATE / DELETE on the evidence tables are NOT granted to the runtime role. This is **schema-design doctrine, not just code discipline** — `tests/integration/db/test_runtime_role_is_append_only.py` is the production-grade canary that the operator runbook for governance-table GRANTs has been applied. A separate `agentos_evidence_admin` role holds DELETE on the evidence tables for retention enforcement (Phase 3.3 evidence-pack export). Without the runbook applied, the runtime is using superuser credentials and the chain is INSERT-only by code discipline only — explicitly NOT acceptable for `COGNIC_RUNTIME_PROFILE=prod`.
 - **Image-size budget** — pre-1C, the single Docker image carries server + observability only and ships under a **120 MiB** ceiling, enforced by a CI job (`image-size-budget`) that fails the build if the kernel image grows past it. When Sprint 1C lands its adapter dependencies, the image is split into:
   - `cognic-agentos-kernel` — server + observability + harness only; **≤120 MiB**.
   - `cognic-agentos-default-adapters` — kernel + Postgres / Qdrant / Vault / Ollama / Langfuse-OTel reference adapters; **≤220 MiB** budget. *(Originally specified at ≤180 MiB pre-build; raised to 220 MiB during Sprint 1C T15 because measured size landed at ~198 MiB — driven by numpy ~50 MiB transitive of qdrant-client + pgvector, grpc ~18 MiB, cryptography ~13 MiB, sqlalchemy ~12 MiB, uvloop ~12 MiB. None have removable bloat. Aggressive prune saved only ~2 MiB. 220 MiB gives ~10% headroom over measured.)*
@@ -181,31 +182,57 @@ Sprint 1 is split into four focused sub-sprints for a clean bootstrap. Each ship
 - `uv run pytest -v` green (CI runs unit tests for all bundled drivers — postgres / qdrant / vault / ollama / langfuse_otel / oracle / dynatrace / openai_compat — without external dependencies; the `oracle-integration` job exercises the live Oracle XE compose overlay via env-gated `@pytest.mark.skipif(not COGNIC_RUN_ORACLE_INTEGRATION)` tests; dynatrace + openai_compat live-stack verification is operator-side, not CI, since Dynatrace requires a real tenant + API token and openai_compat live verification needs either a GPU-resident vLLM or external API keys).
 
 
-### Sprint 2 — Core governance primitives *(3 work-units)*
+### Sprint 2 — Core governance primitives — chain-of-custody foundation *(2 work-units)*
 
-**Goal:** the kernel's load-bearing controls — audit, decision history with hash chain, schema vocabulary.
+**Scope split** (vs. the original BUILD_PLAN-2025 single-sprint shape, see Sprint 2.5 below): three critical-controls modules at ≥95% coverage + Postgres+Oracle migration parity could not realistically fit in 3 wu alongside three additional governance modules. The split lands the chain-of-custody foundation cleanly, then layers operational primitives on top in Sprint 2.5.
+
+**Goal:** the kernel's tamper-evident substrate — audit, decision history with hash chain, schema vocabulary, and the Alembic baseline that retires `OracleAdapter.run_migrations` / `PostgresAdapter.run_migrations` `NotImplementedError` reservations from Phase 1.
 
 **Deliverables:**
-- `core/schemas.py` — `FieldStatus`, `FieldMeta`, `CognicAction`, `ComplianceVerdict` enums
-- `core/audit.py` — `AuditStore.append(event)` with structured event records
-- `core/decision_history.py` — `DecisionHistoryStore.append(record)` returning record_id + chain hash
-- `core/chain_verifier.py` — `walk(start, end)` returns chain integrity proof; `verify(record_id)` confirms the row's hash matches the prior chain
+- `core/schemas.py` — `CognicAction`, `ComplianceVerdict`, `FieldStatus` enums + `FieldMeta` frozen dataclass
+- `core/canonical.py` — `canonical_bytes(obj)` + `hash_record(canonical, prev_hash)` (single source of truth for canonical form)
+- `core/audit.py` — `AuditStore.append(event)` (INSERT-only, fail-loud, hash-chained via `governance_chain_heads` lock-row)
+- `core/decision_history.py` — `DecisionHistoryStore.append(record)` returning `(record_id, hash)`
+- `core/chain_verifier.py` — `walk(table)` + `verify_record(record_id)` returning typed `TamperReport`
 - `db/engine.py` — async SQLAlchemy engine + session factory
-- `db/migrations/001_initial.sql` — `audit`, `decision_history`, `ticket`, `ticket_event` tables (with hash columns)
-- `core/sla.py` — SLA timer primitive (deadline computation, breach detection)
-- `core/escalation.py` — escalation lifecycle state machine
-- `core/guardrails.py` — pluggable input/output filter pipeline (PII, injection — initial filters can be regex-based; ML filters Wave 2)
+- Alembic baseline + initial migration `0001_initial_governance_schema.py` — `governance_chain_heads`, `audit_event`, `decision_history` (single migration set; dialect-portable via SQLAlchemy types)
+- `tools/check_critical_coverage.py` — per-file coverage gate (95% line + 90% branch on the four critical-controls modules)
+- `docs/operator-runbooks/governance-tables-grants.md` — Postgres + Oracle GRANT snippets for runtime + evidence-admin roles
 
 **Tests:**
-- `test_decision_history.py` — append → retrieve → chain hash matches
-- `test_chain_verifier.py` — walk a 10-record chain, mutate one row, verify detects tamper
-- `test_audit.py` — append → query by trace_id
-- `test_guardrails.py` — known-PII input is blocked, clean input passes
+- `test_canonical.py` — golden-hash tests (NaN/Inf rejection; datetime / UUID / bytes round-trip; dict-key sort)
+- `test_audit.py` + `test_decision_history.py` — unit-level append + chain-head update against in-memory SQLite
+- `test_chain_verifier.py` — tamper detection (mutation, deletion, prev_hash corruption, sequence gap, empty chain, single record)
+- `test_alembic_migrations.py` — upgrade → downgrade → upgrade round-trip on Postgres + Oracle
+- `test_concurrent_append.py` — 50 concurrent appends serialise via `governance_chain_heads` `SELECT ... FOR UPDATE`; parametrised on Postgres + Oracle
+- `test_runtime_role_is_append_only.py` — runtime role denied UPDATE/DELETE; positive canary drives `AuditStore.append()` through the runtime-role DSN
 
 **Exit criteria:**
-- Hash chain provably tamper-evident (test mutates a row → verifier raises)
-- All Sprint 1 tests still green; new tests bring suite to ~12 passing
-- No ADR changes needed (Sprint 2 implements ADR-001 / ADR-006 hooks)
+- Hash chain tamper-evident (verifier raises on mutated row, deleted row, corrupted prev_hash)
+- Append serialises correctly under concurrent load on real Postgres + Oracle (no duplicate sequences, no duplicate hashes)
+- Critical-controls modules at ≥95% line + ≥90% branch coverage (per-file CI gate)
+- Operator runbook applied: runtime role provably append-only on both Postgres + Oracle
+- Both `OracleAdapter.run_migrations` and `PostgresAdapter.run_migrations` real (no `NotImplementedError`)
+- Suite grows from 264 (Phase 1 close) to ~340; coverage stays ≥93% global
+- No ADR changes (implements ADR-001 / ADR-006 / ADR-009 hooks)
+
+### Sprint 2.5 — Operational governance primitives *(1 work-unit)*
+
+**Goal:** the operational primitives that consume Sprint 2's chain-of-custody foundation. Carved out of the original Sprint 2 in the 2026-04-28 doctrine amendment so each critical-controls module gets the pair-engineering attention it needs.
+
+**Deliverables:**
+- `core/sla.py` — SLA timer primitive (deadline computation, breach detection)
+- `core/escalation.py` — escalation lifecycle state machine; transitions emit hash-chained events into `decision_history`
+- `core/guardrails.py` — pluggable input/output filter pipeline (PII, injection — initial filters regex-based; ML filters Wave 2)
+
+**Tests:**
+- `test_sla.py` — deadline computation + breach detection
+- `test_escalation.py` — lifecycle transitions emit hash-chained events
+- `test_guardrails.py` — known-PII input blocked; clean input passes
+
+**Exit criteria:**
+- All three operational primitives integrated with Sprint 2's audit / decision_history / chain_verifier
+- Suite grows by ~25 tests; coverage stays ≥93% global
 
 ### Sprint 3 — LLM gateway + provider-honesty *(2 work-units)*
 

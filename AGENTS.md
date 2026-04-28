@@ -41,6 +41,7 @@ Refactors, PR cleanup, negative-path tests, ADRs, evidence docs, RCA notes, rele
 
 Stop for human review when touching:
 - Anything in `core/` (governance primitives, including `core/approval`, `core/policy`, `core/emergency`, `core/memory`)
+- **Hash-chain canonical-form** (`core/canonical.py` — `canonical_bytes`, `hash_record`, `_json_default`, `ZERO_HASH`). Canonical form is the wire-format for evidence-pack export per ADR-006; any change is a wire-protocol change that breaks past evidence verification. Requires human review on **every** edit, not just non-trivial ones, plus an explicit `schema_version` bump in `audit_event` + `decision_history` migrations. (Sprint 2 amendment, 2026-04-28.)
 - Plugin trust gate / signature verification (`protocol/plugin_registry.py`, `protocol/trust_gate.py`, `protocol/supply_chain.py`)
 - MCP / A2A authorization paths (`protocol/mcp_authz.py`, `protocol/a2a_authz.py`)
 - Sandbox or sub-agent enforcement boundaries (including resumable-session checkpoint/wake)
@@ -62,6 +63,7 @@ The following modules are **critical controls**. They get extra scrutiny — 95%
 
 *Core governance:*
 - `core/audit.py`
+- `core/canonical.py` (Sprint 2 — single source of truth for canonical form + SHA-256 framing; wire-format for evidence-pack export)
 - `core/decision_history.py` + `core/chain_verifier.py`
 - `core/guardrails.py`
 - `core/escalation.py`
