@@ -46,6 +46,8 @@ _BUNDLED_ADAPTER_OPTIONAL_DEPS: dict[str, frozenset[str]] = {
     # Ollama adapter only depends on httpx (always present); no kernel-image misses.
     "cognic_agentos.db.adapters.ollama_embedding_adapter": frozenset(),
     "cognic_agentos.db.adapters.langfuse_otel_adapter": frozenset({"langfuse"}),
+    # Sprint 1D enterprise adapters
+    "cognic_agentos.db.adapters.oracle_adapter": frozenset({"sqlalchemy", "oracledb"}),
 }
 
 
