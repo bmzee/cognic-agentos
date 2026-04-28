@@ -50,6 +50,8 @@ _BUNDLED_ADAPTER_OPTIONAL_DEPS: dict[str, frozenset[str]] = {
     "cognic_agentos.db.adapters.oracle_adapter": frozenset({"sqlalchemy", "oracledb"}),
     # Dynatrace adapter only depends on httpx + opentelemetry (both core); no kernel-image misses.
     "cognic_agentos.db.adapters.dynatrace_adapter": frozenset(),
+    # OpenAI-compat embedding only depends on httpx (always present); no kernel-image misses.
+    "cognic_agentos.db.adapters.openai_compat_embedding_adapter": frozenset(),
 }
 
 
