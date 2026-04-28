@@ -108,6 +108,10 @@ def _relational_args(s: Settings) -> tuple[Any, ...]:
         return ()
     if s.db_driver == "postgres":
         return (s.database_url,)
+    if s.db_driver == "oracle":
+        # Oracle uses the existing database_url field with the
+        # oracle+oracledb://...?service_name=... SQLAlchemy URL shape.
+        return (s.database_url,)
     return ()  # plugin packs may take additional args via their own helper
 
 
@@ -132,6 +136,16 @@ def _embedding_args(s: Settings) -> tuple[Any, ...]:
         return ()
     if s.embed_driver == "ollama":
         return (s.embedding_base_url, s.embedding_model, s.embedding_dimensions)
+    if s.embed_driver == "openai_compat":
+        return (
+            s.embedding_base_url,
+            s.embedding_model,
+            s.embedding_dimensions,
+            s.embed_provider_label,
+            s.embedding_api_key,
+            s.embedding_api_key_header,
+            s.embedding_extra_headers,
+        )
     return ()
 
 
@@ -140,4 +154,6 @@ def _observability_args(s: Settings) -> tuple[Any, ...]:
         return ()
     if s.obs_driver == "langfuse_otel":
         return (s.langfuse_host, s.langfuse_public_key, s.langfuse_secret_key)
+    if s.obs_driver == "dynatrace":
+        return (s.dynatrace_tenant_url, s.dynatrace_api_token)
     return ()
