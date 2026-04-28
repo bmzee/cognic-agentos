@@ -102,15 +102,10 @@ class TestLifecycle:
             assert h.status == "unreachable"
 
 
-class TestRunMigrationsRaises:
-    """Production-grade rule: production adapters never silently no-op.
-    Alembic invocation lands in Sprint 2 alongside core/ schema work.
-    Same shape as PostgresAdapter."""
-
-    async def test_run_migrations_not_implemented(self) -> None:
-        a = OracleAdapter(ORACLE_URL)
-        with pytest.raises(NotImplementedError, match="Sprint 2"):
-            await a.run_migrations("db/migrations/oracle")
+# NOTE: TestRunMigrationsRaises was retired in Sprint 2 Task 9. The
+# Sprint 1D stub raised NotImplementedError; Sprint 2 wires real
+# alembic.command.upgrade. The replacement test surface lives in
+# tests/unit/db/test_run_migrations.py.
 
 
 class TestSatisfiesProtocol:

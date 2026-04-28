@@ -34,13 +34,25 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-settings = get_settings()
-if not settings.database_url:
-    raise RuntimeError(
-        "Alembic env requires COGNIC_DATABASE_URL — set it in the operator's "
-        "environment, or in `.env` for dev runs."
-    )
-config.set_main_option("sqlalchemy.url", settings.database_url)
+# URL resolution priority (Sprint 2 Task 9):
+#   1. Caller pre-set ``sqlalchemy.url`` on the Config object (e.g.
+#      PostgresAdapter.run_migrations / OracleAdapter.run_migrations
+#      programmatic invocations) — honour it as-is.
+#   2. Otherwise, read from core.config.Settings.database_url
+#      (CLI invocation: ``uv run alembic upgrade head``).
+#   3. Neither set → raise RuntimeError so the misconfiguration is
+#      loud, not a silent default.
+_resolved_url = config.get_main_option("sqlalchemy.url")
+if not _resolved_url:
+    settings = get_settings()
+    if not settings.database_url:
+        raise RuntimeError(
+            "Alembic env requires COGNIC_DATABASE_URL — set it in the operator's "
+            "environment, or in `.env` for dev runs. Programmatic callers can "
+            "pre-set sqlalchemy.url on the Config object instead."
+        )
+    _resolved_url = settings.database_url
+    config.set_main_option("sqlalchemy.url", _resolved_url)
 
 target_metadata: Any = None
 
@@ -49,7 +61,7 @@ def run_migrations_offline() -> None:
     """Generate SQL without connecting to the database."""
 
     context.configure(
-        url=settings.database_url,
+        url=_resolved_url,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
