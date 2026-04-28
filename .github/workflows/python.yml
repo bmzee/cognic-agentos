@@ -105,6 +105,41 @@ jobs:
           fi
           echo "::notice::Kernel image ${size_mib} MiB is within ${BUDGET_MIB} MiB budget"
 
+      - name: Boot smoke — kernel image
+        # Production-grade gate: image size + lint + tests pass, but
+        # none of those prove the image actually starts and serves a
+        # response. Run the built kernel image, poll /api/v1/healthz,
+        # confirm 200, then stop. Catches uvicorn-factory typos, missing
+        # runtime deps, broken CMD interpolation, and PID-1 signal
+        # plumbing regressions in one cheap step.
+        run: |
+          set -euo pipefail
+          docker run -d --name cognic-kernel-smoke \
+            -p 8000:8000 \
+            cognic-agentos:kernel-ci
+          # Poll up to 30s for the server to bind.
+          ok=0
+          for i in $(seq 1 30); do
+            if curl -fsS --max-time 2 http://127.0.0.1:8000/api/v1/healthz \
+                 -o /tmp/healthz.json 2>/dev/null; then
+              ok=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "${ok}" -ne 1 ]; then
+            echo "::error::Kernel image failed to serve /api/v1/healthz within 30s"
+            docker logs cognic-kernel-smoke || true
+            docker rm -f cognic-kernel-smoke || true
+            exit 1
+          fi
+          echo "::notice::Kernel image booted and served /api/v1/healthz:"
+          cat /tmp/healthz.json
+          echo
+          # Tear down so the next step can claim port 8000 if it wants.
+          docker stop cognic-kernel-smoke
+          docker rm cognic-kernel-smoke
+
       - name: Build default-adapters image
         run: |
           docker build \
