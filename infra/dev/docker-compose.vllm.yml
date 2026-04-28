@@ -1,0 +1,53 @@
+# Cognic AgentOS — vLLM GPU compose overlay (Sprint 1D opt-in).
+#
+# Activated via:
+#   docker compose -f infra/dev/docker-compose.yml \
+#                  -f infra/dev/docker-compose.vllm.yml up -d
+#
+# Requires:
+#   - NVIDIA Container Toolkit installed on the host
+#   - At least one CUDA-capable GPU
+#
+# CI runs without this overlay (CI has no GPU). Local GPU machines + bank
+# staging environments use this to validate the openai_compat embedding
+# path against a real vLLM instance.
+
+services:
+  vllm:
+    # Pin: avoid `latest` so a vLLM upstream-image change can't silently
+    # break the overlay between local-dev sessions. v0.6.6 is an
+    # **intentionally conservative** pin used as a known-shape baseline
+    # for the dev-stack contract (the OpenAI-compat /v1/embeddings +
+    # /v1/models endpoints have been stable since v0.5.x). Operators
+    # productionising on real GPU hardware should bump to a current
+    # stable (recent vLLM releases are tracked at
+    # https://github.com/vllm-project/vllm/releases) and re-verify
+    # against their CUDA driver before locking the production pin.
+    image: vllm/vllm-openai:v0.6.6
+    container_name: cognic-agentos-vllm
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      # Pick a small embedding model by default; operators override to
+      # match their cluster's GPU memory. Defaults are dev-friendly only.
+      VLLM_SERVED_MODEL: ${VLLM_SERVED_MODEL:-BAAI/bge-large-en-v1.5}
+    command: ["--model", "${VLLM_SERVED_MODEL:-BAAI/bge-large-en-v1.5}"]
+    ports:
+      - "${COGNIC_VLLM_PORT:-8000}:8000"
+    healthcheck:
+      # vLLM serves the OpenAI-compat /v1/models endpoint as soon as the
+      # model loads. The image is python-slim and DOES ship `python` so
+      # we use a tiny urllib probe rather than wget.
+      test:
+        - "CMD-SHELL"
+        - "python -c 'import urllib.request,sys; sys.exit(0 if urllib.request.urlopen(\"http://localhost:8000/v1/models\",timeout=2).status==200 else 1)'"
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 60s    # model load is slow on first boot
