@@ -1,0 +1,103 @@
+name: dep-upgrade
+
+# Production-grade BUILD_PLAN promise (per "Reproducible dependency
+# locking"): a scheduled workflow that runs `uv lock --upgrade` and
+# opens a PR with the diff. Operators review the lock-diff and merge
+# only when the resulting CI is green on the new lock — i.e. supply-
+# chain churn never lands silently.
+#
+# Schedule: weekly Monday 06:00 UTC (~before bank-day in EU). The
+# workflow_dispatch trigger lets operators force a manual upgrade
+# (e.g. ahead of a scheduled patch window).
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"   # Mondays 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: dep-upgrade
+  cancel-in-progress: false  # don't cancel an in-flight upgrade attempt
+
+jobs:
+  uv-lock-upgrade:
+    name: uv lock --upgrade + PR
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.5.29"
+          enable-cache: false  # we want a fresh resolve, not a cached one
+
+      - name: Read .python-version
+        id: python-version
+        run: echo "version=$(cat .python-version)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ steps.python-version.outputs.version }}
+
+      - name: Resolve latest compatible versions (uv lock --upgrade)
+        run: uv lock --upgrade
+
+      - name: Diff the lock
+        id: diff
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- uv.lock; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::No lockfile changes — all transitive pins already at latest compatible."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "::group::uv.lock diff"
+            git --no-pager diff -- uv.lock | head -200
+            echo "::endgroup::"
+          fi
+
+      - name: Open / update upgrade PR
+        if: steps.diff.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          # Force a single rolling branch so a second run replaces the
+          # in-flight lock-upgrade rather than fanning out PRs every week.
+          branch: chore/dep-upgrade
+          base: main
+          delete-branch: true
+          commit-message: |
+            chore(deps): weekly uv lock --upgrade
+
+            Automated weekly lockfile refresh; merge only after CI is
+            green on the new lock per BUILD_PLAN's reproducible-locking
+            principle.
+          title: "chore(deps): weekly uv lock --upgrade"
+          body: |
+            Automated weekly lockfile refresh produced by
+            [`.github/workflows/dep-upgrade.yml`](.github/workflows/dep-upgrade.yml).
+
+            **Review checklist before merging:**
+
+            - [ ] `lint + test` job green on the new lock
+            - [ ] `image size budget` job green (kernel ≤120 / default-adapters ≤220 MiB)
+            - [ ] `oracle integration` job green
+            - [ ] No new transitive license issues / CVE alerts on the diff
+            - [ ] Major-version bumps reviewed against the BUILD_PLAN
+                  production-grade rule (no silent breaking changes)
+
+            Per BUILD_PLAN's *"Reproducible dependency locking"* principle:
+            CI runs `uv sync --frozen` against this lock; the lock-diff
+            here is the only path through which transitive supply-chain
+            change reaches `main`.
+          labels: |
+            dependencies
+            automated
