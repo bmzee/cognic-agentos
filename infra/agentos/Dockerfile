@@ -45,9 +45,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /build
 
-# Alpine ships musl; uv installer needs ca-certs + curl. Build tools only
-# in case a future dep lacks a musllinux wheel — Sprint 1A deps all do.
-RUN apk add --no-cache ca-certificates curl
+# Alpine ships musl; uv installer needs ca-certs + curl. binutils provides
+# `strip` — mirrors the Sprint 1D pattern on default-adapters-builder. The
+# kernel image gained sqlalchemy + alembic + greenlet in Sprint 2; greenlet
+# ships compiled .so files that benefit from strip.
+RUN apk add --no-cache ca-certificates curl binutils
 
 # Pinned uv version; the SHA is verified by upstream's installer.
 ADD https://astral.sh/uv/0.5.29/install.sh /uv-install.sh
@@ -60,7 +62,8 @@ COPY src ./src
 
 RUN uv sync --frozen --no-dev --no-editable \
  && find /opt/venv -depth \( -type d -name __pycache__ -o -type d -name tests -o -type d -name test \) -exec rm -rf {} + \
- && find /opt/venv -name "*.dist-info" -exec sh -c 'rm -rf "$1"/RECORD "$1"/WHEEL "$1"/METADATA.bak' _ {} \;
+ && find /opt/venv -name "*.dist-info" -exec sh -c 'rm -rf "$1"/RECORD "$1"/WHEEL "$1"/METADATA.bak' _ {} \; \
+ && find /opt/venv -name "*.so" -exec strip --strip-unneeded {} + 2>/dev/null || true
 
 # ---------- runtime --------------------------------------------------
 FROM python:${PYTHON_VERSION}-alpine AS runtime

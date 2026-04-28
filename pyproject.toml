@@ -33,6 +33,15 @@ dependencies = [
     "prometheus-client>=0.25",  # spec floor was >=0.26; lowered to PyPI reality (0.26 not yet released)
     "prometheus-fastapi-instrumentator>=7.1",
     "python-json-logger>=3.2",
+    # Persistence + governance (Sprint 2 — promoted from [adapters] to base
+    # because core/audit, core/decision_history, core/chain_verifier, and
+    # db/engine all import sqlalchemy directly. The kernel image must be
+    # able to import these governance modules even without --extra adapters.
+    # Driver-specific deps (asyncpg, oracledb, qdrant-client, hvac, langfuse)
+    # stay in [project.optional-dependencies].adapters.
+    "sqlalchemy[asyncio]>=2.0",   # carryover floor from Sprint 1C (was promoted unchanged)
+    "alembic>=1.16",              # carryover floor from Sprint 1C (was promoted unchanged)
+    "greenlet>=3.0",              # SQLAlchemy[asyncio] dep; explicit floor
 ]
 
 [project.optional-dependencies]
@@ -48,9 +57,10 @@ dev = [
     "respx>=0.22",
 ]
 adapters = [
-    # Persistence (Sprint 1C, per ADR-009).
-    "sqlalchemy[asyncio]>=2.0",   # spec floor was >=2.1; lowered to PyPI reality (2.1 is beta-only; latest stable 2.0.x). Same carryover pattern as Sprint 1B's prometheus-client/httpx adjustments. Bump back when 2.1 ships stable.
-    "alembic>=1.16",
+    # Persistence (Sprint 1C, per ADR-009). sqlalchemy + alembic moved
+    # to base [project] deps in Sprint 2 (core/audit imports them) —
+    # the [adapters] extra now carries only driver-specific packages
+    # that the kernel image must NOT ship.
     "asyncpg>=0.31",
     "pgvector>=0.4",
     "qdrant-client>=1.17",        # spec floor was >=1.18; lowered to PyPI reality (1.18 not yet released — latest stable 1.17.1). Bump back when 1.18 ships.
@@ -96,6 +106,7 @@ asyncio_mode = "auto"
 markers = [
     "integration: integration tests requiring external services",
     "oracle: tests requiring the live Oracle XE compose overlay (env-gated via COGNIC_RUN_ORACLE_INTEGRATION=1)",
+    "postgres: tests requiring the live Postgres compose service (env-gated via COGNIC_RUN_POSTGRES_INTEGRATION=1)",
 ]
 
 [tool.ruff]
