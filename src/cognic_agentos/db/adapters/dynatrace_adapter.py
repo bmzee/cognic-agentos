@@ -37,6 +37,7 @@ native runtime Vault resolution lands in Sprint 10) → ``/readyz`` shows
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import Any
 
@@ -52,6 +53,36 @@ logger = logging.getLogger(__name__)
 # metrics.read scope on the API token. Returns 200 with empty/short
 # results when the token is valid; 401 when bad; non-200 otherwise.
 _HEALTH_PATH = "/api/v2/metrics/query?metricSelector=builtin:host.cpu.usage&pageSize=1"
+
+# Dynatrace metric line-protocol dimension key grammar:
+#   - Lowercase letters / digits / dot / hyphen / underscore
+#   - Must start with a lowercase letter
+#   - Up to 100 chars
+# Anything outside this is silently dropped so a stray attribute key
+# doesn't corrupt the line — observability outages must not propagate
+# into the request path.
+_DIM_KEY_RE = re.compile(r"^[a-z][a-z0-9._\-]{0,99}$")
+
+
+def _sanitize_dim_value(v: Any) -> str:
+    """Quote + escape a dimension value for Dynatrace line protocol.
+
+    The line-protocol parser uses commas to separate dimensions and a
+    single space to separate the dimension block from the metric value.
+    Any of those characters in a raw dimension value would corrupt the
+    line. Newlines would terminate the line entirely and let the rest
+    parse as a new metric line — same severity.
+
+    Strategy: always quote, always backslash-escape the quote and the
+    backslash, replace any newlines/carriage-returns with a single
+    space (line protocol forbids them inside quoted values too).
+    """
+
+    s = str(v)
+    s = s.replace("\\", "\\\\")  # backslash first; downstream escapes layer over this
+    s = s.replace('"', '\\"')
+    s = s.replace("\n", " ").replace("\r", " ")
+    return f'"{s}"'
 
 
 class DynatraceAdapter:
@@ -84,17 +115,35 @@ class DynatraceAdapter:
     async def emit_metric(self, name: str, value: float, attributes: dict[str, Any]) -> None:
         # Dynatrace Metric Ingest line protocol:
         #   <metric.name>,<dim1>=<v1>,<dim2>=<v2> <value>
-        dim_parts = [f"{k}={v}" for k, v in attributes.items()]
+        # Keys must match the Dynatrace dimension-key grammar; anything
+        # outside it is silently dropped so a stray attribute can't
+        # corrupt the line. Values are always quoted + escaped so that
+        # spaces / commas / quotes / newlines from caller-controlled
+        # data can't break the line-protocol structure.
+        dim_parts = [
+            f"{k}={_sanitize_dim_value(v)}"
+            for k, v in attributes.items()
+            if isinstance(k, str) and _DIM_KEY_RE.match(k)
+        ]
         dim_block = "," + ",".join(dim_parts) if dim_parts else ""
         line = f"{name}{dim_block} {value}"
 
         try:
             async with httpx.AsyncClient(timeout=2.0) as client:
-                await client.post(
+                resp = await client.post(
                     f"{self._tenant}/api/v2/metrics/ingest",
                     headers=self._headers(content_type="text/plain"),
                     content=line.encode("utf-8"),
                 )
+                # raise_for_status() inside the try-block: a token with
+                # metrics.read (so /readyz passes) but missing
+                # metrics.ingest will return 403 here. Without this,
+                # /readyz reports observability=ok while every metric
+                # write is silently dropped — the most operator-hostile
+                # observability failure mode. Logging via the warning
+                # path keeps the contract that observability outages
+                # never propagate into the request path.
+                resp.raise_for_status()
         except Exception as exc:
             # Observability outages must NOT raise into the request path.
             logger.warning("dynatrace metric emit failed: %s", exc)
