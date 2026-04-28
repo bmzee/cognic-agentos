@@ -18,7 +18,7 @@ Sprint 1 is split into four focused sub-sprints for a clean bootstrap. Each ship
 - **Adapter protocols, not concrete classes** (per ADR-009) — every external system is reached through a `Protocol` interface. Postgres / Qdrant / Vault land in Sprint 1C; Oracle / Dynatrace / OpenAI-compat embedding land in Sprint 1D; alternative adapters install as plugin packs in Phase 2+.
 - **Reproducible dependency locking** — `uv.lock` committed; CI runs `uv sync` (consumes lock, does NOT resolve latest). Scheduled weekly `dep-upgrade.yml` opens a PR with `uv lock --upgrade` diff; lands only after CI is green on the new lock.
 - **Probe separation** — `/healthz` is **liveness** (Sprint 1A; never depends on external systems). `/readyz` is **readiness** (Sprint 1B/1C; per-component status, returns 503 when any critical component is unreachable).
-- **Structured logging from request 1** — JSON logs with `request_id` + OTel `trace_id` + `langfuse_trace_id` (Sprint 1B/1C as observability + adapters land).
+- **Structured logging from request 1** — JSON logs with `request_id` + OTel `trace_id` + `span_id` (Sprint 1B). Langfuse-side trace correlation rides the OTel pipeline (Langfuse-OTel adapter, Sprint 1C); per-event `langfuse_trace_id` joining lands with `core/audit` + the LLM gateway (Sprint 2/3).
 - **Three-layer observability** — Prometheus `/metrics` (Sprint 1B), OpenTelemetry traces (Sprint 1B), Langfuse via observability adapter (Sprint 1C).
 - **OpenAPI schema exposed** at `/api/v1/openapi.json` (Sprint 1B).
 - **CORS allow-list-only** — no `*` wildcards.
