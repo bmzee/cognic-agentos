@@ -36,6 +36,7 @@ emission of the label lands with Sprint 2 ``core/audit`` wiring (Sprint
 
 from __future__ import annotations
 
+import math
 import time
 from typing import Any
 
@@ -133,7 +134,31 @@ class OpenAICompatEmbeddingAdapter:
                     f"Likely misconfigured: COGNIC_EMBEDDING_DIMENSIONS "
                     f"must match the deployed model's actual output dim."
                 )
-            out.append([float(x) for x in embedding])
+            # Per-value sanity. Two failure modes Qdrant cannot recover
+            # from once stored:
+            #   - non-numeric (str / None / nested list): float() either
+            #     raises or silently coerces "1.0" → 1.0, hiding bugs.
+            #   - NaN / Infinity: poisons cosine-distance math (NaN ≠
+            #     NaN, Inf overflows scoring); affected vectors break
+            #     ANN ordering. Reject at the adapter boundary.
+            row: list[float] = []
+            for j, x in enumerate(embedding):
+                if not isinstance(x, int | float) or isinstance(x, bool):
+                    raise ValueError(
+                        f"OpenAI-compat embedding row {i} dim {j} from "
+                        f"{self._provider_label!r} is non-numeric: "
+                        f"got {type(x).__name__}={x!r}"
+                    )
+                xf = float(x)
+                if not math.isfinite(xf):
+                    raise ValueError(
+                        f"OpenAI-compat embedding row {i} dim {j} from "
+                        f"{self._provider_label!r} is non-finite ({xf}); "
+                        f"NaN/Infinity values would corrupt downstream "
+                        f"cosine-distance math."
+                    )
+                row.append(xf)
+            out.append(row)
         return out
 
     @property

@@ -217,6 +217,83 @@ class TestEmbedValidation:
         with pytest.raises(ValueError, match="not a list"):
             await a.embed(["foo"])
 
+    @respx.mock
+    async def test_embed_raises_on_nan_value(self) -> None:
+        """NaN values would poison Qdrant cosine-distance math (any vector
+        containing NaN compares as NaN, breaking ANN ordering). Reject at
+        the adapter boundary rather than letting it reach the index."""
+
+        import pytest
+
+        # JSON spec doesn't allow bare `NaN`, but Python's json module +
+        # vLLM/SGLang both happily emit/consume it. Mock the parsed body
+        # directly via a patched .json() call.
+        body = {
+            "data": [{"embedding": [0.1, float("nan"), 0.3, 0.4], "index": 0}],
+            "model": MODEL,
+            "object": "list",
+        }
+        # respx serializes via httpx Response; pass a Python dict that
+        # round-trips through JSON. Use a custom content payload that
+        # lets NaN through (httpx parses with ujson if installed; we
+        # send raw bytes to be safe).
+        import json as _json
+
+        # Python's json.dumps emits 'NaN' (non-standard but readable);
+        # httpx Response.json() parses it back via the stdlib parser
+        # which DOES accept 'NaN'. That's the same path real providers
+        # use when they emit NaN.
+        raw = _json.dumps(body).encode("utf-8")
+        respx.post(f"{BASE}/v1/embeddings").mock(
+            return_value=Response(200, content=raw, headers={"content-type": "application/json"})
+        )
+        a = _adapter()
+        with pytest.raises(ValueError, match="non-finite"):
+            await a.embed(["foo"])
+
+    @respx.mock
+    async def test_embed_raises_on_inf_value(self) -> None:
+        """Infinity values likewise corrupt downstream cosine-distance."""
+
+        import json as _json
+
+        import pytest
+
+        body = {
+            "data": [{"embedding": [0.1, 0.2, float("inf"), 0.4], "index": 0}],
+            "model": MODEL,
+            "object": "list",
+        }
+        raw = _json.dumps(body).encode("utf-8")
+        respx.post(f"{BASE}/v1/embeddings").mock(
+            return_value=Response(200, content=raw, headers={"content-type": "application/json"})
+        )
+        a = _adapter()
+        with pytest.raises(ValueError, match="non-finite"):
+            await a.embed(["foo"])
+
+    @respx.mock
+    async def test_embed_raises_on_non_numeric_value(self) -> None:
+        """A string masquerading as a numeric in the embedding row would
+        crash float(x) downstream of any silent coercion. Fail loud at
+        the adapter."""
+
+        import pytest
+
+        respx.post(f"{BASE}/v1/embeddings").mock(
+            return_value=Response(
+                200,
+                json={
+                    "data": [{"embedding": [0.1, "oops", 0.3, 0.4], "index": 0}],
+                    "model": MODEL,
+                    "object": "list",
+                },
+            )
+        )
+        a = _adapter()
+        with pytest.raises(ValueError, match="non-numeric"):
+            await a.embed(["foo"])
+
 
 class TestEmbedBearerAuth:
     """OpenAI / Cohere / vLLM-with-auth-token: ``Authorization: Bearer <key>``."""
