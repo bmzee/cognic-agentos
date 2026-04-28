@@ -105,6 +105,41 @@ jobs:
           fi
           echo "::notice::Kernel image ${size_mib} MiB is within ${BUDGET_MIB} MiB budget"
 
+      - name: Boot smoke — kernel image
+        # Production-grade gate: image size + lint + tests pass, but
+        # none of those prove the image actually starts and serves a
+        # response. Run the built kernel image, poll /api/v1/healthz,
+        # confirm 200, then stop. Catches uvicorn-factory typos, missing
+        # runtime deps, broken CMD interpolation, and PID-1 signal
+        # plumbing regressions in one cheap step.
+        run: |
+          set -euo pipefail
+          docker run -d --name cognic-kernel-smoke \
+            -p 8000:8000 \
+            cognic-agentos:kernel-ci
+          # Poll up to 30s for the server to bind.
+          ok=0
+          for i in $(seq 1 30); do
+            if curl -fsS --max-time 2 http://127.0.0.1:8000/api/v1/healthz \
+                 -o /tmp/healthz.json 2>/dev/null; then
+              ok=1
+              break
+            fi
+            sleep 1
+          done
+          if [ "${ok}" -ne 1 ]; then
+            echo "::error::Kernel image failed to serve /api/v1/healthz within 30s"
+            docker logs cognic-kernel-smoke || true
+            docker rm -f cognic-kernel-smoke || true
+            exit 1
+          fi
+          echo "::notice::Kernel image booted and served /api/v1/healthz:"
+          cat /tmp/healthz.json
+          echo
+          # Tear down so the next step can claim port 8000 if it wants.
+          docker stop cognic-kernel-smoke
+          docker rm cognic-kernel-smoke
+
       - name: Build default-adapters image
         run: |
           docker build \
@@ -128,3 +163,74 @@ jobs:
             exit 1
           fi
           echo "::notice::default-adapters image ${size_mib} MiB is within ${BUDGET_MIB} MiB budget"
+
+  oracle-integration:
+    # Sprint 1D: live Oracle XE compose overlay + pytest -m oracle. Runs
+    # on PR + main; failure blocks merge. Default `lint + test` job runs
+    # all tests but the @pytest.mark.oracle integration class self-skips
+    # via `skipif(not COGNIC_RUN_ORACLE_INTEGRATION)` — this job is the
+    # only place those tests execute.
+    name: oracle integration (live XE overlay)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25  # Oracle XE first-boot is slow
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.5.29"
+          enable-cache: true
+
+      - name: Read .python-version
+        id: python-version
+        run: echo "version=$(cat .python-version)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ steps.python-version.outputs.version }}
+
+      - name: uv sync (frozen + all extras)
+        run: uv sync --frozen --all-extras
+
+      - name: Bring up Oracle XE overlay
+        run: |
+          docker compose -f infra/dev/docker-compose.yml \
+                         -f infra/dev/docker-compose.oracle.yml \
+                         up -d oracle
+
+      - name: Wait for Oracle XE healthy
+        run: |
+          set -euo pipefail
+          # First-boot can take ~3-5 minutes; gvenzl healthcheck reports
+          # healthy as soon as SQL*Plus accepts connections.
+          for i in $(seq 1 60); do
+            status=$(docker inspect cognic-agentos-oracle --format='{{.State.Health.Status}}')
+            echo "[${i}/60] oracle health: ${status}"
+            if [ "${status}" = "healthy" ]; then exit 0; fi
+            sleep 10
+          done
+          echo "::error::Oracle XE did not reach healthy state in 10 minutes"
+          docker compose -f infra/dev/docker-compose.yml \
+                         -f infra/dev/docker-compose.oracle.yml logs oracle
+          exit 1
+
+      - name: Run @pytest.mark.oracle tests
+        env:
+          # COGNIC_RUN_ORACLE_INTEGRATION is the env-gate the tests use
+          # via @pytest.mark.skipif. Without this set the live tests
+          # self-skip even when -m oracle selects them.
+          COGNIC_RUN_ORACLE_INTEGRATION: "1"
+          COGNIC_DB_DRIVER: oracle
+          COGNIC_DATABASE_URL: oracle+oracledb://cognic:cognic_dev_only@localhost:1521/?service_name=XEPDB1
+        run: uv run pytest -m oracle -v
+
+      - name: Tear down overlay
+        if: always()
+        run: |
+          docker compose -f infra/dev/docker-compose.yml \
+                         -f infra/dev/docker-compose.oracle.yml \
+                         down -v

@@ -1,8 +1,8 @@
 # Cognic AgentOS
 
-> **Status: Phase 1 Foundation in progress.** Sprints 1A (bootstrap), 1B (observability), and 1C (adapter protocols + reference adapters) are landed; Sprint 1D (enterprise adapters) and Sprints 2-3 (governance primitives + LLM gateway) are next. Build plan in [`docs/BUILD_PLAN.md`](docs/BUILD_PLAN.md). Project plan + execution baseline in [`docs/PROJECT_PLAN.md`](docs/PROJECT_PLAN.md).
+> **Status: Phase 1 Foundation in progress.** Sprints 1A (bootstrap), 1B (observability), 1C (adapter protocols + reference adapters), and 1D (enterprise adapters) are landed; Sprints 2-3 (governance primitives + LLM gateway) are next. Build plan in [`docs/BUILD_PLAN.md`](docs/BUILD_PLAN.md). Project plan + execution baseline in [`docs/PROJECT_PLAN.md`](docs/PROJECT_PLAN.md).
 >
-> **Per ADR-001 + ADR-009:** AgentOS ships the kernel + adapter contracts only. Tools, skills, agents, and bank overlays install as separately-versioned plugin packs (per ADR-002). Adapter implementations are bundled for the default driver set (Postgres / Qdrant / Vault / Ollama / Langfuse-OTel) and pluggable via `[project.optional-dependencies] adapters` extras + the `AdapterRegistry`.
+> **Per ADR-001 + ADR-009:** AgentOS ships the kernel + adapter contracts only. Tools, skills, agents, and bank overlays install as separately-versioned plugin packs (per ADR-002). Adapter implementations are bundled for the default driver set (Sprint 1C: Postgres / Qdrant / Vault / Ollama / Langfuse-OTel; Sprint 1D: Oracle / Dynatrace / OpenAI-compat embedding for vLLM/SGLang/OpenAI/Azure-via-shim) and pluggable via `[project.optional-dependencies] adapters` extras + the `AdapterRegistry`.
 
 The hardened, governance-first agent operating system for regulated banking deployments. Deployed once per bank; tools, skills, and agents install on top as separately-versioned plugin packs. Banks, the Cognic team, and the wider MCP ecosystem can author packs using the bundled SDK + CLI.
 

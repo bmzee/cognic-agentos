@@ -18,7 +18,7 @@ Sprint 1 is split into four focused sub-sprints for a clean bootstrap. Each ship
 - **Adapter protocols, not concrete classes** (per ADR-009) — every external system is reached through a `Protocol` interface. Postgres / Qdrant / Vault land in Sprint 1C; Oracle / Dynatrace / OpenAI-compat embedding land in Sprint 1D; alternative adapters install as plugin packs in Phase 2+.
 - **Reproducible dependency locking** — `uv.lock` committed; CI runs `uv sync` (consumes lock, does NOT resolve latest). Scheduled weekly `dep-upgrade.yml` opens a PR with `uv lock --upgrade` diff; lands only after CI is green on the new lock.
 - **Probe separation** — `/healthz` is **liveness** (Sprint 1A; never depends on external systems). `/readyz` is **readiness** (Sprint 1B/1C; per-component status, returns 503 when any critical component is unreachable).
-- **Structured logging from request 1** — JSON logs with `request_id` + OTel `trace_id` + `langfuse_trace_id` (Sprint 1B/1C as observability + adapters land).
+- **Structured logging from request 1** — JSON logs with `request_id` + OTel `trace_id` + `span_id` (Sprint 1B). Langfuse-side trace correlation rides the OTel pipeline (Langfuse-OTel adapter, Sprint 1C); per-event `langfuse_trace_id` joining lands with `core/audit` + the LLM gateway (Sprint 2/3).
 - **Three-layer observability** — Prometheus `/metrics` (Sprint 1B), OpenTelemetry traces (Sprint 1B), Langfuse via observability adapter (Sprint 1C).
 - **OpenAPI schema exposed** at `/api/v1/openapi.json` (Sprint 1B).
 - **CORS allow-list-only** — no `*` wildcards.
@@ -159,23 +159,26 @@ Sprint 1 is split into four focused sub-sprints for a clean bootstrap. Each ship
 **Deliverables:**
 
 - `pyproject.toml` extension — `oracledb>=2.5`
-- `core/config.py` extension — Oracle-specific connection settings; Dynatrace OTLP endpoint + API token Vault path; OpenAI-compat embedding `embed_base_url`, `embed_provider_label` (vllm/sglang/openai/azure_oai/bedrock for audit clarity)
+- `core/config.py` extension:
+  - **Oracle**: uses the existing `database_url` field; the SQLAlchemy `oracle+oracledb://...` URL shape covers basic XE, Oracle Cloud Autonomous DB (wallet-path embedded in URL), and TNS-aliased descriptors. Bank-deployment variants requiring Pydantic-typed connection-descriptor fields (e.g. wallet path as a separate setting) wait until a real bank deployment needs them.
+  - **Dynatrace**: `dynatrace_tenant_url` + `dynatrace_api_token` + reserved `dynatrace_api_token_vault_path` (Sprint 10 wires runtime Vault resolution). OTLP trace export uses the existing Sprint 1B `OTEL_EXPORTER_OTLP_ENDPOINT` plumbing (operator points it at the Dynatrace OTLP ingest URL); no new OTLP-specific Sprint-1D setting.
+  - **OpenAI-compat embedding**: `embedding_api_key` (the resolved key), `embedding_api_key_header` (default `Authorization`; `api-key` for Azure OpenAI proxies), reserved `embedding_api_key_vault_path` (Sprint 10), `embedding_extra_headers` (dict — for Azure `api-version` etc.), `embed_provider_label` (one of: vllm/sglang/openai/azure_oai/bedrock/cohere/openai_compat — for audit clarity).
 - `db/adapters/oracle_adapter.py` — `RelationalAdapter` via SQLAlchemy + python-oracledb async; migration directory `db/migrations/oracle/`
 - `db/adapters/dynatrace_adapter.py` — `ObservabilityAdapter` for Dynatrace tenants. Two paths: (a) OTLP export to Dynatrace ingest endpoint with API token from Vault, (b) Dynatrace Metric Ingest API for native custom-metric publishing.
-- `db/adapters/openai_compat_embedding_adapter.py` — `EmbeddingAdapter` against any OpenAI-compatible `/v1/embeddings` endpoint. Records `provider_label` on every emitted audit event. Covers vLLM, SGLang, OpenAI, Azure OpenAI, Cohere (where they expose OpenAI shape), AWS Bedrock (via OpenAI shim).
+- `db/adapters/openai_compat_embedding_adapter.py` — `EmbeddingAdapter` against any OpenAI-compatible `/v1/embeddings` endpoint. Sends optional `Authorization: Bearer <key>` (default) or `<custom-header>: <key>` (e.g. Azure `api-key`) plus operator-supplied extra headers. Stores `provider_label` as an adapter property; per-embed audit-event emission of the label lands with Sprint 2 `core/audit` wiring (Sprint 1D ships the storage + plumbing only). Covers vLLM, SGLang, OpenAI, Cohere (OpenAI shape), and Azure-OpenAI / Bedrock when fronted by an OpenAI-compat proxy. Direct Azure-OpenAI URL shape (`/openai/deployments/<name>/embeddings?api-version=...`) requires a separate Azure-specific adapter (deferred — Sprint 1D supports Azure via OpenAI-compat-proxy only).
 - `infra/litellm/config.yaml` extension — Phase 2 production aliases: `cognic-tier1-vllm` (`VLLM_BASE_URL`), `cognic-tier1-sglang` (`SGLANG_BASE_URL`), plus tier-2 equivalents
 - `infra/dev/docker-compose.oracle.yml` — opt-in compose overlay (Oracle XE 21c, ~3 GB image, ~2 GB RAM). Activated via `docker compose -f docker-compose.yml -f docker-compose.oracle.yml up -d`. Most devs run Postgres locally; Oracle compose only when testing the Oracle adapter.
 - `infra/dev/docker-compose.vllm.yml` — opt-in compose overlay for a single-GPU vLLM node (CI runs without; only GPU machines activate)
 - `docs/INFERENCE-BACKENDS.md` — operator guide: when to pick Ollama vs vLLM vs SGLang vs cloud; deployment topology examples
 - `tests/unit/db/test_oracle_adapter.py` — protocol conformance via mock + integration test against Oracle XE marked `@pytest.mark.oracle` (CI matrix has an "oracle" job that brings up the overlay)
 - `tests/unit/db/test_dynatrace_adapter.py` — OTLP path uses configured ingest endpoint + API token; metric ingest API emits Dynatrace-shape metric lines
-- `tests/unit/db/test_openai_compat_embedding_adapter.py` — vLLM-shape and SGLang-shape mock servers; `provider_label` propagates into emitted audit events
+- `tests/unit/db/test_openai_compat_embedding_adapter.py` — vLLM-shape and SGLang-shape mock servers; `provider_label` is exposed as an adapter property (Sprint 1D storage-only); per-embed audit-event emission lands with Sprint 2 `core/audit` wiring
 
 **Exit criteria:**
 - `COGNIC_DB_DRIVER=oracle` + Oracle compose overlay → `/readyz` shows `relational: {driver: oracle, status: ok}`
-- `COGNIC_OBS_DRIVER=dynatrace` + Vault-stored API token → `/readyz` shows `observability: {driver: dynatrace, status: ok}`
-- `COGNIC_EMBED_DRIVER=openai_compat` + `EMBED_BASE_URL` + `EMBED_PROVIDER_LABEL=vllm` → adapter embeds; audit event records `provider_label=vllm`. Switch label to `sglang` → audit records `sglang`.
-- `uv run pytest -v` green (~25 tests total at this point); CI matrix runs oracle/postgres + ollama/openai-compat × langfuse/dynatrace combinations
+- `COGNIC_OBS_DRIVER=dynatrace` + API token resolved by operator (env or secret-mount in Sprint 1D; native runtime Vault resolution lands in Sprint 10) → `/readyz` shows `observability: {driver: dynatrace, status: ok}`
+- `COGNIC_EMBED_DRIVER=openai_compat` + `EMBED_BASE_URL` + `EMBED_PROVIDER_LABEL=vllm` → adapter embeds; `adapter.provider_label == "vllm"` (storage-only in Sprint 1D). Per-embed audit-event emission of the label lands with Sprint 2 `core/audit` wiring; the Sprint 1D contract is the storage + factory plumbing, not the audit-event side.
+- `uv run pytest -v` green (CI runs unit tests for all bundled drivers — postgres / qdrant / vault / ollama / langfuse_otel / oracle / dynatrace / openai_compat — without external dependencies; the `oracle-integration` job exercises the live Oracle XE compose overlay via env-gated `@pytest.mark.skipif(not COGNIC_RUN_ORACLE_INTEGRATION)` tests; dynatrace + openai_compat live-stack verification is operator-side, not CI, since Dynatrace requires a real tenant + API token and openai_compat live verification needs either a GPU-resident vLLM or external API keys).
 
 
 ### Sprint 2 — Core governance primitives *(3 work-units)*

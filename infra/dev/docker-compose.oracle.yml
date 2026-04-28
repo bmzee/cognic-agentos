@@ -1,0 +1,39 @@
+# Cognic AgentOS — Oracle XE 21c compose overlay (Sprint 1D opt-in).
+#
+# Activated via:
+#   docker compose -f infra/dev/docker-compose.yml \
+#                  -f infra/dev/docker-compose.oracle.yml up -d
+#
+# Most devs run Postgres locally; Oracle is opt-in only when testing the
+# Oracle adapter or running `pytest -m oracle` with
+# COGNIC_RUN_ORACLE_INTEGRATION=1.
+#
+# gvenzl/oracle-xe is the standard community image — Oracle's own images
+# are licensed + huge. The :21-slim variant is ~2 GB compressed, ~3 GB
+# unpacked, and needs ~2 GB RAM. First-boot takes ~3-5 minutes while the
+# database initialises; subsequent boots are <30s once the volume is
+# populated.
+
+services:
+  oracle:
+    image: gvenzl/oracle-xe:21-slim
+    container_name: cognic-agentos-oracle
+    environment:
+      ORACLE_PASSWORD: cognic_dev_only  # NEVER used outside dev
+      APP_USER: cognic
+      APP_USER_PASSWORD: cognic_dev_only
+    ports:
+      - "${COGNIC_ORACLE_PORT:-1521}:1521"
+    volumes:
+      - oracle-data:/opt/oracle/oradata
+    healthcheck:
+      # gvenzl ships a /opt/oracle/healthcheck.sh that checks SQL*Plus
+      # connectivity. ~3-5 minutes on first boot before it returns 0.
+      test: ["CMD", "/opt/oracle/healthcheck.sh"]
+      interval: 10s
+      timeout: 5s
+      retries: 60          # generous for first-boot init
+      start_period: 60s    # don't probe for 60s after start
+
+volumes:
+  oracle-data:

@@ -87,29 +87,39 @@ class TestRegistry:
         assert r.kinds() == {"relational", "vector"}
 
     def test_bundled_registry_lists_real_drivers(self) -> None:
-        """``load_bundled_adapters()`` registers the five Sprint-1C drivers
-        in any image where their optional deps are installed (test env =
-        ``--all-extras`` so every module loads cleanly)."""
+        """``load_bundled_adapters()`` registers all eight Sprint-1C+1D
+        drivers in any image where their optional deps are installed
+        (test env = ``--all-extras`` so every module loads cleanly)."""
 
         from cognic_agentos.db.adapters import load_bundled_adapters
 
         results = load_bundled_adapters()
         for module_name in (
+            # Sprint 1C
             "cognic_agentos.db.adapters.postgres_adapter",
             "cognic_agentos.db.adapters.qdrant_adapter",
             "cognic_agentos.db.adapters.vault_adapter",
             "cognic_agentos.db.adapters.ollama_embedding_adapter",
             "cognic_agentos.db.adapters.langfuse_otel_adapter",
+            # Sprint 1D
+            "cognic_agentos.db.adapters.oracle_adapter",
+            "cognic_agentos.db.adapters.dynatrace_adapter",
+            "cognic_agentos.db.adapters.openai_compat_embedding_adapter",
         ):
             assert results[module_name] == "loaded", (
                 f"{module_name} should load in the test env: {results[module_name]}"
             )
 
+        # Sprint 1C drivers
         assert bundled_registry.has("relational", "postgres")
         assert bundled_registry.has("vector", "qdrant")
         assert bundled_registry.has("secret", "vault")
         assert bundled_registry.has("embedding", "ollama")
         assert bundled_registry.has("observability", "langfuse_otel")
+        # Sprint 1D drivers
+        assert bundled_registry.has("relational", "oracle")
+        assert bundled_registry.has("observability", "dynatrace")
+        assert bundled_registry.has("embedding", "openai_compat")
 
     def test_load_bundled_adapters_kernel_resilience(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Simulate kernel-image behaviour: one bundled module's optional
@@ -317,9 +327,14 @@ class TestPerDriverArgs:
         assert _embedding_args(s) == ()
 
     def test_embedding_unknown_returns_empty(self, base_settings: Any) -> None:
+        """Use a placeholder name that's truly not bundled (Sprint 1D
+        added openai_compat to bundled). ``cohere_native`` represents a
+        future Cohere-native (non-OpenAI-shape) plugin pack per ADR-009
+        alternative-adapter list."""
+
         from cognic_agentos.db.adapters.factory import _embedding_args
 
-        s = base_settings.model_copy(update={"embed_driver": "openai_compat"})
+        s = base_settings.model_copy(update={"embed_driver": "cohere_native"})
         assert _embedding_args(s) == ()
 
     def test_observability_langfuse_otel_args(self, base_settings: Any) -> None:
@@ -335,10 +350,67 @@ class TestPerDriverArgs:
         assert _observability_args(s) == ()
 
     def test_observability_unknown_returns_empty(self, base_settings: Any) -> None:
+        """Use a placeholder name that's truly not bundled (Sprint 1D
+        added dynatrace to bundled). ``splunk`` is a future plugin-pack
+        candidate per ADR-009 alternative-adapter list."""
+
         from cognic_agentos.db.adapters.factory import _observability_args
 
-        s = base_settings.model_copy(update={"obs_driver": "dynatrace"})
+        s = base_settings.model_copy(update={"obs_driver": "splunk"})
         assert _observability_args(s) == ()
+
+    # --- Sprint 1D enterprise-driver branches -----------------------
+
+    def test_relational_oracle_args(self, base_settings: Any) -> None:
+        from cognic_agentos.db.adapters.factory import _relational_args
+
+        s = base_settings.model_copy(
+            update={
+                "db_driver": "oracle",
+                "database_url": "oracle+oracledb://u:p@h:1521/?service_name=XEPDB1",
+            }
+        )
+        assert _relational_args(s) == ("oracle+oracledb://u:p@h:1521/?service_name=XEPDB1",)
+
+    def test_observability_dynatrace_args(self, base_settings: Any) -> None:
+        from cognic_agentos.db.adapters.factory import _observability_args
+
+        s = base_settings.model_copy(
+            update={
+                "obs_driver": "dynatrace",
+                "dynatrace_tenant_url": "https://abc.live.dynatrace.com",
+                "dynatrace_api_token": "dt0c01.tok",
+            }
+        )
+        assert _observability_args(s) == (
+            "https://abc.live.dynatrace.com",
+            "dt0c01.tok",
+        )
+
+    def test_embedding_openai_compat_args(self, base_settings: Any) -> None:
+        from cognic_agentos.db.adapters.factory import _embedding_args
+
+        s = base_settings.model_copy(
+            update={
+                "embed_driver": "openai_compat",
+                "embedding_base_url": "http://vllm:8000",
+                "embedding_model": "BAAI/bge-large-en-v1.5",
+                "embedding_dimensions": 1024,
+                "embed_provider_label": "vllm",
+                "embedding_api_key": "sk-test",
+                "embedding_api_key_header": "Authorization",
+                "embedding_extra_headers": {"x-trace": "abc"},
+            }
+        )
+        assert _embedding_args(s) == (
+            "http://vllm:8000",
+            "BAAI/bge-large-en-v1.5",
+            1024,
+            "vllm",
+            "sk-test",
+            "Authorization",
+            {"x-trace": "abc"},
+        )
 
     async def test_close_all_swallows_per_adapter_errors(self, base_settings: Any) -> None:
         """``close_all`` uses contextlib.suppress so one adapter raising
