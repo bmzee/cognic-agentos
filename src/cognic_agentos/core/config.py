@@ -317,7 +317,7 @@ class Settings(BaseSettings):
         description=(
             "Dynatrace API token (header form: Api-Token <value>). "
             "Dev-only when set in source; prod sources via Vault (Sprint 10). "
-            "Required scopes: metrics.read (health probe) + metrics.write (emit_metric)."
+            "Required scopes: metrics.read (health probe) + metrics.ingest (emit_metric)."
         ),
     )
     dynatrace_api_token_vault_path: str | None = Field(
