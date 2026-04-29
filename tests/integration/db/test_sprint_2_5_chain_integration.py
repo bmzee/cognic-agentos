@@ -22,18 +22,24 @@ trip) extend this file in subsequent commits.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import uuid
+from typing import Any
 
 import pytest
 from sqlalchemy import delete, select, update
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 
 from cognic_agentos.core.audit import _chain_heads
 from cognic_agentos.core.canonical import ZERO_HASH
 from cognic_agentos.core.chain_verifier import ChainVerifier
 from cognic_agentos.core.decision_history import _decision_history
-from cognic_agentos.core.escalation import EscalationState, EscalationStore
+from cognic_agentos.core.escalation import (
+    EscalationState,
+    EscalationStore,
+    IllegalEscalationTransition,
+)
 
 
 def _superuser_url(driver: str) -> str:
@@ -215,5 +221,292 @@ async def test_escalation_lifecycle_walks_clean_oracle() -> None:
         store = EscalationStore(engine)
         eid = await _drive_full_lifecycle(store)
         await _assert_lifecycle_landed_clean(engine, store, eid)
+    finally:
+        await engine.dispose()
+
+
+# ===========================================================================
+# T9 — Live race on competing transitions (reviewer-mandated P1 proof)
+# ===========================================================================
+#
+# Drive an escalation to ASSIGNED. From there, _LEGAL_TRANSITIONS
+# allows TWO targets: RESOLVED and RE_ESCALATED. The production
+# contract from T2's append_with_precondition + T3's in-lock
+# validator is that competing transitions serialise on the chain-
+# head FOR UPDATE lock; exactly one wins, and the loser's validator
+# sees the winner has advanced the chain past ASSIGNED + raises
+# IllegalEscalationTransition against the new end-state.
+#
+# **Determinism note (T9-reviewer-P1 fix).** The naive shape —
+# fire two transition() calls via asyncio.gather, assert one wins —
+# is NOT load-bearing. asyncio is single-threaded; if worker A's
+# coroutine runs to completion (commit) before worker B's coroutine
+# even starts reading, the test passes WITHOUT FOR UPDATE having
+# done anything. Sequential A-then-B can't tell us whether the
+# lock is honoured.
+#
+# To force genuine lock contention, T9 uses a test-only
+# ``_PausingEscalationStore`` that pauses inside
+# ``_read_current_state_within_txn`` AFTER the FIRST worker has
+# acquired the chain-head FOR UPDATE lock + read the chain state,
+# but BEFORE its transaction commits. The test then:
+#
+#   1. Schedules worker A (which enters the pause holding the lock).
+#   2. Schedules worker B (whose transition() opens its own txn
+#      and tries SELECT FOR UPDATE on chain_heads — under FOR
+#      UPDATE semantics, this BLOCKS waiting for A's lock).
+#   3. Waits a real-time window long enough for B to reach the
+#      lock attempt and block.
+#   4. Asserts ``not task_b.done()`` — the load-bearing check: if
+#      FOR UPDATE were broken, B would have completed (either
+#      succeeded with the chain still at ASSIGNED, or failed via
+#      the chain-head compare-and-set rowcount mismatch).
+#   5. Releases A → A commits → lock releases → B unblocks.
+#   6. Asserts the standard race outcome: exactly one success, the
+#      loser raises against the advanced state, chain walks clean.
+#
+# SQLite cannot prove this — its async substrate doesn't honour
+# FOR UPDATE row-level locking, so the unit suite (T3) only
+# asserts the validator-shape contract, not the race outcome.
+# Live PG + Oracle are where FOR UPDATE actually serialises.
+
+
+async def _drive_to_assigned(store: EscalationStore) -> uuid.UUID:
+    """Open + ack + assign. Returns the escalation_id at ASSIGNED
+    state, ready for the race."""
+
+    eid, _, _ = await store.open(
+        actor_id="canary",
+        level="p1",
+        reason="t9-race-canary",
+        request_id="req-t9-canary-open",
+    )
+    await store.transition(
+        escalation_id=eid,
+        actor_id="canary",
+        new_state=EscalationState.ACKNOWLEDGED,
+        reason="ack",
+        request_id="req-t9-canary-ack",
+    )
+    await store.transition(
+        escalation_id=eid,
+        actor_id="canary",
+        new_state=EscalationState.ASSIGNED,
+        reason="assign",
+        request_id="req-t9-canary-assign",
+    )
+    return eid
+
+
+class _PausingEscalationStore(EscalationStore):
+    """Test-only EscalationStore that pauses inside
+    ``_read_current_state_within_txn`` after the FIRST worker has
+    acquired the chain-head FOR UPDATE lock + read the chain state,
+    but BEFORE its transaction commits. Subsequent workers'
+    transition() calls block on the SELECT FOR UPDATE that opens
+    DecisionHistoryStore.append_with_precondition's transaction.
+
+    Used by T9's deterministic race test to FORCE lock contention.
+    See the module-level comment block at the top of T9 for the
+    full sequencing.
+    """
+
+    def __init__(
+        self,
+        engine: AsyncEngine,
+        *,
+        paused_event: asyncio.Event,
+        release_event: asyncio.Event,
+    ) -> None:
+        super().__init__(engine)
+        self._paused_event = paused_event
+        self._release_event = release_event
+        self._first_call = True
+
+    async def _read_current_state_within_txn(
+        self, conn: AsyncConnection, escalation_id: uuid.UUID
+    ) -> EscalationState:
+        # Read normally first — the parent reader is unchanged so
+        # the in-lock state observation matches production.
+        state = await super()._read_current_state_within_txn(conn, escalation_id)
+        # On the FIRST call (worker A), pause holding the lock.
+        # Subsequent calls (worker B once unblocked) pass through.
+        if self._first_call:
+            self._first_call = False
+            self._paused_event.set()
+            await self._release_event.wait()
+        return state
+
+
+async def _race_with_forced_lock_contention(
+    engine: AsyncEngine, eid: uuid.UUID
+) -> tuple[list[Any], bool]:
+    """Force two transitions to actually overlap inside the chain-
+    head FOR UPDATE lock by using ``_PausingEscalationStore``.
+    Returns ``(gather_results, lock_held_before_release)`` —
+    ``lock_held_before_release`` is True iff worker B was still
+    blocked waiting for the lock when the test released worker A.
+    Caller asserts on both."""
+
+    paused_event = asyncio.Event()
+    release_event = asyncio.Event()
+    pausing_store = _PausingEscalationStore(
+        engine,
+        paused_event=paused_event,
+        release_event=release_event,
+    )
+
+    async def _worker_a() -> tuple[uuid.UUID, bytes]:
+        return await pausing_store.transition(
+            escalation_id=eid,
+            actor_id="worker-a",
+            new_state=EscalationState.RESOLVED,
+            reason="worker-a wants resolve",
+            request_id="req-t9-deterministic-resolve",
+        )
+
+    async def _worker_b() -> tuple[uuid.UUID, bytes]:
+        # Wait for A to be inside the validator + holding the lock.
+        await paused_event.wait()
+        # Now A holds the chain-head row lock. B's transition()
+        # opens its own txn and tries SELECT FOR UPDATE — under
+        # FOR UPDATE semantics this BLOCKS until A commits.
+        return await pausing_store.transition(
+            escalation_id=eid,
+            actor_id="worker-b",
+            new_state=EscalationState.RE_ESCALATED,
+            reason="worker-b wants re-escalate",
+            request_id="req-t9-deterministic-re-escalate",
+        )
+
+    task_a = asyncio.create_task(_worker_a())
+    task_b = asyncio.create_task(_worker_b())
+
+    # Wait for A to be at the pause (lock held). After this, A is
+    # paused inside the validator with the chain-head row locked.
+    await paused_event.wait()
+
+    # Real-time wait for B to start + reach the SELECT FOR UPDATE
+    # block. asyncio is cooperative; B's task gets scheduled when
+    # we await below. 1.0s is generous: B's path from
+    # `await paused_event.wait()` to the first DB await
+    # (engine.begin) is microseconds; the lock-wait is what should
+    # take time. If FOR UPDATE were NOT honoured, B would complete
+    # entirely (validator + INSERT + commit OR validator + INSERT +
+    # rowcount-mismatch raise) within this window — measured at
+    # tens of milliseconds in practice on PG; Oracle similar.
+    await asyncio.sleep(1.0)
+
+    # Load-bearing assertion: B must still be blocked. If FOR
+    # UPDATE were broken, this is False and the test fails — the
+    # TOCTOU window is open. (The actual assert lives in the test
+    # body so the failure message can mention which DB driver.)
+    lock_held_proof = not task_b.done()
+
+    # Release A → A commits + advances chain → lock released → B
+    # unblocks → B's validator reads NEW state → IllegalEscalationTransition.
+    release_event.set()
+
+    results = list(await asyncio.gather(task_a, task_b, return_exceptions=True))
+    return results, lock_held_proof
+
+
+async def _assert_forced_race_outcome(
+    engine: AsyncEngine,
+    results: list[Any],
+    lock_held_proof: bool,
+    *,
+    driver: str,
+) -> None:
+    """Shared race-outcome assertion. The lock-held proof is
+    asserted FIRST so a regression that opens the TOCTOU window
+    fails with the load-bearing message rather than the secondary
+    "exactly one winner" check."""
+
+    assert lock_held_proof, (
+        f"[{driver}] worker B finished BEFORE A released the chain-head "
+        f"lock — FOR UPDATE was not honoured. The TOCTOU window is open. "
+        f"results: {results!r}"
+    )
+
+    successes = [r for r in results if not isinstance(r, BaseException)]
+    failures = [r for r in results if isinstance(r, BaseException)]
+    assert len(successes) == 1, (
+        f"[{driver}] expected exactly 1 success; got {len(successes)} "
+        f"(both transitions appended → TOCTOU window not closed): {results!r}"
+    )
+    assert len(failures) == 1
+    assert isinstance(failures[0], IllegalEscalationTransition), (
+        f"[{driver}] expected IllegalEscalationTransition; got {failures[0]!r}"
+    )
+    # The loser's validator saw the winner's advanced state. The
+    # winner picked one of {RESOLVED, RE_ESCALATED}; in this
+    # deterministic test, the winner is always worker A (who held
+    # the lock first), so the loser's from_state is RESOLVED.
+    assert failures[0].from_state == EscalationState.RESOLVED, (
+        f"[{driver}] loser saw unexpected from_state: "
+        f"{failures[0].from_state!r} (worker A wins deterministically; "
+        f"loser should see RESOLVED)"
+    )
+
+    # Chain still walks clean — only one transition row landed past
+    # ASSIGNED. Sequence 4 = open(1) + ack(2) + assign(3) + winner(4).
+    report = await ChainVerifier(engine, "decision_history").walk()
+    assert report.is_clean is True, f"[{driver}] chain dirty after race: {report}"
+    assert report.records_checked == 4, (
+        f"[{driver}] expected 4 chain rows after race; "
+        f"got {report.records_checked} "
+        f"(loser's transaction did not roll back?)"
+    )
+
+
+@pytest.mark.postgres
+@_PG_SKIPIF
+async def test_competing_transitions_from_assigned_serialise_postgres() -> None:
+    """Live Postgres: deterministic race using ``_PausingEscalationStore``
+    to force lock contention. Worker A pauses inside the validator
+    holding the chain-head FOR UPDATE lock; worker B's transition()
+    BLOCKS on its own SELECT FOR UPDATE. Asserts B is still blocked
+    when A is released (load-bearing FOR UPDATE proof) + then
+    standard race outcome."""
+
+    # pool_size=4 + max_overflow=0: enough for setup + worker A
+    # (paused) + worker B (blocked) + chain-walk. Mirrors Sprint 2
+    # T12's concurrent-append canary sizing.
+    engine = create_async_engine(
+        _superuser_url("postgres"),
+        pool_size=4,
+        max_overflow=0,
+    )
+    try:
+        await _reset_decision_history(engine)
+        # Drive to ASSIGNED using a regular store (no pause).
+        setup_store = EscalationStore(engine)
+        eid = await _drive_to_assigned(setup_store)
+        # Race using the pausing store.
+        results, lock_held = await _race_with_forced_lock_contention(engine, eid)
+        await _assert_forced_race_outcome(engine, results, lock_held, driver="postgres")
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.oracle
+@_ORACLE_SKIPIF
+async def test_competing_transitions_from_assigned_serialise_oracle() -> None:
+    """Live Oracle XE: same deterministic shape as the PG race
+    test. Oracle's row-level locking semantics on the chain-head
+    SELECT FOR UPDATE are equivalent to PG's for our purposes."""
+
+    engine = create_async_engine(
+        _superuser_url("oracle"),
+        pool_size=4,
+        max_overflow=0,
+    )
+    try:
+        await _reset_decision_history(engine)
+        setup_store = EscalationStore(engine)
+        eid = await _drive_to_assigned(setup_store)
+        results, lock_held = await _race_with_forced_lock_contention(engine, eid)
+        await _assert_forced_race_outcome(engine, results, lock_held, driver="oracle")
     finally:
         await engine.dispose()
