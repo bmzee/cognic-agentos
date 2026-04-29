@@ -68,16 +68,22 @@ class PostgresAdapter:
         import asyncio
 
         from alembic import command
-        from alembic.config import Config
+
+        from cognic_agentos.db.migrations.alembic_config import (
+            make_alembic_config,
+        )
 
         def _run() -> None:
-            config = Config("alembic.ini")
-            # Pin sqlalchemy.url at runtime so the adapter's own URL
-            # wins over whatever env.py would otherwise read from
-            # core.config.Settings. env.py's Round-9 update honours a
-            # pre-set sqlalchemy.url and only falls back to Settings
-            # when none is provided (CLI path).
-            config.set_main_option("sqlalchemy.url", self._url)
+            # ``make_alembic_config`` resolves ``script_location`` from
+            # the package (immune to CWD) + pins ``sqlalchemy.url`` so
+            # the adapter's own URL wins over whatever env.py would
+            # otherwise read from core.config.Settings. The previous
+            # ``Config("alembic.ini")`` shape was CWD-sensitive — it
+            # worked from the repo root in CI but raised
+            # ``CommandError: No 'script_location' key found in
+            # configuration`` from any other CWD or inside the runtime
+            # Docker images (which deliberately do not ship alembic.ini).
+            config = make_alembic_config(self._url)
             command.upgrade(config, "head")
 
         await asyncio.to_thread(_run)

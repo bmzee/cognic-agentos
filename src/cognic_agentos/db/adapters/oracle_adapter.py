@@ -71,16 +71,18 @@ class OracleAdapter:
         import asyncio
 
         from alembic import command
-        from alembic.config import Config
+
+        from cognic_agentos.db.migrations.alembic_config import (
+            make_alembic_config,
+        )
 
         def _run() -> None:
-            config = Config("alembic.ini")
-            # Pin sqlalchemy.url at runtime so the adapter's own URL
-            # wins over whatever env.py would otherwise read from
-            # core.config.Settings. env.py honours a pre-set
-            # sqlalchemy.url and only falls back to Settings when
-            # none is provided (CLI path).
-            config.set_main_option("sqlalchemy.url", self._url)
+            # See PostgresAdapter.run_migrations for the rationale —
+            # this helper resolves script_location from the package +
+            # pins sqlalchemy.url, immune to the previous CWD-sensitive
+            # ``Config("alembic.ini")`` failure mode that broke any
+            # non-repo-root operator path.
+            config = make_alembic_config(self._url)
             command.upgrade(config, "head")
 
         await asyncio.to_thread(_run)

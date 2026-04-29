@@ -15,6 +15,8 @@ the env-gated integration suite (tests/integration/db/).
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -137,4 +139,80 @@ class TestOracleAdapterRunMigrations:
         except NotImplementedError:
             pytest.fail("OracleAdapter.run_migrations still raises NotImplementedError")
         finally:
+            await adapter.close()
+
+
+class TestRunMigrationsCwdIndependence:
+    """Regression test for PR #6 P1 finding.
+
+    Originally both adapters built ``Config("alembic.ini")`` — a
+    CWD-relative path that worked from the repo root in CI but raised
+    ``CommandError: No 'script_location' key found in configuration``
+    from any other CWD or inside the production Docker images (which
+    intentionally do not ship ``alembic.ini``). The fix routes both
+    adapters through ``cognic_agentos.db.migrations.alembic_config.
+    make_alembic_config``, which resolves ``script_location`` from the
+    package via ``Path(__file__).parent`` — immune to CWD.
+
+    These tests exercise the fix by chdir'ing to a CWD that
+    *deliberately does not contain* an ``alembic.ini`` (a tmp_path
+    sibling) and asserting ``run_migrations()`` still applies the
+    migration. They guard against any future regression that
+    re-introduces a relative ``Config(...)`` path.
+    """
+
+    async def test_postgres_run_migrations_works_from_unrelated_cwd(self, tmp_path: Any) -> None:
+        url = f"sqlite+aiosqlite:///{tmp_path / 'pg_cwd.db'}"
+        # CWD is a fresh empty directory with NO alembic.ini.
+        cwd = tmp_path / "unrelated_cwd"
+        cwd.mkdir()
+        assert not (cwd / "alembic.ini").exists()
+
+        adapter = PostgresAdapter(url=url)
+        await adapter.connect()
+        original_cwd = Path.cwd()
+        try:
+            os.chdir(cwd)
+            await adapter.run_migrations()
+            # Verify the migration actually applied (not just no-raise).
+            check_engine = create_async_engine(url)
+            async with check_engine.connect() as conn:
+                result = await conn.execute(
+                    text("SELECT name FROM sqlite_master WHERE type='table'")
+                )
+                tables = {r.name for r in result}
+            await check_engine.dispose()
+            assert "alembic_version" in tables
+            assert "audit_event" in tables
+            assert "decision_history" in tables
+            assert "governance_chain_heads" in tables
+        finally:
+            os.chdir(original_cwd)
+            await adapter.close()
+
+    async def test_oracle_run_migrations_works_from_unrelated_cwd(self, tmp_path: Any) -> None:
+        url = f"sqlite+aiosqlite:///{tmp_path / 'oracle_cwd.db'}"
+        cwd = tmp_path / "unrelated_cwd"
+        cwd.mkdir()
+        assert not (cwd / "alembic.ini").exists()
+
+        adapter = OracleAdapter(url=url)
+        await adapter.connect()
+        original_cwd = Path.cwd()
+        try:
+            os.chdir(cwd)
+            await adapter.run_migrations()
+            check_engine = create_async_engine(url)
+            async with check_engine.connect() as conn:
+                result = await conn.execute(
+                    text("SELECT name FROM sqlite_master WHERE type='table'")
+                )
+                tables = {r.name for r in result}
+            await check_engine.dispose()
+            assert "alembic_version" in tables
+            assert "audit_event" in tables
+            assert "decision_history" in tables
+            assert "governance_chain_heads" in tables
+        finally:
+            os.chdir(original_cwd)
             await adapter.close()
