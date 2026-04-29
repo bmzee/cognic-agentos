@@ -31,10 +31,18 @@ from pathlib import Path
 #: branch_floor) — both as ratios in [0, 1]. Path is relative to the
 #: repo root (matches the keys coverage.json emits).
 _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
+    # Sprint 2 critical-controls quartet — chain-of-custody substrate.
     ("src/cognic_agentos/core/audit.py", 0.95, 0.90),
     ("src/cognic_agentos/core/canonical.py", 0.95, 0.90),
     ("src/cognic_agentos/core/chain_verifier.py", 0.95, 0.90),
     ("src/cognic_agentos/core/decision_history.py", 0.95, 0.90),
+    # Sprint 2.5 critical-controls triplet — operational primitives
+    # consuming the Sprint-2 substrate. All three named in AGENTS.md
+    # critical-controls list; all three carry the same per-file
+    # floors as Sprint 2 (95% line / 90% branch).
+    ("src/cognic_agentos/core/sla.py", 0.95, 0.90),
+    ("src/cognic_agentos/core/escalation.py", 0.95, 0.90),
+    ("src/cognic_agentos/core/guardrails.py", 0.95, 0.90),
 )
 
 
