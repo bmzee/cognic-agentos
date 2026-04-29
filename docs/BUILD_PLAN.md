@@ -190,14 +190,15 @@ Sprint 1 is split into four focused sub-sprints for a clean bootstrap. Each ship
 
 **Deliverables:**
 - `core/schemas.py` — `CognicAction`, `ComplianceVerdict`, `FieldStatus` enums + `FieldMeta` frozen dataclass
-- `core/canonical.py` — `canonical_bytes(obj)` + `hash_record(canonical, prev_hash)` (single source of truth for canonical form)
-- `core/audit.py` — `AuditStore.append(event)` (INSERT-only, fail-loud, hash-chained via `governance_chain_heads` lock-row)
-- `core/decision_history.py` — `DecisionHistoryStore.append(record)` returning `(record_id, hash)`
-- `core/chain_verifier.py` — `walk(table)` + `verify_record(record_id)` returning typed `TamperReport`
+- `core/canonical.py` — `canonical_bytes(obj)` + `hash_record(canonical, prev_hash)` (single source of truth for canonical form). Round-2..4 review hardenings: NaN/Infinity dict-key bypass closed, naive datetimes rejected, tuples rejected (collide with lists in JSON), non-string Enum values rejected, non-finite Decimals rejected
+- `core/audit.py` — `AuditStore.append(event)` (INSERT-only, fail-loud, hash-chained via `governance_chain_heads` lock-row). Payload normalised through canonical-form round-trip at method boundary; chain-head UPDATE is compare-and-set verified
+- `core/decision_history.py` — `DecisionHistoryStore.append(record)` returning `(record_id, hash)`. Same shape as `AuditStore` plus an `actor_id` field on `DecisionRecord`: merged into the normalised payload before hashing/storage with strict equality enforcement against any pre-existing `payload['actor_id']` and `str | None` runtime type-checking on both paths (raw payload + dataclass field)
+- `core/chain_verifier.py` — `ChainVerifier(engine, chain_id)` with `walk()` + `verify_record(record_id)` returning typed `TamperReport`. Five `BreakKind` values: `hash_mismatch`, `sequence_gap`, `prev_hash_mismatch`, `head_mismatch` (catches `governance_chain_heads` row tamper; walk() locks the head row with `SELECT ... FOR UPDATE` for snapshot safety against concurrent appenders), `record_not_found`. NULL passthrough on `iso_controls` + `payload` (no coercion that would mask DBA-side NULL tamper)
 - `db/engine.py` — async SQLAlchemy engine + session factory
-- Alembic baseline + initial migration `0001_initial_governance_schema.py` — `governance_chain_heads`, `audit_event`, `decision_history` (single migration set; dialect-portable via SQLAlchemy types)
-- `tools/check_critical_coverage.py` — per-file coverage gate (95% line + 90% branch on the four critical-controls modules)
-- `docs/operator-runbooks/governance-tables-grants.md` — Postgres + Oracle GRANT snippets for runtime + evidence-admin roles
+- `db/types.py` — dialect-portable governance column types: `chain_hash_column_type()` (Postgres BYTEA / Oracle RAW(32) / SQLite BLOB) + `GovernanceJSON` `TypeDecorator` (Postgres + SQLite native JSON / Oracle CLOB-with-app-side-serialisation; bridges SQLAlchemy 2.0.49's missing `oracle.JSON` type)
+- Alembic baseline + initial migration `0001_initial_governance_schema.py` — `governance_chain_heads`, `audit_event`, `decision_history` (single migration set; dialect-portable via SQLAlchemy types). `audit_event` (not `audit`) avoids Oracle's reserved `AUDIT` identifier; `sequence` is application-assigned (no `Identity()` — would double-source vs the chain-head FOR UPDATE lock)
+- `tools/check_critical_coverage.py` — per-file coverage gate (≥95% line + ≥90% branch on each of the four critical-controls modules); replaces a combined `--cov-fail-under=95` shape that masks an under-covered file behind a well-covered sibling
+- `docs/operator-runbooks/governance-tables-grants.md` — Postgres + Oracle GRANT snippets for runtime + evidence-admin roles. Two pinned Oracle paths for the unqualified-table-resolution problem (private synonyms via `CREATE ANY SYNONYM` OR `CREATE SYNONYM` per-user, OR per-session `ALTER SESSION SET CURRENT_SCHEMA`)
 
 **Tests:**
 - `test_canonical.py` — golden-hash tests (NaN/Inf rejection; datetime / UUID / bytes round-trip; dict-key sort)
@@ -208,12 +209,13 @@ Sprint 1 is split into four focused sub-sprints for a clean bootstrap. Each ship
 - `test_runtime_role_is_append_only.py` — runtime role denied UPDATE/DELETE; positive canary drives `AuditStore.append()` through the runtime-role DSN
 
 **Exit criteria:**
-- Hash chain tamper-evident (verifier raises on mutated row, deleted row, corrupted prev_hash)
-- Append serialises correctly under concurrent load on real Postgres + Oracle (no duplicate sequences, no duplicate hashes)
-- Critical-controls modules at ≥95% line + ≥90% branch coverage (per-file CI gate)
-- Operator runbook applied: runtime role provably append-only on both Postgres + Oracle
-- Both `OracleAdapter.run_migrations` and `PostgresAdapter.run_migrations` real (no `NotImplementedError`)
-- Suite grows from 264 (Phase 1 close) to ~340; coverage stays ≥93% global
+- Hash chain tamper-evident (verifier raises on mutated row, deleted row, corrupted prev_hash, AND mutated `governance_chain_heads` row)
+- Append serialises correctly under concurrent load on real Postgres + Oracle (no duplicate sequences, no duplicate hashes); `walk()` snapshot-safe against concurrent appenders via the same `SELECT ... FOR UPDATE` primitive
+- Critical-controls modules at ≥95% line + ≥90% branch coverage, enforced per-file (not a combined target) via `tools/check_critical_coverage.py` in the `lint + test` CI job
+- Operator runbook applied: runtime role provably append-only on both Postgres + Oracle (positive canary drives `AuditStore.append()` through the runtime-role DSN, not just SELECT)
+- Both `OracleAdapter.run_migrations` and `PostgresAdapter.run_migrations` real (no `NotImplementedError`); `db/migrations/env.py` honours pre-set `sqlalchemy.url` (programmatic adapter invocation) before falling back to `Settings.database_url` (CLI invocation)
+- Suite grows from 264 (Phase 1 close) to ~470 (≈+200 across 11 implementation tasks); coverage stays ≥93% global
+- New `postgres-integration` CI job mirrors the `oracle-integration` shape; both run live-DB tests against compose services
 - No ADR changes (implements ADR-001 / ADR-006 / ADR-009 hooks)
 
 ### Sprint 2.5 — Operational governance primitives *(1 work-unit)*
