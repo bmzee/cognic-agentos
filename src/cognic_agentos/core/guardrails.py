@@ -51,7 +51,7 @@ import re
 from enum import StrEnum
 from typing import ClassVar, Protocol, runtime_checkable
 
-from cognic_agentos.core.audit import AuditStore
+from cognic_agentos.core.audit import AuditEvent, AuditStore
 
 
 class GuardrailDirection(StrEnum):
@@ -172,15 +172,99 @@ class GuardrailPipeline:
         request_id: str,
         tenant_id: str | None = None,
     ) -> PipelineResult:
-        """Run the configured guardrails over ``content``. T7 wires
-        the body. Until then, calling this method raises so a
-        half-built pipeline can't silently accept input.
+        """Run the configured guardrails over ``content`` + emit one
+        ``audit_event`` per tripped guardrail.
+
+        Order of operations:
+
+          1. Run every guardrail synchronously over ``content``.
+             No short-circuit on first trip — auditors want the full
+             picture (e.g. "input matched both PII AND injection
+             patterns").
+          2. Aggregate per-guardrail ``GuardrailResult`` into the
+             ``PipelineResult`` shape; ``passed`` is True iff every
+             constituent guardrail passed.
+          3. For each tripped guardrail, emit ONE
+             ``AuditEvent`` via the supplied ``AuditStore``. One
+             audit row per trip (NOT per pipeline run) so the chain
+             carries diagnostic granularity. Emission order matches
+             pipeline order: chain sequence == pipeline position for
+             trips in a single check() call.
+          4. Return the aggregated ``PipelineResult``.
+
+        Audit-emission shape:
+
+          - ``event_type``: ``"guardrail.trip"`` (canonical chain
+            discriminator for guardrail emissions).
+          - ``request_id``: caller-supplied; ties the trip back to
+            the originating request.
+          - ``tenant_id``: caller-supplied; carried through for
+            Wave-2 multi-tenant policy enforcement.
+          - ``payload``: dict with ``guardrail_name``, ``direction``,
+            and ``matches`` (list — canonical-form snapshot of the
+            tuple from ``GuardrailResult.matches``).
+            **PII privacy:** ``matches`` is the named-pattern tuple
+            from T6 filters, NEVER raw matched text. The pipeline
+            INTENTIONALLY does NOT persist ``GuardrailResult.detail``
+            into the audit payload — ``detail`` is free-form text
+            from arbitrary ``Guardrail`` implementations, and a pack-
+            supplied filter could legitimately put raw matched text
+            (PII, debug context) in there. Persisting that into the
+            immutable chain would defeat the T5/T6 privacy contract.
+            ``detail`` stays on the in-process ``GuardrailResult``
+            for caller-side diagnostics that DON'T cross into
+            evidence. (T7-reviewer-P1 fix.)
+          - ``iso_controls``: ``("ISO42001.A.7.4",)`` — the AI
+            system risk-control mapping for guardrail trips.
+
+        Fail-loud emission posture: if ``AuditStore.append`` raises,
+        ``check`` raises. Mirrors Sprint 2 R3 fail-loud: the request-
+        path caller (LLM gateway, harness) decides whether to block
+        the request, retry the audit, or surface a 5xx. The pipeline
+        does NOT silently swallow audit failures — that would let a
+        guardrail trip slip through without evidence, defeating the
+        entire purpose of the chain.
+
+        Note on emission ordering vs pipeline aggregation: trips are
+        accumulated first (step 2), then emitted in a separate loop
+        (step 3). This means a fail-loud audit failure on the FIRST
+        emission still propagates with the per-guardrail
+        ``GuardrailResult`` set already aggregated — but no
+        ``PipelineResult`` is returned (the exception cuts out before
+        step 4). That's the correct posture: the caller sees the
+        emission failure, not a partial result.
         """
 
-        raise NotImplementedError(
-            "GuardrailPipeline.check is wired in Sprint 2.5 T7; T5 ships "
-            "shapes only. See docs/superpowers/plans/"
-            "2026-04-29-sprint-2.5-operational-primitives.md."
+        results = tuple(g.check(content) for g in self._guardrails)
+        passed = all(r.passed for r in results)
+
+        for r in results:
+            if r.passed:
+                continue
+            await self._audit_store.append(
+                AuditEvent(
+                    event_type="guardrail.trip",
+                    request_id=request_id,
+                    tenant_id=tenant_id,
+                    # NOTE: ``GuardrailResult.detail`` is INTENTIONALLY
+                    # excluded — it's free-form text from arbitrary
+                    # filter implementations that could leak raw
+                    # matched PII into the immutable chain. See the
+                    # method docstring's ``payload`` section for the
+                    # T7-reviewer-P1 rationale.
+                    payload={
+                        "guardrail_name": r.guardrail_name,
+                        "direction": direction.value,
+                        "matches": list(r.matches),
+                    },
+                    iso_controls=("ISO42001.A.7.4",),
+                )
+            )
+
+        return PipelineResult(
+            direction=direction,
+            passed=passed,
+            results=results,
         )
 
 
@@ -215,7 +299,13 @@ class RegexPIIGuardrail:
     GuardrailResult``).
     """
 
-    name: ClassVar[str] = "pii.regex.baseline"
+    # ``name`` is a plain class attribute (immutable str — no RUF012
+    # mutable-default flag) and is also the Protocol-required
+    # instance variable (mypy treats class-level str assignment as
+    # matching ``name: str`` on the Protocol). ``_PATTERNS`` is
+    # genuinely shared mutable-default-ish state, so it gets
+    # ClassVar to satisfy RUF012.
+    name: str = "pii.regex.baseline"
 
     _PATTERNS: ClassVar[dict[str, re.Pattern[str]]] = {
         # Credit card: 13-19 digits, optionally interleaved with
@@ -276,7 +366,7 @@ class InjectionGuardrail:
     ``Guardrail`` Protocol.
     """
 
-    name: ClassVar[str] = "injection.regex.baseline"
+    name: str = "injection.regex.baseline"
 
     _PATTERNS: ClassVar[dict[str, re.Pattern[str]]] = {
         # "ignore [all] previous instructions" — verb forms ignore /
