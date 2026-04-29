@@ -163,7 +163,9 @@ name = "cognic-agentos"
 version = "0.0.1"
 source = { editable = "." }
 dependencies = [
+    { name = "alembic" },
     { name = "fastapi" },
+    { name = "greenlet" },
     { name = "httpx" },
     { name = "opentelemetry-api" },
     { name = "opentelemetry-exporter-otlp" },
@@ -175,12 +177,12 @@ dependencies = [
     { name = "pydantic-settings" },
     { name = "python-json-logger" },
     { name = "pyyaml" },
+    { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
 [package.optional-dependencies]
 adapters = [
-    { name = "alembic" },
     { name = "asyncpg" },
     { name = "cryptography" },
     { name = "hvac" },
@@ -189,7 +191,6 @@ adapters = [
     { name = "pgvector" },
     { name = "qdrant-client" },
     { name = "redis" },
-    { name = "sqlalchemy", extra = ["asyncio"] },
 ]
 dev = [
     { name = "aiosqlite" },
@@ -217,10 +218,11 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aiosqlite", marker = "extra == 'dev'", specifier = ">=0.20" },
-    { name = "alembic", marker = "extra == 'adapters'", specifier = ">=1.16" },
+    { name = "alembic", specifier = ">=1.16" },
     { name = "asyncpg", marker = "extra == 'adapters'", specifier = ">=0.31" },
     { name = "cryptography", marker = "extra == 'adapters'", specifier = ">=45" },
     { name = "fastapi", specifier = ">=0.116" },
+    { name = "greenlet", specifier = ">=3.0" },
     { name = "httpx", specifier = ">=0.28" },
     { name = "hvac", marker = "extra == 'adapters'", specifier = ">=2.4" },
     { name = "langfuse", marker = "extra == 'adapters'", specifier = ">=3.0" },
@@ -244,7 +246,7 @@ requires-dist = [
     { name = "redis", marker = "extra == 'adapters'", specifier = ">=5.3" },
     { name = "respx", marker = "extra == 'dev'", specifier = ">=0.22" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.9" },
-    { name = "sqlalchemy", extras = ["asyncio"], marker = "extra == 'adapters'", specifier = ">=2.0" },
+    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0" },
     { name = "types-pyyaml", marker = "extra == 'dev'" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.35" },
 ]

@@ -48,19 +48,44 @@ class OracleAdapter:
             raise RuntimeError("connect() must be awaited first")
         return self._session_factory()
 
-    async def run_migrations(self, dir: str) -> None:
-        # Per CLAUDE.md production-grade rule: production code paths never
-        # silently no-op. Alembic invocation lands in Sprint 2 alongside
-        # core/ schema work; until then this method fails loudly so a
-        # caller cannot accidentally believe migrations ran. See ADR-009
-        # §"Migration policy".
-        raise NotImplementedError(
-            "OracleAdapter.run_migrations is wired in Sprint 2 alongside "
-            "core/ Alembic migrations (ADR-009 §'Migration policy'). "
-            "Sprint 1D ships the protocol-method shape only; "
-            "db/migrations/oracle/ is pre-reserved for the Oracle-dialect "
-            "migration set."
+    async def run_migrations(self, dir: str | None = None) -> None:
+        """Run Alembic upgrade head against this adapter's database URL.
+
+        **OPERATOR-CALLABLE ONLY.** Per the Sprint-2 doctrine amendment
+        landed in PR #5: the lifespan does not auto-invoke this.
+        Production deployments run ``uv run alembic upgrade head`` (or
+        a Kubernetes job) ahead of rolling out the runtime container.
+        This method exists for dev tooling + integration tests
+        (programmatic invocation that doesn't require shelling out).
+
+        ``dir`` is accepted for backwards compatibility with the
+        Sprint 1D protocol shape but ignored: Sprint 2 anchors the
+        canonical alembic env at ``src/cognic_agentos/db/migrations/``.
+        ``db/migrations/oracle/`` is reserved for future Oracle-only
+        PL/SQL hooks (empty in Sprint 2).
+
+        Idempotent: alembic upgrade head is a no-op when
+        alembic_version already records HEAD.
+        """
+
+        import asyncio
+
+        from alembic import command
+
+        from cognic_agentos.db.migrations.alembic_config import (
+            make_alembic_config,
         )
+
+        def _run() -> None:
+            # See PostgresAdapter.run_migrations for the rationale —
+            # this helper resolves script_location from the package +
+            # pins sqlalchemy.url, immune to the previous CWD-sensitive
+            # ``Config("alembic.ini")`` failure mode that broke any
+            # non-repo-root operator path.
+            config = make_alembic_config(self._url)
+            command.upgrade(config, "head")
+
+        await asyncio.to_thread(_run)
 
     async def close(self) -> None:
         if self._engine is not None:

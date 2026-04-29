@@ -51,8 +51,27 @@ jobs:
       - name: mypy (strict)
         run: uv run mypy src tests
 
-      - name: pytest
-        run: uv run pytest -v
+      - name: pytest (with branch + JSON coverage report)
+        # Branch coverage + JSON output feed the per-file critical-
+        # controls gate below. The default suite excludes the
+        # @pytest.mark.postgres and @pytest.mark.oracle live-DB tests
+        # — those run in their own jobs against compose services.
+        run: |
+          uv run pytest -v \
+            --cov=cognic_agentos \
+            --cov-branch \
+            --cov-report=json \
+            --cov-report=term-missing \
+            -m "not postgres and not oracle"
+
+      - name: Per-file critical-controls coverage gate (≥95% line / ≥90% branch)
+        # Sprint 2 amendment in PR #5: each critical-controls module
+        # (core/audit, core/canonical, core/chain_verifier,
+        # core/decision_history) must independently meet the
+        # threshold. A combined --cov-fail-under check would let one
+        # well-covered file mask another below the floor; the per-file
+        # gate ensures no critical module silently drops.
+        run: uv run python tools/check_critical_coverage.py
 
   image-size-budget:
     # Sprint 1C: image is split. Kernel ≤120 MiB; default-adapters ≤220 MiB.
@@ -218,15 +237,66 @@ jobs:
                          -f infra/dev/docker-compose.oracle.yml logs oracle
           exit 1
 
-      - name: Run @pytest.mark.oracle tests
+      - name: Apply governance migrations + provision runtime role
+        # Sprint 2 Task 12: same setup as the postgres-integration job —
+        # apply the migration as the schema owner, then provision
+        # agentos_runtime + GRANTs + cross-schema synonyms (Path A.1
+        # from the operator runbook, since CI uses SYSTEM which holds
+        # CREATE ANY SYNONYM).
         env:
-          # COGNIC_RUN_ORACLE_INTEGRATION is the env-gate the tests use
-          # via @pytest.mark.skipif. Without this set the live tests
-          # self-skip even when -m oracle selects them.
+          COGNIC_DATABASE_URL: oracle+oracledb://cognic:cognic_dev_only@localhost:1521/?service_name=XEPDB1
+        run: |
+          set -euo pipefail
+          # 1. Apply the governance migration as cognic (schema owner).
+          uv run alembic upgrade head
+          # 2. Provision agentos_runtime (via SYSTEM) + apply GRANTs
+          #    from cognic + create cross-schema synonyms (via SYSTEM,
+          #    using CREATE ANY SYNONYM). Mirrors operator-runbook
+          #    Step 2 + Step 3 + Step 3.5 / Path A.1.
+          docker exec -i cognic-agentos-oracle \
+            sqlplus -S 'system/cognic_dev_only@//localhost:1521/XEPDB1' <<'SQL'
+          WHENEVER SQLERROR EXIT SQL.SQLCODE
+          CREATE USER agentos_runtime IDENTIFIED BY "runtime_dev_only";
+          GRANT CREATE SESSION TO agentos_runtime;
+          CREATE OR REPLACE SYNONYM agentos_runtime.audit_event             FOR cognic.audit_event;
+          CREATE OR REPLACE SYNONYM agentos_runtime.decision_history        FOR cognic.decision_history;
+          CREATE OR REPLACE SYNONYM agentos_runtime.governance_chain_heads  FOR cognic.governance_chain_heads;
+          EXIT;
+          SQL
+          docker exec -i cognic-agentos-oracle \
+            sqlplus -S 'cognic/cognic_dev_only@//localhost:1521/XEPDB1' <<'SQL'
+          WHENEVER SQLERROR EXIT SQL.SQLCODE
+          GRANT INSERT, SELECT          ON audit_event             TO agentos_runtime;
+          GRANT INSERT, SELECT          ON decision_history        TO agentos_runtime;
+          GRANT INSERT, SELECT, UPDATE  ON governance_chain_heads  TO agentos_runtime;
+          EXIT;
+          SQL
+
+      - name: Run @pytest.mark.oracle tests (canary + concurrent first)
+        # Run runtime-role canary + concurrent-append tests BEFORE
+        # the alembic round-trip (which drops + recreates the tables,
+        # discarding the GRANTs + synonyms). Same ordering rationale
+        # as the postgres-integration job.
+        env:
           COGNIC_RUN_ORACLE_INTEGRATION: "1"
           COGNIC_DB_DRIVER: oracle
           COGNIC_DATABASE_URL: oracle+oracledb://cognic:cognic_dev_only@localhost:1521/?service_name=XEPDB1
-        run: uv run pytest -m oracle -v
+          COGNIC_DATABASE_URL_ORACLE_TEST: oracle+oracledb://cognic:cognic_dev_only@localhost:1521/?service_name=XEPDB1
+          COGNIC_RUNTIME_DATABASE_URL_ORACLE_TEST: oracle+oracledb://agentos_runtime:runtime_dev_only@localhost:1521/?service_name=XEPDB1
+        run: |
+          uv run pytest -m oracle -v \
+            tests/integration/db/test_runtime_role_is_append_only.py \
+            tests/integration/db/test_concurrent_append.py
+
+      - name: Run @pytest.mark.oracle tests (alembic round-trip last)
+        env:
+          COGNIC_RUN_ORACLE_INTEGRATION: "1"
+          COGNIC_DB_DRIVER: oracle
+          COGNIC_DATABASE_URL: oracle+oracledb://cognic:cognic_dev_only@localhost:1521/?service_name=XEPDB1
+          COGNIC_DATABASE_URL_ORACLE_TEST: oracle+oracledb://cognic:cognic_dev_only@localhost:1521/?service_name=XEPDB1
+        run: |
+          uv run pytest -m oracle -v \
+            tests/integration/db/test_alembic_migrations.py
 
       - name: Tear down overlay
         if: always()
@@ -234,3 +304,123 @@ jobs:
           docker compose -f infra/dev/docker-compose.yml \
                          -f infra/dev/docker-compose.oracle.yml \
                          down -v
+
+  postgres-integration:
+    # Sprint 2: live Postgres compose service + pytest -m postgres.
+    # Runs on PR + main; failure blocks merge. Default `lint + test`
+    # job runs all non-marked tests; the @pytest.mark.postgres tests
+    # self-skip via `skipif(not COGNIC_RUN_POSTGRES_INTEGRATION)` —
+    # this job is the only place those tests execute.
+    #
+    # Mirrors the `oracle-integration` shape. Postgres is much faster
+    # to start than Oracle XE (~5s vs 3-5min), so the timeout is
+    # tighter.
+    name: postgres integration (live PG compose service)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.5.29"
+          enable-cache: true
+
+      - name: Read .python-version
+        id: python-version
+        run: echo "version=$(cat .python-version)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ steps.python-version.outputs.version }}
+
+      - name: uv sync (frozen + all extras)
+        run: uv sync --frozen --all-extras
+
+      - name: Bring up Postgres compose service
+        run: |
+          docker compose -f infra/dev/docker-compose.yml up -d postgres
+
+      - name: Wait for Postgres healthy
+        run: |
+          set -euo pipefail
+          # pg_isready is the bundled health probe; the compose
+          # healthcheck retries up to 10x at 5s = 50s max. We poll
+          # the same way for log-friendly output.
+          for i in $(seq 1 24); do
+            status=$(docker inspect cognic-agentos-postgres --format='{{.State.Health.Status}}')
+            echo "[${i}/24] postgres health: ${status}"
+            if [ "${status}" = "healthy" ]; then exit 0; fi
+            sleep 5
+          done
+          echo "::error::Postgres did not reach healthy state in 2 minutes"
+          docker compose -f infra/dev/docker-compose.yml logs postgres
+          exit 1
+
+      - name: Apply governance migrations + provision runtime role
+        # Sprint 2 Task 12: the runtime-role canary
+        # (test_runtime_role_is_append_only.py) needs a non-superuser
+        # DSN with the operator-runbook GRANTs already applied. We do
+        # both setup steps inline here so the canary can prove the
+        # GRANT shape works against the same migration-shaped tables a
+        # bank deploys.
+        env:
+          PGPASSWORD: cognic_dev_only
+          COGNIC_DATABASE_URL: postgresql+asyncpg://cognic:cognic_dev_only@localhost:5432/cognic_agentos
+        run: |
+          set -euo pipefail
+          # 1. Apply the governance migration as the superuser (cognic
+          #    owns the database in compose).
+          uv run alembic upgrade head
+          # 2. Provision agentos_runtime + apply the operator-runbook
+          #    GRANTs. Mirror docs/operator-runbooks/governance-tables-grants.md
+          #    Step 2 + Step 3 verbatim — if this drifts from the
+          #    runbook, the canary stops being a proof of the runbook.
+          psql -h localhost -U cognic -d cognic_agentos -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE ROLE agentos_runtime LOGIN PASSWORD 'runtime_dev_only';
+          GRANT INSERT, SELECT          ON audit_event             TO agentos_runtime;
+          GRANT INSERT, SELECT          ON decision_history        TO agentos_runtime;
+          GRANT INSERT, SELECT, UPDATE  ON governance_chain_heads  TO agentos_runtime;
+          SQL
+
+      - name: Run @pytest.mark.postgres tests (canary + concurrent first)
+        # Run the runtime-role canary + concurrent-append tests BEFORE
+        # the alembic round-trip — the round-trip drops + recreates the
+        # tables, which discards the GRANTs. If we ran the canary after,
+        # it would fail with "table or view does not exist" / "permission
+        # denied for SCHEMA public" / similar, since the recreated
+        # tables would have no grants. Split-invocation guarantees the
+        # canary tests run against the same physical tables the GRANTs
+        # were applied to.
+        env:
+          COGNIC_RUN_POSTGRES_INTEGRATION: "1"
+          COGNIC_DB_DRIVER: postgres
+          COGNIC_DATABASE_URL: postgresql+asyncpg://cognic:cognic_dev_only@localhost:5432/cognic_agentos
+          COGNIC_DATABASE_URL_POSTGRES_TEST: postgresql+asyncpg://cognic:cognic_dev_only@localhost:5432/cognic_agentos
+          COGNIC_RUNTIME_DATABASE_URL_POSTGRES_TEST: postgresql+asyncpg://agentos_runtime:runtime_dev_only@localhost:5432/cognic_agentos
+        run: |
+          uv run pytest -m postgres -v \
+            tests/integration/db/test_runtime_role_is_append_only.py \
+            tests/integration/db/test_concurrent_append.py
+
+      - name: Run @pytest.mark.postgres tests (alembic round-trip last)
+        # Alembic round-trip drops + recreates tables; ordering here
+        # ensures the GRANTs the canary depends on aren't disturbed
+        # before the canary asserts on them.
+        env:
+          COGNIC_RUN_POSTGRES_INTEGRATION: "1"
+          COGNIC_DB_DRIVER: postgres
+          COGNIC_DATABASE_URL: postgresql+asyncpg://cognic:cognic_dev_only@localhost:5432/cognic_agentos
+          COGNIC_DATABASE_URL_POSTGRES_TEST: postgresql+asyncpg://cognic:cognic_dev_only@localhost:5432/cognic_agentos
+        run: |
+          uv run pytest -m postgres -v \
+            tests/integration/db/test_alembic_migrations.py
+
+      - name: Tear down compose service
+        if: always()
+        run: |
+          docker compose -f infra/dev/docker-compose.yml down -v
