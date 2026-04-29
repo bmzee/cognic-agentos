@@ -226,15 +226,19 @@ Sprint 1 is split into four focused sub-sprints for a clean bootstrap. Each ship
 - `core/sla.py` — SLA timer primitive (deadline computation, breach detection)
 - `core/escalation.py` — escalation lifecycle state machine; transitions emit hash-chained events into `decision_history`
 - `core/guardrails.py` — pluggable input/output filter pipeline (PII, injection — initial filters regex-based; ML filters Wave 2)
+- `core/decision_history.append_with_precondition[T]` — additive primitive on the Sprint-2 critical-controls module: async caller-supplied validator runs INSIDE the chain-head FOR UPDATE transaction; T-typed return flows into a synchronous record_builder. Closes the TOCTOU window for state-machine validators (added in plan review; load-bearing for `core/escalation.transition`).
 
 **Tests:**
 - `test_sla.py` — deadline computation + breach detection
 - `test_escalation.py` — lifecycle transitions emit hash-chained events
 - `test_guardrails.py` — known-PII input blocked; clean input passes
+- `tests/integration/db/test_sprint_2_5_chain_integration.py` — live PG + Oracle: escalation lifecycle + chain integrity (T8); deterministic `_PausingEscalationStore`-driven race proof for FOR UPDATE serialisation (T9, reviewer-mandated); guardrail-pipeline trip + audit chain integrity + PII privacy contract end-to-end (T10).
 
 **Exit criteria:**
 - All three operational primitives integrated with Sprint 2's audit / decision_history / chain_verifier
 - Suite grows by ~25 tests; coverage stays ≥93% global
+
+**Status:** **CLOSED on `feat/sprint-2.5-operational-primitives`** (2026-04-29). Suite grew from the Sprint-2 merge baseline (468 unit + 18 integration = 486) by **+191 unit + +6 integration** (vs the projected ~25); 96% global coverage. All seven critical-controls modules (Sprint 2 quartet + Sprint 2.5 triplet) pass per-file `≥95% line / ≥90% branch`. See [closeout note](closeouts/2026-04-29-sprint-2.5-operational-primitives.md). **12 commits (T1–T12)** atop the already-merged plan-of-record PR #7 (`4733b52` on `main`); branch READY-FOR-GATE awaiting push/PR/merge authorization.
 
 ### Sprint 3 — LLM gateway + provider-honesty *(2 work-units)*
 

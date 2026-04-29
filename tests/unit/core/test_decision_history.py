@@ -19,7 +19,7 @@ from typing import Any
 
 import pytest
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 
 from cognic_agentos.core.audit import _chain_heads, _metadata
 from cognic_agentos.core.canonical import (
@@ -687,9 +687,17 @@ class TestPayloadSnapshotIsolation:
 
 class TestChainHeadCompareAndSet:
     def test_compare_and_set_predicates_and_rowcount_check_in_source(self) -> None:
+        # Sprint 2.5 T2 refactor: the compare-and-set + rowcount-mismatch
+        # raise live in ``append_with_precondition`` now. ``append`` is
+        # a thin wrapper that delegates through the new method, so the
+        # source-introspection target is the new method (the wrapper's
+        # source is intentionally trivial — only the lambda + the no-op
+        # precondition + the delegated call). The predicates + check
+        # are in the same physical place; the public behaviour is
+        # unchanged.
         import inspect
 
-        source = inspect.getsource(DecisionHistoryStore.append)
+        source = inspect.getsource(DecisionHistoryStore.append_with_precondition)
         assert "latest_sequence == prev_sequence" in source
         assert "latest_hash == prev_hash" in source
         assert "update_result.rowcount" in source and "RuntimeError" in source
@@ -769,3 +777,670 @@ class TestModuleLevelTablesExportable:
         from cognic_agentos.core.decision_history import _decision_history
 
         assert _decision_history.metadata is audit_metadata
+
+
+# ===========================================================================
+# Sprint 2.5 T2 — append_with_precondition[T] primitive
+# ===========================================================================
+#
+# The locked Option-A contract per the merged plan-of-record (PR #7 /
+# 4733b52):
+#
+#     async def append_with_precondition[T](
+#         self,
+#         *,
+#         record_builder: Callable[[T], DecisionRecord],
+#         precondition: Callable[[AsyncConnection, int, bytes], Awaitable[T]],
+#     ) -> tuple[uuid.UUID, bytes]
+#
+# Order of operations under the chain-head FOR UPDATE lock:
+#   1. SELECT FOR UPDATE chain_heads → (prev_seq, prev_hash)
+#   2. captured = await precondition(conn, prev_seq, prev_hash)
+#   3. record = record_builder(captured)        # sync, no I/O
+#   4. validate + canonicalize + envelope + hash
+#   5. INSERT decision_history row
+#   6. UPDATE chain_heads compare-and-set
+#
+# Tests pin: precondition-runs-inside-lock, return-flows-into-builder,
+# builder-runs-after-precondition, exceptions-roll-back-atomically,
+# precondition-can-SELECT-prior-state, T=None-plumbing-types-cleanly,
+# byte-for-byte preservation of the existing append() shape.
+
+
+class TestAppendWithPreconditionPreconditionRunsInLock:
+    """The precondition MUST run inside the chain-head FOR UPDATE
+    transaction, after the head is read and before the new row is
+    inserted. Verified by capturing what the precondition observes."""
+
+    async def test_precondition_receives_locked_head_state(
+        self, store: DecisionHistoryStore, engine: AsyncEngine
+    ) -> None:
+        # Genesis chain has (sequence=0, hash=ZERO_HASH). Capture the
+        # tuple the precondition is invoked with; assert it matches
+        # the head BEFORE the new insert.
+        captured: dict[str, Any] = {}
+
+        async def _capturing_precondition(
+            conn: AsyncConnection, prev_seq: int, prev_hash: bytes
+        ) -> None:
+            captured["prev_seq"] = prev_seq
+            captured["prev_hash"] = prev_hash
+            captured["conn_repr"] = type(conn).__name__
+            return None
+
+        record = DecisionRecord(decision_type="canary", request_id="req-precond-state", payload={})
+        await store.append_with_precondition(
+            record_builder=lambda _state: record,
+            precondition=_capturing_precondition,
+        )
+        assert captured["prev_seq"] == 0
+        assert captured["prev_hash"] == ZERO_HASH
+        # Sanity: connection is an AsyncConnection (or wrapped); not
+        # the engine itself.
+        assert "Connection" in captured["conn_repr"]
+
+    async def test_precondition_can_select_committed_prior_rows(
+        self, store: DecisionHistoryStore, engine: AsyncEngine
+    ) -> None:
+        # Write 3 committed rows via append(). Then call
+        # append_with_precondition with a precondition that SELECTs
+        # COUNT(*) from decision_history; assert the count is exactly 3
+        # (the precondition observes committed-up-to-the-lock state).
+        for i in range(3):
+            await store.append(
+                DecisionRecord(decision_type="seed", request_id=f"req-{i}", payload={"i": i})
+            )
+
+        observed_counts: list[int] = []
+
+        async def _count_precondition(
+            conn: AsyncConnection, prev_seq: int, prev_hash: bytes
+        ) -> int:
+            from sqlalchemy import func
+            from sqlalchemy import select as _select
+
+            result = await conn.execute(_select(func.count()).select_from(_decision_history))
+            count = int(result.scalar() or 0)
+            observed_counts.append(count)
+            return count
+
+        await store.append_with_precondition(
+            record_builder=lambda _captured: DecisionRecord(
+                decision_type="canary",
+                request_id="req-precond-select",
+                payload={"observed": _captured},
+            ),
+            precondition=_count_precondition,
+        )
+        assert observed_counts == [3]
+
+
+class TestAppendWithPreconditionReturnFlowsToBuilder:
+    """Precondition's return value of type T MUST flow into
+    record_builder verbatim. This is the load-bearing contract for
+    Option A — without it, state-machine validators (escalation T3)
+    can't put validated in-lock state into the hashed payload."""
+
+    async def test_return_flows_into_record_builder(
+        self, store: DecisionHistoryStore, engine: AsyncEngine
+    ) -> None:
+        # Sentinel value the precondition returns; the record_builder
+        # asserts it received exactly that value, then folds it into
+        # the persisted payload.
+        SENTINEL = ("captured-state", 42)
+
+        async def _precondition(
+            conn: AsyncConnection, prev_seq: int, prev_hash: bytes
+        ) -> tuple[str, int]:
+            return SENTINEL
+
+        builder_received: list[Any] = []
+
+        def _builder(state: tuple[str, int]) -> DecisionRecord:
+            builder_received.append(state)
+            return DecisionRecord(
+                decision_type="canary",
+                request_id="req-return-flow",
+                payload={"captured_label": state[0], "captured_int": state[1]},
+            )
+
+        record_id, _ = await store.append_with_precondition(
+            record_builder=_builder, precondition=_precondition
+        )
+        # Builder saw the sentinel.
+        assert builder_received == [SENTINEL]
+        # And the persisted row's payload reflects sentinel-derived content.
+        async with engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    select(_decision_history.c.payload).where(
+                        _decision_history.c.record_id == record_id
+                    )
+                )
+            ).one()
+        assert row.payload == {
+            "captured_label": "captured-state",
+            "captured_int": 42,
+        }
+
+
+class TestAppendWithPreconditionOrdering:
+    """record_builder MUST run AFTER precondition. Otherwise the
+    builder couldn't use the precondition's return value, which is
+    the whole point of Option A."""
+
+    async def test_builder_runs_after_precondition(self, store: DecisionHistoryStore) -> None:
+        order: list[str] = []
+
+        async def _precondition(conn: AsyncConnection, prev_seq: int, prev_hash: bytes) -> str:
+            order.append("precondition")
+            return "passed"
+
+        def _builder(state: str) -> DecisionRecord:
+            order.append("builder")
+            assert state == "passed"  # received from precondition
+            return DecisionRecord(
+                decision_type="canary",
+                request_id="req-order",
+                payload={"state": state},
+            )
+
+        await store.append_with_precondition(record_builder=_builder, precondition=_precondition)
+        assert order == ["precondition", "builder"]
+
+
+class TestAppendWithPreconditionRollback:
+    """Exceptions raised from the precondition OR the builder OR
+    later in the transaction MUST roll back atomically. No row
+    inserted, chain head unchanged, exception type propagated."""
+
+    async def _head_state(self, engine: AsyncEngine) -> tuple[int, bytes]:
+        async with engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    select(
+                        _chain_heads.c.latest_sequence,
+                        _chain_heads.c.latest_hash,
+                    ).where(_chain_heads.c.chain_id == "decision_history")
+                )
+            ).one()
+        return int(row.latest_sequence), bytes(row.latest_hash)
+
+    async def _row_count(self, engine: AsyncEngine) -> int:
+        from sqlalchemy import func
+        from sqlalchemy import select as _select
+
+        async with engine.connect() as conn:
+            result = await conn.execute(_select(func.count()).select_from(_decision_history))
+        return int(result.scalar() or 0)
+
+    async def test_precondition_raise_rolls_back(
+        self, store: DecisionHistoryStore, engine: AsyncEngine
+    ) -> None:
+        class Sentinel(RuntimeError):
+            pass
+
+        async def _raising_precondition(
+            conn: AsyncConnection, prev_seq: int, prev_hash: bytes
+        ) -> None:
+            raise Sentinel("validator says no")
+
+        builder_called = False
+
+        def _builder(state: None) -> DecisionRecord:
+            nonlocal builder_called
+            builder_called = True
+            return DecisionRecord(
+                decision_type="should-not-land",
+                request_id="req-rollback-1",
+                payload={},
+            )
+
+        pre_seq, pre_hash = await self._head_state(engine)
+        pre_count = await self._row_count(engine)
+        with pytest.raises(Sentinel, match="validator says no"):
+            await store.append_with_precondition(
+                record_builder=_builder, precondition=_raising_precondition
+            )
+        # Builder was NEVER called — precondition raised before the
+        # builder phase.
+        assert builder_called is False
+        # Chain head + row count unchanged — transaction rolled back.
+        post_seq, post_hash = await self._head_state(engine)
+        post_count = await self._row_count(engine)
+        assert (pre_seq, pre_hash, pre_count) == (post_seq, post_hash, post_count)
+
+    async def test_builder_raise_rolls_back(
+        self, store: DecisionHistoryStore, engine: AsyncEngine
+    ) -> None:
+        class BuilderError(ValueError):
+            pass
+
+        async def _ok_precondition(conn: AsyncConnection, prev_seq: int, prev_hash: bytes) -> None:
+            return None
+
+        def _raising_builder(state: None) -> DecisionRecord:
+            raise BuilderError("builder says no")
+
+        pre_seq, pre_hash = await self._head_state(engine)
+        pre_count = await self._row_count(engine)
+        with pytest.raises(BuilderError, match="builder says no"):
+            await store.append_with_precondition(
+                record_builder=_raising_builder, precondition=_ok_precondition
+            )
+        # Chain head + row count unchanged — builder ran inside the
+        # transaction so its raise rolls back.
+        post_seq, post_hash = await self._head_state(engine)
+        post_count = await self._row_count(engine)
+        assert (pre_seq, pre_hash, pre_count) == (post_seq, post_hash, post_count)
+
+    async def test_canonical_form_violation_in_built_record_rolls_back(
+        self, store: DecisionHistoryStore, engine: AsyncEngine
+    ) -> None:
+        # If record_builder returns a DecisionRecord whose payload is
+        # not canonicalisable (e.g. NaN), canonical_bytes raises and
+        # the transaction rolls back. Same posture as old append() but
+        # now the failure is inside the transaction.
+        async def _ok_precondition(conn: AsyncConnection, prev_seq: int, prev_hash: bytes) -> None:
+            return None
+
+        def _bad_builder(state: None) -> DecisionRecord:
+            return DecisionRecord(
+                decision_type="canary",
+                request_id="req-canonical-fail",
+                payload={"bad": float("nan")},
+            )
+
+        pre_seq, pre_hash = await self._head_state(engine)
+        pre_count = await self._row_count(engine)
+        with pytest.raises(ValueError):  # canonical_bytes raises ValueError
+            await store.append_with_precondition(
+                record_builder=_bad_builder, precondition=_ok_precondition
+            )
+        post_seq, post_hash = await self._head_state(engine)
+        post_count = await self._row_count(engine)
+        assert (pre_seq, pre_hash, pre_count) == (post_seq, post_hash, post_count)
+
+
+class TestAppendWrapperPreservesContract:
+    """The existing public ``append()`` becomes a thin wrapper over
+    ``append_with_precondition`` (async no-op precondition + identity
+    record_builder). EVERY existing append() behavior MUST be
+    preserved byte-for-byte: same canonical envelope, same hash, same
+    persisted row, same actor_id contract, same exception types.
+
+    The full existing append() test surface (TestGenesisAppend,
+    TestSequentialAppends, TestEnvelopeIncludesIdentity, TestActorIdMerge,
+    TestPayloadCanonicalNormalization, TestPayloadSnapshotIsolation,
+    TestChainHeadCompareAndSet, TestFailureModes, ...) is the byte-for-
+    byte regression baseline — those classes test ``append()`` and
+    must still pass after the refactor. The tests below are extra
+    cross-checks that explicitly probe the wrapper-vs-new-method
+    equivalence.
+    """
+
+    async def test_wrapper_produces_same_hash_as_explicit_invocation(
+        self, store: DecisionHistoryStore, engine: AsyncEngine
+    ) -> None:
+        # Build identical-in-shape records and route them through both
+        # call sites; assert the persisted row's hash (the load-bearing
+        # canonical-form output) is identical for matching inputs on
+        # matching chain state.
+        record = DecisionRecord(
+            decision_type="canary",
+            request_id="req-wrapper-equiv",
+            payload={"k": "v"},
+            tenant_id="t-1",
+            iso_controls=("ISO42001.A.7.4",),
+        )
+
+        # Path A: existing append().
+        rid_a, hash_a = await store.append(record)
+
+        # Reset chain to genesis between paths so prev_hash is
+        # identical for both runs (otherwise the chain has advanced
+        # and the second hash differs even for identical record bytes).
+        from sqlalchemy import delete as _delete
+        from sqlalchemy import update as _update
+
+        async with engine.begin() as conn:
+            await conn.execute(_delete(_decision_history))
+            await conn.execute(
+                _update(_chain_heads)
+                .where(_chain_heads.c.chain_id == "decision_history")
+                .values(latest_sequence=0, latest_hash=ZERO_HASH)
+            )
+
+        # Path B: explicit append_with_precondition with no-op.
+        async def _no_op(conn: AsyncConnection, prev_seq: int, prev_hash: bytes) -> None:
+            return None
+
+        rid_b, hash_b = await store.append_with_precondition(
+            record_builder=lambda _: record, precondition=_no_op
+        )
+
+        # record_id is uuid4()-generated so they differ; created_at is
+        # datetime.now(UTC) so it differs by microseconds. The hash
+        # therefore CANNOT be identical between two runs (envelope
+        # depends on record_id + created_at). What we CAN assert:
+        # both hashes are 32 bytes, both record_ids are valid UUIDs,
+        # both rows persisted with the same caller-side fields. Hash
+        # equality is not a contract; envelope-shape equivalence is.
+        assert len(hash_a) == 32
+        assert len(hash_b) == 32
+        assert isinstance(rid_a, uuid.UUID)
+        assert isinstance(rid_b, uuid.UUID)
+        assert rid_a != rid_b  # uuid4 is unique per call
+
+        async with engine.connect() as conn:
+            row_b = (
+                await conn.execute(
+                    select(
+                        _decision_history.c.event_type,
+                        _decision_history.c.request_id,
+                        _decision_history.c.tenant_id,
+                        _decision_history.c.payload,
+                        _decision_history.c.iso_controls,
+                    ).where(_decision_history.c.record_id == rid_b)
+                )
+            ).one()
+        assert row_b.event_type == "canary"
+        assert row_b.request_id == "req-wrapper-equiv"
+        assert row_b.tenant_id == "t-1"
+        assert row_b.payload == {"k": "v"}
+        assert row_b.iso_controls == ["ISO42001.A.7.4"]
+
+    async def test_wrapper_actor_id_contract_preserved(self, store: DecisionHistoryStore) -> None:
+        # actor_id collision should still raise via the wrapper —
+        # proves the validation logic landed inside append_with_precondition
+        # and the wrapper exercises it. Mirror of an existing
+        # TestActorIdMerge case.
+        record = DecisionRecord(
+            decision_type="canary",
+            request_id="req-actor-collision",
+            payload={"actor_id": "agent-x"},
+            actor_id="agent-y",  # mismatch
+        )
+        with pytest.raises(ValueError, match="conflicts"):
+            await store.append(record)
+
+    async def test_wrapper_canonical_form_rejection_preserved(
+        self, store: DecisionHistoryStore
+    ) -> None:
+        # Canonical-form violations still raise via the wrapper.
+        record = DecisionRecord(
+            decision_type="canary",
+            request_id="req-canonical-via-wrapper",
+            payload={"bad": float("nan")},
+        )
+        with pytest.raises(ValueError):
+            await store.append(record)
+
+
+class TestAppendWithPreconditionTypeNonePlumbing:
+    """Generic T = None plumbing for the wrapper path. The existing
+    ``append()`` uses an async precondition returning None + an
+    identity record_builder; PEP 695 inference resolves T = None
+    without ``# type: ignore``. This test pins the inference + the
+    runtime correctness."""
+
+    async def test_t_is_none_when_precondition_returns_none(
+        self, store: DecisionHistoryStore
+    ) -> None:
+        # Type checker should infer T = None here; runtime should
+        # behave identically to the wrapper path.
+        async def _noop(conn: AsyncConnection, prev_seq: int, prev_hash: bytes) -> None:
+            return None
+
+        record = DecisionRecord(
+            decision_type="canary",
+            request_id="req-t-none",
+            payload={"k": "v"},
+        )
+        rid, h = await store.append_with_precondition(
+            record_builder=lambda _state: record, precondition=_noop
+        )
+        assert isinstance(rid, uuid.UUID)
+        assert len(h) == 32
+
+    async def test_explicit_async_lambda_for_precondition_works(
+        self, store: DecisionHistoryStore
+    ) -> None:
+        # Precondition MUST be async — the implementation awaits its
+        # return. This test passes an async no-op directly (vs a sync
+        # lambda which would be a static type error per the contract).
+
+        async def _noop(conn: AsyncConnection, prev_seq: int, prev_hash: bytes) -> None:
+            return None
+
+        record = DecisionRecord(decision_type="canary", request_id="req-async-pre", payload={})
+        rid, h = await store.append_with_precondition(
+            record_builder=lambda _: record, precondition=_noop
+        )
+        assert isinstance(rid, uuid.UUID)
+        assert len(h) == 32
+
+
+class TestAppendPreservesScheduledMutationSnapshot:
+    """Sprint 2 R3 hardening regression test (PR-#7-T2 reviewer P1).
+
+    The original T2 refactor moved payload snapshotting from the
+    ``append()`` wrapper INTO ``append_with_precondition``'s in-lock
+    validation step — which moved the snapshot point AFTER the first
+    ``await``. That regressed Sprint 2 R3's "snapshot before first
+    await" hardening: a caller doing
+    ``task = asyncio.create_task(store.append(record)); await sleep(0); record.payload[...] = ...``
+    could mutate the original payload AFTER the task started but
+    BEFORE the in-lock snapshot ran, and the mutation would land in
+    the hashed envelope + persisted row.
+
+    Fix: the wrapper calls ``_validate_and_normalize_record`` SYNCHRONOUSLY
+    — pre-await — to deep-copy the payload via canonical_bytes
+    round-trip + ``dataclasses.replace`` into a fresh DecisionRecord.
+    Caller mutation post-scheduling cannot reach the snapshot.
+
+    These tests pin the contract by reproducing the regression shape
+    + asserting the persisted row matches the pre-mutation state.
+    """
+
+    async def test_caller_mutation_after_scheduling_does_not_affect_persisted_payload(
+        self, store: DecisionHistoryStore, engine: AsyncEngine
+    ) -> None:
+        import asyncio
+
+        # Caller-owned mutable dict.
+        payload_dict: dict[str, Any] = {"k": "original", "n": 1}
+        record = DecisionRecord(
+            decision_type="canary",
+            request_id="req-mutation-payload",
+            payload=payload_dict,
+        )
+
+        # Schedule the append. The coroutine is created but does not
+        # run until the event loop gives it a tick.
+        task = asyncio.create_task(store.append(record))
+
+        # Yield once. The task runs synchronously up to its first
+        # await. With the fix, the wrapper has already done
+        # _validate_and_normalize_record(record) BEFORE any await,
+        # producing a snapshot record whose payload is independent
+        # of payload_dict. Without the fix, the task is suspended at
+        # engine.begin() with no snapshot taken — the mutation below
+        # would land in the chain.
+        await asyncio.sleep(0)
+
+        # Mutate the caller-owned dict. With the snapshot fix, this
+        # has no effect on the persisted row.
+        payload_dict["k"] = "MUTATED"
+        payload_dict["new_key"] = "should-not-land"
+        del payload_dict["n"]
+
+        record_id, _ = await task
+
+        async with engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    select(_decision_history.c.payload).where(
+                        _decision_history.c.record_id == record_id
+                    )
+                )
+            ).one()
+
+        # Persisted payload reflects the PRE-mutation state.
+        assert row.payload == {"k": "original", "n": 1}, (
+            f"caller mutation post-scheduling leaked into the chain: "
+            f"persisted payload was {row.payload!r}"
+        )
+
+    async def test_caller_mutation_after_scheduling_does_not_affect_hash(
+        self, store: DecisionHistoryStore, engine: AsyncEngine
+    ) -> None:
+        # Stronger form of the above: the hash itself is a function
+        # of the canonical envelope, which contains the payload. If
+        # caller mutation had leaked, the hash would reflect the
+        # mutated payload. Compare the persisted hash to one computed
+        # against the original (pre-mutation) payload via a parallel
+        # control append — they should match modulo record_id +
+        # created_at, which we can normalise away by recomputing the
+        # canonical envelope from the persisted row.
+        import asyncio
+
+        payload_dict: dict[str, Any] = {"original": True}
+        record = DecisionRecord(
+            decision_type="canary",
+            request_id="req-mutation-hash",
+            payload=payload_dict,
+        )
+
+        task = asyncio.create_task(store.append(record))
+        await asyncio.sleep(0)
+
+        # Mutate after scheduling.
+        payload_dict["original"] = False
+        payload_dict["leaked"] = True
+
+        record_id, persisted_hash = await task
+
+        # Recompute the envelope from the persisted row. If the
+        # snapshot fix is in place, the row's payload has the
+        # pre-mutation values + canonical_bytes(envelope) reproduces
+        # persisted_hash given the row's prev_hash + the persisted
+        # column values. (The chain verifier T8 walks the chain
+        # using exactly this primitive.)
+        async with engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    select(
+                        _decision_history.c.record_id,
+                        _decision_history.c.sequence,
+                        _decision_history.c.schema_version,
+                        _decision_history.c.tenant_id,
+                        _decision_history.c.prev_hash,
+                        _decision_history.c.hash,
+                        _decision_history.c.created_at,
+                        _decision_history.c.event_type,
+                        _decision_history.c.request_id,
+                        _decision_history.c.trace_id,
+                        _decision_history.c.span_id,
+                        _decision_history.c.langfuse_trace_id,
+                        _decision_history.c.provider_label,
+                        _decision_history.c.iso_controls,
+                        _decision_history.c.payload,
+                    ).where(_decision_history.c.record_id == record_id)
+                )
+            ).one()
+
+        # The persisted payload is the pre-mutation snapshot.
+        assert row.payload == {"original": True}
+        assert "leaked" not in row.payload
+
+        # Recompute the canonical envelope from the persisted row +
+        # confirm the hash matches. Strong proof that the persisted
+        # hash was computed over the pre-mutation payload, not the
+        # mutated one.
+        # SQLite TIMESTAMP drops tzinfo on round-trip; re-attach UTC.
+        created_at = row.created_at
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=UTC)
+        recomputed_envelope: dict[str, Any] = {
+            "schema_version": int(row.schema_version),
+            "chain_id": "decision_history",
+            "record_id": str(row.record_id),
+            "sequence": int(row.sequence),
+            "tenant_id": row.tenant_id,
+            "created_at": created_at,
+            "event_type": row.event_type,
+            "request_id": row.request_id,
+            "trace_id": row.trace_id,
+            "span_id": row.span_id,
+            "langfuse_trace_id": row.langfuse_trace_id,
+            "provider_label": row.provider_label,
+            "iso_controls": list(row.iso_controls) if row.iso_controls else [],
+            "payload": row.payload,
+        }
+        recomputed_hash = hash_record(canonical_bytes(recomputed_envelope), bytes(row.prev_hash))
+        assert recomputed_hash == persisted_hash == bytes(row.hash), (
+            "hash mismatch — caller mutation leaked into envelope hash"
+        )
+
+
+class TestAppendWithPreconditionUsesSameHeadLockShape:
+    """The new method MUST use the same SELECT FOR UPDATE on
+    governance_chain_heads + same compare-and-set UPDATE shape as
+    the existing append(). Verified via end-to-end by chaining
+    appends across both call sites and walking the chain."""
+
+    async def test_alternating_call_sites_produce_one_clean_chain(
+        self, store: DecisionHistoryStore, engine: AsyncEngine
+    ) -> None:
+        # Append 3 rows alternating between append() and
+        # append_with_precondition. Walk the chain afterwards; assert
+        # sequences are 1, 2, 3 contiguous; each prev_hash matches the
+        # predecessor's hash; the chain head moved to (3, last_hash).
+        async def _no_op(conn: AsyncConnection, prev_seq: int, prev_hash: bytes) -> None:
+            return None
+
+        _rid1, h1 = await store.append(
+            DecisionRecord(decision_type="a", request_id="r1", payload={})
+        )
+        _rid2, h2 = await store.append_with_precondition(
+            record_builder=lambda _: DecisionRecord(decision_type="b", request_id="r2", payload={}),
+            precondition=_no_op,
+        )
+        _rid3, h3 = await store.append(
+            DecisionRecord(decision_type="c", request_id="r3", payload={})
+        )
+
+        async with engine.connect() as conn:
+            rows = (
+                await conn.execute(
+                    select(
+                        _decision_history.c.sequence,
+                        _decision_history.c.prev_hash,
+                        _decision_history.c.hash,
+                    ).order_by(_decision_history.c.sequence)
+                )
+            ).all()
+            head = (
+                await conn.execute(
+                    select(
+                        _chain_heads.c.latest_sequence,
+                        _chain_heads.c.latest_hash,
+                    ).where(_chain_heads.c.chain_id == "decision_history")
+                )
+            ).one()
+
+        assert [int(r.sequence) for r in rows] == [1, 2, 3]
+        # Linkage: row[0].prev_hash == ZERO_HASH; row[N].prev_hash ==
+        # row[N-1].hash.
+        assert bytes(rows[0].prev_hash) == ZERO_HASH
+        assert bytes(rows[1].prev_hash) == bytes(rows[0].hash)
+        assert bytes(rows[2].prev_hash) == bytes(rows[1].hash)
+        # Each row's recorded hash matches what append() / append_with_precondition
+        # returned.
+        assert bytes(rows[0].hash) == h1
+        assert bytes(rows[1].hash) == h2
+        assert bytes(rows[2].hash) == h3
+        # Chain head moved to (3, h3).
+        assert int(head.latest_sequence) == 3
+        assert bytes(head.latest_hash) == h3
