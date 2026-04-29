@@ -1681,12 +1681,30 @@ from cognic_agentos.core.canonical import (
     hash_record,
 )
 
-BreakKind = Literal["hash_mismatch", "sequence_gap", "prev_hash_mismatch"]
+# Round-3 amendment landed during Task 8 implementation review:
+# BreakKind expanded from 3 → 5 values. ``head_mismatch`` catches
+# tampering with the mutable governance_chain_heads row (a DBA
+# could corrupt the head and leave evidence rows intact —
+# previously walk() would have returned clean even though future
+# appends would compute against a corrupted chain). ``record_not_found``
+# is the verify_record() path for a chain_id that doesn't exist.
+BreakKind = Literal[
+    "hash_mismatch",
+    "sequence_gap",
+    "prev_hash_mismatch",
+    "head_mismatch",
+    "record_not_found",
+]
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class TamperReport:
-    table: str
+    # Field renamed ``table`` → ``chain_id`` during Task 8 review:
+    # ChainVerifier addresses chains by the logical chain_id literal
+    # (``audit_event`` / ``decision_history``), not the physical SQL
+    # table name. The two are 1:1 today but logical naming is the
+    # right surface for the verifier API.
+    chain_id: str
     is_clean: bool
     records_checked: int
     first_break_sequence: int | None = None
@@ -1695,11 +1713,13 @@ class TamperReport:
 
 
 class ChainVerifier:
-    def __init__(self, engine: AsyncEngine, table: str) -> None:
-        if table not in {"audit_event", "decision_history"}:
-            raise ValueError(f"unsupported table: {table!r}")
+    # Constructor parameter renamed ``table`` → ``chain_id`` to match
+    # the TamperReport surface (Round-3 amendment, Task 8 review).
+    def __init__(self, engine: AsyncEngine, chain_id: str) -> None:
+        if chain_id not in {"audit_event", "decision_history"}:
+            raise ValueError(f"unsupported chain_id: {chain_id!r}")
         self._engine = engine
-        self._table = table
+        self._chain_id = chain_id
 
     async def walk(self) -> TamperReport:
         # SQLAlchemy Core select — dialect-portable; no LIMIT or
@@ -2186,8 +2206,8 @@ The canary is **explicitly an integration test on real DBs** — `AuditStore.app
 
 - [ ] **Step 13.1: `uv run ruff check .` + `ruff format --check .` + `mypy src tests` (strict).**
 - [ ] **Step 13.2: `uv run pytest -q --cov=cognic_agentos --cov-report=term-missing`.**
-   - Critical-controls modules: ≥95% each.
-   - Global: ≥80% (likely climbs from 93% at Phase 1 close to ~94%).
+   - Critical-controls modules: ≥95% line + ≥90% branch each (per-file gate via `tools/check_critical_coverage.py`).
+   - Global: ≥93%. Actual at sprint close: 95% with `db/migrations/env.py` excluded from rollup (it's exercised end-to-end by `test_alembic_migrations.py` via the alembic CLI subprocess, which coverage.py cannot trace back to the env.py module — see `[tool.coverage.run].omit` in `pyproject.toml`).
 - [ ] **Step 13.3: Live integration runs.**
    - `COGNIC_RUN_POSTGRES_INTEGRATION=1 uv run pytest -m postgres -v`
    - `COGNIC_RUN_ORACLE_INTEGRATION=1 uv run pytest -m oracle -v` (with the Oracle overlay up)
@@ -2201,13 +2221,13 @@ The canary is **explicitly an integration test on real DBs** — `AuditStore.app
 ## Verification — end-state of Sprint 2
 
 - 5 new modules in `src/cognic_agentos/core/` (`schemas`, `canonical`, `audit`, `decision_history`, `chain_verifier`) — Python module names; the underlying DB table is `audit_event`.
-- 1 new module in `src/cognic_agentos/db/` (`engine`).
+- 2 new modules in `src/cognic_agentos/db/` (`engine`, `types`). `db/types` was added in Round-2 of Task 5 (`chain_hash_column_type()` + `GovernanceJSON` TypeDecorator) once the Oracle JSON-CompileError + Oracle RAW(32)-vs-BLOB drift surfaced.
 - 1 new tools script (`tools/check_critical_coverage.py`).
 - Alembic baseline + 1 migration; both `OracleAdapter.run_migrations` and `PostgresAdapter.run_migrations` are real (not `NotImplementedError`); the lifespan does NOT auto-invoke them — operator-only.
 - 3 tables in migration `0001`: `governance_chain_heads` (one row per chain, append serialisation), `audit_event`, `decision_history`. Both evidence tables carry `schema_version` (1) + `tenant_id` (nullable).
-- New CI gates: `postgres-integration` job; concurrency tests against both Postgres + Oracle; per-file critical-controls coverage gate.
-- Test suite grows from 264 (263 passed + 1 oracle-skipped) to ~340 (~270 passed + ~55 new unit + ~17 new integration including parametrised concurrency).
-- Critical-controls modules at ≥95% line + ≥90% branch coverage; global at ≥93%.
+- New CI gates: `postgres-integration` job; per-file critical-controls coverage gate; Postgres + Oracle integration jobs each provision the runtime role + apply the operator-runbook GRANTs (Oracle adds cross-schema synonyms via SYSTEM, Path A.1) before running the canary + concurrency tests.
+- Test suite grows from 264 (Phase 1 close) to **464 unit + 18 integration = 482 total** (≈+200 unit, +18 integration). Plan-time projection was "~340" (Round-1) revised to "~470" in the BUILD_PLAN sweep — actuals match the BUILD_PLAN figure.
+- Critical-controls modules at ≥95% line + ≥90% branch coverage (per-file gate enforced); global at **95%** (with `db/migrations/env.py` excluded from rollup — it is alembic CLI-subprocess scaffolding, not unit-testable; integration tests cover that path).
 - Runtime DB role grants: INSERT + SELECT on `audit_event` + `decision_history`; INSERT + SELECT + UPDATE on `governance_chain_heads`. No DELETE / no UPDATE on evidence tables.
 - Phase-1 carryovers landed: `provider_label` + `langfuse_trace_id` are columns on both tables; LLM gateway (Sprint 3) emits via these columns.
 - New columns in the canonical envelope (Round-2): `schema_version`, `chain_id`, `record_id`, `sequence`, `tenant_id` — mutating any of them is detectable by the chain verifier.
