@@ -75,6 +75,7 @@ from cognic_agentos.core.canonical import ZERO_HASH
 from cognic_agentos.core.decision_history import _decision_history
 from cognic_agentos.core.escalation import (
     _LEGAL_TRANSITIONS,
+    Escalation,
     EscalationNotFound,
     EscalationState,
     EscalationStore,
@@ -787,3 +788,947 @@ class TestValidatorBuilderOrdering:
             "to_state",
             "actor_id",
         }
+
+
+# ===========================================================================
+# Sprint 2.5 T4 — public read-side projection (Escalation, get_by_id, list_open)
+# ===========================================================================
+#
+# T4 is read-only: it adds the public ``Escalation`` dataclass plus
+# ``EscalationStore.get_by_id`` + ``.list_open()``. T3's write
+# contract is unchanged. Malformed-chain semantics MUST be consistent
+# with T3's ``_read_current_state_within_txn`` (PR-#7-T3 reviewer P2):
+# a chain slice with only transition rows and no ``escalation.opened``
+# row for an id is malformed, and:
+#   - ``get_by_id`` MUST raise ``EscalationNotFound``.
+#   - ``list_open`` MUST skip the malformed entry (NOT synthesize a
+#     projection from a partial chain).
+
+
+class TestEscalationProjectionDataclass:
+    """The Escalation projection is frozen + slotted; mutation
+    rejected; field set matches the contract."""
+
+    def _sample(self) -> Escalation:
+        from cognic_agentos.core.escalation import Escalation as _E
+
+        opened_at = datetime(2026, 4, 29, 12, 0, 0, tzinfo=UTC)
+        return _E(
+            escalation_id=uuid.uuid4(),
+            current_state=EscalationState.OPEN,
+            opened_at=opened_at,
+            last_transition_at=opened_at,
+            level="p1",
+            transitions=((None, EscalationState.OPEN, opened_at, "agent-x"),),
+        )
+
+    def test_dataclass_is_frozen(self) -> None:
+        import dataclasses
+
+        e = self._sample()
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            e.level = "other"  # type: ignore[misc]
+
+    def test_dataclass_field_set_matches_contract(self) -> None:
+        import dataclasses
+
+        e = self._sample()
+        names = {f.name for f in dataclasses.fields(e)}
+        assert names == {
+            "escalation_id",
+            "current_state",
+            "opened_at",
+            "last_transition_at",
+            "level",
+            "transitions",
+        }
+
+
+class TestGetById:
+    """``get_by_id`` projects the full lifecycle from
+    decision_history. Eventually-consistent — separate from T3's
+    in-lock validator read."""
+
+    async def test_returns_projection_for_open_only_chain(self, store: EscalationStore) -> None:
+        eid, _, _ = await store.open(
+            actor_id="agent-x",
+            level="p2",
+            reason="just opened",
+            request_id="req-getbyid-1",
+        )
+        e = await store.get_by_id(eid)
+        assert e.escalation_id == eid
+        assert e.current_state == EscalationState.OPEN
+        assert e.level == "p2"
+        # Only the opened row is in the chain; opened_at == last_transition_at.
+        assert e.opened_at == e.last_transition_at
+        assert e.opened_at.tzinfo is not None  # always tz-aware
+        # transitions tuple has one entry: the open event itself.
+        assert len(e.transitions) == 1
+        from_s, to_s, at, actor = e.transitions[0]
+        assert from_s is None
+        assert to_s == EscalationState.OPEN
+        assert at == e.opened_at
+        assert actor == "agent-x"
+
+    async def test_returns_projection_for_full_lifecycle(self, store: EscalationStore) -> None:
+        eid, _, _ = await store.open(
+            actor_id="agent-x",
+            level="p1",
+            reason="full lifecycle",
+            request_id="req-full-1",
+        )
+        await store.transition(
+            escalation_id=eid,
+            actor_id="agent-y",
+            new_state=EscalationState.ACKNOWLEDGED,
+            reason="ack",
+            request_id="req-full-2",
+        )
+        await store.transition(
+            escalation_id=eid,
+            actor_id="agent-z",
+            new_state=EscalationState.ASSIGNED,
+            reason="assign",
+            request_id="req-full-3",
+        )
+        await store.transition(
+            escalation_id=eid,
+            actor_id="agent-w",
+            new_state=EscalationState.RESOLVED,
+            reason="resolve",
+            request_id="req-full-4",
+        )
+
+        e = await store.get_by_id(eid)
+        assert e.escalation_id == eid
+        assert e.current_state == EscalationState.RESOLVED
+        assert e.level == "p1"  # carried from opened row
+        # Four transitions, oldest first.
+        assert len(e.transitions) == 4
+        # Transition tuples: (from, to, at, actor_id).
+        from_states = [t[0] for t in e.transitions]
+        to_states = [t[1] for t in e.transitions]
+        actors = [t[3] for t in e.transitions]
+        assert from_states == [
+            None,
+            EscalationState.OPEN,
+            EscalationState.ACKNOWLEDGED,
+            EscalationState.ASSIGNED,
+        ]
+        assert to_states == [
+            EscalationState.OPEN,
+            EscalationState.ACKNOWLEDGED,
+            EscalationState.ASSIGNED,
+            EscalationState.RESOLVED,
+        ]
+        assert actors == ["agent-x", "agent-y", "agent-z", "agent-w"]
+        # Timestamps: opened_at is first; last_transition_at is last.
+        assert e.opened_at == e.transitions[0][2]
+        assert e.last_transition_at == e.transitions[-1][2]
+        # Strictly non-decreasing — sequence-ordered.
+        ats = [t[2] for t in e.transitions]
+        assert ats == sorted(ats)
+
+    async def test_re_escalation_lifecycle_projects_all_transitions(
+        self, store: EscalationStore
+    ) -> None:
+        eid, _, _ = await store.open(
+            actor_id="canary",
+            level="p1",
+            reason="re-escalate",
+            request_id="req-re-open",
+        )
+        for s in (
+            EscalationState.ACKNOWLEDGED,
+            EscalationState.ASSIGNED,
+            EscalationState.RE_ESCALATED,
+            EscalationState.ACKNOWLEDGED,
+            EscalationState.ASSIGNED,
+            EscalationState.RESOLVED,
+        ):
+            await store.transition(
+                escalation_id=eid,
+                actor_id="canary",
+                new_state=s,
+                reason=f"to-{s.value}",
+                request_id=f"req-re-{s.value}",
+            )
+
+        e = await store.get_by_id(eid)
+        assert e.current_state == EscalationState.RESOLVED
+        # Open + 6 transitions = 7 entries.
+        assert len(e.transitions) == 7
+        to_states = [t[1] for t in e.transitions]
+        assert to_states == [
+            EscalationState.OPEN,
+            EscalationState.ACKNOWLEDGED,
+            EscalationState.ASSIGNED,
+            EscalationState.RE_ESCALATED,
+            EscalationState.ACKNOWLEDGED,
+            EscalationState.ASSIGNED,
+            EscalationState.RESOLVED,
+        ]
+
+    async def test_unknown_id_raises_escalation_not_found(self, store: EscalationStore) -> None:
+        unknown = uuid.uuid4()
+        with pytest.raises(EscalationNotFound) as exc_info:
+            await store.get_by_id(unknown)
+        assert exc_info.value.escalation_id == unknown
+
+    async def test_empty_chain_raises_escalation_not_found(self, store: EscalationStore) -> None:
+        # Fixture chain starts empty — any get_by_id raises.
+        with pytest.raises(EscalationNotFound):
+            await store.get_by_id(uuid.uuid4())
+
+    async def test_malformed_chain_no_opened_row_raises(self, store: EscalationStore) -> None:
+        """Malformed-chain semantics consistent with T3's
+        _read_current_state_within_txn seen_opened guard. A chain
+        with only transition rows for an id (no escalation.opened)
+        is malformed; get_by_id MUST raise EscalationNotFound, not
+        synthesize an Escalation from the partial chain."""
+
+        from cognic_agentos.core.decision_history import (
+            DecisionHistoryStore,
+            DecisionRecord,
+        )
+
+        fake_eid = uuid.uuid4()
+        hist = DecisionHistoryStore(store._engine)
+        await hist.append(
+            DecisionRecord(
+                decision_type="escalation.acknowledged",
+                request_id="req-malformed-getbyid",
+                actor_id="rogue",
+                payload={
+                    "escalation_id": str(fake_eid),
+                    "from_state": "open",
+                    "to_state": "acknowledged",
+                    "reason": "bypass-open emit",
+                },
+            )
+        )
+
+        with pytest.raises(EscalationNotFound) as exc_info:
+            await store.get_by_id(fake_eid)
+        assert exc_info.value.escalation_id == fake_eid
+
+    async def test_picks_correct_escalation_from_multi_id_chain(
+        self, store: EscalationStore
+    ) -> None:
+        eid_a, _, _ = await store.open(
+            actor_id="a",
+            level="p1",
+            reason="a",
+            request_id="req-multi-a",
+        )
+        eid_b, _, _ = await store.open(
+            actor_id="b",
+            level="p2",
+            reason="b",
+            request_id="req-multi-b",
+        )
+        # Drive a forward; leave b at OPEN.
+        await store.transition(
+            escalation_id=eid_a,
+            actor_id="a",
+            new_state=EscalationState.ACKNOWLEDGED,
+            reason="ack-a",
+            request_id="req-multi-a-ack",
+        )
+
+        e_a = await store.get_by_id(eid_a)
+        e_b = await store.get_by_id(eid_b)
+
+        assert e_a.escalation_id == eid_a
+        assert e_a.current_state == EscalationState.ACKNOWLEDGED
+        assert e_a.level == "p1"
+        assert len(e_a.transitions) == 2  # opened + acknowledged
+
+        assert e_b.escalation_id == eid_b
+        assert e_b.current_state == EscalationState.OPEN
+        assert e_b.level == "p2"
+        assert len(e_b.transitions) == 1  # opened only
+
+
+class TestListOpen:
+    """``list_open`` returns all escalations whose current_state is
+    not RESOLVED. Walks the escalation-typed slice once. O(n)."""
+
+    async def test_empty_chain_returns_empty(self, store: EscalationStore) -> None:
+        result = await store.list_open()
+        assert result == ()
+
+    async def test_returns_tuple_with_single_open(self, store: EscalationStore) -> None:
+        eid, _, _ = await store.open(
+            actor_id="a",
+            level="p1",
+            reason="single open",
+            request_id="req-listopen-1",
+        )
+        result = await store.list_open()
+        assert isinstance(result, tuple)
+        assert len(result) == 1
+        assert result[0].escalation_id == eid
+        assert result[0].current_state == EscalationState.OPEN
+
+    async def test_resolved_escalation_not_listed(self, store: EscalationStore) -> None:
+        eid, _, _ = await store.open(
+            actor_id="a",
+            level="p1",
+            reason="will resolve",
+            request_id="req-resolve-open",
+        )
+        for s in (
+            EscalationState.ACKNOWLEDGED,
+            EscalationState.ASSIGNED,
+            EscalationState.RESOLVED,
+        ):
+            await store.transition(
+                escalation_id=eid,
+                actor_id="a",
+                new_state=s,
+                reason=f"to-{s.value}",
+                request_id=f"req-resolve-{s.value}",
+            )
+        result = await store.list_open()
+        assert result == ()
+
+    async def test_mixed_states_only_non_resolved_listed(self, store: EscalationStore) -> None:
+        # Build a chain with escalations in each non-RESOLVED state +
+        # one RESOLVED. list_open MUST return only the non-RESOLVED
+        # ones (4 of them).
+        eid_open, _, _ = await store.open(
+            actor_id="a", level="p1", reason="open-only", request_id="req-mix-1"
+        )
+        eid_ack, _, _ = await store.open(
+            actor_id="b", level="p1", reason="will-ack", request_id="req-mix-2"
+        )
+        await store.transition(
+            escalation_id=eid_ack,
+            actor_id="b",
+            new_state=EscalationState.ACKNOWLEDGED,
+            reason="ack",
+            request_id="req-mix-2-ack",
+        )
+        eid_assigned, _, _ = await store.open(
+            actor_id="c", level="p1", reason="will-assign", request_id="req-mix-3"
+        )
+        for s in (EscalationState.ACKNOWLEDGED, EscalationState.ASSIGNED):
+            await store.transition(
+                escalation_id=eid_assigned,
+                actor_id="c",
+                new_state=s,
+                reason=f"to-{s.value}",
+                request_id=f"req-mix-3-{s.value}",
+            )
+        eid_re, _, _ = await store.open(
+            actor_id="d", level="p1", reason="will-re-escalate", request_id="req-mix-4"
+        )
+        for s in (
+            EscalationState.ACKNOWLEDGED,
+            EscalationState.ASSIGNED,
+            EscalationState.RE_ESCALATED,
+        ):
+            await store.transition(
+                escalation_id=eid_re,
+                actor_id="d",
+                new_state=s,
+                reason=f"to-{s.value}",
+                request_id=f"req-mix-4-{s.value}",
+            )
+        eid_resolved, _, _ = await store.open(
+            actor_id="e", level="p1", reason="will-resolve", request_id="req-mix-5"
+        )
+        for s in (
+            EscalationState.ACKNOWLEDGED,
+            EscalationState.ASSIGNED,
+            EscalationState.RESOLVED,
+        ):
+            await store.transition(
+                escalation_id=eid_resolved,
+                actor_id="e",
+                new_state=s,
+                reason=f"to-{s.value}",
+                request_id=f"req-mix-5-{s.value}",
+            )
+
+        result = await store.list_open()
+        # Set-equality (order is implementation-defined; don't pin it).
+        result_ids = {e.escalation_id for e in result}
+        assert result_ids == {eid_open, eid_ack, eid_assigned, eid_re}
+        # Per-id state check.
+        by_id = {e.escalation_id: e for e in result}
+        assert by_id[eid_open].current_state == EscalationState.OPEN
+        assert by_id[eid_ack].current_state == EscalationState.ACKNOWLEDGED
+        assert by_id[eid_assigned].current_state == EscalationState.ASSIGNED
+        assert by_id[eid_re].current_state == EscalationState.RE_ESCALATED
+        # And the resolved one is genuinely absent.
+        assert eid_resolved not in result_ids
+
+    async def test_malformed_chain_entries_skipped_not_synthesized(
+        self, store: EscalationStore
+    ) -> None:
+        """Malformed-chain consistency with T3 + get_by_id: entries
+        in the chain that have only transition rows (no
+        escalation.opened) MUST be skipped, NOT synthesized into
+        Escalation projections. Mirror of get_by_id's
+        EscalationNotFound semantics in collection form."""
+
+        from cognic_agentos.core.decision_history import (
+            DecisionHistoryStore,
+            DecisionRecord,
+        )
+
+        # One legitimate open escalation.
+        legit_eid, _, _ = await store.open(
+            actor_id="legit",
+            level="p1",
+            reason="legitimate",
+            request_id="req-list-legit",
+        )
+
+        # One malformed chain entry: only acknowledged, no opened.
+        malformed_eid = uuid.uuid4()
+        hist = DecisionHistoryStore(store._engine)
+        await hist.append(
+            DecisionRecord(
+                decision_type="escalation.acknowledged",
+                request_id="req-list-malformed",
+                actor_id="rogue",
+                payload={
+                    "escalation_id": str(malformed_eid),
+                    "from_state": "open",
+                    "to_state": "acknowledged",
+                    "reason": "bypass-open in list_open scan",
+                },
+            )
+        )
+
+        result = await store.list_open()
+        result_ids = {e.escalation_id for e in result}
+        # Only the legitimate one is in the result.
+        assert legit_eid in result_ids
+        assert malformed_eid not in result_ids
+
+
+class TestProjectionLifecycleValidation:
+    """Reviewer T4 P1 regression tests: ``_project_escalations``
+    validates the per-id lifecycle while projecting. Direct emits
+    that produce illegal sequences after a legitimate ``open()``
+    row MUST cause the whole group to be rejected — same observable
+    behaviour as the no-opened-row case (T3 P2 fix).
+
+    These tests exercise the malformed-chain shapes that would have
+    slipped through the original T4 projection (which only checked
+    "opened row exists somewhere" and accepted any subsequent rows
+    verbatim). Without the lifecycle guard, ``list_open()`` would
+    have silently omitted an actually-open escalation as resolved
+    when a bypass-emit injected ``escalation.resolved`` directly
+    after the open.
+    """
+
+    async def _emit_direct(
+        self,
+        store: EscalationStore,
+        *,
+        escalation_id: uuid.UUID,
+        decision_type: str,
+        from_state: str | None,
+        to_state: str,
+        actor_id: str = "rogue",
+        request_id: str = "req-direct",
+    ) -> None:
+        """Emit a single decision_history row via the bypass path
+        (``DecisionHistoryStore.append`` directly, not
+        ``EscalationStore.transition``). Used to construct the
+        malformed-chain shapes the new validator rejects."""
+
+        from cognic_agentos.core.decision_history import (
+            DecisionHistoryStore,
+            DecisionRecord,
+        )
+
+        hist = DecisionHistoryStore(store._engine)
+        await hist.append(
+            DecisionRecord(
+                decision_type=decision_type,
+                request_id=request_id,
+                actor_id=actor_id,
+                payload={
+                    "escalation_id": str(escalation_id),
+                    "from_state": from_state,
+                    "to_state": to_state,
+                    "reason": "bypass-EscalationStore direct emit",
+                },
+            )
+        )
+
+    async def test_open_then_direct_resolved_skipping_states_rejected(
+        self, store: EscalationStore
+    ) -> None:
+        """Reviewer's exact threat shape: legitimate ``open()`` then
+        a direct emit of ``escalation.resolved`` (skipping ack +
+        assigned). Linkage (from=open) holds, but adjacency
+        (RESOLVED not in _LEGAL_TRANSITIONS[OPEN]) does not.
+
+        get_by_id MUST raise EscalationNotFound — the projection
+        treats the whole group as malformed.
+        """
+
+        eid, _, _ = await store.open(
+            actor_id="legit",
+            level="p1",
+            reason="will be corrupted",
+            request_id="req-corrupted-1",
+        )
+        # Direct emit of resolved, claiming from=open. Linkage
+        # passes; adjacency fails (OPEN -> RESOLVED is illegal).
+        await self._emit_direct(
+            store,
+            escalation_id=eid,
+            decision_type="escalation.resolved",
+            from_state="open",
+            to_state="resolved",
+        )
+
+        with pytest.raises(EscalationNotFound):
+            await store.get_by_id(eid)
+
+    async def test_open_then_direct_resolved_skipping_states_omitted_from_list_open(
+        self, store: EscalationStore
+    ) -> None:
+        """Same threat shape, list_open side. Without the lifecycle
+        guard, the projection would set current_state=RESOLVED and
+        list_open would silently OMIT the corrupt escalation —
+        operators would see "no open escalations" while a real-but-
+        bypassed escalation sat in the chain. With the guard, the
+        whole group is skipped: it appears nowhere in list_open.
+        """
+
+        eid, _, _ = await store.open(
+            actor_id="legit",
+            level="p1",
+            reason="should-be-open-but-corrupted",
+            request_id="req-corrupted-2",
+        )
+        await self._emit_direct(
+            store,
+            escalation_id=eid,
+            decision_type="escalation.resolved",
+            from_state="open",
+            to_state="resolved",
+        )
+
+        result = await store.list_open()
+        result_ids = {e.escalation_id for e in result}
+        # The corrupted escalation MUST NOT appear — neither as
+        # OPEN (which it logically is) nor as RESOLVED (which the
+        # bypass-emit faked).
+        assert eid not in result_ids
+
+    async def test_broken_linkage_rejected(self, store: EscalationStore) -> None:
+        """``open()`` + legitimate ``transition(ACKNOWLEDGED)``,
+        then a direct emit whose ``from_state`` does not match the
+        prior row's ``to_state`` (claims from=assigned, but the
+        actual chain end-state is acknowledged). The new validator
+        rejects the whole group on linkage break.
+        """
+
+        eid, _, _ = await store.open(
+            actor_id="legit",
+            level="p1",
+            reason="linkage-test",
+            request_id="req-linkage-1",
+        )
+        await store.transition(
+            escalation_id=eid,
+            actor_id="legit",
+            new_state=EscalationState.ACKNOWLEDGED,
+            reason="legit ack",
+            request_id="req-linkage-2",
+        )
+        # Direct emit: claim from="assigned", to="resolved". Adjacency
+        # is technically legal (ASSIGNED -> RESOLVED is in the map),
+        # but linkage is broken (prior to_state was acknowledged,
+        # not assigned).
+        await self._emit_direct(
+            store,
+            escalation_id=eid,
+            decision_type="escalation.resolved",
+            from_state="assigned",
+            to_state="resolved",
+        )
+
+        with pytest.raises(EscalationNotFound):
+            await store.get_by_id(eid)
+
+    async def test_duplicate_opened_row_rejected(self, store: EscalationStore) -> None:
+        """Two ``escalation.opened`` rows for the same escalation_id
+        — only one legitimate genesis is allowed; duplicates are
+        rejected as malformed."""
+
+        eid, _, _ = await store.open(
+            actor_id="legit",
+            level="p1",
+            reason="will-double-open",
+            request_id="req-dup-1",
+        )
+        # Direct emit of a second escalation.opened.
+        await self._emit_direct(
+            store,
+            escalation_id=eid,
+            decision_type="escalation.opened",
+            from_state=None,
+            to_state="open",
+        )
+
+        with pytest.raises(EscalationNotFound):
+            await store.get_by_id(eid)
+
+    async def test_genesis_row_with_wrong_to_state_rejected(self, store: EscalationStore) -> None:
+        """A bypass-emit that crafts an ``escalation.opened`` row but
+        with ``to_state != "open"`` is rejected: the genesis-row shape
+        check requires from=None AND to="open"."""
+
+        from cognic_agentos.core.decision_history import (
+            DecisionHistoryStore,
+            DecisionRecord,
+        )
+
+        fake_eid = uuid.uuid4()
+        hist = DecisionHistoryStore(store._engine)
+        await hist.append(
+            DecisionRecord(
+                decision_type="escalation.opened",
+                request_id="req-wrong-genesis",
+                actor_id="rogue",
+                payload={
+                    "escalation_id": str(fake_eid),
+                    "from_state": None,
+                    "to_state": "acknowledged",  # wrong — should be "open"
+                    "level": "p1",
+                    "reason": "wrong genesis to_state",
+                },
+            )
+        )
+
+        with pytest.raises(EscalationNotFound):
+            await store.get_by_id(fake_eid)
+
+    async def test_genesis_row_with_non_none_from_state_rejected(
+        self, store: EscalationStore
+    ) -> None:
+        """An ``escalation.opened`` row with a non-None ``from_state``
+        is rejected: the genesis row by definition has no prior state.
+        """
+
+        from cognic_agentos.core.decision_history import (
+            DecisionHistoryStore,
+            DecisionRecord,
+        )
+
+        fake_eid = uuid.uuid4()
+        hist = DecisionHistoryStore(store._engine)
+        await hist.append(
+            DecisionRecord(
+                decision_type="escalation.opened",
+                request_id="req-wrong-from",
+                actor_id="rogue",
+                payload={
+                    "escalation_id": str(fake_eid),
+                    "from_state": "acknowledged",  # wrong — should be None
+                    "to_state": "open",
+                    "level": "p1",
+                    "reason": "wrong genesis from_state",
+                },
+            )
+        )
+
+        with pytest.raises(EscalationNotFound):
+            await store.get_by_id(fake_eid)
+
+    async def test_non_string_from_or_to_state_in_post_open_row_rejected(
+        self, store: EscalationStore
+    ) -> None:
+        """Bypass-emit with malformed payload shape: ``from_state``
+        or ``to_state`` is not a string. The validator's isinstance
+        check rejects the group."""
+
+        from cognic_agentos.core.decision_history import (
+            DecisionHistoryStore,
+            DecisionRecord,
+        )
+
+        eid, _, _ = await store.open(
+            actor_id="legit",
+            level="p1",
+            reason="will-emit-non-string",
+            request_id="req-non-string-1",
+        )
+        # Direct emit: from_state is a number, not a string.
+        # canonical_bytes accepts numbers; the payload lands in the
+        # chain. The lifecycle validator rejects on isinstance.
+        hist = DecisionHistoryStore(store._engine)
+        await hist.append(
+            DecisionRecord(
+                decision_type="escalation.acknowledged",
+                request_id="req-non-string-2",
+                actor_id="rogue",
+                payload={
+                    "escalation_id": str(eid),
+                    "from_state": 42,  # type-wrong: should be a string
+                    "to_state": "acknowledged",
+                    "reason": "non-string from_state",
+                },
+            )
+        )
+
+        with pytest.raises(EscalationNotFound):
+            await store.get_by_id(eid)
+
+    async def test_unknown_state_string_in_post_open_row_rejected(
+        self, store: EscalationStore
+    ) -> None:
+        """Bypass-emit whose ``from_state`` / ``to_state`` is a
+        string but does not match any ``EscalationState`` value
+        (e.g. typo, future-state, deliberate corruption). The
+        validator's ``EscalationState(...)`` ValueError-trap rejects
+        the group."""
+
+        from cognic_agentos.core.decision_history import (
+            DecisionHistoryStore,
+            DecisionRecord,
+        )
+
+        eid, _, _ = await store.open(
+            actor_id="legit",
+            level="p1",
+            reason="will-emit-unknown-state",
+            request_id="req-unknown-state-1",
+        )
+        hist = DecisionHistoryStore(store._engine)
+        await hist.append(
+            DecisionRecord(
+                decision_type="escalation.acknowledged",
+                request_id="req-unknown-state-2",
+                actor_id="rogue",
+                payload={
+                    "escalation_id": str(eid),
+                    "from_state": "open",
+                    "to_state": "wibble",  # not an EscalationState value
+                    "reason": "unknown to_state value",
+                },
+            )
+        )
+
+        with pytest.raises(EscalationNotFound):
+            await store.get_by_id(eid)
+
+    async def test_event_type_disagrees_with_to_state_rejected(
+        self, store: EscalationStore
+    ) -> None:
+        """Reviewer T4 P2 regression: the persisted ``event_type``
+        column is independent evidence and MUST agree with the
+        payload's ``to_state``. A bypass-emit that writes
+        ``event_type='escalation.resolved'`` while
+        ``payload['to_state']='acknowledged'`` is rejected — the row's
+        discriminator and its claimed target state disagree.
+
+        Without this guard, the projection would surface an
+        ACKNOWLEDGED state while an auditor reading raw rows would
+        see ``event_type=escalation.resolved`` for the same chain
+        sequence — two stories about the same evidence row.
+        """
+
+        from cognic_agentos.core.decision_history import (
+            DecisionHistoryStore,
+            DecisionRecord,
+        )
+
+        eid, _, _ = await store.open(
+            actor_id="legit",
+            level="p1",
+            reason="will-emit-mismatch",
+            request_id="req-mismatch-1",
+        )
+        # Direct emit: event_type says "resolved" but payload says
+        # the target is "acknowledged". Linkage holds (from=open
+        # matches the chain's prior to_state); adjacency holds
+        # (OPEN -> ACKNOWLEDGED is legal). The disagreement between
+        # event_type and to_state is the only hole.
+        hist = DecisionHistoryStore(store._engine)
+        await hist.append(
+            DecisionRecord(
+                decision_type="escalation.resolved",  # row's event_type
+                request_id="req-mismatch-2",
+                actor_id="rogue",
+                payload={
+                    "escalation_id": str(eid),
+                    "from_state": "open",
+                    "to_state": "acknowledged",  # payload disagrees
+                    "reason": "event_type / to_state mismatch",
+                },
+            )
+        )
+
+        with pytest.raises(EscalationNotFound):
+            await store.get_by_id(eid)
+
+    async def test_event_type_disagrees_with_to_state_omitted_from_list_open(
+        self, store: EscalationStore
+    ) -> None:
+        """Same threat shape on the list_open side: malformed groups
+        are silently skipped rather than projected with the
+        payload's claimed state."""
+
+        from cognic_agentos.core.decision_history import (
+            DecisionHistoryStore,
+            DecisionRecord,
+        )
+
+        eid, _, _ = await store.open(
+            actor_id="legit",
+            level="p1",
+            reason="will-emit-mismatch-listopen",
+            request_id="req-mismatch-3",
+        )
+        hist = DecisionHistoryStore(store._engine)
+        await hist.append(
+            DecisionRecord(
+                decision_type="escalation.assigned",  # event_type says assigned
+                request_id="req-mismatch-4",
+                actor_id="rogue",
+                payload={
+                    "escalation_id": str(eid),
+                    "from_state": "open",
+                    "to_state": "acknowledged",  # payload says ack
+                    "reason": "list_open mismatch shape",
+                },
+            )
+        )
+
+        result = await store.list_open()
+        result_ids = {e.escalation_id for e in result}
+        assert eid not in result_ids
+
+    async def test_legit_lifecycle_unaffected(self, store: EscalationStore) -> None:
+        """Belt-and-braces regression: a fully-legitimate lifecycle
+        through ``EscalationStore.open`` + ``transition`` MUST still
+        project correctly with the lifecycle guard in place."""
+
+        eid, _, _ = await store.open(
+            actor_id="legit",
+            level="p1",
+            reason="legitimate end-to-end",
+            request_id="req-legit-end-1",
+        )
+        for s in (
+            EscalationState.ACKNOWLEDGED,
+            EscalationState.ASSIGNED,
+            EscalationState.RESOLVED,
+        ):
+            await store.transition(
+                escalation_id=eid,
+                actor_id="legit",
+                new_state=s,
+                reason=f"to-{s.value}",
+                request_id=f"req-legit-end-{s.value}",
+            )
+
+        e = await store.get_by_id(eid)
+        assert e.current_state == EscalationState.RESOLVED
+        assert len(e.transitions) == 4
+
+    async def test_perfectly_faked_lifecycle_via_direct_emits_accepted(
+        self, store: EscalationStore
+    ) -> None:
+        """Documents the contract boundary: a bypass-emit sequence
+        that PERFECTLY mimics a legitimate lifecycle (each row's
+        from_state matches the prior to_state + adjacency holds) is
+        ACCEPTED. The projection layer cannot distinguish such
+        emits from legitimate ones — that defence lives at the
+        runtime-role GRANTs (Sprint 2 operator runbook) and the
+        chain verifier (T8). The projection's job is to surface
+        valid-LOOKING lifecycles; runtime-role enforcement and
+        evidence-pack signatures defend against fully-faked emits.
+
+        This is NOT a defect — it's the boundary where projection
+        guards stop. Pinning it as a documented contract.
+        """
+
+        from cognic_agentos.core.decision_history import (
+            DecisionHistoryStore,
+            DecisionRecord,
+        )
+
+        fake_eid = uuid.uuid4()
+        hist = DecisionHistoryStore(store._engine)
+        # Perfect bypass-emit lifecycle:
+        # opened -> acknowledged -> assigned -> resolved.
+        sequence = [
+            ("escalation.opened", None, "open"),
+            ("escalation.acknowledged", "open", "acknowledged"),
+            ("escalation.assigned", "acknowledged", "assigned"),
+            ("escalation.resolved", "assigned", "resolved"),
+        ]
+        for i, (decision_type, from_state, to_state) in enumerate(sequence):
+            await hist.append(
+                DecisionRecord(
+                    decision_type=decision_type,
+                    request_id=f"req-faked-{i}",
+                    actor_id="rogue",
+                    payload={
+                        "escalation_id": str(fake_eid),
+                        "from_state": from_state,
+                        "to_state": to_state,
+                        "level": "p1" if i == 0 else None,
+                        "reason": f"faked {decision_type}",
+                    },
+                )
+            )
+
+        # Projection accepts the faked-but-shape-correct lifecycle.
+        # Defence-in-depth lives at other layers.
+        e = await store.get_by_id(fake_eid)
+        assert e.current_state == EscalationState.RESOLVED
+        assert len(e.transitions) == 4
+
+
+class TestT3WriteContractUnchanged:
+    """T4 is read-only — T3's write contract is preserved. Sanity-
+    check that the write path still works end-to-end after T4 lands.
+    The full T3 test surface still passes (this class is an extra
+    smoke test focused on the write-path contract specifically)."""
+
+    async def test_t3_write_path_still_works_after_t4(
+        self, store: EscalationStore, engine: AsyncEngine
+    ) -> None:
+        eid, rid, h = await store.open(
+            actor_id="canary",
+            level="p1",
+            reason="t3 still works",
+            request_id="req-t3-still-works",
+        )
+        await store.transition(
+            escalation_id=eid,
+            actor_id="canary",
+            new_state=EscalationState.ACKNOWLEDGED,
+            reason="ack",
+            request_id="req-t3-still-works-ack",
+        )
+        # Verify by reading the chain directly (NOT through T4 reader,
+        # just to keep this test scoped to T3's write contract).
+        async with engine.connect() as conn:
+            rows = (
+                await conn.execute(
+                    select(_decision_history.c.event_type).order_by(_decision_history.c.sequence)
+                )
+            ).all()
+        assert [r.event_type for r in rows] == [
+            "escalation.opened",
+            "escalation.acknowledged",
+        ]
+        assert isinstance(eid, uuid.UUID)
+        assert isinstance(rid, uuid.UUID)
+        assert len(h) == 32
