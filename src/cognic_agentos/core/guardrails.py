@@ -47,8 +47,9 @@ debugging) are explicitly out of Sprint-2.5 scope.
 from __future__ import annotations
 
 import dataclasses
+import re
 from enum import StrEnum
-from typing import Protocol, runtime_checkable
+from typing import ClassVar, Protocol, runtime_checkable
 
 from cognic_agentos.core.audit import AuditStore
 
@@ -183,10 +184,139 @@ class GuardrailPipeline:
         )
 
 
+# ===========================================================================
+# Sprint 2.5 T6 — bundled regex filters
+# ===========================================================================
+#
+# Per BUILD_PLAN: regex-based MVP. ML-based intent classification +
+# semantic PII detection are explicitly Wave 2. The intentional
+# false-positive bias is correct for Sprint 2.5: a high-recall filter
+# at the perimeter is the right shape for ISO 42001 evidence; pack-
+# side overrides + downstream gates can refine.
+#
+# PII privacy: each filter's GuardrailResult.matches carries pattern
+# NAMES (e.g. "credit_card"), NEVER raw matched text. The pipeline
+# emits these names into audit_event payloads (T7); round-tripping
+# raw matches into the chain would recreate the data the filter was
+# meant to block.
+
+
+class RegexPIIGuardrail:
+    """Sprint-2.5 baseline PII filter. Detects rough patterns for:
+
+      - Credit cards (Luhn-light: 13-19 digits, optional separators).
+      - US SSN-shape (NNN-NN-NNNN).
+      - Phone-number-shape (+? 10-15 digits with optional separators).
+      - Email addresses (RFC-5322-light).
+
+    High-recall by design — false-positives at the perimeter are
+    acceptable; downstream gates can refine. Conforms to the
+    ``Guardrail`` Protocol (``name: str`` + ``check(content) ->
+    GuardrailResult``).
+    """
+
+    name: ClassVar[str] = "pii.regex.baseline"
+
+    _PATTERNS: ClassVar[dict[str, re.Pattern[str]]] = {
+        # Credit card: 13-19 digits, optionally interleaved with
+        # single space or hyphen. \b boundaries keep us from gluing
+        # to surrounding digits.
+        "credit_card": re.compile(r"\b(?:\d[ -]?){12,18}\d\b"),
+        # US SSN shape: NNN-NN-NNNN. Anchored to word boundaries.
+        "ssn_us": re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),
+        # Phone: optional + prefix, then 10-15 digits with optional
+        # separators (space, hyphen, parens) interspersed between
+        # adjacent digits. Strict total-digit count:
+        # ``(?:\d[ \-()]{0,2}){9,14}\d`` is 9-14 (digit + ≤2 sep)
+        # iterations + a final digit, so exactly 10-15 total digits.
+        # Non-word/non-digit lookbehind/lookahead reject any
+        # surrounding alphanumeric so the pattern does NOT trip on
+        # short numeric IDs (≤9 digits) or naked long sequences
+        # (≥16 digits — e.g. naked credit cards or order IDs).
+        # The earlier ``\d{1,3}...\d{2,9}`` shape was 7-20 digits —
+        # beyond the documented range — and produced noisy phone
+        # trips on short / long numeric IDs and naked CCs.
+        # (T6-reviewer-P1 fix: tighten to documented 10-15.)
+        #
+        # Documented residual overlap: separator-formatted 16-digit
+        # credit cards (e.g. ``4111-1111-1111-1111``) still trip
+        # via their 12-digit phone-shaped prefix — the lookahead
+        # succeeds at the position before a hyphen. This is the
+        # high-recall design boundary; pinned by the corresponding
+        # T6 test.
+        "phone": re.compile(r"(?<![\w\d])\+?(?:\d[ \-()]{0,2}){9,14}\d(?![\w\d])"),
+        # Email: RFC-5322-light. \w+ before @, dotted host after.
+        "email": re.compile(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b"),
+    }
+
+    def check(self, content: str) -> GuardrailResult:
+        matches = tuple(
+            sorted(pat_name for pat_name, pat in self._PATTERNS.items() if pat.search(content))
+        )
+        return GuardrailResult(
+            guardrail_name=self.name,
+            passed=not matches,
+            matches=matches,
+            detail=None if not matches else f"{len(matches)} pattern(s) tripped",
+        )
+
+
+class InjectionGuardrail:
+    """Sprint-2.5 baseline prompt-injection filter. Detects:
+
+      - Instruction-override phrasing ("ignore previous instructions"
+        and variations).
+      - System-prompt prefix attempts (``system:`` or
+        ``system prompt:`` at line start).
+      - Token-injection markers (``<|im_start|>``, ``<|endoftext|>``,
+        ``### system`` at line start).
+
+    High-recall by design. Pack-side overrides (later sprints) can
+    relax. ML-based intent classification is Wave 2. Conforms to the
+    ``Guardrail`` Protocol.
+    """
+
+    name: ClassVar[str] = "injection.regex.baseline"
+
+    _PATTERNS: ClassVar[dict[str, re.Pattern[str]]] = {
+        # "ignore [all] previous instructions" — verb forms ignore /
+        # ignoring, optional 'all', singular or plural 'instruction'.
+        "instruction_override": re.compile(
+            r"\bignor(?:e|ing)\s+(?:all\s+)?previous\s+instructions?\b",
+            re.IGNORECASE,
+        ),
+        # "system:" or "system prompt:" at start-of-line. Catches
+        # prompts that try to inject a fake system message.
+        "system_prefix": re.compile(
+            r"(?:^|\n)\s*system\s*(?:prompt)?\s*:",
+            re.IGNORECASE,
+        ),
+        # Token-injection markers. ChatML-style <|im_start|> /
+        # <|endoftext|> + the markdown-ish "### system" header.
+        "token_injection_markers": re.compile(
+            r"(?:<\|im_start\|>|<\|endoftext\|>|^###\s*system)",
+            re.IGNORECASE | re.MULTILINE,
+        ),
+    }
+
+    def check(self, content: str) -> GuardrailResult:
+        matches = tuple(
+            sorted(pat_name for pat_name, pat in self._PATTERNS.items() if pat.search(content))
+        )
+        return GuardrailResult(
+            guardrail_name=self.name,
+            passed=not matches,
+            matches=matches,
+            detail=None if not matches else f"{len(matches)} pattern(s) tripped",
+        )
+
+
 __all__: tuple[str, ...] = (
     "Guardrail",
     "GuardrailDirection",
     "GuardrailPipeline",
     "GuardrailResult",
+    "InjectionGuardrail",
     "PipelineResult",
+    "RegexPIIGuardrail",
 )
