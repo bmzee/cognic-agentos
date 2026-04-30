@@ -294,7 +294,12 @@ class TestLedgerWrite:
     ) -> None:
         """Sprint 2 R3 contract: ts is tz-aware at write + read."""
         ledger = GatewayCallLedger(sqlite_engine_with_ledger)
-        ts = _dt.datetime(2026, 4, 30, 12, 0, tzinfo=_dt.UTC)
+        # Use ``now()`` not a fixed timestamp: the read uses a
+        # 60-minute rolling window, so any pinned past timestamp
+        # eventually drifts outside the window as wall-clock advances.
+        # The contract under test is tz-awareness round-trip, not any
+        # specific clock value.
+        ts = _dt.datetime.now(_dt.UTC)
         await ledger.write_row(_make_row(ts=ts))
 
         rows = await ledger.read_recent_calls(window_minutes=60)
