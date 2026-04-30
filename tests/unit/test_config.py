@@ -451,3 +451,112 @@ class TestEnterpriseAdapterSettings:
         s = build_settings_without_env_file()
         assert s.embedding_api_key == "azure-key-value"
         assert s.embedding_api_key_header == "api-key"
+
+
+# --- LLM gateway (Sprint 3 T1, per ADR-007) ---------------------------------
+
+
+class TestLLMGatewaySettings:
+    """Sprint 3 T1 — LLM gateway settings.
+
+    Mirrors the plan's locked decisions: self-hosted-first defaults,
+    CSV/JSON-array parsing on ``allowed_providers`` (mirrors the
+    Sprint-1B ``cors_allowed_origins`` shape), policy_mode rejects
+    unknown literals.
+    """
+
+    def test_defaults_are_self_hosted_first(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        for var in (
+            "COGNIC_TIER1_ALIAS",
+            "COGNIC_TIER2_ALIAS",
+            "COGNIC_LITELLM_BASE_URL",
+            "COGNIC_LITELLM_MASTER_KEY",
+            "COGNIC_ALLOW_EXTERNAL_LLM",
+            "COGNIC_POLICY_MODE",
+            "COGNIC_ALLOWED_PROVIDERS",
+            "COGNIC_LLM_TIMEOUT_S",
+            "COGNIC_LLM_CONCURRENCY_PER_PROFILE",
+            "COGNIC_LLM_CONCURRENCY_MODE",
+            "COGNIC_PROVIDER_HONESTY_LEDGER_WINDOW_MINUTES",
+        ):
+            monkeypatch.delenv(var, raising=False)
+        s = build_settings_without_env_file()
+        assert s.tier1_alias == "cognic-tier1-dev"
+        assert s.tier2_alias == "cognic-tier2-dev"
+        assert s.litellm_base_url is None
+        assert s.litellm_master_key is None
+        assert s.allow_external_llm is False
+        assert s.policy_mode == "self_hosted"
+        assert s.allowed_providers == []
+        assert s.llm_timeout_s == 30.0
+        assert s.llm_concurrency_per_profile == 4
+        assert s.llm_concurrency_mode == "queued"
+        assert s.provider_honesty_ledger_window_minutes == 60
+
+    def test_allowed_providers_parses_csv(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("COGNIC_ALLOWED_PROVIDERS", "openai,azure")
+        s = build_settings_without_env_file()
+        assert s.allowed_providers == ["openai", "azure"]
+
+    def test_allowed_providers_parses_json_array(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("COGNIC_ALLOWED_PROVIDERS", '["openai", "anthropic"]')
+        s = build_settings_without_env_file()
+        assert s.allowed_providers == ["openai", "anthropic"]
+
+    def test_allowed_providers_normalises_to_lowercase(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("COGNIC_ALLOWED_PROVIDERS", "OpenAI, AZURE")
+        s = build_settings_without_env_file()
+        assert s.allowed_providers == ["openai", "azure"]
+
+    def test_allowed_providers_empty_string_yields_empty_list(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("COGNIC_ALLOWED_PROVIDERS", "")
+        s = build_settings_without_env_file()
+        assert s.allowed_providers == []
+
+    def test_policy_mode_rejects_unknown(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("COGNIC_POLICY_MODE", "no_such_mode")
+        with pytest.raises(ValueError):
+            build_settings_without_env_file()
+
+    def test_llm_concurrency_mode_rejects_unknown(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("COGNIC_LLM_CONCURRENCY_MODE", "spinwait")
+        with pytest.raises(ValueError):
+            build_settings_without_env_file()
+
+    def test_llm_timeout_rejects_zero(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("COGNIC_LLM_TIMEOUT_S", "0")
+        with pytest.raises(ValueError):
+            build_settings_without_env_file()
+
+    def test_llm_concurrency_per_profile_rejects_zero(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("COGNIC_LLM_CONCURRENCY_PER_PROFILE", "0")
+        with pytest.raises(ValueError):
+            build_settings_without_env_file()
+
+    def test_provider_honesty_window_rejects_above_24h(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("COGNIC_PROVIDER_HONESTY_LEDGER_WINDOW_MINUTES", "1441")
+        with pytest.raises(ValueError):
+            build_settings_without_env_file()
+
+    def test_explicit_cloud_settings_load(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("COGNIC_TIER1_ALIAS", "cognic-tier1-cloud-openai")
+        monkeypatch.setenv("COGNIC_LITELLM_BASE_URL", "http://litellm:4000")
+        monkeypatch.setenv("COGNIC_LITELLM_MASTER_KEY", "sk-test")
+        monkeypatch.setenv("COGNIC_ALLOW_EXTERNAL_LLM", "true")
+        monkeypatch.setenv("COGNIC_POLICY_MODE", "cloud_openai")
+        monkeypatch.setenv("COGNIC_ALLOWED_PROVIDERS", "openai")
+        s = build_settings_without_env_file()
+        assert s.tier1_alias == "cognic-tier1-cloud-openai"
+        assert s.litellm_base_url == "http://litellm:4000"
+        assert s.litellm_master_key == "sk-test"
+        assert s.allow_external_llm is True
+        assert s.policy_mode == "cloud_openai"
+        assert s.allowed_providers == ["openai"]
