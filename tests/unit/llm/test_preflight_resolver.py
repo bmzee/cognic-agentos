@@ -613,3 +613,179 @@ class TestResolvedUpstreamReusedFromT3:
     def test_provider_helper(self) -> None:
         r = ResolvedUpstream(alias="x", model_string="openai/gpt-4o", api_base=None, external=True)
         assert r.provider() == "openai"
+
+
+# ---------------------------------------------------------------------------
+# TestRealLiteLLMConfigYaml — Sprint 3 T10.
+#
+# Pins the contract that ``infra/litellm/config.yaml`` declares the
+# Sprint 3 cloud aliases and that they classify correctly through
+# the api_base-aware classifier.
+#
+# Round-10 reviewer-P2 correction: ``PreflightResolver`` substitutes
+# env vars only in ``model`` and ``api_base``; the YAML's ``api_key``
+# field is not read by the resolver at all. So cloud aliases
+# ``resolve()`` successfully even with ``OPENAI_API_KEY`` /
+# ``ANTHROPIC_API_KEY`` unset — that's load-bearing for the T10
+# denial-path-exerciseability goal: a dev/test environment without
+# cloud credentials can still resolve the cloud alias, classify it
+# external, and have the gateway's pre-call cloud-policy enforcer
+# deny the call BEFORE any LiteLLM dispatch attempts to use the
+# (absent) credential. The ``cloud_alias_resolves_then_denies``
+# regression below pins that path.
+# ---------------------------------------------------------------------------
+
+
+_REAL_CONFIG = Path(__file__).parents[3] / "infra" / "litellm" / "config.yaml"
+
+_CLOUD_OPENAI_ALIASES = (
+    ("cognic-tier1-cloud-openai", "openai/gpt-4o"),
+    ("cognic-tier2-cloud-openai", "openai/gpt-4o-mini"),
+)
+_CLOUD_ANTHROPIC_ALIASES = (
+    ("cognic-tier1-cloud-anthropic", "anthropic/claude-3-5-sonnet-20241022"),
+    ("cognic-tier2-cloud-anthropic", "anthropic/claude-3-5-haiku-20241022"),
+)
+
+
+class TestRealLiteLLMConfigYaml:
+    def test_real_config_parses_with_cloud_keys_unset(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Round-3 reviewer-P1#3 lazy-substitution contract: a dev
+        environment with no cloud credentials and no vLLM / SGLang
+        env vars must construct the resolver fine. ``from_yaml``
+        stores raw templates; substitution happens only at
+        ``resolve()`` time and only for the ``model`` + ``api_base``
+        fields the resolver consumes."""
+        for var in (
+            "OPENAI_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "VLLM_API_KEY",
+            "SGLANG_API_KEY",
+            "VLLM_BASE_URL",
+            "SGLANG_BASE_URL",
+            "COGNIC_TIER1_VLLM_MODEL",
+            "COGNIC_TIER2_VLLM_MODEL",
+            "COGNIC_TIER1_SGLANG_MODEL",
+            "COGNIC_TIER2_SGLANG_MODEL",
+            "COGNIC_TIER1_CLOUD_OPENAI_MODEL",
+            "COGNIC_TIER2_CLOUD_OPENAI_MODEL",
+            "COGNIC_TIER1_CLOUD_ANTHROPIC_MODEL",
+            "COGNIC_TIER2_CLOUD_ANTHROPIC_MODEL",
+        ):
+            monkeypatch.delenv(var, raising=False)
+        resolver = PreflightResolver.from_yaml(_REAL_CONFIG)
+        # Dev ollama aliases construct + resolve fine — they have a
+        # default api_base and no required env-var.
+        assert resolver.resolve("cognic-tier1-dev").external is False
+
+    def test_real_config_declares_all_sprint_3_cloud_aliases(self) -> None:
+        """Lock the alias-name contract. A rename or removal of any
+        Sprint-3 cloud alias breaks the operator-facing surface
+        documented in .env.example + the BUILD_PLAN."""
+        resolver = PreflightResolver.from_yaml(_REAL_CONFIG)
+        declared = set(resolver.known_aliases)
+        expected = {
+            "cognic-tier1-cloud-openai",
+            "cognic-tier2-cloud-openai",
+            "cognic-tier1-cloud-anthropic",
+            "cognic-tier2-cloud-anthropic",
+        }
+        assert expected.issubset(declared), f"missing Sprint 3 cloud aliases: {expected - declared}"
+
+    @pytest.mark.parametrize(
+        ("alias", "expected_model"),
+        _CLOUD_OPENAI_ALIASES + _CLOUD_ANTHROPIC_ALIASES,
+    )
+    def test_cloud_alias_resolves_to_external_with_default_model(
+        self,
+        alias: str,
+        expected_model: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Cloud aliases:
+        * resolve to external=True (no api_base set; classifier sees
+          the cloud provider prefix unguarded by a private host),
+        * carry api_base=None (Round-2 reviewer-P1#2: api_base is
+          dispositive — its absence on a cloud alias is what makes
+          the classification external),
+        * substitute the documented default model when the per-tier
+          override env var is unset.
+
+        Round-10 reviewer-P2: ``api_key`` is NOT read by the
+        resolver, so the cloud-credential env vars are intentionally
+        NOT set here. Resolution succeeds without them; the gateway's
+        pre-call enforcer is what gates the actual dispatch.
+        """
+        for var in (
+            "OPENAI_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "COGNIC_TIER1_CLOUD_OPENAI_MODEL",
+            "COGNIC_TIER2_CLOUD_OPENAI_MODEL",
+            "COGNIC_TIER1_CLOUD_ANTHROPIC_MODEL",
+            "COGNIC_TIER2_CLOUD_ANTHROPIC_MODEL",
+        ):
+            monkeypatch.delenv(var, raising=False)
+        resolver = PreflightResolver.from_yaml(_REAL_CONFIG)
+        resolved = resolver.resolve(alias)
+        assert resolved.external is True
+        assert resolved.api_base is None
+        assert resolved.model_string == expected_model
+        assert resolved.provenance == "resolved"
+
+    @pytest.mark.parametrize(
+        "alias",
+        [
+            "cognic-tier1-cloud-openai",
+            "cognic-tier2-cloud-openai",
+            "cognic-tier1-cloud-anthropic",
+            "cognic-tier2-cloud-anthropic",
+        ],
+    )
+    def test_cloud_alias_resolves_then_denies_under_default_policy(
+        self, alias: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Round-10 reviewer-P2 — pin the actual T10 denial-path
+        story end-to-end: with NO cloud credentials in the env, the
+        resolver still resolves each cloud alias to an external
+        ResolvedUpstream, and the default-secure cloud-policy
+        enforcer denies BEFORE dispatch ever attempts to use the
+        absent credential. This is the realistic dev/test posture
+        the cloud aliases were added for; it also documents that
+        ``api_key`` is not part of the resolver's substitution
+        surface.
+        """
+        from cognic_agentos.core.config import Settings
+        from cognic_agentos.llm.policy import enforce_cloud_policy
+
+        for var in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
+            monkeypatch.delenv(var, raising=False)
+        resolver = PreflightResolver.from_yaml(_REAL_CONFIG)
+        resolved = resolver.resolve(alias)
+        assert resolved.external is True, "cloud alias must classify external"
+
+        # Default-secure settings: external denied.
+        decision = enforce_cloud_policy(
+            resolved=resolved,
+            settings=Settings(
+                allow_external_llm=False,
+                policy_mode="self_hosted",
+                allowed_providers=[],
+            ),
+            post_response=False,
+        )
+        assert decision.allowed is False
+        assert "allow_external_llm=False" in decision.reason
+
+    def test_cloud_openai_model_override_substitutes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Operator override flows through ``${VAR:-default}``.
+
+        Round-10 reviewer-P2: ``api_key`` env vars are NOT required
+        for resolution; deleted explicitly to make that contract
+        visible in the test."""
+        for var in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("COGNIC_TIER1_CLOUD_OPENAI_MODEL", "gpt-5.4")
+        resolver = PreflightResolver.from_yaml(_REAL_CONFIG)
+        assert resolver.resolve("cognic-tier1-cloud-openai").model_string == "openai/gpt-5.4"

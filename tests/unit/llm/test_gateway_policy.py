@@ -186,6 +186,37 @@ class TestEnforceCloudPolicy:
         assert decision.allowed is False
         assert "self_hosted" in decision.reason
 
+    # --- Sprint 3 enforcer scope (T10 reviewer-P2) ------------------------
+    # The Sprint 3 enforcer does NOT bind ``policy_mode=cloud_*`` sub-
+    # modes to provider families: the only provider gate is
+    # ``allowed_providers``. A ``cloud_anthropic`` mode + an ``openai``
+    # entry on the allow-list will permit an OpenAI upstream. Tightening
+    # this is on the Sprint 13.5 OPA-Rego roadmap; until then the docs
+    # in ``infra/litellm/config.yaml`` and ``.env.example`` describe the
+    # *actual* enforcement surface, and this test pins the gap so any
+    # future runtime-strengthening commit fails here and prompts a
+    # doc/test update at the same time.
+
+    def test_policy_mode_does_not_bind_provider_family(self) -> None:
+        """``cloud_anthropic`` mode + ``openai`` on the allow-list
+        currently ALLOWS an OpenAI cloud upstream. Documents the gap."""
+        mismatched = Settings(
+            allow_external_llm=True,
+            policy_mode="cloud_anthropic",  # operator says "anthropic only"
+            allowed_providers=["openai"],  # ...but allow-list says openai
+        )
+        decision = enforce_cloud_policy(
+            resolved=_openai_cloud(),
+            settings=mismatched,
+            post_response=False,
+        )
+        assert decision.allowed is True, (
+            "Sprint 3 enforcer treats policy_mode!=self_hosted uniformly; "
+            "if this assertion now fails, the runtime has been strengthened "
+            "to bind policy_mode to provider families — update the docs in "
+            "infra/litellm/config.yaml + .env.example to match."
+        )
+
     # --- Provenance-gap deny (Rounds 4+5+6 reviewer-P1) -------------------
 
     def test_unresolved_provenance_denies_unconditionally_default_settings(
