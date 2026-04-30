@@ -478,6 +478,7 @@ class TestLLMGatewaySettings:
             "COGNIC_LLM_CONCURRENCY_PER_PROFILE",
             "COGNIC_LLM_CONCURRENCY_MODE",
             "COGNIC_PROVIDER_HONESTY_LEDGER_WINDOW_MINUTES",
+            "COGNIC_LLM_GUARDRAIL_SCOPE",
         ):
             monkeypatch.delenv(var, raising=False)
         s = build_settings_without_env_file()
@@ -492,6 +493,34 @@ class TestLLMGatewaySettings:
         assert s.llm_concurrency_per_profile == 4
         assert s.llm_concurrency_mode == "queued"
         assert s.provider_honesty_ledger_window_minutes == 60
+        # T1 follow-up: default ``all`` means configured guardrails run
+        # on local + cloud calls. Banks intentionally relax per perimeter.
+        assert s.llm_guardrail_scope == "all"
+
+    @pytest.mark.parametrize(
+        "scope",
+        ["all", "external_only", "self_hosted_only", "off"],
+    )
+    def test_guardrail_scope_accepts_all_four_modes(
+        self, scope: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """T1 follow-up: per-route guardrail scope. ``all`` is the secure
+        default; ``external_only`` lets banks skip local-model guardrails
+        (perimeter-risk justification); ``self_hosted_only`` is the
+        inverse (e.g. operator who guards on-prem traffic but trusts
+        cloud-tenant isolation); ``off`` disables configured pipelines
+        on every call. The runtime branch lives at the gateway boundary
+        (T6); settings layer just exposes the knob."""
+        monkeypatch.setenv("COGNIC_LLM_GUARDRAIL_SCOPE", scope)
+        s = build_settings_without_env_file()
+        assert s.llm_guardrail_scope == scope
+
+    def test_guardrail_scope_rejects_unknown_mode(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Unknown literal must fail at startup, not silently fall back
+        to a default — operator misconfiguration surfaces loudly."""
+        monkeypatch.setenv("COGNIC_LLM_GUARDRAIL_SCOPE", "external")
+        with pytest.raises(ValueError):
+            build_settings_without_env_file()
 
     def test_allowed_providers_parses_csv(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("COGNIC_ALLOWED_PROVIDERS", "openai,azure")

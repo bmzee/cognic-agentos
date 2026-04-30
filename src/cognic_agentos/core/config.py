@@ -458,6 +458,22 @@ class Settings(BaseSettings):
             "``gateway_call_ledger`` (per ADR-007). Capped at 24h."
         ),
     )
+    llm_guardrail_scope: Literal["all", "external_only", "self_hosted_only", "off"] = Field(
+        default="all",
+        description=(
+            "Per-route scope for configured gateway guardrail pipelines. "
+            "``all`` (secure default) runs guardrails on local + cloud "
+            "calls. ``external_only`` runs them only for cloud/external "
+            "upstreams. ``self_hosted_only`` runs them only for local/"
+            "on-prem upstreams. ``off`` skips configured pipelines on "
+            "every call. This knob controls whether configured pipelines "
+            "execute; banks can still inject ``None`` for input or output "
+            "pipeline at gateway construction to disable a direction "
+            "globally — the two axes compose. Per ADR-007 self-hosted-"
+            "first posture: AgentOS ships conservative (``all``); banks "
+            "intentionally relax based on their perimeter risk."
+        ),
+    )
 
     @field_validator("allowed_providers", mode="before")
     @classmethod

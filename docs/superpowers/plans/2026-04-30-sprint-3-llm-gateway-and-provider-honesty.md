@@ -205,6 +205,33 @@ Per Round-2 reviewer-P1#1: any `actual_model_string != preflight.model_string` i
 - **OUTPUT runs AFTER LLM call returns BEFORE caller sees the response.** Reason: the response could carry a model-leaked secret or a prompt-injection mirror; the gateway is the right place to filter, not the caller.
 - **Trip = halt + raise.** Sprint 3 does not implement "redact and continue" or "warn and pass". Sprint 5+ may add modes; for now a trip is a hard-stop. This matches Sprint 2.5's `GuardrailPipeline.check` posture: pipeline returns a result, gateway interprets a non-empty trip list as a halt.
 - **GuardrailPipeline is injected at construction, not built per-call.** `LLMGateway.__init__(input_pipeline: GuardrailPipeline | None, output_pipeline: GuardrailPipeline | None)`. None on either side = no guardrails on that direction (safe-by-construction null-object pattern). No global default — every call site declares what it wants. T6 ships `RegexPIIGuardrail` + `InjectionGuardrail` wired in dev compose; banks override the injection in their own deployment.
+- **Per-route guardrail scope** (T1 follow-up). The `Settings.llm_guardrail_scope` Literal (default `"all"`, secure) lets banks pick which routes a configured pipeline executes on:
+  - `"all"` — run on local + cloud calls (secure default).
+  - `"external_only"` — run only for cloud/external upstreams; skip local/self-hosted (perimeter-risk justification).
+  - `"self_hosted_only"` — run only for local/on-prem upstreams; trust cloud-tenant isolation.
+  - `"off"` — skip configured pipelines on every call.
+
+  Two axes compose: (a) inject `None` for the input or output pipeline at gateway construction to disable a *direction* globally; (b) set `llm_guardrail_scope` to scope *route execution* of any injected pipeline. T6 enforces both at the gateway boundary via:
+
+  ```python
+  def _guardrails_enabled_for(resolved: ResolvedUpstream, scope: str) -> bool:
+      if scope == "all": return True
+      if scope == "external_only": return resolved.external
+      if scope == "self_hosted_only": return not resolved.external
+      if scope == "off": return False
+      raise AssertionError("unreachable")  # Literal type guarantees coverage
+
+  run_input_guardrails = (
+      self._input_pipeline is not None
+      and _guardrails_enabled_for(preflight_resolved, self._settings.llm_guardrail_scope)
+  )
+  run_output_guardrails = (
+      self._output_pipeline is not None
+      and _guardrails_enabled_for(actual_resolved, self._settings.llm_guardrail_scope)
+  )
+  ```
+
+  Note the asymmetry: input direction classifies on `preflight_resolved.external` (decision lands BEFORE LiteLLM dispatches); output direction classifies on `actual_resolved.external` (decision lands AFTER the response). Both are correct — input gating uses what we know, output gating uses what actually happened.
 
 ### §4 — SLA classification behaviour
 
@@ -1581,6 +1608,13 @@ Seven test modules, each load-bearing for one contract claim:
 2. `test_gateway_guardrails.py`:
    - INPUT trip halts before policy resolution + raises `GuardrailViolationError("input")` + ledger row outcome="guardrail_input" (best-effort regime).
    - OUTPUT trip raises `GuardrailViolationError("output")` + **ledger row outcome="guardrail_output" MUST be present** (post-dispatch strict regime).
+   - **T1 follow-up — `llm_guardrail_scope` matrix (load-bearing for the four-mode contract):**
+     - **`scope="all"`** — self-hosted route + external route both run input AND output guardrails. PII-loaded prompt trips on each.
+     - **`scope="external_only"`** — self-hosted route does NOT execute pipelines (PII-loaded prompt + PII-loaded response both pass through cleanly; no `guardrail.trip` audit emitted, ledger row outcome="ok"); external route still trips and behaves identically to `scope="all"`.
+     - **`scope="self_hosted_only"`** — inverse of the prior: self-hosted trips, external passes through.
+     - **`scope="off"`** — neither self-hosted nor external execute pipelines; PII passes through both. **No `guardrail.trip` audit emission** on either route.
+     - **Direction-`None` overrides scope** — `LLMGateway(input_pipeline=None, output_pipeline=<configured>, ..., scope="all")` runs OUTPUT guardrails on every call but never INPUT guardrails. Symmetrically, `output_pipeline=None` with `scope="all"` runs INPUT only. Asserts the inject-None axis composes correctly with the scope axis.
+   - Asymmetric direction-classification regression: when scope is `external_only` and an external alias is preflight-resolved BUT LiteLLM dispatches to a self-hosted upstream (drift case), the **input** runs (preflight is external) but the **output** does not (actual is self-hosted). Pins the per-direction classification choice the plan §3 documents.
 3. `test_gateway_sla.py` — breach emits `audit_event(sla.breach)` + iso_controls=("ISO42001.A.9.2",); does NOT raise; ledger outcome="ok"; warning logs no-audit; green is no-op.
 4. `test_gateway_completion.py` (denied path) — cloud upstream + flag off → `audit_event(gateway.cloud_policy_denied, post_response=False)` + `CloudPolicyViolationError`; **no LiteLLM HTTP call made** (httpx-respx asserts zero requests); ledger row best-effort outcome="denied".
 5. `test_gateway_drift.py` (**load-bearing for Round-1+Round-2 reviewer-P1#1**) — three subtests:
@@ -1663,6 +1697,30 @@ from cognic_agentos.llm.preflight import (
 _LOG = logging.getLogger("cognic_agentos.llm.gateway")
 
 
+def _guardrails_enabled_for(resolved: ResolvedUpstream, scope: str) -> bool:
+    """Per-route guardrail-execution decision (T1 follow-up).
+
+    Consumes ``Settings.llm_guardrail_scope`` and the resolved upstream's
+    api_base-aware ``external`` flag to decide whether an injected
+    pipeline runs on this route. Pure function; no audit emission.
+
+    Composes with the inject-None axis at the gateway: caller logic is
+    ``run = pipeline is not None and _guardrails_enabled_for(resolved, scope)``.
+    """
+
+    if scope == "all":
+        return True
+    if scope == "external_only":
+        return resolved.external
+    if scope == "self_hosted_only":
+        return not resolved.external
+    if scope == "off":
+        return False
+    raise AssertionError(  # Literal type guarantees coverage at the boundary
+        f"unreachable scope {scope!r}; settings validator should have rejected"
+    )
+
+
 class LedgerWriteFailed(RuntimeError):
     """Raised when a strict-regime ledger write fails.
 
@@ -1733,9 +1791,21 @@ class LLMGateway:
         outcome: str = "ok"
 
         # --- 1. INPUT guardrails (pre-dispatch — best-effort ledger regime) -----
-        if self._input_pipeline is not None:
+        # T1 follow-up: per-route scope + inject-None compose. Input
+        # direction classifies on ``preflight_resolved.external`` (the
+        # decision lands BEFORE LiteLLM dispatches; preflight is the
+        # only signal we have at this point). Local-narrow to a non-None
+        # binding so mypy can verify the .check() call without a
+        # type-ignore — Literal-narrowing through compound boolean
+        # expressions isn't recognised by mypy.
+        input_pipeline = self._input_pipeline
+        run_input_guardrails = (
+            input_pipeline is not None
+            and _guardrails_enabled_for(preflight_resolved, self._settings.llm_guardrail_scope)
+        )
+        if run_input_guardrails:
             joined = "\n".join(m.get("content", "") for m in messages)
-            ip_result: PipelineResult = await self._input_pipeline.check(
+            ip_result: PipelineResult = await input_pipeline.check(
                 joined,
                 direction=GuardrailDirection.INPUT,
                 request_id=request_id,
@@ -1975,8 +2045,21 @@ class LLMGateway:
                         )
 
                     # --- 8. OUTPUT guardrails -------------------------------
-                    if self._output_pipeline is not None:
-                        op_result: PipelineResult = await self._output_pipeline.check(
+                    # T1 follow-up: per-route scope + inject-None compose.
+                    # Output direction classifies on ``actual_resolved.external``
+                    # — the decision lands AFTER the response, so we use the
+                    # actual upstream identity. This asymmetry vs the input
+                    # direction is intentional; both use the best signal
+                    # available at their respective decision points.
+                    output_pipeline = self._output_pipeline
+                    run_output_guardrails = (
+                        output_pipeline is not None
+                        and _guardrails_enabled_for(
+                            actual_resolved, self._settings.llm_guardrail_scope
+                        )
+                    )
+                    if run_output_guardrails:
+                        op_result: PipelineResult = await output_pipeline.check(
                             content,
                             direction=GuardrailDirection.OUTPUT,
                             request_id=request_id,
