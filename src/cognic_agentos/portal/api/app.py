@@ -54,6 +54,7 @@ from cognic_agentos.observability import (
     install_request_id_middleware,
     silence_uvicorn_access_log,
 )
+from cognic_agentos.portal.api.system_routes import build_system_router
 
 logger = logging.getLogger(__name__)
 
@@ -232,6 +233,7 @@ def create_app(
     install_request_id_middleware(app)
 
     app.include_router(_build_router(settings))
+    app.include_router(build_system_router(settings))
 
     # Mount Prometheus AFTER routes so the instrumentator's metric registry
     # captures the route table; the scrape endpoint is mounted under
