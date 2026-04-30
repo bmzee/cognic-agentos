@@ -45,6 +45,7 @@ from cognic_agentos.db.adapters import (
     bundled_registry,
     load_bundled_adapters,
 )
+from cognic_agentos.llm.ledger import GatewayCallLedger
 from cognic_agentos.observability import (
     configure_logging,
     configure_tracing,
@@ -159,6 +160,7 @@ def create_app(
     settings: Settings | None = None,
     *,
     adapter_registry: AdapterRegistry | None = None,
+    gateway_ledger: GatewayCallLedger | None = None,
 ) -> FastAPI:
     """Build and return the FastAPI application.
 
@@ -174,6 +176,14 @@ def create_app(
     1A/1B test default), no adapters are built and ``/readyz`` reports
     only the internal triplet — preserving Sprint 1B test behaviour.
 
+    Sprint 3 T9: ``gateway_ledger`` (optional) is attached to
+    ``app.state.gateway_ledger`` so ``/api/v1/system/effective-routing``
+    can read it as the authoritative source per ADR-007. When unset,
+    the endpoint reports an empty post-dispatch picture — the public
+    contract still serves 200 (per ADR-007 the honesty claim never
+    fails closed on missing ledger; the operator sees zero rows + the
+    intent surface from settings).
+
     Production launchers go through :func:`create_prod_app` to default
     ``adapter_registry`` to the process-wide ``bundled_registry``.
     """
@@ -187,6 +197,10 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        # Attach the optional Sprint-3 ledger reader regardless of the
+        # adapter-registry path so /effective-routing works in both
+        # the lifespan-managed adapter mode and the test injection mode.
+        app.state.gateway_ledger = gateway_ledger
         if adapter_registry is None:
             app.state.adapters = None
             yield
