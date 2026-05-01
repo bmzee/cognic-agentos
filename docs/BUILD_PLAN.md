@@ -323,8 +323,11 @@ Sprint 1 is split into four focused sub-sprints for a clean bootstrap. Each ship
   - Sprint 13.5 extends this evaluator with hot-reload, the rest of the default bundles, decision-trail API (`GET /api/v1/policy/decisions/{trace_id}`), and refactors all inline checks across Sprints 4/7B/8/9.5/11/11.5 to delegate
 - `core/config.py` extension — `cognic_plugin_allowlist_path` (Vault path), `cognic_require_cosign` flag, `cognic_supply_chain_policy_bundle` (Rego bundle path; defaults to `policies/_default/supply_chain.rego`)
 - `portal/api/app.py` — `GET /api/v1/system/plugins` (lists registered packs with identity + signature digest + attestation summary)
-- `tests/fixtures/cognic_test_pack/` — a fake pack with entry point + full attestation set, used in tests
-- Documentation update: `docs/HOW-TO-WRITE-A-PACK.md` — attestation requirements section
+- `tests/fixtures/cognic_test_pack/` — installable Hatchling pack with entry point + full attestation set; distribution name (kebab-case) deliberately differs from entry-point alias (snake-case) so the T9/T10 distribution-name-vs-alias divergence is exercised end-to-end. Ships seven attestation files (SBOM / SLSA L3 / in-toto / vuln / license / cosign sig / Sigstore bundle); `tests/fixtures/_signing_kit/build_test_attestations.sh` is the idempotent regen + cosign-real arm
+- `db/adapters/local_object_store_adapter.py` — production filesystem `ObjectStoreAdapter` per ADR-009 (atomic write, sha256-pinned content addressing, retention-window-active rejection of premature delete, path-traversal protection); used by T9 to persist Sigstore bundles under 7-year retention metadata
+- `infra/agentos/Dockerfile` — default-adapters builder pins cosign v3.0.6 + OPA v1.16.1 (sha256-verified at build time, COPY'd into runtime stage); kernel image deliberately untouched. CI smoke runs `cosign version` + `opa version` inside the built image as cognic UID 10001
+- `tools/check_critical_coverage.py` — extended to enforce the plugin-trust / supply-chain / policy quartet (`plugin_registry`, `trust_gate`, `supply_chain`, `core/policy/engine`) at the same `(0.95 line, 0.90 branch)` floor as Sprint 2/2.5/3; gate now covers 16 modules
+- Documentation update: `docs/HOW-TO-WRITE-A-PACK.md` — pack-author entry point with manifest shape, AGNTCY/OASF identity matrix, mandatory-floor + grace-period attestation requirements, and Wave-1 escape-hatch recipes for the cosign / syft / grype generation that `agentos sign --bundle` (Sprint 7A) will eventually wrap
 
 **Tests:**
 - `test_plugin_registry.py` — discover finds the test pack
@@ -350,6 +353,8 @@ Sprint 1 is split into four focused sub-sprints for a clean bootstrap. Each ship
 - Sigstore bundle is persisted to ObjectStoreAdapter and discoverable via `/system/plugins` for examiner replay
 - `attestation_grade` (`full` | `partial`) is exposed per pack in `/system/plugins` and on the reviewer evidence panel
 - Architecture-discipline test still green (registry doesn't import any pack at top-level)
+
+**Status:** **CLOSED on `feat/sprint-4-plugin-registry-trust-gate`** (2026-05-01). Sprint-3 merge baseline measured at the Sprint-4 branch base (`cc0cb57`) was 945 passed + 29 skipped = 974 collected; Sprint 4 ready state is 1441 passed + 29 skipped = 1470 collected — **delta +496 passed / +496 collected** (vs the projected ~13 from the original deliverables list — actual ratio reflects the depth of plan-review-driven regression tests across T6/T7/T9/T10). 96% global coverage. All sixteen critical-controls modules (Sprint 2 quartet + Sprint 2.5 triplet + Sprint 3 LLM quintet + Sprint 4 plugin/trust/supply/policy quartet) pass per-file `≥95% line / ≥90% branch`. See [closeout note](closeouts/2026-05-01-sprint-4-plugin-registry-trust-gate.md). **17 commits** atop the merged plan-of-record (PR #12 / `a84ec85` on `main`): T1, T1-followup (env-prefix re-align), T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15, T16 closeout. Branch READY-FOR-GATE awaiting push/PR/merge authorization.
 
 ### Sprint 5 — MCP host (Streamable HTTP first; STDIO restricted; OAuth/PRM authorization) *(3.5 work-units)*
 
