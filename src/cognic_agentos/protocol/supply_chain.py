@@ -51,11 +51,14 @@ import hashlib
 import json
 import logging
 import math
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
 from cognic_agentos.core.config import Settings
+from cognic_agentos.db.adapters.protocols import ObjectStoreAdapter
+from cognic_agentos.protocol.trust_gate import _validate_pack_id
 
 _LOG = logging.getLogger("cognic_agentos.protocol.supply_chain")
 
@@ -81,6 +84,19 @@ INTOTO_PREDICATE_TYPE_PREFIX = "https://in-toto.io/Layout/"
 #: with valid top-level fields could pass as legitimate provenance
 #: (R5 reviewer-P2 fix).
 _PREDICATE_TYPE_ABSENT: Any = object()
+
+#: Object-store bucket Sigstore bundles land in. The bucket is
+#: deterministic across tenants — per-pack isolation lives in the
+#: key path, not the bucket. Matches the LocalObjectStoreAdapter's
+#: bucket-name regex (lowercase + dashes, single path segment).
+SIGSTORE_BUNDLE_BUCKET: str = "cognic-attestations"
+
+#: 7-year retention for Sigstore bundles per ADR-016 §"Sigstore
+#: bundle retention". 7 years * 365 days * 86400 seconds = 220_752_000.
+#: ADR-016 fixes this floor; tenants can extend (regulatory) but
+#: cannot shorten. Enforced at the adapter level via the
+#: ``retention_seconds`` kwarg on ``ObjectStoreAdapter.put``.
+SIGSTORE_BUNDLE_RETENTION_SECONDS: int = 7 * 365 * 24 * 3600
 
 
 # --- Exception taxonomy -------------------------------------------------
@@ -115,6 +131,19 @@ class IntotoTampered(SupplyChainError):
     """in-toto layout failed structural validation: malformed JSON or
     missing required fields (``steps``, ``expires``). Hard refusal
     with ``refusal_reason='intoto_tampered'``."""
+
+
+class SigstoreBundlePersistenceFailed(SupplyChainError):
+    """Sigstore bundle could not be persisted to the object store
+    (T9). Hard refusal with
+    ``refusal_reason='sigstore_bundle_persistence_failed'`` per
+    ADR-016 mandatory floor — without a stored bundle there's no
+    7-year audit trail, so the pack cannot register.
+
+    The exception message includes only the bundle SHA-256 + the
+    underlying exception class name; raw bundle bytes never appear
+    in error text or audit payloads (privacy + log-injection
+    control consistent with the T6 / T7 stderr handling)."""
 
 
 # --- Per-attestation result types --------------------------------------
@@ -859,6 +888,153 @@ class SupplyChainPipeline:
         return LicenseResult(licenses=licenses, disallowed=disallowed)
 
 
+# --- T9: Sigstore bundle persister --------------------------------------
+
+#: Object-key-safe version regex — tighter than T6's argv-safe
+#: ``_VERSION_RE`` per R1 reviewer-P2 fix. T6 was designed for cosign
+#: argv shape (allows ``+`` for PEP-440 local-version + uppercase),
+#: but the LocalObjectStoreAdapter's KEY regex
+#: (``^[a-z0-9][a-z0-9._/-]{0,255}$``) rejects both. Reusing T6's
+#: validator either let path-aliasing values through (``"."`` collapses
+#: the version segment via path canonicalisation) OR accepted-and-
+#: failed-later inside the adapter (``"1.0+local"`` raises
+#: ``PathTraversalError`` after T9 already approved it). The user's
+#: T9 guardrail is "path inputs already validated before they reach
+#: the adapter" — this regex restores that contract.
+_OBJECT_KEY_VERSION_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+
+
+def _validate_version_for_object_key(version: str) -> None:
+    """Tighten T6's argv-safe version validation for object-store key
+    segment use.
+
+    Refuses:
+      * ``"."`` / ``".."`` — path aliasing (segment collapses or
+        traverses upward when the adapter canonicalises the key).
+      * Versions containing ``+`` (PEP-440 local-version segment),
+        uppercase letters, or any character outside the
+        LocalObjectStoreAdapter's KEY-regex character class.
+      * Anything outside the 1..64 char length.
+
+    Pack versions for Sprint-4 object-store-keyed packs must use the
+    ``[a-z0-9._-]`` subset starting with ``[a-z0-9]``. Cosign argv
+    accepts a wider shape (T6's ``_VALID_VERSION_RE``); T9 narrows
+    for the persistence path.
+    """
+    if not isinstance(version, str):
+        raise ValueError(f"version must be str; got {type(version).__name__!r}")
+    if version in {".", ".."}:
+        raise ValueError(
+            f"version {version!r} would alias the object-store path "
+            f"structure (segment collapses or traverses upward)"
+        )
+    if not _OBJECT_KEY_VERSION_RE.match(version):
+        raise ValueError(
+            f"invalid version {version!r} for object-store key segment: "
+            f"must match {_OBJECT_KEY_VERSION_RE.pattern} "
+            f"(lowercase + digits + ``.``/``_``/``-`` only; PEP-440 ``+`` "
+            f"and uppercase rejected per LocalObjectStoreAdapter KEY contract)"
+        )
+
+
+def _bundle_object_key(pack_id: str, version: str) -> str:
+    """Deterministic object-store key for a pack's Sigstore bundle.
+
+    Shape: ``attestations/<pack_id>/<version>/bundle.sigstore``. Per
+    Sprint-4 plan §3 + the user's T9 guardrail: deterministic keying
+    means a re-registration of the same pack@version overwrites
+    last-writer-wins (Sigstore bundles for the same pack version are
+    content-identical per ADR-016). Cross-tenant isolation lives in
+    the bucket-level access control, not the key path.
+    """
+    return f"attestations/{pack_id}/{version}/bundle.sigstore"
+
+
+async def persist_sigstore_bundle(
+    *,
+    object_store: ObjectStoreAdapter,
+    pack_id: str,
+    version: str,
+    bundle_bytes: bytes,
+) -> str:
+    """Persist a pack's Sigstore bundle at the deterministic key
+    ``attestations/<pack_id>/<version>/bundle.sigstore`` with 7-year
+    retention metadata enforced at the adapter level.
+
+    Per the user's T9 guardrails:
+      * Atomic put with retention via the T4 LocalObjectStoreAdapter
+        contract (tmp-write + fsync(fd) + rename + fsync(parent dir)
+        + sidecar with retain_until = now + 7 years).
+      * No raw bundle bytes in error messages (only the SHA-256 +
+        the underlying exception's class name appear, mirroring T6
+        + T7 stderr/stdout privacy).
+      * Fail-closed: any adapter / validation failure raises
+        ``SigstoreBundlePersistenceFailed``. T10 catches and refuses
+        registration with ``refusal_reason='sigstore_bundle_
+        persistence_failed'``. There is no retry / partial / silent
+        degradation path.
+      * Path inputs validated BEFORE the adapter call so a malformed
+        ``pack_id`` / ``version`` surfaces with a clean T9 error
+        rather than a downstream PathTraversalError from inside the
+        adapter.
+
+    Returns the object-store key string on success. ``object_store``
+    must implement ``ObjectStoreAdapter.put`` with the
+    ``retention_seconds`` kwarg (LocalObjectStoreAdapter does;
+    Sprint-8 S3 driver will).
+    """
+    if not isinstance(bundle_bytes, bytes) or not bundle_bytes:
+        raise SigstoreBundlePersistenceFailed(
+            f"bundle_bytes must be non-empty bytes for pack_id={pack_id!r} "
+            f"version={version!r}; got "
+            f"{type(bundle_bytes).__name__} length="
+            f"{len(bundle_bytes) if isinstance(bundle_bytes, bytes | bytearray) else 'n/a'}"
+        )
+    # Pre-flight identity validation: regex shape, no shell
+    # metacharacters / no path-traversal / no key-aliasing. Any
+    # ValueError from these gets re-raised as
+    # SigstoreBundlePersistenceFailed so T10's
+    # ``except SupplyChainError`` catches it cleanly.
+    #
+    # R1 reviewer-P2 fix: ``_validate_version_for_object_key`` is
+    # tighter than T6's argv-safe version regex. T6 accepted ``"."``
+    # / ``".."`` (which alias the path structure when the adapter
+    # canonicalises the key) and PEP-440 ``+`` / uppercase (which
+    # the LocalObjectStoreAdapter's KEY regex rejects). Reusing T6's
+    # validator weakened the deterministic-key contract and violated
+    # the T9 guardrail "path inputs already validated before they
+    # reach the adapter".
+    try:
+        _validate_pack_id(pack_id)
+        _validate_version_for_object_key(version)
+    except ValueError as exc:
+        raise SigstoreBundlePersistenceFailed(
+            f"identity validation failed for pack_id={pack_id!r} version={version!r}: {exc}"
+        ) from None
+
+    key = _bundle_object_key(pack_id, version)
+    bundle_digest = hashlib.sha256(bundle_bytes).hexdigest()
+    try:
+        await object_store.put(
+            SIGSTORE_BUNDLE_BUCKET,
+            key,
+            bundle_bytes,
+            retention_seconds=SIGSTORE_BUNDLE_RETENTION_SECONDS,
+        )
+    except Exception as exc:
+        # Fail-closed wrap. The bundle SHA-256 is the auditable
+        # identifier (same as T6's signature_digest); raw bundle
+        # bytes NEVER appear in the message.
+        raise SigstoreBundlePersistenceFailed(
+            f"Sigstore bundle persistence failed for pack_id={pack_id!r} "
+            f"version={version!r} key={key!r}: "
+            f"class={type(exc).__name__} "
+            f"bundle_sha256={bundle_digest} "
+            f"bundle_len={len(bundle_bytes)}"
+        ) from None
+    return key
+
+
 # --- helpers ------------------------------------------------------------
 
 
@@ -876,6 +1052,10 @@ def _reject_non_finite_json_constant(value: str) -> Any:
 
 
 __all__ = (
+    "INTOTO_PREDICATE_TYPE_PREFIX",
+    "SIGSTORE_BUNDLE_BUCKET",
+    "SIGSTORE_BUNDLE_RETENTION_SECONDS",
+    "SLSA_PROVENANCE_PREDICATE_TYPE_PREFIX",
     "AttestationResult",
     "IntotoTampered",
     "LicenseResult",
@@ -883,8 +1063,10 @@ __all__ = (
     "SBOMTampered",
     "SLSAResult",
     "SLSATampered",
+    "SigstoreBundlePersistenceFailed",
     "SupplyChainError",
     "SupplyChainPipeline",
     "VulnResult",
     "VulnThresholds",
+    "persist_sigstore_bundle",
 )
