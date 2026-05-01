@@ -1,0 +1,21 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.5",
+  "version": 1,
+  "serialNumber": "urn:uuid:00000000-0000-4000-a000-000000000001",
+  "metadata": {
+    "timestamp": "2026-05-01T00:00:00Z",
+    "tools": [
+      {"vendor": "Cognic AgentOS", "name": "cognic-test-pack-sbom-fixture", "version": "0.1.0"}
+    ],
+    "component": {
+      "type": "library",
+      "bom-ref": "pkg:pypi/cognic-test-pack@0.1.0",
+      "name": "cognic-test-pack",
+      "version": "0.1.0",
+      "purl": "pkg:pypi/cognic-test-pack@0.1.0",
+      "licenses": [{"license": {"id": "MIT"}}]
+    }
+  },
+  "components": []
+}

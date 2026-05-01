@@ -1300,10 +1300,14 @@ class TestDefaultPluginAllowlist:
     def test_default_tenant_present(self) -> None:
         """Sprint-4 plan §6: ``_default`` is the placeholder tenant
         used when a deployment hasn't configured per-tenant overrides.
-        The cognic_test_pack fixture (T12) is the single allow-listed
+        The cognic-test-pack fixture (T12) is the single allow-listed
         pack at Sprint 4 — production deployments overwrite or swap
-        to a Vault-backed list at Sprint 10."""
+        to a Vault-backed list at Sprint 10. The list is keyed off the
+        *signed distribution identity* (``cognic-test-pack``), NOT the
+        entry-point alias (``cognic_test_pack``) — T10 step 1 checks
+        ``record.distribution_name`` against this list, so the keying
+        must match what cosign signs."""
         data = json.loads(_REAL_ALLOWLIST.read_text())
         assert "_default" in data
         assert isinstance(data["_default"], list)
-        assert "cognic_test_pack" in data["_default"]
+        assert "cognic-test-pack" in data["_default"]
