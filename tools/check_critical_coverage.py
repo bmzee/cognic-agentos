@@ -1,4 +1,4 @@
-"""Per-file coverage gate for Sprint-2 critical-controls modules.
+"""Per-file coverage gate for critical-controls modules.
 
 Reads ``coverage.json`` (produced by ``pytest --cov-report=json``)
 and asserts that EACH listed file independently meets the coverage
@@ -18,7 +18,14 @@ Per AGENTS.md amendment in PR #5: ``core/audit.py``,
 ``core/decision_history.py``, ``core/chain_verifier.py``, and
 ``core/canonical.py`` are the four critical-controls modules of
 Sprint 2. Each one carries ``95%+ line + ≥90% branch`` per the plan;
-this script enforces that as a CI gate.
+this script enforces that as a CI gate. Sprint 2.5 added the SLA /
+escalation / guardrails triplet at the same floor. Sprint 3 T11
+extends the gate to the LLM-gateway-shape quintet (gateway, policy,
+preflight, ledger, concurrency) at the same single strict floor —
+all five sit on the cloud-policy / provider-honesty path that
+ADR-007's authoritativeness contract depends on, and the rate-limit
+primitive is small and stable enough to ride the strict gate without
+churn.
 """
 
 from __future__ import annotations
@@ -43,6 +50,30 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     ("src/cognic_agentos/core/sla.py", 0.95, 0.90),
     ("src/cognic_agentos/core/escalation.py", 0.95, 0.90),
     ("src/cognic_agentos/core/guardrails.py", 0.95, 0.90),
+    # Sprint 3 T11 — LLM-gateway-shape critical-controls quintet.
+    # ``llm/gateway.py`` is explicitly named on the AGENTS.md
+    # critical-controls list (cloud-policy enforcer + provider-
+    # honesty ledger feed). The other four are co-load-bearing for
+    # the same surface and ride the same single strict floor:
+    #   * ``policy.py`` is the cloud-policy decision engine the
+    #     gateway delegates to — fail-closed denials on provenance
+    #     gaps (ADR-007) live here.
+    #   * ``preflight.py`` owns LiteLLM-alias → ResolvedUpstream
+    #     resolution + the four-state provenance + the api_base-
+    #     aware classifier; mis-classifications here become silent
+    #     cloud-policy holes.
+    #   * ``ledger.py`` is the authoritative writer for
+    #     ``/effective-routing`` (ADR-007 §"two layers"); the
+    #     "no successful return without persisted ledger row"
+    #     contract is enforced here.
+    #   * ``concurrency.py`` is the per-profile rate-limiter; small
+    #     (~50 stmts) and stable, kept at the strict floor for
+    #     consistency rather than carrying an operational tier.
+    ("src/cognic_agentos/llm/gateway.py", 0.95, 0.90),
+    ("src/cognic_agentos/llm/policy.py", 0.95, 0.90),
+    ("src/cognic_agentos/llm/preflight.py", 0.95, 0.90),
+    ("src/cognic_agentos/llm/ledger.py", 0.95, 0.90),
+    ("src/cognic_agentos/llm/concurrency.py", 0.95, 0.90),
 )
 
 

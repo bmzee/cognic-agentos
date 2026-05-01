@@ -1,9 +1,17 @@
-# Cognic AgentOS — LiteLLM router presets (Sprint 1C).
+# Cognic AgentOS — LiteLLM router presets (Sprint 1C + Sprint 3).
 #
-# Production banks set COGNIC_TIER1_MODEL / COGNIC_TIER2_MODEL to one of
-# the alias names below. Per ADR-009 §"LLM serving" the alias resolves
-# through LiteLLM to the bank's actual inference endpoint. AgentOS code
-# never references upstream model checkpoints directly — only aliases.
+# Production banks set COGNIC_TIER1_ALIAS / COGNIC_TIER2_ALIAS (Sprint 3,
+# per ADR-007) to one of the alias names below. Per ADR-009 §"LLM serving"
+# the alias resolves through LiteLLM to the bank's actual inference
+# endpoint. AgentOS code never references upstream model checkpoints
+# directly — only aliases.
+#
+# Cloud aliases (Sprint 3 T10) are intentionally declared so the
+# cloud-policy denial path (per ADR-007) is exercisable end-to-end
+# against the same router config the runtime uses. They MUST only be
+# selected as the active tier alias when the operator has explicitly
+# opened the cloud-policy gates in .env.example. See the Sprint 3 LLM
+# section there for the full set of env vars.
 
 model_list:
   # --- Dev: Ollama local --------------------------------------------------
@@ -42,6 +50,44 @@ model_list:
       model: openai/${COGNIC_TIER2_SGLANG_MODEL}
       api_base: ${SGLANG_BASE_URL}
       api_key: ${SGLANG_API_KEY}
+
+  # --- Cloud: OpenAI (Sprint 3 — exercises the cloud-policy denial path).
+  #     These aliases dispatch to the public OpenAI API. The Sprint 3
+  #     gateway enforcer (src/cognic_agentos/llm/policy.py) allows them
+  #     ONLY when ALL of:
+  #       * COGNIC_ALLOW_EXTERNAL_LLM=true
+  #       * "openai" in COGNIC_ALLOWED_PROVIDERS (CSV / JSON list)
+  #       * COGNIC_POLICY_MODE != self_hosted
+  #     Any other cloud-mode-vs-provider mismatch is NOT bound by the
+  #     enforcer today (e.g. policy_mode=cloud_anthropic + allowed_
+  #     providers=["openai"] would pass an OpenAI alias) — that
+  #     family-level binding is a Sprint 13.5 OPA-Rego concern.
+  #     No api_base is set: that's load-bearing for the api_base-aware
+  #     classifier — cloud OpenAI must classify as external (Round-2 P1#2).
+  - model_name: cognic-tier1-cloud-openai
+    litellm_params:
+      model: openai/${COGNIC_TIER1_CLOUD_OPENAI_MODEL:-gpt-4o}
+      api_key: ${OPENAI_API_KEY}
+
+  - model_name: cognic-tier2-cloud-openai
+    litellm_params:
+      model: openai/${COGNIC_TIER2_CLOUD_OPENAI_MODEL:-gpt-4o-mini}
+      api_key: ${OPENAI_API_KEY}
+
+  # --- Cloud: Anthropic ---------------------------------------------------
+  #     Same gating as the OpenAI cloud aliases above, but
+  #     COGNIC_ALLOWED_PROVIDERS must include "anthropic". Same caveat
+  #     about policy_mode: the Sprint 3 enforcer does not bind cloud_*
+  #     sub-modes to provider families.
+  - model_name: cognic-tier1-cloud-anthropic
+    litellm_params:
+      model: anthropic/${COGNIC_TIER1_CLOUD_ANTHROPIC_MODEL:-claude-3-5-sonnet-20241022}
+      api_key: ${ANTHROPIC_API_KEY}
+
+  - model_name: cognic-tier2-cloud-anthropic
+    litellm_params:
+      model: anthropic/${COGNIC_TIER2_CLOUD_ANTHROPIC_MODEL:-claude-3-5-haiku-20241022}
+      api_key: ${ANTHROPIC_API_KEY}
 
 litellm_settings:
   drop_params: true

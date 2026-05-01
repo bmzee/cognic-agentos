@@ -384,6 +384,128 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- LLM gateway (Sprint 3, per ADR-007) -------------------------
+    # Drive the Sprint 3 cloud-policy enforcer + provider-honesty
+    # ledger feed. self-hosted-first defaults: ``allow_external_llm``
+    # closed; ``allowed_providers`` empty; ``policy_mode`` self-hosted.
+    # The ``Tier alias / LiteLLM alias / ResolvedUpstream`` three-layer
+    # model is enforced at the gateway boundary, not here — this layer
+    # ships only the operator-facing knobs.
+    tier1_alias: str = Field(
+        default="cognic-tier1-dev",
+        description="LiteLLM alias resolved when caller asks for tier=tier1.",
+    )
+    tier2_alias: str = Field(
+        default="cognic-tier2-dev",
+        description="LiteLLM alias resolved when caller asks for tier=tier2.",
+    )
+    litellm_base_url: str | None = Field(
+        default=None,
+        description="LiteLLM router base URL (e.g. http://litellm:4000).",
+    )
+    litellm_master_key: str | None = Field(
+        default=None,
+        description=(
+            "LiteLLM master key. Dev-only when set in source; prod sources via Vault (Sprint 10)."
+        ),
+    )
+    allow_external_llm: bool = Field(
+        default=False,
+        description=("Master cloud-policy gate per ADR-007. Default closed = self-hosted-first."),
+    )
+    policy_mode: Literal["self_hosted", "cloud_openai", "cloud_anthropic", "cloud_mixed"] = Field(
+        default="self_hosted",
+        description=(
+            "Operator-declared deployment mode. Cross-checked against "
+            "allow_external_llm at the gateway."
+        ),
+    )
+    # ``NoDecode`` for the same reason as ``cors_allowed_origins`` —
+    # pydantic-settings would otherwise JSON-parse the env var at source-
+    # read time and reject the operator-friendly comma-separated form.
+    allowed_providers: Annotated[list[str], NoDecode] = Field(
+        default_factory=list,
+        description=(
+            "Allow-list of external provider prefixes "
+            "(``openai``, ``azure``, ``anthropic``, ``bedrock``, ``cohere``). "
+            "Empty = self-hosted-only. Env-var input may be either a "
+            "comma-separated string or a JSON array; values are lowercased."
+        ),
+    )
+    llm_timeout_s: float = Field(
+        default=30.0,
+        gt=0.0,
+        description="Per-call httpx timeout to LiteLLM, in seconds.",
+    )
+    llm_concurrency_per_profile: int = Field(
+        default=4,
+        ge=1,
+        description="Max in-flight gateway calls per profile (tier1/tier2).",
+    )
+    llm_concurrency_mode: Literal["queued", "fail_fast"] = Field(
+        default="queued",
+        description=(
+            "``queued`` blocks on a free slot. ``fail_fast`` raises "
+            "``LLMConcurrencyExceeded`` immediately when saturated."
+        ),
+    )
+    provider_honesty_ledger_window_minutes: int = Field(
+        default=60,
+        ge=1,
+        le=1440,
+        description=(
+            "Window ``/api/v1/system/effective-routing`` reads from the "
+            "``gateway_call_ledger`` (per ADR-007). Capped at 24h."
+        ),
+    )
+    llm_guardrail_scope: Literal["all", "external_only", "self_hosted_only", "off"] = Field(
+        default="all",
+        description=(
+            "Per-route scope for configured gateway guardrail pipelines. "
+            "``all`` (secure default) runs guardrails on local + cloud "
+            "calls. ``external_only`` runs them only for cloud/external "
+            "upstreams. ``self_hosted_only`` runs them only for local/"
+            "on-prem upstreams. ``off`` skips configured pipelines on "
+            "every call. This knob controls whether configured pipelines "
+            "execute; banks can still inject ``None`` for input or output "
+            "pipeline at gateway construction to disable a direction "
+            "globally — the two axes compose. Per ADR-007 self-hosted-"
+            "first posture: AgentOS ships conservative (``all``); banks "
+            "intentionally relax based on their perimeter risk."
+        ),
+    )
+
+    @field_validator("allowed_providers", mode="before")
+    @classmethod
+    def _split_allowed_providers(cls, value: object) -> list[str]:
+        """Mirror the Sprint-1B ``cors_allowed_origins`` shape.
+
+        Accepts ``None`` / ``[]`` / JSON array string / comma-separated
+        string. Output is lowercased + trimmed; empty entries dropped.
+        Rejects every other shape with a typed ``ValueError`` so misconfig
+        surfaces at startup, not at the policy boundary.
+        """
+
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return [str(p).strip().lower() for p in value if str(p).strip()]
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return []
+            if stripped.startswith("["):
+                import json as _json
+
+                parsed = _json.loads(stripped)
+                if not isinstance(parsed, list):
+                    raise ValueError("allowed_providers JSON value must be a list of strings")
+                return [str(p).strip().lower() for p in parsed if str(p).strip()]
+            return [p.strip().lower() for p in stripped.split(",") if p.strip()]
+        raise ValueError(
+            f"allowed_providers must be list, JSON array, or CSV; got {type(value).__name__}"
+        )
+
     # --- Build metadata ----------------------------------------------
     # Wired by the Dockerfile / CI at image-build time; defaults make
     # local-dev introspection useful without requiring an explicit env.

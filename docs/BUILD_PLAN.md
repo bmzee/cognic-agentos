@@ -245,23 +245,43 @@ Sprint 1 is split into four focused sub-sprints for a clean bootstrap. Each ship
 **Goal:** every LLM call goes through one chokepoint with cloud-policy enforcement; `/system/effective-routing` exposes runtime reality (per ADR-007).
 
 **Deliverables:**
-- `llm/gateway.py` — `completion(messages, tier, config)` with tier-alias resolution, cloud-policy enforcement (`enforce_cloud_policy(alias)`), `_is_external_alias` classification
-- `llm/concurrency.py` — per-profile rate limiter (queue + fail-fast modes)
-- `core/config.py` extension — `runtime_profile` (dev/staging/prod), `llm_timeout_s`, `cloud_offload_eligible`
-- `portal/api/app.py` — `GET /api/v1/system/effective-routing` (reads gateway settings + recent Langfuse generations)
-- `portal/api/app.py` — `GET /api/v1/system/policy` (current ALLOW_EXTERNAL_LLM, mode, allowed providers)
+- `llm/gateway.py` — `LLMGateway.completion(*, tier, messages, request_id, tenant_id)` with tier-alias resolution, pre-call cloud-policy enforcement, post-response policy recheck, drift detection, SLA classify, INPUT/OUTPUT guardrails, narrow connect-class httpx catch, strict-vs-best-effort ledger regimes per ADR-007 §"two layers"
+- `llm/policy.py` — pure-functional `enforce_cloud_policy(resolved, settings, post_response)` over `(ResolvedUpstream, Settings)`; provenance-gap fail-closed gate (Round-4 P1)
+- `llm/preflight.py` — `PreflightResolver.from_yaml` (lazy `${VAR}` substitution) + api_base-aware `_is_external` classifier + `reverse_lookup` tuple disambiguation; four-state provenance vocabulary (`resolved` / `unresolved` / `ambiguous` / `no_dispatch`)
+- `llm/ledger.py` — `GatewayCallLedger.write_row` + `read_recent_calls`; persisted `upstream_api_base` + `provenance` so historical rows stay authoritative
+- `llm/concurrency.py` — `ProfileRateLimiter` (queued + fail-fast modes; atomic per-profile lock)
+- `src/cognic_agentos/db/migrations/versions/20260430_0002_gateway_call_ledger.py` — Alembic migration creating `gateway_call_ledger` (PG/Oracle dialect-portable; `sa.TIMESTAMP(timezone=True)` matches the `GATEWAY_LEDGER_TS_TYPE` convention)
+- `core/config.py` extension — Sprint-3 LLM-gateway settings (`tier1_alias`, `tier2_alias`, `litellm_base_url`, `litellm_master_key`, `allow_external_llm`, `policy_mode`, `allowed_providers`, `llm_timeout_s`, `llm_concurrency_per_profile`, `llm_concurrency_mode`, `provider_honesty_ledger_window_minutes`, `llm_guardrail_scope`)
+- `portal/api/system_routes.py` — new module hosting `GET /api/v1/system/policy` (intent surface; reflects current Settings) + `GET /api/v1/system/effective-routing` (authoritative outcome surface; reads `gateway_call_ledger` over the configured window; opportunistic Langfuse probe via `langfuse_available` flag — never fails closed per ADR-007)
+- `infra/litellm/config.yaml` — four cloud aliases (`cognic-tier{1,2}-cloud-{openai,anthropic}`) so the cloud-policy denial path is exercisable end-to-end; `.env.example` documents the operator-facing env vars
+- `tools/check_critical_coverage.py` — extended to enforce the LLM-gateway-shape quintet (`gateway`, `policy`, `preflight`, `ledger`, `concurrency`) at the same `(0.95 line, 0.90 branch)` floor as Sprint 2 + 2.5 modules; gate now covers 12 modules
 
 **Tests:**
-- `test_gateway_policy.py` — cloud alias + ALLOW_EXTERNAL_LLM=false → raises CloudPolicyViolationError
-- `test_gateway_policy.py` — self-hosted alias passes regardless of policy
-- `test_effective_routing.py` — endpoint reflects current settings + recent calls
-- `test_concurrency.py` — fail-fast mode rejects when slot unavailable
+- `test_gateway_alias_resolution.py` — tier→LiteLLM-alias translation; `UnknownTierError` on unknown tier
+- `test_gateway_policy.py` — pure decision-tree matrix (self-hosted ALLOW; external + flag off DENY; allow-list miss DENY; mode/flag mismatch DENY; provenance gap DENY unconditionally); audit-payload shape; policy-mode-vs-provider-family gap pinned as a tripwire
+- `test_preflight_resolver.py` — lazy `${VAR}` substitution; api_base-aware classification (vLLM with private api_base classifies as self-hosted); `reverse_lookup` tuple disambiguation; round-trip against the real `infra/litellm/config.yaml` including the four cloud aliases (parametrized × 4); `cloud_alias_resolves_then_denies_under_default_policy` (parametrized × 4)
+- `test_gateway_ledger.py` + `test_gateway_ledger_contract.py` — write-then-read; tz-aware round-trip; `outcome="ok"` happy path; `LedgerWriteFailed` on persistence failure (strict regime); window-filter
+- `test_gateway_completion.py` — happy path (tier1 → ollama; ledger row written before return); pre-dispatch denial path (cloud + flag off → no LiteLLM call + audit + best-effort ledger); cloud-allowed pass-through
+- `test_gateway_guardrails.py` — INPUT trip halts before dispatch; OUTPUT trip strict-ledgers before raise; four-mode scope matrix end-to-end (off / external_only / self_hosted_only / all) including external routes, output direction, single-direction-None overrides, and asymmetric-drift cases (input gates on preflight, output on actual)
+- `test_gateway_sla.py` — breach emits `audit_event(sla.breach)` + does NOT raise; green is no-op
+- `test_gateway_drift.py` — drift+actual-allowed; drift+actual-denied; external→external silent-drift caught post-response
+- `test_gateway_post_dispatch_strict_discipline.py` — audit-failure-preserves-provenance for unresolved/ambiguous/drift events; malformed content path; one-call/one-ledger-row regression for JSON-decode + HTTP-status errors
+- `test_gateway_httpx_dispatch_errors.py` — pre-dispatch connect-class vs post-dispatch dispatched-class taxonomy (parametrized 11 arms)
+- `test_gateway_concurrency_ledger.py` — saturated limiter → `LLMConcurrencyExceeded` + best-effort ledger row outcome="concurrency_exhausted"
+- `test_system_policy.py` — endpoint contract (5 tests); operator-vocabulary field naming; stable key set
+- `test_effective_routing.py` — ledger-authoritative aggregation; window honoring; persisted-row pass-through; the four drift cases (resolved / unresolved / ambiguous / no_dispatch exclusion); Langfuse healthy / unreachable / raises (mutation-tested); no-ledger graceful empty; stable top-level key set
+- `test_concurrency.py` — queued + fail-fast modes; atomic per-profile lock; fairness
 
 **Exit criteria:**
-- LiteLLM gateway running in docker-compose; gateway can reach it
-- Self-hosted-only smoke: query → 200 OK → Langfuse trace shows `ollama/*` model
-- Cloud-disabled smoke: cloud alias → endpoint returns 403 with policy reason
-- `/effective-routing` shows what model the last query actually hit
+- All five LLM critical-controls modules pass per-file `≥95% line / ≥90% branch`
+- Gateway is the only path to LiteLLM in this repo; no `httpx.post` to a LiteLLM URL outside `llm/gateway.py`
+- Pre-call cloud-policy DENIES external upstreams unless allow_external_llm=true AND provider on allow-list AND policy_mode != self_hosted
+- Post-response drift detection emits `gateway.upstream_drift_detected` on any `actual_model_string != preflight.model_string`
+- Post-response policy recheck on `actual_resolved` denies via `CloudPolicyViolationError(post_response=True)` when actual provider isn't allow-listed (closes external→external silent drift)
+- `/api/v1/system/effective-routing` reads `gateway_call_ledger` as authoritative; PROFILE-chip drift detection filters to `provenance != "no_dispatch"`; never fails closed on missing data
+- Suite grows by **+286 passing / +291 collected**; coverage stays ≥96% global
+
+**Status:** **CLOSED on `feat/sprint-3-llm-gateway`** (2026-04-30). Sprint-2.5 merge baseline was 659 passed + 24 skipped = 683 collected; Sprint 3 ready state is 945 passed + 29 skipped = 974 collected — **delta +286 passed / +291 collected**; 96% global coverage. All twelve critical-controls modules (Sprint 2 quartet + Sprint 2.5 triplet + Sprint 3 LLM quintet) pass per-file `≥95% line / ≥90% branch`. See [closeout note](closeouts/2026-04-30-sprint-3-llm-gateway-and-provider-honesty.md). **15 commits** atop the merged plan-of-record (PR #9 / `8804088` on `main`): T1, T1-followup, T2, T3, T4, T5, T6 phase A, T6 phase B, T7, T11, fix(tz-aware-ledger-test), T8, T9, T10, T12 closeout. Branch READY-FOR-GATE awaiting push/PR/merge authorization.
 
 **Phase 1 exit:** AgentOS boots, governs, audits. Zero plugins required. Cloud-policy enforcement provably works.
 

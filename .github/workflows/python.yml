@@ -286,7 +286,8 @@ jobs:
         run: |
           uv run pytest -m oracle -v \
             tests/integration/db/test_runtime_role_is_append_only.py \
-            tests/integration/db/test_concurrent_append.py
+            tests/integration/db/test_concurrent_append.py \
+            tests/integration/db/test_gateway_call_ledger.py
 
       - name: Run @pytest.mark.oracle tests (alembic round-trip last)
         env:
@@ -405,7 +406,8 @@ jobs:
         run: |
           uv run pytest -m postgres -v \
             tests/integration/db/test_runtime_role_is_append_only.py \
-            tests/integration/db/test_concurrent_append.py
+            tests/integration/db/test_concurrent_append.py \
+            tests/integration/db/test_gateway_call_ledger.py
 
       - name: Run @pytest.mark.postgres tests (alembic round-trip last)
         # Alembic round-trip drops + recreates tables; ordering here
