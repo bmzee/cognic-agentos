@@ -552,6 +552,15 @@ class Settings(BaseSettings):
             "Must be > 0."
         ),
     )
+    object_store_driver: Literal["local_fs"] = Field(
+        default="local_fs",
+        description=(
+            "ObjectStoreAdapter driver. Sprint 4 ships ``local_fs`` (production "
+            "filesystem; first real impl per AGENTS.md production-grade rule). "
+            "Sprint 8 adds ``s3``; the Literal here will widen to "
+            'Literal["local_fs", "s3"] at that sprint.'
+        ),
+    )
     local_object_store_root: Path | None = Field(
         default=None,
         description=(

@@ -52,6 +52,10 @@ _BUNDLED_ADAPTER_OPTIONAL_DEPS: dict[str, frozenset[str]] = {
     "cognic_agentos.db.adapters.dynatrace_adapter": frozenset(),
     # OpenAI-compat embedding only depends on httpx (always present); no kernel-image misses.
     "cognic_agentos.db.adapters.openai_compat_embedding_adapter": frozenset(),
+    # Sprint 4 — production filesystem ObjectStoreAdapter (per ADR-009 +
+    # ADR-016 retention requirement). Pure-stdlib (Path / os / json /
+    # asyncio); no optional deps so kernel images carry it too.
+    "cognic_agentos.db.adapters.local_object_store_adapter": frozenset(),
 }
 
 

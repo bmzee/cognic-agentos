@@ -7,6 +7,7 @@ driver name in the message — no silent fallback.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -18,6 +19,7 @@ from cognic_agentos.db.adapters import (
     bundled_registry,
 )
 from cognic_agentos.db.adapters import protocols as P
+from cognic_agentos.db.adapters.local_object_store_adapter import LocalObjectStoreAdapter
 from tests.support.adapter_fixtures import (
     InMemoryEmbeddingAdapter,
     InMemoryObservabilityAdapter,
@@ -27,29 +29,41 @@ from tests.support.adapter_fixtures import (
 )
 
 
-def _memory_settings() -> Any:
-    """Build a Settings-like with all drivers set to 'memory'."""
+def _memory_settings(*, local_object_store_root: Path | None = None) -> Any:
+    """Build a Settings-like with all five non-object_store drivers set
+    to ``memory`` and a per-test ``local_object_store_root``.
+
+    Sprint 4 wired ``object_store`` unconditionally in ``build_adapters``,
+    so the factory always resolves a driver. The default
+    ``object_store_driver = local_fs`` stays — tests register the real
+    ``LocalObjectStoreAdapter`` against a per-test tmp path via
+    ``_memory_registry`` to keep the wiring honest.
+    """
 
     from cognic_agentos.core.config import build_settings_without_env_file
 
-    return build_settings_without_env_file().model_copy(
-        update={
-            "db_driver": "memory",
-            "vector_driver": "memory",
-            "secret_driver": "memory",
-            "embed_driver": "memory",
-            "obs_driver": "memory",
-            "database_url": None,
-            "qdrant_url": None,
-            "vault_addr": None,
-            "embedding_base_url": None,
-            "langfuse_host": None,
-        }
-    )
+    update: dict[str, Any] = {
+        "db_driver": "memory",
+        "vector_driver": "memory",
+        "secret_driver": "memory",
+        "embed_driver": "memory",
+        "obs_driver": "memory",
+        "database_url": None,
+        "qdrant_url": None,
+        "vault_addr": None,
+        "embedding_base_url": None,
+        "langfuse_host": None,
+    }
+    if local_object_store_root is not None:
+        update["local_object_store_root"] = local_object_store_root
+    return build_settings_without_env_file().model_copy(update=update)
 
 
 def _memory_registry() -> AdapterRegistry:
-    """A fresh registry with only the in-memory test impls."""
+    """A fresh registry with the in-memory test impls + the real
+    LocalObjectStoreAdapter registered for ``object_store`` (the
+    factory now resolves object_store unconditionally per Sprint-4
+    P2-1 fix)."""
 
     r = AdapterRegistry()
     r.register("relational", "memory", InMemoryRelationalAdapter)
@@ -57,6 +71,7 @@ def _memory_registry() -> AdapterRegistry:
     r.register("secret", "memory", InMemorySecretAdapter)
     r.register("embedding", "memory", InMemoryEmbeddingAdapter)
     r.register("observability", "memory", InMemoryObservabilityAdapter)
+    r.register("object_store", "local_fs", LocalObjectStoreAdapter)
     return r
 
 
@@ -174,8 +189,8 @@ class TestRegistry:
 
 
 class TestFactory:
-    async def test_build_with_memory_drivers(self) -> None:
-        s = _memory_settings()
+    async def test_build_with_memory_drivers(self, tmp_path: Path) -> None:
+        s = _memory_settings(local_object_store_root=tmp_path)
         adapters = build_adapters(s, registry=_memory_registry())
 
         assert isinstance(adapters.relational, P.RelationalAdapter)
@@ -183,21 +198,45 @@ class TestFactory:
         assert isinstance(adapters.secret, P.SecretAdapter)
         assert isinstance(adapters.embedding, P.EmbeddingAdapter)
         assert isinstance(adapters.observability, P.ObservabilityAdapter)
-
-        # ObjectStore remains unset in Sprint 1C (Sprint 8 fills it).
+        # Sprint 4 — object_store is wired unconditionally per P2-1 fix.
         # MemoryAdapter is ADR-019 / Sprint 11.5 — no slot in this sprint.
-        assert adapters.object_store is None
+        assert isinstance(adapters.object_store, P.ObjectStoreAdapter)
+        assert isinstance(adapters.object_store, LocalObjectStoreAdapter)
         assert not hasattr(adapters, "memory")
 
-    async def test_unknown_driver_fails_fast(self) -> None:
-        s = _memory_settings().model_copy(update={"db_driver": "mssql"})
+    async def test_unknown_driver_fails_fast(self, tmp_path: Path) -> None:
+        s = _memory_settings(local_object_store_root=tmp_path).model_copy(
+            update={"db_driver": "mssql"}
+        )
         with pytest.raises(AdapterNotInstalled) as exc:
             build_adapters(s, registry=_memory_registry())
         assert "mssql" in str(exc.value)
         assert "relational" in str(exc.value)
 
-    async def test_open_close_lifecycle(self) -> None:
-        s = _memory_settings()
+    async def test_object_store_unknown_driver_fails_fast(self, tmp_path: Path) -> None:
+        """Sprint-4 P2-1 fix: object_store is resolved UNCONDITIONALLY so
+        a missing driver surfaces as ``AdapterNotInstalled`` per ADR-009.
+        Previously the factory short-circuited via ``if reg.has(...)``
+        and silently set ``object_store=None``, which would let a T9
+        Sigstore-bundle persister run against a None object_store. The
+        registry-without-local_fs case must now fail fast at
+        ``build_adapters`` time."""
+
+        s = _memory_settings(local_object_store_root=tmp_path)
+        # Build a registry that has every kind EXCEPT object_store.
+        r = AdapterRegistry()
+        r.register("relational", "memory", InMemoryRelationalAdapter)
+        r.register("vector", "memory", InMemoryVectorAdapter)
+        r.register("secret", "memory", InMemorySecretAdapter)
+        r.register("embedding", "memory", InMemoryEmbeddingAdapter)
+        r.register("observability", "memory", InMemoryObservabilityAdapter)
+        with pytest.raises(AdapterNotInstalled) as exc:
+            build_adapters(s, registry=r)
+        assert "object_store" in str(exc.value)
+        assert "local_fs" in str(exc.value)
+
+    async def test_open_close_lifecycle(self, tmp_path: Path) -> None:
+        s = _memory_settings(local_object_store_root=tmp_path)
         adapters = build_adapters(s, registry=_memory_registry())
 
         await adapters.open_all()
@@ -205,21 +244,79 @@ class TestFactory:
             adapter = getattr(adapters, name)
             h = await adapter.health_check()
             assert h.status == "ok", f"{name} not ok: {h}"
+        # object_store has no connect(); health_check still works.
+        assert adapters.object_store is not None
+        h = await adapters.object_store.health_check()
+        assert h.status == "ok"
 
         await adapters.close_all()
         # Relational adapter flips to unreachable after close
         h = await adapters.relational.health_check()
         assert h.status == "unreachable"
 
-    async def test_bundled_registry_default_used_when_registry_none(self) -> None:
+    async def test_bundled_registry_default_used_when_registry_none(self, tmp_path: Path) -> None:
         """Smoke: when ``registry`` is None the factory falls back to the
         process-wide ``bundled_registry``. ``vector_driver=memory`` is not
         registered there → AdapterNotInstalled — proving the fallback path
         runs (rather than silently picking up some other registry)."""
 
-        s = _memory_settings()  # vector_driver="memory" is not bundled
+        s = _memory_settings(local_object_store_root=tmp_path)
         with pytest.raises(AdapterNotInstalled):
             build_adapters(s)  # no registry kwarg → uses bundled_registry
+
+
+class TestObjectStoreFactoryWiring:
+    """Sprint-4 T4: factory wires LocalObjectStoreAdapter for ``local_fs``.
+
+    Locks the P2-1 review fix in place: the factory MUST always populate
+    ``adapters.object_store`` from the configured driver + the configured
+    root, and MUST raise ``AdapterNotInstalled`` (not silently leave None)
+    when the registry is missing the driver.
+    """
+
+    def test_load_bundled_adapters_registers_local_fs(self) -> None:
+        """``load_bundled_adapters()`` must include the local_fs driver
+        in its results map AND populate the (object_store, local_fs)
+        slot in the bundled registry. Lock the registration in place."""
+
+        from cognic_agentos.db.adapters import load_bundled_adapters
+
+        results = load_bundled_adapters()
+        assert results["cognic_agentos.db.adapters.local_object_store_adapter"] == "loaded"
+        assert bundled_registry.has("object_store", "local_fs")
+        assert bundled_registry.resolve("object_store", "local_fs") is LocalObjectStoreAdapter
+
+    async def test_build_adapters_wires_local_object_store_with_configured_root(
+        self, tmp_path: Path
+    ) -> None:
+        """``build_adapters`` must instantiate LocalObjectStoreAdapter
+        with ``settings.local_object_store_root`` as its constructor arg.
+        Round-trip a put/get against that root to confirm the adapter
+        is bound to the configured directory (not the global default)."""
+
+        s = _memory_settings(local_object_store_root=tmp_path)
+        adapters = build_adapters(s, registry=_memory_registry())
+        assert isinstance(adapters.object_store, LocalObjectStoreAdapter)
+        # Round-trip through the wired adapter — bytes land under the
+        # configured tmp_path.
+        await adapters.object_store.put("verify-bucket", "marker", b"wired")
+        assert (tmp_path / "verify-bucket" / "marker").read_bytes() == b"wired"
+
+    async def test_build_adapters_uses_settings_default_root_when_unset(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Sanity check the model_validator path: when
+        ``local_object_store_root`` is left as None on Settings, the
+        validator picks the profile-aware default. Force ``$TMPDIR`` to
+        the per-test tmp_path so we don't pollute a shared dev path."""
+
+        monkeypatch.setenv("TMPDIR", str(tmp_path))
+        # Don't pass local_object_store_root, so the validator defaults.
+        s = _memory_settings()  # picks $TMPDIR/cognic-agentos-object-store
+        adapters = build_adapters(s, registry=_memory_registry())
+        assert isinstance(adapters.object_store, LocalObjectStoreAdapter)
+        assert s.local_object_store_root is not None
+        assert s.local_object_store_root.is_relative_to(tmp_path)
 
 
 class TestPerDriverArgs:
@@ -411,6 +508,14 @@ class TestPerDriverArgs:
             "Authorization",
             {"x-trace": "abc"},
         )
+
+    def test_object_store_local_fs_args(self, base_settings: Any, tmp_path: Path) -> None:
+        from cognic_agentos.db.adapters.factory import _object_store_args
+
+        s = base_settings.model_copy(
+            update={"object_store_driver": "local_fs", "local_object_store_root": tmp_path}
+        )
+        assert _object_store_args(s) == (tmp_path,)
 
     async def test_close_all_swallows_per_adapter_errors(self, base_settings: Any) -> None:
         """``close_all`` uses contextlib.suppress so one adapter raising
