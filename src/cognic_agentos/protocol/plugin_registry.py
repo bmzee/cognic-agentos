@@ -32,11 +32,30 @@ from __future__ import annotations
 
 import asyncio
 import importlib.metadata as _im
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Literal
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Literal
 
 from cognic_agentos.core.audit import AuditEvent, AuditStore
+
+if TYPE_CHECKING:
+    # Imported under TYPE_CHECKING to avoid an import-time cycle:
+    # supply_chain.py already imports from trust_gate.py, and
+    # plugin_registry needs both for the T10 integration. Keeping
+    # these import-only for type-checking lets PluginRegistry stay a
+    # safe import target for tests / lifespan code that don't touch
+    # the T10 code path.
+    from cognic_agentos.core.policy.engine import OPAEngine
+    from cognic_agentos.db.adapters.protocols import ObjectStoreAdapter
+    from cognic_agentos.protocol.supply_chain import (
+        SupplyChainPipeline,
+        VulnThresholds,
+    )
+    from cognic_agentos.protocol.trust_gate import TrustGate
+
+_LOG = logging.getLogger("cognic_agentos.protocol.plugin_registry")
 
 PluginKind = Literal["tools", "skills", "agents"]
 
@@ -182,6 +201,35 @@ class PluginNotRegistered(LookupError):
     """Raised by ``PluginRegistry.load`` for a (kind, name) that has
     never been ``register``-ed. Distinct from ``RegistrationRefused``
     so callers can distinguish "never asked" from "asked and refused"."""
+
+
+@dataclass(frozen=True, slots=True)
+class PackAttestations:
+    """Paths to a pack's attestation artefacts plus the cosign-signed
+    SBOM digest that pins SBOM authenticity.
+
+    T10 takes this as a single bundle so the integration call site
+    stays readable. Conventionally rooted at
+    ``<attestation_root>/<pack_id>/<version>/`` but callers can
+    supply arbitrary paths. The four grace-period attestations
+    (SLSA / in-toto / vuln / license) are Optional — absent files
+    demote the grade to ``partial`` rather than refusing.
+    """
+
+    cosign_signature_path: Path
+    cosign_blob_path: Path
+    cosign_trust_root: Path
+    sbom_path: Path
+    #: SHA-256 of the SBOM bytes as the pack's cosign signature
+    #: declares it. T7 verifies SBOM file content matches this digest.
+    sbom_signed_digest: str
+    #: Sigstore bundle file — bytes are read by T10 and persisted to
+    #: the object store via T9 with 7-year retention.
+    sigstore_bundle_path: Path
+    slsa_provenance_path: Path | None = None
+    intoto_layout_path: Path | None = None
+    vuln_scan_path: Path | None = None
+    license_audit_path: Path | None = None
 
 
 @dataclass(slots=True)
@@ -475,6 +523,292 @@ class PluginRegistry:
             raise RegistrationRefused(kind, name, reason)
         return entry.entry_point.load()
 
+    # --- T10: full pack-admission integration ----------------------------
+
+    async def register_with_full_attestation_check(
+        self,
+        pack: DiscoveredPack,
+        artefacts: PackAttestations,
+        *,
+        trust_gate: TrustGate,
+        supply_chain: SupplyChainPipeline,
+        object_store: ObjectStoreAdapter,
+        policy_engine: OPAEngine | None = None,
+        tenant_id: str = "_default",
+        tenant_allowlist: frozenset[str] | None = None,
+        require_full_grade: bool = False,
+        license_allowlist: tuple[str, ...] = (),
+        vuln_thresholds: VulnThresholds | None = None,
+        request_id: str = "system",
+    ) -> RegistrationOutcome:
+        """End-to-end pack registration: discover → trust gate → SBOM →
+        Sigstore-bundle persistence → grace-period verifiers → policy
+        engine → register.
+
+        Per Sprint-4 plan §3 + the user's T10 scope: every failure
+        becomes the matching closed ``refusal_reason`` (T5's enum).
+        ``EntryPoint.load()`` is NEVER called here — that's
+        ``PluginRegistry.load(kind, name)``'s job and the deferred-
+        load invariant of §1. T10 only walks metadata + cryptographic
+        attestations + persists evidence.
+
+        Refusal mapping (in evaluation order — first failure wins):
+
+          1. tenant allow-list miss → ``not_in_tenant_allowlist``
+          2. ``TrustGateError`` from cosign verify (any subclass —
+             CosignVerificationFailed, CosignNotInstalledError,
+             PathTraversalError) → ``cosign_verification_failed``
+          3. ``SBOMMissing`` → ``sbom_missing``
+          4. ``SBOMTampered`` → ``sbom_tampered``
+          5. ``SLSATampered`` → ``slsa_tampered``
+          6. ``IntotoTampered`` → ``intoto_tampered``
+          7. ``SigstoreBundlePersistenceFailed`` (incl. read failure
+             on the bundle file before the persister even runs) →
+             ``sigstore_bundle_persistence_failed``
+          8. policy engine deny (Rego or local fallback) →
+             ``policy_denied_partial_grade``
+
+        On success, ``register()`` is called with the final
+        ``attestation_grade`` (full | partial) plus
+        ``signature_digest`` from the cosign verification. T5's
+        register handles audit emission for both success and refusal
+        paths — T10 itself never emits audit directly.
+        """
+        # Local imports — see TYPE_CHECKING block above for the
+        # rationale (avoid import-time cycle when only the substrate
+        # is needed).
+        from cognic_agentos.protocol.supply_chain import (
+            IntotoTampered,
+            SBOMMissing,
+            SBOMTampered,
+            SigstoreBundlePersistenceFailed,
+            SLSATampered,
+            persist_sigstore_bundle,
+        )
+        from cognic_agentos.protocol.trust_gate import TrustGateError
+
+        record = pack.record
+
+        # Step 1: tenant allow-list. Sprint-4 plan §6 contract:
+        # ``{tenant_id: [pack_name, ...]}`` where pack_name is the
+        # signed distribution identity (the same value cosign verifies
+        # in step 2 + the same value reported as ``RegistrationOutcome.
+        # pack_id``). R1 reviewer-P2 fix: previously this checked
+        # ``record.name`` (the entry-point alias), which let an
+        # entry-point alias that didn't match the signed distribution
+        # pass — and refused real allow-list entries when the
+        # entry-point name differed from the distribution name.
+        # ``None`` allowlist means the operator opted out of allow-
+        # list enforcement; an empty frozenset means accept-no-packs.
+        if tenant_allowlist is not None and record.distribution_name not in tenant_allowlist:
+            return await self.register(
+                pack,
+                refusal_reason="not_in_tenant_allowlist",
+                tenant_id=tenant_id,
+                request_id=request_id,
+            )
+
+        # Step 2: cosign verification — refusal-grade gate. Any
+        # TrustGateError subclass (CosignVerificationFailed,
+        # CosignNotInstalledError, PathTraversalError) maps to one
+        # closed reason for T5's enum.
+        try:
+            cosign_result = await trust_gate.verify_pack_signature(
+                pack_id=record.distribution_name,
+                version=record.distribution_version,
+                signature_path=artefacts.cosign_signature_path,
+                blob_path=artefacts.cosign_blob_path,
+                trust_root=artefacts.cosign_trust_root,
+                tenant_id=tenant_id,
+                request_id=request_id,
+            )
+        except TrustGateError:
+            _LOG.warning(
+                "T10: cosign verification failed for pack %s/%s",
+                record.distribution_name,
+                record.distribution_version,
+            )
+            return await self.register(
+                pack,
+                refusal_reason="cosign_verification_failed",
+                tenant_id=tenant_id,
+                request_id=request_id,
+            )
+        signature_digest = cosign_result.signature_digest
+
+        # Step 3 + 5 (combined): SBOM mandatory floor + grace-period
+        # verifiers. T7's pipeline.verify raises the specific tampered
+        # exceptions which we map to refusal reasons.
+        try:
+            attestation_result = supply_chain.verify(
+                sbom_path=artefacts.sbom_path,
+                sbom_signed_digest=artefacts.sbom_signed_digest,
+                slsa_provenance_path=artefacts.slsa_provenance_path,
+                intoto_layout_path=artefacts.intoto_layout_path,
+                vuln_scan_path=artefacts.vuln_scan_path,
+                license_audit_path=artefacts.license_audit_path,
+                vuln_thresholds=vuln_thresholds,
+                license_allowlist=license_allowlist,
+            )
+        except SBOMMissing:
+            return await self.register(
+                pack,
+                refusal_reason="sbom_missing",
+                signature_digest=signature_digest,
+                tenant_id=tenant_id,
+                request_id=request_id,
+            )
+        except SBOMTampered:
+            return await self.register(
+                pack,
+                refusal_reason="sbom_tampered",
+                signature_digest=signature_digest,
+                tenant_id=tenant_id,
+                request_id=request_id,
+            )
+        except SLSATampered:
+            return await self.register(
+                pack,
+                refusal_reason="slsa_tampered",
+                signature_digest=signature_digest,
+                tenant_id=tenant_id,
+                request_id=request_id,
+            )
+        except IntotoTampered:
+            return await self.register(
+                pack,
+                refusal_reason="intoto_tampered",
+                signature_digest=signature_digest,
+                tenant_id=tenant_id,
+                request_id=request_id,
+            )
+
+        # Step 4: persist Sigstore bundle. Reading the bundle file
+        # itself can fail (missing / unreadable) — both surface as
+        # the same closed-enum refusal so T10 has one mapping per
+        # mandatory-floor failure class.
+        try:
+            bundle_bytes = artefacts.sigstore_bundle_path.read_bytes()
+        except OSError:
+            return await self.register(
+                pack,
+                refusal_reason="sigstore_bundle_persistence_failed",
+                signature_digest=signature_digest,
+                tenant_id=tenant_id,
+                request_id=request_id,
+            )
+        try:
+            # R1 reviewer-P2 fix: persist under the signed distribution
+            # identity (== ``RegistrationOutcome.pack_id``), NOT the
+            # entry-point alias. T9's deterministic key contract is
+            # ``attestations/<pack_id>/<version>/bundle.sigstore``, so
+            # the retained Sigstore bundle's path must match the pack
+            # identity reported via ``/system/plugins`` — otherwise
+            # examiners see the outcome's pack_id pointing at one
+            # path and the bundle stored at another.
+            await persist_sigstore_bundle(
+                object_store=object_store,
+                pack_id=record.distribution_name,
+                version=record.distribution_version,
+                bundle_bytes=bundle_bytes,
+            )
+        except SigstoreBundlePersistenceFailed:
+            return await self.register(
+                pack,
+                refusal_reason="sigstore_bundle_persistence_failed",
+                signature_digest=signature_digest,
+                tenant_id=tenant_id,
+                request_id=request_id,
+            )
+
+        # Step 6: policy decision on the (grade, tenant_policy) pair.
+        # The default Rego bundle (T3) implements the same logic
+        # we'd apply locally if the engine isn't available: full =
+        # always allow, partial = allow unless require_full. Calling
+        # the engine when present gives operators a tenant-Rego seam
+        # for Sprint 13.5 extensions; the local fallback keeps T10
+        # working in kernel-image deployments where OPA is absent.
+        grade = attestation_result.grade
+        if not await _admit_grade(
+            grade=grade,
+            policy_engine=policy_engine,
+            tenant_id=tenant_id,
+            require_full=require_full_grade,
+            request_id=request_id,
+        ):
+            return await self.register(
+                pack,
+                refusal_reason="policy_denied_partial_grade",
+                signature_digest=signature_digest,
+                tenant_id=tenant_id,
+                request_id=request_id,
+            )
+
+        # Step 7: register success.
+        return await self.register(
+            pack,
+            attestation_grade=grade,
+            signature_digest=signature_digest,
+            tenant_id=tenant_id,
+            request_id=request_id,
+        )
+
+
+async def _admit_grade(
+    *,
+    grade: Literal["full", "partial"],
+    policy_engine: OPAEngine | None,
+    tenant_id: str,
+    require_full: bool,
+    request_id: str,
+) -> bool:
+    """T10 admission gate for the (grade, tenant_policy) pair.
+
+    Two implementations:
+
+      * ``policy_engine`` non-None — call the OPA Rego bundle at
+        decision_point ``data.cognic.supply_chain.allow``. The
+        Sprint-4 default bundle (T3) encodes "full = always allow,
+        partial = allow unless require_full"; tenants extend via
+        Rego in Sprint 13.5.
+      * ``policy_engine`` None — local fallback with the same
+        decision logic. Lets T10 work in kernel-image deployments
+        where OPA isn't installed.
+
+    The local fallback's behaviour is identical to the Rego bundle's
+    so flipping the engine on later doesn't change which packs admit.
+
+    R1 reviewer-P2 fix: any exception from ``policy_engine.evaluate``
+    (``OpaNotInstalledError`` / ``RegoEvaluationError`` / generic
+    ``Exception``) is treated as fail-closed deny so T10's contract
+    "every failure becomes a closed refusal_reason" holds. Without
+    this wrap, a policy-engine error would propagate and T10 would
+    never produce a ``RegistrationOutcome`` / audit row — examiners
+    would see a half-finished admission with no evidence trail.
+    """
+    if policy_engine is None:
+        if grade == "full":
+            return True
+        return not require_full
+    try:
+        decision = await policy_engine.evaluate(
+            decision_point="data.cognic.supply_chain.allow",
+            input={
+                "attestation_grade": grade,
+                "tenant_policy": {"require_full": require_full},
+                "tenant_id": tenant_id,
+                "request_id": request_id,
+            },
+        )
+    except Exception:
+        _LOG.warning(
+            "T10: policy engine raised during evaluate(); fail-closed deny for grade=%s tenant=%s",
+            grade,
+            tenant_id,
+        )
+        return False
+    return decision.allow
+
 
 def _outcome_payload(outcome: RegistrationOutcome, record: PluginRecord) -> dict[str, Any]:
     """Audit payload shape for ``plugin.registration_*`` emissions.
@@ -505,6 +839,7 @@ def _outcome_payload(outcome: RegistrationOutcome, record: PluginRecord) -> dict
 __all__ = (
     "AttestationGrade",
     "DiscoveredPack",
+    "PackAttestations",
     "PluginIdentityConflict",
     "PluginKind",
     "PluginNotRegistered",

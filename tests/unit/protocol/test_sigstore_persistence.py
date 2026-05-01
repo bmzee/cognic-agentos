@@ -349,9 +349,7 @@ class TestIdentityValidation:
             )
         mock_store.put.assert_not_called()
 
-    async def test_non_string_version_rejected(
-        self, object_store: LocalObjectStoreAdapter
-    ) -> None:
+    async def test_non_string_version_rejected(self, object_store: LocalObjectStoreAdapter) -> None:
         """Defensive: non-string version values (int / None / bytes)
         are rejected at the type check before regex matching. Mirrors
         T6's argv-validator type-check pattern."""
