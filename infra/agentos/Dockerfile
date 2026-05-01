@@ -28,10 +28,19 @@
 #                             a `strip --strip-unneeded` pass over the
 #                             builder venv brought the final image to
 #                             ~174 MiB. Sprint 4 T13 added pinned cosign
-#                             + OPA binaries (~80 + ~50 MiB unstripped;
-#                             both statically-linked Go) — kernel image
-#                             explicitly does NOT carry them so the
-#                             ≤120 MiB kernel budget is unaffected.
+#                             v3.0.6 + OPA v1.16.1 binaries — neither is
+#                             strippable in the alpine builder (their
+#                             Go-specific PIE ELF layout is not
+#                             recognised by alpine's binutils strip; we
+#                             accept upstream-shipped bytes rather than
+#                             reach for sstrip / llvm-strip / UPX).
+#                             Measured default-adapters reality: 356-
+#                             359 MiB, so the workflow budget was
+#                             revised in T13-followup from 220 → 370
+#                             MiB (measured + small buffer). Kernel
+#                             ≤120 MiB budget is unaffected — kernel
+#                             image explicitly does NOT carry either
+#                             binary.
 #
 # Build args wire git SHA + build timestamp into the image so /version is
 # truthful in deployed environments.
@@ -187,6 +196,16 @@ ARG COSIGN_SHA256=c956e5dfcac53d52bcf058360d579472f0c1d2d9b69f55209e256fe7783f4c
 ARG OPA_VERSION=1.16.1
 ARG OPA_SHA256=dc00b1c32c52f1557f7f127940bc3f1de6c507fdfbe0446f19d3b19ca5786494
 
+# Note on stripping: neither cosign v3.0.6 nor OPA v1.16.1 can be stripped
+# in this build path. Both ship as Go binaries whose ELF layout (PIE +
+# Go-specific sections) alpine's binutils does not recognise; `strip
+# --strip-unneeded` fails with "Unable to recognise the format of the
+# input file" on each. Reaching for sstrip / llvm-strip / UPX to force
+# stripping would add a build-time toolchain dependency for a marginal
+# win and risk supply-chain weirdness on the verifier binaries. Both
+# binaries therefore land in the runtime image at upstream-shipped size,
+# and the default-adapters image budget (in .github/workflows/python.yml)
+# absorbs the cost. Kernel image budget unaffected.
 RUN curl -sSL --fail \
       -o /tmp/cosign \
       "https://github.com/sigstore/cosign/releases/download/v${COSIGN_VERSION}/cosign-linux-amd64" \

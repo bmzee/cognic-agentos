@@ -169,10 +169,19 @@ jobs:
             -t cognic-agentos:adapters-ci \
             .
 
-      - name: Enforce default-adapters image budget (≤220 MiB)
+      - name: Enforce default-adapters image budget (≤370 MiB)
         run: |
           set -euo pipefail
-          BUDGET_MIB=220
+          # Budget revised from 220 → 370 MiB in Sprint-4 T13-followup:
+          # T13 added pinned cosign v3.0.6 + OPA v1.16.1 (Go binaries) to
+          # the default-adapters image per ADR-016. Both binaries ship at
+          # upstream-shipped size because alpine's binutils does not
+          # recognise their ELF layout (PIE + Go-specific sections), so
+          # `strip --strip-unneeded` fails on each. Forcing alternative
+          # stripping/compression tooling would add a build-time
+          # dependency for a marginal win; budget set to measured reality
+          # (~356-359 MiB) plus a small buffer. Kernel ≤120 MiB unchanged.
+          BUDGET_MIB=370
           size_bytes=$(docker image inspect cognic-agentos:adapters-ci --format='{{.Size}}')
           size_mib=$(( size_bytes / 1024 / 1024 ))
           echo "default-adapters image size: ${size_mib} MiB (budget ${BUDGET_MIB} MiB)"
