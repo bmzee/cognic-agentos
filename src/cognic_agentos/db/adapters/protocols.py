@@ -9,10 +9,11 @@ shape at registration time.
 Async/sync flavour rule: every IO-bound method is ``async``. Pure-getter
 methods (e.g. ``EmbeddingAdapter.dimensions``) are synchronous.
 
-``ObjectStoreAdapter`` is declared-only in Sprint 1C — Sprint 8 ships
-the S3/MinIO impl alongside evidence-pack export. Declaring it here lets
-the rest of the codebase reference the type immediately and avoids a
-churn migration later.
+``ObjectStoreAdapter`` ships its first production driver in Sprint 4
+(``local_fs``, filesystem-backed, on the main runtime path per AGENTS.md
+production-grade rule). Sprint 8 adds the ``s3`` driver alongside —
+both drivers conform to this Protocol; deployments select per-tenant via
+``Settings.object_store_driver``.
 
 Memory governance (``MemoryAdapter`` per ADR-019) is **not** declared in
 this sprint — it ships with Sprint 11.5 alongside ``core/memory/``. The
@@ -138,13 +139,70 @@ class EmbeddingAdapter(Protocol):
 
 @runtime_checkable
 class ObjectStoreAdapter(Protocol):
-    """Object storage — DECLARED ONLY in Sprint 1C; Sprint 8 ships the S3/MinIO impl
-    alongside evidence-pack export."""
+    """Object storage — production drivers ship per backend.
 
-    async def put(self, bucket: str, key: str, body: bytes) -> None: ...
+    Drivers:
+      * ``local_fs`` (Sprint 4): filesystem-backed; production code on
+        the main runtime path per AGENTS.md production-grade rule.
+        Single-host AgentOS, NFS / EFS / Azure Files / on-prem mounts.
+      * ``s3`` (Sprint 8): S3-compat (boto3 / MinIO). Adds signed-URL
+        semantics for cross-host attestation-bundle access.
+      * Future: Azure Blob, GCS via plugin packs.
+
+    All drivers conform to this Protocol; deployments select via
+    ``Settings.object_store_driver``.
+    """
+
+    async def put(
+        self,
+        bucket: str,
+        key: str,
+        body: bytes,
+        *,
+        retention_seconds: int | None = None,
+    ) -> None:
+        """Persist ``body`` at ``bucket/key``.
+
+        Atomic semantics: callers see either the previous content or
+        the complete new content; partial / corrupt writes are never
+        visible to ``get()``.
+
+        ``retention_seconds`` (optional): when set, the driver enforces
+        retention at the adapter boundary — ``delete()`` raises within
+        the retention window. Sprint-4 ``local_fs`` driver records
+        retention metadata in a sidecar file; Sprint-8 ``s3`` driver
+        uses S3 Object Lock. Drivers that cannot enforce retention
+        (e.g. memory-only adapters) MAY silently no-op the retention
+        kwarg, but production drivers MUST honour it.
+        """
+        ...
+
     async def get(self, bucket: str, key: str) -> bytes: ...
-    async def delete(self, bucket: str, key: str) -> None: ...
-    async def presign(self, bucket: str, key: str, ttl_s: int) -> str: ...
+    async def delete(self, bucket: str, key: str) -> None:
+        """Remove the object at ``bucket/key``.
+
+        Drivers that enforce retention raise ``RetentionWindowActiveError``
+        (or driver-specific equivalent) when the retention window has
+        not elapsed. Operators must wait for the window to expire
+        rather than swallowing the error.
+        """
+        ...
+
+    async def presign(self, bucket: str, key: str, ttl_s: int) -> str:
+        """Return an external-HTTP-accessible signed URL for the key.
+
+        Drivers backed by storage that does not natively support
+        signed URLs (e.g. the Sprint-4 ``local_fs`` driver) MAY raise
+        ``NotImplementedError`` rather than synthesise a degenerate
+        URL that would silently mislead callers expecting cross-host
+        retrieval. Callers needing presigned-URL semantics must
+        select a driver that implements them (e.g. ``s3`` once
+        Sprint 8 ships). R2-#1 reviewer-fix: this caveat is required
+        because the local driver fails loud per AGENTS.md
+        production-grade rule.
+        """
+        ...
+
     async def health_check(self) -> AdapterHealth: ...
 
 

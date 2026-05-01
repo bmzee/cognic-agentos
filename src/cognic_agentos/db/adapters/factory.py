@@ -21,11 +21,14 @@ from cognic_agentos.db.adapters.registry import AdapterRegistry, bundled_registr
 class Adapters:
     """Typed container exposed to the FastAPI lifespan + harness.
 
-    ``object_store`` ships in Sprint 8 (alongside evidence-pack export).
-    ``None`` in Sprint 1C — the slot exists so Sprint 8 does not require
-    a structural migration. Memory governance (Sprint 11.5 / ADR-019) is
-    handled outside this dataclass; that sprint introduces both the
-    protocol AND the slot at the same time.
+    Sprint 4 wires ``object_store`` via the bundled ``local_fs`` driver
+    (production filesystem ``ObjectStoreAdapter`` per AGENTS.md
+    production-grade rule). Sprint 8 adds the ``s3`` driver alongside;
+    deployments choose via ``Settings.object_store_driver``. The
+    ``| None`` shape stays so test harnesses that don't register the
+    object_store kind still typecheck. Memory governance (Sprint 11.5 /
+    ADR-019) is handled outside this dataclass; that sprint introduces
+    both the protocol AND the slot at the same time.
     """
 
     relational: P.RelationalAdapter
@@ -44,6 +47,8 @@ class Adapters:
             self.embedding,
             self.observability,
         ]
+        if self.object_store is not None:
+            self._all.append(self.object_store)
 
     async def open_all(self) -> None:
         """Open every adapter that has a ``connect()``. Idempotent for
@@ -88,12 +93,27 @@ def build_adapters(
     embedding_cls = reg.resolve("embedding", settings.embed_driver)
     observability_cls = reg.resolve("observability", settings.obs_driver)
 
+    # Sprint 4 — object_store wiring. Resolve UNCONDITIONALLY so a
+    # missing driver surfaces as ``AdapterNotInstalled`` per ADR-009's
+    # no-silent-fallback rule. R1 reviewer-P2: the previous shape
+    # (``if reg.has(...)`` then conditionally resolve) silently set
+    # ``object_store=None`` when the registry was missing local_fs,
+    # which would let the T9 Sigstore-bundle persister run against
+    # a None object_store. Now: misconfiguration fails fast at
+    # ``build_adapters`` time. The ``Adapters`` field stays Optional
+    # so test harnesses that construct the dataclass directly without
+    # an object_store still typecheck — but ``build_adapters`` always
+    # populates it.
+    object_store_cls = reg.resolve("object_store", settings.object_store_driver)
+    object_store_instance = object_store_cls(*_object_store_args(settings))
+
     return Adapters(
         relational=relational_cls(*_relational_args(settings)),
         vector=vector_cls(*_vector_args(settings)),
         secret=secret_cls(*_secret_args(settings)),
         embedding=embedding_cls(*_embedding_args(settings)),
         observability=observability_cls(*_observability_args(settings)),
+        object_store=object_store_instance,
     )
 
 
@@ -156,4 +176,13 @@ def _observability_args(s: Settings) -> tuple[Any, ...]:
         return (s.langfuse_host, s.langfuse_public_key, s.langfuse_secret_key)
     if s.obs_driver == "dynatrace":
         return (s.dynatrace_tenant_url, s.dynatrace_api_token)
+    return ()
+
+
+def _object_store_args(s: Settings) -> tuple[Any, ...]:
+    if s.object_store_driver == "local_fs":
+        # The model_validator on Settings guarantees
+        # ``local_object_store_root`` is non-None by the time the
+        # factory reads it (profile-aware default applied).
+        return (s.local_object_store_root,)
     return ()

@@ -57,13 +57,13 @@ Discovery captures the entry-point metadata (group / name / module path / attrib
 The trust gate shells out to cosign. Per ADR-016 §"What this is NOT" + the April-2026 MCP supply-chain disclosures, **no pack-controlled string ever flows into argv**. Locked invariants:
 
 1. **Argv is list-form only.** `subprocess.run([COSIGN_BIN, "verify", ...], shell=False, ...)` — `shell=False` is explicit + tested. A regression that switches to `shell=True` or to a string command line trips the negative-path test in T6.
-2. **`COSIGN_BIN` is resolved at module-import time** via `shutil.which(settings.cognic_cosign_path or "cosign")` and frozen into a module-level constant. If `cognic_require_cosign=true` (default) and `which` returns `None`, the trust gate raises `CosignNotInstalledError` at the FIRST call (not at import — kernel-image boot must not fail when only running tests that don't touch the trust gate).
-3. **Pack identity / version / signature blob path are validated against a strict regex BEFORE being passed.** Pack name: `^[a-z0-9][a-z0-9_-]{0,127}$`. Version: `^[0-9A-Za-z.+_-]{1,64}$` (PEP 440 superset). Signature blob path: must canonicalise via `os.path.realpath()` to a path under the operator-approved `cognic_signature_root_path` prefix; any traversal attempt rejects.
-4. **Per-tenant trust root path** read from settings (file-backed in Sprint 4; Vault swap → Sprint 10). The path is canonicalised + asserted to live under `cognic_trust_root_prefix`; rejects path-traversal attempts.
+2. **`COSIGN_BIN` is resolved at module-import time** via `shutil.which(settings.cosign_path or "cosign")` and frozen into a module-level constant. If `require_cosign=true` (default) and `which` returns `None`, the trust gate raises `CosignNotInstalledError` at the FIRST call (not at import — kernel-image boot must not fail when only running tests that don't touch the trust gate).
+3. **Pack identity / version / signature blob path are validated against a strict regex BEFORE being passed.** Pack name: `^[a-z0-9][a-z0-9_-]{0,127}$`. Version: `^[0-9A-Za-z.+_-]{1,64}$` (PEP 440 superset). Signature blob path: must canonicalise via `os.path.realpath()` to a path under the operator-approved `signature_root_path` prefix; any traversal attempt rejects.
+4. **Per-tenant trust root path** read from settings (file-backed in Sprint 4; Vault swap → Sprint 10). The path is canonicalised + asserted to live under `trust_root_prefix`; rejects path-traversal attempts.
 5. **No environment variables passed through.** Subprocess uses an explicit minimal `env` dict: `{"PATH": "/usr/local/bin:/usr/bin", "HOME": "/tmp"}` only. No `os.environ` passthrough.
-6. **Strict timeout** (default 30s, configurable via `cognic_cosign_verify_timeout_s`); on timeout the subprocess is `SIGKILL`-terminated; the timeout itself emits `audit_event(trust_gate.cosign_timeout)` chained into `audit_event` substrate.
-7. **Output parsed via cosign's JSON mode (`--output json`)**. Never via shell pipe / regex on free-form stderr. Parse failure → fail-closed refusal.
-8. **Negative-path tests cover every input vector.** T6 ships unit tests for: shell metacharacters in pack name (`;`, `|`, `` ` ``, `$`, `&`, newline, backslash, quotes, glob chars); path traversal in signature path (`../`, `/etc/passwd`, symlink targets outside the prefix); over-long inputs (>128 char pack name, >64 char version); valid-looking inputs that fail cosign at the JSON-parse step (truncated output, malformed JSON, JSON that lacks the `verified` field).
+6. **Strict timeout** (default 30s, configurable via `cosign_verify_timeout_s`); on timeout the subprocess is `SIGKILL`-terminated; the timeout itself emits `audit_event(trust_gate.cosign_timeout)` chained into `audit_event` substrate.
+7. **Verification signal is the cosign exit code** (T6 R3 reviewer-P1 fix, 2026-05-01). Per upstream sigstore/cosign, `cosign verify-blob` reports verification by exit status only — exit 0 = verified, anything non-zero = fail-closed `CosignVerificationFailed`. The `--output json` flag belongs to the OCI `cosign verify` subcommand and is **not supported** by `verify-blob`; passing it makes real cosign reject every pack at the argv-parse step. We never parse cosign stdout/stderr for the decision (which would also break the privacy invariant — those streams can carry attacker-influenced text). Error messages include only `stderr_sha256` / `stderr_len` / `stdout_sha256` / `stdout_len` for operator log correlation.
+8. **Negative-path tests cover every input vector.** T6 ships unit tests for: shell metacharacters in pack name (`;`, `|`, `` ` ``, `$`, `&`, newline, backslash, quotes, glob chars); path traversal in signature path (`../`, `/etc/passwd`, symlink targets outside the prefix); over-long inputs (>128 char pack name, >64 char version); subprocess-launch OSError (EACCES / ENOEXEC after `shutil.which` succeeds) wrapped into `CosignVerificationFailed`; post-verify `_hash_file` OSError (signature removed/swapped between cosign read and hash) wrapped into the same taxonomy; non-zero exit from cosign with stdout + stderr privacy (no raw stream bytes leak into diagnostics — only SHA-256 + length).
 
 ### §3 Supply-chain attestation pipeline — mandatory floor vs grace period
 
@@ -94,7 +94,7 @@ Round-locked: tampered attestations (cryptographic signature failure on SLSA / i
 
 **`LocalObjectStoreAdapter` is production filesystem storage, not a mock or test adapter.** Per AGENTS.md "Production-grade implementation rule" (real integrations in the runtime path; mocks confined to clearly separated test paths) + Q1 of pre-plan brainstorm, this Sprint ships the FIRST real `ObjectStoreAdapter` implementation. Banks deploying AgentOS on a single host or on shared filesystem-backed storage (NFS, EFS, Azure Files, GlusterFS, on-prem mounts) run this driver in production indefinitely; Sprint 8 adds an S3 driver as an *alternative* `cognic_object_store_driver` choice, not a replacement. Both drivers conform to the same `ObjectStoreAdapter` Protocol; deployments choose per-tenant. Locked contract:
 
-1. **Filesystem-backed.** Root path from `cognic_local_object_store_root` setting; default `${COGNIC_DATA_DIR:-/var/lib/cognic-agentos}/object-store`. Bucket = first path segment; key = remaining path.
+1. **Filesystem-backed.** Root path from `local_object_store_root` setting; default `${COGNIC_DATA_DIR:-/var/lib/cognic-agentos}/object-store`. Bucket = first path segment; key = remaining path.
 2. **Atomic write via `os.rename`.** `put(bucket, key, body)` writes to `<root>/<bucket>/.tmp/<uuid4>.tmp`, fsyncs, then renames into `<root>/<bucket>/<key>`. Crash-safe on POSIX; partial files never visible. Concurrent writes to the same key resolve last-writer-wins (acceptable for Sigstore-bundle re-uploads of the same pack version — content is identical).
 3. **Path-traversal safe.** All `bucket` + `key` arguments validated by regex (`^[a-z0-9][a-z0-9._/-]{0,255}$`); resolved path must canonicalise via `os.path.realpath()` to remain under the configured root. Rejects `..`, absolute paths, NUL bytes, symlinks pointing outside root.
 4. **Retention metadata enforced at adapter level.** `put(...)` accepts an optional `retention_seconds` keyword (default `None` = no retention policy). When set, the adapter writes a sidecar `<key>.retention` file containing `{"created_at": "<ISO8601>", "retain_until": "<ISO8601>", "retention_seconds": <int>}`. `delete(bucket, key)` rejects with `RetentionWindowActiveError` if the sidecar's `retain_until` has not passed. T4 unit tests cover (a) deletion within window refused, (b) deletion after window allowed, (c) sidecar tamper (manual edit) → fail-closed-on-read.
@@ -113,7 +113,7 @@ Per ADR-015 §"Sprint 4 (seed)", Sprint 4 ships the smallest evaluator that can 
 2. **API:** `async def evaluate(decision_point: str, input: dict) -> Decision`. `Decision` is a frozen+slotted dataclass: `(allow: bool, rule_matched: str | None, reasoning: str, decision_data: dict[str, Any] | None)`. Q8 lock — `decision_data` carries Sprint-specific outcome data (e.g. `{"attestation_grade": "full"}`).
 
    **Async deviation from ADR-015 §"Engine integration"** (P2-D reviewer-fix). ADR-015 specs `Sync API: engine.evaluate(decision, input) -> Decision`. The plan deliberately deviates: Sprint 2's `AuditStore.append` + Sprint 2.5's `decision_history.append_with_precondition` substrates are async; emitting `policy.decision_evaluated` synchronously inside `evaluate()` would require either `asyncio.to_thread` (defeats the async substrate's chain-head FOR UPDATE serialisation) or fire-and-forget (breaks ADR-007-style "no successful return without persisted evidence" discipline). Async `evaluate()` aligns with the Sprint 2 substrate's locking model. ADR-015's "Sync API" wording predates the Sprint-2 async substrate decision; the deviation is doctrine-aware, not accidental.
-3. **Bundle loading:** load-from-disk only at startup. NO hot-reload (Sprint 13.5 adds it). Bundle path = `cognic_supply_chain_policy_bundle`; default `policies/_default/supply_chain.rego`. Missing bundle file → fail-closed `RegoBundleNotFoundError` at engine construction.
+3. **Bundle loading:** load-from-disk only at startup. NO hot-reload (Sprint 13.5 adds it). Bundle path = `supply_chain_policy_bundle`; default `policies/_default/supply_chain.rego`. Missing bundle file → fail-closed `RegoBundleNotFoundError` at engine construction.
 4. **Bundle compilation:** at engine construction, the evaluator runs `opa eval --partial --data <bundle-path>` once to validate the bundle syntactically. Syntax error → fail-closed `RegoBundleInvalidError` with the OPA error message embedded. No runtime bundle reload.
 5. **Per-call invocation:** for each `evaluate()` call, the evaluator runs `opa eval --data <bundle-path> --input <input-as-json> --format json "<decision-point-query>"` with a strict 5-second timeout. Subprocess shape mirrors §2 — list-form argv, `shell=False`, explicit minimal env, JSON output parse, fail-closed on non-zero exit / parse failure / timeout.
 6. **Audit emission contract** (Q7 lock — first `decision_history` emissions in the project):
@@ -125,7 +125,7 @@ Per ADR-015 §"Sprint 4 (seed)", Sprint 4 ships the smallest evaluator that can 
 
 Per Q6 lock + ADR-002 trust contract:
 
-- Allow-list path = `cognic_plugin_allowlist_path` (settings field). Default: `policies/_default/plugin_allowlist.json`.
+- Allow-list path = `plugin_allowlist_path` (settings field). Default: `policies/_default/plugin_allowlist.json`.
 - Format: `{"<tenant_id>": ["<pack_name>", ...]}`. JSON, version-controlled, cosign-signed in production.
 - Loaded once at registry construction (`PluginRegistry.from_paths(...)`); refresh requires AgentOS restart in Sprint 4.
 - Vault swap → Sprint 10; the file-path setting becomes a Vault path setting then. No API surface change.
@@ -208,16 +208,16 @@ Reproducibility manifest verification (`protocol/reproducibility.py`) is **not**
 
 - `pyproject.toml` — no entry-point group declarations needed (groups materialise from installed packs); `[project.optional-dependencies].adapters` extended with the OPA Go binary install hook (vendored — see T13). `dev` extra unchanged.
 - `src/cognic_agentos/core/config.py` — Sprint 4 settings group:
-  - `cognic_plugin_allowlist_path: Path` (default: `Path("policies/_default/plugin_allowlist.json")`)
-  - `cognic_require_cosign: bool = True`
-  - `cognic_cosign_path: str | None = None` (None → `shutil.which("cosign")`)
-  - `cognic_cosign_verify_timeout_s: float = 30.0` (gt=0)
-  - `cognic_supply_chain_policy_bundle: Path` (default: `Path("policies/_default/supply_chain.rego")`)
-  - `cognic_opa_path: str | None = None` (None → `shutil.which("opa")`)
-  - `cognic_opa_eval_timeout_s: float = 5.0` (gt=0)
-  - `cognic_local_object_store_root: Path` (default: derived from `runtime_profile`; `/var/lib/cognic-agentos/object-store` for prod, `${tmpdir}/object-store` for dev)
-  - `cognic_signature_root_path: Path` (default: `Path("attestations")` — relative to the configured pack-distribution root)
-  - `cognic_trust_root_prefix: Path` (default: `Path("trust-roots")`)
+  - `plugin_allowlist_path: Path` (default: `Path("policies/_default/plugin_allowlist.json")`)
+  - `require_cosign: bool = True`
+  - `cosign_path: str | None = None` (None → `shutil.which("cosign")`)
+  - `cosign_verify_timeout_s: float = 30.0` (gt=0)
+  - `supply_chain_policy_bundle: Path` (default: `Path("policies/_default/supply_chain.rego")`)
+  - `opa_path: str | None = None` (None → `shutil.which("opa")`)
+  - `opa_eval_timeout_s: float = 5.0` (gt=0)
+  - `local_object_store_root: Path` (default: derived from `runtime_profile`; `/var/lib/cognic-agentos/object-store` for prod, `${tmpdir}/object-store` for dev)
+  - `signature_root_path: Path` (default: `Path("attestations")` — relative to the configured pack-distribution root)
+  - `trust_root_prefix: Path` (default: `Path("trust-roots")`)
 - `src/cognic_agentos/db/adapters/factory.py` — `build_adapters` extends to construct `LocalObjectStoreAdapter` when `cognic_object_store_driver=local`; default driver becomes `local` (was `None`); `S3ObjectStoreAdapter` when Sprint 8 lands flips the default.
 - `src/cognic_agentos/db/adapters/registry.py` — registers `local_fs` driver name → `LocalObjectStoreAdapter`.
 - `src/cognic_agentos/portal/api/system_routes.py` — adds `GET /api/v1/system/plugins` route + `_plugin_record_dict` helper. Reads `request.app.state.plugin_registry` (set by lifespan).
@@ -273,36 +273,36 @@ class TestSprint4PluginPolicySettings:
     def test_sprint_4_defaults_match_secure_posture(self) -> None:
         s = Settings(runtime_profile="prod")
         # Cosign required by default — fail-closed posture
-        assert s.cognic_require_cosign is True
-        assert s.cognic_cosign_path is None  # derived via shutil.which at use-time
-        assert s.cognic_cosign_verify_timeout_s == 30.0
+        assert s.require_cosign is True
+        assert s.cosign_path is None  # derived via shutil.which at use-time
+        assert s.cosign_verify_timeout_s == 30.0
         # File-backed allow-list defaults
-        assert s.cognic_plugin_allowlist_path == Path("policies/_default/plugin_allowlist.json")
+        assert s.plugin_allowlist_path == Path("policies/_default/plugin_allowlist.json")
         # Rego seed bundle
-        assert s.cognic_supply_chain_policy_bundle == Path(
+        assert s.supply_chain_policy_bundle == Path(
             "policies/_default/supply_chain.rego"
         )
         # OPA defaults
-        assert s.cognic_opa_path is None
-        assert s.cognic_opa_eval_timeout_s == 5.0
+        assert s.opa_path is None
+        assert s.opa_eval_timeout_s == 5.0
 
     def test_cosign_timeout_must_be_positive(self) -> None:
         with pytest.raises(ValidationError, match="greater than 0"):
-            Settings(runtime_profile="prod", cognic_cosign_verify_timeout_s=0)
+            Settings(runtime_profile="prod", cosign_verify_timeout_s=0)
         with pytest.raises(ValidationError):
-            Settings(runtime_profile="prod", cognic_cosign_verify_timeout_s=-1)
+            Settings(runtime_profile="prod", cosign_verify_timeout_s=-1)
 
     def test_opa_timeout_must_be_positive(self) -> None:
         with pytest.raises(ValidationError, match="greater than 0"):
-            Settings(runtime_profile="prod", cognic_opa_eval_timeout_s=0)
+            Settings(runtime_profile="prod", opa_eval_timeout_s=0)
 
     def test_local_object_store_root_dev_vs_prod(self, monkeypatch, tmp_path) -> None:
         """Dev profile derives root from tmpdir; prod uses /var/lib path."""
         monkeypatch.setenv("TMPDIR", str(tmp_path))
         dev = Settings(runtime_profile="dev")
         prod = Settings(runtime_profile="prod")
-        assert tmp_path in dev.cognic_local_object_store_root.parents
-        assert prod.cognic_local_object_store_root == Path(
+        assert tmp_path in dev.local_object_store_root.parents
+        assert prod.local_object_store_root == Path(
             "/var/lib/cognic-agentos/object-store"
         )
 ```
@@ -313,22 +313,33 @@ class TestSprint4PluginPolicySettings:
 uv run pytest tests/unit/test_config.py::TestSprint4PluginPolicySettings -v
 ```
 
-Expected: AttributeError on `s.cognic_require_cosign` (settings don't exist yet).
+Expected: AttributeError on `s.require_cosign` (settings don't exist yet).
 
 - [ ] **Step 3: Implement the settings extension**
+
+**Field-naming convention** (T1-implementation reconciliation, post-merge):
+field names below are written WITHOUT a redundant `cognic_` prefix
+because `Settings.model_config` already declares
+`env_prefix="COGNIC_"`. The env_prefix is applied at env-var-read
+time only — operators set `COGNIC_REQUIRE_COSIGN=...`, the Python
+field is `require_cosign`. The Sprint-3 convention is identical
+(field `tier1_alias` ↔ env `COGNIC_TIER1_ALIAS`); this aligns Sprint
+4 with that pattern. A redundant in-Python prefix would force
+operators to set `COGNIC_COGNIC_REQUIRE_COSIGN` etc. — collision
+with the documented `.env.example` surface.
 
 ```python
 # core/config.py — append after the Sprint 3 LLM gateway block
 
 # --- Sprint 4 — Plugin registry + trust gate + policy seed (per ADRs 002, 015, 016) ---
-cognic_plugin_allowlist_path: Path = Field(
+plugin_allowlist_path: Path = Field(
     default=Path("policies/_default/plugin_allowlist.json"),
     description=(
         "Per-tenant plugin allow-list path. JSON: {tenant_id: [pack_name, ...]}. "
         "File-backed in Sprint 4; Vault swap → Sprint 10."
     ),
 )
-cognic_require_cosign: bool = Field(
+require_cosign: bool = Field(
     default=True,
     description=(
         "Master fail-closed flag for the plugin trust gate. Default true: pack "
@@ -336,14 +347,14 @@ cognic_require_cosign: bool = Field(
         "Setting false in production is a critical-controls violation."
     ),
 )
-cognic_cosign_path: str | None = Field(
+cosign_path: str | None = Field(
     default=None,
     description=(
         "Override path to the cosign binary. None → shutil.which('cosign') at "
         "first use. Production: pinned in default-adapters Dockerfile target."
     ),
 )
-cognic_cosign_verify_timeout_s: float = Field(
+cosign_verify_timeout_s: float = Field(
     default=30.0,
     gt=0.0,
     description=(
@@ -351,21 +362,21 @@ cognic_cosign_verify_timeout_s: float = Field(
         "timeout itself emits a chained audit event."
     ),
 )
-cognic_supply_chain_policy_bundle: Path = Field(
+supply_chain_policy_bundle: Path = Field(
     default=Path("policies/_default/supply_chain.rego"),
     description=(
         "Rego bundle path consulted by the Sprint-4 policy engine seed for "
         "supply-chain admission decisions (allow / deny / partial-grade tolerance)."
     ),
 )
-cognic_opa_path: str | None = Field(
+opa_path: str | None = Field(
     default=None,
     description=(
         "Override path to the OPA Go binary. None → shutil.which('opa') at "
         "engine construction. Production: pinned in default-adapters Dockerfile target."
     ),
 )
-cognic_opa_eval_timeout_s: float = Field(
+opa_eval_timeout_s: float = Field(
     default=5.0,
     gt=0.0,
     description=(
@@ -373,21 +384,21 @@ cognic_opa_eval_timeout_s: float = Field(
         "fail-closed on parse / non-zero exit."
     ),
 )
-cognic_local_object_store_root: Path = Field(
+local_object_store_root: Path = Field(
     default_factory=lambda: _default_object_store_root(),
     description=(
         "Root directory for the LocalObjectStoreAdapter. Dev profile derives "
         "from $TMPDIR; prod default is /var/lib/cognic-agentos/object-store."
     ),
 )
-cognic_signature_root_path: Path = Field(
+signature_root_path: Path = Field(
     default=Path("attestations"),
     description=(
         "Root prefix under which all pack signature paths must canonicalise. "
         "Path-traversal attempts are refused at the trust-gate boundary."
     ),
 )
-cognic_trust_root_prefix: Path = Field(
+trust_root_prefix: Path = Field(
     default=Path("trust-roots"),
     description=(
         "Root prefix under which all per-tenant cosign trust-root paths must "
@@ -400,7 +411,7 @@ Plus the helper:
 
 ```python
 def _default_object_store_root() -> Path:
-    """Profile-aware default for cognic_local_object_store_root."""
+    """Profile-aware default for local_object_store_root."""
     import os
     if (tmp := os.environ.get("TMPDIR")) is not None:
         return Path(tmp) / "cognic-agentos-object-store"
@@ -1116,7 +1127,7 @@ Full implementation guidance:
 
 `db/adapters/registry.py`: register `("object_store", "local_fs"): LocalObjectStoreAdapter`.
 
-`db/adapters/factory.py`: `build_adapters` constructs `LocalObjectStoreAdapter(root=settings.cognic_local_object_store_root)` when `settings.cognic_object_store_driver == "local_fs"` (new default).
+`db/adapters/factory.py`: `build_adapters` constructs `LocalObjectStoreAdapter(root=settings.local_object_store_root)` when `settings.cognic_object_store_driver == "local_fs"` (new default).
 
 `db/adapters/protocols.py`: extend the `ObjectStoreAdapter.presign` Protocol docstring so callers reading the Protocol type hover see the contract clearly. Suggested patch:
 
@@ -1341,13 +1352,18 @@ class TestTrustGateInputValidation:
 
 
 class TestTrustGateSubprocessShape:
-    def test_argv_is_list_form_no_shell(self, ...): ...
+    # R3 reviewer-P1 fix (2026-05-01): the shape tests pin the
+    # exit-code contract per the upstream sigstore/cosign verify-blob
+    # docs. NO --output / JSON-parse tests — that flag belongs to OCI
+    # ``cosign verify`` and is not supported by ``verify-blob``.
+    def test_argv_is_list_form_with_explicit_flags(self, ...): ...
+    def test_argv_does_not_pass_unsupported_output_json_flag(self, ...): ...
     def test_env_is_minimal_no_environ_passthrough(self, ...): ...
-    def test_strict_timeout_kills_process(self, ...): ...
-    def test_timeout_emits_audit_event(self, ...): ...
-    def test_json_output_parsed_strict(self, ...): ...
+    def test_strict_timeout_kills_process_and_emits_audit(self, ...): ...
     def test_non_zero_exit_fails_closed(self, ...): ...
-    def test_malformed_json_fails_closed(self, ...): ...
+    def test_non_zero_exit_does_not_leak_stderr_or_stdout_content(self, ...): ...
+    def test_subprocess_launch_oserror_wrapped(self, ...): ...
+    def test_signature_hashing_oserror_wrapped(self, ...): ...
 
 
 class TestTrustGateHappyPath:
@@ -1621,7 +1637,7 @@ git commit -m "feat(sprint-4): /api/v1/system/plugins endpoint (T11)"
 
 Test pack is installable via `uv pip install -e tests/fixtures/cognic_test_pack/`.
 
-The cosign signature blob is **ephemerally generated at test fixture setup** by the build script when run with `--regenerate` (CI runs without regeneration; local dev regenerates as needed). For unit tests that don't need a real signature, the cosign subprocess is shimmed (Q4 lock) to return canned JSON.
+The cosign signature blob is **ephemerally generated at test fixture setup** by the build script when run with `--regenerate` (CI runs without regeneration; local dev regenerates as needed). For unit tests that don't need a real signature, the cosign subprocess is shimmed (Q4 lock) to record its argv/env and exit with the desired status code; per the T6 R3 reviewer-P1 fix the shim does **not** emit JSON because the trust gate treats `cosign verify-blob`'s exit code as the verification signal (no stdout parsing).
 
 For the env-gated `@pytest.mark.cosign_real` integration path: requires cosign binary + Sigstore.dev access; runs against the actually-signed pack with a real cosign verify call.
 

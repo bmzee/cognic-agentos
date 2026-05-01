@@ -1,0 +1,22 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cognic-test-pack"
+version = "0.1.0"
+description = "Sprint-4 test pack — exercises the discover→register→load flow against the full attestation pipeline (T10) without touching real cosign/Sigstore"
+readme = { text = "Test fixture pack — installed via `uv pip install -e tests/fixtures/cognic_test_pack/` for the Sprint-4 plugin-registry tests. Not a real Cognic plugin pack; do NOT install in production.", content-type = "text/plain" }
+requires-python = ">=3.11"
+authors = [{ name = "Cognic AgentOS Sprint-4 fixtures" }]
+license = { text = "MIT" }
+
+[project.entry-points."cognic.tools"]
+# Entry-point name: the alias operators see in /api/v1/system/plugins.
+# Distribution name is the cosign-signed identity (cognic-test-pack
+# above); kept distinct so T10's allow-list + T9's bundle key both
+# correctly key off ``distribution_name`` rather than the alias.
+cognic_test_pack = "cognic_test_pack.tool:Plugin"
+
+[tool.hatch.build.targets.wheel]
+packages = ["cognic_test_pack"]

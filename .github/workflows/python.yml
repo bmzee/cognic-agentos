@@ -88,7 +88,7 @@ jobs:
     # gives ~10% headroom over measured. Bump flagged for review at the
     # Sprint 1C READY-FOR-GATE checkpoint; doctrine update to BUILD_PLAN
     # follows if the bump is accepted.
-    name: image size budget (kernel ≤120 / default-adapters ≤220 MiB)
+    name: image size budget (kernel ≤120 / default-adapters ≤370 MiB)
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -169,10 +169,19 @@ jobs:
             -t cognic-agentos:adapters-ci \
             .
 
-      - name: Enforce default-adapters image budget (≤220 MiB)
+      - name: Enforce default-adapters image budget (≤370 MiB)
         run: |
           set -euo pipefail
-          BUDGET_MIB=220
+          # Budget revised from 220 → 370 MiB in Sprint-4 T13-followup:
+          # T13 added pinned cosign v3.0.6 + OPA v1.16.1 (Go binaries) to
+          # the default-adapters image per ADR-016. Both binaries ship at
+          # upstream-shipped size because alpine's binutils does not
+          # recognise their ELF layout (PIE + Go-specific sections), so
+          # `strip --strip-unneeded` fails on each. Forcing alternative
+          # stripping/compression tooling would add a build-time
+          # dependency for a marginal win; budget set to measured reality
+          # (~356-359 MiB) plus a small buffer. Kernel ≤120 MiB unchanged.
+          BUDGET_MIB=370
           size_bytes=$(docker image inspect cognic-agentos:adapters-ci --format='{{.Size}}')
           size_mib=$(( size_bytes / 1024 / 1024 ))
           echo "default-adapters image size: ${size_mib} MiB (budget ${BUDGET_MIB} MiB)"
@@ -182,6 +191,25 @@ jobs:
             exit 1
           fi
           echo "::notice::default-adapters image ${size_mib} MiB is within ${BUDGET_MIB} MiB budget"
+
+      - name: Verify pinned cosign + OPA binaries on PATH (Sprint-4 T13)
+        run: |
+          set -euo pipefail
+          # Trust gate (T6) calls cosign via subprocess; policy engine
+          # (T2) calls opa via subprocess. Both binaries are fetched +
+          # sha256-verified in the default-adapters-builder stage and
+          # COPY'd into the runtime stage. This step proves they end up
+          # on PATH inside the runtime image AND are executable as the
+          # non-root cognic UID 10001 — which is what the trust gate +
+          # policy engine actually invoke.
+          docker run --rm cognic-agentos:adapters-ci sh -c '
+            set -e
+            command -v cosign >/dev/null || { echo "cosign missing on PATH" >&2; exit 1; }
+            command -v opa    >/dev/null || { echo "opa missing on PATH"    >&2; exit 1; }
+            cosign version
+            opa version
+          '
+          echo "::notice::default-adapters image carries pinned cosign + OPA on PATH"
 
   oracle-integration:
     # Sprint 1D: live Oracle XE compose overlay + pytest -m oracle. Runs

@@ -589,3 +589,102 @@ class TestLLMGatewaySettings:
         assert s.allow_external_llm is True
         assert s.policy_mode == "cloud_openai"
         assert s.allowed_providers == ["openai"]
+
+
+# ---------------------------------------------------------------------------
+# Sprint 4 — Plugin registry + trust gate + policy-engine seed settings
+# (per ADRs 002 / 015 / 016).
+# ---------------------------------------------------------------------------
+
+
+class TestSprint4PluginPolicySettings:
+    """Settings tests for the Sprint 4 plugin/trust-gate/policy seed surface.
+
+    Per the Sprint 4 plan-of-record (a84ec85) §1: the file-backed allow-list
+    + cosign + OPA + LocalObjectStoreAdapter root + path-traversal prefixes
+    are all introduced as additive Settings fields. Defaults match the
+    documented secure-by-default posture (cosign required; load-from-disk
+    Rego seed; profile-aware object-store root).
+    """
+
+    def test_sprint_4_defaults_match_secure_posture(self) -> None:
+        s = Settings(_env_file=None, runtime_profile="prod")  # type: ignore[call-arg]
+        # Cosign required by default — fail-closed posture per AGENTS.md
+        # critical-controls discipline (trust gate).
+        assert s.require_cosign is True
+        # cosign_path default is None → resolver runs shutil.which at use-time.
+        assert s.cosign_path is None
+        assert s.cosign_verify_timeout_s == 30.0
+        # File-backed allow-list defaults; Vault swap → Sprint 10.
+        assert s.plugin_allowlist_path == Path("policies/_default/plugin_allowlist.json")
+        # Rego seed bundle (per ADR-015 Sprint-4 phase).
+        assert s.supply_chain_policy_bundle == Path("policies/_default/supply_chain.rego")
+        # OPA defaults match cosign shape — None → shutil.which at use-time.
+        assert s.opa_path is None
+        assert s.opa_eval_timeout_s == 5.0
+        # Path-traversal prefixes (boundary-asserted at trust-gate).
+        assert s.signature_root_path == Path("attestations")
+        assert s.trust_root_prefix == Path("trust-roots")
+
+    def test_cosign_timeout_must_be_positive(self) -> None:
+        """Strict fail-loud per Sprint-4 plan §2 invariant 6 — timeout=0
+        would mean no upper bound; negative is nonsensical."""
+        with pytest.raises(ValueError, match="greater than 0"):
+            Settings(  # type: ignore[call-arg]
+                _env_file=None,
+                runtime_profile="prod",
+                cosign_verify_timeout_s=0,
+            )
+        with pytest.raises(ValueError, match="greater than 0"):
+            Settings(  # type: ignore[call-arg]
+                _env_file=None,
+                runtime_profile="prod",
+                cosign_verify_timeout_s=-1,
+            )
+
+    def test_opa_timeout_must_be_positive(self) -> None:
+        """Same shape as cosign-timeout. Per Sprint-4 plan §5 invariant 5."""
+        with pytest.raises(ValueError, match="greater than 0"):
+            Settings(  # type: ignore[call-arg]
+                _env_file=None,
+                runtime_profile="prod",
+                opa_eval_timeout_s=0,
+            )
+        with pytest.raises(ValueError, match="greater than 0"):
+            Settings(  # type: ignore[call-arg]
+                _env_file=None,
+                runtime_profile="prod",
+                opa_eval_timeout_s=-0.5,
+            )
+
+    def test_local_object_store_root_prod_default(self) -> None:
+        """Prod profile uses the /var/lib path. Pinned regardless of
+        $TMPDIR — the post-init validator picks per profile, not per env."""
+        s = Settings(_env_file=None, runtime_profile="prod")  # type: ignore[call-arg]
+        assert s.local_object_store_root == Path("/var/lib/cognic-agentos/object-store")
+
+    def test_local_object_store_root_dev_derives_from_tmpdir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Dev profile derives root from $TMPDIR. Pinned so test environments
+        don't accidentally write Sigstore bundles into a shared production
+        path."""
+        monkeypatch.setenv("TMPDIR", str(tmp_path))
+        s = Settings(_env_file=None, runtime_profile="dev")  # type: ignore[call-arg]
+        # The default is <tmpdir>/cognic-agentos-object-store; assert that
+        # our tmp_path is the parent (or grandparent depending on env shape).
+        assert s.local_object_store_root is not None
+        assert tmp_path in s.local_object_store_root.parents or (
+            s.local_object_store_root == tmp_path / "cognic-agentos-object-store"
+        )
+
+    def test_cognic_require_cosign_can_be_disabled_explicitly(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Operator can disable cosign requirement (e.g. local dev without
+        cosign installed). Comment in .env.example notes this is a critical-
+        controls violation in production — but the Settings field accepts
+        the override to avoid blocking local iteration."""
+        monkeypatch.setenv("COGNIC_REQUIRE_COSIGN", "false")
+        s = Settings(_env_file=None, runtime_profile="dev")  # type: ignore[call-arg]
+        assert s.require_cosign is False

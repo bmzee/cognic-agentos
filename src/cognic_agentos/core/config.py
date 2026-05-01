@@ -22,7 +22,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from cognic_agentos import __version__
@@ -475,6 +475,122 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- Sprint 4 — Plugin registry + trust gate + policy seed ---------
+    # Per ADRs 002 (MCP plugin protocol — cosign trust gate +
+    # per-tenant allow-list), 015 (policy-as-code — Rego evaluator
+    # seed; load-from-disk only in Sprint 4, hot-reload in Sprint 13.5),
+    # and 016 (supply-chain attestations — Wave-1 mandatory floor +
+    # grace-period split).
+    #
+    # Field-naming note: the Sprint-4 plan-of-record (a84ec85) wrote
+    # field names with a redundant ``cognic_`` prefix; that doubles up
+    # against the ``env_prefix="COGNIC_"`` already declared on
+    # SettingsConfigDict and would force operators to set
+    # ``COGNIC_COGNIC_REQUIRE_COSIGN`` etc. Field names here drop the
+    # in-Python prefix to mirror the existing Sprint-3 convention
+    # (``tier1_alias`` → ``COGNIC_TIER1_ALIAS``); env-var names in
+    # ``.env.example`` stay single-prefixed.
+    plugin_allowlist_path: Path = Field(
+        default=Path("policies/_default/plugin_allowlist.json"),
+        description=(
+            "Per-tenant plugin allow-list path. JSON: "
+            "{tenant_id: [pack_name, ...]}. File-backed in Sprint 4; "
+            "Vault swap → Sprint 10 (no API surface change at the swap)."
+        ),
+    )
+    require_cosign: bool = Field(
+        default=True,
+        description=(
+            "Master fail-closed flag for the plugin trust gate. Default "
+            "true: pack registration refuses if cosign cannot verify the "
+            "signature. Setting false in production is a critical-controls "
+            "violation (per AGENTS.md). The override exists only so local "
+            "dev without cosign installed can iterate."
+        ),
+    )
+    cosign_path: str | None = Field(
+        default=None,
+        description=(
+            "Override path to the cosign binary. None → ``shutil.which("
+            "'cosign')`` at first use. Production: pinned in default-"
+            "adapters Dockerfile target with SHA256 (per Sprint-4 plan §2)."
+        ),
+    )
+    cosign_verify_timeout_s: float = Field(
+        default=30.0,
+        gt=0.0,
+        description=(
+            "Per-call cosign-verify timeout in seconds. Strict: SIGKILL "
+            "on timeout; the timeout itself emits a chained "
+            "``trust_gate.cosign_timeout`` audit event. Must be > 0."
+        ),
+    )
+    supply_chain_policy_bundle: Path = Field(
+        default=Path("policies/_default/supply_chain.rego"),
+        description=(
+            "Rego bundle path consulted by the Sprint-4 policy engine "
+            "seed for supply-chain admission decisions (full-grade "
+            "always allowed; partial-grade tolerance per tenant policy). "
+            "Bundle reload requires AgentOS restart in Sprint 4; Sprint "
+            "13.5 adds hot-reload."
+        ),
+    )
+    opa_path: str | None = Field(
+        default=None,
+        description=(
+            "Override path to the OPA Go binary. None → ``shutil.which("
+            "'opa')`` at engine construction. Production: pinned in "
+            "default-adapters Dockerfile target."
+        ),
+    )
+    opa_eval_timeout_s: float = Field(
+        default=5.0,
+        gt=0.0,
+        description=(
+            "Per-evaluate OPA timeout in seconds. Strict: SIGKILL on "
+            "timeout; fail-closed on parse failure / non-zero exit. "
+            "Must be > 0."
+        ),
+    )
+    object_store_driver: Literal["local_fs"] = Field(
+        default="local_fs",
+        description=(
+            "ObjectStoreAdapter driver. Sprint 4 ships ``local_fs`` (production "
+            "filesystem; first real impl per AGENTS.md production-grade rule). "
+            "Sprint 8 adds ``s3``; the Literal here will widen to "
+            'Literal["local_fs", "s3"] at that sprint.'
+        ),
+    )
+    local_object_store_root: Path | None = Field(
+        default=None,
+        description=(
+            "Root directory for the LocalObjectStoreAdapter "
+            "(production filesystem ObjectStoreAdapter; first real "
+            "implementation per AGENTS.md production-grade rule). When "
+            "unset (the default), the post-init validator picks: prod "
+            "profile → /var/lib/cognic-agentos/object-store; dev/staging "
+            "→ $TMPDIR-derived. Operator override via env var or init "
+            "kwarg always wins. Sprint 8 adds an S3 driver alongside; "
+            "both drivers conform to ObjectStoreAdapter."
+        ),
+    )
+    signature_root_path: Path = Field(
+        default=Path("attestations"),
+        description=(
+            "Root prefix under which all pack signature paths must "
+            "canonicalise. Path-traversal attempts are refused at the "
+            "trust-gate boundary (per Sprint-4 plan §2 invariant 3)."
+        ),
+    )
+    trust_root_prefix: Path = Field(
+        default=Path("trust-roots"),
+        description=(
+            "Root prefix under which all per-tenant cosign trust-root "
+            "paths must canonicalise. Path-traversal attempts are "
+            "refused at the trust-gate boundary."
+        ),
+    )
+
     @field_validator("allowed_providers", mode="before")
     @classmethod
     def _split_allowed_providers(cls, value: object) -> list[str]:
@@ -506,6 +622,27 @@ class Settings(BaseSettings):
             f"allowed_providers must be list, JSON array, or CSV; got {type(value).__name__}"
         )
 
+    @model_validator(mode="after")
+    def _resolve_local_object_store_root(self) -> Settings:
+        """Resolve ``local_object_store_root`` per ``runtime_profile`` if unset.
+
+        Prod profile → ``/var/lib/cognic-agentos/object-store``. Dev /
+        staging → ``$TMPDIR``-derived path (so test runs and shared
+        developer workstations don't accidentally write Sigstore bundles
+        into a production-shared /var/lib path).
+
+        Operator override via env var (``COGNIC_LOCAL_OBJECT_STORE_ROOT``)
+        or init kwarg always wins — that's the path through `data` /
+        explicit-init, which leaves the field non-None at validator entry.
+        """
+
+        if self.local_object_store_root is None:
+            if self.runtime_profile == "prod":
+                self.local_object_store_root = Path("/var/lib/cognic-agentos/object-store")
+            else:
+                self.local_object_store_root = _default_object_store_root()
+        return self
+
     # --- Build metadata ----------------------------------------------
     # Wired by the Dockerfile / CI at image-build time; defaults make
     # local-dev introspection useful without requiring an explicit env.
@@ -526,6 +663,22 @@ class Settings(BaseSettings):
     @property
     def platform_string(self) -> str:
         return f"{platform.system()}-{platform.machine()}"
+
+
+def _default_object_store_root() -> Path:
+    """Profile-aware default for ``cognic_local_object_store_root``.
+
+    Per Sprint-4 plan §4: dev environments derive the LocalObjectStoreAdapter
+    root from ``$TMPDIR`` (so test runs and shared developer workstations
+    don't accidentally write Sigstore bundles into a production-shared
+    /var/lib path); prod defaults to ``/var/lib/cognic-agentos/object-store``
+    which is writable by the AgentOS service account in the default
+    deployment shape.
+    """
+
+    if (tmp := os.environ.get("TMPDIR")) is not None:
+        return Path(tmp) / "cognic-agentos-object-store"
+    return Path("/var/lib/cognic-agentos/object-store")
 
 
 def build_settings_without_env_file() -> Settings:

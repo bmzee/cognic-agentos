@@ -56,6 +56,7 @@ from cognic_agentos.observability import (
     silence_uvicorn_access_log,
 )
 from cognic_agentos.portal.api.system_routes import build_system_router
+from cognic_agentos.protocol.plugin_registry import PluginRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +162,7 @@ def create_app(
     *,
     adapter_registry: AdapterRegistry | None = None,
     gateway_ledger: GatewayCallLedger | None = None,
+    plugin_registry: PluginRegistry | None = None,
 ) -> FastAPI:
     """Build and return the FastAPI application.
 
@@ -201,6 +203,10 @@ def create_app(
         # adapter-registry path so /effective-routing works in both
         # the lifespan-managed adapter mode and the test injection mode.
         app.state.gateway_ledger = gateway_ledger
+        # Sprint-4 T11: same pattern for the plugin registry. When
+        # unset, /api/v1/system/plugins serves an empty list (NOT
+        # 503) per the read-only honesty surface contract.
+        app.state.plugin_registry = plugin_registry
         if adapter_registry is None:
             app.state.adapters = None
             yield

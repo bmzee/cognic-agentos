@@ -49,6 +49,10 @@ from fastapi import APIRouter, Request
 from cognic_agentos.core.config import Settings
 from cognic_agentos.db.adapters import Adapters
 from cognic_agentos.llm.ledger import GatewayCallLedger, GatewayCallRow
+from cognic_agentos.protocol.plugin_registry import (
+    PluginRegistry,
+    RegistrationOutcome,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +119,34 @@ def _row_dict(row: GatewayCallRow) -> dict[str, Any]:
         "provenance": row.provenance,
         "outcome": row.outcome,
         "latency_ms": row.latency_ms,
+    }
+
+
+def _plugin_record_dict(outcome: RegistrationOutcome) -> dict[str, Any]:
+    """Stable per-plugin JSON shape for the T11 endpoint.
+
+    Field naming mirrors ``RegistrationOutcome`` so portal UIs and
+    audit integrations see the same keys here as in the audit chain
+    (``plugin.registration_succeeded`` / ``..._refused``). Per the
+    user's T11 guardrail: includes ``pack_id`` (signed distribution
+    identity, == retained Sigstore-bundle key segment) AND ``name``
+    (entry-point alias) separately so a single distribution exposing
+    several entry points renders correctly. ``signature_digest``
+    + ``refusal_reason`` + ``registered_at`` are always present —
+    null on the refusal / not-yet-registered paths.
+    """
+    return {
+        "kind": outcome.kind,
+        "name": outcome.name,
+        "pack_id": outcome.pack_id,
+        "version": outcome.version,
+        "status": outcome.status,
+        "attestation_grade": outcome.attestation_grade,
+        "signature_digest": outcome.signature_digest,
+        "refusal_reason": outcome.refusal_reason,
+        "registered_at": (
+            outcome.registered_at.isoformat() if outcome.registered_at is not None else None
+        ),
     }
 
 
@@ -215,6 +247,68 @@ def build_system_router(settings: Settings) -> APIRouter:
                 "chip": chip,
             },
             "langfuse_available": langfuse_available,
+        }
+
+    @router.get(
+        "/plugins",
+        summary="Pack registration outcomes (read-only)",
+    )
+    async def plugins(request: Request) -> dict[str, Any]:
+        """Return the operator-visible plugin registration outcomes.
+
+        Read-only endpoint per the user's T11 guardrails: NO
+        registration side effects, NO pack loading
+        (``EntryPoint.load`` stays deferred to the explicit
+        ``PluginRegistry.load(kind, name)`` call site). The response
+        renders ``PluginRegistry.known_packs()`` in registration
+        order — Python ``dict`` preserves insertion order so repeat
+        reads are deterministic.
+
+        Per the field-name contract pinned in T5 + T10, the shape is:
+
+          ``{
+              "plugins": [
+                  {"kind", "name", "pack_id", "version", "status",
+                   "attestation_grade", "signature_digest",
+                   "refusal_reason", "registered_at"},
+                  ...
+              ],
+              "summary": {
+                  "total_discovered", "registered",
+                  "refused_at_registration",
+                  "by_grade": {"full", "partial"}
+              }
+          }``
+
+        ``status`` uses the operator-vocabulary
+        (``registered`` / ``refused_at_registration``); the full
+        ADR-012 lifecycle (submitted / approved / installed / etc.)
+        is Sprint 7B and will extend this surface without breaking
+        the Sprint-4 fields.
+
+        Returns 200 in every reachable case — when no
+        ``plugin_registry`` is attached (Sprint-1A/1B test mode),
+        the response is an empty list + zero-counts summary, NOT
+        a 503. Per ADR-007's two-layers convention the operator-
+        facing surface stays honest about empty state.
+        """
+        registry: PluginRegistry | None = getattr(request.app.state, "plugin_registry", None)
+        outcomes: list[RegistrationOutcome] = (
+            list(registry.known_packs()) if registry is not None else []
+        )
+        plugins_list = [_plugin_record_dict(o) for o in outcomes]
+        registered_count = sum(1 for o in outcomes if o.status == "registered")
+        refused_count = sum(1 for o in outcomes if o.status == "refused_at_registration")
+        full_count = sum(1 for o in outcomes if o.attestation_grade == "full")
+        partial_count = sum(1 for o in outcomes if o.attestation_grade == "partial")
+        return {
+            "plugins": plugins_list,
+            "summary": {
+                "total_discovered": len(outcomes),
+                "registered": registered_count,
+                "refused_at_registration": refused_count,
+                "by_grade": {"full": full_count, "partial": partial_count},
+            },
         }
 
     return router
