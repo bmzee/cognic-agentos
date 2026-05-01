@@ -1206,12 +1206,26 @@ class RegistrationOutcome:
     version: str
     kind: Literal["tools", "skills", "agents"]
     attestation_grade: Literal["full", "partial"] | None
-    refusal_reason: str | None
+    refusal_reason: (
+        Literal[
+            "not_in_tenant_allowlist",
+            "cosign_verification_failed",
+            "sbom_missing",
+            "sigstore_bundle_persistence_failed",
+            "slsa_tampered",
+            "intoto_tampered",
+            "sbom_tampered",
+            "policy_denied_partial_grade",
+        ]
+        | None
+    )
     signature_digest: str | None
     registered_at: datetime | None
 ```
 
-`registered_at` is `None` when `status == "refused_at_registration"` (the pack never reached the registry), populated with the lifespan-startup-time UTC datetime otherwise. `attestation_grade` is `None` only on refusal; for registered packs it is always `"full"` or `"partial"`. `refusal_reason` is `None` on success, populated with one of the documented reason strings (`"not_in_tenant_allowlist"`, `"cosign_verification_failed"`, `"sbom_missing"`, `"sigstore_bundle_persistence_failed"`, `"slsa_tampered"`, `"intoto_tampered"`, `"sbom_tampered"`, `"policy_denied_partial_grade"`) on refusal.
+`registered_at` is `None` when `status == "refused_at_registration"` (the pack never reached the registry), populated with the lifespan-startup-time UTC datetime otherwise. `attestation_grade` is `None` only on refusal; for registered packs it is always `"full"` or `"partial"`. `refusal_reason` is `None` on success and one of the closed enum values on refusal — the type-system enforces the documented vocabulary statically (R3-#1 reviewer-fix).
+
+**Enum-extension cost** (R3-#1 reviewer-fix, explicit): adding a new refusal class requires (a) a new branch in the registry assembly logic in T10, (b) a new `Literal` value here in `RegistrationOutcome`, (c) a new mapping row in `/api/v1/system/plugins` (T11) if the operator-facing surface needs to distinguish the new class, and (d) a new test arm covering the new refusal path. Each of those four is a halt-before-commit step under the plugin-registry critical-controls coverage gate. The Sprint 4 closed enum is intentional: the refusal taxonomy is a stable contract that downstream tooling (Sprint 7B reviewer dashboard, Sprint 13.5 OPA-Rego policy bundles) consumes; loose vocabulary would silently break those consumers when the implementer typos a refusal-string or a Sprint-N+1 commit adds a reason without updating downstream tests. The Literal-tightening trades a minor extension cost for a stable cross-sprint contract.
 
 - [ ] **Step 1: Write the failing test**
 
