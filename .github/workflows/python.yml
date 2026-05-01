@@ -88,7 +88,7 @@ jobs:
     # gives ~10% headroom over measured. Bump flagged for review at the
     # Sprint 1C READY-FOR-GATE checkpoint; doctrine update to BUILD_PLAN
     # follows if the bump is accepted.
-    name: image size budget (kernel ≤120 / default-adapters ≤220 MiB)
+    name: image size budget (kernel ≤120 / default-adapters ≤370 MiB)
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
