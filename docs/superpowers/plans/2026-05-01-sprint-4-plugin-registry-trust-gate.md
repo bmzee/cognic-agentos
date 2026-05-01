@@ -62,8 +62,8 @@ The trust gate shells out to cosign. Per ADR-016 §"What this is NOT" + the Apri
 4. **Per-tenant trust root path** read from settings (file-backed in Sprint 4; Vault swap → Sprint 10). The path is canonicalised + asserted to live under `trust_root_prefix`; rejects path-traversal attempts.
 5. **No environment variables passed through.** Subprocess uses an explicit minimal `env` dict: `{"PATH": "/usr/local/bin:/usr/bin", "HOME": "/tmp"}` only. No `os.environ` passthrough.
 6. **Strict timeout** (default 30s, configurable via `cosign_verify_timeout_s`); on timeout the subprocess is `SIGKILL`-terminated; the timeout itself emits `audit_event(trust_gate.cosign_timeout)` chained into `audit_event` substrate.
-7. **Output parsed via cosign's JSON mode (`--output json`)**. Never via shell pipe / regex on free-form stderr. Parse failure → fail-closed refusal.
-8. **Negative-path tests cover every input vector.** T6 ships unit tests for: shell metacharacters in pack name (`;`, `|`, `` ` ``, `$`, `&`, newline, backslash, quotes, glob chars); path traversal in signature path (`../`, `/etc/passwd`, symlink targets outside the prefix); over-long inputs (>128 char pack name, >64 char version); valid-looking inputs that fail cosign at the JSON-parse step (truncated output, malformed JSON, JSON that lacks the `verified` field).
+7. **Verification signal is the cosign exit code** (T6 R3 reviewer-P1 fix, 2026-05-01). Per upstream sigstore/cosign, `cosign verify-blob` reports verification by exit status only — exit 0 = verified, anything non-zero = fail-closed `CosignVerificationFailed`. The `--output json` flag belongs to the OCI `cosign verify` subcommand and is **not supported** by `verify-blob`; passing it makes real cosign reject every pack at the argv-parse step. We never parse cosign stdout/stderr for the decision (which would also break the privacy invariant — those streams can carry attacker-influenced text). Error messages include only `stderr_sha256` / `stderr_len` / `stdout_sha256` / `stdout_len` for operator log correlation.
+8. **Negative-path tests cover every input vector.** T6 ships unit tests for: shell metacharacters in pack name (`;`, `|`, `` ` ``, `$`, `&`, newline, backslash, quotes, glob chars); path traversal in signature path (`../`, `/etc/passwd`, symlink targets outside the prefix); over-long inputs (>128 char pack name, >64 char version); subprocess-launch OSError (EACCES / ENOEXEC after `shutil.which` succeeds) wrapped into `CosignVerificationFailed`; post-verify `_hash_file` OSError (signature removed/swapped between cosign read and hash) wrapped into the same taxonomy; non-zero exit from cosign with stdout + stderr privacy (no raw stream bytes leak into diagnostics — only SHA-256 + length).
 
 ### §3 Supply-chain attestation pipeline — mandatory floor vs grace period
 
@@ -1352,13 +1352,18 @@ class TestTrustGateInputValidation:
 
 
 class TestTrustGateSubprocessShape:
-    def test_argv_is_list_form_no_shell(self, ...): ...
+    # R3 reviewer-P1 fix (2026-05-01): the shape tests pin the
+    # exit-code contract per the upstream sigstore/cosign verify-blob
+    # docs. NO --output / JSON-parse tests — that flag belongs to OCI
+    # ``cosign verify`` and is not supported by ``verify-blob``.
+    def test_argv_is_list_form_with_explicit_flags(self, ...): ...
+    def test_argv_does_not_pass_unsupported_output_json_flag(self, ...): ...
     def test_env_is_minimal_no_environ_passthrough(self, ...): ...
-    def test_strict_timeout_kills_process(self, ...): ...
-    def test_timeout_emits_audit_event(self, ...): ...
-    def test_json_output_parsed_strict(self, ...): ...
+    def test_strict_timeout_kills_process_and_emits_audit(self, ...): ...
     def test_non_zero_exit_fails_closed(self, ...): ...
-    def test_malformed_json_fails_closed(self, ...): ...
+    def test_non_zero_exit_does_not_leak_stderr_or_stdout_content(self, ...): ...
+    def test_subprocess_launch_oserror_wrapped(self, ...): ...
+    def test_signature_hashing_oserror_wrapped(self, ...): ...
 
 
 class TestTrustGateHappyPath:
@@ -1632,7 +1637,7 @@ git commit -m "feat(sprint-4): /api/v1/system/plugins endpoint (T11)"
 
 Test pack is installable via `uv pip install -e tests/fixtures/cognic_test_pack/`.
 
-The cosign signature blob is **ephemerally generated at test fixture setup** by the build script when run with `--regenerate` (CI runs without regeneration; local dev regenerates as needed). For unit tests that don't need a real signature, the cosign subprocess is shimmed (Q4 lock) to return canned JSON.
+The cosign signature blob is **ephemerally generated at test fixture setup** by the build script when run with `--regenerate` (CI runs without regeneration; local dev regenerates as needed). For unit tests that don't need a real signature, the cosign subprocess is shimmed (Q4 lock) to record its argv/env and exit with the desired status code; per the T6 R3 reviewer-P1 fix the shim does **not** emit JSON because the trust gate treats `cosign verify-blob`'s exit code as the verification signal (no stdout parsing).
 
 For the env-gated `@pytest.mark.cosign_real` integration path: requires cosign binary + Sigstore.dev access; runs against the actually-signed pack with a real cosign verify call.
 
