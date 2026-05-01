@@ -25,7 +25,15 @@ preflight, ledger, concurrency) at the same single strict floor —
 all five sit on the cloud-policy / provider-honesty path that
 ADR-007's authoritativeness contract depends on, and the rate-limit
 primitive is small and stable enough to ride the strict gate without
-churn.
+churn. Sprint 4 T15 extends the gate further with the plugin-trust /
+supply-chain / policy quartet — ``protocol/plugin_registry.py`` (the
+admission orchestrator), ``protocol/trust_gate.py`` (cosign
+subprocess gate per ADR-002), ``protocol/supply_chain.py`` (SLSA +
+in-toto + SBOM + vuln + license + Sigstore-bundle persister per
+ADR-016), and ``core/policy/engine.py`` (the OPA Rego decision
+engine per ADR-015). All four are explicitly named on the AGENTS.md
+critical-controls list and ride the same single strict floor; gate
+size grows from 12 modules to 16.
 """
 
 from __future__ import annotations
@@ -74,6 +82,28 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     ("src/cognic_agentos/llm/preflight.py", 0.95, 0.90),
     ("src/cognic_agentos/llm/ledger.py", 0.95, 0.90),
     ("src/cognic_agentos/llm/concurrency.py", 0.95, 0.90),
+    # Sprint 4 T15 — plugin-trust / supply-chain / policy quartet.
+    # All four are explicitly named on the AGENTS.md critical-controls
+    # list (per the Sprint-4 ADR-002 / ADR-015 / ADR-016 amendments)
+    # and ride the same single strict 95% line / 90% branch floor as
+    # the Sprint-2/2.5/3 modules above:
+    #   * ``plugin_registry.py`` is the admission orchestrator that
+    #     calls every other verifier in sequence and emits the closed-
+    #     enum ``RefusalReason`` on any deny path (fail-closed).
+    #   * ``trust_gate.py`` is the cosign subprocess gate; the eight
+    #     §2 secure-subprocess invariants live here (no shell, list-
+    #     form argv, version+regex pinned, timeout, output ignored
+    #     for parsing, etc.).
+    #   * ``supply_chain.py`` verifies SBOM + SLSA L3+ + in-toto +
+    #     vuln + license, then atomically persists the Sigstore bundle
+    #     under 7-year retention per ADR-016 §"Retention".
+    #   * ``core/policy/engine.py`` is the OPA Rego decision engine;
+    #     fail-closed on every engine error path (ADR-015 §"Default-
+    #     deny posture").
+    ("src/cognic_agentos/protocol/plugin_registry.py", 0.95, 0.90),
+    ("src/cognic_agentos/protocol/trust_gate.py", 0.95, 0.90),
+    ("src/cognic_agentos/protocol/supply_chain.py", 0.95, 0.90),
+    ("src/cognic_agentos/core/policy/engine.py", 0.95, 0.90),
 )
 
 

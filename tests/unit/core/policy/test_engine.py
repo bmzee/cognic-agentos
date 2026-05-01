@@ -2,7 +2,7 @@
 
 Critical-controls module per AGENTS.md (``core/policy/engine.py`` —
 admission-control substrate; per-file gate ≥95% line / ≥90% branch
-once T15 extends ``tools/check_critical_coverage.py``).
+enforced by ``tools/check_critical_coverage.py`` since Sprint 4 T15).
 
 Tests cover:
 - Engine construction (sync ``__init__``) loads the bundle, computes
