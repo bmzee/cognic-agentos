@@ -183,6 +183,25 @@ jobs:
           fi
           echo "::notice::default-adapters image ${size_mib} MiB is within ${BUDGET_MIB} MiB budget"
 
+      - name: Verify pinned cosign + OPA binaries on PATH (Sprint-4 T13)
+        run: |
+          set -euo pipefail
+          # Trust gate (T6) calls cosign via subprocess; policy engine
+          # (T2) calls opa via subprocess. Both binaries are fetched +
+          # sha256-verified in the default-adapters-builder stage and
+          # COPY'd into the runtime stage. This step proves they end up
+          # on PATH inside the runtime image AND are executable as the
+          # non-root cognic UID 10001 — which is what the trust gate +
+          # policy engine actually invoke.
+          docker run --rm cognic-agentos:adapters-ci sh -c '
+            set -e
+            command -v cosign >/dev/null || { echo "cosign missing on PATH" >&2; exit 1; }
+            command -v opa    >/dev/null || { echo "opa missing on PATH"    >&2; exit 1; }
+            cosign version
+            opa version
+          '
+          echo "::notice::default-adapters image carries pinned cosign + OPA on PATH"
+
   oracle-integration:
     # Sprint 1D: live Oracle XE compose overlay + pytest -m oracle. Runs
     # on PR + main; failure blocks merge. Default `lint + test` job runs

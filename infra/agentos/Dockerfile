@@ -27,7 +27,11 @@
 #                             1D added oracledb (~40 MiB unstripped) but
 #                             a `strip --strip-unneeded` pass over the
 #                             builder venv brought the final image to
-#                             ~174 MiB.
+#                             ~174 MiB. Sprint 4 T13 added pinned cosign
+#                             + OPA binaries (~80 + ~50 MiB unstripped;
+#                             both statically-linked Go) — kernel image
+#                             explicitly does NOT carry them so the
+#                             ≤120 MiB kernel budget is unaffected.
 #
 # Build args wire git SHA + build timestamp into the image so /version is
 # truthful in deployed environments.
@@ -167,6 +171,38 @@ RUN uv sync --frozen --no-dev --no-editable --extra adapters \
  && find /opt/venv -name "*.pyi" -delete \
  && find /opt/venv -name "*.so" -exec strip --strip-unneeded {} + 2>/dev/null || true
 
+# Sprint 4 T13: cosign + OPA Go binaries for the trust gate + policy
+# engine. Both are statically-linked Go binaries (musl-compatible);
+# fetched in the BUILDER stage with SHA-256 verification, COPY'd into
+# the runtime stage below. Kernel image deliberately does NOT carry
+# these — the trust gate (T6) and policy engine (T2) only run in the
+# default-adapters runtime profile.
+#
+# Pinning policy: ARG-driven so CI can override for security-driven
+# point-bumps without a Dockerfile edit, but the defaults below ARE
+# the verified-good values — `docker build` with no overrides MUST
+# produce the same bytes as CI. SHA-256 mismatch fails the build.
+ARG COSIGN_VERSION=3.0.6
+ARG COSIGN_SHA256=c956e5dfcac53d52bcf058360d579472f0c1d2d9b69f55209e256fe7783f4c74
+ARG OPA_VERSION=1.16.1
+ARG OPA_SHA256=dc00b1c32c52f1557f7f127940bc3f1de6c507fdfbe0446f19d3b19ca5786494
+
+RUN curl -sSL --fail \
+      -o /tmp/cosign \
+      "https://github.com/sigstore/cosign/releases/download/v${COSIGN_VERSION}/cosign-linux-amd64" \
+ && echo "${COSIGN_SHA256}  /tmp/cosign" | sha256sum -c - \
+ && install -m 0755 /tmp/cosign /usr/local/bin/cosign \
+ && rm /tmp/cosign \
+ && /usr/local/bin/cosign version >/dev/null
+
+RUN curl -sSL --fail \
+      -o /tmp/opa \
+      "https://openpolicyagent.org/downloads/v${OPA_VERSION}/opa_linux_amd64_static" \
+ && echo "${OPA_SHA256}  /tmp/opa" | sha256sum -c - \
+ && install -m 0755 /tmp/opa /usr/local/bin/opa \
+ && rm /tmp/opa \
+ && /usr/local/bin/opa version >/dev/null
+
 # ---------- default-adapters runtime ---------------------------------
 FROM python:${PYTHON_VERSION}-alpine AS default-adapters
 
@@ -196,6 +232,13 @@ RUN addgroup -S -g 10001 cognic \
  && adduser -S -u 10001 -G cognic -h /home/cognic -s /sbin/nologin cognic
 
 COPY --from=default-adapters-builder /opt/venv /opt/venv
+
+# Sprint 4 T13: cosign + OPA binaries fetched + sha256-verified in the
+# builder stage. Trust gate (T6) calls cosign via subprocess; policy
+# engine (T2) calls opa via subprocess. Both pinned via builder-stage
+# ARGs (see COSIGN_VERSION / OPA_VERSION there for the in-tree pins).
+COPY --from=default-adapters-builder /usr/local/bin/cosign /usr/local/bin/cosign
+COPY --from=default-adapters-builder /usr/local/bin/opa /usr/local/bin/opa
 
 WORKDIR /app
 COPY --chown=root:cognic src ./src
