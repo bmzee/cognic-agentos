@@ -1136,3 +1136,174 @@ class TestNonFiniteEvalTimeout:
                 opa_path=None,
                 eval_timeout_s=bad_timeout,
             )
+
+
+# ---------------------------------------------------------------------------
+# TestDefaultSupplyChainBundle — Sprint 4 T3.
+#
+# Verifies the engine integrates with the actual policies/_default/
+# supply_chain.rego bundle file: file present, sha256 deterministically
+# computed, syntax-check passes (shimmed), evaluate() returns the
+# expected Decision shape per scenario.
+#
+# IMPORTANT: these are SHIM-based tests — the real Rego logic
+# (allow rules, default-deny, partial-grade gating) is exercised by
+# T13's @pytest.mark.opa_real env-gated integration arm against the
+# Dockerfile-pinned OPA binary. Sprint-4 unit tests only verify the
+# engine + bundle-file glue, not the Rego semantics.
+# ---------------------------------------------------------------------------
+
+
+_REAL_BUNDLE = Path(__file__).parents[4] / "policies" / "_default" / "supply_chain.rego"
+_REAL_ALLOWLIST = Path(__file__).parents[4] / "policies" / "_default" / "plugin_allowlist.json"
+
+
+class TestDefaultSupplyChainBundle:
+    def test_real_bundle_file_exists(self) -> None:
+        """Locked at the documented path — Sprint-4 plan T3 + ADR-015 §
+        "Sprint 4 (seed)"."""
+        assert _REAL_BUNDLE.is_file(), f"default supply-chain bundle missing at {_REAL_BUNDLE}"
+
+    def test_real_bundle_content_stability(self) -> None:
+        """Pin the load-bearing rules so a refactor that drops the
+        default-deny posture or the grace-period clause is caught
+        even without OPA in the unit-test environment. Sprint-4 plan
+        §3 mandates these specific clauses."""
+        text = _REAL_BUNDLE.read_text()
+        assert "package cognic.supply_chain" in text
+        assert "default allow" in text
+        # Two allow paths: full-grade always; partial-grade unless
+        # tenant requires full.
+        assert 'input.attestation_grade == "full"' in text
+        assert 'input.attestation_grade == "partial"' in text
+        assert "not input.tenant_policy.require_full" in text
+
+    async def test_engine_constructs_against_real_bundle(
+        self,
+        audit_store: AuditStore,
+        decision_history_store: DecisionHistoryStore,
+    ) -> None:
+        """End-to-end: engine reads the real bundle file, computes
+        sha256, runs shimmed `opa fmt --diff` (success), emits
+        `policy.bundle_loaded`. Confirms the bundle is parseable as
+        a Path + the engine doesn't choke on the actual file content."""
+        with patch(
+            "cognic_agentos.core.policy.engine.subprocess.run",
+            side_effect=opa_shim(eval_stdout=fake_opa_eval_response(allow=True)),
+        ):
+            engine = await OPAEngine.create(
+                bundle_path=_REAL_BUNDLE,
+                audit_store=audit_store,
+                decision_history_store=decision_history_store,
+                opa_path="/usr/local/bin/opa",
+            )
+        # Real-file sha256 is deterministic + matches a fresh hash of
+        # the same bytes.
+        expected_sha = hashlib.sha256(_REAL_BUNDLE.read_bytes()).hexdigest()
+        assert engine.bundle_sha256 == expected_sha
+
+    async def test_full_grade_input_allows_through_real_bundle(
+        self,
+        audit_store: AuditStore,
+        decision_history_store: DecisionHistoryStore,
+    ) -> None:
+        """Mirrors Sprint-4 plan T3 Step 1 scenario A. Shim returns
+        allow=True for the full-grade input shape; engine surfaces a
+        Decision(allow=True). Real Rego-rule correctness is tested in
+        T13's env-gated arm."""
+        with patch(
+            "cognic_agentos.core.policy.engine.subprocess.run",
+            side_effect=opa_shim(eval_stdout=fake_opa_eval_response(allow=True)),
+        ):
+            engine = await OPAEngine.create(
+                bundle_path=_REAL_BUNDLE,
+                audit_store=audit_store,
+                decision_history_store=decision_history_store,
+                opa_path="/usr/local/bin/opa",
+            )
+            decision = await engine.evaluate(
+                decision_point="data.cognic.supply_chain.allow",
+                input={"attestation_grade": "full", "tenant_policy": {}},
+            )
+        assert decision.allow is True
+        assert decision.rule_matched == "data.cognic.supply_chain.allow"
+
+    async def test_partial_grade_input_with_lenient_tenant_allows(
+        self,
+        audit_store: AuditStore,
+        decision_history_store: DecisionHistoryStore,
+    ) -> None:
+        """Mirrors Sprint-4 plan T3 Step 1 scenario B."""
+        with patch(
+            "cognic_agentos.core.policy.engine.subprocess.run",
+            side_effect=opa_shim(eval_stdout=fake_opa_eval_response(allow=True)),
+        ):
+            engine = await OPAEngine.create(
+                bundle_path=_REAL_BUNDLE,
+                audit_store=audit_store,
+                decision_history_store=decision_history_store,
+                opa_path="/usr/local/bin/opa",
+            )
+            decision = await engine.evaluate(
+                decision_point="data.cognic.supply_chain.allow",
+                input={
+                    "attestation_grade": "partial",
+                    "tenant_policy": {"require_full": False},
+                },
+            )
+        assert decision.allow is True
+
+    async def test_partial_grade_input_with_strict_tenant_denies(
+        self,
+        audit_store: AuditStore,
+        decision_history_store: DecisionHistoryStore,
+    ) -> None:
+        """Mirrors Sprint-4 plan T3 Step 1 scenario C."""
+        with patch(
+            "cognic_agentos.core.policy.engine.subprocess.run",
+            side_effect=opa_shim(eval_stdout=fake_opa_eval_response(allow=False)),
+        ):
+            engine = await OPAEngine.create(
+                bundle_path=_REAL_BUNDLE,
+                audit_store=audit_store,
+                decision_history_store=decision_history_store,
+                opa_path="/usr/local/bin/opa",
+            )
+            decision = await engine.evaluate(
+                decision_point="data.cognic.supply_chain.allow",
+                input={
+                    "attestation_grade": "partial",
+                    "tenant_policy": {"require_full": True},
+                },
+            )
+        assert decision.allow is False
+
+
+# ---------------------------------------------------------------------------
+# TestDefaultPluginAllowlist — JSON validity + documented shape.
+# Registry consumption lands in T5; this test just ensures the file is
+# valid JSON with the documented top-level structure so T5 doesn't
+# need to discover it the hard way.
+# ---------------------------------------------------------------------------
+
+
+class TestDefaultPluginAllowlist:
+    def test_real_allowlist_file_exists(self) -> None:
+        assert _REAL_ALLOWLIST.is_file(), f"default plugin allow-list missing at {_REAL_ALLOWLIST}"
+
+    def test_real_allowlist_is_valid_json(self) -> None:
+        data = json.loads(_REAL_ALLOWLIST.read_text())
+        assert isinstance(data, dict), (
+            "allow-list root must be an object: {tenant_id: [pack_name, ...]}"
+        )
+
+    def test_default_tenant_present(self) -> None:
+        """Sprint-4 plan §6: ``_default`` is the placeholder tenant
+        used when a deployment hasn't configured per-tenant overrides.
+        The cognic_test_pack fixture (T12) is the single allow-listed
+        pack at Sprint 4 — production deployments overwrite or swap
+        to a Vault-backed list at Sprint 10."""
+        data = json.loads(_REAL_ALLOWLIST.read_text())
+        assert "_default" in data
+        assert isinstance(data["_default"], list)
+        assert "cognic_test_pack" in data["_default"]
