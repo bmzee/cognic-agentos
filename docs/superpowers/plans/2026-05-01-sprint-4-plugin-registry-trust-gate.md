@@ -46,6 +46,8 @@ Sprint 4 sits atop a dense ADR set (ADR-002 plugin protocol, ADR-009 adapter pro
 
 Discovery captures the entry-point metadata (group / name / module path / attribute) only. The trust gate runs on the *metadata* (cosign signature digest of the distribution wheel/sdist that contains the entry point); the actual `load()` happens after registration succeeds AND only when an explicit caller asks.
 
+**`PluginRegistry.load(kind, name)` is synchronous** (R2-#2 reviewer-fix). It is a thin wrapper over the stdlib `EntryPoint.load()` (sync) — no audit emission, no I/O beyond the import. Registration is where the audit / evidence trail lives (`audit_event(plugin.registration_succeeded | _refused)` in T5; `policy.decision_evaluated` in T2). Pinning `load()` sync (a) keeps T5's deferred-load test (P2-K reviewer-fix) consistent with the API shape, (b) avoids accidentally turning every pack-resolution call site into an async one, and (c) leaves room for a separate async wrapper later if pack-access telemetry becomes a Sprint-5+ concern.
+
 **Sprint 4 registration trigger surface — startup-only, no portal endpoint** (P3-C clarification): registration runs once at AgentOS lifespan startup; there is no human-initiated registration endpoint in Sprint 4. The auth surface is the file-backed per-tenant allow-list (§6) — no RBAC scope checks, no portal POST. ADR-012's full lifecycle (`pack.submit` / `pack.review.approve` / `pack.allow_list` / `pack.install` / `pack.revoke`) is Sprint 7B; Sprint 4 deliberately ships none of those scopes. The `/api/v1/system/plugins` endpoint (T11) is read-only.
 
 **AGNTCY/OASF identity-field validation deferred to Sprint 7A** (P3-A clarification): ADR-002 §"Wave 1 identity-field strictness" mandates that pack manifests declare specific identity fields (`agent_id` URN, `display_name`, `provider_organization` + `provider_url`, `agent_card_url`, `agent_card_jws_path` for agent packs). Sprint 4 does NOT validate these fields at registration; that surface lands in Sprint 7A `agentos validate` (pack-author-side) + Sprint 7B reviewer-flow (registry-side). Sprint 4's trust gate consumes the cosign signature over the wheel — that's the only manifest-level check in scope.
@@ -894,6 +896,7 @@ git commit -m "feat(sprint-4): default supply-chain Rego bundle + tenant allow-l
 
 **Files:**
 - Create: `src/cognic_agentos/db/adapters/local_object_store_adapter.py`
+- Modify: `src/cognic_agentos/db/adapters/protocols.py` — `ObjectStoreAdapter.presign` docstring extended (R2-#1 reviewer-fix; see Step 4 below)
 - Modify: `src/cognic_agentos/db/adapters/registry.py` (register `local_fs` driver)
 - Modify: `src/cognic_agentos/db/adapters/factory.py` (default driver = `local_fs` when none configured)
 - Test: `tests/unit/db/adapters/test_local_object_store_adapter.py`
@@ -1109,11 +1112,47 @@ Full implementation guidance:
 - `health_check()`: writes a temp probe file under `root / .health_probe`, deletes it, measures latency. On any IOError → `unreachable`.
 - Validation regex: `_VALID_SEGMENT = re.compile(r"^[a-z0-9][a-z0-9._-]*$")`; bucket = single segment; key may contain `/` separators between segments.
 
-- [ ] **Step 4: Wire up registry + factory**
+- [ ] **Step 4: Wire up registry + factory + Protocol docstring** (R2-#1 reviewer-fix)
 
 `db/adapters/registry.py`: register `("object_store", "local_fs"): LocalObjectStoreAdapter`.
 
 `db/adapters/factory.py`: `build_adapters` constructs `LocalObjectStoreAdapter(root=settings.cognic_local_object_store_root)` when `settings.cognic_object_store_driver == "local_fs"` (new default).
+
+`db/adapters/protocols.py`: extend the `ObjectStoreAdapter.presign` Protocol docstring so callers reading the Protocol type hover see the contract clearly. Suggested patch:
+
+```python
+class ObjectStoreAdapter(Protocol):
+    """Object storage — production drivers ship per backend.
+
+    ``local_fs`` (Sprint 4): filesystem-backed. NFS/EFS/on-prem mounts.
+    ``s3``       (Sprint 8): S3-compat (boto3 / MinIO).
+    Future:      Azure Blob, GCS via plugin packs.
+
+    All drivers conform to this Protocol; deployments select via
+    ``cognic_object_store_driver``.
+    """
+
+    async def put(self, bucket: str, key: str, body: bytes) -> None: ...
+    async def get(self, bucket: str, key: str) -> bytes: ...
+    async def delete(self, bucket: str, key: str) -> None: ...
+    async def presign(self, bucket: str, key: str, ttl_s: int) -> str:
+        """Return an external-HTTP-accessible signed URL for the key.
+
+        Drivers backed by storage that does not natively support
+        signed URLs (e.g. the Sprint-4 ``local_fs`` driver) MAY raise
+        ``NotImplementedError`` rather than synthesise a degenerate
+        URL that would silently mislead callers expecting cross-host
+        retrieval. Callers needing presigned-URL semantics must
+        select a driver that implements them (e.g. ``s3`` once
+        Sprint 8 ships). R2-#1 reviewer-fix: this caveat is required
+        because the local driver fails loud per AGENTS.md
+        production-grade rule.
+        """
+        ...
+    async def health_check(self) -> AdapterHealth: ...
+```
+
+The change is **docstring-only**; no API or runtime behavior change to existing drivers (Sprint 4 ships only the local driver, which already raises per §4 item 5). Sprint 8's S3 driver will populate the docstring's external-URL contract honestly.
 
 - [ ] **Step 5: Run tests → pass**
 
@@ -1142,6 +1181,37 @@ git commit -m "feat(sprint-4): production filesystem ObjectStoreAdapter (T4)"
 - Create: `src/cognic_agentos/protocol/plugin_registry.py`
 - Test: `tests/unit/protocol/__init__.py`
 - Test: `tests/unit/protocol/test_plugin_registry.py`
+
+**`RegistrationOutcome` dataclass shape** (R2-#3 reviewer-fix). Pinned explicitly here because T10's startup log + T11's `/system/plugins` response both consume this shape; without an authoritative declaration the field-name contract drifts:
+
+```python
+# src/cognic_agentos/protocol/plugin_registry.py
+@dataclass(frozen=True, slots=True)
+class RegistrationOutcome:
+    """Outcome of one PluginRegistry.register_with_full_attestation_check call.
+
+    Sprint 4 ships flat outcomes per pre-plan brainstorm Q5 lock — only
+    'registered' or 'refused_at_registration'. The full ADR-012 lifecycle
+    (submitted / under_review / approved / allow_listed / installed /
+    revoked / uninstalled) lands in Sprint 7B and extends this enum.
+
+    Field-name contract is consumed by:
+      * T10 startup-log (logger.info extra={...} shape)
+      * T11 /api/v1/system/plugins response (_plugin_record_dict)
+      * Future Sprint 7B reviewer-flow (extends, does not break)
+    """
+
+    status: Literal["registered", "refused_at_registration"]
+    pack_id: str
+    version: str
+    kind: Literal["tools", "skills", "agents"]
+    attestation_grade: Literal["full", "partial"] | None
+    refusal_reason: str | None
+    signature_digest: str | None
+    registered_at: datetime | None
+```
+
+`registered_at` is `None` when `status == "refused_at_registration"` (the pack never reached the registry), populated with the lifespan-startup-time UTC datetime otherwise. `attestation_grade` is `None` only on refusal; for registered packs it is always `"full"` or `"partial"`. `refusal_reason` is `None` on success, populated with one of the documented reason strings (`"not_in_tenant_allowlist"`, `"cosign_verification_failed"`, `"sbom_missing"`, `"sigstore_bundle_persistence_failed"`, `"slsa_tampered"`, `"intoto_tampered"`, `"sbom_tampered"`, `"policy_denied_partial_grade"`) on refusal.
 
 - [ ] **Step 1: Write the failing test**
 
