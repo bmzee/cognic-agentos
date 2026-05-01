@@ -46,6 +46,10 @@ Sprint 4 sits atop a dense ADR set (ADR-002 plugin protocol, ADR-009 adapter pro
 
 Discovery captures the entry-point metadata (group / name / module path / attribute) only. The trust gate runs on the *metadata* (cosign signature digest of the distribution wheel/sdist that contains the entry point); the actual `load()` happens after registration succeeds AND only when an explicit caller asks.
 
+**Sprint 4 registration trigger surface — startup-only, no portal endpoint** (P3-C clarification): registration runs once at AgentOS lifespan startup; there is no human-initiated registration endpoint in Sprint 4. The auth surface is the file-backed per-tenant allow-list (§6) — no RBAC scope checks, no portal POST. ADR-012's full lifecycle (`pack.submit` / `pack.review.approve` / `pack.allow_list` / `pack.install` / `pack.revoke`) is Sprint 7B; Sprint 4 deliberately ships none of those scopes. The `/api/v1/system/plugins` endpoint (T11) is read-only.
+
+**AGNTCY/OASF identity-field validation deferred to Sprint 7A** (P3-A clarification): ADR-002 §"Wave 1 identity-field strictness" mandates that pack manifests declare specific identity fields (`agent_id` URN, `display_name`, `provider_organization` + `provider_url`, `agent_card_url`, `agent_card_jws_path` for agent packs). Sprint 4 does NOT validate these fields at registration; that surface lands in Sprint 7A `agentos validate` (pack-author-side) + Sprint 7B reviewer-flow (registry-side). Sprint 4's trust gate consumes the cosign signature over the wheel — that's the only manifest-level check in scope.
+
 ### §2 Cosign verification — secure subprocess invariants
 
 The trust gate shells out to cosign. Per ADR-016 §"What this is NOT" + the April-2026 MCP supply-chain disclosures, **no pack-controlled string ever flows into argv**. Locked invariants:
@@ -61,7 +65,11 @@ The trust gate shells out to cosign. Per ADR-016 §"What this is NOT" + the Apri
 
 ### §3 Supply-chain attestation pipeline — mandatory floor vs grace period
 
-Per ADR-016 §"Implementation phases" + Sprint 4's plan-PR shape, attestation verification is a two-tier decision:
+Per ADR-016 §"Implementation phases" + Sprint 4's plan-PR shape, attestation verification is a two-tier decision over **7 attestations that grade the pack**, plus a separate 8th informational attestation (reproducibility) verified independently in T8.
+
+**ADR-016's full attestation set is 8 entries** (cosign signature + SBOM + Sigstore bundle + SLSA + in-toto + vuln scan + license audit + reproducibility manifest). Sprint 4's grade decision (full / partial / refused) consults the **first 7**; reproducibility is **opt-in informational** per ADR-016 §"Reproducibility commitment" — verified separately in T8, surfaces as a `reproducible: bool` flag on the registry record, never participates in the refusal decision unless a tenant Rego policy explicitly requires it (deferred to Sprint 13.5 OPA-Rego per ADR-015).
+
+The 7 attestations participating in the grade decision split into two tiers:
 
 **Mandatory floor (refusal-grade — registration refused if any of these are missing):**
 
@@ -88,7 +96,7 @@ Round-locked: tampered attestations (cryptographic signature failure on SLSA / i
 2. **Atomic write via `os.rename`.** `put(bucket, key, body)` writes to `<root>/<bucket>/.tmp/<uuid4>.tmp`, fsyncs, then renames into `<root>/<bucket>/<key>`. Crash-safe on POSIX; partial files never visible. Concurrent writes to the same key resolve last-writer-wins (acceptable for Sigstore-bundle re-uploads of the same pack version — content is identical).
 3. **Path-traversal safe.** All `bucket` + `key` arguments validated by regex (`^[a-z0-9][a-z0-9._/-]{0,255}$`); resolved path must canonicalise via `os.path.realpath()` to remain under the configured root. Rejects `..`, absolute paths, NUL bytes, symlinks pointing outside root.
 4. **Retention metadata enforced at adapter level.** `put(...)` accepts an optional `retention_seconds` keyword (default `None` = no retention policy). When set, the adapter writes a sidecar `<key>.retention` file containing `{"created_at": "<ISO8601>", "retain_until": "<ISO8601>", "retention_seconds": <int>}`. `delete(bucket, key)` rejects with `RetentionWindowActiveError` if the sidecar's `retain_until` has not passed. T4 unit tests cover (a) deletion within window refused, (b) deletion after window allowed, (c) sidecar tamper (manual edit) → fail-closed-on-read.
-5. **`presign(bucket, key, ttl_s)` returns a `file://`-scheme URL** for filesystem reads (the `presign` API exists for S3 swap symmetry; in Sprint 4 it's a degenerate file URL with the requested `ttl_s` recorded in audit-only — no actual signed-URL semantics).
+5. **`presign(bucket, key, ttl_s)` raises `NotImplementedError`** with message `"presign requires non-local ObjectStoreAdapter driver — local_fs deployments do not support signed-URL semantics"` (P2-B reviewer-fix). The `presign` API exists in the Protocol for S3 swap symmetry, but a `file://`-scheme degenerate URL would silently mislead callers expecting external-HTTP-accessible URLs (e.g. Sprint 7B reviewer dashboard fetching attestation bundles cross-host). Fail-loud is mandatory: any caller that needs presigned-URL access must select an `ObjectStoreAdapter` driver that actually implements signed-URL semantics (S3 / MinIO via Sprint 8). The unit tests in T4 explicitly assert `NotImplementedError` is raised.
 6. **`get(bucket, key)` reads body bytes directly.** No decompression, no automatic content-type interpretation; opaque bytes round-trip exactly as written.
 7. **`health_check()` returns** `AdapterHealth(status="ok", driver="local_fs", latency_ms=<root-stat-time>)` when the configured root is writable; `unreachable` if the root is missing or unwritable.
 8. **Deterministic read-back round-trip** is the load-bearing T4 test: `put(b, k, body); body == get(b, k)` for arbitrary bytes including null bytes, high-bit characters, and 10-MiB Sigstore-bundle-shaped payloads.
@@ -100,12 +108,14 @@ This adapter satisfies the Sprint 8-S3 swap point without leaking filesystem-spe
 Per ADR-015 §"Sprint 4 (seed)", Sprint 4 ships the smallest evaluator that can answer `policies/_default/supply_chain.rego`:
 
 1. **Engine type:** OPA Go binary subprocess invocation (Q3 lock — WASM revisited post-Sprint-13.5). Binary pinned in `infra/agentos/Dockerfile` (`default-adapters` target only — the kernel image does NOT carry the OPA binary; calling `policy.engine.evaluate()` from a kernel-only deployment fail-closes with `OpaNotInstalledError`).
-2. **API:** `engine.evaluate(decision_point: str, input: dict) -> Decision`. `Decision` is a frozen+slotted dataclass: `(allow: bool, rule_matched: str | None, reasoning: str, decision_data: dict[str, Any] | None)`. Q8 lock — `decision_data` carries Sprint-specific outcome data (e.g. `{"attestation_grade": "full"}`).
+2. **API:** `async def evaluate(decision_point: str, input: dict) -> Decision`. `Decision` is a frozen+slotted dataclass: `(allow: bool, rule_matched: str | None, reasoning: str, decision_data: dict[str, Any] | None)`. Q8 lock — `decision_data` carries Sprint-specific outcome data (e.g. `{"attestation_grade": "full"}`).
+
+   **Async deviation from ADR-015 §"Engine integration"** (P2-D reviewer-fix). ADR-015 specs `Sync API: engine.evaluate(decision, input) -> Decision`. The plan deliberately deviates: Sprint 2's `AuditStore.append` + Sprint 2.5's `decision_history.append_with_precondition` substrates are async; emitting `policy.decision_evaluated` synchronously inside `evaluate()` would require either `asyncio.to_thread` (defeats the async substrate's chain-head FOR UPDATE serialisation) or fire-and-forget (breaks ADR-007-style "no successful return without persisted evidence" discipline). Async `evaluate()` aligns with the Sprint 2 substrate's locking model. ADR-015's "Sync API" wording predates the Sprint-2 async substrate decision; the deviation is doctrine-aware, not accidental.
 3. **Bundle loading:** load-from-disk only at startup. NO hot-reload (Sprint 13.5 adds it). Bundle path = `cognic_supply_chain_policy_bundle`; default `policies/_default/supply_chain.rego`. Missing bundle file → fail-closed `RegoBundleNotFoundError` at engine construction.
 4. **Bundle compilation:** at engine construction, the evaluator runs `opa eval --partial --data <bundle-path>` once to validate the bundle syntactically. Syntax error → fail-closed `RegoBundleInvalidError` with the OPA error message embedded. No runtime bundle reload.
 5. **Per-call invocation:** for each `evaluate()` call, the evaluator runs `opa eval --data <bundle-path> --input <input-as-json> --format json "<decision-point-query>"` with a strict 5-second timeout. Subprocess shape mirrors §2 — list-form argv, `shell=False`, explicit minimal env, JSON output parse, fail-closed on non-zero exit / parse failure / timeout.
 6. **Audit emission contract** (Q7 lock — first `decision_history` emissions in the project):
-   - `policy.bundle_loaded` — emitted ONCE at engine construction. Hash-chained into `decision_history`. Payload: `{"bundle_path": "<path>", "bundle_sha256": "<hash>", "loaded_at": "<ISO8601>"}`. NO bundle source content in payload (just the path + hash).
+   - `policy.bundle_loaded` — emitted ONCE per engine-construction in Sprint 4 (no hot-reload). Hash-chained into `decision_history`. Payload: `{"bundle_path": "<path>", "bundle_sha256": "<hash>", "loaded_at": "<ISO8601>"}`. NO bundle source content in payload (just the path + hash). **Cardinality future-proofing** (P3-E): when Sprint 13.5 adds hot-reload, this emission becomes per-reload (one row per bundle-load attempt — both successful and failed). The Sprint-4 schema/payload shape is forward-compatible — no payload-shape change is needed when the cardinality flips, only the call-site frequency.
    - `policy.decision_evaluated` — emitted on every `evaluate()` call. Hash-chained into `decision_history`. Payload: `{"decision_point": "<str>", "input_fingerprint": "<sha256>", "rule_matched": "<str|null>", "outcome": "allow|deny", "bundle_sha256": "<hash>"}`. **`input_fingerprint` is `sha256(canonical_bytes(input))` per Sprint 2 substrate** — never the input itself (input may carry pack manifest content + tenant identifiers; fingerprint is the auditable index).
 7. **No pack-controlled string flows into the OPA argv.** Decision-point query strings are compile-time constants; `input` is JSON-serialised via the Sprint-2 canonical-form path (deterministic). The full §2 secure-subprocess invariant set applies.
 
@@ -1051,6 +1061,22 @@ class TestLocalObjectStoreAdapterRetention:
         assert (retain_until - created_at).total_seconds() == 7 * 365 * 24 * 3600
 
 
+class TestLocalObjectStoreAdapterPresign:
+    async def test_presign_raises_not_implemented(self, tmp_path: Path) -> None:
+        """P2-B reviewer-fix: presign() on the local driver MUST fail
+        loudly. A degenerate file:// URL would silently mislead
+        callers (e.g. Sprint 7B reviewer dashboard) expecting external-
+        HTTP-accessible URLs. Cross-host attestation-bundle access
+        requires a non-local ObjectStoreAdapter driver."""
+        adapter = LocalObjectStoreAdapter(root=tmp_path)
+        await adapter.put("test", "k", b"x")
+        with pytest.raises(
+            NotImplementedError,
+            match="presign requires non-local ObjectStoreAdapter driver",
+        ):
+            await adapter.presign("test", "k", ttl_s=60)
+
+
 class TestLocalObjectStoreAdapterHealth:
     async def test_health_reports_ok_when_writable(self, tmp_path: Path) -> None:
         adapter = LocalObjectStoreAdapter(root=tmp_path)
@@ -1079,7 +1105,7 @@ Full implementation guidance:
 - `put(bucket, key, body, *, retention_seconds=None)`: validates bucket+key via regex; computes target = `root / bucket / key`; canonicalises `target.parent.resolve()` and asserts `is_relative_to(self._root)`; creates `<root>/<bucket>/.tmp/` if missing; writes body to `<tmp_dir>/<uuid4>.tmp`; `os.fsync(fd)`; `os.rename(tmp, target)`. If `retention_seconds` is set, writes `<target>.retention` sidecar with `{created_at, retain_until, retention_seconds}` (ISO8601 + UTC).
 - `get(bucket, key)`: validates; reads bytes; canonicalisation check on resolved target rejects symlinks pointing outside root.
 - `delete(bucket, key)`: validates; checks sidecar; if `retain_until > now()` raises `RetentionWindowActiveError`; else removes file + sidecar.
-- `presign(bucket, key, ttl_s)`: returns `f"file://{target.resolve()}"`; logs an info-level audit-only marker noting ttl_s.
+- `presign(bucket, key, ttl_s)`: raises `NotImplementedError("presign requires non-local ObjectStoreAdapter driver — local_fs deployments do not support signed-URL semantics")`. P2-B fail-loud per §4 item 5 — never returns a degenerate `file://` URL that would mislead callers expecting external-HTTP access.
 - `health_check()`: writes a temp probe file under `root / .health_probe`, deletes it, measures latency. On any IOError → `unreachable`.
 - Validation regex: `_VALID_SEGMENT = re.compile(r"^[a-z0-9][a-z0-9._-]*$")`; bucket = single segment; key may contain `/` separators between segments.
 
@@ -1119,7 +1145,63 @@ git commit -m "feat(sprint-4): production filesystem ObjectStoreAdapter (T4)"
 
 - [ ] **Step 1: Write the failing test**
 
-(See plan §2 + the AGENTS.md plugin-registry critical-controls discipline. Tests cover: `discover()` walks all three entry-point groups; deferred `load()` (no eager import at discover time); `register(record, attestation_grade)` records the pack and emits `audit_event(plugin.registration_succeeded)`; `register` with a `refusal_reason` records the refused state and emits `audit_event(plugin.registration_refused)`; `known_packs()` returns flat list; `load(kind, name)` raises `RegistrationRefused` when the pack was refused; concurrent register calls serialise via the chain-head primitive.)
+Tests cover: `discover()` walks all three entry-point groups; deferred `load()` (no eager import at discover time); `register(record, attestation_grade)` records the pack and emits `audit_event(plugin.registration_succeeded)`; `register` with a `refusal_reason` records the refused state and emits `audit_event(plugin.registration_refused)`; `known_packs()` returns flat list; `load(kind, name)` raises `RegistrationRefused` when the pack was refused; concurrent register calls serialise via the chain-head primitive.
+
+**P2-K reviewer-fix — explicit no-eager-`EntryPoint.load()` test** pinning the §1 dynamic invariant. The existing `tests/unit/architecture/test_no_pack_imports.py` covers static-import-tree discipline (no `cognic_*` pack-namespace imports in the source tree); this new test pins the dynamic invariant that `discover()` itself doesn't trigger `EntryPoint.load()`. Without this test, a regression that adds `entry_point.load()` inside `discover()` would silently re-introduce eager pack import at startup — the supply-chain attack surface ADR-002 §"MCP STDIO threat model" warns against. Test shape:
+
+```python
+# tests/unit/protocol/test_plugin_registry.py — new test in TestDiscovery class
+def test_discover_does_not_eager_import_pack_modules(
+    monkeypatch, tmp_path
+) -> None:
+    """P2-K reviewer-fix — pin the §1 deferred-load invariant.
+
+    A pack's __init__.py executing during discover() would defeat the
+    trust gate's pre-import verification. This test installs a
+    fixture pack whose __init__.py sets a sentinel module-level flag
+    and asserts the flag stays False after discover() returns. The
+    flag only flips when register() → load() is called explicitly.
+    """
+    # Arrange: install a fixture pack with a sentinel-flipping __init__.py
+    # via a tmp-path entry-point shim.
+    import importlib.metadata
+
+    sentinel = {"imported": False}
+
+    class _FakeEntryPoint:
+        name = "test_tool"
+        group = "cognic.tools"
+        value = "fake_pack:Tool"
+
+        def load(self):
+            sentinel["imported"] = True
+            class Tool: ...
+            return Tool
+
+    def _fake_entry_points(*, group: str):
+        if group == "cognic.tools":
+            return [_FakeEntryPoint()]
+        return []
+
+    monkeypatch.setattr(importlib.metadata, "entry_points", _fake_entry_points)
+
+    registry = PluginRegistry()
+
+    # Act: discover() must walk metadata only.
+    discovered = registry.discover()
+
+    # Assert: the sentinel did NOT flip — load() was not called.
+    assert len(discovered) == 1
+    assert sentinel["imported"] is False, (
+        "discover() eager-imported a pack — §1 deferred-load invariant "
+        "violated. The trust gate's pre-import verification depends on "
+        "discover() walking metadata only."
+    )
+
+    # Sanity: explicit load DOES flip the sentinel.
+    registry.load("tools", "test_tool")
+    assert sentinel["imported"] is True
+```
 
 - [ ] **Step 2-7:** TDD: red → implement → green → halt → commit. Single commit:
 
@@ -1345,6 +1427,38 @@ This is the load-bearing integration test surface. T10 alone has ~12 tests cover
 - everything-passes-but-SLSA-L2 → registered, grade=partial (default tenant)
 - same-as-above-with-tenant-require-full → refused at step 6
 
+**P3-J — BUILD_PLAN exit criterion startup log.** BUILD_PLAN Sprint 4 exit criterion: "AgentOS startup logs `Discovered N packs (M registered, K rejected)` plus per-pack attestation outcomes." T10 owns this — at the end of the lifespan-startup pack-registration loop, the registry emits a single `INFO`-level structured log line summarising the registration outcomes:
+
+```python
+# Excerpt from app.py lifespan integration in T10
+discovered = registry.discover()
+registered, refused = 0, 0
+for entry_point in discovered:
+    outcome = await registry.register_with_full_attestation_check(entry_point, ...)
+    if outcome.status == "registered":
+        registered += 1
+    else:
+        refused += 1
+        # Per-pack refusal already audit-logged at the audit_event level;
+        # this is the operator-visible startup log line.
+        logger.warning(
+            "pack registration refused",
+            extra={"pack_id": outcome.pack_id, "reason": outcome.refusal_reason},
+        )
+
+logger.info(
+    "plugin discovery complete",
+    extra={
+        "discovered": len(discovered),
+        "registered": registered,
+        "refused": refused,
+        "by_grade": {"full": ..., "partial": ...},
+    },
+)
+```
+
+The startup log is a regression-testable contract — T10's integration test asserts the exact `extra` shape so portal operators can scrape it deterministically.
+
 - [ ] Standard TDD; halt-before-commit (critical-controls); commit:
 
 ```bash
@@ -1537,7 +1651,9 @@ Closeout structure mirrors Sprint 3:
 - Plan-review findings closed (round-by-round)
 - ADR-016 / ADR-015 / ADR-002 Validation table (delivered / partial / carryover map)
 - Doctrine amendments accepted in Sprint 4
-- Carryover for Sprint 5+
+- Carryover for Sprint 5+ (must include the following Wave-2 items — P3-G + P3-H reviewer-fixes):
+  - **Annual integrity sweep job** (P3-G — ADR-016 §"Retention + offline re-verification") — a scheduled job that picks 1% of registered packs at random + re-verifies their persisted Sigstore bundles + alerts on bundle-verification failure. Wave 2 / out of Sprint 4 scope. Requires Sprint 5+ scheduling primitive.
+  - **Vuln-drift alerting** (P3-H — ADR-016 §"Negative") — emit `pack.vuln_drift` audit event when a registered pack's deps gain a new CVE that exceeds tenant policy threshold post-registration. Wave 2; consumes Sprint 4's persisted SBOM + the future scheduled scan substrate.
 - Out-of-scope items
 - Next sprint pointer (Sprint 5 — MCP host)
 
