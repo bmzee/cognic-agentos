@@ -24,7 +24,7 @@
         "hooks": [
           {
             "type": "prompt",
-            "prompt": "Before stopping: summarize files changed, tests run, remaining risks, whether an ADR is needed, whether brick evidence or checklist updates are still missing, and whether the current state should be committed. If the work is at a logical checkpoint with passing checks for the touched scope, propose or create a commit using a conventional message."
+            "prompt": "SHORT-CIRCUIT FIRST: if the assistant's last message is a holding pattern explicitly awaiting user authorization (e.g. 'Holding.', 'awaiting your call', 'Reply with `commit` to fire'), OR if the working tree has no uncommitted changes the assistant introduced this turn, OR if the assistant has already produced a halt-before-commit summary in the most recent turn and is waiting for an authorization token, output exactly: `Stop hook: holding; no action required.` and stop. Otherwise: summarize files changed, tests run, remaining risks, whether an ADR is needed, whether brick evidence or checklist updates are still missing, and whether the current state should be committed. If the work is at a logical checkpoint with passing checks for the touched scope, propose or create a commit using a conventional message."
           }
         ]
       }
