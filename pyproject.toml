@@ -72,6 +72,15 @@ adapters = [
     "langfuse>=3.0",
     # Enterprise relational (Sprint 1D, per ADR-009)
     "oracledb>=2.5",
+    # MCP host (Sprint 5, per ADR-002). The official Anthropic / MCP-WG
+    # SDK provides Streamable HTTP client wiring + MCP-spec wire format
+    # for protocol/mcp_host.MCPHost + protocol/mcp_transports.
+    # StreamableHTTPTransport. Per Sprint-5 R3 P1 doctrine, the
+    # admission-side modules (mcp_authz / mcp_capabilities / mcp_manifest)
+    # do NOT depend on this SDK; only MCPHost + StreamableHTTPTransport
+    # call require_mcp() at construction. Pinned exactly (no ^/~ ranges)
+    # because version drift is a registration-time contract change.
+    "mcp == 1.27.0",
 ]
 
 [project.urls]
