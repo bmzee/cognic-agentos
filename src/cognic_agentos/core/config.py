@@ -591,6 +591,92 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- Sprint 5 — MCP host (Streamable HTTP first; STDIO restricted) -
+    # Per ADRs 002 (MCP plugin protocol — OAuth/PRM authorization +
+    # STDIO four-gate threat model + sandbox dependency hard-block),
+    # 014 (transitional high-risk-tier refusal until Sprint 13.5
+    # approval engine), and 015 (sampling default-deny Rego seed).
+    #
+    # Sprint-5 Decision Lock (Option C): STDIO ships threat model +
+    # manifest/config validation + fail-closed refusal at registration.
+    # STDIO does NOT ship process launch — that's Sprint 8 with the
+    # sandbox primitive. Every STDIO-related setting here is
+    # validation/refusal-side; no field controls process-spawning
+    # behaviour.
+    mcp_stdio_enabled: bool = Field(
+        default=False,
+        description=(
+            "STDIO MCP transport opt-in. Default False in ALL profiles "
+            "in Sprint 5 (the sandbox primitive lands Sprint 8). When "
+            "Sprint 8 lands, dev profile may flip to True; prod stays "
+            "hard-disabled until operator explicitly opts in PLUS "
+            "sandbox available PLUS four-gate manifest validates. "
+            "Setting True with runtime_profile=prod and no sandbox "
+            "importable triggers a fail-fast SandboxNotAvailableError "
+            "at startup (T8)."
+        ),
+    )
+    mcp_stdio_command_allowlist_path: str = Field(
+        default="secret/cognic/{tenant}/stdio-command-allowlist",
+        description=(
+            "Vault path template for the per-tenant STDIO command "
+            "allow-list. Sprint 5 reads this at registration time to "
+            "refuse STDIO packs whose declared command is not on the "
+            "list. Per ADR-002 §MCP STDIO threat model gate 2."
+        ),
+    )
+    mcp_as_allowlist_path: str = Field(
+        default="secret/cognic/{tenant}/mcp-as-allowlist",
+        description=(
+            "Vault path template for the per-tenant OAuth authorization-"
+            "server allow-list. Sprint 5 refuses MCP servers whose PRM "
+            "advertises a non-allowlisted AS. Per ADR-002 §MCP "
+            "Authorization step 3."
+        ),
+    )
+    mcp_oauth_token_cache_ttl_s: int = Field(
+        default=3600,
+        gt=0,
+        description=(
+            "TTL for the OAuth token cache (seconds). Tokens cached per "
+            "(server, scope, resource) tuple; refreshed before this "
+            "expiry; refresh emits audit.mcp_token_refresh on the "
+            "audit_event chain plus a decision_history row per T11."
+        ),
+    )
+    mcp_oauth_request_timeout_s: int = Field(
+        default=30,
+        gt=0,
+        description=(
+            "Strict timeout on every PRM discovery + token request + "
+            "token refresh outbound HTTP call (seconds). Same fail-"
+            "closed posture as cosign_verify_timeout_s."
+        ),
+    )
+    mcp_call_tool_timeout_s: int = Field(
+        default=60,
+        gt=0,
+        description=(
+            "Strict timeout on every MCP call_tool invocation against "
+            "an HTTP MCP server (seconds). Tools that exceed this raise "
+            "mcp_call_tool_timeout, audit-logged with pack identity + "
+            "tool name + duration."
+        ),
+    )
+    mcp_sampling_policy_bundle: Path = Field(
+        default=Path("policies/_default/sampling.rego"),
+        description=(
+            "Rego bundle path consumed by protocol/mcp_capabilities.py "
+            "to evaluate the four-condition sampling default-deny per "
+            "ADR-002 + MCP-CONFORMANCE.md. Operators override per-"
+            "tenant by pointing this at a Vault-mounted bundle. Default "
+            "ships with policies/_default/sampling.rego (default-deny; "
+            "allow only when pack manifest, tenant policy, cloud-policy "
+            "tier consistency, and allow_external_llm consistency all "
+            "hold)."
+        ),
+    )
+
     @field_validator("allowed_providers", mode="before")
     @classmethod
     def _split_allowed_providers(cls, value: object) -> list[str]:

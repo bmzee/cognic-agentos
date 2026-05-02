@@ -688,3 +688,110 @@ class TestSprint4PluginPolicySettings:
         monkeypatch.setenv("COGNIC_REQUIRE_COSIGN", "false")
         s = Settings(_env_file=None, runtime_profile="dev")  # type: ignore[call-arg]
         assert s.require_cosign is False
+
+
+class TestMcpSettings:
+    """Settings tests for the Sprint 5 MCP host surface.
+
+    Per the Sprint 5 plan-of-record (1e43792) §T1: the MCP-host settings
+    are introduced as additive Settings fields. Defaults match the
+    documented secure-by-default posture (STDIO disabled in all profiles
+    in Sprint 5 — the sandbox primitive lands Sprint 8; OAuth/MCP timeouts
+    pinned at the same fail-closed shape as cosign/OPA).
+    """
+
+    def test_mcp_stdio_enabled_defaults_false(self) -> None:
+        """Sprint-5 Decision Lock: STDIO is hard-disabled by default in
+        ALL profiles. Sprint 8 may flip dev to True after sandbox lands;
+        prod stays False until operator opt-in PLUS sandbox available
+        PLUS four-gate manifest validates."""
+        settings = build_settings_without_env_file()
+        assert settings.mcp_stdio_enabled is False
+
+    def test_mcp_stdio_command_allowlist_path_template(self) -> None:
+        """Per ADR-002 §"MCP STDIO threat model" gate 2: the per-tenant
+        static command allow-list is a Vault path. The default template
+        carries `{tenant}` so each tenant's allow-list lives under its own
+        secret path."""
+        settings = build_settings_without_env_file()
+        assert "{tenant}" in settings.mcp_stdio_command_allowlist_path
+        assert "stdio-command-allowlist" in settings.mcp_stdio_command_allowlist_path
+
+    def test_mcp_as_allowlist_path_template(self) -> None:
+        """Per ADR-002 §"MCP Authorization" step 3: the per-tenant
+        OAuth authorization-server allow-list lives in Vault. Template
+        shape mirrors the STDIO command-allowlist path."""
+        settings = build_settings_without_env_file()
+        assert "{tenant}" in settings.mcp_as_allowlist_path
+        assert "mcp-as-allowlist" in settings.mcp_as_allowlist_path
+
+    def test_mcp_oauth_token_cache_ttl_defaults_one_hour(self) -> None:
+        """Token cache TTL — refreshed before this expiry; refresh emits
+        audit.mcp_token_refresh + decision_history row per T11."""
+        settings = build_settings_without_env_file()
+        assert settings.mcp_oauth_token_cache_ttl_s == 3600
+
+    def test_mcp_oauth_request_timeout_defaults_thirty_seconds(self) -> None:
+        """Strict timeout on every PRM discovery + token request HTTP
+        call. Same fail-closed shape as cosign_verify_timeout_s."""
+        settings = build_settings_without_env_file()
+        assert settings.mcp_oauth_request_timeout_s == 30
+
+    def test_mcp_call_tool_timeout_defaults_one_minute(self) -> None:
+        """Strict timeout on every MCP call_tool invocation. Tools that
+        exceed this raise mcp_call_tool_timeout, audit-logged with pack
+        identity + tool name + duration."""
+        settings = build_settings_without_env_file()
+        assert settings.mcp_call_tool_timeout_s == 60
+
+    def test_mcp_sampling_policy_bundle_defaults_to_default_rego(self) -> None:
+        """Default-deny sampling Rego bundle path. Consumed by
+        protocol/mcp_capabilities.py to evaluate the four-condition
+        sampling default-deny per ADR-002 + MCP-CONFORMANCE.md."""
+        settings = build_settings_without_env_file()
+        assert settings.mcp_sampling_policy_bundle == Path("policies/_default/sampling.rego")
+
+    def test_mcp_oauth_request_timeout_must_be_positive(self) -> None:
+        """Strict fail-loud — same shape as cosign_verify_timeout_s."""
+        with pytest.raises(ValueError, match="greater than 0"):
+            Settings(  # type: ignore[call-arg]
+                _env_file=None,
+                runtime_profile="prod",
+                mcp_oauth_request_timeout_s=0,
+            )
+        with pytest.raises(ValueError, match="greater than 0"):
+            Settings(  # type: ignore[call-arg]
+                _env_file=None,
+                runtime_profile="prod",
+                mcp_oauth_request_timeout_s=-1,
+            )
+
+    def test_mcp_call_tool_timeout_must_be_positive(self) -> None:
+        """Strict fail-loud — same shape as cosign_verify_timeout_s."""
+        with pytest.raises(ValueError, match="greater than 0"):
+            Settings(  # type: ignore[call-arg]
+                _env_file=None,
+                runtime_profile="prod",
+                mcp_call_tool_timeout_s=0,
+            )
+
+    def test_mcp_oauth_token_cache_ttl_must_be_positive(self) -> None:
+        """Cache TTL of 0 means "always refresh" which would defeat the
+        cache; negative is nonsensical."""
+        with pytest.raises(ValueError, match="greater than 0"):
+            Settings(  # type: ignore[call-arg]
+                _env_file=None,
+                runtime_profile="prod",
+                mcp_oauth_token_cache_ttl_s=0,
+            )
+
+    def test_mcp_stdio_enabled_can_be_overridden_in_dev(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Operators can opt into STDIO in dev profile via env var.
+        Sprint 8 will flip the default for dev; prod stays False until
+        sandbox available + four-gate manifest validates (config-load
+        check in T8)."""
+        monkeypatch.setenv("COGNIC_MCP_STDIO_ENABLED", "true")
+        s = Settings(_env_file=None, runtime_profile="dev")  # type: ignore[call-arg]
+        assert s.mcp_stdio_enabled is True
