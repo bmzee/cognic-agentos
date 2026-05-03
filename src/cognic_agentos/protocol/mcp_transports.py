@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import inspect
+import logging
 import time
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager, AsyncExitStack
@@ -27,6 +28,8 @@ import httpx
 from cognic_agentos.core.config import Settings
 from cognic_agentos.protocol import require_mcp
 from cognic_agentos.protocol.mcp_authz import MCPAuthzClient, Token
+
+_LOG = logging.getLogger("cognic_agentos.protocol.mcp_transports")
 
 MCPTransportReason = Literal[
     "mcp_session_open_timeout",
@@ -216,42 +219,113 @@ class StreamableHTTPTransport:
         Keyword-only signature per :class:`MCPTransport` Protocol spec —
         forces the call site to name both arguments so ``server_url``
         and ``token`` can never be silently swapped by a refactor.
+
+        Resource-cleanup contract (R1 P2 #1): the entire open path —
+        SDK open + session_open audit-event emission — runs under a
+        ``try/finally`` that closes the partially-built
+        :class:`AsyncExitStack` if ANY pre-return failure fires.
+        Three failure classes this protects against:
+
+          - ``TimeoutError`` from :func:`asyncio.wait_for` on slow SDK
+            handshake → cleaned up + closed-enum
+            ``mcp_session_open_timeout`` raised.
+          - Any other ``Exception`` during SDK open (DNS / TLS /
+            initialize / etc.) → cleaned up + closed-enum
+            ``mcp_session_open_failed`` raised with the exception
+            class name (NEVER ``str(exc)`` — server-side error
+            strings would otherwise propagate).
+          - **Cancellation** (``asyncio.CancelledError``, a
+            ``BaseException`` subclass — caller awaited on us with a
+            timeout / cancellation scope and the wait expired) →
+            cleaned up + ``CancelledError`` re-raised. Without the
+            ``try/finally``, ``CancelledError`` bypassed both
+            ``except`` clauses and the stack stayed open, leaking the
+            already-entered HTTP client + SDK contexts for the rest
+            of the process lifetime.
+          - **Hook failure** during the session_open audit emission
+            (after the stack is fully entered) → cleaned up + hook
+            exception re-raised. Audit-pipeline failure on the
+            success path is fail-closed by design: per AGENTS.md
+            audit-chain doctrine, a session that the audit pipeline
+            cannot record MUST NOT be returned to the caller.
         """
         stack = AsyncExitStack()
+        cleanup_on_exit = True
         try:
-            session = await asyncio.wait_for(
-                self._open_session_with_stack(server_url=server_url, token=token, stack=stack),
-                timeout=self._open_timeout_s,
-            )
-        except TimeoutError as exc:
-            await stack.aclose()
-            raise MCPTransportError(
-                "mcp_session_open_timeout",
-                "opening Streamable HTTP MCP session timed out",
-                server_url=server_url,
-                timeout_s=self._open_timeout_s,
-            ) from exc
-        except Exception as exc:
-            await stack.aclose()
-            raise MCPTransportError(
-                "mcp_session_open_failed",
-                "opening Streamable HTTP MCP session failed",
-                server_url=server_url,
-                error_type=type(exc).__name__,
-            ) from exc
+            try:
+                session = await asyncio.wait_for(
+                    self._open_session_with_stack(server_url=server_url, token=token, stack=stack),
+                    timeout=self._open_timeout_s,
+                )
+            except TimeoutError as exc:
+                raise MCPTransportError(
+                    "mcp_session_open_timeout",
+                    "opening Streamable HTTP MCP session timed out",
+                    server_url=server_url,
+                    timeout_s=self._open_timeout_s,
+                ) from exc
+            except MCPTransportError:
+                # Already correctly-typed (e.g., from a nested
+                # transport-error path); let the outer try/finally
+                # clean up and re-raise unchanged.
+                raise
+            except Exception as exc:
+                raise MCPTransportError(
+                    "mcp_session_open_failed",
+                    "opening Streamable HTTP MCP session failed",
+                    server_url=server_url,
+                    error_type=type(exc).__name__,
+                ) from exc
+            # Note: ``BaseException`` (incl. CancelledError) intentionally
+            # NOT caught above — falls through to the outer ``finally``
+            # which closes the stack, then propagates unchanged.
 
-        await self._emit_event(
-            MCPTransportEvent(
-                event_type="session_open",
-                server_url=server_url,
-                session_id=session.session_id,
-                payload={
-                    "client_id": token.client_id,
-                    "scopes": list(token.scopes),
-                },
+            # Hook emission is INSIDE the try so a hook failure also
+            # triggers the stack cleanup. Audit-pipeline failure on the
+            # success path is fail-closed by design.
+            await self._emit_event(
+                MCPTransportEvent(
+                    event_type="session_open",
+                    server_url=server_url,
+                    session_id=session.session_id,
+                    payload={
+                        "client_id": token.client_id,
+                        "scopes": list(token.scopes),
+                    },
+                )
             )
-        )
-        return session
+            # Success: ownership of ``stack`` transfers to ``session``;
+            # caller closes via :meth:`close_session`.
+            cleanup_on_exit = False
+            return session
+        finally:
+            if cleanup_on_exit:
+                # R2 P2 #1: ``stack.aclose()`` can itself raise from an
+                # SDK / httpx context manager during cleanup. If we let
+                # that propagate, the cleanup error would replace the
+                # original failure (``mcp_session_open_timeout``,
+                # ``mcp_session_open_failed``, the audit-hook
+                # exception, or ``CancelledError``) the caller is
+                # about to receive. Log the cleanup failure token-free
+                # with ``cleanup_error_type`` only and suppress it so
+                # the original exception/cancellation surfaces
+                # unchanged. ``BaseException`` (incl. nested
+                # ``CancelledError`` from the cleanup itself) is
+                # intentionally NOT caught — if the cleanup is being
+                # cancelled too, the whole task is being torn down and
+                # the cancellation should propagate.
+                try:
+                    await stack.aclose()
+                except Exception as cleanup_exc:
+                    _LOG.warning(
+                        "MCP transport AsyncExitStack cleanup failed "
+                        "during a failed session open (server=%s); "
+                        "suppressing the cleanup error so the original "
+                        "open failure propagates unchanged. "
+                        "cleanup_error_type=%s",
+                        server_url,
+                        type(cleanup_exc).__name__,
+                    )
 
     async def close_session(self, session: MCPSession) -> None:
         """Close the SDK session and emit one close event."""
@@ -291,7 +365,22 @@ class StreamableHTTPTransport:
         )
 
     async def send(self, session: MCPSession, request: MCPToolCallRequest | MCPSDKRequest) -> Any:
-        """Send a tool-call or generic SDK request over an open session."""
+        """Send a tool-call or generic SDK request over an open session.
+
+        Failure-path hook contract (R1 P2 #2): when the SDK send
+        raises (timeout OR generic exception), the audit-event
+        emission for the matching ``send_error`` event runs through
+        :meth:`_emit_send_error_safe`, which **swallows non-cancellation
+        hook exceptions** so the closed-enum
+        ``mcp_call_tool_timeout`` / ``mcp_transport_send_failed``
+        :class:`MCPTransportError` ALWAYS reaches the caller. Without
+        the safe-emit wrapper, a broken T9 audit hook would mask the
+        primary transport error and the closed-enum reason would
+        never reach T9's ``decision_history`` mapping. Cancellation
+        from the hook (rare — requires the hook to await something
+        cancellable) is allowed to propagate because cancellation
+        means the whole operation is being torn down.
+        """
         if session.closed:
             raise MCPTransportError(
                 "mcp_session_closed",
@@ -306,7 +395,7 @@ class StreamableHTTPTransport:
                 timeout=self._call_timeout_s,
             )
         except TimeoutError as exc:
-            await self._emit_send_error(
+            await self._emit_send_error_safe(
                 session=session,
                 reason="mcp_call_tool_timeout",
                 payload={"timeout_s": self._call_timeout_s},
@@ -319,7 +408,7 @@ class StreamableHTTPTransport:
                 timeout_s=self._call_timeout_s,
             ) from exc
         except Exception as exc:
-            await self._emit_send_error(
+            await self._emit_send_error_safe(
                 session=session,
                 reason="mcp_transport_send_failed",
                 payload={"error_type": type(exc).__name__},
@@ -409,6 +498,51 @@ class StreamableHTTPTransport:
                 payload=payload,
             )
         )
+
+    async def _emit_send_error_safe(
+        self,
+        *,
+        session: MCPSession,
+        reason: MCPTransportReason,
+        payload: dict[str, Any],
+    ) -> None:
+        """Emit a send-error event, swallowing non-cancellation hook
+        exceptions so the closed-enum :class:`MCPTransportError` the
+        caller is about to receive is never masked by an audit-pipeline
+        bug (R1 P2 #2).
+
+        Cancellation (``BaseException`` subclass) is allowed to
+        propagate — a cancelled hook means the whole operation is
+        being torn down, and the caller's outer scope should see the
+        cancellation rather than a transport error.
+        """
+        try:
+            await self._emit_send_error(session=session, reason=reason, payload=payload)
+        except Exception as hook_exc:
+            # Per R1 P2 #2: hook failure during the send-error event
+            # MUST NOT mask the closed-enum transport error the caller
+            # is about to receive. Log a warning so operators can see
+            # the audit-pipeline misconfiguration; don't propagate.
+            #
+            # R2 P2 #2: log ONLY the hook exception class name and
+            # fixed context fields. ``str(hook_exc)`` is forbidden
+            # here for the same reason ``str(exc)`` is forbidden in
+            # the closed-enum payloads — a broken hook can raise an
+            # exception whose message contains the original event,
+            # request details, or a copied bearer token. Operators
+            # have the hook source + class name + transport context;
+            # they do NOT need the message text to debug.
+            _LOG.warning(
+                "MCP transport event hook raised during send-error emission "
+                "(server=%s session=%s reason=%s hook_error_type=%s). "
+                "Suppressing the hook exception so the transport error "
+                "reaches the caller; the audit pipeline missed this event "
+                "— fix the hook.",
+                session.server_url,
+                session.session_id,
+                reason,
+                type(hook_exc).__name__,
+            )
 
     async def _emit_event(self, event: MCPTransportEvent) -> None:
         if self._event_hook is None:
