@@ -43,6 +43,7 @@ from collections.abc import Iterator
 
 import pytest
 
+from cognic_agentos.core.config import build_settings_without_env_file
 from cognic_agentos.protocol import (
     MCPNotAvailableError,
     is_mcp_available,
@@ -323,6 +324,32 @@ class TestModuleImportsKernelSafe:
         # Module-level import MUST succeed; only construction or
         # method calls may raise MCPNotAvailableError
         importlib.import_module(module_name)
+
+
+class TestRuntimeRequiresSDK:
+    """Runtime-side classes gate on the SDK at construction time.
+
+    T7 fills the StreamableHTTPTransport arm. T9 adds MCPHost once the
+    orchestrator exists.
+    """
+
+    def test_streamable_http_transport_construction_requires_sdk(
+        self, stub_mcp_missing: None
+    ) -> None:
+        """Module import succeeds without the SDK, but construction
+        fails loudly because StreamableHTTPTransport actually consumes
+        the official MCP SDK at runtime."""
+        module_name = "cognic_agentos.protocol.mcp_transports"
+        if module_name in sys.modules:
+            del sys.modules[module_name]
+
+        mcp_transports = importlib.import_module(module_name)
+
+        with pytest.raises(MCPNotAvailableError):
+            mcp_transports.StreamableHTTPTransport(
+                authz=object(),
+                settings=build_settings_without_env_file(),
+            )
 
 
 class TestProtocolOptionalDepsMapShape:
