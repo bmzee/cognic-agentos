@@ -338,9 +338,10 @@ class TestPluginRegistryAuthzMapperContract:
             _RUNTIME_ONLY_AUTHZ_REASONS,
         )
 
-        assert frozenset(
-            {"mcp_step_up_unauthorised", "mcp_authorisation_lost"}
-        ) == _RUNTIME_ONLY_AUTHZ_REASONS, (
+        assert (
+            frozenset({"mcp_step_up_unauthorised", "mcp_authorisation_lost"})
+            == _RUNTIME_ONLY_AUTHZ_REASONS
+        ), (
             f"_RUNTIME_ONLY_AUTHZ_REASONS drift: {_RUNTIME_ONLY_AUTHZ_REASONS}. "
             f"Pinned at the two T5/T9-known runtime-only values."
         )

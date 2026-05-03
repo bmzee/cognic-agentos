@@ -1,0 +1,16 @@
+{
+  "matches": [],
+  "source": {
+    "type": "directory",
+    "target": "tests/fixtures/cognic_test_mcp_pack/"
+  },
+  "distro": {
+    "name": "",
+    "version": ""
+  },
+  "descriptor": {
+    "name": "grype",
+    "version": "fixture",
+    "configuration": {}
+  }
+}

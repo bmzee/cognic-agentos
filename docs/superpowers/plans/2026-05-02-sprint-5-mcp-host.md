@@ -103,7 +103,7 @@ This sprint creates 7 new modules, 1 new doctrine document, 1 new test fixture p
 - `tests/unit/protocol/test_mcp_high_risk_tier_refused.py` (Task 10)
 - `tests/unit/protocol/test_mcp_audit_linkage.py` — audit-chain side (Task 11)
 - `tests/unit/protocol/test_mcp_decision_history_linkage.py` — decision-history side (Task 11; addresses R1 P2 #6)
-- `tests/fixtures/cognic_test_mcp_pack/` — fixture HTTP MCP server with `cognic-pack-manifest.toml` (Task 12)
+- `tests/fixtures/cognic_test_mcp_pack/` — inert MCP manifest + attestation fixture (import-poisoned package; no runnable server; admission + MCPHost smoke run against a mocked HTTP transport — runnable-server work deferred to a later integration lane) (Task 12)
 - `tests/unit/protocol/test_mcp_no_user_controlled_command.py` — negative-path canary (Task 13)
 - `docs/closeouts/2026-05-XX-sprint-5-mcp-host.md` — closeout (Task 15)
 
@@ -2141,19 +2141,46 @@ git commit -m "feat(sprint-5): MCP audit-chain + decision-history linkage (T11)"
 
 ## Task 12: Fixture HTTP MCP test pack
 
+**Scope decision (recorded after T12 R1 review, 2026-05-03):** the original
+plan called for a real HTTP MCP server module (`server.py`) using the `mcp`
+SDK, plus opening a live HTTP MCP session via `MCPHost.list_tools`. **That
+is not what T12 implements.** The Sprint-5 unit lane keeps the fixture pack
+**import-poisoned** (entry-point references unimport-ably; the package
+`__init__.py` raises on import) and exercises the orchestrator against a
+**mocked HTTP transport**. The justification:
+
+- The runnable-server path needs a live OAuth Authorization Server, real
+  PRM publication, and real network sockets. That belongs to a future
+  integration lane (Sprint 13.5 / pre-go-live), not the unit suite.
+- The mocked-transport approach exercises the full Sprint-4 admission
+  pipeline + Sprint-5 capability validation + MCPHost dispatch contract
+  (`acquire_token` → `open_session` → audit-chain emission → decision
+  history mirror), which is what T12 is actually here to canary.
+- Keeping the fixture import-poisoned preserves the negative-path
+  invariant from Sprint 4 (no fixture pack module ever side-effect-imports
+  into the test process).
+
+If a future implementer is tempted to "fix" the fixture by adding a real
+`server.py`: stop. The fixture is intentionally inert; the real server
+path is deferred to a later integration lane and is out of scope for T12.
+
 **Files:**
 - Create: `tests/fixtures/cognic_test_mcp_pack/pyproject.toml`.
-- Create: `tests/fixtures/cognic_test_mcp_pack/cognic_test_mcp_pack/__init__.py`.
-- Create: `tests/fixtures/cognic_test_mcp_pack/cognic_test_mcp_pack/server.py` — a minimal HTTP MCP server using the `mcp` SDK that publishes PRM, requires OAuth, exposes 2 tools (one `read_only`, one `internal_write`).
+- Create: `tests/fixtures/cognic_test_mcp_pack/cognic_test_mcp_pack/__init__.py` (intentionally import-poisoned; **no `server.py`**).
+- Create: `tests/fixtures/cognic_test_mcp_pack/cognic_test_mcp_pack/cognic-pack-manifest.toml` — declares the MCP-specific block (transport, auth, server_url, scopes) so the registry's Sprint-5 capability validation sees a real-shaped manifest.
 - Create: `tests/fixtures/cognic_test_mcp_pack/attestations/` — full Sprint-4 attestation set so the pack actually admits via the registry. Mirror the `cognic_test_pack` shape from Sprint 4.
 
-**This pack is a fixture only — `tools-only` (no production tools, no real bank logic).** Its purpose is to give the integration tests something real-shaped to exercise.
+**This pack is a fixture only — `tools-only` (no production tools, no real bank logic).** Its purpose is to give the admission pipeline + orchestrator something real-shaped to validate against, while the transport layer is mocked at the test boundary.
 
-- [ ] **Step 1: Author the fixture pack** (mirror `tests/fixtures/cognic_test_pack/` from Sprint 4; add the MCP-specific manifest block + the minimal server).
+- [ ] **Step 1: Author the fixture pack** (mirror `tests/fixtures/cognic_test_pack/` from Sprint 4; add the MCP-specific manifest block; **do not add a runnable server module** — the package `__init__.py` stays import-poisoned).
 
-- [ ] **Step 2: Write the integration smoke test**
+- [ ] **Step 2: Write the admission + orchestrator smoke test**
 
-`tests/unit/protocol/test_mcp_fixture_pack_admission.py` — admits the fixture pack through the full Sprint-4 admission pipeline + Sprint-5 capability validation; opens HTTP MCP session via `MCPHost.list_tools`; calls the `read_only` tool; verifies audit chain.
+`tests/unit/protocol/test_mcp_fixture_pack_admission.py` covers three layers:
+
+1. **Fixture bytes present** — sanity that the attestation set + manifest are on disk in the expected shape.
+2. **Admission** — the fixture pack admits through the full Sprint-4 admission pipeline + Sprint-5 capability validation (manifest's `[tool.cognic.mcp]` block accepted, transport allow-listed, auth recognised).
+3. **MCPHost smoke against fixture, mocked transport** — `discover_servers` + `call_tool` exercised with the HTTP transport mocked at the boundary. Includes a high-risk-tier path that asserts the ADR-014 transitional refusal fires before any token acquisition or session open, with the parallel audit + decision-history evidence rows pinned by reading back from the real SQLite chains (same chain-readback shape as the success-path tests).
 
 - [ ] **Step 3: Run tests; expect PASS**
 
@@ -2162,7 +2189,7 @@ git commit -m "feat(sprint-5): MCP audit-chain + decision-history linkage (T11)"
 - [ ] **Step 5: Sweep + commit**
 
 ```bash
-git commit -m "test(sprint-5): cognic_test_mcp_pack fixture + admission smoke (T12)"
+git commit -m "test(sprint-5): cognic_test_mcp_pack fixture + admission/orchestrator smoke (T12)"
 ```
 
 ---

@@ -1,0 +1,10 @@
+{
+  "licenses": ["MIT"],
+  "artifacts": [
+    {
+      "name": "cognic-test-mcp-pack",
+      "version": "0.1.0",
+      "licenses": ["MIT"]
+    }
+  ]
+}

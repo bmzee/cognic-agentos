@@ -1,4 +1,4 @@
-"""Sprint-5 test fixture pack — IMPORT-POISONED.
+"""Sprint-5 test fixture pack — IMPORT-POISONED (intentionally permanent).
 
 This module's import is deliberately a hard error so the
 mcp_manifest extractor's deferred-load invariant gets a load-bearing
@@ -11,10 +11,20 @@ triggers ``__init__.py`` execution as a side effect, importing this
 package will raise the AssertionError below — which pytest surfaces
 as a clear test failure pointing at the regression.
 
-T12 will replace this fixture with a richer pack that includes a real
-MCP server module; the import-poisoning will move at that point to a
-dedicated isolated fixture so T12's server module can be importable
-when test code DELIBERATELY calls ``PluginRegistry.load(...)``.
+The import-poisoning is the *intended* steady state for this fixture
+in the Sprint-5 unit lane and **does not move**:
+
+- T6 (manifest extractor) needs the package to be unimportable so the
+  deferred-load invariant is testable.
+- T12 (fixture pack admission + MCPHost orchestrator smoke) exercises
+  the registry + orchestrator against a **mocked HTTP transport**;
+  there is no runnable server module here and none is required for
+  the unit lane.
+
+A real runnable MCP server (live OAuth AS, PRM publication, real
+sockets) belongs to a future integration lane (Sprint 13.5 /
+pre-go-live), not the unit suite. Do not "fix" this fixture by adding
+a server module — the lack of one is intentional.
 """
 
 raise AssertionError(

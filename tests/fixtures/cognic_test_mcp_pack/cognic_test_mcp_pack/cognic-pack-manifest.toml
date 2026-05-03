@@ -7,10 +7,14 @@
 # admission via mcp_manifest.extract_pack_manifest() — never loads
 # pack code at admission time.
 #
-# T6 reads this file. T12 will extend the pack with real attestations
-# + an MCP server; the manifest contents may grow then to cover more
-# fields. Today's contents are the minimum the T6.2 capability
-# validator can chew on.
+# T6 reads this file. T12 has now landed as an inert, import-poisoned,
+# mocked-transport fixture: there is no runnable server module in this
+# package and none is required for the unit lane. A real HTTP MCP
+# server (live OAuth AS, PRM publication, real sockets) is deferred to
+# a future integration lane (Sprint 13.5 / pre-go-live). Do NOT add
+# server.py back into this unit fixture — the lack of one is
+# intentional. The manifest contents below are the minimum the T6.2
+# capability validator + the T12 admission/orchestrator smoke need.
 
 [tool.cognic.identity]
 pack_id = "cognic-test-mcp-pack"
