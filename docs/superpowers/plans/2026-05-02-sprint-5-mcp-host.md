@@ -2006,46 +2006,43 @@ git commit -m "feat(sprint-5): MCPHost orchestrator (T9)"
 ## Task 10: ADR-014 transitional high-risk-tier refusal at invocation
 
 **Files:**
-- Modify: `src/cognic_agentos/protocol/mcp_host.py` — add the transitional gate.
+- Modify: `src/cognic_agentos/protocol/mcp_host.py` — add the transitional gate + closed-enum exception class + risk_tier normalisation helper.
 - Test: `tests/unit/protocol/test_mcp_high_risk_tier_refused.py`.
 
 Per ADR-014 §"Sprint 5 (transitional rule)":
 
 > Harness ships **fail-closed** for all tiers above `internal_write` — high-risk tools register but every invocation is refused with `tool_approval_engine_not_available` and audit-logged. This is the only safe state until the approval engine exists.
 
-Surface:
-- In `MCPHost.call_tool`, before any session is opened, read the pack manifest's `[tool.cognic.runtime].risk_tier`.
-- If `risk_tier in {"read_only", "internal_write"}` → proceed to invocation.
-- If `risk_tier in {"customer_data_read", "customer_data_write", "payment_action", "regulator_communication", "cross_tenant", "high_risk_custom"}` → refuse with `tool_approval_engine_not_available`. Emit `audit.tool_invocation_refused` with payload `{declared_risk_tier, refusal_reason: "tool_approval_engine_not_available", sprint_13_5_followup: True}`.
+Surface (T10 + R1 + R2 + R3 + R4 amendments — final shape):
+
+- **`MCPToolInvocationRefused(Exception)`** — closed-enum runtime refusal class, distinct from `MCPTransportError` (transport-layer) + `MCPAuthzError` (auth-layer). Carries `reason: ToolInvocationRefusalReason` + `payload: dict`. Token-free: caller-supplied tool arguments NEVER appear in the payload.
+- **`ToolInvocationRefusalReason = Literal["tool_approval_engine_not_available"]`** — Sprint-5 ships exactly one value; Sprint 13.5 will extend with the approval-engine outcomes.
+- **`_ADR_014_LOW_RISK_TIERS = frozenset({"read_only", "internal_write"})`** — **whitelist semantics + fail-closed default**. The 6 named ADR-014 high-risk tiers (`customer_data_read`, `customer_data_write`, `payment_action`, `regulator_communication`, `cross_tenant`, `high_risk_custom`) AND any unknown / typo / malformed value all refuse. Pinned by regression test. Adding a tier weakens the fail-closed default → MUST land alongside the Sprint 13.5 approval engine.
+- **`_normalize_risk_tier_for_gate(value: Any) -> str`** — defense-in-depth helper for the manifest-supplied risk_tier value (R1+R2+R3). Allow-list strings pass through unchanged (preserves exact-match semantics); other strings get `encode("unicode_escape").decode("ascii")[:200]` (R3 P2 — neutralises log-injection / ANSI / NUL injection attempts; R2 P2 — bounds multi-KB malicious manifests); non-strings get `repr(value)[:200]` (R1 P2 — bounds list/dict/None/etc. so they fail-close via the closed-enum path instead of raw TypeError from the membership check).
+- **`_sanitize_string_for_operator_surface(value: str) -> str`** — defense-in-depth helper for the OTHER caller-supplied strings (`tool_name`, `request_id`, `server_id`) that flow into operator-facing surfaces (R4 P2). Same `encode("unicode_escape").decode("ascii")[:200]` discipline as the risk_tier helper but **without** the allow-list passthrough — every input is escaped + bounded. Used at: the audit-failure warning log path; the `MCPToolInvocationRefused` exception message construction. The audit-row payload **keeps the raw `tool_name`** (T11's downstream canonical-name queries depend on the unsanitised form; JSON canonical-form serialisation handles on-disk safety for the chain row).
+- **Gate at the top of `MCPHost.call_tool`**, fires BEFORE `authz.acquire_token` AND BEFORE `transport.open_session` — a refused call MUST NOT touch the AS or the MCP server (security: don't burn tokens on refusals; audit cleanliness: a refusal row is the only evidence a refused call leaves).
+- **T10 owns the `audit.tool_invocation_refused` audit row** for the ADR-014 path. Payload: `{server_id, tool_name (raw, canonical for T11 query), declared_risk_tier (normalised + bounded + escaped), refusal_reason: "tool_approval_engine_not_available", sprint_13_5_followup: True}`. Top-level `request_id` + `tenant_id` populated. **T11 MUST NOT duplicate this row** — T11 owns `audit.tool_invocation` (success), `audit.tool_invocation_error` (dispatch failures incl. `mcp_authorisation_lost` from T9), and the parallel `decision_history` rows. Audit-pipeline failure during the refusal-emit MUST NOT swallow the refusal; logged token-free + refusal still propagates (the refusal IS the safety outcome).
 - This rule is **mechanical, not configurable**. Sprint 13.5 removes it.
 
-- [ ] **Step 1: Write failing tests** (8 tests — one per risk_tier value, parametrized).
+- [ ] **Step 1: Write failing tests** (~30 baseline + R1/R2/R3/R4 tests = **73 tests across 11 classes** — the original draft sketched 8 tests against the 6 named high-risk tiers; the merged implementation grew to cover whitelist semantics for unknown / typo / empty / case values, defense-in-depth for non-string + multi-KB string + control-character-injection risk_tier shapes, operator-surface sanitisation for caller-supplied `tool_name` / `server_id` / `request_id`, and the audit-emit-failure-doesn't-mask-refusal contract).
 
-```python
-class TestRiskTierTransitionalGate:
-    @pytest.mark.parametrize("tier", ["read_only", "internal_write"])
-    async def test_low_risk_tiers_invoke_successfully(self, tier: str, ...) -> None: ...
+Test catalogue (canonical surface — implementer adds the negative-path arms per the closed-enum table above):
 
-    @pytest.mark.parametrize("tier", [
-        "customer_data_read", "customer_data_write", "payment_action",
-        "regulator_communication", "cross_tenant", "high_risk_custom",
-    ])
-    async def test_high_risk_tiers_refused_with_tool_approval_engine_not_available(
-        self, tier: str, ...
-    ) -> None: ...
-
-    async def test_refusal_audit_event_includes_declared_tier(self, ...) -> None: ...
-
-    async def test_refusal_does_not_open_transport_session(self, ...) -> None:
-        """Belt-and-suspenders: if a refusal somehow reached a session, that
-        would mean the gate is wrong place (downstream of dispatch). The
-        gate MUST be upstream of session-open."""
-        ...
-```
+- `TestRiskTierLowRiskTiers` — 2 parametrized (`read_only`, `internal_write`): gate transparent, normal call_tool flow, no refusal audit row.
+- `TestRiskTierHighRiskTiersRefused` — 6 parametrized (the 6 named ADR-014 high-risk tiers): each refuses with closed-enum reason + `declared_risk_tier` payload.
+- `TestRiskTierRefusalUpstreamOfDispatch` — 12 parametrized (× 2 contracts × 6 tiers): refusal does NOT call `authz.acquire_token`; refusal does NOT open / send / close transport session.
+- `TestRiskTierRefusalAuditRow` — 1: payload schema complete (server_id, tool_name, declared_risk_tier, refusal_reason, sprint_13_5_followup); top-level (request_id, tenant_id) populated; tool **arguments NOT in payload**.
+- `TestRiskTierUnknownValueFailsClosed` — 5 parametrized (typos / case / empty / made-up): unknown tier values fail-close via the same closed-enum path; payload carries verbatim declared value (escaped + bounded).
+- `TestRiskTierRefusalSurvivesAuditFailure` — 1: audit-pipeline failure does NOT mask the refusal (safety outcome wins).
+- `TestRiskTierAllowListPinned` — 3: allow-list pinned at exactly `{read_only, internal_write}`; closed enum pinned at `{tool_approval_engine_not_available}`; exception inherits from Exception.
+- **R1 P2 — `TestRiskTierMalformedShapesFailClosed`** + `TestRiskTierNormalizeHelper` — 11 tests: 7 parametrized non-string shapes (list / multi-list / dict / None / int / bool / float) refuse via the closed-enum path; helper-direct tests pin string passthrough + non-string-truncation contracts; headline list-shape-doesn't-raise-TypeError regression.
+- **R2 P2 — `TestRiskTierNormalizeHelper` extension + `TestLongStringRiskTierEndToEnd`** — 4 tests: long unknown string bounded; short unknown strings pass through; allow-list values pass through unchanged; end-to-end 50 KB string tier bounded in audit row + exception message.
+- **R3 P2 — `TestRiskTierControlCharacterEscaping` + `TestRiskTierAllowListPassThroughVerbatim` + `TestRiskTierEscapingHelper`** — 14 tests: 5 parametrized control-char tiers (newline / tab / ANSI / NUL / CR) escaped in audit row + exception message; log-injection-via-newline doesn't forge a separate log line in the audit-failure warning path; allow-list literal byte-equality preserved; helper-direct tests for 6 parametrized control chars + printable-ASCII passthrough.
+- **R4 P2 — `TestRiskTierToolNameSanitization` + `TestSanitizeStringForOperatorSurfaceHelper`** — 14 tests: 4 parametrized control-char `tool_name` values (newline / tab / ANSI / NUL) escaped in the exception message; log-injection-via-newline-in-`tool_name` doesn't forge a separate log line in the audit-failure warning path; audit row payload preserves the canonical (raw) `tool_name` for T11 downstream queries; helper-direct tests for 6 parametrized control chars + printable-ASCII passthrough + long-string bounding.
 
 - [ ] **Step 2: Implement the gate in `MCPHost.call_tool`**
 
-Single ~15-line block at the top of `call_tool`. References ADR-014 in a comment.
+The gate is a ~15-line block at the top of `call_tool` (after the `_lookup_server` call, before `_resolve_transport`). References ADR-014 in a comment. Plus, at module scope: the `ToolInvocationRefusalReason` closed enum + `MCPToolInvocationRefused` exception class + `_ADR_014_LOW_RISK_TIERS` allow-list + the two defense-in-depth helpers (`_normalize_risk_tier_for_gate` for risk_tier per R1/R2/R3, `_sanitize_string_for_operator_surface` for the other caller-supplied strings per R4). Plus, on `MCPHost`: the `_emit_high_risk_tier_refusal_audit` instance method (which uses `_sanitize_string_for_operator_surface` in its warning-log fallback path).
 
 - [ ] **Step 3: Run tests; expect PASS**
 

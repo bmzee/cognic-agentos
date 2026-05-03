@@ -49,19 +49,35 @@ Doctrinal scope-decisions for T9:
      module in T9. The portal lifespan code populates the mapping
      from the registry walk + per-pack MCP manifest extraction.
 
-  2. **Audit / decision-history happy-path emission is scoped to
-     T11.** T9 wires the constructor-required deps
-     (``audit_store``, ``decision_history_store``) and emits ONLY
-     the close-failure tolerance audit row
-     (``audit.mcp_session_close_failed`` with ``failure_class``
-     ∈ {``"transport"``, ``"hook"``}). T9 RAISES the closed-enum
-     ``MCPAuthzError("mcp_authorisation_lost")`` from the
-     ``call_tool`` second-401-retry exhaustion path (R1 P2 #3) but
-     does NOT emit a corresponding audit row — that lands in T11
-     alongside ``audit.tool_invocation`` /
-     ``audit.tool_invocation_refused`` /
-     ``audit.tool_invocation_error`` + the parallel
-     ``decision_history`` rows.
+  2. **Audit emission ownership is split across T9 / T10 / T11.**
+     T9 wires the constructor-required deps (``audit_store``,
+     ``decision_history_store``) and emits ONLY the close-failure
+     tolerance audit row (``audit.mcp_session_close_failed`` with
+     ``failure_class`` ∈ {``"transport"``, ``"hook"``}). T9 RAISES
+     the closed-enum ``MCPAuthzError("mcp_authorisation_lost")``
+     from the ``call_tool`` second-401-retry exhaustion path
+     (R1 P2 #3) but does NOT emit a corresponding audit row.
+
+     **T10 (this commit) emits ``audit.tool_invocation_refused``
+     directly** for the ADR-014 transitional high-risk-tier gate
+     — payload ``{server_id, tool_name, declared_risk_tier,
+     refusal_reason: "tool_approval_engine_not_available",
+     sprint_13_5_followup: True}`` — BEFORE raising
+     :class:`MCPToolInvocationRefused`. Audit-pipeline failure
+     does not mask the refusal.
+
+     T11 expands the audit + decision-history surface with:
+     ``audit.tool_invocation`` (every successful call_tool);
+     ``audit.tool_invocation_error`` (call dispatched but failed —
+     including ``mcp_authorisation_lost`` from the T9 second-401
+     path AND the auth/transport closed-enum errors); the parallel
+     ``decision_history`` rows (per MCP-CONFORMANCE.md
+     §observability item 9). T11 MUST NOT duplicate the T10
+     refusal row — both are ``audit.tool_invocation_refused``,
+     but T10 owns the ADR-014 transitional path; T11 will own the
+     other refusal classes (capability validator outcomes the
+     orchestrator surfaces, future approval-engine outcomes from
+     Sprint 13.5).
 """
 
 from __future__ import annotations
@@ -335,6 +351,155 @@ def _classify_send_error(exc: BaseException) -> tuple[_AuthSignal, dict[str, Any
         cur = cur.__cause__
         visited += 1
     return "transport_failed", {}
+
+
+#: ADR-014 §"Sprint 5 (transitional rule)" allow-list — the ONLY two
+#: risk_tier values that may invoke without an approval-engine
+#: sign-off. Whitelist semantics + fail-closed default: ANY other
+#: declared tier (the named high-risk set OR an unknown / typo /
+#: malformed value) refuses with
+#: ``tool_approval_engine_not_available``. Sprint 13.5 lands the
+#: approval engine and removes this gate; until then this set is
+#: deliberately tight.
+_ADR_014_LOW_RISK_TIERS: frozenset[str] = frozenset({"read_only", "internal_write"})
+
+#: Maximum length of the truncated ``repr()`` emitted into the audit
+#: row's ``declared_risk_tier`` field for non-string risk_tier values.
+#: A pathological manifest declaring a 10-element list of 1 KB strings
+#: MUST NOT produce a 10 KB audit row. Pinned by regression test.
+_RISK_TIER_REPR_MAX_LEN = 200
+
+
+def _sanitize_string_for_operator_surface(value: str) -> str:
+    """Escape control characters + bound length for caller-supplied
+    strings that flow into operator-facing surfaces (exception
+    messages, warning logs).
+
+    R4 P2 — caller-supplied strings (``tool_name``, ``request_id``,
+    etc.) can carry embedded ``\\n`` / ``\\t`` / ANSI escapes / NUL
+    bytes that would forge log lines, rewrite operator terminals,
+    or truncate downstream viewers. Apply the same discipline as
+    :func:`_normalize_risk_tier_for_gate` (``unicode_escape`` round-
+    trip + ``[:_RISK_TIER_REPR_MAX_LEN]`` cap) but **without** the
+    allow-list passthrough — every input is escaped + bounded. The
+    raw value is preserved in the audit-row payload (T11's
+    canonical-name queries depend on the unsanitised form; JSON
+    canonical-form serialisation handles on-disk safety).
+    """
+    return value.encode("unicode_escape").decode("ascii")[:_RISK_TIER_REPR_MAX_LEN]
+
+
+def _normalize_risk_tier_for_gate(value: Any) -> str:
+    """Coerce a manifest-declared risk_tier into a bounded string
+    suitable for the ADR-014 gate's membership check + audit row.
+
+    R1 P2 — defense-in-depth at the orchestrator boundary.
+    :class:`MCPServerEntry.risk_tier` is typed as ``str`` but the
+    portal lifespan wiring populates this from manifest TOML at
+    runtime; a malformed manifest declaring ``risk_tier = ["x"]``
+    would, without this normalisation, raise raw ``TypeError`` from
+    the membership check (``unhashable type: 'list'``) BEFORE the
+    audit emit + closed-enum refusal fire. Per the T10 contract,
+    malformed tiers MUST follow the same fail-closed path as unknown
+    tiers — ``MCPToolInvocationRefused("tool_approval_engine_not_available")``
+    + audit row carrying a sanitised representation of what was
+    actually declared.
+
+    R2 P2 — the R1 helper bounded only non-string values; long
+    strings still flowed verbatim into the audit row + exception
+    message + warning log. A malformed / malicious manifest
+    declaring a multi-KB string risk_tier could otherwise pollute
+    every operator-visible surface. Strings now also get bounded
+    when they exceed :data:`_RISK_TIER_REPR_MAX_LEN`. Allow-list
+    values are returned unchanged BEFORE the bounding step so the
+    gate's exact-match check is preserved (and so a future
+    allow-list addition with a longer name cannot be silently
+    truncated below its match length).
+
+    R3 P2 — short unknown strings used to pass through verbatim,
+    enabling control-character injection: a manifest declaring
+    ``"payment_action\\nINFO 2026-... auth=success"`` would forge a
+    log line; ``"\\x1b[31mFAKE-ALERT\\x1b[0m"`` would rewrite
+    operator terminal output via ANSI escape; ``"x\\x00y"`` would
+    embed a NUL that may truncate downstream viewers. Every rejected
+    string is now run through ``encode("unicode_escape")`` so
+    ``\\n`` → literal ``\\\\n``, ``\\x1b`` → literal ``\\\\x1b``,
+    NUL → literal ``\\\\x00``, etc. Allow-list values still pass
+    through unchanged so the membership check is unaffected;
+    printable-ASCII typos (``"read-only"``, ``"PAYMENT_ACTION"``)
+    survive the escape transparently because they have no control
+    chars to escape.
+
+    Behaviour:
+
+      - **Allow-list ``str``** (in :data:`_ADR_014_LOW_RISK_TIERS`)
+        → returned **unchanged** (literal byte-equality preserved).
+        The membership check matches.
+      - **Other ``str``** → escaped via ``unicode_escape`` then
+        truncated to :data:`_RISK_TIER_REPR_MAX_LEN`. Printable
+        ASCII (typos) renders verbatim; control characters become
+        their ``\\xNN`` / ``\\n`` / etc. escape sequences.
+      - **Non-``str``** (``None``, ``list``, ``dict``, ``int``,
+        ``bool``, ``float``, anything else) → ``repr(value)``
+        truncated to the same cap. ``repr`` already escapes
+        control chars in any embedded strings.
+    """
+    if isinstance(value, str):
+        if value in _ADR_014_LOW_RISK_TIERS:
+            return value
+        # R3 P2: escape control chars BEFORE bounding so
+        # log-injection / ANSI-rewrite / NUL-truncation attempts
+        # are neutralised in the audit row + exception message +
+        # warning log. ``encode("unicode_escape")`` round-trips
+        # printable ASCII verbatim and escapes everything else.
+        escaped = value.encode("unicode_escape").decode("ascii")
+        return escaped[:_RISK_TIER_REPR_MAX_LEN]
+    return repr(value)[:_RISK_TIER_REPR_MAX_LEN]
+
+
+#: Closed-enum vocabulary for runtime tool-invocation refusals. Sprint
+#: 5 ships exactly one value (the ADR-014 transitional rule); Sprint
+#: 13.5 will extend with the approval-engine outcomes
+#: (``tool_approval_pending``, ``tool_approval_denied``, etc.).
+ToolInvocationRefusalReason = Literal["tool_approval_engine_not_available"]
+
+
+class MCPToolInvocationRefused(Exception):
+    """Closed-enum runtime refusal of a tool invocation by MCPHost.
+
+    Distinct from :class:`MCPTransportError` (transport-layer
+    failures) and :class:`MCPAuthzError` (auth-layer failures). This
+    exception covers refusals that happen at the orchestrator layer,
+    BEFORE any token / session work — currently just the ADR-014
+    transitional high-risk-tier gate.
+
+    Audit-row ownership: T10 emits ``audit.tool_invocation_refused``
+    directly via :meth:`MCPHost._emit_high_risk_tier_refusal_audit`
+    BEFORE raising this exception, so the refusal row is already in
+    the audit chain by the time the caller sees the raise. T11 adds
+    the parallel ``decision_history`` row + the OTHER invocation
+    rows (``audit.tool_invocation`` for success;
+    ``audit.tool_invocation_error`` for dispatch failures) but MUST
+    NOT duplicate the T10 ADR-014 refusal audit row.
+
+    Token-free + closed-enum payload, same discipline as
+    ``MCPTransportError``: caller-supplied tool arguments NEVER
+    appear in the payload (the refusal happens before any
+    data-classification policy has run); the
+    ``declared_risk_tier`` field is bounded via
+    :func:`_normalize_risk_tier_for_gate` so a multi-KB malformed
+    manifest can't pollute the exception message either.
+    """
+
+    def __init__(
+        self,
+        reason: ToolInvocationRefusalReason,
+        message: str = "",
+        **payload: Any,
+    ) -> None:
+        self.reason: ToolInvocationRefusalReason = reason
+        self.payload: dict[str, Any] = payload
+        super().__init__(f"{reason}: {message}" if message else reason)
 
 
 class MCPHost:
@@ -763,6 +928,56 @@ class MCPHost:
         the ADR-014 transitional risk-tier gate before step 2.
         """
         entry = self._lookup_server(server_id)
+
+        # T10 — ADR-014 §"Sprint 5 (transitional rule)": fail-closed
+        # for every risk_tier above ``internal_write``. Mechanical,
+        # not configurable. Sprint 13.5 lands the approval engine and
+        # removes this gate. The gate fires BEFORE token-acquire and
+        # BEFORE session-open — a refused call MUST NOT touch the AS
+        # or the MCP server, both for security (don't burn tokens on
+        # refusals) and for audit cleanliness (a refusal row is the
+        # only evidence a refused call leaves; a token-refresh row
+        # or a session-open row would falsely imply we tried).
+        #
+        # R1 P2: ``entry.risk_tier`` is typed as ``str`` but the
+        # portal lifespan wiring populates this from manifest TOML —
+        # malformed values (list / dict / None / etc.) MUST fail-
+        # close via the same closed-enum path, NOT raw TypeError
+        # from the membership check. ``_normalize_risk_tier_for_gate``
+        # coerces to a bounded-length string that's never in the
+        # allow-list.
+        declared_risk_tier = _normalize_risk_tier_for_gate(entry.risk_tier)
+        if declared_risk_tier not in _ADR_014_LOW_RISK_TIERS:
+            await self._emit_high_risk_tier_refusal_audit(
+                server_id=server_id,
+                tool_name=tool_name,
+                declared_risk_tier=declared_risk_tier,
+                request_id=request_id,
+                tenant_id=tenant_id,
+            )
+            # R4 P2: sanitize caller-supplied ``tool_name`` +
+            # registry-supplied ``server_id`` for the operator-
+            # facing exception message so an operator who
+            # ``str(exc)``-prints or logs the message cannot have
+            # control-char content rewrite their terminal / forge
+            # log lines. Audit-row payload below keeps raw values
+            # (T11 canonical query path).
+            safe_tool_name = _sanitize_string_for_operator_surface(tool_name)
+            safe_server_id = _sanitize_string_for_operator_surface(server_id)
+            raise MCPToolInvocationRefused(
+                "tool_approval_engine_not_available",
+                f"tool {safe_tool_name!r} on server {safe_server_id!r} "
+                f"declares risk_tier={declared_risk_tier!r} which is "
+                f"outside the Sprint-5 transitional allow-list "
+                f"({sorted(_ADR_014_LOW_RISK_TIERS)!r}). Per ADR-014, "
+                f"all tiers above ``internal_write`` are refused until "
+                f"Sprint 13.5 lands the approval engine.",
+                server_id=server_id,
+                tool_name=tool_name,
+                declared_risk_tier=declared_risk_tier,
+                sprint_13_5_followup=True,
+            )
+
         transport = self._resolve_transport(entry)
 
         async def _attempt(token: Token) -> tuple[Any, MCPSession, Token]:
@@ -1006,5 +1221,90 @@ class MCPHost:
                 server_id,
                 request_id,
                 failure_class,
+                type(audit_exc).__name__,
+            )
+
+    async def _emit_high_risk_tier_refusal_audit(
+        self,
+        *,
+        server_id: str,
+        tool_name: str,
+        declared_risk_tier: str,
+        request_id: str,
+        tenant_id: str,
+    ) -> None:
+        """Emit ``audit.tool_invocation_refused`` for the ADR-014
+        transitional gate (T10).
+
+        Audit-pipeline failure during this emit MUST NOT mask the
+        refusal — the refusal IS the safety outcome and propagates
+        to the caller regardless. Audit-emit failure is operationally
+        bad but doesn't change the safety semantics; log token-free
+        and let the orchestrator's ``raise`` proceed.
+
+        Payload schema (matches plan §T10 + T11 will read this shape):
+
+          - ``server_id`` — pack identity (registry pack_id).
+          - ``tool_name`` — manifest-declared tool name. Caller-
+            supplied **arguments** are NOT included (refusal happens
+            before any data-classification policy has run; the
+            conservative default is "no caller bytes in the refusal
+            row").
+          - ``declared_risk_tier`` — manifest value, **normalised +
+            bounded + control-character escaped** via
+            :func:`_normalize_risk_tier_for_gate` (R1+R2+R3): allow-
+            list values pass through unchanged; non-string values
+            (list / dict / None / etc.) become a bounded
+            ``repr()``; long strings get truncated at
+            :data:`_RISK_TIER_REPR_MAX_LEN`; control characters
+            (``\\n``, ``\\t``, ANSI escapes, NUL) are escaped to
+            their ``\\xNN`` / ``\\n`` literal forms. Operators can
+            still triage typos vs intentional high-risk vs
+            malformed manifests; T11 implementers MUST NOT depend
+            on raw manifest bytes here. The original manifest
+            bytes are recoverable only from the cosign-signed pack
+            artefact.
+          - ``refusal_reason`` — closed-enum
+            ``"tool_approval_engine_not_available"``.
+          - ``sprint_13_5_followup`` — ``True`` so a Sprint 13.5
+            release-readiness query can find every refusal row that
+            the approval engine will resolve.
+        """
+        try:
+            await self._audit_store.append(
+                AuditEvent(
+                    event_type="audit.tool_invocation_refused",
+                    request_id=request_id,
+                    tenant_id=tenant_id,
+                    payload={
+                        "server_id": server_id,
+                        "tool_name": tool_name,
+                        "declared_risk_tier": declared_risk_tier,
+                        "refusal_reason": "tool_approval_engine_not_available",
+                        "sprint_13_5_followup": True,
+                    },
+                )
+            )
+        except Exception as audit_exc:
+            # R4 P2: sanitize caller-supplied strings (``tool_name``,
+            # ``request_id``) for the operator-facing log surface so
+            # an embedded newline / ANSI / NUL cannot forge a log
+            # line / rewrite operator terminal / truncate the line.
+            # ``server_id`` comes from the registry (operator-
+            # controlled) but apply the same defense for
+            # consistency. ``declared_risk_tier`` is already
+            # normalised + bounded + escaped via
+            # :func:`_normalize_risk_tier_for_gate`.
+            _LOG.warning(
+                "audit append failed while logging "
+                "audit.tool_invocation_refused for the ADR-014 "
+                "transitional high-risk-tier gate (server_id=%s "
+                "tool_name=%s declared_risk_tier=%s request_id=%s "
+                "audit_error_type=%s); the refusal still propagates "
+                "to the caller (safety outcome wins).",
+                _sanitize_string_for_operator_surface(server_id),
+                _sanitize_string_for_operator_surface(tool_name),
+                declared_risk_tier,
+                _sanitize_string_for_operator_surface(request_id),
                 type(audit_exc).__name__,
             )
