@@ -1066,7 +1066,9 @@ class TestEnumCompleteness:
             # T6.1 manifest extraction (2)
             "mcp_manifest_missing",
             "mcp_manifest_malformed",
-            # T6.2 capability validator (10)
+            # T6.2 capability validator (12 — T15 R1 P2 #6 added
+            # mcp_http_manifest_shape_invalid; T15 R2 P2 added
+            # mcp_tool_data_classes_shape_invalid)
             "mcp_anonymous_refused",
             "mcp_resources_declared_but_no_list",
             "mcp_sampling_default_denied",
@@ -1077,6 +1079,8 @@ class TestEnumCompleteness:
             "mcp_stdio_command_not_allowlisted",
             "mcp_stdio_disabled_in_sprint_5",
             "mcp_transport_unsupported",  # R1 P1 #2
+            "mcp_http_manifest_shape_invalid",  # T15 R1 P2 #6
+            "mcp_tool_data_classes_shape_invalid",  # T15 R2 P2
             # T6.3 registration auth probe (11)
             "mcp_as_not_allowlisted",
             "mcp_token_audience_mismatch",

@@ -26,6 +26,7 @@ on the OPA binary being installed.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -643,8 +644,10 @@ class TestValidationOutcomeShape:
 
     def test_validation_reason_literal_matches_expected_set(self) -> None:
         """Drift detector: the ValidationReason Literal MUST equal the
-        10 capability-side reasons enumerated in the Sprint-5 plan T6.2
-        (9 original + ``mcp_transport_unsupported`` added in R1 P1 #2)."""
+        12 capability-side reasons enumerated in the Sprint-5 plan T6.2
+        (9 original + ``mcp_transport_unsupported`` added in R1 P1 #2 +
+        ``mcp_http_manifest_shape_invalid`` added in T15 R1 P2 #6 +
+        ``mcp_tool_data_classes_shape_invalid`` added in T15 R2 P2)."""
         from typing import get_args
 
         actual = frozenset(get_args(ValidationReason))
@@ -660,6 +663,8 @@ class TestValidationOutcomeShape:
                 "mcp_stdio_command_not_allowlisted",
                 "mcp_stdio_disabled_in_sprint_5",
                 "mcp_transport_unsupported",
+                "mcp_http_manifest_shape_invalid",
+                "mcp_tool_data_classes_shape_invalid",
             }
         )
         assert actual == expected, (
@@ -844,3 +849,371 @@ class TestValidatorSafeAccessors:
         assert _safe_get_dict({"tool": "scalar"}, "tool") == {}
         # Dict parent + dict value → that value
         assert _safe_get_dict({"tool": {"k": "v"}}, "tool") == {"k": "v"}
+
+
+# ---------------------------------------------------------------------------
+# T15 R2 P2 — pack-controlled data_classes shape gate (fail-CLOSED)
+# ---------------------------------------------------------------------------
+
+
+class TestDataClassesShapeRefusal:
+    """T15 R2 P2: a tool's ``data_classes`` field is pack-controlled
+    TOML on a cosign-signed manifest. ADR-002 + ADR-017 contract
+    requires every field be well-shaped; a malformed value MUST
+    fail-CLOSED via the closed-enum :class:`ManifestValidation`
+    envelope rather than silently bypassing the form/TTL
+    restricted-data refusals.
+
+    R1 history (rejected by the reviewer):
+      - The previous bug was a raw ``TypeError`` from
+        ``set(tool.get("data_classes", []) or [])`` on shapes like
+        ``42`` / ``True`` / dict — the exception bypassed the
+        closed-enum envelope and aborted admission without a
+        refusal audit row.
+      - R1 introduced ``_safe_data_classes`` which coerced any
+        non-``list[str]`` shape into an empty set and let the
+        downstream gates fall through. That fixed the crash but
+        introduced a fail-OPEN posture: signed manifests with
+        broken ``data_classes`` would silently bypass the
+        restricted-class refusals.
+
+    R2 fix (this class): a new gate before gates 4+5 walks every
+    tool block; a malformed ``data_classes`` shape produces
+    ``ManifestValidation(ok=False, reason="mcp_tool_data_classes_shape_invalid")``.
+    Tools that omit ``data_classes`` entirely (or declare an empty
+    list) are well-shaped and pass; only an explicit-but-malformed
+    value is a refusal.
+    """
+
+    @pytest.mark.parametrize(
+        ("malformed_value", "label", "expected_payload_keys"),
+        [
+            (42, "int", {"declared_type"}),
+            (True, "bool", {"declared_type"}),
+            ({"customer_pii": True}, "dict", {"declared_type"}),
+            ("customer_pii", "string-not-list", {"declared_type"}),
+            ([42, "customer_pii"], "list-with-int", {"malformed_entry_type"}),
+            ([{"name": "customer_pii"}], "list-with-dict", {"malformed_entry_type"}),
+            ([None, "customer_pii"], "list-with-none", {"malformed_entry_type"}),
+            (["", "customer_pii"], "list-with-empty-string", set()),
+            (["   ", "customer_pii"], "list-with-whitespace", set()),
+        ],
+    )
+    async def test_malformed_data_classes_under_form_elicitation_refused_closed(
+        self,
+        malformed_value: Any,
+        label: str,
+        expected_payload_keys: set[str],
+    ) -> None:
+        """Every malformed shape under the form-elicitation manifest
+        produces the closed-enum
+        ``mcp_tool_data_classes_shape_invalid`` refusal. The gate
+        fires before gates 4 + 5 would consume the field, so a
+        malformed value can never silently bypass the form/TTL
+        refusals downstream.
+        """
+        manifest = _base_manifest(
+            mcp={"elicitation_modes": ["form"]},
+            tools=[{"name": "tool-x", "data_classes": malformed_value}],
+        )
+        result = await validate_mcp_manifest(manifest, context=_ctx())
+        assert result.ok is False, f"label={label}: expected fail-closed refusal, got {result}."
+        assert result.reason == "mcp_tool_data_classes_shape_invalid", (
+            f"label={label}: expected mcp_tool_data_classes_shape_invalid, got {result.reason}."
+        )
+        assert result.payload["tool_name"] == "tool-x"
+        assert result.payload["field"] == "data_classes"
+        for key in expected_payload_keys:
+            assert key in result.payload, (
+                f"label={label}: expected payload key {key!r}, got {sorted(result.payload.keys())}"
+            )
+
+    @pytest.mark.parametrize(
+        ("malformed_value", "label"),
+        [
+            (42, "int"),
+            (True, "bool"),
+            ({"customer_pii": True}, "dict"),
+            ("payment_action", "string-not-list"),
+            ([42, "payment_action"], "list-with-int"),
+            ([None], "list-with-none"),
+            (["   "], "list-with-whitespace"),
+        ],
+    )
+    async def test_malformed_data_classes_under_ttl_cache_refused_closed(
+        self,
+        malformed_value: Any,
+        label: str,
+    ) -> None:
+        """Same fail-closed posture under the TTL-cache gate.
+        The shape gate fires before gate 5 even iterates."""
+        manifest = _base_manifest(
+            tools=[
+                {
+                    "name": "tool-y",
+                    "caching_strategy": "ttl",
+                    "data_classes": malformed_value,
+                }
+            ],
+        )
+        result = await validate_mcp_manifest(manifest, context=_ctx())
+        assert result.ok is False
+        assert result.reason == "mcp_tool_data_classes_shape_invalid"
+        assert result.payload["tool_name"] == "tool-y"
+        assert result.payload["field"] == "data_classes"
+
+    async def test_malformed_data_classes_outside_form_or_ttl_still_refused(
+        self,
+    ) -> None:
+        """Even when no downstream gate would consume the field
+        (no form-elicitation, no TTL caching), a malformed
+        ``data_classes`` is still refused. The signed-static manifest
+        contract requires ``data_classes`` be well-shaped wherever it
+        appears; the gate doesn't make exceptions for tools whose
+        gates wouldn't fire."""
+        manifest = _base_manifest(tools=[{"name": "tool-z", "data_classes": 42}])
+        result = await validate_mcp_manifest(manifest, context=_ctx())
+        assert result.ok is False
+        assert result.reason == "mcp_tool_data_classes_shape_invalid"
+        assert result.payload["tool_name"] == "tool-z"
+
+    async def test_first_malformed_tool_wins(self) -> None:
+        """If multiple tools are malformed, the first-encountered
+        wins (deterministic refusal). Operator sees one specific
+        diagnostic, not an aggregated dump."""
+        manifest = _base_manifest(
+            tools=[
+                {"name": "tool-a", "data_classes": ["customer_pii"]},  # well-shaped
+                {"name": "tool-b", "data_classes": 42},  # FIRST malformed
+                {"name": "tool-c", "data_classes": "another-bad"},
+            ],
+        )
+        result = await validate_mcp_manifest(manifest, context=_ctx())
+        assert result.ok is False
+        assert result.reason == "mcp_tool_data_classes_shape_invalid"
+        assert result.payload["tool_name"] == "tool-b"
+
+    @pytest.mark.parametrize(
+        ("well_formed", "label"),
+        [
+            ([], "empty-list"),
+            (["customer_pii"], "single-restricted"),
+            (["customer_pii", "payment_action"], "multiple-restricted"),
+            (["non-restricted-class"], "single-non-restricted"),
+        ],
+    )
+    async def test_well_formed_data_classes_passes_shape_gate(
+        self,
+        well_formed: list[str],
+        label: str,
+    ) -> None:
+        """Well-shaped ``data_classes`` (empty list or list of non-empty
+        strings) passes the shape gate. Downstream gates may still
+        fire on restricted-class intersection, which is what the
+        existing form/TTL gates test."""
+        manifest = _base_manifest(
+            tools=[{"name": "tool-x", "data_classes": well_formed}],
+        )
+        # No form-elicitation, no TTL → downstream gates don't fire.
+        result = await validate_mcp_manifest(manifest, context=_ctx())
+        assert result.ok is True, (
+            f"label={label}: well-formed data_classes should pass; got {result}"
+        )
+
+    async def test_absent_data_classes_passes_shape_gate(self) -> None:
+        """A tool that doesn't declare ``data_classes`` at all is
+        well-shaped (the field is optional). The shape gate distinguishes
+        "absent" from "present-but-malformed"."""
+        manifest = _base_manifest(tools=[{"name": "tool-x"}])
+        result = await validate_mcp_manifest(manifest, context=_ctx())
+        assert result.ok is True
+
+    async def test_well_formed_data_classes_still_refused_at_form_gate(self) -> None:
+        """Sanity: the shape gate doesn't short-circuit the form-mode
+        restricted-data refusal. A well-shaped ``["customer_pii"]``
+        under form elicitation still triggers gate 4 as expected."""
+        manifest = _base_manifest(
+            mcp={"elicitation_modes": ["form"]},
+            tools=[{"name": "t", "data_classes": ["customer_pii"]}],
+        )
+        result = await validate_mcp_manifest(manifest, context=_ctx())
+        assert result.ok is False
+        assert result.reason == "mcp_elicitation_form_restricted_data_class"
+
+    async def test_well_formed_data_classes_still_refused_at_ttl_gate(self) -> None:
+        """Sanity: same for the TTL-cache gate."""
+        manifest = _base_manifest(
+            tools=[
+                {
+                    "name": "t",
+                    "caching_strategy": "ttl",
+                    "data_classes": ["payment_action"],
+                }
+            ],
+        )
+        result = await validate_mcp_manifest(manifest, context=_ctx())
+        assert result.ok is False
+        assert result.reason == "mcp_caching_ttl_restricted_data_class"
+
+
+# ---------------------------------------------------------------------------
+# T15 R1 P2 #5 — OPA evaluate() failures map to default-deny envelope
+# ---------------------------------------------------------------------------
+
+
+class TestOpaEvaluateFailureDefaultDenies:
+    """T15 R1 P2 #5: an installed OPA engine that raises during
+    ``evaluate()`` MUST default-deny via ``mcp_sampling_default_denied``
+    rather than letting the raw exception propagate. Without the
+    wrap, a transient OPA subprocess failure / JSON-decode bug /
+    binary-missing-from-PATH would skip the registration-refusal
+    evidence path and bypass the closed-enum envelope.
+    """
+
+    async def test_opa_evaluate_runtime_error_default_denies(self) -> None:
+        """Engine raises ``RuntimeError`` mid-evaluate → default-deny
+        with ``opa_evaluate_failed`` reason detail + ``error_type`` in
+        payload."""
+        from unittest.mock import AsyncMock as _AsyncMock
+        from unittest.mock import MagicMock as _MagicMock
+
+        opa_engine = _MagicMock()
+        opa_engine.evaluate = _AsyncMock(
+            side_effect=RuntimeError("opa: subprocess timeout, stderr: <secret debug>")
+        )
+        manifest = _base_manifest(mcp={"sampling_supported": True})
+        result = await validate_mcp_manifest(manifest, context=_ctx(opa_engine=opa_engine))
+        assert result.ok is False
+        assert result.reason == "mcp_sampling_default_denied"
+        assert result.payload.get("reason_detail") == "opa_evaluate_failed"
+        # Class name preserved for diagnostics; raw text NOT included.
+        assert result.payload.get("error_type") == "RuntimeError"
+        # Sanity: the raw exception's secret-looking text is NOT in
+        # the payload anywhere.
+        for v in result.payload.values():
+            assert "secret debug" not in str(v)
+            assert "subprocess timeout" not in str(v)
+
+    async def test_opa_evaluate_cancellation_propagates_unchanged(self) -> None:
+        """``CancelledError`` from ``evaluate()`` MUST propagate;
+        cancellation is not coerced into a closed-enum refusal."""
+        from unittest.mock import AsyncMock as _AsyncMock
+        from unittest.mock import MagicMock as _MagicMock
+
+        opa_engine = _MagicMock()
+        opa_engine.evaluate = _AsyncMock(side_effect=asyncio.CancelledError)
+        manifest = _base_manifest(mcp={"sampling_supported": True})
+        with pytest.raises(asyncio.CancelledError):
+            await validate_mcp_manifest(manifest, context=_ctx(opa_engine=opa_engine))
+
+
+# ---------------------------------------------------------------------------
+# T15 R1 P2 #6 — HTTP-family manifest shape gate fires before auth probe
+# ---------------------------------------------------------------------------
+
+
+class TestHttpManifestShapeGate:
+    """T15 R1 P2 #6: the HTTP-family manifest's ``server_url`` and
+    ``scopes`` are read directly from signed TOML and passed into
+    :meth:`MCPAuthzClient.acquire_token`. Without this gate:
+
+    - ``scopes = "mcp:tools"`` (string) becomes ``tuple("mcp:tools")``
+      downstream — a 9-character tuple whose ``" ".join(...)`` produces
+      the wrong scope-grant string and could under-/over-grant tokens.
+    - ``[42]`` crashes at the same join site with ``TypeError``.
+    - Blank / non-URL ``server_url`` reaches httpx as a malformed URL.
+
+    Catching all three at admission keeps the auth probe + runtime
+    invocation paths free of pack-controlled type confusion. The new
+    closed-enum reason ``mcp_http_manifest_shape_invalid`` fires
+    before any network round-trip.
+    """
+
+    @pytest.mark.parametrize(
+        ("transport", "label"),
+        [
+            ("http", "legacy-alias"),
+            ("streamable-http", "canonical"),
+        ],
+    )
+    async def test_blank_server_url_refused(self, transport: str, label: str) -> None:
+        manifest = _base_manifest(mcp={"transport": transport, "server_url": ""})
+        result = await validate_mcp_manifest(manifest, context=_ctx())
+        assert result.ok is False
+        assert result.reason == "mcp_http_manifest_shape_invalid"
+        assert result.payload["field"] == "server_url"
+
+    async def test_whitespace_only_server_url_refused(self) -> None:
+        manifest = _base_manifest(mcp={"server_url": "   "})
+        result = await validate_mcp_manifest(manifest, context=_ctx())
+        assert result.ok is False
+        assert result.reason == "mcp_http_manifest_shape_invalid"
+        assert result.payload["field"] == "server_url"
+
+    async def test_non_string_server_url_refused(self) -> None:
+        manifest = _base_manifest(mcp={"server_url": 42})
+        result = await validate_mcp_manifest(manifest, context=_ctx())
+        assert result.ok is False
+        assert result.reason == "mcp_http_manifest_shape_invalid"
+        assert result.payload["field"] == "server_url"
+        assert result.payload["declared_type"] == "int"
+
+    async def test_string_scopes_refused(self) -> None:
+        """``scopes = "mcp:tools"`` (single string) is the most likely
+        author mistake; it would otherwise become a 9-char tuple."""
+        manifest = _base_manifest(mcp={"scopes": "mcp:tools"})
+        result = await validate_mcp_manifest(manifest, context=_ctx())
+        assert result.ok is False
+        assert result.reason == "mcp_http_manifest_shape_invalid"
+        assert result.payload["field"] == "scopes"
+        assert result.payload["declared_type"] == "str"
+
+    async def test_int_scopes_refused(self) -> None:
+        manifest = _base_manifest(mcp={"scopes": 42})
+        result = await validate_mcp_manifest(manifest, context=_ctx())
+        assert result.ok is False
+        assert result.reason == "mcp_http_manifest_shape_invalid"
+        assert result.payload["field"] == "scopes"
+
+    async def test_list_with_int_scopes_refused(self) -> None:
+        """``[42]`` is the join-time TypeError vector."""
+        manifest = _base_manifest(mcp={"scopes": [42]})
+        result = await validate_mcp_manifest(manifest, context=_ctx())
+        assert result.ok is False
+        assert result.reason == "mcp_http_manifest_shape_invalid"
+        assert result.payload["field"] == "scopes"
+        assert result.payload["malformed_entry_type"] == "int"
+
+    async def test_list_with_blank_string_refused(self) -> None:
+        manifest = _base_manifest(mcp={"scopes": ["mcp:tools", "   "]})
+        result = await validate_mcp_manifest(manifest, context=_ctx())
+        assert result.ok is False
+        assert result.reason == "mcp_http_manifest_shape_invalid"
+        assert result.payload["field"] == "scopes"
+
+    async def test_well_formed_http_manifest_passes(self) -> None:
+        """Sanity: the gate doesn't break the happy path."""
+        manifest = _base_manifest()  # baseline is HTTP + valid shape
+        result = await validate_mcp_manifest(manifest, context=_ctx())
+        assert result.ok is True
+
+    async def test_stdio_manifest_skips_http_shape_gate(self) -> None:
+        """STDIO transports don't go through this gate (they have
+        their own gates 6.a-d). A blank server_url under STDIO does
+        not produce ``mcp_http_manifest_shape_invalid``."""
+        manifest = _base_manifest(
+            mcp={
+                "transport": "stdio",
+                "server_url": "",
+                "command": "/usr/local/bin/x",
+                "args": ["--config"],
+                "env_allowlist": [],
+            }
+        )
+        result = await validate_mcp_manifest(
+            manifest,
+            context=_ctx(stdio_command_allowlist=frozenset({"/usr/local/bin/x"})),
+        )
+        assert result.ok is False
+        # STDIO Decision Lock fires; the new HTTP gate is bypassed.
+        assert result.reason == "mcp_stdio_disabled_in_sprint_5"

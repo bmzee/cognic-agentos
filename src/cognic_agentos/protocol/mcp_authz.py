@@ -422,10 +422,18 @@ class MCPAuthzClient:
             # failure, etc. Map to the closed-enum
             # mcp_oauth_transport_failure reason so registration auth
             # probes always return a closed refusal (never bubble a
-            # raw httpx exception).
+            # raw httpx exception). T15 R1 P2 #3: the exception's class
+            # name lands in the payload's ``transport_error_class``
+            # field — but the message MUST NOT include ``str(exc)``
+            # because lower-layer httpx exception text can leak
+            # request URLs containing client-secret-like fragments,
+            # backend debug strings, or Authorization-header bytes.
+            # The ``__cause__`` chain via ``from exc`` keeps the raw
+            # detail accessible in tracebacks (operator-only) without
+            # including it in audit / log payloads.
             raise MCPAuthzError(
                 "mcp_oauth_transport_failure",
-                f"PRM probe to {server_url} failed at transport layer: {type(exc).__name__}: {exc}",
+                f"PRM probe to {server_url} failed at transport layer",
                 server_url=server_url,
                 transport_error_class=type(exc).__name__,
             ) from exc
@@ -958,9 +966,11 @@ class MCPAuthzClient:
                 server_url=server_url,
             ) from exc
         except httpx.RequestError as exc:
+            # T15 R1 P2 #3: same scrubbing as discover_resource_metadata's
+            # PRM-probe path — class name in payload, raw text out of message.
             raise MCPAuthzError(
                 "mcp_oauth_transport_failure",
-                f"PRM fetch to {url} failed at transport layer: {type(exc).__name__}: {exc}",
+                f"PRM fetch to {url} failed at transport layer",
                 url=url,
                 server_url=server_url,
                 transport_error_class=type(exc).__name__,
@@ -1026,23 +1036,69 @@ class MCPAuthzClient:
         would let partially-valid security config succeed — wrong
         posture for a critical authorization boundary. Operators must
         fix the misconfiguration before admission proceeds.
+
+        T15 R1 P2 #2: Vault read failures (path-not-found, permission
+        denied, backend unreachable, schema-malformed secret) all map
+        to the closed-enum ``mcp_as_not_allowlisted`` reason. Without
+        the wrapping, a raw adapter exception would escape the
+        registration auth-probe path (which catches only
+        :class:`MCPAuthzError`) and bypass the
+        ``plugin.registration_refused`` evidence path; the runtime
+        path could also classify it as a generic orchestrator error
+        with the wrong taxonomy. ``CancelledError`` is intentionally
+        NOT caught — task cancellation should propagate.
         """
         path = self._settings.mcp_as_allowlist_path.format(tenant=tenant_id)
-        secret = await self._vault.read(path)
+        try:
+            secret = await self._vault.read(path)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # Adapter-shape failures (path missing, permission denied,
+            # backend down, malformed JSON) all map to "AS not
+            # allow-listed" — the operator effect is the same: this
+            # tenant has no admissible AS surface for MCP packs.
+            # T15 R1 P2 #3: keep ``type(exc).__name__`` in the payload
+            # so operators can diagnose without raw ``str(exc)`` text
+            # in the message (lower-layer Vault adapter exceptions
+            # could carry secret-looking URLs or backend debug strings).
+            raise MCPAuthzError(
+                "mcp_as_not_allowlisted",
+                f"AS allow-list read from Vault at {path} failed",
+                vault_path=path,
+                tenant_id=tenant_id,
+                vault_error_class=type(exc).__name__,
+            ) from exc
+
+        if not isinstance(secret, dict):
+            raise MCPAuthzError(
+                "mcp_as_not_allowlisted",
+                f"AS allow-list secret at {path} is not a mapping",
+                vault_path=path,
+                tenant_id=tenant_id,
+            )
+
         servers = secret.get("servers", [])
         if not isinstance(servers, list):
             raise MCPAuthzError(
                 "mcp_as_not_allowlisted",
                 f"AS allow-list at {path} is not a list of strings",
                 vault_path=path,
+                tenant_id=tenant_id,
             )
         for entry in servers:
             if not isinstance(entry, str) or not entry.strip():
+                # The entry value comes from the operator-curated Vault
+                # secret (NOT pack-controlled). Including ``entry!r`` in
+                # the message is operator-actionable diagnostics, not a
+                # leak risk. Distinct from the P2 #3 prohibition on raw
+                # ``str(exc)`` from lower-layer exceptions.
                 raise MCPAuthzError(
                     "mcp_as_not_allowlisted",
                     f"AS allow-list at {path} has malformed entry {entry!r} "
                     f"(every entry must be a non-empty string)",
                     vault_path=path,
+                    tenant_id=tenant_id,
                 )
         return frozenset(servers)
 
@@ -1077,15 +1133,21 @@ class MCPAuthzClient:
         )
         try:
             secret = await self._vault.read(vault_path)
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             # Vault read failures (path-not-found, permission denied,
             # backend unreachable) all map to credentials-missing.
+            # T15 R1 P2 #3: class name in payload, raw text out of
+            # message (Vault adapter exception text could carry
+            # client_secret bytes or AS endpoint URLs).
             raise MCPAuthzError(
                 "mcp_oauth_credentials_missing",
-                f"Vault read at {vault_path} failed: {type(exc).__name__}: {exc}",
+                f"Vault read at {vault_path} failed",
                 vault_path=vault_path,
                 tenant_id=tenant_id,
                 as_issuer=as_issuer,
+                vault_error_class=type(exc).__name__,
             ) from exc
 
         if not isinstance(secret, dict):
@@ -1177,10 +1239,10 @@ class MCPAuthzClient:
                 as_issuer=as_issuer,
             ) from exc
         except httpx.RequestError as exc:
+            # T15 R1 P2 #3: class name in payload, raw text out of message.
             raise MCPAuthzError(
                 "mcp_oauth_transport_failure",
-                f"AS discovery to {as_issuer} failed at transport layer: "
-                f"{type(exc).__name__}: {exc}",
+                f"AS discovery to {as_issuer} failed at transport layer",
                 as_issuer=as_issuer,
                 transport_error_class=type(exc).__name__,
             ) from exc
@@ -1256,10 +1318,13 @@ class MCPAuthzClient:
                 token_endpoint=token_endpoint,
             ) from exc
         except httpx.RequestError as exc:
+            # T15 R1 P2 #3: class name in payload, raw text out of
+            # message — token-request paths carry HTTP Basic credentials
+            # in the Authorization header, so any leak risk in an
+            # exception message is acutely sensitive.
             raise MCPAuthzError(
                 "mcp_oauth_transport_failure",
-                f"token request to {token_endpoint} failed at transport "
-                f"layer: {type(exc).__name__}: {exc}",
+                f"token request to {token_endpoint} failed at transport layer",
                 token_endpoint=token_endpoint,
                 transport_error_class=type(exc).__name__,
             ) from exc

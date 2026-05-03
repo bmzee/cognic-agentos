@@ -89,6 +89,7 @@ surface.
 from __future__ import annotations
 
 import importlib.metadata as _im
+import re as _re
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -166,6 +167,54 @@ class PackManifestMalformedError(MCPManifestError):
     """
 
 
+#: T15 R1 P3 #1 — pack-controlled ``package_name`` shape pin. Restricts
+#: the value to a single Python identifier segment (the importable
+#: package directory): ``[A-Za-z_][A-Za-z0-9_]*``. This rejects path
+#: separators (``/``, ``\``), parent-directory traversal (``..``),
+#: leading dots, hyphens (which Python disallows in package names but
+#: a malformed pack metadata might include), and any other character
+#: that could be interpolated into a path Distribution.locate_file
+#: would resolve outside the intended package-data directory.
+#:
+#: This is a defence-in-depth gate: ``locate_file`` itself walks the
+#: distribution's RECORD index and shouldn't return paths outside the
+#: distribution, BUT (a) editable installs + custom backends use
+#: looser path resolution; (b) some test stubs / SimplePath
+#: implementations don't validate; (c) the Sprint-4 contract is that
+#: pack-controlled string fields fail closed at admission, not at
+#: deeper layers. Mirrors :func:`_validate_version_for_object_key` in
+#: ``protocol/supply_chain.py`` (Sprint 4 R1 P2).
+_PACKAGE_NAME_PATTERN: _re.Pattern[str] = _re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _validate_package_name(package_name: str) -> None:
+    """Reject any pack-controlled ``package_name`` that is not a
+    single Python identifier segment.
+
+    :raises PackManifestNotFoundError: when the value contains path
+        separators, parent-directory traversal, leading dots, or any
+        character outside ``[A-Za-z0-9_]``. Also rejects values that
+        don't start with a letter or underscore (``0foo``, etc.).
+
+    The message names the closed-enum invariant explicitly so an
+    operator debugging via Sprint-7A ``agentos validate`` sees the
+    contract: ``package_name`` is the importable directory segment,
+    NOT a path. Path-shaped inputs get rejected here rather than
+    flowing into ``Distribution.locate_file`` (which on some backends
+    would resolve them outside the package-data root).
+    """
+    if not isinstance(package_name, str) or not _PACKAGE_NAME_PATTERN.fullmatch(package_name):
+        raise PackManifestNotFoundError(
+            f"package_name must be a single Python identifier segment "
+            f"matching ^[A-Za-z_][A-Za-z0-9_]*$ (got "
+            f"{type(package_name).__name__}). Path separators, '..' "
+            f"traversal, hyphens, and leading dots are rejected: this is "
+            f"defence-in-depth before Distribution.locate_file resolves "
+            f"the cognic-pack-manifest.toml path. The pack's distribution "
+            f"metadata declares an invalid package directory name."
+        )
+
+
 def extract_pack_manifest(*, distribution_name: str, package_name: str) -> dict[str, Any]:
     """Read ``<package_name>/cognic-pack-manifest.toml`` from an
     installed pack distribution WITHOUT importing pack code.
@@ -179,13 +228,16 @@ def extract_pack_manifest(*, distribution_name: str, package_name: str) -> dict[
         For most packs ``distribution_name`` and ``package_name``
         differ only in ``-`` vs ``_`` (PEP 503 normalisation), but
         the contract is to take both explicitly so packs that don't
-        follow that convention still work.
+        follow that convention still work. T15 R1 P3 #1: validated
+        against ``_PACKAGE_NAME_PATTERN`` BEFORE any path
+        interpolation.
     :returns: The parsed TOML manifest as a nested dict (output of
         ``tomllib.loads``). Empty TOML parses to ``{}``; the caller
         (the capability validator in T6.2) is responsible for
         validating semantic shape.
     :raises PackManifestNotFoundError: distribution not installed OR
-        manifest path not in RECORD OR file does not exist on disk.
+        manifest path not in RECORD OR file does not exist on disk OR
+        ``package_name`` violates the identifier pattern (T15 R1 P3 #1).
     :raises PackManifestMalformedError: file exists but is not valid
         TOML (chained from :class:`tomllib.TOMLDecodeError`).
 
@@ -196,6 +248,12 @@ def extract_pack_manifest(*, distribution_name: str, package_name: str) -> dict[
     applies (see the module docstring + ``TestExtractDoesNotImportPackage``
     in ``tests/unit/protocol/test_mcp_manifest.py``).
     """
+    # T15 R1 P3 #1: shape-check ``package_name`` before any path
+    # interpolation. Catches '../', backslashes, slashes, and any
+    # other separator-shaped value that could escape the intended
+    # package-data resolution root.
+    _validate_package_name(package_name)
+
     try:
         dist = _im.distribution(distribution_name)
     except _im.PackageNotFoundError as exc:

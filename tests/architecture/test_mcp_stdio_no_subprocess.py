@@ -493,14 +493,28 @@ class TestMcpStdioNoSubprocess:
         mcp_transports, mcp_host); anything less means a task got
         skipped.
 
-        During T4 (this commit) the count is 0, so the assertion is
-        the placeholder ``>= 0``. T15 closeout tightens this to
-        ``>= 5`` once all five modules have shipped — drift detector
-        for missing tasks.
+        T4 (initial commit) shipped this as ``>= 0`` because zero
+        mcp_* modules existed at that point. T15 closeout (this
+        tighten) raises the floor to ``>= 5`` now that the Sprint-5
+        MCP-host quintet has fully landed. The post-Sprint-5 floor is
+        a regression detector: if a future maintainer deletes one of
+        the five MCP-host modules without an accompanying ADR
+        amendment + this floor adjustment, the architecture-test
+        trips and CI fails. Sprint 8 adding ``mcp_stdio_launcher.py``
+        bumps this to ``>= 6``; any other addition that intentionally
+        grows the MCP-host surface should bump the floor too.
         """
         modules = _mcp_modules()
-        # T4 placeholder; tightened to >= 5 in T15 closeout
-        assert len(modules) >= 0
+        assert len(modules) >= 5, (
+            f"Expected at least 5 MCP-host modules under "
+            f"src/cognic_agentos/protocol/ (the Sprint-5 quintet: "
+            f"mcp_authz, mcp_capabilities, mcp_manifest, "
+            f"mcp_transports, mcp_host). Found {len(modules)}: "
+            f"{[str(m) for m in modules]}. If a module was "
+            f"intentionally removed, update this floor + the AGENTS.md "
+            f"critical-controls list + the tools/check_critical_coverage.py "
+            f"gate together."
+        )
 
 
 class TestModuleCollectorSelfTests:

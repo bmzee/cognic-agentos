@@ -3906,3 +3906,222 @@ class TestInvalidateCachedToken:
         # Lock released; invalidation completes
         await invalidate_task
         assert (server, frozenset(("mcp:tools",)), server) not in authz._token_cache
+
+
+# ---------------------------------------------------------------------------
+# T15 R1 P2 #2 — Vault allow-list read failures map to closed-enum refusal
+# ---------------------------------------------------------------------------
+
+
+class TestAsAllowlistVaultReadFailures:
+    """T15 R1 P2 #2: ``_load_as_allowlist`` MUST wrap the Vault adapter
+    call in try/except so adapter-shape failures (path missing,
+    permission denied, backend unreachable, malformed secret) map to
+    ``MCPAuthzError("mcp_as_not_allowlisted")`` rather than letting a
+    raw adapter exception escape the registration auth-probe path
+    (which catches only :class:`MCPAuthzError`).
+
+    Without the wrap, a raw exception would bypass the
+    ``plugin.registration_refused`` evidence path; the runtime path
+    could also classify it as a generic orchestrator error with the
+    wrong taxonomy. ``CancelledError`` is intentionally NOT caught.
+    """
+
+    @respx.mock
+    async def test_vault_read_runtime_error_maps_to_as_not_allowlisted(
+        self,
+        authz: MCPAuthzClient,
+        vault_client: MagicMock,
+    ) -> None:
+        """A generic Vault adapter ``RuntimeError`` (e.g., backend
+        unreachable / permission denied) maps to the closed-enum
+        ``mcp_as_not_allowlisted`` reason, not a raw exception."""
+
+        async def _fail(path: str) -> dict[str, Any]:
+            if "mcp-oauth" in path:
+                return dict(_DEFAULT_OAUTH_CREDS)
+            raise RuntimeError("vault: permission denied for path foo/bar")
+
+        vault_client.read.side_effect = _fail
+        server = "https://server.example/mcp"
+        respx.get(server).mock(return_value=httpx.Response(401))
+        respx.get("https://server.example/.well-known/oauth-protected-resource/mcp").mock(
+            return_value=httpx.Response(200, json={"authorization_servers": ["https://as.example"]})
+        )
+
+        with pytest.raises(MCPAuthzError) as exc:
+            await authz.acquire_token(
+                server_url=server,
+                manifest_scopes=("mcp:tools",),
+                request_id="rid",
+                tenant_id="bank_a",
+            )
+        assert exc.value.reason == "mcp_as_not_allowlisted"
+        # Class name in payload — operator can diagnose adapter type.
+        assert exc.value.payload.get("vault_error_class") == "RuntimeError"
+        # T15 R1 P2 #3 invariant: raw exception text NOT in message.
+        assert "permission denied for path foo/bar" not in str(exc.value)
+        assert "vault:" not in str(exc.value)
+
+    @respx.mock
+    async def test_vault_read_cancellation_propagates_unchanged(
+        self,
+        authz: MCPAuthzClient,
+        vault_client: MagicMock,
+    ) -> None:
+        """``CancelledError`` from the Vault adapter MUST propagate
+        unchanged — task cancellation should not be coerced into a
+        closed-enum refusal."""
+
+        async def _cancel(path: str) -> dict[str, Any]:
+            if "mcp-oauth" in path:
+                return dict(_DEFAULT_OAUTH_CREDS)
+            raise asyncio.CancelledError
+
+        vault_client.read.side_effect = _cancel
+        server = "https://server.example/mcp"
+        respx.get(server).mock(return_value=httpx.Response(401))
+        respx.get("https://server.example/.well-known/oauth-protected-resource/mcp").mock(
+            return_value=httpx.Response(200, json={"authorization_servers": ["https://as.example"]})
+        )
+
+        with pytest.raises(asyncio.CancelledError):
+            await authz.acquire_token(
+                server_url=server,
+                manifest_scopes=("mcp:tools",),
+                request_id="rid",
+                tenant_id="bank_a",
+            )
+
+    @respx.mock
+    async def test_vault_read_returns_non_dict_maps_to_as_not_allowlisted(
+        self,
+        authz: MCPAuthzClient,
+        vault_client: MagicMock,
+    ) -> None:
+        """If the Vault adapter returns a list / string / None instead
+        of a dict, the malformed-shape path fires before the
+        ``servers`` key lookup."""
+
+        async def _bad_shape(path: str) -> Any:
+            if "mcp-oauth" in path:
+                return dict(_DEFAULT_OAUTH_CREDS)
+            return ["not a dict"]
+
+        vault_client.read.side_effect = _bad_shape
+        server = "https://server.example/mcp"
+        respx.get(server).mock(return_value=httpx.Response(401))
+        respx.get("https://server.example/.well-known/oauth-protected-resource/mcp").mock(
+            return_value=httpx.Response(200, json={"authorization_servers": ["https://as.example"]})
+        )
+
+        with pytest.raises(MCPAuthzError) as exc:
+            await authz.acquire_token(
+                server_url=server,
+                manifest_scopes=("mcp:tools",),
+                request_id="rid",
+                tenant_id="bank_a",
+            )
+        assert exc.value.reason == "mcp_as_not_allowlisted"
+
+
+# ---------------------------------------------------------------------------
+# T15 R1 P2 #3 — raw str(exc) MUST NOT appear in MCPAuthzError messages
+# ---------------------------------------------------------------------------
+
+
+class TestAuthzErrorMessageScrubbing:
+    """T15 R1 P2 #3: ``MCPAuthzError.__str__`` includes the message
+    field, and these errors can reach logs / operator surfaces /
+    audit-adjacent paths. A lower-layer exception's ``str(exc)`` can
+    carry Authorization headers, client_secret fragments, backend
+    debug strings, or secret-looking URLs — the message MUST NOT
+    include raw ``str(exc)`` text. Class name in a separate payload
+    field is acceptable; the original exception remains accessible
+    via ``__cause__`` chain in tracebacks.
+    """
+
+    @respx.mock
+    async def test_prm_probe_transport_failure_does_not_leak_exc_text(
+        self,
+        authz: MCPAuthzClient,
+        vault_client: MagicMock,
+    ) -> None:
+        """``httpx.ConnectError("AUTH=secret123 in URL")`` could be
+        provoked by malformed server URLs; the message MUST NOT
+        echo it back into the closed-enum error."""
+        server = "https://server.example/mcp"
+        respx.get(server).mock(side_effect=httpx.ConnectError("AUTH=secret123 in URL leak attempt"))
+
+        with pytest.raises(MCPAuthzError) as exc:
+            await authz.discover_resource_metadata(
+                server_url=server, request_id="rid", tenant_id="bank_a"
+            )
+        assert exc.value.reason == "mcp_oauth_transport_failure"
+        # Class name preserved in payload for diagnostics.
+        assert exc.value.payload.get("transport_error_class") == "ConnectError"
+        # Raw exception text MUST NOT leak through the message.
+        assert "AUTH=secret123" not in str(exc.value)
+        assert "leak attempt" not in str(exc.value)
+
+    @respx.mock
+    async def test_prm_fetch_transport_failure_does_not_leak_exc_text(
+        self,
+        authz: MCPAuthzClient,
+        vault_client: MagicMock,
+    ) -> None:
+        """The endpoint-specific PRM-fetch path also scrubs."""
+        server = "https://server.example/mcp"
+        respx.get(server).mock(return_value=httpx.Response(401))
+        respx.get("https://server.example/.well-known/oauth-protected-resource/mcp").mock(
+            side_effect=httpx.ConnectError("client_secret=abc123 in PRM URL")
+        )
+        respx.get("https://server.example/.well-known/oauth-protected-resource").mock(
+            side_effect=httpx.ConnectError("client_secret=abc123 in PRM URL")
+        )
+
+        with pytest.raises(MCPAuthzError) as exc:
+            await authz.discover_resource_metadata(
+                server_url=server, request_id="rid", tenant_id="bank_a"
+            )
+        assert exc.value.reason == "mcp_oauth_transport_failure"
+        assert exc.value.payload.get("transport_error_class") == "ConnectError"
+        assert "client_secret=abc123" not in str(exc.value)
+
+    @respx.mock
+    async def test_vault_credentials_read_failure_does_not_leak_exc_text(
+        self,
+        authz: MCPAuthzClient,
+        vault_client: MagicMock,
+    ) -> None:
+        """Vault credentials read failure is mapped to
+        ``mcp_oauth_credentials_missing``; raw adapter exception text
+        MUST NOT leak into the message."""
+
+        async def _leak_creds(path: str) -> dict[str, Any]:
+            if "mcp-oauth" in path:
+                raise RuntimeError("vault detail: token=hvs.LEAK_BYTES")
+            return {"servers": ["https://as.example"]}
+
+        vault_client.read.side_effect = _leak_creds
+        server = "https://server.example/mcp"
+        respx.get(server).mock(return_value=httpx.Response(401))
+        respx.get("https://server.example/.well-known/oauth-protected-resource/mcp").mock(
+            return_value=httpx.Response(
+                200,
+                json={"authorization_servers": ["https://as.example"]},
+            )
+        )
+
+        with pytest.raises(MCPAuthzError) as exc:
+            await authz.acquire_token(
+                server_url=server,
+                manifest_scopes=("mcp:tools",),
+                request_id="rid",
+                tenant_id="bank_a",
+            )
+        assert exc.value.reason == "mcp_oauth_credentials_missing"
+        # Class name in payload field, raw text NOT in message.
+        assert exc.value.payload.get("vault_error_class") == "RuntimeError"
+        assert "hvs.LEAK_BYTES" not in str(exc.value)
+        assert "vault detail:" not in str(exc.value)

@@ -133,9 +133,14 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     #     Token cache with refresh + audit / decision-history feed
     #     per the Sprint-5 plan's auth-probe contract.
     #   * ``mcp_capabilities.py`` is the signed-manifest capability
-    #     validator. Sprint-5 closed-enum 10-value vocabulary +
-    #     STDIO four-gate enforcement + Decision Lock umbrella;
-    #     fail-closed on every pack-controlled-TOML defect path.
+    #     validator. Sprint-5 closed-enum 12-value vocabulary (10
+    #     original + ``mcp_http_manifest_shape_invalid`` from T15 R1
+    #     P2 #6 + ``mcp_tool_data_classes_shape_invalid`` from T15
+    #     R2 P2) + STDIO four-gate enforcement + Decision Lock
+    #     umbrella; fail-closed on every pack-controlled-TOML
+    #     defect path (HTTP-family ``server_url`` / ``scopes`` shape,
+    #     tool ``data_classes`` shape, malformed transport, missing
+    #     auth surface, restricted-data-class on form / TTL gates).
     #   * ``mcp_manifest.py`` is the deferred-load signed-manifest
     #     extractor. Resolves ``cognic-pack-manifest.toml`` via
     #     ``Distribution.locate_file()`` WITHOUT importing pack
@@ -165,7 +170,8 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     #     ``_emit_call_evidence``; ``_DispatchContext`` for split
     #     acquired-vs-dispatched token state; ``mcp_orchestrator_error``
     #     closed-enum catch-all; per-tenant ``list_tools`` cache (key
-    #     includes ``tenant_id`` + scopes for cross-tenant isolation);
+    #     tuple ``(tenant_id, server_id, manifest_scopes)`` for
+    #     cross-tenant isolation);
     #     bounded pagination with cap + cycle detection via opaque
     #     SHA-256 cursor fingerprints; deep-copy of returned tool
     #     descriptors so callers can't mutate cache entries.

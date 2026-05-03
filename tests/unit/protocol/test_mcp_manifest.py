@@ -626,3 +626,83 @@ print(json.dumps(manifest))
         # extractor" — which would have surfaced as a non-zero
         # subprocess return code (caught above).
         assert "MUST NOT be executed" not in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# T15 R1 P3 #1 — package_name path-traversal defence-in-depth
+# ---------------------------------------------------------------------------
+
+
+class TestPackageNamePathTraversalDefence:
+    """T15 R1 P3 #1: ``package_name`` is derived from pack-controlled
+    distribution metadata (entry-point group / wheel package
+    declaration) and interpolated into a path passed to
+    :meth:`Distribution.locate_file`. A malformed value containing
+    path separators or ``..`` could in principle make the deferred
+    extractor probe outside the intended package-data path.
+
+    Defence-in-depth gate ``_validate_package_name`` rejects any
+    value that isn't a single Python identifier segment (matching
+    ``^[A-Za-z_][A-Za-z0-9_]*$``) BEFORE any path interpolation.
+    Mirrors :func:`_validate_version_for_object_key` from Sprint 4
+    R1 P2 (object-store key safety).
+    """
+
+    @pytest.mark.parametrize(
+        ("malformed_name", "label"),
+        [
+            ("..", "parent-traversal"),
+            ("../etc", "relative-traversal"),
+            ("foo/../bar", "embedded-traversal"),
+            ("foo/bar", "forward-slash"),
+            ("foo\\bar", "backslash"),
+            (".hidden", "leading-dot"),
+            ("foo-bar", "hyphen-not-identifier"),
+            ("0foo", "leading-digit"),
+            ("foo bar", "space"),
+            ("foo;rm -rf /", "shell-metacharacter"),
+            ("", "empty-string"),
+        ],
+    )
+    def test_malformed_package_name_rejected(self, malformed_name: str, label: str) -> None:
+        """Every malformed shape produces ``PackManifestNotFoundError``
+        BEFORE ``Distribution.locate_file`` would resolve the path."""
+        with pytest.raises(PackManifestNotFoundError) as exc:
+            extract_pack_manifest(
+                distribution_name="cognic-test-pack",
+                package_name=malformed_name,
+            )
+        assert "package_name must be a single Python identifier segment" in str(exc.value)
+
+    @pytest.mark.parametrize(
+        "non_string",
+        [42, True, None, ["foo"], {"name": "foo"}],
+    )
+    def test_non_string_package_name_rejected(self, non_string: Any) -> None:
+        """Non-string ``package_name`` shapes are rejected at the
+        same gate."""
+        with pytest.raises(PackManifestNotFoundError):
+            extract_pack_manifest(
+                distribution_name="cognic-test-pack",
+                package_name=non_string,
+            )
+
+    @pytest.mark.parametrize(
+        "valid_name",
+        ["foo", "foo_bar", "_private", "foo123", "FooBar", "_"],
+    )
+    def test_well_formed_package_name_accepted_by_gate(self, valid_name: str) -> None:
+        """Valid Python-identifier shapes pass the gate; the
+        extractor proceeds to the distribution lookup. The downstream
+        path raises ``PackManifestNotFoundError`` for a different
+        reason (distribution not installed) — proves the gate let the
+        value through to the next step."""
+        with pytest.raises(PackManifestNotFoundError) as exc:
+            extract_pack_manifest(
+                distribution_name=f"cognic-{valid_name}-totally-not-installed",
+                package_name=valid_name,
+            )
+        # Distinct from the package-name gate — this is the
+        # distribution-not-installed path. Message text differs.
+        assert "is not installed" in str(exc.value)
+        assert "package_name must be a single" not in str(exc.value)

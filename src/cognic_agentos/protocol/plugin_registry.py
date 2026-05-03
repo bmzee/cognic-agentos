@@ -106,6 +106,8 @@ RefusalReason = Literal[
     "mcp_stdio_command_not_allowlisted",  # STDIO command not on per-tenant allow-list
     "mcp_stdio_disabled_in_sprint_5",  # umbrella refusal until Sprint 8
     "mcp_transport_unsupported",  # transport != known set (R1 P1 #2 — was silent skip)
+    "mcp_http_manifest_shape_invalid",  # HTTP server_url/scopes shape (T15 R1 P2 #6)
+    "mcp_tool_data_classes_shape_invalid",  # tool data_classes shape (T15 R2 P2)
     # Sprint 5 — registration auth-probe failures (T6.3; 11 values)
     "mcp_as_not_allowlisted",  # PRM advertises non-allowlisted AS
     "mcp_token_audience_mismatch",  # token aud != resource indicator
@@ -141,7 +143,7 @@ _VALID_REFUSAL_REASONS: frozenset[str] = frozenset(
         # T6 admission code path emits it (R2 doctrine).
         "mcp_manifest_missing",
         "mcp_manifest_malformed",
-        # Sprint 5 — capability (10)
+        # Sprint 5 — capability (12; was 10 pre-T15-R1, 11 after T15 R1 P2 #6)
         "mcp_anonymous_refused",
         "mcp_resources_declared_but_no_list",
         "mcp_sampling_default_denied",
@@ -152,6 +154,8 @@ _VALID_REFUSAL_REASONS: frozenset[str] = frozenset(
         "mcp_stdio_command_not_allowlisted",
         "mcp_stdio_disabled_in_sprint_5",
         "mcp_transport_unsupported",
+        "mcp_http_manifest_shape_invalid",  # T15 R1 P2 #6
+        "mcp_tool_data_classes_shape_invalid",  # T15 R2 P2
         # Sprint 5 — auth-probe (11)
         "mcp_as_not_allowlisted",
         "mcp_token_audience_mismatch",
@@ -943,10 +947,12 @@ class PluginRegistry:
         if not validation.ok:
             assert validation.reason is not None  # invariant: reason non-None when not ok
             # ValidationReason is a strict subset of RefusalReason; the
-            # validator's literal IS the refusal subset for the 10
+            # validator's literal IS the refusal subset for the 12
             # capability-side reasons (T6 R1 P1 #2 added
-            # ``mcp_transport_unsupported`` to the original 9; pinned by
-            # the test_validation_reason_literal_matches_expected_set
+            # ``mcp_transport_unsupported`` to the original 9; T15 R1
+            # P2 #6 added ``mcp_http_manifest_shape_invalid``; T15 R2
+            # P2 added ``mcp_tool_data_classes_shape_invalid``; pinned
+            # by the test_validation_reason_literal_matches_expected_set
             # drift test). The return is type-safe by construction.
             return validation.reason
 

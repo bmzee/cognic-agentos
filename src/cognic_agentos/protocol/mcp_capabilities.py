@@ -95,6 +95,7 @@ runtime check.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -121,6 +122,24 @@ ValidationReason = Literal[
     "mcp_stdio_command_not_allowlisted",
     "mcp_stdio_disabled_in_sprint_5",
     "mcp_transport_unsupported",
+    # T15 R1 P2 #6: HTTP-family manifest shape gate. Catches malformed
+    # ``server_url`` / ``scopes`` BEFORE the registration auth probe
+    # invokes ``MCPAuthzClient.acquire_token`` with the values. Without
+    # this gate, ``scopes = "mcp:tools"`` (string instead of list)
+    # becomes ``tuple("mcp:tools")`` — a 9-character tuple whose
+    # ``" ".join(...)`` produces the wrong scope-grant string and could
+    # under-/over-grant tokens; ``[42]`` crashes at the same join site;
+    # blank ``server_url`` reaches httpx with an empty / malformed URL
+    # rather than a closed-enum manifest refusal.
+    "mcp_http_manifest_shape_invalid",
+    # T15 R2 P2: tool ``data_classes`` shape gate. The R1 fail-open
+    # helper coerced any non-``list[str]`` shape into an empty set,
+    # silently bypassing the form / TTL restricted-data refusals.
+    # Reviewer rejected: signed-static manifest contract requires
+    # fail-CLOSED on shape violations. This refusal fires whenever a
+    # tool block declares ``data_classes`` with a malformed shape
+    # (non-list, list-with-non-string, list-with-blank).
+    "mcp_tool_data_classes_shape_invalid",
 ]
 
 
@@ -258,6 +277,77 @@ def _safe_get_dict(parent: Any, key: str) -> dict[str, Any]:
     return value
 
 
+def _data_classes_shape_violation(tool: dict[str, Any]) -> dict[str, Any] | None:
+    """T15 R2 P2: pack-controlled-TOML SHAPE GATE for ``data_classes``.
+
+    The previous fail-open helper (``_safe_data_classes``) treated any
+    non-``list[str]`` shape as "no data classes declared" and silently
+    bypassed the form/TTL restricted-data-class refusals — a fail-OPEN
+    posture inconsistent with the doctrine that signed-static manifests
+    must fail-CLOSED on shape violations (R2 reviewer rejection of the
+    R1 fail-open helper).
+
+    This shape-only gate returns a closed-enum refusal payload (caller
+    wraps in :class:`ManifestValidation`) when ``data_classes`` is
+    present but has an invalid shape. ``data_classes`` is OPTIONAL —
+    a tool with no ``data_classes`` key at all (or with an empty list)
+    is well-shaped; only an explicit-but-malformed value refuses.
+
+    Returns:
+      - ``None`` when the tool's ``data_classes`` is absent OR is a
+        well-formed ``list[str]`` of non-empty strings.
+      - A diagnostic dict (caller-formed payload) when the shape is
+        invalid: non-list shape, list with non-string element,
+        list with empty/whitespace-only string, etc.
+
+    The cosign-signed manifest with a malformed ``data_classes`` field
+    is a manifest defect by ADR-002 / ADR-017 contract; the validator
+    MUST surface a closed-enum refusal so the downstream admission
+    pipeline produces a refusal audit row rather than silently
+    proceeding with the gates skipped.
+    """
+    if "data_classes" not in tool:
+        return None
+    raw = tool["data_classes"]
+    if not isinstance(raw, list):
+        return {
+            "tool_name": tool.get("name"),
+            "field": "data_classes",
+            "declared_type": type(raw).__name__,
+            "reason_detail": "data_classes must be a list of non-empty strings",
+        }
+    for entry in raw:
+        if not isinstance(entry, str):
+            return {
+                "tool_name": tool.get("name"),
+                "field": "data_classes",
+                "reason_detail": ("every data_classes entry must be a non-empty string"),
+                "malformed_entry_type": type(entry).__name__,
+            }
+        if not entry.strip():
+            return {
+                "tool_name": tool.get("name"),
+                "field": "data_classes",
+                "reason_detail": "data_classes entries must not be empty / whitespace-only",
+            }
+    return None
+
+
+def _normalise_data_classes(tool: dict[str, Any]) -> set[str]:
+    """Return the tool's ``data_classes`` as a normalised
+    ``set[str]``. CALLER MUST have already validated shape via
+    :func:`_data_classes_shape_violation` — passing a malformed shape
+    here is undefined behaviour (the function trusts its input).
+
+    Whitespace-only strings have already been rejected at the shape
+    gate; non-list shapes have already been rejected. So this is a
+    pure ``set(tool["data_classes"])`` with the absent-key fallback
+    to empty set.
+    """
+    raw = tool.get("data_classes", [])
+    return {item.strip() for item in raw if isinstance(item, str) and item.strip()}
+
+
 def _mcp_block(manifest: dict[str, Any]) -> dict[str, Any]:
     """Safe accessor for ``[tool.cognic.mcp]`` — returns ``{}`` if
     any intermediate key is missing OR any intermediate (incl. the
@@ -345,6 +435,53 @@ async def validate_mcp_manifest(
             payload={"declared_auth": auth},
         )
 
+    # Gate 1.5 (T15 R1 P2 #6): HTTP-family manifest shape check. Fires
+    # only for HTTP transports (STDIO has its own gates 6.a-d below).
+    # ``server_url`` MUST be a non-empty string; ``scopes`` MUST be
+    # a list/tuple of non-empty strings. Without this gate, a string
+    # ``scopes = "mcp:tools"`` becomes a 9-element tuple of characters
+    # downstream (``tuple("mcp:tools")``) — silently corrupting the
+    # token's scope grant. ``[42]`` crashes at ``" ".join(...)`` time
+    # in ``_request_token``. Blank or non-URL ``server_url`` reaches
+    # httpx as an unrouteable address rather than producing a closed-
+    # enum manifest refusal. Catching all three at admission keeps the
+    # auth probe + runtime invocation paths free of pack-controlled
+    # type confusion.
+    if transport in _HTTP_TRANSPORT_VALUES:
+        server_url = mcp.get("server_url")
+        if not isinstance(server_url, str) or not server_url.strip():
+            return ManifestValidation(
+                ok=False,
+                reason="mcp_http_manifest_shape_invalid",
+                payload={
+                    "field": "server_url",
+                    "declared_type": type(server_url).__name__,
+                    "reason_detail": "server_url must be a non-empty string",
+                },
+            )
+        scopes = mcp.get("scopes")
+        if not isinstance(scopes, list | tuple):
+            return ManifestValidation(
+                ok=False,
+                reason="mcp_http_manifest_shape_invalid",
+                payload={
+                    "field": "scopes",
+                    "declared_type": type(scopes).__name__,
+                    "reason_detail": "scopes must be a list of strings",
+                },
+            )
+        for entry in scopes:
+            if not isinstance(entry, str) or not entry.strip():
+                return ManifestValidation(
+                    ok=False,
+                    reason="mcp_http_manifest_shape_invalid",
+                    payload={
+                        "field": "scopes",
+                        "reason_detail": ("every scope must be a non-empty string"),
+                        "malformed_entry_type": type(entry).__name__,
+                    },
+                )
+
     # Gate 2: resources gate. ``resources_supported = true`` requires
     # both ``resources_list_supported`` and ``resources_read_supported``;
     # MCP server can't expose resources without the read primitive.
@@ -374,19 +511,46 @@ async def validate_mcp_manifest(
                     "sampling_policy_bundle": str(context.sampling_policy_bundle),
                 },
             )
-        decision = await context.opa_engine.evaluate(
-            decision_point=_SAMPLING_DECISION_POINT,
-            input={
-                "pack": {"sampling_supported": True},
-                "tenant": {"sampling_permitted": context.tenant_sampling_permitted},
-                "cloud_policy": {
-                    "tier_consistent": context.cloud_policy_tier_consistent,
-                    "allow_external_llm_consistent": (
-                        context.cloud_policy_allow_external_llm_consistent
-                    ),
+        # T15 R1 P2 #5: an installed OPA engine that raises during
+        # ``evaluate()`` (subprocess timeout, JSON-decode failure,
+        # malformed Rego output, OPA binary missing from PATH at
+        # runtime) MUST default-deny rather than letting the raw
+        # exception propagate. Per Sprint-4 doctrine + ADR-015
+        # §"Default-deny posture": any policy-engine unavailability
+        # is a deny. Without the wrap, a raw exception would bypass
+        # the closed-enum ``ManifestValidation`` envelope and skip
+        # the registration-refusal evidence path.
+        # ``CancelledError`` is intentionally NOT caught — task
+        # cancellation should propagate. ``type(exc).__name__`` is
+        # carried in the payload for diagnostics; raw ``str(exc)``
+        # is intentionally NOT included (could leak Rego source
+        # fragments, file-system paths, or subprocess stderr text).
+        try:
+            decision = await context.opa_engine.evaluate(
+                decision_point=_SAMPLING_DECISION_POINT,
+                input={
+                    "pack": {"sampling_supported": True},
+                    "tenant": {"sampling_permitted": context.tenant_sampling_permitted},
+                    "cloud_policy": {
+                        "tier_consistent": context.cloud_policy_tier_consistent,
+                        "allow_external_llm_consistent": (
+                            context.cloud_policy_allow_external_llm_consistent
+                        ),
+                    },
                 },
-            },
-        )
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            return ManifestValidation(
+                ok=False,
+                reason="mcp_sampling_default_denied",
+                payload={
+                    "reason_detail": "opa_evaluate_failed",
+                    "sampling_policy_bundle": str(context.sampling_policy_bundle),
+                    "error_type": type(exc).__name__,
+                },
+            )
         if not decision.allow:
             return ManifestValidation(
                 ok=False,
@@ -401,11 +565,32 @@ async def validate_mcp_manifest(
                 },
             )
 
+    # Gate 3.5 (T15 R2 P2): tool-block ``data_classes`` shape gate.
+    # Refuses fail-CLOSED on any tool whose ``data_classes`` is
+    # present-but-malformed (non-list, list-with-non-string,
+    # list-with-blank-string). Fires before gates 4 + 5 consume the
+    # field so a malformed value can never silently bypass the
+    # restricted-data refusals downstream. Tools that omit
+    # ``data_classes`` entirely (or declare an empty list) are
+    # well-shaped and pass; only an explicit-but-malformed value is a
+    # refusal. Reviewer rejected the R1 fail-OPEN coercion-to-empty-set
+    # behaviour: signed-static manifest contract requires fail-CLOSED.
+    for tool in _tools_block(manifest):
+        violation = _data_classes_shape_violation(tool)
+        if violation is not None:
+            return ManifestValidation(
+                ok=False,
+                reason="mcp_tool_data_classes_shape_invalid",
+                payload=violation,
+            )
+
     # Gate 4: elicitation form mode + restricted data-class.
+    # Shape gate above guarantees ``data_classes`` is well-formed
+    # (or absent) for every tool the gate iterates here.
     elicitation_modes = mcp.get("elicitation_modes", [])
     if isinstance(elicitation_modes, list) and "form" in elicitation_modes:
         for tool in _tools_block(manifest):
-            tool_data_classes = set(tool.get("data_classes", []) or [])
+            tool_data_classes = _normalise_data_classes(tool)
             restricted_intersect = tool_data_classes & _RESTRICTED_DATA_CLASSES
             if restricted_intersect:
                 return ManifestValidation(
@@ -420,7 +605,7 @@ async def validate_mcp_manifest(
     # Gate 5: TTL caching + restricted data-class.
     for tool in _tools_block(manifest):
         if tool.get("caching_strategy") == "ttl":
-            tool_data_classes = set(tool.get("data_classes", []) or [])
+            tool_data_classes = _normalise_data_classes(tool)
             restricted_intersect = tool_data_classes & _RESTRICTED_DATA_CLASSES
             if restricted_intersect:
                 return ManifestValidation(

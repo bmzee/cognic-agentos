@@ -254,6 +254,10 @@ _EXPECTED_VALIDATION_REASONS: frozenset[str] = frozenset(
         "mcp_stdio_command_not_allowlisted",
         "mcp_stdio_disabled_in_sprint_5",
         "mcp_transport_unsupported",
+        # T15 R1 P2 #6 — HTTP-family server_url/scopes shape gate
+        "mcp_http_manifest_shape_invalid",
+        # T15 R2 P2 — tool data_classes shape gate (fail-closed)
+        "mcp_tool_data_classes_shape_invalid",
     }
 )
 

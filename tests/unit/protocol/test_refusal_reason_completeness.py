@@ -35,10 +35,16 @@ from cognic_agentos.protocol.plugin_registry import RefusalReason
 #:
 #: Layout:
 #:   - 2 manifest extraction failures (T6.1)
-#:   - 10 capability validator failures (T6.2; +mcp_transport_unsupported R1)
+#:   - 12 capability validator failures (T6.2 + T15 R1 P2 #6 added
+#:     ``mcp_http_manifest_shape_invalid`` so HTTP-family ``server_url`` /
+#:     ``scopes`` shape errors fire at admission rather than crashing
+#:     the auth probe with type confusion + T15 R2 P2 added
+#:     ``mcp_tool_data_classes_shape_invalid`` so malformed tool
+#:     ``data_classes`` fail closed via the closed-enum envelope rather
+#:     than silently bypassing the form/TTL restricted-data refusals)
 #:   - 11 registration auth-probe failures (T6.3)
 #:   - 1 registry configuration failure (T6.3; mcp_admission_deps_required R1)
-#:   = 24 total
+#:   = 26 total
 #:
 #: ``mcp_step_up_unauthorised`` is **runtime-only** (emitted by
 #: ``MCPHost.call_tool``'s step-up flow at T9, NEVER from
@@ -50,7 +56,9 @@ SPRINT_5_REFUSAL_REASONS: frozenset[str] = frozenset(
         # T6.1 manifest extraction (2)
         "mcp_manifest_missing",
         "mcp_manifest_malformed",
-        # T6.2 capability validator (10 — R1 P1 #2 added mcp_transport_unsupported)
+        # T6.2 capability validator (12 — R1 P1 #2 added mcp_transport_unsupported;
+        # T15 R1 P2 #6 added mcp_http_manifest_shape_invalid;
+        # T15 R2 P2 added mcp_tool_data_classes_shape_invalid)
         "mcp_anonymous_refused",
         "mcp_resources_declared_but_no_list",
         "mcp_sampling_default_denied",
@@ -61,6 +69,8 @@ SPRINT_5_REFUSAL_REASONS: frozenset[str] = frozenset(
         "mcp_stdio_command_not_allowlisted",
         "mcp_stdio_disabled_in_sprint_5",
         "mcp_transport_unsupported",
+        "mcp_http_manifest_shape_invalid",
+        "mcp_tool_data_classes_shape_invalid",
         # T6.3 registration auth probe (11)
         "mcp_as_not_allowlisted",
         "mcp_token_audience_mismatch",
@@ -94,16 +104,20 @@ class TestRefusalReasonCompleteness:
        ``test_mcp_manifest.py`` that asserts the reason's outcome.
     """
 
-    def test_total_count_is_24(self) -> None:
-        """Pin the total at 24 so future arithmetic drift is loud
+    def test_total_count_is_26(self) -> None:
+        """Pin the total at 26 so future arithmetic drift is loud
         (the count has been wrong in the plan three times — R2 said
         14 vs 16; R14 corrected 14 → 16 in the T6.3 catalogue summary;
-        T6 R1 grew the count 22 → 24 with the
-        ``mcp_transport_unsupported`` (R1 P1 #2) and
-        ``mcp_admission_deps_required`` (R1 P1 #1) additions). The
-        literal list above is the source of truth."""
-        assert len(SPRINT_5_REFUSAL_REASONS) == 24, (
-            f"Expected 24 Sprint-5 refusal reasons; got {len(SPRINT_5_REFUSAL_REASONS)}. "
+        T6 R1 grew the count 22 → 24 with ``mcp_transport_unsupported``
+        (R1 P1 #2) and ``mcp_admission_deps_required`` (R1 P1 #1);
+        T15 R1 P2 #6 grew it 24 → 25 with
+        ``mcp_http_manifest_shape_invalid``; T15 R2 P2 grew it 25 → 26
+        with ``mcp_tool_data_classes_shape_invalid`` so malformed tool
+        ``data_classes`` fail closed via the closed-enum envelope
+        rather than silently bypassing the form/TTL restricted-data
+        refusals). The literal list above is the source of truth."""
+        assert len(SPRINT_5_REFUSAL_REASONS) == 26, (
+            f"Expected 26 Sprint-5 refusal reasons; got {len(SPRINT_5_REFUSAL_REASONS)}. "
             f"Update the count or the set."
         )
 
@@ -358,4 +372,4 @@ class TestSprint5DriftDetectorSelfTest:
         assert inspect.getsourcefile(self.test_set_inspection_works) is not None
 
     def test_canonical_count_matches_set_size(self) -> None:
-        assert len(SPRINT_5_REFUSAL_REASONS) == 24
+        assert len(SPRINT_5_REFUSAL_REASONS) == 26
