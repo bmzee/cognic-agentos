@@ -1,0 +1,32 @@
+# Sprint-5 fixture: signed static MCP pack manifest.
+#
+# This file ships as package data inside the importable package
+# directory per ADR-002 §"MCP STDIO threat model" gate 1. The pack's
+# cosign-verified wheel covers its bytes via inclusion (force-include
+# in pyproject.toml). The runtime plugin registry reads THIS file at
+# admission via mcp_manifest.extract_pack_manifest() — never loads
+# pack code at admission time.
+#
+# T6 reads this file. T12 will extend the pack with real attestations
+# + an MCP server; the manifest contents may grow then to cover more
+# fields. Today's contents are the minimum the T6.2 capability
+# validator can chew on.
+
+[tool.cognic.identity]
+pack_id = "cognic-test-mcp-pack"
+pack_version = "0.1.0"
+
+[tool.cognic.mcp]
+transport = "http"
+auth = "oauth-prm"
+server_url = "https://server.example/mcp"
+scopes = ["mcp:tools"]
+
+[tool.cognic.runtime]
+risk_tier = "read_only"
+
+[tool.cognic.data_governance]
+data_classes = []
+
+[tool.cognic.supply_chain]
+slsa_required_version = "v1.0"

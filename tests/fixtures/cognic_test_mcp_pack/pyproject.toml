@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cognic-test-mcp-pack"
+version = "0.1.0"
+description = "Sprint-5 test pack — exercises the MCP manifest extractor (T6.1) + capability validator (T6.2). T12 will extend this fixture with a real HTTP MCP server module + cosign attestations to drive the end-to-end admission test; T6 only needs the static manifest in package data."
+readme = { text = "Test fixture pack — installed via `uv pip install -e tests/fixtures/cognic_test_mcp_pack/` for the Sprint-5 mcp_manifest extractor tests. Not a real Cognic plugin pack; do NOT install in production. The package's __init__.py is deliberately import-poisoned (raise AssertionError) to enforce the deferred-load invariant: extract_pack_manifest MUST resolve cognic-pack-manifest.toml via Distribution.locate_file() WITHOUT importing the package — if it ever regresses to importing, the assertion fires and the test fails loudly.", content-type = "text/plain" }
+requires-python = ">=3.11"
+authors = [{ name = "Cognic AgentOS Sprint-5 fixtures" }]
+license = { text = "MIT" }
+
+[project.entry-points."cognic.tools"]
+# Entry-point name = the alias operators see in /api/v1/system/plugins.
+# Distribution name (cognic-test-mcp-pack above) is the cosign-signed
+# identity. T12 adds the real Plugin class; T6 leaves this stubbed
+# because the manifest extractor never loads entry points.
+cognic_test_mcp_pack = "cognic_test_mcp_pack:Plugin"
+
+[tool.hatch.build.targets.wheel]
+packages = ["cognic_test_mcp_pack"]
+
+# The signed manifest MUST ship as package data inside the importable
+# package directory per ADR-002 §"MCP STDIO threat model" gate 1.
+# Hatch includes data files matching the pattern by default; the
+# explicit force-include keeps the contract obvious in source.
+[tool.hatch.build.targets.wheel.force-include]
+"cognic_test_mcp_pack/cognic-pack-manifest.toml" = "cognic_test_mcp_pack/cognic-pack-manifest.toml"

@@ -47,8 +47,12 @@ if TYPE_CHECKING:
     # these import-only for type-checking lets PluginRegistry stay a
     # safe import target for tests / lifespan code that don't touch
     # the T10 code path.
+    from collections.abc import Callable
+
+    from cognic_agentos.core.config import Settings
     from cognic_agentos.core.policy.engine import OPAEngine
-    from cognic_agentos.db.adapters.protocols import ObjectStoreAdapter
+    from cognic_agentos.db.adapters.protocols import ObjectStoreAdapter, SecretAdapter
+    from cognic_agentos.protocol.mcp_authz import MCPAuthzClient
     from cognic_agentos.protocol.supply_chain import (
         SupplyChainPipeline,
         VulnThresholds,
@@ -75,6 +79,7 @@ _ENTRY_POINT_GROUPS: dict[PluginKind, str] = {
 #: makes Sprint 7B's reviewer dashboard + Sprint 13.5's OPA bundles
 #: stable across sprint boundaries.
 RefusalReason = Literal[
+    # Sprint 4 — existing (8 values)
     "not_in_tenant_allowlist",
     "cosign_verification_failed",
     "sbom_missing",
@@ -83,12 +88,45 @@ RefusalReason = Literal[
     "intoto_tampered",
     "sbom_tampered",
     "policy_denied_partial_grade",
+    # Sprint 5 — manifest extraction failures (T6.1; 2 values)
+    "mcp_manifest_missing",  # RESERVED for a future explicit MCP-intent path (Sprint-7A
+    # ``agentos validate`` or future MCP-specific entry-point group); current T6 admission
+    # treats absent ``cognic-pack-manifest.toml`` as "no MCP intent" and proceeds — no
+    # admission code path emits this today (R2 doctrine; see _mcp_admit + mcp_manifest
+    # module docstring). Mapper kept reserved so the future caller has the literal ready.
+    "mcp_manifest_malformed",  # TOML invalid OR present-but-non-dict [tool.cognic.mcp] (R2 P1)
+    # Sprint 5 — capability-validator failures (T6.2; 10 values)
+    "mcp_anonymous_refused",  # neither oauth-prm nor api-key declared
+    "mcp_resources_declared_but_no_list",  # resources_supported=true but list/read missing
+    "mcp_sampling_default_denied",  # 4-condition gate failed
+    "mcp_elicitation_form_restricted_data_class",  # form mode + PII/payment/regulator
+    "mcp_caching_ttl_restricted_data_class",  # ttl cache for restricted data class
+    "mcp_stdio_manifest_incomplete",  # STDIO missing command/args/env_allowlist
+    "mcp_stdio_manifest_shell_metacharacter",  # STDIO command contains shell metachars
+    "mcp_stdio_command_not_allowlisted",  # STDIO command not on per-tenant allow-list
+    "mcp_stdio_disabled_in_sprint_5",  # umbrella refusal until Sprint 8
+    "mcp_transport_unsupported",  # transport != known set (R1 P1 #2 — was silent skip)
+    # Sprint 5 — registration auth-probe failures (T6.3; 11 values)
+    "mcp_as_not_allowlisted",  # PRM advertises non-allowlisted AS
+    "mcp_token_audience_mismatch",  # token aud != resource indicator
+    "mcp_token_scope_overgrant",  # AS granted scopes not in manifest set (R6)
+    "mcp_oauth_request_timeout",  # PRM/token request exceeded timeout
+    "mcp_oauth_transport_failure",  # DNS/TLS/network unreachable on PRM/AS/token (R6)
+    "mcp_oauth_credentials_missing",  # Vault has no client_id/client_secret/auth_method (R6)
+    "mcp_oauth_as_discovery_invalid",  # AS .well-known/oauth-authorization-server bad (R11)
+    "mcp_oauth_token_endpoint_error",  # AS token endpoint non-200 (R11)
+    "mcp_oauth_token_response_invalid",  # token response shape malformed (R11)
+    "mcp_prm_invalid",  # PRM document malformed (MCP server side)
+    "mcp_api_key_fallback_unresolved",  # api-key fallback Vault path / secret invalid
+    # Sprint 5 — registry-configuration failures (T6.3; 1 value)
+    "mcp_admission_deps_required",  # MCP block declared but mcp_admission=None (R1 P1 #1)
 ]
 
 AttestationGrade = Literal["full", "partial"]
 
 _VALID_REFUSAL_REASONS: frozenset[str] = frozenset(
     {
+        # Sprint 4
         "not_in_tenant_allowlist",
         "cosign_verification_failed",
         "sbom_missing",
@@ -97,8 +135,189 @@ _VALID_REFUSAL_REASONS: frozenset[str] = frozenset(
         "intoto_tampered",
         "sbom_tampered",
         "policy_denied_partial_grade",
+        # Sprint 5 — manifest (2). Same reserved/future status as the
+        # literal above: ``mcp_manifest_missing`` is in the validset
+        # for type-checker + drift-detector consistency but no current
+        # T6 admission code path emits it (R2 doctrine).
+        "mcp_manifest_missing",
+        "mcp_manifest_malformed",
+        # Sprint 5 — capability (10)
+        "mcp_anonymous_refused",
+        "mcp_resources_declared_but_no_list",
+        "mcp_sampling_default_denied",
+        "mcp_elicitation_form_restricted_data_class",
+        "mcp_caching_ttl_restricted_data_class",
+        "mcp_stdio_manifest_incomplete",
+        "mcp_stdio_manifest_shell_metacharacter",
+        "mcp_stdio_command_not_allowlisted",
+        "mcp_stdio_disabled_in_sprint_5",
+        "mcp_transport_unsupported",
+        # Sprint 5 — auth-probe (11)
+        "mcp_as_not_allowlisted",
+        "mcp_token_audience_mismatch",
+        "mcp_token_scope_overgrant",
+        "mcp_oauth_request_timeout",
+        "mcp_oauth_transport_failure",
+        "mcp_oauth_credentials_missing",
+        "mcp_oauth_as_discovery_invalid",
+        "mcp_oauth_token_endpoint_error",
+        "mcp_oauth_token_response_invalid",
+        "mcp_prm_invalid",
+        "mcp_api_key_fallback_unresolved",
+        # Sprint 5 — registry configuration (1)
+        "mcp_admission_deps_required",
     }
 )
+
+
+#: 1:1 mapping from MCPAuthzClient's :data:`AuthzReason` vocabulary
+#: to :data:`RefusalReason`. Both literals share the same underlying
+#: strings for the eleven registration-boundary reasons; the mapper
+#: exists as a single typed change site so a future divergence
+#: between the two vocabularies (if it ever happens) lives here, not
+#: scattered across the registry's exception-handling code.
+#:
+#: ``mcp_step_up_unauthorised`` is **runtime-only** — emitted by
+#: :meth:`MCPHost.call_tool`'s step-up flow at T9, NEVER from a
+#: registration-time auth probe. Passing it to this mapper is a
+#: programming error and raises :class:`ValueError`.
+_AUTHZ_REASON_TO_REFUSAL: dict[str, RefusalReason] = {
+    "mcp_anonymous_refused": "mcp_anonymous_refused",
+    "mcp_as_not_allowlisted": "mcp_as_not_allowlisted",
+    "mcp_token_audience_mismatch": "mcp_token_audience_mismatch",
+    "mcp_token_scope_overgrant": "mcp_token_scope_overgrant",
+    "mcp_oauth_request_timeout": "mcp_oauth_request_timeout",
+    "mcp_oauth_transport_failure": "mcp_oauth_transport_failure",
+    "mcp_oauth_credentials_missing": "mcp_oauth_credentials_missing",
+    "mcp_oauth_as_discovery_invalid": "mcp_oauth_as_discovery_invalid",
+    "mcp_oauth_token_endpoint_error": "mcp_oauth_token_endpoint_error",
+    "mcp_oauth_token_response_invalid": "mcp_oauth_token_response_invalid",
+    "mcp_prm_invalid": "mcp_prm_invalid",
+}
+
+
+def _authz_reason_to_refusal(authz_reason: str) -> RefusalReason:
+    """Map an :class:`MCPAuthzError.reason` string to the
+    corresponding :data:`RefusalReason`.
+
+    Eleven reasons map identity-style (the two literals share strings
+    for the registration-boundary set). ``mcp_step_up_unauthorised``
+    is runtime-only and raises here — it must never reach the
+    registration-side mapper.
+
+    :param authz_reason: A value of :data:`AuthzReason` from
+        :class:`cognic_agentos.protocol.mcp_authz.MCPAuthzError`.
+    :returns: The matching :data:`RefusalReason` literal.
+    :raises ValueError: If ``authz_reason`` is
+        ``"mcp_step_up_unauthorised"`` (runtime-only) or any unknown
+        value (defensive — would mean a closed-enum drift between
+        the AuthzReason and RefusalReason vocabularies that the
+        ``test_refusal_reason_completeness.py`` regression should
+        have caught at type-check time).
+    """
+    if authz_reason == "mcp_step_up_unauthorised":
+        raise ValueError(
+            "mcp_step_up_unauthorised is runtime-only (emitted by "
+            "MCPHost.call_tool's step-up flow); it MUST NOT reach the "
+            "registration-boundary refusal mapper."
+        )
+    try:
+        return _AUTHZ_REASON_TO_REFUSAL[authz_reason]
+    except KeyError as exc:
+        raise ValueError(
+            f"Unknown AuthzReason {authz_reason!r}; the closed-enum "
+            f"drift detector (test_refusal_reason_completeness.py) "
+            f"should have caught this at type-check time."
+        ) from exc
+
+
+@dataclass(frozen=True, slots=True)
+class MCPAdmissionDeps:
+    """Optional MCP admission dependencies.
+
+    When provided to :meth:`PluginRegistry.register_with_full_attestation_check`,
+    the three Sprint-5 MCP admission steps fire in order between the
+    Sprint-4 cryptographic gates (cosign + SBOM + Sigstore-bundle
+    persist) and the policy-engine grade evaluation:
+
+      A. Manifest extraction (T6.1) — read
+         ``cognic-pack-manifest.toml`` via
+         :func:`cognic_agentos.protocol.mcp_manifest.extract_pack_manifest`.
+         Outcomes per R2 doctrine: **missing manifest proceeds** (no
+         MCP intent — Sprint-4-style pack); **TOML decode failure**
+         refuses with ``mcp_manifest_malformed`` (always, regardless
+         of pack intent — cosign-signed bytes); **present-but-non-
+         dict ``[tool.cognic.mcp]`` block** refuses with
+         ``mcp_manifest_malformed`` via the registry's safe walk
+         (R2 P1). Note: ``mcp_manifest_missing`` is a closed-enum
+         literal RESERVED for a future explicit MCP-intent path
+         (Sprint-7A ``agentos validate`` or future MCP-specific
+         entry-point group); current T6 admission deliberately does
+         NOT emit it because the manifest's well-shaped ``[tool.cognic.mcp]``
+         block is the only valid MCP-intent signal — ``mcp_admission``
+         is dependency wiring, not pack intent.
+      B. Capability validation (T6.2) — pure-functional check via
+         :func:`cognic_agentos.protocol.mcp_capabilities.validate_mcp_manifest`.
+         Closed-enum failures map 1:1 to the matching
+         ``mcp_*`` :data:`RefusalReason`.
+      C. Registration-time auth probe (T6.3) — for HTTP transport
+         only; STDIO is umbrella-refused upstream by the validator.
+         For ``auth = "oauth-prm"``: construct a fresh
+         :class:`MCPAuthzClient` (via
+         :attr:`make_authz_client_for_probe`), call
+         :meth:`MCPAuthzClient.acquire_token`, discard the returned
+         token. Failures map via :func:`_authz_reason_to_refusal`.
+         For ``auth = "api-key"``: validate Vault path resolves AND
+         secret is non-empty AND manifest acknowledges deprecation;
+         any failure → ``mcp_api_key_fallback_unresolved``.
+
+    When ``mcp_admission`` is ``None`` (kernel-image deployment
+    without ``MCPHost`` wired), manifest extraction STILL RUNS
+    (always — per R2 #1) so the MCP-intent check below can fire:
+
+      - **Manifest absent** → no MCP intent; admission proceeds
+        straight to the policy-engine evaluation (Sprint-4 path).
+      - **Manifest present without ``[tool.cognic.mcp]``** → also
+        no MCP intent; same proceed path.
+      - **Manifest present with ``[tool.cognic.mcp]``** AND
+        ``mcp_admission`` is ``None`` → registry refuses
+        fail-closed with ``mcp_admission_deps_required`` (R1 P1
+        #1). MCP packs cannot register on a kernel image without
+        the admission infra wired.
+      - **Manifest present with malformed ``[tool.cognic.mcp]``**
+        (non-dict shape, e.g., ``mcp = "bad"``) → registry refuses
+        fail-closed with ``mcp_manifest_malformed`` (R2 P1).
+
+    R2 doctrine: ``mcp_admission`` is **dependency wiring**, NOT
+    pack-intent. A default-adapters caller may legitimately pass
+    these deps for every registration; they do NOT cause Sprint-4
+    packs to be rejected. The MCP-intent signal is the manifest's
+    well-shaped ``[tool.cognic.mcp]`` block — nothing else.
+
+    Fields:
+      - ``settings`` — for the STDIO command-allowlist Vault path
+        template + the sampling-policy bundle path.
+      - ``vault_client`` — for resolving the per-tenant STDIO
+        command allow-list AND the api-key fallback secret.
+      - ``opa_engine`` — for the four-condition sampling gate; pass
+        ``None`` if no MCP pack will declare ``sampling_supported =
+        true`` (the validator fail-closes with
+        ``mcp_sampling_default_denied`` when sampling is required
+        but the engine is missing — Sprint-4 default-deny doctrine).
+      - ``make_authz_client_for_probe`` — factory returning a fresh
+        :class:`MCPAuthzClient` per probe. The factory pattern keeps
+        the probe's token cache isolated from the runtime client's
+        cache, satisfying the "token-acquired-but-not-stored" probe
+        contract per ADR-002 §"MCP Authorization" step 8 (R10's
+        exact-match cache invariant means a leaked probe token
+        would otherwise be reused by the runtime client's first
+        call).
+    """
+
+    settings: Settings
+    vault_client: SecretAdapter
+    opa_engine: OPAEngine | None
+    make_authz_client_for_probe: Callable[[], MCPAuthzClient]
 
 
 @dataclass(frozen=True, slots=True)
@@ -523,6 +742,252 @@ class PluginRegistry:
             raise RegistrationRefused(kind, name, reason)
         return entry.entry_point.load()
 
+    # --- Sprint 5 T6: MCP admission steps -------------------------------
+
+    async def _mcp_admit(
+        self,
+        *,
+        pack: DiscoveredPack,
+        tenant_id: str,
+        request_id: str,
+        mcp_admission: MCPAdmissionDeps | None,
+    ) -> RefusalReason | None:
+        """Run the three Sprint-5 MCP admission steps; return ``None``
+        on success (or on a Sprint-4-style pack with no MCP block) or
+        a closed-enum :data:`RefusalReason` on failure.
+
+        Sub-steps in order (first failure wins):
+
+          A. **Manifest extraction (T6.1)** — read
+             ``cognic-pack-manifest.toml`` via
+             :func:`cognic_agentos.protocol.mcp_manifest.extract_pack_manifest`.
+             Five behaviours (R2 doctrine):
+               - **Manifest absent** → return ``None``; no MCP intent
+                 (Sprint-4-style pack, harmless). The R1 contract
+                 that refused with ``mcp_manifest_missing`` when
+                 admission deps were wired was wrong (R2 #1) —
+                 ``mcp_admission`` is dependency wiring, NOT pack
+                 intent. ``mcp_manifest_missing`` is now reserved
+                 for a future explicit MCP-intent signal (e.g.,
+                 Sprint-7A's ``agentos validate`` or a future
+                 MCP-specific entry-point group).
+               - **Manifest present, well-shaped MCP block** → step B.
+               - **Manifest present, NO ``[tool.cognic.mcp]`` block** →
+                 return ``None``; no MCP intent (Sprint-4 cognic pack
+                 with non-MCP config).
+               - **Manifest present, MALFORMED ``[tool.cognic.mcp]``**
+                 (e.g., ``mcp = "bad"``) → refuse with
+                 ``mcp_manifest_malformed`` (R2 P1 — was previously
+                 silent admission).
+               - **Manifest itself malformed** (TOML decode failure)
+                 → refuse with ``mcp_manifest_malformed`` (always —
+                 cosign-signed bytes, so a malformed manifest is a
+                 packaging-bug fail-closed event).
+          B. **Capability validation (T6.2)** — pure-functional
+             validator + OPA-backed sampling 4-condition gate.
+             ``mcp_transport_unsupported`` (R1 P1 #2) fires here for
+             unknown transport values.
+          C. **Registration auth probe (T6.3)** — HTTP-OAuth path
+             constructs a fresh :class:`MCPAuthzClient` (via the
+             admission-deps factory) and calls ``acquire_token``;
+             token discarded after probe (factory pattern keeps
+             probe cache isolated from runtime cache —
+             "token-acquired-but-not-stored" per ADR-002 §"MCP
+             Authorization" step 8). API-key path validates Vault
+             secret + deprecation acknowledgement.
+
+        **R1 P1 #1 fail-closed admission rule:** if the manifest
+        contains a ``[tool.cognic.mcp]`` block AND ``mcp_admission``
+        was not provided, the helper returns
+        ``mcp_admission_deps_required``. This prevents a caller that
+        forgot to wire MCPHost from silently admitting an MCP pack
+        without the manifest / capability / auth-probe gates running.
+        Sprint-4 packs without an ``[tool.cognic.mcp]`` block are
+        unaffected (they pass through with ``None``).
+        """
+        # Local imports — keep the module-import-time graph minimal
+        # so kernel-image deployments without MCP wired don't pay
+        # for these imports.
+        from cognic_agentos.protocol.mcp_authz import MCPAuthzError
+        from cognic_agentos.protocol.mcp_capabilities import (
+            ValidationContext,
+            validate_mcp_manifest,
+        )
+        from cognic_agentos.protocol.mcp_manifest import (
+            PackManifestMalformedError,
+            PackManifestNotFoundError,
+            extract_pack_manifest,
+        )
+
+        record = pack.record
+        # Derive importable package name from the entry-point value:
+        # ``"cognic_test_mcp_pack:Plugin"`` → ``"cognic_test_mcp_pack"``.
+        # Splits on ``:`` first (entry-point separator) then on ``.``
+        # (sub-module). Most packs follow PEP 503 normalisation
+        # (``-`` → ``_``) but the entry point is the authoritative
+        # source.
+        package_name = record.entry_point_value.split(":", 1)[0].split(".", 1)[0]
+
+        # Step A: extract manifest. ALWAYS attempted so the
+        # MCP-block detection below can fire regardless of whether
+        # the caller passed admission deps. The MCP-intent signal is
+        # the manifest's ``[tool.cognic.mcp]`` block, NOT the deps —
+        # a default-adapters caller may legitimately wire
+        # ``mcp_admission`` for every registration even though some
+        # packs are pure Sprint-4 (no MCP). Per R2 #1 (corrected
+        # from R1 #1), missing manifest ALWAYS proceeds.
+        try:
+            manifest = extract_pack_manifest(
+                distribution_name=record.distribution_name,
+                package_name=package_name,
+            )
+        except PackManifestNotFoundError:
+            # No manifest = no MCP intent. Sprint-4 pack OR
+            # misconfigured MCP pack (Sprint 7A's `agentos validate`
+            # catches the misconfigured case at dev time; the
+            # registry doesn't try to second-guess intent here).
+            return None
+        except PackManifestMalformedError:
+            # Malformed manifest is always a fail-closed event —
+            # the manifest bytes are cosign-signed, so a malformed
+            # manifest implies a packaging bug or corruption that
+            # MUST surface regardless of whether the pack is MCP.
+            _LOG.warning(
+                "T6: pack %s manifest is malformed at admission",
+                record.distribution_name,
+            )
+            return "mcp_manifest_malformed"
+
+        # Manifest extracted. Detect MCP intent by walking the path
+        # safely (R2 P1 — non-dict intermediates would otherwise
+        # raise raw AttributeError; the safe-walk treats them as
+        # absent). Three outcomes:
+        #
+        #   1. ``[tool.cognic.mcp]`` present-and-a-dict → MCP intent
+        #      (apply R1 fail-closed gate + steps B + C).
+        #   2. ``[tool.cognic.mcp]`` present-but-NOT-a-dict (e.g.,
+        #      ``mcp = "bad"``) → manifest shape malformed; refuse
+        #      with ``mcp_manifest_malformed``. R2 P1 — previously
+        #      treated as no MCP block → silent admission of
+        #      structurally-broken MCP declarations.
+        #   3. ``[tool.cognic.mcp]`` absent → no MCP intent; proceed
+        #      (Sprint-4-style pack).
+        mcp_value = _safe_walk_to_mcp(manifest)
+        if mcp_value is _MCP_BLOCK_MALFORMED:
+            _LOG.warning(
+                "T6: pack %s manifest contains a present-but-non-dict "
+                "[tool.cognic.mcp] entry; refusing as malformed",
+                record.distribution_name,
+            )
+            return "mcp_manifest_malformed"
+        if mcp_value is None:
+            # No MCP block — Sprint-4-style pack with non-MCP cognic
+            # config (or no cognic config at all). Proceed.
+            return None
+
+        # MCP block present-and-well-shaped. Now the R1 P1 #1
+        # admission-deps fail-closed gate fires:
+        if mcp_admission is None:
+            _LOG.warning(
+                "T6: pack %s declares [tool.cognic.mcp] but mcp_admission "
+                "was not provided to register_with_full_attestation_check; "
+                "refusing fail-closed (mcp_admission_deps_required)",
+                record.distribution_name,
+            )
+            return "mcp_admission_deps_required"
+
+        # From here onwards, mcp_admission is non-None (we just
+        # checked the fail-closed condition above). The narrowing
+        # is type-safe by control flow.
+        assert mcp_admission is not None
+
+        # Step B: capability validation. Build a ValidationContext
+        # from the admission deps + tenant_id. STDIO command
+        # allow-list resolved from Vault on a best-effort basis
+        # (missing → empty set → STDIO refused at the per-tenant
+        # gate, which is the correct default-deny posture).
+        stdio_allowlist = await _resolve_stdio_command_allowlist(
+            tenant_id=tenant_id, deps=mcp_admission
+        )
+        validation_context = ValidationContext(
+            tenant_id=tenant_id,
+            stdio_command_allowlist=stdio_allowlist,
+            # Sprint-5 default-deny posture for the sampling gate.
+            # Sprint 13.5 will source these from a richer
+            # tenant-policy bundle; today the validator's job is to
+            # surface the closed-enum refusal when sampling is
+            # requested without operator approval.
+            tenant_sampling_permitted=False,
+            cloud_policy_tier_consistent=True,
+            cloud_policy_allow_external_llm_consistent=(mcp_admission.settings.allow_external_llm),
+            opa_engine=mcp_admission.opa_engine,
+            sampling_policy_bundle=mcp_admission.settings.mcp_sampling_policy_bundle,
+        )
+        validation = await validate_mcp_manifest(manifest, context=validation_context)
+        if not validation.ok:
+            assert validation.reason is not None  # invariant: reason non-None when not ok
+            # ValidationReason is a strict subset of RefusalReason; the
+            # validator's literal IS the refusal subset for the 10
+            # capability-side reasons (T6 R1 P1 #2 added
+            # ``mcp_transport_unsupported`` to the original 9; pinned by
+            # the test_validation_reason_literal_matches_expected_set
+            # drift test). The return is type-safe by construction.
+            return validation.reason
+
+        # Step C: auth probe. Only fires for HTTP-family transports;
+        # STDIO is umbrella-refused above (the validator catches it
+        # before we get here, so we never reach the probe with STDIO).
+        # Both ``"http"`` (legacy) and ``"streamable-http"`` (canonical
+        # per MCP-CONFORMANCE.md) map to the same OAuth/PRM probe (R1
+        # P1 #2 — previously only ``"http"`` matched, which let a
+        # correctly-spec'd ``streamable-http`` pack skip the probe).
+        # The validator's transport closed-enum check (gate 0) means
+        # any value reaching here is necessarily one of the known
+        # transports.
+        from cognic_agentos.protocol.mcp_capabilities import (
+            _HTTP_TRANSPORT_VALUES,
+        )
+
+        mcp_block = manifest.get("tool", {}).get("cognic", {}).get("mcp", {})
+        if mcp_block.get("transport") not in _HTTP_TRANSPORT_VALUES:
+            return None  # STDIO already refused; safety-net for any future transports
+
+        auth_kind = mcp_block.get("auth")
+        if auth_kind == "oauth-prm":
+            try:
+                # Construct a FRESH client per probe (factory pattern)
+                # so the probe's token cache is isolated from any
+                # long-lived runtime client — "token-acquired-but-
+                # not-stored" per ADR-002 step 8.
+                authz_client = mcp_admission.make_authz_client_for_probe()
+                server_url = mcp_block.get("server_url", "")
+                manifest_scopes = tuple(mcp_block.get("scopes", []) or [])
+                _ = await authz_client.acquire_token(
+                    server_url=server_url,
+                    manifest_scopes=manifest_scopes,
+                    request_id=request_id,
+                    tenant_id=tenant_id,
+                )
+                # Token discarded — registration only validates "could
+                # acquire", not "use".
+            except MCPAuthzError as exc:
+                _LOG.info(
+                    "T6: pack %s OAuth probe refused with reason=%s",
+                    record.distribution_name,
+                    exc.reason,
+                )
+                return _authz_reason_to_refusal(exc.reason)
+        elif auth_kind == "api-key":
+            api_key_refusal = await _validate_api_key_fallback(
+                mcp_block=mcp_block,
+                tenant_id=tenant_id,
+                vault_client=mcp_admission.vault_client,
+            )
+            if api_key_refusal is not None:
+                return api_key_refusal
+
+        return None
+
     # --- T10: full pack-admission integration ----------------------------
 
     async def register_with_full_attestation_check(
@@ -540,6 +1005,7 @@ class PluginRegistry:
         license_allowlist: tuple[str, ...] = (),
         vuln_thresholds: VulnThresholds | None = None,
         request_id: str = "system",
+        mcp_admission: MCPAdmissionDeps | None = None,
     ) -> RegistrationOutcome:
         """End-to-end pack registration: discover → trust gate → SBOM →
         Sigstore-bundle persistence → grace-period verifiers → policy
@@ -721,6 +1187,35 @@ class PluginRegistry:
                 request_id=request_id,
             )
 
+        # Step 5 (Sprint 5 — T6): MCP-specific admission steps.
+        # Three sub-steps (A: extract manifest, B: validate
+        # capabilities, C: probe auth at registration time) per the
+        # plan-of-record §T6. Per R1 P1 #1 (fail-closed for MCP
+        # packs): the helper ALWAYS attempts manifest extraction
+        # regardless of whether ``mcp_admission`` was provided. If
+        # the pack ships a ``[tool.cognic.mcp]`` block AND
+        # ``mcp_admission`` is None, the helper returns
+        # ``mcp_admission_deps_required`` — preventing a Sprint-4
+        # caller that forgot to wire MCPHost from silently admitting
+        # an MCP pack without the manifest / capability / auth-probe
+        # gates running. Sprint-4-style packs without an
+        # ``[tool.cognic.mcp]`` block remain unaffected (helper
+        # returns None and the policy step proceeds).
+        mcp_refusal = await self._mcp_admit(
+            pack=pack,
+            tenant_id=tenant_id,
+            request_id=request_id,
+            mcp_admission=mcp_admission,
+        )
+        if mcp_refusal is not None:
+            return await self.register(
+                pack,
+                refusal_reason=mcp_refusal,
+                signature_digest=signature_digest,
+                tenant_id=tenant_id,
+                request_id=request_id,
+            )
+
         # Step 6: policy decision on the (grade, tenant_policy) pair.
         # The default Rego bundle (T3) implements the same logic
         # we'd apply locally if the engine isn't available: full =
@@ -752,6 +1247,112 @@ class PluginRegistry:
             tenant_id=tenant_id,
             request_id=request_id,
         )
+
+
+#: Sentinel returned by :func:`_safe_walk_to_mcp` when the manifest's
+#: ``[tool.cognic.mcp]`` path leads to a present-but-non-dict value
+#: (e.g., the operator wrote ``mcp = "bad"`` in their TOML). Distinct
+#: from ``None`` (which means the path doesn't exist) so the caller
+#: can refuse with ``mcp_manifest_malformed`` for the present-but-
+#: invalid case while still proceeding for the absent case.
+_MCP_BLOCK_MALFORMED = object()
+
+
+def _safe_walk_to_mcp(manifest: dict[str, Any]) -> dict[str, Any] | None | object:
+    """Walk ``manifest -> tool -> cognic -> mcp`` defensively.
+
+    Returns:
+      - The MCP block dict, if every intermediate is a dict AND the
+        leaf ``mcp`` key is present-and-a-dict.
+      - ``None`` if any intermediate is missing OR if ``mcp`` itself
+        is absent (Sprint-4-style pack with no MCP intent).
+      - :data:`_MCP_BLOCK_MALFORMED` (sentinel) if every intermediate
+        is a dict AND ``mcp`` is present-but-NOT-a-dict (e.g.,
+        ``mcp = "bad"``). Caller refuses with
+        ``mcp_manifest_malformed`` (R2 P1).
+
+    A non-dict intermediate (e.g., ``tool = "bad"``) is treated as
+    "absent" rather than "malformed" because the path could not have
+    reached an MCP block anyway — the structural error is in the
+    parent block, which other schema checks catch (per ADR-002 §pack
+    manifest structure).
+    """
+    tool = manifest.get("tool")
+    if not isinstance(tool, dict):
+        return None
+    cognic = tool.get("cognic")
+    if not isinstance(cognic, dict):
+        return None
+    if "mcp" not in cognic:
+        return None
+    mcp = cognic["mcp"]
+    if not isinstance(mcp, dict):
+        return _MCP_BLOCK_MALFORMED
+    return mcp
+
+
+async def _resolve_stdio_command_allowlist(
+    *, tenant_id: str, deps: MCPAdmissionDeps
+) -> frozenset[str]:
+    """Read the per-tenant STDIO command allow-list from Vault.
+
+    Best-effort: if the Vault path doesn't exist, the read raises, or
+    the secret shape is wrong, returns an empty frozenset (which makes
+    the per-tenant gate fail-closed for any STDIO command — the
+    correct default-deny posture). The validator's downstream
+    Sprint-5 umbrella refusal will fire regardless.
+    """
+    try:
+        path = deps.settings.mcp_stdio_command_allowlist_path.format(tenant=tenant_id)
+        secret = await deps.vault_client.read(path)
+    except Exception:
+        _LOG.debug(
+            "T6: STDIO command allow-list Vault read failed for tenant=%s; "
+            "treating as empty (default-deny)",
+            tenant_id,
+        )
+        return frozenset()
+    if not isinstance(secret, dict):
+        return frozenset()
+    # Vault secret shape: {commands: [...]} OR {servers: [...]} (the
+    # AS-allowlist key was reused historically; tolerate both).
+    commands = secret.get("commands") or secret.get("servers") or []
+    if not isinstance(commands, list):
+        return frozenset()
+    return frozenset(c for c in commands if isinstance(c, str) and c.strip())
+
+
+async def _validate_api_key_fallback(
+    *,
+    mcp_block: dict[str, Any],
+    tenant_id: str,
+    vault_client: SecretAdapter,
+) -> RefusalReason | None:
+    """Validate the api-key fallback's three preconditions (per
+    Sprint-5 plan §T6.3 + R13 P2). All three MUST hold:
+
+      1. Manifest's ``api_key_vault_path`` resolves AND the secret
+         is non-empty.
+      2. Manifest declares ``api_key_deprecation_acknowledged = true``.
+
+    Any failure → :data:`mcp_api_key_fallback_unresolved`. Returns
+    ``None`` on success.
+    """
+    if not mcp_block.get("api_key_deprecation_acknowledged"):
+        return "mcp_api_key_fallback_unresolved"
+    vault_path = mcp_block.get("api_key_vault_path")
+    if not isinstance(vault_path, str) or not vault_path.strip():
+        return "mcp_api_key_fallback_unresolved"
+    try:
+        secret = await vault_client.read(vault_path)
+    except Exception:
+        return "mcp_api_key_fallback_unresolved"
+    if not isinstance(secret, dict) or not secret:
+        return "mcp_api_key_fallback_unresolved"
+    api_key = secret.get("api_key")
+    if not isinstance(api_key, str) or not api_key.strip():
+        return "mcp_api_key_fallback_unresolved"
+    return None
 
 
 async def _admit_grade(
@@ -839,6 +1440,7 @@ def _outcome_payload(outcome: RegistrationOutcome, record: PluginRecord) -> dict
 __all__ = (
     "AttestationGrade",
     "DiscoveredPack",
+    "MCPAdmissionDeps",
     "PackAttestations",
     "PluginIdentityConflict",
     "PluginKind",
@@ -848,4 +1450,5 @@ __all__ = (
     "RefusalReason",
     "RegistrationOutcome",
     "RegistrationRefused",
+    "_authz_reason_to_refusal",
 )
