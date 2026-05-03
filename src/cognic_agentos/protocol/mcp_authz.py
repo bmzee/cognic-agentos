@@ -163,6 +163,12 @@ AuthzReason = Literal[
     "mcp_token_audience_mismatch",
     "mcp_token_scope_overgrant",
     "mcp_step_up_unauthorised",
+    # Runtime-only (NOT a registration-boundary value): the MCP server
+    # rejected both the cached and a freshly-acquired token with 401
+    # / 403 invalid_token. MCPHost emits this after one drop+retry
+    # attempt fails — second-401 is the terminal state. Sprint-5 T9
+    # R1 P2 #3.
+    "mcp_authorisation_lost",
     "mcp_oauth_request_timeout",
     "mcp_oauth_transport_failure",
     "mcp_oauth_credentials_missing",
@@ -682,6 +688,38 @@ class MCPAuthzClient:
             token.resource_indicator,
         )
         self._token_cache[cache_key] = token
+
+    async def invalidate_cached_token(self, *, server_url: str) -> None:
+        """Drop every cached token entry whose resource_indicator
+        matches ``server_url``.
+
+        Sprint-5 T9 R1 P2 #3 surface: when MCPHost receives a 401
+        (``mcp_authorisation_lost``) or a 403 ``error="invalid_token"``,
+        the cached token is no longer accepted by the server (AS key
+        rotation, revocation, expiry-not-yet-detected by our
+        refresh-buffer math, etc.). The orchestrator MUST drop the
+        cached entry so the retry's :meth:`acquire_token` does a
+        fresh PRM discovery + token request rather than serving the
+        same dead token from cache.
+
+        Cache keys are ``(resource_indicator, frozenset(scopes),
+        resource_indicator)`` per :meth:`_cache_put_under_granted`;
+        invalidation matches on the resource_indicator (which the
+        cache uses as a stand-in for server_url since that's the
+        bound-to audience). Drops EVERY scope-tier entry for the
+        server — a 401 invalidates the auth context, not just the
+        specific scope tier the failing call used.
+
+        No-op for a server with no cached entries (idempotent).
+        Token-free per the same discipline as the rest of this
+        module — we read keys, not values.
+        """
+        async with self._cache_lock:
+            doomed = [
+                key for key in self._token_cache if key[0] == server_url or key[2] == server_url
+            ]
+            for key in doomed:
+                del self._token_cache[key]
 
     async def step_up_token(
         self,

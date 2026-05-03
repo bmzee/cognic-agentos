@@ -5,9 +5,11 @@ Critical-controls module per AGENTS.md (Plugin trust + supply chain
 Authorization" step 8 fail-closed: "Failed auth at registration →
 pack stays in `proposed` state per ADR-002 (does NOT load until
 resolved)". This file pins the closed-enum mapping from
-``MCPAuthzError.reason`` (12-value AuthzReason; 11 of which reach
-registration — ``mcp_step_up_unauthorised`` is runtime-only) to
-``plugin_registry.RefusalReason`` via the ``_authz_reason_to_refusal()``
+``MCPAuthzError.reason`` (**13-value** AuthzReason; 11 of which reach
+registration — the two runtime-only values are ``mcp_step_up_unauthorised``
+emitted from ``MCPAuthzClient.step_up_token`` (T5) and ``mcp_authorisation_lost``
+emitted from ``MCPHost.call_tool`` second-401-retry exhaustion (T9 R1 P2 #3))
+to ``plugin_registry.RefusalReason`` via the ``_authz_reason_to_refusal()``
 1:1 mapper.
 
 Test classes (per Sprint-5 plan §T6.3 — 16 classes covering all 11

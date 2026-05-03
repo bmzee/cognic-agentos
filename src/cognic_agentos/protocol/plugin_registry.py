@@ -196,30 +196,46 @@ _AUTHZ_REASON_TO_REFUSAL: dict[str, RefusalReason] = {
 }
 
 
+_RUNTIME_ONLY_AUTHZ_REASONS: frozenset[str] = frozenset(
+    {
+        # Emitted from MCPAuthzClient.step_up_token (T5) when a 403
+        # insufficient_scope demands a wider scope the manifest does
+        # not declare.
+        "mcp_step_up_unauthorised",
+        # Emitted from MCPHost.call_tool (T9 R1 P2 #3) when the
+        # second-401 retry fails — both the cached and
+        # freshly-acquired tokens were rejected by the MCP server.
+        "mcp_authorisation_lost",
+    }
+)
+
+
 def _authz_reason_to_refusal(authz_reason: str) -> RefusalReason:
     """Map an :class:`MCPAuthzError.reason` string to the
     corresponding :data:`RefusalReason`.
 
     Eleven reasons map identity-style (the two literals share strings
-    for the registration-boundary set). ``mcp_step_up_unauthorised``
-    is runtime-only and raises here — it must never reach the
-    registration-side mapper.
+    for the registration-boundary set). The two runtime-only reasons
+    (``mcp_step_up_unauthorised``, ``mcp_authorisation_lost``) raise
+    here — they must never reach the registration-side mapper.
 
     :param authz_reason: A value of :data:`AuthzReason` from
         :class:`cognic_agentos.protocol.mcp_authz.MCPAuthzError`.
     :returns: The matching :data:`RefusalReason` literal.
-    :raises ValueError: If ``authz_reason`` is
-        ``"mcp_step_up_unauthorised"`` (runtime-only) or any unknown
-        value (defensive — would mean a closed-enum drift between
-        the AuthzReason and RefusalReason vocabularies that the
+    :raises ValueError: If ``authz_reason`` is one of
+        :data:`_RUNTIME_ONLY_AUTHZ_REASONS` or any unknown value
+        (defensive — would mean a closed-enum drift between the
+        AuthzReason and RefusalReason vocabularies that the
         ``test_refusal_reason_completeness.py`` regression should
         have caught at type-check time).
     """
-    if authz_reason == "mcp_step_up_unauthorised":
+    if authz_reason in _RUNTIME_ONLY_AUTHZ_REASONS:
         raise ValueError(
-            "mcp_step_up_unauthorised is runtime-only (emitted by "
-            "MCPHost.call_tool's step-up flow); it MUST NOT reach the "
-            "registration-boundary refusal mapper."
+            f"{authz_reason!r} is runtime-only (emitted from MCPHost "
+            f"or MCPAuthzClient runtime flows, not from the registration "
+            f"pipeline); it MUST NOT reach the registration-boundary "
+            f"refusal mapper. Runtime-only reasons: "
+            f"{sorted(_RUNTIME_ONLY_AUTHZ_REASONS)}."
         )
     try:
         return _AUTHZ_REASON_TO_REFUSAL[authz_reason]

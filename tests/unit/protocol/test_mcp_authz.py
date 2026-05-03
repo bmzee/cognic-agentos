@@ -1444,6 +1444,10 @@ class TestRefusalReasonClosedEnum:
             "mcp_token_audience_mismatch",
             "mcp_token_scope_overgrant",
             "mcp_step_up_unauthorised",
+            # Sprint-5 T9 R1 P2 #3: runtime-only reason emitted from
+            # MCPHost.call_tool when the second-401 retry fails. Not
+            # in the registration-boundary mapper.
+            "mcp_authorisation_lost",
             "mcp_oauth_request_timeout",
             "mcp_oauth_transport_failure",
             "mcp_oauth_credentials_missing",
@@ -3803,3 +3807,102 @@ class TestInflightCancellationHardening:
         # Slot cleared regardless of which exception type the waiter
         # received (finally-deregister is identity-checked).
         assert authz._inflight_acquires == {}
+
+
+# ---------------------------------------------------------------------------
+# Sprint 5 T9 R1 P2 #3 — invalidate_cached_token surface for orchestrator
+# ---------------------------------------------------------------------------
+
+
+class TestInvalidateCachedToken:
+    """``MCPHost.call_tool`` calls ``invalidate_cached_token`` on a
+    401 / 403 ``invalid_token`` so the next ``acquire_token`` does a
+    fresh PRM discovery + token request rather than serving the same
+    dead token from cache. Without this, the retry would silently
+    reuse the rejected token and the second 401 path would never
+    differ from the first.
+    """
+
+    async def test_invalidate_drops_all_scope_tier_entries_for_server(
+        self, authz: MCPAuthzClient
+    ) -> None:
+        """A 401 invalidates the auth context for the server, not just
+        a single scope tier — drop EVERY entry whose
+        resource_indicator matches."""
+        server = "https://server.example/mcp"
+        # Plant two cached tokens for the same server with different
+        # scope sets (e.g., one narrow, one stepped-up wider)
+        narrow = Token(
+            value="narrow",
+            expires_at=time.time() + 3600,
+            as_issuer="https://as.example",
+            scopes=("mcp:tools",),
+            resource_indicator=server,
+            client_id="cognic-mcp-bank_a",
+        )
+        wide = Token(
+            value="wide",
+            expires_at=time.time() + 3600,
+            as_issuer="https://as.example",
+            scopes=("mcp:tools", "mcp:tools.write"),
+            resource_indicator=server,
+            client_id="cognic-mcp-bank_a",
+        )
+        authz._token_cache[(server, frozenset(("mcp:tools",)), server)] = narrow
+        authz._token_cache[(server, frozenset(("mcp:tools", "mcp:tools.write")), server)] = wide
+        # Plus an unrelated server's token — MUST NOT be touched
+        other = "https://other.example/mcp"
+        other_token = Token(
+            value="other",
+            expires_at=time.time() + 3600,
+            as_issuer="https://as.example",
+            scopes=("mcp:tools",),
+            resource_indicator=other,
+            client_id="cognic-mcp-bank_a",
+        )
+        authz._token_cache[(other, frozenset(("mcp:tools",)), other)] = other_token
+
+        await authz.invalidate_cached_token(server_url=server)
+
+        # All entries for the target server are gone
+        assert (server, frozenset(("mcp:tools",)), server) not in authz._token_cache
+        assert (
+            server,
+            frozenset(("mcp:tools", "mcp:tools.write")),
+            server,
+        ) not in authz._token_cache
+        # Unrelated server's entry is preserved
+        assert (other, frozenset(("mcp:tools",)), other) in authz._token_cache
+
+    async def test_invalidate_idempotent_on_empty_cache(self, authz: MCPAuthzClient) -> None:
+        """No-op for a server with no cached entries (orchestrator
+        may invalidate defensively even when the cache is cold)."""
+        await authz.invalidate_cached_token(server_url="https://nope.example/mcp")
+        assert authz._token_cache == {}
+
+    async def test_invalidate_holds_cache_lock(self, authz: MCPAuthzClient) -> None:
+        """Mutates ``_token_cache`` under the cache lock so a
+        concurrent ``acquire_token`` lookup-and-register pair sees a
+        consistent view (lookup either misses cleanly or hits a
+        not-yet-invalidated entry; never reads a partially-invalidated
+        cache)."""
+        server = "https://server.example/mcp"
+        token = Token(
+            value="x",
+            expires_at=time.time() + 3600,
+            as_issuer="https://as.example",
+            scopes=("mcp:tools",),
+            resource_indicator=server,
+            client_id="cognic-mcp-bank_a",
+        )
+        authz._token_cache[(server, frozenset(("mcp:tools",)), server)] = token
+
+        # Acquire the lock; invalidate must wait
+        async with authz._cache_lock:
+            invalidate_task = asyncio.create_task(authz.invalidate_cached_token(server_url=server))
+            await asyncio.sleep(0.01)
+            # Task is blocked on the lock — entry still present
+            assert (server, frozenset(("mcp:tools",)), server) in authz._token_cache
+        # Lock released; invalidation completes
+        await invalidate_task
+        assert (server, frozenset(("mcp:tools",)), server) not in authz._token_cache

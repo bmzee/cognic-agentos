@@ -221,18 +221,25 @@ class TestPluginRegistryAuthzMapperContract:
     map; ``mcp_step_up_unauthorised`` is runtime-only and raises."""
 
     def test_mapper_covers_all_registration_boundary_authz_reasons(self) -> None:
-        """The :data:`AuthzReason` literal has 12 values; 11 are
-        registration-boundary (mappable to RefusalReason) and one
-        (``mcp_step_up_unauthorised``) is runtime-only. The mapper's
-        public dict (``_AUTHZ_REASON_TO_REFUSAL``) MUST contain
-        exactly the 11 registration-boundary values."""
+        """The :data:`AuthzReason` literal has 13 values; 11 are
+        registration-boundary (mappable to RefusalReason) and two
+        (``mcp_step_up_unauthorised`` + ``mcp_authorisation_lost``)
+        are runtime-only — they only fire from inside ``MCPHost``
+        flows that don't reach the registration-boundary mapper.
+        The mapper's public dict (``_AUTHZ_REASON_TO_REFUSAL``)
+        MUST contain exactly the 11 registration-boundary values."""
         from cognic_agentos.protocol.mcp_authz import AuthzReason
         from cognic_agentos.protocol.plugin_registry import (
             _AUTHZ_REASON_TO_REFUSAL,
         )
 
         all_authz = frozenset(get_args(AuthzReason))
-        expected_runtime_only = frozenset({"mcp_step_up_unauthorised"})
+        # Runtime-only reasons (NEVER reach the registration mapper):
+        # - mcp_step_up_unauthorised: emitted from
+        #   MCPAuthzClient.step_up_token (T5).
+        # - mcp_authorisation_lost: emitted from MCPHost.call_tool
+        #   when the second-401 retry fails (T9 R1 P2 #3).
+        expected_runtime_only = frozenset({"mcp_step_up_unauthorised", "mcp_authorisation_lost"})
         expected_registration_boundary = all_authz - expected_runtime_only
         actual_mapped = frozenset(_AUTHZ_REASON_TO_REFUSAL.keys())
 
@@ -284,6 +291,58 @@ class TestPluginRegistryAuthzMapperContract:
             f"Mapper has non-identity entries: {non_identity}. If you intend "
             f"to diverge the AuthzReason and RefusalReason vocabularies, "
             f"update this test with the rationale + the new mapping shape."
+        )
+
+    def test_mapper_raises_for_step_up_unauthorised(self) -> None:
+        """``mcp_step_up_unauthorised`` is runtime-only — emitted from
+        :meth:`MCPAuthzClient.step_up_token` (T5). The mapper MUST
+        raise rather than silently fall through to a registration
+        refusal that examiners would interpret as an admission-time
+        decision."""
+        from cognic_agentos.protocol.plugin_registry import _authz_reason_to_refusal
+
+        with pytest.raises(ValueError, match="runtime-only"):
+            _authz_reason_to_refusal("mcp_step_up_unauthorised")
+
+    def test_mapper_raises_for_authorisation_lost(self) -> None:
+        """**T9 R1 P2 #3 contract test** — ``mcp_authorisation_lost``
+        is runtime-only: emitted from :meth:`MCPHost.call_tool` when
+        the second-401 retry fails. Like ``mcp_step_up_unauthorised``,
+        the mapper MUST raise if it ever reaches the registration
+        boundary. T11 will surface this in the
+        ``audit.tool_invocation_error`` row + the parallel
+        ``decision_history`` row, NOT in the registration outcome."""
+        from cognic_agentos.protocol.plugin_registry import _authz_reason_to_refusal
+
+        with pytest.raises(ValueError, match="runtime-only"):
+            _authz_reason_to_refusal("mcp_authorisation_lost")
+
+    def test_mapper_raises_for_unknown_authz_reason(self) -> None:
+        """Sanity: an entirely unknown AuthzReason string also raises
+        (defensive — would mean a closed-enum drift the type checker
+        should have caught)."""
+        from cognic_agentos.protocol.plugin_registry import _authz_reason_to_refusal
+
+        with pytest.raises(ValueError, match="Unknown AuthzReason"):
+            _authz_reason_to_refusal("mcp_made_up_value_xyz")
+
+    def test_runtime_only_set_pinned_at_two_values(self) -> None:
+        """The runtime-only set (``_RUNTIME_ONLY_AUTHZ_REASONS``) is
+        the single source of truth for which AuthzReason values
+        bypass the registration mapper. Currently pinned at exactly
+        two: ``mcp_step_up_unauthorised`` (T5) and
+        ``mcp_authorisation_lost`` (T9 R1 P2 #3). Adding a third
+        runtime-only value is a Sprint-N task that MUST extend this
+        set + the drift detector + the doctrine docs."""
+        from cognic_agentos.protocol.plugin_registry import (
+            _RUNTIME_ONLY_AUTHZ_REASONS,
+        )
+
+        assert frozenset(
+            {"mcp_step_up_unauthorised", "mcp_authorisation_lost"}
+        ) == _RUNTIME_ONLY_AUTHZ_REASONS, (
+            f"_RUNTIME_ONLY_AUTHZ_REASONS drift: {_RUNTIME_ONLY_AUTHZ_REASONS}. "
+            f"Pinned at the two T5/T9-known runtime-only values."
         )
 
 
