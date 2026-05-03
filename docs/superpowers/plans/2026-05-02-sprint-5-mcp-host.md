@@ -95,7 +95,7 @@ This sprint creates 7 new modules, 1 new doctrine document, 1 new test fixture p
 - `tests/unit/protocol/test_mcp_manifest.py` — extractor tests against editable + wheel-installed fixtures (Task 6)
 - `tests/unit/protocol/test_mcp_capabilities.py` (Task 6)
 - `tests/unit/protocol/test_mcp_registration_auth_probe.py` — registration-time auth probe tests (Task 6; addresses R1 P2 #3)
-- `tests/unit/protocol/test_refusal_reason_completeness.py` — closed-enum completeness regression test pinning the 16-value Sprint-5 RefusalReason extension (Task 6; addresses R2 P2 #3 + R3 P2 arithmetic correction)
+- `tests/unit/protocol/test_refusal_reason_completeness.py` — closed-enum completeness regression test pinning the 22-value Sprint-5 RefusalReason extension (Task 6; addresses R2 P2 #3 + R3 P2 arithmetic correction + R6 P2 production-grade auth surface + R11 P2 split AS-discovery / token-endpoint / token-response off the PRM-invalid bucket)
 - `tests/unit/protocol/test_optional_dep_loader.py` — optional-dep loader API tests pinning kernel-image module-import behaviour (Task 2; addresses R2 P2 #1)
 - `tests/unit/protocol/test_mcp_transports_http.py` (Task 7)
 - `tests/unit/protocol/test_mcp_transports_stdio.py` (Task 8)
@@ -108,7 +108,7 @@ This sprint creates 7 new modules, 1 new doctrine document, 1 new test fixture p
 - `docs/closeouts/2026-05-XX-sprint-5-mcp-host.md` — closeout (Task 15)
 
 **Modified:**
-- `src/cognic_agentos/core/config.py` — Sprint-5 settings (Task 1; 7 new fields including `mcp_sampling_policy_bundle` per R1 P3 #8)
+- `src/cognic_agentos/core/config.py` — Sprint-5 settings (Task 1; 8 new fields including `mcp_sampling_policy_bundle` per R1 P3 #8 and `mcp_oauth_credentials_path` per T5 R6 P1)
 - `.env.example` — operator-facing docs for new settings (Task 1)
 - `pyproject.toml` + `uv.lock` — pin official `mcp` SDK in adapters extras (Task 2)
 - `src/cognic_agentos/portal/api/app.py` — `create_app` (kernel) does NOT wire MCPHost; `create_prod_app` (default-adapters) does, with kernel-resilient ImportError handling (Task 2; addresses R1 P2 #1)
@@ -180,11 +180,11 @@ After merge: switch to a fresh implementation branch `feat/sprint-5-mcp-host`, r
 ## Task 1: Settings extension + `.env.example`
 
 **Files:**
-- Modify: `src/cognic_agentos/core/config.py` — add 6 Sprint-5 settings.
+- Modify: `src/cognic_agentos/core/config.py` — add 8 Sprint-5 settings (R8 P2 added the production-grade Vault credentials path that R6 P1 needed for real OAuth client credentials; the plan was originally drafted for 7 fields).
 - Modify: `.env.example` — operator-facing docs.
 - Test: `tests/unit/test_config.py` — extend existing settings tests.
 
-The 6 settings:
+The 8 settings:
 
 ```python
 # Sprint 5 — MCP host
@@ -252,6 +252,26 @@ mcp_sampling_policy_bundle: Path = Field(
         "allow_external_llm consistency all hold)."
     ),
 )
+mcp_oauth_credentials_path: str = Field(
+    default="secret/cognic/{tenant}/mcp-oauth/{as_host}",
+    description=(
+        "Vault path template for per-tenant per-AS OAuth client credentials. "
+        "Resolved at token-acquisition time as "
+        "``mcp_oauth_credentials_path.format(tenant=tenant_id, "
+        "as_host=urlparse(as_issuer).netloc.replace(':', '_'))``. "
+        "**Sanitisation** (R9 P3): the AS issuer netloc has ``:`` replaced "
+        "by ``_`` before interpolation so the value is safe to use as a Vault "
+        "path segment; operators populating Vault for an issuer with an "
+        "explicit port (e.g. ``https://as.example:8443``) MUST write the "
+        "secret to ``secret/cognic/<tenant>/mcp-oauth/as.example_8443`` "
+        "(underscore), NOT ``as.example:8443``. Vault secret shape: "
+        "``{client_id, client_secret, auth_method}`` where auth_method is "
+        "one of ``client_secret_post`` / ``client_secret_basic`` (Sprint 5; "
+        "Wave 2 adds private_key_jwt + mTLS). Added in T5 R6 P1 to replace "
+        "the originally-planned synthesised-client_id stub with real Vault-"
+        "backed credentials per AGENTS.md production-grade rule."
+    ),
+)
 ```
 
 - [ ] **Step 1: Write the failing test (mcp settings present + correct defaults)**
@@ -290,19 +310,28 @@ class TestMcpSettings:
         assert settings.mcp_sampling_policy_bundle == Path(
             "policies/_default/sampling.rego"
         )
+
+    def test_mcp_oauth_credentials_path_template(self) -> None:
+        """Per-tenant per-AS Vault path template added in T5 R6 P1.
+        Both ``{tenant}`` and ``{as_host}`` placeholders preserved
+        verbatim so runtime ``.format()`` substitutes correctly."""
+        settings = build_settings_without_env_file()
+        assert "{tenant}" in settings.mcp_oauth_credentials_path
+        assert "{as_host}" in settings.mcp_oauth_credentials_path
+        assert "mcp-oauth" in settings.mcp_oauth_credentials_path
 ```
 
 Run: `uv run pytest tests/unit/test_config.py::TestMcpSettings -v`
-Expected: 7 tests FAIL with `AttributeError: 'Settings' object has no attribute 'mcp_stdio_enabled'`.
+Expected: 8 tests FAIL with `AttributeError: 'Settings' object has no attribute 'mcp_stdio_enabled'`.
 
 - [ ] **Step 2: Implement settings in `core/config.py`**
 
-Add the 7 fields above to `class Settings(BaseSettings):` after the Sprint-4 settings group. Group them under a `# Sprint 5 — MCP host` comment header.
+Add the 8 fields above to `class Settings(BaseSettings):` after the Sprint-4 settings group. Group them under a `# Sprint 5 — MCP host` comment header.
 
 - [ ] **Step 3: Run tests; expect PASS**
 
 Run: `uv run pytest tests/unit/test_config.py::TestMcpSettings -v`
-Expected: 7 PASSED.
+Expected: 8 PASSED.
 
 - [ ] **Step 4: Update `.env.example`**
 
@@ -333,12 +362,25 @@ COGNIC_MCP_CALL_TOOL_TIMEOUT_S=60
 # Sampling default-deny Rego bundle path (consumed by protocol/mcp_capabilities.py).
 # Operators override per-tenant by pointing this at a Vault-mounted bundle.
 COGNIC_MCP_SAMPLING_POLICY_BUNDLE=policies/_default/sampling.rego
+
+# Vault path template for per-tenant per-AS OAuth client credentials (T5 R6 P1).
+# Resolved at token-acquisition time with {tenant} + {as_host} substitutions
+# where {as_host} is urlparse(as_issuer).netloc with ':' replaced by '_' (R9 P3
+# — keeps the value safe as a Vault path segment). For an issuer like
+# "https://as.example:8443" populate Vault at .../mcp-oauth/as.example_8443
+# (underscore), NOT as.example:8443.
+# Vault secret shape: {client_id, client_secret, auth_method} where auth_method
+# is "client_secret_post" or "client_secret_basic" (Sprint 5; Wave 2 adds
+# private_key_jwt + mTLS). Operators MUST populate this Vault path before MCP
+# packs admit; missing credentials surface as the closed-enum
+# mcp_oauth_credentials_missing refusal.
+COGNIC_MCP_OAUTH_CREDENTIALS_PATH=secret/cognic/{tenant}/mcp-oauth/{as_host}
 ```
 
 - [ ] **Step 5: Sweep + commit**
 
 Run: `uv run ruff check . && uv run mypy src tests && uv run pytest -q`
-Expected: All green; suite at 1441 + 7 = 1448 passed.
+Expected: All green; suite at 1441 + 8 = 1449 passed.
 
 ```bash
 git add src/cognic_agentos/core/config.py tests/unit/test_config.py .env.example
@@ -1258,34 +1300,75 @@ This is the OAuth + Protected Resource Metadata client per ADR-002 §"MCP Author
 - `async acquire_token(*, server_url: str, manifest_scopes: tuple[str, ...], request_id: str, tenant_id: str) -> Token` — AS allow-list check + RFC 8707 resource indicator + audience validation on the returned token. Correlates audit + decision-history rows by `request_id`.
 - `async step_up_token(*, server_url: str, current_token: Token, requested_scope: str, manifest_scopes: tuple[str, ...], request_id: str, tenant_id: str) -> Token` — only on `403 insufficient_scope` per spec; refuses if requested_scope is not in manifest_scopes. Step-up is audit-logged with prior + requested-additional scopes.
 - `async refresh_token(*, token: Token, request_id: str, tenant_id: str) -> Token` — emits `audit.mcp_token_refresh` via `audit_store.append(...)` with AS issuer + scopes + resource indicator + client_id; **never token contents**. Also writes a `decision_history` row for the refresh decision (per MCP-CONFORMANCE §observability requirement that session/auth events are correlatable in decision_history).
-- Token cache keyed by `(server_url, tuple(sorted(scopes)), resource_indicator)`.
+- Token cache keyed by `(server_url, frozenset(GRANTED scopes), resource_indicator)` with **exact-match** lookup (R9/R10 P2: an entry hits the cache iff the requested scopes equal the cached granted scopes — neither broader nor narrower cached entries satisfy a request). Concurrent cold acquires for the same key are coalesced via an in-flight `dict[CacheKey, asyncio.Future[Token]]` map; waiters await the shared Future under `asyncio.shield` to keep waiter cancellation from poisoning the slot (R11/R12 P2).
 
 Every method that emits audit takes `request_id: str` and `tenant_id: str` as keyword-only parameters (no defaults; caller MUST provide). This is the same per-request correlation pattern Sprint 3's LLM-gateway uses; not optional.
 
-Closed-enum error vocabulary:
-- `mcp_anonymous_refused` — server lacks PRM AND no API-key fallback declared.
-- `mcp_as_not_allowlisted` — PRM points to a non-allowlisted AS.
-- `mcp_token_audience_mismatch` — `aud` claim does not match resource indicator.
-- `mcp_step_up_unauthorised` — manifest does not declare the wider scope the server is asking for.
-- `mcp_oauth_request_timeout` — discovery / token / refresh exceeded `mcp_oauth_request_timeout_s`.
-- `mcp_prm_invalid` — discovery returned a malformed PRM document.
+Closed-enum error vocabulary (12 values after R6 P2 production-grade auth surface + R11 P2 split AS-discovery / token-endpoint / token-response off the PRM-invalid bucket; the original draft listed only the 6 marked **(original)**):
+
+- `mcp_anonymous_refused` **(original)** — server lacks PRM AND no API-key fallback declared.
+- `mcp_as_not_allowlisted` **(original)** — PRM points to a non-allowlisted AS.
+- `mcp_token_audience_mismatch` **(original)** — `aud` claim does not match resource indicator.
+- `mcp_token_scope_overgrant` **(R6)** — AS granted scopes are not a subset of the manifest-declared set; no-silent-privilege-widening doctrine fails closed even when the AS is allow-listed but misconfigured / compromised.
+- `mcp_step_up_unauthorised` **(original)** — manifest does not declare the wider scope the server is asking for.
+- `mcp_oauth_request_timeout` **(original)** — discovery / token / refresh exceeded `mcp_oauth_request_timeout_s`.
+- `mcp_oauth_transport_failure` **(R6)** — non-timeout transport error (DNS, ConnectError, TLS handshake, network unreachable). Distinct from request-timeout so operators see the precise cause.
+- `mcp_oauth_credentials_missing` **(R6)** — Vault has no per-`(tenant, AS-issuer)` OAuth client credentials configured (R6 P1 replaced the originally-planned synthesised-client_id stub with a Vault-backed lookup; missing config fails closed before any AS round-trip).
+- `mcp_oauth_as_discovery_invalid` **(R11)** — AS `.well-known/oauth-authorization-server` doc malformed (non-200 status, non-JSON body, missing `token_endpoint`). Distinct from `mcp_prm_invalid` because operators debug AS-issuer config differently from MCP-server-side PRM problems.
+- `mcp_oauth_token_endpoint_error` **(R11)** — AS token endpoint returned a non-200 status (401 typically = rejected Vault-stored client credentials, 400 = `invalid_grant`/`invalid_scope`, 503 = AS down). Payload carries `status_code` only — NEVER the response body, which could echo credentials or AS-side debug strings.
+- `mcp_oauth_token_response_invalid` **(R11)** — token response shape malformed (non-JSON body, missing `access_token`, non-numeric / non-finite / non-positive / bool `expires_in`, non-string `scope`).
+- `mcp_prm_invalid` **(original — narrowed by R11)** — PRM document on the MCP server side malformed (`/.well-known/oauth-protected-resource`). NO LONGER covers AS-discovery / token-endpoint / token-response failures (R11 split those out).
 
 - [ ] **Step 1: Write failing tests (full surface, parametrized where it matters)**
 
-12 test classes (one per surface concern), each with its negative-path arm. Total ~30 tests:
+The implementation rounds (R6–R12) substantially expanded the original test surface. The plan-of-record draft listed 12 classes / ~30 tests; the merged implementation lands ~26 classes / ~115 tests covering the closed-enum vocabulary R6–R11 grew from 6 → 12 values, the cancellation hardening R12 added on the in-flight Future, and the cache-correctness invariants R9/R10 pinned (granted-keyed exact-match). Test classes (canonical surface — implementer adds the negative-path arms per the closed-enum table above):
 
+**Discovery + audience + cache + refresh (original draft):**
 - `TestPrmDiscoveryWWWAuthenticatePath` — primary header-driven discovery; `WWW-Authenticate: Bearer resource_metadata="..."` URL followed; header missing → fall through to next path.
 - `TestPrmDiscoveryEndpointSpecificFallback` — endpoint-specific well-known: `https://server.example/public/mcp` → probe `https://server.example/.well-known/oauth-protected-resource/public/mcp`. Found → root path NOT probed.
 - `TestPrmDiscoveryRootFallback` — endpoint-specific 404 → fall back to root `/.well-known/oauth-protected-resource`.
-- `TestPrmDiscoveryPriorityOrder` — when both endpoint-specific and root paths exist with conflicting docs, endpoint-specific wins.
+- `TestPrmDiscoveryPriorityOrder` — both endpoint-specific and root paths populated → endpoint-specific wins.
 - `TestPrmDiscoveryAnonymousRefused` — all three paths fail AND no API-key fallback declared → `mcp_anonymous_refused`.
-- `TestAsAllowlistEnforcement` — PRM advertises AS not on per-tenant allow-list → `mcp_as_not_allowlisted`. Allow-listed → token request proceeds.
-- `TestRfc8707ResourceIndicator` — every token request includes `resource=<server URL>`. Token returned without bound resource → refused (mismatched audience treated as 401).
-- `TestTokenAudienceValidation` — token `aud` claim matches → accepted. Mismatched → rejected; reused token across servers → blocked.
-- `TestTokenCacheAndRefresh` — token cached per (server, scope, resource); refresh before expiry; refresh emits `audit.mcp_token_refresh` with AS issuer + scopes + resource indicator + NO token contents.
-- `TestStepUpScope401Vs403Distinction` — `403 insufficient_scope` → step-up flow. `401 insufficient_scope` → treated as discovery (not step-up). `403` with manifest declaring wider scope → step-up token requested + audit-logged. `403` without manifest declaring → `mcp_step_up_unauthorised`.
-- `TestOauthRequestTimeout` — discovery / token request / refresh exceeding `mcp_oauth_request_timeout_s` → `mcp_oauth_request_timeout`.
-- `TestApiKeyFallback` — manifest declares `auth = "api-key"` with Vault path → API-key path used instead of OAuth; deprecation warning logged once per pack at registration.
+- `TestPrmInvalidShapes` + `TestPrmDocumentEdgeCases` — narrowed `mcp_prm_invalid` ONLY for MCP-server-side PRM-doc malformation per R11 (non-JSON, non-object, missing/empty/malformed `authorization_servers`, malformed `scopes_supported`, fall-through behaviour on 404 / 500 / unclosed-quote `WWW-Authenticate`).
+- `TestAsAllowlistEnforcement` — PRM advertises AS not on per-tenant allow-list → `mcp_as_not_allowlisted`; allow-listed → token request proceeds.
+- `TestRfc8707ResourceIndicator` — every token request includes `resource=<server URL>` form param.
+- `TestTokenAudienceValidation` + `TestTokenRepr` — `aud` matches → accepted; mismatched → `mcp_token_audience_mismatch`; opaque token → trust AS's RFC 8707 binding; `Token.__repr__` MUST redact value.
+- `TestTokenCacheAndRefresh` — refresh emits `audit.mcp_token_refresh` (no token contents) + `decision_history` row.
+- `TestStepUpScopeFlow` + `TestStepUpAsAllowlistRevoked` — `403` with manifest declaring wider scope → step-up audit-logged; manifest does NOT declare → `mcp_step_up_unauthorised`; AS allow-list revoked between original acquire and step-up → `mcp_as_not_allowlisted`.
+- `TestOauthRequestTimeout` — every PRM/AS-discovery/token-endpoint timeout → `mcp_oauth_request_timeout`.
+
+**Production-grade auth surface (R6):**
+- `TestVaultOauthCredentials` — Vault-backed client_id/client_secret resolved by `(tenant, as_host)`; `client_secret_post` form body vs `client_secret_basic` header; missing/malformed credentials fail closed with `mcp_oauth_credentials_missing`; client_secret never leaks into `Token.__repr__`.
+- `TestTransportFailureClosedEnum` — every `httpx.RequestError` (DNS / ConnectError / TLS handshake / network unreachable) on PRM probe / PRM fetch / AS discovery / token endpoint → `mcp_oauth_transport_failure` (operationally distinct from timeout).
+- `TestScopeOvergrantRejection` — AS-granted scopes ⊋ manifest-declared → `mcp_token_scope_overgrant`; AS-narrowing accepted (subset OK).
+- `TestStepUpAuditOnDenial` — denial paths emit `audit.mcp_step_up` BEFORE the raise.
+- `TestRefreshFailureDecisionHistory` — refresh failures (timeout, audience mismatch, AS error) write `decision_history` rows with decision `refresh_failed`.
+
+**TTL cap + defensive parses (R7 / R8):**
+- `TestExpiresInValidation` + `TestExpiresInNonFiniteAndBool` — `expires_in` parsed defensively (non-numeric, null, zero, negative, NaN, Infinity, bool `True`/`False`) → `mcp_oauth_token_response_invalid` (R11 split this off `mcp_prm_invalid`); operator-set `mcp_oauth_token_cache_ttl_s` caps token lifetime even if AS sets longer.
+- `TestAllowlistStrictValidation` — non-string / blank / `None` entries in the AS allow-list fail closed (no silent drop).
+- `TestCredentialsWhitespaceRefused` — whitespace-only `client_id` / `client_secret` → `mcp_oauth_credentials_missing`.
+- `TestBasicAuthEncoding` + `TestBasicAuthFormEncoding` — `client_secret_basic` form-url-encodes credentials per RFC 6749 §2.3.1 (spaces → `+`, NOT `%20`); reserved-character round-trip preserved.
+
+**Cache correctness (R9 / R10):**
+- `TestNarrowedTokenCacheNotReused` (R9) — AS narrows requested broader scope set; cached token MUST NOT be returned for a later broader request.
+- `TestMalformedScopeResponse` (R9) — `scope: null` / list / object → `mcp_oauth_token_response_invalid`; absent → defaults to manifest per OAuth 2.1 §3.2.3.
+- `TestAsHostSanitizationForIssuersWithPorts` (R9) — AS issuer with explicit port (`https://as.example:8443`) resolves Vault path with `:` → `_` substitution.
+- `TestCacheLookupBranchCoverage` (R9) — cross-server entry skipped; near-expiry entry skipped.
+- `TestBroaderCachedTokenNotReusedForNarrowerRequest` (R10) — stepped-up broader-scope token MUST NOT be returned for a later narrower acquire (least-privilege exact-match invariant).
+
+**AS / token-endpoint / token-response split (R11):**
+- `TestRequestTokenErrorPaths` — AS discovery non-200/malformed-JSON/missing-`token_endpoint` → `mcp_oauth_as_discovery_invalid`; token endpoint non-200 (incl. 401 with credential-echoing body) → `mcp_oauth_token_endpoint_error` with `status_code` payload but NEVER body; token response missing `access_token` → `mcp_oauth_token_response_invalid`.
+
+**In-flight coalescing + cancellation hardening (R11 / R12):**
+- `TestInflightAcquireCoalescing` (R11) — two concurrent cold acquires for the same key share ONE network round-trip; failure propagates to concurrent waiter; in-flight slot cleared on success or failure.
+- `TestInflightCancellationHardening` (R12) — cancelling a waiter does NOT cancel the shared Future (`asyncio.shield`); cancelling a waiter does NOT poison the in-flight slot (identity-checked finally-deregister); `set_result` / `set_exception` guarded with `if not future.done()`; cancelling the owner propagates without hanging waiters.
+
+**Closed-enum drift detector + admission-side doctrine:**
+- `TestRefusalReasonClosedEnum` — drift test pinning the 12-value `AuthzReason` literal; adding a new reason without updating `EXPECTED_REASONS` fails the test.
+- `TestAdmissionStaysSdkFree` — R3 P1: client constructs cleanly with `mcp` SDK absent (kernel-image simulation via monkeypatched `find_spec`).
+
+Each test uses `respx` to mock HTTP responses (already a project dep) — same pattern as Sprint-3 LLM gateway tests.
 
 Each test uses `respx` to mock HTTP responses (already a project dep) — same pattern as Sprint-3 LLM gateway tests.
 
@@ -1321,23 +1404,25 @@ class TestRfc8707ResourceIndicator:
 ```
 
 Run: `uv run pytest tests/unit/protocol/test_mcp_authz.py -v`
-Expected: ~30 tests FAIL (`MCPAuthzClient` doesn't exist).
+Expected (red): ~115 tests FAIL (`MCPAuthzClient` doesn't exist). The original draft estimated ~30; the implementation rounds (R6 production-grade auth surface, R7/R8 TTL cap + defensive parses, R9 cache invariants, R10 least-privilege match, R11 closed-enum split + in-flight coalescing, R12 cancellation hardening) grew the surface ~3.8×.
 
 - [ ] **Step 2: Implement `protocol/mcp_authz.py`**
 
 Implementation notes:
-- Use `httpx.AsyncClient` with explicit `timeout=settings.mcp_oauth_request_timeout_s` on every call.
+- Use `httpx.AsyncClient` with explicit `timeout=settings.mcp_oauth_request_timeout_s` on every call. Catch `httpx.TimeoutException` → `mcp_oauth_request_timeout`; catch `httpx.RequestError` → `mcp_oauth_transport_failure` (R6 P2 — DNS / TLS / network unreachable distinct from slow response).
 - `ResourceMetadata` is a frozen-slotted dataclass.
-- `Token` is a frozen-slotted dataclass with `token_value: SecretStr` (Pydantic) so it doesn't accidentally land in audit payloads.
-- Token cache is an `asyncio.Lock`-protected dict keyed by `(server_url, frozenset(scopes), resource_indicator)`.
-- Audit emission uses `audit_store.append(event_type, payload, request_id, tenant_id)` (Sprint-2 substrate).
-- The audit payload for `mcp_token_refresh` includes: `as_issuer`, `scopes`, `resource_indicator`, `client_id`. NEVER the token value.
-- Closed-enum errors are raised via `MCPAuthzError(reason: AuthzReason, …)` where `AuthzReason` is a `Literal[…]` matching the 6 enum values above.
+- `Token` is a frozen-slotted dataclass; the `__repr__` is overridden to redact the value (frozen-slotted alone does not — Python's default slotted-dataclass repr still includes every field).
+- Token cache is an `asyncio.Lock`-protected dict keyed by `(server_url, frozenset(GRANTED scopes), resource_indicator)`. R9/R10: lookup is **exact match** on granted scopes — neither broader nor narrower cached entries satisfy a request (composes least-privilege + no-silent-under-scoping into one rule). R11/R12: an in-flight `dict[CacheKey, asyncio.Future[Token]]` map coalesces concurrent cold acquires into one AS round-trip; waiters use `asyncio.shield` so cancellation doesn't poison the shared Future; `set_result`/`set_exception` guarded with `not future.done()`; identity-checked deregister in `finally`.
+- Audit emission uses `audit_store.append(...)` (Sprint-2 substrate); `decision_history_store.append(...)` writes a row for token refreshes (success AND failure outcomes).
+- The audit payload for `mcp_token_refresh` includes: `as_issuer`, `scopes`, `resource_indicator`, `client_id`. NEVER the token value. The audit payload for `mcp_token_endpoint_error` includes `status_code` only — NEVER the AS response body (could echo credentials).
+- OAuth client credentials per `(tenant, AS issuer)` resolved from Vault at `settings.mcp_oauth_credentials_path` (R6 P1); netloc sanitised by replacing `:` with `_` (R9 P3); `client_secret_basic` credentials form-url-encoded via `quote_plus` per RFC 6749 §2.3.1 (R8 P3) before base64.
+- AS-granted `expires_in` capped by `settings.mcp_oauth_token_cache_ttl_s` (R7 P2); defensive parse rejects non-numeric / non-finite / non-positive / bool with `mcp_oauth_token_response_invalid` (R7/R8/R11 P2).
+- Closed-enum errors are raised via `MCPAuthzError(reason: AuthzReason, …)` where `AuthzReason` is a `Literal[…]` matching the **12 enum values above** (R6 + R11 grew the original 6).
 
 - [ ] **Step 3: Run tests; expect PASS**
 
 Run: `uv run pytest tests/unit/protocol/test_mcp_authz.py -v --cov=cognic_agentos.protocol.mcp_authz --cov-report=term-missing`
-Expected: ~30 PASSED; coverage ≥95% line / ≥90% branch.
+Expected (green): ~115 PASSED; coverage 100% line / 100% branch (well over the ≥95/≥90 critical-controls floor).
 
 - [ ] **Step 4: Architecture test still green**
 
@@ -1433,7 +1518,7 @@ def extract_pack_manifest(distribution_name: str, package_name: str) -> dict:
 ### 6.2 Capability validation surface
 
 - `validate_mcp_manifest(manifest: dict) -> ManifestValidation` — pure function over the parsed manifest dict (output of T6.1's extractor).
-- Closed-enum reasons emitted by the validator (subset of the 16-value Sprint-5 extension; full enumeration in T6 step 6 below): the 9 capability-side reasons (`mcp_anonymous_refused`, `mcp_resources_declared_but_no_list`, `mcp_sampling_default_denied`, `mcp_elicitation_form_restricted_data_class`, `mcp_caching_ttl_restricted_data_class`, `mcp_stdio_manifest_incomplete`, `mcp_stdio_manifest_shell_metacharacter`, `mcp_stdio_command_not_allowlisted`, `mcp_stdio_disabled_in_sprint_5`) plus the 2 extractor-failure reasons proxied from T6.1 (`mcp_manifest_missing`, `mcp_manifest_malformed`).
+- Closed-enum reasons emitted by the validator (subset of the 22-value Sprint-5 extension; full enumeration in T6 step 6 below): the 9 capability-side reasons (`mcp_anonymous_refused`, `mcp_resources_declared_but_no_list`, `mcp_sampling_default_denied`, `mcp_elicitation_form_restricted_data_class`, `mcp_caching_ttl_restricted_data_class`, `mcp_stdio_manifest_incomplete`, `mcp_stdio_manifest_shell_metacharacter`, `mcp_stdio_command_not_allowlisted`, `mcp_stdio_disabled_in_sprint_5`) plus the 2 extractor-failure reasons proxied from T6.1 (`mcp_manifest_missing`, `mcp_manifest_malformed`).
 - Sampling default-deny enforced via OPA evaluation against `policies/_default/sampling.rego` — uses the Sprint-4 `OPAEngine`.
 
 ### 6.3 Registration-time auth probe (R1 P2 #3)
@@ -1441,7 +1526,7 @@ def extract_pack_manifest(distribution_name: str, package_name: str) -> dict:
 ADR-002 §"MCP Authorization" step 8 mandates: "Failed auth at registration → pack stays in `proposed` state per ADR-002 (does NOT load until resolved)." Sprint 5 honours this with a registration-time probe via `MCPAuthzClient`:
 
 After capability validation passes, if the manifest declares `[tool.cognic.mcp].transport = "http"` (production default; Sprint 5's only invocable transport), the registry probes auth:
-- For `auth = "oauth-prm"` (default): call `MCPAuthzClient.discover_resource_metadata(server_url)` → `MCPAuthzClient.acquire_token(server_url, manifest_scopes, tenant_id)`. Any failure (anonymous-refused / AS-not-allowlisted / audience-mismatch / timeout / PRM-invalid) → registration refused with the corresponding closed-enum reason.
+- For `auth = "oauth-prm"` (default): call `MCPAuthzClient.discover_resource_metadata(server_url)` → `MCPAuthzClient.acquire_token(server_url, manifest_scopes, tenant_id)`. Any of the **eleven registration-boundary `AuthzReason` failures** → registration refused with the corresponding closed-enum reason via `_authz_reason_to_refusal()` 1:1 mapping. The eleven (R6 + R11 grew the original five): `mcp_anonymous_refused` (PRM advertises no auth surface), `mcp_as_not_allowlisted` (PRM AS not on per-tenant allow-list), `mcp_token_audience_mismatch` (token `aud` ≠ resource indicator), `mcp_token_scope_overgrant` **(R6)** (AS granted scopes ⊋ manifest), `mcp_oauth_request_timeout` (PRM/AS-discovery/token-endpoint timeout), `mcp_oauth_transport_failure` **(R6)** (DNS/TLS/network unreachable, distinct from timeout), `mcp_oauth_credentials_missing` **(R6)** (Vault has no per-`(tenant, AS-issuer)` client credentials), `mcp_oauth_as_discovery_invalid` **(R11)** (AS `.well-known/oauth-authorization-server` non-200 / non-JSON / missing `token_endpoint`), `mcp_oauth_token_endpoint_error` **(R11)** (token endpoint non-200; payload carries `status_code` only — NEVER the response body), `mcp_oauth_token_response_invalid` **(R11)** (token response shape malformed: missing `access_token`, bad `expires_in`, non-string `scope`), `mcp_prm_invalid` (MCP-server-side PRM document malformed; narrowed by R11). Note: `mcp_step_up_unauthorised` is NOT mapped here — step-up is runtime-only (T9 call_tool).
 - For `auth = "api-key"` (Wave 1 fallback): validate the Vault path resolves AND the secret at that path is non-empty AND the manifest declares the deprecation warning has been acknowledged. Any failure → registration refused with `mcp_api_key_fallback_unresolved`.
 - For STDIO transport: probe is skipped (STDIO is refused upstream of auth probe by the Decision Lock; auth is moot).
 
@@ -1508,16 +1593,31 @@ Same SDK-free import/construction posture for `protocol/mcp_authz.py` (T5) and `
 
 `test_mcp_registration_auth_probe.py` exercises the registry's full `register_with_full_attestation_check` against fixture packs that exercise each auth-probe failure mode:
 
+**Original five auth-probe failure arms (R1-era; still required):**
 - `TestAuthProbeOauthPrmHappyPath` — pack declares `auth = "oauth-prm"`; PRM mock returns valid metadata; AS allow-list contains the issuer; token request succeeds; registration succeeds.
 - `TestAuthProbeAnonymousRefused` — pack declares no auth; PRM mock returns no advertised AS → registration refused with `mcp_anonymous_refused`.
 - `TestAuthProbeAsNotAllowlisted` — PRM advertises an AS not on the per-tenant allow-list → registration refused with `mcp_as_not_allowlisted`.
 - `TestAuthProbeAudienceMismatch` — token returned with mismatched `aud` → registration refused with `mcp_token_audience_mismatch`.
 - `TestAuthProbeTimeout` — PRM endpoint hangs past `mcp_oauth_request_timeout_s` → registration refused with `mcp_oauth_request_timeout`.
-- `TestAuthProbePrmInvalid` — PRM endpoint returns malformed JSON → registration refused with `mcp_prm_invalid`.
+- `TestAuthProbePrmInvalid` — PRM endpoint returns malformed JSON (the MCP-server-side `/.well-known/oauth-protected-resource` doc; R11 narrowed this from the previous catch-all sense) → registration refused with `mcp_prm_invalid`.
+
+**Production-grade auth surface (R6) — three additional arms required so the auth probe + registry mapper exercise the new closed-enum reasons end-to-end:**
+- `TestAuthProbeOauthCredentialsMissing` — Vault path for the per-`(tenant, AS-issuer)` OAuth client credentials (`secret/cognic/{tenant}/mcp-oauth/{as_host}`) returns 404 OR the resolved secret is missing `client_id`/`client_secret`/`auth_method` OR the auth_method is unsupported (e.g., `private_key_jwt` reserved for Wave 2) → registration refused with `mcp_oauth_credentials_missing`.
+- `TestAuthProbeOauthTransportFailure` — `httpx.RequestError` (DNS / ConnectError / TLS handshake / network unreachable) on PRM probe / PRM fetch / AS discovery / token endpoint → registration refused with `mcp_oauth_transport_failure`. Distinct from request-timeout — operators see the precise cause.
+- `TestAuthProbeOauthScopeOvergrant` — AS returns `scope` containing values NOT in the manifest-declared scope set (e.g., `mcp:tools mcp:admin` when manifest declares only `mcp:tools`) → registration refused with `mcp_token_scope_overgrant` (no-silent-privilege-widening doctrine).
+
+**AS / token-endpoint / token-response split (R11) — three additional arms so each new closed-enum reason has a registration-side test:**
+- `TestAuthProbeOauthAsDiscoveryInvalid` — AS `.well-known/oauth-authorization-server` returns non-200 OR non-JSON OR JSON missing `token_endpoint` → registration refused with `mcp_oauth_as_discovery_invalid`. Distinct from `mcp_prm_invalid` — operators debug AS-issuer config differently from MCP-server-side PRM problems.
+- `TestAuthProbeOauthTokenEndpointError` — AS token endpoint returns non-200 (covers 401 = rejected Vault-stored client credentials, 400 = `invalid_grant`/`invalid_scope`, 503 = AS down) → registration refused with `mcp_oauth_token_endpoint_error`. The refusal payload MUST carry `status_code` only; assert that the AS response body (which may echo credentials or AS-side debug strings) is NOT propagated.
+- `TestAuthProbeOauthTokenResponseInvalid` — AS returns 200 but the response body is malformed (non-JSON OR missing `access_token` OR `expires_in` non-numeric / non-finite / non-positive / bool OR `scope` non-string) → registration refused with `mcp_oauth_token_response_invalid`. Parametrize over these shapes.
+
+**API-key fallback + STDIO + don't-leak-into-cache invariants (still required from R1):**
 - `TestAuthProbeApiKeyFallbackHappyPath` — pack declares `auth = "api-key"`, Vault path resolves to a non-empty secret, manifest acknowledges the deprecation warning → registration succeeds with deprecation-warning audit event.
 - `TestAuthProbeApiKeyFallbackUnresolved` — Vault path returns 404 OR secret is empty OR manifest does not acknowledge deprecation → `mcp_api_key_fallback_unresolved`.
 - `TestAuthProbeSkippedForStdio` — STDIO pack reaches auth-probe step → probe is skipped (STDIO refusal is upstream); registration outcome is the STDIO-disabled refusal, not an auth one.
-- `TestAuthProbeTokenNotPersisted` — after a successful probe, the AuthzClient cache does NOT contain the probe-acquired token (registration only validates "could acquire", not "use").
+- `TestAuthProbeTokenNotPersisted` — after a successful probe, the `MCPAuthzClient` cache does NOT contain the probe-acquired token (registration only validates "could acquire", not "use"). With R10's exact-match cache invariant in place, this means the registry MUST construct an `MCPAuthzClient` whose cache is independent of (or cleared after) the runtime client's cache, OR the probe MUST take a non-caching code path.
+
+**Total: 16 test classes** — 6 original (1 OauthPrmHappyPath + 5 failure arms: anonymous-refused / AS-not-allowlisted / audience-mismatch / timeout / PRM-invalid) + 3 R6 production-grade arms (credentials-missing / transport-failure / scope-overgrant) + 3 R11 split-error arms (AS-discovery-invalid / token-endpoint-error / token-response-invalid) + 4 trailing invariants (API-key happy-path / API-key unresolved / STDIO skip / token-not-persisted). All 11 registration-boundary `AuthzReason` failures have a dedicated test arm; this also satisfies the `test_every_reason_has_a_dedicated_test_arm` parametrize check in `test_refusal_reason_completeness.py`.
 
 - [ ] **Step 6: Implement registry integration in `plugin_registry.py`**
 
@@ -1552,9 +1652,9 @@ if mcp_block.get("transport") == "http":
         return refuse(_authz_reason_to_refusal(exc.reason), ...)
 ```
 
-**The closed-enum `RefusalReason` extension — exact, enumerated (R2 P2 #3 fix).**
+**The closed-enum `RefusalReason` extension — exact, enumerated (R2 P2 #3 fix; R6 P2 production-grade auth surface widened the auth-probe row from 5 to 8).**
 
-R1 said "grows by 11 values" without an explicit enumeration; R2's first patch enumerated the literal but mis-summed the auth-probe count as 3 (yielding 14) when the literal block actually lists 5 auth-probe reasons (yielding 16). Sprint 4 made `RefusalReason` a closed vocabulary (the literal type in `plugin_registry.py`) precisely so this kind of arithmetic drift is caught at type-check time. The corrected count: **exactly 16 new reasons** added to the literal:
+R1 said "grows by 11 values" without an explicit enumeration; R2's first patch enumerated the literal but mis-summed the auth-probe count as 3 (yielding 14) when the literal block actually listed 5 auth-probe reasons (yielding 16). R6's T5 production-hardening round added three more auth-probe reasons (`mcp_oauth_credentials_missing`, `mcp_oauth_transport_failure`, `mcp_token_scope_overgrant`) — each operationally distinct from the existing five (Vault ops issue ≠ AS server issue; DNS/TLS/network unreachable ≠ slow response; AS overgrant ≠ AS not allow-listed). R11's review of the production-grade error vocabulary added three more (`mcp_oauth_as_discovery_invalid`, `mcp_oauth_token_endpoint_error`, `mcp_oauth_token_response_invalid`) — splitting the original `mcp_prm_invalid` bucket so that operators see distinct reasons for an AS discovery problem (operators debug the AS issuer config) vs a token-endpoint HTTP error (a 401 here usually points at rejected Vault-stored client credentials, not the MCP server's PRM) vs a malformed token-response shape (missing `access_token`, bad `expires_in`, non-string `scope`). Sprint 4 made `RefusalReason` a closed vocabulary (the literal type in `plugin_registry.py`) precisely so this kind of drift surfaces at type-check time. The corrected count: **exactly 22 new reasons** added to the literal:
 
 ```python
 # src/cognic_agentos/protocol/plugin_registry.py — Sprint-5 RefusalReason extension
@@ -1576,16 +1676,22 @@ RefusalReason = Literal[
     "mcp_stdio_command_not_allowlisted",         # STDIO command not on per-tenant allow-list
     "mcp_stdio_disabled_in_sprint_5",            # umbrella refusal for STDIO until Sprint 8
 
-    # Sprint 5 — registration auth-probe failures (T6.3; 5 values):
+    # Sprint 5 — registration auth-probe failures (T6.3; 11 values):
     "mcp_as_not_allowlisted",                    # PRM advertises non-allowlisted AS
     "mcp_token_audience_mismatch",               # token aud != resource indicator
+    "mcp_token_scope_overgrant",                 # AS granted scopes not in manifest set (R6)
     "mcp_oauth_request_timeout",                 # PRM/token request exceeded timeout
-    "mcp_prm_invalid",                           # PRM document malformed
+    "mcp_oauth_transport_failure",               # DNS/TLS/network unreachable on PRM/AS/token (R6)
+    "mcp_oauth_credentials_missing",             # Vault has no client_id/client_secret/auth_method (R6)
+    "mcp_oauth_as_discovery_invalid",            # AS .well-known/oauth-authorization-server bad (R11)
+    "mcp_oauth_token_endpoint_error",            # AS token endpoint non-200 (401 = creds, 400 = grant) (R11)
+    "mcp_oauth_token_response_invalid",          # token response shape malformed (no access_token, etc.) (R11)
+    "mcp_prm_invalid",                           # PRM document malformed (MCP server side)
     "mcp_api_key_fallback_unresolved",           # api-key fallback Vault path / secret invalid
 ]
 ```
 
-Total Sprint-5 additions: **2 manifest + 9 capability + 5 auth-probe = 16 values**. (Plus `mcp_step_up_unauthorised` from `MCPAuthzClient`'s own enum, which is runtime-only — emitted by `MCPHost.call_tool` step-up flow at T9, NOT by registration. It does NOT appear in `plugin_registry.RefusalReason`.)
+Total Sprint-5 additions: **2 manifest + 9 capability + 11 auth-probe = 22 values**. (Plus `mcp_step_up_unauthorised` from `MCPAuthzClient`'s own enum, which is runtime-only — emitted by `MCPHost.call_tool` step-up flow at T9, NOT by registration. It does NOT appear in `plugin_registry.RefusalReason`.)
 
 **Enum-completeness regression test (R2 P2 #3 fix — load-bearing):**
 
@@ -1621,7 +1727,13 @@ SPRINT_5_REFUSAL_REASONS: frozenset[str] = frozenset({
     "mcp_stdio_disabled_in_sprint_5",
     "mcp_as_not_allowlisted",
     "mcp_token_audience_mismatch",
+    "mcp_token_scope_overgrant",
     "mcp_oauth_request_timeout",
+    "mcp_oauth_transport_failure",
+    "mcp_oauth_credentials_missing",
+    "mcp_oauth_as_discovery_invalid",
+    "mcp_oauth_token_endpoint_error",
+    "mcp_oauth_token_response_invalid",
     "mcp_prm_invalid",
     "mcp_api_key_fallback_unresolved",
 })
@@ -1665,7 +1777,7 @@ class TestRefusalReasonCompleteness:
         # ... (concrete implementation in the test file)
 ```
 
-The mapping `_authz_reason_to_refusal()` helper converts `MCPAuthzClient` reasons (`mcp_anonymous_refused`, `mcp_as_not_allowlisted`, `mcp_token_audience_mismatch`, `mcp_oauth_request_timeout`, `mcp_prm_invalid`) one-to-one into the registry's enum. `mcp_step_up_unauthorised` is NOT mapped — step-up is runtime-only (T9 call_tool) and never reaches the registry.
+The mapping `_authz_reason_to_refusal()` helper converts the eleven registration-boundary `MCPAuthzClient` reasons (`mcp_anonymous_refused`, `mcp_as_not_allowlisted`, `mcp_token_audience_mismatch`, `mcp_token_scope_overgrant`, `mcp_oauth_request_timeout`, `mcp_oauth_transport_failure`, `mcp_oauth_credentials_missing`, `mcp_oauth_as_discovery_invalid`, `mcp_oauth_token_endpoint_error`, `mcp_oauth_token_response_invalid`, `mcp_prm_invalid`) one-to-one into the registry's enum. `mcp_step_up_unauthorised` is NOT mapped — step-up is runtime-only (T9 call_tool) and never reaches the registry.
 
 - [ ] **Step 7: Run tests; expect PASS; coverage ≥95/90 on `mcp_manifest.py` and `mcp_capabilities.py`; existing critical-controls coverage on `plugin_registry.py` still ≥95/90**
 
@@ -2080,7 +2192,7 @@ git commit -m "chore(sprint-5): extend critical-controls gate to MCP quintet (T1
 
 Closeout structure mirrors Sprint 4:
 - Header (parent SHA, base SHA, branch state, commit count).
-- What ships (**5 critical-controls MCP modules** — `mcp_authz`, `mcp_manifest`, `mcp_capabilities`, `mcp_transports`, `mcp_host` — plus threat-model doc + sampling Rego seed + fixture MCP pack + 1 architecture test + 16-value RefusalReason extension with completeness regression + audit-event vocabulary + decision-history correlation + ADR-014 transitional gate + kernel-vs-default-adapters loader API).
+- What ships (**5 critical-controls MCP modules** — `mcp_authz`, `mcp_manifest`, `mcp_capabilities`, `mcp_transports`, `mcp_host` — plus threat-model doc + sampling Rego seed + fixture MCP pack + 1 architecture test + 22-value RefusalReason extension with completeness regression + audit-event vocabulary + decision-history correlation + ADR-014 transitional gate + kernel-vs-default-adapters loader API).
 - CI matrix (no new lanes; existing lanes still gate; per-file coverage now enforces **21 modules**).
 - Doctrine adherence (halt-before-commit on every critical-controls edit; Decision Lock held; architecture test never tripped during sprint).
 - Test + coverage state (20-module gate table).
@@ -2135,7 +2247,7 @@ After authoring the 15 tasks above + folding in the R1 doctrine-review patches (
 
 **Placeholder scan:** searched the plan for "TBD", "TODO", "implement later", "fill in details", "Add appropriate ...". One deliberate placeholder: T2's `mcp == X.Y.Z` — the implementation engineer fills in the pinned version at task time after checking PyPI. This is honest deferral, not a placeholder; the doctrine of "pinned at PR-author time" is exactly the Sprint-4 T13 pattern for cosign + OPA pins.
 
-**Type consistency:** every type referenced in later tasks is defined in earlier ones. `MCPAuthzClient` defined in T5 with `audit_store` + `decision_history_store` constructor params (R1 P2 #7) + reused in T7/T8/T9; admission-side per R3 P1 doctrine (no `require_mcp()` call; pure httpx + OAuth/PRM). `Token` / `ResourceMetadata` defined in T5. `MCPTransport` protocol defined in T7 with `open_session(server_url, token)` taking the token as a constructor-like param (R1 P2 #5 — the call order in T9 acquires the token before opening the session). **`StdioTransport` (T8): the three transport methods (`open_session`, `send`, `close_session`) raise `NotImplementedError`; no `register` method exists** (R2 P2 #4 — registry stays the single owner of `RegistrationOutcome` per Sprint-4 doctrine; R3 P1 — no `require_mcp()` call either, since the class doesn't actually use the SDK). `AuthzReason` literal defined in T5. Closed-enum reason vocabulary unified across T6 + T11 (no two reasons share a name); the **16-value** extension to `plugin_registry.RefusalReason` is enumerated explicitly in T6 step 6 with a completeness regression test (R2 P2 #3 + R3 P2 arithmetic correction).
+**Type consistency:** every type referenced in later tasks is defined in earlier ones. `MCPAuthzClient` defined in T5 with `audit_store` + `decision_history_store` constructor params (R1 P2 #7) + reused in T7/T8/T9; admission-side per R3 P1 doctrine (no `require_mcp()` call; pure httpx + OAuth/PRM). `Token` / `ResourceMetadata` defined in T5. `MCPTransport` protocol defined in T7 with `open_session(server_url, token)` taking the token as a constructor-like param (R1 P2 #5 — the call order in T9 acquires the token before opening the session). **`StdioTransport` (T8): the three transport methods (`open_session`, `send`, `close_session`) raise `NotImplementedError`; no `register` method exists** (R2 P2 #4 — registry stays the single owner of `RegistrationOutcome` per Sprint-4 doctrine; R3 P1 — no `require_mcp()` call either, since the class doesn't actually use the SDK). `AuthzReason` literal defined in T5 (12 values after R6 P2 added `mcp_token_scope_overgrant`, `mcp_oauth_transport_failure`, `mcp_oauth_credentials_missing` and R11 P2 added `mcp_oauth_as_discovery_invalid`, `mcp_oauth_token_endpoint_error`, `mcp_oauth_token_response_invalid`). Closed-enum reason vocabulary unified across T6 + T11 (no two reasons share a name); the **22-value** extension to `plugin_registry.RefusalReason` is enumerated explicitly in T6 step 6 with a completeness regression test (R2 P2 #3 + R3 P2 arithmetic correction + R6 P2 production-grade auth surface widened to 8 auth-probe values + R11 P2 split AS-discovery / token-endpoint / token-response off the PRM-invalid bucket → 11 auth-probe values).
 
 **Cross-task dependencies:** T1 (settings, including `mcp_sampling_policy_bundle` per R1 P3 #8) lands before everything else. T2 (mcp dep + kernel-vs-default-adapters runtime contract per R1 P2 #1) lands before T7/T9. T3 (threat model doc) lands before T4. T4 (architecture test with recursive scan + 3 self-tests per R1 P2 #4) lands before T5. T5 (mcp_authz with audit/decision-history constructor deps per R1 P2 #7) lands before T6 (registration auth probe needs the client per R1 P2 #3) and before T7 (HTTP transport injects auth). T6 (manifest extraction → capability validation → registration auth probe) integrates into `plugin_registry.py` — load-bearing for T8 (STDIO refusal uses the validator) and T9 (MCPHost reads validated manifest). T8 (StdioTransport refusal) lands before T13 (negative-path canary). T11 (separate audit-chain + decision-history rows per R1 P2 #6) lands after T9. T14 (gate extension to 21 modules) lands AFTER all 5 critical-controls modules are at ≥95/90 coverage. T15 (closeout + AGENTS.md update per R1 P3 #9) is last.
 
@@ -2150,6 +2262,22 @@ After authoring the 15 tasks above + folding in the R1 doctrine-review patches (
 
 **R7 doctrine-review findings closed (folded inline into the plan, not deferred):**
 - **P2 — Signature refusal incorrectly assigned to `mcp_capabilities`.** The Decision Lock STDIO-SHIPS bullet at line 24 said `mcp_capabilities` "refuses unsigned manifests" — overstating the validator's responsibility and conflicting with the body contract (signature coverage is Sprint-4 cosign / trust-gate work, manifest reading is `mcp_manifest`, capability/declaration validation is `mcp_capabilities`). Reworded to a three-layered refusal-site list with explicit doctrine-boundary attribution: signature integrity stays at Sprint-4 `protocol/trust_gate.py` (cosign verifies the wheel, which transitively covers the manifest file shipped inside it); missing/malformed static manifest stays at `mcp_manifest` (`PackManifestNotFoundError` / `PackManifestMalformedError`); bad parsed STDIO declarations stay at `mcp_capabilities` (missing command/args/env_allowlist + shell metacharacters + command allowlist + Sprint-5 disabled umbrella). The three sites compose into "any STDIO pack registers as refused in Sprint 5" without any single layer claiming responsibility for ALL refusals — preserves the doctrine boundary the body contract already established.
+
+**Implementation-round amendments (post-plan-merge, folded back into the plan-of-record so future plan-readers see the load-bearing-current vocabulary, not a stale snapshot):**
+- **T5 implementation R14 P3 → T6.3 catalogue arithmetic fix (R14 round).** R13's T6.3 amendment grew the auth-probe test catalogue from 10 → 16 entries (6 original + 3 R6 + 3 R11 + 4 trailing), but the trailing summary line under-counted to "14 test classes — the original 10 plus 4 new ones from R6 + 3 new ones from R11" — internally inconsistent (the 4-from-R6 figure was a typo; only 3 R6 arms exist) and arithmetically wrong (10 + 3 + 3 = 16, not 14). Sprint 4's `RefusalReason` closed-vocabulary doctrine exists precisely so this kind of count drift surfaces before the next implementer reads it. Corrected the summary line to enumerate the four cohorts explicitly: `6 original (1 OauthPrmHappyPath + 5 failure arms) + 3 R6 + 3 R11 + 4 trailing invariants = 16 test classes`. Pure arithmetic correction; no new test class added or removed.
+- **T5 implementation R13 P2 + P3 → T6 auth-probe sketch sync + acquire_token docstring refresh (R13 round).** Two findings:
+  - **R13 P2 — T6 auth-probe paragraph + test catalogue still stale.** The R12 round resynced the **T5** body (closed-enum vocabulary, test catalogue, implementation note) but the **T6.3 registration auth-probe** paragraph at line 1529 still listed only the original five OAuth failures (anonymous-refused / AS-not-allowlisted / audience-mismatch / timeout / PRM-invalid), and the test catalogue at lines 1596-1605 listed 10 test classes covering only those five plus the API-key/STDIO/cache-isolation arms. Since T6 is the next implementation surface, an implementer reading T6 in isolation would have built the registry mapper + completeness tests against a 5-value vocabulary that contradicts the merged 11-value registration-boundary mapper (R6 added 3 + R11 added 3, total 11). Resynced 2 T6.3 surfaces: (1) the auth-probe paragraph now enumerates all 11 registration-boundary `AuthzReason` failures (with R6/R11 origin tags + the operational-distinction rationale for each); (2) the test-class catalogue grew from 10 → 14 entries (3 R6 arms + 3 R11 arms; the R11 token-endpoint-error arm specifically asserts that the AS response body — which can echo credentials — is NOT propagated into the closed-enum payload), and the catalogue now explicitly notes that all 11 registration-boundary `AuthzReason` failures have a dedicated arm (satisfying the `test_every_reason_has_a_dedicated_test_arm` parametrize check in `test_refusal_reason_completeness.py`).
+  - **R13 P3 — `acquire_token` method-level docstring stale.** The method-level docstring on `acquire_token` listed only the pre-hardening 5-failure surface (anonymous-refused / AS-not-allowlisted / audience-mismatch / timeout / PRM-invalid). The module-level docstring is correct, so this was not a behaviour blocker — but a public method docstring out-of-step with the implementation is the kind of breadcrumb that drift-debugging lands on first. Updated to enumerate all 11 closed-enum reasons that `acquire_token` can raise (every value of `AuthzReason` except the runtime-only `mcp_step_up_unauthorised`), each tagged with origin round + operational meaning, with a pointer to the module docstring for the full vocabulary + firing conditions.
+- **T5 implementation R12 P2 → cancellation hardening + T5 plan-body re-sync (R12 round).** Two findings:
+  - **R12 P2 (a) — shield shared in-flight Future from waiter cancellation.** R11's coalescing patch had waiters `await future_to_await` directly. In asyncio, cancelling a waiter task cancels the Future it is awaiting; the owner's later `set_result` / `set_exception` would then raise `InvalidStateError`. On the original failure path that was particularly bad: `set_exception(exc)` ran BEFORE the in-flight slot was popped, so a cancelled-waiter scenario could crash the owner's cleanup mid-flow and leave the slot poisoned with a cancelled Future for the lifetime of the process. Fix: (1) waiters use `asyncio.shield(future_to_await)` so a waiter's cancellation produces a `CancelledError` in THAT task only, leaving the shared Future untouched; (2) the owner's `set_result` / `set_exception` are guarded with `if not future_to_await.done()` so a Future that did somehow end up cancelled doesn't raise InvalidStateError when the owner tries to resolve it; (3) deregister moves into a `finally` block (always runs, regardless of whether `set_exception` raised) and is identity-checked (only pops if the dict entry is still ours, defensively guarding against re-entrant retry storms).
+  - **R12 P2 (b) — T5 plan body re-sync.** The R11 round amended the T6 RefusalReason section (count `19 → 22`, mapper to 11 values) but the **T5** body still listed the old 6-value `AuthzReason`, the original ~30-test sketch, and the implementation note saying `AuthzReason` matches "the 6 enum values above". That contradicted the current 12-value `AuthzReason` and the AS / token-endpoint / token-response split. Resynced 5 T5 surfaces: (1) the closed-enum vocabulary list (6 → 12 values, each tagged with origin round); (2) the test-class catalogue (~30 → ~115 tests, organised by introducing round); (3) the FAIL/PASS expected-count line (~30 → ~115); (4) the cache-key + coalescing implementation note (frozenset of GRANTED scopes + in-flight Future + shield); (5) the "matches the 6 enum values above" note → "matches the 12 enum values above". This was hygiene the R11 amendment should have included; R12 closes it before any subagent / future-implementer reads the stale T5 body.
+- **T5 implementation R11 P2 → in-flight coalescing + AS / token-endpoint / token-response error split (R11 round).** Two findings:
+  - **R11 P2 (a) — coalesce in-flight token acquires.** The constructor comment claimed `_cache_lock` "prevents two concurrent acquires racing the AS", but the lock was actually released between the cache-miss check and the network round-trip, so two cold callers requesting the same `(server, exact_scope_set, resource)` could each issue their own AS request. Fix: keyed in-flight `dict[CacheKey, asyncio.Future]`. The first miss creates a Future, registers under the cache key, releases the lock, runs PRM-discovery + AS-discovery + token POST, and on completion / failure (a) sets the Future result/exception so any concurrent waiters wake up with the same outcome, and (b) removes the Future in `finally` so a future call can retry (transient AS errors don't poison the cache key). The second concurrent caller observes the in-flight Future under lock and awaits it instead of issuing its own request.
+  - **R11 P2 (b) — split AS / token-endpoint / token-response failures off `mcp_prm_invalid`.** The original closed-enum had AS-discovery non-200, AS-discovery malformed JSON, AS-discovery missing `token_endpoint`, token-endpoint non-200, token-response non-JSON, token-response missing `access_token`, malformed `expires_in` (bool / non-numeric / non-finite / non-positive), and non-string `scope` all mapping to the single `mcp_prm_invalid` reason. But `mcp_prm_invalid` is documented as the MCP-server-side PRM document being malformed; a 401 from the AS token endpoint usually points at rejected Vault-stored OAuth client credentials, not at the MCP server's PRM. Three new closed-enum reasons added: `mcp_oauth_as_discovery_invalid` (covers AS `.well-known/oauth-authorization-server` non-200 / malformed JSON / missing `token_endpoint`), `mcp_oauth_token_endpoint_error` (token endpoint non-200; payload carries `status_code` only — never the response body, which could echo credentials or AS-side debug strings), `mcp_oauth_token_response_invalid` (token response shape malformed: non-JSON, missing `access_token`, bad `expires_in`, non-string `scope`). `mcp_prm_invalid` retains its narrow original meaning: only PRM-doc validation failures in `_fetch_prm` raise it. Plan amended in 6 surfaces: (1) `AuthzReason` in T5 9 → 12 values; (2) RefusalReason auth-probe row 8 → 11 values, total 19 → 22; (3) literal block extended with three R11-tagged entries; (4) `SPRINT_5_REFUSAL_REASONS` test set extended; (5) `_authz_reason_to_refusal()` mapper now maps 11 registration-boundary reasons (was 8); (6) closeout deliverable line bumped 19 → 22; type-consistency Self-Review entry updated; this amendment log entry added.
+- **T5 implementation R10 P2 → exact-match cache lookup (R10 round).** R9 introduced a granted-keyed cache with a `granted ⊇ requested` lookup filter to fix the under-scoping bug; R10 reviewer flagged that this same superset rule violates **least privilege** going the other way: a stepped-up token cached under broader granted scopes would be returned for any subsequent narrower acquire, sending a higher-privilege bearer than the call needed. ADR-002 + the Sprint-5 plan call for minimum-scope token acquisition keyed by `(server, scope, resource)`. The fix is exact-match: the cache lookup returns a cached token only when its granted scopes EQUAL the requested set (not narrower, not broader). Implementation simplified from an iterating loop to a direct `dict.get` with key `(server, frozenset(requested), resource)`. Both R9 and R10 invariants now compose as one rule — an entry hits the cache iff `granted == requested`. Helper renamed `_lookup_cached_covering_scopes → _lookup_cached_for_exact_scopes`. The R9 same-narrow-as-cached test still passes because exact-match also fires when the second request happens to ask for exactly the cached granted set; the R10 test pins the broader-cached-narrower-requested case as a fresh round-trip.
+- **T5 implementation R9 P3 + R9 P3 → T1 doc-sync + amendment-count fix (R9 round).** R9 reviewer flagged that the runtime `_load_oauth_credentials` sanitises the AS issuer's netloc by replacing `:` with `_` (so the value is safe as a Vault path segment) but the operator-facing surfaces (T1 plan field-block description + `.env.example` + `core/config.py` field description) all described `{as_host}` as the raw `urlparse(as_issuer).netloc`. For an issuer with an explicit port (e.g. `https://as.example:8443`), an operator following the docs would populate Vault at `secret/cognic/<tenant>/mcp-oauth/as.example:8443` while the client reads `as.example_8443` — producing `mcp_oauth_credentials_missing` at admission. Documented the sanitisation in all three surfaces (the runtime docstring of `_load_oauth_credentials` already had it). R9 P3 separately corrected the immediate-prior R8 amendment entry's count `5 T1 sites → 8 T1-area surfaces (+ 1 non-T1)` since the same sentence already enumerated 8 distinct edits.
+- **T5 implementation R6 P1 + 5×P2 → plan amendment (R7 round).** During T5 (`mcp_authz.py`) implementation review, the user's R6 round flagged that the Sprint-5 plan's "synthesised client_id / no client_secret" stub was a production-grade violation; the fix landed real Vault-backed OAuth client credentials + closed-enum on transport failure + AS-overgrant rejection + audit-on-denial step-up + decision-history-on-refresh-failure + narrowed kernel-image admission docstring. Three of the six fixes added new closed-enum reasons that the plan's "5 auth-probe values" line did not anticipate: `mcp_oauth_credentials_missing` (Vault ops issue, distinct from any pre-existing reason), `mcp_oauth_transport_failure` (DNS/TLS/network unreachable, distinct from `mcp_oauth_request_timeout`), `mcp_token_scope_overgrant` (AS overgrant, distinct from `mcp_as_not_allowlisted`). Per R7 P2 finding "sync new authz reasons with plan/T6", the plan was amended in 8 sites: count `16 → 19` (5 → 8 auth-probe), literal block extended with three R6-tagged entries, `SPRINT_5_REFUSAL_REASONS` test set extended to 19 entries, `_authz_reason_to_refusal()` mapper now maps 8 registration-boundary reasons (was 5), top-level table-of-contents entry, T6.2 validator-subset reference, closeout deliverable line, type-consistency self-review entry. Mapping these into existing reasons would have lost operationally-distinct semantics (Vault ops issue ≠ AS server issue; transport failure ≠ slow response; overgrant ≠ not-allowlisted), so the vocabulary expansion was the right call.
+- **T5 implementation R7 P2 + R8 P2 → T1 surface amendment (R8 round).** R7's "sync new authz reasons with plan/T6" landed the closed-enum + mapper amendment (above), but R8 then flagged that the T1 settings surface was still drafted for 7 fields when R6's Vault-backed credentials path made `mcp_oauth_credentials_path` load-bearing for production OAuth. Plan amended in 8 T1-area surfaces: (1) File Structure header `7 new fields → 8 new fields` with the R6-P1 reason cited; (2) T1 file-list intro `6 → 8` Sprint-5 settings; (3) field-block intro `The 6 settings → The 8 settings`; (4) the 8th field block (`mcp_oauth_credentials_path: str = Field(...)`) inserted after the sampling-policy block; (5) test sketch extended with `test_mcp_oauth_credentials_path_template`; (6) expected-count `7 FAIL/PASSED → 8 FAIL/PASSED`; (7) suite delta `1441 + 7 = 1448 → 1441 + 8 = 1449`; (8) .env snippet extended with the new commented entry. Plus a 9th non-T1 change: R8 P3 corrected the immediate-prior R7 amendment entry's "two of the six fixes added new closed-enum reasons" to "three" (matches the literal list of three new reasons that follows in the same sentence).
 
 **R6 doctrine-review findings closed (folded inline into the plan, not deferred):**
 - **P2 — Top architecture summary omits `mcp_manifest`.** The opening Architecture paragraph (lines 7-12) still described "three critical-controls modules plus a fourth `mcp_capabilities.py`" — pre-R1 framing that omitted the `mcp_manifest.py` extractor R1 P2 #2 added. Reworded to: "Five new critical-controls modules — the Sprint-5 MCP quintet" with all five modules (`mcp_authz`, `mcp_manifest`, `mcp_capabilities`, `mcp_transports`, `mcp_host`) listed at the top level + each tagged with its R3-P1 admission-vs-runtime classification. The top summary now matches the T14 coverage gate (21 modules) + the T15 AGENTS.md update (Sprint-5 quintet) + the closeout's "5 critical-controls MCP modules" claim.
