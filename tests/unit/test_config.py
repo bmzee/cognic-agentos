@@ -795,3 +795,26 @@ class TestMcpSettings:
         monkeypatch.setenv("COGNIC_MCP_STDIO_ENABLED", "true")
         s = Settings(_env_file=None, runtime_profile="dev")  # type: ignore[call-arg]
         assert s.mcp_stdio_enabled is True
+
+    def test_mcp_oauth_credentials_path_template(self) -> None:
+        """Per-tenant per-AS OAuth client credentials Vault path. Sprint
+        5 R6 closure of the "no real OAuth client credentials" P1
+        finding — admission MUST resolve a Vault secret containing
+        ``client_id`` + ``client_secret`` + ``auth_method`` before any
+        token request reaches the AS."""
+        settings = build_settings_without_env_file()
+        assert "{tenant}" in settings.mcp_oauth_credentials_path
+        assert "{as_host}" in settings.mcp_oauth_credentials_path
+        assert "mcp-oauth" in settings.mcp_oauth_credentials_path
+
+    def test_mcp_oauth_credentials_path_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Operators override the default Vault path via env var; the
+        resolved path is a string template (with both {tenant} and
+        {as_host} placeholders preserved verbatim for runtime
+        ``.format()``)."""
+        monkeypatch.setenv(
+            "COGNIC_MCP_OAUTH_CREDENTIALS_PATH",
+            "secret/data/{tenant}/oauth/{as_host}/creds",
+        )
+        s = Settings(_env_file=None, runtime_profile="prod")  # type: ignore[call-arg]
+        assert s.mcp_oauth_credentials_path == "secret/data/{tenant}/oauth/{as_host}/creds"

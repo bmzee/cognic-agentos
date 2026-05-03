@@ -676,6 +676,29 @@ class Settings(BaseSettings):
             "hold)."
         ),
     )
+    mcp_oauth_credentials_path: str = Field(
+        default="secret/cognic/{tenant}/mcp-oauth/{as_host}",
+        description=(
+            "Vault path template for per-tenant per-AS OAuth client "
+            "credentials. Resolved at token-acquisition time as "
+            "``mcp_oauth_credentials_path.format(tenant=tenant_id, "
+            "as_host=urlparse(as_issuer).netloc.replace(':', '_'))``. "
+            "**Sanitisation note** (R9 P3): the AS issuer netloc has "
+            "``:`` replaced by ``_`` before interpolation so the value "
+            "is safe to use as a Vault path segment. Operators "
+            "populating Vault for an issuer with an explicit port (e.g. "
+            "``https://as.example:8443``) MUST therefore write the "
+            "secret to ``secret/cognic/<tenant>/mcp-oauth/as.example_8443`` "
+            "(underscore), NOT ``as.example:8443``. Issuers without an "
+            "explicit port are unaffected. Vault secret shape: "
+            "``{client_id, client_secret, auth_method}`` where "
+            "auth_method is one of ``client_secret_post`` / "
+            "``client_secret_basic``. Sprint 5 ships these two; Wave 2 "
+            "adds private_key_jwt + mTLS client-binding. The MCP authz "
+            "client never logs the secret — it goes into the request "
+            "and is dropped after."
+        ),
+    )
 
     @field_validator("allowed_providers", mode="before")
     @classmethod
