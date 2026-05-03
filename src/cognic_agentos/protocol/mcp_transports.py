@@ -556,3 +556,85 @@ class StreamableHTTPTransport:
         if value <= 0:
             raise ValueError(f"{field_name} must be > 0")
         return float(value)
+
+
+# ---------------------------------------------------------------------------
+# T8 — STDIO MCP transport: pure refusal stub (no launch path)
+# ---------------------------------------------------------------------------
+
+
+class StdioTransport:
+    """STDIO MCP transport refusal stub — non-launching by design.
+
+    Per the Sprint-5 Decision Lock (Option C):
+
+    - Sprint 5 ships the threat model + manifest validation +
+      fail-closed refusal at registration.
+    - Sprint 5 does NOT ship the process-launch path. That belongs to
+      Sprint 8 with the sandbox primitive (ADR-002 §"Sandbox dependency
+      hard-block" + ADR-004).
+
+    This class is the **transport-side half** of that lock: a default
+    Python constructor (no ``__init__`` body, stores no state) plus
+    three transport methods (``open_session`` / ``send`` /
+    ``close_session``) that all raise ``NotImplementedError`` citing
+    ADR-002 + the Sprint-8 hand-off. There is no ``register`` method
+    on this class — pack registration is the registry's job per
+    Sprint-4 doctrine + R2 P2 #4 of the Sprint-5 plan.
+
+    **Why no ``require_mcp()`` call** (R3 P1 doctrine): the class
+    never references the ``mcp`` SDK in any code path. Every method
+    raises before reaching anything SDK-shaped. ``require_mcp()``
+    belongs only in classes that genuinely consume the SDK at
+    runtime (``MCPHost`` and ``StreamableHTTPTransport``).
+
+    **Where the actual STDIO refusal lives:** T6's
+    ``mcp_capabilities.validate_mcp_manifest()`` returns one of the
+    ``mcp_stdio_*`` closed-enum reasons; the ``plugin_registry``
+    admission hook calls the validator and refuses registration via
+    the Sprint-4 ``PluginRegistry.register(refusal_reason=…)`` path,
+    which is what writes the audit row. ONE writer for refusals: the
+    registry. ONE audit row per refusal.
+
+    The defensive contracts in
+    ``tests/unit/protocol/test_mcp_transports_stdio.py``
+    (``test_stdio_transport_does_not_have_register_method`` +
+    ``test_stdio_transport_does_not_emit_audit_events``) catch any
+    future drift that re-introduces a refusal-fabricating method on
+    the transport. The architecture-test gate
+    (``tests/architecture/test_mcp_stdio_no_subprocess.py``) catches
+    any future drift that adds process-spawn primitives to the
+    module.
+    """
+
+    async def open_session(self, *, server_url: str, token: Token) -> MCPSession:
+        raise NotImplementedError(
+            "STDIO transport launch is deferred to Sprint 8 sandbox "
+            "primitive per ADR-002 §Sandbox dependency hard-block + "
+            "ADR-004 §Sandbox primitive. STDIO packs are refused at "
+            "registration in Sprint 5 via the T6 capability validator + "
+            "registry admission hook; this method is unreachable from "
+            "the registry path. Sprint-8 hand-off: T15 closeout note."
+        )
+
+    async def send(
+        self,
+        session: MCPSession,
+        request: MCPToolCallRequest | MCPSDKRequest,
+    ) -> Any:
+        raise NotImplementedError(
+            "STDIO transport launch is deferred to Sprint 8 sandbox "
+            "primitive per ADR-002 §Sandbox dependency hard-block + "
+            "ADR-004 §Sandbox primitive. send() has no STDIO session "
+            "to operate against in Sprint 5. Sprint-8 hand-off: T15 "
+            "closeout note."
+        )
+
+    async def close_session(self, session: MCPSession) -> None:
+        raise NotImplementedError(
+            "STDIO transport launch is deferred to Sprint 8 sandbox "
+            "primitive per ADR-002 §Sandbox dependency hard-block + "
+            "ADR-004 §Sandbox primitive. close_session() has no STDIO "
+            "session to close in Sprint 5. Sprint-8 hand-off: T15 "
+            "closeout note."
+        )

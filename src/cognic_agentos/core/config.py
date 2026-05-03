@@ -14,6 +14,8 @@ adapter, and gateway groups under additional ``Settings`` subclasses or fields.
 
 from __future__ import annotations
 
+import importlib.util
+import logging
 import os
 import platform
 import sys
@@ -33,6 +35,25 @@ RuntimeProfile = Literal["dev", "stage", "prod"]
 # ``prod`` profile. Pydantic-Settings treats ``_env_file=None`` at construction
 # time as "ignore the class-level ``env_file`` setting".
 _PROD_PROFILE_ENV_VAR = "COGNIC_RUNTIME_PROFILE"
+
+_LOG = logging.getLogger("cognic_agentos.core.config")
+
+
+class SandboxNotAvailableError(RuntimeError):
+    """Raised at config-load when ``mcp_stdio_enabled`` is set in
+    production but the sandbox runtime is not importable.
+
+    Per ADR-002 §"Sandbox dependency hard-block" + ADR-004
+    §"Sandbox primitive": STDIO MCP transport is fail-closed in
+    production until BOTH (a) the sandbox primitive lands (Sprint 8)
+    AND (b) the operator explicitly opts in. This error fires the
+    moment ``Settings`` is constructed in a misconfigured shape, so
+    operators see the misconfiguration at startup rather than on
+    first MCP invocation. Same hierarchy class as
+    :class:`cognic_agentos.protocol.MCPNotAvailableError` —
+    catching ``RuntimeError`` at the operator-tooling boundary
+    catches both.
+    """
 
 
 class Settings(BaseSettings):
@@ -206,6 +227,16 @@ class Settings(BaseSettings):
                 "otel_exporter_client_cert_path and "
                 "otel_exporter_client_key_path must be set together (mTLS pair)."
             )
+
+        # Sprint-5 T8: STDIO MCP transport sandbox-availability check.
+        # Per ADR-002 §"Sandbox dependency hard-block" + ADR-004:
+        # ``mcp_stdio_enabled`` in prod requires the sandbox runtime
+        # primitive (Sprint 8). Enforced at config-load so the failure
+        # surfaces at startup, not on first MCP invocation.
+        _check_sandbox_availability(
+            runtime_profile=self.runtime_profile,
+            stdio_enabled=self.mcp_stdio_enabled,
+        )
 
     # --- Adapters (Sprint 1C, per ADR-009) ---------------------------
     # Drivers are plain ``str`` so unknown values flow to the factory's
@@ -772,6 +803,72 @@ class Settings(BaseSettings):
     @property
     def platform_string(self) -> str:
         return f"{platform.system()}-{platform.machine()}"
+
+
+def _check_sandbox_availability(
+    *,
+    runtime_profile: RuntimeProfile,
+    stdio_enabled: bool,
+) -> None:
+    """Sprint-5 T8 fail-fast — STDIO MCP transport requires the
+    sandbox primitive (Sprint 8) before it can launch a process.
+
+    Decision matrix:
+
+    ============= ======================== =========================== ==========
+    profile       mcp_stdio_enabled        sandbox.runtime importable  outcome
+    ============= ======================== =========================== ==========
+    *any*         False                    *irrelevant*                pass
+    prod          True                     False                       **raise**
+    prod          True                     True                        pass
+    dev / stage   True                     False                       warn
+    dev / stage   True                     True                        pass
+    ============= ======================== =========================== ==========
+
+    The fail-fast on ``prod`` is the load-bearing rule per ADR-002
+    §"Sandbox dependency hard-block": production must NEVER boot in a
+    shape that could allow a STDIO pack to launch a process without
+    the sandbox primitive's enforcement boundary. ``dev`` / ``stage``
+    only warn because pack registration is still refused at runtime
+    via T6's ``mcp_stdio_disabled_in_sprint_5`` capability validator
+    regardless of sandbox availability — the dev/stage environment
+    can boot for everything else.
+
+    Sprint 8 lifts the bare-find_spec check; once
+    ``cognic_agentos.sandbox.runtime`` exists this function evolves
+    to call its readiness probe instead of just checking importability.
+    """
+    if not stdio_enabled:
+        return
+    # ``find_spec`` raises ``ModuleNotFoundError`` when the parent
+    # package itself is missing (Sprint 5 has no
+    # ``cognic_agentos.sandbox`` package at all). Treat that as
+    # equivalent to "spec is None" — both signal "sandbox runtime is
+    # not importable".
+    try:
+        sandbox_spec = importlib.util.find_spec("cognic_agentos.sandbox.runtime")
+    except ModuleNotFoundError:
+        sandbox_spec = None
+    if sandbox_spec is not None:
+        return
+    if runtime_profile == "prod":
+        raise SandboxNotAvailableError(
+            "STDIO MCP transport requires the sandbox primitive "
+            "(Sprint 8) per ADR-002 §Sandbox dependency hard-block + "
+            "ADR-004 §Sandbox primitive. Production profile cannot "
+            "opt in to mcp_stdio_enabled until BOTH sandbox available "
+            "AND four-gate manifest validates. To recover: set "
+            "COGNIC_MCP_STDIO_ENABLED=false (the Sprint-5 default) or "
+            "wait for Sprint 8."
+        )
+    _LOG.warning(
+        "mcp_stdio_enabled=True with no sandbox runtime importable "
+        "(runtime_profile=%s). Pack registration refuses STDIO at the "
+        "T6 capability validator regardless; this warning surfaces the "
+        "misconfiguration so the operator can flip the flag before "
+        "Sprint 8 lands.",
+        runtime_profile,
+    )
 
 
 def _default_object_store_root() -> Path:
