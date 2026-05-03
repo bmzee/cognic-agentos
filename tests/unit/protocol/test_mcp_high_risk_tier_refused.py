@@ -29,14 +29,22 @@ T10 implements this gate at the top of :meth:`MCPHost.call_tool`:
     relaxes the gate. Sprint 13.5 lands the approval engine and
     removes this gate.
   - **Audit row**: ``audit.tool_invocation_refused`` with payload
-    ``{server_id, tool_name, declared_risk_tier, refusal_reason:
-    "tool_approval_engine_not_available", sprint_13_5_followup: True,
-    tenant_id}``. The ``declared_risk_tier`` field carries the
-    verbatim manifest value so operators see what the pack actually
-    declared (useful when triaging a typo vs an intentional
-    high-risk tier). Audit-pipeline failure during the refusal-emit
-    MUST NOT swallow the refusal — the refusal is the safety
-    outcome and propagates regardless.
+    ``{pack_id, pack_signature_digest, tool_name, mcp_session_id,
+    as_issuer, scopes, resource_indicator, client_id,
+    declared_risk_tier, refusal_reason:
+    "tool_approval_engine_not_available", sprint_13_5_followup:
+    True}`` (T11 consolidated emission via
+    :meth:`MCPHost._emit_call_evidence`; ``pack_id`` is the
+    canonical schema field — see `test_refusal_audit_row_payload_complete`).
+    The ADR-014 path is pre-dispatch, so ``mcp_session_id`` /
+    ``as_issuer`` / ``client_id`` / ``scopes`` /
+    ``resource_indicator`` are all None on this row. The
+    ``declared_risk_tier`` field carries the manifest value
+    after R1+R2+R3 normalisation (operator-readable but
+    bounded + control-character escaped). Audit-pipeline
+    failure during the refusal-emit MUST NOT swallow the
+    refusal — the refusal is the safety outcome and
+    propagates regardless.
 """
 
 from __future__ import annotations
@@ -393,9 +401,12 @@ class TestRiskTierRefusalAuditRow:
         # Top-level event fields
         assert row.request_id == "req-42"
         assert row.tenant_id == "bank-a"
-        # Payload schema per plan §T10
+        # Payload schema per plan §T10/§T11 — both T10's ADR-014
+        # row and T11's broader invocation row share ``pack_id`` as
+        # the canonical pack-identity field (Sprint-5 wiring sets
+        # MCPServerEntry.server_id == pack_id).
         p = row.payload
-        assert p["server_id"] == entry.server_id
+        assert p["pack_id"] == entry.server_id
         assert p["tool_name"] == "transfer_funds"
         assert p["declared_risk_tier"] == "payment_action"
         assert p["refusal_reason"] == "tool_approval_engine_not_available"

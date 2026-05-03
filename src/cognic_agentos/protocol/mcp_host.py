@@ -49,35 +49,54 @@ Doctrinal scope-decisions for T9:
      module in T9. The portal lifespan code populates the mapping
      from the registry walk + per-pack MCP manifest extraction.
 
-  2. **Audit emission ownership is split across T9 / T10 / T11.**
-     T9 wires the constructor-required deps (``audit_store``,
-     ``decision_history_store``) and emits ONLY the close-failure
-     tolerance audit row (``audit.mcp_session_close_failed`` with
-     ``failure_class`` ∈ {``"transport"``, ``"hook"``}). T9 RAISES
-     the closed-enum ``MCPAuthzError("mcp_authorisation_lost")``
-     from the ``call_tool`` second-401-retry exhaustion path
-     (R1 P2 #3) but does NOT emit a corresponding audit row.
+  2. **Audit emission consolidated through T11's
+     :meth:`_emit_call_evidence`.** Every ``call_tool`` exit path
+     emits exactly one ``audit_event`` row + one
+     ``decision_history`` mcp_call row, correlated by
+     ``request_id`` (per MCP-CONFORMANCE.md §observability item 9).
 
-     **T10 (this commit) emits ``audit.tool_invocation_refused``
-     directly** for the ADR-014 transitional high-risk-tier gate
-     — payload ``{server_id, tool_name, declared_risk_tier,
-     refusal_reason: "tool_approval_engine_not_available",
-     sprint_13_5_followup: True}`` — BEFORE raising
-     :class:`MCPToolInvocationRefused`. Audit-pipeline failure
-     does not mask the refusal.
+     - **T9 — close-failure tolerance** (separate channel):
+       ``audit.mcp_session_close_failed`` with ``failure_class``
+       ∈ {``"transport"``, ``"hook"``} via
+       :meth:`_safe_audit_close_failure`. Best-effort close
+       errors don't propagate; the success/error path's
+       invocation row is still emitted by ``_emit_call_evidence``.
+     - **Invocation rows (T10 + T11)** all flow through
+       :meth:`_emit_call_evidence`:
+         * ``audit.tool_invocation`` — successful ``call_tool``
+           (``decision="invoked"``, ``duration_ms``, full
+           correlation context). Mirror ``mcp_call`` decision row.
+         * ``audit.tool_invocation_refused`` — ADR-014
+           transitional gate (T10; ``refusal_reason=
+           "tool_approval_engine_not_available"`` + ``declared_
+           risk_tier`` + ``sprint_13_5_followup=True``);
+           pre-dispatch authz failures (T11;
+           ``refusal_reason=<authz reason>``);
+           ``mcp_step_up_unauthorised`` after a first send
+           (T11; carries the first-send session context per
+           R1 P1). Mirror ``mcp_call`` decision rows with
+           ``decision="refused"``.
+         * ``audit.tool_invocation_error`` — transport timeout /
+           send failure (T11); ``mcp_authorisation_lost``
+           second-401 retry exhaustion (T11); post-dispatch
+           reacquire failures (T11 R1 P2). All carry full
+           dispatch correlation context (R1 P1) so examiners
+           can replay what auth context the server saw. Mirror
+           ``mcp_call`` decision rows with ``decision=
+           "errored"``.
+     - **Token-refresh + step-up evidence** (channel separate
+       from invocation rows): ``audit.mcp_token_refresh`` +
+       ``audit.mcp_step_up`` + parallel ``mcp_token_refresh``
+       decision rows are emitted from
+       :class:`MCPAuthzClient` (T5).
 
-     T11 expands the audit + decision-history surface with:
-     ``audit.tool_invocation`` (every successful call_tool);
-     ``audit.tool_invocation_error`` (call dispatched but failed —
-     including ``mcp_authorisation_lost`` from the T9 second-401
-     path AND the auth/transport closed-enum errors); the parallel
-     ``decision_history`` rows (per MCP-CONFORMANCE.md
-     §observability item 9). T11 MUST NOT duplicate the T10
-     refusal row — both are ``audit.tool_invocation_refused``,
-     but T10 owns the ADR-014 transitional path; T11 will own the
-     other refusal classes (capability validator outcomes the
-     orchestrator surfaces, future approval-engine outcomes from
-     Sprint 13.5).
+     The ``pack_id`` field — a payload-row schema convention —
+     resolves to ``MCPServerEntry.server_id`` (Sprint-5 wiring
+     sets one pack = one MCP server). Examiners querying
+     ``decision_history WHERE request_id = ?`` get the full
+     MCP-call shape including ``mcp_session_id`` + auth context.
+     Audit + decision pipeline failures both safe-swallow:
+     log token-free + caller still sees the primary outcome.
 """
 
 from __future__ import annotations
@@ -96,7 +115,7 @@ import httpx
 
 from cognic_agentos.core.audit import AuditEvent, AuditStore
 from cognic_agentos.core.config import Settings
-from cognic_agentos.core.decision_history import DecisionHistoryStore
+from cognic_agentos.core.decision_history import DecisionHistoryStore, DecisionRecord
 from cognic_agentos.protocol import require_mcp
 from cognic_agentos.protocol.mcp_authz import MCPAuthzClient, MCPAuthzError, Token
 from cognic_agentos.protocol.mcp_transports import (
@@ -282,6 +301,75 @@ class _CachedToolList:
 
     tools: list[Any]
     cached_at_monotonic: float
+
+
+#: Closed-enum reason emitted into ``audit.tool_invocation_error.
+#: payload['error_taxonomy']`` AND the parallel ``mcp_call`` decision
+#: row's ``decision_reason`` field for the catch-all generic-
+#: ``Exception`` path of :meth:`MCPHost.call_tool` (R4 P2).
+#:
+#: T11 documents ``decision_reason`` as closed-enum-or-null. The
+#: typed handlers populate it with values from
+#: :data:`MCPTransportReason` (e.g. ``mcp_call_tool_timeout``,
+#: ``mcp_session_open_failed``) or :data:`AuthzReason` (e.g.
+#: ``mcp_authorisation_lost``). The generic-``Exception`` handler
+#: cannot use any of those — the exception class is unknown by
+#: definition — so a separate closed value is reserved for this
+#: path. The sanitised Python class name (``type(exc).__name__``)
+#: is preserved in a SEPARATE ``error_type`` payload field for
+#: operator debugging WITHOUT polluting the closed-enum surface.
+#:
+#: This value MUST NOT be reused by the typed handlers — they have
+#: precise closed-enum reasons that downstream consumers depend on.
+_GENERIC_INVOCATION_ERROR_TAXONOMY = "mcp_orchestrator_error"
+
+
+@dataclasses.dataclass(slots=True)
+class _DispatchContext:
+    """Internal: dispatch-state tracker populated by
+    :meth:`MCPHost._call_tool_inner` and read by the outer
+    ``call_tool`` exception handlers (R1 P1, R2 P2).
+
+    Two distinct pairs of fields, separated to avoid the R2 P2
+    bug class where a candidate retry/stepped-up token (never
+    sent) leaks into the audit/decision row for an earlier
+    dispatched failure:
+
+      - **Acquired** state — set after each successful
+        ``acquire_token`` / ``step_up_token``. May or may not
+        have been dispatched. Used by pre-dispatch refusal rows
+        so they can show what token the orchestrator was about
+        to send (operator-debuggable; correlates to the
+        manifest's declared scopes). Updated at every acquire,
+        including retry reacquires and step-up tokens — even if
+        the candidate is never dispatched.
+
+      - **Dispatched** state — set ONLY when ``transport.send``
+        is actually attempted with these. The "the server saw
+        this" pair. ``audit.tool_invocation_error`` rows and the
+        ``mcp_step_up_unauthorised`` refusal row MUST use these
+        so the row's ``mcp_session_id`` + ``as_issuer`` +
+        ``scopes`` + ``resource_indicator`` + ``client_id``
+        truthfully reflect what the server processed — never a
+        candidate token that never left the orchestrator.
+
+    The ``dispatched`` flag also drives R1 P2 — post-dispatch
+    reacquire failures (e.g. ``mcp_oauth_request_timeout`` on
+    the retry's ``acquire_token``) classify as ERRORED rather
+    than REFUSED because the call already reached the server
+    once with a bearer token.
+
+    R2 P2 specifically: a retry's ``open_session`` may raise
+    BEFORE its ``transport.send`` is reached. In that case the
+    dispatched pair stays at the prior successful send's values
+    (truthful — the candidate never reached the server) while
+    ``last_acquired_token`` reflects the new candidate.
+    """
+
+    last_acquired_token: Token | None = None
+    last_dispatched_session: MCPSession | None = None
+    last_dispatched_token: Token | None = None
+    dispatched: bool = False
 
 
 #: Sub-classification of a transport-level send error, derived by
@@ -473,14 +561,16 @@ class MCPToolInvocationRefused(Exception):
     BEFORE any token / session work — currently just the ADR-014
     transitional high-risk-tier gate.
 
-    Audit-row ownership: T10 emits ``audit.tool_invocation_refused``
-    directly via :meth:`MCPHost._emit_high_risk_tier_refusal_audit`
-    BEFORE raising this exception, so the refusal row is already in
-    the audit chain by the time the caller sees the raise. T11 adds
-    the parallel ``decision_history`` row + the OTHER invocation
-    rows (``audit.tool_invocation`` for success;
-    ``audit.tool_invocation_error`` for dispatch failures) but MUST
-    NOT duplicate the T10 ADR-014 refusal audit row.
+    Audit-row ownership: the ADR-014 path emits
+    ``audit.tool_invocation_refused`` + the parallel ``mcp_call``
+    decision row via :meth:`MCPHost._emit_call_evidence` BEFORE
+    raising this exception, so both rows are already persisted
+    by the time the caller sees the raise. T11 consolidated all
+    invocation-row emission through ``_emit_call_evidence``;
+    T10's emission flows through the same helper with
+    ``decision="refused"`` + ``decision_reason=
+    "tool_approval_engine_not_available"`` + extra payload
+    fields ``declared_risk_tier`` + ``sprint_13_5_followup``.
 
     Token-free + closed-enum payload, same discipline as
     ``MCPTransportError``: caller-supplied tool arguments NEVER
@@ -924,9 +1014,14 @@ class MCPHost:
 
         T11 amplifies this with the
         ``audit.tool_invocation`` / ``audit.tool_invocation_error``
-        rows + the parallel ``decision_history`` rows. T10 prepends
-        the ADR-014 transitional risk-tier gate before step 2.
+        rows + the parallel ``decision_history`` rows (emitted via
+        :meth:`_emit_call_evidence` at every exit path). T10
+        prepends the ADR-014 transitional risk-tier gate before
+        step 2 — T10 also flows through the same evidence helper
+        so the ``audit.tool_invocation_refused`` row schema is
+        uniform across all refusal classes.
         """
+        started_at_monotonic = time.monotonic()
         entry = self._lookup_server(server_id)
 
         # T10 — ADR-014 §"Sprint 5 (transitional rule)": fail-closed
@@ -948,19 +1043,28 @@ class MCPHost:
         # allow-list.
         declared_risk_tier = _normalize_risk_tier_for_gate(entry.risk_tier)
         if declared_risk_tier not in _ADR_014_LOW_RISK_TIERS:
-            await self._emit_high_risk_tier_refusal_audit(
-                server_id=server_id,
+            await self._emit_call_evidence(
+                event_type="audit.tool_invocation_refused",
+                decision="refused",
+                decision_reason="tool_approval_engine_not_available",
+                entry=entry,
                 tool_name=tool_name,
-                declared_risk_tier=declared_risk_tier,
                 request_id=request_id,
                 tenant_id=tenant_id,
+                declared_risk_tier=declared_risk_tier,
+                extra_audit_payload={
+                    "refusal_reason": "tool_approval_engine_not_available",
+                    "declared_risk_tier": declared_risk_tier,
+                    "sprint_13_5_followup": True,
+                },
+                extra_decision_payload={"sprint_13_5_followup": True},
             )
             # R4 P2: sanitize caller-supplied ``tool_name`` +
             # registry-supplied ``server_id`` for the operator-
             # facing exception message so an operator who
             # ``str(exc)``-prints or logs the message cannot have
             # control-char content rewrite their terminal / forge
-            # log lines. Audit-row payload below keeps raw values
+            # log lines. Audit-row payload above keeps raw values
             # (T11 canonical query path).
             safe_tool_name = _sanitize_string_for_operator_surface(tool_name)
             safe_server_id = _sanitize_string_for_operator_surface(server_id)
@@ -978,15 +1082,294 @@ class MCPHost:
                 sprint_13_5_followup=True,
             )
 
+        # Main path — wrap the inner orchestration so every exit
+        # (success / authz refusal / step_up_unauthorised /
+        # transport error / second-401 mcp_authorisation_lost)
+        # emits exactly one audit_event row + one decision_history
+        # row. Per plan §T11: every request_id flowing through
+        # call_tool produces 1 audit row (one of the 3 invocation
+        # event types) + 1 mcp_call decision row.
+        #
+        # R1 P1 + P2: ``_DispatchContext`` is populated as the inner
+        # orchestration progresses. Outer handlers read it so:
+        #   - Dispatched-error rows (transport timeout / send fail /
+        #     mcp_authorisation_lost / step_up_unauthorised after a
+        #     first send) carry the correlation context the server
+        #     actually saw (mcp_session_id, as_issuer, scopes, ...).
+        #   - Post-dispatch authz failures (e.g. reacquire_token
+        #     raises mcp_oauth_request_timeout AFTER a first 401)
+        #     classify as ERRORED, not REFUSED — the call already
+        #     reached the server once.
+        ctx = _DispatchContext()
+        try:
+            payload, session, used_token = await self._call_tool_inner(
+                entry=entry,
+                tool_name=tool_name,
+                arguments=arguments,
+                request_id=request_id,
+                tenant_id=tenant_id,
+                dispatch_context=ctx,
+            )
+        except MCPAuthzError as exc:
+            # Classification rules:
+            #   1. ``mcp_authorisation_lost`` (post-dispatch
+            #      second-401 exhaustion) → ERRORED.
+            #   2. Any AuthzError raised AFTER ctx.dispatched is
+            #      True (R1 P2: post-dispatch reacquire failure /
+            #      step_up_unauthorised after a first send) →
+            #      ERRORED; the call already reached the server.
+            #   3. Pre-dispatch authz refusal (acquire_token failed
+            #      before any send) → REFUSED.
+            #
+            # R2 P2: dispatched paths use ``last_dispatched_*``
+            # (truthful — what the server actually saw); pre-
+            # dispatch refusals use ``last_acquired_token`` (the
+            # candidate the orchestrator was about to send). Never
+            # mix candidate-token with prior-dispatch session.
+            dispatched_session_id = (
+                ctx.last_dispatched_session.session_id
+                if ctx.last_dispatched_session is not None
+                else None
+            )
+            if exc.reason == "mcp_authorisation_lost" or ctx.dispatched:
+                # R1 P1 + P2: dispatched → errored, with full context
+                event_type: Literal[
+                    "audit.tool_invocation_error",
+                    "audit.tool_invocation_refused",
+                ] = "audit.tool_invocation_error"
+                decision: Literal["refused", "errored"] = "errored"
+                # Special case: step_up_unauthorised → REFUSED even
+                # though dispatched (we declined to retry with the
+                # wider scope). Keep the dispatch context though.
+                extra_audit: dict[str, Any]
+                if exc.reason == "mcp_step_up_unauthorised":
+                    event_type = "audit.tool_invocation_refused"
+                    decision = "refused"
+                    extra_audit = {"refusal_reason": exc.reason}
+                else:
+                    extra_audit = {"error_taxonomy": exc.reason}
+                await self._emit_call_evidence(
+                    event_type=event_type,
+                    decision=decision,
+                    decision_reason=exc.reason,
+                    entry=entry,
+                    tool_name=tool_name,
+                    request_id=request_id,
+                    tenant_id=tenant_id,
+                    declared_risk_tier=declared_risk_tier,
+                    mcp_session_id=dispatched_session_id,
+                    token=ctx.last_dispatched_token,
+                    extra_audit_payload=extra_audit,
+                )
+            else:
+                # Pre-dispatch authz refusal — never reached the
+                # server. Token may be None (acquire_token failed
+                # at the very first call) or set to the candidate
+                # we were about to send.
+                await self._emit_call_evidence(
+                    event_type="audit.tool_invocation_refused",
+                    decision="refused",
+                    decision_reason=exc.reason,
+                    entry=entry,
+                    tool_name=tool_name,
+                    request_id=request_id,
+                    tenant_id=tenant_id,
+                    declared_risk_tier=declared_risk_tier,
+                    mcp_session_id=None,
+                    token=ctx.last_acquired_token,
+                    extra_audit_payload={"refusal_reason": exc.reason},
+                )
+            raise
+        except MCPTransportError as exc:
+            # R2 P2: ``last_dispatched_*`` is the truthful "the
+            # server saw this" pair. Pre-dispatch open-session
+            # failures (first attempt) leave the dispatched pair
+            # at None+None — honest report that no dispatch
+            # happened. Retry-after-401 open-session failures
+            # leave the dispatched pair at the FIRST send's
+            # session+token (the only one the server saw); the
+            # never-sent candidate token is in
+            # ``last_acquired_token`` but NOT used here.
+            dispatched_session_id = (
+                ctx.last_dispatched_session.session_id
+                if ctx.last_dispatched_session is not None
+                else None
+            )
+            await self._emit_call_evidence(
+                event_type="audit.tool_invocation_error",
+                decision="errored",
+                decision_reason=exc.reason,
+                entry=entry,
+                tool_name=tool_name,
+                request_id=request_id,
+                tenant_id=tenant_id,
+                declared_risk_tier=declared_risk_tier,
+                mcp_session_id=dispatched_session_id,
+                token=ctx.last_dispatched_token,
+                extra_audit_payload={"error_taxonomy": exc.reason},
+            )
+            raise
+        except Exception as exc:
+            # R3 P2: T7's ``StreamableHTTPTransport.open_session``
+            # can re-raise generic ``Exception`` (e.g., from a
+            # buggy ``session_open`` audit hook — its R2 P2 #1
+            # cleanup path closes the AsyncExitStack but lets the
+            # original exception propagate). Without this catch,
+            # such errors bypass T11 evidence emission entirely
+            # — no audit row, no decision row — violating the
+            # "every request_id produces 1 audit + 1 decision
+            # row" invariant.
+            #
+            # R4 P2: closed-enum vocabulary doctrine. The audit
+            # row's ``error_taxonomy`` field and the decision
+            # row's ``decision_reason`` field are closed-enum
+            # surfaces — operators query / map them downstream.
+            # Putting Python class names like ``RuntimeError``
+            # into those fields opens the vocabulary. The closed
+            # reason for this path is
+            # :data:`_GENERIC_INVOCATION_ERROR_TAXONOMY`
+            # (``"mcp_orchestrator_error"``); the sanitised class
+            # name lives in a SEPARATE ``error_type`` payload
+            # field for operator debugging.
+            #
+            # Token-free: ``type(exc).__name__`` only — NEVER
+            # ``str(exc)`` (could carry server-side debug strings
+            # or token bytes).
+            #
+            # ``BaseException`` (incl. ``CancelledError``)
+            # intentionally NOT caught — task teardown
+            # propagates without evidence emission.
+            dispatched_session_id = (
+                ctx.last_dispatched_session.session_id
+                if ctx.last_dispatched_session is not None
+                else None
+            )
+            error_type_name = type(exc).__name__
+            await self._emit_call_evidence(
+                event_type="audit.tool_invocation_error",
+                decision="errored",
+                decision_reason=_GENERIC_INVOCATION_ERROR_TAXONOMY,
+                entry=entry,
+                tool_name=tool_name,
+                request_id=request_id,
+                tenant_id=tenant_id,
+                declared_risk_tier=declared_risk_tier,
+                mcp_session_id=dispatched_session_id,
+                token=ctx.last_dispatched_token,
+                extra_audit_payload={
+                    "error_taxonomy": _GENERIC_INVOCATION_ERROR_TAXONOMY,
+                    "error_type": error_type_name,
+                },
+                extra_decision_payload={"error_type": error_type_name},
+            )
+            raise
+
+        # Success path — emit ``audit.tool_invocation`` + ``invoked``
+        # decision row with full correlation context.
+        duration_ms = int((time.monotonic() - started_at_monotonic) * 1000)
+        await self._emit_call_evidence(
+            event_type="audit.tool_invocation",
+            decision="invoked",
+            decision_reason=None,
+            entry=entry,
+            tool_name=tool_name,
+            request_id=request_id,
+            tenant_id=tenant_id,
+            declared_risk_tier=declared_risk_tier,
+            mcp_session_id=session.session_id,
+            token=used_token,
+            duration_ms=duration_ms,
+        )
+
+        return CallResult(
+            payload=payload,
+            request_id=request_id,
+            server_id=server_id,
+            tool_name=tool_name,
+            mcp_session_id=session.session_id,
+            as_issuer=used_token.as_issuer,
+            scopes=used_token.scopes,
+            client_id=used_token.client_id,
+        )
+
+    async def _call_tool_inner(
+        self,
+        *,
+        entry: MCPServerEntry,
+        tool_name: str,
+        arguments: Mapping[str, Any],
+        request_id: str,
+        tenant_id: str,
+        dispatch_context: _DispatchContext,
+    ) -> tuple[Any, MCPSession, Token]:
+        """Inner orchestration: token acquisition + open + send +
+        retry semantics + close. Returns ``(payload, session,
+        used_token)``; raises :class:`MCPAuthzError` or
+        :class:`MCPTransportError` on the various failure paths.
+
+        Extracted from :meth:`call_tool` so the outer body can wrap
+        the entire orchestration in a single try/except for
+        evidence emission (T11). The inner method itself does not
+        emit evidence — that's the caller's job.
+
+        R1 P1 + R1 P2 + R2 P2: populates ``dispatch_context`` as
+        orchestration progresses so the outer error handlers emit
+        evidence with the correct dispatch correlation context. The
+        R2 P2 split separates **acquired** (candidate) state from
+        **dispatched** ("the server saw this") state so a never-sent
+        retry/step-up token can't leak into a prior dispatch's
+        evidence row. Stages:
+
+          - After each ``acquire_token`` / ``step_up_token`` →
+            :attr:`_DispatchContext.last_acquired_token` is set
+            (used by pre-dispatch refusal rows).
+          - After ``open_session`` succeeds (in ``_attempt``) →
+            no dispatched-state mutation yet (open success ≠
+            send dispatched).
+          - **Just before ``transport.send``** (in ``_attempt``,
+            inside the inner ``try``) →
+            :attr:`_DispatchContext.last_dispatched_session` and
+            :attr:`_DispatchContext.last_dispatched_token` are
+            set; ``dispatched`` flips to True. From this point
+            forward, any failure (including post-dispatch authz
+            reacquire failures) classifies as ERRORED with the
+            send-pair's session+token context. If a retry's
+            ``open_session`` raises BEFORE its send is reached,
+            the dispatched pair stays at the prior successful
+            send's values — truthful, since the candidate
+            token never reached the server.
+        """
         transport = self._resolve_transport(entry)
 
         async def _attempt(token: Token) -> tuple[Any, MCPSession, Token]:
             """Open session, send, close (best-effort). Returns the
-            payload + the session + the token actually used (so the
-            outer caller can build CallResult correlation IDs from
-            the same token instance)."""
+            payload + the session + the token actually used.
+
+            R2 P2: ``dispatch_context.last_dispatched_session`` and
+            ``last_dispatched_token`` are updated ONLY immediately
+            before ``transport.send`` — never on ``open_session``
+            success alone. If a retry's ``open_session`` raises
+            BEFORE this attempt's send is reached, the dispatched
+            pair stays at the prior successful send's values
+            (truthful: the retry candidate never reached the
+            server). ``open_session`` failure first attempt leaves
+            the dispatched pair at None+None (also truthful: no
+            dispatch happened).
+            """
             session = await transport.open_session(server_url=entry.server_url, token=token)
             try:
+                # R2 P2 — update DISPATCHED state immediately before
+                # send. Open succeeded but the bytes haven't actually
+                # reached the server yet; the moment ``transport.send``
+                # is awaited, ``open_session`` has been observed by
+                # the server (HTTP MCP) and the candidate token is
+                # in flight. From here on, any failure inside
+                # ``send`` (timeout / SDK exception / 401 / 403) IS
+                # a dispatched-error event correlating to (session,
+                # token).
+                dispatch_context.last_dispatched_session = session
+                dispatch_context.last_dispatched_token = token
+                dispatch_context.dispatched = True
                 payload = await transport.send(
                     session,
                     MCPToolCallRequest(name=tool_name, arguments=dict(arguments)),
@@ -999,7 +1382,7 @@ class MCPHost:
                 await self._best_effort_close(
                     transport=transport,
                     session=session,
-                    server_id=server_id,
+                    server_id=entry.server_id,
                     request_id=request_id,
                     tenant_id=tenant_id,
                     operation="call_tool",
@@ -1011,20 +1394,32 @@ class MCPHost:
             request_id=request_id,
             tenant_id=tenant_id,
         )
+        # First-acquire success — record token even before dispatch
+        # so a step_up_unauthorised on the FIRST send carries the
+        # correct token in the refusal row.
+        dispatch_context.last_acquired_token = token
         try:
             payload, session, used_token = await _attempt(token)
         except MCPTransportError as first_error:
             signal, signal_payload = _classify_send_error(first_error)
             if signal == "transport_failed":
                 # Real transport error (not auth-related); propagate
-                # unchanged so the caller / T11's
-                # audit.tool_invocation_error path sees the original
-                # closed-enum reason.
+                # unchanged so the caller's audit.tool_invocation_error
+                # path sees the original closed-enum reason. Dispatch
+                # context already populated by _attempt.
                 raise
             if signal == "authz_lost":
                 # 401 OR 403 invalid_token → drop cached token + retry
                 # once with a freshly-acquired token. Second 401 fails
                 # with the closed-enum mcp_authorisation_lost.
+                #
+                # R1 P2: a reacquire failure here (e.g.
+                # mcp_oauth_request_timeout) is a POST-dispatch authz
+                # failure — the call already reached the server once.
+                # ``dispatch_context.dispatched`` is True from the
+                # first send, so the outer handler classifies the
+                # reacquire failure as ERRORED (with the first
+                # send's session context).
                 await self._authz.invalidate_cached_token(server_url=entry.server_url)
                 fresh_token = await self._authz.acquire_token(
                     server_url=entry.server_url,
@@ -1032,6 +1427,7 @@ class MCPHost:
                     request_id=request_id,
                     tenant_id=tenant_id,
                 )
+                dispatch_context.last_acquired_token = fresh_token
                 try:
                     payload, session, used_token = await _attempt(fresh_token)
                 except MCPTransportError as second_error:
@@ -1065,18 +1461,10 @@ class MCPHost:
                     request_id=request_id,
                     tenant_id=tenant_id,
                 )
+                dispatch_context.last_acquired_token = stepped_up
                 payload, session, used_token = await _attempt(stepped_up)
 
-        return CallResult(
-            payload=payload,
-            request_id=request_id,
-            server_id=server_id,
-            tool_name=tool_name,
-            mcp_session_id=session.session_id,
-            as_issuer=used_token.as_issuer,
-            scopes=used_token.scopes,
-            client_id=used_token.client_id,
-        )
+        return payload, session, used_token
 
     # --- helpers ------------------------------------------------------------
 
@@ -1224,87 +1612,148 @@ class MCPHost:
                 type(audit_exc).__name__,
             )
 
-    async def _emit_high_risk_tier_refusal_audit(
+    async def _emit_call_evidence(
         self,
         *,
-        server_id: str,
+        event_type: Literal[
+            "audit.tool_invocation",
+            "audit.tool_invocation_refused",
+            "audit.tool_invocation_error",
+        ],
+        decision: Literal["invoked", "refused", "errored"],
+        decision_reason: str | None,
+        entry: MCPServerEntry,
         tool_name: str,
-        declared_risk_tier: str,
         request_id: str,
         tenant_id: str,
+        declared_risk_tier: str,
+        mcp_session_id: str | None = None,
+        token: Token | None = None,
+        duration_ms: int | None = None,
+        extra_audit_payload: dict[str, Any] | None = None,
+        extra_decision_payload: dict[str, Any] | None = None,
     ) -> None:
-        """Emit ``audit.tool_invocation_refused`` for the ADR-014
-        transitional gate (T10).
+        """T11 — emit the parallel ``audit_event`` + ``decision_history``
+        rows for one ``call_tool`` outcome.
 
-        Audit-pipeline failure during this emit MUST NOT mask the
-        refusal — the refusal IS the safety outcome and propagates
-        to the caller regardless. Audit-emit failure is operationally
-        bad but doesn't change the safety semantics; log token-free
-        and let the orchestrator's ``raise`` proceed.
+        Per plan §T11 (R1 P2 #6 fix — separating the two evidence
+        surfaces): every ``request_id`` flowing through ``call_tool``
+        produces exactly one ``audit_event`` row (one of
+        ``audit.tool_invocation`` / ``audit.tool_invocation_refused``
+        / ``audit.tool_invocation_error``) AND exactly one
+        ``decision_history`` mcp_call row, both correlated by
+        ``request_id``. Examiners querying the audit chain by
+        sequence get the tamper-evident timeline; examiners querying
+        ``decision_history WHERE request_id = ?`` get the full
+        MCP-call shape with ``mcp_session_id`` for replay (per
+        MCP-CONFORMANCE.md §observability item 9).
 
-        Payload schema (matches plan §T10 + T11 will read this shape):
+        Audit + decision pipeline failures BOTH safe-swallow: log
+        token-free + let the caller see the primary outcome.
+        Audit-pipeline failure does NOT mask the success / refusal /
+        error result — same discipline as
+        :meth:`_safe_audit_close_failure`.
 
-          - ``server_id`` — pack identity (registry pack_id).
-          - ``tool_name`` — manifest-declared tool name. Caller-
-            supplied **arguments** are NOT included (refusal happens
-            before any data-classification policy has run; the
-            conservative default is "no caller bytes in the refusal
-            row").
-          - ``declared_risk_tier`` — manifest value, **normalised +
-            bounded + control-character escaped** via
-            :func:`_normalize_risk_tier_for_gate` (R1+R2+R3): allow-
-            list values pass through unchanged; non-string values
-            (list / dict / None / etc.) become a bounded
-            ``repr()``; long strings get truncated at
-            :data:`_RISK_TIER_REPR_MAX_LEN`; control characters
-            (``\\n``, ``\\t``, ANSI escapes, NUL) are escaped to
-            their ``\\xNN`` / ``\\n`` literal forms. Operators can
-            still triage typos vs intentional high-risk vs
-            malformed manifests; T11 implementers MUST NOT depend
-            on raw manifest bytes here. The original manifest
-            bytes are recoverable only from the cosign-signed pack
-            artefact.
-          - ``refusal_reason`` — closed-enum
-            ``"tool_approval_engine_not_available"``.
-          - ``sprint_13_5_followup`` — ``True`` so a Sprint 13.5
-            release-readiness query can find every refusal row that
-            the approval engine will resolve.
+        Payload contract:
+
+          - **Common fields** (audit + decision): ``pack_id`` (=
+            ``entry.server_id``, the registry pack identity);
+            ``tool_name`` (raw — T11 canonical query path);
+            ``mcp_session_id`` (None when refused before session
+            open); ``as_issuer`` / ``scopes`` (sorted for hash
+            stability) / ``resource_indicator`` / ``client_id``
+            (None when refused before token acquired).
+          - **Audit-only**: ``pack_signature_digest``,
+            ``duration_ms`` (success path only), ``outcome="ok"``
+            for the success event_type. ``extra_audit_payload``
+            adds ``refusal_reason`` / ``error_taxonomy`` /
+            ``declared_risk_tier`` / ``sprint_13_5_followup`` per
+            event class.
+          - **Decision-only**: ``declared_risk_tier`` (always),
+            ``decision`` ∈ {invoked, refused, errored},
+            ``decision_reason`` (closed-enum or None for ok).
+            ``extra_decision_payload`` adds path-specific fields.
+
+        **Token-free**: the bearer token's ``value`` bytes NEVER
+        appear in either payload. Tool ``arguments`` NEVER appear
+        in the refusal/error payloads (the call may not have been
+        admitted by data-classification policy; the conservative
+        default is "no caller bytes").
         """
+        # Build the common correlation context. ``token`` is None
+        # for refusals that happened before token acquisition (e.g.
+        # ADR-014 gate, mcp_anonymous_refused at acquire_token);
+        # the audit row honestly records that.
+        common: dict[str, Any] = {
+            "pack_id": entry.server_id,
+            "tool_name": tool_name,
+            "mcp_session_id": mcp_session_id,
+            "as_issuer": token.as_issuer if token else None,
+            "scopes": sorted(token.scopes) if token else None,
+            "resource_indicator": (token.resource_indicator if token else None),
+            "client_id": token.client_id if token else None,
+        }
+
+        # Audit payload: common + pack_signature_digest + outcome
+        # marker for success + duration_ms + per-event extras
+        audit_payload: dict[str, Any] = dict(common)
+        audit_payload["pack_signature_digest"] = entry.pack_signature_digest
+        if event_type == "audit.tool_invocation":
+            audit_payload["outcome"] = "ok"
+        if duration_ms is not None:
+            audit_payload["duration_ms"] = duration_ms
+        if extra_audit_payload:
+            audit_payload.update(extra_audit_payload)
+
         try:
             await self._audit_store.append(
                 AuditEvent(
-                    event_type="audit.tool_invocation_refused",
+                    event_type=event_type,
                     request_id=request_id,
                     tenant_id=tenant_id,
-                    payload={
-                        "server_id": server_id,
-                        "tool_name": tool_name,
-                        "declared_risk_tier": declared_risk_tier,
-                        "refusal_reason": "tool_approval_engine_not_available",
-                        "sprint_13_5_followup": True,
-                    },
+                    payload=audit_payload,
                 )
             )
         except Exception as audit_exc:
-            # R4 P2: sanitize caller-supplied strings (``tool_name``,
-            # ``request_id``) for the operator-facing log surface so
-            # an embedded newline / ANSI / NUL cannot forge a log
-            # line / rewrite operator terminal / truncate the line.
-            # ``server_id`` comes from the registry (operator-
-            # controlled) but apply the same defense for
-            # consistency. ``declared_risk_tier`` is already
-            # normalised + bounded + escaped via
-            # :func:`_normalize_risk_tier_for_gate`.
             _LOG.warning(
-                "audit append failed while logging "
-                "audit.tool_invocation_refused for the ADR-014 "
-                "transitional high-risk-tier gate (server_id=%s "
-                "tool_name=%s declared_risk_tier=%s request_id=%s "
-                "audit_error_type=%s); the refusal still propagates "
-                "to the caller (safety outcome wins).",
-                _sanitize_string_for_operator_surface(server_id),
+                "audit append failed while emitting %s for call_tool "
+                "(pack_id=%s tool_name=%s request_id=%s "
+                "audit_error_type=%s); primary outcome still "
+                "propagates to the caller.",
+                event_type,
+                _sanitize_string_for_operator_surface(entry.server_id),
                 _sanitize_string_for_operator_surface(tool_name),
-                declared_risk_tier,
                 _sanitize_string_for_operator_surface(request_id),
                 type(audit_exc).__name__,
+            )
+
+        # Decision payload: common + declared_risk_tier + decision
+        # + decision_reason + per-path extras
+        decision_payload: dict[str, Any] = dict(common)
+        decision_payload["declared_risk_tier"] = declared_risk_tier
+        decision_payload["decision"] = decision
+        decision_payload["decision_reason"] = decision_reason
+        if extra_decision_payload:
+            decision_payload.update(extra_decision_payload)
+
+        try:
+            await self._decision_history_store.append(
+                DecisionRecord(
+                    decision_type="mcp_call",
+                    request_id=request_id,
+                    tenant_id=tenant_id,
+                    payload=decision_payload,
+                )
+            )
+        except Exception as decision_exc:
+            _LOG.warning(
+                "decision_history append failed for mcp_call "
+                "(pack_id=%s tool_name=%s request_id=%s decision=%s "
+                "decision_error_type=%s); primary outcome still "
+                "propagates to the caller.",
+                _sanitize_string_for_operator_surface(entry.server_id),
+                _sanitize_string_for_operator_surface(tool_name),
+                _sanitize_string_for_operator_surface(request_id),
+                decision,
+                type(decision_exc).__name__,
             )
