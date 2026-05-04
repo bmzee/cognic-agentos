@@ -24,7 +24,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from cognic_agentos import __version__
@@ -728,6 +728,125 @@ class Settings(BaseSettings):
             "adds private_key_jwt + mTLS client-binding. The MCP authz "
             "client never logs the secret — it goes into the request "
             "and is dropped after."
+        ),
+    )
+
+    # ------------------------------------------------------------------
+    # Sprint 6 — A2A endpoint + UI event-stream stub (per ADR-003 + ADR-020)
+    # ------------------------------------------------------------------
+
+    a2a_token_cache_ttl_s: int = Field(
+        default=3600,
+        gt=0,
+        description=(
+            "TTL for the per-tenant A2A pinned-token cache. Tokens are "
+            "read from Vault on cache miss + refreshed before TTL "
+            "elapses. Default 3600s matches Sprint-5 "
+            "``mcp_oauth_token_cache_ttl_s`` (R1 P3 reviewer correction "
+            "— earlier draft said 300s but Sprint-5's default is 3600s; "
+            "parity restored). Per ADR-003 + A2A-CONFORMANCE.md, A2A "
+            "Wave-1 uses per-tenant pinned tokens (mTLS lands Wave 2; "
+            "VC lands Wave 3)."
+        ),
+    )
+
+    a2a_artifact_retention_seconds: int = Field(
+        default=7 * 24 * 3600,
+        gt=0,
+        description=(
+            "Retention window for A2A artifact references stored via "
+            "``ObjectStoreAdapter``. Default 7 days; tenants override "
+            "per regulatory class. Per ADR-003 §"
+            "'Artifacts' — large outputs (PDFs, evidence packs, JSON "
+            ">64 KiB) are stored by reference rather than inlined into "
+            "task responses, so this retention window is the floor "
+            "before the artifact ref becomes unresolvable."
+        ),
+    )
+
+    a2a_pinned_spec_version: str = Field(
+        default="1.0",
+        pattern=r"^[0-9]+\.[0-9]+$",
+        description=(
+            "Pinned A2A spec version. The schema-drift CI gate "
+            "(``test_a2a_schema_drift.py``) compares upstream protobuf "
+            "+ JSON-schema bindings against this pin. Bumping requires "
+            "an explicit reviewed change tied to the drift gate — "
+            "never silent. Per ADR-003 §'Versioning' + "
+            "A2A-CONFORMANCE.md §'Versioning'."
+        ),
+    )
+
+    a2a_schema_drift_check_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            # R2 P2 reviewer correction: include the field name itself
+            # in AliasChoices so direct constructor overrides
+            # (Settings(a2a_schema_drift_check_enabled=True)) still
+            # work. Without this, validation_alias would replace the
+            # default name-based population and ``extra='ignore'``
+            # would silently drop the kwarg — sharp edge for tests +
+            # T6's runtime enable path.
+            "a2a_schema_drift_check_enabled",
+            "COGNIC_A2A_SCHEMA_DRIFT_CHECK_ENABLED",
+            "COGNIC_RUN_A2A_UPSTREAM",
+        ),
+        description=(
+            "Whether the schema-drift CI gate runs. False locally "
+            "(saves the network round-trip on every test run); the "
+            "dedicated CI lane sets ``COGNIC_RUN_A2A_UPSTREAM=1`` "
+            "which flips this setting to True via the AliasChoices "
+            "binding. The drift gate itself is at "
+            "``tests/unit/protocol/test_a2a_schema_drift.py`` (T6). "
+            "Per Sprint-6 Doctrine Decision C — env-gate mirrors the "
+            "Sprint-4 ``cosign_real`` pattern. (R1 P2 reviewer "
+            "correction — the original binding only honoured the "
+            "fully-qualified ``COGNIC_A2A_SCHEMA_DRIFT_CHECK_ENABLED`` "
+            "env var, which would have made the CI lane silently skip "
+            "the upstream check despite setting "
+            "``COGNIC_RUN_A2A_UPSTREAM=1`` per the plan's documented "
+            "convention.)"
+        ),
+    )
+
+    a2a_card_jws_max_size_bytes: int = Field(
+        default=64 * 1024,
+        gt=0,
+        description=(
+            "Maximum size of a detached AgentCard JWS file the trust "
+            "gate accepts. JWS files >64 KiB are an attack vector "
+            "(DoS via large-blob signature verification + memory "
+            "pressure on the trust-gate path). Per Sprint-6 Doctrine "
+            "Decision B — caller-controlled URL threat model + "
+            "AgentCard JWS verification ride the same fail-closed "
+            "posture."
+        ),
+    )
+
+    a2a_outbound_request_timeout_s: int = Field(
+        default=30,
+        gt=0,
+        description=(
+            "Timeout for outbound A2A HTTP calls (Agent Card fetch + "
+            "task dispatch). 30s matches Sprint-5 "
+            "``mcp_oauth_request_timeout_s`` for operational "
+            "consistency. Per Sprint-6 Doctrine Decision B — outbound "
+            "dispatch URLs come from JWS-verified Agent Cards only; "
+            "this timeout is the deadline for both the discovery fetch "
+            "and the dispatch send."
+        ),
+    )
+
+    a2a_inbound_request_timeout_s: int = Field(
+        default=60,
+        gt=0,
+        description=(
+            "Deadline for inbound non-streaming A2A ``handle()`` calls "
+            "before the endpoint emits ``task.failed`` with "
+            "``deadline_exceeded``. 60s budget for typical bank-grade "
+            "tool-bound tasks; streaming tasks use the spec's "
+            "task-progress envelopes instead and are not bound by "
+            "this timeout. Per ADR-003 §'Tasks'."
         ),
     )
 

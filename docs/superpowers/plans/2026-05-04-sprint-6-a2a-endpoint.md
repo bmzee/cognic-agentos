@@ -58,7 +58,7 @@ Sprint 6 creates 11 new protocol modules + 7 new portal endpoints + 1 new threat
 **Protocol layer (10 A2A modules + 1 UI events module):**
 - `src/cognic_agentos/protocol/a2a_endpoint.py` — single owner of the inbound A2A receiver + task lifecycle state machine. **Critical-controls module.** Routes incoming calls by entry-point name via plugin registry; emits `a2a.task_received` + `a2a.task_lifecycle_*` audit + decision_history rows; refuses anonymous calls; refuses unknown targets with `a2a_unknown_target` (501 with ADR-002 reference per BUILD_PLAN exit criterion).
 - `src/cognic_agentos/protocol/a2a_authz.py` — per-tenant pinned-token authorization client. **Critical-controls module.** Validates `Authorization: Bearer <token>` against per-tenant Vault path; emits `a2a.token_rejected` audit row on refusal; closed-enum `A2AAuthzReason` (8 values: token-missing, token-malformed, tenant-mismatch, token-revoked, vault-read-failed, audience-mismatch, scope-insufficient, anonymous-refused).
-- `src/cognic_agentos/protocol/a2a_agent_cards.py` — Agent Card publisher (per-pack `/.well-known/agent-card.json` route) AND verifier (inbound at registration + outbound at dispatch). **Critical-controls module.** Two-pass validation: upstream A2A 1.0 schema (via `a2a-sdk` SDK) + AgentOS bank-grade profile (mandatory `provider`, `securitySchemes`, `securityRequirements`, `signatures`, ≥1 `supportedInterfaces` entry). JWS verification rides Sprint-4 `TrustGate` per-tenant trust root. Card content hash-chained into `decision_history` at registration.
+- `src/cognic_agentos/protocol/a2a_agent_cards.py` — Agent Card publisher (per-pack `/.well-known/agent-card.json` route) AND verifier (inbound at registration + outbound at dispatch). **Critical-controls module.** **Three-pass validation** (T1 R1 P2 reviewer correction added Pass 3 — earlier draft only had two passes which forced JWS failures into the schema bucket): Pass 1 upstream A2A 1.0 schema (via `a2a-sdk`) + Pass 2 AgentOS bank-grade profile (mandatory `provider`, `securitySchemes`, `securityRequirements`, `signatures`, ≥1 `supportedInterfaces` entry) + Pass 3 JWS verification against Sprint-4 `TrustGate` per-tenant trust root. Card content hash-chained into `decision_history` at registration. The 10-value `AgentCardValidationReason` literal covers the per-pass failure modes (1 + 6 + 3); T7 `_AGENT_CARD_VALIDATION_REASON_TO_REFUSAL` mapping collapses the 6 profile flavors into the single `a2a_agent_card_profile_invalid` registry refusal while keeping the JWS reasons distinct.
 - `src/cognic_agentos/protocol/a2a_schema.py` — pinned A2A 1.0 wire-format types. **Critical-controls module.** Re-exports `a2a-sdk` SDK Pydantic types under stable AgentOS names so downstream code keeps working when we bump the SDK pin. Includes `_PINNED_PROTOBUF_DIGEST` + `_PINNED_JSON_SCHEMA_DIGEST` constants the drift CI gate (T6) verifies against.
 - `src/cognic_agentos/protocol/a2a_version.py` — `A2A-Version` HTTP header parser + responder per ADR-003 §"Version negotiation". Closed-enum `A2AVersionOutcome` — **6 values**: `accepted` (`1.0` matches pinned), `absent_rejected` (no header → rejected with `Supported-A2A-Versions: 1.0`; spec interprets absent as `0.3`), `legacy_rejected` (`0.x` → rejected), `higher_minor_degraded` (`1.<higher minor>` → processed with feature-degradation warning), `unsupported_rejected` (`2.x` or unknown → rejected with `Supported-A2A-Versions`), `malformed_rejected` (malformed header → spec-defined parse error).
 - `src/cognic_agentos/protocol/a2a_streaming.py` — A2A 1.0 streaming-message protocol support (chunked HTTP + spec wire envelopes). NOT portal/UI SSE (that's Sprint-7B per ADR-020). Emits `task.progress` / `task.completed` / `task.failed` envelopes per spec; chain-linked into decision_history via `_emit_streaming_evidence` helper mirroring Sprint-5's `_emit_call_evidence`.
@@ -91,8 +91,9 @@ Sprint 6 creates 11 new protocol modules + 7 new portal endpoints + 1 new threat
 - `tests/unit/protocol/test_a2a_authz.py` — token validation contract.
 - `tests/unit/protocol/test_a2a_schema.py` — schema-type contract.
 - `tests/unit/protocol/test_a2a_schema_drift.py` — env-gated CI drift gate (`@pytest.mark.a2a_upstream`).
-- `tests/unit/protocol/test_a2a_agent_cards.py` — two-pass validator + JWS verify.
+- `tests/unit/protocol/test_a2a_agent_cards.py` — three-pass validator (upstream schema + AgentOS profile + JWS) contract; per-pass arm for each of the 10 `AgentCardValidationReason` outcomes including the 3 JWS reasons (T1 R1 P2 + T1 R4 P2 doctrine).
 - `tests/unit/protocol/test_a2a_agent_card_jws_required.py` — registration refused on unsigned / non-allow-listed signer.
+- `tests/unit/protocol/test_trust_gate.py` — extend with arms for the new T7 surfaces: (1) `verify_jws_blob` happy path; (2) signature-mismatch raises `TrustGateError`; (3) **signer-not-on-trust-root raises `TrustGateSignerNotAllowlistedError`** (T1 R4 P2 — pin the subclass-vs-parent distinction so callers' closed-enum routing stays unambiguous); (4) malformed JWS raises `TrustGateError`; (5) `TrustGateSignerNotAllowlistedError` is a subclass of `TrustGateError` so callers that ONLY catch the parent still see it (defensive Python isinstance check).
 - `tests/unit/protocol/test_a2a_agent_card_outbound_verification.py` — outbound dispatch fetches card, verifies JWS, dispatches to `supportedInterfaces[].url`.
 - `tests/unit/protocol/test_a2a_agent_card_chain_audit.py` — card content hash-chained at registration.
 - `tests/unit/protocol/test_a2a_version.py` — version-header negotiation (6 cases per `A2AVersionOutcome`).
@@ -120,19 +121,19 @@ Sprint 6 creates 11 new protocol modules + 7 new portal endpoints + 1 new threat
 - `src/cognic_agentos/core/config.py` — Sprint-6 settings (T1): `a2a_token_cache_ttl_s`, `a2a_artifact_retention_seconds`, `a2a_pinned_spec_version`, `a2a_schema_drift_check_enabled`, `a2a_card_jws_max_size_bytes`, `a2a_outbound_request_timeout_s`, `a2a_inbound_request_timeout_s`. Mirrors Sprint-5's `mcp_*` setting block shape. **Halt-before-commit** because `core/config.py` ships AGENTS.md-cited critical-controls knobs (token cache, retention windows, fail-closed timeouts).
 - `src/cognic_agentos/protocol/__init__.py` — export new modules (`A2AEndpoint`, `A2AAuthzClient`, `A2AAgentCardVerifier`, `A2AVersionNegotiator`, `UIEventEmitter`, etc.); extend the closed-enum re-exports.
 - `src/cognic_agentos/portal/api/app.py` — **two-phase amendment** (R0 P2 reviewer correction). T2 ONLY adds the `is_a2a_available()` log branch (kernel-resilient `try/except ImportError` for the `a2a-sdk`); kernel image still boots without it (mirrors Sprint-5 T2 R3 P1 doctrine). T2 does NOT mount any HTTP routes — that follows in: T9 (`POST /api/v1/a2a` receiver + Agent-Card publisher routes), T11 (`/api/v1/a2a/capabilities` + `/cancel` + artifacts retrieval). T12 wires `UIEventEmitter` at the harness boundary (in-process emit hooks; **no SSE endpoint** — Sprint 7B owns that per ADR-020 phase table). The two-phase shape avoids the Sprint-5 T15 R1 P2 #1 overclaim trap (`create_prod_app` MUST NOT promise wiring it doesn't actually do).
-- `src/cognic_agentos/protocol/trust_gate.py` — additive: `verify_jws_blob(jws_bytes, *, payload_bytes, tenant_id)` method that reuses the per-tenant cosign trust root for JWS signature verification. **Critical-controls module — halt-before-commit.** No subprocess / no shell. Wraps `joserfc` JWS verification (R3 P2 #1 — picked for RFC-7797 detached-JWS support) with the same secure-default posture as the cosign caller (explicit env, no-fallthrough on key resolution).
+- `src/cognic_agentos/protocol/trust_gate.py` — additive: (1) `verify_jws_blob(jws_bytes, *, payload_bytes, tenant_id)` method that reuses the per-tenant cosign trust root for JWS signature verification; (2) **new `TrustGateSignerNotAllowlistedError(TrustGateError)` subclass** (T1 R4 P2 reviewer correction — without this subclass, T7's verifier would have to collapse both signature-invalid AND signer-not-allowlisted into the same `TrustGateError` catch and lose the closed-enum split the R3 P2 reviewer correction enabled). **Critical-controls module — halt-before-commit.** No subprocess / no shell. Wraps `joserfc` JWS verification (R3 P2 #1 — picked for RFC-7797 detached-JWS support) with the same secure-default posture as the cosign caller (explicit env, no-fallthrough on key resolution). The subclass is **added to `trust_gate.py`'s own `__all__`** (T1 R5 P3 reviewer correction — earlier draft incorrectly said `protocol/__init__.py`'s `__all__`, but T7's verifier imports from `cognic_agentos.protocol.trust_gate` and `trust_gate.py` carries its own export list). Step 8 below pins the `__all__` extension explicitly.
 - `src/cognic_agentos/protocol/plugin_registry.py` — additive: extend the admission pipeline with an Agent Card JWS verification step **AFTER the trust gate's wheel cosign verifies AND after the Sprint-5 deferred-load manifest extractor reads `agent_card_jws_path`** (R0 P2 reviewer correction — pack must be cosign-trusted FIRST so its declared metadata is trustworthy enough to read). The full ordering is: (1) per-tenant allow-list; (2) wheel cosign verification (Sprint-4 trust gate); (3) full Sprint-4 attestation pipeline (SBOM / SLSA / in-toto / vuln / license / Sigstore); (4) Sprint-5 deferred-load manifest extraction via `Distribution.locate_file()`; (5) **NEW Sprint-6 step:** read `agent_card_jws_path` from the cosign-verified manifest, fetch the detached JWS bytes via `joserfc`, verify against the per-tenant trust root via `TrustGate.verify_jws_blob`. **Critical-controls module — halt-before-commit.**
 
   **Closed-enum `RefusalReason` extension — 6 new registration-boundary literals (R3 P2 #3 reviewer correction listed them explicitly):**
 
-  | Registry `RefusalReason` literal | Fires at admission step | Source enum mapped from |
+  | Registry `RefusalReason` literal | Fires at admission step | Source `AgentCardValidationReason` literal mapped from |
   |---|---|---|
-  | `a2a_manifest_jws_path_missing` | step (4) — manifest extracted but missing `[tool.cognic.a2a].agent_card_jws_path` | T7 manifest-shape check |
-  | `a2a_agent_card_jws_blob_unreadable` | step (5) — JWS sidecar file declared but not on disk / not readable | T7 file-IO check |
-  | `a2a_agent_card_signature_invalid` | step (5) — `joserfc.jws.deserialize_compact` raises on signature mismatch | T7 `AgentCardValidationReason.signature_invalid` |
-  | `a2a_agent_card_signer_not_allowlisted` | step (5) — signature verifies but signer key is not on per-tenant trust root | T7 `AgentCardValidationReason.signer_not_allowlisted` |
-  | `a2a_agent_card_upstream_schema_invalid` | step (5) — Pass 1 of two-pass validation fails (card not a valid A2A 1.0 AgentCard per upstream JSON-schema) | T7 `AgentCardValidationReason.upstream_schema_invalid` |
-  | `a2a_agent_card_profile_invalid` | step (5) — Pass 2 fails (spec-valid card but missing AgentOS bank-grade profile field — `provider`, `securitySchemes`, `securityRequirements`, `signatures`, ≥1 `supportedInterfaces` entry) | T7 `AgentCardValidationReason.profile_invalid` |
+  | `a2a_manifest_jws_path_missing` | step (4) — manifest extracted but missing `[tool.cognic.a2a].agent_card_jws_path` | (none — manifest-shape check, fires before card validation runs) |
+  | `a2a_agent_card_jws_blob_unreadable` | step (5) — JWS sidecar file declared but not on disk / not readable | `agent_card_jws_blob_unreadable` |
+  | `a2a_agent_card_signature_invalid` | step (5) — `joserfc.jws.deserialize_compact` raises on signature mismatch | `agent_card_signature_invalid` |
+  | `a2a_agent_card_signer_not_allowlisted` | step (5) — signature verifies but signer key is not on per-tenant trust root | `agent_card_signer_not_allowlisted` |
+  | `a2a_agent_card_upstream_schema_invalid` | step (5) — Pass 1 of three-pass validation fails (card not a valid A2A 1.0 AgentCard per upstream JSON-schema) | `agent_card_upstream_schema_invalid` |
+  | `a2a_agent_card_profile_invalid` | step (5) — Pass 2 fails (spec-valid card but missing AgentOS bank-grade profile field — `provider`, `securitySchemes`, `securityRequirements`, `signatures`, ≥1 `supportedInterfaces` entry, OR a top-level `url` violation) | `agent_card_profile_provider_missing` / `_security_schemes_missing` / `_security_requirements_missing` / `_signatures_missing` / `_supported_interfaces_empty` / `_top_level_url_forbidden` (6 validation literals collapse to this single registry refusal) |
 
   These 6 are the registration-boundary `RefusalReason` literals; they are NOT the same as the 11 runtime-side `A2APolicyRefusalReason` literals from T11 (which surface in `data.policy_reason` of A2A error responses, not in registry refusals). The registry-side reasons all carry the `a2a_` prefix to mirror the Sprint-5 `mcp_*` convention; the policy-side reasons are type-namespaced via `A2APolicyRefusalReason` and stay unprefixed (matches the Sprint-5 `AuthzReason` pattern). RefusalReason count goes 26 → **32**.
 
@@ -220,10 +221,11 @@ Expected: FAIL — no `a2a_*` fields on `Settings`.
 # ---------------------------------------------------------------------------
 
 #: TTL for the per-tenant A2A pinned-token cache. Tokens are read from
-#: Vault on cache miss + refreshed before TTL elapses. Default 300s
-#: matches Sprint-5 mcp_oauth_token_cache_ttl_s for operational
-#: consistency.
-a2a_token_cache_ttl_s: int = Field(default=300, gt=0)
+#: Vault on cache miss + refreshed before TTL elapses. Default 3600s
+#: matches Sprint-5 mcp_oauth_token_cache_ttl_s (T1 R1 P3 reviewer
+#: correction — earlier draft said 300s; Sprint-5's actual default is
+#: 3600s; parity restored).
+a2a_token_cache_ttl_s: int = Field(default=3600, gt=0)
 
 #: Retention window for A2A artifact references stored via
 #: ObjectStoreAdapter. Default 7 days; tenants override per
@@ -236,11 +238,23 @@ a2a_artifact_retention_seconds: int = Field(default=7 * 24 * 3600, gt=0)
 a2a_pinned_spec_version: str = Field(default="1.0", pattern=r"^[0-9]+\.[0-9]+$")
 
 #: Whether the schema-drift CI gate runs at startup. False locally
-#: (saves network round-trip on every test run); CI sets
-#: COGNIC_RUN_A2A_UPSTREAM=1 which the env-var-binding pulls in as
-#: True. The drift gate itself is in tests/unit/protocol/
-#: test_a2a_schema_drift.py.
-a2a_schema_drift_check_enabled: bool = Field(default=False)
+#: (saves network round-trip on every test run); the dedicated CI
+#: lane sets COGNIC_RUN_A2A_UPSTREAM=1 which the AliasChoices
+#: binding flips to True (T1 R1 P2 reviewer correction — without
+#: the alias, the CI lane would silently skip the upstream check).
+#: T1 R2 P2 added the field name to AliasChoices so direct
+#: constructor overrides + name-based population still work
+#: (Settings(a2a_schema_drift_check_enabled=True) MUST stick rather
+#: than be silently dropped by extra='ignore'). The drift gate
+#: itself is in tests/unit/protocol/test_a2a_schema_drift.py.
+a2a_schema_drift_check_enabled: bool = Field(
+    default=False,
+    validation_alias=AliasChoices(
+        "a2a_schema_drift_check_enabled",        # constructor + name-based population (R2)
+        "COGNIC_A2A_SCHEMA_DRIFT_CHECK_ENABLED", # standard env-prefix path
+        "COGNIC_RUN_A2A_UPSTREAM",                # CI alias (R1)
+    ),
+)
 
 #: Maximum size of a detached AgentCard JWS file the trust gate
 #: accepts. JWS files >64 KiB are an attack vector (DoS via
@@ -256,6 +270,10 @@ a2a_outbound_request_timeout_s: int = Field(default=30, gt=0)
 #: budget for typical bank-grade tool-bound tasks.
 a2a_inbound_request_timeout_s: int = Field(default=60, gt=0)
 ```
+
+> **Note** — T1 R1 P2 also requires importing ``AliasChoices`` from
+> ``pydantic`` at the top of ``core/config.py`` alongside the existing
+> ``Field`` / ``field_validator`` / ``model_validator`` imports.
 
 - [ ] **Step 4: Implement closed-enum vocab declarations**
 
@@ -385,29 +403,41 @@ _POLICY_REASON_TO_SPEC_CODE_SHAPE: dict[str, str] = {  # illustrative; defined i
     "wave2_feature_refused": "unsupported_operation",
 }
 
-#: AgentCard validation outcomes. Two-pass: upstream A2A 1.0 schema
-#: + AgentOS bank-grade profile. 7 values.
+#: AgentCard validation outcomes. **Three-pass** (T1 R1 P2 reviewer
+#: correction added the JWS pass — earlier draft only had upstream-
+#: schema + profile, which would have forced T7 to misclassify JWS
+#: failures or use untyped strings):
+#:   1. Upstream A2A 1.0 schema (spec-conformance gate)
+#:   2. AgentOS bank-grade profile gates (6 specific failure modes)
+#:   3. JWS signature verification (3 outcomes)
+#: 10 values total.
 AgentCardValidationReason = Literal[
-    "agent_card_upstream_schema_invalid",      # spec-conformance gate
-    "agent_card_profile_provider_missing",     # AgentOS profile gate
+    # Pass 1 — upstream A2A 1.0 schema (spec-conformance gate)
+    "agent_card_upstream_schema_invalid",
+    # Pass 2 — AgentOS bank-grade profile gates
+    "agent_card_profile_provider_missing",
     "agent_card_profile_security_schemes_missing",
     "agent_card_profile_security_requirements_missing",
     "agent_card_profile_signatures_missing",
     "agent_card_profile_supported_interfaces_empty",
     "agent_card_profile_top_level_url_forbidden",  # spec violation
+    # Pass 3 — JWS signature verification (T1 R1 P2 addition)
+    "agent_card_jws_blob_unreadable",       # detached JWS sidecar file IO failure
+    "agent_card_signature_invalid",         # cryptographic signature verify failed
+    "agent_card_signer_not_allowlisted",    # signer key not on per-tenant trust root
 ]
 ```
 
 - [ ] **Step 5: Run; expect PASS**
 
-Run: `uv run pytest tests/unit/test_config.py::TestSprint6A2ASettings -v`
-Expected: 9 passed.
+Run: `uv run pytest tests/unit/test_config.py::TestSprint6A2ASettings tests/unit/test_config.py::TestSprint6ClosedEnumVocabulary -v`
+Expected: 26 passed (T1 R1 + R2 corrections grew the count from 9 — 17 settings arms + 9 closed-enum arms; the alias regressions + the constructor-override regression land here).
 
 - [ ] **Step 6: Update `.env.example`**
 
 ```bash
 # A2A endpoint (Sprint 6, per ADR-003 + docs/A2A-CONFORMANCE.md)
-COGNIC_A2A_TOKEN_CACHE_TTL_S=300
+COGNIC_A2A_TOKEN_CACHE_TTL_S=3600  # T1 R1 P3 corrected from 300 — Sprint-5 mcp_oauth_token_cache_ttl_s default IS 3600s; parity restored
 COGNIC_A2A_ARTIFACT_RETENTION_SECONDS=604800
 COGNIC_A2A_PINNED_SPEC_VERSION=1.0
 COGNIC_A2A_SCHEMA_DRIFT_CHECK_ENABLED=false
@@ -1445,19 +1475,20 @@ git commit -m "feat(sprint-6): A2A 1.0 wire-format types + drift CI gate (T6)"
 
 ---
 
-## Task 7: `protocol/a2a_agent_cards.py` — two-pass validator + JWS verify
+## Task 7: `protocol/a2a_agent_cards.py` — three-pass validator (schema + profile + JWS)
 
 **Files:**
 - Create: `src/cognic_agentos/protocol/a2a_agent_cards.py` — Agent Card publisher + verifier.
-- Modify: `src/cognic_agentos/protocol/trust_gate.py` — additive `verify_jws_blob(...)` method (reuses Sprint-4 per-tenant trust root).
-- Create: `tests/unit/protocol/test_a2a_agent_cards.py` — two-pass validator contract.
+- Modify: `src/cognic_agentos/protocol/trust_gate.py` — additive `verify_jws_blob(...)` method + new `TrustGateSignerNotAllowlistedError(TrustGateError)` subclass (reuses Sprint-4 per-tenant trust root).
+- Modify: `tests/unit/protocol/test_trust_gate.py` — extend with arms for the new `verify_jws_blob` + `TrustGateSignerNotAllowlistedError` surfaces (T1 R5 P3 reviewer correction added this entry — earlier draft introduced the test arms in prose elsewhere but never added the file to T7's explicit-path staging list, so an implementer following the Step 9 git-add block would have landed the subclass without its regressions).
+- Create: `tests/unit/protocol/test_a2a_agent_cards.py` — three-pass validator contract (1 upstream-schema arm + 6 AgentOS-profile arms + 3 JWS arms = 10 arms covering each `AgentCardValidationReason` literal).
 - Create: `tests/unit/protocol/test_a2a_agent_card_jws_required.py` — registration refused on unsigned / non-allow-listed signer.
 - Create: `tests/unit/protocol/test_a2a_agent_card_outbound_verification.py` — outbound dispatch verifies the target's card before sending.
 - Create: `tests/unit/protocol/test_a2a_agent_card_chain_audit.py` — card content hash-chained at registration; subsequent mutations require re-registration.
 
 **Halt-before-commit:** Yes (TWO critical-controls modules touched: `a2a_agent_cards.py` AND `trust_gate.py`).
 
-The two-pass validation per A2A-CONFORMANCE.md:
+The three-pass validation per A2A-CONFORMANCE.md (T1 R1 P2 added Pass 3):
 - **Pass 1 (upstream A2A 1.0 schema)** — card must be a legitimate A2A 1.0 card (validates against the SDK's `AgentCard` Pydantic type derived from upstream protobuf). A card with top-level `url` (forbidden by spec — URLs live in `supportedInterfaces[].url`) → fail. A card with Cognic-specific identity fields (`agent_id`, `oasf_capability_set`, etc.) at the top level → fail (those live in pack manifest's `[tool.cognic.identity]` block).
 - **Pass 2 (AgentOS bank-grade profile)** — spec-optional fields AgentOS makes mandatory: `provider`, `securitySchemes`, `securityRequirements`, `signatures`, ≥1 `supportedInterfaces` entry. Failures return `agentos_profile_violation` with the specific mandatory field listed (distinct from upstream-schema failures so authors can diagnose without confusing the two layers).
 
@@ -1474,7 +1505,7 @@ Skeleton of the implementation:
 
 Critical-controls module per AGENTS.md (Sprint-6 amendment).
 
-Two-pass validation per docs/A2A-CONFORMANCE.md:
+Three-pass validation per docs/A2A-CONFORMANCE.md (T1 R1 P2 added Pass 3):
   Pass 1 — upstream A2A 1.0 schema (via a2a-sdk Python package)
   Pass 2 — AgentOS bank-grade profile
 
@@ -1482,12 +1513,15 @@ JWS verification rides Sprint-4 trust gate's per-tenant trust root.
 Both inbound (registration) and outbound (call dispatch) paths
 verify before proceeding.
 
-Closed-enum AgentCardValidationReason (7 values) lives in
+Closed-enum AgentCardValidationReason (10 values, three-pass —
+T1 R1 P2 added the 3 JWS-verification outcomes alongside the
+1 upstream-schema gate + 6 AgentOS-profile gates) lives in
 cognic_agentos.protocol.__init__.
 """
 
 from __future__ import annotations
 
+import asyncio  # T1 R4 P3 — needed for the CancelledError re-raise in verify()
 import dataclasses
 import logging
 from pathlib import Path
@@ -1499,7 +1533,11 @@ from cognic_agentos.core.audit import AuditStore
 from cognic_agentos.core.config import Settings
 from cognic_agentos.core.decision_history import DecisionHistoryStore
 from cognic_agentos.protocol import AgentCardValidationReason
-from cognic_agentos.protocol.trust_gate import TrustGate
+from cognic_agentos.protocol.trust_gate import (
+    TrustGate,
+    TrustGateError,
+    TrustGateSignerNotAllowlistedError,
+)
 
 _LOG = logging.getLogger(__name__)
 
@@ -1520,7 +1558,7 @@ class A2AAgentCardError(Exception):
 
 
 class A2AAgentCardVerifier:
-    """Two-pass validator + JWS-verifier. Used by the registry at
+    """Three-pass validator + JWS-verifier. Used by the registry at
     pack registration AND by ``A2AEndpoint.dispatch_outbound`` at
     call time.
     """
@@ -1548,37 +1586,90 @@ class A2AAgentCardVerifier:
         tenant_id: str,
         request_id: str,
     ) -> AgentCardValidation:
-        """Two-pass validation + JWS verification. Returns
+        """Three-pass validation (upstream schema + AgentOS profile + JWS).
+        Returns
         ``AgentCardValidation(ok=True, reason=None, payload={})`` on
         success; closed-enum refusal otherwise.
         """
+        # Pass 3 — JWS verification (T1 R1 P2 added the dedicated JWS
+        # validation reasons; T1 R3 P2 reviewer correction below
+        # routes the three failure modes onto the correct closed-enum
+        # values, NOT the upstream-schema bucket they used to collapse
+        # into).
+
         # Size cap defends against DoS via large-blob signature
         # verification (per Sprint-6 T1 a2a_card_jws_max_size_bytes).
+        # Oversized blob = unreadable from the gate's perspective —
+        # we refuse before passing the bytes to joserfc.
         if len(jws_bytes) > self._settings.a2a_card_jws_max_size_bytes:
             return AgentCardValidation(
                 ok=False,
-                reason="agent_card_upstream_schema_invalid",
+                reason="agent_card_jws_blob_unreadable",
                 payload={
                     "field": "jws",
                     "size_bytes": len(jws_bytes),
                     "max_bytes": self._settings.a2a_card_jws_max_size_bytes,
+                    "reason_detail": "size_cap_exceeded",
                 },
             )
 
         # JWS verification (Sprint-4 trust gate handles the keystore +
-        # signer-allow-list lookup).
+        # signer-allow-list lookup; ``verify_jws_blob`` raises
+        # ``TrustGateError`` for signature-mismatch / unparseable JWS,
+        # ``TrustGateSignerNotAllowlistedError`` for non-allowlisted
+        # signers — the gate is responsible for distinguishing the
+        # two cases at the ``except`` boundary so the closed-enum
+        # routing here is unambiguous).  Both classes are imported at
+        # module scope (see top of file).
         try:
             await self._trust_gate.verify_jws_blob(
                 jws_bytes=jws_bytes,
                 payload_bytes=card_bytes,
                 tenant_id=tenant_id,
             )
-        except Exception as exc:
+        except asyncio.CancelledError:
+            raise
+        except TrustGateSignerNotAllowlistedError as exc:
+            # Signature itself verified but the signing key was not
+            # on the per-tenant cosign trust root. Different
+            # operational fix (rotate trust root) than a forged
+            # signature, so closed-enum split.
             return AgentCardValidation(
                 ok=False,
-                reason="agent_card_upstream_schema_invalid",
+                reason="agent_card_signer_not_allowlisted",
                 payload={
                     "jws_error_class": type(exc).__name__,
+                    # NB: never include the raw exception message —
+                    # might carry signer key id / fingerprint that
+                    # belongs in audit not in operator-visible payload.
+                },
+            )
+        except TrustGateError as exc:
+            # Signature verification failed (mismatch, malformed JWS
+            # header, unsupported algorithm). Per Sprint-5 doctrine:
+            # ``type(exc).__name__`` lands in the payload; raw
+            # ``str(exc)`` does NOT (could leak Authorization-header
+            # bytes or signer-key fragments).
+            return AgentCardValidation(
+                ok=False,
+                reason="agent_card_signature_invalid",
+                payload={
+                    "jws_error_class": type(exc).__name__,
+                },
+            )
+        except Exception as exc:
+            # Unexpected non-trust-gate exception (e.g., joserfc
+            # raising something the trust gate didn't normalise).
+            # Per the closed-enum doctrine: refuse with the most
+            # specific JWS reason rather than the schema bucket;
+            # if this fires, ``TrustGate`` needs a wrapper to keep
+            # the closed-enum invariant.
+            return AgentCardValidation(
+                ok=False,
+                reason="agent_card_signature_invalid",
+                payload={
+                    "jws_error_class": type(exc).__name__,
+                    "reason_detail": "unexpected_exception_class",
                 },
             )
 
@@ -1687,10 +1778,48 @@ class A2AAgentCardVerifier:
         return AgentCard.model_validate_json(card_resp.content)
 ```
 
-- [ ] **Step 8: Add `verify_jws_blob` to Sprint-4 trust gate (additive, halt-before-commit)**
+- [ ] **Step 8: Add `verify_jws_blob` + `TrustGateSignerNotAllowlistedError` to Sprint-4 trust gate (additive, halt-before-commit)**
+
+T7 R4 P2 reviewer correction: the verifier skeleton (Step 4 above) catches `TrustGateSignerNotAllowlistedError` separately from `TrustGateError` so signer-allow-list failures land on the correct closed-enum reason (`agent_card_signer_not_allowlisted`) instead of collapsing into the generic signature-invalid bucket. That requires the trust-gate task to ship the subclass + export it. The Step-8 snippet below adds both:
 
 ```python
-# src/cognic_agentos/protocol/trust_gate.py — append method to TrustGate
+# src/cognic_agentos/protocol/trust_gate.py — append subclass + method
+# to the existing TrustGateError + TrustGate definitions, and extend
+# the module's own ``__all__`` so callers can import the new subclass
+# from cognic_agentos.protocol.trust_gate (T1 R5 P3 reviewer correction
+# pinned this — earlier draft mistakenly said the export lived on
+# protocol/__init__.py's __all__, but trust_gate.py has its own export
+# list and the verifier skeleton imports directly from this module).
+
+# Extend the existing __all__ at top of trust_gate.py:
+__all__ = [
+    # ... existing Sprint-4 entries unchanged ...
+    "TrustGateError",
+    "TrustGate",
+    # T1 Sprint-6 addition:
+    "TrustGateSignerNotAllowlistedError",
+]
+
+
+class TrustGateSignerNotAllowlistedError(TrustGateError):
+    """Raised by ``TrustGate.verify_jws_blob`` when the JWS signature
+    verifies cryptographically but the signing key is NOT on the
+    per-tenant cosign trust root.
+
+    Distinct from :class:`TrustGateError` (which covers JWS parse
+    failures + cryptographic signature mismatches) so callers can
+    map the two failure modes onto distinct closed-enum reasons.
+    Sprint-6 ``A2AAgentCardVerifier`` (T7) catches this subclass
+    BEFORE the parent ``TrustGateError`` to route signer-allow-list
+    failures onto ``agent_card_signer_not_allowlisted`` and
+    cryptographic mismatches onto ``agent_card_signature_invalid``.
+
+    Operationally distinct: a signer-not-allowlisted failure means
+    rotate the per-tenant trust root + re-register; a signature-
+    invalid failure means the card was tampered with after signing.
+    Different audit categories + different operator runbooks.
+    """
+
 
 async def verify_jws_blob(
     self,
@@ -1704,15 +1833,31 @@ async def verify_jws_blob(
     A2AAgentCardVerifier; same trust authority that signs the wheel
     signs the Agent Card.
 
-    Raises ``TrustGateError`` on:
-      - JWS parse failure
-      - signature verification failure
-      - signer not on per-tenant allow-list
+    Raises:
+      - :class:`TrustGateError` on JWS parse failure OR cryptographic
+        signature verification failure (signature mismatch,
+        unsupported algorithm, malformed JWS header).
+      - :class:`TrustGateSignerNotAllowlistedError` (subclass of
+        TrustGateError) when the signature verifies cryptographically
+        but the signing key is NOT on the per-tenant cosign trust
+        root. **MUST be raised AFTER the cryptographic verify call
+        succeeds**, NOT before — otherwise an unsigned blob would
+        falsely produce "signer not allowlisted" instead of
+        "signature invalid".
+
+    Callers MUST catch :class:`TrustGateSignerNotAllowlistedError`
+    BEFORE the parent :class:`TrustGateError` so the closed-enum
+    routing stays unambiguous (Python's exception hierarchy + ``except``
+    ordering rules).
 
     Implementation detail: walks the JWS protected header, resolves
     the signer's public key from the per-tenant cosign trust root
     (re-using the same Vault path as cosign verification), then
-    delegates to ``joserfc`` for cryptographic verification.
+    delegates to ``joserfc`` for cryptographic verification. After
+    verification succeeds, looks up the resolved key fingerprint
+    against the per-tenant trust-root allow-list and raises
+    ``TrustGateSignerNotAllowlistedError`` if the fingerprint is
+    not present.
 
     Mirrors the Sprint-4 cosign-subprocess invocation's secure-default
     posture: explicit timeout, no shell, no fallthrough on key
@@ -1726,11 +1871,12 @@ async def verify_jws_blob(
 ```bash
 git add src/cognic_agentos/protocol/a2a_agent_cards.py \
         src/cognic_agentos/protocol/trust_gate.py \
+        tests/unit/protocol/test_trust_gate.py \
         tests/unit/protocol/test_a2a_agent_cards.py \
         tests/unit/protocol/test_a2a_agent_card_jws_required.py \
         tests/unit/protocol/test_a2a_agent_card_outbound_verification.py \
         tests/unit/protocol/test_a2a_agent_card_chain_audit.py
-git commit -m "feat(sprint-6): A2A Agent Card two-pass validator + JWS verify (T7)"
+git commit -m "feat(sprint-6): A2A Agent Card three-pass validator (schema + profile + JWS) (T7)"
 ```
 
 ---
@@ -3014,7 +3160,7 @@ Per-module rationale (mirrors Sprint-5 T14 R1 P3 ownership-accuracy fix):
 | Module | Why critical | AGENTS.md trigger |
 |---|---|---|
 | `protocol/a2a_authz.py` | Single owner of per-tenant pinned-token validation; mirror of `mcp_authz` shape; closed-enum 8-value `A2AAuthzReason` carries the audit-row taxonomy. | Protocol authorization |
-| `protocol/a2a_agent_cards.py` | JWS verification on Agent Cards is identity-routing critical — a forged or tampered card routes outbound traffic to attacker-controlled endpoints. Two-pass validator (upstream + AgentOS profile) is the only place AgentOS validates A2A-spec card shapes. | Protocol authorization + Plugin trust + supply chain |
+| `protocol/a2a_agent_cards.py` | JWS verification on Agent Cards is identity-routing critical — a forged or tampered card routes outbound traffic to attacker-controlled endpoints. Three-pass validator (upstream schema + AgentOS profile + JWS verify) is the only place AgentOS validates A2A-spec card shapes; 10-value `AgentCardValidationReason` literal covers each per-pass failure mode. | Protocol authorization + Plugin trust + supply chain |
 | `protocol/a2a_endpoint.py` | Single owner of the task-lifecycle state machine + chain linkage across the A2A boundary. Anonymous-refusal gate + Wave-2-refusal gate live here. | Protocol authorization + Wire-protocol contracts |
 | `protocol/a2a_schema.py` | Wire-format truth — drift = wire-protocol break. Pinned digest constants + the schema-drift CI gate live here. | Wire-protocol contracts |
 | `protocol/a2a_version.py` | Wire-protocol gate every inbound A2A call passes through; closed-enum 6-case `A2AVersionOutcome` matrix; rejecting absent-header per spec. (R0 P2 promotion; sustained through R2 P2 #4 reviewer correction that caught this row + the snippet still missing the entry.) | Wire-protocol contracts |
@@ -3041,7 +3187,7 @@ Implementation:
 #   * ``a2a_authz.py`` is the per-tenant pinned-token validator —
 #     closed-enum 8-value A2AAuthzReason; Vault-read exception
 #     mapping per Sprint-5 T15 R1 P2 #2 doctrine.
-#   * ``a2a_agent_cards.py`` is the two-pass Agent Card validator
+#   * ``a2a_agent_cards.py`` is the three-pass Agent Card validator
 #     + JWS verifier. Pass 1 upstream A2A 1.0 schema; Pass 2
 #     AgentOS bank-grade profile. JWS rides Sprint-4 trust root.
 #     Identity-routing critical: a forged card routes outbound
@@ -3130,7 +3276,7 @@ Closeout structure mirrors Sprint 5:
 **Sprint-7A hand-off checklist (load-bearing — surfaced as its own §):**
 
 1. `agentos sign --bundle` SDK + CLI — wraps the Wave-1 escape-hatch recipe (manual cosign + syft + grype + Agent Card JWS signing).
-2. `agentos validate <pack-path>` — runs the same Sprint-4 trust gate + Sprint-6 Agent Card two-pass validator + manifest checks against the conformance matrix.
+2. `agentos validate <pack-path>` — runs the same Sprint-4 trust gate + Sprint-6 Agent Card three-pass validator (schema + profile + JWS) + manifest checks against the conformance matrix.
 3. UI event-stream SSE endpoint (`GET /api/v1/ui/runs/{run_id}/events`) lands in Sprint 7B alongside the `frontend_action.*` event family.
 
 The hand-off is the contract Sprint 6 deliberately leaves unfinished. Sprint 7A + 7B should treat this list as their acceptance criteria for the SDK/CLI + UI portions of their scope.
@@ -3140,7 +3286,7 @@ The hand-off is the contract Sprint 6 deliberately leaves unfinished. Sprint 7A 
 ```markdown
 *Protocol — A2A endpoint (Sprint 6):*
 - `protocol/a2a_authz.py` (per ADR-003 — per-tenant pinned-token validation; Vault-rotated; anonymous-A2A forbidden Wave-1)
-- `protocol/a2a_agent_cards.py` (per ADR-003 + A2A-CONFORMANCE.md — two-pass card validator + JWS verify against per-tenant trust root; identity-routing critical)
+- `protocol/a2a_agent_cards.py` (per ADR-003 + A2A-CONFORMANCE.md — three-pass card validator (upstream schema + AgentOS profile + JWS verify against per-tenant trust root); identity-routing critical)
 - `protocol/a2a_endpoint.py` (per ADR-003 — inbound receiver + task lifecycle state machine + cross-agent chain linkage)
 - `protocol/a2a_schema.py` (per ADR-003 — pinned A2A 1.0 wire-format types; schema-drift CI gate)
 - `protocol/a2a_version.py` (per ADR-003 + AGENTS.md §"Wire-protocol contracts" — A2A-Version header negotiation; 6-case matrix; rejecting absent-header per spec)
@@ -3355,7 +3501,7 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     # above:
     #   * a2a_authz.py — per-tenant pinned-token client (anonymous-A2A
     #     forbidden Wave-1; Vault-rotated; mirrors mcp_authz pattern).
-    #   * a2a_agent_cards.py — two-pass card validator + JWS verify
+    #   * a2a_agent_cards.py — three-pass card validator + JWS verify
     #     against Sprint-4 trust root; identity-routing critical.
     #   * a2a_endpoint.py — task-lifecycle state machine + cross-agent
     #     chain linkage; single owner of inbound + outbound transport.
@@ -3453,7 +3599,7 @@ These are honest deferrals (matches Sprint-4 T13 cosign-pin pattern + Sprint-5 T
 - ADR-020 §"Subscription endpoints" — explicitly out of Sprint 6 scope (Sprint 7B). Plan calls this out.
 - A2A-CONFORMANCE.md §"Feature conformance matrix" — Wave-1 column ✅ entries all in T9-T13; Wave-2 ❌ entries refused at T14.
 - A2A-CONFORMANCE.md §"Authorization" — Wave-1 per-tenant Bearer at T5; Wave-2 mTLS deferred per Doctrine Decision F (refused with closed-enum sub-tag).
-- A2A-CONFORMANCE.md §"Card shape" — two-pass validation at T7 (upstream + AgentOS profile).
+- A2A-CONFORMANCE.md §"Card shape" — three-pass validation at T7 (upstream schema + AgentOS profile + JWS verify; T1 R1 P2 added Pass 3).
 - A2A-CONFORMANCE.md §"Card signatures (JWS) — mandatory for AgentOS" — JWS verify at T7 via Sprint-4 trust root extension; admission ordering per Doctrine Decision F (cosign first, then manifest extract, then card JWS verify).
 - A2A-CONFORMANCE.md §"Audit linkage" — T9 inbound + outbound chain links.
 - A2A-CONFORMANCE.md §"Versioning" — T6 schema pin + drift gate (with the dedicated `a2a-spec drift detection` CI lane added at T6 per R0 P2 reviewer correction).
