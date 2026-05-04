@@ -1,0 +1,36 @@
+# Sprint-5 fixture: signed static MCP pack manifest.
+#
+# This file ships as package data inside the importable package
+# directory per ADR-002 §"MCP STDIO threat model" gate 1. The pack's
+# cosign-verified wheel covers its bytes via inclusion (force-include
+# in pyproject.toml). The runtime plugin registry reads THIS file at
+# admission via mcp_manifest.extract_pack_manifest() — never loads
+# pack code at admission time.
+#
+# T6 reads this file. T12 has now landed as an inert, import-poisoned,
+# mocked-transport fixture: there is no runnable server module in this
+# package and none is required for the unit lane. A real HTTP MCP
+# server (live OAuth AS, PRM publication, real sockets) is deferred to
+# a future integration lane (Sprint 13.5 / pre-go-live). Do NOT add
+# server.py back into this unit fixture — the lack of one is
+# intentional. The manifest contents below are the minimum the T6.2
+# capability validator + the T12 admission/orchestrator smoke need.
+
+[tool.cognic.identity]
+pack_id = "cognic-test-mcp-pack"
+pack_version = "0.1.0"
+
+[tool.cognic.mcp]
+transport = "http"
+auth = "oauth-prm"
+server_url = "https://server.example/mcp"
+scopes = ["mcp:tools"]
+
+[tool.cognic.runtime]
+risk_tier = "read_only"
+
+[tool.cognic.data_governance]
+data_classes = []
+
+[tool.cognic.supply_chain]
+slsa_required_version = "v1.0"

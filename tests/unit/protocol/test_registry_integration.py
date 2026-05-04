@@ -1013,17 +1013,43 @@ class TestPolicyEnginePath:
 class TestEnumCompleteness:
     """Lock the closed-enum coverage contract: every value in T5's
     ``RefusalReason`` Literal MUST be exercised by at least one test
-    in this file. The Sprint-4 plan explicitly calls out enum
-    extension as a 4-step change requiring a new test arm — this
-    self-test catches anyone adding a refusal reason without a test.
+    arm. The Sprint-4 plan explicitly calls out enum extension as a
+    4-step change requiring a new test arm — this self-test catches
+    anyone adding a refusal reason without a test.
+
+    Cross-sprint scope (Sprint-5 T6 amendment): Sprint-4 reasons are
+    covered by tests in THIS file (TestRefusalEnumMapping). Sprint-5
+    additions (manifest extraction + capability validator + auth
+    probe + registry configuration — **24 values** after T6 R1
+    grew the count 22 → 24 with ``mcp_transport_unsupported`` and
+    ``mcp_admission_deps_required``) are covered by:
+
+      - ``tests/unit/protocol/test_mcp_capabilities.py`` (**10
+        capability reasons** — original 9 plus
+        ``mcp_transport_unsupported`` from T6 R1 P1 #2; one test
+        class per reason).
+      - ``tests/unit/protocol/test_mcp_registration_auth_probe.py``
+        (11 auth-probe reasons + 2 manifest-extraction reasons +
+        1 registry-configuration reason
+        ``mcp_admission_deps_required`` from T6 R1 P1 #1; one test
+        class per reason).
+      - ``tests/unit/protocol/test_refusal_reason_completeness.py``
+        (cross-cutting drift detector that walks the whole
+        Sprint-5 vocabulary; the load-bearing regression).
+
+    This file's test pins the union — accepting that the Sprint-5
+    reasons are tested in their dedicated files. If a Sprint-5 reason
+    is added to the Literal but missing from the Sprint-5 drift
+    detector, ``test_refusal_reason_completeness.py`` catches it
+    first.
     """
 
     def test_every_refusal_reason_has_a_test(self) -> None:
         from cognic_agentos.protocol.plugin_registry import _VALID_REFUSAL_REASONS
 
-        # Each test in TestRefusalEnumMapping covers one reason; the
-        # test names embed the reason.
-        covered = {
+        # Sprint 4 — each reason covered by a TestRefusalEnumMapping arm
+        # in this file.
+        covered_sprint_4 = {
             "not_in_tenant_allowlist",
             "cosign_verification_failed",
             "sbom_missing",
@@ -1033,6 +1059,44 @@ class TestEnumCompleteness:
             "sigstore_bundle_persistence_failed",
             "policy_denied_partial_grade",
         }
+        # Sprint 5 — covered by dedicated test files (see class
+        # docstring). Listed explicitly so adding a NEW Sprint-5
+        # reason without updating one of those files surfaces here too.
+        covered_sprint_5 = {
+            # T6.1 manifest extraction (2)
+            "mcp_manifest_missing",
+            "mcp_manifest_malformed",
+            # T6.2 capability validator (12 — T15 R1 P2 #6 added
+            # mcp_http_manifest_shape_invalid; T15 R2 P2 added
+            # mcp_tool_data_classes_shape_invalid)
+            "mcp_anonymous_refused",
+            "mcp_resources_declared_but_no_list",
+            "mcp_sampling_default_denied",
+            "mcp_elicitation_form_restricted_data_class",
+            "mcp_caching_ttl_restricted_data_class",
+            "mcp_stdio_manifest_incomplete",
+            "mcp_stdio_manifest_shell_metacharacter",
+            "mcp_stdio_command_not_allowlisted",
+            "mcp_stdio_disabled_in_sprint_5",
+            "mcp_transport_unsupported",  # R1 P1 #2
+            "mcp_http_manifest_shape_invalid",  # T15 R1 P2 #6
+            "mcp_tool_data_classes_shape_invalid",  # T15 R2 P2
+            # T6.3 registration auth probe (11)
+            "mcp_as_not_allowlisted",
+            "mcp_token_audience_mismatch",
+            "mcp_token_scope_overgrant",
+            "mcp_oauth_request_timeout",
+            "mcp_oauth_transport_failure",
+            "mcp_oauth_credentials_missing",
+            "mcp_oauth_as_discovery_invalid",
+            "mcp_oauth_token_endpoint_error",
+            "mcp_oauth_token_response_invalid",
+            "mcp_prm_invalid",
+            "mcp_api_key_fallback_unresolved",
+            # T6.3 registry configuration (1)
+            "mcp_admission_deps_required",  # R1 P1 #1
+        }
+        covered = covered_sprint_4 | covered_sprint_5
         assert covered == _VALID_REFUSAL_REASONS, (
             f"closed-enum coverage gap. Missing: "
             f"{_VALID_REFUSAL_REASONS - covered}; "

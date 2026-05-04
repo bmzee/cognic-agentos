@@ -83,8 +83,15 @@ The following modules are **critical controls**. They get extra scrutiny — 95%
 - `protocol/supply_chain.py` (per ADR-016 — SLSA + in-toto + SBOM + vuln + license + Sigstore bundle retention)
 
 *Protocol authorization:*
-- `protocol/mcp_authz.py` (per ADR-002 amendment — OAuth/PRM token cache + refresh + AS allow-list)
+- `protocol/mcp_authz.py` (per ADR-002 amendment — OAuth/PRM token cache + refresh + AS allow-list; also listed under "Protocol — MCP host (Sprint 5)" below)
 - `protocol/a2a_authz.py` (per ADR-003 — per-tenant token authorization + Wave 2 mTLS hook + Wave 3 VC hook)
+
+*Protocol — MCP host (Sprint 5):*
+- `protocol/mcp_authz.py` (per ADR-002 amendment — already in critical-controls list pre-Sprint-5; gate enforcement extended in Sprint 5)
+- `protocol/mcp_capabilities.py` (per ADR-002 + MCP-CONFORMANCE.md — manifest validation, capability default-deny enforcement, STDIO four-gate + Decision Lock umbrella, sampling four-condition gate via OPA Rego)
+- `protocol/mcp_manifest.py` (per Sprint-5 R1 P2 #2 — signed-manifest extractor; deferred-load invariant via `Distribution.locate_file()` without importing pack code per ADR-002 §gate 1)
+- `protocol/mcp_transports.py` (per Sprint-5 Decision Lock — Streamable HTTP transport with per-event hook-failure semantics + STDIO refusal-only stub; Sprint-8 launcher is a separate critical-controls module added then)
+- `protocol/mcp_host.py` (per ADR-002 — admission-to-invocation orchestrator; ADR-014 transitional risk-tier gate; audit + decision-history correlation via `_emit_call_evidence`; per-tenant `list_tools` cache + bounded pagination + opaque cursor fingerprints + deep-copy descriptors)
 
 *Isolation boundaries:*
 - `sandbox/` (isolation boundary, including `checkpoint/suspend/wake` audit-chain integrity per ADR-004)

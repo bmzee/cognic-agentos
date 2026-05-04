@@ -34,6 +34,20 @@ ADR-016), and ``core/policy/engine.py`` (the OPA Rego decision
 engine per ADR-015). All four are explicitly named on the AGENTS.md
 critical-controls list and ride the same single strict floor; gate
 size grows from 12 modules to 16.
+
+Sprint 5 T14 extends the gate with the MCP-host quintet —
+``protocol/mcp_authz.py`` (OAuth/PRM admission-side authz client per
+ADR-002), ``protocol/mcp_capabilities.py`` (signed-manifest capability
+validator + STDIO four-gate enforcement), ``protocol/mcp_manifest.py``
+(deferred-load signed-manifest extractor), ``protocol/mcp_transports.py``
+(Streamable HTTP transport + STDIO non-launching refusal stub per the
+Sprint-5 Decision Lock), and ``protocol/mcp_host.py`` (admission-to-
+invocation orchestrator + ADR-014 transitional gate + audit /
+decision-history correlation). All five sit on the MCP-host critical-
+path that ADR-002 (MCP plugin protocol amendment April 2026) and the
+April-2026 OX-Security disclosures' threat model depend on, and ride
+the same strict 95% line / 90% branch floor; gate size grows from 16
+modules to 21.
 """
 
 from __future__ import annotations
@@ -104,6 +118,68 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     ("src/cognic_agentos/protocol/trust_gate.py", 0.95, 0.90),
     ("src/cognic_agentos/protocol/supply_chain.py", 0.95, 0.90),
     ("src/cognic_agentos/core/policy/engine.py", 0.95, 0.90),
+    # Sprint 5 T14 — MCP-host critical-controls quintet. The Sprint-5
+    # plan-of-record nominates these five modules as the MCP-host
+    # critical-controls floor; T14 lands them in this gate. T15 is the
+    # corresponding AGENTS.md doctrine update that mirrors this gate
+    # under a new "Protocol — MCP host (Sprint 5)" section. (Pre-T15,
+    # AGENTS.md only names ``protocol/mcp_authz.py`` under "Protocol
+    # authorization"; T15 expands that list to match this gate so the
+    # gate config + doctrine document stay in sync.) All five ride the
+    # same single strict 95% line / 90% branch floor as Sprint-2/2.5/
+    # 3/4 modules:
+    #   * ``mcp_authz.py`` is the admission-side OAuth/PRM authz
+    #     client — RFC 8707 resource indicator + AS allow-list +
+    #     Token cache with refresh + audit / decision-history feed
+    #     per the Sprint-5 plan's auth-probe contract.
+    #   * ``mcp_capabilities.py`` is the signed-manifest capability
+    #     validator. Sprint-5 closed-enum 12-value vocabulary (10
+    #     original + ``mcp_http_manifest_shape_invalid`` from T15 R1
+    #     P2 #6 + ``mcp_tool_data_classes_shape_invalid`` from T15
+    #     R2 P2) + STDIO four-gate enforcement + Decision Lock
+    #     umbrella; fail-closed on every pack-controlled-TOML
+    #     defect path (HTTP-family ``server_url`` / ``scopes`` shape,
+    #     tool ``data_classes`` shape, malformed transport, missing
+    #     auth surface, restricted-data-class on form / TTL gates).
+    #   * ``mcp_manifest.py`` is the deferred-load signed-manifest
+    #     extractor. Resolves ``cognic-pack-manifest.toml`` via
+    #     ``Distribution.locate_file()`` WITHOUT importing pack
+    #     code per ADR-002 §gate 1; the deferred-load invariant.
+    #   * ``mcp_transports.py`` carries the two protocol-side transport
+    #     classes: the Streamable HTTP transport (canonical MCP SDK
+    #     ``streamablehttp_client`` wiring + ``open_session`` /
+    #     ``send`` / ``close_session`` lifecycle + transport
+    #     ``event_hook`` contract for emitting transport events). Hook-
+    #     failure semantics are PER EVENT and intentionally non-
+    #     uniform: only ``send_error`` emission is safe-swallowed (via
+    #     ``_emit_send_error_safe``) so a broken audit hook can't mask
+    #     the underlying ``mcp_call_tool_timeout`` /
+    #     ``mcp_transport_send_failed`` taxonomies; the
+    #     ``session_open`` event is fail-closed (hook exceptions
+    #     re-raise after the AsyncExitStack is closed); ``session_close``
+    #     hook failures are best-effort and may propagate to the
+    #     host's close path. Plus the STDIO non-launching refusal stub
+    #     per the Sprint-5 Decision Lock (three transport methods, all
+    #     NotImplementedError; no ``register`` method, no audit-event
+    #     emission). Pagination, per-tenant caching, descriptor
+    #     handling, and cursor opacity are NOT transport
+    #     responsibilities — they live on the host.
+    #   * ``mcp_host.py`` is the admission-to-invocation orchestrator
+    #     and owns: ADR-014 transitional high-risk-tier gate;
+    #     audit-chain + decision-history correlation via
+    #     ``_emit_call_evidence``; ``_DispatchContext`` for split
+    #     acquired-vs-dispatched token state; ``mcp_orchestrator_error``
+    #     closed-enum catch-all; per-tenant ``list_tools`` cache (key
+    #     tuple ``(tenant_id, server_id, manifest_scopes)`` for
+    #     cross-tenant isolation);
+    #     bounded pagination with cap + cycle detection via opaque
+    #     SHA-256 cursor fingerprints; deep-copy of returned tool
+    #     descriptors so callers can't mutate cache entries.
+    ("src/cognic_agentos/protocol/mcp_authz.py", 0.95, 0.90),
+    ("src/cognic_agentos/protocol/mcp_capabilities.py", 0.95, 0.90),
+    ("src/cognic_agentos/protocol/mcp_manifest.py", 0.95, 0.90),
+    ("src/cognic_agentos/protocol/mcp_transports.py", 0.95, 0.90),
+    ("src/cognic_agentos/protocol/mcp_host.py", 0.95, 0.90),
 )
 
 

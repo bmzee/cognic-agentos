@@ -56,6 +56,7 @@ from cognic_agentos.observability import (
     silence_uvicorn_access_log,
 )
 from cognic_agentos.portal.api.system_routes import build_system_router
+from cognic_agentos.protocol import is_mcp_available
 from cognic_agentos.protocol.plugin_registry import PluginRegistry
 
 logger = logging.getLogger(__name__)
@@ -280,6 +281,58 @@ def create_prod_app() -> FastAPI:
     builds the default adapter set. Splitting this out keeps
     ``create_app`` a pure factory that doesn't side-effect adapter
     construction unless asked.
+
+    Sprint 5 T2 adds the kernel-vs-default-adapters MCP availability
+    check at startup. Per the Sprint-5 plan §T2 step 5 + R3 P1
+    doctrine: ``create_prod_app`` checks :func:`is_mcp_available` once
+    and either logs that the SDK is present (default-adapters image →
+    MCPHost can be wired by T9) or logs a structured warning that
+    MCP runtime serving is unavailable (kernel image or any venv
+    missing ``mcp``).
+
+    Narrow scope of the MCP-availability log: the warning's payload
+    explicitly notes that "the Sprint-5 MCP admission modules
+    (mcp_manifest, mcp_capabilities, mcp_authz) import + construct on
+    the kernel image without the SDK installed" — module imports +
+    construction, not end-to-end admission. **Full Sprint-4
+    signed-pack admission still depends on cosign + OPA which are
+    default-adapters-only**; that boundary is independent of the MCP
+    runtime gate. Operators reading the structured warning's
+    ``remediation`` field see both constraints called out so misconfig
+    diagnosis stays unambiguous.
+
+    The actual ``MCPHost`` wiring lands at Sprint-5 T9 (when the
+    class itself exists). T2 establishes the availability-check
+    contract + the structured-warning shape so T9 just extends the
+    available-branch to construct + attach ``app.state.mcp_host``.
     """
 
-    return create_app(adapter_registry=bundled_registry)
+    app = create_app(adapter_registry=bundled_registry)
+    if is_mcp_available():
+        # Sprint-5 T2: log SDK presence. T9 extends this branch to
+        # construct + attach app.state.mcp_host = MCPHost(...).
+        logger.info("mcp.sdk_present_at_startup", extra={"image": "default-adapters"})
+    else:
+        # Kernel image (or any venv missing `mcp`). Admission-side
+        # MCP modules (mcp_manifest, mcp_capabilities, mcp_authz)
+        # import + construct without the SDK installed (per R3 P1
+        # doctrine — SDK-free); runtime invocation (MCPHost.call_tool
+        # / list_tools) is unavailable here. End-to-end signed-pack
+        # admission has its own separate dependency on Sprint-4 cosign
+        # + OPA, documented in `protocol.MCPNotAvailableError`'s docstring.
+        logger.warning(
+            "mcp.host_unavailable_in_image",
+            extra={
+                "missing_module": "mcp",
+                "optional_dep_group": "adapters",
+                "remediation": (
+                    "rebuild image with --extra adapters to wire MCPHost, "
+                    "or use the kernel image only for governance + audit + "
+                    "registry-discovery + /system/* read surfaces (note: "
+                    "end-to-end signed-pack admission also requires cosign "
+                    "+ OPA which are default-adapters-only per Sprint-4 "
+                    "doctrine, independent of this MCP-runtime gate)"
+                ),
+            },
+        )
+    return app

@@ -41,6 +41,28 @@
 #                             ≤120 MiB budget is unaffected — kernel
 #                             image explicitly does NOT carry either
 #                             binary.
+#                             Sprint 5 T2 added the official `mcp` SDK
+#                             v1.27.0 to the adapters extras group
+#                             (NOT to base dependencies). Kernel image
+#                             does NOT carry the SDK and `create_app`
+#                             deliberately does not wire MCPHost into
+#                             app.state. Operators using the kernel
+#                             image get governance + audit + /system/*
+#                             read surfaces; the Sprint-5 MCP admission
+#                             modules (mcp_manifest, mcp_capabilities,
+#                             mcp_authz) import + construct on the
+#                             kernel image without the SDK installed.
+#                             End-to-end signed-pack admission still
+#                             depends on the Sprint-4 cosign + OPA
+#                             binaries which ship in this default-
+#                             adapters image only — the kernel image
+#                             cannot complete `register_with_full_
+#                             attestation_check` without those
+#                             binaries on PATH. MCP-host serving
+#                             (call_tool / list_tools) is default-
+#                             adapters-only via `create_prod_app`.
+#                             This is the same precedent Sprint 4 set
+#                             for cosign + OPA binaries.
 #
 # Build args wire git SHA + build timestamp into the image so /version is
 # truthful in deployed environments.

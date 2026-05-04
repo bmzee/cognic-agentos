@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cognic-test-mcp-pack"
+version = "0.1.0"
+description = "Sprint-5 unit test pack — exercises the MCP manifest extractor (T6.1), capability validator (T6.2), and the T12 fixture-pack admission + MCPHost orchestrator smoke against a mocked HTTP transport. The fixture is intentionally inert: no runnable server module, no live OAuth AS, no real network — that path is deferred to a later integration lane."
+readme = { text = "Test fixture pack — installed via `uv pip install -e tests/fixtures/cognic_test_mcp_pack/` for the Sprint-5 unit suite. Not a real Cognic plugin pack; do NOT install in production. The package's __init__.py is deliberately import-poisoned (raise AssertionError) and intentionally stays that way: it enforces the deferred-load invariant for the manifest extractor (extract_pack_manifest MUST resolve cognic-pack-manifest.toml via Distribution.locate_file() WITHOUT importing the package) and it preserves the T12 scope decision (admission + orchestrator validated against mocked transport; runnable HTTP MCP server intentionally out of scope for the unit lane).", content-type = "text/plain" }
+requires-python = ">=3.11"
+authors = [{ name = "Cognic AgentOS Sprint-5 fixtures" }]
+license = { text = "MIT" }
+
+[project.entry-points."cognic.tools"]
+# Entry-point name = the alias operators see in /api/v1/system/plugins.
+# Distribution name (cognic-test-mcp-pack above) is the cosign-signed
+# identity. The Plugin reference is intentionally unresolvable in the
+# unit lane: the package __init__.py is import-poisoned and there is
+# no real Plugin class. The Sprint-5 manifest extractor (T6.1) never
+# loads entry points, and the T12 admission/orchestrator smoke uses a
+# mocked HTTP transport — neither path needs a runnable Plugin.
+cognic_test_mcp_pack = "cognic_test_mcp_pack:Plugin"
+
+[tool.hatch.build.targets.wheel]
+packages = ["cognic_test_mcp_pack"]
+
+# The signed manifest MUST ship as package data inside the importable
+# package directory per ADR-002 §"MCP STDIO threat model" gate 1.
+# Hatch includes data files matching the pattern by default; the
+# explicit force-include keeps the contract obvious in source.
+[tool.hatch.build.targets.wheel.force-include]
+"cognic_test_mcp_pack/cognic-pack-manifest.toml" = "cognic_test_mcp_pack/cognic-pack-manifest.toml"

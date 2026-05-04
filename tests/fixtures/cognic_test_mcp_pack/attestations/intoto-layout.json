@@ -1,0 +1,25 @@
+{
+  "_type": "https://in-toto.io/Layout/v1",
+  "expires": "2027-05-03T00:00:00Z",
+  "readme": "Sprint-5 cognic_test_mcp_pack fixture in-toto layout",
+  "keys": {},
+  "steps": [
+    {
+      "name": "build",
+      "expected_command": ["python", "-m", "build"],
+      "expected_materials": [],
+      "expected_products": [["CREATE", "dist/cognic_test_mcp_pack-0.1.0-py3-none-any.whl"]],
+      "pubkeys": [],
+      "threshold": 1
+    },
+    {
+      "name": "sign",
+      "expected_command": ["cosign", "sign-blob"],
+      "expected_materials": [["MATCH", "dist/cognic_test_mcp_pack-0.1.0-py3-none-any.whl"]],
+      "expected_products": [["CREATE", "attestations/cosign.sig"]],
+      "pubkeys": [],
+      "threshold": 1
+    }
+  ],
+  "inspect": []
+}
