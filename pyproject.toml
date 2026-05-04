@@ -81,6 +81,42 @@ adapters = [
     # call require_mcp() at construction. Pinned exactly (no ^/~ ranges)
     # because version drift is a registration-time contract change.
     "mcp == 1.27.0",
+    # A2A endpoint (Sprint 6, per ADR-003 + docs/A2A-CONFORMANCE.md).
+    # Official Linux-Foundation-governed Python SDK. Provides the
+    # spec-canonical Pydantic types (generated from protobuf) for two
+    # disjoint module classes:
+    #   (a) SDK-consuming runtime modules — module-level + construction-
+    #       level SDK use; gated by require_a2a() at construction.
+    #       protocol/a2a_endpoint (T9 task lifecycle),
+    #       protocol/a2a_streaming (T10 streaming envelopes),
+    #       protocol/a2a_artifacts (T11 artifact references).
+    #   (b) Lazy schema re-export module — TYPE_CHECKING-only imports
+    #       at module level + lazy SDK access via _types() function;
+    #       the module itself imports cleanly without the SDK installed.
+    #       protocol/a2a_schema (T6 stable re-exports + drift digests).
+    # Admission-side modules (a2a_authz, a2a_agent_cards, a2a_version,
+    # a2a_errors, a2a_capability_negotiation, a2a_cancellation) are
+    # SDK-FREE per Sprint-6 R3 P1 + Sprint-6 T2 R2 P2 #1 doctrine —
+    # a2a_version is a pure-functional 6-case A2A-Version header parser
+    # with no SDK dependency; a2a_errors owns the spec-code Literal
+    # vocabulary (string-typed wire codes, not SDK types); the T11
+    # small modules consume only that Literal vocabulary + pack-manifest
+    # data. Future maintainers must NOT move a2a_schema into the
+    # runtime-side optional-deps map — its import path is genuinely
+    # SDK-free and the lazy boundary is what keeps it admission-safe.
+    # Import namespace is `a2a` (NOT `a2a_sdk`, NOT `a2a_protocol` —
+    # the latter is an unrelated 0.1.0 PyPI package). Pinned exactly:
+    # version drift is a wire-protocol contract change tied to the
+    # schema-drift CI gate (T6).
+    "a2a-sdk == 1.0.2",
+    # JWS verification for A2A Agent Card detached signatures (Sprint 6
+    # T7, per A2A-CONFORMANCE.md §"Card signatures (JWS)"). joserfc was
+    # picked (over python-jose, which is abandoned + lacks RFC-7797
+    # support, and over jwcrypto, which is older + uses a different
+    # crypto family) because (a) explicit RFC-7797 detached-JWS API
+    # surface; (b) actively maintained by the authlib author; (c)
+    # transitively reuses cryptography>=45 (already pinned for cosign).
+    "joserfc == 1.6.4",
 ]
 
 [project.urls]

@@ -7,7 +7,7 @@
 **Architecture:** Ten new protocol modules under `src/cognic_agentos/protocol/a2a_*` plus one for `ui_events.py`. Inbound A2A traffic enters via a new `POST /api/v1/a2a` portal endpoint, routed by a single owner (`A2AEndpoint`) that holds the task-lifecycle state machine and emits chain-linked decision_history records. Outbound dispatch fetches the target's signed Agent Card from the spec well-known path, verifies the JWS against the Sprint-4 trust root, and dispatches to the URL inside the verified card's `supportedInterfaces[].url` — never to a caller-supplied URL. The A2A wire format is generated from upstream protobuf source (Sprint-6 T2 lock); a CI drift gate fails the build if the spec moves beyond the pinned version. The UI event-stream layer (T12) ships only the typed Pydantic schema + emit hooks at the harness boundary; SSE transport lands at Sprint 7B per ADR-020's phased schedule. Decision Lock: A2A 1.0 only (no 0.x compatibility, no 2.x speculative); Wave-2 features fail-closed with explicit error codes (no silent-accept).
 
 **Tech Stack:**
-- A2A wire format: official **`a2a-sdk == X.Y.Z`** Python SDK pulled into the `adapters` extra group (kernel-image-free; default-adapters image carries it). Schema source: spec-published protobuf compiled to Pydantic via the SDK's generated bindings, with parity check against the spec's JSON-schema bindings.
+- A2A wire format: official **`a2a-sdk == 1.0.2`** Python SDK pulled into the `adapters` extra group (kernel-image-free; default-adapters image carries it). Schema source: spec-published protobuf compiled to Pydantic via the SDK's generated bindings, with parity check against the spec's JSON-schema bindings.
 - HTTP layer: `httpx.AsyncClient` (admission-side authz client + outbound dispatch + Agent Card fetch). No new HTTP library introduced.
 - JWS verification: **`joserfc`** — new Sprint-6 pin (R3 P2 #1 corrected the original `python-jose` choice; `python-jose` is essentially abandoned (last release 2023) and explicitly does NOT support RFC 7797 unencoded-payload JWS — the `joserfc` author publishes a comparison table marking python-jose's RFC-7797 support as missing. Sprint-6 needs detached / RFC-7797 capability for Agent Card sidecar `.jws` verification, so `joserfc` is the correct choice). Added to the `adapters` extra at T2; reuses Sprint-4's pinned `cryptography>=45` backend transitively. Agent Card detached JWS verification at T7 consumes it.
 - Streaming: A2A 1.0 streaming-message envelope (chunked HTTP / spec wire format), distinct from the Sprint-7B portal SSE endpoint.
@@ -39,7 +39,7 @@ This plan runs T1–T16 followed by six dedicated doctrine-decision sections and
 
 - **File Structure** — files created / modified by Sprint 6 with one-line responsibility-per-file.
 - **Tasks T1–T16** — the implementation arc, in dependency order, each with files / steps / commit shape.
-- **Doctrine Decision A — A2A SDK + protobuf pin** — `a2a-sdk == X.Y.Z`; kernel-vs-default-adapters split rationale.
+- **Doctrine Decision A — A2A SDK + protobuf pin** — `a2a-sdk == 1.0.2`; kernel-vs-default-adapters split rationale.
 - **Doctrine Decision B — Caller-controlled URL threat model** — proposes `docs/A2A-CALLER-URL-THREAT-MODEL.md`; documents four reachable URL surfaces.
 - **Doctrine Decision C — Schema-drift CI gate env policy** — `@pytest.mark.a2a_upstream` env-gate; `COGNIC_RUN_A2A_UPSTREAM=1` opt-in; CI sets the var; local dev skips by default.
 - **Doctrine Decision D — Sub-agent boundary** — Sprint 6 transport only; ADR-005 `spawn_subagent` orchestration is Sprint 8.
@@ -116,7 +116,7 @@ Sprint 6 creates 11 new protocol modules + 7 new portal endpoints + 1 new threat
 
 ### Modified (~9 files)
 
-- `pyproject.toml` — add `a2a-sdk == X.Y.Z` to `adapters` extra (kernel image stays SDK-free).
+- `pyproject.toml` — add `a2a-sdk == 1.0.2` to `adapters` extra (kernel image stays SDK-free).
 - `uv.lock` — refresh after pin lands.
 - `src/cognic_agentos/core/config.py` — Sprint-6 settings (T1): `a2a_token_cache_ttl_s`, `a2a_artifact_retention_seconds`, `a2a_pinned_spec_version`, `a2a_schema_drift_check_enabled`, `a2a_card_jws_max_size_bytes`, `a2a_outbound_request_timeout_s`, `a2a_inbound_request_timeout_s`. Mirrors Sprint-5's `mcp_*` setting block shape. **Halt-before-commit** because `core/config.py` ships AGENTS.md-cited critical-controls knobs (token cache, retention windows, fail-closed timeouts).
 - `src/cognic_agentos/protocol/__init__.py` — export new modules (`A2AEndpoint`, `A2AAuthzClient`, `A2AAgentCardVerifier`, `A2AVersionNegotiator`, `UIEventEmitter`, etc.); extend the closed-enum re-exports.
@@ -466,17 +466,17 @@ git commit -m "feat(sprint-6): add A2A endpoint settings + closed-enum vocab sca
 ## Task 2: A2A SDK + protobuf pin + kernel/adapters split
 
 **Files:**
-- Modify: `pyproject.toml` — add `a2a-sdk == X.Y.Z` to the `adapters` extra group.
+- Modify: `pyproject.toml` — add `a2a-sdk == 1.0.2` to the `adapters` extra group.
 - Modify: `uv.lock` — refresh after pin lands.
-- Modify: `src/cognic_agentos/portal/api/app.py` — `create_prod_app` (default-adapters factory) wires the A2A SDK; `create_app` (kernel) does NOT. Mirrors Sprint-5 T2 R3 P1 doctrine.
+- Modify: `src/cognic_agentos/portal/api/app.py` — `create_prod_app` (default-adapters factory) at T2 ONLY logs SDK availability via `is_a2a_available()` (info on present, warning on missing); `create_app` (kernel) does NOT touch the SDK at all. **No route mounting at T2** (R0 P2 + R1 P3 + R2 P2 #2 reviewer corrections — Sprint-5 T15 R1 P2 #1 lesson). Route mounting + `A2AEndpoint` construction lands at T9 (`POST /api/v1/a2a` receiver), T11 (`/capabilities` + `/cancel` + artifacts retrieval), T12 (`UIEventEmitter` harness wiring). Mirrors Sprint-5 T2 R3 P1 doctrine for the kernel-vs-adapters split itself.
 - Modify: `src/cognic_agentos/protocol/__init__.py` — `is_a2a_available()` helper that mirrors `is_mcp_available()` from Sprint 5.
-- Test: `tests/unit/protocol/test_optional_dep_loader.py` — extend the existing kernel-vs-adapters dependency-loader fixture with A2A SDK presence/absence arms.
+- Test: `tests/unit/protocol/test_optional_dep_loader.py` — extend the existing kernel-vs-adapters dependency-loader fixture with A2A SDK presence/absence arms. **T2 R1 P2 #1 + R2 P2 #1 reviewer corrections:** the SDK-free admission contract MUST actually be tested (not assumed), AND the test contract MUST cover the full 10-module architecture-sentinel surface (not just the original 8). Adds `_A2A_MODULES_PLANNED` (10 modules — full architecture-sentinel surface) + `_A2A_ADMISSION_SIDE_MODULES` (7 SDK-free modules: `a2a_authz`, `a2a_agent_cards`, `a2a_schema`, `a2a_version`, `a2a_errors`, `a2a_capability_negotiation`, `a2a_cancellation`) + `_A2A_RUNTIME_SIDE_MODULES` (3: `a2a_endpoint`, `a2a_streaming`, `a2a_artifacts`); adds `_existing_a2a_modules(admission_only=...)` helper; adds parametrized `test_admission_modules_import_succeed_without_a2a_sdk` arm in `TestModuleImportsKernelSafe` (mirrors the MCP arm but filters to admission-side only — runtime-side modules are tolerated to fail import under `stub_a2a_missing` because their public classes call `require_a2a()` at construction not at import); adds `test_dict_excludes_a2a_admission_modules` + `test_dict_includes_a2a_runtime_modules` to `TestProtocolOptionalDepsMapShape` (admission modules MUST NOT appear in `_PROTOCOL_OPTIONAL_DEPS`; runtime modules MUST map to exactly `frozenset({"a2a"})`). Without these arms the `stub_a2a_missing` fixture would catch nothing through T8 and a future module-level `from a2a import …` drift in an admission-side module would only trip in production at kernel-image startup.
 
 **Halt-before-commit:** Yes (touches `portal/api/app.py` lifespan factory which is on the AGENTS.md critical-controls list as a kernel-startup boundary).
 
 - [ ] **Step 1: Pin the SDK + record the pin decision**
 
-The pin point is **`a2a-sdk == X.Y.Z`** (April 2026 release, Linux-Foundation-governed). The SDK ships:
+The pin point is **`a2a-sdk == 1.0.2`** (April 2026 release, Linux-Foundation-governed). The SDK ships:
 - Generated Pydantic types from the spec's protobuf source (canonical data model per ADR-003 + A2A-CONFORMANCE.md).
 - A `JsonSchemaBindings` namespace exposing the spec-published JSON-schema bindings used as the parity-check side of T6's drift gate.
 - A reference HTTP client + server skeletons (we DO NOT use the server skeleton — `protocol/a2a_endpoint.py` is our own implementation; we use the SDK only for wire-format types + version-header utilities).
@@ -487,7 +487,7 @@ We considered three alternatives:
 |---|---|---|
 | Vendor `.proto` + compile via `betterproto` | Rejected | Vendoring the protobuf source means we own a fork of the spec wire format. Drift between our compiled types and upstream becomes invisible until the JSON-schema parity test (T6) catches it; by then any change has already merged. The official SDK gives us upstream's Pydantic types directly + a parity check against the spec's JSON-schema. |
 | Use a third-party `a2a-py` community shim | Rejected | Wave 1 community shims are not Linux-Foundation-governed; they may diverge from spec. The official `a2a-sdk` package matches the spec authors' own tests. |
-| **Pin official `a2a-sdk == X.Y.Z`** | **Selected** | Spec authors' own types; LF governance; consumed by 150+ orgs in production per ADR-003. Schema-drift CI gate (T6) catches upstream drift. Sprint-7A `agentos validate` will use the same SDK. |
+| **Pin official `a2a-sdk == 1.0.2`** | **Selected** | Spec authors' own types; LF governance; consumed by 150+ orgs in production per ADR-003. Schema-drift CI gate (T6) catches upstream drift. Sprint-7A `agentos validate` will use the same SDK. |
 
 - [ ] **Step 2: Update `pyproject.toml`**
 
@@ -499,7 +499,7 @@ adapters = [
     # ... Sprint-5 entries unchanged ...
     "mcp == 1.27.0",
     # Sprint 6 — A2A 1.0 SDK
-    "a2a-sdk == X.Y.Z",  # PIN AT T2: confirm version + import namespace
+    "a2a-sdk == 1.0.2",  # T2 lock-time pin (Apr-2026 release; namespace = `a2a`)
     # Sprint 6 — JWS verification for Agent Card detached signatures.
     # R2 P2 #2 reviewer correction: Sprint 4 pinned ``cryptography>=45``
     # for cosign's transitive needs but no JWS library; T7's Agent
@@ -519,7 +519,7 @@ adapters = [
     # current canonical choice for new Python JWS work; (c) it
     # transitively uses ``cryptography`` so we reuse Sprint-4's
     # pinned backend without a second crypto family.
-    "joserfc == X.Y.Z",  # PIN AT T2: verify latest stable on PyPI
+    "joserfc == 1.6.4",  # T2 lock-time pin (latest stable; transitively uses cryptography>=45)
 ]
 ```
 
@@ -1222,7 +1222,7 @@ git commit -m "feat(sprint-6): A2A per-tenant pinned-token authz client (T5)"
 
 **Files:**
 - Create: `src/cognic_agentos/protocol/a2a_schema.py` — re-exports the `a2a-sdk` SDK's Pydantic types under stable AgentOS names; includes `_PINNED_PROTOBUF_DIGEST` + `_PINNED_JSON_SCHEMA_DIGEST` constants the drift gate verifies.
-- Create: `tests/unit/protocol/test_a2a_schema.py` — schema-type contract (re-export shape, AgentCard / Task / StreamingMessage / Artifact / Cancellation envelope round-tripping through Pydantic).
+- Create: `tests/unit/protocol/test_a2a_schema.py` — schema-type contract (re-export shape — `AgentCard` / `Task` / `StreamResponse` / `Artifact` / `CancelTaskRequest` / `TaskArtifactUpdateEvent` / `TaskStatusUpdateEvent` — round-tripping through Pydantic; T2 R1 P2 corrected the type names from the planning-stage drafts which used `StreamingMessage` / `CancellationRequest` / `ErrorResponse` (those names don't exist in `a2a-sdk == 1.0.2`).
 - Create: `tests/unit/protocol/test_a2a_schema_drift.py` — env-gated CI drift gate. Pulls upstream A2A 1.0 protobuf source AND the spec-published JSON-schema bindings; diffs both against AgentOS's pinned digests. **Skipped by default** (no network in unit suite); fires on the dedicated CI lane below.
 - **Modify:** `.github/workflows/python.yml` — **R0 P2 / R2 P2 #5 reviewer corrections (was missing from the original T6 file list; R2 corrected the `needs:` target + the setup-step shape).** Add a new dedicated CI lane named `a2a-spec drift detection`. The lane is structured as a `needs: ci`-gated downstream job (matching the actual workflow's `ci` job id, NOT a non-existent `lint-test` id) and inlines the same uv + setup-python chain the `ci` job uses (the workflow does not have a `./.github/actions/setup-python` composite action — verified at R2-correction time):
   ```yaml
@@ -1284,13 +1284,23 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    # T2 R1 P2 reviewer correction: actual a2a-sdk==1.0.2 exports are
+    # ``StreamResponse`` (NOT ``StreamingMessage``) and
+    # ``CancelTaskRequest`` (NOT ``CancellationRequest``); the SDK
+    # ships typed error classes per spec error code (e.g.,
+    # ``InvalidParamsError``, ``InvalidRequestError``,
+    # ``TaskNotFoundError``) rather than a single ``ErrorResponse``
+    # type. The schema module re-exports the actual SDK names; if a
+    # future SDK bump renames any of these, the schema-drift CI gate
+    # at T6 catches it.
     from a2a.types import (
         AgentCard,
-        Task,
-        StreamingMessage,
         Artifact,
-        CancellationRequest,
-        ErrorResponse,
+        CancelTaskRequest,
+        StreamResponse,
+        Task,
+        TaskArtifactUpdateEvent,
+        TaskStatusUpdateEvent,
     )
 
 # Lazy import — admission-side modules (a2a_authz, etc.) construct
@@ -1299,13 +1309,22 @@ if TYPE_CHECKING:
 def _types():
     from a2a.types import (
         AgentCard,
-        Task,
-        StreamingMessage,
         Artifact,
-        CancellationRequest,
-        ErrorResponse,
+        CancelTaskRequest,
+        StreamResponse,
+        Task,
+        TaskArtifactUpdateEvent,
+        TaskStatusUpdateEvent,
     )
-    return AgentCard, Task, StreamingMessage, Artifact, CancellationRequest, ErrorResponse
+    return (
+        AgentCard,
+        Task,
+        StreamResponse,
+        Artifact,
+        CancelTaskRequest,
+        TaskArtifactUpdateEvent,
+        TaskStatusUpdateEvent,
+    )
 
 
 #: SHA-256 of the upstream A2A 1.0 protobuf source bundle (the
@@ -3310,7 +3329,7 @@ git commit -m "docs(sprint-6): closeout + BUILD_PLAN refresh + AGENTS.md critica
 
 ## Doctrine Decision A — A2A SDK + protobuf pin
 
-**Decision:** Pin `a2a-sdk == X.Y.Z` (the upstream Linux Foundation A2A reference Python SDK) as a hard requirement under the `adapters` extra group in `pyproject.toml`. Kernel image stays free of the SDK; default-adapters image carries it. The `create_app` factory (kernel) does NOT wire `A2AEndpoint`; `create_prod_app` (default-adapters) constructs it on the available-branch with kernel-resilient `try/except ImportError` handling — same pattern Sprint-5 T2 established for the MCP SDK.
+**Decision:** Pin `a2a-sdk == 1.0.2` (the upstream Linux Foundation A2A reference Python SDK) as a hard requirement under the `adapters` extra group in `pyproject.toml`. Kernel image stays free of the SDK; default-adapters image carries it. The `create_app` factory (kernel) does NOT touch the SDK at all. `create_prod_app` (default-adapters) at T2 ONLY logs SDK availability via `is_a2a_available()` (info on present, warning on missing) — kernel-resilient `try/except ImportError` handling, same pattern Sprint-5 T2 established for the MCP SDK. **Route mounting + runtime endpoint construction is deferred to T9 (`A2AEndpoint` + `POST /api/v1/a2a` receiver), T11 (`/capabilities` + `/cancel` + artifacts retrieval routes), and T12 (`UIEventEmitter` harness wiring).** R0 P2 + R1 P3 + R2 P2 #2 reviewer corrections folded in: this section MUST NOT promise wiring it doesn't actually do at T2 (Sprint-5 T15 R1 P2 #1 lesson — the `create_prod_app` overclaim trap).
 
 **Pin point:** the implementation engineer fills in the exact patch version at T2 commit time after checking PyPI for the latest 1.0.x release that matches the spec's protobuf source-of-truth digest. This mirrors Sprint-4 T13 (cosign + OPA pins) and Sprint-5 T2 (MCP SDK pin) — "pinned at PR-author time" so the digest captured in `_PINNED_PROTOBUF_DIGEST` (T6 schema-drift gate) matches the SDK version at the moment of the lock.
 
@@ -3323,7 +3342,7 @@ git commit -m "docs(sprint-6): closeout + BUILD_PLAN refresh + AGENTS.md critica
 
 **Bump policy:** when upstream A2A releases 1.0.x → 1.0.(x+1), the patch bump is reviewed at the Sprint-6 closeout-followup level (one reviewer round, schema-drift CI gate must show no breaking change). 1.0.x → 1.1.x is a feature-spec change that requires an ADR-003 amendment + a re-evaluation of the Wave-1/2/3 matrix in `docs/A2A-CONFORMANCE.md`. 1.x → 2.x is a wire-protocol change that requires a new ADR.
 
-**Wire-protocol stability invariant:** the SDK pin + the schema-drift CI gate (T6) together guarantee that two AgentOS deployments running the same `a2a-sdk == X.Y.Z` interpret identical wire bytes identically. This is the same kind of invariant Sprint-2's `core/canonical.py` provides for the audit chain: deterministic semantics across deployments. Pack authors who depend on AgentOS interpreting an A2A 1.0 envelope do not need to know what AgentOS's pinned patch version is — they just need to know AgentOS is on 1.0.x.
+**Wire-protocol stability invariant:** the SDK pin + the schema-drift CI gate (T6) together guarantee that two AgentOS deployments running the same `a2a-sdk == 1.0.2` interpret identical wire bytes identically. This is the same kind of invariant Sprint-2's `core/canonical.py` provides for the audit chain: deterministic semantics across deployments. Pack authors who depend on AgentOS interpreting an A2A 1.0 envelope do not need to know what AgentOS's pinned patch version is — they just need to know AgentOS is on 1.0.x.
 
 ---
 
@@ -3387,7 +3406,7 @@ _PINNED_JSON_SCHEMA_DIGEST = "sha256:..."  # PIN AT T2
 
 1. **Upstream-vs-pinned digest check.** Fetch the upstream URL; sha256 the bytes; compare to `_PINNED_PROTOBUF_DIGEST` / `_PINNED_JSON_SCHEMA_DIGEST`. Fail-closed if either has moved beyond our pinned version. Forces a deliberate review + version bump.
 2. **Spec-published-binding parity check.** Fetch both the upstream protobuf source AND the upstream JSON-schema binding; verify that the JSON-schema binding's field set is a parity match for the protobuf source's field set. Fail-closed if the spec-published JSON-schema binding has diverged from protobuf — catches upstream drift the spec authors haven't yet republished.
-3. **Pinned-vs-installed parity check.** The installed `a2a-sdk == X.Y.Z` SDK's generated Pydantic types must match the pinned protobuf source's field set. Fail-closed otherwise — catches the rare case where the SDK's release artefact lags the spec's release artefact.
+3. **Pinned-vs-installed parity check.** The installed `a2a-sdk == 1.0.2` SDK's generated Pydantic types must match the pinned protobuf source's field set. Fail-closed otherwise — catches the rare case where the SDK's release artefact lags the spec's release artefact.
 
 **CI lane configuration:** add `a2a-spec drift detection` to `.github/workflows/python.yml` as a separate lane with `env: COGNIC_RUN_A2A_UPSTREAM: 1`. Runs on push + PR. Fails the build on any of the three checks above. Local-dev runs of the full unit suite skip the lane silently with the standard env-gate skip message (parallel to the Sprint-4 cosign-real lane's behaviour).
 
@@ -3572,12 +3591,17 @@ After authoring the 16 tasks above + folding in the six doctrine-decision sectio
 5. `tests/unit/protocol/test_a2a_schema_drift.py` (T6) — env-gated upstream drift CI gate.
 6. `tests/unit/protocol/test_ui_event_taxonomy_completeness.py` (T12) — Wave-1 family/type pinning per Doctrine Decision E.
 
-**Placeholder scan.** Searched the plan for "TBD", "TODO", "implement later", "fill in details", "add appropriate ...". Three deliberate placeholders, each marked "PIN AT T2":
+**Placeholder scan.** Searched the plan for "TBD", "TODO", "implement later", "fill in details", "add appropriate ...". Per the Sprint-4 T13 cosign-pin pattern + Sprint-5 T2 mcp-pin pattern, "PIN AT T2" sentinels are honest deferrals (not placeholders — the doctrine-decision sections name the exact data needed at each pin point). T2 R2 P3 #2 reviewer correction split this list to record what T2 has now resolved vs what T6 must still resolve at digest-capture time:
 
-- T2 `a2a-sdk == X.Y.Z` — exact version filled at T2 commit time after PyPI check (verify `pip index versions a2a-sdk` matches the upstream A2A 1.0 spec authors' release; confirm the import namespace is `a2a` not `a2a_sdk` and not `a2a_protocol`).
-- T6 `_UPSTREAM_PROTOBUF_URL` / `_UPSTREAM_JSON_SCHEMA_URL` / `_PINNED_PROTOBUF_DIGEST` / `_PINNED_JSON_SCHEMA_DIGEST` — pinned at T2 alongside the SDK version. Implementation engineer captures the digests from the upstream URLs at lock time.
+**Resolved at T2 commit time (this commit):**
 
-These are honest deferrals (matches Sprint-4 T13 cosign-pin pattern + Sprint-5 T2 mcp-pin pattern), not placeholders. The plan's doctrine-decision sections name the exact data needed at each pin point.
+- `a2a-sdk == 1.0.2` — pinned in `pyproject.toml` after PyPI verification. Import namespace confirmed `a2a` (not `a2a_sdk`, not the unrelated `a2a_protocol` 0.1.0 package). T2 R1 P3 #1 reviewer correction filled the version after probing the actual SDK exports.
+- `joserfc == 1.6.4` — pinned in `pyproject.toml` after PyPI verification (latest stable; transitively reuses Sprint-4's pinned `cryptography>=45` backend so we don't introduce a second crypto family). T2 R1 P3 #1 same correction.
+
+**Remaining for T6 (digest-capture time, alongside the schema-drift CI gate land):**
+
+- `_UPSTREAM_PROTOBUF_URL` / `_UPSTREAM_JSON_SCHEMA_URL` — the canonical upstream URLs the schema-drift gate fetches against. T6 implementation engineer pins these from the A2A 1.0 spec's release artefacts at the same commit as the digest constants.
+- `_PINNED_PROTOBUF_DIGEST` / `_PINNED_JSON_SCHEMA_DIGEST` — SHA-256 digests of the protobuf source + JSON schema bindings as captured at the SDK pin point. T6 implementation engineer captures these from the upstream URLs after running `uv lock` so the digests align with the locked SDK version.
 
 **Type consistency.** Every type referenced in later tasks is defined in earlier ones:
 
@@ -3629,7 +3653,7 @@ These are honest deferrals (matches Sprint-4 T13 cosign-pin pattern + Sprint-5 T
 | **R2 P2 #5** — Schema-drift CI lane (T6) referenced `needs: lint-test` but the actual workflow job id is `ci`; also referenced `./.github/actions/setup-python` which doesn't exist in the repo. Implementing the snippet as-written would have made the workflow invalid. | Verified ground truth (`grep` of `.github/workflows/python.yml`): job id is `ci`; setup chain is inline (`actions/checkout@v6` → `astral-sh/setup-uv@v7` with version `0.5.29` + `enable-cache: true` → `.python-version` read → `actions/setup-python@v6` → `uv sync --frozen --all-extras`). T6 lane snippet rewritten to match (`needs: ci` + inline setup steps copied verbatim from the existing `ci` job for parity). |
 | **R2 P3 #1** — T16 closeout instructions still said "no new lanes; per-file coverage now enforces 26 modules" — stale relative to T6's new lane + T15's 27-module gate. | T16 closeout-template lines updated to record the `a2a-spec drift detection` lane addition and the 27-module gate. |
 | **R2 P3 #2** — AGENTS.md amendment text + 2 other doctrine-drift-scan rows still said "4-case matrix" for `a2a_version.py` even though the plan now consistently uses 6 outcomes. | All 3 sites updated to "6-case matrix" via `replace_all`. AGENTS.md inserted text now matches the file-structure + Doctrine Decision F + T8 task body. |
-| **R3 P2 #1** — Chosen JWS library doesn't support claimed contract: `python-jose` is essentially abandoned + does NOT support RFC 7797 unencoded-payload JWS, but the plan claimed it does. Agent Card sidecar `.jws` verification is identity-routing critical so the library must actually support the spec serialisation. | Switched from `python-jose[cryptography] == 3.5.0` to `joserfc == X.Y.Z` (PIN AT T2). Rationale documented inline in T2 + Tech Stack: joserfc has explicit RFC-7797 API surface, is actively maintained by the authlib author, and transitively uses Sprint-4's pinned `cryptography` backend so we don't introduce a second crypto family. T7 trust-gate `verify_jws_blob` references updated. |
+| **R3 P2 #1** — Chosen JWS library doesn't support claimed contract: `python-jose` is essentially abandoned + does NOT support RFC 7797 unencoded-payload JWS, but the plan claimed it does. Agent Card sidecar `.jws` verification is identity-routing critical so the library must actually support the spec serialisation. | Switched from `python-jose[cryptography] == 3.5.0` to `joserfc == 1.6.4` (PIN AT T2). Rationale documented inline in T2 + Tech Stack: joserfc has explicit RFC-7797 API surface, is actively maintained by the authlib author, and transitively uses Sprint-4's pinned `cryptography` backend so we don't introduce a second crypto family. T7 trust-gate `verify_jws_blob` references updated. |
 | **R3 P2 #2** — `a2a_errors.py` was still treated as non-critical even though after R2 it owns the spec wire `A2AErrorCode` enum + AgentOS `A2APolicyRefusalReason` enum + `_POLICY_REASON_TO_SPEC_CODE` mapping. Drift in any of these changes what remote A2A callers see — wire-protocol-public. | Promoted to critical-controls. Gate count adjusted **27 → 28** (Sprint-6 grows from 21 → 28 across 7 modules: original quintet + R0's `a2a_version.py` + R3's `a2a_errors.py`). T11 halt-before-commit flipped (with explicit "Mixed: Yes for `a2a_errors.py` portion of the commit"); T15 file list, rationale table, per-module comment block, `_CRITICAL_FILES` snippet all add the `a2a_errors.py` row; AGENTS.md amendment text adds the new line; "sextet"/"6 modules" → "septet"/"7 modules" / "28" everywhere. |
 | **R3 P2 #3** — Plan said RefusalReason 26 → 32 with "6 new A2A reasons" but never listed them. Some prose used `a2a_agent_card_signature_invalid` while the policy literal is `agent_card_signature_invalid`. The reconciliation between AgentCardValidationReason / A2APolicyRefusalReason → registry RefusalReason was not explicit. | Added an explicit table at the `plugin_registry.py` file-structure entry listing the 6 registry-boundary `RefusalReason` literals (`a2a_manifest_jws_path_missing`, `a2a_agent_card_jws_blob_unreadable`, `a2a_agent_card_signature_invalid`, `a2a_agent_card_signer_not_allowlisted`, `a2a_agent_card_upstream_schema_invalid`, `a2a_agent_card_profile_invalid`) + their fire-step + their source `AgentCardValidationReason` value. Drift-detector test now asserts `_AGENT_CARD_VALIDATION_REASON_TO_REFUSAL` mapping is exhaustive (mirrors Sprint-5 `_AUTHZ_REASON_TO_REFUSAL` pattern). The two layers are explicitly separated: `RefusalReason` (a2a_-prefixed, registry-boundary) vs `A2APolicyRefusalReason` (unprefixed, type-namespaced, runtime). |
 | **R3 P3** — Wave-2 refusal reason name drift: canonical literal is `wave2_feature_refused` (in `A2APolicyRefusalReason`) but Decision Lock + test inventory + caller-URL threat model + WebhookRefused class all said `a2a_wave2_feature_refused`. | All 4 prose sites updated to `A2APolicyRefusalReason.wave2_feature_refused` (type-qualified to make the layer obvious). The Sprint-6 vocabulary is now: registry RefusalReason → `a2a_*` prefix; A2APolicyRefusalReason → unprefixed (type-namespaced via the literal name); AGENTS.md / pyproject / docs all use the correct vocabulary for the layer they reference. |
