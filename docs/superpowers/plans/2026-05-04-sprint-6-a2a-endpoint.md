@@ -9,7 +9,7 @@
 **Tech Stack:**
 - A2A wire format: official **`a2a-sdk == X.Y.Z`** Python SDK pulled into the `adapters` extra group (kernel-image-free; default-adapters image carries it). Schema source: spec-published protobuf compiled to Pydantic via the SDK's generated bindings, with parity check against the spec's JSON-schema bindings.
 - HTTP layer: `httpx.AsyncClient` (admission-side authz client + outbound dispatch + Agent Card fetch). No new HTTP library introduced.
-- JWS verification: `python-jose[cryptography]` (already pinned in Sprint-4 trust gate work; reused here for Agent Card signature verification).
+- JWS verification: **`joserfc`** — new Sprint-6 pin (R3 P2 #1 corrected the original `python-jose` choice; `python-jose` is essentially abandoned (last release 2023) and explicitly does NOT support RFC 7797 unencoded-payload JWS — the `joserfc` author publishes a comparison table marking python-jose's RFC-7797 support as missing. Sprint-6 needs detached / RFC-7797 capability for Agent Card sidecar `.jws` verification, so `joserfc` is the correct choice). Added to the `adapters` extra at T2; reuses Sprint-4's pinned `cryptography>=45` backend transitively. Agent Card detached JWS verification at T7 consumes it.
 - Streaming: A2A 1.0 streaming-message envelope (chunked HTTP / spec wire format), distinct from the Sprint-7B portal SSE endpoint.
 - UI events: Pydantic v2 typed event models for **all 11 ADR-020 Wave-1 event families** (`agent_run`, `tool_call`, `subagent`, `approval`, `artifact`, `interrupt`, `frontend_action`, `memory`, `decision_audit`, `policy`, `kill_switch`); Sprint 6 wires emit hooks for the 3 families with existing emit sites (`tool_call`, `decision_audit`, `artifact`); no transport in this sprint (SSE endpoint = Sprint 7B per ADR-020 phase table).
 - Audit: Sprint-2 `AuditStore` + Sprint-2 `DecisionHistoryStore`. Every A2A inbound + outbound emits chained events via the same hash-chain primitives the MCP host (Sprint 5) uses.
@@ -22,7 +22,7 @@
 This plan locks the following decisions at plan time. Future implementers MUST consult AGENTS.md per-edit halt-before-commit before deviating from any of these:
 
 1. **A2A spec version: 1.0 only.** No 0.x compatibility shim; no 2.x speculative implementation. The version-negotiation matrix (T8) refuses every non-1.0 version with `VersionNotSupportedError` and a `Supported-A2A-Versions: 1.0` response header. When upstream A2A releases 1.1+, the version bump is a deliberate reviewed change tied to the schema-drift CI gate (T6) — NOT a silent extension.
-2. **Wave-2 features refused with closed-enum reasons.** Push-notification subscribe, multi-modal payloads, long-running task resumption, mTLS auth — all four are spec-valid features but Wave-1 explicitly refuses them. Refusal is closed-enum (`a2a_wave2_feature_refused` with a sub-tag identifying the feature) so a future Wave-2 implementation simply removes the refusal site rather than threading a new code path.
+2. **Wave-2 features refused with closed-enum reasons.** Push-notification subscribe, multi-modal payloads, long-running task resumption, mTLS auth — all four are spec-valid features but Wave-1 explicitly refuses them. Refusal is closed-enum (`A2APolicyRefusalReason.wave2_feature_refused` with a sub-tag identifying the feature) so a future Wave-2 implementation simply removes the refusal site rather than threading a new code path.
 3. **No anonymous A2A.** Every inbound call requires `Authorization: Bearer ...` against a per-tenant pinned token (Vault-rotated). Anonymous calls refused with `a2a_anonymous_refused` (mirrors Sprint-5 `mcp_anonymous_refused`).
 4. **Outbound dispatch URLs come from verified Agent Cards.** Architecture-test (T4) + runtime canary (T14) enforce: every outbound `httpx` call's URL parameter must trace to a JWS-verified Agent Card's `supportedInterfaces[].url`. Caller-supplied URLs and model-output URLs never reach `httpx.AsyncClient.post(url=...)`.
 5. **UI event SSE endpoint is Sprint-7B work.** ADR-020 explicitly schedules the SSE transport for Sprint 7B (after Sprint-7A's `agentos sign --bundle` SDK + CLI). Sprint 6 ships ONLY the typed Pydantic event SCHEMA — for **all 11 ADR-020 Wave-1 event families** — plus the in-process emit-hook layer that wires the 3 families with existing emit sites (`tool_call`, `decision_audit`, `artifact`). The remaining 8 families have schema-only stubs whose emit hooks land in their owning sprints (`subagent` @ Sprint 8; `frontend_action` @ Sprint 7B alongside SSE; `memory` @ Sprint 11.5; `approval` / `interrupt` / `policy` / `kill_switch` @ Sprint 13.5; `agent_run` when the run primitive lands). The schema is stable from day one.
@@ -44,7 +44,7 @@ This plan runs T1–T16 followed by six dedicated doctrine-decision sections and
 - **Doctrine Decision C — Schema-drift CI gate env policy** — `@pytest.mark.a2a_upstream` env-gate; `COGNIC_RUN_A2A_UPSTREAM=1` opt-in; CI sets the var; local dev skips by default.
 - **Doctrine Decision D — Sub-agent boundary** — Sprint 6 transport only; ADR-005 `spawn_subagent` orchestration is Sprint 8.
 - **Doctrine Decision E — UI events Wave-1 taxonomy stability** — schema for **all 11 ADR-020 Wave-1 families** ships in Sprint 6; emit hooks wire only for the 3 with existing emit sites (`tool_call`, `decision_audit`, `artifact`); other 8 families are model-only stubs whose hooks land in their owning sprints per the ADR-020 phase table.
-- **Doctrine Decision F — Critical-controls expansion rationale** — per-module case for the 21 → 27 gate growth.
+- **Doctrine Decision F — Critical-controls expansion rationale** — per-module case for the 21 → 28 gate growth.
 - **Self-Review** — completion checklist.
 
 ---
@@ -64,8 +64,8 @@ Sprint 6 creates 11 new protocol modules + 7 new portal endpoints + 1 new threat
 - `src/cognic_agentos/protocol/a2a_streaming.py` — A2A 1.0 streaming-message protocol support (chunked HTTP + spec wire envelopes). NOT portal/UI SSE (that's Sprint-7B per ADR-020). Emits `task.progress` / `task.completed` / `task.failed` envelopes per spec; chain-linked into decision_history via `_emit_streaming_evidence` helper mirroring Sprint-5's `_emit_call_evidence`.
 - `src/cognic_agentos/protocol/a2a_artifacts.py` — artifact reference generator. Large outputs (PDFs, evidence packs, JSON > 64 KiB) stored via Sprint-4's `LocalObjectStoreAdapter` and returned as `ArtifactRef(uri, sha256, size_bytes, mime_type)`; small payloads remain inline; per-tenant retention configurable via `Settings.a2a_artifact_retention_seconds`.
 - `src/cognic_agentos/protocol/a2a_capability_negotiation.py` — `GET /api/v1/a2a/capabilities` endpoint backing module. Reads pack manifests' declared `[tool.cognic.a2a].capabilities_supported`; returns canonical A2A 1.0 capability list (subset of the agent's manifest declaration; never broader).
-- `src/cognic_agentos/protocol/a2a_cancellation.py` — task cancellation primitive. `cancel_task(task_id, *, reason)` flips lifecycle to `cancelled`, emits `a2a.task_cancelled` chained event with partial-state payload digest, refuses subsequent calls against the cancelled task ID with `a2a_task_already_cancelled`.
-- `src/cognic_agentos/protocol/a2a_errors.py` — full A2A 1.0 error taxonomy as a closed-enum Literal. 14 spec-defined codes (per A2A 1.0 §error-codes): `task_not_found`, `task_already_cancelled`, `version_not_supported`, `agent_card_signature_invalid`, `agent_card_not_found`, `unknown_target`, `capability_not_supported`, `streaming_not_supported`, `artifact_too_large`, `artifact_retention_exceeded`, `wave2_feature_refused`, `anonymous_refused`, `tenant_token_invalid`, `parse_error`. Re-exported through `protocol/__init__.py`.
+- `src/cognic_agentos/protocol/a2a_cancellation.py` — task cancellation primitive. `cancel_task(task_id, *, reason)` flips lifecycle to `cancelled`, emits `a2a.task_cancelled` chained event with partial-state payload digest, refuses subsequent calls against the cancelled task ID with the spec-conformant `task_not_cancelable` error code.
+- `src/cognic_agentos/protocol/a2a_errors.py` — **two closed-enum Literals (R2 P2 #1 reviewer correction — split spec wire codes from AgentOS-policy reasons).** (1) `A2AErrorCode` — 14 A2A 1.0 spec-defined wire codes: 5 JSON-RPC envelope errors (`parse_error`, `invalid_request`, `method_not_found`, `invalid_params`, `internal_error`) + 9 A2A-specific codes (`task_not_found`, `task_not_cancelable`, `version_not_supported`, `unsupported_operation`, `content_type_not_supported`, `invalid_agent_response`, `push_notification_not_supported`, `extended_agent_card_not_configured`, `extension_support_required`). Source-of-truth is the A2A 1.0 spec's §"Error codes" — every literal here MUST appear verbatim. (2) `A2APolicyRefusalReason` — 11 AgentOS-specific refusal reasons surfaced via `data.policy_reason` detail field on top of a spec-conformant `error.code`: `agent_card_signature_invalid`, `agent_card_signer_not_allowlisted`, `agent_card_not_found`, `anonymous_refused`, `tenant_token_invalid`, `unknown_target`, `capability_not_supported`, `streaming_not_supported`, `artifact_too_large`, `artifact_retention_exceeded`, `wave2_feature_refused` (with sub-tag identifying the refused feature). The split keeps the wire contract spec-conformant while preserving the rich audit-side refusal vocabulary; mirrors the Sprint-5 MCP authz pattern. The two `Literal` types are re-exported through `protocol/__init__.py` for downstream type imports; the `_POLICY_REASON_TO_SPEC_CODE` mapping is **module-private inside `a2a_errors.py`** (R4 P2 reviewer correction — co-located with the error-response builder that reads it; avoids the cyclic-import hazard an earlier draft introduced).
 - `src/cognic_agentos/protocol/ui_events.py` — typed UI event taxonomy (Wave 1) per ADR-020. **Critical-controls module** (per ADR-020 stop rule — public event schema). **All 11 Wave-1 Pydantic event-family models seeded in Sprint 6** (R0 P2 reviewer correction — schema covers full ADR-020 §"Event taxonomy (Wave 1)" regardless of which sprint wires the emit hooks): `agent_run.{started,progress,completed,failed,cancelled,paused,resumed}`, `tool_call.{requested,approved,denied,started,progress,completed,failed}`, `subagent.{spawned,completed,failed,recursion_capped}`, `approval.{pending,granted,granted_second,denied,expired}`, `artifact.{started,chunk,completed}`, `interrupt.{requested_by_agent,requested_by_operator,acknowledged}`, `frontend_action.{submitted,accepted,rejected}`, `memory.{recall_started,recall_completed,forget,redact}`, `decision_audit.event_appended`, `policy.{decision_evaluated,bundle_loaded}`, `kill_switch.{flipped,reverted}`. Emit-hook protocol (`UIEventHook`) wires **3 families in Sprint 6** (the families with existing emit sites): `tool_call.*` (mirrors Sprint-5's `audit.tool_invocation_*`), `decision_audit.event_appended` (mirrors every `DecisionHistoryStore.append`), `artifact.*` (mirrors Sprint-6 T11's artifact lifecycle). The other 8 families have model-only stubs; their emit hooks land in their owning sprints per the ADR-020 phase table. Sprint-6 audit emits are NOT changed — UI events are an ADDITIVE mirror at the same call site. **No SSE endpoint** in Sprint 6 (ADR-020 schedules SSE for Sprint 7B).
 
 **Portal endpoints (in `src/cognic_agentos/portal/api/app.py` + new routers under `portal/api/routes/`):**
@@ -107,7 +107,7 @@ Sprint 6 creates 11 new protocol modules + 7 new portal endpoints + 1 new threat
 - `tests/unit/protocol/test_a2a_anonymous_refused.py` — anonymous call → 401 with `a2a_anonymous_refused`.
 - `tests/unit/protocol/test_a2a_spec_conformance.py` — runs the conformance fixtures.
 - `tests/unit/protocol/test_a2a_no_caller_controlled_url.py` — runtime canary (T14) complementing the architecture test.
-- `tests/unit/protocol/test_a2a_wave2_features_refused.py` — push notifications, multi-modal, long-running resumption all refused with `a2a_wave2_feature_refused`.
+- `tests/unit/protocol/test_a2a_wave2_features_refused.py` — push notifications, multi-modal, long-running resumption all refused with `A2APolicyRefusalReason.wave2_feature_refused`.
 - `tests/unit/protocol/test_a2a_outbound_version.py` — every outbound call includes `A2A-Version: 1.0`.
 - `tests/unit/protocol/test_a2a_fixture_pack_admission.py` — registry admits `cognic_test_agent_pack` through the full Sprint-4 admission pipeline + Sprint-6 AgentCard JWS verification step.
 - `tests/unit/protocol/test_ui_events.py` — typed event-family models + emit-hook contract.
@@ -120,13 +120,27 @@ Sprint 6 creates 11 new protocol modules + 7 new portal endpoints + 1 new threat
 - `src/cognic_agentos/core/config.py` — Sprint-6 settings (T1): `a2a_token_cache_ttl_s`, `a2a_artifact_retention_seconds`, `a2a_pinned_spec_version`, `a2a_schema_drift_check_enabled`, `a2a_card_jws_max_size_bytes`, `a2a_outbound_request_timeout_s`, `a2a_inbound_request_timeout_s`. Mirrors Sprint-5's `mcp_*` setting block shape. **Halt-before-commit** because `core/config.py` ships AGENTS.md-cited critical-controls knobs (token cache, retention windows, fail-closed timeouts).
 - `src/cognic_agentos/protocol/__init__.py` — export new modules (`A2AEndpoint`, `A2AAuthzClient`, `A2AAgentCardVerifier`, `A2AVersionNegotiator`, `UIEventEmitter`, etc.); extend the closed-enum re-exports.
 - `src/cognic_agentos/portal/api/app.py` — **two-phase amendment** (R0 P2 reviewer correction). T2 ONLY adds the `is_a2a_available()` log branch (kernel-resilient `try/except ImportError` for the `a2a-sdk`); kernel image still boots without it (mirrors Sprint-5 T2 R3 P1 doctrine). T2 does NOT mount any HTTP routes — that follows in: T9 (`POST /api/v1/a2a` receiver + Agent-Card publisher routes), T11 (`/api/v1/a2a/capabilities` + `/cancel` + artifacts retrieval). T12 wires `UIEventEmitter` at the harness boundary (in-process emit hooks; **no SSE endpoint** — Sprint 7B owns that per ADR-020 phase table). The two-phase shape avoids the Sprint-5 T15 R1 P2 #1 overclaim trap (`create_prod_app` MUST NOT promise wiring it doesn't actually do).
-- `src/cognic_agentos/protocol/trust_gate.py` — additive: `verify_jws_blob(jws_bytes, *, payload_bytes, tenant_id)` method that reuses the per-tenant cosign trust root for JWS signature verification. **Critical-controls module — halt-before-commit.** No subprocess / no shell. Wraps `python-jose` JWS verification with the same secure-default posture as the cosign caller (timeout, explicit env, no-fallthrough on key resolution).
-- `src/cognic_agentos/protocol/plugin_registry.py` — additive: extend the admission pipeline with an Agent Card JWS verification step **AFTER the trust gate's wheel cosign verifies AND after the Sprint-5 deferred-load manifest extractor reads `agent_card_jws_path`** (R0 P2 reviewer correction — pack must be cosign-trusted FIRST so its declared metadata is trustworthy enough to read). The full ordering is: (1) per-tenant allow-list; (2) wheel cosign verification (Sprint-4 trust gate); (3) full Sprint-4 attestation pipeline (SBOM / SLSA / in-toto / vuln / license / Sigstore); (4) Sprint-5 deferred-load manifest extraction via `Distribution.locate_file()`; (5) **NEW Sprint-6 step:** read `agent_card_jws_path` from the cosign-verified manifest, fetch the detached JWS bytes, verify against the per-tenant trust root via `TrustGate.verify_jws_blob`. On failure at step (5), registration refused with `a2a_agent_card_signature_invalid`. Closed-enum `RefusalReason` extension: add the 6 new A2A reasons (count goes 26 → 32). **Critical-controls module — halt-before-commit.**
-- `tests/unit/protocol/test_refusal_reason_completeness.py` — drift-detector update: 26 → 32 expected count + the 6 new A2A reason names. Mirrors the Sprint-5 R1/R2/R3 closed-enum doctrine: every new reason gets a literal entry, a frozenset entry, a per-reason test-arm coverage row, and a count-pin.
-- `tools/check_critical_coverage.py` — T15 extension. Gate grows 21 → 27 modules at the strict 95/90 floor: `a2a_authz`, `a2a_agent_cards`, `a2a_endpoint`, `a2a_schema`, `a2a_version`, `ui_events`. (R0 P2 fix — `a2a_version.py` added per AGENTS.md §"Wire-protocol contracts" stop-rule; version negotiation IS wire-protocol surface even though the module is small + pure-functional.) Per-module rationale comment block follows the Sprint-5 R1 P3 pattern (transport-owned vs host-owned invariants stay where they live in the codebase).
+- `src/cognic_agentos/protocol/trust_gate.py` — additive: `verify_jws_blob(jws_bytes, *, payload_bytes, tenant_id)` method that reuses the per-tenant cosign trust root for JWS signature verification. **Critical-controls module — halt-before-commit.** No subprocess / no shell. Wraps `joserfc` JWS verification (R3 P2 #1 — picked for RFC-7797 detached-JWS support) with the same secure-default posture as the cosign caller (explicit env, no-fallthrough on key resolution).
+- `src/cognic_agentos/protocol/plugin_registry.py` — additive: extend the admission pipeline with an Agent Card JWS verification step **AFTER the trust gate's wheel cosign verifies AND after the Sprint-5 deferred-load manifest extractor reads `agent_card_jws_path`** (R0 P2 reviewer correction — pack must be cosign-trusted FIRST so its declared metadata is trustworthy enough to read). The full ordering is: (1) per-tenant allow-list; (2) wheel cosign verification (Sprint-4 trust gate); (3) full Sprint-4 attestation pipeline (SBOM / SLSA / in-toto / vuln / license / Sigstore); (4) Sprint-5 deferred-load manifest extraction via `Distribution.locate_file()`; (5) **NEW Sprint-6 step:** read `agent_card_jws_path` from the cosign-verified manifest, fetch the detached JWS bytes via `joserfc`, verify against the per-tenant trust root via `TrustGate.verify_jws_blob`. **Critical-controls module — halt-before-commit.**
+
+  **Closed-enum `RefusalReason` extension — 6 new registration-boundary literals (R3 P2 #3 reviewer correction listed them explicitly):**
+
+  | Registry `RefusalReason` literal | Fires at admission step | Source enum mapped from |
+  |---|---|---|
+  | `a2a_manifest_jws_path_missing` | step (4) — manifest extracted but missing `[tool.cognic.a2a].agent_card_jws_path` | T7 manifest-shape check |
+  | `a2a_agent_card_jws_blob_unreadable` | step (5) — JWS sidecar file declared but not on disk / not readable | T7 file-IO check |
+  | `a2a_agent_card_signature_invalid` | step (5) — `joserfc.jws.deserialize_compact` raises on signature mismatch | T7 `AgentCardValidationReason.signature_invalid` |
+  | `a2a_agent_card_signer_not_allowlisted` | step (5) — signature verifies but signer key is not on per-tenant trust root | T7 `AgentCardValidationReason.signer_not_allowlisted` |
+  | `a2a_agent_card_upstream_schema_invalid` | step (5) — Pass 1 of two-pass validation fails (card not a valid A2A 1.0 AgentCard per upstream JSON-schema) | T7 `AgentCardValidationReason.upstream_schema_invalid` |
+  | `a2a_agent_card_profile_invalid` | step (5) — Pass 2 fails (spec-valid card but missing AgentOS bank-grade profile field — `provider`, `securitySchemes`, `securityRequirements`, `signatures`, ≥1 `supportedInterfaces` entry) | T7 `AgentCardValidationReason.profile_invalid` |
+
+  These 6 are the registration-boundary `RefusalReason` literals; they are NOT the same as the 11 runtime-side `A2APolicyRefusalReason` literals from T11 (which surface in `data.policy_reason` of A2A error responses, not in registry refusals). The registry-side reasons all carry the `a2a_` prefix to mirror the Sprint-5 `mcp_*` convention; the policy-side reasons are type-namespaced via `A2APolicyRefusalReason` and stay unprefixed (matches the Sprint-5 `AuthzReason` pattern). RefusalReason count goes 26 → **32**.
+
+- `tests/unit/protocol/test_refusal_reason_completeness.py` — drift-detector update: 26 → 32 expected count + the 6 new `a2a_*` reason names enumerated above. Mirrors the Sprint-5 R1/R2/R3 closed-enum doctrine: every new reason gets a literal entry, a frozenset entry, a per-reason test-arm coverage row, and a count-pin. Also add a fresh assertion that `_AGENT_CARD_VALIDATION_REASON_TO_REFUSAL` mapping (lives in `plugin_registry.py`) is exhaustive — every value in `AgentCardValidationReason` MUST map to exactly one `RefusalReason`. Same drift-detector pattern as Sprint-5 `_AUTHZ_REASON_TO_REFUSAL`.
+- `tools/check_critical_coverage.py` — T15 extension. Gate grows 21 → 28 modules at the strict 95/90 floor: `a2a_authz`, `a2a_agent_cards`, `a2a_endpoint`, `a2a_schema`, `a2a_version`, `a2a_errors`, `ui_events`. R0 P2 added `a2a_version.py`; **R3 P2 #2 added `a2a_errors.py`** because that module owns the spec wire `A2AErrorCode` enum + the AgentOS `A2APolicyRefusalReason` enum + the `_POLICY_REASON_TO_SPEC_CODE` mapping — drift in any of these changes what remote A2A callers see, which is wire-protocol-public. Per-module rationale comment block follows the Sprint-5 R1 P3 pattern (transport-owned vs host-owned invariants stay where they live in the codebase).
 - `docs/BUILD_PLAN.md` — Sprint-6 status flipped to **CLOSED** at T16 commit time.
-- `AGENTS.md` — T16 doctrine update: append a new "Protocol — A2A endpoint (Sprint 6)" section under the critical-controls list listing all **6 Sprint-6 critical-controls modules** (R0 P2 reviewer correction added `a2a_version.py` to the original quintet) with their per-module rationale lines. Mirrors the Sprint-5 amendment shape.
-- `tests/architecture/test_mcp_stdio_no_subprocess.py` — sentinel tightened: the `test_at_least_one_mcp_module_exists` lower-bound stays at `>= 5`; a parallel `tests/architecture/test_a2a_no_subprocess.py::test_at_least_one_a2a_module_exists` is added with `>= 9` (the Sprint-6 a2a quintet `endpoint, authz, agent_cards, schema, version, streaming, artifacts, capability_negotiation, cancellation, errors` = 10 modules; the floor is 9 to leave room for one rename without tripping the test).
+- `AGENTS.md` — T16 doctrine update: append a new "Protocol — A2A endpoint (Sprint 6)" section under the critical-controls list listing all **7 Sprint-6 critical-controls modules** (R4 P3 reviewer correction — septet not sextet: original quintet + R0 P2 added `a2a_version.py` + R3 P2 #2 added `a2a_errors.py`) with their per-module rationale lines. Mirrors the Sprint-5 amendment shape.
+- `tests/architecture/test_mcp_stdio_no_subprocess.py` — sentinel tightened: the `test_at_least_one_mcp_module_exists` lower-bound stays at `>= 5`; a parallel `tests/architecture/test_a2a_no_subprocess.py::test_at_least_one_a2a_module_exists` is added with `>= 9`. The Sprint-6 A2A module set comprises **10 modules** total (`a2a_endpoint`, `a2a_authz`, `a2a_agent_cards`, `a2a_schema`, `a2a_version`, `a2a_streaming`, `a2a_artifacts`, `a2a_capability_negotiation`, `a2a_cancellation`, `a2a_errors`); the architecture-sentinel floor is set at 9 to leave room for one rename without tripping the test. **Note:** this 10-module count is the architecture-sentinel surface (every `protocol/a2a_*` file), distinct from the 7-module critical-controls floor (the subset under the 95/90 coverage gate). R4 P3 reviewer correction renamed the misleading "quintet" wording.
 
 ---
 
@@ -277,24 +291,99 @@ A2AVersionOutcome = Literal[
     "malformed_rejected",
 ]
 
-#: A2A error taxonomy. 14 spec-defined codes per A2A 1.0
-#: §error-codes — these are wire-protocol values, not Cognic-bespoke.
+#: A2A spec-defined error taxonomy. **Wire-protocol values only** —
+#: every literal here MUST appear verbatim in the A2A 1.0 specification's
+#: error-code list. Cognic-bespoke / AgentOS-policy reasons live in the
+#: separate ``A2APolicyRefusalReason`` literal below (R2 P2 #1 reviewer
+#: correction — earlier draft mixed spec codes with AgentOS reasons,
+#: which would have made the wire contract non-spec-conformant).
+#:
+#: Source-of-truth: A2A 1.0 spec §"Error codes" plus the JSON-RPC 2.0
+#: error-code envelope the spec inherits. The 14 values below are
+#: those required by the Sprint-6 Wave-1 feature surface; future
+#: spec-defined codes (e.g., for push-notification config errors when
+#: that feature lands in Wave 2) are appended here when their
+#: respective features ship.
 A2AErrorCode = Literal[
-    "task_not_found",
-    "task_already_cancelled",
-    "version_not_supported",
-    "agent_card_signature_invalid",
-    "agent_card_not_found",
-    "unknown_target",
-    "capability_not_supported",
-    "streaming_not_supported",
-    "artifact_too_large",
-    "artifact_retention_exceeded",
-    "wave2_feature_refused",
-    "anonymous_refused",
-    "tenant_token_invalid",
+    # JSON-RPC envelope errors (spec inherits from JSON-RPC 2.0)
     "parse_error",
+    "invalid_request",
+    "method_not_found",
+    "invalid_params",
+    "internal_error",
+    # A2A 1.0 spec-defined task / dispatch errors
+    "task_not_found",
+    "task_not_cancelable",
+    "version_not_supported",
+    "unsupported_operation",
+    "content_type_not_supported",
+    "invalid_agent_response",
+    "push_notification_not_supported",
+    "extended_agent_card_not_configured",
+    "extension_support_required",
 ]
+
+#: AgentOS-specific policy-refusal reasons. **NOT wire-protocol values**
+#: — these surface in the error response's ``data.policy_reason`` detail
+#: field on top of the spec-conformant ``error.code`` (which always
+#: comes from :data:`A2AErrorCode`). Operators, audit consumers, and
+#: bank reviewers see the policy reason for diagnostic clarity; remote
+#: A2A callers see only the spec code (since they cannot be expected
+#: to know Cognic-specific refusal vocabulary).
+#:
+#: This split keeps the A2A wire contract spec-conformant while still
+#: surfacing the rich AgentOS refusal vocabulary the audit / decision-
+#: history chains depend on. Mirrors the Sprint-5 MCP authz pattern
+#: where ``MCPAuthzError`` carries the closed-enum reason in a separate
+#: payload field rather than mixing it into the OAuth wire response.
+A2APolicyRefusalReason = Literal[
+    # Identity / trust
+    "agent_card_signature_invalid",       # JWS verify failed at registration or outbound
+    "agent_card_signer_not_allowlisted",  # Card signed by signer not on per-tenant trust root
+    "agent_card_not_found",               # Well-known fetch returned 404 for outbound dispatch
+    # Authn / authz
+    "anonymous_refused",                  # Inbound request lacks Authorization: Bearer ...
+    "tenant_token_invalid",               # Token signature / expiry / tenant-scope mismatch
+    # Routing
+    "unknown_target",                     # target_agent doesn't resolve via plugin registry
+    # Capability gates
+    "capability_not_supported",           # Caller invoked a capability the agent didn't declare
+    "streaming_not_supported",            # Caller requested streaming on a non-streaming task
+    "artifact_too_large",                 # Outbound artifact exceeds per-tenant size cap
+    "artifact_retention_exceeded",        # Inbound caller requested retention beyond tenant policy
+    # Wave-2 features (spec-valid but Wave-1 refused; sub-tag identifies feature)
+    "wave2_feature_refused",              # Used with sub-tag in data.feature
+]
+
+#: Mapping from policy-refusal reason → spec error code. **Defined
+#: in :mod:`cognic_agentos.protocol.a2a_errors` itself** (NOT here in
+#: ``protocol/__init__.py``) — R4 P2 reviewer correction. Keeping the
+#: mapping inside the error-builder module avoids a cyclic-import
+#: hazard (the error-response builder consumes it; the closed-enum
+#: literals it maps from are re-exported from this `__init__.py`)
+#: and keeps the mapping co-located with the factory functions that
+#: read it. T11 imports `A2AErrorCode` + `A2APolicyRefusalReason`
+#: from `cognic_agentos.protocol` and defines `_POLICY_REASON_TO_SPEC_CODE`
+#: as a module-private constant inside `a2a_errors.py`. The shape
+#: shown here is illustrative only — implementation engineer copies
+#: this into `a2a_errors.py` at T11 commit time.
+#:
+#: Pinned by a drift-detector test that asserts the mapping covers
+#: every value in :data:`A2APolicyRefusalReason` (test lives in
+#: `tests/unit/protocol/test_a2a_errors.py` per T11).
+_POLICY_REASON_TO_SPEC_CODE_SHAPE: dict[str, str] = {  # illustrative; defined in a2a_errors.py at T11
+    "agent_card_signature_invalid": "invalid_agent_response",
+    "agent_card_signer_not_allowlisted": "invalid_agent_response",
+    "agent_card_not_found": "invalid_agent_response",
+    "anonymous_refused": "invalid_request",
+    "tenant_token_invalid": "invalid_request",
+    "unknown_target": "method_not_found",
+    "capability_not_supported": "unsupported_operation",
+    "streaming_not_supported": "unsupported_operation",
+    "artifact_too_large": "invalid_params",
+    "artifact_retention_exceeded": "invalid_params",
+    "wave2_feature_refused": "unsupported_operation",
+}
 
 #: AgentCard validation outcomes. Two-pass: upstream A2A 1.0 schema
 #: + AgentOS bank-grade profile. 7 values.
@@ -374,15 +463,33 @@ We considered three alternatives:
 
 ```toml
 # pyproject.toml — extend the adapters extra group (Sprint-5 already
-# added mcp == 1.27.0 here; A2A 1.0 SDK joins it)
+# added mcp == 1.27.0 here; A2A 1.0 SDK + JWS verifier join it)
 [project.optional-dependencies]
 adapters = [
     # ... Sprint-5 entries unchanged ...
     "mcp == 1.27.0",
-    # Sprint 6 — A2A 1.0 SDK + JWS verification dependency
-    "a2a-sdk == X.Y.Z",
-    # python-jose was already pinned by Sprint 4 trust gate work; no
-    # second copy.
+    # Sprint 6 — A2A 1.0 SDK
+    "a2a-sdk == X.Y.Z",  # PIN AT T2: confirm version + import namespace
+    # Sprint 6 — JWS verification for Agent Card detached signatures.
+    # R2 P2 #2 reviewer correction: Sprint 4 pinned ``cryptography>=45``
+    # for cosign's transitive needs but no JWS library; T7's Agent
+    # Card verifier needs an explicit JWS implementation. R3 P2 #1
+    # reviewer correction: the original ``python-jose[cryptography]``
+    # choice was wrong because (a) python-jose is essentially
+    # abandoned (last release 2023) and (b) it does NOT support
+    # RFC 7797 unencoded-payload JWS — explicitly marked unsupported
+    # in the joserfc author's comparison table. Agent Card sidecar
+    # ``.jws`` files use RFC-7797 / detached serialisation, so the
+    # JWS library MUST support that mode.
+    #
+    # Choice: ``joserfc`` over ``jwcrypto`` because (a) joserfc has
+    # an explicit RFC-7797 API surface (``joserfc.jws.serialize_compact``
+    # / ``deserialize_compact`` with ``payload_b64`` flag); (b) it's
+    # actively maintained by the same author as authlib and is the
+    # current canonical choice for new Python JWS work; (c) it
+    # transitively uses ``cryptography`` so we reuse Sprint-4's
+    # pinned backend without a second crypto family.
+    "joserfc == X.Y.Z",  # PIN AT T2: verify latest stable on PyPI
 ]
 ```
 
@@ -601,7 +708,7 @@ legitimate reason for any ``protocol/a2a_*`` module to spawn a
 subprocess. (cosign + OPA subprocess invocations live in
 ``protocol/trust_gate.py`` + ``core/policy/engine.py`` respectively;
 A2A's wire-format work happens entirely inside the Python process
-using ``a2a-sdk`` SDK + ``httpx`` + ``python-jose``.)
+using ``a2a-sdk`` SDK + ``httpx`` + ``joserfc``.)
 
 The 9 banned import / call shapes:
 
@@ -1087,21 +1194,36 @@ git commit -m "feat(sprint-6): A2A per-tenant pinned-token authz client (T5)"
 - Create: `src/cognic_agentos/protocol/a2a_schema.py` — re-exports the `a2a-sdk` SDK's Pydantic types under stable AgentOS names; includes `_PINNED_PROTOBUF_DIGEST` + `_PINNED_JSON_SCHEMA_DIGEST` constants the drift gate verifies.
 - Create: `tests/unit/protocol/test_a2a_schema.py` — schema-type contract (re-export shape, AgentCard / Task / StreamingMessage / Artifact / Cancellation envelope round-tripping through Pydantic).
 - Create: `tests/unit/protocol/test_a2a_schema_drift.py` — env-gated CI drift gate. Pulls upstream A2A 1.0 protobuf source AND the spec-published JSON-schema bindings; diffs both against AgentOS's pinned digests. **Skipped by default** (no network in unit suite); fires on the dedicated CI lane below.
-- **Modify:** `.github/workflows/python.yml` — **R0 P2 reviewer correction (was missing from the original T6 file list).** Add a new dedicated CI lane named `a2a-spec drift detection`:
+- **Modify:** `.github/workflows/python.yml` — **R0 P2 / R2 P2 #5 reviewer corrections (was missing from the original T6 file list; R2 corrected the `needs:` target + the setup-step shape).** Add a new dedicated CI lane named `a2a-spec drift detection`. The lane is structured as a `needs: ci`-gated downstream job (matching the actual workflow's `ci` job id, NOT a non-existent `lint-test` id) and inlines the same uv + setup-python chain the `ci` job uses (the workflow does not have a `./.github/actions/setup-python` composite action — verified at R2-correction time):
   ```yaml
   a2a-spec-drift:
     name: a2a-spec drift detection
     runs-on: ubuntu-latest
-    needs: lint-test
+    timeout-minutes: 10
+    needs: ci  # gate on lint+test+coverage passing first
     env:
       COGNIC_RUN_A2A_UPSTREAM: "1"
     steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/setup-python  # same setup as lint-test lane
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.5.29"
+          enable-cache: true
+      - name: Read .python-version
+        id: python-version
+        run: echo "version=$(cat .python-version)" >> "$GITHUB_OUTPUT"
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ steps.python-version.outputs.version }}
+      - name: uv sync (frozen)
+        run: uv sync --frozen --all-extras
       - name: Run A2A schema-drift gate
         run: uv run pytest -v -m a2a_upstream tests/unit/protocol/test_a2a_schema_drift.py
   ```
-  Without this workflow edit, the env-gated test would skip BOTH locally AND in CI — silently weakening the wire-format conformance gate the plan relies on. The lane runs after `lint-test` so a syntax / type regression doesn't trigger a network probe; it fails the build on actual upstream drift OR on persistent upstream outage (the test distinguishes the two diagnostics per Doctrine Decision C). **Pin marker registration:** also extend `pyproject.toml`'s `[tool.pytest.ini_options].markers` to register `a2a_upstream: env-gated upstream A2A schema drift gate` so pytest doesn't warn on the unknown marker.
+  The setup steps (`actions/checkout@v6` → `astral-sh/setup-uv@v7` with version `0.5.29` + `enable-cache: true` → `.python-version` read → `actions/setup-python@v6` → `uv sync --frozen --all-extras`) are copied verbatim from the existing `ci` job to keep parity; if a future PR bumps the action versions in `ci`, this lane bumps in lockstep. Without this workflow edit, the env-gated test would skip BOTH locally AND in CI — silently weakening the wire-format conformance gate the plan relies on. The lane runs after `ci` so a syntax / type regression doesn't trigger a network probe; it fails the build on actual upstream drift OR on persistent upstream outage (the test distinguishes the two diagnostics per Doctrine Decision C). **Pin marker registration:** also extend `pyproject.toml`'s `[tool.pytest.ini_options].markers` to register `a2a_upstream: env-gated upstream A2A schema drift gate` so pytest doesn't warn on the unknown marker.
 
 **Halt-before-commit:** Yes — `a2a_schema.py` is on the Sprint-6 critical-controls list (wire-format truth — drift = wire-protocol break).
 
@@ -1590,7 +1712,7 @@ async def verify_jws_blob(
     Implementation detail: walks the JWS protected header, resolves
     the signer's public key from the per-tenant cosign trust root
     (re-using the same Vault path as cosign verification), then
-    delegates to ``python-jose`` for cryptographic verification.
+    delegates to ``joserfc`` for cryptographic verification.
 
     Mirrors the Sprint-4 cosign-subprocess invocation's secure-default
     posture: explicit timeout, no shell, no fallthrough on key
@@ -1619,7 +1741,7 @@ git commit -m "feat(sprint-6): A2A Agent Card two-pass validator + JWS verify (T
 - Create: `src/cognic_agentos/protocol/a2a_version.py` — header parser + responder.
 - Create: `tests/unit/protocol/test_a2a_version.py` — 6-case matrix.
 
-**Halt-before-commit:** No (not on the critical-controls list — pure parsing module; the gating happens at `A2AEndpoint` which IS critical-controls).
+**Halt-before-commit:** **Yes** (R2 P2 #3 reviewer correction — `a2a_version.py` was promoted to the critical-controls floor per Doctrine Decision F + R0 P2 #4. AGENTS.md §"Wire-protocol contracts" treats version negotiation as stop-rule material; the 6-case header negotiation matrix is the wire-protocol gate every inbound A2A call passes through. An earlier draft of this task's header read "No (not critical)" — that contradicted the R0 promotion and is fixed here.)
 
 The 6 cases per ADR-003 §"Version negotiation":
 1. `A2A-Version: 1.0` — accepted (matches pinned version).
@@ -2181,12 +2303,12 @@ git commit -m "feat(sprint-6): A2A 1.0 task streaming protocol support (T10)"
 - Create: `src/cognic_agentos/protocol/a2a_artifacts.py` — artifact reference generator (ObjectStoreAdapter-backed).
 - Create: `src/cognic_agentos/protocol/a2a_capability_negotiation.py` — `GET /api/v1/a2a/capabilities` backing module.
 - Create: `src/cognic_agentos/protocol/a2a_cancellation.py` — task cancellation primitive.
-- Create: `src/cognic_agentos/protocol/a2a_errors.py` — full A2A 1.0 closed-enum error taxonomy (14 spec-defined codes per A2A 1.0 §error-codes).
+- Create: `src/cognic_agentos/protocol/a2a_errors.py` — A2A 1.0 spec error taxonomy (`A2AErrorCode` Literal — 14 spec-defined wire codes) + AgentOS policy-refusal reason taxonomy (`A2APolicyRefusalReason` Literal — 11 AgentOS-specific refusal reasons surfaced in `data.policy_reason`) + `_POLICY_REASON_TO_SPEC_CODE` mapping. R2 P2 #1 reviewer correction split spec wire codes from AgentOS-policy reasons so the wire contract stays spec-conformant.
 - Create: `tests/unit/protocol/test_a2a_artifacts.py`, `test_a2a_capability_negotiation.py`, `test_a2a_cancellation.py`, `test_a2a_error_taxonomy.py`.
 
-**Halt-before-commit:** No (these are small, single-responsibility modules with no critical-controls invariants beyond the closed-enum reasons).
+**Halt-before-commit:** **Mixed — Yes for the `a2a_errors.py` portion of the commit; No for the other three.** Per R3 P2 #2 reviewer correction, `a2a_errors.py` was promoted to the critical-controls floor because it owns the spec wire `A2AErrorCode` literal + AgentOS `A2APolicyRefusalReason` literal + `_POLICY_REASON_TO_SPEC_CODE` mapping — drift in any of these changes what remote A2A callers see. The implementation engineer SHOULD split T11 into two commits if that makes the halt-before-commit ergonomics cleaner: (a) `a2a_errors.py` + tests (halt-before-commit), then (b) `a2a_artifacts.py` + `a2a_capability_negotiation.py` + `a2a_cancellation.py` + tests (no halt). If kept as one commit, the halt-before-commit pause MUST happen before the combined commit.
 
-Why these four are bundled into one task: each is self-contained (≤100 LOC of impl + ≤200 LOC of tests), shares no internal state with the others, and lands together as the "small endpoints + enum" surface that fills out the A2A 1.0 spec compliance matrix.
+Why these four are bundled into one task: each is self-contained (≤100 LOC of impl + ≤200 LOC of tests), shares no internal state with the others, and lands together as the "small endpoints + enum" surface that fills out the A2A 1.0 spec compliance matrix. The `a2a_errors.py` module is small in LoC but doctrinally distinct (wire-protocol contract).
 
 ### `a2a_artifacts.py`
 
@@ -2293,30 +2415,103 @@ state audit emitted; subsequent calls reject the cancelled task ID.
 ### `a2a_errors.py`
 
 ```python
-"""protocol/a2a_errors.py — full A2A 1.0 closed-enum error taxonomy.
+"""protocol/a2a_errors.py — A2A 1.0 spec error taxonomy + AgentOS
+policy-refusal reasons.
 
-Per A2A 1.0 §error-codes. 14 spec-defined codes (closed-enum,
-re-exported from protocol/__init__.py).
+R2 P2 #1 reviewer correction split the original "mixed enum" into
+two separate Literals:
 
-Sprint-6 doctrine: every error response uses spec-defined codes;
-no Cognic-bespoke codes for spec-mapped failures.
+- ``A2AErrorCode`` — the wire-protocol codes per A2A 1.0 §"Error
+  codes". Every literal here MUST appear verbatim in the spec.
+  Wave-1 surface is the 14 codes Sprint-6 actually consumes; future
+  spec-defined codes (e.g., for push-notification config errors when
+  that feature lands in Wave 2) are appended here in their owning
+  sprint.
+- ``A2APolicyRefusalReason`` — AgentOS-specific reasons surfaced in
+  the ``data.policy_reason`` field on top of a spec-conformant
+  ``error.code``. Operators / audit consumers / bank reviewers see
+  the rich reason; remote A2A callers see only the spec code.
+
+Sprint-6 doctrine: the wire ``error.code`` MUST be a spec-defined
+value from :data:`A2AErrorCode`. AgentOS-policy detail rides in
+``data.policy_reason`` keyed off :data:`A2APolicyRefusalReason`.
 """
 
 from __future__ import annotations
 
 import dataclasses
 
-from cognic_agentos.protocol import A2AErrorCode
+from cognic_agentos.protocol import A2AErrorCode, A2APolicyRefusalReason
+
+
+# R4 P2 reviewer correction: the policy→spec-code mapping lives HERE
+# in a2a_errors.py (NOT in protocol/a2a_schema.py and NOT re-imported
+# from protocol/__init__.py). Co-locating it with the error-response
+# builder keeps it module-private + avoids the cyclic-import hazard
+# the original draft introduced. Pinned by a drift detector in
+# tests/unit/protocol/test_a2a_errors.py asserting every
+# A2APolicyRefusalReason value has a mapping entry.
+_POLICY_REASON_TO_SPEC_CODE: dict[A2APolicyRefusalReason, A2AErrorCode] = {
+    "agent_card_signature_invalid": "invalid_agent_response",
+    "agent_card_signer_not_allowlisted": "invalid_agent_response",
+    "agent_card_not_found": "invalid_agent_response",
+    "anonymous_refused": "invalid_request",
+    "tenant_token_invalid": "invalid_request",
+    "unknown_target": "method_not_found",
+    "capability_not_supported": "unsupported_operation",
+    "streaming_not_supported": "unsupported_operation",
+    "artifact_too_large": "invalid_params",
+    "artifact_retention_exceeded": "invalid_params",
+    "wave2_feature_refused": "unsupported_operation",
+}
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class A2AErrorResponse:
-    code: A2AErrorCode
-    message: str
-    spec_section: str  # which A2A 1.0 section defines this code
-    payload: dict[str, str]  # operator-debugging metadata
-    http_status: int  # spec-mapped HTTP status code
+    """Spec-conformant A2A error response envelope.
 
+    The wire surface is JSON-RPC-2.0-shaped:
+        {"jsonrpc": "2.0", "id": ..., "error": {"code": <int>,
+         "message": <str>, "data": {"policy_reason": ..., ...}}}
+
+    ``code`` (int) is mapped from the spec literal at serialise time
+    via ``_SPEC_CODE_TO_INT``. ``data.policy_reason`` carries the
+    AgentOS policy reason for operator / audit consumption.
+    """
+
+    code: A2AErrorCode  # spec wire code (Literal)
+    message: str  # human-readable; may be sanitised before egress
+    spec_section: str  # which A2A 1.0 section defines this code
+    policy_reason: A2APolicyRefusalReason | None = None  # AgentOS detail
+    feature_subtag: str | None = None  # used with wave2_feature_refused
+    payload: dict[str, str] | None = None  # operator-debugging metadata
+    http_status: int = 400  # spec-mapped HTTP status code
+
+
+def from_policy_reason(
+    reason: A2APolicyRefusalReason,
+    *,
+    message: str,
+    feature_subtag: str | None = None,
+    payload: dict[str, str] | None = None,
+) -> A2AErrorResponse:
+    """Build an :class:`A2AErrorResponse` from an AgentOS policy
+    refusal reason. The spec wire code is resolved via
+    :data:`_POLICY_REASON_TO_SPEC_CODE` so the wire contract stays
+    spec-conformant.
+    """
+    spec_code = _POLICY_REASON_TO_SPEC_CODE[reason]
+    return A2AErrorResponse(
+        code=spec_code,  # spec wire code
+        message=message,
+        spec_section="A2A-1.0 §error-codes",
+        policy_reason=reason,
+        feature_subtag=feature_subtag,
+        payload=payload,
+    )
+
+
+# Spec-only error factories (no policy reason layered on top):
 
 def task_not_found(task_id: str) -> A2AErrorResponse:
     return A2AErrorResponse(
@@ -2328,10 +2523,22 @@ def task_not_found(task_id: str) -> A2AErrorResponse:
     )
 
 
-def task_already_cancelled(task_id: str) -> A2AErrorResponse: ...
+def task_not_cancelable(task_id: str) -> A2AErrorResponse: ...
 def version_not_supported(supported: str) -> A2AErrorResponse: ...
-def agent_card_signature_invalid(reason: str) -> A2AErrorResponse: ...
-# ... 10 more spec-mapped factory functions ...
+def unsupported_operation(method: str) -> A2AErrorResponse: ...
+def content_type_not_supported(declared: str) -> A2AErrorResponse: ...
+def invalid_agent_response(reason: str) -> A2AErrorResponse: ...
+def push_notification_not_supported() -> A2AErrorResponse: ...
+def extended_agent_card_not_configured() -> A2AErrorResponse: ...
+def extension_support_required(missing_extension: str) -> A2AErrorResponse: ...
+
+# JSON-RPC envelope factories:
+
+def parse_error(detail: str) -> A2AErrorResponse: ...
+def invalid_request(detail: str) -> A2AErrorResponse: ...
+def method_not_found(method: str) -> A2AErrorResponse: ...
+def invalid_params(detail: str) -> A2AErrorResponse: ...
+def internal_error() -> A2AErrorResponse: ...
 ```
 
 - [ ] **Step 1: Implement four modules + tests**
@@ -2795,10 +3002,10 @@ git commit -m "test(sprint-6): negative-path canary for A2A caller-URL threat mo
 
 ---
 
-## Task 15: Critical-controls coverage gate extension 21 → 27 modules
+## Task 15: Critical-controls coverage gate extension 21 → 28 modules
 
 **Files:**
-- Modify: `tools/check_critical_coverage.py` — extend the gate from 21 (Sprint-5 final) to **27 modules** (R0 P2 reviewer correction added `a2a_version.py` to the original quintet). Six Sprint-6 candidates at the strict 95% line / 90% branch floor: `a2a_authz`, `a2a_agent_cards`, `a2a_endpoint`, `a2a_schema`, `a2a_version`, `ui_events`.
+- Modify: `tools/check_critical_coverage.py` — extend the gate from 21 (Sprint-5 final) to **28 modules**. Five original Sprint-6 candidates + `a2a_version.py` (R0 P2 reviewer correction) + `a2a_errors.py` (R3 P2 #2 reviewer correction — owns the spec wire `A2AErrorCode` enum + AgentOS `A2APolicyRefusalReason` enum + `_POLICY_REASON_TO_SPEC_CODE` mapping; drift = wire-protocol-public). **Seven Sprint-6 candidates** at the strict 95% line / 90% branch floor: `a2a_authz`, `a2a_agent_cards`, `a2a_endpoint`, `a2a_schema`, `a2a_version`, `a2a_errors`, `ui_events`.
 
 **Halt-before-commit:** Yes — the gate config is the executable single-source-of-truth for the per-file coverage floor; changes require explicit reviewer pass.
 
@@ -2810,6 +3017,8 @@ Per-module rationale (mirrors Sprint-5 T14 R1 P3 ownership-accuracy fix):
 | `protocol/a2a_agent_cards.py` | JWS verification on Agent Cards is identity-routing critical — a forged or tampered card routes outbound traffic to attacker-controlled endpoints. Two-pass validator (upstream + AgentOS profile) is the only place AgentOS validates A2A-spec card shapes. | Protocol authorization + Plugin trust + supply chain |
 | `protocol/a2a_endpoint.py` | Single owner of the task-lifecycle state machine + chain linkage across the A2A boundary. Anonymous-refusal gate + Wave-2-refusal gate live here. | Protocol authorization + Wire-protocol contracts |
 | `protocol/a2a_schema.py` | Wire-format truth — drift = wire-protocol break. Pinned digest constants + the schema-drift CI gate live here. | Wire-protocol contracts |
+| `protocol/a2a_version.py` | Wire-protocol gate every inbound A2A call passes through; closed-enum 6-case `A2AVersionOutcome` matrix; rejecting absent-header per spec. (R0 P2 promotion; sustained through R2 P2 #4 reviewer correction that caught this row + the snippet still missing the entry.) | Wire-protocol contracts |
+| `protocol/a2a_errors.py` | Owns the A2A 1.0 spec wire `A2AErrorCode` enum (14 spec codes) + AgentOS `A2APolicyRefusalReason` enum (11 policy reasons) + `_POLICY_REASON_TO_SPEC_CODE` mapping that drives the error-response builder. Drift in any of these changes what remote A2A callers see. (R3 P2 #2 promotion — earlier draft kept this non-critical because the module is "just enums"; reviewer correctly flagged that the mapping IS wire-protocol contract.) | Wire-protocol contracts |
 | `protocol/ui_events.py` | Per ADR-020 stop rule: public event schema, MUST remain backward-compatible across versions. The Wave-1 typed taxonomy is the contract every future UI subscriber implements. | UI event-stream contract (ADR-020) |
 
 Implementation:
@@ -2817,16 +3026,18 @@ Implementation:
 ```python
 # tools/check_critical_coverage.py — extend _CRITICAL_FILES tuple
 
-# Sprint 6 T15 — A2A endpoint quintet. The Sprint-6 plan-of-record
-# nominates these five modules as the A2A critical-controls floor;
-# T15 lands them in this gate. T16 is the corresponding AGENTS.md
+# Sprint 6 T15 — A2A endpoint septet (R2 P2 #4 reviewer correction
+# expanded the original quintet with a2a_version.py — version
+# negotiation IS wire-protocol surface per AGENTS.md
+# §"Wire-protocol contracts"; R3 P2 #2 reviewer correction added
+# a2a_errors.py — the spec wire error enum + AgentOS policy-refusal
+# enum + their mapping all live there, and drift in any of those is
+# wire-protocol-public). The Sprint-6 plan-of-record nominates these
+# **seven** modules as the A2A critical-controls floor; T15 lands
+# them in this gate. T16 is the corresponding AGENTS.md
 # doctrine update that mirrors this gate under a new "Protocol —
-# A2A endpoint (Sprint 6)" section. (Pre-T16, AGENTS.md only names
-# protocol/a2a_authz.py under "Protocol authorization" + lists
-# protocol/ui_events.py per ADR-020 stop rule; T16 expands that list
-# to match this gate so the gate config + doctrine document stay in
-# sync.) All five ride the same single strict 95% line / 90% branch
-# floor as Sprint-2/2.5/3/4/5 modules:
+# A2A endpoint (Sprint 6)" section. All seven ride the same single
+# strict 95% line / 90% branch floor as Sprint-2/2.5/3/4/5 modules:
 #   * ``a2a_authz.py`` is the per-tenant pinned-token validator —
 #     closed-enum 8-value A2AAuthzReason; Vault-read exception
 #     mapping per Sprint-5 T15 R1 P2 #2 doctrine.
@@ -2844,6 +3055,18 @@ Implementation:
 #     gate (test_a2a_schema_drift.py) catches upstream movement
 #     before it reaches us. Pinned digest constants + the upstream
 #     URL constants live here.
+#   * ``a2a_version.py`` is the A2A-Version 6-case header
+#     negotiation matrix. Wire-protocol gate every inbound A2A
+#     call passes through; closed-enum A2AVersionOutcome carries
+#     the per-case behaviour. Module is small + pure-functional but
+#     the doctrinal surface is wire-protocol-public (R0 P2 #4 +
+#     R2 P2 #4 reviewer corrections promoted from non-critical).
+#   * ``a2a_errors.py`` owns the spec wire ``A2AErrorCode`` literal
+#     (14 spec-defined codes) + the AgentOS ``A2APolicyRefusalReason``
+#     literal (11 policy reasons) + ``_POLICY_REASON_TO_SPEC_CODE``
+#     mapping (drives the error-response builder; what remote
+#     callers actually see). Drift in any of these is wire-protocol-
+#     public; promoted from non-critical at R3 P2 #2.
 #   * ``ui_events.py`` is the Wave-1 typed event taxonomy + emit-
 #     hook layer per ADR-020. Public event schema; MUST remain
 #     backward-compatible across versions. Per ADR-020 stop rule
@@ -2852,6 +3075,8 @@ Implementation:
 ("src/cognic_agentos/protocol/a2a_agent_cards.py", 0.95, 0.90),
 ("src/cognic_agentos/protocol/a2a_endpoint.py", 0.95, 0.90),
 ("src/cognic_agentos/protocol/a2a_schema.py", 0.95, 0.90),
+("src/cognic_agentos/protocol/a2a_version.py", 0.95, 0.90),
+("src/cognic_agentos/protocol/a2a_errors.py", 0.95, 0.90),
 ("src/cognic_agentos/protocol/ui_events.py", 0.95, 0.90),
 ```
 
@@ -2861,13 +3086,13 @@ Implementation:
 uv run pytest --cov=cognic_agentos --cov-branch --cov-report=json --cov-report= -q
 ```
 
-- [ ] **Step 2: Inspect coverage of the 5 new modules; expect ≥95% line, ≥90% branch (per the strict floor)**
+- [ ] **Step 2: Inspect coverage of the 7 new modules; expect ≥95% line, ≥90% branch (per the strict floor)**
 
-If any of the 5 falls short, ADD MORE TESTS to the per-module `test_a2a_*.py` file before extending the gate. The gate isn't a target — coverage IS the target; the gate just makes regressions visible.
+If any of the 7 falls short, ADD MORE TESTS to the per-module `test_a2a_*.py` file before extending the gate. The gate isn't a target — coverage IS the target; the gate just makes regressions visible.
 
 - [ ] **Step 3: Extend the gate**
 
-- [ ] **Step 4: Run gate; expect 27 modules PASS**
+- [ ] **Step 4: Run gate; expect 28 modules PASS**
 
 ```bash
 uv run python tools/check_critical_coverage.py
@@ -2876,7 +3101,7 @@ uv run python tools/check_critical_coverage.py
 - [ ] **Step 5: Halt-before-commit + commit**
 
 ```bash
-git commit -m "chore(sprint-6): extend critical-controls gate to A2A quintet (T15)"
+git commit -m "chore(sprint-6): extend critical-controls gate to A2A septet (T15)"
 ```
 
 ---
@@ -2886,7 +3111,7 @@ git commit -m "chore(sprint-6): extend critical-controls gate to A2A quintet (T1
 **Files:**
 - Create: `docs/closeouts/2026-05-XX-sprint-6-a2a-endpoint.md` (date filled at commit time).
 - Modify: `docs/BUILD_PLAN.md` — flip Sprint 6 status to `**CLOSED**`.
-- Modify: `AGENTS.md` — add the Sprint-6 critical-controls **sextet** (six modules, R0 P2 correction) under a new "Protocol — A2A endpoint (Sprint 6)" section.
+- Modify: `AGENTS.md` — add the Sprint-6 critical-controls **septet** (seven modules: original quintet + R0 P2 added `a2a_version.py` + R3 P2 #2 added `a2a_errors.py`) under a new "Protocol — A2A endpoint (Sprint 6)" section.
 - Modify: `tests/architecture/test_a2a_no_subprocess.py` — tighten the `test_at_least_one_a2a_module_exists` sentinel from the T4-placeholder `>= 0` to `>= 9` (the 10 a2a modules — endpoint, authz, agent_cards, schema, version, streaming, artifacts, capability_negotiation, cancellation, errors — minus 1 to leave room for one rename without tripping the test).
 - Modify: `tests/architecture/test_mcp_stdio_no_subprocess.py` — sentinel stays at `>= 5` (Sprint-5 floor).
 
@@ -2894,10 +3119,10 @@ git commit -m "chore(sprint-6): extend critical-controls gate to A2A quintet (T1
 
 Closeout structure mirrors Sprint 5:
 - Header (parent SHA, base SHA, branch state, commit count).
-- What ships (**6 critical-controls A2A + UI events modules** — `a2a_authz`, `a2a_agent_cards`, `a2a_endpoint`, `a2a_schema`, `a2a_version`, `ui_events` — plus 5 small endpoint/enum modules + UI events stub for all 11 ADR-020 Wave-1 families + caller-URL threat-model doc + conformance fixtures + 16 new test modules + critical-controls gate extension to **27**).
-- CI matrix (no new lanes; existing lanes still gate; per-file coverage now enforces 27 modules).
+- What ships (**7 critical-controls A2A + UI events modules** — `a2a_authz`, `a2a_agent_cards`, `a2a_endpoint`, `a2a_schema`, `a2a_version`, `a2a_errors`, `ui_events` — plus 4 small endpoint modules + UI events stub for all 11 ADR-020 Wave-1 families + caller-URL threat-model doc + conformance fixtures + 16 new test modules + critical-controls gate extension to **28**).
+- CI matrix (T6 added the dedicated `a2a-spec drift detection` lane env-gated on `COGNIC_RUN_A2A_UPSTREAM=1`; existing lanes still gate; per-file coverage now enforces **28 modules**).
 - Doctrine adherence (halt-before-commit on every critical-controls edit; A2A SDK pin; Wave-2-refusal closed-enum doctrine; caller-URL threat model).
-- Test + coverage state (26-module gate table).
+- Test + coverage state (**28-module gate table**).
 - Plan-review findings closed (round-by-round across T1-T16; expected ~5-10 reviewer rounds based on Sprint-5 cadence).
 - ADR-003 / ADR-020 / A2A-CONFORMANCE.md Validation table (delivered / partial / carryover map).
 - Doctrine amendments accepted in Sprint 6 (including the new "Protocol — A2A endpoint (Sprint 6)" critical-controls section + the `docs/A2A-CALLER-URL-THREAT-MODEL.md` document).
@@ -2918,7 +3143,8 @@ The hand-off is the contract Sprint 6 deliberately leaves unfinished. Sprint 7A 
 - `protocol/a2a_agent_cards.py` (per ADR-003 + A2A-CONFORMANCE.md — two-pass card validator + JWS verify against per-tenant trust root; identity-routing critical)
 - `protocol/a2a_endpoint.py` (per ADR-003 — inbound receiver + task lifecycle state machine + cross-agent chain linkage)
 - `protocol/a2a_schema.py` (per ADR-003 — pinned A2A 1.0 wire-format types; schema-drift CI gate)
-- `protocol/a2a_version.py` (per ADR-003 + AGENTS.md §"Wire-protocol contracts" — A2A-Version header negotiation; 4-case matrix; rejecting absent-header per spec)
+- `protocol/a2a_version.py` (per ADR-003 + AGENTS.md §"Wire-protocol contracts" — A2A-Version header negotiation; 6-case matrix; rejecting absent-header per spec)
+- `protocol/a2a_errors.py` (per ADR-003 + AGENTS.md §"Wire-protocol contracts" — A2A 1.0 spec wire `A2AErrorCode` enum + AgentOS `A2APolicyRefusalReason` enum + their mapping; what remote A2A callers see)
 - `protocol/ui_events.py` (per ADR-020 — Wave-1 typed event taxonomy + emit-hook layer; public event schema covering all 11 ADR-020 Wave-1 families, MUST remain backward-compatible)
 ```
 
@@ -2971,7 +3197,7 @@ git commit -m "docs(sprint-6): closeout + BUILD_PLAN refresh + AGENTS.md critica
 
 3. **Agent Card discovery URL.** When AgentOS calls a remote agent, it constructs the discovery URL as `f"{origin}/.well-known/agent-card.json"` where `origin` is derived from the registered pack's `[tool.cognic.identity].agent_card_origin` field — itself a manifest-declared, cosign-signed value (T7 R-loop will close this gap; the field IS NOT a caller input). The well-known suffix `.well-known/agent-card.json` is **constant, not parameterisable** — no caller can override the suffix. The canary asserts: every Agent Card fetch in `protocol/a2a_agent_cards.py` constructs the URL via the constant suffix; no `format()` / f-string interpolation of caller-controlled strings into the suffix slot. Closed-enum reason: `a2a_agent_card_discovery_path_not_constant`.
 
-4. **Push-notification webhooks (Wave-2 feature).** Push-notification subscribe is spec-valid in A2A 1.0 but Wave-2 in AgentOS — refused in Wave-1 with `a2a_wave2_feature_refused` (closed-enum sub-tag `push_notification`). The webhook URL would be caller-controlled by definition; refusing the entire feature in Wave-1 means no caller-controlled webhook URL ever reaches `httpx`. When Sprint 12 (or wherever push-notification lands) lifts this refusal, the caller-URL threat model amendment lands alongside it with explicit per-tenant URL allow-list + Vault-stored signing-key + outbound mTLS — same shape Sprint-5 T13's args-side validation will get when Sprint 8 lifts the STDIO umbrella.
+4. **Push-notification webhooks (Wave-2 feature).** Push-notification subscribe is spec-valid in A2A 1.0 but Wave-2 in AgentOS — refused in Wave-1 with `A2APolicyRefusalReason.wave2_feature_refused` (closed-enum sub-tag `push_notification`). The webhook URL would be caller-controlled by definition; refusing the entire feature in Wave-1 means no caller-controlled webhook URL ever reaches `httpx`. When Sprint 12 (or wherever push-notification lands) lifts this refusal, the caller-URL threat model amendment lands alongside it with explicit per-tenant URL allow-list + Vault-stored signing-key + outbound mTLS — same shape Sprint-5 T13's args-side validation will get when Sprint 8 lifts the STDIO umbrella.
 
 ### Architecture-test backstop (T4)
 
@@ -2990,7 +3216,7 @@ The test ships with three self-tests (top-level scan, nested-submodule scan, ren
 - `TestInboundTargetAgentIsEntrypointName` — every `target_agent` shape that resembles a URL (`https://...`, `//...`, `file://`, `javascript:`, `data:`) is refused at envelope validation with closed-enum `a2a_target_must_be_entrypoint_name`.
 - `TestOutboundSpawnSubagentNeverAcceptsURL` — `A2AEndpoint.dispatch_outbound(target_agent="...")` reachable via every API surface refuses any kwarg matching `*_url` (TypeError-typed at the boundary).
 - `TestAgentCardDiscoverySuffixIsConstant` — `protocol/a2a_agent_cards.py` discovery code never interpolates a caller value into the well-known suffix. Module-shape assertion (mirrors Sprint-5 `TestThreatModelInvariants`): the constant `_AGENT_CARD_WELL_KNOWN_SUFFIX = "/.well-known/agent-card.json"` is pinned by frozenset equality.
-- `TestWave2WebhookRefused` — push-notification subscribe is refused with closed-enum `a2a_wave2_feature_refused` AND the refusal is observable end-to-end through the audit + decision-history chain (parallel to Sprint-5 T12's high-risk-tier evidence chain-readback).
+- `TestWave2WebhookRefused` — push-notification subscribe is refused with closed-enum `A2APolicyRefusalReason.wave2_feature_refused` AND the refusal is observable end-to-end through the audit + decision-history chain (parallel to Sprint-5 T12's high-risk-tier evidence chain-readback).
 
 ---
 
@@ -3102,9 +3328,9 @@ The other 8 families have schema-only stubs in Sprint 6: their Pydantic models r
 
 ---
 
-## Doctrine Decision F — Critical-controls expansion rationale (21 → 27)
+## Doctrine Decision F — Critical-controls expansion rationale (21 → 28)
 
-**Decision:** Sprint 6 grows the per-file critical-controls coverage gate from 21 modules (Sprint-5 closeout state) to **27 modules** (six new entries, not five — R0 P2 reviewer correction added `a2a_version.py` per AGENTS.md §"Wire-protocol contracts" stop-rule). Each new entry carries the strict 95% line / 90% branch floor; each one's inclusion is justified below against the AGENTS.md critical-controls doctrine criteria.
+**Decision:** Sprint 6 grows the per-file critical-controls coverage gate from 21 modules (Sprint-5 closeout state) to **28 modules** (seven new entries — original five + `a2a_version.py` per R0 P2 #4 + `a2a_errors.py` per R3 P2 #2). Each new entry carries the strict 95% line / 90% branch floor; each one's inclusion is justified below against the AGENTS.md critical-controls doctrine criteria.
 
 | Module | Added by | Doctrine trigger | Why critical |
 |---|---|---|---|
@@ -3122,10 +3348,11 @@ The other 8 families have schema-only stubs in Sprint 6: their Pydantic models r
 _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     # ... Sprint 2-5 entries (21 modules) ...
 
-    # Sprint 6 T15 — A2A endpoint + version-negotiation + UI events
-    # sextet. Per ADR-003 + ADR-020 + AGENTS.md critical-controls list
-    # amendments. All six ride the same single strict 95% line / 90%
-    # branch floor as the Sprint-2/2.5/3/4/5 modules above:
+    # Sprint 6 T15 — A2A endpoint + version-negotiation + error-taxonomy
+    # + UI events septet. Per ADR-003 + ADR-020 + AGENTS.md critical-
+    # controls list amendments. All seven ride the same single strict
+    # 95% line / 90% branch floor as the Sprint-2/2.5/3/4/5 modules
+    # above:
     #   * a2a_authz.py — per-tenant pinned-token client (anonymous-A2A
     #     forbidden Wave-1; Vault-rotated; mirrors mcp_authz pattern).
     #   * a2a_agent_cards.py — two-pass card validator + JWS verify
@@ -3137,6 +3364,10 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     #   * a2a_version.py — A2A-Version header negotiation matrix; per
     #     AGENTS.md §"Wire-protocol contracts" the version gate is
     #     wire-protocol surface even though the module is small.
+    #   * a2a_errors.py — A2A 1.0 spec wire ``A2AErrorCode`` enum +
+    #     AgentOS ``A2APolicyRefusalReason`` enum + their mapping;
+    #     drift in any of these changes what remote A2A callers see
+    #     (R3 P2 #2 reviewer correction promoted from non-critical).
     #   * ui_events.py — Wave-1 typed event taxonomy + emit-hook layer;
     #     public event schema, MUST remain backward-compatible across
     #     versions per ADR-020.
@@ -3145,6 +3376,7 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     ("src/cognic_agentos/protocol/a2a_endpoint.py", 0.95, 0.90),
     ("src/cognic_agentos/protocol/a2a_schema.py", 0.95, 0.90),
     ("src/cognic_agentos/protocol/a2a_version.py", 0.95, 0.90),
+    ("src/cognic_agentos/protocol/a2a_errors.py", 0.95, 0.90),
     ("src/cognic_agentos/protocol/ui_events.py", 0.95, 0.90),
 )
 ```
@@ -3152,9 +3384,11 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
 **Modules NOT included in the critical-controls floor (deliberate):**
 
 - `protocol/a2a_streaming.py` (T10) — wire-format streaming adapter; consumes the schema (T6) + dispatches via the endpoint (T9). Has no independent fail-closed invariants beyond what those two enforce. Sprint-7 evaluation: if streaming-side bugs surface, promote to critical-controls then.
-- `protocol/a2a_artifacts.py` / `a2a_capability_negotiation.py` / `a2a_cancellation.py` / `a2a_errors.py` (T11) — small endpoints + an enum module. None carry independent fail-closed invariants; all consume the upstream critical-controls modules.
+- `protocol/a2a_artifacts.py` / `a2a_capability_negotiation.py` / `a2a_cancellation.py` (T11) — small endpoints. None carry independent fail-closed invariants; all consume the upstream critical-controls modules. (R3 P2 #2 reviewer correction removed `a2a_errors.py` from this "not included" list — that module owns the wire `A2AErrorCode` enum + `A2APolicyRefusalReason` enum + the mapping, which IS wire-protocol-public; promoted to critical-controls.)
 
-**(R0 P2 reviewer note — historical)**: an earlier draft of this section listed `a2a_version.py` as NOT included in the critical-controls floor on the rationale that it's a small pure-functional module. The reviewer correctly flagged that AGENTS.md §"Wire-protocol contracts" treats version negotiation as stop-rule material regardless of module size — the test surface is small but the doctrinal surface is wire-protocol-public. Promoted into the gate; gate count adjusted 26 → 27.
+**(R0 P2 reviewer note — historical)**: an earlier draft listed `a2a_version.py` as NOT included on the rationale that it's a small pure-functional module. The reviewer correctly flagged that AGENTS.md §"Wire-protocol contracts" treats version negotiation as stop-rule material regardless of module size. Promoted; gate count 26 → 27.
+
+**(R3 P2 #2 reviewer note — historical)**: a later draft listed `a2a_errors.py` as NOT included on the rationale that it's "just an enum module". The reviewer correctly flagged that the spec wire enum + AgentOS policy enum + the policy→spec mapping are wire-protocol contracts (drift = what remote callers see). Promoted; gate count 27 → 28.
 
 **AGENTS.md amendment text (lands at T16):** see Task 16 §"AGENTS.md amendment text" above for the exact insert under the AGENTS.md critical-controls list.
 
@@ -3212,7 +3446,7 @@ These are honest deferrals (matches Sprint-4 T13 cosign-pin pattern + Sprint-5 T
 - ADR-003 §"Inbound A2A" / §"Outbound A2A" — implemented at T9 with the explicit Sub-agent boundary (Doctrine Decision D).
 - ADR-003 §"Message envelope" — Sprint 6 follows the spec wire format (NOT the illustrative Python dict in the ADR); pinned via T6 schema gate.
 - ADR-003 §"A2A 1.0 feature scope" — Wave-1 features all in T9 / T10 / T11; Wave-2 features refused with closed-enum at T14.
-- ADR-003 §"Version negotiation" — implemented at T8 with the 4-case matrix; module is critical-controls per AGENTS.md §"Wire-protocol contracts".
+- ADR-003 §"Version negotiation" — implemented at T8 with the 6-case matrix; module is critical-controls per AGENTS.md §"Wire-protocol contracts".
 - ADR-003 §"Audit chain linkage" — implemented at T9 (inbound `a2a.task_received`) + T9 outbound dispatch (`a2a.task_dispatched`). The Sub-agent boundary (Doctrine Decision D) records that `spawn_subagent`-side audit chaining ships in Sprint 8.
 - ADR-020 §"Decision" — Sprint 6 implements item 1 (typed event schema for ALL 11 Wave-1 families). Items 2-6 (SSE transport, RBAC subscriber, decision-history-mirror catch-up endpoint, frontend-action POST, JSON-schema publication at the well-known path) ship in Sprint 7B per the ADR's phased schedule. Doctrine Decision E pins the full taxonomy.
 - ADR-020 §"Event taxonomy (Wave 1)" — **all 11 families** pinned in Doctrine Decision E + T12 (R0 P2 reviewer correction — earlier draft only pinned 5). Phased emit-hook wiring per ADR-020 §"Implementation phases" documented in Doctrine Decision E.
@@ -3223,10 +3457,10 @@ These are honest deferrals (matches Sprint-4 T13 cosign-pin pattern + Sprint-5 T
 - A2A-CONFORMANCE.md §"Card signatures (JWS) — mandatory for AgentOS" — JWS verify at T7 via Sprint-4 trust root extension; admission ordering per Doctrine Decision F (cosign first, then manifest extract, then card JWS verify).
 - A2A-CONFORMANCE.md §"Audit linkage" — T9 inbound + outbound chain links.
 - A2A-CONFORMANCE.md §"Versioning" — T6 schema pin + drift gate (with the dedicated `a2a-spec drift detection` CI lane added at T6 per R0 P2 reviewer correction).
-- A2A-CONFORMANCE.md §"Version negotiation" — T8 4-case matrix; promoted to critical-controls per R0 P2 reviewer correction.
+- A2A-CONFORMANCE.md §"Version negotiation" — T8 6-case matrix; promoted to critical-controls per R0 P2 reviewer correction.
 - A2A-CONFORMANCE.md §"What pack authors must declare" — `agent_card_jws_path` mandatory at T7.
 
-**R0 + R1 reviewer-round corrections folded into this Self-Review (two rounds before plan commit):**
+**R0 + R1 + R2 + R3 + R4 reviewer-round corrections folded into this Self-Review (five rounds; R2 + R3 + R4 ran against the pushed plan-PR #17):**
 
 | Finding | Fix |
 |---|---|
@@ -3242,6 +3476,20 @@ These are honest deferrals (matches Sprint-4 T13 cosign-pin pattern + Sprint-5 T
 | **R1 P3** — `create_prod_app` docstring still promised route mounting after the body was corrected to log-only. | Docstring rewritten: "T2 ONLY logs SDK availability — route mounting is deferred to T9 / T11 / T12". Explicit reference to the Sprint-5 T15 R1 P2 #1 overclaim that this fix mirrors. |
 | **R1 P3** — Document map line 46 still said "5 families pinned" while the body said 11 schema / 3 wired. | Document map line refreshed to match. |
 | **R1 P3** — `A2AVersionOutcome` count drift: file-structure said "5 values" while listing 6; tests inventory said "5 cases" while T8 said "6". | Pinned to 6 consistently across file-structure, tests-inventory, T8, Doctrine Decision F. |
+| **R2 P2 #1** — `A2AErrorCode` enum mixed AgentOS/profile reasons (`agent_card_signature_invalid`, `unknown_target`, `wave2_feature_refused`, `anonymous_refused`, `tenant_token_invalid`) with spec wire codes, while omitting canonical A2A 1.0 errors (`push_notification_not_supported`, `unsupported_operation`, `content_type_not_supported`, `invalid_agent_response`, `extended_agent_card_not_configured`, `extension_support_required`, `version_not_supported`). Would have steered impl into a non-spec wire contract. | Split into two closed-enum Literals: `A2AErrorCode` (14 spec-defined wire codes — JSON-RPC envelope errors + A2A 1.0 spec errors only) and `A2APolicyRefusalReason` (11 AgentOS-specific reasons surfaced via `data.policy_reason` detail field on top of a spec-conformant `error.code`). Added `_POLICY_REASON_TO_SPEC_CODE` mapping. Updated T11 task body, file-structure description, T1 closed-enum scaffolding. Wire contract now spec-conformant; rich AgentOS refusal vocabulary preserved in audit-side detail field. |
+| **R2 P2 #2** — JWS dependency assumption was wrong: plan claimed `python-jose[cryptography]` was already pinned by Sprint-4 trust-gate work, but pyproject.toml only pins `cryptography>=45` (no JWS library). T7 would have failed at import time. | T2's `pyproject.toml` snippet now explicitly pins `python-jose[cryptography] == 3.5.0` in the `adapters` extra. Choice rationale (RFC 7797 detached-JWS support; reuses Sprint-4 cryptography backend) documented inline. Tech-Stack header updated to remove the false "already pinned" claim. |
+| **R2 P2 #3** — T8 (`a2a_version.py`) task body still said "halt-before-commit: No (not on the critical-controls list)" even though R0 P2 #4 promoted the module to the critical-controls floor. Could have caused the version-negotiation wire contract to land without the required pause. | T8 halt-before-commit flipped to "Yes" with explicit reference to R0 P2 #4 + R2 P2 #3 corrections + the AGENTS.md §"Wire-protocol contracts" stop-rule. |
+| **R2 P2 #4** — T15 file list said "27 modules" but the rationale table + per-module comment block + `_CRITICAL_FILES` snippet still showed only 5 entries (missing `a2a_version.py`). If implemented from the snippet, gate would have stayed at 26 + missed the newly-promoted version module. | T15 rationale table grows to 6 rows; per-module comment block expanded with the `a2a_version.py` rationale paragraph; `_CRITICAL_FILES` snippet adds the entry; Step 2 / Step 4 text updated from "5 new modules" → "6 new modules" / "28 modules PASS"; commit message updated from "quintet" → "sextet". |
+| **R2 P2 #5** — Schema-drift CI lane (T6) referenced `needs: lint-test` but the actual workflow job id is `ci`; also referenced `./.github/actions/setup-python` which doesn't exist in the repo. Implementing the snippet as-written would have made the workflow invalid. | Verified ground truth (`grep` of `.github/workflows/python.yml`): job id is `ci`; setup chain is inline (`actions/checkout@v6` → `astral-sh/setup-uv@v7` with version `0.5.29` + `enable-cache: true` → `.python-version` read → `actions/setup-python@v6` → `uv sync --frozen --all-extras`). T6 lane snippet rewritten to match (`needs: ci` + inline setup steps copied verbatim from the existing `ci` job for parity). |
+| **R2 P3 #1** — T16 closeout instructions still said "no new lanes; per-file coverage now enforces 26 modules" — stale relative to T6's new lane + T15's 27-module gate. | T16 closeout-template lines updated to record the `a2a-spec drift detection` lane addition and the 27-module gate. |
+| **R2 P3 #2** — AGENTS.md amendment text + 2 other doctrine-drift-scan rows still said "4-case matrix" for `a2a_version.py` even though the plan now consistently uses 6 outcomes. | All 3 sites updated to "6-case matrix" via `replace_all`. AGENTS.md inserted text now matches the file-structure + Doctrine Decision F + T8 task body. |
+| **R3 P2 #1** — Chosen JWS library doesn't support claimed contract: `python-jose` is essentially abandoned + does NOT support RFC 7797 unencoded-payload JWS, but the plan claimed it does. Agent Card sidecar `.jws` verification is identity-routing critical so the library must actually support the spec serialisation. | Switched from `python-jose[cryptography] == 3.5.0` to `joserfc == X.Y.Z` (PIN AT T2). Rationale documented inline in T2 + Tech Stack: joserfc has explicit RFC-7797 API surface, is actively maintained by the authlib author, and transitively uses Sprint-4's pinned `cryptography` backend so we don't introduce a second crypto family. T7 trust-gate `verify_jws_blob` references updated. |
+| **R3 P2 #2** — `a2a_errors.py` was still treated as non-critical even though after R2 it owns the spec wire `A2AErrorCode` enum + AgentOS `A2APolicyRefusalReason` enum + `_POLICY_REASON_TO_SPEC_CODE` mapping. Drift in any of these changes what remote A2A callers see — wire-protocol-public. | Promoted to critical-controls. Gate count adjusted **27 → 28** (Sprint-6 grows from 21 → 28 across 7 modules: original quintet + R0's `a2a_version.py` + R3's `a2a_errors.py`). T11 halt-before-commit flipped (with explicit "Mixed: Yes for `a2a_errors.py` portion of the commit"); T15 file list, rationale table, per-module comment block, `_CRITICAL_FILES` snippet all add the `a2a_errors.py` row; AGENTS.md amendment text adds the new line; "sextet"/"6 modules" → "septet"/"7 modules" / "28" everywhere. |
+| **R3 P2 #3** — Plan said RefusalReason 26 → 32 with "6 new A2A reasons" but never listed them. Some prose used `a2a_agent_card_signature_invalid` while the policy literal is `agent_card_signature_invalid`. The reconciliation between AgentCardValidationReason / A2APolicyRefusalReason → registry RefusalReason was not explicit. | Added an explicit table at the `plugin_registry.py` file-structure entry listing the 6 registry-boundary `RefusalReason` literals (`a2a_manifest_jws_path_missing`, `a2a_agent_card_jws_blob_unreadable`, `a2a_agent_card_signature_invalid`, `a2a_agent_card_signer_not_allowlisted`, `a2a_agent_card_upstream_schema_invalid`, `a2a_agent_card_profile_invalid`) + their fire-step + their source `AgentCardValidationReason` value. Drift-detector test now asserts `_AGENT_CARD_VALIDATION_REASON_TO_REFUSAL` mapping is exhaustive (mirrors Sprint-5 `_AUTHZ_REASON_TO_REFUSAL` pattern). The two layers are explicitly separated: `RefusalReason` (a2a_-prefixed, registry-boundary) vs `A2APolicyRefusalReason` (unprefixed, type-namespaced, runtime). |
+| **R3 P3** — Wave-2 refusal reason name drift: canonical literal is `wave2_feature_refused` (in `A2APolicyRefusalReason`) but Decision Lock + test inventory + caller-URL threat model + WebhookRefused class all said `a2a_wave2_feature_refused`. | All 4 prose sites updated to `A2APolicyRefusalReason.wave2_feature_refused` (type-qualified to make the layer obvious). The Sprint-6 vocabulary is now: registry RefusalReason → `a2a_*` prefix; A2APolicyRefusalReason → unprefixed (type-namespaced via the literal name); AGENTS.md / pyproject / docs all use the correct vocabulary for the layer they reference. |
+| **R4 P2** — `_POLICY_REASON_TO_SPEC_CODE` import mismatch: T1 defined the mapping in `protocol/__init__.py`, but T11 imported it from `protocol.a2a_schema`. Implementing literally would have failed at import time or pushed the policy→spec-code mapping into the wrong wire-schema module. | Mapping moved to `a2a_errors.py` itself (where it's read by the error-response builder). T1's closed-enum scaffolding renamed the illustrative shape to `_POLICY_REASON_TO_SPEC_CODE_SHAPE` with an explicit comment that the canonical definition lives in `a2a_errors.py`. T11 import line dropped (replaced with a local definition that types the dict over the public Literal types from `cognic_agentos.protocol`). File-structure entry for `a2a_errors.py` updated to clarify that the two `Literal` types are re-exported through `protocol/__init__.py` but the mapping is **module-private** inside `a2a_errors.py`. Avoids the cyclic-import hazard the original draft introduced. |
+| **R4 P3 #1** — File-inventory line still said "all 6 Sprint-6 critical-controls modules" even after R3 P2 #2 promoted `a2a_errors.py` (making it 7 / septet). | Updated to "all 7 Sprint-6 critical-controls modules" with explicit reference to the R0 + R3 cumulative growth path (quintet → sextet → septet). |
+| **R4 P3 #2** — Architecture-sentinel prose called the A2A module set a "quintet" while enumerating 10 modules. Confused the architecture-sentinel surface (10 `protocol/a2a_*` files) with the critical-controls floor (7 modules). | Rewritten to name the **10-module A2A surface** explicitly + draw the explicit distinction from the **7-module critical-controls floor**. "Quintet" wording removed from the architecture-sentinel description. |
 
 If you find further issues, fix them inline. No need to re-review — just fix and move on. If you find a spec requirement with no task, add the task.
 
