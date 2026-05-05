@@ -201,6 +201,17 @@ disallow_untyped_defs = false
 module = ["hvac.*"]
 ignore_missing_imports = true
 
+# Sprint-6 T7 — google.protobuf ships no stubs in the dependency
+# tree we lock against (types-protobuf would need to be added to
+# dev-deps). The protobuf surface a2a_agent_cards uses is narrow
+# (json_format.Parse + DecodeError), and the strict-typing surface
+# we DO control treats the parsed AgentCard as the typed re-export
+# from cognic_agentos.protocol.a2a_schema. Ignoring missing imports
+# at the boundary keeps the strict-typing posture for our own code.
+[[tool.mypy.overrides]]
+module = ["google.protobuf.*"]
+ignore_missing_imports = true
+
 [tool.coverage.run]
 source = ["src/cognic_agentos"]
 branch = true
