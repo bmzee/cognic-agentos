@@ -124,7 +124,7 @@ When upstream A2A releases 1.1+, AgentOS evaluates feature additions, decides Wa
 
 ### Version negotiation (`A2A-Version` header)
 
-Per A2A 1.0 spec, every HTTP request carries an `A2A-Version` header. AgentOS handles all four cases the spec mandates:
+Per A2A 1.0 spec, every HTTP request carries an `A2A-Version` header. AgentOS handles all six cases via the closed-enum :class:`A2AVersionOutcome` matrix the spec mandates (T8's `protocol/a2a_version.py` is the runtime gate; the matrix below is the operator-facing summary):
 
 | Inbound header | Behaviour |
 |---|---|
