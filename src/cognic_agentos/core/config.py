@@ -764,6 +764,23 @@ class Settings(BaseSettings):
         ),
     )
 
+    a2a_artifact_inline_threshold_bytes: int = Field(
+        default=64 * 1024,
+        gt=0,
+        description=(
+            "Inline-vs-store threshold for A2A artifact bytes. Payloads "
+            "with ``len(bytes) <= threshold`` ride inline in the Task "
+            "envelope; larger payloads are persisted via "
+            "``ObjectStoreAdapter`` and returned as ``ArtifactRef``. "
+            "64 KiB is the A2A 1.0 spec recommendation; banks with "
+            "stricter inline-payload caps (e.g. for dual-boundary "
+            "review) override downward. Per Sprint-6 T11 R0 doctrine "
+            "#4 reviewer correction (production-grade rule per "
+            "AGENTS.md): deployment-tunable thresholds belong in "
+            "Settings, not as module-level constants."
+        ),
+    )
+
     a2a_pinned_spec_version: str = Field(
         default="1.0",
         pattern=r"^[0-9]+\.[0-9]+$",

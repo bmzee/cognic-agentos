@@ -848,6 +848,14 @@ class TestSprint6A2ASettings:
         s = build_settings_without_env_file()
         assert s.a2a_artifact_retention_seconds == 7 * 24 * 3600
 
+    def test_a2a_artifact_inline_threshold_bytes_default(self) -> None:
+        """Sprint-6 T11 R0 doctrine #4: deployment-tunable inline-vs-
+        store threshold (was a hardcoded 64 KiB constant in the plan
+        skeleton; promoted to Settings per AGENTS.md production-grade
+        rule)."""
+        s = build_settings_without_env_file()
+        assert s.a2a_artifact_inline_threshold_bytes == 64 * 1024
+
     def test_a2a_pinned_spec_version_default(self) -> None:
         s = build_settings_without_env_file()
         assert s.a2a_pinned_spec_version == "1.0"
@@ -913,6 +921,16 @@ class TestSprint6A2ASettings:
             Settings(  # type: ignore[call-arg]
                 _env_file=None,
                 a2a_artifact_retention_seconds=0,
+            )
+
+    def test_a2a_artifact_inline_threshold_must_be_positive(self) -> None:
+        """Fail-closed: 0-byte threshold would force EVERY artifact
+        through ObjectStore (forcing the inline path off entirely),
+        which is the wrong default for tiny payloads."""
+        with pytest.raises(ValidationError):
+            Settings(  # type: ignore[call-arg]
+                _env_file=None,
+                a2a_artifact_inline_threshold_bytes=0,
             )
 
     def test_a2a_pinned_spec_version_pattern_rejects_non_numeric(self) -> None:
