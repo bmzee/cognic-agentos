@@ -4,10 +4,10 @@
 
 **Goal:** Cognic AgentOS speaks A2A 1.0 inbound + outbound, **pinned to the released A2A 1.0 wire-spec with conformance fixtures** (per ADR-003 + `docs/A2A-CONFORMANCE.md`) — not a Cognic-bespoke shape. Wave 1 implements the mandatory feature set (Agent Cards, Tasks, Streaming, Artifacts, Capability negotiation, Cancellation, Error taxonomy, per-tenant token authz). Wave 2 features (push notifications, multi-modal, long-running task resumption, mTLS) are explicitly refused with closed-enum reasons. Sprint 6 also seeds the **UI event-stream contract** per ADR-020 — a typed event taxonomy + emit-hook layer that mirrors every audit event in-process, with the SSE endpoint deferred to Sprint 7B.
 
-**Architecture:** Ten new protocol modules under `src/cognic_agentos/protocol/a2a_*` plus one for `ui_events.py`. Inbound A2A traffic enters via a new `POST /api/v1/a2a` portal endpoint, routed by a single owner (`A2AEndpoint`) that holds the task-lifecycle state machine and emits chain-linked decision_history records. Outbound dispatch fetches the target's signed Agent Card from the spec well-known path, verifies the JWS against the Sprint-4 trust root, and dispatches to the URL inside the verified card's `supportedInterfaces[].url` — never to a caller-supplied URL. The A2A wire format is generated from upstream protobuf source (Sprint-6 T2 lock); a CI drift gate fails the build if the spec moves beyond the pinned version. The UI event-stream layer (T12) ships only the typed Pydantic schema + emit hooks at the harness boundary; SSE transport lands at Sprint 7B per ADR-020's phased schedule. Decision Lock: A2A 1.0 only (no 0.x compatibility, no 2.x speculative); Wave-2 features fail-closed with explicit error codes (no silent-accept).
+**Architecture:** Ten new protocol modules under `src/cognic_agentos/protocol/a2a_*` plus one for `ui_events.py`. Inbound A2A traffic enters via a new `POST /api/v1/a2a` portal endpoint, routed by a single owner (`A2AEndpoint`) that holds the task-lifecycle state machine and emits chain-linked decision_history records. Outbound dispatch fetches the target's signed Agent Card from the spec well-known path, verifies the JWS against the Sprint-4 trust root, and dispatches to the URL inside the verified card's `supportedInterfaces[].url` — never to a caller-supplied URL. The A2A wire format is the SDK's protobuf-generated message classes, re-exported under stable AgentOS names (Sprint-6 T2 SDK pin + T6 schema-module lock); a CI drift gate fetches the upstream protobuf source at the pinned `v1.0.0` git tag and SHA-256s it against a digest captured at T6 commit time, failing the build if upstream moves. The UI event-stream layer (T12) ships only the typed Pydantic schema + emit hooks at the harness boundary; SSE transport lands at Sprint 7B per ADR-020's phased schedule. Decision Lock: A2A 1.0 only (no 0.x compatibility, no 2.x speculative); Wave-2 features fail-closed with explicit error codes (no silent-accept).
 
 **Tech Stack:**
-- A2A wire format: official **`a2a-sdk == 1.0.2`** Python SDK pulled into the `adapters` extra group (kernel-image-free; default-adapters image carries it). Schema source: spec-published protobuf compiled to Pydantic via the SDK's generated bindings, with parity check against the spec's JSON-schema bindings.
+- A2A wire format: official **`a2a-sdk == 1.0.2`** Python SDK pulled into the `adapters` extra group (kernel-image-free; default-adapters image carries it). Schema source: the SDK ships **protobuf-generated message classes** (via `MessageMeta` from `google.protobuf`; **NOT Pydantic** — T6 R0 capture-time correction; the planning-stage prose called these "Pydantic types" but the actual SDK exports are protobuf `Message` subclasses). T6's `protocol/a2a_schema.py` re-exports the 7 Wave-1 types under stable AgentOS names via PEP 562 lazy `__getattr__`; the schema-drift CI gate (T6) pulls the upstream protobuf source at the pinned `v1.0.0` git tag and SHA-256s it against a captured digest. JSON-schema parity check + helper module are **deferred** until upstream publishes a canonical JSON-schema bundle (`specification/json/` is currently a README-only directory; T6 ships the protobuf-digest gate only — see Doctrine Decision C for the deferred-items breakdown).
 - HTTP layer: `httpx.AsyncClient` (admission-side authz client + outbound dispatch + Agent Card fetch). No new HTTP library introduced.
 - JWS verification: **`joserfc`** — new Sprint-6 pin (R3 P2 #1 corrected the original `python-jose` choice; `python-jose` is essentially abandoned (last release 2023) and explicitly does NOT support RFC 7797 unencoded-payload JWS — the `joserfc` author publishes a comparison table marking python-jose's RFC-7797 support as missing. Sprint-6 needs detached / RFC-7797 capability for Agent Card sidecar `.jws` verification, so `joserfc` is the correct choice). Added to the `adapters` extra at T2; reuses Sprint-4's pinned `cryptography>=45` backend transitively. Agent Card detached JWS verification at T7 consumes it.
 - Streaming: A2A 1.0 streaming-message envelope (chunked HTTP / spec wire format), distinct from the Sprint-7B portal SSE endpoint.
@@ -59,7 +59,7 @@ Sprint 6 creates 11 new protocol modules + 7 new portal endpoints + 1 new threat
 - `src/cognic_agentos/protocol/a2a_endpoint.py` — single owner of the inbound A2A receiver + task lifecycle state machine. **Critical-controls module.** Routes incoming calls by entry-point name via plugin registry; emits `a2a.task_received` + `a2a.task_lifecycle_*` audit + decision_history rows; refuses anonymous calls; refuses unknown targets with `a2a_unknown_target` (501 with ADR-002 reference per BUILD_PLAN exit criterion).
 - `src/cognic_agentos/protocol/a2a_authz.py` — per-tenant pinned-token authorization client. **Critical-controls module.** Validates `Authorization: Bearer <token>` against per-tenant Vault path; emits `a2a.token_rejected` audit row on refusal; closed-enum `A2AAuthzReason` (8 values: token-missing, token-malformed, tenant-mismatch, token-revoked, vault-read-failed, audience-mismatch, scope-insufficient, anonymous-refused).
 - `src/cognic_agentos/protocol/a2a_agent_cards.py` — Agent Card publisher (per-pack `/.well-known/agent-card.json` route) AND verifier (inbound at registration + outbound at dispatch). **Critical-controls module.** **Three-pass validation** (T1 R1 P2 reviewer correction added Pass 3 — earlier draft only had two passes which forced JWS failures into the schema bucket): Pass 1 upstream A2A 1.0 schema (via `a2a-sdk`) + Pass 2 AgentOS bank-grade profile (mandatory `provider`, `securitySchemes`, `securityRequirements`, `signatures`, ≥1 `supportedInterfaces` entry) + Pass 3 JWS verification against Sprint-4 `TrustGate` per-tenant trust root. Card content hash-chained into `decision_history` at registration. The 10-value `AgentCardValidationReason` literal covers the per-pass failure modes (1 + 6 + 3); T7 `_AGENT_CARD_VALIDATION_REASON_TO_REFUSAL` mapping collapses the 6 profile flavors into the single `a2a_agent_card_profile_invalid` registry refusal while keeping the JWS reasons distinct.
-- `src/cognic_agentos/protocol/a2a_schema.py` — pinned A2A 1.0 wire-format types. **Critical-controls module.** Re-exports `a2a-sdk` SDK Pydantic types under stable AgentOS names so downstream code keeps working when we bump the SDK pin. Includes `_PINNED_PROTOBUF_DIGEST` + `_PINNED_JSON_SCHEMA_DIGEST` constants the drift CI gate (T6) verifies against.
+- `src/cognic_agentos/protocol/a2a_schema.py` — pinned A2A 1.0 wire-format types. **Critical-controls module.** Re-exports the `a2a-sdk` SDK's **protobuf-generated message classes** (NOT Pydantic — T6 R0 capture-time correction; the SDK ships protobuf via `MessageMeta`) under stable AgentOS names via PEP 562 lazy `__getattr__` so the module imports cleanly without `a2a-sdk` installed (admission-side per Sprint-5 R3 P1; first attribute access fires `require_a2a()`). Includes `_PINNED_PROTOBUF_DIGEST` + `_UPSTREAM_PROTOBUF_URL` constants the drift CI gate (T6) verifies against. JSON-schema digest pin + parity check + the `protocol/a2a_schema_parity.py` helper module are **deferred** until upstream publishes a canonical JSON-schema bundle (`specification/json/` is currently a README-only directory) — see Doctrine Decision C.
 - `src/cognic_agentos/protocol/a2a_version.py` — `A2A-Version` HTTP header parser + responder per ADR-003 §"Version negotiation". Closed-enum `A2AVersionOutcome` — **6 values**: `accepted` (`1.0` matches pinned), `absent_rejected` (no header → rejected with `Supported-A2A-Versions: 1.0`; spec interprets absent as `0.3`), `legacy_rejected` (`0.x` → rejected), `higher_minor_degraded` (`1.<higher minor>` → processed with feature-degradation warning), `unsupported_rejected` (`2.x` or unknown → rejected with `Supported-A2A-Versions`), `malformed_rejected` (malformed header → spec-defined parse error).
 - `src/cognic_agentos/protocol/a2a_streaming.py` — A2A 1.0 streaming-message protocol support (chunked HTTP + spec wire envelopes). NOT portal/UI SSE (that's Sprint-7B per ADR-020). Emits `task.progress` / `task.completed` / `task.failed` envelopes per spec; chain-linked into decision_history via `_emit_streaming_evidence` helper mirroring Sprint-5's `_emit_call_evidence`.
 - `src/cognic_agentos/protocol/a2a_artifacts.py` — artifact reference generator. Large outputs (PDFs, evidence packs, JSON > 64 KiB) stored via Sprint-4's `LocalObjectStoreAdapter` and returned as `ArtifactRef(uri, sha256, size_bytes, mime_type)`; small payloads remain inline; per-tenant retention configurable via `Settings.a2a_artifact_retention_seconds`.
@@ -477,15 +477,15 @@ git commit -m "feat(sprint-6): add A2A endpoint settings + closed-enum vocab sca
 - [ ] **Step 1: Pin the SDK + record the pin decision**
 
 The pin point is **`a2a-sdk == 1.0.2`** (April 2026 release, Linux-Foundation-governed). The SDK ships:
-- Generated Pydantic types from the spec's protobuf source (canonical data model per ADR-003 + A2A-CONFORMANCE.md).
-- A `JsonSchemaBindings` namespace exposing the spec-published JSON-schema bindings used as the parity-check side of T6's drift gate.
+- **Protobuf-generated message classes** from the spec's protobuf source under `a2a.types` (canonical data model per ADR-003 + A2A-CONFORMANCE.md). T6 R0 capture-time correction: the planning-stage prose called these "Pydantic types" but the actual SDK exports are protobuf `Message` subclasses with `MessageMeta` metaclass; round-trip is `SerializeToString()` + `Class.FromString()`, not `model_validate()`.
 - A reference HTTP client + server skeletons (we DO NOT use the server skeleton — `protocol/a2a_endpoint.py` is our own implementation; we use the SDK only for wire-format types + version-header utilities).
+- Note on JSON-schema parity (T6 R0 capture-time correction): the planning-stage draft assumed the SDK exposes a `JsonSchemaBindings` namespace mirroring spec-published JSON-schema bindings, used as the parity-check side of T6's drift gate. Reality at T6 capture: the spec authors do NOT publish a canonical JSON-schema bundle (`specification/json/` is a README-only directory); T6 ships the protobuf-digest gate only and defers JSON-schema parity until upstream publishes a canonical bundle. See Doctrine Decision C for the deferred-items breakdown.
 
 We considered three alternatives:
 
 | Option | Decision | Reason |
 |---|---|---|
-| Vendor `.proto` + compile via `betterproto` | Rejected | Vendoring the protobuf source means we own a fork of the spec wire format. Drift between our compiled types and upstream becomes invisible until the JSON-schema parity test (T6) catches it; by then any change has already merged. The official SDK gives us upstream's Pydantic types directly + a parity check against the spec's JSON-schema. |
+| Vendor `.proto` + compile via `betterproto` | Rejected | Vendoring the protobuf source means we own a fork of the spec wire format. Drift between our compiled types and upstream becomes invisible until the schema-drift gate (T6) catches it; by then any change has already merged. The official SDK gives us upstream's protobuf-generated message classes directly (T6 R0 capture-time correction: SDK ships protobuf via `MessageMeta`, NOT Pydantic — see Tech Stack line 10), and the T6 drift gate SHA-256s the canonical upstream proto source against a captured digest on every CI run. JSON-schema parity is deferred until upstream publishes a canonical JSON-schema bundle (currently README-only; see Doctrine Decision C). |
 | Use a third-party `a2a-py` community shim | Rejected | Wave 1 community shims are not Linux-Foundation-governed; they may diverge from spec. The official `a2a-sdk` package matches the spec authors' own tests. |
 | **Pin official `a2a-sdk == 1.0.2`** | **Selected** | Spec authors' own types; LF governance; consumed by 150+ orgs in production per ADR-003. Schema-drift CI gate (T6) catches upstream drift. Sprint-7A `agentos validate` will use the same SDK. |
 
@@ -1268,9 +1268,11 @@ git commit -m "feat(sprint-6): A2A per-tenant pinned-token authz client (T5)"
 ## Task 6: `protocol/a2a_schema.py` + schema-drift CI gate
 
 **Files:**
-- Create: `src/cognic_agentos/protocol/a2a_schema.py` — re-exports the `a2a-sdk` SDK's Pydantic types under stable AgentOS names; includes `_PINNED_PROTOBUF_DIGEST` + `_PINNED_JSON_SCHEMA_DIGEST` constants the drift gate verifies.
-- Create: `tests/unit/protocol/test_a2a_schema.py` — schema-type contract (re-export shape — `AgentCard` / `Task` / `StreamResponse` / `Artifact` / `CancelTaskRequest` / `TaskArtifactUpdateEvent` / `TaskStatusUpdateEvent` — round-tripping through Pydantic; T2 R1 P2 corrected the type names from the planning-stage drafts which used `StreamingMessage` / `CancellationRequest` / `ErrorResponse` (those names don't exist in `a2a-sdk == 1.0.2`).
-- Create: `tests/unit/protocol/test_a2a_schema_drift.py` — env-gated CI drift gate. Pulls upstream A2A 1.0 protobuf source AND the spec-published JSON-schema bindings; diffs both against AgentOS's pinned digests. **Skipped by default** (no network in unit suite); fires on the dedicated CI lane below.
+- Create: `src/cognic_agentos/protocol/a2a_schema.py` — re-exports the `a2a-sdk` SDK's protobuf-generated message types (`a2a-sdk == 1.0.2` ships protobuf message classes via `MessageMeta`, NOT Pydantic — T6 R0 capture-time correction; the plan's earlier draft assumed Pydantic). Module-level **PEP 562 `__getattr__`** lazy-loads each of the 7 type names on first access so the module imports cleanly without `a2a-sdk` installed (admission-side per Sprint-5 R3 P1 doctrine — first attribute access fires `require_a2a()`); module-level constants `A2A_SPEC_VERSION` / `_PINNED_PROTOBUF_DIGEST` / `_UPSTREAM_PROTOBUF_URL` remain accessible without the SDK so the drift CI gate's metadata can be read in any image. Includes `_PINNED_PROTOBUF_DIGEST` (real digest captured at T6 commit time from the canonical upstream URL pinned to the **`v1.0.0` git tag**) which the drift gate verifies.
+- Create: `tests/unit/protocol/test_a2a_schema.py` — schema-type contract (re-export shape — `AgentCard` / `Task` / `StreamResponse` / `Artifact` / `CancelTaskRequest` / `TaskArtifactUpdateEvent` / `TaskStatusUpdateEvent`). Round-trip via **protobuf `SerializeToString()` + `Class.FromString()`** (T6 R0 capture-time correction; the plan's earlier draft said "Pydantic round-trip" but the SDK ships protobuf, not Pydantic). T2 R1 P2 + T6 verified the type names against `a2a-sdk == 1.0.2`'s `a2a.types` exports — pre-correction draft names (`StreamingMessage` / `CancellationRequest` / `ErrorResponse`) DO NOT exist in the SDK and are explicitly rejected by a drift-detector arm. Adds the lazy `__getattr__` resolution arms (parametrized over all 7 types, cache-on-first-access, AttributeError-on-typo) + the admission-side import invariant arm (constants accessible without lazy SDK resolution).
+- Create: `tests/unit/protocol/test_a2a_schema_drift.py` — env-gated CI drift gate. Pulls the upstream A2A 1.0 **protobuf source** at the pinned `v1.0.0` git tag and SHA-256s it against `_PINNED_PROTOBUF_DIGEST`. **Skipped by default** (no network in unit suite); fires on the dedicated CI lane below. **T6 R0 capture-time correction:** the plan's earlier draft assumed the spec authors publish BOTH a canonical protobuf bundle AND a canonical JSON-schema binding bundle (with a parity check between them). Reality at T6 capture: the spec authors publish only the protobuf source at `raw.githubusercontent.com/a2aproject/A2A/v1.0.0/specification/a2a.proto`; `specification/json/` contains only a README pointing back at the protobuf source. T6 ships the protobuf-digest gate only (1 test arm, not 3); the JSON-schema artifact + parity check + the `protocol/a2a_schema_parity.py` helper module land when (or if) the spec authors publish a canonical JSON-schema bundle. The capture-time divergence is documented inline in both the schema module's docstring and the drift-gate's docstring so future maintainers see the rationale at the source.
+- **Modify:** `pyproject.toml` — register the `a2a_upstream` pytest marker under `[tool.pytest.ini_options].markers` so the env-gated drift gate runs without `PytestUnknownMarkWarning`.
+- **Modify:** `tests/unit/architecture/test_no_env_specific_values_in_source.py` — extend `_SPEC_URI_PREFIXES` with `https://raw.githubusercontent.com/a2aproject/A2A/` (mirrors the SLSA / in-toto / SPDX / CycloneDX exemptions: a fixed external-standards URL, not an operational endpoint). Widen `_module_level_uppercase_spec_constants` to recognise both `ast.Assign` AND `ast.AnnAssign` so annotated module constants like `_UPSTREAM_PROTOBUF_URL: str = "https://..."` qualify for the spec-prefix exemption (annotation type doesn't change semantic exemption).
 - **Modify:** `.github/workflows/python.yml` — **R0 P2 / R2 P2 #5 reviewer corrections (was missing from the original T6 file list; R2 corrected the `needs:` target + the setup-step shape).** Add a new dedicated CI lane named `a2a-spec drift detection`. The lane is structured as a `needs: ci`-gated downstream job (matching the actual workflow's `ci` job id, NOT a non-existent `lint-test` id) and inlines the same uv + setup-python chain the `ci` job uses (the workflow does not have a `./.github/actions/setup-python` composite action — verified at R2-correction time):
   ```yaml
   a2a-spec-drift:
@@ -1306,6 +1308,16 @@ git commit -m "feat(sprint-6): A2A per-tenant pinned-token authz client (T5)"
 
 - [ ] **Step 1: Write `protocol/a2a_schema.py`**
 
+**T6 R0 capture-time correction:** the planning-stage skeleton below
+described both protobuf + JSON-schema bundle pinning (with a parity
+helper). Reality at T6 capture: upstream publishes only the protobuf
+source at a canonical URL; the `specification/json/` directory holds
+only a README. The actual shipped shape is **protobuf-only** with a
+PEP 562 `__getattr__` lazy SDK loader. Step 1-3 below show what
+actually shipped; the obsolete JSON-schema + parity-helper skeleton
+is preserved at the bottom of T6 (under "Superseded planning-stage
+skeleton") for changelog continuity.
+
 ```python
 """protocol/a2a_schema.py — pinned A2A 1.0 wire-format types.
 
@@ -1314,102 +1326,109 @@ Critical-controls module per AGENTS.md (Sprint-6 amendment, "Protocol
 the schema-drift CI gate (test_a2a_schema_drift.py) catches upstream
 movement before it reaches us.
 
-Re-exports the ``a2a-sdk`` SDK's Pydantic types under stable
-AgentOS names so downstream code keeps working when we bump the SDK
-pin. The pinned digests below are checksum-of-the-spec-source-bytes,
-captured at the time of the SDK pin (T2). The drift gate compares
-upstream's current digest against these constants; on mismatch, the
-build fails and a deliberate review + version bump is required.
+Re-exports the ``a2a-sdk`` SDK's protobuf-generated message types
+(NOT Pydantic — the SDK ships protobuf-generated classes via
+``MessageMeta``; T6 R0 capture-time correction). Module-level PEP
+562 ``__getattr__`` lazy-loads each of the 7 type names on first
+access so the module imports cleanly without ``a2a-sdk`` installed
+(admission-side per Sprint-5 R3 P1 doctrine — first attribute
+access fires ``require_a2a()``).
 
-Pinned A2A spec version: ``1.0`` (April 2026 release, Linux-Foundation
-governance). Bumping the pinned version is a deliberate reviewed
-change (per Sprint-6 Decision Lock #1).
+Pinned A2A spec version: ``1.0``. The pinned digest below is the
+SHA-256 of the upstream protobuf source at the v1.0.0 git tag,
+captured at T6 commit time. The drift gate compares upstream's
+current digest against this constant; on mismatch, the build fails
+and a deliberate review + version bump is required (per Sprint-6
+Decision Lock #1).
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+
+from cognic_agentos.protocol import require_a2a
+
+A2A_SPEC_VERSION: str = "1.0"
+
+#: SHA-256 of the canonical upstream protobuf source at the pinned
+#: v1.0.0 tag. Captured at T6 commit time from
+#: raw.githubusercontent.com/a2aproject/A2A/v1.0.0/specification/a2a.proto.
+_PINNED_PROTOBUF_DIGEST: str = "<captured at T6 commit time>"
+
+#: Pin to v1.0.0 git tag (NOT main) so spec-authors' WIP on main
+#: doesn't trip the gate; only a deliberate v-tag update OR our
+#: own decision to bump the pinned tag trips the gate.
+_UPSTREAM_PROTOBUF_URL: str = (
+    "https://raw.githubusercontent.com/a2aproject/A2A/"
+    "v1.0.0/specification/a2a.proto"
+)
+
+_REEXPORTED_TYPE_NAMES: frozenset[str] = frozenset({
+    "AgentCard", "Artifact", "CancelTaskRequest", "StreamResponse",
+    "Task", "TaskArtifactUpdateEvent", "TaskStatusUpdateEvent",
+})
+
+__all__ = (
+    "A2A_SPEC_VERSION",
+    "AgentCard", "Artifact", "CancelTaskRequest", "StreamResponse",
+    "Task", "TaskArtifactUpdateEvent", "TaskStatusUpdateEvent",
+    "get_pinned_spec_version",
+)
 
 if TYPE_CHECKING:
-    # T2 R1 P2 reviewer correction: actual a2a-sdk==1.0.2 exports are
-    # ``StreamResponse`` (NOT ``StreamingMessage``) and
-    # ``CancelTaskRequest`` (NOT ``CancellationRequest``); the SDK
-    # ships typed error classes per spec error code (e.g.,
-    # ``InvalidParamsError``, ``InvalidRequestError``,
-    # ``TaskNotFoundError``) rather than a single ``ErrorResponse``
-    # type. The schema module re-exports the actual SDK names; if a
-    # future SDK bump renames any of these, the schema-drift CI gate
-    # at T6 catches it.
+    # T2 R1 P2 verified the actual SDK names — StreamResponse (NOT
+    # StreamingMessage), CancelTaskRequest (NOT CancellationRequest);
+    # SDK ships per-error-code typed classes (NOT a single
+    # ErrorResponse). At runtime, names resolve via __getattr__ on
+    # first access — letting the module import cleanly without
+    # a2a-sdk installed (admission-side per Sprint-5 R3 P1).
     from a2a.types import (
-        AgentCard,
-        Artifact,
-        CancelTaskRequest,
-        StreamResponse,
-        Task,
-        TaskArtifactUpdateEvent,
-        TaskStatusUpdateEvent,
+        AgentCard, Artifact, CancelTaskRequest, StreamResponse,
+        Task, TaskArtifactUpdateEvent, TaskStatusUpdateEvent,
     )
-
-# Lazy import — admission-side modules (a2a_authz, etc.) construct
-# without the SDK; this import only fires when the registry actually
-# calls into a2a_schema for wire-format work.
-def _types():
-    from a2a.types import (
-        AgentCard,
-        Artifact,
-        CancelTaskRequest,
-        StreamResponse,
-        Task,
-        TaskArtifactUpdateEvent,
-        TaskStatusUpdateEvent,
-    )
-    return (
-        AgentCard,
-        Task,
-        StreamResponse,
-        Artifact,
-        CancelTaskRequest,
-        TaskArtifactUpdateEvent,
-        TaskStatusUpdateEvent,
-    )
-
-
-#: SHA-256 of the upstream A2A 1.0 protobuf source bundle (the
-#: a2a.proto + agent_card.proto + task.proto file set distributed
-#: by the spec authors). Captured at SDK pin time (T2).
-_PINNED_PROTOBUF_DIGEST: str = "0" * 64  # placeholder — populated at T2 commit time
-
-#: SHA-256 of the upstream A2A 1.0 JSON-schema binding bundle.
-_PINNED_JSON_SCHEMA_DIGEST: str = "0" * 64  # placeholder — populated at T2 commit time
-
-#: Upstream URL where the spec authors publish the canonical
-#: protobuf + JSON-schema bundles. Pinned in source so the drift
-#: gate has an unambiguous fetch target.
-_UPSTREAM_PROTOBUF_URL: str = "https://a2a-protocol.org/spec/1.0/a2a.proto"
-_UPSTREAM_JSON_SCHEMA_URL: str = "https://a2a-protocol.org/spec/1.0/json-schema-bindings.json"
 
 
 def get_pinned_spec_version() -> str:
-    """The pinned A2A spec version. Single source of truth for any
-    code that needs to assert spec compliance."""
-    return "1.0"
+    return A2A_SPEC_VERSION
+
+
+def __getattr__(name: str) -> Any:
+    """Lazy attribute access for the re-exported SDK types.
+
+    PEP 562 module-level __getattr__ fires on attribute access for
+    names not in the module dict. ``import a2a_schema`` imports
+    cleanly without the SDK; ``from a2a_schema import AgentCard``
+    fires require_a2a() (raising A2ANotAvailableError if SDK is
+    missing) and returns the SDK class. First access caches the
+    resolved name into globals() so subsequent accesses skip
+    __getattr__.
+    """
+    if name not in _REEXPORTED_TYPE_NAMES:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    require_a2a()
+    from a2a import types as _a2a_types
+    resolved = getattr(_a2a_types, name)
+    globals()[name] = resolved
+    return resolved
 ```
 
-- [ ] **Step 2: Write the schema-drift CI gate**
+- [ ] **Step 2: Write the schema-drift CI gate (protobuf-only)**
 
 ```python
-"""Schema-drift CI gate. Pulls upstream A2A 1.0 protobuf source AND
-the spec-published JSON-schema bindings; diffs both against the
-pinned digests in protocol/a2a_schema.py.
+"""Schema-drift CI gate. Pulls the upstream A2A 1.0 protobuf source
+at the pinned v1.0.0 tag and SHA-256s it against
+_PINNED_PROTOBUF_DIGEST in protocol/a2a_schema.py.
 
-Env-gated per Sprint-6 Doctrine Decision C: the test only runs when
-``COGNIC_RUN_A2A_UPSTREAM=1`` is set. CI sets it; local dev skips
-by default (saves network round-trip on every test run). Mirrors
-Sprint-4 ``cosign_real`` env-gate pattern.
+Env-gated per Sprint-6 Doctrine Decision C: only runs when
+COGNIC_RUN_A2A_UPSTREAM=1 is set. CI sets it on the dedicated
+a2a-spec-drift lane; local dev skips by default. Mirrors the
+Sprint-4 cosign_real env-gate pattern.
 
-If the upstream digest moves beyond the pinned digest, this test
-fails and a deliberate review + version bump is required (per
-Sprint-6 Decision Lock #1). Silent upstream upgrades are forbidden.
+T6 R0 capture-time correction: upstream publishes only the
+protobuf source at a canonical URL; the planning-stage assumption
+of a parallel JSON-schema bundle does not hold. The JSON-schema
+artifact + parity check + the helper module land when (or if) the
+spec authors publish a canonical JSON-schema bundle.
 """
 
 from __future__ import annotations
@@ -1421,122 +1440,87 @@ import httpx
 import pytest
 
 from cognic_agentos.protocol.a2a_schema import (
-    _PINNED_JSON_SCHEMA_DIGEST,
     _PINNED_PROTOBUF_DIGEST,
-    _UPSTREAM_JSON_SCHEMA_URL,
     _UPSTREAM_PROTOBUF_URL,
 )
 
-pytestmark = pytest.mark.skipif(
-    os.environ.get("COGNIC_RUN_A2A_UPSTREAM") != "1",
-    reason=(
-        "live A2A upstream schema check; opt in via "
-        "COGNIC_RUN_A2A_UPSTREAM=1 (CI sets this; local dev skips "
-        "to save network round-trip on every test run)"
+pytestmark = [
+    pytest.mark.skipif(
+        os.environ.get("COGNIC_RUN_A2A_UPSTREAM") != "1",
+        reason=(
+            "live A2A upstream schema check; opt in via "
+            "COGNIC_RUN_A2A_UPSTREAM=1"
+        ),
     ),
-)
+    pytest.mark.a2a_upstream,
+]
 
 
-@pytest.mark.a2a_upstream
 async def test_pinned_protobuf_digest_matches_upstream() -> None:
-    """The pinned protobuf-bundle digest in
-    ``protocol/a2a_schema.py`` MUST match the SHA-256 of the bytes
-    upstream is publishing right now. If upstream moves, the build
-    fails and a Sprint-N reviewer + version-bump pass is required.
-    """
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.get(_UPSTREAM_PROTOBUF_URL)
         resp.raise_for_status()
         upstream_digest = hashlib.sha256(resp.content).hexdigest()
 
     assert upstream_digest == _PINNED_PROTOBUF_DIGEST, (
         f"A2A 1.0 protobuf source has drifted from pin.\n"
-        f"  Pinned: {_PINNED_PROTOBUF_DIGEST}\n"
+        f"  Pinned:   {_PINNED_PROTOBUF_DIGEST}\n"
         f"  Upstream: {upstream_digest}\n"
-        f"  URL: {_UPSTREAM_PROTOBUF_URL}\n"
+        f"  URL:      {_UPSTREAM_PROTOBUF_URL}\n"
         f"\n"
-        f"Action: review the upstream change; if accepted, bump the pin "
-        f"in protocol/a2a_schema.py with an explicit changelog entry. "
-        f"Silent upgrades are forbidden per Sprint-6 Decision Lock #1."
-    )
-
-
-@pytest.mark.a2a_upstream
-async def test_pinned_json_schema_digest_matches_upstream() -> None:
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(_UPSTREAM_JSON_SCHEMA_URL)
-        resp.raise_for_status()
-        upstream_digest = hashlib.sha256(resp.content).hexdigest()
-
-    assert upstream_digest == _PINNED_JSON_SCHEMA_DIGEST, (
-        f"A2A 1.0 JSON-schema bindings have drifted from pin.\n"
-        f"  Pinned: {_PINNED_JSON_SCHEMA_DIGEST}\n"
-        f"  Upstream: {upstream_digest}\n"
-        f"  URL: {_UPSTREAM_JSON_SCHEMA_URL}\n"
-    )
-
-
-@pytest.mark.a2a_upstream
-async def test_protobuf_and_json_schema_bindings_have_parity() -> None:
-    """Catches upstream drift the spec authors haven't yet
-    republished: if the protobuf source has moved but the JSON-schema
-    bundle hasn't (or vice versa), our pinned types may be in
-    inconsistent state.
-    """
-    async with httpx.AsyncClient(timeout=30) as client:
-        proto_resp = await client.get(_UPSTREAM_PROTOBUF_URL)
-        json_resp = await client.get(_UPSTREAM_JSON_SCHEMA_URL)
-        proto_resp.raise_for_status()
-        json_resp.raise_for_status()
-
-    # The parity check is structural: every protobuf message type
-    # MUST have a corresponding JSON-schema definition. Implementation
-    # detail of "structural" is owned by the SDK + this test's helper.
-    from cognic_agentos.protocol.a2a_schema_parity import (
-        check_protobuf_json_schema_parity,
-    )
-    check_protobuf_json_schema_parity(
-        protobuf_bytes=proto_resp.content,
-        json_schema_bytes=json_resp.content,
+        f"Action: review the upstream change against the Wave-1/2/3\n"
+        f"matrix in docs/A2A-CONFORMANCE.md. If accepted, bump the\n"
+        f"pin in protocol/a2a_schema.py with an explicit changelog\n"
+        f"entry. Silent upgrades are forbidden per Sprint-6 Decision\n"
+        f"Lock #1."
     )
 ```
 
-- [ ] **Step 3: Implement the parity helper module**
+- [ ] **Step 3: (deferred — JSON-schema parity helper)**
 
-```python
-"""protocol/a2a_schema_parity.py — protobuf vs JSON-schema parity.
-
-Helper module for test_a2a_schema_drift.py. Walks both bundles and
-asserts every protobuf message type has a matching JSON-schema
-definition + every JSON-schema definition has a matching protobuf
-message type. Catches the case where upstream's two bindings have
-diverged but the spec authors haven't yet republished.
-"""
-# ... implementation walks both and asserts parity ...
-```
+T6 R0 capture-time correction: this step previously implemented
+`protocol/a2a_schema_parity.py`. With the JSON-schema bundle absent
+upstream, the parity check has no second artifact to compare
+against; the helper module is NOT shipped at T6. When (or if) the
+spec authors publish a canonical JSON-schema bundle, the parity
+helper + the JSON-schema digest pin + the parity test arm land
+together as a Sprint-N reviewer-pause amendment. The deferred
+contract is documented inline in `protocol/a2a_schema.py`'s docstring
+and in `tests/unit/protocol/test_a2a_schema_drift.py`'s docstring.
 
 - [ ] **Step 4: Run drift gate locally without env-var; expect SKIP**
 
 ```bash
 uv run pytest tests/unit/protocol/test_a2a_schema_drift.py -v
 ```
-Expected: skipped (3 tests).
+Expected: 1 test skipped (the protobuf-digest gate).
 
 - [ ] **Step 5: Run drift gate with env-var; expect PASS**
 
 ```bash
 COGNIC_RUN_A2A_UPSTREAM=1 uv run pytest tests/unit/protocol/test_a2a_schema_drift.py -v
 ```
-Expected: 3 passed (assuming the digests have been captured at SDK pin time).
+Expected: 1 passed (the protobuf-digest gate; T6 R0 capture-time
+shipped 1 test arm, not 3).
 
 - [ ] **Step 6: Halt-before-commit + commit**
 
+T6 R0 capture-time correction: the parity-helper module
+`src/cognic_agentos/protocol/a2a_schema_parity.py` is NOT shipped at
+T6 — the spec authors publish only the protobuf source; there is
+no JSON-schema bundle to check parity against. The git-add block
+drops that path. CI workflow + pyproject + architecture-test
+exemption modifications are also part of T6's commit per the
+expanded Files list above.
+
 ```bash
 git add src/cognic_agentos/protocol/a2a_schema.py \
-        src/cognic_agentos/protocol/a2a_schema_parity.py \
         tests/unit/protocol/test_a2a_schema.py \
-        tests/unit/protocol/test_a2a_schema_drift.py
-git commit -m "feat(sprint-6): A2A 1.0 wire-format types + drift CI gate (T6)"
+        tests/unit/protocol/test_a2a_schema_drift.py \
+        pyproject.toml \
+        .github/workflows/python.yml \
+        tests/unit/architecture/test_no_env_specific_values_in_source.py
+git commit -m "feat(sprint-6): A2A 1.0 wire-format types + protobuf drift CI gate (T6)"
 ```
 
 ---
@@ -1555,7 +1539,7 @@ git commit -m "feat(sprint-6): A2A 1.0 wire-format types + drift CI gate (T6)"
 **Halt-before-commit:** Yes (TWO critical-controls modules touched: `a2a_agent_cards.py` AND `trust_gate.py`).
 
 The three-pass validation per A2A-CONFORMANCE.md (T1 R1 P2 added Pass 3):
-- **Pass 1 (upstream A2A 1.0 schema)** — card must be a legitimate A2A 1.0 card (validates against the SDK's `AgentCard` Pydantic type derived from upstream protobuf). A card with top-level `url` (forbidden by spec — URLs live in `supportedInterfaces[].url`) → fail. A card with Cognic-specific identity fields (`agent_id`, `oasf_capability_set`, etc.) at the top level → fail (those live in pack manifest's `[tool.cognic.identity]` block).
+- **Pass 1 (upstream A2A 1.0 schema)** — card must be a legitimate A2A 1.0 card (parses against the SDK's `AgentCard` protobuf message class via `google.protobuf.json_format.Parse`; T6 R0 capture-time correction: SDK ships protobuf, NOT Pydantic). A card with top-level `url` (forbidden by spec — URLs live in `supportedInterfaces[].url`) → fail. A card with Cognic-specific identity fields (`agent_id`, `oasf_capability_set`, etc.) at the top level → fail (those live in pack manifest's `[tool.cognic.identity]` block).
 - **Pass 2 (AgentOS bank-grade profile)** — spec-optional fields AgentOS makes mandatory: `provider`, `securitySchemes`, `securityRequirements`, `signatures`, ≥1 `supportedInterfaces` entry. Failures return `agentos_profile_violation` with the specific mandatory field listed (distinct from upstream-schema failures so authors can diagnose without confusing the two layers).
 
 JWS verification:
@@ -1740,27 +1724,73 @@ class A2AAgentCardVerifier:
             )
 
         # Pass 1: upstream A2A 1.0 schema validation (delegates to
-        # a2a-sdk Python package).
-        from a2a.types import AgentCard
+        # a2a-sdk Python package). T6 R0 capture-time correction:
+        # the SDK ships protobuf-generated message classes (NOT
+        # Pydantic), so the parse path uses the protobuf JSON-format
+        # round-trip via ``google.protobuf.json_format.Parse``. Card
+        # bytes arrive as the spec-canonical JSON serialisation
+        # (``/.well-known/agent-card.json`` is a JSON document); the
+        # protobuf JSON-format parser projects the JSON onto the
+        # protobuf message fields. Re-export comes via the lazy
+        # loader in ``protocol/a2a_schema`` so the verifier module
+        # stays admission-side (no module-level SDK import).
+        #
+        # **Order matters** (T7 R4 P2 reviewer correction): the
+        # forbidden-top-level-``url`` check MUST run BEFORE
+        # ``json_format.Parse``. Default protobuf JSON parse rejects
+        # unknown fields with ``ParseError`` — a card carrying a
+        # top-level ``url`` would surface as
+        # ``agent_card_upstream_schema_invalid`` and the dedicated
+        # ``agent_card_profile_top_level_url_forbidden`` reason would
+        # be unreachable. Pre-parse JSON inspection routes the
+        # spec-mandated forbidden-field violation to its own closed-
+        # enum reason as the AgentCardValidationReason inventory
+        # requires.
+        import json as _json
+
+        from google.protobuf import json_format
+        from google.protobuf.message import DecodeError
+
+        from cognic_agentos.protocol.a2a_schema import AgentCard
+
+        # 1a. Decode bytes → JSON. Malformed JSON is upstream-schema-
+        # invalid (the document isn't a valid JSON object at all).
         try:
-            card = AgentCard.model_validate_json(card_bytes)
-        except Exception as exc:
+            raw_card = _json.loads(
+                card_bytes if isinstance(card_bytes, str) else card_bytes.decode()
+            )
+        except (UnicodeDecodeError, _json.JSONDecodeError) as exc:
             return AgentCardValidation(
                 ok=False,
                 reason="agent_card_upstream_schema_invalid",
-                payload={
-                    "error_type": type(exc).__name__,
-                },
+                payload={"error_type": type(exc).__name__},
             )
 
-        # Spec-violation: top-level url MUST NOT be present.
-        # The SDK's Pydantic type rejects it but defensive double-check.
-        card_dict = card.model_dump()
-        if "url" in card_dict:
+        # 1b. Spec-violation: top-level ``url`` MUST NOT be present
+        # (per ADR-003 + A2A-CONFORMANCE.md §"Card shape" — endpoint
+        # URLs live in ``supportedInterfaces[].url``, NOT at the
+        # AgentCard top level). Run BEFORE protobuf parse so the
+        # dedicated profile-violation reason is reachable.
+        if isinstance(raw_card, dict) and "url" in raw_card:
             return AgentCardValidation(
                 ok=False,
                 reason="agent_card_profile_top_level_url_forbidden",
                 payload={"forbidden_field": "url"},
+            )
+
+        # 1c. Protobuf parse. Any field shape that fails the
+        # generated AgentCard message's field validation
+        # (type-mismatch, unknown field other than the spec-forbidden
+        # ones already filtered above, missing required field per
+        # the .proto schema) surfaces as
+        # ``agent_card_upstream_schema_invalid``.
+        try:
+            card = json_format.Parse(card_bytes, AgentCard())
+        except (json_format.ParseError, DecodeError, ValueError) as exc:
+            return AgentCardValidation(
+                ok=False,
+                reason="agent_card_upstream_schema_invalid",
+                payload={"error_type": type(exc).__name__},
             )
 
         # Pass 2: AgentOS bank-grade profile.
@@ -1807,7 +1837,7 @@ class A2AAgentCardVerifier:
         """Outbound dispatch path. Fetches the target's
         ``/.well-known/agent-card.json`` + detached JWS file from
         the same origin; verifies via :meth:`validate_card`; returns
-        the verified ``AgentCard`` Pydantic instance whose
+        the verified ``AgentCard`` protobuf message instance whose
         ``supported_interfaces[].url`` is the SAFE source of the
         outbound dispatch URL.
 
@@ -1840,8 +1870,17 @@ class A2AAgentCardVerifier:
                 f"agent_card_signature_invalid: {validation.reason}",
             )
 
-        from a2a.types import AgentCard
-        return AgentCard.model_validate_json(card_resp.content)
+        # T6 R0 capture-time correction: SDK ships protobuf, NOT
+        # Pydantic. Parse the card-bytes JSON via google.protobuf
+        # json_format into a fresh AgentCard message instance. The
+        # validation pass above has already confirmed the bytes
+        # parse cleanly + meet the AgentOS profile + JWS-verify; this
+        # second parse is on the verified bytes for return.
+        from google.protobuf import json_format
+
+        from cognic_agentos.protocol.a2a_schema import AgentCard
+
+        return json_format.Parse(card_resp.content, AgentCard())
 ```
 
 - [ ] **Step 8: Add `verify_jws_blob` + `TrustGateSignerNotAllowlistedError` to Sprint-4 trust gate (additive, halt-before-commit)**
@@ -3436,28 +3475,39 @@ The test ships with three self-tests (top-level scan, nested-submodule scan, ren
 
 **Decision:** `tests/unit/protocol/test_a2a_schema_drift.py` (T6) is **env-gated** via `@pytest.mark.a2a_upstream` + `COGNIC_RUN_A2A_UPSTREAM=1`. Mirrors the Sprint-4 `cosign_real` pattern (`@pytest.mark.cosign_real` + `COGNIC_RUN_COSIGN_REAL=1`). CI sets the env-var on the dedicated lane; local dev skips the test by default so a developer without network access still runs the full unit suite green.
 
-**Why env-gate (not always-run):** the test pulls upstream A2A 1.0 protobuf source AND the spec's published JSON-schema binding from the spec authors' canonical URLs (pinned at T2 alongside the SDK version). Network-dependent tests in the unit suite would degrade local-dev iteration speed; gating preserves the "unit suite is offline-runnable" contract Sprint-1B established. The drift-gate's purpose is CI-side regression detection, not per-developer iteration.
+**Why env-gate (not always-run):** the test pulls the upstream A2A 1.0 protobuf source from the spec authors' canonical URL (pinned to the v1.0.0 git tag, captured at T6 commit time alongside the SDK lock). Network-dependent tests in the unit suite would degrade local-dev iteration speed; gating preserves the "unit suite is offline-runnable" contract Sprint-1B established. The drift-gate's purpose is CI-side regression detection, not per-developer iteration.
 
-**Pinned upstream URLs (captured at T2 commit time):**
+**T6 R0 capture-time correction (protobuf-only):** the planning-stage draft of this section described three checks (upstream protobuf digest, upstream JSON-schema digest, protobuf-vs-JSON-schema parity) on the assumption that the spec authors publish both a canonical protobuf source AND a canonical JSON-schema binding. Reality at T6 capture: upstream publishes only `specification/a2a.proto` at a canonical URL; `specification/json/` contains only a README pointing back at the protobuf source. The shipped gate is **a single protobuf-digest check**; the JSON-schema digest pin + parity check + the `protocol/a2a_schema_parity.py` helper module are deferred until (or if) the spec authors publish a canonical JSON-schema bundle.
+
+**Pinned upstream URL + digest (captured at T6 commit time):**
 
 ```python
-# Sprint-6 T6 — pinned at SDK lock time. Implementation engineer
-# fills in the exact spec-published URLs at PR-author time.
-_UPSTREAM_PROTOBUF_URL = "https://a2a-protocol.org/dev/spec/v1.0/a2a.proto"  # PIN AT T2
-_UPSTREAM_JSON_SCHEMA_URL = "https://a2a-protocol.org/dev/spec/v1.0/a2a.json"  # PIN AT T2
-_PINNED_PROTOBUF_DIGEST = "sha256:..."  # PIN AT T2 — captured digest at lock time
-_PINNED_JSON_SCHEMA_DIGEST = "sha256:..."  # PIN AT T2
+# Sprint-6 T6 — captured digest at SDK lock time, pinned to the
+# v1.0.0 git tag (NOT main) so spec-authors' WIP on main doesn't
+# trip the gate; only a deliberate v-tag update OR our own decision
+# to bump the pinned tag trips it.
+_UPSTREAM_PROTOBUF_URL = (
+    "https://raw.githubusercontent.com/a2aproject/A2A/"
+    "v1.0.0/specification/a2a.proto"
+)
+_PINNED_PROTOBUF_DIGEST = "<captured at T6 commit time>"
 ```
 
-**Drift detection logic (three checks, each fail-closed):**
+**Drift detection logic (one check, fail-closed):**
 
-1. **Upstream-vs-pinned digest check.** Fetch the upstream URL; sha256 the bytes; compare to `_PINNED_PROTOBUF_DIGEST` / `_PINNED_JSON_SCHEMA_DIGEST`. Fail-closed if either has moved beyond our pinned version. Forces a deliberate review + version bump.
-2. **Spec-published-binding parity check.** Fetch both the upstream protobuf source AND the upstream JSON-schema binding; verify that the JSON-schema binding's field set is a parity match for the protobuf source's field set. Fail-closed if the spec-published JSON-schema binding has diverged from protobuf — catches upstream drift the spec authors haven't yet republished.
-3. **Pinned-vs-installed parity check.** The installed `a2a-sdk == 1.0.2` SDK's generated Pydantic types must match the pinned protobuf source's field set. Fail-closed otherwise — catches the rare case where the SDK's release artefact lags the spec's release artefact.
+1. **Upstream-vs-pinned digest check.** Fetch the upstream URL; sha256 the bytes; compare to `_PINNED_PROTOBUF_DIGEST`. Fail-closed if upstream has moved beyond our pinned version. Forces a deliberate review against the Wave-1/2/3 conformance matrix in `docs/A2A-CONFORMANCE.md` + a version bump.
 
-**CI lane configuration:** add `a2a-spec drift detection` to `.github/workflows/python.yml` as a separate lane with `env: COGNIC_RUN_A2A_UPSTREAM: 1`. Runs on push + PR. Fails the build on any of the three checks above. Local-dev runs of the full unit suite skip the lane silently with the standard env-gate skip message (parallel to the Sprint-4 cosign-real lane's behaviour).
+**Deferred (lands when upstream publishes a canonical JSON-schema bundle):**
 
-**Fault-tolerance note:** the test's network round-trip uses `httpx.get` with a 30s timeout + explicit retry budget (one retry on transient failure). A persistent upstream outage (spec authors' site down) results in a CI lane failure that the operator triages as "upstream unreachable" rather than as "drift detected" — distinguished by the explicit `pytest.skip` raise on `httpx.ConnectError` in the test body, vs the `assert digest == pinned` failure on actual drift. Both lanes fail the build but the diagnostic is unambiguous.
+- JSON-schema digest pin + drift check.
+- Protobuf-vs-JSON-schema parity check (catches upstream drift where the spec authors haven't republished one binding).
+- `protocol/a2a_schema_parity.py` helper module that walks both bundles structurally.
+
+These items remain plan-of-record commitments — the deferred contract is documented inline in `protocol/a2a_schema.py`'s docstring + `tests/unit/protocol/test_a2a_schema_drift.py`'s docstring so future maintainers see the rationale at the source.
+
+**CI lane configuration:** add `a2a-spec drift detection` to `.github/workflows/python.yml` as a separate lane with `env: COGNIC_RUN_A2A_UPSTREAM: 1`. Runs on push + PR. Fails the build on the protobuf-digest check above. Local-dev runs of the full unit suite skip the lane silently with the standard env-gate skip message (parallel to the Sprint-4 cosign-real lane's behaviour).
+
+**Fault-tolerance note:** the test's network round-trip uses `httpx.AsyncClient` with a 30s timeout. A persistent upstream outage (GitHub down, DNS failure) raises an `httpx` transport error from `resp.raise_for_status()` rather than the digest-mismatch assertion — distinguishing "upstream unreachable" from "drift detected" in the CI lane's diagnostic. Both fail the build but the diagnostic is unambiguous. The lane's 10-minute timeout bounds the retry window.
 
 ---
 
@@ -3647,10 +3697,14 @@ After authoring the 16 tasks above + folding in the six doctrine-decision sectio
 - `a2a-sdk == 1.0.2` — pinned in `pyproject.toml` after PyPI verification. Import namespace confirmed `a2a` (not `a2a_sdk`, not the unrelated `a2a_protocol` 0.1.0 package). T2 R1 P3 #1 reviewer correction filled the version after probing the actual SDK exports.
 - `joserfc == 1.6.4` — pinned in `pyproject.toml` after PyPI verification (latest stable; transitively reuses Sprint-4's pinned `cryptography>=45` backend so we don't introduce a second crypto family). T2 R1 P3 #1 same correction.
 
-**Remaining for T6 (digest-capture time, alongside the schema-drift CI gate land):**
+**Resolved at T6 commit time (T6 R0 capture):**
 
-- `_UPSTREAM_PROTOBUF_URL` / `_UPSTREAM_JSON_SCHEMA_URL` — the canonical upstream URLs the schema-drift gate fetches against. T6 implementation engineer pins these from the A2A 1.0 spec's release artefacts at the same commit as the digest constants.
-- `_PINNED_PROTOBUF_DIGEST` / `_PINNED_JSON_SCHEMA_DIGEST` — SHA-256 digests of the protobuf source + JSON schema bindings as captured at the SDK pin point. T6 implementation engineer captures these from the upstream URLs after running `uv lock` so the digests align with the locked SDK version.
+- `_UPSTREAM_PROTOBUF_URL` — pinned to `https://raw.githubusercontent.com/a2aproject/A2A/v1.0.0/specification/a2a.proto` (the spec authors' canonical proto source at the v1.0.0 git tag — NOT main, so spec-authors' WIP doesn't trip the gate).
+- `_PINNED_PROTOBUF_DIGEST` — captured at T6 commit time from the URL above. Drift CI gate (`test_a2a_schema_drift.py`) fails the build on mismatch.
+
+**Deferred — lands when upstream publishes a canonical JSON-schema bundle (T6 R0 capture-time discovery):**
+
+- `_UPSTREAM_JSON_SCHEMA_URL` / `_PINNED_JSON_SCHEMA_DIGEST` — the spec authors do NOT currently publish a canonical JSON-schema binding bundle at any URL; `specification/json/` in the upstream repo is a README-only directory pointing back at the protobuf source. There is no second artifact to pin or fetch. T6 ships the protobuf-only gate (1 test arm); the JSON-schema digest pin + the parity test arm + the `protocol/a2a_schema_parity.py` helper module land together as a Sprint-N reviewer-pause amendment when (or if) the spec authors publish the bundle.
 
 **Type consistency.** Every type referenced in later tasks is defined in earlier ones:
 

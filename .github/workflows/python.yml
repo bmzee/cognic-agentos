@@ -73,6 +73,50 @@ jobs:
         # gate ensures no critical module silently drops.
         run: uv run python tools/check_critical_coverage.py
 
+  a2a-spec-drift:
+    # Sprint 6 T6 — env-gated upstream A2A schema-drift gate per
+    # Doctrine Decision C. The lane runs after the main `ci` job so a
+    # syntax / type regression doesn't trigger a network probe; it
+    # fetches the canonical A2A 1.0 protobuf source from the pinned
+    # ``v1.0.0`` git tag (NOT main) and SHA-256s it against the
+    # digest pinned in ``protocol/a2a_schema.py``. Mismatch fails the
+    # build and a deliberate review + version-bump pass is required
+    # (per Sprint-6 Decision Lock #1 — silent upgrades forbidden).
+    #
+    # Setup chain (checkout → uv → python → uv sync) is copied
+    # verbatim from the main `ci` job above; if a future PR bumps
+    # action versions in `ci`, this lane bumps in lockstep.
+    name: a2a-spec drift detection
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: ci  # gate on lint+test+coverage passing first
+    env:
+      COGNIC_RUN_A2A_UPSTREAM: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.5.29"
+          enable-cache: true
+
+      - name: Read .python-version
+        id: python-version
+        run: echo "version=$(cat .python-version)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ steps.python-version.outputs.version }}
+
+      - name: uv sync (frozen)
+        run: uv sync --frozen --all-extras
+
+      - name: Run A2A schema-drift gate
+        run: uv run pytest -v -m a2a_upstream tests/unit/protocol/test_a2a_schema_drift.py
+
   image-size-budget:
     # Sprint 1C: image is split. Kernel ≤120 MiB; default-adapters ≤220 MiB.
     # Both budgets are gated here. The kernel image is what most banks
