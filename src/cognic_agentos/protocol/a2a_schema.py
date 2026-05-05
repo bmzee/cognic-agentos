@@ -68,10 +68,18 @@ _UPSTREAM_PROTOBUF_URL: str = (
     "https://raw.githubusercontent.com/a2aproject/A2A/v1.0.0/specification/a2a.proto"
 )
 
-#: The 7 SDK type names this module re-exports. Sourced from
+#: The 9 SDK type names this module re-exports. Sourced from
 #: ``a2a.types`` (the protobuf-generated message classes; metaclass
 #: ``MessageMeta`` from the google.protobuf library). Pinned exactly
 #: so a future SDK rename trips the drift gate before it reaches us.
+#:
+#: T10 R1 P2 #2: ``TaskStatus`` + ``TaskState`` added to the set so
+#: ``protocol/a2a_streaming.py`` builds envelopes via the schema-
+#: module boundary (under the drift-gate's protection) rather than
+#: importing ``a2a.types`` / ``a2a.types.a2a_pb2`` directly.
+#: ``TaskState`` is the protobuf ``EnumTypeWrapper`` instance whose
+#: attributes (``TASK_STATE_WORKING`` etc.) are the integer enum
+#: values; ``TaskStatus`` is the message class.
 _REEXPORTED_TYPE_NAMES: frozenset[str] = frozenset(
     {
         "AgentCard",
@@ -80,11 +88,13 @@ _REEXPORTED_TYPE_NAMES: frozenset[str] = frozenset(
         "StreamResponse",
         "Task",
         "TaskArtifactUpdateEvent",
+        "TaskState",
+        "TaskStatus",
         "TaskStatusUpdateEvent",
     }
 )
 
-#: Public ``__all__`` surface — the 7 lazy SDK type names + the
+#: Public ``__all__`` surface — the 9 lazy SDK type names + the
 #: spec-version public constant + the version accessor. The pinned-
 #: digest + upstream-URL constants are module-private (underscore-
 #: prefixed) by convention; downstream code reads them only via
@@ -100,6 +110,8 @@ __all__ = (
     "StreamResponse",
     "Task",
     "TaskArtifactUpdateEvent",
+    "TaskState",
+    "TaskStatus",
     "TaskStatusUpdateEvent",
     "get_pinned_spec_version",
 )
@@ -116,6 +128,8 @@ if TYPE_CHECKING:
         StreamResponse,
         Task,
         TaskArtifactUpdateEvent,
+        TaskState,
+        TaskStatus,
         TaskStatusUpdateEvent,
     )
 

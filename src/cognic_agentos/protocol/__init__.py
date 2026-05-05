@@ -258,7 +258,7 @@ class A2ANotAvailableError(RuntimeError):
     all run without the ``a2a-sdk`` SDK.
 
     What this error specifically signals: an attempt to construct
-    :class:`A2AEndpoint` (T9) or :class:`A2AStreamingHandler` (T10)
+    :class:`A2AEndpoint` (T9) or :class:`A2AStreamingEmitter` (T10)
     or :class:`A2AArtifactsManager` (T11) on a venv without the SDK.
     """
 
@@ -303,8 +303,8 @@ def require_a2a() -> None:
 
     - ``A2AEndpoint.__init__`` (T9 — task-lifecycle state machine
       that consumes the SDK's task-envelope types)
-    - ``A2AStreamingHandler.__init__`` (T10 — streaming-message
-      protocol that consumes the SDK's streaming envelope types)
+    - ``A2AStreamingEmitter.__init__`` (T10 — streaming wire-format
+      adapter that consumes the SDK's streaming envelope types)
     - ``A2AArtifactsManager.__init__`` (T11 — artifact-reference
       generator that builds envelopes from the SDK shapes)
 
@@ -348,7 +348,7 @@ def require_a2a() -> None:
             "``a2a_capability_negotiation``, ``a2a_cancellation``) "
             "import + construct without this SDK; this error "
             "specifically signals an attempt to construct "
-            "``A2AEndpoint`` / ``A2AStreamingHandler`` / "
+            "``A2AEndpoint`` / ``A2AStreamingEmitter`` / "
             "``A2AArtifactsManager`` (runtime-only, "
             "default-adapters-only)."
         )

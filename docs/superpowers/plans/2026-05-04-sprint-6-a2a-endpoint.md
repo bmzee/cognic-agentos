@@ -61,7 +61,7 @@ Sprint 6 creates 11 new protocol modules + 7 new portal endpoints + 1 new threat
 - `src/cognic_agentos/protocol/a2a_agent_cards.py` — Agent Card publisher (per-pack `/.well-known/agent-card.json` route) AND verifier (inbound at registration + outbound at dispatch). **Critical-controls module.** **Three-pass validation** (T1 R1 P2 reviewer correction added Pass 3 — earlier draft only had two passes which forced JWS failures into the schema bucket): Pass 1 upstream A2A 1.0 schema (via `a2a-sdk`) + Pass 2 AgentOS bank-grade profile (mandatory `provider`, `securitySchemes`, `securityRequirements`, `signatures`, ≥1 `supportedInterfaces` entry) + Pass 3 JWS verification against Sprint-4 `TrustGate` per-tenant trust root. Card content hash-chained into `decision_history` at registration. The 10-value `AgentCardValidationReason` literal covers the per-pass failure modes (1 + 6 + 3); T7 `_AGENT_CARD_VALIDATION_REASON_TO_REFUSAL` mapping collapses the 6 profile flavors into the single `a2a_agent_card_profile_invalid` registry refusal while keeping the JWS reasons distinct.
 - `src/cognic_agentos/protocol/a2a_schema.py` — pinned A2A 1.0 wire-format types. **Critical-controls module.** Re-exports the `a2a-sdk` SDK's **protobuf-generated message classes** (NOT Pydantic — T6 R0 capture-time correction; the SDK ships protobuf via `MessageMeta`) under stable AgentOS names via PEP 562 lazy `__getattr__` so the module imports cleanly without `a2a-sdk` installed (admission-side per Sprint-5 R3 P1; first attribute access fires `require_a2a()`). Includes `_PINNED_PROTOBUF_DIGEST` + `_UPSTREAM_PROTOBUF_URL` constants the drift CI gate (T6) verifies against. JSON-schema digest pin + parity check + the `protocol/a2a_schema_parity.py` helper module are **deferred** until upstream publishes a canonical JSON-schema bundle (`specification/json/` is currently a README-only directory) — see Doctrine Decision C.
 - `src/cognic_agentos/protocol/a2a_version.py` — `A2A-Version` HTTP header parser + responder per ADR-003 §"Version negotiation". Closed-enum `A2AVersionOutcome` — **6 values**: `accepted` (`1.0` matches pinned), `absent_rejected` (no header → rejected with `Supported-A2A-Versions: 1.0`; spec interprets absent as `0.3`), `legacy_rejected` (`0.x` → rejected), `higher_minor_degraded` (`1.<higher minor>` → processed with feature-degradation warning), `unsupported_rejected` (`2.x` or unknown → rejected with `Supported-A2A-Versions`), `malformed_rejected` (malformed header → spec-defined parse error).
-- `src/cognic_agentos/protocol/a2a_streaming.py` — A2A 1.0 streaming-message protocol support (chunked HTTP + spec wire envelopes). NOT portal/UI SSE (that's Sprint-7B per ADR-020). Emits `task.progress` / `task.completed` / `task.failed` envelopes per spec; chain-linked into decision_history via `_emit_streaming_evidence` helper mirroring Sprint-5's `_emit_call_evidence`.
+- `src/cognic_agentos/protocol/a2a_streaming.py` — A2A 1.0 streaming wire-format adapter. NOT portal/UI SSE (that's Sprint-7B per ADR-020). Builds protobuf `StreamResponse` envelopes (oneof `task` / `message` / `status_update` / `artifact_update`) via the T6 schema-module re-export boundary; lifecycle transitions ride `TaskStatusUpdateEvent` whose `TaskStatus.state` is one of the 9 SDK `TaskState` enum values; artifact streaming rides `TaskArtifactUpdateEvent` with `append` / `last_chunk` flags. Wire encoding via `google.protobuf.json_format.MessageToJson` (no hand-rolled JSON). Public boundary is the AgentOS-side `StreamState` Literal (8 values mirroring SDK `TASK_STATE_*` 1:1; T9 `TaskState` spellings are **rejected** at the API surface so a future endpoint-integration PR must do the deliberate adapter work). Chain-linked into `decision_history` via `_emit_streaming_evidence` helper mirroring Sprint-5's `_emit_call_evidence`.
 - `src/cognic_agentos/protocol/a2a_artifacts.py` — artifact reference generator. Large outputs (PDFs, evidence packs, JSON > 64 KiB) stored via Sprint-4's `LocalObjectStoreAdapter` and returned as `ArtifactRef(uri, sha256, size_bytes, mime_type)`; small payloads remain inline; per-tenant retention configurable via `Settings.a2a_artifact_retention_seconds`.
 - `src/cognic_agentos/protocol/a2a_capability_negotiation.py` — `GET /api/v1/a2a/capabilities` endpoint backing module. Reads pack manifests' declared `[tool.cognic.a2a].capabilities_supported`; returns canonical A2A 1.0 capability list (subset of the agent's manifest declaration; never broader).
 - `src/cognic_agentos/protocol/a2a_cancellation.py` — task cancellation primitive. `cancel_task(task_id, *, reason)` flips lifecycle to `cancelled`, emits `a2a.task_cancelled` chained event with partial-state payload digest, refuses subsequent calls against the cancelled task ID with the spec-conformant `task_not_cancelable` error code.
@@ -263,8 +263,9 @@ a2a_card_jws_max_size_bytes: int = Field(default=64 * 1024, gt=0)
 a2a_outbound_request_timeout_s: int = Field(default=30, gt=0)
 
 #: Deadline for inbound non-streaming A2A `handle()` calls before
-#: the endpoint emits `task.failed` with `deadline_exceeded`. 60s
-#: budget for typical bank-grade tool-bound tasks.
+#: the endpoint transitions the task to FAILED (audit event
+#: `a2a.task_failed`, error_code `deadline_exceeded`). 60s budget
+#: for typical bank-grade tool-bound tasks.
 a2a_inbound_request_timeout_s: int = Field(default=60, gt=0)
 ```
 
@@ -2395,8 +2396,10 @@ git commit -m "feat(sprint-6): A2A inbound endpoint + task lifecycle + chain lin
 ## Task 10: `protocol/a2a_streaming.py` — A2A 1.0 task streaming protocol support
 
 **Files:**
-- Create: `src/cognic_agentos/protocol/a2a_streaming.py` — A2A 1.0 streaming-message protocol support per the spec wire format. Emits `task.progress` / `task.completed` / `task.failed` envelopes per A2A 1.0; chain-linked into decision_history via `_emit_streaming_evidence` helper.
-- Create: `tests/unit/protocol/test_a2a_streaming.py` — streaming envelope contract; chain linkage; chunked-transfer interop with `httpx`.
+- Create: `src/cognic_agentos/protocol/a2a_streaming.py` — A2A 1.0 streaming wire-format adapter. Builds protobuf `StreamResponse` envelopes (oneof `task` / `message` / `status_update` / `artifact_update`) via the T6 schema-module re-export boundary; lifecycle transitions ride `TaskStatusUpdateEvent` whose `TaskStatus.state` is one of the 9 SDK `TaskState` enum values; artifact streaming rides `TaskArtifactUpdateEvent` with `append` / `last_chunk` flags. Wire encoding via `google.protobuf.json_format.MessageToJson` (no hand-rolled JSON). Chain-linked into `decision_history` via `_emit_streaming_evidence` helper. Per T10 R1 P2 #2: every SDK type travels through `cognic_agentos.protocol.a2a_schema` so the T6 drift-gate covers the full wire surface; direct `a2a.types` / `a2a.types.a2a_pb2` imports are forbidden.
+- Modify: `src/cognic_agentos/protocol/a2a_schema.py` — extend `_REEXPORTED_TYPE_NAMES` from 7 to 9 (add `TaskStatus` + `TaskState`) so the streaming module's wire-type imports stay inside the drift-gate boundary. Update `__all__` + `TYPE_CHECKING` re-imports to match.
+- Modify: `tests/unit/protocol/test_a2a_schema.py` — refresh re-export count to 9 + update `test_reexported_set_matches_doctrine` to include the two new entries.
+- Create: `tests/unit/protocol/test_a2a_streaming.py` — pins the wire-format contract, the `StreamState` public-boundary doctrine (T9 spellings rejected), the schema-module-only import boundary (AST-walk regression), the closed AgentOS→SDK state mapping, the chain-linkage evidence per envelope, and the audit/decision-history safe-swallow.
 
 **Halt-before-commit:** No (not on the critical-controls list — but see the explicit distinction from Sprint-7B UI SSE).
 
@@ -2408,6 +2411,48 @@ git commit -m "feat(sprint-6): A2A inbound endpoint + task lifecycle + chain lin
 | **UI event-stream SSE** | Sprint 7B | `protocol/ui_events_sse.py` (future) | W3C Server-Sent Events (`text/event-stream` + `Last-Event-Id` cursor) | Portal UIs subscribing to run-state events |
 
 The A2A streaming envelope is a spec-defined data format; SSE is a transport. The two might both ride chunked-transfer over HTTP but their wire formats are different and their consumers are different. Sprint 6 ships ONLY the A2A streaming protocol.
+
+**Authoritative wire-format contract (verified against `a2a-sdk == 1.0.2`, `a2a/types/a2a_pb2.pyi`):**
+
+```proto
+StreamResponse {
+    oneof payload {
+        Task                    task            = 1;  // initial task envelope
+        Message                 message         = 2;  // synchronous message reply
+        TaskStatusUpdateEvent   status_update   = 3;  // lifecycle transition
+        TaskArtifactUpdateEvent artifact_update = 4;  // artifact chunk
+    }
+}
+
+TaskStatusUpdateEvent {
+    string task_id; string context_id;
+    TaskStatus status;          // status.state ∈ TASK_STATE_* (9 values)
+    Struct metadata;
+}
+
+TaskArtifactUpdateEvent {
+    string task_id; string context_id;
+    Artifact artifact;
+    bool append; bool last_chunk;
+    Struct metadata;
+}
+```
+
+The lifecycle progress / completion / failure semantics are conveyed via `TaskStatusUpdateEvent.status.state` (`TASK_STATE_WORKING`, `TASK_STATE_COMPLETED`, `TASK_STATE_FAILED`, `TASK_STATE_CANCELED`, etc. — 9 SDK enum values total). There are NO textual `task.progress` / `task.completed` / `task.failed` envelope types in the spec — those were the day-1 sketch's stand-in. T10 emits real protobuf `StreamResponse` messages encoded via `google.protobuf.json_format.MessageToJson` (the SDK's encoder), never hand-rolled JSON. Cancellation lands in T13; the streaming module is responsible only for the wire-format adapter, not the lifecycle authority.
+
+**T10 doctrines (locked before code):**
+
+1. **SDK protobuf JSON only, via the T6 schema-module boundary.** Envelopes built exclusively via the lazy re-exports on `cognic_agentos.protocol.a2a_schema` (which T10 R1 P2 #2 extended from 7 to 9 entries — adding `TaskStatus` + `TaskState`); wire encoding via `google.protobuf.json_format.MessageToJson`. The streaming module NEVER imports `a2a.types` or `a2a.types.a2a_pb2` directly — every SDK type used here MUST be in `_REEXPORTED_TYPE_NAMES` so the T6 drift-gate covers the full wire surface. Hand-rolled envelope JSON is forbidden in the wire path.
+
+2. **Runtime-side SDK gate at construction.** `A2AStreamingEmitter.__init__` calls `require_a2a()` per the T2 `_PROTOCOL_OPTIONAL_DEPS` contract (T10 module is in that map alongside `a2a_endpoint` + `a2a_artifacts`). Module import itself is tolerated to fail under `stub_a2a_missing`; construction is the load-bearing gate.
+
+3. **Chain-linkage evidence per envelope.** Every emitted `StreamResponse` produces a parallel `audit_event` (`a2a.stream_chunk`) + `decision_history` row with payload digest, stream sequence, task / context ids, envelope kind (one of the four `oneof` field names), and the parent / child trace ids the upstream endpoint minted. Audit + decision pipeline failures safe-swallow per the Sprint-5 `_emit_call_evidence` discipline (mirrors T9 `_emit_a2a_evidence`).
+
+4. **`StreamState` is the public boundary; T9 `TaskState` adapter is deferred.** T10 exposes the 8-value `StreamState` Literal (`submitted` / `working` / `completed` / `failed` / `canceled` / `input_required` / `rejected` / `auth_required`), which mirrors the SDK `TaskState` enum 1:1 (minus the never-emitted `TASK_STATE_UNSPECIFIED`). T9's narrower AgentOS lifecycle vocabulary (`created` / `running` / `succeeded` / `failed` / `cancelled`) is **NOT** a valid input to this emitter — the spelling drift (`succeeded` vs `completed`, `cancelled` vs `canceled`) plus T9's narrower set means an automatic adapter at this boundary would silently lose spec-valid Wave-1 lifecycle states (`input_required` / `rejected` / `auth_required` are spec-valid but absent from T9). The deferred endpoint-integration task owns the T9 `TaskState` → `StreamState` adapter; tests pin that `emit_status` rejects T9 spellings (`created` / `running` / `succeeded` / `cancelled`) with `KeyError` so a future endpoint-integration PR cannot accidentally couple the two surfaces without doing the deliberate mapping work. The drift detector pins both ends: AgentOS `StreamState` literal-set must equal `_AGENTOS_TO_SDK_STATE_NAMES` keys, and the SDK constant set must equal its values.
+
+5. **Standalone emitter; endpoint integration deferred.** T10 ships `A2AStreamingEmitter` + `encode_stream_response` ONLY. `A2AEndpoint.handle()` integration (detect `streaming = true` agent handlers, delegate to the emitter, return chunked-transfer response) is a deliberate later task with its own halt-before-commit (touches `a2a_endpoint.py`, which is on the critical-controls list). Without this deferral, T10's footprint expands into critical-controls territory unannounced. The T9 → SDK lifecycle adapter (per doctrine #4) is part of that deferred work, not T10.
+
+> **NB — skeleton below is illustrative pre-impl** (same R3-P3 pattern as T9). The block that follows was the day-1 sketch; it predates the SDK-shape verification and uses textual `task.progress` / `task.completed` / `task.failed` envelope types that are not in the A2A 1.0 spec. Treat the doctrine list above + the shipped module (`src/cognic_agentos/protocol/a2a_streaming.py`) + the test contract (`tests/unit/protocol/test_a2a_streaming.py`) as authoritative. Future T10-adjacent work (endpoint integration, future Wave-2 streaming features) MUST consult the shipped module, NOT this skeleton.
 
 ```python
 """protocol/a2a_streaming.py — A2A 1.0 task streaming protocol support.
@@ -2543,6 +2588,8 @@ def _encode_envelope(env: StreamingEnvelope) -> bytes:
     # ... delegates to a2a SDK ...
     ...
 ```
+
+> **End of pre-impl illustrative skeleton.** See the doctrine list above + `src/cognic_agentos/protocol/a2a_streaming.py` + `tests/unit/protocol/test_a2a_streaming.py` for the authoritative SDK-conformant shape (real `StreamResponse` protobuf, `MessageToJson` encoding, runtime SDK gate, chain-linkage evidence, deferred endpoint integration).
 
 - [ ] **Step 1-3: Tests + impl + commit**
 

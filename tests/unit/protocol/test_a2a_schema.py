@@ -79,19 +79,23 @@ class TestPinnedDigestShape:
 
 
 class TestReexportedTypeNamesContract:
-    """Pin the 7-type re-export set so a future edit that adds or
+    """Pin the 9-type re-export set so a future edit that adds or
     drops a name must update both the source module and this test
     surface."""
 
-    def test_reexported_set_has_seven_types(self) -> None:
-        """The Wave-1 wire-format surface comprises exactly 7 types
-        per the plan-of-record §File Structure."""
-        assert len(_REEXPORTED_TYPE_NAMES) == 7
+    def test_reexported_set_has_nine_types(self) -> None:
+        """The Wave-1 wire-format surface comprises exactly 9 types:
+        the original 7 (T2 R1 P2 + T6 R0 capture) + ``TaskStatus`` +
+        ``TaskState`` (T10 R1 P2 #2 — extending the schema-module
+        boundary so ``protocol/a2a_streaming.py`` builds envelopes
+        through the drift-gate-protected re-export rather than
+        importing ``a2a.types`` / ``a2a.types.a2a_pb2`` directly)."""
+        assert len(_REEXPORTED_TYPE_NAMES) == 9
 
     def test_reexported_set_matches_doctrine(self) -> None:
-        """The exact 7 names per T2 R1 P2 reviewer correction —
-        verified against ``a2a-sdk == 1.0.2``'s ``a2a.types``
-        exports."""
+        """The exact 9 names per T2 R1 P2 + T10 R1 P2 #2 reviewer
+        corrections — verified against ``a2a-sdk == 1.0.2``'s
+        ``a2a.types`` exports."""
         expected = {
             "AgentCard",
             "Artifact",
@@ -99,6 +103,8 @@ class TestReexportedTypeNamesContract:
             "StreamResponse",
             "Task",
             "TaskArtifactUpdateEvent",
+            "TaskState",
+            "TaskStatus",
             "TaskStatusUpdateEvent",
         }
         assert set(_REEXPORTED_TYPE_NAMES) == expected

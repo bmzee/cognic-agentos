@@ -119,7 +119,7 @@ _A2A_MODULES_PLANNED = (
     "cognic_agentos.protocol.a2a_cancellation",
     # Runtime-side (MAY import the SDK at module level — tolerated to
     # fail under stub_a2a_missing because A2AEndpoint /
-    # A2AStreamingHandler / A2AArtifactsManager call require_a2a()
+    # A2AStreamingEmitter / A2AArtifactsManager call require_a2a()
     # at construction, not at import). T9/T10/T11 land these.
     "cognic_agentos.protocol.a2a_endpoint",
     "cognic_agentos.protocol.a2a_streaming",
@@ -553,8 +553,8 @@ class TestProtocolOptionalDepsMapShape:
             f"Admission-side a2a modules MUST NOT appear in "
             f"_PROTOCOL_OPTIONAL_DEPS — found: {sorted(leaked)}. "
             f"Per Sprint-5 R3 P1 + Sprint-6 same doctrine, only "
-            f"runtime-side classes (A2AEndpoint, streaming handler, "
-            f"artifacts manager) gate on the SDK at construction."
+            f"runtime-side classes (A2AEndpoint, A2AStreamingEmitter, "
+            f"A2AArtifactsManager) gate on the SDK at construction."
         )
 
     def test_dict_includes_a2a_runtime_modules(self) -> None:

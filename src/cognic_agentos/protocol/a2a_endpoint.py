@@ -361,7 +361,7 @@ class A2AEndpoint:
     ``a2a_version``, ``a2a_errors``, ``a2a_capability_negotiation``,
     ``a2a_cancellation``) are NOT in that map and construct without
     the SDK — only :class:`A2AEndpoint` /
-    :class:`A2AStreamingHandler` / :class:`A2AArtifactsManager` gate
+    :class:`A2AStreamingEmitter` / :class:`A2AArtifactsManager` gate
     on it at construction.
 
     Once construction succeeds, the SDK boundary at request time is
