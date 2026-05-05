@@ -97,15 +97,12 @@ Sprint 6 creates 11 new protocol modules + 7 new portal endpoints + 1 new threat
 - `tests/unit/protocol/test_a2a_agent_card_outbound_verification.py` — outbound dispatch fetches card, verifies JWS, dispatches to `supportedInterfaces[].url`.
 - `tests/unit/protocol/test_a2a_agent_card_chain_audit.py` — card content hash-chained at registration.
 - `tests/unit/protocol/test_a2a_version.py` — version-header negotiation (6 cases per `A2AVersionOutcome`).
-- `tests/unit/protocol/test_a2a_endpoint.py` — inbound receiver + lifecycle.
+- `tests/unit/protocol/test_a2a_endpoint.py` — inbound receiver + lifecycle + cross-agent chain linkage + gate-refusal evidence + unknown-target + anonymous-refused + multimodal Wave-2 detection + deeply-nested-payload fail-closed + invalid-response canonicalisation + runtime-side SDK gate. **Consolidated** per T9 R3 P3: earlier draft split this into four files (`test_a2a_endpoint.py`, `test_a2a_unknown_target.py`, `test_a2a_anonymous_refused.py`, `test_a2a_chain_audit.py`); merged into one so contract maintenance is local to the gate test class.
 - `tests/unit/protocol/test_a2a_streaming.py` — task streaming wire format.
 - `tests/unit/protocol/test_a2a_artifacts.py` — large output → reference; small payload → inline.
 - `tests/unit/protocol/test_a2a_capability_negotiation.py` — `/capabilities` lists exactly the manifest's declarations.
 - `tests/unit/protocol/test_a2a_cancellation.py` — in-flight task cancelled; partial-state audit emitted.
 - `tests/unit/protocol/test_a2a_error_taxonomy.py` — every spec-defined error path returns the spec's code.
-- `tests/unit/protocol/test_a2a_chain_audit.py` — parent + 3 child messages → cross-agent chain proof.
-- `tests/unit/protocol/test_a2a_unknown_target.py` — unknown target → 501 with ADR-002 reference.
-- `tests/unit/protocol/test_a2a_anonymous_refused.py` — anonymous call → 401 with `a2a_anonymous_refused`.
 - `tests/unit/protocol/test_a2a_spec_conformance.py` — runs the conformance fixtures.
 - `tests/unit/protocol/test_a2a_no_caller_controlled_url.py` — runtime canary (T14) complementing the architecture test.
 - `tests/unit/protocol/test_a2a_wave2_features_refused.py` — push notifications, multi-modal, long-running resumption all refused with `A2APolicyRefusalReason.wave2_feature_refused`.
@@ -2135,18 +2132,23 @@ git commit -m "feat(sprint-6): A2A-Version header negotiation (T8)"
 
 **Files:**
 - Create: `src/cognic_agentos/protocol/a2a_endpoint.py` — single owner of the inbound A2A receiver.
-- Create: `tests/unit/protocol/test_a2a_endpoint.py` — 30+ arms covering routing / lifecycle / chain linkage / anonymous refusal / unknown target / version negotiation rejection paths.
-- Create: `tests/unit/protocol/test_a2a_unknown_target.py` — focused unknown-target → 501 + ADR-002 reference.
-- Create: `tests/unit/protocol/test_a2a_anonymous_refused.py` — focused anonymous → 401 + `a2a_anonymous_refused`.
-- Create: `tests/unit/protocol/test_a2a_chain_audit.py` — parent + 3 child messages → cross-agent chain proof.
+- Create: `tests/unit/protocol/test_a2a_endpoint.py` — 79 arms (consolidated per R3 P3) covering all 6 gates, lifecycle transitions, chain linkage, gate-refusal evidence rows, multimodal Wave-2 detector (R2 P2 SDK Part shape; R4 P2 alias-collision defence; R5 P2 decoder-side RecursionError), deeply-nested + wide scalar payload fail-closed (R3 P2 + R4 P2 + R5 P2), invalid-response canonicalisation, runtime-side SDK gate, single-writer task-state guarantee, audit-pipeline safe-swallow, closed-enum module shape. **Earlier draft split this into four files** (`test_a2a_endpoint.py`, `test_a2a_unknown_target.py`, `test_a2a_anonymous_refused.py`, `test_a2a_chain_audit.py`); the implementation consolidated them into the single module above so contract maintenance is local — each gate's regression arms live next to the test class for that gate, and the closed-enum coverage tracker only has one file to walk.
 
 **Halt-before-commit:** Yes — `a2a_endpoint.py` is the single owner of the task-lifecycle state machine + chain linkage; reviewer pause needed.
 
-Task lifecycle state machine: `created → running → succeeded | failed | cancelled`. Single owner; transitions are single-writer (the endpoint). Audit emission on every transition: `a2a.task_received` (created), `a2a.task_running`, `a2a.task_succeeded`, `a2a.task_failed`, `a2a.task_cancelled`.
+Task lifecycle state machine: `created → running → succeeded | failed | cancelled`. Single owner; transitions are single-writer (the endpoint). Audit emission on every transition: `a2a.task_received` (created), `a2a.task_running`, `a2a.task_succeeded`, `a2a.task_failed`, `a2a.task_cancelled`. **Pre-task gate refusals also emit chained evidence** (`a2a.task_refused`) carrying `parent_trace_id`, `child_trace_id`, `payload_digest`, `error_code`, and `policy_reason` per R1 P2 #1 — the cross-agent chain is walkable end-to-end including the refusal leg, not just the success leg.
 
 Chain linkage: every inbound message gets a `parent_trace_id` (from caller) + a fresh `child_trace_id`; the audit row carries both so the cross-agent chain is walkable end-to-end. Mirrors Sprint-2's hash-chain primitives (single-writer, content-addressed) extended across the A2A boundary.
 
-Routing: target identification by entry-point name → plugin registry lookup → dispatch to the agent pack's `handle(message)` method. Unknown target → 501 with ADR-002 reference. Anonymous call (no `Authorization` header) → 401 with `a2a_anonymous_refused`.
+Routing: target identification by entry-point name → `PluginRegistry.load("agents", target_agent)` → dispatch to the agent pack's `handle(payload, task=...)` method. `PluginNotRegistered` / `RegistrationRefused` BOTH map to spec `method_not_found` + policy-reason `unknown_target` (registry refusal vocabulary stays opaque to remote A2A callers). Anonymous call (no `Authorization` header) maps via the closed-enum `_AUTHZ_REASON_TO_POLICY_REASON` table to spec `invalid_request` + policy-reason `anonymous_refused`; every other authz failure surfaces as `invalid_request` + policy-reason `tenant_token_invalid` so finer token-state never leaks across the wire. Wave-2 traffic (push-notification subscribe, task resumption, multimodal `Part` shapes — `raw` / `url` oneof field set, or `mediaType` / `media_type` indicating image/audio/video) is refused with spec `unsupported_operation` + policy-reason `wave2_feature_refused` **before** routing so a registered Wave-1 agent never receives Wave-2 traffic.
+
+Gate order (locked by R1/R2 reviewer rounds): version → authn → wave-2 → routing → task-create+dispatch → emit. Earlier drafts placed routing before wave-2; that ordering is unsafe because a Wave-2 method whose entry-point name happens to match a registered agent slips past the gate at routing time, so the wave-2 gate now fires first.
+
+Construction is **runtime-side**: `A2AEndpoint.__init__` calls `require_a2a()` per the T2 `_PROTOCOL_OPTIONAL_DEPS` contract — mounting the endpoint on a kernel-image deployment (without `a2a-sdk`) raises `A2ANotAvailableError` immediately rather than at first inbound traffic. Mirrors Sprint-5 `MCPHost.__init__` / `require_mcp()`.
+
+Response gate: per A2A 1.0, the agent handler's response MUST be a JSON-RPC-shaped dict that is canonical-form-clean per `core/canonical.canonical_bytes` (no bytes-of-the-payload-tree-violator types like sets, complex numbers, tuples, non-finite floats, non-string dict keys, naive datetimes). Non-dict OR canonicalisation failure refuses with spec `invalid_agent_response` BEFORE the SUCCEEDED transition — the audit chain matches the wire error returned to the caller. The FAILED transition's `_transition` accepts an explicit `error_code` so the audit row records `invalid_agent_response` rather than the generic `internal_error` (which is reserved for raw handler exceptions per R1 P2 #4).
+
+> **NB — skeleton below is illustrative pre-R1/R2.** The block that follows was the day-1 sketch; the shipped implementation diverges in five load-bearing places (gate ordering, `require_a2a()` at construction, refusal-evidence emission, closed-enum policy-reason → spec-code mapping via `_AUTHZ_REASON_TO_POLICY_REASON`, registry shape `load("agents", ...)` raising typed exceptions). Treat the prose above + the shipped module (`src/cognic_agentos/protocol/a2a_endpoint.py`) + the test contract (`tests/unit/protocol/test_a2a_endpoint.py`) as authoritative. Future T9-adjacent work (T10 streaming, T11 errors, T13 cancellation) MUST consult the shipped module, NOT this skeleton.
 
 ```python
 """protocol/a2a_endpoint.py — A2A inbound receiver + task lifecycle.
@@ -2377,6 +2379,8 @@ class A2AEndpoint:
         # ... single-writer transition + audit/dh emit ...
         ...
 ```
+
+> **End of pre-R1/R2 illustrative skeleton.** See the prose contract above + `src/cognic_agentos/protocol/a2a_endpoint.py` + `tests/unit/protocol/test_a2a_endpoint.py` for the authoritative R1/R2-conformant shape (gate ordering, `require_a2a()`, refusal-evidence, closed-enum policy mapping, registry shape).
 
 - [ ] **Step 1-7: Iteratively build out the gates with R1-R6 reviewer-round shape** mirroring Sprint-5 T9 R1-R5 hardening.
 
