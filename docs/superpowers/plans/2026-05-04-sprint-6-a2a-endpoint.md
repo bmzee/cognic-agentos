@@ -85,7 +85,7 @@ Sprint 6 creates 11 new protocol modules + 7 new portal endpoints + 1 new threat
 
 **Architecture tests (2 files):**
 - `tests/architecture/test_a2a_no_subprocess.py` — static-AST scan banning `subprocess` / `os.exec*` / `os.spawn*` / `os.system` / `os.popen` / `asyncio.create_subprocess_*` / `multiprocessing.Process` / `shell=True` under any module whose path matches `protocol/a2a_*.py`. Mirrors Sprint-5 T4. Three self-tests pin the collector contract.
-- `tests/architecture/test_a2a_no_caller_controlled_url.py` — static-AST scan asserting that NO module under `protocol/a2a_*` calls `httpx.AsyncClient.get/post/put/delete(url=<x>)` where `<x>` traces to a function parameter, request-body field, or model-output string. Every outbound dispatch URL MUST come from a literal-or-allowlisted source: a JWS-verified Agent Card's `supportedInterfaces[].url` OR a `Settings.a2a_*_url` field OR a hardcoded well-known suffix. Three self-tests pin the collector + the URL-source-classifier.
+- `tests/architecture/test_a2a_no_caller_controlled_url.py` — static-AST scan asserting that NO module under `protocol/a2a_*` calls `httpx.AsyncClient.{get,post,put,patch,delete,request,send}(url=<x>)` where `<x>` traces to a function parameter, an inbound-request attribute chain (root in `{request, message, payload, envelope, body, task}`), a function-parameter-rooted attribute chain (T4 R2 P2 — even card-shaped chains rooted on caller-supplied params are refused), or a model-output string. Every outbound dispatch URL MUST come from a literal-or-allowlisted source: a JWS-verified Agent Card rebound through `verified_card` / `verified_agent_card` (the verifier-output allow-list of root names) and accessed via `.supported_interfaces[*].url` OR `.url`, OR a `Settings.a2a_*_url` field, OR a hardcoded well-known suffix. URL extraction is method-aware: `client.request(method, url, ...)` reads URL from positional arg 1 (NOT arg 0); `client.send(request_obj)` reads URL from the Request object (statically traced as "unknown" — runtime canary takes over). Three self-tests pin the collector + the URL-source-classifier.
 
 **Unit test modules (~16 files):**
 - `tests/unit/protocol/test_a2a_authz.py` — token validation contract.
@@ -717,7 +717,8 @@ T3 produces no commit. The plan's Self-Review section records "T3: zero findings
 
 **Files:**
 - Create: `tests/architecture/test_a2a_no_subprocess.py` — static-AST scan of every module under `src/cognic_agentos/protocol/a2a_*.py`. Refuses any `subprocess` / `os.exec*` / `os.spawn*` / `os.posix_spawn*` / `os.system` / `os.popen` / `asyncio.create_subprocess_exec` / `asyncio.create_subprocess_shell` / `multiprocessing.Process` / `shell=True` import or call. Mirrors Sprint-5 T4 `test_mcp_stdio_no_subprocess.py` exactly.
-- Create: `tests/architecture/test_a2a_no_caller_controlled_url.py` — static-AST scan asserting that NO module under `protocol/a2a_*` calls `httpx.AsyncClient.{get,post,put,delete}(url=<x>)` where `<x>` is a function parameter of the call site, a request-body field, or a model-output string. Allowed URL sources: literals, `Settings.a2a_*_url` fields, hardcoded well-known suffixes (`/.well-known/agent-card.json`), or values from objects whose type is `AgentCard` (with attribute access path containing `supported_interfaces[*].url`).
+- Create: `tests/architecture/test_a2a_no_caller_controlled_url.py` — static-AST scan asserting that NO module under `protocol/a2a_*` calls `httpx.AsyncClient.{get,post,put,patch,delete,request,send}(url=<x>)` where `<x>` traces to a function parameter, a **function-parameter-rooted attribute chain** (T4 R2 P2 — even card-shaped chains like `target_card.supported_interfaces[0].url` are refused when the root is caller-supplied; `self`/`cls` excepted as Python-convention method receivers), an inbound-request attribute chain (root in `{request, message, payload, envelope, body, task}`), or a model-output string. Allowed URL sources: literals; `Settings.a2a_*_url` fields (when not function-param-rooted); hardcoded well-known suffixes interpolating non-caller-controlled origins; **verifier-output AgentCard chains rooted at `verified_card` / `verified_agent_card`** (T4 R2 P2 — generic `card` / `agent_card` chain roots are NOT in the allow-list and fall through to "unknown" because static AST cannot tell whether a generically-named binding came from the JWS verifier or from caller input; implementations MUST rebind verifier output through `verified_card` / `verified_agent_card` before constructing dispatch URLs) accessed via `.supported_interfaces[*].url` OR `.url`. The httpx-call detector is narrowed to actual httpx receivers (T4 R3 P2) — bare/attr names containing `client`/`http`/`httpx` fragments, OR `httpx`-rooted chains, OR `httpx.AsyncClient(...)` constructor receivers — so unrelated dict-like accesses (`self._tasks.get(task_id)`, `headers.get(name)`, `cache.get(key)`, `store.get(id)`) are NOT flagged. Plus a binding pre-pass (T4 R4 P2) tracks names produced by `transport = httpx.AsyncClient()` / `self.session = httpx.Client()` / `async with httpx.AsyncClient() as session:` so renamed httpx clients with non-conforming names are still scanned. **T4 R5 P2 reviewer correction:** the binding pre-pass is alias-aware — an import-alias pre-pass collects `import httpx as <alias>` and `from httpx import {AsyncClient,Client} [as <alias>]` so `transport = hx.AsyncClient()` and `transport = AsyncClient()` (after `from httpx import AsyncClient`) and `transport = Async()` (after `from httpx import AsyncClient as Async`) all add `transport` to the binding set. **T4 R5 P3 reviewer correction:** binding visibility is scope-aware — module-scope bindings are visible everywhere, function-scope bindings only within the same function, class-scope `self.X = httpx...` bindings only across methods of the same class — so a `session = httpx.AsyncClient()` in one function does NOT leak into unrelated `session.<method>(...)` calls in other functions or classes. **T4 R6 P2 reviewer correction:** direct alias-constructor receivers are recognised via the alias-aware constructor matcher, so `hx.AsyncClient().get(target_url)` (after `import httpx as hx`) and `AsyncClient().get(target_url)` (after `from httpx import AsyncClient`) and `Async().get(target_url)` (after rename) are flagged even without a bound name; the `_is_httpx_receiver` Call branch threads the alias sets through to `_is_httpx_constructor_call` instead of recursing alias-blind. **T4 R1 P2 #1 reviewer correction:** URL-extraction is method-aware — `client.request(method, url, ...)` reads URL from positional arg 1 (NOT arg 0); `client.send(request_obj)` reads URL from the Request object (statically traced as "unknown" — runtime canary takes over). **T4 R1 P2 #2 reviewer correction:** the URL-source classifier refuses inbound-rooted attribute chains (`request.*`, `message.*`, `payload.*`, `envelope.*`, `body.*`, `task.*`) **before** running the AgentCard allow-list heuristics, so chains like `request.supported_interfaces[0].url` or `message.agent_card.url` (which LOOK card-shaped) are correctly refused.
+- Create: `docs/A2A-CALLER-URL-THREAT-MODEL.md` — authoritative threat-model document (per File Structure line 81 + Doctrine Decision B). **T4 R1 P3 reviewer correction:** landed alongside the architecture test instead of left as a dangling reference. Mirrors `docs/MCP-STDIO-THREAT-MODEL.md` structure: background → threat model → four reachable URL surfaces (inbound `target_agent`, outbound `spawn_subagent`, AgentCard discovery URL, push-notification webhooks) → Sprint-6 enforcement (architecture-test backstop + runtime canary + JWS verification) → explicit non-enforcement (Wave-2 mTLS, Wave-3 VC) → cross-references.
 
 **Halt-before-commit:** Yes — the architecture tests ARE the wire-protocol invariants; reviewer pause needed.
 
@@ -769,7 +770,8 @@ renamed-module detection (where ``a2a_`` prefix has been dropped but
 ```python
 """Architecture test: outbound URLs in protocol/a2a_* MUST come from
 verified Agent Cards or operator-controlled settings, NEVER from
-function parameters / request bodies / model outputs.
+function parameters / function-parameter-rooted attribute chains /
+inbound-request attribute chains / model outputs.
 
 This is the static-AST half of the A2A caller-URL threat model
 (``docs/A2A-CALLER-URL-THREAT-MODEL.md``). The runtime half is
@@ -778,27 +780,72 @@ canary).
 
 The collector walks every module under
 ``src/cognic_agentos/protocol/a2a_*.py`` and asserts that every
-``httpx.AsyncClient.{get,post,put,delete}`` call satisfies one of:
+``httpx.AsyncClient.{get,post,put,patch,delete,request,send}`` call
+(narrowed to actual httpx receivers per T4 R3 P2 — receiver name must
+contain a fragment in ``{"client", "http", "httpx"}``, OR the chain
+root is the literal ``httpx`` module, OR the receiver is an
+``httpx.AsyncClient(...)`` / ``httpx.Client(...)`` constructor call;
+ordinary dict-like accesses such as ``self._tasks.get(task_id)`` /
+``headers.get(name)`` / ``mapping.get(key)`` / ``store.get(id)`` are
+NOT flagged) satisfies one of the **allowed URL sources**:
 
   1. URL is a string literal.
-  2. URL is a `Settings.a2a_*_url` attribute access.
-  3. URL is a hardcoded well-known suffix concatenated to a verified
-     origin (``f"{origin}/.well-known/agent-card.json"`` where
-     ``origin`` traces to a verified ``AgentCard.supported_interfaces``).
-  4. URL is an attribute access on an ``AgentCard`` typed instance
-     (``card.supported_interfaces[i].url``).
+  2. URL is a ``Settings.a2a_*_url`` attribute access AND the chain
+     root is NOT a function parameter.
+  3. URL is a hardcoded well-known suffix concatenated to a non-caller-
+     controlled origin via f-string (``f"{verified_card.origin}/.well-known/agent-card.json"``;
+     the runtime canary T14 is the load-bearing half for this shape).
+  4. URL is an attribute access rooted at one of the verifier-output
+     names (``verified_card`` / ``verified_agent_card`` — T4 R2 P2
+     tightened the AgentCard allow-list to these names; generic
+     ``card`` / ``agent_card`` chains classify as "unknown" and the
+     runtime canary takes over) AND whose chain includes
+     ``supported_interfaces`` or ends with ``.url``.
+
+URL extraction is method-aware (T4 R1 P2 #1):
+
+  - ``get`` / ``post`` / ``put`` / ``patch`` / ``delete`` — URL at
+    positional arg 0 OR keyword ``url=``.
+  - ``request`` — URL at positional arg **1** (after the method name)
+    OR keyword ``url=``. Without method-awareness,
+    ``client.request("POST", target_url)`` would have classified the
+    literal ``"POST"`` as the URL and the actual caller-supplied URL
+    would have slipped past.
+  - ``send`` — first positional arg is a ``httpx.Request`` object,
+    not a URL. Static AST cannot trace into Request construction;
+    flagged as "no statically-identifiable URL argument" and the
+    runtime canary takes over.
 
 Forbidden URL sources (the ban list):
 
   - Function parameters of the call site (caller-supplied URL).
-  - Request-body fields (caller-supplied via inbound A2A request).
-  - Model-output strings (LLM-generated URL).
+  - Function-parameter-rooted attribute chains (T4 R2 P2 — even
+    card-shaped chains like ``target_card.supported_interfaces[0].url``
+    where ``target_card`` is a function parameter are refused; the
+    chain root is by definition caller-controlled). Exception:
+    ``self`` / ``cls`` are method receivers by Python convention,
+    NOT caller-supplied data, so ``self.settings.a2a_*_url`` and
+    similar instance-rooted chains are allowed.
+  - Inbound-request attribute chains rooted at ``request`` /
+    ``message`` / ``payload`` / ``envelope`` / ``body`` / ``task``
+    (T4 R1 P2 #2 — refused BEFORE the AgentCard allow-list so chains
+    like ``request.supported_interfaces[0].url`` cannot slip through).
   - Concatenations including any of the above.
 
-Three self-tests pin the collector + the URL-source classifier:
+Self-tests pin the collector + the URL-source classifier + the httpx-
+call detector + the URL extractor + end-to-end module shapes (the
+parametrized arm grows from ``[None]`` at T4 to 10 modules at T11
+closeout):
+
   - test_collector_finds_top_level_a2a_files
   - test_url_source_classifier_rejects_caller_param
   - test_url_source_classifier_accepts_agent_card_attr_access
+  - test_classifier_rejects_function_param_card_root (T4 R2 P2)
+  - test_classifier_rejects_inbound_supported_interfaces_chain (T4 R1 P2 #2)
+  - test_extract_url_request_method_takes_url_at_pos_1 (T4 R1 P2 #1)
+  - test_task_store_get_call_NOT_flagged (T4 R3 P2)
+  - test_module_with_real_httpx_call_after_dict_calls_still_flagged
+    (T4 R3 P2 positive control)
 """
 # ... full implementation ...
 ```
@@ -3581,6 +3628,8 @@ After authoring the 16 tasks above + folding in the six doctrine-decision sectio
 | `tests/fixtures/a2a-conformance/` | T13 |
 | `docs/A2A-CONFORMANCE.md` (alignment review) | T3 |
 | `protocol/ui_events.py` (ADR-020 stub) | T12 |
+
+**T3 verification result (executed 2026-05-04, post-T2-commit, no-commit task):** three walks completed against `docs/A2A-CONFORMANCE.md` + `docs/adrs/ADR-003-a2a-inter-agent.md` + `docs/adrs/ADR-020-ui-event-stream-contract.md` (filename has the `-contract` suffix; plan body originally said `ADR-020-ui-event-stream.md`). Zero implementation-phase findings. Three doctrine-divergence-vs-BUILD_PLAN observations were folded in earlier reviewer rounds and remain pinned for T16 BUILD_PLAN refresh: (1) BUILD_PLAN line 454 says AgentCard validation is **two-pass**; plan ships **three-pass** (T1 R1 P2 added Pass 3 — JWS verification — because A2A-CONFORMANCE.md §"Card signatures (JWS)" makes JWS mandatory, contradicting the pre-JWS-mandate two-pass framing); (2) BUILD_PLAN line 469 lists 5 UI-event families seeded; plan ships 11 schemas / 3 wired (R0 P2 #3 matched ADR-020's full Wave-1 11-family taxonomy — the BUILD_PLAN 5-family enumeration was a partial transcript); (3) BUILD_PLAN test names `test_a2a_agent_card_spec_shape` and `test_a2a_version_header` are stylistic shifts vs plan's `test_a2a_agent_cards` (with per-pass arms covering the spec-shape content) and `test_a2a_version` (matching content). All three are noted-only — feed T16's BUILD_PLAN refresh, no plan-PR re-review. ADR-003 + ADR-020 walks returned zero hard divergences. One semantic note carried forward: `A2APolicyRefusalReason.wave2_feature_refused` is the closed-enum literal under which push-notifications + long-running-resumption are refused; ADR-003 / A2A-CONFORMANCE.md technically classify these as "Optional in Wave 1, Required in Wave 2" rather than "Wave 2 only" — the literal name is a labelling choice consistent with BUILD_PLAN line 503's framing ("Wave 2 features... refused with explicit error code"), not a wire-format issue.
 
 **Six additional load-bearing artifacts the plan adds beyond BUILD_PLAN's literal list:**
 
