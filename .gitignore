@@ -68,6 +68,14 @@ secrets/
 *.pem
 *.key
 
+# Narrow exception: Sprint-6 T13 fixture pack ships a deliberately-public
+# RSA public-key PEM used to verify the static AgentCard JWS in
+# `tests/unit/protocol/test_a2a_fixture_pack_admission.py`. The
+# corresponding private key was generated at fixture-author time and
+# discarded — only the .pub.pem (which is, by definition, public) is
+# tracked. The `*.pem` rule above remains in force for every other path.
+!tests/fixtures/cognic_test_agent_pack/cognic_test_agent_pack/agent_cards/test_agent.pub.pem
+
 # Build artefacts (Sprint 4+ supply chain bundles, ignored from CI checkouts)
 attestations/local/
 

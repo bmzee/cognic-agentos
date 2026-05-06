@@ -1,0 +1,17 @@
+{
+  "fixture_kind": "manifest_capabilities",
+  "manifest": {
+    "tool": {
+      "cognic": {
+        "a2a": {
+          "spec_version": "1.0",
+          "capabilities_supported": ["regulatory_qa", "citation_grounded"],
+          "streaming": true,
+          "artifacts_supported": true,
+          "extended_agent_card": false
+        }
+      }
+    }
+  },
+  "rationale": "Wave-1 declarations pass through verbatim; capabilities_supported preserved as Cognic semantic tags."
+}

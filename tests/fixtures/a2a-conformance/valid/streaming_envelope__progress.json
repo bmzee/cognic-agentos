@@ -1,0 +1,9 @@
+{
+  "statusUpdate": {
+    "taskId": "tasks/conf-stream-1",
+    "contextId": "ctx-conf-1",
+    "status": {
+      "state": "TASK_STATE_WORKING"
+    }
+  }
+}

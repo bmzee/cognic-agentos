@@ -1,0 +1,10 @@
+{
+  "jsonrpc": "2.0",
+  "id": "req-conf-cancel-001",
+  "method": "tasks/cancel",
+  "params": {
+    "tenant": "bank_a",
+    "id": "task-conf-cancel-1",
+    "metadata": {}
+  }
+}

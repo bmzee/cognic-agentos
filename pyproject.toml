@@ -30,7 +30,7 @@ dependencies = [
     "opentelemetry-sdk>=1.28",
     "opentelemetry-instrumentation-fastapi>=0.49",
     "opentelemetry-exporter-otlp>=1.28",
-    "prometheus-client>=0.25",  # spec floor was >=0.26; lowered to PyPI reality (0.26 not yet released)
+    "prometheus-client>=0.25", # spec floor was >=0.26; lowered to PyPI reality (0.26 not yet released)
     "prometheus-fastapi-instrumentator>=7.1",
     "python-json-logger>=3.2",
     # Persistence + governance (Sprint 2 — promoted from [adapters] to base
@@ -39,9 +39,10 @@ dependencies = [
     # able to import these governance modules even without --extra adapters.
     # Driver-specific deps (asyncpg, oracledb, qdrant-client, hvac, langfuse)
     # stay in [project.optional-dependencies].adapters.
-    "sqlalchemy[asyncio]>=2.0",   # carryover floor from Sprint 1C (was promoted unchanged)
-    "alembic>=1.16",              # carryover floor from Sprint 1C (was promoted unchanged)
-    "greenlet>=3.0",              # SQLAlchemy[asyncio] dep; explicit floor
+    "sqlalchemy[asyncio]>=2.0", # carryover floor from Sprint 1C (was promoted unchanged)
+    "alembic>=1.16", # carryover floor from Sprint 1C (was promoted unchanged)
+    "greenlet>=3.0", # SQLAlchemy[asyncio] dep; explicit floor
+    "python-ulid>=3.1.0",
 ]
 
 [project.optional-dependencies]
@@ -81,6 +82,42 @@ adapters = [
     # call require_mcp() at construction. Pinned exactly (no ^/~ ranges)
     # because version drift is a registration-time contract change.
     "mcp == 1.27.0",
+    # A2A endpoint (Sprint 6, per ADR-003 + docs/A2A-CONFORMANCE.md).
+    # Official Linux-Foundation-governed Python SDK. Provides the
+    # spec-canonical Pydantic types (generated from protobuf) for two
+    # disjoint module classes:
+    #   (a) SDK-consuming runtime modules — module-level + construction-
+    #       level SDK use; gated by require_a2a() at construction.
+    #       protocol/a2a_endpoint (T9 task lifecycle),
+    #       protocol/a2a_streaming (T10 streaming envelopes),
+    #       protocol/a2a_artifacts (T11 artifact references).
+    #   (b) Lazy schema re-export module — TYPE_CHECKING-only imports
+    #       at module level + lazy SDK access via _types() function;
+    #       the module itself imports cleanly without the SDK installed.
+    #       protocol/a2a_schema (T6 stable re-exports + drift digests).
+    # Admission-side modules (a2a_authz, a2a_agent_cards, a2a_version,
+    # a2a_errors, a2a_capability_negotiation, a2a_cancellation) are
+    # SDK-FREE per Sprint-6 R3 P1 + Sprint-6 T2 R2 P2 #1 doctrine —
+    # a2a_version is a pure-functional 6-case A2A-Version header parser
+    # with no SDK dependency; a2a_errors owns the spec-code Literal
+    # vocabulary (string-typed wire codes, not SDK types); the T11
+    # small modules consume only that Literal vocabulary + pack-manifest
+    # data. Future maintainers must NOT move a2a_schema into the
+    # runtime-side optional-deps map — its import path is genuinely
+    # SDK-free and the lazy boundary is what keeps it admission-safe.
+    # Import namespace is `a2a` (NOT `a2a_sdk`, NOT `a2a_protocol` —
+    # the latter is an unrelated 0.1.0 PyPI package). Pinned exactly:
+    # version drift is a wire-protocol contract change tied to the
+    # schema-drift CI gate (T6).
+    "a2a-sdk == 1.0.2",
+    # JWS verification for A2A Agent Card detached signatures (Sprint 6
+    # T7, per A2A-CONFORMANCE.md §"Card signatures (JWS)"). joserfc was
+    # picked (over python-jose, which is abandoned + lacks RFC-7797
+    # support, and over jwcrypto, which is older + uses a different
+    # crypto family) because (a) explicit RFC-7797 detached-JWS API
+    # surface; (b) actively maintained by the authlib author; (c)
+    # transitively reuses cryptography>=45 (already pinned for cosign).
+    "joserfc == 1.6.4",
 ]
 
 [project.urls]
@@ -116,6 +153,7 @@ markers = [
     "integration: integration tests requiring external services",
     "oracle: tests requiring the live Oracle XE compose overlay (env-gated via COGNIC_RUN_ORACLE_INTEGRATION=1)",
     "postgres: tests requiring the live Postgres compose service (env-gated via COGNIC_RUN_POSTGRES_INTEGRATION=1)",
+    "a2a_upstream: env-gated upstream A2A schema-drift gate (Sprint-6 T6, env-gated via COGNIC_RUN_A2A_UPSTREAM=1; CI runs on the a2a-spec-drift lane)",
 ]
 
 [tool.ruff]
@@ -162,6 +200,17 @@ disallow_untyped_defs = false
 # small and exercised end-to-end by adapter tests.
 [[tool.mypy.overrides]]
 module = ["hvac.*"]
+ignore_missing_imports = true
+
+# Sprint-6 T7 — google.protobuf ships no stubs in the dependency
+# tree we lock against (types-protobuf would need to be added to
+# dev-deps). The protobuf surface a2a_agent_cards uses is narrow
+# (json_format.Parse + DecodeError), and the strict-typing surface
+# we DO control treats the parsed AgentCard as the typed re-export
+# from cognic_agentos.protocol.a2a_schema. Ignoring missing imports
+# at the boundary keeps the strict-typing posture for our own code.
+[[tool.mypy.overrides]]
+module = ["google.protobuf.*"]
 ignore_missing_imports = true
 
 [tool.coverage.run]

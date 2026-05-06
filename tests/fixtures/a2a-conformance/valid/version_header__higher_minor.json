@@ -1,0 +1,5 @@
+{
+  "fixture_kind": "version_header",
+  "header_value": "1.99",
+  "rationale": "Higher minor proceeds with feature-degradation warning per ADR-003 §Version negotiation."
+}

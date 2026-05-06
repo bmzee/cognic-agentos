@@ -48,6 +48,27 @@ path that ADR-002 (MCP plugin protocol amendment April 2026) and the
 April-2026 OX-Security disclosures' threat model depend on, and ride
 the same strict 95% line / 90% branch floor; gate size grows from 16
 modules to 21.
+
+Sprint 6 T15 extends the gate with the A2A endpoint septet —
+``protocol/a2a_authz.py`` (per-tenant pinned-token validator),
+``protocol/a2a_agent_cards.py`` (three-pass Agent Card validator +
+JWS verifier; T14 added the 7th profile gate
+``agent_card_profile_wave2_auth_required`` for cards declaring
+mtlsSecurityScheme — 11-value AgentCardValidationReason),
+``protocol/a2a_endpoint.py`` (inbound receiver + task lifecycle
+state machine + cross-agent chain linkage),
+``protocol/a2a_schema.py`` (pinned A2A 1.0 wire-format types),
+``protocol/a2a_version.py`` (A2A-Version 6-case header negotiation —
+R0/R2 promoted from non-critical because version negotiation IS
+wire-protocol surface per AGENTS.md §"Wire-protocol contracts"),
+``protocol/a2a_errors.py`` (spec wire ``A2AErrorCode`` 14 values +
+AgentOS ``A2APolicyRefusalReason`` 11 values + their mapping; R3
+promoted from non-critical because the mapping IS wire-protocol
+contract), and ``protocol/ui_events.py`` (Wave-1 typed event
+taxonomy + emit-hook layer per ADR-020 — public event schema, MUST
+remain backward-compatible across versions). All seven ride the
+same strict 95% line / 90% branch floor; gate size grows from 21
+modules to 28.
 """
 
 from __future__ import annotations
@@ -180,6 +201,62 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     ("src/cognic_agentos/protocol/mcp_manifest.py", 0.95, 0.90),
     ("src/cognic_agentos/protocol/mcp_transports.py", 0.95, 0.90),
     ("src/cognic_agentos/protocol/mcp_host.py", 0.95, 0.90),
+    # Sprint 6 T15 — A2A endpoint septet (R2 P2 #4 reviewer correction
+    # expanded the original quintet with ``a2a_version.py`` — version
+    # negotiation IS wire-protocol surface per AGENTS.md
+    # §"Wire-protocol contracts"; R3 P2 #2 reviewer correction added
+    # ``a2a_errors.py`` — the spec wire error enum + AgentOS policy-
+    # refusal enum + their mapping all live there, and drift in any of
+    # those is wire-protocol-public). The Sprint-6 plan-of-record
+    # nominates these **seven** modules as the A2A critical-controls
+    # floor; T15 lands them in this gate. T16 is the corresponding
+    # AGENTS.md doctrine update that mirrors this gate under a new
+    # "Protocol — A2A endpoint (Sprint 6)" section. All seven ride the
+    # same single strict 95% line / 90% branch floor as
+    # Sprint-2/2.5/3/4/5 modules:
+    #   * ``a2a_authz.py`` is the per-tenant pinned-token validator —
+    #     closed-enum 8-value A2AAuthzReason; Vault-read exception
+    #     mapping per Sprint-5 T15 R1 P2 #2 doctrine.
+    #   * ``a2a_agent_cards.py`` is the three-pass Agent Card validator
+    #     + JWS verifier. Pass 1 upstream A2A 1.0 schema; Pass 2
+    #     AgentOS bank-grade profile (T14 added the 7th profile gate
+    #     ``agent_card_profile_wave2_auth_required`` for cards
+    #     declaring mtlsSecurityScheme — 11-value
+    #     AgentCardValidationReason). JWS rides Sprint-4 trust root.
+    #     Identity-routing critical: a forged card routes outbound
+    #     traffic to attacker-controlled endpoints.
+    #   * ``a2a_endpoint.py`` is the inbound receiver + task lifecycle
+    #     state machine + cross-agent chain linkage. Anonymous-refusal
+    #     gate + Wave-2-refusal gate live here. Single-writer for the
+    #     TaskState transitions.
+    #   * ``a2a_schema.py`` is the pinned A2A 1.0 wire-format types.
+    #     Wire-format drift = wire-protocol break; the schema-drift CI
+    #     gate (test_a2a_schema_drift.py) catches upstream movement
+    #     before it reaches us. Pinned digest constants + the upstream
+    #     URL constants live here.
+    #   * ``a2a_version.py`` is the A2A-Version 6-case header
+    #     negotiation matrix. Wire-protocol gate every inbound A2A
+    #     call passes through; closed-enum A2AVersionOutcome carries
+    #     the per-case behaviour. Module is small + pure-functional but
+    #     the doctrinal surface is wire-protocol-public (R0 P2 #4 +
+    #     R2 P2 #4 reviewer corrections promoted from non-critical).
+    #   * ``a2a_errors.py`` owns the spec wire ``A2AErrorCode`` literal
+    #     (14 spec-defined codes) + the AgentOS ``A2APolicyRefusalReason``
+    #     literal (11 policy reasons) + ``_POLICY_REASON_TO_SPEC_CODE``
+    #     mapping (drives the error-response builder; what remote
+    #     callers actually see). Drift in any of these is wire-protocol-
+    #     public; promoted from non-critical at R3 P2 #2.
+    #   * ``ui_events.py`` is the Wave-1 typed event taxonomy + emit-
+    #     hook layer per ADR-020. Public event schema; MUST remain
+    #     backward-compatible across versions. Per ADR-020 stop rule
+    #     on the AGENTS.md critical-controls list.
+    ("src/cognic_agentos/protocol/a2a_authz.py", 0.95, 0.90),
+    ("src/cognic_agentos/protocol/a2a_agent_cards.py", 0.95, 0.90),
+    ("src/cognic_agentos/protocol/a2a_endpoint.py", 0.95, 0.90),
+    ("src/cognic_agentos/protocol/a2a_schema.py", 0.95, 0.90),
+    ("src/cognic_agentos/protocol/a2a_version.py", 0.95, 0.90),
+    ("src/cognic_agentos/protocol/a2a_errors.py", 0.95, 0.90),
+    ("src/cognic_agentos/protocol/ui_events.py", 0.95, 0.90),
 )
 
 

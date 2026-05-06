@@ -1,0 +1,33 @@
+{
+  "_type": "https://in-toto.io/Statement/v1",
+  "predicateType": "https://slsa.dev/provenance/v1",
+  "subject": [
+    {
+      "name": "cognic-test-agent-pack",
+      "digest": {"sha256": "0000000000000000000000000000000000000000000000000000000000000006"}
+    }
+  ],
+  "predicate": {
+    "buildDefinition": {
+      "buildType": "https://github.com/actions/runner/v1",
+      "externalParameters": {
+        "configSource": "git+https://github.com/cognic/cognic-test-agent-pack@v0.1.0"
+      },
+      "internalParameters": {},
+      "resolvedDependencies": []
+    },
+    "runDetails": {
+      "builder": {
+        "id": "https://github.com/actions/runner",
+        "version": {"runner": "2.310.0"}
+      },
+      "metadata": {
+        "invocationId": "fixture-invocation-0006",
+        "startedOn": "2026-05-06T00:00:00Z",
+        "finishedOn": "2026-05-06T00:00:30Z"
+      },
+      "byproducts": []
+    },
+    "slsaLevel": 3
+  }
+}

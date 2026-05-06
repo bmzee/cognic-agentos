@@ -1,0 +1,7 @@
+{
+  "spec_code": "unsupported_operation",
+  "policy_reason": "wave2_feature_refused",
+  "validator": "A2AEndpoint._classify_wave2_feature",
+  "wave2_feature": "multimodal_payload",
+  "rationale": "Part with raw oneof field set — Wave-2 multimodal payload per A2A 1.0 Part proto."
+}

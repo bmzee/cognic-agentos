@@ -6,6 +6,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from cognic_agentos.core import config as config_module
 from cognic_agentos.core.config import (
@@ -818,3 +819,322 @@ class TestMcpSettings:
         )
         s = Settings(_env_file=None, runtime_profile="prod")  # type: ignore[call-arg]
         assert s.mcp_oauth_credentials_path == "secret/data/{tenant}/oauth/{as_host}/creds"
+
+
+# ---------------------------------------------------------------------------
+# Sprint 6 — A2A endpoint + UI event-stream stub settings (T1)
+# ---------------------------------------------------------------------------
+
+
+class TestSprint6A2ASettings:
+    """Sprint-6 T1 settings contract per the plan-of-record at
+    ``docs/superpowers/plans/2026-05-04-sprint-6-a2a-endpoint.md``.
+
+    Seven new settings cover the A2A endpoint surface (token cache,
+    artifact retention, pinned spec version, schema-drift CI gate,
+    JWS size cap, in/outbound HTTP timeouts). Each carries a
+    fail-closed default + a positive-value validator where
+    applicable; ``a2a_pinned_spec_version`` matches a strict
+    ``^[0-9]+\\.[0-9]+$`` pattern so version bumps are deliberate.
+    """
+
+    def test_a2a_token_cache_ttl_s_default(self) -> None:
+        """Default 3600s matches Sprint-5 ``mcp_oauth_token_cache_ttl_s``
+        per R1 P3 reviewer correction (was 300 in the original draft)."""
+        s = build_settings_without_env_file()
+        assert s.a2a_token_cache_ttl_s == 3600
+
+    def test_a2a_artifact_retention_seconds_default(self) -> None:
+        s = build_settings_without_env_file()
+        assert s.a2a_artifact_retention_seconds == 7 * 24 * 3600
+
+    def test_a2a_artifact_inline_threshold_bytes_default(self) -> None:
+        """Sprint-6 T11 R0 doctrine #4: deployment-tunable inline-vs-
+        store threshold (was a hardcoded 64 KiB constant in the plan
+        skeleton; promoted to Settings per AGENTS.md production-grade
+        rule)."""
+        s = build_settings_without_env_file()
+        assert s.a2a_artifact_inline_threshold_bytes == 64 * 1024
+
+    def test_a2a_pinned_spec_version_default(self) -> None:
+        s = build_settings_without_env_file()
+        assert s.a2a_pinned_spec_version == "1.0"
+
+    def test_a2a_schema_drift_check_enabled_default(self) -> None:
+        """Drift check OFF by default; CI sets COGNIC_RUN_A2A_UPSTREAM=1
+        to opt in. The check itself is in
+        tests/unit/protocol/test_a2a_schema_drift.py (T6)."""
+        s = build_settings_without_env_file()
+        assert s.a2a_schema_drift_check_enabled is False
+
+    def test_a2a_card_jws_max_size_bytes_default(self) -> None:
+        """64 KiB cap matches the AgentCard size budget the trust
+        gate validates against; larger files are an attack vector
+        (DoS via large-blob signature verification + memory pressure)."""
+        s = build_settings_without_env_file()
+        assert s.a2a_card_jws_max_size_bytes == 64 * 1024
+
+    def test_a2a_outbound_request_timeout_s_default(self) -> None:
+        """30s matches Sprint-5 ``mcp_oauth_request_timeout_s`` for
+        operational consistency."""
+        s = build_settings_without_env_file()
+        assert s.a2a_outbound_request_timeout_s == 30
+
+    def test_a2a_inbound_request_timeout_s_default(self) -> None:
+        """Inbound timeout is the deadline for ``A2AEndpoint.handle()``
+        to produce a response on a non-streaming task."""
+        s = build_settings_without_env_file()
+        assert s.a2a_inbound_request_timeout_s == 60
+
+    def test_a2a_outbound_timeout_must_be_positive(self) -> None:
+        """Fail-closed: 0s would silently accept hung connections."""
+        with pytest.raises(ValidationError):
+            Settings(  # type: ignore[call-arg]
+                _env_file=None,
+                a2a_outbound_request_timeout_s=0,
+            )
+
+    def test_a2a_inbound_timeout_must_be_positive(self) -> None:
+        with pytest.raises(ValidationError):
+            Settings(  # type: ignore[call-arg]
+                _env_file=None,
+                a2a_inbound_request_timeout_s=0,
+            )
+
+    def test_a2a_card_jws_max_size_bytes_must_be_positive(self) -> None:
+        """Fail-closed: 0-byte cap would refuse every card."""
+        with pytest.raises(ValidationError):
+            Settings(  # type: ignore[call-arg]
+                _env_file=None,
+                a2a_card_jws_max_size_bytes=0,
+            )
+
+    def test_a2a_token_cache_ttl_must_be_positive(self) -> None:
+        with pytest.raises(ValidationError):
+            Settings(  # type: ignore[call-arg]
+                _env_file=None,
+                a2a_token_cache_ttl_s=0,
+            )
+
+    def test_a2a_artifact_retention_must_be_positive(self) -> None:
+        with pytest.raises(ValidationError):
+            Settings(  # type: ignore[call-arg]
+                _env_file=None,
+                a2a_artifact_retention_seconds=0,
+            )
+
+    def test_a2a_artifact_inline_threshold_must_be_positive(self) -> None:
+        """Fail-closed: 0-byte threshold would force EVERY artifact
+        through ObjectStore (forcing the inline path off entirely),
+        which is the wrong default for tiny payloads."""
+        with pytest.raises(ValidationError):
+            Settings(  # type: ignore[call-arg]
+                _env_file=None,
+                a2a_artifact_inline_threshold_bytes=0,
+            )
+
+    def test_a2a_pinned_spec_version_pattern_rejects_non_numeric(self) -> None:
+        """Strict ``^[0-9]+\\.[0-9]+$`` pattern means version bumps are
+        always deliberate (the schema-drift CI gate at T6 is the
+        only legitimate trigger)."""
+        with pytest.raises(ValidationError):
+            Settings(  # type: ignore[call-arg]
+                _env_file=None,
+                a2a_pinned_spec_version="1.0.beta",
+            )
+
+    def test_a2a_pinned_spec_version_env_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Operators bump the pinned version via env var; the strict
+        pattern still validates."""
+        monkeypatch.setenv("COGNIC_A2A_PINNED_SPEC_VERSION", "1.1")
+        s = Settings(_env_file=None, runtime_profile="prod")  # type: ignore[call-arg]
+        assert s.a2a_pinned_spec_version == "1.1"
+
+    def test_a2a_schema_drift_check_enabled_env_override(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The fully-qualified ``COGNIC_A2A_SCHEMA_DRIFT_CHECK_ENABLED``
+        env var flips the setting via the standard pydantic-settings
+        env-prefix binding."""
+        monkeypatch.setenv("COGNIC_A2A_SCHEMA_DRIFT_CHECK_ENABLED", "true")
+        s = Settings(_env_file=None, runtime_profile="prod")  # type: ignore[call-arg]
+        assert s.a2a_schema_drift_check_enabled is True
+
+    def test_a2a_schema_drift_check_enabled_via_run_a2a_upstream_alias(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """**R1 P2 regression** — the dedicated CI lane (per Doctrine
+        Decision C + the plan's §T6 a2a-spec-drift workflow snippet)
+        sets ``COGNIC_RUN_A2A_UPSTREAM=1``. Without the
+        ``AliasChoices`` binding on the field, that env var would NOT
+        flip ``a2a_schema_drift_check_enabled`` — the CI lane would
+        silently skip the upstream check despite setting the documented
+        env var. This test pins the alias so future maintainers can't
+        regress it.
+        """
+        monkeypatch.setenv("COGNIC_RUN_A2A_UPSTREAM", "1")
+        # Explicitly clear the fully-qualified var so the test only
+        # exercises the alias path.
+        monkeypatch.delenv("COGNIC_A2A_SCHEMA_DRIFT_CHECK_ENABLED", raising=False)
+        s = Settings(_env_file=None, runtime_profile="prod")  # type: ignore[call-arg]
+        assert s.a2a_schema_drift_check_enabled is True
+
+    def test_a2a_schema_drift_run_a2a_upstream_false_value(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The alias also honours falsy values per pydantic's bool
+        coercion (``"0"`` / ``"false"`` / ``""``). Operators turning
+        the env var off MUST get the default-False back, not a sticky
+        True."""
+        monkeypatch.setenv("COGNIC_RUN_A2A_UPSTREAM", "0")
+        monkeypatch.delenv("COGNIC_A2A_SCHEMA_DRIFT_CHECK_ENABLED", raising=False)
+        s = Settings(_env_file=None, runtime_profile="prod")  # type: ignore[call-arg]
+        assert s.a2a_schema_drift_check_enabled is False
+
+    def test_a2a_schema_drift_check_enabled_constructor_override(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """**R2 P2 regression** — adding ``validation_alias`` removes
+        the default name-based population, so without including the
+        field name itself in ``AliasChoices`` a direct constructor
+        override (``Settings(a2a_schema_drift_check_enabled=True)``)
+        would be silently dropped by ``extra='ignore'``. That sharp
+        edge would re-introduce the drift-gate skip in tests/factories
+        + any T6 runtime enable path. This test pins the
+        constructor-override path so future maintainers can't regress
+        it.
+        """
+        # Clear any env vars so we exercise the constructor path purely.
+        monkeypatch.delenv("COGNIC_A2A_SCHEMA_DRIFT_CHECK_ENABLED", raising=False)
+        monkeypatch.delenv("COGNIC_RUN_A2A_UPSTREAM", raising=False)
+        s = Settings(  # type: ignore[call-arg]
+            _env_file=None,
+            a2a_schema_drift_check_enabled=True,
+        )
+        assert s.a2a_schema_drift_check_enabled is True
+
+        # And the False side: explicit constructor False MUST stick
+        # even if a falsy env value is later set (which it isn't here,
+        # but pin the orthogonality so a future precedence bug surfaces).
+        s_false = Settings(  # type: ignore[call-arg]
+            _env_file=None,
+            a2a_schema_drift_check_enabled=False,
+        )
+        assert s_false.a2a_schema_drift_check_enabled is False
+
+
+# ---------------------------------------------------------------------------
+# Sprint 6 — closed-enum vocabulary scaffolding sanity (T1)
+# ---------------------------------------------------------------------------
+
+
+class TestSprint6ClosedEnumVocabulary:
+    """T1 declares the Sprint-6 closed-enum literals in
+    ``protocol/__init__.py``. Subsequent tasks (T5 authz, T6 schema,
+    T7 cards, T8 version, T9 endpoint, T11 errors) import them.
+
+    The drift detectors that pin literal-set arithmetic land at T11
+    (in ``test_a2a_errors.py``) + T6 (in ``test_a2a_schema.py``) +
+    Sprint-5's existing ``test_refusal_reason_completeness.py``
+    extended at T1 for the 6 new registry-side reasons. T1 just
+    asserts the vocab declarations are importable + carry the
+    expected member counts.
+    """
+
+    def test_a2a_authz_reason_has_8_values(self) -> None:
+        """8 values per file-structure §A2AAuthzReason (T5 will
+        extend the validator to fire each)."""
+        from typing import get_args
+
+        from cognic_agentos.protocol import A2AAuthzReason
+
+        assert len(get_args(A2AAuthzReason)) == 8
+
+    def test_a2a_version_outcome_has_6_values(self) -> None:
+        """6 values per ADR-003 §"Version negotiation" (T8 fires
+        each)."""
+        from typing import get_args
+
+        from cognic_agentos.protocol import A2AVersionOutcome
+
+        assert len(get_args(A2AVersionOutcome)) == 6
+
+    def test_a2a_error_code_has_14_spec_codes(self) -> None:
+        """14 spec-defined wire codes per A2A 1.0 §"Error codes":
+        5 JSON-RPC envelope errors + 9 A2A-specific. R2 P2 #1
+        reviewer correction split spec wire codes from AgentOS-
+        policy reasons; this counts the wire side only."""
+        from typing import get_args
+
+        from cognic_agentos.protocol import A2AErrorCode
+
+        assert len(get_args(A2AErrorCode)) == 14
+
+    def test_a2a_policy_refusal_reason_has_11_values(self) -> None:
+        """11 AgentOS-specific refusal reasons surfaced via
+        ``data.policy_reason`` detail field on top of a spec-conformant
+        ``error.code``. R2 P2 #1 split."""
+        from typing import get_args
+
+        from cognic_agentos.protocol import A2APolicyRefusalReason
+
+        assert len(get_args(A2APolicyRefusalReason)) == 11
+
+    def test_agent_card_validation_reason_has_11_values(self) -> None:
+        """11 values: 1 upstream-schema gate + 7 AgentOS-profile gates +
+        3 JWS-verification outcomes. T1 R1 P2 reviewer correction added
+        the 3 JWS values (without them T7's validator would have to
+        misclassify JWS failures as schema/profile failures or use
+        untyped strings, breaking the closed-enum mapping doctrine).
+        T14 R0 added the 7th profile gate
+        ``agent_card_profile_wave2_auth_required`` — cards declaring
+        ``mtlsSecurityScheme`` are refused under Wave-1 bearer-token
+        transport policy per A2A-CONFORMANCE.md §"Wave breakdown"
+        (Wave-1 = per-tenant pinned bearer token; Wave-2 = mTLS;
+        Wave-3 = verifiable credentials)."""
+        from typing import get_args
+
+        from cognic_agentos.protocol import AgentCardValidationReason
+
+        assert len(get_args(AgentCardValidationReason)) == 11
+
+    def test_agent_card_validation_reason_includes_jws_outcomes(self) -> None:
+        """**R1 P2 regression** — the three JWS-verification outcomes
+        (blob-unreadable, signature-invalid, signer-not-allowlisted)
+        MUST be in the literal so T7's two-pass validator + T7's
+        `plugin_registry` integration can map JWS failures onto the
+        correct registry RefusalReasons (`a2a_agent_card_jws_blob_unreadable`,
+        `a2a_agent_card_signature_invalid`,
+        `a2a_agent_card_signer_not_allowlisted`)."""
+        from typing import get_args
+
+        from cognic_agentos.protocol import AgentCardValidationReason
+
+        values = set(get_args(AgentCardValidationReason))
+        assert "agent_card_jws_blob_unreadable" in values
+        assert "agent_card_signature_invalid" in values
+        assert "agent_card_signer_not_allowlisted" in values
+
+    def test_a2a_authz_reason_uses_a2a_prefix(self) -> None:
+        """All A2AAuthzReason values carry the ``a2a_`` prefix
+        (mirrors Sprint-5 ``mcp_*`` convention)."""
+        from typing import get_args
+
+        from cognic_agentos.protocol import A2AAuthzReason
+
+        for value in get_args(A2AAuthzReason):
+            assert value.startswith("a2a_"), f"A2AAuthzReason {value!r} missing ``a2a_`` prefix"
+
+    def test_a2a_policy_refusal_reason_does_not_use_a2a_prefix(self) -> None:
+        """A2APolicyRefusalReason values are unprefixed because the
+        type name carries the namespace; mirrors Sprint-5 AuthzReason
+        layout. R3 P3 reviewer correction pinned this distinction."""
+        from typing import get_args
+
+        from cognic_agentos.protocol import A2APolicyRefusalReason
+
+        for value in get_args(A2APolicyRefusalReason):
+            assert not value.startswith("a2a_"), (
+                f"A2APolicyRefusalReason {value!r} should NOT carry "
+                f"the a2a_ prefix (the type name carries the namespace)"
+            )

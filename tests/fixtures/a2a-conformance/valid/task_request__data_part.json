@@ -1,0 +1,14 @@
+{
+  "jsonrpc": "2.0",
+  "id": "req-conf-002",
+  "method": "message/send",
+  "params": {
+    "message": {
+      "messageId": "msg-002",
+      "role": "ROLE_USER",
+      "parts": [
+        {"data": {"query": "structured", "k": "v"}}
+      ]
+    }
+  }
+}

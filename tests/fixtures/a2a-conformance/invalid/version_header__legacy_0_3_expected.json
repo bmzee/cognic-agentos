@@ -1,0 +1,6 @@
+{
+  "spec_code": "version_not_supported",
+  "validator": "a2a_version.negotiate_inbound_version",
+  "outcome": "legacy_rejected",
+  "rationale": "0.x versions are spec-legacy; AgentOS doesn't bundle a 0.3 implementation per Decision Lock #1 (silent upgrade forbidden)."
+}

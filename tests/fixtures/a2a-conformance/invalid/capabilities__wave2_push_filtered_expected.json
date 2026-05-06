@@ -1,0 +1,9 @@
+{
+  "spec_code": null,
+  "policy_reason": null,
+  "validator": "a2a_capability_negotiation.read_pack_capabilities",
+  "rationale": "Wave-2 push_notification_config=true is filtered to false (NOT raised as a wire error); the dropped declaration surfaces in deferred_wave2_features per Decision Lock #2.",
+  "expect_filtered_field": "push_notification_config",
+  "expect_push_notifications_value": false,
+  "expect_deferred_contains": "push_notification_config"
+}

@@ -1,0 +1,15 @@
+{
+  "artifactUpdate": {
+    "taskId": "tasks/conf-stream-1",
+    "contextId": "ctx-conf-1",
+    "artifact": {
+      "artifactId": "artifact-001",
+      "name": "output",
+      "parts": [
+        {"text": "chunk content"}
+      ]
+    },
+    "append": false,
+    "lastChunk": true
+  }
+}

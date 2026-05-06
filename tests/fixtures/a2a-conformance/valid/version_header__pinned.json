@@ -1,0 +1,5 @@
+{
+  "fixture_kind": "version_header",
+  "header_value": "1.0",
+  "rationale": "Pinned version matches AgentOS — accepted."
+}

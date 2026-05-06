@@ -76,6 +76,14 @@ _SPEC_URI_PREFIXES: tuple[str, ...] = (
     "https://in-toto.io/",
     "https://spdx.org/",
     "https://cyclonedx.org/",
+    # Sprint-6 T6 — A2A 1.0 spec source-of-truth at a pinned ``v1.0.0``
+    # tag URL. The drift CI gate (test_a2a_schema_drift.py) compares
+    # this URL's SHA-256 against ``_PINNED_PROTOBUF_DIGEST`` per
+    # Doctrine Decision C; a deliberate spec-author update to the
+    # v-tag (or our own bump) trips the gate. Same shape as the
+    # SPDX / CycloneDX / SLSA / in-toto exemptions: a fixed external
+    # standards body identifier, not an operational endpoint.
+    "https://raw.githubusercontent.com/a2aproject/A2A/",
 )
 
 
@@ -119,8 +127,8 @@ def _settings_subclasses(tree: ast.AST) -> set[ast.ClassDef]:
 
 def _module_level_uppercase_spec_constants(tree: ast.AST) -> set[int]:
     """Identify ``ast.Constant`` nodes that are the RHS of a module-
-    level Assign with an all-UPPERCASE ``Name`` target AND whose
-    string value matches a known spec/standard URI prefix
+    level Assign or AnnAssign with an all-UPPERCASE ``Name`` target
+    AND whose string value matches a known spec/standard URI prefix
     (``_SPEC_URI_PREFIXES``).
 
     Narrow exemption (R3 reviewer-P2 fix): previously any UPPERCASE
@@ -129,19 +137,35 @@ def _module_level_uppercase_spec_constants(tree: ast.AST) -> set[int]:
     ``PROD_API_URL = "https://bank.example"``. The exemption is now
     keyed off both UPPERCASE-name AND a known spec prefix; arbitrary
     operational URLs assigned to UPPERCASE names stay rejected.
+
+    Sprint-6 T6 widened to also recognise ``AnnAssign`` (annotated
+    assignments like ``_UPSTREAM_PROTOBUF_URL: str = "https://..."``)
+    so the exemption logic matches URL semantics, not assignment-
+    statement type. Annotated and unannotated assignments are
+    semantically equivalent for this guard.
     """
     if not isinstance(tree, ast.Module):
         return set()
     out: set[int] = set()
     for node in tree.body:
-        if not isinstance(node, ast.Assign):
+        targets: list[ast.expr]
+        value: ast.expr | None
+        if isinstance(node, ast.Assign):
+            targets = list(node.targets)
+            value = node.value
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+            value = node.value
+        else:
             continue
-        if not all(isinstance(t, ast.Name) and t.id.isupper() for t in node.targets):
+        if value is None:
             continue
-        if not isinstance(node.value, ast.Constant) or not isinstance(node.value.value, str):
+        if not all(isinstance(t, ast.Name) and t.id.isupper() for t in targets):
             continue
-        if any(node.value.value.startswith(p) for p in _SPEC_URI_PREFIXES):
-            out.add(id(node.value))
+        if not isinstance(value, ast.Constant) or not isinstance(value.value, str):
+            continue
+        if any(value.value.startswith(p) for p in _SPEC_URI_PREFIXES):
+            out.add(id(value))
     return out
 
 

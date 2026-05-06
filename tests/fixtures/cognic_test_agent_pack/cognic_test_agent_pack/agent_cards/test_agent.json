@@ -1,0 +1,65 @@
+{
+  "capabilities": {
+    "extendedAgentCard": false,
+    "pushNotifications": false,
+    "streaming": true
+  },
+  "defaultInputModes": [
+    "text/plain",
+    "application/json"
+  ],
+  "defaultOutputModes": [
+    "text/plain",
+    "application/json"
+  ],
+  "description": "Sprint-6 fixture agent \u2014 Wave-1 receiver smoke",
+  "name": "Cognic Test Agent",
+  "provider": {
+    "organization": "Cognic AgentOS Sprint-6 fixtures",
+    "url": "https://cognic.example/test"
+  },
+  "securityRequirements": [
+    {
+      "schemes": {
+        "bearer": {
+          "list": [
+            "a2a:invoke"
+          ]
+        }
+      }
+    }
+  ],
+  "securitySchemes": {
+    "bearer": {
+      "httpAuthSecurityScheme": {
+        "bearerFormat": "cognic-pinned-token",
+        "scheme": "bearer"
+      }
+    }
+  },
+  "signatures": [
+    {
+      "protected": "(jws-protected-header-placeholder)",
+      "signature": "(jws-signature-placeholder)"
+    }
+  ],
+  "skills": [
+    {
+      "description": "Sprint-6 fixture skill",
+      "id": "test_capability",
+      "name": "test_capability",
+      "tags": [
+        "test"
+      ]
+    }
+  ],
+  "supportedInterfaces": [
+    {
+      "protocolBinding": "JSONRPC",
+      "protocolVersion": "1.0",
+      "tenant": "bank_a",
+      "url": "https://packs.example/a2a"
+    }
+  ],
+  "version": "0.1.0"
+}

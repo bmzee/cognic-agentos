@@ -56,7 +56,7 @@ from cognic_agentos.observability import (
     silence_uvicorn_access_log,
 )
 from cognic_agentos.portal.api.system_routes import build_system_router
-from cognic_agentos.protocol import is_mcp_available
+from cognic_agentos.protocol import is_a2a_available, is_mcp_available
 from cognic_agentos.protocol.plugin_registry import PluginRegistry
 
 logger = logging.getLogger(__name__)
@@ -335,4 +335,43 @@ def create_prod_app() -> FastAPI:
                 ),
             },
         )
+
+    # Sprint-6 T2: A2A SDK presence check. Mirrors the MCP branch
+    # above — same R3 P1 doctrine: kernel image stays SDK-free;
+    # default-adapters image carries the SDK. T2 ONLY logs SDK
+    # presence here. Route mounting is deferred per the plan's
+    # R0 P2 reviewer correction (the factory MUST NOT promise wiring
+    # it doesn't actually do — same overclaim trap Sprint-5 T15 R1
+    # P2 #1 caught with MCPHost):
+    #   - T9 will mount `routes.a2a` (POST /api/v1/a2a receiver)
+    #   - T11 will mount `routes.a2a_capabilities` /
+    #     `routes.a2a_cancellation` / `routes.a2a_artifacts`
+    #   - T12 will wire UI-event emit hooks at the harness boundary
+    #     (NO HTTP route — Sprint 7B owns the SSE endpoint per
+    #     ADR-020 phase table)
+    if is_a2a_available():
+        logger.info("a2a.sdk_present_at_startup", extra={"image": "default-adapters"})
+    else:
+        # Kernel image (or any venv missing `a2a-sdk`). Admission-side
+        # A2A modules (a2a_authz, a2a_agent_cards, a2a_schema,
+        # a2a_version) import + construct without the SDK installed
+        # (per Sprint-5 R3 P1 + Sprint-6 same doctrine — SDK-free);
+        # runtime serving (A2AEndpoint.handle, streaming, artifacts)
+        # is unavailable here.
+        logger.warning(
+            "a2a.endpoint_unavailable_in_image",
+            extra={
+                "missing_module": "a2a",
+                "optional_dep_group": "adapters",
+                "remediation": (
+                    "rebuild image with --extra adapters to wire "
+                    "A2AEndpoint, or use the kernel image only for "
+                    "governance + audit + admission-side surfaces "
+                    "(per-tenant token validation, AgentCard JWS "
+                    "verification, manifest checks all work without "
+                    "the SDK per Sprint-6 R3 P1 doctrine)"
+                ),
+            },
+        )
+
     return app

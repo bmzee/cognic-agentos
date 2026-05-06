@@ -61,9 +61,13 @@ import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from cognic_agentos.core.audit import AuditEvent, AuditStore
 from cognic_agentos.core.config import Settings
+
+if TYPE_CHECKING:
+    from cognic_agentos.db.adapters.protocols import SecretAdapter
 
 _LOG = logging.getLogger("cognic_agentos.protocol.trust_gate")
 
@@ -76,6 +80,16 @@ _PACK_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,127}$")
 #: Version regex — PEP 440 superset (``^[0-9A-Za-z.+_-]{1,64}$``). Same
 #: shell-metacharacter immunity property as ``_PACK_ID_RE``.
 _VERSION_RE = re.compile(r"^[0-9A-Za-z.+_-]{1,64}$")
+
+#: Tenant identity regex — same shape as the pack-id regex; refuses
+#: every path metacharacter (``/``, ``..``, newline, ``\0``, raw
+#: percent-encoded sequences). Used by :meth:`TrustGate.verify_jws_blob`
+#: (T7) to validate ``tenant_id`` BEFORE interpolation into the
+#: per-tenant Vault path. Without this gate, a malformed tenant id
+#: like ``bank_a/../bank_b`` could address a different secret
+#: depending on the SecretAdapter's path-resolution behaviour —
+#: exactly the per-tenant boundary this trust root protects.
+_TENANT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 #: Subprocess env — only PATH + HOME. ``os.environ`` is NOT passed
 #: through. Anything cosign needs from the environment must come from
@@ -131,6 +145,32 @@ class PathTraversalError(TrustGateError, ValueError):
     ``except TrustGateError:`` catches it) and ``ValueError`` (so the
     standard library's path-tools idiom of ``except ValueError:``
     catches it too).
+    """
+
+
+class TrustGateSignerNotAllowlistedError(TrustGateError):
+    """Raised by :meth:`TrustGate.verify_jws_blob` when the JWS
+    advertises a ``kid`` that is NOT on the per-tenant trust root.
+
+    Distinct from the generic :class:`TrustGateError` (which covers
+    JWS parse failures + cryptographic signature mismatches) so
+    callers can map the two failure modes onto distinct closed-enum
+    reasons. Sprint-6 :class:`A2AAgentCardVerifier` (T7) catches
+    this subclass BEFORE the parent ``TrustGateError`` to route
+    signer-allow-list failures onto
+    ``agent_card_signer_not_allowlisted`` and cryptographic
+    mismatches onto ``agent_card_signature_invalid``.
+
+    Operationally distinct: a signer-not-allowlisted failure means
+    rotate the per-tenant trust root + re-register; a signature-
+    invalid failure means the card was tampered with after signing.
+    Different audit categories + different operator runbooks.
+
+    Inherits from :class:`TrustGateError` so a caller that ONLY
+    catches the parent still sees the failure (defensive Python
+    isinstance behaviour). Callers MUST place the
+    ``except TrustGateSignerNotAllowlistedError`` clause BEFORE
+    ``except TrustGateError`` to preserve closed-enum routing.
     """
 
 
@@ -213,15 +253,27 @@ class TrustGate:
 
     Construction takes ``settings`` (for the cosign-path, timeout, and
     root-prefix configuration) + an ``AuditStore`` (for the timeout
-    audit emission). The cosign binary is resolved at construction via
+    audit emission) + an optional :class:`SecretAdapter` (Sprint-6 T7
+    addition — required for :meth:`verify_jws_blob` Agent Card JWS
+    verification; left as ``None`` for callers that only need the
+    Sprint-4 cosign verification surface).
+
+    The cosign binary is resolved at construction via
     ``shutil.which``; ``CosignNotInstalledError`` is deferred to the
     first ``verify_pack_signature`` call so a kernel-image boot that
     never reaches the trust gate doesn't fail.
     """
 
-    def __init__(self, *, settings: Settings, audit_store: AuditStore) -> None:
+    def __init__(
+        self,
+        *,
+        settings: Settings,
+        audit_store: AuditStore,
+        secret_adapter: SecretAdapter | None = None,
+    ) -> None:
         self._settings = settings
         self._audit_store = audit_store
+        self._secret_adapter = secret_adapter
         # § 2 invariant 2: resolve at construction; defer the missing-
         # binary error to first call. ``shutil.which`` returns the
         # absolute path or None.
@@ -232,6 +284,190 @@ class TrustGate:
     def cosign_bin(self) -> str | None:
         """Resolved cosign path; None when ``shutil.which`` came up empty."""
         return self._cosign_bin
+
+    async def verify_jws_blob(
+        self,
+        *,
+        jws_bytes: bytes,
+        payload_bytes: bytes,
+        tenant_id: str,
+    ) -> None:
+        """Verify a detached JWS over an arbitrary payload using the
+        per-tenant trust root.
+
+        Used by Sprint-6 :class:`A2AAgentCardVerifier` (T7) to verify
+        Agent Card detached JWS files. The same per-tenant trust
+        authority that signs the wheel (Sprint-4 cosign) is expected
+        to sign the Agent Card; T7's Vault layout stores JWS-format
+        public keys at
+        ``secret/cognic/<tenant>/a2a-jws-trust-root`` as a list of
+        ``{"kid": "<key-id>", "pem": "<PEM-encoded public key>"}``
+        entries.
+
+        Per Sprint-6 plan-of-record T7 R4 P2 reviewer correction +
+        the Sprint-5 T15 R1 P2 #2 + #3 doctrine:
+
+        - Raises :class:`TrustGateSignerNotAllowlistedError` (subclass
+          of :class:`TrustGateError`) when the JWS advertises a
+          ``kid`` that is NOT on the per-tenant trust root. Operator
+          fix: rotate the trust root or have the agent re-sign with
+          an allow-listed key.
+        - Raises :class:`TrustGateError` on every other failure mode
+          (no ``kid`` AND no key verifies; ``kid`` resolves to a key
+          but the cryptographic verify fails; JWS bytes are
+          unparseable; supported algorithm mismatch; size cap
+          exceeded). Operator fix: investigate the card's signing
+          pipeline.
+        - Propagates :class:`asyncio.CancelledError` unwrapped per
+          Sprint-5 T15 R1 P2 #2 doctrine.
+        - Returns ``None`` on success.
+
+        ``payload_bytes`` is the **detached** card JSON (the bytes
+        the JWS was computed over, not embedded in the JWS itself —
+        RFC 7797). ``joserfc`` performs the cryptographic verify
+        with these bytes provided via the ``payload=`` kwarg.
+
+        Caller MUST catch the subclass BEFORE the parent for
+        closed-enum routing:
+
+        .. code-block:: python
+
+            try:
+                await trust_gate.verify_jws_blob(...)
+            except TrustGateSignerNotAllowlistedError:
+                # signer key not on trust root
+                ...
+            except TrustGateError:
+                # signature mismatch / parse failure
+                ...
+        """
+        if self._secret_adapter is None:
+            raise TrustGateError(
+                "TrustGate.verify_jws_blob requires a secret_adapter at "
+                "construction time; this instance was built without one. "
+                "Wire the Vault SecretAdapter through "
+                "create_prod_app's TrustGate construction site."
+            )
+
+        # T7 R1 P2 #2 reviewer correction: validate ``tenant_id``
+        # against a strict regex BEFORE interpolating it into the
+        # Vault path. A malformed tenant id like ``bank_a/../bank_b``
+        # would address a different secret depending on the
+        # SecretAdapter's path-resolution semantics — exactly the
+        # per-tenant boundary this trust root protects. The
+        # exception message intentionally does NOT echo the raw
+        # tenant text (which could be attacker-controlled) — only
+        # the field name + the validation regex source. The audit
+        # surface that consumes this exception logs the request_id,
+        # not the raw tenant value.
+        if not isinstance(tenant_id, str) or not _TENANT_ID_RE.match(tenant_id):
+            raise TrustGateError(
+                "tenant_id failed strict-segment validation; "
+                "expected match for ``^[a-z0-9][a-z0-9_-]{0,63}$``"
+            )
+
+        # 1. Parse the JWS to extract its protected header (which
+        #    carries the signing-key id under "kid"). ``extract_compact``
+        #    returns the parsed structure WITHOUT verifying the
+        #    signature — verification happens in step 3 after we've
+        #    decided which key to verify against.
+        from joserfc import jws as _jws_module
+        from joserfc.errors import DecodeError, JoseError
+
+        try:
+            extracted = _jws_module.extract_compact(jws_bytes)
+        except (DecodeError, JoseError, ValueError) as exc:
+            raise TrustGateError(f"JWS unparseable: {type(exc).__name__}") from exc
+
+        kid = extracted.headers().get("kid") if extracted.headers() else None
+        alg = extracted.headers().get("alg") if extracted.headers() else None
+
+        # 2. Resolve the per-tenant JWS trust root via Vault.
+        try:
+            trust_root_payload = await self._secret_adapter.read(
+                f"secret/cognic/{tenant_id}/a2a-jws-trust-root"
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            raise TrustGateError(
+                f"per-tenant JWS trust root read failed: {type(exc).__name__}"
+            ) from exc
+
+        if not isinstance(trust_root_payload, dict):
+            raise TrustGateError("per-tenant JWS trust root payload is not a mapping")
+        keys_field = trust_root_payload.get("keys", [])
+        if not isinstance(keys_field, list):
+            raise TrustGateError("per-tenant JWS trust root 'keys' field is not a list")
+
+        keyring: dict[str, str] = {}
+        for entry in keys_field:
+            if not isinstance(entry, dict):
+                continue
+            entry_kid = entry.get("kid")
+            entry_pem = entry.get("pem")
+            if isinstance(entry_kid, str) and isinstance(entry_pem, str):
+                keyring[entry_kid] = entry_pem
+
+        if not keyring:
+            raise TrustGateError(
+                "per-tenant JWS trust root has no usable keys (every "
+                "entry must be a {kid, pem} dict of strings)"
+            )
+
+        # 3. Allow-list check. If the JWS advertises a kid, that kid
+        #    MUST be on the per-tenant trust root. Distinct closed-
+        #    enum reason from cryptographic-verify failure.
+        if kid is None:
+            # No kid header — cannot resolve a specific key on the
+            # allow-list. Treat as invalid signature (caller maps
+            # to ``agent_card_signature_invalid``).
+            raise TrustGateError(
+                "JWS protected header is missing 'kid'; cannot resolve "
+                "signing key against per-tenant trust root"
+            )
+        if kid not in keyring:
+            raise TrustGateSignerNotAllowlistedError(
+                # T7 R1 P2 #2: do NOT interpolate raw tenant_id into
+                # exception text — even though the validator above
+                # has rejected path-metacharacter shapes, the
+                # exception message reaches operator log surfaces
+                # where tenant identifiers are PII-class data.
+                "JWS signer kid is not on the per-tenant trust root"
+            )
+
+        # 4. Cryptographic verification via joserfc. The detached
+        #    payload is passed via the ``payload=`` kwarg per RFC 7797.
+        from joserfc.errors import BadSignatureError
+        from joserfc.jwk import RSAKey
+
+        try:
+            public_key = RSAKey.import_key(keyring[kid])
+        except Exception as exc:
+            raise TrustGateError(
+                f"per-tenant JWS public key import failed: {type(exc).__name__}"
+            ) from exc
+
+        algorithms = [alg] if alg else None
+
+        try:
+            _jws_module.deserialize_compact(
+                jws_bytes,
+                public_key,
+                algorithms=algorithms,
+                payload=payload_bytes,
+            )
+        except BadSignatureError as exc:
+            raise TrustGateError(
+                f"JWS cryptographic verification failed: {type(exc).__name__}"
+            ) from exc
+        except (DecodeError, JoseError, ValueError) as exc:
+            # Already-parsed JWS that fails on detached-payload
+            # verification (e.g., RFC 7797 mode mismatch). Maps
+            # to signature-invalid.
+            raise TrustGateError(
+                f"JWS detached-payload verification failed: {type(exc).__name__}"
+            ) from exc
 
     async def verify_pack_signature(
         self,
@@ -456,4 +692,5 @@ __all__ = (
     "PathTraversalError",
     "TrustGate",
     "TrustGateError",
+    "TrustGateSignerNotAllowlistedError",
 )

@@ -1,0 +1,4 @@
+{
+  "fixture_kind": "wave2_payload",
+  "payload_bytes": "{\"jsonrpc\":\"2.0\",\"id\":\"req-w2-rs\",\"method\":\"tasks/resubscribe\",\"params\":{\"name\":\"tasks/foo\"}}"
+}

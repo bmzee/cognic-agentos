@@ -963,3 +963,301 @@ class TestExceptionTaxonomy:
         stdlib ``except ValueError:`` idiom catches it (the local
         object-store adapter follows the same convention)."""
         assert issubclass(PathTraversalError, ValueError)
+
+
+# ---------------------------------------------------------------------------
+# TestVerifyJwsBlobNegativePaths — Sprint-6 amendment (post-T14, pre-T15).
+#
+# ``verify_jws_blob`` is the runtime trust path the Sprint-6 A2A AgentCard
+# verifier rides on. Its happy-path is exercised end-to-end by
+# ``test_a2a_agent_cards.py`` against a real keypair + real Vault payload,
+# and its tampered-payload regression lives in
+# ``test_a2a_fixture_pack_admission.py`` (BadSignatureError → TrustGateError).
+# This section pins the EIGHT named negative-path arms inside
+# ``verify_jws_blob`` that the integration paths don't directly exercise:
+#
+#   1. Vault read failure (secret_adapter.read raises a non-async-cancelled
+#      Exception → wrapped as TrustGateError).
+#   2. Trust-root payload not a dict (Vault returned str/list).
+#   3. ``keys`` field not a list.
+#   4. Malformed key entry SKIP (continue branch — non-dict entry mixed
+#      with valid entries; the verifier silently skips and proceeds).
+#   5. No usable keys after filtering (every entry malformed) → TrustGateError.
+#   6. JWS protected header missing ``kid`` → TrustGateError.
+#   7. Malformed PEM at the JWS's kid → RSAKey.import_key raises →
+#      TrustGateError.
+#   8. Unparseable / detached-payload verification failure (joserfc raises
+#      a non-BadSignatureError subclass of JoseError — e.g.,
+#      ``UnsupportedAlgorithmError``) → TrustGateError.
+#
+# These eight arms together close the critical-controls coverage gap on
+# trust_gate.py before Sprint-6 T15 extends the gate to the A2A septet
+# (per the per-file 95% line / 90% branch floor in
+# tools/check_critical_coverage.py).
+# ---------------------------------------------------------------------------
+
+
+class TestVerifyJwsBlobNegativePaths:
+    """Eight focused negative-path arms for ``verify_jws_blob``.
+
+    Each arm constructs a real :class:`TrustGate` with a mocked
+    ``secret_adapter`` (the subject IS the trust gate's branching;
+    Vault transport is not the subject). RSA keypair generation is
+    real but module-scoped via the existing fixture pattern."""
+
+    @staticmethod
+    def _make_trust_gate(
+        *,
+        secret_adapter_response: Any | None = None,
+        secret_adapter_exc: Exception | None = None,
+    ) -> TrustGate:
+        from unittest.mock import AsyncMock, MagicMock
+
+        secret_adapter = MagicMock()
+        if secret_adapter_exc is not None:
+            secret_adapter.read = AsyncMock(side_effect=secret_adapter_exc)
+        else:
+            secret_adapter.read = AsyncMock(return_value=secret_adapter_response)
+        audit_store = MagicMock()
+        audit_store.append = AsyncMock(return_value=(None, b""))
+        return TrustGate(
+            settings=build_settings_without_env_file(),
+            audit_store=audit_store,
+            secret_adapter=secret_adapter,
+        )
+
+    @staticmethod
+    def _real_keypair() -> tuple[bytes, bytes]:
+        """Generate a fresh RSA keypair for the amendment arms.
+
+        Module-scoping at the class level isn't worth it: the negative-
+        path arms each touch the keyring once or never; total RSA cost
+        across the section stays under one second."""
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+
+        priv = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        priv_pem = priv.private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        pub_pem = priv.public_key().public_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+        return priv_pem, pub_pem
+
+    @staticmethod
+    def _sign_detached(
+        priv_pem: bytes, *, kid: str = "k1", alg: str = "RS256"
+    ) -> tuple[bytes, bytes]:
+        """Produce a detached compact JWS over a fixed payload + return
+        ``(jws_bytes, payload_bytes)``."""
+        from joserfc import jws as jws_module
+        from joserfc.jwk import RSAKey
+
+        priv_key = RSAKey.import_key(priv_pem)
+        payload = b"trust-gate-amendment-payload"
+        compact = jws_module.serialize_compact({"alg": alg, "kid": kid}, payload, priv_key)
+        parts = compact.split(".")
+        detached = f"{parts[0]}..{parts[2]}".encode()
+        return detached, payload
+
+    # --- arm 1 ----------------------------------------------------------
+    async def test_vault_read_failure_wraps_as_trust_gate_error(self) -> None:
+        priv_pem, _ = self._real_keypair()
+        jws_bytes, payload_bytes = self._sign_detached(priv_pem)
+        gate = self._make_trust_gate(secret_adapter_exc=RuntimeError("vault transport down"))
+        with pytest.raises(TrustGateError) as excinfo:
+            await gate.verify_jws_blob(
+                jws_bytes=jws_bytes,
+                payload_bytes=payload_bytes,
+                tenant_id="bank_a",
+            )
+        # Closed-enum message includes the wrapped exception's class
+        # name (NOT the raw text per Sprint-5 T15 R1 P2 #3 doctrine).
+        assert "trust root read failed" in str(excinfo.value)
+        assert "RuntimeError" in str(excinfo.value)
+
+    # --- arm 2 ----------------------------------------------------------
+    async def test_non_dict_trust_root_payload_refused(self) -> None:
+        priv_pem, _ = self._real_keypair()
+        jws_bytes, payload_bytes = self._sign_detached(priv_pem)
+        # Vault returns a list instead of the expected dict — defensive
+        # validator must refuse rather than KeyError downstream.
+        gate = self._make_trust_gate(secret_adapter_response=["not", "a", "dict"])
+        with pytest.raises(TrustGateError) as excinfo:
+            await gate.verify_jws_blob(
+                jws_bytes=jws_bytes,
+                payload_bytes=payload_bytes,
+                tenant_id="bank_a",
+            )
+        assert "not a mapping" in str(excinfo.value)
+
+    # --- arm 3 ----------------------------------------------------------
+    async def test_non_list_keys_field_refused(self) -> None:
+        priv_pem, _ = self._real_keypair()
+        jws_bytes, payload_bytes = self._sign_detached(priv_pem)
+        # ``keys`` is a string instead of a list of {kid, pem} dicts.
+        gate = self._make_trust_gate(secret_adapter_response={"keys": "this-should-be-a-list"})
+        with pytest.raises(TrustGateError) as excinfo:
+            await gate.verify_jws_blob(
+                jws_bytes=jws_bytes,
+                payload_bytes=payload_bytes,
+                tenant_id="bank_a",
+            )
+        assert "keys" in str(excinfo.value) and "not a list" in str(excinfo.value)
+
+    # --- arm 4 ----------------------------------------------------------
+    async def test_malformed_key_entry_skipped_silently(self) -> None:
+        """One bad entry mixed with one good entry — the bad entry is
+        silently skipped (the ``continue`` branch in the for-loop)
+        and the good entry verifies the JWS. The test passes IFF the
+        verifier reaches the good entry, which is only possible if
+        the bad entry was skipped (not raised on)."""
+        priv_pem, pub_pem = self._real_keypair()
+        jws_bytes, payload_bytes = self._sign_detached(priv_pem, kid="good-kid")
+        # Mix of malformed entries (None, non-dict, dict-with-int-kid)
+        # and one valid entry whose kid matches the JWS header.
+        gate = self._make_trust_gate(
+            secret_adapter_response={
+                "keys": [
+                    None,
+                    "not-a-dict",
+                    {"kid": 1234, "pem": pub_pem.decode()},  # non-str kid → kept as filter
+                    {"kid": "good-kid", "pem": pub_pem.decode()},
+                ]
+            }
+        )
+        # No exception → verification succeeded against the good entry
+        # → bad entries were silently skipped.
+        await gate.verify_jws_blob(
+            jws_bytes=jws_bytes,
+            payload_bytes=payload_bytes,
+            tenant_id="bank_a",
+        )
+
+    # --- arm 5 ----------------------------------------------------------
+    async def test_no_usable_keys_after_filtering_refused(self) -> None:
+        priv_pem, _ = self._real_keypair()
+        jws_bytes, payload_bytes = self._sign_detached(priv_pem)
+        # Every entry malformed in a different way — keyring ends up
+        # empty after filtering.
+        gate = self._make_trust_gate(
+            secret_adapter_response={
+                "keys": [
+                    None,
+                    "not-a-dict",
+                    {"kid": 5, "pem": "x"},  # non-str kid
+                    {"kid": "k", "pem": 9},  # non-str pem
+                    {},  # empty dict
+                ]
+            }
+        )
+        with pytest.raises(TrustGateError) as excinfo:
+            await gate.verify_jws_blob(
+                jws_bytes=jws_bytes,
+                payload_bytes=payload_bytes,
+                tenant_id="bank_a",
+            )
+        assert "no usable keys" in str(excinfo.value)
+
+    # --- arm 6 ----------------------------------------------------------
+    async def test_missing_kid_in_jws_header_refused(self) -> None:
+        """JWS header has ``alg`` but no ``kid`` — the verifier cannot
+        resolve a specific key on the allow-list and refuses with the
+        closed-enum message. Note: a JWS with NO alg fires earlier in
+        the deserialize step (``MissingAlgorithmError``); to isolate the
+        ``kid is None`` arm specifically, we sign a JWS with a kid then
+        strip it from the header by re-serialising at the joserfc
+        layer."""
+        from joserfc import jws as jws_module
+        from joserfc.jwk import RSAKey
+
+        priv_pem, pub_pem = self._real_keypair()
+        priv_key = RSAKey.import_key(priv_pem)
+        payload = b"missing-kid-payload"
+        # serialize_compact with header={"alg": "RS256"} only — no kid.
+        compact = jws_module.serialize_compact({"alg": "RS256"}, payload, priv_key)
+        parts = compact.split(".")
+        detached = f"{parts[0]}..{parts[2]}".encode()
+
+        # Vault has ANY non-empty keyring so the no-usable-keys path
+        # doesn't fire first.
+        gate = self._make_trust_gate(
+            secret_adapter_response={"keys": [{"kid": "some-kid", "pem": pub_pem.decode()}]}
+        )
+        with pytest.raises(TrustGateError) as excinfo:
+            await gate.verify_jws_blob(
+                jws_bytes=detached,
+                payload_bytes=payload,
+                tenant_id="bank_a",
+            )
+        assert "missing 'kid'" in str(excinfo.value)
+
+    # --- arm 7 ----------------------------------------------------------
+    async def test_malformed_pem_at_jws_kid_refused(self) -> None:
+        """Vault stores a string at the JWS's kid that is NOT a valid
+        PEM. ``RSAKey.import_key`` raises; the verifier wraps as
+        ``TrustGateError`` (NOT a kid-not-allowlisted; kid IS on the
+        list — the PEM itself is malformed)."""
+        priv_pem, _ = self._real_keypair()
+        jws_bytes, payload_bytes = self._sign_detached(priv_pem, kid="malformed-kid")
+        gate = self._make_trust_gate(
+            secret_adapter_response={
+                "keys": [{"kid": "malformed-kid", "pem": "this is not a valid pem"}]
+            }
+        )
+        with pytest.raises(TrustGateError) as excinfo:
+            await gate.verify_jws_blob(
+                jws_bytes=jws_bytes,
+                payload_bytes=payload_bytes,
+                tenant_id="bank_a",
+            )
+        assert "public key import failed" in str(excinfo.value)
+
+    # --- arm 8 ----------------------------------------------------------
+    async def test_deserialize_failure_non_bad_signature_wraps_as_trust_gate_error(
+        self,
+    ) -> None:
+        """The deserialize step raises a non-``BadSignatureError``
+        subclass of ``JoseError`` — this maps to the
+        ``DecodeError, JoseError, ValueError`` arm distinct from the
+        signature-mismatch arm. We trigger
+        :class:`UnsupportedAlgorithmError` by handing the verifier a
+        JWS whose protected header carries a closed-enum-spec
+        algorithm not in the resolution-allowed list (alg=ES256
+        header → algorithms=[ES256] passed to deserialize → joserfc
+        rejects ES256 against an RSA key)."""
+        import base64
+        import json as _json
+
+        _priv_pem, pub_pem = self._real_keypair()
+        # Construct a JWS-shape with header alg=ES256, kid=test-kid
+        # (a 3-segment value extract_compact tolerates). The signature
+        # segment is base64-valid but the algorithm/key mismatch
+        # surfaces on deserialize.
+        header = {"alg": "ES256", "kid": "test-kid"}
+        h_seg = base64.urlsafe_b64encode(_json.dumps(header).encode()).rstrip(b"=").decode()
+        # 64 bytes of zeros = valid ES256-shaped signature space, but
+        # joserfc rejects on alg/key mismatch before checking the bytes.
+        sig_seg = base64.urlsafe_b64encode(b"\x00" * 64).rstrip(b"=").decode()
+        detached = f"{h_seg}..{sig_seg}".encode()
+        gate = self._make_trust_gate(
+            secret_adapter_response={"keys": [{"kid": "test-kid", "pem": pub_pem.decode()}]}
+        )
+        with pytest.raises(TrustGateError) as excinfo:
+            await gate.verify_jws_blob(
+                jws_bytes=detached,
+                payload_bytes=b"some-payload",
+                tenant_id="bank_a",
+            )
+        # Either "JWS unparseable" (if extract_compact rejects on
+        # algorithm-resolve) OR "JWS detached-payload verification
+        # failed" (if it reaches deserialize). Both are TrustGateError;
+        # both pin the closed-enum mapping. Assert the broad message
+        # shape — a future joserfc change that moves the rejection
+        # earlier in the pipeline is still caught.
+        msg = str(excinfo.value)
+        assert ("JWS unparseable" in msg) or ("JWS detached-payload" in msg)

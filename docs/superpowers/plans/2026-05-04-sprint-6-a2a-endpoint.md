@@ -4,10 +4,10 @@
 
 **Goal:** Cognic AgentOS speaks A2A 1.0 inbound + outbound, **pinned to the released A2A 1.0 wire-spec with conformance fixtures** (per ADR-003 + `docs/A2A-CONFORMANCE.md`) — not a Cognic-bespoke shape. Wave 1 implements the mandatory feature set (Agent Cards, Tasks, Streaming, Artifacts, Capability negotiation, Cancellation, Error taxonomy, per-tenant token authz). Wave 2 features (push notifications, multi-modal, long-running task resumption, mTLS) are explicitly refused with closed-enum reasons. Sprint 6 also seeds the **UI event-stream contract** per ADR-020 — a typed event taxonomy + emit-hook layer that mirrors every audit event in-process, with the SSE endpoint deferred to Sprint 7B.
 
-**Architecture:** Ten new protocol modules under `src/cognic_agentos/protocol/a2a_*` plus one for `ui_events.py`. Inbound A2A traffic enters via a new `POST /api/v1/a2a` portal endpoint, routed by a single owner (`A2AEndpoint`) that holds the task-lifecycle state machine and emits chain-linked decision_history records. Outbound dispatch fetches the target's signed Agent Card from the spec well-known path, verifies the JWS against the Sprint-4 trust root, and dispatches to the URL inside the verified card's `supportedInterfaces[].url` — never to a caller-supplied URL. The A2A wire format is generated from upstream protobuf source (Sprint-6 T2 lock); a CI drift gate fails the build if the spec moves beyond the pinned version. The UI event-stream layer (T12) ships only the typed Pydantic schema + emit hooks at the harness boundary; SSE transport lands at Sprint 7B per ADR-020's phased schedule. Decision Lock: A2A 1.0 only (no 0.x compatibility, no 2.x speculative); Wave-2 features fail-closed with explicit error codes (no silent-accept).
+**Architecture:** Ten new protocol modules under `src/cognic_agentos/protocol/a2a_*` plus one for `ui_events.py`. Inbound A2A traffic enters via a new `POST /api/v1/a2a` portal endpoint, routed by a single owner (`A2AEndpoint`) that holds the task-lifecycle state machine and emits chain-linked decision_history records. Outbound dispatch fetches the target's signed Agent Card from the spec well-known path, verifies the JWS against the Sprint-4 trust root, and dispatches to the URL inside the verified card's `supportedInterfaces[].url` — never to a caller-supplied URL. The A2A wire format is the SDK's protobuf-generated message classes, re-exported under stable AgentOS names (Sprint-6 T2 SDK pin + T6 schema-module lock); a CI drift gate fetches the upstream protobuf source at the pinned `v1.0.0` git tag and SHA-256s it against a digest captured at T6 commit time, failing the build if upstream moves. The UI event-stream layer (T12) ships only the typed Pydantic schema + emit hooks at the harness boundary; SSE transport lands at Sprint 7B per ADR-020's phased schedule. Decision Lock: A2A 1.0 only (no 0.x compatibility, no 2.x speculative); Wave-2 features fail-closed with explicit error codes (no silent-accept).
 
 **Tech Stack:**
-- A2A wire format: official **`a2a-sdk == X.Y.Z`** Python SDK pulled into the `adapters` extra group (kernel-image-free; default-adapters image carries it). Schema source: spec-published protobuf compiled to Pydantic via the SDK's generated bindings, with parity check against the spec's JSON-schema bindings.
+- A2A wire format: official **`a2a-sdk == 1.0.2`** Python SDK pulled into the `adapters` extra group (kernel-image-free; default-adapters image carries it). Schema source: the SDK ships **protobuf-generated message classes** (via `MessageMeta` from `google.protobuf`; **NOT Pydantic** — T6 R0 capture-time correction; the planning-stage prose called these "Pydantic types" but the actual SDK exports are protobuf `Message` subclasses). T6's `protocol/a2a_schema.py` re-exports the 7 Wave-1 types under stable AgentOS names via PEP 562 lazy `__getattr__`; the schema-drift CI gate (T6) pulls the upstream protobuf source at the pinned `v1.0.0` git tag and SHA-256s it against a captured digest. JSON-schema parity check + helper module are **deferred** until upstream publishes a canonical JSON-schema bundle (`specification/json/` is currently a README-only directory; T6 ships the protobuf-digest gate only — see Doctrine Decision C for the deferred-items breakdown).
 - HTTP layer: `httpx.AsyncClient` (admission-side authz client + outbound dispatch + Agent Card fetch). No new HTTP library introduced.
 - JWS verification: **`joserfc`** — new Sprint-6 pin (R3 P2 #1 corrected the original `python-jose` choice; `python-jose` is essentially abandoned (last release 2023) and explicitly does NOT support RFC 7797 unencoded-payload JWS — the `joserfc` author publishes a comparison table marking python-jose's RFC-7797 support as missing. Sprint-6 needs detached / RFC-7797 capability for Agent Card sidecar `.jws` verification, so `joserfc` is the correct choice). Added to the `adapters` extra at T2; reuses Sprint-4's pinned `cryptography>=45` backend transitively. Agent Card detached JWS verification at T7 consumes it.
 - Streaming: A2A 1.0 streaming-message envelope (chunked HTTP / spec wire format), distinct from the Sprint-7B portal SSE endpoint.
@@ -39,7 +39,7 @@ This plan runs T1–T16 followed by six dedicated doctrine-decision sections and
 
 - **File Structure** — files created / modified by Sprint 6 with one-line responsibility-per-file.
 - **Tasks T1–T16** — the implementation arc, in dependency order, each with files / steps / commit shape.
-- **Doctrine Decision A — A2A SDK + protobuf pin** — `a2a-sdk == X.Y.Z`; kernel-vs-default-adapters split rationale.
+- **Doctrine Decision A — A2A SDK + protobuf pin** — `a2a-sdk == 1.0.2`; kernel-vs-default-adapters split rationale.
 - **Doctrine Decision B — Caller-controlled URL threat model** — proposes `docs/A2A-CALLER-URL-THREAT-MODEL.md`; documents four reachable URL surfaces.
 - **Doctrine Decision C — Schema-drift CI gate env policy** — `@pytest.mark.a2a_upstream` env-gate; `COGNIC_RUN_A2A_UPSTREAM=1` opt-in; CI sets the var; local dev skips by default.
 - **Doctrine Decision D — Sub-agent boundary** — Sprint 6 transport only; ADR-005 `spawn_subagent` orchestration is Sprint 8.
@@ -58,15 +58,15 @@ Sprint 6 creates 11 new protocol modules + 7 new portal endpoints + 1 new threat
 **Protocol layer (10 A2A modules + 1 UI events module):**
 - `src/cognic_agentos/protocol/a2a_endpoint.py` — single owner of the inbound A2A receiver + task lifecycle state machine. **Critical-controls module.** Routes incoming calls by entry-point name via plugin registry; emits `a2a.task_received` + `a2a.task_lifecycle_*` audit + decision_history rows; refuses anonymous calls; refuses unknown targets with `a2a_unknown_target` (501 with ADR-002 reference per BUILD_PLAN exit criterion).
 - `src/cognic_agentos/protocol/a2a_authz.py` — per-tenant pinned-token authorization client. **Critical-controls module.** Validates `Authorization: Bearer <token>` against per-tenant Vault path; emits `a2a.token_rejected` audit row on refusal; closed-enum `A2AAuthzReason` (8 values: token-missing, token-malformed, tenant-mismatch, token-revoked, vault-read-failed, audience-mismatch, scope-insufficient, anonymous-refused).
-- `src/cognic_agentos/protocol/a2a_agent_cards.py` — Agent Card publisher (per-pack `/.well-known/agent-card.json` route) AND verifier (inbound at registration + outbound at dispatch). **Critical-controls module.** Two-pass validation: upstream A2A 1.0 schema (via `a2a-sdk` SDK) + AgentOS bank-grade profile (mandatory `provider`, `securitySchemes`, `securityRequirements`, `signatures`, ≥1 `supportedInterfaces` entry). JWS verification rides Sprint-4 `TrustGate` per-tenant trust root. Card content hash-chained into `decision_history` at registration.
-- `src/cognic_agentos/protocol/a2a_schema.py` — pinned A2A 1.0 wire-format types. **Critical-controls module.** Re-exports `a2a-sdk` SDK Pydantic types under stable AgentOS names so downstream code keeps working when we bump the SDK pin. Includes `_PINNED_PROTOBUF_DIGEST` + `_PINNED_JSON_SCHEMA_DIGEST` constants the drift CI gate (T6) verifies against.
+- `src/cognic_agentos/protocol/a2a_agent_cards.py` — Agent Card publisher (per-pack `/.well-known/agent-card.json` route) AND verifier (inbound at registration + outbound at dispatch). **Critical-controls module.** **Three-pass validation** (T1 R1 P2 reviewer correction added Pass 3 — earlier draft only had two passes which forced JWS failures into the schema bucket): Pass 1 upstream A2A 1.0 schema (via `a2a-sdk`) + Pass 2 AgentOS bank-grade profile (mandatory `provider`, `securitySchemes`, `securityRequirements`, `signatures`, ≥1 `supportedInterfaces` entry, plus the **Wave-2 auth refusal** added during T14 — any `mtlsSecurityScheme` declared anywhere in `securitySchemes` is refused under Wave-1 bearer-token transport policy per A2A-CONFORMANCE.md §"Wave breakdown") + Pass 3 JWS verification against Sprint-4 `TrustGate` per-tenant trust root. Card content hash-chained into `decision_history` at registration. The **11-value** `AgentCardValidationReason` literal covers the per-pass failure modes (1 + 7 + 3, where T14 added `agent_card_profile_wave2_auth_required` as the 7th profile reason); T7 `_AGENT_CARD_VALIDATION_REASON_TO_REFUSAL` mapping collapses the 7 profile flavors into the single `a2a_agent_card_profile_invalid` registry refusal while keeping the JWS reasons distinct.
+- `src/cognic_agentos/protocol/a2a_schema.py` — pinned A2A 1.0 wire-format types. **Critical-controls module.** Re-exports the `a2a-sdk` SDK's **protobuf-generated message classes** (NOT Pydantic — T6 R0 capture-time correction; the SDK ships protobuf via `MessageMeta`) under stable AgentOS names via PEP 562 lazy `__getattr__` so the module imports cleanly without `a2a-sdk` installed (admission-side per Sprint-5 R3 P1; first attribute access fires `require_a2a()`). Includes `_PINNED_PROTOBUF_DIGEST` + `_UPSTREAM_PROTOBUF_URL` constants the drift CI gate (T6) verifies against. JSON-schema digest pin + parity check + the `protocol/a2a_schema_parity.py` helper module are **deferred** until upstream publishes a canonical JSON-schema bundle (`specification/json/` is currently a README-only directory) — see Doctrine Decision C.
 - `src/cognic_agentos/protocol/a2a_version.py` — `A2A-Version` HTTP header parser + responder per ADR-003 §"Version negotiation". Closed-enum `A2AVersionOutcome` — **6 values**: `accepted` (`1.0` matches pinned), `absent_rejected` (no header → rejected with `Supported-A2A-Versions: 1.0`; spec interprets absent as `0.3`), `legacy_rejected` (`0.x` → rejected), `higher_minor_degraded` (`1.<higher minor>` → processed with feature-degradation warning), `unsupported_rejected` (`2.x` or unknown → rejected with `Supported-A2A-Versions`), `malformed_rejected` (malformed header → spec-defined parse error).
-- `src/cognic_agentos/protocol/a2a_streaming.py` — A2A 1.0 streaming-message protocol support (chunked HTTP + spec wire envelopes). NOT portal/UI SSE (that's Sprint-7B per ADR-020). Emits `task.progress` / `task.completed` / `task.failed` envelopes per spec; chain-linked into decision_history via `_emit_streaming_evidence` helper mirroring Sprint-5's `_emit_call_evidence`.
+- `src/cognic_agentos/protocol/a2a_streaming.py` — A2A 1.0 streaming wire-format adapter. NOT portal/UI SSE (that's Sprint-7B per ADR-020). Builds protobuf `StreamResponse` envelopes (oneof `task` / `message` / `status_update` / `artifact_update`) via the T6 schema-module re-export boundary; lifecycle transitions ride `TaskStatusUpdateEvent` whose `TaskStatus.state` is one of the 9 SDK `TaskState` enum values; artifact streaming rides `TaskArtifactUpdateEvent` with `append` / `last_chunk` flags. Wire encoding via `google.protobuf.json_format.MessageToJson` (no hand-rolled JSON). Public boundary is the AgentOS-side `StreamState` Literal (8 values mirroring SDK `TASK_STATE_*` 1:1; T9 `TaskState` spellings are **rejected** at the API surface so a future endpoint-integration PR must do the deliberate adapter work). Chain-linked into `decision_history` via `_emit_streaming_evidence` helper mirroring Sprint-5's `_emit_call_evidence`.
 - `src/cognic_agentos/protocol/a2a_artifacts.py` — artifact reference generator. Large outputs (PDFs, evidence packs, JSON > 64 KiB) stored via Sprint-4's `LocalObjectStoreAdapter` and returned as `ArtifactRef(uri, sha256, size_bytes, mime_type)`; small payloads remain inline; per-tenant retention configurable via `Settings.a2a_artifact_retention_seconds`.
-- `src/cognic_agentos/protocol/a2a_capability_negotiation.py` — `GET /api/v1/a2a/capabilities` endpoint backing module. Reads pack manifests' declared `[tool.cognic.a2a].capabilities_supported`; returns canonical A2A 1.0 capability list (subset of the agent's manifest declaration; never broader).
-- `src/cognic_agentos/protocol/a2a_cancellation.py` — task cancellation primitive. `cancel_task(task_id, *, reason)` flips lifecycle to `cancelled`, emits `a2a.task_cancelled` chained event with partial-state payload digest, refuses subsequent calls against the cancelled task ID with the spec-conformant `task_not_cancelable` error code.
+- `src/cognic_agentos/protocol/a2a_capability_negotiation.py` — `GET /api/v1/a2a/capabilities` endpoint backing module. Reads the canonical FLAT `[tool.cognic.a2a]` block from pack manifests (`capabilities_supported`, `streaming`, `push_notification_config`, `artifacts_supported`, `extended_agent_card`, `extensions` per `A2A-CONFORMANCE.md`); returns a Wave-1-filtered `A2ACapabilities` response with Wave-2 declarations forced to false + surfaced in `deferred_wave2_features`. Strict bool typing — truthy non-bool shapes (e.g. `"false"`) treated as `False`. Subset of manifest declarations; never broader.
+- `src/cognic_agentos/protocol/a2a_cancellation.py` — task cancellation primitive. Standalone `A2ATaskCancellationHandler(endpoint)` with the T9 endpoint injected; **never mutates `TaskState` directly** (single-writer invariant pinned by an AST-walk regression). `cancel_task(*, task_id, request_id, tenant_id, parent_trace_id=None)` delegates the lifecycle flip to `endpoint._transition_async(..., new_state=TaskState.CANCELLED)`, which emits the chained `a2a.task_cancelled` audit on the successful path. **Refusal paths chain-linked** per T11 R1 P2 #3: unknown task → spec `task_not_found`; terminal-state task → spec `task_not_cancelable`; both emit `a2a.task_refused` audit + `a2a_call` decision-history rows via `endpoint._emit_refusal_evidence(gate="cancellation", payload_digest=sha256(task_id), parent_trace_id, child_trace_id, ...)`. Refusals raise `CancellationError` carrying the spec-conformant `A2AErrorResponse` (separate layer from T9's `A2AEndpointError`).
 - `src/cognic_agentos/protocol/a2a_errors.py` — **two closed-enum Literals (R2 P2 #1 reviewer correction — split spec wire codes from AgentOS-policy reasons).** (1) `A2AErrorCode` — 14 A2A 1.0 spec-defined wire codes: 5 JSON-RPC envelope errors (`parse_error`, `invalid_request`, `method_not_found`, `invalid_params`, `internal_error`) + 9 A2A-specific codes (`task_not_found`, `task_not_cancelable`, `version_not_supported`, `unsupported_operation`, `content_type_not_supported`, `invalid_agent_response`, `push_notification_not_supported`, `extended_agent_card_not_configured`, `extension_support_required`). Source-of-truth is the A2A 1.0 spec's §"Error codes" — every literal here MUST appear verbatim. (2) `A2APolicyRefusalReason` — 11 AgentOS-specific refusal reasons surfaced via `data.policy_reason` detail field on top of a spec-conformant `error.code`: `agent_card_signature_invalid`, `agent_card_signer_not_allowlisted`, `agent_card_not_found`, `anonymous_refused`, `tenant_token_invalid`, `unknown_target`, `capability_not_supported`, `streaming_not_supported`, `artifact_too_large`, `artifact_retention_exceeded`, `wave2_feature_refused` (with sub-tag identifying the refused feature). The split keeps the wire contract spec-conformant while preserving the rich audit-side refusal vocabulary; mirrors the Sprint-5 MCP authz pattern. The two `Literal` types are re-exported through `protocol/__init__.py` for downstream type imports; the `_POLICY_REASON_TO_SPEC_CODE` mapping is **module-private inside `a2a_errors.py`** (R4 P2 reviewer correction — co-located with the error-response builder that reads it; avoids the cyclic-import hazard an earlier draft introduced).
-- `src/cognic_agentos/protocol/ui_events.py` — typed UI event taxonomy (Wave 1) per ADR-020. **Critical-controls module** (per ADR-020 stop rule — public event schema). **All 11 Wave-1 Pydantic event-family models seeded in Sprint 6** (R0 P2 reviewer correction — schema covers full ADR-020 §"Event taxonomy (Wave 1)" regardless of which sprint wires the emit hooks): `agent_run.{started,progress,completed,failed,cancelled,paused,resumed}`, `tool_call.{requested,approved,denied,started,progress,completed,failed}`, `subagent.{spawned,completed,failed,recursion_capped}`, `approval.{pending,granted,granted_second,denied,expired}`, `artifact.{started,chunk,completed}`, `interrupt.{requested_by_agent,requested_by_operator,acknowledged}`, `frontend_action.{submitted,accepted,rejected}`, `memory.{recall_started,recall_completed,forget,redact}`, `decision_audit.event_appended`, `policy.{decision_evaluated,bundle_loaded}`, `kill_switch.{flipped,reverted}`. Emit-hook protocol (`UIEventHook`) wires **3 families in Sprint 6** (the families with existing emit sites): `tool_call.*` (mirrors Sprint-5's `audit.tool_invocation_*`), `decision_audit.event_appended` (mirrors every `DecisionHistoryStore.append`), `artifact.*` (mirrors Sprint-6 T11's artifact lifecycle). The other 8 families have model-only stubs; their emit hooks land in their owning sprints per the ADR-020 phase table. Sprint-6 audit emits are NOT changed — UI events are an ADDITIVE mirror at the same call site. **No SSE endpoint** in Sprint 6 (ADR-020 schedules SSE for Sprint 7B).
+- `src/cognic_agentos/protocol/ui_events.py` — typed UI event taxonomy (Wave 1) per ADR-020. **Critical-controls module** (per ADR-020 stop rule — public event schema). **All 11 Wave-1 Pydantic event-family models seeded in Sprint 6** (R0 P2 reviewer correction — schema covers full ADR-020 §"Event taxonomy (Wave 1)" regardless of which sprint wires the emit hooks): `agent_run.{started,progress,completed,failed,cancelled,paused,resumed}`, `tool_call.{requested,approved,denied,started,progress,completed,failed}`, `subagent.{spawned,completed,failed,recursion_capped}`, `approval.{pending,granted,granted_second,denied,expired}`, `artifact.{started,chunk,completed}`, `interrupt.{requested_by_agent,requested_by_operator,acknowledged}`, `frontend_action.{submitted,accepted,rejected}`, `memory.{recall_started,recall_completed,forget,redact}`, `decision_audit.event_appended`, `policy.{decision_evaluated,bundle_loaded}`, `kill_switch.{flipped,reverted}`. The discriminated `UIEvent` union is **two-level** (R1 P2 #1): per-family inner unions discriminated on `type`, top-level union discriminated on `family` (a flat single-discriminator union fails Pydantic adapter creation because each family has multiple event classes). Emit-hook protocol (`UIEventHook`) wires **3 families in Sprint 6** (the families with existing emit sites): `tool_call.*` (mirrors Sprint-5's `audit.tool_invocation` / `audit.tool_invocation_refused` / `audit.tool_invocation_error`), `artifact.*` (mirrors Sprint-6 T11's `a2a.artifact_prepared`), `decision_audit.event_appended`. **Per R2 P2 #1**, `decision_audit.event_appended` is the universal generic mirror emitted from BOTH `AuditStore.append` AND `DecisionHistoryStore.append` (with `data.chain_id` discriminating `"audit_event"` from `"decision_history"`) so audit-only sources (`guardrail.trip`, `trust_gate.cosign_timeout`, future gateway events that don't write to DH) still mirror to UI. **Per R2 P2 #2**, the generic mirror's `data` carries `event_type`, `payload_digest` (`sha256:<hex>` of canonicalised payload via `core/canonical.canonical_bytes`), `request_id`, `sequence`, `chain_id`, `tenant_id` — a reconnecting UI / examiner can identify the source row without DB fetch. **Per R2 P3**, all three hook dispatch loops snapshot the registry via `tuple(self._hooks)` at entry so a self-registering hook can never extend the iteration target indefinitely. The other 8 families have model-only stubs; their emit hooks land in their owning sprints per the ADR-020 phase table. Sprint-6 audit emits are NOT changed — UI events are an ADDITIVE mirror at the same call site (per-hook deep-copy isolation per R1 P2 #2 + #3). **No SSE endpoint** in Sprint 6 (ADR-020 schedules SSE for Sprint 7B).
 
 **Portal endpoints (in `src/cognic_agentos/portal/api/app.py` + new routers under `portal/api/routes/`):**
 - `portal/api/routes/a2a.py` — new router. Mounts `POST /api/v1/a2a` (inbound receiver, calls `A2AEndpoint.handle`); `GET /api/v1/a2a/tasks/{task_id}` (status); `POST /api/v1/a2a/tasks/{task_id}/cancel` (cancellation); `GET /api/v1/a2a/capabilities` (capability negotiation).
@@ -85,26 +85,24 @@ Sprint 6 creates 11 new protocol modules + 7 new portal endpoints + 1 new threat
 
 **Architecture tests (2 files):**
 - `tests/architecture/test_a2a_no_subprocess.py` — static-AST scan banning `subprocess` / `os.exec*` / `os.spawn*` / `os.system` / `os.popen` / `asyncio.create_subprocess_*` / `multiprocessing.Process` / `shell=True` under any module whose path matches `protocol/a2a_*.py`. Mirrors Sprint-5 T4. Three self-tests pin the collector contract.
-- `tests/architecture/test_a2a_no_caller_controlled_url.py` — static-AST scan asserting that NO module under `protocol/a2a_*` calls `httpx.AsyncClient.get/post/put/delete(url=<x>)` where `<x>` traces to a function parameter, request-body field, or model-output string. Every outbound dispatch URL MUST come from a literal-or-allowlisted source: a JWS-verified Agent Card's `supportedInterfaces[].url` OR a `Settings.a2a_*_url` field OR a hardcoded well-known suffix. Three self-tests pin the collector + the URL-source-classifier.
+- `tests/architecture/test_a2a_no_caller_controlled_url.py` — static-AST scan asserting that NO module under `protocol/a2a_*` calls `httpx.AsyncClient.{get,post,put,patch,delete,request,send}(url=<x>)` where `<x>` traces to a function parameter, an inbound-request attribute chain (root in `{request, message, payload, envelope, body, task}`), a function-parameter-rooted attribute chain (T4 R2 P2 — even card-shaped chains rooted on caller-supplied params are refused), or a model-output string. Every outbound dispatch URL MUST come from a literal-or-allowlisted source: a JWS-verified Agent Card rebound through `verified_card` / `verified_agent_card` (the verifier-output allow-list of root names) and accessed via `.supported_interfaces[*].url` OR `.url`, OR a `Settings.a2a_*_url` field, OR a hardcoded well-known suffix. URL extraction is method-aware: `client.request(method, url, ...)` reads URL from positional arg 1 (NOT arg 0); `client.send(request_obj)` reads URL from the Request object (statically traced as "unknown" — runtime canary takes over). Three self-tests pin the collector + the URL-source-classifier.
 
 **Unit test modules (~16 files):**
 - `tests/unit/protocol/test_a2a_authz.py` — token validation contract.
 - `tests/unit/protocol/test_a2a_schema.py` — schema-type contract.
 - `tests/unit/protocol/test_a2a_schema_drift.py` — env-gated CI drift gate (`@pytest.mark.a2a_upstream`).
-- `tests/unit/protocol/test_a2a_agent_cards.py` — two-pass validator + JWS verify.
+- `tests/unit/protocol/test_a2a_agent_cards.py` — three-pass validator (upstream schema + AgentOS profile + JWS) contract; per-pass arm for each of the **11** `AgentCardValidationReason` outcomes including the 3 JWS reasons (T1 R1 P2 + T1 R4 P2 doctrine) plus the Wave-2 auth refusal (T14 `TestProfileWave2AuthRequired`: mtls-only refused, mtls+bearer-mixed conservatively also refused).
 - `tests/unit/protocol/test_a2a_agent_card_jws_required.py` — registration refused on unsigned / non-allow-listed signer.
+- `tests/unit/protocol/test_trust_gate.py` — extend with arms for the new T7 surfaces: (1) `verify_jws_blob` happy path; (2) signature-mismatch raises `TrustGateError`; (3) **signer-not-on-trust-root raises `TrustGateSignerNotAllowlistedError`** (T1 R4 P2 — pin the subclass-vs-parent distinction so callers' closed-enum routing stays unambiguous); (4) malformed JWS raises `TrustGateError`; (5) `TrustGateSignerNotAllowlistedError` is a subclass of `TrustGateError` so callers that ONLY catch the parent still see it (defensive Python isinstance check).
 - `tests/unit/protocol/test_a2a_agent_card_outbound_verification.py` — outbound dispatch fetches card, verifies JWS, dispatches to `supportedInterfaces[].url`.
 - `tests/unit/protocol/test_a2a_agent_card_chain_audit.py` — card content hash-chained at registration.
 - `tests/unit/protocol/test_a2a_version.py` — version-header negotiation (6 cases per `A2AVersionOutcome`).
-- `tests/unit/protocol/test_a2a_endpoint.py` — inbound receiver + lifecycle.
+- `tests/unit/protocol/test_a2a_endpoint.py` — inbound receiver + lifecycle + cross-agent chain linkage + gate-refusal evidence + unknown-target + anonymous-refused + multimodal Wave-2 detection + deeply-nested-payload fail-closed + invalid-response canonicalisation + runtime-side SDK gate. **Consolidated** per T9 R3 P3: earlier draft split this into four files (`test_a2a_endpoint.py`, `test_a2a_unknown_target.py`, `test_a2a_anonymous_refused.py`, `test_a2a_chain_audit.py`); merged into one so contract maintenance is local to the gate test class.
 - `tests/unit/protocol/test_a2a_streaming.py` — task streaming wire format.
 - `tests/unit/protocol/test_a2a_artifacts.py` — large output → reference; small payload → inline.
 - `tests/unit/protocol/test_a2a_capability_negotiation.py` — `/capabilities` lists exactly the manifest's declarations.
-- `tests/unit/protocol/test_a2a_cancellation.py` — in-flight task cancelled; partial-state audit emitted.
-- `tests/unit/protocol/test_a2a_error_taxonomy.py` — every spec-defined error path returns the spec's code.
-- `tests/unit/protocol/test_a2a_chain_audit.py` — parent + 3 child messages → cross-agent chain proof.
-- `tests/unit/protocol/test_a2a_unknown_target.py` — unknown target → 501 with ADR-002 reference.
-- `tests/unit/protocol/test_a2a_anonymous_refused.py` — anonymous call → 401 with `a2a_anonymous_refused`.
+- `tests/unit/protocol/test_a2a_cancellation.py` — happy-path cancellation transitions through T9's single-writer state machine; AST-walk pin that the cancellation source never assigns `.state` directly; refusal chain-linkage (T11 R1 P2 #3) for both `task_not_found` and `task_not_cancelable` (audit + decision_history rows + `gate="cancellation"` + parent/child trace + sha256(task_id) digest); success-path no-double-emit invariant.
+- `tests/unit/protocol/test_a2a_errors.py` — `_POLICY_REASON_TO_SPEC_CODE` completeness + codomain drift detector; T9-alignment regression for the 4 overlapping policy reasons; `A2AErrorResponse` frozen+slots dataclass shape; one factory per `A2AErrorCode` Literal (14 spec wire codes); `A2AErrorCode` + `A2APolicyRefusalReason` literal-set arithmetic.
 - `tests/unit/protocol/test_a2a_spec_conformance.py` — runs the conformance fixtures.
 - `tests/unit/protocol/test_a2a_no_caller_controlled_url.py` — runtime canary (T14) complementing the architecture test.
 - `tests/unit/protocol/test_a2a_wave2_features_refused.py` — push notifications, multi-modal, long-running resumption all refused with `A2APolicyRefusalReason.wave2_feature_refused`.
@@ -115,24 +113,24 @@ Sprint 6 creates 11 new protocol modules + 7 new portal endpoints + 1 new threat
 
 ### Modified (~9 files)
 
-- `pyproject.toml` — add `a2a-sdk == X.Y.Z` to `adapters` extra (kernel image stays SDK-free).
+- `pyproject.toml` — add `a2a-sdk == 1.0.2` to `adapters` extra (kernel image stays SDK-free).
 - `uv.lock` — refresh after pin lands.
 - `src/cognic_agentos/core/config.py` — Sprint-6 settings (T1): `a2a_token_cache_ttl_s`, `a2a_artifact_retention_seconds`, `a2a_pinned_spec_version`, `a2a_schema_drift_check_enabled`, `a2a_card_jws_max_size_bytes`, `a2a_outbound_request_timeout_s`, `a2a_inbound_request_timeout_s`. Mirrors Sprint-5's `mcp_*` setting block shape. **Halt-before-commit** because `core/config.py` ships AGENTS.md-cited critical-controls knobs (token cache, retention windows, fail-closed timeouts).
 - `src/cognic_agentos/protocol/__init__.py` — export new modules (`A2AEndpoint`, `A2AAuthzClient`, `A2AAgentCardVerifier`, `A2AVersionNegotiator`, `UIEventEmitter`, etc.); extend the closed-enum re-exports.
 - `src/cognic_agentos/portal/api/app.py` — **two-phase amendment** (R0 P2 reviewer correction). T2 ONLY adds the `is_a2a_available()` log branch (kernel-resilient `try/except ImportError` for the `a2a-sdk`); kernel image still boots without it (mirrors Sprint-5 T2 R3 P1 doctrine). T2 does NOT mount any HTTP routes — that follows in: T9 (`POST /api/v1/a2a` receiver + Agent-Card publisher routes), T11 (`/api/v1/a2a/capabilities` + `/cancel` + artifacts retrieval). T12 wires `UIEventEmitter` at the harness boundary (in-process emit hooks; **no SSE endpoint** — Sprint 7B owns that per ADR-020 phase table). The two-phase shape avoids the Sprint-5 T15 R1 P2 #1 overclaim trap (`create_prod_app` MUST NOT promise wiring it doesn't actually do).
-- `src/cognic_agentos/protocol/trust_gate.py` — additive: `verify_jws_blob(jws_bytes, *, payload_bytes, tenant_id)` method that reuses the per-tenant cosign trust root for JWS signature verification. **Critical-controls module — halt-before-commit.** No subprocess / no shell. Wraps `joserfc` JWS verification (R3 P2 #1 — picked for RFC-7797 detached-JWS support) with the same secure-default posture as the cosign caller (explicit env, no-fallthrough on key resolution).
+- `src/cognic_agentos/protocol/trust_gate.py` — additive: (1) `verify_jws_blob(jws_bytes, *, payload_bytes, tenant_id)` method that reuses the per-tenant cosign trust root for JWS signature verification; (2) **new `TrustGateSignerNotAllowlistedError(TrustGateError)` subclass** (T1 R4 P2 reviewer correction — without this subclass, T7's verifier would have to collapse both signature-invalid AND signer-not-allowlisted into the same `TrustGateError` catch and lose the closed-enum split the R3 P2 reviewer correction enabled). **Critical-controls module — halt-before-commit.** No subprocess / no shell. Wraps `joserfc` JWS verification (R3 P2 #1 — picked for RFC-7797 detached-JWS support) with the same secure-default posture as the cosign caller (explicit env, no-fallthrough on key resolution). The subclass is **added to `trust_gate.py`'s own `__all__`** (T1 R5 P3 reviewer correction — earlier draft incorrectly said `protocol/__init__.py`'s `__all__`, but T7's verifier imports from `cognic_agentos.protocol.trust_gate` and `trust_gate.py` carries its own export list). Step 8 below pins the `__all__` extension explicitly.
 - `src/cognic_agentos/protocol/plugin_registry.py` — additive: extend the admission pipeline with an Agent Card JWS verification step **AFTER the trust gate's wheel cosign verifies AND after the Sprint-5 deferred-load manifest extractor reads `agent_card_jws_path`** (R0 P2 reviewer correction — pack must be cosign-trusted FIRST so its declared metadata is trustworthy enough to read). The full ordering is: (1) per-tenant allow-list; (2) wheel cosign verification (Sprint-4 trust gate); (3) full Sprint-4 attestation pipeline (SBOM / SLSA / in-toto / vuln / license / Sigstore); (4) Sprint-5 deferred-load manifest extraction via `Distribution.locate_file()`; (5) **NEW Sprint-6 step:** read `agent_card_jws_path` from the cosign-verified manifest, fetch the detached JWS bytes via `joserfc`, verify against the per-tenant trust root via `TrustGate.verify_jws_blob`. **Critical-controls module — halt-before-commit.**
 
   **Closed-enum `RefusalReason` extension — 6 new registration-boundary literals (R3 P2 #3 reviewer correction listed them explicitly):**
 
-  | Registry `RefusalReason` literal | Fires at admission step | Source enum mapped from |
+  | Registry `RefusalReason` literal | Fires at admission step | Source `AgentCardValidationReason` literal mapped from |
   |---|---|---|
-  | `a2a_manifest_jws_path_missing` | step (4) — manifest extracted but missing `[tool.cognic.a2a].agent_card_jws_path` | T7 manifest-shape check |
-  | `a2a_agent_card_jws_blob_unreadable` | step (5) — JWS sidecar file declared but not on disk / not readable | T7 file-IO check |
-  | `a2a_agent_card_signature_invalid` | step (5) — `joserfc.jws.deserialize_compact` raises on signature mismatch | T7 `AgentCardValidationReason.signature_invalid` |
-  | `a2a_agent_card_signer_not_allowlisted` | step (5) — signature verifies but signer key is not on per-tenant trust root | T7 `AgentCardValidationReason.signer_not_allowlisted` |
-  | `a2a_agent_card_upstream_schema_invalid` | step (5) — Pass 1 of two-pass validation fails (card not a valid A2A 1.0 AgentCard per upstream JSON-schema) | T7 `AgentCardValidationReason.upstream_schema_invalid` |
-  | `a2a_agent_card_profile_invalid` | step (5) — Pass 2 fails (spec-valid card but missing AgentOS bank-grade profile field — `provider`, `securitySchemes`, `securityRequirements`, `signatures`, ≥1 `supportedInterfaces` entry) | T7 `AgentCardValidationReason.profile_invalid` |
+  | `a2a_manifest_jws_path_missing` | step (4) — manifest extracted but missing `[tool.cognic.a2a].agent_card_jws_path` | (none — manifest-shape check, fires before card validation runs) |
+  | `a2a_agent_card_jws_blob_unreadable` | step (5) — JWS sidecar file declared but not on disk / not readable | `agent_card_jws_blob_unreadable` |
+  | `a2a_agent_card_signature_invalid` | step (5) — `joserfc.jws.deserialize_compact` raises on signature mismatch | `agent_card_signature_invalid` |
+  | `a2a_agent_card_signer_not_allowlisted` | step (5) — signature verifies but signer key is not on per-tenant trust root | `agent_card_signer_not_allowlisted` |
+  | `a2a_agent_card_upstream_schema_invalid` | step (5) — Pass 1 of three-pass validation fails (card not a valid A2A 1.0 AgentCard per upstream JSON-schema) | `agent_card_upstream_schema_invalid` |
+  | `a2a_agent_card_profile_invalid` | step (5) — Pass 2 fails (spec-valid card but missing AgentOS bank-grade profile field — `provider`, `securitySchemes`, `securityRequirements`, `signatures`, ≥1 `supportedInterfaces` entry, OR a top-level `url` violation) | `agent_card_profile_provider_missing` / `_security_schemes_missing` / `_security_requirements_missing` / `_signatures_missing` / `_supported_interfaces_empty` / `_top_level_url_forbidden` (6 validation literals collapse to this single registry refusal) |
 
   These 6 are the registration-boundary `RefusalReason` literals; they are NOT the same as the 11 runtime-side `A2APolicyRefusalReason` literals from T11 (which surface in `data.policy_reason` of A2A error responses, not in registry refusals). The registry-side reasons all carry the `a2a_` prefix to mirror the Sprint-5 `mcp_*` convention; the policy-side reasons are type-namespaced via `A2APolicyRefusalReason` and stay unprefixed (matches the Sprint-5 `AuthzReason` pattern). RefusalReason count goes 26 → **32**.
 
@@ -220,10 +218,11 @@ Expected: FAIL — no `a2a_*` fields on `Settings`.
 # ---------------------------------------------------------------------------
 
 #: TTL for the per-tenant A2A pinned-token cache. Tokens are read from
-#: Vault on cache miss + refreshed before TTL elapses. Default 300s
-#: matches Sprint-5 mcp_oauth_token_cache_ttl_s for operational
-#: consistency.
-a2a_token_cache_ttl_s: int = Field(default=300, gt=0)
+#: Vault on cache miss + refreshed before TTL elapses. Default 3600s
+#: matches Sprint-5 mcp_oauth_token_cache_ttl_s (T1 R1 P3 reviewer
+#: correction — earlier draft said 300s; Sprint-5's actual default is
+#: 3600s; parity restored).
+a2a_token_cache_ttl_s: int = Field(default=3600, gt=0)
 
 #: Retention window for A2A artifact references stored via
 #: ObjectStoreAdapter. Default 7 days; tenants override per
@@ -236,11 +235,23 @@ a2a_artifact_retention_seconds: int = Field(default=7 * 24 * 3600, gt=0)
 a2a_pinned_spec_version: str = Field(default="1.0", pattern=r"^[0-9]+\.[0-9]+$")
 
 #: Whether the schema-drift CI gate runs at startup. False locally
-#: (saves network round-trip on every test run); CI sets
-#: COGNIC_RUN_A2A_UPSTREAM=1 which the env-var-binding pulls in as
-#: True. The drift gate itself is in tests/unit/protocol/
-#: test_a2a_schema_drift.py.
-a2a_schema_drift_check_enabled: bool = Field(default=False)
+#: (saves network round-trip on every test run); the dedicated CI
+#: lane sets COGNIC_RUN_A2A_UPSTREAM=1 which the AliasChoices
+#: binding flips to True (T1 R1 P2 reviewer correction — without
+#: the alias, the CI lane would silently skip the upstream check).
+#: T1 R2 P2 added the field name to AliasChoices so direct
+#: constructor overrides + name-based population still work
+#: (Settings(a2a_schema_drift_check_enabled=True) MUST stick rather
+#: than be silently dropped by extra='ignore'). The drift gate
+#: itself is in tests/unit/protocol/test_a2a_schema_drift.py.
+a2a_schema_drift_check_enabled: bool = Field(
+    default=False,
+    validation_alias=AliasChoices(
+        "a2a_schema_drift_check_enabled",        # constructor + name-based population (R2)
+        "COGNIC_A2A_SCHEMA_DRIFT_CHECK_ENABLED", # standard env-prefix path
+        "COGNIC_RUN_A2A_UPSTREAM",                # CI alias (R1)
+    ),
+)
 
 #: Maximum size of a detached AgentCard JWS file the trust gate
 #: accepts. JWS files >64 KiB are an attack vector (DoS via
@@ -252,10 +263,15 @@ a2a_card_jws_max_size_bytes: int = Field(default=64 * 1024, gt=0)
 a2a_outbound_request_timeout_s: int = Field(default=30, gt=0)
 
 #: Deadline for inbound non-streaming A2A `handle()` calls before
-#: the endpoint emits `task.failed` with `deadline_exceeded`. 60s
-#: budget for typical bank-grade tool-bound tasks.
+#: the endpoint transitions the task to FAILED (audit event
+#: `a2a.task_failed`, error_code `deadline_exceeded`). 60s budget
+#: for typical bank-grade tool-bound tasks.
 a2a_inbound_request_timeout_s: int = Field(default=60, gt=0)
 ```
+
+> **Note** — T1 R1 P2 also requires importing ``AliasChoices`` from
+> ``pydantic`` at the top of ``core/config.py`` alongside the existing
+> ``Field`` / ``field_validator`` / ``model_validator`` imports.
 
 - [ ] **Step 4: Implement closed-enum vocab declarations**
 
@@ -385,29 +401,43 @@ _POLICY_REASON_TO_SPEC_CODE_SHAPE: dict[str, str] = {  # illustrative; defined i
     "wave2_feature_refused": "unsupported_operation",
 }
 
-#: AgentCard validation outcomes. Two-pass: upstream A2A 1.0 schema
-#: + AgentOS bank-grade profile. 7 values.
+#: AgentCard validation outcomes. **Three-pass** (T1 R1 P2 reviewer
+#: correction added the JWS pass — earlier draft only had upstream-
+#: schema + profile, which would have forced T7 to misclassify JWS
+#: failures or use untyped strings):
+#:   1. Upstream A2A 1.0 schema (spec-conformance gate)
+#:   2. AgentOS bank-grade profile gates (7 specific failure modes;
+#:      T14 added the Wave-2 auth refusal as the 7th)
+#:   3. JWS signature verification (3 outcomes)
+#: 11 values total.
 AgentCardValidationReason = Literal[
-    "agent_card_upstream_schema_invalid",      # spec-conformance gate
-    "agent_card_profile_provider_missing",     # AgentOS profile gate
+    # Pass 1 — upstream A2A 1.0 schema (spec-conformance gate)
+    "agent_card_upstream_schema_invalid",
+    # Pass 2 — AgentOS bank-grade profile gates
+    "agent_card_profile_provider_missing",
     "agent_card_profile_security_schemes_missing",
     "agent_card_profile_security_requirements_missing",
     "agent_card_profile_signatures_missing",
     "agent_card_profile_supported_interfaces_empty",
     "agent_card_profile_top_level_url_forbidden",  # spec violation
+    "agent_card_profile_wave2_auth_required",  # T14: card declares mtlsSecurityScheme
+    # Pass 3 — JWS signature verification (T1 R1 P2 addition)
+    "agent_card_jws_blob_unreadable",       # detached JWS sidecar file IO failure
+    "agent_card_signature_invalid",         # cryptographic signature verify failed
+    "agent_card_signer_not_allowlisted",    # signer key not on per-tenant trust root
 ]
 ```
 
 - [ ] **Step 5: Run; expect PASS**
 
-Run: `uv run pytest tests/unit/test_config.py::TestSprint6A2ASettings -v`
-Expected: 9 passed.
+Run: `uv run pytest tests/unit/test_config.py::TestSprint6A2ASettings tests/unit/test_config.py::TestSprint6ClosedEnumVocabulary -v`
+Expected: 26 passed (T1 R1 + R2 corrections grew the count from 9 — 17 settings arms + 9 closed-enum arms; the alias regressions + the constructor-override regression land here).
 
 - [ ] **Step 6: Update `.env.example`**
 
 ```bash
 # A2A endpoint (Sprint 6, per ADR-003 + docs/A2A-CONFORMANCE.md)
-COGNIC_A2A_TOKEN_CACHE_TTL_S=300
+COGNIC_A2A_TOKEN_CACHE_TTL_S=3600  # T1 R1 P3 corrected from 300 — Sprint-5 mcp_oauth_token_cache_ttl_s default IS 3600s; parity restored
 COGNIC_A2A_ARTIFACT_RETENTION_SECONDS=604800
 COGNIC_A2A_PINNED_SPEC_VERSION=1.0
 COGNIC_A2A_SCHEMA_DRIFT_CHECK_ENABLED=false
@@ -436,28 +466,28 @@ git commit -m "feat(sprint-6): add A2A endpoint settings + closed-enum vocab sca
 ## Task 2: A2A SDK + protobuf pin + kernel/adapters split
 
 **Files:**
-- Modify: `pyproject.toml` — add `a2a-sdk == X.Y.Z` to the `adapters` extra group.
+- Modify: `pyproject.toml` — add `a2a-sdk == 1.0.2` to the `adapters` extra group.
 - Modify: `uv.lock` — refresh after pin lands.
-- Modify: `src/cognic_agentos/portal/api/app.py` — `create_prod_app` (default-adapters factory) wires the A2A SDK; `create_app` (kernel) does NOT. Mirrors Sprint-5 T2 R3 P1 doctrine.
+- Modify: `src/cognic_agentos/portal/api/app.py` — `create_prod_app` (default-adapters factory) at T2 ONLY logs SDK availability via `is_a2a_available()` (info on present, warning on missing); `create_app` (kernel) does NOT touch the SDK at all. **No route mounting at T2** (R0 P2 + R1 P3 + R2 P2 #2 reviewer corrections — Sprint-5 T15 R1 P2 #1 lesson). Route mounting + `A2AEndpoint` construction lands at T9 (`POST /api/v1/a2a` receiver), T11 (`/capabilities` + `/cancel` + artifacts retrieval), T12 (`UIEventEmitter` harness wiring). Mirrors Sprint-5 T2 R3 P1 doctrine for the kernel-vs-adapters split itself.
 - Modify: `src/cognic_agentos/protocol/__init__.py` — `is_a2a_available()` helper that mirrors `is_mcp_available()` from Sprint 5.
-- Test: `tests/unit/protocol/test_optional_dep_loader.py` — extend the existing kernel-vs-adapters dependency-loader fixture with A2A SDK presence/absence arms.
+- Test: `tests/unit/protocol/test_optional_dep_loader.py` — extend the existing kernel-vs-adapters dependency-loader fixture with A2A SDK presence/absence arms. **T2 R1 P2 #1 + R2 P2 #1 reviewer corrections:** the SDK-free admission contract MUST actually be tested (not assumed), AND the test contract MUST cover the full 10-module architecture-sentinel surface (not just the original 8). Adds `_A2A_MODULES_PLANNED` (10 modules — full architecture-sentinel surface) + `_A2A_ADMISSION_SIDE_MODULES` (7 SDK-free modules: `a2a_authz`, `a2a_agent_cards`, `a2a_schema`, `a2a_version`, `a2a_errors`, `a2a_capability_negotiation`, `a2a_cancellation`) + `_A2A_RUNTIME_SIDE_MODULES` (3: `a2a_endpoint`, `a2a_streaming`, `a2a_artifacts`); adds `_existing_a2a_modules(admission_only=...)` helper; adds parametrized `test_admission_modules_import_succeed_without_a2a_sdk` arm in `TestModuleImportsKernelSafe` (mirrors the MCP arm but filters to admission-side only — runtime-side modules are tolerated to fail import under `stub_a2a_missing` because their public classes call `require_a2a()` at construction not at import); adds `test_dict_excludes_a2a_admission_modules` + `test_dict_includes_a2a_runtime_modules` to `TestProtocolOptionalDepsMapShape` (admission modules MUST NOT appear in `_PROTOCOL_OPTIONAL_DEPS`; runtime modules MUST map to exactly `frozenset({"a2a"})`). Without these arms the `stub_a2a_missing` fixture would catch nothing through T8 and a future module-level `from a2a import …` drift in an admission-side module would only trip in production at kernel-image startup.
 
 **Halt-before-commit:** Yes (touches `portal/api/app.py` lifespan factory which is on the AGENTS.md critical-controls list as a kernel-startup boundary).
 
 - [ ] **Step 1: Pin the SDK + record the pin decision**
 
-The pin point is **`a2a-sdk == X.Y.Z`** (April 2026 release, Linux-Foundation-governed). The SDK ships:
-- Generated Pydantic types from the spec's protobuf source (canonical data model per ADR-003 + A2A-CONFORMANCE.md).
-- A `JsonSchemaBindings` namespace exposing the spec-published JSON-schema bindings used as the parity-check side of T6's drift gate.
+The pin point is **`a2a-sdk == 1.0.2`** (April 2026 release, Linux-Foundation-governed). The SDK ships:
+- **Protobuf-generated message classes** from the spec's protobuf source under `a2a.types` (canonical data model per ADR-003 + A2A-CONFORMANCE.md). T6 R0 capture-time correction: the planning-stage prose called these "Pydantic types" but the actual SDK exports are protobuf `Message` subclasses with `MessageMeta` metaclass; round-trip is `SerializeToString()` + `Class.FromString()`, not `model_validate()`.
 - A reference HTTP client + server skeletons (we DO NOT use the server skeleton — `protocol/a2a_endpoint.py` is our own implementation; we use the SDK only for wire-format types + version-header utilities).
+- Note on JSON-schema parity (T6 R0 capture-time correction): the planning-stage draft assumed the SDK exposes a `JsonSchemaBindings` namespace mirroring spec-published JSON-schema bindings, used as the parity-check side of T6's drift gate. Reality at T6 capture: the spec authors do NOT publish a canonical JSON-schema bundle (`specification/json/` is a README-only directory); T6 ships the protobuf-digest gate only and defers JSON-schema parity until upstream publishes a canonical bundle. See Doctrine Decision C for the deferred-items breakdown.
 
 We considered three alternatives:
 
 | Option | Decision | Reason |
 |---|---|---|
-| Vendor `.proto` + compile via `betterproto` | Rejected | Vendoring the protobuf source means we own a fork of the spec wire format. Drift between our compiled types and upstream becomes invisible until the JSON-schema parity test (T6) catches it; by then any change has already merged. The official SDK gives us upstream's Pydantic types directly + a parity check against the spec's JSON-schema. |
+| Vendor `.proto` + compile via `betterproto` | Rejected | Vendoring the protobuf source means we own a fork of the spec wire format. Drift between our compiled types and upstream becomes invisible until the schema-drift gate (T6) catches it; by then any change has already merged. The official SDK gives us upstream's protobuf-generated message classes directly (T6 R0 capture-time correction: SDK ships protobuf via `MessageMeta`, NOT Pydantic — see Tech Stack line 10), and the T6 drift gate SHA-256s the canonical upstream proto source against a captured digest on every CI run. JSON-schema parity is deferred until upstream publishes a canonical JSON-schema bundle (currently README-only; see Doctrine Decision C). |
 | Use a third-party `a2a-py` community shim | Rejected | Wave 1 community shims are not Linux-Foundation-governed; they may diverge from spec. The official `a2a-sdk` package matches the spec authors' own tests. |
-| **Pin official `a2a-sdk == X.Y.Z`** | **Selected** | Spec authors' own types; LF governance; consumed by 150+ orgs in production per ADR-003. Schema-drift CI gate (T6) catches upstream drift. Sprint-7A `agentos validate` will use the same SDK. |
+| **Pin official `a2a-sdk == 1.0.2`** | **Selected** | Spec authors' own types; LF governance; consumed by 150+ orgs in production per ADR-003. Schema-drift CI gate (T6) catches upstream drift. Sprint-7A `agentos validate` will use the same SDK. |
 
 - [ ] **Step 2: Update `pyproject.toml`**
 
@@ -469,7 +499,7 @@ adapters = [
     # ... Sprint-5 entries unchanged ...
     "mcp == 1.27.0",
     # Sprint 6 — A2A 1.0 SDK
-    "a2a-sdk == X.Y.Z",  # PIN AT T2: confirm version + import namespace
+    "a2a-sdk == 1.0.2",  # T2 lock-time pin (Apr-2026 release; namespace = `a2a`)
     # Sprint 6 — JWS verification for Agent Card detached signatures.
     # R2 P2 #2 reviewer correction: Sprint 4 pinned ``cryptography>=45``
     # for cosign's transitive needs but no JWS library; T7's Agent
@@ -489,7 +519,7 @@ adapters = [
     # current canonical choice for new Python JWS work; (c) it
     # transitively uses ``cryptography`` so we reuse Sprint-4's
     # pinned backend without a second crypto family.
-    "joserfc == X.Y.Z",  # PIN AT T2: verify latest stable on PyPI
+    "joserfc == 1.6.4",  # T2 lock-time pin (latest stable; transitively uses cryptography>=45)
 ]
 ```
 
@@ -687,7 +717,8 @@ T3 produces no commit. The plan's Self-Review section records "T3: zero findings
 
 **Files:**
 - Create: `tests/architecture/test_a2a_no_subprocess.py` — static-AST scan of every module under `src/cognic_agentos/protocol/a2a_*.py`. Refuses any `subprocess` / `os.exec*` / `os.spawn*` / `os.posix_spawn*` / `os.system` / `os.popen` / `asyncio.create_subprocess_exec` / `asyncio.create_subprocess_shell` / `multiprocessing.Process` / `shell=True` import or call. Mirrors Sprint-5 T4 `test_mcp_stdio_no_subprocess.py` exactly.
-- Create: `tests/architecture/test_a2a_no_caller_controlled_url.py` — static-AST scan asserting that NO module under `protocol/a2a_*` calls `httpx.AsyncClient.{get,post,put,delete}(url=<x>)` where `<x>` is a function parameter of the call site, a request-body field, or a model-output string. Allowed URL sources: literals, `Settings.a2a_*_url` fields, hardcoded well-known suffixes (`/.well-known/agent-card.json`), or values from objects whose type is `AgentCard` (with attribute access path containing `supported_interfaces[*].url`).
+- Create: `tests/architecture/test_a2a_no_caller_controlled_url.py` — static-AST scan asserting that NO module under `protocol/a2a_*` calls `httpx.AsyncClient.{get,post,put,patch,delete,request,send}(url=<x>)` where `<x>` traces to a function parameter, a **function-parameter-rooted attribute chain** (T4 R2 P2 — even card-shaped chains like `target_card.supported_interfaces[0].url` are refused when the root is caller-supplied; `self`/`cls` excepted as Python-convention method receivers), an inbound-request attribute chain (root in `{request, message, payload, envelope, body, task}`), or a model-output string. Allowed URL sources: literals; `Settings.a2a_*_url` fields (when not function-param-rooted); hardcoded well-known suffixes interpolating non-caller-controlled origins; **verifier-output AgentCard chains rooted at `verified_card` / `verified_agent_card`** (T4 R2 P2 — generic `card` / `agent_card` chain roots are NOT in the allow-list and fall through to "unknown" because static AST cannot tell whether a generically-named binding came from the JWS verifier or from caller input; implementations MUST rebind verifier output through `verified_card` / `verified_agent_card` before constructing dispatch URLs) accessed via `.supported_interfaces[*].url` OR `.url`. The httpx-call detector is narrowed to actual httpx receivers (T4 R3 P2) — bare/attr names containing `client`/`http`/`httpx` fragments, OR `httpx`-rooted chains, OR `httpx.AsyncClient(...)` constructor receivers — so unrelated dict-like accesses (`self._tasks.get(task_id)`, `headers.get(name)`, `cache.get(key)`, `store.get(id)`) are NOT flagged. Plus a binding pre-pass (T4 R4 P2) tracks names produced by `transport = httpx.AsyncClient()` / `self.session = httpx.Client()` / `async with httpx.AsyncClient() as session:` so renamed httpx clients with non-conforming names are still scanned. **T4 R5 P2 reviewer correction:** the binding pre-pass is alias-aware — an import-alias pre-pass collects `import httpx as <alias>` and `from httpx import {AsyncClient,Client} [as <alias>]` so `transport = hx.AsyncClient()` and `transport = AsyncClient()` (after `from httpx import AsyncClient`) and `transport = Async()` (after `from httpx import AsyncClient as Async`) all add `transport` to the binding set. **T4 R5 P3 reviewer correction:** binding visibility is scope-aware — module-scope bindings are visible everywhere, function-scope bindings only within the same function, class-scope `self.X = httpx...` bindings only across methods of the same class — so a `session = httpx.AsyncClient()` in one function does NOT leak into unrelated `session.<method>(...)` calls in other functions or classes. **T4 R6 P2 reviewer correction:** direct alias-constructor receivers are recognised via the alias-aware constructor matcher, so `hx.AsyncClient().get(target_url)` (after `import httpx as hx`) and `AsyncClient().get(target_url)` (after `from httpx import AsyncClient`) and `Async().get(target_url)` (after rename) are flagged even without a bound name; the `_is_httpx_receiver` Call branch threads the alias sets through to `_is_httpx_constructor_call` instead of recursing alias-blind. **T4 R1 P2 #1 reviewer correction:** URL-extraction is method-aware — `client.request(method, url, ...)` reads URL from positional arg 1 (NOT arg 0); `client.send(request_obj)` reads URL from the Request object (statically traced as "unknown" — runtime canary takes over). **T4 R1 P2 #2 reviewer correction:** the URL-source classifier refuses inbound-rooted attribute chains (`request.*`, `message.*`, `payload.*`, `envelope.*`, `body.*`, `task.*`) **before** running the AgentCard allow-list heuristics, so chains like `request.supported_interfaces[0].url` or `message.agent_card.url` (which LOOK card-shaped) are correctly refused.
+- Create: `docs/A2A-CALLER-URL-THREAT-MODEL.md` — authoritative threat-model document (per File Structure line 81 + Doctrine Decision B). **T4 R1 P3 reviewer correction:** landed alongside the architecture test instead of left as a dangling reference. Mirrors `docs/MCP-STDIO-THREAT-MODEL.md` structure: background → threat model → four reachable URL surfaces (inbound `target_agent`, outbound `spawn_subagent`, AgentCard discovery URL, push-notification webhooks) → Sprint-6 enforcement (architecture-test backstop + runtime canary + JWS verification) → explicit non-enforcement (Wave-2 mTLS, Wave-3 VC) → cross-references.
 
 **Halt-before-commit:** Yes — the architecture tests ARE the wire-protocol invariants; reviewer pause needed.
 
@@ -739,7 +770,8 @@ renamed-module detection (where ``a2a_`` prefix has been dropped but
 ```python
 """Architecture test: outbound URLs in protocol/a2a_* MUST come from
 verified Agent Cards or operator-controlled settings, NEVER from
-function parameters / request bodies / model outputs.
+function parameters / function-parameter-rooted attribute chains /
+inbound-request attribute chains / model outputs.
 
 This is the static-AST half of the A2A caller-URL threat model
 (``docs/A2A-CALLER-URL-THREAT-MODEL.md``). The runtime half is
@@ -748,27 +780,72 @@ canary).
 
 The collector walks every module under
 ``src/cognic_agentos/protocol/a2a_*.py`` and asserts that every
-``httpx.AsyncClient.{get,post,put,delete}`` call satisfies one of:
+``httpx.AsyncClient.{get,post,put,patch,delete,request,send}`` call
+(narrowed to actual httpx receivers per T4 R3 P2 — receiver name must
+contain a fragment in ``{"client", "http", "httpx"}``, OR the chain
+root is the literal ``httpx`` module, OR the receiver is an
+``httpx.AsyncClient(...)`` / ``httpx.Client(...)`` constructor call;
+ordinary dict-like accesses such as ``self._tasks.get(task_id)`` /
+``headers.get(name)`` / ``mapping.get(key)`` / ``store.get(id)`` are
+NOT flagged) satisfies one of the **allowed URL sources**:
 
   1. URL is a string literal.
-  2. URL is a `Settings.a2a_*_url` attribute access.
-  3. URL is a hardcoded well-known suffix concatenated to a verified
-     origin (``f"{origin}/.well-known/agent-card.json"`` where
-     ``origin`` traces to a verified ``AgentCard.supported_interfaces``).
-  4. URL is an attribute access on an ``AgentCard`` typed instance
-     (``card.supported_interfaces[i].url``).
+  2. URL is a ``Settings.a2a_*_url`` attribute access AND the chain
+     root is NOT a function parameter.
+  3. URL is a hardcoded well-known suffix concatenated to a non-caller-
+     controlled origin via f-string (``f"{verified_card.origin}/.well-known/agent-card.json"``;
+     the runtime canary T14 is the load-bearing half for this shape).
+  4. URL is an attribute access rooted at one of the verifier-output
+     names (``verified_card`` / ``verified_agent_card`` — T4 R2 P2
+     tightened the AgentCard allow-list to these names; generic
+     ``card`` / ``agent_card`` chains classify as "unknown" and the
+     runtime canary takes over) AND whose chain includes
+     ``supported_interfaces`` or ends with ``.url``.
+
+URL extraction is method-aware (T4 R1 P2 #1):
+
+  - ``get`` / ``post`` / ``put`` / ``patch`` / ``delete`` — URL at
+    positional arg 0 OR keyword ``url=``.
+  - ``request`` — URL at positional arg **1** (after the method name)
+    OR keyword ``url=``. Without method-awareness,
+    ``client.request("POST", target_url)`` would have classified the
+    literal ``"POST"`` as the URL and the actual caller-supplied URL
+    would have slipped past.
+  - ``send`` — first positional arg is a ``httpx.Request`` object,
+    not a URL. Static AST cannot trace into Request construction;
+    flagged as "no statically-identifiable URL argument" and the
+    runtime canary takes over.
 
 Forbidden URL sources (the ban list):
 
   - Function parameters of the call site (caller-supplied URL).
-  - Request-body fields (caller-supplied via inbound A2A request).
-  - Model-output strings (LLM-generated URL).
+  - Function-parameter-rooted attribute chains (T4 R2 P2 — even
+    card-shaped chains like ``target_card.supported_interfaces[0].url``
+    where ``target_card`` is a function parameter are refused; the
+    chain root is by definition caller-controlled). Exception:
+    ``self`` / ``cls`` are method receivers by Python convention,
+    NOT caller-supplied data, so ``self.settings.a2a_*_url`` and
+    similar instance-rooted chains are allowed.
+  - Inbound-request attribute chains rooted at ``request`` /
+    ``message`` / ``payload`` / ``envelope`` / ``body`` / ``task``
+    (T4 R1 P2 #2 — refused BEFORE the AgentCard allow-list so chains
+    like ``request.supported_interfaces[0].url`` cannot slip through).
   - Concatenations including any of the above.
 
-Three self-tests pin the collector + the URL-source classifier:
+Self-tests pin the collector + the URL-source classifier + the httpx-
+call detector + the URL extractor + end-to-end module shapes (the
+parametrized arm grows from ``[None]`` at T4 to 10 modules at T11
+closeout):
+
   - test_collector_finds_top_level_a2a_files
   - test_url_source_classifier_rejects_caller_param
   - test_url_source_classifier_accepts_agent_card_attr_access
+  - test_classifier_rejects_function_param_card_root (T4 R2 P2)
+  - test_classifier_rejects_inbound_supported_interfaces_chain (T4 R1 P2 #2)
+  - test_extract_url_request_method_takes_url_at_pos_1 (T4 R1 P2 #1)
+  - test_task_store_get_call_NOT_flagged (T4 R3 P2)
+  - test_module_with_real_httpx_call_after_dict_calls_still_flagged
+    (T4 R3 P2 positive control)
 """
 # ... full implementation ...
 ```
@@ -1191,9 +1268,11 @@ git commit -m "feat(sprint-6): A2A per-tenant pinned-token authz client (T5)"
 ## Task 6: `protocol/a2a_schema.py` + schema-drift CI gate
 
 **Files:**
-- Create: `src/cognic_agentos/protocol/a2a_schema.py` — re-exports the `a2a-sdk` SDK's Pydantic types under stable AgentOS names; includes `_PINNED_PROTOBUF_DIGEST` + `_PINNED_JSON_SCHEMA_DIGEST` constants the drift gate verifies.
-- Create: `tests/unit/protocol/test_a2a_schema.py` — schema-type contract (re-export shape, AgentCard / Task / StreamingMessage / Artifact / Cancellation envelope round-tripping through Pydantic).
-- Create: `tests/unit/protocol/test_a2a_schema_drift.py` — env-gated CI drift gate. Pulls upstream A2A 1.0 protobuf source AND the spec-published JSON-schema bindings; diffs both against AgentOS's pinned digests. **Skipped by default** (no network in unit suite); fires on the dedicated CI lane below.
+- Create: `src/cognic_agentos/protocol/a2a_schema.py` — re-exports the `a2a-sdk` SDK's protobuf-generated message types (`a2a-sdk == 1.0.2` ships protobuf message classes via `MessageMeta`, NOT Pydantic — T6 R0 capture-time correction; the plan's earlier draft assumed Pydantic). Module-level **PEP 562 `__getattr__`** lazy-loads each of the 7 type names on first access so the module imports cleanly without `a2a-sdk` installed (admission-side per Sprint-5 R3 P1 doctrine — first attribute access fires `require_a2a()`); module-level constants `A2A_SPEC_VERSION` / `_PINNED_PROTOBUF_DIGEST` / `_UPSTREAM_PROTOBUF_URL` remain accessible without the SDK so the drift CI gate's metadata can be read in any image. Includes `_PINNED_PROTOBUF_DIGEST` (real digest captured at T6 commit time from the canonical upstream URL pinned to the **`v1.0.0` git tag**) which the drift gate verifies.
+- Create: `tests/unit/protocol/test_a2a_schema.py` — schema-type contract (re-export shape — `AgentCard` / `Task` / `StreamResponse` / `Artifact` / `CancelTaskRequest` / `TaskArtifactUpdateEvent` / `TaskStatusUpdateEvent`). Round-trip via **protobuf `SerializeToString()` + `Class.FromString()`** (T6 R0 capture-time correction; the plan's earlier draft said "Pydantic round-trip" but the SDK ships protobuf, not Pydantic). T2 R1 P2 + T6 verified the type names against `a2a-sdk == 1.0.2`'s `a2a.types` exports — pre-correction draft names (`StreamingMessage` / `CancellationRequest` / `ErrorResponse`) DO NOT exist in the SDK and are explicitly rejected by a drift-detector arm. Adds the lazy `__getattr__` resolution arms (parametrized over all 7 types, cache-on-first-access, AttributeError-on-typo) + the admission-side import invariant arm (constants accessible without lazy SDK resolution).
+- Create: `tests/unit/protocol/test_a2a_schema_drift.py` — env-gated CI drift gate. Pulls the upstream A2A 1.0 **protobuf source** at the pinned `v1.0.0` git tag and SHA-256s it against `_PINNED_PROTOBUF_DIGEST`. **Skipped by default** (no network in unit suite); fires on the dedicated CI lane below. **T6 R0 capture-time correction:** the plan's earlier draft assumed the spec authors publish BOTH a canonical protobuf bundle AND a canonical JSON-schema binding bundle (with a parity check between them). Reality at T6 capture: the spec authors publish only the protobuf source at `raw.githubusercontent.com/a2aproject/A2A/v1.0.0/specification/a2a.proto`; `specification/json/` contains only a README pointing back at the protobuf source. T6 ships the protobuf-digest gate only (1 test arm, not 3); the JSON-schema artifact + parity check + the `protocol/a2a_schema_parity.py` helper module land when (or if) the spec authors publish a canonical JSON-schema bundle. The capture-time divergence is documented inline in both the schema module's docstring and the drift-gate's docstring so future maintainers see the rationale at the source.
+- **Modify:** `pyproject.toml` — register the `a2a_upstream` pytest marker under `[tool.pytest.ini_options].markers` so the env-gated drift gate runs without `PytestUnknownMarkWarning`.
+- **Modify:** `tests/unit/architecture/test_no_env_specific_values_in_source.py` — extend `_SPEC_URI_PREFIXES` with `https://raw.githubusercontent.com/a2aproject/A2A/` (mirrors the SLSA / in-toto / SPDX / CycloneDX exemptions: a fixed external-standards URL, not an operational endpoint). Widen `_module_level_uppercase_spec_constants` to recognise both `ast.Assign` AND `ast.AnnAssign` so annotated module constants like `_UPSTREAM_PROTOBUF_URL: str = "https://..."` qualify for the spec-prefix exemption (annotation type doesn't change semantic exemption).
 - **Modify:** `.github/workflows/python.yml` — **R0 P2 / R2 P2 #5 reviewer corrections (was missing from the original T6 file list; R2 corrected the `needs:` target + the setup-step shape).** Add a new dedicated CI lane named `a2a-spec drift detection`. The lane is structured as a `needs: ci`-gated downstream job (matching the actual workflow's `ci` job id, NOT a non-existent `lint-test` id) and inlines the same uv + setup-python chain the `ci` job uses (the workflow does not have a `./.github/actions/setup-python` composite action — verified at R2-correction time):
   ```yaml
   a2a-spec-drift:
@@ -1229,6 +1308,16 @@ git commit -m "feat(sprint-6): A2A per-tenant pinned-token authz client (T5)"
 
 - [ ] **Step 1: Write `protocol/a2a_schema.py`**
 
+**T6 R0 capture-time correction:** the planning-stage skeleton below
+described both protobuf + JSON-schema bundle pinning (with a parity
+helper). Reality at T6 capture: upstream publishes only the protobuf
+source at a canonical URL; the `specification/json/` directory holds
+only a README. The actual shipped shape is **protobuf-only** with a
+PEP 562 `__getattr__` lazy SDK loader. Step 1-3 below show what
+actually shipped; the obsolete JSON-schema + parity-helper skeleton
+is preserved at the bottom of T6 (under "Superseded planning-stage
+skeleton") for changelog continuity.
+
 ```python
 """protocol/a2a_schema.py — pinned A2A 1.0 wire-format types.
 
@@ -1237,83 +1326,109 @@ Critical-controls module per AGENTS.md (Sprint-6 amendment, "Protocol
 the schema-drift CI gate (test_a2a_schema_drift.py) catches upstream
 movement before it reaches us.
 
-Re-exports the ``a2a-sdk`` SDK's Pydantic types under stable
-AgentOS names so downstream code keeps working when we bump the SDK
-pin. The pinned digests below are checksum-of-the-spec-source-bytes,
-captured at the time of the SDK pin (T2). The drift gate compares
-upstream's current digest against these constants; on mismatch, the
-build fails and a deliberate review + version bump is required.
+Re-exports the ``a2a-sdk`` SDK's protobuf-generated message types
+(NOT Pydantic — the SDK ships protobuf-generated classes via
+``MessageMeta``; T6 R0 capture-time correction). Module-level PEP
+562 ``__getattr__`` lazy-loads each of the 7 type names on first
+access so the module imports cleanly without ``a2a-sdk`` installed
+(admission-side per Sprint-5 R3 P1 doctrine — first attribute
+access fires ``require_a2a()``).
 
-Pinned A2A spec version: ``1.0`` (April 2026 release, Linux-Foundation
-governance). Bumping the pinned version is a deliberate reviewed
-change (per Sprint-6 Decision Lock #1).
+Pinned A2A spec version: ``1.0``. The pinned digest below is the
+SHA-256 of the upstream protobuf source at the v1.0.0 git tag,
+captured at T6 commit time. The drift gate compares upstream's
+current digest against this constant; on mismatch, the build fails
+and a deliberate review + version bump is required (per Sprint-6
+Decision Lock #1).
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+
+from cognic_agentos.protocol import require_a2a
+
+A2A_SPEC_VERSION: str = "1.0"
+
+#: SHA-256 of the canonical upstream protobuf source at the pinned
+#: v1.0.0 tag. Captured at T6 commit time from
+#: raw.githubusercontent.com/a2aproject/A2A/v1.0.0/specification/a2a.proto.
+_PINNED_PROTOBUF_DIGEST: str = "<captured at T6 commit time>"
+
+#: Pin to v1.0.0 git tag (NOT main) so spec-authors' WIP on main
+#: doesn't trip the gate; only a deliberate v-tag update OR our
+#: own decision to bump the pinned tag trips the gate.
+_UPSTREAM_PROTOBUF_URL: str = (
+    "https://raw.githubusercontent.com/a2aproject/A2A/"
+    "v1.0.0/specification/a2a.proto"
+)
+
+_REEXPORTED_TYPE_NAMES: frozenset[str] = frozenset({
+    "AgentCard", "Artifact", "CancelTaskRequest", "StreamResponse",
+    "Task", "TaskArtifactUpdateEvent", "TaskStatusUpdateEvent",
+})
+
+__all__ = (
+    "A2A_SPEC_VERSION",
+    "AgentCard", "Artifact", "CancelTaskRequest", "StreamResponse",
+    "Task", "TaskArtifactUpdateEvent", "TaskStatusUpdateEvent",
+    "get_pinned_spec_version",
+)
 
 if TYPE_CHECKING:
+    # T2 R1 P2 verified the actual SDK names — StreamResponse (NOT
+    # StreamingMessage), CancelTaskRequest (NOT CancellationRequest);
+    # SDK ships per-error-code typed classes (NOT a single
+    # ErrorResponse). At runtime, names resolve via __getattr__ on
+    # first access — letting the module import cleanly without
+    # a2a-sdk installed (admission-side per Sprint-5 R3 P1).
     from a2a.types import (
-        AgentCard,
-        Task,
-        StreamingMessage,
-        Artifact,
-        CancellationRequest,
-        ErrorResponse,
+        AgentCard, Artifact, CancelTaskRequest, StreamResponse,
+        Task, TaskArtifactUpdateEvent, TaskStatusUpdateEvent,
     )
-
-# Lazy import — admission-side modules (a2a_authz, etc.) construct
-# without the SDK; this import only fires when the registry actually
-# calls into a2a_schema for wire-format work.
-def _types():
-    from a2a.types import (
-        AgentCard,
-        Task,
-        StreamingMessage,
-        Artifact,
-        CancellationRequest,
-        ErrorResponse,
-    )
-    return AgentCard, Task, StreamingMessage, Artifact, CancellationRequest, ErrorResponse
-
-
-#: SHA-256 of the upstream A2A 1.0 protobuf source bundle (the
-#: a2a.proto + agent_card.proto + task.proto file set distributed
-#: by the spec authors). Captured at SDK pin time (T2).
-_PINNED_PROTOBUF_DIGEST: str = "0" * 64  # placeholder — populated at T2 commit time
-
-#: SHA-256 of the upstream A2A 1.0 JSON-schema binding bundle.
-_PINNED_JSON_SCHEMA_DIGEST: str = "0" * 64  # placeholder — populated at T2 commit time
-
-#: Upstream URL where the spec authors publish the canonical
-#: protobuf + JSON-schema bundles. Pinned in source so the drift
-#: gate has an unambiguous fetch target.
-_UPSTREAM_PROTOBUF_URL: str = "https://a2a-protocol.org/spec/1.0/a2a.proto"
-_UPSTREAM_JSON_SCHEMA_URL: str = "https://a2a-protocol.org/spec/1.0/json-schema-bindings.json"
 
 
 def get_pinned_spec_version() -> str:
-    """The pinned A2A spec version. Single source of truth for any
-    code that needs to assert spec compliance."""
-    return "1.0"
+    return A2A_SPEC_VERSION
+
+
+def __getattr__(name: str) -> Any:
+    """Lazy attribute access for the re-exported SDK types.
+
+    PEP 562 module-level __getattr__ fires on attribute access for
+    names not in the module dict. ``import a2a_schema`` imports
+    cleanly without the SDK; ``from a2a_schema import AgentCard``
+    fires require_a2a() (raising A2ANotAvailableError if SDK is
+    missing) and returns the SDK class. First access caches the
+    resolved name into globals() so subsequent accesses skip
+    __getattr__.
+    """
+    if name not in _REEXPORTED_TYPE_NAMES:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    require_a2a()
+    from a2a import types as _a2a_types
+    resolved = getattr(_a2a_types, name)
+    globals()[name] = resolved
+    return resolved
 ```
 
-- [ ] **Step 2: Write the schema-drift CI gate**
+- [ ] **Step 2: Write the schema-drift CI gate (protobuf-only)**
 
 ```python
-"""Schema-drift CI gate. Pulls upstream A2A 1.0 protobuf source AND
-the spec-published JSON-schema bindings; diffs both against the
-pinned digests in protocol/a2a_schema.py.
+"""Schema-drift CI gate. Pulls the upstream A2A 1.0 protobuf source
+at the pinned v1.0.0 tag and SHA-256s it against
+_PINNED_PROTOBUF_DIGEST in protocol/a2a_schema.py.
 
-Env-gated per Sprint-6 Doctrine Decision C: the test only runs when
-``COGNIC_RUN_A2A_UPSTREAM=1`` is set. CI sets it; local dev skips
-by default (saves network round-trip on every test run). Mirrors
-Sprint-4 ``cosign_real`` env-gate pattern.
+Env-gated per Sprint-6 Doctrine Decision C: only runs when
+COGNIC_RUN_A2A_UPSTREAM=1 is set. CI sets it on the dedicated
+a2a-spec-drift lane; local dev skips by default. Mirrors the
+Sprint-4 cosign_real env-gate pattern.
 
-If the upstream digest moves beyond the pinned digest, this test
-fails and a deliberate review + version bump is required (per
-Sprint-6 Decision Lock #1). Silent upstream upgrades are forbidden.
+T6 R0 capture-time correction: upstream publishes only the
+protobuf source at a canonical URL; the planning-stage assumption
+of a parallel JSON-schema bundle does not hold. The JSON-schema
+artifact + parity check + the helper module land when (or if) the
+spec authors publish a canonical JSON-schema bundle.
 """
 
 from __future__ import annotations
@@ -1325,141 +1440,107 @@ import httpx
 import pytest
 
 from cognic_agentos.protocol.a2a_schema import (
-    _PINNED_JSON_SCHEMA_DIGEST,
     _PINNED_PROTOBUF_DIGEST,
-    _UPSTREAM_JSON_SCHEMA_URL,
     _UPSTREAM_PROTOBUF_URL,
 )
 
-pytestmark = pytest.mark.skipif(
-    os.environ.get("COGNIC_RUN_A2A_UPSTREAM") != "1",
-    reason=(
-        "live A2A upstream schema check; opt in via "
-        "COGNIC_RUN_A2A_UPSTREAM=1 (CI sets this; local dev skips "
-        "to save network round-trip on every test run)"
+pytestmark = [
+    pytest.mark.skipif(
+        os.environ.get("COGNIC_RUN_A2A_UPSTREAM") != "1",
+        reason=(
+            "live A2A upstream schema check; opt in via "
+            "COGNIC_RUN_A2A_UPSTREAM=1"
+        ),
     ),
-)
+    pytest.mark.a2a_upstream,
+]
 
 
-@pytest.mark.a2a_upstream
 async def test_pinned_protobuf_digest_matches_upstream() -> None:
-    """The pinned protobuf-bundle digest in
-    ``protocol/a2a_schema.py`` MUST match the SHA-256 of the bytes
-    upstream is publishing right now. If upstream moves, the build
-    fails and a Sprint-N reviewer + version-bump pass is required.
-    """
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.get(_UPSTREAM_PROTOBUF_URL)
         resp.raise_for_status()
         upstream_digest = hashlib.sha256(resp.content).hexdigest()
 
     assert upstream_digest == _PINNED_PROTOBUF_DIGEST, (
         f"A2A 1.0 protobuf source has drifted from pin.\n"
-        f"  Pinned: {_PINNED_PROTOBUF_DIGEST}\n"
+        f"  Pinned:   {_PINNED_PROTOBUF_DIGEST}\n"
         f"  Upstream: {upstream_digest}\n"
-        f"  URL: {_UPSTREAM_PROTOBUF_URL}\n"
+        f"  URL:      {_UPSTREAM_PROTOBUF_URL}\n"
         f"\n"
-        f"Action: review the upstream change; if accepted, bump the pin "
-        f"in protocol/a2a_schema.py with an explicit changelog entry. "
-        f"Silent upgrades are forbidden per Sprint-6 Decision Lock #1."
-    )
-
-
-@pytest.mark.a2a_upstream
-async def test_pinned_json_schema_digest_matches_upstream() -> None:
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.get(_UPSTREAM_JSON_SCHEMA_URL)
-        resp.raise_for_status()
-        upstream_digest = hashlib.sha256(resp.content).hexdigest()
-
-    assert upstream_digest == _PINNED_JSON_SCHEMA_DIGEST, (
-        f"A2A 1.0 JSON-schema bindings have drifted from pin.\n"
-        f"  Pinned: {_PINNED_JSON_SCHEMA_DIGEST}\n"
-        f"  Upstream: {upstream_digest}\n"
-        f"  URL: {_UPSTREAM_JSON_SCHEMA_URL}\n"
-    )
-
-
-@pytest.mark.a2a_upstream
-async def test_protobuf_and_json_schema_bindings_have_parity() -> None:
-    """Catches upstream drift the spec authors haven't yet
-    republished: if the protobuf source has moved but the JSON-schema
-    bundle hasn't (or vice versa), our pinned types may be in
-    inconsistent state.
-    """
-    async with httpx.AsyncClient(timeout=30) as client:
-        proto_resp = await client.get(_UPSTREAM_PROTOBUF_URL)
-        json_resp = await client.get(_UPSTREAM_JSON_SCHEMA_URL)
-        proto_resp.raise_for_status()
-        json_resp.raise_for_status()
-
-    # The parity check is structural: every protobuf message type
-    # MUST have a corresponding JSON-schema definition. Implementation
-    # detail of "structural" is owned by the SDK + this test's helper.
-    from cognic_agentos.protocol.a2a_schema_parity import (
-        check_protobuf_json_schema_parity,
-    )
-    check_protobuf_json_schema_parity(
-        protobuf_bytes=proto_resp.content,
-        json_schema_bytes=json_resp.content,
+        f"Action: review the upstream change against the Wave-1/2/3\n"
+        f"matrix in docs/A2A-CONFORMANCE.md. If accepted, bump the\n"
+        f"pin in protocol/a2a_schema.py with an explicit changelog\n"
+        f"entry. Silent upgrades are forbidden per Sprint-6 Decision\n"
+        f"Lock #1."
     )
 ```
 
-- [ ] **Step 3: Implement the parity helper module**
+- [ ] **Step 3: (deferred — JSON-schema parity helper)**
 
-```python
-"""protocol/a2a_schema_parity.py — protobuf vs JSON-schema parity.
-
-Helper module for test_a2a_schema_drift.py. Walks both bundles and
-asserts every protobuf message type has a matching JSON-schema
-definition + every JSON-schema definition has a matching protobuf
-message type. Catches the case where upstream's two bindings have
-diverged but the spec authors haven't yet republished.
-"""
-# ... implementation walks both and asserts parity ...
-```
+T6 R0 capture-time correction: this step previously implemented
+`protocol/a2a_schema_parity.py`. With the JSON-schema bundle absent
+upstream, the parity check has no second artifact to compare
+against; the helper module is NOT shipped at T6. When (or if) the
+spec authors publish a canonical JSON-schema bundle, the parity
+helper + the JSON-schema digest pin + the parity test arm land
+together as a Sprint-N reviewer-pause amendment. The deferred
+contract is documented inline in `protocol/a2a_schema.py`'s docstring
+and in `tests/unit/protocol/test_a2a_schema_drift.py`'s docstring.
 
 - [ ] **Step 4: Run drift gate locally without env-var; expect SKIP**
 
 ```bash
 uv run pytest tests/unit/protocol/test_a2a_schema_drift.py -v
 ```
-Expected: skipped (3 tests).
+Expected: 1 test skipped (the protobuf-digest gate).
 
 - [ ] **Step 5: Run drift gate with env-var; expect PASS**
 
 ```bash
 COGNIC_RUN_A2A_UPSTREAM=1 uv run pytest tests/unit/protocol/test_a2a_schema_drift.py -v
 ```
-Expected: 3 passed (assuming the digests have been captured at SDK pin time).
+Expected: 1 passed (the protobuf-digest gate; T6 R0 capture-time
+shipped 1 test arm, not 3).
 
 - [ ] **Step 6: Halt-before-commit + commit**
 
+T6 R0 capture-time correction: the parity-helper module
+`src/cognic_agentos/protocol/a2a_schema_parity.py` is NOT shipped at
+T6 — the spec authors publish only the protobuf source; there is
+no JSON-schema bundle to check parity against. The git-add block
+drops that path. CI workflow + pyproject + architecture-test
+exemption modifications are also part of T6's commit per the
+expanded Files list above.
+
 ```bash
 git add src/cognic_agentos/protocol/a2a_schema.py \
-        src/cognic_agentos/protocol/a2a_schema_parity.py \
         tests/unit/protocol/test_a2a_schema.py \
-        tests/unit/protocol/test_a2a_schema_drift.py
-git commit -m "feat(sprint-6): A2A 1.0 wire-format types + drift CI gate (T6)"
+        tests/unit/protocol/test_a2a_schema_drift.py \
+        pyproject.toml \
+        .github/workflows/python.yml \
+        tests/unit/architecture/test_no_env_specific_values_in_source.py
+git commit -m "feat(sprint-6): A2A 1.0 wire-format types + protobuf drift CI gate (T6)"
 ```
 
 ---
 
-## Task 7: `protocol/a2a_agent_cards.py` — two-pass validator + JWS verify
+## Task 7: `protocol/a2a_agent_cards.py` — three-pass validator (schema + profile + JWS)
 
 **Files:**
 - Create: `src/cognic_agentos/protocol/a2a_agent_cards.py` — Agent Card publisher + verifier.
-- Modify: `src/cognic_agentos/protocol/trust_gate.py` — additive `verify_jws_blob(...)` method (reuses Sprint-4 per-tenant trust root).
-- Create: `tests/unit/protocol/test_a2a_agent_cards.py` — two-pass validator contract.
+- Modify: `src/cognic_agentos/protocol/trust_gate.py` — additive `verify_jws_blob(...)` method + new `TrustGateSignerNotAllowlistedError(TrustGateError)` subclass (reuses Sprint-4 per-tenant trust root).
+- Modify: `tests/unit/protocol/test_trust_gate.py` — extend with arms for the new `verify_jws_blob` + `TrustGateSignerNotAllowlistedError` surfaces (T1 R5 P3 reviewer correction added this entry — earlier draft introduced the test arms in prose elsewhere but never added the file to T7's explicit-path staging list, so an implementer following the Step 9 git-add block would have landed the subclass without its regressions).
+- Create: `tests/unit/protocol/test_a2a_agent_cards.py` — three-pass validator contract (1 upstream-schema arm + 7 AgentOS-profile arms + 3 JWS arms = 11 arms covering each `AgentCardValidationReason` literal; T14 added `agent_card_profile_wave2_auth_required` as the 7th profile arm via `TestProfileWave2AuthRequired`).
 - Create: `tests/unit/protocol/test_a2a_agent_card_jws_required.py` — registration refused on unsigned / non-allow-listed signer.
 - Create: `tests/unit/protocol/test_a2a_agent_card_outbound_verification.py` — outbound dispatch verifies the target's card before sending.
 - Create: `tests/unit/protocol/test_a2a_agent_card_chain_audit.py` — card content hash-chained at registration; subsequent mutations require re-registration.
 
 **Halt-before-commit:** Yes (TWO critical-controls modules touched: `a2a_agent_cards.py` AND `trust_gate.py`).
 
-The two-pass validation per A2A-CONFORMANCE.md:
-- **Pass 1 (upstream A2A 1.0 schema)** — card must be a legitimate A2A 1.0 card (validates against the SDK's `AgentCard` Pydantic type derived from upstream protobuf). A card with top-level `url` (forbidden by spec — URLs live in `supportedInterfaces[].url`) → fail. A card with Cognic-specific identity fields (`agent_id`, `oasf_capability_set`, etc.) at the top level → fail (those live in pack manifest's `[tool.cognic.identity]` block).
-- **Pass 2 (AgentOS bank-grade profile)** — spec-optional fields AgentOS makes mandatory: `provider`, `securitySchemes`, `securityRequirements`, `signatures`, ≥1 `supportedInterfaces` entry. Failures return `agentos_profile_violation` with the specific mandatory field listed (distinct from upstream-schema failures so authors can diagnose without confusing the two layers).
+The three-pass validation per A2A-CONFORMANCE.md (T1 R1 P2 added Pass 3):
+- **Pass 1 (upstream A2A 1.0 schema)** — card must be a legitimate A2A 1.0 card (parses against the SDK's `AgentCard` protobuf message class via `google.protobuf.json_format.Parse`; T6 R0 capture-time correction: SDK ships protobuf, NOT Pydantic). A card with top-level `url` (forbidden by spec — URLs live in `supportedInterfaces[].url`) → fail. A card with Cognic-specific identity fields (`agent_id`, `oasf_capability_set`, etc.) at the top level → fail (those live in pack manifest's `[tool.cognic.identity]` block).
+- **Pass 2 (AgentOS bank-grade profile — runtime-critical subset)** — spec-optional fields AgentOS makes mandatory at the **runtime verifier**: `provider` (with a non-empty organization), `securitySchemes`, `securityRequirements`, `signatures`, ≥1 `supportedInterfaces` entry, **plus the Wave-2 auth refusal added in T14** — any `mtlsSecurityScheme` declared anywhere in `securitySchemes` is refused under Wave-1 bearer-token transport policy with the closed-enum reason `agent_card_profile_wave2_auth_required` per A2A-CONFORMANCE.md §"Wave breakdown" (Wave-1 = per-tenant pinned bearer token; Wave-2 = mTLS; Wave-3 = verifiable credentials). Failures return `agentos_profile_violation` with the specific mandatory field listed (distinct from upstream-schema failures so authors can diagnose without confusing the two layers). **T7 R1 P2 #1 reviewer correction — runtime-vs-build-time split:** `docs/A2A-CONFORMANCE.md` §"Card shape" lists 8 mandatory profile categories — the 5 above PLUS `name`, `description`, `version`, `provider.url`, `capabilities`, `defaultInputModes`, `defaultOutputModes`, `skills`. T7's runtime verifier enforces ONLY the security-critical 5 + the T14 Wave-2 auth refusal (the gates an attacker could exploit at registration: no anonymous A2A, signed cards mandatory, ≥1 dispatchable interface, identifiable provider, no Wave-2-only auth schemes). The remaining bank-grade governance metadata (name / description / version / provider.url / capabilities / defaultInputModes / defaultOutputModes / skills) is enforced at **build-time** by Sprint 7A `agentos validate` per A2A-CONFORMANCE.md §"Card shape" closing paragraph. Keeps the runtime closed-enum surface narrow (11 values: 1 upstream + 7 profile + 3 JWS) + the registry-side `RefusalReason` mapping 1:1; comprehensive bank-grade profile coverage lands at the build-time CI gate where a malformed pack is rejected before it ships.
 
 JWS verification:
 - **Inbound (pack registration)** — pack manifest declares `agent_card_jws_path`. Trust gate verifies JWS against per-tenant trust root. Unsigned card or signer not on the trust root → registration refused with `a2a_agent_card_signature_invalid`.
@@ -1474,7 +1555,7 @@ Skeleton of the implementation:
 
 Critical-controls module per AGENTS.md (Sprint-6 amendment).
 
-Two-pass validation per docs/A2A-CONFORMANCE.md:
+Three-pass validation per docs/A2A-CONFORMANCE.md (T1 R1 P2 added Pass 3):
   Pass 1 — upstream A2A 1.0 schema (via a2a-sdk Python package)
   Pass 2 — AgentOS bank-grade profile
 
@@ -1482,12 +1563,17 @@ JWS verification rides Sprint-4 trust gate's per-tenant trust root.
 Both inbound (registration) and outbound (call dispatch) paths
 verify before proceeding.
 
-Closed-enum AgentCardValidationReason (7 values) lives in
+Closed-enum AgentCardValidationReason (11 values, three-pass —
+T1 R1 P2 added the 3 JWS-verification outcomes alongside the
+1 upstream-schema gate + 6 AgentOS-profile gates; T14 added the
+7th profile gate `agent_card_profile_wave2_auth_required` for
+cards declaring `mtlsSecurityScheme`) lives in
 cognic_agentos.protocol.__init__.
 """
 
 from __future__ import annotations
 
+import asyncio  # T1 R4 P3 — needed for the CancelledError re-raise in verify()
 import dataclasses
 import logging
 from pathlib import Path
@@ -1499,7 +1585,11 @@ from cognic_agentos.core.audit import AuditStore
 from cognic_agentos.core.config import Settings
 from cognic_agentos.core.decision_history import DecisionHistoryStore
 from cognic_agentos.protocol import AgentCardValidationReason
-from cognic_agentos.protocol.trust_gate import TrustGate
+from cognic_agentos.protocol.trust_gate import (
+    TrustGate,
+    TrustGateError,
+    TrustGateSignerNotAllowlistedError,
+)
 
 _LOG = logging.getLogger(__name__)
 
@@ -1520,7 +1610,7 @@ class A2AAgentCardError(Exception):
 
 
 class A2AAgentCardVerifier:
-    """Two-pass validator + JWS-verifier. Used by the registry at
+    """Three-pass validator + JWS-verifier. Used by the registry at
     pack registration AND by ``A2AEndpoint.dispatch_outbound`` at
     call time.
     """
@@ -1548,62 +1638,161 @@ class A2AAgentCardVerifier:
         tenant_id: str,
         request_id: str,
     ) -> AgentCardValidation:
-        """Two-pass validation + JWS verification. Returns
+        """Three-pass validation (upstream schema + AgentOS profile + JWS).
+        Returns
         ``AgentCardValidation(ok=True, reason=None, payload={})`` on
         success; closed-enum refusal otherwise.
         """
+        # Pass 3 — JWS verification (T1 R1 P2 added the dedicated JWS
+        # validation reasons; T1 R3 P2 reviewer correction below
+        # routes the three failure modes onto the correct closed-enum
+        # values, NOT the upstream-schema bucket they used to collapse
+        # into).
+
         # Size cap defends against DoS via large-blob signature
         # verification (per Sprint-6 T1 a2a_card_jws_max_size_bytes).
+        # Oversized blob = unreadable from the gate's perspective —
+        # we refuse before passing the bytes to joserfc.
         if len(jws_bytes) > self._settings.a2a_card_jws_max_size_bytes:
             return AgentCardValidation(
                 ok=False,
-                reason="agent_card_upstream_schema_invalid",
+                reason="agent_card_jws_blob_unreadable",
                 payload={
                     "field": "jws",
                     "size_bytes": len(jws_bytes),
                     "max_bytes": self._settings.a2a_card_jws_max_size_bytes,
+                    "reason_detail": "size_cap_exceeded",
                 },
             )
 
         # JWS verification (Sprint-4 trust gate handles the keystore +
-        # signer-allow-list lookup).
+        # signer-allow-list lookup; ``verify_jws_blob`` raises
+        # ``TrustGateError`` for signature-mismatch / unparseable JWS,
+        # ``TrustGateSignerNotAllowlistedError`` for non-allowlisted
+        # signers — the gate is responsible for distinguishing the
+        # two cases at the ``except`` boundary so the closed-enum
+        # routing here is unambiguous).  Both classes are imported at
+        # module scope (see top of file).
         try:
             await self._trust_gate.verify_jws_blob(
                 jws_bytes=jws_bytes,
                 payload_bytes=card_bytes,
                 tenant_id=tenant_id,
             )
-        except Exception as exc:
+        except asyncio.CancelledError:
+            raise
+        except TrustGateSignerNotAllowlistedError as exc:
+            # Signature itself verified but the signing key was not
+            # on the per-tenant cosign trust root. Different
+            # operational fix (rotate trust root) than a forged
+            # signature, so closed-enum split.
             return AgentCardValidation(
                 ok=False,
-                reason="agent_card_upstream_schema_invalid",
+                reason="agent_card_signer_not_allowlisted",
+                payload={
+                    "jws_error_class": type(exc).__name__,
+                    # NB: never include the raw exception message —
+                    # might carry signer key id / fingerprint that
+                    # belongs in audit not in operator-visible payload.
+                },
+            )
+        except TrustGateError as exc:
+            # Signature verification failed (mismatch, malformed JWS
+            # header, unsupported algorithm). Per Sprint-5 doctrine:
+            # ``type(exc).__name__`` lands in the payload; raw
+            # ``str(exc)`` does NOT (could leak Authorization-header
+            # bytes or signer-key fragments).
+            return AgentCardValidation(
+                ok=False,
+                reason="agent_card_signature_invalid",
                 payload={
                     "jws_error_class": type(exc).__name__,
                 },
             )
-
-        # Pass 1: upstream A2A 1.0 schema validation (delegates to
-        # a2a-sdk Python package).
-        from a2a.types import AgentCard
-        try:
-            card = AgentCard.model_validate_json(card_bytes)
         except Exception as exc:
+            # Unexpected non-trust-gate exception (e.g., joserfc
+            # raising something the trust gate didn't normalise).
+            # Per the closed-enum doctrine: refuse with the most
+            # specific JWS reason rather than the schema bucket;
+            # if this fires, ``TrustGate`` needs a wrapper to keep
+            # the closed-enum invariant.
             return AgentCardValidation(
                 ok=False,
-                reason="agent_card_upstream_schema_invalid",
+                reason="agent_card_signature_invalid",
                 payload={
-                    "error_type": type(exc).__name__,
+                    "jws_error_class": type(exc).__name__,
+                    "reason_detail": "unexpected_exception_class",
                 },
             )
 
-        # Spec-violation: top-level url MUST NOT be present.
-        # The SDK's Pydantic type rejects it but defensive double-check.
-        card_dict = card.model_dump()
-        if "url" in card_dict:
+        # Pass 1: upstream A2A 1.0 schema validation (delegates to
+        # a2a-sdk Python package). T6 R0 capture-time correction:
+        # the SDK ships protobuf-generated message classes (NOT
+        # Pydantic), so the parse path uses the protobuf JSON-format
+        # round-trip via ``google.protobuf.json_format.Parse``. Card
+        # bytes arrive as the spec-canonical JSON serialisation
+        # (``/.well-known/agent-card.json`` is a JSON document); the
+        # protobuf JSON-format parser projects the JSON onto the
+        # protobuf message fields. Re-export comes via the lazy
+        # loader in ``protocol/a2a_schema`` so the verifier module
+        # stays admission-side (no module-level SDK import).
+        #
+        # **Order matters** (T7 R4 P2 reviewer correction): the
+        # forbidden-top-level-``url`` check MUST run BEFORE
+        # ``json_format.Parse``. Default protobuf JSON parse rejects
+        # unknown fields with ``ParseError`` — a card carrying a
+        # top-level ``url`` would surface as
+        # ``agent_card_upstream_schema_invalid`` and the dedicated
+        # ``agent_card_profile_top_level_url_forbidden`` reason would
+        # be unreachable. Pre-parse JSON inspection routes the
+        # spec-mandated forbidden-field violation to its own closed-
+        # enum reason as the AgentCardValidationReason inventory
+        # requires.
+        import json as _json
+
+        from google.protobuf import json_format
+        from google.protobuf.message import DecodeError
+
+        from cognic_agentos.protocol.a2a_schema import AgentCard
+
+        # 1a. Decode bytes → JSON. Malformed JSON is upstream-schema-
+        # invalid (the document isn't a valid JSON object at all).
+        try:
+            raw_card = _json.loads(
+                card_bytes if isinstance(card_bytes, str) else card_bytes.decode()
+            )
+        except (UnicodeDecodeError, _json.JSONDecodeError) as exc:
+            return AgentCardValidation(
+                ok=False,
+                reason="agent_card_upstream_schema_invalid",
+                payload={"error_type": type(exc).__name__},
+            )
+
+        # 1b. Spec-violation: top-level ``url`` MUST NOT be present
+        # (per ADR-003 + A2A-CONFORMANCE.md §"Card shape" — endpoint
+        # URLs live in ``supportedInterfaces[].url``, NOT at the
+        # AgentCard top level). Run BEFORE protobuf parse so the
+        # dedicated profile-violation reason is reachable.
+        if isinstance(raw_card, dict) and "url" in raw_card:
             return AgentCardValidation(
                 ok=False,
                 reason="agent_card_profile_top_level_url_forbidden",
                 payload={"forbidden_field": "url"},
+            )
+
+        # 1c. Protobuf parse. Any field shape that fails the
+        # generated AgentCard message's field validation
+        # (type-mismatch, unknown field other than the spec-forbidden
+        # ones already filtered above, missing required field per
+        # the .proto schema) surfaces as
+        # ``agent_card_upstream_schema_invalid``.
+        try:
+            card = json_format.Parse(card_bytes, AgentCard())
+        except (json_format.ParseError, DecodeError, ValueError) as exc:
+            return AgentCardValidation(
+                ok=False,
+                reason="agent_card_upstream_schema_invalid",
+                payload={"error_type": type(exc).__name__},
             )
 
         # Pass 2: AgentOS bank-grade profile.
@@ -1650,7 +1839,7 @@ class A2AAgentCardVerifier:
         """Outbound dispatch path. Fetches the target's
         ``/.well-known/agent-card.json`` + detached JWS file from
         the same origin; verifies via :meth:`validate_card`; returns
-        the verified ``AgentCard`` Pydantic instance whose
+        the verified ``AgentCard`` protobuf message instance whose
         ``supported_interfaces[].url`` is the SAFE source of the
         outbound dispatch URL.
 
@@ -1683,14 +1872,61 @@ class A2AAgentCardVerifier:
                 f"agent_card_signature_invalid: {validation.reason}",
             )
 
-        from a2a.types import AgentCard
-        return AgentCard.model_validate_json(card_resp.content)
+        # T6 R0 capture-time correction: SDK ships protobuf, NOT
+        # Pydantic. Parse the card-bytes JSON via google.protobuf
+        # json_format into a fresh AgentCard message instance. The
+        # validation pass above has already confirmed the bytes
+        # parse cleanly + meet the AgentOS profile + JWS-verify; this
+        # second parse is on the verified bytes for return.
+        from google.protobuf import json_format
+
+        from cognic_agentos.protocol.a2a_schema import AgentCard
+
+        return json_format.Parse(card_resp.content, AgentCard())
 ```
 
-- [ ] **Step 8: Add `verify_jws_blob` to Sprint-4 trust gate (additive, halt-before-commit)**
+- [ ] **Step 8: Add `verify_jws_blob` + `TrustGateSignerNotAllowlistedError` to Sprint-4 trust gate (additive, halt-before-commit)**
+
+T7 R4 P2 reviewer correction: the verifier skeleton (Step 4 above) catches `TrustGateSignerNotAllowlistedError` separately from `TrustGateError` so signer-allow-list failures land on the correct closed-enum reason (`agent_card_signer_not_allowlisted`) instead of collapsing into the generic signature-invalid bucket. That requires the trust-gate task to ship the subclass + export it. The Step-8 snippet below adds both:
 
 ```python
-# src/cognic_agentos/protocol/trust_gate.py — append method to TrustGate
+# src/cognic_agentos/protocol/trust_gate.py — append subclass + method
+# to the existing TrustGateError + TrustGate definitions, and extend
+# the module's own ``__all__`` so callers can import the new subclass
+# from cognic_agentos.protocol.trust_gate (T1 R5 P3 reviewer correction
+# pinned this — earlier draft mistakenly said the export lived on
+# protocol/__init__.py's __all__, but trust_gate.py has its own export
+# list and the verifier skeleton imports directly from this module).
+
+# Extend the existing __all__ at top of trust_gate.py:
+__all__ = [
+    # ... existing Sprint-4 entries unchanged ...
+    "TrustGateError",
+    "TrustGate",
+    # T1 Sprint-6 addition:
+    "TrustGateSignerNotAllowlistedError",
+]
+
+
+class TrustGateSignerNotAllowlistedError(TrustGateError):
+    """Raised by ``TrustGate.verify_jws_blob`` when the JWS signature
+    verifies cryptographically but the signing key is NOT on the
+    per-tenant cosign trust root.
+
+    Distinct from :class:`TrustGateError` (which covers JWS parse
+    failures + cryptographic signature mismatches) so callers can
+    map the two failure modes onto distinct closed-enum reasons.
+    Sprint-6 ``A2AAgentCardVerifier`` (T7) catches this subclass
+    BEFORE the parent ``TrustGateError`` to route signer-allow-list
+    failures onto ``agent_card_signer_not_allowlisted`` and
+    cryptographic mismatches onto ``agent_card_signature_invalid``.
+
+    Operationally distinct: a signer-not-allowlisted failure means
+    rotate the per-tenant trust root + re-register; a signature-
+    invalid failure means the card was tampered with after signing.
+    Different audit categories + different operator runbooks.
+    """
+
 
 async def verify_jws_blob(
     self,
@@ -1704,15 +1940,31 @@ async def verify_jws_blob(
     A2AAgentCardVerifier; same trust authority that signs the wheel
     signs the Agent Card.
 
-    Raises ``TrustGateError`` on:
-      - JWS parse failure
-      - signature verification failure
-      - signer not on per-tenant allow-list
+    Raises:
+      - :class:`TrustGateError` on JWS parse failure OR cryptographic
+        signature verification failure (signature mismatch,
+        unsupported algorithm, malformed JWS header).
+      - :class:`TrustGateSignerNotAllowlistedError` (subclass of
+        TrustGateError) when the signature verifies cryptographically
+        but the signing key is NOT on the per-tenant cosign trust
+        root. **MUST be raised AFTER the cryptographic verify call
+        succeeds**, NOT before — otherwise an unsigned blob would
+        falsely produce "signer not allowlisted" instead of
+        "signature invalid".
+
+    Callers MUST catch :class:`TrustGateSignerNotAllowlistedError`
+    BEFORE the parent :class:`TrustGateError` so the closed-enum
+    routing stays unambiguous (Python's exception hierarchy + ``except``
+    ordering rules).
 
     Implementation detail: walks the JWS protected header, resolves
     the signer's public key from the per-tenant cosign trust root
     (re-using the same Vault path as cosign verification), then
-    delegates to ``joserfc`` for cryptographic verification.
+    delegates to ``joserfc`` for cryptographic verification. After
+    verification succeeds, looks up the resolved key fingerprint
+    against the per-tenant trust-root allow-list and raises
+    ``TrustGateSignerNotAllowlistedError`` if the fingerprint is
+    not present.
 
     Mirrors the Sprint-4 cosign-subprocess invocation's secure-default
     posture: explicit timeout, no shell, no fallthrough on key
@@ -1726,11 +1978,12 @@ async def verify_jws_blob(
 ```bash
 git add src/cognic_agentos/protocol/a2a_agent_cards.py \
         src/cognic_agentos/protocol/trust_gate.py \
+        tests/unit/protocol/test_trust_gate.py \
         tests/unit/protocol/test_a2a_agent_cards.py \
         tests/unit/protocol/test_a2a_agent_card_jws_required.py \
         tests/unit/protocol/test_a2a_agent_card_outbound_verification.py \
         tests/unit/protocol/test_a2a_agent_card_chain_audit.py
-git commit -m "feat(sprint-6): A2A Agent Card two-pass validator + JWS verify (T7)"
+git commit -m "feat(sprint-6): A2A Agent Card three-pass validator (schema + profile + JWS) (T7)"
 ```
 
 ---
@@ -1884,18 +2137,23 @@ git commit -m "feat(sprint-6): A2A-Version header negotiation (T8)"
 
 **Files:**
 - Create: `src/cognic_agentos/protocol/a2a_endpoint.py` — single owner of the inbound A2A receiver.
-- Create: `tests/unit/protocol/test_a2a_endpoint.py` — 30+ arms covering routing / lifecycle / chain linkage / anonymous refusal / unknown target / version negotiation rejection paths.
-- Create: `tests/unit/protocol/test_a2a_unknown_target.py` — focused unknown-target → 501 + ADR-002 reference.
-- Create: `tests/unit/protocol/test_a2a_anonymous_refused.py` — focused anonymous → 401 + `a2a_anonymous_refused`.
-- Create: `tests/unit/protocol/test_a2a_chain_audit.py` — parent + 3 child messages → cross-agent chain proof.
+- Create: `tests/unit/protocol/test_a2a_endpoint.py` — 79 arms (consolidated per R3 P3) covering all 6 gates, lifecycle transitions, chain linkage, gate-refusal evidence rows, multimodal Wave-2 detector (R2 P2 SDK Part shape; R4 P2 alias-collision defence; R5 P2 decoder-side RecursionError), deeply-nested + wide scalar payload fail-closed (R3 P2 + R4 P2 + R5 P2), invalid-response canonicalisation, runtime-side SDK gate, single-writer task-state guarantee, audit-pipeline safe-swallow, closed-enum module shape. **Earlier draft split this into four files** (`test_a2a_endpoint.py`, `test_a2a_unknown_target.py`, `test_a2a_anonymous_refused.py`, `test_a2a_chain_audit.py`); the implementation consolidated them into the single module above so contract maintenance is local — each gate's regression arms live next to the test class for that gate, and the closed-enum coverage tracker only has one file to walk.
 
 **Halt-before-commit:** Yes — `a2a_endpoint.py` is the single owner of the task-lifecycle state machine + chain linkage; reviewer pause needed.
 
-Task lifecycle state machine: `created → running → succeeded | failed | cancelled`. Single owner; transitions are single-writer (the endpoint). Audit emission on every transition: `a2a.task_received` (created), `a2a.task_running`, `a2a.task_succeeded`, `a2a.task_failed`, `a2a.task_cancelled`.
+Task lifecycle state machine: `created → running → succeeded | failed | cancelled`. Single owner; transitions are single-writer (the endpoint). Audit emission on every transition: `a2a.task_received` (created), `a2a.task_running`, `a2a.task_succeeded`, `a2a.task_failed`, `a2a.task_cancelled`. **Pre-task gate refusals also emit chained evidence** (`a2a.task_refused`) carrying `parent_trace_id`, `child_trace_id`, `payload_digest`, `error_code`, and `policy_reason` per R1 P2 #1 — the cross-agent chain is walkable end-to-end including the refusal leg, not just the success leg.
 
 Chain linkage: every inbound message gets a `parent_trace_id` (from caller) + a fresh `child_trace_id`; the audit row carries both so the cross-agent chain is walkable end-to-end. Mirrors Sprint-2's hash-chain primitives (single-writer, content-addressed) extended across the A2A boundary.
 
-Routing: target identification by entry-point name → plugin registry lookup → dispatch to the agent pack's `handle(message)` method. Unknown target → 501 with ADR-002 reference. Anonymous call (no `Authorization` header) → 401 with `a2a_anonymous_refused`.
+Routing: target identification by entry-point name → `PluginRegistry.load("agents", target_agent)` → dispatch to the agent pack's `handle(payload, task=...)` method. `PluginNotRegistered` / `RegistrationRefused` BOTH map to spec `method_not_found` + policy-reason `unknown_target` (registry refusal vocabulary stays opaque to remote A2A callers). Anonymous call (no `Authorization` header) maps via the closed-enum `_AUTHZ_REASON_TO_POLICY_REASON` table to spec `invalid_request` + policy-reason `anonymous_refused`; every other authz failure surfaces as `invalid_request` + policy-reason `tenant_token_invalid` so finer token-state never leaks across the wire. Wave-2 traffic (push-notification subscribe, task resumption, multimodal `Part` shapes — `raw` / `url` oneof field set, or `mediaType` / `media_type` indicating image/audio/video) is refused with spec `unsupported_operation` + policy-reason `wave2_feature_refused` **before** routing so a registered Wave-1 agent never receives Wave-2 traffic.
+
+Gate order (locked by R1/R2 reviewer rounds): version → authn → wave-2 → routing → task-create+dispatch → emit. Earlier drafts placed routing before wave-2; that ordering is unsafe because a Wave-2 method whose entry-point name happens to match a registered agent slips past the gate at routing time, so the wave-2 gate now fires first.
+
+Construction is **runtime-side**: `A2AEndpoint.__init__` calls `require_a2a()` per the T2 `_PROTOCOL_OPTIONAL_DEPS` contract — mounting the endpoint on a kernel-image deployment (without `a2a-sdk`) raises `A2ANotAvailableError` immediately rather than at first inbound traffic. Mirrors Sprint-5 `MCPHost.__init__` / `require_mcp()`.
+
+Response gate: per A2A 1.0, the agent handler's response MUST be a JSON-RPC-shaped dict that is canonical-form-clean per `core/canonical.canonical_bytes` (no bytes-of-the-payload-tree-violator types like sets, complex numbers, tuples, non-finite floats, non-string dict keys, naive datetimes). Non-dict OR canonicalisation failure refuses with spec `invalid_agent_response` BEFORE the SUCCEEDED transition — the audit chain matches the wire error returned to the caller. The FAILED transition's `_transition` accepts an explicit `error_code` so the audit row records `invalid_agent_response` rather than the generic `internal_error` (which is reserved for raw handler exceptions per R1 P2 #4).
+
+> **NB — skeleton below is illustrative pre-R1/R2.** The block that follows was the day-1 sketch; the shipped implementation diverges in five load-bearing places (gate ordering, `require_a2a()` at construction, refusal-evidence emission, closed-enum policy-reason → spec-code mapping via `_AUTHZ_REASON_TO_POLICY_REASON`, registry shape `load("agents", ...)` raising typed exceptions). Treat the prose above + the shipped module (`src/cognic_agentos/protocol/a2a_endpoint.py`) + the test contract (`tests/unit/protocol/test_a2a_endpoint.py`) as authoritative. Future T9-adjacent work (T10 streaming, T11 errors, T13 cancellation) MUST consult the shipped module, NOT this skeleton.
 
 ```python
 """protocol/a2a_endpoint.py — A2A inbound receiver + task lifecycle.
@@ -2127,6 +2385,8 @@ class A2AEndpoint:
         ...
 ```
 
+> **End of pre-R1/R2 illustrative skeleton.** See the prose contract above + `src/cognic_agentos/protocol/a2a_endpoint.py` + `tests/unit/protocol/test_a2a_endpoint.py` for the authoritative R1/R2-conformant shape (gate ordering, `require_a2a()`, refusal-evidence, closed-enum policy mapping, registry shape).
+
 - [ ] **Step 1-7: Iteratively build out the gates with R1-R6 reviewer-round shape** mirroring Sprint-5 T9 R1-R5 hardening.
 
 - [ ] **Step 8: Halt-before-commit + commit**
@@ -2140,8 +2400,10 @@ git commit -m "feat(sprint-6): A2A inbound endpoint + task lifecycle + chain lin
 ## Task 10: `protocol/a2a_streaming.py` — A2A 1.0 task streaming protocol support
 
 **Files:**
-- Create: `src/cognic_agentos/protocol/a2a_streaming.py` — A2A 1.0 streaming-message protocol support per the spec wire format. Emits `task.progress` / `task.completed` / `task.failed` envelopes per A2A 1.0; chain-linked into decision_history via `_emit_streaming_evidence` helper.
-- Create: `tests/unit/protocol/test_a2a_streaming.py` — streaming envelope contract; chain linkage; chunked-transfer interop with `httpx`.
+- Create: `src/cognic_agentos/protocol/a2a_streaming.py` — A2A 1.0 streaming wire-format adapter. Builds protobuf `StreamResponse` envelopes (oneof `task` / `message` / `status_update` / `artifact_update`) via the T6 schema-module re-export boundary; lifecycle transitions ride `TaskStatusUpdateEvent` whose `TaskStatus.state` is one of the 9 SDK `TaskState` enum values; artifact streaming rides `TaskArtifactUpdateEvent` with `append` / `last_chunk` flags. Wire encoding via `google.protobuf.json_format.MessageToJson` (no hand-rolled JSON). Chain-linked into `decision_history` via `_emit_streaming_evidence` helper. Per T10 R1 P2 #2: every SDK type travels through `cognic_agentos.protocol.a2a_schema` so the T6 drift-gate covers the full wire surface; direct `a2a.types` / `a2a.types.a2a_pb2` imports are forbidden.
+- Modify: `src/cognic_agentos/protocol/a2a_schema.py` — extend `_REEXPORTED_TYPE_NAMES` from 7 to 9 (add `TaskStatus` + `TaskState`) so the streaming module's wire-type imports stay inside the drift-gate boundary. Update `__all__` + `TYPE_CHECKING` re-imports to match.
+- Modify: `tests/unit/protocol/test_a2a_schema.py` — refresh re-export count to 9 + update `test_reexported_set_matches_doctrine` to include the two new entries.
+- Create: `tests/unit/protocol/test_a2a_streaming.py` — pins the wire-format contract, the `StreamState` public-boundary doctrine (T9 spellings rejected), the schema-module-only import boundary (AST-walk regression), the closed AgentOS→SDK state mapping, the chain-linkage evidence per envelope, and the audit/decision-history safe-swallow.
 
 **Halt-before-commit:** No (not on the critical-controls list — but see the explicit distinction from Sprint-7B UI SSE).
 
@@ -2153,6 +2415,48 @@ git commit -m "feat(sprint-6): A2A inbound endpoint + task lifecycle + chain lin
 | **UI event-stream SSE** | Sprint 7B | `protocol/ui_events_sse.py` (future) | W3C Server-Sent Events (`text/event-stream` + `Last-Event-Id` cursor) | Portal UIs subscribing to run-state events |
 
 The A2A streaming envelope is a spec-defined data format; SSE is a transport. The two might both ride chunked-transfer over HTTP but their wire formats are different and their consumers are different. Sprint 6 ships ONLY the A2A streaming protocol.
+
+**Authoritative wire-format contract (verified against `a2a-sdk == 1.0.2`, `a2a/types/a2a_pb2.pyi`):**
+
+```proto
+StreamResponse {
+    oneof payload {
+        Task                    task            = 1;  // initial task envelope
+        Message                 message         = 2;  // synchronous message reply
+        TaskStatusUpdateEvent   status_update   = 3;  // lifecycle transition
+        TaskArtifactUpdateEvent artifact_update = 4;  // artifact chunk
+    }
+}
+
+TaskStatusUpdateEvent {
+    string task_id; string context_id;
+    TaskStatus status;          // status.state ∈ TASK_STATE_* (9 values)
+    Struct metadata;
+}
+
+TaskArtifactUpdateEvent {
+    string task_id; string context_id;
+    Artifact artifact;
+    bool append; bool last_chunk;
+    Struct metadata;
+}
+```
+
+The lifecycle progress / completion / failure semantics are conveyed via `TaskStatusUpdateEvent.status.state` (`TASK_STATE_WORKING`, `TASK_STATE_COMPLETED`, `TASK_STATE_FAILED`, `TASK_STATE_CANCELED`, etc. — 9 SDK enum values total). There are NO textual `task.progress` / `task.completed` / `task.failed` envelope types in the spec — those were the day-1 sketch's stand-in. T10 emits real protobuf `StreamResponse` messages encoded via `google.protobuf.json_format.MessageToJson` (the SDK's encoder), never hand-rolled JSON. Cancellation lands in T13; the streaming module is responsible only for the wire-format adapter, not the lifecycle authority.
+
+**T10 doctrines (locked before code):**
+
+1. **SDK protobuf JSON only, via the T6 schema-module boundary.** Envelopes built exclusively via the lazy re-exports on `cognic_agentos.protocol.a2a_schema` (which T10 R1 P2 #2 extended from 7 to 9 entries — adding `TaskStatus` + `TaskState`); wire encoding via `google.protobuf.json_format.MessageToJson`. The streaming module NEVER imports `a2a.types` or `a2a.types.a2a_pb2` directly — every SDK type used here MUST be in `_REEXPORTED_TYPE_NAMES` so the T6 drift-gate covers the full wire surface. Hand-rolled envelope JSON is forbidden in the wire path.
+
+2. **Runtime-side SDK gate at construction.** `A2AStreamingEmitter.__init__` calls `require_a2a()` per the T2 `_PROTOCOL_OPTIONAL_DEPS` contract (T10 module is in that map alongside `a2a_endpoint` + `a2a_artifacts`). Module import itself is tolerated to fail under `stub_a2a_missing`; construction is the load-bearing gate.
+
+3. **Chain-linkage evidence per envelope.** Every emitted `StreamResponse` produces a parallel `audit_event` (`a2a.stream_chunk`) + `decision_history` row with payload digest, stream sequence, task / context ids, envelope kind (one of the four `oneof` field names), and the parent / child trace ids the upstream endpoint minted. Audit + decision pipeline failures safe-swallow per the Sprint-5 `_emit_call_evidence` discipline (mirrors T9 `_emit_a2a_evidence`).
+
+4. **`StreamState` is the public boundary; T9 `TaskState` adapter is deferred.** T10 exposes the 8-value `StreamState` Literal (`submitted` / `working` / `completed` / `failed` / `canceled` / `input_required` / `rejected` / `auth_required`), which mirrors the SDK `TaskState` enum 1:1 (minus the never-emitted `TASK_STATE_UNSPECIFIED`). T9's narrower AgentOS lifecycle vocabulary (`created` / `running` / `succeeded` / `failed` / `cancelled`) is **NOT** a valid input to this emitter — the spelling drift (`succeeded` vs `completed`, `cancelled` vs `canceled`) plus T9's narrower set means an automatic adapter at this boundary would silently lose spec-valid Wave-1 lifecycle states (`input_required` / `rejected` / `auth_required` are spec-valid but absent from T9). The deferred endpoint-integration task owns the T9 `TaskState` → `StreamState` adapter; tests pin that `emit_status` rejects T9 spellings (`created` / `running` / `succeeded` / `cancelled`) with `KeyError` so a future endpoint-integration PR cannot accidentally couple the two surfaces without doing the deliberate mapping work. The drift detector pins both ends: AgentOS `StreamState` literal-set must equal `_AGENTOS_TO_SDK_STATE_NAMES` keys, and the SDK constant set must equal its values.
+
+5. **Standalone emitter; endpoint integration deferred.** T10 ships `A2AStreamingEmitter` + `encode_stream_response` ONLY. `A2AEndpoint.handle()` integration (detect `streaming = true` agent handlers, delegate to the emitter, return chunked-transfer response) is a deliberate later task with its own halt-before-commit (touches `a2a_endpoint.py`, which is on the critical-controls list). Without this deferral, T10's footprint expands into critical-controls territory unannounced. The T9 → SDK lifecycle adapter (per doctrine #4) is part of that deferred work, not T10.
+
+> **NB — skeleton below is illustrative pre-impl** (same R3-P3 pattern as T9). The block that follows was the day-1 sketch; it predates the SDK-shape verification and uses textual `task.progress` / `task.completed` / `task.failed` envelope types that are not in the A2A 1.0 spec. Treat the doctrine list above + the shipped module (`src/cognic_agentos/protocol/a2a_streaming.py`) + the test contract (`tests/unit/protocol/test_a2a_streaming.py`) as authoritative. Future T10-adjacent work (endpoint integration, future Wave-2 streaming features) MUST consult the shipped module, NOT this skeleton.
 
 ```python
 """protocol/a2a_streaming.py — A2A 1.0 task streaming protocol support.
@@ -2289,6 +2593,8 @@ def _encode_envelope(env: StreamingEnvelope) -> bytes:
     ...
 ```
 
+> **End of pre-impl illustrative skeleton.** See the doctrine list above + `src/cognic_agentos/protocol/a2a_streaming.py` + `tests/unit/protocol/test_a2a_streaming.py` for the authoritative SDK-conformant shape (real `StreamResponse` protobuf, `MessageToJson` encoding, runtime SDK gate, chain-linkage evidence, deferred endpoint integration).
+
 - [ ] **Step 1-3: Tests + impl + commit**
 
 ```bash
@@ -2300,15 +2606,46 @@ git commit -m "feat(sprint-6): A2A 1.0 task streaming protocol support (T10)"
 ## Task 11: Small endpoints + error taxonomy enum (consolidated)
 
 **Files:**
-- Create: `src/cognic_agentos/protocol/a2a_artifacts.py` — artifact reference generator (ObjectStoreAdapter-backed).
-- Create: `src/cognic_agentos/protocol/a2a_capability_negotiation.py` — `GET /api/v1/a2a/capabilities` backing module.
-- Create: `src/cognic_agentos/protocol/a2a_cancellation.py` — task cancellation primitive.
-- Create: `src/cognic_agentos/protocol/a2a_errors.py` — A2A 1.0 spec error taxonomy (`A2AErrorCode` Literal — 14 spec-defined wire codes) + AgentOS policy-refusal reason taxonomy (`A2APolicyRefusalReason` Literal — 11 AgentOS-specific refusal reasons surfaced in `data.policy_reason`) + `_POLICY_REASON_TO_SPEC_CODE` mapping. R2 P2 #1 reviewer correction split spec wire codes from AgentOS-policy reasons so the wire contract stays spec-conformant.
-- Create: `tests/unit/protocol/test_a2a_artifacts.py`, `test_a2a_capability_negotiation.py`, `test_a2a_cancellation.py`, `test_a2a_error_taxonomy.py`.
 
-**Halt-before-commit:** **Mixed — Yes for the `a2a_errors.py` portion of the commit; No for the other three.** Per R3 P2 #2 reviewer correction, `a2a_errors.py` was promoted to the critical-controls floor because it owns the spec wire `A2AErrorCode` literal + AgentOS `A2APolicyRefusalReason` literal + `_POLICY_REASON_TO_SPEC_CODE` mapping — drift in any of these changes what remote A2A callers see. The implementation engineer SHOULD split T11 into two commits if that makes the halt-before-commit ergonomics cleaner: (a) `a2a_errors.py` + tests (halt-before-commit), then (b) `a2a_artifacts.py` + `a2a_capability_negotiation.py` + `a2a_cancellation.py` + tests (no halt). If kept as one commit, the halt-before-commit pause MUST happen before the combined commit.
+Create (4 source modules):
+- `src/cognic_agentos/protocol/a2a_artifacts.py` — artifact reference generator (ObjectStoreAdapter-backed); emits `a2a.artifact_prepared` audit on both inline + object-store paths.
+- `src/cognic_agentos/protocol/a2a_capability_negotiation.py` — `GET /api/v1/a2a/capabilities` backing module; reads canonical FLAT `[tool.cognic.a2a]` manifest block; strict bool typing.
+- `src/cognic_agentos/protocol/a2a_cancellation.py` — task cancellation primitive; standalone with endpoint injected; refusal paths emit `a2a.task_refused` chain evidence (`gate="cancellation"`).
+- `src/cognic_agentos/protocol/a2a_errors.py` — A2A 1.0 spec error taxonomy (`A2AErrorCode` Literal — 14 spec wire codes) + AgentOS policy-refusal reason taxonomy (`A2APolicyRefusalReason` Literal — 11 AgentOS-specific refusal reasons surfaced in `data.policy_reason`) + `_POLICY_REASON_TO_SPEC_CODE` mapping. R2 P2 #1 reviewer correction split spec wire codes from AgentOS-policy reasons so the wire contract stays spec-conformant.
+
+Create (4 test modules):
+- `tests/unit/protocol/test_a2a_artifacts.py` — inline/store boundary, audit emission both paths, threshold parametrize, audit safe-swallow.
+- `tests/unit/protocol/test_a2a_capability_negotiation.py` — canonical-flat-manifest reader, strict bool typing (parametrized truthy non-bool fails closed), Wave-2 filter + deferred-tracking, subset invariant.
+- `tests/unit/protocol/test_a2a_cancellation.py` — happy path, terminal-state refusals, single-writer AST-walk, refusal chain-linkage (R1 P2 #3) for both `task_not_found` + `task_not_cancelable`.
+- `tests/unit/protocol/test_a2a_errors.py` — mapping completeness/codomain (drift detector), T9-alignment regression, dataclass shape, 14 spec-code factories, literal-set arithmetic.
+
+Modify (4):
+- `src/cognic_agentos/core/config.py` — new `a2a_artifact_inline_threshold_bytes: int = Field(default=64*1024, gt=0)` setting (R0 doctrine #4 — deployment-tunable threshold). **AGENTS.md `core/` stop-rule trigger**.
+- `.env.example` — `COGNIC_A2A_ARTIFACT_INLINE_THRESHOLD_BYTES=65536` operator-facing entry.
+- `tests/unit/test_config.py` — 2 new arms (default + positive-validator) pinning the new setting.
+- `docs/superpowers/plans/2026-05-04-sprint-6-a2a-endpoint.md` — R0 doctrines + 4-skeleton bracketing + R1 + R2 prose refresh.
+
+**Halt-before-commit:** **Yes — single bundled commit + single halt** (R0 doctrine lock with implementation engineer). `a2a_errors.py` is on the critical-controls floor (wire-protocol contract per R3 P2 #2). `core/config.py` is touched (new `a2a_artifact_inline_threshold_bytes` setting per R0 doctrine #4 below) — that's a second AGENTS.md `core/` stop-rule trigger. Single commit; one halt covers both surfaces.
 
 Why these four are bundled into one task: each is self-contained (≤100 LOC of impl + ≤200 LOC of tests), shares no internal state with the others, and lands together as the "small endpoints + enum" surface that fills out the A2A 1.0 spec compliance matrix. The `a2a_errors.py` module is small in LoC but doctrinally distinct (wire-protocol contract).
+
+**T11 doctrines (locked R0 with implementation engineer before code):**
+
+1. **`_POLICY_REASON_TO_SPEC_CODE` source-of-truth in `a2a_errors.py`; T9 NOT refactored.** T9's existing inline hardcoding of `invalid_request` / `method_not_found` / `unsupported_operation` for authz / routing / wave-2 refusals already agrees with what the centralised map produces — same wire outcomes for every overlapping case. T11 ships the canonical map; T9's `a2a_endpoint.py` (critical-controls) stays untouched. Tests pin alignment by computing T9's expected wire codes from the map and asserting equality.
+
+2. **`A2AErrorResponse` (T11 new) + `A2AEndpointError` (T9 existing) live at different layers — both retained.** `A2AEndpointError` is the Python exception type T9 raises inside `handle()` to abort processing; `A2AErrorResponse` is the JSON-RPC-shaped response envelope T11 builds for HTTP serialization (carries `code`, `message`, `policy_reason`, `feature_subtag`, `payload`, `http_status`). The deferred HTTP-route integration converts the former into the latter at egress.
+
+3. **Artifact chain-linkage evidence — `a2a.artifact_prepared` audit emitted on BOTH inline and object-store paths.** Per R0 doctrine refinement (user explicit): the audit is mode-neutral, carrying `storage_mode: "inline" | "object_store"`, `sha256`, `size_bytes`, plus `bucket` / `key` / `retention_seconds` only on the object-store path. Safe-swallow audit-pipeline failures per the T9/T10 discipline. The audit is visible regardless of where the bytes ended up so examiners see the storage decision, not just the stored blob.
+
+4. **Inline threshold via `Settings.a2a_artifact_inline_threshold_bytes`.** New Field with `default=64*1024` and `gt=0` validator; `.env.example` entry; config-test pin. Hardcoded thresholds are the wrong long-term shape per AGENTS.md production-grade rule. **NB**: this is the second `core/` AGENTS.md stop-rule trigger inside T11 (alongside `a2a_errors.py`'s critical-controls floor).
+
+5. **Cancellation as standalone module; endpoint injected; no second writer; refusal paths chain-linked.** `A2ATaskCancellationHandler(endpoint).cancel_task(*, task_id, request_id, tenant_id, parent_trace_id=None)` delegates the lifecycle transition to `endpoint._transition_async(task, new_state=TaskState.CANCELLED, request_id, tenant_id)`; the cancellation handler NEVER mutates `TaskState` directly (T9 single-writer invariant — pinned by an AST-walk regression that bans `.state =` assignment in the cancellation source). Both refusal paths emit chained evidence per **T11 R1 P2 #3** (T9 R1 P2 #1 precedent — every A2A call is chain-linked, including refusals): `task_not_found` (unknown task_id) and `task_not_cancelable` (terminal state) call `endpoint._emit_refusal_evidence(event_type="a2a.task_refused", gate="cancellation", error_code, parent_trace_id, child_trace_id, payload_digest=sha256(task_id), ...)`. `parent_trace_id` is caller-supplied (HTTP route forwards the inbound trace) or freshly minted; `child_trace_id` is locally minted; the payload digest is SHA-256 of the canonical identity string (cancellation requests have no inbound payload body). The successful path is unchanged — T9's `_emit_a2a_evidence` emits `a2a.task_cancelled` on the CANCELLED transition; the handler MUST NOT double-emit. Refusals raise `CancellationError` carrying the spec-conformant `A2AErrorResponse`. Future HTTP route integration wiring `POST /v1/tasks/{task_id}:cancel` forwards the inbound `parent_trace_id` so the cross-agent chain remains walkable through the cancellation leg.
+
+6. **Capability negotiation — declared-capability reader; never invent capabilities.** Reads the canonical FLAT `[tool.cognic.a2a]` block from the pack manifest (per `docs/A2A-CONFORMANCE.md` §"What pack authors must declare" + `docs/BUILD_PLAN.md`): `capabilities_supported` (list of Cognic semantic tags), `streaming` (bool), `push_notification_config` (bool — Wave-2, filtered), `artifacts_supported` (bool), `extended_agent_card` (bool), `extensions` (list of URN strings). NOT a nested `[tool.cognic.a2a.capabilities]` sub-section (T11 R1 P2 #1 reviewer correction — earlier draft drifted to nested shape). Returns Wave-1-filtered `A2ACapabilities` dataclass; Wave-2 declarations like `push_notification_config = true` filtered to false with the field name surfaced in `deferred_wave2_features` (Decision Lock #2). **Strict bool typing** (T11 R1 P2 #2): boolean fields require the actual `bool` Python type — non-bool values (truthy strings like `"false"`, dicts, lists) treated as `False` regardless of truthiness. Empty `A2ACapabilities` when declarations absent. Tests pin: subset ⊆ manifest; Wave-2 declarations dropped + tracked; Wave-1 booleans require strict bool typing; capabilities_supported list filters non-string entries.
+
+7. **Single commit, single halt-before-commit.** Per per-action discipline: `a2a_errors.py` (wire-protocol contract) + `core/config.py` (Settings field) both trigger AGENTS.md `core/` stop rules. Plan skeletons for all four modules bracketed as historical pre-impl (T9 R3 P3 / T10 R0 P3 pattern).
+
+> **NB — skeletons below are illustrative pre-impl** (same R3-P3 bracketing pattern as T9 + T10). The four code blocks that follow were the day-1 sketches; treat the doctrines above + the shipped modules (`src/cognic_agentos/protocol/a2a_errors.py`, `a2a_artifacts.py`, `a2a_capability_negotiation.py`, `a2a_cancellation.py`) + the test contracts as authoritative. Future T11-adjacent work (HTTP route integration, pack-manifest validators) MUST consult the shipped modules, NOT these skeletons.
 
 ### `a2a_artifacts.py`
 
@@ -2541,6 +2878,8 @@ def invalid_params(detail: str) -> A2AErrorResponse: ...
 def internal_error() -> A2AErrorResponse: ...
 ```
 
+> **End of pre-impl illustrative skeletons.** See the doctrine list above + the shipped four modules + their test contracts for the authoritative R0-conformant shape.
+
 - [ ] **Step 1: Implement four modules + tests**
 - [ ] **Step 2: Run; expect PASS**
 - [ ] **Step 3: Commit**
@@ -2555,21 +2894,27 @@ git commit -m "feat(sprint-6): A2A artifacts + capabilities + cancellation + err
 
 **R0 P2 reviewer correction.** An earlier draft pinned 5 Wave-1 families with `decision_audit` and dropped `approval`, `interrupt`, `frontend_action`, `memory`, `policy`, `kill_switch`. ADR-020 §"Event taxonomy (Wave 1)" lists ALL 11 families as the public schema; the §"Implementation phases" table assigns when each family's *emit hooks* get wired across Sprints 6 / 7B / 11.5 / 13.5. The fix per Doctrine Decision E: **Sprint 6 ships typed Pydantic SCHEMA for all 11 Wave-1 families** (the schema is the public contract — stable from day one) AND **wires emit hooks for 3 families** in Sprint 6 (`tool_call`, `decision_audit`, `artifact`). The other 8 families have schema-only stubs in Sprint 6; their emit hooks land in their owning sprints per the ADR-020 phase table.
 
-**ADR-020 audit-mirror scope clarification (R1 P2 reviewer correction).** ADR-020's Sprint-6 phase row mandates "every existing audit event mirrors to a typed UI event in-process". The Sprint-6 implementation discharges this in two complementary layers:
+**ADR-020 audit-mirror scope clarification (R1 P2 + R2 P2 reviewer corrections).** ADR-020's Sprint-6 phase row mandates "every existing audit event mirrors to a typed UI event in-process". The Sprint-6 implementation discharges this in two complementary layers:
 
-1. **Family-specific mirrors** for events whose semantics map cleanly to a typed family. `audit.tool_invocation_succeeded` → `tool_call.completed`; `audit.tool_invocation_refused` → `tool_call.denied`; etc. Sprint-5's tool-invocation surface is the only family-specific source today; Sprint 6 itself adds artifact-lifecycle (T11) → `artifact.*`.
-2. **Generic catch-all mirror via `decision_audit.event_appended`** at `DecisionHistoryStore.append`. **EVERY row appended to `decision_history` — regardless of which audit subsystem produced it (Sprint-2 chain rows, Sprint-2.5 SLA / escalation / guardrail events, Sprint-3 LLM-gateway ledger entries, Sprint-4 plugin-trust / supply-chain events, Sprint-5 MCP host invocations, Sprint-6 A2A events, AND any future emitter) — produces a parallel `decision_audit.event_appended` UI event with the original event's family / type / payload-digest in `data`.** This is the load-bearing mirror that satisfies ADR-020's "every existing audit event mirrors" requirement: it sits at the canonical sink (`DecisionHistoryStore.append`) so no audit subsystem can emit without the UI mirror firing.
+1. **Family-specific mirrors** for events whose semantics map cleanly to a typed family. `audit.tool_invocation` → `tool_call.completed`; `audit.tool_invocation_refused` → `tool_call.denied`; `audit.tool_invocation_error` → `tool_call.failed`. Sprint-5's tool-invocation surface is the only family-specific source today; Sprint 6 itself adds artifact-lifecycle (T11) → `artifact.completed` via `a2a.artifact_prepared`.
 
-The two layers are intentional, not redundant: the family-specific mirrors give UIs typed semantics for the families they care about (`tool_call.denied` is more useful for a runbook than a generic `decision_audit.event_appended` whose `data` happens to encode the same information); the generic mirror guarantees the contract holds even for audit subsystems whose family-specific mirrors haven't been wired yet (e.g., LLM-gateway ledger rows in Sprint 3+ — not a Wave-1 family — still mirror through `decision_audit`). When Sprint 13.5 adds the `policy.*` and `kill_switch.*` families' emit hooks, they layer on top of the generic mirror; they don't replace it.
+2. **Generic catch-all mirror via `decision_audit.event_appended`** emitted from BOTH `AuditStore.append` AND `DecisionHistoryStore.append` (R2 P2 #1). **EVERY row appended to either chain — regardless of which audit subsystem produced it (Sprint-2 chain rows, Sprint-2.5 SLA / escalation / guardrail events, Sprint-3 LLM-gateway ledger entries, Sprint-4 plugin-trust / supply-chain events, Sprint-5 MCP host invocations, Sprint-6 A2A events, AND any future emitter) — produces a parallel `decision_audit.event_appended` UI event.** ``data.chain_id`` discriminates the source chain (`"audit_event"` vs `"decision_history"`); `data` also carries `event_type`, `payload_digest` (`sha256:<hex>` of the canonicalised payload), `request_id`, `sequence`, `tenant_id` per R2 P2 #2 so a reconnecting UI / examiner can identify the source row without DB fetch.
+
+   The audit-side generic mirror (R2 P2 #1) is load-bearing: audit-only sources like `guardrail.trip` and `trust_gate.cosign_timeout` (and any future emitter that doesn't write to `decision_history`) are covered. Earlier R0/R1 framing tied the catch-all to DH only; that framing is superseded — both chains now emit it.
+
+The two layers are intentional, not redundant: the family-specific mirrors give UIs typed semantics for the families they care about (`tool_call.denied` is more useful for a runbook than a generic `decision_audit.event_appended` whose `data` happens to encode the same information); the generic mirror guarantees the contract holds even for audit subsystems whose family-specific mirrors haven't been wired yet (e.g., LLM-gateway ledger rows in Sprint 3+ — not a Wave-1 family — still mirror through `decision_audit`) AND for audit-only sources that never write to DH. An event that writes to BOTH chains produces TWO generic mirrors (one per chain); ``data.chain_id`` distinguishes them so subscribers can dedupe by `(chain_id, sequence)` if needed. When Sprint 13.5 adds the `policy.*` and `kill_switch.*` families' emit hooks, they layer on top of the generic mirror; they don't replace it.
 
 **Files:**
-- Create: `src/cognic_agentos/protocol/ui_events.py` — typed Pydantic models for ALL 11 Wave-1 event families per ADR-020 §"Event taxonomy (Wave 1)". Emit-hook protocol that wires three families in Sprint 6 (Sprint-5's `audit.tool_invocation_*` → `tool_call.*`; Sprint-2+'s `DecisionHistoryStore.append` → **generic `decision_audit.event_appended` covering EVERY audit/decision row regardless of subsystem**; Sprint-6 T11's `a2a_artifacts.py` → `artifact.*`). Other 8 families have model-only stubs.
-- Create: `tests/unit/protocol/test_ui_events.py` — typed event-family model contracts (model_validate / model_dump round-trip; literal-type pinning for family/type fields; `schema_version: "1.0"` constant).
-- Create: `tests/unit/protocol/test_ui_events_audit_mirror.py` — the 3 Sprint-6-wired families get parallel typed UI events without changing the audit-emit shape. Includes:
-  - `tool_call.completed` mirrors `audit.tool_invocation_succeeded` (and `denied` / `failed` / etc. for the closed-enum sibling outcomes).
-  - `artifact.completed` mirrors Sprint-6 T11's artifact emits.
-  - **`decision_audit.event_appended` mirrors EVERY `DecisionHistoryStore.append` regardless of subsystem origin.** The test exercises this with a non-tool, non-artifact audit row (e.g., a Sprint-3 LLM-gateway `gateway.call_succeeded` ledger entry, or a Sprint-2 chain-only event) and asserts the mirror still fires with the source event's family / type / payload-digest carried through `data`. This is the load-bearing test that proves ADR-020's "every existing audit event mirrors" contract in Sprint 6.
-- Create: `tests/unit/protocol/test_ui_event_taxonomy_completeness.py` — drift detector: every family from ADR-020 §"Event taxonomy (Wave 1)" MUST be in the `_WAVE_1_FAMILIES` literal; the test fails if ADR-020 grows OR shrinks. Plus a sister assertion that the 3 Sprint-6-WIRED families (vs the 11 Sprint-6-SCHEMA-ONLY families) match the expected subset.
+- Create: `src/cognic_agentos/protocol/ui_events.py` — typed Pydantic models for ALL 11 Wave-1 event families per ADR-020 §"Event taxonomy (Wave 1)". Emit-hook layer wires three families in Sprint 6:
+  - `tool_call.*` mirroring Sprint-5's `audit.tool_invocation` / `audit.tool_invocation_refused` / `audit.tool_invocation_error`.
+  - `artifact.*` mirroring Sprint-6 T11's `a2a.artifact_prepared`.
+  - **`decision_audit.event_appended`** as the universal generic mirror emitted from BOTH `AuditStore.append` AND `DecisionHistoryStore.append` (R2 P2 #1) — every chain row produces one, with `data.chain_id` discriminating `"audit_event"` from `"decision_history"`. `data` also carries `event_type`, `payload_digest` (sha256 of canonicalised payload), `request_id`, `sequence`, `tenant_id` (R2 P2 #2). The other 8 families have model-only stubs (emit hooks land in their owning sprints per ADR-020 phase table). The discriminated `UIEvent` union is **two-level** (R1 P2 #1): per-family inner unions discriminated on `type`, top-level union discriminated on `family`. Hook dispatch loops snapshot the registry via `tuple(self._hooks)` before iteration (R2 P3) so a self-registering hook can never extend the loop indefinitely.
+- Modify: `src/cognic_agentos/core/audit.py` — add `register_append_hook` API + `AppendedEventSnapshot` frozen dataclass + `AuditAppendHook` Callable + post-commit hook firing (R0 #1, #2, #3). **Sprint-2 critical-controls touch.**
+- Modify: `src/cognic_agentos/core/decision_history.py` — same hook surface (`AppendedDecisionSnapshot` / `DecisionAppendHook` / `register_append_hook`). **Sprint-2 critical-controls touch.**
+- Modify: `pyproject.toml` + `uv.lock` — add `python-ulid` as a base runtime dependency (R0 #5).
+- Create: `tests/unit/protocol/test_ui_events.py` — typed event-family model contracts (model_validate / model_dump round-trip; literal-type pinning for family/type fields; `SCHEMA_VERSION` "1.0" constant; `event_id` ULID format pin).
+- Create: `tests/unit/protocol/test_ui_events_audit_mirror.py` — wired-family mirrors fire correctly + audit-only events (e.g. `guardrail.trip`) emit `decision_audit.event_appended` via the AuditStore-side generic mirror (R2 P2 #1) carrying full payload identity (R2 P2 #2); per-hook deep-copy isolation (R1 P2 #2 + #3) so first hook mutating data/payload cannot affect later hooks; live-registry snapshot (R2 P3) so a self-registering hook does not extend the dispatch loop.
+- Create: `tests/unit/protocol/test_ui_event_taxonomy_completeness.py` — drift detectors: 11-family + 3-wired-family pinned sets, layer-safety AST-walk regression (`core/` MUST NOT import `protocol/`), `TypeAdapter(UIEvent)` build-and-validate regression for the two-level discriminated union (R1 P2 #1), routing-table alignment with audit `event_type` vocabulary.
 
 **Halt-before-commit:** Yes — `ui_events.py` is a public event schema (per ADR-020 stop rule on the AGENTS.md critical-controls list); the schema MUST be stable from day one.
 
@@ -2592,6 +2937,42 @@ The two layers are intentional, not redundant: the family-specific mirrors give 
 | `kill_switch` | `flipped`, `reverted` | schema only | Sprint 13.5 (per ADR-018 emergency controls + ADR-020 phase table) |
 
 **Sprint-6 emit-hook count: 3 wired / 11 total.** The schema-only-stub families register their Pydantic models so a future Sprint 7B SSE subscriber sees the full 11-family contract immediately when it lands; the schema-stable-from-day-one invariant is preserved even though only 3 families have observable emit traffic in Sprint 6.
+
+**T12 R0 doctrines (locked with implementation engineer before code):**
+
+1. **Layer-safe append-hook surface — `register_append_hook(...)` on both stores; `core/` MUST NOT import `protocol/`.** Per AGENTS.md layer ordering, `core/audit.py` + `core/decision_history.py` are foundational; `protocol/ui_events.py` consumes them, never the reverse. The hook surface accepts a generic Protocol callback (`AppendHook = Callable[[AppendedEventSnapshot], Awaitable[None]]`); the UI emitter implements that protocol from `protocol/ui_events.py` and registers itself at construction time. AST-walk regression test pins the no-`core→protocol` import boundary (mirrors Sprint-6 T10's no-direct-SDK regression).
+
+2. **Awaited sequential post-commit firing.** Hooks fire AFTER the `async with self._engine.begin() as conn:` block exits (i.e. AFTER commit), AFTER all in-transaction state is captured, BEFORE `append()` returns. Refactor of the existing `return record_id, new_hash` (currently inside the transaction) is mandatory — hooks MUST NOT run under the chain-head lock (slow hooks would back up every concurrent appender). One broken hook does NOT poison emission to subsequent hooks (try/except per hook, log token-free, continue iteration). Hook latency is the caller's documented cost.
+
+3. **Hook payload — normalized persisted snapshot, not caller-mutable raw payload + per-hook deep-copy isolation (R1 P2 #3).** Hooks receive an `AppendedEventSnapshot` / `AppendedDecisionSnapshot` dataclass containing: `record_id`, `chain_id`, `sequence`, `created_at`, `new_hash`, `event_type` / `decision_type`, `request_id`, `tenant_id`, `trace_id`, plus the **canonicalised payload snapshot** (the same dict that was hashed into the chain — already independent of caller's mutable reference per Sprint-2's pre-await-snapshot doctrine). Caller mutation of the original `event.payload` after `await append(...)` returns CANNOT affect what hooks see. Frozen+slotted dataclass. **Per-hook deep-copy** (R1 P2 #3): `_fire_append_hooks` calls `dataclasses.replace(snapshot, payload=copy.deepcopy(snapshot.payload))` for each hook so a misbehaving first hook mutating `payload` cannot leak to subsequent hooks; `UIEventEmitter._safe_emit` does the same via `event.model_copy(deep=True)` (R1 P2 #2). **Hook-registry snapshot** (R2 P3): all three dispatch loops use `tuple(self._hooks)` at entry so a self-registering hook lands for the NEXT dispatch, not the current one.
+
+4. **`run_id: str | None = None` for Sprint-6 mirrored events.** No agent-run primitive in scope (Sprint-7A introduces it); the schema honestly reflects that the field is unset rather than aliased to `request_id`. Future Sprint-7A run-primitive wiring will populate `run_id` at emit time without schema change.
+
+5. **`event_id` via `python-ulid` — added as a base runtime dependency.** `_new_event_id()` wrapper returns `f"evt_{ULID()}"` (Crockford-base32, 26 chars; total length 30). UUID4 fallback explicitly NOT permitted — the ULID time-orderability + sortability are required for SSE-resume cursor semantics in Sprint-7B. Tests pin the `evt_` prefix + Crockford alphabet shape so a future regression to a different scheme trips immediately.
+
+6. **Pydantic v2 family-level + type-level Literal discrimination — TWO-LEVEL union (R1 P2 #1).** Each family ships a typed model with both `family: Literal["..."]` AND `type: Literal["..."]` fields. Discriminating only on `type` would collide on shared values (e.g., `completed` appears in `agent_run`, `tool_call`, `subagent`, `artifact`); discriminating only on `family` ALSO fails (each family has multiple event classes, e.g. 7 `ToolCall` events all share `family="tool_call"`) — Pydantic raises `TypeError: Value '<family>' for discriminator 'family' mapped to multiple choices`. The fix is a **two-level discriminated union**: per-family inner unions (`_AgentRunEvent`, `_ToolCallEvent`, …, 11 total) discriminated on `type`, then top-level `UIEvent = Annotated[Union[per-family unions], Field(discriminator='family')]` discriminated on `family`. `TypeAdapter(UIEvent)` builds + validates cleanly (regression-pinned in `test_ui_event_taxonomy_completeness.py::TestUIEventDiscriminatedUnion`).
+
+7. **Routing mappings (locked at R0; generic mirror promoted to BOTH chains at R2 P2 #1):**
+   - `audit.tool_invocation` → `tool_call.completed` (typed)
+   - `audit.tool_invocation_refused` → `tool_call.denied` (typed)
+   - `audit.tool_invocation_error` → `tool_call.failed` (typed)
+   - `a2a.artifact_prepared` → `artifact.completed` (typed)
+   - Every `AuditStore.append` → `decision_audit.event_appended` (generic, `data.chain_id="audit_event"`)
+   - Every `DecisionHistoryStore.append` → `decision_audit.event_appended` (generic, `data.chain_id="decision_history"`)
+
+   Audit rows that map to a typed family produce TWO emissions (typed + generic); audit-only rows that don't map produce ONE (generic only). T9 `a2a.task_*` events that ALSO write to DH produce two generic mirrors (one per chain) — `data.chain_id` distinguishes them; subscribers may dedupe by `(chain_id, sequence)` if they only care about logical events.
+
+   **`data` payload on the generic mirror (R2 P2 #2)**: `event_type` (the source row's `event_type` for AuditStore appends, `decision_type` for DH appends), `payload_digest` (`sha256:<hex>` of the canonicalised payload), `request_id`, `sequence`, `chain_id`, `tenant_id`. UIs / examiners can identify the source row without DB fetch.
+
+8. **Wired-family pin: `frozenset({"tool_call", "artifact", "decision_audit"})`.** Pinned in the test suite as a drift detector — adding a 4th wired family in Sprint 6 trips the test before merge. The other 8 families have schema-only stubs; their emit hooks land in their owning sprints per the ADR-020 phase table.
+
+**T12 halt-before-commit — TRIPLE stop-rule trigger:**
+
+  - `protocol/ui_events.py` (ADR-020 public event schema — critical-controls per AGENTS.md)
+  - `core/audit.py` (Sprint-2 critical-controls — adding hook surface)
+  - `core/decision_history.py` (Sprint-2 critical-controls — adding hook surface)
+
+> **NB — skeleton below is illustrative pre-impl** (same R3-P3 bracketing pattern as T9/T10/T11). The Pydantic schema sketch that follows omits `_LOG = logging.getLogger(__name__)` (referenced inside `UIEventEmitter.emit`), uses an `_dt.datetime` ts default the implementation should source from the snapshot's `created_at` instead, and hand-rolls the discriminated union without `Annotated[..., Field(discriminator='family')]`. Treat the doctrine list above + the shipped module + the test contracts as authoritative; future T12-adjacent work (Sprint-7B SSE endpoint, Sprint-13.5 approval/policy/kill_switch emit hooks) MUST consult the shipped module, NOT this skeleton.
 
 ```python
 """protocol/ui_events.py — UI event-stream typed schema (Wave 1).
@@ -2858,6 +3239,8 @@ __all__ = (
 )
 ```
 
+> **End of pre-impl illustrative skeleton.** See the doctrine list above + the shipped `src/cognic_agentos/protocol/ui_events.py` + `src/cognic_agentos/core/audit.py` (hook surface) + `src/cognic_agentos/core/decision_history.py` (hook surface) + the test contracts for the authoritative R0-conformant shape.
+
 - [ ] **Step 1-3: Tests + impl + emit-mirror integration tests + commit**
 
 ```bash
@@ -3014,7 +3397,7 @@ Per-module rationale (mirrors Sprint-5 T14 R1 P3 ownership-accuracy fix):
 | Module | Why critical | AGENTS.md trigger |
 |---|---|---|
 | `protocol/a2a_authz.py` | Single owner of per-tenant pinned-token validation; mirror of `mcp_authz` shape; closed-enum 8-value `A2AAuthzReason` carries the audit-row taxonomy. | Protocol authorization |
-| `protocol/a2a_agent_cards.py` | JWS verification on Agent Cards is identity-routing critical — a forged or tampered card routes outbound traffic to attacker-controlled endpoints. Two-pass validator (upstream + AgentOS profile) is the only place AgentOS validates A2A-spec card shapes. | Protocol authorization + Plugin trust + supply chain |
+| `protocol/a2a_agent_cards.py` | JWS verification on Agent Cards is identity-routing critical — a forged or tampered card routes outbound traffic to attacker-controlled endpoints. Three-pass validator (upstream schema + AgentOS profile + JWS verify) is the only place AgentOS validates A2A-spec card shapes; **11-value** `AgentCardValidationReason` literal covers each per-pass failure mode (T14 added `agent_card_profile_wave2_auth_required` — Wave-1 transport refuses any card declaring `mtlsSecurityScheme` per A2A-CONFORMANCE.md §"Wave breakdown"). | Protocol authorization + Plugin trust + supply chain |
 | `protocol/a2a_endpoint.py` | Single owner of the task-lifecycle state machine + chain linkage across the A2A boundary. Anonymous-refusal gate + Wave-2-refusal gate live here. | Protocol authorization + Wire-protocol contracts |
 | `protocol/a2a_schema.py` | Wire-format truth — drift = wire-protocol break. Pinned digest constants + the schema-drift CI gate live here. | Wire-protocol contracts |
 | `protocol/a2a_version.py` | Wire-protocol gate every inbound A2A call passes through; closed-enum 6-case `A2AVersionOutcome` matrix; rejecting absent-header per spec. (R0 P2 promotion; sustained through R2 P2 #4 reviewer correction that caught this row + the snippet still missing the entry.) | Wire-protocol contracts |
@@ -3041,7 +3424,7 @@ Implementation:
 #   * ``a2a_authz.py`` is the per-tenant pinned-token validator —
 #     closed-enum 8-value A2AAuthzReason; Vault-read exception
 #     mapping per Sprint-5 T15 R1 P2 #2 doctrine.
-#   * ``a2a_agent_cards.py`` is the two-pass Agent Card validator
+#   * ``a2a_agent_cards.py`` is the three-pass Agent Card validator
 #     + JWS verifier. Pass 1 upstream A2A 1.0 schema; Pass 2
 #     AgentOS bank-grade profile. JWS rides Sprint-4 trust root.
 #     Identity-routing critical: a forged card routes outbound
@@ -3130,7 +3513,7 @@ Closeout structure mirrors Sprint 5:
 **Sprint-7A hand-off checklist (load-bearing — surfaced as its own §):**
 
 1. `agentos sign --bundle` SDK + CLI — wraps the Wave-1 escape-hatch recipe (manual cosign + syft + grype + Agent Card JWS signing).
-2. `agentos validate <pack-path>` — runs the same Sprint-4 trust gate + Sprint-6 Agent Card two-pass validator + manifest checks against the conformance matrix.
+2. `agentos validate <pack-path>` — runs the same Sprint-4 trust gate + Sprint-6 Agent Card three-pass validator (schema + profile + JWS) + manifest checks against the conformance matrix.
 3. UI event-stream SSE endpoint (`GET /api/v1/ui/runs/{run_id}/events`) lands in Sprint 7B alongside the `frontend_action.*` event family.
 
 The hand-off is the contract Sprint 6 deliberately leaves unfinished. Sprint 7A + 7B should treat this list as their acceptance criteria for the SDK/CLI + UI portions of their scope.
@@ -3140,7 +3523,7 @@ The hand-off is the contract Sprint 6 deliberately leaves unfinished. Sprint 7A 
 ```markdown
 *Protocol — A2A endpoint (Sprint 6):*
 - `protocol/a2a_authz.py` (per ADR-003 — per-tenant pinned-token validation; Vault-rotated; anonymous-A2A forbidden Wave-1)
-- `protocol/a2a_agent_cards.py` (per ADR-003 + A2A-CONFORMANCE.md — two-pass card validator + JWS verify against per-tenant trust root; identity-routing critical)
+- `protocol/a2a_agent_cards.py` (per ADR-003 + A2A-CONFORMANCE.md — three-pass card validator (upstream schema + AgentOS profile + JWS verify against per-tenant trust root); identity-routing critical)
 - `protocol/a2a_endpoint.py` (per ADR-003 — inbound receiver + task lifecycle state machine + cross-agent chain linkage)
 - `protocol/a2a_schema.py` (per ADR-003 — pinned A2A 1.0 wire-format types; schema-drift CI gate)
 - `protocol/a2a_version.py` (per ADR-003 + AGENTS.md §"Wire-protocol contracts" — A2A-Version header negotiation; 6-case matrix; rejecting absent-header per spec)
@@ -3164,7 +3547,7 @@ git commit -m "docs(sprint-6): closeout + BUILD_PLAN refresh + AGENTS.md critica
 
 ## Doctrine Decision A — A2A SDK + protobuf pin
 
-**Decision:** Pin `a2a-sdk == X.Y.Z` (the upstream Linux Foundation A2A reference Python SDK) as a hard requirement under the `adapters` extra group in `pyproject.toml`. Kernel image stays free of the SDK; default-adapters image carries it. The `create_app` factory (kernel) does NOT wire `A2AEndpoint`; `create_prod_app` (default-adapters) constructs it on the available-branch with kernel-resilient `try/except ImportError` handling — same pattern Sprint-5 T2 established for the MCP SDK.
+**Decision:** Pin `a2a-sdk == 1.0.2` (the upstream Linux Foundation A2A reference Python SDK) as a hard requirement under the `adapters` extra group in `pyproject.toml`. Kernel image stays free of the SDK; default-adapters image carries it. The `create_app` factory (kernel) does NOT touch the SDK at all. `create_prod_app` (default-adapters) at T2 ONLY logs SDK availability via `is_a2a_available()` (info on present, warning on missing) — kernel-resilient `try/except ImportError` handling, same pattern Sprint-5 T2 established for the MCP SDK. **Route mounting + runtime endpoint construction is deferred to T9 (`A2AEndpoint` + `POST /api/v1/a2a` receiver), T11 (`/capabilities` + `/cancel` + artifacts retrieval routes), and T12 (`UIEventEmitter` harness wiring).** R0 P2 + R1 P3 + R2 P2 #2 reviewer corrections folded in: this section MUST NOT promise wiring it doesn't actually do at T2 (Sprint-5 T15 R1 P2 #1 lesson — the `create_prod_app` overclaim trap).
 
 **Pin point:** the implementation engineer fills in the exact patch version at T2 commit time after checking PyPI for the latest 1.0.x release that matches the spec's protobuf source-of-truth digest. This mirrors Sprint-4 T13 (cosign + OPA pins) and Sprint-5 T2 (MCP SDK pin) — "pinned at PR-author time" so the digest captured in `_PINNED_PROTOBUF_DIGEST` (T6 schema-drift gate) matches the SDK version at the moment of the lock.
 
@@ -3177,7 +3560,7 @@ git commit -m "docs(sprint-6): closeout + BUILD_PLAN refresh + AGENTS.md critica
 
 **Bump policy:** when upstream A2A releases 1.0.x → 1.0.(x+1), the patch bump is reviewed at the Sprint-6 closeout-followup level (one reviewer round, schema-drift CI gate must show no breaking change). 1.0.x → 1.1.x is a feature-spec change that requires an ADR-003 amendment + a re-evaluation of the Wave-1/2/3 matrix in `docs/A2A-CONFORMANCE.md`. 1.x → 2.x is a wire-protocol change that requires a new ADR.
 
-**Wire-protocol stability invariant:** the SDK pin + the schema-drift CI gate (T6) together guarantee that two AgentOS deployments running the same `a2a-sdk == X.Y.Z` interpret identical wire bytes identically. This is the same kind of invariant Sprint-2's `core/canonical.py` provides for the audit chain: deterministic semantics across deployments. Pack authors who depend on AgentOS interpreting an A2A 1.0 envelope do not need to know what AgentOS's pinned patch version is — they just need to know AgentOS is on 1.0.x.
+**Wire-protocol stability invariant:** the SDK pin + the schema-drift CI gate (T6) together guarantee that two AgentOS deployments running the same `a2a-sdk == 1.0.2` interpret identical wire bytes identically. This is the same kind of invariant Sprint-2's `core/canonical.py` provides for the audit chain: deterministic semantics across deployments. Pack authors who depend on AgentOS interpreting an A2A 1.0 envelope do not need to know what AgentOS's pinned patch version is — they just need to know AgentOS is on 1.0.x.
 
 ---
 
@@ -3191,13 +3574,13 @@ git commit -m "docs(sprint-6): closeout + BUILD_PLAN refresh + AGENTS.md critica
 
 ### The four reachable URL-source surfaces
 
-1. **Inbound `target_agent` field on a received A2A envelope.** This is an **entry-point name** (string of the form `cognic_agent_<name>`), NEVER a URL. The endpoint resolves the name through the plugin registry to a registered pack, then calls `pack.handle(message)` in-process. **No URL is ever constructed from this field.** Refusal vector: any reachable code path that tries to interpret `target_agent` as a URL is an architecture-test failure (T4) AND a runtime-canary failure (T14). Closed-enum reason on attempted URL-shaped value: `a2a_target_must_be_entrypoint_name`.
+1. **Inbound `target_agent` field on a received A2A envelope.** This is an **entry-point name** (string of the form `cognic_agent_<name>`), NEVER a URL. The endpoint resolves the name through the plugin registry to a registered pack, then calls `pack.handle(message)` in-process. **No URL is ever constructed from this field.** Refusal vector: any reachable code path that tries to interpret `target_agent` as a URL is an architecture-test failure (T4) AND a runtime-canary failure (T14). Closed-enum reason on attempted URL-shaped value: spec wire code `method_not_found` + `policy_reason="unknown_target"` (the registry has no entry-point under those names; mapping unknown-target to JSON-RPC's `method_not_found` is the spec-correct semantic). The runtime canary additionally asserts the HTTP-client sentinel records ZERO method calls — the URL never leaks past routing into a constructor.
 
-2. **Outbound `spawn_subagent(target_agent, ...)` (ADR-005, Sprint 8).** Sprint 6 ships only the *outbound transport* layer — the bytes-on-the-wire half. The orchestration semantics ship with the sub-agent primitive in Sprint 8 (Doctrine Decision D below). When that lands, the `target_agent` argument is again an entry-point name; the sub-agent module resolves it through the plugin registry, fetches the registered pack's signed Agent Card, verifies the JWS via Sprint-4's per-tenant trust root, and dispatches to the URL inside the verified `supportedInterfaces[].url` array. **`spawn_subagent` MUST NOT accept a `target_url` kwarg** — the canary asserts this. Closed-enum reason if a future caller tries: `a2a_dispatch_url_not_from_verified_card`.
+2. **Outbound `spawn_subagent(target_agent, ...)` (ADR-005, Sprint 8).** Sprint 6 ships only the *outbound transport* layer — the bytes-on-the-wire half. The orchestration semantics ship with the sub-agent primitive in Sprint 8 (Doctrine Decision D below). When that lands, the `target_agent` argument is again an entry-point name; the sub-agent module resolves it through the plugin registry, fetches the registered pack's signed Agent Card, verifies the JWS via Sprint-4's per-tenant trust root, and dispatches to the URL inside the verified `supportedInterfaces[].url` array. **`spawn_subagent` MUST NOT accept a `target_url` kwarg.** **T14 covers this surface INDIRECTLY in Sprint 6** — `TestSubagentTargetIsEntryPointName` feeds URL-shaped target_agents to `A2AEndpoint.handle` and asserts they're refused as unknown targets and never reach an outbound URL constructor. The direct `spawn_subagent(target_url=...)` canary lands alongside the Sprint 8 sub-agent primitive (the production stub does not exist yet — Sprint 6 deliberately does not introduce production scaffolding ahead of Sprint 8).
 
-3. **Agent Card discovery URL.** When AgentOS calls a remote agent, it constructs the discovery URL as `f"{origin}/.well-known/agent-card.json"` where `origin` is derived from the registered pack's `[tool.cognic.identity].agent_card_origin` field — itself a manifest-declared, cosign-signed value (T7 R-loop will close this gap; the field IS NOT a caller input). The well-known suffix `.well-known/agent-card.json` is **constant, not parameterisable** — no caller can override the suffix. The canary asserts: every Agent Card fetch in `protocol/a2a_agent_cards.py` constructs the URL via the constant suffix; no `format()` / f-string interpolation of caller-controlled strings into the suffix slot. Closed-enum reason: `a2a_agent_card_discovery_path_not_constant`.
+3. **Agent Card discovery URL.** When AgentOS calls a remote agent, it constructs the discovery URL as `f"{origin}/.well-known/agent-card.json"` where `origin` is derived from the registered pack's `[tool.cognic.identity].agent_card_origin` field — itself a manifest-declared, cosign-signed value (T7 R-loop will close this gap; the field IS NOT a caller input). The well-known suffix `.well-known/agent-card.json` is **constant, not parameterisable** — no caller can override the suffix. T14's `TestOutboundDispatchURLFromVerifiedCard` drives the **real** `A2AAgentCardVerifier.fetch_and_verify_outbound_card` against 13 non-origin `target_origin` shapes (path / query / fragment / userinfo / non-`http(s)` scheme / non-string) and asserts each is refused with `agent_card_jws_blob_unreadable` carrying `rejected_component` ∈ `{not_string, scheme, netloc, path, query_or_fragment, userinfo}` BEFORE `httpx.AsyncClient.get` is called (the spy on `http_client.get` is asserted never-awaited).
 
-4. **Push-notification webhooks (Wave-2 feature).** Push-notification subscribe is spec-valid in A2A 1.0 but Wave-2 in AgentOS — refused in Wave-1 with `A2APolicyRefusalReason.wave2_feature_refused` (closed-enum sub-tag `push_notification`). The webhook URL would be caller-controlled by definition; refusing the entire feature in Wave-1 means no caller-controlled webhook URL ever reaches `httpx`. When Sprint 12 (or wherever push-notification lands) lifts this refusal, the caller-URL threat model amendment lands alongside it with explicit per-tenant URL allow-list + Vault-stored signing-key + outbound mTLS — same shape Sprint-5 T13's args-side validation will get when Sprint 8 lifts the STDIO umbrella.
+4. **Push-notification webhooks (Wave-2 feature).** Push-notification subscribe is spec-valid in A2A 1.0 but Wave-2 in AgentOS — refused in Wave-1 with spec wire code `unsupported_operation` + `policy_reason="wave2_feature_refused"` + sub-tag `wave2_feature="push_notification_subscribe"` (the `_classify_wave2_feature` walker matches both `tasks/pushNotificationConfig/set` and `tasks/pushNotificationConfig/get` to this sub-tag). The webhook URL inside `params` would be caller-controlled by definition; refusing at the method-name gate means the URL is never parsed. When Sprint 12 (or wherever push-notification lands) lifts this refusal, the caller-URL threat model amendment lands alongside it with explicit per-tenant URL allow-list + Vault-stored signing-key + outbound mTLS — same shape Sprint-5 T13's args-side validation will get when Sprint 8 lifts the STDIO umbrella.
 
 ### Architecture-test backstop (T4)
 
@@ -3211,12 +3594,15 @@ The test ships with three self-tests (top-level scan, nested-submodule scan, ren
 
 ### Runtime canary (T14)
 
-`tests/unit/protocol/test_a2a_no_caller_controlled_url.py` (note: same filename as the architecture test but lives under `tests/unit/protocol/` — separate module). Mirrors Sprint-5 T13's class shape:
+`tests/unit/protocol/test_a2a_no_caller_controlled_url.py` (note: same filename as the architecture test but lives under `tests/unit/protocol/` — separate module). Drives the **real** `A2AEndpoint` + `A2AAgentCardVerifier` (only audit / decision-history / registry / secret-adapter mocked):
 
-- `TestInboundTargetAgentIsEntrypointName` — every `target_agent` shape that resembles a URL (`https://...`, `//...`, `file://`, `javascript:`, `data:`) is refused at envelope validation with closed-enum `a2a_target_must_be_entrypoint_name`.
-- `TestOutboundSpawnSubagentNeverAcceptsURL` — `A2AEndpoint.dispatch_outbound(target_agent="...")` reachable via every API surface refuses any kwarg matching `*_url` (TypeError-typed at the boundary).
-- `TestAgentCardDiscoverySuffixIsConstant` — `protocol/a2a_agent_cards.py` discovery code never interpolates a caller value into the well-known suffix. Module-shape assertion (mirrors Sprint-5 `TestThreatModelInvariants`): the constant `_AGENT_CARD_WELL_KNOWN_SUFFIX = "/.well-known/agent-card.json"` is pinned by frozenset equality.
-- `TestWave2WebhookRefused` — push-notification subscribe is refused with closed-enum `A2APolicyRefusalReason.wave2_feature_refused` AND the refusal is observable end-to-end through the audit + decision-history chain (parallel to Sprint-5 T12's high-risk-tier evidence chain-readback).
+- `TestCallerURLRefusedAtEndpoint` — every `target_agent` shape that resembles a URL (13 arms: `https://...`, `https://host:8443/...`, `http://10.0.0.1`, `http://[::1]:8080`, `//cdn.example/a`, `javascript:alert(1)`, `file:///etc/passwd`, `data:text/plain,x`, `ftp://...`, `agent_with/slash`, `agent_with\backslash`, `agent_with://scheme`, `  https://leading-space...`) is refused at the routing gate (gate 4) with spec wire code `method_not_found` + `policy_reason="unknown_target"`. The HTTP-client sentinel records ZERO method calls — the URL never leaks past routing into a constructor.
+- `TestOutboundDispatchURLFromVerifiedCard` — every non-origin `target_origin` is refused inside `A2AAgentCardVerifier.fetch_and_verify_outbound_card` BEFORE `httpx.AsyncClient.get` is awaited. Reason: `agent_card_jws_blob_unreadable` with `rejected_component` ∈ `{not_string, scheme, netloc, path, query_or_fragment, userinfo}`.
+- `TestSubagentTargetIsEntryPointName` — **indirect coverage only** for Sprint 6. URL-shaped target_agents fed to `A2AEndpoint.handle` are refused as unknown targets; the direct `spawn_subagent(target_url=...)` canary lands with the Sprint 8 sub-agent primitive (the production stub does not exist yet).
+- `TestPushNotificationWebhookRefusedWave1` — `tasks/pushNotificationConfig/{set,get}` methods are refused at the Wave-2 gate with spec wire code `unsupported_operation` + `policy_reason="wave2_feature_refused"` + sub-tag `wave2_feature="push_notification_subscribe"` BEFORE the caller-supplied webhook URL in the params is parsed.
+- `TestThreatModelInvariants` — pin the four closed-enum vocabularies (`A2AAuthzReason` 8 values, `AgentCardValidationReason` 11 values, `A2AErrorCode` 14 values, `A2APolicyRefusalReason` 11 values). Drift detector — any addition trips a test and forces explicit doctrine update.
+
+Companion canary modules: **`test_a2a_anonymous_refused.py`** (real `A2AAuthzClient.validate_inbound_token` × 7 adversarial Authorization shapes), **`test_a2a_wave2_features_refused.py`** (real `A2AEndpoint._classify_wave2_feature` via `handle` × 11 Wave-2 shapes + 1 mTLS-in-card via `validate_card`), **`test_a2a_outbound_version.py`** (instance-level mock on `_http` × `A2A-Version: 1.0` on each outbound GET).
 
 ---
 
@@ -3224,28 +3610,39 @@ The test ships with three self-tests (top-level scan, nested-submodule scan, ren
 
 **Decision:** `tests/unit/protocol/test_a2a_schema_drift.py` (T6) is **env-gated** via `@pytest.mark.a2a_upstream` + `COGNIC_RUN_A2A_UPSTREAM=1`. Mirrors the Sprint-4 `cosign_real` pattern (`@pytest.mark.cosign_real` + `COGNIC_RUN_COSIGN_REAL=1`). CI sets the env-var on the dedicated lane; local dev skips the test by default so a developer without network access still runs the full unit suite green.
 
-**Why env-gate (not always-run):** the test pulls upstream A2A 1.0 protobuf source AND the spec's published JSON-schema binding from the spec authors' canonical URLs (pinned at T2 alongside the SDK version). Network-dependent tests in the unit suite would degrade local-dev iteration speed; gating preserves the "unit suite is offline-runnable" contract Sprint-1B established. The drift-gate's purpose is CI-side regression detection, not per-developer iteration.
+**Why env-gate (not always-run):** the test pulls the upstream A2A 1.0 protobuf source from the spec authors' canonical URL (pinned to the v1.0.0 git tag, captured at T6 commit time alongside the SDK lock). Network-dependent tests in the unit suite would degrade local-dev iteration speed; gating preserves the "unit suite is offline-runnable" contract Sprint-1B established. The drift-gate's purpose is CI-side regression detection, not per-developer iteration.
 
-**Pinned upstream URLs (captured at T2 commit time):**
+**T6 R0 capture-time correction (protobuf-only):** the planning-stage draft of this section described three checks (upstream protobuf digest, upstream JSON-schema digest, protobuf-vs-JSON-schema parity) on the assumption that the spec authors publish both a canonical protobuf source AND a canonical JSON-schema binding. Reality at T6 capture: upstream publishes only `specification/a2a.proto` at a canonical URL; `specification/json/` contains only a README pointing back at the protobuf source. The shipped gate is **a single protobuf-digest check**; the JSON-schema digest pin + parity check + the `protocol/a2a_schema_parity.py` helper module are deferred until (or if) the spec authors publish a canonical JSON-schema bundle.
+
+**Pinned upstream URL + digest (captured at T6 commit time):**
 
 ```python
-# Sprint-6 T6 — pinned at SDK lock time. Implementation engineer
-# fills in the exact spec-published URLs at PR-author time.
-_UPSTREAM_PROTOBUF_URL = "https://a2a-protocol.org/dev/spec/v1.0/a2a.proto"  # PIN AT T2
-_UPSTREAM_JSON_SCHEMA_URL = "https://a2a-protocol.org/dev/spec/v1.0/a2a.json"  # PIN AT T2
-_PINNED_PROTOBUF_DIGEST = "sha256:..."  # PIN AT T2 — captured digest at lock time
-_PINNED_JSON_SCHEMA_DIGEST = "sha256:..."  # PIN AT T2
+# Sprint-6 T6 — captured digest at SDK lock time, pinned to the
+# v1.0.0 git tag (NOT main) so spec-authors' WIP on main doesn't
+# trip the gate; only a deliberate v-tag update OR our own decision
+# to bump the pinned tag trips it.
+_UPSTREAM_PROTOBUF_URL = (
+    "https://raw.githubusercontent.com/a2aproject/A2A/"
+    "v1.0.0/specification/a2a.proto"
+)
+_PINNED_PROTOBUF_DIGEST = "<captured at T6 commit time>"
 ```
 
-**Drift detection logic (three checks, each fail-closed):**
+**Drift detection logic (one check, fail-closed):**
 
-1. **Upstream-vs-pinned digest check.** Fetch the upstream URL; sha256 the bytes; compare to `_PINNED_PROTOBUF_DIGEST` / `_PINNED_JSON_SCHEMA_DIGEST`. Fail-closed if either has moved beyond our pinned version. Forces a deliberate review + version bump.
-2. **Spec-published-binding parity check.** Fetch both the upstream protobuf source AND the upstream JSON-schema binding; verify that the JSON-schema binding's field set is a parity match for the protobuf source's field set. Fail-closed if the spec-published JSON-schema binding has diverged from protobuf — catches upstream drift the spec authors haven't yet republished.
-3. **Pinned-vs-installed parity check.** The installed `a2a-sdk == X.Y.Z` SDK's generated Pydantic types must match the pinned protobuf source's field set. Fail-closed otherwise — catches the rare case where the SDK's release artefact lags the spec's release artefact.
+1. **Upstream-vs-pinned digest check.** Fetch the upstream URL; sha256 the bytes; compare to `_PINNED_PROTOBUF_DIGEST`. Fail-closed if upstream has moved beyond our pinned version. Forces a deliberate review against the Wave-1/2/3 conformance matrix in `docs/A2A-CONFORMANCE.md` + a version bump.
 
-**CI lane configuration:** add `a2a-spec drift detection` to `.github/workflows/python.yml` as a separate lane with `env: COGNIC_RUN_A2A_UPSTREAM: 1`. Runs on push + PR. Fails the build on any of the three checks above. Local-dev runs of the full unit suite skip the lane silently with the standard env-gate skip message (parallel to the Sprint-4 cosign-real lane's behaviour).
+**Deferred (lands when upstream publishes a canonical JSON-schema bundle):**
 
-**Fault-tolerance note:** the test's network round-trip uses `httpx.get` with a 30s timeout + explicit retry budget (one retry on transient failure). A persistent upstream outage (spec authors' site down) results in a CI lane failure that the operator triages as "upstream unreachable" rather than as "drift detected" — distinguished by the explicit `pytest.skip` raise on `httpx.ConnectError` in the test body, vs the `assert digest == pinned` failure on actual drift. Both lanes fail the build but the diagnostic is unambiguous.
+- JSON-schema digest pin + drift check.
+- Protobuf-vs-JSON-schema parity check (catches upstream drift where the spec authors haven't republished one binding).
+- `protocol/a2a_schema_parity.py` helper module that walks both bundles structurally.
+
+These items remain plan-of-record commitments — the deferred contract is documented inline in `protocol/a2a_schema.py`'s docstring + `tests/unit/protocol/test_a2a_schema_drift.py`'s docstring so future maintainers see the rationale at the source.
+
+**CI lane configuration:** add `a2a-spec drift detection` to `.github/workflows/python.yml` as a separate lane with `env: COGNIC_RUN_A2A_UPSTREAM: 1`. Runs on push + PR. Fails the build on the protobuf-digest check above. Local-dev runs of the full unit suite skip the lane silently with the standard env-gate skip message (parallel to the Sprint-4 cosign-real lane's behaviour).
+
+**Fault-tolerance note:** the test's network round-trip uses `httpx.AsyncClient` with a 30s timeout. A persistent upstream outage (GitHub down, DNS failure) raises an `httpx` transport error from `resp.raise_for_status()` rather than the digest-mismatch assertion — distinguishing "upstream unreachable" from "drift detected" in the CI lane's diagnostic. Both fail the build but the diagnostic is unambiguous. The lane's 10-minute timeout bounds the retry window.
 
 ---
 
@@ -3296,11 +3693,11 @@ _PINNED_JSON_SCHEMA_DIGEST = "sha256:..."  # PIN AT T2
 
 **Sprint 6 emit-hook contract.** Three families are wired in Sprint 6, with the third serving as the generic catch-all that satisfies ADR-020's "every existing audit event mirrors" mandate:
 
-1. `tool_call` — Sprint-5's `audit.tool_invocation_{succeeded,failed,refused,errored}` already fires for every MCP tool call. T12 adds a parallel `tool_call.{completed,failed,denied,...}` UI-event emit at the SAME call site, **without changing the audit emit shape**. The audit row remains the system-of-record; the UI event is an in-process mirror with typed family-specific semantics (operator-friendly for runbooks).
-2. `artifact` — Sprint-6 T11's `a2a_artifacts.py` emits artifact lifecycle events as it streams chunks via `ObjectStoreAdapter`. T12 wires the UI mirror at the same call sites.
-3. **`decision_audit.event_appended` — generic catch-all at `DecisionHistoryStore.append`** (R1 P2 reviewer clarification). EVERY row appended to `decision_history` — regardless of which audit subsystem produced it (Sprint-2 chain rows, Sprint-2.5 SLA / escalation / guardrail events, Sprint-3 LLM-gateway ledger, Sprint-4 plugin-trust / supply-chain, Sprint-5 MCP host, Sprint-6 A2A, AND any future emitter) — produces one `decision_audit.event_appended` UI event with the source row's family / type / payload-digest in `data`. This is the load-bearing mirror that discharges ADR-020's "every existing audit event mirrors" contract: it sits at the canonical sink, so no audit subsystem can emit a row without the UI mirror firing. RBAC-gated to the `audit.read` scope when Sprint 7B's SSE subscriber lands.
+1. `tool_call` — Sprint-5's `audit.tool_invocation` / `audit.tool_invocation_refused` / `audit.tool_invocation_error` already fires for every MCP tool call. T12 adds a parallel `tool_call.{completed,denied,failed}` UI-event emit at the SAME call site, **without changing the audit emit shape**. The audit row remains the system-of-record; the UI event is an in-process mirror with typed family-specific semantics (operator-friendly for runbooks).
+2. `artifact` — Sprint-6 T11's `a2a_artifacts.py` emits `a2a.artifact_prepared` per stored / inlined artifact. T12 wires the UI mirror at the same call site → `artifact.completed`.
+3. **`decision_audit.event_appended` — generic catch-all at BOTH `AuditStore.append` AND `DecisionHistoryStore.append`** (R1 P2 + R2 P2 #1 reviewer clarifications). EVERY row appended to either chain — regardless of which audit subsystem produced it (Sprint-2 chain rows, Sprint-2.5 SLA / escalation / guardrail events, Sprint-3 LLM-gateway ledger, Sprint-4 plugin-trust / supply-chain, Sprint-5 MCP host, Sprint-6 A2A, AND any future emitter) — produces one `decision_audit.event_appended` UI event. ``data.chain_id`` discriminates `"audit_event"` from `"decision_history"`; ``data`` also carries `event_type`, `payload_digest` (`sha256:<hex>` of canonicalised payload via `core/canonical.canonical_bytes`), `request_id`, `sequence`, `tenant_id` (R2 P2 #2). This is the load-bearing mirror that discharges ADR-020's "every existing audit event mirrors" contract: it sits at BOTH canonical sinks, so no audit subsystem can emit a row without the UI mirror firing — and audit-only sources (`guardrail.trip`, `trust_gate.cosign_timeout`, future emitters that don't write to DH) are covered by the AuditStore-side emission. RBAC-gated to the `audit.read` scope when Sprint 7B's SSE subscriber lands.
 
-The two layers (family-specific mirrors + generic catch-all) are intentional. Family-specific mirrors give UIs typed semantics for the families they care about; the generic mirror guarantees the ADR-020 contract holds even for audit subsystems whose family-specific mirrors haven't been wired yet. When Sprint 13.5 adds the `policy.*` and `kill_switch.*` families' emit hooks, they layer on top of the generic mirror; they don't replace it.
+The two layers (family-specific mirrors + generic catch-all) are intentional. Family-specific mirrors give UIs typed semantics for the families they care about; the generic mirror guarantees the ADR-020 contract holds even for audit subsystems whose family-specific mirrors haven't been wired yet AND for audit-only sources that never write to DH. An event that writes to BOTH chains produces TWO generic mirrors (one per chain); subscribers may dedupe by `(chain_id, sequence)` if they only care about logical events. When Sprint 13.5 adds the `policy.*` and `kill_switch.*` families' emit hooks, they layer on top of the generic mirror; they don't replace it.
 
 The other 8 families have schema-only stubs in Sprint 6: their Pydantic models register, JSON-schema-export works, completeness tests pass — but no family-specific emit hooks fire because the underlying primitives don't exist yet (e.g., `subagent` waits for Sprint-8's sub-agent primitive; `approval` waits for Sprint-13.5's approval engine). Their *audit-row equivalents*, when they exist in Sprint 6 (e.g., a hypothetical Sprint-13.5 `audit.approval_pending` row), still mirror through `decision_audit.event_appended` per the generic catch-all. When the owning sprints land, they extend `ui_events.py` with family-specific emit-hook wiring at the new primitive's call sites.
 
@@ -3355,7 +3752,7 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     # above:
     #   * a2a_authz.py — per-tenant pinned-token client (anonymous-A2A
     #     forbidden Wave-1; Vault-rotated; mirrors mcp_authz pattern).
-    #   * a2a_agent_cards.py — two-pass card validator + JWS verify
+    #   * a2a_agent_cards.py — three-pass card validator + JWS verify
     #     against Sprint-4 trust root; identity-routing critical.
     #   * a2a_endpoint.py — task-lifecycle state machine + cross-agent
     #     chain linkage; single owner of inbound + outbound transport.
@@ -3417,6 +3814,8 @@ After authoring the 16 tasks above + folding in the six doctrine-decision sectio
 | `docs/A2A-CONFORMANCE.md` (alignment review) | T3 |
 | `protocol/ui_events.py` (ADR-020 stub) | T12 |
 
+**T3 verification result (executed 2026-05-04, post-T2-commit, no-commit task):** three walks completed against `docs/A2A-CONFORMANCE.md` + `docs/adrs/ADR-003-a2a-inter-agent.md` + `docs/adrs/ADR-020-ui-event-stream-contract.md` (filename has the `-contract` suffix; plan body originally said `ADR-020-ui-event-stream.md`). Zero implementation-phase findings. Three doctrine-divergence-vs-BUILD_PLAN observations were folded in earlier reviewer rounds and remain pinned for T16 BUILD_PLAN refresh: (1) BUILD_PLAN line 454 says AgentCard validation is **two-pass**; plan ships **three-pass** (T1 R1 P2 added Pass 3 — JWS verification — because A2A-CONFORMANCE.md §"Card signatures (JWS)" makes JWS mandatory, contradicting the pre-JWS-mandate two-pass framing); (2) BUILD_PLAN line 469 lists 5 UI-event families seeded; plan ships 11 schemas / 3 wired (R0 P2 #3 matched ADR-020's full Wave-1 11-family taxonomy — the BUILD_PLAN 5-family enumeration was a partial transcript); (3) BUILD_PLAN test names `test_a2a_agent_card_spec_shape` and `test_a2a_version_header` are stylistic shifts vs plan's `test_a2a_agent_cards` (with per-pass arms covering the spec-shape content) and `test_a2a_version` (matching content). All three are noted-only — feed T16's BUILD_PLAN refresh, no plan-PR re-review. ADR-003 + ADR-020 walks returned zero hard divergences. One semantic note carried forward: `A2APolicyRefusalReason.wave2_feature_refused` is the closed-enum literal under which push-notifications + long-running-resumption are refused; ADR-003 / A2A-CONFORMANCE.md technically classify these as "Optional in Wave 1, Required in Wave 2" rather than "Wave 2 only" — the literal name is a labelling choice consistent with BUILD_PLAN line 503's framing ("Wave 2 features... refused with explicit error code"), not a wire-format issue.
+
 **Six additional load-bearing artifacts the plan adds beyond BUILD_PLAN's literal list:**
 
 1. `tests/architecture/test_a2a_no_subprocess.py` (T4) — guardrail mirroring Sprint-5 architecture test.
@@ -3426,12 +3825,21 @@ After authoring the 16 tasks above + folding in the six doctrine-decision sectio
 5. `tests/unit/protocol/test_a2a_schema_drift.py` (T6) — env-gated upstream drift CI gate.
 6. `tests/unit/protocol/test_ui_event_taxonomy_completeness.py` (T12) — Wave-1 family/type pinning per Doctrine Decision E.
 
-**Placeholder scan.** Searched the plan for "TBD", "TODO", "implement later", "fill in details", "add appropriate ...". Three deliberate placeholders, each marked "PIN AT T2":
+**Placeholder scan.** Searched the plan for "TBD", "TODO", "implement later", "fill in details", "add appropriate ...". Per the Sprint-4 T13 cosign-pin pattern + Sprint-5 T2 mcp-pin pattern, "PIN AT T2" sentinels are honest deferrals (not placeholders — the doctrine-decision sections name the exact data needed at each pin point). T2 R2 P3 #2 reviewer correction split this list to record what T2 has now resolved vs what T6 must still resolve at digest-capture time:
 
-- T2 `a2a-sdk == X.Y.Z` — exact version filled at T2 commit time after PyPI check (verify `pip index versions a2a-sdk` matches the upstream A2A 1.0 spec authors' release; confirm the import namespace is `a2a` not `a2a_sdk` and not `a2a_protocol`).
-- T6 `_UPSTREAM_PROTOBUF_URL` / `_UPSTREAM_JSON_SCHEMA_URL` / `_PINNED_PROTOBUF_DIGEST` / `_PINNED_JSON_SCHEMA_DIGEST` — pinned at T2 alongside the SDK version. Implementation engineer captures the digests from the upstream URLs at lock time.
+**Resolved at T2 commit time (this commit):**
 
-These are honest deferrals (matches Sprint-4 T13 cosign-pin pattern + Sprint-5 T2 mcp-pin pattern), not placeholders. The plan's doctrine-decision sections name the exact data needed at each pin point.
+- `a2a-sdk == 1.0.2` — pinned in `pyproject.toml` after PyPI verification. Import namespace confirmed `a2a` (not `a2a_sdk`, not the unrelated `a2a_protocol` 0.1.0 package). T2 R1 P3 #1 reviewer correction filled the version after probing the actual SDK exports.
+- `joserfc == 1.6.4` — pinned in `pyproject.toml` after PyPI verification (latest stable; transitively reuses Sprint-4's pinned `cryptography>=45` backend so we don't introduce a second crypto family). T2 R1 P3 #1 same correction.
+
+**Resolved at T6 commit time (T6 R0 capture):**
+
+- `_UPSTREAM_PROTOBUF_URL` — pinned to `https://raw.githubusercontent.com/a2aproject/A2A/v1.0.0/specification/a2a.proto` (the spec authors' canonical proto source at the v1.0.0 git tag — NOT main, so spec-authors' WIP doesn't trip the gate).
+- `_PINNED_PROTOBUF_DIGEST` — captured at T6 commit time from the URL above. Drift CI gate (`test_a2a_schema_drift.py`) fails the build on mismatch.
+
+**Deferred — lands when upstream publishes a canonical JSON-schema bundle (T6 R0 capture-time discovery):**
+
+- `_UPSTREAM_JSON_SCHEMA_URL` / `_PINNED_JSON_SCHEMA_DIGEST` — the spec authors do NOT currently publish a canonical JSON-schema binding bundle at any URL; `specification/json/` in the upstream repo is a README-only directory pointing back at the protobuf source. There is no second artifact to pin or fetch. T6 ships the protobuf-only gate (1 test arm); the JSON-schema digest pin + the parity test arm + the `protocol/a2a_schema_parity.py` helper module land together as a Sprint-N reviewer-pause amendment when (or if) the spec authors publish the bundle.
 
 **Type consistency.** Every type referenced in later tasks is defined in earlier ones:
 
@@ -3453,7 +3861,7 @@ These are honest deferrals (matches Sprint-4 T13 cosign-pin pattern + Sprint-5 T
 - ADR-020 §"Subscription endpoints" — explicitly out of Sprint 6 scope (Sprint 7B). Plan calls this out.
 - A2A-CONFORMANCE.md §"Feature conformance matrix" — Wave-1 column ✅ entries all in T9-T13; Wave-2 ❌ entries refused at T14.
 - A2A-CONFORMANCE.md §"Authorization" — Wave-1 per-tenant Bearer at T5; Wave-2 mTLS deferred per Doctrine Decision F (refused with closed-enum sub-tag).
-- A2A-CONFORMANCE.md §"Card shape" — two-pass validation at T7 (upstream + AgentOS profile).
+- A2A-CONFORMANCE.md §"Card shape" — three-pass validation at T7 (upstream schema + AgentOS profile + JWS verify; T1 R1 P2 added Pass 3).
 - A2A-CONFORMANCE.md §"Card signatures (JWS) — mandatory for AgentOS" — JWS verify at T7 via Sprint-4 trust root extension; admission ordering per Doctrine Decision F (cosign first, then manifest extract, then card JWS verify).
 - A2A-CONFORMANCE.md §"Audit linkage" — T9 inbound + outbound chain links.
 - A2A-CONFORMANCE.md §"Versioning" — T6 schema pin + drift gate (with the dedicated `a2a-spec drift detection` CI lane added at T6 per R0 P2 reviewer correction).
@@ -3472,7 +3880,7 @@ These are honest deferrals (matches Sprint-4 T13 cosign-pin pattern + Sprint-5 T
 | **R0 P2 #5** — Schema-drift CI gate would silently skip both locally AND in CI because the workflow was never updated | T6 file list now includes `.github/workflows/python.yml` with the explicit `a2a-spec drift detection` lane (`COGNIC_RUN_A2A_UPSTREAM=1`); `pyproject.toml`'s `[tool.pytest.ini_options].markers` registers `a2a_upstream` so pytest doesn't warn. |
 | **R0 P2 #6** — Agent Card JWS verification ordered BEFORE wheel cosign verification, but doctrine says pack must be cosign-trusted FIRST so its declared metadata is trustworthy enough to read | File-structure description for `protocol/plugin_registry.py` now explicitly orders: (1) allow-list → (2) wheel cosign → (3) Sprint-4 attestation pipeline → (4) Sprint-5 deferred-load manifest extract → (5) **NEW Sprint-6 step:** Agent Card JWS verify against per-tenant trust root. |
 | **R0 P3** — Several placeholder snippets ("full implementation following Sprint-5 T4 pattern", abbreviated canary bodies, all-zeroes pinned digests without explicit "PIN AT T2" annotation) | Pinned-digest sentinels left as `0...` but explicitly annotated PIN AT T2; abbreviated tasks flagged here for the implementation engineer to expand on a per-task basis at TDD-step time. The Sprint-5-style "every code block complete" doctrine is reasserted in this Self-Review entry: implementation engineer fills concrete code at task time, not before. |
-| **R1 P2** — ADR-020 audit-mirror scope ambiguous (plan wired only `tool_call` + `decision_audit` + `artifact`, but ADR-020 says "every existing audit event mirrors"). | T12 + Doctrine Decision E now state explicitly that the `decision_audit.event_appended` hook at `DecisionHistoryStore.append` is the **generic catch-all** covering every audit/decision row regardless of subsystem origin (Sprint-2 chain / Sprint-2.5 SLA / Sprint-3 ledger / Sprint-4 plugin-trust / Sprint-5 MCP / Sprint-6 A2A / future). Family-specific mirrors give typed semantics; the generic mirror discharges the ADR-020 contract. New regression test in `test_ui_events_audit_mirror.py` exercises the generic path with a non-tool, non-artifact row. |
+| **R1 P2 + R2 P2 #1** — ADR-020 audit-mirror scope ambiguous (plan wired only `tool_call` + `decision_audit` + `artifact`, but ADR-020 says "every existing audit event mirrors"). R1 placed the catch-all at `DecisionHistoryStore.append` only, which would have silently dropped audit-only sources (`guardrail.trip`, `trust_gate.cosign_timeout`, future emitters that don't write to DH). | T12 + Doctrine Decision E now state explicitly that `decision_audit.event_appended` is the **generic catch-all** emitted from BOTH `AuditStore.append` AND `DecisionHistoryStore.append` (R2 P2 #1) covering every audit/decision row regardless of subsystem origin (Sprint-2 chain / Sprint-2.5 SLA / Sprint-3 ledger / Sprint-4 plugin-trust / Sprint-5 MCP / Sprint-6 A2A / future). `data.chain_id` discriminates `"audit_event"` from `"decision_history"`; `data` also carries `event_type`, `payload_digest` (`sha256:<hex>` of canonicalised payload), `request_id`, `sequence`, `tenant_id` (R2 P2 #2). Events that write to BOTH chains produce two mirrors; subscribers may dedupe by `(chain_id, sequence)`. Family-specific mirrors give typed semantics; the generic mirror discharges the ADR-020 contract on both sinks. New regression tests in `test_ui_events_audit_mirror.py` exercise the audit-only generic path (e.g. `guardrail.trip`) and pin payload-identity fields. |
 | **R1 P3** — `create_prod_app` docstring still promised route mounting after the body was corrected to log-only. | Docstring rewritten: "T2 ONLY logs SDK availability — route mounting is deferred to T9 / T11 / T12". Explicit reference to the Sprint-5 T15 R1 P2 #1 overclaim that this fix mirrors. |
 | **R1 P3** — Document map line 46 still said "5 families pinned" while the body said 11 schema / 3 wired. | Document map line refreshed to match. |
 | **R1 P3** — `A2AVersionOutcome` count drift: file-structure said "5 values" while listing 6; tests inventory said "5 cases" while T8 said "6". | Pinned to 6 consistently across file-structure, tests-inventory, T8, Doctrine Decision F. |
@@ -3483,7 +3891,7 @@ These are honest deferrals (matches Sprint-4 T13 cosign-pin pattern + Sprint-5 T
 | **R2 P2 #5** — Schema-drift CI lane (T6) referenced `needs: lint-test` but the actual workflow job id is `ci`; also referenced `./.github/actions/setup-python` which doesn't exist in the repo. Implementing the snippet as-written would have made the workflow invalid. | Verified ground truth (`grep` of `.github/workflows/python.yml`): job id is `ci`; setup chain is inline (`actions/checkout@v6` → `astral-sh/setup-uv@v7` with version `0.5.29` + `enable-cache: true` → `.python-version` read → `actions/setup-python@v6` → `uv sync --frozen --all-extras`). T6 lane snippet rewritten to match (`needs: ci` + inline setup steps copied verbatim from the existing `ci` job for parity). |
 | **R2 P3 #1** — T16 closeout instructions still said "no new lanes; per-file coverage now enforces 26 modules" — stale relative to T6's new lane + T15's 27-module gate. | T16 closeout-template lines updated to record the `a2a-spec drift detection` lane addition and the 27-module gate. |
 | **R2 P3 #2** — AGENTS.md amendment text + 2 other doctrine-drift-scan rows still said "4-case matrix" for `a2a_version.py` even though the plan now consistently uses 6 outcomes. | All 3 sites updated to "6-case matrix" via `replace_all`. AGENTS.md inserted text now matches the file-structure + Doctrine Decision F + T8 task body. |
-| **R3 P2 #1** — Chosen JWS library doesn't support claimed contract: `python-jose` is essentially abandoned + does NOT support RFC 7797 unencoded-payload JWS, but the plan claimed it does. Agent Card sidecar `.jws` verification is identity-routing critical so the library must actually support the spec serialisation. | Switched from `python-jose[cryptography] == 3.5.0` to `joserfc == X.Y.Z` (PIN AT T2). Rationale documented inline in T2 + Tech Stack: joserfc has explicit RFC-7797 API surface, is actively maintained by the authlib author, and transitively uses Sprint-4's pinned `cryptography` backend so we don't introduce a second crypto family. T7 trust-gate `verify_jws_blob` references updated. |
+| **R3 P2 #1** — Chosen JWS library doesn't support claimed contract: `python-jose` is essentially abandoned + does NOT support RFC 7797 unencoded-payload JWS, but the plan claimed it does. Agent Card sidecar `.jws` verification is identity-routing critical so the library must actually support the spec serialisation. | Switched from `python-jose[cryptography] == 3.5.0` to `joserfc == 1.6.4` (PIN AT T2). Rationale documented inline in T2 + Tech Stack: joserfc has explicit RFC-7797 API surface, is actively maintained by the authlib author, and transitively uses Sprint-4's pinned `cryptography` backend so we don't introduce a second crypto family. T7 trust-gate `verify_jws_blob` references updated. |
 | **R3 P2 #2** — `a2a_errors.py` was still treated as non-critical even though after R2 it owns the spec wire `A2AErrorCode` enum + AgentOS `A2APolicyRefusalReason` enum + `_POLICY_REASON_TO_SPEC_CODE` mapping. Drift in any of these changes what remote A2A callers see — wire-protocol-public. | Promoted to critical-controls. Gate count adjusted **27 → 28** (Sprint-6 grows from 21 → 28 across 7 modules: original quintet + R0's `a2a_version.py` + R3's `a2a_errors.py`). T11 halt-before-commit flipped (with explicit "Mixed: Yes for `a2a_errors.py` portion of the commit"); T15 file list, rationale table, per-module comment block, `_CRITICAL_FILES` snippet all add the `a2a_errors.py` row; AGENTS.md amendment text adds the new line; "sextet"/"6 modules" → "septet"/"7 modules" / "28" everywhere. |
 | **R3 P2 #3** — Plan said RefusalReason 26 → 32 with "6 new A2A reasons" but never listed them. Some prose used `a2a_agent_card_signature_invalid` while the policy literal is `agent_card_signature_invalid`. The reconciliation between AgentCardValidationReason / A2APolicyRefusalReason → registry RefusalReason was not explicit. | Added an explicit table at the `plugin_registry.py` file-structure entry listing the 6 registry-boundary `RefusalReason` literals (`a2a_manifest_jws_path_missing`, `a2a_agent_card_jws_blob_unreadable`, `a2a_agent_card_signature_invalid`, `a2a_agent_card_signer_not_allowlisted`, `a2a_agent_card_upstream_schema_invalid`, `a2a_agent_card_profile_invalid`) + their fire-step + their source `AgentCardValidationReason` value. Drift-detector test now asserts `_AGENT_CARD_VALIDATION_REASON_TO_REFUSAL` mapping is exhaustive (mirrors Sprint-5 `_AUTHZ_REASON_TO_REFUSAL` pattern). The two layers are explicitly separated: `RefusalReason` (a2a_-prefixed, registry-boundary) vs `A2APolicyRefusalReason` (unprefixed, type-namespaced, runtime). |
 | **R3 P3** — Wave-2 refusal reason name drift: canonical literal is `wave2_feature_refused` (in `A2APolicyRefusalReason`) but Decision Lock + test inventory + caller-URL threat model + WebhookRefused class all said `a2a_wave2_feature_refused`. | All 4 prose sites updated to `A2APolicyRefusalReason.wave2_feature_refused` (type-qualified to make the layer obvious). The Sprint-6 vocabulary is now: registry RefusalReason → `a2a_*` prefix; A2APolicyRefusalReason → unprefixed (type-namespaced via the literal name); AGENTS.md / pyproject / docs all use the correct vocabulary for the layer they reference. |

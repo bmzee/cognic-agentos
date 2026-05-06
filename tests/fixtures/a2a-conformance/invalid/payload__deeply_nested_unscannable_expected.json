@@ -1,0 +1,7 @@
+{
+  "spec_code": "unsupported_operation",
+  "policy_reason": "wave2_feature_refused",
+  "validator": "A2AEndpoint._classify_wave2_feature",
+  "wave2_feature": "payload_unscannable",
+  "rationale": "Iterative walker fails closed on depth/node bound exceedance OR json.loads RecursionError mapped to same sub-tag (T9 R3 P2 + R5 P2)."
+}
