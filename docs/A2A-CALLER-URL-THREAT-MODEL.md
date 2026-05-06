@@ -45,7 +45,7 @@ Restated from the Sprint-6 plan-of-record §"Doctrine Decision B":
 
 This is an **entry-point name** (string of the form `cognic_agent_<name>`), NEVER a URL. The endpoint resolves the name through the plugin registry to a registered pack, then calls `pack.handle(message)` in-process.
 
-**No URL is ever constructed from this field.** Refusal vector: any reachable code path that tries to interpret `target_agent` as a URL is an architecture-test failure (T4) AND a runtime-canary failure (T14). Closed-enum reason on attempted URL-shaped value: `a2a_target_must_be_entrypoint_name`.
+**No URL is ever constructed from this field.** Refusal vector: any reachable code path that tries to interpret `target_agent` as a URL is an architecture-test failure (T4) AND a runtime-canary failure (T14). Closed-enum reason on attempted URL-shaped value: spec wire code `method_not_found` + `policy_reason="unknown_target"` (the registry has no entry-point under URL-shaped names; mapping unknown-target to JSON-RPC's `method_not_found` is the spec-correct semantic). The runtime canary additionally asserts the HTTP-client sentinel records ZERO method calls — the URL never leaks past routing into a constructor.
 
 ### 3.2 Outbound `spawn_subagent(target_agent, ...)` (ADR-005, Sprint 8)
 
@@ -53,7 +53,7 @@ Sprint 6 ships only the *outbound transport* layer. The orchestration semantics 
 
 When `spawn_subagent` lands, the `target_agent` argument is again an entry-point name; the sub-agent module resolves it through the plugin registry, fetches the registered pack's signed Agent Card, verifies the JWS via Sprint-4's per-tenant trust root, and dispatches to the URL inside the verified `supportedInterfaces[].url` array.
 
-**`spawn_subagent` MUST NOT accept a `target_url` kwarg.** The runtime canary asserts this. Closed-enum reason if a future caller tries: `a2a_dispatch_url_not_from_verified_card`.
+**`spawn_subagent` MUST NOT accept a `target_url` kwarg.** **T14 covers this surface INDIRECTLY in Sprint 6** — `TestSubagentTargetIsEntryPointName` feeds URL-shaped target_agents to `A2AEndpoint.handle` and asserts they're refused as unknown targets (same `method_not_found` + `unknown_target` posture as §3.1) and never reach an outbound URL constructor. The direct `spawn_subagent(target_url=...)` canary lands alongside the Sprint 8 sub-agent primitive (the production stub does not exist yet — Sprint 6 deliberately does not introduce production scaffolding ahead of Sprint 8).
 
 ### 3.3 Agent Card discovery URL
 
@@ -67,13 +67,13 @@ where `origin` is derived from the registered pack's `[tool.cognic.identity].age
 
 The well-known suffix `.well-known/agent-card.json` is **constant, not parameterisable** — no caller can override the suffix.
 
-The architecture test (T4) asserts: every Agent Card fetch in `protocol/a2a_agent_cards.py` constructs the URL via the constant suffix; no `format()` / f-string interpolation of caller-controlled strings into the suffix slot. Closed-enum reason on violation: `a2a_agent_card_discovery_path_not_constant`.
+The architecture test (T4) asserts: every Agent Card fetch in `protocol/a2a_agent_cards.py` constructs the URL via the constant suffix; no `format()` / f-string interpolation of caller-controlled strings into the suffix slot. The runtime canary (T14) `TestOutboundDispatchURLFromVerifiedCard` complements the static check by driving the **real** `A2AAgentCardVerifier.fetch_and_verify_outbound_card` against 13 non-origin `target_origin` shapes (path / query / fragment / userinfo / non-`http(s)` scheme / non-string) and asserting each is refused with `agent_card_jws_blob_unreadable` carrying `rejected_component` ∈ `{not_string, scheme, netloc, path, query_or_fragment, userinfo}` BEFORE `httpx.AsyncClient.get` is awaited (the spy on `http_client.get` is asserted never-awaited).
 
 ### 3.4 Push-notification webhooks (Wave-2 feature)
 
-Push-notification subscribe is spec-valid in A2A 1.0 but Wave-2 in AgentOS — refused in Wave-1 with `A2APolicyRefusalReason.wave2_feature_refused` (closed-enum sub-tag `push_notification`).
+Push-notification subscribe is spec-valid in A2A 1.0 but Wave-2 in AgentOS — refused in Wave-1 at the inbound endpoint Wave-2 gate with spec wire code `unsupported_operation` + `policy_reason="wave2_feature_refused"` + sub-tag `wave2_feature="push_notification_subscribe"`. The `_classify_wave2_feature` walker matches both `tasks/pushNotificationConfig/set` and `tasks/pushNotificationConfig/get` to this sub-tag.
 
-The webhook URL would be caller-controlled by definition; refusing the entire feature in Wave-1 means no caller-controlled webhook URL ever reaches `httpx`. When push-notification support lands, the caller-URL threat model amendment lands alongside it with explicit per-tenant URL allow-list + Vault-stored signing-key + outbound mTLS — same shape Sprint-5 T13's args-side validation will get when Sprint 8 lifts the STDIO umbrella.
+The webhook URL inside `params` would be caller-controlled by definition; refusing at the method-name gate (BEFORE any URL parsing) means no caller-controlled webhook URL ever reaches `httpx`. When push-notification support lands, the caller-URL threat model amendment lands alongside it with explicit per-tenant URL allow-list + Vault-stored signing-key + outbound mTLS — same shape Sprint-5 T13's args-side validation will get when Sprint 8 lifts the STDIO umbrella.
 
 ## 4. Sprint-6 enforcement (this sprint)
 
@@ -126,12 +126,15 @@ The test ships with self-tests pinning the collector + the URL-source classifier
 
 ### 4.2 Runtime canary (T14)
 
-**`tests/unit/protocol/test_a2a_no_caller_controlled_url.py`** (T14 — same filename as the architecture test but lives under `tests/unit/protocol/`; separate module). Mirrors Sprint-5 T13's class shape. Specifically:
+**`tests/unit/protocol/test_a2a_no_caller_controlled_url.py`** (T14 — same filename as the architecture test but lives under `tests/unit/protocol/`; separate module). Drives the **real** `A2AEndpoint` + `A2AAgentCardVerifier` + `A2AAuthzClient` (only audit / decision-history / registry / secret-adapter mocked) — every adversary-controlled URL surface MUST produce the correct closed-enum refusal at the correct entry point. Specifically:
 
-- `TestInboundTargetAgentIsEntrypointName` — every `target_agent` shape that resembles a URL (`https://...`, `//...`, `file://`, `javascript:`, `data:`) is refused at envelope validation with closed-enum `a2a_target_must_be_entrypoint_name`.
-- `TestOutboundSpawnSubagentNeverAcceptsURL` — `A2AEndpoint.dispatch_outbound(target_agent="...")` reachable via every API surface refuses any kwarg matching `*_url` (TypeError-typed at the boundary).
-- `TestAgentCardDiscoverySuffixIsConstant` — `protocol/a2a_agent_cards.py` discovery code never interpolates a caller value into the well-known suffix. Module-shape assertion: the constant `_AGENT_CARD_WELL_KNOWN_SUFFIX = "/.well-known/agent-card.json"` is pinned.
-- `TestWave2WebhookRefused` — push-notification subscribe is refused with closed-enum `A2APolicyRefusalReason.wave2_feature_refused`, observable end-to-end through the audit + decision-history chain.
+- `TestCallerURLRefusedAtEndpoint` — every `target_agent` shape that resembles a URL (`https://...`, `//...`, `file://`, `javascript:`, `data:`, plus path-shaped names like `agent_with/slash`) is refused at the routing gate (gate 4) with spec wire code `method_not_found` + `policy_reason="unknown_target"` (the registry has no entry-point under those names). The fixture verifies an HTTP-client sentinel records ZERO method calls — the URL never leaks past routing into a constructor. **Spec rationale:** unknown target names map to JSON-RPC `method_not_found` semantically; `parse_error` / `invalid_request` are reserved for malformed JSON-RPC payloads.
+- `TestOutboundDispatchURLFromVerifiedCard` — every non-origin `target_origin` (path / query / fragment / userinfo / non-`http(s)` scheme / non-string) is refused inside `A2AAgentCardVerifier.fetch_and_verify_outbound_card` BEFORE `httpx.AsyncClient.get` is called. Spy on `http_client.get` confirms it was never awaited. Pinned reason: `agent_card_jws_blob_unreadable` carrying `rejected_component` ∈ `{not_string, scheme, netloc, path, query_or_fragment, userinfo}`.
+- `TestSubagentTargetIsEntryPointName` — **indirect coverage only** for Sprint 6. Sub-agent dispatch (whose primitive ships in Sprint 8 per ADR-005) takes entry-point names, not URLs. The Sprint-6 transport-side invariant pinned here is INDIRECT: URL-shaped target_agents fed to `A2AEndpoint.handle` are refused as unknown targets and never reach an outbound URL constructor. The direct `spawn_subagent(target_url=...)` canary lands alongside the Sprint 8 sub-agent primitive.
+- `TestPushNotificationWebhookRefusedWave1` — `tasks/pushNotificationConfig/{set,get}` methods are refused at the Wave-2 gate with spec wire code `unsupported_operation` + `policy_reason="wave2_feature_refused"` + sub-tag `wave2_feature="push_notification_subscribe"` BEFORE the caller-supplied webhook URL in the params is ever parsed.
+- `TestThreatModelInvariants` — pin the four closed-enum vocabularies (`A2AAuthzReason` 8 values, `AgentCardValidationReason` 11 values, `A2AErrorCode` 14 values, `A2APolicyRefusalReason` 11 values). Drift = wire-protocol-public; any addition trips a test and forces an explicit doctrine-update PR.
+
+Companion canary modules: **`test_a2a_anonymous_refused.py`** (drives the real `A2AAuthzClient.validate_inbound_token` against 7 adversarial Authorization-header shapes; pinned to closed-enum `A2AAuthzReason` values), **`test_a2a_wave2_features_refused.py`** (drives `A2AEndpoint._classify_wave2_feature` via `handle` against 11 Wave-2 traffic shapes — push-notification methods, multimodal `Part` raw/url fields, image/audio/video media-type prefixes, deeply-nested unscannable payloads, mTLS-in-card via `A2AAgentCardVerifier.validate_card`), **`test_a2a_outbound_version.py`** (instance-level mock on `_http` capturing every outbound `.get()` and asserting `A2A-Version: 1.0` on each).
 
 ### 4.3 JWS verification (T7)
 
