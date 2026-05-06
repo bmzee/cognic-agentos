@@ -1,0 +1,14 @@
+{
+  "jsonrpc": "2.0",
+  "id": "req-conf-001",
+  "method": "message/send",
+  "params": {
+    "message": {
+      "messageId": "msg-001",
+      "role": "ROLE_USER",
+      "parts": [
+        {"text": "What is the capital of France?"}
+      ]
+    }
+  }
+}

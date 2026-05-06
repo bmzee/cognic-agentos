@@ -1,0 +1,6 @@
+{
+  "spec_code": "version_not_supported",
+  "validator": "a2a_version.negotiate_inbound_version",
+  "outcome": "malformed_rejected",
+  "rationale": "Header doesn't match canonical decimal pattern; spec-defined parse error."
+}

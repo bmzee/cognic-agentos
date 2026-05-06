@@ -1,0 +1,7 @@
+cognic-test-agent-pack-fixture-sigstore-bundle-placeholder
+this file is intentionally non-cryptographic for Sprint-6 unit tests
+mirrors Sprint-5 cognic_test_mcp_pack/attestations/bundle.sigstore.
+The T9 persister treats Sigstore bundle bytes as opaque — its only
+contract is "persist atomically with 7-year retention metadata". The
+@pytest.mark.cosign_real integration path uses build_test_
+attestations.sh --regenerate to produce a real Sigstore bundle.

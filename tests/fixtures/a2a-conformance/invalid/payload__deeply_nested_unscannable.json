@@ -1,0 +1,6 @@
+{
+  "fixture_kind": "wave2_payload_oversized",
+  "rationale": "Deeply nested JSON payload (~12 000 levels) trips the C-side json decoder's recursion limit OR the iterative walker's depth bound. Both surface as wave2_feature='payload_unscannable' (T9 R3 P2 + R5 P2). Generated dynamically by the test runner since the bytes are large; this fixture only declares the test parameters.",
+  "depth": 12000,
+  "leaf": "x"
+}

@@ -1,0 +1,34 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cognic-test-agent-pack"
+version = "0.1.0"
+description = "Sprint-6 unit test pack — exercises the A2A 1.0 admission pipeline (Sprint-4 attestation pipeline + Sprint-6 AgentCard JWS verification step) and the T13 fixture-pack admission + A2AEndpoint receiver smoke against a mocked HTTP transport. The fixture is intentionally inert: no runnable A2A 1.0 server module, no live OAuth AS, no real network — that path is deferred to a future integration lane."
+readme = { text = "Test fixture pack — installed via `uv pip install -e tests/fixtures/cognic_test_agent_pack/` for the Sprint-6 unit suite. Not a real Cognic plugin pack; do NOT install in production. The package's __init__.py is deliberately import-poisoned (raise AssertionError) and intentionally stays that way: it enforces the deferred-load invariant per ADR-002 §gate 1 (admission MUST resolve cognic-pack-manifest.toml + agent_cards/* via Distribution.locate_file() WITHOUT importing pack code). Mirrors the Sprint-5 cognic_test_mcp_pack fixture's import-poisoning + scope-decision pattern (T13 reuses the same doctrine).", content-type = "text/plain" }
+requires-python = ">=3.11"
+authors = [{ name = "Cognic AgentOS Sprint-6 fixtures" }]
+license = { text = "MIT" }
+
+[project.entry-points."cognic.agents"]
+# Entry-point name = the alias operators see in /api/v1/system/plugins.
+# Distribution name (cognic-test-agent-pack above) is the cosign-signed
+# identity. The Plugin reference is intentionally unresolvable in the
+# unit lane: the package __init__.py is import-poisoned and there is
+# no real Plugin class. The Sprint-5 manifest extractor (T6.1) never
+# loads entry points, and the T13 admission/receiver smoke uses a
+# mocked HTTP transport — neither path needs a runnable Plugin.
+cognic_test_agent_pack = "cognic_test_agent_pack:Plugin"
+
+[tool.hatch.build.targets.wheel]
+packages = ["cognic_test_agent_pack"]
+
+# The signed manifest + AgentCard + JWS MUST ship as package data
+# inside the importable package directory per ADR-002 §gate 1. Hatch
+# includes data files matching the pattern by default; the explicit
+# force-include keeps the contract obvious in source.
+[tool.hatch.build.targets.wheel.force-include]
+"cognic_test_agent_pack/cognic-pack-manifest.toml" = "cognic_test_agent_pack/cognic-pack-manifest.toml"
+"cognic_test_agent_pack/agent_cards/test_agent.json" = "cognic_test_agent_pack/agent_cards/test_agent.json"
+"cognic_test_agent_pack/agent_cards/test_agent.jws" = "cognic_test_agent_pack/agent_cards/test_agent.jws"

@@ -1,0 +1,41 @@
+# Sprint-6 fixture: signed static A2A pack manifest.
+#
+# This file ships as package data inside the importable package
+# directory per ADR-002 §gate 1. The pack's cosign-verified wheel
+# covers its bytes via inclusion (force-include in pyproject.toml).
+# The runtime plugin registry reads THIS file at admission via the
+# Sprint-5 manifest extractor (which T13 reuses for A2A admission) —
+# never loads pack code at admission time.
+#
+# T13 reads this manifest. Manifest contents below are the minimum
+# the Sprint-4 attestation pipeline + Sprint-6 AgentCard JWS verifier
+# + T11 capability reader need to admit + dispatch the fixture pack.
+#
+# Schema follows the canonical FLAT [tool.cognic.a2a] block per
+# docs/A2A-CONFORMANCE.md §"What pack authors must declare". T11's
+# capability reader (a2a_capability_negotiation.read_pack_capabilities)
+# walks this section directly.
+
+[tool.cognic.identity]
+pack_id = "cognic-test-agent-pack"
+pack_version = "0.1.0"
+
+[tool.cognic.a2a]
+spec_version = "1.0"
+agent_card_url = "https://packs.example/agent_cards/test_agent.json"
+agent_card_jws_path = "agent_cards/test_agent.jws"
+capabilities_supported = ["test_capability", "regulatory_qa"]
+streaming = true
+push_notification_config = false  # opt-in for Wave 2 — fixture stays Wave-1
+artifacts_supported = true
+extended_agent_card = false
+auth_scheme = "bearer"
+
+[tool.cognic.runtime]
+risk_tier = "read_only"
+
+[tool.cognic.data_governance]
+data_classes = []
+
+[tool.cognic.supply_chain]
+slsa_required_version = "v1.0"

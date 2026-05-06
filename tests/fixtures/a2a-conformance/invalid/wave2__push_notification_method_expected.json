@@ -1,0 +1,7 @@
+{
+  "spec_code": "unsupported_operation",
+  "policy_reason": "wave2_feature_refused",
+  "validator": "A2AEndpoint._classify_wave2_feature",
+  "wave2_feature": "push_notification_subscribe",
+  "rationale": "Push-notification subscribe is Wave-2 per Decision Lock #2."
+}

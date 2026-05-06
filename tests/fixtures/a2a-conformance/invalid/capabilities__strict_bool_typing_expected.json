@@ -1,0 +1,6 @@
+{
+  "spec_code": null,
+  "validator": "a2a_capability_negotiation.read_pack_capabilities",
+  "rationale": "Truthy non-bool value 'false' (string) MUST be treated as False per T11 R1 P2 #2 strict bool typing. bool('false') is True under Python truthiness; the reader's _bool_or_false rejects non-bool types regardless of truthiness.",
+  "expect_streaming_value": false
+}
