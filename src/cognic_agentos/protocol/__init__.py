@@ -486,7 +486,10 @@ A2APolicyRefusalReason = Literal[
 #:   2. **AgentOS bank-grade profile** — mandatory ``provider``,
 #:      ``securitySchemes``, ``securityRequirements``, ``signatures``,
 #:      at least one ``supportedInterfaces`` entry, plus the
-#:      no-top-level-``url`` spec violation.
+#:      no-top-level-``url`` spec violation, plus the Wave-2 auth
+#:      refusal (T14 R0: a card declaring ``mtlsSecurityScheme``
+#:      anywhere in its ``securitySchemes`` map demands a Wave-2
+#:      transport AgentOS Wave-1 cannot honor).
 #:   3. **JWS signature** — detached JWS over the card content
 #:      verified against the per-tenant trust root (R1 P2 reviewer
 #:      correction added these 3 outcomes; without them, T7's
@@ -497,18 +500,19 @@ A2APolicyRefusalReason = Literal[
 #: integration maps each onto a registry ``RefusalReason`` literal
 #: (the 6 a2a_*-prefixed RefusalReasons enumerated in the plan's
 #: Doctrine Decision F via ``_AGENT_CARD_VALIDATION_REASON_TO_REFUSAL``;
-#: the 6 profile-flavors collapse into the single
+#: the 7 profile-flavors collapse into the single
 #: ``a2a_agent_card_profile_invalid`` registry refusal).
 AgentCardValidationReason = Literal[
     # Pass 1 — upstream A2A 1.0 schema (spec-conformance gate)
     "agent_card_upstream_schema_invalid",
-    # Pass 2 — AgentOS bank-grade profile gates (6 specific failure modes)
+    # Pass 2 — AgentOS bank-grade profile gates (7 specific failure modes)
     "agent_card_profile_provider_missing",
     "agent_card_profile_security_schemes_missing",
     "agent_card_profile_security_requirements_missing",
     "agent_card_profile_signatures_missing",
     "agent_card_profile_supported_interfaces_empty",
     "agent_card_profile_top_level_url_forbidden",  # spec violation
+    "agent_card_profile_wave2_auth_required",  # T14: card declares mTLS (Wave-2)
     # Pass 3 — JWS signature verification (R1 P2 reviewer correction)
     "agent_card_jws_blob_unreadable",  # detached JWS sidecar file IO failure
     "agent_card_signature_invalid",  # cryptographic signature verify failed

@@ -1,8 +1,10 @@
 """Sprint 6 T7 — protocol/a2a_agent_cards.py contract tests.
 
 Covers the three-pass Agent Card validator + outbound-dispatch
-verifier. Each of the 10 :class:`AgentCardValidationReason`
-literals has at least one fire-path arm; happy path + audit
+verifier. Each of the 11 :class:`AgentCardValidationReason`
+literals has at least one fire-path arm (T14 added
+``agent_card_profile_wave2_auth_required`` as the 11th value —
+covered by ``TestProfileWave2AuthRequired``); happy path + audit
 emission + outbound-fetch behaviour are pinned in their own
 classes.
 
@@ -546,6 +548,58 @@ class TestProfileSupportedInterfacesEmpty:
         )
         assert result.ok is False
         assert result.reason == "agent_card_profile_supported_interfaces_empty"
+
+
+class TestProfileWave2AuthRequired:
+    """T14: a card whose ``securitySchemes`` map declares any
+    ``mtlsSecurityScheme`` entry MUST be refused under Wave-1
+    bearer-token transport policy. Wave-1 = per-tenant pinned
+    bearer token; Wave-2 = mTLS; Wave-3 = verifiable credentials
+    per A2A-CONFORMANCE.md §"Wave breakdown"."""
+
+    async def test_mtls_only_card_refused_with_wave2_reason(
+        self,
+        verifier: A2AAgentCardVerifier,
+        rsa_keypair: tuple[str, str],
+    ) -> None:
+        priv_pem, _ = rsa_keypair
+        card = _valid_card_dict()
+        card["securitySchemes"] = {"mtls": {"mtlsSecurityScheme": {"description": "mTLS only"}}}
+        card_bytes, jws_bytes = _sign_card(card, priv_pem)
+        result = await verifier.validate_card(
+            card_bytes=card_bytes,
+            jws_bytes=jws_bytes,
+            tenant_id="bank_a",
+            request_id="rid-mtls-only",
+        )
+        assert result.ok is False
+        assert result.reason == "agent_card_profile_wave2_auth_required"
+
+    async def test_mtls_alongside_bearer_still_refused(
+        self,
+        verifier: A2AAgentCardVerifier,
+        rsa_keypair: tuple[str, str],
+    ) -> None:
+        # Even with a bearer scheme on offer, the presence of mTLS
+        # anywhere in the map signals a Wave-2 expectation. The gate
+        # fires conservatively — when Wave-2 lands, lift it to
+        # ``mtls-ONLY-card refused`` per the docstring on
+        # ``validate_card``.
+        priv_pem, _ = rsa_keypair
+        card = _valid_card_dict()
+        card["securitySchemes"] = {
+            "bearer": {},
+            "mtls": {"mtlsSecurityScheme": {"description": "Wave-2 future"}},
+        }
+        card_bytes, jws_bytes = _sign_card(card, priv_pem)
+        result = await verifier.validate_card(
+            card_bytes=card_bytes,
+            jws_bytes=jws_bytes,
+            tenant_id="bank_a",
+            request_id="rid-mtls-mixed",
+        )
+        assert result.ok is False
+        assert result.reason == "agent_card_profile_wave2_auth_required"
 
 
 # =============================================================================
@@ -1128,7 +1182,7 @@ class TestOutboundOriginStrictValidation:
 
 
 # =============================================================================
-# Drift detector — pin the 10-value reason enum so a future edit
+# Drift detector — pin the 11-value reason enum so a future edit
 # that adds/drops a reason must also update the test surface.
 # =============================================================================
 
@@ -1147,6 +1201,7 @@ class TestClosedEnumReasonsExhaustive:
             "agent_card_profile_signatures_missing",
             "agent_card_profile_supported_interfaces_empty",
             "agent_card_profile_top_level_url_forbidden",
+            "agent_card_profile_wave2_auth_required",
             "agent_card_jws_blob_unreadable",
             "agent_card_signature_invalid",
             "agent_card_signer_not_allowlisted",

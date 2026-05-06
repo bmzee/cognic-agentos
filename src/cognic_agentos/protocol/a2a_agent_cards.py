@@ -68,9 +68,12 @@ re-export through :mod:`cognic_agentos.protocol.a2a_schema`.
            reason), ``agent_card_signature_invalid`` (cryptographic
            verify failure / unparseable JWS).
 
-The 10-value closed-enum :class:`AgentCardValidationReason` lives
+The 11-value closed-enum :class:`AgentCardValidationReason` lives
 in :mod:`cognic_agentos.protocol`; this module returns
-:class:`AgentCardValidation` (success or one of the 10 reasons).
+:class:`AgentCardValidation` (success or one of the 11 reasons).
+T14 added ``agent_card_profile_wave2_auth_required`` for cards
+that declare ``mtlsSecurityScheme`` (Wave-2 auth) anywhere in
+their ``securitySchemes`` map.
 
 **Validation order** (T7 R0 design):
 
@@ -369,6 +372,33 @@ class A2AAgentCardVerifier:
                 request_id=request_id,
                 required_field="supportedInterfaces",
             )
+
+        # T14 — Wave-2 auth refusal. Per A2A-CONFORMANCE.md §"Wave
+        # breakdown" + Sprint-6 Decision Lock #3:
+        #
+        #   Wave-1 = per-tenant pinned bearer token
+        #   Wave-2 = mTLS
+        #   Wave-3 = verifiable credentials
+        #
+        # A card whose ``securitySchemes`` map declares any
+        # ``mtlsSecurityScheme`` entry is asking the caller to
+        # authenticate via mTLS — Wave-1 transport (HTTP+bearer) cannot
+        # honor that. The runtime canary in
+        # ``tests/unit/protocol/test_a2a_wave2_features_refused.py``
+        # pins this refusal as part of the caller-URL threat model.
+        # When Wave-2 lands, lift this gate (or refine to "card requires
+        # ONLY mTLS"); the closed-enum reason
+        # ``agent_card_profile_wave2_auth_required`` is the single
+        # signal callers will see.
+        for scheme_name, scheme in card.security_schemes.items():
+            if scheme.WhichOneof("scheme") == "mtls_security_scheme":
+                return await self._refuse(
+                    reason="agent_card_profile_wave2_auth_required",
+                    tenant_id=tenant_id,
+                    request_id=request_id,
+                    rejected_scheme_name=scheme_name,
+                    rejected_scheme_kind="mtls_security_scheme",
+                )
 
         # All three passes cleared → emit success audit + return ok.
         await self._audit.append(

@@ -1080,17 +1080,23 @@ class TestSprint6ClosedEnumVocabulary:
 
         assert len(get_args(A2APolicyRefusalReason)) == 11
 
-    def test_agent_card_validation_reason_has_10_values(self) -> None:
-        """10 values: 1 upstream-schema gate + 6 AgentOS-profile gates +
-        3 JWS-verification outcomes (R1 P2 reviewer correction added the
-        JWS values; without them T7's validator would have to misclassify
-        JWS failures as schema/profile failures or use untyped strings,
-        breaking the closed-enum mapping doctrine)."""
+    def test_agent_card_validation_reason_has_11_values(self) -> None:
+        """11 values: 1 upstream-schema gate + 7 AgentOS-profile gates +
+        3 JWS-verification outcomes. T1 R1 P2 reviewer correction added
+        the 3 JWS values (without them T7's validator would have to
+        misclassify JWS failures as schema/profile failures or use
+        untyped strings, breaking the closed-enum mapping doctrine).
+        T14 R0 added the 7th profile gate
+        ``agent_card_profile_wave2_auth_required`` — cards declaring
+        ``mtlsSecurityScheme`` are refused under Wave-1 bearer-token
+        transport policy per A2A-CONFORMANCE.md §"Wave breakdown"
+        (Wave-1 = per-tenant pinned bearer token; Wave-2 = mTLS;
+        Wave-3 = verifiable credentials)."""
         from typing import get_args
 
         from cognic_agentos.protocol import AgentCardValidationReason
 
-        assert len(get_args(AgentCardValidationReason)) == 10
+        assert len(get_args(AgentCardValidationReason)) == 11
 
     def test_agent_card_validation_reason_includes_jws_outcomes(self) -> None:
         """**R1 P2 regression** — the three JWS-verification outcomes
