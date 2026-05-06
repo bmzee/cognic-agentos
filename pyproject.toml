@@ -30,7 +30,7 @@ dependencies = [
     "opentelemetry-sdk>=1.28",
     "opentelemetry-instrumentation-fastapi>=0.49",
     "opentelemetry-exporter-otlp>=1.28",
-    "prometheus-client>=0.25",  # spec floor was >=0.26; lowered to PyPI reality (0.26 not yet released)
+    "prometheus-client>=0.25", # spec floor was >=0.26; lowered to PyPI reality (0.26 not yet released)
     "prometheus-fastapi-instrumentator>=7.1",
     "python-json-logger>=3.2",
     # Persistence + governance (Sprint 2 — promoted from [adapters] to base
@@ -39,9 +39,10 @@ dependencies = [
     # able to import these governance modules even without --extra adapters.
     # Driver-specific deps (asyncpg, oracledb, qdrant-client, hvac, langfuse)
     # stay in [project.optional-dependencies].adapters.
-    "sqlalchemy[asyncio]>=2.0",   # carryover floor from Sprint 1C (was promoted unchanged)
-    "alembic>=1.16",              # carryover floor from Sprint 1C (was promoted unchanged)
-    "greenlet>=3.0",              # SQLAlchemy[asyncio] dep; explicit floor
+    "sqlalchemy[asyncio]>=2.0", # carryover floor from Sprint 1C (was promoted unchanged)
+    "alembic>=1.16", # carryover floor from Sprint 1C (was promoted unchanged)
+    "greenlet>=3.0", # SQLAlchemy[asyncio] dep; explicit floor
+    "python-ulid>=3.1.0",
 ]
 
 [project.optional-dependencies]

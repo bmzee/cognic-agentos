@@ -31,8 +31,10 @@ parallel with ``audit_event`` for chain-verifier reuse).
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import json as _json
+import logging
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
@@ -54,6 +56,8 @@ from sqlalchemy.types import TIMESTAMP, Uuid
 from cognic_agentos.core.audit import _chain_heads, _metadata
 from cognic_agentos.core.canonical import canonical_bytes, hash_record
 from cognic_agentos.db.types import GovernanceJSON, chain_hash_column_type
+
+_LOG = logging.getLogger(__name__)
 
 #: Locked at 1 for Sprint 2; bump requires AGENTS.md per-edit review of
 #: ``core/canonical`` + a migration that sets the new default.
@@ -245,6 +249,51 @@ class DecisionRecord:
     iso_controls: tuple[str, ...] = ()
 
 
+@dataclasses.dataclass(frozen=True, slots=True)
+class AppendedDecisionSnapshot:
+    """Post-commit snapshot of a :class:`DecisionRecord` row, passed
+    to every registered :data:`DecisionAppendHook` after a successful
+    chain-write commit.
+
+    Per Sprint-6 T12 R0 doctrine #3: the ``payload`` field carries
+    the **canonicalised persisted snapshot** (the same dict that was
+    hashed into the chain row), NOT the caller's mutable
+    ``DecisionRecord.payload`` reference. Caller mutation of the
+    original ``record.payload`` after ``append()`` returns CANNOT
+    affect what hooks see.
+
+    Frozen + slotted. Hooks fire AFTER commit + BEFORE
+    :meth:`DecisionHistoryStore.append` /
+    :meth:`DecisionHistoryStore.append_with_precondition` returns,
+    awaited sequentially per the T12 R0 doctrine #2.
+    """
+
+    record_id: uuid.UUID
+    chain_id: str
+    sequence: int
+    new_hash: bytes
+    created_at: datetime
+    decision_type: str
+    request_id: str
+    payload: dict[str, Any]
+    actor_id: str | None = None
+    tenant_id: str | None = None
+    trace_id: str | None = None
+    span_id: str | None = None
+    langfuse_trace_id: str | None = None
+    provider_label: str | None = None
+    iso_controls: tuple[str, ...] = ()
+
+
+#: Layer-safe append-hook protocol. Per T12 R0 doctrine #1: ``core/``
+#: MUST NOT import ``protocol/``; hook is a generic
+#: ``Callable[[AppendedDecisionSnapshot], Awaitable[None]]`` so any
+#: subscriber can register without forcing core/ to know about the
+#: subscriber's identity. The ``protocol/ui_events.py`` UI emitter
+#: implements this protocol and registers itself at construction.
+DecisionAppendHook = Callable[[AppendedDecisionSnapshot], Awaitable[None]]
+
+
 class DecisionHistoryStore:
     """Append-only hash-chained decision-history store.
 
@@ -259,6 +308,55 @@ class DecisionHistoryStore:
 
     def __init__(self, engine: AsyncEngine) -> None:
         self._engine = engine
+        self._append_hooks: list[DecisionAppendHook] = []
+
+    def register_append_hook(self, hook: DecisionAppendHook) -> None:
+        """Register a post-commit hook that fires for every successful
+        :meth:`append` (and :meth:`append_with_precondition`).
+
+        Same layer-safe / awaited-sequential / post-commit / payload-
+        snapshot doctrine as :meth:`AuditStore.register_append_hook`
+        — see that method's docstring + T12 R0 doctrines #1-#3.
+
+        Per T12 R0 doctrine #7 + ADR-020: every ``DecisionHistoryStore.
+        append`` call mirrors to a typed UI ``decision_audit.event_appended``
+        event. The UI emitter registers a hook here at construction
+        time; the hook fires post-commit + receives the canonicalised
+        persisted snapshot.
+        """
+        self._append_hooks.append(hook)
+
+    async def _fire_append_hooks(self, snapshot: AppendedDecisionSnapshot) -> None:
+        """Fire registered hooks in registration order. Per-hook
+        try/except isolates failures.
+
+        T12 R1 P2 #3 reviewer correction: each hook receives its
+        own deep-copied snapshot. See
+        :meth:`AuditStore._fire_append_hooks` for the invariant —
+        same shallow-mutable hazard applies here on
+        :attr:`AppendedDecisionSnapshot.payload`.
+        """
+        # T12 R2 P3 reviewer correction: snapshot the registry before
+        # dispatch (see :meth:`AuditStore._fire_append_hooks` for the
+        # invariant). Self-registering hooks land for the NEXT
+        # append, not the current one.
+        for hook in tuple(self._append_hooks):
+            try:
+                hook_snapshot = dataclasses.replace(
+                    snapshot,
+                    payload=copy.deepcopy(snapshot.payload),
+                )
+                await hook(hook_snapshot)
+            except Exception as exc:
+                _LOG.warning(
+                    "decision_history.append_hook_failed: hook=%s "
+                    "record_id=%s decision_type=%s error_type=%s; "
+                    "subsequent hooks + primary outcome unaffected.",
+                    getattr(hook, "__qualname__", type(hook).__name__),
+                    snapshot.record_id,
+                    snapshot.decision_type,
+                    type(exc).__name__,
+                )
 
     async def append(self, record: DecisionRecord) -> tuple[uuid.UUID, bytes]:
         """Public append API. Unchanged contract for existing callers.
@@ -497,10 +595,38 @@ class DecisionHistoryStore:
                     f"shape diverged from db/types."
                 )
 
-            return record_id, new_hash
+        # ⬆ async-with exits here = transaction COMMITS. Per T12 R0
+        # doctrine #2: hooks fire AFTER commit + AFTER the transaction
+        # returns + BEFORE this method returns. Hooks MUST NOT run
+        # under the chain-head lock. The snapshot carries the
+        # canonicalised persisted payload (T12 R0 doctrine #3),
+        # NOT the caller-mutable raw payload.
+        if self._append_hooks:
+            snapshot = AppendedDecisionSnapshot(
+                record_id=record_id,
+                chain_id=self._CHAIN_ID,
+                sequence=new_sequence,
+                new_hash=new_hash,
+                created_at=now,
+                decision_type=normalised.decision_type,
+                request_id=normalised.request_id,
+                payload=normalised.payload,
+                actor_id=normalised.actor_id,
+                tenant_id=normalised.tenant_id,
+                trace_id=normalised.trace_id,
+                span_id=normalised.span_id,
+                langfuse_trace_id=normalised.langfuse_trace_id,
+                provider_label=normalised.provider_label,
+                iso_controls=tuple(iso_controls_list),
+            )
+            await self._fire_append_hooks(snapshot)
+
+        return record_id, new_hash
 
 
 __all__: tuple[str, ...] = (
+    "AppendedDecisionSnapshot",
+    "DecisionAppendHook",
     "DecisionHistoryStore",
     "DecisionRecord",
     "_decision_history",

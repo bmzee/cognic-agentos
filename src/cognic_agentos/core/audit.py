@@ -57,9 +57,12 @@ column types in ``db/types``.
 
 from __future__ import annotations
 
+import copy
 import dataclasses
 import json as _json
+import logging
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -79,6 +82,8 @@ from sqlalchemy.types import TIMESTAMP, Uuid
 
 from cognic_agentos.core.canonical import canonical_bytes, hash_record
 from cognic_agentos.db.types import GovernanceJSON, chain_hash_column_type
+
+_LOG = logging.getLogger(__name__)
 
 #: schema_version locked at 1 for Sprint 2. A bump requires (a) an
 #: AGENTS.md per-edit review of ``core/canonical``, (b) a migration
@@ -159,6 +164,55 @@ class AuditEvent:
     iso_controls: tuple[str, ...] = ()
 
 
+@dataclasses.dataclass(frozen=True, slots=True)
+class AppendedEventSnapshot:
+    """Post-commit snapshot of an :class:`AuditEvent` row, passed to
+    every registered :data:`AuditAppendHook` after a successful
+    chain-write commit.
+
+    Per Sprint-6 T12 R0 doctrine #3: the ``payload`` field carries the
+    **canonicalised persisted snapshot** (the same dict that was
+    hashed into the chain row), NOT the caller's mutable
+    ``AuditEvent.payload`` reference. Caller mutation of the original
+    ``event.payload`` after ``append()`` returns CANNOT affect what
+    hooks see — the snapshot is independent.
+
+    Frozen + slotted so the snapshot can't be mutated between hook
+    invocations. The dict referenced by ``payload`` is itself a fresh
+    dict from the canonical-form round-trip; mutating it does NOT
+    affect the row already on disk (the row carries the same dict's
+    JSON-projected form).
+
+    Hooks fire AFTER commit + BEFORE :meth:`AuditStore.append` returns,
+    awaited sequentially per the T12 R0 doctrine #2.
+    """
+
+    record_id: uuid.UUID
+    chain_id: str
+    sequence: int
+    new_hash: bytes
+    created_at: datetime
+    event_type: str
+    request_id: str
+    payload: dict[str, Any]
+    tenant_id: str | None = None
+    trace_id: str | None = None
+    span_id: str | None = None
+    langfuse_trace_id: str | None = None
+    provider_label: str | None = None
+    iso_controls: tuple[str, ...] = ()
+
+
+#: Layer-safe append-hook protocol. Per T12 R0 doctrine #1: ``core/``
+#: MUST NOT import ``protocol/``; the hook is a generic
+#: ``Callable[[AppendedEventSnapshot], Awaitable[None]]`` so any
+#: subscriber can register without forcing core/ to know about the
+#: subscriber's identity. The ``protocol/ui_events.py`` UI emitter
+#: implements this protocol and registers itself at construction time
+#: from outside ``core/``.
+AuditAppendHook = Callable[[AppendedEventSnapshot], Awaitable[None]]
+
+
 class AuditStore:
     """Append-only hash-chained audit-event store.
 
@@ -173,6 +227,73 @@ class AuditStore:
 
     def __init__(self, engine: AsyncEngine) -> None:
         self._engine = engine
+        self._append_hooks: list[AuditAppendHook] = []
+
+    def register_append_hook(self, hook: AuditAppendHook) -> None:
+        """Register a post-commit hook that fires for every successful
+        :meth:`append`.
+
+        Per T12 R0 doctrine #1 (layer safety): ``core/`` MUST NOT
+        import ``protocol/`` — the hook is a generic Callable so any
+        subscriber (e.g. ``protocol/ui_events.py``'s UI emitter) can
+        register from outside ``core/`` without forcing this module
+        to know about the subscriber's identity.
+
+        Per T12 R0 doctrine #2 (post-commit awaited sequential):
+        registered hooks fire in registration order AFTER the
+        chain-write transaction commits and BEFORE :meth:`append`
+        returns. One slow hook delays the next caller's append; one
+        broken hook does NOT poison emission to subsequent hooks
+        (T12 R0 doctrine — hook failures isolated, logged
+        token-free, and emission continues).
+
+        Per T12 R0 doctrine #3 (snapshot payload): hooks receive an
+        :class:`AppendedEventSnapshot` carrying the canonicalised
+        persisted snapshot, NOT the caller's mutable
+        ``AuditEvent.payload``.
+        """
+        self._append_hooks.append(hook)
+
+    async def _fire_append_hooks(self, snapshot: AppendedEventSnapshot) -> None:
+        """Fire registered hooks in registration order. Per-hook
+        try/except isolates failures: one broken hook does not block
+        subsequent hooks. Token-free log on failure.
+
+        T12 R1 P2 #3 reviewer correction: each hook receives its
+        own **deep-copied snapshot** so mutation of the
+        ``payload`` dict by one hook cannot leak to subsequent
+        hooks. The :class:`AppendedEventSnapshot` dataclass is
+        frozen, but ``payload: dict[str, Any]`` is shallow — a
+        misbehaving hook could mutate it (or its nested values)
+        before the next hook in the registration list sees it,
+        contradicting the doctrine "hooks receive the canonical
+        persisted snapshot". Per-hook ``dataclasses.replace`` with
+        ``copy.deepcopy(payload)`` gives every subscriber an
+        independent reference.
+        """
+        # T12 R2 P3 reviewer correction: snapshot the hook registry
+        # before dispatch. A hook that registers another hook
+        # mid-emission would otherwise extend the loop's iteration
+        # target indefinitely (or expose the new hook to the current
+        # snapshot). ``tuple(...)`` freezes dispatch at entry; new
+        # registrations land for the NEXT append.
+        for hook in tuple(self._append_hooks):
+            try:
+                hook_snapshot = dataclasses.replace(
+                    snapshot,
+                    payload=copy.deepcopy(snapshot.payload),
+                )
+                await hook(hook_snapshot)
+            except Exception as exc:
+                _LOG.warning(
+                    "audit.append_hook_failed: hook=%s record_id=%s "
+                    "event_type=%s error_type=%s; subsequent hooks + "
+                    "primary outcome unaffected.",
+                    getattr(hook, "__qualname__", type(hook).__name__),
+                    snapshot.record_id,
+                    snapshot.event_type,
+                    type(exc).__name__,
+                )
 
     async def append(self, event: AuditEvent) -> tuple[uuid.UUID, bytes]:
         # Snapshot + normalise the caller-mutable payload BEFORE any
@@ -303,10 +424,38 @@ class AuditStore:
                     f"shape diverged from db/types."
                 )
 
-            return record_id, new_hash
+        # ⬆ async-with exits here = transaction COMMITS. Per T12 R0
+        # doctrine #2: hooks fire AFTER commit + AFTER the transaction
+        # returns + BEFORE this method returns to the caller. Hooks
+        # MUST NOT run under the chain-head lock (a slow hook would
+        # back up every concurrent appender). The snapshot carries
+        # the canonicalised persisted payload (T12 R0 doctrine #3),
+        # NOT the caller-mutable raw payload.
+        if self._append_hooks:
+            snapshot = AppendedEventSnapshot(
+                record_id=record_id,
+                chain_id=self._CHAIN_ID,
+                sequence=new_sequence,
+                new_hash=new_hash,
+                created_at=now,
+                event_type=event.event_type,
+                request_id=event.request_id,
+                payload=payload_snapshot,
+                tenant_id=event.tenant_id,
+                trace_id=event.trace_id,
+                span_id=event.span_id,
+                langfuse_trace_id=event.langfuse_trace_id,
+                provider_label=event.provider_label,
+                iso_controls=tuple(iso_controls_list),
+            )
+            await self._fire_append_hooks(snapshot)
+
+        return record_id, new_hash
 
 
 __all__: tuple[str, ...] = (
+    "AppendedEventSnapshot",
+    "AuditAppendHook",
     "AuditEvent",
     "AuditStore",
     "_audit_event",
