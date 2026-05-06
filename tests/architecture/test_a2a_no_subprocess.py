@@ -444,17 +444,21 @@ class TestA2aNoSubprocess:
         per the architecture-sentinel surface (a2a_endpoint, a2a_authz,
         a2a_agent_cards, a2a_schema, a2a_version, a2a_streaming,
         a2a_artifacts, a2a_capability_negotiation, a2a_cancellation,
-        a2a_errors); this floor tightens to ``>= 9`` at T16 closeout
-        to leave room for one rename without tripping the test.
-
-        T4 (this commit) ships ``>= 0`` because zero a2a_* modules
-        exist at this point. T15/T16 closeout raises the floor.
+        a2a_errors). T16 closeout (this commit) tightens the floor
+        from the T4 placeholder ``>= 0`` to ``>= 9`` — leaves room
+        for one rename without tripping the test, but trips before
+        the parametrized arm above starts vacuously passing on
+        accidental module deletion.
         """
         modules = _a2a_modules()
-        # T4 floor — tightens to >= 9 at T16 closeout
-        assert len(modules) >= 0, (
-            f"Negative count from _a2a_modules(): {len(modules)}; "
-            f"the collector returned a malformed result."
+        # T16 floor — Sprint 6 ships 10 a2a_*.py modules; -1 rename buffer.
+        assert len(modules) >= 9, (
+            f"Only {len(modules)} a2a_*.py modules under "
+            f"src/cognic_agentos/protocol/. Sprint 6 ships 10 such "
+            f"modules; the collector floor of 9 leaves room for one "
+            f"rename without tripping. If two or more were renamed "
+            f"or deleted, the parametrized scan above would silently "
+            f"shrink — investigate before bumping this floor down."
         )
 
 
