@@ -102,6 +102,7 @@ from cognic_agentos.core.audit import AuditEvent, AuditStore
 from cognic_agentos.core.config import Settings
 from cognic_agentos.core.decision_history import DecisionHistoryStore, DecisionRecord
 from cognic_agentos.protocol import AgentCardValidationReason
+from cognic_agentos.protocol.a2a_version import PINNED_VERSION
 from cognic_agentos.protocol.trust_gate import (
     TrustGate,
     TrustGateError,
@@ -527,15 +528,30 @@ class A2AAgentCardVerifier:
         # combined with the well-known suffix it falls onto the
         # allowed-pattern branch.
         timeout = self._settings.a2a_outbound_request_timeout_s
+        # T14 R0: every outbound A2A call MUST advertise the pinned
+        # spec version via the ``A2A-Version`` header per ADR-003 +
+        # A2A-CONFORMANCE.md §"Version negotiation". Without the
+        # header, the spec instructs receivers to interpret the
+        # request as A2A 0.3 (the legacy version) — that means our
+        # outbound card-discovery probes would be answered against
+        # the wrong wire contract on a 1.0-only target. The pinned
+        # constant lives in ``protocol/a2a_version.PINNED_VERSION``
+        # so the inbound and outbound halves of the negotiation
+        # share a single source of truth (drift = wire-protocol
+        # break, caught by the T14
+        # ``test_a2a_outbound_version.py`` canary).
+        outbound_headers = {"A2A-Version": PINNED_VERSION}
 
         try:
             card_resp = await self._http.get(
                 f"{target_origin.rstrip('/')}/.well-known/agent-card.json",
                 timeout=timeout,
+                headers=outbound_headers,
             )
             jws_resp = await self._http.get(
                 f"{target_origin.rstrip('/')}/.well-known/agent-card.json.jws",
                 timeout=timeout,
+                headers=outbound_headers,
             )
         except asyncio.CancelledError:
             raise

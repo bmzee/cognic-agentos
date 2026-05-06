@@ -844,6 +844,44 @@ class TestOutboundFetchAndVerify:
             )
         assert exc.value.reason == "agent_card_jws_blob_unreadable"
 
+    @respx.mock
+    async def test_outbound_card_fetch_sends_a2a_version_header(
+        self,
+        verifier: A2AAgentCardVerifier,
+        rsa_keypair: tuple[str, str],
+    ) -> None:
+        """T14 R0 regression: every outbound A2A call MUST advertise
+        the pinned spec version via the ``A2A-Version`` header per
+        ADR-003 + A2A-CONFORMANCE.md §"Version negotiation". Without
+        the header, the spec instructs receivers to interpret the
+        request as A2A 0.3 (legacy) — which would mismatch the wire
+        contract on a 1.0-only target. Pinned at the call site so a
+        future change that drops the header trips before it reaches
+        a remote agent."""
+        from cognic_agentos.protocol.a2a_version import PINNED_VERSION
+
+        priv_pem, _ = rsa_keypair
+        card_bytes, jws_bytes = _sign_card(_valid_card_dict(), priv_pem)
+        card_route = respx.get("https://remote.example.com/.well-known/agent-card.json").mock(
+            return_value=httpx.Response(200, content=card_bytes)
+        )
+        jws_route = respx.get("https://remote.example.com/.well-known/agent-card.json.jws").mock(
+            return_value=httpx.Response(200, content=jws_bytes)
+        )
+        await verifier.fetch_and_verify_outbound_card(
+            target_origin="https://remote.example.com",
+            tenant_id="bank_a",
+            request_id="rid-outbound-version",
+        )
+        assert card_route.called
+        assert jws_route.called
+        # Both outbound probes carry the pinned version header.
+        assert card_route.calls[0].request.headers.get("A2A-Version") == PINNED_VERSION
+        assert jws_route.calls[0].request.headers.get("A2A-Version") == PINNED_VERSION
+        # And the pinned constant is "1.0" (drift-detector: if the
+        # spec pin moves, the canary author must look here too).
+        assert PINNED_VERSION == "1.0"
+
 
 # =============================================================================
 # Plan-of-record `test_a2a_agent_card_jws_required.py` contract:
