@@ -204,6 +204,15 @@ target-version = "py312"
 line-length = 100
 src = ["src", "tests"]
 
+# Sprint-7A T5 — `cli/templates/` carries Jinja2 source files (with
+# extensions like ``.py``, ``.toml``, ``.yml``, ``.md``) that contain
+# ``{{ ... }}`` placeholders the scaffolder substitutes at write time.
+# These files are NOT valid Python / TOML / YAML on their own; ruff +
+# tomllib + yaml parsers all choke on the unresolved Jinja syntax. The
+# scaffold tests exercise the rendered output (which IS valid); the
+# templates themselves are render-time-only artifacts.
+extend-exclude = ["src/cognic_agentos/cli/templates/**"]
+
 [tool.ruff.lint]
 select = [
     "E",    # pycodestyle errors
@@ -232,6 +241,10 @@ warn_unused_ignores = true
 disallow_untyped_defs = true
 no_implicit_optional = true
 check_untyped_defs = true
+# Sprint-7A T5 — exclude the Jinja2 template tree (see the matching
+# ruff extend-exclude block). Templates are render-time artifacts,
+# not importable Python.
+exclude = "^src/cognic_agentos/cli/templates/"
 
 [[tool.mypy.overrides]]
 module = ["tests.*"]

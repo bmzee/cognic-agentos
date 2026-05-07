@@ -112,33 +112,16 @@ def test_command_help_exits_zero(command_name: str) -> None:
 # by real-implementation arms.
 
 
-def test_init_tool_with_pack_name_reaches_stub_exit_pointer() -> None:
-    """``agentos init-tool example`` parses cleanly + exits 2 with
-    the T5 pointer in stderr. R17 P2 #1: pins the documented T5
-    surface (top-level hyphenated command) directly."""
-    runner = CliRunner()
-    result = runner.invoke(app, ["init-tool", "example"])
-    assert result.exit_code == 2, (
-        f"agentos init-tool example exited {result.exit_code}; "
-        f"expected 2 (stub fail-loud). stderr: {result.stderr!r}"
-    )
-    assert "Sprint-7A T5" in result.stderr
-
-
-def test_init_skill_with_pack_name_reaches_stub_exit_pointer() -> None:
-    """``agentos init-skill example`` parses cleanly + exits 2."""
-    runner = CliRunner()
-    result = runner.invoke(app, ["init-skill", "example"])
-    assert result.exit_code == 2
-    assert "Sprint-7A T5" in result.stderr
-
-
-def test_init_agent_with_pack_name_reaches_stub_exit_pointer() -> None:
-    """``agentos init-agent example`` parses cleanly + exits 2."""
-    runner = CliRunner()
-    result = runner.invoke(app, ["init-agent", "example"])
-    assert result.exit_code == 2
-    assert "Sprint-7A T5" in result.stderr
+# R17 P2 #1 init-{tool,skill,agent} arms originally pinned the
+# fail-loud stub behavior (exit 2 + "Sprint-7A T5" pointer). T5
+# replaced those stubs with real Jinja2-driven scaffolds, so the
+# corresponding working-behavior regressions live in
+# ``test_cli_init.py::test_init_command_replaces_stub`` (uses
+# ``runner.isolated_filesystem`` to keep scaffold output out of the
+# repo root). The init-* arms here would have hit "directory exists"
+# refusals as soon as the tests started writing real packs into
+# whatever CWD pytest was launched from — better to leave the
+# scaffold-behavior coverage exclusively in test_cli_init.py.
 
 
 def test_validate_with_pack_path_reaches_stub_exit_pointer() -> None:

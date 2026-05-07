@@ -259,28 +259,45 @@ def _stub_exit(message: str) -> None:
 # pattern across every other Sprint-7A CLI verb.
 
 
+def _run_init(kind: str, pack_name: str) -> None:
+    """Common init-* command body. Delegates to :func:`scaffold` and
+    renders a clean fail-loud message if scaffolding refuses (invalid
+    pack name, target exists, etc.) — the exception text comes
+    straight from :class:`ScaffoldError`'s remediation copy."""
+    from cognic_agentos.cli.init import ScaffoldError, scaffold
+
+    try:
+        pack_root = scaffold(kind=kind, pack_name=pack_name, parent_dir=Path.cwd())
+    except ScaffoldError as exc:
+        typer.echo(f"agentos init-{kind}: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    typer.echo(f"scaffolded {kind} pack at {pack_root}")
+    typer.echo(
+        "Next steps: edit AUTHOR-FILL placeholders, then run "
+        "`agentos validate <pack>` to surface remaining gaps."
+    )
+
+
 @app.command(name="init-tool")
 def init_tool(
     pack_name: str = typer.Argument(
         ...,
         help=(
             "Name of the new tool pack. Produces ``cognic-tool-<name>/`` "
-            "scaffolded from the ``cli/templates/tool/`` Jinja2 templates."
+            "in the current working directory, scaffolded from the "
+            "bundled ``cli/templates/tool/`` Jinja2 templates."
         ),
     ),
 ) -> None:
     """Scaffold a new tool pack repo from the bundled templates.
 
-    Lands in Sprint-7A T5 (Jinja2 templates + the three init-*
-    commands at ``cli/init.py``). The generated tree includes
-    pyproject.toml + cognic-pack-manifest.toml + a ``Tool`` subclass
-    stub + tests/conftest.py wired against ``agentos_sdk.testing``.
+    The generated tree includes pyproject.toml + cognic-pack-manifest.toml
+    + a ``Tool`` subclass overriding ``_invoke()`` + tests/conftest.py
+    wired against ``agentos_sdk.testing``. Pack name MUST be a
+    lowercase Python-identifier fragment (a-z, 0-9, _; cannot start
+    with a digit).
     """
-    del pack_name  # placeholder until T5 wires the templates
-    _stub_exit(
-        "agentos init-tool is not yet wired — lands in Sprint-7A T5 "
-        "(Jinja2 templates + cli/init.py)."
-    )
+    _run_init("tool", pack_name)
 
 
 @app.command(name="init-skill")
@@ -289,22 +306,20 @@ def init_skill(
         ...,
         help=(
             "Name of the new skill pack. Produces ``cognic-skill-<name>/`` "
-            "scaffolded from the ``cli/templates/skill/`` Jinja2 templates."
+            "in the current working directory."
         ),
     ),
 ) -> None:
     """Scaffold a new skill pack repo from the bundled templates.
 
-    Lands in Sprint-7A T5. Skills compose tools deterministically;
-    the generated subclass declares ``declared_tools`` + overrides
-    ``execute()`` (NOT ``__init__``, per the SDK's R6 P2 #1
-    construction-rejection rule).
+    Skills compose tools deterministically; the generated subclass
+    declares ``declared_tools`` + overrides ``execute()``. The SDK's
+    ``Skill.__init_subclass__`` refuses subclasses that define their
+    own constructor (R6 P2 #1) — pack-specific init logic goes in
+    the ``setup()`` hook the base class calls after the registry
+    cross-check.
     """
-    del pack_name  # placeholder until T5 wires the templates
-    _stub_exit(
-        "agentos init-skill is not yet wired — lands in Sprint-7A T5 "
-        "(Jinja2 templates + cli/init.py)."
-    )
+    _run_init("skill", pack_name)
 
 
 @app.command(name="init-agent")
@@ -313,23 +328,19 @@ def init_agent(
         ...,
         help=(
             "Name of the new agent pack. Produces ``cognic-agent-<name>/`` "
-            "scaffolded from the ``cli/templates/agent/`` Jinja2 templates."
+            "in the current working directory."
         ),
     ),
 ) -> None:
     """Scaffold a new agent pack repo from the bundled templates.
 
-    Lands in Sprint-7A T5. The generated tree includes an empty
-    ``agent_cards/`` directory, a ``Agent`` subclass overriding
-    ``handle(payload, *, task)`` (matching the shipped Sprint-6
-    A2AEndpoint dispatch contract), and a ``cognic-pack-manifest.toml``
-    declaring the agent's A2A capabilities.
+    The generated tree includes an empty ``agent_cards/`` directory,
+    an ``Agent`` subclass overriding ``handle(payload, *, task)``
+    matching the shipped Sprint-6 ``A2AEndpoint`` dispatch contract,
+    and a ``cognic-pack-manifest.toml`` declaring the agent's A2A
+    capabilities.
     """
-    del pack_name  # placeholder until T5 wires the templates
-    _stub_exit(
-        "agentos init-agent is not yet wired — lands in Sprint-7A T5 "
-        "(Jinja2 templates + cli/init.py)."
-    )
+    _run_init("agent", pack_name)
 
 
 @app.command()

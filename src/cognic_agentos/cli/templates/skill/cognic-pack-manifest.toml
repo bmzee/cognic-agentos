@@ -1,0 +1,29 @@
+# Cognic AgentOS pack manifest — Wave-1 schema.
+
+[pack]
+pack_id = "{{ pack_id }}"
+schema_version = 1
+kind = "{{ kind }}"
+
+[identity]
+agent_id = "AUTHOR-FILL: stable identifier (e.g., did:web:example.com:skills:{{ pack_name }})"
+display_name = "AUTHOR-FILL: human-readable name shown in registries"
+provider_organization = "AUTHOR-FILL: your organization"
+provider_url = "AUTHOR-FILL: https://your-org.example.com"
+agent_card_url = "AUTHOR-FILL: https://your-org.example.com/skills/{{ pack_name }}/card.json"
+agent_card_jws_path = "agent_cards/agent-card.jws"  # AUTHOR-FILL if your pack ships JWS-signed cards
+
+[data_governance]
+data_classes = ["AUTHOR-FILL: e.g., public, internal, confidential, restricted"]
+purpose = "AUTHOR-FILL: business purpose this {{ kind }} serves"
+retention_days = 0  # AUTHOR-FILL
+egress_allowlist = []  # AUTHOR-FILL
+
+[risk_tier]
+tier = "AUTHOR-FILL: low | medium | high | restricted"
+
+[supply_chain]
+attestation_paths = [
+    "attestations/cosign.sig",
+    "attestations/sbom.cdx.json",
+]
