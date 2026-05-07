@@ -43,6 +43,11 @@ dependencies = [
     "alembic>=1.16", # carryover floor from Sprint 1C (was promoted unchanged)
     "greenlet>=3.0", # SQLAlchemy[asyncio] dep; explicit floor
     "python-ulid>=3.1.0",
+    # Sprint-7A T2 — agentos_sdk.Tool template-method validates input/output
+    # against ``input_schema`` / ``output_schema`` (declared per pack subclass);
+    # jsonschema is the validation engine. Already a transitive via fastapi,
+    # but pinning here so the SDK's public contract is explicit.
+    "jsonschema>=4.26",
 ]
 
 [project.optional-dependencies]
@@ -53,6 +58,9 @@ dev = [
     "ruff>=0.9",
     "mypy>=1.14",
     "types-PyYAML",
+    # Sprint-7A T2 — agentos_sdk.Tool template-method validates input/output
+    # via jsonschema; mypy strict mode needs the type stubs.
+    "types-jsonschema>=4.26",
     # Sprint 1C — test infra for adapter unit tests
     "aiosqlite>=0.20",
     "respx>=0.22",
@@ -140,6 +148,7 @@ dev-dependencies = [
     "ruff>=0.9",
     "mypy>=1.14",
     "types-PyYAML",
+    "types-jsonschema>=4.26",
     # Sprint 1C — test infra for adapter unit tests
     "aiosqlite>=0.20",
     "respx>=0.22",
