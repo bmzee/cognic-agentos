@@ -14,11 +14,14 @@ agent_card_url = "AUTHOR-FILL: https://your-org.example.com/agents/{{ pack_name 
 agent_card_jws_path = "agent_cards/agent-card.jws"
 
 [a2a]
-# Wave-1 A2A capabilities. Push notifications, extended cards, and
-# other Wave-2 features trip refusals from the A2A validator (T8).
+# Wave-1 A2A capabilities. Push notifications and other Wave-2 features
+# trip refusals from the A2A validator (T8). Field names match the
+# runtime reader at protocol/a2a_capability_negotiation.read_pack_capabilities;
+# changing them here without updating the runtime/validator alignment
+# would silently bypass the build-time gate (R23 P2 #2).
 capabilities_supported = []
 streaming = false
-push_notifications = false
+push_notification_config = false
 extended_agent_card = false
 artifacts_supported = false
 

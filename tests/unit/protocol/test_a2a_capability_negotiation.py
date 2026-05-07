@@ -108,6 +108,103 @@ class TestEmptyManifest:
         manifest = {"tool": {"cognic": {"a2a": "not-a-dict"}}}
         assert read_pack_capabilities(manifest) == A2ACapabilities()
 
+    def test_top_level_a2a_section_not_a_dict(self) -> None:
+        """R24 P2 #1: defensive against malformed top-level ``[a2a]``
+        too. A scalar value at the top-level key falls through to the
+        legacy fallback path."""
+        manifest = {"a2a": "not-a-dict"}
+        assert read_pack_capabilities(manifest) == A2ACapabilities()
+
+    def test_top_level_tool_not_a_dict_falls_through(self) -> None:
+        """R24 P2 #1: ``[tool]`` set to a scalar (improbable but
+        possible from a malformed manifest) does not crash the path
+        walker — the runtime reader returns an empty result instead."""
+        assert read_pack_capabilities({"tool": "not-a-table"}) == A2ACapabilities()
+
+    def test_top_level_tool_cognic_not_a_dict_falls_through(self) -> None:
+        """R24 P2 #1: ``[tool.cognic]`` set to a scalar is also
+        defended."""
+        assert read_pack_capabilities({"tool": {"cognic": "not-a-table"}}) == A2ACapabilities()
+
+
+# =============================================================================
+# R24 P2 #1 — top-level [a2a] shape (T5 cognic-pack-manifest canonical)
+# =============================================================================
+
+
+class TestTopLevelA2AShape:
+    """Sprint-7A T5 introduced cognic-pack-manifest.toml's top-level
+    ``[a2a]`` layout. The runtime reader accepts that shape directly so
+    a scaffolded pack's declared capabilities reach runtime registration
+    without re-arrangement. The historical ``[tool.cognic.a2a]`` shape
+    stays supported as a backward-compat fallback."""
+
+    def test_top_level_a2a_streaming_round_trip(self) -> None:
+        manifest = {"a2a": {"streaming": True}}
+        caps = read_pack_capabilities(manifest)
+        assert caps.streaming is True
+
+    def test_top_level_a2a_capabilities_supported(self) -> None:
+        manifest = {"a2a": {"capabilities_supported": ["regulatory_qa", "citation_grounded"]}}
+        caps = read_pack_capabilities(manifest)
+        assert caps.capabilities_supported == ("regulatory_qa", "citation_grounded")
+
+    def test_top_level_a2a_wave2_field_filtered_to_deferred(self) -> None:
+        """``push_notification_config = true`` at top-level is still
+        Wave-2-filtered; the runtime reader surfaces it under
+        ``deferred_wave2_features`` with ``push_notifications=False``."""
+        manifest = {"a2a": {"push_notification_config": True}}
+        caps = read_pack_capabilities(manifest)
+        assert caps.push_notifications is False
+        assert "push_notification_config" in caps.deferred_wave2_features
+
+    def test_top_level_a2a_takes_precedence_over_legacy(self) -> None:
+        """If a manifest carries BOTH shapes (unusual but possible
+        during a migration), the canonical top-level shape wins —
+        otherwise scaffold + runtime would disagree on what's
+        advertised."""
+        manifest = {
+            "a2a": {"streaming": True},
+            "tool": {"cognic": {"a2a": {"streaming": False, "artifacts_supported": True}}},
+        }
+        caps = read_pack_capabilities(manifest)
+        # Top-level wins → streaming=True, artifacts_supported=False
+        # (the legacy block's True is ignored).
+        assert caps.streaming is True
+        assert caps.artifacts_supported is False
+
+
+class TestScaffoldRuntimeLifecycle:
+    """R24 P2 #1 lifecycle pinner: T5's ``agentos init-agent``
+    scaffolder produces a cognic-pack-manifest.toml whose ``[a2a]``
+    block flows cleanly into the runtime reader. Without this pinner,
+    a future scaffold-template drift would silently hide capabilities
+    from runtime callers (the original break R24 caught)."""
+
+    def test_scaffolded_agent_pack_capabilities_reach_runtime_reader(self, tmp_path: Any) -> None:
+        import tomllib
+
+        from cognic_agentos.cli.init import scaffold
+
+        pack_root = scaffold(kind="agent", pack_name="example", parent_dir=tmp_path)
+        manifest_text = (pack_root / "cognic-pack-manifest.toml").read_text()
+        # Flip a Wave-1 capability so we can assert the runtime reader
+        # actually surfaces it (default scaffold has streaming=false).
+        manifest_text = manifest_text.replace("streaming = false", "streaming = true").replace(
+            "artifacts_supported = false", "artifacts_supported = true"
+        )
+        manifest = tomllib.loads(manifest_text)
+
+        caps = read_pack_capabilities(manifest)
+        assert caps.streaming is True, (
+            "scaffolded agent pack's streaming capability did not reach "
+            "the runtime reader; scaffold + reader are out of alignment"
+        )
+        assert caps.artifacts_supported is True
+        # Also confirm the Wave-1-clean default scaffold doesn't emit
+        # spurious deferred Wave-2 features.
+        assert caps.deferred_wave2_features == ()
+
 
 # =============================================================================
 # Wave-1 manifest fields — flat schema
