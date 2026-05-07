@@ -150,15 +150,39 @@ async def test_fixture_audit_capture_records_appended_events(tmp_path: Path) -> 
 # ---------------------------------------------------------------------------
 
 
-def test_assert_manifest_validates_raises_not_implemented_until_t6(tmp_path: Path) -> None:
-    """T6 ships ``cognic_agentos.cli.validate.run_validators``; until
-    then the helper raises ``NotImplementedError`` citing the sprint
-    task so pack authors know exactly when it comes online. After T6
-    lands, this test flips to assert real-validation behaviour."""
+def test_assert_manifest_validates_refuses_pack_without_manifest(tmp_path: Path) -> None:
+    """T6 wired ``cognic_agentos.cli.validate.run_validators``. The
+    SDK helper now delegates into it: when ``pack_path`` has no
+    manifest, the orchestrator returns one refusal-severity finding
+    and ``assert_manifest_validates`` raises ``AssertionError`` with
+    the closed-enum reason in the rendered remediation copy.
+
+    (Pre-T6 this test asserted ``NotImplementedError`` against the
+    forward-declared stub; the flip pins the working behaviour.)
+    """
     from cognic_agentos.sdk.testing import assert_manifest_validates
 
-    with pytest.raises(NotImplementedError, match="Sprint-7A T6"):
+    with pytest.raises(AssertionError, match="manifest_not_found"):
         assert_manifest_validates(tmp_path)
+
+
+def test_assert_manifest_validates_passes_pack_with_clean_manifest(tmp_path: Path) -> None:
+    """Happy path: a manifest that parses cleanly + carries every
+    universally-required top-level block + every per-concern
+    validator stub returns ``[]`` → the helper returns None (no
+    AssertionError). T7-T12 wire real validators that find
+    AUTHOR-FILL refusals; that test arm lands when those validators
+    ship."""
+    from cognic_agentos.sdk.testing import assert_manifest_validates
+
+    # Includes [pack].pack_id + every R19 P2 #1 universally-required
+    # top-level block so the orchestrator's shape gate accepts it.
+    (tmp_path / "cognic-pack-manifest.toml").write_text(
+        '[pack]\npack_id = "cognic-tool-test"\n'
+        "[identity]\n[data_governance]\n[risk_tier]\n[supply_chain]\n"
+    )
+    # No exception — every per-concern stub returns [].
+    assert_manifest_validates(tmp_path)
 
 
 # ---------------------------------------------------------------------------

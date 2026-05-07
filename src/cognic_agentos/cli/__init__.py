@@ -349,17 +349,32 @@ def validate(
         ...,
         help="Path to the pack directory whose manifest will be validated.",
     ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help=(
+            "Emit findings as one-JSON-per-line for CI parsers. The JSON "
+            "shape carries severity / reason / message / payload."
+        ),
+    ),
 ) -> None:
     """Run the manifest validation pipeline against a pack directory.
 
-    Lands in Sprint-7A T6 (orchestrator + manifest-shape checks);
-    per-concern validators land at T7-T12.
+    Dispatches to every per-concern validator (identity / a2a / mcp /
+    data_governance / risk_tier / supply_chain), renders each finding
+    to stderr, and exits 1 iff any finding is refusal-severity.
+    Warning-severity findings render but do NOT affect exit code
+    (R3 P2 #2 doctrine — the warning channel surfaces optional
+    Wave-1 fields without failing CI).
     """
-    del pack_path  # placeholder until T6 wires the orchestrator
-    _stub_exit(
-        "agentos validate is not yet wired — lands in Sprint-7A T6 "
-        "(orchestrator) + T7-T12 (per-concern validators)."
-    )
+    from cognic_agentos.cli.validate import format_finding, run_validators
+
+    findings = run_validators(pack_path)
+    for f in findings:
+        typer.echo(format_finding(f, json_output=json_output, pack_path=pack_path), err=True)
+    if any(f.affects_exit_code for f in findings):
+        raise typer.Exit(code=1)
+    typer.echo(f"validate: PASS ({pack_path})")
 
 
 @app.command(name="test-harness")
