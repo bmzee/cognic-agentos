@@ -54,16 +54,27 @@ if TYPE_CHECKING:
 # Test fixtures: synthesize manifests on disk
 # ---------------------------------------------------------------------------
 
-#: Minimum-shape manifest passing the orchestrator's R19 P2 #1 shape
-#: gate. Carries [pack].pack_id + every universally-required top-level
-#: block. Per-concern validators (T7-T12 stubs at this commit) get
-#: dispatch on this shape; future real validators surface their
-#: refusals against the empty block bodies.
+#: Minimum-shape manifest that passes the orchestrator's R19 P2 #1
+#: shape gate AND the Wave-1 per-concern validators that have shipped
+#: at this commit (T7 identity). T8-T12 are still stubs — once they
+#: ship real refusals, this constant grows to cover their expected
+#: clean-pass shape too.
+#:
+#: Identity block (T7) carries every universally-mandatory field
+#: populated with realistic values + ``oasf_capability_set`` so the
+#: Wave-1 warning doesn't fire either. The pack kind is ``"tool"`` —
+#: agent-pack-only identity checks are skipped.
 _MINIMAL_VALID_MANIFEST: str = """\
 [pack]
 pack_id = "cognic-tool-test"
+kind = "tool"
 
 [identity]
+agent_id = "did:web:example.com:tools:test"
+display_name = "Test Tool"
+provider_organization = "Example Org"
+provider_url = "https://example.com"
+oasf_capability_set = ["test.v1"]
 
 [data_governance]
 

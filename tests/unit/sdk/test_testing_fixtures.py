@@ -167,21 +167,40 @@ def test_assert_manifest_validates_refuses_pack_without_manifest(tmp_path: Path)
 
 
 def test_assert_manifest_validates_passes_pack_with_clean_manifest(tmp_path: Path) -> None:
-    """Happy path: a manifest that parses cleanly + carries every
-    universally-required top-level block + every per-concern
-    validator stub returns ``[]`` → the helper returns None (no
-    AssertionError). T7-T12 wire real validators that find
-    AUTHOR-FILL refusals; that test arm lands when those validators
-    ship."""
+    """Happy path: a manifest that passes the orchestrator's shape
+    gate AND every per-concern validator that has shipped at this
+    commit (T7 identity).
+
+    The [identity] block carries every Wave-1 mandatory field
+    populated with realistic values so T7 returns no refusals; the
+    Wave-1 warning ``identity_oasf_capability_set_missing`` is
+    silenced by declaring ``oasf_capability_set``. T8-T12 are still
+    stubs returning ``[]`` so this manifest currently passes; once
+    those validators ship real refusals the test's manifest grows
+    to cover their clean-pass shape too."""
     from cognic_agentos.sdk.testing import assert_manifest_validates
 
-    # Includes [pack].pack_id + every R19 P2 #1 universally-required
-    # top-level block so the orchestrator's shape gate accepts it.
     (tmp_path / "cognic-pack-manifest.toml").write_text(
-        '[pack]\npack_id = "cognic-tool-test"\n'
-        "[identity]\n[data_governance]\n[risk_tier]\n[supply_chain]\n"
+        """\
+[pack]
+pack_id = "cognic-tool-test"
+kind = "tool"
+
+[identity]
+agent_id = "did:web:example.com:tools:test"
+display_name = "Test Tool"
+provider_organization = "Example Org"
+provider_url = "https://example.com"
+oasf_capability_set = ["test.v1"]
+
+[data_governance]
+
+[risk_tier]
+
+[supply_chain]
+"""
     )
-    # No exception — every per-concern stub returns [].
+    # No exception — orchestrator returns no refusals.
     assert_manifest_validates(tmp_path)
 
 
