@@ -48,6 +48,32 @@ dependencies = [
     # jsonschema is the validation engine. Already a transitive via fastapi,
     # but pinning here so the SDK's public contract is explicit.
     "jsonschema>=4.26",
+    # Sprint-7A T4 — `agentos` / `agentos-cli` console scripts (registered
+    # under [project.scripts] below) are mandatory pack-author surface per
+    # ADR-008 Phase A. R1 P2 #1 reviewer correction: putting Typer / Jinja2
+    # under [project.optional-dependencies].sdk would leave a `pip install
+    # -e .` install with the script entry point wired but the imports
+    # unresolvable — first invocation of `agentos --help` would raise
+    # ModuleNotFoundError before Typer's help-renderer ran. The CLI is
+    # part of the AgentOS public surface; its dependencies are part of
+    # the base install. Jinja2 lands here at T4 because cli/__init__.py
+    # imports the templates package at T5; pinning at T4 keeps the
+    # pyproject churn to a single sprint.
+    #
+    # Plan deviation: the plan-of-record specified ``typer>=0.12,<0.13``,
+    # but Typer 0.12.x resolves against ``Parameter.make_metavar()`` from
+    # click <8.2 — click 8.3 (current resolution) made ``ctx`` mandatory,
+    # which trips a TypeError on every ``--help`` invocation under
+    # 0.12.x. Bumped to the tested-compatible range ``>=0.25,<0.26``
+    # (R16 P3 #1 reviewer correction — earlier draft used ``>=0.15``
+    # with no upper bound, which leaves a fresh install outside the
+    # current uv.lock vulnerable to rediscovering the same class of
+    # CLI-compat break the deviation was meant to close). Bump the
+    # upper bound only after exercising the new minor against
+    # ``tests/unit/cli/`` end-to-end. Flagged for plan-of-record
+    # amendment at sprint closeout.
+    "typer>=0.25,<0.26",
+    "jinja2>=3.1,<4",
 ]
 
 [project.optional-dependencies]
@@ -127,6 +153,14 @@ adapters = [
     # transitively reuses cryptography>=45 (already pinned for cosign).
     "joserfc == 1.6.4",
 ]
+
+[project.scripts]
+# Sprint-7A T4 — pack-author console scripts. Both names point at the
+# same Typer app; ``agentos`` is the friendly form for human use,
+# ``agentos-cli`` is the long-form alias that survives in environments
+# that already have an ``agentos`` binary (rare, but cheap insurance).
+agentos = "cognic_agentos.cli:app"
+agentos-cli = "cognic_agentos.cli:app"
 
 [project.urls]
 Homepage = "https://cognic.ai"

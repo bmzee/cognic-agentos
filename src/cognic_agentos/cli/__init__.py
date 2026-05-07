@@ -1,14 +1,15 @@
-"""Sprint-7A T1 — `agentos-cli` Typer app + closed-enum vocabulary scaffolding.
+"""Sprint-7A T1 + T4 — `agentos-cli` Typer app + closed-enum vocabulary.
 
 This module is the public entry point for the `agentos` /
 `agentos-cli` console scripts (registered in `pyproject.toml`
-`[project.scripts]` at T4) AND the home of the Sprint-7A closed-enum
-vocabulary. T1 ships the literal + the dataclass + the severity helper;
-the per-concern validators (T7-T12) and the sign/verify orchestrators
-(T14) consume the vocabulary; the orchestrator at T6 aggregates findings
-into a single exit-code calculation.
-
-The Typer app skeleton lands at T4 — T1 only ships the vocabulary.
+`[project.scripts]`) AND the home of the Sprint-7A closed-enum
+vocabulary. T1 shipped the literal + the dataclass + the severity
+helper; T4 added the Typer app skeleton + the public command surface
+as fail-loud stubs. The per-concern validators (T7-T12) and the
+sign/verify orchestrators (T14) consume the vocabulary; the
+orchestrator at T6 aggregates findings into a single exit-code
+calculation; T5-T14 each replace a stub body with the real
+implementation.
 
 Closed-enum doctrine (per the Sprint-7A plan-of-record):
 
@@ -33,13 +34,16 @@ Closed-enum doctrine (per the Sprint-7A plan-of-record):
     the orchestrator (T6) computes exit code via
     ``any(f.affects_exit_code for f in findings)``.
 
-Sprint-7A T1.
+Sprint-7A T1 + T4.
 """
 
 from __future__ import annotations
 
 import dataclasses
+from pathlib import Path
 from typing import Any, Final, Literal
+
+import typer
 
 #: Closed-enum union of every refusal + warning the validate command can
 #: emit. T1 seed; grows during T7-T14 per R6 P3 #5. Whenever a new
@@ -198,10 +202,273 @@ class ValidatorFinding:
         return self.severity == "refusal"
 
 
+# ---------------------------------------------------------------------------
+# Sprint-7A T4 — Typer app skeleton
+# ---------------------------------------------------------------------------
+#
+# Public command surface (5 verbs covering the pack-author workflow:
+# scaffold / validate / test / sign / verify) + the ``init`` sub-app
+# that hosts the three scaffold-a-pack subcommands at T5. Every public
+# command is registered here at T4 as a fail-loud stub; T5-T14 each
+# replace a stub body with the real implementation. Pinning the full
+# surface from T4 keeps ``agentos --help`` stable across the sprint.
+#
+# Stub UX: ``typer.echo(message, err=True) + raise typer.Exit(code=2)``
+# is the doctrinal pattern for "command exists but is not yet wired"
+# (per AGENTS.md production-grade rule — fail loudly, point at the
+# task that lands the real implementation).
+
+app = typer.Typer(
+    name="agentos",
+    help=(
+        "AgentOS pack-author CLI — scaffold, validate, test, sign, "
+        "and verify Cognic-compatible plugin packs."
+    ),
+    no_args_is_help=True,
+)
+
+
+def _stub_exit(message: str) -> None:
+    """Common fail-loud stub body. Writes the "not yet wired" pointer
+    to stderr (so ``agentos validate ... > /dev/null`` still surfaces
+    the message) + exits with code 2 (reserved for "command exists
+    but is not implemented yet" — distinct from validate's exit 1
+    refusal at T6 + future success exit 0)."""
+    typer.echo(message, err=True)
+    raise typer.Exit(code=2)
+
+
+# R16 P2 #1 reviewer correction: the T4 stubs declare placeholder
+# arguments + options matching the canonical T5 / T6 / T13 / T14
+# surfaces documented in the Sprint-7A plan-of-record so natural
+# pack-author invocations (``agentos init-tool foo``,
+# ``agentos validate .``, ``agentos sign --bundle .``, etc.) parse
+# cleanly + reach the fail-loud ``_stub_exit`` body. The placeholder
+# values are intentionally unused — the real argument semantics land
+# alongside each command's real implementation at T5 / T6 / T13 / T14.
+#
+# R17 P2 #1 reviewer correction: the three scaffold commands ship as
+# top-level hyphenated commands (``init-tool`` / ``init-skill`` /
+# ``init-agent``), NOT as sub-commands of an ``init`` sub-app. This
+# matches the T5 plan-of-record's documented surface exactly
+# (``agentos init-tool example`` is the canonical T5 invocation).
+# An earlier T4 draft wired ``init`` as a sub-app per a stale fragment
+# of the T4 example code, but that would have forced T5 to either
+# fight the T4 contract or silently shift the documented CLI shape
+# to nested commands. Top-level hyphenated stubs is the consistent
+# pattern across every other Sprint-7A CLI verb.
+
+
+@app.command(name="init-tool")
+def init_tool(
+    pack_name: str = typer.Argument(
+        ...,
+        help=(
+            "Name of the new tool pack. Produces ``cognic-tool-<name>/`` "
+            "scaffolded from the ``cli/templates/tool/`` Jinja2 templates."
+        ),
+    ),
+) -> None:
+    """Scaffold a new tool pack repo from the bundled templates.
+
+    Lands in Sprint-7A T5 (Jinja2 templates + the three init-*
+    commands at ``cli/init.py``). The generated tree includes
+    pyproject.toml + cognic-pack-manifest.toml + a ``Tool`` subclass
+    stub + tests/conftest.py wired against ``agentos_sdk.testing``.
+    """
+    del pack_name  # placeholder until T5 wires the templates
+    _stub_exit(
+        "agentos init-tool is not yet wired — lands in Sprint-7A T5 "
+        "(Jinja2 templates + cli/init.py)."
+    )
+
+
+@app.command(name="init-skill")
+def init_skill(
+    pack_name: str = typer.Argument(
+        ...,
+        help=(
+            "Name of the new skill pack. Produces ``cognic-skill-<name>/`` "
+            "scaffolded from the ``cli/templates/skill/`` Jinja2 templates."
+        ),
+    ),
+) -> None:
+    """Scaffold a new skill pack repo from the bundled templates.
+
+    Lands in Sprint-7A T5. Skills compose tools deterministically;
+    the generated subclass declares ``declared_tools`` + overrides
+    ``execute()`` (NOT ``__init__``, per the SDK's R6 P2 #1
+    construction-rejection rule).
+    """
+    del pack_name  # placeholder until T5 wires the templates
+    _stub_exit(
+        "agentos init-skill is not yet wired — lands in Sprint-7A T5 "
+        "(Jinja2 templates + cli/init.py)."
+    )
+
+
+@app.command(name="init-agent")
+def init_agent(
+    pack_name: str = typer.Argument(
+        ...,
+        help=(
+            "Name of the new agent pack. Produces ``cognic-agent-<name>/`` "
+            "scaffolded from the ``cli/templates/agent/`` Jinja2 templates."
+        ),
+    ),
+) -> None:
+    """Scaffold a new agent pack repo from the bundled templates.
+
+    Lands in Sprint-7A T5. The generated tree includes an empty
+    ``agent_cards/`` directory, a ``Agent`` subclass overriding
+    ``handle(payload, *, task)`` (matching the shipped Sprint-6
+    A2AEndpoint dispatch contract), and a ``cognic-pack-manifest.toml``
+    declaring the agent's A2A capabilities.
+    """
+    del pack_name  # placeholder until T5 wires the templates
+    _stub_exit(
+        "agentos init-agent is not yet wired — lands in Sprint-7A T5 "
+        "(Jinja2 templates + cli/init.py)."
+    )
+
+
+@app.command()
+def validate(
+    pack_path: Path = typer.Argument(  # noqa: B008
+        ...,
+        help="Path to the pack directory whose manifest will be validated.",
+    ),
+) -> None:
+    """Run the manifest validation pipeline against a pack directory.
+
+    Lands in Sprint-7A T6 (orchestrator + manifest-shape checks);
+    per-concern validators land at T7-T12.
+    """
+    del pack_path  # placeholder until T6 wires the orchestrator
+    _stub_exit(
+        "agentos validate is not yet wired — lands in Sprint-7A T6 "
+        "(orchestrator) + T7-T12 (per-concern validators)."
+    )
+
+
+@app.command(name="test-harness")
+def test_harness(
+    pack_path: Path = typer.Argument(  # noqa: B008
+        ...,
+        help="Path to the pack directory the hybrid harness will exercise.",
+    ),
+) -> None:
+    """Run the hybrid test harness against a pack repo.
+
+    Lands in Sprint-7A T13 (hybrid runner: pytest + manifest-validate
+    + the SDK fixture wiring).
+    """
+    del pack_path  # placeholder until T13 wires the hybrid runner
+    _stub_exit(
+        "agentos test-harness is not yet wired — lands in Sprint-7A T13 "
+        "(hybrid runner: pytest + manifest-validate + SDK fixtures)."
+    )
+
+
+@app.command(name="sign-blob")
+def sign_blob(
+    wheel_path: Path = typer.Argument(  # noqa: B008
+        ...,
+        help="Path to the wheel to sign with cosign sign-blob.",
+    ),
+    dev_mode_skip_cosign: bool = typer.Option(
+        False,
+        "--dev-mode-skip-cosign",
+        help=(
+            "Skip the real cosign invocation (dev-only; rejected in the "
+            "prod settings profile per Doctrine F)."
+        ),
+    ),
+) -> None:
+    """Cosign sign-blob a single artifact (Wave-1 minimal sign path).
+
+    Lands in Sprint-7A T14 alongside the full ``sign --bundle``
+    orchestrator; ``sign-blob`` is the smaller-surface verb pack
+    authors use during local development + key-rotation flows.
+    """
+    del wheel_path, dev_mode_skip_cosign  # placeholders until T14
+    _stub_exit(
+        "agentos sign-blob is not yet wired — lands in Sprint-7A T14 "
+        "(cosign sign-blob over a single artifact)."
+    )
+
+
+@app.command()
+def sign(
+    pack_path: Path = typer.Argument(  # noqa: B008
+        ...,
+        help="Path to the pack directory to sign.",
+    ),
+    bundle: bool = typer.Option(
+        False,
+        "--bundle",
+        help=(
+            "Generate the full Wave-1 attestation set (cosign + SBOM + "
+            "SLSA provenance + in-toto layout + AgentCard JWS) per "
+            "Doctrine Decision F. Without --bundle, behaves like "
+            "sign-blob over the pack wheel."
+        ),
+    ),
+    dev_mode_skip_cosign: bool = typer.Option(
+        False,
+        "--dev-mode-skip-cosign",
+        help=(
+            "Skip the real cosign invocation (dev-only; rejected in the "
+            "prod settings profile per Doctrine F)."
+        ),
+    ),
+) -> None:
+    """Generate the full signed-bundle attestation set for a pack.
+
+    Lands in Sprint-7A T14 — produces cosign signature + SBOM
+    (syft) + SLSA provenance + in-toto layout + license audit +
+    AgentCard JWS (per ADR-016 supply-chain controls).
+    """
+    del pack_path, bundle, dev_mode_skip_cosign  # placeholders until T14
+    _stub_exit(
+        "agentos sign is not yet wired — lands in Sprint-7A T14 "
+        "(full bundle generator: cosign + SBOM + SLSA + in-toto + JWS)."
+    )
+
+
+@app.command()
+def verify(
+    pack_path: Path = typer.Argument(  # noqa: B008
+        ...,
+        help="Path to the pack directory whose attestations will be verified.",
+    ),
+    trust_root: str | None = typer.Option(
+        None,
+        "--trust-root",
+        help=(
+            "Trust-root path (or ``vault://...`` URI resolved via the "
+            "SecretAdapter) the cosign + JWS verifications run against."
+        ),
+    ),
+) -> None:
+    """Offline trust-gate verifier — verify a signed pack's bundle.
+
+    Lands in Sprint-7A T14 — mirrors the runtime
+    ``protocol/trust_gate.py`` checks so pack authors can verify
+    locally before publishing.
+    """
+    del pack_path, trust_root  # placeholders until T14
+    _stub_exit(
+        "agentos verify is not yet wired — lands in Sprint-7A T14 "
+        "(offline trust-gate verifier mirroring protocol/trust_gate)."
+    )
+
+
 __all__ = [
     "_VALIDATOR_REASON_OWNERSHIP",
     "_WARNING_REASONS",
     "ValidatorFinding",
     "ValidatorReason",
+    "app",
     "severity_for",
 ]
