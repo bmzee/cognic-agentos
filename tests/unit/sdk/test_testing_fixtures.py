@@ -194,6 +194,9 @@ provider_url = "https://example.com"
 oasf_capability_set = ["test.v1"]
 
 [data_governance]
+data_classes = ["public", "internal"]
+purpose = "operational_telemetry"
+retention_policy = "none"
 
 [risk_tier]
 

@@ -57,22 +57,22 @@ from pathlib import Path
 from typing import Any
 
 from cognic_agentos.cli import ValidatorFinding
+from cognic_agentos.cli._governance_vocab import (
+    RESTRICTED_DATA_CLASSES as _RESTRICTED_DATA_CLASSES,
+)
 
-#: Restricted data classes per ADR-017's tier model. Wave-1 scope:
-#: only ``"restricted"`` itself trips the cross-check (matches the
-#: closed-enum reason names ``mcp_caching_restricted_data_class``
-#: + ``mcp_elicitation_form_restricted_data_class`` literally).
-#: T5 templates' AUTHOR-FILL hint lists ``public / internal /
-#: confidential / restricted`` as the canonical 4-tier model;
-#: caching ``confidential`` is risky but allowed at Wave-1 — the
-#: bright line is ``restricted``.
+#: Restricted-tier data classes per ADR-017. Single source of truth
+#: at :data:`cognic_agentos.cli._governance_vocab.RESTRICTED_DATA_CLASSES`
+#: (T10 owns the set; T9 imports from there so the build-time
+#: validators agree on which classes are restricted).
 #:
-#: Different from
-#: ``protocol.mcp_capabilities._RESTRICTED_DATA_CLASSES`` (which
-#: lists domain-specific names like ``customer_pii``); the runtime
-#: + build-time validators operate at different fidelities by
-#: design. See the module docstring's "out of scope" note.
-_RESTRICTED_DATA_CLASSES: frozenset[str] = frozenset({"restricted"})
+#: T10's R26 P2 doctrine notes the runtime layer uses a partly-
+#: overlapping domain-specific set
+#: (``protocol.mcp_capabilities._RESTRICTED_DATA_CLASSES`` —
+#: ``customer_pii`` / ``payment_action`` / ``regulator_communication``).
+#: Reconciliation between build-time + runtime is a future doctrine
+#: commit; the migration-guard test in
+#: ``test_data_governance_vocab_consolidation.py`` pins the contract.
 
 
 #: Closed-enum tuple of (path-prefix, accessor-tuple) pairs the

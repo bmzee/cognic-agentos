@@ -14,10 +14,13 @@ agent_card_url = "AUTHOR-FILL: https://your-org.example.com/skills/{{ pack_name 
 agent_card_jws_path = "agent_cards/agent-card.jws"  # AUTHOR-FILL if your pack ships JWS-signed cards
 
 [data_governance]
-data_classes = ["AUTHOR-FILL: e.g., public, internal, confidential, restricted"]
-purpose = "AUTHOR-FILL: business purpose this {{ kind }} serves"
-retention_days = 0  # AUTHOR-FILL
-egress_allowlist = []  # AUTHOR-FILL
+# ADR-017 contract — vocabulary values are closed-enum literals
+# defined at cognic_agentos.cli._governance_vocab.
+data_classes = ["AUTHOR-FILL: e.g., public | internal | customer_pii | payment_data | credentials | regulator_communication | audit_trail | model_inputs | model_outputs"]
+purpose = "AUTHOR-FILL: e.g., transaction_processing | regulatory_reporting | fraud_detection | customer_support | audit_evidence | operational_telemetry"
+retention_policy = "AUTHOR-FILL: e.g., none | session_only | task_only | purpose_window | regulator_floor | indefinite_with_legal_basis"
+# retention_max_window = 90  # AUTHOR-FILL: uncomment + set when policy != "none"
+egress_allow_list = []  # AUTHOR-FILL
 
 [risk_tier]
 tier = "AUTHOR-FILL: low | medium | high | restricted"

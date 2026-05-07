@@ -127,37 +127,37 @@ def test_mcp_elicitation_form_with_public_data_classes_no_refusal(tmp_path: Path
 
 
 def test_mcp_caching_with_restricted_data_class_refuses(tmp_path: Path) -> None:
-    """``caching = true`` AND data_classes contains "restricted" →
+    """``caching = true`` AND data_classes contains "customer_pii" →
     ``mcp_caching_restricted_data_class`` refusal."""
     findings = mcp.validate(
-        _tool_manifest_with_mcp(caching=True, data_classes=["restricted"]),
+        _tool_manifest_with_mcp(caching=True, data_classes=["customer_pii"]),
         tmp_path,
     )
     matching = [f for f in findings if f.reason == "mcp_caching_restricted_data_class"]
     assert len(matching) == 1
     assert matching[0].severity == "refusal"
     assert matching[0].affects_exit_code is True
-    assert "restricted" in matching[0].payload["restricted_data_classes"]
+    assert "customer_pii" in matching[0].payload["restricted_data_classes"]
 
 
 def test_mcp_elicitation_form_with_restricted_data_class_refuses(tmp_path: Path) -> None:
-    """``elicitation_form = true`` AND data_classes contains "restricted"
+    """``elicitation_form = true`` AND data_classes contains "customer_pii"
     → ``mcp_elicitation_form_restricted_data_class`` refusal."""
     findings = mcp.validate(
-        _tool_manifest_with_mcp(elicitation_form=True, data_classes=["restricted"]),
+        _tool_manifest_with_mcp(elicitation_form=True, data_classes=["customer_pii"]),
         tmp_path,
     )
     matching = [f for f in findings if f.reason == "mcp_elicitation_form_restricted_data_class"]
     assert len(matching) == 1
     assert matching[0].severity == "refusal"
-    assert "restricted" in matching[0].payload["restricted_data_classes"]
+    assert "customer_pii" in matching[0].payload["restricted_data_classes"]
 
 
 def test_mcp_caching_false_with_restricted_data_class_no_refusal(tmp_path: Path) -> None:
     """The cross-check fires only when caching is True AND data is
     restricted. caching=false with restricted data → no refusal."""
     findings = mcp.validate(
-        _tool_manifest_with_mcp(caching=False, data_classes=["restricted"]),
+        _tool_manifest_with_mcp(caching=False, data_classes=["customer_pii"]),
         tmp_path,
     )
     assert not any(f.reason == "mcp_caching_restricted_data_class" for f in findings)
@@ -167,7 +167,7 @@ def test_mcp_caching_string_with_restricted_data_class_no_refusal(tmp_path: Path
     """Bool-only check (mirrors T8): a string ``"true"`` is NOT
     treated as caching opt-in."""
     findings = mcp.validate(
-        _tool_manifest_with_mcp(caching="true", data_classes=["restricted"]),
+        _tool_manifest_with_mcp(caching="true", data_classes=["customer_pii"]),
         tmp_path,
     )
     assert not any(f.reason == "mcp_caching_restricted_data_class" for f in findings)
@@ -178,7 +178,7 @@ def test_mcp_both_refusals_emit_together(tmp_path: Path) -> None:
     restricted data → both refusals surface (one per offending
     flag)."""
     findings = mcp.validate(
-        _tool_manifest_with_mcp(caching=True, elicitation_form=True, data_classes=["restricted"]),
+        _tool_manifest_with_mcp(caching=True, elicitation_form=True, data_classes=["customer_pii"]),
         tmp_path,
     )
     refusal_reasons = {f.reason for f in findings}
@@ -193,7 +193,7 @@ def test_mcp_both_refusals_emit_together(tmp_path: Path) -> None:
 
 def test_mcp_data_classes_with_author_fill_placeholder_no_refusal(tmp_path: Path) -> None:
     """T5 scaffolds ship ``data_classes`` with an AUTHOR-FILL
-    placeholder string. That doesn't match "restricted" exactly, so
+    placeholder string. That doesn't match "customer_pii" exactly, so
     it doesn't fire the cross-check (T10 data_governance validator
     will refuse the placeholder itself; T9 doesn't double-fire)."""
     findings = mcp.validate(
@@ -228,13 +228,13 @@ def test_mcp_data_classes_missing_no_refusal(tmp_path: Path) -> None:
 
 
 def test_mcp_data_classes_non_list_no_refusal(tmp_path: Path) -> None:
-    """``data_classes = "restricted"`` (scalar instead of list) →
+    """``data_classes = "customer_pii"`` (scalar instead of list) →
     treated as no declared classes, no cross-check refusal. T10
     owns the shape refusal."""
     manifest = {
         "pack": {"pack_id": "cognic-tool-x", "kind": "tool"},
         "mcp": {"caching": True},
-        "data_governance": {"data_classes": "restricted"},
+        "data_governance": {"data_classes": "customer_pii"},
     }
     findings = mcp.validate(manifest, tmp_path)
     assert not any(f.reason == "mcp_caching_restricted_data_class" for f in findings)
@@ -242,20 +242,20 @@ def test_mcp_data_classes_non_list_no_refusal(tmp_path: Path) -> None:
 
 def test_mcp_data_classes_with_non_string_entries_filtered(tmp_path: Path) -> None:
     """Non-string entries in data_classes (e.g., ints) are filtered
-    out; only string entries can match "restricted"."""
+    out; only string entries can match "customer_pii"."""
     findings = mcp.validate(
-        _tool_manifest_with_mcp(caching=True, data_classes=[42, "restricted", None]),
+        _tool_manifest_with_mcp(caching=True, data_classes=[42, "customer_pii", None]),
         tmp_path,
     )
     matching = [f for f in findings if f.reason == "mcp_caching_restricted_data_class"]
     assert len(matching) == 1
-    assert matching[0].payload["restricted_data_classes"] == ["restricted"]
+    assert matching[0].payload["restricted_data_classes"] == ["customer_pii"]
 
 
 def test_mcp_data_classes_whitespace_normalised(tmp_path: Path) -> None:
     """Whitespace around class names is stripped before matching."""
     findings = mcp.validate(
-        _tool_manifest_with_mcp(caching=True, data_classes=["  restricted  "]),
+        _tool_manifest_with_mcp(caching=True, data_classes=["  customer_pii  "]),
         tmp_path,
     )
     matching = [f for f in findings if f.reason == "mcp_caching_restricted_data_class"]
@@ -273,7 +273,7 @@ def test_mcp_validator_refuses_at_tool_cognic_mcp_path(tmp_path: Path) -> None:
     manifest = {
         "pack": {"pack_id": "cognic-tool-x", "kind": "tool"},
         "tool": {"cognic": {"mcp": {"caching": True}}},
-        "data_governance": {"data_classes": ["restricted"]},
+        "data_governance": {"data_classes": ["customer_pii"]},
     }
     findings = mcp.validate(manifest, tmp_path)
     matching = [f for f in findings if f.reason == "mcp_caching_restricted_data_class"]
@@ -287,7 +287,7 @@ def test_mcp_validator_handles_partial_tool_cognic_path(tmp_path: Path) -> None:
         {
             "pack": {"pack_id": "cognic-tool-x", "kind": "tool"},
             "tool": {"poetry": {}},
-            "data_governance": {"data_classes": ["restricted"]},
+            "data_governance": {"data_classes": ["customer_pii"]},
         },
         tmp_path,
     )
@@ -300,7 +300,7 @@ def test_mcp_validator_handles_non_dict_tool(tmp_path: Path) -> None:
         {
             "pack": {"pack_id": "cognic-tool-x", "kind": "tool"},
             "tool": "not-a-table",
-            "data_governance": {"data_classes": ["restricted"]},
+            "data_governance": {"data_classes": ["customer_pii"]},
         },
         tmp_path,
     )
@@ -314,7 +314,7 @@ def test_mcp_validator_handles_non_dict_tool(tmp_path: Path) -> None:
 
 def test_mcp_validator_returns_validator_finding_instances(tmp_path: Path) -> None:
     findings = mcp.validate(
-        _tool_manifest_with_mcp(caching=True, data_classes=["restricted"]),
+        _tool_manifest_with_mcp(caching=True, data_classes=["customer_pii"]),
         tmp_path,
     )
     assert findings, "expected at least one finding"
@@ -335,7 +335,7 @@ def test_mcp_validator_accepts_scaffolded_tool_template(tmp_path: Path) -> None:
     parsed = tomllib.loads((pack_root / "cognic-pack-manifest.toml").read_text())
     findings = mcp.validate(parsed, pack_root)
     # Default scaffold has caching=false, elicitation_form=false, +
-    # AUTHOR-FILL data_classes (which doesn't match "restricted"
+    # AUTHOR-FILL data_classes (which doesn't match "customer_pii"
     # exactly), so no T9 refusals fire.
     assert findings == [], (
         "T5 tool scaffold's [mcp] block produces refusals from T9; "
@@ -346,7 +346,7 @@ def test_mcp_validator_accepts_scaffolded_tool_template(tmp_path: Path) -> None:
 
 def test_mcp_validator_refuses_scaffolded_tool_with_restricted_caching(tmp_path: Path) -> None:
     """The corollary regression: when an author replaces the
-    AUTHOR-FILL data_classes with ``["restricted"]`` AND flips
+    AUTHOR-FILL data_classes with ``["customer_pii"]`` AND flips
     ``caching = false`` to ``true``, T9 trips. Pins that the scaffold's
     field names align with the validator's recognized vocabulary."""
     import tomllib
@@ -357,10 +357,15 @@ def test_mcp_validator_refuses_scaffolded_tool_with_restricted_caching(tmp_path:
     manifest_path = pack_root / "cognic-pack-manifest.toml"
     text = manifest_path.read_text()
     text = text.replace("caching = false", "caching = true")
-    text = text.replace(
-        '["AUTHOR-FILL: e.g., public, internal, confidential, restricted"]',
-        '["restricted"]',
+    # The T5 tool template's data_classes AUTHOR-FILL hint lists the
+    # canonical DataClass values pipe-separated; replace the whole
+    # placeholder line with a concrete restricted-tier class.
+    old_data_classes_line = (
+        'data_classes = ["AUTHOR-FILL: e.g., public | internal | '
+        "customer_pii | payment_data | credentials | regulator_communication | "
+        'audit_trail | model_inputs | model_outputs"]'
     )
+    text = text.replace(old_data_classes_line, 'data_classes = ["customer_pii"]')
     manifest_path.write_text(text)
 
     parsed = tomllib.loads(manifest_path.read_text())
@@ -376,15 +381,18 @@ def test_mcp_validator_refuses_scaffolded_tool_with_restricted_caching(tmp_path:
 def test_mcp_validator_exposes_restricted_classes_constant() -> None:
     """The validator exports its restricted-class set so tests +
     docs reference a single source of truth. Wave-1 scope: just
-    "restricted"."""
-    from cognic_agentos.cli.validators.mcp import _RESTRICTED_DATA_CLASSES
+    "customer_pii"."""
+    # T10 consolidated the restricted-class set into the canonical
+    # vocab module; T9's mcp validator imports from there. The assertion
+    # here is on the canonical source-of-truth.
+    from cognic_agentos.cli._governance_vocab import RESTRICTED_DATA_CLASSES
 
-    assert "restricted" in _RESTRICTED_DATA_CLASSES
+    assert "customer_pii" in RESTRICTED_DATA_CLASSES
 
 
 @pytest.mark.parametrize("klass", ["public", "internal", "confidential"])
 def test_mcp_non_restricted_classes_do_not_trip_refusal(tmp_path: Path, klass: str) -> None:
-    """Only "restricted" trips the cross-check at Wave-1 (per the
+    """Only "customer_pii" trips the cross-check at Wave-1 (per the
     closed-enum reason name). Other classes are caching-allowed."""
     findings = mcp.validate(
         _tool_manifest_with_mcp(caching=True, data_classes=[klass]),
@@ -403,7 +411,7 @@ def test_mcp_caching_strategy_ttl_with_restricted_refuses(tmp_path: Path) -> Non
     data → refuse. Mirrors the runtime gate's behavior; without this,
     a docs-shaped manifest would bypass T9."""
     findings = mcp.validate(
-        _tool_manifest_with_mcp(caching_strategy="ttl", data_classes=["restricted"]),
+        _tool_manifest_with_mcp(caching_strategy="ttl", data_classes=["customer_pii"]),
         tmp_path,
     )
     matching = [f for f in findings if f.reason == "mcp_caching_restricted_data_class"]
@@ -415,7 +423,7 @@ def test_mcp_caching_strategy_none_with_restricted_no_refusal(tmp_path: Path) ->
     """Only ``caching_strategy = "ttl"`` is risky (matches runtime
     gate's narrow scope). Other strategies do not refuse."""
     findings = mcp.validate(
-        _tool_manifest_with_mcp(caching_strategy="none", data_classes=["restricted"]),
+        _tool_manifest_with_mcp(caching_strategy="none", data_classes=["customer_pii"]),
         tmp_path,
     )
     assert not any(f.reason == "mcp_caching_restricted_data_class" for f in findings)
@@ -425,7 +433,7 @@ def test_mcp_caching_strategy_memory_with_restricted_no_refusal(tmp_path: Path) 
     """Memory caches don't survive process restarts; only TTL is the
     flagged risk in Wave-1."""
     findings = mcp.validate(
-        _tool_manifest_with_mcp(caching_strategy="memory", data_classes=["restricted"]),
+        _tool_manifest_with_mcp(caching_strategy="memory", data_classes=["customer_pii"]),
         tmp_path,
     )
     assert not any(f.reason == "mcp_caching_restricted_data_class" for f in findings)
@@ -435,7 +443,7 @@ def test_mcp_elicitation_modes_form_with_restricted_refuses(tmp_path: Path) -> N
     """Runtime/docs shape: ``elicitation_modes`` containing ``"form"``
     AND restricted data → refuse."""
     findings = mcp.validate(
-        _tool_manifest_with_mcp(elicitation_modes=["form"], data_classes=["restricted"]),
+        _tool_manifest_with_mcp(elicitation_modes=["form"], data_classes=["customer_pii"]),
         tmp_path,
     )
     matching = [f for f in findings if f.reason == "mcp_elicitation_form_restricted_data_class"]
@@ -446,7 +454,7 @@ def test_mcp_elicitation_modes_form_with_restricted_refuses(tmp_path: Path) -> N
 def test_mcp_elicitation_modes_other_with_restricted_no_refusal(tmp_path: Path) -> None:
     """``elicitation_modes`` with other modes (e.g., "text") is fine."""
     findings = mcp.validate(
-        _tool_manifest_with_mcp(elicitation_modes=["text", "voice"], data_classes=["restricted"]),
+        _tool_manifest_with_mcp(elicitation_modes=["text", "voice"], data_classes=["customer_pii"]),
         tmp_path,
     )
     assert not any(f.reason == "mcp_elicitation_form_restricted_data_class" for f in findings)
@@ -454,7 +462,7 @@ def test_mcp_elicitation_modes_other_with_restricted_no_refusal(tmp_path: Path) 
 
 def test_mcp_elicitation_modes_empty_list_no_refusal(tmp_path: Path) -> None:
     findings = mcp.validate(
-        _tool_manifest_with_mcp(elicitation_modes=[], data_classes=["restricted"]),
+        _tool_manifest_with_mcp(elicitation_modes=[], data_classes=["customer_pii"]),
         tmp_path,
     )
     assert not any(f.reason == "mcp_elicitation_form_restricted_data_class" for f in findings)
@@ -464,7 +472,7 @@ def test_mcp_elicitation_modes_non_list_no_refusal(tmp_path: Path) -> None:
     """Defensive: ``elicitation_modes`` set to a scalar instead of a
     list does not crash and doesn't fire."""
     findings = mcp.validate(
-        _tool_manifest_with_mcp(elicitation_modes="form", data_classes=["restricted"]),
+        _tool_manifest_with_mcp(elicitation_modes="form", data_classes=["customer_pii"]),
         tmp_path,
     )
     assert not any(f.reason == "mcp_elicitation_form_restricted_data_class" for f in findings)
@@ -487,7 +495,7 @@ def test_mcp_runtime_field_families_at_legacy_path_refuse(tmp_path: Path) -> Non
                 }
             }
         },
-        "data_governance": {"data_classes": ["restricted"]},
+        "data_governance": {"data_classes": ["customer_pii"]},
     }
     findings = mcp.validate(manifest, tmp_path)
     refusal_fields = {
@@ -517,7 +525,7 @@ def test_mcp_restricted_at_legacy_data_governance_path_refuses(tmp_path: Path) -
     manifest = {
         "pack": {"pack_id": "cognic-tool-x", "kind": "tool"},
         "mcp": {"caching": True},
-        "tool": {"cognic": {"data_governance": {"data_classes": ["restricted"]}}},
+        "tool": {"cognic": {"data_governance": {"data_classes": ["customer_pii"]}}},
     }
     findings = mcp.validate(manifest, tmp_path)
     matching = [f for f in findings if f.reason == "mcp_caching_restricted_data_class"]
@@ -532,7 +540,7 @@ def test_mcp_restricted_classes_unioned_across_governance_paths(tmp_path: Path) 
         "pack": {"pack_id": "cognic-tool-x", "kind": "tool"},
         "mcp": {"caching": True},
         "data_governance": {"data_classes": ["public"]},
-        "tool": {"cognic": {"data_governance": {"data_classes": ["restricted"]}}},
+        "tool": {"cognic": {"data_governance": {"data_classes": ["customer_pii"]}}},
     }
     findings = mcp.validate(manifest, tmp_path)
     assert any(f.reason == "mcp_caching_restricted_data_class" for f in findings)

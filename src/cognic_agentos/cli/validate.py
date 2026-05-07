@@ -85,6 +85,23 @@ _REQUIRED_TOP_LEVEL_BLOCKS: tuple[str, ...] = (
 )
 
 
+def _resolves_in_legacy_path(data: dict[str, object], block_name: str) -> bool:
+    """True iff ``[tool.cognic.<block_name>]`` resolves to a TOML
+    sub-table. Used by the R27 P2 #1 shape-gate fallback so packs
+    declaring a required block at the legacy/docs-aligned
+    ``[tool.cognic.*]`` location aren't refused before the per-
+    concern validators (T7-T12 dual-path-read) get a chance to see
+    them. Returns False on any non-dict intermediate or if the leaf
+    is missing/non-dict — the gate fires its normal block_absent
+    refusal in that case."""
+    cursor: object = data
+    for segment in ("tool", "cognic", block_name):
+        if not isinstance(cursor, dict):
+            return False
+        cursor = cursor.get(segment)
+    return isinstance(cursor, dict)
+
+
 def _check_manifest_shape(
     data: dict[str, object],
     manifest_path: Path,
@@ -144,15 +161,28 @@ def _check_manifest_shape(
     # ``failure_mode="block_not_table"``, distinct from
     # ``"block_absent"`` so CI parsers can render different
     # remediation copy.
+    #
+    # R27 P2 #1 reviewer correction: a required block is also
+    # satisfied if declared at its legacy ``[tool.cognic.<block>]``
+    # location (the per-concern validators T7-T12 dual-path-read
+    # both shapes). Without this, the orchestrator's shape gate
+    # short-circuited on docs-shaped manifests + the legacy/docs
+    # compatibility advertised in the per-concern validators was
+    # never reachable through ``agentos validate``.
     for block in _REQUIRED_TOP_LEVEL_BLOCKS:
         if block not in data:
+            # Top-level absent — try the legacy fallback before
+            # emitting a refusal.
+            if _resolves_in_legacy_path(data, block):
+                continue
             findings.append(
                 ValidatorFinding(
                     severity="refusal",
                     reason="manifest_missing_required_block",
                     message=(
                         f"manifest at {manifest_path} is missing required "
-                        f"top-level block [{block}]."
+                        f"top-level block [{block}] (also not present at "
+                        f"legacy [tool.cognic.{block}])."
                     ),
                     payload={
                         "manifest_path": str(manifest_path),

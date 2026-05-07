@@ -32,11 +32,18 @@ elicitation_form = false
 
 [data_governance]
 # ADR-017 contract. Every field below is enforced by the
-# data-governance validator (T10) + the runtime DLP path.
-data_classes = ["AUTHOR-FILL: e.g., public, internal, confidential, restricted"]
-purpose = "AUTHOR-FILL: business purpose this {{ kind }} serves"
-retention_days = 0  # AUTHOR-FILL: e.g., 30, 90, 365
-egress_allowlist = []  # AUTHOR-FILL: e.g., ["api.example.com"]
+# data-governance validator (T10) + the runtime DLP path. Vocabulary
+# values are closed-enum literals defined at
+# cognic_agentos.cli._governance_vocab; see the validator for the full
+# allowed-values list.
+data_classes = ["AUTHOR-FILL: e.g., public | internal | customer_pii | payment_data | credentials | regulator_communication | audit_trail | model_inputs | model_outputs"]
+purpose = "AUTHOR-FILL: e.g., transaction_processing | regulatory_reporting | fraud_detection | customer_support | audit_evidence | operational_telemetry"
+retention_policy = "AUTHOR-FILL: e.g., none | session_only | task_only | purpose_window | regulator_floor | indefinite_with_legal_basis"
+# retention_max_window required when retention_policy != "none".
+# Positive number representing the retention period (units per
+# pack-author docs, typically days).
+# retention_max_window = 90  # AUTHOR-FILL: uncomment + set when policy != "none"
+egress_allow_list = []  # AUTHOR-FILL: e.g., ["api.example.com"]
 
 [risk_tier]
 # ADR-014 risk tier. Must be consistent with the declared

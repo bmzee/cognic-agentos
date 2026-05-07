@@ -77,7 +77,37 @@ RetentionPolicy = Literal[
 ]
 
 
+#: Restricted-tier ``DataClass`` values. T10 (data-governance) and T9
+#: (MCP) cross-check pack manifests against this set: caching restricted
+#: data + form-elicitation against restricted data + low-risk-tier with
+#: restricted data are all refused. T10 owns the set; T9 imports from
+#: here so the build-time validators agree on which classes are
+#: restricted.
+#:
+#: Every member MUST also appear in the :data:`DataClass` literal — the
+#: vocab-consolidation guard test pins this invariant.
+#:
+#: The runtime layer's analogous set lives at
+#: ``protocol.mcp_capabilities._RESTRICTED_DATA_CLASSES`` and uses
+#: domain-specific identifiers (``customer_pii`` /
+#: ``payment_action`` / ``regulator_communication``). Naming overlap
+#: is partial: build-time uses ``payment_data`` while the runtime uses
+#: ``payment_action``. A future doctrine commit should reconcile
+#: these — the migration-guard test in
+#: ``tests/unit/cli/validators/test_data_governance_vocab_consolidation.py``
+#: pins the contract.
+RESTRICTED_DATA_CLASSES: frozenset[str] = frozenset(
+    {
+        "customer_pii",
+        "payment_data",
+        "credentials",
+        "regulator_communication",
+    }
+)
+
+
 __all__ = [
+    "RESTRICTED_DATA_CLASSES",
     "DataClass",
     "Purpose",
     "RetentionPolicy",

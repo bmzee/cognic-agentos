@@ -56,14 +56,17 @@ if TYPE_CHECKING:
 
 #: Minimum-shape manifest that passes the orchestrator's R19 P2 #1
 #: shape gate AND the Wave-1 per-concern validators that have shipped
-#: at this commit (T7 identity). T8-T12 are still stubs — once they
-#: ship real refusals, this constant grows to cover their expected
-#: clean-pass shape too.
+#: at this commit (T7 identity, T8 a2a, T9 mcp, T10 data_governance).
+#: T11-T12 are still stubs — once they ship real refusals, this
+#: constant grows to cover their expected clean-pass shape too.
 #:
-#: Identity block (T7) carries every universally-mandatory field
-#: populated with realistic values + ``oasf_capability_set`` so the
-#: Wave-1 warning doesn't fire either. The pack kind is ``"tool"`` —
-#: agent-pack-only identity checks are skipped.
+#: Identity block (T7) carries every universally-mandatory field +
+#: ``oasf_capability_set`` (so the Wave-1 warning is silenced).
+#: data_governance block (T10) populates every closed-enum field
+#: with valid values from the canonical _governance_vocab catalogue
+#: + a non-restricted data_classes set so the cross-checks pass.
+#: Pack kind is ``"tool"`` — agent-pack-only identity checks are
+#: skipped, MCP block is empty so T9 doesn't fire on caching/etc.
 _MINIMAL_VALID_MANIFEST: str = """\
 [pack]
 pack_id = "cognic-tool-test"
@@ -77,6 +80,9 @@ provider_url = "https://example.com"
 oasf_capability_set = ["test.v1"]
 
 [data_governance]
+data_classes = ["public", "internal"]
+purpose = "operational_telemetry"
+retention_policy = "none"
 
 [risk_tier]
 
@@ -384,6 +390,126 @@ def test_run_validators_short_circuits_on_non_table_required_block(
 
     assert called == [], "per-concern validators called despite non-table shape failure"
     assert findings, "expected shape-gate refusals"
+
+
+@pytest.mark.parametrize(
+    "block",
+    ["identity", "data_governance", "risk_tier", "supply_chain"],
+)
+def test_run_validators_accepts_required_block_at_legacy_path(
+    tmp_path: Path, block: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R27 P2 #1: a manifest declaring a required block at the legacy
+    ``[tool.cognic.<block>]`` location MUST satisfy the shape gate so
+    the per-concern validators (which dual-path-read) get dispatched.
+    Without this, the orchestrator short-circuited before the legacy
+    compatibility advertised in T7-T10 was reachable."""
+    from cognic_agentos.cli import validators
+    from cognic_agentos.cli.validate import run_validators
+
+    # Stub each per-concern validator so the test isolates the shape
+    # gate's behavior (we only care that dispatch happens, not what
+    # the per-concern validators say about empty blocks).
+    for name in (
+        "identity",
+        "a2a",
+        "mcp",
+        "data_governance",
+        "risk_tier",
+        "supply_chain",
+    ):
+        monkeypatch.setattr(getattr(validators, name), "validate", lambda data, pack: [])
+
+    blocks = {"identity", "data_governance", "risk_tier", "supply_chain"}
+    blocks.discard(block)
+    body_lines = ['[pack]\npack_id = "cognic-tool-test"\n']
+    body_lines.extend(f"[{b}]\n" for b in sorted(blocks))
+    # The block under test goes to the legacy location.
+    body_lines.append(f"[tool.cognic.{block}]\n")
+    _write_manifest(tmp_path, "".join(body_lines))
+
+    findings = run_validators(tmp_path)
+    # NO manifest_missing_required_block for the block at the legacy
+    # location.
+    block_misses = [
+        f
+        for f in findings
+        if f.reason == "manifest_missing_required_block" and f.payload.get("block") == block
+    ]
+    assert block_misses == [], (
+        f"shape gate refused legacy-path [{block}] block when canonical "
+        f"top-level was absent: {[(f.reason, f.payload) for f in findings]!r}"
+    )
+
+
+def test_run_validators_legacy_path_with_top_level_present_no_double_fire(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R27 P2 #1: when BOTH canonical and legacy locations declare
+    a required block, the shape gate fires no refusal (the canonical
+    path satisfies; the legacy is harmless). Per-concern validators
+    handle dual-path semantics themselves."""
+    from cognic_agentos.cli import validators
+    from cognic_agentos.cli.validate import run_validators
+
+    for name in (
+        "identity",
+        "a2a",
+        "mcp",
+        "data_governance",
+        "risk_tier",
+        "supply_chain",
+    ):
+        monkeypatch.setattr(getattr(validators, name), "validate", lambda data, pack: [])
+
+    _write_manifest(
+        tmp_path,
+        '[pack]\npack_id = "cognic-tool-test"\n'
+        "[identity]\n[data_governance]\n[risk_tier]\n[supply_chain]\n"
+        "[tool.cognic.identity]\n[tool.cognic.data_governance]\n",
+    )
+
+    findings = run_validators(tmp_path)
+    assert not any(f.reason == "manifest_missing_required_block" for f in findings)
+
+
+def test_run_validators_top_level_non_table_not_rescued_by_legacy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R27 P2 #1 corollary: if top-level is present-but-non-table,
+    the legacy path does NOT rescue it — pack-author should fix the
+    canonical location. Block_not_table refusal still fires."""
+    from cognic_agentos.cli import validators
+    from cognic_agentos.cli.validate import run_validators
+
+    for name in (
+        "identity",
+        "a2a",
+        "mcp",
+        "data_governance",
+        "risk_tier",
+        "supply_chain",
+    ):
+        monkeypatch.setattr(getattr(validators, name), "validate", lambda data, pack: [])
+
+    _write_manifest(
+        tmp_path,
+        # identity declared as a scalar at top-level, then as a table
+        # at legacy. The non-table top-level still trips the gate.
+        'identity = "not-a-table"\n'
+        '[pack]\npack_id = "cognic-tool-test"\n'
+        "[data_governance]\n[risk_tier]\n[supply_chain]\n"
+        "[tool.cognic.identity]\n",
+    )
+
+    findings = run_validators(tmp_path)
+    matching = [
+        f
+        for f in findings
+        if f.reason == "manifest_missing_required_block" and f.payload.get("block") == "identity"
+    ]
+    assert len(matching) == 1
+    assert matching[0].payload["failure_mode"] == "block_not_table"
 
 
 def test_run_validators_short_circuits_per_concern_dispatch_on_shape_failure(
