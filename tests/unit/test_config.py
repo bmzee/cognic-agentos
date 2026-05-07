@@ -1138,3 +1138,431 @@ class TestSprint6ClosedEnumVocabulary:
                 f"A2APolicyRefusalReason {value!r} should NOT carry "
                 f"the a2a_ prefix (the type name carries the namespace)"
             )
+
+
+class TestSprint7ASettings:
+    """Sprint-7A T1 settings contract per the plan-of-record at
+    ``docs/superpowers/plans/2026-05-06-sprint-7a-agentos-sdk-cli.md``.
+
+    Seven new CLI settings cover the SDK + CLI surface (cosign /
+    syft / grype / license-auditor binary paths + signing-key path
+    + signing-trust-root path + dev-mode-skip-cosign override). The
+    R9 P2 #1 prod-profile guard rejects any `signing_key_path`
+    whose resolved absolute path lies under `examples/` or
+    `tests/fixtures/` at startup so test-only signing keys cannot
+    accidentally be wired into production deployments.
+    """
+
+    def test_cosign_path_default_none(self) -> None:
+        from cognic_agentos.core.config import build_settings_without_env_file
+
+        s = build_settings_without_env_file()
+        assert s.cosign_path is None
+
+    def test_syft_path_default_none(self) -> None:
+        from cognic_agentos.core.config import build_settings_without_env_file
+
+        s = build_settings_without_env_file()
+        assert s.syft_path is None
+
+    def test_grype_path_default_none(self) -> None:
+        from cognic_agentos.core.config import build_settings_without_env_file
+
+        s = build_settings_without_env_file()
+        assert s.grype_path is None
+
+    def test_license_auditor_path_default_none(self) -> None:
+        from cognic_agentos.core.config import build_settings_without_env_file
+
+        s = build_settings_without_env_file()
+        assert s.license_auditor_path is None
+
+    def test_signing_key_path_default_none(self) -> None:
+        from cognic_agentos.core.config import build_settings_without_env_file
+
+        s = build_settings_without_env_file()
+        assert s.signing_key_path is None
+
+    def test_signing_trust_root_path_default_none(self) -> None:
+        from cognic_agentos.core.config import build_settings_without_env_file
+
+        s = build_settings_without_env_file()
+        assert s.signing_trust_root_path is None
+
+    def test_dev_mode_skip_cosign_default_false(self) -> None:
+        from cognic_agentos.core.config import build_settings_without_env_file
+
+        s = build_settings_without_env_file()
+        assert s.dev_mode_skip_cosign is False
+
+    def test_signing_key_path_under_examples_in_prod_rejected(self) -> None:
+        """R9 P2 #1 + R10 P2 #2 — prod profile rejects test-fixture-tree
+        signing-key paths at startup so synthetic keys cannot leak
+        into production deployments."""
+        from pydantic import ValidationError
+
+        from cognic_agentos.core.config import (
+            Settings,
+        )
+
+        with pytest.raises(ValidationError) as excinfo:
+            Settings(
+                runtime_profile="prod",
+                signing_key_path="/abs/path/to/examples/cognic-agent-example-minimal/attestations/test-signing/test_signing_key.private.pem",
+            )
+        assert "signing_key_path_under_test_fixture_tree_in_prod" in str(excinfo.value)
+
+    def test_signing_key_path_under_tests_fixtures_in_prod_rejected(self) -> None:
+        from pydantic import ValidationError
+
+        from cognic_agentos.core.config import Settings
+
+        with pytest.raises(ValidationError) as excinfo:
+            Settings(
+                runtime_profile="prod",
+                signing_key_path="/abs/path/to/tests/fixtures/cli_sign_target_pack/attestations/test-signing/test_signing_key.private.pem",
+            )
+        assert "signing_key_path_under_test_fixture_tree_in_prod" in str(excinfo.value)
+
+    def test_signing_key_path_under_examples_in_dev_allowed(self) -> None:
+        """The R9 guard is prod-profile-only by design — unit-lane
+        testing under dev/test profile MUST be able to use the
+        test-fixture keys, otherwise T14 + T15 lifecycle tests
+        cannot run."""
+        from cognic_agentos.core.config import Settings
+
+        # Dev profile + examples-tree path → allowed (no exception).
+        s = Settings(
+            runtime_profile="dev",
+            signing_key_path="/abs/path/to/examples/cognic-agent-example-minimal/attestations/test-signing/test_signing_key.private.pem",
+        )
+        assert s.signing_key_path is not None
+        assert "examples" in s.signing_key_path
+
+    def test_signing_key_path_in_prod_real_path_allowed(self) -> None:
+        """Prod profile + real signing-key path (NOT under
+        examples/ or tests/fixtures/) → allowed. Pin both
+        prod-profile-allowed paths AND prod-profile-rejected paths
+        so the guard is enforced at the path-shape boundary, not
+        by accident."""
+        from cognic_agentos.core.config import Settings
+
+        s = Settings(
+            runtime_profile="prod",
+            signing_key_path="/etc/cognic/signing-keys/prod.pem",
+        )
+        assert s.signing_key_path == "/etc/cognic/signing-keys/prod.pem"
+
+    def test_signing_key_path_relative_examples_in_prod_rejected(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """R11 P2 #1 — the earlier draft matched raw substrings
+        (``/examples/``), which silently accepted RELATIVE paths
+        like ``examples/cognic-agent-example-minimal/...`` because
+        the relative form starts with ``examples/`` (no leading
+        slash). Fix resolves to absolute against cwd, so the
+        relative form is now caught."""
+        from pydantic import ValidationError
+
+        from cognic_agentos.core.config import Settings
+
+        # Resolve happens against cwd; use a tmp_path with the
+        # examples/ structure so the resolve produces a path
+        # containing ``/examples/``.
+        (tmp_path / "examples" / "agent-pack" / "attestations").mkdir(parents=True)
+        monkeypatch.chdir(tmp_path)
+
+        with pytest.raises(ValidationError) as excinfo:
+            Settings(
+                runtime_profile="prod",
+                signing_key_path="examples/agent-pack/attestations/test_signing_key.private.pem",
+            )
+        assert "signing_key_path_under_test_fixture_tree_in_prod" in str(excinfo.value)
+
+    def test_signing_key_path_relative_tests_fixtures_in_prod_rejected(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """R11 P2 #1 — same bypass concern for relative paths under
+        tests/fixtures/."""
+        from pydantic import ValidationError
+
+        from cognic_agentos.core.config import Settings
+
+        (tmp_path / "tests" / "fixtures" / "cli_sign_target_pack").mkdir(parents=True)
+        monkeypatch.chdir(tmp_path)
+
+        with pytest.raises(ValidationError) as excinfo:
+            Settings(
+                runtime_profile="prod",
+                signing_key_path="tests/fixtures/cli_sign_target_pack/test_signing_key.private.pem",
+            )
+        assert "signing_key_path_under_test_fixture_tree_in_prod" in str(excinfo.value)
+
+    def test_signing_key_path_vault_uri_in_prod_allowed(self) -> None:
+        """R11 P2 #1 — ``vault://`` URIs are NOT filesystem paths
+        and cannot be under the test-fixture trees. Real prod
+        deployments commonly use vault:// URIs; the guard MUST
+        skip them rather than attempting Path.resolve() on a URI
+        (which would produce a nonsense local path)."""
+        from cognic_agentos.core.config import Settings
+
+        s = Settings(
+            runtime_profile="prod",
+            signing_key_path="vault://secret/cognic/signing-keys/prod",
+        )
+        assert s.signing_key_path == "vault://secret/cognic/signing-keys/prod"
+
+    def test_signing_key_path_https_uri_in_prod_allowed(self) -> None:
+        """R11 P2 #1 — generalisation: any URI-shaped value (``://``
+        present) skips the guard. Defends against future signing
+        backends introducing other URI schemes (kms://, hsm://, etc.)
+        without forcing them to round-trip through this guard."""
+        from cognic_agentos.core.config import Settings
+
+        s = Settings(
+            runtime_profile="prod",
+            signing_key_path="kms://aws/key/abc123",
+        )
+        assert s.signing_key_path == "kms://aws/key/abc123"
+
+    def test_prod_uri_signing_key_with_dev_skip_cosign_still_rejected(self) -> None:
+        """R12 P2 #1 — the earlier draft's ``return self`` in the
+        URI branch short-circuited the dev_mode_skip_cosign guard.
+        ``Settings(runtime_profile="prod", signing_key_path="vault://...",
+        dev_mode_skip_cosign=True)`` was accepted, which violated
+        Doctrine F (dev_mode_skip_cosign MUST be False in prod
+        regardless of signing-key shape). Fix routes URI values
+        past the fixture-tree check but THROUGH the dev-mode guard;
+        this regression pins the corrected behaviour."""
+        from pydantic import ValidationError
+
+        from cognic_agentos.core.config import Settings
+
+        with pytest.raises(ValidationError) as excinfo:
+            Settings(
+                runtime_profile="prod",
+                signing_key_path="vault://secret/cognic/signing-keys/prod",
+                dev_mode_skip_cosign=True,
+            )
+        # The dev-mode guard fires (NOT the fixture-tree guard);
+        # pin the message text so a future refactor that re-introduces
+        # the URI short-circuit trips this test.
+        assert "dev_mode_skip_cosign=True is forbidden in prod" in str(excinfo.value)
+
+
+class TestSprint7AClosedEnumVocabulary:
+    """Sprint-7A T1 closed-enum vocabulary per the plan-of-record.
+
+    Three closed-enum literals declared in `cli/__init__.py`:
+      - `ValidatorReason` — the union of all per-concern validator
+        refusal/warning literals (~25 values at T1 seed; grows during
+        T7-T14 per R6 P3 #5).
+      - `_WARNING_REASONS` — closed frozenset of warning-severity
+        ValidatorReason values; everything else is refusal by
+        definition (R3 P2 #2 + R6 P2 #1 doctrine).
+      - `severity_for(reason)` helper — single source-of-truth for
+        finding severity.
+
+    Plus `DataClass` / `Purpose` / `RetentionPolicy` literals in
+    `cli/_governance_vocab.py` (R1 P2 #4) — build-time owner of the
+    data-governance vocabulary.
+    """
+
+    def test_validator_reason_imports_cleanly(self) -> None:
+        from cognic_agentos.cli import ValidatorReason  # noqa: F401
+
+    def test_validator_reason_is_a_literal(self) -> None:
+        from typing import get_args
+
+        from cognic_agentos.cli import ValidatorReason
+
+        # Literal[...] returns a non-empty tuple from get_args.
+        assert len(get_args(ValidatorReason)) > 0
+
+    def test_validator_reason_has_at_least_seed_count(self) -> None:
+        """T1 seed has ~25 values; pin minimum. Final shape grows
+        during T7-T14 (per the plan's growth-window note)."""
+        from typing import get_args
+
+        from cognic_agentos.cli import ValidatorReason
+
+        assert len(get_args(ValidatorReason)) >= 25
+
+    def test_warning_reasons_subset_of_validator_reason(self) -> None:
+        """R3 P2 #2 + R6 P2 #1: every member of `_WARNING_REASONS`
+        MUST be a member of `ValidatorReason` (the closed warning
+        set is a strict subset of the literal)."""
+        from typing import get_args
+
+        from cognic_agentos.cli import _WARNING_REASONS, ValidatorReason
+
+        all_reasons = set(get_args(ValidatorReason))
+        assert all_reasons >= _WARNING_REASONS, (
+            f"_WARNING_REASONS contains values not in ValidatorReason: "
+            f"{_WARNING_REASONS - all_reasons}"
+        )
+
+    def test_warning_reasons_contains_oasf_capability_set_missing(self) -> None:
+        """T7 identity validator's only Wave-1 warning reason."""
+        from cognic_agentos.cli import _WARNING_REASONS
+
+        assert "identity_oasf_capability_set_missing" in _WARNING_REASONS
+
+    def test_severity_for_returns_warning_for_warning_reason(self) -> None:
+        from cognic_agentos.cli import severity_for
+
+        assert severity_for("identity_oasf_capability_set_missing") == "warning"
+
+    def test_severity_for_returns_refusal_for_non_warning_reason(self) -> None:
+        from cognic_agentos.cli import severity_for
+
+        # Pick a representative refusal reason from the seed.
+        assert severity_for("manifest_not_found") == "refusal"
+
+    def test_validator_finding_dataclass_shape(self) -> None:
+        """ValidatorFinding(severity, reason, message, payload) with
+        affects_exit_code property per R1 P2 #3 + R3 P2 #2."""
+        from cognic_agentos.cli import ValidatorFinding
+
+        f = ValidatorFinding(
+            severity="refusal",
+            reason="manifest_not_found",
+            message="manifest file does not exist",
+            payload={"path": "/x/y/z"},
+        )
+        assert f.severity == "refusal"
+        assert f.reason == "manifest_not_found"
+        assert f.message == "manifest file does not exist"
+        assert f.payload == {"path": "/x/y/z"}
+        assert f.affects_exit_code is True
+
+    def test_validator_finding_warning_does_not_affect_exit_code(self) -> None:
+        from cognic_agentos.cli import ValidatorFinding
+
+        f = ValidatorFinding(
+            severity="warning",
+            reason="identity_oasf_capability_set_missing",
+            message="Wave-1 warning; not a refusal",
+        )
+        assert f.affects_exit_code is False
+
+    def test_validator_finding_is_attribute_frozen(self) -> None:
+        """R11 P3 #2 — narrowed claim: ``frozen=True`` blocks
+        attribute reassignment on the finding instance, but
+        immutability is **shallow only** (payload is a mutable
+        dict). Test only asserts what's actually true."""
+        import dataclasses
+
+        from cognic_agentos.cli import ValidatorFinding
+
+        f = ValidatorFinding(severity="refusal", reason="manifest_not_found", message="x")
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            f.severity = "warning"  # type: ignore[misc]
+
+    def test_validator_finding_is_not_hashable(self) -> None:
+        """R11 P3 #2 — pin the actual hashability contract: findings
+        are NOT hashable because ``payload`` is a dict. If a future
+        refactor changes ``payload``'s type to something hashable,
+        this test trips and forces the doctrine doc-update."""
+        from cognic_agentos.cli import ValidatorFinding
+
+        f = ValidatorFinding(severity="refusal", reason="manifest_not_found", message="x")
+        with pytest.raises(TypeError, match="unhashable"):
+            hash(f)
+
+    def test_validator_finding_payload_is_shallowly_mutable(self) -> None:
+        """R11 P3 #2 — pin the actual immutability contract:
+        ``payload`` is a plain dict and can be mutated by callers.
+        The orchestrator treats findings as logically read-only by
+        convention, not by enforcement."""
+        from cognic_agentos.cli import ValidatorFinding
+
+        f = ValidatorFinding(severity="refusal", reason="manifest_not_found", message="x")
+        # Mutating payload succeeds — confirming the shallow-only
+        # immutability boundary.
+        f.payload["new_key"] = "added_after_construction"
+        assert f.payload["new_key"] == "added_after_construction"
+
+    def test_warning_reasons_drift_detector_exhaustive_split(self) -> None:
+        """R10 P2 #2 + R3 P2 #2 — assert the exhaustive split:
+        set(ValidatorReason) - _WARNING_REASONS == _EXPECTED_REFUSAL_REASONS
+        where _EXPECTED_REFUSAL_REASONS is an inline test-side
+        frozenset. Adding a literal value without explicitly
+        placing it in either set trips this drift detector.
+
+        T1 seed: 1 warning + ~24 refusals = ~25 total. The
+        `_EXPECTED_REFUSAL_REASONS` set below pins the seed shape;
+        every growth point during T7-T14 MUST update this set in
+        the same commit that grows the literal.
+        """
+        from typing import get_args
+
+        from cognic_agentos.cli import _WARNING_REASONS, ValidatorReason
+
+        _EXPECTED_REFUSAL_REASONS_T1_SEED: frozenset[str] = frozenset(
+            {
+                # Manifest shape (T6 orchestrator)
+                "manifest_not_found",
+                "manifest_unparseable_toml",
+                "manifest_missing_pack_id",
+                "manifest_missing_required_block",
+                # Identity (T7) — refusals
+                "identity_agent_id_missing",
+                "identity_display_name_missing",
+                "identity_provider_organization_missing",
+                "identity_provider_url_missing",
+                "identity_agent_card_url_missing",
+                "identity_agent_card_jws_path_missing",
+                "identity_agent_card_jws_path_unresolvable",
+                # A2A (T8)
+                "a2a_wave2_feature_in_wave1_manifest",
+                # MCP (T9)
+                "mcp_wave2_feature_in_wave1_manifest",
+                "mcp_caching_restricted_data_class",
+                "mcp_elicitation_form_restricted_data_class",
+                # Data governance (T10)
+                "data_governance_contract_missing",
+                "data_governance_contract_inconsistent_with_risk_tier",
+                "data_governance_contract_inconsistent_with_mcp_caching",
+                # Risk tier (T11)
+                "risk_tier_inconsistent_with_data_classes",
+                # Supply chain (T12)
+                "supply_chain_attestation_path_missing",
+                "supply_chain_attestation_path_unresolvable",
+                # Sign (T14 baseline; expands)
+                "sign_cosign_not_installed",
+                "sign_signing_key_unavailable",
+                "sign_subprocess_failed",
+            }
+        )
+
+        actual_refusals = set(get_args(ValidatorReason)) - _WARNING_REASONS
+        assert actual_refusals == _EXPECTED_REFUSAL_REASONS_T1_SEED, (
+            f"ValidatorReason refusal-set drift: "
+            f"extra={actual_refusals - _EXPECTED_REFUSAL_REASONS_T1_SEED}, "
+            f"missing={_EXPECTED_REFUSAL_REASONS_T1_SEED - actual_refusals}"
+        )
+
+    def test_governance_vocab_data_class_imports_cleanly(self) -> None:
+        from cognic_agentos.cli._governance_vocab import DataClass  # noqa: F401
+
+    def test_governance_vocab_data_class_is_non_empty_literal(self) -> None:
+        from typing import get_args
+
+        from cognic_agentos.cli._governance_vocab import DataClass
+
+        assert len(get_args(DataClass)) > 0
+
+    def test_governance_vocab_purpose_imports_cleanly(self) -> None:
+        from typing import get_args
+
+        from cognic_agentos.cli._governance_vocab import Purpose
+
+        assert len(get_args(Purpose)) > 0
+
+    def test_governance_vocab_retention_policy_imports_cleanly(self) -> None:
+        from typing import get_args
+
+        from cognic_agentos.cli._governance_vocab import RetentionPolicy
+
+        assert len(get_args(RetentionPolicy)) > 0

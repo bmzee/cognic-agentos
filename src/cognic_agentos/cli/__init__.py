@@ -1,0 +1,207 @@
+"""Sprint-7A T1 — `agentos-cli` Typer app + closed-enum vocabulary scaffolding.
+
+This module is the public entry point for the `agentos` /
+`agentos-cli` console scripts (registered in `pyproject.toml`
+`[project.scripts]` at T4) AND the home of the Sprint-7A closed-enum
+vocabulary. T1 ships the literal + the dataclass + the severity helper;
+the per-concern validators (T7-T12) and the sign/verify orchestrators
+(T14) consume the vocabulary; the orchestrator at T6 aggregates findings
+into a single exit-code calculation.
+
+The Typer app skeleton lands at T4 — T1 only ships the vocabulary.
+
+Closed-enum doctrine (per the Sprint-7A plan-of-record):
+
+  - ``ValidatorReason`` is the single closed-enum literal of every
+    refusal + warning the validate command can emit. ~25 values at T1
+    seed; grows during T7-T14 (per R6 P3 #5) — every growth point MUST
+    update both ``_VALIDATOR_REASON_OWNERSHIP`` (reason → owning
+    validator file) and the test-side `_EXPECTED_REFUSAL_REASONS` set
+    in `tests/unit/test_config.py::TestSprint7AClosedEnumVocabulary`,
+    OR add the new reason to ``_WARNING_REASONS`` if it's a warning.
+
+  - Severity is derived **solely** from ``_WARNING_REASONS`` via
+    ``severity_for(reason)``. Everything not in the warning set is a
+    refusal by definition (R3 P2 #2 + R4 P2 #1 doctrine). The drift
+    detector pins the exhaustive split: ``set(ValidatorReason) -
+    _WARNING_REASONS == _EXPECTED_REFUSAL_REASONS``. Adding a literal
+    value without explicitly placing it in either set trips the
+    drift detector.
+
+  - ``ValidatorFinding`` is the carrier dataclass for refusals +
+    warnings. ``affects_exit_code`` is True iff severity == "refusal";
+    the orchestrator (T6) computes exit code via
+    ``any(f.affects_exit_code for f in findings)``.
+
+Sprint-7A T1.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+from typing import Any, Final, Literal
+
+#: Closed-enum union of every refusal + warning the validate command can
+#: emit. T1 seed; grows during T7-T14 per R6 P3 #5. Whenever a new
+#: reason lands, both the ownership map below AND the warning frozenset
+#: (or the test-side `_EXPECTED_REFUSAL_REASONS` complement) MUST be
+#: updated in the same commit.
+ValidatorReason = Literal[
+    # Manifest shape (T6 orchestrator) — refusals
+    "manifest_not_found",
+    "manifest_unparseable_toml",
+    "manifest_missing_pack_id",
+    "manifest_missing_required_block",
+    # Identity (T7) — refusals
+    "identity_agent_id_missing",
+    "identity_display_name_missing",
+    "identity_provider_organization_missing",
+    "identity_provider_url_missing",
+    "identity_agent_card_url_missing",
+    "identity_agent_card_jws_path_missing",
+    "identity_agent_card_jws_path_unresolvable",
+    # Identity (T7) — warning (severity="warning"; exit 0)
+    "identity_oasf_capability_set_missing",
+    # A2A (T8) — refusal
+    "a2a_wave2_feature_in_wave1_manifest",
+    # MCP (T9) — refusals
+    "mcp_wave2_feature_in_wave1_manifest",
+    "mcp_caching_restricted_data_class",
+    "mcp_elicitation_form_restricted_data_class",
+    # Data governance (T10) — refusals
+    "data_governance_contract_missing",
+    "data_governance_contract_inconsistent_with_risk_tier",
+    "data_governance_contract_inconsistent_with_mcp_caching",
+    # Risk tier (T11) — refusal
+    "risk_tier_inconsistent_with_data_classes",
+    # Supply chain (T12) — refusals
+    "supply_chain_attestation_path_missing",
+    "supply_chain_attestation_path_unresolvable",
+    # Sign (T14 baseline; the literal grows when sign --bundle expands per
+    # R2 P2 #5: sign_syft_not_installed / sign_grype_not_installed /
+    # sign_license_auditor_not_installed / sign_agent_card_jws_signing_failed
+    # / sign_provenance_template_render_failed /
+    # sign_intoto_layout_template_render_failed; verify-side reasons land
+    # then too: verify_cosign_signature_invalid / verify_sbom_digest_mismatch
+    # / verify_provenance_invalid / verify_intoto_layout_invalid /
+    # verify_attestation_path_unresolvable / verify_agent_card_jws_invalid
+    # / verify_trust_root_path_unresolvable)
+    "sign_cosign_not_installed",
+    "sign_signing_key_unavailable",
+    "sign_subprocess_failed",
+]
+
+
+#: Closed frozenset of warning-severity ``ValidatorReason`` values.
+#: Everything not in this set is a refusal by definition. T1 seed:
+#: 1 warning (the AGNTCY/OASF Wave-1 optional capability_set field).
+#: Growth via the drift-detector test in
+#: ``test_config.py::TestSprint7AClosedEnumVocabulary``.
+_WARNING_REASONS: Final[frozenset[ValidatorReason]] = frozenset(
+    {
+        "identity_oasf_capability_set_missing",
+    }
+)
+
+
+#: Closed mapping: ``ValidatorReason`` → owning validator-file name.
+#: T1 seed; grows during T7-T14 alongside the literal. Every reason
+#: lands here exactly once — the file name is the validator that owns
+#: emission of that reason. Drift-detector test pins the exhaustive
+#: domain (every literal value MUST appear as a key here).
+_VALIDATOR_REASON_OWNERSHIP: Final[dict[ValidatorReason, str]] = {
+    # Manifest shape — owned by the orchestrator itself (no validator file).
+    "manifest_not_found": "validate.py",
+    "manifest_unparseable_toml": "validate.py",
+    "manifest_missing_pack_id": "validate.py",
+    "manifest_missing_required_block": "validate.py",
+    # Identity (T7)
+    "identity_agent_id_missing": "validators/identity.py",
+    "identity_display_name_missing": "validators/identity.py",
+    "identity_provider_organization_missing": "validators/identity.py",
+    "identity_provider_url_missing": "validators/identity.py",
+    "identity_agent_card_url_missing": "validators/identity.py",
+    "identity_agent_card_jws_path_missing": "validators/identity.py",
+    "identity_agent_card_jws_path_unresolvable": "validators/identity.py",
+    "identity_oasf_capability_set_missing": "validators/identity.py",
+    # A2A (T8)
+    "a2a_wave2_feature_in_wave1_manifest": "validators/a2a.py",
+    # MCP (T9)
+    "mcp_wave2_feature_in_wave1_manifest": "validators/mcp.py",
+    "mcp_caching_restricted_data_class": "validators/mcp.py",
+    "mcp_elicitation_form_restricted_data_class": "validators/mcp.py",
+    # Data governance (T10)
+    "data_governance_contract_missing": "validators/data_governance.py",
+    "data_governance_contract_inconsistent_with_risk_tier": "validators/data_governance.py",
+    "data_governance_contract_inconsistent_with_mcp_caching": "validators/data_governance.py",
+    # Risk tier (T11)
+    "risk_tier_inconsistent_with_data_classes": "validators/risk_tier.py",
+    # Supply chain (T12)
+    "supply_chain_attestation_path_missing": "validators/supply_chain.py",
+    "supply_chain_attestation_path_unresolvable": "validators/supply_chain.py",
+    # Sign (T14)
+    "sign_cosign_not_installed": "sign.py",
+    "sign_signing_key_unavailable": "sign.py",
+    "sign_subprocess_failed": "sign.py",
+}
+
+
+def severity_for(reason: ValidatorReason) -> Literal["refusal", "warning"]:
+    """Return the finding severity for ``reason``.
+
+    Single source-of-truth for severity: a reason is a warning iff it
+    appears in ``_WARNING_REASONS``; otherwise it's a refusal. R3 P2 #2
+    + R4 P2 #1 doctrine — severity is NOT carried alongside ownership;
+    the two axes are independent and pinned independently by drift
+    detectors.
+    """
+    return "warning" if reason in _WARNING_REASONS else "refusal"
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class ValidatorFinding:
+    """Carrier dataclass for refusals + warnings emitted by per-concern
+    validators.
+
+    The orchestrator (T6) aggregates ``list[ValidatorFinding]`` across
+    every validator, renders all of them to stderr, and computes exit
+    code via ``any(f.affects_exit_code for f in findings)`` so
+    warning-severity findings do NOT cause exit 1.
+
+    Per R1 P2 #3 + R3 P2 #2 doctrine: the severity-aware finding model
+    keeps the warning channel propagating end-to-end (validator →
+    orchestrator → CI parsers) without conflating with refusals.
+
+    **Immutability: shallow only** (R11 P3 #2 reviewer correction —
+    the earlier draft claimed "hashable + immutable" which was
+    incorrect). ``frozen=True`` + ``slots=True`` block attribute
+    reassignment on the finding instance itself, but ``payload`` is a
+    plain ``dict[str, Any]`` so callers CAN mutate it via
+    ``finding.payload["x"] = "y"``. The orchestrator's render pipeline
+    treats findings as logically read-only by convention; deeper
+    immutability isn't a load-bearing contract here. Findings are
+    NOT hashable — ``hash(finding)`` raises ``TypeError`` because
+    ``payload`` is a dict. If the orchestrator ever needs hashable
+    findings for deduplication, the caller can map to
+    ``(severity, reason, message)`` tuples explicitly.
+    """
+
+    severity: Literal["refusal", "warning"]
+    reason: ValidatorReason
+    message: str
+    payload: dict[str, Any] = dataclasses.field(default_factory=dict)
+
+    @property
+    def affects_exit_code(self) -> bool:
+        """True iff this finding should cause non-zero exit. Refusals
+        affect exit code; warnings do not."""
+        return self.severity == "refusal"
+
+
+__all__ = [
+    "_VALIDATOR_REASON_OWNERSHIP",
+    "_WARNING_REASONS",
+    "ValidatorFinding",
+    "ValidatorReason",
+    "severity_for",
+]
