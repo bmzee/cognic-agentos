@@ -443,3 +443,207 @@ def test_identity_agent_pack_emits_all_agent_card_failures_together(tmp_path: Pa
     refusal_reasons = {f.reason for f in findings if f.severity == "refusal"}
     assert "identity_agent_card_url_missing" in refusal_reasons
     assert "identity_agent_card_jws_path_missing" in refusal_reasons
+
+
+# ---------------------------------------------------------------------------
+# (h) Dual-path lookup — canonical [identity] + legacy [tool.cognic.identity]
+#
+# T11 doctrine fix: every per-concern validator reads BOTH the canonical
+# top-level block AND the legacy ``[tool.cognic.<block>]`` shape (per the
+# user's dual-path doctrine memo). Without this, the orchestrator's
+# R27 P2 #1 shape gate accepts ``[tool.cognic.identity]`` as satisfying
+# the required-block check, the validator dispatches, but ``_identity_block``
+# only reads top-level — so a docs-shaped pack fires every identity-
+# missing refusal even with a fully-valid legacy block.
+# ---------------------------------------------------------------------------
+
+
+def _legacy_identity_only(**identity_overrides: Any) -> dict[str, Any]:
+    """Build a manifest declaring only ``[tool.cognic.identity]``
+    (canonical absent). Mirrors the docs-shaped pack-author flow per
+    ``docs/HOW-TO-WRITE-A-PACK.md`` + the existing reference fixture
+    packs."""
+    base_identity: dict[str, Any] = {
+        "agent_id": "did:web:example.com:tools:legacy-demo",
+        "display_name": "Legacy Demo",
+        "provider_organization": "Example Org",
+        "provider_url": "https://example.com",
+        "oasf_capability_set": ["kyc.v1"],
+    }
+    for k, v in identity_overrides.items():
+        if v is None:
+            base_identity.pop(k, None)
+        else:
+            base_identity[k] = v
+    return {
+        "pack": {"pack_id": "cognic-tool-legacy-demo", "kind": "tool"},
+        "tool": {"cognic": {"identity": base_identity}},
+    }
+
+
+def test_identity_legacy_only_full_pass_returns_empty(tmp_path: Path) -> None:
+    """Docs-shaped manifest with ONLY ``[tool.cognic.identity]``
+    populated (canonical absent) MUST validate clean when every
+    Wave-1 mandatory field is present. Without dual-path support
+    the validator surfaced every field-missing refusal."""
+    findings = identity.validate(_legacy_identity_only(), tmp_path)
+    assert findings == [], f"unexpected findings: {[(f.severity, f.reason) for f in findings]!r}"
+
+
+@pytest.mark.parametrize(
+    ("field", "reason"),
+    [
+        ("agent_id", "identity_agent_id_missing"),
+        ("display_name", "identity_display_name_missing"),
+        ("provider_organization", "identity_provider_organization_missing"),
+        ("provider_url", "identity_provider_url_missing"),
+    ],
+)
+def test_identity_legacy_path_missing_field_refuses(
+    tmp_path: Path, field: str, reason: str
+) -> None:
+    """A required field absent at the legacy path fires the same
+    closed-enum refusal as at the canonical path. Payload's
+    ``block_path`` distinguishes which path tripped each refusal."""
+    findings = identity.validate(_legacy_identity_only(**{field: None}), tmp_path)
+    matching = [f for f in findings if f.reason == reason and f.severity == "refusal"]
+    assert len(matching) == 1, (
+        f"expected one {reason!r} refusal at legacy path; "
+        f"got {[(f.severity, f.reason, f.payload) for f in findings]!r}"
+    )
+    assert matching[0].payload["block_path"] == "tool.cognic.identity"
+
+
+def test_identity_both_paths_validated_independently(tmp_path: Path) -> None:
+    """Mirrors T8/T9/T10/T11's R27 P2 #2 doctrine: when BOTH paths
+    are declared, each validates independently. A pack-author who
+    half-fills one path while the other is fully populated still
+    sees per-path remediation for the half-filled one."""
+    manifest = {
+        "pack": {"pack_id": "cognic-tool-demo", "kind": "tool"},
+        "identity": {
+            "agent_id": "did:web:example.com:tools:canonical",
+            "display_name": "Canonical Pack",
+            "provider_organization": "Example Org",
+            "provider_url": "https://example.com",
+            "oasf_capability_set": ["kyc.v1"],
+        },
+        "tool": {
+            "cognic": {
+                "identity": {
+                    # Legacy block declared but missing display_name +
+                    # provider_organization.
+                    "agent_id": "did:web:example.com:tools:legacy",
+                    "provider_url": "https://example.com",
+                    "oasf_capability_set": ["kyc.v1"],
+                }
+            }
+        },
+    }
+    findings = identity.validate(manifest, tmp_path)
+    legacy_refusals = [
+        f
+        for f in findings
+        if f.severity == "refusal" and f.payload.get("block_path") == "tool.cognic.identity"
+    ]
+    refusal_reasons = {f.reason for f in legacy_refusals}
+    assert refusal_reasons == {
+        "identity_display_name_missing",
+        "identity_provider_organization_missing",
+    }, (
+        f"expected exactly the two missing-field refusals at legacy path; "
+        f"got {[(f.reason, f.payload) for f in legacy_refusals]!r}"
+    )
+
+    # Canonical-path refusals: none — every field is populated there.
+    canonical_refusals = [
+        f for f in findings if f.severity == "refusal" and f.payload.get("block_path") == "identity"
+    ]
+    assert canonical_refusals == []
+
+
+def test_identity_legacy_partial_path_no_crash(tmp_path: Path) -> None:
+    """``[tool]`` declared without ``[tool.cognic.identity]`` falls
+    through cleanly when the canonical path is also absent — direct
+    unit-test entry point; the orchestrator's shape gate handles the
+    block-absent refusal."""
+    manifest = {
+        "pack": {"pack_id": "x", "kind": "tool"},
+        "tool": {"cognic": {"some_other_block": {}}},
+    }
+    findings = identity.validate(manifest, tmp_path)
+    assert findings == []
+
+
+def test_identity_legacy_non_dict_no_crash(tmp_path: Path) -> None:
+    """``[tool.cognic.identity]`` declared as a scalar (defensive
+    guard) falls through cleanly when canonical path is also
+    absent."""
+    manifest = {
+        "pack": {"pack_id": "x", "kind": "tool"},
+        "tool": {"cognic": {"identity": "not-a-table"}},
+    }
+    findings = identity.validate(manifest, tmp_path)
+    assert findings == []
+
+
+def test_identity_legacy_path_oasf_warning_distinguished_by_block_path(
+    tmp_path: Path,
+) -> None:
+    """The Wave-1 oasf_capability_set warning fires per declared
+    path — pack-author who declares the field at canonical but not at
+    legacy gets a warning scoped to the legacy block_path."""
+    manifest = {
+        "pack": {"pack_id": "x", "kind": "tool"},
+        "identity": {
+            "agent_id": "did:web:example.com:tools:demo",
+            "display_name": "Demo",
+            "provider_organization": "Example Org",
+            "provider_url": "https://example.com",
+            "oasf_capability_set": ["kyc.v1"],
+        },
+        "tool": {
+            "cognic": {
+                "identity": {
+                    "agent_id": "did:web:example.com:tools:demo",
+                    "display_name": "Demo",
+                    "provider_organization": "Example Org",
+                    "provider_url": "https://example.com",
+                    # oasf_capability_set absent at legacy path.
+                }
+            }
+        },
+    }
+    findings = identity.validate(manifest, tmp_path)
+    oasf_warnings = [f for f in findings if f.reason == "identity_oasf_capability_set_missing"]
+    assert len(oasf_warnings) == 1
+    assert oasf_warnings[0].severity == "warning"
+    assert oasf_warnings[0].payload["block_path"] == "tool.cognic.identity"
+
+
+def test_identity_legacy_path_agent_pack_jws_validated(tmp_path: Path) -> None:
+    """For agent packs, the JWS path-containment gate runs against
+    each declared path's ``agent_card_jws_path``. A docs-shaped agent
+    pack with the JWS field at the legacy path is path-validated;
+    a containment violation surfaces as a refusal."""
+    manifest = {
+        "pack": {"pack_id": "cognic-agent-demo", "kind": "agent"},
+        "tool": {
+            "cognic": {
+                "identity": {
+                    "agent_id": "did:web:example.com:agents:demo",
+                    "display_name": "Demo Agent",
+                    "provider_organization": "Example Org",
+                    "provider_url": "https://example.com",
+                    "agent_card_url": "https://example.com/agents/demo/card.json",
+                    "agent_card_jws_path": "/etc/hosts",  # absolute path
+                    "oasf_capability_set": ["dialogue.v1"],
+                }
+            }
+        },
+    }
+    findings = identity.validate(manifest, tmp_path)
+    matching = [f for f in findings if f.reason == "identity_agent_card_jws_path_unresolvable"]
+    assert len(matching) == 1
+    assert matching[0].payload["block_path"] == "tool.cognic.identity"
+    assert matching[0].payload["failure_mode"] == "absolute_path_rejected"

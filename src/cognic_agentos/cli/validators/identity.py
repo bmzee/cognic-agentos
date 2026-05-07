@@ -35,6 +35,22 @@ placeholders at every author-customizable site. This validator
 treats those as missing — a freshly-scaffolded pack fails ``agentos
 validate`` with explicit per-field remediation, the canonical
 pack-author iteration loop the plan-of-record documents.
+
+Dual-path lookup (T11 doctrine-fix follow-up): mirrors the T8/T9/T10
+doctrine. Each declared identity path validates independently.
+
+  - Canonical T5 shape: top-level ``[identity]``.
+  - Legacy/docs shape: ``[tool.cognic.identity]`` (per
+    ``docs/HOW-TO-WRITE-A-PACK.md`` + the existing reference fixture
+    packs at ``tests/fixtures/cognic_test_{mcp,agent}_pack/``).
+
+The orchestrator's R27 P2 #1 shape gate accepts either path; without
+T7 honouring both, a docs-shaped manifest dispatched here and fired
+every field-missing refusal even with a fully-valid legacy block.
+Each refusal + warning carries ``payload.block_path`` distinguishing
+which path tripped it (``identity`` for canonical;
+``tool.cognic.identity`` for legacy) so authors can locate per-path
+remediation.
 """
 
 from __future__ import annotations
@@ -76,14 +92,43 @@ def _is_missing_or_placeholder(value: Any) -> bool:
     return stripped.startswith(_AUTHOR_FILL_PREFIX)
 
 
-def _identity_block(data: dict[str, Any]) -> dict[str, Any]:
-    """Return the manifest's ``[identity]`` sub-table as a dict. The
-    orchestrator's shape gate (T6 R19 P2 #1) guarantees the block is
-    present + a TOML table by the time this validator runs; the
-    defensive ``isinstance`` check covers direct unit-test entry
-    points that bypass the orchestrator."""
-    block = data.get("identity")
-    return block if isinstance(block, dict) else {}
+#: Closed-enum tuple of (block_path, accessor) pairs the validator
+#: inspects. Mirrors the T8/T9/T10/T11 dual-path doctrine. Order is
+#: (canonical first, legacy second) so deterministic per-path
+#: dispatch surfaces canonical-path refusals before legacy-path
+#: ones in the orchestrator's aggregated finding list.
+_IDENTITY_BLOCK_LOCATIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("identity", ("identity",)),
+    ("tool.cognic.identity", ("tool", "cognic", "identity")),
+)
+
+
+def _resolve_path(data: dict[str, Any], path: tuple[str, ...]) -> dict[str, Any] | None:
+    """Walk ``path`` through ``data``; return the leaf dict or
+    ``None`` on any non-dict intermediate."""
+    cursor: Any = data
+    for segment in path:
+        if not isinstance(cursor, dict):
+            return None
+        cursor = cursor.get(segment)
+    return cursor if isinstance(cursor, dict) else None
+
+
+def _identity_blocks(data: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    """Return every declared identity block (canonical + legacy) as
+    ``(block_path, block)`` pairs in dispatch order. The
+    orchestrator's shape gate (T6 R19 P2 #1 + R27 P2 #1) guarantees
+    at least one path is declared by the time this validator runs;
+    direct unit-test entry points may pass a manifest with neither
+    path, in which case this returns ``[]`` and ``validate`` is a
+    no-op (the orchestrator's missing-block refusal owns that
+    case)."""
+    located: list[tuple[str, dict[str, Any]]] = []
+    for prefix, accessor in _IDENTITY_BLOCK_LOCATIONS:
+        block = _resolve_path(data, accessor)
+        if block is not None:
+            located.append((prefix, block))
+    return located
 
 
 def _pack_kind(data: dict[str, Any]) -> str | None:
@@ -96,14 +141,20 @@ def _pack_kind(data: dict[str, Any]) -> str | None:
     return kind if isinstance(kind, str) else None
 
 
-def _check_jws_path_resolves(jws_value: str, pack_path: Path) -> list[ValidatorFinding]:
+def _check_jws_path_resolves(
+    jws_value: str, pack_path: Path, block_path: str
+) -> list[ValidatorFinding]:
     """R22 P2 #1 path-containment gate. Wave-1 doctrine: the
-    ``identity.agent_card_jws_path`` field is fed to the Sprint-4
-    trust-gate verifier at admission time and MUST point at a file
-    inside the published pack. A malicious or malformed manifest
-    that declared an absolute path (``/etc/hosts``) or a traversal
+    ``agent_card_jws_path`` field is fed to the Sprint-4 trust-gate
+    verifier at admission time and MUST point at a file inside the
+    published pack. A malicious or malformed manifest that declared
+    an absolute path (``/etc/hosts``) or a traversal
     (``../outside.jws``) could otherwise route the signer/verifier
     at files outside the pack root.
+
+    ``block_path`` distinguishes which manifest path declared the
+    JWS field (``identity`` for canonical; ``tool.cognic.identity``
+    for legacy) so authors can locate per-path remediation.
 
     Three failure modes share the closed-enum reason
     ``identity_agent_card_jws_path_unresolvable``; the payload's
@@ -133,6 +184,7 @@ def _check_jws_path_resolves(jws_value: str, pack_path: Path) -> list[ValidatorF
                     "published pack."
                 ),
                 payload={
+                    "block_path": block_path,
                     "field": "identity.agent_card_jws_path",
                     "declared_path": jws_value,
                     "failure_mode": "absolute_path_rejected",
@@ -155,6 +207,7 @@ def _check_jws_path_resolves(jws_value: str, pack_path: Path) -> list[ValidatorF
                     "files inside the published pack."
                 ),
                 payload={
+                    "block_path": block_path,
                     "field": "identity.agent_card_jws_path",
                     "declared_path": jws_value,
                     "resolved_path": str(jws_full_path),
@@ -175,6 +228,7 @@ def _check_jws_path_resolves(jws_value: str, pack_path: Path) -> list[ValidatorF
                     "MUST be present in the published pack."
                 ),
                 payload={
+                    "block_path": block_path,
                     "field": "identity.agent_card_jws_path",
                     "declared_path": jws_value,
                     "resolved_path": str(jws_full_path),
@@ -186,21 +240,21 @@ def _check_jws_path_resolves(jws_value: str, pack_path: Path) -> list[ValidatorF
     return []
 
 
-def validate(data: dict[str, Any], pack_path: Path) -> list[ValidatorFinding]:
-    """Validate the manifest's ``[identity]`` block per the AGNTCY/OASF
-    Wave-1 strictness matrix.
-
-    Returns a list of refusal- + warning-severity findings; empty on
-    full pass. The orchestrator concatenates findings across
-    validators and computes exit code via
-    ``ValidatorFinding.affects_exit_code``.
-    """
+def _validate_identity_block(
+    block: dict[str, Any],
+    block_path: str,
+    pack_kind: str | None,
+    pack_path: Path,
+) -> list[ValidatorFinding]:
+    """Validate one declared identity block against the AGNTCY/OASF
+    Wave-1 strictness matrix. Each refusal + warning carries
+    ``payload.block_path = <block_path>`` so authors can locate
+    per-path remediation when both shapes are declared."""
     findings: list[ValidatorFinding] = []
-    identity = _identity_block(data)
 
     # Universally-mandatory fields — one refusal per missing.
     for field, reason in _UNIVERSAL_MANDATORY_FIELDS:
-        if _is_missing_or_placeholder(identity.get(field)):
+        if _is_missing_or_placeholder(block.get(field)):
             findings.append(
                 ValidatorFinding(
                     severity="refusal",
@@ -210,15 +264,18 @@ def validate(data: dict[str, Any], pack_path: Path) -> list[ValidatorFinding]:
                         f"AUTHOR-FILL placeholder; the AGNTCY/OASF Wave-1 "
                         f"strictness matrix requires this field."
                     ),
-                    payload={"field": f"identity.{field}"},
+                    payload={
+                        "block_path": block_path,
+                        "field": f"identity.{field}",
+                    },
                 )
             )
 
     # Agent-pack-only mandatory fields. Tool + skill packs skip these
     # — agent_card_url and agent_card_jws_path are meaningless outside
     # the agent-discovery surface.
-    if _pack_kind(data) == "agent":
-        if _is_missing_or_placeholder(identity.get("agent_card_url")):
+    if pack_kind == "agent":
+        if _is_missing_or_placeholder(block.get("agent_card_url")):
             findings.append(
                 ValidatorFinding(
                     severity="refusal",
@@ -228,11 +285,14 @@ def validate(data: dict[str, Any], pack_path: Path) -> list[ValidatorFinding]:
                         "AUTHOR-FILL placeholder; agent packs must declare "
                         "their A2A agent-card endpoint URL."
                     ),
-                    payload={"field": "identity.agent_card_url"},
+                    payload={
+                        "block_path": block_path,
+                        "field": "identity.agent_card_url",
+                    },
                 )
             )
 
-        jws_value = identity.get("agent_card_jws_path")
+        jws_value = block.get("agent_card_jws_path")
         if _is_missing_or_placeholder(jws_value):
             findings.append(
                 ValidatorFinding(
@@ -244,18 +304,21 @@ def validate(data: dict[str, Any], pack_path: Path) -> list[ValidatorFinding]:
                         "declare a pack-relative path to the JWS-signed "
                         "agent card."
                     ),
-                    payload={"field": "identity.agent_card_jws_path"},
+                    payload={
+                        "block_path": block_path,
+                        "field": "identity.agent_card_jws_path",
+                    },
                 )
             )
         else:
             # mypy: _is_missing_or_placeholder returns False only when
             # value is a non-empty string, so jws_value is str here.
             assert isinstance(jws_value, str)
-            findings.extend(_check_jws_path_resolves(jws_value, pack_path))
+            findings.extend(_check_jws_path_resolves(jws_value, pack_path, block_path))
 
     # Wave-1 optional / Wave-2 mandatory: oasf_capability_set absent
     # fires a warning-severity finding (does NOT affect exit code).
-    if "oasf_capability_set" not in identity:
+    if "oasf_capability_set" not in block:
         findings.append(
             ValidatorFinding(
                 severity="warning",
@@ -266,10 +329,41 @@ def validate(data: dict[str, Any], pack_path: Path) -> list[ValidatorFinding]:
                     "AGNTCY/OASF capability discovery. Declare the "
                     "capability set now to avoid a future refusal."
                 ),
-                payload={"field": "identity.oasf_capability_set"},
+                payload={
+                    "block_path": block_path,
+                    "field": "identity.oasf_capability_set",
+                },
             )
         )
 
+    return findings
+
+
+def validate(data: dict[str, Any], pack_path: Path) -> list[ValidatorFinding]:
+    """Validate the manifest's identity declaration per the
+    AGNTCY/OASF Wave-1 strictness matrix.
+
+    Both the canonical top-level ``[identity]`` and the legacy
+    ``[tool.cognic.identity]`` shapes are inspected; each declared
+    location validates independently and surfaces its own refusals
+    + warnings with ``payload.block_path`` distinguishing the path.
+
+    Returns a list of refusal- + warning-severity findings; empty on
+    full pass. The orchestrator concatenates findings across
+    validators and computes exit code via
+    ``ValidatorFinding.affects_exit_code``.
+    """
+    located = _identity_blocks(data)
+    if not located:
+        # Direct unit-test entry without either path declared. The
+        # orchestrator's shape gate owns the missing-block refusal
+        # for the regular flow.
+        return []
+
+    pack_kind = _pack_kind(data)
+    findings: list[ValidatorFinding] = []
+    for block_path, block in located:
+        findings.extend(_validate_identity_block(block, block_path, pack_kind, pack_path))
     return findings
 
 

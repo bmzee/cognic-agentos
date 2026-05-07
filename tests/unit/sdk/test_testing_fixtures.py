@@ -199,6 +199,7 @@ purpose = "operational_telemetry"
 retention_policy = "none"
 
 [risk_tier]
+tier = "read_only"
 
 [supply_chain]
 """

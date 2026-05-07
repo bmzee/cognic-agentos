@@ -85,6 +85,7 @@ purpose = "operational_telemetry"
 retention_policy = "none"
 
 [risk_tier]
+tier = "read_only"
 
 [supply_chain]
 """
@@ -394,7 +395,7 @@ def test_run_validators_short_circuits_on_non_table_required_block(
 
 @pytest.mark.parametrize(
     "block",
-    ["identity", "data_governance", "risk_tier", "supply_chain"],
+    ["identity", "data_governance", "supply_chain"],
 )
 def test_run_validators_accepts_required_block_at_legacy_path(
     tmp_path: Path, block: str, monkeypatch: pytest.MonkeyPatch
@@ -403,7 +404,14 @@ def test_run_validators_accepts_required_block_at_legacy_path(
     ``[tool.cognic.<block>]`` location MUST satisfy the shape gate so
     the per-concern validators (which dual-path-read) get dispatched.
     Without this, the orchestrator short-circuited before the legacy
-    compatibility advertised in T7-T10 was reachable."""
+    compatibility advertised in T7-T10 was reachable.
+
+    ``risk_tier`` is excluded from this parametrize because its legacy
+    shape is structurally different — it nests inside
+    ``[tool.cognic.runtime]`` as a flat ``risk_tier`` field rather than
+    a sub-table. The dedicated regression for that path lives at
+    :func:`test_run_validators_accepts_risk_tier_at_legacy_runtime_path`
+    below."""
     from cognic_agentos.cli import validators
     from cognic_agentos.cli.validate import run_validators
 
@@ -440,6 +448,150 @@ def test_run_validators_accepts_required_block_at_legacy_path(
         f"shape gate refused legacy-path [{block}] block when canonical "
         f"top-level was absent: {[(f.reason, f.payload) for f in findings]!r}"
     )
+
+
+def test_run_validators_accepts_risk_tier_at_legacy_runtime_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T11 doctrine fix: the docs / runtime / fixture-aligned legacy
+    shape for risk-tier declaration is ``[tool.cognic.runtime]`` with a
+    flat ``risk_tier`` field — NOT ``[tool.cognic.risk_tier].tier``.
+
+    Per ``docs/BUILD_PLAN.md:528``, ``docs/HOW-TO-WRITE-A-PACK.md``,
+    the Sprint-7A plan-of-record §"Task 11", and both reference
+    fixture packs (``tests/fixtures/cognic_test_{mcp,agent}_pack/``),
+    the pack-author-facing legacy shape is::
+
+        [tool.cognic.runtime]
+        risk_tier = "read_only"
+
+    A docs-shaped manifest declaring its risk tier this way and NOT
+    declaring a top-level ``[risk_tier]`` block MUST satisfy the
+    orchestrator's shape gate so the per-concern validator runs."""
+    from cognic_agentos.cli import validators
+    from cognic_agentos.cli.validate import run_validators
+
+    for name in (
+        "identity",
+        "a2a",
+        "mcp",
+        "data_governance",
+        "risk_tier",
+        "supply_chain",
+    ):
+        monkeypatch.setattr(getattr(validators, name), "validate", lambda data, pack: [])
+
+    _write_manifest(
+        tmp_path,
+        '[pack]\npack_id = "cognic-tool-test"\n'
+        "[identity]\n[data_governance]\n[supply_chain]\n"
+        '[tool.cognic.runtime]\nrisk_tier = "read_only"\n',
+    )
+
+    findings = run_validators(tmp_path)
+    block_misses = [
+        f
+        for f in findings
+        if f.reason == "manifest_missing_required_block" and f.payload.get("block") == "risk_tier"
+    ]
+    assert block_misses == [], (
+        "shape gate refused docs-shaped [tool.cognic.runtime] risk_tier "
+        f"declaration: {[(f.reason, f.payload) for f in findings]!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    "tool_value",
+    [
+        # [tool] declared as a scalar — short-circuits before reaching
+        # the [tool.cognic] check.
+        '"not-a-table"',
+        # [tool] is a table but [tool.cognic] is a scalar.
+        "\n[tool]\ncognic = 42",
+        # [tool.cognic] is a table but [tool.cognic.runtime] is a scalar.
+        '\n[tool.cognic]\nruntime = "x"',
+    ],
+)
+def test_run_validators_runtime_legacy_path_with_malformed_tool_branch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tool_value: str
+) -> None:
+    """Defensive guards in the risk_tier-special-case legacy resolver:
+    a malformed ``[tool]`` / ``[tool.cognic]`` / ``[tool.cognic.runtime]``
+    intermediate cannot rescue a missing top-level ``[risk_tier]``.
+    The refusal still surfaces; the resolver returns False before
+    reaching the ``risk_tier`` field check."""
+    from cognic_agentos.cli import validators
+    from cognic_agentos.cli.validate import run_validators
+
+    for name in (
+        "identity",
+        "a2a",
+        "mcp",
+        "data_governance",
+        "risk_tier",
+        "supply_chain",
+    ):
+        monkeypatch.setattr(getattr(validators, name), "validate", lambda data, pack: [])
+
+    if tool_value.startswith('"'):
+        body = (
+            '[pack]\npack_id = "cognic-tool-test"\n'
+            "[identity]\n[data_governance]\n[supply_chain]\n"
+            f"tool = {tool_value}\n"
+        )
+    else:
+        body = (
+            '[pack]\npack_id = "cognic-tool-test"\n'
+            "[identity]\n[data_governance]\n[supply_chain]\n" + tool_value + "\n"
+        )
+    _write_manifest(tmp_path, body)
+
+    findings = run_validators(tmp_path)
+    block_misses = [
+        f
+        for f in findings
+        if f.reason == "manifest_missing_required_block" and f.payload.get("block") == "risk_tier"
+    ]
+    assert len(block_misses) == 1
+    assert block_misses[0].payload["failure_mode"] == "block_absent"
+
+
+def test_run_validators_rejects_runtime_block_without_risk_tier_field(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``[tool.cognic.runtime]`` only satisfies the risk_tier shape
+    gate when the block ACTUALLY carries a ``risk_tier`` field. An
+    empty ``[tool.cognic.runtime]`` (or one carrying only unrelated
+    runtime config) does not rescue a missing top-level
+    ``[risk_tier]`` declaration."""
+    from cognic_agentos.cli import validators
+    from cognic_agentos.cli.validate import run_validators
+
+    for name in (
+        "identity",
+        "a2a",
+        "mcp",
+        "data_governance",
+        "risk_tier",
+        "supply_chain",
+    ):
+        monkeypatch.setattr(getattr(validators, name), "validate", lambda data, pack: [])
+
+    _write_manifest(
+        tmp_path,
+        '[pack]\npack_id = "cognic-tool-test"\n'
+        "[identity]\n[data_governance]\n[supply_chain]\n"
+        '[tool.cognic.runtime]\nsome_other_setting = "x"\n',
+    )
+
+    findings = run_validators(tmp_path)
+    block_misses = [
+        f
+        for f in findings
+        if f.reason == "manifest_missing_required_block" and f.payload.get("block") == "risk_tier"
+    ]
+    assert len(block_misses) == 1
+    assert block_misses[0].payload["failure_mode"] == "block_absent"
 
 
 def test_run_validators_legacy_path_with_top_level_present_no_double_fire(

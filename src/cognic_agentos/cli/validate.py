@@ -86,14 +86,41 @@ _REQUIRED_TOP_LEVEL_BLOCKS: tuple[str, ...] = (
 
 
 def _resolves_in_legacy_path(data: dict[str, object], block_name: str) -> bool:
-    """True iff ``[tool.cognic.<block_name>]`` resolves to a TOML
-    sub-table. Used by the R27 P2 #1 shape-gate fallback so packs
-    declaring a required block at the legacy/docs-aligned
-    ``[tool.cognic.*]`` location aren't refused before the per-
-    concern validators (T7-T12 dual-path-read) get a chance to see
-    them. Returns False on any non-dict intermediate or if the leaf
-    is missing/non-dict — the gate fires its normal block_absent
-    refusal in that case."""
+    """True iff the required block's legacy/docs-aligned location
+    resolves to a meaningful declaration. Used by the R27 P2 #1
+    shape-gate fallback so docs-shaped manifests aren't refused
+    before the per-concern validators (T7-T12 dual-path-read) get a
+    chance to see them. Returns False on any non-dict intermediate
+    or if the leaf is missing/non-dict — the gate fires its normal
+    block_absent refusal in that case.
+
+    Most blocks share the same legacy nesting (a ``[tool.cognic.<block>]``
+    sub-table mirroring the canonical top-level shape). The
+    ``risk_tier`` block is the exception (T11 doctrine fix): per
+    ``docs/BUILD_PLAN.md:528``, ``docs/HOW-TO-WRITE-A-PACK.md``, the
+    Sprint-7A plan-of-record §"Task 11", and both reference fixture
+    packs at ``tests/fixtures/cognic_test_{mcp,agent}_pack/``, the
+    legacy/docs/runtime shape for risk-tier declaration is
+    ``[tool.cognic.runtime].risk_tier`` — a flat ``risk_tier`` field
+    inside the richer runtime-config sub-table, NOT a separate
+    ``[tool.cognic.risk_tier]`` block. The ``runtime`` block has
+    other purposes; for ``risk_tier`` to be considered satisfied via
+    the legacy path the ``risk_tier`` field MUST actually be present
+    inside it (any value type — the per-concern validator catches
+    type-shape errors).
+    """
+    if block_name == "risk_tier":
+        runtime_block = data.get("tool")
+        if not isinstance(runtime_block, dict):
+            return False
+        cognic_block = runtime_block.get("cognic")
+        if not isinstance(cognic_block, dict):
+            return False
+        runtime_sub = cognic_block.get("runtime")
+        if not isinstance(runtime_sub, dict):
+            return False
+        return "risk_tier" in runtime_sub
+
     cursor: object = data
     for segment in ("tool", "cognic", block_name):
         if not isinstance(cursor, dict):
@@ -175,6 +202,14 @@ def _check_manifest_shape(
             # emitting a refusal.
             if _resolves_in_legacy_path(data, block):
                 continue
+            # ``risk_tier`` nests differently in the legacy shape
+            # (``[tool.cognic.runtime].risk_tier``); other blocks
+            # share the simpler ``[tool.cognic.<block>]`` form.
+            legacy_hint = (
+                "[tool.cognic.runtime].risk_tier"
+                if block == "risk_tier"
+                else f"[tool.cognic.{block}]"
+            )
             findings.append(
                 ValidatorFinding(
                     severity="refusal",
@@ -182,7 +217,7 @@ def _check_manifest_shape(
                     message=(
                         f"manifest at {manifest_path} is missing required "
                         f"top-level block [{block}] (also not present at "
-                        f"legacy [tool.cognic.{block}])."
+                        f"legacy {legacy_hint})."
                     ),
                     payload={
                         "manifest_path": str(manifest_path),

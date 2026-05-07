@@ -106,9 +106,77 @@ RESTRICTED_DATA_CLASSES: frozenset[str] = frozenset(
 )
 
 
+#: Catalogue of risk tiers per ADR-014. The runtime tool-approval
+#: gate keys per-call workflows off these values; the build-time T11
+#: validator refuses any tier outside this set + cross-checks that
+#: the declared tier is high enough for the declared data classes.
+#:
+#: Order of declaration here is the canonical "authority" ordering
+#: (lowest-authority first). The ``RISK_TIER_ORDER`` tuple below
+#: pins this for "at-least" comparisons.
+RiskTier = Literal[
+    "read_only",
+    "internal_write",
+    "customer_data_read",
+    "customer_data_write",
+    "payment_action",
+    "regulator_communication",
+    "cross_tenant",
+    "high_risk_custom",
+]
+
+
+#: Canonical authority ordering of :data:`RiskTier` values, lowest-
+#: authority first. T11 uses index lookups against this tuple to
+#: implement the "at-least" cross-check (declared tier index >=
+#: required tier index for each data class). The vocab-consolidation
+#: guard test pins ``set(RISK_TIER_ORDER) == set(get_args(RiskTier))``.
+RISK_TIER_ORDER: tuple[str, ...] = (
+    "read_only",
+    "internal_write",
+    "customer_data_read",
+    "customer_data_write",
+    "payment_action",
+    "regulator_communication",
+    "cross_tenant",
+    "high_risk_custom",
+)
+
+
+#: Per-data-class minimum-tier mapping for the T11 cross-check. A
+#: pack declaring a class in this map MUST also declare a tier at
+#: or above the mapped minimum; otherwise T11 fires
+#: ``risk_tier_inconsistent_with_data_classes`` with payload
+#: ``failure_mode="tier_below_minimum_for_data_class"``.
+#:
+#: Classes NOT in this map (``public``, ``internal``, ``audit_trail``,
+#: ``model_inputs``, ``model_outputs``) carry no minimum-tier
+#: requirement at Wave-1 — the runtime DLP gate handles per-record
+#: filtering for those.
+DATA_CLASS_TO_MIN_RISK_TIER: dict[str, str] = {
+    "customer_pii": "customer_data_read",
+    "payment_data": "payment_action",
+    "credentials": "customer_data_write",
+    "regulator_communication": "regulator_communication",
+}
+
+
+#: T10 cross-check uses this set: tiers that DO NOT permit handling
+#: any restricted-tier data class. A manifest declaring a tier in
+#: this set + restricted ``data_classes`` trips the T10 refusal
+#: ``data_governance_contract_inconsistent_with_risk_tier`` (T11
+#: also fires its own per-class refusals; T10's framing is
+#: data-governance-side perspective on the same violation).
+LOW_AUTHORITY_TIERS: frozenset[str] = frozenset({"read_only", "internal_write"})
+
+
 __all__ = [
+    "DATA_CLASS_TO_MIN_RISK_TIER",
+    "LOW_AUTHORITY_TIERS",
     "RESTRICTED_DATA_CLASSES",
+    "RISK_TIER_ORDER",
     "DataClass",
     "Purpose",
     "RetentionPolicy",
+    "RiskTier",
 ]

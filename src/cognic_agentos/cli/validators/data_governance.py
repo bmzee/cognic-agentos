@@ -28,9 +28,17 @@ Validator scope (Wave-1):
 
   Cross-validation:
 
-  - ``[risk_tier].tier == "low"`` AND data_classes intersects the
-    :data:`RESTRICTED_DATA_CLASSES` set →
-    ``data_governance_contract_inconsistent_with_risk_tier``.
+  - Declared risk tier in :data:`LOW_AUTHORITY_TIERS` (the ADR-014
+    ``read_only`` / ``internal_write`` set) AND data_classes
+    intersects the :data:`RESTRICTED_DATA_CLASSES` set →
+    ``data_governance_contract_inconsistent_with_risk_tier``. The
+    risk tier is read from BOTH the canonical ``[risk_tier].tier``
+    (T5 shape) AND the legacy ``[tool.cognic.runtime].risk_tier``
+    (docs / fixture-aligned shape per ``docs/BUILD_PLAN.md:528``);
+    either declaration with the restricted-class combination trips
+    the refusal. Mirrors T11's per-data-class cross-check from the
+    data-governance side (informational duplicate; either fix
+    stops both refusals).
   - ``[mcp].caching = true`` (or ``caching_strategy = "ttl"``) AND
     data_classes intersects the restricted set →
     ``data_governance_contract_inconsistent_with_mcp_caching``.
@@ -63,6 +71,7 @@ from typing import Any
 
 from cognic_agentos.cli import ValidatorFinding
 from cognic_agentos.cli._governance_vocab import (
+    LOW_AUTHORITY_TIERS,
     RESTRICTED_DATA_CLASSES,
     DataClass,
     Purpose,
@@ -323,38 +332,78 @@ def _validate_egress_allow_list(block: dict[str, Any], prefix: str) -> list[Vali
     return findings
 
 
+def _declared_risk_tiers(data: dict[str, Any]) -> list[str]:
+    """Return every declared risk-tier string across both manifest
+    shapes, in dispatch order (canonical T5 first, legacy runtime
+    second). Whitespace stripped; non-string entries filtered.
+
+    Canonical: ``[risk_tier].tier``. Legacy: ``[tool.cognic.runtime].risk_tier``
+    (the docs / fixture-aligned shape; see the T11 doctrine fix
+    docstring at :mod:`cognic_agentos.cli.validators.risk_tier`).
+    """
+    tiers: list[str] = []
+
+    risk_block = _resolve_path(data, ("risk_tier",))
+    if risk_block is not None:
+        tier = risk_block.get("tier")
+        if isinstance(tier, str) and tier.strip():
+            tiers.append(tier.strip())
+
+    runtime_block = _resolve_path(data, ("tool", "cognic", "runtime"))
+    if runtime_block is not None:
+        tier = runtime_block.get("risk_tier")
+        if isinstance(tier, str) and tier.strip():
+            tiers.append(tier.strip())
+
+    return tiers
+
+
 def _cross_check_risk_tier(
     declared_classes: list[str], data: dict[str, Any]
 ) -> list[ValidatorFinding]:
-    """Refuse a "low" risk_tier declaration when data_classes
-    intersects the restricted set."""
-    risk_block = data.get("risk_tier")
-    if not isinstance(risk_block, dict):
-        return []
-    tier = risk_block.get("tier")
-    if not isinstance(tier, str):
-        return []
-    if tier.strip() != "low":
-        return []
-    restricted = sorted(set(declared_classes) & RESTRICTED_DATA_CLASSES)
-    if not restricted:
-        return []
-    return [
-        ValidatorFinding(
-            severity="refusal",
-            reason="data_governance_contract_inconsistent_with_risk_tier",
-            message=(
-                f"risk_tier.tier='low' but data_governance.data_classes "
-                f"declares restricted classes ({restricted}); a low-tier "
-                "pack cannot handle restricted-tier data. Either raise the "
-                "tier or remove the restricted classes."
-            ),
-            payload={
-                "risk_tier": "low",
-                "restricted_data_classes": restricted,
-            },
-        )
-    ]
+    """Refuse a low-authority risk_tier declaration when data_classes
+    intersects the restricted set.
+
+    The "low-authority" tier set is the canonical
+    :data:`cognic_agentos.cli._governance_vocab.LOW_AUTHORITY_TIERS`
+    (``{"read_only", "internal_write"}`` per ADR-014). T11's
+    risk_tier validator owns the per-class minimum-tier cross-check
+    using a richer mapping; T10's framing here is the data-governance
+    perspective on the same conceptual violation, narrowed to the
+    bright-line low-authority set so the two refusals fire as
+    informational duplicates (pack-author who fixes either side
+    stops both).
+
+    Inspects both manifest shapes: canonical ``[risk_tier].tier`` AND
+    legacy ``[tool.cognic.runtime].risk_tier``. The first declared
+    low-authority tier intersecting restricted data classes trips
+    the refusal — the union semantic prevents pack authors from
+    splitting declarations across paths to dodge the cross-check.
+    """
+    for tier in _declared_risk_tiers(data):
+        if tier not in LOW_AUTHORITY_TIERS:
+            continue
+        restricted = sorted(set(declared_classes) & RESTRICTED_DATA_CLASSES)
+        if not restricted:
+            continue
+        return [
+            ValidatorFinding(
+                severity="refusal",
+                reason="data_governance_contract_inconsistent_with_risk_tier",
+                message=(
+                    f"declared risk_tier {tier!r} is in the low-"
+                    f"authority set ({sorted(LOW_AUTHORITY_TIERS)!r}) but "
+                    f"data_governance.data_classes declares restricted "
+                    f"classes ({restricted}); raise the tier or remove the "
+                    "restricted classes."
+                ),
+                payload={
+                    "risk_tier": tier,
+                    "restricted_data_classes": restricted,
+                },
+            )
+        ]
+    return []
 
 
 def _mcp_caching_enabled(data: dict[str, Any]) -> bool:

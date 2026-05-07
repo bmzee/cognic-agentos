@@ -21,10 +21,18 @@ Validator contract (per ADR-017 + the plan-of-record T10 section):
     refused as malformed.
 
   Cross-validation:
-    - ``[risk_tier].tier == "low"`` AND data_classes intersects the
-      restricted set → ``data_governance_contract_inconsistent_with_risk_tier``.
-      (Other tier values are tolerable; the bright line is "low" tier
-      claiming sensitive data classes.)
+    - Declared risk tier in :data:`LOW_AUTHORITY_TIERS` (the ADR-014
+      ``read_only`` / ``internal_write`` set) AND data_classes
+      intersects the :data:`RESTRICTED_DATA_CLASSES` set →
+      ``data_governance_contract_inconsistent_with_risk_tier``. The
+      tier is read from BOTH the canonical ``[risk_tier].tier`` (T5
+      shape) AND the legacy ``[tool.cognic.runtime].risk_tier``
+      (docs / fixture-aligned shape per ``docs/BUILD_PLAN.md:528``);
+      either declaration with the restricted-class combination
+      trips the refusal. Higher-authority tiers
+      (``customer_data_read`` and above per ADR-014's tier ordering)
+      are tolerable on this T10-side check; T11 owns the per-class
+      minimum-tier enforcement.
     - ``[mcp].caching = true`` (or ``caching_strategy = "ttl"``) AND
       data_classes intersects the restricted set →
       ``data_governance_contract_inconsistent_with_mcp_caching``.
@@ -63,7 +71,7 @@ def _manifest(
     retention_policy: Any = "none",
     retention_max_window: Any = None,
     egress_allow_list: Any = None,
-    risk_tier: Any = "medium",
+    risk_tier: Any = "customer_data_read",
     mcp_caching: bool | None = None,
     drop_data_governance: bool = False,
 ) -> dict[str, Any]:
@@ -354,7 +362,7 @@ def test_egress_allow_list_non_string_entry_refuses(tmp_path: Path) -> None:
 
 def test_low_tier_with_restricted_class_refuses(tmp_path: Path) -> None:
     findings = data_governance.validate(
-        _manifest(data_classes=["customer_pii"], risk_tier="low"), tmp_path
+        _manifest(data_classes=["customer_pii"], risk_tier="read_only"), tmp_path
     )
     matching = [
         f for f in findings if f.reason == "data_governance_contract_inconsistent_with_risk_tier"
@@ -362,12 +370,12 @@ def test_low_tier_with_restricted_class_refuses(tmp_path: Path) -> None:
     assert len(matching) == 1
     assert matching[0].severity == "refusal"
     assert "customer_pii" in matching[0].payload["restricted_data_classes"]
-    assert matching[0].payload["risk_tier"] == "low"
+    assert matching[0].payload["risk_tier"] == "read_only"
 
 
 def test_low_tier_with_non_restricted_class_no_refusal(tmp_path: Path) -> None:
     findings = data_governance.validate(
-        _manifest(data_classes=["public", "internal"], risk_tier="low"), tmp_path
+        _manifest(data_classes=["public", "internal"], risk_tier="read_only"), tmp_path
     )
     assert not any(
         f.reason == "data_governance_contract_inconsistent_with_risk_tier" for f in findings
@@ -378,7 +386,7 @@ def test_high_tier_with_restricted_class_no_refusal(tmp_path: Path) -> None:
     """A high-tier pack handling restricted data is consistent — no
     risk_tier refusal."""
     findings = data_governance.validate(
-        _manifest(data_classes=["customer_pii"], risk_tier="high"), tmp_path
+        _manifest(data_classes=["customer_pii"], risk_tier="customer_data_write"), tmp_path
     )
     assert not any(
         f.reason == "data_governance_contract_inconsistent_with_risk_tier" for f in findings
@@ -390,6 +398,52 @@ def test_risk_tier_block_missing_no_cross_check(tmp_path: Path) -> None:
     T10 doesn't double-fire — just skips the cross-check."""
     manifest = _manifest(data_classes=["customer_pii"])
     manifest.pop("risk_tier", None)
+    findings = data_governance.validate(manifest, tmp_path)
+    assert not any(
+        f.reason == "data_governance_contract_inconsistent_with_risk_tier" for f in findings
+    )
+
+
+def test_legacy_runtime_risk_tier_path_triggers_cross_check(tmp_path: Path) -> None:
+    """T11 doctrine fix: T10's cross-check reads the legacy
+    ``[tool.cognic.runtime].risk_tier`` shape too, so a docs-shaped
+    manifest declaring ``read_only`` there + ``customer_pii`` in
+    data_classes still trips the refusal."""
+    manifest = _manifest(data_classes=["customer_pii"])
+    manifest.pop("risk_tier", None)
+    manifest["tool"] = {"cognic": {"runtime": {"risk_tier": "read_only"}}}
+    findings = data_governance.validate(manifest, tmp_path)
+    matching = [
+        f for f in findings if f.reason == "data_governance_contract_inconsistent_with_risk_tier"
+    ]
+    assert len(matching) == 1
+    assert matching[0].payload["risk_tier"] == "read_only"
+    assert "customer_pii" in matching[0].payload["restricted_data_classes"]
+
+
+def test_split_path_low_tier_smuggle_caught_by_union(tmp_path: Path) -> None:
+    """Pack-author splits the declaration: canonical ``[risk_tier].tier``
+    set to a high-authority tier (``customer_data_write``) but legacy
+    ``[tool.cognic.runtime].risk_tier`` smuggles ``read_only``. T10's
+    cross-check unions across both paths — the legacy declaration
+    still trips the refusal because the runtime DLP enforcer cannot
+    rely on either declaration alone being authoritative."""
+    manifest = _manifest(data_classes=["customer_pii"], risk_tier="customer_data_write")
+    manifest["tool"] = {"cognic": {"runtime": {"risk_tier": "read_only"}}}
+    findings = data_governance.validate(manifest, tmp_path)
+    matching = [
+        f for f in findings if f.reason == "data_governance_contract_inconsistent_with_risk_tier"
+    ]
+    assert len(matching) == 1
+    assert matching[0].payload["risk_tier"] == "read_only"
+
+
+def test_legacy_runtime_non_string_risk_tier_no_cross_check(tmp_path: Path) -> None:
+    """Defensive: ``[tool.cognic.runtime].risk_tier`` declared as a
+    non-string falls through cleanly (T11 owns the shape refusal)."""
+    manifest = _manifest(data_classes=["customer_pii"])
+    manifest.pop("risk_tier", None)
+    manifest["tool"] = {"cognic": {"runtime": {"risk_tier": 42}}}
     findings = data_governance.validate(manifest, tmp_path)
     assert not any(
         f.reason == "data_governance_contract_inconsistent_with_risk_tier" for f in findings
@@ -558,7 +612,7 @@ def test_split_classes_across_paths_unioned_for_cross_check(tmp_path: Path) -> N
                 }
             }
         },
-        "risk_tier": {"tier": "low"},
+        "risk_tier": {"tier": "read_only"},
     }
     findings = data_governance.validate(manifest, tmp_path)
     matching = [
@@ -614,7 +668,7 @@ def test_data_governance_full_pass_returns_empty(tmp_path: Path) -> None:
             retention_policy="purpose_window",
             retention_max_window=90,
             egress_allow_list=["api.example.com"],
-            risk_tier="medium",
+            risk_tier="customer_data_read",
         ),
         tmp_path,
     )
