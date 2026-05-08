@@ -88,6 +88,7 @@ retention_policy = "none"
 tier = "read_only"
 
 [supply_chain]
+attestation_paths = ["attestations/cosign.sig"]
 """
 
 
@@ -96,6 +97,20 @@ def _write_manifest(pack_path: Path, body: str) -> Path:
     manifest = pack_path / "cognic-pack-manifest.toml"
     manifest.write_text(body)
     return manifest
+
+
+def _write_minimal_valid_pack(pack_path: Path) -> Path:
+    """Write the minimal valid manifest AND populate the placeholder
+    attestation file declared in ``_MINIMAL_VALID_MANIFEST``. T12's
+    supply-chain validator refuses missing attestation files; tests
+    that exercise the clean-pass path must materialise them on disk.
+
+    Returns the manifest path (mirrors :func:`_write_manifest`)."""
+    manifest_path = _write_manifest(pack_path, _MINIMAL_VALID_MANIFEST)
+    attestation = pack_path / "attestations" / "cosign.sig"
+    attestation.parent.mkdir(parents=True, exist_ok=True)
+    attestation.write_bytes(b".")
+    return manifest_path
 
 
 def _write_manifest_bytes(pack_path: Path, body: bytes) -> Path:
@@ -139,12 +154,13 @@ def test_run_validators_returns_manifest_unparseable_when_bad_toml(tmp_path: Pat
 
 
 def test_run_validators_returns_empty_for_valid_minimal_manifest(tmp_path: Path) -> None:
-    """Manifest parses cleanly + every per-concern validator (T7-T12
-    stubs at this commit) returns ``[]`` → orchestrator returns ``[]``.
-    Pack-author exit code on this path is 0."""
+    """Manifest parses cleanly + every per-concern validator returns
+    ``[]`` (T12's supply-chain validator refuses missing attestation
+    files, so the helper materialises them on disk) → orchestrator
+    returns ``[]``. Pack-author exit code on this path is 0."""
     from cognic_agentos.cli.validate import run_validators
 
-    _write_manifest(tmp_path, _MINIMAL_VALID_MANIFEST)
+    _write_minimal_valid_pack(tmp_path)
     findings = run_validators(tmp_path)
     assert findings == []
 
@@ -800,7 +816,7 @@ def test_validate_command_exits_1_on_unparseable_manifest(tmp_path: Path) -> Non
 
 
 def test_validate_command_exits_0_on_pass(tmp_path: Path) -> None:
-    _write_manifest(tmp_path, _MINIMAL_VALID_MANIFEST)
+    _write_minimal_valid_pack(tmp_path)
     runner = CliRunner()
     result = runner.invoke(app, ["validate", str(tmp_path)])
     assert result.exit_code == 0, f"expected 0, got {result.exit_code}; stderr={result.stderr!r}"
@@ -817,7 +833,7 @@ def test_validate_command_exits_0_on_warning_only(
     parsers see the warning; CI workflow does NOT fail."""
     from cognic_agentos.cli import validators
 
-    _write_manifest(tmp_path, _MINIMAL_VALID_MANIFEST)
+    _write_minimal_valid_pack(tmp_path)
     monkeypatch.setattr(
         validators.identity,
         "validate",
@@ -878,7 +894,7 @@ def test_validate_command_json_mode_emits_findings_as_json_lines(
     finding to stderr — the format CI parsers parse line-by-line."""
     from cognic_agentos.cli import validators
 
-    _write_manifest(tmp_path, _MINIMAL_VALID_MANIFEST)
+    _write_minimal_valid_pack(tmp_path)
     monkeypatch.setattr(
         validators.identity,
         "validate",

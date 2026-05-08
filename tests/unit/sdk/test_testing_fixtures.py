@@ -174,10 +174,11 @@ def test_assert_manifest_validates_passes_pack_with_clean_manifest(tmp_path: Pat
     The [identity] block carries every Wave-1 mandatory field
     populated with realistic values so T7 returns no refusals; the
     Wave-1 warning ``identity_oasf_capability_set_missing`` is
-    silenced by declaring ``oasf_capability_set``. T8-T12 are still
-    stubs returning ``[]`` so this manifest currently passes; once
-    those validators ship real refusals the test's manifest grows
-    to cover their clean-pass shape too."""
+    silenced by declaring ``oasf_capability_set``. T8-T12 ship real
+    refusals at this commit; ``[supply_chain]`` declares an
+    ``attestation_paths`` list whose single entry is materialised on
+    disk below so T12 returns clean (T12's ``path_does_not_exist``
+    is otherwise the canonical fresh-scaffold refusal)."""
     from cognic_agentos.sdk.testing import assert_manifest_validates
 
     (tmp_path / "cognic-pack-manifest.toml").write_text(
@@ -202,8 +203,14 @@ retention_policy = "none"
 tier = "read_only"
 
 [supply_chain]
+attestation_paths = ["attestations/cosign.sig"]
 """
     )
+    # T12 refuses unless the declared path resolves to a real file
+    # inside the pack root; materialise the placeholder here.
+    attestation = tmp_path / "attestations" / "cosign.sig"
+    attestation.parent.mkdir(parents=True, exist_ok=True)
+    attestation.write_bytes(b".")
     # No exception — orchestrator returns no refusals.
     assert_manifest_validates(tmp_path)
 
