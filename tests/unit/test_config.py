@@ -1529,10 +1529,24 @@ class TestSprint7AClosedEnumVocabulary:
                 # Supply chain (T12)
                 "supply_chain_attestation_path_missing",
                 "supply_chain_attestation_path_unresolvable",
-                # Sign (T14 baseline; expands)
+                # Sign (T14 — full Wave-1 bundle generator per Doctrine F)
                 "sign_cosign_not_installed",
+                "sign_syft_not_installed",
+                "sign_grype_not_installed",
+                "sign_license_auditor_not_installed",
                 "sign_signing_key_unavailable",
                 "sign_subprocess_failed",
+                "sign_agent_card_jws_signing_failed",
+                "sign_provenance_template_render_failed",
+                "sign_intoto_layout_template_render_failed",
+                # Verify (T14 — offline trust gate per ADR-016 Sprint-7A)
+                "verify_cosign_signature_invalid",
+                "verify_sbom_digest_mismatch",
+                "verify_provenance_invalid",
+                "verify_intoto_layout_invalid",
+                "verify_attestation_path_unresolvable",
+                "verify_agent_card_jws_invalid",
+                "verify_trust_root_path_unresolvable",
             }
         )
 

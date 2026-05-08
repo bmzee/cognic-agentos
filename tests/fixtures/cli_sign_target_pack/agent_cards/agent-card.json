@@ -1,0 +1,15 @@
+{
+  "name": "sign_target",
+  "agent_id": "did:web:example.com:agents:sign_target",
+  "display_name": "Sign Target Agent",
+  "provider_organization": "Cognic AgentOS Sprint-7A T14 fixtures",
+  "provider_url": "https://example.com/sprint-7a-t14",
+  "description": "T14 fixture agent — exercises sign --bundle + verify offline trust gate.",
+  "capabilities": {
+    "streaming": false,
+    "push_notification_config": false,
+    "extended_agent_card": false,
+    "artifacts_supported": false
+  },
+  "schema_version": "1.0"
+}

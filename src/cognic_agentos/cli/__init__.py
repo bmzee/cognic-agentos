@@ -81,18 +81,30 @@ ValidatorReason = Literal[
     # Supply chain (T12) — refusals
     "supply_chain_attestation_path_missing",
     "supply_chain_attestation_path_unresolvable",
-    # Sign (T14 baseline; the literal grows when sign --bundle expands per
-    # R2 P2 #5: sign_syft_not_installed / sign_grype_not_installed /
-    # sign_license_auditor_not_installed / sign_agent_card_jws_signing_failed
-    # / sign_provenance_template_render_failed /
-    # sign_intoto_layout_template_render_failed; verify-side reasons land
-    # then too: verify_cosign_signature_invalid / verify_sbom_digest_mismatch
-    # / verify_provenance_invalid / verify_intoto_layout_invalid /
-    # verify_attestation_path_unresolvable / verify_agent_card_jws_invalid
-    # / verify_trust_root_path_unresolvable)
+    # Sign (T14 — full Wave-1 bundle generator per Doctrine Decision F
+    # + ADR-016; 9 reasons covering missing-tool refusals + signing-key
+    # resolution + subprocess-exec failures + JWS-signing failures +
+    # template-render failures).
     "sign_cosign_not_installed",
+    "sign_syft_not_installed",
+    "sign_grype_not_installed",
+    "sign_license_auditor_not_installed",
     "sign_signing_key_unavailable",
     "sign_subprocess_failed",
+    "sign_agent_card_jws_signing_failed",
+    "sign_provenance_template_render_failed",
+    "sign_intoto_layout_template_render_failed",
+    # Verify (T14 — offline trust gate per ADR-016 Sprint-7A mandate;
+    # mirrors the Sprint-4 runtime trust-gate verification path; 7
+    # closed-enum reasons covering each of the 6 verification steps
+    # plus the trust-root-resolution refusal R7 P2 #2 added).
+    "verify_cosign_signature_invalid",
+    "verify_sbom_digest_mismatch",
+    "verify_provenance_invalid",
+    "verify_intoto_layout_invalid",
+    "verify_attestation_path_unresolvable",
+    "verify_agent_card_jws_invalid",
+    "verify_trust_root_path_unresolvable",
 ]
 
 
@@ -143,10 +155,24 @@ _VALIDATOR_REASON_OWNERSHIP: Final[dict[ValidatorReason, str]] = {
     # Supply chain (T12)
     "supply_chain_attestation_path_missing": "validators/supply_chain.py",
     "supply_chain_attestation_path_unresolvable": "validators/supply_chain.py",
-    # Sign (T14)
+    # Sign (T14 — full Wave-1 bundle generator per Doctrine Decision F)
     "sign_cosign_not_installed": "sign.py",
+    "sign_syft_not_installed": "sign.py",
+    "sign_grype_not_installed": "sign.py",
+    "sign_license_auditor_not_installed": "sign.py",
     "sign_signing_key_unavailable": "sign.py",
     "sign_subprocess_failed": "sign.py",
+    "sign_agent_card_jws_signing_failed": "sign.py",
+    "sign_provenance_template_render_failed": "sign.py",
+    "sign_intoto_layout_template_render_failed": "sign.py",
+    # Verify (T14 — offline trust gate per ADR-016 Sprint-7A mandate)
+    "verify_cosign_signature_invalid": "verify.py",
+    "verify_sbom_digest_mismatch": "verify.py",
+    "verify_provenance_invalid": "verify.py",
+    "verify_intoto_layout_invalid": "verify.py",
+    "verify_attestation_path_unresolvable": "verify.py",
+    "verify_agent_card_jws_invalid": "verify.py",
+    "verify_trust_root_path_unresolvable": "verify.py",
 }
 
 
@@ -434,18 +460,81 @@ def sign_blob(
             "prod settings profile per Doctrine F)."
         ),
     ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help=(
+            "Emit the sign report as a single JSON object on stdout "
+            "(deterministic-ordered keys) for CI parsers."
+        ),
+    ),
 ) -> None:
     """Cosign sign-blob a single artifact (Wave-1 minimal sign path).
 
-    Lands in Sprint-7A T14 alongside the full ``sign --bundle``
-    orchestrator; ``sign-blob`` is the smaller-surface verb pack
-    authors use during local development + key-rotation flows.
+    Lands in Sprint-7A T14.A — narrow cosign sign-blob wrapper.
+    Resolves cosign via ``shutil.which`` (or ``settings.cosign_path``),
+    wires the signing key from ``settings.signing_key_path``, invokes
+    cosign via real ``asyncio.create_subprocess_exec``, and writes
+    ``cosign.sig`` + ``bundle.sigstore`` to the wheel's parent
+    directory.
+
+    Exits 0 when ``SignReport.overall_status == "pass"``; 1 when the
+    report fails (cosign-not-installed / signing-key-unavailable /
+    subprocess-failed).
     """
-    del wheel_path, dev_mode_skip_cosign  # placeholders until T14
-    _stub_exit(
-        "agentos sign-blob is not yet wired — lands in Sprint-7A T14 "
-        "(cosign sign-blob over a single artifact)."
+    import asyncio as _asyncio
+
+    from pydantic import ValidationError as _ValidationError
+
+    from cognic_agentos.cli.sign import (
+        format_sign_report,
+        format_sign_report_finding_annotations,
+        format_sign_report_summary,
+        run_sign_blob,
     )
+    from cognic_agentos.core.config import build_settings_without_env_file
+
+    # Build Settings — Pydantic ValidationError surfaces if the prod-
+    # profile guards (config.py:966 signing_key_path-under-fixture-tree;
+    # config.py:1035 dev_mode_skip_cosign-in-prod) reject the input.
+    # Render the error to stderr before exiting so pack authors see
+    # the validator's own remediation message, not a raw traceback.
+    try:
+        settings = build_settings_without_env_file()
+    except _ValidationError as exc:
+        typer.echo(f"agentos sign-blob: Settings validation refused: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+
+    # Layer the CLI --dev-mode-skip-cosign flag onto Settings + re-
+    # validate so prod-profile invocations of the flag fire the same
+    # guard even when the env var was unset.
+    if dev_mode_skip_cosign and not settings.dev_mode_skip_cosign:
+        try:
+            mutated = settings.model_dump()
+            mutated["dev_mode_skip_cosign"] = True
+            settings = type(settings).model_validate(mutated)
+        except _ValidationError as exc:
+            typer.echo(
+                f"agentos sign-blob: --dev-mode-skip-cosign refused by Settings validation: {exc}",
+                err=True,
+            )
+            raise typer.Exit(code=2) from exc
+
+    report = _asyncio.run(
+        run_sign_blob(
+            wheel_path,
+            settings,
+            dev_mode_skip_cosign=dev_mode_skip_cosign,
+        )
+    )
+    if json_output:
+        typer.echo(format_sign_report(report, json_output=True))
+    else:
+        typer.echo(format_sign_report_summary(report))
+        for annotation in format_sign_report_finding_annotations(report):
+            typer.echo(annotation, err=True)
+    if report.overall_status != "pass":
+        raise typer.Exit(code=1)
 
 
 @app.command()

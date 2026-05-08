@@ -139,13 +139,13 @@ def test_command_help_exits_zero(command_name: str) -> None:
 # + asserts the conformance-report shape + Typer exit codes directly).
 
 
-def test_sign_blob_with_wheel_path_reaches_stub_exit_pointer() -> None:
-    """``agentos sign-blob ./dist/example-0.1.0-py3-none-any.whl``
-    parses cleanly + exits 2 with the T14 pointer in stderr."""
-    runner = CliRunner()
-    result = runner.invoke(app, ["sign-blob", "./dist/example-0.1.0-py3-none-any.whl"])
-    assert result.exit_code == 2
-    assert "Sprint-7A T14" in result.stderr
+# The original R16 P2 #1 ``sign-blob`` arm pinned the T4 fail-loud
+# stub (exit 2 + "Sprint-7A T14" pointer). T14.A replaced that stub
+# with the real cosign sign-blob orchestrator, so the working-behavior
+# regressions live in ``test_cli_sign.py`` (which drives sign-blob
+# against the task-local fixture pack at
+# ``tests/fixtures/cli_sign_target_pack/`` + a cosign-shim mirroring
+# the Sprint-4 ``test_trust_gate.py::_make_cosign_shim`` pattern).
 
 
 def test_sign_with_bundle_flag_and_pack_path_reaches_stub_exit_pointer() -> None:

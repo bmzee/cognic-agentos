@@ -1,0 +1,21 @@
+# Sprint-7A T14 task-local fixture — minimal-but-valid pyproject.toml
+# for the synthetic agent pack the sign + verify orchestrators exercise.
+# NOT installed by the test runner; the orchestrators read this file +
+# the wheel build target statically.
+
+[project]
+name = "cognic-agent-sign-target"
+version = "0.1.0"
+description = "Sprint-7A T14 fixture — exercises agentos sign --bundle + agentos verify."
+requires-python = ">=3.12"
+dependencies = ["cognic-agentos"]
+
+[project.entry-points."cognic.agents"]
+sign_target = "cognic_agent_sign_target.agent:SignTargetAgent"
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cognic_agent_sign_target"]

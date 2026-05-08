@@ -1,0 +1,51 @@
+# Sprint-7A T14 task-local fixture pack — minimal-but-valid synthetic
+# AGENT pack used by tests/unit/cli/test_cli_sign.py +
+# tests/unit/cli/test_cli_verify.py. Per R6 P2 #2 the fixture is
+# committed alongside T14 so the sign + verify test slices run without
+# T15's examples/ reference packs having landed yet. NOT a production
+# pack; the package source is inert and used only by the sign + verify
+# orchestrator dry-runs.
+#
+# Agent kind chosen so the JWS-signing arm + the verify_agent_card_jws_invalid
+# arm are exercised by the same fixture (tool-kind packs do not ship a
+# JWS, which would leave those arms without test coverage).
+
+[pack]
+pack_id = "cognic-agent-sign-target"
+schema_version = 1
+kind = "agent"
+
+[identity]
+agent_id = "did:web:example.com:agents:sign_target"
+display_name = "Sign Target Agent"
+provider_organization = "Cognic AgentOS Sprint-7A T14 fixtures"
+provider_url = "https://example.com/sprint-7a-t14"
+agent_card_url = "https://example.com/sprint-7a-t14/agents/sign_target/card.json"
+agent_card_jws_path = "agent_cards/agent-card.jws"
+oasf_capability_set = ["test.v1"]
+
+[a2a]
+capabilities_supported = []
+streaming = false
+push_notification_config = false
+extended_agent_card = false
+artifacts_supported = false
+
+[data_governance]
+data_classes = ["public", "internal"]
+purpose = "operational_telemetry"
+retention_policy = "none"
+
+[risk_tier]
+tier = "read_only"
+
+[supply_chain]
+attestation_paths = [
+    "attestations/cosign.sig",
+    "attestations/bundle.sigstore",
+    "attestations/sbom.cdx.json",
+    "attestations/vuln-scan.json",
+    "attestations/license-audit.json",
+    "attestations/slsa-provenance.intoto.json",
+    "attestations/intoto-layout.json",
+]

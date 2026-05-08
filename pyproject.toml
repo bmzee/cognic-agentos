@@ -257,6 +257,13 @@ check_untyped_defs = true
 exclude = [
     "^src/cognic_agentos/cli/templates/",
     "^tests/fixtures/cli_harness_target_pack/",
+    # Sprint-7A T14 — same rationale as T13: the cli_sign_target_pack
+    # fixture is loaded by test code at runtime (sign + verify
+    # orchestrators read its tree directly via the filesystem, NOT via
+    # pip-install). The intra-package import in
+    # ``cognic_agent_sign_target/__init__.py`` is unresolvable to mypy
+    # without the package being installed.
+    "^tests/fixtures/cli_sign_target_pack/",
 ]
 
 [[tool.mypy.overrides]]

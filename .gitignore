@@ -76,6 +76,21 @@ secrets/
 # tracked. The `*.pem` rule above remains in force for every other path.
 !tests/fixtures/cognic_test_agent_pack/cognic_test_agent_pack/agent_cards/test_agent.pub.pem
 
+# Sprint-7A T14 narrow exception: cli/sign.py + cli/verify.py task-local
+# fixture pack ships an explicit test-only RSA keypair (BOTH private +
+# public PEM committed) used by T14's JWS-signing arm + T14's verify
+# happy-path arm to deterministically regenerate + verify the AgentCard
+# JWS in-process. Per R9 P2 #1 the private key is committed (mirrors
+# the Sprint-6 fixture-pack public-PEM pattern but on the private side):
+#  - the keypair is synthetic, no production trust root anywhere trusts it
+#  - the prod settings profile rejects ``signing_key_path`` paths under
+#    ``tests/fixtures/`` or ``examples/`` at startup (config.py:966)
+#  - the ``test_signing_key`` naming + the NOTE.md alongside both PEMs
+#    make the test-only intent unmissable
+# The `*.pem` rule above remains in force for every other path.
+!tests/fixtures/cli_sign_target_pack/attestations/test-signing/test_signing_key.private.pem
+!tests/fixtures/cli_sign_target_pack/attestations/test-signing/test_signing_key.public.pem
+
 # Build artefacts (Sprint 4+ supply chain bundles, ignored from CI checkouts)
 attestations/local/
 
