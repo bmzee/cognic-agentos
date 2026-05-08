@@ -549,8 +549,8 @@ def sign(
         help=(
             "Generate the full Wave-1 attestation set (cosign + SBOM + "
             "SLSA provenance + in-toto layout + AgentCard JWS) per "
-            "Doctrine Decision F. Without --bundle, behaves like "
-            "sign-blob over the pack wheel."
+            "Doctrine Decision F. Without --bundle, this command refuses "
+            "(use ``agentos sign-blob <wheel>`` for the narrow path)."
         ),
     ),
     dev_mode_skip_cosign: bool = typer.Option(
@@ -561,18 +561,93 @@ def sign(
             "prod settings profile per Doctrine F)."
         ),
     ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help=(
+            "Emit the sign report as a single JSON object on stdout "
+            "(deterministic-ordered keys) for CI parsers."
+        ),
+    ),
 ) -> None:
     """Generate the full signed-bundle attestation set for a pack.
 
-    Lands in Sprint-7A T14 — produces cosign signature + SBOM
-    (syft) + SLSA provenance + in-toto layout + license audit +
-    AgentCard JWS (per ADR-016 supply-chain controls).
+    Lands in Sprint-7A T14.B — orchestrates the full Wave-1 recipe:
+    cosign + syft SBOM + grype vuln scan + license audit + SLSA
+    provenance template + in-toto layout template + AgentCard JWS
+    (agent packs only) per Doctrine Decision F + ADR-016. Per-tool
+    fail-loud refusal if any external binary is missing; closed-enum
+    reasons name the missing tool for CI parsers.
+
+    Exits 0 when ``SignReport.overall_status == "pass"``; 1 when the
+    report fails (missing-tool / signing-key-unavailable / subprocess-
+    failed / template-render-failed / JWS-signing-failed).
+
+    Without ``--bundle``, the command refuses + points at
+    ``agentos sign-blob`` for the narrow cosign-only path.
     """
-    del pack_path, bundle, dev_mode_skip_cosign  # placeholders until T14
-    _stub_exit(
-        "agentos sign is not yet wired — lands in Sprint-7A T14 "
-        "(full bundle generator: cosign + SBOM + SLSA + in-toto + JWS)."
+    import asyncio as _asyncio
+
+    from pydantic import ValidationError as _ValidationError
+
+    from cognic_agentos.cli.sign import (
+        format_sign_report,
+        format_sign_report_finding_annotations,
+        format_sign_report_summary,
+        run_sign_bundle,
     )
+    from cognic_agentos.core.config import build_settings_without_env_file
+
+    if not bundle:
+        typer.echo(
+            "agentos sign: --bundle is required for the full Wave-1 "
+            "attestation orchestrator. For the narrow cosign-only path "
+            "use `agentos sign-blob <wheel>`.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    try:
+        settings = build_settings_without_env_file()
+    except _ValidationError as exc:
+        typer.echo(f"agentos sign: Settings validation refused: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+
+    if dev_mode_skip_cosign and not settings.dev_mode_skip_cosign:
+        try:
+            mutated = settings.model_dump()
+            mutated["dev_mode_skip_cosign"] = True
+            settings = type(settings).model_validate(mutated)
+        except _ValidationError as exc:
+            typer.echo(
+                f"agentos sign: --dev-mode-skip-cosign refused by Settings validation: {exc}",
+                err=True,
+            )
+            raise typer.Exit(code=2) from exc
+
+    # R7 P2 #2 reviewer correction: SecretAdapter construction lives
+    # inside the orchestrator (lazy, only for vault:// URIs).
+    # Construction failures collapse into a structured
+    # ``sign_signing_key_unavailable`` finding routed through the
+    # SignReport pipeline — preserves the JSON-output contract for
+    # CI parsers in --json mode. Pre-R7 the CLI built the adapter
+    # eagerly + exited 2 with a plain stderr string, bypassing
+    # JSON output entirely.
+    report = _asyncio.run(
+        run_sign_bundle(
+            pack_path,
+            settings,
+            dev_mode_skip_cosign=settings.dev_mode_skip_cosign,
+        )
+    )
+    if json_output:
+        typer.echo(format_sign_report(report, json_output=True))
+    else:
+        typer.echo(format_sign_report_summary(report))
+        for annotation in format_sign_report_finding_annotations(report):
+            typer.echo(annotation, err=True)
+    if report.overall_status != "pass":
+        raise typer.Exit(code=1)
 
 
 @app.command()
