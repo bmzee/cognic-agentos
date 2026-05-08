@@ -244,8 +244,15 @@ def test_multiple_shape_failures_emit_per_entry_findings(tmp_path: Path) -> None
         _manifest(paths=["", 42, "AUTHOR-FILL: x"]),
         tmp_path,
     )
-    refusal_modes = [
-        f.payload.get("failure_mode")
+    # ``payload["failure_mode"]`` is typed Any (the payload dict is
+    # ``dict[str, Any]``); annotating the comprehension result as
+    # ``list[str]`` propagates the test's actual contract through to
+    # mypy's strict-mode check on ``sorted(...)`` (the alternative
+    # ``f.payload.get("failure_mode")`` returns ``Any | None`` which
+    # trips a SupportsRichComparisonT type-var error per local-gate
+    # mypy run).
+    refusal_modes: list[str] = [
+        f.payload["failure_mode"]
         for f in findings
         if f.reason == "supply_chain_attestation_path_missing"
     ]

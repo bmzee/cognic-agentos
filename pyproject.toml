@@ -244,7 +244,20 @@ check_untyped_defs = true
 # Sprint-7A T5 — exclude the Jinja2 template tree (see the matching
 # ruff extend-exclude block). Templates are render-time artifacts,
 # not importable Python.
-exclude = "^src/cognic_agentos/cli/templates/"
+#
+# Sprint-7A T13 — exclude the harness's task-local fixture pack at
+# tests/fixtures/cli_harness_target_pack/. The fixture is loaded by
+# `cli/test_harness.py` via `importlib.util.spec_from_file_location`
+# at runtime — it is NOT pip-installed, so mypy cannot resolve the
+# intra-package import in `cognic_tool_harness_target/__init__.py`
+# (`from cognic_tool_harness_target.tool import HarnessTargetTool`).
+# Excluding the fixture mirrors how pack repos are out-of-tree for
+# mypy in production: pack code lives in pack repos, the OS only
+# loads it at runtime via the entry-point group.
+exclude = [
+    "^src/cognic_agentos/cli/templates/",
+    "^tests/fixtures/cli_harness_target_pack/",
+]
 
 [[tool.mypy.overrides]]
 module = ["tests.*"]
