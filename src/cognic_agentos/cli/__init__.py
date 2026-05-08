@@ -383,17 +383,41 @@ def test_harness(
         ...,
         help="Path to the pack directory the hybrid harness will exercise.",
     ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help=(
+            "Emit the conformance report as a single JSON object on "
+            "stdout (deterministic-ordered keys) for CI parsers."
+        ),
+    ),
 ) -> None:
     """Run the hybrid test harness against a pack repo.
 
-    Lands in Sprint-7A T13 (hybrid runner: pytest + manifest-validate
-    + the SDK fixture wiring).
+    Per Doctrine Decision C, the harness runs the validate pipeline
+    + dispatch dry-run against fixture adapters (no live transports)
+    + emits a conformance report covering identity / A2A / MCP /
+    data-governance / risk-tier / supply-chain / dispatch outcome.
+
+    Exits 0 when ``HarnessReport.overall_status == "pass"``; 1 when
+    the report fails (validate refusals OR dispatch failures).
     """
-    del pack_path  # placeholder until T13 wires the hybrid runner
-    _stub_exit(
-        "agentos test-harness is not yet wired — lands in Sprint-7A T13 "
-        "(hybrid runner: pytest + manifest-validate + SDK fixtures)."
+    from cognic_agentos.cli.test_harness import (
+        format_report,
+        format_report_finding_annotations,
+        format_report_summary,
+        run_harness,
     )
+
+    report = run_harness(pack_path)
+    if json_output:
+        typer.echo(format_report(report, json_output=True))
+    else:
+        typer.echo(format_report_summary(report))
+        for annotation in format_report_finding_annotations(report):
+            typer.echo(annotation, err=True)
+    if report.overall_status != "pass":
+        raise typer.Exit(code=1)
 
 
 @app.command(name="sign-blob")

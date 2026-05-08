@@ -131,13 +131,12 @@ def test_command_help_exits_zero(command_name: str) -> None:
 # tmp_path + asserts orchestrator exit codes + stderr shape directly).
 
 
-def test_test_harness_with_pack_path_reaches_stub_exit_pointer() -> None:
-    """``agentos test-harness .`` parses cleanly + exits 2 with the
-    T13 pointer in stderr."""
-    runner = CliRunner()
-    result = runner.invoke(app, ["test-harness", "."])
-    assert result.exit_code == 2
-    assert "Sprint-7A T13" in result.stderr
+# The original R16 P2 #1 ``test-harness`` arm pinned the T4 fail-loud
+# stub (exit 2 + "Sprint-7A T13" pointer). T13 replaced that stub with
+# the real hybrid runner, so the working-behavior regressions live in
+# ``test_cli_test_harness.py`` (which drives the harness against the
+# task-local fixture pack at ``tests/fixtures/cli_harness_target_pack/``
+# + asserts the conformance-report shape + Typer exit codes directly).
 
 
 def test_sign_blob_with_wheel_path_reaches_stub_exit_pointer() -> None:
