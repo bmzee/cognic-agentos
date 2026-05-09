@@ -1,0 +1,15 @@
+{
+  "name": "example_minimal",
+  "agent_id": "did:web:example.com:agents:example_minimal",
+  "display_name": "Example Minimal Agent",
+  "provider_organization": "Cognic AgentOS Sprint-7A T15 reference",
+  "provider_url": "https://example.com/sprint-7a-t15",
+  "description": "T15 reference agent — exercises the per-kind Wave-1 author lifecycle (scaffold -> sign -> validate -> harness refused -> verify).",
+  "capabilities": {
+    "streaming": false,
+    "push_notification_config": false,
+    "extended_agent_card": false,
+    "artifacts_supported": false
+  },
+  "schema_version": "1.0"
+}

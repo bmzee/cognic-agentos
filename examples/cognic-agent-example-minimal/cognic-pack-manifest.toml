@@ -1,0 +1,54 @@
+# Sprint-7A T15 reference pack — minimal-but-valid AGENT pack.
+#
+# Purpose: demonstrate the per-kind Wave-1 author lifecycle for agents
+# (`scaffold → sign → validate → harness (refused with closed-enum
+# `harness_unsupported_pack_kind`) → verify`). The harness
+# narrowing is documented at T13/R31 and locked by the
+# ``_HARNESS_SUPPORTED_KINDS = frozenset({"tool"})`` literal in
+# `cli/test_harness.py`. Agent-pack harness expansion lands in a
+# follow-up Sprint-7B task; sign + verify (incl. AgentCard JWS) are
+# kind-aware and DO exercise the agent path here.
+#
+# Doctrine D (plan §59): minimal-but-valid; neutral name; no
+# `AUTHOR-FILL:` placeholders.
+
+[pack]
+pack_id = "cognic-agent-example-minimal"
+schema_version = 1
+kind = "agent"
+
+[identity]
+agent_id = "did:web:example.com:agents:example_minimal"
+display_name = "Example Minimal Agent"
+provider_organization = "Cognic AgentOS Sprint-7A T15 reference"
+provider_url = "https://example.com/sprint-7a-t15"
+agent_card_url = "https://example.com/sprint-7a-t15/agents/example_minimal/card.json"
+agent_card_jws_path = "agent_cards/agent-card.jws"
+oasf_capability_set = ["example.v1"]
+
+[a2a]
+capabilities_supported = []
+streaming = false
+push_notification_config = false
+extended_agent_card = false
+artifacts_supported = false
+
+[data_governance]
+data_classes = ["public", "internal"]
+purpose = "operational_telemetry"
+retention_policy = "none"
+egress_allow_list = []
+
+[risk_tier]
+tier = "read_only"
+
+[supply_chain]
+attestation_paths = [
+    "attestations/cosign.sig",
+    "attestations/bundle.sigstore",
+    "attestations/sbom.cdx.json",
+    "attestations/vuln-scan.json",
+    "attestations/license-audit.json",
+    "attestations/slsa-provenance.intoto.json",
+    "attestations/intoto-layout.json",
+]

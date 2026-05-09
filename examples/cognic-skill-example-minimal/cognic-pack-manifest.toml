@@ -1,0 +1,49 @@
+# Sprint-7A T15 reference pack — minimal-but-valid SKILL pack.
+#
+# Purpose: demonstrate the per-kind Wave-1 author lifecycle for skills
+# (`scaffold → sign → validate → harness (refused with closed-enum
+# `harness_unsupported_pack_kind`) → verify`). The harness
+# narrowing is documented at T13/R31 and locked by the
+# ``_HARNESS_SUPPORTED_KINDS = frozenset({"tool"})`` literal in
+# `cli/test_harness.py`. Skill-pack harness expansion lands in a
+# follow-up Sprint-7B task; sign + verify are kind-agnostic.
+#
+# Doctrine D (plan §59): minimal-but-valid; neutral name; no
+# `AUTHOR-FILL:` placeholders.
+
+[pack]
+pack_id = "cognic-skill-example-minimal"
+schema_version = 1
+kind = "skill"
+
+[identity]
+agent_id = "did:web:example.com:skills:example_minimal"
+display_name = "Example Minimal Skill"
+provider_organization = "Cognic AgentOS Sprint-7A T15 reference"
+provider_url = "https://example.com/sprint-7a-t15"
+agent_card_url = "https://example.com/sprint-7a-t15/skills/example_minimal/card.json"
+oasf_capability_set = ["example.v1"]
+
+[mcp]
+caching = false
+elicitation_form = false
+
+[data_governance]
+data_classes = ["public"]
+purpose = "operational_telemetry"
+retention_policy = "none"
+egress_allow_list = []
+
+[risk_tier]
+tier = "read_only"
+
+[supply_chain]
+attestation_paths = [
+    "attestations/cosign.sig",
+    "attestations/bundle.sigstore",
+    "attestations/sbom.cdx.json",
+    "attestations/vuln-scan.json",
+    "attestations/license-audit.json",
+    "attestations/slsa-provenance.intoto.json",
+    "attestations/intoto-layout.json",
+]

@@ -1,0 +1,49 @@
+# Sprint-7A T15 reference pack — minimal-but-valid TOOL pack.
+#
+# Purpose: demonstrate the per-kind Wave-1 author lifecycle for tools
+# (`scaffold → sign → validate → harness (PASS) → verify`). Inert by
+# design: the entry-point object's `invoke` returns ``{"echo": <input>}``;
+# this pack does NOT model production tool behavior. Banks consume the
+# templates at `cli/templates/tool/` for real packs; this directory is
+# the lifecycle gate.
+#
+# Doctrine D (plan §59): minimal-but-valid; neutral name (`example-minimal`,
+# not a domain-specific stem); no `AUTHOR-FILL:` placeholders so every
+# validator passes from the committed shape.
+
+[pack]
+pack_id = "cognic-tool-example-minimal"
+schema_version = 1
+kind = "tool"
+
+[identity]
+agent_id = "did:web:example.com:tools:example_minimal"
+display_name = "Example Minimal Tool"
+provider_organization = "Cognic AgentOS Sprint-7A T15 reference"
+provider_url = "https://example.com/sprint-7a-t15"
+agent_card_url = "https://example.com/sprint-7a-t15/tools/example_minimal/card.json"
+oasf_capability_set = ["example.v1"]
+
+[mcp]
+caching = false
+elicitation_form = false
+
+[data_governance]
+data_classes = ["public"]
+purpose = "operational_telemetry"
+retention_policy = "none"
+egress_allow_list = []
+
+[risk_tier]
+tier = "read_only"
+
+[supply_chain]
+attestation_paths = [
+    "attestations/cosign.sig",
+    "attestations/bundle.sigstore",
+    "attestations/sbom.cdx.json",
+    "attestations/vuln-scan.json",
+    "attestations/license-audit.json",
+    "attestations/slsa-provenance.intoto.json",
+    "attestations/intoto-layout.json",
+]

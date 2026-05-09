@@ -90,6 +90,14 @@ secrets/
 # The `*.pem` rule above remains in force for every other path.
 !tests/fixtures/cli_sign_target_pack/attestations/test-signing/test_signing_key.private.pem
 !tests/fixtures/cli_sign_target_pack/attestations/test-signing/test_signing_key.public.pem
+# Sprint-7A T15: same rationale as the T14 fixture pair above; this
+# pair lives under examples/cognic-agent-example-minimal/ so the T15
+# reference-pack lifecycle test can deterministically sign + verify
+# the AgentCard JWS without live signing infrastructure. See
+# examples/cognic-agent-example-minimal/attestations/test-signing/NOTE.md
+# for the full rationale + audit trail.
+!examples/cognic-agent-example-minimal/attestations/test-signing/test_signing_key.private.pem
+!examples/cognic-agent-example-minimal/attestations/test-signing/test_signing_key.public.pem
 
 # Build artefacts (Sprint 4+ supply chain bundles, ignored from CI checkouts)
 attestations/local/
