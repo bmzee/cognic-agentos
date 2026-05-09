@@ -49,6 +49,56 @@ April-2026 OX-Security disclosures' threat model depend on, and ride
 the same strict 95% line / 90% branch floor; gate size grows from 16
 modules to 21.
 
+Sprint 7A T16 extends the gate with the **authoring SDK + CLI**
+nonet — nine modules that together form the build-time half of the
+trust gate (mirrors the runtime trust gate's protocol/* modules
+already on the floor):
+
+  * ``cli/validate.py`` — orchestrator that coordinates the six
+    per-concern validators + the shape gate; the build-time
+    counterpart to the runtime ``protocol/plugin_registry.py`` per
+    Doctrine Decision G.
+  * ``cli/validators/identity.py`` — AGNTCY/OASF Wave-1 strictness
+    on the [identity] block. Wire-protocol-public for cross-org
+    agent discovery.
+  * ``cli/validators/a2a.py`` — Wave-2 capability-feature refusal
+    on the [a2a] block (T8/R28 promotion call deferred to T16; on
+    review the validator owns refusal paths the runtime reader does
+    NOT — runtime silently filters, validator refuses → policy, not
+    delegation; promoted at T16).
+  * ``cli/validators/data_governance.py`` — ADR-017 contract
+    validation on the [data_governance] block. Runtime DLP
+    enforcement reads the same closed-enum vocabulary.
+  * ``cli/validators/supply_chain.py`` — ADR-016 attestation-paths
+    declaration validator. Feeds the runtime trust gate.
+  * ``cli/sign.py`` — full-bundle generator: cosign sign-blob +
+    syft SBOM + grype vuln scan + license audit + AgentCard JWS +
+    SLSA provenance + in-toto layout + 7-attestation persister.
+    Security-critical signing path.
+  * ``cli/verify.py`` — offline trust gate per ADR-016 Sprint-7A
+    mandate (R2 P2 #5). 11-step orchestrator mirroring the
+    Sprint-4 runtime trust-gate verification path. R15 follow-up
+    round 2 P2 #1 moved the load probe to step 11 (FINAL gate)
+    so pack code never executes until every non-executing trust
+    check has passed.
+  * ``cli/_load_probe.py`` — isolated-subprocess EntryPoint.load()
+    probe. R15 follow-up round 2 P2 #2 hardened the result channel
+    (fd inheritance + per-invocation success token + token-write
+    only after ep.load() returns + parent enforces token match).
+    Step 11 of the verify trust pipeline.
+  * ``cli/_wheel_integrity.py`` — wheel identity + dist-info +
+    METADATA + entry-point shape validator. Helper threads the
+    validated (module, object) tuples to verify so the load probe
+    operates on the same source the helper validated (R15
+    follow-up round 1 P2 #1 fix).
+
+All nine ride the same single strict 95% line / 90% branch floor.
+Off-gate per Doctrine Decision G's pure-delegation rule:
+``cli/validators/mcp.py`` (narrow caching/elicitation refusals
+delegating to cross-checks) and ``cli/validators/risk_tier.py``
+(closed-enum check + vocabulary delegation). Gate size grows from
+28 modules to 37.
+
 Sprint 6 T15 extends the gate with the A2A endpoint septet —
 ``protocol/a2a_authz.py`` (per-tenant pinned-token validator),
 ``protocol/a2a_agent_cards.py`` (three-pass Agent Card validator +
@@ -257,6 +307,26 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     ("src/cognic_agentos/protocol/a2a_version.py", 0.95, 0.90),
     ("src/cognic_agentos/protocol/a2a_errors.py", 0.95, 0.90),
     ("src/cognic_agentos/protocol/ui_events.py", 0.95, 0.90),
+    # Sprint 7A T16 — authoring SDK + CLI nonet. Build-time half of
+    # the trust gate; mirrors the runtime trust gate's protocol/*
+    # modules above. See module docstring for per-module rationale.
+    # T8 (a2a.py) promotion call deferred at landing → resolved at
+    # T16 closeout: validator owns refusal paths the runtime reader
+    # does not (runtime filters silently, validator refuses), so it
+    # qualifies as policy under Doctrine Decision G's "non-trivial
+    # allow/deny logic" rule and joins the gate.
+    # Off-gate per the pure-delegation rule: cli/validators/mcp.py
+    # (narrow caching/elicitation refusals) + cli/validators/risk_tier.py
+    # (closed-enum + vocabulary delegation).
+    ("src/cognic_agentos/cli/validate.py", 0.95, 0.90),
+    ("src/cognic_agentos/cli/validators/identity.py", 0.95, 0.90),
+    ("src/cognic_agentos/cli/validators/a2a.py", 0.95, 0.90),
+    ("src/cognic_agentos/cli/validators/data_governance.py", 0.95, 0.90),
+    ("src/cognic_agentos/cli/validators/supply_chain.py", 0.95, 0.90),
+    ("src/cognic_agentos/cli/sign.py", 0.95, 0.90),
+    ("src/cognic_agentos/cli/verify.py", 0.95, 0.90),
+    ("src/cognic_agentos/cli/_load_probe.py", 0.95, 0.90),
+    ("src/cognic_agentos/cli/_wheel_integrity.py", 0.95, 0.90),
 )
 
 

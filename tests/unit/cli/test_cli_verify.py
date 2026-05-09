@@ -6412,3 +6412,201 @@ def test_verify_load_probe_step_11_runs_after_step_10(
         "Step 5c reference still in verify orchestrator — load probe must "
         "run at step 11, not step 5c, per R15 follow-up P2 #1"
     )
+
+
+# ---------------------------------------------------------------
+# Section AD — T16 critical-controls coverage gate (defensive branches)
+# ---------------------------------------------------------------
+# Sprint-7A T16 promotes cli/verify.py + cli/_load_probe.py to the
+# strict 95/90 critical-controls coverage gate. The defensive
+# error-path branches in both modules ride above 95% line + 90%
+# branch only when the harder-to-reach OSError / RuntimeError /
+# malformed-result paths are exercised. These tests fill those gaps
+# via narrow monkeypatched stubs rather than by writing pathological
+# fixture packs (which would couple the tests to specific filesystem
+# states).
+
+
+def test_load_probe_non_dict_json_emits_unparseable_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T16: probe result file parses as valid JSON but is NOT a dict
+    (e.g., a list, a number) → ``load_probe_unparseable_output`` with
+    ``actual_type`` payload field. Covers the
+    ``isinstance(result, dict)`` defensive guard at
+    cli/_load_probe.py:457-470."""
+    pack = _stage_signed_pack(tmp_path, monkeypatch)
+    verify_shim = _make_cosign_shim(tmp_path, exit_code=0)
+    _wire_verify_settings(monkeypatch, cosign_path=verify_shim, trust_root=_TEST_PUBLIC_PEM)
+
+    import cognic_agentos.cli._load_probe as _probe_module
+
+    # A probe script that writes a JSON LIST (not a dict) to the
+    # inherited result fd. argv[1] is the fd integer post-R15-fold-up.
+    monkeypatch.setattr(
+        _probe_module,
+        "_PROBE_SCRIPT_SOURCE",
+        ("import os, sys\nos.fdopen(int(sys.argv[1]), 'w').write('[1, 2, 3]')\n"),
+    )
+    runner = CliRunner()
+    result = runner.invoke(app, ["verify", "--json", str(pack)])
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    refusing = next(
+        f for f in payload["findings"] if f.get("reason") == "verify_entry_point_load_failed"
+    )
+    assert refusing["payload"]["failure_mode"] == "load_probe_unparseable_output"
+    assert refusing["payload"].get("actual_type") == "list", refusing["payload"]
+
+
+def test_load_probe_unrecognized_phase_emits_unparseable_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T16: probe result has ``ok=False`` but a phase value the parent
+    doesn't recognize (e.g., a typo or a hostile probe). Returns
+    ``load_probe_unparseable_output`` with a payload carrying the
+    full result dict for diagnosis. Covers the
+    ``phase not in _FAILURE_MODE_BY_PHASE`` defensive guard at
+    cli/_load_probe.py:499-511."""
+    pack = _stage_signed_pack(tmp_path, monkeypatch)
+    verify_shim = _make_cosign_shim(tmp_path, exit_code=0)
+    _wire_verify_settings(monkeypatch, cosign_path=verify_shim, trust_root=_TEST_PUBLIC_PEM)
+
+    import cognic_agentos.cli._load_probe as _probe_module
+
+    # A probe script that writes ok=False with an unrecognized phase.
+    monkeypatch.setattr(
+        _probe_module,
+        "_PROBE_SCRIPT_SOURCE",
+        (
+            "import json, os, sys\n"
+            'os.fdopen(int(sys.argv[1]), "w").write('
+            'json.dumps({"ok": False, "phase": "unknown_phase_xyz"}))\n'
+        ),
+    )
+    runner = CliRunner()
+    result = runner.invoke(app, ["verify", "--json", str(pack)])
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    refusing = next(
+        f for f in payload["findings"] if f.get("reason") == "verify_entry_point_load_failed"
+    )
+    assert refusing["payload"]["failure_mode"] == "load_probe_unparseable_output"
+    assert refusing["payload"]["result"]["phase"] == "unknown_phase_xyz", refusing["payload"]
+
+
+def test_verify_empty_validated_entry_points_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T16: defense-in-depth fail-closed when wheel-integrity returns
+    no validated entry points but execution reaches step 11 anyway.
+    Should never happen in practice — ``wheel_empty_cognic_entry_point_group``
+    fires upstream — but the defensive branch refuses with closed-enum
+    ``load_probe_no_validated_entry_points``. Covers verify.py:2800-2818."""
+    pack = _stage_signed_pack(tmp_path, monkeypatch)
+    verify_shim = _make_cosign_shim(tmp_path, exit_code=0)
+    _wire_verify_settings(monkeypatch, cosign_path=verify_shim, trust_root=_TEST_PUBLIC_PEM)
+
+    # Monkeypatch the wheel-integrity helper to return an empty
+    # entry-points tuple. The earlier validate steps have already run
+    # by the time verify reaches this code path, so we patch at the
+    # source module — verify imports it lazily inside the orchestrator.
+    import cognic_agentos.cli._wheel_integrity as _wheel_integrity_module
+
+    original = _wheel_integrity_module.read_signed_wheel_dist_info_metadata
+
+    def _patched(wheel_path: Path, **kwargs: Any) -> Any:
+        result, failure = original(wheel_path, **kwargs)
+        if result is None:
+            return result, failure
+        # Replace the entry-points slot with an empty tuple.
+        name, version, kind, _ = result
+        return (name, version, kind, ()), None
+
+    monkeypatch.setattr(
+        _wheel_integrity_module,
+        "read_signed_wheel_dist_info_metadata",
+        _patched,
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["verify", "--json", str(pack)])
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    refusing = next(
+        f for f in payload["findings"] if f.get("reason") == "verify_entry_point_load_failed"
+    )
+    assert refusing["payload"]["failure_mode"] == "load_probe_no_validated_entry_points"
+
+
+def test_verify_cosign_path_falls_back_to_shutil_which_none(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T16: when ``COGNIC_COSIGN_PATH`` is unset AND ``shutil.which``
+    returns None, verify refuses with closed-enum
+    ``verify_cosign_signature_invalid`` (failure_mode
+    ``cosign_not_installed``). Covers the fallback branch at
+    verify.py:725-727."""
+    pack = _stage_signed_pack(tmp_path, monkeypatch)
+    # Clear the cosign-path env var so the fallback `shutil.which`
+    # branch fires. _wire_verify_settings would otherwise wire it.
+    monkeypatch.delenv("COGNIC_COSIGN_PATH", raising=False)
+    monkeypatch.setenv("COGNIC_SIGNING_TRUST_ROOT_PATH", str(_TEST_PUBLIC_PEM))
+
+    # shutil is module-global; verify.py imports it at module top
+    # level, so patching shutil.which directly is sufficient for
+    # the fallback branch (verify.py:725) to fire.
+    import shutil as _shutil
+
+    monkeypatch.setattr(_shutil, "which", lambda _binary: None)
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["verify", "--json", str(pack)])
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    reasons = [f["reason"] for f in payload["findings"]]
+    assert "verify_cosign_signature_invalid" in reasons, reasons
+    refusing = next(
+        f for f in payload["findings"] if f["reason"] == "verify_cosign_signature_invalid"
+    )
+    assert refusing["payload"]["failure_mode"] == "cosign_not_installed"
+
+
+def test_verify_path_resolve_oserror_on_attestation_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T16: ``Path.resolve`` raising OSError (e.g., self-referential
+    symlink, unreadable parent) during attestation-path containment
+    check yields ``verify_attestation_path_unresolvable``. Covers the
+    defensive (OSError, RuntimeError) branches sprinkled across the
+    helper functions verify.py uses for attestation + wheel +
+    intoto-kind-probe path resolution."""
+    pack = _stage_signed_pack(tmp_path, monkeypatch)
+    verify_shim = _make_cosign_shim(tmp_path, exit_code=0)
+    _wire_verify_settings(monkeypatch, cosign_path=verify_shim, trust_root=_TEST_PUBLIC_PEM)
+
+    # Monkeypatch Path.resolve to raise OSError for any path under
+    # the staged pack's attestations/cosign.sig — that's the FIRST
+    # attestation file Step 3 probes, so the defensive branch fires
+    # on the first attempt.
+    original_resolve = Path.resolve
+    target_substr = "attestations/cosign.sig"
+
+    def _flaky_resolve(self: Path, *args: Any, **kwargs: Any) -> Path:
+        if target_substr in str(self):
+            raise OSError("simulated resolve failure for T16 coverage")
+        return original_resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", _flaky_resolve)
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["verify", "--json", str(pack)])
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    reasons = [f["reason"] for f in payload["findings"]]
+    assert "verify_attestation_path_unresolvable" in reasons, reasons
