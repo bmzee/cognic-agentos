@@ -197,14 +197,24 @@ _VALIDATOR_REASON_OWNERSHIP: Final[dict[ValidatorReason, str]] = {
     "verify_attestation_path_unresolvable": "verify.py",
     "verify_agent_card_jws_invalid": "verify.py",
     "verify_trust_root_path_unresolvable": "verify.py",
-    # Hooks (Sprint-7A2 T6 — cli/validators/hooks.py)
+    # Hooks (Sprint-7A2 T4 + T6).
+    # ``hook_pack_kind_constraint_violated`` is owned by ``validate.py``
+    # because the orchestrator-level forbidden-block check (Sprint-7A2
+    # T4: refuse ``[a2a]`` / ``[mcp]`` for ``kind="hook"``) emits it
+    # BEFORE per-concern dispatch — keeps the 1:1 ownership map
+    # invariant (one reason → one owning file) without forcing
+    # validators/hooks.py to import the orchestrator's check or
+    # forcing the orchestrator to defer the refusal to a per-concern
+    # validator that hasn't run yet. T6's ``validators/hooks.py``
+    # uses the other 8 hook_* reasons for in-block + cross-reference
+    # checks.
     "hook_block_shape_invalid": "validators/hooks.py",
     "hook_id_invalid": "validators/hooks.py",
     "hook_phase_invalid": "validators/hooks.py",
     "hook_ordering_class_invalid": "validators/hooks.py",
     "hook_timeout_invalid": "validators/hooks.py",
     "hook_fail_policy_invalid": "validators/hooks.py",
-    "hook_pack_kind_constraint_violated": "validators/hooks.py",
+    "hook_pack_kind_constraint_violated": "validate.py",
     "hook_entry_point_mismatch": "validators/hooks.py",
     "hook_unresolved_reference": "validators/hooks.py",
     "verify_entry_point_load_failed": "verify.py",

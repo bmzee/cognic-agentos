@@ -8,14 +8,26 @@ under-identified packs.
 
 Wave-1 strictness matrix:
 
-  - Universally mandatory (every pack kind): ``agent_id`` /
-    ``display_name`` / ``provider_organization`` / ``provider_url``.
-    Missing OR ``AUTHOR-FILL`` placeholder OR empty string OR
-    non-string → closed-enum refusal per field.
+  - Universally mandatory (every pack kind — tool / skill / agent /
+    hook): ``agent_id`` / ``display_name`` /
+    ``provider_organization`` / ``provider_url``. Missing OR
+    ``AUTHOR-FILL`` placeholder OR empty string OR non-string →
+    closed-enum refusal per field.
   - Agent-pack-only mandatory: ``agent_card_url`` /
-    ``agent_card_jws_path``. Tool + skill packs are NOT checked
-    against these (the field is meaningless outside the agent
-    discovery surface).
+    ``agent_card_jws_path``. Tool + skill + **hook** packs are NOT
+    checked against these (the field is meaningless outside the
+    agent discovery surface). Sprint-7A2 T4 amendment: hook packs
+    explicitly mirror the tool/skill behavior here — hook packs do
+    NOT ship an AgentCard JWS, so the agent-only requirement is
+    correctly skipped via the existing ``pack_kind == "agent"``
+    branch. The Sprint-7A2 T6 hook validator
+    (``cli/validators/hooks.py``) adds the ACTIVE refusal for hook
+    packs that DECLARE ``agent_card_jws_path`` (closed-enum
+    ``hook_pack_kind_constraint_violated`` with
+    ``failure_mode=agent_card_jws_path_forbidden``); the identity
+    validator itself stays kind-agnostic for that field per the
+    one-validator-owns-each-refusal invariant in the closed-enum
+    ownership map.
   - ``agent_card_jws_path`` resolves: pack-relative path must point
     at an existing file. Missing-or-placeholder path surfaces as
     ``identity_agent_card_jws_path_missing``; present-but-unresolvable
@@ -271,9 +283,12 @@ def _validate_identity_block(
                 )
             )
 
-    # Agent-pack-only mandatory fields. Tool + skill packs skip these
-    # — agent_card_url and agent_card_jws_path are meaningless outside
-    # the agent-discovery surface.
+    # Agent-pack-only mandatory fields. Tool + skill + hook packs
+    # skip these — agent_card_url and agent_card_jws_path are
+    # meaningless outside the agent-discovery surface. Sprint-7A2 T4:
+    # hook packs explicitly follow the tool/skill skip behavior; the
+    # active refusal for hook packs that DECLARE agent_card_jws_path
+    # lives in cli/validators/hooks.py (Sprint-7A2 T6).
     if pack_kind == "agent":
         if _is_missing_or_placeholder(block.get("agent_card_url")):
             findings.append(

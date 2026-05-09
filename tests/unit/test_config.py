@@ -1715,26 +1715,37 @@ class TestSprint7A2HookVocabulary:
         assert isinstance(settings.hook_max_timeout_s, float)
 
     def test_hook_validator_reasons_owned_by_validators_hooks_py(self) -> None:
-        """All 9 hook_* ValidatorReason entries route to
-        ``validators/hooks.py`` ownership — pinned so a future T6
-        author cannot accidentally split hook reasons across
-        multiple validator files (each closed-enum reason lands in
-        exactly one file per the ownership-map invariant)."""
+        """8 of 9 hook_* ValidatorReason entries route to
+        ``validators/hooks.py`` ownership; the 9th
+        (``hook_pack_kind_constraint_violated``) routes to
+        ``validate.py`` because the orchestrator-level forbidden-
+        block check (Sprint-7A2 T4: refuse [a2a] / [mcp] for
+        kind="hook") emits it BEFORE per-concern dispatch.
+
+        Pinned so a future T6 author cannot accidentally split hook
+        reasons across multiple validator files OR drift the
+        T4-owned reason back into validators/hooks.py — each closed-
+        enum reason lands in exactly one file per the ownership-map
+        invariant."""
         from cognic_agentos.cli import _VALIDATOR_REASON_OWNERSHIP, ValidatorReason
 
-        hook_reasons: set[ValidatorReason] = {
+        hook_reasons_owned_by_hooks_py: set[ValidatorReason] = {
             "hook_block_shape_invalid",
             "hook_id_invalid",
             "hook_phase_invalid",
             "hook_ordering_class_invalid",
             "hook_timeout_invalid",
             "hook_fail_policy_invalid",
-            "hook_pack_kind_constraint_violated",
             "hook_entry_point_mismatch",
             "hook_unresolved_reference",
         }
-        for reason in hook_reasons:
+        for reason in hook_reasons_owned_by_hooks_py:
             assert _VALIDATOR_REASON_OWNERSHIP[reason] == "validators/hooks.py", (
                 f"hook reason {reason!r} must be owned by validators/hooks.py; "
                 f"got {_VALIDATOR_REASON_OWNERSHIP[reason]!r}"
             )
+        # The 9th hook reason — the orchestrator-emitted one — is
+        # owned by validate.py per Sprint-7A2 T4. Moving it back to
+        # validators/hooks.py would break the 1:1 ownership invariant
+        # because validate.py would then emit a reason it doesn't own.
+        assert _VALIDATOR_REASON_OWNERSHIP["hook_pack_kind_constraint_violated"] == "validate.py"
