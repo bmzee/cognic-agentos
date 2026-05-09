@@ -95,9 +95,10 @@ ValidatorReason = Literal[
     "sign_provenance_template_render_failed",
     "sign_intoto_layout_template_render_failed",
     # Verify (T14 — offline trust gate per ADR-016 Sprint-7A mandate;
-    # mirrors the Sprint-4 runtime trust-gate verification path; 7
+    # mirrors the Sprint-4 runtime trust-gate verification path; 8
     # closed-enum reasons covering each of the 6 verification steps
-    # plus the trust-root-resolution refusal R7 P2 #2 added).
+    # plus the trust-root-resolution refusal (R7 P2 #2) plus the
+    # entry-point load probe (R15 pivot).
     "verify_cosign_signature_invalid",
     "verify_sbom_digest_mismatch",
     "verify_provenance_invalid",
@@ -105,6 +106,12 @@ ValidatorReason = Literal[
     "verify_attestation_path_unresolvable",
     "verify_agent_card_jws_invalid",
     "verify_trust_root_path_unresolvable",
+    # R15 reviewer pivot: replace the static-AST loadability walk with
+    # a real isolated-subprocess EntryPoint.load() probe. The probe's
+    # closed-enum sub-cases live under ``payload.failure_mode``; this
+    # top-level reason owns every load-probe refusal so admission can
+    # distinguish loadability from declarative shape failures.
+    "verify_entry_point_load_failed",
 ]
 
 
@@ -173,6 +180,7 @@ _VALIDATOR_REASON_OWNERSHIP: Final[dict[ValidatorReason, str]] = {
     "verify_attestation_path_unresolvable": "verify.py",
     "verify_agent_card_jws_invalid": "verify.py",
     "verify_trust_root_path_unresolvable": "verify.py",
+    "verify_entry_point_load_failed": "verify.py",
 }
 
 
@@ -661,21 +669,48 @@ def verify(
         "--trust-root",
         help=(
             "Trust-root path (or ``vault://...`` URI resolved via the "
-            "SecretAdapter) the cosign + JWS verifications run against."
+            "SecretAdapter) the cosign + JWS verifications run against. "
+            "Overrides Settings.signing_trust_root_path."
         ),
+    ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Emit machine-parseable JSON to stdout instead of text.",
     ),
 ) -> None:
     """Offline trust-gate verifier — verify a signed pack's bundle.
 
-    Lands in Sprint-7A T14 — mirrors the runtime
-    ``protocol/trust_gate.py`` checks so pack authors can verify
-    locally before publishing.
+    Mirrors the runtime ``protocol/trust_gate.py`` checks so pack
+    authors can verify locally before publishing. Sprint-7A T14.C.
     """
-    del pack_path, trust_root  # placeholders until T14
-    _stub_exit(
-        "agentos verify is not yet wired — lands in Sprint-7A T14 "
-        "(offline trust-gate verifier mirroring protocol/trust_gate)."
+    import asyncio as _asyncio
+    import sys as _sys
+
+    from cognic_agentos.cli.verify import (
+        format_verify_report,
+        format_verify_report_finding_annotations,
+        format_verify_report_summary,
+        run_verify,
     )
+    from cognic_agentos.core.config import Settings
+
+    settings = Settings()
+    report = _asyncio.run(
+        run_verify(
+            pack_path=pack_path,
+            settings=settings,
+            trust_root=trust_root,
+        )
+    )
+    if json_output:
+        typer.echo(format_verify_report(report, json_output=True))
+    else:
+        typer.echo(format_verify_report_summary(report))
+        for line in format_verify_report_finding_annotations(report):
+            print(line, file=_sys.stderr)
+    if report.overall_status != "pass":
+        raise typer.Exit(code=1)
 
 
 __all__ = [

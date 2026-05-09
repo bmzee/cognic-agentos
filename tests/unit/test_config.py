@@ -1539,7 +1539,9 @@ class TestSprint7AClosedEnumVocabulary:
                 "sign_agent_card_jws_signing_failed",
                 "sign_provenance_template_render_failed",
                 "sign_intoto_layout_template_render_failed",
-                # Verify (T14 — offline trust gate per ADR-016 Sprint-7A)
+                # Verify (T14 — offline trust gate per ADR-016 Sprint-7A;
+                # R15 pivot adds verify_entry_point_load_failed for the
+                # isolated-subprocess EntryPoint.load() probe).
                 "verify_cosign_signature_invalid",
                 "verify_sbom_digest_mismatch",
                 "verify_provenance_invalid",
@@ -1547,6 +1549,7 @@ class TestSprint7AClosedEnumVocabulary:
                 "verify_attestation_path_unresolvable",
                 "verify_agent_card_jws_invalid",
                 "verify_trust_root_path_unresolvable",
+                "verify_entry_point_load_failed",
             }
         )
 

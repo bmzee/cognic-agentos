@@ -941,23 +941,75 @@ def _make_tool_shim(
 
 
 def _stage_pack_with_wheel(tmp_path: Path, *, kind: str = "agent") -> Path:
-    """Copy the fixture pack to ``tmp_path`` + stage a placeholder
-    wheel under ``<pack>/dist/`` so sign --bundle's wheel-discovery
-    succeeds. Returns the staged pack root.
+    """Copy the fixture pack to ``tmp_path`` + stage a real ZIP-shaped
+    wheel under ``<pack>/dist/`` so sign --bundle's wheel-discovery +
+    R7 P2 #1 wheel-content integrity check both succeed. Returns the
+    staged pack root.
 
-    ``kind`` controls which fixture pack to clone:
-      - ``"agent"`` (default) — uses the T14 fixture
-        (``cli_sign_target_pack``, kind=agent).
-      - Future: ``"tool"`` — when T14.B adds tool-pack arms.
+    R7 P2 #1 reviewer correction (T14.C): the wheel MUST be a real
+    ZIP with a properly-named ``dist-info/`` containing a ``METADATA``
+    file (whose Name + Version agree with the wheel filename) and an
+    ``entry_points.txt`` (with at least one PEP 621
+    ``module:object`` entry under the appropriate ``cognic.{kind}s``
+    group). Pre-fix tests used synthetic ``b"PK\\x03\\x04..."`` byte
+    strings, which the new shared wheel-integrity helper refuses.
+
+    ``kind`` controls which fixture pack to clone (default ``agent``).
     """
     import shutil as _shutil
+    import zipfile as _zipfile
 
     pack_root = tmp_path / "staged_pack"
     _shutil.copytree(_SIGN_TARGET_PACK, pack_root)
     dist_dir = pack_root / "dist"
     dist_dir.mkdir(exist_ok=True)
     wheel = dist_dir / "cognic_agent_sign_target-0.1.0-py3-none-any.whl"
-    wheel.write_bytes(b"PK\x03\x04synthetic-wheel-bytes-for-T14B")
+    dist_info = "cognic_agent_sign_target-0.1.0.dist-info"
+    if kind == "agent":
+        ep_group = "cognic.agents"
+        ep_target = "cognic_agent_sign_target.agent:SignTargetAgent"
+    elif kind == "tool":
+        ep_group = "cognic.tools"
+        ep_target = "cognic_agent_sign_target.tool:SignTargetTool"
+    else:
+        ep_group = "cognic.skills"
+        ep_target = "cognic_agent_sign_target.skill:SignTargetSkill"
+    with _zipfile.ZipFile(wheel, "w", _zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(
+            f"{dist_info}/entry_points.txt",
+            f"[{ep_group}]\nsign_target = {ep_target}\n",
+        )
+        zf.writestr(
+            f"{dist_info}/METADATA",
+            "Metadata-Version: 2.1\nName: cognic_agent_sign_target\nVersion: 0.1.0\n",
+        )
+        zf.writestr(
+            f"{dist_info}/WHEEL",
+            (
+                "Wheel-Version: 1.0\n"
+                "Generator: agentos-test-fixture\n"
+                "Root-Is-Purelib: true\n"
+                "Tag: py3-none-any\n"
+            ),
+        )
+        # R9 P2 #2 + R10 P2 #1: write the entry-point target module
+        # with a top-level class def matching the target's first
+        # object segment. R15 pivot: also write package __init__.py
+        # so zipimport recognizes the module path as a real package
+        # (zipimport doesn't support PEP 420 namespace packages).
+        ep_module_path, _, ep_object_path = ep_target.partition(":")
+        ep_first_object = ep_object_path.split(".")[0]
+        ep_module_parts = ep_module_path.split(".")
+        for _depth in range(1, len(ep_module_parts)):
+            zf.writestr(
+                "/".join(ep_module_parts[:_depth]) + "/__init__.py",
+                "",
+            )
+        ep_module_file = "/".join(ep_module_parts) + ".py"
+        zf.writestr(
+            ep_module_file,
+            f"class {ep_first_object}:\n    pass\n",
+        )
     return pack_root
 
 
@@ -1325,7 +1377,32 @@ def test_sign_bundle_for_tool_kind_pack_skips_agent_card_jws(
     # Stage the wheel.
     dist_dir = pack / "dist"
     dist_dir.mkdir(exist_ok=True)
-    (dist_dir / "cognic_tool_sign_target-0.1.0-py3-none-any.whl").write_bytes(b"PK")
+    import zipfile as _zipfile
+
+    _tool_wheel = dist_dir / "cognic_tool_sign_target-0.1.0-py3-none-any.whl"
+    _tool_dist_info = "cognic_tool_sign_target-0.1.0.dist-info"
+    with _zipfile.ZipFile(_tool_wheel, "w", _zipfile.ZIP_DEFLATED) as _zf:
+        _zf.writestr(
+            f"{_tool_dist_info}/entry_points.txt",
+            "[cognic.tools]\nsign_target = cognic_tool_sign_target.tool:Tool\n",
+        )
+        _zf.writestr(
+            f"{_tool_dist_info}/METADATA",
+            "Metadata-Version: 2.1\nName: cognic_tool_sign_target\nVersion: 0.1.0\n",
+        )
+        _zf.writestr(
+            f"{_tool_dist_info}/WHEEL",
+            (
+                "Wheel-Version: 1.0\n"
+                "Generator: agentos-test-fixture\n"
+                "Root-Is-Purelib: true\n"
+                "Tag: py3-none-any\n"
+            ),
+        )
+        _zf.writestr(
+            "cognic_tool_sign_target/tool.py",
+            "class Tool:\n    pass\n",
+        )
 
     _set_sign_bundle_settings(
         monkeypatch,
@@ -2492,7 +2569,32 @@ def test_sign_bundle_records_real_pack_version_from_pyproject(
     # Stage a wheel matching the new version.
     dist_dir = pack / "dist"
     dist_dir.mkdir(exist_ok=True)
-    (dist_dir / "cognic_agent_sign_target-2.5.0-py3-none-any.whl").write_bytes(b"PK")
+    import zipfile as _zipfile
+
+    _wheel_2_5_0 = dist_dir / "cognic_agent_sign_target-2.5.0-py3-none-any.whl"
+    _di_2_5_0 = "cognic_agent_sign_target-2.5.0.dist-info"
+    with _zipfile.ZipFile(_wheel_2_5_0, "w", _zipfile.ZIP_DEFLATED) as _zf:
+        _zf.writestr(
+            f"{_di_2_5_0}/entry_points.txt",
+            "[cognic.agents]\nsign_target = cognic_agent_sign_target.agent:SignTargetAgent\n",
+        )
+        _zf.writestr(
+            f"{_di_2_5_0}/METADATA",
+            "Metadata-Version: 2.1\nName: cognic_agent_sign_target\nVersion: 2.5.0\n",
+        )
+        _zf.writestr(
+            f"{_di_2_5_0}/WHEEL",
+            (
+                "Wheel-Version: 1.0\n"
+                "Generator: agentos-test-fixture\n"
+                "Root-Is-Purelib: true\n"
+                "Tag: py3-none-any\n"
+            ),
+        )
+        _zf.writestr(
+            "cognic_agent_sign_target/agent.py",
+            "class SignTargetAgent:\n    pass\n",
+        )
     _set_sign_bundle_settings(
         monkeypatch,
         cosign_path=shims["cosign"],
@@ -3191,7 +3293,32 @@ def test_sign_bundle_intoto_layout_omits_jws_for_tool_pack(
     )
     dist_dir = pack / "dist"
     dist_dir.mkdir(exist_ok=True)
-    (dist_dir / "cognic_tool_sign_target-0.1.0-py3-none-any.whl").write_bytes(b"PK")
+    import zipfile as _zipfile
+
+    _tool_wheel = dist_dir / "cognic_tool_sign_target-0.1.0-py3-none-any.whl"
+    _tool_dist_info = "cognic_tool_sign_target-0.1.0.dist-info"
+    with _zipfile.ZipFile(_tool_wheel, "w", _zipfile.ZIP_DEFLATED) as _zf:
+        _zf.writestr(
+            f"{_tool_dist_info}/entry_points.txt",
+            "[cognic.tools]\nsign_target = cognic_tool_sign_target.tool:Tool\n",
+        )
+        _zf.writestr(
+            f"{_tool_dist_info}/METADATA",
+            "Metadata-Version: 2.1\nName: cognic_tool_sign_target\nVersion: 0.1.0\n",
+        )
+        _zf.writestr(
+            f"{_tool_dist_info}/WHEEL",
+            (
+                "Wheel-Version: 1.0\n"
+                "Generator: agentos-test-fixture\n"
+                "Root-Is-Purelib: true\n"
+                "Tag: py3-none-any\n"
+            ),
+        )
+        _zf.writestr(
+            "cognic_tool_sign_target/tool.py",
+            "class Tool:\n    pass\n",
+        )
 
     _set_sign_bundle_settings(
         monkeypatch,

@@ -620,6 +620,19 @@ class Settings(BaseSettings):
             "``trust_gate.cosign_timeout`` audit event. Must be > 0."
         ),
     )
+    load_probe_timeout_s: float = Field(
+        default=30.0,
+        gt=0.0,
+        description=(
+            "Per-call timeout (seconds) for the isolated-subprocess "
+            "``EntryPoint.load()`` probe used by ``agentos verify`` "
+            "after cosign verify-blob succeeds. SIGKILL + reap on "
+            "timeout; result routes to closed-enum "
+            "``verify_entry_point_load_failed`` "
+            "with ``payload.failure_mode=load_probe_timeout``. "
+            "Must be > 0. Sprint-7A T14.C R15 pivot."
+        ),
+    )
     supply_chain_policy_bundle: Path = Field(
         default=Path("policies/_default/supply_chain.rego"),
         description=(

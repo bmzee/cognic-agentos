@@ -931,6 +931,40 @@ def _discover_wheel(
             },
         )
 
+    # R10 P2 #2 reviewer correction: also require the RAW wheel-
+    # filename version spelling to match the expected version
+    # textually. Pre-fix ``Version(expected) == Version(filename)``
+    # (semantic equality) was sufficient — but the reviewer
+    # reproduced sign + verify both PASS with pyproject/METADATA/
+    # dist-info = ``1.0`` and wheel filename = ``...-1.0.0-...whl``.
+    # That contradicts R9's pyproject/filename/METADATA textual-
+    # agreement promise + leaves provenance with ``pack_version='1.0'``
+    # naming an artifact whose filename says ``1.0.0``. Mirror the
+    # textual-equality gate in verify's ``_discover_wheel_for_verify``.
+    raw_filename_version = wheel.name.split("-")[1] if "-" in wheel.name else ""
+    if raw_filename_version != expected_version:
+        return None, SignFinding(
+            severity="refusal",
+            reason="sign_subprocess_failed",
+            message=(
+                f"sign --bundle: wheel filename {wheel.name!r} carries "
+                f"version segment {raw_filename_version!r} which does "
+                f"not match pyproject [project].version="
+                f"{expected_version!r} TEXTUALLY (even though both "
+                "parse to the same PEP 440 Version). Refusing: "
+                "pyproject + wheel filename + wheel METADATA MUST "
+                "all use the same spelling so sign + verify operate "
+                "on the same string (R10 P2 #2)."
+            ),
+            payload={
+                "pack_path": str(pack_path),
+                "wheel_filename": wheel.name,
+                "filename_version_text": raw_filename_version,
+                "expected_version_text": expected_version,
+                "failure_mode": "wheel_version_mismatch",
+            },
+        )
+
     return wheel, None
 
 
@@ -1533,6 +1567,7 @@ def _build_slsa_provenance_dict(
     *,
     pack_id: str,
     pack_version: str,
+    pack_kind: str,
     wheel_path: Path,
     sbom_digest: str,
     signing_identity: str,
@@ -1577,6 +1612,15 @@ def _build_slsa_provenance_dict(
                 "externalParameters": {
                     "pack_id": pack_id,
                     "pack_version": pack_version,
+                    # T14.C R4 P2 #1: bind manifest [pack].kind into
+                    # SLSA provenance so verify can refuse a kind-flip
+                    # tamper that scrubs every JWS-presence signal
+                    # (default file, manifest declaration, layout
+                    # entry). Without this, an attacker who flips
+                    # an agent pack to ``skill`` and removes all JWS
+                    # traces would re-derive the expected attestation
+                    # set from the tampered kind + pass verify.
+                    "pack_kind": pack_kind,
                     "sbom_digest_sha256": sbom_digest,
                     "wave_1_simplification": True,
                 },
@@ -1603,6 +1647,7 @@ def _build_intoto_layout_dict(
     *,
     pack_id: str,
     pack_version: str,
+    pack_kind: str,
     signing_identity: str,
     artifact_paths: list[str],
 ) -> dict[str, Any]:
@@ -1619,6 +1664,9 @@ def _build_intoto_layout_dict(
         "_type": _AGENTOS_INTOTO_LAYOUT_TYPE,
         "pack_id": pack_id,
         "pack_version": pack_version,
+        # T14.C R4 P2 #1: bind manifest [pack].kind into in-toto
+        # layout — same kind-flip tamper defense as SLSA.
+        "pack_kind": pack_kind,
         "signing_identity": signing_identity,
         "artifact_paths": artifact_paths,
         "rendered_at": now,
@@ -2706,6 +2754,98 @@ async def _run_sign_bundle_inner(
         )
     artifacts["license_audit"] = str(license_path)
 
+    # Step 7b (R7 P2 #1): wheel-content integrity check BEFORE
+    # rendering SLSA / in-toto. Mirrors verify-side's R6 P2 #1 +
+    # R6 P2 #2 + R7 P2 #2 protections via the shared helper at
+    # ``cli._wheel_integrity``. Pre-R7 sign emitted provenance for
+    # any wheel whose filename matched pyproject — but a wheel can
+    # be renamed without changing the signed bytes, so the wheel's
+    # internal METADATA might disagree with the (mutable) wheel
+    # filename + pyproject version. That created bundles the new
+    # verifier rejects immediately. Sign now refuses up-front.
+    from cognic_agentos.cli._wheel_integrity import (
+        read_signed_wheel_dist_info_metadata as _shared_wheel_integrity_read,
+    )
+
+    _wheel_triple, _wheel_integrity_failure = _shared_wheel_integrity_read(
+        wheel_path,
+        expected_project_name=project_name,
+        expected_version=pack_version,
+    )
+    if _wheel_integrity_failure is not None:
+        findings.append(
+            SignFinding(
+                severity="refusal",
+                reason="sign_subprocess_failed",
+                message=f"sign --bundle: {_wheel_integrity_failure.message}",
+                payload={
+                    **_wheel_integrity_failure.payload,
+                    "failure_mode": _wheel_integrity_failure.failure_mode,
+                },
+            )
+        )
+        return SignReport(
+            operation="sign-bundle",
+            target_path=str(pack_path),
+            overall_status="fail",
+            findings=findings,
+        )
+    # R8 P2 #1 reviewer correction: compare the wheel-derived kind
+    # against the manifest [pack].kind. Pre-fix sign discarded the
+    # triple via ``del _wheel_triple`` + happily emitted AgentCard JWS
+    # + agent provenance for a wheel whose entry-point group declared
+    # a different kind (e.g., agent manifest + ``[cognic.tools]``
+    # wheel). Mirror verify's ``wheel_kind_disagrees_with_manifest``
+    # refusal before rendering provenance.
+    assert _wheel_triple is not None
+    # R15 follow-up round 1 P2 #1/P2 #2: helper now returns a 4-tuple;
+    # the validated entry-point list is consumed only by verify
+    # step 11 (the FINAL gate of the trust pipeline post R15 follow-up
+    # round 2 P2 #1 ordering fix). Sign discards the trailing slot —
+    # wheel-integrity-anchored kind + name + version are the sign-side
+    # outputs.
+    (
+        _wheel_metadata_name,
+        _wheel_metadata_version,
+        _wheel_derived_kind,
+        _wheel_validated_entry_points,
+    ) = _wheel_triple
+    del _wheel_validated_entry_points
+    if _wheel_derived_kind != pack_kind:
+        findings.append(
+            SignFinding(
+                severity="refusal",
+                reason="sign_subprocess_failed",
+                message=(
+                    f"sign --bundle: wheel-derived pack kind="
+                    f"{_wheel_derived_kind!r} does not match manifest "
+                    f"[pack].kind={pack_kind!r}. The wheel's entry-point "
+                    "group is the integrity-anchored source of truth for "
+                    "kind; refusing to render provenance for a kind-"
+                    "mismatched bundle."
+                ),
+                payload={
+                    "pack_path": str(pack_path),
+                    "wheel_path": str(wheel_path),
+                    "derived_pack_kind": _wheel_derived_kind,
+                    "manifest_pack_kind": pack_kind,
+                    "failure_mode": "wheel_kind_disagrees_with_manifest",
+                },
+            )
+        )
+        return SignReport(
+            operation="sign-bundle",
+            target_path=str(pack_path),
+            overall_status="fail",
+            findings=findings,
+        )
+    # The wheel's signed METADATA Name + Version + kind all agree
+    # with the wheel filename + pyproject + manifest. Sign-side does
+    # NOT rebind project_name / pack_version (sign uses them only for
+    # reading + provenance authoring; the integrity check above
+    # ensures they agree with the signed wheel content).
+    del _wheel_metadata_name, _wheel_metadata_version, _wheel_derived_kind
+
     # Step 8: SLSA provenance template.
     # R3 P2 #3: ``signing_identity`` (vault URI or file path) is
     # recorded in attestations + cosign-argv byproduct. The
@@ -2742,6 +2882,7 @@ async def _run_sign_bundle_inner(
         slsa_path,
         pack_id=pack_id,
         pack_version=pack_version,
+        pack_kind=pack_kind,
         wheel_path=wheel_path,
         sbom_digest=sbom_digest,
         signing_identity=signing_identity,
@@ -2790,6 +2931,7 @@ async def _run_sign_bundle_inner(
         intoto_path,
         pack_id=pack_id,
         pack_version=pack_version,
+        pack_kind=pack_kind,
         signing_identity=signing_identity,
         artifact_paths=intoto_artifact_paths,
     )
