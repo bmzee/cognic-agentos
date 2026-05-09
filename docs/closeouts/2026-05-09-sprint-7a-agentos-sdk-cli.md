@@ -148,12 +148,24 @@
 - **Test-only keypair pattern.** Committed RSA-2048 PEM pair under `attestations/test-signing/` with explicit NOTE + `prod`-profile rejection guard.
 - **Wave-1 narrow harness contract.** Harness runs against unmodified host runtime; no sandboxing.
 
-## Sprint-7B hand-off checklist (load-bearing)
+## Sprint-7A2 hand-off checklist (load-bearing)
 
-Sprint-7B picks up the **bank pack lifecycle API + workflow + UI event-stream endpoints** track per ADR-012 + PROJECT_PLAN §7-8.
+Sprint-7A2 picks up **hook packs + the runtime hook engine** before Sprint-7B freezes the bank lifecycle API around pack-kind storage and workflow contracts. This keeps Sprint-7B's existing lifecycle scope intact while ensuring it supports all four authoring pack kinds (`tool | skill | agent | hook`) from day one.
 
-- [ ] `packs/lifecycle.py` — pack-record lifecycle state machine consuming the Sprint-7A SDK + CLI surface (`agentos sign --bundle` produces the artefacts; lifecycle binds them to a Postgres record).
-- [ ] **Harness expansion to skill + agent dispatch.** Sprint-7A T13 narrowed `_HARNESS_SUPPORTED_KINDS = frozenset({"tool"})`. Sprint-7B grows the dispatch table to `{"tool", "skill", "agent"}` AND routes via a kind-aware `_dispatch_one` that handles Skill's `ToolRegistry` instantiation requirement + Agent's `handle(payload, *, task)` signature. The skill + agent reference packs at `examples/` already exercise the `harness_unsupported_pack_kind` refusal path; the Sprint-7B expansion lands the green-path.
+- [ ] `sdk/hook.py` — first-class `Hook` base/protocol plus `HookContext` and `HookResult`.
+- [ ] `agentos init-hook` + inert `examples/cognic-hook-example-minimal/` reference pack.
+- [ ] Manifest + entry-point support for `kind = "hook"` and `[project.entry-points."cognic.hooks"]`.
+- [ ] `agentos validate`, `agentos sign --bundle`, and `agentos verify` support hook packs under the same identity, supply-chain, wheel-integrity, and isolated-load-probe discipline as tools/skills/agents.
+- [ ] Runtime hook registry + deterministic dispatcher with ordering, timeout, fail-closed default for governed-data phases, and audit evidence.
+- [ ] ADR-017 DLP wiring: pre-hooks run before governed input reaches pack code; post-hooks run before governed output leaves AgentOS.
+- [ ] Sprint-7B forward-compat constraint: pack lifecycle storage/API must treat pack kind as `tool | skill | agent | hook`, not a hard-coded three-kind enum.
+
+## Sprint-7B hand-off checklist (after 7A2)
+
+Sprint-7B then picks up the **bank pack lifecycle API + workflow + UI event-stream endpoints** track per ADR-012 + PROJECT_PLAN §7-8.
+
+- [ ] `packs/lifecycle.py` — pack-record lifecycle state machine consuming the Sprint-7A / Sprint-7A2 SDK + CLI surface (`agentos sign --bundle` produces the artefacts; lifecycle binds them to a Postgres record).
+- [ ] **Harness expansion to skill + agent dispatch.** Sprint-7A T13 narrowed `_HARNESS_SUPPORTED_KINDS = frozenset({"tool"})`. Sprint-7B grows the dispatch table to `{"tool", "skill", "agent"}` AND routes via a kind-aware `_dispatch_one` that handles Skill's `ToolRegistry` instantiation requirement + Agent's `handle(payload, *, task)` signature. Hook dispatch remains owned by the Sprint-7A2 hook dispatcher, not the test harness. The skill + agent reference packs at `examples/` already exercise the `harness_unsupported_pack_kind` refusal path; the Sprint-7B expansion lands the green-path.
 - [ ] **UI event-stream endpoints (ADR-020).** Sprint-6 seeded all 11 Wave-1 event-family models + wired 3 emit hooks (`tool_call.*`, `artifact.*`, `decision_audit.event_appended`). Sprint-7B lands the SSE endpoint at `GET /api/v1/runs/{run_id}/events`. Reconnect-safe via `decision_history` mirror per ADR-020.
 - [ ] **Realtime auto-attestation API.** Sprint-7A's `cli/sign.py` produces the bundle at sign time; the runtime equivalent (auto-attestation as the pack runs) ships in Sprint-7B alongside the lifecycle API.
 - [ ] **Compliance helper emit path.** Sprint-7A ships the declaration shape (`declare_iso_42001_controls`); per-event emission into the audit chain lands in a follow-up sprint with the runtime auto-attestation API.
@@ -165,6 +177,7 @@ None. Every plan §1503-1530 deliverable for T16 + every plan §1533-1574 delive
 ## Out of scope (Sprint-7A intentionally did NOT ship)
 
 - **Bank pack lifecycle state machine + Postgres record store** — Sprint-7B per ADR-012 + PROJECT_PLAN §7-8.
+- **Hook packs + runtime hook engine** — Sprint-7A2 per the post-closeout sequencing amendment; hooks are authoring/platform primitives, not productized bank-specific packs.
 - **Studio UI authoring** — ADR-008 Phase B; explicitly deferred per ADR-008 + ADR-021 reservation.
 - **Skill + agent harness dispatch** — Sprint-7B per the harness expansion task in the hand-off checklist above.
 - **Compliance per-event emit path** — follow-up sprint alongside runtime auto-attestation.
@@ -172,4 +185,4 @@ None. Every plan §1503-1530 deliverable for T16 + every plan §1533-1574 delive
 
 ## Next sprint
 
-**Sprint 7B — Bank pack lifecycle API + workflow + UI event-stream endpoints** *(3.5 work-units)*. See `docs/BUILD_PLAN.md` §"Sprint 7B".
+**Sprint 7A2 — Hook packs + runtime hook engine** *(2.5 work-units)*. See `docs/BUILD_PLAN.md` §"Sprint 7A2". Sprint 7B remains the bank pack lifecycle API + workflow + UI event-stream sprint and must consume `tool | skill | agent | hook` from day one.
