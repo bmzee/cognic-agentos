@@ -132,7 +132,7 @@ jobs:
     # gives ~10% headroom over measured. Bump flagged for review at the
     # Sprint 1C READY-FOR-GATE checkpoint; doctrine update to BUILD_PLAN
     # follows if the bump is accepted.
-    name: image size budget (kernel ≤120 / default-adapters ≤370 MiB)
+    name: image size budget (kernel ≤120 / default-adapters ≤385 MiB)
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -213,7 +213,7 @@ jobs:
             -t cognic-agentos:adapters-ci \
             .
 
-      - name: Enforce default-adapters image budget (≤370 MiB)
+      - name: Enforce default-adapters image budget (≤385 MiB)
         run: |
           set -euo pipefail
           # Budget revised from 220 → 370 MiB in Sprint-4 T13-followup:
@@ -225,7 +225,20 @@ jobs:
           # stripping/compression tooling would add a build-time
           # dependency for a marginal win; budget set to measured reality
           # (~356-359 MiB) plus a small buffer. Kernel ≤120 MiB unchanged.
-          BUDGET_MIB=370
+          #
+          # Budget revised again from 370 → 385 MiB in Sprint-7A T17-
+          # followup: Sprint-7A added joserfc (AgentCard JWS signing
+          # path), typer + click (agentos CLI framework), and jinja2 +
+          # markupsafe (init-{tool,skill,agent} scaffold templates) —
+          # all legitimate runtime deps for the documented `agentos
+          # init / validate / test-harness / sign / verify` workflow.
+          # Default-adapters image grew to a measured 374 MiB (≈15 MiB
+          # over the Sprint-4 baseline of 356-359 MiB). Per the same
+          # "measured reality plus small buffer" doctrine, bump the
+          # budget to 385 MiB (~11 MiB buffer over the new measured
+          # 374 MiB; mirrors the Sprint-4 buffer shape). Budget remains
+          # a strong gate. Kernel ≤120 MiB unchanged.
+          BUDGET_MIB=385
           size_bytes=$(docker image inspect cognic-agentos:adapters-ci --format='{{.Size}}')
           size_mib=$(( size_bytes / 1024 / 1024 ))
           echo "default-adapters image size: ${size_mib} MiB (budget ${BUDGET_MIB} MiB)"
