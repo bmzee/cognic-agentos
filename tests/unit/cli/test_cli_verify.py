@@ -1065,11 +1065,24 @@ def test_verify_help_exits_zero_and_lists_trust_root_option(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """``agentos verify --help`` exits 0 + the --trust-root option is
-    documented in the help text."""
+    documented in the help text.
+
+    Typer's rich renderer interleaves per-character ANSI color codes
+    when the runner's terminal width clips the option line — on CI
+    runners (narrower TERM than a local dev tty) the literal
+    ``--trust-root`` becomes
+    ``\\x1b[1;36m-\\x1b[0m\\x1b[1;36m-trust\\x1b[0m\\x1b[1;36m-root\\x1b[0m``
+    in the captured stdout. Strip ANSI SGR escapes before the
+    substring assertion so the test is deterministic across runner
+    environments.
+    """
+    import re as _re
+
     runner = CliRunner()
     result = runner.invoke(app, ["verify", "--help"])
     assert result.exit_code == 0
-    assert "--trust-root" in result.stdout
+    plain_stdout = _re.sub(r"\x1b\[[0-9;]*m", "", result.stdout)
+    assert "--trust-root" in plain_stdout
 
 
 def test_verify_with_json_flag_emits_json_with_overall_status_and_findings(
