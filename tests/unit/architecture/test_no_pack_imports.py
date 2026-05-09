@@ -30,9 +30,32 @@ PACK_NAMESPACE_PREFIXES: tuple[str, ...] = (
 
 SRC_ROOT = Path(__file__).resolve().parents[3] / "src" / "cognic_agentos"
 
+#: Sprint-7A T5 carve-out: the CLI's Jinja2 scaffold-template tree
+#: contains ``.py`` files with ``{{ ... }}`` placeholders that are
+#: NOT valid Python until the scaffolder substitutes the context.
+#: Pinned to the exact root rather than a ``templates`` path-segment
+#: match so future modules under other ``*/templates/`` directories
+#: (e.g., a real ``runtime/templates/`` that ships executable code)
+#: stay subject to the pack-import gate. R18 P3 #1.
+_CLI_TEMPLATES_ROOT: Path = SRC_ROOT / "cli" / "templates"
+
 
 def _iter_py_files() -> list[Path]:
-    return sorted(p for p in SRC_ROOT.rglob("*.py") if "__pycache__" not in p.parts)
+    """Iterate every ``.py`` file under the OS source tree, EXCEPT:
+
+    - ``__pycache__/`` byte-compiled artifacts.
+    - ``cli/templates/`` Jinja2 source files (Sprint-7A T5 — these
+      are render-time templates with ``{{ ... }}`` placeholders and
+      are NOT valid Python until the scaffolder substitutes the
+      context. The pack-namespace-import gate runs against the
+      rendered output via ``test_cli_init.py``'s scaffold tests
+      instead.)
+    """
+    return sorted(
+        p
+        for p in SRC_ROOT.rglob("*.py")
+        if "__pycache__" not in p.parts and not p.is_relative_to(_CLI_TEMPLATES_ROOT)
+    )
 
 
 def _module_imports(path: Path) -> list[str]:

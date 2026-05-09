@@ -287,7 +287,7 @@ Sprint 1 is split into four focused sub-sprints for a clean bootstrap. Each ship
 
 ---
 
-## Phase 2 — Protocol layer + SDK + Pack Lifecycle + UI Event-Stream (Sprints 4, 5, 6, 7A, 7B, ~14.5 work-units)
+## Phase 2 — Protocol layer + SDK + Pack Lifecycle + UI Event-Stream (Sprints 4, 5, 6, 7A, 7A2, 7B, ~17 work-units)
 
 ### Sprint 4 — Plugin registry + trust gate + supply-chain attestations + policy-engine seed *(3.5 work-units)*
 
@@ -325,7 +325,7 @@ Sprint 1 is split into four focused sub-sprints for a clean bootstrap. Each ship
 - `portal/api/app.py` — `GET /api/v1/system/plugins` (lists registered packs with identity + signature digest + attestation summary)
 - `tests/fixtures/cognic_test_pack/` — installable Hatchling pack with entry point + full attestation set; distribution name (kebab-case) deliberately differs from entry-point alias (snake-case) so the T9/T10 distribution-name-vs-alias divergence is exercised end-to-end. Ships seven attestation files (SBOM / SLSA L3 / in-toto / vuln / license / cosign sig / Sigstore bundle); `tests/fixtures/_signing_kit/build_test_attestations.sh` is the idempotent regen + cosign-real arm
 - `db/adapters/local_object_store_adapter.py` — production filesystem `ObjectStoreAdapter` per ADR-009 (atomic write, sha256-pinned content addressing, retention-window-active rejection of premature delete, path-traversal protection); used by T9 to persist Sigstore bundles under 7-year retention metadata
-- `infra/agentos/Dockerfile` — default-adapters builder pins cosign v3.0.6 + OPA v1.16.1 (sha256-verified at build time, COPY'd into runtime stage); kernel image deliberately untouched. CI smoke runs `cosign version` + `opa version` inside the built image as cognic UID 10001. **Default-adapters image budget revised in T13-followup from ≤220 → ≤370 MiB**: both Go binaries ship at upstream-shipped size because alpine's binutils does not recognise their PIE-ELF layout (`strip --strip-unneeded` fails); forcing alternative stripping/compression tooling would add a build-time dependency for a marginal win; budget set to measured reality plus a small buffer. **Kernel ≤120 MiB budget unchanged.**
+- `infra/agentos/Dockerfile` — default-adapters builder pins cosign v3.0.6 + OPA v1.16.1 (sha256-verified at build time, COPY'd into runtime stage); kernel image deliberately untouched. CI smoke runs `cosign version` + `opa version` inside the built image as cognic UID 10001. **Default-adapters image budget revised in T13-followup from ≤220 → ≤370 MiB**: both Go binaries ship at upstream-shipped size because alpine's binutils does not recognise their PIE-ELF layout (`strip --strip-unneeded` fails); forcing alternative stripping/compression tooling would add a build-time dependency for a marginal win; budget set to measured reality plus a small buffer. **Kernel ≤120 MiB budget unchanged.** **Bumped again Sprint-7A T17-followup ≤370 → ≤385 MiB**: Sprint-7A added joserfc (AgentCard JWS signing) + typer + click (CLI framework) + jinja2 + markupsafe (init-{tool,skill,agent} scaffold templates) — all legitimate runtime deps for the documented `agentos init / validate / test-harness / sign / verify` workflow. Image grew to a measured 374 MiB; new ~11 MiB buffer mirrors the Sprint-4 shape.
 - `tools/check_critical_coverage.py` — extended to enforce the plugin-trust / supply-chain / policy quartet (`plugin_registry`, `trust_gate`, `supply_chain`, `core/policy/engine`) at the same `(0.95 line, 0.90 branch)` floor as Sprint 2/2.5/3; gate now covers 16 modules
 - Documentation update: `docs/HOW-TO-WRITE-A-PACK.md` — pack-author entry point with manifest shape, AGNTCY/OASF identity matrix, mandatory-floor + grace-period attestation requirements, and Wave-1 escape-hatch recipes for the cosign / syft / grype generation that `agentos sign --bundle` (Sprint 7A) will eventually wrap
 
@@ -553,15 +553,61 @@ Sprint 1 is split into four focused sub-sprints for a clean bootstrap. Each ship
 - `agentos test-harness` produces a conformance report including AGNTCY/OASF identity, A2A declarations, MCP declarations, data-governance contract, risk-tier consistency, supply-chain attestation completeness
 - Three reference packs scaffolded under `examples/`: `cognic-tool-example-search`, `cognic-skill-example-kyc`, `cognic-agent-example-policyqa` — all carrying complete identity + governance + supply-chain declarations
 
+**Status:** **CLOSED on `feat/sprint-7a-agentos-sdk-cli`** (2026-05-09). Sprint-6 merge baseline measured at the Sprint-7A branch base (`35e9016`) was 3013 passed + 30 skipped; Sprint-7A ready state is **3849 passed + 30 skipped** — delta **+836 passed** (driven by the closed-enum-vocabulary regressions across T1-T13 reviewer rounds, the T13 harness narrowing matrix + Wave-1 narrow-contract canary, the T14 sign + verify slices including the R15 PIVOT regression suite (Sections AA + AB + AC) addressing 11 reviewer findings across 4 follow-up rounds, the T15 reference-pack full-lifecycle CI gate, and the T16 Section AD coverage tests promoting verify.py + _load_probe.py to the strict 95/90 floor). 96% global coverage. **All 37 critical-controls modules** (Sprint 2 quartet + Sprint 2.5 triplet + Sprint 3 LLM quintet + Sprint 4 plugin/trust/supply/policy quartet + Sprint 5 MCP-host quintet + Sprint 6 A2A endpoint septet + **Sprint 7A authoring SDK + CLI nonet**) pass per-file `≥95% line / ≥90% branch`. See [closeout note](closeouts/2026-05-09-sprint-7a-agentos-sdk-cli.md). **20 commits** atop the merged Sprint-6 plan-of-record (`35e9016` on `main`): T1-T6 (settings + closed-enum vocab + SDK base classes + SDK testing/compliance helpers + CLI entry point + init scaffolders + validate orchestrator), T7-T12 (six per-concern validators), T13 (test-harness with R31-R34 narrow folded in), T13 hotfix (mypy gate at `8da2d48`), T14.A + T14.B + T14 (cli/sign.py sign-blob + sign --bundle full orchestrator + verify.py 11-step offline trust gate with R15 PIVOT replacing static-AST loadability with isolated-subprocess load probe), T15 (three reference packs + full-lifecycle CI gate), T16 (critical-controls coverage gate +9 modules + 3 docs), T17 closeout. Branch READY-FOR-GATE awaiting push/PR/merge authorization.
+
+### Sprint 7A2 — Hook packs + runtime hook engine *(2.5 work-units)*
+
+**Goal:** complete the AgentOS authoring primitive set before the bank pack lifecycle API hardens around pack kinds. Tools, skills, and agents shipped in Sprint 7A; Sprint 7A2 adds first-class governance hooks as signed plugin packs so Sprint 7B can manage `tool | skill | agent | hook` from day one.
+
+**Deliverables:**
+
+*SDK + authoring surface:*
+- `src/cognic_agentos/sdk/hook.py` — `Hook` base/protocol plus `HookContext` and `HookResult` value types. Hooks are deterministic governance extensions, not Layer C agent behavior.
+- `src/cognic_agentos/cli/init.py` — `agentos init-hook <name>` scaffold with a neutral reference implementation and no bank-specific behavior.
+- `docs/SDK-REFERENCE.md`, `docs/HOW-TO-WRITE-A-PACK.md`, `docs/PACK-MANIFEST-SPEC.md` — hook-pack authoring, manifest, lifecycle, and failure-policy documentation.
+- `examples/cognic-hook-example-minimal/` — inert reference hook pack. It demonstrates the signed author lifecycle only; it must not ship a production DLP recogniser, workflow, or bank-specific policy.
+
+*Manifest + entry-point contract:*
+- `cognic-pack-manifest.toml` supports `kind = "hook"` as a first-class pack kind.
+- `pyproject.toml` supports `[project.entry-points."cognic.hooks"]`.
+- Hook manifest declarations bind to ADR-017 `dlp_pre_hooks` / `dlp_post_hooks` by stable hook IDs. Validate refuses unresolved hook references, duplicate hook IDs, unsupported phases, and ambiguous ordering.
+- `agentos validate`, `agentos sign --bundle`, and `agentos verify` accept hook packs with the same identity, supply-chain, dist-info, and load-probe discipline as tool/skill/agent packs.
+
+*Runtime registry + dispatcher:*
+- `packs/hooks/registry.py` — verified hook registration keyed by hook ID, phase, pack identity, and signed artefact digest.
+- `packs/hooks/dispatcher.py` — deterministic phase dispatcher with explicit ordering, timeout, failure policy, and audit linkage.
+- ADR-017 runtime DLP wiring: pre-hooks run before pack code sees governed input; post-hooks run before governed output leaves AgentOS. Fail-closed is the default for data-governance phases unless policy explicitly declares a narrower fail-open exception.
+- Every hook decision emits audit evidence with hook ID, phase, policy input digest, result, timeout/failure state, and ISO 42001 control tags.
+
+**Tests:**
+- `test_sdk_hook_base.py` — Hook base/protocol contract, context/result validation, deterministic result shape.
+- `test_cli_init_hook.py` — scaffold produces a static-only hook reference pack with no generated attestations committed.
+- `test_cli_validate_hook_pack.py` — hook manifests accept valid declarations and refuse unresolved hook IDs, duplicate IDs, unsupported phases, invalid ordering, and data-governance phase mismatches.
+- `test_cli_sign_verify_hook_pack.py` — hook pack signs and verifies through the same ADR-016 bundle path, including the isolated load probe.
+- `test_hook_registry.py` — only verified hook packs register; duplicate IDs and stale digests refuse fail-closed.
+- `test_hook_dispatcher_ordering.py` — multiple hooks execute in deterministic order with tuple-snapshot dispatch isolation.
+- `test_hook_dispatcher_timeout_failure.py` — timeout, exception, malformed result, and policy-denied hook outcomes produce closed-enum audit/refusal records.
+- `test_dlp_hook_integration.py` — pre-hooks run before governed input reaches pack code; post-hooks run before output leaves AgentOS; payload contents are not logged.
+- `test_reference_hook_pack_full_lifecycle.py` — minimal hook pack completes scaffold -> wheel-build -> sign -> validate -> verify.
+
+**Exit criteria:**
+- `agentos init-hook example-dlp-precheck` creates a valid hook-pack scaffold in <5s.
+- A signed hook pack validates and verifies with the same offline trust guarantees as the Sprint 7A pack kinds.
+- ADR-017 `dlp_pre_hooks` and `dlp_post_hooks` resolve to verified hook IDs and run through the deterministic dispatcher.
+- Hook failures are auditable, bounded by timeout, and fail-closed by default for governed-data paths.
+- Sprint 7B's lifecycle API can model all four pack kinds (`tool | skill | agent | hook`) without a kind-schema migration.
+
+**Status:** Planned. This is a sequencing amendment accepted after Sprint 7A closeout: hook packs land as Sprint 7A2 so Sprint 7B can remain the bank lifecycle sprint without being renamed or later retrofitted.
+
 ### Sprint 7B — Bank pack lifecycle API + workflow + UI event-stream endpoints *(3.5 work-units)*
 
-**Goal:** banks can manage the full pack lifecycle through portal APIs (per ADR-012 + PROJECT_PLAN §7-8). Not just CLI — a workflow with state machine, RBAC scopes, audit linkage, and evidence inspection.
+**Goal:** banks can manage the full pack lifecycle through portal APIs (per ADR-012 + PROJECT_PLAN §7-8). Not just CLI — a workflow with state machine, RBAC scopes, audit linkage, and evidence inspection. Because Sprint 7A2 lands hooks first, every 7B storage/API/event contract must treat pack kind as `tool | skill | agent | hook` from day one.
 
 **Deliverables:**
 
 *Lifecycle state machine + storage:*
 - `src/cognic_agentos/packs/__init__.py`, `packs/lifecycle.py` — state machine: `draft → submitted → under_review → approved (or rejected/withdrawn) → allow_listed → installed → disabled → revoked → uninstalled`
-- `packs/storage.py` — Postgres-backed pack-record store (uses `RelationalAdapter`); schema includes manifest, signed-artefact digest, SBOM, conformance report, lifecycle history, RBAC-trail
+- `packs/storage.py` — Postgres-backed pack-record store (uses `RelationalAdapter`); schema includes pack kind (`tool | skill | agent | hook`), manifest, signed-artefact digest, SBOM, conformance report, lifecycle history, RBAC-trail
 - `db/migrations/001_packs_lifecycle.sql` (Postgres) and `db/migrations/oracle/001_packs_lifecycle.sql` (Oracle)
 
 *Portal API endpoints:*
@@ -629,7 +675,7 @@ Sprint 1 is split into four focused sub-sprints for a clean bootstrap. Each ship
 - OWASP conformance runs automatically on submit; failures gate approval
 - Reviewer cannot approve a pack without acknowledging the data-governance contract, risk tier, and supply-chain evidence panels (enforced server-side, not just UI)
 
-**Phase 2 exit:** AgentOS hosts plugin packs, provides authoring tooling, AND drives the full bank-pack lifecycle through portal APIs. The PROJECT_PLAN §8 success criterion is met: "A bank engineering team can create its own signed tool pack, deterministic skill pack, and A2A-speaking agent pack; install them on AgentOS; and have them operate under the same governance controls as Cognic-authored packs."
+**Phase 2 exit:** AgentOS hosts plugin packs, provides authoring tooling, includes first-class governance hook packs, AND drives the full bank-pack lifecycle through portal APIs. The PROJECT_PLAN §8 success criterion is met: "A bank engineering team can create its own signed tool pack, deterministic skill pack, and A2A-speaking agent pack; install them on AgentOS; and have them operate under the same governance controls as Cognic-authored packs." Sprint 7A2 extends that authoring set with signed hook packs before the lifecycle API freezes its pack-kind model.
 
 ---
 
@@ -1085,54 +1131,55 @@ These hold for every sprint:
 
 ## Schedule-risk acknowledgement
 
-Seven sprints in the current plan are sized **optimistically** at the work-units shown; treat them as floors, not ceilings. If any of them runs over by ≥1 work-unit, stop and split rather than push through:
+Eight sprints in the current plan are sized **optimistically** at the work-units shown; treat them as floors, not ceilings. If any of them runs over by ≥1 work-unit, stop and split rather than push through:
 
 | Sprint | Risk | Why |
 |---|---|---|
 | **Sprint 1D — Enterprise adapters** (2 wu) | Oracle adapter alone (SQLAlchemy + python-oracledb async + dialect-specific migrations + Oracle XE compose overlay + integration test job) is realistically ~1.5 wu on its own. Dynatrace adapter + OpenAI-compat embedding adapter add another 1-2 wu. **Realistic range: 2-3.5 wu.** Mitigation: split into 1D-Oracle + 1D-Observability + 1D-Embedding if it overruns Day 2. |
 | **Sprint 5 — MCP host (with OAuth/PRM)** (3.5 wu) | Streamable HTTP transport + STDIO restricted (4-gate) + OAuth/PRM client + capability validator + audit-chain integration + 14 distinct test files. **Realistic range: 3.5-5 wu.** Mitigation: split into 5a-transports + 5b-authorization + 5c-capability-validator if it overruns Day 4. |
 | **Sprint 7A — agentos-sdk + agentos-cli** (2 wu) | Original 2-wu envelope expanded with AGNTCY/OASF identity validation + A2A/MCP conformance declaration validation + data-governance contract validation + risk-tier consistency + supply-chain attestation paths — 6 new validators. **Realistic range: 2-3 wu.** Mitigation: split into 7A-cli-base + 7A-validators if it overruns Day 2. |
+| **Sprint 7A2 — Hook packs + runtime hook engine** (2.5 wu) | New first-class pack primitive plus runtime DLP hook dispatch: SDK base, `cognic.hooks` entry points, manifest validation, sign/verify admission, registry, deterministic dispatcher, timeout/failure policy, audit evidence, and ADR-017 pre/post DLP wiring. **Realistic range: 2.5-4 wu.** Mitigation: split into 7A2a-authoring-and-admission + 7A2b-runtime-dispatch-and-DLP if it overruns Day 3. |
 | **Sprint 7B — Bank pack lifecycle + UI event-stream endpoints** (3.5 wu) | 11 lifecycle states × ~30 portal endpoints × RBAC scopes × OWASP conformance integration × **four reviewer evidence panels (data governance, risk tier, supply chain, conformance)** × **UI event-stream SSE endpoints + frontend-action POST + portable JSON schema** × audit chain linkage × five-gate approval composition. State-machine surface area is the largest single sprint in the plan. **Realistic range: 3.5-5.5 wu.** Mitigation: split into 7B-state-machine-and-storage + 7B-portal-API + 7B-evidence-panels + 7B-ui-events if it overruns Day 3. |
 | **Sprint 9.5 — Model Registry** (2 wu) | New entity type + ~7 portal endpoints + 7 RBAC scopes + ISO 42001 control tagging + decision_history schema extension + provider-honesty endpoint extension + cosign verification + eval/adversarial gate integration. **Realistic range: 2-3 wu.** Mitigation: split into 9.5a-storage-and-API + 9.5b-gate-integration if it overruns Day 2. |
 | **Sprint 11.5 — Agent memory governance** (2 wu) | New platform primitive: 6 MemoryAPI operations × 3 tiers × per-write enforcement (data-class + purpose + consent) × forget/redact/export pathways × kill-switch integration × Postgres + Redis adapters + vector-store integration. 12 new tests including regulator-erasure chain-of-custody. **Realistic range: 2-3.5 wu.** Mitigation: split into 11.5a-api-and-storage + 11.5b-enforcement-and-erasure if it overruns Day 2. |
 | **Sprint 13.5 — Approval + Policy + Kill switches** (3 wu) | Three new platform primitives in one sprint: runtime tool approval state machine + OPA/Rego integration + Redis-backed kill-switch + quotas + 6 portal API surfaces + 10 new tests including fail-closed paths. **Realistic range: 3-5 wu.** Mitigation: split into 13.5a-approval + 13.5b-policy + 13.5c-emergency if it overruns Day 3. |
 
-The 52.5-work-unit Phases-1-4 total assumes these sprints land at their floor estimates. If any overrun → recompute total. **Don't push through a red sprint to keep the calendar; the ADR enforcement architecture makes recovery expensive once code is in.**
+The 55-work-unit Phases-1-4 total assumes these sprints land at their floor estimates. If any overrun → recompute total. **Don't push through a red sprint to keep the calendar; the ADR enforcement architecture makes recovery expensive once code is in.**
 
-### Treat 52.5 wu as a disciplined lower bound, not a commitment
+### Treat 55 wu as a disciplined lower bound, not a commitment
 
-This number is the floor across **seven** already-flagged-optimistic sprints (1D, 5, 7A, 7B, 9.5, 11.5, 13.5). The seven flagged sprints sum to 18 wu at the floor and 28 wu at the ceiling — a Δ of 10 wu. So Phases 1-4 realistic envelope = **52.5 wu floor, ~57 wu midpoint, ~62.5 wu ceiling** if every flagged sprint hits its ceiling. That is not a forecast — it is the honest envelope.
+This number is the floor across **eight** already-flagged-optimistic sprints (1D, 5, 7A, 7A2, 7B, 9.5, 11.5, 13.5). The eight flagged sprints sum to 20.5 wu at the floor and 32 wu at the ceiling — a Δ of 11.5 wu. So Phases 1-4 realistic envelope = **55 wu floor, ~61 wu midpoint, ~66.5 wu ceiling** if every flagged sprint hits its ceiling. That is not a forecast — it is the honest envelope.
 
 For external commitments (procurement schedules, examiner timelines, board updates), use:
 
 | Posture | Number to use |
 |---|---|
-| **Internal velocity tracking** | 52.5 wu (the floor) |
-| **Bank stakeholder commitment** | 57 wu (midpoint; allows ~half the flagged sprints to overrun) |
-| **Procurement / regulatory deadline** | 62.5 wu (ceiling; no sprint splits required) |
+| **Internal velocity tracking** | 55 wu (the floor) |
+| **Bank stakeholder commitment** | 61 wu (midpoint; allows ~half the flagged sprints to overrun) |
+| **Procurement / regulatory deadline** | 66.5 wu (ceiling; no sprint splits required) |
 
 Calendar translation (~3-4 wu per week solo + Claude-Code throughput):
-- Floor: 13-14 weeks focused / 18-22 calendar
-- Mid: 14-16 weeks focused / 20-25 calendar
-- Ceiling: 16-18 weeks focused / 24-29 calendar
+- Floor: 14-15 weeks focused / 19-24 calendar
+- Mid: 15-17 weeks focused / 21-26 calendar
+- Ceiling: 17-19 weeks focused / 25-31 calendar
 
-**Anyone quoting "Phases 1-4 in ~18 weeks" is quoting the floor** — say so explicitly when escalating. Don't let "the plan said 18 weeks" become a commitment that breaks under the first sprint overrun.
+**Anyone quoting "Phases 1-4 in ~19-24 calendar weeks" is quoting the floor** — say so explicitly when escalating. Don't let "the plan said 19 weeks" become a commitment that breaks under the first sprint overrun.
 
 ## Total budget
 
 | Phase | Sprints | Work-units | Calendar |
 |---|---|---|---|
 | **1 Foundation** | 1A, 1B, 1C, 1D, 2, 3 | 12 | ~2.5-3 weeks |
-| **2 Protocol + SDK + Pack Lifecycle + UI Event-Stream** | 4, 5, 6, 7A, 7B | 14.5 | ~3-3.5 weeks |
+| **2 Protocol + SDK + Pack Lifecycle + UI Event-Stream** | 4, 5, 6, 7A, 7A2, 7B | 17 | ~4 weeks |
 | **3 Sandbox (with Resumable Sessions) + Compliance + Model Lifecycle** | 8, 8.5, 9, 9.5, 10 | 10 | ~2-2.5 weeks |
 | **4 Sub-agent + Memory Governance + Quality Gates + Policy + Kill Switches + Deploy** | 11, 11.5, 12, 13, 13.5, 14, 15 | 16 | ~3.5 weeks |
-| **Phases 1-4 total** | 21 sub-sprints | **52.5 work-units** | **~12-13 weeks focused / 18-22 calendar** |
+| **Phases 1-4 total** | 22 sub-sprints | **55 work-units** | **~14-15 weeks focused / 19-24 calendar** |
 | **5 Studio (deferred)** | 16-21 | 13 | +3 weeks focused / +5-6 calendar |
-| **Including Studio** | 27 sub-sprints | **65.5 work-units** | **~15-16 weeks focused / 23-27 calendar** |
+| **Including Studio** | 28 sub-sprints | **68 work-units** | **~17-18 weeks focused / 24-30 calendar** |
 
 Phases 1-4 are the bank-deployable platform. Phase 5 ships only after Phase 4 stabilises and Studio is explicitly demanded.
 
-**Why the totals went up since the prior revision:** Sprint 8.5 (Resumable Session API per ADR-004 amendment) added 1 wu in Phase 3; Sprint 13.5 (Runtime tool approval + Policy-as-code + Emergency controls per ADR-014/015/018) added 3 wu in Phase 4; Sprint 11.5 (Agent memory governance per ADR-019) added 2 wu in Phase 4; Sprint 4 picked up the policy-engine seed (+0.5 wu); Sprint 6 picked up the UI-events stub (+0.5 wu); Sprint 7B picked up the UI-events SSE endpoints + frontend-action POST (+0.5 wu); MCP auth picked up WWW-Authenticate + step-up + audience validation; A2A picked up signed-Agent-Card verification + correct absent-header rule. Most increases sit inside existing sprint envelopes — flagged in "Schedule-risk acknowledgement" if any overruns.
+**Why the totals went up since the prior revision:** Sprint 8.5 (Resumable Session API per ADR-004 amendment) added 1 wu in Phase 3; Sprint 13.5 (Runtime tool approval + Policy-as-code + Emergency controls per ADR-014/015/018) added 3 wu in Phase 4; Sprint 11.5 (Agent memory governance per ADR-019) added 2 wu in Phase 4; Sprint 4 picked up the policy-engine seed (+0.5 wu); Sprint 6 picked up the UI-events stub (+0.5 wu); Sprint 7A2 adds first-class hook packs + runtime hook dispatch before the lifecycle API freezes its pack-kind model (+2.5 wu); Sprint 7B picked up the UI-events SSE endpoints + frontend-action POST (+0.5 wu); MCP auth picked up WWW-Authenticate + step-up + audience validation; A2A picked up signed-Agent-Card verification + correct absent-header rule. Most increases sit inside existing sprint envelopes — flagged in "Schedule-risk acknowledgement" if any overruns.
 
 ---
 
@@ -1161,6 +1208,6 @@ All prerequisites resolved:
 - GitHub remote: `bmzee/cognic-agentos` (private), pushed after Sprint 1A commit lands
 - Sprint 1 split into 1A/1B/1C/1D per the critique — clean bootstrap before observability before adapters before enterprise adapters
 - Sprint 5 MCP host design includes the STDIO threat model + four-gate restriction (per ADR-002 amendment + PROJECT_PLAN §5)
-- Sprint 7 split into 7A (SDK/CLI) and 7B (lifecycle APIs per ADR-012)
+- Sprint 7 split into 7A (SDK/CLI), 7A2 (hook packs + runtime hook engine), and 7B (lifecycle APIs per ADR-012)
 
 Say "go Sprint 1A" to begin execution.

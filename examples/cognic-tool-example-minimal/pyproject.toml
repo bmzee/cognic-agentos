@@ -1,0 +1,21 @@
+# Sprint-7A T15 reference pack — minimal-but-valid TOOL pack pyproject.
+# NOT installed by the test runner; verify reads this statically + the
+# wheel build target is materialized in tmp_path during the lifecycle
+# test.
+
+[project]
+name = "cognic-tool-example-minimal"
+version = "0.1.0"
+description = "Sprint-7A T15 reference tool pack — exercises the per-kind Wave-1 author lifecycle."
+requires-python = ">=3.12"
+dependencies = ["cognic-agentos"]
+
+[project.entry-points."cognic.tools"]
+example_minimal = "cognic_tool_example_minimal.tool:ExampleMinimalTool"
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cognic_tool_example_minimal"]

@@ -1,0 +1,27 @@
+# Reference workflow — runs `agentos validate` + `agentos sign --bundle`
+# + `agentos verify` on every push to main. AUTHOR-FILL: review +
+# customize the publish step for your registry.
+
+name: sign-and-publish
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  sign:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # cosign keyless signing via OIDC
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install cognic-agentos
+      - run: agentos validate .
+      - run: agentos sign --bundle .
+      - run: agentos verify .
+      # AUTHOR-FILL: add a publishing step (e.g., upload to internal
+      # registry, twine to PyPI, push to OCI registry, etc.).

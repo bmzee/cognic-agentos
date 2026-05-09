@@ -2,24 +2,159 @@
 
 This doc tells you how to build a plugin pack that AgentOS will register
 at startup. It is the pack-author counterpart to ADR-002 (plugin
-protocol), ADR-016 (supply-chain controls), and ADR-017 (data-governance
-contracts) — read those when you need the *why*; this doc tells you the
-*what* in checklist form.
+protocol), ADR-008 (authoring platform), ADR-016 (supply-chain
+controls), and ADR-017 (data-governance contracts) — read those when
+you need the *why*; this doc tells you the *what* in checklist form.
 
 **Audience.** Engineers writing a tool, skill, or agent pack that will
 ship as its own distribution and install on top of AgentOS via
 `uv pip install` (or whatever the operator's pack channel is).
 
-**Wave 1 scope.** This doc reflects Sprint 4 / Wave 1. Items marked as
+**Sprint-7A author surface (Wave 1, current).** The recommended way to
+build a pack is the `agentos` CLI (Sprint-7A T4 + T5 + T6 + T13 + T14).
+Skip down to **Section 0 (Sprint-7A quickstart)** for the
+`init → build wheel → sign --bundle → validate → test-harness → verify`
+workflow against the Wave-1 toolchain. The order is sign-before-validate
+because `agentos validate` checks every declared
+`supply_chain.attestation_paths` file is present on disk — `sign --bundle`
+is what populates them. The deeper sections of this doc (1–7) describe
+the full plumbing the CLI automates and remain the canonical reference
+for operators and pack-author edge cases.
+
+**Wave 1 scope.** This doc reflects Sprint 4 / Wave 1 plumbing + the
+Sprint-7A SDK + CLI author surface that lands on top. Items marked as
 **Wave 2** or **Sprint 7A+** describe the eventual contract; the
 **Wave 1 escape hatch** subsection under each tells you what to do
 *today* before that tooling lands.
 
-The canonical worked example is the in-tree fixture pack at
-`tests/fixtures/cognic_test_pack/` — a complete, installable pack with
-a full attestation set. When this doc and that fixture disagree, the
-fixture is right (CI re-verifies it on every build) and this doc is
-wrong; please open an issue.
+The canonical worked example for the Sprint-7A author flow is one of
+the three reference packs at `examples/cognic-{tool,skill,agent}-example-minimal/`.
+When this doc and a reference pack disagree, the pack is right (CI
+re-verifies all three on every build via
+`tests/unit/cli/test_reference_packs_full_lifecycle_green.py`) and
+this doc is wrong; please open an issue. The Sprint-4 fixture pack at
+`tests/fixtures/cognic_test_pack/` remains the canonical example for
+the runtime trust-gate plumbing covered in Sections 4 + 7.
+
+---
+
+## 0. Sprint-7A quickstart — `agentos` CLI
+
+**Install.** The `agentos` console script ships with `cognic-agentos`.
+
+```
+uv pip install cognic-agentos
+agentos --help
+```
+
+**Three pack kinds, three scaffolders.** Pick the kind matching your
+pack's role (Section 1 covers the difference):
+
+```
+agentos init-tool  my-pack    # cognic.tools entry-point group
+agentos init-skill my-pack    # cognic.skills entry-point group
+agentos init-agent my-pack    # cognic.agents entry-point group
+```
+
+Each scaffolder writes a complete pack tree (manifest + pyproject +
+inert source + README) with `AUTHOR-FILL:` placeholders the validator
+refuses on. Replace every placeholder with a real value before
+proceeding.
+
+**Canonical workflow order: `init → build wheel → sign --bundle →
+validate → test-harness → verify`.** The `agentos validate` step
+checks `supply_chain.attestation_paths` for non-empty + every declared
+file present on disk; the seven attestation files are produced by
+`sign --bundle`, so the realistic flow runs sign FIRST and then
+validates against the populated tree. Running `agentos validate` on a
+fresh checkout (before any sign) WILL refuse — that's the expected
+shape, not a bug; it's a useful pre-sign **readiness check** for
+catching block-shape errors before you spend wall-clock time on the
+sign pipeline.
+
+**Build the wheel.**
+
+```
+python -m build --wheel    # or `uv build`
+```
+
+**Sign + bundle.** Run the four supply-chain binaries (cosign / syft /
+grype / pip-licenses) + emit the SLSA + in-toto attestations + (agent
+packs) sign the AgentCard JWS:
+
+```
+agentos sign --bundle .
+```
+
+This populates `attestations/` with the seven files the runtime trust
+gate verifies. For agent packs, `agent_cards/agent-card.jws` is also
+written.
+
+**Validate (now passes).**
+
+```
+agentos validate .
+```
+
+The orchestrator runs six per-concern validators (identity, a2a, mcp,
+data_governance, risk_tier, supply_chain) plus a shape gate against
+the canonical [pack] / [identity] / [a2a] / [mcp] / [data_governance]
+/ [risk_tier] / [supply_chain] block layout (the legacy
+`[tool.cognic.*]` shape is also accepted via dual-path lookup).
+
+**Optional pre-sign readiness check.** If you want to catch
+block-shape / closed-enum / AUTHOR-FILL errors before running the
+sign pipeline, you CAN run `agentos validate .` before sign — but
+expect a refusal on `supply_chain.attestation_paths` because the
+attestation files do not exist yet. That refusal is informational;
+proceed with the sign step and re-validate after.
+
+**Optional: `agentos test-harness` for tool packs.** Wave-1 narrows
+this to `kind = "tool"`; skill + agent dispatch dry-runs land in
+Sprint-7B. For tools, the harness invokes the entry point's
+`Tool.invoke()` template-method path against the **unmodified host
+runtime** so the SDK's input/output schema-validation seam is
+exercised end-to-end before publish:
+
+```
+agentos test-harness .
+```
+
+**Wave-1 narrow contract.** The harness does NOT install
+`httpx.MockTransport`, inject `agentos_sdk.testing.fixture_settings`,
+scope environment variables, or sandbox filesystem / network access.
+Tool `_invoke()` code runs against real httpx / hvac / sqlalchemy /
+Langfuse clients if your pack constructs them. If your tool performs
+live network or filesystem actions at import time or `_invoke()`
+time, those actions WILL fire during `agentos test-harness`. Pack
+authors who need fixture-adapter isolation wire it themselves in
+their pack test suite via `agentos_sdk.testing.fixture_settings` /
+`agentos_sdk.testing.fixture_audit_capture` — the harness is a
+pre-publish sanity gate (validate pipeline + `Tool.invoke` dispatch
++ conformance report), NOT a sandbox.
+
+**Verify offline.** Optional dry-run of the runtime trust gate against
+the freshly signed bundle. Same 11-step pipeline the runtime
+plugin-registry runs at admission time, plus the load probe (Step 11):
+
+```
+agentos verify .
+```
+
+**Reference packs.** Three minimal-but-valid packs at
+`examples/cognic-{tool,skill,agent}-example-minimal/` demonstrate the
+full lifecycle for each kind. They are inert by design (no production
+behavior) but every committed artifact passes every gate; copy a
+reference pack, substitute real behavior, and the surrounding
+manifest + pyproject + lifecycle is already valid. The agent example
+ships an explicit test-only RSA-2048 keypair under
+`attestations/test-signing/` (with a NOTE.md spelling out the
+test-only doctrine + the `prod`-profile rejection guard).
+
+**The detailed plumbing.** Sections 1–7 below describe the manifest
+shapes, the seven attestation files, and the runtime trust gate that
+sits beneath the CLI. The CLI automates most of it; read the deeper
+sections when you need to debug a refusal or override a step.
 
 ---
 

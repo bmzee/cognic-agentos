@@ -87,10 +87,21 @@ _SPEC_URI_PREFIXES: tuple[str, ...] = (
 )
 
 
+#: Sprint-7A T5 carve-out: the CLI's Jinja2 scaffold-template tree
+#: contains ``.py`` files with ``{{ ... }}`` placeholders + raw
+#: AUTHOR-FILL string literals that the env-specific-values gate
+#: cannot meaningfully scan. Pinned to the exact CLI templates root
+#: rather than a ``templates`` path-segment match so future modules
+#: under other ``*/templates/`` directories stay gated. R18 P3 #1.
+_CLI_TEMPLATES_ROOT: Path = SRC_ROOT / "cli" / "templates"
+
+
 def _iter_py_files() -> list[Path]:
     files: list[Path] = []
     for p in sorted(SRC_ROOT.rglob("*.py")):
         if "__pycache__" in p.parts:
+            continue
+        if p.is_relative_to(_CLI_TEMPLATES_ROOT):
             continue
         rel = str(p.relative_to(SRC_ROOT))
         if rel in EXEMPT_RELATIVE_PATHS:

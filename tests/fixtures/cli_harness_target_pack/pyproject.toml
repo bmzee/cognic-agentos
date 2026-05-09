@@ -1,0 +1,22 @@
+# Sprint-7A T13 task-local fixture — minimal-but-valid pyproject.toml
+# for the synthetic tool pack the harness exercises. NOT installed by
+# the test runner; the harness's entry-point loader reads this file
+# statically + loads the referenced module from ``src/`` via
+# ``importlib.util.spec_from_file_location``.
+
+[project]
+name = "cognic-tool-harness-target"
+version = "0.1.0"
+description = "Sprint-7A T13 fixture — exercises agentos test-harness dispatch dry-run."
+requires-python = ">=3.12"
+dependencies = ["cognic-agentos"]
+
+[project.entry-points."cognic.tools"]
+harness_target = "cognic_tool_harness_target.tool:HarnessTargetTool"
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cognic_tool_harness_target"]

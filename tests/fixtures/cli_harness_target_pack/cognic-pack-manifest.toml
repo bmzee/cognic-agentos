@@ -1,0 +1,37 @@
+# Sprint-7A T13 task-local fixture pack — minimal-but-valid synthetic
+# tool pack used by ``tests/unit/cli/test_cli_test_harness.py``. Per
+# the R7 P2 #1 task-decoupling pattern, this fixture is committed
+# alongside T13 so the harness test slice runs without T15's
+# ``examples/`` reference packs having landed yet. NOT a production
+# pack; the package source under ``src/`` is inert and used only by
+# the harness's dispatch dry-run.
+
+[pack]
+pack_id = "cognic-tool-harness-target"
+schema_version = 1
+kind = "tool"
+
+[identity]
+agent_id = "did:web:example.com:tools:harness_target"
+display_name = "Harness Target Tool"
+provider_organization = "Cognic AgentOS Sprint-7A T13 fixtures"
+provider_url = "https://example.com/sprint-7a-t13"
+oasf_capability_set = ["test.v1"]
+
+[mcp]
+caching = false
+elicitation_form = false
+
+[data_governance]
+data_classes = ["public", "internal"]
+purpose = "operational_telemetry"
+retention_policy = "none"
+
+[risk_tier]
+tier = "read_only"
+
+[supply_chain]
+attestation_paths = [
+    "attestations/cosign.sig",
+    "attestations/sbom.cdx.json",
+]

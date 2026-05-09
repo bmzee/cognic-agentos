@@ -1,0 +1,35 @@
+# Cognic AgentOS pack manifest — Wave-1 schema.
+
+[pack]
+pack_id = "{{ pack_id }}"
+schema_version = 1
+kind = "{{ kind }}"
+
+[identity]
+agent_id = "AUTHOR-FILL: stable identifier (e.g., did:web:example.com:skills:{{ pack_name }})"
+display_name = "AUTHOR-FILL: human-readable name shown in registries"
+provider_organization = "AUTHOR-FILL: your organization"
+provider_url = "AUTHOR-FILL: https://your-org.example.com"
+agent_card_url = "AUTHOR-FILL: https://your-org.example.com/skills/{{ pack_name }}/card.json"
+agent_card_jws_path = "agent_cards/agent-card.jws"  # AUTHOR-FILL if your pack ships JWS-signed cards
+
+[data_governance]
+# ADR-017 contract — vocabulary values are closed-enum literals
+# defined at cognic_agentos.cli._governance_vocab.
+data_classes = ["AUTHOR-FILL: e.g., public | internal | customer_pii | payment_data | credentials | regulator_communication | audit_trail | model_inputs | model_outputs"]
+purpose = "AUTHOR-FILL: e.g., transaction_processing | regulatory_reporting | fraud_detection | customer_support | audit_evidence | operational_telemetry"
+retention_policy = "AUTHOR-FILL: e.g., none | session_only | task_only | purpose_window | regulator_floor | indefinite_with_legal_basis"
+# retention_max_window = 90  # AUTHOR-FILL: uncomment + set when policy != "none"
+egress_allow_list = []  # AUTHOR-FILL
+
+[risk_tier]
+# ADR-014 risk tier. See _governance_vocab.RiskTier for the closed-
+# enum vocabulary; T11's cross-check refuses tiers below the minimum
+# required by the declared data_classes.
+tier = "AUTHOR-FILL: e.g., read_only | internal_write | customer_data_read | customer_data_write | payment_action | regulator_communication | cross_tenant | high_risk_custom"
+
+[supply_chain]
+attestation_paths = [
+    "attestations/cosign.sig",
+    "attestations/sbom.cdx.json",
+]

@@ -1,0 +1,18 @@
+# Sprint-7A T15 reference pack — minimal-but-valid SKILL pack pyproject.
+
+[project]
+name = "cognic-skill-example-minimal"
+version = "0.1.0"
+description = "Sprint-7A T15 reference skill pack — exercises the per-kind Wave-1 author lifecycle."
+requires-python = ">=3.12"
+dependencies = ["cognic-agentos"]
+
+[project.entry-points."cognic.skills"]
+example_minimal = "cognic_skill_example_minimal.skill:ExampleMinimalSkill"
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cognic_skill_example_minimal"]

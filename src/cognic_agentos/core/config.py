@@ -544,9 +544,73 @@ class Settings(BaseSettings):
         description=(
             "Override path to the cosign binary. None → ``shutil.which("
             "'cosign')`` at first use. Production: pinned in default-"
-            "adapters Dockerfile target with SHA256 (per Sprint-4 plan §2)."
+            "adapters Dockerfile target with SHA256 (per Sprint-4 plan §2). "
+            "Sprint-7A consumer: ``cli/sign.py`` (T14)."
         ),
     )
+    # ----- Sprint-7A T1 settings (per the Sprint-7A plan-of-record) -----
+    syft_path: str | None = Field(
+        default=None,
+        description=(
+            "Override path to the syft binary used by ``agentos sign --bundle`` "
+            "(T14) for SBOM generation per ADR-016. None → ``shutil.which("
+            "'syft')`` at first use; missing binary fails-loud with closed-enum "
+            "``sign_syft_not_installed``. Sprint-7A T1."
+        ),
+    )
+    grype_path: str | None = Field(
+        default=None,
+        description=(
+            "Override path to the grype binary used by ``agentos sign --bundle`` "
+            "(T14) for vulnerability scanning per ADR-016. None → "
+            "``shutil.which('grype')`` at first use; missing binary fails-loud "
+            "with closed-enum ``sign_grype_not_installed``. Sprint-7A T1."
+        ),
+    )
+    license_auditor_path: str | None = Field(
+        default=None,
+        description=(
+            "Override path to the license-auditor binary (pip-licenses or "
+            "cyclonedx-py) used by ``agentos sign --bundle`` (T14) per "
+            "ADR-016. None → ``shutil.which`` at first use; missing binary "
+            "fails-loud with closed-enum ``sign_license_auditor_not_installed``. "
+            "Sprint-7A T1."
+        ),
+    )
+    signing_key_path: str | None = Field(
+        default=None,
+        description=(
+            "Path or ``vault://`` URI to the signing key used by "
+            "``agentos sign --bundle`` (T14) and verified against the trust "
+            "root by ``agentos verify`` (T14). None → SDK fails-loud with "
+            "closed-enum ``sign_signing_key_unavailable``. R9 P2 #1: prod "
+            "profile rejects any path under ``examples/`` or "
+            "``tests/fixtures/`` at startup so test-only synthetic keys "
+            "cannot leak into production deployments. Sprint-7A T1."
+        ),
+    )
+    signing_trust_root_path: str | None = Field(
+        default=None,
+        description=(
+            "Path to the public-key PEM (or ``vault://`` URI) used by "
+            "``agentos verify`` (T14) as the trust-root target. R9 P2 #1: "
+            "in unit-lane testing this points at a committed test-only "
+            "public PEM under ``examples/`` or ``tests/fixtures/``; in "
+            "production this points at the per-tenant Vault trust-root path. "
+            "Sprint-7A T1."
+        ),
+    )
+    dev_mode_skip_cosign: bool = Field(
+        default=False,
+        description=(
+            "Dev-only override that lets ``agentos sign --bundle`` skip the "
+            "cosign-blob step (the rest of the bundle still generates). "
+            "Per Doctrine F: prints a security warning to stderr; ``prod`` "
+            "profile rejects ``True`` at startup with a closed-enum "
+            "settings-validation error. Sprint-7A T1."
+        ),
+    )
+    # ----- end Sprint-7A T1 settings -----
     cosign_verify_timeout_s: float = Field(
         default=30.0,
         gt=0.0,
@@ -554,6 +618,19 @@ class Settings(BaseSettings):
             "Per-call cosign-verify timeout in seconds. Strict: SIGKILL "
             "on timeout; the timeout itself emits a chained "
             "``trust_gate.cosign_timeout`` audit event. Must be > 0."
+        ),
+    )
+    load_probe_timeout_s: float = Field(
+        default=30.0,
+        gt=0.0,
+        description=(
+            "Per-call timeout (seconds) for the isolated-subprocess "
+            "``EntryPoint.load()`` probe used by ``agentos verify`` "
+            "after cosign verify-blob succeeds. SIGKILL + reap on "
+            "timeout; result routes to closed-enum "
+            "``verify_entry_point_load_failed`` "
+            "with ``payload.failure_mode=load_probe_timeout``. "
+            "Must be > 0. Sprint-7A T14.C R15 pivot."
         ),
     )
     supply_chain_policy_bundle: Path = Field(
@@ -897,6 +974,84 @@ class Settings(BaseSettings):
         raise ValueError(
             f"allowed_providers must be list, JSON array, or CSV; got {type(value).__name__}"
         )
+
+    @model_validator(mode="after")
+    def _validate_signing_key_path_prod_profile_guard(self) -> Settings:
+        """Sprint-7A R9 P2 #1 — prod-profile guard rejecting test-fixture-tree
+        signing keys at startup.
+
+        ``examples/`` and ``tests/fixtures/`` are the canonical homes for
+        synthetic test-only signing keys (per the R9 P2 #1 doctrine in the
+        Sprint-7A plan-of-record). Those keys are committed via narrow
+        ``.gitignore`` exceptions so T14 + T15 lifecycle tests can run
+        deterministically in the unit lane. Production deployments MUST
+        NOT reuse them — a real prod signing key lives at an
+        operator-controlled path (or a ``vault://`` URI) outside both
+        trees.
+
+        The guard is prod-profile-only by design: dev / test profiles
+        MUST be able to wire the test-fixture keys, otherwise T14 + T15
+        cannot exercise the sign + verify lifecycle.
+
+        Raises ``ValueError`` (which Pydantic wraps as
+        ``ValidationError``) with the closed-enum reason
+        ``signing_key_path_under_test_fixture_tree_in_prod`` when the
+        guard fires. R10 P2 #2 — both rejected and allowed path shapes
+        are pinned by tests in TestSprint7ASettings.
+
+        R11 P2 #1 reviewer correction: the earlier draft matched
+        ``"/examples/"`` and ``"/tests/fixtures/"`` as raw substrings,
+        which silently accepted any RELATIVE path that didn't start
+        with a slash (e.g., a ``signing_key_path`` like
+        ``examples/cognic-agent-example-minimal/...`` bypassed the
+        guard because the relative form starts with ``examples/``,
+        not ``/examples/``). Fix: skip URI-shaped values (e.g.,
+        ``vault://...``) since those aren't filesystem paths, then
+        resolve filesystem paths to absolute form via
+        ``Path.resolve()`` before the segment match.
+        ``Path.resolve()`` works on non-existent paths in Python
+        3.12+ — it just normalises lexically against the cwd, which
+        is what we need.
+        """
+        if (
+            self.runtime_profile == "prod"
+            and self.signing_key_path is not None
+            and "://" not in self.signing_key_path
+        ):
+            # Filesystem path branch — URI-shaped values (vault://,
+            # kms://, etc.) skip the fixture-tree check because they
+            # aren't filesystem paths. R12 P2 #1 reviewer correction:
+            # the earlier draft used ``return self`` here, which
+            # short-circuited the rest of the validator including the
+            # dev_mode_skip_cosign guard below. Now URI values fall
+            # through to the dev-mode guard cleanly. Resolve relative
+            # paths to absolute against the current working directory;
+            # this covers both ``signing_key_path="/abs/path/to/examples/..."``
+            # (already absolute) and ``signing_key_path="examples/..."``
+            # (relative to cwd) — the segment match below sees the
+            # same shape regardless of how the operator spelled the
+            # input.
+            from pathlib import Path as _Path
+
+            resolved = str(_Path(self.signing_key_path).resolve())
+            for segment in ("/examples/", "/tests/fixtures/"):
+                if segment in resolved:
+                    raise ValueError(
+                        "signing_key_path_under_test_fixture_tree_in_prod: "
+                        f"signing_key_path={self.signing_key_path!r} "
+                        f"resolves to {resolved!r} which is under "
+                        f"{segment.strip('/')} — that tree is reserved "
+                        "for synthetic test-only keys (Sprint-7A R9 P2 "
+                        "#1). Production signing keys MUST live outside "
+                        "the examples/ and tests/fixtures/ trees."
+                    )
+        if self.runtime_profile == "prod" and self.dev_mode_skip_cosign:
+            raise ValueError(
+                "dev_mode_skip_cosign=True is forbidden in prod profile "
+                "per Sprint-7A Doctrine Decision F. Set runtime_profile to "
+                "'dev' or 'test', or remove the override."
+            )
+        return self
 
     @model_validator(mode="after")
     def _resolve_local_object_store_root(self) -> Settings:

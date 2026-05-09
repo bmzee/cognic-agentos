@@ -1,0 +1,63 @@
+# Cognic AgentOS pack manifest — Wave-1 schema.
+#
+# Every "AUTHOR-FILL:" placeholder triggers a refusal from
+# `agentos validate` until you replace it with a real value.
+# Run `agentos validate .` after each round of edits to surface
+# remaining gaps.
+
+[pack]
+pack_id = "{{ pack_id }}"
+schema_version = 1
+kind = "{{ kind }}"
+
+[identity]
+# AGNTCY/OASF identity matrix. Every field below is mandatory per
+# Sprint-7A T7 (identity validator). The agent_card_jws_path is the
+# pack-relative path the JWS verifier reads at admission time.
+agent_id = "AUTHOR-FILL: stable identifier (e.g., did:web:example.com:tools:{{ pack_name }})"
+display_name = "AUTHOR-FILL: human-readable name shown in registries"
+provider_organization = "AUTHOR-FILL: your organization"
+provider_url = "AUTHOR-FILL: https://your-org.example.com"
+agent_card_url = "AUTHOR-FILL: https://your-org.example.com/tools/{{ pack_name }}/card.json"
+agent_card_jws_path = "agent_cards/agent-card.jws"  # AUTHOR-FILL if your pack ships JWS-signed cards
+
+# OASF capability set — optional Wave-1 (warning, NOT refusal):
+# capability_set = ["AUTHOR-FILL: e.g., kyc.v1, retrieval.v1"]
+
+[mcp]
+# Wave-1 MCP capabilities. Caching + elicitation_form on restricted
+# data classes trip refusals from the MCP validator (T9).
+caching = false
+elicitation_form = false
+
+[data_governance]
+# ADR-017 contract. Every field below is enforced by the
+# data-governance validator (T10) + the runtime DLP path. Vocabulary
+# values are closed-enum literals defined at
+# cognic_agentos.cli._governance_vocab; see the validator for the full
+# allowed-values list.
+data_classes = ["AUTHOR-FILL: e.g., public | internal | customer_pii | payment_data | credentials | regulator_communication | audit_trail | model_inputs | model_outputs"]
+purpose = "AUTHOR-FILL: e.g., transaction_processing | regulatory_reporting | fraud_detection | customer_support | audit_evidence | operational_telemetry"
+retention_policy = "AUTHOR-FILL: e.g., none | session_only | task_only | purpose_window | regulator_floor | indefinite_with_legal_basis"
+# retention_max_window required when retention_policy != "none".
+# Positive number representing the retention period (units per
+# pack-author docs, typically days).
+# retention_max_window = 90  # AUTHOR-FILL: uncomment + set when policy != "none"
+egress_allow_list = []  # AUTHOR-FILL: e.g., ["api.example.com"]
+
+[risk_tier]
+# ADR-014 risk tier. Must be consistent with the declared
+# data_classes (e.g., declaring 'customer_pii' requires at least
+# 'customer_data_read'; declaring 'payment_data' requires at least
+# 'payment_action'). Closed-enum vocabulary defined at
+# cognic_agentos.cli._governance_vocab.RiskTier.
+tier = "AUTHOR-FILL: e.g., read_only | internal_write | customer_data_read | customer_data_write | payment_action | regulator_communication | cross_tenant | high_risk_custom"
+
+[supply_chain]
+# ADR-016 attestation paths. Each path is checked at validate time;
+# missing files trip supply_chain_attestation_path_unresolvable.
+# Run `agentos sign --bundle .` to populate attestations/.
+attestation_paths = [
+    "attestations/cosign.sig",
+    "attestations/sbom.cdx.json",
+]
