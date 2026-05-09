@@ -112,6 +112,23 @@ ValidatorReason = Literal[
     # top-level reason owns every load-probe refusal so admission can
     # distinguish loadability from declarative shape failures.
     "verify_entry_point_load_failed",
+    # Hook-pack manifest validation (Sprint-7A2 T6 — the cli/validators/
+    # hooks.py module added at T6 emits these). Each closed-enum reason
+    # owns a distinct refusal site; ``payload.failure_mode`` distinguishes
+    # within-reason sub-cases (e.g., ``hook_block_shape_invalid`` carries
+    # ``failure_mode=missing_block`` / ``empty_declarations`` /
+    # ``missing_required_field`` / ``unknown_field``). The seed list at
+    # plan-of-record T1 is 9 reasons; if T6 review surfaces additional
+    # refusal paths the literal grows in the same commit that adds them.
+    "hook_block_shape_invalid",
+    "hook_id_invalid",
+    "hook_phase_invalid",
+    "hook_ordering_class_invalid",
+    "hook_timeout_invalid",
+    "hook_fail_policy_invalid",
+    "hook_pack_kind_constraint_violated",
+    "hook_entry_point_mismatch",
+    "hook_unresolved_reference",
 ]
 
 
@@ -180,6 +197,16 @@ _VALIDATOR_REASON_OWNERSHIP: Final[dict[ValidatorReason, str]] = {
     "verify_attestation_path_unresolvable": "verify.py",
     "verify_agent_card_jws_invalid": "verify.py",
     "verify_trust_root_path_unresolvable": "verify.py",
+    # Hooks (Sprint-7A2 T6 — cli/validators/hooks.py)
+    "hook_block_shape_invalid": "validators/hooks.py",
+    "hook_id_invalid": "validators/hooks.py",
+    "hook_phase_invalid": "validators/hooks.py",
+    "hook_ordering_class_invalid": "validators/hooks.py",
+    "hook_timeout_invalid": "validators/hooks.py",
+    "hook_fail_policy_invalid": "validators/hooks.py",
+    "hook_pack_kind_constraint_violated": "validators/hooks.py",
+    "hook_entry_point_mismatch": "validators/hooks.py",
+    "hook_unresolved_reference": "validators/hooks.py",
     "verify_entry_point_load_failed": "verify.py",
 }
 
