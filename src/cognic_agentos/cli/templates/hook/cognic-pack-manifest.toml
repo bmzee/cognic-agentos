@@ -1,0 +1,82 @@
+# Cognic AgentOS pack manifest — Wave-1 schema (Sprint-7A2 hook pack).
+
+[pack]
+pack_id = "{{ pack_id }}"
+schema_version = 1
+kind = "{{ kind }}"
+
+[identity]
+agent_id = "AUTHOR-FILL: stable identifier (e.g., did:web:example.com:hooks:{{ pack_name }})"
+display_name = "AUTHOR-FILL: human-readable name shown in registries"
+provider_organization = "AUTHOR-FILL: your organization"
+provider_url = "AUTHOR-FILL: https://your-org.example.com"
+agent_card_url = "AUTHOR-FILL: https://your-org.example.com/hooks/{{ pack_name }}/card.json"
+# Hook packs do NOT ship an AgentCard JWS; OMIT agent_card_jws_path
+# entirely. Sprint-7A2 T6 validator refuses kind="hook" packs that
+# declare agent_card_jws_path with closed-enum reason
+# hook_pack_kind_constraint_violated.
+
+[data_governance]
+# ADR-017 contract — vocabulary values are closed-enum literals
+# defined at cognic_agentos.cli._governance_vocab.
+data_classes = ["AUTHOR-FILL: e.g., public | internal | customer_pii | payment_data | credentials | regulator_communication | audit_trail | model_inputs | model_outputs"]
+purpose = "AUTHOR-FILL: e.g., transaction_processing | regulatory_reporting | fraud_detection | customer_support | audit_evidence | operational_telemetry"
+retention_policy = "AUTHOR-FILL: e.g., none | session_only | task_only | purpose_window | regulator_floor | indefinite_with_legal_basis"
+# retention_max_window = 90  # AUTHOR-FILL: uncomment + set when policy != "none"
+egress_allow_list = []  # AUTHOR-FILL — hooks are normally egress-free.
+
+[risk_tier]
+# ADR-014 risk tier. See _governance_vocab.RiskTier for the closed-
+# enum vocabulary; T11's cross-check refuses tiers below the minimum
+# required by the declared data_classes.
+tier = "AUTHOR-FILL: e.g., read_only | internal_write | customer_data_read | customer_data_write | payment_action | regulator_communication | cross_tenant | high_risk_custom"
+
+# Sprint-7A2 hook-pack-specific block. Each declaration binds a
+# stable hook_id to a phase + ordering_class + timeout + fail_policy.
+# The matching pyproject.toml [project.entry-points."cognic.hooks"]
+# section MUST list one entry per hook_id below. The Sprint-7A2 T6
+# validator cross-checks both directions.
+[hooks]
+[[hooks.declarations]]
+# AUTHOR-FILL: stable snake_case hook ID. Matches the calling pack's
+# [data_governance].dlp_pre_hooks / dlp_post_hooks reference.
+hook_id = "AUTHOR-FILL: e.g., redact_pii_in_input"
+# Closed-enum hook phase from cognic_agentos.cli._governance_vocab.HookPhase.
+# Wave-1: dlp_pre runs before pack code sees governed input;
+#         dlp_post runs before governed output leaves AgentOS.
+phase = "AUTHOR-FILL: dlp_pre | dlp_post"
+# Closed-enum ordering class from cognic_agentos.cli._governance_vocab.
+# HookOrderingClass. Wave-1: input_* classes pair with dlp_pre,
+# output_* classes pair with dlp_post; T6 validator refuses
+# mismatched pairings.
+#
+# dlp_pre classes (semantic order):
+#   input_validation       — earliest; refuses obviously-invalid input
+#   input_authorization    — consent / authz checks
+#   input_redaction        — PII redaction
+#   input_normalization    — format normalization
+# dlp_post classes (semantic order):
+#   output_validation      — earliest post-hook
+#   output_egress_check    — egress allow-list cross-check
+#   output_redaction       — secondary PII redaction
+#   output_masking         — account / id masking
+ordering_class = "AUTHOR-FILL: pick a value from the list above"
+# Per-hook timeout in seconds; capped at Settings.hook_max_timeout_s
+# (default 30.0). Dispatcher enforces min(declared, ceiling) at
+# runtime. T6 refuses values > ceiling or <= 0.
+timeout_seconds = 5.0
+# Closed-enum fail policy from HookFailPolicy:
+#   fail_closed (default) — hook timeout / exception / refuse leaves
+#                            the calling-pack invocation refused;
+#                            ADR-017 mandates fail-closed for all
+#                            data-governance phases by default.
+#   fail_open             — REFUSED unless the calling pack declares
+#                            a matching fail_open_exception in its
+#                            [data_governance] block.
+fail_policy = "fail_closed"
+
+[supply_chain]
+attestation_paths = [
+    "attestations/cosign.sig",
+    "attestations/sbom.cdx.json",
+]

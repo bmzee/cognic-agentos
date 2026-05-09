@@ -1,4 +1,4 @@
-"""Sprint-7A T5 — `agentos init-{tool,skill,agent}` scaffold logic.
+"""Sprint-7A T5 + Sprint-7A2 T3 — `agentos init-{tool,skill,agent,hook}` scaffold logic.
 
 The Typer command wrappers in :mod:`cognic_agentos.cli` delegate
 into :func:`scaffold`; the scaffold function is the unit-tested seam
@@ -31,6 +31,19 @@ kind (R5 P2 #2):
   - Agent subclass overrides ``handle`` (the public abstract; the
     signature matches the shipped Sprint-6 ``A2AEndpoint`` dispatch
     contract).
+  - Hook subclass overrides ``_invoke(context, payload)`` (NOT
+    ``invoke``; the SDK's ``Hook.__init_subclass__`` rejects
+    subclasses that override the public final method, mirrors Tool
+    R8 P2 #1; Sprint-7A2 T2). Pack authors declare ``hook_id`` +
+    ``phase`` ClassVars; the build-time validator (Sprint-7A2 T6)
+    cross-checks both against the manifest's ``[hooks].declarations``
+    block.
+
+Sprint-7A2 T3 adds ``hook`` as the 4th supported kind. The
+hook-specific entry-point group is ``cognic.hooks`` (not
+``cognic.hooks`` plural-like-the-others — wait, it IS plural;
+``cognic.tools`` / ``cognic.skills`` / ``cognic.agents`` /
+``cognic.hooks`` all follow the same plural-noun convention).
 """
 
 from __future__ import annotations
@@ -55,8 +68,9 @@ _MODULE_PATH_PLACEHOLDER: Final[str] = "__module__"
 
 #: Closed allow-list of supported scaffold kinds. Each kind has a
 #: matching template subtree + an ``app.command`` registration in
-#: :mod:`cognic_agentos.cli`.
-_SUPPORTED_KINDS: Final[frozenset[str]] = frozenset({"tool", "skill", "agent"})
+#: :mod:`cognic_agentos.cli`. Sprint-7A2 T3 adds ``hook`` as the 4th
+#: kind alongside the Sprint-7A T5 trio.
+_SUPPORTED_KINDS: Final[frozenset[str]] = frozenset({"tool", "skill", "agent", "hook"})
 
 #: Pack-name validator: lowercase ASCII letters / digits / underscores;
 #: must start with a letter (Python-identifier rule, restricted to

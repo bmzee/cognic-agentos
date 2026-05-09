@@ -404,6 +404,30 @@ def init_agent(
     _run_init("agent", pack_name)
 
 
+@app.command(name="init-hook")
+def init_hook(
+    pack_name: str = typer.Argument(
+        ...,
+        help=(
+            "Name of the new hook pack. Produces ``cognic-hook-<name>/`` "
+            "in the current working directory."
+        ),
+    ),
+) -> None:
+    """Scaffold a new hook pack repo from the bundled templates.
+
+    Sprint-7A2 T3. Hook packs are deterministic governance extensions
+    (NOT Layer C agent behavior) registered under the
+    ``cognic.hooks`` entry-point group. The generated tree includes
+    a ``Hook`` subclass overriding ``_invoke(context, payload)``, a
+    ``cognic-pack-manifest.toml`` carrying the new ``[hooks]`` block
+    declaring per-hook IDs + phases + ordering classes + timeouts +
+    fail-policy, and (unlike agent packs) NO ``agent_cards/``
+    directory because hook packs do NOT ship an AgentCard JWS.
+    """
+    _run_init("hook", pack_name)
+
+
 @app.command()
 def validate(
     pack_path: Path = typer.Argument(  # noqa: B008
