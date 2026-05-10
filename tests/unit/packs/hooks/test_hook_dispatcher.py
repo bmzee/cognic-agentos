@@ -32,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import hashlib
+from collections.abc import Callable
 from typing import ClassVar
 
 import pytest
@@ -41,6 +42,7 @@ from cognic_agentos.packs.hooks.dispatcher import (
     HookDispatcher,
     HookDispatchOutcome,
     HookDispatchResult,
+    HookDispatchSelectionError,
     HookFailureMode,
 )
 from cognic_agentos.packs.hooks.registry import (
@@ -1447,6 +1449,7 @@ def test_public_surface_is_what_we_imported() -> None:
         "HookDispatcher",
         "HookDispatchOutcome",
         "HookDispatchResult",
+        "HookDispatchSelectionError",
         "HookFailureMode",
     }
     assert expected.issubset(set(d_mod.__all__))
@@ -1459,3 +1462,509 @@ def test_decision_decorator_pin() -> None:
 
     members = set(get_args(HookDecision))
     assert members == {"pass", "redact", "mask", "refuse"}
+
+
+# ---------------------------------------------------------------------------
+# T8 — dispatch_for_pack: per-pack selector
+#
+# Per ADR-017 line 97 ("pack manifest names which hooks must run; AgentOS
+# resolves them via the plugin registry"). dispatch_for_pack runs ONLY the
+# hook entries whose hook_id is in ``declared_hook_ids``, in dispatcher-
+# canonical order (ordering_rank ascending; ties by hook_id alphabetic) —
+# NOT the declaration order in ``declared_hook_ids``.
+#
+# Step order inside dispatch_for_pack: caller-input validation → digest →
+# BUDGET CHECK → snapshot → resolve+dedup declared_hook_ids → sort → iterate.
+# An unresolved hook_id raises :class:`HookDispatchSelectionError` AFTER
+# the budget check passes. T8 R1 P2-2 fix: DLPGuard catches this exception
+# as the **primary route** to ``dlp_hook_id_unresolved`` — DLPGuard does
+# NOT pre-validate hook_id resolution itself, so the dispatcher's
+# precedence (budget before lookup) stays intact. The exception is the
+# normal unresolved-ID path, NOT a dead-code defense-in-depth raise.
+# ---------------------------------------------------------------------------
+
+
+class _OrderingClassRedactPii(Hook):
+    """input_redaction class (rank 30) — middle of dlp_pre pipeline."""
+
+    hook_id: ClassVar[str] = "redact_pii"
+    phase: ClassVar[HookPhase] = "dlp_pre"
+
+    async def _invoke(self, context: HookContext, payload: bytes) -> HookResult:
+        return HookResult(
+            decision="redact", redacted_payload=b"PII_REDACTED:" + payload, policy_reason=None
+        )
+
+
+class _OrderingClassEarlyValidate(Hook):
+    """input_validation class (rank 10) — earliest in dlp_pre."""
+
+    hook_id: ClassVar[str] = "early_validate"
+    phase: ClassVar[HookPhase] = "dlp_pre"
+
+    async def _invoke(self, context: HookContext, payload: bytes) -> HookResult:
+        return HookResult(
+            decision="redact", redacted_payload=b"VALIDATED:" + payload, policy_reason=None
+        )
+
+
+class _OrderingClassLateNormalize(Hook):
+    """input_normalization class (rank 40) — latest in dlp_pre."""
+
+    hook_id: ClassVar[str] = "late_normalize"
+    phase: ClassVar[HookPhase] = "dlp_pre"
+
+    async def _invoke(self, context: HookContext, payload: bytes) -> HookResult:
+        return HookResult(
+            decision="redact", redacted_payload=b"NORMALIZED:" + payload, policy_reason=None
+        )
+
+
+def _make_loader(cls: type[Hook]) -> Callable[[], type[Hook]]:
+    """Helper that closes over a hook class with a typed lambda —
+    avoids mypy ``Cannot infer type of lambda`` on default-arg
+    closure-capture patterns inside generator expressions."""
+    return lambda: cls
+
+
+def _seed_multi_hook_registry(
+    *,
+    hook_specs: list[tuple[type[Hook], str]],  # (hook_class, ordering_class)
+    distribution_name: str = "cognic-hook-multi",
+    distribution_version: str = "0.1.0",
+    signature_digest: str = "sha256:" + "b" * 64,
+    timeout_seconds: float = 1.0,
+    max_timeout_seconds: float = 30.0,
+) -> HookRegistry:
+    """Seed a registry with multiple hook declarations from one pack."""
+    registry = HookRegistry(max_timeout_seconds=max_timeout_seconds)
+    decls = tuple(
+        HookDeclaration(
+            hook_id=cls.hook_id,
+            phase=cls.phase,
+            ordering_class=oc,  # type: ignore[arg-type]
+            timeout_seconds=timeout_seconds,
+            fail_policy="fail_closed",
+            fail_open_exception=None,
+            callable_loader=_make_loader(cls),
+        )
+        for cls, oc in hook_specs
+    )
+    pack = VerifiedHookPack(
+        distribution_name=distribution_name,
+        distribution_version=distribution_version,
+        signature_digest=signature_digest,
+        declarations=decls,
+    )
+    registry.register_pack(pack)
+    return registry
+
+
+class TestDispatchForPackEmpty:
+    """An empty ``declared_hook_ids`` is a no-op: payload unchanged,
+    outcome=passed, digest computed against the original payload.
+    Mirrors :class:`TestDispatcherEmptyPhase` semantics."""
+
+    @pytest.mark.asyncio
+    async def test_empty_declared_returns_passed_with_payload_unchanged(self) -> None:
+        registry = _seed_multi_hook_registry(
+            hook_specs=[
+                (_OrderingClassRedactPii, "input_redaction"),
+                (_OrderingClassEarlyValidate, "input_validation"),
+            ],
+        )
+        dispatcher = HookDispatcher(
+            registry=registry,
+            max_payload_bytes=10_000,
+            max_timeout_seconds_runtime=30.0,
+        )
+        result = await dispatcher.dispatch_for_pack(
+            phase="dlp_pre",
+            declared_hook_ids=[],
+            payload=b"hello",
+            context_template=_ctx_template(),
+        )
+        assert result.outcome == "passed"
+        # Payload untouched — no hooks ran.
+        assert result.final_payload == b"hello"
+        assert result.failure_mode is None
+        assert result.failed_hook_id is None
+        assert result.policy_reason is None
+        # Digest computed against the original payload.
+        assert result.policy_input_digest == hashlib.sha256(b"hello").hexdigest()
+
+
+class TestDispatchForPackFiltering:
+    """Per-pack selector semantics: only hooks named in
+    ``declared_hook_ids`` run; other registered hooks for the phase
+    do not — matches ADR-017 line 97 doctrine."""
+
+    @pytest.mark.asyncio
+    async def test_runs_only_declared_subset(self) -> None:
+        # Three hooks registered under dlp_pre; only declare ONE.
+        registry = _seed_multi_hook_registry(
+            hook_specs=[
+                (_OrderingClassRedactPii, "input_redaction"),
+                (_OrderingClassEarlyValidate, "input_validation"),
+                (_OrderingClassLateNormalize, "input_normalization"),
+            ],
+        )
+        dispatcher = HookDispatcher(
+            registry=registry,
+            max_payload_bytes=10_000,
+            max_timeout_seconds_runtime=30.0,
+        )
+        result = await dispatcher.dispatch_for_pack(
+            phase="dlp_pre",
+            declared_hook_ids=["redact_pii"],  # ONLY this one
+            payload=b"data",
+            context_template=_ctx_template(),
+        )
+        assert result.outcome == "passed"
+        # Only redact_pii ran; final_payload reflects ITS transformation only.
+        assert result.final_payload == b"PII_REDACTED:data"
+
+    @pytest.mark.asyncio
+    async def test_canonical_order_not_declaration_order(self) -> None:
+        """Order is dispatcher-canonical (ordering_rank ascending) NOT
+        the order of ``declared_hook_ids``."""
+        registry = _seed_multi_hook_registry(
+            hook_specs=[
+                (_OrderingClassRedactPii, "input_redaction"),  # rank 30
+                (_OrderingClassEarlyValidate, "input_validation"),  # rank 10
+                (_OrderingClassLateNormalize, "input_normalization"),  # rank 40
+            ],
+        )
+        dispatcher = HookDispatcher(
+            registry=registry,
+            max_payload_bytes=10_000,
+            max_timeout_seconds_runtime=30.0,
+        )
+        # Declare in REVERSE order — dispatcher must still run by
+        # ordering_rank ascending: validate (10) → redact (30) → normalize (40).
+        result = await dispatcher.dispatch_for_pack(
+            phase="dlp_pre",
+            declared_hook_ids=["late_normalize", "redact_pii", "early_validate"],
+            payload=b"raw",
+            context_template=_ctx_template(),
+        )
+        assert result.outcome == "passed"
+        # If order is canonical: validate(raw) → redact(VALIDATED:raw) →
+        # normalize(PII_REDACTED:VALIDATED:raw) → "NORMALIZED:PII_REDACTED:VALIDATED:raw"
+        assert result.final_payload == b"NORMALIZED:PII_REDACTED:VALIDATED:raw"
+
+    @pytest.mark.asyncio
+    async def test_undeclared_registered_hooks_do_not_run(self) -> None:
+        """An ``input_validation`` hook is registered but NOT declared
+        for this pack — the validate transformation must be ABSENT
+        from the final payload."""
+        registry = _seed_multi_hook_registry(
+            hook_specs=[
+                (_OrderingClassRedactPii, "input_redaction"),
+                (_OrderingClassEarlyValidate, "input_validation"),
+            ],
+        )
+        dispatcher = HookDispatcher(
+            registry=registry,
+            max_payload_bytes=10_000,
+            max_timeout_seconds_runtime=30.0,
+        )
+        result = await dispatcher.dispatch_for_pack(
+            phase="dlp_pre",
+            declared_hook_ids=["redact_pii"],  # NOT early_validate
+            payload=b"raw",
+            context_template=_ctx_template(),
+        )
+        assert result.outcome == "passed"
+        # If early_validate had run, payload would carry "VALIDATED:".
+        # It MUST NOT.
+        assert b"VALIDATED" not in result.final_payload
+        assert result.final_payload == b"PII_REDACTED:raw"
+
+
+class TestDispatchForPackUnresolvedRaises:
+    """An unresolved hook_id raises :class:`HookDispatchSelectionError`
+    AFTER the dispatcher's budget check has passed. T8 R1 P2-2 fix:
+    this is the primary route to ``dlp_hook_id_unresolved`` — DLPGuard
+    catches the exception and translates; DLPGuard does NOT pre-validate
+    hook_id resolution itself (so the dispatcher's budget-check-before-
+    lookup precedence stays intact)."""
+
+    @pytest.mark.asyncio
+    async def test_unresolved_hook_id_raises_typed_exception(self) -> None:
+        registry = _seed_multi_hook_registry(
+            hook_specs=[(_OrderingClassRedactPii, "input_redaction")],
+        )
+        dispatcher = HookDispatcher(
+            registry=registry,
+            max_payload_bytes=10_000,
+            max_timeout_seconds_runtime=30.0,
+        )
+        with pytest.raises(HookDispatchSelectionError) as excinfo:
+            await dispatcher.dispatch_for_pack(
+                phase="dlp_pre",
+                declared_hook_ids=["redact_pii", "this_hook_does_not_exist"],
+                payload=b"data",
+                context_template=_ctx_template(),
+            )
+        # Message names the unresolved hook_id so an operator can act on it.
+        assert "this_hook_does_not_exist" in str(excinfo.value)
+
+    @pytest.mark.asyncio
+    async def test_unresolved_in_empty_registry_raises(self) -> None:
+        registry = HookRegistry(max_timeout_seconds=30.0)
+        dispatcher = HookDispatcher(
+            registry=registry,
+            max_payload_bytes=10_000,
+            max_timeout_seconds_runtime=30.0,
+        )
+        with pytest.raises(HookDispatchSelectionError):
+            await dispatcher.dispatch_for_pack(
+                phase="dlp_pre",
+                declared_hook_ids=["any_hook"],
+                payload=b"data",
+                context_template=_ctx_template(),
+            )
+
+    @pytest.mark.asyncio
+    async def test_phase_mismatch_unresolved_raises(self) -> None:
+        """A hook registered under dlp_pre but the dispatch is for
+        dlp_post → unresolved at dispatch_for_pack (the lookup keys
+        on (phase, hook_id))."""
+        registry = _seed_multi_hook_registry(
+            hook_specs=[(_OrderingClassRedactPii, "input_redaction")],
+        )
+        dispatcher = HookDispatcher(
+            registry=registry,
+            max_payload_bytes=10_000,
+            max_timeout_seconds_runtime=30.0,
+        )
+        with pytest.raises(HookDispatchSelectionError):
+            await dispatcher.dispatch_for_pack(
+                phase="dlp_post",
+                declared_hook_ids=["redact_pii"],  # exists in dlp_pre, NOT dlp_post
+                payload=b"data",
+                context_template=_ctx_template(phase="dlp_post"),
+            )
+
+
+class TestDispatchForPackPayloadBudget:
+    """Payload-unscannable refusal still routes through the closed-enum
+    failure mode for dispatch_for_pack — same as :meth:`dispatch`."""
+
+    @pytest.mark.asyncio
+    async def test_payload_too_large_refuses_before_lookup(self) -> None:
+        registry = _seed_multi_hook_registry(
+            hook_specs=[(_OrderingClassRedactPii, "input_redaction")],
+        )
+        dispatcher = HookDispatcher(
+            registry=registry,
+            max_payload_bytes=4,  # forces immediate refusal
+            max_timeout_seconds_runtime=30.0,
+        )
+        result = await dispatcher.dispatch_for_pack(
+            phase="dlp_pre",
+            declared_hook_ids=["redact_pii"],
+            payload=b"too_long_payload",
+            context_template=_ctx_template(),
+        )
+        assert result.outcome == "failed"
+        assert result.failure_mode == "hook_payload_unscannable"
+        # final_payload returns ORIGINAL on failure paths.
+        assert result.final_payload == b"too_long_payload"
+
+    @pytest.mark.asyncio
+    async def test_payload_budget_check_before_unresolved_lookup(self) -> None:
+        """A payload-too-large refusal MUST short-circuit BEFORE the
+        unresolved-id lookup raises, so an unscannable payload with
+        unresolved ids returns failed (not raises)."""
+        registry = _seed_multi_hook_registry(
+            hook_specs=[(_OrderingClassRedactPii, "input_redaction")],
+        )
+        dispatcher = HookDispatcher(
+            registry=registry,
+            max_payload_bytes=4,
+            max_timeout_seconds_runtime=30.0,
+        )
+        result = await dispatcher.dispatch_for_pack(
+            phase="dlp_pre",
+            declared_hook_ids=["nonexistent"],  # would raise if lookup ran
+            payload=b"too_long_payload",
+            context_template=_ctx_template(),
+        )
+        assert result.outcome == "failed"
+        assert result.failure_mode == "hook_payload_unscannable"
+
+
+class TestDispatchForPackFailureRouting:
+    """All five HookFailureMode values reachable through dispatch_for_pack
+    just as they are through dispatch — pin parity."""
+
+    @pytest.mark.asyncio
+    async def test_timeout_routes_through_dispatch_for_pack(self) -> None:
+        registry = _seed_registry(hook_class=_SlowHook, timeout_seconds=0.05)
+        dispatcher = HookDispatcher(
+            registry=registry,
+            max_payload_bytes=10_000,
+            max_timeout_seconds_runtime=30.0,
+        )
+        result = await dispatcher.dispatch_for_pack(
+            phase="dlp_pre",
+            declared_hook_ids=["slow_hook"],
+            payload=b"data",
+            context_template=_ctx_template(),
+        )
+        assert result.outcome == "failed"
+        assert result.failure_mode == "hook_timeout"
+        assert result.failed_hook_id == "slow_hook"
+
+    @pytest.mark.asyncio
+    async def test_refuse_routes_through_dispatch_for_pack(self) -> None:
+        registry = _seed_registry(hook_class=_RefuseHook)
+        dispatcher = HookDispatcher(
+            registry=registry,
+            max_payload_bytes=10_000,
+            max_timeout_seconds_runtime=30.0,
+        )
+        result = await dispatcher.dispatch_for_pack(
+            phase="dlp_pre",
+            declared_hook_ids=["refuse_hook"],
+            payload=b"data",
+            context_template=_ctx_template(),
+        )
+        assert result.outcome == "refused"
+        assert result.failure_mode == "hook_policy_refused"
+        assert result.failed_hook_id == "refuse_hook"
+        assert result.policy_reason == "data_class_blocked"
+
+    @pytest.mark.asyncio
+    async def test_exception_routes_through_dispatch_for_pack(self) -> None:
+        registry = _seed_registry(hook_class=_RaiseGenericHook)
+        dispatcher = HookDispatcher(
+            registry=registry,
+            max_payload_bytes=10_000,
+            max_timeout_seconds_runtime=30.0,
+        )
+        result = await dispatcher.dispatch_for_pack(
+            phase="dlp_pre",
+            declared_hook_ids=["raise_generic_hook"],
+            payload=b"data",
+            context_template=_ctx_template(),
+        )
+        assert result.outcome == "failed"
+        assert result.failure_mode == "hook_exception"
+
+    @pytest.mark.asyncio
+    async def test_malformed_result_routes_through_dispatch_for_pack(self) -> None:
+        registry = _seed_registry(hook_class=_MalformedResultHook)
+        dispatcher = HookDispatcher(
+            registry=registry,
+            max_payload_bytes=10_000,
+            max_timeout_seconds_runtime=30.0,
+        )
+        result = await dispatcher.dispatch_for_pack(
+            phase="dlp_pre",
+            declared_hook_ids=["malformed_result_hook"],
+            payload=b"data",
+            context_template=_ctx_template(),
+        )
+        assert result.outcome == "failed"
+        assert result.failure_mode == "hook_malformed_result"
+
+
+class TestDispatchForPackInputValidation:
+    """Caller-input validation (phase mismatch / hook_id sentinel)
+    raises :class:`ValueError` fail-fast — same as :meth:`dispatch`."""
+
+    @pytest.mark.asyncio
+    async def test_phase_mismatch_in_template_raises(self) -> None:
+        registry = _seed_multi_hook_registry(
+            hook_specs=[(_OrderingClassRedactPii, "input_redaction")],
+        )
+        dispatcher = HookDispatcher(
+            registry=registry,
+            max_payload_bytes=10_000,
+            max_timeout_seconds_runtime=30.0,
+        )
+        with pytest.raises(ValueError, match="phase"):
+            await dispatcher.dispatch_for_pack(
+                phase="dlp_pre",
+                declared_hook_ids=[],
+                payload=b"data",
+                context_template=_ctx_template(phase="dlp_post"),
+            )
+
+    @pytest.mark.asyncio
+    async def test_hook_id_sentinel_violation_raises(self) -> None:
+        registry = _seed_multi_hook_registry(
+            hook_specs=[(_OrderingClassRedactPii, "input_redaction")],
+        )
+        dispatcher = HookDispatcher(
+            registry=registry,
+            max_payload_bytes=10_000,
+            max_timeout_seconds_runtime=30.0,
+        )
+        bad_template = dataclasses.replace(_ctx_template(), hook_id="forbidden")
+        with pytest.raises(ValueError, match="hook_id"):
+            await dispatcher.dispatch_for_pack(
+                phase="dlp_pre",
+                declared_hook_ids=[],
+                payload=b"data",
+                context_template=bad_template,
+            )
+
+
+class TestDispatchForPackSnapshotSemantics:
+    """A self-registering hook called during _invoke cannot extend the
+    iteration target — dispatch_for_pack reads the registry snapshot
+    once at dispatch entry."""
+
+    @pytest.mark.asyncio
+    async def test_snapshot_taken_once(self) -> None:
+        # Build a minimal fixture: one hook registered. Even if it
+        # tried to register another mid-dispatch (which it doesn't),
+        # the snapshot would be frozen.
+        registry = _seed_multi_hook_registry(
+            hook_specs=[(_OrderingClassRedactPii, "input_redaction")],
+        )
+        dispatcher = HookDispatcher(
+            registry=registry,
+            max_payload_bytes=10_000,
+            max_timeout_seconds_runtime=30.0,
+        )
+        # First dispatch — entry exists, runs cleanly.
+        result_1 = await dispatcher.dispatch_for_pack(
+            phase="dlp_pre",
+            declared_hook_ids=["redact_pii"],
+            payload=b"a",
+            context_template=_ctx_template(),
+        )
+        assert result_1.outcome == "passed"
+        assert result_1.final_payload == b"PII_REDACTED:a"
+
+        # Second dispatch — same dispatcher, same entry — pins
+        # determinism across calls.
+        result_2 = await dispatcher.dispatch_for_pack(
+            phase="dlp_pre",
+            declared_hook_ids=["redact_pii"],
+            payload=b"b",
+            context_template=_ctx_template(),
+        )
+        assert result_2.outcome == "passed"
+        assert result_2.final_payload == b"PII_REDACTED:b"
+
+
+class TestDispatchSelectionErrorIsPublic:
+    """:class:`HookDispatchSelectionError` is part of the public surface
+    — DLPGuard (T8) catches it; future kill-switch sprints may also
+    catch it. Pin its public-ness."""
+
+    def test_class_is_in_dispatcher_module_all(self) -> None:
+        from cognic_agentos.packs.hooks import dispatcher as d_mod
+
+        assert "HookDispatchSelectionError" in d_mod.__all__
+
+    def test_class_is_runtime_error_subclass(self) -> None:
+        # Inherits from RuntimeError so a generic ``except RuntimeError``
+        # also catches it (defense-in-depth — old-style callers).
+        assert issubclass(HookDispatchSelectionError, RuntimeError)

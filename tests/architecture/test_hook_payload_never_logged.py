@@ -1,7 +1,7 @@
-"""Sprint-7A2 T7 architecture test — hook-dispatcher payload-never-logged.
+"""Sprint-7A2 T7+T8 architecture test — hook-dispatcher payload-never-logged.
 
 Per the plan-of-record's Doctrine Lock E (payload-contents-never-
-logged invariant) + the Sprint-7A2 T7 review watchpoints:
+logged invariant) + the Sprint-7A2 T7+T8 review watchpoints:
 
   The ``payload`` argument is opaque bytes; the dispatcher computes
   ``hashlib.sha256(payload).hexdigest()`` for the audit row's
@@ -13,6 +13,14 @@ walks the AST of every Python file under
 ``src/cognic_agentos/packs/hooks/`` and refuses any of the dangerous
 shapes that would let payload bytes leak into a log / print /
 stringification path.
+
+Sprint-7A2 T8 extension: ``packs/hooks/dlp_integration.py`` (the
+runtime DLP scan adapter) joins the swept module set automatically
+via the rglob discovery in :func:`_hook_modules`. The DLPGuard wraps
+the dispatcher with per-pack hook selection + closed-enum
+``DLPRefusalReason`` — same payload-never-logged invariant applies
+because DLPGuard inherits the ``policy_input_digest`` from the
+dispatcher and never re-handles raw payload bytes.
 
 The taxonomy of refused shapes (flat ban, tight allow-list):
 
@@ -300,6 +308,21 @@ def test_dispatcher_module_exists(_modules: list[pathlib.Path]) -> None:
         "src/cognic_agentos/packs/hooks/dispatcher.py to exist; not found. "
         "If you renamed/removed the dispatcher, update this regression's "
         "module discovery."
+    )
+
+
+def test_dlp_integration_module_exists(_modules: list[pathlib.Path]) -> None:
+    """Sprint-7A2 T8 — sanity check that dlp_integration.py is also
+    swept. DLPGuard wraps the dispatcher's per-pack selector with the
+    data-governance pre/post phase semantics; the same payload-never-
+    logged invariant applies. Without this assertion, a future rename
+    of dlp_integration.py could silently degrade the threat model."""
+    names = {p.name for p in _modules}
+    assert "dlp_integration.py" in names, (
+        "tests/architecture/test_hook_payload_never_logged.py expected "
+        "src/cognic_agentos/packs/hooks/dlp_integration.py to exist; not "
+        "found. If you renamed/removed the DLP integration adapter, update "
+        "this regression's module discovery."
     )
 
 

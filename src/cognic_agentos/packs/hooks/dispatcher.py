@@ -65,7 +65,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import hashlib
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Final, Literal
 
@@ -81,6 +81,7 @@ from cognic_agentos.sdk.hook import (
 __all__ = [
     "HookDispatchOutcome",
     "HookDispatchResult",
+    "HookDispatchSelectionError",
     "HookDispatcher",
     "HookFailureMode",
 ]
@@ -105,6 +106,60 @@ HookFailureMode = Literal[
     "hook_policy_refused",
     "hook_payload_unscannable",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Selection-error raised by ``dispatch_for_pack`` (T8) when a declared
+# hook_id is missing from the registry snapshot. T8 R1 P2-2 fix: this
+# is the **normal path** for the unresolved-ID case, NOT a dead-code
+# defense-in-depth raise. DLPGuard delegates first to
+# ``dispatch_for_pack`` so the dispatcher's budget-check-before-lookup
+# precedence is preserved; an unknown hook_id encountered AFTER the
+# budget check raises this exception, which DLPGuard catches and
+# routes to the closed-enum ``dlp_hook_id_unresolved`` terminus.
+#
+# Carries structured ``hook_id`` + ``phase`` attributes (rather than
+# only a stringified message) so DLPGuard can populate audit rows +
+# ``DLPGuardOutcome.failed_hook_id`` without re-parsing the message.
+#
+# Inherits :class:`RuntimeError` so a generic ``except RuntimeError``
+# also catches it (defense-in-depth — old-style callers).
+# ---------------------------------------------------------------------------
+
+
+class HookDispatchSelectionError(RuntimeError):
+    """Raised by :meth:`HookDispatcher.dispatch_for_pack` when a
+    declared ``hook_id`` is not registered for the requested phase.
+
+    This is the **primary signal** for the unresolved-ID case — T8
+    R1 P2-2 review removed DLPGuard's pre-validation pass, so
+    DLPGuard delegates first and catches this exception as the
+    normal route to ``dlp_hook_id_unresolved``.
+
+    The unresolved ``hook_id`` + ``phase`` are exposed as structured
+    attributes (:attr:`HookDispatchSelectionError.hook_id` /
+    :attr:`HookDispatchSelectionError.phase`) so callers (DLPGuard,
+    T8) can populate audit rows + outcome fields without re-parsing
+    the exception message.
+
+    The exception fires only AFTER the dispatcher's budget check has
+    passed (lookup runs after budget per
+    :meth:`HookDispatcher.dispatch_for_pack` step order), so an
+    oversized payload + unresolved id correctly routes to
+    ``hook_payload_unscannable``, NOT to this exception.
+    """
+
+    def __init__(self, *, hook_id: str, phase: HookPhase) -> None:
+        self.hook_id: Final[str] = hook_id
+        self.phase: Final[HookPhase] = phase
+        super().__init__(
+            "declared hook_id "
+            + repr(hook_id)
+            + " is not registered for phase "
+            + repr(phase)
+            + "; caller (DLPGuard) catches this and routes to "
+            + "``dlp_hook_id_unresolved``."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -294,6 +349,180 @@ class HookDispatcher:
             return outcome
 
         # Every hook returned pass / redact / mask; chain completed.
+        return HookDispatchResult(
+            outcome="passed",
+            final_payload=current_payload,
+            failure_mode=None,
+            failed_hook_id=None,
+            failed_pack_distribution_name=None,
+            policy_reason=None,
+            policy_input_digest=digest,
+        )
+
+    # --- per-pack dispatch ---------------------------------------------------
+
+    async def dispatch_for_pack(
+        self,
+        *,
+        phase: HookPhase,
+        declared_hook_ids: Sequence[str],
+        payload: bytes,
+        context_template: HookContext,
+    ) -> HookDispatchResult:
+        """Sprint-7A2 T8 — run the per-pack subset of registered hooks.
+
+        Per ADR-017 line 97: "pack manifest names which hooks must run;
+        AgentOS resolves them via the plugin registry." A calling pack
+        declares ``[data_governance].dlp_pre_hooks`` /
+        ``dlp_post_hooks`` listing the hook_ids that MUST run for this
+        pack's invocations. This method runs ONLY those hooks — other
+        hooks registered under the same phase but NOT in
+        ``declared_hook_ids`` do not run for this pack.
+
+        Order: dispatcher-canonical (``ordering_rank`` ascending; ties
+        broken by ``hook_id`` alphabetic — same as :meth:`dispatch`).
+        NOT the order of ``declared_hook_ids``. Pack authors do not
+        control runtime order via declaration ordering; the rank table
+        at ``cli/_governance_vocab.HOOK_ORDERING_RANK`` is the
+        deterministic-order primitive.
+
+        Empty ``declared_hook_ids`` returns ``outcome="passed"`` with
+        the payload unchanged — a calling pack that declares no DLP
+        hooks for the phase has nothing to run. Payload digest is
+        still computed for audit-row correlation.
+
+        Step order inside dispatch_for_pack: caller-input validation
+        → digest → **budget check** → snapshot → resolve+dedup
+        declared_hook_ids → sort by canonical order → iterate. The
+        budget check fires BEFORE lookup, so an oversized payload
+        with an unknown hook_id returns ``outcome="failed"`` /
+        ``hook_payload_unscannable`` rather than raising
+        :class:`HookDispatchSelectionError`. Manifest declarations
+        with duplicate hook_ids are silently deduped at the
+        snapshot-resolve step (a hook runs at most once per
+        dispatch); T10's manifest validator is the build-time gate.
+
+        A ``declared_hook_id`` missing from the registry snapshot
+        raises :class:`HookDispatchSelectionError` AFTER the budget
+        check has passed. T8 R1 P2-2 fix: DLPGuard catches this
+        exception as the primary route to ``dlp_hook_id_unresolved``
+        — DLPGuard does NOT pre-validate hook_id resolution itself,
+        so the dispatcher's precedence (budget before lookup) stays
+        intact.
+
+        Caller-input validation (template hook_id sentinel + phase
+        agreement) raises :class:`ValueError` fail-fast — same as
+        :meth:`dispatch`.
+        """
+        # Caller-input validation — fail-fast on template confusion.
+        # Mirrors :meth:`dispatch`; both validations apply to dispatch_for_pack.
+        if context_template.hook_id != "":
+            raise ValueError(
+                "context_template.hook_id must be the empty-string "
+                "sentinel; the dispatcher fills hook_id per-hook. "
+                "Got: " + repr(context_template.hook_id)
+            )
+        if context_template.phase != phase:
+            raise ValueError(
+                "context_template.phase ("
+                + repr(context_template.phase)
+                + ") does not match dispatch argument phase ("
+                + repr(phase)
+                + "); caller is confused about which phase to run."
+            )
+
+        # Compute the original-payload digest ONCE; propagate to every
+        # audit row + the result envelope. Same invariant as :meth:`dispatch`.
+        digest = hashlib.sha256(payload).hexdigest()
+
+        # Pre-loop budget check — payloads too large refuse fail-closed
+        # BEFORE any hook runs. MUST come before the unresolved-id
+        # lookup so that an unscannable-payload + unresolved-ids combo
+        # routes to the failure outcome rather than raising
+        # HookDispatchSelectionError. Payload-budget is the more
+        # operator-actionable signal.
+        if len(payload) > self._max_payload_bytes:
+            await self._maybe_emit_audit(
+                event_type="hook.payload_unscannable",
+                phase=phase,
+                hook_id=None,
+                pack_distribution_name=None,
+                pack_distribution_version=None,
+                outcome="failed",
+                failure_mode="hook_payload_unscannable",
+                policy_reason=None,
+                policy_input_digest=digest,
+                tenant_id=context_template.tenant_id,
+                request_id=context_template.request_id,
+            )
+            return HookDispatchResult(
+                outcome="failed",
+                final_payload=payload,
+                failure_mode="hook_payload_unscannable",
+                failed_hook_id=None,
+                failed_pack_distribution_name=None,
+                policy_reason=None,
+                policy_input_digest=digest,
+            )
+
+        # SNAPSHOT — single read, same semantics as :meth:`dispatch`.
+        # A self-registering hook cannot extend the iteration target
+        # mid-dispatch (the snapshot is taken once per dispatch call).
+        phase_hooks = self._registry.get_phase_hooks(phase)
+
+        # Build a (phase, hook_id) → entry index from the snapshot for
+        # O(1) declared-id lookup. Iterating ``declared_hook_ids`` and
+        # then re-iterating ``phase_hooks`` would be O(n²) — fine at
+        # Wave-1 scale but the index pattern is cheap.
+        entry_by_hook_id: dict[str, HookEntry] = {e.hook_id: e for e in phase_hooks}
+
+        # Resolve declared_hook_ids against the snapshot. T10's
+        # validator refuses duplicate hook_ids in
+        # ``[data_governance].dlp_pre_hooks`` / ``dlp_post_hooks``
+        # at build time; runtime defense-in-depth here silently
+        # dedupes the iteration target (a hook runs AT MOST ONCE per
+        # dispatch even if the manifest's array somehow contains
+        # duplicates). An unresolved id raises
+        # :class:`HookDispatchSelectionError` — DLPGuard catches it
+        # for the ``dlp_hook_id_unresolved`` terminus.
+        seen_hook_ids: set[str] = set()
+        resolved_entries: list[HookEntry] = []
+        for hook_id in declared_hook_ids:
+            if hook_id in seen_hook_ids:
+                # Silent runtime dedupe — manifest validator T10 is
+                # the build-time gate; this guard is fail-safe.
+                continue
+            seen_hook_ids.add(hook_id)
+            entry = entry_by_hook_id.get(hook_id)
+            if entry is None:
+                raise HookDispatchSelectionError(hook_id=hook_id, phase=phase)
+            resolved_entries.append(entry)
+
+        # Sort resolved entries by dispatcher-canonical order:
+        # ``ordering_rank`` ascending, ties by ``hook_id`` alphabetic.
+        # NOT by the order of ``declared_hook_ids`` — the rank table
+        # at ``cli/_governance_vocab.HOOK_ORDERING_RANK`` is the
+        # deterministic-order primitive (same as
+        # :meth:`HookRegistry.get_phase_hooks`).
+        resolved_entries.sort(key=lambda e: (e.ordering_rank, e.hook_id))
+
+        current_payload = payload
+        for entry in resolved_entries:
+            outcome = await self._invoke_one(
+                entry=entry,
+                phase=phase,
+                payload=current_payload,
+                context_template=context_template,
+                policy_input_digest=digest,
+            )
+            if outcome.outcome == "passed":
+                # Successful pass — possibly with payload transformation.
+                current_payload = outcome.final_payload
+                continue
+            # Halt on the first non-pass outcome — refuse / fail propagate.
+            return outcome
+
+        # Every declared hook returned pass / redact / mask; chain completed.
         return HookDispatchResult(
             outcome="passed",
             final_payload=current_payload,
