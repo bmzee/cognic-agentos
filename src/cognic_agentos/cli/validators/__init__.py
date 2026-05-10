@@ -26,6 +26,7 @@ from __future__ import annotations
 from cognic_agentos.cli.validators import (
     a2a,
     data_governance,
+    hooks,
     identity,
     mcp,
     risk_tier,
@@ -35,6 +36,7 @@ from cognic_agentos.cli.validators import (
 __all__ = [
     "a2a",
     "data_governance",
+    "hooks",
     "identity",
     "mcp",
     "risk_tier",

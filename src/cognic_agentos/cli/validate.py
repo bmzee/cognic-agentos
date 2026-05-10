@@ -57,6 +57,7 @@ from cognic_agentos.cli import ValidatorFinding
 from cognic_agentos.cli.validators import (
     a2a,
     data_governance,
+    hooks,
     identity,
     mcp,
     risk_tier,
@@ -420,6 +421,13 @@ def run_validators(pack_path: Path) -> list[ValidatorFinding]:
     findings.extend(data_governance.validate(data, pack_path))
     findings.extend(risk_tier.validate(data, pack_path))
     findings.extend(supply_chain.validate(data, pack_path))
+    # Sprint-7A2 T5 — hook-block validator. Fires for every pack
+    # (Wave-1 narrow: hook packs MUST declare [hooks]; non-hook
+    # packs skipping a [hooks] block is silently allowed). Comes
+    # last in the dispatch order so per-concern refusals from the
+    # earlier validators (identity / data_governance / etc.) appear
+    # first when CI parsers walk the findings list.
+    findings.extend(hooks.validate(data, pack_path))
     return findings
 
 
