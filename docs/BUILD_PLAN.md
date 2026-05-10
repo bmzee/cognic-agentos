@@ -608,7 +608,7 @@ Sprint 1 is split into four focused sub-sprints for a clean bootstrap. Each ship
 *Lifecycle state machine + storage:*
 - `src/cognic_agentos/packs/__init__.py`, `packs/lifecycle.py` — state machine: `draft → submitted → under_review → approved (or rejected/withdrawn) → allow_listed → installed → disabled → revoked → uninstalled`
 - `packs/storage.py` — Postgres-backed pack-record store (uses `RelationalAdapter`); schema includes pack kind (`tool | skill | agent | hook`), manifest, signed-artefact digest, SBOM, conformance report, lifecycle history, RBAC-trail
-- `db/migrations/001_packs_lifecycle.sql` (Postgres) and `db/migrations/oracle/001_packs_lifecycle.sql` (Oracle)
+- Alembic version `src/cognic_agentos/db/migrations/versions/20260510_0003_packs_lifecycle.py` with dialect-portable SQLAlchemy types (`sa.Uuid()` for UUIDs, `chain_hash_column_type()` for fixed 32-byte SHA-256 digest material per Sprint 2 doctrine, `sa.TIMESTAMP(timezone=True)` for timestamps to preserve offsets on Oracle) + PG/Oracle compile tests via direct `dialect.compile(...)` seam + env-gated live PG/Oracle integration tests for upgrade/downgrade + CHECK-constraint enforcement. (The earlier raw `db/migrations/001_*.sql` reference was stale doctrine; Alembic infrastructure landed in Sprint 2 with `20260428_0001_initial_governance_schema.py` and `20260430_0002_gateway_call_ledger.py`.)
 
 *Portal API endpoints:*
 - Author surface: `POST /api/v1/packs/drafts`, `PUT /api/v1/packs/drafts/{id}`, `POST /api/v1/packs/drafts/{id}/submit`, `DELETE /api/v1/packs/drafts/{id}`
