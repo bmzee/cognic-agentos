@@ -88,7 +88,7 @@ fail_policy = "fail_closed"          # closed-enum; "fail_closed" is Wave-1
 - `phase` is closed-enum (`dlp_pre` / `dlp_post` Wave-1). Future phases (memory pre/post per ADR-019; escalation pre per ADR-014; egress pre per ADR-017's egress allow-list) land in follow-up sprints.
 - `ordering_class` is closed-enum; the dispatcher's deterministic order resolves first by phase, then by `ordering_rank` ascending (the rank table at `cli/_governance_vocab.HOOK_ORDERING_RANK` — every `HookOrderingClass` maps to an integer rank), with ties broken by `hook_id` alphabetic. Pack authors don't write absolute integer priorities; they pick a class, and the rank table makes the position deterministic regardless of class-name spelling.
 - `timeout_seconds` is pack-author-declared but a Settings-side ceiling (`Settings.hook_max_timeout_s`, default 30s) caps it.
-- `fail_policy` is closed-enum (`fail_closed` default). `fail_open` requires the calling pack's `[data_governance]` to declare an explicit `fail_open_exception` phase + reason — refused at validate time otherwise.
+- `fail_policy` is closed-enum (`fail_closed` default). **Wave-1 reality (T12 R1 doctrine reconcile):** the build-time validator refuses every `fail_open` declaration with closed-enum `hook_fail_policy_invalid` / `fail_open_without_exception`. The runtime registry's `HookDeclaration.fail_open_exception` field is a single exception class name the dispatcher matches against the raised exception's class via an MRO walk (see `packs/hooks/dispatcher.py` lines 567-569). The matching build-time manifest shape that would populate `fail_open_exception` is reserved for a follow-up sprint; it is **not** a `[data_governance]` field, and the original plan wording naming a "phase + reason pairing" was incorrect. T13 ADR-017 amendment A4 must reflect this: Wave-1 fail-closed-only at the validator boundary; future carve-out via per-`HookDeclaration` exception-class-name declaration, not via `[data_governance]`.
 
 ### Doctrine Lock B — `cognic.hooks` entry-point contract
 
@@ -190,19 +190,20 @@ The `Hook` base is **public API**, under Doctrine E halt-before-commit (broader 
 
 ### Doctrine Lock F — Critical-controls promotion list (T12 final call)
 
-**Provisional list (T12 closeout decision):**
+**Final list (T12 reconcile decision, post-T7+T8 reality):**
 
 | Module | On-gate? | Rationale |
 |---|---|---|
 | `packs/hooks/registry.py` | **on** | Admission gate; fail-closed on duplicate-ID / stale-digest / cross-pack-conflict; security-critical. |
 | `packs/hooks/dispatcher.py` | **on** | Runtime decision engine; fail-closed default; ADR-017 enforcement boundary. |
+| `packs/hooks/dlp_integration.py` | **on** | DLPGuard adapter wrapping `dispatch_for_pack` with `dlp_pre` / `dlp_post` phase semantics. Closed-enum 3-value `DLPRefusalReason` (`dlp_hook_id_unresolved` / `dlp_dispatcher_failed` / `dlp_dispatcher_refused`); ADR-017 line 97 enforcement boundary. T8 commit explicitly tagged `(CRITICAL CONTROLS)`; the refusal-payload-contract-divergence and delegate-first-preserves-precedence doctrine memories were both born from T8 R1 P2 fixes on this module. Qualifies for promotion under Doctrine Decision G's "non-trivial allow/deny logic" rule (same rule that promoted `cli/validators/a2a.py` at Sprint-7A T16). T12 reconcile lifted from off-list to on-gate; provisional Doctrine Lock F (authored before T7+T8 landed) under-counted the post-T8 module set. |
 | `cli/validators/hooks.py` | **on** | Manifest validator + cross-reference resolver against ADR-017 declarations. |
 | `sdk/hook.py` | **off (Doctrine E)** | Public API surface — halt-before-commit per Doctrine E covers it; coverage-gate would be cargo-cult here. |
 | `cli/init.py` (existing module, hook scaffolder added) | off | scaffolding; output is what matters, gated by `test_cli_init_hook.py`. |
 | `cli/sign.py` / `cli/verify.py` (existing) | already on | extended to accept `kind = "hook"`; the existing critical-controls pinning carries forward. |
 | `cli/_wheel_integrity.py` (existing) | already on | extended kind-derivation table for `cognic.hooks → "hook"`; existing pinning carries forward. |
 
-Final list lands at T12 closeout. Gate size: **37 → 40 modules** (+3 new: registry, dispatcher, hooks validator).
+Final list lands at T12 closeout. Gate size: **37 → 41 modules** (+4 new: registry, dispatcher, dlp_integration, hooks validator).
 
 ### Doctrine Lock G — Validate / sign / verify acceptance criteria
 
@@ -210,7 +211,7 @@ Final list lands at T12 closeout. Gate size: **37 → 40 modules** (+3 new: regi
 - Accepts `kind = "hook"` packs.
 - New `[hooks].declarations` block validator (T6 of this sprint):
   - Required fields per declaration: `hook_id` (string, snake_case), `phase` (closed-enum), `ordering_class` (closed-enum), `timeout_seconds` (positive float ≤ `Settings.hook_max_timeout_s`), `fail_policy` (closed-enum).
-  - Refuses: missing fields, duplicate hook_ids within the manifest, unknown phase, unknown ordering_class, timeout above ceiling, fail_open with no `fail_open_exception` declaration, mismatch between manifest declarations + pyproject `[project.entry-points."cognic.hooks"]` keys.
+  - Refuses: missing fields, duplicate hook_ids within the manifest, unknown phase, unknown ordering_class, timeout above ceiling, **any `fail_policy = "fail_open"` declaration in Wave-1** (closed-enum `hook_fail_policy_invalid` / `fail_open_without_exception` — the matching exception-declaration shape that would populate the runtime's `HookDeclaration.fail_open_exception` field is reserved for a follow-up sprint per §91), mismatch between manifest declarations + pyproject `[project.entry-points."cognic.hooks"]` keys.
 - Cross-references existing validators:
   - `cli/validators/data_governance.py` — when a non-hook pack declares `[data_governance].dlp_pre_hooks` or `dlp_post_hooks`, those hook_ids MUST be declarable across the verified hook-pack ecosystem (validate-time check is shape-only since cross-pack resolution is runtime; runtime registry resolution is the gate).
   - `cli/validators/identity.py` — hook packs do NOT declare `agent_card_jws_path`; the existing identity validator's agent-pack rule already only requires `agent_card_jws_path` for `kind = "agent"`.
@@ -244,7 +245,7 @@ These are explicit doctrine amendments Sprint-7A2 must land. Each is tracked as 
 
 - [ ] **A3 — ADR-017 line 125 amendment: hook pack naming convention.** Currently reads "Cognic ships baseline DLP hooks (PII redaction, account masking); banks plug in their own DLP via the plugin registry as `cognic-dlp-<name>` packs." Sprint-7A2 amends the naming to follow the kind, not the phase: pack name is `cognic-hook-<name>` generically (e.g., `cognic-hook-redact-pii`, `cognic-hook-mask-accounts`). The legacy `cognic-dlp-<name>` form is **accepted at runtime** (no breaking change for already-published DLP packs) but **not promoted in scaffolders or documentation** going forward — `agentos init-hook` produces `cognic-hook-<name>`-shaped packs only. Amendment note explicit on the back-compat path so a future reviewer can audit.
 
-- [ ] **A4 — ADR-017 new subsection: "DLP hook failure policy".** Currently ADR-017's Runtime enforcement subsection (lines 94-101) describes the pre/post hook flow but does not enumerate failure modes. Sprint-7A2 adds a new subsection "DLP hook failure policy" documenting the 5 closed-enum failure modes from Doctrine Lock E (`hook_timeout` / `hook_exception` / `hook_malformed_result` / `hook_policy_refused` / `hook_payload_unscannable`) + the fail-closed-by-default rule + the `fail_open_exception` declaration carve-out + the payload-contents-never-logged invariant.
+- [ ] **A4 — ADR-017 new subsection: "DLP hook failure policy".** Currently ADR-017's Runtime enforcement subsection (lines 94-101) describes the pre/post hook flow but does not enumerate failure modes. Sprint-7A2 adds a new subsection "DLP hook failure policy" documenting the 5 closed-enum failure modes from Doctrine Lock E (`hook_timeout` / `hook_exception` / `hook_malformed_result` / `hook_policy_refused` / `hook_payload_unscannable`) + the fail-closed-by-default rule + **the Wave-1 fail-closed-only validator boundary** (every `fail_open` declaration refused; the runtime registry's `HookDeclaration.fail_open_exception` field — a single exception class name matched via dispatcher MRO walk per `packs/hooks/dispatcher.py` lines 567-569 — is wired but unreachable until the matching build-time manifest shape lands in a follow-up sprint) + the payload-contents-never-logged invariant.
 
 **Sequencing decision.** All four amendments land in **the T13 closeout commit** (alongside the BUILD_PLAN status flip + AGENTS.md amendment), NOT as a separate ADR-amendment-first PR. Rationale: the amendments are descriptive (codifying what Sprint-7A2 actually shipped), not prescriptive (locking new design before code). Sprint-7A used the same pattern at T17 (AGENTS.md "Authoring — SDK + CLI (Sprint 7A)" subsection landed in the closeout). If reviewer prefers an amendment-first PR, surface at T1 review and the slate moves to a pre-T1 PR.
 
@@ -381,7 +382,7 @@ These are explicit doctrine amendments Sprint-7A2 must land. Each is tracked as 
 
 ### Task 12: Critical-controls coverage gate extension + 4 docs
 
-- Modify: `tools/check_critical_coverage.py` — gate +3 modules (`packs/hooks/registry.py`, `packs/hooks/dispatcher.py`, `cli/validators/hooks.py`); gate size **37 → 40**.
+- Modify: `tools/check_critical_coverage.py` — gate +4 modules (`packs/hooks/registry.py`, `packs/hooks/dispatcher.py`, `packs/hooks/dlp_integration.py`, `cli/validators/hooks.py`); gate size **37 → 41**. (Doctrine Lock F reconcile at T12 start lifted `dlp_integration.py` from off-list to on-gate; T8 commit's CC tag + the two doctrine memories born from its R1 fixes resolve the "non-trivial allow/deny logic" criterion.)
 - Coverage probe: candidate-module-narrowed `--cov` per the modified-B doctrine from Sprint-7A T16.
 - Modify: `docs/HOW-TO-WRITE-A-PACK.md` — Section 0 extended with `init-hook`; new Section 8 hook authoring.
 - Modify: `docs/SDK-REFERENCE.md` — new Section 8 `Hook` API.
@@ -424,7 +425,7 @@ After writing the complete plan, looked at the BUILD_PLAN deliverables / tests /
 - BUILD_PLAN.md Sprint-7A2 status flip.
 
 **Critical-controls coverage gate floor + promotion rule (Doctrine Decision G, inherited from Sprint-7A T16):**
-- 3 hook modules promote at T12: `packs/hooks/registry.py`, `packs/hooks/dispatcher.py`, `cli/validators/hooks.py`.
+- 4 hook modules promote at T12: `packs/hooks/registry.py`, `packs/hooks/dispatcher.py`, `packs/hooks/dlp_integration.py`, `cli/validators/hooks.py`. (T12 reconcile decision: provisional Doctrine Lock F (authored before T7+T8 landed) named only 3 modules; T8 commit's CC tag on `dlp_integration.py` + the two doctrine memories born from T8 R1 P2 fixes (refusal-payload contract divergence + delegate-first preserves precedence) resolve the "non-trivial allow/deny logic" criterion; module promoted at T12 start.)
 - `sdk/hook.py` stays off the floor per Doctrine E (public-API stability halt-before-commit covers it).
 - `cli/init.py` extension stays off (scaffolding).
 - Existing critical-controls modules touched (`cli/validate.py`, `cli/sign.py`, `cli/verify.py`, `cli/_wheel_integrity.py`, `cli/validators/data_governance.py`) carry forward their existing pinning.

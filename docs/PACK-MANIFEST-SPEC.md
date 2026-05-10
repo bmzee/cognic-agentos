@@ -28,12 +28,14 @@ doctrine); new packs SHOULD use the canonical top-level shape.
 |---|---|---|---|
 | `pack_id` | string | yes | Stable kebab-case identifier (e.g., `cognic-tool-example-minimal`). Must equal the pyproject `[project].name`. |
 | `schema_version` | int | yes | `1` for Wave-1. |
-| `kind` | string | yes | One of `tool` / `skill` / `agent`. Cross-checked against the pyproject entry-point group at sign + verify time (R5 P2 #1 wheel-anchored kind derivation). |
+| `kind` | string | yes | One of `tool` / `skill` / `agent` / `hook`. Cross-checked against the pyproject entry-point group at sign + verify time (R5 P2 #1 wheel-anchored kind derivation). The `hook` kind (Sprint-7A2) maps to the `cognic.hooks` entry-point group and ships per-pack hook declarations in a `[hooks]` block (Section 8). |
 
-The wheel's `cognic.{tools,skills,agents}` entry-point group is the
-**integrity-anchored** source of truth for kind (cosign signs the
+The wheel's `cognic.{tools,skills,agents,hooks}` entry-point group is
+the **integrity-anchored** source of truth for kind (cosign signs the
 wheel; the manifest is mutable). Verify refuses if `[pack].kind`
-disagrees with the wheel's entry-point group.
+disagrees with the wheel's entry-point group. Sprint-7A2 T9 extended
+the wheel-integrity helper's kind-derivation table to include
+`cognic.hooks → "hook"`.
 
 ---
 
@@ -101,10 +103,22 @@ ADR-017 contract. Closed-enum vocabularies live at
 | `retention_policy` | string | yes | Closed-enum: `none` / `session_only` / `task_only` / `purpose_window` / `regulator_floor` / `indefinite_with_legal_basis`. |
 | `retention_max_window` | int | conditional | Required when `retention_policy != "none"`; positive integer (typically days). |
 | `egress_allow_list` | list[string] | yes | Allow-listed egress targets (e.g., `["api.example.com"]`); empty list `[]` means no egress. |
+| `dlp_pre_hooks` | list[string] | optional (Sprint-7A2) | Closed-enum hook_id references that MUST run before the calling pack's pack-code on every invocation. Each value resolves to a hook_id declared by an installed `kind = "hook"` pack's `[hooks].declarations[].hook_id`. Cross-check is shape-only at validate time (resolution is runtime); see Section 8 + the runbook at `docs/operator-runbooks/hook-pack-failure-policy.md` for the dispatcher contract. |
+| `dlp_post_hooks` | list[string] | optional (Sprint-7A2) | Closed-enum hook_id references that MUST run after pack-code returns and before the result reaches the caller. Same resolution semantics as `dlp_pre_hooks`. |
 
 Cross-check with `[risk_tier]`: the declared risk tier MUST be at
 or above the minimum tier each data_class requires (T10 + T11
 cross-validation).
+
+Cross-check with `[hooks]` (Sprint-7A2): the `dlp_pre_hooks` /
+`dlp_post_hooks` lists name hook_ids declared by INSTALLED hook
+packs — by convention authored exclusively in `kind = "hook"`
+packs' `[hooks]` blocks (Section 8). Validate-time check is
+shape-only because cross-pack hook resolution is a runtime
+concern; the runtime hook registry + DLPGuard adapter
+(`packs/hooks/dlp_integration.py`) emit the
+`dlp_hook_id_unresolved` closed-enum refusal at invocation time if
+a referenced hook_id has no installed declaration.
 
 ---
 
@@ -155,7 +169,87 @@ declared path is missing on disk. The realistic flow is
 
 ---
 
-## 8. Stability + versioning
+## 8. `[hooks]` — hook packs only; required for `kind="hook"` (Sprint-7A2)
+
+ADR-017 Sprint-7A2 amendment: hook packs are the 4th first-class pack
+kind alongside tool / skill / agent. They ship deterministic
+governance extensions (PII redaction / account masking / output
+egress checks / etc.) that DLP-aware tool / skill / agent packs
+reference via `[data_governance].dlp_pre_hooks` /
+`dlp_post_hooks` (Section 5). Hook packs do NOT ship an AgentCard
+JWS (the JWS gate in `cli/sign.py` + `cli/verify.py` is gated on
+`pack_kind == "agent"`); they DO ship the same seven-attestation
+supply-chain set as every other kind.
+
+The `[hooks]` block is **mandatory** for `kind = "hook"` packs. The
+Wave-1 orchestrator's `_FORBIDDEN_BLOCKS_BY_KIND` check is
+one-directional — it refuses **hook packs** declaring `[a2a]` or
+`[mcp]` (Wave-2-feature smuggling defense), but does NOT refuse
+non-hook packs declaring `[hooks]`. Wave-1's contract for non-hook
+packs with a present `[hooks]` block: **no kind-strict refusal**,
+but the block is still **shape-validated** — `cli/validators/hooks.py`
+runs the per-declaration shape gate on any located block regardless
+of pack kind, so a non-hook pack with malformed `[hooks].declarations`
+still receives the normal closed-enum refusals
+(`hook_block_shape_invalid` / `hook_id_invalid` / etc.). The kind
+short-circuit only governs (a) the outer "no `[hooks]` block at all"
+refusal (which fires only when `pack_kind == "hook"`) and (b) the
+entry-point cross-check fall-through when every declaration is
+malformed (the cross-check skips for non-hook packs). A follow-up
+sprint may add a kind-strict refusal for the non-hook-with-`[hooks]`
+case; until then, treat shape-validation as the only gate.
+
+Each entry in the `declarations` array-of-tables declares one hook
+the pack ships:
+
+```toml
+[hooks]
+
+[[hooks.declarations]]
+hook_id = "redact_pii_in_input"
+phase = "dlp_pre"
+ordering_class = "input_redaction"
+timeout_seconds = 5.0
+fail_policy = "fail_closed"
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `hook_id` | string | yes | snake_case identifier (`^[a-z][a-z0-9_]*$`); MUST match the pyproject `[project.entry-points."cognic.hooks"]` key for this hook. Globally unique within the manifest (`duplicate_in_manifest` refusal). |
+| `phase` | string | yes | Closed-enum: `dlp_pre` / `dlp_post`. Sourced from `cognic_agentos.cli._governance_vocab.HookPhase`. |
+| `ordering_class` | string | yes | Closed-enum (8 values): `input_validation` / `input_authorization` / `input_redaction` / `input_normalization` (for `dlp_pre`); `output_validation` / `output_egress_check` / `output_redaction` / `output_masking` (for `dlp_post`). The class name's `input_*` / `output_*` stem MUST match the phase or the validator emits `phase_class_mismatch`. The dispatcher orders hooks within a phase by `HOOK_ORDERING_RANK[ordering_class]` ascending, then `hook_id` alphabetic for ties. |
+| `timeout_seconds` | float | yes | Per-hook invocation timeout. Positive number ≤ `Settings.hook_max_timeout_s` (default ceiling 30.0). The dispatcher routes timeout to the closed-enum `hook_timeout` failure mode. |
+| `fail_policy` | string | yes | Closed-enum: `fail_closed` / `fail_open`. **Wave-1: only `fail_closed` is accepted.** `fail_closed` is the ADR-017 + Doctrine Lock E default — the calling pack's invocation is refused if the hook times out / raises / returns malformed result / explicitly refuses / payload exceeds the unscannable budget. Any `fail_policy = "fail_open"` declaration is REFUSED in Wave-1 with closed-enum `hook_fail_policy_invalid` (failure_mode `fail_open_without_exception`); the matching `fail_open_exception` declaration shape — which would carve out a per-pack exception path on the registry's `HookDeclaration` runtime — is reserved for a follow-up sprint and does NOT live on `[data_governance]`. Use `fail_closed` until that lands. |
+
+Cross-checks the validator runs:
+
+- **pyproject entry-point cross-check.** Every `[hooks].declarations[].hook_id` MUST appear as a `[project.entry-points."cognic.hooks"]` key in the same pack's `pyproject.toml`. Mismatch routes to `hook_unresolved_reference` (manifest references entry-point that doesn't exist) or `hook_entry_point_mismatch` (pyproject declares an entry-point with no manifest declaration). Both refusal sites surface `pyproject_unparseable` for unreadable / malformed pyproject.toml files.
+- **Per-declaration shape gate.** Block-shape failures (declarations field absent, declarations not a list, declarations empty, declaration entry not a table, declaration missing required field) all route to the closed-enum `hook_block_shape_invalid` reason with `payload.failure_mode` distinguishing the sub-case.
+- **Hook-pack kind-gate (one-directional).** The orchestrator's `_FORBIDDEN_BLOCKS_BY_KIND` check refuses HOOK packs declaring `[a2a]` or `[mcp]` (closed-enum `hook_pack_kind_constraint_violated` with `payload.failure_mode` distinguishing the offending block). The check does NOT fire on non-hook packs declaring `[hooks]` — there is no kind-strict refusal for that path in Wave-1, but `cli/validators/hooks.py` still shape-validates any present `[hooks]` block regardless of pack kind (see the §8 contract paragraph above for the full breakdown).
+
+The full closed-enum refusal taxonomy emitted by `cli/validators/hooks.py`:
+
+| Reason | Failure modes carried via `payload.failure_mode` |
+|---|---|
+| `hook_block_shape_invalid` | `block_missing_for_hook_pack` / `declarations_field_absent` / `declarations_field_not_list` / `declarations_empty` / `declaration_entry_not_table` / `declaration_missing_required_field` |
+| `hook_id_invalid` | `invalid_shape` / `duplicate_in_manifest` |
+| `hook_phase_invalid` | `not_in_closed_enum` / `not_a_string` |
+| `hook_ordering_class_invalid` | `not_in_closed_enum` / `not_a_string` / `phase_class_mismatch` |
+| `hook_timeout_invalid` | `not_a_positive_number` / `above_ceiling` |
+| `hook_fail_policy_invalid` | `not_in_closed_enum` / `not_a_string` / `fail_open_without_exception` |
+| `hook_entry_point_mismatch` | `pyproject_only` / `pyproject_unparseable` |
+| `hook_unresolved_reference` | `manifest_only` |
+| `hook_pack_kind_constraint_violated` | (orchestrator-owned; HOOK pack declares `[a2a]` or `[mcp]` — Wave-1's one-directional kind-gate; `payload.failure_mode` distinguishes the offending block) |
+
+For the runtime side of the contract — what happens when a referenced
+hook_id can't be resolved at invocation time, when a hook times out,
+when `_invoke()` raises — see
+`docs/operator-runbooks/hook-pack-failure-policy.md` (the 5 closed-enum
+dispatcher failure modes + their on-call remediations).
+
+---
+
+## 9. Stability + versioning
 
 | Item | Stability |
 |---|---|
@@ -182,7 +276,7 @@ manifest references is pinned by a drift-detector test in
 
 ---
 
-## 9. Where the validators live
+## 10. Where the validators live
 
 | Block | Validator |
 |---|---|
@@ -193,6 +287,7 @@ manifest references is pinned by a drift-detector test in
 | `[data_governance]` | `cli/validators/data_governance.py` |
 | `[risk_tier]` | `cli/validators/risk_tier.py` |
 | `[supply_chain]` | `cli/validators/supply_chain.py` |
+| `[hooks]` | `cli/validators/hooks.py` |
 
 Each validator surfaces refusals via the closed-enum
 `ValidatorReason` literal at `cognic_agentos.cli.__init__`. Refusal

@@ -1,8 +1,9 @@
 # Cognic AgentOS SDK reference
 
-Python API surface for pack authors. Covers the three base classes
-(`Tool`, `Skill`, `Agent`), the `ToolRegistry` protocol skills consume,
-and the testing + compliance helpers under `cognic_agentos.sdk.testing`.
+Python API surface for pack authors. Covers the four base classes
+(`Tool`, `Skill`, `Agent`, `Hook`), the `ToolRegistry` protocol skills
+consume, and the testing + compliance helpers under
+`cognic_agentos.sdk.testing`.
 
 This doc is the API contract; for the *workflow* (scaffold → build
 wheel → sign → validate → harness → verify per the static-only/
@@ -25,6 +26,7 @@ amendment + a migration release note.
 from cognic_agentos.sdk.tool import Tool
 from cognic_agentos.sdk.skill import Skill, SkillUnregisteredToolError
 from cognic_agentos.sdk.agent import Agent
+from cognic_agentos.sdk.hook import Hook, HookContext, HookResult
 from cognic_agentos.sdk.registry import ToolRegistry
 ```
 
@@ -340,9 +342,143 @@ in a follow-up sprint alongside the runtime auto-attestation API.
 
 ---
 
-## 8. Stability + versioning
+## 8. `cognic_agentos.sdk.hook.Hook` (Sprint-7A2)
 
-- The three base classes (`Tool`, `Skill`, `Agent`), the
+Base class for `cognic.hooks` entry-point implementations — the 4th
+first-class pack kind alongside `Tool` / `Skill` / `Agent`. Hooks
+are deterministic governance extensions (PII redaction / account
+masking / output egress checks / etc.) that DLP-aware tool /
+skill / agent packs reference via
+`[data_governance].dlp_pre_hooks` / `dlp_post_hooks` (per ADR-017).
+Subclasses declare `hook_id` + `phase` as `ClassVar` fields,
+override `_invoke()` for the actual work, and let the SDK's
+template-method validation seam handle context / payload / result
+shape checks.
+
+### 8.1 Required ClassVars
+
+```python
+from typing import ClassVar
+from cognic_agentos.cli._governance_vocab import HookPhase
+from cognic_agentos.sdk.hook import Hook, HookContext, HookResult
+
+
+class RedactPIIHook(Hook):
+    hook_id: ClassVar[str] = "redact_pii_in_input"
+    phase: ClassVar[HookPhase] = "dlp_pre"
+```
+
+`hook_id` matches the manifest's `[hooks].declarations[].hook_id`
++ the calling pack's `[data_governance].dlp_pre_hooks` /
+`dlp_post_hooks` reference. `phase` is the closed-enum from
+`cognic_agentos.cli._governance_vocab.HookPhase` (Wave-1:
+`"dlp_pre"` / `"dlp_post"`).
+
+### 8.2 Required override
+
+```python
+async def _invoke(self, context: HookContext, payload: bytes) -> HookResult:
+    if self._matches_pii(payload):
+        return HookResult(
+            decision="redact",
+            redacted_payload=self._redact(payload),
+            policy_reason=None,
+        )
+    return HookResult(decision="pass", redacted_payload=None, policy_reason=None)
+```
+
+The SDK base validates `context` + `payload` BEFORE calling
+`_invoke`, validates the returned `HookResult` AFTER. Subclasses
+focus on the policy decision; the validation discipline cannot be
+bypassed.
+
+### 8.3 The `invoke()` template method (DO NOT OVERRIDE)
+
+The dispatcher entry point is `Hook.invoke(context, payload)`. It
+is `@final` (mypy) AND guarded at runtime via `__init_subclass__`
+walking `cls.__mro__`. Any class that defines `invoke` directly in
+a non-base ancestor raises `TypeError` at class-creation time —
+catches mixin-smuggling that would otherwise bypass the validation
+seam.
+
+Override `_invoke` instead.
+
+### 8.4 `HookContext`
+
+Frozen + slotted dataclass passed to every `_invoke()` call. Carries
+hook + invocation IDs + closed-enum policy metadata + manifest
+snapshots the hook may key its decision off:
+
+| Field | Type | Notes |
+|---|---|---|
+| `hook_id` | `str` | The `hook_id` this invocation targets. |
+| `phase` | `HookPhase` | Closed-enum (`"dlp_pre"` / `"dlp_post"`). |
+| `pack_id` | `str` | The CALLING pack's `[pack].pack_id` (NOT the hook pack's). |
+| `tenant_id` | `str` | Per-tenant binding for tenant-specific policy. |
+| `request_id` | `str` | Stable request identifier for audit-chain correlation. |
+| `trace_id` | `str \| None` | Distributed-trace identifier (None outside a traced request). |
+| `parent_trace_id` | `str \| None` | Parent-trace identifier for cross-agent chain linkage (None at top of chain). |
+| `manifest_data_classes` | `tuple[str, ...]` | The CALLING pack's declared `[data_governance].data_classes`, snapshot at admission time. |
+| `manifest_purpose` | `str` | The CALLING pack's declared `[data_governance].purpose`. |
+
+Critical invariant: `HookContext` does NOT carry the payload bytes.
+The dispatcher passes payload separately to `_invoke()` so the
+context is safely loggable. The AST-walk regression at
+`tests/architecture/test_hook_payload_never_logged.py` (Sprint-7A2
+T7) pins the payload-never-logged invariant; hooks MUST NOT log /
+store / exfiltrate the `payload` argument.
+
+### 8.5 `HookResult`
+
+Frozen + slotted dataclass returned to the dispatcher.
+
+| Field | Type | Notes |
+|---|---|---|
+| `decision` | `HookDecision` | Closed-enum: `"pass"` / `"redact"` / `"mask"` / `"refuse"`. |
+| `redacted_payload` | `bytes \| None` | For `redact` / `mask`: the modified payload bytes. MUST be None for `pass` / `refuse`. |
+| `policy_reason` | `str \| None` | For `refuse`: closed-enum policy reason from the calling pack's vocabulary; propagates to the `hook_policy_refused` audit row + caller refusal envelope. MUST be None for `pass` / `redact` / `mask`; MUST be a non-empty string for `refuse`. |
+| `audit_metadata` | `dict[str, Any]` | Token-free metadata the dispatcher attaches to the audit row. Hooks MUST NOT include payload bytes here. |
+
+Decision-↔-fields invariant enforced by `Hook.invoke()` AFTER
+`_invoke` returns; violations raise `HookResultShapeError` (subclass
+of `HookContractError` → in the `HookError` hierarchy → caught by
+the dispatcher's single refusal-surface catch).
+
+### 8.6 Errors
+
+- `HookError` — base class for any SDK-raised hook error.
+- `HookContractError` — base for contract-shape violations (caught by
+  the dispatcher as a single refusal-surface).
+- `HookContextError` — `context` argument was None / wrong type.
+- `HookPayloadError` — `payload` argument was None / non-`bytes`.
+- `HookResultShapeError` — `_invoke` returned a non-`HookResult`, OR
+  a `HookResult` whose fields violate the decision-↔-fields
+  invariant.
+
+Pack-author-raised exceptions (anything NOT in the `HookError`
+hierarchy) route to the closed-enum `hook_exception` dispatcher
+failure mode; the dispatcher catches them at the single try/except
+boundary and emits the failure-mode audit row. See
+`docs/operator-runbooks/hook-pack-failure-policy.md` for the full
+5-failure-mode operator runbook.
+
+### 8.7 What's intentionally NOT here
+
+- **No tool / skill registry passed to hooks.** Hooks key decisions
+  off the payload + the `HookContext` snapshot only — they do NOT
+  invoke other hooks / tools / skills via the SDK. The dispatcher
+  enforces ordering + concurrency via the closed-enum
+  `ordering_class` taxonomy declared in the manifest.
+- **No automatic schema validation.** Hooks operate on raw
+  `payload: bytes`; pack authors implement payload-shape parsing
+  inline. The dispatcher's payload budget (per-pack + per-hook
+  ceiling) is the only payload-side gate the SDK enforces.
+
+---
+
+## 9. Stability + versioning
+
+- The four base classes (`Tool`, `Skill`, `Agent`, `Hook`), the
   `ToolRegistry` protocol, and the testing helpers are **public
   API**. Backward-compatible across Sprint-7A and forward per
   ADR-008.

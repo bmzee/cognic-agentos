@@ -795,6 +795,334 @@ fail_policy = "fail_closed"
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# T12 floor-uplift coverage closures (CRITICAL CONTROLS)
+# ---------------------------------------------------------------------------
+#
+# Sprint-7A2 T12 promotes ``cli/validators/hooks.py`` to the strict
+# 95/90 critical-controls coverage gate. The seven blocks below close
+# the residual line + branch coverage gap surfaced by the T12 probe:
+#
+#   * Inner ``_validate_hook_block`` non-dict block branch (the OUTER
+#     "block missing entirely" branch is already tested at line 170,
+#     but the inner "block-present-but-not-a-table" branch is a
+#     separate refusal site).
+#   * ``declaration_entry_not_table`` shape failure (declarations array
+#     contains a non-table entry — TOML allows ``declarations = [42]``).
+#   * The four per-field ``if value is None: return []`` skip branches
+#     in ``_validate_hook_id_field`` / ``_validate_phase_field`` /
+#     ``_validate_ordering_class_field`` / ``_validate_fail_policy_field``
+#     (reached when a declaration omits the field; the missing-field
+#     refusal is emitted by ``_validate_declaration``'s required-field
+#     check, NOT by the per-field validator). The timeout None-skip is
+#     already covered by ``test_hooks_validator_refuses_declaration_missing_required_field``.
+#   * Three malformed-pyproject defenses in ``_read_pyproject_hook_entry_points``
+#     (``project`` not a dict; ``entry-points`` not a dict;
+#     ``cognic.hooks`` not a dict). Each routes to the empty-entry-points
+#     return path so the cross-check emits ``manifest_only`` for every
+#     manifest-declared hook_id.
+#   * The ``elif pack_kind == "hook"`` branch in ``validate()`` that
+#     suppresses the entry-point cross-check when EVERY declaration
+#     was malformed (no valid hook_ids accumulated → cross-check skip).
+
+
+def test_hooks_validator_refuses_inner_hooks_block_not_a_dict(tmp_path: Path) -> None:
+    """[hooks] is present but its value is not a TOML table — the
+    inner ``_validate_hook_block`` non-dict branch fires (separate
+    refusal site from the OUTER ``not located_blocks`` branch already
+    tested above)."""
+    _write_pyproject(tmp_path)
+    body = _hook_pack_manifest("")  # no [hooks] block in body
+    data = _parse(body)
+    # Force a non-table value at the canonical path so _resolve_path
+    # returns a string. TOML parser would normally treat ``[hooks]``
+    # as a table header; injecting via the parsed dict is the cleanest
+    # way to exercise the inner-branch defense.
+    data["hooks"] = "not a dict"
+    findings = validate(data, tmp_path)
+    matching = [
+        f
+        for f in findings
+        if f.reason == "hook_block_shape_invalid"
+        and f.payload["failure_mode"] == "block_missing_for_hook_pack"
+        and f.payload["block_path"] == "hooks"
+    ]
+    assert len(matching) == 1, [f.payload for f in findings]
+    assert "expected a TOML table" in matching[0].message
+
+
+def test_hooks_validator_refuses_declaration_entry_not_a_table(tmp_path: Path) -> None:
+    """declarations array contains non-table entries → one
+    ``declaration_entry_not_table`` shape finding per non-table."""
+    _write_pyproject(tmp_path)
+    body = _hook_pack_manifest("\n[hooks]\ndeclarations = [42, 'string-value']\n")
+    data = _parse(body)
+    findings = validate(data, tmp_path)
+    not_table_findings = [
+        f
+        for f in findings
+        if f.reason == "hook_block_shape_invalid"
+        and f.payload["failure_mode"] == "declaration_entry_not_table"
+    ]
+    assert len(not_table_findings) == 2, [f.payload for f in findings]
+    indexes = sorted(f.payload["declaration_index"] for f in not_table_findings)
+    assert indexes == [0, 1]
+
+
+def test_hooks_validator_skips_hook_id_field_validator_when_field_missing(
+    tmp_path: Path,
+) -> None:
+    """Declaration missing ``hook_id`` → ``_validate_hook_id_field``
+    early-returns ``[]`` on ``value is None``; the missing-field
+    refusal comes from the required-field check, NOT from the per-
+    field validator."""
+    _write_pyproject(tmp_path)
+    body = _hook_pack_manifest(
+        """
+[[hooks.declarations]]
+phase = "dlp_pre"
+ordering_class = "input_redaction"
+timeout_seconds = 5.0
+fail_policy = "fail_closed"
+# hook_id intentionally missing
+"""
+    )
+    data = _parse(body)
+    findings = validate(data, tmp_path)
+    # Required-field refusal is present.
+    missing = [
+        f
+        for f in findings
+        if f.reason == "hook_block_shape_invalid"
+        and f.payload["failure_mode"] == "declaration_missing_required_field"
+        and f.payload["field"] == "hook_id"
+    ]
+    assert len(missing) == 1
+    # The per-field validator did NOT emit a hook_id_invalid refusal
+    # (it short-circuited on the None-skip branch).
+    assert not any(f.reason == "hook_id_invalid" for f in findings)
+
+
+def test_hooks_validator_skips_phase_field_validator_when_field_missing(
+    tmp_path: Path,
+) -> None:
+    """Declaration missing ``phase`` → ``_validate_phase_field``
+    early-returns on the None-skip branch."""
+    _write_pyproject(tmp_path)
+    body = _hook_pack_manifest(
+        """
+[[hooks.declarations]]
+hook_id = "redact_pii_in_input"
+ordering_class = "input_redaction"
+timeout_seconds = 5.0
+fail_policy = "fail_closed"
+# phase intentionally missing
+"""
+    )
+    data = _parse(body)
+    findings = validate(data, tmp_path)
+    assert any(
+        f.reason == "hook_block_shape_invalid"
+        and f.payload["failure_mode"] == "declaration_missing_required_field"
+        and f.payload["field"] == "phase"
+        for f in findings
+    )
+    assert not any(f.reason == "hook_phase_invalid" for f in findings)
+
+
+def test_hooks_validator_skips_ordering_class_field_validator_when_field_missing(
+    tmp_path: Path,
+) -> None:
+    """Declaration missing ``ordering_class`` → per-field validator's
+    None-skip branch fires (and downstream phase-class-mismatch check
+    is also skipped since ordering_class is None)."""
+    _write_pyproject(tmp_path)
+    body = _hook_pack_manifest(
+        """
+[[hooks.declarations]]
+hook_id = "redact_pii_in_input"
+phase = "dlp_pre"
+timeout_seconds = 5.0
+fail_policy = "fail_closed"
+# ordering_class intentionally missing
+"""
+    )
+    data = _parse(body)
+    findings = validate(data, tmp_path)
+    assert any(
+        f.reason == "hook_block_shape_invalid"
+        and f.payload["failure_mode"] == "declaration_missing_required_field"
+        and f.payload["field"] == "ordering_class"
+        for f in findings
+    )
+    assert not any(f.reason == "hook_ordering_class_invalid" for f in findings)
+
+
+def test_hooks_validator_skips_fail_policy_field_validator_when_field_missing(
+    tmp_path: Path,
+) -> None:
+    """Declaration missing ``fail_policy`` → per-field validator's
+    None-skip branch fires."""
+    _write_pyproject(tmp_path)
+    body = _hook_pack_manifest(
+        """
+[[hooks.declarations]]
+hook_id = "redact_pii_in_input"
+phase = "dlp_pre"
+ordering_class = "input_redaction"
+timeout_seconds = 5.0
+# fail_policy intentionally missing
+"""
+    )
+    data = _parse(body)
+    findings = validate(data, tmp_path)
+    assert any(
+        f.reason == "hook_block_shape_invalid"
+        and f.payload["failure_mode"] == "declaration_missing_required_field"
+        and f.payload["field"] == "fail_policy"
+        for f in findings
+    )
+    assert not any(f.reason == "hook_fail_policy_invalid" for f in findings)
+
+
+def test_hooks_validator_pyproject_project_section_not_a_dict(tmp_path: Path) -> None:
+    """pyproject.toml has top-level ``project = "string"`` (not a
+    table) → ``_read_pyproject_hook_entry_points`` returns ``({}, None)``;
+    cross-check sees zero entry points, manifest hook_id surfaces as
+    ``manifest_only`` ``hook_unresolved_reference``."""
+    _write_pyproject(tmp_path, body='project = "not a table"\n')
+    data = _parse(_hook_pack_manifest())
+    findings = validate(data, tmp_path)
+    assert any(
+        f.reason == "hook_unresolved_reference"
+        and f.payload["failure_mode"] == "manifest_only"
+        and f.payload["hook_id"] == "redact_pii_in_input"
+        for f in findings
+    ), [f.payload for f in findings]
+
+
+def test_hooks_validator_pyproject_entry_points_not_a_dict(tmp_path: Path) -> None:
+    """pyproject.toml has ``[project]`` but ``entry-points`` is a
+    string (not a table) → empty entry-point set → ``manifest_only``
+    refusal for the manifest-declared hook_id."""
+    _write_pyproject(
+        tmp_path,
+        body=(
+            "[project]\n"
+            'name = "cognic-hook-test"\n'
+            'version = "0.1.0"\n'
+            'entry-points = "not a table"\n'
+        ),
+    )
+    data = _parse(_hook_pack_manifest())
+    findings = validate(data, tmp_path)
+    assert any(
+        f.reason == "hook_unresolved_reference"
+        and f.payload["failure_mode"] == "manifest_only"
+        and f.payload["hook_id"] == "redact_pii_in_input"
+        for f in findings
+    ), [f.payload for f in findings]
+
+
+def test_hooks_validator_pyproject_cognic_hooks_not_a_dict(tmp_path: Path) -> None:
+    """pyproject.toml has ``[project.entry-points]`` but
+    ``"cognic.hooks"`` is a string → empty entry-point set →
+    ``manifest_only`` refusal."""
+    _write_pyproject(
+        tmp_path,
+        body=(
+            "[project]\n"
+            'name = "cognic-hook-test"\n'
+            'version = "0.1.0"\n'
+            "[project.entry-points]\n"
+            '"cognic.hooks" = "not a table"\n'
+        ),
+    )
+    data = _parse(_hook_pack_manifest())
+    findings = validate(data, tmp_path)
+    assert any(
+        f.reason == "hook_unresolved_reference"
+        and f.payload["failure_mode"] == "manifest_only"
+        and f.payload["hook_id"] == "redact_pii_in_input"
+        for f in findings
+    ), [f.payload for f in findings]
+
+
+def test_hooks_validator_skips_cross_check_when_all_declarations_malformed(
+    tmp_path: Path,
+) -> None:
+    """Hook pack with [hooks] block but every declaration is non-
+    table → ``all_declared_hook_ids`` stays empty → the
+    ``elif pack_kind == "hook"`` branch is taken and the cross-check
+    is suppressed (per-declaration refusals are enough; entry-point
+    findings on top would be noise)."""
+    _write_pyproject(tmp_path)
+    body = _hook_pack_manifest("\n[hooks]\ndeclarations = [42]\n")
+    data = _parse(body)
+    findings = validate(data, tmp_path)
+    # The declaration_entry_not_table refusal is present.
+    assert any(
+        f.reason == "hook_block_shape_invalid"
+        and f.payload["failure_mode"] == "declaration_entry_not_table"
+        for f in findings
+    )
+    # But NO entry-point cross-check findings (manifest_only or
+    # pyproject_only); the elif-branch suppressed them.
+    assert not any(
+        f.reason in {"hook_unresolved_reference", "hook_entry_point_mismatch"} for f in findings
+    ), [f.payload for f in findings]
+
+
+def test_hooks_validator_non_hook_pack_with_malformed_hooks_block_skips_cross_check(
+    tmp_path: Path,
+) -> None:
+    """Non-hook pack (e.g. ``kind="tool"``) with a [hooks] block whose
+    declarations are all malformed → ``all_declared_hook_ids`` empty
+    AND ``pack_kind != "hook"`` so neither the ``if`` arm nor the
+    ``elif`` arm fires; control falls through to ``return findings``.
+    Pins the [828→835] branch (non-hook fall-through path)."""
+    _write_pyproject(tmp_path)
+    # kind="tool" pack with a [hooks] block whose declarations are
+    # all non-table entries. Wave-1's _FORBIDDEN_BLOCKS_BY_KIND only
+    # refuses HOOK packs declaring [a2a]/[mcp]; the orchestrator does
+    # NOT fire kind-strict refusal for non-hook [hooks]. But the
+    # validator IS NOT silent on the block — it shape-validates the
+    # declarations array regardless of pack kind, and the per-
+    # declaration refusals (declaration_entry_not_table here) still
+    # fire (asserted below).
+    #
+    # The narrower branch this test pins is the entry-point cross-
+    # check fall-through: after every declaration is malformed,
+    # all_declared_hook_ids is empty AND pack_kind != "hook", so
+    # neither the `if all_declared_hook_ids:` arm nor the
+    # `elif pack_kind == "hook":` arm fires; control falls through
+    # the L828→835 branch to `return findings` without emitting any
+    # hook_unresolved_reference / hook_entry_point_mismatch. This
+    # complements the kind="hook" twin above
+    # (test_hooks_validator_skips_cross_check_when_all_declarations_malformed)
+    # which pins the elif arm.
+    body = """
+[pack]
+pack_id = "cognic-tool-with-bad-hooks"
+kind = "tool"
+
+[hooks]
+declarations = [42]
+"""
+    data = _parse(body)
+    findings = validate(data, tmp_path)
+    # Per-declaration refusal IS emitted.
+    assert any(
+        f.reason == "hook_block_shape_invalid"
+        and f.payload["failure_mode"] == "declaration_entry_not_table"
+        for f in findings
+    )
+    # No cross-check findings (the L828→835 fall-through branch).
+    assert not any(
+        f.reason in {"hook_unresolved_reference", "hook_entry_point_mismatch"} for f in findings
+    )
+
+
 def test_hooks_validator_returns_validator_finding_instances(tmp_path: Path) -> None:
     """Every finding is a ValidatorFinding (not a raw dict). Pinned
     so a future refactor doesn't accidentally break the orchestrator's
