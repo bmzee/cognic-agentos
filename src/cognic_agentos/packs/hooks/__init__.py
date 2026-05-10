@@ -9,8 +9,12 @@ Two modules per Doctrine Lock D in
   unverified packs, stale digests, and timeout-above-ceiling.
 * :mod:`cognic_agentos.packs.hooks.dispatcher` — ``HookDispatcher``
   deterministic phase dispatcher (T7). Reads an immutable snapshot
-  from the registry; never mutates registry state. (Lands at T7;
-  this package does not export it yet.)
+  from the registry; never mutates registry state. Five closed-enum
+  failure modes per Doctrine Lock E
+  (``hook_timeout`` / ``hook_exception`` / ``hook_malformed_result`` /
+  ``hook_policy_refused`` / ``hook_payload_unscannable``).
+  Payload-contents-never-logged invariant pinned by
+  ``tests/architecture/test_hook_payload_never_logged.py``.
 
 The hook surface is a Wave-1 ADR-017 enforcement primitive: DLP
 pre/post hooks gate the calling-pack invocation lifecycle. The
@@ -22,6 +26,12 @@ dispatch).
 
 from __future__ import annotations
 
+from cognic_agentos.packs.hooks.dispatcher import (
+    HookDispatcher,
+    HookDispatchOutcome,
+    HookDispatchResult,
+    HookFailureMode,
+)
 from cognic_agentos.packs.hooks.registry import (
     HookDeclaration,
     HookEntry,
@@ -33,7 +43,11 @@ from cognic_agentos.packs.hooks.registry import (
 
 __all__ = [
     "HookDeclaration",
+    "HookDispatchOutcome",
+    "HookDispatchResult",
+    "HookDispatcher",
     "HookEntry",
+    "HookFailureMode",
     "HookRegistry",
     "HookRegistryRefusal",
     "HookRegistryRefusalReason",
