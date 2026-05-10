@@ -971,9 +971,21 @@ def _stage_pack_with_wheel(tmp_path: Path, *, kind: str = "agent") -> Path:
     elif kind == "tool":
         ep_group = "cognic.tools"
         ep_target = "cognic_agent_sign_target.tool:SignTargetTool"
-    else:
+    elif kind == "skill":
         ep_group = "cognic.skills"
         ep_target = "cognic_agent_sign_target.skill:SignTargetSkill"
+    elif kind == "hook":
+        # Sprint-7A2 T9 — 4th first-class pack kind. Hook packs declare
+        # ``[cognic.hooks]`` in entry_points.txt; the wheel-integrity
+        # helper maps that to kind="hook" + sign skips JWS like tool /
+        # skill packs.
+        ep_group = "cognic.hooks"
+        ep_target = "cognic_agent_sign_target.hook:SignTargetHook"
+    else:
+        raise AssertionError(
+            f"_stage_pack_with_wheel got unsupported kind={kind!r}; "
+            "supported arms: agent / tool / skill / hook."
+        )
     with _zipfile.ZipFile(wheel, "w", _zipfile.ZIP_DEFLATED) as zf:
         zf.writestr(
             f"{dist_info}/entry_points.txt",
@@ -2744,8 +2756,10 @@ def test_sign_bundle_with_unknown_pack_kind_emits_subprocess_failed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """R4 P2 #3: manifest with ``[pack].kind = "garbage"`` (not in
-    the closed-enum {tool, skill, agent}) → closed-enum refusal
-    (failure_mode=manifest_unknown_kind)."""
+    the closed-enum {tool, skill, agent, hook}) → closed-enum refusal
+    (failure_mode=manifest_unknown_kind). Sprint-7A2 T9 amendment:
+    "hook" joined the closed enum as the 4th first-class kind; the
+    refusal still fires for any value outside the new 4-element set."""
     shims = _stage_full_shim_set(tmp_path)
     pack = _stage_pack_with_wheel(tmp_path)
     manifest_path = pack / "cognic-pack-manifest.toml"
@@ -4231,3 +4245,254 @@ def test_sign_bundle_jws_signing_failure_emits_agent_card_jws_signing_failed(
     assert result.exit_code == 1
     payload = json.loads(result.stdout.strip())
     assert any(f["reason"] == "sign_agent_card_jws_signing_failed" for f in payload["findings"])
+
+
+# =============================================================================
+# Sprint-7A2 T9 — sign-bundle hook-pack-kind acceptance.
+# =============================================================================
+#
+# T9 extends ``_VALID_PACK_KINDS`` (sign.py:189) to include "hook" as
+# the 4th first-class pack kind, alongside the wheel-integrity table
+# extension at ``_wheel_integrity.py``. Hook packs ship the same
+# attestation set as tool + skill packs (no AgentCard JWS); the
+# existing ``pack_kind == "agent"`` JWS gate handles this without
+# branching.
+
+
+def test_sign_bundle_for_hook_kind_pack_skips_agent_card_jws(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hook-kind packs (Sprint-7A2 T9) flow through sign --bundle the
+    same way tool-kind packs do: 7 attestation files produced (cosign
+    sig + cosign bundle + SBOM + vuln scan + license audit + SLSA +
+    in-toto layout); zero AgentCard JWS files (hook packs do not
+    declare an AgentCard). Mirrors
+    ``test_sign_bundle_for_tool_kind_pack_skips_agent_card_jws`` for
+    the hook kind."""
+    shims = _stage_full_shim_set(tmp_path)
+    # Clone the agent-fixture pack but flip kind to "hook" + drop
+    # [a2a] block + agent_card fields + add a minimal [hooks] block.
+    # Note: ``sign --bundle`` itself does NOT run the validator
+    # pipeline; the [hooks] block keeps the staged pack validate-clean
+    # for ``agentos validate`` callers + verify Step 10's manifest
+    # re-validation. Without it, verify would refuse with
+    # ``hook_unresolved_reference`` on the sibling verify-side test.
+    import shutil as _shutil
+
+    pack = tmp_path / "hook_pack"
+    _shutil.copytree(_SIGN_TARGET_PACK, pack)
+    manifest_path = pack / "cognic-pack-manifest.toml"
+    body = manifest_path.read_text()
+    body = body.replace('kind = "agent"', 'kind = "hook"')
+    body = body.replace(
+        'pack_id = "cognic-agent-sign-target"', 'pack_id = "cognic-hook-sign-target"'
+    )
+    # Strip [a2a] block + agent_card_url / agent_card_jws_path (hook
+    # packs forbid all three per T4 + T6 + T7 validators).
+    new_lines: list[str] = []
+    in_a2a_block = False
+    for line in body.splitlines():
+        if line.startswith("[a2a]"):
+            in_a2a_block = True
+            continue
+        if in_a2a_block and line.startswith("["):
+            in_a2a_block = False
+        if in_a2a_block:
+            continue
+        if "agent_card_url" in line or "agent_card_jws_path" in line:
+            continue
+        new_lines.append(line)
+    # Append a minimal [hooks] block so the T6 hook validator accepts
+    # the manifest. Single declaration matching the entry_points.txt
+    # we'll write to the wheel below.
+    new_lines.extend(
+        [
+            "",
+            "[hooks]",
+            "[[hooks.declarations]]",
+            'hook_id = "sign_target"',
+            'phase = "dlp_pre"',
+            'ordering_class = "input_redaction"',
+            "timeout_seconds = 5.0",
+            'fail_policy = "fail_closed"',
+        ]
+    )
+    manifest_path.write_text("\n".join(new_lines) + "\n")
+    # pyproject.toml [project].name → match the renamed pack.
+    pyproject_path = pack / "pyproject.toml"
+    pyproject_path.write_text(
+        pyproject_path.read_text().replace(
+            'name = "cognic-agent-sign-target"',
+            'name = "cognic-hook-sign-target"',
+        )
+    )
+    # Stage the wheel with [cognic.hooks] entry-point group.
+    dist_dir = pack / "dist"
+    dist_dir.mkdir(exist_ok=True)
+    import zipfile as _zipfile
+
+    _hook_wheel = dist_dir / "cognic_hook_sign_target-0.1.0-py3-none-any.whl"
+    _hook_dist_info = "cognic_hook_sign_target-0.1.0.dist-info"
+    with _zipfile.ZipFile(_hook_wheel, "w", _zipfile.ZIP_DEFLATED) as _zf:
+        _zf.writestr(
+            f"{_hook_dist_info}/entry_points.txt",
+            "[cognic.hooks]\nsign_target = cognic_hook_sign_target.hook:Hook\n",
+        )
+        _zf.writestr(
+            f"{_hook_dist_info}/METADATA",
+            "Metadata-Version: 2.1\nName: cognic_hook_sign_target\nVersion: 0.1.0\n",
+        )
+        _zf.writestr(
+            f"{_hook_dist_info}/WHEEL",
+            (
+                "Wheel-Version: 1.0\n"
+                "Generator: agentos-test-fixture\n"
+                "Root-Is-Purelib: true\n"
+                "Tag: py3-none-any\n"
+            ),
+        )
+        _zf.writestr(
+            "cognic_hook_sign_target/__init__.py",
+            "",
+        )
+        _zf.writestr(
+            "cognic_hook_sign_target/hook.py",
+            "class Hook:\n    pass\n",
+        )
+
+    _set_sign_bundle_settings(
+        monkeypatch,
+        cosign_path=shims["cosign"],
+        syft_path=shims["syft"],
+        grype_path=shims["grype"],
+        license_auditor_path=shims["license_auditor"],
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["sign", "--bundle", str(pack)])
+    assert result.exit_code == 0, (
+        f"hook-pack sign --bundle failed: stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    # No AgentCard JWS produced for hook packs.
+    jws_path = pack / "agent_cards" / "agent-card.jws"
+    assert not jws_path.exists(), "hook pack must not produce an AgentCard JWS"
+    # All 7 non-JWS attestations DO exist (mirrors the tool-pack arm).
+    for name in (
+        "sbom.cdx.json",
+        "vuln-scan.json",
+        "license-audit.json",
+        "slsa-provenance.intoto.json",
+        "intoto-layout.json",
+        "cosign.sig",
+        "bundle.sigstore",
+    ):
+        assert (pack / "attestations" / name).is_file(), (
+            f"hook-pack sign should produce attestation {name!r}"
+        )
+
+
+def test_sign_bundle_for_hook_kind_pack_records_kind_in_intoto_layout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sprint-7A2 T9 — the in-toto layout's ``pack_kind`` field
+    records ``"hook"`` for hook packs (not "agent" / "tool" / "skill"),
+    so verify Step 8's expected-artifact-set comparison routes
+    through the hook arm. Pins the kind-derivation thread that
+    flows from manifest → sign → in-toto layout → verify."""
+    # Re-use the previous test's fixture-construction by calling it as
+    # a module-private helper would be cleaner, but per-test isolation
+    # + fresh tmp_path is preferred. Inline the staging since hook
+    # packs are the only T9 lifecycle test.
+    shims = _stage_full_shim_set(tmp_path)
+    import shutil as _shutil
+
+    pack = tmp_path / "hook_pack_intoto"
+    _shutil.copytree(_SIGN_TARGET_PACK, pack)
+    manifest_path = pack / "cognic-pack-manifest.toml"
+    body = manifest_path.read_text()
+    body = body.replace('kind = "agent"', 'kind = "hook"')
+    body = body.replace(
+        'pack_id = "cognic-agent-sign-target"', 'pack_id = "cognic-hook-sign-target"'
+    )
+    new_lines: list[str] = []
+    in_a2a_block = False
+    for line in body.splitlines():
+        if line.startswith("[a2a]"):
+            in_a2a_block = True
+            continue
+        if in_a2a_block and line.startswith("["):
+            in_a2a_block = False
+        if in_a2a_block:
+            continue
+        if "agent_card_url" in line or "agent_card_jws_path" in line:
+            continue
+        new_lines.append(line)
+    new_lines.extend(
+        [
+            "",
+            "[hooks]",
+            "[[hooks.declarations]]",
+            'hook_id = "sign_target"',
+            'phase = "dlp_pre"',
+            'ordering_class = "input_redaction"',
+            "timeout_seconds = 5.0",
+            'fail_policy = "fail_closed"',
+        ]
+    )
+    manifest_path.write_text("\n".join(new_lines) + "\n")
+    pyproject_path = pack / "pyproject.toml"
+    pyproject_path.write_text(
+        pyproject_path.read_text().replace(
+            'name = "cognic-agent-sign-target"',
+            'name = "cognic-hook-sign-target"',
+        )
+    )
+    dist_dir = pack / "dist"
+    dist_dir.mkdir(exist_ok=True)
+    import zipfile as _zipfile
+
+    _hook_wheel = dist_dir / "cognic_hook_sign_target-0.1.0-py3-none-any.whl"
+    _hook_dist_info = "cognic_hook_sign_target-0.1.0.dist-info"
+    with _zipfile.ZipFile(_hook_wheel, "w", _zipfile.ZIP_DEFLATED) as _zf:
+        _zf.writestr(
+            f"{_hook_dist_info}/entry_points.txt",
+            "[cognic.hooks]\nsign_target = cognic_hook_sign_target.hook:Hook\n",
+        )
+        _zf.writestr(
+            f"{_hook_dist_info}/METADATA",
+            "Metadata-Version: 2.1\nName: cognic_hook_sign_target\nVersion: 0.1.0\n",
+        )
+        _zf.writestr(
+            f"{_hook_dist_info}/WHEEL",
+            (
+                "Wheel-Version: 1.0\n"
+                "Generator: agentos-test-fixture\n"
+                "Root-Is-Purelib: true\n"
+                "Tag: py3-none-any\n"
+            ),
+        )
+        _zf.writestr("cognic_hook_sign_target/__init__.py", "")
+        _zf.writestr(
+            "cognic_hook_sign_target/hook.py",
+            "class Hook:\n    pass\n",
+        )
+
+    _set_sign_bundle_settings(
+        monkeypatch,
+        cosign_path=shims["cosign"],
+        syft_path=shims["syft"],
+        grype_path=shims["grype"],
+        license_auditor_path=shims["license_auditor"],
+    )
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["sign", "--bundle", str(pack)])
+    assert result.exit_code == 0, f"hook-pack sign --bundle failed: {result.stdout!r}"
+    intoto_path = pack / "attestations" / "intoto-layout.json"
+    assert intoto_path.exists()
+    intoto_doc = json.loads(intoto_path.read_text())
+    assert intoto_doc["pack_kind"] == "hook", (
+        f"in-toto layout pack_kind should be 'hook'; got {intoto_doc['pack_kind']!r}"
+    )

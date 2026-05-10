@@ -300,14 +300,50 @@ def _stage_signed_pack(
             if "agent_card_url" in line or "agent_card_jws_path" in line:
                 continue
             new_lines.append(line)
+        # Sprint-7A2 T9: hook packs additionally need a minimal
+        # ``[hooks]`` block so the staged pack stays validate-clean.
+        # ``sign --bundle`` does NOT itself invoke the validator
+        # pipeline; the block matters for verify Step 10's manifest
+        # re-validation (which DOES run the full T6 hook validator)
+        # + for ``agentos validate`` callers in adjacent tests.
+        # Without it, verify Step 10 would refuse with
+        # ``hook_unresolved_reference``. One declaration matches the
+        # ``[project.entry-points."cognic.hooks"]`` entry-point group
+        # emitted to pyproject below (entry-point key `sign_target` ↔
+        # declaration ``hook_id = "sign_target"``).
+        if kind == "hook":
+            new_lines.extend(
+                [
+                    "",
+                    "[hooks]",
+                    "[[hooks.declarations]]",
+                    'hook_id = "sign_target"',
+                    'phase = "dlp_pre"',
+                    'ordering_class = "input_redaction"',
+                    "timeout_seconds = 5.0",
+                    'fail_policy = "fail_closed"',
+                ]
+            )
         manifest_path.write_text("\n".join(new_lines) + "\n")
         pyproject_path = pack / "pyproject.toml"
-        pyproject_path.write_text(
-            pyproject_path.read_text().replace(
-                'name = "cognic-agent-sign-target"',
-                f'name = "cognic-{kind}-sign-target"',
-            )
+        pyproject_text = pyproject_path.read_text().replace(
+            'name = "cognic-agent-sign-target"',
+            f'name = "cognic-{kind}-sign-target"',
         )
+        # Sprint-7A2 T9: hook validator re-validates manifest at
+        # verify Step 10 + cross-references pyproject's
+        # ``[project.entry-points."cognic.hooks"]`` against
+        # ``[hooks].declarations``. Rewrite the agent entry-points
+        # group to the hook one so the cross-check passes; entry-
+        # point key matches the manifest's hook_id="sign_target".
+        if kind == "hook":
+            pyproject_text = pyproject_text.replace(
+                '[project.entry-points."cognic.agents"]\n'
+                'sign_target = "cognic_agent_sign_target.agent:SignTargetAgent"\n',
+                '[project.entry-points."cognic.hooks"]\n'
+                'sign_target = "cognic_hook_sign_target.hook:SignTargetHook"\n',
+            )
+        pyproject_path.write_text(pyproject_text)
 
     dist_dir = pack / "dist"
     dist_dir.mkdir(exist_ok=True)
@@ -2597,7 +2633,8 @@ def test_verify_with_pyproject_missing_version_emits_attestation_unresolvable(
 # Section P — R2 reviewer regressions (3 P2 + 1 P3 findings folded)
 #
 # Each arm pins one specific tightening from the R2 reviewer round:
-#   - R2 P2 #1: pack-kind closed-enum {tool, skill, agent} membership
+#   - R2 P2 #1: pack-kind closed-enum {tool, skill, agent, hook} membership
+#               (Sprint-7A2 T9 added "hook" as the 4th first-class kind)
 #   - R2 P2 #2: SLSA + in-toto pack_id / pack_version identity match
 #   - R2 P2 #3: cosign verify-blob timeout (SIGKILL + reap)
 #   - R2 P3 #1: in-toto layout path-spelling normalization
@@ -6623,3 +6660,191 @@ def test_verify_path_resolve_oserror_on_attestation_path(
     payload = json.loads(result.stdout)
     reasons = [f["reason"] for f in payload["findings"]]
     assert "verify_attestation_path_unresolvable" in reasons, reasons
+
+
+# =============================================================================
+# Sprint-7A2 T9 — wheel-integrity hook-kind derivation.
+# =============================================================================
+#
+# The wheel-integrity helper at ``cli/_wheel_integrity.py`` derives a
+# pack's kind from the cosign-signed wheel's ``dist-info/entry_points.txt``
+# (cognic.agents → "agent", cognic.tools → "tool", cognic.skills →
+# "skill"). T9 extends the table with ``cognic.hooks → "hook"`` so
+# Sprint-7A2 hook packs (the 4th first-class kind) flow through sign
+# + verify identically to tool / skill packs (no AgentCard JWS, same
+# attestation set + load probe).
+
+
+class TestWheelIntegrityAcceptsHookSection:
+    """Direct unit test for ``read_signed_wheel_dist_info_metadata``
+    asserting that a wheel declaring ``[cognic.hooks]`` is accepted +
+    its derived kind is ``"hook"``. This is the load-bearing assertion
+    pinning Sprint-7A2 T9's kind-derivation table extension."""
+
+    def test_cognic_hooks_section_returns_kind_hook(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A signed wheel with one ``[cognic.hooks]`` entry resolves
+        kind="hook" via the wheel-integrity helper. Pre-T9 this would
+        return ``wheel_no_cognic_entry_point`` because the helper
+        only knew ``cognic.agents`` / ``cognic.tools`` / ``cognic.skills``."""
+        import zipfile as _zipfile
+
+        from cognic_agentos.cli._wheel_integrity import (
+            read_signed_wheel_dist_info_metadata,
+        )
+
+        wheel_path = tmp_path / "cognic_hook_sign_target-0.1.0-py3-none-any.whl"
+        dist_info = "cognic_hook_sign_target-0.1.0.dist-info"
+        with _zipfile.ZipFile(wheel_path, "w", _zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr(
+                f"{dist_info}/entry_points.txt",
+                "[cognic.hooks]\nredact_pii = cognic_hook_sign_target.hook:RedactPii\n",
+            )
+            zf.writestr(
+                f"{dist_info}/METADATA",
+                "Metadata-Version: 2.1\nName: cognic_hook_sign_target\nVersion: 0.1.0\n",
+            )
+            zf.writestr(
+                f"{dist_info}/WHEEL",
+                (
+                    "Wheel-Version: 1.0\n"
+                    "Generator: agentos-test-fixture\n"
+                    "Root-Is-Purelib: true\n"
+                    "Tag: py3-none-any\n"
+                ),
+            )
+            zf.writestr(
+                "cognic_hook_sign_target/__init__.py",
+                "",
+            )
+            zf.writestr(
+                "cognic_hook_sign_target/hook.py",
+                "class RedactPii:\n    pass\n",
+            )
+
+        result, failure = read_signed_wheel_dist_info_metadata(
+            wheel_path,
+            expected_project_name="cognic-hook-sign-target",
+            expected_version="0.1.0",
+        )
+        assert failure is None, f"hook wheel refused: {failure!r}"
+        assert result is not None
+        canonical_name, version, kind, entry_points = result
+        assert canonical_name == "cognic-hook-sign-target"
+        assert version == "0.1.0"
+        assert kind == "hook", f"cognic.hooks → 'hook' kind derivation expected; got {kind!r}"
+        assert entry_points == (("cognic_hook_sign_target.hook", "RedactPii"),)
+
+    def test_cognic_hooks_with_other_cognic_group_refused_as_multiple(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A wheel declaring BOTH ``[cognic.hooks]`` AND another
+        cognic.* group fires ``wheel_multiple_cognic_groups`` with
+        both kinds in the payload. Pins R6 P2 #1 spoof-first defense
+        for the hook kind: the same multi-group refusal that catches
+        agent+tool spoofing must also catch hook+anything spoofing."""
+        import zipfile as _zipfile
+
+        from cognic_agentos.cli._wheel_integrity import (
+            read_signed_wheel_dist_info_metadata,
+        )
+
+        wheel_path = tmp_path / "cognic_hook_spoof-0.1.0-py3-none-any.whl"
+        dist_info = "cognic_hook_spoof-0.1.0.dist-info"
+        with _zipfile.ZipFile(wheel_path, "w", _zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr(
+                f"{dist_info}/entry_points.txt",
+                ("[cognic.hooks]\nredact = mod:Cls\n[cognic.tools]\nspoof = mod:Cls\n"),
+            )
+            zf.writestr(
+                f"{dist_info}/METADATA",
+                "Metadata-Version: 2.1\nName: cognic_hook_spoof\nVersion: 0.1.0\n",
+            )
+            zf.writestr(
+                f"{dist_info}/WHEEL",
+                (
+                    "Wheel-Version: 1.0\n"
+                    "Generator: agentos-test-fixture\n"
+                    "Root-Is-Purelib: true\n"
+                    "Tag: py3-none-any\n"
+                ),
+            )
+
+        result, failure = read_signed_wheel_dist_info_metadata(
+            wheel_path,
+            expected_project_name="cognic-hook-spoof",
+            expected_version="0.1.0",
+        )
+        assert result is None
+        assert failure is not None
+        assert failure.failure_mode == "wheel_multiple_cognic_groups"
+        # Both groups appear in the payload — defends against a future
+        # maintainer who adds hook detection without also extending the
+        # multi-group enumeration.
+        assert "hook" in failure.payload["cognic_groups"]
+        assert "tool" in failure.payload["cognic_groups"]
+
+
+# =============================================================================
+# Sprint-7A2 T9 — verify-bundle hook-pack-kind end-to-end.
+# =============================================================================
+
+
+def test_verify_bundle_for_hook_kind_pack_succeeds_and_skips_jws_step(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sprint-7A2 T9 — a hook-kind pack that signs cleanly verifies
+    cleanly: the full pipeline (Steps 1-11) runs to completion, and
+    Step 9 (AgentCard JWS verification) is skipped because the JWS
+    arm is gated on ``pack_kind == "agent"``. Mirrors the tool /
+    skill verify lifecycle for the 4th first-class kind."""
+    pack = _stage_signed_pack(tmp_path, monkeypatch, kind="hook")
+    verify_shim = _make_cosign_shim(tmp_path, exit_code=0)
+    _wire_verify_settings(monkeypatch, cosign_path=verify_shim, trust_root=_TEST_PUBLIC_PEM)
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["verify", "--json", str(pack)])
+    assert result.exit_code == 0, (
+        f"hook-pack verify failed: stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    payload = json.loads(result.stdout)
+    # No findings + no JWS-related reasons.
+    assert payload["findings"] == [], (
+        f"hook-pack verify should produce zero findings; got {payload['findings']}"
+    )
+    # Hook packs don't ship a JWS — confirm the JWS file genuinely
+    # absent (not just unreferenced by verify).
+    jws_path = pack / "agent_cards" / "agent-card.jws"
+    assert not jws_path.exists(), "hook pack should not have produced a JWS at sign time"
+
+
+def test_verify_bundle_for_hook_kind_pack_intoto_pack_kind_field_records_hook(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sprint-7A2 T9 — the in-toto layout produced at sign time records
+    ``pack_kind = "hook"`` for hook packs, and verify Step 8 reads
+    that field through without mismatch. Pins the kind-derivation
+    thread that flows from manifest → wheel-integrity → sign →
+    in-toto layout → verify."""
+    pack = _stage_signed_pack(tmp_path, monkeypatch, kind="hook")
+    intoto_path = pack / "attestations" / "intoto-layout.json"
+    assert intoto_path.exists()
+    intoto_doc = json.loads(intoto_path.read_text())
+    assert intoto_doc.get("pack_kind") == "hook", (
+        f"in-toto layout pack_kind should be 'hook'; got {intoto_doc.get('pack_kind')!r}"
+    )
+    # Now run verify against the staged hook pack and confirm the
+    # in-toto layout shape passes Step 8 (no verify_intoto_layout_invalid).
+    verify_shim = _make_cosign_shim(tmp_path, exit_code=0)
+    _wire_verify_settings(monkeypatch, cosign_path=verify_shim, trust_root=_TEST_PUBLIC_PEM)
+    runner = CliRunner()
+    result = runner.invoke(app, ["verify", "--json", str(pack)])
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    reasons = [f["reason"] for f in payload["findings"]]
+    assert "verify_intoto_layout_invalid" not in reasons, reasons

@@ -21,6 +21,16 @@ from that wheel; the runtime trust gate would bless an unloadable
 agent pack. Fix: require at least one well-formed ``module:object``
 entry under the selected cognic.* section.
 
+Sprint-7A2 T9: the kind-derivation table grew the 4th first-class
+kind — ``cognic.hooks → "hook"`` — so hook packs flow through the
+same wheel-integrity gate as tool / skill / agent packs. Hook packs
+ship the same attestation set as tool / skill packs (no AgentCard
+JWS); sign + verify gate JWS on ``pack_kind == "agent"`` so the
+new kind wires through unchanged downstream. The
+``wheel_multiple_cognic_groups`` spoof-first defense (R6 P2 #1)
+extends to hook+anything spoofing automatically because the same
+``len(cognic_groups) > 1`` check fires for the new group too.
+
 R15 reviewer pivot: the static-AST loadability walk that R13/R14/R15
 tried to harden incrementally (top-level Raise → unresolved bases →
 decorators / defaults / annotations → strict allowlist → trusted-
@@ -442,6 +452,14 @@ def read_signed_wheel_dist_info_metadata(
         cognic_groups.append("tool")
     if parser.has_section("cognic.skills"):
         cognic_groups.append("skill")
+    # Sprint-7A2 T9: hook is the 4th first-class pack kind (alongside
+    # tool / skill / agent). Hook packs declare ``[cognic.hooks]`` in
+    # entry_points.txt; the kind-derivation table below maps it to
+    # ``"hook"``. Hook packs ship the same attestation set as tool /
+    # skill packs (no AgentCard JWS); sign + verify gate JWS on
+    # ``pack_kind == "agent"`` so hook packs flow through identically.
+    if parser.has_section("cognic.hooks"):
+        cognic_groups.append("hook")
 
     if not cognic_groups:
         return None, WheelIntegrityFailure(
@@ -450,8 +468,8 @@ def read_signed_wheel_dist_info_metadata(
                 f"wheel {wheel_path} declares no cognic.* entry-point "
                 "group. Cognic packs MUST declare exactly one of "
                 '[project.entry-points."cognic.agents" / "cognic.tools" '
-                '/ "cognic.skills"] so verify can derive an integrity-'
-                "anchored kind."
+                '/ "cognic.skills" / "cognic.hooks"] so verify can derive '
+                "an integrity-anchored kind."
             ),
             payload={
                 "wheel_path": str(wheel_path),
@@ -475,6 +493,8 @@ def read_signed_wheel_dist_info_metadata(
         "agent": "cognic.agents",
         "tool": "cognic.tools",
         "skill": "cognic.skills",
+        # Sprint-7A2 T9 — hook is the 4th first-class kind.
+        "hook": "cognic.hooks",
     }[kind]
 
     # R7 P2 #2: the selected cognic.* group MUST contain at least one
