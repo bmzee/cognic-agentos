@@ -31,7 +31,7 @@ build-time vocab cleanly under the CLI namespace).
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Final, Literal
 
 #: Catalogue of data classes Wave-1 packs may declare in
 #: ``[tool.cognic.data_governance].data_classes``. New classes land in
@@ -170,12 +170,116 @@ DATA_CLASS_TO_MIN_RISK_TIER: dict[str, str] = {
 LOW_AUTHORITY_TIERS: frozenset[str] = frozenset({"read_only", "internal_write"})
 
 
+# ---------------------------------------------------------------------------
+# Sprint-7A2 T1 — hook-pack closed-enum vocabulary
+# ---------------------------------------------------------------------------
+#
+# Wave-1 hook taxonomy added by Sprint-7A2 (per the plan-of-record at
+# ``docs/superpowers/plans/2026-05-09-sprint-7a2-hook-packs-runtime.md``
+# Doctrine Locks A + C + E). Hook packs ship as a fourth first-class
+# pack kind alongside tools / skills / agents; the validator (T6 of
+# Sprint-7A2) cross-checks pack manifests against these literals; the
+# runtime registry + dispatcher (T7 / T8 of Sprint-7A2) consume the
+# same closed enums for admission + dispatch ordering.
+
+#: Closed-enum hook phase. Wave-1 narrow: only the two ADR-017 DLP
+#: phases (`dlp_pre` runs before pack code sees governed input;
+#: `dlp_post` runs before governed output leaves AgentOS). Future
+#: phases (memory pre/post per ADR-019; escalation pre per ADR-014;
+#: egress pre per ADR-017's egress allow-list) land in follow-up
+#: sprints; growth via the drift-detector test in
+#: ``tests/unit/test_config.py::TestSprint7A2HookVocabulary``.
+HookPhase = Literal[
+    "dlp_pre",
+    "dlp_post",
+]
+
+
+#: Closed-enum hook ordering class. Authors pick a semantic class; the
+#: dispatcher (Sprint-7A2 T8) orders within a phase by
+#: ``HOOK_ORDERING_RANK[ordering_class]`` ascending, then by
+#: ``hook_id`` alphabetic for ties — gives deterministic ordering
+#: without surfacing brittle integer-priority knobs to pack authors.
+#: Wave-1 narrow: 4 input-side classes for `dlp_pre`, 4 output-side
+#: classes for `dlp_post` (8 values total).
+HookOrderingClass = Literal[
+    # dlp_pre phase
+    "input_validation",  # earliest; refuses obviously-invalid input
+    "input_authorization",  # consent / authz checks
+    "input_redaction",  # PII redaction (ADR-017 example: redact_pii_in_input)
+    "input_normalization",  # format normalization
+    # dlp_post phase
+    "output_validation",  # earliest post-hook; refuses obviously-invalid output
+    "output_egress_check",  # egress allow-list cross-check
+    "output_redaction",  # secondary PII redaction
+    "output_masking",  # account / id masking (ADR-017 example: mask_account_numbers)
+]
+
+
+#: Dispatcher ordering rank: lower-number runs first within a phase.
+#: Each ordering class maps to its semantic position in the phase
+#: pipeline. Authors don't write integers; the closed-enum class
+#: name is the binding surface, this map is the dispatcher's
+#: deterministic-order primitive. Test pins exhaustive coverage of
+#: every ``HookOrderingClass`` value.
+HOOK_ORDERING_RANK: Final[dict[HookOrderingClass, int]] = {
+    # dlp_pre — input pipeline
+    "input_validation": 10,
+    "input_authorization": 20,
+    "input_redaction": 30,
+    "input_normalization": 40,
+    # dlp_post — output pipeline
+    "output_validation": 10,
+    "output_egress_check": 20,
+    "output_redaction": 30,
+    "output_masking": 40,
+}
+
+
+#: Closed-enum hook failure policy. Wave-1: ``fail_closed`` is the
+#: default for all data-governance phases per ADR-017 + Doctrine Lock E
+#: (the calling pack's invocation is refused if the hook times out /
+#: raises / returns malformed result / explicitly refuses / payload
+#: exceeds the unscannable budget). ``fail_open`` is permitted ONLY
+#: when the calling pack's ``[data_governance]`` declares a matching
+#: ``fail_open_exception`` phase + reason; the validator (T6) refuses
+#: ``fail_open`` declarations otherwise.
+HookFailPolicy = Literal[
+    "fail_closed",
+    "fail_open",
+]
+
+
+#: Mapping ``HookOrderingClass`` → set of valid ``HookPhase`` values.
+#: Validator (T6) refuses a pack manifest that pairs an
+#: ``input_*`` ordering class with ``dlp_post`` or an ``output_*``
+#: ordering class with ``dlp_pre`` — the pairing IS phase-specific
+#: and the closed-enum names are deliberately stem-prefixed
+#: (``input_*`` vs ``output_*``) so a future reviewer or author can
+#: read the phase off the class name without consulting this map.
+HOOK_ORDERING_CLASS_PHASE: Final[dict[HookOrderingClass, HookPhase]] = {
+    "input_validation": "dlp_pre",
+    "input_authorization": "dlp_pre",
+    "input_redaction": "dlp_pre",
+    "input_normalization": "dlp_pre",
+    "output_validation": "dlp_post",
+    "output_egress_check": "dlp_post",
+    "output_redaction": "dlp_post",
+    "output_masking": "dlp_post",
+}
+
+
 __all__ = [
     "DATA_CLASS_TO_MIN_RISK_TIER",
+    "HOOK_ORDERING_CLASS_PHASE",
+    "HOOK_ORDERING_RANK",
     "LOW_AUTHORITY_TIERS",
     "RESTRICTED_DATA_CLASSES",
     "RISK_TIER_ORDER",
     "DataClass",
+    "HookFailPolicy",
+    "HookOrderingClass",
+    "HookPhase",
     "Purpose",
     "RetentionPolicy",
     "RiskTier",

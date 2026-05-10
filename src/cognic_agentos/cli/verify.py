@@ -489,17 +489,17 @@ def _read_pack_kind_for_verify(
     """Read ``[pack].pack_id`` + ``[pack].kind`` from the manifest.
 
     R2 P2 #1 reviewer correction: ``[pack].kind`` MUST be a non-empty
-    string in the closed enum ``{tool, skill, agent}`` (mirrors sign-
-    side ``cli.sign._read_pack_kind_for_bundle``). Pre-fix the helper
-    coerced missing/non-string/blank kind to ``""`` and returned any
-    other string verbatim — an attacker who flipped a signed agent
+    string in the closed enum ``{tool, skill, agent, hook}`` (mirrors
+    sign-side ``cli.sign._read_pack_kind_for_bundle``). Pre-fix the
+    helper coerced missing/non-string/blank kind to ``""`` and returned
+    any other string verbatim — an attacker who flipped a signed agent
     pack's manifest from ``kind = "agent"`` to ``kind = "skill"`` (or
     ``kind = "garbage"`` / ``kind = 42``) could skip the AgentCard
     JWS arm entirely (JWS is gated on ``pack_kind == "agent"``).
     Validators do NOT reliably refuse arbitrary kind values, so the
     refusal MUST land here before any kind-gated step runs. Closed-
     enum vocabulary lives at ``cli.sign._VALID_PACK_KINDS``
-    (single-sourced).
+    (single-sourced; Sprint-7A2 T9 added "hook" as the 4th kind).
 
     On any IO / parse / shape / closed-enum failure, returns
     ``("", "", verify_attestation_path_unresolvable)``. The full

@@ -19,6 +19,10 @@ Validator contract (per ADR-017 + the plan-of-record T10 section):
     period; semantics per pack-author docs.
   - ``egress_allow_list`` (optional): list of strings; non-list
     refused as malformed.
+  - ``dlp_pre_hooks`` / ``dlp_post_hooks`` (optional, Sprint-7A2 T10
+    extension): list of snake_case hook_id strings; per-list
+    duplicates refused; cross-pack resolution remains a runtime
+    registry concern.
 
   Cross-validation:
     - Declared risk tier in :data:`LOW_AUTHORITY_TIERS` (the ADR-014
@@ -49,6 +53,10 @@ Closed-enum reasons (T10 owns):
     ``purpose_invalid`` / ``retention_policy_missing`` /
     ``retention_policy_invalid`` / ``retention_max_window_missing`` /
     ``retention_max_window_invalid`` / ``egress_allow_list_invalid_shape``).
+    Sprint-7A2 T10 adds six new failure_mode values:
+    ``dlp_pre_hooks_invalid_shape`` / ``dlp_post_hooks_invalid_shape``
+    / ``dlp_pre_hooks_invalid_hook_id`` / ``dlp_post_hooks_invalid_hook_id``
+    / ``dlp_pre_hooks_duplicate`` / ``dlp_post_hooks_duplicate``.
   - ``data_governance_contract_inconsistent_with_risk_tier``.
   - ``data_governance_contract_inconsistent_with_mcp_caching``.
 """
@@ -62,6 +70,7 @@ import pytest
 
 from cognic_agentos.cli import ValidatorFinding
 from cognic_agentos.cli.validators import data_governance
+from cognic_agentos.cli.validators import hooks as _hooks_validator
 
 
 def _manifest(
@@ -71,6 +80,8 @@ def _manifest(
     retention_policy: Any = "none",
     retention_max_window: Any = None,
     egress_allow_list: Any = None,
+    dlp_pre_hooks: Any = None,
+    dlp_post_hooks: Any = None,
     risk_tier: Any = "customer_data_read",
     mcp_caching: bool | None = None,
     drop_data_governance: bool = False,
@@ -90,6 +101,14 @@ def _manifest(
             gov["retention_max_window"] = retention_max_window
         if egress_allow_list is not None:
             gov["egress_allow_list"] = egress_allow_list
+        # Sprint-7A2 T10: dlp_*_hooks are optional shape-validated lists
+        # of snake_case hook_ids. ``None`` here means absent (validator
+        # no-ops); explicit ``[]`` means present-and-empty (also valid;
+        # tests that pin empty-list semantics pass ``[]`` directly).
+        if dlp_pre_hooks is not None:
+            gov["dlp_pre_hooks"] = dlp_pre_hooks
+        if dlp_post_hooks is not None:
+            gov["dlp_post_hooks"] = dlp_post_hooks
         # Allow tests to delete fields by passing the special sentinel.
         gov = {k: v for k, v in gov.items() if v is not _DELETE}
 
@@ -668,6 +687,357 @@ def test_data_governance_full_pass_returns_empty(tmp_path: Path) -> None:
             retention_policy="purpose_window",
             retention_max_window=90,
             egress_allow_list=["api.example.com"],
+            risk_tier="customer_data_read",
+        ),
+        tmp_path,
+    )
+    assert findings == []
+
+
+# ---------------------------------------------------------------------------
+# (k) Sprint-7A2 T10 — dlp_pre_hooks / dlp_post_hooks shape
+# ---------------------------------------------------------------------------
+#
+# Per ADR-017 + the Sprint-7A2 plan-of-record T10 paragraph:
+# shape-validate ``dlp_pre_hooks`` + ``dlp_post_hooks`` as string
+# arrays of snake_case hook_ids. Cross-pack resolution (i.e., whether
+# the named hook_id actually corresponds to a registered hook in any
+# verified hook pack) remains a runtime registry concern — build-time
+# validator only checks shape + identifier syntax + per-list
+# uniqueness.
+#
+# Six new ``payload.failure_mode`` values land under the existing
+# ``data_governance_contract_missing`` closed-enum reason (no new
+# ValidatorReason member; consistent with the 10-failure-mode pattern
+# the validator already uses for data_classes / purpose / retention /
+# egress_allow_list field-shape failures).
+
+
+def test_dlp_hook_ref_pattern_mirrors_hook_id_pattern_drift_guard() -> None:
+    """**Lock-B drift guard.** ``data_governance._HOOK_REF_PATTERN`` is
+    a documented mirror of ``validators/hooks.py:_HOOK_ID_PATTERN``;
+    the per-id parametrized tests above only sample a handful of bad
+    inputs, so if the hooks-validator regex later changes intentionally
+    (e.g., to allow leading underscores, or to require a length cap),
+    this mirror could silently diverge and pack authors would see
+    contradictory refusals across the two validators (T6 hooks-side
+    accepts an id that T10 dlp-reference-side refuses, or vice versa).
+
+    Pin the mirror invariant directly: both ``re.Pattern.pattern``
+    strings AND both ``re.Pattern.flags`` integers MUST match. If
+    either side genuinely needs to change, this test forces the same
+    commit to update both — at which point the maintainer either
+    re-syncs the mirror or consciously breaks the invariant after
+    re-evaluating the cross-validator-consistency contract.
+
+    Sister-doctrine to the AST self-test pattern from T7's
+    payload-never-logged regression (per
+    ``feedback_security_regression_hardening.md``): load-bearing
+    invariants get explicit pins, not just docstrings.
+    """
+    assert data_governance._HOOK_REF_PATTERN.pattern == _hooks_validator._HOOK_ID_PATTERN.pattern, (
+        "data_governance._HOOK_REF_PATTERN diverged from "
+        "validators/hooks.py:_HOOK_ID_PATTERN. The mirror is "
+        "load-bearing for cross-validator consistency on hook_id "
+        "syntax; either re-sync, or update both sites + this test "
+        "consciously after re-evaluating the contract."
+    )
+    assert data_governance._HOOK_REF_PATTERN.flags == _hooks_validator._HOOK_ID_PATTERN.flags, (
+        "data_governance._HOOK_REF_PATTERN re flags drifted from "
+        "validators/hooks.py:_HOOK_ID_PATTERN flags."
+    )
+
+
+def test_dlp_pre_hooks_absent_no_finding(tmp_path: Path) -> None:
+    """``dlp_pre_hooks`` is OPTIONAL — absence produces no finding."""
+    findings = data_governance.validate(_manifest(), tmp_path)
+    assert not any(f.payload.get("failure_mode", "").startswith("dlp_pre_hooks_") for f in findings)
+
+
+def test_dlp_post_hooks_absent_no_finding(tmp_path: Path) -> None:
+    """``dlp_post_hooks`` is OPTIONAL — absence produces no finding."""
+    findings = data_governance.validate(_manifest(), tmp_path)
+    assert not any(
+        f.payload.get("failure_mode", "").startswith("dlp_post_hooks_") for f in findings
+    )
+
+
+def test_dlp_pre_hooks_empty_list_no_finding(tmp_path: Path) -> None:
+    """Explicit empty list (``dlp_pre_hooks = []``) is valid — pack
+    declares zero pre-hooks. No finding."""
+    findings = data_governance.validate(_manifest(dlp_pre_hooks=[]), tmp_path)
+    assert not any(f.payload.get("failure_mode", "").startswith("dlp_pre_hooks_") for f in findings)
+
+
+def test_dlp_post_hooks_empty_list_no_finding(tmp_path: Path) -> None:
+    findings = data_governance.validate(_manifest(dlp_post_hooks=[]), tmp_path)
+    assert not any(
+        f.payload.get("failure_mode", "").startswith("dlp_post_hooks_") for f in findings
+    )
+
+
+@pytest.mark.parametrize(
+    "bad_value",
+    [
+        "redact_pii_in_input",  # bare string, not a list
+        42,  # number
+        {"redact": True},  # dict
+        ("redact_pii",),  # tuple — TOML produces list, not tuple
+    ],
+)
+def test_dlp_pre_hooks_non_list_refused(tmp_path: Path, bad_value: Any) -> None:
+    """``dlp_pre_hooks`` must be a list (TOML array). Any non-list
+    shape trips ``dlp_pre_hooks_invalid_shape``."""
+    findings = data_governance.validate(_manifest(dlp_pre_hooks=bad_value), tmp_path)
+    matching = [
+        f
+        for f in findings
+        if f.reason == "data_governance_contract_missing"
+        and f.payload.get("failure_mode") == "dlp_pre_hooks_invalid_shape"
+    ]
+    assert len(matching) == 1, (
+        f"expected dlp_pre_hooks_invalid_shape for {bad_value!r}; "
+        f"got {[(f.reason, f.payload) for f in findings]!r}"
+    )
+
+
+@pytest.mark.parametrize(
+    "bad_value",
+    [
+        "mask_account_numbers",
+        42,
+        {"mask": True},
+        ("mask_account",),
+    ],
+)
+def test_dlp_post_hooks_non_list_refused(tmp_path: Path, bad_value: Any) -> None:
+    findings = data_governance.validate(_manifest(dlp_post_hooks=bad_value), tmp_path)
+    matching = [
+        f
+        for f in findings
+        if f.reason == "data_governance_contract_missing"
+        and f.payload.get("failure_mode") == "dlp_post_hooks_invalid_shape"
+    ]
+    assert len(matching) == 1
+
+
+def test_dlp_pre_hooks_non_string_entry_refused(tmp_path: Path) -> None:
+    """A list with a non-string entry (``[\"redact_pii\", 42]``) is
+    structurally malformed → ``dlp_pre_hooks_invalid_shape``."""
+    findings = data_governance.validate(_manifest(dlp_pre_hooks=["redact_pii", 42]), tmp_path)
+    matching = [
+        f for f in findings if f.payload.get("failure_mode") == "dlp_pre_hooks_invalid_shape"
+    ]
+    assert len(matching) == 1
+
+
+def test_dlp_post_hooks_non_string_entry_refused(tmp_path: Path) -> None:
+    findings = data_governance.validate(_manifest(dlp_post_hooks=["mask_accounts", None]), tmp_path)
+    matching = [
+        f for f in findings if f.payload.get("failure_mode") == "dlp_post_hooks_invalid_shape"
+    ]
+    assert len(matching) == 1
+
+
+@pytest.mark.parametrize(
+    "bad_id",
+    [
+        "Bad-Name",  # hyphen + uppercase
+        "redact pii",  # space
+        "1leading_digit",  # starts with digit
+        "UPPER_CASE",  # uppercase
+        "",  # empty
+        "_leading_underscore",  # T6's _HOOK_ID_PATTERN starts with [a-z]
+        "trailing-",  # hyphen
+        "with.dot",  # dot
+    ],
+)
+def test_dlp_pre_hooks_invalid_hook_id_refused(tmp_path: Path, bad_id: str) -> None:
+    """Each entry MUST match the snake_case identifier pattern
+    (``^[a-z][a-z0-9_]*$``). Any miss trips
+    ``dlp_pre_hooks_invalid_hook_id``. Mirrors the same pattern at
+    ``cli/validators/hooks.py:_HOOK_ID_PATTERN`` (T6); the regex is
+    duplicated as a documented mirror."""
+    findings = data_governance.validate(_manifest(dlp_pre_hooks=[bad_id]), tmp_path)
+    matching = [
+        f
+        for f in findings
+        if f.reason == "data_governance_contract_missing"
+        and f.payload.get("failure_mode") == "dlp_pre_hooks_invalid_hook_id"
+    ]
+    assert matching, (
+        f"expected dlp_pre_hooks_invalid_hook_id for {bad_id!r}; "
+        f"got {[(f.reason, f.payload) for f in findings]!r}"
+    )
+    assert matching[0].payload.get("invalid_value") == bad_id
+
+
+@pytest.mark.parametrize(
+    "bad_id",
+    [
+        "Bad-Name",
+        "redact pii",
+        "1leading_digit",
+        "UPPER_CASE",
+        "",
+        "_leading_underscore",
+        "trailing-",
+        "with.dot",
+    ],
+)
+def test_dlp_post_hooks_invalid_hook_id_refused(tmp_path: Path, bad_id: str) -> None:
+    findings = data_governance.validate(_manifest(dlp_post_hooks=[bad_id]), tmp_path)
+    matching = [
+        f for f in findings if f.payload.get("failure_mode") == "dlp_post_hooks_invalid_hook_id"
+    ]
+    assert matching
+
+
+def test_dlp_pre_hooks_duplicate_refused(tmp_path: Path) -> None:
+    """Per the lock: REFUSE duplicates at build time. Tightens manifest
+    canonicalization; surfaces author error loudly. Doesn't compete with
+    T8 dispatcher's runtime dedupe (runtime stays defensive, build-time
+    stays canonical)."""
+    findings = data_governance.validate(
+        _manifest(dlp_pre_hooks=["redact_pii", "redact_pii"]), tmp_path
+    )
+    matching = [
+        f
+        for f in findings
+        if f.reason == "data_governance_contract_missing"
+        and f.payload.get("failure_mode") == "dlp_pre_hooks_duplicate"
+    ]
+    assert len(matching) == 1
+    assert matching[0].payload.get("duplicate_hook_id") == "redact_pii"
+
+
+def test_dlp_post_hooks_duplicate_refused(tmp_path: Path) -> None:
+    findings = data_governance.validate(
+        _manifest(dlp_post_hooks=["mask_accounts", "mask_accounts", "redact_post"]),
+        tmp_path,
+    )
+    matching = [f for f in findings if f.payload.get("failure_mode") == "dlp_post_hooks_duplicate"]
+    assert len(matching) == 1
+    assert matching[0].payload.get("duplicate_hook_id") == "mask_accounts"
+
+
+def test_dlp_pre_and_post_hooks_can_share_id(tmp_path: Path) -> None:
+    """Per-list uniqueness is the only check. The same hook_id appearing
+    in BOTH ``dlp_pre_hooks`` and ``dlp_post_hooks`` is allowed — a
+    single Hook implementation can register for both phases via
+    separate declarations. T10 does NOT cross-check the two lists."""
+    findings = data_governance.validate(
+        _manifest(
+            dlp_pre_hooks=["redact_pii"],
+            dlp_post_hooks=["redact_pii"],
+        ),
+        tmp_path,
+    )
+    assert not any(
+        f.payload.get("failure_mode", "").startswith("dlp_pre_hooks_")
+        or f.payload.get("failure_mode", "").startswith("dlp_post_hooks_")
+        for f in findings
+    )
+
+
+def test_dlp_pre_hooks_valid_passes(tmp_path: Path) -> None:
+    """Snake_case entries, no duplicates → no finding."""
+    findings = data_governance.validate(
+        _manifest(dlp_pre_hooks=["redact_pii_in_input", "scrub_secrets"]), tmp_path
+    )
+    assert not any(f.payload.get("failure_mode", "").startswith("dlp_pre_hooks_") for f in findings)
+
+
+def test_dlp_post_hooks_valid_passes(tmp_path: Path) -> None:
+    findings = data_governance.validate(
+        _manifest(dlp_post_hooks=["mask_account_numbers", "redact_response"]), tmp_path
+    )
+    assert not any(
+        f.payload.get("failure_mode", "").startswith("dlp_post_hooks_") for f in findings
+    )
+
+
+def test_dlp_hooks_legacy_path_validated(tmp_path: Path) -> None:
+    """Manifests using the legacy ``[tool.cognic.data_governance]``
+    layout get the same shape validation. Mirrors the existing legacy
+    path test at section (i)."""
+    manifest = {
+        "pack": {"pack_id": "x", "kind": "tool"},
+        "tool": {
+            "cognic": {
+                "data_governance": {
+                    "data_classes": ["public"],
+                    "purpose": "transaction_processing",
+                    "retention_policy": "none",
+                    "dlp_pre_hooks": ["Bad-Name"],
+                }
+            }
+        },
+    }
+    findings = data_governance.validate(manifest, tmp_path)
+    matching = [
+        f
+        for f in findings
+        if f.payload.get("failure_mode") == "dlp_pre_hooks_invalid_hook_id"
+        and f.payload.get("block_path") == "tool.cognic.data_governance"
+    ]
+    assert len(matching) == 1, (
+        f"expected legacy-path dlp_pre_hooks_invalid_hook_id; "
+        f"got {[(f.reason, f.payload) for f in findings]!r}"
+    )
+
+
+def test_dlp_hooks_each_block_validated_independently(tmp_path: Path) -> None:
+    """When BOTH the canonical and the legacy data_governance blocks
+    declare ``dlp_pre_hooks`` with different problems, EACH block fires
+    its own refusal. Mirrors the section (j) "each path validated
+    independently" pattern (R27 P2 #2 union doctrine inherited from
+    Sprint-7A T10)."""
+    manifest = {
+        "pack": {"pack_id": "x", "kind": "tool"},
+        "data_governance": {
+            "data_classes": ["public"],
+            "purpose": "transaction_processing",
+            "retention_policy": "none",
+            "dlp_pre_hooks": ["good_id", "good_id"],  # duplicate
+        },
+        "tool": {
+            "cognic": {
+                "data_governance": {
+                    "data_classes": ["public"],
+                    "purpose": "transaction_processing",
+                    "retention_policy": "none",
+                    "dlp_pre_hooks": ["Bad-Name"],  # invalid syntax
+                }
+            }
+        },
+    }
+    findings = data_governance.validate(manifest, tmp_path)
+    block_paths_with_dup = {
+        f.payload["block_path"]
+        for f in findings
+        if f.payload.get("failure_mode") == "dlp_pre_hooks_duplicate"
+    }
+    block_paths_with_syntax = {
+        f.payload["block_path"]
+        for f in findings
+        if f.payload.get("failure_mode") == "dlp_pre_hooks_invalid_hook_id"
+    }
+    assert "data_governance" in block_paths_with_dup
+    assert "tool.cognic.data_governance" in block_paths_with_syntax
+
+
+def test_dlp_hooks_full_happy_path(tmp_path: Path) -> None:
+    """Every field populated including dlp_*_hooks → empty findings."""
+    findings = data_governance.validate(
+        _manifest(
+            data_classes=["public", "internal"],
+            purpose="transaction_processing",
+            retention_policy="purpose_window",
+            retention_max_window=90,
+            egress_allow_list=["api.example.com"],
+            dlp_pre_hooks=["redact_pii_in_input", "validate_input_shape"],
+            dlp_post_hooks=["mask_account_numbers", "egress_check"],
             risk_tier="customer_data_read",
         ),
         tmp_path,

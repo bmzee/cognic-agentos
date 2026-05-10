@@ -7,7 +7,7 @@ shape of a name in this surface halts before commit per Doctrine
 Decision E (broader than the critical-controls gate; SDK shape is a
 public contract, not just a security gate).
 
-Wave-1 surface (T2):
+Wave-1 surface (Sprint-7A T2):
 
   - ``Tool`` / ``ToolError`` / ``ToolInputSchemaError`` /
     ``ToolOutputSchemaError`` / ``ToolSchemaDeclarationError`` —
@@ -22,13 +22,36 @@ Wave-1 surface (T2):
   - ``ToolRegistry`` — PEP 544 Protocol both runtime + fixture
     registries conform to structurally.
 
+Wave-1 surface (Sprint-7A2 T2):
+
+  - ``Hook`` / ``HookContext`` / ``HookResult`` / ``HookDecision`` —
+    base class + value types for governance hook implementations
+    registered under the ``cognic.hooks`` entry-point group.
+  - ``HookError`` / ``HookContractError`` / ``HookContextError`` /
+    ``HookPayloadError`` / ``HookResultShapeError`` — closed-enum
+    exception hierarchy for hook contract violations; the runtime
+    hook dispatcher catches the top-level ``HookError`` as a single
+    refusal-surface catch.
+
 Testing helpers (``agentos_sdk.testing``) and ISO-42001 compliance
-helpers (``agentos_sdk.compliance``) ship in T3 of the same sprint.
+helpers (``agentos_sdk.compliance``) ship in T3 of the Sprint-7A
+arc.
 """
 
 from __future__ import annotations
 
 from cognic_agentos.sdk.agent import Agent
+from cognic_agentos.sdk.hook import (
+    Hook,
+    HookContext,
+    HookContextError,
+    HookContractError,
+    HookDecision,
+    HookError,
+    HookPayloadError,
+    HookResult,
+    HookResultShapeError,
+)
 from cognic_agentos.sdk.registry import ToolRegistry
 from cognic_agentos.sdk.skill import Skill, SkillError, SkillUnregisteredToolError
 from cognic_agentos.sdk.tool import (
@@ -41,6 +64,15 @@ from cognic_agentos.sdk.tool import (
 
 __all__ = [
     "Agent",
+    "Hook",
+    "HookContext",
+    "HookContextError",
+    "HookContractError",
+    "HookDecision",
+    "HookError",
+    "HookPayloadError",
+    "HookResult",
+    "HookResultShapeError",
     "Skill",
     "SkillError",
     "SkillUnregisteredToolError",

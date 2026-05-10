@@ -1,0 +1,37 @@
+[project]
+name = "{{ pack_id }}"
+version = "0.1.0"
+description = "AUTHOR-FILL: short description of what this {{ kind }} pack does."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "AUTHOR-FILL: e.g., Proprietary or Apache-2.0" }
+authors = [
+    { name = "AUTHOR-FILL: your name", email = "AUTHOR-FILL: you@example.com" },
+]
+
+dependencies = [
+    "cognic-agentos",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=1",
+]
+
+# Sprint-7A2 hook-pack entry-point group. ONE entry per hook_id
+# declared in cognic-pack-manifest.toml's [hooks].declarations block;
+# the Sprint-7A2 T6 validator cross-checks both directions.
+[project.entry-points."{{ entry_point_group }}"]
+{{ pack_name }} = "{{ module_name }}.{{ kind }}:{{ class_name }}"
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/{{ module_name }}"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

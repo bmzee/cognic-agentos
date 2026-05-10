@@ -112,6 +112,23 @@ ValidatorReason = Literal[
     # top-level reason owns every load-probe refusal so admission can
     # distinguish loadability from declarative shape failures.
     "verify_entry_point_load_failed",
+    # Hook-pack manifest validation (Sprint-7A2 T6 — the cli/validators/
+    # hooks.py module added at T6 emits these). Each closed-enum reason
+    # owns a distinct refusal site; ``payload.failure_mode`` distinguishes
+    # within-reason sub-cases (e.g., ``hook_block_shape_invalid`` carries
+    # ``failure_mode=missing_block`` / ``empty_declarations`` /
+    # ``missing_required_field`` / ``unknown_field``). The seed list at
+    # plan-of-record T1 is 9 reasons; if T6 review surfaces additional
+    # refusal paths the literal grows in the same commit that adds them.
+    "hook_block_shape_invalid",
+    "hook_id_invalid",
+    "hook_phase_invalid",
+    "hook_ordering_class_invalid",
+    "hook_timeout_invalid",
+    "hook_fail_policy_invalid",
+    "hook_pack_kind_constraint_violated",
+    "hook_entry_point_mismatch",
+    "hook_unresolved_reference",
 ]
 
 
@@ -180,6 +197,26 @@ _VALIDATOR_REASON_OWNERSHIP: Final[dict[ValidatorReason, str]] = {
     "verify_attestation_path_unresolvable": "verify.py",
     "verify_agent_card_jws_invalid": "verify.py",
     "verify_trust_root_path_unresolvable": "verify.py",
+    # Hooks (Sprint-7A2 T4 + T6).
+    # ``hook_pack_kind_constraint_violated`` is owned by ``validate.py``
+    # because the orchestrator-level forbidden-block check (Sprint-7A2
+    # T4: refuse ``[a2a]`` / ``[mcp]`` for ``kind="hook"``) emits it
+    # BEFORE per-concern dispatch — keeps the 1:1 ownership map
+    # invariant (one reason → one owning file) without forcing
+    # validators/hooks.py to import the orchestrator's check or
+    # forcing the orchestrator to defer the refusal to a per-concern
+    # validator that hasn't run yet. T6's ``validators/hooks.py``
+    # uses the other 8 hook_* reasons for in-block + cross-reference
+    # checks.
+    "hook_block_shape_invalid": "validators/hooks.py",
+    "hook_id_invalid": "validators/hooks.py",
+    "hook_phase_invalid": "validators/hooks.py",
+    "hook_ordering_class_invalid": "validators/hooks.py",
+    "hook_timeout_invalid": "validators/hooks.py",
+    "hook_fail_policy_invalid": "validators/hooks.py",
+    "hook_pack_kind_constraint_violated": "validate.py",
+    "hook_entry_point_mismatch": "validators/hooks.py",
+    "hook_unresolved_reference": "validators/hooks.py",
     "verify_entry_point_load_failed": "verify.py",
 }
 
@@ -375,6 +412,30 @@ def init_agent(
     capabilities.
     """
     _run_init("agent", pack_name)
+
+
+@app.command(name="init-hook")
+def init_hook(
+    pack_name: str = typer.Argument(
+        ...,
+        help=(
+            "Name of the new hook pack. Produces ``cognic-hook-<name>/`` "
+            "in the current working directory."
+        ),
+    ),
+) -> None:
+    """Scaffold a new hook pack repo from the bundled templates.
+
+    Sprint-7A2 T3. Hook packs are deterministic governance extensions
+    (NOT Layer C agent behavior) registered under the
+    ``cognic.hooks`` entry-point group. The generated tree includes
+    a ``Hook`` subclass overriding ``_invoke(context, payload)``, a
+    ``cognic-pack-manifest.toml`` carrying the new ``[hooks]`` block
+    declaring per-hook IDs + phases + ordering classes + timeouts +
+    fail-policy, and (unlike agent packs) NO ``agent_cards/``
+    directory because hook packs do NOT ship an AgentCard JWS.
+    """
+    _run_init("hook", pack_name)
 
 
 @app.command()

@@ -119,6 +119,45 @@ taxonomy + emit-hook layer per ADR-020 — public event schema, MUST
 remain backward-compatible across versions). All seven ride the
 same strict 95% line / 90% branch floor; gate size grows from 21
 modules to 28.
+
+Sprint 7A2 T12 extends the gate with the **hook-pack runtime + author
+quartet** — four modules that together form the runtime + build-time
+trust path for ADR-017 hook packs (the 4th first-class pack kind
+alongside tool / skill / agent):
+
+  * ``packs/hooks/registry.py`` — admission gate; fail-closed on
+    duplicate-ID / stale-digest / cross-pack-conflict; per-pack
+    selector tracking. Sprint-7A2 T6.
+  * ``packs/hooks/dispatcher.py`` — runtime decision engine; closed-
+    enum ``HookDecision`` (pass / redact / mask / refuse); per-pack
+    selector semantics + budget-before-lookup precedence; payload-
+    never-logged AST regression at
+    ``tests/architecture/test_hook_payload_never_logged.py``. Sprint-7A2 T7.
+  * ``packs/hooks/dlp_integration.py`` — DLPGuard adapter wrapping
+    ``dispatch_for_pack`` with ``dlp_pre`` / ``dlp_post`` phase
+    semantics. Closed-enum 3-value ``DLPRefusalReason``
+    (``dlp_hook_id_unresolved`` / ``dlp_dispatcher_failed`` /
+    ``dlp_dispatcher_refused``); ADR-017 line 97 enforcement
+    boundary. T8 commit explicitly tagged ``(CRITICAL CONTROLS)``;
+    the refusal-payload-contract-divergence and delegate-first-
+    preserves-precedence doctrine memories were both born from T8
+    R1 P2 fixes on this module. T12 reconcile decision lifted
+    ``dlp_integration.py`` from off-list (provisional Doctrine Lock F
+    written before T7+T8 landed) to on-gate; promoted under
+    Doctrine Decision G's "non-trivial allow/deny logic" rule (the
+    same rule that promoted ``cli/validators/a2a.py`` at Sprint-7A
+    T16). Sprint-7A2 T8.
+  * ``cli/validators/hooks.py`` — manifest validator + cross-
+    reference resolver against ADR-017 declarations. Sprint-7A2 T5.
+
+``sdk/hook.py`` stays off the gate per Doctrine E (public-API
+stability halt-before-commit covers it; coverage-gate would be
+cargo-cult). Existing critical-controls modules touched by this
+sprint (``cli/validate.py``, ``cli/sign.py``, ``cli/verify.py``,
+``cli/_wheel_integrity.py``, ``cli/validators/data_governance.py``)
+carry forward their existing pinning. All four hook modules ride
+the same single strict 95% line / 90% branch floor; gate size grows
+from 37 modules to 41.
 """
 
 from __future__ import annotations
@@ -327,6 +366,15 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     ("src/cognic_agentos/cli/verify.py", 0.95, 0.90),
     ("src/cognic_agentos/cli/_load_probe.py", 0.95, 0.90),
     ("src/cognic_agentos/cli/_wheel_integrity.py", 0.95, 0.90),
+    # Sprint 7A2 T12 — hook-pack runtime + author quartet. ADR-017
+    # 4th-pack-kind enforcement path; see module docstring for per-
+    # module rationale + the T12 reconcile decision that lifted
+    # dlp_integration.py from off-list to on-gate. All four ride the
+    # same single strict 95% line / 90% branch floor.
+    ("src/cognic_agentos/packs/hooks/registry.py", 0.95, 0.90),
+    ("src/cognic_agentos/packs/hooks/dispatcher.py", 0.95, 0.90),
+    ("src/cognic_agentos/packs/hooks/dlp_integration.py", 0.95, 0.90),
+    ("src/cognic_agentos/cli/validators/hooks.py", 0.95, 0.90),
 )
 
 

@@ -184,9 +184,17 @@ _AGENTOS_INTOTO_LAYOUT_TYPE: Final[str] = "in-toto-layout/v1-wave1-simplified"
 #: ``_read_pack_kind_for_bundle`` rejects manifests whose
 #: ``[pack].kind`` is missing / non-string / not in this set.
 #: Mirrors the SDK + CLI scaffold types (init-tool / init-skill /
-#: init-agent + the test-harness's ``_HARNESS_SUPPORTED_KINDS``
+#: init-agent / init-hook + the test-harness's ``_HARNESS_SUPPORTED_KINDS``
 #: subset).
-_VALID_PACK_KINDS: Final[frozenset[str]] = frozenset({"tool", "skill", "agent"})
+#:
+#: Sprint-7A2 T9 amendment: ``"hook"`` joins as the 4th first-class
+#: pack kind. Hook packs ship the same attestation set as tool +
+#: skill packs (no AgentCard JWS); the existing ``pack_kind ==
+#: "agent"`` JWS gate handles this without branching. Wheel-integrity
+#: kind-derivation (cli/_wheel_integrity.py) is the matching
+#: producer-side extension; verify.py imports this same frozenset
+#: so the verifier accepts hook packs identically.
+_VALID_PACK_KINDS: Final[frozenset[str]] = frozenset({"tool", "skill", "agent", "hook"})
 
 
 # ---------------------------------------------------------------------------
@@ -1112,7 +1120,7 @@ def _read_pack_kind_for_bundle(
                 reason="sign_subprocess_failed",
                 message=(
                     f"sign --bundle: manifest at {manifest_path} is missing "
-                    "[pack].kind. Expected one of {tool, skill, agent}."
+                    "[pack].kind. Expected one of {tool, skill, agent, hook}."
                 ),
                 payload={
                     "pack_path": str(pack_path),
@@ -1131,7 +1139,7 @@ def _read_pack_kind_for_bundle(
                 message=(
                     f"sign --bundle: manifest at {manifest_path} declares "
                     f"[pack].kind of type {type(raw_kind).__name__!r}; "
-                    "expected a string from {tool, skill, agent}."
+                    "expected a string from {tool, skill, agent, hook}."
                 ),
                 payload={
                     "pack_path": str(pack_path),

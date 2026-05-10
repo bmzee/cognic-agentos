@@ -51,11 +51,13 @@ from __future__ import annotations
 import json
 import tomllib
 from pathlib import Path
+from typing import Final
 
 from cognic_agentos.cli import ValidatorFinding
 from cognic_agentos.cli.validators import (
     a2a,
     data_governance,
+    hooks,
     identity,
     mcp,
     risk_tier,
@@ -83,6 +85,86 @@ _REQUIRED_TOP_LEVEL_BLOCKS: tuple[str, ...] = (
     "risk_tier",
     "supply_chain",
 )
+
+
+#: Sprint-7A2 T4 — pack-kind-specific forbidden top-level blocks.
+#:
+#: Per the plan-of-record Doctrine Lock A: hook packs are NOT
+#: A2A-speaking and NOT MCP-tool-shaped, so declaring ``[a2a]`` or
+#: ``[mcp]`` on a ``kind="hook"`` manifest is a packaging error the
+#: orchestrator refuses BEFORE the per-concern validators run (the
+#: a2a / mcp validators would otherwise emit unrelated refusals
+#: against fields hook packs aren't expected to populate). Closed
+#: enum: every entry routes through ``hook_pack_kind_constraint_violated``
+#: with ``payload.failure_mode`` distinguishing the offending block.
+#:
+#: The check covers BOTH the canonical top-level shape AND the
+#: legacy ``[tool.cognic.<block>]`` shape per R23 dual-path doctrine
+#: — a future maintainer cannot smuggle Wave-2 features into a hook
+#: pack via either path.
+_FORBIDDEN_BLOCKS_BY_KIND: Final[dict[str, frozenset[str]]] = {
+    "hook": frozenset({"a2a", "mcp"}),
+}
+
+
+def _check_pack_kind_constraints(
+    data: dict[str, object],
+    manifest_path: Path,
+) -> list[ValidatorFinding]:
+    """Sprint-7A2 T4 — refuse pack-kind-incompatible top-level blocks.
+
+    Wave-1 narrow: only ``kind="hook"`` packs have forbidden blocks
+    (``[a2a]`` + ``[mcp]``). The check fires AFTER the shape gate
+    (so a malformed [pack] block short-circuits earlier) but BEFORE
+    per-concern dispatch (so unrelated validators don't emit noisy
+    refusals against fields the hook pack isn't expected to populate).
+
+    Each forbidden block emits one finding with the closed-enum
+    reason ``hook_pack_kind_constraint_violated`` + a distinguishing
+    ``payload.failure_mode``. The check is idempotent — declaring
+    BOTH ``[a2a]`` AND ``[mcp]`` on a hook pack produces two
+    findings (one per offending block).
+    """
+    findings: list[ValidatorFinding] = []
+    pack_block = data.get("pack")
+    if not isinstance(pack_block, dict):
+        return findings  # shape gate already emitted; defer
+    pack_kind = pack_block.get("kind")
+    if not isinstance(pack_kind, str) or pack_kind not in _FORBIDDEN_BLOCKS_BY_KIND:
+        return findings
+    forbidden = _FORBIDDEN_BLOCKS_BY_KIND[pack_kind]
+    for block in sorted(forbidden):
+        # Refuse top-level shape OR legacy ``[tool.cognic.<block>]``.
+        # The legacy path mirrors the per-concern validators' R23
+        # dual-path-read; without checking both, an author could
+        # smuggle the forbidden block via the legacy form.
+        present_top = block in data
+        present_legacy = _resolves_in_legacy_path(data, block)
+        if not (present_top or present_legacy):
+            continue
+        block_path = block if present_top else f"tool.cognic.{block}"
+        findings.append(
+            ValidatorFinding(
+                severity="refusal",
+                reason="hook_pack_kind_constraint_violated",
+                message=(
+                    f"manifest at {manifest_path} declares "
+                    f"[{block_path}] but pack kind is {pack_kind!r}; "
+                    f"hook packs are not "
+                    f"{'A2A-speaking' if block == 'a2a' else 'MCP-tool-shaped'} "
+                    f"and MUST NOT declare this block. Remove the "
+                    f"[{block_path}] declaration from the manifest."
+                ),
+                payload={
+                    "manifest_path": str(manifest_path),
+                    "pack_kind": pack_kind,
+                    "block": block,
+                    "block_path": block_path,
+                    "failure_mode": f"{block}_block_forbidden",
+                },
+            )
+        )
+    return findings
 
 
 def _resolves_in_legacy_path(data: dict[str, object], block_name: str) -> bool:
@@ -318,16 +400,34 @@ def run_validators(pack_path: Path) -> list[ValidatorFinding]:
     if shape_findings:
         return shape_findings
 
+    # Sprint-7A2 T4: pack-kind-specific forbidden-block check.
+    # Refuses [a2a] / [mcp] declarations on ``kind="hook"`` packs
+    # BEFORE the per-concern dispatch so the a2a / mcp validators
+    # don't fire noisy refusals against blocks the hook pack
+    # shouldn't populate. The check returns its findings but does
+    # NOT short-circuit per-concern dispatch — pack authors get the
+    # full picture in a single validate run (forbidden-block
+    # refusals + any other manifest issues).
+    kind_findings = _check_pack_kind_constraints(data, manifest_path)
+
     # Dispatch to every per-concern validator. Order matches the
     # closed-enum reason-ownership mapping in cognic_agentos.cli;
     # pack-author docs + CI parsers may depend on positional output.
     findings: list[ValidatorFinding] = []
+    findings.extend(kind_findings)
     findings.extend(identity.validate(data, pack_path))
     findings.extend(a2a.validate(data, pack_path))
     findings.extend(mcp.validate(data, pack_path))
     findings.extend(data_governance.validate(data, pack_path))
     findings.extend(risk_tier.validate(data, pack_path))
     findings.extend(supply_chain.validate(data, pack_path))
+    # Sprint-7A2 T5 — hook-block validator. Fires for every pack
+    # (Wave-1 narrow: hook packs MUST declare [hooks]; non-hook
+    # packs skipping a [hooks] block is silently allowed). Comes
+    # last in the dispatch order so per-concern refusals from the
+    # earlier validators (identity / data_governance / etc.) appear
+    # first when CI parsers walk the findings list.
+    findings.extend(hooks.validate(data, pack_path))
     return findings
 
 

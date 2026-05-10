@@ -935,6 +935,11 @@ _ORCHESTRATOR_EMITTED_REASONS: tuple[str, ...] = (
     "manifest_unparseable_toml",
     "manifest_missing_pack_id",
     "manifest_missing_required_block",
+    # Sprint-7A2 T4 — orchestrator-level forbidden-block check for
+    # kind="hook" packs. Emitted from validate.py BEFORE per-concern
+    # dispatch (so a2a/mcp validators don't fire noisy refusals
+    # against blocks the hook pack shouldn't populate).
+    "hook_pack_kind_constraint_violated",
 )
 
 
@@ -966,3 +971,238 @@ def test_orchestrator_emitted_reasons_are_owned_by_validate_py() -> None:
             f"orchestrator-emitted reason {reason!r} is owned by "
             f"{_VALIDATOR_REASON_OWNERSHIP[typed_reason]!r}, not validate.py"
         )
+
+
+# ---------------------------------------------------------------------------
+# Sprint-7A2 T4 — pack-kind-constraint check for hook packs
+# ---------------------------------------------------------------------------
+
+
+_HOOK_MANIFEST_WITHOUT_FORBIDDEN_BLOCKS: str = """\
+[pack]
+pack_id = "cognic-hook-test"
+kind = "hook"
+
+[identity]
+agent_id = "did:web:example.com:hooks:test"
+display_name = "Test Hook"
+provider_organization = "Example Org"
+provider_url = "https://example.com"
+oasf_capability_set = ["test.v1"]
+
+[data_governance]
+data_classes = ["public"]
+purpose = "operational_telemetry"
+retention_policy = "none"
+
+[risk_tier]
+tier = "read_only"
+
+[supply_chain]
+attestation_paths = ["attestations/cosign.sig"]
+"""
+
+
+def _write_hook_pack_with_block(pack_path: Path, *, extra_block: str) -> Path:
+    """Write a kind="hook" manifest plus an extra forbidden block (e.g.,
+    ``[a2a]`` or ``[mcp]``). Returns the manifest path."""
+    body = _HOOK_MANIFEST_WITHOUT_FORBIDDEN_BLOCKS + extra_block
+    manifest_path = _write_manifest(pack_path, body)
+    attestation = pack_path / "attestations" / "cosign.sig"
+    attestation.parent.mkdir(parents=True, exist_ok=True)
+    attestation.write_bytes(b".")
+    return manifest_path
+
+
+def test_orchestrator_refuses_a2a_block_on_hook_pack(tmp_path: Path) -> None:
+    """Sprint-7A2 T4: a ``kind="hook"`` pack declaring an ``[a2a]``
+    block trips the orchestrator's forbidden-block refusal with
+    ``payload.failure_mode="a2a_block_forbidden"``. Refusal is emitted
+    BEFORE the a2a validator runs so the per-concern validator doesn't
+    fire noisy refusals against a Wave-2 feature it expects to see in
+    agent packs."""
+    from cognic_agentos.cli.validate import run_validators
+
+    extra = "\n[a2a]\nstreaming = true\n"
+    _write_hook_pack_with_block(tmp_path, extra_block=extra)
+    findings = run_validators(tmp_path)
+
+    # Filter to the orchestrator's hook-kind-constraint refusal —
+    # other findings (e.g., a2a validator's own emissions) may
+    # follow but the orchestrator's refusal MUST be present.
+    hook_refusals = [f for f in findings if f.reason == "hook_pack_kind_constraint_violated"]
+    assert len(hook_refusals) == 1, (
+        f"expected exactly one hook_pack_kind_constraint_violated; "
+        f"got {[f.reason for f in findings]}"
+    )
+    refusal = hook_refusals[0]
+    assert refusal.severity == "refusal"
+    assert refusal.payload["pack_kind"] == "hook"
+    assert refusal.payload["block"] == "a2a"
+    assert refusal.payload["block_path"] == "a2a"
+    assert refusal.payload["failure_mode"] == "a2a_block_forbidden"
+
+
+def test_orchestrator_refuses_mcp_block_on_hook_pack(tmp_path: Path) -> None:
+    """Same as the [a2a] arm above for [mcp]; closed-enum
+    ``failure_mode="mcp_block_forbidden"``."""
+    from cognic_agentos.cli.validate import run_validators
+
+    extra = "\n[mcp]\ncaching = true\n"
+    _write_hook_pack_with_block(tmp_path, extra_block=extra)
+    findings = run_validators(tmp_path)
+
+    hook_refusals = [f for f in findings if f.reason == "hook_pack_kind_constraint_violated"]
+    assert len(hook_refusals) == 1
+    refusal = hook_refusals[0]
+    assert refusal.payload["pack_kind"] == "hook"
+    assert refusal.payload["block"] == "mcp"
+    assert refusal.payload["failure_mode"] == "mcp_block_forbidden"
+
+
+def test_orchestrator_refuses_both_forbidden_blocks_on_hook_pack(
+    tmp_path: Path,
+) -> None:
+    """When BOTH ``[a2a]`` AND ``[mcp]`` are declared on a hook pack,
+    the orchestrator emits TWO findings (one per offending block).
+    Confirms idempotent per-block emission — pack authors see the
+    full picture in a single validate run."""
+    from cognic_agentos.cli.validate import run_validators
+
+    extra = "\n[a2a]\nstreaming = true\n\n[mcp]\ncaching = true\n"
+    _write_hook_pack_with_block(tmp_path, extra_block=extra)
+    findings = run_validators(tmp_path)
+
+    hook_refusals = [f for f in findings if f.reason == "hook_pack_kind_constraint_violated"]
+    assert len(hook_refusals) == 2
+    failure_modes = {f.payload["failure_mode"] for f in hook_refusals}
+    assert failure_modes == {"a2a_block_forbidden", "mcp_block_forbidden"}
+
+
+def test_orchestrator_refuses_legacy_path_a2a_block_on_hook_pack(
+    tmp_path: Path,
+) -> None:
+    """R23 dual-path doctrine: ``[tool.cognic.a2a]`` (legacy form)
+    is also forbidden on a hook pack. Without this, an author could
+    smuggle the forbidden block via the legacy form past the
+    orchestrator check."""
+    from cognic_agentos.cli.validate import run_validators
+
+    extra = "\n[tool.cognic.a2a]\nstreaming = true\n"
+    _write_hook_pack_with_block(tmp_path, extra_block=extra)
+    findings = run_validators(tmp_path)
+
+    hook_refusals = [f for f in findings if f.reason == "hook_pack_kind_constraint_violated"]
+    assert len(hook_refusals) == 1
+    refusal = hook_refusals[0]
+    assert refusal.payload["pack_kind"] == "hook"
+    assert refusal.payload["block"] == "a2a"
+    assert refusal.payload["block_path"] == "tool.cognic.a2a"
+    assert refusal.payload["failure_mode"] == "a2a_block_forbidden"
+
+
+def test_orchestrator_does_not_refuse_a2a_block_on_agent_pack(
+    tmp_path: Path,
+) -> None:
+    """Agent packs are EXPECTED to declare ``[a2a]`` — the orchestrator
+    forbidden-block check fires ONLY for kind="hook" packs.
+    Negative-side regression: an agent pack declaring ``[a2a]``
+    proceeds to per-concern dispatch without a hook-kind refusal."""
+    from cognic_agentos.cli.validate import run_validators
+
+    body = """\
+[pack]
+pack_id = "cognic-agent-test"
+kind = "agent"
+
+[identity]
+agent_id = "did:web:example.com:agents:test"
+display_name = "Test Agent"
+provider_organization = "Example Org"
+provider_url = "https://example.com"
+oasf_capability_set = ["test.v1"]
+
+[a2a]
+streaming = false
+
+[data_governance]
+data_classes = ["public"]
+purpose = "operational_telemetry"
+retention_policy = "none"
+
+[risk_tier]
+tier = "read_only"
+
+[supply_chain]
+attestation_paths = ["attestations/cosign.sig"]
+"""
+    _write_manifest(tmp_path, body)
+    (tmp_path / "attestations").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "attestations" / "cosign.sig").write_bytes(b".")
+    findings = run_validators(tmp_path)
+
+    hook_refusals = [f for f in findings if f.reason == "hook_pack_kind_constraint_violated"]
+    assert hook_refusals == [], (
+        f"agent pack with [a2a] block should NOT trigger hook-kind refusal; got {hook_refusals!r}"
+    )
+
+
+def test_orchestrator_does_not_refuse_mcp_block_on_tool_pack(
+    tmp_path: Path,
+) -> None:
+    """Tool packs are EXPECTED to declare ``[mcp]`` — same negative-
+    side check as the agent + [a2a] arm above."""
+    from cognic_agentos.cli.validate import run_validators
+
+    body = """\
+[pack]
+pack_id = "cognic-tool-test"
+kind = "tool"
+
+[identity]
+agent_id = "did:web:example.com:tools:test"
+display_name = "Test Tool"
+provider_organization = "Example Org"
+provider_url = "https://example.com"
+oasf_capability_set = ["test.v1"]
+
+[mcp]
+caching = false
+
+[data_governance]
+data_classes = ["public"]
+purpose = "operational_telemetry"
+retention_policy = "none"
+
+[risk_tier]
+tier = "read_only"
+
+[supply_chain]
+attestation_paths = ["attestations/cosign.sig"]
+"""
+    _write_manifest(tmp_path, body)
+    (tmp_path / "attestations").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "attestations" / "cosign.sig").write_bytes(b".")
+    findings = run_validators(tmp_path)
+
+    hook_refusals = [f for f in findings if f.reason == "hook_pack_kind_constraint_violated"]
+    assert hook_refusals == []
+
+
+def test_orchestrator_hook_pack_without_forbidden_blocks_passes_kind_check(
+    tmp_path: Path,
+) -> None:
+    """A clean kind="hook" manifest (no [a2a], no [mcp]) does NOT
+    trigger the orchestrator's forbidden-block refusal. Other
+    refusals from per-concern validators may follow (e.g., the T6
+    hooks validator at Sprint-7A2 T5 may refuse a missing [hooks]
+    block once it lands), but the T4 orchestrator check stays silent."""
+    from cognic_agentos.cli.validate import run_validators
+
+    _write_hook_pack_with_block(tmp_path, extra_block="")
+    findings = run_validators(tmp_path)
+
+    hook_refusals = [f for f in findings if f.reason == "hook_pack_kind_constraint_violated"]
+    assert hook_refusals == [], (
+        f"clean hook pack should not trigger hook-kind refusal; got {[f.reason for f in findings]}"
+    )

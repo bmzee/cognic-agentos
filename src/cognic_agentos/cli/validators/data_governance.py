@@ -25,6 +25,10 @@ Validator scope (Wave-1):
     positive number.
   - ``egress_allow_list`` (optional): if present, must be a list of
     strings.
+  - ``dlp_pre_hooks`` / ``dlp_post_hooks`` (optional, Sprint-7A2 T10
+    extension): if present, each must be a list of snake_case
+    hook_id strings; per-list duplicates refused; cross-pack
+    resolution is runtime concern (see ``_validate_dlp_hook_list``).
 
   Cross-validation:
 
@@ -47,16 +51,25 @@ Closed-enum reasons T10 owns:
 
   - ``data_governance_contract_missing`` — catch-all for field-shape
     failures; ``payload.failure_mode`` distinguishes (mirrors T6's
-    ``manifest_missing_required_block`` failure-mode pattern).
+    ``manifest_missing_required_block`` failure-mode pattern). The
+    Sprint-7A2 T10 extension adds six new failure_mode values for
+    the dlp_*_hooks fields:
+    ``dlp_pre_hooks_invalid_shape`` / ``dlp_post_hooks_invalid_shape``
+    (not a list, or contains a non-string entry),
+    ``dlp_pre_hooks_invalid_hook_id`` / ``dlp_post_hooks_invalid_hook_id``
+    (entry fails snake_case),
+    ``dlp_pre_hooks_duplicate`` / ``dlp_post_hooks_duplicate``
+    (same hook_id more than once per list).
   - ``data_governance_contract_inconsistent_with_risk_tier``.
   - ``data_governance_contract_inconsistent_with_mcp_caching``.
 
 Out of T10 scope:
 
-  - ``dlp_pre_hooks`` / ``dlp_post_hooks`` cross-check against pack
-    exports (the plan-of-record mentioned this as a stretch goal;
-    the closed-enum doesn't carry a reason for hook-name mismatch
-    yet, so deferring to a future sprint).
+  - Cross-pack resolution of ``dlp_pre_hooks`` / ``dlp_post_hooks``
+    entries (i.e., whether a named hook_id corresponds to a
+    registered hook in any verified hook pack). Runtime registry
+    + dispatcher concern per Sprint-7A2 T6 / T7 / T8; build-time
+    validator only checks shape + syntax + per-list uniqueness.
   - ``requires_consent`` / ``regulator_retention_required`` — boolean
     fields that don't have closed-enum reasons attached. T10 leaves
     them to the runtime consent gate (the build-time check would be
@@ -65,9 +78,10 @@ Out of T10 scope:
 
 from __future__ import annotations
 
+import re as _re
 import typing
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 from cognic_agentos.cli import ValidatorFinding
 from cognic_agentos.cli._governance_vocab import (
@@ -85,6 +99,20 @@ from cognic_agentos.cli._governance_vocab import (
 _VALID_DATA_CLASSES: frozenset[str] = frozenset(typing.get_args(DataClass))
 _VALID_PURPOSES: frozenset[str] = frozenset(typing.get_args(Purpose))
 _VALID_RETENTION_POLICIES: frozenset[str] = frozenset(typing.get_args(RetentionPolicy))
+
+#: Sprint-7A2 T10 — snake_case validator for ``dlp_pre_hooks`` /
+#: ``dlp_post_hooks`` entries. Documented mirror of
+#: ``cli/validators/hooks.py:_HOOK_ID_PATTERN``; the regex is
+#: duplicated rather than imported per the T10 lock-point decision
+#: (narrowest blast radius — both validators co-evolve under the
+#: ``cli/validators/`` namespace and share doctrine ownership).
+#:
+#: If this regex ever drifts from ``validators/hooks.py:_HOOK_ID_PATTERN``,
+#: pack authors will see contradictory refusals (T6 hooks-validator
+#: accepts a hook_id the T10 dlp-reference validator refuses, or
+#: vice versa). The mirror is load-bearing; future maintainers, do
+#: not relax it without re-syncing both sites.
+_HOOK_REF_PATTERN: Final[_re.Pattern[str]] = _re.compile(r"^[a-z][a-z0-9_]*$")
 
 
 #: Closed-enum tuple of (path-prefix, accessor-tuple) pairs for the
@@ -332,6 +360,110 @@ def _validate_egress_allow_list(block: dict[str, Any], prefix: str) -> list[Vali
     return findings
 
 
+def _validate_dlp_hook_list(
+    block: dict[str, Any], prefix: str, field_name: str
+) -> list[ValidatorFinding]:
+    """Sprint-7A2 T10 — shape-validate one of ``dlp_pre_hooks`` /
+    ``dlp_post_hooks``.
+
+    The field is OPTIONAL: absence produces no finding. An empty list
+    (``[]``) is explicitly valid (pack declares zero hooks for that
+    phase).
+
+    Three failure modes (each prefixed with ``field_name``):
+
+      - ``<field>_invalid_shape`` — value is not a list, OR the list
+        contains a non-string entry. Single refusal per block; the
+        whole list is rejected as malformed (subsequent identifier /
+        duplicate checks short-circuit because they cannot operate on
+        a malformed list safely).
+      - ``<field>_invalid_hook_id`` — at least one entry fails the
+        snake_case identifier regex. One refusal per offending entry
+        with ``payload.invalid_value`` + ``payload.index`` for author
+        diagnostics.
+      - ``<field>_duplicate`` — same hook_id appears more than once
+        in the list. One refusal per duplicate group with
+        ``payload.duplicate_hook_id``. Build-time canonicalization is
+        loud-on-author-error; the T8 dispatcher's runtime dedupe
+        stays defensive (silent) so the two layers don't double-error.
+
+    Cross-pack resolution (i.e., whether ``redact_pii`` actually
+    corresponds to a hook_id declared by some installed hook pack)
+    is RUNTIME concern — the registry's admission gate (T6) + the
+    dispatcher's per-pack selector (T8) own that. Build-time only
+    checks shape + identifier syntax + per-list uniqueness.
+    """
+    if field_name not in block:
+        return []
+
+    raw = block[field_name]
+    findings: list[ValidatorFinding] = []
+
+    # Shape check: must be a list of strings.
+    if not isinstance(raw, list) or not all(isinstance(entry, str) for entry in raw):
+        findings.append(
+            _refusal(
+                prefix=prefix,
+                failure_mode=f"{field_name}_invalid_shape",
+                message=(
+                    f"{prefix}.{field_name} must be a list of snake_case "
+                    f"hook_id strings (got {raw!r}). The runtime DLP "
+                    "dispatcher resolves these against installed hook "
+                    "packs at admission; build-time only checks shape."
+                ),
+                invalid_value=raw,
+            )
+        )
+        # Short-circuit — the list is structurally malformed; running
+        # identifier-syntax + duplicate checks on it would be unsafe.
+        return findings
+
+    # Identifier-syntax check: each entry must match snake_case.
+    for index, entry in enumerate(raw):
+        if not _HOOK_REF_PATTERN.match(entry):
+            findings.append(
+                _refusal(
+                    prefix=prefix,
+                    failure_mode=f"{field_name}_invalid_hook_id",
+                    message=(
+                        f"{prefix}.{field_name}[{index}] = {entry!r} is "
+                        "not a snake_case identifier (lowercase ASCII "
+                        "letters / digits / underscores; must not start "
+                        "with a digit). Mirrors the hook_id syntax T6 "
+                        "enforces on hook-pack manifest declarations."
+                    ),
+                    invalid_value=entry,
+                    index=index,
+                )
+            )
+
+    # Duplicate-within-list check. Per the T10 lock: REFUSE duplicates
+    # at build time. Each duplicate group surfaces ONE refusal so an
+    # author seeing ``["x", "x", "x"]`` gets one finding for ``x``,
+    # not two.
+    seen: set[str] = set()
+    duplicates_reported: set[str] = set()
+    for entry in raw:
+        if entry in seen and entry not in duplicates_reported:
+            findings.append(
+                _refusal(
+                    prefix=prefix,
+                    failure_mode=f"{field_name}_duplicate",
+                    message=(
+                        f"{prefix}.{field_name} declares hook_id "
+                        f"{entry!r} more than once. Each hook_id MUST "
+                        "appear at most once per phase list; remove "
+                        "the duplicate(s)."
+                    ),
+                    duplicate_hook_id=entry,
+                )
+            )
+            duplicates_reported.add(entry)
+        seen.add(entry)
+
+    return findings
+
+
 def _declared_risk_tiers(data: dict[str, Any]) -> list[str]:
     """Return every declared risk-tier string across both manifest
     shapes, in dispatch order (canonical T5 first, legacy runtime
@@ -486,6 +618,12 @@ def validate(data: dict[str, Any], pack_path: Path) -> list[ValidatorFinding]:
         findings.extend(_validate_purpose(block, prefix))
         findings.extend(_validate_retention(block, prefix))
         findings.extend(_validate_egress_allow_list(block, prefix))
+        # Sprint-7A2 T10 — dlp_pre_hooks / dlp_post_hooks shape +
+        # snake_case + per-list uniqueness. Per-block (each declared
+        # location validated independently); cross-pack resolution
+        # remains a runtime registry concern.
+        findings.extend(_validate_dlp_hook_list(block, prefix, "dlp_pre_hooks"))
+        findings.extend(_validate_dlp_hook_list(block, prefix, "dlp_post_hooks"))
 
     # Cross-validation operates on the union of valid classes across
     # both paths. Pack authors cannot hide a restricted class from the

@@ -1550,6 +1550,20 @@ class TestSprint7AClosedEnumVocabulary:
                 "verify_agent_card_jws_invalid",
                 "verify_trust_root_path_unresolvable",
                 "verify_entry_point_load_failed",
+                # Hooks (Sprint-7A2 T6 — cli/validators/hooks.py;
+                # 9 closed-enum reasons; sub-cases via
+                # payload.failure_mode). T1 vocabulary scaffold per
+                # the plan-of-record at
+                # docs/superpowers/plans/2026-05-09-sprint-7a2-hook-packs-runtime.md.
+                "hook_block_shape_invalid",
+                "hook_id_invalid",
+                "hook_phase_invalid",
+                "hook_ordering_class_invalid",
+                "hook_timeout_invalid",
+                "hook_fail_policy_invalid",
+                "hook_pack_kind_constraint_violated",
+                "hook_entry_point_mismatch",
+                "hook_unresolved_reference",
             }
         )
 
@@ -1583,3 +1597,155 @@ class TestSprint7AClosedEnumVocabulary:
         from cognic_agentos.cli._governance_vocab import RetentionPolicy
 
         assert len(get_args(RetentionPolicy)) > 0
+
+
+class TestSprint7A2HookVocabulary:
+    """Sprint-7A2 T1 — hook closed-enum vocabulary drift detectors.
+
+    These tests pin the Wave-1 hook taxonomy added by Sprint-7A2's
+    plan-of-record Doctrine Locks A + C + E:
+
+      - HookPhase: 2 values (dlp_pre / dlp_post).
+      - HookOrderingClass: 8 values (4 input-side, 4 output-side).
+      - HookFailPolicy: 2 values (fail_closed / fail_open).
+      - HOOK_ORDERING_RANK + HOOK_ORDERING_CLASS_PHASE: exhaustive
+        coverage of every HookOrderingClass value.
+
+    Future phases (memory pre/post per ADR-019; escalation pre per
+    ADR-014; egress pre per ADR-017's egress allow-list) land in
+    follow-up sprints; growth here MUST be paired with the validator
+    + dispatcher updates in the same commit.
+    """
+
+    def test_hook_phase_has_wave1_two_values(self) -> None:
+        from typing import get_args
+
+        from cognic_agentos.cli._governance_vocab import HookPhase
+
+        assert set(get_args(HookPhase)) == {"dlp_pre", "dlp_post"}
+
+    def test_hook_ordering_class_has_eight_values(self) -> None:
+        from typing import get_args
+
+        from cognic_agentos.cli._governance_vocab import HookOrderingClass
+
+        expected = {
+            "input_validation",
+            "input_authorization",
+            "input_redaction",
+            "input_normalization",
+            "output_validation",
+            "output_egress_check",
+            "output_redaction",
+            "output_masking",
+        }
+        assert set(get_args(HookOrderingClass)) == expected
+
+    def test_hook_fail_policy_has_two_values(self) -> None:
+        from typing import get_args
+
+        from cognic_agentos.cli._governance_vocab import HookFailPolicy
+
+        assert set(get_args(HookFailPolicy)) == {"fail_closed", "fail_open"}
+
+    def test_hook_ordering_rank_covers_every_class(self) -> None:
+        """Every HookOrderingClass value MUST appear as a key in
+        HOOK_ORDERING_RANK; the dispatcher (Sprint-7A2 T8) reads
+        rank for deterministic ordering and KeyError on a missing
+        class would be a runtime crash."""
+        from typing import get_args
+
+        from cognic_agentos.cli._governance_vocab import (
+            HOOK_ORDERING_RANK,
+            HookOrderingClass,
+        )
+
+        assert set(HOOK_ORDERING_RANK.keys()) == set(get_args(HookOrderingClass))
+
+    def test_hook_ordering_rank_within_phase_is_unique(self) -> None:
+        """Within each phase, the input_*/output_* classes must have
+        distinct ranks so the dispatcher's ordering is total (no
+        ties-by-rank that fall back unpredictably to hook_id alpha)."""
+        from cognic_agentos.cli._governance_vocab import (
+            HOOK_ORDERING_CLASS_PHASE,
+            HOOK_ORDERING_RANK,
+        )
+
+        per_phase: dict[str, list[int]] = {"dlp_pre": [], "dlp_post": []}
+        for cls, rank in HOOK_ORDERING_RANK.items():
+            per_phase[HOOK_ORDERING_CLASS_PHASE[cls]].append(rank)
+        for phase, ranks in per_phase.items():
+            assert len(ranks) == len(set(ranks)), f"phase={phase} has duplicate ranks: {ranks}"
+
+    def test_hook_ordering_class_phase_covers_every_class(self) -> None:
+        """Every HookOrderingClass value MUST appear as a key in
+        HOOK_ORDERING_CLASS_PHASE; the validator (Sprint-7A2 T6)
+        reads this map to refuse class+phase mismatches and KeyError
+        on a missing class would be a refusal-path bug."""
+        from typing import get_args
+
+        from cognic_agentos.cli._governance_vocab import (
+            HOOK_ORDERING_CLASS_PHASE,
+            HookOrderingClass,
+        )
+
+        assert set(HOOK_ORDERING_CLASS_PHASE.keys()) == set(get_args(HookOrderingClass))
+
+    def test_hook_ordering_class_phase_input_classes_pair_to_dlp_pre(self) -> None:
+        from cognic_agentos.cli._governance_vocab import HOOK_ORDERING_CLASS_PHASE
+
+        for cls, phase in HOOK_ORDERING_CLASS_PHASE.items():
+            if cls.startswith("input_"):
+                assert phase == "dlp_pre", f"input class {cls} must pair to dlp_pre"
+
+    def test_hook_ordering_class_phase_output_classes_pair_to_dlp_post(self) -> None:
+        from cognic_agentos.cli._governance_vocab import HOOK_ORDERING_CLASS_PHASE
+
+        for cls, phase in HOOK_ORDERING_CLASS_PHASE.items():
+            if cls.startswith("output_"):
+                assert phase == "dlp_post", f"output class {cls} must pair to dlp_post"
+
+    def test_settings_hook_max_timeout_s_default(self) -> None:
+        """Settings.hook_max_timeout_s defaults to 30.0 seconds + must
+        be > 0; the validator (Sprint-7A2 T6) reads this as the
+        per-hook timeout ceiling; the runtime dispatcher
+        (Sprint-7A2 T8) enforces the same ceiling at dispatch time."""
+        settings = build_settings_without_env_file()
+        assert settings.hook_max_timeout_s == 30.0
+        assert isinstance(settings.hook_max_timeout_s, float)
+
+    def test_hook_validator_reasons_owned_by_validators_hooks_py(self) -> None:
+        """8 of 9 hook_* ValidatorReason entries route to
+        ``validators/hooks.py`` ownership; the 9th
+        (``hook_pack_kind_constraint_violated``) routes to
+        ``validate.py`` because the orchestrator-level forbidden-
+        block check (Sprint-7A2 T4: refuse [a2a] / [mcp] for
+        kind="hook") emits it BEFORE per-concern dispatch.
+
+        Pinned so a future T6 author cannot accidentally split hook
+        reasons across multiple validator files OR drift the
+        T4-owned reason back into validators/hooks.py — each closed-
+        enum reason lands in exactly one file per the ownership-map
+        invariant."""
+        from cognic_agentos.cli import _VALIDATOR_REASON_OWNERSHIP, ValidatorReason
+
+        hook_reasons_owned_by_hooks_py: set[ValidatorReason] = {
+            "hook_block_shape_invalid",
+            "hook_id_invalid",
+            "hook_phase_invalid",
+            "hook_ordering_class_invalid",
+            "hook_timeout_invalid",
+            "hook_fail_policy_invalid",
+            "hook_entry_point_mismatch",
+            "hook_unresolved_reference",
+        }
+        for reason in hook_reasons_owned_by_hooks_py:
+            assert _VALIDATOR_REASON_OWNERSHIP[reason] == "validators/hooks.py", (
+                f"hook reason {reason!r} must be owned by validators/hooks.py; "
+                f"got {_VALIDATOR_REASON_OWNERSHIP[reason]!r}"
+            )
+        # The 9th hook reason — the orchestrator-emitted one — is
+        # owned by validate.py per Sprint-7A2 T4. Moving it back to
+        # validators/hooks.py would break the 1:1 ownership invariant
+        # because validate.py would then emit a reason it doesn't own.
+        assert _VALIDATOR_REASON_OWNERSHIP["hook_pack_kind_constraint_violated"] == "validate.py"

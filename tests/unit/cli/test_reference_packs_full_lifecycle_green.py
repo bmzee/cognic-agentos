@@ -1,5 +1,6 @@
-"""Sprint-7A T15 — full-lifecycle CI gate for the three ``examples/``
-reference packs.
+"""Sprint-7A T15 — full-lifecycle CI gate for the four ``examples/``
+reference packs (Sprint-7A2 T11 added the hook arm; the T15-era
+doctrine carries forward unchanged across the four-pack matrix).
 
 Per Doctrine D + the T15 step-list (plan §1375), each reference pack
 must clear the per-kind Wave-1 author lifecycle:
@@ -29,10 +30,20 @@ The harness step is per-kind (T13/R31 narrows
     ``harness_unsupported_pack_kind``.
   - agent pack — harness REFUSES with closed-enum
     ``harness_unsupported_pack_kind``.
+  - hook pack (Sprint-7A2 T11) — harness REFUSES with closed-enum
+    ``harness_unsupported_pack_kind``. Hook-pack harness expansion
+    lands in a follow-up Sprint-7B task alongside skill+agent
+    dispatch-table widening.
 
-Sign + verify are kind-agnostic; all three packs ship full
-attestation declarations + (agent) JWS-signed AgentCard, and all
-three clear sign --bundle + verify end-to-end.
+Sign + verify are kind-agnostic; all four packs ship full
+attestation declarations and clear sign --bundle + verify end-to-end.
+The AgentCard JWS arm is the one kind-specific surface: ``cli/sign.py``
++ ``cli/verify.py`` both gate JWS generation/verification on
+``pack_kind == "agent"``. Tool / skill / hook manifests simply omit
+``[identity].agent_card_jws_path`` and the JWS arm is skipped
+end-to-end. The runtime trust-gate path (cosign verify-blob, SBOM
+digest, SLSA provenance, in-toto layout, load probe) runs uniformly
+for every kind.
 
 R8 P2 #2 reviewer correction (plan §1474): the lifecycle test reuses
 T14's shim infrastructure (cosign / syft / grype / license-auditor)
@@ -75,6 +86,19 @@ _EXAMPLES_ROOT = Path(__file__).resolve().parents[3] / "examples"
 _TOOL_PACK = _EXAMPLES_ROOT / "cognic-tool-example-minimal"
 _SKILL_PACK = _EXAMPLES_ROOT / "cognic-skill-example-minimal"
 _AGENT_PACK = _EXAMPLES_ROOT / "cognic-agent-example-minimal"
+# Sprint-7A2 T11 — hook reference pack. Hook packs do NOT ship an
+# AgentCard JWS — but the gate is sign-side + verify-side, NOT
+# validator-side: ``cli/sign.py`` + ``cli/verify.py`` both gate the
+# JWS arm on ``pack_kind == "agent"``, and hook manifests simply
+# omit ``[identity].agent_card_jws_path``. The orchestrator's
+# kind-narrow constraint (``cli/validate.py:_FORBIDDEN_BLOCKS_BY_KIND``)
+# refuses ``[a2a]`` + ``[mcp]`` blocks on ``kind="hook"`` packs but
+# does NOT touch ``agent_card_jws_path``. The harness side: every
+# non-tool kind refuses with closed-enum
+# ``harness_unsupported_pack_kind`` (cli/test_harness.py:_HARNESS_SUPPORTED_KINDS).
+# Sign + verify trust-gate path (cosign / SBOM / SLSA / in-toto /
+# load probe) is kind-agnostic for hook packs same as skill/agent.
+_HOOK_PACK = _EXAMPLES_ROOT / "cognic-hook-example-minimal"
 
 # Test-only keypair shipped with the agent reference pack (matched
 # halves committed via the .gitignore exception lines).
@@ -185,8 +209,11 @@ def _wire_sign_settings(
     """Set the env vars sign --bundle reads to wire the four shim
     binaries + the test-only signing key shipped with the agent
     reference pack. The signing-key path is set unconditionally;
-    tool + skill packs do not consume it (no AgentCard JWS) but
-    sign --bundle's environment hydration is the same regardless."""
+    non-agent packs (tool + skill + hook) do not consume it — the
+    JWS arm in ``cli/sign.py`` is gated on ``pack_kind == "agent"``
+    — but sign --bundle's environment hydration is the same
+    regardless. Sprint-7A2 T11 added the hook arm to the matrix
+    alongside the existing tool + skill arms."""
     monkeypatch.setenv("COGNIC_COSIGN_PATH", str(shims["cosign"]))
     monkeypatch.setenv("COGNIC_SYFT_PATH", str(shims["syft"]))
     monkeypatch.setenv("COGNIC_GRYPE_PATH", str(shims["grype"]))
@@ -303,11 +330,12 @@ def _run_full_lifecycle(
     # ---- verify ----
     # Verify Step 1 (trust-root resolution) gates regardless of
     # pack kind — agent packs consume it for AgentCard JWS
-    # verification at step 9; tool + skill packs require the path
-    # to be set even though step 9 is skipped (the resolution gate
-    # is uniform across kinds for forward-compatibility with future
-    # non-agent JWS surfaces). Wire the test-only public PEM for
-    # all three kinds.
+    # verification at step 9; non-agent packs (tool + skill + hook)
+    # require the path to be set even though step 9 is skipped (the
+    # resolution gate is uniform across kinds for forward-compatibility
+    # with future non-agent JWS surfaces). Wire the test-only public
+    # PEM for all four kinds. Sprint-7A2 T11 added the hook arm to
+    # the matrix alongside the existing tool + skill + agent arms.
     verify_shim = _make_cosign_shim(tmp_path, exit_code=0)
     _wire_verify_settings(
         monkeypatch,
@@ -369,4 +397,33 @@ def test_reference_agent_pack_full_lifecycle_green(
         tmp_path=tmp_path,
         monkeypatch=monkeypatch,
         expected_kind="agent",
+    )
+
+
+def test_reference_hook_pack_full_lifecycle_green(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sprint-7A2 T11 — hook pack — full Wave-1 lifecycle clears every
+    gate EXCEPT the harness's per-kind narrowing. The harness MUST
+    refuse with closed-enum ``harness_unsupported_pack_kind`` (mirrors
+    skill + agent at T13/R31; hook-pack harness expansion lands in a
+    follow-up sprint alongside skill+agent dispatch-table widening).
+
+    Sign + verify are kind-agnostic — they clear end-to-end through
+    the supply-chain + trust-gate path. The hook pack ships NO
+    ``agent_cards/`` directory + NO test-signing keypair: the
+    AgentCard JWS arm is gated on ``pack_kind == "agent"`` in BOTH
+    ``cli/sign.py`` (skips JWS generation) and ``cli/verify.py``
+    (skips JWS verification at Step 9), so hook manifests simply
+    omit ``[identity].agent_card_jws_path``. The orchestrator's
+    kind-narrow constraint at ``cli/validate.py:_FORBIDDEN_BLOCKS_BY_KIND``
+    is a separate refusal arm — it refuses ``[a2a]`` / ``[mcp]``
+    blocks on a ``kind="hook"`` pack but does NOT touch
+    ``agent_card_jws_path``."""
+    _run_full_lifecycle(
+        _HOOK_PACK,
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+        expected_kind="hook",
     )

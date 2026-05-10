@@ -633,6 +633,22 @@ class Settings(BaseSettings):
             "Must be > 0. Sprint-7A T14.C R15 pivot."
         ),
     )
+    hook_max_timeout_s: float = Field(
+        default=30.0,
+        gt=0.0,
+        description=(
+            "Wave-1 ceiling (seconds) on the per-hook timeout pack "
+            "authors may declare in ``[hooks].declarations[].timeout_seconds``. "
+            "The Sprint-7A2 build-time hook validator refuses any "
+            "declaration above this ceiling; the runtime hook "
+            "dispatcher enforces the same ceiling at dispatch time "
+            "via ``min(manifest.timeout_seconds, "
+            "Settings.hook_max_timeout_s)`` so a malicious manifest "
+            "cannot extend an admission-side accepted hook past the "
+            "operator's policy limit. Must be > 0. Sprint-7A2 T1 "
+            "Doctrine Lock A."
+        ),
+    )
     supply_chain_policy_bundle: Path = Field(
         default=Path("policies/_default/supply_chain.rego"),
         description=(

@@ -1,0 +1,64 @@
+# Sprint-7A2 T11 reference pack — minimal-but-valid HOOK pack.
+#
+# Purpose: demonstrate the per-kind Wave-1 author lifecycle for hooks
+# (`scaffold → sign → validate → harness (refused with closed-enum
+# `harness_unsupported_pack_kind`) → verify`). The harness narrowing
+# mirrors the skill + agent reference packs (T13/R31:
+# ``_HARNESS_SUPPORTED_KINDS = frozenset({"tool"})`` in
+# `cli/test_harness.py`). Hook-pack harness expansion lands in a
+# follow-up Sprint-7B task; sign + verify are kind-agnostic.
+#
+# Per Sprint-7A2 plan-of-record Doctrine Lock A + the
+# ``cli/validate.py:_FORBIDDEN_BLOCKS_BY_KIND`` orchestrator gate: hook
+# packs MUST NOT declare [a2a] (not A2A-speaking) or [mcp] (not
+# MCP-tool-shaped); both are refused with the closed-enum
+# ``hook_pack_kind_constraint_violated``. Hook packs MUST NOT declare
+# ``agent_card_jws_path`` (no AgentCard JWS). The Doctrine D refrain
+# from Sprint-7A T15 still applies: minimal-but-valid; neutral name;
+# no ``AUTHOR-FILL:`` placeholders.
+
+[pack]
+pack_id = "cognic-hook-example-minimal"
+schema_version = 1
+kind = "hook"
+
+[identity]
+agent_id = "did:web:example.com:hooks:example_minimal"
+display_name = "Example Minimal Hook"
+provider_organization = "Cognic AgentOS Sprint-7A2 T11 reference"
+provider_url = "https://example.com/sprint-7a2-t11"
+agent_card_url = "https://example.com/sprint-7a2-t11/hooks/example_minimal/card.json"
+oasf_capability_set = ["example.v1"]
+
+[data_governance]
+data_classes = ["public"]
+purpose = "operational_telemetry"
+retention_policy = "none"
+egress_allow_list = []
+
+[risk_tier]
+tier = "read_only"
+
+# Sprint-7A2 hook-pack-specific block. Each declaration binds a stable
+# hook_id to a phase + ordering_class + timeout + fail_policy. The
+# matching pyproject.toml [project.entry-points."cognic.hooks"] section
+# MUST list one entry per hook_id below; the Sprint-7A2 T6 hook
+# validator cross-checks both directions.
+[hooks]
+[[hooks.declarations]]
+hook_id = "example_minimal"
+phase = "dlp_pre"
+ordering_class = "input_validation"
+timeout_seconds = 5.0
+fail_policy = "fail_closed"
+
+[supply_chain]
+attestation_paths = [
+    "attestations/cosign.sig",
+    "attestations/bundle.sigstore",
+    "attestations/sbom.cdx.json",
+    "attestations/vuln-scan.json",
+    "attestations/license-audit.json",
+    "attestations/slsa-provenance.intoto.json",
+    "attestations/intoto-layout.json",
+]
