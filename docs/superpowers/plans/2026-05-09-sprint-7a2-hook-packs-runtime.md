@@ -395,7 +395,7 @@ These are explicit doctrine amendments Sprint-7A2 must land. Each is tracked as 
 
 - [ ] Create: `docs/closeouts/2026-05-XX-sprint-7a2-hook-packs-runtime.md` (date filled at commit time).
 - [ ] Modify: `docs/BUILD_PLAN.md` — Sprint-7A2 status flip to CLOSED.
-- [ ] Modify: `AGENTS.md` — new "Authoring — Hook packs (Sprint 7A2)" critical-controls subsection listing the 3 promoted modules (registry, dispatcher, hooks validator).
+- [ ] Modify: `AGENTS.md` — new "Authoring — Hook packs (Sprint 7A2)" critical-controls subsection listing the **4** promoted modules (registry, dispatcher, dlp_integration, hooks validator). T12 reconcile updated the count from the originally-planned 3; the provisional Doctrine Lock F (authored before T7+T8 landed) under-counted the post-T8 module set; T8 commit's `(CRITICAL CONTROLS)` tag on `dlp_integration.py` plus the two doctrine memories born from T8 R1 P2 fixes (refusal-payload contract divergence + delegate-first preserves precedence) resolve the "non-trivial allow/deny logic" rule.
 - [ ] **A1**: amend `docs/adrs/ADR-008-authoring-platform.md` — kind enumeration line 8 (`tools / skills / agents / hooks`); add `agentos init-hook` line 32; add `agentos_sdk.hook` lines 42-46. Per the "ADR amendments needed" section above.
 - [ ] **A2**: amend `docs/adrs/ADR-017-data-governance-contracts.md` line 97 — `cognic_agentos.dlp.DLPHook` → `cognic_agentos.sdk.hook.Hook`; add Sprint-7A2 amendment note.
 - [ ] **A3**: amend `docs/adrs/ADR-017-data-governance-contracts.md` line 125 — `cognic-dlp-<name>` → `cognic-hook-<name>` (with explicit back-compat note for legacy `cognic-dlp-*` runtime acceptance).
@@ -458,7 +458,7 @@ Plan saved to `docs/superpowers/plans/2026-05-09-sprint-7a2-hook-packs-runtime.m
 
 1. **The 7 doctrine locks A-G** — any adjustments before T1 begins?
 2. **The ADR amendment slate** (ADR-008 + ADR-017 line 97 + ADR-017 line 125 + ADR-017 new failure-policy subsection) — agreed to land at T13 closeout, OR should an ADR-amendment-first PR land separately before any code?
-3. **Critical-controls promotion list** (3 modules: registry / dispatcher / hooks validator; `sdk/hook.py` off-floor per Doctrine E) — adjust?
+3. **Critical-controls promotion list** (4 modules: registry / dispatcher / dlp_integration / hooks validator; `sdk/hook.py` off-floor per Doctrine E) — adjust? (T12 reconcile lifted from 3 to 4; the Self-Review item is updated in lockstep with the Doctrine Lock F table at §196-206.)
 4. **Harness-narrow decision for hook packs** (Wave-1: refuse with `harness_unsupported_pack_kind` mirroring skill + agent; Sprint-7B grows the dispatch table) — agreed?
 5. **Failure policy closed-enum** (5 sub-cases under `dispatch_hook_failed`: timeout / exception / malformed_result / policy_refused / payload_unscannable) — complete?
 

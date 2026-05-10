@@ -20,14 +20,19 @@ Wave-1 strictness matrix:
     explicitly mirror the tool/skill behavior here — hook packs do
     NOT ship an AgentCard JWS, so the agent-only requirement is
     correctly skipped via the existing ``pack_kind == "agent"``
-    branch. The Sprint-7A2 T6 hook validator
-    (``cli/validators/hooks.py``) adds the ACTIVE refusal for hook
-    packs that DECLARE ``agent_card_jws_path`` (closed-enum
-    ``hook_pack_kind_constraint_violated`` with
-    ``failure_mode=agent_card_jws_path_forbidden``); the identity
-    validator itself stays kind-agnostic for that field per the
-    one-validator-owns-each-refusal invariant in the closed-enum
-    ownership map.
+    branch. Wave-1 imposes NO active refusal for tool / skill /
+    hook packs that DECLARE ``agent_card_jws_path``: the field is
+    ignored outside the ``pack_kind == "agent"`` branch. The
+    orchestrator-owned closed-enum
+    ``hook_pack_kind_constraint_violated`` (emitted by
+    ``cli/validate.py`` with ``payload.failure_mode`` ∈
+    {``a2a_block_forbidden``, ``mcp_block_forbidden``}) covers a
+    different dimension — the ``[a2a]`` / ``[mcp]`` block-presence
+    check on hook packs — and does NOT refuse on
+    ``identity.agent_card_jws_path``. Sprint-7A2 T13 doctrine fix
+    (corrected from a pre-T13 docstring that misnamed the owner +
+    invented an ``agent_card_jws_path_forbidden`` failure_mode that
+    was never implemented).
   - ``agent_card_jws_path`` resolves: pack-relative path must point
     at an existing file. Missing-or-placeholder path surfaces as
     ``identity_agent_card_jws_path_missing``; present-but-unresolvable
@@ -286,9 +291,12 @@ def _validate_identity_block(
     # Agent-pack-only mandatory fields. Tool + skill + hook packs
     # skip these — agent_card_url and agent_card_jws_path are
     # meaningless outside the agent-discovery surface. Sprint-7A2 T4:
-    # hook packs explicitly follow the tool/skill skip behavior; the
-    # active refusal for hook packs that DECLARE agent_card_jws_path
-    # lives in cli/validators/hooks.py (Sprint-7A2 T6).
+    # hook packs explicitly follow the tool/skill skip behavior.
+    # Wave-1 has NO active refusal for non-agent packs that DECLARE
+    # agent_card_jws_path (the field is ignored outside the
+    # pack_kind == "agent" branch); see the module docstring for
+    # the T13 doctrine fix recording the corrected ownership of
+    # hook_pack_kind_constraint_violated.
     if pack_kind == "agent":
         if _is_missing_or_placeholder(block.get("agent_card_url")):
             findings.append(

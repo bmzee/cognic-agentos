@@ -94,10 +94,28 @@ A reviewer can reject on data-governance grounds with a categorised reason (e.g.
 ### Runtime enforcement
 
 Per-call:
-- Pre-invocation: DLP pre-hooks run (PII redaction, etc.). Hook is a separate adapter `cognic_agentos.dlp.DLPHook` — pack manifest names which hooks must run; AgentOS resolves them via the plugin registry.
+- Pre-invocation: DLP pre-hooks run (PII redaction, etc.). Hook is a separate adapter `cognic_agentos.sdk.hook.Hook` — pack manifest names which hooks must run; AgentOS resolves them via the plugin registry. (Sprint-7A2 amendment, 2026-05-10: broadened from the originally-named DLP-only `cognic_agentos.dlp.DLPHook` to a generic phase taxonomy. The DLP pre/post phases are two of the closed-enum hook phases supported in Wave-1; future phases for memory governance / escalation / egress land in follow-up sprints. See "Sprint-7A2 amendments" below.)
 - Egress check: any HTTP call from a tool sandbox checks the destination against the manifest's `egress_allow_list` AND the tenant's Rego egress policy. **Reject on mismatch — sandbox kills the call.**
 - Post-invocation: DLP post-hooks run (masking, redaction). Output reaches the caller only after hooks complete.
 - Data-class crossing: every read of a `customer_pii` source emits a `data_access` audit event tagged with the manifest's `purpose`. Examiner can trace every PII-class data access by purpose.
+
+### DLP hook failure policy *(Sprint-7A2 amendment)*
+
+The runtime hook dispatcher (`packs/hooks/dispatcher.py` per ADR-008 + Sprint-7A2) classifies every hook outcome into one of **five closed-enum failure modes**. Closed-enum so operator runbooks, audit consumers, and policy authors can reason about every possible terminal state without surprise:
+
+| Failure mode | Trigger | Wave-1 default response |
+|---|---|---|
+| `hook_timeout` | `asyncio.wait_for` exceeded the per-hook `timeout_seconds` clamped against `Settings.hook_max_timeout_s`. | Fail-closed (timeout fires OUTSIDE the hook's catch boundary; fail-open never applies). |
+| `hook_exception` | Hook `_invoke()` raised any unhandled `Exception` other than `HookContractError`. | Fail-closed by default. **Carve-out path** — if the hook's `HookDeclaration.fail_policy == "fail_open"` AND the raised exception's class name (walked through MRO per `dispatcher.py:567-569`) matches `HookDeclaration.fail_open_exception`, treat as `decision="pass"`. **Wave-1 reality:** the build-time validator (`cli/validators/hooks.py`) refuses every `fail_policy="fail_open"` declaration with closed-enum `hook_fail_policy_invalid` / `fail_open_without_exception`, so the carve-out is reachable in code but unreachable through the manifest pipeline. The matching build-time manifest shape that would populate `fail_open_exception` is reserved for a follow-up sprint. |
+| `hook_malformed_result` | Hook `invoke()` returned a non-`HookResult` / non-coroutine, OR the loader returned a non-Hook subclass, OR `HookContractError` (any subclass) was raised. | **Always fail-closed; never fail-open.** SDK contract violations are programming errors. The pre-instantiation `except HookContractError` block matches BEFORE the generic `except Exception` so a malicious declaration cannot smuggle a contract violation past the malformed-result gate by naming `HookContractError` (or any subclass) as `fail_open_exception`. |
+| `hook_policy_refused` | Hook returned `HookResult(decision="refuse", policy_reason=...)`. | Fail-closed; the hook explicitly chose to refuse. |
+| `hook_payload_unscannable` | Payload exceeded `Settings.hook_max_payload_bytes` budget BEFORE any hook ran (size-check is a dispatcher precondition). | Fail-closed; never invokes a hook for an over-budget payload. |
+
+**Audit invariant — payload contents are never logged.** Every failure-mode finding records the SHA-256 `policy_input_digest` of the **original** governed payload (computed before any hook transformation) plus the hook ID, phase, ordering class, timeout state, and ISO 42001 control tags. Hook payloads themselves never enter the audit chain: examiners trace WHO ran WHICH hook on a digest-identified governed input, not the input bytes. This invariant is what makes the failure-policy table examiner-readable without leaking customer data.
+
+**Wave-1 fail-closed-only validator boundary.** The build-time validator (`cli/validators/hooks.py`) treats every `fail_policy="fail_open"` declaration as a refusal — closed-enum `hook_fail_policy_invalid` / `fail_open_without_exception`. The runtime registry's `HookDeclaration.fail_open_exception` field is wired (the dispatcher MRO walk is implemented + unit-tested) but unreachable through the validator pipeline until the matching build-time manifest shape lands in a follow-up sprint. The future shape will be a per-`HookDeclaration` exception-class-name field, NOT a `[data_governance]` field — exception class names are a hook-author concern, not a data-governance-contract concern, so they belong on the hook declaration that owns the exception.
+
+**Operator response.** Operator runbook at `docs/operator-runbooks/hook-pack-failure-policy.md` documents per-mode response, audit-trail invariants, and escalation paths. Wave-1 stance: fail-closed is the default for governed-data phases unless and until the policy carve-out (deliberately disabled at the validator boundary) lands.
 
 ### Customer-consent integration
 
@@ -122,7 +140,7 @@ When `requires_consent: true`, the harness checks the session for a valid consen
 - **Pack-author burden** — every pack must declare its contract accurately. Mitigation: SDK CLI (`agentos validate`) checks declared classes against tool implementation (e.g. a tool that calls `query_customer_account` must declare `customer_pii` + `account_balance`).
 - **Manifest churn** — when bank-internal data classification changes, all packs may need manifest updates. Versioning policy: manifest changes are a minor pack-version bump (semver).
 - **Consent-token integration** — banks vary in consent management. Cognic ships a default consent-token format; banks override per Rego policy.
-- **DLP hook ecosystem** — Cognic ships baseline DLP hooks (PII redaction, account masking); banks plug in their own DLP via the plugin registry as `cognic-dlp-<name>` packs.
+- **Hook pack ecosystem** — Cognic ships baseline hook packs (PII redaction, account masking); banks plug in their own via the plugin registry as `cognic-hook-<name>` packs (Sprint-7A2 naming convention; the runtime registry is name-agnostic — admission is keyed on signed entry-point + ADR-016 bundle, not on pack-name pattern — so any previously-published `cognic-dlp-*` pack remains loadable. `agentos init-hook` produces only `cognic-hook-<name>`-shaped packs going forward).
 
 ### Neutral
 - This ADR overlaps with ADR-014 (runtime tool approval): a tool with `data_classes: customer_pii` is automatically `risk_tier: customer_data_read` minimum unless the manifest declares otherwise. Schema validation enforces consistency.
@@ -132,6 +150,7 @@ When `requires_consent: true`, the harness checks the session for a valid consen
 | Sprint | Work |
 |---|---|
 | **Sprint 7A** | Pack manifest schema includes `[tool.cognic.data_governance]` section; SDK validator checks against controlled vocabulary; CLI `agentos validate` flags missing/invalid sections |
+| **Sprint 7A2** | Hook packs become a first-class authoring kind. SDK ships `cognic_agentos.sdk.hook.Hook` + `HookContext` + `HookResult` + closed-enum `HookPhase`. **Build-time / runtime split for the DLP-hook reference contract:** `cli/validators/data_governance.py` shape-validates `dlp_pre_hooks` / `dlp_post_hooks` as **lists of snake_case strings only** (closed-enum refusals: `<field>_invalid_shape` / `<field>_invalid_hook_id` / `<field>_duplicate`); `cli/validators/hooks.py` validates the `[hooks]` block declarations + cross-checks declared `hook_id`s against pyproject `[project.entry-points."cognic.hooks"]` (in-pack consistency only); cross-pack resolution of a calling pack's `dlp_*_hooks` reference against installed hook-pack IDs is RUNTIME concern — the registry's admission gate plus `DLPGuard` surface unresolved references via the `dlp_hook_id_unresolved` runtime closed-enum, never as a build-time reason. `cli/sign.py` + `cli/verify.py` accept `kind = "hook"` packs through the same ADR-016 supply-chain pipeline. Runtime half: `packs/hooks/registry.py` (verified-hook admission keyed by hook ID + phase + signed-artefact digest; exposes `register_pack` + `snapshot` + `get_phase_hooks`) + `packs/hooks/dispatcher.py` (deterministic phase dispatcher with the 5 closed-enum failure modes documented in "DLP hook failure policy" above; consumes registry snapshots; owns `dispatch` + `dispatch_for_pack`) + `packs/hooks/dlp_integration.py` (DLPGuard wiring `dlp_pre` / `dlp_post` on top of `HookDispatcher.dispatch_for_pack`). Wave-1 fail-closed-only — every `fail_policy="fail_open"` declaration refused at the validator boundary. |
 | **Sprint 7B** | Reviewer evidence view surfaces the contract; rejection categories include data-governance reasons; manifest version bump semver enforced |
 | **Sprint 11.5 (DLP seed)** | Minimal `core/dlp/scanner.py` (Presidio-backed) — used by `memory/api.remember()` to enforce consent-token requirement on restricted classes. Same `DLPScanner` protocol Sprint 13.5 will extend. |
 | **Sprint 13.5 (full runtime)** | Extends the Sprint 11.5 DLP seed with post-call DLP on tool outputs, custom recogniser plugins, per-tenant recogniser allow/deny lists. Adds: egress check against manifest + Rego policy; consent-token harness integration at the tool-call boundary; data-access audit events tagged with purpose |
@@ -139,11 +158,22 @@ When `requires_consent: true`, the harness checks the session for a valid consen
 
 Sprint 7A grows ~0.5 wu (manifest schema + validator). Sprint 7B grows ~0.5 wu (reviewer evidence panel). Sprint 11.5 absorbs ~0.25 wu for the DLP seed (already inside the Sprint 11.5 envelope). Sprint 13.5 absorbs ~0.5 wu for the full runtime extension.
 
+## Sprint-7A2 amendments (descriptive — codifying what shipped, 2026-05-10)
+
+Sprint 7A2 (`feat/sprint-7a2-hook-packs-runtime`) added first-class hook packs as the runtime extension point this ADR's "DLP hooks" subsection always referred to. The original ADR was written before the hook taxonomy firmed up; the amendments are descriptive (codifying what Sprint-7A2 actually shipped), not prescriptive.
+
+- **A2 — Runtime enforcement, line 97.** `cognic_agentos.dlp.DLPHook` → `cognic_agentos.sdk.hook.Hook`. The originally-proposed DLP-only adapter was broadened to a generic `Hook` ABC supporting closed-enum phases (Wave-1: `dlp_pre` + `dlp_post`; future phases for memory governance / escalation / egress).
+- **A3 — Negative consequences, line 125 (now line 130).** Hook pack naming aligned with kind-not-phase convention: `cognic-dlp-<name>` → `cognic-hook-<name>`. Runtime registry is name-agnostic (admission is keyed on signed entry-point + ADR-016 bundle, not on pack-name pattern), so any previously-published `cognic-dlp-*` pack remains loadable; `agentos init-hook` produces only `cognic-hook-<name>`-shaped packs going forward.
+- **A4 — New "DLP hook failure policy" subsection.** Codifies the 5 closed-enum failure modes (`hook_timeout` / `hook_exception` / `hook_malformed_result` / `hook_policy_refused` / `hook_payload_unscannable`) + the Wave-1 fail-closed-only validator boundary + the runtime carve-out mechanism (`HookDeclaration.fail_open_exception` matched via dispatcher MRO walk per `dispatcher.py:567-569`) + the `policy_input_digest` audit invariant (payload contents are never logged). Operator runbook at `docs/operator-runbooks/hook-pack-failure-policy.md`.
+- **Implementation phases table.** Added Sprint 7A2 row enumerating SDK + CLI extensions + runtime registry + dispatcher + DLP integration.
+
 ## References
 - ADR-002 (manifest spec — extended here)
 - ADR-006 (ISO 42001 — A.7.4 impact, A.10.2 transparency, A.8.x data quality)
+- ADR-008 (authoring platform — `cognic_agentos.sdk.hook.Hook` ABC + `agentos init-hook` scaffold + `kind = "hook"` enumeration)
 - ADR-012 (pack lifecycle — reviewer enforcement point)
 - ADR-014 (runtime tool approval — risk-tier consistency)
 - ADR-015 (Rego policy — per-tenant data-governance enforcement)
+- ADR-016 (supply-chain controls — hook packs ride the same cosign + SBOM + SLSA + in-toto bundle as tool / skill / agent packs)
 - [GDPR Article 30 — records of processing activities](https://gdpr-info.eu/art-30-gdpr/)
 - [EU AI Act — high-risk-system data documentation](https://artificialintelligenceact.eu/)
