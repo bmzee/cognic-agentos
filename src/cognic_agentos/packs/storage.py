@@ -208,10 +208,12 @@ _packs = Table(
 # guard at (a) above intercepts every storage-side call site BEFORE
 # the helper is reached, so the helper's own runtime guard at
 # ``packs/lifecycle.py:388-389`` cannot fire from within this module.
-# The helper's guard fires only when external callers (Sprint 7B.2
-# portal handlers, T6 harness dispatch) invoke ``iso_controls_for``
-# directly — that fire-site lives in :mod:`cognic_agentos.packs.lifecycle`,
-# NOT here.
+# The helper's guard fires only when external callers (planned:
+# Sprint 7B.2 portal handlers) invoke ``iso_controls_for`` directly —
+# that fire-site lives in :mod:`cognic_agentos.packs.lifecycle`, NOT
+# here. No in-tree caller invokes the helper directly today; storage
+# is the only consumer of the helper, and it routes through the
+# preflight guard at (a) above.
 
 
 class PackNotFound(Exception):
@@ -426,7 +428,7 @@ class PackRecordStore:
         # ``_TRANSITION_TO_TARGET_STATE[transition]`` indexed access
         # below — leaking an unstructured exception past the
         # closed-enum boundary that downstream consumers (Sprint 7B.2
-        # portal handlers, T6 harness dispatch) catch on
+        # portal handlers planned) would catch on
         # ``LifecycleTransitionRefused``. Mirrors the asymmetric-runtime-
         # guard fix at ``packs/lifecycle.py`` step 3 (T2 R1 P2): both
         # layers MUST refuse out-of-vocabulary transition names with

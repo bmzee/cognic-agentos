@@ -304,9 +304,9 @@ _TRANSITION_TO_ISO_CONTROLS: Final[Mapping[TransitionName, tuple[str, ...]]] = {
 class LifecycleTransitionRefused(Exception):
     """Raised when the bank-pack lifecycle state machine refuses a
     transition. Carries the closed-enum :data:`LifecycleRefusalReason`
-    so callers (T3 storage layer, T6 harness dispatch, Sprint 7B.2
-    portal handlers) can dispatch on the exact failure mode without
-    parsing strings.
+    so callers (T3 storage layer today; Sprint 7B.2 portal handlers
+    planned) can dispatch on the exact failure mode without parsing
+    strings.
 
     Co-located with :data:`LifecycleRefusalReason` in this module
     because the exception is a thin wrapper around the closed-enum;
