@@ -55,7 +55,10 @@ from cognic_agentos.observability import (
     install_request_id_middleware,
     silence_uvicorn_access_log,
 )
+from cognic_agentos.packs.storage import PackRecordStore
+from cognic_agentos.portal.api.packs import build_packs_router
 from cognic_agentos.portal.api.system_routes import build_system_router
+from cognic_agentos.portal.rbac.actor import ActorBinder
 from cognic_agentos.protocol import is_a2a_available, is_mcp_available
 from cognic_agentos.protocol.plugin_registry import PluginRegistry
 
@@ -164,6 +167,8 @@ def create_app(
     adapter_registry: AdapterRegistry | None = None,
     gateway_ledger: GatewayCallLedger | None = None,
     plugin_registry: PluginRegistry | None = None,
+    actor_binder: ActorBinder | None = None,
+    pack_record_store: PackRecordStore | None = None,
 ) -> FastAPI:
     """Build and return the FastAPI application.
 
@@ -187,6 +192,21 @@ def create_app(
     fails closed on missing ledger; the operator sees zero rows + the
     intent surface from settings).
 
+    Sprint 7B.2 T3: ``actor_binder`` + ``pack_record_store`` are
+    attached to ``app.state.actor_binder`` / ``app.state.pack_record_store``
+    so the T4-T7 pack-router endpoints can resolve the per-request
+    :class:`~cognic_agentos.portal.rbac.actor.Actor` + load
+    :class:`~cognic_agentos.packs.storage.PackRecord` rows. The pack
+    router (mounted at ``/api/v1/packs`` per ADR-012 §55) is included
+    ONLY when BOTH kwargs are provided — RBAC enforcement at every
+    pack endpoint requires a working actor binder; mounting the
+    router without one would create routes that always 500 at request
+    time. When ``pack_record_store`` is provided but ``actor_binder``
+    is None the kernel emits a structured fail-loud warning at the
+    ``cognic_agentos.portal.api.app`` logger; mirrors the
+    ``mcp.host_unavailable_in_image`` pattern in
+    :func:`create_prod_app`.
+
     Production launchers go through :func:`create_prod_app` to default
     ``adapter_registry`` to the process-wide ``bundled_registry``.
     """
@@ -208,6 +228,14 @@ def create_app(
         # unset, /api/v1/system/plugins serves an empty list (NOT
         # 503) per the read-only honesty surface contract.
         app.state.plugin_registry = plugin_registry
+        # Sprint-7B.2 T3: pack-router wiring inputs. ``app.state``
+        # carries both regardless of whether the router was actually
+        # mounted at construction time (the mount decision is
+        # made in the outer factory body so the route table is locked
+        # before lifespan startup; this attach point exposes the
+        # objects to test fixtures + future read-only honesty surfaces).
+        app.state.actor_binder = actor_binder
+        app.state.pack_record_store = pack_record_store
         if adapter_registry is None:
             app.state.adapters = None
             yield
@@ -255,6 +283,76 @@ def create_app(
 
     app.include_router(_build_router(settings))
     app.include_router(build_system_router(settings))
+
+    # Sprint-7B.2 T3: pack-router wiring. Mount only when BOTH
+    # ``actor_binder`` and ``pack_record_store`` are provided — the
+    # T4-T7 endpoints declare per-route ``RequireScope(...)`` /
+    # ``RequireTenantOwnership(...)`` dependencies that read both off
+    # ``app.state``; mounting routes without one would either fail-open
+    # (silently skip RBAC) or 500 at request time with a confusing
+    # AttributeError. Both partial-config branches are no-mount AND
+    # both emit a structured fail-loud warning naming the missing
+    # kwarg — symmetric coverage closes the T3-R1 P2 finding that a
+    # half-wired pack store (binder set, store None) would otherwise
+    # silently disable the pack API in production with no operator
+    # signal.
+    #
+    # ``app.state.pack_router_mounted`` is the introspection flag tests
+    # + future read-only honesty surfaces use to confirm the mount
+    # decision. Set at factory-body time (NOT lifespan) so the flag is
+    # available immediately on the returned ``FastAPI`` instance, before
+    # the first request fires lifespan startup. T3 ships an empty
+    # router so the FastAPI route table doesn't gain a path entry that
+    # a test could grep for; the flag IS the wire-protocol-public
+    # "is the pack router available?" signal.
+    app.state.pack_router_mounted = False
+    if actor_binder is not None and pack_record_store is not None:
+        app.include_router(build_packs_router(store=pack_record_store))
+        app.state.pack_router_mounted = True
+    elif pack_record_store is not None:
+        # Fail-loud misconfig — operator provided a pack store but no
+        # binder. Mirrors the ``mcp.host_unavailable_in_image`` pattern
+        # in :func:`create_prod_app` (structured warning at startup,
+        # closed-enum ``reason`` field, explicit remediation string).
+        logger.warning(
+            "portal.packs_router_unmounted_actor_binder_missing",
+            extra={
+                "reason": "actor_binder_required_for_pack_router",
+                "remediation": (
+                    "create_app(actor_binder=<bank-overlay-binder>, "
+                    "pack_record_store=<store>) wires the pack router; "
+                    "without actor_binder, RBAC enforcement at every "
+                    "pack endpoint would have no source of Actor "
+                    "identity. The kernel default "
+                    "KernelDefaultActorBinder fails-loud at request "
+                    "time, but the wiring boundary refuses earlier so "
+                    "misconfig is caught at startup."
+                ),
+            },
+        )
+    elif actor_binder is not None:
+        # Symmetric fail-loud misconfig — operator provided a binder
+        # but no pack store. Closed at T3-R1 P2 review: without this
+        # warning, a half-wired deployment (binder configured, store
+        # missing) would silently disable the pack API in production
+        # with no operator signal. Mirrors the warning above with a
+        # distinct ``reason`` enum value so operators can fingerprint
+        # WHICH half of the wiring boundary is missing.
+        logger.warning(
+            "portal.packs_router_unmounted_pack_record_store_missing",
+            extra={
+                "reason": "pack_record_store_required_for_pack_router",
+                "remediation": (
+                    "create_app(actor_binder=<bank-overlay-binder>, "
+                    "pack_record_store=<store>) wires the pack router; "
+                    "without pack_record_store, the pack endpoints "
+                    "would have no backing storage and every T4-T7 "
+                    "route would surface a confusing 500 at request "
+                    "time. The wiring boundary refuses earlier so "
+                    "misconfig is caught at startup."
+                ),
+            },
+        )
 
     # Mount Prometheus AFTER routes so the instrumentator's metric registry
     # captures the route table; the scrape endpoint is mounted under
