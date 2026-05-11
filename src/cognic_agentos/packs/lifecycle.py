@@ -155,8 +155,13 @@ TransitionName = Literal[
 #: reason for ANY out-of-vocabulary input, not just kind / state. Without
 #: this, a caller passing ``transition="archive"`` would raise
 #: ``KeyError("archive")`` at ``_VALID_TRANSITIONS[transition]`` lookup,
-#: breaking the contract that downstream T3 storage code relies on (it
-#: catches ``LifecycleTransitionRefused``, not arbitrary exceptions).
+#: breaking the closed-enum contract that downstream T3 storage code relies
+#: on. Storage does NOT catch ``LifecycleTransitionRefused`` — the
+#: exception propagates up through ``append_with_precondition`` and
+#: ``transition()`` while ``engine.begin()`` at
+#: ``core/decision_history.py:482`` rolls back the precondition's
+#: transaction (established at T7 R7). An unstructured ``KeyError`` would
+#: bypass that closed-enum-only contract entirely.
 LifecycleRefusalReason = Literal[
     "lifecycle_transition_invalid_state_pair",
     "lifecycle_transition_state_unknown",
@@ -286,7 +291,7 @@ _KNOWN_ISO_CONTROL_CODES: Final[frozenset[str]] = frozenset(
 #: pinned by ``test_lifecycle_audit.py::TestSprint7B1IsoControlsMapShape``.
 #: Build-time assert at module foot mirrors the
 #: ``_TRANSITION_TO_TARGET_STATE`` drift assert at
-#: ``packs/storage.py:644-653``.
+#: ``packs/storage.py:641-655``.
 _TRANSITION_TO_ISO_CONTROLS: Final[Mapping[TransitionName, tuple[str, ...]]] = {
     "submit": ("A.5.31", "A.6.2.4"),
     "claim": ("A.5.31",),
@@ -316,7 +321,7 @@ class LifecycleTransitionRefused(Exception):
     public seam that takes a closed-enum-typed argument
     (``validate_transition`` step 3 in this module;
     :meth:`PackRecordStore.transition` preflight guard at
-    ``packs/storage.py:435-436``; :func:`iso_controls_for` in this module)
+    ``packs/storage.py:437-438``; :func:`iso_controls_for` in this module)
     raises this same exception with the same
     ``"lifecycle_transition_name_unknown"`` reason for out-of-vocabulary
     transitions.
@@ -359,7 +364,7 @@ def iso_controls_for(transition: TransitionName) -> tuple[str, ...]:
     Per the asymmetric-runtime-guard doctrine
     (``feedback_strict_review_off_gate.md`` §8 — same as
     :func:`validate_transition` step 3 + :meth:`PackRecordStore.transition`
-    preflight guard at ``packs/storage.py:435-436``): out-of-vocabulary
+    preflight guard at ``packs/storage.py:437-438``): out-of-vocabulary
     transition names are refused with :class:`LifecycleTransitionRefused`
     carrying the closed-enum
     ``"lifecycle_transition_name_unknown"`` reason — NOT a bare
@@ -458,8 +463,12 @@ def validate_transition(
     # would raise ``KeyError`` at the ``_VALID_TRANSITIONS[transition]``
     # lookup at step 6 (generic fallthrough), leaking an unstructured
     # exception past the closed-enum contract that downstream T3 storage
-    # code (catching ``LifecycleTransitionRefused``) relies on. T2 R1 P2
-    # added this guard + the matching closed-enum reason.
+    # code relies on. Storage does NOT catch ``LifecycleTransitionRefused`` —
+    # it propagates up through ``append_with_precondition`` and
+    # ``transition()`` while ``engine.begin()`` at
+    # ``core/decision_history.py:482`` rolls back the precondition's
+    # transaction (established at T7 R7). T2 R1 P2 added this guard +
+    # the matching closed-enum reason.
     if transition not in _KNOWN_TRANSITIONS:
         return "lifecycle_transition_name_unknown"
 
@@ -510,7 +519,7 @@ def validate_transition(
 # ``tests/unit/packs/test_lifecycle_audit.py::TestSprint7B1IsoControlsMapShape``
 # provides the operator-facing diagnostic. Mirrors the
 # ``_TRANSITION_TO_TARGET_STATE`` drift assert at
-# ``packs/storage.py:644-653``.
+# ``packs/storage.py:641-655``.
 assert set(_TRANSITION_TO_ISO_CONTROLS.keys()) == set(get_args(TransitionName)), (
     "_TRANSITION_TO_ISO_CONTROLS keys diverge from get_args(TransitionName)"
 )

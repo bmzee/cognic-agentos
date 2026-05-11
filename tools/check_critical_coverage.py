@@ -165,16 +165,16 @@ machine + storage critical path:
 
   * ``packs/lifecycle.py`` — pure-functional state machine.
     Closed-enum **13-value** ``LifecycleRefusalReason`` at
-    lines 160-174 (finalised at T2 from the plan-of-record's
+    lines 165-179 (finalised at T2 from the plan-of-record's
     provisional ±1 count as the transition table was enumerated).
-    ``_VALID_TRANSITIONS`` legal-pair table at :191 (10 transitions
+    ``_VALID_TRANSITIONS`` legal-pair table at :196 (10 transitions
     / 13 legal pairs). ``validate_transition(*, from_state,
-    to_state, kind, transition)`` pure validator at :393 — four
-    keyword-only args. ``iso_controls_for(transition)`` at :338
+    to_state, kind, transition)`` pure validator at :398 — four
+    keyword-only args. ``iso_controls_for(transition)`` at :343
     returns the canonical ISO 42001 control tuple from the
     3-value ``_KNOWN_ISO_CONTROL_CODES`` set ({``A.5.31``,
     ``A.5.32``, ``A.6.2.4``}) feeding chain-row emission.
-    ``LifecycleTransitionRefused(reason)`` at :304 carries ONLY
+    ``LifecycleTransitionRefused(reason)`` at :309 carries ONLY
     the closed-enum reason. Doctrine Lock C — the closed-enum
     vocabulary IS the consumer-API wire-protocol contract carried
     by ``LifecycleTransitionRefused.reason``. The only in-tree
@@ -201,7 +201,7 @@ machine + storage critical path:
     (out-of-vocabulary transitions raise
     ``LifecycleTransitionRefused("lifecycle_transition_name_unknown")``
     BEFORE any helper invocation or DB work; mirrors the
-    asymmetric-runtime-guard fix at ``packs/lifecycle.py:388-389``);
+    asymmetric-runtime-guard fix at ``packs/lifecycle.py:393-394``);
     on the green path resolves ``target_state`` at :440 and
     derives the canonical ISO 42001 control tuple via
     ``iso_controls_for(transition)`` at :456 BEFORE the closure

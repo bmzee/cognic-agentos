@@ -319,11 +319,11 @@ class TestSprint7B1IsoControlsRecordedForEveryTransition:
     - ``payload['iso_controls']`` is the JSON-encoded shape the portal
       API surfaces to operators reading evidence rows. Storage stamps
       both (``payload['iso_controls']`` at
-      ``packs/storage.py:517`` + the
+      ``packs/storage.py:519`` + the
       ``DecisionRecord(..., iso_controls=...)`` kwarg at
-      ``packs/storage.py:519``) on every transition row, both populated
+      ``packs/storage.py:521``) on every transition row, both populated
       from the same ``canonical_iso_controls`` local that
-      ``packs/storage.py:454`` derives via :func:`iso_controls_for`.
+      ``packs/storage.py:456`` derives via :func:`iso_controls_for`.
     """
 
     async def test_full_lifecycle_walk_tags_every_chain_row_with_canonical_controls(
@@ -513,11 +513,11 @@ class TestSprint7B1FailClosedRefusalPaths:
     async def test_preflight_unknown_transition_name_no_chain_row_no_state_mutation(
         self, store: PackRecordStore, engine: AsyncEngine
     ) -> None:
-        # The runtime guard at ``packs/storage.py:435-436`` (T3 R1 P2 #2)
+        # The runtime guard at ``packs/storage.py:437-438`` (T3 R1 P2 #2)
         # rejects out-of-vocabulary transition names BEFORE any DB
         # connection is acquired. Mirrors ``validate_transition`` step
-        # 3 (T2 R1 P2) at ``packs/lifecycle.py:463-464`` and the
-        # :func:`iso_controls_for` guard at ``packs/lifecycle.py:388-389``
+        # 3 (T2 R1 P2) at ``packs/lifecycle.py:472-473`` and the
+        # :func:`iso_controls_for` guard at ``packs/lifecycle.py:393-394``
         # (T5 R1 P2) — all three sites raise
         # :class:`LifecycleTransitionRefused` with the same closed-enum
         # ``"lifecycle_transition_name_unknown"`` reason for any input
@@ -548,8 +548,10 @@ class TestSprint7B1FailClosedRefusalPaths:
         # Drive a record to ``uninstalled`` (terminal), then attempt
         # to transition further. ``validate_transition`` fires the
         # terminal-state guard at step 4
-        # (``packs/lifecycle.py:472-473`` after the T5 ISO-doc + helper
-        # expansion shifted the step-4 line range).
+        # (``packs/lifecycle.py:481-482`` after the T5 ISO-doc + helper
+        # expansion + T8 R3 Option B comment expansions shifted the
+        # step-4 line range; step 3's transition-name guard is the
+        # neighbouring pair at ``packs/lifecycle.py:472-473``).
         rec = _make_record(pack_id="rec-terminal-canary")
         await store.save_draft(rec)
         for transition in ("submit", "claim", "approve", "allow_list", "install", "disable"):

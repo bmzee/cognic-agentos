@@ -281,7 +281,11 @@ class TestSprint7B1InvalidTransitionsEmitClosedEnum:
         # ``KeyError`` at the ``_VALID_TRANSITIONS[transition]`` lookup at
         # the generic fallthrough step, leaking an unstructured exception
         # past the closed-enum contract that downstream T3 storage code
-        # (catching ``LifecycleTransitionRefused``) relies on.
+        # relies on. Storage does NOT catch ``LifecycleTransitionRefused``
+        # — the exception propagates up through
+        # ``append_with_precondition`` and ``transition()`` while
+        # ``engine.begin()`` at ``core/decision_history.py:482`` rolls
+        # back the precondition's transaction (established at T7 R7).
         result = validate_transition(
             from_state="draft",
             to_state="submitted",

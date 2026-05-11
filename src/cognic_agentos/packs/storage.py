@@ -207,7 +207,7 @@ _packs = Table(
 # this exception on out-of-vocabulary inputs — but storage's preflight
 # guard at (a) above intercepts every storage-side call site BEFORE
 # the helper is reached, so the helper's own runtime guard at
-# ``packs/lifecycle.py:388-389`` cannot fire from within this module.
+# ``packs/lifecycle.py:393-394`` cannot fire from within this module.
 # The helper's guard fires only when external callers (planned:
 # Sprint 7B.2 portal handlers) invoke ``iso_controls_for`` directly —
 # that fire-site lives in :mod:`cognic_agentos.packs.lifecycle`, NOT
@@ -442,7 +442,7 @@ class PackRecordStore:
         # source of truth at ``packs.lifecycle``; callers cannot supply
         # nor override). The preflight ``transition not in
         # _TRANSITION_TO_TARGET_STATE`` guard above means the helper's
-        # own runtime guard at ``packs/lifecycle.py:388-389`` cannot
+        # own runtime guard at ``packs/lifecycle.py:393-394`` cannot
         # fire from this call site — both guards check the same closed
         # set (the storage map and the lifecycle map both key off
         # ``TransitionName``; verified by the build-time drift detector
