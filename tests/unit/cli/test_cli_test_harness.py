@@ -5,13 +5,16 @@ Per Doctrine Decision C (post R31 + R32 + R33 narrowing),
 
   1. Manifest parse via the shared loader (same path :func:`run_validators` uses).
   2. The full validate pipeline (every refusal surfaces).
-  3. Dispatch dry-run for tool packs only (Wave-1 narrow per R33 P2 #1):
+  3. Dispatch dry-run for tool packs (Wave-1 narrow per R33 P2 #1):
      ``cls() + await instance.invoke()`` with no kwargs against the
      unmodified host runtime — NO ``fixture_settings`` injection,
-     NO ``httpx.MockTransport``, NO transport interception. Skill +
-     Agent packs are explicitly refused with closed-enum
-     ``harness_unsupported_pack_kind`` at the kind-narrowing gate
-     per R31 P2 #2.
+     NO ``httpx.MockTransport``, NO transport interception.
+     Sprint-7B.1 T6a widened :data:`_HARNESS_SUPPORTED_KINDS` from
+     ``frozenset({"tool"})`` to the full four-kind vocabulary
+     (``tool`` / ``skill`` / ``agent`` / ``hook``); per-kind dry-run
+     dispatch impls land in T6b. The kind-narrowing gate now surfaces
+     only for kinds outside :data:`PackKind` entirely (synthetic
+     fifth-kind canary in Section L below uses ``"workflow"``).
   4. Emit a conformance report covering identity / A2A / MCP /
      data-governance / risk-tier / supply-chain / dispatch dry-run.
 
@@ -960,25 +963,40 @@ def test_run_harness_entry_point_via_symlink_outside_pack_src_emits_unresolvable
 
 
 # ---------------------------------------------------------------------------
-# Section L — R31 P2 #2: narrow Wave-1 dispatch to tool packs
+# Section L — kind-narrowing gate: defense-in-depth for kinds outside
+# :data:`_HARNESS_SUPPORTED_KINDS`. Sprint-7A T13/R31 originally
+# narrowed the gate to ``kind="tool"`` only; Sprint-7B.1 T6a widened
+# the supported set to ``{"tool", "skill", "agent", "hook"}`` so the
+# gate now fires only for kinds outside the closed-enum entirely
+# (e.g. a synthetic ``"workflow"`` fifth kind, a typo, or a malicious
+# manifest). The synthetic ``"workflow"`` canary is unreachable
+# through the full author lifecycle (``cli/sign.py:_VALID_PACK_KINDS``
+# refuses it) but the harness's gate is the runtime defense-in-depth
+# layer for direct :func:`run_harness` invocation against unsigned
+# packs in pack-author integration code.
 # ---------------------------------------------------------------------------
 
 
-def _validate_clean_skill_manifest() -> str:
-    """A validate-clean kind=skill manifest used to exercise the
-    pack-kind narrowing gate. Mirrors the T13 fixture pack manifest
-    with kind="skill" substituted in + identity fields adjusted to
-    pass identity validator's skill-pack rules."""
+def _validate_clean_unknown_kind_manifest() -> str:
+    """A validate-clean ``kind = "workflow"`` manifest used to
+    exercise the pack-kind narrowing gate against a synthetic fifth
+    kind. Mirrors the T13 fixture pack manifest with the kind value
+    swapped for a member outside :data:`_HARNESS_SUPPORTED_KINDS` +
+    outside :data:`PackKind` literal entirely. Sprint-7B.1 T6a
+    converted this fixture from ``kind="skill"`` (no longer
+    narrowing-gated post-T6a) to ``kind="workflow"`` (still
+    narrowing-gated).
+    """
     return (
         "[pack]\n"
-        'pack_id = "cognic-skill-narrowing"\n'
+        'pack_id = "cognic-workflow-narrowing"\n'
         "schema_version = 1\n"
-        'kind = "skill"\n'
+        'kind = "workflow"\n'
         "\n"
         "[identity]\n"
-        'agent_id = "did:web:example.com:skills:narrowing"\n'
-        'display_name = "Narrowing Skill"\n'
-        'provider_organization = "Sprint-7A T13/R31 fixtures"\n'
+        'agent_id = "did:web:example.com:workflows:narrowing"\n'
+        'display_name = "Narrowing Workflow"\n'
+        'provider_organization = "Sprint-7B.1 T6a fixtures"\n'
         'provider_url = "https://example.com/narrowing"\n'
         'oasf_capability_set = ["test.v1"]\n'
         "\n"
@@ -998,25 +1016,27 @@ def _validate_clean_skill_manifest() -> str:
     )
 
 
-def test_run_harness_with_skill_kind_emits_unsupported_pack_kind(
+def test_run_harness_with_unknown_kind_emits_unsupported_pack_kind(
     tmp_path: Path,
 ) -> None:
-    """T13 narrows the harness's dispatch dry-run to ``kind="tool"``
-    packs only. Skill packs reach the harness with a validate-clean
-    manifest but receive the closed-enum
-    ``harness_unsupported_pack_kind`` refusal — pointing at the
-    expansion task — instead of a generic dispatch error from
-    ``Skill(tools=...)`` not being satisfied."""
+    """Defense-in-depth — the kind-narrowing gate refuses a pack whose
+    ``[pack].kind`` is outside :data:`_HARNESS_SUPPORTED_KINDS`. Post
+    Sprint-7B.1 T6a the supported set covers all four known kinds
+    (``tool`` / ``skill`` / ``agent`` / ``hook``); the gate now
+    surfaces only for synthetic fifth kinds (e.g. ``"workflow"``)
+    that bypass :func:`run_validators` — preventing a generic
+    dispatch-table AttributeError on a kind the table does not
+    understand."""
     pack_path = _write_pack(
-        tmp_path / "skill_pack",
-        manifest=_validate_clean_skill_manifest(),
+        tmp_path / "workflow_pack",
+        manifest=_validate_clean_unknown_kind_manifest(),
     )
     report = run_harness(pack_path)
     # Validate must be clean for the kind-narrowing gate to be the
     # surfaced refusal — otherwise the validate-refusal short-circuit
     # would mask it.
     refusals = [f for f in report.validate_findings if f.affects_exit_code]
-    assert refusals == [], f"validate refused skill manifest: {refusals!r}"
+    assert refusals == [], f"validate refused workflow-kind manifest: {refusals!r}"
     assert report.overall_status == "fail"
     assert any(f.reason == "harness_unsupported_pack_kind" for f in report.findings)
     assert report.dispatch_results == []
@@ -1027,14 +1047,16 @@ def test_unsupported_pack_kind_finding_carries_pack_kind_in_payload(
 ) -> None:
     """The closed-enum refusal records the offending pack kind in
     payload so CI parsers + harness-extension authors can route
-    on the kind without re-parsing the manifest."""
+    on the kind without re-parsing the manifest. Sprint-7B.1 T6a
+    flipped this fixture from ``kind="skill"`` (now narrowing-gate-
+    clean) to ``kind="workflow"`` (still narrowing-gate-refused)."""
     pack_path = _write_pack(
-        tmp_path / "skill_payload",
-        manifest=_validate_clean_skill_manifest(),
+        tmp_path / "workflow_payload",
+        manifest=_validate_clean_unknown_kind_manifest(),
     )
     report = run_harness(pack_path)
     finding = next(f for f in report.findings if f.reason == "harness_unsupported_pack_kind")
-    assert finding.payload["pack_kind"] == "skill"
+    assert finding.payload["pack_kind"] == "workflow"
     assert "tool" in finding.payload["supported_kinds"]
 
 

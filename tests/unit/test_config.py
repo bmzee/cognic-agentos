@@ -1756,21 +1756,23 @@ class TestSprint7B1PackKindVocabulary:
     (NARROW form).
 
     Pins :data:`cognic_agentos.packs.lifecycle.PackKind` alignment with the
-    build-time pack-kind surfaces that already support all 4 kinds at T2:
+    build-time pack-kind surfaces:
 
     - ``cli.init._SUPPORTED_KINDS`` (Sprint-7A scaffold validator)
     - ``cli.sign._VALID_PACK_KINDS`` (Sprint-7A2 signing-time kind validator)
 
     The harness surfaces (``cli.test_harness._HARNESS_SUPPORTED_KINDS`` +
-    ``cli.test_harness._KIND_TO_ENTRY_POINT_GROUP``) are still Wave-1-narrow
-    at T2 (``frozenset({"tool"})`` + 3-kind dict) and expand at T6a — the
-    full 4-surface drift assertion lands at T6a in
+    ``cli.test_harness._KIND_TO_ENTRY_POINT_GROUP``) were Wave-1-narrow at
+    T2 (``frozenset({"tool"})`` + 3-kind dict) and were widened at
+    Sprint-7B.1 T6a to the full four-kind vocabulary. The harness-side
+    three-way drift assertion (supported-kinds frozenset == entry-point
+    group keys == ``get_args(PackKind)``) lives at
     ``tests/unit/cli/test_harness_vocabulary.py`` per the plan-of-record's
     Doctrine Lock A.
 
     Adding a 5th pack kind in a future sprint REQUIRES updating every
-    surface listed above + the harness surfaces (post-T6a) or this test
-    fails — by design."""
+    surface listed above + the harness surfaces or this test fails — by
+    design."""
 
     def test_pack_kind_aligns_with_init_supported_kinds(self) -> None:
         from typing import get_args

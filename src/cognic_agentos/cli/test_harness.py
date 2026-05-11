@@ -23,16 +23,21 @@ Per Doctrine Decision C, ``agentos test-harness <pack-path>`` runs:
      kwargs against the SDK's already-validated
      :class:`Tool.invoke` template (which validates input + output
      schemas), and capture the response shape for the conformance
-     report. Skill + Agent packs are explicitly refused at the
-     kind-narrowing gate per T13/R31 (closed-enum reason
-     :data:`harness_unsupported_pack_kind`); their dispatch
-     contracts (Skill ``ToolRegistry`` at instantiation, Agent
-     ``handle(payload: bytes, *, task: TaskRecord)``) require
-     dedicated fixture-adapter wiring that lands when the harness
-     is expanded. Earlier drafts of this bullet said dispatch ran
-     against ``agentos_sdk.testing.fixture_settings`` + memory-
-     backed adapters — that wiring was never implemented; bullet 4
-     spells out the no-transport-interception narrow.
+     report. Sprint-7B.1 T6a widened the kind-narrowing gate's
+     supported set from ``{"tool"}`` to ``{"tool", "skill", "agent",
+     "hook"}`` so the gate refuses only kinds outside
+     :data:`PackKind` entirely (synthetic fifth-kind canary in
+     ``test_cli_test_harness.py::Section L`` uses ``"workflow"``).
+     Per-kind dry-run dispatch impls for skill (``ToolRegistry``
+     fixture + ``execute(...)``), agent (``handle(payload, task=
+     TaskRecord)``), and hook (``Hook.invoke(context, payload)``
+     public seam) land in T6b; until then non-tool kinds exit
+     non-zero via a dispatch-stage refusal
+     (:data:`harness_dispatch_failed`) rather than the kind-
+     narrowing refusal. Earlier drafts of this bullet said
+     dispatch ran against ``agentos_sdk.testing.fixture_settings``
+     + memory-backed adapters — that wiring was never implemented;
+     see bullet 4 for the no-transport-interception narrow.
   4. **Wave-1 narrow contract — no transport interception**
      (R33 P2 #1). The harness DOES NOT install
      ``httpx.MockTransport``, inject ``agentos_sdk.testing.
@@ -127,22 +132,27 @@ HarnessReason = Literal[
     "harness_no_entry_points_declared",
     "harness_entry_point_unresolvable",
     "harness_dispatch_failed",
-    # R31 P2 #2 — Wave-1 narrow: dispatch dry-run supports tool packs
-    # only. Skill + Agent dispatch contracts (Skill needs ToolRegistry
-    # at instantiation; Agent's ``handle()`` takes
-    # ``payload: bytes + task: TaskRecord``) require dedicated fixture-
-    # adapter wiring that lands when the harness's kind dispatch table
-    # is expanded.
+    # Defense-in-depth refusal for kinds outside :data:`PackKind`.
+    # Originally seeded at Sprint-7A T13/R31 P2 #2 to narrow Wave-1
+    # dispatch to ``kind="tool"`` only; Sprint-7B.1 T6a widened the
+    # supported set to the full :data:`PackKind` vocabulary so this
+    # gate now fires only for synthetic / typo / malicious kinds
+    # outside the closed-enum entirely (e.g. ``"workflow"``).
     "harness_unsupported_pack_kind",
 ]
 
 
-#: Pack kinds the harness's Wave-1 dispatch path supports.
-#: Skill + Agent kinds are explicitly refused with
-#: ``harness_unsupported_pack_kind`` instead of being routed through
-#: a Tool-only dispatch path that would crash with a generic
-#: instantiation error.
-_HARNESS_SUPPORTED_KINDS: Final[frozenset[str]] = frozenset({"tool"})
+#: Pack kinds the harness's dispatch path supports. Pinned in three-
+#: way lockstep with :data:`_KIND_TO_ENTRY_POINT_GROUP` keys and
+#: ``typing.get_args(PackKind)`` by the drift detector in
+#: ``test_harness_vocabulary.py``. Kinds outside this frozenset are
+#: refused at the kind-narrowing gate with closed-enum
+#: ``harness_unsupported_pack_kind`` — defending downstream dispatch
+#: from a generic AttributeError on a kind the dispatch table does
+#: not understand. Sprint-7B.1 T6a widened the set from
+#: ``frozenset({"tool"})`` to the full four-kind vocabulary; per-kind
+#: dry-run dispatch impls land in T6b.
+_HARNESS_SUPPORTED_KINDS: Final[frozenset[str]] = frozenset({"tool", "skill", "agent", "hook"})
 
 
 #: Regex that every dotted-module-name segment in an entry-point
@@ -166,14 +176,19 @@ _HARNESS_SUPPORTED_KINDS: Final[frozenset[str]] = frozenset({"tool"})
 _MODULE_SEGMENT_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
-#: Closed-enum mapping ``"tool" / "skill" / "agent"`` → the matching
-#: ``[project.entry-points."<group>"]`` table the harness reads. Pinned
-#: here so a future migration that renames the groups updates a single
-#: source of truth.
+#: Closed-enum mapping ``"tool" / "skill" / "agent" / "hook"`` → the
+#: matching ``[project.entry-points."<group>"]`` table the harness
+#: reads. Pinned here so a future migration that renames the groups
+#: updates a single source of truth. Sprint-7B.1 T6a added the
+#: ``"hook"`` arm pointing at ``cognic.hooks`` (Sprint-7A2 T9 wired
+#: the ``cognic.hooks`` entry-point group through the wheel-integrity
+#: kind-derivation table; T6a brought the harness's vocabulary to
+#: match).
 _KIND_TO_ENTRY_POINT_GROUP: Final[dict[str, str]] = {
     "tool": "cognic.tools",
     "skill": "cognic.skills",
     "agent": "cognic.agents",
+    "hook": "cognic.hooks",
 }
 
 
@@ -757,24 +772,32 @@ def run_harness(pack_path: Path) -> HarnessReport:
     # Validate clean — read the pack identity for the report header.
     pack_id, pack_kind = _read_pack_id_and_kind(pack_path)
 
-    # Step 1.5 (R31 P2 #2): pack-kind narrowing. Wave-1 dispatches
-    # tool packs only — Skill needs ToolRegistry at instantiation
-    # time, Agent's ``handle()`` takes ``payload: bytes + task:
-    # TaskRecord``. Routing those through the Tool-only dispatch
-    # path would produce generic instantiation errors; the closed-
-    # enum refusal points authors at the future expansion task.
+    # Step 1.5: kind-narrowing gate — defense-in-depth for kinds
+    # outside :data:`_HARNESS_SUPPORTED_KINDS`. Originally seeded at
+    # Sprint-7A T13/R31 P2 #2 to narrow Wave-1 dispatch to
+    # ``kind="tool"`` only; Sprint-7B.1 T6a widened the supported set
+    # to the full :data:`PackKind` vocabulary, so this gate now fires
+    # only for kinds outside the closed-enum entirely (synthetic /
+    # typo / malicious manifests with e.g. ``kind="workflow"``).
+    # ``cli/sign.py:_VALID_PACK_KINDS`` refuses unknown kinds up-front
+    # in the full author lifecycle, but :func:`run_harness` is also
+    # called via direct integration against unsigned packs — the gate
+    # is the runtime last line of defense to keep a generic dispatch-
+    # table AttributeError from surfacing for a kind the table does
+    # not understand.
     if pack_kind not in _HARNESS_SUPPORTED_KINDS:
         findings.append(
             HarnessFinding(
                 severity="refusal",
                 reason="harness_unsupported_pack_kind",
                 message=(
-                    f"pack kind {pack_kind!r} is not yet supported by the "
-                    "harness's dispatch dry-run. Wave-1 dispatches tool "
-                    "packs only; skill + agent packs require dedicated "
-                    "fixture-adapter wiring (Skill ToolRegistry, Agent "
-                    "TaskRecord+payload) that lands when the harness's "
-                    "kind dispatch table is expanded."
+                    f"pack kind {pack_kind!r} is not a member of the harness's "
+                    f"supported-kinds closed enum "
+                    f"{sorted(_HARNESS_SUPPORTED_KINDS)!r}. Common causes: a "
+                    "typo in the manifest's [pack].kind field, or a manifest "
+                    "from a future / experimental pack format that this "
+                    "harness build does not yet support. Update [pack].kind "
+                    "to one of the supported values + re-run the harness."
                 ),
                 payload={
                     "pack_path": str(pack_path),
