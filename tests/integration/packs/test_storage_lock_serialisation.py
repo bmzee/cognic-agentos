@@ -214,7 +214,6 @@ async def _canary_row_lock_serialisation(driver: str) -> None:
                     actor_id=label,
                     tenant_id=None,
                     evidence_pointer=None,
-                    iso_controls=(),
                     request_id=f"req-race-{label}",
                 )
             except LifecycleTransitionRefused as exc:
@@ -406,7 +405,6 @@ async def _canary_pack_row_lock_blocks_competing_transition(driver: str) -> None
                     actor_id="t2",
                     tenant_id=None,
                     evidence_pointer=None,
-                    iso_controls=(),
                     request_id="req-t2-blocked",
                 )
             except LifecycleTransitionRefused as exc:

@@ -38,6 +38,7 @@ from cognic_agentos.packs.lifecycle import (
     PackKind,
     PackState,
     TransitionName,
+    iso_controls_for,
 )
 from cognic_agentos.packs.storage import (
     _TRANSITION_TO_TARGET_STATE,
@@ -380,7 +381,6 @@ class TestSprint7B1PackRecordStoreTransitionHappyPath:
             actor_id="author-1",
             tenant_id=None,
             evidence_pointer=None,
-            iso_controls=("A.5.31",),
             request_id="req-submit-canary",
         )
         # Chain row count grew by one.
@@ -402,7 +402,6 @@ class TestSprint7B1PackRecordStoreTransitionHappyPath:
             actor_id="author-1",
             tenant_id="tenant-canary",
             evidence_pointer=None,
-            iso_controls=(),
             request_id="req-decision-type-canary",
         )
         async with engine.connect() as conn:
@@ -450,7 +449,6 @@ class TestSprint7B1PackRecordStoreTransitionHappyPath:
                 actor_id=f"actor-{trans}",
                 tenant_id=None,
                 evidence_pointer=None,
-                iso_controls=(),
                 request_id=f"req-{trans}",
             )
             assert await _read_pack_state(engine, rec.id) == expected_state
@@ -460,15 +458,32 @@ class TestSprint7B1PackRecordStoreTransitionHappyPath:
     async def test_iso_controls_recorded_in_chain_payload(
         self, store: PackRecordStore, engine: AsyncEngine
     ) -> None:
+        # Sprint 7B.1 T5 (R1 P2 reviewer fix): storage.transition()
+        # derives iso_controls canonically from the transition name; the
+        # public API no longer accepts an ``iso_controls`` argument so
+        # callers cannot emit an audit-untagged or wrongly-tagged chain
+        # row. The chain row's ``iso_controls`` column AND
+        # ``payload['iso_controls']`` MUST both equal
+        # ``iso_controls_for("submit")``. Pin a fresh lookup here against
+        # the canonical map (drift in the map without updating
+        # ``test_lifecycle_audit.py::TestSprint7B1IsoControlsMapShape``
+        # would fail there first; this assertion catches the inverse —
+        # the helper drifts without the canonical assertion catching it).
         rec = _make_record()
         await store.save_draft(rec)
+        expected_controls = iso_controls_for("submit")
+        assert expected_controls == ("A.5.31", "A.6.2.4"), (
+            "submit-transition iso_controls drifted from "
+            "Sprint-7B.1-T5 canonical mapping; if intentional update "
+            "test_lifecycle_audit.py::TestSprint7B1IsoControlsMapShape "
+            "in the same commit"
+        )
         await store.transition(
             pack_id=rec.id,
             transition="submit",
             actor_id="author-1",
             tenant_id=None,
             evidence_pointer="s3://bucket/evidence-1",
-            iso_controls=("A.5.31", "A.6.2.4"),
             request_id="req-iso-canary",
         )
         async with engine.connect() as conn:
@@ -479,9 +494,34 @@ class TestSprint7B1PackRecordStoreTransitionHappyPath:
                     .limit(1)
                 )
             ).one()
-        assert list(row.iso_controls) == ["A.5.31", "A.6.2.4"]
+        assert tuple(row.iso_controls) == expected_controls
         assert row.payload["evidence_pointer"] == "s3://bucket/evidence-1"
-        assert row.payload["iso_controls"] == ["A.5.31", "A.6.2.4"]
+        assert tuple(row.payload["iso_controls"]) == expected_controls
+
+    async def test_caller_cannot_supply_iso_controls_argument(self, store: PackRecordStore) -> None:
+        # Sprint 7B.1 T5 R1 P2: storage.transition() no longer accepts
+        # ``iso_controls`` as a kwarg — the canonical mapping in
+        # ``packs.lifecycle`` is the single source of truth per ADR-006
+        # §"Evidence emission". Pinning this against accidental
+        # reintroduction of the parameter (which would re-open the
+        # untagged-chain-row attack surface that R1 P2 closed).
+        rec = _make_record()
+        await store.save_draft(rec)
+        with pytest.raises(TypeError) as ei:
+            await store.transition(
+                pack_id=rec.id,
+                transition="submit",
+                actor_id="author-1",
+                tenant_id=None,
+                evidence_pointer=None,
+                iso_controls=("A.5.31",),  # type: ignore[call-arg]
+                request_id="req-iso-arg-refused",
+            )
+        # The standard CPython kwarg-mismatch message includes the
+        # bad kwarg name. Pinning the exact substring would couple to
+        # CPython error-message wording (unstable across versions);
+        # asserting the name appears in the diagnostic is sufficient.
+        assert "iso_controls" in str(ei.value)
 
 
 # ===========================================================================
@@ -508,7 +548,6 @@ class TestSprint7B1PackRecordStoreTransitionRefused:
             actor_id="author-1",
             tenant_id=None,
             evidence_pointer=None,
-            iso_controls=(),
             request_id="req-canary-1",
         )
         chain_before = await _count_chain_rows(engine)
@@ -520,7 +559,6 @@ class TestSprint7B1PackRecordStoreTransitionRefused:
                 actor_id="author-1",
                 tenant_id=None,
                 evidence_pointer=None,
-                iso_controls=(),
                 request_id="req-canary-2",
             )
         assert ei.value.reason == "lifecycle_transition_invalid_state_pair"
@@ -543,7 +581,6 @@ class TestSprint7B1PackRecordStoreTransitionRefused:
             actor_id="author-1",
             tenant_id=None,
             evidence_pointer=None,
-            iso_controls=(),
             request_id="req-1",
         )
         chain_before = await _count_chain_rows(engine)
@@ -554,7 +591,6 @@ class TestSprint7B1PackRecordStoreTransitionRefused:
                 actor_id="reviewer-1",
                 tenant_id=None,
                 evidence_pointer=None,
-                iso_controls=(),
                 request_id="req-2",
             )
         assert ei.value.reason == "lifecycle_transition_approve_without_review_claim"
@@ -582,7 +618,6 @@ class TestSprint7B1PackRecordStoreTransitionRefused:
                 actor_id="canary",
                 tenant_id=None,
                 evidence_pointer=None,
-                iso_controls=(),
                 request_id=f"req-{trans}",
             )
         chain_before = await _count_chain_rows(engine)
@@ -593,7 +628,6 @@ class TestSprint7B1PackRecordStoreTransitionRefused:
                 actor_id="canary",
                 tenant_id=None,
                 evidence_pointer=None,
-                iso_controls=(),
                 request_id="req-after-uninstalled",
             )
         assert ei.value.reason == "lifecycle_transition_terminal_state"
@@ -622,7 +656,6 @@ class TestSprint7B1PackRecordStoreTransitionPackNotFound:
                 actor_id="canary",
                 tenant_id=None,
                 evidence_pointer=None,
-                iso_controls=(),
                 request_id="req-missing",
             )
         # No row inserted (rollback).
@@ -653,7 +686,6 @@ class TestSprint7B1PackRecordStoreListByStatus:
             actor_id="canary",
             tenant_id=None,
             evidence_pointer=None,
-            iso_controls=(),
             request_id="req-canary",
         )
 
@@ -716,7 +748,6 @@ class TestSprint7B1PackRecordStoreLoadLifecycleHistory:
                 actor_id="canary",
                 tenant_id=None,
                 evidence_pointer=None,
-                iso_controls=(),
                 request_id=f"req-{trans}",
             )
         history = await store.load_lifecycle_history(rec.id)
@@ -739,7 +770,6 @@ class TestSprint7B1PackRecordStoreLoadLifecycleHistory:
                 actor_id="canary",
                 tenant_id=None,
                 evidence_pointer=None,
-                iso_controls=(),
                 request_id=f"req-{r.pack_id}",
             )
         history_a = await store.load_lifecycle_history(rec_a.id)
@@ -932,7 +962,6 @@ class TestSprint7B1PackRecordStoreTransitionNameUnknownGuard:
                 actor_id="canary",
                 tenant_id=None,
                 evidence_pointer=None,
-                iso_controls=(),
                 request_id="req-archive",
             )
         # Closed-enum reason mirrors the lifecycle layer's guard
@@ -967,7 +996,6 @@ class TestSprint7B1PackRecordStoreTransitionNameUnknownGuard:
                 actor_id="canary",
                 tenant_id=None,
                 evidence_pointer=None,
-                iso_controls=(),
                 request_id="req",
             )
         except LifecycleTransitionRefused as exc:
@@ -1023,7 +1051,6 @@ class TestSprint7B1StorageGuardsLoadBearing:
                 actor_id="canary",
                 tenant_id=None,
                 evidence_pointer=None,
-                iso_controls=(),
                 request_id="req",
             )
         # Closed-enum boundary holds — KeyError("archive") would have

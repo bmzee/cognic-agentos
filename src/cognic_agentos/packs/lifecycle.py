@@ -65,6 +65,35 @@ Refusal precedence (more-specific reasons fire BEFORE generic fallthrough):
 future kind-specific transition rules and has NO emit path in 7B.1.
 Future sprints adding such a rule MUST add an emit path AND a
 corresponding regression test in the same commit.
+
+ISO 42001 control mapping (Sprint 7B.1 T5)
+------------------------------------------
+
+Per ADR-006 §"Evidence emission" and the plan-of-record T5 §"ISO 42001
+control mapping + fail-closed semantics tests", every pack-lifecycle
+chain row is tagged with the ISO 42001 controls the transition exercises.
+The canonical mapping lives at :data:`_TRANSITION_TO_ISO_CONTROLS` and
+is exposed publicly via :func:`iso_controls_for` — single source of
+truth for Sprint 7B.2 portal handlers + future direct callers.
+
+The closed control vocabulary :data:`_KNOWN_ISO_CONTROL_CODES` pins the
+set of codes the lifecycle map may reference at build time:
+
+- ``A.5.31`` — regulatory governance gate (every author-side and
+  reviewer-side decision lands here).
+- ``A.5.32`` — operational access control (allow-list / install /
+  disable / revoke / uninstall — tenant-facing state transitions).
+- ``A.6.2.4`` — AI system requirements and specifications (approval /
+  revocation events — gates that authorise or de-authorise a pack
+  against its declared capabilities).
+
+Widening the vocabulary is a deliberate sprint scope decision — adding
+a code outside this set requires updating both
+:data:`_KNOWN_ISO_CONTROL_CODES` AND the ADR-006 Phase 3.1
+``compliance/iso42001/controls.py`` registry (lands in a future sprint)
+in the same commit. The build-time drift detector at
+``tests/unit/packs/test_lifecycle_audit.py`` refuses any silent map edit
+that introduces an unvetted code.
 """
 
 from __future__ import annotations
@@ -206,6 +235,161 @@ _KNOWN_STATES: Final[frozenset[str]] = frozenset(get_args(PackState))
 _KNOWN_TRANSITIONS: Final[frozenset[str]] = frozenset(get_args(TransitionName))
 
 
+#: Closed ISO 42001 control vocabulary for the pack-lifecycle map. Drift
+#: detector ensures every value in :data:`_TRANSITION_TO_ISO_CONTROLS`
+#: is a member of this set; widening the vocabulary requires updating
+#: this constant AND the future ``compliance/iso42001/controls.py``
+#: registry (ADR-006 Phase 3.1) in the same commit per the module
+#: docstring §"ISO 42001 control mapping (Sprint 7B.1 T5)".
+_KNOWN_ISO_CONTROL_CODES: Final[frozenset[str]] = frozenset(
+    {
+        "A.5.31",
+        "A.5.32",
+        "A.6.2.4",
+    }
+)
+
+#: Canonical ``TransitionName`` → ``tuple[str, ...]`` ISO 42001 control
+#: mapping. Sprint 7B.1 T5. Per ADR-006 §"Evidence emission" + plan-of-
+#: record T5: every transition emits a chain row tagged with the controls
+#: the transition exercises. Examiner-side evidence-pack export walks
+#: ``decision_history.event_type LIKE 'pack.lifecycle.%'`` and groups
+#: rows by ISO control for the per-control coverage section of the
+#: bundle.
+#:
+#: Per-transition rationale (each code is in
+#: :data:`_KNOWN_ISO_CONTROL_CODES`):
+#:
+#: - ``submit`` → ``("A.5.31", "A.6.2.4")`` — author kicks off the
+#:   regulatory review (A.5.31) AND declares the system requirements
+#:   that will be reviewed (A.6.2.4).
+#: - ``claim`` → ``("A.5.31",)`` — reviewer takes ownership; pure
+#:   regulatory logging.
+#: - ``approve`` → ``("A.5.31", "A.6.2.4")`` — governance gate fires
+#:   on the requirements & specifications.
+#: - ``reject`` → ``("A.5.31",)`` — governance gate documents the
+#:   refusal.
+#: - ``withdraw`` → ``("A.5.31",)`` — author cancels the regulatory
+#:   review.
+#: - ``allow_list`` → ``("A.5.31", "A.5.32")`` — regulatory gate
+#:   plus per-tenant access-control authorisation.
+#: - ``install`` → ``("A.5.31", "A.5.32")`` — operational
+#:   activation under a tenant; regulatory record + access control.
+#: - ``disable`` → ``("A.5.32",)`` — operational access control only.
+#: - ``revoke`` → ``("A.5.32", "A.6.2.4")`` — security-incident path;
+#:   access control + the AI system specification gate (revocation
+#:   means specs no longer hold).
+#: - ``uninstall`` → ``("A.5.32",)`` — operational access control;
+#:   terminal state.
+#:
+#: ``Mapping`` keys must equal ``get_args(TransitionName)`` exactly;
+#: pinned by ``test_lifecycle_audit.py::TestSprint7B1IsoControlsMapShape``.
+#: Build-time assert at module foot mirrors the
+#: ``_TRANSITION_TO_TARGET_STATE`` drift assert at
+#: ``packs/storage.py:644-653``.
+_TRANSITION_TO_ISO_CONTROLS: Final[Mapping[TransitionName, tuple[str, ...]]] = {
+    "submit": ("A.5.31", "A.6.2.4"),
+    "claim": ("A.5.31",),
+    "approve": ("A.5.31", "A.6.2.4"),
+    "reject": ("A.5.31",),
+    "withdraw": ("A.5.31",),
+    "allow_list": ("A.5.31", "A.5.32"),
+    "install": ("A.5.31", "A.5.32"),
+    "disable": ("A.5.32",),
+    "revoke": ("A.5.32", "A.6.2.4"),
+    "uninstall": ("A.5.32",),
+}
+
+
+class LifecycleTransitionRefused(Exception):
+    """Raised when the bank-pack lifecycle state machine refuses a
+    transition. Carries the closed-enum :data:`LifecycleRefusalReason`
+    so callers (T3 storage layer, T6 harness dispatch, Sprint 7B.2
+    portal handlers) can dispatch on the exact failure mode without
+    parsing strings.
+
+    Co-located with :data:`LifecycleRefusalReason` in this module
+    because the exception is a thin wrapper around the closed-enum;
+    keeping the type AND the enum AND the validator together makes the
+    asymmetric-runtime-guard doctrine
+    (``feedback_strict_review_off_gate.md`` §8) self-evident — every
+    public seam that takes a closed-enum-typed argument
+    (``validate_transition`` step 3 in this module;
+    :meth:`PackRecordStore.transition` preflight guard at
+    ``packs/storage.py:435-436``; :func:`iso_controls_for` in this module)
+    raises this same exception with the same
+    ``"lifecycle_transition_name_unknown"`` reason for out-of-vocabulary
+    transitions.
+
+    The exception is re-exported from ``cognic_agentos.packs.storage``
+    for backward compatibility — pre-Sprint-7B.1-T5 callers import via
+    the storage module path. Sprint-7B.1-T5 added the public re-export
+    in lifecycle (this module) for the helper. The class is the same
+    Python object identity in both locations
+    (``packs.storage.LifecycleTransitionRefused is
+    packs.lifecycle.LifecycleTransitionRefused``).
+    """
+
+    def __init__(self, reason: LifecycleRefusalReason) -> None:
+        self.reason = reason
+        super().__init__(reason)
+
+
+def iso_controls_for(transition: TransitionName) -> tuple[str, ...]:
+    """Return the canonical ISO 42001 control tags for a named
+    pack-lifecycle transition.
+
+    Single source of truth for what controls each pack-lifecycle
+    transition exercises per ADR-006 §"Evidence emission". The chain-
+    row emit path is owned by :meth:`PackRecordStore.transition`, which
+    looks up the canonical tuple via THIS helper internally (Sprint
+    7B.1 T5 R1 P2 — the storage public API does NOT accept an
+    ``iso_controls`` argument so callers cannot inject untagged or
+    wrongly-tagged events).
+
+    External callers — Sprint 7B.2 portal handlers + future
+    inspection / display / preflight surfaces — may use this helper
+    to PREVIEW what controls a given transition will tag (e.g.
+    rendering "this approval will exercise A.5.31 + A.6.2.4" in the
+    portal UI before the operator confirms). It is NOT a way to
+    supply or override controls at the storage call site; the only
+    write path is :meth:`PackRecordStore.transition`'s internal
+    derivation.
+
+    Per the asymmetric-runtime-guard doctrine
+    (``feedback_strict_review_off_gate.md`` §8 — same as
+    :func:`validate_transition` step 3 + :meth:`PackRecordStore.transition`
+    preflight guard at ``packs/storage.py:435-436``): out-of-vocabulary
+    transition names are refused with :class:`LifecycleTransitionRefused`
+    carrying the closed-enum
+    ``"lifecycle_transition_name_unknown"`` reason — NOT a bare
+    ``KeyError`` leaking the dictionary internals.
+
+    Parameters
+    ----------
+    transition
+        Member of the canonical 10-tuple :data:`TransitionName`. Static
+        type-checkers refuse out-of-vocabulary calls; the runtime guard
+        catches dynamic mis-calls (e.g. from JSON-decoded API payloads).
+
+    Returns
+    -------
+    tuple[str, ...]
+        The canonical ISO 42001 control codes for this transition.
+        Codes are drawn from :data:`_KNOWN_ISO_CONTROL_CODES`.
+
+    Raises
+    ------
+    LifecycleTransitionRefused
+        With ``reason="lifecycle_transition_name_unknown"`` when
+        ``transition`` is not a member of :data:`TransitionName`.
+    """
+
+    if transition not in _TRANSITION_TO_ISO_CONTROLS:
+        raise LifecycleTransitionRefused("lifecycle_transition_name_unknown")
+    return _TRANSITION_TO_ISO_CONTROLS[transition]
+
+
 def validate_transition(
     *,
     from_state: PackState,
@@ -319,10 +503,33 @@ def validate_transition(
     return None
 
 
+# Build-time invariant: the canonical iso-controls map covers every
+# TransitionName key exactly, and every code is in the closed
+# _KNOWN_ISO_CONTROL_CODES vocabulary. Asserted at import time so module
+# load alone surfaces drift; the unit test at
+# ``tests/unit/packs/test_lifecycle_audit.py::TestSprint7B1IsoControlsMapShape``
+# provides the operator-facing diagnostic. Mirrors the
+# ``_TRANSITION_TO_TARGET_STATE`` drift assert at
+# ``packs/storage.py:644-653``.
+assert set(_TRANSITION_TO_ISO_CONTROLS.keys()) == set(get_args(TransitionName)), (
+    "_TRANSITION_TO_ISO_CONTROLS keys diverge from get_args(TransitionName)"
+)
+for _t, _codes in _TRANSITION_TO_ISO_CONTROLS.items():
+    assert len(_codes) > 0, f"_TRANSITION_TO_ISO_CONTROLS[{_t!r}] is empty"
+    for _c in _codes:
+        assert _c in _KNOWN_ISO_CONTROL_CODES, (
+            f"_TRANSITION_TO_ISO_CONTROLS[{_t!r}] contains code {_c!r} "
+            f"outside the closed _KNOWN_ISO_CONTROL_CODES vocabulary"
+        )
+del _t, _codes, _c
+
+
 __all__ = [
     "LifecycleRefusalReason",
+    "LifecycleTransitionRefused",
     "PackKind",
     "PackState",
     "TransitionName",
+    "iso_controls_for",
     "validate_transition",
 ]

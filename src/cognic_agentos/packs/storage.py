@@ -107,10 +107,11 @@ from cognic_agentos.core.decision_history import (
 from cognic_agentos.db.types import chain_hash_column_type
 from cognic_agentos.packs.lifecycle import (
     _VALID_TRANSITIONS,
-    LifecycleRefusalReason,
+    LifecycleTransitionRefused,
     PackKind,
     PackState,
     TransitionName,
+    iso_controls_for,
     validate_transition,
 )
 
@@ -179,21 +180,38 @@ _packs = Table(
 )
 
 
-class LifecycleTransitionRefused(Exception):
-    """Raised by :meth:`PackRecordStore.transition` when the lifecycle
-    state machine refuses the transition. Carries the closed-enum
-    :data:`cognic_agentos.packs.lifecycle.LifecycleRefusalReason` so
-    callers (T6+, Sprint 7B.2 portal handlers) can dispatch on the
-    exact failure mode without parsing strings.
-
-    The exception fires from inside the ``append_with_precondition``
-    precondition closure — the entire transaction rolls back, no
-    chain row inserted, no state cache mutation.
-    """
-
-    def __init__(self, reason: LifecycleRefusalReason) -> None:
-        self.reason = reason
-        super().__init__(reason)
+# ``LifecycleTransitionRefused`` is defined in
+# :mod:`cognic_agentos.packs.lifecycle` (the closed-enum
+# :data:`LifecycleRefusalReason` it carries lives there) and re-exported
+# here for backward-compatible import paths — pre-Sprint-7B.1-T5 callers
+# imported via the storage module. The class is the same Python object
+# in both locations
+# (``packs.storage.LifecycleTransitionRefused is
+# packs.lifecycle.LifecycleTransitionRefused``).
+#
+# Storage-module fire-sites (two):
+#   (a) :meth:`PackRecordStore.transition` preflight guard at the
+#       ``transition not in _TRANSITION_TO_TARGET_STATE`` check —
+#       no DB connection acquired; closed-enum reason
+#       ``"lifecycle_transition_name_unknown"``.
+#   (b) The ``_precondition`` closure on a ``validate_transition``
+#       non-None return — the ``engine.begin()`` transaction owned by
+#       :meth:`DecisionHistoryStore.append_with_precondition` rolls
+#       back atomically (no chain row, no state cache mutation);
+#       closed-enum reason is any value of
+#       :data:`LifecycleRefusalReason` other than
+#       ``"lifecycle_transition_name_unknown"``.
+#
+# The pure-functional helper :func:`iso_controls_for` (which storage
+# calls inside ``transition()`` per Sprint-7B.1-T5 R1 P2) also raises
+# this exception on out-of-vocabulary inputs — but storage's preflight
+# guard at (a) above intercepts every storage-side call site BEFORE
+# the helper is reached, so the helper's own runtime guard at
+# ``packs/lifecycle.py:388-389`` cannot fire from within this module.
+# The helper's guard fires only when external callers (Sprint 7B.2
+# portal handlers, T6 harness dispatch) invoke ``iso_controls_for``
+# directly — that fire-site lives in :mod:`cognic_agentos.packs.lifecycle`,
+# NOT here.
 
 
 class PackNotFound(Exception):
@@ -345,12 +363,22 @@ class PackRecordStore:
         actor_id: str,
         tenant_id: str | None,
         evidence_pointer: str | None,
-        iso_controls: tuple[str, ...],
         request_id: str,
     ) -> tuple[uuid.UUID, bytes]:
         """Atomically advance a pack through a named lifecycle
         transition. Returns ``(record_id, chain_hash)`` from the chain
         insert.
+
+        ISO 42001 control tags are derived canonically (Sprint 7B.1 T5
+        + R1 P2 reviewer fix) — callers do NOT supply ``iso_controls``.
+        The transition name alone determines the tags via
+        :func:`cognic_agentos.packs.lifecycle.iso_controls_for`,
+        single source of truth per ADR-006 §"Evidence emission" and
+        ADR-012's "all state transitions emit hash-chained audit events
+        tagged with applicable ISO 42001 controls" contract. Caller-
+        supplied tags would let a misconfigured or malicious caller emit
+        an audit-untagged or wrongly-tagged chain row, breaking
+        examiner-side evidence-pack export.
 
         Atomic semantics (Doctrine Lock D): chain-head ``SELECT FOR
         UPDATE`` → pack-row ``SELECT FOR UPDATE`` → ``validate_transition``
@@ -408,6 +436,22 @@ class PackRecordStore:
             raise LifecycleTransitionRefused("lifecycle_transition_name_unknown")
 
         target_state = _TRANSITION_TO_TARGET_STATE[transition]
+        # Canonical ISO 42001 control derivation (T5 R1 P2 — single
+        # source of truth at ``packs.lifecycle``; callers cannot supply
+        # nor override). The preflight ``transition not in
+        # _TRANSITION_TO_TARGET_STATE`` guard above means the helper's
+        # own runtime guard at ``packs/lifecycle.py:388-389`` cannot
+        # fire from this call site — both guards check the same closed
+        # set (the storage map and the lifecycle map both key off
+        # ``TransitionName``; verified by the build-time drift detector
+        # ``TestSprint7B1IsoControlsMapShape::test_map_keys_match_transition_name_literal``
+        # at ``tests/unit/packs/test_lifecycle_audit.py``). The helper
+        # call is nonetheless retained (rather than indexing
+        # ``_TRANSITION_TO_ISO_CONTROLS`` directly) so storage stays
+        # routed through the public lifecycle seam — single source of
+        # truth for the mapping, not two callers indexing the same
+        # private dict.
+        canonical_iso_controls = iso_controls_for(transition)
 
         async def _precondition(
             conn: AsyncConnection,
@@ -470,9 +514,9 @@ class PackRecordStore:
                     "to_state": target_state,
                     "transition_name": transition,
                     "evidence_pointer": evidence_pointer,
-                    "iso_controls": list(iso_controls),
+                    "iso_controls": list(canonical_iso_controls),
                 },
-                iso_controls=iso_controls,
+                iso_controls=canonical_iso_controls,
             )
 
         return await self._history.append_with_precondition(
