@@ -313,7 +313,7 @@ _KNOWN_ISO_CONTROL_CODES: Final[frozenset[str]] = frozenset(
 #: pinned by ``test_lifecycle_audit.py::TestSprint7B1IsoControlsMapShape``.
 #: Build-time assert at module foot mirrors the
 #: ``_TRANSITION_TO_TARGET_STATE`` drift assert at
-#: ``packs/storage.py:935-949``.
+#: ``packs/storage.py:984-998``.
 _TRANSITION_TO_ISO_CONTROLS: Final[Mapping[TransitionName, tuple[str, ...]]] = {
     "submit": ("A.5.31", "A.6.2.4"),
     "claim": ("A.5.31",),
@@ -344,7 +344,7 @@ class LifecycleTransitionRefused(Exception):
     public seam that takes a closed-enum-typed argument
     (``validate_transition`` step 3 in this module;
     :meth:`PackRecordStore.transition` preflight guard at
-    ``packs/storage.py:693-694``; :func:`iso_controls_for` in this module)
+    ``packs/storage.py:714-715``; :func:`iso_controls_for` in this module)
     raises this same exception with the same
     ``"lifecycle_transition_name_unknown"`` reason for out-of-vocabulary
     transitions.
@@ -387,7 +387,7 @@ def iso_controls_for(transition: TransitionName) -> tuple[str, ...]:
     Per the asymmetric-runtime-guard doctrine
     (``feedback_strict_review_off_gate.md`` §8 — same as
     :func:`validate_transition` step 3 + :meth:`PackRecordStore.transition`
-    preflight guard at ``packs/storage.py:693-694``): out-of-vocabulary
+    preflight guard at ``packs/storage.py:714-715``): out-of-vocabulary
     transition names are refused with :class:`LifecycleTransitionRefused`
     carrying the closed-enum
     ``"lifecycle_transition_name_unknown"`` reason — NOT a bare
@@ -545,7 +545,7 @@ def validate_transition(
 # ``tests/unit/packs/test_lifecycle_audit.py::TestSprint7B1IsoControlsMapShape``
 # provides the operator-facing diagnostic. Mirrors the
 # ``_TRANSITION_TO_TARGET_STATE`` drift assert at
-# ``packs/storage.py:935-949``.
+# ``packs/storage.py:984-998``.
 assert set(_TRANSITION_TO_ISO_CONTROLS.keys()) == set(get_args(TransitionName)), (
     "_TRANSITION_TO_ISO_CONTROLS keys diverge from get_args(TransitionName)"
 )

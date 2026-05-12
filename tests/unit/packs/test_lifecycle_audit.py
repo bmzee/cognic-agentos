@@ -322,11 +322,11 @@ class TestSprint7B1IsoControlsRecordedForEveryTransition:
     - ``payload['iso_controls']`` is the JSON-encoded shape the portal
       API surfaces to operators reading evidence rows. Storage stamps
       both (``payload['iso_controls']`` at
-      ``packs/storage.py:775`` + the
+      ``packs/storage.py:798`` + the
       ``DecisionRecord(..., iso_controls=...)`` kwarg at
-      ``packs/storage.py:777``) on every transition row, both populated
+      ``packs/storage.py:808``) on every transition row, both populated
       from the same ``canonical_iso_controls`` local that
-      ``packs/storage.py:712`` derives via :func:`iso_controls_for`.
+      ``packs/storage.py:733`` derives via :func:`iso_controls_for`.
     """
 
     async def test_full_lifecycle_walk_tags_every_chain_row_with_canonical_controls(
@@ -524,7 +524,7 @@ class TestSprint7B1FailClosedRefusalPaths:
     async def test_preflight_unknown_transition_name_no_chain_row_no_state_mutation(
         self, store: PackRecordStore, engine: AsyncEngine
     ) -> None:
-        # The runtime guard at ``packs/storage.py:693-694`` (T3 R1 P2 #2)
+        # The runtime guard at ``packs/storage.py:714-715`` (T3 R1 P2 #2)
         # rejects out-of-vocabulary transition names BEFORE any DB
         # connection is acquired. Mirrors ``validate_transition`` step
         # 3 (T2 R1 P2) at ``packs/lifecycle.py:498-499`` and the

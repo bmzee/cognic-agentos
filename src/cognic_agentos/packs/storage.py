@@ -622,6 +622,7 @@ class PackRecordStore:
         tenant_id: str | None,
         evidence_pointer: str | None,
         request_id: str,
+        actor_type: str | None = None,
     ) -> tuple[uuid.UUID, bytes]:
         """Atomically advance a pack through a named lifecycle
         transition. Returns ``(record_id, chain_hash)`` from the chain
@@ -637,6 +638,26 @@ class PackRecordStore:
         supplied tags would let a misconfigured or malicious caller emit
         an audit-untagged or wrongly-tagged chain row, breaking
         examiner-side evidence-pack export.
+
+        **Sprint 7B.2 T6 slice-2 (R24 P2 Path B + B2 user-authorized
+        CC-ADJ):** the optional keyword-only ``actor_type`` parameter
+        is persisted as a top-level ``payload["actor_type"]`` key when
+        non-None. The watchpoint (d) plan-of-record contract: the
+        allow-list audit row records ``actor.actor_type == "human"``
+        in the chain payload for examiner traceability without
+        requiring log-correlation across surfaces. Persistence is
+        conditional (key omitted entirely when ``actor_type is None``)
+        so existing call sites + every pre-T6 chain row stay
+        byte-shape compatible — backward-compat guardrail per the
+        user-authorized patch contract. Storage performs no
+        vocabulary validation; it accepts any string and writes it
+        verbatim. The :data:`~cognic_agentos.portal.rbac.actor.ActorType`
+        ``"human" | "service"`` closed-enum lives at the rbac
+        boundary; storage stays a thin string passthrough so the
+        layering (packs/storage MUST NOT depend on portal/rbac) holds.
+        Slices 3-4 of T6 thread the same kwarg for install / disable /
+        revoke / uninstall transitions so every operator audit row
+        carries the actor's type for parity with allow-list.
 
         Atomic semantics (Doctrine Lock D): chain-head ``SELECT FOR
         UPDATE`` → pack-row ``SELECT FOR UPDATE`` → ``validate_transition``
@@ -760,20 +781,30 @@ class PackRecordStore:
 
         def _build_record(captured: tuple[PackState, PackKind]) -> DecisionRecord:
             from_state, kind = captured
+            # Sprint 7B.2 T6 slice-2 (R24 P2 Path B + B2): conditional
+            # ``actor_type`` payload key. Only inserted when the kwarg
+            # was passed non-None — preserves byte-shape compat with
+            # every pre-slice-2 chain row + every call site that
+            # doesn't need the actor-type evidence surface (the T5
+            # review handlers + the T4 author handlers all stay
+            # untouched at their existing payload shape).
+            payload: dict[str, Any] = {
+                "pack_id": str(pack_id),
+                "kind": kind,
+                "from_state": from_state,
+                "to_state": target_state,
+                "transition_name": transition,
+                "evidence_pointer": evidence_pointer,
+                "iso_controls": list(canonical_iso_controls),
+            }
+            if actor_type is not None:
+                payload["actor_type"] = actor_type
             return DecisionRecord(
                 decision_type=f"pack.lifecycle.{target_state}",
                 request_id=request_id,
                 actor_id=actor_id,
                 tenant_id=tenant_id,
-                payload={
-                    "pack_id": str(pack_id),
-                    "kind": kind,
-                    "from_state": from_state,
-                    "to_state": target_state,
-                    "transition_name": transition,
-                    "evidence_pointer": evidence_pointer,
-                    "iso_controls": list(canonical_iso_controls),
-                },
+                payload=payload,
                 iso_controls=canonical_iso_controls,
             )
 

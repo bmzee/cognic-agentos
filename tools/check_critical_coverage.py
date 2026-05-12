@@ -181,16 +181,17 @@ machine + storage critical path:
     by ``LifecycleTransitionRefused.reason``. The only in-tree
     consumer today is T3 storage (``packs/storage.py:117`` imports
     the contract; ``transition()`` derives the canonical ISO
-    control tuple via ``iso_controls_for(transition)`` at :712
+    control tuple via ``iso_controls_for(transition)`` at :733
     BEFORE the precondition closure — pure-functional helper, no
-    I/O — then runs ``validate_transition(...)`` at :736-741
+    I/O — then runs ``validate_transition(...)`` at :757-762
     INSIDE the closure under the row-locked view; the precondition
-    raises ``LifecycleTransitionRefused`` at :743, ``engine.begin()``
+    raises ``LifecycleTransitionRefused`` at :764, ``engine.begin()``
     at ``core/decision_history.py:482`` rolls back the transaction
     on the exception path, and the exception propagates up
     through ``append_with_precondition`` and ``transition()`` to
-    the caller — neither storage layer catches it); Sprint 7B.2
-    portal handlers are the planned next consumer. Chain audit events themselves use the
+    the caller — neither storage layer catches it); the Sprint 7B.2
+    portal pack-API handlers (author / review / operator) are the
+    in-tree consumers as of T6. Chain audit events themselves use the
     ``pack.lifecycle.<target_state>`` namespace (keyed by target
     state, not by ``.refused`` — refusals roll back BEFORE any
     chain row is written). Sprint-7B.1 T2.
@@ -198,39 +199,47 @@ machine + storage critical path:
     :379; the ``DecisionHistoryStore.append_with_precondition``
     consumer that drives every lifecycle transition through the
     Sprint-2.5 T2 atomic primitive. ``transition()`` at :616
-    first runs the preflight transition-name guard at :693-694
+    first runs the preflight transition-name guard at :714-715
     (out-of-vocabulary transitions raise
     ``LifecycleTransitionRefused("lifecycle_transition_name_unknown")``
     BEFORE any helper invocation or DB work; mirrors the
     asymmetric-runtime-guard fix at ``packs/lifecycle.py:416-417``);
-    on the green path resolves ``target_state`` at :696 and
+    on the green path resolves ``target_state`` at :717 and
     derives the canonical ISO 42001 control tuple via
-    ``iso_controls_for(transition)`` at :712 BEFORE the closure
+    ``iso_controls_for(transition)`` at :733 BEFORE the closure
     (pure-functional, no I/O), then enters the row-locked
-    precondition closure at :714 (``SELECT ... FOR UPDATE`` on
-    the ``packs`` row at :723-730 under the chain-head ``FOR
-    UPDATE`` lock) → ``validate_transition(...)`` at :736-741
+    precondition closure at :735 (``SELECT ... FOR UPDATE`` on
+    the ``packs`` row at :744-749 under the chain-head ``FOR
+    UPDATE`` lock) → ``validate_transition(...)`` at :757-762
     under the locked view → ``UPDATE packs SET state, last_actor,
-    updated_at`` at :750-758 (three columns; no ``version_counter``
+    updated_at`` at :771-779 (three columns; no ``version_counter``
     field — atomicity comes from the chain-head + row lock pair).
-    OUTSIDE the closure: ``_build_record`` at :761 mints a
+    OUTSIDE the closure: ``_build_record`` at :782 mints a
     ``DecisionRecord`` with
-    ``decision_type = f"pack.lifecycle.{target_state}"`` at :764
+    ``decision_type = f"pack.lifecycle.{target_state}"`` at :803
     and the pre-derived ``canonical_iso_controls`` value (no fresh
-    ``iso_controls_for`` call from ``_build_record``).
-    ``append_with_precondition`` at :780 commits chain row +
-    state-cache UPDATE + chain-head UPDATE atomically. Two-class
-    refusal taxonomy: ``PackNotFound`` at :266 for missing-pack
-    lookups; ``PackRecordRefused`` at :293-350 carrying the
-    4-value ``PackRecordRefusalReason`` Literal at :285 (genesis-
-    state guard + 3 update_draft API-contract refusals — Sprint 7B.2
-    T4 bumped 1 → 4 when ``update_draft()`` landed; ``update_draft()``
-    itself at :443 mirrors ``save_draft()``'s genesis-state pattern
-    at :396 — atomic ``UPDATE … WHERE state='draft'``, no chain row);
-    transition-table refusals raise ``LifecycleTransitionRefused``
-    from the precondition at :743 so the engine's transactional
-    rollback fires (no chain row, no state-cache mutation, no
-    orphan INSERT). Doctrine Lock D. Sprint-7B.1 T3.
+    ``iso_controls_for`` call from ``_build_record``). **Sprint 7B.2
+    T6 slice-2 (R24 P2 Path B + B2 user-authorized CC-ADJ) added
+    the optional keyword-only ``actor_type: str | None = None``
+    kwarg at :625; when non-None it is persisted as a top-level
+    ``payload["actor_type"]`` key conditionally at :800-801 so
+    existing call sites + every pre-T6 chain row stay byte-shape
+    compatible (additive-only schema; storage stays a thin string
+    passthrough — the ``human | service`` closed-enum lives at the
+    rbac boundary).** ``append_with_precondition`` at :811 commits
+    chain row + state-cache UPDATE + chain-head UPDATE atomically.
+    Two-class refusal taxonomy: ``PackNotFound`` at :266 for
+    missing-pack lookups; ``PackRecordRefused`` at :293-350
+    carrying the 4-value ``PackRecordRefusalReason`` Literal at
+    :285 (genesis-state guard + 3 update_draft API-contract
+    refusals — Sprint 7B.2 T4 bumped 1 → 4 when ``update_draft()``
+    landed; ``update_draft()`` itself at :443 mirrors
+    ``save_draft()``'s genesis-state pattern at :396 — atomic
+    ``UPDATE … WHERE state='draft'``, no chain row); transition-
+    table refusals raise ``LifecycleTransitionRefused`` from the
+    precondition at :764 so the engine's transactional rollback
+    fires (no chain row, no state-cache mutation, no orphan
+    INSERT). Doctrine Lock D. Sprint-7B.1 T3.
 
 Both modules ride the same single strict 95% line / 90% branch
 floor. Off-gate per Doctrine F gate-counting rule: the Alembic
@@ -239,6 +248,83 @@ migration version file at
 — DDL is doctrine-critical but not coverage-tracked by convention
 (migrations are run-once executable schema, not behavioural code).
 Gate size grows from 41 modules to 43.
+
+Sprint 7B.2 T6 extends the gate with the **operator-surface route
+module** — one module that owns the 5 ADR-012 §68-73 operator
+lifecycle endpoints behind ``/api/v1/packs``:
+
+  * ``portal/api/packs/operator_routes.py`` — 5 endpoints
+    (POST ``/{pack_id}/allow-list`` + POST ``/{pack_id}/install`` +
+    POST ``/{pack_id}/disable`` + POST ``/{pack_id}/revoke`` + DELETE
+    ``/{pack_id}/install`` for uninstall). The allow-list endpoint
+    is the **single user-authorized site for the AGENTS.md
+    "Human-only decisions / Per-tenant allow-list changes" doctrine
+    enforcement** — wired with :func:`RequireHumanActor` so a
+    service-token actor holding ``pack.allow_list`` scope is refused
+    at the dep chain (closed-enum
+    ``HumanActorDenialReason("actor_type_must_be_human")``) before
+    the handler body runs. The module also owns the watchpoint (d)
+    examiner-traceability surface for the allow-list audit row: the
+    green-path ``portal.packs.allow_list`` structured log carries
+    ``actor_type`` AND the chain row's ``payload["actor_type"]``
+    records the same value via R24 Path B + B2 (the storage CC-ADJ
+    threaded through ``actor_type=actor.actor_type`` on every call
+    to :meth:`PackRecordStore.transition`). All 5 handlers share a
+    delegate-to-storage 3-arm refusal pattern: :class:`PackNotFound`
+    → 404 ``pack_not_found`` + ``portal.packs.<verb>_refused`` log;
+    :class:`LifecycleTransitionRefused` → 409 + closed-enum reason
+    + ``portal.packs.<verb>_refused`` log; green path returns the
+    re-loaded :class:`PackResponse`. Per R19 P2 #2 mutually-
+    exclusive log contract: RBAC / tenant / human-actor dep-chain
+    refusals emit their OWN sibling-guard logs (zero operator-vocab
+    log); handler-body refusals (state-machine OR PackNotFound
+    race) emit EXACTLY ONE ``portal.packs.<verb>_refused``. The
+    R27-hardened race contract pins this on the
+    :class:`PackNotFound` axis for every verb (caplog asserts
+    reason / actor_subject / pack_id / from_state on the refused
+    log; threat-model-revert verified load-bearing). Multi-from-
+    state pairs (revoke installed/disabled → revoked; uninstall
+    disabled/revoked → uninstalled) are pinned explicitly per leg.
+    The module also owns the per-verb request-id minter prefixes
+    (``_PACK_{ALLOW_LIST,INSTALL,DISABLE,REVOKE,UNINSTALL}_REQUEST_ID_PREFIX``
+    at module scope; 13 chars each; the module-foot build-time
+    ``assert`` pins the ``len(prefix) + 32 (uuid4().hex) <= 64``
+    invariant against the ``decision_history.request_id`` String(64)
+    column cap). Standing-offer §30 module-header invariant: ``from
+    __future__ import annotations`` is INTENTIONALLY OMITTED — PEP
+    563 string-deferred annotations would break FastAPI's
+    ``inspect.signature()`` / ``typing.get_type_hints()`` resolution
+    on ``Annotated[..., Depends(<closure-local>)]`` annotations
+    (the shared dependency instances are local-scope inside
+    :func:`build_operator_routes`, NOT module globals); pinned by
+    AST self-test + per-verb invocation tests at
+    ``tests/unit/portal/api/packs/test_operator_routes.py`` per
+    ``feedback_security_regression_hardening.md`` (threat-model-
+    revert verified at slice-1 + slice-2 + slice-4 boundaries).
+    Sprint-7B.2 T6.
+
+T6 scope note: this commit adds ``operator_routes.py`` to the
+durable per-file critical-controls coverage gate because it owns
+the AGENTS.md "Human-only decisions" enforcement boundary
+(:func:`RequireHumanActor` sub-dependency on allow-list) + the
+R24 actor_type chain-payload provenance surface — both
+wire-protocol-public surfaces. Whether the sibling pack-router
+modules already classified CC at commit time
+(``portal/api/packs/author_routes.py`` per T4,
+``portal/api/packs/review_routes.py`` per T5,
+``portal/api/packs/router.py`` per T3) should ALSO be added to
+this durable per-file gate is a separate doctrinal decision —
+T6 deliberately does NOT change their on-gate status either way;
+the CC tag carried by their respective landing commits stays as-is
+until explicitly reviewed. Off-gate per public-API-stability rule:
+``packs/storage.py``'s ``actor_type`` kwarg shape change (R24) is
+doctrine-critical but is covered transitively via the existing
+``packs/storage.py`` gate entry + 3 dedicated R24 backward-compat
+tests at ``tests/unit/packs/test_storage.py``.
+
+The module rides the same single strict 95% line / 90% branch
+floor as the rest of the critical-controls gate. Gate size grows
+from 43 modules to 44.
 """
 
 from __future__ import annotations
@@ -472,6 +558,24 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     # Both ride the same single strict 95% line / 90% branch floor.
     ("src/cognic_agentos/packs/lifecycle.py", 0.95, 0.90),
     ("src/cognic_agentos/packs/storage.py", 0.95, 0.90),
+    # Sprint 7B.2 T6 — operator-surface route module. The 5 ADR-012
+    # §68-73 operator endpoints (allow-list + install + disable +
+    # revoke + uninstall) live here; the allow-list endpoint is the
+    # single user-authorized site for the AGENTS.md "Human-only
+    # decisions / Per-tenant allow-list changes" doctrine enforcement
+    # (RequireHumanActor sub-dependency). Owns the watchpoint (d)
+    # examiner-traceability surface for the allow-list audit row via
+    # the R24 Path B + B2 actor_type carry-forward through every
+    # transition() call. R27-hardened mutually-exclusive race
+    # contract: every verb's PackNotFound race path emits EXACTLY
+    # ONE ``portal.packs.<verb>_refused`` log with reason +
+    # actor_subject + pack_id + from_state (caplog asserted;
+    # threat-model-revert verified load-bearing at slices 2 + 3 + 4).
+    # Standing-offer §30 module-header invariant pinned by AST self-
+    # test + per-verb invocation tests per
+    # ``feedback_security_regression_hardening.md``. Rides the same
+    # single strict 95% line / 90% branch floor.
+    ("src/cognic_agentos/portal/api/packs/operator_routes.py", 0.95, 0.90),
 )
 
 

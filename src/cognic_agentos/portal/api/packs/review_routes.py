@@ -443,7 +443,7 @@ def build_review_routes(*, store: PackRecordStore) -> APIRouter:
         history = await store.load_lifecycle_history(record.id)
         # Most-recent submit row first. `load_lifecycle_history`
         # returns rows ordered by sequence ASC per the storage seam at
-        # `packs/storage.py:839` (signature) — `order_by(sequence)` on
+        # `packs/storage.py:870` (signature) — `order_by(sequence)` on
         # the inner query; iterate in reverse to find the most-recent
         # submit. (Pre-T9: there is at most one submit row per pack
         # lifecycle; post-T9 may have re-submits after withdraw/cancel

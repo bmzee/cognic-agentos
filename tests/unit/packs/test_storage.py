@@ -498,6 +498,111 @@ class TestSprint7B1PackRecordStoreTransitionHappyPath:
         assert row.payload["evidence_pointer"] == "s3://bucket/evidence-1"
         assert tuple(row.payload["iso_controls"]) == expected_controls
 
+    async def test_transition_omits_actor_type_payload_key_when_not_supplied(
+        self, store: PackRecordStore, engine: AsyncEngine
+    ) -> None:
+        """Sprint 7B.2 T6 slice 2 — backward-compat guardrail per user
+        Path-B R24 review: existing call sites that do NOT pass the
+        new ``actor_type`` kwarg MUST produce chain rows whose payload
+        does NOT carry the ``actor_type`` key. This preserves byte-shape
+        compatibility with every chain row written before slice 2 +
+        with every storage call site that doesn't need the human-actor
+        evidence (T5 review surface, T4 author surface, every pre-T6
+        sprint's chain rows).
+        """
+        rec = _make_record()
+        await store.save_draft(rec)
+        await store.transition(
+            pack_id=rec.id,
+            transition="submit",
+            actor_id="author-1",
+            tenant_id=None,
+            evidence_pointer=None,
+            request_id="req-actor-type-omitted",
+        )
+        async with engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    select(_decision_history.c.payload)
+                    .order_by(_decision_history.c.sequence.desc())
+                    .limit(1)
+                )
+            ).one()
+        assert "actor_type" not in row.payload, (
+            "chain row payload MUST NOT carry the 'actor_type' key when "
+            "the kwarg is not supplied — byte-shape backward-compat with "
+            f"pre-slice-2 chain rows; got payload={row.payload!r}"
+        )
+
+    async def test_transition_persists_actor_type_human_in_payload(
+        self, store: PackRecordStore, engine: AsyncEngine
+    ) -> None:
+        """Sprint 7B.2 T6 slice 2 — Path B + B2 implementation: when
+        ``actor_type="human"`` is passed to ``transition()``, the
+        chain row's ``payload["actor_type"]`` MUST equal ``"human"``.
+        This is the watchpoint (d) examiner-traceability surface — a
+        flat top-level payload key (NOT nested under
+        ``actor_attributes``) per user-chosen Option B2.
+        """
+        rec = _make_record()
+        await store.save_draft(rec)
+        await store.transition(
+            pack_id=rec.id,
+            transition="submit",
+            actor_id="operator-1",
+            tenant_id=None,
+            evidence_pointer=None,
+            request_id="req-actor-type-human",
+            actor_type="human",
+        )
+        async with engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    select(_decision_history.c.payload)
+                    .order_by(_decision_history.c.sequence.desc())
+                    .limit(1)
+                )
+            ).one()
+        assert row.payload.get("actor_type") == "human", (
+            "chain row payload['actor_type'] MUST equal 'human' when the "
+            f"kwarg is passed; got payload={row.payload!r}"
+        )
+
+    async def test_transition_persists_actor_type_service_in_payload(
+        self, store: PackRecordStore, engine: AsyncEngine
+    ) -> None:
+        """Sprint 7B.2 T6 slice 2 — the storage layer's ``actor_type``
+        kwarg is a thin string passthrough; it does NOT enforce the
+        ``"human"`` / ``"service"`` ActorType vocabulary (that lives in
+        ``portal/rbac/actor.py:49`` and is enforced at the endpoint
+        boundary via :class:`RequireHumanActor`). Storage just
+        persists whatever string the caller passes — proves the seam
+        is generic enough for slices 3-4 (install/disable/revoke/
+        uninstall) which pass through actor_type without re-asserting
+        the human-actor invariant (those endpoints don't gate on
+        actor_type but the audit surface still records it).
+        """
+        rec = _make_record()
+        await store.save_draft(rec)
+        await store.transition(
+            pack_id=rec.id,
+            transition="submit",
+            actor_id="ci-bot-1",
+            tenant_id=None,
+            evidence_pointer=None,
+            request_id="req-actor-type-service",
+            actor_type="service",
+        )
+        async with engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    select(_decision_history.c.payload)
+                    .order_by(_decision_history.c.sequence.desc())
+                    .limit(1)
+                )
+            ).one()
+        assert row.payload.get("actor_type") == "service"
+
     async def test_caller_cannot_supply_iso_controls_argument(self, store: PackRecordStore) -> None:
         # Sprint 7B.1 T5 R1 P2: storage.transition() no longer accepts
         # ``iso_controls`` as a kwarg — the canonical mapping in
