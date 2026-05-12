@@ -165,26 +165,27 @@ machine + storage critical path:
 
   * ``packs/lifecycle.py`` — pure-functional state machine.
     Closed-enum **13-value** ``LifecycleRefusalReason`` at
-    lines 165-179 (finalised at T2 from the plan-of-record's
+    lines 175-189 (finalised at T2 from the plan-of-record's
     provisional ±1 count as the transition table was enumerated).
-    ``_VALID_TRANSITIONS`` legal-pair table at :196 (10 transitions
-    / 13 legal pairs). ``validate_transition(*, from_state,
-    to_state, kind, transition)`` pure validator at :398 — four
-    keyword-only args. ``iso_controls_for(transition)`` at :343
+    ``_VALID_TRANSITIONS`` legal-pair table at :210 (11 transitions
+    / 14 legal pairs; Sprint 7B.2 T4 extended from 10/13 by adding
+    ``cancel_draft`` per ADR-012 §59). ``validate_transition(*, from_state,
+    to_state, kind, transition)`` pure validator at :421 — four
+    keyword-only args. ``iso_controls_for(transition)`` at :366
     returns the canonical ISO 42001 control tuple from the
     3-value ``_KNOWN_ISO_CONTROL_CODES`` set ({``A.5.31``,
     ``A.5.32``, ``A.6.2.4``}) feeding chain-row emission.
-    ``LifecycleTransitionRefused(reason)`` at :309 carries ONLY
+    ``LifecycleTransitionRefused(reason)`` at :332 carries ONLY
     the closed-enum reason. Doctrine Lock C — the closed-enum
     vocabulary IS the consumer-API wire-protocol contract carried
     by ``LifecycleTransitionRefused.reason``. The only in-tree
-    consumer today is T3 storage (``packs/storage.py:108`` imports
+    consumer today is T3 storage (``packs/storage.py:117`` imports
     the contract; ``transition()`` derives the canonical ISO
-    control tuple via ``iso_controls_for(transition)`` at :456
+    control tuple via ``iso_controls_for(transition)`` at :712
     BEFORE the precondition closure — pure-functional helper, no
-    I/O — then runs ``validate_transition(...)`` at :480-485
+    I/O — then runs ``validate_transition(...)`` at :736-741
     INSIDE the closure under the row-locked view; the precondition
-    raises ``LifecycleTransitionRefused`` at :487, ``engine.begin()``
+    raises ``LifecycleTransitionRefused`` at :743, ``engine.begin()``
     at ``core/decision_history.py:482`` rolls back the transaction
     on the exception path, and the exception propagates up
     through ``append_with_precondition`` and ``transition()`` to
@@ -194,37 +195,40 @@ machine + storage critical path:
     state, not by ``.refused`` — refusals roll back BEFORE any
     chain row is written). Sprint-7B.1 T2.
   * ``packs/storage.py`` — Postgres-backed ``PackRecordStore`` at
-    :296; the ``DecisionHistoryStore.append_with_precondition``
+    :379; the ``DecisionHistoryStore.append_with_precondition``
     consumer that drives every lifecycle transition through the
-    Sprint-2.5 T2 atomic primitive. ``transition()`` at :360
-    first runs the preflight transition-name guard at :437-438
+    Sprint-2.5 T2 atomic primitive. ``transition()`` at :616
+    first runs the preflight transition-name guard at :693-694
     (out-of-vocabulary transitions raise
     ``LifecycleTransitionRefused("lifecycle_transition_name_unknown")``
     BEFORE any helper invocation or DB work; mirrors the
-    asymmetric-runtime-guard fix at ``packs/lifecycle.py:393-394``);
-    on the green path resolves ``target_state`` at :440 and
+    asymmetric-runtime-guard fix at ``packs/lifecycle.py:416-417``);
+    on the green path resolves ``target_state`` at :696 and
     derives the canonical ISO 42001 control tuple via
-    ``iso_controls_for(transition)`` at :456 BEFORE the closure
+    ``iso_controls_for(transition)`` at :712 BEFORE the closure
     (pure-functional, no I/O), then enters the row-locked
-    precondition closure at :458 (``SELECT ... FOR UPDATE`` on
-    the ``packs`` row at :467-473 under the chain-head ``FOR
-    UPDATE`` lock) → ``validate_transition(...)`` at :480-485
+    precondition closure at :714 (``SELECT ... FOR UPDATE`` on
+    the ``packs`` row at :723-730 under the chain-head ``FOR
+    UPDATE`` lock) → ``validate_transition(...)`` at :736-741
     under the locked view → ``UPDATE packs SET state, last_actor,
-    updated_at`` at :494-502 (three columns; no ``version_counter``
+    updated_at`` at :750-758 (three columns; no ``version_counter``
     field — atomicity comes from the chain-head + row lock pair).
-    OUTSIDE the closure: ``_build_record`` at :505 mints a
+    OUTSIDE the closure: ``_build_record`` at :761 mints a
     ``DecisionRecord`` with
-    ``decision_type = f"pack.lifecycle.{target_state}"`` at :508
+    ``decision_type = f"pack.lifecycle.{target_state}"`` at :764
     and the pre-derived ``canonical_iso_controls`` value (no fresh
     ``iso_controls_for`` call from ``_build_record``).
-    ``append_with_precondition`` at :524 commits chain row +
+    ``append_with_precondition`` at :780 commits chain row +
     state-cache UPDATE + chain-head UPDATE atomically. Two-class
-    refusal taxonomy: ``PackNotFound`` at :219 for missing-pack
-    lookups; ``PackRecordRefused`` at :238-265 carrying the
-    1-value ``PackRecordRefusalReason`` Literal at :235 (only for
-    the ``save_draft`` API-contract genesis-state guard);
+    refusal taxonomy: ``PackNotFound`` at :266 for missing-pack
+    lookups; ``PackRecordRefused`` at :293-350 carrying the
+    4-value ``PackRecordRefusalReason`` Literal at :285 (genesis-
+    state guard + 3 update_draft API-contract refusals — Sprint 7B.2
+    T4 bumped 1 → 4 when ``update_draft()`` landed; ``update_draft()``
+    itself at :443 mirrors ``save_draft()``'s genesis-state pattern
+    at :396 — atomic ``UPDATE … WHERE state='draft'``, no chain row);
     transition-table refusals raise ``LifecycleTransitionRefused``
-    from the precondition at :487 so the engine's transactional
+    from the precondition at :743 so the engine's transactional
     rollback fires (no chain row, no state-cache mutation, no
     orphan INSERT). Doctrine Lock D. Sprint-7B.1 T3.
 

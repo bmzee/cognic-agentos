@@ -51,8 +51,12 @@ class TestSprint7B1ClosedEnumVocabulary:
             "uninstalled",
         }
 
-    def test_transition_name_is_canonical_10_tuple_per_adr_012(self) -> None:
-        # ADR-012 §"State transitions" 10-row table at lines 38-48.
+    def test_transition_name_is_canonical_11_tuple_per_adr_012(self) -> None:
+        # ADR-012 §"State transitions" 10-row table at lines 38-48 +
+        # ADR-012 §59 ``cancel_draft`` extension added at Sprint 7B.2 T4.
+        # The author-cancellation pair (``cancel_draft``: draft→withdrawn)
+        # is distinct from ``withdraw`` (which §39 limits to
+        # submitted/under_review source states).
         assert set(get_args(TransitionName)) == {
             "submit",
             "claim",
@@ -64,6 +68,7 @@ class TestSprint7B1ClosedEnumVocabulary:
             "disable",
             "revoke",
             "uninstall",
+            "cancel_draft",
         }
 
     def test_lifecycle_refusal_reason_is_canonical_13_value_closed_enum(self) -> None:
@@ -140,10 +145,11 @@ class TestSprint7B1ValidTransitionsTable:
                 )
 
     def test_table_pairs_match_adr_012_state_transitions_table(self) -> None:
-        """Pin the exact 13 legal ``(from, to)`` pairs across the 10 transitions
-        per ADR-012 lines 38-48 (3 transitions are multi-from: withdraw,
-        revoke, uninstall — each contributing 2 pairs; the other 7 are
-        single-from)."""
+        """Pin the exact 14 legal ``(from, to)`` pairs across the 11 transitions
+        per ADR-012 lines 38-48 + §59 cancel_draft extension (3 transitions
+        are multi-from: withdraw, revoke, uninstall — each contributing 2
+        pairs; 8 are single-from including the Sprint 7B.2 T4 ``cancel_draft``
+        addition)."""
         assert _VALID_TRANSITIONS["submit"] == frozenset({("draft", "submitted")})
         assert _VALID_TRANSITIONS["claim"] == frozenset({("submitted", "under_review")})
         assert _VALID_TRANSITIONS["approve"] == frozenset({("under_review", "approved")})
@@ -169,22 +175,32 @@ class TestSprint7B1ValidTransitionsTable:
                 ("revoked", "uninstalled"),
             }
         )
+        # Sprint 7B.2 T4 — ``cancel_draft`` extension per ADR-012 §59.
+        # Distinct from ``withdraw`` even though both reach
+        # ``withdrawn``: cancel_draft requires ``draft`` source state
+        # (developer scratches own draft); withdraw requires
+        # ``submitted``/``under_review`` (author retracts a submission
+        # already under reviewer attention).
+        assert _VALID_TRANSITIONS["cancel_draft"] == frozenset({("draft", "withdrawn")})
 
-    def test_table_has_13_legal_pairs_total(self) -> None:
-        """Aggregate cross-check: across all 10 transitions, exactly 13 legal
+    def test_table_has_14_legal_pairs_total(self) -> None:
+        """Aggregate cross-check: across all 11 transitions, exactly 14 legal
         ``(from, to)`` pairs are encoded.
 
-        Breakdown per ADR-012 §"State transitions" (lines 38-48):
+        Breakdown per ADR-012 §"State transitions" (lines 38-48) +
+        Sprint 7B.2 T4 ``cancel_draft`` extension per ADR-012 §59:
 
-        - 7 single-from transitions: submit, claim, approve, reject,
+        - 7 original single-from transitions: submit, claim, approve, reject,
           allow_list, install, disable → 7 pairs.
         - 3 multi-from transitions (2 from-states each): withdraw
           (submitted/under_review), revoke (installed/disabled), uninstall
           (disabled/revoked) → 6 pairs.
+        - 1 new single-from transition added at Sprint 7B.2 T4:
+          cancel_draft (draft → withdrawn) → 1 pair.
 
-        Total = 7 + 6 = 13."""
+        Total = 7 + 6 + 1 = 14."""
         total_pairs = sum(len(pairs) for pairs in _VALID_TRANSITIONS.values())
-        assert total_pairs == 13
+        assert total_pairs == 14
 
 
 class TestSprint7B1ValidTransitionsReturnNone:
@@ -208,6 +224,10 @@ class TestSprint7B1ValidTransitionsReturnNone:
             ("disabled", "revoked", "revoke"),
             ("disabled", "uninstalled", "uninstall"),
             ("revoked", "uninstalled", "uninstall"),
+            # Sprint 7B.2 T4 — ``cancel_draft`` author-cancellation flow
+            # per ADR-012 §59. Distinct from ``withdraw``; pinned at the
+            # parametrized passes set so the per-kind cross-check holds.
+            ("draft", "withdrawn", "cancel_draft"),
         ],
     )
     @pytest.mark.parametrize("kind", ["tool", "skill", "agent", "hook"])
@@ -612,3 +632,136 @@ class TestSprint7B1KeywordOnlyArgumentSignature:
                 "tool",
                 "submit",
             )
+
+
+class TestSprint7B2CancelDraftExtension:
+    """Sprint 7B.2 T4 — ``cancel_draft`` author-cancellation flow per
+    ADR-012 §59 (CC-ADJ extension to the Sprint-7B.1 state machine).
+
+    Pins the new 11th transition's distinct semantics from the existing
+    ``withdraw`` transition: both reach ``withdrawn`` but from disjoint
+    source states (cancel_draft: draft only; withdraw: submitted /
+    under_review only). The asymmetric split preserves the audit-chain
+    distinction between "developer scratches own draft" and "author
+    retracts a submission already under reviewer attention".
+
+    The 4-map lockstep extension (lifecycle's ``TransitionName`` Literal
+    + ``_VALID_TRANSITIONS`` + ``_TRANSITION_TO_ISO_CONTROLS`` + storage's
+    ``_TRANSITION_TO_TARGET_STATE``) is pinned by the existing drift
+    detectors (one in lifecycle.py at module foot, one in storage.py at
+    module foot, one in test_lifecycle_audit.py's map-keys-match test);
+    this test class focuses on the per-transition semantics.
+    """
+
+    def test_cancel_draft_returns_none_for_draft_to_withdrawn(self) -> None:
+        # Happy path — the new transition's canonical pair.
+        result = validate_transition(
+            from_state="draft",
+            to_state="withdrawn",
+            kind="tool",
+            transition="cancel_draft",
+        )
+        assert result is None
+
+    @pytest.mark.parametrize(
+        "from_state",
+        [
+            "submitted",
+            "under_review",
+            "approved",
+            "rejected",
+            "withdrawn",
+            "allow_listed",
+            "installed",
+            "disabled",
+            "revoked",
+            "uninstalled",
+        ],
+    )
+    def test_cancel_draft_refused_from_non_draft_state(self, from_state: str) -> None:
+        """Asymmetric-split pin — ``cancel_draft`` requires ``draft``
+        source state. From any other state, it falls through to the
+        generic ``lifecycle_transition_invalid_state_pair`` reason (no
+        per-transition specific reason for cancel_draft; the validator's
+        precedence chain catches all non-draft source states uniformly).
+
+        The terminal-state guard at step 4 fires BEFORE the generic
+        fallthrough for from_state=uninstalled — that's why the
+        parametrize doesn't assert a single reason; the test runs per
+        non-draft state and checks the result IS a refusal, with the
+        terminal-state branch surfaced separately."""
+        result = validate_transition(
+            from_state=from_state,  # type: ignore[arg-type]
+            to_state="withdrawn",
+            kind="tool",
+            transition="cancel_draft",
+        )
+        # uninstalled → terminal-state takes precedence (step 4 before
+        # generic fallthrough); all other non-draft sources land on the
+        # generic invalid-state-pair reason.
+        if from_state == "uninstalled":
+            assert result == "lifecycle_transition_terminal_state"
+        else:
+            assert result == "lifecycle_transition_invalid_state_pair"
+
+    def test_cancel_draft_refused_to_non_withdrawn_state(self) -> None:
+        """cancel_draft → anywhere-but-withdrawn falls through to the
+        generic invalid-state-pair reason. Pin so a future refactor
+        that expanded the legal-pairs frozenset would have to update
+        this test."""
+        result = validate_transition(
+            from_state="draft",
+            to_state="submitted",  # cancel_draft would never reach this
+            kind="tool",
+            transition="cancel_draft",
+        )
+        assert result == "lifecycle_transition_invalid_state_pair"
+
+    def test_withdraw_still_refused_from_draft_state(self) -> None:
+        """Asymmetric-split pin (inverse): the existing ``withdraw``
+        transition MUST still refuse from ``draft`` source state (it
+        is limited to ``submitted`` / ``under_review`` per ADR-012 §39).
+        A regression that mistakenly extended ``withdraw`` to cover
+        ``draft`` would silently merge the audit-chain narrative with
+        cancel_draft's — pinned at the test layer to catch any such
+        drift."""
+        result = validate_transition(
+            from_state="draft",
+            to_state="withdrawn",
+            kind="tool",
+            transition="withdraw",
+        )
+        # withdraw from draft hits the per-transition specific reason
+        # ``withdraw_post_review`` (which encodes "withdraw only from
+        # submitted/under_review").
+        assert result == "lifecycle_transition_withdraw_post_review"
+
+    def test_only_cancel_draft_can_reach_withdrawn_from_draft(self) -> None:
+        """End-to-end asymmetric-split pin: ``(draft, withdrawn)`` is
+        ONLY a legal pair under ``cancel_draft``, NEVER under any other
+        transition name. Pin by iterating all 11 transition names and
+        asserting only ``cancel_draft`` returns None for this pair."""
+        legal_under: list[str] = []
+        for transition in get_args(TransitionName):
+            result = validate_transition(
+                from_state="draft",
+                to_state="withdrawn",
+                kind="tool",
+                transition=transition,
+            )
+            if result is None:
+                legal_under.append(transition)
+        assert legal_under == ["cancel_draft"]
+
+    def test_cancel_draft_kind_independence(self) -> None:
+        """Doctrine Lock G — kind does not affect ``cancel_draft``
+        validity (mirrors the 10 original transitions). Pin per
+        canonical 4-tuple."""
+        for kind in ("tool", "skill", "agent", "hook"):
+            result = validate_transition(
+                from_state="draft",
+                to_state="withdrawn",
+                kind=kind,
+                transition="cancel_draft",
+            )
+            assert result is None, f"kind={kind}: expected None; got {result!r}"

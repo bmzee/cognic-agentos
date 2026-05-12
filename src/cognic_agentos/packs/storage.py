@@ -39,11 +39,19 @@ Doctrine
   :class:`PackRecordRefused` did not yet exist):
 
   1. **API-contract refusal** — :class:`PackRecordRefused` carries the
-     closed-enum :data:`PackRecordRefusalReason` (Wave-1: only
-     ``pack_record_save_draft_initial_state_not_draft``). Raised by
+     closed-enum :data:`PackRecordRefusalReason` (Sprint 7B.2 T4 bumped
+     this from 1 to 4 values: the genesis-state guard
+     ``pack_record_save_draft_initial_state_not_draft`` plus three
+     ``update_draft`` API-contract refusals
+     ``pack_record_update_non_draft_state`` /
+     ``pack_record_update_field_not_allowed`` /
+     ``pack_record_update_field_invalid_shape``). Raised by
      :meth:`PackRecordStore.save_draft` BEFORE any DB connection is
      acquired when the supplied record violates the API's preconditions
-     (``state != "draft"`` would bypass the lifecycle audit chain).
+     (``state != "draft"`` would bypass the lifecycle audit chain),
+     and by :meth:`PackRecordStore.update_draft` for the three
+     update-side preconditions (non-draft-state target, allow-list
+     violation, per-field value-shape violation).
   2. **State-machine transition refusal** —
      :class:`LifecycleTransitionRefused` carries the closed-enum
      :data:`cognic_agentos.packs.lifecycle.LifecycleRefusalReason`
@@ -78,6 +86,7 @@ Doctrine
 
 from __future__ import annotations
 
+import logging
 import uuid
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -115,7 +124,17 @@ from cognic_agentos.packs.lifecycle import (
     validate_transition,
 )
 
-#: Each :data:`TransitionName` in the canonical 10-tuple has exactly one
+#: Sprint 7B.2 T4 — module-level logger for structured-log emission paths.
+#: Today only the ``update_draft`` value-shape refusal branch writes to it
+#: (``packs.update_draft.invalid_shape``); other refusal paths still raise
+#: typed exceptions that callers dispatch on. The contract per Sprint 7B.2
+#: T4 plan §"Structured-log emission contract": diagnostic field names
+#: surface via this logger rather than being extended onto the typed-
+#: exception payload (so the 7B.1 ``PackRecordRefused.__init__`` signature
+#: stays unchanged at ``(reason, *, state=None)``).
+_LOG = logging.getLogger(__name__)
+
+#: Each :data:`TransitionName` in the canonical 11-tuple has exactly one
 #: legal ``to_state`` (verified at build time by
 #: ``tests/unit/packs/test_storage.py::TestSprint7B1TransitionToTargetStateMap``
 #: against ``_VALID_TRANSITIONS``). Storage derives ``to_state`` from
@@ -125,6 +144,15 @@ from cognic_agentos.packs.lifecycle import (
 #: new transition without an entry here OR adding a ``_VALID_TRANSITIONS``
 #: row whose pair set has a different ``to_state`` than mapped here
 #: would fail the drift detector.
+#:
+#: Sprint 7B.2 T4 added ``cancel_draft → "withdrawn"`` per ADR-012 §59
+#: (the developer-scratches-own-draft path). The lifecycle.py
+#: ``_VALID_TRANSITIONS["cancel_draft"]`` table extension is the
+#: authoritative source; this map mirrors it in lockstep per Sprint-7B.1
+#: T3 R1 P2 #2 asymmetric-guard pattern (Round 3 P2 #3 ownership split:
+#: lifecycle.py owns transition vocabulary; storage.py owns this local
+#: target-state mirror because storage needs ``target_state`` resolved
+#: BEFORE the precondition closure for the chain row's event-type tag).
 _TRANSITION_TO_TARGET_STATE: Final[Mapping[TransitionName, PackState]] = {
     "submit": "submitted",
     "claim": "under_review",
@@ -136,7 +164,26 @@ _TRANSITION_TO_TARGET_STATE: Final[Mapping[TransitionName, PackState]] = {
     "disable": "disabled",
     "revoke": "revoked",
     "uninstall": "uninstalled",
+    "cancel_draft": "withdrawn",
 }
+
+#: Sprint 7B.2 T4 R3 P2 #3 — shared column-width constants for the
+#: ``packs`` table. Wire-protocol-public: the DTOs at
+#: ``portal/api/packs/author_routes.py`` import these and apply them as
+#: Pydantic ``Field(max_length=...)`` constraints so wire-input refusal
+#: at 422 matches the DB column cap. Pre-fix the create DTO accepted
+#: empty ``pack_id`` / empty ``display_name`` / empty ``sbom_pointer``;
+#: ``save_draft()`` has no equivalent shape guard, so malformed values
+#: could persist while ``update_draft`` refused analogous shapes —
+#: asymmetric create vs update field semantics. Promoting these
+#: constants to module level closes the asymmetry: every consumer
+#: derives from the single source of truth.
+PACK_ID_MAX_LEN: Final[int] = 256
+PACK_DISPLAY_NAME_MAX_LEN: Final[int] = 256
+PACK_KIND_MAX_LEN: Final[int] = 16
+PACK_STATE_MAX_LEN: Final[int] = 32
+PACK_TENANT_ID_MAX_LEN: Final[int] = 256
+PACK_ACTOR_MAX_LEN: Final[int] = 256
 
 #: Module-level Table object registered against the SAME ``_metadata`` as
 #: ``audit_event`` + ``decision_history`` (imported from ``core/audit``).
@@ -153,16 +200,16 @@ _packs = Table(
     "packs",
     _metadata,
     Column("id", Uuid(), primary_key=True),
-    Column("kind", String(16), nullable=False),
-    Column("pack_id", String(256), nullable=False),
-    Column("display_name", String(256), nullable=False),
-    Column("state", String(32), nullable=False),
+    Column("kind", String(PACK_KIND_MAX_LEN), nullable=False),
+    Column("pack_id", String(PACK_ID_MAX_LEN), nullable=False),
+    Column("display_name", String(PACK_DISPLAY_NAME_MAX_LEN), nullable=False),
+    Column("state", String(PACK_STATE_MAX_LEN), nullable=False),
     Column("manifest_digest", chain_hash_column_type(), nullable=False),
     Column("signed_artefact_digest", chain_hash_column_type(), nullable=False),
     Column("sbom_pointer", Text(), nullable=True),
-    Column("tenant_id", String(256), nullable=True),
-    Column("created_by", String(256), nullable=False),
-    Column("last_actor", String(256), nullable=False),
+    Column("tenant_id", String(PACK_TENANT_ID_MAX_LEN), nullable=True),
+    Column("created_by", String(PACK_ACTOR_MAX_LEN), nullable=False),
+    Column("last_actor", String(PACK_ACTOR_MAX_LEN), nullable=False),
     Column("created_at", TIMESTAMP(timezone=True), nullable=False),
     Column("updated_at", TIMESTAMP(timezone=True), nullable=False),
     CheckConstraint(
@@ -207,7 +254,7 @@ _packs = Table(
 # this exception on out-of-vocabulary inputs — but storage's preflight
 # guard at (a) above intercepts every storage-side call site BEFORE
 # the helper is reached, so the helper's own runtime guard at
-# ``packs/lifecycle.py:393-394`` cannot fire from within this module.
+# ``packs/lifecycle.py:416-417`` cannot fire from within this module.
 # The helper's guard fires only when external callers (planned:
 # Sprint 7B.2 portal handlers) invoke ``iso_controls_for`` directly —
 # that fire-site lives in :mod:`cognic_agentos.packs.lifecycle`, NOT
@@ -228,27 +275,63 @@ class PackNotFound(Exception):
         super().__init__(f"pack not found: {pack_id}")
 
 
-#: Closed-enum vocabulary for ``save_draft``-API contract refusals. The
-#: only Wave-1 reason is the genesis-state guard; future kind-specific
-#: or identity-specific preconditions land alongside without breaking
-#: the closed-enum dispatch contract.
-PackRecordRefusalReason = Literal["pack_record_save_draft_initial_state_not_draft",]
+#: Closed-enum vocabulary for ``save_draft`` + ``update_draft`` API-contract
+#: refusals. Sprint 7B.2 T4 bumped this from 1 to 4 values: the original
+#: genesis-state guard plus three ``update_draft`` API-contract refusals.
+#: The dual-contract surface (Sprint-7B.1 genesis-state guard + Sprint-7B.2
+#: update_draft preconditions) covers every author-side write path; future
+#: kind-specific or identity-specific preconditions land alongside without
+#: breaking the closed-enum dispatch contract.
+PackRecordRefusalReason = Literal[
+    "pack_record_save_draft_initial_state_not_draft",
+    "pack_record_update_non_draft_state",
+    "pack_record_update_field_not_allowed",
+    "pack_record_update_field_invalid_shape",
+]
 
 
 class PackRecordRefused(Exception):
-    """Raised by :meth:`PackRecordStore.save_draft` when the supplied
-    :class:`PackRecord` violates the API contract. The Wave-1 contract
-    is genesis-state-only: ``save_draft`` is the entry point to the
-    state machine, so ``record.state`` MUST be ``"draft"``. Calling
-    ``save_draft(state="installed")`` would persist a row with no
-    ``decision_history`` predecessor, bypassing the lifecycle audit
-    path entirely (T3 R1 P2 finding).
+    """Raised by :meth:`PackRecordStore.save_draft` (genesis-state guard)
+    OR :meth:`PackRecordStore.update_draft` (3 update_draft API-contract
+    refusals — non-draft-state, field-not-allowed, field-invalid-shape).
 
-    Distinct from :class:`LifecycleTransitionRefused` because this is
-    NOT a state-machine refusal — the lifecycle table never had a
-    chance to fire. Callers (Sprint 7B.2 portal author handlers) can
+    The dual-contract surface was finalised at Sprint 7B.2 T4: the
+    Sprint-7B.1 contract was genesis-state-only because ``save_draft``
+    is the entry point to the state machine, so ``record.state`` MUST
+    be ``"draft"``. Calling ``save_draft(state="installed")`` would
+    persist a row with no ``decision_history`` predecessor, bypassing
+    the lifecycle audit path entirely (T3 R1 P2 finding). Sprint 7B.2 T4
+    added ``update_draft`` for in-place edits to draft-state packs;
+    its three refusal modes land on the same exception class:
+
+    - ``pack_record_update_non_draft_state`` — pack exists but is not
+      in ``draft`` state (covers the race where a concurrent
+      ``transition("submit")`` or ``transition("cancel_draft")`` advanced
+      the pack out of ``draft`` between the route's preload and the
+      atomic UPDATE).
+    - ``pack_record_update_field_not_allowed`` — caller's ``updates``
+      dict contains a key outside the 4-field allow-list (covers
+      attempts to mutate any of the 5 immutable fields ``tenant_id``
+      / ``state`` / ``kind`` / ``pack_id`` / ``created_by``).
+    - ``pack_record_update_field_invalid_shape`` — allow-listed key
+      carries a value that fails the per-field type/shape contract
+      (Sprint 7B.2 T4 plan Round 6 P3 #4 — pure-Python validation;
+      mirrors the ``cli/validators/`` early-refusal pattern).
+
+    Distinct from :class:`LifecycleTransitionRefused` because neither
+    branch is a state-machine refusal — the lifecycle table never had
+    a chance to fire. Callers (Sprint 7B.2 portal author handlers) can
     dispatch on the exception class to distinguish "your draft request
     was malformed" from "the state machine refused your transition".
+
+    The exception payload carries the closed-enum :data:`PackRecordRefusalReason`
+    ONLY — no failing-field-name attribute (Sprint 7B.2 T4 Round 7 P2 #3
+    decision to keep the 7B.1 ``__init__`` signature unchanged at
+    ``(reason, *, state=None)``). Failing-field-name diagnostics surface
+    via the structured-log record emitted by ``update_draft`` at the
+    value-shape refusal branch (``packs.update_draft.invalid_shape``);
+    SIEM correlation + examiner audit consume the log, not the
+    exception payload.
     """
 
     def __init__(
@@ -357,6 +440,179 @@ class PackRecordStore:
             )
         return record.id
 
+    async def update_draft(
+        self,
+        *,
+        pack_id: uuid.UUID,
+        updates: dict[str, Any],
+        actor_id: str,
+    ) -> None:
+        """Sprint 7B.2 T4 — in-place edit of a ``draft``-state pack.
+
+        Updates a fixed allow-list of 4 non-state fields
+        (``display_name`` / ``manifest_digest`` / ``signed_artefact_digest``
+        / ``sbom_pointer``) on a pack iff its current ``state == 'draft'``.
+        ``last_actor`` + ``updated_at`` are ALWAYS overwritten by this
+        call regardless of which allow-listed fields the caller supplied
+        (so the audit-trail invariant ``last_actor`` = current modifier
+        holds). The original ``created_by`` is NEVER mutated (it sits in
+        the 5-field immutable set ``tenant_id`` / ``state`` / ``kind`` /
+        ``pack_id`` / ``created_by`` — attempts to include any of these
+        in ``updates`` are refused with
+        ``pack_record_update_field_not_allowed``).
+
+        No chain event is emitted — mirrors :meth:`save_draft`'s
+        genesis-state pattern. The pack is still in the pre-submit
+        editing window where the audit chain has not yet started; the
+        first chain event fires on the first ``transition()`` (typically
+        ``submit`` or ``cancel_draft``).
+
+        Refusal precedence (Sprint 7B.2 T4 plan §"Atomicity specification")
+        — fires top-down, fail-loud at the first mismatch:
+
+        1. **Field-allowlist refusal** (pure-Python, before any DB call):
+           if any key in ``updates`` is outside the 4-field allow-list,
+           raise :class:`PackRecordRefused` with reason
+           ``pack_record_update_field_not_allowed``. Mirrors the
+           early-refusal pattern in Sprint-7B.1 T3 storage's preflight
+           transition-name guard.
+        2. **Per-field value-shape refusal** (pure-Python, Round 6 P3 #4):
+           for each allow-listed key, verify the value matches the
+           per-field shape contract (``str`` non-empty ≤256 for
+           ``display_name``; ``bytes`` len==32 for both digests;
+           ``str`` non-empty or ``None`` for ``sbom_pointer``). First
+           mismatch raises :class:`PackRecordRefused` with reason
+           ``pack_record_update_field_invalid_shape``. The failing
+           field name surfaces via structured-log emission
+           (``packs.update_draft.invalid_shape``) for SIEM correlation;
+           NOT carried in the exception payload (Round 7 P2 #3 decision
+           to keep ``PackRecordRefused.__init__`` signature unchanged).
+        3. **Atomic UPDATE with state precondition**: single SQL
+           ``UPDATE packs SET <allowlisted-fields>, last_actor, updated_at
+           WHERE id = :pack_id AND state = 'draft'``. The state predicate
+           is part of the WHERE clause (NOT a separate
+           ``SELECT ... FOR UPDATE`` precondition closure — no chain row
+           is emitted, so ``append_with_precondition`` is not the right
+           primitive; the atomic UPDATE alone provides the consistency
+           guarantee).
+        4. **Rowcount-based refusal disambiguation**: rowcount==1 →
+           success path; rowcount==0 → follow-up
+           ``SELECT id, state FROM packs WHERE id = :pack_id`` to
+           distinguish :class:`PackNotFound` from
+           :class:`PackRecordRefused` with reason
+           ``pack_record_update_non_draft_state`` (the latter covers
+           the race where a concurrent ``transition("submit")`` or
+           ``transition("cancel_draft")`` advanced the pack out of
+           ``draft`` between the route's preload and the atomic UPDATE).
+
+        Tenant-isolation enforcement is route-level (caller goes through
+        :func:`portal.rbac.tenant_isolation.RequireTenantOwnership` at
+        the FastAPI dependency layer); storage enforces ONLY the
+        state-machine + field-allowlist + value-shape invariants. The
+        kwarg signature deliberately does NOT take a ``tenant_id``
+        argument so a caller cannot smuggle a cross-tenant mutation
+        past this layer (per Sprint 7B.2 T4 plan Round 5 P2 #3
+        resolution, mirroring 7B.1 ``save_draft()`` which also does
+        not accept ``tenant_id`` as a separate kwarg).
+
+        Parameters
+        ----------
+        pack_id
+            Target pack's primary-key UUID. The route layer resolves this
+            from the URL path via ``RequireTenantOwnership(pack_id_param=...)``
+            BEFORE calling here.
+        updates
+            Field-name → new-value mapping. Must contain only keys from
+            the 4-field allow-list above; values must match the per-field
+            shape contract.
+        actor_id
+            Authenticated principal's ``subject`` (from
+            :class:`Actor.subject`). Written to ``last_actor`` and used
+            in the structured-log emission's ``extra`` payload.
+
+        Raises
+        ------
+        PackRecordRefused
+            With closed-enum reason
+            ``pack_record_update_field_not_allowed`` (Step 1) /
+            ``pack_record_update_field_invalid_shape`` (Step 2) /
+            ``pack_record_update_non_draft_state`` (Step 4). All three
+            refuse fail-loud, fail-closed: no row mutation, no chain
+            row.
+        PackNotFound
+            Step 4 follow-up SELECT returned no row — pack does not
+            exist at this ``pack_id``. Distinct from
+            ``pack_record_update_non_draft_state`` because no decision
+            was made — the caller asked about a row that does not
+            exist.
+        """
+
+        # Step 1 — field-allowlist refusal (pure-Python; no DB call).
+        # The 4-field allow-list is the ONLY mutable surface; everything
+        # outside it (including the 5 immutable fields tenant_id / state
+        # / kind / pack_id / created_by) refuses with the same closed-enum
+        # reason so the caller dispatches uniformly. Mirrors the Sprint-
+        # 7B.1 T3 storage preflight transition-name guard pattern.
+        _ALLOWED_FIELDS: frozenset[str] = frozenset(
+            {
+                "display_name",
+                "manifest_digest",
+                "signed_artefact_digest",
+                "sbom_pointer",
+            }
+        )
+        for key in updates:
+            if key not in _ALLOWED_FIELDS:
+                raise PackRecordRefused("pack_record_update_field_not_allowed")
+
+        # Step 2 — per-field value-shape refusal (pure-Python; no DB call).
+        # First mismatch raises with the closed-enum reason ONLY; the
+        # failing field name surfaces via structured-log emission BEFORE
+        # the raise so SIEM correlation has the diagnostic without
+        # extending the typed-exception payload (Sprint 7B.2 T4 plan
+        # Round 7 P2 #3 + Round 8 reviewer answer #1 contract).
+        for key, value in updates.items():
+            if not _is_valid_update_value_shape(key, value):
+                _LOG.warning(
+                    "packs.update_draft.invalid_shape",
+                    extra={"pack_id": str(pack_id), "field": key},
+                )
+                raise PackRecordRefused("pack_record_update_field_invalid_shape")
+
+        # Step 3 — atomic UPDATE with state predicate as part of the
+        # WHERE clause. The ``state = 'draft'`` predicate IS the
+        # consistency guarantee — a concurrent transition() that
+        # advances the pack out of draft causes our UPDATE to affect
+        # zero rows, surfacing as a clean refusal in Step 4. No
+        # SELECT ... FOR UPDATE precondition closure because no chain
+        # row is emitted; the atomic UPDATE is the only authoritative
+        # state check.
+        async with self._engine.begin() as conn:
+            update_values: dict[str, Any] = dict(updates)
+            update_values["last_actor"] = actor_id
+            update_values["updated_at"] = datetime.now(UTC)
+            result = await conn.execute(
+                update(_packs)
+                .where(_packs.c.id == pack_id)
+                .where(_packs.c.state == "draft")
+                .values(**update_values)
+            )
+            if result.rowcount == 1:
+                return
+
+            # Step 4 — rowcount==0 disambiguation. Follow-up SELECT runs
+            # inside the same transaction (no FOR UPDATE — disambiguation
+            # is purely informational; the refusal is already determined
+            # by the UPDATE's rowcount==0; the SELECT only chooses
+            # between PackNotFound vs pack_record_update_non_draft_state).
+            row = (await conn.execute(select(_packs.c.state).where(_packs.c.id == pack_id))).first()
+            if row is None:
+                raise PackNotFound(pack_id)
+            raise PackRecordRefused(
+                "pack_record_update_non_draft_state",
+                state=row.state,
+            )
+
     async def transition(
         self,
         *,
@@ -442,7 +698,7 @@ class PackRecordStore:
         # source of truth at ``packs.lifecycle``; callers cannot supply
         # nor override). The preflight ``transition not in
         # _TRANSITION_TO_TARGET_STATE`` guard above means the helper's
-        # own runtime guard at ``packs/lifecycle.py:393-394`` cannot
+        # own runtime guard at ``packs/lifecycle.py:416-417`` cannot
         # fire from this call site — both guards check the same closed
         # set (the storage map and the lifecycle map both key off
         # ``TransitionName``; verified by the build-time drift detector
@@ -616,6 +872,44 @@ class PackRecordStore:
         return history
 
 
+def _is_valid_update_value_shape(field_name: str, value: Any) -> bool:
+    """Sprint 7B.2 T4 — per-field value-shape validator for
+    :meth:`PackRecordStore.update_draft`.
+
+    Returns ``True`` iff ``value`` matches the per-field type/shape
+    contract documented at :meth:`PackRecordStore.update_draft` Step 2.
+    Per-field contracts derived from :class:`PackRecord` field types
+    at :class:`PackRecord` definition above:
+
+    - ``display_name`` — ``str``, non-empty, length ≤ 256 chars
+      (DB column is ``String(256)``; longer values would either fail
+      a CHECK constraint or silently truncate depending on dialect)
+    - ``manifest_digest`` — ``bytes``, exactly 32 bytes (SHA-256
+      output width per :data:`chain_hash_column_type`)
+    - ``signed_artefact_digest`` — ``bytes``, exactly 32 bytes (same
+      as manifest_digest)
+    - ``sbom_pointer`` — ``str`` non-empty OR ``None`` (DB column is
+      ``Text(nullable=True)``; an empty string is semantically distinct
+      from None and treated as malformed input here)
+
+    Helper returns ``False`` on the FIRST validation rule that fails;
+    the caller's loop is per-key, so the first mismatching key
+    surfaces in the structured-log emission. ``field_name`` outside
+    the 4-field allow-list returns ``False`` defensively (Step 1
+    should have already refused; this is belt-and-braces).
+    """
+
+    if field_name == "display_name":
+        return isinstance(value, str) and 0 < len(value) <= PACK_DISPLAY_NAME_MAX_LEN
+    if field_name in ("manifest_digest", "signed_artefact_digest"):
+        return isinstance(value, bytes) and len(value) == 32
+    if field_name == "sbom_pointer":
+        if value is None:
+            return True
+        return isinstance(value, str) and len(value) > 0
+    return False
+
+
 def _row_to_record(mapping: Mapping[str, Any]) -> PackRecord:
     """Project a ``packs`` row mapping back into a :class:`PackRecord`.
     Single source of truth for column → field name parity.
@@ -656,6 +950,12 @@ del _t, _target, _to_states
 
 
 __all__: tuple[str, ...] = (
+    "PACK_ACTOR_MAX_LEN",
+    "PACK_DISPLAY_NAME_MAX_LEN",
+    "PACK_ID_MAX_LEN",
+    "PACK_KIND_MAX_LEN",
+    "PACK_STATE_MAX_LEN",
+    "PACK_TENANT_ID_MAX_LEN",
     "LifecycleTransitionRefused",
     "PackNotFound",
     "PackRecord",

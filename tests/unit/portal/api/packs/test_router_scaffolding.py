@@ -114,7 +114,7 @@ def test_pack_base_model_forbids_extra_fields() -> None:
 
 def _make_pack_response_payload() -> dict[str, object]:
     """Returns a complete :class:`PackResponse` payload that mirrors the
-    :class:`PackRecord` field set at ``packs/storage.py:280-293`` minus
+    :class:`PackRecord` field set at ``packs/storage.py:351-378`` minus
     the two SHA-256 digests (security: digests are admin-only and
     surface only on the inspection-tier endpoints at T7 per the
     plan-of-record's ``inspection_routes.py``)."""

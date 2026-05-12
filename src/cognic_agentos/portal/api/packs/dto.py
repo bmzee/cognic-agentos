@@ -55,7 +55,7 @@ class PackResponse(PackBaseModel):
     """Default public-surface view of a
     :class:`~cognic_agentos.packs.storage.PackRecord`.
 
-    Field set mirrors :class:`PackRecord` at ``packs/storage.py:280-293``
+    Field set mirrors :class:`PackRecord` at ``packs/storage.py:351-378``
     minus the two SHA-256 digests (``manifest_digest`` /
     ``signed_artefact_digest``). The narrower projection keeps
     cryptographic-signature material off the default read surface;

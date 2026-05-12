@@ -20,7 +20,7 @@ substrate). Type seams:
   in SQLAlchemy 2.0. Compiles to native ``UUID`` on Postgres and
   ``CHAR(32)`` (32-char hex without dashes) on Oracle / SQLite. Mirrors
   the Sprint-2 substrate at ``20260428_0001_initial_governance_schema.py:123``
-  and the in-process Table at ``packs/storage.py:154`` — the migration
+  and the in-process Table at ``packs/storage.py:199`` — the migration
   MUST match the in-process Table exactly so Oracle integration canaries
   bind ``id`` values that match the underlying column type.
   **Not** ``sa.dialects.postgresql.UUID(as_uuid=True)``: that's a
@@ -40,7 +40,7 @@ substrate). Type seams:
 CHECK constraints on ``kind`` and ``state`` enforce the Sprint-7B.1
 closed-enum vocabularies (``PackKind`` 4-tuple + ``PackState``
 11-tuple) at the DB layer; out-of-vocabulary values rejected by the
-Pydantic model at ``packs/storage.py:248-273`` are caught a second time
+Pydantic model at ``packs/storage.py:351-378`` are caught a second time
 here in case a future direct-SQL writer bypasses the model.
 
 Indexes:
@@ -50,7 +50,7 @@ Indexes:
   (Sprint 7B.2 portal API: "show me all approved packs for tenant X").
 
 Round-1 reviewer-P1 schema invariant — the in-process Table at
-``packs/storage.py:151`` and this migration's ``op.create_table(...)``
+``packs/storage.py:199`` and this migration's ``op.create_table(...)``
 MUST agree on every column name + nullability + CHECK constraint.
 Drift is pinned by the unit test at
 ``tests/unit/db/test_migration_20260510_0003.py::test_packs_columns_match_storage_table_object``.
@@ -110,7 +110,7 @@ def upgrade() -> None:
         sa.Column("created_at", PACKS_TS_TYPE, nullable=False),
         sa.Column("updated_at", PACKS_TS_TYPE, nullable=False),
         # Inline CheckConstraints mirror the source-of-truth declaration
-        # at ``packs/storage.py:167-176``. Constraint names are pinned
+        # at ``packs/storage.py:215-224``. Constraint names are pinned
         # ``ck_packs_{kind,state}`` so live-DB downgrades drop the
         # constraints by name without dialect quirks.
         sa.CheckConstraint(
@@ -124,7 +124,7 @@ def upgrade() -> None:
             name="ck_packs_state",
         ),
     )
-    # Index inventory matches ``packs/storage.py:177-178``.
+    # Index inventory matches ``packs/storage.py:225-226``.
     op.create_index("ix_packs_kind_state", "packs", ["kind", "state"])
     op.create_index("ix_packs_tenant_state", "packs", ["tenant_id", "state"])
 

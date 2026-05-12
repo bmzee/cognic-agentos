@@ -48,7 +48,7 @@ Refusal precedence (more-specific reasons fire BEFORE generic fallthrough):
 2. ``lifecycle_transition_state_unknown`` — ``from_state`` or ``to_state``
    not in the canonical 11-tuple.
 3. ``lifecycle_transition_name_unknown`` — ``transition`` not in the
-   canonical 10-tuple. Steps 1-3 form the input-vocabulary block; if any
+   canonical 11-tuple. Steps 1-3 form the input-vocabulary block; if any
    fires, no semantic check runs.
 4. ``lifecycle_transition_terminal_state`` — ``from_state == "uninstalled"``
    has no outgoing edges per ADR-012.
@@ -127,9 +127,18 @@ PackState = Literal[
     "uninstalled",
 ]
 
-#: Canonical 10-tuple of transition names per ADR-012 §"State transitions"
-#: (lines 38-48). ``withdraw`` / ``revoke`` / ``uninstall`` each have
-#: multiple legal from-states — see :data:`_VALID_TRANSITIONS`.
+#: Canonical 11-tuple of transition names per ADR-012 §"State transitions"
+#: (lines 38-48) + ADR-012 §59 ``cancel_draft``. ``withdraw`` / ``revoke``
+#: / ``uninstall`` each have multiple legal from-states — see
+#: :data:`_VALID_TRANSITIONS`.
+#:
+#: Sprint 7B.2 T4 added ``cancel_draft`` per ADR-012 §59 "DELETE
+#: /api/v1/packs/drafts/{id}" as the developer-scratches-own-draft path,
+#: distinct from the existing ``withdraw`` transition (which §39 limits
+#: to ``submitted`` / ``under_review`` source states). Treating these
+#: as separate transitions preserves the audit-chain distinction
+#: between a developer cancelling their own draft vs an author
+#: retracting a submission already under reviewer attention.
 TransitionName = Literal[
     "submit",
     "claim",
@@ -141,6 +150,7 @@ TransitionName = Literal[
     "disable",
     "revoke",
     "uninstall",
+    "cancel_draft",
 ]
 
 #: 13-value closed-enum refusal reasons (Doctrine Lock C, finalised at T2 —
@@ -179,8 +189,9 @@ LifecycleRefusalReason = Literal[
 ]
 
 #: Per-transition legal ``(from_state, to_state)`` pairs, mirroring the
-#: ADR-012 §"State transitions" table verbatim. Keyed by transition name;
-#: value is the frozenset of legal ``(from, to)`` pairs.
+#: ADR-012 §"State transitions" table verbatim plus the ``cancel_draft``
+#: extension added at Sprint 7B.2 T4 per ADR-012 §59. Keyed by transition
+#: name; value is the frozenset of legal ``(from, to)`` pairs.
 #:
 #: Most transitions have a single legal from-state. ``withdraw`` / ``revoke``
 #: / ``uninstall`` each have two legal from-states per ADR-012:
@@ -188,11 +199,14 @@ LifecycleRefusalReason = Literal[
 #: - ``withdraw``: submitted/under_review → withdrawn (line 43)
 #: - ``revoke``: installed/disabled → revoked (line 47)
 #: - ``uninstall``: disabled/revoked → uninstalled (line 48)
+#: - ``cancel_draft``: draft → withdrawn (Sprint 7B.2 T4 per ADR-012 §59;
+#:   distinct from ``withdraw`` which §39 limits to submitted/under_review)
 #:
-#: 13 legal pairs in total across the 10 transitions (7 single-from + 3
-#: multi-from x 2 from-states each = 7 + 6 = 13). Pinned by
+#: 14 legal pairs in total across the 11 transitions (7 single-from + 3
+#: multi-from x 2 from-states each + cancel_draft single-from x 1 =
+#: 7 + 6 + 1 = 14). Pinned by
 #: ``tests/unit/packs/test_lifecycle.py::TestSprint7B1ValidTransitionsTable
-#: ::test_table_has_13_legal_pairs_total``.
+#: ::test_table_has_14_legal_pairs_total``.
 _VALID_TRANSITIONS: Final[Mapping[TransitionName, frozenset[tuple[PackState, PackState]]]] = {
     "submit": frozenset({("draft", "submitted")}),
     "claim": frozenset({("submitted", "under_review")}),
@@ -219,6 +233,7 @@ _VALID_TRANSITIONS: Final[Mapping[TransitionName, frozenset[tuple[PackState, Pac
             ("revoked", "uninstalled"),
         }
     ),
+    "cancel_draft": frozenset({("draft", "withdrawn")}),
 }
 
 #: Runtime canonical kind set, derived from the :data:`PackKind` Literal at
@@ -286,12 +301,19 @@ _KNOWN_ISO_CONTROL_CODES: Final[frozenset[str]] = frozenset(
 #:   means specs no longer hold).
 #: - ``uninstall`` → ``("A.5.32",)`` — operational access control;
 #:   terminal state.
+#: - ``cancel_draft`` → ``("A.5.31",)`` — author scratches an
+#:   unsubmitted draft. Sprint 7B.2 T4 (per Round 6 P2 #3 decision):
+#:   mirrors ``withdraw``'s ``A.5.31`` mapping since both transitions
+#:   are author-cancellation flows reaching ``withdrawn`` — the
+#:   regulatory-gate semantic is the same even though the source
+#:   state and downstream audit narrative differ (developer scratches
+#:   own draft vs. author retracts submission under reviewer attention).
 #:
 #: ``Mapping`` keys must equal ``get_args(TransitionName)`` exactly;
 #: pinned by ``test_lifecycle_audit.py::TestSprint7B1IsoControlsMapShape``.
 #: Build-time assert at module foot mirrors the
 #: ``_TRANSITION_TO_TARGET_STATE`` drift assert at
-#: ``packs/storage.py:641-655``.
+#: ``packs/storage.py:935-949``.
 _TRANSITION_TO_ISO_CONTROLS: Final[Mapping[TransitionName, tuple[str, ...]]] = {
     "submit": ("A.5.31", "A.6.2.4"),
     "claim": ("A.5.31",),
@@ -303,6 +325,7 @@ _TRANSITION_TO_ISO_CONTROLS: Final[Mapping[TransitionName, tuple[str, ...]]] = {
     "disable": ("A.5.32",),
     "revoke": ("A.5.32", "A.6.2.4"),
     "uninstall": ("A.5.32",),
+    "cancel_draft": ("A.5.31",),
 }
 
 
@@ -321,7 +344,7 @@ class LifecycleTransitionRefused(Exception):
     public seam that takes a closed-enum-typed argument
     (``validate_transition`` step 3 in this module;
     :meth:`PackRecordStore.transition` preflight guard at
-    ``packs/storage.py:437-438``; :func:`iso_controls_for` in this module)
+    ``packs/storage.py:693-694``; :func:`iso_controls_for` in this module)
     raises this same exception with the same
     ``"lifecycle_transition_name_unknown"`` reason for out-of-vocabulary
     transitions.
@@ -364,7 +387,7 @@ def iso_controls_for(transition: TransitionName) -> tuple[str, ...]:
     Per the asymmetric-runtime-guard doctrine
     (``feedback_strict_review_off_gate.md`` §8 — same as
     :func:`validate_transition` step 3 + :meth:`PackRecordStore.transition`
-    preflight guard at ``packs/storage.py:437-438``): out-of-vocabulary
+    preflight guard at ``packs/storage.py:693-694``): out-of-vocabulary
     transition names are refused with :class:`LifecycleTransitionRefused`
     carrying the closed-enum
     ``"lifecycle_transition_name_unknown"`` reason — NOT a bare
@@ -373,7 +396,7 @@ def iso_controls_for(transition: TransitionName) -> tuple[str, ...]:
     Parameters
     ----------
     transition
-        Member of the canonical 10-tuple :data:`TransitionName`. Static
+        Member of the canonical 11-tuple :data:`TransitionName`. Static
         type-checkers refuse out-of-vocabulary calls; the runtime guard
         catches dynamic mis-calls (e.g. from JSON-decoded API payloads).
 
@@ -433,12 +456,15 @@ def validate_transition(
         ``lifecycle_transition_kind_state_combination_forbidden``.
     transition
         The named lifecycle transition. Must be a member of the canonical
-        10-tuple :data:`TransitionName`. Out-of-set values return
+        11-tuple :data:`TransitionName`. Out-of-set values return
         ``lifecycle_transition_name_unknown``. The transition name carries
         the action semantics (``submit`` vs. ``approve`` vs. ``reject``)
         that ``(from, to)`` alone does not capture — e.g. for ``withdraw``
         the same pair could be reached by ``reject`` if reject targeted
-        ``withdrawn``.
+        ``withdrawn``; for ``cancel_draft`` vs. ``withdraw`` both reach
+        ``withdrawn`` but from distinct source states (``draft`` vs.
+        ``submitted``/``under_review``) with distinct audit narratives
+        per ADR-012 §39 + §59.
 
     Returns
     -------
@@ -519,7 +545,7 @@ def validate_transition(
 # ``tests/unit/packs/test_lifecycle_audit.py::TestSprint7B1IsoControlsMapShape``
 # provides the operator-facing diagnostic. Mirrors the
 # ``_TRANSITION_TO_TARGET_STATE`` drift assert at
-# ``packs/storage.py:641-655``.
+# ``packs/storage.py:935-949``.
 assert set(_TRANSITION_TO_ISO_CONTROLS.keys()) == set(get_args(TransitionName)), (
     "_TRANSITION_TO_ISO_CONTROLS keys diverge from get_args(TransitionName)"
 )
