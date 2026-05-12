@@ -799,6 +799,8 @@ class PackRecordStore:
         state: PackState,
         limit: int = 50,
         cursor: uuid.UUID | None = None,
+        *,
+        tenant_id: str | None = None,
     ) -> list[PackRecord]:
         """Paginated state-filter read. Returns records whose
         denormalised ``packs.state`` cache matches.
@@ -808,11 +810,27 @@ class PackRecordStore:
         ``packs.id`` so the cursor pagination is dialect-portable
         across PG / Oracle / SQLite without depending on
         ``ORDER BY ... NULLS LAST`` quirks.
+
+        Sprint 7B.2 T5 (plan Round 11 P2 #1 + Round 14 P2 #1 backward-
+        compatible signature): optional keyword-only ``tenant_id``
+        filter. When non-None, adds ``tenant_id == :tenant_id`` to the
+        WHERE clause server-side, leveraging the ``ix_packs_tenant_state``
+        composite index per migration L129. The reviewer-queue endpoint
+        at ``GET /api/v1/packs/review-queue`` calls this with
+        ``tenant_id=actor.tenant_id`` so cross-tenant rows are filtered
+        server-side (no in-handler filtering, no pagination skew).
+
+        The ``tenant_id`` parameter lives BEHIND the ``*`` separator so
+        it is keyword-only-with-default — pre-T5 call sites passing
+        only ``state`` (or ``state``, ``limit``, ``cursor``) keep
+        identical semantics.
         """
 
         stmt = select(_packs).where(_packs.c.state == state).order_by(_packs.c.id)
         if cursor is not None:
             stmt = stmt.where(_packs.c.id > cursor)
+        if tenant_id is not None:
+            stmt = stmt.where(_packs.c.tenant_id == tenant_id)
         stmt = stmt.limit(limit)
         async with self._engine.connect() as conn:
             rows = (await conn.execute(stmt)).all()

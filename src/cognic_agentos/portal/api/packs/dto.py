@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import datetime
 import uuid
+from typing import Annotated, Any, Literal
 
 import pydantic
 
@@ -93,3 +94,135 @@ class PackResponse(PackBaseModel):
     last_actor: str
     created_at: datetime.datetime
     updated_at: datetime.datetime
+
+
+# ---------------------------------------------------------------------------
+# Sprint 7B.2 T5 — RejectionReason 7-value closed-enum vocabulary
+# (Plan Round 11 P2 #2 — anchored to ADR-012 §41 5-gate composition +
+# operational categories + free-form fallback)
+# ---------------------------------------------------------------------------
+
+#: Plan Round 11 P2 #2 — closed-enum vocabulary carried on
+#: :class:`RejectDraftRequest` bodies AND on the T5 reject-handler
+#: structured-log ``extra["reason"]`` field. Wire-protocol-public; any
+#: change is a wire-protocol break.
+#:
+#: 7 values anchored to ADR-012 §41's 5-gate composition + 2 operational
+#: categories:
+#:
+#: - ``signature_invalid`` — cosign / SLSA failure (gate 1)
+#: - ``evaluation_pass_rate_below_threshold`` — ADR-010 eval harness red (gate 2)
+#: - ``adversarial_corpus_pass_rate_below_threshold`` — ADR-011 adversarial red (gate 3)
+#: - ``owasp_conformance_red`` — ADR-012 §41 OWASP gate red (gate 4)
+#: - ``data_governance_unfit`` — ADR-017 data-class / purpose mismatch
+#: - ``documentation_incomplete`` — operational; manifest fields incomplete
+#: - ``other`` — free-form fallback; ``comments`` IS the diagnostic
+#:
+#: Style note: plain ``= Literal[...]`` (no ``TypeAlias`` annotation) to
+#: match the Sprint-7B.1 repo convention at ``packs/lifecycle.py:111``.
+RejectionReason = Literal[
+    "signature_invalid",
+    "evaluation_pass_rate_below_threshold",
+    "adversarial_corpus_pass_rate_below_threshold",
+    "owasp_conformance_red",
+    "data_governance_unfit",
+    "documentation_incomplete",
+    "other",
+]
+
+
+# ---------------------------------------------------------------------------
+# Sprint 7B.2 T5 — RejectDraftRequest body schema
+# (Plan Round 11 P2 #2 + Round 11 P2 #3 — bare-transition + structured-log
+# in T5; T9 carry-forward attaches `{rejection_reason, reviewer_comments}`
+# to the chain row via `evidence_attachments`)
+# ---------------------------------------------------------------------------
+
+
+class RejectDraftRequest(PackBaseModel):
+    """POST ``/api/v1/packs/{pack_id}/reject`` request body.
+
+    Plan Round 11 P2 #2 + Round 11 P2 #3:
+    - ``reason``: closed-enum :data:`RejectionReason` (7 values).
+    - ``comments``: required non-empty string; carries the reviewer's
+      free-form diagnostic. When ``reason == "other"`` the comments
+      field IS the evidence (no other semantic content on the reason).
+
+    T5 ships reject as a bare transition + structured-log only emission
+    of these fields (per Round 11 P2 #3); T9 carry-forward amends the
+    reject handler to persist
+    ``{"rejection_reason": body.reason, "reviewer_comments": body.comments}``
+    to the chain row via ``evidence_attachments``. The DTO schema is
+    stable across T5 + T9 (T9 changes the storage payload, not the
+    wire-input shape).
+
+    Inherits :class:`PackBaseModel`'s ``frozen=True`` + ``extra="forbid"``
+    so smuggled fields refuse at validation; downstream handler cannot
+    mutate the body mid-request.
+    """
+
+    reason: RejectionReason
+    comments: Annotated[str, pydantic.Field(min_length=1)]
+
+    @pydantic.model_validator(mode="after")
+    def _refuse_other_reason_with_empty_comments(self) -> RejectDraftRequest:
+        """Plan Round 11 P2 #2 — when ``reason == "other"`` the
+        ``comments`` field IS the free-form diagnostic and MUST be
+        non-empty. The ``Field(min_length=1)`` constraint already
+        rejects empty strings for ALL reasons; this validator is a
+        cross-axis guard so a future relaxation of the field
+        constraint cannot silently undermine the ``other`` evidence
+        contract.
+
+        Pinned by ``test_refuses_other_reason_without_comments`` at
+        ``tests/unit/portal/api/packs/test_router_scaffolding.py``.
+        """
+        if self.reason == "other" and not self.comments.strip():
+            raise ValueError(
+                "comments MUST be non-empty when reason == 'other'; the "
+                "'other' value carries no semantic content of its own "
+                "and the free-form comments are the evidence surface"
+            )
+        return self
+
+
+# ---------------------------------------------------------------------------
+# Sprint 7B.2 T5 — PackEvidenceResponse response schema
+# (Plan Round 11 P3 #5 — GET /api/v1/packs/{pack_id}/evidence)
+# ---------------------------------------------------------------------------
+
+
+class PackEvidenceResponse(PackBaseModel):
+    """GET ``/api/v1/packs/{pack_id}/evidence`` response body.
+
+    Plan Round 11 P3 #5 — two-field shape exposing the T9
+    auto-run-on-submit conformance evidence + a placeholder for the
+    7B.3 reviewer evidence panels (always-null literal in 7B.2).
+
+    Read-path (T5):
+    - Walk :meth:`PackRecordStore.load_lifecycle_history` for the pack.
+    - Find the most-recent ``event_type == "pack.lifecycle.submitted"`` row.
+    - Surface its ``payload.get("conformance")`` value on the
+      ``conformance`` field; ``None`` for pre-T9 chain rows that carry
+      no conformance key.
+
+    Plan T5 caveat: until T9 lands, EVERY submit chain row is a pre-T9
+    chain that carries no ``conformance`` key, so the endpoint surfaces
+    ``{"conformance": null, "reviewer_evidence_panels": null}``
+    gracefully — the test surface pins both the pre-T9 null path AND
+    the forward-looking T9 populated path.
+
+    Fields:
+    - ``conformance: dict[str, Any] | None`` — populated when T9
+      auto-run-on-submit has attached evidence; ``None`` otherwise.
+    - ``reviewer_evidence_panels: None`` — literal-typed at ``None``
+      in 7B.2; 7B.3 will widen this field to the full evidence-panel
+      object. The literal-typed-at-``None`` constraint pins the
+      always-null contract so a 7B.2 caller cannot silently surface a
+      non-null value through this field; pinned by
+      ``test_reviewer_evidence_panels_only_accepts_none`` at
+      ``tests/unit/portal/api/packs/test_router_scaffolding.py``.
+    """
+
+    conformance: dict[str, Any] | None
+    reviewer_evidence_panels: None

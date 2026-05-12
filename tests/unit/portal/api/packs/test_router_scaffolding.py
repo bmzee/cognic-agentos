@@ -18,13 +18,20 @@ the entire downstream test surface.
 
 import datetime
 import uuid
+from typing import get_args
 
 import pydantic
 import pytest
 from fastapi import FastAPI
 
 from cognic_agentos.portal.api.packs import build_packs_router
-from cognic_agentos.portal.api.packs.dto import PackBaseModel, PackResponse
+from cognic_agentos.portal.api.packs.dto import (
+    PackBaseModel,
+    PackEvidenceResponse,
+    PackResponse,
+    RejectDraftRequest,
+    RejectionReason,
+)
 
 # ---------------------------------------------------------------------------
 # Stub PackRecordStore (sufficient for T3 — no method calls in T3 yet)
@@ -259,3 +266,221 @@ def test_pack_response_strict_input_still_refuses_extra_fields_in_dict() -> None
     payload["smuggled_extra_field"] = "attacker-controlled"
     with pytest.raises(pydantic.ValidationError):
         PackResponse.model_validate(payload)
+
+
+# ===========================================================================
+# Sprint 7B.2 T5 — RejectionReason 7-value closed-enum vocabulary
+# (Round 11 P2 #2; anchored to ADR-012 §41 5-gate composition + ops)
+# ===========================================================================
+
+
+class TestSprint7B2RejectionReasonVocabulary:
+    """Plan Round 11 P2 #2 — ``RejectionReason`` 7-value closed-enum
+    vocabulary anchored to ADR-012 §41 5-gate composition + 2
+    operational categories + free-form fallback.
+
+    Wire-protocol-public: the literal IS carried in :class:`RejectDraftRequest`
+    bodies and in the T5 reject-handler structured-log ``extra["reason"]``.
+    Any addition/rename/removal is a wire-protocol break per AGENTS.md
+    "Wire-protocol contracts" stop rule + ``feedback_strict_review_off_gate.md``
+    closed-enum stability doctrine.
+    """
+
+    def test_literal_values_pinned_at_7(self) -> None:
+        """Plan Round 11 P2 #2 — exactly 7 closed-enum values, in the
+        canonical set anchored to ADR-012 §41 5-gate composition:
+
+        - ``signature_invalid`` — cosign / SLSA failure (gate 1)
+        - ``evaluation_pass_rate_below_threshold`` — ADR-010 eval harness red (gate 2)
+        - ``adversarial_corpus_pass_rate_below_threshold`` — ADR-011 adversarial red (gate 3)
+        - ``owasp_conformance_red`` — ADR-012 §41 OWASP gate red (gate 4)
+        - ``data_governance_unfit`` — ADR-017 data-class / purpose mismatch
+        - ``documentation_incomplete`` — operational; manifest fields incomplete
+        - ``other`` — free-form fallback; ``comments`` is the diagnostic
+        """
+        expected = {
+            "signature_invalid",
+            "evaluation_pass_rate_below_threshold",
+            "adversarial_corpus_pass_rate_below_threshold",
+            "owasp_conformance_red",
+            "data_governance_unfit",
+            "documentation_incomplete",
+            "other",
+        }
+        actual = set(get_args(RejectionReason))
+        assert actual == expected
+        assert len(actual) == 7
+
+
+# ===========================================================================
+# Sprint 7B.2 T5 — RejectDraftRequest DTO (Round 11 P2 #2 + Round 11 P2 #3)
+# ===========================================================================
+
+
+class TestSprint7B2RejectDraftRequest:
+    """Plan Round 11 P2 #2 + Round 11 P2 #3 — POST /api/v1/packs/{pack_id}/reject
+    body schema. Carries ``reason`` (closed-enum) + ``comments`` (non-empty
+    str); when ``reason == "other"`` the ``comments`` field carries the
+    free-form diagnostic.
+
+    T5 ships reject as a bare transition + structured-log only emission
+    of these fields (per Round 11 P2 #3); T9 carry-forward amends the
+    reject handler to persist ``{"rejection_reason": …, "reviewer_comments": …}``
+    to the chain row via ``evidence_attachments`` (per Round 12 P2 #2).
+    """
+
+    def test_round_trips_valid_reason_and_comments(self) -> None:
+        """Happy path — every closed-enum reason validates with
+        non-empty comments."""
+        for reason_value in get_args(RejectionReason):
+            req = RejectDraftRequest(
+                reason=reason_value,
+                comments="sample diagnostic",
+            )
+            assert req.reason == reason_value
+            assert req.comments == "sample diagnostic"
+
+    def test_refuses_out_of_vocab_reason(self) -> None:
+        """An out-of-vocab reason value MUST refuse at Pydantic
+        validation — the closed-enum is wire-protocol-public + a string
+        like ``"not_a_real_reason"`` would silently land in the
+        structured-log emission as evidence if not caught here."""
+        with pytest.raises(pydantic.ValidationError):
+            RejectDraftRequest(
+                reason="not_a_real_reason",  # type: ignore[arg-type]
+                comments="diagnostic",
+            )
+
+    def test_refuses_empty_comments(self) -> None:
+        """``comments`` is REQUIRED non-empty (``Field(min_length=1)``).
+        Empty comments leave the reject chain row with no diagnostic
+        and break the audit-evidence contract per ADR-012 §42."""
+        with pytest.raises(pydantic.ValidationError):
+            RejectDraftRequest(
+                reason="signature_invalid",
+                comments="",
+            )
+
+    def test_refuses_other_reason_without_comments(self) -> None:
+        """Plan Round 11 P2 #2 — when ``reason == "other"`` the
+        ``comments`` field IS the free-form diagnostic and MUST be
+        non-empty (the ``other`` value carries no semantic content of
+        its own; comments are the evidence surface). Pinned via a
+        Pydantic ``model_validator(mode="after")``.
+
+        Note: the non-empty constraint is enforced for ALL reasons via
+        ``Field(min_length=1)`` per ``test_refuses_empty_comments``;
+        this test is the explicit cross-axis pin for the ``other``
+        case so a future relaxation of the ``min_length=1`` field
+        constraint cannot silently undermine the ``other`` evidence
+        contract.
+        """
+        with pytest.raises(pydantic.ValidationError):
+            RejectDraftRequest(
+                reason="other",
+                comments="",
+            )
+
+    def test_refuses_other_reason_with_whitespace_only_comments(self) -> None:
+        """Plan Round 11 P2 #2 — defensive-cross-axis pin: the
+        ``Field(min_length=1)`` constraint accepts a whitespace-only
+        string (length > 0), but the model_validator's ``.strip()``
+        check rejects it for the ``other`` reason (whitespace-only
+        comments carry no diagnostic content; the ``other`` reason's
+        comments are the audit-evidence surface).
+
+        Exercises the model_validator branch that
+        ``test_refuses_empty_comments`` cannot reach (because
+        ``Field(min_length=1)`` rejects ``""`` before the validator
+        runs). The two tests together pin both layers of the contract.
+        """
+        with pytest.raises(pydantic.ValidationError):
+            RejectDraftRequest(
+                reason="other",
+                comments="   ",  # whitespace-only; passes min_length=1
+            )
+
+    def test_is_frozen(self) -> None:
+        """DTO inherits :class:`PackBaseModel` (frozen) — handler
+        cannot mutate the body mid-request."""
+        req = RejectDraftRequest(reason="signature_invalid", comments="x")
+        with pytest.raises(pydantic.ValidationError):
+            req.comments = "mutated"
+
+    def test_forbids_extra_fields(self) -> None:
+        """``extra="forbid"`` from :class:`PackBaseModel` — smuggled
+        fields refuse at validation."""
+        with pytest.raises(pydantic.ValidationError):
+            RejectDraftRequest(
+                reason="signature_invalid",
+                comments="x",
+                smuggled_field="bad",  # type: ignore[call-arg]
+            )
+
+
+# ===========================================================================
+# Sprint 7B.2 T5 — PackEvidenceResponse DTO (Round 11 P3 #5)
+# ===========================================================================
+
+
+class TestSprint7B2PackEvidenceResponse:
+    """Plan Round 11 P3 #5 — GET /api/v1/packs/{pack_id}/evidence
+    response shape. Carries the conformance evidence attached by T9's
+    auto-run-on-submit wire (read from the chain ``payload.conformance``).
+
+    Two-field shape:
+    - ``conformance: dict[str, Any] | None`` — populated when T9 has
+      attached evidence to the submit chain row; ``None`` pre-T9 or when
+      the pack has no submit row.
+    - ``reviewer_evidence_panels: None`` — literal-typed at ``None``
+      in 7B.2; 7B.3 fills in with the full evidence-panel object.
+    """
+
+    def test_accepts_conformance_dict(self) -> None:
+        """The conformance kwarg accepts an arbitrary dict (the OWASP
+        runner emits the result schema; T9 will pin the inner shape)."""
+        resp = PackEvidenceResponse(
+            conformance={"status": "green", "checks": []},
+            reviewer_evidence_panels=None,
+        )
+        assert resp.conformance == {"status": "green", "checks": []}
+        assert resp.reviewer_evidence_panels is None
+
+    def test_accepts_null_conformance_for_pre_t9_chains(self) -> None:
+        """Plan T5 caveat — pre-T9 submit chain rows carry no
+        ``payload.conformance`` key; the read path surfaces ``None``
+        and the endpoint MUST return a structured ``null`` rather than
+        a 500."""
+        resp = PackEvidenceResponse(
+            conformance=None,
+            reviewer_evidence_panels=None,
+        )
+        assert resp.conformance is None
+        assert resp.reviewer_evidence_panels is None
+
+    def test_reviewer_evidence_panels_only_accepts_none(self) -> None:
+        """Plan Round 11 P3 #5 — ``reviewer_evidence_panels`` is
+        literal-typed at ``None`` in 7B.2 (always-null surface; 7B.3
+        will widen). A non-None value here would silently break the
+        wire-protocol-public contract that the field is ALWAYS null
+        in 7B.2."""
+        with pytest.raises(pydantic.ValidationError):
+            PackEvidenceResponse(
+                conformance=None,
+                reviewer_evidence_panels={"some": "thing"},  # type: ignore[arg-type]
+            )
+
+    def test_is_frozen(self) -> None:
+        """DTO inherits :class:`PackBaseModel` (frozen)."""
+        resp = PackEvidenceResponse(conformance=None, reviewer_evidence_panels=None)
+        with pytest.raises(pydantic.ValidationError):
+            resp.conformance = {}
+
+    def test_forbids_extra_fields(self) -> None:
+        """``extra="forbid"`` from :class:`PackBaseModel`."""
+        with pytest.raises(pydantic.ValidationError):
+            PackEvidenceResponse(
+                conformance=None,
+                reviewer_evidence_panels=None,
+                smuggled_panel="bad",  # type: ignore[call-arg]
+            )
