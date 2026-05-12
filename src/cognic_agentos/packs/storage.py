@@ -97,6 +97,7 @@ from sqlalchemy import (
     CheckConstraint,
     Column,
     Index,
+    Select,
     String,
     Table,
     Text,
@@ -867,6 +868,54 @@ class PackRecordStore:
             rows = (await conn.execute(stmt)).all()
         return [_row_to_record(dict(r._mapping)) for r in rows]
 
+    async def list_for_tenant(
+        self,
+        tenant_id: str,
+        *,
+        limit: int = 50,
+        cursor: uuid.UUID | None = None,
+        state: PackState | None = None,
+    ) -> list[PackRecord]:
+        """Paginated tenant-scoped read for the inspection surface.
+
+        Sprint 7B.2 T7 (plan Round 19 P2 #4 + Round 22 P2 #2): the new
+        inspection endpoint ``GET /api/v1/packs`` lacks a ``{pack_id}``
+        path-param so :class:`RequireTenantOwnership` cannot enforce
+        row-level filtering — server-side WHERE clause filtering is
+        REQUIRED and is the authoritative tenant boundary. Mirrors the
+        T5 reviewer-queue solution via :meth:`list_by_status`'s
+        ``tenant_id`` kwarg, but with two doctrinal differences:
+
+        - ``tenant_id`` is REQUIRED (positional-or-keyword, BEFORE
+          the ``*`` separator) — the inspection endpoint cannot list
+          packs without a tenant scope; making it optional would
+          re-open the cross-tenant leak class.
+        - ``state`` is OPTIONAL keyword-only (AFTER the ``*``) —
+          inspection lists across all lifecycle states by default;
+          callers narrow via the ``state`` kwarg when needed.
+
+        ``cursor`` is the last id returned by the previous page; pass
+        ``None`` (default) for the first page. Ordering is by
+        ``packs.id`` so cursor pagination is dialect-portable across
+        PG / Oracle / SQLite (same convention as :meth:`list_by_status`).
+
+        The WHERE clause covers ``(tenant_id, state)`` so the existing
+        ``ix_packs_tenant_state`` composite index per migration L129
+        services both the always-present ``tenant_id == :tenant_id``
+        predicate and the optional ``state == :state`` predicate. The
+        SQL is built via the module-private
+        :func:`_build_list_for_tenant_stmt` helper — same builder the
+        Slice-1 SQL-shape regression imports + asserts on; eliminates
+        the vacuous-proof bug class where a test-local duplicate
+        ``select`` could pass while the production query drifts
+        (plan Round 22 P2 #2).
+        """
+
+        stmt = _build_list_for_tenant_stmt(tenant_id, limit=limit, cursor=cursor, state=state)
+        async with self._engine.connect() as conn:
+            rows = (await conn.execute(stmt)).all()
+        return [_row_to_record(dict(r._mapping)) for r in rows]
+
     async def load_lifecycle_history(self, pack_id: uuid.UUID) -> list[DecisionRecord]:
         """Walk the ``decision_history.event_type LIKE 'pack.lifecycle.%'``
         slice filtered to ``payload['pack_id'] == str(pack_id)``,
@@ -957,6 +1006,58 @@ def _is_valid_update_value_shape(field_name: str, value: Any) -> bool:
             return True
         return isinstance(value, str) and len(value) > 0
     return False
+
+
+def _build_list_for_tenant_stmt(
+    tenant_id: str,
+    *,
+    limit: int,
+    cursor: uuid.UUID | None,
+    state: PackState | None = None,
+) -> Select[Any]:
+    """Build the SELECT statement for :meth:`PackRecordStore.list_for_tenant`.
+
+    Sprint 7B.2 T7 (plan Round 22 P2 #2) — module-private builder
+    pattern. The public :meth:`PackRecordStore.list_for_tenant` invokes
+    this helper as its ONLY query-construction path; the Slice-1
+    SQL-shape regression at
+    ``tests/unit/packs/test_storage_list_for_tenant.py::
+    test_list_for_tenant_compiles_with_indexed_where_clause`` imports
+    this SAME builder and asserts on its compiled output. Single
+    source of truth for the WHERE-clause shape; production + test
+    reference the same module-private symbol.
+
+    WHERE shape (authoritative):
+
+    - ``packs.tenant_id == :tenant_id`` — ALWAYS present; this is the
+      server-side authoritative tenant boundary (no in-handler
+      filtering can leak cross-tenant rows).
+    - ``packs.state == :state`` — only when ``state`` is non-None.
+    - ``packs.id > :cursor`` — only when ``cursor`` is non-None
+      (cursor pagination excludes the cursor record itself).
+
+    Ordering is by ``packs.id`` for dialect-portable cursor pagination
+    across PG / Oracle / SQLite. Both filter columns ``(tenant_id,
+    state)`` are covered by the ``ix_packs_tenant_state`` composite
+    index per migration L129 — the always-present tenant filter
+    matches the leading column, the optional state filter matches the
+    trailing column.
+
+    Underscore prefix marks this as module-private but it is
+    module-public for the test import, mirroring the existing
+    :func:`_row_to_record` helper convention. Plan Round 22 P2 #2 +
+    P3 #3 propagation refresh — eliminates the
+    "test-writes-its-own-select-and-assertion-passes-while-production-
+    drifts" vacuous-proof bug class.
+    """
+
+    stmt = select(_packs).where(_packs.c.tenant_id == tenant_id).order_by(_packs.c.id)
+    if state is not None:
+        stmt = stmt.where(_packs.c.state == state)
+    if cursor is not None:
+        stmt = stmt.where(_packs.c.id > cursor)
+    stmt = stmt.limit(limit)
+    return stmt
 
 
 def _row_to_record(mapping: Mapping[str, Any]) -> PackRecord:

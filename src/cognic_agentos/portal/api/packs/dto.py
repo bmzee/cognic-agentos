@@ -56,7 +56,7 @@ class PackResponse(PackBaseModel):
     """Default public-surface view of a
     :class:`~cognic_agentos.packs.storage.PackRecord`.
 
-    Field set mirrors :class:`PackRecord` at ``packs/storage.py:351-378``
+    Field set mirrors :class:`PackRecord` at ``packs/storage.py:352-379``
     minus the two SHA-256 digests (``manifest_digest`` /
     ``signed_artefact_digest``). The narrower projection keeps
     cryptographic-signature material off the default read surface;
@@ -226,3 +226,72 @@ class PackEvidenceResponse(PackBaseModel):
 
     conformance: dict[str, Any] | None
     reviewer_evidence_panels: None
+
+
+# ---------------------------------------------------------------------------
+# Sprint 7B.2 T7 — inspection-surface response schemas
+# (Plan §998 + §999 + §1000 — detail / audit / invocations)
+# ---------------------------------------------------------------------------
+
+
+class PackLifecycleEventResponse(PackBaseModel):
+    """Projection of a :class:`~cognic_agentos.core.decision_history.DecisionRecord`
+    row for inspection-surface responses (detail.history + audit +
+    invocations endpoints share this shape).
+
+    ``from_attributes=True`` (mirrors :class:`PackResponse` at T3) so
+    handlers can pass loaded :class:`DecisionRecord` instances directly
+    to ``model_validate`` without an intermediate ``dataclasses.asdict``
+    conversion. Field set mirrors :class:`DecisionRecord` at
+    ``core/decision_history.py:240-249`` minus the trace/span/langfuse
+    correlation fields (those are observability-surface concerns and
+    not part of the bank-facing audit DTO at Sprint 7B.2).
+
+    The ``sequence`` column on the underlying ``decision_history`` row
+    is deliberately NOT projected — :class:`DecisionRecord` itself
+    does not carry it (the column is selected only for ``ORDER BY``
+    inside :meth:`~cognic_agentos.packs.storage.PackRecordStore.load_lifecycle_history`).
+    Adding sequence to the wire shape would require extending the
+    canonical decision-history dataclass — a CC-ADJ change on
+    ``core/decision_history.py`` deferred beyond Sprint 7B.2 T7.
+
+    ``iso_controls`` accepts both the source-side ``tuple[str, ...]``
+    representation and a wire-side ``list[str]`` — Pydantic v2 coerces
+    tuples to lists at validation time so the JSON-serialised wire
+    shape stays uniform.
+    """
+
+    model_config = pydantic.ConfigDict(frozen=True, extra="forbid", from_attributes=True)
+
+    decision_type: str
+    request_id: str
+    payload: dict[str, Any]
+    tenant_id: str | None
+    iso_controls: list[str]
+
+
+class PackDetailResponse(PackBaseModel):
+    """GET ``/api/v1/packs/{pack_id}`` response body.
+
+    Plan §998 — "Pack detail incl. lifecycle history (read from
+    packs/storage's state cache)". The response composes TWO data
+    sources:
+
+    - ``pack``: :class:`PackResponse` projection of the
+      :class:`~cognic_agentos.packs.storage.PackRecord` returned by
+      the :class:`~cognic_agentos.portal.rbac.tenant_isolation.RequireTenantOwnership`
+      dependency (no second ``store.load`` call — the dependency
+      already loaded + tenant-checked the row).
+    - ``history``: walk of
+      :meth:`~cognic_agentos.packs.storage.PackRecordStore.load_lifecycle_history`
+      projected through :class:`PackLifecycleEventResponse`.
+
+    The two-key composite (NOT a flat extension of
+    :class:`PackResponse`) keeps the detail-surface and list-surface
+    wire shapes orthogonal — a future detail-only field cannot
+    accidentally leak into the list endpoint's
+    :class:`PackResponse` projection.
+    """
+
+    pack: PackResponse
+    history: list[PackLifecycleEventResponse]

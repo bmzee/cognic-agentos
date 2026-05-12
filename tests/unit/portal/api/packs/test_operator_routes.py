@@ -344,7 +344,7 @@ async def _seed_approved_pack(
     (approve). Three different actors for the three transitions so the
     same actor can later allow-list without tripping any cross-role
     constraint (role-separation is endpoint-level, not storage-level —
-    storage accepts any ``actor_id`` per ``packs/storage.py:616``).
+    storage accepts any ``actor_id`` per ``packs/storage.py:617``).
     """
     record = await _seed_draft_pack(store, tenant_id=tenant_id, created_by=created_by)
     await store.transition(
@@ -477,10 +477,15 @@ class TestSprint7B2OperatorRoutesProductionWiring:
         assert "/api/v1/packs/drafts" in compiled_paths, (
             f"T4 author-drafts path lost — regression in router wiring; got {compiled_paths}"
         )
-        # T7 examiner-list path MUST NOT be present (T7 not yet wired)
-        assert "/api/v1/packs" not in compiled_paths, (
-            "T7 examiner-list path landed too early — T6 must not register "
-            f"/api/v1/packs; got {compiled_paths}"
+        # T7 carry-forward — inspection list at EXACTLY
+        # ``/api/v1/packs`` (no trailing slash per R33 P2 doctrine —
+        # registered directly on the parent via
+        # ``register_inspection_list`` with path=""; the slashless
+        # form IS the wire-protocol contract per plan §997 +
+        # ADR-012 §75). Was a negative "T7 not yet wired" temporal
+        # pin pre-T7; flipped to a positive presence assertion now.
+        assert "/api/v1/packs" in compiled_paths, (
+            f"T7 examiner-list path missing from composed build_packs_router — got {compiled_paths}"
         )
 
     def test_install_path_carries_both_post_and_delete(self) -> None:
@@ -770,7 +775,7 @@ class TestSprint7B2AllowListEndpoint:
 
         # Tertiary cross-surface: packs.last_actor cache mirrors the
         # chain row's actor_id (same write under the row-locked
-        # transaction per packs/storage.py:776).
+        # transaction per packs/storage.py:777).
         reloaded = await store.load(record.id)
         assert reloaded is not None
         assert reloaded.last_actor == "operator@bank.example"

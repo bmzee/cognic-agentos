@@ -293,8 +293,30 @@ class TestSprint7B2ReviewRoutesProductionWiring:
     def test_build_packs_router_includes_review_routes(self) -> None:
         """``build_packs_router(store=stub)`` produces a router whose
         compiled ``app.routes`` includes the T5 review-queue path AND
-        the T4 author-drafts path AND does NOT include the T7
-        examiner-list path (T7 not yet wired)."""
+        the T4 author-drafts path AND the T7 examiner-list path.
+
+        **Sprint 7B.2 T7 carry-forward** — the original T5 assertion
+        was a TEMPORAL negative pin ("T7 not yet wired") which was
+        load-bearing only between T5 and T7 landing. T7 wires the
+        inspection list endpoint into :func:`build_packs_router` at
+        EXACTLY ``/api/v1/packs`` (no trailing slash, per R33 P2
+        doctrine — the list endpoint is registered directly on the
+        parent router via ``register_inspection_list`` so path ``""``
+        + parent prefix yields the slashless wire-protocol path per
+        plan §997 + ADR-012 §75). The negative assertion is flipped
+        to a positive "BOTH T5 review-queue AND T7 inspection-list
+        are reachable post-T7-wire" — composition regression pinning
+        that neither shadows the other. The T5/T7 collision split
+        (review queue at ``/review-queue``; inspection list at the
+        bare parent root) means the two paths are textually distinct
+        in the compiled route table.
+
+        The narrow ``review_routes`` half — that the T5 sub-router
+        ALONE does NOT register the inspection path — is pinned
+        SEPARATELY by ``test_review_routes_does_not_register_inspection_list_path``
+        (the regression isolated to the T5 sub-router output, not
+        the fully-composed parent router output).
+        """
         router = build_packs_router(store=_StubStore())  # type: ignore[arg-type]
         app = FastAPI()
         app.include_router(router)
@@ -307,9 +329,14 @@ class TestSprint7B2ReviewRoutesProductionWiring:
         assert "/api/v1/packs/drafts" in compiled_paths, (
             f"T4 author-drafts path lost — regression in router wiring; got {compiled_paths}"
         )
-        assert "/api/v1/packs" not in compiled_paths, (
-            "T7 examiner-list path landed too early — T5 must not register "
-            f"/api/v1/packs; got {compiled_paths}"
+        # T7 carry-forward — inspection list at EXACTLY
+        # ``/api/v1/packs`` (no trailing slash per R33 P2 doctrine —
+        # the slashless form IS the wire-protocol contract per plan
+        # §997, not a 307-redirect target). Was a negative "not yet
+        # wired" assertion pre-T7; flipped to a positive presence
+        # assertion now.
+        assert "/api/v1/packs" in compiled_paths, (
+            f"T7 examiner-list path missing from composed build_packs_router — got {compiled_paths}"
         )
 
 
