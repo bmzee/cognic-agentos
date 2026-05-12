@@ -340,6 +340,68 @@ tests at ``tests/unit/packs/test_storage.py``.
 The module rides the same single strict 95% line / 90% branch
 floor as the rest of the critical-controls gate. Gate size grows
 from 43 modules to 44.
+
+Sprint 7B.2 T8 extends the gate with the **OWASP conformance check
+matrix** pair (ADR-012 §119 + BUILD_PLAN §628) — both modules form
+the wire-protocol-public reviewer-evidence surface that T9 attaches
+to the chain payload's ``payload.conformance`` and 7B.3 reviewers
+consume:
+
+  * ``packs/conformance/checks.py`` — closed-enum 10-value
+    :data:`OWASPCheckCategory` Literal + the 3-value
+    :data:`ConformanceCheckStatus` + :data:`ConformanceOverallStatus`
+    Literals + the frozen :class:`ConformanceCheckResult` +
+    :class:`ConformanceReport` (4-field order:
+    ``overall_status, results, summary, errored_categories``)
+    dataclasses. Wire-protocol-public per ADR-006 — drift in the
+    Literal vocabulary or the dataclass field order breaks evidence-
+    pack export readers.
+  * ``packs/conformance/owasp_agentic.py`` — 10 deterministic
+    manifest-shape check bodies (``check_tool_misuse``,
+    ``check_goal_hijacking``, ``check_identity_abuse``,
+    ``check_prompt_injected_skills``, ``check_dependency_poisoning``,
+    ``check_secret_exfiltration``, ``check_unsafe_filesystem``,
+    ``check_unsafe_network``, ``check_supply_chain_integrity``,
+    ``check_skills_top_10``), the :data:`_APPLICABILITY` matrix
+    (per-pack-kind 10x4 declarative gate; examiner-readable from the
+    static table without running the suite), the
+    :data:`_CHECK_REGISTRY` ordered tuple (1:1 with the Literal), and
+    the :func:`run_owasp_conformance` dispatcher. The dispatcher
+    consults :data:`_APPLICABILITY` BEFORE invoking each check body —
+    on a known kind not in the applicability set the runner
+    synthesises a ``not_applicable`` result with a
+    ``manifest.pack.kind:`` field-path prefix WITHOUT calling the
+    body. Bodies are wrapped in ``try / except Exception`` so a
+    checker raising synthesises a ``not_applicable`` result with the
+    user-locked exact format ``"manifest: <category> checker raised
+    <ExcType>: <message>"`` AND appends the category to
+    :class:`ConformanceReport.errored_categories`. Overall-status
+    precedence: **yellow > red > green** — yellow takes precedence
+    over red because a checker exception means the suite is
+    incomplete and the red/green verdict is not trustworthy.
+
+Per-check enum is preserved at 3 values (``pass`` / ``fail`` /
+``not_applicable``); ``yellow`` lives ONLY on the composite report.
+Findings are ``list[str]`` with stable field-path prefixes
+(``manifest.<path>: <reason>``). Checks are deterministic +
+manifest-shape only: no filesystem reads, no network calls, no
+dependency downloads, no digest recomputation (the CLI validators
+at ``cli/validators/identity.py`` etc. own the file-system-
+touching checks at build/admission time; conformance runtime
+duplicates only the small manifest-shape subset and never reaches
+back into CLI plumbing).
+
+The ``__init__.py`` re-exports only (no behaviour) and is
+off-gate per Doctrine F. A cross-set drift guard at
+``test_owasp_applicability.py::TestCategorySetCohesion`` pins
+that :data:`OWASPCheckCategory`, :data:`_CHECK_REGISTRY`, and
+:data:`_APPLICABILITY` all carry the same 10-element category set
+in registry-iteration order — drift in any one of the three is the
+most-likely future regression class.
+
+Both modules ride the same single strict 95% line / 90% branch
+floor as the rest of the critical-controls gate. Gate size grows
+from 44 modules to 46.
 """
 
 from __future__ import annotations
@@ -591,6 +653,32 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     # ``feedback_security_regression_hardening.md``. Rides the same
     # single strict 95% line / 90% branch floor.
     ("src/cognic_agentos/portal/api/packs/operator_routes.py", 0.95, 0.90),
+    # Sprint 7B.2 T8 — OWASP conformance check matrix pair (ADR-012
+    # §119 + BUILD_PLAN §628). Both modules form the wire-protocol-
+    # public reviewer-evidence surface that T9 attaches to the chain
+    # payload's ``payload.conformance`` and 7B.3 reviewers consume:
+    #   * ``packs/conformance/checks.py`` owns the closed-enum 10-
+    #     value ``OWASPCheckCategory`` Literal + the 3-value
+    #     ``ConformanceCheckStatus`` + ``ConformanceOverallStatus``
+    #     Literals + the frozen ``ConformanceCheckResult`` +
+    #     ``ConformanceReport(overall_status, results, summary,
+    #     errored_categories)`` dataclasses. Field order is wire-
+    #     protocol-public per ADR-006 — drift breaks evidence-pack
+    #     export readers.
+    #   * ``packs/conformance/owasp_agentic.py`` owns the 10
+    #     deterministic manifest-shape check bodies, the
+    #     ``_APPLICABILITY`` matrix (per-pack-kind 10x4 declarative
+    #     gate), the ``_CHECK_REGISTRY`` ordered tuple (1:1 with the
+    #     Literal), and the ``run_owasp_conformance`` dispatcher
+    #     (applicability gate + exception-wrapping + yellow-precedence
+    #     overall-status derivation + ``(N errored)`` summary suffix).
+    #     Yellow takes precedence over red because a checker exception
+    #     means the suite is incomplete and the red/green verdict is
+    #     not trustworthy. The ``__init__.py`` re-exports only; off-
+    #     gate per Doctrine F.
+    # Both ride the same single strict 95% line / 90% branch floor.
+    ("src/cognic_agentos/packs/conformance/checks.py", 0.95, 0.90),
+    ("src/cognic_agentos/packs/conformance/owasp_agentic.py", 0.95, 0.90),
 )
 
 
