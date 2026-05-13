@@ -468,6 +468,89 @@ shape suite.
 
 Rides the same single strict 95% line / 90% branch floor.  Gate
 size grows from 46 modules to 47.
+
+----------------------------------------------------------------------
+Sprint 7B.2 T12 — Portal RBAC + portal pack API promotions (gate 47 → 55).
+----------------------------------------------------------------------
+
+T12 completes the plan §1304-1314 critical-controls floor uplift for
+Sprint 7B.2.  The plan claimed a 12-module bump (43 → 55) but 4 of
+those modules were promoted incrementally during T6 / T8 / T9 as
+each landed its own halt-before-commit critical-controls review
+(``operator_routes.py`` at T6; ``conformance/checks.py`` +
+``conformance/owasp_agentic.py`` at T8; ``conformance/runner.py`` at
+T9 Slice 4).  T12 promotes the remaining 8:
+
+  * Portal RBAC primitives (6 modules) — closed-enum vocabularies
+    are wire-protocol-public per ADR-012 §40 + ADR-008:
+    - ``portal/rbac/scopes.py`` — 12-value ``PackRBACScope`` Literal
+      + 4 role-group frozensets whose union equals
+      ``PACK_LIFECYCLE_SCOPES`` (partition invariant).
+    - ``portal/rbac/actor.py`` — frozen ``Actor`` Pydantic model +
+      2-value ``ActorType`` Literal.  Identity boundary at the
+      portal admission seam + production-grade fail-loud default
+      (unconfigured actor providers raise ``NotImplementedError``).
+    - ``portal/rbac/enforcement.py`` — ``RequireScope`` factory +
+      3-value ``RBACDenialReason``
+      (``actor_unauthenticated`` / ``scope_not_held`` /
+      ``actor_binder_not_configured``).
+    - ``portal/rbac/tenant_isolation.py`` —
+      ``RequireTenantOwnership`` factory + 4-value
+      ``TenantIsolationFailure``.  Cross-tenant 404 doctrine: pack
+      belonging to tenant A is INVISIBLE to tenant B (404 not 403
+      so a probe cannot enumerate cross-tenant pack-IDs).
+    - ``portal/rbac/human_actor.py`` — ``RequireHumanActor`` +
+      1-value ``HumanActorDenialReason``.  Single user-authorized
+      site for the AGENTS.md "Per-tenant allow-list changes"
+      Human-only-decisions doctrine — wired as a sub-dependency on
+      the allow-list endpoint at ``operator_routes.py``.
+    - ``portal/rbac/role_separation.py`` —
+      ``RequireDifferentActorThanCreator`` factory + 1-value
+      ``RoleSeparationFailure``.  ADR-012 §17 cross-role
+      separation: the actor who created a pack MUST NOT review it.
+
+  * Portal pack API route modules (2) — wire-protocol-public author
+    + review surfaces:
+    - ``portal/api/packs/author_routes.py`` — owns the T9 Slice 2
+      route-owned 4-way refusal union via
+      ``AuthorRequestRefusalReason = Literal["manifest_digest_mismatch"]``
+      + auto-runs OWASP conformance + threads
+      ``expected_manifest_digest`` to close the TOCTOU window
+      per plan §1179-1181.
+    - ``portal/api/packs/review_routes.py`` — owns claim / approve /
+      reject / evidence-read endpoints + the T9 Slice 3 dual-surface
+      emission contract (rejection reason + comments land on BOTH
+      the structured log AND the chain row's
+      ``payload["evidence_attachments"]``).
+
+Off-floor rationale for the modules T12 deliberately does NOT
+promote (each carrying its own doctrinal carve-out documented at
+the call site):
+
+  * ``portal/api/packs/inspection_routes.py`` (T7) — pure-read
+    endpoints; no ``store.transition()`` calls; no chain-row
+    writes; no Human-only-decisions enforcement boundary.  The
+    R32 doctrine kept it off the durable gate because the CC risk
+    for its tenant-isolation boundary is fully covered by
+    ``packs/storage.py``'s ``list_for_tenant`` method already on
+    the gate from T7 Slice 1.
+  * ``portal/api/packs/router.py`` (T3) — sub-router scaffolding
+    file.  No decision logic; no closed-enum vocabulary; no
+    refusal taxonomy.  Carrier file only.
+  * ``cli/conformance.py`` (T10) + ``cli/test_harness.py`` (T11
+    extension) — authoring/dev-only public CLI commands per
+    Sprint-7A T13 R4 P3 #5 doctrine ("public command, NOT
+    test-only path, off-floor because every gate it surfaces is
+    enforced upstream by the on-floor matrix at
+    ``packs/conformance/owasp_agentic.py``").  Both delegate to
+    the on-floor matrix for the actual decision logic; the CLI
+    modules carry only manifest-parse + dispatch + render +
+    exit-code translation glue.
+
+Rides the same single strict 95% line / 90% branch floor.  Gate
+size grows from 47 modules to 55 (+8).  All promoted modules
+verified at line=100%/branch=100% in the T11 + R45 + R46 fresh
+coverage.json baseline.
 """
 
 from __future__ import annotations
@@ -752,6 +835,95 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     # conversion + the 4-key wire-shape contract — NOT pure re-
     # export glue.  Pinned by ``test_runner.py``'s 9-test suite.
     ("src/cognic_agentos/packs/conformance/runner.py", 0.95, 0.90),
+    # Sprint 7B.2 T12 doctrine — Portal RBAC modules (6) + portal
+    # pack API author/review route modules (2). The plan-of-record at
+    # §1298 claimed a 12-module floor uplift; 4 of the 12 were
+    # promoted incrementally during T6 (operator_routes), T8 (checks
+    # + owasp_agentic), and T9 (runner) as each landed its own
+    # halt-before-commit critical-controls review. T12 promotes the
+    # remaining 8. Gate count goes 47 → 55. Plan §1304-1310 lists
+    # all 12; the 4 already-promoted entries above carry the same
+    # rationale + ride the same single strict 95% line / 90% branch
+    # floor. The 8 T12 promotions are:
+    #
+    #   * RBAC primitives (6):
+    #     - ``portal/rbac/scopes.py`` — closed-enum 12-value
+    #       ``PackRBACScope`` Literal IS the wire-protocol contract
+    #       for every 403 RBAC denial in the portal pack API; the
+    #       4 role-group frozenset partition pins which role groups
+    #       perform which lifecycle actions.
+    #     - ``portal/rbac/actor.py`` — frozen ``Actor`` Pydantic
+    #       model + closed-enum 2-value ``ActorType`` Literal +
+    #       production-grade fail-loud default. The identity
+    #       boundary at the portal admission seam.
+    #     - ``portal/rbac/enforcement.py`` — ``RequireScope``
+    #       dependency factory + closed-enum 3-value
+    #       ``RBACDenialReason``. The 403 wire-protocol surface.
+    #     - ``portal/rbac/tenant_isolation.py`` — closed-enum
+    #       4-value ``TenantIsolationFailure`` (Round 1 P2 #3
+    #       seeded 3 values; T2 R1 P2 #1 added
+    #       ``pack_store_not_configured``). Cross-tenant 404
+    #       doctrine — a pack belonging to tenant A is INVISIBLE
+    #       to tenant B; 404 (NOT 403) so a probe cannot enumerate
+    #       cross-tenant pack-IDs.
+    #     - ``portal/rbac/human_actor.py`` — ``RequireHumanActor``
+    #       dependency + closed-enum 1-value
+    #       ``HumanActorDenialReason("actor_type_must_be_human")``.
+    #       The single user-authorized site for the AGENTS.md
+    #       "Per-tenant allow-list changes" Human-only-decisions
+    #       doctrine — wired as a sub-dependency on the allow-list
+    #       endpoint at ``operator_routes.py`` BEFORE the handler
+    #       body runs.
+    #     - ``portal/rbac/role_separation.py`` —
+    #       ``RequireDifferentActorThanCreator`` factory +
+    #       closed-enum 1-value ``RoleSeparationFailure``. ADR-012
+    #       §17 cross-role separation: the actor who created a
+    #       pack MUST NOT also review it.
+    #   * Portal pack API route modules (2):
+    #     - ``portal/api/packs/author_routes.py`` — wire-protocol-
+    #       public author surface. The T9 Slice 2 extension adds
+    #       a route-owned 4-way refusal union via the
+    #       ``AuthorRequestRefusalReason = Literal["manifest_digest_mismatch"]``
+    #       closed-enum (distinct from ``AuthorRefusalReason``
+    #       409s + ``TenantIsolationFailure`` 404/500s +
+    #       ``RBACDenialReason`` 403/500s) + auto-runs OWASP
+    #       conformance + threads ``expected_manifest_digest`` to
+    #       close the TOCTOU window.
+    #     - ``portal/api/packs/review_routes.py`` — wire-protocol-
+    #       public review surface (5 endpoints: claim / approve /
+    #       reject / approve fail-loud per P2 #1 + 4-axis matrix
+    #       per Round 11 P3 #6 / evidence read / queue list). T9
+    #       Slice 3 extension threads ``evidence_attachments`` into
+    #       the chain row's ``payload["evidence_attachments"]`` for
+    #       the dual-surface emission contract (structured log +
+    #       chain payload).
+    #
+    # NOT on this T12 promotion set:
+    #   * ``portal/api/packs/inspection_routes.py`` (T7) — pure-read
+    #     inspection endpoints. R32 doctrine kept it OFF the durable
+    #     gate because it owns neither the Human-only-decisions
+    #     enforcement boundary nor the R24 actor_type chain-payload
+    #     provenance surface; the CC risk for its tenant-isolation
+    #     boundary is covered by ``packs/storage.py``'s
+    #     ``list_for_tenant`` already being on the gate from T7
+    #     Slice 1.
+    #   * ``portal/api/packs/router.py`` (T3) — sub-router
+    #     scaffolding. Carrier file with no decision logic.
+    #   * ``cli/conformance.py`` (T10) + ``cli/test_harness.py``
+    #     (T11 extension) — authoring/dev-only public CLI commands
+    #     per Sprint-7A T13 R4 P3 #5 doctrine; off-floor because
+    #     every gate they surface is enforced upstream by the
+    #     on-floor matrix at ``packs/conformance/owasp_agentic.py``.
+    #
+    # All 8 ride the same single strict 95% line / 90% branch floor.
+    ("src/cognic_agentos/portal/rbac/scopes.py", 0.95, 0.90),
+    ("src/cognic_agentos/portal/rbac/actor.py", 0.95, 0.90),
+    ("src/cognic_agentos/portal/rbac/enforcement.py", 0.95, 0.90),
+    ("src/cognic_agentos/portal/rbac/tenant_isolation.py", 0.95, 0.90),
+    ("src/cognic_agentos/portal/rbac/human_actor.py", 0.95, 0.90),
+    ("src/cognic_agentos/portal/rbac/role_separation.py", 0.95, 0.90),
+    ("src/cognic_agentos/portal/api/packs/author_routes.py", 0.95, 0.90),
+    ("src/cognic_agentos/portal/api/packs/review_routes.py", 0.95, 0.90),
 )
 
 
