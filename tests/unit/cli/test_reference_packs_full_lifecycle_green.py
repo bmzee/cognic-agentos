@@ -22,18 +22,25 @@ artifact set sign produced satisfies every validator gate). This
 matches the realistic author flow: scaffold → fill manifest → build
 wheel → sign → validate → harness → publish.
 
-The harness step is per-kind (T13/R31 narrows
-``_HARNESS_SUPPORTED_KINDS = frozenset({"tool"})``):
+The harness step is uniformly green-path for all four kinds. Sprint-
+7B.1 T6a widened ``_HARNESS_SUPPORTED_KINDS`` from
+``frozenset({"tool"})`` to the full four-kind vocabulary (``tool`` /
+``skill`` / ``agent`` / ``hook``); Sprint-7B.1 T6b wired the per-
+kind dispatch dry-run via public SDK seams:
 
-  - tool pack — harness runs + PASSES.
-  - skill pack — harness REFUSES with closed-enum
-    ``harness_unsupported_pack_kind``.
-  - agent pack — harness REFUSES with closed-enum
-    ``harness_unsupported_pack_kind``.
-  - hook pack (Sprint-7A2 T11) — harness REFUSES with closed-enum
-    ``harness_unsupported_pack_kind``. Hook-pack harness expansion
-    lands in a follow-up Sprint-7B task alongside skill+agent
-    dispatch-table widening.
+  - tool pack — harness runs ``await tool.invoke()`` against the
+    SDK's input/output-schema validation seam; PASSES.
+  - skill pack — harness instantiates with a no-op ``ToolRegistry``
+    matching the skill's declared_tools tuple, runs
+    ``await skill.execute()`` against the SDK's R5 P2 #3 cross-
+    check seam; PASSES.
+  - agent pack — harness runs ``await agent.handle(payload=b"",
+    task=<synthetic TaskRecord>)`` against the Agent abc.ABC
+    abstract method; PASSES.
+  - hook pack (Sprint-7A2 T11) — harness runs ``await hook.invoke(
+    context, payload)`` against the PUBLIC seam at
+    ``sdk/hook.py:347`` (NOT the abstract ``_invoke`` at ``:373``)
+    so the SDK's three validation phases fire; PASSES.
 
 Sign + verify are kind-agnostic; all four packs ship full
 attestation declarations and clear sign --bundle + verify end-to-end.
@@ -93,9 +100,11 @@ _AGENT_PACK = _EXAMPLES_ROOT / "cognic-agent-example-minimal"
 # omit ``[identity].agent_card_jws_path``. The orchestrator's
 # kind-narrow constraint (``cli/validate.py:_FORBIDDEN_BLOCKS_BY_KIND``)
 # refuses ``[a2a]`` + ``[mcp]`` blocks on ``kind="hook"`` packs but
-# does NOT touch ``agent_card_jws_path``. The harness side: every
-# non-tool kind refuses with closed-enum
-# ``harness_unsupported_pack_kind`` (cli/test_harness.py:_HARNESS_SUPPORTED_KINDS).
+# does NOT touch ``agent_card_jws_path``. The harness side post
+# Sprint-7B.1 T6a + T6b: ``_HARNESS_SUPPORTED_KINDS`` widened to all
+# four kinds (T6a) + per-kind dispatch dry-run wired through public
+# SDK seams (T6b); hook packs reach the green path via
+# ``Hook.invoke(context, payload)`` at ``sdk/hook.py:347``.
 # Sign + verify trust-gate path (cosign / SBOM / SLSA / in-toto /
 # load probe) is kind-agnostic for hook packs same as skill/agent.
 _HOOK_PACK = _EXAMPLES_ROOT / "cognic-hook-example-minimal"
@@ -255,11 +264,22 @@ def _run_full_lifecycle(
     pack: stage clone → synthesize wheel → sign --bundle → validate
     → harness → verify.
 
-    ``expected_kind`` selects the per-kind harness expectation:
+    Post Sprint-7B.1 T6a (kind-narrowing gate widened to all four
+    known kinds) + T6b (per-kind dispatch dry-run wired through
+    public SDK seams), the harness is uniformly green-path for all
+    four kinds:
 
-      - ``"tool"`` — harness PASSES (exit 0).
-      - ``"skill"`` / ``"agent"`` — harness REFUSES with
-        ``harness_unsupported_pack_kind`` (exit 1).
+      - ``"tool"`` — ``await tool.invoke()`` PASSES.
+      - ``"skill"`` — instantiate w/ no-op ToolRegistry,
+        ``await skill.execute()`` PASSES.
+      - ``"agent"`` — ``await agent.handle(payload, task=
+        TaskRecord)`` PASSES.
+      - ``"hook"`` — ``await hook.invoke(context, payload)`` (public
+        seam at sdk/hook.py:347) PASSES.
+
+    ``expected_kind`` selects the reference-pack arm but the
+    harness expectation is the same green-path assertion for all
+    four kinds.
     """
     pack = _stage_reference_pack_clone(source_pack, tmp_path)
     _synthesize_wheel_from_pack_source(pack)
@@ -296,36 +316,31 @@ def _run_full_lifecycle(
     refusals = [f for f in findings if f.get("severity") == "refusal"]
     assert refusals == [], f"validate refusals on {pack.name}: {refusals!r}"
 
-    # ---- harness — per-kind expectation matrix ----
+    # ---- harness — uniform green-path for all four kinds ----
+    # Post Sprint-7B.1 T6a (kind gate widened) + T6b (per-kind
+    # dispatch wired through public SDK seams), every reference pack
+    # clears the harness end-to-end. The per-kind dispatch routes:
+    # Tool.invoke / Skill.execute (via no-op ToolRegistry) /
+    # Agent.handle / Hook.invoke (public seam at sdk/hook.py:347).
     harness_result = runner.invoke(app, ["test-harness", "--json", str(pack)])
-    if expected_kind == "tool":
-        assert harness_result.exit_code == 0, (
-            f"test-harness refused tool pack {pack.name}: "
-            f"exit={harness_result.exit_code} stdout={harness_result.stdout!r} "
-            f"stderr={harness_result.stderr!r}"
-        )
-        harness_payload = json.loads(harness_result.stdout)
-        assert harness_payload["overall_status"] == "pass", harness_payload
-    else:
-        assert harness_result.exit_code == 1, (
-            f"test-harness should refuse {expected_kind} pack {pack.name} at the "
-            f"kind-narrow gate; got exit={harness_result.exit_code}, "
-            f"stdout={harness_result.stdout!r}, stderr={harness_result.stderr!r}"
-        )
-        harness_payload = json.loads(harness_result.stdout)
-        refusal = next(
-            (
-                f
-                for f in harness_payload["findings"]
-                if f.get("reason") == "harness_unsupported_pack_kind"
-            ),
-            None,
-        )
-        assert refusal is not None, (
-            f"expected harness_unsupported_pack_kind refusal in {expected_kind} "
-            f"harness output; findings={harness_payload['findings']!r}"
-        )
-        assert refusal["payload"]["pack_kind"] == expected_kind, refusal["payload"]
+    assert harness_result.exit_code == 0, (
+        f"test-harness refused {expected_kind} pack {pack.name}: "
+        f"exit={harness_result.exit_code} stdout={harness_result.stdout!r} "
+        f"stderr={harness_result.stderr!r}"
+    )
+    harness_payload = json.loads(harness_result.stdout)
+    assert harness_payload["overall_status"] == "pass", harness_payload
+    # Kind-narrowing refusal MUST NOT fire — all four kinds are in
+    # _HARNESS_SUPPORTED_KINDS post-T6a + reach green-path dispatch
+    # post-T6b.
+    unsupported_kind_findings = [
+        f for f in harness_payload["findings"] if f.get("reason") == "harness_unsupported_pack_kind"
+    ]
+    assert unsupported_kind_findings == [], (
+        f"{expected_kind} pack {pack.name} tripped the kind-narrowing "
+        f"gate; expected the gate to fire only for kinds outside "
+        f"PackKind. findings={harness_payload['findings']!r}"
+    )
 
     # ---- verify ----
     # Verify Step 1 (trust-root resolution) gates regardless of
@@ -372,10 +387,12 @@ def test_reference_skill_pack_full_lifecycle_green(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Skill pack — full Wave-1 lifecycle clears every gate EXCEPT
-    the harness's per-kind narrowing (T13/R31). The harness MUST
-    refuse with closed-enum ``harness_unsupported_pack_kind``;
-    sign + verify still pass — they are kind-agnostic."""
+    """Skill pack — full Wave-1 lifecycle clears sign + validate +
+    harness + verify post Sprint-7B.1 T6b. The harness instantiates
+    ``ExampleMinimalSkill(tools=<no-op-registry>)`` (Skill.__init__
+    R5 P2 #3 cross-check seam validates declared_tools against the
+    registry's list_tools()) + awaits ``skill.execute()`` to clear
+    the dispatch dry-run. Sign + verify are kind-agnostic."""
     _run_full_lifecycle(
         _SKILL_PACK,
         tmp_path=tmp_path,
@@ -390,8 +407,10 @@ def test_reference_agent_pack_full_lifecycle_green(
 ) -> None:
     """Agent pack — full Wave-1 lifecycle, including the AgentCard
     JWS regen via the test-only signing keypair shipped under
-    ``attestations/test-signing/``. Same harness narrowing as the
-    skill pack: refuses with ``harness_unsupported_pack_kind``."""
+    ``attestations/test-signing/``. The harness post Sprint-7B.1 T6b
+    awaits ``agent.handle(payload=b"", task=<synthetic TaskRecord>)``
+    against the Agent abc.ABC abstract method to clear the dispatch
+    dry-run."""
     _run_full_lifecycle(
         _AGENT_PACK,
         tmp_path=tmp_path,
@@ -404,11 +423,12 @@ def test_reference_hook_pack_full_lifecycle_green(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Sprint-7A2 T11 — hook pack — full Wave-1 lifecycle clears every
-    gate EXCEPT the harness's per-kind narrowing. The harness MUST
-    refuse with closed-enum ``harness_unsupported_pack_kind`` (mirrors
-    skill + agent at T13/R31; hook-pack harness expansion lands in a
-    follow-up sprint alongside skill+agent dispatch-table widening).
+    """Sprint-7A2 T11 — hook pack — full Wave-1 lifecycle clears sign
+    + validate + harness + verify post Sprint-7B.1 T6b. The harness
+    awaits ``hook.invoke(context, payload)`` via the PUBLIC seam at
+    ``sdk/hook.py:347`` (NOT abstract ``_invoke`` at ``:373``) so
+    the SDK's three validation phases (context / payload / result-
+    shape) fire end-to-end against the inert reference hook.
 
     Sign + verify are kind-agnostic — they clear end-to-end through
     the supply-chain + trust-gate path. The hook pack ships NO

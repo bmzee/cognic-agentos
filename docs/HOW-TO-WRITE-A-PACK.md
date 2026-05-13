@@ -118,12 +118,29 @@ expect a refusal on `supply_chain.attestation_paths` because the
 attestation files do not exist yet. That refusal is informational;
 proceed with the sign step and re-validate after.
 
-**Optional: `agentos test-harness` for tool packs.** Wave-1 narrows
-this to `kind = "tool"`; skill + agent dispatch dry-runs land in
-Sprint-7B. For tools, the harness invokes the entry point's
-`Tool.invoke()` template-method path against the **unmodified host
-runtime** so the SDK's input/output schema-validation seam is
-exercised end-to-end before publish:
+**Optional: `agentos test-harness`.** Sprint-7B.1 T6a + T6b
+delivered the harness's per-kind dry-run dispatch for all four
+supported kinds (`tool` / `skill` / `agent` / `hook`); kinds
+outside that set are refused with `harness_unsupported_pack_kind`
+at the kind-narrowing gate. Each kind dispatches through its
+PUBLIC SDK seam (never the private `_invoke` paths) against the
+**unmodified host runtime** so the SDK's validation seams fire
+end-to-end before publish:
+
+- `tool` — `await tool.invoke()` against the Tool input/output
+  schema-validation seam.
+- `skill` — `Skill(tools=<no-op-registry>) + await skill.execute()`
+  against the R5 P2 #3 cross-check seam (the no-op registry is
+  derived from your skill's `declared_tools` ClassVar so
+  multi-tool skills get an exactly-matching registry).
+- `agent` — `await agent.handle(payload=b"", task=<synthetic
+  TaskRecord>)` against the Agent abstract method seam.
+- `hook` — `await hook.invoke(context, payload)` against the
+  public seam at `sdk/hook.py:347` (NOT the abstract `_invoke` at
+  `:373`). The harness runs all three SDK validation phases
+  (pre-`_invoke` context + pre-`_invoke` payload + post-`_invoke`
+  result-shape) and strips the raw `redacted_payload` bytes from
+  the conformance report per ADR-017 + Doctrine Lock E.
 
 ```
 agentos test-harness .
@@ -469,7 +486,7 @@ cd cognic-hook-redact-pii-pan
 python -m build --wheel
 agentos sign --bundle .       # produces 7 attestations under attestations/
 agentos validate .            # passes once attestations exist on disk
-agentos test-harness .        # Wave-1 narrow: refused with `harness_unsupported_pack_kind`
+agentos test-harness .        # green path post Sprint-7B.1 T6b — Hook.invoke(context, payload) seam
 agentos verify .              # offline trust-gate dry run; 11-step pipeline
 ```
 
@@ -481,13 +498,20 @@ Two doctrine differences vs tool / skill / agent packs:
    verify skips Step 9 (JWS verification) for hook packs. The
    validator does NOT enforce the JWS gate — ownership lives
    sign-side + verify-side.
-2. **Harness Wave-1 narrow.** `agentos test-harness .` Wave-1
-   narrows the dispatch table to `frozenset({"tool"})`; hook +
-   skill + agent harness expansion lands in a follow-up Sprint-7B
-   task. Hook packs receive `harness_unsupported_pack_kind`
-   refusal — that is the expected shape, not a bug. Sign + verify
-   remain kind-agnostic so the lifecycle still runs end-to-end
-   through the supply-chain + trust-gate path.
+2. **Harness dispatch via the public `Hook.invoke` seam.** Sprint-
+   7B.1 T6b wired hook-pack dispatch dry-run via
+   `Hook.invoke(context, payload)` at `sdk/hook.py:347` (NOT the
+   abstract `_invoke` at `sdk/hook.py:373`) so the SDK's three
+   validation phases (`_validate_hook_context` /
+   `_validate_hook_payload` / `_validate_hook_result`) fire
+   against your hook subclass end-to-end. The harness's
+   conformance report strips raw `redacted_payload` bytes per
+   ADR-017 + Doctrine Lock E (the AST-walk regression at
+   `tests/architecture/test_hook_payload_never_logged.py` is
+   extended to the harness layer in T6b's
+   `test_hook_dispatch_report_never_carries_redacted_payload_bytes`).
+   Sign + verify remain kind-agnostic so the full lifecycle runs
+   end-to-end through the supply-chain + trust-gate path.
 
 ### 8.2 Manifest shape — `[hooks]` block
 

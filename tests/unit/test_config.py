@@ -1749,3 +1749,66 @@ class TestSprint7A2HookVocabulary:
         # validators/hooks.py would break the 1:1 ownership invariant
         # because validate.py would then emit a reason it doesn't own.
         assert _VALIDATOR_REASON_OWNERSHIP["hook_pack_kind_constraint_violated"] == "validate.py"
+
+
+class TestSprint7B1PackKindVocabulary:
+    """Sprint 7B.1 T2 — :data:`PackKind` multi-surface drift detector
+    (NARROW form).
+
+    Pins :data:`cognic_agentos.packs.lifecycle.PackKind` alignment with the
+    build-time pack-kind surfaces:
+
+    - ``cli.init._SUPPORTED_KINDS`` (Sprint-7A scaffold validator)
+    - ``cli.sign._VALID_PACK_KINDS`` (Sprint-7A2 signing-time kind validator)
+
+    The harness surfaces (``cli.test_harness._HARNESS_SUPPORTED_KINDS`` +
+    ``cli.test_harness._KIND_TO_ENTRY_POINT_GROUP``) were Wave-1-narrow at
+    T2 (``frozenset({"tool"})`` + 3-kind dict) and were widened at
+    Sprint-7B.1 T6a to the full four-kind vocabulary. The harness-side
+    three-way drift assertion (supported-kinds frozenset == entry-point
+    group keys == ``get_args(PackKind)``) lives at
+    ``tests/unit/cli/test_harness_vocabulary.py`` per the plan-of-record's
+    Doctrine Lock A.
+
+    Adding a 5th pack kind in a future sprint REQUIRES updating every
+    surface listed above + the harness surfaces or this test fails — by
+    design."""
+
+    def test_pack_kind_aligns_with_init_supported_kinds(self) -> None:
+        from typing import get_args
+
+        from cognic_agentos.cli.init import _SUPPORTED_KINDS
+        from cognic_agentos.packs.lifecycle import PackKind
+
+        assert set(get_args(PackKind)) == _SUPPORTED_KINDS
+
+    def test_pack_kind_aligns_with_sign_valid_pack_kinds(self) -> None:
+        from typing import get_args
+
+        from cognic_agentos.cli.sign import _VALID_PACK_KINDS
+        from cognic_agentos.packs.lifecycle import PackKind
+
+        assert set(get_args(PackKind)) == _VALID_PACK_KINDS
+
+    def test_pack_state_is_canonical_11_tuple_per_adr_012(self) -> None:
+        """ADR-012 §"Lifecycle states" lines 25-32 — pin the 11-tuple at
+        the cross-sprint config layer so the migration CHECK constraint
+        (T4) and storage Pydantic Literal (T3) cannot drift apart from the
+        state-machine source-of-truth."""
+        from typing import get_args
+
+        from cognic_agentos.packs.lifecycle import PackState
+
+        assert set(get_args(PackState)) == {
+            "draft",
+            "submitted",
+            "under_review",
+            "approved",
+            "rejected",
+            "withdrawn",
+            "allow_listed",
+            "installed",
+            "disabled",
+            "revoked",
+            "uninstalled",
+        }

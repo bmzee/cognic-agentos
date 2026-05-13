@@ -14,25 +14,57 @@ Per Doctrine Decision C, ``agentos test-harness <pack-path>`` runs:
      :func:`cognic_agentos.cli.validate.run_validators` so every
      refusal the validate command emits surfaces here too).
   2. The full validate pipeline (every per-concern validator runs).
-  3. Dry-run dispatch for tool packs (R33 P2 #1 / R34 P2 #1
-     narrow): load each ``cognic.tools`` entry-point declared in
-     the pack's ``pyproject.toml`` via filepath
+  3. Per-kind dry-run dispatch for all four supported kinds (Sprint-
+     7B.1 T6a widened the kind-narrowing gate from ``{"tool"}`` to
+     the full ``{"tool", "skill", "agent", "hook"}`` vocabulary; T6b
+     wired the dispatch impls below). Load each entry-point declared
+     in the pack's ``pyproject.toml`` under the matching
+     ``cognic.<kind>s`` group via filepath
      (``importlib.util.spec_from_file_location`` against
-     ``pack_path/src/``), instantiate the class with NO constructor
-     arguments (``cls()``), invoke ``await tool.invoke()`` with NO
-     kwargs against the SDK's already-validated
-     :class:`Tool.invoke` template (which validates input + output
-     schemas), and capture the response shape for the conformance
-     report. Skill + Agent packs are explicitly refused at the
-     kind-narrowing gate per T13/R31 (closed-enum reason
-     :data:`harness_unsupported_pack_kind`); their dispatch
-     contracts (Skill ``ToolRegistry`` at instantiation, Agent
-     ``handle(payload: bytes, *, task: TaskRecord)``) require
-     dedicated fixture-adapter wiring that lands when the harness
-     is expanded. Earlier drafts of this bullet said dispatch ran
-     against ``agentos_sdk.testing.fixture_settings`` + memory-
-     backed adapters — that wiring was never implemented; bullet 4
-     spells out the no-transport-interception narrow.
+     ``pack_path/src/``), then dry-run via the kind's PUBLIC SDK
+     seam — never the private ``_invoke`` paths, so the SDK's
+     validation seams fire end-to-end:
+
+       - ``tool`` — ``cls() + await tool.invoke()`` against the
+         Tool template-method seam at ``sdk/tool.py:144`` (validates
+         kwargs against ``input_schema`` + result against
+         ``output_schema``).
+       - ``skill`` — ``cls(tools=<no-op-registry>) + await
+         skill.execute()`` against the Skill cross-check seam at
+         ``sdk/skill.py:73`` (R5 P2 #3 — validates ``declared_tools``
+         against the registry's ``list_tools()``). The no-op
+         registry is built by :func:`_build_skill_tool_registry`
+         from the skill class's ``declared_tools`` ClassVar so
+         multi-tool skills get a registry that exactly matches
+         their declaration.
+       - ``agent`` — ``cls() + await agent.handle(payload, task=
+         <inert TaskRecord>)`` against the Agent abstract method at
+         ``sdk/agent.py:52-77``.
+       - ``hook`` — ``cls() + await hook.invoke(context, payload)``
+         against the PUBLIC seam at ``sdk/hook.py:347`` (NOT the
+         abstract ``_invoke`` at ``sdk/hook.py:373``). Hook.invoke
+         runs three SDK validation phases:
+         ``_validate_hook_context`` + ``_validate_hook_payload``
+         (pre-``_invoke``; sdk/hook.py:221-241) +
+         ``_validate_hook_result`` (post-``_invoke``;
+         sdk/hook.py:244-288). Hook results pass through
+         :func:`_hook_result_to_safe_report_dict` so the
+         conformance report carries only safe metadata indicators
+         (``decision`` / ``policy_reason`` /
+         ``redacted_payload_present`` / ``audit_metadata_keys``) —
+         raw ``redacted_payload`` bytes NEVER cross the harness
+         reporting boundary per ADR-017 + Doctrine Lock E (Sprint-
+         7A2 T7 payload-never-logged invariant pinned by
+         ``tests/architecture/test_hook_payload_never_logged.py``
+         + extended to the harness in T6b's
+         ``test_hook_dispatch_report_never_carries_redacted_payload_bytes``).
+
+     Kinds outside :data:`_HARNESS_SUPPORTED_KINDS` (synthetic
+     fifth-kind canary in ``test_cli_test_harness.py::Section L``
+     uses ``"workflow"``) are refused at the kind-narrowing gate
+     with closed-enum :data:`harness_unsupported_pack_kind` — the
+     defense-in-depth layer before per-kind dispatch routing. See
+     bullet 4 for the no-transport-interception narrow.
   4. **Wave-1 narrow contract — no transport interception**
      (R33 P2 #1). The harness DOES NOT install
      ``httpx.MockTransport``, inject ``agentos_sdk.testing.
@@ -100,6 +132,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import hashlib
 import importlib.util
 import inspect
 import json
@@ -112,6 +145,10 @@ from typing import Any, Final, Literal
 
 from cognic_agentos.cli import ValidatorFinding
 from cognic_agentos.cli.validate import _MANIFEST_FILENAME, run_validators
+from cognic_agentos.protocol.a2a_endpoint import TaskRecord, TaskState
+from cognic_agentos.sdk.hook import HookContext, HookResult
+from cognic_agentos.sdk.registry import ToolRegistry
+from cognic_agentos.sdk.tool import Tool
 
 # ---------------------------------------------------------------------------
 # Closed-enum HarnessReason vocabulary
@@ -127,22 +164,27 @@ HarnessReason = Literal[
     "harness_no_entry_points_declared",
     "harness_entry_point_unresolvable",
     "harness_dispatch_failed",
-    # R31 P2 #2 — Wave-1 narrow: dispatch dry-run supports tool packs
-    # only. Skill + Agent dispatch contracts (Skill needs ToolRegistry
-    # at instantiation; Agent's ``handle()`` takes
-    # ``payload: bytes + task: TaskRecord``) require dedicated fixture-
-    # adapter wiring that lands when the harness's kind dispatch table
-    # is expanded.
+    # Defense-in-depth refusal for kinds outside :data:`PackKind`.
+    # Originally seeded at Sprint-7A T13/R31 P2 #2 to narrow Wave-1
+    # dispatch to ``kind="tool"`` only; Sprint-7B.1 T6a widened the
+    # supported set to the full :data:`PackKind` vocabulary so this
+    # gate now fires only for synthetic / typo / malicious kinds
+    # outside the closed-enum entirely (e.g. ``"workflow"``).
     "harness_unsupported_pack_kind",
 ]
 
 
-#: Pack kinds the harness's Wave-1 dispatch path supports.
-#: Skill + Agent kinds are explicitly refused with
-#: ``harness_unsupported_pack_kind`` instead of being routed through
-#: a Tool-only dispatch path that would crash with a generic
-#: instantiation error.
-_HARNESS_SUPPORTED_KINDS: Final[frozenset[str]] = frozenset({"tool"})
+#: Pack kinds the harness's dispatch path supports. Pinned in three-
+#: way lockstep with :data:`_KIND_TO_ENTRY_POINT_GROUP` keys and
+#: ``typing.get_args(PackKind)`` by the drift detector in
+#: ``test_harness_vocabulary.py``. Kinds outside this frozenset are
+#: refused at the kind-narrowing gate with closed-enum
+#: ``harness_unsupported_pack_kind`` — defending downstream dispatch
+#: from a generic AttributeError on a kind the dispatch table does
+#: not understand. Sprint-7B.1 T6a widened the set from
+#: ``frozenset({"tool"})`` to the full four-kind vocabulary; per-kind
+#: dry-run dispatch impls land in T6b.
+_HARNESS_SUPPORTED_KINDS: Final[frozenset[str]] = frozenset({"tool", "skill", "agent", "hook"})
 
 
 #: Regex that every dotted-module-name segment in an entry-point
@@ -166,15 +208,220 @@ _HARNESS_SUPPORTED_KINDS: Final[frozenset[str]] = frozenset({"tool"})
 _MODULE_SEGMENT_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
-#: Closed-enum mapping ``"tool" / "skill" / "agent"`` → the matching
-#: ``[project.entry-points."<group>"]`` table the harness reads. Pinned
-#: here so a future migration that renames the groups updates a single
-#: source of truth.
+#: Closed-enum mapping ``"tool" / "skill" / "agent" / "hook"`` → the
+#: matching ``[project.entry-points."<group>"]`` table the harness
+#: reads. Pinned here so a future migration that renames the groups
+#: updates a single source of truth. Sprint-7B.1 T6a added the
+#: ``"hook"`` arm pointing at ``cognic.hooks`` (Sprint-7A2 T9 wired
+#: the ``cognic.hooks`` entry-point group through the wheel-integrity
+#: kind-derivation table; T6a brought the harness's vocabulary to
+#: match).
 _KIND_TO_ENTRY_POINT_GROUP: Final[dict[str, str]] = {
     "tool": "cognic.tools",
     "skill": "cognic.skills",
     "agent": "cognic.agents",
+    "hook": "cognic.hooks",
 }
+
+
+# ---------------------------------------------------------------------------
+# Per-kind dispatch builders + constants (Sprint-7B.1 T6b)
+# ---------------------------------------------------------------------------
+
+
+#: Inert :class:`HookContext` fed to every hook dispatch dry-run. The
+#: ``Hook.invoke`` public seam at ``sdk/hook.py:347`` validates this
+#: against ``_validate_hook_context`` BEFORE ``_invoke`` runs. Module-
+#: level so the Section-B pinning regression at
+#: ``tests/unit/cli/test_harness_dispatch.py`` can monkeypatch to
+#: ``None`` and pin the harness's routing of the resulting
+#: ``HookContextError`` into ``harness_dispatch_failed`` +
+#: ``failure_message`` containing the SDK exception class name.
+_DISPATCH_HOOK_CONTEXT: HookContext = HookContext(
+    hook_id="harness_dispatch_dry_run",
+    phase="dlp_pre",
+    pack_id="harness_dispatch",
+    tenant_id="harness",
+    request_id="harness-dispatch-dry-run",
+    trace_id=None,
+    parent_trace_id=None,
+    manifest_data_classes=(),
+    manifest_purpose="harness_dispatch_dry_run",
+)
+
+
+#: Inert payload bytes fed to every hook dispatch dry-run. Empty
+#: bytes mirror the ADR-017 + Doctrine Lock E payload-never-logged
+#: invariant by carrying no sensitive content. Module-level for the
+#: same monkeypatch-to-``None`` pinning shape as
+#: :data:`_DISPATCH_HOOK_CONTEXT`.
+_DISPATCH_HOOK_PAYLOAD: bytes = b""
+
+
+#: Inert agent payload bytes — same empty-bytes sentinel as
+#: :data:`_DISPATCH_HOOK_PAYLOAD`. The reference agent's ``handle()``
+#: ignores both ``payload`` + ``task``; pack authors writing real
+#: agents key their behaviour off the A2A envelope bytes + cross-
+#: check ``task.payload_digest`` against ``sha256(payload).hexdigest()``
+#: (the A2A endpoint's contract at ``protocol/a2a_endpoint.py:436``
+#: + ``:662``). Constant declared BEFORE
+#: :data:`_DISPATCH_AGENT_TASK_RECORD` so the digest derivation
+#: below reads it directly.
+_DISPATCH_AGENT_PAYLOAD: bytes = b""
+
+
+#: Inert :class:`TaskRecord` fed to every agent dispatch dry-run.
+#: All 8 required fields populated with deterministic harness
+#: sentinels; ``payload_digest`` is derived from
+#: :data:`_DISPATCH_AGENT_PAYLOAD` via
+#: ``hashlib.sha256(payload).hexdigest()`` to match the A2A
+#: source-of-truth contract at ``protocol/a2a_endpoint.py:436`` +
+#: ``:662``. The reference agent's ``handle()`` ignores the task
+#: entirely (Wave-1 inert path), but pack authors writing real
+#: agents that cross-check the envelope against the supplied
+#: payload would refuse the call if this digest drifted; the
+#: regression at
+#: ``test_harness_dispatch.py::test_agent_dispatch_task_record_payload_digest_matches_payload``
+#: pins the lockstep.
+_DISPATCH_AGENT_TASK_RECORD: TaskRecord = TaskRecord(
+    task_id="harness-dispatch-dry-run-task",
+    target_agent="harness-dispatch",
+    parent_trace_id="harness-dispatch-parent",
+    child_trace_id="harness-dispatch-child",
+    state=TaskState.CREATED,
+    created_at=0.0,
+    updated_at=0.0,
+    payload_digest=hashlib.sha256(_DISPATCH_AGENT_PAYLOAD).hexdigest(),
+)
+
+
+#: Permissive input schema shared by every dynamically-constructed
+#: harness no-op Tool subclass. ``additionalProperties: true`` lets
+#: skill code call ``await tool.invoke(arbitrary_kwarg=...)`` without
+#: crashing in the SDK's input-schema validation seam.
+_HARNESS_NO_OP_TOOL_INPUT_SCHEMA: Final[dict[str, Any]] = {
+    "type": "object",
+    "additionalProperties": True,
+}
+
+
+#: Permissive output schema — paired with the empty-dict return value
+#: of :func:`_harness_dispatch_no_op_invoke` so the SDK's output-
+#: schema validation seam passes for any skill that calls a no-op
+#: tool.
+_HARNESS_NO_OP_TOOL_OUTPUT_SCHEMA: Final[dict[str, Any]] = {
+    "type": "object",
+    "additionalProperties": True,
+}
+
+
+async def _harness_dispatch_no_op_invoke(self: Tool, **kwargs: Any) -> dict[str, Any]:
+    """Permissive no-op ``_invoke`` body bound to every dynamically-
+    constructed harness no-op Tool subclass. Ignores ``self`` + any
+    kwargs + returns the empty dict so the SDK's output-schema
+    validation seam clears against
+    :data:`_HARNESS_NO_OP_TOOL_OUTPUT_SCHEMA`."""
+    del self, kwargs
+    return {}
+
+
+def _make_harness_no_op_tool_class(tool_name: str) -> type[Tool]:
+    """Construct a :class:`Tool` subclass whose ``name`` ClassVar
+    matches ``tool_name`` EXACTLY. Used by
+    :class:`_HarnessFixtureNoOpToolRegistry` so a skill that reads
+    ``self._tools.get(name).name`` sees the registered key as the
+    tool's identity — mirroring the contract every real
+    :class:`ToolRegistry` honors (each registered tool's ``name``
+    matches the key it was registered under).
+
+    Built via ``type(...)`` so the ``name`` / ``input_schema`` /
+    ``output_schema`` ClassVars resolve at class-definition time +
+    :meth:`Tool.__init_subclass__` runs its template-method
+    validation seam (refuses ``invoke`` overrides in any ancestor
+    other than ``Tool`` / ``object``). Each declared name gets its
+    own subclass; subclass-cache isn't necessary because the
+    registry instance keeps each subclass alive for the duration of
+    a single dispatch dry-run + the harness pops the modules
+    afterwards.
+    """
+    return type(
+        f"_HarnessNoOpTool__{tool_name}",
+        (Tool,),
+        {
+            "name": tool_name,
+            "input_schema": _HARNESS_NO_OP_TOOL_INPUT_SCHEMA,
+            "output_schema": _HARNESS_NO_OP_TOOL_OUTPUT_SCHEMA,
+            "_invoke": _harness_dispatch_no_op_invoke,
+        },
+    )
+
+
+class _HarnessFixtureNoOpToolRegistry:
+    """Strict-membership ``ToolRegistry`` impl. Pre-builds one
+    :class:`Tool` subclass per declared name in ``__init__`` so
+    ``get(name)`` returns a Tool instance whose ``.name`` matches
+    the requested key EXACTLY (R1 reviewer P3 — earlier draft
+    returned a singleton ``_HarnessFixtureNoOpTool`` whose ``name``
+    was a constant regardless of key; a future skill calling
+    ``self._tools.get(name).name`` would have seen wrong identity).
+
+    Strict-membership semantics: ``get(name)`` for any name outside
+    ``declared`` raises ``KeyError`` — prevents future multi-tool
+    skill drift from masking real ``Skill.__init__`` cross-check
+    failures.
+    """
+
+    def __init__(self, *, declared: tuple[str, ...]) -> None:
+        self._declared: frozenset[str] = frozenset(declared)
+        self._tools: dict[str, Tool] = {
+            tool_name: _make_harness_no_op_tool_class(tool_name)() for tool_name in declared
+        }
+
+    def list_tools(self) -> list[str]:
+        return sorted(self._declared)
+
+    def get(self, name: str) -> Tool:
+        if name not in self._declared:
+            raise KeyError(
+                f"tool {name!r} is not registered; the harness's no-op "
+                f"registry exposes only the skill's declared_tools "
+                f"tuple. Declared: {sorted(self._declared)!r}."
+            )
+        return self._tools[name]
+
+
+def _build_skill_tool_registry(skill_cls: type) -> ToolRegistry:
+    """Construct a strict-membership ``ToolRegistry`` covering the
+    skill class's ``declared_tools`` ClassVar. Derives the name set
+    dynamically so future multi-tool skill packs (or single-tool
+    packs that rename their declared tool) get a registry that
+    exactly matches their declaration without drift.
+    """
+    declared_tools: tuple[str, ...] = tuple(getattr(skill_cls, "declared_tools", ()))
+    return _HarnessFixtureNoOpToolRegistry(declared=declared_tools)
+
+
+def _hook_result_to_safe_report_dict(result: HookResult) -> dict[str, Any]:
+    """Convert :class:`HookResult` to a safe report dict that omits
+    raw ``redacted_payload`` bytes per ADR-017 + Doctrine Lock E +
+    the Sprint-7A2 T7 payload-never-logged invariant (pinned by the
+    AST-walk regression at
+    ``tests/architecture/test_hook_payload_never_logged.py``).
+
+    Only safe metadata indicators cross the harness reporting
+    boundary: ``decision`` (closed-enum string), ``policy_reason``
+    (string or None), ``redacted_payload_present`` (bool indicator —
+    NOT the bytes themselves), ``audit_metadata_keys`` (tuple of key
+    names — NOT the values). The conformance report's
+    ``response_keys`` derives from ``dict.keys()`` of this dict so the
+    invariant holds end-to-end through the CLI's ``--json`` payload.
+    """
+    return {
+        "decision": result.decision,
+        "policy_reason": result.policy_reason,
+        "redacted_payload_present": result.redacted_payload is not None,
+        "audit_metadata_keys": tuple(result.audit_metadata.keys()),
+    }
 
 
 #: Closed-enum tuple of validate-pipeline concerns surfaced in the
@@ -540,13 +787,71 @@ def _load_entry_point_class(
     return cls
 
 
-async def _dry_run_invoke(cls: type) -> dict[str, Any]:
-    """Instantiate ``cls`` (a Tool subclass) + invoke it with no
-    kwargs. Wrapped here so the dispatch try-block in
-    :func:`_dispatch_one` has a single async coroutine to await."""
-    instance = cls()
-    result: dict[str, Any] = await instance.invoke()
-    return result
+async def _dry_run_invoke(cls: type, *, pack_kind: str) -> dict[str, Any]:
+    """Per-kind dispatch dry-run. Routes on ``pack_kind`` to the
+    public SDK seam for each kind (Sprint-7B.1 T6b widening; pre-T6b
+    this function was Tool-only).
+
+    Per-kind dispatch contracts (all public SDK seams; private
+    ``_invoke`` paths are NEVER called directly so SDK validators
+    fire):
+
+      - ``"tool"`` — ``cls() + await instance.invoke()`` against
+        ``Tool.invoke`` template-method seam at ``sdk/tool.py:144``
+        (validates kwargs against input_schema + result against
+        output_schema).
+      - ``"skill"`` — ``cls(tools=<no-op-registry>) +
+        await skill.execute()`` against the Skill cross-check seam
+        at ``sdk/skill.py:73`` (R5 P2 #3 — validates declared_tools
+        against registry list_tools()).
+      - ``"agent"`` — ``cls() + await agent.handle(payload, task=
+        <inert TaskRecord>)`` against the Agent abstract method at
+        ``sdk/agent.py:52-77``.
+      - ``"hook"`` — ``cls() + await hook.invoke(context, payload)``
+        against the PUBLIC seam at ``sdk/hook.py:347`` (NOT the
+        abstract ``_invoke`` at ``sdk/hook.py:373``). Hook.invoke
+        runs three SDK validation phases: pre-``_invoke`` context
+        + pre-``_invoke`` payload (sdk/hook.py:221-241) + post-
+        ``_invoke`` result-shape (sdk/hook.py:244-288).
+
+    Return value is the per-kind dispatch result coerced to a dict
+    so ``DispatchOutcome.response_keys`` derives uniformly. For
+    hook kind, :func:`_hook_result_to_safe_report_dict` strips the
+    raw ``redacted_payload`` bytes per ADR-017 + Doctrine Lock E
+    payload-never-logged invariant.
+    """
+    if pack_kind == "tool":
+        tool_instance = cls()
+        tool_result: dict[str, Any] = await tool_instance.invoke()
+        return tool_result
+    if pack_kind == "skill":
+        skill_instance = cls(tools=_build_skill_tool_registry(cls))
+        skill_result: dict[str, Any] = await skill_instance.execute()
+        return skill_result
+    if pack_kind == "agent":
+        agent_instance = cls()
+        agent_result: dict[str, Any] = await agent_instance.handle(
+            _DISPATCH_AGENT_PAYLOAD,
+            task=_DISPATCH_AGENT_TASK_RECORD,
+        )
+        return agent_result
+    if pack_kind == "hook":
+        hook_instance = cls()
+        hook_result: HookResult = await hook_instance.invoke(
+            _DISPATCH_HOOK_CONTEXT,
+            _DISPATCH_HOOK_PAYLOAD,
+        )
+        return _hook_result_to_safe_report_dict(hook_result)
+    # Unreachable in practice — the Step 1.5 kind-narrowing gate at
+    # :func:`run_harness` refuses kinds outside :data:`PackKind`
+    # BEFORE dispatch. This branch is defense-in-depth: a future
+    # refactor that bypasses the Step 1.5 gate gets a deterministic
+    # failure rather than silently calling an undefined SDK seam.
+    raise ValueError(
+        f"_dry_run_invoke received unsupported pack_kind {pack_kind!r}; "
+        f"the Step 1.5 kind-narrowing gate at run_harness should have "
+        f"refused this kind before dispatch."
+    )
 
 
 def _dispatch_one(
@@ -554,6 +859,7 @@ def _dispatch_one(
     *,
     name: str,
     entry_point_ref: str,
+    pack_kind: str,
 ) -> DispatchResult:
     """Run the dispatch dry-run for a single entry-point declaration.
     Closed-enum refusal mapping:
@@ -646,7 +952,7 @@ def _dispatch_one(
         import asyncio
 
         try:
-            result = asyncio.run(_dry_run_invoke(cls))
+            result = asyncio.run(_dry_run_invoke(cls, pack_kind=pack_kind))
         except Exception as exc:
             return DispatchResult(
                 entry_point_name=name,
@@ -757,24 +1063,32 @@ def run_harness(pack_path: Path) -> HarnessReport:
     # Validate clean — read the pack identity for the report header.
     pack_id, pack_kind = _read_pack_id_and_kind(pack_path)
 
-    # Step 1.5 (R31 P2 #2): pack-kind narrowing. Wave-1 dispatches
-    # tool packs only — Skill needs ToolRegistry at instantiation
-    # time, Agent's ``handle()`` takes ``payload: bytes + task:
-    # TaskRecord``. Routing those through the Tool-only dispatch
-    # path would produce generic instantiation errors; the closed-
-    # enum refusal points authors at the future expansion task.
+    # Step 1.5: kind-narrowing gate — defense-in-depth for kinds
+    # outside :data:`_HARNESS_SUPPORTED_KINDS`. Originally seeded at
+    # Sprint-7A T13/R31 P2 #2 to narrow Wave-1 dispatch to
+    # ``kind="tool"`` only; Sprint-7B.1 T6a widened the supported set
+    # to the full :data:`PackKind` vocabulary, so this gate now fires
+    # only for kinds outside the closed-enum entirely (synthetic /
+    # typo / malicious manifests with e.g. ``kind="workflow"``).
+    # ``cli/sign.py:_VALID_PACK_KINDS`` refuses unknown kinds up-front
+    # in the full author lifecycle, but :func:`run_harness` is also
+    # called via direct integration against unsigned packs — the gate
+    # is the runtime last line of defense to keep a generic dispatch-
+    # table AttributeError from surfacing for a kind the table does
+    # not understand.
     if pack_kind not in _HARNESS_SUPPORTED_KINDS:
         findings.append(
             HarnessFinding(
                 severity="refusal",
                 reason="harness_unsupported_pack_kind",
                 message=(
-                    f"pack kind {pack_kind!r} is not yet supported by the "
-                    "harness's dispatch dry-run. Wave-1 dispatches tool "
-                    "packs only; skill + agent packs require dedicated "
-                    "fixture-adapter wiring (Skill ToolRegistry, Agent "
-                    "TaskRecord+payload) that lands when the harness's "
-                    "kind dispatch table is expanded."
+                    f"pack kind {pack_kind!r} is not a member of the harness's "
+                    f"supported-kinds closed enum "
+                    f"{sorted(_HARNESS_SUPPORTED_KINDS)!r}. Common causes: a "
+                    "typo in the manifest's [pack].kind field, or a manifest "
+                    "from a future / experimental pack format that this "
+                    "harness build does not yet support. Update [pack].kind "
+                    "to one of the supported values + re-run the harness."
                 ),
                 payload={
                     "pack_path": str(pack_path),
@@ -846,7 +1160,9 @@ def run_harness(pack_path: Path) -> HarnessReport:
     # Step 4: per-entry-point dispatch dry-run.
     dispatch_results: list[DispatchResult] = []
     for name, ref in entry_points.items():
-        dispatch_results.append(_dispatch_one(pack_path, name=name, entry_point_ref=ref))
+        dispatch_results.append(
+            _dispatch_one(pack_path, name=name, entry_point_ref=ref, pack_kind=pack_kind)
+        )
 
     overall_status: Literal["pass", "fail"] = (
         "pass" if not findings and all(r.status == "pass" for r in dispatch_results) else "fail"

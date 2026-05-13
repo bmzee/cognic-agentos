@@ -158,6 +158,83 @@ sprint (``cli/validate.py``, ``cli/sign.py``, ``cli/verify.py``,
 carry forward their existing pinning. All four hook modules ride
 the same single strict 95% line / 90% branch floor; gate size grows
 from 37 modules to 41.
+
+Sprint 7B.1 T7 extends the gate with the **Bank pack lifecycle**
+pair — two modules that together form the ADR-012 lifecycle-state-
+machine + storage critical path:
+
+  * ``packs/lifecycle.py`` — pure-functional state machine.
+    Closed-enum **13-value** ``LifecycleRefusalReason`` at
+    lines 165-179 (finalised at T2 from the plan-of-record's
+    provisional ±1 count as the transition table was enumerated).
+    ``_VALID_TRANSITIONS`` legal-pair table at :196 (10 transitions
+    / 13 legal pairs). ``validate_transition(*, from_state,
+    to_state, kind, transition)`` pure validator at :398 — four
+    keyword-only args. ``iso_controls_for(transition)`` at :343
+    returns the canonical ISO 42001 control tuple from the
+    3-value ``_KNOWN_ISO_CONTROL_CODES`` set ({``A.5.31``,
+    ``A.5.32``, ``A.6.2.4``}) feeding chain-row emission.
+    ``LifecycleTransitionRefused(reason)`` at :309 carries ONLY
+    the closed-enum reason. Doctrine Lock C — the closed-enum
+    vocabulary IS the consumer-API wire-protocol contract carried
+    by ``LifecycleTransitionRefused.reason``. The only in-tree
+    consumer today is T3 storage (``packs/storage.py:108`` imports
+    the contract; ``transition()`` derives the canonical ISO
+    control tuple via ``iso_controls_for(transition)`` at :456
+    BEFORE the precondition closure — pure-functional helper, no
+    I/O — then runs ``validate_transition(...)`` at :480-485
+    INSIDE the closure under the row-locked view; the precondition
+    raises ``LifecycleTransitionRefused`` at :487, ``engine.begin()``
+    at ``core/decision_history.py:482`` rolls back the transaction
+    on the exception path, and the exception propagates up
+    through ``append_with_precondition`` and ``transition()`` to
+    the caller — neither storage layer catches it); Sprint 7B.2
+    portal handlers are the planned next consumer. Chain audit events themselves use the
+    ``pack.lifecycle.<target_state>`` namespace (keyed by target
+    state, not by ``.refused`` — refusals roll back BEFORE any
+    chain row is written). Sprint-7B.1 T2.
+  * ``packs/storage.py`` — Postgres-backed ``PackRecordStore`` at
+    :296; the ``DecisionHistoryStore.append_with_precondition``
+    consumer that drives every lifecycle transition through the
+    Sprint-2.5 T2 atomic primitive. ``transition()`` at :360
+    first runs the preflight transition-name guard at :437-438
+    (out-of-vocabulary transitions raise
+    ``LifecycleTransitionRefused("lifecycle_transition_name_unknown")``
+    BEFORE any helper invocation or DB work; mirrors the
+    asymmetric-runtime-guard fix at ``packs/lifecycle.py:393-394``);
+    on the green path resolves ``target_state`` at :440 and
+    derives the canonical ISO 42001 control tuple via
+    ``iso_controls_for(transition)`` at :456 BEFORE the closure
+    (pure-functional, no I/O), then enters the row-locked
+    precondition closure at :458 (``SELECT ... FOR UPDATE`` on
+    the ``packs`` row at :467-473 under the chain-head ``FOR
+    UPDATE`` lock) → ``validate_transition(...)`` at :480-485
+    under the locked view → ``UPDATE packs SET state, last_actor,
+    updated_at`` at :494-502 (three columns; no ``version_counter``
+    field — atomicity comes from the chain-head + row lock pair).
+    OUTSIDE the closure: ``_build_record`` at :505 mints a
+    ``DecisionRecord`` with
+    ``decision_type = f"pack.lifecycle.{target_state}"`` at :508
+    and the pre-derived ``canonical_iso_controls`` value (no fresh
+    ``iso_controls_for`` call from ``_build_record``).
+    ``append_with_precondition`` at :524 commits chain row +
+    state-cache UPDATE + chain-head UPDATE atomically. Two-class
+    refusal taxonomy: ``PackNotFound`` at :219 for missing-pack
+    lookups; ``PackRecordRefused`` at :238-265 carrying the
+    1-value ``PackRecordRefusalReason`` Literal at :235 (only for
+    the ``save_draft`` API-contract genesis-state guard);
+    transition-table refusals raise ``LifecycleTransitionRefused``
+    from the precondition at :487 so the engine's transactional
+    rollback fires (no chain row, no state-cache mutation, no
+    orphan INSERT). Doctrine Lock D. Sprint-7B.1 T3.
+
+Both modules ride the same single strict 95% line / 90% branch
+floor. Off-gate per Doctrine F gate-counting rule: the Alembic
+migration version file at
+``src/cognic_agentos/db/migrations/versions/20260510_0003_packs_lifecycle.py``
+— DDL is doctrine-critical but not coverage-tracked by convention
+(migrations are run-once executable schema, not behavioural code).
+Gate size grows from 41 modules to 43.
 """
 
 from __future__ import annotations
@@ -375,6 +452,22 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     ("src/cognic_agentos/packs/hooks/dispatcher.py", 0.95, 0.90),
     ("src/cognic_agentos/packs/hooks/dlp_integration.py", 0.95, 0.90),
     ("src/cognic_agentos/cli/validators/hooks.py", 0.95, 0.90),
+    # Sprint 7B.1 T7 — Bank pack lifecycle (state machine + storage)
+    # pair. Both modules form the ADR-012 lifecycle-state-machine +
+    # storage critical path; see module docstring above for per-module
+    # rationale. ``packs/lifecycle.py`` is the pure-functional state
+    # machine (closed-enum ``LifecycleRefusalReason`` +
+    # ``_VALID_TRANSITIONS`` table + ``validate_transition`` pure
+    # validator + ``iso_controls_for`` ISO 42001 control mapping).
+    # ``packs/storage.py`` is the row-locked ``append_with_precondition``
+    # consumer (atomic chain-insert + state-cache UPDATE + chain-head
+    # UPDATE in a single transaction). Off-gate per Doctrine F
+    # gate-counting rule: the Alembic migration version file
+    # (``src/cognic_agentos/db/migrations/versions/20260510_0003_packs_lifecycle.py``)
+    # — doctrine-critical DDL but not coverage-tracked by convention.
+    # Both ride the same single strict 95% line / 90% branch floor.
+    ("src/cognic_agentos/packs/lifecycle.py", 0.95, 0.90),
+    ("src/cognic_agentos/packs/storage.py", 0.95, 0.90),
 )
 
 
