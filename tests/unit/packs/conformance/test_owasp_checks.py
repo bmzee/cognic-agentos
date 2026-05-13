@@ -38,7 +38,7 @@ def _base_manifest(kind: str = "tool") -> dict[str, object]:
             "provider_organization": "Acme",
             "provider_url": "https://acme.example",
         },
-        "risk_tier": {"tier": "medium"},
+        "risk_tier": {"tier": "read_only"},
     }
 
 
@@ -823,7 +823,7 @@ class TestSprint7B2T8EdgeCaseCoverage:
         surfaces missing pack.kind."""
         from cognic_agentos.packs.conformance.owasp_agentic import check_tool_misuse
 
-        manifest: dict[str, object] = {"pack": "not-a-dict", "risk_tier": {"tier": "medium"}}
+        manifest: dict[str, object] = {"pack": "not-a-dict", "risk_tier": {"tier": "read_only"}}
 
         result = check_tool_misuse(manifest)
 

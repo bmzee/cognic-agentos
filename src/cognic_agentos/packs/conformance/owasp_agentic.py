@@ -113,7 +113,31 @@ def _pack_kind(manifest: dict[str, Any]) -> str | None:
 # ---------------------------------------------------------------------------
 
 _VALID_PACK_KINDS = frozenset({"tool", "skill", "agent", "hook"})
-_VALID_RISK_TIERS = frozenset({"low", "medium", "high"})
+
+#: Canonical ADR-014 risk-tier vocabulary (8 values, single-sourced at
+#: ``cli/_governance_vocab.py:117`` as the ``RiskTier`` Literal). Sprint-
+#: 7B.2 R45 corrected an earlier T8 seed of the 3-value
+#: ``{"low", "medium", "high"}`` set which diverged from ADR-014's
+#: canonical authority ordering. Drift between this set and the
+#: ``RiskTier`` Literal is pinned by
+#: ``tests/unit/packs/conformance/test_owasp_risk_tier_vocab_drift.py``
+#: — the test imports both surfaces and asserts they match
+#: ``frozenset(typing.get_args(RiskTier))``; production code here MUST
+#: NOT import from ``cognic_agentos.cli`` (the architectural arrow
+#: runs cli → packs, not the reverse), so the values are inlined
+#: here and the test enforces lockstep across the two source files.
+_VALID_RISK_TIERS = frozenset(
+    {
+        "read_only",
+        "internal_write",
+        "customer_data_read",
+        "customer_data_write",
+        "payment_action",
+        "regulator_communication",
+        "cross_tenant",
+        "high_risk_custom",
+    }
+)
 
 # Injection-style escape sequences scanned by check_goal_hijacking +
 # check_prompt_injected_skills. Pattern list is intentionally narrow:
@@ -151,8 +175,14 @@ def check_tool_misuse(manifest: dict[str, Any]) -> ConformanceCheckResult:
 
     1. ``manifest.pack.kind`` must exist and be one of
        ``{"tool", "skill", "agent", "hook"}``.
-    2. ``manifest.risk_tier.tier`` must exist and be one of
-       ``{"low", "medium", "high"}`` per ADR-014.
+    2. ``manifest.risk_tier.tier`` must exist and be one of the
+       canonical ADR-014 8-value ``RiskTier`` set (``read_only``
+       through ``high_risk_custom``). Sprint-7B.2 R45 corrected an
+       earlier T8 seed of the 3-value ``{"low", "medium", "high"}``
+       set which diverged from ADR-014's canonical authority ordering;
+       the drift detector at
+       ``tests/unit/packs/conformance/test_owasp_risk_tier_vocab_drift.py``
+       now pins lockstep with ``cli/_governance_vocab.RiskTier``.
     3. ``manifest.mcp`` block declaration MUST NOT appear on a non-tool pack
        (cross-kind constraint; mirrors the Sprint-7A2 hook-pack
        ``hook_pack_kind_constraint_violated`` refusal pattern).

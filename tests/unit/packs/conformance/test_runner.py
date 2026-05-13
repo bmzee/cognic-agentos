@@ -33,7 +33,7 @@ _BASE_TOOL_MANIFEST: dict[str, Any] = {
         "provider_organization": "Acme",
         "provider_url": "https://acme.example",
     },
-    "risk_tier": {"tier": "medium"},
+    "risk_tier": {"tier": "read_only"},
 }
 
 

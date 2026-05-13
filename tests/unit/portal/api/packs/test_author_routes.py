@@ -151,7 +151,7 @@ def _well_formed_tool_manifest() -> dict[str, Any]:
             "provider_organization": "Acme",
             "provider_url": "https://acme.example",
         },
-        "risk_tier": {"tier": "medium"},
+        "risk_tier": {"tier": "read_only"},
     }
 
 
@@ -2099,7 +2099,7 @@ class TestSprint7B2T9SubmitDraftConformance:
         # passes or N/As).  The submit must still complete with 200.
         bad_manifest: dict[str, Any] = {
             "pack": {"kind": "tool", "name": "demo", "version": "1.0.0"},
-            "risk_tier": {"tier": "medium"},
+            "risk_tier": {"tier": "read_only"},
             # NOTE: identity block deliberately omitted → check_identity_abuse fails
         }
         record = await _seed_draft(store, tenant_id="t1", manifest=bad_manifest)

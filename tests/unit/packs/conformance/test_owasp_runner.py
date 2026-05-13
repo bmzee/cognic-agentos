@@ -179,7 +179,7 @@ class TestSprint7B2T8RunnerComposition:
                 "provider_organization": "Acme",
                 "provider_url": "https://acme.example",
             },
-            "risk_tier": {"tier": "medium"},
+            "risk_tier": {"tier": "read_only"},
             "skills": [
                 {
                     "name": "summarise",
@@ -399,7 +399,7 @@ class TestSprint7B2T8RunnerSkipsNonApplicable:
 
         manifest: dict[str, object] = {
             "pack": {"kind": "tool", "name": "x", "version": "1.0.0"},
-            "risk_tier": {"tier": "medium"},
+            "risk_tier": {"tier": "read_only"},
         }
         report = owasp_agentic.run_owasp_conformance(manifest)
 
@@ -437,7 +437,7 @@ class TestSprint7B2T8RunnerSkipsNonApplicable:
 
         manifest: dict[str, object] = {
             "pack": {"kind": "skill", "name": "x", "version": "1.0.0"},
-            "risk_tier": {"tier": "low"},
+            "risk_tier": {"tier": "read_only"},
         }
         owasp_agentic.run_owasp_conformance(manifest)
 
@@ -491,7 +491,7 @@ class TestSprint7B2T8YellowOnCheckerException:
 
         manifest: dict[str, object] = {
             "pack": {"kind": "tool", "name": "x", "version": "1.0.0"},
-            "risk_tier": {"tier": "medium"},
+            "risk_tier": {"tier": "read_only"},
         }
         report = owasp_agentic.run_owasp_conformance(manifest)
 
@@ -514,7 +514,7 @@ class TestSprint7B2T8YellowOnCheckerException:
 
         manifest: dict[str, object] = {
             "pack": {"kind": "tool", "name": "x", "version": "1.0.0"},
-            "risk_tier": {"tier": "medium"},
+            "risk_tier": {"tier": "read_only"},
         }
         report = owasp_agentic.run_owasp_conformance(manifest)
 
@@ -545,7 +545,7 @@ class TestSprint7B2T8YellowOnCheckerException:
 
         manifest: dict[str, object] = {
             "pack": {"kind": "tool", "name": "x", "version": "1.0.0"},
-            "risk_tier": {"tier": "medium"},
+            "risk_tier": {"tier": "read_only"},
         }
         report = owasp_agentic.run_owasp_conformance(manifest)
 
@@ -576,7 +576,7 @@ class TestSprint7B2T8YellowOnCheckerException:
 
         manifest: dict[str, object] = {
             "pack": {"kind": "tool", "name": "x", "version": "1.0.0"},
-            "risk_tier": {"tier": "medium"},
+            "risk_tier": {"tier": "read_only"},
         }
         report = owasp_agentic.run_owasp_conformance(manifest)
 
@@ -613,7 +613,7 @@ class TestSprint7B2T8YellowPrecedenceOverRed:
 
         manifest: dict[str, object] = {
             "pack": {"kind": "tool", "name": "x", "version": "1.0.0"},
-            "risk_tier": {"tier": "medium"},
+            "risk_tier": {"tier": "read_only"},
             # supply_chain block deliberately missing → check_supply_chain
             # returns fail → would be "red" if no error.
         }
@@ -642,7 +642,7 @@ class TestSprint7B2T8YellowPrecedenceOverRed:
 
         manifest: dict[str, object] = {
             "pack": {"kind": "tool", "name": "x", "version": "1.0.0"},
-            "risk_tier": {"tier": "medium"},
+            "risk_tier": {"tier": "read_only"},
             "supply_chain": {"attestation_paths": ["x.sig"]},
         }
         report = owasp_agentic.run_owasp_conformance(manifest)
@@ -677,7 +677,7 @@ class TestSprint7B2T8SummaryErroredAnnotation:
 
         manifest: dict[str, object] = {
             "pack": {"kind": "tool", "name": "x", "version": "1.0.0"},
-            "risk_tier": {"tier": "medium"},
+            "risk_tier": {"tier": "read_only"},
             "supply_chain": {"attestation_paths": ["x.sig"]},
         }
         report = owasp_agentic.run_owasp_conformance(manifest)
@@ -691,7 +691,7 @@ class TestSprint7B2T8SummaryErroredAnnotation:
 
         manifest: dict[str, object] = {
             "pack": {"kind": "tool", "name": "x", "version": "1.0.0"},
-            "risk_tier": {"tier": "medium"},
+            "risk_tier": {"tier": "read_only"},
             "supply_chain": {"attestation_paths": ["x.sig"]},
         }
         report = run_owasp_conformance(manifest)

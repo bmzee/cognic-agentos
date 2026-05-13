@@ -62,7 +62,7 @@ provider_organization = "Example Org"
 provider_url = "https://example.com"
 
 [risk_tier]
-tier = "low"
+tier = "read_only"
 
 [data_governance]
 data_classes = ["public"]
@@ -85,7 +85,7 @@ name = "demo"
 version = "1.0.0"
 
 [risk_tier]
-tier = "low"
+tier = "read_only"
 
 [data_governance]
 data_classes = ["public"]
