@@ -134,6 +134,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, Literal
 
+import tomli_w
+
 from cognic_agentos.cli import ValidatorReason
 from cognic_agentos.core.config import Settings
 
@@ -2258,6 +2260,99 @@ async def _run_sign_blob_inner(
 
 
 # ---------------------------------------------------------------------------
+# Sprint 7B.3 T2 Slice F — bundle-root helpers per R5 P2 #2 + R6 P2 #4
+# + R7 P2 #4 contract.
+#
+# Three pure-functional helpers consumed by ``run_sign_bundle`` to wire
+# the ``[supply_chain].blob_path`` manifest field automatically — the
+# 7B.3 signature gate is non-overridable per ADR-012 §110, so the field
+# MUST be wired by the authoring CLI rather than by manual author edit
+# (manual edit would surface as ``signature_blob_path_not_declared_in_manifest``
+# at every approve).
+# ---------------------------------------------------------------------------
+
+
+def _resolve_bundle_root(
+    *,
+    wheel_path: Path,
+    bundle_root_override: Path | None,
+) -> Path:
+    """Sprint 7B.3 T2 Slice F — resolve the bundle root for sign-bundle.
+
+    Per R7 P2 #4 CLI contract: the ``--bundle-root <path>`` flag's
+    default is ``Path(wheel).parent.resolve()``; an explicit override
+    takes precedence. Both inputs go through ``Path.resolve()`` so the
+    relative-to computation operates on a stable canonicalised
+    absolute path (symlinks + ``.``/``..`` segments + relative inputs
+    all normalise before the relative-to call).
+
+    Returns the canonicalised bundle root :class:`Path`.
+    """
+    if bundle_root_override is not None:
+        return bundle_root_override.resolve()
+    return wheel_path.parent.resolve()
+
+
+def _compute_bundle_root_relative_blob_path(
+    *,
+    wheel_path: Path,
+    bundle_root: Path,
+) -> str:
+    """Sprint 7B.3 T2 Slice F — compute the wheel's bundle-root-relative
+    POSIX path.
+
+    Both inputs are pre-resolved by :func:`_resolve_bundle_root` /
+    caller. Computes ``wheel.relative_to(bundle_root)`` + emits via
+    :meth:`Path.as_posix` for cross-platform manifest portability
+    (R7 P2 #4 doctrine — POSIX forward slashes regardless of host OS;
+    the manifest field is wire-protocol-public across all deployments).
+
+    Raises :class:`ValueError` when the wheel is NOT a descendant of
+    the bundle root. The caller (run_sign_bundle) translates this into
+    the ``sign_wheel_outside_bundle_root`` SignFinding per R7 P2 #4.
+    """
+    resolved_wheel = wheel_path.resolve()
+    try:
+        relative = resolved_wheel.relative_to(bundle_root)
+    except ValueError as exc:
+        raise ValueError(
+            f"wheel {resolved_wheel!s} is not under bundle root "
+            f"{bundle_root!s}; sign --bundle-root requires the wheel "
+            "to be a descendant of the resolved bundle root."
+        ) from exc
+    return relative.as_posix()
+
+
+def _write_blob_path_to_manifest(
+    *,
+    manifest_path: Path,
+    blob_path: str,
+) -> None:
+    """Sprint 7B.3 T2 Slice F — round-trip-safe TOML mutation that
+    inserts or updates ``[supply_chain].blob_path`` in the pack's
+    ``cognic-pack-manifest.toml``.
+
+    Uses stdlib ``tomllib`` (read) + ``tomli_w`` (write — added as a
+    new top-level dep in T2 Slice F). Preserves every other field in
+    the manifest; idempotent on re-run with the same value (running
+    twice produces byte-identical output).
+
+    Creates the ``[supply_chain]`` block when missing (e.g. minimal
+    manifests during bring-up). The CLI authoring contract per ADR-016
+    requires the block to exist in production packs; this helper does
+    NOT enforce that contract — :mod:`cli.validators.supply_chain` is
+    the build-time validator that fails missing ``attestation_paths``.
+
+    R10 LOCK: signature non-overridability per ADR-012 §110 means the
+    field MUST be wired automatically; this helper IS the automation.
+    """
+    data: dict[str, Any] = tomllib.loads(manifest_path.read_bytes().decode("utf-8"))
+    supply_chain = data.setdefault("supply_chain", {})
+    supply_chain["blob_path"] = blob_path
+    manifest_path.write_bytes(tomli_w.dumps(data).encode("utf-8"))
+
+
+# ---------------------------------------------------------------------------
 # Public API: run_sign_bundle (T14.B full Wave-1 orchestrator)
 # ---------------------------------------------------------------------------
 
@@ -2268,6 +2363,7 @@ async def run_sign_bundle(
     *,
     dev_mode_skip_cosign: bool = False,
     secret_adapter: SecretAdapter | None = None,
+    bundle_root: Path | None = None,
 ) -> SignReport:
     """Build + return the :class:`SignReport` for the full Wave-1
     attestation set per Doctrine Decision F + ADR-016.
@@ -2386,6 +2482,7 @@ async def run_sign_bundle(
             signing_identity=signing_identity,
             findings=findings,
             dev_mode_skip_cosign=dev_mode_skip_cosign,
+            bundle_root=bundle_root,
         )
     finally:
         if key_tempfile is not None:
@@ -2497,6 +2594,7 @@ async def _run_sign_bundle_inner(
     signing_identity: str,
     findings: list[SignFinding],
     dev_mode_skip_cosign: bool,
+    bundle_root: Path | None = None,
 ) -> SignReport:
     """Inner sign-bundle body factored out so the caller can wrap the
     signing key tempfile cleanup in a single try/finally (per R2 P2 #2
@@ -2602,6 +2700,105 @@ async def _run_sign_bundle_inner(
             findings=findings,
         )
     assert wheel_path is not None
+
+    # Sprint 7B.3 T2 Slice F (R7 P2 #4) — bundle-root validation +
+    # manifest write-back. The blob_path field IS wire-protocol-public
+    # for the runtime signature gate per ADR-012 §110 (non-overridable).
+    # Compute the bundle-root-relative POSIX path, refuse on outside-
+    # root, and write the field back to cognic-pack-manifest.toml so
+    # the submit-flow's request body carries it automatically (no
+    # author drift).
+    resolved_bundle_root = _resolve_bundle_root(
+        wheel_path=wheel_path, bundle_root_override=bundle_root
+    )
+    try:
+        blob_path_relative = _compute_bundle_root_relative_blob_path(
+            wheel_path=wheel_path, bundle_root=resolved_bundle_root
+        )
+    except ValueError as exc:
+        findings.append(
+            SignFinding(
+                severity="refusal",
+                reason="sign_wheel_outside_bundle_root",
+                message=(
+                    f"sign --bundle-root refused: {exc}. The wheel MUST "
+                    "be a descendant of the resolved bundle root for the "
+                    "[supply_chain].blob_path manifest field to bind."
+                ),
+                payload={
+                    "wheel_path": str(wheel_path.resolve()),
+                    "bundle_root": str(resolved_bundle_root),
+                },
+            )
+        )
+        return SignReport(
+            operation="sign-bundle",
+            target_path=str(pack_path),
+            overall_status="fail",
+            findings=findings,
+        )
+    # Write-back to the manifest. R10 LOCK signature non-overridability
+    # makes this MANDATORY rather than informational. Re-derive the
+    # manifest path here (the existing helpers at step 3 derived it
+    # locally; the value is constant from pack_path).
+    #
+    # R-reviewer-round P2 #1 hardening: ``_write_blob_path_to_manifest``
+    # can raise from read_bytes / TOML decode / tomli_w.dumps /
+    # write_bytes — read-only filesystems, racey concurrent edits,
+    # malformed TOML, unsupported value types. The orchestrator's
+    # closed-enum refusal contract requires these failures collapse
+    # into a structured ``SignFinding``, not a raw traceback that
+    # escapes ``agentos sign --bundle``. Catch the narrow exception
+    # types the helper can raise; let unexpected exceptions propagate
+    # (fail-loud for genuinely-unexpected programming errors).
+    bundle_manifest_path = pack_path / "cognic-pack-manifest.toml"
+    try:
+        _write_blob_path_to_manifest(
+            manifest_path=bundle_manifest_path, blob_path=blob_path_relative
+        )
+    except (OSError, tomllib.TOMLDecodeError, UnicodeDecodeError, TypeError) as exc:
+        # Classify the failure for sharper operator-facing diagnostics.
+        # OSError covers read-only FS + missing-file + permission +
+        # concurrent-unlink races; TOMLDecodeError covers malformed
+        # manifest TOML; UnicodeDecodeError covers non-UTF-8 manifest
+        # bytes; TypeError covers tomli_w unsupported-value-type
+        # (defensive — should not fire on a well-formed parsed dict
+        # but pinned anyway).
+        if isinstance(exc, tomllib.TOMLDecodeError | UnicodeDecodeError):
+            failure_mode = "decode_error"
+        elif isinstance(exc, TypeError):
+            failure_mode = "encode_error"
+        elif isinstance(exc, FileNotFoundError):
+            failure_mode = "read_error"
+        else:
+            # PermissionError + generic OSError (EROFS, ENOSPC, EIO).
+            failure_mode = "write_error"
+        findings.append(
+            SignFinding(
+                severity="refusal",
+                reason="sign_manifest_blob_path_write_failed",
+                message=(
+                    f"sign --bundle failed to write [supply_chain].blob_path "
+                    f"into {bundle_manifest_path}: {type(exc).__name__}: {exc}. "
+                    "The signature gate per ADR-012 §110 is non-overridable, "
+                    "so the blob_path manifest field MUST be wired by the "
+                    "authoring CLI; this failure path cannot be bypassed "
+                    "via the override path."
+                ),
+                payload={
+                    "manifest_path": str(bundle_manifest_path),
+                    "blob_path": blob_path_relative,
+                    "failure_mode": failure_mode,
+                    "error_type": type(exc).__name__,
+                },
+            )
+        )
+        return SignReport(
+            operation="sign-bundle",
+            target_path=str(pack_path),
+            overall_status="fail",
+            findings=findings,
+        )
 
     # attestations_dir + agent_cards_dir already created + validated
     # in step 3a-output-dirs above (R8 P2 #3 doctrine — early to

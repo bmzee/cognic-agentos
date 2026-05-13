@@ -632,6 +632,10 @@ class PackRecordStore:
         payload_conformance: dict[str, Any] | None = None,
         expected_manifest_digest: bytes | None = None,
         evidence_attachments: dict[str, Any] | None = None,
+        reviewer_acknowledgement: dict[str, Any] | None = None,
+        payload_manifest: dict[str, Any] | None = None,
+        override_event_id: str | None = None,
+        signed_artefact_root: str | None = None,
     ) -> tuple[uuid.UUID, bytes]:
         """Atomically advance a pack through a named lifecycle
         transition. Returns ``(record_id, chain_hash)`` from the chain
@@ -862,6 +866,24 @@ class PackRecordStore:
                 payload["conformance"] = payload_conformance
             if evidence_attachments is not None:
                 payload["evidence_attachments"] = evidence_attachments
+            # Sprint 7B.3 T2 Slice C — 4 new optional payload keys.
+            # All gated by the same is-not-None pattern as actor_type /
+            # conformance / evidence_attachments above; omitted kwargs
+            # do NOT add empty keys (user-watchpoint (ii) invariant per
+            # T9 + R1 P2 #1 + R6 P2 #4). Storage stays a thin
+            # passthrough; the route handlers own which kwarg fires
+            # on which transition (T5 review reject path threads
+            # evidence_attachments; T9 review approve threads
+            # reviewer_acknowledgement + override_event_id; T2/T9 author
+            # submit threads payload_manifest + signed_artefact_root).
+            if reviewer_acknowledgement is not None:
+                payload["reviewer_acknowledgement"] = reviewer_acknowledgement
+            if payload_manifest is not None:
+                payload["manifest"] = payload_manifest
+            if override_event_id is not None:
+                payload["override_event_id"] = override_event_id
+            if signed_artefact_root is not None:
+                payload["signed_artefact_root"] = signed_artefact_root
             return DecisionRecord(
                 decision_type=f"pack.lifecycle.{target_state}",
                 request_id=request_id,

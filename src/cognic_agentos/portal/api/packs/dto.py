@@ -33,6 +33,7 @@ from typing import Annotated, Any, Literal
 
 import pydantic
 
+from cognic_agentos.packs.approval_types import ApprovalOverrideReason
 from cognic_agentos.packs.lifecycle import PackKind, PackState
 
 
@@ -215,9 +216,77 @@ class SubmitDraftRequest(PackBaseModel):
     by the OWASP conformance check matrix + the build-time CLI
     validators; pinning a closed Pydantic schema here would re-implement
     that validation surface twice.
+
+    Sprint 7B.3 T2 (R6 P2 #4 + R8 P2 #4) — NEW REQUIRED field
+    ``signed_artefact_root: str``. The submit-declared absolute path
+    to the signed-bundle directory on the approve-time host (R8 P2 #4
+    — submit-declared at the author surface, NOT operator-declared).
+    Pydantic validator refuses relative paths + empty strings +
+    path-traversal ``..`` segments at request-body parse time → **422
+    Unprocessable Entity** before any storage call (R-reviewer-round
+    P2 #2 wire-status alignment — FastAPI's native ValidationError
+    handler surfaces 422, matching the rest of the author route's
+    body-validation doctrine; earlier draft incorrectly claimed 400).
+    The approve handler reads this from the persisted
+    ``payload["signed_artefact_root"]`` chain payload key via
+    :func:`find_latest_submit_row` + passes to the signature path
+    resolver to produce absolute cosign verification paths.
     """
 
     manifest: dict[str, Any]
+    signed_artefact_root: str
+
+    @pydantic.field_validator("signed_artefact_root")
+    @classmethod
+    def _validate_signed_artefact_root(cls, value: str) -> str:
+        """Sprint 7B.3 T2 Slice D — R6 P2 #4 + R8 P2 #4 validation.
+
+        Enforces three invariants at request-body parse time:
+
+        1. Non-empty — empty string would let a misbehaving author
+           pretend the bundle root exists at the empty path.
+        2. Absolute — at approve time the handler has no base for
+           relative-path resolution; relative paths cannot reach the
+           cosign verifier (R5 P2 #3 doctrine, locked at R6).
+        3. Path-traversal-safe — no ``..`` segments. Defense in depth
+           alongside the resolver's traversal red-reasons.
+
+        Per the FastAPI convention, Pydantic validators raise
+        ``ValueError`` which Pydantic re-wraps into ``ValidationError``
+        + FastAPI surfaces as 422 Unprocessable Entity (R-reviewer-round
+        P2 #2 wire-status doctrine — the route does NOT map this to
+        400 downstream; 422 IS the wire contract for request-body
+        validation failures, matching the rest of the author route's
+        existing validation surface). The validator's job is to refuse
+        the value before any handler body runs.
+        """
+        # Invariant 1 — non-empty.
+        if not value or not value.strip():
+            raise ValueError("signed_artefact_root must be a non-empty string")
+        # Invariant 2 — absolute path. Per POSIX convention, absolute
+        # paths start with "/". Windows absolute paths (e.g. C:\) are
+        # not currently supported; banks deploying on Windows host
+        # operators would need to pre-mount POSIX-rooted volumes.
+        if not value.startswith("/"):
+            raise ValueError(
+                "signed_artefact_root must be an absolute path "
+                f"(received {value!r}); relative paths cannot be "
+                "resolved at approve time per R5 P2 #3 + R6 P2 #4 "
+                "doctrine."
+            )
+        # Invariant 3 — no path-traversal segments. Reject ``..``
+        # anywhere in the path (defense in depth alongside the
+        # resolver's signature_path_traversal_rejected codes).
+        # Split on "/" and look for an exact ".." segment so values
+        # like "/foo/..bar/baz" (legitimate filename with leading
+        # dots) are NOT mis-rejected.
+        segments = value.split("/")
+        if ".." in segments:
+            raise ValueError(
+                "signed_artefact_root must not contain '..' path-traversal "
+                f"segments (received {value!r})."
+            )
+        return value
 
 
 # ---------------------------------------------------------------------------
@@ -336,3 +405,61 @@ class PackDetailResponse(PackBaseModel):
 
     pack: PackResponse
     history: list[PackLifecycleEventResponse]
+
+
+# ---------------------------------------------------------------------------
+# Sprint 7B.3 T2 Slice D — ReviewerAcknowledgement + ApproveRequest
+# (R1 P2 #1 reviewer-ack DTO + R5 P2 #1 neutral-domain vocab import)
+# ---------------------------------------------------------------------------
+
+
+class ReviewerAcknowledgement(PackBaseModel):
+    """Sprint 7B.3 — server-side reviewer-acknowledgement panel-ack model.
+
+    4 booleans, one per reviewer evidence panel (T3-T6). Each reviewer
+    MUST explicitly flip the corresponding flag to True before the
+    5-gate composer's gate 5 will return green. The 5-gate composer
+    (T7) reads this model's values via :class:`ApproveRequest`.
+
+    Plan default per R10 LOCK #4: signature is the ONLY non-overridable
+    gate per ADR-012 §110 literal; reviewer-acknowledgement CAN be
+    skipped via the override path. The override chain event's
+    ``gate_composition_snapshot`` records the ack state at override
+    time so examiners see WHICH panels were unchecked when the
+    override fired.
+
+    Inherits :class:`PackBaseModel`'s ``frozen=True`` + ``extra="forbid"``
+    so smuggled fields (e.g. a 5th panel ack) refuse at validation.
+    Defaults all False — reviewer makes explicit affirmative choices
+    per ADR-012 §38 (audit trail: which panels did the reviewer
+    actually look at before approving).
+    """
+
+    data_governance_acknowledged: bool = False
+    risk_tier_acknowledged: bool = False
+    supply_chain_acknowledged: bool = False
+    conformance_acknowledged: bool = False
+
+
+class ApproveRequest(PackBaseModel):
+    """Sprint 7B.3 — POST ``/api/v1/packs/{pack_id}/approve`` request body.
+
+    Carries the reviewer's panel-ack values + optional override reason
+    when invoking the override path. Replaces the T5 503-stub's empty
+    body model at ``review_routes.py:271+``.
+
+    Per R5 P2 #1 doctrinal fix: :data:`ApprovalOverrideReason` is
+    imported from :mod:`cognic_agentos.packs.approval_types` (neutral
+    domain vocabulary module). The portal DTO consumes the vocab; the
+    architectural arrow ``portal → packs`` is preserved.
+
+    Per R10 LOCK #4: ``override_reason is None`` → green-path approval
+    (every gate must return green); ``override_reason is not None`` →
+    override path (signature still non-overridable per ADR-012 §110;
+    other 4 gates may be red).
+
+    Inherits :class:`PackBaseModel`'s ``frozen=True`` + ``extra="forbid"``.
+    """
+
+    acknowledgement: ReviewerAcknowledgement
+    override_reason: ApprovalOverrideReason | None = None
