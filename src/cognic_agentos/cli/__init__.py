@@ -472,6 +472,64 @@ def validate(
     typer.echo(f"validate: PASS ({pack_path})")
 
 
+@app.command()
+def conformance(
+    pack_path: Path = typer.Argument(  # noqa: B008
+        ...,
+        help=(
+            "Path to the pack directory whose manifest will be checked "
+            "against the OWASP conformance matrix."
+        ),
+    ),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help=(
+            "Emit the conformance report as a single JSON object on "
+            "stdout (deterministic-ordered keys + 2-space indent) for "
+            "CI parsers. Text mode emits one line per category + a "
+            "trailing summary line."
+        ),
+    ),
+) -> None:
+    """Run the OWASP conformance matrix against a pack manifest.
+
+    Dispatches to :func:`cognic_agentos.packs.conformance.run_owasp_conformance`
+    via the thin :mod:`cognic_agentos.cli.conformance` wrapper and
+    translates the verdict to an exit code:
+
+      - 0 — ``overall_status == "green"``.
+      - 1 — ``overall_status in {"red", "yellow"}`` (any non-green
+        verdict; yellow's incompleteness signal means the suite is not
+        trustworthy and surfaces with the same non-zero exit code as
+        red).
+      - 2 — invocation error (missing pack path / missing manifest /
+        unparseable TOML; closed-enum
+        :data:`cognic_agentos.cli.conformance.ConformanceInvocationError`).
+
+    Invocation-error refusals render to stderr as a GH-Actions inline
+    annotation (``::error file=<pack>::<reason>: <message>``) mirroring
+    the ``cli/validate.py`` convention; the conformance report renders
+    to stdout so non-CI runs see the verdict cleanly.
+    """
+    from cognic_agentos.cli.conformance import (
+        ConformanceInvocationFailure,
+        format_report,
+        run_conformance,
+    )
+
+    outcome = run_conformance(pack_path)
+    if isinstance(outcome, ConformanceInvocationFailure):
+        typer.echo(
+            f"::error file={pack_path}::{outcome.reason}: {outcome.message}",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    typer.echo(format_report(outcome, json_output=json_output))
+    if outcome.overall_status != "green":
+        raise typer.Exit(code=1)
+
+
 @app.command(name="test-harness")
 def test_harness(
     pack_path: Path = typer.Argument(  # noqa: B008
