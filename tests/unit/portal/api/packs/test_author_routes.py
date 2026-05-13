@@ -43,6 +43,7 @@ rule)."""
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
@@ -54,7 +55,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from cognic_agentos.core.audit import _chain_heads, _metadata
-from cognic_agentos.core.canonical import ZERO_HASH
+from cognic_agentos.core.canonical import ZERO_HASH, canonical_bytes
 from cognic_agentos.packs.storage import PackRecord, PackRecordStore
 from cognic_agentos.portal.api.app import create_app
 from cognic_agentos.portal.rbac.actor import Actor
@@ -138,24 +139,55 @@ def _build_app(*, actor: Actor, store: PackRecordStore) -> FastAPI:
     )
 
 
+def _well_formed_tool_manifest() -> dict[str, Any]:
+    """A minimal manifest that passes every applicable OWASP conformance check
+    + cleanly serialises into a stable :func:`canonical_bytes` digest.  Sprint
+    7B.2 T9 submit handler accepts this shape in the request body."""
+    return {
+        "pack": {"kind": "tool", "name": "demo", "version": "1.0.0"},
+        "identity": {
+            "agent_id": "cognic.demo.v1",
+            "display_name": "Demo",
+            "provider_organization": "Acme",
+            "provider_url": "https://acme.example",
+        },
+        "risk_tier": {"tier": "medium"},
+    }
+
+
+def _manifest_digest(manifest: dict[str, Any]) -> bytes:
+    """Compute the SHA-256 digest the T9 submit handler will use to cross-
+    check the request-body manifest against the persisted pack row."""
+    return hashlib.sha256(canonical_bytes(manifest)).digest()
+
+
 async def _seed_draft(
     store: PackRecordStore,
     *,
     tenant_id: str = "t1",
     created_by: str = "alice@bank.example",
     state: str = "draft",
+    manifest: dict[str, Any] | None = None,
 ) -> PackRecord:
     """Insert a draft pack row directly via the store. For non-draft
     seeds (used by negative-state tests) we first save_draft then
-    transition to the target state through legal pairs."""
+    transition to the target state through legal pairs.
+
+    Sprint 7B.2 T9 extension: pass ``manifest=...`` to seed the
+    record's ``manifest_digest`` from the matching SHA-256 over
+    :func:`canonical_bytes` so the submit handler's cheap digest pre-
+    check accepts the same dict when sent via the request body.  When
+    ``manifest`` is None the record's digest stays at the pre-T9
+    deterministic 32-byte fixture (``b"\\x01" * 32``)."""
     now = datetime.now(UTC)
+    digest = _manifest_digest(manifest) if manifest is not None else b"\x01" * 32
     record = PackRecord(
         id=uuid.uuid4(),
         kind="tool",
         pack_id=f"cognic-tool-{uuid.uuid4().hex[:8]}",
         display_name="Seed Pack",
         state="draft",
-        manifest_digest=b"\x01" * 32,
+        manifest_digest=digest,
         signed_artefact_digest=b"\x02" * 32,
         sbom_pointer=None,
         tenant_id=tenant_id,
@@ -751,12 +783,16 @@ class TestSprint7B2BoundedRequestIdInvariant:
 
         from cognic_agentos.core.decision_history import _decision_history
 
-        record = await _seed_draft(store, tenant_id="t1")
+        manifest = _well_formed_tool_manifest()
+        record = await _seed_draft(store, tenant_id="t1", manifest=manifest)
         actor = _make_actor(scopes=frozenset({"pack.submit"}))
         app = _build_app(actor=actor, store=store)
 
         with TestClient(app) as client:
-            response = client.post(f"/api/v1/packs/drafts/{record.id}/submit")
+            response = client.post(
+                f"/api/v1/packs/drafts/{record.id}/submit",
+                json={"manifest": manifest},
+            )
         assert response.status_code == 200, response.text
 
         async with store._engine.connect() as conn:
@@ -829,34 +865,46 @@ class TestSprint7B2SubmitDraftEndpoint:
     submitted via :meth:`PackRecordStore.transition`."""
 
     async def test_submit_happy_path_returns_submitted_pack(self, store: PackRecordStore) -> None:
-        record = await _seed_draft(store, tenant_id="t1")
+        manifest = _well_formed_tool_manifest()
+        record = await _seed_draft(store, tenant_id="t1", manifest=manifest)
         actor = _make_actor(scopes=frozenset({"pack.submit"}))
         app = _build_app(actor=actor, store=store)
 
         with TestClient(app) as client:
-            response = client.post(f"/api/v1/packs/drafts/{record.id}/submit")
+            response = client.post(
+                f"/api/v1/packs/drafts/{record.id}/submit",
+                json={"manifest": manifest},
+            )
         assert response.status_code == 200, response.text
         body = response.json()
         assert body["state"] == "submitted"
         assert body["last_actor"] == "alice@bank.example"
 
     async def test_submit_refuses_cross_tenant_with_404(self, store: PackRecordStore) -> None:
-        record = await _seed_draft(store, tenant_id="t1")
+        manifest = _well_formed_tool_manifest()
+        record = await _seed_draft(store, tenant_id="t1", manifest=manifest)
         actor = _make_actor(tenant_id="t2", scopes=frozenset({"pack.submit"}))
         app = _build_app(actor=actor, store=store)
 
         with TestClient(app) as client:
-            response = client.post(f"/api/v1/packs/drafts/{record.id}/submit")
+            response = client.post(
+                f"/api/v1/packs/drafts/{record.id}/submit",
+                json={"manifest": manifest},
+            )
         assert response.status_code == 404
         assert response.json()["detail"]["reason"] == "tenant_id_mismatch"
 
     async def test_submit_refuses_missing_pack_submit_scope(self, store: PackRecordStore) -> None:
-        record = await _seed_draft(store, tenant_id="t1")
+        manifest = _well_formed_tool_manifest()
+        record = await _seed_draft(store, tenant_id="t1", manifest=manifest)
         actor = _make_actor(scopes=frozenset({"pack.withdraw"}))
         app = _build_app(actor=actor, store=store)
 
         with TestClient(app) as client:
-            response = client.post(f"/api/v1/packs/drafts/{record.id}/submit")
+            response = client.post(
+                f"/api/v1/packs/drafts/{record.id}/submit",
+                json={"manifest": manifest},
+            )
         assert response.status_code == 403
         body = response.json()
         assert body["detail"]["reason"] == "scope_not_held"
@@ -868,16 +916,23 @@ class TestSprint7B2SubmitDraftEndpoint:
         """Plan watchpoint (e) — re-submitting an already-submitted
         pack returns 409 with closed-enum
         ``lifecycle_transition_invalid_state_pair`` from 7B.1."""
-        record = await _seed_draft(store, tenant_id="t1")
+        manifest = _well_formed_tool_manifest()
+        record = await _seed_draft(store, tenant_id="t1", manifest=manifest)
         actor = _make_actor(scopes=frozenset({"pack.submit"}))
         app = _build_app(actor=actor, store=store)
 
         with TestClient(app) as client:
             # First submit succeeds
-            first = client.post(f"/api/v1/packs/drafts/{record.id}/submit")
+            first = client.post(
+                f"/api/v1/packs/drafts/{record.id}/submit",
+                json={"manifest": manifest},
+            )
             assert first.status_code == 200
             # Second submit on now-submitted pack must refuse
-            second = client.post(f"/api/v1/packs/drafts/{record.id}/submit")
+            second = client.post(
+                f"/api/v1/packs/drafts/{record.id}/submit",
+                json={"manifest": manifest},
+            )
         assert second.status_code == 409
         body = second.json()
         # submit from submitted → invalid_state_pair (no per-transition
@@ -998,7 +1053,13 @@ class TestSprint7B2SameTenantAuthorCollaboration:
     async def test_same_tenant_collaboration_allowed_on_draft_submit(
         self, store: PackRecordStore
     ) -> None:
-        record = await _seed_draft(store, tenant_id="t1", created_by="alice@bank.example")
+        manifest = _well_formed_tool_manifest()
+        record = await _seed_draft(
+            store,
+            tenant_id="t1",
+            created_by="alice@bank.example",
+            manifest=manifest,
+        )
         actor_b = _make_actor(
             subject="bob@bank.example",
             tenant_id="t1",
@@ -1007,7 +1068,10 @@ class TestSprint7B2SameTenantAuthorCollaboration:
         app = _build_app(actor=actor_b, store=store)
 
         with TestClient(app) as client:
-            response = client.post(f"/api/v1/packs/drafts/{record.id}/submit")
+            response = client.post(
+                f"/api/v1/packs/drafts/{record.id}/submit",
+                json={"manifest": manifest},
+            )
         assert response.status_code == 200
         body = response.json()
         assert body["state"] == "submitted"
@@ -1269,7 +1333,8 @@ class TestSprint7B2PackNotFoundRaceHandlers:
     Postgres / Oracle lives at the integration level."""
 
     async def test_submit_translates_pack_not_found_to_404(self, store: PackRecordStore) -> None:
-        record = await _seed_draft(store, tenant_id="t1")
+        manifest = _well_formed_tool_manifest()
+        record = await _seed_draft(store, tenant_id="t1", manifest=manifest)
 
         # Wrap the store with a transition-overriding sentinel
         class _RaceStore:
@@ -1292,7 +1357,10 @@ class TestSprint7B2PackNotFoundRaceHandlers:
         app = _build_app(actor=actor, store=race_store)  # type: ignore[arg-type]
 
         with TestClient(app) as client:
-            response = client.post(f"/api/v1/packs/drafts/{record.id}/submit")
+            response = client.post(
+                f"/api/v1/packs/drafts/{record.id}/submit",
+                json={"manifest": manifest},
+            )
         assert response.status_code == 404, response.text
         assert response.json()["detail"]["reason"] == "pack_not_found"
 
@@ -1485,13 +1553,17 @@ class TestSprint7B2PackNotFoundRaceHandlers:
                     return None
                 return await self._real.load(pack_id)
 
-        record = await _seed_draft(store, tenant_id="t1")
+        manifest = _well_formed_tool_manifest()
+        record = await _seed_draft(store, tenant_id="t1", manifest=manifest)
         race_store = _RaceLoadStore(store, record.id)
         actor = _make_actor(scopes=frozenset({"pack.submit"}))
         app = _build_app(actor=actor, store=race_store)  # type: ignore[arg-type]
 
         with TestClient(app) as client:
-            response = client.post(f"/api/v1/packs/drafts/{record.id}/submit")
+            response = client.post(
+                f"/api/v1/packs/drafts/{record.id}/submit",
+                json={"manifest": manifest},
+            )
         assert response.status_code == 404, response.text
         assert response.json()["detail"]["reason"] == "pack_not_found"
 
@@ -1609,29 +1681,36 @@ class TestSprint7B2AuthorRefusalReasonClosedEnum:
             f"AuthorRefusalReason values not in upstream: {declared - upstream}"
         )
 
-    def test_every_handler_emitted_reason_is_in_3_way_closed_enum_union(self) -> None:
-        """T4 R5 P2 — union-coverage pin.
+    def test_every_handler_emitted_reason_is_in_4_way_closed_enum_union(self) -> None:
+        """T4 R5 P2 + Sprint-7B.2 T9 R40 P2 #1 extension — union-coverage pin.
 
         :data:`AuthorRefusalReason` is the narrow 409-storage/lifecycle
-        vocab — NOT the full author-surface wire-protocol surface. The
-        complete handler-emitted refusal vocabulary is a 3-way union:
+        vocab — NOT the full author-surface wire-protocol surface.  The
+        complete handler-emitted refusal vocabulary is a **4-way union**
+        (was 3-way pre-T9; T9 R40 P2 #1 added the route-owned 400 vocab):
 
           * :data:`AuthorRefusalReason` (storage/lifecycle 409s)
+          * :data:`AuthorRequestRefusalReason` (route-owned 400s — T9
+            ``manifest_digest_mismatch`` from the cheap pre-check)
           * :data:`TenantIsolationFailure` (404 + 500 from the gate)
           * :data:`RBACDenialReason` (403 + 500 from the auth gate)
 
         Pre-R5 the documentation claimed :data:`AuthorRefusalReason`
         WAS the full vocabulary — leaving ``"pack_not_found"`` (emitted
         by the submit / cancel / update handlers' PackNotFound race
-        translations) outside any declared closed-enum. This test
-        enumerates every literal ``reason`` string the author handlers
-        emit + asserts each is in the 3-way union. A future refactor
-        that introduces an out-of-vocabulary literal must add it to
-        the appropriate enum AND update this test."""
+        translations) outside any declared closed-enum.  T9 R40 P2 #1
+        added the 4th union member to close the same drift class for
+        the new T9 ``manifest_digest_mismatch`` 400 emit at the cheap
+        pre-check.  This test enumerates every literal ``reason``
+        string the author handlers emit + asserts each is in the
+        4-way union.  A future refactor that introduces an out-of-
+        vocabulary literal must add it to the appropriate enum AND
+        update this test."""
         from typing import get_args
 
         from cognic_agentos.portal.api.packs.author_routes import (
             AuthorRefusalReason,
+            AuthorRequestRefusalReason,
         )
         from cognic_agentos.portal.rbac.enforcement import RBACDenialReason
         from cognic_agentos.portal.rbac.tenant_isolation import (
@@ -1654,10 +1733,14 @@ class TestSprint7B2AuthorRefusalReasonClosedEnum:
             "lifecycle_transition_terminal_state",
             # PackNotFound race translations (TenantIsolationFailure)
             "pack_not_found",
+            # Sprint 7B.2 T9 — submit handler cheap-pre-check 400 emit
+            # (AuthorRequestRefusalReason)
+            "manifest_digest_mismatch",
         }
 
         union = (
             set(get_args(AuthorRefusalReason))
+            | set(get_args(AuthorRequestRefusalReason))
             | set(get_args(TenantIsolationFailure))
             | set(get_args(RBACDenialReason))
         )
@@ -1667,7 +1750,8 @@ class TestSprint7B2AuthorRefusalReasonClosedEnum:
         assert not drift, (
             f"Handler-emitted reasons not in any closed-enum: {drift!r}. "
             "Every literal ``detail.reason`` string MUST be a member of "
-            "AuthorRefusalReason | TenantIsolationFailure | RBACDenialReason. "
+            "AuthorRefusalReason | AuthorRequestRefusalReason | "
+            "TenantIsolationFailure | RBACDenialReason. "
             "Add the missing values to the appropriate enum + extend the "
             "drift detector."
         )
@@ -1696,3 +1780,402 @@ class TestSprint7B2AuthorRefusalReasonClosedEnum:
         # the constant but not the tenant-isolation enum (or vice
         # versa) would land here.
         assert _PACK_NOT_FOUND_REASON == "pack_not_found"
+
+    def test_author_request_refusal_reason_has_exactly_one_value(self) -> None:
+        """Sprint 7B.2 T9 R40 P2 #1 — the route-owned 400 vocabulary
+        starts with a single value (``manifest_digest_mismatch``).  Future
+        T9 / T10 / 7B.3 / 7B.4 additions to the cheap-pre-check / DTO-
+        validation surface land here; any drift must update the value
+        set + the 4-way union in
+        :meth:`test_every_handler_emitted_reason_is_in_4_way_closed_enum_union`."""
+        from typing import get_args
+
+        from cognic_agentos.portal.api.packs.author_routes import (
+            AuthorRequestRefusalReason,
+        )
+
+        assert set(get_args(AuthorRequestRefusalReason)) == {"manifest_digest_mismatch"}
+
+    def test_manifest_digest_mismatch_constant_traces_to_request_refusal_enum(
+        self,
+    ) -> None:
+        """Sprint 7B.2 T9 R40 P2 #1 — mirror of
+        :meth:`test_pack_not_found_constant_traces_to_tenant_isolation_enum`.
+        The centralised :data:`_MANIFEST_DIGEST_MISMATCH_REASON` Final-
+        Literal constant MUST be a member of
+        :data:`AuthorRequestRefusalReason`.  Build-time drift detector at
+        module foot fails import on mismatch; this test is the positive
+        regression for the test layer."""
+        from typing import get_args
+
+        from cognic_agentos.portal.api.packs.author_routes import (
+            _MANIFEST_DIGEST_MISMATCH_REASON,
+            AuthorRequestRefusalReason,
+        )
+
+        assert _MANIFEST_DIGEST_MISMATCH_REASON in get_args(AuthorRequestRefusalReason)
+        # Also pin the literal value — a future rename that updates
+        # the constant but not the enum (or vice versa) lands here.
+        assert _MANIFEST_DIGEST_MISMATCH_REASON == "manifest_digest_mismatch"
+
+    def test_author_request_refusal_reason_is_disjoint_from_upstream_enums(self) -> None:
+        """Sprint 7B.2 T9 R40 P2 #1 — route-owned ≠ upstream-delegated
+        invariant.  :data:`AuthorRequestRefusalReason` values MUST NOT
+        collide with any of the 4 upstream enums.  A collision would
+        mean a route-owned 400 emit could be confused with a storage /
+        lifecycle / RBAC / tenant-isolation refusal at examiner-side
+        evidence-pack consumers.  Build-time drift detector at module
+        foot fails import on collision; this test is the positive
+        regression."""
+        from typing import get_args
+
+        from cognic_agentos.packs.lifecycle import LifecycleRefusalReason
+        from cognic_agentos.packs.storage import PackRecordRefusalReason
+        from cognic_agentos.portal.api.packs.author_routes import (
+            AuthorRequestRefusalReason,
+        )
+        from cognic_agentos.portal.rbac.enforcement import RBACDenialReason
+        from cognic_agentos.portal.rbac.tenant_isolation import (
+            TenantIsolationFailure,
+        )
+
+        request_vocab = set(get_args(AuthorRequestRefusalReason))
+        upstream_vocab = (
+            set(get_args(LifecycleRefusalReason))
+            | set(get_args(PackRecordRefusalReason))
+            | set(get_args(TenantIsolationFailure))
+            | set(get_args(RBACDenialReason))
+        )
+
+        overlap = request_vocab & upstream_vocab
+        assert not overlap, (
+            f"AuthorRequestRefusalReason values collide with upstream enums: "
+            f"{overlap!r}.  Route-owned 400 vocabulary MUST be disjoint from "
+            f"the 4 upstream enums."
+        )
+
+
+# ===========================================================================
+# Sprint 7B.2 T9 — submit + auto-run conformance + locked manifest-digest
+# ===========================================================================
+
+
+class TestSprint7B2T9SubmitDraftConformance:
+    """Sprint 7B.2 T9 — submit endpoint extension per plan §1062-1252.
+
+    The submit handler now: (a) accepts the manifest dict in the request
+    body; (b) cheap-pre-checks ``sha256(canonical_bytes(body.manifest)) ==
+    record.manifest_digest`` → 400 ``manifest_digest_mismatch`` on
+    discrepancy; (c) runs OWASP conformance via
+    :func:`run_owasp_conformance_for_chain_payload` OUTSIDE the storage
+    closure; (d) threads ``payload_conformance`` + ``expected_manifest_digest``
+    through :meth:`PackRecordStore.transition` so the chain row carries
+    ``payload.conformance`` AND the locked precondition closes the TOCTOU
+    window between handler preload + transition (race-condition fix per
+    plan §1179-1181).
+
+    Submission is intentionally NON-GATING: a ``red`` conformance result
+    still proceeds to a successful submit so the chain row carries the
+    evidence (gate is 7B.3 5-gate composition, not 7B.2 submit).
+    """
+
+    async def test_submit_writes_payload_conformance_to_chain_row(
+        self, store: PackRecordStore
+    ) -> None:
+        """Happy path — submit with matching manifest body lands a chain row
+        whose ``payload.conformance`` carries the 4-key
+        :class:`ConformanceReport` shape (overall_status / results / summary
+        / errored_categories)."""
+        import json
+
+        from sqlalchemy import select
+
+        from cognic_agentos.core.decision_history import _decision_history
+
+        manifest = _well_formed_tool_manifest()
+        record = await _seed_draft(store, tenant_id="t1", manifest=manifest)
+        actor = _make_actor(scopes=frozenset({"pack.submit"}))
+        app = _build_app(actor=actor, store=store)
+
+        with TestClient(app) as client:
+            response = client.post(
+                f"/api/v1/packs/drafts/{record.id}/submit",
+                json={"manifest": manifest},
+            )
+        assert response.status_code == 200, response.text
+
+        # Read the submit chain row's payload + assert the conformance
+        # block carries the 4 canonical top-level keys.
+        async with store._engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    select(_decision_history.c.payload)
+                    .where(_decision_history.c.event_type == "pack.lifecycle.submitted")
+                    .order_by(_decision_history.c.sequence.desc())
+                )
+            ).first()
+        assert row is not None
+        raw = row[0]
+        if isinstance(raw, (bytes, bytearray)):
+            raw = raw.decode("utf-8")
+        payload = json.loads(raw) if isinstance(raw, str) else raw
+        assert "conformance" in payload, (
+            f"submit chain row missing payload.conformance; payload keys={list(payload.keys())}"
+        )
+        assert set(payload["conformance"].keys()) == {
+            "overall_status",
+            "results",
+            "summary",
+            "errored_categories",
+        }
+
+    async def test_submit_refuses_400_on_manifest_digest_mismatch(
+        self, store: PackRecordStore, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Cheap pre-check path — the handler computes
+        ``sha256(canonical_bytes(body.manifest))`` BEFORE the storage call
+        and refuses 400 + closed-enum ``manifest_digest_mismatch`` on
+        discrepancy.  No chain row written; no state mutation.  Pinned
+        WITHOUT going through the storage layer because the cheap path
+        short-circuits before ``store.transition`` is invoked.
+
+        R40 P2 #2 caplog hardening: the cheap-pre-check path emits a
+        ``portal.packs.submit_refused`` structured log carrying
+        ``reason`` / ``actor_subject`` / ``pack_id`` / ``from_state``
+        (the ``from_state`` field is the R40 P2 #2 addition for parity
+        with the other submit refusal paths).  EXACTLY ONE such log
+        record fires on the 400 path — a future change that removes
+        the log or splits it into multiple records would fail this
+        assertion."""
+        import logging
+
+        from sqlalchemy import func, select
+
+        from cognic_agentos.core.decision_history import _decision_history
+
+        seed_manifest = _well_formed_tool_manifest()
+        # Seed the record with the digest derived from seed_manifest, then
+        # send a DIFFERENT manifest in the body.  Cheap pre-check fires.
+        record = await _seed_draft(store, tenant_id="t1", manifest=seed_manifest)
+        wrong_manifest = _well_formed_tool_manifest()
+        wrong_manifest["pack"]["name"] = "different-name"
+
+        actor = _make_actor(scopes=frozenset({"pack.submit"}))
+        app = _build_app(actor=actor, store=store)
+
+        async with store._engine.connect() as conn:
+            chain_before = int(
+                (await conn.execute(select(func.count(_decision_history.c.sequence)))).scalar_one()
+            )
+
+        with (
+            caplog.at_level(
+                logging.WARNING,
+                logger="cognic_agentos.portal.api.packs.author_routes",
+            ),
+            TestClient(app) as client,
+        ):
+            response = client.post(
+                f"/api/v1/packs/drafts/{record.id}/submit",
+                json={"manifest": wrong_manifest},
+            )
+        assert response.status_code == 400, response.text
+        assert response.json()["detail"]["reason"] == "manifest_digest_mismatch"
+
+        # R40 P2 #2 — caplog hardening: EXACTLY ONE submit_refused log
+        # with the 4 expected extra fields.  A future change that
+        # removes or renames the log, or splits it across multiple
+        # records, fails here.
+        submit_refused_records = [
+            r for r in caplog.records if r.message == "portal.packs.submit_refused"
+        ]
+        assert len(submit_refused_records) == 1, (
+            f"expected exactly 1 portal.packs.submit_refused log record, "
+            f"got {len(submit_refused_records)}; records={submit_refused_records!r}"
+        )
+        log_record = submit_refused_records[0]
+        assert log_record.reason == "manifest_digest_mismatch"  # type: ignore[attr-defined]
+        assert log_record.actor_subject == actor.subject  # type: ignore[attr-defined]
+        assert log_record.pack_id == str(record.id)  # type: ignore[attr-defined]
+        # R40 P2 #2 — from_state parity with the other submit refusal paths.
+        assert log_record.from_state == "draft"  # type: ignore[attr-defined]
+
+        # No chain row written + pack state unchanged.
+        async with store._engine.connect() as conn:
+            chain_after = int(
+                (await conn.execute(select(func.count(_decision_history.c.sequence)))).scalar_one()
+            )
+        assert chain_after == chain_before
+        reloaded = await store.load(record.id)
+        assert reloaded is not None
+        assert reloaded.state == "draft"
+
+    async def test_submit_refuses_409_on_locked_manifest_digest_race(
+        self, store: PackRecordStore
+    ) -> None:
+        """Locked-precondition path — handler preload sees digest A, then a
+        concurrent ``update_draft`` (or equivalent mutation) changes the
+        stored digest to B BEFORE the route's transition call.  The
+        cheap pre-check passes (handler's preloaded ``record.manifest_digest``
+        matches the body's digest A), but the in-precondition ``SELECT
+        FOR UPDATE`` reads digest B and the storage-only-emit cross-check
+        fires.  The 409 carries the user-locked closed-enum
+        ``lifecycle_transition_manifest_digest_changed_during_submit``
+        per plan §1179-1181.
+
+        Simulated by mutating ``packs.manifest_digest`` directly between
+        the handler's preload + the transition's locked SELECT — the
+        same race a concurrent ``update_draft`` would produce on PG /
+        Oracle."""
+        from sqlalchemy import update
+
+        from cognic_agentos.packs.storage import _packs
+
+        manifest = _well_formed_tool_manifest()
+        record = await _seed_draft(store, tenant_id="t1", manifest=manifest)
+        actor = _make_actor(scopes=frozenset({"pack.submit"}))
+
+        # Race injection — replace the route handler's transition call so a
+        # concurrent mutator updates the row's manifest_digest IMMEDIATELY
+        # BEFORE the locked SELECT runs.  Both the cheap pre-check + the
+        # body's digest match the seeded value; only the row-locked digest
+        # has drifted.  This is the exact TOCTOU shape the locked
+        # precondition was added to close.
+        race_engine = store._engine
+        original_transition = store.transition
+
+        async def _racing_transition(*args: Any, **kwargs: Any) -> Any:
+            # Concurrent update: mutate the pack row's manifest_digest
+            # BEFORE delegating to the real transition().  The race
+            # window between handler preload + transition's locked
+            # SELECT is what this models.
+            async with race_engine.begin() as conn:
+                await conn.execute(
+                    update(_packs)
+                    .where(_packs.c.id == record.id)
+                    .values(manifest_digest=b"\xff" * 32)
+                )
+            return await original_transition(*args, **kwargs)
+
+        store.transition = _racing_transition  # type: ignore[method-assign]
+        try:
+            app = _build_app(actor=actor, store=store)
+            with TestClient(app) as client:
+                response = client.post(
+                    f"/api/v1/packs/drafts/{record.id}/submit",
+                    json={"manifest": manifest},
+                )
+        finally:
+            store.transition = original_transition  # type: ignore[method-assign]
+
+        assert response.status_code == 409, response.text
+        assert (
+            response.json()["detail"]["reason"]
+            == "lifecycle_transition_manifest_digest_changed_during_submit"
+        )
+
+        # Pack state unchanged — locked-precondition refusal rolls back
+        # the transaction atomically.
+        reloaded = await store.load(record.id)
+        assert reloaded is not None
+        assert reloaded.state == "draft"
+
+    async def test_submit_red_conformance_still_proceeds_evidence_not_gate(
+        self, store: PackRecordStore
+    ) -> None:
+        """Per BUILD_PLAN §627 — conformance is EVIDENCE, not a gate.  A
+        manifest that fails one or more OWASP checks (here: missing
+        identity block → ``check_identity_abuse`` fails) MUST still
+        produce a successful submit transition; the failure surfaces as
+        evidence on the chain row, not as a 4xx refusal at the route.
+        The 7B.3 5-gate composition handles the actual gate semantics."""
+        import json
+
+        from sqlalchemy import select
+
+        from cognic_agentos.core.decision_history import _decision_history
+
+        # A manifest with deliberately broken identity (every other check
+        # passes or N/As).  The submit must still complete with 200.
+        bad_manifest: dict[str, Any] = {
+            "pack": {"kind": "tool", "name": "demo", "version": "1.0.0"},
+            "risk_tier": {"tier": "medium"},
+            # NOTE: identity block deliberately omitted → check_identity_abuse fails
+        }
+        record = await _seed_draft(store, tenant_id="t1", manifest=bad_manifest)
+        actor = _make_actor(scopes=frozenset({"pack.submit"}))
+        app = _build_app(actor=actor, store=store)
+
+        with TestClient(app) as client:
+            response = client.post(
+                f"/api/v1/packs/drafts/{record.id}/submit",
+                json={"manifest": bad_manifest},
+            )
+        # Submit still completes with 200 despite red conformance.
+        assert response.status_code == 200, response.text
+        assert response.json()["state"] == "submitted"
+
+        # The chain row carries the conformance evidence + the overall
+        # status reflects the failure.
+        async with store._engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    select(_decision_history.c.payload)
+                    .where(_decision_history.c.event_type == "pack.lifecycle.submitted")
+                    .order_by(_decision_history.c.sequence.desc())
+                )
+            ).first()
+        assert row is not None
+        raw = row[0]
+        if isinstance(raw, (bytes, bytearray)):
+            raw = raw.decode("utf-8")
+        payload = json.loads(raw) if isinstance(raw, str) else raw
+        # Red verdict surfaces as evidence — the route doesn't gate on it.
+        assert payload["conformance"]["overall_status"] in {"red", "yellow"}
+        assert payload["conformance"]["results"]["identity_abuse"]["status"] == "fail"
+
+    async def test_submit_request_id_bounded_to_64_chars_after_t9(
+        self, store: PackRecordStore
+    ) -> None:
+        """T9 carry-forward of the T4 R3 P2 #1 bounded-request-id invariant.
+        The submit handler MUST reuse the existing
+        :func:`_mint_request_id(_PACK_SUBMIT_REQUEST_ID_PREFIX)` minter
+        (NOT switch to ``request.state.request_id`` per plan §1177); the
+        emitted request_id MUST be ≤ 64 chars to fit the
+        ``decision_history.request_id`` ``String(64)`` column cap on
+        PG / Oracle."""
+        from sqlalchemy import select
+
+        from cognic_agentos.core.decision_history import _decision_history
+
+        manifest = _well_formed_tool_manifest()
+        record = await _seed_draft(store, tenant_id="t1", manifest=manifest)
+        actor = _make_actor(scopes=frozenset({"pack.submit"}))
+        app = _build_app(actor=actor, store=store)
+
+        with TestClient(app) as client:
+            response = client.post(
+                f"/api/v1/packs/drafts/{record.id}/submit",
+                json={"manifest": manifest},
+            )
+        assert response.status_code == 200, response.text
+
+        async with store._engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    select(_decision_history.c.request_id)
+                    .where(_decision_history.c.event_type == "pack.lifecycle.submitted")
+                    .order_by(_decision_history.c.sequence.desc())
+                )
+            ).first()
+        assert row is not None
+        request_id = row.request_id
+        assert len(request_id) <= 64, (
+            f"request_id={request_id!r} is {len(request_id)} chars > 64 cap; "
+            f"T9 must reuse the T4 _mint_request_id minter, NOT switch to "
+            f"request.state.request_id per plan §1177"
+        )
+        assert request_id.startswith("pack-submit-"), (
+            f"request_id={request_id!r} missing 'pack-submit-' prefix — T9 "
+            f"must NOT introduce a fresh prefix"
+        )

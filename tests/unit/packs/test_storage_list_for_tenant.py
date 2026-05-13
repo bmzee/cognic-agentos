@@ -37,7 +37,7 @@ on its compiled output — eliminates the "test-writes-its-own-select-
 and-assertion-passes-while-production-drifts" vacuous-proof bug class.
 The builder is module-private (underscore prefix) but module-public
 for the test import, mirroring the existing ``_row_to_record`` helper
-convention at ``packs/storage.py:1063``.
+convention at ``packs/storage.py:1125``.
 
 **Five regressions per plan §966 + §1013** (Round 21 P2 #2 bumped 4→5;
 Round 22 P2 #2 + P3 #3 propagation refresh):

@@ -322,11 +322,11 @@ class TestSprint7B1IsoControlsRecordedForEveryTransition:
     - ``payload['iso_controls']`` is the JSON-encoded shape the portal
       API surfaces to operators reading evidence rows. Storage stamps
       both (``payload['iso_controls']`` at
-      ``packs/storage.py:799`` + the
+      ``packs/storage.py:851`` + the
       ``DecisionRecord(..., iso_controls=...)`` kwarg at
-      ``packs/storage.py:809``) on every transition row, both populated
+      ``packs/storage.py:871``) on every transition row, both populated
       from the same ``canonical_iso_controls`` local that
-      ``packs/storage.py:734`` derives via :func:`iso_controls_for`.
+      ``packs/storage.py:761`` derives via :func:`iso_controls_for`.
     """
 
     async def test_full_lifecycle_walk_tags_every_chain_row_with_canonical_controls(
@@ -524,7 +524,7 @@ class TestSprint7B1FailClosedRefusalPaths:
     async def test_preflight_unknown_transition_name_no_chain_row_no_state_mutation(
         self, store: PackRecordStore, engine: AsyncEngine
     ) -> None:
-        # The runtime guard at ``packs/storage.py:715-716`` (T3 R1 P2 #2)
+        # The runtime guard at ``packs/storage.py:742-743`` (T3 R1 P2 #2)
         # rejects out-of-vocabulary transition names BEFORE any DB
         # connection is acquired. Mirrors ``validate_transition`` step
         # 3 (T2 R1 P2) at ``packs/lifecycle.py:498-499`` and the
@@ -696,3 +696,93 @@ class TestSprint7B1FailClosedRefusalPaths:
         assert ei.value.reason == "lifecycle_transition_disable_not_installed"
         assert await _count_chain_rows(engine) == chain_before
         assert await _read_pack_state(engine, rec.id) == state_before
+
+
+# ===========================================================================
+# Sprint 7B.2 T9 — Locked manifest-digest precondition refusal regression
+# ===========================================================================
+
+
+class TestSprint7B2T9LockedManifestDigestPrecondition:
+    """The Sprint 7B.2 T9 locked manifest-digest precondition refuses a submit
+    transition when the caller's ``expected_manifest_digest`` kwarg disagrees
+    with the ``packs.manifest_digest`` column the runner reads under the
+    ``SELECT ... FOR UPDATE`` row lock (plan §1179-1181 race-condition fix).
+
+    Doctrine Lock D — the check fires INSIDE ``_precondition``, raising
+    :class:`LifecycleTransitionRefused`
+    (``lifecycle_transition_manifest_digest_changed_during_submit``); the
+    enclosing ``engine.begin()`` transaction owned by
+    :meth:`DecisionHistoryStore.append_with_precondition` rolls back
+    atomically. No chain row inserted. No pack state mutation."""
+
+    async def test_locked_precondition_refuses_on_manifest_digest_mismatch(
+        self, store: PackRecordStore, engine: AsyncEngine
+    ) -> None:
+        rec = _make_record(pack_id="rec-digest-mismatch-canary")
+        await store.save_draft(rec)
+        chain_before = await _count_chain_rows(engine)
+        state_before = await _read_pack_state(engine, rec.id)
+        assert state_before == "draft"
+
+        with pytest.raises(LifecycleTransitionRefused) as ei:
+            await store.transition(
+                pack_id=rec.id,
+                transition="submit",
+                actor_id="t9-canary",
+                tenant_id=None,
+                evidence_pointer=None,
+                request_id="req-t9-mismatch",
+                expected_manifest_digest=b"\xff" * 32,  # ≠ row's b"\x01"*32
+            )
+        assert ei.value.reason == "lifecycle_transition_manifest_digest_changed_during_submit"
+        # Atomic rollback proof (Doctrine Lock D): no chain row + no state mutation.
+        assert await _count_chain_rows(engine) == chain_before
+        assert await _read_pack_state(engine, rec.id) == state_before
+
+    async def test_locked_precondition_passes_when_expected_manifest_digest_matches(
+        self, store: PackRecordStore, engine: AsyncEngine
+    ) -> None:
+        rec = _make_record(pack_id="rec-digest-match-canary")
+        await store.save_draft(rec)
+        chain_before = await _count_chain_rows(engine)
+
+        # ``_make_record`` seeds manifest_digest=b"\x01" * 32; pass the
+        # matching value into the kwarg → check passes → transition proceeds.
+        await store.transition(
+            pack_id=rec.id,
+            transition="submit",
+            actor_id="t9-canary",
+            tenant_id=None,
+            evidence_pointer=None,
+            request_id="req-t9-match",
+            expected_manifest_digest=b"\x01" * 32,
+        )
+
+        assert await _count_chain_rows(engine) == chain_before + 1
+        assert await _read_pack_state(engine, rec.id) == "submitted"
+
+    async def test_locked_precondition_skipped_when_expected_manifest_digest_is_none(
+        self, store: PackRecordStore, engine: AsyncEngine
+    ) -> None:
+        """``expected_manifest_digest=None`` (default) preserves the pre-T9
+        contract — no digest verification, transition proceeds on validate-only.
+        Backward-compat with every non-submit-route caller (allow_list /
+        install / disable / revoke / uninstall / claim / approve / reject /
+        withdraw / cancel_draft)."""
+        rec = _make_record(pack_id="rec-digest-none-canary")
+        await store.save_draft(rec)
+        chain_before = await _count_chain_rows(engine)
+
+        await store.transition(
+            pack_id=rec.id,
+            transition="submit",
+            actor_id="t9-canary",
+            tenant_id=None,
+            evidence_pointer=None,
+            request_id="req-t9-none",
+            # expected_manifest_digest omitted (defaults to None)
+        )
+
+        assert await _count_chain_rows(engine) == chain_before + 1
+        assert await _read_pack_state(engine, rec.id) == "submitted"

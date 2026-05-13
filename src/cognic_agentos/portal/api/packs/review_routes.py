@@ -337,14 +337,21 @@ def build_review_routes(*, store: PackRecordStore) -> APIRouter:
         comments → 422 from Pydantic body validation BEFORE this
         handler runs.
 
-        T5 narrow scope (R11 P2 #3 + R12 P2 #2 + R18 P2 #2):
-        chain row carries the bare transition payload only.
-        Categorised reason + comments emit via
-        ``portal.packs.review.reject`` structured log on the green
-        path (load-bearing T5 evidence surface). T9 carry-forward
-        migrates these to the chain row's
-        ``payload["evidence_attachments"]`` via the third
-        ``transition()`` kwarg.
+        T5 narrow scope (R11 P2 #3 + R12 P2 #2 + R18 P2 #2) +
+        Sprint 7B.2 T9 Slice 3 carry-forward: the categorised reason +
+        comments emit via BOTH the ``portal.packs.review.reject``
+        structured log (operations surface, T5 carry-forward) AND
+        the chain row's ``payload["evidence_attachments"]`` field
+        (examiner surface, NEW at T9 via the third ``transition()``
+        kwarg per plan §1086-1088).  The chain payload is the
+        authoritative source for evidence-pack export per ADR-006;
+        the structured log stays as the ops surface for operational
+        observability tooling (defence-in-depth dual emission).
+
+        Storage stays a thin passthrough — the
+        ``evidence_attachments`` kwarg accepts any dict; the
+        ``{"rejection_reason", "reviewer_comments"}`` closed-set
+        shape is owned by this route + its tests, NOT by storage.
 
         Mutually-exclusive structured-log emission per R18 P2 #2:
         - Green: EXACTLY ONE ``portal.packs.review.reject`` record.
@@ -359,6 +366,14 @@ def build_review_routes(*, store: PackRecordStore) -> APIRouter:
                 tenant_id=actor.tenant_id,
                 evidence_pointer=None,
                 request_id=_mint_request_id(_PACK_REJECT_REQUEST_ID_PREFIX),
+                # T9 Slice 3 carry-forward (plan §1086-1088): categorised
+                # reject payload migrates from log-only to chain row.
+                # Closed-set shape {rejection_reason, reviewer_comments}
+                # owned by this route — storage stays thin passthrough.
+                evidence_attachments={
+                    "rejection_reason": body.reason,
+                    "reviewer_comments": body.comments,
+                },
             )
         except PackNotFound:
             # R16 P2 #2 — race translation; refused-event log only
@@ -392,9 +407,14 @@ def build_review_routes(*, store: PackRecordStore) -> APIRouter:
                 detail={"reason": exc.reason},
             ) from None
 
-        # Green path: emit the load-bearing T5 evidence log carrying
-        # the categorised reason + comments (R11 P2 #3 + R18 P2 #2).
-        # T9 carry-forward will migrate these fields to the chain row.
+        # Green path: emit the structured operations-surface log
+        # carrying the categorised reason + comments (R11 P2 #3 +
+        # R18 P2 #2).  T9 Slice 3 has migrated the same pair to the
+        # chain row's ``payload["evidence_attachments"]`` (examiner
+        # surface, threaded via the ``evidence_attachments`` kwarg
+        # above); the log emission stays as the operations surface
+        # for live observability tooling (defence-in-depth dual
+        # surface — chain row is the authoritative source per ADR-006).
         _LOG.warning(
             "portal.packs.review.reject",
             extra={
@@ -424,15 +444,21 @@ def build_review_routes(*, store: PackRecordStore) -> APIRouter:
         pack; finds the most-recent ``event_type ==
         "pack.lifecycle.submitted"`` chain row; surfaces its
         ``payload.get("conformance")`` value on the response's
-        ``conformance`` field — ``None`` for pre-T9 chain rows that
-        carry no ``conformance`` key.
+        ``conformance`` field.
 
-        Plan T5 caveat: until T9 lands, ALL submit chain rows are
-        pre-T9 fixtures with no ``conformance`` key — the endpoint
-        surfaces ``{"conformance": null, "reviewer_evidence_panels":
-        null}`` gracefully (NOT 500). The ``reviewer_evidence_panels``
-        field is always-null in 7B.2; 7B.3 will fill it with the full
-        evidence-panel object.
+        Sprint 7B.2 T9 Slice 2 wired auto-run-on-submit, so submit
+        chain rows produced from T9 onward carry the OWASP
+        conformance suite result under ``payload.conformance`` per
+        :func:`run_owasp_conformance_for_chain_payload`'s 4-key
+        wire-shape.  Historical / pre-T9 submit chain rows (created
+        by fixtures or by the T5-era submit handler before Slice 2
+        landed) have no ``conformance`` key — the endpoint surfaces
+        ``None`` for those rows gracefully (NOT 500); both shapes
+        coexist in production via the same response schema.
+
+        ``reviewer_evidence_panels`` remains always-null in 7B.2;
+        Sprint 7B.3 will fill it with the full evidence-panel object
+        once the 5-gate composition lands.
 
         Gated by ``RequireScope("pack.audit.read")`` (examiner-facing
         per ADR-012 §75) + ``RequireTenantOwnership`` (no role-

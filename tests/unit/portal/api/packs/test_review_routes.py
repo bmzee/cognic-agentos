@@ -723,11 +723,16 @@ class TestSprint7B2RejectEndpoint:
     :class:`RejectDraftRequest` — ``reason`` (7-value closed-enum
     :data:`RejectionReason`) + ``comments`` (required non-empty str).
 
-    T5 narrow scope (R11 P2 #3): chain row carries the bare
-    transition payload only — categorised reason + comments emit via
-    structured log ONLY. T9 carry-forward amends the reject handler to
-    attach ``{"rejection_reason": …, "reviewer_comments": …}`` via
-    ``evidence_attachments``.
+    T5 → T9 history: T5 (R11 P2 #3) shipped the bare reject
+    transition with categorised reason + comments emitted via
+    structured log ONLY.  Sprint 7B.2 T9 Slice 3 has now extended the
+    handler to ALSO attach ``{"rejection_reason": …,
+    "reviewer_comments": …}`` to the chain row's
+    ``payload["evidence_attachments"]`` via the third
+    ``transition()`` kwarg per plan §1086-1088.  The structured log
+    remains the operations surface; the chain row is the
+    authoritative examiner surface per ADR-006 (defence-in-depth
+    dual emission).
 
     Structured-log contract (R17 P2 #2 + R18 P2 #2 per-event-type
     table):
@@ -994,12 +999,16 @@ class TestSprint7B2RejectEndpoint:
         """Plan R18 P2 #2 caplog table — accepted reject (green path)
         emits EXACTLY ONE ``portal.packs.review.reject`` record
         carrying reason + comments + actor_subject + pack_id (the
-        load-bearing T5 evidence surface per R11 P2 #3). NO
-        ``portal.packs.reject_refused`` record fires on the green path.
+        operations-surface log per R11 P2 #3 + R18 P2 #2 mutually-
+        exclusive emission contract). NO ``portal.packs.reject_refused``
+        record fires on the green path.
 
-        T9 carry-forward will migrate these fields to the chain row's
-        ``payload["evidence_attachments"]``; this T5 test pins the
-        log-only emission as the current evidence surface."""
+        This test pins the log surface specifically.  The chain-row /
+        ``payload["evidence_attachments"]`` examiner surface (added
+        at T9 Slice 3 per plan §1086-1088) is pinned by
+        :meth:`test_reject_chain_row_carries_evidence_attachments_post_t9`
+        + :meth:`test_reject_accepted_emits_evidence_log_and_persists_post_t9`
+        (dual-surface defence-in-depth)."""
         caplog.set_level(
             logging.WARNING,
             logger="cognic_agentos.portal.api.packs.review_routes",
@@ -1086,23 +1095,33 @@ class TestSprint7B2RejectEndpoint:
         assert emitted.reason == "lifecycle_transition_invalid_state_pair"  # type: ignore[attr-defined]
         assert emitted.from_state == "submitted"  # type: ignore[attr-defined]
 
-    async def test_reject_chain_row_does_not_carry_evidence_attachments_in_t5(
+    async def test_reject_chain_row_carries_evidence_attachments_post_t9(
         self,
         store: PackRecordStore,
     ) -> None:
-        """Plan R11 P2 #3 + R12 P2 #2 + T9 carry-forward — the T5
-        reject chain row carries ONLY the bare transition payload
-        (``pack_id`` / ``kind`` / ``from_state`` / ``to_state`` /
-        ``transition_name`` / ``evidence_pointer`` / ``iso_controls``).
-        The categorised ``rejection_reason`` + ``reviewer_comments``
-        fields land in the chain row's ``payload["evidence_attachments"]``
-        at T9 via the third ``transition()`` kwarg; T5 emits them via
-        structured log only.
+        """Sprint 7B.2 T9 Slice 3 — the reject chain row's
+        ``payload["evidence_attachments"]`` carries the categorised
+        ``rejection_reason`` + ``reviewer_comments`` after T9 amends
+        the handler via the third ``transition()`` kwarg per plan
+        §1086-1088 + Round 11 P2 #3.
 
-        Pins the forward-looking contract — T9 tests will assert the
-        ``evidence_attachments`` key DOES land on the chain row; this
-        T5 test asserts it does NOT (yet).
-        """
+        **T5 → T9 history (renamed from the original
+        ``test_reject_chain_row_does_not_carry_evidence_attachments_in_t5``):**
+        T5 shipped the bare reject transition + emitted the categorised
+        reason + comments via the ``portal.packs.review.reject``
+        structured log ONLY (chain row carried just the bare transition
+        payload — ``pack_id`` / ``kind`` / ``from_state`` / ``to_state``
+        / ``transition_name`` / ``evidence_pointer`` / ``iso_controls``).
+        T9 Slice 3 migrates the categorised pair to the chain row via
+        ``evidence_attachments={"rejection_reason": body.reason,
+        "reviewer_comments": body.comments}``; the chain payload becomes
+        the authoritative examiner surface, while the structured log
+        stays as the operations surface (defence-in-depth dual
+        emission, per the user-locked Slice 3 contract).
+
+        The dedicated dual-surface log + chain regression lives in
+        :meth:`test_reject_accepted_emits_evidence_log_and_persists_post_t9`
+        below; this test pins the chain-payload shape specifically."""
         record = await _seed_under_review_pack(store, created_by="bob@bank.example")
         actor = _make_actor(
             subject="alice@bank.example",
@@ -1124,14 +1143,228 @@ class TestSprint7B2RejectEndpoint:
         reject_rows = [r for r in history if r.decision_type == "pack.lifecycle.rejected"]
         assert len(reject_rows) == 1
         payload = reject_rows[0].payload
-        # T5 contract: bare transition payload only.
-        assert "evidence_attachments" not in payload, (
-            "T5 reject chain row must NOT carry evidence_attachments; "
-            "categorised reason + comments live in the structured log "
-            "until T9 amends the handler via the evidence_attachments kwarg"
+
+        # T9 contract: evidence_attachments key carries exactly the
+        # categorised pair per plan §1086-1088.
+        assert "evidence_attachments" in payload, (
+            "T9-extended reject chain row MUST carry evidence_attachments; "
+            "structured log remains as the ops surface, but the chain row "
+            "is the authoritative examiner surface"
         )
+        assert payload["evidence_attachments"] == {
+            "rejection_reason": "data_governance_unfit",
+            "reviewer_comments": "PII purpose mismatch",
+        }
+        # Closed-set keys — storage stays a thin passthrough but the
+        # route MUST emit exactly {rejection_reason, reviewer_comments};
+        # any added top-level key here is a route-side contract drift.
+        assert set(payload["evidence_attachments"].keys()) == {
+            "rejection_reason",
+            "reviewer_comments",
+        }
+        # T5 still emits the log; the chain row gains the new key. The
+        # categorised pair MUST NOT be promoted to a top-level key on
+        # payload itself — only nested inside evidence_attachments.
         assert "rejection_reason" not in payload
         assert "reviewer_comments" not in payload
+
+    async def test_reject_accepted_emits_evidence_log_and_persists_post_t9(
+        self,
+        store: PackRecordStore,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Sprint 7B.2 T9 Slice 3 dual-surface contract — the
+        categorised reject pair lands on BOTH the structured log
+        (operations surface, T5 carry-forward) AND the chain payload
+        (examiner surface, new at T9).  Defence-in-depth: a future
+        change that drops one surface fails this test."""
+        import logging
+
+        record = await _seed_under_review_pack(store, created_by="bob@bank.example")
+        actor = _make_actor(
+            subject="alice@bank.example",
+            scopes=frozenset({"pack.review.reject"}),
+        )
+        app = _build_app(actor=actor, store=store)
+
+        with (
+            caplog.at_level(
+                logging.WARNING,
+                logger="cognic_agentos.portal.api.packs.review_routes",
+            ),
+            TestClient(app) as client,
+        ):
+            response = client.post(
+                f"/api/v1/packs/{record.id}/reject",
+                json={
+                    "reason": "signature_invalid",
+                    "comments": "cosign signature missing",
+                },
+            )
+        assert response.status_code == 200
+
+        # (1) Ops surface — exactly 1 portal.packs.review.reject log
+        review_records = [r for r in caplog.records if r.message == "portal.packs.review.reject"]
+        assert len(review_records) == 1
+        log_record = review_records[0]
+        assert log_record.reason == "signature_invalid"  # type: ignore[attr-defined]
+        assert log_record.comments == "cosign signature missing"  # type: ignore[attr-defined]
+
+        # (2) Examiner surface — chain row payload.evidence_attachments
+        history = await store.load_lifecycle_history(record.id)
+        reject_rows = [r for r in history if r.decision_type == "pack.lifecycle.rejected"]
+        assert len(reject_rows) == 1
+        assert reject_rows[0].payload["evidence_attachments"] == {
+            "rejection_reason": "signature_invalid",
+            "reviewer_comments": "cosign signature missing",
+        }
+
+    async def test_reject_state_machine_refusal_emits_exactly_one_refused_log_post_t9(
+        self,
+        store: PackRecordStore,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """T9 caplog parity carry-forward — state-machine refusal path
+        (LifecycleTransitionRefused from an invalid-state submission)
+        still emits EXACTLY ONE ``portal.packs.reject_refused`` log per
+        R18 P2 #2 mutually-exclusive emission.  No
+        ``portal.packs.review.reject`` accepted log fires on the
+        refusal path.  T9's evidence-attachments threading does NOT
+        change the refusal-axis log emission shape."""
+        import logging
+
+        # Seed a SUBMITTED pack (not under_review) — reject from this
+        # state triggers lifecycle_transition_invalid_state_pair.
+        record = await _seed_submitted_pack(store, created_by="bob@bank.example")
+        actor = _make_actor(
+            subject="alice@bank.example",
+            scopes=frozenset({"pack.review.reject"}),
+        )
+        app = _build_app(actor=actor, store=store)
+
+        with (
+            caplog.at_level(
+                logging.WARNING,
+                logger="cognic_agentos.portal.api.packs.review_routes",
+            ),
+            TestClient(app) as client,
+        ):
+            response = client.post(
+                f"/api/v1/packs/{record.id}/reject",
+                json={
+                    "reason": "evaluation_pass_rate_below_threshold",
+                    "comments": "out of vocab; from submitted state",
+                },
+            )
+        assert response.status_code == 409
+
+        refused = [r for r in caplog.records if r.message == "portal.packs.reject_refused"]
+        accepted = [r for r in caplog.records if r.message == "portal.packs.review.reject"]
+        assert len(refused) == 1, (
+            f"expected EXACTLY ONE portal.packs.reject_refused on state-machine "
+            f"refusal; got {len(refused)}; records={refused!r}"
+        )
+        assert len(accepted) == 0, (
+            f"refusal axis MUST NOT emit portal.packs.review.reject; got {len(accepted)}"
+        )
+
+    async def test_reject_rbac_or_tenant_refusal_emits_zero_route_level_logs_post_t9(
+        self,
+        store: PackRecordStore,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """T9 caplog parity carry-forward — sibling-gate refusals
+        (RBAC / tenant-isolation) refuse at the dep chain BEFORE the
+        handler body runs, so the route-level
+        ``portal.packs.review.reject`` and ``portal.packs.reject_refused``
+        log records MUST both fire ZERO times.  RBAC/tenant gates emit
+        their OWN logs (``portal.rbac.*`` / ``portal.tenant_isolation.*``)
+        — the route handler logs are mutually exclusive with those."""
+        import logging
+
+        record = await _seed_under_review_pack(store, created_by="bob@bank.example")
+        # Cross-tenant actor — tenant-isolation gate refuses before
+        # the handler body runs.
+        actor = _make_actor(
+            subject="alice@otherbank.example",
+            tenant_id="t2",
+            scopes=frozenset({"pack.review.reject"}),
+        )
+        app = _build_app(actor=actor, store=store)
+
+        with (
+            caplog.at_level(
+                logging.WARNING,
+                logger="cognic_agentos.portal.api.packs.review_routes",
+            ),
+            TestClient(app) as client,
+        ):
+            response = client.post(
+                f"/api/v1/packs/{record.id}/reject",
+                json={"reason": "evaluation_pass_rate_below_threshold", "comments": "x"},
+            )
+        assert response.status_code == 404
+
+        # Route-level handler logs MUST be ZERO on sibling-gate refusal.
+        review_records = [
+            r
+            for r in caplog.records
+            if r.message in {"portal.packs.review.reject", "portal.packs.reject_refused"}
+        ]
+        assert len(review_records) == 0, (
+            f"sibling-gate (RBAC/tenant) refusal MUST NOT emit route-level "
+            f"reject logs; got {len(review_records)}; records={review_records!r}"
+        )
+
+    async def test_reject_request_id_reuses_t5_prefix_no_new_t9_prefix(
+        self,
+        store: PackRecordStore,
+    ) -> None:
+        """Sprint 7B.2 T9 user-locked carry-forward — the T9 amendment
+        REUSES the T5-owned ``_PACK_REJECT_REQUEST_ID_PREFIX``
+        (``"pack-reject-"``) for the reject handler's request_id;
+        T9 introduces NO new prefix per plan §1177 + Round 14 P2 #2.
+
+        Pin via the chain row's persisted request_id — must start with
+        ``"pack-reject-"`` AND fit the 64-char column cap."""
+        from sqlalchemy import select
+
+        from cognic_agentos.core.decision_history import _decision_history
+
+        record = await _seed_under_review_pack(store, created_by="bob@bank.example")
+        actor = _make_actor(
+            subject="alice@bank.example",
+            scopes=frozenset({"pack.review.reject"}),
+        )
+        app = _build_app(actor=actor, store=store)
+
+        with TestClient(app) as client:
+            response = client.post(
+                f"/api/v1/packs/{record.id}/reject",
+                json={
+                    "reason": "evaluation_pass_rate_below_threshold",
+                    "comments": "T9 prefix-reuse regression",
+                },
+            )
+        assert response.status_code == 200, response.text
+
+        async with store._engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    select(_decision_history.c.request_id)
+                    .where(_decision_history.c.event_type == "pack.lifecycle.rejected")
+                    .order_by(_decision_history.c.sequence.desc())
+                )
+            ).first()
+        assert row is not None
+        request_id = row.request_id
+        assert len(request_id) <= 64, (
+            f"request_id={request_id!r} is {len(request_id)} chars > 64 cap"
+        )
+        assert request_id.startswith("pack-reject-"), (
+            f"request_id={request_id!r} missing 'pack-reject-' prefix — "
+            f"T9 must reuse the T5-owned prefix, not introduce a new one"
+        )
 
 
 # ===========================================================================
@@ -1607,27 +1840,33 @@ class TestSprint7B2EvidenceEndpoint:
     Plan R11 P3 #5 response shape — :class:`PackEvidenceResponse`:
     ``{conformance: dict[str, Any] | None, reviewer_evidence_panels: None}``.
 
-    Plan T5 caveat: until T9 lands, ALL submit chain rows are pre-T9
-    fixtures that carry no ``conformance`` key — the endpoint surfaces
-    ``{"conformance": null, "reviewer_evidence_panels": null}``
-    gracefully (NOT 500). Both pre-T9 (null) and post-T9 (populated)
-    paths are pinned here; the post-T9 test uses a stub store whose
-    ``load_lifecycle_history`` returns a hand-built T9-schema chain
-    row (forward-looking — exercises the handler's read-path logic
-    without depending on T9 infrastructure).
+    Sprint 7B.2 T9 Slice 2 wired auto-run-on-submit, so submit chain
+    rows produced from T9 onward carry the OWASP conformance suite
+    result under ``payload.conformance``.  Pre-T9 / historical submit
+    chain rows (fixtures or rows created by the T5-era submit handler
+    before T9 Slice 2 landed) have no ``conformance`` key — both
+    shapes coexist via the same response schema, with ``None``
+    surfaced for the no-key path (NOT 500).  Both pre-T9 (null) and
+    post-T9 (populated) paths are pinned here.  ``reviewer_evidence_panels``
+    remains always-null in 7B.2; 7B.3 fills it with the 5-gate
+    evidence-panel object.
     """
 
-    async def test_evidence_returns_null_pre_t9(
+    async def test_evidence_returns_null_for_historical_pre_t9_row(
         self,
         store: PackRecordStore,
     ) -> None:
         """Plan R11 P3 #5 — submitted pack with no conformance key on
-        its submit chain row (the pre-T9 state) → endpoint returns
-        ``{"conformance": null, "reviewer_evidence_panels": null}``.
+        its submit chain row (historical / pre-T9 shape) → endpoint
+        returns ``{"conformance": null, "reviewer_evidence_panels":
+        null}``.
 
-        Pinned per plan T5 caveat — ALL submit chain rows in 7B.2 are
-        pre-T9 today (T9 auto-run hasn't landed yet), so the endpoint
-        must handle this case gracefully (NOT 500)."""
+        Sprint 7B.2 T9 Slice 2 wired auto-run-on-submit so T9-era
+        submits DO carry ``payload.conformance``; this test pins the
+        historical-compatibility path where the chain row was created
+        before T9 (or by a fixture that bypasses the route handler).
+        The endpoint MUST handle the no-key case gracefully (NOT
+        500) so production chain rows from both eras read uniformly."""
         record = await _seed_submitted_pack(store, created_by="bob@bank.example")
         actor = _make_actor(
             subject="alice@bank.example",
@@ -1643,17 +1882,21 @@ class TestSprint7B2EvidenceEndpoint:
         assert body == {"conformance": None, "reviewer_evidence_panels": None}
 
     def test_evidence_surfaces_payload_conformance_post_t9_fixture(self) -> None:
-        """Plan T5 caveat (forward-looking) — once T9's
-        auto-run-on-submit wire is landed, submit chain rows will
-        carry a top-level ``conformance: dict[str, Any]`` key on the
-        ``payload``. Exercises the handler's READ-PATH logic on a
-        hand-built T9-schema chain row via a stub store — proves the
-        endpoint will surface the populated conformance dict without
-        requiring T9 infrastructure to land first.
+        """T9-era submit chain rows carry a top-level
+        ``conformance: dict[str, Any]`` key on the ``payload`` (Sprint
+        7B.2 T9 Slice 2 wired auto-run-on-submit per
+        :func:`run_owasp_conformance_for_chain_payload`).  This test
+        exercises the evidence endpoint's READ-PATH logic against a
+        hand-built T9-era chain row via a stub store — a focused
+        read-path fixture isolated from the submit handler's write
+        path (the dual-surface integration is pinned by
+        ``test_submit_writes_payload_conformance_to_chain_row`` in
+        ``test_author_routes.py``; this test pins only the evidence
+        endpoint's read-side dict-surfacing).
 
         Stub-store shape: ``load_lifecycle_history`` returns a list
         with ONE :class:`DecisionRecord` whose ``payload`` carries the
-        T9 ``conformance`` key.
+        T9-era ``conformance`` key.
         """
         from cognic_agentos.core.decision_history import DecisionRecord
 

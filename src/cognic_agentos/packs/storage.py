@@ -55,13 +55,18 @@ Doctrine
   2. **State-machine transition refusal** —
      :class:`LifecycleTransitionRefused` carries the closed-enum
      :data:`cognic_agentos.packs.lifecycle.LifecycleRefusalReason`
-     (13 reasons). Raised by :meth:`PackRecordStore.transition` from
-     either path: PREFLIGHT
-     (``lifecycle_transition_name_unknown`` — runtime guard at
-     function entry; no DB connection acquired) or IN-PRECONDITION
+     (14 reasons; the 14th —
+     ``lifecycle_transition_manifest_digest_changed_during_submit`` —
+     emits from the locked precondition's manifest-digest cross-check
+     added at Sprint 7B.2 T9, NOT from :func:`validate_transition`).
+     Raised by :meth:`PackRecordStore.transition` from either path:
+     PREFLIGHT (``lifecycle_transition_name_unknown`` — runtime guard
+     at function entry; no DB connection acquired) or IN-PRECONDITION
      (any other reason — from
      :func:`cognic_agentos.packs.lifecycle.validate_transition` running
-     under the chain-head lock; transaction rolls back atomically).
+     under the chain-head lock, OR from the storage-side digest cross-
+     check that fires under the same lock; transaction rolls back
+     atomically).
   3. **Lookup miss** — :class:`PackNotFound` carries the missing
      ``pack_id: uuid.UUID`` (NOT a closed enum — no enum is needed
      because the failure mode is single-valued; the structured field
@@ -624,6 +629,9 @@ class PackRecordStore:
         evidence_pointer: str | None,
         request_id: str,
         actor_type: str | None = None,
+        payload_conformance: dict[str, Any] | None = None,
+        expected_manifest_digest: bytes | None = None,
+        evidence_attachments: dict[str, Any] | None = None,
     ) -> tuple[uuid.UUID, bytes]:
         """Atomically advance a pack through a named lifecycle
         transition. Returns ``(record_id, chain_hash)`` from the chain
@@ -678,14 +686,33 @@ class PackRecordStore:
             there is nothing to roll back.
 
         Raises (IN-PRECONDITION — transaction rolls back atomically):
-          :class:`PackNotFound` — ``pack_id`` has no row in ``packs``
-            after the precondition's ``SELECT ... FOR UPDATE`` returns.
-          :class:`LifecycleTransitionRefused` with any reason OTHER
-            than ``"lifecycle_transition_name_unknown"`` — the state
-            machine refused the transition; the closed-enum reason
-            came from
+          Three distinct sources, all firing under the chain-head + pack-
+          row FOR UPDATE locks established by the precondition closure;
+          all three trigger atomic rollback of the chain row INSERT +
+          ``packs.state`` cache UPDATE + chain-head UPDATE via the
+          enclosing ``engine.begin()`` transaction.
+
+          (1) :class:`PackNotFound` — ``pack_id`` has no row in ``packs``
+            after the precondition's ``SELECT ... FOR UPDATE`` returns
+            empty.
+          (2) :class:`LifecycleTransitionRefused` with reason
+            ``"lifecycle_transition_manifest_digest_changed_during_submit"``
+            — the storage-side digest cross-check added at Sprint 7B.2
+            T9. Fires from inside ``_precondition`` AFTER the SELECT
+            returns AND BEFORE :func:`validate_transition`, when the
+            caller passed a non-None ``expected_manifest_digest`` kwarg
+            AND the row-locked ``packs.manifest_digest`` column does
+            NOT match (race-condition fix per plan §1179-1181 closing
+            the TOCTOU window between the submit route's preloaded
+            :class:`PackRecord` and the in-precondition state-machine
+            check). Storage-only-emit — :func:`validate_transition` has
+            no access to the persisted digest column and therefore
+            cannot produce this reason.
+          (3) :class:`LifecycleTransitionRefused` with any OTHER
+            reason — the pure-functional state-machine refusal from
             :func:`cognic_agentos.packs.lifecycle.validate_transition`
-            running under the chain-head FOR UPDATE lock. Examples:
+            running under the chain-head FOR UPDATE lock AFTER the
+            digest cross-check passes. Examples:
             ``"lifecycle_transition_invalid_state_pair"``,
             ``"lifecycle_transition_terminal_state"``,
             ``"lifecycle_transition_approve_without_review_claim"``.
@@ -741,10 +768,16 @@ class PackRecordStore:
             # SELECT FOR UPDATE on the pack row. Locks the row even
             # though the chain-head lock already serialises chain
             # appends — documents future-writer safety per Doctrine
-            # Lock D step 1.
+            # Lock D step 1. Sprint 7B.2 T9: ``manifest_digest`` is
+            # added to the projection so the locked precondition can
+            # cross-check against the caller's
+            # ``expected_manifest_digest`` kwarg under the same row
+            # lock (race-condition fix per plan §1179-1181 — closes
+            # the TOCTOU window between the route's preloaded pack
+            # record and the in-precondition state-machine check).
             row = (
                 await conn.execute(
-                    select(_packs.c.state, _packs.c.kind)
+                    select(_packs.c.state, _packs.c.kind, _packs.c.manifest_digest)
                     .where(_packs.c.id == pack_id)
                     .with_for_update()
                 )
@@ -754,6 +787,25 @@ class PackRecordStore:
 
             from_state: PackState = row.state
             kind: PackKind = row.kind
+
+            # Sprint 7B.2 T9 — locked manifest-digest cross-check.
+            # When ``expected_manifest_digest is None`` (default;
+            # every non-submit caller) skip the check entirely so
+            # backward-compat with every pre-T9 chain row holds. When
+            # non-None, the digest read from the row-locked SELECT
+            # MUST match exactly; mismatch raises the closed-enum
+            # refusal from inside the closure so
+            # ``DecisionHistoryStore.append_with_precondition`` 's
+            # ``engine.begin()`` transaction rolls back atomically
+            # (no chain row inserted, no ``packs.state`` cache
+            # mutation — Doctrine Lock D preserved).
+            if (
+                expected_manifest_digest is not None
+                and bytes(row.manifest_digest) != expected_manifest_digest
+            ):
+                raise LifecycleTransitionRefused(
+                    "lifecycle_transition_manifest_digest_changed_during_submit"
+                )
 
             reason = validate_transition(
                 from_state=from_state,
@@ -800,6 +852,16 @@ class PackRecordStore:
             }
             if actor_type is not None:
                 payload["actor_type"] = actor_type
+            # Sprint 7B.2 T9 — conditional ``conformance`` +
+            # ``evidence_attachments`` payload keys. The omitted-kwarg
+            # branch leaves the payload byte-shape compatible with every
+            # pre-T9 chain row (and every non-submit / non-reject
+            # caller); this is the user-watchpoint (ii) invariant —
+            # omitted kwargs MUST NOT add empty keys.
+            if payload_conformance is not None:
+                payload["conformance"] = payload_conformance
+            if evidence_attachments is not None:
+                payload["evidence_attachments"] = evidence_attachments
             return DecisionRecord(
                 decision_type=f"pack.lifecycle.{target_state}",
                 request_id=request_id,

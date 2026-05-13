@@ -21,14 +21,28 @@ CREATE/UPDATE/SUBMIT, ``pack.withdraw`` for CANCEL) within the same
 ``created_by`` (immutable) + ``last_actor`` (bumped on every mutation) +
 the chain row's ``payload.actor_id`` together capture the audit lineage.
 
+Sprint 7B.2 T9 — submit handler extension (Slice 2):
+
+The ``POST /drafts/{id}/submit`` handler now accepts the manifest dict in
+the request body (:class:`SubmitDraftRequest`), runs the cheap-pre-check
+``sha256(canonical_bytes(body.manifest)) == record.manifest_digest`` →
+refuses 400 + ``manifest_digest_mismatch`` (member of
+:data:`AuthorRequestRefusalReason`) on discrepancy, runs the OWASP
+conformance suite via
+:func:`~cognic_agentos.packs.conformance.runner.run_owasp_conformance_for_chain_payload`,
+and threads ``payload_conformance`` + ``expected_manifest_digest`` into
+:meth:`PackRecordStore.transition`.  The locked precondition's
+storage-only-emit digest cross-check closes the load-then-submit TOCTOU
+window per plan §1179-1181 (storage emits
+``lifecycle_transition_manifest_digest_changed_during_submit`` from
+inside the row lock; the handler translates it to a 409 via the
+existing :class:`LifecycleTransitionRefused` catch).  Submission is
+intentionally non-gating per BUILD_PLAN §627 — a ``red`` or ``yellow``
+conformance verdict still produces a successful submit; the chain row
+carries the evidence for 7B.3 reviewer evidence panels.
+
 What's NOT in this module (deferred to other Sprint 7B.2 tasks):
 
-- **Conformance auto-run on POST ``/submit``** — Sprint 7B.2 T9 wires
-  the conformance runner into the submit handler, attaching the result
-  as ``payload.conformance`` on the submit transition's chain row.
-- **Locked manifest-digest precondition** — Sprint 7B.2 T9 closes the
-  load-then-submit TOCTOU window by passing ``expected_manifest_digest``
-  to :meth:`PackRecordStore.transition`.
 - **5-gate approve composer** — Sprint 7B.3.
 
 The endpoints respond to refusal paths uniformly: closed-enum reason
@@ -37,6 +51,7 @@ in the response body's ``detail.reason`` field (matches the
 established by :func:`RequireScope` + :func:`RequireTenantOwnership`).
 """
 
+import hashlib
 import logging
 import re
 import uuid
@@ -46,6 +61,10 @@ from typing import Annotated, Any, Final, Literal
 import pydantic
 from fastapi import APIRouter, Depends, HTTPException
 
+from cognic_agentos.core.canonical import canonical_bytes
+from cognic_agentos.packs.conformance.runner import (
+    run_owasp_conformance_for_chain_payload,
+)
 from cognic_agentos.packs.lifecycle import LifecycleTransitionRefused, PackKind
 from cognic_agentos.packs.storage import (
     PACK_DISPLAY_NAME_MAX_LEN,
@@ -55,7 +74,11 @@ from cognic_agentos.packs.storage import (
     PackRecordRefused,
     PackRecordStore,
 )
-from cognic_agentos.portal.api.packs.dto import PackBaseModel, PackResponse
+from cognic_agentos.portal.api.packs.dto import (
+    PackBaseModel,
+    PackResponse,
+    SubmitDraftRequest,
+)
 from cognic_agentos.portal.rbac.actor import Actor
 from cognic_agentos.portal.rbac.enforcement import RequireScope
 from cognic_agentos.portal.rbac.tenant_isolation import (
@@ -191,14 +214,21 @@ def _decode_sha256_hex(value: Any) -> bytes:
 Sha256DigestBytes = Annotated[bytes, pydantic.BeforeValidator(_decode_sha256_hex)]
 
 
-#: T4 R5 P2 narrowing — :data:`AuthorRefusalReason` is the closed-enum
-#: vocabulary for **409-status storage/lifecycle refusals surfaced from
-#: author handlers**, NOT the full author-surface wire-protocol refusal
-#: vocabulary. The complete refusal surface emitted by these endpoints
-#: is a 3-way union:
+#: T4 R5 P2 narrowing + Sprint-7B.2 T9 R40 P2 #1 extension —
+#: :data:`AuthorRefusalReason` is the closed-enum vocabulary for **409-
+#: status storage/lifecycle refusals surfaced from author handlers**,
+#: NOT the full author-surface wire-protocol refusal vocabulary. The
+#: complete refusal surface emitted by these endpoints is a **4-way
+#: union** (R40 P2 #1 — was 3-way pre-T9; the new
+#: :data:`AuthorRequestRefusalReason` literal carries request-body
+#: validation refusals owned by the route, NOT delegated from
+#: storage/lifecycle/RBAC/tenant-isolation upstream enums):
 #:
 #:   * :data:`AuthorRefusalReason` — 409 storage/lifecycle refusals
 #:     (this Literal, 6 values)
+#:   * :data:`AuthorRequestRefusalReason` — 400 route-owned request-body
+#:     refusals (T9: ``manifest_digest_mismatch`` from the cheap pre-
+#:     check on POST ``/submit``)
 #:   * :data:`~cognic_agentos.portal.rbac.tenant_isolation.TenantIsolationFailure`
 #:     — 404/500 tenant-isolation failures (``pack_not_found`` /
 #:     ``tenant_id_mismatch`` / ``actor_tenant_id_missing`` /
@@ -216,9 +246,11 @@ Sha256DigestBytes = Annotated[bytes, pydantic.BeforeValidator(_decode_sha256_hex
 #: isolation gate's own 404 emit path.
 #:
 #: The build-time drift detector + the test-layer union-coverage check
-#: pin the 3-way invariant. Pre-R5 the docstring claimed this Literal
+#: pin the 4-way invariant. Pre-R5 the docstring claimed this Literal
 #: WAS the full author-surface vocabulary — that claim left
-#: ``pack_not_found`` outside the declared/drift-checked surface.
+#: ``pack_not_found`` outside the declared/drift-checked surface; T9
+#: R40 P2 #1 added the 4th union member to close the same drift class
+#: for the new T9 ``manifest_digest_mismatch`` 400 emit.
 #:
 #: Style note: plain ``= Literal[...]`` (no ``TypeAlias`` annotation) to
 #: match the Sprint-7B.1 repo convention at ``packs/lifecycle.py:111``.
@@ -234,6 +266,29 @@ AuthorRefusalReason = Literal[
 ]
 
 
+#: Sprint 7B.2 T9 R40 P2 #1 — route-owned request-body refusal vocabulary.
+#: Distinct from :data:`AuthorRefusalReason` because these reasons do NOT
+#: originate from upstream storage/lifecycle closed-enums — they're owned
+#: by the handler's request-body validation layer, surface as **400-status
+#: wire-protocol bodies**, and would never appear in
+#: :data:`PackRecordRefusalReason` / :data:`LifecycleRefusalReason` /
+#: :data:`TenantIsolationFailure` / :data:`RBACDenialReason`.
+#:
+#: T9 adds ``manifest_digest_mismatch`` for the cheap pre-check at the
+#: submit handler: when ``sha256(canonical_bytes(body.manifest))``
+#: disagrees with ``record.manifest_digest``, the handler refuses 400
+#: with this reason BEFORE running the OWASP conformance suite or
+#: opening the storage transaction (defence-in-depth — the authoritative
+#: check is the locked precondition's
+#: ``lifecycle_transition_manifest_digest_changed_during_submit`` inside
+#: ``transition()``).
+#:
+#: The build-time drift detector at module foot verifies this literal
+#: shares NO values with the four upstream enums (route-owned ≠
+#: upstream-delegated).
+AuthorRequestRefusalReason = Literal["manifest_digest_mismatch",]
+
+
 #: T4 R5 P2 — centralised typed literal for the ``pack_not_found`` 404
 #: emit path. Three handler sites (submit / cancel / update post-transition
 #: reload + storage PackNotFound) emit this string in the 404 detail body;
@@ -244,6 +299,17 @@ AuthorRefusalReason = Literal[
 #: isolation enum but forgets to update the handler emit sites, the
 #: drift detector fails import.
 _PACK_NOT_FOUND_REASON: Final[Literal["pack_not_found"]] = "pack_not_found"
+
+
+#: Sprint 7B.2 T9 R40 P2 #1 — centralised typed Literal for the
+#: T9 ``manifest_digest_mismatch`` 400 emit at the submit handler.
+#: Mirror of the :data:`_PACK_NOT_FOUND_REASON` pattern: gives the
+#: build-time drift detector a typed handle to verify membership in
+#: :data:`AuthorRequestRefusalReason`, so a future rename of the wire
+#: string without updating the handler emit site fails import.
+_MANIFEST_DIGEST_MISMATCH_REASON: Final[Literal["manifest_digest_mismatch"]] = (
+    "manifest_digest_mismatch"
+)
 
 
 class CreateDraftRequest(PackBaseModel):
@@ -547,26 +613,84 @@ def build_author_routes(*, store: PackRecordStore) -> APIRouter:
         summary="Submit a draft for review",
     )
     async def submit_draft(
+        body: SubmitDraftRequest,
         actor: Annotated[Actor, Depends(_require_pack_submit)],
         record: Annotated[PackRecord, Depends(_require_tenant_ownership)],
     ) -> PackResponse:
-        """Submit the draft for reviewer attention. Lifecycle:
+        """Submit the draft for reviewer attention.  Lifecycle:
         ``draft → submitted`` via :meth:`PackRecordStore.transition`
         with transition name ``"submit"``.
 
-        Sprint 7B.2 T4 ships ONLY the bare transition. T9 will:
-        (a) auto-run the OWASP conformance suite + attach the result
-        as ``payload.conformance`` on the chain row; (b) close the
-        load-then-submit TOCTOU window via a locked manifest-digest
-        precondition fed by ``expected_manifest_digest``.
+        **Sprint 7B.2 T9 — manifest body + auto-run conformance + locked
+        manifest-digest precondition** (plan §1062-1252 + §1179-1181):
 
-        T4 R1 P2 #3 fix — :class:`PackNotFound` is caught + translated
-        to a structured 404. ``PackRecordStore.transition``'s
-        precondition closure raises :class:`PackNotFound` when its
-        ``SELECT ... FOR UPDATE`` finds no row, which can happen if a
-        concurrent deleter races us between the tenant-isolation
-        dependency's load + our transition call. Without this catch
-        the exception would leak as a generic 500."""
+        1. Cheap pre-check — compute
+           ``sha256(canonical_bytes(body.manifest))`` and refuse 400 +
+           closed-enum ``manifest_digest_mismatch`` if it does NOT match
+           the persisted ``record.manifest_digest``.  Cheap because the
+           handler's preloaded :class:`PackRecord` already carries the
+           digest; no extra DB round-trip.
+        2. Run the OWASP conformance suite via
+           :func:`run_owasp_conformance_for_chain_payload` OUTSIDE the
+           storage closure.  Pure-functional + manifest-shape only — no
+           filesystem / network / dependency-download side effects.
+           Per BUILD_PLAN §627 the result is EVIDENCE, not a gate: a
+           ``red`` or ``yellow`` overall_status still proceeds to a
+           successful submit; the chain row carries the verdict for
+           7B.3 reviewer evidence panels + the 5-gate composition.
+        3. Thread ``payload_conformance`` + ``expected_manifest_digest``
+           into :meth:`PackRecordStore.transition`.  The locked
+           precondition cross-checks the row-locked
+           ``packs.manifest_digest`` against the kwarg; mismatch raises
+           the storage-only-emit
+           ``lifecycle_transition_manifest_digest_changed_during_submit``
+           closed-enum refusal from inside the precondition closure,
+           closing the TOCTOU window between (1) and the locked SELECT.
+
+        T9 reuses the existing T4
+        :func:`_mint_request_id(_PACK_SUBMIT_REQUEST_ID_PREFIX)` minter
+        per plan §1177 — NO new prefix introduced.  The bounded-request-
+        id invariant ('``pack-submit-`` + uuid4().hex' = 44 chars ≤ 64
+        cap) is unchanged and pinned by the existing
+        ``test_submit_emitted_request_id_is_bounded_and_prefixed`` +
+        the new T9 ``test_submit_request_id_bounded_to_64_chars_after_t9``.
+
+        T4 R1 P2 #3 fix preserved — :class:`PackNotFound` is caught +
+        translated to a structured 404.  T9-extended exception
+        catch-list also handles the new digest-mismatch closed-enum
+        from the locked precondition path via the same
+        :class:`LifecycleTransitionRefused` translator.
+        """
+        # T9 step 1 — cheap digest pre-check (defence-in-depth; the
+        # authoritative check is the locked precondition inside
+        # ``transition()`` per plan §1179-1181).  A mismatch here
+        # short-circuits before we run the conformance suite or open the
+        # storage transaction; useful for fast-fail on obvious caller
+        # errors (stale manifest cache, wrong pack_id in body, etc.).
+        if hashlib.sha256(canonical_bytes(body.manifest)).digest() != record.manifest_digest:
+            _LOG.warning(
+                "portal.packs.submit_refused",
+                extra={
+                    "reason": _MANIFEST_DIGEST_MISMATCH_REASON,
+                    "actor_subject": actor.subject,
+                    "pack_id": str(record.id),
+                    "from_state": record.state,
+                },
+            )
+            raise HTTPException(
+                status_code=400,
+                detail={"reason": _MANIFEST_DIGEST_MISMATCH_REASON},
+            )
+
+        # T9 step 2 — run OWASP conformance OUTSIDE the storage closure.
+        # Pure-functional over the manifest dict; no I/O.  Non-gating
+        # per BUILD_PLAN §627.
+        conformance_payload = run_owasp_conformance_for_chain_payload(body.manifest)
+
+        # T9 step 3 — thread evidence + race-protection kwargs into
+        # ``transition()``.  The locked precondition's manifest-digest
+        # cross-check uses ``expected_manifest_digest`` to close the
+        # TOCTOU window per plan §1179-1181.
         try:
             await store.transition(
                 pack_id=record.id,
@@ -575,6 +699,8 @@ def build_author_routes(*, store: PackRecordStore) -> APIRouter:
                 tenant_id=actor.tenant_id,
                 evidence_pointer=None,
                 request_id=_mint_request_id(_PACK_SUBMIT_REQUEST_ID_PREFIX),
+                payload_conformance=conformance_payload,
+                expected_manifest_digest=record.manifest_digest,
             )
         except PackNotFound:
             # T4 R1 P2 #3 — race: row gone between tenant-isolation
@@ -698,6 +824,7 @@ def build_author_routes(*, store: PackRecordStore) -> APIRouter:
 
 __all__ = [
     "AuthorRefusalReason",
+    "AuthorRequestRefusalReason",
     "CreateDraftRequest",
     "UpdateDraftRequest",
     "build_author_routes",
@@ -720,6 +847,9 @@ def _validate_author_refusal_reason_drift() -> None:
     )
     from cognic_agentos.packs.storage import (
         PackRecordRefusalReason as _PR,
+    )
+    from cognic_agentos.portal.rbac.enforcement import (
+        RBACDenialReason,
     )
 
     upstream = set(get_args(_LR)) | set(get_args(_PR))
@@ -755,6 +885,36 @@ def _validate_author_refusal_reason_drift() -> None:
             "isolation layer also recognises (the 404 emit symmetry "
             "doctrine: a route-level PackNotFound race and the gate-"
             "level tenant-isolation 404 surface the same reason)."
+        )
+
+    # Sprint 7B.2 T9 R40 P2 #1 — verify the centralised
+    # _MANIFEST_DIGEST_MISMATCH_REASON literal IS a member of
+    # AuthorRequestRefusalReason (positive trace) AND IS NOT a member
+    # of any other upstream enum (route-owned ≠ upstream-delegated).
+    # The route-owned enum is wire-protocol-public via the 4-way union;
+    # drift here would silently bypass the union-coverage gate.
+    request_vocab = set(get_args(AuthorRequestRefusalReason))
+    # pragma: no cover branch — import-time fail-loud drift guard.
+    if _MANIFEST_DIGEST_MISMATCH_REASON not in request_vocab:  # pragma: no cover
+        raise RuntimeError(
+            f"_MANIFEST_DIGEST_MISMATCH_REASON={_MANIFEST_DIGEST_MISMATCH_REASON!r} "
+            f"is not a member of AuthorRequestRefusalReason {sorted(request_vocab)!r}. "
+            "This is a wire-protocol-drift bug — the T9 cheap-pre-check "
+            "400 emit MUST carry a closed-enum reason from the route-"
+            "owned vocabulary."
+        )
+    # Route-owned ≠ upstream-delegated invariant: AuthorRequestRefusalReason
+    # values MUST NOT collide with any of the 4 upstream enums.  A
+    # collision would mean a route-owned 400 emit could be confused
+    # with a storage / lifecycle / RBAC / tenant-isolation refusal.
+    full_upstream = upstream | isolation_vocab | set(get_args(RBACDenialReason))
+    request_overlap = request_vocab & full_upstream
+    if request_overlap:  # pragma: no cover - import-time fail-loud
+        raise RuntimeError(
+            f"AuthorRequestRefusalReason values collide with upstream enums: "
+            f"{request_overlap!r}.  Route-owned refusal vocabulary MUST be "
+            f"disjoint from PackRecordRefusalReason | LifecycleRefusalReason "
+            f"| TenantIsolationFailure | RBACDenialReason."
         )
 
 

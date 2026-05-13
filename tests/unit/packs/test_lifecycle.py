@@ -71,14 +71,22 @@ class TestSprint7B1ClosedEnumVocabulary:
             "cancel_draft",
         }
 
-    def test_lifecycle_refusal_reason_is_canonical_13_value_closed_enum(self) -> None:
-        # Doctrine Lock C — 13 values, finalised at T2 R1 P2 (the
+    def test_lifecycle_refusal_reason_is_canonical_14_value_closed_enum(self) -> None:
+        # Doctrine Lock C — 14 values: 13 finalised at T2 R1 P2 (the
         # plan-of-record's provisional 12-value count grew by one when the
         # transition-name runtime guard was added to close the
-        # KeyError-leak contract bug). ``actor_role_mismatch`` deferred to
-        # 7B.2 (RBAC), ``evidence_required`` deferred to 7B.3 (5-gate);
+        # KeyError-leak contract bug); +1 at Sprint 7B.2 T9 for the locked
+        # manifest-digest precondition refusal that fires from inside
+        # ``packs/storage._precondition`` when the submit-path caller's
+        # ``expected_manifest_digest`` kwarg disagrees with the row-locked
+        # ``manifest_digest`` column (race-condition fix per plan §1181).
+        # ``actor_role_mismatch`` deferred to 7B.2 (RBAC),
+        # ``evidence_required`` deferred to 7B.3 (5-gate);
         # ``kind_state_combination_forbidden`` reserved for future kind
-        # rules with no emit path in 7B.1.
+        # rules with no emit path in 7B.1; the 14th value
+        # ``manifest_digest_changed_during_submit`` emits ONLY from
+        # ``storage._precondition``, NOT from ``validate_transition``
+        # (which has no access to the manifest_digest column).
         assert set(get_args(LifecycleRefusalReason)) == {
             "lifecycle_transition_invalid_state_pair",
             "lifecycle_transition_state_unknown",
@@ -93,7 +101,21 @@ class TestSprint7B1ClosedEnumVocabulary:
             "lifecycle_transition_approve_without_review_claim",
             "lifecycle_transition_disable_not_installed",
             "lifecycle_transition_allow_list_not_approved",
+            "lifecycle_transition_manifest_digest_changed_during_submit",
         }
+
+    def test_manifest_digest_changed_during_submit_is_storage_only_emit(self) -> None:
+        """The 14th value, ``lifecycle_transition_manifest_digest_changed_during_submit``,
+        emits ONLY from ``packs/storage._precondition`` on a TOCTOU race —
+        NOT from :func:`validate_transition` (which is a pure-functional
+        state-machine validator with no access to the persisted
+        ``manifest_digest`` column). Pinning here so a future refactor
+        that tries to thread digest-mismatch back into
+        :func:`validate_transition` is forced to update this test +
+        revisit the plan-of-record's separation-of-concerns invariant."""
+        assert "lifecycle_transition_manifest_digest_changed_during_submit" in get_args(
+            LifecycleRefusalReason
+        )
 
     def test_kind_state_combination_forbidden_is_reserved_doctrine_value(self) -> None:
         """``lifecycle_transition_kind_state_combination_forbidden`` is included
@@ -251,11 +273,16 @@ class TestSprint7B1ValidTransitionsReturnNone:
 
 
 class TestSprint7B1InvalidTransitionsEmitClosedEnum:
-    """One negative case per emittable :data:`LifecycleRefusalReason` (12
-    emit reasons after T2 R1 P2 added ``lifecycle_transition_name_unknown``;
-    the 13th value, ``lifecycle_transition_kind_state_combination_forbidden``,
-    is reserved per
-    :class:`TestSprint7B1ClosedEnumVocabulary.test_kind_state_combination_forbidden_is_reserved_doctrine_value`).
+    """One negative case per emittable :data:`LifecycleRefusalReason` value
+    that :func:`validate_transition` produces (12 emit reasons after T2 R1 P2
+    added ``lifecycle_transition_name_unknown``; the 13th value,
+    ``lifecycle_transition_kind_state_combination_forbidden``, is reserved
+    per
+    :class:`TestSprint7B1ClosedEnumVocabulary.test_kind_state_combination_forbidden_is_reserved_doctrine_value`;
+    the 14th value, ``lifecycle_transition_manifest_digest_changed_during_submit``,
+    is storage-only-emit per
+    :class:`TestSprint7B1ClosedEnumVocabulary.test_manifest_digest_changed_during_submit_is_storage_only_emit`
+    — its emit path lives in ``packs/storage._precondition`` not here).
 
     Per the plan-of-record T2 §"Tests": "12+ representative invalid transitions"
     — exceeded here with explicit per-reason tests + precedence-ordering tests.

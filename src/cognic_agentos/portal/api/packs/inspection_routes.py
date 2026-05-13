@@ -241,7 +241,7 @@ def build_inspection_routes(*, store: PackRecordStore) -> APIRouter:
         ``decision_history.event_type LIKE 'pack.lifecycle.%'`` slice
         filtered to ``payload['pack_id'] == str(pack_id)`` (the
         client-side JSON-key filter pattern at
-        ``packs/storage.py:919-970``, dialect-portable across PG /
+        ``packs/storage.py:981-1033``, dialect-portable across PG /
         Oracle / SQLite). Filtering is done at the storage seam — no
         cross-pack rows reach this handler.
 

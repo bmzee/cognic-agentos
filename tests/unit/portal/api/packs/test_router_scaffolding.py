@@ -429,16 +429,23 @@ class TestSprint7B2PackEvidenceResponse:
     auto-run-on-submit wire (read from the chain ``payload.conformance``).
 
     Two-field shape:
-    - ``conformance: dict[str, Any] | None`` — populated when T9 has
-      attached evidence to the submit chain row; ``None`` pre-T9 or when
-      the pack has no submit row.
+    - ``conformance: dict[str, Any] | None`` — populated for T9-era
+      submit chain rows (Sprint 7B.2 T9 Slice 2 wired auto-run-on-
+      submit so post-T9 rows carry the 4-key runner payload);
+      ``None`` for historical / pre-T9 chain rows that lack the
+      ``conformance`` key OR when the pack has no submit row.
     - ``reviewer_evidence_panels: None`` — literal-typed at ``None``
       in 7B.2; 7B.3 fills in with the full evidence-panel object.
     """
 
     def test_accepts_conformance_dict(self) -> None:
-        """The conformance kwarg accepts an arbitrary dict (the OWASP
-        runner emits the result schema; T9 will pin the inner shape)."""
+        """The conformance kwarg accepts an arbitrary dict.  The OWASP
+        runner's 4-key inner shape (``overall_status`` / ``results`` /
+        ``summary`` / ``errored_categories``) is owned + pinned by
+        ``tests/unit/packs/conformance/test_runner.py``'s 9-test wire-
+        shape suite; this DTO test pins only the outer Pydantic
+        validation contract that the conformance field accepts the
+        dict shape (or ``None``)."""
         resp = PackEvidenceResponse(
             conformance={"status": "green", "checks": []},
             reviewer_evidence_panels=None,
@@ -447,10 +454,12 @@ class TestSprint7B2PackEvidenceResponse:
         assert resp.reviewer_evidence_panels is None
 
     def test_accepts_null_conformance_for_pre_t9_chains(self) -> None:
-        """Plan T5 caveat — pre-T9 submit chain rows carry no
+        """Historical-compatibility path — pre-T9 submit chain rows
+        (fixtures or rows created by the T5-era submit handler before
+        Sprint 7B.2 T9 Slice 2 wired auto-run-on-submit) carry no
         ``payload.conformance`` key; the read path surfaces ``None``
-        and the endpoint MUST return a structured ``null`` rather than
-        a 500."""
+        and the endpoint returns a structured ``null`` rather than
+        a 500.  Both shapes coexist via this DTO."""
         resp = PackEvidenceResponse(
             conformance=None,
             reviewer_evidence_panels=None,

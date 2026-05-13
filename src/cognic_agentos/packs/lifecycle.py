@@ -153,12 +153,21 @@ TransitionName = Literal[
     "cancel_draft",
 ]
 
-#: 13-value closed-enum refusal reasons (Doctrine Lock C, finalised at T2 —
-#: the plan-of-record anticipated +/- 1 vs. its provisional 12-value count
-#: as the transition table was enumerated). ``actor_role_mismatch`` and
-#: ``evidence_required`` are deferred to Sprint 7B.2 / 7B.3 respectively per
-#: the plan-of-record. ``lifecycle_transition_kind_state_combination_forbidden``
-#: is reserved for future kind-specific rules and has no emit path in 7B.1.
+#: 14-value closed-enum refusal reasons (Doctrine Lock C; 13 values finalised
+#: at T2 from the plan-of-record's provisional ±1 count as the transition
+#: table was enumerated; +1 added at Sprint 7B.2 T9 for the locked
+#: manifest-digest precondition refusal that fires from inside
+#: ``packs/storage._precondition`` when the submit-path caller's
+#: ``expected_manifest_digest`` kwarg disagrees with the row-locked
+#: ``manifest_digest`` column — race-condition fix per plan §1179-1181).
+#: ``actor_role_mismatch`` and ``evidence_required`` are deferred to Sprint
+#: 7B.2 (RBAC) / 7B.3 (5-gate) respectively. The 14th value
+#: ``lifecycle_transition_manifest_digest_changed_during_submit`` emits ONLY
+#: from ``storage._precondition`` (storage-only-emit), NOT from
+#: :func:`validate_transition` which is pure-functional and has no access
+#: to the persisted ``manifest_digest`` column.
+#: ``lifecycle_transition_kind_state_combination_forbidden`` is reserved
+#: for future kind-specific rules and has no emit path in 7B.1.
 #:
 #: ``lifecycle_transition_name_unknown`` was added at T2 R1 P2 to close the
 #: KeyError-leak contract bug — the public function MUST return a closed-enum
@@ -186,6 +195,7 @@ LifecycleRefusalReason = Literal[
     "lifecycle_transition_approve_without_review_claim",
     "lifecycle_transition_disable_not_installed",
     "lifecycle_transition_allow_list_not_approved",
+    "lifecycle_transition_manifest_digest_changed_during_submit",
 ]
 
 #: Per-transition legal ``(from_state, to_state)`` pairs, mirroring the
@@ -313,7 +323,7 @@ _KNOWN_ISO_CONTROL_CODES: Final[frozenset[str]] = frozenset(
 #: pinned by ``test_lifecycle_audit.py::TestSprint7B1IsoControlsMapShape``.
 #: Build-time assert at module foot mirrors the
 #: ``_TRANSITION_TO_TARGET_STATE`` drift assert at
-#: ``packs/storage.py:1085-1099``.
+#: ``packs/storage.py:1147-1161``.
 _TRANSITION_TO_ISO_CONTROLS: Final[Mapping[TransitionName, tuple[str, ...]]] = {
     "submit": ("A.5.31", "A.6.2.4"),
     "claim": ("A.5.31",),
@@ -344,7 +354,7 @@ class LifecycleTransitionRefused(Exception):
     public seam that takes a closed-enum-typed argument
     (``validate_transition`` step 3 in this module;
     :meth:`PackRecordStore.transition` preflight guard at
-    ``packs/storage.py:715-716``; :func:`iso_controls_for` in this module)
+    ``packs/storage.py:742-743``; :func:`iso_controls_for` in this module)
     raises this same exception with the same
     ``"lifecycle_transition_name_unknown"`` reason for out-of-vocabulary
     transitions.
@@ -387,7 +397,7 @@ def iso_controls_for(transition: TransitionName) -> tuple[str, ...]:
     Per the asymmetric-runtime-guard doctrine
     (``feedback_strict_review_off_gate.md`` §8 — same as
     :func:`validate_transition` step 3 + :meth:`PackRecordStore.transition`
-    preflight guard at ``packs/storage.py:715-716``): out-of-vocabulary
+    preflight guard at ``packs/storage.py:742-743``): out-of-vocabulary
     transition names are refused with :class:`LifecycleTransitionRefused`
     carrying the closed-enum
     ``"lifecycle_transition_name_unknown"`` reason — NOT a bare
@@ -545,7 +555,7 @@ def validate_transition(
 # ``tests/unit/packs/test_lifecycle_audit.py::TestSprint7B1IsoControlsMapShape``
 # provides the operator-facing diagnostic. Mirrors the
 # ``_TRANSITION_TO_TARGET_STATE`` drift assert at
-# ``packs/storage.py:1085-1099``.
+# ``packs/storage.py:1147-1161``.
 assert set(_TRANSITION_TO_ISO_CONTROLS.keys()) == set(get_args(TransitionName)), (
     "_TRANSITION_TO_ISO_CONTROLS keys diverge from get_args(TransitionName)"
 )

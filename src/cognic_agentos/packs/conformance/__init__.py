@@ -52,6 +52,9 @@ from cognic_agentos.packs.conformance.owasp_agentic import (
     check_unsafe_network,
     run_owasp_conformance,
 )
+from cognic_agentos.packs.conformance.runner import (
+    run_owasp_conformance_for_chain_payload,
+)
 
 __all__ = [
     "ConformanceCheckResult",
@@ -70,4 +73,5 @@ __all__ = [
     "check_unsafe_filesystem",
     "check_unsafe_network",
     "run_owasp_conformance",
+    "run_owasp_conformance_for_chain_payload",
 ]

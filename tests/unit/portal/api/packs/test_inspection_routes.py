@@ -673,7 +673,7 @@ class TestSprint7B2InspectionDetailEndpoint:
             assert "decision_type" in event
 
         # The submit row is tagged ``pack.lifecycle.submitted`` per
-        # ``packs/storage.py:804`` (target-state event-type namespace).
+        # ``packs/storage.py:866`` (target-state event-type namespace).
         decision_types = {event["decision_type"] for event in history}
         assert "pack.lifecycle.submitted" in decision_types, (
             f"submit chain row missing from history; got {decision_types}"
@@ -748,7 +748,7 @@ class TestSprint7B2InspectionAuditEndpoint:
     """``GET /api/v1/packs/{pack_id}/audit`` — hash-chained audit
     events per plan §999. Reads via :meth:`PackRecordStore.load_lifecycle_history`
     (filtered to ``payload['pack_id'] == str(pack_id)`` per the
-    ``packs/storage.py:919-970`` walker — already in the storage CC
+    ``packs/storage.py:981-1033`` walker — already in the storage CC
     surface and dialect-portable across PG / Oracle / SQLite).
 
     Dependency chain identical to detail endpoint above:

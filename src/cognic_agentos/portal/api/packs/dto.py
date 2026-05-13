@@ -187,6 +187,40 @@ class RejectDraftRequest(PackBaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Sprint 7B.2 T9 — SubmitDraftRequest request schema
+# (Plan §1183-1234 — POST /api/v1/packs/drafts/{pack_id}/submit body)
+# ---------------------------------------------------------------------------
+
+
+class SubmitDraftRequest(PackBaseModel):
+    """POST ``/api/v1/packs/drafts/{pack_id}/submit`` request body
+    (Sprint 7B.2 T9).
+
+    Author / SDK / CLI sends the manifest dict as JSON; the route
+    computes ``sha256(canonical_bytes(body.manifest))`` and cross-checks
+    against the persisted ``packs.manifest_digest`` column (cheap pre-
+    check) + threads ``expected_manifest_digest=record.manifest_digest``
+    into the storage transition so the in-precondition cross-check
+    closes the TOCTOU window per plan §1179-1181.
+
+    The manifest dict is also fed to
+    :func:`run_owasp_conformance_for_chain_payload` so the chain row's
+    ``payload.conformance`` carries the OWASP suite result as evidence
+    (non-gating per BUILD_PLAN §627; the actual gate composition is 7B.3).
+
+    Inherits :class:`PackBaseModel`'s ``frozen=True`` + ``extra="forbid"``
+    so smuggled top-level fields refuse at validation.  The ``manifest``
+    field itself is intentionally typed as ``dict[str, Any]`` (NOT a
+    closed Pydantic schema) — the manifest's internal shape is validated
+    by the OWASP conformance check matrix + the build-time CLI
+    validators; pinning a closed Pydantic schema here would re-implement
+    that validation surface twice.
+    """
+
+    manifest: dict[str, Any]
+
+
+# ---------------------------------------------------------------------------
 # Sprint 7B.2 T5 — PackEvidenceResponse response schema
 # (Plan Round 11 P3 #5 — GET /api/v1/packs/{pack_id}/evidence)
 # ---------------------------------------------------------------------------
@@ -199,18 +233,25 @@ class PackEvidenceResponse(PackBaseModel):
     auto-run-on-submit conformance evidence + a placeholder for the
     7B.3 reviewer evidence panels (always-null literal in 7B.2).
 
-    Read-path (T5):
+    Read-path:
     - Walk :meth:`PackRecordStore.load_lifecycle_history` for the pack.
     - Find the most-recent ``event_type == "pack.lifecycle.submitted"`` row.
     - Surface its ``payload.get("conformance")`` value on the
-      ``conformance`` field; ``None`` for pre-T9 chain rows that carry
-      no conformance key.
+      ``conformance`` field.
 
-    Plan T5 caveat: until T9 lands, EVERY submit chain row is a pre-T9
-    chain that carries no ``conformance`` key, so the endpoint surfaces
-    ``{"conformance": null, "reviewer_evidence_panels": null}``
-    gracefully — the test surface pins both the pre-T9 null path AND
-    the forward-looking T9 populated path.
+    Sprint 7B.2 T9 Slice 2 wired auto-run-on-submit, so T9-era submit
+    chain rows carry the 4-key runner payload (``overall_status`` /
+    ``results`` / ``summary`` / ``errored_categories``) per
+    :func:`~cognic_agentos.packs.conformance.runner.run_owasp_conformance_for_chain_payload`'s
+    wire-shape contract.  Historical / pre-T9 submit chain rows
+    (fixtures or rows created by the T5-era submit handler before
+    Slice 2 landed) have no ``conformance`` key — the endpoint
+    surfaces ``None`` for those rows gracefully (NOT 500); both shapes
+    coexist via this schema, and the test surface pins both the
+    historical-null path AND the T9-populated path.
+    ``reviewer_evidence_panels`` stays literal-``None`` in 7B.2;
+    7B.3 fills it with the full evidence-panel object once the 5-gate
+    composition lands.
 
     Fields:
     - ``conformance: dict[str, Any] | None`` — populated when T9

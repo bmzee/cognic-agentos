@@ -164,9 +164,12 @@ pair — two modules that together form the ADR-012 lifecycle-state-
 machine + storage critical path:
 
   * ``packs/lifecycle.py`` — pure-functional state machine.
-    Closed-enum **13-value** ``LifecycleRefusalReason`` at
-    lines 175-189 (finalised at T2 from the plan-of-record's
-    provisional ±1 count as the transition table was enumerated).
+    Closed-enum **14-value** ``LifecycleRefusalReason`` at
+    lines 175-190 (13 values finalised at T2 from the plan-of-record's
+    provisional ±1 count as the transition table was enumerated; +1
+    at Sprint 7B.2 T9 for the locked manifest-digest precondition
+    refusal — storage-only-emit, race-condition fix per plan
+    §1179-1181).
     ``_VALID_TRANSITIONS`` legal-pair table at :210 (11 transitions
     / 14 legal pairs; Sprint 7B.2 T4 extended from 10/13 by adding
     ``cancel_draft`` per ADR-012 §59). ``validate_transition(*, from_state,
@@ -179,7 +182,7 @@ machine + storage critical path:
     the closed-enum reason. Doctrine Lock C — the closed-enum
     vocabulary IS the consumer-API wire-protocol contract carried
     by ``LifecycleTransitionRefused.reason``. **Two-tier consumer
-    split**: T3 storage (``packs/storage.py:118``) is the SOLE
+    split**: T3 storage (``packs/storage.py:129-130``) is the SOLE
     DIRECT caller of ``iso_controls_for(...)`` +
     ``validate_transition(...)``; the Sprint 7B.2 portal pack-API
     handlers (T4 author / T5 review / T6 operator / T7 inspection)
@@ -187,66 +190,94 @@ machine + storage critical path:
     SURFACED by storage's re-raise (typed-exception catch around
     ``store.transition(...)`` call sites in each handler body).
     ``transition()`` derives the canonical ISO control tuple via
-    ``iso_controls_for(transition)`` at :734 BEFORE the precondition
+    ``iso_controls_for(transition)`` at :761 BEFORE the precondition
     closure — pure-functional helper, no I/O — then runs
-    ``validate_transition(...)`` at :758-763 INSIDE the closure
+    ``validate_transition(...)`` at :810-815 INSIDE the closure
     under the row-locked view; the precondition raises
-    ``LifecycleTransitionRefused`` at :765, ``engine.begin()`` at
+    ``LifecycleTransitionRefused`` at :817 (validate-refusal path)
+    or at :806-808 (Sprint 7B.2 T9 storage-only-emit digest-mismatch
+    path — see below), ``engine.begin()`` at
     ``core/decision_history.py:482`` rolls back the transaction on
-    the exception path, and the exception propagates up through
+    every exception path, and the exception propagates up through
     ``append_with_precondition`` and ``transition()`` to the portal
     handler — neither storage layer catches it. Chain audit events themselves use the
     ``pack.lifecycle.<target_state>`` namespace (keyed by target
     state, not by ``.refused`` — refusals roll back BEFORE any
     chain row is written). Sprint-7B.1 T2.
   * ``packs/storage.py`` — Postgres-backed ``PackRecordStore`` at
-    :380; the ``DecisionHistoryStore.append_with_precondition``
+    :385; the ``DecisionHistoryStore.append_with_precondition``
     consumer that drives every lifecycle transition through the
-    Sprint-2.5 T2 atomic primitive. ``transition()`` at :617
-    first runs the preflight transition-name guard at :715-716
+    Sprint-2.5 T2 atomic primitive. ``transition()`` at :622
+    first runs the preflight transition-name guard at :742-743
     (out-of-vocabulary transitions raise
     ``LifecycleTransitionRefused("lifecycle_transition_name_unknown")``
     BEFORE any helper invocation or DB work; mirrors the
     asymmetric-runtime-guard fix at ``packs/lifecycle.py:416-417``);
-    on the green path resolves ``target_state`` at :718 and
+    on the green path resolves ``target_state`` at :745 and
     derives the canonical ISO 42001 control tuple via
-    ``iso_controls_for(transition)`` at :734 BEFORE the closure
+    ``iso_controls_for(transition)`` at :761 BEFORE the closure
     (pure-functional, no I/O), then enters the row-locked
-    precondition closure at :736 (``SELECT ... FOR UPDATE`` on
-    the ``packs`` row at :745-750 under the chain-head ``FOR
-    UPDATE`` lock) → ``validate_transition(...)`` at :758-763
-    under the locked view → ``UPDATE packs SET state, last_actor,
-    updated_at`` at :772-780 (three columns; no ``version_counter``
-    field — atomicity comes from the chain-head + row lock pair).
-    OUTSIDE the closure: ``_build_record`` at :783 mints a
-    ``DecisionRecord`` with
-    ``decision_type = f"pack.lifecycle.{target_state}"`` at :804
+    precondition closure at :763 (``SELECT ... FOR UPDATE`` on
+    the ``packs`` row at :778-783 projecting
+    ``state, kind, manifest_digest`` under the chain-head ``FOR
+    UPDATE`` lock — Sprint 7B.2 T9 extended the column set from
+    ``state, kind`` to add ``manifest_digest`` so the locked
+    precondition can cross-check the row's digest against the
+    caller's ``expected_manifest_digest`` kwarg) →
+    **Sprint 7B.2 T9 storage-only-emit digest cross-check at
+    :806-808**: when ``expected_manifest_digest is not None`` AND
+    the row-locked ``manifest_digest`` does NOT match, the
+    precondition raises
+    ``LifecycleTransitionRefused("lifecycle_transition_manifest_digest_changed_during_submit")``
+    BEFORE the state-machine validator runs (race-condition fix
+    per plan §1179-1181; storage-only-emit because
+    ``validate_transition`` has no access to the persisted digest
+    column) → ``validate_transition(...)`` at :810-815 under the
+    locked view (raises ``LifecycleTransitionRefused(reason)`` at
+    :817 on the state-machine refusal path) → ``UPDATE packs SET
+    state, last_actor, updated_at`` at :824-832 (three columns;
+    no ``version_counter`` field — atomicity comes from the
+    chain-head + row lock pair). OUTSIDE the closure:
+    ``_build_record`` at :835 mints a ``DecisionRecord`` with
+    ``decision_type = f"pack.lifecycle.{target_state}"`` at :866
     and the pre-derived ``canonical_iso_controls`` value (no fresh
     ``iso_controls_for`` call from ``_build_record``). **Sprint 7B.2
     T6 slice-2 (R24 P2 Path B + B2 user-authorized CC-ADJ) added
     the optional keyword-only ``actor_type: str | None = None``
-    kwarg at :626; when non-None it is persisted as a top-level
-    ``payload["actor_type"]`` key conditionally at :801-802 so
+    kwarg at :631; when non-None it is persisted as a top-level
+    ``payload["actor_type"]`` key conditionally at :854-855 so
     existing call sites + every pre-T6 chain row stay byte-shape
     compatible (additive-only schema; storage stays a thin string
     passthrough — the ``human | service`` closed-enum lives at the
-    rbac boundary).** ``append_with_precondition`` at :812 commits
+    rbac boundary).** **Sprint 7B.2 T9 added three further
+    optional keyword-only kwargs to ``transition()`` at :632-634
+    — ``payload_conformance: dict[str, Any] | None``,
+    ``expected_manifest_digest: bytes | None``, and
+    ``evidence_attachments: dict[str, Any] | None``; the first +
+    third land as conditional ``payload["conformance"]`` /
+    ``payload["evidence_attachments"]`` keys at :861-864 via the
+    same ``_build_record`` shape pattern as the T6
+    ``payload["actor_type"]`` insert (omitted kwargs add NO empty
+    keys); the second feeds the storage-only-emit digest cross-
+    check above. Storage stays a thin passthrough — vocabulary /
+    shape validation lives at the portal route boundary, not
+    storage.** ``append_with_precondition`` at :874 commits
     chain row + state-cache UPDATE + chain-head UPDATE atomically.
-    Two-class refusal taxonomy: ``PackNotFound`` at :267 for
-    missing-pack lookups; ``PackRecordRefused`` at :294-351
+    Two-class refusal taxonomy: ``PackNotFound`` at :272 for
+    missing-pack lookups; ``PackRecordRefused`` at :299-356
     carrying the 4-value ``PackRecordRefusalReason`` Literal at
-    :286 (genesis-state guard + 3 update_draft API-contract
+    :291 (genesis-state guard + 3 update_draft API-contract
     refusals — Sprint 7B.2 T4 bumped 1 → 4 when ``update_draft()``
-    landed; ``update_draft()`` itself at :444 mirrors
-    ``save_draft()``'s genesis-state pattern at :397 — atomic
+    landed; ``update_draft()`` itself at :449 mirrors
+    ``save_draft()``'s genesis-state pattern at :402 — atomic
     ``UPDATE … WHERE state='draft'``, no chain row); transition-
     table refusals raise ``LifecycleTransitionRefused`` from the
-    precondition at :765 so the engine's transactional rollback
+    precondition at :817 so the engine's transactional rollback
     fires (no chain row, no state-cache mutation, no orphan
     INSERT). **Sprint 7B.2 T7 CC-ADJ extension (Slice 1 — pure
     read; no Doctrine Lock D touch)**: NEW ``list_for_tenant(...)``
-    at :871 + module-private ``_build_list_for_tenant_stmt(...)``
-    at :1011 — the AUTHORITATIVE tenant-scoped read seam for the
+    at :933 + module-private ``_build_list_for_tenant_stmt(...)``
+    at :1073 — the AUTHORITATIVE tenant-scoped read seam for the
     T7 inspection-list endpoint (the only inspection endpoint
     without a ``{pack_id}`` path-param, so server-side WHERE clause
     ``tenant_id == :tenant_id`` IS the tenant boundary). REQUIRED
@@ -402,6 +433,41 @@ most-likely future regression class.
 Both modules ride the same single strict 95% line / 90% branch
 floor as the rest of the critical-controls gate. Gate size grows
 from 44 modules to 46.
+
+Sprint 7B.2 T9 Slice 4 promotes the **chain-payload serialization
+adapter** to the durable gate (plan §1062-1252; gate 46 → 47):
+
+  * ``packs/conformance/runner.py`` —
+    :func:`run_owasp_conformance_for_chain_payload(manifest) ->
+    dict[str, Any]` is the WIRE-SHAPE boundary between the
+    :func:`run_owasp_conformance` check matrix and the chain row's
+    ``payload["conformance"]`` key.  Delegates to the T8 dispatcher
+    for the check matrix, then converts the returned
+    :class:`ConformanceReport` via :func:`dataclasses.asdict` and
+    EXPLICITLY converts ``errored_categories`` from tuple to list.
+    The tuple → list conversion is load-bearing: Python's
+    :func:`dataclasses.asdict` PRESERVES tuple-typed fields, but the
+    Sprint-2 canonical-form at
+    :func:`cognic_agentos.core.canonical.canonical_bytes` REJECTS
+    tuples in chain payloads (to prevent the silent list/tuple
+    ambiguity bug class).  Without the explicit conversion the
+    chain insert at every T9 submit would fail with a TypeError on
+    the canonical-form gate.  The 4-key top-level shape
+    (``overall_status, results, summary, errored_categories``) is
+    wire-protocol-public per ADR-006 — T9 chain payload consumers +
+    7B.3 reviewer evidence panels read this exact dict shape.
+
+T9 promotes runner.py — NOT pure re-export glue — because it owns
+the chain-payload serialization contract (including the canonical-
+form-required tuple/list conversion).  Drift in either the 4-key
+top-level shape or the tuple → list invariant breaks chain-payload
+byte-stability + canonical-form acceptance + 7B.3 reviewer
+consumer schemas.  Pinned by
+``tests/unit/packs/conformance/test_runner.py``'s 9-test wire-
+shape suite.
+
+Rides the same single strict 95% line / 90% branch floor.  Gate
+size grows from 46 modules to 47.
 """
 
 from __future__ import annotations
@@ -679,6 +745,13 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     # Both ride the same single strict 95% line / 90% branch floor.
     ("src/cognic_agentos/packs/conformance/checks.py", 0.95, 0.90),
     ("src/cognic_agentos/packs/conformance/owasp_agentic.py", 0.95, 0.90),
+    # Sprint 7B.2 T9 Slice 4 — chain-payload serialization adapter
+    # (plan §1062-1252).  Thin wire-shape boundary between the T8
+    # check matrix + the T9 chain row's ``payload["conformance"]``.
+    # Owns the load-bearing ``errored_categories`` tuple → list
+    # conversion + the 4-key wire-shape contract — NOT pure re-
+    # export glue.  Pinned by ``test_runner.py``'s 9-test suite.
+    ("src/cognic_agentos/packs/conformance/runner.py", 0.95, 0.90),
 )
 
 

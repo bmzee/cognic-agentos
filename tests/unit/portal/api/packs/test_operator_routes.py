@@ -344,7 +344,7 @@ async def _seed_approved_pack(
     (approve). Three different actors for the three transitions so the
     same actor can later allow-list without tripping any cross-role
     constraint (role-separation is endpoint-level, not storage-level —
-    storage accepts any ``actor_id`` per ``packs/storage.py:617``).
+    storage accepts any ``actor_id`` per ``packs/storage.py:622``).
     """
     record = await _seed_draft_pack(store, tenant_id=tenant_id, created_by=created_by)
     await store.transition(
