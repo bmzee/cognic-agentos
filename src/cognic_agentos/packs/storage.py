@@ -39,21 +39,34 @@ Doctrine
   :class:`PackRecordRefused` did not yet exist):
 
   1. **API-contract refusal** — :class:`PackRecordRefused` carries the
-     closed-enum :data:`PackRecordRefusalReason` (Wave-1: only
-     ``pack_record_save_draft_initial_state_not_draft``). Raised by
+     closed-enum :data:`PackRecordRefusalReason` (Sprint 7B.2 T4 bumped
+     this from 1 to 4 values: the genesis-state guard
+     ``pack_record_save_draft_initial_state_not_draft`` plus three
+     ``update_draft`` API-contract refusals
+     ``pack_record_update_non_draft_state`` /
+     ``pack_record_update_field_not_allowed`` /
+     ``pack_record_update_field_invalid_shape``). Raised by
      :meth:`PackRecordStore.save_draft` BEFORE any DB connection is
      acquired when the supplied record violates the API's preconditions
-     (``state != "draft"`` would bypass the lifecycle audit chain).
+     (``state != "draft"`` would bypass the lifecycle audit chain),
+     and by :meth:`PackRecordStore.update_draft` for the three
+     update-side preconditions (non-draft-state target, allow-list
+     violation, per-field value-shape violation).
   2. **State-machine transition refusal** —
      :class:`LifecycleTransitionRefused` carries the closed-enum
      :data:`cognic_agentos.packs.lifecycle.LifecycleRefusalReason`
-     (13 reasons). Raised by :meth:`PackRecordStore.transition` from
-     either path: PREFLIGHT
-     (``lifecycle_transition_name_unknown`` — runtime guard at
-     function entry; no DB connection acquired) or IN-PRECONDITION
+     (14 reasons; the 14th —
+     ``lifecycle_transition_manifest_digest_changed_during_submit`` —
+     emits from the locked precondition's manifest-digest cross-check
+     added at Sprint 7B.2 T9, NOT from :func:`validate_transition`).
+     Raised by :meth:`PackRecordStore.transition` from either path:
+     PREFLIGHT (``lifecycle_transition_name_unknown`` — runtime guard
+     at function entry; no DB connection acquired) or IN-PRECONDITION
      (any other reason — from
      :func:`cognic_agentos.packs.lifecycle.validate_transition` running
-     under the chain-head lock; transaction rolls back atomically).
+     under the chain-head lock, OR from the storage-side digest cross-
+     check that fires under the same lock; transaction rolls back
+     atomically).
   3. **Lookup miss** — :class:`PackNotFound` carries the missing
      ``pack_id: uuid.UUID`` (NOT a closed enum — no enum is needed
      because the failure mode is single-valued; the structured field
@@ -78,6 +91,7 @@ Doctrine
 
 from __future__ import annotations
 
+import logging
 import uuid
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -88,6 +102,7 @@ from sqlalchemy import (
     CheckConstraint,
     Column,
     Index,
+    Select,
     String,
     Table,
     Text,
@@ -115,7 +130,17 @@ from cognic_agentos.packs.lifecycle import (
     validate_transition,
 )
 
-#: Each :data:`TransitionName` in the canonical 10-tuple has exactly one
+#: Sprint 7B.2 T4 — module-level logger for structured-log emission paths.
+#: Today only the ``update_draft`` value-shape refusal branch writes to it
+#: (``packs.update_draft.invalid_shape``); other refusal paths still raise
+#: typed exceptions that callers dispatch on. The contract per Sprint 7B.2
+#: T4 plan §"Structured-log emission contract": diagnostic field names
+#: surface via this logger rather than being extended onto the typed-
+#: exception payload (so the 7B.1 ``PackRecordRefused.__init__`` signature
+#: stays unchanged at ``(reason, *, state=None)``).
+_LOG = logging.getLogger(__name__)
+
+#: Each :data:`TransitionName` in the canonical 11-tuple has exactly one
 #: legal ``to_state`` (verified at build time by
 #: ``tests/unit/packs/test_storage.py::TestSprint7B1TransitionToTargetStateMap``
 #: against ``_VALID_TRANSITIONS``). Storage derives ``to_state`` from
@@ -125,6 +150,15 @@ from cognic_agentos.packs.lifecycle import (
 #: new transition without an entry here OR adding a ``_VALID_TRANSITIONS``
 #: row whose pair set has a different ``to_state`` than mapped here
 #: would fail the drift detector.
+#:
+#: Sprint 7B.2 T4 added ``cancel_draft → "withdrawn"`` per ADR-012 §59
+#: (the developer-scratches-own-draft path). The lifecycle.py
+#: ``_VALID_TRANSITIONS["cancel_draft"]`` table extension is the
+#: authoritative source; this map mirrors it in lockstep per Sprint-7B.1
+#: T3 R1 P2 #2 asymmetric-guard pattern (Round 3 P2 #3 ownership split:
+#: lifecycle.py owns transition vocabulary; storage.py owns this local
+#: target-state mirror because storage needs ``target_state`` resolved
+#: BEFORE the precondition closure for the chain row's event-type tag).
 _TRANSITION_TO_TARGET_STATE: Final[Mapping[TransitionName, PackState]] = {
     "submit": "submitted",
     "claim": "under_review",
@@ -136,7 +170,26 @@ _TRANSITION_TO_TARGET_STATE: Final[Mapping[TransitionName, PackState]] = {
     "disable": "disabled",
     "revoke": "revoked",
     "uninstall": "uninstalled",
+    "cancel_draft": "withdrawn",
 }
+
+#: Sprint 7B.2 T4 R3 P2 #3 — shared column-width constants for the
+#: ``packs`` table. Wire-protocol-public: the DTOs at
+#: ``portal/api/packs/author_routes.py`` import these and apply them as
+#: Pydantic ``Field(max_length=...)`` constraints so wire-input refusal
+#: at 422 matches the DB column cap. Pre-fix the create DTO accepted
+#: empty ``pack_id`` / empty ``display_name`` / empty ``sbom_pointer``;
+#: ``save_draft()`` has no equivalent shape guard, so malformed values
+#: could persist while ``update_draft`` refused analogous shapes —
+#: asymmetric create vs update field semantics. Promoting these
+#: constants to module level closes the asymmetry: every consumer
+#: derives from the single source of truth.
+PACK_ID_MAX_LEN: Final[int] = 256
+PACK_DISPLAY_NAME_MAX_LEN: Final[int] = 256
+PACK_KIND_MAX_LEN: Final[int] = 16
+PACK_STATE_MAX_LEN: Final[int] = 32
+PACK_TENANT_ID_MAX_LEN: Final[int] = 256
+PACK_ACTOR_MAX_LEN: Final[int] = 256
 
 #: Module-level Table object registered against the SAME ``_metadata`` as
 #: ``audit_event`` + ``decision_history`` (imported from ``core/audit``).
@@ -153,16 +206,16 @@ _packs = Table(
     "packs",
     _metadata,
     Column("id", Uuid(), primary_key=True),
-    Column("kind", String(16), nullable=False),
-    Column("pack_id", String(256), nullable=False),
-    Column("display_name", String(256), nullable=False),
-    Column("state", String(32), nullable=False),
+    Column("kind", String(PACK_KIND_MAX_LEN), nullable=False),
+    Column("pack_id", String(PACK_ID_MAX_LEN), nullable=False),
+    Column("display_name", String(PACK_DISPLAY_NAME_MAX_LEN), nullable=False),
+    Column("state", String(PACK_STATE_MAX_LEN), nullable=False),
     Column("manifest_digest", chain_hash_column_type(), nullable=False),
     Column("signed_artefact_digest", chain_hash_column_type(), nullable=False),
     Column("sbom_pointer", Text(), nullable=True),
-    Column("tenant_id", String(256), nullable=True),
-    Column("created_by", String(256), nullable=False),
-    Column("last_actor", String(256), nullable=False),
+    Column("tenant_id", String(PACK_TENANT_ID_MAX_LEN), nullable=True),
+    Column("created_by", String(PACK_ACTOR_MAX_LEN), nullable=False),
+    Column("last_actor", String(PACK_ACTOR_MAX_LEN), nullable=False),
     Column("created_at", TIMESTAMP(timezone=True), nullable=False),
     Column("updated_at", TIMESTAMP(timezone=True), nullable=False),
     CheckConstraint(
@@ -207,7 +260,7 @@ _packs = Table(
 # this exception on out-of-vocabulary inputs — but storage's preflight
 # guard at (a) above intercepts every storage-side call site BEFORE
 # the helper is reached, so the helper's own runtime guard at
-# ``packs/lifecycle.py:393-394`` cannot fire from within this module.
+# ``packs/lifecycle.py:416-417`` cannot fire from within this module.
 # The helper's guard fires only when external callers (planned:
 # Sprint 7B.2 portal handlers) invoke ``iso_controls_for`` directly —
 # that fire-site lives in :mod:`cognic_agentos.packs.lifecycle`, NOT
@@ -228,27 +281,63 @@ class PackNotFound(Exception):
         super().__init__(f"pack not found: {pack_id}")
 
 
-#: Closed-enum vocabulary for ``save_draft``-API contract refusals. The
-#: only Wave-1 reason is the genesis-state guard; future kind-specific
-#: or identity-specific preconditions land alongside without breaking
-#: the closed-enum dispatch contract.
-PackRecordRefusalReason = Literal["pack_record_save_draft_initial_state_not_draft",]
+#: Closed-enum vocabulary for ``save_draft`` + ``update_draft`` API-contract
+#: refusals. Sprint 7B.2 T4 bumped this from 1 to 4 values: the original
+#: genesis-state guard plus three ``update_draft`` API-contract refusals.
+#: The dual-contract surface (Sprint-7B.1 genesis-state guard + Sprint-7B.2
+#: update_draft preconditions) covers every author-side write path; future
+#: kind-specific or identity-specific preconditions land alongside without
+#: breaking the closed-enum dispatch contract.
+PackRecordRefusalReason = Literal[
+    "pack_record_save_draft_initial_state_not_draft",
+    "pack_record_update_non_draft_state",
+    "pack_record_update_field_not_allowed",
+    "pack_record_update_field_invalid_shape",
+]
 
 
 class PackRecordRefused(Exception):
-    """Raised by :meth:`PackRecordStore.save_draft` when the supplied
-    :class:`PackRecord` violates the API contract. The Wave-1 contract
-    is genesis-state-only: ``save_draft`` is the entry point to the
-    state machine, so ``record.state`` MUST be ``"draft"``. Calling
-    ``save_draft(state="installed")`` would persist a row with no
-    ``decision_history`` predecessor, bypassing the lifecycle audit
-    path entirely (T3 R1 P2 finding).
+    """Raised by :meth:`PackRecordStore.save_draft` (genesis-state guard)
+    OR :meth:`PackRecordStore.update_draft` (3 update_draft API-contract
+    refusals — non-draft-state, field-not-allowed, field-invalid-shape).
 
-    Distinct from :class:`LifecycleTransitionRefused` because this is
-    NOT a state-machine refusal — the lifecycle table never had a
-    chance to fire. Callers (Sprint 7B.2 portal author handlers) can
+    The dual-contract surface was finalised at Sprint 7B.2 T4: the
+    Sprint-7B.1 contract was genesis-state-only because ``save_draft``
+    is the entry point to the state machine, so ``record.state`` MUST
+    be ``"draft"``. Calling ``save_draft(state="installed")`` would
+    persist a row with no ``decision_history`` predecessor, bypassing
+    the lifecycle audit path entirely (T3 R1 P2 finding). Sprint 7B.2 T4
+    added ``update_draft`` for in-place edits to draft-state packs;
+    its three refusal modes land on the same exception class:
+
+    - ``pack_record_update_non_draft_state`` — pack exists but is not
+      in ``draft`` state (covers the race where a concurrent
+      ``transition("submit")`` or ``transition("cancel_draft")`` advanced
+      the pack out of ``draft`` between the route's preload and the
+      atomic UPDATE).
+    - ``pack_record_update_field_not_allowed`` — caller's ``updates``
+      dict contains a key outside the 4-field allow-list (covers
+      attempts to mutate any of the 5 immutable fields ``tenant_id``
+      / ``state`` / ``kind`` / ``pack_id`` / ``created_by``).
+    - ``pack_record_update_field_invalid_shape`` — allow-listed key
+      carries a value that fails the per-field type/shape contract
+      (Sprint 7B.2 T4 plan Round 6 P3 #4 — pure-Python validation;
+      mirrors the ``cli/validators/`` early-refusal pattern).
+
+    Distinct from :class:`LifecycleTransitionRefused` because neither
+    branch is a state-machine refusal — the lifecycle table never had
+    a chance to fire. Callers (Sprint 7B.2 portal author handlers) can
     dispatch on the exception class to distinguish "your draft request
     was malformed" from "the state machine refused your transition".
+
+    The exception payload carries the closed-enum :data:`PackRecordRefusalReason`
+    ONLY — no failing-field-name attribute (Sprint 7B.2 T4 Round 7 P2 #3
+    decision to keep the 7B.1 ``__init__`` signature unchanged at
+    ``(reason, *, state=None)``). Failing-field-name diagnostics surface
+    via the structured-log record emitted by ``update_draft`` at the
+    value-shape refusal branch (``packs.update_draft.invalid_shape``);
+    SIEM correlation + examiner audit consume the log, not the
+    exception payload.
     """
 
     def __init__(
@@ -357,6 +446,179 @@ class PackRecordStore:
             )
         return record.id
 
+    async def update_draft(
+        self,
+        *,
+        pack_id: uuid.UUID,
+        updates: dict[str, Any],
+        actor_id: str,
+    ) -> None:
+        """Sprint 7B.2 T4 — in-place edit of a ``draft``-state pack.
+
+        Updates a fixed allow-list of 4 non-state fields
+        (``display_name`` / ``manifest_digest`` / ``signed_artefact_digest``
+        / ``sbom_pointer``) on a pack iff its current ``state == 'draft'``.
+        ``last_actor`` + ``updated_at`` are ALWAYS overwritten by this
+        call regardless of which allow-listed fields the caller supplied
+        (so the audit-trail invariant ``last_actor`` = current modifier
+        holds). The original ``created_by`` is NEVER mutated (it sits in
+        the 5-field immutable set ``tenant_id`` / ``state`` / ``kind`` /
+        ``pack_id`` / ``created_by`` — attempts to include any of these
+        in ``updates`` are refused with
+        ``pack_record_update_field_not_allowed``).
+
+        No chain event is emitted — mirrors :meth:`save_draft`'s
+        genesis-state pattern. The pack is still in the pre-submit
+        editing window where the audit chain has not yet started; the
+        first chain event fires on the first ``transition()`` (typically
+        ``submit`` or ``cancel_draft``).
+
+        Refusal precedence (Sprint 7B.2 T4 plan §"Atomicity specification")
+        — fires top-down, fail-loud at the first mismatch:
+
+        1. **Field-allowlist refusal** (pure-Python, before any DB call):
+           if any key in ``updates`` is outside the 4-field allow-list,
+           raise :class:`PackRecordRefused` with reason
+           ``pack_record_update_field_not_allowed``. Mirrors the
+           early-refusal pattern in Sprint-7B.1 T3 storage's preflight
+           transition-name guard.
+        2. **Per-field value-shape refusal** (pure-Python, Round 6 P3 #4):
+           for each allow-listed key, verify the value matches the
+           per-field shape contract (``str`` non-empty ≤256 for
+           ``display_name``; ``bytes`` len==32 for both digests;
+           ``str`` non-empty or ``None`` for ``sbom_pointer``). First
+           mismatch raises :class:`PackRecordRefused` with reason
+           ``pack_record_update_field_invalid_shape``. The failing
+           field name surfaces via structured-log emission
+           (``packs.update_draft.invalid_shape``) for SIEM correlation;
+           NOT carried in the exception payload (Round 7 P2 #3 decision
+           to keep ``PackRecordRefused.__init__`` signature unchanged).
+        3. **Atomic UPDATE with state precondition**: single SQL
+           ``UPDATE packs SET <allowlisted-fields>, last_actor, updated_at
+           WHERE id = :pack_id AND state = 'draft'``. The state predicate
+           is part of the WHERE clause (NOT a separate
+           ``SELECT ... FOR UPDATE`` precondition closure — no chain row
+           is emitted, so ``append_with_precondition`` is not the right
+           primitive; the atomic UPDATE alone provides the consistency
+           guarantee).
+        4. **Rowcount-based refusal disambiguation**: rowcount==1 →
+           success path; rowcount==0 → follow-up
+           ``SELECT id, state FROM packs WHERE id = :pack_id`` to
+           distinguish :class:`PackNotFound` from
+           :class:`PackRecordRefused` with reason
+           ``pack_record_update_non_draft_state`` (the latter covers
+           the race where a concurrent ``transition("submit")`` or
+           ``transition("cancel_draft")`` advanced the pack out of
+           ``draft`` between the route's preload and the atomic UPDATE).
+
+        Tenant-isolation enforcement is route-level (caller goes through
+        :func:`portal.rbac.tenant_isolation.RequireTenantOwnership` at
+        the FastAPI dependency layer); storage enforces ONLY the
+        state-machine + field-allowlist + value-shape invariants. The
+        kwarg signature deliberately does NOT take a ``tenant_id``
+        argument so a caller cannot smuggle a cross-tenant mutation
+        past this layer (per Sprint 7B.2 T4 plan Round 5 P2 #3
+        resolution, mirroring 7B.1 ``save_draft()`` which also does
+        not accept ``tenant_id`` as a separate kwarg).
+
+        Parameters
+        ----------
+        pack_id
+            Target pack's primary-key UUID. The route layer resolves this
+            from the URL path via ``RequireTenantOwnership(pack_id_param=...)``
+            BEFORE calling here.
+        updates
+            Field-name → new-value mapping. Must contain only keys from
+            the 4-field allow-list above; values must match the per-field
+            shape contract.
+        actor_id
+            Authenticated principal's ``subject`` (from
+            :class:`Actor.subject`). Written to ``last_actor`` and used
+            in the structured-log emission's ``extra`` payload.
+
+        Raises
+        ------
+        PackRecordRefused
+            With closed-enum reason
+            ``pack_record_update_field_not_allowed`` (Step 1) /
+            ``pack_record_update_field_invalid_shape`` (Step 2) /
+            ``pack_record_update_non_draft_state`` (Step 4). All three
+            refuse fail-loud, fail-closed: no row mutation, no chain
+            row.
+        PackNotFound
+            Step 4 follow-up SELECT returned no row — pack does not
+            exist at this ``pack_id``. Distinct from
+            ``pack_record_update_non_draft_state`` because no decision
+            was made — the caller asked about a row that does not
+            exist.
+        """
+
+        # Step 1 — field-allowlist refusal (pure-Python; no DB call).
+        # The 4-field allow-list is the ONLY mutable surface; everything
+        # outside it (including the 5 immutable fields tenant_id / state
+        # / kind / pack_id / created_by) refuses with the same closed-enum
+        # reason so the caller dispatches uniformly. Mirrors the Sprint-
+        # 7B.1 T3 storage preflight transition-name guard pattern.
+        _ALLOWED_FIELDS: frozenset[str] = frozenset(
+            {
+                "display_name",
+                "manifest_digest",
+                "signed_artefact_digest",
+                "sbom_pointer",
+            }
+        )
+        for key in updates:
+            if key not in _ALLOWED_FIELDS:
+                raise PackRecordRefused("pack_record_update_field_not_allowed")
+
+        # Step 2 — per-field value-shape refusal (pure-Python; no DB call).
+        # First mismatch raises with the closed-enum reason ONLY; the
+        # failing field name surfaces via structured-log emission BEFORE
+        # the raise so SIEM correlation has the diagnostic without
+        # extending the typed-exception payload (Sprint 7B.2 T4 plan
+        # Round 7 P2 #3 + Round 8 reviewer answer #1 contract).
+        for key, value in updates.items():
+            if not _is_valid_update_value_shape(key, value):
+                _LOG.warning(
+                    "packs.update_draft.invalid_shape",
+                    extra={"pack_id": str(pack_id), "field": key},
+                )
+                raise PackRecordRefused("pack_record_update_field_invalid_shape")
+
+        # Step 3 — atomic UPDATE with state predicate as part of the
+        # WHERE clause. The ``state = 'draft'`` predicate IS the
+        # consistency guarantee — a concurrent transition() that
+        # advances the pack out of draft causes our UPDATE to affect
+        # zero rows, surfacing as a clean refusal in Step 4. No
+        # SELECT ... FOR UPDATE precondition closure because no chain
+        # row is emitted; the atomic UPDATE is the only authoritative
+        # state check.
+        async with self._engine.begin() as conn:
+            update_values: dict[str, Any] = dict(updates)
+            update_values["last_actor"] = actor_id
+            update_values["updated_at"] = datetime.now(UTC)
+            result = await conn.execute(
+                update(_packs)
+                .where(_packs.c.id == pack_id)
+                .where(_packs.c.state == "draft")
+                .values(**update_values)
+            )
+            if result.rowcount == 1:
+                return
+
+            # Step 4 — rowcount==0 disambiguation. Follow-up SELECT runs
+            # inside the same transaction (no FOR UPDATE — disambiguation
+            # is purely informational; the refusal is already determined
+            # by the UPDATE's rowcount==0; the SELECT only chooses
+            # between PackNotFound vs pack_record_update_non_draft_state).
+            row = (await conn.execute(select(_packs.c.state).where(_packs.c.id == pack_id))).first()
+            if row is None:
+                raise PackNotFound(pack_id)
+            raise PackRecordRefused(
+                "pack_record_update_non_draft_state",
+                state=row.state,
+            )
+
     async def transition(
         self,
         *,
@@ -366,6 +628,10 @@ class PackRecordStore:
         tenant_id: str | None,
         evidence_pointer: str | None,
         request_id: str,
+        actor_type: str | None = None,
+        payload_conformance: dict[str, Any] | None = None,
+        expected_manifest_digest: bytes | None = None,
+        evidence_attachments: dict[str, Any] | None = None,
     ) -> tuple[uuid.UUID, bytes]:
         """Atomically advance a pack through a named lifecycle
         transition. Returns ``(record_id, chain_hash)`` from the chain
@@ -381,6 +647,26 @@ class PackRecordStore:
         supplied tags would let a misconfigured or malicious caller emit
         an audit-untagged or wrongly-tagged chain row, breaking
         examiner-side evidence-pack export.
+
+        **Sprint 7B.2 T6 slice-2 (R24 P2 Path B + B2 user-authorized
+        CC-ADJ):** the optional keyword-only ``actor_type`` parameter
+        is persisted as a top-level ``payload["actor_type"]`` key when
+        non-None. The watchpoint (d) plan-of-record contract: the
+        allow-list audit row records ``actor.actor_type == "human"``
+        in the chain payload for examiner traceability without
+        requiring log-correlation across surfaces. Persistence is
+        conditional (key omitted entirely when ``actor_type is None``)
+        so existing call sites + every pre-T6 chain row stay
+        byte-shape compatible — backward-compat guardrail per the
+        user-authorized patch contract. Storage performs no
+        vocabulary validation; it accepts any string and writes it
+        verbatim. The :data:`~cognic_agentos.portal.rbac.actor.ActorType`
+        ``"human" | "service"`` closed-enum lives at the rbac
+        boundary; storage stays a thin string passthrough so the
+        layering (packs/storage MUST NOT depend on portal/rbac) holds.
+        Slices 3-4 of T6 thread the same kwarg for install / disable /
+        revoke / uninstall transitions so every operator audit row
+        carries the actor's type for parity with allow-list.
 
         Atomic semantics (Doctrine Lock D): chain-head ``SELECT FOR
         UPDATE`` → pack-row ``SELECT FOR UPDATE`` → ``validate_transition``
@@ -400,14 +686,33 @@ class PackRecordStore:
             there is nothing to roll back.
 
         Raises (IN-PRECONDITION — transaction rolls back atomically):
-          :class:`PackNotFound` — ``pack_id`` has no row in ``packs``
-            after the precondition's ``SELECT ... FOR UPDATE`` returns.
-          :class:`LifecycleTransitionRefused` with any reason OTHER
-            than ``"lifecycle_transition_name_unknown"`` — the state
-            machine refused the transition; the closed-enum reason
-            came from
+          Three distinct sources, all firing under the chain-head + pack-
+          row FOR UPDATE locks established by the precondition closure;
+          all three trigger atomic rollback of the chain row INSERT +
+          ``packs.state`` cache UPDATE + chain-head UPDATE via the
+          enclosing ``engine.begin()`` transaction.
+
+          (1) :class:`PackNotFound` — ``pack_id`` has no row in ``packs``
+            after the precondition's ``SELECT ... FOR UPDATE`` returns
+            empty.
+          (2) :class:`LifecycleTransitionRefused` with reason
+            ``"lifecycle_transition_manifest_digest_changed_during_submit"``
+            — the storage-side digest cross-check added at Sprint 7B.2
+            T9. Fires from inside ``_precondition`` AFTER the SELECT
+            returns AND BEFORE :func:`validate_transition`, when the
+            caller passed a non-None ``expected_manifest_digest`` kwarg
+            AND the row-locked ``packs.manifest_digest`` column does
+            NOT match (race-condition fix per plan §1179-1181 closing
+            the TOCTOU window between the submit route's preloaded
+            :class:`PackRecord` and the in-precondition state-machine
+            check). Storage-only-emit — :func:`validate_transition` has
+            no access to the persisted digest column and therefore
+            cannot produce this reason.
+          (3) :class:`LifecycleTransitionRefused` with any OTHER
+            reason — the pure-functional state-machine refusal from
             :func:`cognic_agentos.packs.lifecycle.validate_transition`
-            running under the chain-head FOR UPDATE lock. Examples:
+            running under the chain-head FOR UPDATE lock AFTER the
+            digest cross-check passes. Examples:
             ``"lifecycle_transition_invalid_state_pair"``,
             ``"lifecycle_transition_terminal_state"``,
             ``"lifecycle_transition_approve_without_review_claim"``.
@@ -442,7 +747,7 @@ class PackRecordStore:
         # source of truth at ``packs.lifecycle``; callers cannot supply
         # nor override). The preflight ``transition not in
         # _TRANSITION_TO_TARGET_STATE`` guard above means the helper's
-        # own runtime guard at ``packs/lifecycle.py:393-394`` cannot
+        # own runtime guard at ``packs/lifecycle.py:416-417`` cannot
         # fire from this call site — both guards check the same closed
         # set (the storage map and the lifecycle map both key off
         # ``TransitionName``; verified by the build-time drift detector
@@ -463,10 +768,16 @@ class PackRecordStore:
             # SELECT FOR UPDATE on the pack row. Locks the row even
             # though the chain-head lock already serialises chain
             # appends — documents future-writer safety per Doctrine
-            # Lock D step 1.
+            # Lock D step 1. Sprint 7B.2 T9: ``manifest_digest`` is
+            # added to the projection so the locked precondition can
+            # cross-check against the caller's
+            # ``expected_manifest_digest`` kwarg under the same row
+            # lock (race-condition fix per plan §1179-1181 — closes
+            # the TOCTOU window between the route's preloaded pack
+            # record and the in-precondition state-machine check).
             row = (
                 await conn.execute(
-                    select(_packs.c.state, _packs.c.kind)
+                    select(_packs.c.state, _packs.c.kind, _packs.c.manifest_digest)
                     .where(_packs.c.id == pack_id)
                     .with_for_update()
                 )
@@ -476,6 +787,25 @@ class PackRecordStore:
 
             from_state: PackState = row.state
             kind: PackKind = row.kind
+
+            # Sprint 7B.2 T9 — locked manifest-digest cross-check.
+            # When ``expected_manifest_digest is None`` (default;
+            # every non-submit caller) skip the check entirely so
+            # backward-compat with every pre-T9 chain row holds. When
+            # non-None, the digest read from the row-locked SELECT
+            # MUST match exactly; mismatch raises the closed-enum
+            # refusal from inside the closure so
+            # ``DecisionHistoryStore.append_with_precondition`` 's
+            # ``engine.begin()`` transaction rolls back atomically
+            # (no chain row inserted, no ``packs.state`` cache
+            # mutation — Doctrine Lock D preserved).
+            if (
+                expected_manifest_digest is not None
+                and bytes(row.manifest_digest) != expected_manifest_digest
+            ):
+                raise LifecycleTransitionRefused(
+                    "lifecycle_transition_manifest_digest_changed_during_submit"
+                )
 
             reason = validate_transition(
                 from_state=from_state,
@@ -504,20 +834,40 @@ class PackRecordStore:
 
         def _build_record(captured: tuple[PackState, PackKind]) -> DecisionRecord:
             from_state, kind = captured
+            # Sprint 7B.2 T6 slice-2 (R24 P2 Path B + B2): conditional
+            # ``actor_type`` payload key. Only inserted when the kwarg
+            # was passed non-None — preserves byte-shape compat with
+            # every pre-slice-2 chain row + every call site that
+            # doesn't need the actor-type evidence surface (the T5
+            # review handlers + the T4 author handlers all stay
+            # untouched at their existing payload shape).
+            payload: dict[str, Any] = {
+                "pack_id": str(pack_id),
+                "kind": kind,
+                "from_state": from_state,
+                "to_state": target_state,
+                "transition_name": transition,
+                "evidence_pointer": evidence_pointer,
+                "iso_controls": list(canonical_iso_controls),
+            }
+            if actor_type is not None:
+                payload["actor_type"] = actor_type
+            # Sprint 7B.2 T9 — conditional ``conformance`` +
+            # ``evidence_attachments`` payload keys. The omitted-kwarg
+            # branch leaves the payload byte-shape compatible with every
+            # pre-T9 chain row (and every non-submit / non-reject
+            # caller); this is the user-watchpoint (ii) invariant —
+            # omitted kwargs MUST NOT add empty keys.
+            if payload_conformance is not None:
+                payload["conformance"] = payload_conformance
+            if evidence_attachments is not None:
+                payload["evidence_attachments"] = evidence_attachments
             return DecisionRecord(
                 decision_type=f"pack.lifecycle.{target_state}",
                 request_id=request_id,
                 actor_id=actor_id,
                 tenant_id=tenant_id,
-                payload={
-                    "pack_id": str(pack_id),
-                    "kind": kind,
-                    "from_state": from_state,
-                    "to_state": target_state,
-                    "transition_name": transition,
-                    "evidence_pointer": evidence_pointer,
-                    "iso_controls": list(canonical_iso_controls),
-                },
+                payload=payload,
                 iso_controls=canonical_iso_controls,
             )
 
@@ -543,6 +893,8 @@ class PackRecordStore:
         state: PackState,
         limit: int = 50,
         cursor: uuid.UUID | None = None,
+        *,
+        tenant_id: str | None = None,
     ) -> list[PackRecord]:
         """Paginated state-filter read. Returns records whose
         denormalised ``packs.state`` cache matches.
@@ -552,12 +904,76 @@ class PackRecordStore:
         ``packs.id`` so the cursor pagination is dialect-portable
         across PG / Oracle / SQLite without depending on
         ``ORDER BY ... NULLS LAST`` quirks.
+
+        Sprint 7B.2 T5 (plan Round 11 P2 #1 + Round 14 P2 #1 backward-
+        compatible signature): optional keyword-only ``tenant_id``
+        filter. When non-None, adds ``tenant_id == :tenant_id`` to the
+        WHERE clause server-side, leveraging the ``ix_packs_tenant_state``
+        composite index per migration L129. The reviewer-queue endpoint
+        at ``GET /api/v1/packs/review-queue`` calls this with
+        ``tenant_id=actor.tenant_id`` so cross-tenant rows are filtered
+        server-side (no in-handler filtering, no pagination skew).
+
+        The ``tenant_id`` parameter lives BEHIND the ``*`` separator so
+        it is keyword-only-with-default — pre-T5 call sites passing
+        only ``state`` (or ``state``, ``limit``, ``cursor``) keep
+        identical semantics.
         """
 
         stmt = select(_packs).where(_packs.c.state == state).order_by(_packs.c.id)
         if cursor is not None:
             stmt = stmt.where(_packs.c.id > cursor)
+        if tenant_id is not None:
+            stmt = stmt.where(_packs.c.tenant_id == tenant_id)
         stmt = stmt.limit(limit)
+        async with self._engine.connect() as conn:
+            rows = (await conn.execute(stmt)).all()
+        return [_row_to_record(dict(r._mapping)) for r in rows]
+
+    async def list_for_tenant(
+        self,
+        tenant_id: str,
+        *,
+        limit: int = 50,
+        cursor: uuid.UUID | None = None,
+        state: PackState | None = None,
+    ) -> list[PackRecord]:
+        """Paginated tenant-scoped read for the inspection surface.
+
+        Sprint 7B.2 T7 (plan Round 19 P2 #4 + Round 22 P2 #2): the new
+        inspection endpoint ``GET /api/v1/packs`` lacks a ``{pack_id}``
+        path-param so :class:`RequireTenantOwnership` cannot enforce
+        row-level filtering — server-side WHERE clause filtering is
+        REQUIRED and is the authoritative tenant boundary. Mirrors the
+        T5 reviewer-queue solution via :meth:`list_by_status`'s
+        ``tenant_id`` kwarg, but with two doctrinal differences:
+
+        - ``tenant_id`` is REQUIRED (positional-or-keyword, BEFORE
+          the ``*`` separator) — the inspection endpoint cannot list
+          packs without a tenant scope; making it optional would
+          re-open the cross-tenant leak class.
+        - ``state`` is OPTIONAL keyword-only (AFTER the ``*``) —
+          inspection lists across all lifecycle states by default;
+          callers narrow via the ``state`` kwarg when needed.
+
+        ``cursor`` is the last id returned by the previous page; pass
+        ``None`` (default) for the first page. Ordering is by
+        ``packs.id`` so cursor pagination is dialect-portable across
+        PG / Oracle / SQLite (same convention as :meth:`list_by_status`).
+
+        The WHERE clause covers ``(tenant_id, state)`` so the existing
+        ``ix_packs_tenant_state`` composite index per migration L129
+        services both the always-present ``tenant_id == :tenant_id``
+        predicate and the optional ``state == :state`` predicate. The
+        SQL is built via the module-private
+        :func:`_build_list_for_tenant_stmt` helper — same builder the
+        Slice-1 SQL-shape regression imports + asserts on; eliminates
+        the vacuous-proof bug class where a test-local duplicate
+        ``select`` could pass while the production query drifts
+        (plan Round 22 P2 #2).
+        """
+
+        stmt = _build_list_for_tenant_stmt(tenant_id, limit=limit, cursor=cursor, state=state)
         async with self._engine.connect() as conn:
             rows = (await conn.execute(stmt)).all()
         return [_row_to_record(dict(r._mapping)) for r in rows]
@@ -616,6 +1032,96 @@ class PackRecordStore:
         return history
 
 
+def _is_valid_update_value_shape(field_name: str, value: Any) -> bool:
+    """Sprint 7B.2 T4 — per-field value-shape validator for
+    :meth:`PackRecordStore.update_draft`.
+
+    Returns ``True`` iff ``value`` matches the per-field type/shape
+    contract documented at :meth:`PackRecordStore.update_draft` Step 2.
+    Per-field contracts derived from :class:`PackRecord` field types
+    at :class:`PackRecord` definition above:
+
+    - ``display_name`` — ``str``, non-empty, length ≤ 256 chars
+      (DB column is ``String(256)``; longer values would either fail
+      a CHECK constraint or silently truncate depending on dialect)
+    - ``manifest_digest`` — ``bytes``, exactly 32 bytes (SHA-256
+      output width per :data:`chain_hash_column_type`)
+    - ``signed_artefact_digest`` — ``bytes``, exactly 32 bytes (same
+      as manifest_digest)
+    - ``sbom_pointer`` — ``str`` non-empty OR ``None`` (DB column is
+      ``Text(nullable=True)``; an empty string is semantically distinct
+      from None and treated as malformed input here)
+
+    Helper returns ``False`` on the FIRST validation rule that fails;
+    the caller's loop is per-key, so the first mismatching key
+    surfaces in the structured-log emission. ``field_name`` outside
+    the 4-field allow-list returns ``False`` defensively (Step 1
+    should have already refused; this is belt-and-braces).
+    """
+
+    if field_name == "display_name":
+        return isinstance(value, str) and 0 < len(value) <= PACK_DISPLAY_NAME_MAX_LEN
+    if field_name in ("manifest_digest", "signed_artefact_digest"):
+        return isinstance(value, bytes) and len(value) == 32
+    if field_name == "sbom_pointer":
+        if value is None:
+            return True
+        return isinstance(value, str) and len(value) > 0
+    return False
+
+
+def _build_list_for_tenant_stmt(
+    tenant_id: str,
+    *,
+    limit: int,
+    cursor: uuid.UUID | None,
+    state: PackState | None = None,
+) -> Select[Any]:
+    """Build the SELECT statement for :meth:`PackRecordStore.list_for_tenant`.
+
+    Sprint 7B.2 T7 (plan Round 22 P2 #2) — module-private builder
+    pattern. The public :meth:`PackRecordStore.list_for_tenant` invokes
+    this helper as its ONLY query-construction path; the Slice-1
+    SQL-shape regression at
+    ``tests/unit/packs/test_storage_list_for_tenant.py::
+    test_list_for_tenant_compiles_with_indexed_where_clause`` imports
+    this SAME builder and asserts on its compiled output. Single
+    source of truth for the WHERE-clause shape; production + test
+    reference the same module-private symbol.
+
+    WHERE shape (authoritative):
+
+    - ``packs.tenant_id == :tenant_id`` — ALWAYS present; this is the
+      server-side authoritative tenant boundary (no in-handler
+      filtering can leak cross-tenant rows).
+    - ``packs.state == :state`` — only when ``state`` is non-None.
+    - ``packs.id > :cursor`` — only when ``cursor`` is non-None
+      (cursor pagination excludes the cursor record itself).
+
+    Ordering is by ``packs.id`` for dialect-portable cursor pagination
+    across PG / Oracle / SQLite. Both filter columns ``(tenant_id,
+    state)`` are covered by the ``ix_packs_tenant_state`` composite
+    index per migration L129 — the always-present tenant filter
+    matches the leading column, the optional state filter matches the
+    trailing column.
+
+    Underscore prefix marks this as module-private but it is
+    module-public for the test import, mirroring the existing
+    :func:`_row_to_record` helper convention. Plan Round 22 P2 #2 +
+    P3 #3 propagation refresh — eliminates the
+    "test-writes-its-own-select-and-assertion-passes-while-production-
+    drifts" vacuous-proof bug class.
+    """
+
+    stmt = select(_packs).where(_packs.c.tenant_id == tenant_id).order_by(_packs.c.id)
+    if state is not None:
+        stmt = stmt.where(_packs.c.state == state)
+    if cursor is not None:
+        stmt = stmt.where(_packs.c.id > cursor)
+    stmt = stmt.limit(limit)
+    return stmt
+
+
 def _row_to_record(mapping: Mapping[str, Any]) -> PackRecord:
     """Project a ``packs`` row mapping back into a :class:`PackRecord`.
     Single source of truth for column → field name parity.
@@ -656,6 +1162,12 @@ del _t, _target, _to_states
 
 
 __all__: tuple[str, ...] = (
+    "PACK_ACTOR_MAX_LEN",
+    "PACK_DISPLAY_NAME_MAX_LEN",
+    "PACK_ID_MAX_LEN",
+    "PACK_KIND_MAX_LEN",
+    "PACK_STATE_MAX_LEN",
+    "PACK_TENANT_ID_MAX_LEN",
     "LifecycleTransitionRefused",
     "PackNotFound",
     "PackRecord",

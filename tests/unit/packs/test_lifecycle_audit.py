@@ -26,8 +26,10 @@ Test surface:
   NOT supply tags, they are looked up via
   :func:`iso_controls_for` from the transition name) AND the chain
   row's own ``iso_controls`` column (canonical envelope field; the
-  verifier re-reads this column). The full 10-transition lifecycle
-  walk emits one chain row per transition.
+  verifier re-reads this column). The full 11-transition lifecycle
+  walk emits one chain row per transition (Sprint 7B.2 T4 extended
+  this from 10 to 11 transitions by adding ``cancel_draft`` per
+  ADR-012 §59).
 - Chain integrity: :meth:`ChainVerifier.walk` over the
   ``decision_history`` chain returns ``is_clean=True`` after a
   5-transition install-path slice (``submit`` → ``claim`` →
@@ -46,7 +48,7 @@ Test surface:
   ``TestSprint7B1IsoControlsRecordedForEveryTransition`` below; the
   walk catches **mutation of correctly-tagged rows** (over the
   install-path subset), the canonical-match test catches **incorrect
-  tagging at write time** (across all 10 ``TransitionName`` values).
+  tagging at write time** (across all 11 ``TransitionName`` values).
   Together they cover the two distinct attack surfaces.
 - Fail-closed semantics: each refusal class not covered in
   ``test_storage.py`` proves zero chain row insertion + zero
@@ -305,7 +307,8 @@ class TestSprint7B1IsoControlsForHelper:
 
 
 class TestSprint7B1IsoControlsRecordedForEveryTransition:
-    """Walk a full 10-transition lifecycle slice and verify the canonical
+    """Walk a full 11-transition lifecycle slice (Sprint 7B.2 T4 extended
+    from 10 to 11 by adding ``cancel_draft``) and verify the canonical
     ISO controls land in both the chain row's ``iso_controls`` column
     AND ``payload['iso_controls']`` for each transition.
 
@@ -319,37 +322,42 @@ class TestSprint7B1IsoControlsRecordedForEveryTransition:
     - ``payload['iso_controls']`` is the JSON-encoded shape the portal
       API surfaces to operators reading evidence rows. Storage stamps
       both (``payload['iso_controls']`` at
-      ``packs/storage.py:519`` + the
+      ``packs/storage.py:851`` + the
       ``DecisionRecord(..., iso_controls=...)`` kwarg at
-      ``packs/storage.py:521``) on every transition row, both populated
+      ``packs/storage.py:871``) on every transition row, both populated
       from the same ``canonical_iso_controls`` local that
-      ``packs/storage.py:456`` derives via :func:`iso_controls_for`.
+      ``packs/storage.py:761`` derives via :func:`iso_controls_for`.
     """
 
     async def test_full_lifecycle_walk_tags_every_chain_row_with_canonical_controls(
         self, store: PackRecordStore, engine: AsyncEngine
     ) -> None:
-        # Walk the full 10-transition lifecycle. Each transition's
+        # Walk the full 11-transition lifecycle. Each transition's
         # chain row MUST carry the canonical iso_controls from the
         # lifecycle map.
         #
-        # The lifecycle walk uses two records because no single
-        # pack-record path touches all 10 transitions (the state
+        # The lifecycle walk uses four records because no single
+        # pack-record path touches all 11 transitions (the state
         # machine branches at approve/reject + at disable/revoke +
-        # at withdraw branches off the linear path). The two records
-        # together cover: rec_a — submit, claim, reject; rec_b —
-        # submit, claim, approve, allow_list, install, disable,
-        # revoke, uninstall. Plus rec_c — submit, withdraw — to
-        # cover the withdraw branch. Together that exercises every
-        # TransitionName key.
+        # withdraw branches off the linear path + Sprint 7B.2 T4's
+        # cancel_draft requires draft source state, distinct from
+        # both the rec_b install-path entry-state AND rec_c's
+        # submit-then-withdraw flow). The four records together
+        # cover: rec_a — submit, claim, reject; rec_b — submit,
+        # claim, approve, allow_list, install, disable, revoke,
+        # uninstall; rec_c — submit, withdraw; rec_d — cancel_draft.
+        # Together that exercises every TransitionName key in the
+        # canonical 11-tuple.
         rec_a = _make_record(pack_id="rec-a-rejected-path")
         rec_b = _make_record(pack_id="rec-b-full-install-path")
         rec_c = _make_record(pack_id="rec-c-withdraw-path")
+        rec_d = _make_record(pack_id="rec-d-cancel-draft-path")
         await store.save_draft(rec_a)
         await store.save_draft(rec_b)
         await store.save_draft(rec_c)
+        await store.save_draft(rec_d)
 
-        # Sequenced transitions across the three records.
+        # Sequenced transitions across the four records.
         walks: list[tuple[uuid.UUID, TransitionName]] = [
             (rec_a.id, "submit"),
             (rec_a.id, "claim"),
@@ -364,6 +372,7 @@ class TestSprint7B1IsoControlsRecordedForEveryTransition:
             (rec_b.id, "uninstall"),
             (rec_c.id, "submit"),
             (rec_c.id, "withdraw"),
+            (rec_d.id, "cancel_draft"),
         ]
         for i, (pack_id, transition) in enumerate(walks):
             await store.transition(
@@ -392,9 +401,11 @@ class TestSprint7B1IsoControlsRecordedForEveryTransition:
                 )
             ).all()
 
-        # 13 transitions emitted across the three records (every
-        # TransitionName visited at least once).
-        assert len(rows) == 13
+        # 14 transitions emitted across the four records (every
+        # TransitionName visited at least once; Sprint 7B.2 T4
+        # extended the canonical from 10 to 11 with cancel_draft,
+        # and the walk-count grew 13 → 14 to match).
+        assert len(rows) == 14
         # Coverage: every TransitionName appears at least once in
         # the walk.
         observed_transitions = {row.payload["transition_name"] for row in rows}
@@ -438,7 +449,7 @@ class TestSprint7B1LifecycleChainIntegrity:
     transition names lives in the Stage 3 canonical-match test above
     (:class:`TestSprint7B1IsoControlsRecordedForEveryTransition`);
     that test asserts the WRITTEN tags equal :func:`iso_controls_for`
-    for each of the 10 ``TransitionName`` values.
+    for each of the 11 ``TransitionName`` values.
 
     Scope (what THIS test catches):
 
@@ -513,15 +524,15 @@ class TestSprint7B1FailClosedRefusalPaths:
     async def test_preflight_unknown_transition_name_no_chain_row_no_state_mutation(
         self, store: PackRecordStore, engine: AsyncEngine
     ) -> None:
-        # The runtime guard at ``packs/storage.py:437-438`` (T3 R1 P2 #2)
+        # The runtime guard at ``packs/storage.py:742-743`` (T3 R1 P2 #2)
         # rejects out-of-vocabulary transition names BEFORE any DB
         # connection is acquired. Mirrors ``validate_transition`` step
-        # 3 (T2 R1 P2) at ``packs/lifecycle.py:472-473`` and the
-        # :func:`iso_controls_for` guard at ``packs/lifecycle.py:393-394``
+        # 3 (T2 R1 P2) at ``packs/lifecycle.py:498-499`` and the
+        # :func:`iso_controls_for` guard at ``packs/lifecycle.py:416-417``
         # (T5 R1 P2) — all three sites raise
         # :class:`LifecycleTransitionRefused` with the same closed-enum
         # ``"lifecycle_transition_name_unknown"`` reason for any input
-        # outside the canonical 10-tuple :data:`TransitionName`.
+        # outside the canonical 11-tuple :data:`TransitionName`.
         rec = _make_record(pack_id="rec-preflight-canary")
         await store.save_draft(rec)
         chain_before = await _count_chain_rows(engine)
@@ -548,10 +559,10 @@ class TestSprint7B1FailClosedRefusalPaths:
         # Drive a record to ``uninstalled`` (terminal), then attempt
         # to transition further. ``validate_transition`` fires the
         # terminal-state guard at step 4
-        # (``packs/lifecycle.py:481-482`` after the T5 ISO-doc + helper
+        # (``packs/lifecycle.py:507-508`` after the T5 ISO-doc + helper
         # expansion + T8 R3 Option B comment expansions shifted the
         # step-4 line range; step 3's transition-name guard is the
-        # neighbouring pair at ``packs/lifecycle.py:472-473``).
+        # neighbouring pair at ``packs/lifecycle.py:498-499``).
         rec = _make_record(pack_id="rec-terminal-canary")
         await store.save_draft(rec)
         for transition in ("submit", "claim", "approve", "allow_list", "install", "disable"):
@@ -685,3 +696,93 @@ class TestSprint7B1FailClosedRefusalPaths:
         assert ei.value.reason == "lifecycle_transition_disable_not_installed"
         assert await _count_chain_rows(engine) == chain_before
         assert await _read_pack_state(engine, rec.id) == state_before
+
+
+# ===========================================================================
+# Sprint 7B.2 T9 — Locked manifest-digest precondition refusal regression
+# ===========================================================================
+
+
+class TestSprint7B2T9LockedManifestDigestPrecondition:
+    """The Sprint 7B.2 T9 locked manifest-digest precondition refuses a submit
+    transition when the caller's ``expected_manifest_digest`` kwarg disagrees
+    with the ``packs.manifest_digest`` column the runner reads under the
+    ``SELECT ... FOR UPDATE`` row lock (plan §1179-1181 race-condition fix).
+
+    Doctrine Lock D — the check fires INSIDE ``_precondition``, raising
+    :class:`LifecycleTransitionRefused`
+    (``lifecycle_transition_manifest_digest_changed_during_submit``); the
+    enclosing ``engine.begin()`` transaction owned by
+    :meth:`DecisionHistoryStore.append_with_precondition` rolls back
+    atomically. No chain row inserted. No pack state mutation."""
+
+    async def test_locked_precondition_refuses_on_manifest_digest_mismatch(
+        self, store: PackRecordStore, engine: AsyncEngine
+    ) -> None:
+        rec = _make_record(pack_id="rec-digest-mismatch-canary")
+        await store.save_draft(rec)
+        chain_before = await _count_chain_rows(engine)
+        state_before = await _read_pack_state(engine, rec.id)
+        assert state_before == "draft"
+
+        with pytest.raises(LifecycleTransitionRefused) as ei:
+            await store.transition(
+                pack_id=rec.id,
+                transition="submit",
+                actor_id="t9-canary",
+                tenant_id=None,
+                evidence_pointer=None,
+                request_id="req-t9-mismatch",
+                expected_manifest_digest=b"\xff" * 32,  # ≠ row's b"\x01"*32
+            )
+        assert ei.value.reason == "lifecycle_transition_manifest_digest_changed_during_submit"
+        # Atomic rollback proof (Doctrine Lock D): no chain row + no state mutation.
+        assert await _count_chain_rows(engine) == chain_before
+        assert await _read_pack_state(engine, rec.id) == state_before
+
+    async def test_locked_precondition_passes_when_expected_manifest_digest_matches(
+        self, store: PackRecordStore, engine: AsyncEngine
+    ) -> None:
+        rec = _make_record(pack_id="rec-digest-match-canary")
+        await store.save_draft(rec)
+        chain_before = await _count_chain_rows(engine)
+
+        # ``_make_record`` seeds manifest_digest=b"\x01" * 32; pass the
+        # matching value into the kwarg → check passes → transition proceeds.
+        await store.transition(
+            pack_id=rec.id,
+            transition="submit",
+            actor_id="t9-canary",
+            tenant_id=None,
+            evidence_pointer=None,
+            request_id="req-t9-match",
+            expected_manifest_digest=b"\x01" * 32,
+        )
+
+        assert await _count_chain_rows(engine) == chain_before + 1
+        assert await _read_pack_state(engine, rec.id) == "submitted"
+
+    async def test_locked_precondition_skipped_when_expected_manifest_digest_is_none(
+        self, store: PackRecordStore, engine: AsyncEngine
+    ) -> None:
+        """``expected_manifest_digest=None`` (default) preserves the pre-T9
+        contract — no digest verification, transition proceeds on validate-only.
+        Backward-compat with every non-submit-route caller (allow_list /
+        install / disable / revoke / uninstall / claim / approve / reject /
+        withdraw / cancel_draft)."""
+        rec = _make_record(pack_id="rec-digest-none-canary")
+        await store.save_draft(rec)
+        chain_before = await _count_chain_rows(engine)
+
+        await store.transition(
+            pack_id=rec.id,
+            transition="submit",
+            actor_id="t9-canary",
+            tenant_id=None,
+            evidence_pointer=None,
+            request_id="req-t9-none",
+            # expected_manifest_digest omitted (defaults to None)
+        )
+
+        assert await _count_chain_rows(engine) == chain_before + 1
+        assert await _read_pack_state(engine, rec.id) == "submitted"

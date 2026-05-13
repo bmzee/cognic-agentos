@@ -590,3 +590,239 @@ async def test_oracle_check_constraint_rejects_unknown_kind() -> None:
 @_ORACLE_SKIPIF
 async def test_oracle_check_constraint_rejects_unknown_state() -> None:
     await _canary_check_constraint_state("oracle")
+
+
+# ---- canary 5: deterministic update_draft contention (Sprint 7B.2 T4) ----
+
+
+async def _canary_update_draft_blocks_behind_row_lock_and_refuses(
+    driver: str,
+) -> None:
+    """Sprint 7B.2 T4 plan §"Atomicity specification (Round 4 P2 #3)"
+    + halt-summary watchpoint (g) — T4 R2 P2 #2 rewrite using the
+    deterministic barrier-based pattern from
+    :func:`_canary_pack_row_lock_blocks_competing_transition`.
+
+    Pre-R2: this canary used :func:`asyncio.gather` with no barrier
+    or lock orchestration. It accepted the "both succeed" sequential-
+    smoke-test outcome, which would have passed even if
+    ``update_draft`` failed to honour its ``WHERE state='draft'``
+    precondition — the reviewer correctly flagged this as not
+    proving contention.
+
+    The barrier-based design forces the race deterministically:
+
+    1. T1 (lock-holder, raw SQL — bypasses the lifecycle validator
+       intentionally; the test exercises lock semantics, not the
+       validator): acquires ``SELECT ... FOR UPDATE`` on the pack
+       row inside an open transaction, then mutates state to
+       ``"submitted"`` under the lock. Signals ``t1_acquired`` and
+       awaits ``t1_release``.
+    2. Main: probes that T2 is PENDING — if T2's atomic UPDATE did
+       not contend with T1's row lock, T2 completes in low ms,
+       failing the probe assertion.
+    3. T2 (the system-under-test): calls
+       :meth:`PackRecordStore.update_draft` with a non-empty updates
+       dict. update_draft's atomic ``UPDATE packs SET ... WHERE id=...
+       AND state='draft'`` blocks waiting for T1's row lock.
+    4. Main: releases ``t1_release``. T1 commits state=``"submitted"``
+       and releases its row lock.
+    5. T2 unblocks. Its UPDATE matches WHERE id=... AND
+       state='draft' against the now-``submitted`` row — rowcount=0.
+       The Step-4 disambiguation SELECT observes state=``"submitted"``
+       and raises :class:`PackRecordRefused` with reason
+       ``pack_record_update_non_draft_state``.
+
+    Five assertions pin the contract:
+
+    - **PENDING probe** — T2 must NOT complete during the PROBE_WINDOW;
+      if it does, ``update_draft``'s atomic UPDATE did not contend
+      with T1's row lock at all (the WHERE-state-draft precondition
+      would be a stale-read instead of an under-lock read).
+    - **Refusal class + closed-enum reason** —
+      :class:`PackRecordRefused` with reason
+      ``pack_record_update_non_draft_state``. Any other refusal
+      (or success) means the rowcount-disambiguation SELECT misread
+      the post-commit state.
+    - **Chain count unchanged** — neither T1 (raw SQL) nor T2
+      (update_draft refused before its UPDATE landed) emits a chain
+      row. Genesis-state pattern preserved under contention.
+    - **Final state = "submitted"** — T1's update is preserved;
+      T2's refused UPDATE did NOT overwrite (LOST-UPDATE scenario
+      negative pin).
+    - **last_actor preserved** — T2's refused UPDATE did not bump
+      ``last_actor``; the value remains the pre-T1 ``"canary"`` from
+      ``save_draft`` (T1's raw SQL UPDATE only touched ``state``).
+
+    SQLite cannot honour row-level ``FOR UPDATE`` locking (database-
+    level locks only), so this proof requires real Postgres or Oracle.
+    """
+
+    from cognic_agentos.packs.storage import PackRecordRefused
+
+    PROBE_WINDOW_S = 1.5
+    BARRIER_TIMEOUT_S = 10.0
+    T1_STATE_ADVANCE = "submitted"
+
+    engine = create_async_engine(_superuser_url(driver), pool_size=4, max_overflow=0)
+    try:
+        await _reset_state(engine)
+        store = PackRecordStore(engine)
+        rec = _make_record()
+        await store.save_draft(rec)
+
+        # Capture the pre-T1 last_actor for the final-state assertion.
+        original_last_actor = rec.last_actor
+
+        t1_acquired = asyncio.Event()
+        t1_release = asyncio.Event()
+
+        async def t1_hold_then_advance_state() -> None:
+            async with engine.begin() as conn1:
+                # 1. Acquire pack-row FOR UPDATE.
+                row = (
+                    await conn1.execute(
+                        select(_packs.c.id).where(_packs.c.id == rec.id).with_for_update()
+                    )
+                ).first()
+                assert row is not None, "T1 setup: pack row not found"
+                # 2. Raw SQL UPDATE advances state under the lock.
+                # Bypasses the lifecycle validator intentionally —
+                # this test exercises lock semantics, not state-
+                # machine correctness. Critically: does NOT touch
+                # last_actor or updated_at, so the final-state
+                # assertion can distinguish T1's contribution from
+                # any rogue T2 mutation.
+                await conn1.execute(
+                    update(_packs).where(_packs.c.id == rec.id).values(state=T1_STATE_ADVANCE)
+                )
+                t1_acquired.set()
+                # 3. Hold the row lock + uncommitted state until the
+                # main test releases us.
+                await t1_release.wait()
+            # async-with exits → T1 commits → state="submitted"
+            # persisted → row lock released → T2 unblocks.
+
+        async def t2_attempt_update_draft() -> Exception | None:
+            try:
+                await store.update_draft(
+                    pack_id=rec.id,
+                    updates={"display_name": "T2-Attempted-Rename"},
+                    actor_id="t2-update-actor",
+                )
+                return None  # T2 reached success — FORBIDDEN
+            except PackRecordRefused as exc:
+                return exc
+            except Exception as exc:
+                # Any other exception class is a bug — surface it
+                # for the assertion below.
+                return exc
+
+        try:
+            t1_task = asyncio.create_task(t1_hold_then_advance_state())
+            await asyncio.wait_for(t1_acquired.wait(), timeout=BARRIER_TIMEOUT_S)
+
+            chain_count_before = await _count_lifecycle_chain_rows(engine)
+
+            t2_task = asyncio.create_task(t2_attempt_update_draft())
+
+            # PENDING probe — T2's atomic UPDATE must block on T1's
+            # row lock during the probe window. If T2 completes,
+            # update_draft's WHERE-state-draft predicate was a stale-
+            # read (not under the row lock), violating the
+            # plan §"Atomicity specification" contract.
+            await asyncio.sleep(PROBE_WINDOW_S)
+            assert not t2_task.done(), (
+                "update_draft did not block on the pack-row FOR UPDATE held "
+                "by T1; update_draft's atomic UPDATE failed to honour the "
+                "row lock. Plan §'Atomicity specification' Step 3 contract "
+                "broken — WHERE state='draft' must read under the lock, "
+                "not from a stale MVCC snapshot."
+            )
+
+            # Release T1 → T1 commits state="submitted" → T2 unblocks.
+            t1_release.set()
+            await asyncio.wait_for(t1_task, timeout=BARRIER_TIMEOUT_S)
+            t2_result = await asyncio.wait_for(t2_task, timeout=BARRIER_TIMEOUT_S)
+
+            # ASSERTION 1 — T2 refused (read state under the lock).
+            assert isinstance(t2_result, PackRecordRefused), (
+                f"T2 must refuse with PackRecordRefused — it read state "
+                f"under the FOR UPDATE lock and saw T1's post-commit "
+                f"state ({T1_STATE_ADVANCE!r}). If T2 succeeded, the "
+                f"atomic UPDATE's WHERE predicate did not see the "
+                f"post-commit state. Got: {t2_result!r}"
+            )
+
+            # ASSERTION 2 — Closed-enum reason matches the rowcount-
+            # disambiguation refusal (Step 4: UPDATE rowcount=0 →
+            # follow-up SELECT observes state='submitted' →
+            # pack_record_update_non_draft_state).
+            assert t2_result.reason == "pack_record_update_non_draft_state", (
+                f"T2 refused but with the wrong reason — expected "
+                f"the rowcount-disambiguation Step-4 reason "
+                f"'pack_record_update_non_draft_state' (the follow-up "
+                f"SELECT should see state='submitted'); "
+                f"got {t2_result.reason!r}"
+            )
+            # The exception also carries the live state — pin it
+            # so a future regression in the disambiguation SELECT
+            # surfaces.
+            assert t2_result.state == T1_STATE_ADVANCE, (
+                f"PackRecordRefused.state field should carry the "
+                f"actual non-draft state observed by the follow-up "
+                f"SELECT; got {t2_result.state!r}, expected "
+                f"{T1_STATE_ADVANCE!r}"
+            )
+
+            # ASSERTION 3 — No chain rows emitted. Neither T1 (raw
+            # SQL UPDATE) nor T2 (update_draft refused) writes to
+            # decision_history. Genesis-state pattern preserved
+            # under contention.
+            chain_count_after = await _count_lifecycle_chain_rows(engine)
+            assert chain_count_after == chain_count_before, (
+                f"update_draft contention must not emit chain rows. "
+                f"chain rows: before={chain_count_before}, "
+                f"after={chain_count_after}"
+            )
+
+            # ASSERTION 4 — Final state is T1's value. T2's refused
+            # UPDATE never landed — LOST-UPDATE scenario negative pin.
+            loaded = await store.load(rec.id)
+            assert loaded is not None
+            assert loaded.state == T1_STATE_ADVANCE, (
+                f"final state should be T1's value ({T1_STATE_ADVANCE!r}); "
+                f"got {loaded.state!r}. T2's refused UPDATE wrote anyway — "
+                f"plan §'Atomicity specification' Step 3 violated."
+            )
+
+            # ASSERTION 5 — last_actor preserved as the original
+            # save_draft value. T2's refused UPDATE did not bump
+            # last_actor (the auto-bump only fires if the UPDATE
+            # actually matched a row). T1's raw SQL deliberately
+            # did not touch last_actor.
+            assert loaded.last_actor == original_last_actor, (
+                f"last_actor should remain the original save_draft "
+                f"value ({original_last_actor!r}); got "
+                f"{loaded.last_actor!r}. T2's refused UPDATE bumped "
+                f"last_actor anyway — atomicity violation."
+            )
+        finally:
+            # Defence-in-depth: ensure T1 never leaks even on
+            # assertion failure (otherwise T2 would spin forever
+            # waiting on the row lock).
+            t1_release.set()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@_PG_SKIPIF
+async def test_postgres_update_draft_blocks_behind_row_lock_and_refuses() -> None:
+    await _canary_update_draft_blocks_behind_row_lock_and_refuses("postgres")
+
+
+@pytest.mark.oracle
+@_ORACLE_SKIPIF
+async def test_oracle_update_draft_blocks_behind_row_lock_and_refuses() -> None:
+    await _canary_update_draft_blocks_behind_row_lock_and_refuses("oracle")

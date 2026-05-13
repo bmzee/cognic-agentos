@@ -10,7 +10,7 @@ against a live database, then runs CHECK-constraint enforcement
 canaries to prove the ``ck_packs_kind`` + ``ck_packs_state``
 constraints actually reject out-of-vocabulary values at the DB layer
 (not just at the Pydantic model layer in
-``packs/storage.py:248-273``).
+``packs/storage.py:352-379``).
 
 Env-gated like the prior integration tests; runs only when the
 matching ``COGNIC_RUN_*_INTEGRATION`` env var is set + the matching

@@ -494,7 +494,7 @@ class TestSprint7B1Migration0003CheckConstraintsInMigrationSource:
         in the plan-of-record T4 prose; we chose inline
         ``CheckConstraint(...)`` inside ``op.create_table(...)`` to
         mirror the source-of-truth declaration at
-        ``packs/storage.py:167-176``. Pin that choice — adding a
+        ``packs/storage.py:216-225``. Pin that choice — adding a
         post-create ``op.create_check_constraint`` would split the
         constraint declaration across two layers and break the
         single-statement create-table contract.

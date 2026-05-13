@@ -145,6 +145,9 @@ from typing import Any, Final, Literal
 
 from cognic_agentos.cli import ValidatorFinding
 from cognic_agentos.cli.validate import _MANIFEST_FILENAME, run_validators
+from cognic_agentos.packs.conformance import (
+    run_owasp_conformance,
+)
 from cognic_agentos.protocol.a2a_endpoint import TaskRecord, TaskState
 from cognic_agentos.sdk.hook import HookContext, HookResult
 from cognic_agentos.sdk.registry import ToolRegistry
@@ -509,6 +512,28 @@ class DispatchResult:
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
+class ConformanceSummary:
+    """OWASP conformance summary surfaced by the test-harness tail-call
+    (Sprint-7B.2 T11). **Non-gating evidence per BUILD_PLAN §627** —
+    populated only when validate + dispatch are green; the harness's
+    ``overall_status`` is NOT flipped by a non-green conformance
+    verdict. The Sprint-7B.3 5-gate composer owns the gating decision.
+
+    Wire-shape field order (per ADR-006 evidence-pack-export readers):
+    ``green`` / ``overall_status`` / ``findings``. Drift breaks JSON
+    consumers reading by position / by-key.
+
+    ``green`` mirrors ``overall_status == "green"`` for the trivial
+    yes/no answer pack authors want from CI. ``findings`` is a flat
+    list of ``"<category>: <finding-text>"`` strings (per-category
+    findings from the OWASP matrix, prefixed for grep-ability)."""
+
+    green: bool
+    overall_status: Literal["green", "red", "yellow"]
+    findings: list[str]
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
 class HarnessReport:
     """Conformance report — the public T13 output shape.
 
@@ -517,6 +542,13 @@ class HarnessReport:
       - ``validate_findings`` carries no refusal-severity entries.
       - ``findings`` (harness-side refusals) is empty.
       - Every :class:`DispatchResult` has ``status == "pass"``.
+
+    ``conformance`` (Sprint-7B.2 T11) carries the OWASP matrix verdict
+    when validate + dispatch are green; ``None`` when conformance was
+    skipped because an earlier step failed. **NON-GATING** per
+    BUILD_PLAN §627 — a non-green conformance verdict does NOT flip
+    ``overall_status`` to ``"fail"``; it surfaces as evidence in the
+    JSON / text output + as ``::warning::`` stderr annotations.
     """
 
     pack_path: str
@@ -527,6 +559,7 @@ class HarnessReport:
     validate_summary: dict[str, Literal["pass", "fail", "skipped"]]
     findings: list[HarnessFinding]
     dispatch_results: list[DispatchResult]
+    conformance: ConformanceSummary | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -575,6 +608,83 @@ def _read_pack_id_and_kind(pack_path: Path) -> tuple[str, str]:
     pack_id_str = pack_id if isinstance(pack_id, str) else ""
     kind_str = kind if isinstance(kind, str) else ""
     return (pack_id_str, kind_str)
+
+
+def _read_full_manifest_dict(pack_path: Path) -> dict[str, Any]:
+    """Read + parse the full manifest dict (Sprint-7B.2 T11).
+
+    Used by the OWASP conformance tail-call after validate +
+    dispatch are green. Returns ``{}`` if the manifest cannot be
+    read / parsed — the conformance runner produces a non-green
+    verdict for an empty manifest dict, which is the correct
+    "evidence is missing" surface for the harness output. This
+    helper does NOT raise — the seam contract of :func:`run_harness`
+    promises never to raise from the conformance arm.
+    """
+    manifest_path = pack_path / _MANIFEST_FILENAME
+    try:
+        raw_bytes = manifest_path.read_bytes()
+        data = tomllib.loads(raw_bytes.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _build_conformance_summary(pack_path: Path) -> ConformanceSummary:
+    """Run :func:`run_owasp_conformance` against ``pack_path``'s
+    manifest and project the report into a :class:`ConformanceSummary`.
+
+    Sprint-7B.2 T11 tail-call (per plan §1282). Findings are
+    flattened to ``"<category>: <finding-text>"`` strings so the
+    JSON shape stays trivial + grep-able. Two sources contribute to
+    the flattened findings list:
+
+      1. **Red-path failures.** Per-category results with
+         ``status == "fail"`` (the OWASP probe reported a manifest-
+         shape problem).
+      2. **Yellow-path checker exceptions** (R45 P2 #1 fix). The
+         matrix's runner-loop wrapper at
+         ``packs/conformance/owasp_agentic.run_owasp_conformance``
+         synthesizes a ``status="not_applicable"`` result when a
+         checker body raises (incomplete suite signal) AND appends
+         the category to ``report.errored_categories``. Without
+         surfacing these findings, a yellow verdict produces
+         ``ConformanceSummary(overall_status="yellow", findings=[])``
+         + zero ``::warning`` stderr annotations — pack authors lose
+         the diagnostic that the suite is incomplete. The R45 fix
+         iterates ``errored_categories`` AFTER the red-path loop so
+         CI parsers consuming the warning annotations see the
+         category-prefixed finding for every checker exception too.
+
+    ``not_applicable`` results that came from the applicability
+    matrix (NOT from a checker exception) are deliberately omitted
+    — they represent "this check does not apply to this pack kind",
+    not a failure or incompleteness signal.
+    """
+    manifest = _read_full_manifest_dict(pack_path)
+    report = run_owasp_conformance(manifest)
+    findings: list[str] = []
+    for category, result in report.results.items():
+        if result.status != "fail":
+            continue
+        for finding in result.findings:
+            findings.append(f"{category}: {finding}")
+    # R45 P2 #1: yellow / errored-category findings ALSO flow into
+    # the surfaced list so the ::warning stderr annotations cover
+    # incompleteness signals too. Order: red-path findings first
+    # (registry order via ``report.results.items()``), then yellow-
+    # path findings (registry order via ``report.errored_categories``).
+    for category in report.errored_categories:
+        errored_result = report.results.get(category)
+        if errored_result is None:
+            continue
+        for finding in errored_result.findings:
+            findings.append(f"{category}: {finding}")
+    return ConformanceSummary(
+        green=report.overall_status == "green",
+        overall_status=report.overall_status,
+        findings=findings,
+    )
 
 
 def _load_pyproject(
@@ -1164,8 +1274,22 @@ def run_harness(pack_path: Path) -> HarnessReport:
             _dispatch_one(pack_path, name=name, entry_point_ref=ref, pack_kind=pack_kind)
         )
 
+    # Step 5: OWASP conformance tail-call (Sprint-7B.2 T11). Fires
+    # only when validate + dispatch are green; skipped otherwise so
+    # the conformance arm doesn't produce noise against a pack that
+    # is already failing at an earlier gate. NON-GATING per
+    # BUILD_PLAN §627: a non-green verdict surfaces in
+    # ``HarnessReport.conformance`` + stderr ``::warning::`` lines but
+    # does NOT flip ``overall_status`` to ``"fail"``. The Sprint-7B.3
+    # 5-gate composer owns the gating decision; the test-harness
+    # produces evidence, not a gate signal.
+    conformance: ConformanceSummary | None = None
+    dispatch_all_pass = all(r.status == "pass" for r in dispatch_results)
+    if not findings and dispatch_all_pass:
+        conformance = _build_conformance_summary(pack_path)
+
     overall_status: Literal["pass", "fail"] = (
-        "pass" if not findings and all(r.status == "pass" for r in dispatch_results) else "fail"
+        "pass" if not findings and dispatch_all_pass else "fail"
     )
     return HarnessReport(
         pack_path=str(pack_path),
@@ -1176,6 +1300,7 @@ def run_harness(pack_path: Path) -> HarnessReport:
         validate_summary=validate_summary,
         findings=findings,
         dispatch_results=dispatch_results,
+        conformance=conformance,
     )
 
 
@@ -1186,7 +1311,20 @@ def run_harness(pack_path: Path) -> HarnessReport:
 
 def _build_report_payload(report: HarnessReport) -> dict[str, Any]:
     """Build the deterministic JSON payload for ``--json`` mode.
-    Extracted so the JSON shape stays single-sourced + testable."""
+    Extracted so the JSON shape stays single-sourced + testable.
+
+    The ``conformance`` key (Sprint-7B.2 T11) is ``None`` when the
+    OWASP tail-call was skipped (earlier step failed), or the 3-key
+    summary dict (``green`` / ``overall_status`` / ``findings``)
+    when it ran. Wire-shape field order matches
+    :class:`ConformanceSummary` per ADR-006."""
+    conformance: dict[str, Any] | None = None
+    if report.conformance is not None:
+        conformance = {
+            "green": report.conformance.green,
+            "overall_status": report.conformance.overall_status,
+            "findings": list(report.conformance.findings),
+        }
     return {
         "pack_path": report.pack_path,
         "pack_id": report.pack_id,
@@ -1227,6 +1365,7 @@ def _build_report_payload(report: HarnessReport) -> dict[str, Any]:
             }
             for r in report.dispatch_results
         ],
+        "conformance": conformance,
     }
 
 
@@ -1253,6 +1392,17 @@ def format_report_summary(report: HarnessReport) -> str:
             lines.append(
                 f"  dispatch.{r.entry_point_name}: fail ({r.failure_reason}: {r.failure_message})"
             )
+    # Conformance verdict line (Sprint-7B.2 T11). Surfaces only when
+    # the OWASP tail-call ran (non-None conformance summary). The
+    # "non-gating" doctrine means the verdict can be non-green while
+    # the harness overall is PASS — the verdict line makes that
+    # distinction visible to pack authors scanning the summary.
+    if report.conformance is not None:
+        finding_count = len(report.conformance.findings)
+        lines.append(
+            f"  conformance: {report.conformance.overall_status} "
+            f"(green={report.conformance.green}, findings={finding_count})"
+        )
     return "\n".join(lines)
 
 
@@ -1284,6 +1434,16 @@ def format_report_finding_annotations(report: HarnessReport) -> list[str]:
                 f"dispatch.{r.entry_point_name} ({r.entry_point_ref}) — "
                 f"{r.failure_message}"
             )
+    # Conformance findings emit ``::warning::`` annotations (Sprint-7B.2 T11).
+    # Per the non-gating doctrine, OWASP failures are warnings (not
+    # errors) — they render to stderr so CI parsers can see the
+    # signal but they do NOT affect exit code. Mirrors the validate-
+    # side warning-severity pattern at
+    # ``cli/__init__.py:ValidatorFinding`` (e.g.,
+    # ``identity_oasf_capability_set_missing``).
+    if report.conformance is not None:
+        for finding in report.conformance.findings:
+            lines.append(f"::warning file={report.pack_path}::conformance: {finding}")
     return lines
 
 
@@ -1309,6 +1469,7 @@ def format_report(report: HarnessReport, *, json_output: bool) -> str:
 
 
 __all__ = [
+    "ConformanceSummary",
     "DispatchOutcome",
     "DispatchResult",
     "HarnessFinding",
