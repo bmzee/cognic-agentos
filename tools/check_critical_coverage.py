@@ -944,6 +944,24 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     #     pinned by the disjointness drift detectors in
     #     ``test_evidence_routes_structure.py``.
     ("src/cognic_agentos/packs/evidence/data_governance.py", 0.95, 0.90),
+    # Sprint 7B.3 T4 — risk-tier evidence panel.
+    # ADR-014 §24-37 — risk-tier vocabulary IS the runtime tool-
+    # approval contract. The module owns the wire-protocol-public
+    # 7-value ``ApprovalFlowKind`` closed-enum + the 1:1
+    # ``_RISK_TIER_TO_APPROVAL_FLOW`` mapping table that the 5-gate
+    # composer (T7) consumes alongside the panel route handler.
+    # Drift in the Literal OR the mapping table is wire-protocol-
+    # public regression. Mirrors the T3 data-governance projector
+    # promotion (wire-protocol-public vocab + cross-layer consumer).
+    #
+    # Same R32 carry-over as T3: ``portal/api/packs/evidence_routes.py``
+    # stays OFF the durable gate — the T4 risk-tier handler does not
+    # own a Human-only-decisions enforcement boundary or actor_type
+    # chain-payload provenance surface; CC risk covered by the
+    # projector being on the gate + the existing T3 disjointness
+    # drift detectors covering the shared ``EvidencePanelRefusalReason``
+    # vocab in ``test_evidence_routes_structure.py``.
+    ("src/cognic_agentos/packs/evidence/risk_tier.py", 0.95, 0.90),
 )
 
 

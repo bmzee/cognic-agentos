@@ -35,6 +35,7 @@ import pydantic
 
 from cognic_agentos.packs.approval_types import ApprovalOverrideReason
 from cognic_agentos.packs.evidence.data_governance import DataGovernanceDiffFlag
+from cognic_agentos.packs.evidence.risk_tier import ApprovalFlowKind
 from cognic_agentos.packs.lifecycle import PackKind, PackState
 
 
@@ -538,3 +539,66 @@ class DataGovernancePanel(PackBaseModel):
     dlp_pre_hooks: tuple[str, ...]
     dlp_post_hooks: tuple[str, ...]
     tenant_policy_diff: tuple[DataGovernanceDiffFlag, ...]
+
+
+# ---------------------------------------------------------------------------
+# Sprint 7B.3 T4 — RiskTierPanel response DTO
+# (Plan §318 — GET /api/v1/packs/{pack_id}/evidence/risk-tier)
+# ---------------------------------------------------------------------------
+
+
+class RiskTierPanel(PackBaseModel):
+    """Sprint 7B.3 T4 — GET ``/api/v1/packs/{pack_id}/evidence/risk-tier``
+    response body per plan §318.
+
+    Wire-shape projection of a pack's persisted manifest's
+    ``risk_tier.tier`` field per ADR-014 §24-37. The route handler at
+    :mod:`cognic_agentos.portal.api.packs.evidence_routes` fetches the
+    persisted manifest via :func:`find_latest_submit_row` +
+    ``payload["manifest"]`` and feeds it through
+    :func:`cognic_agentos.packs.evidence.risk_tier.project_risk_tier_panel`
+    to produce the :class:`RiskTierPanelData` projector output, then
+    ``RiskTierPanel.model_validate(panel_data)`` projects onto this
+    wire shape via ``from_attributes=True``.
+
+    Architectural-arrow invariant: this DTO consumes the
+    :data:`ApprovalFlowKind` vocabulary from
+    :mod:`cognic_agentos.packs.evidence.risk_tier` (the source-of-
+    truth module). The arrow runs ``portal → packs/evidence``
+    exclusively — projectors do NOT import portal types.
+
+    ``from_attributes=True`` matches the :class:`DataGovernancePanel`
+    interop pattern: handlers can pass a :class:`RiskTierPanelData`
+    directly without an intermediate ``dataclasses.asdict`` conversion.
+
+    Field set (4 fields, frozen per plan §318):
+
+    - ``pack_kind: PackKind`` — authoritative kind from the
+      :class:`PackRecord.kind` projection (handler cross-checks
+      against ``manifest["pack"]["kind"]`` BEFORE invoking the
+      projector; mismatch surfaces as 409 ``pack_kind_mismatch``).
+    - ``risk_tier: str`` — bare string (NOT the :data:`RiskTier`
+      Literal) so the defensive-fallback paths (missing block,
+      non-dict block, unknown tier, non-string value) can surface a
+      raw drift indicator (the unknown string or empty) without a
+      Pydantic refusal at validation. The drift is signalled to the
+      reviewer via the projector's ``approval_flow="pack_declared"``
+      conservative fallback (NOT by refusing to serve the panel).
+    - ``approval_flow: ApprovalFlowKind`` — closed-enum 7-value Literal
+      per ADR-014 §30-37. Pydantic v2 refuses out-of-vocab values at
+      validation time (mirrors :data:`DataGovernanceDiffFlag` strict
+      validation on the data-governance panel).
+    - ``approval_flow_description: str`` — per-flow display text for
+      the reviewer UI hint; non-empty for every flow value.
+
+    Inherits :class:`PackBaseModel`'s ``frozen=True`` + ``extra="forbid"``
+    — smuggled fields refuse at validation; downstream handler cannot
+    mutate the DTO mid-request.
+    """
+
+    model_config = pydantic.ConfigDict(frozen=True, extra="forbid", from_attributes=True)
+
+    pack_kind: PackKind
+    risk_tier: str
+    approval_flow: ApprovalFlowKind
+    approval_flow_description: str

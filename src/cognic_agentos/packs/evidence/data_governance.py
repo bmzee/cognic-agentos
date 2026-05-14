@@ -106,11 +106,16 @@ tenant's policy:
 - ``"egress_endpoint_not_in_tenant_allowlist"`` — pack's
   ``egress_allow_list`` includes an endpoint outside the tenant's
   policy.
-- ``"dlp_pre_hook_missing"`` — pack declares a ``dlp_pre_hooks`` entry
-  that does not resolve to an installed hook pack at scan time (the
-  panel surface flags it; the runtime DLP gate refuses at invocation
-  time).
-- ``"dlp_post_hook_missing"`` — same as above for ``dlp_post_hooks``.
+- ``"dlp_pre_hook_missing"`` — tenant policy's ``required_dlp_pre_hooks``
+  declares one or more hook IDs that the pack did NOT list in its own
+  ``dlp_pre_hooks`` block (the pack failed to wire a tenant-mandated
+  pre-phase hook). Whether the declared hook IDs themselves resolve
+  to installed hook packs at scan time is a SEPARATE runtime concern
+  owned by the hook registry + DLPGuard per ADR-017 §97 — the panel
+  surfaces only the manifest-declaration gap against tenant policy.
+- ``"dlp_post_hook_missing"`` — symmetric for the post-phase: tenant
+  policy's ``required_dlp_post_hooks`` declares a hook ID the pack
+  did NOT list in its ``dlp_post_hooks`` block.
 - ``"none"`` — sentinel for "no drift detected"; emitted ONLY when
   the projector ran against a tenant policy AND found no violations.
   Distinguished from the empty-tuple-on-no-policy contract per plan
@@ -254,7 +259,15 @@ def _compute_tenant_policy_diff(
         flags.append("data_class_not_in_tenant_allowlist")
 
     allowed_purposes = tenant_policy.get("allowed_purposes")
-    if allowed_purposes is not None and purpose != "" and purpose not in allowed_purposes:
+    # Note: NO ``purpose != ""`` guard. ADR-017 build-time validation
+    # treats ``purpose`` as required; a corrupted or pre-validation
+    # persisted manifest with a missing/empty ``purpose`` MUST trip
+    # ``purpose_not_declared`` whenever the tenant has wired an
+    # ``allowed_purposes`` policy — silently returning ``("none",)``
+    # would let an integrity break read as policy-clean. Pinned by
+    # ``test_data_governance_panel.py::
+    # test_diff_purpose_not_declared_when_purpose_missing_and_policy_wired``.
+    if allowed_purposes is not None and purpose not in allowed_purposes:
         flags.append("purpose_not_declared")
 
     max_retention = tenant_policy.get("max_retention_window")

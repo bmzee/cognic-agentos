@@ -1,22 +1,31 @@
-"""Sprint 7B.3 T3 — reviewer evidence-panel routes (CRITICAL CONTROLS).
+"""Sprint 7B.3 T3+T4 — reviewer evidence-panel routes (CRITICAL CONTROLS).
 
 Per the plan-of-record at
 ``docs/superpowers/plans/2026-05-13-sprint-7b3-reviewer-evidence-panels-5-gate.md``
-§290-307 — ships the data-governance evidence-panel handler under
-``/api/v1/packs``. T4-T6 extend the SAME ``build_evidence_routes``
-factory with the remaining three panels (risk-tier / supply-chain /
-conformance); T7 wires the 5-gate composer that consumes the same
-projector outputs.
+§290-323 — ships the data-governance (T3) + risk-tier (T4) evidence-
+panel handlers under ``/api/v1/packs``. T5-T6 extend the SAME
+``build_evidence_routes`` factory with the remaining two panels
+(supply-chain / conformance); T7 wires the 5-gate composer that
+consumes the same projector outputs.
 
-T3 endpoint surface (this commit):
+Endpoint surface (T3 + T4):
 
-- ``GET  /{pack_id}/evidence/data-governance`` — gated by
+- ``GET  /{pack_id}/evidence/data-governance`` (T3) — gated by
   ``pack.review.claim`` + ``RequireTenantOwnership``; reads the
   authoritative manifest from the most recent submit chain row via
   :func:`find_latest_submit_row` + ``payload["manifest"]`` per plan
   R1 P2 #1's manifest-evidence-source seam; projects through
   :func:`project_data_governance_panel`; returns
   :class:`DataGovernancePanel` per plan §302.
+- ``GET  /{pack_id}/evidence/risk-tier`` (T4) — same RBAC + tenant
+  isolation as T3; reads the same manifest via the same seam;
+  projects through :func:`project_risk_tier_panel`; returns
+  :class:`RiskTierPanel` per plan §318. The closed-enum
+  :data:`ApprovalFlowKind` Literal at
+  :mod:`cognic_agentos.packs.evidence.risk_tier` IS the wire-protocol
+  contract for the panel's ``approval_flow`` field; ADR-014 §30-37
+  is the canonical source of truth for the risk-tier → approval-flow
+  mapping table.
 
 Refusal taxonomy (handler-body 409s):
 
@@ -65,8 +74,9 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from cognic_agentos.packs._lifecycle_helpers import find_latest_submit_row
 from cognic_agentos.packs.evidence.data_governance import project_data_governance_panel
+from cognic_agentos.packs.evidence.risk_tier import project_risk_tier_panel
 from cognic_agentos.packs.storage import PackRecord, PackRecordStore
-from cognic_agentos.portal.api.packs.dto import DataGovernancePanel
+from cognic_agentos.portal.api.packs.dto import DataGovernancePanel, RiskTierPanel
 from cognic_agentos.portal.rbac.actor import Actor
 from cognic_agentos.portal.rbac.enforcement import RequireScope
 from cognic_agentos.portal.rbac.tenant_isolation import RequireTenantOwnership
@@ -189,7 +199,13 @@ def build_evidence_routes(*, store: PackRecordStore) -> APIRouter:
 
         pack_meta = manifest.get("pack")
         manifest_kind = pack_meta.get("kind") if isinstance(pack_meta, dict) else None
-        if manifest_kind is not None and manifest_kind != record.kind:
+        # R9 kind-integrity invariant: the manifest's pack.kind MUST be
+        # present, MUST be a string, AND MUST equal the authoritative
+        # PackRecord.kind. Absent / non-string values are treated as
+        # pack_kind_mismatch (NOT silently projected against record.kind)
+        # so a corrupted persisted manifest cannot bypass the integrity
+        # gate. Pinned by both panels' kind-integrity regression tests.
+        if not isinstance(manifest_kind, str) or manifest_kind != record.kind:
             _LOG.warning(
                 "portal.packs.evidence.data_governance_panel_refused",
                 extra={
@@ -211,6 +227,115 @@ def build_evidence_routes(*, store: PackRecordStore) -> APIRouter:
             tenant_policy=None,  # plan §304 — tenant-policy substrate is post-7B
         )
         return DataGovernancePanel.model_validate(panel_data)
+
+    @router.get(
+        "/{pack_id}/evidence/risk-tier",
+        summary="Reviewer risk-tier evidence panel (ADR-014 projection)",
+    )
+    async def risk_tier_panel(
+        _actor: Annotated[Actor, Depends(_require_pack_review_claim)],
+        record: Annotated[PackRecord, Depends(_require_tenant_ownership)],
+    ) -> RiskTierPanel:
+        """Project the persisted manifest's ``risk_tier`` block onto
+        the reviewer-facing evidence panel per plan §317-321.
+
+        Dependency chain (resolution order):
+
+        1. ``_require_pack_review_claim`` (:class:`RequireScope`) — 403
+           ``scope_not_held`` for missing scope.
+        2. ``_require_tenant_ownership`` (:class:`RequireTenantOwnership`) —
+           404 ``tenant_id_mismatch`` for cross-tenant; returns the
+           :class:`PackRecord` for the kind cross-check.
+
+        Handler-body refusals (all 409 + closed-enum
+        :data:`EvidencePanelRefusalReason`):
+
+        - No submit chain row → ``pack_not_yet_submitted``.
+        - Submit row missing ``payload["manifest"]`` → ``manifest_evidence_not_persisted``.
+        - ``manifest["pack"]["kind"] != record.kind`` → ``pack_kind_mismatch``.
+
+        Per plan §319-321 + ADR-014 §30-37: the projector resolves the
+        manifest's declared ``risk_tier.tier`` value through the 1:1
+        :data:`_RISK_TIER_TO_APPROVAL_FLOW` mapping table to produce
+        the :data:`ApprovalFlowKind` for the reviewer UI hint. The
+        canonical 8 :data:`RiskTier` values resolve to their ADR-014
+        flows; the defensive-fallback paths (missing block, malformed
+        block, unknown tier, non-string tier value) ALL resolve to the
+        most-conservative ``"pack_declared"`` flow so the reviewer is
+        never auto-routed on a vacuous default.
+
+        Structured-log emission: every refusal path logs
+        ``portal.packs.evidence.risk_tier_panel_refused`` with reason
+        + ``pack_id`` + ``actor_subject`` so observability tooling can
+        audit panel-access refusal patterns (mirrors the T3 data-
+        governance panel's emission contract — distinct log message
+        per panel so a future regression that cross-fires (e.g. risk-
+        tier handler emitting a data-governance log) is caught by the
+        per-panel mutually-exclusive log assertions in
+        ``test_evidence_panel_routes.py``).
+        """
+        history = await store.load_lifecycle_history(record.id)
+        submit_row = find_latest_submit_row(history)
+        if submit_row is None:
+            _LOG.warning(
+                "portal.packs.evidence.risk_tier_panel_refused",
+                extra={
+                    "reason": _PACK_NOT_YET_SUBMITTED_REASON,
+                    "actor_subject": _actor.subject,
+                    "pack_id": str(record.id),
+                    "from_state": record.state,
+                },
+            )
+            raise HTTPException(
+                status_code=409,
+                detail={"reason": _PACK_NOT_YET_SUBMITTED_REASON},
+            )
+
+        manifest = submit_row.payload.get("manifest")
+        if not isinstance(manifest, dict):
+            _LOG.warning(
+                "portal.packs.evidence.risk_tier_panel_refused",
+                extra={
+                    "reason": _MANIFEST_EVIDENCE_NOT_PERSISTED_REASON,
+                    "actor_subject": _actor.subject,
+                    "pack_id": str(record.id),
+                    "from_state": record.state,
+                },
+            )
+            raise HTTPException(
+                status_code=409,
+                detail={"reason": _MANIFEST_EVIDENCE_NOT_PERSISTED_REASON},
+            )
+
+        pack_meta = manifest.get("pack")
+        manifest_kind = pack_meta.get("kind") if isinstance(pack_meta, dict) else None
+        # R9 kind-integrity invariant: the manifest's pack.kind MUST be
+        # present, MUST be a string, AND MUST equal the authoritative
+        # PackRecord.kind. Absent / non-string values are treated as
+        # pack_kind_mismatch (NOT silently projected against record.kind)
+        # so a corrupted persisted manifest cannot bypass the integrity
+        # gate. Pinned by both panels' kind-integrity regression tests.
+        if not isinstance(manifest_kind, str) or manifest_kind != record.kind:
+            _LOG.warning(
+                "portal.packs.evidence.risk_tier_panel_refused",
+                extra={
+                    "reason": _PACK_KIND_MISMATCH_REASON,
+                    "actor_subject": _actor.subject,
+                    "pack_id": str(record.id),
+                    "record_kind": record.kind,
+                    "manifest_kind": manifest_kind,
+                },
+            )
+            raise HTTPException(
+                status_code=409,
+                detail={"reason": _PACK_KIND_MISMATCH_REASON},
+            )
+
+        panel_data = project_risk_tier_panel(
+            manifest=manifest,
+            record_kind=record.kind,
+        )
+        return RiskTierPanel.model_validate(panel_data)
 
     return router
 

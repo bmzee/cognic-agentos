@@ -103,24 +103,38 @@ class TestSprint7B3T3SliceDBuildEvidenceRoutesShape:
         }
         assert ("/{pack_id}/evidence/data-governance", frozenset({"GET"})) in compiled_paths
 
-    def test_t3_registers_exactly_one_route(self) -> None:
-        """Slice D ships ONE handler — the data-governance panel.
-        T4-T6 extend the SAME factory with risk-tier / supply-chain /
-        conformance panels per plan §294. Pin the T3 count so a
-        future slice extension flips this test on visibility."""
+    def test_registers_risk_tier_panel_route(self) -> None:
+        """Sprint 7B.3 T4 — ``GET /{pack_id}/evidence/risk-tier`` MUST
+        be present on the returned router. Wire-protocol-public path
+        per plan §316; renaming breaks every bank-overlay's evidence-
+        panel consumer."""
+        store = typing.cast(PackRecordStore, object())
+        router = build_evidence_routes(store=store)
+        compiled_paths = {
+            (route.path, frozenset(route.methods))
+            for route in router.routes
+            if hasattr(route, "path") and hasattr(route, "methods")
+        }
+        assert ("/{pack_id}/evidence/risk-tier", frozenset({"GET"})) in compiled_paths
+
+    def test_t3_t4_register_exactly_two_routes(self) -> None:
+        """Slices D (T3 data-governance) + T4 (risk-tier) ship TWO
+        handlers on the same factory. T5-T6 extend with supply-chain
+        / conformance panels per plan §294. Pin the cumulative count
+        so a future slice extension flips this test on visibility."""
         store = typing.cast(PackRecordStore, object())
         router = build_evidence_routes(store=store)
         route_count = sum(
             1 for route in router.routes if hasattr(route, "path") and hasattr(route, "methods")
         )
-        assert route_count == 1
+        assert route_count == 2
 
 
 class TestSprint7B3T3SliceERouterWiring:
     """Pin the production wiring at :func:`build_packs_router` so the
     full path ``GET /api/v1/packs/{pack_id}/evidence/data-governance``
-    is exposed by the deployed app (not just at the un-mounted
-    sub-router shape level)."""
+    (T3) + ``…/risk-tier`` (T4) are exposed by the deployed app (not
+    just at the un-mounted sub-router shape level)."""
 
     def test_packs_router_includes_data_governance_panel_path(self) -> None:
         store = typing.cast(PackRecordStore, object())
@@ -132,6 +146,21 @@ class TestSprint7B3T3SliceERouterWiring:
         }
         assert (
             "/api/v1/packs/{pack_id}/evidence/data-governance",
+            frozenset({"GET"}),
+        ) in compiled_paths
+
+    def test_packs_router_includes_risk_tier_panel_path(self) -> None:
+        """Sprint 7B.3 T4 — pin the production wiring for the risk-tier
+        path. Mirrors :meth:`test_packs_router_includes_data_governance_panel_path`."""
+        store = typing.cast(PackRecordStore, object())
+        parent = build_packs_router(store=store)
+        compiled_paths = {
+            (route.path, frozenset(route.methods))
+            for route in parent.routes
+            if hasattr(route, "path") and hasattr(route, "methods")
+        }
+        assert (
+            "/api/v1/packs/{pack_id}/evidence/risk-tier",
             frozenset({"GET"}),
         ) in compiled_paths
 

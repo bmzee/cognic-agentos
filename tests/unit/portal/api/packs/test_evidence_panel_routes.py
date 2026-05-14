@@ -121,9 +121,22 @@ _FIXTURE_DATA_GOVERNANCE_BLOCK: dict[str, Any] = {
 }
 
 
-def _build_manifest(*, kind: PackKind, pack_id_field: str) -> dict[str, Any]:
-    """Build a minimal but realistic manifest dict for fixture submits."""
-    return {
+def _build_manifest(
+    *,
+    kind: PackKind,
+    pack_id_field: str,
+    risk_tier_value: str | None = "customer_data_read",
+) -> dict[str, Any]:
+    """Build a minimal but realistic manifest dict for fixture submits.
+
+    The ``risk_tier_value`` kwarg is non-None by default so T3 fixtures
+    keep working unchanged (the data-governance projector ignores the
+    block). T4 fixtures parameterise on this value to exercise the
+    full 8-value :data:`RiskTier` set + the defensive-fallback paths.
+    Pass ``None`` to OMIT the ``risk_tier`` block entirely (exercises
+    the missing-block defensive path).
+    """
+    manifest: dict[str, Any] = {
         "pack": {
             "kind": kind,
             "pack_id": pack_id_field,
@@ -132,6 +145,9 @@ def _build_manifest(*, kind: PackKind, pack_id_field: str) -> dict[str, Any]:
         },
         "data_governance": dict(_FIXTURE_DATA_GOVERNANCE_BLOCK),
     }
+    if risk_tier_value is not None:
+        manifest["risk_tier"] = {"tier": risk_tier_value}
+    return manifest
 
 
 async def _seed_submitted_pack(
@@ -438,5 +454,453 @@ class TestSprint7B3T3SliceFManifestShapeIntegration:
         app = _build_app(actor=_make_actor(), store=store)
         with TestClient(app) as client:
             response = client.get(_PANEL_PATH.format(pack_id=record.id))
+        assert response.status_code == 409
+        assert response.json() == {"detail": {"reason": "pack_kind_mismatch"}}
+
+
+# ===========================================================================
+# Sprint 7B.3 T4 Slice E — risk-tier evidence-panel integration tests
+# ===========================================================================
+#
+# Mirrors the T3 Slice F layout (Happy path / Refusal reasons / Sibling-gate
+# refusals / Manifest-shape integration) for the risk-tier endpoint. The 4
+# T4 classes pin the SAME refusal contract + the SAME RBAC + tenant-isolation
+# gates as T3 — drift in any path-shared invariant would surface in both
+# classes simultaneously, catching the "panel-specific drift" regression
+# class.
+# ===========================================================================
+
+
+_RISK_TIER_PANEL_PATH = "/api/v1/packs/{pack_id}/evidence/risk-tier"
+
+
+class TestSprint7B3T4SliceEHappyPath:
+    """Slice E-1 — green-path projection for the risk-tier panel."""
+
+    async def test_happy_path_returns_200_and_full_panel_shape(
+        self, store: PackRecordStore
+    ) -> None:
+        record = await _seed_submitted_pack(store, kind="tool")
+        app = _build_app(actor=_make_actor(), store=store)
+        with TestClient(app) as client:
+            response = client.get(_RISK_TIER_PANEL_PATH.format(pack_id=record.id))
+        assert response.status_code == 200
+        body = response.json()
+        # _build_manifest default tier is customer_data_read → single_approval.
+        assert body["pack_kind"] == "tool"
+        assert body["risk_tier"] == "customer_data_read"
+        assert body["approval_flow"] == "single_approval"
+        assert isinstance(body["approval_flow_description"], str)
+        assert body["approval_flow_description"] != ""
+        # Wire-shape — exactly 4 fields, none smuggled.
+        assert frozenset(body.keys()) == frozenset(
+            {"pack_kind", "risk_tier", "approval_flow", "approval_flow_description"}
+        )
+
+    @pytest.mark.parametrize(
+        ("tier", "expected_flow"),
+        [
+            ("read_only", "auto_run"),
+            ("internal_write", "audit_emphasis"),
+            ("customer_data_read", "single_approval"),
+            ("customer_data_write", "single_approval"),
+            ("payment_action", "four_eyes"),
+            ("regulator_communication", "four_eyes_categorised"),
+            ("cross_tenant", "operator_legal_signoff"),
+            ("high_risk_custom", "pack_declared"),
+        ],
+    )
+    async def test_every_canonical_tier_resolves_through_full_stack(
+        self, store: PackRecordStore, tier: str, expected_flow: str
+    ) -> None:
+        """Every one of the 8 canonical :data:`RiskTier` values resolves
+        through the full FastAPI stack to its ADR-014 approval flow.
+        Pins the projector → DTO → JSON serialization round-trip for
+        every canonical tier (NOT just the projector contract)."""
+        manifest = _build_manifest(
+            kind="tool",
+            pack_id_field=f"cognic-tool-{tier}",
+            risk_tier_value=tier,
+        )
+        record = await _seed_submitted_pack(store, kind="tool", manifest=manifest)
+        app = _build_app(actor=_make_actor(), store=store)
+        with TestClient(app) as client:
+            response = client.get(_RISK_TIER_PANEL_PATH.format(pack_id=record.id))
+        assert response.status_code == 200
+        body = response.json()
+        assert body["risk_tier"] == tier
+        assert body["approval_flow"] == expected_flow
+
+    @pytest.mark.parametrize("kind", ["tool", "skill", "agent", "hook"])
+    async def test_pack_kind_echoes_record_kind_across_all_four_kinds(
+        self, store: PackRecordStore, kind: PackKind
+    ) -> None:
+        """``pack_kind`` MUST come from the authoritative
+        :class:`PackRecord.kind`. Mirror of T3's parametrised kind test
+        — pinned independently because each panel's projector contract
+        is independently auditable."""
+        record = await _seed_submitted_pack(store, kind=kind)
+        app = _build_app(actor=_make_actor(), store=store)
+        with TestClient(app) as client:
+            response = client.get(_RISK_TIER_PANEL_PATH.format(pack_id=record.id))
+        assert response.status_code == 200
+        assert response.json()["pack_kind"] == kind
+
+
+class TestSprint7B3T4SliceERefusalReasons:
+    """Slice E-2 — the three handler-body 409 refusal paths +
+    structured-log mutually-exclusive emission contract.
+
+    Distinct log message ``portal.packs.evidence.risk_tier_panel_refused``
+    (NOT ``data_governance_panel_refused``) pinned to catch the cross-
+    panel emission-drift regression class.
+    """
+
+    async def test_409_pack_not_yet_submitted_on_draft_state(
+        self,
+        store: PackRecordStore,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        record = await _seed_draft_pack(store)
+        app = _build_app(actor=_make_actor(), store=store)
+        caplog.set_level(logging.WARNING, logger="cognic_agentos.portal.api.packs.evidence_routes")
+        with TestClient(app) as client:
+            response = client.get(_RISK_TIER_PANEL_PATH.format(pack_id=record.id))
+        assert response.status_code == 409
+        assert response.json() == {"detail": {"reason": "pack_not_yet_submitted"}}
+        refused_logs = [
+            r
+            for r in caplog.records
+            if r.message == "portal.packs.evidence.risk_tier_panel_refused"
+        ]
+        assert len(refused_logs) == 1
+        assert refused_logs[0].__dict__["reason"] == "pack_not_yet_submitted"
+        assert refused_logs[0].__dict__["pack_id"] == str(record.id)
+        assert refused_logs[0].__dict__["actor_subject"] == "alice@bank.example"
+
+    async def test_409_manifest_evidence_not_persisted_on_pre_7b3_submit_row(
+        self,
+        store: PackRecordStore,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        record = await _seed_submitted_pack(store, omit_manifest_kwarg=True)
+        app = _build_app(actor=_make_actor(), store=store)
+        caplog.set_level(logging.WARNING, logger="cognic_agentos.portal.api.packs.evidence_routes")
+        with TestClient(app) as client:
+            response = client.get(_RISK_TIER_PANEL_PATH.format(pack_id=record.id))
+        assert response.status_code == 409
+        assert response.json() == {"detail": {"reason": "manifest_evidence_not_persisted"}}
+        refused_logs = [
+            r
+            for r in caplog.records
+            if r.message == "portal.packs.evidence.risk_tier_panel_refused"
+        ]
+        assert len(refused_logs) == 1
+        assert refused_logs[0].__dict__["reason"] == "manifest_evidence_not_persisted"
+
+    async def test_409_pack_kind_mismatch_when_manifest_kind_disagrees(
+        self,
+        store: PackRecordStore,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        tampered_manifest = _build_manifest(kind="tool", pack_id_field="cognic-tool-xyz")
+        tampered_manifest["pack"]["kind"] = "skill"
+        record = await _seed_submitted_pack(store, kind="tool", manifest=tampered_manifest)
+        app = _build_app(actor=_make_actor(), store=store)
+        caplog.set_level(logging.WARNING, logger="cognic_agentos.portal.api.packs.evidence_routes")
+        with TestClient(app) as client:
+            response = client.get(_RISK_TIER_PANEL_PATH.format(pack_id=record.id))
+        assert response.status_code == 409
+        assert response.json() == {"detail": {"reason": "pack_kind_mismatch"}}
+        refused_logs = [
+            r
+            for r in caplog.records
+            if r.message == "portal.packs.evidence.risk_tier_panel_refused"
+        ]
+        assert len(refused_logs) == 1
+        assert refused_logs[0].__dict__["reason"] == "pack_kind_mismatch"
+        assert refused_logs[0].__dict__["record_kind"] == "tool"
+        assert refused_logs[0].__dict__["manifest_kind"] == "skill"
+
+    async def test_happy_path_emits_zero_refused_logs(
+        self,
+        store: PackRecordStore,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Mutually-exclusive emission contract: green path emits ZERO
+        ``portal.packs.evidence.risk_tier_panel_refused`` records."""
+        record = await _seed_submitted_pack(store)
+        app = _build_app(actor=_make_actor(), store=store)
+        caplog.set_level(logging.WARNING, logger="cognic_agentos.portal.api.packs.evidence_routes")
+        with TestClient(app) as client:
+            response = client.get(_RISK_TIER_PANEL_PATH.format(pack_id=record.id))
+        assert response.status_code == 200
+        refused_logs = [
+            r
+            for r in caplog.records
+            if r.message == "portal.packs.evidence.risk_tier_panel_refused"
+        ]
+        assert refused_logs == []
+
+    async def test_risk_tier_handler_does_not_emit_data_governance_log(
+        self,
+        store: PackRecordStore,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Cross-panel emission-drift regression: the risk-tier refusal
+        path emits ONLY the ``risk_tier_panel_refused`` log message —
+        NEVER the data-governance log. A future change that copies
+        T3's emission inline into the T4 handler by mistake would
+        cross-fire and be caught by this assertion."""
+        record = await _seed_draft_pack(store)
+        app = _build_app(actor=_make_actor(), store=store)
+        caplog.set_level(logging.WARNING, logger="cognic_agentos.portal.api.packs.evidence_routes")
+        with TestClient(app) as client:
+            response = client.get(_RISK_TIER_PANEL_PATH.format(pack_id=record.id))
+        assert response.status_code == 409
+        # The data-governance panel's log MUST NOT fire here.
+        dg_logs = [
+            r
+            for r in caplog.records
+            if r.message == "portal.packs.evidence.data_governance_panel_refused"
+        ]
+        assert dg_logs == []
+
+
+class TestSprint7B3T4SliceESiblingGateRefusals:
+    """Slice E-3 — RBAC / tenant-isolation / unknown-pack-id refusals
+    via the dependency chain. Same gate semantics as T3."""
+
+    async def test_rbac_403_when_actor_lacks_review_claim_scope(
+        self, store: PackRecordStore
+    ) -> None:
+        record = await _seed_submitted_pack(store)
+        actor = _make_actor(scopes=frozenset({"pack.audit.read"}))
+        app = _build_app(actor=actor, store=store)
+        with TestClient(app) as client:
+            response = client.get(_RISK_TIER_PANEL_PATH.format(pack_id=record.id))
+        assert response.status_code == 403
+        detail = response.json()["detail"]
+        assert detail["reason"] == "scope_not_held"
+        assert detail["required_scope"] == "pack.review.claim"
+
+    async def test_tenant_isolation_404_on_cross_tenant_access(
+        self, store: PackRecordStore
+    ) -> None:
+        record = await _seed_submitted_pack(store, tenant_id="t1")
+        actor = _make_actor(tenant_id="t2")
+        app = _build_app(actor=actor, store=store)
+        with TestClient(app) as client:
+            response = client.get(_RISK_TIER_PANEL_PATH.format(pack_id=record.id))
+        assert response.status_code == 404
+        assert response.json() == {"detail": {"reason": "tenant_id_mismatch"}}
+
+    async def test_unknown_pack_id_404_pack_not_found(self, store: PackRecordStore) -> None:
+        bogus_id = uuid.uuid4()
+        app = _build_app(actor=_make_actor(), store=store)
+        with TestClient(app) as client:
+            response = client.get(_RISK_TIER_PANEL_PATH.format(pack_id=bogus_id))
+        assert response.status_code == 404
+        assert response.json() == {"detail": {"reason": "pack_not_found"}}
+
+
+class TestSprint7B3T4SliceEManifestShapeIntegration:
+    """Slice E-4 — exercise the projector's defensive-fallback paths
+    through the full FastAPI stack."""
+
+    async def test_missing_risk_tier_block_resolves_to_pack_declared_fallback(
+        self, store: PackRecordStore
+    ) -> None:
+        """Manifest without a ``risk_tier`` block surfaces ``risk_tier=""``
+        + ``approval_flow="pack_declared"`` so the reviewer is routed
+        through the most-conservative flow rather than auto-running."""
+        manifest = _build_manifest(
+            kind="tool",
+            pack_id_field="cognic-tool-norisk",
+            risk_tier_value=None,  # omit risk_tier block
+        )
+        record = await _seed_submitted_pack(store, manifest=manifest)
+        app = _build_app(actor=_make_actor(), store=store)
+        with TestClient(app) as client:
+            response = client.get(_RISK_TIER_PANEL_PATH.format(pack_id=record.id))
+        assert response.status_code == 200
+        body = response.json()
+        assert body["risk_tier"] == ""
+        assert body["approval_flow"] == "pack_declared"
+
+    async def test_unknown_tier_value_resolves_to_pack_declared_fallback(
+        self, store: PackRecordStore
+    ) -> None:
+        """A manifest with a ``tier`` value outside the canonical 8
+        (e.g. drift / corruption / future-vocab) surfaces the raw
+        value echoed onto ``risk_tier`` + the conservative
+        ``pack_declared`` flow. Reviewer sees the drift on-panel."""
+        manifest = _build_manifest(
+            kind="tool",
+            pack_id_field="cognic-tool-legacy",
+            risk_tier_value="legacy_unknown_tier",
+        )
+        record = await _seed_submitted_pack(store, manifest=manifest)
+        app = _build_app(actor=_make_actor(), store=store)
+        with TestClient(app) as client:
+            response = client.get(_RISK_TIER_PANEL_PATH.format(pack_id=record.id))
+        assert response.status_code == 200
+        body = response.json()
+        assert body["risk_tier"] == "legacy_unknown_tier"
+        assert body["approval_flow"] == "pack_declared"
+
+    async def test_malformed_risk_tier_block_resolves_to_pack_declared_fallback(
+        self, store: PackRecordStore
+    ) -> None:
+        """A manifest with ``risk_tier`` as a non-dict value (e.g. a
+        bare string from corrupted persistence) surfaces empty +
+        pack_declared fallback rather than crashing the route."""
+        manifest = _build_manifest(
+            kind="tool",
+            pack_id_field="cognic-tool-malformed",
+        )
+        manifest["risk_tier"] = "not-a-dict"  # tamper with shape
+        record = await _seed_submitted_pack(store, manifest=manifest)
+        app = _build_app(actor=_make_actor(), store=store)
+        with TestClient(app) as client:
+            response = client.get(_RISK_TIER_PANEL_PATH.format(pack_id=record.id))
+        assert response.status_code == 200
+        body = response.json()
+        assert body["risk_tier"] == ""
+        assert body["approval_flow"] == "pack_declared"
+
+    async def test_approval_flow_description_present_in_response(
+        self, store: PackRecordStore
+    ) -> None:
+        """The ``approval_flow_description`` field MUST be present
+        AND non-empty on every successful panel response — wire-
+        protocol-public guarantee for the reviewer UI hint."""
+        record = await _seed_submitted_pack(store, kind="tool")
+        app = _build_app(actor=_make_actor(), store=store)
+        with TestClient(app) as client:
+            response = client.get(_RISK_TIER_PANEL_PATH.format(pack_id=record.id))
+        assert response.status_code == 200
+        description = response.json()["approval_flow_description"]
+        assert isinstance(description, str)
+        assert description != ""
+
+
+# ===========================================================================
+# Sprint 7B.3 T4 R-reviewer-round P2 #2 — kind-integrity refusal hardening
+# (shared evidence-route fix — applies to BOTH data-governance and risk-tier
+#  panels; pinned by dual-panel regression tests so a future drift in either
+#  handler's kind check fails this suite)
+# ===========================================================================
+
+
+class TestSprint7B3T4ReviewerP2KindIntegrityHardening:
+    """R-reviewer-round P2 #2 — fix the latent T3 + T4 bug where the
+    handler accepted a manifest with missing / non-string ``pack.kind``
+    by silently projecting against :class:`PackRecord.kind`. Per R9
+    kind-integrity invariant the manifest kind MUST be present, MUST
+    be a string, AND MUST equal the authoritative record kind.
+
+    Three failure modes covered for EACH of the 2 panel handlers
+    (total: 6 regression cases) — drift in either handler trips the
+    suite.
+    """
+
+    @pytest.mark.parametrize(
+        "panel_path",
+        [
+            "/api/v1/packs/{pack_id}/evidence/data-governance",
+            "/api/v1/packs/{pack_id}/evidence/risk-tier",
+        ],
+    )
+    async def test_missing_pack_block_refuses_409_kind_mismatch(
+        self,
+        store: PackRecordStore,
+        panel_path: str,
+    ) -> None:
+        """Manifest without a top-level ``pack`` block — handler MUST
+        refuse with 409 ``pack_kind_mismatch`` rather than projecting
+        against ``record.kind``. Mirrors the strict-integrity contract
+        a forged / corrupted persisted manifest cannot bypass."""
+        manifest = _build_manifest(kind="tool", pack_id_field="cognic-tool-nopack")
+        del manifest["pack"]  # remove entire pack block
+        record = await _seed_submitted_pack(store, kind="tool", manifest=manifest)
+        app = _build_app(actor=_make_actor(), store=store)
+        with TestClient(app) as client:
+            response = client.get(panel_path.format(pack_id=record.id))
+        assert response.status_code == 409
+        assert response.json() == {"detail": {"reason": "pack_kind_mismatch"}}
+
+    @pytest.mark.parametrize(
+        "panel_path",
+        [
+            "/api/v1/packs/{pack_id}/evidence/data-governance",
+            "/api/v1/packs/{pack_id}/evidence/risk-tier",
+        ],
+    )
+    async def test_missing_kind_field_in_pack_block_refuses_409(
+        self,
+        store: PackRecordStore,
+        panel_path: str,
+    ) -> None:
+        """``pack`` block present but ``kind`` field missing — same
+        refusal. Per R9 the manifest MUST declare its kind explicitly;
+        the route does NOT default to ``record.kind``."""
+        manifest = _build_manifest(kind="tool", pack_id_field="cognic-tool-nokind")
+        del manifest["pack"]["kind"]  # remove only the kind field
+        record = await _seed_submitted_pack(store, kind="tool", manifest=manifest)
+        app = _build_app(actor=_make_actor(), store=store)
+        with TestClient(app) as client:
+            response = client.get(panel_path.format(pack_id=record.id))
+        assert response.status_code == 409
+        assert response.json() == {"detail": {"reason": "pack_kind_mismatch"}}
+
+    @pytest.mark.parametrize(
+        "panel_path",
+        [
+            "/api/v1/packs/{pack_id}/evidence/data-governance",
+            "/api/v1/packs/{pack_id}/evidence/risk-tier",
+        ],
+    )
+    async def test_non_string_kind_value_refuses_409(
+        self,
+        store: PackRecordStore,
+        panel_path: str,
+    ) -> None:
+        """``pack.kind`` carries a non-string value (e.g. dict / int /
+        bool from a corrupted manifest) — handler MUST refuse rather
+        than allowing the type-confusion to slip through the
+        ``!=`` comparison (where ``42 != "tool"`` is True but the
+        ``pack_kind_mismatch`` reason is the canonical refusal)."""
+        manifest = _build_manifest(kind="tool", pack_id_field="cognic-tool-badkind")
+        manifest["pack"]["kind"] = 42  # non-string value
+        record = await _seed_submitted_pack(store, kind="tool", manifest=manifest)
+        app = _build_app(actor=_make_actor(), store=store)
+        with TestClient(app) as client:
+            response = client.get(panel_path.format(pack_id=record.id))
+        assert response.status_code == 409
+        assert response.json() == {"detail": {"reason": "pack_kind_mismatch"}}
+
+    @pytest.mark.parametrize(
+        "panel_path",
+        [
+            "/api/v1/packs/{pack_id}/evidence/data-governance",
+            "/api/v1/packs/{pack_id}/evidence/risk-tier",
+        ],
+    )
+    async def test_non_dict_pack_block_refuses_409(
+        self,
+        store: PackRecordStore,
+        panel_path: str,
+    ) -> None:
+        """``pack`` block present but is a non-dict value (e.g. a bare
+        string from corrupted persistence) — handler MUST refuse. Pins
+        the ``isinstance(pack_meta, dict)`` defensive branch + the
+        widened kind-integrity check together."""
+        manifest = _build_manifest(kind="tool", pack_id_field="cognic-tool-strpack")
+        manifest["pack"] = "not-a-dict"  # corrupt block shape
+        record = await _seed_submitted_pack(store, kind="tool", manifest=manifest)
+        app = _build_app(actor=_make_actor(), store=store)
+        with TestClient(app) as client:
+            response = client.get(panel_path.format(pack_id=record.id))
         assert response.status_code == 409
         assert response.json() == {"detail": {"reason": "pack_kind_mismatch"}}

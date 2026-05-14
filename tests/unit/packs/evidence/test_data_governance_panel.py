@@ -244,6 +244,49 @@ class TestSprint7B3T3SliceBProjectDataGovernancePanel:
         )
         assert "purpose_not_declared" in result.tenant_policy_diff
 
+    def test_diff_purpose_not_declared_when_purpose_missing_and_policy_wired(self) -> None:
+        """Reviewer P2 — a corrupted / pre-validation manifest with an
+        EMPTY ``data_governance`` block MUST trip ``purpose_not_declared``
+        whenever the tenant has wired ``allowed_purposes``. Pre-fix the
+        ``purpose != ""`` guard short-circuited the check so missing-
+        purpose silently returned ``("none",)`` on an otherwise-clean
+        empty block — letting an integrity break read as policy-clean.
+
+        ADR-017 build-time validation treats ``purpose`` as required;
+        the panel projector at runtime MUST mirror that requirement
+        when a tenant policy is wired.
+        """
+        manifest_with_empty_block: dict[str, object] = {"data_governance": {}}
+        policy: TenantDataGovernancePolicy = {
+            "allowed_purposes": frozenset({"transaction_processing"}),
+        }
+        result = project_data_governance_panel(
+            manifest=manifest_with_empty_block,
+            record_kind="tool",
+            tenant_policy=policy,
+        )
+        assert "purpose_not_declared" in result.tenant_policy_diff
+        # The "none" sentinel is NEVER mixed with violation flags.
+        assert "none" not in result.tenant_policy_diff
+
+    def test_diff_purpose_not_declared_when_no_data_governance_block_at_all(
+        self,
+    ) -> None:
+        """Sibling case: manifest entirely lacking a ``data_governance``
+        key still surfaces ``purpose_not_declared`` when
+        ``allowed_purposes`` is wired (the projector coerces missing
+        block → empty block → empty purpose; the same policy-violation
+        path fires)."""
+        policy: TenantDataGovernancePolicy = {
+            "allowed_purposes": frozenset({"transaction_processing"}),
+        }
+        result = project_data_governance_panel(
+            manifest={},
+            record_kind="tool",
+            tenant_policy=policy,
+        )
+        assert "purpose_not_declared" in result.tenant_policy_diff
+
     def test_diff_retention_exceeds_tenant_max(self) -> None:
         policy: TenantDataGovernancePolicy = {"max_retention_window": 60.0}
         result = project_data_governance_panel(
