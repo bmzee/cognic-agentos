@@ -61,6 +61,8 @@ from cognic_agentos.portal.api.system_routes import build_system_router
 from cognic_agentos.portal.rbac.actor import ActorBinder
 from cognic_agentos.protocol import is_a2a_available, is_mcp_available
 from cognic_agentos.protocol.plugin_registry import PluginRegistry
+from cognic_agentos.protocol.trust_gate import TrustGate
+from cognic_agentos.protocol.trust_root_resolver import TrustRootResolver
 
 logger = logging.getLogger(__name__)
 
@@ -169,6 +171,8 @@ def create_app(
     plugin_registry: PluginRegistry | None = None,
     actor_binder: ActorBinder | None = None,
     pack_record_store: PackRecordStore | None = None,
+    trust_gate: TrustGate | None = None,
+    trust_root_resolver: TrustRootResolver | None = None,
 ) -> FastAPI:
     """Build and return the FastAPI application.
 
@@ -191,6 +195,18 @@ def create_app(
     contract still serves 200 (per ADR-007 the honesty claim never
     fails closed on missing ledger; the operator sees zero rows + the
     intent surface from settings).
+
+    Sprint 7B.3 T9: ``trust_gate`` + ``trust_root_resolver`` (both
+    optional) are attached to ``app.state.trust_gate`` /
+    ``app.state.trust_root_resolver`` and threaded into
+    :func:`build_packs_router` → :func:`build_review_routes` for the
+    ``POST /api/v1/packs/{pack_id}/approve`` endpoint's gate-1 (cosign
+    signature) resolution. When either is ``None`` the approve handler
+    resolves Gate 1 to a ``red`` ``SignatureGateInput`` — fail-closed,
+    never a crash. Production launchers inject a real
+    :class:`~cognic_agentos.protocol.trust_gate.TrustGate` + a
+    bank-overlay
+    :class:`~cognic_agentos.protocol.trust_root_resolver.TrustRootResolver`.
 
     Sprint 7B.2 T3: ``actor_binder`` + ``pack_record_store`` are
     attached to ``app.state.actor_binder`` / ``app.state.pack_record_store``
@@ -236,6 +252,14 @@ def create_app(
         # objects to test fixtures + future read-only honesty surfaces).
         app.state.actor_binder = actor_binder
         app.state.pack_record_store = pack_record_store
+        # Sprint-7B.3 T9: cosign trust-gate verifier + per-tenant
+        # trust-root resolver for the approve endpoint's gate-1
+        # (signature) resolution. Attached regardless of whether the
+        # pack router was mounted (mirror of the actor_binder pattern);
+        # both default ``None`` → the approve handler resolves Gate 1
+        # to a ``red`` SignatureGateInput rather than crashing.
+        app.state.trust_gate = trust_gate
+        app.state.trust_root_resolver = trust_root_resolver
         if adapter_registry is None:
             app.state.adapters = None
             yield
@@ -307,7 +331,13 @@ def create_app(
     # "is the pack router available?" signal.
     app.state.pack_router_mounted = False
     if actor_binder is not None and pack_record_store is not None:
-        app.include_router(build_packs_router(store=pack_record_store))
+        app.include_router(
+            build_packs_router(
+                store=pack_record_store,
+                trust_gate=trust_gate,
+                trust_root_resolver=trust_root_resolver,
+            )
+        )
         app.state.pack_router_mounted = True
     elif pack_record_store is not None:
         # Fail-loud misconfig — operator provided a pack store but no

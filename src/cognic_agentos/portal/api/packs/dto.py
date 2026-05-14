@@ -33,6 +33,12 @@ from typing import Annotated, Any, Literal
 
 import pydantic
 
+from cognic_agentos.packs.approval_gates import (
+    ApprovalGateName,
+    ApprovalGateOutcome,
+    ApprovalGateRedReason,
+    OverrideRefusalReason,
+)
 from cognic_agentos.packs.approval_types import ApprovalOverrideReason
 from cognic_agentos.packs.evidence.conformance_matrix import MatrixComparisonFlag
 from cognic_agentos.packs.evidence.data_governance import DataGovernanceDiffFlag
@@ -476,6 +482,58 @@ class ApproveRequest(PackBaseModel):
 
     acknowledgement: ReviewerAcknowledgement
     override_reason: ApprovalOverrideReason | None = None
+
+
+class ApproveGateResult(PackBaseModel):
+    """Sprint 7B.3 T9 — one gate's result inside :class:`ApproveRefusalResponse`.
+
+    Wire projection of
+    :class:`~cognic_agentos.packs.approval_gates.ApprovalGateResult`
+    (a frozen domain dataclass). Field set + order match the per-gate
+    dicts :func:`~cognic_agentos.packs.approval_gates.composition_snapshot`
+    emits, so the handler builds the 412 body straight from the
+    snapshot with no intermediate massaging.
+
+    Architectural-arrow invariant: this DTO consumes the composer's
+    closed-enum vocabularies (``portal → packs``); the composer never
+    imports portal.
+    """
+
+    gate: ApprovalGateName
+    outcome: ApprovalGateOutcome
+    red_reason: ApprovalGateRedReason | None
+    evidence_pointer: str | None
+
+
+class ApproveRefusalResponse(PackBaseModel):
+    """Sprint 7B.3 T9 — ``POST /{pack_id}/approve`` **412** refusal body.
+
+    Returned when the 5-gate composition is NOT all-green (plan §518 +
+    §522). The first four fields are the EXACT shape
+    :func:`~cognic_agentos.packs.approval_gates.composition_snapshot`
+    emits — the handler does ``ApproveRefusalResponse(**composition_snapshot(
+    composition), override_refusal_reason=...)``:
+
+    - ``pack_kind`` / ``gates`` / ``all_green`` / ``non_overridable_red_gates``
+      — the red-state gate composition payload so the reviewer UI can
+      render WHICH gates blocked approval.
+    - ``override_refusal_reason`` — ``None`` on the plain
+      not-all-green-no-override 412; carries the closed-enum
+      :data:`~cognic_agentos.packs.approval_gates.OverrideRefusalReason`
+      on the override-attempted-but-refused 412 branch (e.g.
+      ``non_overridable_red_gate`` when gate 1 is red, or
+      ``override_scope_not_held``).
+
+    The handler raises ``HTTPException(status_code=412,
+    detail=ApproveRefusalResponse(...).model_dump())`` — the DTO is the
+    wire-shape contract for that detail body.
+    """
+
+    pack_kind: PackKind
+    gates: list[ApproveGateResult]
+    all_green: bool
+    non_overridable_red_gates: list[ApprovalGateName]
+    override_refusal_reason: OverrideRefusalReason | None = None
 
 
 # ---------------------------------------------------------------------------
