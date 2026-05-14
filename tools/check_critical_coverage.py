@@ -1008,6 +1008,29 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     # build-time drift detector at
     # ``tests/unit/tools/test_generate_conformance_matrix_json.py``.
     ("src/cognic_agentos/packs/evidence/conformance_matrix.py", 0.95, 0.90),
+    # Sprint 7B.3 T7 — ADR-012 §41 five-gate approval composer.
+    # ``packs/approval_gates.py`` is the substantive enforcement boundary
+    # for the ``under_review → approved`` lifecycle transition: the
+    # pure-functional ``compose_approval_gates`` decides whether a
+    # plugin pack clears the 5 orthogonal gates (signature / evaluation
+    # / adversarial / owasp_conformance / reviewer_acknowledgement). The
+    # module owns 9 wire-protocol-public closed-enum Literals (5 per-gate
+    # red-reason vocabularies + the consolidated 22-value
+    # ``ApprovalGateRedReason`` union + ``ApprovalGateName`` +
+    # ``ApprovalGateOutcome`` + the binary ``SignatureGateOutcome``
+    # which makes the illegal ``evidence_not_attached`` signature state
+    # unrepresentable per ADR-012 §110) that render into the 412
+    # ``ApproveRefusalResponse`` body, the ``_NON_OVERRIDABLE_GATES``
+    # ADR-012 §110 policy constant (cosign signature is the single
+    # non-overridable gate), and the gate-5 derivation logic (the one
+    # gate the composer itself decides). Drift in any Literal, the
+    # policy set, or the derivation is wire-protocol-public / governance-
+    # doctrine regression. On the durable gate per the Sprint-7B.3
+    # per-task precedent (T3-T6 each added their own CC module);
+    # promoted here at T7 rather than deferred to T11. Pure-functional
+    # (no I/O); the route handler at ``portal/api/packs/review_routes.py``
+    # (T9) owns the wiring + pre-computes gates 1-4.
+    ("src/cognic_agentos/packs/approval_gates.py", 0.95, 0.90),
 )
 
 
