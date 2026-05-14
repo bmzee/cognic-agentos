@@ -146,6 +146,9 @@ def _build_manifest(
     pack_id_field: str,
     risk_tier_value: str | None = "customer_data_read",
     supply_chain_block: dict[str, Any] | None = None,
+    mcp_block: dict[str, Any] | None = None,
+    a2a_block: dict[str, Any] | None = None,
+    identity_block: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a minimal but realistic manifest dict for fixture submits.
 
@@ -162,6 +165,14 @@ def _build_manifest(
     to exercise the full attestation-set projection. T3/T4 fixtures
     keep working unchanged — the data-governance / risk-tier
     projectors ignore the block.
+
+    Sprint 7B.3 T6 extension — the ``mcp_block`` / ``a2a_block`` /
+    ``identity_block`` kwargs are None-by-default (mirror the missing-
+    block defensive path for T6 fixtures); pass populated dicts to
+    exercise the conformance-matrix projection's MCP / A2A / OASF
+    declaration paths. T3/T4/T5 fixtures keep working unchanged — the
+    data-governance / risk-tier / supply-chain projectors ignore these
+    blocks.
     """
     manifest: dict[str, Any] = {
         "pack": {
@@ -176,6 +187,12 @@ def _build_manifest(
         manifest["risk_tier"] = {"tier": risk_tier_value}
     if supply_chain_block is not None:
         manifest["supply_chain"] = supply_chain_block
+    if mcp_block is not None:
+        manifest["mcp"] = mcp_block
+    if a2a_block is not None:
+        manifest["a2a"] = a2a_block
+    if identity_block is not None:
+        manifest["identity"] = identity_block
     return manifest
 
 
@@ -187,6 +204,7 @@ async def _seed_submitted_pack(
     created_by: str = "bob@bank.example",
     manifest: dict[str, Any] | None = None,
     omit_manifest_kwarg: bool = False,
+    conformance_payload: dict[str, Any] | None = None,
 ) -> PackRecord:
     """Save a draft + transition to submitted with payload_manifest.
 
@@ -194,6 +212,14 @@ async def _seed_submitted_pack(
     WITHOUT the T2 ``payload_manifest`` kwarg (simulates pre-7B.3 /
     fixture chain rows). When ``manifest=None`` (and not omitted) the
     submit uses :func:`_build_manifest`'s default shape.
+
+    Sprint 7B.3 T6 extension — when ``conformance_payload`` is non-None
+    the submit transition ALSO threads the 7B.2-T9 ``payload_conformance``
+    kwarg so the chain row carries ``payload["conformance"]`` (the
+    OWASP suite verdict the conformance-matrix panel surfaces inline).
+    When ``None`` the submit row has no ``conformance`` key — simulates
+    a pre-7B.2-T9 chain row, exercising the panel's graceful
+    ``owasp_verdict=None`` path.
     """
     now = datetime.now(UTC)
     pack_id_field = f"cognic-{kind}-{uuid.uuid4().hex[:8]}"
@@ -230,6 +256,8 @@ async def _seed_submitted_pack(
     }
     if not omit_manifest_kwarg:
         transition_kwargs["payload_manifest"] = effective_manifest
+    if conformance_payload is not None:
+        transition_kwargs["payload_conformance"] = conformance_payload
 
     await store.transition(**transition_kwargs)
     return record.model_copy(update={"state": "submitted"})
@@ -829,11 +857,12 @@ class TestSprint7B3T4ReviewerP2KindIntegrityHardening:
     kind-integrity invariant the manifest kind MUST be present, MUST
     be a string, AND MUST equal the authoritative record kind.
 
-    Sprint 7B.3 T5 carry-forward: parametrize extended to include the
-    new ``/supply-chain`` panel path — same widened predicate doctrine
-    applies to all THREE evidence-panel handlers. Four failure modes
-    covered for EACH of the 3 panel handlers (total: 12 regression
-    cases) — drift in any handler trips the suite.
+    Sprint 7B.3 T5 + T6 carry-forward: parametrize extended to include
+    the ``/supply-chain`` (T5) and ``/conformance`` (T6) panel paths —
+    same widened predicate doctrine applies to all FOUR evidence-panel
+    handlers. Four failure modes covered for EACH of the 4 panel
+    handlers (total: 16 regression cases) — drift in any handler trips
+    the suite.
     """
 
     @pytest.mark.parametrize(
@@ -842,6 +871,7 @@ class TestSprint7B3T4ReviewerP2KindIntegrityHardening:
             "/api/v1/packs/{pack_id}/evidence/data-governance",
             "/api/v1/packs/{pack_id}/evidence/risk-tier",
             "/api/v1/packs/{pack_id}/evidence/supply-chain",
+            "/api/v1/packs/{pack_id}/evidence/conformance",
         ],
     )
     async def test_missing_pack_block_refuses_409_kind_mismatch(
@@ -868,6 +898,7 @@ class TestSprint7B3T4ReviewerP2KindIntegrityHardening:
             "/api/v1/packs/{pack_id}/evidence/data-governance",
             "/api/v1/packs/{pack_id}/evidence/risk-tier",
             "/api/v1/packs/{pack_id}/evidence/supply-chain",
+            "/api/v1/packs/{pack_id}/evidence/conformance",
         ],
     )
     async def test_missing_kind_field_in_pack_block_refuses_409(
@@ -893,6 +924,7 @@ class TestSprint7B3T4ReviewerP2KindIntegrityHardening:
             "/api/v1/packs/{pack_id}/evidence/data-governance",
             "/api/v1/packs/{pack_id}/evidence/risk-tier",
             "/api/v1/packs/{pack_id}/evidence/supply-chain",
+            "/api/v1/packs/{pack_id}/evidence/conformance",
         ],
     )
     async def test_non_string_kind_value_refuses_409(
@@ -920,6 +952,7 @@ class TestSprint7B3T4ReviewerP2KindIntegrityHardening:
             "/api/v1/packs/{pack_id}/evidence/data-governance",
             "/api/v1/packs/{pack_id}/evidence/risk-tier",
             "/api/v1/packs/{pack_id}/evidence/supply-chain",
+            "/api/v1/packs/{pack_id}/evidence/conformance",
         ],
     )
     async def test_non_dict_pack_block_refuses_409(
@@ -1308,3 +1341,524 @@ class TestSprint7B3T5SliceDManifestShapeIntegration:
             "valid/path.sig",
             "another/valid.bundle",
         ]
+
+
+# ===========================================================================
+# Sprint 7B.3 T6 Slice D — conformance-matrix evidence-panel route integration.
+#
+# Mirrors the T5 Slice D layout (HappyPath / RefusalReasons / SiblingGate /
+# ManifestShapeIntegration) for the conformance endpoint, PLUS two T6-
+# specific classes: KindAwareMatrix (R9 4-kind applicability matrix per
+# plan §354) and OwaspVerdict (the payload["conformance"] inline-surfacing
+# contract per plan §353). The conformance handler shares the SAME refusal
+# + RBAC + tenant-isolation contract as T3-T5 — drift in any path-shared
+# invariant surfaces across all four panels' suites simultaneously.
+# ===========================================================================
+
+
+_CONFORMANCE_PANEL_PATH = "/api/v1/packs/{pack_id}/evidence/conformance"
+
+# Signer-shaped protocol blocks for T6 fixtures. The [mcp] block declares
+# `sampling` (⚠️ restricted in the shipped matrix → mcp_capability_restricted)
+# + `resources` (✅ supported → clean). The [a2a] block declares
+# `streaming` (✅ supported → clean) + `push_notification_config`
+# (⚠️ restricted + Wave-2-promoted → a2a_wave2_feature_declared). The
+# [identity] block declares one OASF capability → oasf_capability_wave2_declared.
+_FIXTURE_MCP_BLOCK: dict[str, Any] = {
+    "sampling_supported": True,
+    "resources_supported": True,
+}
+_FIXTURE_A2A_BLOCK: dict[str, Any] = {
+    "streaming": True,
+    "push_notification_config": True,
+}
+_FIXTURE_IDENTITY_BLOCK: dict[str, Any] = {
+    "oasf_capability_set": ["search.v1"],
+}
+
+# 4-key OWASP suite verdict dict — the shape 7B.2 T9's
+# `run_owasp_conformance_for_chain_payload` writes to the chain row's
+# `payload["conformance"]` key.
+_FIXTURE_CONFORMANCE_PAYLOAD: dict[str, Any] = {
+    "overall_status": "green",
+    "results": {
+        "tool_misuse": {"category": "tool_misuse", "status": "pass", "findings": []},
+        "secret_exfiltration": {
+            "category": "secret_exfiltration",
+            "status": "pass",
+            "findings": [],
+        },
+    },
+    "summary": "9 pass / 0 fail / 1 not_applicable",
+    "errored_categories": [],
+}
+
+
+class TestSprint7B3T6SliceDHappyPath:
+    """Slice D-1 — green-path projection through the production app."""
+
+    async def test_happy_path_returns_200_and_full_panel_shape(
+        self, store: PackRecordStore
+    ) -> None:
+        manifest = _build_manifest(
+            kind="agent",
+            pack_id_field="cognic-agent-conf",
+            mcp_block=_FIXTURE_MCP_BLOCK,
+            a2a_block=_FIXTURE_A2A_BLOCK,
+            identity_block=_FIXTURE_IDENTITY_BLOCK,
+        )
+        record = await _seed_submitted_pack(
+            store,
+            kind="agent",
+            manifest=manifest,
+            conformance_payload=_FIXTURE_CONFORMANCE_PAYLOAD,
+        )
+        app = _build_app(actor=_make_actor(), store=store)
+        with TestClient(app) as client:
+            response = client.get(_CONFORMANCE_PANEL_PATH.format(pack_id=record.id))
+        assert response.status_code == 200
+        body = response.json()
+        assert body["pack_kind"] == "agent"
+        assert set(body["declarations"].keys()) == {"mcp", "a2a", "oasf"}
+        assert body["declarations"]["mcp"]["applicable"] is True
+        assert body["declarations"]["a2a"]["applicable"] is True
+        assert body["declarations"]["oasf"]["applicable"] is True
+        # sampling (restricted) + push_notification_config (wave2) + oasf
+        # capability all flag; resources + streaming are clean.
+        assert set(body["flagged_mismatches"]) == {
+            "mcp_capability_restricted",
+            "a2a_wave2_feature_declared",
+            "oasf_capability_wave2_declared",
+        }
+        assert body["owasp_verdict"]["overall_status"] == "green"
+
+    async def test_clean_agent_pack_has_empty_flagged_mismatches(
+        self, store: PackRecordStore
+    ) -> None:
+        """An agent pack declaring only ✅-supported features produces
+        an empty ``flagged_mismatches`` tuple."""
+        manifest = _build_manifest(
+            kind="agent",
+            pack_id_field="cognic-agent-clean",
+            mcp_block={"resources_supported": True},
+            a2a_block={"streaming": True, "artifacts_supported": True},
+        )
+        record = await _seed_submitted_pack(store, kind="agent", manifest=manifest)
+        app = _build_app(actor=_make_actor(), store=store)
+        with TestClient(app) as client:
+            response = client.get(_CONFORMANCE_PANEL_PATH.format(pack_id=record.id))
+        assert response.status_code == 200
+        assert response.json()["flagged_mismatches"] == []
+
+    async def test_comparisons_carry_protocol_feature_flag(self, store: PackRecordStore) -> None:
+        manifest = _build_manifest(
+            kind="agent",
+            pack_id_field="cognic-agent-cmp",
+            mcp_block={"sampling_supported": True},
+        )
+        record = await _seed_submitted_pack(store, kind="agent", manifest=manifest)
+        app = _build_app(actor=_make_actor(), store=store)
+        with TestClient(app) as client:
+            response = client.get(_CONFORMANCE_PANEL_PATH.format(pack_id=record.id))
+        assert response.status_code == 200
+        comparisons = response.json()["comparisons"]
+        sampling = next(c for c in comparisons if c["feature"] == "sampling")
+        assert sampling["protocol"] == "mcp"
+        assert sampling["matrix_wave_1"] == "restricted"
+        assert sampling["flag"] == "mcp_capability_restricted"
+
+
+class TestSprint7B3T6SliceDKindAwareMatrix:
+    """Slice D-2 — R9 4-kind protocol-applicability matrix per plan §354.
+
+    tool/skill/agent → MCP applicable; agent → +A2A +OASF; hook → none.
+    Applicability is derived from the authoritative PackRecord.kind.
+    """
+
+    @pytest.mark.parametrize(
+        ("kind", "mcp_applies", "a2a_applies", "oasf_applies"),
+        [
+            ("tool", True, False, False),
+            ("skill", True, False, False),
+            ("agent", True, True, True),
+            ("hook", False, False, False),
+        ],
+    )
+    async def test_protocol_applicability_per_kind(
+        self,
+        store: PackRecordStore,
+        kind: PackKind,
+        mcp_applies: bool,
+        a2a_applies: bool,
+        oasf_applies: bool,
+    ) -> None:
+        record = await _seed_submitted_pack(store, kind=kind)
+        app = _build_app(actor=_make_actor(), store=store)
+        with TestClient(app) as client:
+            response = client.get(_CONFORMANCE_PANEL_PATH.format(pack_id=record.id))
+        assert response.status_code == 200
+        declarations = response.json()["declarations"]
+        assert declarations["mcp"]["applicable"] is mcp_applies
+        assert declarations["a2a"]["applicable"] is a2a_applies
+        assert declarations["oasf"]["applicable"] is oasf_applies
+
+    async def test_hook_pack_with_mcp_block_produces_no_comparisons(
+        self, store: PackRecordStore
+    ) -> None:
+        """A hook pack that (wrongly) carries an [mcp] block — the panel
+        marks MCP not_applicable + emits ZERO comparisons rather than
+        failing the absent-protocol expectation per plan §351."""
+        manifest = _build_manifest(
+            kind="hook",
+            pack_id_field="cognic-hook-mcp",
+            mcp_block=_FIXTURE_MCP_BLOCK,
+        )
+        record = await _seed_submitted_pack(store, kind="hook", manifest=manifest)
+        app = _build_app(actor=_make_actor(), store=store)
+        with TestClient(app) as client:
+            response = client.get(_CONFORMANCE_PANEL_PATH.format(pack_id=record.id))
+        assert response.status_code == 200
+        body = response.json()
+        assert body["declarations"]["mcp"]["applicable"] is False
+        assert body["comparisons"] == []
+        assert body["flagged_mismatches"] == []
+
+    async def test_tool_pack_a2a_block_ignored(self, store: PackRecordStore) -> None:
+        """A tool pack carrying an [a2a] block — A2A is not applicable
+        for tool kind, so the block produces no comparisons."""
+        manifest = _build_manifest(
+            kind="tool",
+            pack_id_field="cognic-tool-a2a",
+            a2a_block=_FIXTURE_A2A_BLOCK,
+        )
+        record = await _seed_submitted_pack(store, kind="tool", manifest=manifest)
+        app = _build_app(actor=_make_actor(), store=store)
+        with TestClient(app) as client:
+            response = client.get(_CONFORMANCE_PANEL_PATH.format(pack_id=record.id))
+        assert response.status_code == 200
+        body = response.json()
+        assert body["declarations"]["a2a"]["applicable"] is False
+        assert [c for c in body["comparisons"] if c["protocol"] == "a2a"] == []
+
+
+class TestSprint7B3T6SliceDOwaspVerdict:
+    """Slice D-3 — the payload["conformance"] inline-surfacing contract
+    per plan §353."""
+
+    async def test_owasp_verdict_surfaced_inline(self, store: PackRecordStore) -> None:
+        record = await _seed_submitted_pack(
+            store, kind="tool", conformance_payload=_FIXTURE_CONFORMANCE_PAYLOAD
+        )
+        app = _build_app(actor=_make_actor(), store=store)
+        with TestClient(app) as client:
+            response = client.get(_CONFORMANCE_PANEL_PATH.format(pack_id=record.id))
+        assert response.status_code == 200
+        verdict = response.json()["owasp_verdict"]
+        assert verdict["overall_status"] == "green"
+        assert verdict["summary"] == "9 pass / 0 fail / 1 not_applicable"
+        assert {r["category"] for r in verdict["results"]} == {
+            "tool_misuse",
+            "secret_exfiltration",
+        }
+
+    async def test_pre_7b2_t9_submit_row_surfaces_none_verdict_not_409(
+        self, store: PackRecordStore
+    ) -> None:
+        """A submit chain row without a ``conformance`` key (pre-7B.2-T9)
+        surfaces ``owasp_verdict=None`` gracefully — the OWASP verdict
+        is supplementary evidence, NOT a manifest-evidence-persistence
+        boundary, so this is a 200 (not a 409)."""
+        record = await _seed_submitted_pack(store, kind="tool")  # no conformance_payload
+        app = _build_app(actor=_make_actor(), store=store)
+        with TestClient(app) as client:
+            response = client.get(_CONFORMANCE_PANEL_PATH.format(pack_id=record.id))
+        assert response.status_code == 200
+        assert response.json()["owasp_verdict"] is None
+
+    async def test_red_verdict_with_findings_surfaced(self, store: PackRecordStore) -> None:
+        payload: dict[str, Any] = {
+            "overall_status": "red",
+            "results": {
+                "unsafe_network": {
+                    "category": "unsafe_network",
+                    "status": "fail",
+                    "findings": ["manifest.egress: wildcard egress not allowed"],
+                }
+            },
+            "summary": "9 pass / 1 fail / 0 not_applicable",
+            "errored_categories": [],
+        }
+        record = await _seed_submitted_pack(store, kind="tool", conformance_payload=payload)
+        app = _build_app(actor=_make_actor(), store=store)
+        with TestClient(app) as client:
+            response = client.get(_CONFORMANCE_PANEL_PATH.format(pack_id=record.id))
+        assert response.status_code == 200
+        verdict = response.json()["owasp_verdict"]
+        assert verdict["overall_status"] == "red"
+        assert verdict["results"][0]["findings"] == ["manifest.egress: wildcard egress not allowed"]
+
+
+class TestSprint7B3T6SliceDRefusalReasons:
+    """Slice D-4 — handler-body 409 refusals + per-panel mutually-
+    exclusive log emission. Same refusal contract as T3-T5."""
+
+    async def test_409_pack_not_yet_submitted_on_draft_state(
+        self, store: PackRecordStore, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        record = await _seed_draft_pack(store)
+        app = _build_app(actor=_make_actor(), store=store)
+        caplog.set_level(logging.WARNING, logger="cognic_agentos.portal.api.packs.evidence_routes")
+        with TestClient(app) as client:
+            response = client.get(_CONFORMANCE_PANEL_PATH.format(pack_id=record.id))
+        assert response.status_code == 409
+        assert response.json() == {"detail": {"reason": "pack_not_yet_submitted"}}
+        refused = [
+            r
+            for r in caplog.records
+            if r.message == "portal.packs.evidence.conformance_panel_refused"
+        ]
+        assert len(refused) == 1
+        assert refused[0].reason == "pack_not_yet_submitted"  # type: ignore[attr-defined]
+
+    async def test_409_manifest_evidence_not_persisted_on_pre_7b3_submit_row(
+        self, store: PackRecordStore
+    ) -> None:
+        record = await _seed_submitted_pack(store, omit_manifest_kwarg=True)
+        app = _build_app(actor=_make_actor(), store=store)
+        with TestClient(app) as client:
+            response = client.get(_CONFORMANCE_PANEL_PATH.format(pack_id=record.id))
+        assert response.status_code == 409
+        assert response.json() == {"detail": {"reason": "manifest_evidence_not_persisted"}}
+
+    async def test_409_pack_kind_mismatch_when_manifest_kind_disagrees(
+        self, store: PackRecordStore
+    ) -> None:
+        manifest = _build_manifest(kind="agent", pack_id_field="cognic-agent-x")
+        record = await _seed_submitted_pack(store, kind="tool", manifest=manifest)
+        app = _build_app(actor=_make_actor(), store=store)
+        with TestClient(app) as client:
+            response = client.get(_CONFORMANCE_PANEL_PATH.format(pack_id=record.id))
+        assert response.status_code == 409
+        assert response.json() == {"detail": {"reason": "pack_kind_mismatch"}}
+
+    async def test_happy_path_emits_zero_refused_logs(
+        self, store: PackRecordStore, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        record = await _seed_submitted_pack(store, kind="agent")
+        app = _build_app(actor=_make_actor(), store=store)
+        caplog.set_level(logging.WARNING, logger="cognic_agentos.portal.api.packs.evidence_routes")
+        with TestClient(app) as client:
+            response = client.get(_CONFORMANCE_PANEL_PATH.format(pack_id=record.id))
+        assert response.status_code == 200
+        refused = [
+            r
+            for r in caplog.records
+            if r.message == "portal.packs.evidence.conformance_panel_refused"
+        ]
+        assert refused == []
+
+    async def test_conformance_handler_does_not_emit_other_panel_logs(
+        self, store: PackRecordStore, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Cross-panel emission-drift regression: the conformance
+        refusal path emits ONLY the ``conformance_panel_refused`` log
+        — NEVER the data-governance / risk-tier / supply-chain logs."""
+        record = await _seed_draft_pack(store)
+        app = _build_app(actor=_make_actor(), store=store)
+        caplog.set_level(logging.WARNING, logger="cognic_agentos.portal.api.packs.evidence_routes")
+        with TestClient(app) as client:
+            response = client.get(_CONFORMANCE_PANEL_PATH.format(pack_id=record.id))
+        assert response.status_code == 409
+        for sibling in (
+            "portal.packs.evidence.data_governance_panel_refused",
+            "portal.packs.evidence.risk_tier_panel_refused",
+            "portal.packs.evidence.supply_chain_panel_refused",
+        ):
+            assert [r for r in caplog.records if r.message == sibling] == []
+
+
+class TestSprint7B3T6SliceDSiblingGateRefusals:
+    """Slice D-5 — RBAC / tenant-isolation / unknown-pack-id refusals
+    via the dependency chain. Same gate semantics as T3-T5."""
+
+    async def test_rbac_403_when_actor_lacks_review_claim_scope(
+        self, store: PackRecordStore
+    ) -> None:
+        record = await _seed_submitted_pack(store)
+        actor = _make_actor(scopes=frozenset({"pack.audit.read"}))
+        app = _build_app(actor=actor, store=store)
+        with TestClient(app) as client:
+            response = client.get(_CONFORMANCE_PANEL_PATH.format(pack_id=record.id))
+        assert response.status_code == 403
+        assert response.json()["detail"]["reason"] == "scope_not_held"
+
+    async def test_tenant_isolation_404_on_cross_tenant_access(
+        self, store: PackRecordStore
+    ) -> None:
+        record = await _seed_submitted_pack(store, tenant_id="t1")
+        actor = _make_actor(tenant_id="t2")
+        app = _build_app(actor=actor, store=store)
+        with TestClient(app) as client:
+            response = client.get(_CONFORMANCE_PANEL_PATH.format(pack_id=record.id))
+        assert response.status_code == 404
+        assert response.json() == {"detail": {"reason": "tenant_id_mismatch"}}
+
+    async def test_unknown_pack_id_404_pack_not_found(self, store: PackRecordStore) -> None:
+        bogus_id = uuid.uuid4()
+        app = _build_app(actor=_make_actor(), store=store)
+        with TestClient(app) as client:
+            response = client.get(_CONFORMANCE_PANEL_PATH.format(pack_id=bogus_id))
+        assert response.status_code == 404
+        assert response.json() == {"detail": {"reason": "pack_not_found"}}
+
+
+class TestSprint7B3T6SliceDManifestShapeIntegration:
+    """Slice D-6 — exercise the projector's defensive-fallback paths
+    through the full FastAPI stack."""
+
+    async def test_missing_protocol_blocks_return_empty_declared_features(
+        self, store: PackRecordStore
+    ) -> None:
+        """Default _build_manifest carries NO mcp/a2a/identity blocks —
+        every protocol's ``declared_features`` is empty + no
+        comparisons + no flags."""
+        record = await _seed_submitted_pack(store, kind="agent")
+        app = _build_app(actor=_make_actor(), store=store)
+        with TestClient(app) as client:
+            response = client.get(_CONFORMANCE_PANEL_PATH.format(pack_id=record.id))
+        assert response.status_code == 200
+        body = response.json()
+        assert body["declarations"]["mcp"]["declared_features"] == []
+        assert body["declarations"]["a2a"]["declared_features"] == []
+        assert body["declarations"]["oasf"]["declared_features"] == []
+        assert body["comparisons"] == []
+        assert body["flagged_mismatches"] == []
+
+    async def test_non_dict_protocol_block_falls_back(self, store: PackRecordStore) -> None:
+        """Corrupted persistence — ``mcp`` as a bare string — surfaces
+        the defensive fallback (empty declared_features) WITHOUT
+        crashing the route."""
+        manifest = _build_manifest(kind="agent", pack_id_field="cognic-agent-bad")
+        manifest["mcp"] = "not-a-dict"
+        record = await _seed_submitted_pack(store, kind="agent", manifest=manifest)
+        app = _build_app(actor=_make_actor(), store=store)
+        with TestClient(app) as client:
+            response = client.get(_CONFORMANCE_PANEL_PATH.format(pack_id=record.id))
+        assert response.status_code == 200
+        assert response.json()["declarations"]["mcp"]["declared_features"] == []
+
+    async def test_non_string_oasf_entries_filtered_through_stack(
+        self, store: PackRecordStore
+    ) -> None:
+        """Non-string drift in ``oasf_capability_set`` is silently
+        filtered at the projector — the wire never carries a non-string
+        capability even when the persisted manifest contains one."""
+        manifest = _build_manifest(
+            kind="agent",
+            pack_id_field="cognic-agent-oasf-drift",
+            identity_block={"oasf_capability_set": ["ok.v1", 42, None]},
+        )
+        record = await _seed_submitted_pack(store, kind="agent", manifest=manifest)
+        app = _build_app(actor=_make_actor(), store=store)
+        with TestClient(app) as client:
+            response = client.get(_CONFORMANCE_PANEL_PATH.format(pack_id=record.id))
+        assert response.status_code == 200
+        assert response.json()["declarations"]["oasf"]["declared_features"] == ["ok.v1"]
+
+    async def test_malformed_conformance_payload_surfaces_none_verdict(
+        self, store: PackRecordStore
+    ) -> None:
+        """A persisted ``conformance`` payload with a bogus
+        ``overall_status`` surfaces ``owasp_verdict=None`` — the panel
+        does NOT crash + does NOT leak a half-formed verdict."""
+        record = await _seed_submitted_pack(
+            store,
+            kind="tool",
+            conformance_payload={"overall_status": "purple", "results": {}},
+        )
+        app = _build_app(actor=_make_actor(), store=store)
+        with TestClient(app) as client:
+            response = client.get(_CONFORMANCE_PANEL_PATH.format(pack_id=record.id))
+        assert response.status_code == 200
+        assert response.json()["owasp_verdict"] is None
+
+
+class TestSprint7B3T6SliceDDualPathAndScaffoldShapes:
+    """Slice D-7 — R-reviewer P2 #1 (canonical scaffold ``[mcp]`` field
+    families) + P2 #2 (legacy ``[tool.cognic.*]`` dual-path block
+    resolution) through the full FastAPI stack. A real ``agentos
+    init-tool`` pack OR a docs-shaped submitted manifest must project
+    its protocol declarations — not empty."""
+
+    async def test_scaffold_shaped_mcp_block_projects_through_stack(
+        self, store: PackRecordStore
+    ) -> None:
+        """The canonical shape ``agentos init-tool`` emits — ``caching``
+        + ``elicitation_form`` booleans (NOT ``caching_strategy`` /
+        ``elicitation_modes``)."""
+        manifest = _build_manifest(
+            kind="tool",
+            pack_id_field="cognic-tool-scaffold",
+            mcp_block={"caching": True, "elicitation_form": True},
+        )
+        record = await _seed_submitted_pack(store, kind="tool", manifest=manifest)
+        app = _build_app(actor=_make_actor(), store=store)
+        with TestClient(app) as client:
+            response = client.get(_CONFORMANCE_PANEL_PATH.format(pack_id=record.id))
+        assert response.status_code == 200
+        body = response.json()
+        assert set(body["declarations"]["mcp"]["declared_features"]) == {
+            "caching",
+            "elicitation",
+        }
+        # elicitation is ⚠️ restricted; caching is ✅ supported.
+        assert body["flagged_mismatches"] == ["mcp_capability_restricted"]
+
+    async def test_nested_tool_cognic_mcp_block_projects_through_stack(
+        self, store: PackRecordStore
+    ) -> None:
+        """A docs-shaped submitted manifest carrying ``[tool.cognic.mcp]``
+        (NOT top-level ``[mcp]``) MUST still project — the dual-path
+        resolver mirrors the validator + runtime-reader R23 doctrine."""
+        manifest: dict[str, Any] = {
+            "pack": {
+                "kind": "tool",
+                "pack_id": "cognic-tool-nested",
+                "display_name": "Nested Pack",
+                "version": "0.0.1",
+            },
+            "data_governance": dict(_FIXTURE_DATA_GOVERNANCE_BLOCK),
+            "tool": {"cognic": {"mcp": {"sampling_supported": True}}},
+        }
+        record = await _seed_submitted_pack(store, kind="tool", manifest=manifest)
+        app = _build_app(actor=_make_actor(), store=store)
+        with TestClient(app) as client:
+            response = client.get(_CONFORMANCE_PANEL_PATH.format(pack_id=record.id))
+        assert response.status_code == 200
+        body = response.json()
+        assert body["declarations"]["mcp"]["declared_features"] == ["sampling"]
+        assert body["flagged_mismatches"] == ["mcp_capability_restricted"]
+
+    async def test_nested_tool_cognic_identity_oasf_projects_through_stack(
+        self, store: PackRecordStore
+    ) -> None:
+        """Legacy ``[tool.cognic.identity]`` OASF capabilities resolve
+        through the full stack for an agent pack."""
+        manifest: dict[str, Any] = {
+            "pack": {
+                "kind": "agent",
+                "pack_id": "cognic-agent-nested-id",
+                "display_name": "Nested Identity Pack",
+                "version": "0.0.1",
+            },
+            "data_governance": dict(_FIXTURE_DATA_GOVERNANCE_BLOCK),
+            "tool": {"cognic": {"identity": {"oasf_capability_set": ["kyc.v1"]}}},
+        }
+        record = await _seed_submitted_pack(store, kind="agent", manifest=manifest)
+        app = _build_app(actor=_make_actor(), store=store)
+        with TestClient(app) as client:
+            response = client.get(_CONFORMANCE_PANEL_PATH.format(pack_id=record.id))
+        assert response.status_code == 200
+        body = response.json()
+        assert body["declarations"]["oasf"]["declared_features"] == ["kyc.v1"]
+        assert body["flagged_mismatches"] == ["oasf_capability_wave2_declared"]

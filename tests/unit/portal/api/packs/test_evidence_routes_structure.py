@@ -131,17 +131,32 @@ class TestSprint7B3T3SliceDBuildEvidenceRoutesShape:
         }
         assert ("/{pack_id}/evidence/supply-chain", frozenset({"GET"})) in compiled_paths
 
-    def test_t3_t4_t5_register_exactly_three_routes(self) -> None:
+    def test_registers_conformance_panel_route(self) -> None:
+        """Sprint 7B.3 T6 — ``GET /{pack_id}/evidence/conformance`` MUST
+        be present on the returned router. Wire-protocol-public path
+        per plan §348; renaming breaks every bank-overlay's evidence-
+        panel consumer."""
+        store = typing.cast(PackRecordStore, object())
+        router = build_evidence_routes(store=store)
+        compiled_paths = {
+            (route.path, frozenset(route.methods))
+            for route in router.routes
+            if hasattr(route, "path") and hasattr(route, "methods")
+        }
+        assert ("/{pack_id}/evidence/conformance", frozenset({"GET"})) in compiled_paths
+
+    def test_t3_t4_t5_t6_register_exactly_four_routes(self) -> None:
         """Slices D (T3 data-governance) + T4 (risk-tier) + T5 (supply-
-        chain) ship THREE handlers on the same factory. T6 extends
-        with the conformance panel per plan §294. Pin the cumulative
-        count so a future slice extension flips this test on visibility."""
+        chain) + T6 (conformance) ship FOUR handlers on the same
+        factory. T6 is the final 7B.3 evidence panel per plan §294 +
+        §345. Pin the cumulative count so a future slice extension
+        flips this test on visibility."""
         store = typing.cast(PackRecordStore, object())
         router = build_evidence_routes(store=store)
         route_count = sum(
             1 for route in router.routes if hasattr(route, "path") and hasattr(route, "methods")
         )
-        assert route_count == 3
+        assert route_count == 4
 
 
 class TestSprint7B3T3SliceERouterWiring:
@@ -190,6 +205,22 @@ class TestSprint7B3T3SliceERouterWiring:
         }
         assert (
             "/api/v1/packs/{pack_id}/evidence/supply-chain",
+            frozenset({"GET"}),
+        ) in compiled_paths
+
+    def test_packs_router_includes_conformance_panel_path(self) -> None:
+        """Sprint 7B.3 T6 — pin the production wiring for the
+        conformance path. Mirrors
+        :meth:`test_packs_router_includes_supply_chain_panel_path`."""
+        store = typing.cast(PackRecordStore, object())
+        parent = build_packs_router(store=store)
+        compiled_paths = {
+            (route.path, frozenset(route.methods))
+            for route in parent.routes
+            if hasattr(route, "path") and hasattr(route, "methods")
+        }
+        assert (
+            "/api/v1/packs/{pack_id}/evidence/conformance",
             frozenset({"GET"}),
         ) in compiled_paths
 

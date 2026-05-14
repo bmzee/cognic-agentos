@@ -1,14 +1,13 @@
-"""Sprint 7B.3 T3+T4+T5 — reviewer evidence-panel routes (CRITICAL CONTROLS).
+"""Sprint 7B.3 T3+T4+T5+T6 — reviewer evidence-panel routes (CRITICAL CONTROLS).
 
 Per the plan-of-record at
 ``docs/superpowers/plans/2026-05-13-sprint-7b3-reviewer-evidence-panels-5-gate.md``
-§290-339 — ships the data-governance (T3) + risk-tier (T4) +
-supply-chain (T5) evidence-panel handlers under ``/api/v1/packs``. T6
-extends the SAME ``build_evidence_routes`` factory with the
-conformance-matrix panel; T7 wires the 5-gate composer that consumes
+§290-356 — ships the data-governance (T3) + risk-tier (T4) +
+supply-chain (T5) + conformance-matrix (T6) evidence-panel handlers
+under ``/api/v1/packs``. T7 wires the 5-gate composer that consumes
 the same projector outputs.
 
-Endpoint surface (T3 + T4 + T5):
+Endpoint surface (T3 + T4 + T5 + T6):
 
 - ``GET  /{pack_id}/evidence/data-governance`` (T3) — gated by
   ``pack.review.claim`` + ``RequireTenantOwnership``; reads the
@@ -42,6 +41,26 @@ Endpoint surface (T3 + T4 + T5):
   sigstore-bundle retention floor per §70-72 surfaces as
   ``sigstore_bundle_retention_expires_at`` when BOTH the bundle is
   declared AND the storage seam returned a non-None timestamp.
+- ``GET  /{pack_id}/evidence/conformance`` (T6) — same RBAC + tenant
+  isolation as T3-T5; reads the same manifest via the same seam +
+  ADDITIONALLY reads the submit chain row's ``payload["conformance"]``
+  (the OWASP suite verdict written by 7B.2 T9); projects through
+  :func:`project_conformance_matrix_panel`; returns
+  :class:`ConformanceMatrixPanel` per plan §350. The projector
+  compares the manifest's declared MCP/A2A/AGNTCY-OASF feature sets
+  against the static-shipped conformance matrix (generated from
+  ``docs/MCP-CONFORMANCE.md`` + ``docs/A2A-CONFORMANCE.md`` at build
+  time by ``tools/generate_conformance_matrix_json.py``; loaded once
+  at projector-module import — runtime never parses Markdown). The
+  closed-enum :data:`MatrixComparisonFlag` Literal at
+  :mod:`cognic_agentos.packs.evidence.conformance_matrix` IS the
+  wire-protocol contract for the panel's ``flagged_mismatches`` tuple.
+  **R9 kind-aware**: MCP applies to tool/skill/agent; A2A + OASF apply
+  to agent only; hook packs mark all three matrices ``not_applicable``
+  — applicability is derived from the authoritative
+  :class:`PackRecord.kind`. A pre-7B.2-T9 submit row has no
+  ``payload["conformance"]`` → ``owasp_verdict`` surfaces ``None``
+  gracefully (supplementary evidence, NOT a 409 boundary).
 
 Refusal taxonomy (handler-body 409s):
 
@@ -89,11 +108,13 @@ from typing import Annotated, Final, Literal
 from fastapi import APIRouter, Depends, HTTPException
 
 from cognic_agentos.packs._lifecycle_helpers import find_latest_submit_row
+from cognic_agentos.packs.evidence.conformance_matrix import project_conformance_matrix_panel
 from cognic_agentos.packs.evidence.data_governance import project_data_governance_panel
 from cognic_agentos.packs.evidence.risk_tier import project_risk_tier_panel
 from cognic_agentos.packs.evidence.supply_chain import project_supply_chain_panel
 from cognic_agentos.packs.storage import PackRecord, PackRecordStore
 from cognic_agentos.portal.api.packs.dto import (
+    ConformanceMatrixPanel,
     DataGovernancePanel,
     RiskTierPanel,
     SupplyChainPanel,
@@ -477,6 +498,132 @@ def build_evidence_routes(*, store: PackRecordStore) -> APIRouter:
             submit_created_at=submit_created_at,
         )
         return SupplyChainPanel.model_validate(panel_data)
+
+    @router.get(
+        "/{pack_id}/evidence/conformance",
+        summary="Reviewer conformance-matrix evidence panel (ADR-002 + ADR-003 projection)",
+    )
+    async def conformance_panel(
+        _actor: Annotated[Actor, Depends(_require_pack_review_claim)],
+        record: Annotated[PackRecord, Depends(_require_tenant_ownership)],
+    ) -> ConformanceMatrixPanel:
+        """Project the persisted manifest's ``[mcp]`` / ``[a2a]`` /
+        ``[identity]`` protocol declarations + the submit chain row's
+        ``payload["conformance"]`` OWASP verdict onto the reviewer-
+        facing conformance-matrix evidence panel per plan §349-353.
+
+        Dependency chain (resolution order):
+
+        1. ``_require_pack_review_claim`` (:class:`RequireScope`) — 403
+           ``scope_not_held`` for missing scope.
+        2. ``_require_tenant_ownership`` (:class:`RequireTenantOwnership`) —
+           404 ``tenant_id_mismatch`` for cross-tenant; returns the
+           :class:`PackRecord` for the kind cross-check.
+
+        Handler-body refusals (all 409 + closed-enum
+        :data:`EvidencePanelRefusalReason`):
+
+        - No submit chain row → ``pack_not_yet_submitted``.
+        - Submit row missing ``payload["manifest"]`` → ``manifest_evidence_not_persisted``.
+        - ``manifest["pack"]["kind"] != record.kind`` → ``pack_kind_mismatch``.
+
+        Per plan §349-353: the projector compares the manifest's
+        declared MCP/A2A/AGNTCY-OASF feature sets against the static-
+        shipped conformance matrix (generated from
+        ``docs/MCP-CONFORMANCE.md`` + ``docs/A2A-CONFORMANCE.md`` at
+        build time; loaded once at projector-module import — runtime
+        never parses Markdown) AND surfaces the T9 chain-row
+        ``payload["conformance"]`` OWASP verdict inline. **R9 kind-
+        aware**: tool/skill/agent packs project MCP; agent packs
+        additionally project A2A + OASF; hook packs mark all three
+        matrices ``not_applicable`` rather than failing absent protocol
+        blocks — the applicability decision is derived from the
+        authoritative :attr:`PackRecord.kind`, NOT the manifest.
+
+        Unlike T3-T5, this handler ALSO reads ``payload["conformance"]``
+        (in addition to ``payload["manifest"]``). A pre-7B.2-T9 submit
+        chain row predates the OWASP-verdict persistence extension —
+        ``payload.get("conformance")`` returns ``None`` and the
+        projector surfaces ``owasp_verdict=None`` gracefully (NOT a
+        409; the OWASP verdict is supplementary evidence, not a
+        manifest-evidence-persistence boundary).
+
+        Structured-log emission: every refusal path logs
+        ``portal.packs.evidence.conformance_panel_refused`` with
+        reason + ``pack_id`` + ``actor_subject`` — mirrors the T3/T4/T5
+        per-panel mutually-exclusive log emission contract pinned by
+        ``test_evidence_panel_routes.py``.
+        """
+        history = await store.load_lifecycle_history(record.id)
+        submit_row = find_latest_submit_row(history)
+        if submit_row is None:
+            _LOG.warning(
+                "portal.packs.evidence.conformance_panel_refused",
+                extra={
+                    "reason": _PACK_NOT_YET_SUBMITTED_REASON,
+                    "actor_subject": _actor.subject,
+                    "pack_id": str(record.id),
+                    "from_state": record.state,
+                },
+            )
+            raise HTTPException(
+                status_code=409,
+                detail={"reason": _PACK_NOT_YET_SUBMITTED_REASON},
+            )
+
+        manifest = submit_row.payload.get("manifest")
+        if not isinstance(manifest, dict):
+            _LOG.warning(
+                "portal.packs.evidence.conformance_panel_refused",
+                extra={
+                    "reason": _MANIFEST_EVIDENCE_NOT_PERSISTED_REASON,
+                    "actor_subject": _actor.subject,
+                    "pack_id": str(record.id),
+                    "from_state": record.state,
+                },
+            )
+            raise HTTPException(
+                status_code=409,
+                detail={"reason": _MANIFEST_EVIDENCE_NOT_PERSISTED_REASON},
+            )
+
+        pack_meta = manifest.get("pack")
+        manifest_kind = pack_meta.get("kind") if isinstance(pack_meta, dict) else None
+        # R9 kind-integrity invariant: the manifest's pack.kind MUST be
+        # present, MUST be a string, AND MUST equal the authoritative
+        # PackRecord.kind. Absent / non-string values are treated as
+        # pack_kind_mismatch (NOT silently projected against record.kind)
+        # so a corrupted persisted manifest cannot bypass the integrity
+        # gate. Pinned by all four panels' kind-integrity regression
+        # tests (T4 R1 P2 dual-panel parametrize + T5/T6 carry-forward).
+        if not isinstance(manifest_kind, str) or manifest_kind != record.kind:
+            _LOG.warning(
+                "portal.packs.evidence.conformance_panel_refused",
+                extra={
+                    "reason": _PACK_KIND_MISMATCH_REASON,
+                    "actor_subject": _actor.subject,
+                    "pack_id": str(record.id),
+                    "record_kind": record.kind,
+                    "manifest_kind": manifest_kind,
+                },
+            )
+            raise HTTPException(
+                status_code=409,
+                detail={"reason": _PACK_KIND_MISMATCH_REASON},
+            )
+
+        # T6: the conformance panel reads BOTH payload["manifest"] AND
+        # payload["conformance"] (the OWASP verdict written by 7B.2 T9).
+        # A pre-7B.2-T9 submit row has no "conformance" key — .get()
+        # returns None and the projector surfaces owasp_verdict=None
+        # gracefully (supplementary evidence, NOT a 409 boundary).
+        conformance_payload = submit_row.payload.get("conformance")
+        panel_data = project_conformance_matrix_panel(
+            manifest=manifest,
+            record_kind=record.kind,
+            conformance_payload=conformance_payload,
+        )
+        return ConformanceMatrixPanel.model_validate(panel_data)
 
     return router
 

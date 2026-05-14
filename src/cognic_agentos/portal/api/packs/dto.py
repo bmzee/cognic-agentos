@@ -34,6 +34,7 @@ from typing import Annotated, Any, Literal
 import pydantic
 
 from cognic_agentos.packs.approval_types import ApprovalOverrideReason
+from cognic_agentos.packs.evidence.conformance_matrix import MatrixComparisonFlag
 from cognic_agentos.packs.evidence.data_governance import DataGovernanceDiffFlag
 from cognic_agentos.packs.evidence.risk_tier import ApprovalFlowKind
 from cognic_agentos.packs.lifecycle import PackKind, PackState
@@ -706,3 +707,173 @@ class SupplyChainPanel(PackBaseModel):
     sigstore_bundle_path_declared: str | None
     in_toto_layout_declared: str | None
     sigstore_bundle_retention_expires_at: datetime.datetime | None
+
+
+# ---------------------------------------------------------------------------
+# Sprint 7B.3 T6 — ConformanceMatrixPanel response DTO + nested sub-models
+# (Plan §350 — GET /api/v1/packs/{pack_id}/evidence/conformance)
+# ---------------------------------------------------------------------------
+
+
+class MatrixDeclarationPanel(PackBaseModel):
+    """Sprint 7B.3 T6 — per-protocol declaration summary sub-model.
+
+    Pydantic mirror of
+    :class:`cognic_agentos.packs.evidence.conformance_matrix.MatrixDeclaration`.
+    Carried as the VALUE type of :attr:`ConformanceMatrixPanel.declarations`
+    (keyed ``"mcp"`` / ``"a2a"`` / ``"oasf"``).
+
+    Field set (3 fields):
+
+    - ``applicable: bool`` — R9: whether the protocol matrix applies to
+      the pack's kind (plan §351). ``False`` → no comparisons emitted.
+    - ``applicability_reason: str`` — human-readable reason.
+    - ``declared_features: tuple[str, ...]`` — conformance-matrix slugs
+      (MCP / A2A) or capability strings (OASF) the manifest declared.
+    """
+
+    model_config = pydantic.ConfigDict(frozen=True, extra="forbid", from_attributes=True)
+
+    applicable: bool
+    applicability_reason: str
+    declared_features: tuple[str, ...]
+
+
+class MatrixComparisonPanel(PackBaseModel):
+    """Sprint 7B.3 T6 — one declared-feature → conformance-matrix
+    comparison row sub-model.
+
+    Pydantic mirror of
+    :class:`cognic_agentos.packs.evidence.conformance_matrix.MatrixComparison`.
+    Carried as the element type of :attr:`ConformanceMatrixPanel.comparisons`.
+
+    Field set (5 fields):
+
+    - ``protocol: str`` — ``"mcp"`` / ``"a2a"`` / ``"oasf"``.
+    - ``feature: str`` — the conformance-matrix slug or OASF capability.
+    - ``matrix_wave_1: str | None`` — the matrix's Wave-1 posture, or
+      ``None`` for an unknown slug / OASF.
+    - ``matrix_wave_2_promoted: bool`` — whether the matrix commits to
+      promoting the feature in Wave 2.
+    - ``flag: MatrixComparisonFlag | None`` — the closed-enum mismatch
+      flag for this row, or ``None`` when the declaration is clean.
+    """
+
+    model_config = pydantic.ConfigDict(frozen=True, extra="forbid", from_attributes=True)
+
+    protocol: str
+    feature: str
+    matrix_wave_1: str | None
+    matrix_wave_2_promoted: bool
+    flag: MatrixComparisonFlag | None
+
+
+class OwaspCheckResultPanel(PackBaseModel):
+    """Sprint 7B.3 T6 — one OWASP per-category check result sub-model.
+
+    Pydantic mirror of
+    :class:`cognic_agentos.packs.evidence.conformance_matrix.OwaspCheckResultData`.
+    Defensive ``str``-typed fields — the persisted
+    ``payload["conformance"]`` is reconstructed defensively by the
+    projector (unknown category / status filtered out).
+
+    Field set (3 fields): ``category: str`` / ``status: str`` /
+    ``findings: tuple[str, ...]``.
+    """
+
+    model_config = pydantic.ConfigDict(frozen=True, extra="forbid", from_attributes=True)
+
+    category: str
+    status: str
+    findings: tuple[str, ...]
+
+
+class OwaspVerdictPanel(PackBaseModel):
+    """Sprint 7B.3 T6 — projected T9 chain-row ``payload["conformance"]``
+    OWASP suite verdict sub-model per plan §353.
+
+    Pydantic mirror of
+    :class:`cognic_agentos.packs.evidence.conformance_matrix.OwaspVerdictData`.
+    NOT the
+    :class:`cognic_agentos.packs.conformance.checks.ConformanceReport`
+    dataclass directly — see the projector module docstring's "OWASP
+    verdict projection" note (each 7B.3 projector owns its own output
+    type; ``ConformanceReport``'s field order is itself ADR-006 wire-
+    protocol-public).
+
+    Field set (4 fields):
+
+    - ``overall_status: str`` — ``"green"`` / ``"red"`` / ``"yellow"``.
+    - ``results: tuple[OwaspCheckResultPanel, ...]`` — per-category
+      results, preserving the persisted payload's iteration order.
+    - ``summary: str`` — the runner's human-readable count phrase.
+    - ``errored_categories: tuple[str, ...]`` — categories whose
+      checker raised during the suite run.
+    """
+
+    model_config = pydantic.ConfigDict(frozen=True, extra="forbid", from_attributes=True)
+
+    overall_status: str
+    results: tuple[OwaspCheckResultPanel, ...]
+    summary: str
+    errored_categories: tuple[str, ...]
+
+
+class ConformanceMatrixPanel(PackBaseModel):
+    """Sprint 7B.3 T6 — GET ``/api/v1/packs/{pack_id}/evidence/conformance``
+    response body per plan §350.
+
+    Wire-shape projection of a pack's persisted manifest's protocol
+    declarations (``[mcp]`` / ``[a2a]`` / ``[identity]`` blocks)
+    compared against the static-shipped AgentOS conformance matrix
+    (per ``docs/MCP-CONFORMANCE.md`` + ``docs/A2A-CONFORMANCE.md``) +
+    the submit chain row's ``payload["conformance"]`` OWASP verdict.
+
+    The route handler at
+    :mod:`cognic_agentos.portal.api.packs.evidence_routes` fetches the
+    persisted manifest via :func:`find_latest_submit_row` +
+    ``payload["manifest"]`` AND the submit-row ``payload["conformance"]``,
+    feeds both through
+    :func:`cognic_agentos.packs.evidence.conformance_matrix.project_conformance_matrix_panel`
+    to produce the :class:`ConformanceMatrixPanelData` projector
+    output, then ``ConformanceMatrixPanel.model_validate(panel_data)``
+    projects onto this wire shape via ``from_attributes=True``.
+
+    Architectural-arrow invariant: this DTO consumes the
+    :data:`MatrixComparisonFlag` vocabulary from
+    :mod:`cognic_agentos.packs.evidence.conformance_matrix` (the
+    source-of-truth module). The arrow runs ``portal → packs/evidence``
+    exclusively — projectors do NOT import portal types.
+
+    Field set (5 fields, frozen per plan §350):
+
+    - ``pack_kind: PackKind`` — authoritative kind from the
+      :class:`PackRecord.kind` projection (handler cross-checks
+      against ``manifest["pack"]["kind"]`` BEFORE invoking the
+      projector; mismatch surfaces as 409 ``pack_kind_mismatch``).
+    - ``declarations: dict[str, MatrixDeclarationPanel]`` — keyed
+      ``"mcp"`` / ``"a2a"`` / ``"oasf"``; ALL THREE keys always
+      present (R9 applicability carried IN the value, not by key
+      absence).
+    - ``comparisons: tuple[MatrixComparisonPanel, ...]`` — one row per
+      declared feature across all APPLICABLE protocols.
+    - ``flagged_mismatches: tuple[MatrixComparisonFlag, ...]`` —
+      deduplicated, alphabetically-sorted distinct closed-enum
+      mismatch flags; empty tuple = comparison ran, no mismatches.
+    - ``owasp_verdict: OwaspVerdictPanel | None`` — the projected T9
+      OWASP suite verdict, or ``None`` when the submit row carried no
+      ``payload["conformance"]`` (pre-7B.2-T9 chain rows) or it was
+      malformed.
+
+    Inherits :class:`PackBaseModel`'s ``frozen=True`` + ``extra="forbid"``
+    — smuggled fields refuse at validation; downstream handler cannot
+    mutate the DTO mid-request.
+    """
+
+    model_config = pydantic.ConfigDict(frozen=True, extra="forbid", from_attributes=True)
+
+    pack_kind: PackKind
+    declarations: dict[str, MatrixDeclarationPanel]
+    comparisons: tuple[MatrixComparisonPanel, ...]
+    flagged_mismatches: tuple[MatrixComparisonFlag, ...]
+    owasp_verdict: OwaspVerdictPanel | None
