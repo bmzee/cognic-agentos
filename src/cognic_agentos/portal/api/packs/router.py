@@ -18,6 +18,12 @@ wire-protocol contract); the three ``{pack_id}`` sub-handlers
 (detail / audit / invocations) live on a sub-router returned by
 :func:`build_inspection_routes`.
 
+**Sprint 7B.3 T3 wires the reviewer evidence-panel surface** under
+``/api/v1/packs`` via :func:`build_evidence_routes`: T3 ships the
+data-governance panel at ``/{pack_id}/evidence/data-governance``;
+T4-T6 extend the SAME factory with the risk-tier / supply-chain /
+conformance panels per ADR-012 §41 + the 5-gate composer (T7).
+
 The :class:`~cognic_agentos.packs.storage.PackRecordStore` is threaded
 as a keyword-only argument so T4-T7 endpoint handlers can close over
 it (mirrors the Sprint-2 + Sprint-5 router-factory pattern at
@@ -39,6 +45,7 @@ from fastapi import APIRouter
 
 from cognic_agentos.packs.storage import PackRecordStore
 from cognic_agentos.portal.api.packs.author_routes import build_author_routes
+from cognic_agentos.portal.api.packs.evidence_routes import build_evidence_routes
 from cognic_agentos.portal.api.packs.inspection_routes import (
     build_inspection_routes,
     register_inspection_list,
@@ -94,4 +101,9 @@ def build_packs_router(*, store: PackRecordStore) -> APIRouter:
     # a sub-router included below.
     register_inspection_list(router, store=store)
     router.include_router(build_inspection_routes(store=store))
+    # Sprint 7B.3 T3 — reviewer evidence-panel surface under
+    # ``/api/v1/packs/{pack_id}/evidence/<panel>``. T3 ships the
+    # data-governance panel; T4-T6 extend the same factory with the
+    # risk-tier / supply-chain / conformance panels.
+    router.include_router(build_evidence_routes(store=store))
     return router

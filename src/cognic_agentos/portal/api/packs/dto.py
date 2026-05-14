@@ -34,6 +34,7 @@ from typing import Annotated, Any, Literal
 import pydantic
 
 from cognic_agentos.packs.approval_types import ApprovalOverrideReason
+from cognic_agentos.packs.evidence.data_governance import DataGovernanceDiffFlag
 from cognic_agentos.packs.lifecycle import PackKind, PackState
 
 
@@ -463,3 +464,77 @@ class ApproveRequest(PackBaseModel):
 
     acknowledgement: ReviewerAcknowledgement
     override_reason: ApprovalOverrideReason | None = None
+
+
+# ---------------------------------------------------------------------------
+# Sprint 7B.3 T3 — DataGovernancePanel response DTO
+# (Plan §302 — GET /api/v1/packs/{pack_id}/evidence/data-governance)
+# ---------------------------------------------------------------------------
+
+
+class DataGovernancePanel(PackBaseModel):
+    """Sprint 7B.3 T3 — GET ``/api/v1/packs/{pack_id}/evidence/data-governance``
+    response body per plan §302.
+
+    Wire-shape projection of a pack's persisted manifest's
+    ``data_governance`` block per ADR-017. The route handler at
+    :mod:`cognic_agentos.portal.api.packs.evidence_routes` fetches the
+    persisted manifest via :func:`find_latest_submit_row` +
+    ``payload["manifest"]`` and feeds it through
+    :func:`cognic_agentos.packs.evidence.data_governance.project_data_governance_panel`
+    to produce the :class:`DataGovernancePanelData` projector output,
+    then ``DataGovernancePanel.model_validate(panel_data)`` projects
+    onto this wire shape via ``from_attributes=True``.
+
+    Architectural-arrow invariant: this DTO consumes the
+    :data:`DataGovernanceDiffFlag` vocabulary from
+    :mod:`cognic_agentos.packs.evidence.data_governance` (the source-
+    of-truth module). The arrow runs ``portal → packs/evidence``
+    exclusively — projectors do NOT import portal types.
+
+    ``from_attributes=True`` matches the :class:`PackResponse` +
+    :class:`PackLifecycleEventResponse` interop pattern: handlers can
+    pass a :class:`DataGovernancePanelData` directly without an
+    intermediate ``dataclasses.asdict`` conversion.
+
+    Field set (10 fields, frozen per plan §302):
+
+    - ``pack_kind: PackKind`` — authoritative kind from the
+      :class:`PackRecord.kind` projection (handler cross-checks against
+      ``manifest["pack"]["kind"]`` BEFORE invoking the projector;
+      mismatch surfaces as 409 ``pack_kind_mismatch``, NOT a panel
+      payload anomaly).
+    - ``data_classes: tuple[str, ...]`` — ADR-017 data-class set.
+    - ``purpose: str`` — single business purpose.
+    - ``purpose_description: str`` — human-readable description
+      (optional in the manifest; defaults to empty).
+    - ``retention_policy: str`` — retention-policy enum value.
+    - ``retention_max_window: str`` — stringified for display; the
+      manifest stores a positive number when ``retention_policy !=
+      "none"``.
+    - ``egress_allow_list: tuple[str, ...]`` — allowed egress endpoints.
+    - ``dlp_pre_hooks: tuple[str, ...]`` — declared pre-phase hook ids.
+    - ``dlp_post_hooks: tuple[str, ...]`` — declared post-phase hook ids.
+    - ``tenant_policy_diff: tuple[DataGovernanceDiffFlag, ...]`` —
+      closed-enum tuple. Empty ``()`` means "no tenant policy wired"
+      per plan §304; ``("none",)`` means "policy wired + no drift";
+      otherwise one or more violation flags (never mixed with the
+      ``"none"`` sentinel).
+
+    Inherits :class:`PackBaseModel`'s ``frozen=True`` + ``extra="forbid"``
+    — smuggled fields refuse at validation; downstream handler cannot
+    mutate the DTO mid-request.
+    """
+
+    model_config = pydantic.ConfigDict(frozen=True, extra="forbid", from_attributes=True)
+
+    pack_kind: PackKind
+    data_classes: tuple[str, ...]
+    purpose: str
+    purpose_description: str
+    retention_policy: str
+    retention_max_window: str
+    egress_allow_list: tuple[str, ...]
+    dlp_pre_hooks: tuple[str, ...]
+    dlp_post_hooks: tuple[str, ...]
+    tenant_policy_diff: tuple[DataGovernanceDiffFlag, ...]

@@ -924,6 +924,26 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     ("src/cognic_agentos/portal/rbac/role_separation.py", 0.95, 0.90),
     ("src/cognic_agentos/portal/api/packs/author_routes.py", 0.95, 0.90),
     ("src/cognic_agentos/portal/api/packs/review_routes.py", 0.95, 0.90),
+    # Sprint 7B.3 T3 — pack data-governance evidence panel.
+    # AGENTS.md L54 + L156 explicit stop rule: "Pack data-governance
+    # contracts (``packs/evidence/data_governance.py``, runtime DLP
+    # enforcement)". The module owns the wire-protocol-public 7-value
+    # ``DataGovernanceDiffFlag`` closed-enum vocabulary + the pure-
+    # functional projector that the 5-gate composer (T7) reads in
+    # addition to the route handler — drift in the vocab OR the
+    # projector field-set is wire-protocol-public regression.
+    #
+    # NOT on this T3 promotion set:
+    #   * ``portal/api/packs/evidence_routes.py`` (T3) — route module
+    #     orchestrating the projector. Mirrors the T7 inspection_routes
+    #     decision (R32 doctrine): route module that doesn't own a
+    #     Human-only-decisions enforcement boundary or actor_type
+    #     chain-payload provenance surface stays OFF the durable gate;
+    #     CC risk covered by the projector being on the gate + the
+    #     route-owned ``EvidencePanelRefusalReason`` 3-value vocab
+    #     pinned by the disjointness drift detectors in
+    #     ``test_evidence_routes_structure.py``.
+    ("src/cognic_agentos/packs/evidence/data_governance.py", 0.95, 0.90),
 )
 
 
