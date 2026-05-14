@@ -962,6 +962,27 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     # drift detectors covering the shared ``EvidencePanelRefusalReason``
     # vocab in ``test_evidence_routes_structure.py``.
     ("src/cognic_agentos/packs/evidence/risk_tier.py", 0.95, 0.90),
+    # Sprint 7B.3 T5 — supply-chain evidence panel.
+    # ADR-016 §23-33 (attestation kinds) + §70-72 (7-year sigstore-
+    # bundle retention) — the module owns the wire-protocol-public
+    # 7-value ``AttestationKind`` closed-enum that the 5-gate composer
+    # (T7) consumes for Gate 1 (signature) evidence lookup alongside
+    # the panel route handler. The projector ALSO encodes the truth
+    # table for retention-floor computation per the regulator
+    # boundary; drift in EITHER the Literal OR the retention math is
+    # wire-protocol-public regression.
+    #
+    # Same R32 carry-over as T3 + T4: ``portal/api/packs/evidence_routes.py``
+    # stays OFF the durable gate — the T5 supply-chain handler does
+    # not own a Human-only-decisions enforcement boundary or
+    # actor_type chain-payload provenance surface; CC risk covered by
+    # the projector being on the gate + the existing T3/T4 disjointness
+    # drift detectors covering the shared ``EvidencePanelRefusalReason``
+    # vocab in ``test_evidence_routes_structure.py``. The companion
+    # storage seam ``PackRecordStore.load_latest_submit_created_at``
+    # ships on ``packs/storage.py`` which is ALREADY on the durable
+    # gate; no separate gate-bump for the new method.
+    ("src/cognic_agentos/packs/evidence/supply_chain.py", 0.95, 0.90),
 )
 
 

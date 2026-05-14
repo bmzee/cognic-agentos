@@ -1053,6 +1053,80 @@ class PackRecordStore:
             )
         return history
 
+    async def load_latest_submit_created_at(self, pack_id: uuid.UUID) -> datetime | None:
+        """Return the ``created_at`` timestamp of the most recent
+        ``pack.lifecycle.submitted`` chain row for the given pack, or
+        ``None`` when no submit row exists.
+
+        Sprint 7B.3 T5 seam — feeds the 7-year sigstore-bundle
+        retention computation in :func:`project_supply_chain_panel` per
+        ADR-016 §70-72. The route handler at
+        :mod:`cognic_agentos.portal.api.packs.evidence_routes` calls
+        this method alongside :meth:`load_lifecycle_history` and passes
+        the result to the projector as the ``submit_created_at``
+        kwarg.
+
+        Why a NEW method rather than extending
+        :class:`~cognic_agentos.core.decision_history.DecisionRecord`
+        with a ``created_at`` field: the canonical
+        :class:`DecisionRecord` is the wire-format for evidence-pack
+        export per ADR-006 + AGENTS.md "Stop rules"; extending it
+        would be a CC change to the canonical dataclass. AGENTS.md
+        L138 (Sprint 7B.2 T7 doctrine) already documents the precedent
+        for deferring CC-ADJ canonical-dataclass extensions in favour
+        of minimal-surface storage methods. The persisted
+        ``created_at`` column at
+        :data:`_decision_history.c.created_at` is already there per
+        Sprint 2 (``TIMESTAMP(timezone=True)``); this method projects
+        it without surfacing it through the canonical wire shape.
+
+        Implementation mirrors :meth:`load_lifecycle_history`'s
+        dialect-portable client-side filter on the ``payload['pack_id']``
+        key (PG / SQLite / Oracle CLOB-with-app-side-serialisation).
+        Ordering by ``sequence DESC`` returns the most recent submit
+        first; we read only the head and return its timestamp.
+
+        Returns:
+            ``datetime`` — timezone-aware (preserves the column's
+              tzinfo); always the MOST RECENT submit's timestamp when
+              multiple exist (re-submit-after-cancel_draft flow per
+              ADR-012 §59 + Sprint 7B.2 T4).
+            ``None`` — when no submit chain row exists for the given
+              pack-id (draft state, unknown pack-id, or pre-submit
+              read).
+        """
+
+        target_id = str(pack_id)
+        async with self._engine.connect() as conn:
+            rows = (
+                await conn.execute(
+                    select(
+                        _decision_history.c.created_at,
+                        _decision_history.c.payload,
+                    )
+                    .where(_decision_history.c.event_type == "pack.lifecycle.submitted")
+                    .order_by(_decision_history.c.sequence.desc())
+                )
+            ).all()
+
+        for row in rows:
+            payload: dict[str, Any] = row.payload or {}
+            if payload.get("pack_id") != target_id:
+                continue
+            created_at: datetime = row.created_at
+            # Defensive tzinfo restoration for backends that drop the
+            # column's timezone on read (SQLite + aiosqlite). The write
+            # path at ``core/decision_history.py:528`` uses
+            # ``datetime.now(UTC)`` so every persisted timestamp IS
+            # UTC; Postgres preserves the tzinfo, SQLite drops it. The
+            # method's contract promises a timezone-aware datetime, so
+            # we restore it when the column read produced a naive
+            # value — no-op on Postgres (the conditional skips).
+            if created_at.tzinfo is None:
+                created_at = created_at.replace(tzinfo=UTC)
+            return created_at
+        return None
+
 
 def _is_valid_update_value_shape(field_name: str, value: Any) -> bool:
     """Sprint 7B.2 T4 — per-field value-shape validator for

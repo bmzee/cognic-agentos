@@ -121,11 +121,31 @@ _FIXTURE_DATA_GOVERNANCE_BLOCK: dict[str, Any] = {
 }
 
 
+# Signer-shaped [supply_chain] block — the live `agentos sign --bundle`
+# contract declares every attestation FILE through `attestation_paths`
+# under the canonical filenames per `cli/verify.py:_REQUIRED_ATTESTATION_FILES`.
+# `slsa_level` is the one optional author-declared key (the validator
+# tolerates it; the signer does not auto-populate it).
+_FIXTURE_SUPPLY_CHAIN_BLOCK: dict[str, Any] = {
+    "attestation_paths": [
+        "attestations/cosign.sig",
+        "attestations/bundle.sigstore",
+        "attestations/sbom.cdx.json",
+        "attestations/vuln-scan.json",
+        "attestations/license-audit.json",
+        "attestations/slsa-provenance.intoto.json",
+        "attestations/intoto-layout.json",
+    ],
+    "slsa_level": 3,
+}
+
+
 def _build_manifest(
     *,
     kind: PackKind,
     pack_id_field: str,
     risk_tier_value: str | None = "customer_data_read",
+    supply_chain_block: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build a minimal but realistic manifest dict for fixture submits.
 
@@ -135,6 +155,13 @@ def _build_manifest(
     full 8-value :data:`RiskTier` set + the defensive-fallback paths.
     Pass ``None`` to OMIT the ``risk_tier`` block entirely (exercises
     the missing-block defensive path).
+
+    Sprint 7B.3 T5 extension — the ``supply_chain_block`` kwarg is
+    None-by-default (mirrors the missing-block defensive path for
+    T5 fixtures); pass a populated dict (or :data:`_FIXTURE_SUPPLY_CHAIN_BLOCK`)
+    to exercise the full attestation-set projection. T3/T4 fixtures
+    keep working unchanged — the data-governance / risk-tier
+    projectors ignore the block.
     """
     manifest: dict[str, Any] = {
         "pack": {
@@ -147,6 +174,8 @@ def _build_manifest(
     }
     if risk_tier_value is not None:
         manifest["risk_tier"] = {"tier": risk_tier_value}
+    if supply_chain_block is not None:
+        manifest["supply_chain"] = supply_chain_block
     return manifest
 
 
@@ -800,9 +829,11 @@ class TestSprint7B3T4ReviewerP2KindIntegrityHardening:
     kind-integrity invariant the manifest kind MUST be present, MUST
     be a string, AND MUST equal the authoritative record kind.
 
-    Three failure modes covered for EACH of the 2 panel handlers
-    (total: 6 regression cases) — drift in either handler trips the
-    suite.
+    Sprint 7B.3 T5 carry-forward: parametrize extended to include the
+    new ``/supply-chain`` panel path — same widened predicate doctrine
+    applies to all THREE evidence-panel handlers. Four failure modes
+    covered for EACH of the 3 panel handlers (total: 12 regression
+    cases) — drift in any handler trips the suite.
     """
 
     @pytest.mark.parametrize(
@@ -810,6 +841,7 @@ class TestSprint7B3T4ReviewerP2KindIntegrityHardening:
         [
             "/api/v1/packs/{pack_id}/evidence/data-governance",
             "/api/v1/packs/{pack_id}/evidence/risk-tier",
+            "/api/v1/packs/{pack_id}/evidence/supply-chain",
         ],
     )
     async def test_missing_pack_block_refuses_409_kind_mismatch(
@@ -835,6 +867,7 @@ class TestSprint7B3T4ReviewerP2KindIntegrityHardening:
         [
             "/api/v1/packs/{pack_id}/evidence/data-governance",
             "/api/v1/packs/{pack_id}/evidence/risk-tier",
+            "/api/v1/packs/{pack_id}/evidence/supply-chain",
         ],
     )
     async def test_missing_kind_field_in_pack_block_refuses_409(
@@ -859,6 +892,7 @@ class TestSprint7B3T4ReviewerP2KindIntegrityHardening:
         [
             "/api/v1/packs/{pack_id}/evidence/data-governance",
             "/api/v1/packs/{pack_id}/evidence/risk-tier",
+            "/api/v1/packs/{pack_id}/evidence/supply-chain",
         ],
     )
     async def test_non_string_kind_value_refuses_409(
@@ -885,6 +919,7 @@ class TestSprint7B3T4ReviewerP2KindIntegrityHardening:
         [
             "/api/v1/packs/{pack_id}/evidence/data-governance",
             "/api/v1/packs/{pack_id}/evidence/risk-tier",
+            "/api/v1/packs/{pack_id}/evidence/supply-chain",
         ],
     )
     async def test_non_dict_pack_block_refuses_409(
@@ -904,3 +939,372 @@ class TestSprint7B3T4ReviewerP2KindIntegrityHardening:
             response = client.get(panel_path.format(pack_id=record.id))
         assert response.status_code == 409
         assert response.json() == {"detail": {"reason": "pack_kind_mismatch"}}
+
+
+# ===========================================================================
+# Sprint 7B.3 T5 Slice D — supply-chain evidence-panel route integration.
+#
+# Mirrors the T4 Slice E layout (HappyPath / RefusalReasons / SiblingGate /
+# ManifestShapeIntegration) for the supply-chain endpoint. The 4 T5 classes
+# pin the SAME refusal contract + RBAC + tenant-isolation gates as T3+T4 —
+# drift in any path-shared invariant would surface in all classes
+# simultaneously.
+# ===========================================================================
+
+
+_SUPPLY_CHAIN_PANEL_PATH = "/api/v1/packs/{pack_id}/evidence/supply-chain"
+
+
+class TestSprint7B3T5SliceDHappyPath:
+    """Slice D-1 — green-path projection for the supply-chain panel."""
+
+    async def test_happy_path_returns_200_and_full_panel_shape(
+        self, store: PackRecordStore
+    ) -> None:
+        """Full-shape green path: manifest with the full
+        :data:`_FIXTURE_SUPPLY_CHAIN_BLOCK` declarations + a submit
+        chain row whose ``created_at`` feeds the 7-year sigstore
+        retention computation."""
+        manifest = _build_manifest(
+            kind="tool",
+            pack_id_field="cognic-tool-fullsupplychain",
+            supply_chain_block=dict(_FIXTURE_SUPPLY_CHAIN_BLOCK),
+        )
+        record = await _seed_submitted_pack(store, kind="tool", manifest=manifest)
+        app = _build_app(actor=_make_actor(), store=store)
+        with TestClient(app) as client:
+            response = client.get(_SUPPLY_CHAIN_PANEL_PATH.format(pack_id=record.id))
+        assert response.status_code == 200
+        body = response.json()
+        # Wire-shape — exactly 9 fields, none smuggled.
+        assert frozenset(body.keys()) == frozenset(
+            {
+                "pack_kind",
+                "declared_attestation_paths",
+                "slsa_level_declared",
+                "sbom_path_declared",
+                "vuln_scan_path_declared",
+                "license_audit_path_declared",
+                "sigstore_bundle_path_declared",
+                "in_toto_layout_declared",
+                "sigstore_bundle_retention_expires_at",
+            }
+        )
+        assert body["pack_kind"] == "tool"
+        assert body["declared_attestation_paths"] == [
+            "attestations/cosign.sig",
+            "attestations/bundle.sigstore",
+            "attestations/sbom.cdx.json",
+            "attestations/vuln-scan.json",
+            "attestations/license-audit.json",
+            "attestations/slsa-provenance.intoto.json",
+            "attestations/intoto-layout.json",
+        ]
+        assert body["slsa_level_declared"] == 3
+        # The five named path fields are DERIVED from attestation_paths
+        # by canonical-basename match (R1 P2 #1).
+        assert body["sbom_path_declared"] == "attestations/sbom.cdx.json"
+        assert body["vuln_scan_path_declared"] == "attestations/vuln-scan.json"
+        assert body["license_audit_path_declared"] == "attestations/license-audit.json"
+        assert body["sigstore_bundle_path_declared"] == "attestations/bundle.sigstore"
+        assert body["in_toto_layout_declared"] == "attestations/intoto-layout.json"
+        # Retention surfaces as ISO 8601 datetime (Pydantic v2 datetime
+        # serialisation default).
+        assert body["sigstore_bundle_retention_expires_at"] is not None
+        assert isinstance(body["sigstore_bundle_retention_expires_at"], str)
+
+    @pytest.mark.parametrize("kind", ["tool", "skill", "agent", "hook"])
+    async def test_pack_kind_echoes_record_kind_across_all_four_kinds(
+        self, store: PackRecordStore, kind: PackKind
+    ) -> None:
+        """``pack_kind`` MUST come from the authoritative
+        :class:`PackRecord.kind`. Mirror of T3/T4's parametrised kind
+        test — pinned independently because each panel's projector
+        contract is independently auditable."""
+        record = await _seed_submitted_pack(store, kind=kind)
+        app = _build_app(actor=_make_actor(), store=store)
+        with TestClient(app) as client:
+            response = client.get(_SUPPLY_CHAIN_PANEL_PATH.format(pack_id=record.id))
+        assert response.status_code == 200
+        assert response.json()["pack_kind"] == kind
+
+    async def test_retention_computed_when_sigstore_bundle_declared(
+        self, store: PackRecordStore
+    ) -> None:
+        """When the manifest's ``attestation_paths`` carries the
+        canonical ``bundle.sigstore`` file, the panel DERIVES
+        ``sigstore_bundle_path_declared`` + projects a non-None
+        retention timestamp. Pinned independently of the full-shape
+        happy path — the retention computation is the load-bearing
+        ADR-016 §70-72 contract for the reviewer UI. This is the exact
+        signer-shaped case R1 P2 #1 fixed (pre-fix returned None)."""
+        block = {"attestation_paths": ["attestations/bundle.sigstore"]}
+        manifest = _build_manifest(
+            kind="tool",
+            pack_id_field="cognic-tool-sigonly",
+            supply_chain_block=block,
+        )
+        record = await _seed_submitted_pack(store, kind="tool", manifest=manifest)
+        app = _build_app(actor=_make_actor(), store=store)
+        with TestClient(app) as client:
+            response = client.get(_SUPPLY_CHAIN_PANEL_PATH.format(pack_id=record.id))
+        assert response.status_code == 200
+        assert response.json()["sigstore_bundle_path_declared"] == ("attestations/bundle.sigstore")
+        assert response.json()["sigstore_bundle_retention_expires_at"] is not None
+
+    async def test_retention_none_when_no_sigstore_declaration(
+        self, store: PackRecordStore
+    ) -> None:
+        """When ``attestation_paths`` carries NO canonical
+        ``bundle.sigstore`` entry, retention surfaces as None — even
+        though the submit row's ``created_at`` is available (the
+        retention is a property of the BUNDLE, not the submit row)."""
+        # attestation_paths declares only cosign.sig — no bundle.
+        block = {"attestation_paths": ["attestations/cosign.sig"], "slsa_level": 3}
+        manifest = _build_manifest(
+            kind="tool",
+            pack_id_field="cognic-tool-noslsa",
+            supply_chain_block=block,
+        )
+        record = await _seed_submitted_pack(store, kind="tool", manifest=manifest)
+        app = _build_app(actor=_make_actor(), store=store)
+        with TestClient(app) as client:
+            response = client.get(_SUPPLY_CHAIN_PANEL_PATH.format(pack_id=record.id))
+        assert response.status_code == 200
+        body = response.json()
+        assert body["sigstore_bundle_path_declared"] is None
+        assert body["sigstore_bundle_retention_expires_at"] is None
+        # slsa_level still projects (optional author-declared key).
+        assert body["slsa_level_declared"] == 3
+
+
+class TestSprint7B3T5SliceDRefusalReasons:
+    """Slice D-2 — the three handler-body 409 refusal paths +
+    structured-log mutually-exclusive emission contract."""
+
+    async def test_409_pack_not_yet_submitted_on_draft_state(
+        self,
+        store: PackRecordStore,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        record = await _seed_draft_pack(store)
+        app = _build_app(actor=_make_actor(), store=store)
+        caplog.set_level(logging.WARNING, logger="cognic_agentos.portal.api.packs.evidence_routes")
+        with TestClient(app) as client:
+            response = client.get(_SUPPLY_CHAIN_PANEL_PATH.format(pack_id=record.id))
+        assert response.status_code == 409
+        assert response.json() == {"detail": {"reason": "pack_not_yet_submitted"}}
+        refused_logs = [
+            r
+            for r in caplog.records
+            if r.message == "portal.packs.evidence.supply_chain_panel_refused"
+        ]
+        assert len(refused_logs) == 1
+        assert refused_logs[0].__dict__["reason"] == "pack_not_yet_submitted"
+        assert refused_logs[0].__dict__["pack_id"] == str(record.id)
+        assert refused_logs[0].__dict__["actor_subject"] == "alice@bank.example"
+
+    async def test_409_manifest_evidence_not_persisted_on_pre_7b3_submit_row(
+        self,
+        store: PackRecordStore,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        record = await _seed_submitted_pack(store, omit_manifest_kwarg=True)
+        app = _build_app(actor=_make_actor(), store=store)
+        caplog.set_level(logging.WARNING, logger="cognic_agentos.portal.api.packs.evidence_routes")
+        with TestClient(app) as client:
+            response = client.get(_SUPPLY_CHAIN_PANEL_PATH.format(pack_id=record.id))
+        assert response.status_code == 409
+        assert response.json() == {"detail": {"reason": "manifest_evidence_not_persisted"}}
+        refused_logs = [
+            r
+            for r in caplog.records
+            if r.message == "portal.packs.evidence.supply_chain_panel_refused"
+        ]
+        assert len(refused_logs) == 1
+        assert refused_logs[0].__dict__["reason"] == "manifest_evidence_not_persisted"
+
+    async def test_409_pack_kind_mismatch_when_manifest_kind_disagrees(
+        self,
+        store: PackRecordStore,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        tampered_manifest = _build_manifest(kind="tool", pack_id_field="cognic-tool-xyz")
+        tampered_manifest["pack"]["kind"] = "skill"
+        record = await _seed_submitted_pack(store, kind="tool", manifest=tampered_manifest)
+        app = _build_app(actor=_make_actor(), store=store)
+        caplog.set_level(logging.WARNING, logger="cognic_agentos.portal.api.packs.evidence_routes")
+        with TestClient(app) as client:
+            response = client.get(_SUPPLY_CHAIN_PANEL_PATH.format(pack_id=record.id))
+        assert response.status_code == 409
+        assert response.json() == {"detail": {"reason": "pack_kind_mismatch"}}
+        refused_logs = [
+            r
+            for r in caplog.records
+            if r.message == "portal.packs.evidence.supply_chain_panel_refused"
+        ]
+        assert len(refused_logs) == 1
+        assert refused_logs[0].__dict__["reason"] == "pack_kind_mismatch"
+        assert refused_logs[0].__dict__["record_kind"] == "tool"
+        assert refused_logs[0].__dict__["manifest_kind"] == "skill"
+
+    async def test_happy_path_emits_zero_refused_logs(
+        self,
+        store: PackRecordStore,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Mutually-exclusive emission contract: green path emits ZERO
+        ``portal.packs.evidence.supply_chain_panel_refused`` records."""
+        record = await _seed_submitted_pack(store)
+        app = _build_app(actor=_make_actor(), store=store)
+        caplog.set_level(logging.WARNING, logger="cognic_agentos.portal.api.packs.evidence_routes")
+        with TestClient(app) as client:
+            response = client.get(_SUPPLY_CHAIN_PANEL_PATH.format(pack_id=record.id))
+        assert response.status_code == 200
+        refused_logs = [
+            r
+            for r in caplog.records
+            if r.message == "portal.packs.evidence.supply_chain_panel_refused"
+        ]
+        assert refused_logs == []
+
+    async def test_supply_chain_handler_does_not_emit_other_panel_logs(
+        self,
+        store: PackRecordStore,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Cross-panel emission-drift regression: the supply-chain
+        refusal path emits ONLY the ``supply_chain_panel_refused``
+        log message — NEVER the data-governance OR risk-tier logs.
+        A future change that copies a sibling handler's emission
+        inline by mistake would cross-fire."""
+        record = await _seed_draft_pack(store)
+        app = _build_app(actor=_make_actor(), store=store)
+        caplog.set_level(logging.WARNING, logger="cognic_agentos.portal.api.packs.evidence_routes")
+        with TestClient(app) as client:
+            response = client.get(_SUPPLY_CHAIN_PANEL_PATH.format(pack_id=record.id))
+        assert response.status_code == 409
+        # Neither sibling panel's log MUST fire here.
+        dg_logs = [
+            r
+            for r in caplog.records
+            if r.message == "portal.packs.evidence.data_governance_panel_refused"
+        ]
+        rt_logs = [
+            r
+            for r in caplog.records
+            if r.message == "portal.packs.evidence.risk_tier_panel_refused"
+        ]
+        assert dg_logs == []
+        assert rt_logs == []
+
+
+class TestSprint7B3T5SliceDSiblingGateRefusals:
+    """Slice D-3 — RBAC / tenant-isolation / unknown-pack-id refusals
+    via the dependency chain. Same gate semantics as T3+T4."""
+
+    async def test_rbac_403_when_actor_lacks_review_claim_scope(
+        self, store: PackRecordStore
+    ) -> None:
+        record = await _seed_submitted_pack(store)
+        actor = _make_actor(scopes=frozenset({"pack.audit.read"}))
+        app = _build_app(actor=actor, store=store)
+        with TestClient(app) as client:
+            response = client.get(_SUPPLY_CHAIN_PANEL_PATH.format(pack_id=record.id))
+        assert response.status_code == 403
+        detail = response.json()["detail"]
+        assert detail["reason"] == "scope_not_held"
+        assert detail["required_scope"] == "pack.review.claim"
+
+    async def test_tenant_isolation_404_on_cross_tenant_access(
+        self, store: PackRecordStore
+    ) -> None:
+        record = await _seed_submitted_pack(store, tenant_id="t1")
+        actor = _make_actor(tenant_id="t2")
+        app = _build_app(actor=actor, store=store)
+        with TestClient(app) as client:
+            response = client.get(_SUPPLY_CHAIN_PANEL_PATH.format(pack_id=record.id))
+        assert response.status_code == 404
+        assert response.json() == {"detail": {"reason": "tenant_id_mismatch"}}
+
+    async def test_unknown_pack_id_404_pack_not_found(self, store: PackRecordStore) -> None:
+        bogus_id = uuid.uuid4()
+        app = _build_app(actor=_make_actor(), store=store)
+        with TestClient(app) as client:
+            response = client.get(_SUPPLY_CHAIN_PANEL_PATH.format(pack_id=bogus_id))
+        assert response.status_code == 404
+        assert response.json() == {"detail": {"reason": "pack_not_found"}}
+
+
+class TestSprint7B3T5SliceDManifestShapeIntegration:
+    """Slice D-4 — exercise the projector's defensive-fallback paths
+    through the full FastAPI stack."""
+
+    async def test_missing_supply_chain_block_returns_all_empty_or_none(
+        self, store: PackRecordStore
+    ) -> None:
+        """Manifest without a ``supply_chain`` block surfaces every
+        declared field as None / empty + retention None — the
+        reviewer sees the gap on-panel rather than the route
+        crashing on a missing block."""
+        # Default _build_manifest carries NO supply_chain block.
+        record = await _seed_submitted_pack(store, kind="tool")
+        app = _build_app(actor=_make_actor(), store=store)
+        with TestClient(app) as client:
+            response = client.get(_SUPPLY_CHAIN_PANEL_PATH.format(pack_id=record.id))
+        assert response.status_code == 200
+        body = response.json()
+        assert body["declared_attestation_paths"] == []
+        assert body["slsa_level_declared"] is None
+        assert body["sbom_path_declared"] is None
+        assert body["vuln_scan_path_declared"] is None
+        assert body["license_audit_path_declared"] is None
+        assert body["sigstore_bundle_path_declared"] is None
+        assert body["in_toto_layout_declared"] is None
+        assert body["sigstore_bundle_retention_expires_at"] is None
+
+    async def test_non_dict_supply_chain_block_falls_back(self, store: PackRecordStore) -> None:
+        """Corrupted persistence — ``supply_chain`` as a bare string —
+        surfaces the defensive fallback (all None / empty + retention
+        None) WITHOUT crashing the route."""
+        manifest = _build_manifest(kind="tool", pack_id_field="cognic-tool-malformed")
+        manifest["supply_chain"] = "not-a-dict"
+        record = await _seed_submitted_pack(store, kind="tool", manifest=manifest)
+        app = _build_app(actor=_make_actor(), store=store)
+        with TestClient(app) as client:
+            response = client.get(_SUPPLY_CHAIN_PANEL_PATH.format(pack_id=record.id))
+        assert response.status_code == 200
+        body = response.json()
+        assert body["declared_attestation_paths"] == []
+        assert body["sigstore_bundle_path_declared"] is None
+        assert body["sigstore_bundle_retention_expires_at"] is None
+
+    async def test_non_string_entries_in_attestation_paths_filtered_through_stack(
+        self, store: PackRecordStore
+    ) -> None:
+        """Non-string drift in ``attestation_paths`` is silently
+        filtered at the projector — the wire never carries a
+        non-string entry even when the persisted manifest contains
+        one."""
+        block = {
+            "attestation_paths": [
+                "valid/path.sig",
+                42,  # non-string drift
+                None,
+                "another/valid.bundle",
+            ],
+        }
+        manifest = _build_manifest(
+            kind="tool",
+            pack_id_field="cognic-tool-drift",
+            supply_chain_block=block,
+        )
+        record = await _seed_submitted_pack(store, kind="tool", manifest=manifest)
+        app = _build_app(actor=_make_actor(), store=store)
+        with TestClient(app) as client:
+            response = client.get(_SUPPLY_CHAIN_PANEL_PATH.format(pack_id=record.id))
+        assert response.status_code == 200
+        assert response.json()["declared_attestation_paths"] == [
+            "valid/path.sig",
+            "another/valid.bundle",
+        ]

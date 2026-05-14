@@ -1,14 +1,14 @@
-"""Sprint 7B.3 T3+T4 — reviewer evidence-panel routes (CRITICAL CONTROLS).
+"""Sprint 7B.3 T3+T4+T5 — reviewer evidence-panel routes (CRITICAL CONTROLS).
 
 Per the plan-of-record at
 ``docs/superpowers/plans/2026-05-13-sprint-7b3-reviewer-evidence-panels-5-gate.md``
-§290-323 — ships the data-governance (T3) + risk-tier (T4) evidence-
-panel handlers under ``/api/v1/packs``. T5-T6 extend the SAME
-``build_evidence_routes`` factory with the remaining two panels
-(supply-chain / conformance); T7 wires the 5-gate composer that
-consumes the same projector outputs.
+§290-339 — ships the data-governance (T3) + risk-tier (T4) +
+supply-chain (T5) evidence-panel handlers under ``/api/v1/packs``. T6
+extends the SAME ``build_evidence_routes`` factory with the
+conformance-matrix panel; T7 wires the 5-gate composer that consumes
+the same projector outputs.
 
-Endpoint surface (T3 + T4):
+Endpoint surface (T3 + T4 + T5):
 
 - ``GET  /{pack_id}/evidence/data-governance`` (T3) — gated by
   ``pack.review.claim`` + ``RequireTenantOwnership``; reads the
@@ -26,6 +26,22 @@ Endpoint surface (T3 + T4):
   contract for the panel's ``approval_flow`` field; ADR-014 §30-37
   is the canonical source of truth for the risk-tier → approval-flow
   mapping table.
+- ``GET  /{pack_id}/evidence/supply-chain`` (T5) — same RBAC + tenant
+  isolation as T3+T4; reads the same manifest via the same seam +
+  sources the submit-row ``created_at`` via the T5 storage seam
+  :meth:`PackRecordStore.load_latest_submit_created_at` (additive
+  method; NO ``DecisionRecord`` extension per AGENTS.md L138 doctrine);
+  projects through :func:`project_supply_chain_panel`; returns
+  :class:`SupplyChainPanel` per plan §334. **The panel projects what
+  the author DECLARED in the manifest — not the verification status**;
+  actual cosign-signature-verification surfaces via the composer's
+  Gate 1 result on the approve endpoint (T7-T9). The closed-enum
+  :data:`AttestationKind` Literal at
+  :mod:`cognic_agentos.packs.evidence.supply_chain` IS the wire-protocol
+  contract for the 7 attestation kinds per ADR-016 §23-33; the 7-year
+  sigstore-bundle retention floor per §70-72 surfaces as
+  ``sigstore_bundle_retention_expires_at`` when BOTH the bundle is
+  declared AND the storage seam returned a non-None timestamp.
 
 Refusal taxonomy (handler-body 409s):
 
@@ -75,8 +91,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from cognic_agentos.packs._lifecycle_helpers import find_latest_submit_row
 from cognic_agentos.packs.evidence.data_governance import project_data_governance_panel
 from cognic_agentos.packs.evidence.risk_tier import project_risk_tier_panel
+from cognic_agentos.packs.evidence.supply_chain import project_supply_chain_panel
 from cognic_agentos.packs.storage import PackRecord, PackRecordStore
-from cognic_agentos.portal.api.packs.dto import DataGovernancePanel, RiskTierPanel
+from cognic_agentos.portal.api.packs.dto import (
+    DataGovernancePanel,
+    RiskTierPanel,
+    SupplyChainPanel,
+)
 from cognic_agentos.portal.rbac.actor import Actor
 from cognic_agentos.portal.rbac.enforcement import RequireScope
 from cognic_agentos.portal.rbac.tenant_isolation import RequireTenantOwnership
@@ -336,6 +357,126 @@ def build_evidence_routes(*, store: PackRecordStore) -> APIRouter:
             record_kind=record.kind,
         )
         return RiskTierPanel.model_validate(panel_data)
+
+    @router.get(
+        "/{pack_id}/evidence/supply-chain",
+        summary="Reviewer supply-chain evidence panel (ADR-016 projection)",
+    )
+    async def supply_chain_panel(
+        _actor: Annotated[Actor, Depends(_require_pack_review_claim)],
+        record: Annotated[PackRecord, Depends(_require_tenant_ownership)],
+    ) -> SupplyChainPanel:
+        """Project the persisted manifest's ``supply_chain`` block + the
+        submit chain row's ``created_at`` onto the reviewer-facing
+        evidence panel per plan §333-336.
+
+        Dependency chain (resolution order):
+
+        1. ``_require_pack_review_claim`` (:class:`RequireScope`) — 403
+           ``scope_not_held`` for missing scope.
+        2. ``_require_tenant_ownership`` (:class:`RequireTenantOwnership`) —
+           404 ``tenant_id_mismatch`` for cross-tenant; returns the
+           :class:`PackRecord` for the kind cross-check.
+
+        Handler-body refusals (all 409 + closed-enum
+        :data:`EvidencePanelRefusalReason`):
+
+        - No submit chain row → ``pack_not_yet_submitted``.
+        - Submit row missing ``payload["manifest"]`` → ``manifest_evidence_not_persisted``.
+        - ``manifest["pack"]["kind"] != record.kind`` → ``pack_kind_mismatch``.
+
+        Per plan §333: the panel surfaces what the author DECLARED at
+        sign time per ADR-016 §23-33; it does NOT re-verify cosign
+        signatures at panel-read time (that's the composer's Gate 1
+        concern at T7-T9). The reviewer reads the panel to see WHAT
+        was declared; the composer result to see WHETHER it VERIFIED.
+
+        The submit-row ``created_at`` feeds the 7-year sigstore-bundle
+        retention computation per ADR-016 §70-72 — sourced via the T5
+        storage seam :meth:`PackRecordStore.load_latest_submit_created_at`
+        (additive method; NO :class:`DecisionRecord` extension per
+        AGENTS.md L138 doctrine).
+
+        Structured-log emission: every refusal path logs
+        ``portal.packs.evidence.supply_chain_panel_refused`` with
+        reason + ``pack_id`` + ``actor_subject`` — mirrors the T3/T4
+        per-panel mutually-exclusive log emission contract pinned by
+        ``test_evidence_panel_routes.py``.
+        """
+        history = await store.load_lifecycle_history(record.id)
+        submit_row = find_latest_submit_row(history)
+        if submit_row is None:
+            _LOG.warning(
+                "portal.packs.evidence.supply_chain_panel_refused",
+                extra={
+                    "reason": _PACK_NOT_YET_SUBMITTED_REASON,
+                    "actor_subject": _actor.subject,
+                    "pack_id": str(record.id),
+                    "from_state": record.state,
+                },
+            )
+            raise HTTPException(
+                status_code=409,
+                detail={"reason": _PACK_NOT_YET_SUBMITTED_REASON},
+            )
+
+        manifest = submit_row.payload.get("manifest")
+        if not isinstance(manifest, dict):
+            _LOG.warning(
+                "portal.packs.evidence.supply_chain_panel_refused",
+                extra={
+                    "reason": _MANIFEST_EVIDENCE_NOT_PERSISTED_REASON,
+                    "actor_subject": _actor.subject,
+                    "pack_id": str(record.id),
+                    "from_state": record.state,
+                },
+            )
+            raise HTTPException(
+                status_code=409,
+                detail={"reason": _MANIFEST_EVIDENCE_NOT_PERSISTED_REASON},
+            )
+
+        pack_meta = manifest.get("pack")
+        manifest_kind = pack_meta.get("kind") if isinstance(pack_meta, dict) else None
+        # R9 kind-integrity invariant: the manifest's pack.kind MUST be
+        # present, MUST be a string, AND MUST equal the authoritative
+        # PackRecord.kind. Absent / non-string values are treated as
+        # pack_kind_mismatch (NOT silently projected against record.kind)
+        # so a corrupted persisted manifest cannot bypass the integrity
+        # gate. Pinned by all three panels' kind-integrity regression
+        # tests (T4 R1 P2 dual-panel parametrize + T5 carry-forward).
+        if not isinstance(manifest_kind, str) or manifest_kind != record.kind:
+            _LOG.warning(
+                "portal.packs.evidence.supply_chain_panel_refused",
+                extra={
+                    "reason": _PACK_KIND_MISMATCH_REASON,
+                    "actor_subject": _actor.subject,
+                    "pack_id": str(record.id),
+                    "record_kind": record.kind,
+                    "manifest_kind": manifest_kind,
+                },
+            )
+            raise HTTPException(
+                status_code=409,
+                detail={"reason": _PACK_KIND_MISMATCH_REASON},
+            )
+
+        # T5 storage seam: source the submit chain row's created_at to
+        # feed the 7-year sigstore-bundle retention computation. The
+        # method returns None when no submit row exists for the pack
+        # — at this point in the handler the submit_row check above
+        # has already passed, so the method should return a non-None
+        # value on the green path. Defensive None handling in the
+        # projector covers the edge case where the chain-row write +
+        # the load are racing across replicas (read-after-write
+        # consistency window on multi-replica Postgres).
+        submit_created_at = await store.load_latest_submit_created_at(record.id)
+        panel_data = project_supply_chain_panel(
+            manifest=manifest,
+            record_kind=record.kind,
+            submit_created_at=submit_created_at,
+        )
+        return SupplyChainPanel.model_validate(panel_data)
 
     return router
 

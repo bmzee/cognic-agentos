@@ -38,6 +38,16 @@ from cognic_agentos.packs.evidence.data_governance import DataGovernanceDiffFlag
 from cognic_agentos.packs.evidence.risk_tier import ApprovalFlowKind
 from cognic_agentos.packs.lifecycle import PackKind, PackState
 
+# Note: :data:`AttestationKind` is intentionally NOT imported here even
+# though the :class:`SupplyChainPanel` DTO is wire-protocol-public for
+# that vocabulary. The DTO surfaces each attestation kind as a NAMED
+# field (``slsa_level_declared`` / ``sbom_path_declared`` / …) rather
+# than a flat ``dict[AttestationKind, ...]`` field, so the closed-enum
+# Literal never appears in a field annotation. The Literal lives at
+# the projector module + the drift detector at
+# ``tests/unit/portal/api/packs/test_dto_t5_supply_chain_panel.py``
+# pins lockstep between the field set and the projector dataclass.
+
 
 class PackBaseModel(pydantic.BaseModel):
     """Frozen + ``extra="forbid"`` base for every Sprint 7B.2 pack DTO.
@@ -602,3 +612,97 @@ class RiskTierPanel(PackBaseModel):
     risk_tier: str
     approval_flow: ApprovalFlowKind
     approval_flow_description: str
+
+
+# ---------------------------------------------------------------------------
+# Sprint 7B.3 T5 — SupplyChainPanel response DTO
+# (Plan §334 — GET /api/v1/packs/{pack_id}/evidence/supply-chain)
+# ---------------------------------------------------------------------------
+
+
+class SupplyChainPanel(PackBaseModel):
+    """Sprint 7B.3 T5 — GET ``/api/v1/packs/{pack_id}/evidence/supply-chain``
+    response body per plan §334.
+
+    Wire-shape projection of a pack's persisted manifest's
+    ``supply_chain`` block per ADR-016 §23-33 + the 7-year sigstore-
+    bundle retention floor per §70-72. The route handler at
+    :mod:`cognic_agentos.portal.api.packs.evidence_routes` fetches the
+    persisted manifest via :func:`find_latest_submit_row` +
+    ``payload["manifest"]`` AND sources the submit-row ``created_at``
+    via :meth:`PackRecordStore.load_latest_submit_created_at` and feeds
+    both through
+    :func:`cognic_agentos.packs.evidence.supply_chain.project_supply_chain_panel`
+    to produce the :class:`SupplyChainPanelData` projector output, then
+    ``SupplyChainPanel.model_validate(panel_data)`` projects onto this
+    wire shape via ``from_attributes=True``.
+
+    **Per plan §333 — declarations, NOT verification status**: every
+    field on this DTO is "as declared in the manifest". Actual cosign-
+    signature-verification status surfaces via the composer's Gate 1
+    result on the approve endpoint (T7-T9), NOT on this panel. The
+    reviewer reads the panel to see WHAT the author declared; the
+    composer result to see WHETHER the declarations VERIFIED.
+
+    Architectural-arrow invariant: this DTO consumes the
+    :data:`AttestationKind` vocabulary from
+    :mod:`cognic_agentos.packs.evidence.supply_chain` (the source-of-
+    truth module). The arrow runs ``portal → packs/evidence``
+    exclusively — projectors do NOT import portal types.
+
+    ``from_attributes=True`` matches the :class:`DataGovernancePanel`
+    + :class:`RiskTierPanel` interop pattern: handlers can pass a
+    :class:`SupplyChainPanelData` directly without an intermediate
+    :func:`dataclasses.asdict` conversion.
+
+    Field set (9 fields, frozen per plan §334):
+
+    - ``pack_kind: PackKind`` — authoritative kind from the
+      :class:`PackRecord.kind` projection (handler cross-checks
+      against ``manifest["pack"]["kind"]`` BEFORE invoking the
+      projector; mismatch surfaces as 409 ``pack_kind_mismatch``).
+    - ``declared_attestation_paths: tuple[str, ...]`` — paths the
+      author declared in ``manifest.supply_chain.attestation_paths``.
+      Non-string entries silently filtered at the projector.
+    - ``slsa_level_declared: int | None`` — SLSA level (1-4) per ADR-016
+      §24; None when missing / non-int / a bool subclass / out-of-range
+      (defensive — the projector applies the 1..4 validity gate).
+    - ``sbom_path_declared: str | None`` — SBOM file path per §25.
+    - ``vuln_scan_path_declared: str | None`` — vuln-scan baseline
+      path per §26.
+    - ``license_audit_path_declared: str | None`` — license-audit
+      output path per §27.
+    - ``sigstore_bundle_path_declared: str | None`` — Rekor-bound
+      bundle path per §28.
+    - ``in_toto_layout_declared: str | None`` — in-toto layout path
+      per §29.
+    - ``sigstore_bundle_retention_expires_at: datetime | None`` —
+      submit-row ``created_at`` + 7 years per §70-72 when BOTH the
+      bundle is declared AND the submit-row timestamp is available;
+      None otherwise.
+
+    The :data:`AttestationKind` Literal is wire-protocol-public but is
+    NOT directly carried on this DTO as a field annotation — the panel
+    surfaces each kind as a NAMED field (``slsa_level_declared`` /
+    ``sbom_path_declared`` / etc.) rather than a flat ``dict[
+    AttestationKind, ...]``, so reviewers and bank-overlay consumers
+    can audit individual declaration presence without dict-keyset
+    drift. The closed-enum vocabulary lives at the projector module
+    for the 5-gate composer (T7) to consume.
+
+    Inherits :class:`PackBaseModel`'s ``frozen=True`` + ``extra="forbid"``
+    — smuggled fields refuse at validation; downstream handler cannot
+    mutate the DTO mid-request.
+    """
+
+    model_config = pydantic.ConfigDict(frozen=True, extra="forbid", from_attributes=True)
+
+    pack_kind: PackKind
+    declared_attestation_paths: tuple[str, ...]
+    slsa_level_declared: int | None
+    sbom_path_declared: str | None
+    vuln_scan_path_declared: str | None
+    license_audit_path_declared: str | None
+    sigstore_bundle_path_declared: str | None
+    in_toto_layout_declared: str | None
+    sigstore_bundle_retention_expires_at: datetime.datetime | None
