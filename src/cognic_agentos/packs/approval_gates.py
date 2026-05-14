@@ -45,30 +45,39 @@ drift detector at ``tests/unit/packs/test_approval_gates.py::
 TestSprint7B3T7SliceHReviewerAckKeyDrift`` (which MAY import portal)
 pins them in lockstep against ``ReviewerAcknowledgement.model_fields``.
 
-**Override path is T8, not here.** This module ships only
-:func:`compose_approval_gates`. T8 adds ``evaluate_override_decision``
-which consumes the :class:`ApprovalGateComposition` produced here.
-:data:`_NON_OVERRIDABLE_GATES` (= ``{"signature"}`` per ADR-012 §110 +
-R10 LOCK Flag #4 — cosign signature is the single non-overridable
-gate) is declared here so the composition can surface
-:attr:`ApprovalGateComposition.non_overridable_red_gates` for the
-T8 override helper to refuse on.
+**Override path (Sprint 7B.3 T8).** Alongside the T7 composer this
+module also ships :func:`evaluate_override_decision` — the pure-
+functional override-aware helper the T9 approve endpoint's override
+path consumes — and :func:`composition_snapshot` — the canonical-safe
+serialiser that converts the frozen :class:`ApprovalGateComposition`
+(``tuple`` ``gates`` + ``frozenset`` ``non_overridable_red_gates``)
+into a ``dict`` the override-event chain payload can carry past
+``core.canonical.canonical_bytes`` (which rejects tuples and has no
+frozenset rule). :data:`_NON_OVERRIDABLE_GATES` (= ``{"signature"}``
+per ADR-012 §110 + R10 LOCK Flag #4 — cosign signature is the single
+non-overridable gate) drives the override helper's
+``non_overridable_red_gate`` refusal via
+:attr:`ApprovalGateComposition.non_overridable_red_gates`.
 
-**Closed-enum vocabulary IS the wire-protocol contract.** The 9
-Literals below (5 per-gate red-reason Literals + the consolidated
-:data:`ApprovalGateRedReason` union + :data:`ApprovalGateName` +
-:data:`ApprovalGateOutcome` + the binary :data:`SignatureGateOutcome`)
-are wire-protocol-public — they render into the 412
-``ApproveRefusalResponse`` body the T9 endpoint returns. Drift in
-either direction is a wire-protocol-public regression class; pinned by
-the Slice-A drift detectors.
+**Closed-enum vocabulary IS the wire-protocol contract.** The module
+owns **10** wire-protocol-public closed-enum Literals. The 9 in the
+closed-enum block immediately below (5 per-gate red-reason Literals +
+the consolidated :data:`ApprovalGateRedReason` union +
+:data:`ApprovalGateName` + :data:`ApprovalGateOutcome` + the binary
+:data:`SignatureGateOutcome`) are pinned by the Slice-A drift
+detectors; the 10th — :data:`OverrideRefusalReason` (T8, in the
+override-path section at the foot of the module) — is pinned by the
+Slice-J drift detector. All 10 render into the 412
+``ApproveRefusalResponse`` body the T9 endpoint returns; drift in
+either direction is a wire-protocol-public regression class.
 """
 
 from __future__ import annotations
 
 import dataclasses
-from typing import Literal
+from typing import Any, Literal
 
+from cognic_agentos.packs.approval_types import ApprovalOverrideReason
 from cognic_agentos.packs.conformance.checks import ConformanceOverallStatus
 from cognic_agentos.packs.lifecycle import PackKind
 
@@ -82,6 +91,8 @@ __all__ = [
     "ApprovalGateResult",
     "EvaluationGateInput",
     "EvaluationRedReason",
+    "OverrideDecision",
+    "OverrideRefusalReason",
     "OwaspGateInput",
     "OwaspRedReason",
     "ReviewerAckRedReason",
@@ -89,6 +100,8 @@ __all__ = [
     "SignatureGateOutcome",
     "SignatureRedReason",
     "compose_approval_gates",
+    "composition_snapshot",
+    "evaluate_override_decision",
 ]
 
 
@@ -487,3 +500,137 @@ def compose_approval_gates(
         all_green=all_green,
         non_overridable_red_gates=non_overridable_red_gates,
     )
+
+
+# ---------------------------------------------------------------------------
+# Sprint 7B.3 T8 — override path: vocabulary + decision helper + snapshot.
+# ---------------------------------------------------------------------------
+
+
+OverrideRefusalReason = Literal[
+    "composition_already_all_green",
+    "override_scope_not_held",
+    "override_reason_missing",
+    "non_overridable_red_gate",
+]
+"""Closed-enum 4-value vocabulary for why :func:`evaluate_override_decision`
+refused an override. Wire-protocol-public — the T9 approve endpoint
+renders it into the 412 refusal body's override-path branch.
+
+- ``composition_already_all_green`` — the composition is all-green; there
+  is nothing to override (renamed from the pre-R12
+  ``no_red_gates_to_override``, which mis-described the trigger — the
+  trigger is ``composition.all_green``, not "zero red gates", because an
+  ``evidence_not_attached``-only composition has zero red gates yet IS
+  overrideable).
+- ``non_overridable_red_gate`` — a gate in :data:`_NON_OVERRIDABLE_GATES`
+  (cosign signature, per ADR-012 §110) is ``red``; no override is
+  possible regardless of who asks.
+- ``override_scope_not_held`` — the caller does not hold the
+  ``pack.override.approval_gate`` RBAC scope.
+- ``override_reason_missing`` — no categorised :data:`ApprovalOverrideReason`
+  was supplied.
+"""
+
+
+@dataclasses.dataclass(frozen=True)
+class OverrideDecision:
+    """The frozen verdict of :func:`evaluate_override_decision`.
+
+    ``allowed`` is ``True`` iff the override path may proceed;
+    ``refusal_reason`` carries the closed-enum :data:`OverrideRefusalReason`
+    when ``allowed`` is ``False`` and is ``None`` when ``allowed`` is
+    ``True`` (the two fields are mutually constrained — pinned by the
+    Slice-J tests).
+    """
+
+    allowed: bool
+    refusal_reason: OverrideRefusalReason | None
+
+
+def evaluate_override_decision(
+    *,
+    composition: ApprovalGateComposition,
+    override_scope_held: bool,
+    override_reason: ApprovalOverrideReason | None,
+) -> OverrideDecision:
+    """Decide whether the ADR-012 §107 override path may force-approve.
+
+    Pure-functional — no I/O, no DB, no time, no random. The T9 approve
+    endpoint calls this AFTER :func:`compose_approval_gates` when the
+    composition is not all-green: it passes the composition, whether the
+    caller holds the ``pack.override.approval_gate`` scope, and the
+    categorised override reason from the request body.
+
+    An override is **allowed** iff ALL of:
+
+    - ``not composition.all_green`` — there is a blocking gate to
+      override. "Blocking" = ``red`` OR ``evidence_not_attached`` (R12
+      blocking-not-red doctrine); ``all_green`` already treats both as
+      non-green, so an ``evidence_not_attached``-only composition (zero
+      ``red`` gates — the EXPECTED pre-Sprint-11 state for gates 2/3) IS
+      overrideable.
+    - ``composition.non_overridable_red_gates`` is empty — no gate in
+      :data:`_NON_OVERRIDABLE_GATES` (cosign signature) is ``red``.
+      ADR-012 §110 makes the signature gate absolutely non-overridable.
+    - ``override_scope_held`` — the caller holds the override RBAC scope.
+    - ``override_reason is not None`` — a categorised reason was supplied.
+
+    Otherwise the override is refused with exactly one
+    :data:`OverrideRefusalReason`. **Refusal precedence — most-fundamental
+    blocker first:** (1) ``composition_already_all_green`` (is there even
+    something to override?) → (2) ``non_overridable_red_gate`` (is an
+    override legal here AT ALL, regardless of caller?) → (3)
+    ``override_scope_not_held`` (does the caller have authority?) → (4)
+    ``override_reason_missing`` (did they supply the required reason?).
+    (1) and (2) are mutually exclusive — an all-green composition has no
+    red gates — so their relative order is moot, but (2) is checked
+    before the caller-specific gates (3)/(4) so the wire response always
+    surfaces the ADR-012 §110 absolute stop ahead of the authority check.
+    """
+    if composition.all_green:
+        return OverrideDecision(allowed=False, refusal_reason="composition_already_all_green")
+    if composition.non_overridable_red_gates:
+        return OverrideDecision(allowed=False, refusal_reason="non_overridable_red_gate")
+    if not override_scope_held:
+        return OverrideDecision(allowed=False, refusal_reason="override_scope_not_held")
+    if override_reason is None:
+        return OverrideDecision(allowed=False, refusal_reason="override_reason_missing")
+    return OverrideDecision(allowed=True, refusal_reason=None)
+
+
+def composition_snapshot(composition: ApprovalGateComposition) -> dict[str, Any]:
+    """Serialise an :class:`ApprovalGateComposition` into a canonical-safe
+    ``dict`` for the ``pack.approval_override`` chain-event payload.
+
+    :class:`ApprovalGateComposition` is a ``@dataclasses.dataclass`` whose
+    ``gates`` field is a ``tuple`` and whose ``non_overridable_red_gates``
+    field is a ``frozenset``. ``core.canonical.canonical_bytes`` REJECTS
+    tuples with ``TypeError`` (they would silently become JSON arrays,
+    losing the list/tuple distinction) and has no serialisation rule for
+    ``frozenset`` — so a raw ``dataclasses.asdict(composition)`` would
+    fail the override-event chain insert. This helper converts ``gates``
+    to a ``list`` of plain ``dict``s and ``non_overridable_red_gates`` to
+    a **sorted** ``list`` (deterministic ordering — the gate names are
+    examiner-visible). Mirrors the load-bearing tuple→list conversion
+    doctrine at ``packs/conformance/runner.py``.
+
+    The T9 override path builds the snapshot via this helper and passes
+    the result as ``append_override_event``'s ``gate_composition_snapshot``
+    kwarg so examiners can reconstruct WHICH gates were red / blocking at
+    override time.
+    """
+    return {
+        "pack_kind": composition.pack_kind,
+        "gates": [
+            {
+                "gate": result.gate,
+                "outcome": result.outcome,
+                "red_reason": result.red_reason,
+                "evidence_pointer": result.evidence_pointer,
+            }
+            for result in composition.gates
+        ],
+        "all_green": composition.all_green,
+        "non_overridable_red_gates": sorted(composition.non_overridable_red_gates),
+    }

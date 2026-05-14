@@ -2,16 +2,17 @@
 
 Pins:
 
-- The 12 scopes from BUILD_PLAN.md §622-625 verbatim. (The Sprint-7B.1 closeout
-  L119 says "14 scopes" but enumerates 12 — known cite-from-memory typo in the
-  closeout per Sprint 7B.2 plan self-review Round 0.5. BUILD_PLAN §622-625 is the
-  source of truth at 12. The override scope ``pack.override.approval_gate`` from
-  ADR-012 §107-110 ships with Sprint 7B.3's 5-gate composer — not 7B.2.)
+- The 13 lifecycle scopes: the 12 from BUILD_PLAN.md §622-625 verbatim plus the
+  override scope ``pack.override.approval_gate`` from ADR-012 §107-110 (added at
+  Sprint 7B.3 T8 alongside the 5-gate composer's override path). (The Sprint-7B.1
+  closeout L119 says "14 scopes" but enumerated 12 — known cite-from-memory typo in
+  the closeout per Sprint 7B.2 plan self-review Round 0.5.)
 - Closed-enum literal stability — any addition or rename is a wire-protocol break
   visible in this test's diff. ``PackRBACScope`` is the wire-protocol contract
   carried in every 403 ``scope_not_held`` denial body.
-- Role-group frozensets partition ``PACK_LIFECYCLE_SCOPES`` exactly — no scope
-  appears in two role groups, none are missing.
+- Role-group frozensets + ``OVERRIDE_SCOPES`` partition ``PACK_LIFECYCLE_SCOPES``
+  exactly — no scope appears in two groups, none are missing. The override-scope-
+  specific assertions live in ``test_scopes_override_extension.py``.
 """
 
 from typing import get_args
@@ -22,19 +23,22 @@ from cognic_agentos.portal.rbac.scopes import (
     AUTHOR_SCOPES,
     EXAMINER_SCOPES,
     OPERATOR_SCOPES,
+    OVERRIDE_SCOPES,
     PACK_LIFECYCLE_SCOPES,
     REVIEWER_SCOPES,
     PackRBACScope,
 )
 
 
-def test_pack_lifecycle_scopes_frozen_at_12_values() -> None:
-    """ADR-012 §39 + BUILD_PLAN §622-625 — exactly 12 lifecycle scopes in 7B.2."""
-    assert len(PACK_LIFECYCLE_SCOPES) == 12
+def test_pack_lifecycle_scopes_frozen_at_13_values() -> None:
+    """ADR-012 §39 + §107-110 — 12 BUILD_PLAN §622-625 lifecycle scopes plus the
+    Sprint-7B.3-T8 override scope = 13."""
+    assert len(PACK_LIFECYCLE_SCOPES) == 13
 
 
 def test_pack_lifecycle_scopes_match_build_plan_verbatim() -> None:
-    """Every scope in BUILD_PLAN §622-625 must appear in PACK_LIFECYCLE_SCOPES."""
+    """Every scope in BUILD_PLAN §622-625 plus the ADR-012 §107-110 override
+    scope must appear in PACK_LIFECYCLE_SCOPES."""
     expected = frozenset(
         {
             # Author surface (BUILD_PLAN §622)
@@ -56,6 +60,10 @@ def test_pack_lifecycle_scopes_match_build_plan_verbatim() -> None:
             # ``pack.read.metadata`` scope — inspection is examiner territory)
             "pack.audit.read",
             "pack.invocation.read",
+            # Override surface (ADR-012 §107-110) — Sprint 7B.3 T8; the
+            # privileged force-approve gate. Its own group (OVERRIDE_SCOPES),
+            # not held implicitly by any of the 4 role groups.
+            "pack.override.approval_gate",
         }
     )
     assert expected == PACK_LIFECYCLE_SCOPES
@@ -76,10 +84,11 @@ def test_pack_lifecycle_scopes_match_build_plan_verbatim() -> None:
         "pack.uninstall",
         "pack.audit.read",
         "pack.invocation.read",
+        "pack.override.approval_gate",
     ],
 )
 def test_pack_rbac_scope_literal_admits_value(value: str) -> None:
-    """Closed-enum membership pin — each of the 12 wire-protocol values must
+    """Closed-enum membership pin — each of the 13 wire-protocol values must
     appear in ``get_args(PackRBACScope)``. Any rename or removal breaks here."""
     assert value in get_args(PackRBACScope)
 
@@ -140,14 +149,22 @@ def test_examiner_scopes_match_build_plan_examiner_surface() -> None:
 
 
 def test_role_groups_partition_pack_lifecycle_scopes_exactly() -> None:
-    """Invariant — the four role-group frozensets partition
-    ``PACK_LIFECYCLE_SCOPES`` with no overlap and no gap. This catches the
-    refactor failure mode where a new scope is added to ``PACK_LIFECYCLE_SCOPES``
-    but forgotten in its role group (or vice versa)."""
-    union = AUTHOR_SCOPES | REVIEWER_SCOPES | OPERATOR_SCOPES | EXAMINER_SCOPES
+    """Invariant — the four role-group frozensets plus ``OVERRIDE_SCOPES``
+    partition ``PACK_LIFECYCLE_SCOPES`` with no overlap and no gap. This
+    catches the refactor failure mode where a new scope is added to
+    ``PACK_LIFECYCLE_SCOPES`` but forgotten in its group (or vice versa).
+    Sprint 7B.3 T8 extended the partition from 4 groups to 5 with the
+    addition of ``OVERRIDE_SCOPES`` (the ADR-012 §107-110 override scope)."""
+    union = AUTHOR_SCOPES | REVIEWER_SCOPES | OPERATOR_SCOPES | EXAMINER_SCOPES | OVERRIDE_SCOPES
     assert union == PACK_LIFECYCLE_SCOPES
-    # Pairwise disjointness — no scope in two role groups.
-    groups = [AUTHOR_SCOPES, REVIEWER_SCOPES, OPERATOR_SCOPES, EXAMINER_SCOPES]
+    # Pairwise disjointness — no scope in two groups.
+    groups = [
+        AUTHOR_SCOPES,
+        REVIEWER_SCOPES,
+        OPERATOR_SCOPES,
+        EXAMINER_SCOPES,
+        OVERRIDE_SCOPES,
+    ]
     for i, g1 in enumerate(groups):
         for g2 in groups[i + 1 :]:
-            assert g1.isdisjoint(g2), f"Role-group overlap detected: {g1 & g2}"
+            assert g1.isdisjoint(g2), f"Group overlap detected: {g1 & g2}"

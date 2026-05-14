@@ -91,6 +91,7 @@ Doctrine
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import uuid
 from collections.abc import Mapping
@@ -120,6 +121,7 @@ from cognic_agentos.core.decision_history import (
     _decision_history,
 )
 from cognic_agentos.db.types import chain_hash_column_type
+from cognic_agentos.packs.approval_types import ApprovalOverrideReason
 from cognic_agentos.packs.lifecycle import (
     _VALID_TRANSITIONS,
     LifecycleTransitionRefused,
@@ -380,6 +382,44 @@ class PackRecord(pydantic.BaseModel):
     last_actor: str
     created_at: datetime
     updated_at: datetime
+
+
+#: Sprint 7B.3 T8 — the ``pack.approval_override`` chain-event contract.
+#: ``decision_type`` matches ADR-012 §107 verbatim; the ISO control is
+#: ``A.6.2.4`` (governance overrides). The control is pinned DIRECTLY as
+#: a constant here — NOT derived via
+#: :func:`cognic_agentos.packs.lifecycle.iso_controls_for` — because an
+#: approval-gate override is NOT a lifecycle transition: there is no
+#: :data:`TransitionName` to map, and ``append_override_event`` uses the
+#: plain ``DecisionHistoryStore.append`` API (no precondition closure,
+#: no ``packs.state`` cache mutation). ``A.6.2.4`` is a member of the
+#: same ``packs.lifecycle._KNOWN_ISO_CONTROL_CODES`` set that
+#: ``iso_controls_for`` draws from, so the override path's tag is
+#: vocabulary-consistent with the lifecycle path's tags.
+_OVERRIDE_EVENT_DECISION_TYPE: Final[str] = "pack.approval_override"
+_OVERRIDE_EVENT_ISO_CONTROLS: Final[tuple[str, ...]] = ("A.6.2.4",)
+
+
+@dataclasses.dataclass(frozen=True)
+class OverrideEventAppendResult:
+    """Structured return value of :meth:`PackRecordStore.append_override_event`.
+
+    Carries the two values ``DecisionHistoryStore.append`` returns —
+    ``(record_id, chain_hash)`` — so the T9 route caller can correlate
+    the override event with the subsequent approve transition: it threads
+    ``str(result.record_id)`` into ``transition()``'s ``override_event_id``
+    keyword-only kwarg (the kwarg that landed in T2 Slice C). Field order
+    matches the underlying ``append`` tuple-return shape.
+
+    NOT a :class:`~cognic_agentos.core.decision_history.DecisionRecord`
+    (an earlier plan draft typed it that way — R2 P2 #3 fix): the live
+    ``DecisionRecord`` model has no persisted ``id`` field; persistence
+    identity is the ``(record_id, chain_hash)`` pair the store mints at
+    append time.
+    """
+
+    record_id: uuid.UUID
+    chain_hash: bytes
 
 
 class PackRecordStore:
@@ -897,6 +937,110 @@ class PackRecordStore:
             record_builder=_build_record,
             precondition=_precondition,
         )
+
+    async def append_override_event(
+        self,
+        *,
+        pack_id: uuid.UUID,
+        override_actor_subject: str,
+        override_reason: ApprovalOverrideReason,
+        gate_composition_snapshot: dict[str, Any],
+        request_id: str,
+    ) -> OverrideEventAppendResult:
+        """Emit a ``pack.approval_override`` chain event recording a
+        privileged reviewer's ADR-012 §107 force-approve authorisation.
+
+        Sprint 7B.3 T8. Unlike :meth:`transition` this uses the plain
+        ``DecisionHistoryStore.append`` API (``core/decision_history.py``)
+        — NOT ``append_with_precondition``. An approval-gate override is
+        NOT a lifecycle state-machine transition: there is no
+        ``validate_transition`` precondition to run and no ``packs.state``
+        cache to mutate. The chain-head ``SELECT FOR UPDATE`` inside
+        ``append`` provides canonical ordering only.
+
+        **Override-then-approve atomicity doctrine (R3 P2 #4 — dangling-
+        override audit design).** The ``pack.approval_override`` event is
+        emitted FIRST and records the reviewer's authorisation decision
+        as an immutable audit fact. The subsequent approve transition
+        (the T9 caller's separate ``transition("approve", ...,
+        override_event_id=str(result.record_id))`` call) is an
+        INDEPENDENT chain event whose success or failure does not
+        retroactively affect this one. If the approve transition later
+        refuses (state / race / tenant check), the chain CORRECTLY shows
+        the override event with ``outcome="authorized"`` and NO
+        ``pack.lifecycle.approved`` event — examiners read this as
+        "reviewer authorised override at T1; approve did not complete by
+        T2". The dangling-override pattern is INTENTIONAL: the override
+        authorisation itself is the fact being recorded. Atomic-across-
+        two-writes is not cleanly available without touching
+        ``core/decision_history.py`` (an AGENTS.md stop-rule module);
+        the plan deliberately chose the non-atomic two-event semantics.
+
+        Args:
+          pack_id: the pack the override authorises a force-approve for;
+            persisted as ``payload["pack_id"] = str(pack_id)`` (mirroring
+            ``transition()``'s ``_build_record`` contract). ``append_override_event``
+            does NOT read or mutate the ``packs`` row (an override is not
+            a state transition) — but the chain row MUST be pack-linkable:
+            under the dangling-override audit design the surviving override
+            row is the only record of the authorisation, and per-pack
+            history readers filter on ``payload["pack_id"]``.
+          override_actor_subject: the privileged reviewer's subject;
+            persisted as ``payload["actor_subject"]``.
+          override_reason: the categorised :data:`ApprovalOverrideReason`
+            from the request body; persisted verbatim as
+            ``payload["override_reason"]`` (closed-enum value — no synonym
+            substitution).
+          gate_composition_snapshot: the canonical-safe ``dict`` the T9
+            caller builds via
+            :func:`cognic_agentos.packs.approval_gates.composition_snapshot`
+            — the full gate composition AT override time so examiners can
+            reconstruct WHICH gates were red / blocking. Storage stays a
+            thin dict passthrough: it performs NO vocabulary or shape
+            validation (same doctrine as ``transition()``'s
+            ``payload_conformance`` kwarg). A non-canonical-safe dict
+            (tuples, sets, custom types) fails loud on the
+            ``core.canonical.canonical_bytes`` gate inside ``append``.
+          request_id: the caller-minted request id for the chain row's
+            ``request_id`` column (the T9 route handler mints it; mirrors
+            every other chain-writing seam — ``transition()`` takes the
+            same kwarg).
+
+        Returns:
+          :class:`OverrideEventAppendResult` carrying the
+          ``(record_id, chain_hash)`` pair from the underlying ``append``.
+
+        Chain row shape:
+          - ``decision_type`` = ``pack.approval_override``
+          - ``iso_controls`` = ``("A.6.2.4",)`` (governance overrides)
+          - ``payload`` = the explicit 5-key shape
+            ``{pack_id, actor_subject, override_reason,
+            gate_composition_snapshot, outcome}`` with
+            ``outcome == "authorized"`` — a NEW closed-enum single-value
+            Literal at 7B.3 (forward-compatible: a future sprint may
+            extend it with ``completed`` / ``approve_refused_post_override``
+            / ``superseded`` via a second event correlation). ``pack_id``
+            is ``str(pack_id)`` (R14 reviewer P2 — the override row MUST
+            be pack-linkable). The ``DecisionRecord.actor_id`` field is
+            left ``None`` — the actor is carried in
+            ``payload["actor_subject"]``, so the canonical-form actor-id
+            merge does not add a 6th key.
+        """
+        payload: dict[str, Any] = {
+            "pack_id": str(pack_id),
+            "actor_subject": override_actor_subject,
+            "override_reason": override_reason,
+            "gate_composition_snapshot": gate_composition_snapshot,
+            "outcome": "authorized",
+        }
+        record = DecisionRecord(
+            decision_type=_OVERRIDE_EVENT_DECISION_TYPE,
+            request_id=request_id,
+            payload=payload,
+            iso_controls=_OVERRIDE_EVENT_ISO_CONTROLS,
+        )
+        record_id, chain_hash = await self._history.append(record)
+        return OverrideEventAppendResult(record_id=record_id, chain_hash=chain_hash)
 
     async def load(self, pack_id: uuid.UUID) -> PackRecord | None:
         """Return the pack record for ``pack_id`` or ``None`` if none

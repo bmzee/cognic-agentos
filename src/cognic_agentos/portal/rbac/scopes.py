@@ -1,7 +1,7 @@
 """Sprint 7B.2 T2 — closed-enum RBAC scope vocabulary for the bank-pack lifecycle.
 
-Per ADR-012 §39 + BUILD_PLAN §622-625 the lifecycle portal API ships with
-exactly **12** scopes, partitioned across four role groups:
+Per ADR-012 §39 + BUILD_PLAN §622-625 + ADR-012 §107-110 the lifecycle
+portal API ships with **13** scopes, partitioned across five groups:
 
 - Author surface (BUILD_PLAN §622): ``pack.submit``, ``pack.withdraw``
 - Reviewer surface (BUILD_PLAN §623): ``pack.review.claim``,
@@ -10,27 +10,31 @@ exactly **12** scopes, partitioned across four role groups:
   ``pack.disable``, ``pack.revoke``, ``pack.uninstall``
 - Examiner / inspection surface (BUILD_PLAN §625 + ADR-012 §75):
   ``pack.audit.read``, ``pack.invocation.read``
+- Override surface (ADR-012 §107-110): ``pack.override.approval_gate`` —
+  the privileged force-approve gate, added at Sprint 7B.3 T8 alongside
+  the 5-gate composer's override path. Its own group
+  (:data:`OVERRIDE_SCOPES`), not held implicitly by any of the four
+  role groups.
 
 :data:`PackRBACScope` is the **wire-protocol contract** — every 403
 ``scope_not_held`` denial body carries the missing scope as a closed-enum
 string. Any addition, rename, or removal is a wire-protocol break and
 shows up in :file:`tests/unit/portal/rbac/test_scopes.py`'s diff (the
-parametrised literal-pin tests + the role-group partition invariant).
+parametrised literal-pin tests + the 5-group partition invariant); the
+override-scope-specific assertions live in
+:file:`tests/unit/portal/rbac/test_scopes_override_extension.py`.
 
-Sprint 7B.3 adds the override scope ``pack.override.approval_gate`` from
-ADR-012 §107-110 alongside the 5-gate composer. It is intentionally NOT
-present in 7B.2.
-
-The Sprint-7B.1 closeout L119 says "14 scopes" but enumerates 12 — a
+The Sprint-7B.1 closeout L119 says "14 scopes" but enumerated 12 — a
 known cite-from-memory typo in the closeout per Sprint 7B.2 plan
-self-review Round 0.5. BUILD_PLAN §622-625 is the source of truth at 12.
+self-review Round 0.5. BUILD_PLAN §622-625 + ADR-012 §107-110 are the
+source of truth at 13.
 """
 
 from __future__ import annotations
 
 from typing import Literal
 
-#: Closed-enum literal of the 12 bank-pack lifecycle scopes carried in
+#: Closed-enum literal of the 13 bank-pack lifecycle scopes carried in
 #: the 403 ``scope_not_held`` denial body. ANY change here is a
 #: wire-protocol break — pinned by the parametrised literal-membership
 #: tests in :file:`tests/unit/portal/rbac/test_scopes.py`.
@@ -51,6 +55,8 @@ PackRBACScope = Literal[
     "pack.uninstall",
     "pack.audit.read",
     "pack.invocation.read",
+    # Sprint 7B.3 T8 — ADR-012 §107-110 override scope (the 13th).
+    "pack.override.approval_gate",
 ]
 
 #: Set type carried on :class:`~cognic_agentos.portal.rbac.actor.Actor`
@@ -60,8 +66,8 @@ PackRBACScope = Literal[
 #: vocab scope strings are caught by mypy at the call site.
 ScopeSet = frozenset[PackRBACScope]
 
-#: All 12 lifecycle scopes as a frozenset — wire-protocol surface for
-#: the validator + the role-group partition invariant test. Used by
+#: All 13 lifecycle scopes as a frozenset — wire-protocol surface for
+#: the validator + the 5-group partition invariant test. Used by
 #: bank-overlay binders to validate the actor's effective scope set
 #: against the kernel's closed-enum vocabulary before minting an
 #: :class:`Actor` (catches typos in the overlay's scope-claim mapping
@@ -80,6 +86,7 @@ PACK_LIFECYCLE_SCOPES: frozenset[PackRBACScope] = frozenset(
         "pack.uninstall",
         "pack.audit.read",
         "pack.invocation.read",
+        "pack.override.approval_gate",
     }
 )
 
@@ -123,5 +130,23 @@ EXAMINER_SCOPES: frozenset[PackRBACScope] = frozenset(
     {
         "pack.audit.read",
         "pack.invocation.read",
+    }
+)
+
+#: ADR-012 §107-110 — override-surface scope group. Sprint 7B.3 T8.
+#: A single-value group, intentionally distinct from the four role-group
+#: frozensets above: ``pack.override.approval_gate`` is the privileged
+#: force-approve gate and is NOT held implicitly by any author /
+#: reviewer / operator / examiner role — a bank-overlay binder must
+#: grant it explicitly. The 5-way partition
+#: ``AUTHOR | REVIEWER | OPERATOR | EXAMINER | OVERRIDE ==
+#: PACK_LIFECYCLE_SCOPES`` is pinned by the partition invariant test in
+#: :file:`tests/unit/portal/rbac/test_scopes.py`. The T9 approve
+#: endpoint's override path gates on this scope; the composer-side
+#: :func:`cognic_agentos.packs.approval_gates.evaluate_override_decision`
+#: consumes the held/not-held boolean.
+OVERRIDE_SCOPES: frozenset[PackRBACScope] = frozenset(
+    {
+        "pack.override.approval_gate",
     }
 )

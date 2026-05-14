@@ -483,9 +483,11 @@ T9 Slice 4).  T12 promotes the remaining 8:
 
   * Portal RBAC primitives (6 modules) — closed-enum vocabularies
     are wire-protocol-public per ADR-012 §40 + ADR-008:
-    - ``portal/rbac/scopes.py`` — 12-value ``PackRBACScope`` Literal
-      + 4 role-group frozensets whose union equals
-      ``PACK_LIFECYCLE_SCOPES`` (partition invariant).
+    - ``portal/rbac/scopes.py`` — 13-value ``PackRBACScope`` Literal
+      (12 BUILD_PLAN §622-625 lifecycle scopes + the Sprint-7B.3-T8
+      ADR-012 §107-110 override scope ``pack.override.approval_gate``)
+      + 4 role-group frozensets plus ``OVERRIDE_SCOPES`` whose 5-way
+      union equals ``PACK_LIFECYCLE_SCOPES`` (partition invariant).
     - ``portal/rbac/actor.py`` — frozen ``Actor`` Pydantic model +
       2-value ``ActorType`` Literal.  Identity boundary at the
       portal admission seam + production-grade fail-loud default
@@ -847,11 +849,13 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     # floor. The 8 T12 promotions are:
     #
     #   * RBAC primitives (6):
-    #     - ``portal/rbac/scopes.py`` — closed-enum 12-value
+    #     - ``portal/rbac/scopes.py`` — closed-enum 13-value
     #       ``PackRBACScope`` Literal IS the wire-protocol contract
     #       for every 403 RBAC denial in the portal pack API; the
-    #       4 role-group frozenset partition pins which role groups
-    #       perform which lifecycle actions.
+    #       5-group frozenset partition (4 role groups +
+    #       ``OVERRIDE_SCOPES``) pins which groups perform which
+    #       lifecycle actions. Sprint 7B.3 T8 added the 13th value,
+    #       the ADR-012 §107-110 override scope.
     #     - ``portal/rbac/actor.py`` — frozen ``Actor`` Pydantic
     #       model + closed-enum 2-value ``ActorType`` Literal +
     #       production-grade fail-loud default. The identity
@@ -1014,22 +1018,27 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     # pure-functional ``compose_approval_gates`` decides whether a
     # plugin pack clears the 5 orthogonal gates (signature / evaluation
     # / adversarial / owasp_conformance / reviewer_acknowledgement). The
-    # module owns 9 wire-protocol-public closed-enum Literals (5 per-gate
-    # red-reason vocabularies + the consolidated 22-value
-    # ``ApprovalGateRedReason`` union + ``ApprovalGateName`` +
-    # ``ApprovalGateOutcome`` + the binary ``SignatureGateOutcome``
-    # which makes the illegal ``evidence_not_attached`` signature state
-    # unrepresentable per ADR-012 §110) that render into the 412
+    # module owns 10 wire-protocol-public closed-enum Literals — the T7
+    # composer's 9 (5 per-gate red-reason vocabularies + the consolidated
+    # 22-value ``ApprovalGateRedReason`` union + ``ApprovalGateName`` +
+    # ``ApprovalGateOutcome`` + the binary ``SignatureGateOutcome`` which
+    # makes the illegal ``evidence_not_attached`` signature state
+    # unrepresentable per ADR-012 §110) plus the T8 override path's
+    # ``OverrideRefusalReason`` (4-value — the 412 refusal body's
+    # override-path branch) — that render into the 412
     # ``ApproveRefusalResponse`` body, the ``_NON_OVERRIDABLE_GATES``
     # ADR-012 §110 policy constant (cosign signature is the single
-    # non-overridable gate), and the gate-5 derivation logic (the one
-    # gate the composer itself decides). Drift in any Literal, the
-    # policy set, or the derivation is wire-protocol-public / governance-
-    # doctrine regression. On the durable gate per the Sprint-7B.3
-    # per-task precedent (T3-T6 each added their own CC module);
-    # promoted here at T7 rather than deferred to T11. Pure-functional
-    # (no I/O); the route handler at ``portal/api/packs/review_routes.py``
-    # (T9) owns the wiring + pre-computes gates 1-4.
+    # non-overridable gate), the gate-5 derivation logic (the one gate
+    # the composer itself decides), and the T8 override seam
+    # (``evaluate_override_decision`` + the canonical-safe
+    # ``composition_snapshot`` serialiser). Drift in any Literal, the
+    # policy set, the derivation, or the override helper is wire-
+    # protocol-public / governance-doctrine regression. On the durable
+    # gate per the Sprint-7B.3 per-task precedent (T3-T6 each added their
+    # own CC module); promoted here at T7 rather than deferred to T11.
+    # Pure-functional (no I/O); the route handler at
+    # ``portal/api/packs/review_routes.py`` (T9) owns the wiring +
+    # pre-computes gates 1-4.
     ("src/cognic_agentos/packs/approval_gates.py", 0.95, 0.90),
 )
 

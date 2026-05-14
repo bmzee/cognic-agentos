@@ -1,5 +1,5 @@
-"""Sprint 7B.3 T7 — :func:`compose_approval_gates` 5-gate composer tests
-(CRITICAL CONTROLS).
+"""Sprint 7B.3 T7 + T8 — :func:`compose_approval_gates` 5-gate composer
++ override-path helper tests (CRITICAL CONTROLS).
 
 Per the plan-of-record
 ``docs/superpowers/plans/2026-05-13-sprint-7b3-reviewer-evidence-panels-5-gate.md``
@@ -8,13 +8,19 @@ ADR-012 §41's ``under_review → approved`` transition. It is a pure
 function — no I/O, no DB, no time, no random — that assembles four
 PRE-COMPUTED gate inputs (built by the T9 route handler) plus the
 reviewer-acknowledgement request body into a frozen
-:class:`ApprovalGateComposition`.
+:class:`ApprovalGateComposition`. T8 (§398-436) adds the override path:
+``evaluate_override_decision`` + the canonical-safe ``composition_snapshot``
+serialiser.
+
+The module owns **10** wire-protocol-public closed-enum Literals — the
+9 T7 composer Literals (pinned by Slice A) + the T8
+``OverrideRefusalReason`` (pinned by Slice J).
 
 Test slices:
 
-- **Slice A** — closed-enum vocab drift detectors (9 Literals;
-  exact-set + count for each). The vocab IS the wire-protocol contract
-  for the 412 ``ApproveRefusalResponse`` body.
+- **Slice A** — closed-enum vocab drift detectors for the 9 T7 composer
+  Literals (exact-set + count for each). The vocab IS the wire-protocol
+  contract for the 412 ``ApproveRefusalResponse`` body.
 - **Slice B** — frozen dataclass shape drift detectors (4 input
   dataclasses + 2 output dataclasses).
 - **Slice C** — per-gate outcome pass-through for the 4 pre-computed
@@ -37,6 +43,15 @@ Test slices:
   module MAY import portal; the domain composer MUST NOT — R11).
 - **Slice I** — ``_NON_OVERRIDABLE_GATES`` pinned to
   ``frozenset({"signature"})`` per ADR-012 §110 + R10 LOCK Flag #4.
+- **Slice J** (T8) — ``evaluate_override_decision``: the
+  ``OverrideRefusalReason`` 4-value vocab drift detector + the 4 refusal
+  branches + the allowed path + refusal precedence
+  (``composition_already_all_green`` → ``non_overridable_red_gate`` →
+  ``override_scope_not_held`` → ``override_reason_missing``) + the R12
+  blocking-not-red ``evidence_not_attached``-overrideable case.
+- **Slice K** (T8) — ``composition_snapshot``: the canonical-safe
+  serialiser (``gates`` → list, ``non_overridable_red_gates`` → sorted
+  list) + the load-bearing ``canonical_bytes``-survival test.
 """
 
 from __future__ import annotations
@@ -65,6 +80,8 @@ from cognic_agentos.packs.approval_gates import (
     ApprovalGateResult,
     EvaluationGateInput,
     EvaluationRedReason,
+    OverrideDecision,
+    OverrideRefusalReason,
     OwaspGateInput,
     OwaspRedReason,
     ReviewerAckRedReason,
@@ -72,6 +89,8 @@ from cognic_agentos.packs.approval_gates import (
     SignatureGateOutcome,
     SignatureRedReason,
     compose_approval_gates,
+    composition_snapshot,
+    evaluate_override_decision,
 )
 
 # ---------------------------------------------------------------------------
@@ -135,10 +154,12 @@ def _flatten_literal_union(union: object) -> frozenset[str]:
 
 
 class TestSprint7B3T7SliceAVocabDrift:
-    """The 9 closed-enum Literals ARE the wire-protocol contract for the
-    412 refusal body. Drift in either direction is a wire-protocol-public
-    regression — pinned exact-set + count, independently, for crisp
-    drift diagnosis."""
+    """The 9 T7 composer closed-enum Literals ARE the wire-protocol
+    contract for the 412 refusal body. Drift in either direction is a
+    wire-protocol-public regression — pinned exact-set + count,
+    independently, for crisp drift diagnosis. (The module's 10th
+    wire-protocol-public Literal — the T8 ``OverrideRefusalReason`` — is
+    pinned by Slice J, not here.)"""
 
     def test_approval_gate_name_exact_set(self) -> None:
         assert frozenset(typing.get_args(ApprovalGateName)) == frozenset(
@@ -801,3 +822,253 @@ class TestSprint7B3T7SliceINonOverridablePolicy:
 
     def test_non_overridable_gates_is_a_subset_of_gate_names(self) -> None:
         assert frozenset(typing.get_args(ApprovalGateName)) >= NON_OVERRIDABLE_GATES
+
+
+# ---------------------------------------------------------------------------
+# Slice J — T8 evaluate_override_decision (the override-aware composer helper)
+# ---------------------------------------------------------------------------
+
+# A blocking-but-overrideable composition: gate 2 (evaluation) is
+# ``evidence_not_attached`` — non-green/blocking, zero ``red`` gates,
+# ``non_overridable_red_gates`` empty. This is the EXPECTED pre-Sprint-11
+# state for gates 2/3 (R12 blocking-not-red doctrine).
+_EVIDENCE_NOT_ATTACHED_EVALUATION = EvaluationGateInput(
+    outcome="evidence_not_attached",
+    red_reason="evaluation_evidence_not_attached",
+    pass_rate=None,
+    threshold=None,
+)
+_EVIDENCE_NOT_ATTACHED_ADVERSARIAL = AdversarialGateInput(
+    outcome="evidence_not_attached",
+    red_reason="adversarial_evidence_not_attached",
+    pass_rate=None,
+    high_severity_failures=0,
+)
+# A red-signature composition: gate 1 is ``red`` → ``signature`` lands in
+# ``non_overridable_red_gates`` → override path MUST refuse (ADR-012 §110).
+_RED_SIGNATURE = SignatureGateInput(
+    outcome="red",
+    red_reason="signature_cosign_verify_failed",
+    signature_digest=None,
+)
+
+
+class TestSprint7B3T8SliceJEvaluateOverrideDecision:
+    """``evaluate_override_decision`` — the pure-functional override-aware
+    helper consumed by the T9 approve endpoint's override path. Refusal
+    precedence (most-fundamental blocker first):
+    ``composition_already_all_green`` → ``non_overridable_red_gate`` →
+    ``override_scope_not_held`` → ``override_reason_missing``."""
+
+    def test_override_refusal_reason_exact_set(self) -> None:
+        """Closed-enum 4-value vocabulary — wire-protocol-public for the
+        412 refusal body's override-path branch."""
+        assert frozenset(typing.get_args(OverrideRefusalReason)) == frozenset(
+            {
+                "composition_already_all_green",
+                "override_scope_not_held",
+                "override_reason_missing",
+                "non_overridable_red_gate",
+            }
+        )
+
+    def test_override_refusal_reason_count_is_four(self) -> None:
+        assert len(typing.get_args(OverrideRefusalReason)) == 4
+
+    def test_blocking_composition_with_scope_and_reason_is_allowed(self) -> None:
+        """Not-all-green + no non-overridable red + scope held + reason
+        given → override allowed."""
+        comp = _compose(evaluation=_EVIDENCE_NOT_ATTACHED_EVALUATION)
+        decision = evaluate_override_decision(
+            composition=comp,
+            override_scope_held=True,
+            override_reason="security_exception",
+        )
+        assert decision == OverrideDecision(allowed=True, refusal_reason=None)
+
+    def test_evidence_not_attached_only_composition_is_overrideable(self) -> None:
+        """R12 blocking-not-red — a composition whose ONLY non-green gates
+        are ``evidence_not_attached`` (zero ``red``, ``non_overridable_red_gates``
+        empty) IS overrideable; it is not stranded with no override path."""
+        comp = _compose(
+            evaluation=_EVIDENCE_NOT_ATTACHED_EVALUATION,
+            adversarial=_EVIDENCE_NOT_ATTACHED_ADVERSARIAL,
+        )
+        assert comp.all_green is False
+        assert comp.non_overridable_red_gates == frozenset()
+        decision = evaluate_override_decision(
+            composition=comp,
+            override_scope_held=True,
+            override_reason="prerelease_validation",
+        )
+        assert decision.allowed is True
+        assert decision.refusal_reason is None
+
+    def test_all_green_composition_refused_already_all_green(self) -> None:
+        """An all-green composition has nothing to override — refused even
+        with scope + reason."""
+        decision = evaluate_override_decision(
+            composition=_compose(),
+            override_scope_held=True,
+            override_reason="other",
+        )
+        assert decision == OverrideDecision(
+            allowed=False, refusal_reason="composition_already_all_green"
+        )
+
+    def test_red_signature_refused_non_overridable(self) -> None:
+        """A red signature gate populates ``non_overridable_red_gates`` —
+        ADR-012 §110 makes it absolutely non-overridable; refused even
+        with scope + reason."""
+        comp = _compose(signature=_RED_SIGNATURE)
+        assert comp.non_overridable_red_gates == frozenset({"signature"})
+        decision = evaluate_override_decision(
+            composition=comp,
+            override_scope_held=True,
+            override_reason="security_exception",
+        )
+        assert decision == OverrideDecision(
+            allowed=False, refusal_reason="non_overridable_red_gate"
+        )
+
+    def test_blocking_composition_without_scope_refused_scope_not_held(self) -> None:
+        comp = _compose(evaluation=_EVIDENCE_NOT_ATTACHED_EVALUATION)
+        decision = evaluate_override_decision(
+            composition=comp,
+            override_scope_held=False,
+            override_reason="security_exception",
+        )
+        assert decision == OverrideDecision(allowed=False, refusal_reason="override_scope_not_held")
+
+    def test_blocking_composition_without_reason_refused_reason_missing(self) -> None:
+        comp = _compose(evaluation=_EVIDENCE_NOT_ATTACHED_EVALUATION)
+        decision = evaluate_override_decision(
+            composition=comp,
+            override_scope_held=True,
+            override_reason=None,
+        )
+        assert decision == OverrideDecision(allowed=False, refusal_reason="override_reason_missing")
+
+    def test_precedence_all_green_beats_scope_not_held(self) -> None:
+        """An all-green composition is refused ``composition_already_all_green``
+        even when scope is ALSO not held — the no-op precondition is the
+        most fundamental blocker."""
+        decision = evaluate_override_decision(
+            composition=_compose(),
+            override_scope_held=False,
+            override_reason=None,
+        )
+        assert decision.refusal_reason == "composition_already_all_green"
+
+    def test_precedence_non_overridable_beats_scope_not_held(self) -> None:
+        """A red signature is refused ``non_overridable_red_gate`` even
+        when scope is ALSO not held — the ADR-012 §110 absolute stop wins
+        over the authority check (no override is possible here, period)."""
+        decision = evaluate_override_decision(
+            composition=_compose(signature=_RED_SIGNATURE),
+            override_scope_held=False,
+            override_reason=None,
+        )
+        assert decision.refusal_reason == "non_overridable_red_gate"
+
+    def test_precedence_scope_not_held_beats_reason_missing(self) -> None:
+        """An overrideable composition with neither scope nor reason is
+        refused ``override_scope_not_held`` — authority is checked before
+        the categorised-reason requirement."""
+        comp = _compose(evaluation=_EVIDENCE_NOT_ATTACHED_EVALUATION)
+        decision = evaluate_override_decision(
+            composition=comp,
+            override_scope_held=False,
+            override_reason=None,
+        )
+        assert decision.refusal_reason == "override_scope_not_held"
+
+    def test_override_decision_is_frozen(self) -> None:
+        decision = evaluate_override_decision(
+            composition=_compose(),
+            override_scope_held=True,
+            override_reason="other",
+        )
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            decision.allowed = True  # type: ignore[misc]
+
+    def test_evaluate_override_decision_is_deterministic(self) -> None:
+        comp = _compose(evaluation=_EVIDENCE_NOT_ATTACHED_EVALUATION)
+        first = evaluate_override_decision(
+            composition=comp, override_scope_held=True, override_reason="security_exception"
+        )
+        second = evaluate_override_decision(
+            composition=comp, override_scope_held=True, override_reason="security_exception"
+        )
+        assert first == second
+
+
+# ---------------------------------------------------------------------------
+# Slice K — T8 composition_snapshot (canonical-safe serialiser)
+# ---------------------------------------------------------------------------
+
+
+class TestSprint7B3T8SliceKCompositionSnapshot:
+    """``composition_snapshot`` converts the frozen ``ApprovalGateComposition``
+    (a ``@dataclasses.dataclass`` with a ``tuple`` ``gates`` field + a
+    ``frozenset`` ``non_overridable_red_gates`` field) into a canonical-safe
+    ``dict`` — ``core.canonical.canonical_bytes`` REJECTS tuples and has no
+    rule for frozensets, so a raw ``dataclasses.asdict`` would fail the
+    override-event chain insert. Mirrors the load-bearing tuple→list fix at
+    ``packs/conformance/runner.py``."""
+
+    def test_snapshot_gates_is_list_not_tuple(self) -> None:
+        snap = composition_snapshot(_compose())
+        assert isinstance(snap["gates"], list)
+        assert not isinstance(snap["gates"], tuple)
+
+    def test_snapshot_non_overridable_red_gates_is_sorted_list(self) -> None:
+        snap = composition_snapshot(_compose(signature=_RED_SIGNATURE))
+        value = snap["non_overridable_red_gates"]
+        assert isinstance(value, list)
+        assert value == sorted(value)
+        assert value == ["signature"]
+
+    def test_snapshot_empty_non_overridable_red_gates_is_empty_list(self) -> None:
+        snap = composition_snapshot(_compose())
+        assert snap["non_overridable_red_gates"] == []
+
+    def test_snapshot_survives_canonical_bytes(self) -> None:
+        """THE load-bearing test — the snapshot of a realistic composition
+        (red signature + evidence_not_attached gates) must pass through
+        ``canonical_bytes`` without the tuple/frozenset ``TypeError`` that
+        a raw ``dataclasses.asdict`` would trigger."""
+        from cognic_agentos.core.canonical import canonical_bytes
+
+        comp = _compose(
+            signature=_RED_SIGNATURE,
+            adversarial=_EVIDENCE_NOT_ATTACHED_ADVERSARIAL,
+        )
+        snap = composition_snapshot(comp)
+        # Wrapped in a dict mirroring the override-event chain payload.
+        canonical_bytes({"gate_composition_snapshot": snap})
+
+    def test_snapshot_preserves_gate_order(self) -> None:
+        snap = composition_snapshot(_compose())
+        assert [g["gate"] for g in snap["gates"]] == list(GATE_ORDER)
+
+    def test_snapshot_round_trips_every_gate_field(self) -> None:
+        comp = _compose(signature=_RED_SIGNATURE)
+        snap = composition_snapshot(comp)
+        for result, gate_dict in zip(comp.gates, snap["gates"], strict=True):
+            assert gate_dict == {
+                "gate": result.gate,
+                "outcome": result.outcome,
+                "red_reason": result.red_reason,
+                "evidence_pointer": result.evidence_pointer,
+            }
+
+    def test_snapshot_includes_top_level_fields(self) -> None:
+        comp = _compose(pack_kind="tool")
+        snap = composition_snapshot(comp)
+        assert snap["pack_kind"] == "tool"
+        assert snap["all_green"] is True
+
+    def test_snapshot_is_deterministic(self) -> None:
+        comp = _compose(signature=_RED_SIGNATURE)
+        assert composition_snapshot(comp) == composition_snapshot(comp)
