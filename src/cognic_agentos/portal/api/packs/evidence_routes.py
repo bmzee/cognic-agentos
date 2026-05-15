@@ -113,6 +113,7 @@ from cognic_agentos.packs.evidence.data_governance import project_data_governanc
 from cognic_agentos.packs.evidence.risk_tier import project_risk_tier_panel
 from cognic_agentos.packs.evidence.supply_chain import project_supply_chain_panel
 from cognic_agentos.packs.storage import PackRecord, PackRecordStore
+from cognic_agentos.portal.api.packs.author_routes import _mint_request_id
 from cognic_agentos.portal.api.packs.dto import (
     ConformanceMatrixPanel,
     DataGovernancePanel,
@@ -146,6 +147,18 @@ _MANIFEST_EVIDENCE_NOT_PERSISTED_REASON: Final[Literal["manifest_evidence_not_pe
     "manifest_evidence_not_persisted"
 )
 _PACK_KIND_MISMATCH_REASON: Final[Literal["pack_kind_mismatch"]] = "pack_kind_mismatch"
+
+
+#: Sprint 7B.3 T10 (R17 P2 #3) — request-id minter prefix for the
+#: ``pack.evidence_read.<panel_name>`` audit chain rows. ``_mint_request_id``
+#: is cross-imported from ``author_routes.py`` (the same shared minter
+#: ``operator_routes.py`` uses); the module-foot ``assert`` below pins
+#: ``len(prefix) + 32 (uuid4().hex) <= _REQUEST_ID_MAX_LEN`` so a future
+#: prefix rename cannot silently overflow the ``decision_history.request_id``
+#: ``String(64)`` column cap. ``"pack-evidence-read-"`` = 19 chars; + 32
+#: hex = 51 ≤ 64.
+_PACK_EVIDENCE_READ_REQUEST_ID_PREFIX: Final[str] = "pack-evidence-read-"
+_REQUEST_ID_MAX_LEN: Final[int] = 64
 
 
 def build_evidence_routes(*, store: PackRecordStore) -> APIRouter:
@@ -268,7 +281,22 @@ def build_evidence_routes(*, store: PackRecordStore) -> APIRouter:
             record_kind=record.kind,
             tenant_policy=None,  # plan §304 — tenant-policy substrate is post-7B
         )
-        return DataGovernancePanel.model_validate(panel_data)
+        # T10 (plan §554-557 + R18 P2) — build + validate the response DTO
+        # FIRST, THEN emit the panel-access audit event, THEN return the
+        # already-validated DTO. The audit event is emitted ONLY after BOTH
+        # the projector AND DTO validation succeed, so a 200 response
+        # correlates 1:1 with exactly one pack.evidence_read.<panel_name>
+        # chain row — any 4xx refusal above OR a 500 from a projector / DTO
+        # contract drift returns BEFORE the emit (the read did not happen).
+        panel = DataGovernancePanel.model_validate(panel_data)
+        await store.append_evidence_read_event(
+            pack_id=record.id,
+            actor_subject=_actor.subject,
+            panel_name="data_governance",
+            tenant_id=_actor.tenant_id,
+            request_id=_mint_request_id(_PACK_EVIDENCE_READ_REQUEST_ID_PREFIX),
+        )
+        return panel
 
     @router.get(
         "/{pack_id}/evidence/risk-tier",
@@ -377,7 +405,18 @@ def build_evidence_routes(*, store: PackRecordStore) -> APIRouter:
             manifest=manifest,
             record_kind=record.kind,
         )
-        return RiskTierPanel.model_validate(panel_data)
+        # T10 (plan §554-557 + R18 P2) — validate DTO, THEN emit, THEN
+        # return (see the data-governance handler for the full
+        # 1:1-correlation rationale).
+        panel = RiskTierPanel.model_validate(panel_data)
+        await store.append_evidence_read_event(
+            pack_id=record.id,
+            actor_subject=_actor.subject,
+            panel_name="risk_tier",
+            tenant_id=_actor.tenant_id,
+            request_id=_mint_request_id(_PACK_EVIDENCE_READ_REQUEST_ID_PREFIX),
+        )
+        return panel
 
     @router.get(
         "/{pack_id}/evidence/supply-chain",
@@ -497,7 +536,18 @@ def build_evidence_routes(*, store: PackRecordStore) -> APIRouter:
             record_kind=record.kind,
             submit_created_at=submit_created_at,
         )
-        return SupplyChainPanel.model_validate(panel_data)
+        # T10 (plan §554-557 + R18 P2) — validate DTO, THEN emit, THEN
+        # return (see the data-governance handler for the full
+        # 1:1-correlation rationale).
+        panel = SupplyChainPanel.model_validate(panel_data)
+        await store.append_evidence_read_event(
+            pack_id=record.id,
+            actor_subject=_actor.subject,
+            panel_name="supply_chain",
+            tenant_id=_actor.tenant_id,
+            request_id=_mint_request_id(_PACK_EVIDENCE_READ_REQUEST_ID_PREFIX),
+        )
+        return panel
 
     @router.get(
         "/{pack_id}/evidence/conformance",
@@ -623,9 +673,34 @@ def build_evidence_routes(*, store: PackRecordStore) -> APIRouter:
             record_kind=record.kind,
             conformance_payload=conformance_payload,
         )
-        return ConformanceMatrixPanel.model_validate(panel_data)
+        # T10 (plan §554-557 + R18 P2) — validate DTO, THEN emit, THEN
+        # return (see the data-governance handler for the full
+        # 1:1-correlation rationale). NOTE the panel_name is
+        # "conformance_matrix" (the EvidencePanelName closed-enum value),
+        # NOT "conformance" (the route-path segment).
+        panel = ConformanceMatrixPanel.model_validate(panel_data)
+        await store.append_evidence_read_event(
+            pack_id=record.id,
+            actor_subject=_actor.subject,
+            panel_name="conformance_matrix",
+            tenant_id=_actor.tenant_id,
+            request_id=_mint_request_id(_PACK_EVIDENCE_READ_REQUEST_ID_PREFIX),
+        )
+        return panel
 
     return router
+
+
+# Build-time invariant (R17 P2 #3) — mirrors the module-foot asserts at
+# ``author_routes.py`` + ``operator_routes.py``. Pins the request-id
+# prefix length so a future rename cannot silently overflow the
+# ``decision_history.request_id`` ``String(64)`` column cap.
+assert len(_PACK_EVIDENCE_READ_REQUEST_ID_PREFIX) + 32 <= _REQUEST_ID_MAX_LEN, (
+    f"request_id prefix {_PACK_EVIDENCE_READ_REQUEST_ID_PREFIX!r} "
+    f"({len(_PACK_EVIDENCE_READ_REQUEST_ID_PREFIX)} chars) + uuid4().hex (32 chars) "
+    f"= {len(_PACK_EVIDENCE_READ_REQUEST_ID_PREFIX) + 32} > {_REQUEST_ID_MAX_LEN}; "
+    "would overflow decision_history.request_id column cap"
+)
 
 
 __all__ = ["EvidencePanelRefusalReason", "build_evidence_routes"]

@@ -360,7 +360,7 @@ async def _inject_submit_evidence(
     verify the chain hash, so a direct payload mutation is sufficient
     for the test and stays a clearly-separated test-only path.
     """
-    engine = store._engine  # noqa: SLF001 - test-only direct chain read/write
+    engine = store._engine  # test-only direct chain read/write
     async with engine.begin() as conn:
         rows = (
             await conn.execute(

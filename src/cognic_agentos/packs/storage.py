@@ -400,6 +400,40 @@ _OVERRIDE_EVENT_DECISION_TYPE: Final[str] = "pack.approval_override"
 _OVERRIDE_EVENT_ISO_CONTROLS: Final[tuple[str, ...]] = ("A.6.2.4",)
 
 
+#: Sprint 7B.3 T10 — the closed-enum 4-value evidence-panel vocabulary.
+#: ``EvidencePanelName`` IS the wire-protocol contract for BOTH the
+#: ``pack.evidence_read.<panel_name>`` chain-event ``decision_type``
+#: namespace (4 possible values) AND the ``payload["panel_name"]`` key.
+#: It lives HERE — co-located with
+#: :meth:`PackRecordStore.append_evidence_read_event`, the method that
+#: emits it — exactly as :data:`_OVERRIDE_EVENT_DECISION_TYPE` co-locates
+#: with ``append_override_event`` (R17 P3 #1 location LOCK). The
+#: ``packs/evidence/`` projector modules stay pure (manifest-in /
+#: dict-out) and have no need of this vocabulary; ``evidence_routes.py``
+#: imports it from here.
+EvidencePanelName = Literal[
+    "data_governance",
+    "risk_tier",
+    "supply_chain",
+    "conformance_matrix",
+]
+
+#: Sprint 7B.3 T10 — the ``pack.evidence_read.<panel_name>`` chain-event
+#: contract. The ISO control is ``A.5.31`` (audit logs / event logging);
+#: pinned DIRECTLY as a constant here — NOT derived via
+#: :func:`cognic_agentos.packs.lifecycle.iso_controls_for` — because an
+#: evidence-panel read is NOT a lifecycle transition: there is no
+#: :data:`TransitionName` to map, and ``append_evidence_read_event`` uses
+#: the plain ``DecisionHistoryStore.append`` API (no precondition closure,
+#: no ``packs.state`` cache mutation). Mirrors the
+#: :data:`_OVERRIDE_EVENT_DECISION_TYPE` doctrine. ``A.5.31`` is a member
+#: of the same ``packs.lifecycle._KNOWN_ISO_CONTROL_CODES`` set that
+#: ``iso_controls_for`` draws from, so the evidence-read path's tag is
+#: vocabulary-consistent with the lifecycle path's tags.
+_EVIDENCE_READ_EVENT_DECISION_TYPE_PREFIX: Final[str] = "pack.evidence_read"
+_EVIDENCE_READ_EVENT_ISO_CONTROLS: Final[tuple[str, ...]] = ("A.5.31",)
+
+
 @dataclasses.dataclass(frozen=True)
 class OverrideEventAppendResult:
     """Structured return value of :meth:`PackRecordStore.append_override_event`.
@@ -416,6 +450,25 @@ class OverrideEventAppendResult:
     ``DecisionRecord`` model has no persisted ``id`` field; persistence
     identity is the ``(record_id, chain_hash)`` pair the store mints at
     append time.
+    """
+
+    record_id: uuid.UUID
+    chain_hash: bytes
+
+
+@dataclasses.dataclass(frozen=True)
+class EvidenceReadEventAppendResult:
+    """Structured return value of
+    :meth:`PackRecordStore.append_evidence_read_event`.
+
+    Carries the two values ``DecisionHistoryStore.append`` returns —
+    ``(record_id, chain_hash)``. Mirrors :class:`OverrideEventAppendResult`
+    exactly (Sprint 7B.3 T10; plan §553): a panel-read audit event, like
+    an override event, is appended via the plain ``append`` API, so the
+    persistence identity is the ``(record_id, chain_hash)`` pair the store
+    mints at append time — NOT a
+    :class:`~cognic_agentos.core.decision_history.DecisionRecord` (the
+    live model has no persisted ``id`` field).
     """
 
     record_id: uuid.UUID
@@ -1041,6 +1094,93 @@ class PackRecordStore:
         )
         record_id, chain_hash = await self._history.append(record)
         return OverrideEventAppendResult(record_id=record_id, chain_hash=chain_hash)
+
+    async def append_evidence_read_event(
+        self,
+        *,
+        pack_id: uuid.UUID,
+        actor_subject: str,
+        panel_name: EvidencePanelName,
+        tenant_id: str,
+        request_id: str,
+    ) -> EvidenceReadEventAppendResult:
+        """Emit a ``pack.evidence_read.<panel_name>`` chain event recording
+        a reviewer's access to one of the four evidence panels.
+
+        Sprint 7B.3 T10 (plan §533-566). Like :meth:`append_override_event`
+        this uses the plain ``DecisionHistoryStore.append`` API — NOT
+        ``append_with_precondition``. An evidence-panel read is NOT a
+        lifecycle state-machine transition: there is no
+        ``validate_transition`` precondition to run and no ``packs.state``
+        cache to mutate. The chain-head ``SELECT FOR UPDATE`` inside
+        ``append`` provides canonical ordering only.
+
+        The route handler calls this AFTER the panel projector returns
+        successfully, so a 200 panel response correlates 1:1 with exactly
+        one chain row; 4xx/5xx panel responses emit zero audit events
+        (the read did not happen).
+
+        Args:
+          pack_id: the pack whose evidence panel was read; persisted as
+            ``payload["pack_id"] = str(pack_id)`` so the audit row is
+            pack-linkable (per-pack history readers filter on
+            ``payload["pack_id"]``). ``append_evidence_read_event`` does
+            NOT read or mutate the ``packs`` row — a panel read is not a
+            state transition.
+          actor_subject: the reviewer's subject; persisted as
+            ``payload["actor_subject"]``.
+          panel_name: the closed-enum :data:`EvidencePanelName` value —
+            one of the four evidence panels; drives BOTH the chain-event
+            ``decision_type`` namespace (``pack.evidence_read.<panel_name>``)
+            AND the ``payload["panel_name"]`` key. Persisted verbatim (no
+            synonym substitution).
+          tenant_id: the reviewer's tenant; threaded to the
+            :class:`~cognic_agentos.core.decision_history.DecisionRecord`
+            ``tenant_id`` FIELD (DB column ``decision_history.tenant_id``)
+            — NOT the payload dict (R17 P2 #2). Evidence-panel reads are
+            tenant-scoped examiner-traceable events; the tenant boundary
+            belongs on the chain row's first-class column.
+            ``append_evidence_read_event`` is the first pack chain-writing
+            seam to populate that column.
+          request_id: the caller-minted request id for the chain row's
+            ``request_id`` column (the route handler mints it via the
+            ``evidence_routes.py`` ``_mint_request_id`` helper; mirrors
+            every other chain-writing seam — ``transition()`` +
+            ``append_override_event`` take the same kwarg).
+
+        Returns:
+          :class:`EvidenceReadEventAppendResult` carrying the
+          ``(record_id, chain_hash)`` pair from the underlying ``append``.
+
+        Chain row shape:
+          - ``decision_type`` = ``f"pack.evidence_read.{panel_name}"``
+            (4 possible values from :data:`EvidencePanelName`)
+          - ``iso_controls`` = ``("A.5.31",)`` (audit logs)
+          - ``tenant_id`` = the ``tenant_id`` arg (first-class column,
+            NOT the payload — R17 P2 #2)
+          - ``payload`` = the explicit 4-key shape ``{actor_subject,
+            pack_id, panel_name, requested_at}`` — NO manifest content,
+            NO sensitive data-class values, NO ``tenant_id`` key.
+            ``requested_at`` is an ISO 8601 UTC timestamp stamped at emit
+            time. The ``DecisionRecord.actor_id`` field is left ``None``
+            — the actor is carried in ``payload["actor_subject"]``, so
+            the canonical-form actor-id merge does not add a 5th key.
+        """
+        payload: dict[str, Any] = {
+            "actor_subject": actor_subject,
+            "pack_id": str(pack_id),
+            "panel_name": panel_name,
+            "requested_at": datetime.now(UTC).isoformat(),
+        }
+        record = DecisionRecord(
+            decision_type=f"{_EVIDENCE_READ_EVENT_DECISION_TYPE_PREFIX}.{panel_name}",
+            request_id=request_id,
+            payload=payload,
+            tenant_id=tenant_id,
+            iso_controls=_EVIDENCE_READ_EVENT_ISO_CONTROLS,
+        )
+        record_id, chain_hash = await self._history.append(record)
+        return EvidenceReadEventAppendResult(record_id=record_id, chain_hash=chain_hash)
 
     async def load(self, pack_id: uuid.UUID) -> PackRecord | None:
         """Return the pack record for ``pack_id`` or ``None`` if none
