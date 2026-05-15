@@ -4496,3 +4496,269 @@ def test_sign_bundle_for_hook_kind_pack_records_kind_in_intoto_layout(
     assert intoto_doc["pack_kind"] == "hook", (
         f"in-toto layout pack_kind should be 'hook'; got {intoto_doc['pack_kind']!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Sprint 7B.3 T2 Slice F — end-to-end integration: bundle-root flag +
+# [supply_chain].blob_path manifest write-back
+# ---------------------------------------------------------------------------
+
+
+def test_sign_bundle_writes_blob_path_default_bundle_root_is_dist_dir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sprint 7B.3 T2 Slice F (R7 P2 #4) — invoking `agentos sign --bundle`
+    without an explicit `--bundle-root` flag uses the discovered wheel's
+    parent directory (``<pack>/dist/``) as the bundle root, and emits
+    `[supply_chain].blob_path = "<wheel-filename>"` (the wheel sits
+    directly in the bundle root, so the relative POSIX path is just
+    the basename)."""
+    import tomllib as _tomllib
+
+    shims = _stage_full_shim_set(tmp_path)
+    pack = _stage_pack_with_wheel(tmp_path)
+    _set_sign_bundle_settings(
+        monkeypatch,
+        cosign_path=shims["cosign"],
+        syft_path=shims["syft"],
+        grype_path=shims["grype"],
+        license_auditor_path=shims["license_auditor"],
+    )
+
+    result = CliRunner().invoke(app, ["sign", "--bundle", str(pack)])
+    assert result.exit_code == 0, (
+        f"sign --bundle (default bundle-root) failed: "
+        f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+
+    # Manifest should now carry [supply_chain].blob_path with the
+    # wheel filename (R6 P2 #4 — bundle-root-relative POSIX path).
+    manifest_text = (pack / "cognic-pack-manifest.toml").read_text()
+    manifest_data = _tomllib.loads(manifest_text)
+    assert "supply_chain" in manifest_data
+    assert "blob_path" in manifest_data["supply_chain"], (
+        f"R7 P2 #4 — sign --bundle must emit "
+        f"[supply_chain].blob_path; supply_chain block was "
+        f"{manifest_data['supply_chain']!r}"
+    )
+    # Default bundle root = wheel parent (dist/), so blob_path is just
+    # the wheel filename.
+    assert (
+        manifest_data["supply_chain"]["blob_path"]
+        == "cognic_agent_sign_target-0.1.0-py3-none-any.whl"
+    )
+
+
+def test_sign_bundle_writes_blob_path_explicit_bundle_root_emits_nested_posix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sprint 7B.3 T2 Slice F (R7 P2 #4) — explicit `--bundle-root <pack>`
+    makes the wheel a nested file under the bundle root + the emitted
+    blob_path is the POSIX nested relative path (``dist/<wheel>``)."""
+    import tomllib as _tomllib
+
+    shims = _stage_full_shim_set(tmp_path)
+    pack = _stage_pack_with_wheel(tmp_path)
+    _set_sign_bundle_settings(
+        monkeypatch,
+        cosign_path=shims["cosign"],
+        syft_path=shims["syft"],
+        grype_path=shims["grype"],
+        license_auditor_path=shims["license_auditor"],
+    )
+
+    # Explicit bundle-root = pack root; the wheel is at <pack>/dist/<wheel>.
+    result = CliRunner().invoke(app, ["sign", "--bundle", str(pack), "--bundle-root", str(pack)])
+    assert result.exit_code == 0, (
+        f"sign --bundle --bundle-root failed: stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+
+    manifest_data = _tomllib.loads((pack / "cognic-pack-manifest.toml").read_text())
+    # POSIX nested path; never windows-style backslashes.
+    assert (
+        manifest_data["supply_chain"]["blob_path"]
+        == "dist/cognic_agent_sign_target-0.1.0-py3-none-any.whl"
+    )
+    assert "\\" not in manifest_data["supply_chain"]["blob_path"]
+
+
+def test_sign_bundle_refuses_wheel_outside_bundle_root_with_closed_enum_reason(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sprint 7B.3 T2 Slice F (R7 P2 #4) — when `--bundle-root <path>`
+    references a directory that does NOT contain the discovered wheel,
+    sign-bundle refuses with closed-enum ``sign_wheel_outside_bundle_root``
+    + non-zero exit. No mutation of the manifest's blob_path field on
+    refusal path."""
+    shims = _stage_full_shim_set(tmp_path)
+    pack = _stage_pack_with_wheel(tmp_path)
+    _set_sign_bundle_settings(
+        monkeypatch,
+        cosign_path=shims["cosign"],
+        syft_path=shims["syft"],
+        grype_path=shims["grype"],
+        license_auditor_path=shims["license_auditor"],
+    )
+    # Stage an unrelated directory as the "bundle root" → the wheel
+    # under <pack>/dist/ is NOT a descendant.
+    unrelated_root = tmp_path / "elsewhere"
+    unrelated_root.mkdir()
+
+    result = CliRunner().invoke(
+        app,
+        ["sign", "--bundle", str(pack), "--bundle-root", str(unrelated_root), "--json"],
+    )
+    assert result.exit_code != 0, "sign --bundle must refuse on wheel-outside-root"
+
+    # JSON output carries the closed-enum reason for CI parsers.
+    report = json.loads(result.stdout)
+    reasons = [f["reason"] for f in report.get("findings", [])]
+    assert "sign_wheel_outside_bundle_root" in reasons, (
+        f"R7 P2 #4 — expected closed-enum sign_wheel_outside_bundle_root "
+        f"in findings; got reasons={reasons}"
+    )
+
+
+def test_sign_bundle_refuses_manifest_write_failure_via_closed_enum_finding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sprint 7B.3 T2 Slice F R-reviewer-round P2 #1 — when
+    ``_write_blob_path_to_manifest`` raises (read-only FS, racey
+    concurrent edit, malformed TOML, unsupported value type), the
+    orchestrator collapses the failure into a structured
+    ``sign_manifest_blob_path_write_failed`` ``SignFinding`` rather
+    than letting a raw traceback escape ``agentos sign --bundle``.
+
+    Reproduces the failure by monkeypatching the helper to raise
+    ``PermissionError`` (simulating a read-only manifest file). The
+    test asserts the CLI exits non-zero AND the JSON report carries
+    the closed-enum reason + failure_mode discriminator.
+    """
+    import cognic_agentos.cli.sign as sign_module
+
+    shims = _stage_full_shim_set(tmp_path)
+    pack = _stage_pack_with_wheel(tmp_path)
+    _set_sign_bundle_settings(
+        monkeypatch,
+        cosign_path=shims["cosign"],
+        syft_path=shims["syft"],
+        grype_path=shims["grype"],
+        license_auditor_path=shims["license_auditor"],
+    )
+
+    # Make the helper raise PermissionError to simulate a read-only
+    # manifest write target — the most-likely real-world trigger
+    # outside unit tests.
+    def _raise_permission_error(*, manifest_path: Path, blob_path: str) -> None:
+        raise PermissionError(f"simulated EROFS on {manifest_path}")
+
+    monkeypatch.setattr(sign_module, "_write_blob_path_to_manifest", _raise_permission_error)
+
+    result = CliRunner().invoke(app, ["sign", "--bundle", str(pack), "--json"])
+    assert result.exit_code != 0, (
+        "Manifest write failure must surface as non-zero exit, not a "
+        f"silent pass: stdout={result.stdout!r}"
+    )
+
+    report = json.loads(result.stdout)
+    reasons = [f["reason"] for f in report.get("findings", [])]
+    assert "sign_manifest_blob_path_write_failed" in reasons, (
+        f"R-reviewer-round P2 #1 — expected closed-enum "
+        f"sign_manifest_blob_path_write_failed; got reasons={reasons}"
+    )
+    # Verify failure_mode discriminator is wired (write_error for
+    # PermissionError per the classification table in sign.py).
+    write_finding = next(
+        f for f in report["findings"] if f["reason"] == "sign_manifest_blob_path_write_failed"
+    )
+    assert write_finding["payload"]["failure_mode"] == "write_error"
+    assert write_finding["payload"]["error_type"] == "PermissionError"
+
+
+@pytest.mark.parametrize(
+    ("raised_exc_factory", "expected_failure_mode", "expected_error_type"),
+    [
+        # decode_error: malformed TOML in the existing manifest file.
+        (
+            lambda: __import__("tomllib").TOMLDecodeError(
+                "simulated malformed TOML", "garbage manifest body", 0
+            ),
+            "decode_error",
+            "TOMLDecodeError",
+        ),
+        # decode_error: non-UTF-8 bytes in the manifest file.
+        (
+            lambda: UnicodeDecodeError("utf-8", b"\xff\xfe", 0, 1, "simulated non-utf8"),
+            "decode_error",
+            "UnicodeDecodeError",
+        ),
+        # encode_error: defensive — tomli_w refuses an unsupported value
+        # type. Should never fire on a well-formed parsed dict but pinned
+        # anyway per the sign.py classification table.
+        (
+            lambda: TypeError("simulated tomli_w unsupported value type"),
+            "encode_error",
+            "TypeError",
+        ),
+        # read_error: manifest file was unlinked between sign-bundle's
+        # manifest-read in step 3 and the blob-path write here (racey
+        # concurrent edit; very unlikely but classified).
+        (
+            lambda: FileNotFoundError("simulated missing manifest file"),
+            "read_error",
+            "FileNotFoundError",
+        ),
+    ],
+    ids=["TOMLDecodeError", "UnicodeDecodeError", "TypeError", "FileNotFoundError"],
+)
+def test_sign_bundle_manifest_write_failure_classifies_each_exception_type(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    raised_exc_factory: Any,
+    expected_failure_mode: str,
+    expected_error_type: str,
+) -> None:
+    """Sprint 7B.3 T2 Slice F R-reviewer-round P2 #1 — parametrized
+    coverage for each entry in the manifest-write classification table
+    at ``cli/sign.py:2767-2775``: TOMLDecodeError + UnicodeDecodeError
+    both → ``decode_error``; TypeError → ``encode_error``;
+    FileNotFoundError → ``read_error`` (PermissionError + generic
+    OSError fallback → ``write_error`` covered separately).
+
+    Pinning each branch keeps the classification table on the durable
+    coverage gate as the failure modes drift with future tomli/tomli_w
+    versions.
+    """
+    import cognic_agentos.cli.sign as sign_module
+
+    shims = _stage_full_shim_set(tmp_path)
+    pack = _stage_pack_with_wheel(tmp_path)
+    _set_sign_bundle_settings(
+        monkeypatch,
+        cosign_path=shims["cosign"],
+        syft_path=shims["syft"],
+        grype_path=shims["grype"],
+        license_auditor_path=shims["license_auditor"],
+    )
+
+    def _raise(*, manifest_path: Path, blob_path: str) -> None:
+        raise raised_exc_factory()
+
+    monkeypatch.setattr(sign_module, "_write_blob_path_to_manifest", _raise)
+
+    result = CliRunner().invoke(app, ["sign", "--bundle", str(pack), "--json"])
+    assert result.exit_code != 0
+
+    report = json.loads(result.stdout)
+    finding = next(
+        f for f in report["findings"] if f["reason"] == "sign_manifest_blob_path_write_failed"
+    )
+    assert finding["payload"]["failure_mode"] == expected_failure_mode, (
+        f"expected failure_mode={expected_failure_mode!r} for "
+        f"{expected_error_type}; got {finding['payload']['failure_mode']!r}"
+    )
+    assert finding["payload"]["error_type"] == expected_error_type

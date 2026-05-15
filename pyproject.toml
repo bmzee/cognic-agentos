@@ -74,6 +74,18 @@ dependencies = [
     # amendment at sprint closeout.
     "typer>=0.25,<0.26",
     "jinja2>=3.1,<4",
+    # Sprint 7B.3 T2 Slice F — `agentos sign --bundle-root <path>`
+    # writes the bundle-root-relative `[supply_chain].blob_path` back
+    # into the author's `cognic-pack-manifest.toml` (R6 P2 #4 + R7 P2
+    # #4). Python stdlib's `tomllib` is read-only (PEP 680); `tomli-w`
+    # is the canonical small write-only counterpart (same author as
+    # tomli/tomllib; stable; zero transitive deps). Required for the
+    # signature gate's non-overridability per ADR-012 §110 — the gate
+    # cannot be bypassed, so the manifest field MUST be wired
+    # automatically by the authoring CLI rather than by manual author
+    # edit. Plan deviation: original Slice F estimate was "~25 LoC"
+    # without dep churn; expanded scope explicitly authorized at R10+.
+    "tomli-w>=1.0,<2",
 ]
 
 [project.optional-dependencies]

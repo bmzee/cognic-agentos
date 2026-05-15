@@ -1526,10 +1526,15 @@ class TestSprint7AClosedEnumVocabulary:
                 "data_governance_contract_inconsistent_with_mcp_caching",
                 # Risk tier (T11)
                 "risk_tier_inconsistent_with_data_classes",
-                # Supply chain (T12)
+                # Supply chain (T12 + Sprint 7B.3 T2 R-reviewer-round
+                # P2 #1 — supply-chain blob_path validator extension).
                 "supply_chain_attestation_path_missing",
                 "supply_chain_attestation_path_unresolvable",
-                # Sign (T14 — full Wave-1 bundle generator per Doctrine F)
+                "supply_chain_blob_path_unresolvable",
+                # Sign (T14 — full Wave-1 bundle generator per Doctrine F;
+                # Sprint 7B.3 T2 carry-forward adds two further sign
+                # refusal reasons for the bundle-root contract per plan
+                # R6 P2 #4 + R-reviewer-round P2 #1).
                 "sign_cosign_not_installed",
                 "sign_syft_not_installed",
                 "sign_grype_not_installed",
@@ -1539,6 +1544,8 @@ class TestSprint7AClosedEnumVocabulary:
                 "sign_agent_card_jws_signing_failed",
                 "sign_provenance_template_render_failed",
                 "sign_intoto_layout_template_render_failed",
+                "sign_wheel_outside_bundle_root",
+                "sign_manifest_blob_path_write_failed",
                 # Verify (T14 — offline trust gate per ADR-016 Sprint-7A;
                 # R15 pivot adds verify_entry_point_load_failed for the
                 # isolated-subprocess EntryPoint.load() probe).

@@ -81,6 +81,17 @@ ValidatorReason = Literal[
     # Supply chain (T12) — refusals
     "supply_chain_attestation_path_missing",
     "supply_chain_attestation_path_unresolvable",
+    # Sprint 7B.3 T2 Slice G (R6 P2 #4 + R7 P2 #4) — blob_path field
+    # validation. The new optional ``[supply_chain].blob_path`` field
+    # is wire-protocol-public for the 7B.3 signature gate's signature
+    # path resolver. When present in the manifest, the validator
+    # refuses on shape failures (non-string / empty / absolute / path-
+    # traversal / AUTHOR-FILL) via ``payload.failure_mode`` discriminator
+    # mirroring the ``supply_chain_attestation_path_unresolvable``
+    # multi-failure-mode pattern. Field-absent path is silent (additive
+    # contract — legacy packs validate cleanly + fail closed at the
+    # runtime signature gate per ADR-012 §110).
+    "supply_chain_blob_path_unresolvable",
     # Sign (T14 — full Wave-1 bundle generator per Doctrine Decision F
     # + ADR-016; 9 reasons covering missing-tool refusals + signing-key
     # resolution + subprocess-exec failures + JWS-signing failures +
@@ -94,6 +105,27 @@ ValidatorReason = Literal[
     "sign_agent_card_jws_signing_failed",
     "sign_provenance_template_render_failed",
     "sign_intoto_layout_template_render_failed",
+    # Sprint 7B.3 T2 Slice F (R7 P2 #4) — wheel-outside-bundle-root
+    # refusal. ``agentos sign --bundle-root <path>`` REFUSES with this
+    # reason when the resolved wheel path is not a descendant of the
+    # resolved bundle root (`Path(wheel).resolve()` does not start with
+    # `Path(bundle_root).resolve()`). The 7B.3 signature gate is
+    # non-overridable per ADR-012 §110, so a wheel emitted outside the
+    # bundle root would produce a manifest the runtime resolver cannot
+    # bind, breaking every approve. Refusal short-circuits the sign-
+    # bundle pipeline before any subprocess runs.
+    "sign_wheel_outside_bundle_root",
+    # Sprint 7B.3 T2 Slice F (R-reviewer-round P2 #1) — manifest blob_path
+    # write-back failure. ``run_sign_bundle`` mutates
+    # ``cognic-pack-manifest.toml`` to insert ``[supply_chain].blob_path``
+    # via tomllib (read) + tomli_w (write); these calls can raise on
+    # read-only filesystems, racey concurrent edits, malformed TOML, or
+    # unsupported value types. Collapsing the failures into a structured
+    # ``SignFinding`` keeps the CLI's closed-enum refusal contract intact
+    # (no raw traceback escapes the orchestrator). ``payload.failure_mode``
+    # distinguishes the underlying exception class (read_error /
+    # decode_error / write_error / encode_error).
+    "sign_manifest_blob_path_write_failed",
     # Verify (T14 — offline trust gate per ADR-016 Sprint-7A mandate;
     # mirrors the Sprint-4 runtime trust-gate verification path; 8
     # closed-enum reasons covering each of the 6 verification steps
@@ -179,8 +211,11 @@ _VALIDATOR_REASON_OWNERSHIP: Final[dict[ValidatorReason, str]] = {
     # Supply chain (T12)
     "supply_chain_attestation_path_missing": "validators/supply_chain.py",
     "supply_chain_attestation_path_unresolvable": "validators/supply_chain.py",
+    "supply_chain_blob_path_unresolvable": "validators/supply_chain.py",
     # Sign (T14 — full Wave-1 bundle generator per Doctrine Decision F)
     "sign_cosign_not_installed": "sign.py",
+    "sign_wheel_outside_bundle_root": "sign.py",
+    "sign_manifest_blob_path_write_failed": "sign.py",
     "sign_syft_not_installed": "sign.py",
     "sign_grype_not_installed": "sign.py",
     "sign_license_auditor_not_installed": "sign.py",
@@ -688,6 +723,17 @@ def sign(
             "prod settings profile per Doctrine F)."
         ),
     ),
+    bundle_root: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--bundle-root",
+        help=(
+            "Sprint 7B.3 T2 Slice F (R7 P2 #4): the bundle root used to "
+            "compute the manifest's [supply_chain].blob_path field. "
+            "Defaults to the discovered wheel's parent directory. The "
+            "wheel MUST be a descendant of this path; otherwise sign "
+            "refuses with closed-enum sign_wheel_outside_bundle_root."
+        ),
+    ),
     json_output: bool = typer.Option(
         False,
         "--json",
@@ -765,6 +811,7 @@ def sign(
             pack_path,
             settings,
             dev_mode_skip_cosign=settings.dev_mode_skip_cosign,
+            bundle_root=bundle_root,
         )
     )
     if json_output:

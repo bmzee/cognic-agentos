@@ -791,7 +791,7 @@ class TestSprint7B2BoundedRequestIdInvariant:
         with TestClient(app) as client:
             response = client.post(
                 f"/api/v1/packs/drafts/{record.id}/submit",
-                json={"manifest": manifest},
+                json={"manifest": manifest, "signed_artefact_root": "/var/cognic/bundles/test"},
             )
         assert response.status_code == 200, response.text
 
@@ -873,7 +873,7 @@ class TestSprint7B2SubmitDraftEndpoint:
         with TestClient(app) as client:
             response = client.post(
                 f"/api/v1/packs/drafts/{record.id}/submit",
-                json={"manifest": manifest},
+                json={"manifest": manifest, "signed_artefact_root": "/var/cognic/bundles/test"},
             )
         assert response.status_code == 200, response.text
         body = response.json()
@@ -889,7 +889,7 @@ class TestSprint7B2SubmitDraftEndpoint:
         with TestClient(app) as client:
             response = client.post(
                 f"/api/v1/packs/drafts/{record.id}/submit",
-                json={"manifest": manifest},
+                json={"manifest": manifest, "signed_artefact_root": "/var/cognic/bundles/test"},
             )
         assert response.status_code == 404
         assert response.json()["detail"]["reason"] == "tenant_id_mismatch"
@@ -903,7 +903,7 @@ class TestSprint7B2SubmitDraftEndpoint:
         with TestClient(app) as client:
             response = client.post(
                 f"/api/v1/packs/drafts/{record.id}/submit",
-                json={"manifest": manifest},
+                json={"manifest": manifest, "signed_artefact_root": "/var/cognic/bundles/test"},
             )
         assert response.status_code == 403
         body = response.json()
@@ -925,13 +925,13 @@ class TestSprint7B2SubmitDraftEndpoint:
             # First submit succeeds
             first = client.post(
                 f"/api/v1/packs/drafts/{record.id}/submit",
-                json={"manifest": manifest},
+                json={"manifest": manifest, "signed_artefact_root": "/var/cognic/bundles/test"},
             )
             assert first.status_code == 200
             # Second submit on now-submitted pack must refuse
             second = client.post(
                 f"/api/v1/packs/drafts/{record.id}/submit",
-                json={"manifest": manifest},
+                json={"manifest": manifest, "signed_artefact_root": "/var/cognic/bundles/test"},
             )
         assert second.status_code == 409
         body = second.json()
@@ -1070,7 +1070,7 @@ class TestSprint7B2SameTenantAuthorCollaboration:
         with TestClient(app) as client:
             response = client.post(
                 f"/api/v1/packs/drafts/{record.id}/submit",
-                json={"manifest": manifest},
+                json={"manifest": manifest, "signed_artefact_root": "/var/cognic/bundles/test"},
             )
         assert response.status_code == 200
         body = response.json()
@@ -1359,7 +1359,7 @@ class TestSprint7B2PackNotFoundRaceHandlers:
         with TestClient(app) as client:
             response = client.post(
                 f"/api/v1/packs/drafts/{record.id}/submit",
-                json={"manifest": manifest},
+                json={"manifest": manifest, "signed_artefact_root": "/var/cognic/bundles/test"},
             )
         assert response.status_code == 404, response.text
         assert response.json()["detail"]["reason"] == "pack_not_found"
@@ -1562,7 +1562,7 @@ class TestSprint7B2PackNotFoundRaceHandlers:
         with TestClient(app) as client:
             response = client.post(
                 f"/api/v1/packs/drafts/{record.id}/submit",
-                json={"manifest": manifest},
+                json={"manifest": manifest, "signed_artefact_root": "/var/cognic/bundles/test"},
             )
         assert response.status_code == 404, response.text
         assert response.json()["detail"]["reason"] == "pack_not_found"
@@ -1900,7 +1900,7 @@ class TestSprint7B2T9SubmitDraftConformance:
         with TestClient(app) as client:
             response = client.post(
                 f"/api/v1/packs/drafts/{record.id}/submit",
-                json={"manifest": manifest},
+                json={"manifest": manifest, "signed_artefact_root": "/var/cognic/bundles/test"},
             )
         assert response.status_code == 200, response.text
 
@@ -1977,7 +1977,10 @@ class TestSprint7B2T9SubmitDraftConformance:
         ):
             response = client.post(
                 f"/api/v1/packs/drafts/{record.id}/submit",
-                json={"manifest": wrong_manifest},
+                json={
+                    "manifest": wrong_manifest,
+                    "signed_artefact_root": "/var/cognic/bundles/test",
+                },
             )
         assert response.status_code == 400, response.text
         assert response.json()["detail"]["reason"] == "manifest_digest_mismatch"
@@ -2063,7 +2066,7 @@ class TestSprint7B2T9SubmitDraftConformance:
             with TestClient(app) as client:
                 response = client.post(
                     f"/api/v1/packs/drafts/{record.id}/submit",
-                    json={"manifest": manifest},
+                    json={"manifest": manifest, "signed_artefact_root": "/var/cognic/bundles/test"},
                 )
         finally:
             store.transition = original_transition  # type: ignore[method-assign]
@@ -2109,7 +2112,10 @@ class TestSprint7B2T9SubmitDraftConformance:
         with TestClient(app) as client:
             response = client.post(
                 f"/api/v1/packs/drafts/{record.id}/submit",
-                json={"manifest": bad_manifest},
+                json={
+                    "manifest": bad_manifest,
+                    "signed_artefact_root": "/var/cognic/bundles/test",
+                },
             )
         # Submit still completes with 200 despite red conformance.
         assert response.status_code == 200, response.text
@@ -2156,7 +2162,7 @@ class TestSprint7B2T9SubmitDraftConformance:
         with TestClient(app) as client:
             response = client.post(
                 f"/api/v1/packs/drafts/{record.id}/submit",
-                json={"manifest": manifest},
+                json={"manifest": manifest, "signed_artefact_root": "/var/cognic/bundles/test"},
             )
         assert response.status_code == 200, response.text
 
@@ -2179,3 +2185,153 @@ class TestSprint7B2T9SubmitDraftConformance:
             f"request_id={request_id!r} missing 'pack-submit-' prefix — T9 "
             f"must NOT introduce a fresh prefix"
         )
+
+
+# ===========================================================================
+# Sprint 7B.3 T2 Slice E — submit handler threads payload_manifest +
+# signed_artefact_root into transition() (R1 P2 #1 + R6 P2 #4)
+# ===========================================================================
+
+
+class TestSprint7B3T2SliceESubmitThreadsT2Kwargs:
+    """End-to-end pin: handler threads the two new T2 submit-flow
+    transition kwargs (``payload_manifest`` + ``signed_artefact_root``)
+    so the resulting submit chain row carries both NEW top-level
+    payload keys.
+
+    R1 P2 #1 — ``payload["manifest"]`` is the evidence-source seam for
+    T3-T6 reviewer evidence panels; without this thread, the panels at
+    panel-read time would fall back to 409 ``manifest_evidence_not_persisted``.
+
+    R6 P2 #4 — ``payload["signed_artefact_root"]`` is the operator-staged
+    bundle-root path that T9's signature path resolver concatenates with
+    manifest-relative paths to produce absolute cosign verification paths.
+    Without this thread, every approve in 7B.3 would hit
+    ``signature_signed_artefact_root_not_declared_at_submit``.
+    """
+
+    async def test_submit_writes_manifest_to_chain_payload(self, store: PackRecordStore) -> None:
+        """Happy path — submit body's ``manifest`` lands verbatim on
+        the submit chain row's ``payload["manifest"]``."""
+        import json
+
+        from sqlalchemy import select
+
+        from cognic_agentos.core.decision_history import _decision_history
+
+        manifest = _well_formed_tool_manifest()
+        record = await _seed_draft(store, tenant_id="t1", manifest=manifest)
+        actor = _make_actor(scopes=frozenset({"pack.submit"}))
+        app = _build_app(actor=actor, store=store)
+
+        with TestClient(app) as client:
+            response = client.post(
+                f"/api/v1/packs/drafts/{record.id}/submit",
+                json={
+                    "manifest": manifest,
+                    "signed_artefact_root": "/var/cognic/bundles/t1/x-1.0",
+                },
+            )
+        assert response.status_code == 200, response.text
+
+        async with store._engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    select(_decision_history.c.payload)
+                    .where(_decision_history.c.event_type == "pack.lifecycle.submitted")
+                    .order_by(_decision_history.c.sequence.desc())
+                )
+            ).first()
+        assert row is not None
+        raw = row[0]
+        if isinstance(raw, (bytes, bytearray)):
+            raw = raw.decode("utf-8")
+        payload = json.loads(raw) if isinstance(raw, str) else raw
+        assert "manifest" in payload, (
+            f"R1 P2 #1 evidence-source seam broken — submit chain row missing "
+            f"payload['manifest']; keys={sorted(payload.keys())}"
+        )
+        assert payload["manifest"] == manifest, (
+            "payload['manifest'] must equal the author-submitted manifest "
+            "body verbatim (T3-T6 panels project off this value)"
+        )
+
+    async def test_submit_writes_signed_artefact_root_to_chain_payload(
+        self, store: PackRecordStore
+    ) -> None:
+        """Happy path — submit body's ``signed_artefact_root`` lands on
+        the submit chain row's ``payload["signed_artefact_root"]`` per
+        R6 P2 #4."""
+        import json
+
+        from sqlalchemy import select
+
+        from cognic_agentos.core.decision_history import _decision_history
+
+        manifest = _well_formed_tool_manifest()
+        record = await _seed_draft(store, tenant_id="t1", manifest=manifest)
+        actor = _make_actor(scopes=frozenset({"pack.submit"}))
+        app = _build_app(actor=actor, store=store)
+
+        bundle_root = "/var/cognic/bundles/t1/x-1.0-r2-thread"
+        with TestClient(app) as client:
+            response = client.post(
+                f"/api/v1/packs/drafts/{record.id}/submit",
+                json={
+                    "manifest": manifest,
+                    "signed_artefact_root": bundle_root,
+                },
+            )
+        assert response.status_code == 200, response.text
+
+        async with store._engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    select(_decision_history.c.payload)
+                    .where(_decision_history.c.event_type == "pack.lifecycle.submitted")
+                    .order_by(_decision_history.c.sequence.desc())
+                )
+            ).first()
+        assert row is not None
+        raw = row[0]
+        if isinstance(raw, (bytes, bytearray)):
+            raw = raw.decode("utf-8")
+        payload = json.loads(raw) if isinstance(raw, str) else raw
+        assert "signed_artefact_root" in payload, (
+            f"R6 P2 #4 bundle-root seam broken — submit chain row missing "
+            f"payload['signed_artefact_root']; keys={sorted(payload.keys())}"
+        )
+        assert payload["signed_artefact_root"] == bundle_root, (
+            "payload['signed_artefact_root'] must equal the submit-declared "
+            "bundle path verbatim (T9 signature path resolver concatenates "
+            "with manifest-relative paths)"
+        )
+
+    async def test_submit_422_on_relative_signed_artefact_root(
+        self, store: PackRecordStore
+    ) -> None:
+        """R6 P2 #4 + R8 P2 #4 + R-reviewer-round P2 #2 — Pydantic
+        validator rejects relative ``signed_artefact_root`` at
+        request-body parse → 422 Unprocessable Entity (FastAPI's native
+        ValidationError surface) before any storage call. Earlier draft
+        of this test was named ``test_submit_400_on_...`` claiming a 400
+        downstream-decoder mapping; R-reviewer-round P2 #2 aligned the
+        wire-status to 422 to match the existing author-route
+        body-validation doctrine."""
+        manifest = _well_formed_tool_manifest()
+        record = await _seed_draft(store, tenant_id="t1", manifest=manifest)
+        actor = _make_actor(scopes=frozenset({"pack.submit"}))
+        app = _build_app(actor=actor, store=store)
+
+        with TestClient(app) as client:
+            response = client.post(
+                f"/api/v1/packs/drafts/{record.id}/submit",
+                json={
+                    "manifest": manifest,
+                    "signed_artefact_root": "relative/path",  # invalid
+                },
+            )
+        # FastAPI surfaces Pydantic ValidationError as 422 Unprocessable
+        # Entity.  The validator's job is to refuse BEFORE the handler
+        # body runs; the 422 fingerprint pins that path.
+        assert response.status_code == 422, response.text

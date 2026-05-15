@@ -287,6 +287,125 @@ def _validate_path_entry(
     return findings
 
 
+def _validate_blob_path_field(*, block: dict[str, Any], prefix: str) -> list[ValidatorFinding]:
+    """Sprint 7B.3 T2 Slice G (R6 P2 #4 + R7 P2 #4) — validate the
+    optional ``[supply_chain].blob_path`` field.
+
+    Field-absent is the GREEN path (additive contract; legacy packs
+    validate cleanly + fail closed at the runtime signature gate per
+    ADR-012 §110). When present, the field MUST be:
+
+    1. A string (``failure_mode="blob_path_not_string"``)
+    2. Non-empty / non-whitespace (``failure_mode="blob_path_empty"``)
+    3. Relative — no leading ``/`` (``failure_mode="blob_path_absolute_forbidden"``)
+    4. Path-traversal-safe — no ``..`` segments
+       (``failure_mode="blob_path_traversal_rejected"``)
+    5. Not AUTHOR-FILL (``failure_mode="blob_path_author_fill"``)
+
+    All findings use the new closed-enum reason
+    ``supply_chain_blob_path_unresolvable`` with ``payload.failure_mode``
+    discriminator (mirrors the existing
+    ``supply_chain_attestation_path_unresolvable`` multi-failure-mode
+    pattern).
+    """
+    if "blob_path" not in block:
+        # Field-absent green path; legacy packs validate cleanly.
+        return []
+
+    value = block["blob_path"]
+
+    if not isinstance(value, str):
+        return [
+            ValidatorFinding(
+                severity="refusal",
+                reason="supply_chain_blob_path_unresolvable",
+                message=(f"{prefix}.blob_path must be a string; got {type(value).__name__}."),
+                payload={
+                    "block_path": prefix,
+                    "failure_mode": "blob_path_not_string",
+                    "declared_value": value,
+                },
+            )
+        ]
+
+    stripped = value.strip()
+    if not stripped:
+        return [
+            ValidatorFinding(
+                severity="refusal",
+                reason="supply_chain_blob_path_unresolvable",
+                message=(f"{prefix}.blob_path is empty or whitespace-only."),
+                payload={
+                    "block_path": prefix,
+                    "failure_mode": "blob_path_empty",
+                },
+            )
+        ]
+
+    if stripped.startswith(_AUTHOR_FILL_PREFIX):
+        return [
+            ValidatorFinding(
+                severity="refusal",
+                reason="supply_chain_blob_path_unresolvable",
+                message=(
+                    f"{prefix}.blob_path is still an AUTHOR-FILL placeholder; "
+                    "run `agentos sign --bundle .` to emit the value."
+                ),
+                payload={
+                    "block_path": prefix,
+                    "failure_mode": "blob_path_author_fill",
+                    "declared_value": value,
+                },
+            )
+        ]
+
+    # Absolute path → refused. R5 P2 #3 + R6 P2 #4 doctrine: the
+    # manifest field MUST be bundle-root-relative so the runtime
+    # signature path resolver can concatenate with the submit-declared
+    # signed_artefact_root.
+    if stripped.startswith("/"):
+        return [
+            ValidatorFinding(
+                severity="refusal",
+                reason="supply_chain_blob_path_unresolvable",
+                message=(
+                    f"{prefix}.blob_path={stripped!r} is absolute; the field "
+                    "MUST be bundle-root-relative per R5 P2 #3 + R6 P2 #4 "
+                    "doctrine. Re-run `agentos sign --bundle --bundle-root "
+                    "<bundle>` to emit a relative value."
+                ),
+                payload={
+                    "block_path": prefix,
+                    "failure_mode": "blob_path_absolute_forbidden",
+                    "declared_value": value,
+                },
+            )
+        ]
+
+    # Path-traversal rejection — any ``..`` SEGMENT (not just substring)
+    # in the relative path refuses. Splitting on "/" makes "..bar" and
+    # "foo..baz" valid (legitimate filenames with leading/embedded dots).
+    if ".." in stripped.split("/"):
+        return [
+            ValidatorFinding(
+                severity="refusal",
+                reason="supply_chain_blob_path_unresolvable",
+                message=(
+                    f"{prefix}.blob_path={stripped!r} contains a '..' "
+                    "path-traversal segment; the field MUST be a clean "
+                    "bundle-root-relative path."
+                ),
+                payload={
+                    "block_path": prefix,
+                    "failure_mode": "blob_path_traversal_rejected",
+                    "declared_value": value,
+                },
+            )
+        ]
+
+    return []
+
+
 def _validate_supply_chain_block(
     block: dict[str, Any], prefix: str, pack_path: Path
 ) -> list[ValidatorFinding]:
@@ -296,6 +415,11 @@ def _validate_supply_chain_block(
     non-list ``attestation_paths`` cannot have its entries iterated.
     Once the shape is OK, every entry is checked independently so
     pack authors get one finding per offending entry.
+
+    Sprint 7B.3 T2 Slice G — additionally validates the optional
+    ``blob_path`` field per :func:`_validate_blob_path_field`. The
+    blob_path check is independent of the attestation_paths check;
+    both produce their own findings independently.
     """
     raw_paths = block.get("attestation_paths")
 
@@ -385,6 +509,12 @@ def _validate_supply_chain_block(
         findings.extend(
             _validate_path_entry(stripped, prefix=prefix, index=index, pack_path=pack_path)
         )
+
+    # Sprint 7B.3 T2 Slice G — independent blob_path validation. Runs
+    # after attestation_paths regardless of attestation_paths outcome
+    # so authors see ALL shape failures in a single iteration. Field-
+    # absent path is silent (additive contract).
+    findings.extend(_validate_blob_path_field(block=block, prefix=prefix))
 
     return findings
 

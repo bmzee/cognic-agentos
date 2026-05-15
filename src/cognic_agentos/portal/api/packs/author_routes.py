@@ -691,6 +691,13 @@ def build_author_routes(*, store: PackRecordStore) -> APIRouter:
         # ``transition()``.  The locked precondition's manifest-digest
         # cross-check uses ``expected_manifest_digest`` to close the
         # TOCTOU window per plan §1179-1181.
+        #
+        # Sprint 7B.3 T2 Slice E — additionally thread the full
+        # author-submitted manifest (R1 P2 #1 evidence-source seam)
+        # AND the submit-declared signed_artefact_root bundle path
+        # (R6 P2 #4 + R8 P2 #4 — author-surface declared). Both land
+        # on the submit chain row's payload via the additive-only
+        # T2 storage extension (storage stays a thin passthrough).
         try:
             await store.transition(
                 pack_id=record.id,
@@ -701,6 +708,8 @@ def build_author_routes(*, store: PackRecordStore) -> APIRouter:
                 request_id=_mint_request_id(_PACK_SUBMIT_REQUEST_ID_PREFIX),
                 payload_conformance=conformance_payload,
                 expected_manifest_digest=record.manifest_digest,
+                payload_manifest=body.manifest,
+                signed_artefact_root=body.signed_artefact_root,
             )
         except PackNotFound:
             # T4 R1 P2 #3 — race: row gone between tenant-isolation

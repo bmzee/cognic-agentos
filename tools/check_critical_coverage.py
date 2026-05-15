@@ -483,9 +483,11 @@ T9 Slice 4).  T12 promotes the remaining 8:
 
   * Portal RBAC primitives (6 modules) — closed-enum vocabularies
     are wire-protocol-public per ADR-012 §40 + ADR-008:
-    - ``portal/rbac/scopes.py`` — 12-value ``PackRBACScope`` Literal
-      + 4 role-group frozensets whose union equals
-      ``PACK_LIFECYCLE_SCOPES`` (partition invariant).
+    - ``portal/rbac/scopes.py`` — 13-value ``PackRBACScope`` Literal
+      (12 BUILD_PLAN §622-625 lifecycle scopes + the Sprint-7B.3-T8
+      ADR-012 §107-110 override scope ``pack.override.approval_gate``)
+      + 4 role-group frozensets plus ``OVERRIDE_SCOPES`` whose 5-way
+      union equals ``PACK_LIFECYCLE_SCOPES`` (partition invariant).
     - ``portal/rbac/actor.py`` — frozen ``Actor`` Pydantic model +
       2-value ``ActorType`` Literal.  Identity boundary at the
       portal admission seam + production-grade fail-loud default
@@ -551,6 +553,62 @@ Rides the same single strict 95% line / 90% branch floor.  Gate
 size grows from 47 modules to 55 (+8).  All promoted modules
 verified at line=100%/branch=100% in the T11 + R45 + R46 fresh
 coverage.json baseline.
+
+----------------------------------------------------------------------
+Sprint 7B.3 — Reviewer evidence panels + 5-gate composer (gate 55 → 60).
+----------------------------------------------------------------------
+
+Sprint 7B.3 ships the 4 reviewer evidence panels + the pure-functional
+5-gate approval composer per ADR-012 §41 + §107-119.  Unlike the
+Sprint 7B.2 T12 batch promotion, every 7B.3 critical-controls module
+was promoted to the durable gate *by its own landing commit* (the
+per-task-promotion pattern) — the entries already appear in
+``_CRITICAL_FILES`` below with their per-task inline rationale.  This
+section records the batch for the docstring audit trail; T11 itself
+adds NO new ``_CRITICAL_FILES`` entry.
+
+  * ``packs/evidence/data_governance.py`` (T3) — ADR-017 data-
+    governance evidence panel projector + the wire-protocol-public
+    ``DataGovernanceDiffFlag`` closed-enum.
+  * ``packs/evidence/risk_tier.py`` (T4) — ADR-014 risk-tier evidence
+    panel + the ``ApprovalFlowKind`` closed-enum + the 1:1
+    ``_RISK_TIER_TO_APPROVAL_FLOW`` mapping table.
+  * ``packs/evidence/supply_chain.py`` (T5) — ADR-016 supply-chain
+    evidence panel + the ``AttestationKind`` closed-enum + the
+    7-year sigstore-bundle retention-floor math.
+  * ``packs/evidence/conformance_matrix.py`` (T6) — ADR-002 + ADR-003
+    protocol-conformance evidence panel + the ``MatrixComparisonFlag``
+    closed-enum + the R9 kind-applicability matrix + the persisted-
+    OWASP-verdict reconstruction.
+  * ``packs/approval_gates.py`` (T7) — ADR-012 §41 five-gate approval
+    composer; the pure-functional ``compose_approval_gates`` decides
+    the ``under_review → approved`` transition + owns 10 wire-
+    protocol-public closed-enum Literals + the T8 override path.
+
+Off-floor rationale for the 7B.3 route + scaffolding modules that
+deliberately do NOT promote (each carrying its own doctrinal carve-out
+documented at the call site):
+
+  * ``portal/api/packs/evidence_routes.py`` (T3-T6 panel handlers +
+    the T10 audit-emission seam) — same R32 doctrine as
+    ``inspection_routes.py``: the module owns no Human-only-decisions
+    enforcement boundary and no actor_type chain-payload provenance
+    surface.  The T10 ``pack.evidence_read.<panel>`` audit events are
+    emitted through ``packs/storage.py``'s
+    ``append_evidence_read_event`` method, which is ALREADY on the
+    durable gate — the CC risk is covered upstream.  (Plan Round-19
+    user decision, 2026-05-15, superseding the R3 P2 #3 on-gate
+    projection.)
+  * ``portal/api/packs/router.py`` — sub-router scaffolding.  The
+    7B.3 wiring extension (threading ``trust_gate`` /
+    ``trust_root_resolver`` through to the new
+    ``build_evidence_routes`` include) adds no decision logic, no
+    closed-enum vocabulary, and no refusal taxonomy.  Carrier file
+    only — consistent with the Sprint 7B.2 T3 carve-out.
+
+Rides the same single strict 95% line / 90% branch floor.  Gate size
+grows from 55 modules to 60 (+5).  The count is pinned by the T11
+self-test at ``tests/unit/tools/test_check_critical_coverage.py``.
 """
 
 from __future__ import annotations
@@ -847,11 +905,13 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     # floor. The 8 T12 promotions are:
     #
     #   * RBAC primitives (6):
-    #     - ``portal/rbac/scopes.py`` — closed-enum 12-value
+    #     - ``portal/rbac/scopes.py`` — closed-enum 13-value
     #       ``PackRBACScope`` Literal IS the wire-protocol contract
     #       for every 403 RBAC denial in the portal pack API; the
-    #       4 role-group frozenset partition pins which role groups
-    #       perform which lifecycle actions.
+    #       5-group frozenset partition (4 role groups +
+    #       ``OVERRIDE_SCOPES``) pins which groups perform which
+    #       lifecycle actions. Sprint 7B.3 T8 added the 13th value,
+    #       the ADR-012 §107-110 override scope.
     #     - ``portal/rbac/actor.py`` — frozen ``Actor`` Pydantic
     #       model + closed-enum 2-value ``ActorType`` Literal +
     #       production-grade fail-loud default. The identity
@@ -924,6 +984,118 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     ("src/cognic_agentos/portal/rbac/role_separation.py", 0.95, 0.90),
     ("src/cognic_agentos/portal/api/packs/author_routes.py", 0.95, 0.90),
     ("src/cognic_agentos/portal/api/packs/review_routes.py", 0.95, 0.90),
+    # Sprint 7B.3 T3 — pack data-governance evidence panel.
+    # AGENTS.md L54 + L167 explicit stop rule: "Pack data-governance
+    # contracts (``packs/evidence/data_governance.py``, runtime DLP
+    # enforcement)". The module owns the wire-protocol-public 7-value
+    # ``DataGovernanceDiffFlag`` closed-enum vocabulary + the pure-
+    # functional projector that the 5-gate composer (T7) reads in
+    # addition to the route handler — drift in the vocab OR the
+    # projector field-set is wire-protocol-public regression.
+    #
+    # NOT on this T3 promotion set:
+    #   * ``portal/api/packs/evidence_routes.py`` (T3) — route module
+    #     orchestrating the projector. Mirrors the T7 inspection_routes
+    #     decision (R32 doctrine): route module that doesn't own a
+    #     Human-only-decisions enforcement boundary or actor_type
+    #     chain-payload provenance surface stays OFF the durable gate;
+    #     CC risk covered by the projector being on the gate + the
+    #     route-owned ``EvidencePanelRefusalReason`` 3-value vocab
+    #     pinned by the disjointness drift detectors in
+    #     ``test_evidence_routes_structure.py``.
+    ("src/cognic_agentos/packs/evidence/data_governance.py", 0.95, 0.90),
+    # Sprint 7B.3 T4 — risk-tier evidence panel.
+    # ADR-014 §24-37 — risk-tier vocabulary IS the runtime tool-
+    # approval contract. The module owns the wire-protocol-public
+    # 7-value ``ApprovalFlowKind`` closed-enum + the 1:1
+    # ``_RISK_TIER_TO_APPROVAL_FLOW`` mapping table that the 5-gate
+    # composer (T7) consumes alongside the panel route handler.
+    # Drift in the Literal OR the mapping table is wire-protocol-
+    # public regression. Mirrors the T3 data-governance projector
+    # promotion (wire-protocol-public vocab + cross-layer consumer).
+    #
+    # Same R32 carry-over as T3: ``portal/api/packs/evidence_routes.py``
+    # stays OFF the durable gate — the T4 risk-tier handler does not
+    # own a Human-only-decisions enforcement boundary or actor_type
+    # chain-payload provenance surface; CC risk covered by the
+    # projector being on the gate + the existing T3 disjointness
+    # drift detectors covering the shared ``EvidencePanelRefusalReason``
+    # vocab in ``test_evidence_routes_structure.py``.
+    ("src/cognic_agentos/packs/evidence/risk_tier.py", 0.95, 0.90),
+    # Sprint 7B.3 T5 — supply-chain evidence panel.
+    # ADR-016 §23-33 (attestation kinds) + §70-72 (7-year sigstore-
+    # bundle retention) — the module owns the wire-protocol-public
+    # 7-value ``AttestationKind`` closed-enum that the 5-gate composer
+    # (T7) consumes for Gate 1 (signature) evidence lookup alongside
+    # the panel route handler. The projector ALSO encodes the truth
+    # table for retention-floor computation per the regulator
+    # boundary; drift in EITHER the Literal OR the retention math is
+    # wire-protocol-public regression.
+    #
+    # Same R32 carry-over as T3 + T4: ``portal/api/packs/evidence_routes.py``
+    # stays OFF the durable gate — the T5 supply-chain handler does
+    # not own a Human-only-decisions enforcement boundary or
+    # actor_type chain-payload provenance surface; CC risk covered by
+    # the projector being on the gate + the existing T3/T4 disjointness
+    # drift detectors covering the shared ``EvidencePanelRefusalReason``
+    # vocab in ``test_evidence_routes_structure.py``. The companion
+    # storage seam ``PackRecordStore.load_latest_submit_created_at``
+    # ships on ``packs/storage.py`` which is ALREADY on the durable
+    # gate; no separate gate-bump for the new method.
+    ("src/cognic_agentos/packs/evidence/supply_chain.py", 0.95, 0.90),
+    # Sprint 7B.3 T6 — conformance-matrix evidence panel.
+    # ADR-002 (MCP capability conformance) + ADR-003 (A2A feature
+    # conformance) + the AGNTCY/OASF Wave-2 identity posture — the
+    # module owns the wire-protocol-public 6-value ``MatrixComparisonFlag``
+    # closed-enum that reviewers see in ``flagged_mismatches`` AND the
+    # R9 kind-applicability matrix (which protocol matrices apply to
+    # tool / skill / agent / hook packs). The projector ALSO defensively
+    # reconstructs the persisted ``payload["conformance"]`` OWASP verdict
+    # into the panel-local ``OwaspVerdictData`` shape; drift in EITHER
+    # the Literal OR the kind-applicability sets OR the verdict-
+    # reconstruction shape is wire-protocol-public regression.
+    #
+    # Same R32 carry-over as T3 + T4 + T5: ``portal/api/packs/evidence_routes.py``
+    # stays OFF the durable gate — the T6 conformance handler does not
+    # own a Human-only-decisions enforcement boundary or an actor_type
+    # chain-payload provenance surface; CC risk is covered by the
+    # projector being on the gate + the shared ``EvidencePanelRefusalReason``
+    # disjointness drift detectors in ``test_evidence_routes_structure.py``.
+    # The static-shipped ``conformance_matrix.json`` is generated by the
+    # off-floor ``tools/generate_conformance_matrix_json.py`` build-time
+    # script (tools/ scripts are not coverage-tracked per Doctrine F);
+    # the JSON shape is pinned against the source Markdown by the
+    # build-time drift detector at
+    # ``tests/unit/tools/test_generate_conformance_matrix_json.py``.
+    ("src/cognic_agentos/packs/evidence/conformance_matrix.py", 0.95, 0.90),
+    # Sprint 7B.3 T7 — ADR-012 §41 five-gate approval composer.
+    # ``packs/approval_gates.py`` is the substantive enforcement boundary
+    # for the ``under_review → approved`` lifecycle transition: the
+    # pure-functional ``compose_approval_gates`` decides whether a
+    # plugin pack clears the 5 orthogonal gates (signature / evaluation
+    # / adversarial / owasp_conformance / reviewer_acknowledgement). The
+    # module owns 10 wire-protocol-public closed-enum Literals — the T7
+    # composer's 9 (5 per-gate red-reason vocabularies + the consolidated
+    # 22-value ``ApprovalGateRedReason`` union + ``ApprovalGateName`` +
+    # ``ApprovalGateOutcome`` + the binary ``SignatureGateOutcome`` which
+    # makes the illegal ``evidence_not_attached`` signature state
+    # unrepresentable per ADR-012 §110) plus the T8 override path's
+    # ``OverrideRefusalReason`` (4-value — the 412 refusal body's
+    # override-path branch) — that render into the 412
+    # ``ApproveRefusalResponse`` body, the ``_NON_OVERRIDABLE_GATES``
+    # ADR-012 §110 policy constant (cosign signature is the single
+    # non-overridable gate), the gate-5 derivation logic (the one gate
+    # the composer itself decides), and the T8 override seam
+    # (``evaluate_override_decision`` + the canonical-safe
+    # ``composition_snapshot`` serialiser). Drift in any Literal, the
+    # policy set, the derivation, or the override helper is wire-
+    # protocol-public / governance-doctrine regression. On the durable
+    # gate per the Sprint-7B.3 per-task precedent (T3-T6 each added their
+    # own CC module); promoted here at T7 rather than deferred to T11.
+    # Pure-functional (no I/O); the route handler at
+    # ``portal/api/packs/review_routes.py`` (T9) owns the wiring +
+    # pre-computes gates 1-4.
+    ("src/cognic_agentos/packs/approval_gates.py", 0.95, 0.90),
 )
 
 

@@ -1,0 +1,94 @@
+{
+  "a2a": {
+    "agent_cards": {
+      "wave_1": "supported",
+      "wave_2_promoted": false
+    },
+    "anonymous_unauthenticated_a2a": {
+      "wave_1": "forbidden",
+      "wave_2_promoted": false
+    },
+    "artifacts": {
+      "wave_1": "supported",
+      "wave_2_promoted": false
+    },
+    "cancellation": {
+      "wave_1": "supported",
+      "wave_2_promoted": false
+    },
+    "capability_negotiation": {
+      "wave_1": "supported",
+      "wave_2_promoted": false
+    },
+    "error_taxonomy": {
+      "wave_1": "supported",
+      "wave_2_promoted": false
+    },
+    "federated_a2a_across_organisations": {
+      "wave_1": "forbidden",
+      "wave_2_promoted": false
+    },
+    "long_running_task_resumption": {
+      "wave_1": "restricted",
+      "wave_2_promoted": true
+    },
+    "multi_modal_payloads": {
+      "wave_1": "forbidden",
+      "wave_2_promoted": true
+    },
+    "push_notification_config": {
+      "wave_1": "restricted",
+      "wave_2_promoted": true
+    },
+    "streaming_messages": {
+      "wave_1": "supported",
+      "wave_2_promoted": false
+    },
+    "tasks": {
+      "wave_1": "supported",
+      "wave_2_promoted": false
+    }
+  },
+  "mcp": {
+    "caching": {
+      "wave_1": "supported",
+      "wave_2_promoted": true
+    },
+    "cancellation": {
+      "wave_1": "supported",
+      "wave_2_promoted": false
+    },
+    "elicitation": {
+      "wave_1": "restricted",
+      "wave_2_promoted": true
+    },
+    "logging": {
+      "wave_1": "supported",
+      "wave_2_promoted": false
+    },
+    "progress_notifications": {
+      "wave_1": "supported",
+      "wave_2_promoted": false
+    },
+    "prompts": {
+      "wave_1": "supported",
+      "wave_2_promoted": true
+    },
+    "resources": {
+      "wave_1": "supported",
+      "wave_2_promoted": false
+    },
+    "roots": {
+      "wave_1": "restricted",
+      "wave_2_promoted": false
+    },
+    "sampling": {
+      "wave_1": "restricted",
+      "wave_2_promoted": true
+    },
+    "tools": {
+      "wave_1": "supported",
+      "wave_2_promoted": false
+    }
+  }
+}
