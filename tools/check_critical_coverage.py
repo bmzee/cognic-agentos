@@ -553,6 +553,62 @@ Rides the same single strict 95% line / 90% branch floor.  Gate
 size grows from 47 modules to 55 (+8).  All promoted modules
 verified at line=100%/branch=100% in the T11 + R45 + R46 fresh
 coverage.json baseline.
+
+----------------------------------------------------------------------
+Sprint 7B.3 — Reviewer evidence panels + 5-gate composer (gate 55 → 60).
+----------------------------------------------------------------------
+
+Sprint 7B.3 ships the 4 reviewer evidence panels + the pure-functional
+5-gate approval composer per ADR-012 §41 + §107-119.  Unlike the
+Sprint 7B.2 T12 batch promotion, every 7B.3 critical-controls module
+was promoted to the durable gate *by its own landing commit* (the
+per-task-promotion pattern) — the entries already appear in
+``_CRITICAL_FILES`` below with their per-task inline rationale.  This
+section records the batch for the docstring audit trail; T11 itself
+adds NO new ``_CRITICAL_FILES`` entry.
+
+  * ``packs/evidence/data_governance.py`` (T3) — ADR-017 data-
+    governance evidence panel projector + the wire-protocol-public
+    ``DataGovernanceDiffFlag`` closed-enum.
+  * ``packs/evidence/risk_tier.py`` (T4) — ADR-014 risk-tier evidence
+    panel + the ``ApprovalFlowKind`` closed-enum + the 1:1
+    ``_RISK_TIER_TO_APPROVAL_FLOW`` mapping table.
+  * ``packs/evidence/supply_chain.py`` (T5) — ADR-016 supply-chain
+    evidence panel + the ``AttestationKind`` closed-enum + the
+    7-year sigstore-bundle retention-floor math.
+  * ``packs/evidence/conformance_matrix.py`` (T6) — ADR-002 + ADR-003
+    protocol-conformance evidence panel + the ``MatrixComparisonFlag``
+    closed-enum + the R9 kind-applicability matrix + the persisted-
+    OWASP-verdict reconstruction.
+  * ``packs/approval_gates.py`` (T7) — ADR-012 §41 five-gate approval
+    composer; the pure-functional ``compose_approval_gates`` decides
+    the ``under_review → approved`` transition + owns 10 wire-
+    protocol-public closed-enum Literals + the T8 override path.
+
+Off-floor rationale for the 7B.3 route + scaffolding modules that
+deliberately do NOT promote (each carrying its own doctrinal carve-out
+documented at the call site):
+
+  * ``portal/api/packs/evidence_routes.py`` (T3-T6 panel handlers +
+    the T10 audit-emission seam) — same R32 doctrine as
+    ``inspection_routes.py``: the module owns no Human-only-decisions
+    enforcement boundary and no actor_type chain-payload provenance
+    surface.  The T10 ``pack.evidence_read.<panel>`` audit events are
+    emitted through ``packs/storage.py``'s
+    ``append_evidence_read_event`` method, which is ALREADY on the
+    durable gate — the CC risk is covered upstream.  (Plan Round-19
+    user decision, 2026-05-15, superseding the R3 P2 #3 on-gate
+    projection.)
+  * ``portal/api/packs/router.py`` — sub-router scaffolding.  The
+    7B.3 wiring extension (threading ``trust_gate`` /
+    ``trust_root_resolver`` through to the new
+    ``build_evidence_routes`` include) adds no decision logic, no
+    closed-enum vocabulary, and no refusal taxonomy.  Carrier file
+    only — consistent with the Sprint 7B.2 T3 carve-out.
+
+Rides the same single strict 95% line / 90% branch floor.  Gate size
+grows from 55 modules to 60 (+5).  The count is pinned by the T11
+self-test at ``tests/unit/tools/test_check_critical_coverage.py``.
 """
 
 from __future__ import annotations
@@ -929,7 +985,7 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     ("src/cognic_agentos/portal/api/packs/author_routes.py", 0.95, 0.90),
     ("src/cognic_agentos/portal/api/packs/review_routes.py", 0.95, 0.90),
     # Sprint 7B.3 T3 — pack data-governance evidence panel.
-    # AGENTS.md L54 + L156 explicit stop rule: "Pack data-governance
+    # AGENTS.md L54 + L167 explicit stop rule: "Pack data-governance
     # contracts (``packs/evidence/data_governance.py``, runtime DLP
     # enforcement)". The module owns the wire-protocol-public 7-value
     # ``DataGovernanceDiffFlag`` closed-enum vocabulary + the pure-
