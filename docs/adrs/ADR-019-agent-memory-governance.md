@@ -39,6 +39,20 @@ Three explicit tiers, every fact tagged with one:
 
 Cross-tenant memory is forbidden in Wave 1; reserved as a Wave 3 concern (federated A2A + AGNTCY identity).
 
+### Governed self-improvement
+
+AgentOS should support Hermes-style improvement: continuous behaviour improvement through memory, feedback, evaluation evidence, and capability-promotion proposals across long-running agent deployments. The improvement loop is a governed platform capability, not uncontrolled agent self-modification. Agent packs declare what the agent is allowed to learn; AgentOS controls how learning is stored, evaluated, promoted, approved, audited, rolled back, or refused.
+
+Three improvement classes are permitted:
+
+1. **Memory improvement** — preferences, prior cases, resolved workflows, and escalation patterns flow through the AgentOS memory API. Private agent-owned `long_term` memory is forbidden; the governed memory store is the only persistence path.
+2. **Behaviour improvement** — AgentOS records outcome metadata via `core/decision_history.py`, the gateway-call ledger, and the Sprint 12 eval harness. Routing-change recommendations are submitted as ordinary promotion proposals through the existing model lifecycle and promotion flow (ADR-013, including `POST /api/v1/models/{id}/promote`); agent-derived recommendations carry no special channel beyond the evidence they attach. Prompt/config changes surface as pack-version promotion proposals (ADR-012). No runtime mutation of routing, prompts, manifests, tools, skills, or pack contents occurs outside these named promotion gates.
+3. **Capability improvement** — an agent may propose a new tool, skill, workflow, prompt, or sub-agent template, but it cannot activate that proposal silently. The proposal is a structured recommendation submitted to AgentOS with evidence such as failed cases, suggested prompt deltas, or suggested tool specs. Pack authoring and cosign signing remain developer / bank-engineering activities per ADR-008 and ADR-016; the resulting signed pack artifact or pack update must pass plugin registry admission, supply-chain checks, evaluation gates, policy review, and human approval per AGENTS.md "Human-only decisions" where required.
+
+The pack manifest declares the allowed learning surface in `[tool.cognic.learning_surface]`: memory tiers, feedback signals, evaluation metrics, promotable artifact types, and human-approval requirements. Build-time shape validation belongs in `cli/validators/learning_surface.py`; closed-enum vocabularies belong in `cli/_governance_vocab.py`, matching the data-governance / risk-tier pattern. Attempts to self-modify outside the gate refuse with a closed-enum `learning_surface_violation` reason owned by that validator family. No runtime code rewrite, unreviewed prompt mutation, new tool activation, skill promotion, or sub-agent creation becomes active without AgentOS-mediated promotion.
+
+Comparison with Hermes Agent (Nous Research, 2026): Hermes is a personal-AI variant where the agent may directly write local memory, skill, and persona files that affect later invocations. AgentOS implements the same capability classes — persistent memory, procedural skills, persona/configuration, scheduled execution, and feedback-driven improvement — but mediates each through governed promotion gates: signed pack artifacts (ADR-016), pack lifecycle review and allow-listing (ADR-012), runtime approval for high-risk tiers (ADR-014), scheduler admission for background work (ADR-022), and chain-linked audit (ADR-006). The trade-off is intentional: slower iteration in exchange for bank-grade auditability, rollback, and supply-chain integrity.
+
 ### Governed memory API
 
 ```python
