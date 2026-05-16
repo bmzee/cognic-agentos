@@ -607,7 +607,7 @@ Sprint 1 is split into four focused sub-sprints for a clean bootstrap. Each ship
 
 **7B.3 (Reviewer evidence panels + 5-gate approval composition + reviewer-acknowledgement field enforcement):** **CLOSED** on `feat/sprint-7b3-reviewer-evidence-panels-5-gate` (2026-05-15; T1-T11 tip `bb23a9c`, completed by the T12 BUILD_PLAN status flip + T13 closeout); critical-controls floor 55 → 60; 5 CC modules promoted incrementally by their own landing commits (T3: `packs/evidence/data_governance.py`; T4: `packs/evidence/risk_tier.py`; T5: `packs/evidence/supply_chain.py`; T6: `packs/evidence/conformance_matrix.py`; T7: `packs/approval_gates.py`). Ships the 4 reviewer evidence panels (data governance / risk tier / supply chain / conformance matrix) + the pure-functional 5-gate approval composer (`compose_approval_gates`) wired into the `under_review → approved` approve endpoint (T9, replacing the Sprint-7B.2 503 stub) + the ADR-012 §107 override path (T8) + evidence-panel access audit emission (T10). `portal/api/packs/evidence_routes.py` ships the 4 GET panel endpoints but stays OFF the durable coverage gate per the T11 R19 user decision (R32 doctrine — the CC risk is covered upstream by the on-gate `packs/storage.py` audit-emission seam). Stacked directly on the merged Sprint-7B.2 tip (`a9631ff` on `main`); pushes as its own PR. See [closeout note](closeouts/2026-05-15-sprint-7b3-reviewer-evidence-panels-5-gate.md). **MERGED to `main` via PR #24** (`c53de7a`).
 
-**7B.4 (UI event-stream endpoints + RBAC denial chain events promotion + `UIEventBroker` primitive + `ElicitationAdapter` Protocol + `elicitation.rego` stop-rule):** **CLOSED** on `feat/sprint-7b4-ui-event-stream-endpoints` (2026-05-16; pre-T14 tip `04d680e`); critical-controls floor 60 → 63; 3 CC modules promoted at T13 batch (`portal/api/ui/action_routes.py` + `stream_routes.py` + `elicitation_gate.py`) + 1 new stop-rule policy bundle (`policies/_default/elicitation.rego`). Ships ADR-020's full UI event-stream surface: 3 SSE GET endpoints + POST /actions discriminated-union dispatch + `RequireUIAction` FastAPI dep + portable JSON schema at `/.well-known/cognic-ui-events.json` (snapshot-pinned drift detector) + 11-family Wave-1 typed-event taxonomy + 9-family SSE-streamed subset + 16-byte deterministic chain-derived event_id cursor for SSE-resume + `UIEventBroker` FastAPI-free in-memory pub/sub primitive + ContextVar-based typed-event capture during awaited DH-append + `ElicitationAdapter` Protocol with `KernelDefaultElicitationAdapter` fail-loud scaffold + 5-step elicitation gate (`evaluate_elicitation_submission`) wiring the `elicitation.rego` Step-5 decision-point + dual-surface RBAC denial chain events (log FIRST + broker chain row SECOND + fail-closed 500 `rbac_denial_emit_failed`) + `UIRBACScope` 8-value peer Literal + 5 new closed-enum vocabularies + AST architectural-arrow regressions + runtime event_id recompute cross-check. T14 R0 coverage repair (post-T13 finding): `stream_routes.py` initially landed at 91.71% line / 82.50% branch — 8 focused tests at `test_stream_routes_coverage_branches.py` closed the gap to 100/100, honoring `feedback_strict_review_off_gate` doctrine (gap is test-suite incompleteness, not off-gate justification). User-locked Hybrid SSE test-strategy doctrine (ASGITransport for refusals + uvicorn-in-loop for streaming + direct-broker for supplementals) — established after ASGITransport-buffer-full-body discovery prevented streaming-test viability. Stacked directly on the merged Sprint-7B.3 tip (`c53de7a` on `main`); pushes as its own PR. See [closeout note](closeouts/2026-05-16-sprint-7b4-ui-event-stream-endpoints.md). Branch READY-FOR-GATE awaiting push/PR/merge authorization.
+**7B.4 (UI event-stream endpoints + RBAC denial chain events promotion + `UIEventBroker` primitive + `ElicitationAdapter` Protocol + `elicitation.rego` stop-rule):** **CLOSED** on `feat/sprint-7b4-ui-event-stream-endpoints` (2026-05-16; pre-T14 tip `04d680e`); critical-controls floor 60 → 63; 3 CC modules promoted at T13 batch (`portal/api/ui/action_routes.py` + `stream_routes.py` + `elicitation_gate.py`) + 1 new stop-rule policy bundle (`policies/_default/elicitation.rego`). Ships ADR-020's full UI event-stream surface: 3 SSE GET endpoints + POST /actions discriminated-union dispatch + `RequireUIAction` FastAPI dep + portable JSON schema at `/.well-known/cognic-ui-events.json` (snapshot-pinned drift detector) + 11-family Wave-1 typed-event taxonomy + 9-family SSE-streamed subset + 16-byte deterministic chain-derived event_id cursor for SSE-resume + `UIEventBroker` FastAPI-free in-memory pub/sub primitive + ContextVar-based typed-event capture during awaited DH-append + `ElicitationAdapter` Protocol with `KernelDefaultElicitationAdapter` fail-loud scaffold + 5-step elicitation gate (`evaluate_elicitation_submission`) wiring the `elicitation.rego` Step-5 decision-point + dual-surface RBAC denial chain events (log FIRST + broker chain row SECOND + fail-closed 500 `rbac_denial_emit_failed`) + `UIRBACScope` 8-value peer Literal + 5 new closed-enum vocabularies + AST architectural-arrow regressions + runtime event_id recompute cross-check. T14 R0 coverage repair (post-T13 finding): `stream_routes.py` initially landed at 91.71% line / 82.50% branch — 8 focused tests at `test_stream_routes_coverage_branches.py` closed the gap to 100/100, honoring `feedback_strict_review_off_gate` doctrine (gap is test-suite incompleteness, not off-gate justification). User-locked Hybrid SSE test-strategy doctrine (ASGITransport for refusals + uvicorn-in-loop for streaming + direct-broker for supplementals) — established after ASGITransport-buffer-full-body discovery prevented streaming-test viability. Stacked directly on the merged Sprint-7B.3 tip (`c53de7a` on `main`); merged to `main` via PR #25 (`3674065`) on 2026-05-16. See [closeout note](closeouts/2026-05-16-sprint-7b4-ui-event-stream-endpoints.md).
 
 **Sprint 7B is now CLOSED.** All 4 sub-sprints (7B.1 → 7B.4) shipped.
 
@@ -689,7 +689,7 @@ Sprint 1 is split into four focused sub-sprints for a clean bootstrap. Each ship
 
 ---
 
-## Phase 3 — Sandbox (with Resumable Sessions) + Compliance + Model Lifecycle (Sprints 8, 8.5, 9, 9.5, 10, ~10 work-units)
+## Phase 3 — Sandbox (with Resumable Sessions) + Compliance + Model Lifecycle + Runtime Scheduler (Sprints 8, 8.5, 9, 9.5, 10, 10.5, ~13 work-units)
 
 ### Sprint 8 — Sandbox primitive *(3 work-units)*
 
@@ -749,15 +749,18 @@ Sprint 1 is split into four focused sub-sprints for a clean bootstrap. Each ship
 - `core/decision_history.py` extension — same pattern
 - `compliance/iso42001/evidence_pack.py` — `export(period, scope)` returns a tarball: per-control coverage + raw evidence rows + Merkle root + signed manifest
 - `portal/api/app.py` — `GET /api/v1/compliance/evidence-pack?from=...&to=...&scope=...`
+- `portal/api/app.py` — `GET /api/v1/traces/{trace_id}` trace explorer endpoint returning the chain-walked run timeline from `decision_history` + `audit_event`; this is evidence-pack-adjacent, not a new event store
 
 **Tests:**
 - `test_control_mapping.py` — every governance hook emits expected control tags
 - `test_evidence_pack.py` — generate pack, validate Merkle root, validate signed manifest
 - `test_evidence_pack_completeness.py` — pack contains every audit event in window
+- `test_trace_explorer.py` — trace timeline walks parent/child chain links in order, preserves examiner-visible event provenance, and never returns cross-tenant rows
 
 **Exit criteria:**
 - Generated evidence pack passes external Merkle-root verification (manual cosign verify)
 - Initial 8 controls have ≥1 hook tagged each
+- A trace timeline can reconstruct a run from `decision_history` without requiring UI event-stream state
 
 ### Sprint 9.5 — Model Registry primitive *(2 work-units)*
 
@@ -835,7 +838,40 @@ Sprint 1 is split into four focused sub-sprints for a clean bootstrap. Each ship
 - Credentials provably revoked when sandbox destroyed
 - Per-tenant TTL caps enforced
 
-**Phase 3 exit:** AgentOS provides bank-grade isolation + audit-evidence-export ready for examiner + model lifecycle registry that closes the "which fine-tuned model handled which case" procurement gap. Future-product hook (Cognic Forge — Wave 2 separate repo per ADR-013) can publish fine-tuned models into the registry end-to-end.
+### Sprint 10.5 — Runtime scheduler / work queue *(3 work-units)*
+
+**Goal:** ship the first-class AgentOS scheduler/orchestrator primitive per ADR-022. The scheduler admits, queues, runs, cancels, preempts, expires, and audits platform work before Sprint 11 sub-agents consume it. This is the missing OS resource-management layer: priority queues, per-tenant concurrency, backpressure, budget inheritance, policy evaluation, and queue-time quota refusal.
+
+**Deliverables:**
+- `core/scheduler/__init__.py` — public scheduler types and closed-enum contracts (`SchedulerPriorityClass`, `SchedulerAdmissionOutcome`, `SchedulerTaskState`, `SchedulerRefusalReason`). `SchedulerAdmissionOutcome` is the 7-value submit-result union (2 accepted + 5 refused); `SchedulerRefusalReason` is exactly the 5-value refusal subset used in `scheduler.admission_refused.payload.reason`, not an independent vocabulary.
+- `core/scheduler/queue.py` — two-class Wave-1 queue (`interactive` / `background`), FIFO within class, bounded queue depths, per-tenant / per-pack / per-actor concurrency counters
+- `core/scheduler/storage.py` — Postgres-backed pending / running / terminal task state via `RelationalAdapter`; task lifecycle rows link to `decision_history` trace IDs
+- `core/scheduler/policy.py` — admission policy glue: evaluates `scheduler.rego`, consults kill switches and quota projections, computes retry-after values for queue-full backpressure
+- `core/scheduler/engine.py` — public async seam: `submit(...)`, `cancel(task_id)`, `mark_running(...)`, `complete(...)`, `fail(...)`, `preempt(...)`, `reap_expired(...)`; emits audit + decision-history lifecycle records
+- `policies/_default/scheduler.rego` — default-deny Rego bundle at `data.cognic.scheduler.admit.allow`; aggressive kernel default refuses unsafe class / tier combinations until tenant overlays loosen them
+- `core/config.py` extension — scheduler defaults for priority queue depths, per-tenant / per-pack / per-actor caps, expiry windows, and retry-after clamps; tests pin boundedness, not the exact numbers
+- Harness / MCP / A2A / sandbox integration seams — high-level invocation entry points call `scheduler.submit(...)` before dispatch; actual pack/tool execution remains owned by the existing subsystem
+
+**Tests:**
+- `test_scheduler_priority_fifo.py` — interactive work is admitted ahead of background work; FIFO preserved within each class
+- `test_scheduler_concurrency_caps.py` — per-tenant, per-pack, and per-actor caps enqueue when capacity is saturated and refuse only when the matching queue is full
+- `test_scheduler_backpressure.py` — queue-full returns closed-enum refusal + bounded `retry_after_s`; cap-saturated-but-queue-has-room never refuses
+- `test_scheduler_policy_rego.py` — `scheduler.rego` default-deny path refuses unsafe class / tier combinations; OPA errors fail closed
+- `test_scheduler_quota_submit_refusal.py` — quota exhaustion refuses at submit time before any model/tool call is made; emits `quota.refused_at_queue`
+- `test_scheduler_cancel_preempt.py` — cancellation delivers cooperative `asyncio.CancelledError`; token-budget exhaustion preempts in-flight tasks; sandbox-boundary kill records `sandbox_boundary_killed`
+- `test_scheduler_subagent_budget_inheritance.py` — child task submitted with `parent_task_id` inherits the parent's remaining budget snapshot and cannot exceed the narrower child-pack quota
+- `test_scheduler_audit_chain.py` — admission + lifecycle events hash-chain through `decision_history` with ISO 42001 A.6.2.5 tags
+
+**Exit criteria:**
+- Scheduler admits immediate-capacity tasks, queues saturated-cap tasks, and refuses only queue-full / policy / quota / kill-switch / invalid-pack-state cases with closed-enum reasons
+- Interactive vs background ordering, bounded backpressure, and concurrency caps are proven by tests
+- Quotas are scheduler-evaluable at submit time, not only accumulated after gateway calls
+- Sub-agent child tasks can depend on scheduler budget inheritance in Sprint 11
+- `core/scheduler/{engine,queue,policy,storage}.py` enter the critical-controls coverage gate at 95/90 when Sprint 10.5 implementation lands; `policies/_default/scheduler.rego` enters the stop-rule policy-bundle list
+
+**Post-Phase-4 Wave 2 note:** keep weighted fair-share, multi-level feedback queues, arbitrary-N priority classes, cross-instance work-stealing, priority-inversion detection, operator-initiated preemption, and auto-class-promotion on the future-work list without assigning an exact sprint number yet. Do not pull those into Sprint 10.5; schedule them only after Phase 4 telemetry or bank demand proves the Wave-1 two-class FIFO model is insufficient.
+
+**Phase 3 exit:** AgentOS provides bank-grade isolation + audit-evidence-export ready for examiner + model lifecycle registry that closes the "which fine-tuned model handled which case" procurement gap, plus the ADR-022 runtime scheduler substrate that manages work admission, priority, cancellation, backpressure, and quota refusal before sub-agents arrive. Future-product hook (Cognic Forge — Wave 2 separate repo per ADR-013) can publish fine-tuned models into the registry end-to-end.
 
 ---
 
@@ -843,12 +879,12 @@ Sprint 1 is split into four focused sub-sprints for a clean bootstrap. Each ship
 
 ### Sprint 11 — Sub-agent primitive *(3 work-units)*
 
-**Goal:** dynamic delegation per ADR-005; orchestrator-worker spawning with isolated context + privilege de-escalation.
+**Goal:** dynamic delegation per ADR-005; orchestrator-worker spawning with isolated context + privilege de-escalation, submitted through the Sprint 10.5 scheduler so child tasks inherit narrowed budgets and queue-time policy decisions.
 
 **Deliverables:**
 - `subagent/__init__.py` — `SubAgent` primitive
-- `subagent/spawn.py` — A2A-backed `invoke(prompt)` flow
-- `subagent/policy.py` — depth, budget, tool-allow-list narrowing
+- `subagent/spawn.py` — A2A-backed `invoke(prompt)` flow that calls `SchedulerEngine.submit(..., parent_task_id=...)` before child dispatch
+- `subagent/policy.py` — depth and tool-allow-list narrowing; budget arithmetic delegates to scheduler parent-budget snapshots instead of reimplementing queue policy
 - `core/decision_history.py` extension — child record links to parent's chain hash
 - Harness extension — `spawn_subagent(...)` exposed to agent packs
 
@@ -856,22 +892,25 @@ Sprint 1 is split into four focused sub-sprints for a clean bootstrap. Each ship
 - `test_subagent_spawn.py` — parent agent spawns child, child returns result, parent context unchanged
 - `test_subagent_privilege.py` — child cannot escalate to a tool parent didn't have
 - `test_subagent_depth.py` — depth-4 spawn beyond `max_depth=3` → escalation triggered
-- `test_subagent_budget.py` — exceeding token budget → child terminated + parent informed
+- `test_subagent_budget.py` — exceeding token budget → scheduler preempts child + parent informed
+- `test_subagent_scheduler_inheritance.py` — child cannot exceed parent remaining budget or bypass scheduler policy by spawning recursively
 - `test_subagent_audit_chain.py` — Merkle proof over parent + child events verifies
 
 **Exit criteria:**
 - Cross-agent audit chain verifiable
 - Privilege escalation provably blocked
+- Every child task flows through the scheduler; no direct child execution seam bypasses `core/scheduler`
 
 ### Sprint 11.5 — Agent memory governance *(2 work-units)*
 
-**Goal:** ship `core/memory/` per ADR-019 — the governed memory API every Layer C agent uses for `remember / recall / forget / redact / export / list_for_subject`. Three tiers (`scratch` / `task` / `long_term`); default-deny for `long_term`; per-write data-class + purpose + consent enforcement; chain-linked audit; regulator-erasure pathway. Lands before Sprint 12 so the eval harness can exercise memory-aware agents.
+**Goal:** ship `core/memory/` per ADR-019 — the governed memory API every Layer C agent uses for `remember / recall / recall_episodes / forget / redact / export / list_for_subject`. Three tiers (`scratch` / `task` / `long_term`); default-deny for `long_term`; per-write data-class + purpose + consent enforcement; chain-linked audit; regulator-erasure pathway. Lands before Sprint 12 so the eval harness can exercise memory-aware agents.
 
 **Deliverables:**
-- `core/memory/__init__.py`, `memory/api.py` — `MemoryAPI` with the six operations; injected into every Layer C agent via the harness; direct DB access from Layer C is architecturally forbidden (architecture-discipline test enforces)
+- `core/memory/__init__.py`, `memory/api.py` — `MemoryAPI` with seven operations; injected into every Layer C agent via the harness; direct DB access from Layer C is architecturally forbidden (architecture-discipline test enforces)
 - `memory/tiers.py` — `MemoryTier` enum (`scratch`, `task`, `long_term`) + per-tier policy defaults
 - `memory/storage.py` — `MemoryAdapter` protocol + `PostgresMemoryAdapter` (relational; per-tenant schema; tier columns + JSONB value) + `RedisMemoryAdapter` (scratch-only, sub-second TTL)
 - `memory/vector.py` — `VectorStoreAdapter` integration (Qdrant default per ADR-009) for semantic recall; data-class metadata co-stored for per-purpose filtering
+- `memory/episodes.py` — `recall_episodes(subject_id, *, similarity_threshold, purpose)` view over governed `long_term` memories joined to `decision_history` outcomes; this is episodic recall as an API operation, not a fourth memory tier
 - **`core/dlp/__init__.py`, `core/dlp/scanner.py` (minimal seed; expanded in Sprint 13.5)** — write-time DLP scanner so memory writes have classification at registration. Scope of this seed:
   - Pluggable `DLPScanner` protocol; reference implementation uses Microsoft Presidio (or equivalent) with pinned recogniser set for: `customer_pii` (names, IDs, emails, phone numbers), `payment_action` (card numbers, IBANs, SWIFT codes), `regulator_communication` (regulator-name dictionary)
   - Returns `DLPVerdict { detected_classes, redaction_spans, confidence }`
@@ -896,7 +935,8 @@ Sprint 1 is split into four focused sub-sprints for a clean bootstrap. Each ship
 - **Approval-engine transitional rule (mirrors Sprint 5 MCP rule per ADR-014)**: between Sprint 11.5 ship and Sprint 13.5 (when `core/approval` lands), `long_term` writes from packs with `risk_tier >= customer_data_write` are **refused** with error `memory_approval_engine_not_available`. The write attempt is audit-logged with declared tier so banks can plan rollout. `scratch` and `task` tier writes work normally; `long_term` writes from `read_only` / `internal_write` packs work normally. Sprint 13.5 lifts the refusal by routing high-risk `long_term` writes through `core/approval` (same flow as MCP tool calls). Removal of the transitional rule is itself an audit event (`memory_approval.engine_enabled`) so the cutover is provable.
 
 **Tests:**
-- `test_memory_api_six_operations.py` — every operation works for the happy path
+- `test_memory_api_seven_operations.py` — every operation works for the happy path
+- `test_memory_recall_episodes.py` — episodic recall returns prior cases / outcomes from governed memory + decision-history linkage, respects purpose filtering, and never creates a fourth tier
 - `test_memory_tier_default_deny.py` — `long_term` write without manifest declaration → refused; with declaration but tenant policy denies → refused; both pass → accepted
 - `test_memory_data_class_consent.py` — restricted data class + missing consent token → refused; valid consent → accepted with consent ledger event chain-linked
 - `test_memory_purpose_alignment.py` — write with purpose A; recall with mismatched purpose → refused per `memory_purpose_matrix.rego`
@@ -911,8 +951,9 @@ Sprint 1 is split into four focused sub-sprints for a clean bootstrap. Each ship
 - `test_memory_high_risk_long_term_refused_pre_13_5.py` — pack with `risk_tier = "customer_data_write"` attempting `long_term` write → refused with `memory_approval_engine_not_available`; same pack's `task` and `scratch` writes succeed; `read_only` pack's `long_term` write succeeds; refusal audit-logged with declared tier
 
 **Exit criteria:**
-- All six MemoryAPI operations work end-to-end for all three tiers
+- All seven MemoryAPI operations work end-to-end for all three tiers
 - Default-deny long-term enforced; cross-subject recall enforced
+- Episodic recall is available through `recall_episodes(...)` and remains backed by governed `long_term` + `decision_history`, not private agent-owned memory
 - Regulator-erasure pathway provably purges + emits chain-of-custody event
 - Layer C agents cannot bypass MemoryAPI (architecture test green)
 - Memory events flow into ISO 42001 evidence-pack export
@@ -997,13 +1038,14 @@ Sprint 1 is split into four focused sub-sprints for a clean bootstrap. Each ship
 *Policy-as-code (per ADR-015):*
 - **`core/policy/engine.py` extension** — extends the Sprint 4 seed evaluator with hot-reload (bundle ETag change → reload + audit event; in-flight evaluations see new bundle ≤60s), decision-trail API, and extends the bundle set
 - `policies/_default/` — Cognic-published default Rego bundles complete set: `supply_chain.rego` (Sprint 4), `memory.rego` + `memory_purpose_matrix.rego` (Sprint 11.5), plus this sprint adds `packs.rego`, `models.rego`, `tools.rego`, `sandbox.rego`, `subagent.rego`, `lifecycle.rego`, `sampling.rego`, `shared.rego`
-- Refactor existing inline checks (Sprint 7B lifecycle, Sprint 8 sandbox egress, Sprint 11 sub-agent spawn, Sprint 9.5 model promotion) to delegate to `policy.engine.evaluate(decision, input)`. Sprint 4 trust gate and Sprint 11.5 memory enforcement already delegate (via the seed) — this sprint just expands their bundles, no refactor needed
+- Refactor existing inline checks (Sprint 7B lifecycle, Sprint 8 sandbox egress, Sprint 10.5 scheduler admission, Sprint 11 sub-agent spawn, Sprint 9.5 model promotion) to delegate to `policy.engine.evaluate(decision, input)`. Sprint 4 trust gate and Sprint 11.5 memory enforcement already delegate (via the seed) — this sprint just expands their bundles, no refactor needed
 - Portal API: `GET /api/v1/policy/decisions/{trace_id}` returns the per-decision audit trail (which rule matched, what input, what outcome)
 - Bundle versioning: each bundle has a content hash; loading a new bundle emits `policy.bundle_loaded` event hash-chained into decision_history
 
 *Emergency controls (per ADR-018):*
 - **Extends** the Sprint 11.5 `core/emergency/` seed (which shipped `memory.write_freeze` only) with the full kill-switch class set: `pack`, `tool`, `model`, `tenant_packs`, `tenant_full`, `cloud`, `feature`. Same Redis schema, same fail-closed semantics — only the class enum and the harness call sites grow
-- `emergency/quotas.py` — quota classes (tokens, spend, invocations, recursion-depth) accumulating from gateway-call ledger (per ADR-007)
+- `emergency/quotas.py` — quota classes (tokens, spend, invocations, recursion-depth) accumulating from gateway-call ledger (per ADR-007) and exposing scheduler-evaluable projections at submit time
+- `core/scheduler/policy.py` integration — quota exhaustion is refused at the scheduler admission boundary before model/tool work starts; emits `quota.refused_at_queue` chain event, while gateway post-execution reconciliation still records actual token/spend usage
 - Portal API: `GET /api/v1/emergency/kill-switches`, `POST /api/v1/emergency/kill-switches`, `DELETE /api/v1/emergency/kill-switches/{key}`, `GET /api/v1/quotas?tenant=...`, `PUT /api/v1/quotas/{class}/{scope}`
 - RBAC scopes: `emergency.kill.pack`, `emergency.kill.tool`, `emergency.kill.model`, `emergency.kill.tenant_packs`, `emergency.kill.tenant_full`, `emergency.kill.cloud`, `emergency.kill.feature`, `quota.override.<class>`
 - Fail-closed behaviour: if Redis is unreachable, harness uses last-cached state for ≤60s then refuses all invocations (does NOT default permissive)
@@ -1022,6 +1064,7 @@ Sprint 1 is split into four focused sub-sprints for a clean bootstrap. Each ship
 - `test_kill_switch_propagation.py` — flip a switch; harness rejects within ≤30s P99 across 100 simulated in-flight invocations
 - `test_kill_switch_fail_closed.py` — Redis unreachable >60s → harness refuses all calls (no permissive fallback)
 - `test_quota_enforcement.py` — soft warn at 80%, hard refuse at 100%, override extends with audit
+- `test_quota_refused_at_queue.py` — exhausted quota refuses at scheduler submit, emits `quota.refused_at_queue`, and proves no downstream gateway call is made
 - `test_emergency_audit_chain.py` — full kill-switch flip → reject → revert → restore audit chain integrity verifies via Merkle proof
 - `test_high_risk_tier_unblocked_post_13_5.py` — pack registered in Sprint 5 with `risk_tier = "customer_data_read"` was refused at invocation; after Sprint 13.5 module-load, the same pack invocation succeeds (subject to approval flow); `tool_approval.engine_enabled` audit event is present at the cutover
 - `test_memory_high_risk_long_term_unblocked_post_13_5.py` — pack with `risk_tier = "customer_data_write"` was refused at `long_term` write before 13.5; after 13.5 module-load, the same write succeeds (subject to approval flow); `memory_approval.engine_enabled` audit event is present at the cutover
@@ -1030,7 +1073,7 @@ Sprint 1 is split into four focused sub-sprints for a clean bootstrap. Each ship
 - Runtime tool approval enforces all 8 risk tiers; 4-eyes distinctness verified
 - Policy engine has 6 default bundles loaded; every Sprint 4 / 7B / 8 / 9.5 / 11 / 13.5 inline check refactored to delegate
 - Kill switches propagate within 30s P99
-- Quotas accumulate from the gateway-call ledger correctly; soft/hard thresholds fire as designed
+- Quotas accumulate from the gateway-call ledger correctly, feed scheduler admission before execution, and soft/hard thresholds fire as designed
 - Fail-closed Redis behaviour proven (deliberate Redis kill → harness refuses; restart → harness recovers)
 - 10 new tests green on top of Sprint 13's eval/adversarial suite
 
@@ -1141,7 +1184,7 @@ These hold for every sprint:
 
 ## Schedule-risk acknowledgement
 
-Eight sprints in the current plan are sized **optimistically** at the work-units shown; treat them as floors, not ceilings. If any of them runs over by ≥1 work-unit, stop and split rather than push through:
+Nine sprints in the current plan are sized **optimistically** at the work-units shown; treat them as floors, not ceilings. If any of them runs over by ≥1 work-unit, stop and split rather than push through:
 
 | Sprint | Risk | Why |
 |---|---|---|
@@ -1151,29 +1194,30 @@ Eight sprints in the current plan are sized **optimistically** at the work-units
 | **Sprint 7A2 — Hook packs + runtime hook engine** (2.5 wu) | New first-class pack primitive plus runtime DLP hook dispatch: SDK base, `cognic.hooks` entry points, manifest validation, sign/verify admission, registry, deterministic dispatcher, timeout/failure policy, audit evidence, and ADR-017 pre/post DLP wiring. **Realistic range: 2.5-4 wu.** Mitigation: split into 7A2a-authoring-and-admission + 7A2b-runtime-dispatch-and-DLP if it overruns Day 3. |
 | **Sprint 7B — Bank pack lifecycle + UI event-stream endpoints** (3.5 wu) | 11 lifecycle states × ~30 portal endpoints × RBAC scopes × OWASP conformance integration × **four reviewer evidence panels (data governance, risk tier, supply chain, conformance)** × **UI event-stream SSE endpoints + frontend-action POST + portable JSON schema** × audit chain linkage × five-gate approval composition. State-machine surface area is the largest single sprint in the plan. **Realistic range: 3.5-5.5 wu.** Mitigation: split into 7B-state-machine-and-storage + 7B-portal-API + 7B-evidence-panels + 7B-ui-events if it overruns Day 3. |
 | **Sprint 9.5 — Model Registry** (2 wu) | New entity type + ~7 portal endpoints + 7 RBAC scopes + ISO 42001 control tagging + decision_history schema extension + provider-honesty endpoint extension + cosign verification + eval/adversarial gate integration. **Realistic range: 2-3 wu.** Mitigation: split into 9.5a-storage-and-API + 9.5b-gate-integration if it overruns Day 2. |
-| **Sprint 11.5 — Agent memory governance** (2 wu) | New platform primitive: 6 MemoryAPI operations × 3 tiers × per-write enforcement (data-class + purpose + consent) × forget/redact/export pathways × kill-switch integration × Postgres + Redis adapters + vector-store integration. 12 new tests including regulator-erasure chain-of-custody. **Realistic range: 2-3.5 wu.** Mitigation: split into 11.5a-api-and-storage + 11.5b-enforcement-and-erasure if it overruns Day 2. |
-| **Sprint 13.5 — Approval + Policy + Kill switches** (3 wu) | Three new platform primitives in one sprint: runtime tool approval state machine + OPA/Rego integration + Redis-backed kill-switch + quotas + 6 portal API surfaces + 10 new tests including fail-closed paths. **Realistic range: 3-5 wu.** Mitigation: split into 13.5a-approval + 13.5b-policy + 13.5c-emergency if it overruns Day 3. |
+| **Sprint 10.5 — Runtime scheduler / work queue** (3 wu) | New OS primitive: priority queues, per-tenant / per-pack / per-actor concurrency caps, queue-full backpressure, policy/OPA admission, quota refusal at submit time, cancellation/preemption, persistence, and audit linkage before Sprint 11 sub-agents depend on it. **Realistic range: 3-4.5 wu.** Mitigation: split into 10.5a-engine-queue-storage + 10.5b-policy-integration-entrypoints if it overruns Day 3. |
+| **Sprint 11.5 — Agent memory governance** (2 wu) | New platform primitive: 7 MemoryAPI operations × 3 tiers × per-write enforcement (data-class + purpose + consent) × forget/redact/export pathways × episodic recall over decision_history × kill-switch integration × Postgres + Redis adapters + vector-store integration. 13 new tests including regulator-erasure chain-of-custody. **Realistic range: 2-3.5 wu.** Mitigation: split into 11.5a-api-and-storage + 11.5b-enforcement-and-erasure if it overruns Day 2. |
+| **Sprint 13.5 — Approval + Policy + Kill switches** (3 wu) | Three new platform primitives in one sprint: runtime tool approval state machine + OPA/Rego integration + Redis-backed kill-switch + quotas + scheduler-admission quota integration + 6 portal API surfaces + 11 new tests including fail-closed paths. **Realistic range: 3-5 wu.** Mitigation: split into 13.5a-approval + 13.5b-policy + 13.5c-emergency if it overruns Day 3. |
 
-The 55-work-unit Phases-1-4 total assumes these sprints land at their floor estimates. If any overrun → recompute total. **Don't push through a red sprint to keep the calendar; the ADR enforcement architecture makes recovery expensive once code is in.**
+The 58-work-unit Phases-1-4 total assumes these sprints land at their floor estimates. If any overrun → recompute total. **Don't push through a red sprint to keep the calendar; the ADR enforcement architecture makes recovery expensive once code is in.**
 
-### Treat 55 wu as a disciplined lower bound, not a commitment
+### Treat 58 wu as a disciplined lower bound, not a commitment
 
-This number is the floor across **eight** already-flagged-optimistic sprints (1D, 5, 7A, 7A2, 7B, 9.5, 11.5, 13.5). The eight flagged sprints sum to 20.5 wu at the floor and 32 wu at the ceiling — a Δ of 11.5 wu. So Phases 1-4 realistic envelope = **55 wu floor, ~61 wu midpoint, ~66.5 wu ceiling** if every flagged sprint hits its ceiling. That is not a forecast — it is the honest envelope.
+This number is the floor across **nine** already-flagged-optimistic sprints (1D, 5, 7A, 7A2, 7B, 9.5, 10.5, 11.5, 13.5). The nine flagged sprints sum to 23.5 wu at the floor and 36.5 wu at the ceiling — a Δ of 13 wu. So Phases 1-4 realistic envelope = **58 wu floor, ~65 wu midpoint, ~71 wu ceiling** if every flagged sprint hits its ceiling. That is not a forecast — it is the honest envelope.
 
 For external commitments (procurement schedules, examiner timelines, board updates), use:
 
 | Posture | Number to use |
 |---|---|
-| **Internal velocity tracking** | 55 wu (the floor) |
-| **Bank stakeholder commitment** | 61 wu (midpoint; allows ~half the flagged sprints to overrun) |
-| **Procurement / regulatory deadline** | 66.5 wu (ceiling; no sprint splits required) |
+| **Internal velocity tracking** | 58 wu (the floor) |
+| **Bank stakeholder commitment** | 65 wu (midpoint; allows ~half the flagged sprints to overrun) |
+| **Procurement / regulatory deadline** | 71 wu (ceiling; no sprint splits required) |
 
 Calendar translation (~3-4 wu per week solo + Claude-Code throughput):
-- Floor: 14-15 weeks focused / 19-24 calendar
-- Mid: 15-17 weeks focused / 21-26 calendar
-- Ceiling: 17-19 weeks focused / 25-31 calendar
+- Floor: 15-16 weeks focused / 20-25 calendar
+- Mid: 16-18 weeks focused / 22-28 calendar
+- Ceiling: 18-20 weeks focused / 26-33 calendar
 
-**Anyone quoting "Phases 1-4 in ~19-24 calendar weeks" is quoting the floor** — say so explicitly when escalating. Don't let "the plan said 19 weeks" become a commitment that breaks under the first sprint overrun.
+**Anyone quoting "Phases 1-4 in ~20-25 calendar weeks" is quoting the floor** — say so explicitly when escalating. Don't let "the plan said 20 weeks" become a commitment that breaks under the first sprint overrun.
 
 ## Total budget
 
@@ -1181,15 +1225,15 @@ Calendar translation (~3-4 wu per week solo + Claude-Code throughput):
 |---|---|---|---|
 | **1 Foundation** | 1A, 1B, 1C, 1D, 2, 3 | 12 | ~2.5-3 weeks |
 | **2 Protocol + SDK + Pack Lifecycle + UI Event-Stream** | 4, 5, 6, 7A, 7A2, 7B | 17 | ~4 weeks |
-| **3 Sandbox (with Resumable Sessions) + Compliance + Model Lifecycle** | 8, 8.5, 9, 9.5, 10 | 10 | ~2-2.5 weeks |
+| **3 Sandbox (with Resumable Sessions) + Compliance + Model Lifecycle + Runtime Scheduler** | 8, 8.5, 9, 9.5, 10, 10.5 | 13 | ~3-3.5 weeks |
 | **4 Sub-agent + Memory Governance + Quality Gates + Policy + Kill Switches + Deploy** | 11, 11.5, 12, 13, 13.5, 14, 15 | 16 | ~3.5 weeks |
-| **Phases 1-4 total** | 22 sub-sprints | **55 work-units** | **~14-15 weeks focused / 19-24 calendar** |
+| **Phases 1-4 total** | 23 sub-sprints | **58 work-units** | **~15-16 weeks focused / 20-25 calendar** |
 | **5 Studio (deferred)** | 16-21 | 13 | +3 weeks focused / +5-6 calendar |
-| **Including Studio** | 28 sub-sprints | **68 work-units** | **~17-18 weeks focused / 24-30 calendar** |
+| **Including Studio** | 29 sub-sprints | **71 work-units** | **~18-19 weeks focused / 25-31 calendar** |
 
 Phases 1-4 are the bank-deployable platform. Phase 5 ships only after Phase 4 stabilises and Studio is explicitly demanded.
 
-**Why the totals went up since the prior revision:** Sprint 8.5 (Resumable Session API per ADR-004 amendment) added 1 wu in Phase 3; Sprint 13.5 (Runtime tool approval + Policy-as-code + Emergency controls per ADR-014/015/018) added 3 wu in Phase 4; Sprint 11.5 (Agent memory governance per ADR-019) added 2 wu in Phase 4; Sprint 4 picked up the policy-engine seed (+0.5 wu); Sprint 6 picked up the UI-events stub (+0.5 wu); Sprint 7A2 adds first-class hook packs + runtime hook dispatch before the lifecycle API freezes its pack-kind model (+2.5 wu); Sprint 7B picked up the UI-events SSE endpoints + frontend-action POST (+0.5 wu); MCP auth picked up WWW-Authenticate + step-up + audience validation; A2A picked up signed-Agent-Card verification + correct absent-header rule. Most increases sit inside existing sprint envelopes — flagged in "Schedule-risk acknowledgement" if any overruns.
+**Why the totals went up since the prior revision:** Sprint 8.5 (Resumable Session API per ADR-004 amendment) added 1 wu in Phase 3; Sprint 10.5 (Runtime Scheduler / Work Queue per ADR-022) added 3 wu in Phase 3 so AgentOS has an explicit OS resource-management/orchestrator substrate before sub-agents; Sprint 13.5 (Runtime tool approval + Policy-as-code + Emergency controls per ADR-014/015/018) added 3 wu in Phase 4; Sprint 11.5 (Agent memory governance per ADR-019) added 2 wu in Phase 4; Sprint 4 picked up the policy-engine seed (+0.5 wu); Sprint 6 picked up the UI-events stub (+0.5 wu); Sprint 7A2 adds first-class hook packs + runtime hook dispatch before the lifecycle API freezes its pack-kind model (+2.5 wu); Sprint 7B picked up the UI-events SSE endpoints + frontend-action POST (+0.5 wu); MCP auth picked up WWW-Authenticate + step-up + audience validation; A2A picked up signed-Agent-Card verification + correct absent-header rule. Most increases sit inside existing sprint envelopes — flagged in "Schedule-risk acknowledgement" if any overruns.
 
 ---
 
@@ -1203,7 +1247,8 @@ Before each phase starts, decide:
 | **Before Sprint 4** | Cosign trust-root provisioning model — Vault path layout |
 | **Before Sprint 7** | SDK CLI distribution — bundle in main image vs separate `cognic-agentos-cli` PyPI package |
 | **Before Sprint 8** | Sandbox backend choice for Wave 1 — DinD vs gVisor vs Firecracker |
-| **Before Sprint 11** | Sub-agent recursion depth default — global, per-tenant, or per-agent |
+| **Before Sprint 10.5** | Scheduler Wave-1 admission defaults — queue depths, retry-after clamps, and aggressive default-deny `scheduler.rego` overlay posture |
+| **Before Sprint 11** | Sub-agent recursion depth default — global, per-tenant, or per-agent; budget inheritance is through the Sprint 10.5 scheduler |
 | **Before Sprint 12** | Target bank for the first POC deployment (drives bank-overlay template content) |
 | **Before Phase 5** | Confirm Studio demand — only proceed if a bank explicitly asks for no-code authoring |
 

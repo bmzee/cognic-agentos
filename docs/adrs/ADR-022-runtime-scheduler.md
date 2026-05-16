@@ -52,7 +52,7 @@ Class is declared at `scheduler.submit(task, *, class_)` time and cannot change 
 
 ### Admission outcomes — closed enum (wire-protocol contract)
 
-`SchedulerEngine.submit()` returns a `SchedulerAdmissionOutcome` value carrying one of seven closed-enum reasons. This vocabulary IS the wire-protocol contract for every caller dispatching on submit result. Drift between the Literal and consumer error-handling is caught at module load by a partition-invariant test.
+`SchedulerEngine.submit()` returns a `SchedulerAdmissionOutcome` value carrying one of seven closed-enum outcomes. This vocabulary IS the wire-protocol contract for every caller dispatching on submit result. Drift between the Literal and consumer error-handling is caught at module load by a partition-invariant test.
 
 | Outcome | Meaning | HTTP analog (when surfaced via portal) |
 |---|---|---|
@@ -71,7 +71,7 @@ Class is declared at `scheduler.submit(task, *, class_)` time and cannot change 
 3. If queue is full for (tenant, class) → `scheduler_admission_refused_queue_full` with `retry_after_s`.
 4. If quota / policy / kill-switch / pack-state denies → refuse immediately with the matching closed-enum reason; audit-emit `scheduler.admission_refused` carrying the reason.
 
-The four refusal paths share a single `scheduler.admission_refused` audit event family; `payload.reason` discriminates. The two acceptance paths share `scheduler.admission_accepted`; `payload.outcome` discriminates immediate vs queued. **Six closed-enum values across two event families** — small enough that examiners can hold the matrix in their head.
+The five refusal outcomes share a single `scheduler.admission_refused` audit event family; `payload.reason` discriminates. The two acceptance outcomes share `scheduler.admission_accepted`; `payload.outcome` discriminates immediate vs queued. **Seven closed-enum values across two event families** — small enough that examiners can hold the matrix in their head.
 
 ### Task lifecycle state machine
 
