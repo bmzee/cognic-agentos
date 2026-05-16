@@ -158,10 +158,15 @@ async def app_with_broker(
     settings: Settings,
     actor_t1: Actor,
 ) -> FastAPI:
-    """UI-test app: broker wired via create_app; actor binder mocked to
-    actor_t1. Used by tests that exercise non-UI routes (pack routes for
-    RBAC denial flows in T6; the alias `app` below adds UI routes once
-    T10 ships)."""
+    """UI-test app: actor binder mocked to actor_t1; broker INJECTED
+    via the T12 ``broker=`` kwarg so the route's broker IS the fixture
+    broker (subscriber-state parity).
+
+    T12: create_app now auto-mounts the UI router + .well-known when
+    the broker is wired — so this fixture alone is sufficient for tests
+    that exercise the full UI surface. The ``app`` alias below stays
+    around for backward source-compat with T10 tests that request it
+    by name."""
     from cognic_agentos.portal.api.app import create_app
 
     return create_app(
@@ -170,49 +175,23 @@ async def app_with_broker(
         audit_store=audit_store,
         ui_event_emitter=ui_event_emitter,
         actor_binder=_FixtureActorBinder(actor_t1),
+        broker=broker,
     )
 
 
 @pytest.fixture
-async def app(
-    app_with_broker: FastAPI,
-    broker: UIEventBroker,
-    settings: Settings,
-    decision_history_store: DecisionHistoryStore,
-) -> FastAPI:
-    """UI-routes-mounted app fixture.
+async def app(app_with_broker: FastAPI) -> FastAPI:
+    """UI-routes-mounted app alias.
 
-    Wraps `app_with_broker` and includes the T10 SSE stream router via
-    lazy import. The lazy import lets this fixture coexist in the T6
-    conftest WITHOUT breaking T6's RBAC test collection — T6 RBAC tests
-    use `app_with_broker` directly (no UI routes needed); the import
-    only fires when a test requests `app` (T10+ SSE tests).
+    T12: ``app_with_broker`` already mounts UI routes via ``create_app``'s
+    automatic UI-router mount + .well-known registration (gated on the
+    injected broker). This alias is just a backward-source-compat name
+    for T10 tests that request ``app`` rather than ``app_with_broker``.
 
-    T10 plan-vs-reality drift #1: ``build_stream_routes`` takes
-    ``settings`` + ``decision_history_store`` via closure-capture
-    (NOT ``request.app.state.settings``) because ``create_app``
-    populates ``app.state.decision_history_store`` but NOT
-    ``app.state.settings``. Closure-capture keeps ``create_app``
-    untouched (avoids a CC-ADJ to portal/api/app.py) and matches
-    the existing ``broker=`` capture pattern.
-
-    Production-grade: NO silent fallback. If a test requests `app` and
-    the stream_routes module is missing (e.g. running T10 tests before
-    T10 ships the module), the lazy import raises ImportError — that
-    IS the TDD RED for those tests."""
-    # Lazy import. At T6 time stream_routes didn't exist; ``# type: ignore
-    # [import-untyped]`` was needed. T10 shipped the module so the ignore
-    # is unused now; left in place as a runtime-import-only convention.
-    from cognic_agentos.portal.api.ui.stream_routes import build_stream_routes
-
-    app_with_broker.include_router(
-        build_stream_routes(
-            broker=broker,
-            settings=settings,
-            decision_history_store=decision_history_store,
-        ),
-        prefix="/api/v1/ui",
-    )
+    Pre-T12, this fixture manually called ``build_stream_routes(...)``
+    + ``include_router(...)`` because ``create_app`` didn't know about
+    the UI router. T12 moved that wiring into ``create_app`` itself,
+    so the fixture body collapsed to a pass-through."""
     return app_with_broker
 
 
@@ -256,30 +235,20 @@ async def app_low_cap(
 ) -> FastAPI:
     """App variant with broker built from `settings_low_cap` (cap=1).
 
-    Per plan §3475-3479: re-roots both `create_app` AND
-    `build_stream_routes(broker=, settings=)` at `settings_low_cap` so
-    the second SSE connect on the same tenant actually hits the cap.
-    The `app` fixture would NOT fire 429 because its broker carries
-    default cap=50."""
+    T12: uses the new ``broker=`` kwarg on ``create_app`` to inject
+    ``broker_low_cap`` so the UI router's broker IS the cap-1 broker
+    (otherwise create_app would build an internal broker from the
+    default settings, and the cap test would silently never fire)."""
     from cognic_agentos.portal.api.app import create_app
-    from cognic_agentos.portal.api.ui.stream_routes import build_stream_routes
 
-    application = create_app(
+    return create_app(
         settings=settings_low_cap,
         decision_history_store=decision_history_store,
         audit_store=audit_store,
         ui_event_emitter=ui_event_emitter,
         actor_binder=_FixtureActorBinder(actor_t1),
+        broker=broker_low_cap,
     )
-    application.include_router(
-        build_stream_routes(
-            broker=broker_low_cap,
-            settings=settings_low_cap,
-            decision_history_store=decision_history_store,
-        ),
-        prefix="/api/v1/ui",
-    )
-    return application
 
 
 @pytest.fixture
@@ -308,26 +277,20 @@ async def app_short_send_timeout(
     actor_t1: Actor,
 ) -> FastAPI:
     """App variant whose broker + EventSourceResponse use the
-    short-send-timeout settings (per plan §3714-3717)."""
-    from cognic_agentos.portal.api.app import create_app
-    from cognic_agentos.portal.api.ui.stream_routes import build_stream_routes
+    short-send-timeout settings (per plan §3714-3717).
 
-    application = create_app(
+    T12: ``broker=`` injection so the half-open cleanup test inspects
+    the SAME subscriber list the route writes to."""
+    from cognic_agentos.portal.api.app import create_app
+
+    return create_app(
         settings=settings_short_send_timeout,
         decision_history_store=decision_history_store,
         audit_store=audit_store,
         ui_event_emitter=ui_event_emitter,
         actor_binder=_FixtureActorBinder(actor_t1),
+        broker=broker_short_send_timeout,
     )
-    application.include_router(
-        build_stream_routes(
-            broker=broker_short_send_timeout,
-            settings=settings_short_send_timeout,
-            decision_history_store=decision_history_store,
-        ),
-        prefix="/api/v1/ui",
-    )
-    return application
 
 
 # ---------------------------------------------------------------------------
@@ -586,27 +549,26 @@ def _build_t11_app(
     actor: Actor,
     elicitation_adapter: Any,
 ) -> FastAPI:
-    """T11: Build an app with the action router mounted.
+    """T11: Build an app with the FULL UI surface mounted.
 
-    Wraps ``create_app`` (which wires broker + stores + emitter +
-    actor_binder) and includes the action router via lazy import so
-    this fixture file imports cleanly BEFORE T11 ships
-    ``action_routes.py`` — the ImportError IS the TDD RED for T11."""
+    T12: ``create_app`` now mounts the action + stream + .well-known
+    routes automatically when the broker is wired. The ``broker=`` +
+    ``elicitation_adapter=`` kwargs thread the test-injected deps
+    into the route closures. Earlier draft manually called
+    ``application.include_router(build_action_routes(...))`` — that
+    manual include is now redundant + would double-mount the action
+    router."""
     from cognic_agentos.portal.api.app import create_app
-    from cognic_agentos.portal.api.ui.action_routes import build_action_routes
 
-    application = create_app(
+    return create_app(
         settings=settings,
         decision_history_store=decision_history_store,
         audit_store=audit_store,
         ui_event_emitter=ui_event_emitter,
         actor_binder=_FixtureActorBinder(actor),
+        broker=broker,
+        elicitation_adapter=elicitation_adapter,
     )
-    application.include_router(
-        build_action_routes(broker=broker, elicitation_adapter=elicitation_adapter),
-        prefix="/api/v1/ui",
-    )
-    return application
 
 
 @pytest.fixture
@@ -680,12 +642,12 @@ async def app_with_scopes_and_broker(
     broker: UIEventBroker,
     actor_t1_all_ui_scopes: Actor,
 ) -> FastAPI:
-    """T11: Same as ``app_with_scopes`` but ALSO mounts the T10 stream
-    router so the correlation-latency test can subscribe to the SSE
-    feed + post an action against the SAME broker instance."""
-    from cognic_agentos.portal.api.ui.stream_routes import build_stream_routes
-
-    application = _build_t11_app(
+    """T11: Same as ``app_with_scopes`` (full UI surface — stream +
+    action + .well-known auto-mounted by ``create_app``). T12 collapsed
+    this onto the shared ``_build_t11_app`` builder — earlier draft
+    manually re-included ``build_stream_routes`` which would
+    double-mount post-T12."""
+    return _build_t11_app(
         settings=settings,
         decision_history_store=decision_history_store,
         audit_store=audit_store,
@@ -694,15 +656,6 @@ async def app_with_scopes_and_broker(
         actor=actor_t1_all_ui_scopes,
         elicitation_adapter=_StubElicitationAdapter(),
     )
-    application.include_router(
-        build_stream_routes(
-            broker=broker,
-            settings=settings,
-            decision_history_store=decision_history_store,
-        ),
-        prefix="/api/v1/ui",
-    )
-    return application
 
 
 # ---------------------------------------------------------------------------
@@ -756,26 +709,19 @@ async def app_with_scopes_and_allow_rego(
     ``rego_engine=None`` → gate Step 5 fires ``elicitation_unwired_evaluator``
     on every submit_elicitation request, never reaching the adapter)."""
     from cognic_agentos.portal.api.app import create_app
-    from cognic_agentos.portal.api.ui.action_routes import build_action_routes
 
-    application = create_app(
+    return create_app(
         settings=settings,
         decision_history_store=decision_history_store,
         audit_store=audit_store,
         ui_event_emitter=ui_event_emitter,
         actor_binder=_FixtureActorBinder(actor_t1_all_ui_scopes),
+        broker=broker,
+        elicitation_adapter=_StubElicitationAdapter(),
+        # mypy: _AlwaysAllowRegoEngine is duck-typed against the
+        # T8 gate's narrow ``.evaluate(...)`` call surface, NOT a
+        # full OPAEngine subclass. The cast keeps build_action_routes'
+        # production-strict parameter type (``OPAEngine | None``) while
+        # letting tests inject a stub. Test-only divergence.
+        rego_engine=_AlwaysAllowRegoEngine(),  # type: ignore[arg-type]
     )
-    application.include_router(
-        build_action_routes(
-            broker=broker,
-            elicitation_adapter=_StubElicitationAdapter(),
-            # mypy: _AlwaysAllowRegoEngine is duck-typed against the
-            # T8 gate's narrow `.evaluate(...)` call surface, NOT a
-            # full OPAEngine subclass. The cast keeps build_action_routes'
-            # production-strict parameter type (`OPAEngine | None`) while
-            # letting tests inject a stub. Test-only divergence.
-            rego_engine=_AlwaysAllowRegoEngine(),  # type: ignore[arg-type]
-        ),
-        prefix="/api/v1/ui",
-    )
-    return application

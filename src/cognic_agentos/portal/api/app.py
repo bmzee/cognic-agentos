@@ -33,7 +33,7 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -66,10 +66,20 @@ from cognic_agentos.portal.api.packs import build_packs_router
 from cognic_agentos.portal.api.system_routes import build_system_router
 from cognic_agentos.portal.rbac.actor import ActorBinder
 from cognic_agentos.protocol import is_a2a_available, is_mcp_available
+from cognic_agentos.protocol.elicitation_adapter import ElicitationAdapter
 from cognic_agentos.protocol.plugin_registry import PluginRegistry
 from cognic_agentos.protocol.trust_gate import TrustGate
 from cognic_agentos.protocol.trust_root_resolver import TrustRootResolver
 from cognic_agentos.protocol.ui_events import UIEventBroker, UIEventEmitter
+
+if TYPE_CHECKING:
+    # Sprint-7B.4 T12: type-only refs for the create_app signature.
+    # ``OPAEngine`` lives in ``core/policy/engine`` (CC module per the
+    # AGENTS.md stop rule); importing it at runtime would extend the
+    # core module's blast radius into the portal layer for callers
+    # that don't wire OPA. TYPE_CHECKING keeps the kwarg typed without
+    # pulling the engine module into the import graph.
+    from cognic_agentos.core.policy.engine import OPAEngine
 
 logger = logging.getLogger(__name__)
 
@@ -191,6 +201,25 @@ def create_app(
     decision_history_store: DecisionHistoryStore | None = None,
     audit_store: AuditStore | None = None,
     ui_event_emitter: UIEventEmitter | None = None,
+    # Sprint-7B.4 T12: optional UI-router deps (same None-default
+    # pattern). When ANY of the broker-prerequisite triple
+    # (decision_history_store + ui_event_emitter + settings) is
+    # missing AND ``broker`` is not pre-injected, UI routes do NOT
+    # mount + .well-known is NOT registered.
+    #
+    # ``broker`` is the test-fixture-injection seam: pass a pre-built
+    # UIEventBroker so the route + the test share subscriber state
+    # (production callers pass None and let create_app build internally
+    # from the T6 deps).
+    #
+    # ``elicitation_adapter`` + ``rego_engine`` route through to
+    # ``build_action_routes`` for the submit_elicitation path; absent
+    # values surface the matching elicitation_backend_unwired /
+    # elicitation_unwired_evaluator refusal at request time per the
+    # T8 gate's Step 1 / Step 5.
+    broker: UIEventBroker | None = None,
+    elicitation_adapter: ElicitationAdapter | None = None,
+    rego_engine: OPAEngine | None = None,
 ) -> FastAPI:
     """Build and return the FastAPI application.
 
@@ -356,13 +385,22 @@ def create_app(
     app.state.trust_root_resolver = trust_root_resolver
 
     # Sprint-7B.4 T6: broker construction + eager attach.
-    # Backward-compat: callers that omit ANY of the three new optional
-    # deps get `app.state.ui_event_broker = None`; the shared
-    # `_emit_denial_or_500` helper's `if broker is None: return`
+    # Sprint-7B.4 T12: extended to accept a pre-built broker via the
+    # ``broker=`` kwarg (test-fixture-injection seam — the route + the
+    # test then share subscriber state). When ``broker`` is None AND
+    # the T6 deps are wired, build internally from the T6 deps.
+    # Backward-compat: callers that omit ANY of the prerequisites get
+    # ``app.state.ui_event_broker = None``; the shared
+    # ``_emit_denial_or_500`` helper's ``if broker is None: return``
     # log-only fallback (per R3 #3) keeps existing pack-only test
     # fixtures green.
-    portal_broker: UIEventBroker | None = None
-    if decision_history_store is not None and ui_event_emitter is not None and settings is not None:
+    portal_broker: UIEventBroker | None = broker
+    if (
+        portal_broker is None
+        and decision_history_store is not None
+        and ui_event_emitter is not None
+        and settings is not None
+    ):
         portal_broker = UIEventBroker(
             decision_history_store=decision_history_store,
             settings=settings,
@@ -373,6 +411,14 @@ def create_app(
     app.state.decision_history_store = decision_history_store
     app.state.audit_store = audit_store
     app.state.ui_event_emitter = ui_event_emitter
+    # Sprint-7B.4 T12: cache the optional UI deps on app.state for
+    # introspection (e.g. operator tools, debug endpoints) — the UI
+    # router itself reads them from closure capture, NOT from
+    # ``app.state.*``, so changing these post-construction has NO
+    # effect on route behavior.
+    app.state.elicitation_adapter = elicitation_adapter
+    app.state.rego_engine = rego_engine
+    app.state.settings = settings
 
     # Middleware add order is OUTER-LAST in Starlette: the call chain
     # walks the most-recently-added middleware first. We want the
@@ -506,6 +552,37 @@ def create_app(
                 ),
             },
         )
+
+    # Sprint-7B.4 T12: UI router mount + .well-known registration.
+    # Gated on ``portal_broker is not None`` — pack-only deployments
+    # that don't wire the T6 deps OR the ``broker=`` kwarg get NO UI
+    # routes + NO .well-known endpoint (the R3 #3 backward-compat
+    # invariant). When the broker IS wired, mount the composed UI
+    # router (stream + action) + register .well-known at the app
+    # root per RFC 8615.
+    if portal_broker is not None:
+        # decision_history_store + settings are guaranteed non-None
+        # here: portal_broker is non-None only if either (a) it was
+        # injected via the ``broker=`` kwarg (caller owns wiring) or
+        # (b) the auto-build branch above required both. The
+        # ``assert`` pins the invariant for mypy + future maintainers.
+        assert decision_history_store is not None
+        assert settings is not None
+        from cognic_agentos.portal.api.ui.router import build_ui_routes
+        from cognic_agentos.portal.api.ui.well_known_routes import (
+            register_well_known_routes,
+        )
+
+        app.include_router(
+            build_ui_routes(
+                broker=portal_broker,
+                settings=settings,
+                decision_history_store=decision_history_store,
+                elicitation_adapter=elicitation_adapter,
+                rego_engine=rego_engine,
+            )
+        )
+        register_well_known_routes(app)
 
     # Mount Prometheus AFTER routes so the instrumentator's metric registry
     # captures the route table; the scrape endpoint is mounted under
