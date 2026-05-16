@@ -3,6 +3,8 @@
 ## Status
 **APPROVED for implementation** on 2026-04-26.
 
+**Amended on 2026-05-16** (this revision) — minor amendment shipped alongside the Sprint 8A T1 design spec. Adds the **canonical sandbox runtime image catalog** as a new class of AgentOS-published runtime artifact subject to the same cosign + SBOM + vuln + license + Sigstore-bundle pipeline as plugin packs. See new subsection §"AgentOS-published runtime artifacts" below.
+
 ## Context
 
 ADR-002 specifies cosign signature verification + per-tenant allow-list as the trust gate for plugin packs. That's necessary but insufficient for bank-grade supply-chain assurance. Modern banking + EU AI Act + US Executive Order 14028 expectations:
@@ -34,6 +36,23 @@ Extend the trust gate (ADR-002) and pack lifecycle (ADR-012) with a **layered su
 | **Reproducibility manifest** | Lockfile (uv.lock / package-lock.json / etc.) + builder image digest | pack CI |
 
 All of these are **bundled into a single pack-attestation directory** that travels with the artefact. AgentOS trust gate verifies each at pack registration time.
+
+### AgentOS-published runtime artifacts (2026-05-16 amendment)
+
+Beyond plugin-pack artifacts, AgentOS itself publishes a small set of runtime container images that EVERY sandbox launches from. These images are subject to the same supply-chain pipeline as plugin packs — they are NOT trusted by default just because AgentOS published them.
+
+**Wave-1 canonical sandbox image catalog** (per Sprint 8A spec §9):
+
+| Image | Role |
+|---|---|
+| `cognic/sandbox-runtime-python:vX.Y@sha256:...` | Pure Python execution (runtime image) |
+| `cognic/sandbox-runtime-shell:vX.Y@sha256:...` | Shell scripts + small CLIs (runtime image) |
+| `cognic/sandbox-runtime-data:vX.Y@sha256:...` | Data tooling — psql, poppler, pandas (runtime image) |
+| `cognic/sandbox-egress-proxy:vX.Y@sha256:...` | Egress proxy sidecar (dual-container topology per ADR-004 Wave-1 amendment) |
+
+Each image carries the full 8-attestation bundle (cosign + SLSA + in-toto + SBOM + vuln scan + license audit + Sigstore bundle + reproducibility manifest). The trust-gate verification path that runs on plugin packs at registration time also runs on these images at sandbox-create time via `sandbox/catalog.py` per Sprint 8A spec §9. Banks may tighten via Rego policy (require specific minimum SLSA level, reject specific CVE classes, narrow the license allow-list) but cannot loosen the kernel default-deny posture without a kernel + ADR amendment. **Refresh cadence**: monthly base-image refresh + on-CVE; tracked in a published cadence policy.
+
+**Per-pack-image escape hatch** — pack manifests may declare their own `[tool.cognic.sandbox] runtime_image = "bank/my-custom-sandbox@sha256:..."` as long as the image (a) carries the full 8-attestation bundle, (b) is signed by a key in the tenant cosign allow-list, and (c) is explicitly tenant-allow-listed in policy.yaml. Per-pack images go through the same trust-gate verification as catalog images; nothing about "we published this one" makes catalog images more trusted at the cryptographic-verification layer — the catalog is a convenience contract for the common case, not a trust shortcut.
 
 ### Per-tenant policy gates (delegated to ADR-015 Rego policies)
 
