@@ -59,11 +59,63 @@ PackRBACScope = Literal[
     "pack.override.approval_gate",
 ]
 
+
+#: Sprint 7B.4 T5 — closed-enum literal of the 8 UI event-stream + action
+#: scopes added per ADR-020 + the design spec §4.1. Carried in the same
+#: 403 ``scope_not_held`` denial body as :data:`PackRBACScope` — ANY
+#: change here is a wire-protocol break on the UI denial surface.
+#:
+#: The 8 values partition into:
+#:
+#:   - **2 stream-surface scopes** consumed by the T10 SSE GET endpoints
+#:     (one for the run-scoped stream, one for the tenant-scoped stream):
+#:     ``ui.run_stream``, ``ui.tenant_stream``.
+#:   - **6 action-surface scopes** consumed by the T11 POST /actions
+#:     endpoint's per-class :class:`RequireUIAction` dependency; one
+#:     scope per :data:`~cognic_agentos.portal.api.ui.dto.ActionClass`
+#:     value: ``ui.action.{approve,deny,cancel_run,interrupt,resume,
+#:     submit_elicitation}``.
+#:
+#: **Value-disjoint from :data:`PackRBACScope`** by namespace separation
+#: (every UI scope is ``ui.*``; no pack scope is). Disjointness +
+#: namespace separation are enforced by
+#: :file:`tests/unit/portal/rbac/test_actor_scope_widening.py`: overlap
+#: would create a wire-protocol ambiguity where a single 403 reason
+#: string could match either family, leaving examiners + operator
+#: runbooks unable to determine which surface emitted the denial.
+#:
+#: Style note: plain ``= Literal[...]`` (no ``TypeAlias`` annotation) to
+#: match the Sprint-7B.1 + Sprint-7B.2 repo convention at
+#: ``packs/lifecycle.py:111`` + :data:`PackRBACScope` above.
+UIRBACScope = Literal[
+    # 2 SSE stream-surface scopes (T10 GET endpoints).
+    "ui.run_stream",
+    "ui.tenant_stream",
+    # 6 action-surface scopes — one per ActionClass (T11 POST /actions
+    # per-class RequireUIAction).
+    "ui.action.approve",
+    "ui.action.deny",
+    "ui.action.cancel_run",
+    "ui.action.interrupt",
+    "ui.action.resume",
+    "ui.action.submit_elicitation",
+]
+
+
 #: Set type carried on :class:`~cognic_agentos.portal.rbac.actor.Actor`
 #: instances and consumed by :class:`RequireScope`. The frozenset is
 #: chosen for membership-test O(1) + immutability (matches the frozen
 #: Actor model). The element type is the closed-enum literal so out-of-
 #: vocab scope strings are caught by mypy at the call site.
+#:
+#: Sprint 7B.4 T5 note: this alias keeps the narrow
+#: ``frozenset[PackRBACScope]`` shape for backward compat with existing
+#: bank-overlay binders that mint pack-only scope sets. :class:`Actor`
+#: itself widens the annotation directly to
+#: ``frozenset[PackRBACScope | UIRBACScope]`` (see actor.py) so a single
+#: actor can carry mixed-family scopes; this `ScopeSet` alias stays
+#: pack-only until a future overlay-API amendment promotes it to the
+#: union form.
 ScopeSet = frozenset[PackRBACScope]
 
 #: All 13 lifecycle scopes as a frozenset — wire-protocol surface for
