@@ -132,14 +132,18 @@ def test_require_scope_refuses_actor_missing_required_scope() -> None:
 def test_scope_not_held_denial_emits_structured_log(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Plan Round 5 P3 #5 — denial events emit structured log records
-    against the ``cognic_agentos.portal.rbac.enforcement`` logger. Full
-    hash-chain emission ships in Sprint 7B.4."""
+    """Sprint-7B.4 T6 — denial events emit structured log records via the
+    shared ``_emit_denial_or_500`` helper. Wire-shape change: message is
+    now ``portal.rbac.<denial_type>`` (e.g. ``portal.rbac.scope_not_held``)
+    instead of the previous constant ``portal.rbac.denied``. Structured
+    ``reason`` attribute unchanged — operators querying on the structured
+    field stay compatible. Hash-chain emission lives at T6 too via the
+    same helper; this test covers only the log surface."""
     actor = _human_actor(scopes=frozenset({"pack.withdraw"}))
     app = _make_app(_StubBinder(actor), required_scope="pack.submit")
     with caplog.at_level(logging.WARNING, logger="cognic_agentos.portal.rbac.enforcement"):
         TestClient(app).get("/guarded")
-    denied = [r for r in caplog.records if "portal.rbac.denied" in r.message]
+    denied = [r for r in caplog.records if r.message == "portal.rbac.scope_not_held"]
     assert len(denied) == 1
     record = denied[0]
     assert getattr(record, "reason", None) == "scope_not_held"
@@ -165,10 +169,12 @@ def test_require_scope_refuses_unauthenticated_binding() -> None:
 def test_actor_unauthenticated_denial_emits_structured_log(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    # Sprint-7B.4 T6 wire-shape: message is now `portal.rbac.<denial_type>`
+    # via the shared `_emit_denial_or_500` helper (was `portal.rbac.denied`).
     app = _make_app(_UnauthenticatedBinder(), required_scope="pack.submit")
     with caplog.at_level(logging.WARNING, logger="cognic_agentos.portal.rbac.enforcement"):
         TestClient(app).get("/guarded")
-    denied = [r for r in caplog.records if "portal.rbac.denied" in r.message]
+    denied = [r for r in caplog.records if r.message == "portal.rbac.actor_unauthenticated"]
     assert len(denied) == 1
     assert getattr(denied[0], "reason", None) == "actor_unauthenticated"
 
@@ -192,10 +198,12 @@ def test_require_scope_returns_500_when_kernel_default_binder_active() -> None:
 def test_actor_binder_not_configured_emits_structured_log(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    # Sprint-7B.4 T6 wire-shape: message is now `portal.rbac.<denial_type>`
+    # via the shared `_emit_denial_or_500` helper (was `portal.rbac.denied`).
     app = _make_app(KernelDefaultActorBinder(), required_scope="pack.submit")
     with caplog.at_level(logging.WARNING, logger="cognic_agentos.portal.rbac.enforcement"):
         TestClient(app, raise_server_exceptions=False).get("/guarded")
-    denied = [r for r in caplog.records if "portal.rbac.denied" in r.message]
+    denied = [r for r in caplog.records if r.message == "portal.rbac.actor_binder_not_configured"]
     assert len(denied) == 1
     assert getattr(denied[0], "reason", None) == "actor_binder_not_configured"
 

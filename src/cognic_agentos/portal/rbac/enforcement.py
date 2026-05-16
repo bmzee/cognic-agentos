@@ -26,8 +26,9 @@ modes — each with a real emit path:
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
-from typing import Annotated, Literal
+import uuid
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from fastapi import Depends, HTTPException, Request
 
@@ -36,7 +37,10 @@ from cognic_agentos.portal.rbac.actor import (
     ActorBinder,
     ActorBinderUnauthenticated,
 )
-from cognic_agentos.portal.rbac.scopes import PackRBACScope
+from cognic_agentos.portal.rbac.scopes import PackRBACScope, UIRBACScope
+
+if TYPE_CHECKING:
+    from cognic_agentos.protocol.ui_events import RBACDenialType, UIEventBroker
 
 _LOG = logging.getLogger(__name__)
 
@@ -57,66 +61,157 @@ RBACDenialReason = Literal[
 ]
 
 
-def _emit_denial_log(
-    *,
-    reason: RBACDenialReason,
-    required_scope: PackRBACScope | None = None,
-    actor_subject: str | None = None,
-) -> None:
-    """Application-logging emit path for RBAC denials.
-
-    Plan Round 5 P3 #5 placeholder — full hash-chain emission ships in
-    Sprint 7B.4. For 7B.2 this records the denial to the SIEM-fed
-    logging stack with structured ``extra`` so log-search queries can
-    filter on ``reason`` / ``required_scope`` / ``actor_subject`` without
-    string parsing.
-
-    ``required_scope`` is included only when the scope is known at the
-    emit site — i.e. for the ``scope_not_held`` reason emitted by
-    :func:`RequireScope`. The two auth-related reasons (emitted by
-    :func:`_bind_actor`) cannot know which scope the caller wanted,
-    so the field is omitted there.
+def _resolve_request_id(request: Request) -> str:
+    """Resolve a request_id from `request.state.request_id` (set by the
+    T6 portal request-id middleware on every `/api/v1/*` path). Mints a
+    `portal-rbac-denial-<uuid4>` fallback if unset — should never fire
+    under normal portal traffic but covers non-portal callers that
+    bypass the middleware (52 chars ≤ 64 column cap).
     """
-    extra: dict[str, object] = {"reason": reason}
+    return getattr(request.state, "request_id", None) or f"portal-rbac-denial-{uuid.uuid4().hex}"
+
+
+async def _emit_denial_or_500(
+    broker: UIEventBroker | None,
+    *,
+    denial_type: RBACDenialType,
+    actor_subject: str | None,
+    tenant_id: str | None,
+    request_id: str,
+    http_status: int,
+    required_scope: str | None = None,
+    pack_id: str | None = None,
+    actor_type: str | None = None,
+    pack_created_by: str | None = None,
+    resource_type: str | None = None,
+) -> None:
+    """Sprint-7B.4 T6 shared dual-surface emission helper.
+
+    Used by :func:`_bind_actor` + the 4 `Require*` deps across the RBAC
+    modules (enforcement, tenant_isolation, human_actor, role_separation).
+    The kwargs match :meth:`UIEventBroker.emit_rbac_denial` 1:1.
+
+    Emission order — log FIRST (operations surface, guaranteed), broker
+    SECOND (examiner surface, conditional):
+
+      1. ``_LOG.warning(f"portal.rbac.{denial_type}", extra={"reason", "actor_subject",
+         "tenant_id", "request_id", "http_status", ...optional...})`` — wire
+         shape: the log message itself encodes the denial_type so log routing /
+         alerting can key on the constant suffix. ALWAYS fires.
+
+      2. If ``broker is None`` → return (R3 #3 backward-compat: pack-only
+         deployments that omit the new optional deps to ``create_app`` stay
+         green; structured log preserves the operations surface).
+
+      3. ``await broker.emit_rbac_denial(...)`` — chain row append. Failure
+         raises ``HTTPException(500, detail={"reason": "rbac_denial_emit_failed"})``
+         (NO silent audit loss — fail-closed per the P1 fail-closed contract;
+         pinned by the threat-model-revert regression in
+         ``test_rbac_denial_chain_emission.py``).
+
+    `tenant_id` contract (per design spec P1 #5):
+      - actor IS resolved at the call site → pass ``actor.tenant_id``.
+      - actor is UNRESOLVED (the 2 ``_bind_actor`` failure paths —
+        actor_unauthenticated, actor_binder_not_configured) → pass
+        ``tenant_id=None``. The chain row writes (audit surface preserved);
+        SSE subscribers filter by event.tenant so unauth denials never
+        reach any tenant's stream by design.
+    """
+    log_extra: dict[str, Any] = {
+        "reason": denial_type,
+        "actor_subject": actor_subject,
+        "tenant_id": tenant_id,
+        "request_id": request_id,
+        "http_status": http_status,
+    }
     if required_scope is not None:
-        extra["required_scope"] = required_scope
-    if actor_subject is not None:
-        extra["actor_subject"] = actor_subject
-    _LOG.warning("portal.rbac.denied", extra=extra)
+        log_extra["required_scope"] = required_scope
+    if pack_id is not None:
+        log_extra["pack_id"] = pack_id
+    if actor_type is not None:
+        log_extra["actor_type"] = actor_type
+    if pack_created_by is not None:
+        log_extra["pack_created_by"] = pack_created_by
+    if resource_type is not None:
+        log_extra["resource_type"] = resource_type
+    _LOG.warning(f"portal.rbac.{denial_type}", extra=log_extra)
+
+    if broker is None:  # R3 #3 backward-compat: pack-only deployments
+        return
+
+    try:
+        await broker.emit_rbac_denial(
+            denial_type=denial_type,
+            actor_subject=actor_subject,
+            tenant_id=tenant_id,
+            request_id=request_id,
+            http_status=http_status,
+            required_scope=required_scope,
+            pack_id=pack_id,
+            actor_type=actor_type,
+            pack_created_by=pack_created_by,
+            resource_type=resource_type,
+        )
+    except Exception as exc:
+        _LOG.error("portal.rbac.denial_emit_failed", exc_info=True)
+        raise HTTPException(
+            500,
+            detail={"reason": "rbac_denial_emit_failed"},
+        ) from exc
 
 
-def _bind_actor(request: Request) -> Actor:
-    """Shared actor-binding dependency.
+async def _bind_actor(request: Request) -> Actor:
+    """Sprint-7B.4 T6: async wrapper around the existing SYNC
+    :meth:`ActorBinder.bind` so denial paths can ``await
+    broker.emit_rbac_denial``. The binder.bind call itself stays
+    synchronous — the existing :class:`ActorBinder` Protocol at
+    ``portal/rbac/actor.py:122`` is sync `def bind(...)`; broadening
+    it is out of scope for 7B.4.
 
-    Resolves :class:`ActorBinder` from ``request.app.state.actor_binder``,
-    calls ``.bind(request=request)``, and surfaces the two auth-related
-    :data:`RBACDenialReason` values:
+    Resolves :class:`ActorBinder` from ``request.app.state.actor_binder``;
+    surfaces the 3 closed-enum :data:`RBACDenialReason` values through
+    the shared :func:`_emit_denial_or_500` helper:
 
+    - ``binder is None`` → 500 ``actor_binder_not_configured`` (wiring miss).
     - :class:`ActorBinderUnauthenticated` → 403 ``actor_unauthenticated``.
     - :class:`NotImplementedError` (kernel-default binder) → 500
-      ``actor_binder_not_configured``.
+      ``actor_binder_not_configured`` (overlay never wired).
 
-    Used by :func:`RequireScope` and
-    :func:`~cognic_agentos.portal.rbac.tenant_isolation.RequireTenantOwnership`
-    via ``Depends(_bind_actor)``. FastAPI caches dependencies by callable
-    identity within a request, so the binder is invoked once even when
-    both gates run on the same route.
-
-    Scope-membership refusal lives in :func:`RequireScope`, NOT here —
-    keeping the two concerns separate so tenant-isolation can reuse the
-    binding without a redundant scope check.
+    All 3 paths pass ``tenant_id=None`` to the helper (per design spec
+    P1 #5 — no actor resolved → chain row has NULL tenant_id; SSE
+    subscribers filter by tenant so unauth denials never reach any
+    tenant's stream).
     """
     binder: ActorBinder | None = getattr(request.app.state, "actor_binder", None)
+    broker: UIEventBroker | None = getattr(request.app.state, "ui_event_broker", None)
+    request_id = _resolve_request_id(request)
+
     if binder is None:
-        _emit_denial_log(reason="actor_binder_not_configured")
+        await _emit_denial_or_500(
+            broker,
+            denial_type="actor_binder_not_configured",
+            actor_subject=None,
+            tenant_id=None,
+            request_id=request_id,
+            http_status=500,
+        )
         raise HTTPException(
             status_code=500,
             detail={"reason": "actor_binder_not_configured"},
         )
+
     try:
+        # SYNC call — preserves the existing ActorBinder Protocol contract.
         return binder.bind(request=request)
     except ActorBinderUnauthenticated:
-        _emit_denial_log(reason="actor_unauthenticated")
+        await _emit_denial_or_500(
+            broker,
+            denial_type="actor_unauthenticated",
+            actor_subject=None,
+            tenant_id=None,
+            request_id=request_id,
+            http_status=403,
+        )
         raise HTTPException(
             status_code=403,
             detail={"reason": "actor_unauthenticated"},
@@ -124,44 +219,53 @@ def _bind_actor(request: Request) -> Actor:
     except NotImplementedError:
         # Kernel-default binder still in place — bank overlay forgot to
         # inject a real binder via ``create_app(actor_binder=...)``.
-        _emit_denial_log(reason="actor_binder_not_configured")
+        await _emit_denial_or_500(
+            broker,
+            denial_type="actor_binder_not_configured",
+            actor_subject=None,
+            tenant_id=None,
+            request_id=request_id,
+            http_status=500,
+        )
         raise HTTPException(
             status_code=500,
             detail={"reason": "actor_binder_not_configured"},
         ) from None
 
 
-def RequireScope(scope: PackRBACScope) -> Callable[..., Actor]:
+def RequireScope(scope: PackRBACScope | UIRBACScope) -> Callable[..., Awaitable[Actor]]:
     """FastAPI dependency factory — admit the request iff the bound
     :class:`Actor` holds ``scope``.
 
-    Resolves :class:`ActorBinder` from ``request.app.state.actor_binder``
-    (set by ``create_app(actor_binder=...)``) and calls ``.bind(request=
-    request)``. Three exception classes drive the three closed-enum
-    :data:`RBACDenialReason` values:
+    Sprint-7B.4 T5 widened the scope parameter to accept both
+    :data:`PackRBACScope` and :data:`UIRBACScope` (the T11 POST /actions
+    + T10 SSE endpoints depend on this widening — they call
+    ``RequireScope("ui.action.approve")`` etc.).
 
-    - :class:`ActorBinderUnauthenticated` (real binder, per-request auth
-      failure) → 403 ``actor_unauthenticated``.
-    - :class:`NotImplementedError` (kernel-default binder still plugged
-      in — bank overlay never injected a real one) → 500
-      ``actor_binder_not_configured``. Distinct from 403 so a client
-      cannot mistake kernel-misconfig for an auth failure that retrying
-      with different credentials might fix.
-    - Scope-membership miss → 403 ``scope_not_held`` with the missing
-      scope + actor subject in the response body so callers can trace
-      the denial without re-binding.
+    Sprint-7B.4 T6 converted the inner dependency to async so the
+    denial path can ``await broker.emit_rbac_denial`` via the shared
+    :func:`_emit_denial_or_500` helper. ``_bind_actor`` is also async;
+    FastAPI handles async sub-deps transparently — no callsite changes
+    required for existing pack-route handlers.
 
     Returns the bound :class:`Actor` on success so downstream handlers
-    (T4-T6 endpoints) can consume the resolved identity without
-    re-binding.
+    consume the resolved identity without re-binding.
     """
 
-    def dependency(actor: Annotated[Actor, Depends(_bind_actor)]) -> Actor:
+    async def dependency(
+        request: Request,
+        actor: Annotated[Actor, Depends(_bind_actor)],
+    ) -> Actor:
         if scope not in actor.scopes:
-            _emit_denial_log(
-                reason="scope_not_held",
-                required_scope=scope,
+            broker: UIEventBroker | None = getattr(request.app.state, "ui_event_broker", None)
+            await _emit_denial_or_500(
+                broker,
+                denial_type="scope_not_held",
                 actor_subject=actor.subject,
+                tenant_id=actor.tenant_id,  # P1 #5: actor IS resolved here
+                request_id=_resolve_request_id(request),
+                http_status=403,
+                required_scope=scope,
             )
             raise HTTPException(
                 status_code=403,

@@ -75,7 +75,7 @@ import logging
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from cognic_agentos.packs.storage import PackRecord, PackRecordStore
 from cognic_agentos.portal.api.packs.dto import (
@@ -84,11 +84,12 @@ from cognic_agentos.portal.api.packs.dto import (
     PackResponse,
 )
 from cognic_agentos.portal.rbac.actor import Actor
-from cognic_agentos.portal.rbac.enforcement import RequireScope
-from cognic_agentos.portal.rbac.tenant_isolation import (
-    RequireTenantOwnership,
-    _emit_isolation_log,
+from cognic_agentos.portal.rbac.enforcement import (
+    RequireScope,
+    _emit_denial_or_500,
+    _resolve_request_id,
 )
+from cognic_agentos.portal.rbac.tenant_isolation import RequireTenantOwnership
 
 _LOG = logging.getLogger(__name__)
 
@@ -132,6 +133,7 @@ def register_inspection_list(
 
     @parent.get("", summary="List packs scoped to actor.tenant_id")
     async def list_packs(
+        request: Request,
         actor: Annotated[Actor, Depends(_require_pack_audit_read)],
         limit: int = 50,
         cursor: uuid.UUID | None = None,
@@ -154,16 +156,23 @@ def register_inspection_list(
         surface as 500 + the same closed-enum reason the
         path-param-tenant-isolated endpoints emit, NOT silently mask
         as a 200 empty-list response. ``pack_id="<list>"`` sentinel
-        keeps the existing
-        :func:`tenant_isolation._emit_isolation_log` helper signature
-        (``pack_id: str``) type-safe under mypy — no Optional kwarg
-        introduced; same log message + closed-enum reason the
-        sibling endpoints emit on their 500 path.
+        keeps log-aggregator bucketing discoverable while staying
+        type-safe under mypy.
+
+        Sprint-7B.4 T6: now routes through the shared
+        :func:`_emit_denial_or_500` helper (same dual-surface
+        contract as the path-param-tenant-isolated endpoints — log
+        first, then chain row via the broker if wired).
         """
         if not actor.tenant_id:
-            _emit_isolation_log(
-                reason="actor_tenant_id_missing",
+            broker = getattr(request.app.state, "ui_event_broker", None)
+            await _emit_denial_or_500(
+                broker,
+                denial_type="actor_tenant_id_missing",
                 actor_subject=actor.subject,
+                tenant_id=None,  # actor.tenant_id is empty
+                request_id=_resolve_request_id(request),
+                http_status=500,
                 pack_id="<list>",  # sentinel — no {pack_id} path-param
             )
             raise HTTPException(

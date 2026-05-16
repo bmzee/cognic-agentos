@@ -313,19 +313,19 @@ def test_tenant_isolation_emits_structured_log_per_reason(
     expected_reason: str,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """T2 R1 P2 #2 — caplog parity with :file:`test_enforcement.py`. Each
-    closed-enum :data:`TenantIsolationFailure` value (except the
-    defensive ``pack_store_not_configured`` which gets its own test
-    below) must emit a structured log record at
-    ``cognic_agentos.portal.rbac.tenant_isolation`` with ``reason``,
-    ``actor_subject``, and ``pack_id`` fields. Without this pin the
-    logging side-effect can regress while the HTTP-response tests stay
-    green."""
+    """Sprint-7B.4 T6 wire-shape: emission moved from per-module helper
+    (`_emit_isolation_log`, logger ``cognic_agentos.portal.rbac.tenant_isolation``,
+    message ``portal.rbac.tenant_isolation_failed``) to the shared
+    ``_emit_denial_or_500`` helper (logger
+    ``cognic_agentos.portal.rbac.enforcement``, message
+    ``portal.rbac.<reason>``). Structured ``reason`` / ``actor_subject``
+    / ``pack_id`` fields are unchanged — operators querying on
+    structured fields stay compatible."""
     app, _ = build_app()
     pack_uuid = uuid.uuid4()
-    with caplog.at_level(logging.WARNING, logger="cognic_agentos.portal.rbac.tenant_isolation"):
+    with caplog.at_level(logging.WARNING, logger="cognic_agentos.portal.rbac.enforcement"):
         TestClient(app, raise_server_exceptions=False).get(f"/packs/{pack_uuid}")
-    records = [r for r in caplog.records if "portal.rbac.tenant_isolation_failed" in r.message]
+    records = [r for r in caplog.records if r.message == f"portal.rbac.{expected_reason}"]
     assert len(records) == 1, f"Expected exactly one denial log; got {records}"
     record = records[0]
     assert getattr(record, "reason", None) == expected_reason
@@ -336,10 +336,13 @@ def test_tenant_isolation_emits_structured_log_per_reason(
 def test_pack_store_not_configured_emits_structured_log(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """T2 R1 P2 #2 — caplog assertion for the defensive
-    ``pack_store_not_configured`` 500. Kept separate from the
-    parametrized matrix above because the app construction is unique
-    (no store wired)."""
+    """Sprint-7B.4 T6 wire-shape: emission moved from
+    `_emit_isolation_log` (tenant_isolation logger, constant message
+    `portal.rbac.tenant_isolation_failed`) to the shared
+    `_emit_denial_or_500` helper (enforcement logger, per-reason
+    message `portal.rbac.pack_store_not_configured`). Kept separate
+    from the parametrized matrix above because the app construction
+    is unique (no store wired)."""
     actor = _human_actor(tenant_id="t1")
     app = FastAPI()
     app.state.actor_binder = _StubBinder(actor)
@@ -350,9 +353,9 @@ def test_pack_store_not_configured_emits_structured_log(
         return {"pack_id": pack.pack_id}
 
     pack_uuid = uuid.uuid4()
-    with caplog.at_level(logging.WARNING, logger="cognic_agentos.portal.rbac.tenant_isolation"):
+    with caplog.at_level(logging.WARNING, logger="cognic_agentos.portal.rbac.enforcement"):
         TestClient(app, raise_server_exceptions=False).get(f"/packs/{pack_uuid}")
-    records = [r for r in caplog.records if "portal.rbac.tenant_isolation_failed" in r.message]
+    records = [r for r in caplog.records if r.message == "portal.rbac.pack_store_not_configured"]
     assert len(records) == 1
     assert getattr(records[0], "reason", None) == "pack_store_not_configured"
 

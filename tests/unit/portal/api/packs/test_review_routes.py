@@ -1537,12 +1537,19 @@ class TestSprint7B2ReviewQueueEndpoint:
         Type-correctness (R21 P2 #1): ``Actor.tenant_id`` is typed
         ``str`` (not ``str | None``) so the only reachable falsy case
         under live Pydantic validation is the empty string. The
-        ``_emit_isolation_log(pack_id: str)`` helper requires ``str``;
-        the handler passes the sentinel ``"<review-queue>"``.
+        sentinel ``"<review-queue>"`` keeps the log-aggregator bucket
+        discoverable AND satisfies the helper's ``pack_id: str``
+        contract.
+
+        Sprint-7B.4 T6 wire-shape: emission now routes through the
+        shared ``_emit_denial_or_500`` helper (logger
+        ``cognic_agentos.portal.rbac.enforcement``, message
+        ``portal.rbac.actor_tenant_id_missing``) instead of the
+        per-module ``_emit_isolation_log``.
         """
         caplog.set_level(
             logging.WARNING,
-            logger="cognic_agentos.portal.rbac.tenant_isolation",
+            logger="cognic_agentos.portal.rbac.enforcement",
         )
         actor = _make_actor(
             subject="alice@bank.example",
@@ -1557,20 +1564,22 @@ class TestSprint7B2ReviewQueueEndpoint:
         assert response.status_code == 500, response.text
         assert response.json() == {"detail": {"reason": "actor_tenant_id_missing"}}
 
-        # Structured-log emission on the tenant-isolation logger
-        isolation_records = [
-            r for r in caplog.records if r.name == "cognic_agentos.portal.rbac.tenant_isolation"
+        # Structured-log emission on the enforcement logger (Sprint-7B.4 T6).
+        denial_records = [
+            r
+            for r in caplog.records
+            if r.name == "cognic_agentos.portal.rbac.enforcement"
+            and r.message == "portal.rbac.actor_tenant_id_missing"
         ]
-        assert len(isolation_records) == 1, (
-            f"expected exactly one tenant-isolation log record on the "
-            f"actor_tenant_id_missing route-level preflight; got {len(isolation_records)}"
+        assert len(denial_records) == 1, (
+            f"expected exactly one denial log record on the "
+            f"actor_tenant_id_missing route-level preflight; got {len(denial_records)}"
         )
-        emitted = isolation_records[0]
+        emitted = denial_records[0]
         assert emitted.reason == "actor_tenant_id_missing"  # type: ignore[attr-defined]
         assert emitted.actor_subject == "alice@bank.example"  # type: ignore[attr-defined]
         # Sentinel pack_id per R21 P2 #1 — keeps the log-aggregator
-        # bucket discoverable AND satisfies the helper's `pack_id: str`
-        # type contract (no None pack_id slips through).
+        # bucket discoverable.
         assert emitted.pack_id == "<review-queue>"  # type: ignore[attr-defined]
 
 

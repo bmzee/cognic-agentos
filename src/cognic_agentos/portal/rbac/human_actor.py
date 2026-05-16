@@ -26,13 +26,20 @@ Module is intentionally separate from :mod:`.enforcement` because:
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
-from typing import Annotated, Literal
+from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING, Annotated, Literal
 
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Request
 
 from cognic_agentos.portal.rbac.actor import Actor
-from cognic_agentos.portal.rbac.enforcement import _bind_actor
+from cognic_agentos.portal.rbac.enforcement import (
+    _bind_actor,
+    _emit_denial_or_500,
+    _resolve_request_id,
+)
+
+if TYPE_CHECKING:
+    from cognic_agentos.protocol.ui_events import UIEventBroker
 
 _LOG = logging.getLogger(__name__)
 
@@ -48,11 +55,19 @@ _LOG = logging.getLogger(__name__)
 HumanActorDenialReason = Literal["actor_type_must_be_human"]
 
 
-def RequireHumanActor() -> Callable[..., Actor]:
+def RequireHumanActor() -> Callable[..., Awaitable[Actor]]:
     """FastAPI dependency factory — admit only ``actor_type == "human"``.
 
     Refuses service actors with 403 +
     ``{"reason": "actor_type_must_be_human", "actor_subject": ...}``.
+
+    Sprint-7B.4 T6: converted to async so the denial path can ``await
+    broker.emit_rbac_denial`` via the shared
+    :func:`~cognic_agentos.portal.rbac.enforcement._emit_denial_or_500`
+    helper. FastAPI handles async sub-deps transparently for existing
+    callers (the allow-list endpoint at
+    ``portal/api/packs/operator_routes.py:..`` declares
+    ``Depends(RequireHumanActor())`` — no callsite change required).
 
     Out-of-vocabulary ``actor_type`` values (e.g. ``"robot"``) are
     already refused at :class:`Actor` construction by Pydantic — this
@@ -63,15 +78,20 @@ def RequireHumanActor() -> Callable[..., Actor]:
     consume the resolved identity without re-binding.
     """
 
-    def dependency(actor: Annotated[Actor, Depends(_bind_actor)]) -> Actor:
+    async def dependency(
+        request: Request,
+        actor: Annotated[Actor, Depends(_bind_actor)],
+    ) -> Actor:
         if actor.actor_type != "human":
-            _LOG.warning(
-                "portal.rbac.human_actor_required",
-                extra={
-                    "reason": "actor_type_must_be_human",
-                    "actor_subject": actor.subject,
-                    "actor_type": actor.actor_type,
-                },
+            broker: UIEventBroker | None = getattr(request.app.state, "ui_event_broker", None)
+            await _emit_denial_or_500(
+                broker,
+                denial_type="actor_type_must_be_human",
+                actor_subject=actor.subject,
+                tenant_id=actor.tenant_id,  # P1 #5: actor IS resolved
+                request_id=_resolve_request_id(request),
+                http_status=403,
+                actor_type=actor.actor_type,
             )
             raise HTTPException(
                 status_code=403,

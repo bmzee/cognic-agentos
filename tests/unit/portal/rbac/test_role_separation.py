@@ -208,26 +208,39 @@ async def test_role_separation_admits_when_subjects_differ() -> None:
 
     Constructs the closure-factory with a stub ``tenant_ownership``
     callable, then invokes the inner closure directly with manually-
-    bound ``actor`` + ``record`` kwargs (bypassing FastAPI's ``Depends``
-    resolution — the OpenAPI introspection test covers the live FastAPI
-    path separately).
+    bound ``actor`` + ``record`` + ``request`` kwargs (bypassing FastAPI's
+    ``Depends`` resolution — the OpenAPI introspection test covers the
+    live FastAPI path separately).
+
+    Sprint-7B.4 T6: the closure signature now takes ``request`` so the
+    refusal path can resolve ``request.app.state.ui_event_broker`` for
+    the shared ``_emit_denial_or_500`` helper. On the admit path the
+    request is never accessed — but pytest's MagicMock auto-creation
+    would return a Mock for any attr if we didn't bind ``request``
+    explicitly. The simplest approach: pass a minimal MagicMock with
+    `ui_event_broker` explicitly bound to None (the admit path doesn't
+    read it; this is just defence-in-depth against silent test drift
+    if a future change moves the broker resolution above the if-guard).
 
     Reviewer ``alice@bank.example`` claiming a pack created by
     ``bob@bank.example`` is the canonical happy path: subjects differ;
     cross-role separation is satisfied; the closure returns ``None``
     without raising.
     """
+    from unittest.mock import MagicMock
+
     require_diff = RequireDifferentActorThanCreator(
         tenant_ownership=_stub_tenant_ownership,
     )
 
     actor = _make_actor(subject="alice@bank.example")
     record = _make_record(created_by="bob@bank.example")
+    request = MagicMock()
+    request.app.state.ui_event_broker = None
+    request.state.request_id = "portal-req-test-admit"
 
     # Should return None without raising — subjects differ.
-    # (No explicit `result is None` check: the closure returns implicitly,
-    # and mypy correctly flags `result = await ...` as func-returns-value.)
-    await require_diff(actor=actor, record=record)
+    await require_diff(request=request, actor=actor, record=record)
 
 
 # ---------------------------------------------------------------------------
@@ -250,15 +263,24 @@ async def test_role_separation_refuses_when_subjects_match() -> None:
     Closed-enum reason value matches the wire-protocol-public
     :data:`RoleSeparationFailure` literal pinned at test #1.
     """
+    from unittest.mock import MagicMock
+
     require_diff = RequireDifferentActorThanCreator(
         tenant_ownership=_stub_tenant_ownership,
     )
 
     actor = _make_actor(subject="bob@bank.example")
     record = _make_record(created_by="bob@bank.example")
+    # Sprint-7B.4 T6: closure now takes `request` for broker resolution
+    # via `_emit_denial_or_500`. broker=None forces the helper's log-only
+    # fallback (no chain emit attempt) — refusal path still raises 403
+    # with the same closed-enum detail.
+    request = MagicMock()
+    request.app.state.ui_event_broker = None
+    request.state.request_id = "portal-req-test-refuse"
 
     with pytest.raises(HTTPException) as excinfo:
-        await require_diff(actor=actor, record=record)
+        await require_diff(request=request, actor=actor, record=record)
 
     assert excinfo.value.status_code == 403
     # HTTPException.detail is typed Any by FastAPI; cast for mypy clarity.
@@ -275,75 +297,87 @@ async def test_role_separation_refuses_when_subjects_match() -> None:
 async def test_role_separation_emits_structured_log(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Plan Round 16 P2 #3 — structured-log emission BEFORE the HTTPException.
+    """Sprint-7B.4 T6 wire-shape: structured-log emission moved from
+    per-module `_LOG.warning("portal.rbac.role_separation_refused", ...)`
+    in role_separation to the shared `_emit_denial_or_500` helper in
+    enforcement. Wire changes:
 
-    Sibling RBAC guards ALL emit a structured log before raising:
-    ``tenant_isolation._emit_isolation_log`` at ``:75-94``,
-    ``human_actor._LOG.warning(...)`` at ``:68``,
-    ``enforcement._emit_denial_log``. role_separation MUST emit on the
-    same observability surface so denial events bucket correctly across
-    the four-axis enforcement surface (scope / tenant / actor-type /
-    role-separation).
+    - Logger source: ``cognic_agentos.portal.rbac.role_separation`` →
+      ``cognic_agentos.portal.rbac.enforcement``
+    - Message: ``portal.rbac.role_separation_refused`` →
+      ``portal.rbac.actor_cannot_review_own_pack``
+
+    Structured ``reason`` / ``actor_subject`` / ``pack_id`` /
+    ``pack_created_by`` fields unchanged — operators querying on
+    structured fields stay compatible.
 
     Asserts on the refusal path (subjects match):
     - EXACTLY ONE log record fires at WARNING level
-    - Logger: ``cognic_agentos.portal.rbac.role_separation``
-    - Message: ``portal.rbac.role_separation_refused``
+    - Logger: ``cognic_agentos.portal.rbac.enforcement``
+    - Message: ``portal.rbac.actor_cannot_review_own_pack``
     - ``extra`` dict carries closed-enum reason + actor_subject +
       pack_id + pack_created_by
 
-    Asserts on the admit path (subjects differ): NO log record fires.
-
-    Mirrors the parametrized log-emission test pattern at
-    ``test_tenant_isolation.py::test_tenant_isolation_emits_structured_log_per_reason``
-    (T2 R1 P2 #2) and ``test_human_actor.py``'s
-    ``test_require_human_actor_refusal_emits_structured_log``.
+    Asserts on the admit path (subjects differ): NO denial log record
+    fires on the enforcement logger.
     """
+    from unittest.mock import MagicMock
+
     require_diff = RequireDifferentActorThanCreator(
         tenant_ownership=_stub_tenant_ownership,
     )
 
     # --- Refusal path: subjects match ---
     caplog.clear()
-    caplog.set_level(logging.WARNING, logger="cognic_agentos.portal.rbac.role_separation")
+    caplog.set_level(logging.WARNING, logger="cognic_agentos.portal.rbac.enforcement")
 
     actor = _make_actor(subject="bob@bank.example")
     record = _make_record(
         id=uuid.UUID("11111111-2222-3333-4444-555555555555"),
         created_by="bob@bank.example",
     )
+    request = MagicMock()
+    request.app.state.ui_event_broker = None  # T6 log-only fallback
+    request.state.request_id = "portal-req-test-rs-log"
 
     with pytest.raises(HTTPException):
-        await require_diff(actor=actor, record=record)
+        await require_diff(request=request, actor=actor, record=record)
 
-    role_separation_records = [
-        r for r in caplog.records if r.name == "cognic_agentos.portal.rbac.role_separation"
+    enforcement_records = [
+        r
+        for r in caplog.records
+        if r.name == "cognic_agentos.portal.rbac.enforcement"
+        and r.message == "portal.rbac.actor_cannot_review_own_pack"
     ]
-    assert len(role_separation_records) == 1, (
-        f"expected EXACTLY ONE role_separation log record on refusal, "
-        f"got {len(role_separation_records)}"
+    assert len(enforcement_records) == 1, (
+        f"expected EXACTLY ONE enforcement log record on refusal, got {len(enforcement_records)}"
     )
-    record_log = role_separation_records[0]
+    record_log = enforcement_records[0]
     assert record_log.levelno == logging.WARNING
-    assert record_log.message == "portal.rbac.role_separation_refused"
     assert record_log.reason == "actor_cannot_review_own_pack"  # type: ignore[attr-defined]
     assert record_log.actor_subject == "bob@bank.example"  # type: ignore[attr-defined]
     assert record_log.pack_id == "11111111-2222-3333-4444-555555555555"  # type: ignore[attr-defined]
     assert record_log.pack_created_by == "bob@bank.example"  # type: ignore[attr-defined]
 
-    # --- Admit path: subjects differ; no log record fires ---
+    # --- Admit path: subjects differ; no denial log record fires ---
     caplog.clear()
 
     admit_actor = _make_actor(subject="alice@bank.example")
     admit_record = _make_record(created_by="bob@bank.example")
+    admit_request = MagicMock()
+    admit_request.app.state.ui_event_broker = None
+    admit_request.state.request_id = "portal-req-test-rs-admit"
 
-    await require_diff(actor=admit_actor, record=admit_record)
+    await require_diff(request=admit_request, actor=admit_actor, record=admit_record)
 
     admit_records = [
-        r for r in caplog.records if r.name == "cognic_agentos.portal.rbac.role_separation"
+        r
+        for r in caplog.records
+        if r.name == "cognic_agentos.portal.rbac.enforcement"
+        and r.message == "portal.rbac.actor_cannot_review_own_pack"
     ]
     assert len(admit_records) == 0, (
-        f"admit path must emit NO role_separation log record; got {len(admit_records)}"
+        f"admit path must emit NO denial log record; got {len(admit_records)}"
     )
 
 
@@ -395,9 +429,14 @@ def test_role_separation_closure_factory_shape() -> None:
     assert callable(require_diff)
     assert inspect.iscoroutinefunction(require_diff)
 
-    # (2) Signature has actor + record parameters.
+    # (2) Signature has actor + record + request parameters.
+    # Sprint-7B.4 T6 added `request` for broker resolution via the
+    # shared `_emit_denial_or_500` helper (FastAPI auto-injects
+    # `Request` for any param typed as such — transparent to existing
+    # endpoint callers that declare `Depends(require_diff)` without
+    # passing `request` themselves).
     sig = inspect.signature(require_diff)
-    assert set(sig.parameters.keys()) == {"actor", "record"}
+    assert set(sig.parameters.keys()) == {"actor", "record", "request"}
 
     # (3) Annotation-object capture: the `record` parameter's annotation
     #     is `Annotated[PackRecord, Depends(captured_tenant_ownership)]`

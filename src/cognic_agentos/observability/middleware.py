@@ -16,7 +16,7 @@ from starlette.middleware.cors import CORSMiddleware
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from cognic_agentos.core.config import Settings
-from cognic_agentos.observability.logging import bind_request_id
+from cognic_agentos.observability.logging import REQUEST_ID_CONTEXT, bind_request_id
 
 REQUEST_ID_HEADER = "X-Request-Id"
 """Inbound + outbound header name. Mixed-case to match common conventions."""
@@ -66,9 +66,22 @@ class RequestIdMiddleware:
 
         async def send_with_header(message: Message) -> None:
             if message["type"] == "http.response.start":
+                # Sprint-7B.4 T6: read REQUEST_ID_CONTEXT FRESH at
+                # response-write time so any inner middleware that
+                # rebinds the contextvar (e.g. the portal request-id
+                # middleware that mints `portal-req-<uuid>` for
+                # `/api/v1/*` paths) is reflected in the response
+                # X-Request-Id header. Without this, the access log
+                # (which reads the contextvar via _ContextFilter) and
+                # the response header would diverge — operators
+                # correlating inbound→logs by X-Request-Id would see a
+                # different id than the one the structured log carries
+                # for the same request. Pinned by `tests/unit/test_logging.py`
+                # (`test_actual_request_emits_json_access_line_*`).
+                effective_request_id = REQUEST_ID_CONTEXT.get() or request_id
                 response_headers: list[tuple[bytes, bytes]] = list(message.get("headers", []))
                 response_headers.append(
-                    (REQUEST_ID_HEADER.encode("latin-1"), request_id.encode("latin-1"))
+                    (REQUEST_ID_HEADER.encode("latin-1"), effective_request_id.encode("latin-1"))
                 )
                 message["headers"] = response_headers
             await send(message)

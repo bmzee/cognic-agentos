@@ -39,13 +39,20 @@ from __future__ import annotations
 import logging
 import uuid
 from collections.abc import Awaitable, Callable
-from typing import Annotated, Literal
+from typing import TYPE_CHECKING, Annotated, Literal
 
 from fastapi import Depends, HTTPException, Request
 
 from cognic_agentos.packs.storage import PackRecord
 from cognic_agentos.portal.rbac.actor import Actor
-from cognic_agentos.portal.rbac.enforcement import _bind_actor
+from cognic_agentos.portal.rbac.enforcement import (
+    _bind_actor,
+    _emit_denial_or_500,
+    _resolve_request_id,
+)
+
+if TYPE_CHECKING:
+    from cognic_agentos.protocol.ui_events import UIEventBroker
 
 _LOG = logging.getLogger(__name__)
 
@@ -72,25 +79,17 @@ TenantIsolationFailure = Literal[
 ]
 
 
-def _emit_isolation_log(
-    *,
-    reason: TenantIsolationFailure,
-    actor_subject: str,
-    pack_id: str,
-) -> None:
-    """Structured log emit path for tenant-isolation failures.
-
-    Mirrors :func:`cognic_agentos.portal.rbac.enforcement._emit_denial_log`
-    — full hash-chain emission ships in Sprint 7B.4 per plan Round 5 P3 #5.
-    """
-    _LOG.warning(
-        "portal.rbac.tenant_isolation_failed",
-        extra={
-            "reason": reason,
-            "actor_subject": actor_subject,
-            "pack_id": pack_id,
-        },
-    )
+#: Sprint-7B.4 T6 — the per-module `_emit_isolation_log` helper was
+#: removed when refusal sites switched to the shared
+#: :func:`~cognic_agentos.portal.rbac.enforcement._emit_denial_or_500`
+#: helper (one source of truth for log + chain emission across all 4
+#: RBAC modules). The wire-shape change: log records now come from the
+#: ``cognic_agentos.portal.rbac.enforcement`` logger with message
+#: ``portal.rbac.<TenantIsolationFailure>`` (e.g.
+#: ``portal.rbac.tenant_id_mismatch``) instead of the previous
+#: per-module constant ``portal.rbac.tenant_isolation_failed``.
+#: Structured ``reason`` attribute is unchanged — operators querying on
+#: the structured field stay compatible without query updates.
 
 
 def RequireTenantOwnership(
@@ -127,12 +126,21 @@ def RequireTenantOwnership(
                 f"RequireTenantOwnership path-param mismatch: "
                 f"no '{pack_id_param}' in request.path_params"
             )
+        # Sprint-7B.4 T6: resolve broker + request_id once for the whole
+        # dependency so all 4 emit branches below share the same context.
+        broker: UIEventBroker | None = getattr(request.app.state, "ui_event_broker", None)
+        request_id = _resolve_request_id(request)
+
         try:
             pack_uuid = uuid.UUID(raw)
         except (ValueError, TypeError):
-            _emit_isolation_log(
-                reason="pack_not_found",
+            await _emit_denial_or_500(
+                broker,
+                denial_type="pack_not_found",
                 actor_subject=actor.subject,
+                tenant_id=actor.tenant_id or None,
+                request_id=request_id,
+                http_status=404,
                 pack_id=str(raw),
             )
             raise HTTPException(
@@ -141,9 +149,13 @@ def RequireTenantOwnership(
             ) from None
 
         if not actor.tenant_id:
-            _emit_isolation_log(
-                reason="actor_tenant_id_missing",
+            await _emit_denial_or_500(
+                broker,
+                denial_type="actor_tenant_id_missing",
                 actor_subject=actor.subject,
+                tenant_id=None,  # actor.tenant_id is empty — chain row gets NULL
+                request_id=request_id,
+                http_status=500,
                 pack_id=str(pack_uuid),
             )
             raise HTTPException(
@@ -160,9 +172,13 @@ def RequireTenantOwnership(
             # structured log). Distinct from ``actor_binder_not_configured``
             # so operators can fingerprint WHICH wiring step the overlay
             # bootstrap missed.
-            _emit_isolation_log(
-                reason="pack_store_not_configured",
+            await _emit_denial_or_500(
+                broker,
+                denial_type="pack_store_not_configured",
                 actor_subject=actor.subject,
+                tenant_id=actor.tenant_id,
+                request_id=request_id,
+                http_status=500,
                 pack_id=str(pack_uuid),
             )
             raise HTTPException(
@@ -172,9 +188,13 @@ def RequireTenantOwnership(
 
         record: PackRecord | None = await store.load(pack_uuid)
         if record is None:
-            _emit_isolation_log(
-                reason="pack_not_found",
+            await _emit_denial_or_500(
+                broker,
+                denial_type="pack_not_found",
                 actor_subject=actor.subject,
+                tenant_id=actor.tenant_id,
+                request_id=request_id,
+                http_status=404,
                 pack_id=str(pack_uuid),
             )
             raise HTTPException(
@@ -185,9 +205,13 @@ def RequireTenantOwnership(
         if record.tenant_id != actor.tenant_id:
             # 404 NOT 403 — info-leak prevention. A 403 leaks pack
             # existence to a cross-tenant attacker.
-            _emit_isolation_log(
-                reason="tenant_id_mismatch",
+            await _emit_denial_or_500(
+                broker,
+                denial_type="tenant_id_mismatch",
                 actor_subject=actor.subject,
+                tenant_id=actor.tenant_id,
+                request_id=request_id,
+                http_status=404,
                 pack_id=str(pack_uuid),
             )
             raise HTTPException(

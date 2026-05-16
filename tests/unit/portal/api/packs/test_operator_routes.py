@@ -599,7 +599,12 @@ class TestSprint7B2OperatorRequestIdPrefixBounded:
 
 
 _OPERATOR_ROUTES_LOGGER = "cognic_agentos.portal.api.packs.operator_routes"
-_HUMAN_ACTOR_LOGGER = "cognic_agentos.portal.rbac.human_actor"
+#: Sprint-7B.4 T6 wire-shape: human_actor refusal now emits via the
+#: shared `_emit_denial_or_500` helper in enforcement; logger source
+#: + message constant both change. Constant points at the new logger
+#: + message form so tests filtering on it stay accurate.
+_HUMAN_ACTOR_LOGGER = "cognic_agentos.portal.rbac.enforcement"
+_HUMAN_ACTOR_MESSAGE = "portal.rbac.actor_type_must_be_human"
 
 
 class TestSprint7B2AllowListEndpoint:
@@ -898,15 +903,15 @@ class TestSprint7B2AllowListEndpoint:
         assert response.status_code == 403
         assert response.json()["detail"]["reason"] == "actor_type_must_be_human"
 
-        # Sibling-guard log fires EXACTLY ONCE
+        # Sibling-guard log fires EXACTLY ONCE (Sprint-7B.4 T6 wire-shape:
+        # logger is now enforcement, message is `portal.rbac.<denial_type>`).
         human_actor_records = [
             r
             for r in caplog.records
-            if r.name == _HUMAN_ACTOR_LOGGER and r.message == "portal.rbac.human_actor_required"
+            if r.name == _HUMAN_ACTOR_LOGGER and r.message == _HUMAN_ACTOR_MESSAGE
         ]
         assert len(human_actor_records) == 1, (
-            f"expected EXACTLY 1 portal.rbac.human_actor_required record; "
-            f"got {len(human_actor_records)}"
+            f"expected EXACTLY 1 {_HUMAN_ACTOR_MESSAGE} record; got {len(human_actor_records)}"
         )
 
         # Operator-vocab refused-event MUST NOT fire — R19 P2 #2
