@@ -86,6 +86,14 @@ dependencies = [
     # edit. Plan deviation: original Slice F estimate was "~25 LoC"
     # without dep churn; expanded scope explicitly authorized at R10+.
     "tomli-w>=1.0,<2",
+    # Sprint-7B.4 T3 — sse-starlette is the EventSourceResponse class that
+    # implements the SSE wire protocol (heartbeat, retry-after, send_timeout,
+    # ping-suppress sentinel) per ADR-020. It was a transitive dep until
+    # 7B.4 promoted it to an EXPLICIT runtime dep because T10's stream_routes
+    # imports it directly + every UI-stream production deployment depends on
+    # its presence at import time. <3.0.0 caps the upper bound at a major
+    # version boundary per the repo convention.
+    "sse-starlette>=2.1.0,<3.0.0",
 ]
 
 [project.optional-dependencies]

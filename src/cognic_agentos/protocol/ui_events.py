@@ -84,9 +84,11 @@ typed Pydantic schema + the in-process emit-hook layer.
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as _dt
 import hashlib
 import logging
+import uuid
 from collections.abc import Awaitable, Callable
 from typing import Annotated, Any, Final, Literal
 
@@ -135,6 +137,69 @@ _WAVE_1_FAMILIES: Final[frozenset[str]] = frozenset(
 _WIRED_IN_SPRINT_6: Final[frozenset[str]] = frozenset({"tool_call", "artifact", "decision_audit"})
 
 
+#: Sprint-7B.4 T3 — the 9 families that flow over SSE in Wave 1.
+#:
+#: A strict subset of :data:`_WAVE_1_FAMILIES` (11 families). The 2
+#: excluded families (``tool_call`` + ``artifact``) are audit-event-
+#: backed (mirrored from the audit chain by the Sprint-6 hook), not
+#: decision-history-backed; the Wave-1 SSE transport is
+#: decision-history-only per the design spec §4.2. The byte slot for
+#: an audit-event SSE surface stays reserved (cursor `chain_disc=0x02`
+#: refuses fail-closed in :func:`_decode_chain_cursor`) for a Wave-2
+#: expansion that does NOT re-cut the wire format.
+#:
+#: Drift in this set is wire-protocol drift — pinned by the
+#: TestSSEWave1StreamedFamilies regression in
+#: ``tests/unit/protocol/test_ui_events_rbac_denial_type.py``.
+_SSE_WAVE_1_STREAMED_FAMILIES: Final[frozenset[str]] = frozenset(
+    {
+        "policy",
+        "decision_audit",
+        "agent_run",
+        "subagent",
+        "approval",
+        "interrupt",
+        "frontend_action",
+        "memory",
+        "kill_switch",
+    }
+)
+
+
+#: Sprint-7B.4 T3 — protocol-owned 9-value union over the 4 portal RBAC
+#: denial vocabularies (`portal/rbac/enforcement.RBACDenialReason` +
+#: `portal/rbac/tenant_isolation.TenantIsolationFailure` +
+#: `portal/rbac/human_actor.HumanActorDenialReason` +
+#: `portal/rbac/role_separation.RoleSeparationFailure`).
+#:
+#: **Architectural-arrow invariant:** this Literal is defined HERE,
+#: NOT imported from `portal/rbac/*`. The protocol layer is upstream
+#: of portal; the union equality with the 4 source Literals is
+#: enforced AT THE TEST LAYER so this module stays import-clean.
+#:
+#: Used as the discriminator on `rbac.<denial_type>` chain events
+#: appended via `UIEventBroker.emit_rbac_denial` (Sprint 7B.4 T4),
+#: which feeds the `PolicyRBACDenied` typed-projector path. Drift
+#: with the 4 portal vocabularies is wire-protocol drift (the 403
+#: response body's `reason` field per ADR-012 §40 + AGENTS.md
+#: "Wire-protocol contracts" stop rule).
+RBACDenialType = Literal[
+    # from portal/rbac/enforcement.py:53 — RBACDenialReason (3)
+    "actor_unauthenticated",
+    "scope_not_held",
+    "actor_binder_not_configured",
+    # from portal/rbac/tenant_isolation.py:67 — TenantIsolationFailure (4)
+    "tenant_id_mismatch",
+    "pack_not_found",
+    "actor_tenant_id_missing",
+    "pack_store_not_configured",
+    # from portal/rbac/human_actor.py:48 — HumanActorDenialReason (1)
+    "actor_type_must_be_human",
+    # from portal/rbac/role_separation.py:93 — RoleSeparationFailure (1)
+    "actor_cannot_review_own_pack",
+]
+
+
 #: Audit ``event_type`` → (family, type) routing for the
 #: ``tool_call`` mirror (T12 R0 doctrine #7). Source-of-truth for
 #: Sprint-5 MCP host's ``audit.tool_invocation_*`` event vocabulary.
@@ -174,6 +239,181 @@ def _new_event_id() -> str:
     cursor semantics.
     """
     return f"evt_{ULID()}"
+
+
+# ---------------------------------------------------------------------------
+# Chain-derived event_id cursor (Sprint-7B.4 T3) — wire-protocol-public
+# ---------------------------------------------------------------------------
+#
+# SSE-resume cursors per ADR-020 + the 7B.4 design spec §4.3. The
+# event_id format remains `evt_<26 base32 ULID>` (30 chars total) as
+# already published in Sprint 6, but for typed events derived from a
+# chain row the 16-byte ULID payload is NOT random — it encodes the
+# chain coordinates so the SSE replay endpoint can decode a resume
+# cursor back into `(chain_id, sequence, ordinal, type_hash)` without
+# round-tripping the database.
+#
+# **16-byte payload layout (locked at 7B.4 design spec §4.3):**
+#
+#     | offset | bytes | field        | meaning                                |
+#     |--------|-------|--------------|----------------------------------------|
+#     | 0      | 1     | chain_disc   | 0x01=decision_history, 0x02=audit_event |
+#     | 1..8   | 8     | sequence     | big-endian chain row sequence          |
+#     | 9      | 1     | ordinal      | per-row event ordinal (0=typed, 1=mirror) |
+#     | 10..15 | 6     | type_hash    | sha256("<family>.<type>")[:6]          |
+#
+# Wave-1 only honors `chain_disc=0x01` (decision_history). Cursors
+# minted against the audit chain (`chain_disc=0x02`) decode-refuse
+# with :class:`CursorChainUnsupported`; the byte slot stays reserved
+# so a Wave-2 audit-event SSE surface can use it without re-cutting
+# the wire format.
+#
+# Determinism is load-bearing: the broker resolves the event_id of
+# an in-flight chain append by re-encoding the persisted
+# (sequence, ordinal, family, type) tuple. If `_chain_derived_event_id`
+# were nondeterministic the broker's captured event_id would diverge
+# from the SSE-fanout event_id and subscribers would see cursor drift.
+
+
+#: Wave-1 supports `decision_history` only. `audit_event` is byte-reserved
+#: for the Wave-2 audit-event SSE surface; the decoder refuses it
+#: fail-closed in Wave-1.
+ChainId = Literal["decision_history", "audit_event"]
+
+#: Forward map: ChainId → 1-byte discriminator written at payload offset 0.
+_CHAIN_DISCRIMINATOR_BYTES: Final[dict[ChainId, int]] = {
+    "decision_history": 0x01,
+    "audit_event": 0x02,
+}
+
+#: Reverse map for decode. Closed-set on the forward map's values; any
+#: byte outside this set raises :class:`CursorChainUnsupported`.
+_CHAIN_DISCRIMINATOR_REVERSE: Final[dict[int, ChainId]] = {
+    v: k for k, v in _CHAIN_DISCRIMINATOR_BYTES.items()
+}
+
+
+class CursorMalformed(ValueError):
+    """Cursor `event_id` failed shape validation (wrong prefix, wrong
+    length, or base32 decoding raised). Maps to HTTP 422 ``cursor_malformed``
+    at the SSE route per the design spec §4.3."""
+
+
+class CursorChainUnsupported(ValueError):
+    """Cursor's `chain_disc` byte is outside the Wave-1 supported set.
+    Wave-1 supports `chain_disc=0x01` (decision_history) only;
+    `chain_disc=0x02` is byte-reserved for the Wave-2 audit-event SSE
+    surface and refuses fail-closed here so a probe cannot fall back
+    to the decision_history chain by accident. Maps to HTTP 422
+    ``cursor_chain_unsupported`` at the SSE route."""
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class ChainCursor:
+    """Decoded cursor coordinates per the locked 16-byte payload layout.
+
+    `type_hash` is exactly 6 bytes; the boundary `type_hash` drift
+    detector in the replay path compares this against the projector's
+    expected `sha256("<family>.<type>")[:6]` to detect Pydantic-model
+    rename drift mid-stream."""
+
+    chain_id: ChainId
+    sequence: int
+    ordinal: int
+    type_hash: bytes  # exactly 6 bytes
+
+
+def _chain_derived_event_id(
+    *,
+    chain_id: ChainId,
+    sequence: int,
+    ordinal: int,
+    family: str,
+    type_: str,
+) -> str:
+    """Encode the 16-byte cursor payload into ``evt_<26 base32>``.
+
+    The output shape matches :func:`_new_event_id` (30 chars total,
+    ``evt_`` prefix, 26-char Crockford-base32 ULID body) so SSE
+    consumers cannot distinguish chain-derived cursors from random
+    event_ids by inspection — the decoder is the only authoritative
+    source of cursor coordinates.
+
+    Per the locked T3 layout: ``chain_disc`` (1 byte) + ``sequence``
+    (8 bytes big-endian) + ``ordinal`` (1 byte) + ``type_hash``
+    (6 bytes = sha256(family.type)[:6]) = exactly 16 bytes.
+    """
+    chain_disc = _CHAIN_DISCRIMINATOR_BYTES[chain_id].to_bytes(1, "big")
+    seq_bytes = sequence.to_bytes(8, "big")
+    ordinal_byte = ordinal.to_bytes(1, "big")
+    type_hash = hashlib.sha256(f"{family}.{type_}".encode()).digest()[:6]
+    payload = chain_disc + seq_bytes + ordinal_byte + type_hash
+    # Length guard — load-bearing: ULID.from_bytes() raises on != 16 bytes,
+    # but the explicit assert pins the spec-locked size as a regression boundary.
+    assert len(payload) == 16, f"cursor payload must be 16 bytes, got {len(payload)}"
+    return f"evt_{ULID.from_bytes(payload)}"
+
+
+def _decode_chain_cursor(event_id: str) -> ChainCursor:
+    """Decode ``evt_<26 base32>`` → :class:`ChainCursor`.
+
+    Fail-closed at every shape boundary: malformed prefix / length /
+    base32 → :class:`CursorMalformed`; unsupported `chain_disc` byte
+    → :class:`CursorChainUnsupported`. No silent fallback — a
+    Wave-2 cursor passed to a Wave-1 endpoint MUST refuse, NOT
+    re-interpret as decision_history.
+    """
+    if not event_id.startswith("evt_") or len(event_id) != 30:
+        raise CursorMalformed(f"invalid event_id format: {event_id!r}")
+    try:
+        payload = bytes(ULID.from_str(event_id[4:]))
+    except (ValueError, TypeError) as exc:
+        raise CursorMalformed(f"base32 decode failed for {event_id!r}") from exc
+    chain_disc = payload[0]
+    if chain_disc not in _CHAIN_DISCRIMINATOR_REVERSE:
+        raise CursorChainUnsupported(f"chain_disc=0x{chain_disc:02x} not in Wave-1 supported set")
+    if chain_disc != 0x01:  # Wave-1: only decision_history is honored
+        raise CursorChainUnsupported(
+            f"chain_disc=0x{chain_disc:02x} reserved for Wave-2 (audit_event SSE)"
+        )
+    return ChainCursor(
+        chain_id=_CHAIN_DISCRIMINATOR_REVERSE[chain_disc],
+        sequence=int.from_bytes(payload[1:9], "big"),
+        ordinal=payload[9],
+        type_hash=payload[10:16],
+    )
+
+
+# ---------------------------------------------------------------------------
+# AppendResult — broker chain-append return shape (Sprint-7B.4 T3)
+# ---------------------------------------------------------------------------
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class AppendResult:
+    """Sprint-7B.4 T3 — broker chain-append return shape.
+
+    Returned by every ``UIEventBroker.emit_*`` / ``append_*`` seam
+    (T4). The deterministic ``event_id`` is resolved by the broker
+    from the typed event that fires synchronously during the awaited
+    ``DecisionHistoryStore.append`` — see T4 for the ContextVar
+    capture mechanism that bridges the typed-projector hook back to
+    the broker's `append_*` return.
+
+    Wire-protocol-public to T10 SSE route handlers (the
+    ``submitted_event_id`` + ``resolution_event_id`` cursors on
+    ``ActionResponse`` are these values), and to T11 action-route
+    handlers. Field additions are wire-extensions; renames or
+    removals are wire-breaking.
+
+    Frozen + slotted: instances cannot be mutated after construction;
+    test fixtures and route handlers can safely hand the same
+    ``AppendResult`` to multiple consumers without aliasing risk.
+    """
+
+    record_id: uuid.UUID
+    chain_hash: bytes
+    event_id: str
 
 
 # ---------------------------------------------------------------------------
@@ -426,6 +666,25 @@ class PolicyBundleLoaded(_BaseEvent):
     type: Literal["bundle_loaded"] = "bundle_loaded"
 
 
+class PolicyRBACDenied(_BaseEvent):
+    """Sprint-7B.4 T3 — typed event for `rbac.<denial_type>` chain rows.
+
+    Reuses the reserved `policy.*` family slot per ADR-020 — the
+    11-family `_WAVE_1_FAMILIES` set stays unchanged, the
+    `rbac.<denial_type>` decision_type collapses onto the existing
+    `policy` family rather than introducing a 12th family.
+
+    The portal-typed fields (`denial_type`, `actor_subject`,
+    `request_id`, `required_scope`, `pack_id`, etc.) travel inside
+    the inherited `data: dict[str, Any]` field — NOT as bare typed
+    attributes — per the architectural-arrow invariant (protocol
+    cannot import portal-owned closed-enum types).
+    """
+
+    family: Literal["policy"] = "policy"
+    type: Literal["rbac_denied"] = "rbac_denied"
+
+
 # ---- kill_switch.* (schema only — Sprint-13.5 wires) -------------------------
 
 
@@ -444,11 +703,16 @@ class KillSwitchReverted(_BaseEvent):
 # ---------------------------------------------------------------------------
 
 
-#: All 35 typed event subclasses (sum of family-event-counts across
+#: All 36 typed event subclasses (sum of family-event-counts across
 #: the 11 Wave-1 families per ADR-020 §"Event taxonomy (Wave 1)"):
 #: 7 agent_run + 7 tool_call + 4 subagent + 5 approval + 3 artifact +
 #: 3 interrupt + 3 frontend_action + 4 memory + 1 decision_audit +
-#: 2 policy + 2 kill_switch.
+#: 3 policy + 2 kill_switch.
+#: (policy bumped 2 → 3 at Sprint-7B.4 T3 / R1: PolicyRBACDenied lands
+#: in the policy.* slot alongside PolicyDecisionEvaluated +
+#: PolicyBundleLoaded; the `_PolicyEvent` discriminated union and the
+#: total count update together so TypeAdapter(UIEvent) accepts every
+#: defined event class.)
 #:
 #: Per T12 R1 P2 #1 reviewer correction: the discriminated union is
 #: built as a **two-level structure** rather than a flat union with
@@ -527,7 +791,7 @@ _MemoryEvent = Annotated[
 _DecisionAuditEvent = Annotated[DecisionAuditEventAppended, pydantic.Field(discriminator="type")]
 
 _PolicyEvent = Annotated[
-    PolicyDecisionEvaluated | PolicyBundleLoaded,
+    PolicyDecisionEvaluated | PolicyBundleLoaded | PolicyRBACDenied,
     pydantic.Field(discriminator="type"),
 ]
 
@@ -862,6 +1126,7 @@ __all__ = (
     "PolicyBundleLoaded",
     # policy
     "PolicyDecisionEvaluated",
+    "PolicyRBACDenied",
     "SubagentCompleted",
     "SubagentFailed",
     "SubagentRecursionCapped",
