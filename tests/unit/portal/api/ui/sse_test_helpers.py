@@ -18,8 +18,9 @@ reuse this module unchanged — no extension.
 
 from __future__ import annotations
 
+import contextlib
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 import httpx
@@ -54,8 +55,40 @@ def _async_client(app: Any, *, base_url: str = "http://t") -> httpx.AsyncClient:
 
         async with _async_client(app) as c:
             r = await c.get("/api/v1/...")
+
+    **FORBIDDEN for streaming-body tests** (per T10 user-locked test-
+    strategy doctrine, 2026-05-16): ``ASGITransport.handle_async_request``
+    in httpx 0.28.1 buffers the entire response body before returning
+    (``body_parts: list = []``; ``await self.app(scope, receive, send)``
+    only returns after ``more_body=False`` is sent). For infinite SSE
+    responses ``app()`` never returns → ``c.stream(...).__aenter__()``
+    never returns → tests hang. Streaming tests MUST use the
+    :func:`_real_client` helper against a uvicorn fixture instead.
+    Use ``_async_client`` ONLY for tests that exercise refusal paths
+    (RBAC 403, cross-tenant 404, malformed-cursor 422, etc.) where
+    the response completes synchronously.
     """
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=base_url)
+
+
+def _real_client(base_url: str) -> httpx.AsyncClient:
+    """Real-HTTP-transport httpx client for the uvicorn-fixture pattern.
+
+    Used by SSE streaming tests where the response body is infinite —
+    paired with the ``uvicorn_app_factory`` fixture in
+    :file:`conftest.py`. The real HTTP transport supports incremental
+    body delivery + proper ``http.disconnect`` propagation on
+    ``async with c.stream(...) as r:`` exit, which ASGITransport does
+    not (see :func:`_async_client` for the full rationale).
+    """
+    return httpx.AsyncClient(base_url=base_url)
+
+
+#: Type alias for the ``uvicorn_app_factory`` fixture's return type so
+#: tests can annotate the parameter terse-ly. The factory is an
+#: async-context-manager factory: call it with a FastAPI app, get back
+#: an ``async with ... as base_url`` context manager.
+UvicornAppFactory = Callable[[Any], contextlib.AbstractAsyncContextManager[str]]
 
 
 async def _next_sse_event(response: httpx.Response) -> dict[str, Any]:
@@ -65,7 +98,14 @@ async def _next_sse_event(response: httpx.Response) -> dict[str, Any]:
     SSE event-name header (`"<family>.<type>"`) and `data` is the parsed
     JSON payload of the `data:` line. Skips comment lines (`: keepalive`
     heartbeats). Raises RuntimeError if the stream ends without a
-    complete event."""
+    complete event.
+
+    **Single-call only.** httpx's :meth:`Response.aiter_lines` consumes
+    the response body; calling :func:`_next_sse_event` twice on the
+    same response raises :exc:`httpx.StreamConsumed`. Tests that need
+    to read multiple events sequentially MUST use :func:`_iter_sse_events`
+    which iterates ``aiter_lines`` once with internal SSE buffering.
+    """
     pending: dict[str, str] = {}
     async for raw in response.aiter_lines():
         if raw.startswith(":"):
@@ -88,9 +128,34 @@ async def _next_sse_event(response: httpx.Response) -> dict[str, Any]:
 async def _iter_sse_events(
     response: httpx.Response, *, max_events: int
 ) -> AsyncIterator[dict[str, Any]]:
-    """Yield up to max_events ServerSentEvents off `response`."""
-    for _ in range(max_events):
-        yield await _next_sse_event(response)
+    """Yield up to max_events ServerSentEvents off ``response``.
+
+    Single-call ``aiter_lines`` walk + internal SSE buffering so the
+    iterator can yield multiple events from one streaming response.
+    Earlier draft called :func:`_next_sse_event` in a loop — each call
+    re-creates ``aiter_lines`` which httpx tracks via consumed state,
+    raising :exc:`httpx.StreamConsumed` on the second iteration.
+    """
+    pending: dict[str, str] = {}
+    yielded = 0
+    async for raw in response.aiter_lines():
+        if raw.startswith(":"):
+            continue
+        if raw == "":
+            if "data" in pending:
+                yield {
+                    "id": pending.get("id"),
+                    "event": pending.get("event"),
+                    "data": json.loads(pending["data"]),
+                }
+                yielded += 1
+                if yielded >= max_events:
+                    return
+            pending = {}
+            continue
+        if ":" in raw:
+            key, _, val = raw.partition(":")
+            pending[key.strip()] = val.lstrip(" ")
 
 
 async def _read_recent_decision_history_rows(broker_or_app: Any) -> list[Any]:

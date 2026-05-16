@@ -986,6 +986,45 @@ def _project_typed_decision_history(snapshot: AppendedDecisionSnapshot) -> _Base
     return None
 
 
+@dataclasses.dataclass(frozen=True)
+class _DHReplaySnapshot:
+    """Sprint-7B.4 T10 R3 #1 — replay-side snapshot shape compatible with
+    :class:`AppendedDecisionSnapshot` field access.
+
+    Constructed by ``_replay_from_decision_history`` in
+    :file:`portal/api/ui/stream_routes.py` from raw SQLAlchemy rows of
+    the exported :data:`cognic_agentos.core.decision_history._decision_history`
+    Table; consumed by the existing typed projectors
+    (:func:`_project_typed_decision_history`,
+    :func:`_build_decision_audit_for_dh_snapshot`) so the live + replay
+    paths stay byte-identical.
+
+    Carries EXACTLY the fields the projector functions read — drift
+    between this dataclass and the projector field-access surface is
+    pinned by
+    :class:`tests.unit.protocol.test_ui_events_dh_replay_snapshot.TestDHReplaySnapshotShapeMatchesAppendedDecisionSnapshot`
+    (4 regressions: field-name subset of ``AppendedDecisionSnapshot``,
+    exact 9-field set, projector access surface ⊆ replay fields, +
+    runtime projector-call smoke against a constructed instance).
+
+    Module-private (leading underscore) — NOT in ``__all__``. The
+    consumers are :func:`_project_typed_decision_history` +
+    :func:`_build_decision_audit_for_dh_snapshot` (also module-private
+    helpers) and the T10 SSE replay path (which imports it via the
+    underscore name explicitly).
+    """
+
+    sequence: int
+    decision_type: str
+    tenant_id: str | None
+    trace_id: str | None
+    request_id: str
+    payload: dict[str, Any]
+    new_hash: bytes
+    chain_id: str
+    created_at: _dt.datetime
+
+
 def _build_decision_audit_for_dh_snapshot(
     snapshot: AppendedDecisionSnapshot,
 ) -> DecisionAuditEventAppended:
