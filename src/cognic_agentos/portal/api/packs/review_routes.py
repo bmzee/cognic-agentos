@@ -55,7 +55,7 @@ import math
 from pathlib import Path
 from typing import Annotated, Any, Final, NoReturn, TypeGuard
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from cognic_agentos.core.decision_history import DecisionRecord
 from cognic_agentos.packs._lifecycle_helpers import find_latest_submit_row
@@ -80,12 +80,13 @@ from cognic_agentos.portal.api.packs.dto import (
     RejectDraftRequest,
 )
 from cognic_agentos.portal.rbac.actor import Actor
-from cognic_agentos.portal.rbac.enforcement import RequireScope
-from cognic_agentos.portal.rbac.role_separation import RequireDifferentActorThanCreator
-from cognic_agentos.portal.rbac.tenant_isolation import (
-    RequireTenantOwnership,
-    _emit_isolation_log,
+from cognic_agentos.portal.rbac.enforcement import (
+    RequireScope,
+    _emit_denial_or_500,
+    _resolve_request_id,
 )
+from cognic_agentos.portal.rbac.role_separation import RequireDifferentActorThanCreator
+from cognic_agentos.portal.rbac.tenant_isolation import RequireTenantOwnership
 from cognic_agentos.protocol.trust_gate import (
     CosignNotInstalledError,
     CosignVerificationFailed,
@@ -527,6 +528,7 @@ def build_review_routes(
 
     @router.get("/review-queue", summary="Reviewer queue — submitted packs scoped to tenant")
     async def review_queue(
+        request: Request,
         actor: Annotated[Actor, Depends(_require_pack_review_claim)],
     ) -> list[PackResponse]:
         """Reviewer queue scoped to ``actor.tenant_id``.
@@ -551,19 +553,27 @@ def build_review_routes(
         :func:`RequireTenantOwnership` (no ``{pack_id}`` path-param)
         which means it ALSO bypasses the existing 500
         ``actor_tenant_id_missing`` emission at
-        ``tenant_isolation.py:144-152``. An actor with empty
-        ``tenant_id`` + scope held would otherwise receive 200 [] —
-        silently hiding a kernel binder misconfig that path-param
-        endpoints fail-loud-500 on. Mirrors the T7 inspection-list
-        preflight pattern (plan R20 P2 #2 + R21 P2 #1 type-corrected).
-        ``_emit_isolation_log(pack_id: str)`` requires ``str``; the
+        ``tenant_isolation.py``. An actor with empty ``tenant_id`` +
+        scope held would otherwise receive 200 [] — silently hiding a
+        kernel binder misconfig that path-param endpoints fail-loud-500
+        on. Mirrors the T7 inspection-list preflight pattern.
+
+        Sprint-7B.4 T6: now routes through the shared
+        :func:`_emit_denial_or_500` helper (same dual-surface
+        contract as the path-param-tenant-isolated endpoints — log
+        first, then chain row via the broker if wired). The
         ``"<review-queue>"`` sentinel keeps log-aggregator bucketing
         discoverable while staying type-safe under mypy.
         """
         if not actor.tenant_id:
-            _emit_isolation_log(
-                reason="actor_tenant_id_missing",
+            broker = getattr(request.app.state, "ui_event_broker", None)
+            await _emit_denial_or_500(
+                broker,
+                denial_type="actor_tenant_id_missing",
                 actor_subject=actor.subject,
+                tenant_id=None,  # actor.tenant_id is empty
+                request_id=_resolve_request_id(request),
+                http_status=500,
                 pack_id="<review-queue>",  # sentinel — no {pack_id} at this endpoint
             )
             raise HTTPException(

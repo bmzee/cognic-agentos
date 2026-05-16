@@ -27,17 +27,22 @@ defaults to the process-wide ``bundled_registry``.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import uuid
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
-from typing import Any
+from contextlib import asynccontextmanager, suppress
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
 
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import JSONResponse
 from prometheus_fastapi_instrumentator import Instrumentator
 
 from cognic_agentos import __version__
+from cognic_agentos.core.audit import AuditStore
 from cognic_agentos.core.config import Settings, get_settings
+from cognic_agentos.core.decision_history import DecisionHistoryStore
 from cognic_agentos.db.adapters import (
     AdapterRegistry,
     Adapters,
@@ -47,6 +52,7 @@ from cognic_agentos.db.adapters import (
 )
 from cognic_agentos.llm.ledger import GatewayCallLedger
 from cognic_agentos.observability import (
+    bind_request_id,
     configure_logging,
     configure_tracing,
     install_access_log_middleware,
@@ -60,9 +66,20 @@ from cognic_agentos.portal.api.packs import build_packs_router
 from cognic_agentos.portal.api.system_routes import build_system_router
 from cognic_agentos.portal.rbac.actor import ActorBinder
 from cognic_agentos.protocol import is_a2a_available, is_mcp_available
+from cognic_agentos.protocol.elicitation_adapter import ElicitationAdapter
 from cognic_agentos.protocol.plugin_registry import PluginRegistry
 from cognic_agentos.protocol.trust_gate import TrustGate
 from cognic_agentos.protocol.trust_root_resolver import TrustRootResolver
+from cognic_agentos.protocol.ui_events import UIEventBroker, UIEventEmitter
+
+if TYPE_CHECKING:
+    # Sprint-7B.4 T12: type-only refs for the create_app signature.
+    # ``OPAEngine`` lives in ``core/policy/engine`` (CC module per the
+    # AGENTS.md stop rule); importing it at runtime would extend the
+    # core module's blast radius into the portal layer for callers
+    # that don't wire OPA. TYPE_CHECKING keeps the kwarg typed without
+    # pulling the engine module into the import graph.
+    from cognic_agentos.core.policy.engine import OPAEngine
 
 logger = logging.getLogger(__name__)
 
@@ -173,6 +190,36 @@ def create_app(
     pack_record_store: PackRecordStore | None = None,
     trust_gate: TrustGate | None = None,
     trust_root_resolver: TrustRootResolver | None = None,
+    # Sprint-7B.4 T6: backward-compatible optional deps (None-default
+    # follows the 7B.3 T9 trust_gate / trust_root_resolver precedent).
+    # When all 3 are wired AND settings is non-None, create_app constructs
+    # the UIEventBroker + registers it on the emitter + mounts a periodic
+    # reap_idle lifespan task. Existing test fixtures + bank-overlay
+    # callers that omit them continue working — broker stays None,
+    # RBAC deps' shared _emit_denial_or_500 helper takes its log-only
+    # fallback path (R3 #3 backward-compat).
+    decision_history_store: DecisionHistoryStore | None = None,
+    audit_store: AuditStore | None = None,
+    ui_event_emitter: UIEventEmitter | None = None,
+    # Sprint-7B.4 T12: optional UI-router deps (same None-default
+    # pattern). When ANY of the broker-prerequisite triple
+    # (decision_history_store + ui_event_emitter + settings) is
+    # missing AND ``broker`` is not pre-injected, UI routes do NOT
+    # mount + .well-known is NOT registered.
+    #
+    # ``broker`` is the test-fixture-injection seam: pass a pre-built
+    # UIEventBroker so the route + the test share subscriber state
+    # (production callers pass None and let create_app build internally
+    # from the T6 deps).
+    #
+    # ``elicitation_adapter`` + ``rego_engine`` route through to
+    # ``build_action_routes`` for the submit_elicitation path; absent
+    # values surface the matching elicitation_backend_unwired /
+    # elicitation_unwired_evaluator refusal at request time per the
+    # T8 gate's Step 1 / Step 5.
+    broker: UIEventBroker | None = None,
+    elicitation_adapter: ElicitationAdapter | None = None,
+    rego_engine: OPAEngine | None = None,
 ) -> FastAPI:
     """Build and return the FastAPI application.
 
@@ -236,51 +283,66 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        # Attach the optional Sprint-3 ledger reader regardless of the
-        # adapter-registry path so /effective-routing works in both
-        # the lifespan-managed adapter mode and the test injection mode.
-        app.state.gateway_ledger = gateway_ledger
-        # Sprint-4 T11: same pattern for the plugin registry. When
-        # unset, /api/v1/system/plugins serves an empty list (NOT
-        # 503) per the read-only honesty surface contract.
-        app.state.plugin_registry = plugin_registry
-        # Sprint-7B.2 T3: pack-router wiring inputs. ``app.state``
-        # carries both regardless of whether the router was actually
-        # mounted at construction time (the mount decision is
-        # made in the outer factory body so the route table is locked
-        # before lifespan startup; this attach point exposes the
-        # objects to test fixtures + future read-only honesty surfaces).
-        app.state.actor_binder = actor_binder
-        app.state.pack_record_store = pack_record_store
-        # Sprint-7B.3 T9: cosign trust-gate verifier + per-tenant
-        # trust-root resolver for the approve endpoint's gate-1
-        # (signature) resolution. Attached regardless of whether the
-        # pack router was mounted (mirror of the actor_binder pattern);
-        # both default ``None`` → the approve handler resolves Gate 1
-        # to a ``red`` SignatureGateInput rather than crashing.
-        app.state.trust_gate = trust_gate
-        app.state.trust_root_resolver = trust_root_resolver
-        if adapter_registry is None:
-            app.state.adapters = None
-            yield
-            return
+        # Sprint-7B.4 T6: lifespan-managed reap task ONLY.
+        # All synchronous-object state attaches (gateway_ledger,
+        # plugin_registry, actor_binder, pack_record_store, trust_gate,
+        # trust_root_resolver, decision_history_store, audit_store,
+        # ui_event_emitter, ui_event_broker) now happen at module level
+        # right after `app = FastAPI(...)` below — so they are visible
+        # to httpx.ASGITransport callers that don't run lifespan.
+        # The reap_task DOES belong in lifespan because it needs an
+        # asyncio event loop + clean cancellation on app shutdown.
+        reap_task: asyncio.Task[None] | None = None
+        broker_for_lifespan = app.state.ui_event_broker
+        if broker_for_lifespan is not None and settings is not None:
+            _idle_s = settings.ui_event_stream_idle_timeout_s
 
-        # Trigger bundled-adapter registration side-effects. In the
-        # default-adapters image this loads all five drivers; in the
-        # kernel image (no `adapters` extras installed) every module
-        # ImportErrors quietly per its allowlist and any configured
-        # driver fails fast at build_adapters().
-        if adapter_registry is bundled_registry:
-            load_bundled_adapters()
+            async def _reap_loop() -> None:
+                """Periodic SSE-subscriber reaper. Runs at 1/3 the idle
+                timeout so a stale subscriber is detected within one
+                reap window; logs + swallows any per-iteration exception
+                so a single failure does NOT kill the loop for the
+                entire process lifetime."""
+                while True:
+                    await asyncio.sleep(_idle_s / 3)
+                    try:
+                        broker_for_lifespan.reap_idle(datetime.now(UTC))
+                    except Exception:
+                        logger.exception("ui.broker.reap_idle_failed")
 
-        adapters = build_adapters(settings, registry=adapter_registry)
-        await adapters.open_all()
-        app.state.adapters = adapters
+            reap_task = asyncio.create_task(_reap_loop())
+
+        # Outer try/finally guarantees the reap task is cancelled even
+        # on the adapter-registry-None early-return path below.
         try:
-            yield
+            if adapter_registry is None:
+                app.state.adapters = None
+                yield
+                return
+
+            # Trigger bundled-adapter registration side-effects. In the
+            # default-adapters image this loads all five drivers; in the
+            # kernel image (no `adapters` extras installed) every module
+            # ImportErrors quietly per its allowlist and any configured
+            # driver fails fast at build_adapters().
+            if adapter_registry is bundled_registry:
+                load_bundled_adapters()
+
+            adapters = build_adapters(settings, registry=adapter_registry)
+            await adapters.open_all()
+            app.state.adapters = adapters
+            try:
+                yield
+            finally:
+                await adapters.close_all()
+                app.state.adapters = None
         finally:
-            await adapters.close_all()
-            app.state.adapters = None
+            # Sprint-7B.4 T6: reap-task cleanup. Always runs even when
+            # adapter-registry-None path early-returned.
+            if reap_task is not None:
+                reap_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await reap_task
 
     app = FastAPI(
         title="Cognic AgentOS",
@@ -294,6 +356,70 @@ def create_app(
         lifespan=lifespan,
     )
 
+    # Sprint-7B.4 T6: eager app.state attach for all synchronous-object
+    # deps (everything except the adapter pool, which needs async
+    # open_all() in lifespan).
+    #
+    # Why eager (NOT inside lifespan): httpx.ASGITransport (used by
+    # test fixtures via
+    # `tests/unit/portal/api/ui/sse_test_helpers._async_client`) does
+    # NOT run lifespan startup. RBAC deps reading
+    # `request.app.state.<dep>` would always see None under httpx test
+    # transport, taking degraded fallback paths — chain rows would
+    # never persist; pack routes would 500 with
+    # `pack_store_not_configured`; etc. Module-level attach guarantees
+    # state is observable from the FIRST request regardless of
+    # transport choice (TestClient runs lifespan; httpx does not; both
+    # see the same app.state now).
+    #
+    # Pre-T6 the attaches lived inside lifespan; that worked for the
+    # Sprint-7B.2/7B.3 tests because they used TestClient. T6 RBAC
+    # tests use httpx.ASGITransport (because the broker chain-emit
+    # path requires async test bodies) → the lifespan-attach pattern
+    # is no longer adequate.
+    app.state.gateway_ledger = gateway_ledger
+    app.state.plugin_registry = plugin_registry
+    app.state.actor_binder = actor_binder
+    app.state.pack_record_store = pack_record_store
+    app.state.trust_gate = trust_gate
+    app.state.trust_root_resolver = trust_root_resolver
+
+    # Sprint-7B.4 T6: broker construction + eager attach.
+    # Sprint-7B.4 T12: extended to accept a pre-built broker via the
+    # ``broker=`` kwarg (test-fixture-injection seam — the route + the
+    # test then share subscriber state). When ``broker`` is None AND
+    # the T6 deps are wired, build internally from the T6 deps.
+    # Backward-compat: callers that omit ANY of the prerequisites get
+    # ``app.state.ui_event_broker = None``; the shared
+    # ``_emit_denial_or_500`` helper's ``if broker is None: return``
+    # log-only fallback (per R3 #3) keeps existing pack-only test
+    # fixtures green.
+    portal_broker: UIEventBroker | None = broker
+    if (
+        portal_broker is None
+        and decision_history_store is not None
+        and ui_event_emitter is not None
+        and settings is not None
+    ):
+        portal_broker = UIEventBroker(
+            decision_history_store=decision_history_store,
+            settings=settings,
+        )
+        portal_broker.register_with_emitter(ui_event_emitter)
+
+    app.state.ui_event_broker = portal_broker
+    app.state.decision_history_store = decision_history_store
+    app.state.audit_store = audit_store
+    app.state.ui_event_emitter = ui_event_emitter
+    # Sprint-7B.4 T12: cache the optional UI deps on app.state for
+    # introspection (e.g. operator tools, debug endpoints) — the UI
+    # router itself reads them from closure capture, NOT from
+    # ``app.state.*``, so changing these post-construction has NO
+    # effect on route behavior.
+    app.state.elicitation_adapter = elicitation_adapter
+    app.state.rego_engine = rego_engine
+    app.state.settings = settings
+
     # Middleware add order is OUTER-LAST in Starlette: the call chain
     # walks the most-recently-added middleware first. We want the
     # access-log middleware to run INSIDE the OTel span (so trace_id is
@@ -303,6 +429,49 @@ def create_app(
     install_access_log_middleware(app)
     install_cors_middleware(app, settings)
     install_otel_instrumentation(app)
+
+    # Sprint-7B.4 T6: portal request-id middleware. Mints a
+    # ``portal-req-<uuid4.hex>`` (43 chars ≤ the decision_history
+    # request_id column cap of 64) onto ``request.state.request_id``
+    # for every ``/api/v1/*`` path so the RBAC denial helpers
+    # (`_emit_denial_or_500` via `_resolve_request_id`) have a stable
+    # correlation id on EVERY denial. The fallback
+    # `portal-rbac-denial-<uuid4.hex>` in `_resolve_request_id` covers
+    # non-portal callers that bypass this middleware (should never fire
+    # under normal traffic).
+    #
+    # ALSO rebinds the observability `REQUEST_ID_CONTEXT` contextvar
+    # via `bind_request_id(...)` so the structured-log shape carries
+    # the portal-prefixed id (otherwise the
+    # `observability.logging._ContextFilter` would emit the
+    # observability-bound uuid4.hex value — operators need ONE
+    # consistent id per request across log + chain row).
+    #
+    # **Registration order matters**: this middleware is added BEFORE
+    # `install_request_id_middleware(app)` below so observability's
+    # request-id middleware ends up OUTERMOST in the Starlette
+    # call chain (Starlette runs most-recently-added first on ingress).
+    # observability fires first → sets contextvar from X-Request-Id
+    # header (or default) → T6 fires next INSIDE → overwrites contextvar
+    # with the portal-prefixed id for the rest of the request lifetime.
+    # Reversing the order would let observability clobber T6's value.
+    @app.middleware("http")
+    async def _portal_request_id_middleware(request: Request, call_next: Any) -> Any:
+        if request.url.path.startswith("/api/v1/") and not getattr(
+            request.state, "request_id", None
+        ):
+            portal_rid = f"portal-req-{uuid.uuid4().hex}"
+            request.state.request_id = portal_rid
+            bind_request_id(portal_rid)
+            # The X-Request-Id response header is written by
+            # observability's RequestIdMiddleware reading the contextvar
+            # FRESH at response time (Sprint-7B.4 T6 amendment at
+            # `observability/middleware.py:78-83`); rebinding the
+            # contextvar here means the response header AND the access
+            # log AND the denial log AND the chain row all carry the
+            # SAME portal-req-* id on portal traffic.
+        return await call_next(request)
+
     install_request_id_middleware(app)
 
     app.include_router(_build_router(settings))
@@ -383,6 +552,37 @@ def create_app(
                 ),
             },
         )
+
+    # Sprint-7B.4 T12: UI router mount + .well-known registration.
+    # Gated on ``portal_broker is not None`` — pack-only deployments
+    # that don't wire the T6 deps OR the ``broker=`` kwarg get NO UI
+    # routes + NO .well-known endpoint (the R3 #3 backward-compat
+    # invariant). When the broker IS wired, mount the composed UI
+    # router (stream + action) + register .well-known at the app
+    # root per RFC 8615.
+    if portal_broker is not None:
+        # decision_history_store + settings are guaranteed non-None
+        # here: portal_broker is non-None only if either (a) it was
+        # injected via the ``broker=`` kwarg (caller owns wiring) or
+        # (b) the auto-build branch above required both. The
+        # ``assert`` pins the invariant for mypy + future maintainers.
+        assert decision_history_store is not None
+        assert settings is not None
+        from cognic_agentos.portal.api.ui.router import build_ui_routes
+        from cognic_agentos.portal.api.ui.well_known_routes import (
+            register_well_known_routes,
+        )
+
+        app.include_router(
+            build_ui_routes(
+                broker=portal_broker,
+                settings=settings,
+                decision_history_store=decision_history_store,
+                elicitation_adapter=elicitation_adapter,
+                rego_engine=rego_engine,
+            )
+        )
+        register_well_known_routes(app)
 
     # Mount Prometheus AFTER routes so the instrumentator's metric registry
     # captures the route table; the scrape endpoint is mounted under

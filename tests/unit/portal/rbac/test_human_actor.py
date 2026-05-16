@@ -112,15 +112,19 @@ def test_require_human_actor_refusal_emits_structured_log(
 ) -> None:
     """T2 R1 P2 #2 — caplog parity with :file:`test_enforcement.py`. The
     closed-enum :data:`HumanActorDenialReason` value must emit a
-    structured log record at ``cognic_agentos.portal.rbac.human_actor``
-    with ``reason``, ``actor_subject``, and ``actor_type`` fields.
-    Without this pin the logging side-effect can regress while the
-    HTTP-response test stays green."""
+    structured log record at ``cognic_agentos.portal.rbac.enforcement``
+    (Sprint-7B.4 T6 wire-shape: emission now routes through the shared
+    ``_emit_denial_or_500`` helper, so the logger source moves from
+    ``human_actor`` to ``enforcement`` and the message becomes
+    ``portal.rbac.actor_type_must_be_human``). Without this pin the
+    logging side-effect can regress while the HTTP-response test stays
+    green; the structured ``reason`` / ``actor_subject`` / ``actor_type``
+    fields are unchanged."""
     actor = _make_actor(actor_type="service")
     app = _make_app(actor)
-    with caplog.at_level(logging.WARNING, logger="cognic_agentos.portal.rbac.human_actor"):
+    with caplog.at_level(logging.WARNING, logger="cognic_agentos.portal.rbac.enforcement"):
         TestClient(app).get("/operator/allow-list")
-    records = [r for r in caplog.records if "portal.rbac.human_actor_required" in r.message]
+    records = [r for r in caplog.records if r.message == "portal.rbac.actor_type_must_be_human"]
     assert len(records) == 1
     record = records[0]
     assert getattr(record, "reason", None) == "actor_type_must_be_human"

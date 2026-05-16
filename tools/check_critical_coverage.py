@@ -609,6 +609,94 @@ documented at the call site):
 Rides the same single strict 95% line / 90% branch floor.  Gate size
 grows from 55 modules to 60 (+5).  The count is pinned by the T11
 self-test at ``tests/unit/tools/test_check_critical_coverage.py``.
+
+----------------------------------------------------------------------
+Sprint 7B.4 — UI event-stream endpoints (gate 60 → 63).
+----------------------------------------------------------------------
+
+Sprint 7B.4 ships the ADR-020 UI event-stream surface — typed-event
+broker (T4 extension to ``protocol/ui_events.py``), 5-step
+elicitation gate (T8 ``elicitation_gate.py``), 3 SSE GET endpoints
++ Last-Event-ID + reconnect (T10 ``stream_routes.py``), POST /actions
+discriminated-union dispatch + RequireUIAction (T11
+``action_routes.py``), .well-known schema publication (T12), full
+``create_app`` wiring (T12 portal/api/app.py CC-ADJ extension).  3
+modules promoted to the durable gate at T13:
+
+  * ``portal/api/ui/action_routes.py`` (T11) — wire-protocol-public
+    POST /api/v1/ui/actions + RequireUIAction FastAPI dep + 6-class
+    discriminated-union dispatch + submit_elicitation gate routing
+    + frontend_action.{submitted,accepted,rejected} chain emit via
+    the broker centralisation seam.  The 10-value
+    ``ActionRejectionReason`` Literal (defined in
+    ``portal/api/ui/dto.py``; mirrored in ``elicitation_gate.py``)
+    is the wire vocabulary every refusal body carries; closed-enum
+    drift is wire-break.
+
+  * ``portal/api/ui/stream_routes.py`` (T10) — reconnect-safe SSE
+    transport.  Owns the 4-value ``CursorRefusalReason`` Literal
+    (``cursor_malformed`` / ``cursor_chain_unsupported`` /
+    ``cursor_not_found`` / ``cursor_projection_drift_detected`` —
+    ``cursor_tenant_mismatch`` deliberately NOT in the enum per the
+    cross-tenant-invisible doctrine; cross-tenant cursors emit
+    ``pack_not_found`` instead).  Cross-tenant 404 invisibility +
+    type_hash drift detection (pre-stream, in
+    ``_validate_cursor_tenant``) + boundary-row dedup are all
+    load-bearing security properties pinned by TM-revert tests.
+
+  * ``portal/api/ui/elicitation_gate.py`` (T8) — substantive policy
+    boundary for submit_elicitation.  5-step refusal contract
+    (adapter wired? → ctx lookup → mode parity → restricted-data-
+    class → Rego eval) + 10-value ``ActionRejectionReason`` Literal
+    carrier (parallel definition with ``portal/api/ui/dto.py``;
+    lockstep pinned by the test-only drift detector at
+    ``tests/unit/portal/api/ui/test_dto_action.py
+    ::TestActionRejectionReasonCrossModuleEquality``).  Pure-async
+    + returns ``GateOutcome``; HTTP mapping is in
+    ``action_routes.py`` at the call site, NOT here.
+
+Off-floor rationale for the 7B.4 modules that deliberately do NOT
+promote (each carrying its own doctrinal carve-out):
+
+  * ``portal/api/ui/dto.py`` (T9) — pure type-only DTOs + closed-enum
+    Literals + Pydantic v2 discriminated unions.  No runtime logic;
+    drift in the wire types is caught at Pydantic parse time +
+    static type checks.  Same precedent as ``portal/api/packs/dto.py``.
+
+  * ``portal/api/ui/router.py`` (T12) — composition factory.  Threads
+    closure-captured deps into ``build_stream_routes(...)`` +
+    ``build_action_routes(...)``.  Carrier file with no decision
+    logic, no closed-enum vocabulary, no refusal taxonomy.
+
+  * ``portal/api/ui/well_known_routes.py`` (T12) — schema publication.
+    Builds the snapshot-pinned JSON Schema bundle via
+    ``pydantic.TypeAdapter(union).json_schema()`` over the 11 Wave-1
+    family discriminated unions; the snapshot-drift regression at
+    ``tests/unit/portal/api/ui/test_well_known_routes.py
+    ::TestSchemaSnapshotPinned`` is the load-bearing pin.  No
+    decision logic.
+
+  * ``protocol/elicitation_adapter.py`` (Sprint-7B.4 T7-foundation)
+    — narrow ``@runtime_checkable`` Protocol + frozen dataclasses
+    (``ElicitationContext`` / ``ElicitationResult``) + the
+    ``ElicitationBackendError`` exception class.  Bank overlays
+    implement this Protocol; AgentOS ships only the
+    ``KernelDefaultElicitationAdapter`` fail-loud scaffold.  Off-floor
+    because the module is pure type-contract + exception class —
+    every meaningful invariant (Protocol method shape, dataclass
+    field set, exception identity) is enforced at the call site
+    (``portal/api/ui/elicitation_gate.py`` is on the floor + covers
+    the runtime contract) or via type-shape regressions
+    (``tests/unit/protocol/test_ui_events_dh_replay_snapshot.py``
+    precedent applies to any future shape pin needed here).  Coverage
+    on a pure-Protocol module would measure runtime-import + class-
+    decoration lines only — no decision logic to gate.
+
+  * ``portal/api/ui/__init__.py`` — package marker.
+
+Rides the same single strict 95% line / 90% branch floor.  Gate size
+grows from 60 modules to 63 (+3).  The count is pinned by the T13
+self-test at ``tests/unit/tools/test_check_critical_coverage.py``.
 """
 
 from __future__ import annotations
@@ -1096,6 +1184,82 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     # ``portal/api/packs/review_routes.py`` (T9) owns the wiring +
     # pre-computes gates 1-4.
     ("src/cognic_agentos/packs/approval_gates.py", 0.95, 0.90),
+    # ------------------------------------------------------------------
+    # Sprint 7B.4 T13 — UI event-stream durable critical-controls
+    # modules (gate 60 → 63).
+    # ------------------------------------------------------------------
+    # ``portal/api/ui/action_routes.py`` (T11) — wire-protocol-public
+    # POST /api/v1/ui/actions surface.  ``RequireUIAction(broker)``
+    # closure-factory dep parses body via Annotated[ActionRequest,
+    # Body(...)] discriminated union + binds actor via
+    # Depends(_bind_actor) + maps body.action_class →
+    # ``ui.action.<class>`` required scope + emits
+    # ``policy.rbac_denied`` via the shared ``_emit_denial_or_500``
+    # helper (fail-closed 500 ``rbac_denial_emit_failed`` on broker
+    # exception).  ``_STUB_REASONS`` 5-class deferred-stub map is
+    # wire-protocol-public (the 3 ``action_backend_deferred_*``
+    # closed-enum reasons land on every stub-path response body +
+    # the rejected chain row's payload).  submit_elicitation path
+    # routes through ``evaluate_elicitation_submission`` (T8 gate);
+    # green path calls ``adapter.handle_submission``; backend
+    # exception translates to ``elicitation_backend_failed``
+    # (distinct from gate refusals so examiners can tell "backend
+    # rejected" apart from "gate refused" without re-running the
+    # gate).  Deterministic ``submitted_event_id`` +
+    # ``resolution_event_id`` cursors via the broker's
+    # ``_chain_derived_event_id`` projection — pinned by
+    # ``test_action_routes.py
+    # ::TestActionResponseEventIdCursorsMatchSSE``.  T7 forward
+    # watchpoint honored: no isinstance check against the
+    # ``@runtime_checkable`` ``ElicitationAdapter`` Protocol;
+    # duck-typed at the call site.
+    ("src/cognic_agentos/portal/api/ui/action_routes.py", 0.95, 0.90),
+    # ``portal/api/ui/stream_routes.py`` (T10) — reconnect-safe SSE
+    # transport.  3 SSE GET endpoints (``/runs/{run_id}/events``,
+    # ``/tenants/{tenant_id}/events``, ``/events/since/{event_id}``)
+    # gated by ``ui.run_stream`` / ``ui.tenant_stream`` RBAC.  Closure-
+    # captures broker + settings + decision_history_store at
+    # ``build_stream_routes`` call time (T10 plan-vs-reality drift
+    # #1 resolution — ``create_app`` populates
+    # ``app.state.decision_history_store`` but NOT
+    # ``app.state.settings``).  Owns the 4-value ``CursorRefusalReason``
+    # Literal (``cursor_malformed`` / ``cursor_chain_unsupported``
+    # / ``cursor_not_found`` / ``cursor_projection_drift_detected``);
+    # ``cursor_tenant_mismatch`` deliberately NOT in the enum per
+    # the cross-tenant-invisible doctrine (cross-tenant cursors
+    # emit ``pack_not_found`` so a probe cannot enumerate tenant
+    # boundaries by response shape).  Type_hash drift detection in
+    # ``_validate_cursor_tenant`` runs PRE-STREAM (NOT in the
+    # generator) so the 500 actually reaches the client — raising
+    # HTTPException after http.response.start would leave the
+    # client with a broken stream.  Last-Event-ID header WINS over
+    # URL cursor; malformed header fails closed with 422
+    # ``cursor_malformed`` (no silent fall-back) — TM-revert pinned.
+    # Boundary-row dedup + heartbeat cadence + send_timeout half-
+    # open cleanup are all wire-protocol-public properties pinned
+    # by the T10 test suite.
+    ("src/cognic_agentos/portal/api/ui/stream_routes.py", 0.95, 0.90),
+    # ``portal/api/ui/elicitation_gate.py`` (T8) — substantive
+    # policy boundary for the submit_elicitation surface.  Pure-async
+    # ``evaluate_elicitation_submission(*, request, actor, adapter,
+    # rego_engine) -> GateOutcome``; 5-step refusal contract
+    # mapped to a 10-value ``ActionRejectionReason`` Literal (6
+    # gate-emitted + 4 handler-emitted reasons; lockstep with
+    # ``portal/api/ui/dto.py``'s parallel Literal via the test-only
+    # drift detector at
+    # ``tests/unit/portal/api/ui/test_dto_action.py
+    # ::TestActionRejectionReasonCrossModuleEquality``).  Step 1
+    # adapter-wired check + Step 2 ctx resolution + Step 3 mode
+    # parity (BOTH directions) + Step 4 form-mode + restricted-data-
+    # class refusal (``_RESTRICTED_DATA_CLASSES`` = 3-value frozenset
+    # mirroring ``protocol/mcp_capabilities._RESTRICTED_DATA_CLASSES``
+    # via test-only three-way lockstep — NO runtime cross-module
+    # import per the user-locked drift-detector doctrine) + Step 5
+    # Rego eval at ``data.cognic.ui.elicitation_submit.allow`` with
+    # fail-closed mapping for OPA-unavailable / bundle-error /
+    # decision-false.  The route handler at ``action_routes.py``
+    # owns the HTTP mapping; the gate stays pure-functional.
+    ("src/cognic_agentos/portal/api/ui/elicitation_gate.py", 0.95, 0.90),
 )
 
 

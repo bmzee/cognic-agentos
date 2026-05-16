@@ -64,13 +64,20 @@ field. Any change is a wire-protocol break.
 
 import logging
 from collections.abc import Awaitable, Callable
-from typing import Annotated, Literal
+from typing import TYPE_CHECKING, Annotated, Literal
 
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Request
 
 from cognic_agentos.packs.storage import PackRecord
 from cognic_agentos.portal.rbac.actor import Actor
-from cognic_agentos.portal.rbac.enforcement import _bind_actor
+from cognic_agentos.portal.rbac.enforcement import (
+    _bind_actor,
+    _emit_denial_or_500,
+    _resolve_request_id,
+)
+
+if TYPE_CHECKING:
+    from cognic_agentos.protocol.ui_events import UIEventBroker
 
 #: Module-scoped logger (Round 16 P2 #3). Mirrors sibling RBAC guards
 #: at ``tenant_isolation._LOG`` (``:50``), ``human_actor._LOG`` (``:37``),
@@ -159,22 +166,24 @@ def RequireDifferentActorThanCreator(
     """
 
     async def _check(
+        request: Request,
         actor: Annotated[Actor, Depends(_bind_actor)],
         record: Annotated[PackRecord, Depends(tenant_ownership)],
     ) -> None:
         if actor.subject == record.created_by:
-            # Round 16 P2 #3 — structured-log emission BEFORE the raise
-            # so observability tooling sees the denial regardless of
-            # how the caller handles the HTTP response. Mirrors
-            # sibling-guard pattern in tenant_isolation + human_actor.
-            _LOG.warning(
-                "portal.rbac.role_separation_refused",
-                extra={
-                    "reason": "actor_cannot_review_own_pack",
-                    "actor_subject": actor.subject,
-                    "pack_id": str(record.id),
-                    "pack_created_by": record.created_by,
-                },
+            # Sprint-7B.4 T6: structured log + chain row via the shared
+            # _emit_denial_or_500 helper (single source of truth for
+            # both surfaces across all 4 RBAC modules).
+            broker: UIEventBroker | None = getattr(request.app.state, "ui_event_broker", None)
+            await _emit_denial_or_500(
+                broker,
+                denial_type="actor_cannot_review_own_pack",
+                actor_subject=actor.subject,
+                tenant_id=actor.tenant_id,  # P1 #5: actor IS resolved
+                request_id=_resolve_request_id(request),
+                http_status=403,
+                pack_id=str(record.id),
+                pack_created_by=record.created_by,
             )
             raise HTTPException(
                 status_code=403,

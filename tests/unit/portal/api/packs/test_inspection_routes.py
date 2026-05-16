@@ -381,18 +381,18 @@ class TestSprint7B2InspectionListEndpoint:
         store: PackRecordStore,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """Plan R21 P2 #1 — the preflight MUST reuse the existing
-        :func:`tenant_isolation._emit_isolation_log` helper so the
-        structured-log message + closed-enum ``reason`` field are
-        identical to the path-param-tenant-isolated endpoints'
-        emissions. ``pack_id == "<list>"`` sentinel keeps log-
-        aggregator bucketing clean AND stays type-safe under the
-        helper's ``pack_id: str`` signature at
-        ``tenant_isolation.py:75-80``.
+        """Sprint-7B.4 T6 wire-shape: the preflight now routes through
+        the shared ``_emit_denial_or_500`` helper (in enforcement.py)
+        instead of the per-module ``_emit_isolation_log``. The logger
+        source moves to ``cognic_agentos.portal.rbac.enforcement`` and
+        the message becomes ``portal.rbac.actor_tenant_id_missing``.
+        Structured ``reason`` / ``actor_subject`` / ``pack_id`` fields
+        unchanged — ``pack_id == "<list>"`` sentinel remains the
+        wire-protocol contract for log-aggregator bucketing.
         """
         caplog.set_level(
             logging.WARNING,
-            logger="cognic_agentos.portal.rbac.tenant_isolation",
+            logger="cognic_agentos.portal.rbac.enforcement",
         )
 
         actor = _make_actor(tenant_id="", scopes=frozenset({"pack.audit.read"}))
@@ -405,11 +405,11 @@ class TestSprint7B2InspectionListEndpoint:
         isolation_records = [
             r
             for r in caplog.records
-            if r.name == "cognic_agentos.portal.rbac.tenant_isolation"
-            and r.message == "portal.rbac.tenant_isolation_failed"
+            if r.name == "cognic_agentos.portal.rbac.enforcement"
+            and r.message == "portal.rbac.actor_tenant_id_missing"
         ]
         assert len(isolation_records) == 1, (
-            f"expected EXACTLY 1 portal.rbac.tenant_isolation_failed record on "
+            f"expected EXACTLY 1 portal.rbac.actor_tenant_id_missing record on "
             f"missing-tenant-id preflight; got {len(isolation_records)}"
         )
         emitted = isolation_records[0]
@@ -417,7 +417,7 @@ class TestSprint7B2InspectionListEndpoint:
         assert emitted.reason == "actor_tenant_id_missing"  # type: ignore[attr-defined]
         assert emitted.actor_subject == "examiner@bank.example"  # type: ignore[attr-defined]
         # Plan R21 P2 #1 — pack_id="<list>" sentinel (NOT None — the
-        # helper signature is `pack_id: str` not `str | None`).
+        # shared helper still accepts pack_id as positional str kwarg).
         assert emitted.pack_id == "<list>", (  # type: ignore[attr-defined]
             f"pack_id sentinel must be '<list>' per plan R21 P2 #1; got {emitted.pack_id!r}"  # type: ignore[attr-defined]
         )

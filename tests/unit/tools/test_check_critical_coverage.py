@@ -35,10 +35,10 @@ import pytest
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _GATE_TOOL_PATH = _REPO_ROOT / "tools" / "check_critical_coverage.py"
 
-#: Entry count after the Sprint 7B.3 T3-T7 incremental promotions
-#: (55 at the 7B.2 T12 close + 5 panels/composer = 60). Bump this in
-#: lockstep with any deliberate ``_CRITICAL_FILES`` change.
-_EXPECTED_ENTRY_COUNT = 60
+#: Entry count after the Sprint 7B.4 T13 promotions (60 at the 7B.3
+#: T7 close + 3 UI event-stream modules = 63). Bump this in lockstep
+#: with any deliberate ``_CRITICAL_FILES`` change.
+_EXPECTED_ENTRY_COUNT = 63
 
 #: The 5 modules Sprint 7B.3 promoted to the durable gate, each by its
 #: own landing commit (T3-T6 panels + T7 composer). All ride the
@@ -60,6 +60,43 @@ _SPRINT_7B3_GATE_MODULES = (
 _SPRINT_7B3_OFF_GATE_MODULES = (
     "src/cognic_agentos/portal/api/packs/evidence_routes.py",
     "src/cognic_agentos/portal/api/packs/router.py",
+)
+
+
+#: The 3 modules Sprint 7B.4 T13 promoted to the durable gate (T11
+#: action_routes + T10 stream_routes + T8 elicitation_gate). All
+#: ride the standard 95%-line / 90%-branch floor.
+_SPRINT_7B4_GATE_MODULES = (
+    "src/cognic_agentos/portal/api/ui/action_routes.py",
+    "src/cognic_agentos/portal/api/ui/stream_routes.py",
+    "src/cognic_agentos/portal/api/ui/elicitation_gate.py",
+)
+
+#: Modules the Sprint 7B.4 plan deliberately keeps OFF the durable
+#: gate (each carries an in-source carve-out rationale documented in
+#: the 7B.4 docstring section of ``tools/check_critical_coverage.py``):
+#:
+#: - ``dto.py`` (T9): pure type-only DTOs — Pydantic parse + static
+#:   types catch drift; same precedent as ``portal/api/packs/dto.py``.
+#: - ``router.py`` (T12): composition factory — carrier file only.
+#: - ``well_known_routes.py`` (T12): schema publication — load-bearing
+#:   regression is the snapshot-pinned drift test, not coverage.
+#: - ``protocol/elicitation_adapter.py``: pure type-contract module
+#:   (narrow ``@runtime_checkable`` Protocol + frozen dataclasses
+#:   ``ElicitationContext`` / ``ElicitationResult`` + the
+#:   ``ElicitationBackendError`` exception class). Off-floor because
+#:   every meaningful invariant (Protocol method shape, dataclass
+#:   field set, exception identity) is enforced at the call site —
+#:   the on-floor ``portal/api/ui/elicitation_gate.py`` covers the
+#:   runtime contract; coverage on a pure-Protocol module would
+#:   measure runtime-import + decoration lines only. See the matching
+#:   "Off-floor rationale" entry in
+#:   ``tools/check_critical_coverage.py``'s 7B.4 docstring section.
+_SPRINT_7B4_OFF_GATE_MODULES = (
+    "src/cognic_agentos/portal/api/ui/dto.py",
+    "src/cognic_agentos/portal/api/ui/router.py",
+    "src/cognic_agentos/portal/api/ui/well_known_routes.py",
+    "src/cognic_agentos/protocol/elicitation_adapter.py",
 )
 
 
@@ -124,3 +161,27 @@ def test_no_duplicate_paths(gate_tool: ModuleType) -> None:
     """
     paths = [path for path, _line, _branch in gate_tool._CRITICAL_FILES]
     assert len(paths) == len(set(paths)), "duplicate path(s) in _CRITICAL_FILES"
+
+
+def test_sprint_7b4_modules_present_with_standard_floors(
+    gate_tool: ModuleType,
+) -> None:
+    """All 3 Sprint 7B.4 T13 promotions are on the gate at the 95/90 floor."""
+    by_path = {path: (line, branch) for path, line, branch in gate_tool._CRITICAL_FILES}
+    for module in _SPRINT_7B4_GATE_MODULES:
+        assert module in by_path, f"Sprint 7B.4 module missing from gate: {module}"
+        assert by_path[module] == (0.95, 0.90), (
+            f"{module} must ride the standard 95%-line / 90%-branch floor"
+        )
+
+
+@pytest.mark.parametrize("off_gate_module", _SPRINT_7B4_OFF_GATE_MODULES)
+def test_sprint_7b4_off_gate_modules_absent(gate_tool: ModuleType, off_gate_module: str) -> None:
+    """4 Sprint 7B.4 modules stay OFF the durable gate per the in-source
+    7B.4 docstring carve-outs (``dto.py`` / ``router.py`` /
+    ``well_known_routes.py`` / ``protocol/elicitation_adapter.py``).
+
+    A future edit that promotes any of them without revisiting the
+    doctrine fails here, forcing a deliberate review."""
+    paths = {path for path, _line, _branch in gate_tool._CRITICAL_FILES}
+    assert off_gate_module not in paths

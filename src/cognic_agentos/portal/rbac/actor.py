@@ -34,7 +34,11 @@ from typing import Literal, Protocol
 import pydantic
 from fastapi import Request
 
-from cognic_agentos.portal.rbac.scopes import ScopeSet
+from cognic_agentos.portal.rbac.scopes import (  # noqa: F401  (ScopeSet kept for legacy bank-overlay re-export)
+    PackRBACScope,
+    ScopeSet,
+    UIRBACScope,
+)
 
 #: 2-value closed-enum actor-type discriminator per plan Round 1 P3 #8.
 #:
@@ -69,7 +73,13 @@ class Actor(pydantic.BaseModel):
 
     subject: str
     tenant_id: str
-    scopes: ScopeSet
+    #: Sprint 7B.4 T5 — widened from ``ScopeSet`` (``frozenset[PackRBACScope]``)
+    #: to ``frozenset[PackRBACScope | UIRBACScope]`` so a single
+    #: bank-overlay actor can carry mixed-family scopes (e.g. a reviewer
+    #: who also drives the portal UI: pack.review.* AND ui.tenant_stream +
+    #: ui.action.approve). Additive widening — every pre-T5 actor that
+    #: carried only PackRBACScope values still constructs cleanly.
+    scopes: frozenset[PackRBACScope | UIRBACScope]
     actor_type: ActorType
 
 

@@ -1090,6 +1090,48 @@ class Settings(BaseSettings):
                 self.local_object_store_root = _default_object_store_root()
         return self
 
+    # --- UI event-stream knobs (Sprint 7B.4 per ADR-020) -----------------
+    # P1 #6 ownership note: these 5 fields are wired in Settings (NOT in
+    # protocol/ui_events.py) so operators can override them via the standard
+    # env-var path (COGNIC_UI_EVENT_STREAM_*). The UIEventBroker primitive
+    # reads them at construction time + uses them to bound subscriber state.
+    # Each field's `ge=...` floor refuses operator misconfigurations that
+    # would silently break the broker (cap=0 would refuse every subscriber;
+    # queue_maxsize<16 would overflow on the first event burst; timeouts<1s
+    # would reap subscribers mid-yield). Drift in defaults is operator-
+    # visible production-behavior drift; pinned by
+    # tests/unit/core/test_config_ui_event_stream_fields.py.
+    ui_event_stream_per_tenant_cap: int = Field(
+        default=50,
+        ge=1,
+        description="Max concurrent SSE subscribers per tenant; the broker refuses "
+        "register_subscriber with TenantConnectionCapExceeded when hit.",
+    )
+    ui_event_stream_queue_maxsize: int = Field(
+        default=1000,
+        ge=16,
+        description="Per-subscriber asyncio.Queue maxsize; QueueFull increments "
+        "subscriber.overflow_count and logs ui.subscriber.queue_overflow.",
+    )
+    ui_event_stream_idle_timeout_s: int = Field(
+        default=90,
+        ge=15,
+        description="Seconds of no successful generator yield (heartbeat or event) "
+        "before reap_idle closes the subscriber.",
+    )
+    ui_event_stream_heartbeat_interval_s: int = Field(
+        default=15,
+        ge=1,
+        description="Broker/generator-owned heartbeat interval (yields "
+        'ServerSentEvent(comment="keepalive")).',
+    )
+    ui_event_stream_send_timeout_s: int = Field(
+        default=30,
+        ge=1,
+        description="sse-starlette EventSourceResponse send_timeout; bounds "
+        "half-open client cleanup.",
+    )
+
     # --- Build metadata ----------------------------------------------
     # Wired by the Dockerfile / CI at image-build time; defaults make
     # local-dev introspection useful without requiring an explicit env.
