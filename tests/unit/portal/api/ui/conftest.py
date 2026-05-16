@@ -20,6 +20,7 @@ import socket
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 import uvicorn
@@ -481,3 +482,300 @@ async def uvicorn_app_factory() -> AsyncIterator[
                     task.cancel()
                     with contextlib.suppress(asyncio.CancelledError, Exception):
                         await task
+
+
+# ---------------------------------------------------------------------------
+# Sprint 7B.4 T11 fixtures — POST /api/v1/ui/actions
+# ---------------------------------------------------------------------------
+#
+# Per the user-locked decision (2026-05-16 T11): these fixtures live in
+# conftest.py NOT in ``test_action_routes.py`` because the correlation-
+# latency test in the sibling file ``test_action_routes_correlation_latency.py``
+# requests ``app_with_scopes_and_broker`` — pytest fixtures defined in a
+# test module are only visible WITHIN that module, so cross-file sharing
+# requires conftest. The fixture names are T11-specific
+# (``app_with_scopes`` / ``app_with_only_approve`` / ``app_no_adapter`` /
+# ``app_with_scopes_and_broker``) so they don't collide with the T10-shipped
+# ``app`` / ``app_with_broker`` / ``app_low_cap`` / ``app_short_send_timeout``
+# fixtures; T10 tests don't reference the T11 names → no fixture-discovery
+# pollution.
+
+
+@pytest.fixture
+def actor_t1_all_ui_scopes() -> Actor:
+    """T11: Actor holding ALL 8 UI scopes (2 stream + 6 action).
+
+    Matches the value-set of the T6-shipped ``actor_t1`` but declared
+    locally here so the T11 app builders don't transitively depend on
+    the T6 actor's exact subject/tenant_id (decouples T10 vs T11 actor
+    contracts)."""
+    return Actor(
+        subject="u1",
+        tenant_id="t1",
+        actor_type="human",
+        scopes=frozenset(
+            {
+                "ui.run_stream",
+                "ui.tenant_stream",
+                "ui.action.approve",
+                "ui.action.deny",
+                "ui.action.cancel_run",
+                "ui.action.interrupt",
+                "ui.action.resume",
+                "ui.action.submit_elicitation",
+            }
+        ),
+    )
+
+
+@pytest.fixture
+def actor_t1_only_approve() -> Actor:
+    """T11: Actor with ONLY ``ui.action.approve`` — drives the
+    per-class scope-enforcement test (deny POST must 403)."""
+    return Actor(
+        subject="u1",
+        tenant_id="t1",
+        actor_type="human",
+        scopes=frozenset({"ui.action.approve"}),
+    )
+
+
+class _StubElicitationAdapter:
+    """T11: Stub satisfying the ``ElicitationAdapter`` Protocol via
+    duck-typing (NOT ``isinstance`` / inheritance — Protocol is
+    ``@runtime_checkable`` but isinstance only checks method-presence,
+    not signature/asyncness; the authoritative shape check is at the
+    ``await adapter.handle_submission(...)`` call site per the T7
+    forward watchpoint)."""
+
+    async def get_context(
+        self, *, elicitation_id: str, tenant_id: str
+    ) -> Any:  # -> ElicitationContext | None (lazy import below)
+        import uuid
+
+        from cognic_agentos.protocol.elicitation_adapter import ElicitationContext
+
+        return ElicitationContext(
+            elicitation_id=elicitation_id,
+            tenant_id=tenant_id,
+            originating_pack_id="pack-test",
+            originating_decision_record_id=uuid.UUID(int=0),
+            elicitation_modes=("url", "form"),
+            data_classes=(),
+            expires_at=None,
+        )
+
+    async def handle_submission(
+        self, *, ctx: Any, mode: Any, payload: dict[str, Any]
+    ) -> Any:  # -> ElicitationResult (lazy import below)
+        from cognic_agentos.protocol.elicitation_adapter import ElicitationResult
+
+        return ElicitationResult(
+            delivered_at=datetime.now(UTC),
+            backend_correlation_id=f"stub-backend-{ctx.elicitation_id}",
+        )
+
+
+def _build_t11_app(
+    *,
+    settings: Settings,
+    decision_history_store: DecisionHistoryStore,
+    audit_store: AuditStore,
+    ui_event_emitter: UIEventEmitter,
+    broker: UIEventBroker,
+    actor: Actor,
+    elicitation_adapter: Any,
+) -> FastAPI:
+    """T11: Build an app with the action router mounted.
+
+    Wraps ``create_app`` (which wires broker + stores + emitter +
+    actor_binder) and includes the action router via lazy import so
+    this fixture file imports cleanly BEFORE T11 ships
+    ``action_routes.py`` — the ImportError IS the TDD RED for T11."""
+    from cognic_agentos.portal.api.app import create_app
+    from cognic_agentos.portal.api.ui.action_routes import build_action_routes
+
+    application = create_app(
+        settings=settings,
+        decision_history_store=decision_history_store,
+        audit_store=audit_store,
+        ui_event_emitter=ui_event_emitter,
+        actor_binder=_FixtureActorBinder(actor),
+    )
+    application.include_router(
+        build_action_routes(broker=broker, elicitation_adapter=elicitation_adapter),
+        prefix="/api/v1/ui",
+    )
+    return application
+
+
+@pytest.fixture
+async def app_with_scopes(
+    settings: Settings,
+    decision_history_store: DecisionHistoryStore,
+    audit_store: AuditStore,
+    ui_event_emitter: UIEventEmitter,
+    broker: UIEventBroker,
+    actor_t1_all_ui_scopes: Actor,
+) -> FastAPI:
+    return _build_t11_app(
+        settings=settings,
+        decision_history_store=decision_history_store,
+        audit_store=audit_store,
+        ui_event_emitter=ui_event_emitter,
+        broker=broker,
+        actor=actor_t1_all_ui_scopes,
+        elicitation_adapter=_StubElicitationAdapter(),
+    )
+
+
+@pytest.fixture
+async def app_with_only_approve(
+    settings: Settings,
+    decision_history_store: DecisionHistoryStore,
+    audit_store: AuditStore,
+    ui_event_emitter: UIEventEmitter,
+    broker: UIEventBroker,
+    actor_t1_only_approve: Actor,
+) -> FastAPI:
+    return _build_t11_app(
+        settings=settings,
+        decision_history_store=decision_history_store,
+        audit_store=audit_store,
+        ui_event_emitter=ui_event_emitter,
+        broker=broker,
+        actor=actor_t1_only_approve,
+        elicitation_adapter=_StubElicitationAdapter(),
+    )
+
+
+@pytest.fixture
+async def app_no_adapter(
+    settings: Settings,
+    decision_history_store: DecisionHistoryStore,
+    audit_store: AuditStore,
+    ui_event_emitter: UIEventEmitter,
+    broker: UIEventBroker,
+    actor_t1_all_ui_scopes: Actor,
+) -> FastAPI:
+    """T11: ``elicitation_adapter=None`` — exercises the
+    ``elicitation_backend_unwired`` path per spec §5.5."""
+    return _build_t11_app(
+        settings=settings,
+        decision_history_store=decision_history_store,
+        audit_store=audit_store,
+        ui_event_emitter=ui_event_emitter,
+        broker=broker,
+        actor=actor_t1_all_ui_scopes,
+        elicitation_adapter=None,
+    )
+
+
+@pytest.fixture
+async def app_with_scopes_and_broker(
+    settings: Settings,
+    decision_history_store: DecisionHistoryStore,
+    audit_store: AuditStore,
+    ui_event_emitter: UIEventEmitter,
+    broker: UIEventBroker,
+    actor_t1_all_ui_scopes: Actor,
+) -> FastAPI:
+    """T11: Same as ``app_with_scopes`` but ALSO mounts the T10 stream
+    router so the correlation-latency test can subscribe to the SSE
+    feed + post an action against the SAME broker instance."""
+    from cognic_agentos.portal.api.ui.stream_routes import build_stream_routes
+
+    application = _build_t11_app(
+        settings=settings,
+        decision_history_store=decision_history_store,
+        audit_store=audit_store,
+        ui_event_emitter=ui_event_emitter,
+        broker=broker,
+        actor=actor_t1_all_ui_scopes,
+        elicitation_adapter=_StubElicitationAdapter(),
+    )
+    application.include_router(
+        build_stream_routes(
+            broker=broker,
+            settings=settings,
+            decision_history_store=decision_history_store,
+        ),
+        prefix="/api/v1/ui",
+    )
+    return application
+
+
+# ---------------------------------------------------------------------------
+# Sprint 7B.4 T11 R3 P1 #1 — submit_elicitation green-path fixture
+# ---------------------------------------------------------------------------
+#
+# R3 P1 #1: T11's original test set only covered the
+# ``elicitation_backend_unwired`` path (Step 1 gate refusal on
+# adapter=None). The gate-green → adapter.handle_submission →
+# frontend_action.accepted path was untested; a regression that skipped
+# backend dispatch or stopped emitting accepted rows would still pass.
+# This fixture wires an _AlwaysAllowRegoEngine so the T8 gate's Step 5
+# resolves to allow=True, exercising the green-path adapter call.
+
+
+class _AlwaysAllowRegoEngine:
+    """Stub satisfying the duck-typed contract the T8 gate calls:
+    ``await rego_engine.evaluate(decision_point=..., input=...)``
+    returning an object with a ``.allow == True`` attribute.
+
+    Returns a real :class:`cognic_agentos.core.policy.engine.Decision`
+    dataclass instance (NOT a SimpleNamespace) so the gate's narrowing
+    behavior + the dataclass's frozen contract are exercised under
+    test the same way they are under production OPA evaluation."""
+
+    async def evaluate(self, *, decision_point: str, input: dict[str, Any]) -> Any:  # -> Decision
+        from cognic_agentos.core.policy.engine import Decision
+
+        return Decision(
+            allow=True,
+            rule_matched="cognic.ui.elicitation_submit.allow",
+            reasoning="stub: always allow",
+            decision_data=None,
+        )
+
+
+@pytest.fixture
+async def app_with_scopes_and_allow_rego(
+    settings: Settings,
+    decision_history_store: DecisionHistoryStore,
+    audit_store: AuditStore,
+    ui_event_emitter: UIEventEmitter,
+    broker: UIEventBroker,
+    actor_t1_all_ui_scopes: Actor,
+) -> FastAPI:
+    """T11 R3 P1 #1: app wired with BOTH a stub elicitation adapter AND
+    an always-allow rego engine — exercises the gate-green path through
+    ``adapter.handle_submission`` + ``frontend_action.accepted`` emit.
+
+    Different from ``app_with_scopes`` (which has adapter but
+    ``rego_engine=None`` → gate Step 5 fires ``elicitation_unwired_evaluator``
+    on every submit_elicitation request, never reaching the adapter)."""
+    from cognic_agentos.portal.api.app import create_app
+    from cognic_agentos.portal.api.ui.action_routes import build_action_routes
+
+    application = create_app(
+        settings=settings,
+        decision_history_store=decision_history_store,
+        audit_store=audit_store,
+        ui_event_emitter=ui_event_emitter,
+        actor_binder=_FixtureActorBinder(actor_t1_all_ui_scopes),
+    )
+    application.include_router(
+        build_action_routes(
+            broker=broker,
+            elicitation_adapter=_StubElicitationAdapter(),
+            # mypy: _AlwaysAllowRegoEngine is duck-typed against the
+            # T8 gate's narrow `.evaluate(...)` call surface, NOT a
+            # full OPAEngine subclass. The cast keeps build_action_routes'
+            # production-strict parameter type (`OPAEngine | None`) while
+            # letting tests inject a stub. Test-only divergence.
+            rego_engine=_AlwaysAllowRegoEngine(),  # type: ignore[arg-type]
+        ),
+        prefix="/api/v1/ui",
+    )
+    return application
