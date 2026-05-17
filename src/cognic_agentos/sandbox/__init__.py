@@ -17,6 +17,11 @@ from cognic_agentos.sandbox.admission import (
     admit_policy,
 )
 from cognic_agentos.sandbox.audit import emit_sandbox_event
+from cognic_agentos.sandbox.catalog import (
+    CanonicalImageCatalog,
+    CosignVerifyResult,
+    SBOMVerifyResult,
+)
 from cognic_agentos.sandbox.policy import (
     PackAdmissionContext,
     RiskTier,
@@ -39,12 +44,15 @@ from cognic_agentos.sandbox.protocol import (
 )
 
 __all__ = [
+    "CanonicalImageCatalog",
     "CatalogProtocol",
+    "CosignVerifyResult",
     "CredentialAdapter",
     "KernelDefaultCredentialAdapter",
     "PackAdmissionContext",
     "ProxyAccessRecord",
     "RiskTier",
+    "SBOMVerifyResult",
     "SandboxBackend",
     "SandboxBackendHealth",
     "SandboxBackendHealthStatus",
