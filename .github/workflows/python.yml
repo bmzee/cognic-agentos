@@ -39,6 +39,32 @@ jobs:
         with:
           python-version: ${{ steps.python-version.outputs.version }}
 
+      - name: Install pinned OPA binary (Sprint-8B T8B-pre)
+        # Same OPA v1.16.1 + sha256 as the default-adapters Docker image
+        # (infra/agentos/Dockerfile:218-245). Sprint-4 T13 added OPA to
+        # the runtime image but the `lint + test` job here runs on the
+        # bare ubuntu-latest runner WITHOUT that image, so the direct-OPA
+        # smoke tests at tests/unit/policies/test_sandbox_rego.py +
+        # test_elicitation_rego.py both SKIPPED with "opa binary not
+        # installed" — leaving Rego-syntax regressions (mis-named package,
+        # deleted default-deny, inverted rule) uncaught by CI on every PR.
+        # Closes the gap flagged in the Sprint-7B.4 closeout (line 71) +
+        # Sprint-8A T13 closeout. Detection in the test files is
+        # ``shutil.which("opa")``; installing to /usr/local/bin makes
+        # those tests RUN rather than skip on every PR.
+        run: |
+          set -euo pipefail
+          OPA_VERSION=1.16.1
+          OPA_SHA256=dc00b1c32c52f1557f7f127940bc3f1de6c507fdfbe0446f19d3b19ca5786494
+          curl --fail --location --silent --show-error \
+            -o /tmp/opa \
+            "https://openpolicyagent.org/downloads/v${OPA_VERSION}/opa_linux_amd64_static"
+          echo "${OPA_SHA256}  /tmp/opa" | sha256sum -c -
+          sudo install -m 0755 /tmp/opa /usr/local/bin/opa
+          rm /tmp/opa
+          opa version
+          echo "::notice::OPA v${OPA_VERSION} on PATH; rego tests will RUN (not skip)"
+
       - name: uv sync (frozen — consumes uv.lock, never resolves latest)
         run: uv sync --frozen --all-extras
 
