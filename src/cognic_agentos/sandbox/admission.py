@@ -315,10 +315,20 @@ async def admit_policy(
     # need the full OCI ref; ``docker.io/sha256:...`` is not a valid
     # ref). The catalog maintains a ``_digest_to_ref`` reverse-map.
     _, image_digest = policy.runtime_image.rsplit("@", 1)
-    if not (
-        catalog.is_canonical(image_digest)
-        or catalog.is_tenant_allow_listed(image_digest, tenant_id)
-    ):
+    # T11 Pre-commit fix — capture both bools as locals so Step 9's
+    # Rego input dict can thread the precomputed ``_runtime_image_authorised``
+    # inputs the bundle's rule-4 check requires. Without this, every
+    # otherwise-safe admission that already passed catalog + cosign +
+    # SBOM verification would reach the Rego bundle with both fields
+    # undefined and be denied with ``sandbox_policy_rego_denied`` —
+    # a silent dead end. Capturing the bools here also avoids a second
+    # ``catalog.is_canonical`` / ``catalog.is_tenant_allow_listed``
+    # call at Step 9 (the in-memory catalog is cheap, but single-source
+    # is the right shape; future remote-catalog backings would otherwise
+    # double the round-trip).
+    runtime_image_in_canonical_set = catalog.is_canonical(image_digest)
+    runtime_image_in_tenant_allow_list = catalog.is_tenant_allow_listed(image_digest, tenant_id)
+    if not (runtime_image_in_canonical_set or runtime_image_in_tenant_allow_list):
         raise SandboxLifecycleRefused(
             "sandbox_image_digest_not_in_canonical_catalog",
             detail=(
@@ -374,6 +384,19 @@ async def admit_policy(
             "credential_adapter_wired": not isinstance(
                 credential_adapter, KernelDefaultCredentialAdapter
             ),
+            # T11 — bundle rule 4 (defence-in-depth catalog membership
+            # check; see ``policies/_default/sandbox.rego`` +
+            # ``_runtime_image_authorised``). These two precomputed
+            # bools were captured at Step 6 from the same catalog calls
+            # that already gated the admission; threading them here is
+            # what makes the rule-4 ``allow if`` branch decidable. Both
+            # bools are reachable on a green path because Step 6 already
+            # short-circuits the false/false case with a refusal — but
+            # the Rego bundle MUST receive both fields to satisfy its
+            # input contract, otherwise the precomputed-bool checks
+            # become falsy-by-absence and the bundle denies fail-closed.
+            "runtime_image_in_canonical_set": runtime_image_in_canonical_set,
+            "runtime_image_in_tenant_allow_list": runtime_image_in_tenant_allow_list,
             "tenant_id": tenant_id,
         },
     )

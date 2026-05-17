@@ -435,6 +435,74 @@ class TestAdmissionHappyPath:
         # Spec §6.1 step 9 + §816 are the wire-protocol-public source.
         assert call_kwargs["decision_point"] == "data.cognic.sandbox.admit.allow"
 
+    async def test_admit_policy_threads_runtime_image_bools_into_rego_input(
+        self,
+    ) -> None:
+        """T11 pre-commit fix — the Rego bundle's rule 4
+        (``_runtime_image_authorised``) requires
+        ``runtime_image_in_canonical_set`` AND
+        ``runtime_image_in_tenant_allow_list`` precomputed bools in
+        the input dict. Without these, every otherwise-safe admission
+        that already passed catalog + cosign + SBOM reaches the
+        bundle with both fields undefined and is denied with
+        ``sandbox_policy_rego_denied`` — a silent dead end. This
+        regression pins both keys are sent + carry the catalog's
+        precomputed bool values."""
+
+        rego = _passing_rego()
+        catalog = _passing_catalog()
+        # _passing_catalog defaults BOTH bools to True; the bundle's
+        # rule 4 ``_runtime_image_authorised`` matches when either is
+        # true. Pin both to verify the wiring threads the catalog's
+        # bools end-to-end (not a hardcoded literal somewhere in
+        # admission.py).
+        catalog.is_canonical.return_value = True
+        catalog.is_tenant_allow_listed.return_value = False
+        await admit_policy(
+            _valid_policy(),
+            tenant_id="t-1",
+            actor=MagicMock(),
+            pack_context=_valid_pack_context(),
+            catalog=catalog,
+            credential_adapter=AsyncMock(spec=CredentialAdapter),
+            rego_engine=rego,
+            settings=_passing_settings(),
+        )
+        rego.evaluate.assert_awaited_once()
+        rego_input = rego.evaluate.call_args.kwargs["input"]
+        # Both keys MUST be present + carry the bool values the
+        # catalog returned (not hardcoded literals).
+        assert rego_input["runtime_image_in_canonical_set"] is True
+        assert rego_input["runtime_image_in_tenant_allow_list"] is False
+
+    async def test_admit_policy_threads_tenant_allow_list_bool_when_only_path_is_overlay(
+        self,
+    ) -> None:
+        """Companion to the above — the tenant-allow-list escape hatch
+        is what makes rule 4 actually decidable for non-canonical
+        bank-overlay images. Pin that when the canonical set is false
+        but the tenant allow-list is true, the bundle still receives
+        both bools (not the canonical short-circuit dropping the
+        second key, etc.)."""
+
+        rego = _passing_rego()
+        catalog = _passing_catalog()
+        catalog.is_canonical.return_value = False
+        catalog.is_tenant_allow_listed.return_value = True
+        await admit_policy(
+            _valid_policy(),
+            tenant_id="t-1",
+            actor=MagicMock(),
+            pack_context=_valid_pack_context(),
+            catalog=catalog,
+            credential_adapter=AsyncMock(spec=CredentialAdapter),
+            rego_engine=rego,
+            settings=_passing_settings(),
+        )
+        rego_input = rego.evaluate.call_args.kwargs["input"]
+        assert rego_input["runtime_image_in_canonical_set"] is False
+        assert rego_input["runtime_image_in_tenant_allow_list"] is True
+
 
 # ---------------------------------------------------------------------------
 # Step-ordering invariants (spec §6.1)
