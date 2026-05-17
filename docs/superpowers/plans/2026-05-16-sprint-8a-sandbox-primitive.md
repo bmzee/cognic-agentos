@@ -4096,9 +4096,21 @@ Adds 1 entry to AGENTS.md "Stop rules" list at T12.
 Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
 ```
 
----
+### T11 implementation notes (2026-05-17)
 
-## Task T12 — AGENTS.md stop-rule + critical-controls gate uplift 63 → 70 (CC; AGENTS.md is doctrine)
+**Plan-vs-spec drift identified at execution time + patched per `feedback_patch_plan_against_doctrine`:**
+
+The T11 plan stub above covers **3 of the 4** Wave-1 default rules from spec §13. Rule 4 — `Refuse if policy.runtime_image not in catalog AND not in tenant allow-list (defence-in-depth with §6.1 step 6)` — is missing from the stub's allow-rule and from its 5-arm test matrix.
+
+**Resolution: implement per spec, not per stub.** Spec §13 is the source of truth. The implemented bundle adds:
+
+- Extended input contract: `input.runtime_image_in_canonical_set: bool` + `input.runtime_image_in_tenant_allow_list: bool` (precomputed by the Python admission caller before OPA eval; mirrors the sampling.rego pattern of passing precomputed bools rather than re-implementing set membership in Rego)
+- New rule `_runtime_image_authorised` (true when either bool is true) added to the allow-rule's required conditions
+- New decision-matrix test arm `test_runtime_image_not_in_catalog_nor_tenant_allow_list_refused`
+
+The reference test pattern follows `tests/unit/policies/test_elicitation_rego.py` (real `OPAEngine` over an in-memory SQLite chain head pair) rather than the plan stub's bare `subprocess.run(["opa", "eval", ...])` form — the engine-based pattern is the canonical Sprint-7B.4 precedent and exercises the audit-emission seam end-to-end. Both forms are env-gated on `shutil.which("opa") is not None`.
+
+**Gate-floor count UNCHANGED.** The rego bundle is a stop-rule entry (covered by `_runtime_image_authorised` joining the AGENTS.md additions at T12), not a Python module on the durable per-file coverage gate; T12's 63 → 70 arithmetic is unaffected.
 
 **Scope:** Update AGENTS.md "Stop rules" + "Critical-controls rule" to add the **7 newly-on-gate sandbox modules** (protocol + policy + admission + catalog + proxy + warm_pool + backends/docker_sibling per spec §17) + 1 new stop-rule entry for `policies/_default/sandbox.rego`. Update `tools/check_critical_coverage.py` and its self-test for the gate uplift **63 → 70**.
 
