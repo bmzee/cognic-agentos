@@ -30,6 +30,7 @@ from cognic_agentos.sandbox.policy import (
     validate_policy_shape,
 )
 from cognic_agentos.sandbox.protocol import (
+    ProxyAccessOutcome,
     ProxyAccessRecord,
     SandboxBackend,
     SandboxBackendHealth,
@@ -42,15 +43,24 @@ from cognic_agentos.sandbox.protocol import (
     SandboxRefusalReason,
     SandboxSession,
 )
+from cognic_agentos.sandbox.proxy import (
+    EgressProxyConfig,
+    ProxyAccessRefusalReason,
+    proxy_log_to_chain_payload,
+    render_proxy_config,
+)
 
 __all__ = [
     "CanonicalImageCatalog",
     "CatalogProtocol",
     "CosignVerifyResult",
     "CredentialAdapter",
+    "EgressProxyConfig",
     "KernelDefaultCredentialAdapter",
     "PackAdmissionContext",
+    "ProxyAccessOutcome",
     "ProxyAccessRecord",
+    "ProxyAccessRefusalReason",
     "RiskTier",
     "SBOMVerifyResult",
     "SandboxBackend",
@@ -67,5 +77,7 @@ __all__ = [
     "WritableMount",
     "admit_policy",
     "emit_sandbox_event",
+    "proxy_log_to_chain_payload",
+    "render_proxy_config",
     "validate_policy_shape",
 ]

@@ -113,15 +113,65 @@ class SandboxPolicyViolated(Exception):
 # ---------------------------------------------------------------------------
 
 
+#: Closed-enum 2-value Literal for proxy decisions on outbound requests
+#: (spec §10.3 ``outcome`` field). Named alias (NOT anonymous Literal)
+#: so the runtime-checkable mirror at
+#: :data:`cognic_agentos.sandbox.proxy._VALID_OUTCOMES` can derive via
+#: :func:`typing.get_args` and stay in lockstep with the Literal
+#: without a hand-maintained copy — symmetric with
+#: :data:`cognic_agentos.sandbox.proxy.ProxyAccessRefusalReason`.
+ProxyAccessOutcome = Literal["allowed", "refused"]
+
+
 @dataclass(frozen=True)
 class ProxyAccessRecord:
     """Per-request entry in ``SandboxExecResult.proxy_log`` (spec §10.3).
-    Full impl with the proxy module lands at T7; declared here so the
-    Protocol signature compiles. Fields are placeholders until T7."""
+
+    6 fields per the spec §10.3 audit-emission contract:
+
+    * ``host`` — the requested host the proxy saw (sidecar-side
+      ALLOW_LIST is checked against this exact string).
+    * ``method`` — HTTP method (``GET`` / ``POST`` / ``CONNECT`` / …).
+    * ``timestamp`` — timezone-aware ``datetime`` of when the proxy
+      observed the request (sidecar clock; backend renders into ISO
+      8601 at chain-row serialisation time). Any aware offset is
+      accepted unchanged — UTC is the operational convention but
+      not the runtime contract; the only constraint is Python's
+      strict aware definition (``tzinfo is not None`` AND
+      ``utcoffset() is not None``). The materialiser at
+      ``sandbox.proxy.proxy_log_to_chain_payload`` enforces this at
+      the evidence boundary.
+    * ``policy_id`` — the per-session policy identifier the sidecar
+      received via env (allows examiners to correlate proxy_log
+      entries with the SandboxPolicy that admitted the session).
+    * ``outcome`` — :data:`ProxyAccessOutcome` (``"allowed"`` or
+      ``"refused"``). Runtime closed-set enforcement happens at
+      ``sandbox.proxy.proxy_log_to_chain_payload`` (the materialiser
+      is the single evidence-boundary seam since Python doesn't
+      enforce Literal values at runtime).
+    * ``refusal_reason`` — ``None`` on allowed; on refused, one of
+      the ``ProxyAccessRefusalReason`` Wave-1 values declared at
+      ``sandbox.proxy.ProxyAccessRefusalReason``
+      (``"not_in_allow_list"`` / ``"non_http_connect_target"``).
+      Typed as ``str | None`` here (NOT the Literal) to keep
+      ``protocol.py`` free of an import dependency on
+      ``sandbox.proxy`` (the dependency arrow runs the other
+      direction); the Literal pin lives at the proxy module.
+
+    Sprint 8A T3 declared this dataclass as a 4-field placeholder
+    explicitly marked "Fields are placeholders until T7"; Sprint 8A
+    T7 expanded to this 6-field shape. The runtime construction
+    surface lands at T10 (DockerSibling backend reads the sidecar
+    proxy log + builds these records). No existing callsite
+    constructs this type pre-T7, so the expansion is backward-
+    compatible with the live wire.
+    """
 
     host: str
     method: str
-    outcome: Literal["allowed", "refused"]
+    timestamp: datetime
+    policy_id: str
+    outcome: ProxyAccessOutcome
     refusal_reason: str | None
 
 
