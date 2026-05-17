@@ -10,6 +10,12 @@ OpenShift backend ships in Sprint 8B. Both conform to the same
 
 from __future__ import annotations
 
+from cognic_agentos.sandbox.admission import (
+    CatalogProtocol,
+    CredentialAdapter,
+    KernelDefaultCredentialAdapter,
+    admit_policy,
+)
 from cognic_agentos.sandbox.audit import emit_sandbox_event
 from cognic_agentos.sandbox.policy import (
     PackAdmissionContext,
@@ -33,6 +39,9 @@ from cognic_agentos.sandbox.protocol import (
 )
 
 __all__ = [
+    "CatalogProtocol",
+    "CredentialAdapter",
+    "KernelDefaultCredentialAdapter",
     "PackAdmissionContext",
     "ProxyAccessRecord",
     "RiskTier",
@@ -48,6 +57,7 @@ __all__ = [
     "SandboxRefusalReason",
     "SandboxSession",
     "WritableMount",
+    "admit_policy",
     "emit_sandbox_event",
     "validate_policy_shape",
 ]
