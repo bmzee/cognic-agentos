@@ -38,8 +38,6 @@ from cognic_agentos.sandbox import (
 )
 
 if TYPE_CHECKING:
-    import aiodocker as _aiodocker_for_typing
-
     from cognic_agentos.sandbox.backends.docker_sibling import (
         DockerSiblingSandboxBackend,
     )
@@ -50,132 +48,10 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-@pytest.fixture
-async def docker_client():
-    """Real Docker AsyncClient against host daemon."""
-    import aiodocker
-
-    client = aiodocker.Docker()
-    try:
-        yield client
-    finally:
-        await client.close()
-
-
-#: The 4 canonical Sprint-8A images. Until the supply-chain pipeline
-#: at Sprint 14 publishes the real cosign-signed digests, these are
-#: PLACEHOLDER refs that can never resolve in a real Docker daemon.
-#: The ``_canonical_artifact_preflight`` auto-use fixture below probes
-#: each ref + ``pytest.skip``s with a structured message when any is
-#: missing, per ``feedback_canonical_artifact_not_oss_substitute``
-#: (NEVER silently substitute an OSS image masquerading as the
-#: canonical name). Updating these to real digests is a Sprint-14
-#: deployment-kit task, NOT a T10a workaround.
-_CANONICAL_SPRINT_8A_IMAGES = (
-    "cognic/sandbox-runtime-python:v1@sha256:" + "a" * 64,
-    "cognic/sandbox-runtime-shell:v1@sha256:" + "b" * 64,
-    "cognic/sandbox-runtime-data:v1@sha256:" + "c" * 64,
-    "cognic/sandbox-egress-proxy:v1@sha256:" + "d" * 64,
-)
-
-
-@pytest.fixture(autouse=True)
-async def _canonical_artifact_preflight(
-    docker_client: _aiodocker_for_typing.Docker,
-) -> None:
-    """Per ``feedback_canonical_artifact_not_oss_substitute``:
-    canonical artifacts MUST be real shippable images at the sprint
-    that declares them canonical. A missing canonical image at
-    env-gated test time → ``pytest.skip`` with a structured message
-    naming the missing ref, NEVER silent OSS substitution.
-
-    Probes each canonical image via ``docker_client.images.inspect``
-    (no-op on hit; raises DockerError on miss). On first miss, skips
-    the test with the exact ref + a pointer to the Sprint-14 deploy
-    kit that publishes the real digests.
-
-    Autouse=True so every test in this file gets the preflight
-    without each test having to opt in.
-    """
-    import aiodocker
-
-    for ref in _CANONICAL_SPRINT_8A_IMAGES:
-        try:
-            await docker_client.images.inspect(ref)
-        except aiodocker.exceptions.DockerError as e:
-            pytest.skip(
-                f"canonical artifact {ref!r} not pullable from local "
-                f"docker daemon ({e}); env-gated T10a integration test "
-                f"requires the canonical Sprint-8A image catalog to be "
-                f"pre-pulled. Real cosign-signed digests are published "
-                f"by the Sprint-14 deployment kit; until then this test "
-                f"correctly skips fail-loud. Do NOT substitute an OSS "
-                f"image (mitmproxy/tinyproxy/etc) masquerading as the "
-                f"canonical name — that would break the chain of trust "
-                f"per feedback_canonical_artifact_not_oss_substitute. "
-                f"Set COGNIC_USE_LOCAL_FIXTURE_PROXY=1 ONLY for "
-                f"clearly-named local fixtures."
-            )
-
-
-@pytest.fixture
-def catalog(tmp_path):
-    """In-memory catalog preloaded with the 4 canonical Sprint-8A images.
-
-    Per ``feedback_canonical_artifact_not_oss_substitute``, the digests
-    are PLACEHOLDERS until Sprint 14. The
-    ``_canonical_artifact_preflight`` auto-use fixture above probes
-    each ref + skips with a structured message when any is missing.
-    """
-    from cognic_agentos.sandbox.catalog import CanonicalImageCatalog
-
-    trust_root = tmp_path / "cognic-cosign.pub"
-    trust_root.write_text("# fixture trust root for env-gated DockerSibling test")
-    return CanonicalImageCatalog(
-        canonical_refs=frozenset(_CANONICAL_SPRINT_8A_IMAGES),
-        tenant_trust_roots={"t-1": trust_root},
-        tenant_allow_lists={"t-1": frozenset()},
-    )
-
-
-@pytest.fixture
-async def backend(docker_client, catalog):
-    """Real DockerSiblingSandboxBackend wired against host Docker
-    daemon + the fixture catalog + in-memory audit + decision-history
-    stores. Tests assume cosign + syft are mocked at the catalog
-    seam via monkeypatch.setattr in each test method so the
-    env-gated tests don't actually shell out."""
-    from sqlalchemy.ext.asyncio import create_async_engine
-
-    from cognic_agentos.core.audit import AuditStore
-    from cognic_agentos.core.decision_history import DecisionHistoryStore
-    from cognic_agentos.sandbox import KernelDefaultCredentialAdapter
-    from cognic_agentos.sandbox.backends.docker_sibling import (
-        DockerSiblingSandboxBackend,
-    )
-
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
-    rego = AsyncMock()
-    decision = MagicMock()
-    decision.allow = True
-    decision.reasoning = ""
-    rego.evaluate = AsyncMock(return_value=decision)
-    settings = MagicMock(
-        sandbox_per_tenant_max_cpu=4.0,
-        sandbox_per_tenant_max_memory=4096,
-        sandbox_per_tenant_max_walltime=300.0,
-    )
-    return DockerSiblingSandboxBackend(
-        docker_client=docker_client,
-        image_catalog=catalog,
-        credential_adapter=KernelDefaultCredentialAdapter(),
-        rego_engine=rego,
-        audit_store=AuditStore(engine=engine),
-        decision_history_store=DecisionHistoryStore(engine=engine),
-        settings=settings,
-        warm_pool=None,
-    )
-
+# Shared fixtures (docker_client / catalog / backend / _canonical_artifact_preflight)
+# live in conftest.py at this directory — T10b extracted them so the
+# env-gated test_docker_sibling_resource_caps.py + future T10c
+# test_docker_sibling_egress.py can request them by name.
 
 _INTERNAL_WRITE_POLICY = SandboxPolicy(
     cpu_cores=0.5,
