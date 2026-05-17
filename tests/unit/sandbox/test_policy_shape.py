@@ -1,0 +1,434 @@
+"""Sprint 8A T3 — pure Stage-1 shape validation + closed-enum vocab pins.
+
+NO I/O. Stage-2 admission (catalog + cosign + SBOM + Rego) lives in
+T5 (sandbox/admission.py); these tests cover ONLY the pure validation
+surface per the Sprint 8A spec §6.1.
+"""
+
+from __future__ import annotations
+
+import ast
+import dataclasses
+import inspect
+import typing
+
+import pytest
+
+from cognic_agentos.sandbox import (
+    PackAdmissionContext,
+    SandboxLifecycleEvent,
+    SandboxLifecycleRefused,
+    SandboxPolicy,
+    SandboxPolicyViolationReason,
+    SandboxRefusalReason,
+    validate_policy_shape,
+)
+
+
+class TestClosedEnumPartitionInvariants:
+    """Pin the wire-protocol-public closed-enum values + counts."""
+
+    def test_sandbox_refusal_reason_has_exactly_15_values(self) -> None:
+        values = typing.get_args(SandboxRefusalReason)
+        assert len(values) == 15, (
+            f"SandboxRefusalReason must have 15 values per spec §4.1; found {len(values)}: {values}"
+        )
+
+    def test_sandbox_policy_violation_reason_has_exactly_6_values(self) -> None:
+        # T10c R1 P1.2 amended this from 5 → 6 with the addition of
+        # ``egress_audit_unreadable`` (fail-closed for unreadable
+        # proxy_log). Pinned at 6 to catch any future drift.
+        values = typing.get_args(SandboxPolicyViolationReason)
+        assert len(values) == 6, (
+            f"SandboxPolicyViolationReason must have 6 values per spec §4.2 + "
+            f"T10c R1 P1.2; found {len(values)}: {values}"
+        )
+
+    def test_sandbox_lifecycle_event_has_exactly_8_values(self) -> None:
+        values = typing.get_args(SandboxLifecycleEvent)
+        assert len(values) == 8, (
+            f"SandboxLifecycleEvent must have 8 values per spec §4.3; found {len(values)}: {values}"
+        )
+
+    def test_sandbox_refusal_reason_includes_high_risk_pre_13_5(self) -> None:
+        assert "sandbox_high_risk_tier_refused_pre_13_5" in typing.get_args(SandboxRefusalReason)
+
+    def test_sandbox_policy_violation_reason_does_not_include_cpu_cap_exceeded(self) -> None:
+        # Round-3 P2 fix: --cpus throttling under cap is NOT a violation
+        violations = typing.get_args(SandboxPolicyViolationReason)
+        assert "cpu_cap_exceeded" not in violations
+        assert "cpu_time_budget_exceeded" in violations
+
+    def test_sandbox_lifecycle_event_does_not_include_warm_pool_replenished(self) -> None:
+        # User-locked taxonomy: replenishment is the cause; the event
+        # is still `precreated` per spec §4.3.
+        events = typing.get_args(SandboxLifecycleEvent)
+        assert "sandbox.warm_pool.replenished" not in events
+        assert "sandbox.warm_pool.precreated" in events
+
+    def test_sandbox_refusal_reason_canonical_values_present(self) -> None:
+        """Spot-check the 15-value Literal contains the canonical set
+        documented in spec §4.1 (full vocabulary)."""
+        values = set(typing.get_args(SandboxRefusalReason))
+        expected = {
+            "sandbox_credential_adapter_not_configured",
+            "sandbox_runtime_deps_unsupported_in_production",
+            "sandbox_high_risk_tier_refused_pre_13_5",
+            "sandbox_image_digest_not_in_canonical_catalog",
+            "sandbox_image_cosign_verification_failed",
+            "sandbox_image_sbom_check_failed",
+            "sandbox_image_digest_format_invalid",
+            "sandbox_policy_exceeds_tenant_max_cpu",
+            "sandbox_policy_exceeds_tenant_max_memory",
+            "sandbox_policy_exceeds_tenant_max_walltime",
+            "sandbox_policy_egress_host_invalid",
+            "sandbox_policy_egress_protocol_not_http",
+            "sandbox_policy_rego_denied",
+            "sandbox_backend_unavailable",
+            "sandbox_warm_pool_drained",
+        }
+        assert values == expected, f"drift: {values ^ expected}"
+
+    def test_sandbox_policy_violation_reason_canonical_values_present(self) -> None:
+        values = set(typing.get_args(SandboxPolicyViolationReason))
+        expected = {
+            "cpu_time_budget_exceeded",
+            "memory_cap_exceeded",
+            "walltime_cap_exceeded",
+            "egress_host_not_allow_listed",
+            "egress_protocol_not_http",
+            # T10c R1 P1.2 — fail-closed for unreadable proxy_log
+            "egress_audit_unreadable",
+        }
+        assert values == expected, f"drift: {values ^ expected}"
+
+
+class TestRiskTierDriftDetectorTestOnly:
+    """Pin the sandbox-local RiskTier Literal against
+    cli/_governance_vocab.RiskTier at test time WITHOUT a runtime
+    cross-module import.
+
+    Per feedback_drift_detector_test_only_no_runtime_import +
+    AGENTS.md "Plugin discipline" (runtime sandbox code must not import
+    build-time CLI vocab). Each module declares its own local Literal;
+    this test imports from BOTH and asserts equality so drift fails CI.
+    """
+
+    def test_sandbox_local_risk_tier_matches_cli_governance_vocab(self) -> None:
+        from cognic_agentos.cli._governance_vocab import RiskTier as CLIRiskTier
+        from cognic_agentos.sandbox.policy import RiskTier as SandboxRiskTier
+
+        cli_values = frozenset(typing.get_args(CLIRiskTier))
+        sandbox_values = frozenset(typing.get_args(SandboxRiskTier))
+        assert sandbox_values == cli_values, (
+            f"sandbox/policy.py:RiskTier must mirror "
+            f"cli/_governance_vocab.py:RiskTier verbatim. "
+            f"sandbox-only: {sandbox_values - cli_values}; "
+            f"cli-only: {cli_values - sandbox_values}"
+        )
+
+    def test_sandbox_module_does_not_runtime_import_cli_vocab(self) -> None:
+        """AST-walk sandbox/policy.py source; assert no
+        `from cognic_agentos.cli` import statement. Runtime sandbox
+        must not depend on build-time CLI vocab."""
+        from cognic_agentos.sandbox import policy
+
+        source = inspect.getsource(policy)
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module:
+                assert not node.module.startswith("cognic_agentos.cli"), (
+                    f"sandbox/policy.py must not import from cognic_agentos.cli "
+                    f"(found `from {node.module} import ...`); per AGENTS.md "
+                    "Plugin discipline + feedback_drift_detector_test_only_"
+                    "no_runtime_import"
+                )
+
+
+class TestStage1ShapeValidationArms:
+    """Per spec §6.1 step 1+2 — each Stage-1 refusal arm must fire on
+    a minimal-deviating policy. Reaches the in-scope T3 refusal arms
+    only (Stage-2 arms covered at T5)."""
+
+    @staticmethod
+    def _valid_policy_base(**overrides: object) -> SandboxPolicy:
+        """Minimum valid SandboxPolicy that passes Stage-1 with the
+        given field overrides."""
+        defaults: dict[str, object] = {
+            "cpu_cores": 0.5,
+            "cpu_time_budget_s": None,
+            "memory_mb": 256,
+            "walltime_s": 30.0,
+            "runtime_image": "cognic/sandbox-runtime-python:v1@sha256:" + "a" * 64,
+            "egress_allow_list": ("api.example.com",),
+            "vault_path": None,
+        }
+        defaults.update(overrides)
+        return SandboxPolicy(**defaults)  # type: ignore[arg-type]
+
+    def test_minimum_valid_policy_passes(self) -> None:
+        validate_policy_shape(self._valid_policy_base())
+
+    def test_cpu_cores_zero_refuses_exceeds_tenant_max_cpu(self) -> None:
+        with pytest.raises(SandboxLifecycleRefused) as exc:
+            validate_policy_shape(self._valid_policy_base(cpu_cores=0))
+        assert exc.value.reason == "sandbox_policy_exceeds_tenant_max_cpu"
+
+    def test_cpu_cores_negative_refuses_exceeds_tenant_max_cpu(self) -> None:
+        with pytest.raises(SandboxLifecycleRefused) as exc:
+            validate_policy_shape(self._valid_policy_base(cpu_cores=-0.5))
+        assert exc.value.reason == "sandbox_policy_exceeds_tenant_max_cpu"
+
+    def test_memory_mb_zero_refuses_exceeds_tenant_max_memory(self) -> None:
+        with pytest.raises(SandboxLifecycleRefused) as exc:
+            validate_policy_shape(self._valid_policy_base(memory_mb=0))
+        assert exc.value.reason == "sandbox_policy_exceeds_tenant_max_memory"
+
+    def test_walltime_zero_refuses_exceeds_tenant_max_walltime(self) -> None:
+        with pytest.raises(SandboxLifecycleRefused) as exc:
+            validate_policy_shape(self._valid_policy_base(walltime_s=0))
+        assert exc.value.reason == "sandbox_policy_exceeds_tenant_max_walltime"
+
+    def test_cpu_time_budget_zero_refuses(self) -> None:
+        with pytest.raises(SandboxLifecycleRefused) as exc:
+            validate_policy_shape(self._valid_policy_base(cpu_time_budget_s=0))
+        assert exc.value.reason == "sandbox_policy_exceeds_tenant_max_cpu"
+
+    def test_cpu_time_budget_none_passes(self) -> None:
+        validate_policy_shape(self._valid_policy_base(cpu_time_budget_s=None))
+
+    def test_image_ref_without_at_sha256_refuses(self) -> None:
+        with pytest.raises(SandboxLifecycleRefused) as exc:
+            validate_policy_shape(
+                self._valid_policy_base(runtime_image="cognic/sandbox-runtime-python:v1")
+            )
+        assert exc.value.reason == "sandbox_image_digest_format_invalid"
+
+    def test_image_ref_with_malformed_digest_refuses(self) -> None:
+        with pytest.raises(SandboxLifecycleRefused) as exc:
+            validate_policy_shape(
+                self._valid_policy_base(
+                    runtime_image="cognic/sandbox-runtime-python:v1@sha256:not-a-real-digest"
+                )
+            )
+        assert exc.value.reason == "sandbox_image_digest_format_invalid"
+
+    def test_image_ref_with_uppercase_hex_digest_refuses(self) -> None:
+        """Spec §6.1 step 1: digest must be `^sha256:[0-9a-f]{64}$` —
+        lowercase hex only per OCI convention."""
+        with pytest.raises(SandboxLifecycleRefused) as exc:
+            validate_policy_shape(
+                self._valid_policy_base(
+                    runtime_image="cognic/sandbox-runtime-python:v1@sha256:" + "A" * 64
+                )
+            )
+        assert exc.value.reason == "sandbox_image_digest_format_invalid"
+
+    def test_image_ref_with_leading_hyphen_component_refuses(self) -> None:
+        """Round-9 R9 P1 reviewer fix: each `/`-delimited repo
+        component MUST start with `[a-z0-9]`; ``cognic/-bad`` has the
+        second component starting with `-`."""
+        with pytest.raises(SandboxLifecycleRefused) as exc:
+            validate_policy_shape(
+                self._valid_policy_base(runtime_image="cognic/-bad:v1@sha256:" + "a" * 64)
+            )
+        assert exc.value.reason == "sandbox_image_digest_format_invalid"
+
+    def test_image_ref_with_empty_repo_component_refuses(self) -> None:
+        """Round-9 R9 P1 reviewer fix: consecutive `/` produces an
+        empty component which is not a valid OCI ref."""
+        with pytest.raises(SandboxLifecycleRefused) as exc:
+            validate_policy_shape(
+                self._valid_policy_base(runtime_image="cognic//bad:v1@sha256:" + "a" * 64)
+            )
+        assert exc.value.reason == "sandbox_image_digest_format_invalid"
+
+    def test_image_ref_with_trailing_slash_refuses(self) -> None:
+        """Round-9 R9 P1 reviewer fix: trailing `/` on the repository
+        path produces an empty trailing component."""
+        with pytest.raises(SandboxLifecycleRefused) as exc:
+            validate_policy_shape(
+                self._valid_policy_base(runtime_image="cognic/bad/:v1@sha256:" + "a" * 64)
+            )
+        assert exc.value.reason == "sandbox_image_digest_format_invalid"
+
+    def test_image_ref_with_leading_hyphen_first_component_refuses(self) -> None:
+        """Defence-in-depth — even the FIRST component must not
+        start with a hyphen (or any separator)."""
+        with pytest.raises(SandboxLifecycleRefused) as exc:
+            validate_policy_shape(
+                self._valid_policy_base(runtime_image="-cognic/sandbox:v1@sha256:" + "a" * 64)
+            )
+        assert exc.value.reason == "sandbox_image_digest_format_invalid"
+
+    def test_image_ref_with_trailing_separator_in_component_refuses(self) -> None:
+        """Components cannot end with a separator per OCI; ``sandbox-``
+        is a malformed component."""
+        with pytest.raises(SandboxLifecycleRefused) as exc:
+            validate_policy_shape(
+                self._valid_policy_base(runtime_image="cognic/sandbox-:v1@sha256:" + "a" * 64)
+            )
+        assert exc.value.reason == "sandbox_image_digest_format_invalid"
+
+    def test_image_ref_with_double_dash_separator_passes(self) -> None:
+        """Round-9 R9 P2 reviewer fix: OCI grammar allows ``-+`` (one
+        or more dashes) between alphanumeric runs. ``sandbox--runtime``
+        is a valid OCI component."""
+        validate_policy_shape(
+            self._valid_policy_base(runtime_image="cognic/sandbox--runtime:v1@sha256:" + "a" * 64)
+        )
+
+    def test_image_ref_with_triple_dash_separator_passes(self) -> None:
+        """OCI grammar's ``-+`` separator allows any positive number of
+        consecutive dashes between alphanumeric runs."""
+        validate_policy_shape(
+            self._valid_policy_base(runtime_image="cognic/sandbox---runtime:v1@sha256:" + "a" * 64)
+        )
+
+    def test_image_ref_with_double_underscore_separator_passes(self) -> None:
+        """Round-9 R9 P2 reviewer fix: OCI grammar allows ``__``
+        (exactly two underscores) as a separator. Bank per-pack images
+        commonly use this form (e.g. ``bank__internal_pack``)."""
+        validate_policy_shape(
+            self._valid_policy_base(runtime_image="cognic/sandbox__runtime:v1@sha256:" + "a" * 64)
+        )
+
+    def test_image_ref_with_single_underscore_separator_passes(self) -> None:
+        validate_policy_shape(
+            self._valid_policy_base(runtime_image="cognic/sandbox_runtime:v1@sha256:" + "a" * 64)
+        )
+
+    def test_image_ref_with_dot_separator_passes(self) -> None:
+        validate_policy_shape(
+            self._valid_policy_base(runtime_image="cognic/sandbox.runtime:v1@sha256:" + "a" * 64)
+        )
+
+    def test_image_ref_with_triple_underscore_separator_refuses(self) -> None:
+        """OCI grammar: only ``__`` (exactly two) allowed for
+        underscore-separator; three+ consecutive underscores are not
+        valid. Reviewer's negative-case companion to the double-
+        underscore positive test."""
+        with pytest.raises(SandboxLifecycleRefused) as exc:
+            validate_policy_shape(
+                self._valid_policy_base(
+                    runtime_image="cognic/sandbox___runtime:v1@sha256:" + "a" * 64
+                )
+            )
+        assert exc.value.reason == "sandbox_image_digest_format_invalid"
+
+    def test_image_ref_with_double_dot_separator_refuses(self) -> None:
+        """OCI grammar: only single ``.`` allowed; two consecutive dots
+        are not a valid separator. Reviewer's negative-case companion
+        to the single-dot positive test."""
+        with pytest.raises(SandboxLifecycleRefused) as exc:
+            validate_policy_shape(
+                self._valid_policy_base(
+                    runtime_image="cognic/sandbox..runtime:v1@sha256:" + "a" * 64
+                )
+            )
+        assert exc.value.reason == "sandbox_image_digest_format_invalid"
+
+    def test_image_ref_with_mixed_underscore_dot_separator_refuses(self) -> None:
+        """OCI grammar: separator must match exactly one alternative
+        (``[._]`` / ``__`` / ``-+``); mixed ``_.`` between alphanumeric
+        runs doesn't satisfy any single alternative."""
+        with pytest.raises(SandboxLifecycleRefused) as exc:
+            validate_policy_shape(
+                self._valid_policy_base(
+                    runtime_image="cognic/sandbox_.runtime:v1@sha256:" + "a" * 64
+                )
+            )
+        assert exc.value.reason == "sandbox_image_digest_format_invalid"
+
+    def test_ftp_scheme_in_egress_refuses_protocol_not_http(self) -> None:
+        with pytest.raises(SandboxLifecycleRefused) as exc:
+            validate_policy_shape(
+                self._valid_policy_base(egress_allow_list=("ftp://files.example.com",))
+            )
+        assert exc.value.reason == "sandbox_policy_egress_protocol_not_http"
+
+    def test_leading_hyphen_in_egress_refuses_host_invalid(self) -> None:
+        with pytest.raises(SandboxLifecycleRefused) as exc:
+            validate_policy_shape(self._valid_policy_base(egress_allow_list=("-bad.example.com",)))
+        assert exc.value.reason == "sandbox_policy_egress_host_invalid"
+
+    def test_empty_egress_host_refuses_host_invalid(self) -> None:
+        with pytest.raises(SandboxLifecycleRefused) as exc:
+            validate_policy_shape(self._valid_policy_base(egress_allow_list=("",)))
+        assert exc.value.reason == "sandbox_policy_egress_host_invalid"
+
+    def test_double_dot_egress_host_refuses_host_invalid(self) -> None:
+        with pytest.raises(SandboxLifecycleRefused) as exc:
+            validate_policy_shape(self._valid_policy_base(egress_allow_list=("a..b.com",)))
+        assert exc.value.reason == "sandbox_policy_egress_host_invalid"
+
+    def test_http_scheme_with_valid_host_passes(self) -> None:
+        validate_policy_shape(
+            self._valid_policy_base(egress_allow_list=("http://api.example.com",))
+        )
+
+    def test_https_scheme_with_valid_host_passes(self) -> None:
+        validate_policy_shape(
+            self._valid_policy_base(egress_allow_list=("https://api.example.com",))
+        )
+
+    def test_localhost_passes_as_egress_host(self) -> None:
+        validate_policy_shape(self._valid_policy_base(egress_allow_list=("localhost",)))
+
+    def test_empty_egress_allow_list_passes(self) -> None:
+        """A sandbox with no outbound network is a legal policy."""
+        validate_policy_shape(self._valid_policy_base(egress_allow_list=()))
+
+    def test_full_oci_ref_with_registry_and_port_passes(self) -> None:
+        """OCI parser must accept refs from registries with dots + ports."""
+        validate_policy_shape(
+            self._valid_policy_base(
+                runtime_image="registry.example.com:5000/cognic/sandbox-runtime:v1@sha256:"
+                + "a" * 64,
+            )
+        )
+
+
+class TestPackAdmissionContextShape:
+    def test_pack_admission_context_has_6_constructor_fields(self) -> None:
+        """Round-3 third-follow-on amendment: PackAdmissionContext has
+        6 fields (pack_id + pack_version + pack_artifact_digest +
+        risk_tier + declares_dynamic_install + profile)."""
+        fields = {f.name for f in dataclasses.fields(PackAdmissionContext)}
+        expected = {
+            "pack_id",
+            "pack_version",
+            "pack_artifact_digest",
+            "risk_tier",
+            "declares_dynamic_install",
+            "profile",
+        }
+        assert fields == expected, f"PackAdmissionContext drift: {fields ^ expected}"
+
+    def test_pack_admission_context_is_frozen(self) -> None:
+        """Behavior-level pin: attempting to mutate a constructed
+        instance raises ``dataclasses.FrozenInstanceError``. This
+        proves frozen-ness without relying on ``__dataclass_params__``
+        (which mypy does not recognise as a documented attribute)."""
+        ctx = PackAdmissionContext(
+            pack_id="p",
+            pack_version="v1",
+            pack_artifact_digest="sha256:" + "1" * 64,
+            risk_tier="internal_write",
+            declares_dynamic_install=False,
+            profile="production",
+        )
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            ctx.pack_id = "mutated"  # type: ignore[misc]
+
+    def test_pack_admission_context_constructs_with_canonical_fields(self) -> None:
+        ctx = PackAdmissionContext(
+            pack_id="cognic.test_pack",
+            pack_version="v1.0.0",
+            pack_artifact_digest="sha256:" + "1" * 64,
+            risk_tier="internal_write",
+            declares_dynamic_install=False,
+            profile="production",
+        )
+        assert ctx.pack_id == "cognic.test_pack"
+        assert ctx.risk_tier == "internal_write"

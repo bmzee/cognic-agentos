@@ -3,6 +3,8 @@
 ## Status
 **APPROVED for implementation** on 2026-04-26.
 
+**Amended on 2026-05-16** (this revision) — substantive amendment shipped alongside the Sprint 8A T1 design spec. Clarifies that "Wave 1 DinD" in the original wording means the **Docker-sibling pattern via host docker.sock**, NOT pure nested Docker-in-Docker with a `--privileged` container; adds Kubernetes/OpenShift Pod backend as a co-Wave-1 backend (not deferred to Wave 2) per the OpenShift production-deployment target surfaced during Sprint 8A brainstorming; adds the immutable-runtime-image doctrine + canonical image catalog + signed per-pack-image escape hatch; extends implementation phases for the 8A/8B sprint split. Trust-boundary language made explicit for the Docker-sibling pattern. Stronger isolation backends (gVisor, Firecracker, Kata, rootless Docker) remain Wave-2 deferred per the original ADR.
+
 ## Context
 
 Per Anthropic's Managed Agents pattern (April 2026), the **sandbox** is the "hands" of an agent system — an ephemeral, resource-capped, network-egress-controlled execution environment. Cognic AgentOS today has no sandbox primitive: agents and tools run in the same Python process as the OS. For banking deployment this is unacceptable:
@@ -17,16 +19,17 @@ Per Anthropic's Managed Agents pattern (April 2026), the **sandbox** is the "han
 Add a `sandbox/` primitive module providing `SandboxSession`. Lifecycle: `create() → exec() → destroy()`. Each session is:
 
 - A separately-named container (e.g. Docker, runc, gVisor, Firecracker — backend abstracted)
-- Resource-capped (CPU quota, memory, wall-time)
-- Egress allow-listed (per-call list of permitted hostnames)
-- Image-pinned (cosign-verified digest of the sandbox runtime image)
-- Credential-scoped (Vault leases minted at create, revoked at destroy)
-- Audit-logged (every create / exec / destroy emits an event with policy + outcome)
+- Resource-capped (CPU quota, memory, wall-time; optional `cpu_time_budget_s` per Sprint 8A spec — `--cpus` throttling under cap is NOT a runtime violation by itself, only an exceeded CPU-seconds budget is)
+- Egress allow-listed (per-call list of permitted hostnames; **HTTP/HTTPS-only in Wave 1** via an AgentOS-controlled proxy endpoint; non-HTTP protocols refused at the application layer; raw TCP/UDP/DNS attempts blocked at the network layer)
+- **Image-pinned from an immutable, cosign-signed runtime image** (per the 2026-05-16 amendment): AgentOS publishes a small **canonical image catalog** (Wave-1: `cognic/sandbox-runtime-python`, `cognic/sandbox-runtime-shell`, `cognic/sandbox-runtime-data`, `cognic/sandbox-egress-proxy` — 4 images). Pack-specific runtime images are allowed only when signed, SBOM-scanned, digest-pinned, and tenant allow-listed. **Production sandboxes do not install OS or Python packages at create time** (dynamic apt-get/pip is refused fail-closed); the binary set is provably what the cosign-signed digest binds to. Banks reject runtime-install patterns at first security audit because evidence-pack export per ADR-006 cannot capture a runtime-installed binary set.
+- Credential-scoped (Vault leases minted at create, revoked at destroy — Sprint 10 ships the real `VaultCredentialAdapter`; Sprint 8A ships only the `CredentialAdapter` Protocol + fail-loud `KernelDefaultCredentialAdapter` stub that refuses fail-closed when a policy declares `vault_path:` and no real adapter is wired)
+- Audit-logged (every create / exec / destroy emits an event with policy + outcome; Sprint 8A's 8-event taxonomy lands under ISO 42001 A.6.2.5 per ADR-006)
 
 ### Backend choice
-- **Wave 1**: Docker-in-Docker (DinD) — simplest to operate inside a single bank deployment
-- **Wave 2**: gVisor or Firecracker — stronger isolation when banks demand kernel-level boundary
-- Backend swappable via a `SandboxBackend` protocol; AgentOS doesn't bake DinD into the contract
+- **Wave 1 backend #1 — `DockerSiblingSandboxBackend`** (this is what "Wave 1 DinD" in the original wording resolves to per the 2026-05-16 amendment): AgentOS talks to the host Docker daemon via mounted `/var/run/docker.sock` and launches **sibling** sandbox containers (not nested children of a privileged inner daemon). Trust boundary: *"Wave-1 sandbox isolation is Docker-container isolation managed through the host Docker daemon. AgentOS is inside the trusted control plane. A compromised AgentOS process with Docker socket access is equivalent to host-level Docker control. This is acceptable for Wave-1 reference deployment, not the final bank-grade isolation story."* Egress topology: dual-container internal-network pattern (sandbox attaches to a per-session `internal=True` Docker bridge with NO external gateway; the egress proxy is a separate dual-homed sidecar container on both the internal bridge and a non-internal bridge with external gateway; sandbox HTTP client routes via `HTTP_PROXY` env vars). For local dev, CI, Docker Compose deployments, and small Docker-host deployments where the operator accepts the Docker-daemon trust posture.
+- **Wave 1 backend #2 — `KubernetesPodSandboxBackend`** (added 2026-05-16 amendment per the OpenShift production-deployment target): for bank production on OpenShift / Kubernetes clusters where Docker-socket access is unavailable or unacceptable. OpenShift-compatible pod SecurityContext (no `--privileged`; matches the restricted-by-default SCC); NetworkPolicy permits only proxy egress; ServiceAccount with minimal RBAC; namespace/tenant routing config. Ships in **Sprint 8B** as the sibling sprint to Sprint 8A.
+- **Wave 2** — gVisor / Firecracker / Kata / rootless Docker — stronger isolation when banks demand kernel-level boundary; deferred until banks demand it.
+- Backend swappable via a `SandboxBackend` Protocol; AgentOS does not bake any specific backend into the contract. Backend selection is process-wide via `COGNIC_SANDBOX_BACKEND=docker_sibling | kubernetes_pod` env var in Wave 1; per-tenant routing deferred to a later sprint (Sprint 14 deployment kit is the candidate home).
 
 ### Per-call policy
 Tools and agents request a sandbox by declaring a `SandboxPolicy`. The harness validates the policy against the per-tenant maximum (defined in `policy.yaml`) and refuses requests that exceed limits.
@@ -55,12 +58,17 @@ Sandbox lifecycle hooks map to ISO 42001 Annex A controls A.6.2.x (operational c
 - Some MCP tools may not need a sandbox (read-only metadata queries, etc). The harness flags `requires_sandbox: bool` per tool and only creates sessions when required.
 
 ## Implementation phases
-1. **Phase 3.1**: `SandboxBackend` protocol + DinD reference implementation
-2. **Phase 3.2**: warm-pool + lifecycle metrics
-3. **Phase 3.3**: per-tenant policy schema + Vault credential leasing
-4. **Phase 3.4**: ISO 42001 control tagging on lifecycle events
-5. **Phase 3.5**: **Resumable-session API** — `checkpoint(label) / suspend() / wake(session_id)` (added Sprint 8.5)
-6. **Phase 4.x**: gVisor / Firecracker backend (Wave 2)
+
+Restructured 2026-05-16 amendment for the Sprint 8A/8B split:
+
+1. **Sprint 8A** — `SandboxBackend` Protocol + `SandboxPolicy` + `DockerSiblingSandboxBackend` (NOT pure DinD) + dual-container internal-network egress topology with `cognic/sandbox-egress-proxy` sidecar + canonical 4-image catalog (3 runtime + 1 proxy sidecar) cosign-signed via Sprint-4 supply-chain pipeline + warm-pool (narrow scope: `register/precreate/checkout/release_or_destroy/drain`) + `CredentialAdapter` Protocol with `KernelDefaultCredentialAdapter` fail-loud stub (Vault leasing deferred to Sprint 10) + shared backend conformance suite + ISO 42001 A.6.2.5 audit-event taxonomy (8 events) + `policies/_default/sandbox.rego` admission bundle. ~3.5 wu.
+2. **Sprint 8B** — `KubernetesPodSandboxBackend` + OpenShift-compatible pod SecurityContext + NetworkPolicy egress to proxy only + ServiceAccount + minimal RBAC + namespace/tenant routing config + live-cluster conformance tests env-gated. Same conformance suite as 8A; both backends conform to the same `SandboxBackend` Protocol. ~1.5-2 wu.
+3. **Sprint 8.5** — **Resumable-session API** — `checkpoint(label) / suspend() / wake(session_id)` per the separate amendment below.
+4. **Sprint 9** — ISO 42001 evidence-pack export integration (sandbox events flow through `compliance/iso42001/evidence_pack.py`).
+5. **Sprint 10** — Real Vault credential leasing replaces the Sprint 8A fail-loud stub (`KernelDefaultCredentialAdapter` → `VaultCredentialAdapter`).
+6. **Sprint 10.5** — Scheduler (ADR-022) wraps `sandbox.create()` in `SchedulerEngine.submit()`; sandbox creation becomes a scheduler-admitted operation. 8A's API is designed for forward-compatibility (no breaking change at 10.5 landing).
+7. **Sprint 13.5** — `core/approval/engine.py` lands; the Sprint-8A transitional refusal `sandbox_high_risk_tier_refused_pre_13_5` lifts (6-value high-risk-tier set routes through approval per ADR-014 instead of refusing fail-closed). Cutover audit event `sandbox_approval.engine_enabled` emitted at module-load.
+8. **Wave 2** — gVisor / Firecracker / Kata / rootless Docker backends; all conform to the same `SandboxBackend` Protocol.
 
 ## Resumable-session API (Sprint 8.5)
 

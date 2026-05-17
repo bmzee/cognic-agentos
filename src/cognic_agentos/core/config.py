@@ -1132,6 +1132,44 @@ class Settings(BaseSettings):
         "half-open client cleanup.",
     )
 
+    # --- Sandbox (Sprint 8A per ADR-004) ---------------------------------
+    # Per-tenant resource caps consumed by ``sandbox.admission.admit_policy``
+    # at spec §6.1 step 5. A policy declaring caps that exceed the tenant
+    # max refuses with the matching ``SandboxRefusalReason``:
+    # ``sandbox_policy_exceeds_tenant_max_{cpu,memory,walltime}``. Defaults
+    # are conservative Wave-1 starting points; bank deployments override
+    # via the COGNIC_SANDBOX_PER_TENANT_MAX_* env vars per tenant overlay.
+    # Tests pin these fields exist by hasattr + default-positive assertions
+    # at ``tests/unit/sandbox/test_admission_pipeline.py::
+    # TestSettingsSandboxPerTenantMaxFields``.
+    sandbox_per_tenant_max_cpu: float = Field(
+        default=4.0,
+        gt=0,
+        description=(
+            "Per-tenant ceiling for SandboxPolicy.cpu_cores (Docker --cpus "
+            "throttle). admit_policy refuses sandbox_policy_exceeds_tenant_"
+            "max_cpu when policy.cpu_cores exceeds this value."
+        ),
+    )
+    sandbox_per_tenant_max_memory: int = Field(
+        default=1024,
+        gt=0,
+        description=(
+            "Per-tenant ceiling for SandboxPolicy.memory_mb (Docker "
+            "--memory cap, megabytes). admit_policy refuses "
+            "sandbox_policy_exceeds_tenant_max_memory on exceed."
+        ),
+    )
+    sandbox_per_tenant_max_walltime: float = Field(
+        default=300.0,
+        gt=0,
+        description=(
+            "Per-tenant ceiling for SandboxPolicy.walltime_s (AgentOS-side "
+            "wall-clock timer, seconds). admit_policy refuses "
+            "sandbox_policy_exceeds_tenant_max_walltime on exceed."
+        ),
+    )
+
     # --- Build metadata ----------------------------------------------
     # Wired by the Dockerfile / CI at image-build time; defaults make
     # local-dev introspection useful without requiring an explicit env.

@@ -1,6 +1,9 @@
 # ADR-006 — ISO/IEC 42001 Control Mapping
 
 ## Status
+
+**Amended on 2026-05-16** (this revision) — minor amendment shipped alongside the Sprint 8A T1 design spec. Adds the 8 sandbox lifecycle events from Sprint 8A's audit taxonomy to the A.6.2.5 (Operational responsibilities) row of the Initial control coverage table; introduces 2 new sandbox closed-enum vocabularies (`SandboxRefusalReason` 15 values + `SandboxPolicyViolationReason` 6 values — extended from 5 → 6 at Sprint 8A T10c R1 P1.2 with the addition of `egress_audit_unreadable` for fail-closed proxy_log readback) as the wire-protocol-public refusal taxonomies tagged under A.6.2.5.
+
 **APPROVED for implementation** on 2026-04-26.
 
 ## Context
@@ -23,7 +26,7 @@ Add a `compliance/iso42001/` module containing:
 
 | Control area | Cognic hook |
 |---|---|
-| A.6.2.5 — Operational responsibilities | `escalation.transition`, `rbac.check_scope` |
+| A.6.2.5 — Operational responsibilities | `escalation.transition`, `rbac.check_scope`, **8 sandbox lifecycle events** (2026-05-16 amendment per Sprint 8A spec §4.3): `sandbox.lifecycle.created`, `sandbox.lifecycle.exec_completed`, `sandbox.lifecycle.destroyed`, `sandbox.lifecycle.refused` (carries `SandboxRefusalReason` 15-value closed-enum), `sandbox.policy.violated` (carries `SandboxPolicyViolationReason` 6-value closed-enum — amended to 6 at Sprint 8A T10c R1 P1.2 with `egress_audit_unreadable`; egress-reason rows additionally carry `payload.proxy_log: list[ProxyAccessRecord]` per spec §10.3 examiner-readable evidence requirement), `sandbox.warm_pool.precreated`, `sandbox.warm_pool.checked_out`, `sandbox.warm_pool.drained` |
 | A.6.2.6 — Roles and responsibilities | `rbac.role_scopes` |
 | A.7.4 — AI system impact assessment | `decision_history.append` (with `impact: high`) |
 | A.7.6 — AI system risk evaluation | `auto_degradation.evaluate`, `compliance_checker.score` |
