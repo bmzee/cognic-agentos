@@ -49,6 +49,7 @@ from cognic_agentos.sandbox.proxy import (
     proxy_log_to_chain_payload,
     render_proxy_config,
 )
+from cognic_agentos.sandbox.warm_pool import SandboxWarmPool
 
 __all__ = [
     "CanonicalImageCatalog",
@@ -74,6 +75,7 @@ __all__ = [
     "SandboxPolicyViolationReason",
     "SandboxRefusalReason",
     "SandboxSession",
+    "SandboxWarmPool",
     "WritableMount",
     "admit_policy",
     "emit_sandbox_event",
