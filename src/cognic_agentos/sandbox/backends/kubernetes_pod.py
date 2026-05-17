@@ -74,7 +74,10 @@ itself stays importable without the extra.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import json
+import logging
 import uuid as _uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -82,6 +85,12 @@ from typing import TYPE_CHECKING, Any
 
 import kubernetes_asyncio  # noqa: F401 — admission contract: the sandbox-k8s extra MUST be installed
 from kubernetes_asyncio import client as kube_client
+from kubernetes_asyncio.stream import WsApiClient
+from kubernetes_asyncio.stream.ws_client import (
+    ERROR_CHANNEL,
+    STDERR_CHANNEL,
+    STDOUT_CHANNEL,
+)
 
 from cognic_agentos.sandbox.admission import (
     CatalogProtocol,
@@ -89,13 +98,21 @@ from cognic_agentos.sandbox.admission import (
     admit_policy,
 )
 from cognic_agentos.sandbox.audit import emit_sandbox_event
+from cognic_agentos.sandbox.backends._shared_exec import (
+    _classify_exec_failure,
+    _ProxyLogReadFailure,
+)
 from cognic_agentos.sandbox.policy import PackAdmissionContext, SandboxPolicy
 from cognic_agentos.sandbox.protocol import (
+    ProxyAccessRecord,
     SandboxBackendHealth,
     SandboxExecResult,
     SandboxLifecycleRefused,
+    SandboxPolicyViolated,
     SandboxSession,
 )
+
+_LOG = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from cognic_agentos.core.audit import AuditStore
@@ -159,6 +176,43 @@ _TENANT_ID_LABEL: str = "cognic.agentos.sandbox.tenant_id"
 #: catalog before the pod starts (mirrors docker_sibling's
 #: ``_start_proxy_sidecar`` R1 P1.1 gate).
 _CANONICAL_EGRESS_PROXY_IMAGE: str = "cognic/sandbox-egress-proxy:v1@sha256:" + "d" * 64
+
+#: Path inside the canonical egress-proxy image at which the proxy
+#: sidecar writes its per-request JSONL audit log. T8B-c's
+#: ``_read_proxy_log_from_sidecar_k8s`` reads via ``pods/exec`` ``cat``
+#: on session ``exec_completed``. Wire-contract with the canonical
+#: image; drift here breaks proxy_log materialisation across both
+#: backends. Pinned constant equal to
+#: ``docker_sibling._PROXY_LOG_PATH`` per the
+#: ``feedback_drift_detector_test_only_no_runtime_import`` doctrine
+#: (cross-module copy + test-only drift detector at
+#: ``test_exec_classification_cross_backend_drift.py``).
+_PROXY_LOG_PATH: str = "/var/log/cognic-proxy/access.jsonl"
+
+#: cpu_time_budget_s monitor poll interval (T8B-c). Per spec §7 item 4
+#: ("polled at ≥1Hz"). 0.5s strikes a balance: tight enough to fire
+#: within ~500ms of budget overage, loose enough to avoid stressing
+#: the apiserver's pods/exec endpoint. Matches docker_sibling's
+#: ``_CPU_BUDGET_POLL_INTERVAL_S`` for cross-backend behavioural
+#: equivalence — a cpu-budget kill that fired at noticeably different
+#: rates across backends would break the consumer's expectations on
+#: cap enforcement latency.
+_CPU_BUDGET_POLL_INTERVAL_S: float = 0.5
+
+#: Cgroup v2 cumulative cpu-usage file. Inside the sandbox container's
+#: cgroup namespace this surfaces accumulated cpu time. The value is
+#: read by the cpu-budget monitor via short-lived ``pods/exec``
+#: ``cat`` calls. Cgroup v2 ``cpu.stat`` carries ``usage_usec`` as
+#: the first field of the ``usage_usec`` line; the canonical Sprint-8A
+#: runtime images mount cgroup v2 by default per the
+#: Sprint-14 deploy-kit nodeselector contract.
+_CGROUP_V2_CPU_STAT_PATH: str = "/sys/fs/cgroup/cpu.stat"
+
+#: Cgroup v1 fallback path (cumulative cpu nanoseconds). Used when
+#: ``_CGROUP_V2_CPU_STAT_PATH`` returns nonzero exit (kernel < 5.x
+#: nodes still in field). The cpu-budget monitor tries v2 first,
+#: falls back to v1 on failure.
+_CGROUP_V1_CPUACCT_PATH: str = "/sys/fs/cgroup/cpuacct/cpuacct.usage"
 
 
 # ---------------------------------------------------------------------------
@@ -641,27 +695,226 @@ class KubernetesPodSandboxBackend:
         *,
         timeout_s: float | None = None,
     ) -> SandboxExecResult:
-        """Execute a command in the session.
+        """Execute a command in the session per spec §7 lines 495-502.
 
-        DEFERRED to T8B-c per the user-locked plan. The K8s
-        ``pods/exec`` websocket stream API + cap-violation
-        classification (OOMKilled detection via
-        ``ContainerStatus.lastState.terminated.reason``; walltime;
-        cpu-budget) land in T8B-c alongside the backend factory +
-        cross-backend conformance wire-up.
+        T8B-c implementation — mirrors
+        :meth:`DockerSiblingSandboxBackend.exec` decision logic for
+        cross-backend behavioural equivalence:
 
-        Per the production-grade fail-loud rule (CLAUDE.md): this
-        stub raises :class:`NotImplementedError` pointing at the
-        ADR + the unfinished sub-task so a caller who reaches this
-        method sees a structured error, not a silent no-op.
+        1. AgentOS-side walltime cap — :meth:`_open_pod_exec_stream`
+           runs the command via the K8s ``pods/exec`` websocket
+           stream under ``asyncio.timeout(walltime)``. Timeout →
+           kill pod + raise ``SandboxPolicyViolated(walltime_cap_exceeded)``.
+        2. Background :meth:`_cpu_time_budget_monitor_k8s` task polls
+           cgroup ``cpu.stat`` via ``pods/exec`` ``cat`` at
+           ``_CPU_BUDGET_POLL_INTERVAL_S`` when ``policy.cpu_time_budget_s``
+           is set; on overage kills pod + signals an asyncio.Event.
+        3. After exec completes, :meth:`_read_pod_oom_killed` inspects
+           the Pod's ContainerStatus for
+           ``state.terminated.reason == "OOMKilled"`` (the K8s wire-
+           contract equivalent of Docker's ``State.OOMKilled``);
+           exit_code 137 + OOMKilled → ``memory_cap_exceeded``.
+        4. Pure :func:`_classify_exec_failure` decides precedence
+           (walltime > cpu_budget > OOM > green).
+        5. Green-path: :meth:`_read_proxy_log_from_sidecar_k8s` reads
+           the proxy sidecar's JSONL audit log via ``pods/exec``
+           ``cat``. T8B-c R1 fail-closed: any readback failure →
+           ``egress_audit_unreadable`` violation. Mirrors
+           docker_sibling T10c R1 P1.2 wire-protocol-public contract;
+           missing it ships a silent egress-bypass class.
+
+        Throttling under ``policy.cpu_cores`` cap is NOT a violation
+        per round-3 P2 invariant: the kernel scheduler may slow a
+        CPU-bound workload, but only ``cpu_time_budget_exceeded``
+        (when a budget is set) raises ``SandboxPolicyViolated``.
         """
-        raise NotImplementedError(
-            "KubernetesPodSandboxBackend.exec lands at Sprint 8B T8B-c "
-            "(exec via pods/exec websocket stream + cap-violation "
-            "classification + proxy-log readback). The T8B-b commit "
-            "ships only create() / destroy() / health(). Per ADR-004 "
-            "amendment + AGENTS.md production-grade rule."
-        )
+        if not isinstance(session, KubernetesPodSession):
+            raise TypeError(
+                f"KubernetesPodSandboxBackend.exec expects "
+                f"KubernetesPodSession; got {type(session).__name__}"
+            )
+
+        walltime = timeout_s if timeout_s is not None else session.policy.walltime_s
+        pod_name = session._pod_name
+
+        # Background cpu-budget monitor — only spawned when policy
+        # carries a budget. The monitor sets cpu_violated_event when
+        # it observes the cgroup-stat cpu_usage exceed the budget +
+        # kills the pod so the in-flight exec returns.
+        cpu_violated_event = asyncio.Event()
+        monitor_task: asyncio.Task[None] | None = None
+        if session.policy.cpu_time_budget_s is not None:
+            monitor_task = asyncio.create_task(
+                self._cpu_time_budget_monitor_k8s(
+                    pod_name=pod_name,
+                    container_name=_SANDBOX_CONTAINER_NAME,
+                    budget_s=session.policy.cpu_time_budget_s,
+                    cpu_violated_event=cpu_violated_event,
+                )
+            )
+
+        # ``body_raised`` tracks whether the try block raises. The
+        # finally block uses it to decide whether to propagate a
+        # monitor-task failure (mirrors docker_sibling's R3 P1 fix
+        # — if the exec body completed successfully but the monitor
+        # failed, the monitor exception MUST surface so the caller
+        # knows cap enforcement was unverified).
+        body_raised = False
+        walltime_exceeded = False
+        stdout: bytes = b""
+        stderr: bytes = b""
+        exit_code = 0
+
+        try:
+            try:
+                stdout, stderr, exit_code = await self._open_pod_exec_stream(
+                    pod_name=pod_name,
+                    container_name=_SANDBOX_CONTAINER_NAME,
+                    command=command,
+                    walltime_s=walltime,
+                )
+            except TimeoutError:
+                # Mirror docker_sibling R2 P1.1 — kill on walltime
+                # overage. _kill_pod_or_raise propagates real
+                # ApiException (only 404/already-gone is benign).
+                # If kill fails, the ApiException propagates instead
+                # of walltime_cap_exceeded — caller knows enforcement
+                # is unverified.
+                await self._kill_pod_or_raise(pod_name)
+                walltime_exceeded = True
+
+            # Read pod status to detect OOM-kill. ContainerStatus
+            # state.terminated.reason == "OOMKilled" is the
+            # authoritative K8s signal; exit 137 alone is not enough
+            # (could be manual SIGKILL).
+            oom_killed = await self._read_pod_oom_killed(pod_name=pod_name)
+            cpu_budget_exceeded = cpu_violated_event.is_set()
+
+            reason = _classify_exec_failure(
+                exit_code=exit_code,
+                oom_killed=oom_killed,
+                walltime_exceeded=walltime_exceeded,
+                cpu_budget_exceeded=cpu_budget_exceeded,
+            )
+            if reason is not None:
+                detail = (
+                    f"command={command!r} exit_code={exit_code} "
+                    f"oom_killed={oom_killed} "
+                    f"walltime_exceeded={walltime_exceeded} "
+                    f"cpu_budget_exceeded={cpu_budget_exceeded}"
+                )
+                # Mirror docker_sibling R1 P1.5 + R2 P1.2 — emit
+                # ``sandbox.policy.violated`` BEFORE raising so the
+                # cap kill gets a chain row. Without this, cap kills
+                # happen in production with NO audit trail. Per spec
+                # §4.3 + §12 wire-public taxonomy.
+                #
+                # R2 P1.2 contract: NO ``contextlib.suppress`` here.
+                # A transient audit-store outage MUST fail-closed
+                # (NOT silently drop the evidence row). If the audit
+                # append raises, the caller sees that exception
+                # instead of SandboxPolicyViolated — they should treat
+                # an audit-store outage as a CC failure that supersedes
+                # the cap reason.
+                await self._emit_policy_violated(
+                    session=session,
+                    reason=reason,
+                )
+                raise SandboxPolicyViolated(reason, detail=detail)
+
+            # T8B-c — read proxy_log from sidecar + classify any
+            # egress refusals. Per spec §10.3 the canonical proxy
+            # image writes JSONL to ``_PROXY_LOG_PATH``; backend
+            # reads via pods/exec cat. Per spec §7 line 501 + §10.4,
+            # egress refusals raise SandboxPolicyViolated with the
+            # matching closed-enum reason.
+            #
+            # T8B-c R1 fail-closed (mirrors docker_sibling T10c R1 P1.2):
+            # ``_read_proxy_log_from_sidecar_k8s`` raises
+            # ``_ProxyLogReadFailure`` when it cannot prove the log
+            # is complete (sidecar gone, cat exit nonzero, unexpected
+            # exception). We catch + emit policy.violated with
+            # closed-enum ``egress_audit_unreadable`` + raise —
+            # AgentOS MUST NOT emit a green ``exec_completed`` when
+            # refusals may have been silently elided.
+            try:
+                proxy_log = await self._read_proxy_log_from_sidecar_k8s(
+                    pod_name=pod_name,
+                    sidecar_container_name=_PROXY_SIDECAR_CONTAINER_NAME,
+                )
+            except _ProxyLogReadFailure as read_err:
+                detail = (
+                    f"command={command!r} exit_code={exit_code} proxy_log_readback_error={read_err}"
+                )
+                await self._emit_policy_violated(
+                    session=session,
+                    reason="egress_audit_unreadable",
+                    proxy_log=(),
+                )
+                raise SandboxPolicyViolated(
+                    "egress_audit_unreadable",
+                    detail=detail,
+                ) from read_err
+
+            # Egress classification — Sprint 8B carries forward the
+            # docker_sibling _classify_egress_refusal pattern. For
+            # T8B-c the readback returns ``()`` on the green path
+            # (mock returns empty tuple; live K8s reads zero-length
+            # log when no outbound calls were made). When the
+            # canonical proxy ships records, the same classification
+            # path lights up across both backends.
+            from cognic_agentos.sandbox.backends.docker_sibling import (
+                _classify_egress_refusal,
+            )
+
+            egress_reason = _classify_egress_refusal(proxy_log)
+            if egress_reason is not None:
+                detail = (
+                    f"command={command!r} exit_code={exit_code} "
+                    f"proxy_log_refused_count="
+                    f"{sum(1 for r in proxy_log if r.outcome == 'refused')}"
+                )
+                await self._emit_policy_violated(
+                    session=session,
+                    reason=egress_reason,
+                    proxy_log=proxy_log,
+                )
+                raise SandboxPolicyViolated(egress_reason, detail=detail)  # type: ignore[arg-type]
+
+            # Green path — emit sandbox.lifecycle.exec_completed per
+            # spec §4.3 + §7 line 502 + return SandboxExecResult with
+            # the materialised proxy_log.
+            await self._emit_lifecycle_exec_completed(
+                session=session,
+                exit_code=exit_code,
+                proxy_log=proxy_log,
+            )
+            return SandboxExecResult(
+                stdout=stdout,
+                stderr=stderr,
+                exit_code=exit_code,
+                proxy_log=proxy_log,
+            )
+        except BaseException:
+            body_raised = True
+            raise
+        finally:
+            # Mirror docker_sibling R3 P1 — propagate monitor task
+            # failures when the exec body completed successfully.
+            # Earlier ``contextlib.suppress(BaseException)`` ordering
+            # silenced ALL monitor exceptions; a cpu-budget kill that
+            # failed followed by a natural workload exit would return
+            # green with NO policy.violated row — cap UNENFORCED.
+            if monitor_task is not None:
+                if not monitor_task.done():
+                    monitor_task.cancel()
+                try:
+                    await monitor_task
+                except asyncio.CancelledError:
+                    pass  # expected — we cancelled it
+                except BaseException as monitor_exc:
+                    if not body_raised:
+                        raise monitor_exc
 
     async def destroy(self, session: SandboxSession) -> None:
         """Tear down session + the K8s Pod + the per-session
@@ -809,6 +1062,409 @@ class KubernetesPodSandboxBackend:
             raise
 
     # ------------------------------------------------------------------
+    # T8B-c — exec() I/O helpers (pods/exec websocket + pod status
+    # readers + cgroup-stat readers + proxy-log readback)
+    # ------------------------------------------------------------------
+
+    async def _open_pod_exec_stream(
+        self,
+        *,
+        pod_name: str,
+        container_name: str,
+        command: list[str],
+        walltime_s: float | None,
+    ) -> tuple[bytes, bytes, int]:
+        """Open a ``pods/exec`` websocket stream + consume until the
+        ERROR channel close. Returns ``(stdout, stderr, exit_code)``.
+
+        Uses ``WsApiClient`` (sharing this backend's existing
+        ``Configuration`` so auth / TLS / kubeconfig flows are
+        unified) with ``_preload_content=False`` so the raw
+        websocket is returned + we can read the multiplexed channel
+        format ourselves (channel byte 1 prefix per
+        ``kubernetes_asyncio.stream.ws_client``: 1=stdout, 2=stderr,
+        3=error). The ERROR channel carries the exit-code-bearing
+        JSON document parseable by
+        ``WsApiClient.parse_error_data``.
+
+        Walltime enforcement: wraps the stream-consumption loop in
+        ``asyncio.timeout(walltime_s)``. Timeout raises
+        ``TimeoutError`` which the caller (:meth:`exec`) catches +
+        translates to ``walltime_cap_exceeded``.
+
+        T8B-c — production path. Test paths mock this method directly
+        per the test isolation pattern at
+        ``test_kubernetes_pod_exec_classification.py``.
+        """
+        ws_client_obj = WsApiClient(configuration=self._kube.configuration)
+        try:
+            ws_api = kube_client.CoreV1Api(ws_client_obj)
+            stdout = bytearray()
+            stderr = bytearray()
+            exit_code = 0
+
+            try:
+                async with asyncio.timeout(walltime_s):
+                    # _preload_content=False returns an
+                    # _WSRequestContextManager — async-with it to get
+                    # the live ClientWebSocketResponse.
+                    #
+                    # Typestubs annotate ``command: str`` but the
+                    # runtime accepts ``list[str]`` (per the upstream
+                    # ws_client.request expansion at
+                    # ``kubernetes_asyncio/stream/ws_client.py:90-93``
+                    # which iterates the list to one
+                    # ``command=<arg>`` query param per element).
+                    # Same gap for the WsResponse return type — at
+                    # _preload_content=False the call returns a
+                    # _WSRequestContextManager (awaitable yielding
+                    # an aiohttp ClientWebSocketResponse), not a
+                    # str.
+                    ws_ctx = ws_api.connect_get_namespaced_pod_exec(
+                        pod_name,
+                        self._namespace,
+                        container=container_name,
+                        command=command,  # type: ignore[arg-type]
+                        stdin=False,
+                        stdout=True,
+                        stderr=True,
+                        tty=False,
+                        _preload_content=False,
+                    )
+                    async with await ws_ctx as ws:  # type: ignore[attr-defined]
+                        async for wsmsg in ws:
+                            data = wsmsg.data
+                            if not data or len(data) < 1:
+                                continue
+                            channel = data[0]
+                            payload = data[1:]
+                            if channel == STDOUT_CHANNEL:
+                                stdout.extend(payload)
+                            elif channel == STDERR_CHANNEL:
+                                stderr.extend(payload)
+                            elif channel == ERROR_CHANNEL and payload:
+                                try:
+                                    exit_code = WsApiClient.parse_error_data(
+                                        bytes(payload).decode("utf-8")
+                                    )
+                                except (
+                                    ValueError,
+                                    KeyError,
+                                    json.JSONDecodeError,
+                                ):
+                                    # Malformed error payload — surface
+                                    # as a non-zero exit so the caller's
+                                    # classify path doesn't silently
+                                    # treat as green. Mirrors
+                                    # docker_sibling defensive shape-
+                                    # parsing pattern.
+                                    exit_code = -1
+                            # Ignore unknown channels (resize/etc).
+            except TimeoutError:
+                raise  # exec() body catches + classifies
+
+            return bytes(stdout), bytes(stderr), exit_code
+        finally:
+            with contextlib.suppress(Exception):
+                await ws_client_obj.close()
+
+    async def _kill_pod_or_raise(self, pod_name: str) -> None:
+        """Delete the Pod with ``grace_period_seconds=0`` — the K8s
+        equivalent of ``container.kill(SIGKILL)``. Already-gone
+        (ApiException 404) is treated as benign (the cap effectively
+        enforced — workload is not running). ANY other ApiException
+        is propagated unchanged (fail-closed per docker_sibling R2
+        P1.1: a cap-violation path that suppresses kill failure can
+        pretend it enforced when it didn't).
+
+        Callers: walltime + cpu-budget monitor paths in :meth:`exec`.
+        On propagated failure the cap-violation reason is NOT raised
+        — the ApiException surfaces to the caller instead, so they
+        know enforcement is unverified.
+        """
+        api = kube_client.CoreV1Api(self._kube)
+        try:
+            await api.delete_namespaced_pod(
+                name=pod_name,
+                namespace=self._namespace,
+                grace_period_seconds=0,
+            )
+        except kube_client.ApiException as e:
+            if getattr(e, "status", None) == 404:
+                return  # benign: pod already gone
+            raise  # real failure → fail-closed propagate
+
+    async def _read_pod_oom_killed(self, *, pod_name: str) -> bool:
+        """Read the Pod's ContainerStatus for the sandbox container
+        and return True iff the kernel oom-killer fired.
+
+        K8s wire-contract: the OOMKilled signal lives at
+        ``container_status.state.terminated.reason == "OOMKilled"``
+        (live terminated state) OR at
+        ``container_status.last_state.terminated.reason == "OOMKilled"``
+        (post-restart cached state — sandbox pods use
+        ``RestartPolicy=Never`` so this should never fire in practice,
+        but reading both surfaces defends against the kubelet's
+        eventually-consistent status updates).
+
+        Returns False if the pod / container status is unreadable
+        (the caller's classify path will treat as non-OOM; exec()
+        returns the exit code without raising memory_cap_exceeded).
+        This mirrors docker_sibling's defensive ``info.get("State",
+        {}).get("OOMKilled", False)`` pattern.
+        """
+        api = kube_client.CoreV1Api(self._kube)
+        try:
+            pod = await api.read_namespaced_pod_status(
+                name=pod_name,
+                namespace=self._namespace,
+            )
+        except kube_client.ApiException:
+            return False  # status unreadable; caller's classify path proceeds
+
+        statuses = getattr(pod.status, "container_statuses", None) or []
+        for cs in statuses:
+            if cs.name != _SANDBOX_CONTAINER_NAME:
+                continue
+            # Check current terminated state
+            state = getattr(cs, "state", None)
+            if state is not None:
+                terminated = getattr(state, "terminated", None)
+                if terminated is not None:
+                    reason = getattr(terminated, "reason", None)
+                    if reason == "OOMKilled":
+                        return True
+            # Check last_state.terminated (e.g. transitional state)
+            last_state = getattr(cs, "last_state", None)
+            if last_state is not None:
+                terminated = getattr(last_state, "terminated", None)
+                if terminated is not None:
+                    reason = getattr(terminated, "reason", None)
+                    if reason == "OOMKilled":
+                        return True
+        return False
+
+    async def _read_cpu_usage_ns(
+        self,
+        *,
+        pod_name: str,
+        container_name: str,
+    ) -> int | None:
+        """Read the cumulative CPU usage (nanoseconds) for the named
+        container via a short-lived ``pods/exec`` ``cat`` against the
+        cgroup stat file.
+
+        Tries cgroup v2 (``cpu.stat`` ``usage_usec`` first field of
+        the ``usage_usec <ns>`` line) first; falls back to cgroup v1
+        (``cpuacct/cpuacct.usage`` cumulative nanoseconds raw int)
+        on v2 failure. Returns None on any failure (best-effort per
+        docker_sibling's transient-stats-hiccup contract — the
+        monitor will continue polling on the next valid snapshot).
+
+        Cgroup v2 ``cpu.stat`` format::
+
+            usage_usec 12345678
+            user_usec 11000000
+            system_usec 1345678
+
+        v1 ``cpuacct.usage`` format::
+
+            123456789012345
+        """
+        # Try cgroup v2 first
+        result = await self._exec_short_lived(
+            pod_name=pod_name,
+            container_name=container_name,
+            command=["cat", _CGROUP_V2_CPU_STAT_PATH],
+        )
+        if result is not None:
+            stdout, exit_code = result
+            if exit_code == 0:
+                for line in stdout.decode("utf-8", errors="replace").splitlines():
+                    parts = line.strip().split()
+                    if len(parts) == 2 and parts[0] == "usage_usec":
+                        try:
+                            return int(parts[1]) * 1000  # us → ns
+                        except ValueError:
+                            return None
+
+        # Fall back to cgroup v1
+        result = await self._exec_short_lived(
+            pod_name=pod_name,
+            container_name=container_name,
+            command=["cat", _CGROUP_V1_CPUACCT_PATH],
+        )
+        if result is not None:
+            stdout, exit_code = result
+            if exit_code == 0:
+                try:
+                    return int(stdout.decode("utf-8", errors="replace").strip())
+                except ValueError:
+                    return None
+
+        return None
+
+    async def _exec_short_lived(
+        self,
+        *,
+        pod_name: str,
+        container_name: str,
+        command: list[str],
+    ) -> tuple[bytes, int] | None:
+        """Run a short-lived command via ``pods/exec`` + return
+        ``(stdout, exit_code)`` or None on transport failure.
+
+        Used by :meth:`_read_cpu_usage_ns` for cgroup reads + by
+        :meth:`_read_proxy_log_from_sidecar_k8s` for proxy-log
+        readback. Best-effort wrapper around
+        :meth:`_open_pod_exec_stream` — None return indicates the
+        transport itself failed (websocket open / network blip);
+        the caller decides whether None is benign (cpu-stat poll:
+        continue) or fail-closed (proxy-log readback: raise
+        ``_ProxyLogReadFailure``).
+        """
+        try:
+            stdout, _stderr, exit_code = await self._open_pod_exec_stream(
+                pod_name=pod_name,
+                container_name=container_name,
+                command=command,
+                walltime_s=10.0,  # short timeout per call — defence-in-depth
+            )
+            return stdout, exit_code
+        except (kube_client.ApiException, TimeoutError, OSError):
+            return None
+        except Exception:
+            # Other unexpected exceptions also surface as None — caller
+            # decides whether to treat as transient or fail-closed.
+            return None
+
+    async def _cpu_time_budget_monitor_k8s(
+        self,
+        *,
+        pod_name: str,
+        container_name: str,
+        budget_s: float,
+        cpu_violated_event: asyncio.Event,
+    ) -> None:
+        """Background asyncio task — polls cgroup cpu_usage at
+        ``_CPU_BUDGET_POLL_INTERVAL_S``; when accumulated CPU-seconds
+        exceed ``budget_s``, kills the pod + sets
+        ``cpu_violated_event`` so :meth:`exec`'s post-loop
+        classification routes the failure to
+        ``cpu_time_budget_exceeded``.
+
+        Mirrors docker_sibling's ``_cpu_time_budget_monitor`` semantics:
+
+        * Best-effort polling — a transient cgroup-read hiccup MUST NOT
+          crash the in-flight exec; continue polling so the budget
+          check still fires on the next valid snapshot.
+        * Kill BEFORE setting the event (R2 P1.1 contract):
+          :meth:`_kill_pod_or_raise` propagates real ApiException;
+          if kill fails, the monitor task exits with the exception +
+          the event is NEVER set, so :meth:`exec` does NOT raise
+          cpu_time_budget_exceeded while the workload may still be
+          running. Walltime then acts as the natural backstop.
+        * Handle ``asyncio.CancelledError`` cleanly by re-raising
+          (the finally block in :meth:`exec` cancels on every exit
+          path).
+
+        Task spawned by :meth:`exec` ONLY when
+        ``policy.cpu_time_budget_s`` is set — without a budget the
+        cpu-budget violation is unreachable regardless of cpu usage.
+        """
+        budget_ns = int(budget_s * 1_000_000_000)
+        while True:
+            try:
+                cpu_usage_ns = await self._read_cpu_usage_ns(
+                    pod_name=pod_name,
+                    container_name=container_name,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                cpu_usage_ns = None
+
+            if cpu_usage_ns is None:
+                # Transient cgroup-read hiccup — continue polling.
+                await asyncio.sleep(_CPU_BUDGET_POLL_INTERVAL_S)
+                continue
+
+            if cpu_usage_ns >= budget_ns:
+                # Kill BEFORE setting the event per docker_sibling
+                # R2 P1.1. _kill_pod_or_raise propagates real
+                # ApiException; only 404/already-gone is benign.
+                await self._kill_pod_or_raise(pod_name)
+                cpu_violated_event.set()
+                return
+
+            await asyncio.sleep(_CPU_BUDGET_POLL_INTERVAL_S)
+
+    async def _read_proxy_log_from_sidecar_k8s(
+        self,
+        *,
+        pod_name: str,
+        sidecar_container_name: str,
+    ) -> tuple[ProxyAccessRecord, ...]:
+        """Read the canonical proxy sidecar's JSONL access log via
+        ``pods/exec`` ``cat``. Returns the parsed tuple of
+        ProxyAccessRecord per spec §10.3 wire-contract.
+
+        T8B-c fail-closed contract (mirrors docker_sibling T10c R1
+        P1.2): the canonical proxy image's contract is the log file
+        at ``_PROXY_LOG_PATH`` ALWAYS exists + is readable; empty
+        file (size 0) is the canonical "no outbound calls"
+        representation. ANY failure modes (container gone, cat exit
+        nonzero, exec failure, unexpected exception) raise
+        ``_ProxyLogReadFailure`` so :meth:`exec` can fail-closed via
+        ``SandboxPolicyViolated(egress_audit_unreadable)``.
+
+        Bank-grade trust posture requires AgentOS to fail-closed when
+        it cannot prove the absence of refusals; a best-effort
+        ``return ()`` design would silently elide refusals if the
+        sidecar crashed mid-exec after refusing outbound calls but
+        before the backend could read.
+        """
+        try:
+            result = await self._exec_short_lived(
+                pod_name=pod_name,
+                container_name=sidecar_container_name,
+                command=["cat", _PROXY_LOG_PATH],
+            )
+        except Exception as e:
+            raise _ProxyLogReadFailure(
+                f"unexpected error opening proxy_log exec stream on "
+                f"sidecar {sidecar_container_name!r}: {e!r}"
+            ) from e
+
+        if result is None:
+            raise _ProxyLogReadFailure(
+                f"proxy sidecar {sidecar_container_name!r} unreachable "
+                f"during proxy_log readback; cannot prove absence of "
+                f"refusals — fail-closed per T8B-c R1 (mirrors "
+                f"docker_sibling T10c R1 P1.2)"
+            )
+
+        stdout, exit_code = result
+        if exit_code != 0:
+            raise _ProxyLogReadFailure(
+                f"sidecar cat {_PROXY_LOG_PATH!r} exited {exit_code} "
+                f"— canonical proxy image guarantees a readable log "
+                f"file; fail-closed per T8B-c R1"
+            )
+
+        # Parse JSONL output via the shared parser. Delegating to the
+        # docker_sibling parser keeps both backends' JSONL shape in
+        # lockstep (the canonical proxy image emits the same JSON
+        # shape regardless of backend; the parser is wire-protocol-
+        # public).
+        from cognic_agentos.sandbox.backends.docker_sibling import (
+            _parse_proxy_log_jsonl,
+        )
+
+        raw = stdout.decode("utf-8", errors="replace")
+        return _parse_proxy_log_jsonl(raw)
+
+    # ------------------------------------------------------------------
     # Audit emission — spec §4.3 + spec §12 wire-protocol-public events
     # ------------------------------------------------------------------
 
@@ -872,6 +1528,87 @@ class KubernetesPodSandboxBackend:
             trace_id="",
             session_id=session.session_id,
             payload={"duration_s": duration_s},
+        )
+
+    async def _emit_lifecycle_exec_completed(
+        self,
+        *,
+        session: KubernetesPodSession,
+        exit_code: int,
+        proxy_log: tuple[ProxyAccessRecord, ...],
+    ) -> None:
+        """Emit ``sandbox.lifecycle.exec_completed`` per spec §4.3
+        wire-public payload + spec §7 line 502.
+
+        Payload carries ``exit_code`` + serialised ``proxy_log``
+        (list of dicts; canonical_bytes-safe — see warm_pool's
+        ``_tuples_to_lists`` pattern for the list/tuple ambiguity
+        bug class avoidance).
+
+        Only fires on the green-path exec return; cap-violation
+        + egress-violation paths emit ``sandbox.policy.violated``
+        instead.
+
+        Mirrors :meth:`DockerSiblingSandboxBackend._emit_lifecycle_exec_completed`
+        wire shape for cross-backend behavioural equivalence — both
+        backends emit the same chain row keys on the same lifecycle
+        transitions.
+        """
+        from cognic_agentos.sandbox.proxy import proxy_log_to_chain_payload
+
+        await emit_sandbox_event(
+            self._dh,
+            event="sandbox.lifecycle.exec_completed",
+            tenant_id=session.tenant_id,
+            actor_id=session._actor_subject,
+            trace_id="",
+            session_id=session.session_id,
+            payload={
+                "exit_code": exit_code,
+                "proxy_log": proxy_log_to_chain_payload(proxy_log),
+            },
+        )
+
+    async def _emit_policy_violated(
+        self,
+        *,
+        session: KubernetesPodSession,
+        reason: str,
+        proxy_log: tuple[ProxyAccessRecord, ...] = (),
+    ) -> None:
+        """Emit ``sandbox.policy.violated`` per spec §4.3 wire-public
+        payload ``{reason: SandboxPolicyViolationReason}``.
+
+        Fired BEFORE :meth:`exec` raises ``SandboxPolicyViolated`` on
+        any cap-violation path (memory_cap_exceeded /
+        walltime_cap_exceeded / cpu_time_budget_exceeded /
+        egress_audit_unreadable / egress_host_not_allow_listed /
+        egress_protocol_not_http). Without this row, cap kills
+        happen in production with NO audit trail and the evidence
+        pack misses the wire-protocol-public event.
+
+        When ``proxy_log`` is non-empty (egress refusal path), the
+        materialised list of records is included on the chain row
+        payload under the ``proxy_log`` key — spec §10.3 requires
+        examiners to prove which outbound calls were attempted +
+        which were refused FROM THE CHAIN ROW ALONE.
+
+        Mirrors :meth:`DockerSiblingSandboxBackend._emit_policy_violated`
+        wire shape for cross-backend behavioural equivalence.
+        """
+        from cognic_agentos.sandbox.proxy import proxy_log_to_chain_payload
+
+        payload: dict[str, Any] = {"reason": reason}
+        if proxy_log:
+            payload["proxy_log"] = proxy_log_to_chain_payload(proxy_log)
+        await emit_sandbox_event(
+            self._dh,
+            event="sandbox.policy.violated",
+            tenant_id=session.tenant_id,
+            actor_id=session._actor_subject,
+            trace_id="",
+            session_id=session.session_id,
+            payload=payload,
         )
 
 

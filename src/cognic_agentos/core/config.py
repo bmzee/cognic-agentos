@@ -1170,6 +1170,26 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Sprint 8B — backend selection seam per ADR-004 amendment §32 +
+    # the 2026-05-17 preflight decision. AgentOS owns the default
+    # selection seam; bank overlays MAY override via the
+    # COGNIC_SANDBOX_BACKEND env var. Default preserves Sprint-8A
+    # behaviour on existing deployments (DockerSibling for dev/CI);
+    # Wave-1 K8s production deployments override to "kubernetes_pod".
+    # Per-tenant routing deferred to Sprint 14 deployment kit.
+    # Wired into ``sandbox.backend_factory.get_backend(settings)``;
+    # pinned by ``tests/unit/sandbox/test_backend_factory.py``.
+    sandbox_backend: Literal["docker_sibling", "kubernetes_pod"] = Field(
+        default="docker_sibling",
+        description=(
+            "Sprint 8B — selects the SandboxBackend implementation. "
+            "AgentOS owns the default selection seam per the 2026-05-17 "
+            "preflight decision. Bank overlays MAY override via the "
+            "COGNIC_SANDBOX_BACKEND env var per ADR-004 amendment §32. "
+            "Default preserves Sprint 8A behavior on existing deployments."
+        ),
+    )
+
     # --- Build metadata ----------------------------------------------
     # Wired by the Dockerfile / CI at image-build time; defaults make
     # local-dev introspection useful without requiring an explicit env.

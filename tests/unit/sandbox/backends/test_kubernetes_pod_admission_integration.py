@@ -502,29 +502,13 @@ class TestCreateRollsBackOnK8sApiFailure:
         assert any(c.startswith("netpol:") for c in teardown_calls)
 
 
-class TestExecStubFailsLoud:
-    """Per ADR-004 + CLAUDE.md production-grade rule — the K8s
-    backend's exec() stub MUST raise NotImplementedError pointing
-    at T8B-c, NOT silently return an empty SandboxExecResult.
-    A silent no-op would let pack code 'succeed' against an
-    unfinished backend in production."""
-
-    async def test_exec_raises_not_implemented_error_pointing_at_t8b_c(
-        self,
-    ) -> None:
-        backend = _backend()
-        backend._create_network_policy = AsyncMock(return_value=None)  # type: ignore[method-assign]
-        backend._create_pod = AsyncMock(return_value=None)  # type: ignore[method-assign]
-        backend._emit_lifecycle_created = AsyncMock(return_value=None)  # type: ignore[method-assign]
-        session = await backend.create(
-            _valid_policy(),
-            actor=_actor(),
-            tenant_id="t-1",
-            pack_context=_valid_pack_context(),
-            use_warm_pool=False,
-        )
-        with pytest.raises(NotImplementedError, match="T8B-c"):
-            await backend.exec(session, ["echo", "hi"])
+# NOTE: ``TestExecStubFailsLoud`` (T8B-b) was DELETED at T8B-c —
+# the deferred-stub it pinned has been replaced by the real exec()
+# body. The new exec() behavioural pins live at
+# ``test_kubernetes_pod_exec_classification.py`` (decision logic;
+# unit, non-env-gated) + ``test_kubernetes_pod_resource_caps.py``
+# (kernel-level cgroup + OOM enforcement; env-gated on
+# COGNIC_RUN_K8S_SANDBOX=1).
 
 
 class TestDestroyEmitsLifecycleEventOnceAndIsIdempotent:
