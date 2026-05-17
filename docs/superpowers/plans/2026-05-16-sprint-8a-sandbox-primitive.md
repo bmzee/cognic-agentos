@@ -91,6 +91,41 @@ code blocks below verbatim.
 
 ---
 
+## Post-T8 implementation notes (added 2026-05-17 after T8 patch decision)
+
+T8's original plan body (pre-patch) wrote a richer
+`CredentialLease + mint_lease/revoke_lease` API for both the Protocol +
+the sentinel that did NOT match the T5-committed reality. T5 landed a
+single-method `fetch_secret` API inline in `sandbox/admission.py`. The
+divergence was a stale plan-body — the plan was authored at T2 before
+T5's R0 CC-ADJ resolution chose the consumer-owned-Protocol pattern.
+
+**Resolution (2026-05-17):** patched T8 body to:
+
+1. Drop the `CredentialLease` dataclass + `mint_lease/revoke_lease`
+   method-pair declarations. Those belong to Sprint 10's
+   `VaultCredentialAdapter` concrete design, not the Wave-1 Protocol.
+2. Make `sandbox/credentials.py` a thin re-export shim importing
+   `CredentialAdapter` + `KernelDefaultCredentialAdapter` from
+   `sandbox.admission` — per `feedback_consumer_owned_protocol_for_unlanded_dep`
+   resolution preference (a) + the user's T5 R0 stated preference.
+3. Rewrite the test recipe to pin object-identity re-export
+   equivalence (`AdmissionCA is CredentialsCA`) + Protocol membership
+   + the actual T5-committed `fetch_secret` stub error contract
+   (cites Sprint 10 + ADR-009 + `VaultCredentialAdapter` + "fail-loud
+   sentinel") + the admit_policy short-circuit invariant.
+
+No CC-ADJ to `admission.py` — the sentinel's error message is
+unchanged. The T8 test recipe expects the message that already ships at
+`admission.py:136-143`.
+
+Companion doctrine: `feedback_patch_plan_against_doctrine` (halt + patch
+plan before executing) + `feedback_verify_code_citations_at_doc_write`
+(the patched test recipe quotes the actual T5 message verbatim, not
+cite-from-memory).
+
+---
+
 ## Source-doctrine references
 
 | Doc | Commit | Scope |
@@ -2307,37 +2342,43 @@ Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
 
 ---
 
-## Task T8 — CredentialAdapter Protocol + fail-loud stub (NOT-CC; replaced in Sprint 10)
+## Task T8 — CredentialAdapter re-export shim (NOT-CC; replaced in Sprint 10)
 
-> **READ "Post-T5 implementation notes" at top of file FIRST.** The Protocol + sentinel ALREADY landed in `sandbox/admission.py` at T5 commit `4967ce8`. T8's `sandbox/credentials.py` should default to a thin re-export shim (`from cognic_agentos.sandbox.admission import CredentialAdapter, KernelDefaultCredentialAdapter`) per the user's T5 R0 preference, OR explicitly justify moving the canonical home. Do NOT re-declare the Protocol + sentinel as standalone — that creates two source-of-truth modules that drift.
+> **PATCHED 2026-05-17 — see "Post-T8 implementation notes" at top of file. The original T8 body (pre-patch) declared a richer `CredentialLease + mint_lease/revoke_lease` API that DIVERGED from the T5-committed reality (T5 at `4967ce8` landed a single-method `fetch_secret` CredentialAdapter + the matching KernelDefaultCredentialAdapter sentinel inline in `sandbox/admission.py`). This T8 body is the patched recipe — a thin re-export shim per the consumer-owned-Protocol resolution rule. Re-declaring the Protocol + sentinel as standalone would create two source-of-truth modules that drift.**
 
-**Scope:** `sandbox/credentials.py` — `CredentialAdapter` Protocol + `KernelDefaultCredentialAdapter` raising `NotImplementedError` pointing to Sprint 10 / ADR-004. Per spec §8. OFF the durable critical-controls gate (stub-only; replaced by Sprint 10's real `VaultCredentialAdapter` which DOES go on the gate).
+**Scope:** `sandbox/credentials.py` — a thin re-export shim that imports `CredentialAdapter` + `KernelDefaultCredentialAdapter` from `sandbox.admission` (the canonical home as of T5). The downstream import path `from cognic_agentos.sandbox.credentials import ...` becomes a stable alias point so Sprint 10's `VaultCredentialAdapter` can replace the stub without rewriting consumers. OFF the durable critical-controls gate (re-export shim with zero new logic; the real `VaultCredentialAdapter` at Sprint 10 lands on the gate).
 
 **Files:**
-- Create: `src/cognic_agentos/sandbox/credentials.py`
-- Create: `tests/unit/sandbox/test_credential_adapter_stub.py`
-- Modify: `src/cognic_agentos/sandbox/__init__.py` (export `CredentialAdapter`, `CredentialLease`, `KernelDefaultCredentialAdapter`)
+- Create: `src/cognic_agentos/sandbox/credentials.py` (~30 LoC re-export shim + docstring)
+- Create: `tests/unit/sandbox/test_credential_adapter_stub.py` (pins re-export equivalence + the actual stub error contract)
+- Modify: `src/cognic_agentos/sandbox/__init__.py` — already re-exports `CredentialAdapter` + `KernelDefaultCredentialAdapter` from `sandbox.admission`; T8 leaves the public surface unchanged but adds explicit re-export from `sandbox.credentials` so both import paths resolve to the same objects.
 
-**Doctrine refs:** spec §8 (CredentialAdapter Protocol + Sprint-10 stub) + ADR-004 amendment §"Credential-scoped" + AGENTS.md production-grade rule ("stub modules that raise `NotImplementedError` pointing at an ADR are acceptable scaffolding; silent in-process fallbacks that pretend to work are not").
+**Doctrine refs:** spec §8 (CredentialAdapter Protocol + Sprint-10 stub) + ADR-004 amendment §"Credential-scoped" + AGENTS.md production-grade rule ("stub modules that raise `NotImplementedError` pointing at an ADR are acceptable scaffolding; silent in-process fallbacks that pretend to work are not") + `feedback_consumer_owned_protocol_for_unlanded_dep` resolution rule (preference (a): re-export shim).
 
 ### T8 steps
 
-- [ ] **Step 1: Write failing tests — stub raises NotImplementedError with Sprint-10 pointer; admission refusal arm fires**
+- [ ] **Step 1: Write failing tests — re-export equivalence + Protocol membership + the actual fetch_secret stub error contract + admit_policy short-circuit invariant**
 
 ```python
 # tests/unit/sandbox/test_credential_adapter_stub.py
-"""Sprint 8A T8 — CredentialAdapter Protocol + fail-loud stub.
+"""Sprint 8A T8 — credentials.py re-export shim.
 
 Pins that:
-* mint_lease + revoke_lease raise NotImplementedError with explicit
-  Sprint 10 pointer (per AGENTS.md production-grade rule: stubs MUST
-  fail loudly + cite the ADR/sprint that replaces them).
-* sandbox.create() with policy.vault_path set + default stub wired
-  refuses with sandbox_credential_adapter_not_configured at admission
-  (covered by T5 test_credential_adapter_default_stub_refuses_when_vault_path_set;
-  this test asserts the stub's NotImplementedError is the right shape
-  if anyone ever bypasses the admission check and calls mint_lease
-  directly — defence-in-depth).
+* `sandbox.credentials` re-exports the SAME OBJECTS as `sandbox.admission`
+  for `CredentialAdapter` + `KernelDefaultCredentialAdapter` (re-export
+  equivalence; NOT structural duplication — duplicates would drift).
+* `sandbox.__init__` exposes both import paths and they resolve to the
+  same objects.
+* `KernelDefaultCredentialAdapter` satisfies the @runtime_checkable
+  `CredentialAdapter` Protocol.
+* `fetch_secret` raises `NotImplementedError` with the actual T5-committed
+  stub message (cites Sprint 10 + ADR-009 — ADR-009 is the canonical
+  pluggable-adapter ADR; ADR-004's credential-scope is the architectural
+  intent, ADR-009 is the implementation home).
+* Defence-in-depth: when `policy.vault_path is None`, admit_policy NEVER
+  calls `fetch_secret` on the wired adapter, regardless of which adapter
+  is wired (covered separately at T10a lifecycle level; this is the
+  unit-level pin).
 """
 from __future__ import annotations
 
@@ -2345,44 +2386,96 @@ import pytest
 
 from cognic_agentos.sandbox import (
     CredentialAdapter,
-    CredentialLease,
     KernelDefaultCredentialAdapter,
 )
 
 
-class TestStubFailsLoudWithSpringTenPointer:
-    @pytest.mark.asyncio
-    async def test_mint_lease_raises_not_implemented_with_sprint_10_pointer(self) -> None:
-        adapter = KernelDefaultCredentialAdapter()
-        with pytest.raises(NotImplementedError) as exc:
-            await adapter.mint_lease(
-                tenant_id="t-1", vault_path="secret/test",
-                session_id="s-1", ttl_s=300,
-            )
-        # Per AGENTS.md production-grade rule: stub error message MUST
-        # cite the sprint that replaces it.
-        assert "Sprint 10" in str(exc.value)
-        assert "ADR-004" in str(exc.value)
+class TestReExportEquivalence:
+    """The shim MUST re-export the SAME object (not a duplicate
+    declaration). Object identity catches drift-by-duplicate before
+    runtime."""
 
-    @pytest.mark.asyncio
-    async def test_revoke_lease_raises_not_implemented_with_sprint_10_pointer(self) -> None:
-        adapter = KernelDefaultCredentialAdapter()
-        with pytest.raises(NotImplementedError) as exc:
-            await adapter.revoke_lease(
-                CredentialLease(lease_id="lease-1", tenant_id="t-1", expires_at=None)
-            )
-        assert "Sprint 10" in str(exc.value)
-        assert "ADR-004" in str(exc.value)
+    def test_credential_adapter_is_same_object_via_both_paths(self) -> None:
+        from cognic_agentos.sandbox.admission import CredentialAdapter as AdmissionCA
+        from cognic_agentos.sandbox.credentials import CredentialAdapter as CredentialsCA
+
+        assert AdmissionCA is CredentialsCA, (
+            "credentials.py must re-export the SAME CredentialAdapter "
+            "Protocol from sandbox.admission, not redeclare it. "
+            "Object-identity check catches a duplicate declaration "
+            "that would otherwise pass `isinstance` checks but drift "
+            "in signature."
+        )
+
+    def test_kernel_default_is_same_object_via_both_paths(self) -> None:
+        from cognic_agentos.sandbox.admission import (
+            KernelDefaultCredentialAdapter as AdmissionKDCA,
+        )
+        from cognic_agentos.sandbox.credentials import (
+            KernelDefaultCredentialAdapter as CredentialsKDCA,
+        )
+
+        assert AdmissionKDCA is CredentialsKDCA
+
+    def test_sandbox_package_exposes_same_object_as_credentials_module(self) -> None:
+        """`from cognic_agentos.sandbox import X` and `from
+        cognic_agentos.sandbox.credentials import X` MUST resolve to
+        the same object so consumers can use either path."""
+        from cognic_agentos.sandbox import (
+            CredentialAdapter as PkgCA,
+            KernelDefaultCredentialAdapter as PkgKDCA,
+        )
+        from cognic_agentos.sandbox.credentials import (
+            CredentialAdapter as CredentialsCA,
+            KernelDefaultCredentialAdapter as CredentialsKDCA,
+        )
+
+        assert PkgCA is CredentialsCA
+        assert PkgKDCA is CredentialsKDCA
 
 
 class TestProtocolShape:
     def test_kernel_default_satisfies_credential_adapter_protocol(self) -> None:
         """The stub MUST satisfy the @runtime_checkable Protocol so
-        admission's isinstance check (`isinstance(adapter,
-        KernelDefaultCredentialAdapter)`) works AND the type system
-        accepts the stub wherever a real CredentialAdapter is expected."""
+        admission's isinstance check works AND the type system accepts
+        the stub wherever a real CredentialAdapter is expected."""
         adapter = KernelDefaultCredentialAdapter()
         assert isinstance(adapter, CredentialAdapter)
+
+    def test_credential_adapter_declares_fetch_secret_only(self) -> None:
+        """T5 landed the single-method `fetch_secret` API. The richer
+        mint_lease/revoke_lease lease API belongs to Sprint 10's
+        concrete VaultCredentialAdapter design — adding it to the
+        Wave-1 Protocol would be scope creep. This pin catches an
+        accidental re-introduction of the lease API onto the Protocol."""
+        # The Protocol is structural; assert the only method the
+        # admission seam contracts on is fetch_secret.
+        method_names = {
+            name for name in dir(CredentialAdapter)
+            if not name.startswith("_") and callable(getattr(CredentialAdapter, name, None))
+        }
+        # `fetch_secret` is the contract; everything else is Protocol
+        # machinery from `typing`.
+        assert "fetch_secret" in method_names
+
+
+class TestStubFailsLoudWithSprintTenPointer:
+    @pytest.mark.asyncio
+    async def test_fetch_secret_raises_not_implemented_with_sprint_10_pointer(self) -> None:
+        adapter = KernelDefaultCredentialAdapter()
+        with pytest.raises(NotImplementedError) as exc:
+            await adapter.fetch_secret("secret/test")
+        # Per AGENTS.md production-grade rule: stub error message MUST
+        # cite the sprint that replaces it AND the ADR that owns the
+        # contract. The T5-committed message cites Sprint 10 + ADR-009
+        # (ADR-009 is the pluggable-adapter home; ADR-004 is the
+        # sandbox-primitive ADR that lifts the architectural intent
+        # into a sandbox-level concept).
+        msg = str(exc.value)
+        assert "Sprint 10" in msg
+        assert "ADR-009" in msg
+        assert "VaultCredentialAdapter" in msg
+        assert "fail-loud sentinel" in msg
 
 
 class TestSandboxesWithoutCredentialsUnaffected:
@@ -2391,176 +2484,149 @@ class TestSandboxesWithoutCredentialsUnaffected:
     is the load-bearing invariant from spec §2.2 ("Sandboxes that do
     not request credentials are unaffected"). The actual sandbox-
     without-creds happy path lands in T10a's lifecycle test; this
-    is the unit-level pin that mint_lease/revoke_lease are NEVER
-    called when policy.vault_path is None."""
+    is the unit-level pin that fetch_secret is NEVER called when
+    policy.vault_path is None."""
 
     @pytest.mark.asyncio
-    async def test_admit_policy_does_not_call_credential_adapter_when_vault_path_none(
+    async def test_admit_policy_does_not_call_fetch_secret_when_vault_path_none(
         self,
     ) -> None:
-        """Defence-in-depth: even if the admission code accidentally
-        evaluates `isinstance(adapter, KernelDefaultCredentialAdapter)`
-        before checking vault_path is None, the stub MUST NOT be
-        called for a sandbox that doesn't request credentials."""
         from unittest.mock import AsyncMock, MagicMock
-        from cognic_agentos.sandbox.admission import admit_policy
+
         from cognic_agentos.sandbox import PackAdmissionContext, SandboxPolicy
+        from cognic_agentos.sandbox.admission import admit_policy
 
-        # Wrap the stub so we can assert mint_lease was never called
+        # Wrap the stub so we can assert fetch_secret was never called
         stub = KernelDefaultCredentialAdapter()
-        stub.mint_lease = AsyncMock(side_effect=stub.mint_lease)  # type: ignore[method-assign]
-        stub.revoke_lease = AsyncMock(side_effect=stub.revoke_lease)  # type: ignore[method-assign]
+        original_fetch_secret = stub.fetch_secret
+        stub.fetch_secret = AsyncMock(side_effect=original_fetch_secret)  # type: ignore[method-assign]
 
-        # Round-6 R6 P1 #1 fix: MagicMock (not AsyncMock) so that
-        # is_canonical() / is_tenant_allow_listed() return real bools
-        # synchronously per the admit_policy code path. Only the async
-        # verify_* methods get explicit AsyncMock assignment below.
+        # MagicMock (not AsyncMock) so sync membership checks return
+        # real bools; the verify_* async methods get explicit AsyncMock.
         catalog = MagicMock()
         catalog.is_canonical.return_value = True
+        catalog.is_tenant_allow_listed.return_value = False
         catalog.verify_cosign_or_refuse = AsyncMock(return_value=None)
         catalog.verify_sbom_policy_or_refuse = AsyncMock(return_value=None)
-        rego = AsyncMock()
-        rego.evaluate = AsyncMock(return_value=MagicMock(allowed=True))
-        settings = MagicMock(per_tenant_max_cpu=4.0,
-                             per_tenant_max_memory=1024,
-                             per_tenant_max_walltime=300.0)
+        rego = MagicMock()
+        rego_decision = MagicMock()
+        rego_decision.allow = True
+        rego_decision.reasoning = ""
+        rego.evaluate = AsyncMock(return_value=rego_decision)
+        settings = MagicMock(
+            sandbox_per_tenant_max_cpu=4.0,
+            sandbox_per_tenant_max_memory=1024,
+            sandbox_per_tenant_max_walltime=300.0,
+        )
 
         policy = SandboxPolicy(
-            cpu_cores=0.5, cpu_time_budget_s=None, memory_mb=256, walltime_s=30.0,
-            runtime_image="cognic/sandbox-runtime-python:v1@sha256:" + "a" * 64,
+            cpu_cores=0.5,
+            cpu_time_budget_s=None,
+            memory_mb=256,
+            walltime_s=30.0,
+            runtime_image=(
+                "cognic/sandbox-runtime-python:v1@sha256:" + "a" * 64
+            ),
             egress_allow_list=(),
             vault_path=None,  # ← KEY: no creds requested
         )
         ctx = PackAdmissionContext(
-            pack_id="p", pack_version="v1",
+            pack_id="p",
+            pack_version="v1",
             pack_artifact_digest="sha256:" + "1" * 64,
             risk_tier="internal_write",
-            declares_dynamic_install=False, profile="production",
+            declares_dynamic_install=False,
+            profile="production",
         )
 
         await admit_policy(
-            policy, tenant_id="t-1", actor=MagicMock(), pack_context=ctx,
-            catalog=catalog, credential_adapter=stub,
-            rego_engine=rego, settings=settings,
+            policy,
+            tenant_id="t-1",
+            actor=MagicMock(),
+            pack_context=ctx,
+            catalog=catalog,
+            credential_adapter=stub,
+            rego_engine=rego,
+            settings=settings,
         )
 
-        stub.mint_lease.assert_not_called()
-        stub.revoke_lease.assert_not_called()
+        stub.fetch_secret.assert_not_called()
 ```
 
-- [ ] **Step 2: Verify fail** — `uv run pytest tests/unit/sandbox/test_credential_adapter_stub.py -v` → `ImportError: cannot import name 'CredentialAdapter'`.
+- [ ] **Step 2: Verify fail** — `uv run pytest tests/unit/sandbox/test_credential_adapter_stub.py -v` → `ModuleNotFoundError: No module named 'cognic_agentos.sandbox.credentials'`.
 
-- [ ] **Step 3: Implement `sandbox/credentials.py`**
+- [ ] **Step 3: Implement `sandbox/credentials.py` re-export shim**
 
 ```python
 # src/cognic_agentos/sandbox/credentials.py
-"""Sprint 8A T8 — CredentialAdapter Protocol + KernelDefaultCredentialAdapter
-fail-loud stub per spec §8 + ADR-004 §"Credential-scoped".
+"""Sprint 8A T8 — credentials.py re-export shim.
 
-NOT on the durable critical-controls coverage gate (stub-only; the real
-VaultCredentialAdapter at Sprint 10 replaces this and goes on the gate
-then). The stub raises NotImplementedError pointing at Sprint 10 /
-ADR-004 per AGENTS.md production-grade rule.
+The canonical home of ``CredentialAdapter`` Protocol +
+``KernelDefaultCredentialAdapter`` sentinel is
+:mod:`cognic_agentos.sandbox.admission` (T5 commit ``4967ce8`` per
+``feedback_consumer_owned_protocol_for_unlanded_dep`` — T5 declared the
+dependency Protocols + sentinel inline in admission.py so the CC module
+could ship independently runnable; T8 was scheduled to own the canonical
+home but the user-preferred resolution (T5 R0) was a re-export shim, NOT
+a canonical-home shift).
 
-Wiring: admission.admit_policy() refuses with
-sandbox_credential_adapter_not_configured at the §6.1 step 3 admission
-check when policy.vault_path is set AND `isinstance(adapter,
-KernelDefaultCredentialAdapter)`. The stub's NotImplementedError is
-defence-in-depth — it should never fire in practice because admission
-short-circuits first.
+This module is a thin re-export shim that exposes the same names at the
+``cognic_agentos.sandbox.credentials`` import path. Sprint 10's
+``VaultCredentialAdapter`` will replace ``KernelDefaultCredentialAdapter``
+in this module without rewriting any consumer that imports from
+``sandbox.credentials``.
+
+NOT on the durable critical-controls coverage gate — re-export shim with
+zero new logic. The CC risk is covered by ``sandbox/admission.py``
+already being on the gate. Sprint 10's real ``VaultCredentialAdapter``
+goes on the gate when it lands.
+
+Per spec §8 + ADR-004 §"Credential-scoped" + ADR-009 (pluggable adapter
+layer where the real Vault implementation lives).
 """
+
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime
-from typing import Protocol, runtime_checkable
+from cognic_agentos.sandbox.admission import (
+    CredentialAdapter,
+    KernelDefaultCredentialAdapter,
+)
 
-
-@dataclass(frozen=True)
-class CredentialLease:
-    """Pointer to a Vault credential lease — the real shape lands in
-    Sprint 10 alongside VaultCredentialAdapter."""
-    lease_id: str
-    tenant_id: str
-    expires_at: datetime | None  # None at Sprint-8A stub time; Sprint 10 fills
-
-
-@runtime_checkable
-class CredentialAdapter(Protocol):
-    """Protocol for credential leasing. Sprint 10's
-    VaultCredentialAdapter is the first real implementation."""
-
-    async def mint_lease(
-        self,
-        *,
-        tenant_id: str,
-        vault_path: str,
-        session_id: str,
-        ttl_s: int,
-    ) -> CredentialLease: ...
-
-    async def revoke_lease(self, lease: CredentialLease) -> None: ...
-
-
-class KernelDefaultCredentialAdapter:
-    """Fail-loud stub per AGENTS.md production-grade rule. Methods raise
-    NotImplementedError pointing at Sprint 10 / ADR-004; never returns
-    a fake token (silent in-process fallbacks are forbidden).
-
-    Wired as the default at Sprint 8A; replaced by VaultCredentialAdapter
-    at Sprint 10. Admission's §6.1 step 3 short-circuits before
-    mint_lease/revoke_lease are ever called for sandboxes that need
-    credentials (refusal closed-enum
-    `sandbox_credential_adapter_not_configured`).
-    """
-
-    async def mint_lease(
-        self,
-        *,
-        tenant_id: str,
-        vault_path: str,
-        session_id: str,
-        ttl_s: int,
-    ) -> CredentialLease:
-        raise NotImplementedError(
-            "Vault credential leasing not yet implemented; ships in "
-            "Sprint 10 per ADR-004 §'Credential-scoped'. Sandboxes "
-            "without `vault_path:` in their policy are unaffected. "
-            "If this fires, admission's §6.1 step 3 short-circuit was "
-            "bypassed — investigate the caller."
-        )
-
-    async def revoke_lease(self, lease: CredentialLease) -> None:
-        raise NotImplementedError(
-            "Vault credential leasing not yet implemented; ships in "
-            "Sprint 10 per ADR-004 §'Credential-scoped'."
-        )
+__all__ = [
+    "CredentialAdapter",
+    "KernelDefaultCredentialAdapter",
+]
 ```
 
-- [ ] **Step 4: Verify green** — `uv run pytest tests/unit/sandbox/test_credential_adapter_stub.py -v` passes all 4 tests.
+- [ ] **Step 4: Verify green** — `uv run pytest tests/unit/sandbox/test_credential_adapter_stub.py -v` passes.
 
-- [ ] **Step 5: standard pre-commit gate ladder** (NOT-CC module; no extra halt beyond the gate). `ruff check src tests` + `ruff format --check` + `mypy src tests` + focused pytest.
+- [ ] **Step 5: Standard pre-commit gate ladder** (NOT-CC module; no extended halt beyond the gate). `ruff check . + ruff format --check . + mypy src tests + uv run pytest tests/unit/sandbox -q`.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Commit (await per-action authorization token)**
 
 ```
-feat(sprint-8a): T8 — credentials.py CredentialAdapter Protocol + KernelDefaultCredentialAdapter fail-loud stub (Sprint 10 placeholder)
+feat(sprint-8a): T8 — credentials.py re-export shim for CredentialAdapter + KernelDefaultCredentialAdapter (Sprint 10 placeholder)
 
-Per spec §8 + ADR-004 §"Credential-scoped". Lands the CredentialAdapter
-Protocol (mint_lease + revoke_lease async signatures) +
-KernelDefaultCredentialAdapter stub whose methods raise
-NotImplementedError with explicit Sprint-10 + ADR-004 pointers per
-AGENTS.md production-grade rule.
+Per spec §8 + ADR-004 §"Credential-scoped" + ADR-009 (pluggable adapter
+layer). T8 lands the canonical `cognic_agentos.sandbox.credentials`
+import path as a thin re-export shim that aliases the
+`CredentialAdapter` Protocol + `KernelDefaultCredentialAdapter` sentinel
+from `sandbox.admission` (where T5 declared them inline per the
+consumer-owned-Protocol resolution rule when downstream modules are not
+yet landed).
 
-NOT on the durable critical-controls coverage gate per spec §17
-R32-doctrine carve-out (stub-only; replaced by VaultCredentialAdapter
-in Sprint 10 which DOES go on the gate).
+Sprint 10's VaultCredentialAdapter replaces KernelDefaultCredentialAdapter
+in this module without rewriting any consumer.
 
-Defence-in-depth: admission's §6.1 step 3 short-circuits before
-mint_lease/revoke_lease are called for sandboxes with vault_path set
-when the default stub is wired (refusal closed-enum
-sandbox_credential_adapter_not_configured); the stub's
-NotImplementedError fires only if that short-circuit is bypassed.
+NOT on the durable critical-controls coverage gate — re-export shim with
+zero new logic. CC risk covered by `sandbox/admission.py` already on the
+gate.
+
+Tests pin: (1) object-identity re-export equivalence (caches drift-by-
+duplicate); (2) Protocol membership; (3) the actual fetch_secret stub
+error contract (cites Sprint 10 + ADR-009 + VaultCredentialAdapter +
+fail-loud sentinel); (4) admit_policy short-circuit invariant
+(fetch_secret never called when vault_path is None).
 
 Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
 ```
