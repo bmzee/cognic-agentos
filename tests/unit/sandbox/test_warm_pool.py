@@ -1095,3 +1095,219 @@ class TestWarmPoolAuditRowsCarryServiceActorIdentity:
         record = record_builder(None)
         assert record.decision_type == "sandbox.warm_pool.drained"
         assert record.actor_id == "drain-actor-id"
+
+
+# ---------------------------------------------------------------------------
+# T13 R6 coverage repair — close 8 missing lines + 8 missing branches on
+# warm_pool.py per `tools/check_critical_coverage.py`'s 95% line / 90% branch
+# floor (Sprint-8A T12 promotion). Tests target negative/error/race paths
+# the existing suite did not exercise — NOT broad coverage padding.
+# ---------------------------------------------------------------------------
+
+
+class TestInitValidation:
+    """warm_pool.py:256-259 — `__init__` ValueError gates per spec §11.
+
+    Without these gates a degenerate pool (max=0 → can never deposit;
+    idle_ttl=0 → instant-expire every entry) would silently misbehave
+    long after construction. Fail-loud at construction time per the
+    production-grade rule.
+    """
+
+    @pytest.mark.parametrize("bad_size", [0, -1])
+    def test_init_raises_on_max_pool_size_per_key_below_one(self, bad_size: int) -> None:
+        """warm_pool.py:256-257 — ValueError on max_pool_size_per_key < 1."""
+        with pytest.raises(ValueError, match="max_pool_size_per_key must be >= 1"):
+            _make_pool(max_pool_size_per_key=bad_size)
+
+    @pytest.mark.parametrize("bad_ttl", [0.0, -1.0, -0.001])
+    def test_init_raises_on_idle_ttl_s_zero_or_negative(self, bad_ttl: float) -> None:
+        """warm_pool.py:258-259 — ValueError on idle_ttl_s <= 0."""
+        with pytest.raises(ValueError, match="idle_ttl_s must be > 0"):
+            _make_pool(idle_ttl_s=bad_ttl)
+
+
+class TestDrainFlippedDuringPerKeyLockWait:
+    """warm_pool.py:341-342 + 447-449 — `_drained` re-check inside the
+    per-key lock per the R1 P1 race-window fix.
+
+    Race window: a fast-path check at line 329 (precreate) or 437
+    (release_or_destroy) sees `_drained=False`; another coroutine flips
+    `_drained=True` and starts draining; the original coroutine is
+    still waiting on `_lock_for(key)`. Without the in-lock re-check the
+    coroutine would proceed to deposit (precreate) or release into a
+    drained pool. The re-check (lines 341 + 447) is the load-bearing
+    correctness gate — these tests exercise it by holding the per-key
+    lock externally, flipping `_drained` while the in-flight call
+    blocks on the lock, then releasing.
+    """
+
+    @pytest.mark.asyncio
+    async def test_precreate_observes_drain_flipped_during_lock_acquisition(
+        self,
+    ) -> None:
+        """warm_pool.py:341-342 — branch [341,342] precreate in-lock re-check."""
+        import asyncio
+
+        backend = AsyncMock()
+        backend.create.return_value = _make_session("blocked", _PACK_CTX_A)
+        pool = _make_pool(backend=backend)
+        # Acquire the per-key lock externally to block precreate at line 333.
+        from cognic_agentos.sandbox.warm_pool import _derive_pool_key
+
+        pool_key = _derive_pool_key(_POLICY, _PACK_CTX_A, "t-1")
+        lock = await pool._lock_for(pool_key)
+        await lock.acquire()
+        try:
+            # Spawn precreate — it will hit the fast-path check at 329
+            # (_drained=False), then block at line 333 acquiring the lock.
+            precreate_task = asyncio.create_task(
+                pool.precreate(_POLICY, tenant_id="t-1", pack_context=_PACK_CTX_A)
+            )
+            # Yield so precreate runs up to the lock wait.
+            await asyncio.sleep(0)
+            # Flip _drained while precreate is blocked.
+            pool._drained = True
+        finally:
+            # Release the lock; precreate acquires it + hits the
+            # in-lock re-check at 341 + returns at 342.
+            lock.release()
+        await precreate_task
+        # backend.create MUST NOT have been called — the in-lock
+        # re-check short-circuited before the cold-create at line 354.
+        backend.create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_release_destroys_when_drain_flipped_during_lock_acquisition(
+        self,
+    ) -> None:
+        """warm_pool.py:447-449 — branch [447,448] release in-lock re-check."""
+        import asyncio
+
+        from cognic_agentos.sandbox.warm_pool import _derive_pool_key
+
+        backend = AsyncMock()
+        pool = _make_pool(backend=backend)
+        pool_key = _derive_pool_key(_POLICY, _PACK_CTX_A, "t-1")
+        lock = await pool._lock_for(pool_key)
+        await lock.acquire()
+        session = _make_session("racing", _PACK_CTX_A)
+        try:
+            # Spawn release_or_destroy — fast-path at 437 sees
+            # _drained=False; blocks at 442 acquiring the lock.
+            release_task = asyncio.create_task(pool.release_or_destroy(session))
+            await asyncio.sleep(0)
+            # Flip _drained while release blocks.
+            pool._drained = True
+        finally:
+            lock.release()
+        await release_task
+        # In-lock re-check fires: backend.destroy called with the
+        # session + return without depositing into the pool.
+        backend.destroy.assert_awaited_once_with(session)
+        # Pool MUST be empty — the session was destroyed, not deposited.
+        assert pool.current_size(_POLICY, tenant_id="t-1", pack_context=_PACK_CTX_A) == 0
+
+
+class TestDrainEmptyAndRegisteredPaths:
+    """warm_pool.py drain() additional branches.
+
+    * Branch [497,493] — `if pool:` False on a key whose deque is
+      empty (natural state after a prior drain).
+    * Line 520-521 — `if key in self._registered:` True branch — the
+      drained payload's policy + tenant come from the registered triple
+      rather than the cold-released else fallback.
+    """
+
+    @pytest.mark.asyncio
+    async def test_drain_skips_keys_with_empty_deque(self) -> None:
+        """warm_pool.py drain branch [497,493] — empty pool skip.
+
+        After the first drain, every key in _pools is an empty deque.
+        A second drain iterates the same keys; `if pool:` is False so
+        the snapshot stays empty + the audit loop emits zero events.
+        """
+        backend = AsyncMock()
+        backend.create.return_value = _make_session("warm", _PACK_CTX_A)
+        dh_store = _make_decision_history_store()
+        pool = _make_pool(backend=backend, decision_history_store=dh_store)
+        await pool.precreate(_POLICY, tenant_id="t-1", pack_context=_PACK_CTX_A)
+        await pool.drain()  # First drain — emits one drained event
+        dh_store.append_with_precondition.reset_mock()
+        # _drained is set so subsequent register fails — but the keys
+        # remain in _pools as empty deques. Second drain hits the
+        # `if pool:` False branch for every key.
+        await pool.drain()
+        # Zero events emitted on the second drain — all pools were empty.
+        dh_store.append_with_precondition.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_drain_uses_registered_policy_for_audit_emission(
+        self,
+    ) -> None:
+        """warm_pool.py:520-521 — drain emit uses registered triple's
+        policy + tenant when the key IS in _registered.
+
+        Existing tests in TestAuditEmission exercise the cold-released
+        path (no register call → else branch fallback at 522-524). This
+        test exercises the registered path so both arms of the
+        if/else split at 520 are covered.
+        """
+        backend = AsyncMock()
+        backend.create.return_value = _make_session("warm", _PACK_CTX_A)
+        dh_store = _make_decision_history_store()
+        pool = _make_pool(backend=backend, decision_history_store=dh_store)
+        # register BEFORE precreate so the key is in _registered when
+        # drain runs the per-key audit emission.
+        await pool.register(_POLICY, tenant_id="t-1", pack_context=_PACK_CTX_A)
+        await pool.precreate(_POLICY, tenant_id="t-1", pack_context=_PACK_CTX_A)
+        dh_store.append_with_precondition.reset_mock()
+        await pool.drain()
+        # One drained event — the registered branch fired (policy + tenant
+        # came from _registered, not from sessions[0]).
+        assert dh_store.append_with_precondition.await_count == 1
+        record_builder = dh_store.append_with_precondition.await_args.kwargs["record_builder"]
+        record = record_builder(None)
+        assert record.decision_type == "sandbox.warm_pool.drained"
+        assert record.tenant_id == "t-1"
+
+
+class TestLockForRace:
+    """warm_pool.py:625-630 — `_lock_for` re-check inside `_locks_lock`.
+
+    Race window: two coroutines call `_lock_for(key)` concurrently;
+    both fail the fast-path check at 622 (no existing lock); both
+    await `_locks_lock`; the first wins + allocates; the second wins
+    next + MUST re-check at 628 + return the existing lock at 630
+    rather than allocating a second lock. Without this re-check, two
+    locks would exist for the same key + the per-key serialisation
+    contract would silently break.
+    """
+
+    @pytest.mark.asyncio
+    async def test_lock_for_returns_existing_when_race_resolves_inside_locks_lock(
+        self,
+    ) -> None:
+        """warm_pool.py:629-630 — branch [629,630] in-lock re-check."""
+        import asyncio
+
+        pool = _make_pool()
+        key = b"race-key"
+        # Hold _locks_lock externally so both _lock_for coroutines
+        # block at line 625 awaiting it.
+        await pool._locks_lock.acquire()
+        try:
+            t1 = asyncio.create_task(pool._lock_for(key))
+            t2 = asyncio.create_task(pool._lock_for(key))
+            # Yield so both reach the await on _locks_lock.
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+        finally:
+            pool._locks_lock.release()
+        lock1 = await t1
+        lock2 = await t2
+        # Both calls MUST return the SAME lock object — the race
+        # resolved correctly via the in-lock re-check.
+        assert lock1 is lock2
+        # And only one lock exists in the map.
+        assert len([k for k in pool._locks if k == key]) == 1
