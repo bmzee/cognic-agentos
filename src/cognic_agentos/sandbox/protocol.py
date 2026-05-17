@@ -4,7 +4,7 @@ Wire-protocol-public per spec §5. Critical-controls module per AGENTS.md.
 
 Sprint 8A ships:
 * 15-value `SandboxRefusalReason` Literal (per spec §4.1)
-* 5-value `SandboxPolicyViolationReason` Literal (per spec §4.2)
+* 6-value `SandboxPolicyViolationReason` Literal (per spec §4.2 + T10c R1 P1.2)
 * 8-value `SandboxLifecycleEvent` Literal (per spec §4.3)
 * `SandboxLifecycleRefused` + `SandboxPolicyViolated` exception types
 * `SandboxExecResult` + `SandboxBackendHealth` result types
@@ -49,7 +49,8 @@ SandboxRefusalReason = Literal[
     "sandbox_warm_pool_drained",
 ]
 
-#: 5-value closed-enum for runtime policy violations during ``exec`` (spec §4.2).
+#: 6-value closed-enum for runtime policy violations during ``exec``
+#: (spec §4.2 + T10c R1 P1.2 amendment).
 #:
 #: Note: CPU throttling under the Docker ``--cpus`` cap is NOT a
 #: violation by itself — a CPU-bound workload that stays within its
@@ -57,12 +58,24 @@ SandboxRefusalReason = Literal[
 #: Workloads needing a hard CPU-seconds budget set
 #: ``SandboxPolicy.cpu_time_budget_s``; the runtime monitor reads
 #: cgroup ``cpuacct.usage_us`` and kills when exceeded.
+#:
+#: ``egress_audit_unreadable`` (T10c R1 P1.2) — additive amendment:
+#: surfaces a fail-closed runtime-violation when the proxy sidecar's
+#: ALLOW_LIST audit log cannot be read at session ``exec_completed``
+#: time. Without this reason, a sidecar that crashes mid-exec OR an
+#: unreachable log file would silently elide refusals + emit a
+#: green ``exec_completed`` chain row — defeating the §10.3
+#: "examiners can prove refused-vs-allowed from the chain row"
+#: contract. The bank-grade trust posture requires fail-closed:
+#: if AgentOS cannot prove the absence of refusals, treat it as
+#: a violation.
 SandboxPolicyViolationReason = Literal[
     "cpu_time_budget_exceeded",
     "memory_cap_exceeded",
     "walltime_cap_exceeded",
     "egress_host_not_allow_listed",
     "egress_protocol_not_http",
+    "egress_audit_unreadable",
 ]
 
 #: 8-value closed-enum for audit chain-row decision_type discriminator

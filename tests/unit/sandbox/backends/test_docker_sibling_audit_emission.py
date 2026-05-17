@@ -95,7 +95,18 @@ def _make_backend(
     docker.containers.get = AsyncMock(
         side_effect=aiodocker.exceptions.DockerError(404, "not found")
     )
-    docker.networks.get = AsyncMock(side_effect=aiodocker.exceptions.DockerError(404, "not found"))
+    # T10c — networks.get serves TWO use cases now:
+    # 1. create() path attaches sidecar to egress network via
+    #    networks.get(egress_name).connect(...)  → needs success
+    # 2. teardown path's _destroy_network_if_exists wants 404
+    #
+    # The audit-emission tests pin emit behaviour, not teardown
+    # behaviour, so we return a mock network whose connect() +
+    # delete() are AsyncMocks; teardown just silently runs them.
+    mock_network = MagicMock()
+    mock_network.connect = AsyncMock()
+    mock_network.delete = AsyncMock()
+    docker.networks.get = AsyncMock(return_value=mock_network)
     catalog = MagicMock()
     catalog.is_canonical.return_value = True
     catalog.verify_cosign_or_refuse = AsyncMock(return_value=None)

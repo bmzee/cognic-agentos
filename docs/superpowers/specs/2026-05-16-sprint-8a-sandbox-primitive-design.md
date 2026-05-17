@@ -165,15 +165,16 @@ The 15-value closed-enum for sandbox-creation refusals. Drift between this Liter
 
 ### 4.2 `SandboxPolicyViolationReason` — `sandbox.policy.violated.payload.reason`
 
-The 5-value closed-enum for runtime policy violations during `exec`. **Note:** CPU throttling under the `--cpus` cap is NOT a violation by itself — a CPU-bound workload that stays within its budget is expected to be throttled by the kernel scheduler. Workloads needing a hard CPU-seconds budget set `SandboxPolicy.cpu_time_budget_s` (optional; runtime monitor reads `cgroup cpuacct.usage_us` and kills when exceeded).
+The 6-value closed-enum for runtime policy violations during `exec` (amended from 5 → 6 at T10c R1 P1.2 with the addition of `egress_audit_unreadable`). **Note:** CPU throttling under the `--cpus` cap is NOT a violation by itself — a CPU-bound workload that stays within its budget is expected to be throttled by the kernel scheduler. Workloads needing a hard CPU-seconds budget set `SandboxPolicy.cpu_time_budget_s` (optional; runtime monitor reads `cgroup cpuacct.usage_us` and kills when exceeded).
 
 | Reason | Trigger |
 |---|---|
 | `cpu_time_budget_exceeded` | `SandboxPolicy.cpu_time_budget_s` set AND cgroup `cpuacct.usage_us` exceeded the budget; container killed. Not fired when budget is unset (the `--cpus` throttle is the only CPU control). |
 | `memory_cap_exceeded` | OOM-killer triggered by the cgroup memory cap |
 | `walltime_cap_exceeded` | AgentOS-side timer fires; container killed |
-| `egress_host_not_allow_listed` | Proxy rejects an outbound request to a non-allow-listed host |
-| `egress_protocol_not_http` | Proxy receives HTTP CONNECT to a non-443 port OR a non-HTTP method (e.g. `CONNECT example.com:6379 HTTP/1.1` for Redis, `CONNECT example.com:25 HTTP/1.1` for SMTP). **Proxy-observed only** — raw TCP / UDP / DNS-over-TCP attempts that bypass the proxy entirely are blocked at the network layer (sandbox has no external gateway per §10.1) and are NOT emitted as policy-violation events in Wave 1; see §10.4 for the full proxy-observed vs network-blocked split |
+| `egress_host_not_allow_listed` | Proxy rejects an outbound request to a non-allow-listed host. The chain row's `payload.proxy_log` carries the FULL outbound-call history (refused + allowed) per spec §10.3 examiner-readable evidence requirement (T10c R1 P1.3). |
+| `egress_protocol_not_http` | Proxy receives HTTP CONNECT to a non-443 port OR a non-HTTP method (e.g. `CONNECT example.com:6379 HTTP/1.1` for Redis, `CONNECT example.com:25 HTTP/1.1` for SMTP). **Proxy-observed only** — raw TCP / UDP / DNS-over-TCP attempts that bypass the proxy entirely are blocked at the network layer (sandbox has no external gateway per §10.1) and are NOT emitted as policy-violation events in Wave 1; see §10.4 for the full proxy-observed vs network-blocked split. Chain row also carries `payload.proxy_log` (T10c R1 P1.3). |
+| `egress_audit_unreadable` | AgentOS could not read the proxy sidecar's access log at session `exec_completed` time (sidecar crashed mid-exec; log file unreadable; `cat` exited nonzero). T10c R1 P1.2 fail-closed amendment — without this reason, an unreachable log would silently elide refusals and emit a green `exec_completed`. Bank-grade trust posture: if AgentOS cannot prove the absence of refusals, treat it as a violation. The chain row's `payload.proxy_log` is empty `[]` in this case (we couldn't read it). |
 
 ### 4.3 `SandboxLifecycleEvent` — top-level audit event family discriminator
 
@@ -185,7 +186,7 @@ The 8-value closed-enum following the user-locked taxonomy (Sprint 8 brainstormi
 | `sandbox.lifecycle.exec_completed` | `SandboxSession.exec()` returns (success or non-violation failure) | `payload.exit_code: int` |
 | `sandbox.lifecycle.destroyed` | `SandboxSession.destroy()` succeeds | `payload.duration_s: float` |
 | `sandbox.lifecycle.refused` | `SandboxSession.create()` fails admission | `payload.reason: SandboxRefusalReason` |
-| `sandbox.policy.violated` | Runtime policy cap exceeded; session killed | `payload.reason: SandboxPolicyViolationReason` |
+| `sandbox.policy.violated` | Runtime policy cap exceeded; session killed | `payload.reason: SandboxPolicyViolationReason` (always); `payload.proxy_log: list[ProxyAccessRecord]` (egress reasons only — `egress_host_not_allow_listed` / `egress_protocol_not_http` carry the full outbound-call history; `egress_audit_unreadable` carries an empty list because the log was unreadable; cap reasons omit the key) per T10c R1 P1.3 amendment |
 | `sandbox.warm_pool.precreated` | A new pool member becomes ready (covers initial fill AND replenishment) | `payload.pool_key: str` + `payload.pool_size_after: int` |
 | `sandbox.warm_pool.checked_out` | A pool member is handed to a `SandboxSession.create()` call | `payload.pool_key: str` + `payload.pool_size_after: int` |
 | `sandbox.warm_pool.drained` | Shutdown drain completes for a pool | `payload.pool_key: str` + `payload.drained_count: int` |
@@ -651,7 +652,16 @@ def render_proxy_config(allow_list: tuple[str, ...]) -> ProxyConfig:
 
 ### 10.3 Audit emission
 
-Every outbound request through the proxy emits a `ProxyAccessRecord` carrying `host`, `method`, `timestamp`, `policy_id`, `allow_or_refuse`, `refusal_reason` (if refused). On `exec_completed`, the proxy flushes its access log to a shared mount; the backend reads it and renders into the chain row's `payload.proxy_log: list[ProxyAccessRecord]`. Examiners can prove "this session attempted X outbound calls; Y were allowed, Z were refused" from the chain row alone.
+Every outbound request through the proxy emits a `ProxyAccessRecord` carrying `host`, `method`, `timestamp`, `policy_id`, `allow_or_refuse`, `refusal_reason` (if refused). On session exec completion, the proxy flushes its access log to a known path inside the sidecar (`/var/log/cognic-proxy/access.jsonl` per the T10c wire-contract); the backend reads it via `docker exec cat` on the sidecar container and renders into the chain row's `payload.proxy_log: list[ProxyAccessRecord]`. Examiners can prove "this session attempted X outbound calls; Y were allowed, Z were refused" from the chain row alone.
+
+**Which chain row carries `proxy_log`** (T10c R1 P1.3 + R2 P2 amendments):
+
+- **Green exec path** — `sandbox.lifecycle.exec_completed` carries `payload.proxy_log: list[ProxyAccessRecord]` (every outbound call, all `allowed`).
+- **Egress refusal path** — `sandbox.policy.violated` carries `payload.proxy_log: list[ProxyAccessRecord]` (the full outbound-call history including refused records; reason is `egress_host_not_allow_listed` OR `egress_protocol_not_http` per the first refusal's `refusal_reason`). Examiners get the same evidence shape whether the session ended green or via refusal.
+- **Cap-violation path** — `sandbox.policy.violated` with `payload.reason ∈ {cpu_time_budget_exceeded, memory_cap_exceeded, walltime_cap_exceeded}` does NOT include `proxy_log` (cap kills happen before the AgentOS-side proxy_log readback; the killed exec doesn't have a meaningful proxy log to surface).
+- **Audit-unreadable path** — `sandbox.policy.violated` with `payload.reason == egress_audit_unreadable` carries `payload.proxy_log: []` (the readback itself failed — we know we cannot prove no refusals, but we have no records to surface). T10c R1 P1.2 fail-closed amendment.
+
+**Readback contract** (T10c R1 P1.2 + R2 P1): the canonical `cognic/sandbox-egress-proxy` image guarantees the log path exists + is readable for the lifetime of the sidecar container; empty file is the canonical "no outbound calls" representation. ANY readback failure (sidecar container gone, `cat` exit nonzero, unexpected exception, decode error) is treated as `egress_audit_unreadable` — fail-closed per the bank-grade trust posture. Catalog verification on the proxy image itself uses the digest extracted via `rsplit("@", 1)` (same axis as T5 admission uses on `runtime_image`; `CanonicalImageCatalog` is digest-keyed).
 
 ### 10.4 Non-HTTP refusal — proxy-observed vs network-blocked
 

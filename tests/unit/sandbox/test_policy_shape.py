@@ -34,11 +34,14 @@ class TestClosedEnumPartitionInvariants:
             f"SandboxRefusalReason must have 15 values per spec §4.1; found {len(values)}: {values}"
         )
 
-    def test_sandbox_policy_violation_reason_has_exactly_5_values(self) -> None:
+    def test_sandbox_policy_violation_reason_has_exactly_6_values(self) -> None:
+        # T10c R1 P1.2 amended this from 5 → 6 with the addition of
+        # ``egress_audit_unreadable`` (fail-closed for unreadable
+        # proxy_log). Pinned at 6 to catch any future drift.
         values = typing.get_args(SandboxPolicyViolationReason)
-        assert len(values) == 5, (
-            f"SandboxPolicyViolationReason must have 5 values per spec §4.2; "
-            f"found {len(values)}: {values}"
+        assert len(values) == 6, (
+            f"SandboxPolicyViolationReason must have 6 values per spec §4.2 + "
+            f"T10c R1 P1.2; found {len(values)}: {values}"
         )
 
     def test_sandbox_lifecycle_event_has_exactly_8_values(self) -> None:
@@ -94,6 +97,8 @@ class TestClosedEnumPartitionInvariants:
             "walltime_cap_exceeded",
             "egress_host_not_allow_listed",
             "egress_protocol_not_http",
+            # T10c R1 P1.2 — fail-closed for unreadable proxy_log
+            "egress_audit_unreadable",
         }
         assert values == expected, f"drift: {values ^ expected}"
 

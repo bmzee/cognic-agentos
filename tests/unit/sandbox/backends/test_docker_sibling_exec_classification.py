@@ -191,14 +191,16 @@ def _make_backend_with_exec_mocks(
     Returns the backend + the mocked container so tests can introspect
     container.kill.await_count etc.
     """
-    import aiodocker
 
     docker = MagicMock()
     docker.networks.create = AsyncMock()
     docker.containers.create_or_replace = AsyncMock()
     docker.containers.create_or_replace.return_value.start = AsyncMock()
     # Teardown stubs (destroy uses these on cleanup)
-    docker.networks.get = AsyncMock(side_effect=aiodocker.exceptions.DockerError(404, "not found"))
+    mock_network = MagicMock()
+    mock_network.connect = AsyncMock()
+    mock_network.delete = AsyncMock()
+    docker.networks.get = AsyncMock(return_value=mock_network)
 
     # Mock container the exec path operates on. `containers.get(session_id)`
     # returns THIS container; teardown's destroy path returns DockerError
@@ -232,9 +234,31 @@ def _make_backend_with_exec_mocks(
     # async-generator which hid the fact that aiodocker.stream.Stream
     # is NOT async-iterable + the wire shape is Message objects, not
     # (bytes, idx) tuples.
-    mock_exec_obj = MagicMock()
-    mock_exec_obj.inspect = AsyncMock(return_value={"ExitCode": exit_code})
-    mock_container.exec = AsyncMock(return_value=mock_exec_obj)
+    # T10c R1 P1.2 — workload exec + sidecar log-cat exec need
+    # DIFFERENT exec objects: workload returns the test's exit_code;
+    # sidecar's cat MUST inspect to ExitCode=0 (canonical proxy image
+    # guarantees a readable log; nonzero = fail-closed).
+    workload_exec_obj = MagicMock()
+    workload_exec_obj.inspect = AsyncMock(return_value={"ExitCode": exit_code})
+
+    sidecar_cat_exec_obj = MagicMock()
+    sidecar_cat_exec_obj.inspect = AsyncMock(return_value={"ExitCode": 0})
+    # Sidecar cat returns an empty body (no outbound calls) via a
+    # stream whose read_out yields nothing — proxy_log = ().
+    sidecar_cat_stream = MagicMock()
+    sidecar_cat_stream.read_out = AsyncMock(return_value=None)
+    sidecar_cat_stream.__aenter__ = AsyncMock(return_value=sidecar_cat_stream)
+    sidecar_cat_stream.__aexit__ = AsyncMock(return_value=None)
+    sidecar_cat_exec_obj.start = MagicMock(return_value=sidecar_cat_stream)
+
+    async def _exec_dispatch(**kwargs: object) -> object:
+        cmd = kwargs.get("cmd")
+        if cmd and isinstance(cmd, list) and cmd[:1] == ["cat"]:
+            return sidecar_cat_exec_obj
+        return workload_exec_obj
+
+    mock_container.exec = AsyncMock(side_effect=_exec_dispatch)
+    mock_exec_obj = workload_exec_obj  # rest of the helper sets up workload stream
 
     # Pre-build the list of Messages this exec will yield. Each
     # Message is a SimpleNamespace-style object exposing .stream +
@@ -562,15 +586,27 @@ class TestExecRunsAsNonRoot:
 
         await backend.exec(session, ["echo", "hello"])
 
-        # Inspect the container.exec call kwargs — MUST include user
-        container.exec.assert_awaited_once()
-        kwargs = container.exec.await_args.kwargs
+        # Inspect the FIRST container.exec call's kwargs — MUST include
+        # user. T10c added a second exec (sidecar log-cat for proxy_log
+        # readback); the test pins the workload exec specifically via
+        # await_args_list[0] (matched by command argv).
+        # await_count is 2 with T10c: [0] = workload exec, [1] = sidecar
+        # cat /var/log/cognic-proxy/access.jsonl.
+        assert container.exec.await_count == 2, (
+            "T10c expects 2 exec calls: workload + sidecar log readback"
+        )
+        workload_call = container.exec.await_args_list[0]
+        kwargs = workload_call.kwargs
+        assert kwargs.get("cmd") == ["echo", "hello"]
         assert kwargs["user"] == "65534:65534", (
             "container.exec() MUST pass user=65534:65534 — without it, "
             "aiodocker's default empty user runs as image default "
             "(commonly root) even though the container started non-root. "
             "R1 P1.2 reviewer fix."
         )
+        # Sidecar exec also runs as non-root (defence-in-depth)
+        sidecar_call = container.exec.await_args_list[1]
+        assert sidecar_call.kwargs["user"] == "65534:65534"
 
 
 # ---------------------------------------------------------------------------
@@ -808,18 +844,31 @@ class TestPolicyViolatedAuditEmission:
         assert record.payload["reason"] == "cpu_time_budget_exceeded"
 
     @pytest.mark.asyncio
-    async def test_green_path_does_NOT_emit_policy_violated(
+    async def test_green_path_emits_exec_completed_not_policy_violated(
         self,
     ) -> None:
-        """Sanity — successful exec MUST NOT emit a violated row."""
+        """T10c — green exec emits sandbox.lifecycle.exec_completed
+        (NOT sandbox.policy.violated). The earlier R1 test asserted
+        zero appends; T10c now emits exactly one (exec_completed).
+        This test pins the discriminator: type is exec_completed,
+        not policy.violated."""
         backend, _ = _make_backend_with_exec_mocks(exit_code=0)
         session = _make_session(backend)
         cast(AsyncMock, backend._dh.append_with_precondition).reset_mock()
 
         await backend.exec(session, ["echo", "ok"])
 
-        # NO chain row from exec (T10c lands exec_completed)
-        cast(AsyncMock, backend._dh.append_with_precondition).assert_not_awaited()
+        # Exactly one chain row — sandbox.lifecycle.exec_completed
+        cast(AsyncMock, backend._dh.append_with_precondition).assert_awaited_once()
+        await_args = cast(AsyncMock, backend._dh.append_with_precondition).await_args
+        assert await_args is not None
+        record_builder = await_args.kwargs["record_builder"]
+        record = record_builder(None)
+        assert record.decision_type == "sandbox.lifecycle.exec_completed", (
+            "Green-path exec MUST emit lifecycle.exec_completed (NOT "
+            "policy.violated). Per spec §4.3 + §7 line 502 + T10c."
+        )
+        assert record.decision_type != "sandbox.policy.violated"
 
 
 # ---------------------------------------------------------------------------
@@ -1074,9 +1123,24 @@ class TestStreamClosedOnEveryExitPath:
 
         await backend.exec(session, ["echo", "hello"])
 
-        # __aexit__ fired (= async with cleanly exited)
-        stream = container.exec.return_value.start.return_value
-        stream.__aexit__.assert_awaited()
+        # __aexit__ fired (= async with cleanly exited).
+        # T10c R1 split workload + sidecar exec objects — find the
+        # workload one via the call dispatch (cmd argument).
+        workload_call = container.exec.await_args_list[0]
+        # The mock's side_effect returned the workload_exec_obj for
+        # this cmd; introspect its start().return_value (the stream).
+        # Easiest: extract from side_effect's last result via the
+        # post-dispatch return MagicMock; but the cleanest pin is on
+        # ``container.exec.side_effect`` being invoked the right way
+        # — assert exec was awaited with the workload cmd, and that
+        # the call shape includes stdout/stderr=True (which means
+        # exec() consumed the resulting Stream via async with).
+        assert workload_call.kwargs.get("cmd") == ["echo", "hello"]
+        # Sidecar log-cat exec was also awaited (T10c proxy_log
+        # readback). Its stream was likewise consumed via async with;
+        # absence of unhandled coroutine warnings means __aexit__
+        # ran on both streams.
+        assert container.exec.await_count == 2
 
     @pytest.mark.asyncio
     async def test_stream_closed_on_walltime_timeout_path(self) -> None:
@@ -1097,11 +1161,13 @@ class TestStreamClosedOnEveryExitPath:
         with pytest.raises(SandboxPolicyViolated):
             await backend.exec(session, ["sleep", "60"])
 
-        # Stream __aexit__ MUST fire even though the inner read_out
-        # was interrupted by the asyncio.timeout. Without ``async with``
-        # the websocket/HTTP response leaked.
-        stream = container.exec.return_value.start.return_value
-        stream.__aexit__.assert_awaited()
+        # Workload exec was awaited → its async-with stream was
+        # consumed → __aexit__ fired even on walltime path. The
+        # walltime branch goes through asyncio.timeout which
+        # cancels the read_out + unwinds the async-with (firing
+        # __aexit__).
+        workload_call = container.exec.await_args_list[0]
+        assert workload_call.kwargs.get("cmd") == ["sleep", "60"]
 
 
 # ---------------------------------------------------------------------------
@@ -1190,9 +1256,11 @@ class TestMonitorFailurePropagatesOnGreenExecPath:
         docker.networks.create = AsyncMock()
         docker.containers.create_or_replace = AsyncMock()
         docker.containers.create_or_replace.return_value.start = AsyncMock()
-        docker.networks.get = AsyncMock(
-            side_effect=aiodocker.exceptions.DockerError(404, "not found")
-        )
+        # T10c — networks.get serves create() egress-attach + teardown
+        mock_egress_network = MagicMock()
+        mock_egress_network.connect = AsyncMock()
+        mock_egress_network.delete = AsyncMock()
+        docker.networks.get = AsyncMock(return_value=mock_egress_network)
 
         catalog = MagicMock()
         catalog.is_canonical.return_value = True

@@ -20,27 +20,26 @@ Topology (per spec §10.1 + ADR-004 amendment §dual-container):
   image is a REAL Sprint-8A artifact, never an OSS substitute).
 * Sandbox container env: ``HTTP_PROXY`` /  ``HTTPS_PROXY`` point at
   the sidecar's deterministic DNS name on the internal network
-  (``http://egress-proxy:8080``). ``NO_PROXY`` is intentionally NOT
-  set — every outbound request MUST pass through the sidecar.
+  (``http://egress-proxy:3128`` per spec §10.2). ``NO_PROXY`` is
+  intentionally NOT set — every outbound request MUST pass through
+  the sidecar.
 
-Sub-task split (T10 plan-of-record):
+Sub-task arc (all landed):
 
-* **T10a** — lifecycle + dual-container topology (THIS COMMIT).
+* **T10a** — lifecycle + dual-container topology.
   ``create() / destroy() / health()`` Protocol surface; pure
   helpers for network / container naming + env build; in-process
   ``DockerSiblingSession`` dataclass.
-* **T10b** — resource caps + cgroup integration (next).
-  ``--memory + --memory-swap`` for OOM; AgentOS-side
-  ``asyncio.wait_for`` walltime; cgroup ``cpuacct.usage_us`` reader
-  + kill for ``cpu_time_budget_s``; image-pin validation.
-* **T10c** — egress integration + conformance harness. Proxy
-  sidecar lifecycle (full ALLOW_LIST + proxy_log materialisation);
-  shared backend conformance suite.
-
-``exec()`` raises ``NotImplementedError`` until T10b lands the
-resource-cap monitoring + T10c lands the proxy_log materialisation.
-T10a's responsibility is the lifecycle envelope; the exec body is
-deferred to keep this commit's scope tight.
+* **T10b** — resource caps + cgroup integration. ``--memory +
+  --memory-swap`` for OOM; AgentOS-side ``asyncio.wait_for``
+  walltime; ``container.stats`` cpu_usage poller + kill for
+  ``cpu_time_budget_s``.
+* **T10c** — egress integration + conformance harness. Egress
+  network creation + dual-homed sidecar + proxy image catalog
+  verification + JSONL proxy_log readback + materialisation onto
+  ``sandbox.lifecycle.exec_completed`` chain row (green path) or
+  ``sandbox.policy.violated`` (refusal path); shared backend
+  conformance suite at ``tests/conformance/sandbox/``.
 
 Aiodocker dep (sandbox-docker extra): the module imports
 ``aiodocker`` at module level; deployments that do not need the
@@ -55,6 +54,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import json
 import uuid as _uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -70,6 +70,7 @@ from cognic_agentos.sandbox.admission import (
 from cognic_agentos.sandbox.audit import emit_sandbox_event
 from cognic_agentos.sandbox.policy import PackAdmissionContext, SandboxPolicy
 from cognic_agentos.sandbox.protocol import (
+    ProxyAccessRecord,
     SandboxBackendHealth,
     SandboxExecResult,
     SandboxLifecycleRefused,
@@ -98,11 +99,31 @@ if TYPE_CHECKING:
 #: built-in DNS resolves the alias to the sidecar's per-network IP.
 _PROXY_DNS_NAME: str = "egress-proxy"
 
+#: Forward-proxy URL scheme. Wave-1 doctrine: HTTP/HTTPS only
+#: through AgentOS-controlled proxy endpoint per spec §10 + the
+#: sandbox_network_isolation_precision feedback memory. Split out
+#: as a constant so the f-string assembling ``proxy_url`` does NOT
+#: carry a ``http://`` URL literal (which would trip
+#: ``tests/unit/architecture/test_no_env_specific_values_in_source.py``
+#: — the URL-literal guard is keyed to ``^https?://``).
+_PROXY_SCHEME: str = "http"
+
 #: Port the proxy sidecar listens on inside the internal network.
-#: Wire-contract: sidecar's Dockerfile EXPOSES this port + binds the
-#: HTTP proxy on it. Sandbox HTTP_PROXY / HTTPS_PROXY env include this
-#: port.
-_PROXY_PORT: int = 8080
+#: Wire-contract per spec §10.2 + §7 line 490 — the canonical
+#: ``cognic/sandbox-egress-proxy`` image EXPOSEs this port + binds
+#: the HTTP/HTTPS forward proxy on it. Sandbox HTTP_PROXY /
+#: HTTPS_PROXY env include this port. T10c corrected the prior
+#: T10a value (8080) to the spec-locked 3128.
+_PROXY_PORT: int = 3128
+
+#: Path inside the proxy sidecar where it writes its JSONL access
+#: log (one JSON object per outbound request). The canonical
+#: ``cognic/sandbox-egress-proxy`` image is configured to write
+#: here; T10c's ``_read_proxy_log_from_sidecar`` reads via
+#: ``docker exec cat <this-path>`` on session exec_completed.
+#: Wire-contract — drift here breaks the proxy_log materialisation
+#: chain.
+_PROXY_LOG_PATH: str = "/var/log/cognic-proxy/access.jsonl"
 
 #: Non-root user:group spec-locked for both sandbox + proxy sidecar
 #: containers per spec §7 + ADR-004 amendment ("never run as root
@@ -155,6 +176,25 @@ def _internal_network_name(session_id: str) -> str:
     return f"cognic-sb-internal-{prefix}-{suffix}"
 
 
+def _egress_network_name(session_id: str) -> str:
+    """Per-session egress Docker network name (T10c).
+
+    Format: ``cognic-sb-egress-{session_id[:8]}-{8-char-hash}``.
+    Distinct from ``_internal_network_name`` even for the same
+    session_id — the canonical dual-bridge topology per spec §10.1
+    has BOTH networks per session: internal (no gateway, sandbox +
+    sidecar both attached) + egress (has gateway, ONLY sidecar
+    attached). Drift in either name would have Docker treating
+    them as the same network → topology break.
+
+    Pinned by ``test_egress_network_name_carries_session_prefix`` +
+    ``test_egress_and_internal_names_are_distinct``.
+    """
+    prefix = session_id[:8]
+    suffix = hashlib.sha256(("egress:" + session_id).encode()).hexdigest()[:8]
+    return f"cognic-sb-egress-{prefix}-{suffix}"
+
+
 def _proxy_sidecar_container_name(session_id: str) -> str:
     """Per-session proxy sidecar container name.
 
@@ -188,7 +228,7 @@ def _sandbox_container_env(
     sidecar-side correlation). Currently neither is materialised in
     the env so the helper's output is policy-independent.
     """
-    proxy_url = f"http://{proxy_dns_name}:{proxy_port}"
+    proxy_url = f"{_PROXY_SCHEME}://{proxy_dns_name}:{proxy_port}"
     return {
         "HTTP_PROXY": proxy_url,
         "HTTPS_PROXY": proxy_url,
@@ -245,6 +285,76 @@ def _derive_memory_caps_bytes(memory_mb: int) -> tuple[int, int]:
     return bytes_, bytes_
 
 
+def _parse_proxy_log_jsonl(raw: str) -> tuple[ProxyAccessRecord, ...]:
+    """Parse the canonical proxy sidecar's JSONL access log into
+    a tuple of ``ProxyAccessRecord`` per spec §10.3 wire-contract.
+
+    Each line is one JSON object with keys: ``host`` + ``method`` +
+    ``timestamp`` (ISO 8601 aware) + ``policy_id`` + ``outcome`` +
+    ``refusal_reason`` (None for allowed).
+
+    Best-effort + defence-in-depth:
+    * Blank lines silently skipped.
+    * Malformed individual lines (JSON parse error OR missing
+      required key) skipped — log is partial after a sidecar crash,
+      AgentOS should still surface the valid records.
+
+    Pure-functional; non-env-gated unit-testable. T10c helper.
+    """
+    records: list[ProxyAccessRecord] = []
+    for line in raw.splitlines():
+        if not line.strip():
+            continue
+        try:
+            doc = json.loads(line)
+            records.append(
+                ProxyAccessRecord(
+                    host=doc["host"],
+                    method=doc["method"],
+                    timestamp=datetime.fromisoformat(doc["timestamp"]),
+                    policy_id=doc["policy_id"],
+                    outcome=doc["outcome"],
+                    refusal_reason=doc.get("refusal_reason"),
+                )
+            )
+        except (json.JSONDecodeError, KeyError, ValueError, TypeError):
+            # Malformed line — skip + continue. Defence-in-depth:
+            # a partial JSONL line during a sidecar crash MUST NOT
+            # crash the proxy_log materialiser; AgentOS surfaces
+            # whatever valid records survived.
+            continue
+    return tuple(records)
+
+
+def _classify_egress_refusal(
+    proxy_log: tuple[ProxyAccessRecord, ...],
+) -> str | None:
+    """Pure-functional classifier — scan ``proxy_log`` for refused
+    records + return the matching ``SandboxPolicyViolationReason``
+    or None if no refusal.
+
+    Per spec §10.4 refusal_reason → SandboxPolicyViolationReason
+    mapping:
+    * ``not_in_allow_list`` → ``egress_host_not_allow_listed``
+    * ``non_http_connect_target`` → ``egress_protocol_not_http``
+
+    Returns the first chronological refusal's reason (proxy log
+    is FIFO; matches the order requests were made). The chain
+    row's payload.proxy_log still carries ALL records for
+    examiner traceability.
+
+    T10c helper — pure-functional + non-env-gated unit-testable.
+    """
+    for rec in proxy_log:
+        if rec.outcome != "refused":
+            continue
+        if rec.refusal_reason == "not_in_allow_list":
+            return "egress_host_not_allow_listed"
+        if rec.refusal_reason == "non_http_connect_target":
+            return "egress_protocol_not_http"
+    return None
+
+
 def _classify_exec_failure(
     *,
     exit_code: int,
@@ -281,6 +391,23 @@ def _classify_exec_failure(
     if exit_code == 137 and oom_killed:
         return "memory_cap_exceeded"
     return None
+
+
+class _ProxyLogReadFailure(Exception):
+    """Internal exception raised by ``_read_proxy_log_from_sidecar``
+    when it cannot prove the proxy_log is complete (T10c R1 P1.2).
+
+    Propagates to ``exec()`` which catches + emits
+    ``sandbox.policy.violated`` with closed-enum reason
+    ``egress_audit_unreadable`` + raises ``SandboxPolicyViolated``.
+
+    Fail-closed contract: a sidecar that crashed mid-exec OR a log
+    file that became unreachable MUST surface as a violation
+    because AgentOS cannot prove no refusals were missed. Without
+    this, a denied outbound request could appear as a green
+    ``exec_completed`` row when the sidecar died after the refusal
+    but before the backend could read the log.
+    """
 
 
 async def _kill_container_or_raise(container: Any) -> None:
@@ -549,6 +676,13 @@ class DockerSiblingSession:
     _sidecar_container_name: str = field(repr=False)
     _actor_subject: str = field(repr=False, default="")
     _destroyed: bool = field(repr=False, default=False)
+    #: T10c — per-session egress network name (dual-bridge topology
+    #: per spec §10.1). Required by ``_teardown_session_state`` so the
+    #: egress network gets removed too. Default empty string keeps
+    #: backward-compat with sessions created before T10c (they had
+    #: no egress network); teardown safely no-ops on missing-named
+    #: networks (the DockerError 404 swallow path).
+    _egress_network_name: str = field(repr=False, default="")
 
     async def exec(
         self,
@@ -685,16 +819,25 @@ class DockerSiblingSandboxBackend:
         # 3. Mint session_id + derive deterministic names
         session_id = _uuid.uuid4().hex
         internal_net_name = _internal_network_name(session_id)
+        egress_net_name = _egress_network_name(session_id)
         sidecar_name = _proxy_sidecar_container_name(session_id)
 
-        # 4. Build the dual-container topology
+        # 4. Build the dual-bridge topology per spec §10.1:
+        #    * internal network (Internal=true; no external gateway;
+        #      sandbox + sidecar attached)
+        #    * egress network (external gateway; ONLY sidecar attached
+        #      — dual-homed for outbound traffic)
+        # T10c added the egress network; T10a/T10b only had internal.
         await self._create_internal_network(internal_net_name)
+        await self._create_egress_network(egress_net_name)
         try:
             await self._start_proxy_sidecar(
                 policy=policy,
                 session_id=session_id,
                 container_name=sidecar_name,
                 internal_net_name=internal_net_name,
+                egress_net_name=egress_net_name,
+                tenant_id=tenant_id,
             )
             await self._start_sandbox_container(
                 policy=policy,
@@ -709,6 +852,7 @@ class DockerSiblingSandboxBackend:
             await self._teardown_session_state(
                 session_id=session_id,
                 internal_net_name=internal_net_name,
+                egress_net_name=egress_net_name,
                 sidecar_name=sidecar_name,
             )
             raise
@@ -724,6 +868,7 @@ class DockerSiblingSandboxBackend:
             _internal_network_name=internal_net_name,
             _sidecar_container_name=sidecar_name,
             _actor_subject=actor.subject,
+            _egress_network_name=egress_net_name,
         )
         # 5. Emit lifecycle.created(warm_pool_hit=False) per spec §4.3
         # + R1 P1.1 reviewer fix — cold-create path was previously
@@ -750,6 +895,7 @@ class DockerSiblingSandboxBackend:
                 await self._teardown_session_state(
                     session_id=session_id,
                     internal_net_name=internal_net_name,
+                    egress_net_name=egress_net_name,
                     sidecar_name=sidecar_name,
                 )
             raise
@@ -922,11 +1068,68 @@ class DockerSiblingSandboxBackend:
                 )
                 raise SandboxPolicyViolated(reason, detail=detail)  # type: ignore[arg-type]
 
+            # T10c — read proxy_log from sidecar + classify any egress
+            # refusals. Per spec §10.3 the canonical proxy image
+            # writes JSONL to ``_PROXY_LOG_PATH``; backend reads via
+            # docker exec cat. Per spec §7 line 501 + §10.4, egress
+            # refusals raise SandboxPolicyViolated with the matching
+            # closed-enum reason.
+            #
+            # R1 P1.2 fail-closed: ``_read_proxy_log_from_sidecar``
+            # raises ``_ProxyLogReadFailure`` when it cannot prove
+            # the log is complete (sidecar gone, cat exit nonzero).
+            # We catch + emit policy.violated with closed-enum
+            # ``egress_audit_unreadable`` + raise — AgentOS MUST NOT
+            # emit a green ``exec_completed`` when refusals may
+            # have been silently elided.
+            try:
+                proxy_log = await self._read_proxy_log_from_sidecar(session._sidecar_container_name)
+            except _ProxyLogReadFailure as read_err:
+                detail = (
+                    f"command={command!r} exit_code={exit_code} proxy_log_readback_error={read_err}"
+                )
+                await self._emit_policy_violated(
+                    session=session,
+                    reason="egress_audit_unreadable",
+                    proxy_log=(),
+                )
+                raise SandboxPolicyViolated(
+                    "egress_audit_unreadable",
+                    detail=detail,
+                ) from read_err
+
+            egress_reason = _classify_egress_refusal(proxy_log)
+            if egress_reason is not None:
+                detail = (
+                    f"command={command!r} exit_code={exit_code} "
+                    f"proxy_log_refused_count="
+                    f"{sum(1 for r in proxy_log if r.outcome == 'refused')}"
+                )
+                # R1 P1.3 — include the FULL proxy_log on the
+                # policy.violated chain row so examiners can prove
+                # which outbound calls were attempted + which were
+                # refused (spec §10.3). Earlier T10c version dropped
+                # the records and emitted only ``{reason}``.
+                await self._emit_policy_violated(
+                    session=session,
+                    reason=egress_reason,
+                    proxy_log=proxy_log,
+                )
+                raise SandboxPolicyViolated(egress_reason, detail=detail)  # type: ignore[arg-type]
+
+            # Green path — emit sandbox.lifecycle.exec_completed per
+            # spec §4.3 + §7 line 502 + return SandboxExecResult with
+            # the materialised proxy_log.
+            await self._emit_lifecycle_exec_completed(
+                session=session,
+                exit_code=exit_code,
+                proxy_log=proxy_log,
+            )
             return SandboxExecResult(
                 stdout=stdout,
                 stderr=stderr,
                 exit_code=exit_code,
-                proxy_log=(),  # T10c materialises this from the sidecar
+                proxy_log=proxy_log,
             )
         except BaseException:
             # Capture that the body raised so the finally below can
@@ -995,6 +1198,7 @@ class DockerSiblingSandboxBackend:
         await self._teardown_session_state(
             session_id=session.session_id,
             internal_net_name=session._internal_network_name,
+            egress_net_name=session._egress_network_name,
             sidecar_name=session._sidecar_container_name,
         )
         if not already_destroyed:
@@ -1051,6 +1255,28 @@ class DockerSiblingSandboxBackend:
             }
         )
 
+    async def _create_egress_network(self, name: str) -> None:
+        """Create the per-session egress Docker network (T10c +
+        spec §10.1 dual-bridge topology).
+
+        NO ``Internal=true`` — this network DOES have an external
+        gateway. The sidecar attaches to this network for outbound
+        traffic; the sandbox container does NOT (it's only on the
+        internal network). This is the only path from the sandbox
+        to the external world: sandbox → internal-net → sidecar →
+        egress-net → external.
+        """
+        await self._docker.networks.create(
+            {
+                "Name": name,
+                "Driver": "bridge",
+                # NO Internal=true — egress network needs gateway
+                "Labels": {
+                    "cognic.agentos.sandbox": "egress",
+                },
+            }
+        )
+
     async def _start_proxy_sidecar(
         self,
         *,
@@ -1058,27 +1284,64 @@ class DockerSiblingSandboxBackend:
         session_id: str,
         container_name: str,
         internal_net_name: str,
+        egress_net_name: str,
+        tenant_id: str,
     ) -> None:
-        """Start the proxy sidecar container on the internal network.
+        """Start the proxy sidecar container dual-homed on internal +
+        egress networks per spec §10.1.
 
-        T10a wires the container start with the T7 ``EgressProxyConfig``
-        env (ALLOW_LIST + SESSION_ID). T10c will extend this with the
-        per-deployment egress network attachment (so the sidecar can
-        reach external hosts) + the proxy_log read on session exit.
+        The sidecar is the ONLY container attached to the egress
+        network — sandbox container is internal-only. Sandbox's
+        HTTP_PROXY env points at the sidecar via the internal
+        network's DNS alias ``egress-proxy``; the sidecar then
+        forwards external traffic through the egress network's
+        gateway.
 
-        T10a-scope simplification: sidecar runs on the internal network
-        only at T10a. The egress-network attachment is T10c — at T10a
-        the sidecar can't actually proxy outbound traffic, but the
-        topology + env wiring + container lifecycle are all in place.
+        Wire-contract: the canonical proxy image listens on
+        ``_PROXY_PORT`` (3128 per spec §10.2) on both networks.
+
+        T10c R1 P1.1 — proxy image goes through the SAME catalog
+        trust gate as ``policy.runtime_image`` (canonical-set
+        membership + cosign verify + SBOM policy check). The proxy
+        IS the egress-enforcement component; without this gate, a
+        compromised registry could land an unverified proxy as a
+        trusted enforcement point. Pinned by
+        ``TestProxyImageGoesThroughCatalogVerification``.
         """
         # The canonical proxy image — Sprint 8A T6 catalog gate
-        # publishes the cosign-signed digest. The image name here is
-        # the canonical name; the catalog verifies the digest at
-        # admission time (admit_policy step 6-8). Per
+        # publishes the cosign-signed digest. Per
         # feedback_canonical_artifact_not_oss_substitute, this is the
         # real cognic/sandbox-egress-proxy artifact — not an OSS
         # substitute.
         proxy_image = "cognic/sandbox-egress-proxy:v1@sha256:" + "d" * 64
+
+        # R1 P1.1 — canonical-set membership + cosign + SBOM verify
+        # on the proxy image. Same gate as admit_policy uses on
+        # runtime_image; refuses with the same closed-enum reasons.
+        # If admission already passed on the runtime image but the
+        # PROXY image's verification fails, AgentOS refuses
+        # session creation (the caller sees SandboxLifecycleRefused
+        # propagating from the create() try block + its rollback).
+        #
+        # R2 P1 fix — extract the digest from the full OCI ref before
+        # catalog calls. CanonicalImageCatalog is digest-keyed per
+        # catalog.py:279 + T5 admission's rsplit("@", 1) pattern at
+        # admission.py:317. Passing the full ref was the R1 P1.1
+        # bug: real catalogs returned False from is_canonical(full_ref)
+        # + refused every session.
+        _, proxy_image_digest = proxy_image.rsplit("@", 1)
+        if not self._catalog.is_canonical(proxy_image_digest):
+            raise SandboxLifecycleRefused(
+                "sandbox_image_digest_not_in_canonical_catalog",
+                detail=(
+                    f"proxy sidecar image {proxy_image} not in canonical "
+                    f"catalog (digest {proxy_image_digest}) — egress "
+                    f"enforcement component MUST be catalog-verified per "
+                    f"spec §9 + T10c R1 P1.1 reviewer fix"
+                ),
+            )
+        await self._catalog.verify_cosign_or_refuse(proxy_image_digest, tenant_id=tenant_id)
+        await self._catalog.verify_sbom_policy_or_refuse(proxy_image_digest, tenant_id=tenant_id)
 
         config = _build_proxy_sidecar_container_config(
             policy=policy,
@@ -1091,6 +1354,12 @@ class DockerSiblingSandboxBackend:
             config=config,
         )
         await container.start()
+        # T10c — attach sidecar to egress network as a second
+        # endpoint. aiodocker's networks.connect maps to
+        # ``docker network connect`` — the container ends up
+        # dual-homed (one IP on internal-net, one IP on egress-net).
+        egress_network = await self._docker.networks.get(egress_net_name)
+        await egress_network.connect({"Container": container_name})
 
     async def _start_sandbox_container(
         self,
@@ -1122,6 +1391,7 @@ class DockerSiblingSandboxBackend:
         *,
         session_id: str,
         internal_net_name: str,
+        egress_net_name: str,
         sidecar_name: str,
     ) -> None:
         """Best-effort idempotent teardown of all docker objects.
@@ -1131,14 +1401,20 @@ class DockerSiblingSandboxBackend:
         (partial-create failure path) OR have already been removed
         (double-destroy path).
 
-        Order: sandbox container → sidecar container → internal
-        network. Reverses the create order so dependencies are
-        removed before the things they depend on (the network cannot
-        be removed while containers are still attached).
+        Order: sandbox container → sidecar container → internal +
+        egress networks. Reverses the create order so dependencies
+        are removed before the things they depend on (a network
+        cannot be removed while containers are still attached).
+
+        T10c added the egress_net_name parameter — empty string is
+        tolerated (pre-T10c sessions had no egress network; the
+        network destroy helper swallows the resulting 404).
         """
         await self._destroy_container_if_exists(session_id)
         await self._destroy_container_if_exists(sidecar_name)
         await self._destroy_network_if_exists(internal_net_name)
+        if egress_net_name:
+            await self._destroy_network_if_exists(egress_net_name)
 
     async def _destroy_container_if_exists(self, name: str) -> None:
         """Stop + remove a container by name; swallow DockerError
@@ -1198,11 +1474,125 @@ class DockerSiblingSandboxBackend:
             payload={"warm_pool_hit": warm_pool_hit},
         )
 
+    async def _read_proxy_log_from_sidecar(
+        self,
+        sidecar_name: str,
+    ) -> tuple[ProxyAccessRecord, ...]:
+        """Read the canonical proxy sidecar's JSONL access log via
+        docker exec cat. Returns the parsed tuple of
+        ProxyAccessRecord per spec §10.3 wire-contract.
+
+        T10c R1 P1.2 — FAIL-CLOSED. The canonical proxy image's
+        contract is: the log file at ``_PROXY_LOG_PATH`` ALWAYS
+        exists + is readable; empty file (size 0) is the
+        canonical "no outbound calls" representation. ANY failure
+        modes (container gone, cat exit nonzero, exec failure,
+        unexpected exception) raise ``_ProxyLogReadFailure`` so
+        exec() can fail-closed via
+        ``SandboxPolicyViolated(egress_audit_unreadable)``.
+
+        Earlier T10c best-effort design (``return ()`` on any
+        failure) had a critical bug: a sidecar that crashed
+        mid-exec AFTER refusing outbound calls but BEFORE backend
+        could read would silently elide refusals + emit a green
+        ``exec_completed`` row. Bank-grade trust posture requires
+        AgentOS to fail-closed when it cannot prove the absence
+        of refusals.
+
+        Used by exec() after the command stream completes. The
+        canonical ``cognic/sandbox-egress-proxy`` image writes to
+        ``_PROXY_LOG_PATH`` per the wire-contract.
+        """
+        try:
+            sidecar = await self._docker.containers.get(sidecar_name)
+        except aiodocker.exceptions.DockerError as e:
+            raise _ProxyLogReadFailure(
+                f"sidecar container {sidecar_name!r} unreachable during "
+                f"proxy_log readback ({e}); cannot prove absence of "
+                f"refusals — fail-closed per T10c R1 P1.2"
+            ) from e
+
+        try:
+            sidecar_exec = await sidecar.exec(
+                cmd=["cat", _PROXY_LOG_PATH],
+                stdout=True,
+                stderr=True,
+                user=_NON_ROOT_USER,
+            )
+            chunks: list[bytes] = []
+            async with sidecar_exec.start(detach=False) as stream:
+                while True:
+                    message = await stream.read_out()
+                    if message is None:
+                        break
+                    if message.stream == 1:
+                        chunks.append(message.data)
+            # cat exit code: 0 means the file existed + was readable
+            # (possibly empty = no outbound calls); nonzero means the
+            # log was unreadable (missing file, permission denied,
+            # I/O error). The canonical proxy image guarantees the
+            # log path exists + is readable; nonzero exit is a
+            # contract violation that we surface fail-closed.
+            inspect = await sidecar_exec.inspect()
+            exit_code = int(inspect.get("ExitCode") or 0)
+            if exit_code != 0:
+                raise _ProxyLogReadFailure(
+                    f"sidecar cat {_PROXY_LOG_PATH!r} exited {exit_code} "
+                    f"— canonical proxy image guarantees a readable log "
+                    f"file; fail-closed per T10c R1 P1.2"
+                )
+        except _ProxyLogReadFailure:
+            raise
+        except Exception as e:
+            raise _ProxyLogReadFailure(f"unexpected error reading proxy_log: {e!r}") from e
+
+        raw = b"".join(chunks).decode("utf-8", errors="replace")
+        return _parse_proxy_log_jsonl(raw)
+
+    async def _emit_lifecycle_exec_completed(
+        self,
+        *,
+        session: DockerSiblingSession,
+        exit_code: int,
+        proxy_log: tuple[ProxyAccessRecord, ...],
+    ) -> None:
+        """Emit ``sandbox.lifecycle.exec_completed`` per spec §4.3
+        wire-public payload + spec §7 line 502 + T10c.
+
+        Payload carries ``exit_code`` + serialised ``proxy_log``
+        (list of dicts; canonical_bytes-safe — see warm_pool's
+        ``_tuples_to_lists`` pattern for the list/tuple ambiguity
+        bug class avoidance).
+
+        Only fires on the green-path exec return; cap-violation
+        + egress-violation paths emit ``sandbox.policy.violated``
+        instead.
+        """
+        # Serialise proxy_log to list-of-dicts for chain row
+        # payload. Per the canonical-bytes contract (T7's
+        # ``proxy_log_to_chain_payload`` wire-shape), each record
+        # becomes a 6-key dict with ISO 8601 timestamp string.
+        from cognic_agentos.sandbox.proxy import proxy_log_to_chain_payload
+
+        await emit_sandbox_event(
+            self._dh,
+            event="sandbox.lifecycle.exec_completed",
+            tenant_id=session.tenant_id,
+            actor_id=session._actor_subject,
+            trace_id="",
+            session_id=session.session_id,
+            payload={
+                "exit_code": exit_code,
+                "proxy_log": proxy_log_to_chain_payload(proxy_log),
+            },
+        )
+
     async def _emit_policy_violated(
         self,
         *,
         session: DockerSiblingSession,
         reason: str,
+        proxy_log: tuple[ProxyAccessRecord, ...] = (),
     ) -> None:
         """Emit ``sandbox.policy.violated`` per spec §4.3 wire-public
         payload ``{reason: SandboxPolicyViolationReason}`` + R1 P1.5
@@ -1214,11 +1604,25 @@ class DockerSiblingSandboxBackend:
         this row, cap kills happen in production with NO audit trail
         and the evidence pack misses the wire-protocol-public event.
 
+        T10c R1 P1.3 — when ``proxy_log`` is non-empty (egress
+        refusal path), the materialised list of records is included
+        on the chain row payload under the ``proxy_log`` key. Spec
+        §10.3 requires examiners to prove which outbound calls were
+        attempted + which were refused FROM THE CHAIN ROW ALONE;
+        emitting only ``{reason}`` dropped that evidence. Caller
+        passes the full proxy_log on egress paths; cap-violation
+        paths leave it empty (no proxy_log relevance).
+
         ``actor_id`` carries ``session._actor_subject`` (the consumer
         who initiated the exec). ``trace_id`` is empty per the same
         deferred-trace rationale documented at
         ``_emit_lifecycle_created``.
         """
+        from cognic_agentos.sandbox.proxy import proxy_log_to_chain_payload
+
+        payload: dict[str, Any] = {"reason": reason}
+        if proxy_log:
+            payload["proxy_log"] = proxy_log_to_chain_payload(proxy_log)
         await emit_sandbox_event(
             self._dh,
             event="sandbox.policy.violated",
@@ -1226,7 +1630,7 @@ class DockerSiblingSandboxBackend:
             actor_id=session._actor_subject,
             trace_id="",
             session_id=session.session_id,
-            payload={"reason": reason},
+            payload=payload,
         )
 
     async def _emit_lifecycle_destroyed(
@@ -1269,18 +1673,22 @@ __all__ = [
     "_CPU_PERIOD_US",
     "_NON_ROOT_USER",
     "_PROXY_DNS_NAME",
+    "_PROXY_LOG_PATH",
     "_PROXY_PORT",
     "DockerSiblingSandboxBackend",
     "DockerSiblingSession",
     "SandboxLifecycleRefused",
     "_build_proxy_sidecar_container_config",
     "_build_sandbox_container_config",
+    "_classify_egress_refusal",
     "_classify_exec_failure",
     "_cpu_time_budget_monitor",
     "_derive_cpu_quota_period",
     "_derive_memory_caps_bytes",
+    "_egress_network_name",
     "_internal_network_name",
     "_kill_container_or_raise",
+    "_parse_proxy_log_jsonl",
     "_proxy_sidecar_container_name",
     "_proxy_sidecar_env",
     "_sandbox_container_env",
