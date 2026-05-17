@@ -14,6 +14,83 @@
 
 ---
 
+## Post-T5 implementation notes (added 2026-05-17 after T5 commit `4967ce8` + R2)
+
+This plan was authored at T2 with the assumption that T5 could import
+from yet-unlanded T6 + T8 modules. Three drifts surfaced at T5
+implementation time and were resolved with user authorization; T6
+and T8 implementors MUST read these notes before consuming the T5
+code blocks below verbatim.
+
+1. **Protocols + sentinel live in `sandbox/admission.py`, NOT in T6/T8 files.**
+   The T5 plan-block code (lines ~1015-1016 + ~1376-1380) imports
+   `CanonicalImageCatalog` from `sandbox.catalog` and
+   `CredentialAdapter` + `KernelDefaultCredentialAdapter` from
+   `sandbox.credentials`. The committed T5 implementation
+   ([4967ce8](#)) declares **`CatalogProtocol` + `CredentialAdapter`
+   Protocol + `KernelDefaultCredentialAdapter` concrete sentinel
+   class** in `sandbox/admission.py` so T5 is independently
+   compilable. T6 ships the concrete `CanonicalImageCatalog`
+   structurally conforming to `CatalogProtocol`; T8 may either
+   re-export the sentinel from `sandbox/credentials` for symmetry
+   OR move its canonical home there (rewriting T5's import).
+   Per the "consumer-owned Protocol when downstream not landed"
+   resolution rule. (T5 R0 P3 doctrine decision.)
+
+2. **Settings fields are `sandbox_per_tenant_max_*` (prefixed), NOT bare `per_tenant_max_*`.**
+   The T5 plan-block mocks (e.g. line ~1086-1088) use unprefixed
+   `MagicMock(per_tenant_max_cpu=4.0, ...)`. The committed T5
+   implementation extends `core/config.py:Settings` with three
+   sandbox-prefixed fields (`sandbox_per_tenant_max_cpu` /
+   `sandbox_per_tenant_max_memory` /
+   `sandbox_per_tenant_max_walltime`) per the in-repo
+   sectioning convention (`ui_event_stream_*`, `adapters_*`).
+   `admit_policy` + tests use the prefixed names.
+
+3. **Rego decision-point is `data.cognic.sandbox.admit.allow` (the boolean expression), NOT bare `data.cognic.sandbox.admit` (the package); `OPAEngine.evaluate` is kw-only.**
+   The T5 plan-block code (line ~1497-1521) calls
+   `rego_engine.evaluate("data.cognic.sandbox.admit", input={...})`
+   positionally and reads `.allowed` / `.deny_reason`. Three
+   fixups in the committed implementation:
+   * Real `OPAEngine.evaluate` signature at
+     `core/policy/engine.py:269` is kw-only `evaluate(*,
+     decision_point: str, input: dict)`.
+   * Decision-point points at the `.allow` boolean expression
+     INSIDE the package (spec §6.1 step 9 + §816 + §920) — NOT
+     the bare package, which would return a dict and trip
+     `RegoEvaluationError` once T11's real bundle lands per
+     `core/policy/engine.py:296-298`. (T5 R1 P1 BLOCKING fix.)
+   * `Decision` shape uses `.allow` (not `.allowed`) +
+     `.reasoning` (not `.deny_reason`) per
+     `core/policy/engine.py:133`.
+
+   T9 (sandbox.rego bundle) authors MUST declare the `allow`
+   rule INSIDE the `data.cognic.sandbox.admit` package per this
+   wire-contract.
+
+**Affected downstream tasks:**
+* **T6 (this task next)** — the catalog implementation must
+  structurally conform to `CatalogProtocol` declared in
+  `sandbox/admission.py` (4 methods: 2 sync `is_canonical` /
+  `is_tenant_allow_listed` + 2 async `verify_cosign_or_refuse` /
+  `verify_sbom_policy_or_refuse`). Adding `CanonicalImageCatalog`
+  as a Protocol subclass is OPTIONAL — structural conformance is
+  what `admit_policy` needs.
+* **T8** — `sandbox/credentials.py` becomes one of: (a) a
+  re-export shim that does `from cognic_agentos.sandbox.admission
+  import CredentialAdapter, KernelDefaultCredentialAdapter`
+  (cheapest), (b) the new canonical home with `admission.py`
+  importing back from it (cyclic-resolve via TYPE_CHECKING),
+  or (c) a full move that updates `admission.py` to import from
+  `credentials`. Decision is T8's; the user's preference at T5
+  R0 was option (a) re-export shim.
+* **T9 (sandbox.rego)** — bundle MUST declare
+  `package cognic.sandbox.admit` with a top-level `allow := false`
+  default + explicit allow rules per the `.allow`-suffix
+  wire-contract.
+
+---
+
 ## Source-doctrine references
 
 | Doc | Commit | Scope |
@@ -981,6 +1058,8 @@ Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
 ---
 
 ## Task T5 — Admission pipeline (Stage-2)
+
+> **DONE (committed at `4967ce8`). Plan-vs-reality fixups applied — see "Post-T5 implementation notes" at top of file before re-reading the code blocks below verbatim.** The committed implementation declares Protocols in `sandbox/admission.py`, uses `sandbox_per_tenant_max_*` Settings prefix, and points the Rego decision-point at `data.cognic.sandbox.admit.allow` (kw-only `OPAEngine.evaluate`).
 
 **Scope:** the async admission seam shared across all backends. Calls Stage-1 pure validator + then runs catalog + cosign + SBOM + Rego + credential-adapter + high-risk-tier checks in order, refusing fail-closed on the first failure.
 
@@ -2229,6 +2308,8 @@ Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
 ---
 
 ## Task T8 — CredentialAdapter Protocol + fail-loud stub (NOT-CC; replaced in Sprint 10)
+
+> **READ "Post-T5 implementation notes" at top of file FIRST.** The Protocol + sentinel ALREADY landed in `sandbox/admission.py` at T5 commit `4967ce8`. T8's `sandbox/credentials.py` should default to a thin re-export shim (`from cognic_agentos.sandbox.admission import CredentialAdapter, KernelDefaultCredentialAdapter`) per the user's T5 R0 preference, OR explicitly justify moving the canonical home. Do NOT re-declare the Protocol + sentinel as standalone — that creates two source-of-truth modules that drift.
 
 **Scope:** `sandbox/credentials.py` — `CredentialAdapter` Protocol + `KernelDefaultCredentialAdapter` raising `NotImplementedError` pointing to Sprint 10 / ADR-004. Per spec §8. OFF the durable critical-controls gate (stub-only; replaced by Sprint 10's real `VaultCredentialAdapter` which DOES go on the gate).
 
