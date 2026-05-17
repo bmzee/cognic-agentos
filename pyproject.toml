@@ -173,6 +173,21 @@ adapters = [
     # transitively reuses cryptography>=45 (already pinned for cosign).
     "joserfc == 1.6.4",
 ]
+sandbox-docker = [
+    # Sprint 8A T10 — DockerSiblingSandboxBackend uses aiodocker as the
+    # async Docker daemon client. NOT in [project] base deps so a
+    # KubernetesPod-only deployment (Sprint 8B, the production target
+    # per AGENTS.md) does not pull a docker-py-stack dependency it does
+    # not use. The DockerSibling backend module imports aiodocker at
+    # module level — installs without this extra do NOT import the
+    # backend module (the sandbox package re-export is wrapped behind
+    # a try/except ImportError that surfaces a structured
+    # NotImplementedError pointing at this extra when missing).
+    # aiodocker has no upper bound pin because the API surface
+    # (Docker / containers / networks / show / exec / kill) is stable;
+    # bump if a future version breaks the contract.
+    "aiodocker>=0.24",
+]
 
 [project.scripts]
 # Sprint-7A T4 — pack-author console scripts. Both names point at the

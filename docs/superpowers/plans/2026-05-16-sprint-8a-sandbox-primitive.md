@@ -91,6 +91,77 @@ code blocks below verbatim.
 
 ---
 
+## Post-T9 implementation notes (added 2026-05-17 before T10 execution)
+
+T10 is the first integration-heavy task in Sprint 8A — every earlier
+seam (protocol, policy, admission, catalog, audit, proxy, credentials,
+warm_pool) lands together inside `DockerSiblingSandboxBackend`. Per
+user direction (2026-05-17), T10 is **split deliberately** into
+T10a / T10b / T10c with a halt-before-commit per sub-task. This is
+NOT a one-shot "land all then halt" pattern.
+
+**Sub-task scope (locked at T10 pre-flight):**
+
+* **T10a** — lifecycle + dual-container topology. `create()` / `destroy()` /
+  `health()` implementing `SandboxBackend` Protocol; per-session internal
+  Docker network with `Internal=true` + proxy sidecar on internal+egress
+  networks; sandbox `HTTP_PROXY` / `HTTPS_PROXY` env wiring. Also lands the
+  `sandbox_session` `@asynccontextmanager` helper in `sandbox/__init__.py`
+  per spec §288-334 (warm-pool-aware exit routing).
+* **T10b** — resource caps + cgroup integration. `--memory` + `--memory-swap`
+  for OOM kill; AgentOS-side `asyncio.wait_for` walltime; cgroup
+  `cpuacct.usage_us` reader + kill for `cpu_time_budget_s`; image-pin
+  validation. Spec §7 round-3 P2 invariant: `--cpus` throttling under
+  cap is NOT a violation; only `cpu_time_budget_exceeded` fires (and
+  only when set).
+* **T10c** — egress integration + conformance harness. Proxy sidecar
+  lifecycle (build `ALLOW_LIST` + `SESSION_ID` env from
+  `EgressProxyConfig.to_env()`; read proxy_log JSON on exec exit;
+  materialise via `proxy_log_to_chain_payload` onto
+  `sandbox.lifecycle.exec_completed` chain row); shared conformance
+  suite at `tests/conformance/sandbox/` parametrised on backend
+  (Sprint 8B extends with `kubernetes_pod`).
+
+**Pre-flight gap closures:**
+
+1. **`aiodocker` was missing from `pyproject.toml`.** Plan recipe
+   imports `aiodocker.Docker()`; without the dep, `pip install -e .`
+   would leave the DockerSibling backend module unable to import.
+   Resolution: added as `[project.optional-dependencies].sandbox-docker`
+   extra (NOT base) so KubernetesPod-only deployments (Sprint 8B, the
+   production target per AGENTS.md) do not pull a docker-py-stack
+   dependency they don't use. Re-export from `sandbox/__init__.py`
+   wrapped behind a try/except ImportError that surfaces a structured
+   `NotImplementedError` pointing at the extra when missing. Per
+   `feedback_verify_dep_availability_at_implementation`.
+
+2. **`sandbox_session` helper context manager has no implementation
+   yet.** Spec §288-334 declares the contract; T10a lands the
+   implementation as part of the lifecycle wire-up. NOT a separate
+   task — it composes the backend + warm_pool seams that T10a is
+   already integrating.
+
+3. **`cognic/sandbox-egress-proxy` canonical image — REAL artifact,
+   NOT placeholder.** User-locked doctrine 2026-05-17: the canonical
+   proxy image IS the security enforcement point; treating it as
+   placeholder-only would make T10's "secure Docker sibling backend"
+   green while the main egress control is absent. OSS components
+   (tinyproxy / mitmproxy / envoy) ARE allowed only INSIDE the
+   canonical cosign-signed image, OR as clearly-named local fixtures
+   behind an explicit `COGNIC_USE_LOCAL_FIXTURE_PROXY=1` env flag
+   (refused in production profile). Missing canonical artifact at
+   T10c env-gated test time → `pytest.skip(f"canonical artifact
+   {ref} not pullable; ...")` with structured message naming the
+   missing ref, NEVER silent OSS substitution. Per
+   `feedback_canonical_artifact_not_oss_substitute`. T10c carries
+   this as an explicit pre-flight blocker contract.
+
+**Halt cadence:** each of T10a/T10b/T10c ends with a CC
+halt-before-commit gate + per-action authorization token before
+its commit. No "land all then halt" pattern.
+
+---
+
 ## Post-T8 implementation notes (added 2026-05-17 after T8 patch decision)
 
 T8's original plan body (pre-patch) wrote a richer
