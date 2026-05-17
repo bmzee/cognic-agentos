@@ -1260,6 +1260,153 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     # decision-false.  The route handler at ``action_routes.py``
     # owns the HTTP mapping; the gate stays pure-functional.
     ("src/cognic_agentos/portal/api/ui/elicitation_gate.py", 0.95, 0.90),
+    # ------------------------------------------------------------------
+    # Sprint 8A T12 — Sandbox primitive durable critical-controls
+    # modules (gate 63 → 70).
+    # ------------------------------------------------------------------
+    # Per the Sprint-8A design spec §17 "Critical-controls scope"
+    # (``docs/superpowers/specs/2026-05-16-sprint-8a-sandbox-primitive-design.md``)
+    # the entire ``sandbox/`` tree is a stop-rule isolation boundary;
+    # the 7 modules promoted here are the substantive enforcement
+    # surfaces of the sandbox admission + lifecycle + egress + warm-pool
+    # critical path. All ride the same single strict 95% line / 90%
+    # branch floor as Sprint-2/2.5/3/4/5/6/7A/7A2/7B.1-4 modules.
+    #
+    # Floor arithmetic: Sprint 8A lands BEFORE Sprint 10.5 in BUILD_PLAN
+    # phase order (Phase 3 sequence: 8 → 8.5 → 9 → 9.5 → 10 → 10.5 → 11).
+    # Post-7B.4 floor is 63; Sprint 8A adds 7 modules → 70. When
+    # Sprint 10.5 subsequently lands its scheduler modules the floor
+    # extends further.
+    #
+    #   * ``sandbox/protocol.py`` — ``SandboxBackend`` + ``SandboxSession``
+    #     Protocols + ``PackAdmissionContext`` + ``SandboxPolicy`` +
+    #     ``SandboxBackendHealth`` + ``SandboxRefusalReason``
+    #     (wire-protocol-public closed-enum) + ``SandboxPolicyViolationReason``
+    #     (wire-protocol-public closed-enum, 6-value at T10c R1 P1.2) +
+    #     ``SandboxLifecycleEvent`` (8-value event family discriminator
+    #     per ADR-006 amendment). Backend-conformance contract: every
+    #     backend (DockerSibling Wave-1, KubernetesPod Sprint 8B, gVisor/
+    #     Firecracker Wave-2) MUST structurally conform. Drift in any
+    #     Protocol method or closed-enum is wire-protocol-public
+    #     regression that breaks every downstream backend + caller.
+    #   * ``sandbox/policy.py`` — ``SandboxPolicy`` frozen dataclass
+    #     (``@dataclass(frozen=True)`` at ``policy.py:133`` — NOT a
+    #     Pydantic model) + pure synchronous ``validate_policy_shape()``
+    #     (Stage-1 admission glue); ``_validate_egress_host`` RFC 1123
+    #     hostname + HTTP/HTTPS scheme guard feeding
+    #     ``sandbox_policy_egress_host_invalid`` (``policy.py:277,282``)
+    #     + ``sandbox_policy_egress_protocol_not_http``
+    #     (``policy.py:267``) refusals — both values live on the wire-
+    #     public ``SandboxRefusalReason`` Literal at
+    #     ``protocol.py:45-46``. Stage-1 is the cheap shape gate that
+    #     runs BEFORE async Stage-2 admission; a bug here lets malformed
+    #     policies reach the catalog + cosign + Rego layers.
+    #   * ``sandbox/admission.py`` — async ``admit_policy()``; Stage-2
+    #     admission pipeline (catalog + cosign + SBOM + Rego + credential
+    #     adapter + high-risk-tier gate). The substantive trust-gate-
+    #     equivalent decision point shared across all backends. Declares
+    #     the ``CatalogProtocol`` + ``CredentialAdapter`` Protocols
+    #     inline per the ``feedback_consumer_owned_protocol_for_unlanded_dep``
+    #     resolution; ``KernelDefaultCredentialAdapter`` sentinel raises
+    #     ``NotImplementedError`` pointing at Sprint 10 per the
+    #     production-grade rule. Step 6 captures the catalog membership
+    #     bools (canonical-set + tenant-allow-list) as locals BEFORE
+    #     Step 9 threads them into the Rego input dict; pinned by 2 T11
+    #     regression tests so a future refactor can't disconnect the
+    #     Stage-2 catalog check from the Rego rule-4 decision point.
+    #   * ``sandbox/catalog.py`` — ``CanonicalImageCatalog`` + cosign
+    #     subprocess verification + real syft SBOM verification + per-
+    #     tenant allow-list. Spec round-1 P1 promotion — a bug here
+    #     lets untrusted images run; not "thin wiring". Mirrors the
+    #     ``protocol/trust_gate.py`` cosign subprocess invariants
+    #     (no shell, list-form argv, version-pinned, timeout, output
+    #     ignored for parsing).
+    #   * ``sandbox/proxy.py`` — egress proxy config rendering + allow-
+    #     list enforcement + per-request audit-log shaping. Spec round-1
+    #     P1 promotion — the single egress enforcement point; a bug
+    #     here lets forbidden outbound traffic through; not "thin
+    #     wiring". Owns the wire-protocol-public ``ProxyAccessRecord``
+    #     6-field frozen dataclass at ``protocol.py:140-188``
+    #     (``host`` / ``method`` / ``timestamp`` / ``policy_id`` /
+    #     ``outcome`` / ``refusal_reason``) materialised via
+    #     ``proxy_log_to_chain_payload`` at ``proxy.py:238`` into
+    #     ``payload["proxy_log"]`` on ``sandbox.lifecycle.exec_completed``
+    #     (``audit.py:53``) AND on ``sandbox.policy.violated``
+    #     (``audit.py:56``) per the T10c R2 ADR-006 amendment.
+    #     Evidence-boundary helpers validate runtime semantics per
+    #     ``feedback_evidence_boundary_runtime_validation`` (T7 R1-R5
+    #     fixes: tz-aware audit timestamps via ``utcoffset() is not
+    #     None`` at ``proxy.py:320``; joint invariants across closed-
+    #     enum + payload key set — ``outcome='allowed'`` requires no
+    #     ``refusal_reason`` + ``outcome='refused'`` requires one; per
+    #     ``proxy.py:342-357``; unknown-Literal refusals;
+    #     ``# type: ignore`` smuggling guard).
+    #   * ``sandbox/warm_pool.py`` — bounded pool + drain semantics +
+    #     audit emission + ``use_warm_pool=False`` replenishment
+    #     contract. The latency-target enforcement surface (≤500ms P95
+    #     sandbox session create per spec §16 exit criterion). Pool-key
+    #     derivation at ``_derive_pool_key`` (``warm_pool.py:164``) keys
+    #     by ``tenant_id + policy + 5 PackAdmissionContext admission
+    #     fields`` — ``tenant_id`` is part of the key per the T9 R1
+    #     P1 reviewer fix (``warm_pool.py:174``) which closed the
+    #     cross-tenant pool-reuse bug class (admission contexts from
+    #     different tenants that happen to look identical MUST NOT
+    #     share a warm session); pinned by
+    #     ``tests/unit/sandbox/test_warm_pool.py::
+    #     test_checkout_under_different_tenant_id_returns_none``
+    #     (``test_warm_pool.py:641``).
+    #     Capacity-before-eviction + wall-time-vs-idle-time + list/
+    #     tuple ambiguity at ``canonical_bytes`` input — all three
+    #     closed by T9 R1-R3 fixes per
+    #     ``feedback_evidence_boundary_runtime_validation``.
+    #   * ``sandbox/backends/docker_sibling.py`` —
+    #     ``DockerSiblingSandboxBackend``. The actual Wave-1 backend-
+    #     specific enforcement surface: dual-container internal-network
+    #     topology (runtime container + egress-proxy sidecar, both on
+    #     a sandbox-private bridge with ``--network none`` on the
+    #     runtime side per ``feedback_sandbox_network_isolation_precision``);
+    #     cgroup integration for CPU/memory caps; OOM-killer enforcement
+    #     for ``memory_cap_exceeded``; AgentOS-side walltime timer for
+    #     ``walltime_cap_exceeded``. The ``Wave-1 DinD`` doctrinal-
+    #     vs-implementation gap per ``feedback_precise_security_terminology``
+    #     resolved at T10a: backend name is ``DockerSiblingSandboxBackend``
+    #     (not ``DindBackend``); ADR-004 amendment ships the clarifying
+    #     "Wave-1 DinD = sibling-pattern" language alongside Sprint 8A.
+    #     Architecture-discipline test (URL-literal / port-int guards
+    #     at ``tests/unit/architecture/``) catches f-string URL drift —
+    #     concrete loss case at T10c per
+    #     ``feedback_full_gate_pre_commit``.
+    #
+    # OFF the durable gate per spec §17 + Doctrine F (with explicit
+    # carve-out rationale; same precedent as ``packs/conformance/__init__.py``
+    # + ``portal/api/packs/router.py``):
+    #
+    #   * ``sandbox/audit.py`` — thin chain-row converter for the
+    #     8 sandbox lifecycle event taxonomies. The substantive
+    #     audit-chain invariants (hash-chain integrity, canonical-form
+    #     determinism, ISO 42001 control tagging) are enforced upstream
+    #     by the on-gate ``core/audit.py`` + ``core/decision_history.py``
+    #     + ``core/canonical.py``. Bugs in audit.py's event-payload-
+    #     rendering surface through the 8-event taxonomy unit test +
+    #     the integration tests of ``backends/docker_sibling.py``. CC
+    #     risk covered upstream; promoting here would measure runtime-
+    #     import + delegation lines only.
+    #   * ``sandbox/credentials.py`` — re-export shim (38 lines; zero
+    #     new logic) per the ``feedback_consumer_owned_protocol_for_unlanded_dep``
+    #     resolution. The canonical home of ``CredentialAdapter`` +
+    #     ``KernelDefaultCredentialAdapter`` is ``sandbox/admission.py``
+    #     (which IS on the gate); ``sandbox/credentials.py`` re-exports
+    #     them so Sprint 10's real ``VaultCredentialAdapter`` can
+    #     replace the canonical-home module without rewriting consumers
+    #     that import from ``sandbox.credentials``. Sprint 10's real
+    #     adapter goes ON the gate when it lands.
+    ("src/cognic_agentos/sandbox/protocol.py", 0.95, 0.90),
+    ("src/cognic_agentos/sandbox/policy.py", 0.95, 0.90),
+    ("src/cognic_agentos/sandbox/admission.py", 0.95, 0.90),
+    ("src/cognic_agentos/sandbox/catalog.py", 0.95, 0.90),
+    ("src/cognic_agentos/sandbox/proxy.py", 0.95, 0.90),
+    ("src/cognic_agentos/sandbox/warm_pool.py", 0.95, 0.90),
+    ("src/cognic_agentos/sandbox/backends/docker_sibling.py", 0.95, 0.90),
 )
 
 

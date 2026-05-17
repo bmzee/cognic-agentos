@@ -35,10 +35,10 @@ import pytest
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _GATE_TOOL_PATH = _REPO_ROOT / "tools" / "check_critical_coverage.py"
 
-#: Entry count after the Sprint 7B.4 T13 promotions (60 at the 7B.3
-#: T7 close + 3 UI event-stream modules = 63). Bump this in lockstep
-#: with any deliberate ``_CRITICAL_FILES`` change.
-_EXPECTED_ENTRY_COUNT = 63
+#: Entry count after the Sprint 8A T12 promotions (63 at the 7B.4
+#: T13 close + 7 sandbox modules = 70). Bump this in lockstep with
+#: any deliberate ``_CRITICAL_FILES`` change.
+_EXPECTED_ENTRY_COUNT = 70
 
 #: The 5 modules Sprint 7B.3 promoted to the durable gate, each by its
 #: own landing commit (T3-T6 panels + T7 composer). All ride the
@@ -183,5 +183,66 @@ def test_sprint_7b4_off_gate_modules_absent(gate_tool: ModuleType, off_gate_modu
 
     A future edit that promotes any of them without revisiting the
     doctrine fails here, forcing a deliberate review."""
+    paths = {path for path, _line, _branch in gate_tool._CRITICAL_FILES}
+    assert off_gate_module not in paths
+
+
+#: The 7 modules Sprint 8A T12 promoted to the durable gate. Per the
+#: Sprint-8A design spec §17 "Critical-controls scope". All ride the
+#: standard 95%-line / 90%-branch floor.
+_SPRINT_8A_GATE_MODULES = (
+    "src/cognic_agentos/sandbox/protocol.py",
+    "src/cognic_agentos/sandbox/policy.py",
+    "src/cognic_agentos/sandbox/admission.py",
+    "src/cognic_agentos/sandbox/catalog.py",
+    "src/cognic_agentos/sandbox/proxy.py",
+    "src/cognic_agentos/sandbox/warm_pool.py",
+    "src/cognic_agentos/sandbox/backends/docker_sibling.py",
+)
+
+#: Modules the Sprint 8A spec §17 deliberately keeps OFF the durable
+#: gate (each carries an in-source carve-out rationale documented in
+#: the 8A docstring section of ``tools/check_critical_coverage.py``):
+#:
+#: - ``sandbox/audit.py``: thin chain-row converter for the 8 sandbox
+#:   lifecycle event taxonomies. Substantive audit-chain invariants
+#:   (hash-chain, canonical-form, ISO control tagging) are enforced
+#:   upstream by the on-gate ``core/audit.py`` +
+#:   ``core/decision_history.py`` + ``core/canonical.py``. Bugs in the
+#:   event-payload-rendering surface through the 8-event taxonomy unit
+#:   test + the integration tests of ``backends/docker_sibling.py``.
+#: - ``sandbox/credentials.py``: re-export shim (38 lines; zero new
+#:   logic). Canonical home of ``CredentialAdapter`` +
+#:   ``KernelDefaultCredentialAdapter`` is ``sandbox/admission.py``
+#:   (which IS on the gate); ``sandbox/credentials.py`` re-exports so
+#:   Sprint 10's real ``VaultCredentialAdapter`` can replace the
+#:   canonical-home module without rewriting consumers. Sprint 10's
+#:   real adapter goes ON the gate when it lands.
+_SPRINT_8A_OFF_GATE_MODULES = (
+    "src/cognic_agentos/sandbox/audit.py",
+    "src/cognic_agentos/sandbox/credentials.py",
+)
+
+
+def test_sprint_8a_modules_present_with_standard_floors(
+    gate_tool: ModuleType,
+) -> None:
+    """All 7 Sprint 8A T12 promotions are on the gate at the 95/90 floor."""
+    by_path = {path: (line, branch) for path, line, branch in gate_tool._CRITICAL_FILES}
+    for module in _SPRINT_8A_GATE_MODULES:
+        assert module in by_path, f"Sprint 8A module missing from gate: {module}"
+        assert by_path[module] == (0.95, 0.90), (
+            f"{module} must ride the standard 95%-line / 90%-branch floor"
+        )
+
+
+@pytest.mark.parametrize("off_gate_module", _SPRINT_8A_OFF_GATE_MODULES)
+def test_sprint_8a_off_gate_modules_absent(gate_tool: ModuleType, off_gate_module: str) -> None:
+    """2 Sprint 8A modules stay OFF the durable gate per the in-source
+    8A docstring carve-outs (``sandbox/audit.py`` thin chain-row
+    converter + ``sandbox/credentials.py`` re-export shim).
+
+    A future edit that promotes either without revisiting the spec §17
+    rationale fails here, forcing a deliberate review."""
     paths = {path for path, _line, _branch in gate_tool._CRITICAL_FILES}
     assert off_gate_module not in paths
