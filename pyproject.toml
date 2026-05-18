@@ -188,6 +188,36 @@ sandbox-docker = [
     # bump if a future version breaks the contract.
     "aiodocker>=0.24",
 ]
+sandbox-k8s = [
+    # Sprint 8B T8B-b — KubernetesPodSandboxBackend uses
+    # kubernetes-asyncio as the async Kubernetes API client (the most
+    # mature async option; default per the 2026-05-17 preflight
+    # decision). NOT in [project] base deps so a DockerSibling-only
+    # deployment (Sprint 8A; dev/CI) does not pull the
+    # kubernetes-asyncio + websockets + aiohttp stack it does not use.
+    # The KubernetesPod backend module imports kubernetes_asyncio at
+    # module level — installs without this extra do NOT import the
+    # backend module (the sandbox package re-export is wrapped behind
+    # a try/except ImportError that surfaces a structured
+    # NotImplementedError pointing at this extra when missing,
+    # mirroring the sandbox-docker pattern above).
+    # Min-version pinned at T8B-b step 1 (2026-05-17): 35.0.1 is the
+    # current PyPI stable. API surface verified at session compose time
+    # per feedback_verify_dep_availability_at_implementation:
+    #   * CoreV1Api.create_namespaced_pod(namespace, body, **kwargs)
+    #   * CoreV1Api.delete_namespaced_pod(name, namespace, **kwargs)
+    #   * CoreV1Api.read_namespaced_pod_status(name, namespace, **kwargs)
+    #   * CoreV1Api.list_namespaced_pod(namespace, **kwargs)
+    #   * NetworkingV1Api.create_namespaced_network_policy(namespace, body, **kwargs)
+    #   * NetworkingV1Api.delete_namespaced_network_policy(name, namespace, **kwargs)
+    #   * CoreV1Api.connect_get_namespaced_pod_exec(name, namespace, **kwargs)
+    #   * kubernetes_asyncio.stream.WsApiClient subclasses ApiClient
+    # The lower bound is permissive (>=35) because the synchronous
+    # client (the upstream kubernetes-client repo) tracks a different
+    # version line; bump if a future kubernetes-asyncio release breaks
+    # any of the verified surfaces above.
+    "kubernetes-asyncio>=35.0.1",
+]
 
 [project.scripts]
 # Sprint-7A T4 — pack-author console scripts. Both names point at the

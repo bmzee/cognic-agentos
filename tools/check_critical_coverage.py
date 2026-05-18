@@ -1407,6 +1407,91 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     ("src/cognic_agentos/sandbox/proxy.py", 0.95, 0.90),
     ("src/cognic_agentos/sandbox/warm_pool.py", 0.95, 0.90),
     ("src/cognic_agentos/sandbox/backends/docker_sibling.py", 0.95, 0.90),
+    #
+    # Sprint 8B T8B-d — Sandbox primitive (Wave-1 K8s/OpenShift backend)
+    # gate promotion (+1 module → 71 total). Lands the second Wave-1
+    # SandboxBackend per ADR-004 amendment + project_openshift_deployment_target.
+    # Same 95%/90% floor as the Sprint 8A backends; promoted at T8B-d
+    # via the user-locked tightening edit B from Sprint 8B preflight
+    # (2026-05-17): `tools/check_critical_coverage.py` against fresh
+    # coverage.json runs IN THE SAME COMMIT as this `_CRITICAL_FILES`
+    # extension — NOT just the `_EXPECTED_ENTRY_COUNT` bump in the
+    # count-guard self-test. Per
+    # `feedback_verify_promotion_meets_floor_at_promotion_time`
+    # (born from the Sprint 8A T12 verification gap where the gate
+    # was promoted having only verified the count-guard, NOT the
+    # actual floor — and post-T13 the gate found 2/7 promoted modules
+    # below threshold). The count guard pins gate METADATA; the gate
+    # tool itself pins actual coverage. Orthogonal axes; T8B-d
+    # commits BOTH.
+    #
+    # ON the durable gate (+1):
+    #
+    #   * ``sandbox/backends/kubernetes_pod.py`` —
+    #     ``KubernetesPodSandboxBackend``. The Wave-1 K8s/OpenShift
+    #     bank-production backend. Conforms to the same SandboxBackend
+    #     Protocol (``protocol.py:254``) as DockerSibling; reuses the
+    #     backend-agnostic 9-step ``admit_policy`` Stage-2 pipeline +
+    #     canonical image catalog + 8-event audit taxonomy + sandbox.rego
+    #     bundle. K8s-specific surface: per-Pod NetworkPolicy (deny-all
+    #     egress except proxy sidecar via shared Pod localhost per
+    #     ``feedback_sandbox_network_isolation_precision``); OpenShift-
+    #     compatible pod SecurityContext (no ``--privileged``; omits
+    #     ``runAsUser`` for namespace-allocated MustRunAsRange compat;
+    #     capabilities.drop=[ALL]; readOnlyRootFilesystem); cgroup-via-
+    #     exec cpu-budget monitor (NOT metrics-server; chosen at T8B-c
+    #     Step 1 verification for sub-second granularity + no cluster
+    #     prereq); OOMKilled detection via
+    #     ``ContainerStatus.last_state.terminated.reason == "OOMKilled"``
+    #     (kubelet-authoritative; not exit 137 alone). Proxy-log fail-
+    #     closed contract preserved (T10c R1 P1.2 wire-protocol-public
+    #     per ``SandboxPolicyViolationReason.egress_audit_unreadable``).
+    #     The cross-backend drift detector at
+    #     ``tests/unit/sandbox/backends/test_exec_classification_cross_backend_drift.py``
+    #     pins behavioural lockstep with docker_sibling's
+    #     ``_classify_exec_failure`` without coupling production code
+    #     per ``feedback_drift_detector_test_only_no_runtime_import``.
+    #     User-found P1 at orchestrator's trust-but-verify gate (T8B-c
+    #     commit ``7943491``): ``backend_factory.get_backend`` documented
+    #     ``kwargs["settings"] = settings`` injection but did not deliver
+    #     until the post-subagent P1 fix landed — refines the
+    #     trust-but-verify doctrine ("test fixture papers over production
+    #     gap" is a distinct subagent failure mode beyond the
+    #     "re-gate-ladder after auto-fix" one).
+    #
+    # OFF the durable gate per Doctrine F (with explicit carve-out
+    # rationale; same precedent as Sprint 8A's
+    # ``sandbox/audit.py`` + ``sandbox/credentials.py``):
+    #
+    #   * ``sandbox/backend_factory.py`` — pure selection seam (130 LoC).
+    #     The wire-protocol-public contract IS the
+    #     ``Settings.sandbox_backend`` Literal arm set + the
+    #     ``COGNIC_SANDBOX_BACKEND`` env-var override per ADR-004 §32.
+    #     Drift between the Literal arms + the factory's accepted set
+    #     is pinned by
+    #     ``tests/unit/sandbox/test_backend_factory.py::TestBackendFactoryEnumerateCoverage``;
+    #     the settings-injection contract is pinned by
+    #     ``TestBackendFactoryRoutesByLiteral`` (3 tests post-P1-fix,
+    #     TM-revert verified). The substantive enforcement lives in
+    #     the chosen backend's own ``create()`` / ``exec()`` /
+    #     ``destroy()`` / ``health()`` methods (both backends ON the
+    #     gate). Promoting the factory would measure routing-glue
+    #     coverage where the test surface already drift-detects the
+    #     wire contract; off-gate per the same Sprint-7A T17 R4 P3 #5
+    #     doctrine that kept ``cli/conformance.py`` off-gate when the
+    #     dispatched matrix is already CC.
+    #   * ``sandbox/backends/_shared_exec.py`` — pure-functional helper
+    #     (101 LoC: ``_classify_exec_failure`` + ``_ProxyLogReadFailure``).
+    #     Consumer-owned by ``kubernetes_pod`` per
+    #     ``feedback_consumer_owned_protocol_for_unlanded_dep``;
+    #     docker_sibling keeps its inline copies UNCHANGED per the
+    #     sandbox isolation-boundary stop-rule. Behavioural lockstep
+    #     across both backends pinned by the test-only drift detector
+    #     at ``test_exec_classification_cross_backend_drift.py``. CC
+    #     risk covered by the on-gate ``kubernetes_pod.py`` consumer
+    #     surface + the on-gate ``docker_sibling.py`` consumer
+    #     surface; promoting here would double-count the same enforcement.
+    ("src/cognic_agentos/sandbox/backends/kubernetes_pod.py", 0.95, 0.90),
 )
 
 

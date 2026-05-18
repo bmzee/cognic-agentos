@@ -104,6 +104,45 @@ except ImportError as _import_error:  # aiodocker not installed
     DockerSiblingSandboxBackend = _DockerSiblingSandboxBackendUnavailable
 
 
+# KubernetesPodSandboxBackend — guarded import. The backend module
+# imports kubernetes_asyncio (the sandbox-k8s optional extra); a kernel
+# install without the extra stays functional, but constructing the
+# backend surfaces a structured NotImplementedError. Mirrors the
+# DockerSibling pattern above.
+try:
+    from cognic_agentos.sandbox.backends.kubernetes_pod import (
+        KubernetesPodSandboxBackend as _KubernetesPodSandboxBackendReal,
+    )
+
+    KubernetesPodSandboxBackend: type = _KubernetesPodSandboxBackendReal
+except ImportError as _k8s_import_error:  # kubernetes_asyncio not installed
+    _saved_k8s_import_error: ImportError = _k8s_import_error
+
+    class _KubernetesPodSandboxBackendUnavailable:
+        """Fail-loud placeholder when ``kubernetes_asyncio`` (sandbox-k8s
+        extra) is not installed. Per AGENTS.md production-grade rule:
+        stubs raise NotImplementedError pointing at the missing
+        dependency rather than silently failing at first use.
+
+        DockerSibling-only deployments (Sprint 8A, dev/CI per AGENTS.md)
+        do not need this backend and should construct
+        ``DockerSiblingSandboxBackend`` instead.
+        """
+
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            raise NotImplementedError(
+                "KubernetesPodSandboxBackend requires `kubernetes_asyncio` "
+                "from the sandbox-k8s optional extra. Install with "
+                "`pip install -e .[sandbox-k8s]`. If you do not need the "
+                "Kubernetes/OpenShift backend (e.g. DockerSibling-only "
+                "dev/CI deployment per Sprint 8A), construct "
+                "DockerSiblingSandboxBackend instead. "
+                f"Underlying ImportError: {_saved_k8s_import_error}"
+            )
+
+    KubernetesPodSandboxBackend = _KubernetesPodSandboxBackendUnavailable
+
+
 @asynccontextmanager
 async def sandbox_session(
     backend: SandboxBackend,
@@ -164,6 +203,7 @@ __all__ = [
     "DockerSiblingSandboxBackend",
     "EgressProxyConfig",
     "KernelDefaultCredentialAdapter",
+    "KubernetesPodSandboxBackend",
     "PackAdmissionContext",
     "ProxyAccessOutcome",
     "ProxyAccessRecord",
