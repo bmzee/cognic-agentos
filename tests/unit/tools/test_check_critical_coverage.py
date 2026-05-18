@@ -38,7 +38,7 @@ _GATE_TOOL_PATH = _REPO_ROOT / "tools" / "check_critical_coverage.py"
 #: Entry count after the Sprint 8A T12 promotions (63 at the 7B.4
 #: T13 close + 7 sandbox modules = 70). Bump this in lockstep with
 #: any deliberate ``_CRITICAL_FILES`` change.
-_EXPECTED_ENTRY_COUNT = 70
+_EXPECTED_ENTRY_COUNT = 71
 
 #: The 5 modules Sprint 7B.3 promoted to the durable gate, each by its
 #: own landing commit (T3-T6 panels + T7 composer). All ride the
@@ -243,6 +243,73 @@ def test_sprint_8a_off_gate_modules_absent(gate_tool: ModuleType, off_gate_modul
     converter + ``sandbox/credentials.py`` re-export shim).
 
     A future edit that promotes either without revisiting the spec §17
+    rationale fails here, forcing a deliberate review."""
+    paths = {path for path, _line, _branch in gate_tool._CRITICAL_FILES}
+    assert off_gate_module not in paths
+
+
+# ---------------------------------------------------------------------------
+# Sprint 8B T8B-d — Wave-1 K8s/OpenShift backend gate promotion (+1 → 71)
+# ---------------------------------------------------------------------------
+
+#: The 1 module Sprint 8B T8B-d promotes to the durable gate. The
+#: tightening edit B from Sprint 8B preflight (2026-05-17) requires
+#: this commit also run ``tools/check_critical_coverage.py`` against
+#: fresh ``coverage.json`` — NOT just this count-guard bump. See
+#: ``feedback_verify_promotion_meets_floor_at_promotion_time``.
+_SPRINT_8B_GATE_MODULES = ("src/cognic_agentos/sandbox/backends/kubernetes_pod.py",)
+
+#: Modules T8B-c landed that Sprint 8B deliberately keeps OFF the
+#: durable gate (each carries an in-source carve-out rationale in
+#: ``tools/check_critical_coverage.py``'s Sprint 8B docstring section):
+#:
+#: - ``sandbox/backend_factory.py``: pure selection seam (130 LoC).
+#:   Wire-protocol-public contract is the ``Settings.sandbox_backend``
+#:   Literal + ``COGNIC_SANDBOX_BACKEND`` env-var override per ADR-004
+#:   §32; drift detector at
+#:   ``tests/unit/sandbox/test_backend_factory.py::TestBackendFactoryEnumerateCoverage``
+#:   pins the Literal-arm-set lockstep + the settings-injection
+#:   contract is pinned by ``TestBackendFactoryRoutesByLiteral``
+#:   (TM-revert verified post the user-found P1 fix at T8B-c). The
+#:   substantive enforcement lives in the chosen backend's methods
+#:   (both backends ON the gate). Off-gate per the same Sprint-7A T17
+#:   R4 P3 #5 doctrine that kept ``cli/conformance.py`` off-gate when
+#:   the dispatched matrix is already CC.
+#: - ``sandbox/backends/_shared_exec.py``: pure-functional helper
+#:   (101 LoC: ``_classify_exec_failure`` + ``_ProxyLogReadFailure``).
+#:   Consumer-owned by ``kubernetes_pod`` per
+#:   ``feedback_consumer_owned_protocol_for_unlanded_dep``;
+#:   docker_sibling keeps its inline copies UNCHANGED per the sandbox
+#:   isolation-boundary stop-rule. Behavioural lockstep across both
+#:   backends pinned by the test-only drift detector at
+#:   ``test_exec_classification_cross_backend_drift.py``. CC risk
+#:   covered by the on-gate ``kubernetes_pod.py`` consumer +
+#:   ``docker_sibling.py`` consumer; promoting here would
+#:   double-count the same enforcement.
+_SPRINT_8B_OFF_GATE_MODULES = (
+    "src/cognic_agentos/sandbox/backend_factory.py",
+    "src/cognic_agentos/sandbox/backends/_shared_exec.py",
+)
+
+
+def test_sprint_8b_modules_present_with_standard_floors(
+    gate_tool: ModuleType,
+) -> None:
+    """The 1 Sprint 8B T8B-d promotion is on the gate at the 95/90 floor."""
+    by_path = {path: (line, branch) for path, line, branch in gate_tool._CRITICAL_FILES}
+    for module in _SPRINT_8B_GATE_MODULES:
+        assert module in by_path, f"Sprint 8B module missing from gate: {module}"
+        assert by_path[module] == (0.95, 0.90), (
+            f"{module} must ride the standard 95%-line / 90%-branch floor"
+        )
+
+
+@pytest.mark.parametrize("off_gate_module", _SPRINT_8B_OFF_GATE_MODULES)
+def test_sprint_8b_off_gate_modules_absent(gate_tool: ModuleType, off_gate_module: str) -> None:
+    """2 Sprint 8B modules (``backend_factory.py`` + ``_shared_exec.py``)
+    stay OFF the durable gate per the in-source 8B docstring carve-outs.
+
+    A future edit that promotes either without revisiting the carve-out
     rationale fails here, forcing a deliberate review."""
     paths = {path for path, _line, _branch in gate_tool._CRITICAL_FILES}
     assert off_gate_module not in paths
