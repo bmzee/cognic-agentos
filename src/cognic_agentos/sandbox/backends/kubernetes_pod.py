@@ -6,9 +6,14 @@ Wave-1 production backend for Kubernetes/OpenShift per
 ``project_openshift_deployment_target``. Conforms to the same
 :class:`SandboxBackend` Protocol as
 :class:`DockerSiblingSandboxBackend`
-(:mod:`cognic_agentos.sandbox.protocol`). Emits the same 8-event audit
-taxonomy via :func:`emit_sandbox_event` and the same 15-value
-:data:`SandboxRefusalReason` closed-enum.
+(:mod:`cognic_agentos.sandbox.protocol`). Emits the same sandbox
+audit/refusal taxonomy via :func:`emit_sandbox_event` and
+:data:`SandboxRefusalReason` (Sprint 8A: 8 lifecycle events + 15
+refusal reasons; Sprint 8.5 T1 extended to 12 + 21 per spec §3.3 —
+adds checkpointed/suspended/woken/checkpoint_purged events + 6
+wake-time refusal arms; this backend stays SYMMETRIC with
+DockerSibling across the extended taxonomy per spec §7.3 cross-backend
+parity invariant).
 
 Topology per ``feedback_sandbox_network_isolation_precision`` +
 ADR-004 amendment "dual-container":
@@ -104,6 +109,7 @@ from cognic_agentos.sandbox.backends._shared_exec import (
 )
 from cognic_agentos.sandbox.policy import PackAdmissionContext, SandboxPolicy
 from cognic_agentos.sandbox.protocol import (
+    CheckpointId,
     ProxyAccessRecord,
     SandboxBackendHealth,
     SandboxExecResult,
@@ -482,6 +488,26 @@ class KubernetesPodSession:
 
     async def destroy(self) -> None:
         await self._backend.destroy(self)
+
+    # Sprint 8.5 T1 scaffolding — checkpoint + suspend land at T7 per
+    # ADR-004 §73-93 + spec §7.2 (kubernetes_asyncio multiplexed-websocket
+    # tar pipe). NotImplementedError stubs per AGENTS.md production-grade
+    # rule. T7 lands real impls SYMMETRIC with T6's DockerSibling impls
+    # (cross-backend parity per spec §7.3 conformance suite).
+
+    async def checkpoint(self, label: str) -> CheckpointId:
+        raise NotImplementedError(
+            "KubernetesPodSession.checkpoint lands at Sprint 8.5 T7 per "
+            "ADR-004 §73-93 + spec §7.2 (workspace-tar via kubernetes_asyncio "
+            "multiplexed-websocket exec). T1 ships the Protocol declaration only."
+        )
+
+    async def suspend(self) -> None:
+        raise NotImplementedError(
+            "KubernetesPodSession.suspend lands at Sprint 8.5 T7 per "
+            "ADR-004 §73-93 + spec §7.2 (take final checkpoint via "
+            "self.checkpoint('__suspend__') + Pod.delete + NetworkPolicy.delete)."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -972,6 +998,30 @@ class KubernetesPodSandboxBackend:
                 detail=f"k8s apiserver unreachable: {e}",
             )
         return SandboxBackendHealth(status="ok")
+
+    # Sprint 8.5 T1 scaffolding — wake lands at T7 per ADR-004 §73-93 +
+    # spec §3.2 + §7.2. NotImplementedError stub per AGENTS.md
+    # production-grade rule. T7 wires the SAME 7-step wake pipeline as
+    # T6's DockerSibling impl — cross-backend parity per spec §7.3 +
+    # the conformance regression at T9
+    # (test_wake_session_tombstoned_conformance.py).
+
+    async def wake(
+        self,
+        session_id: str,
+        *,
+        actor: Actor,
+        tenant_id: str,
+    ) -> SandboxSession:
+        raise NotImplementedError(
+            "KubernetesPodSandboxBackend.wake lands at Sprint 8.5 T7 per "
+            "ADR-004 §73-93 + spec §3.2 + §7.2. T7 wires the 7-step "
+            "wake pipeline SYMMETRIC with DockerSibling (tombstone-first "
+            "via CheckpointStore.load_tombstone → admit_policy revalidate "
+            "→ fresh Pod + NetworkPolicy → tar xzf workspace via "
+            "kubernetes_asyncio exec → emit sandbox.lifecycle.woken). "
+            "T1 ships the Protocol declaration + this scaffolding stub."
+        )
 
     # ------------------------------------------------------------------
     # Internal — K8s object lifecycle

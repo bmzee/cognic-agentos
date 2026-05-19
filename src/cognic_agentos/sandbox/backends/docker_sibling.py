@@ -70,6 +70,7 @@ from cognic_agentos.sandbox.admission import (
 from cognic_agentos.sandbox.audit import emit_sandbox_event
 from cognic_agentos.sandbox.policy import PackAdmissionContext, SandboxPolicy
 from cognic_agentos.sandbox.protocol import (
+    CheckpointId,
     ProxyAccessRecord,
     SandboxBackendHealth,
     SandboxExecResult,
@@ -695,6 +696,28 @@ class DockerSiblingSession:
     async def destroy(self) -> None:
         await self._backend.destroy(self)
 
+    # Sprint 8.5 T1 scaffolding — checkpoint + suspend land at T6 per
+    # ADR-004 §73-93. NotImplementedError stubs fail loudly + document
+    # the contract per AGENTS.md production-grade rule ("stubs that
+    # raise NotImplementedError pointing at an ADR are acceptable
+    # scaffolding"). DockerSiblingSession structurally conforms to the
+    # extended SandboxSession Protocol so mypy stays green between T1
+    # and T6; calling either method before T6 surfaces a clear pointer.
+
+    async def checkpoint(self, label: str) -> CheckpointId:
+        raise NotImplementedError(
+            "DockerSiblingSession.checkpoint lands at Sprint 8.5 T6 per "
+            "ADR-004 §73-93 + spec §7.1 (workspace-tar via aiodocker exec). "
+            "T1 ships the Protocol declaration only."
+        )
+
+    async def suspend(self) -> None:
+        raise NotImplementedError(
+            "DockerSiblingSession.suspend lands at Sprint 8.5 T6 per "
+            "ADR-004 §73-93 + spec §7.1 (take final checkpoint via "
+            "self.checkpoint('__suspend__') + container.stop/remove)."
+        )
+
 
 # ---------------------------------------------------------------------------
 # DockerSiblingSandboxBackend
@@ -1228,6 +1251,27 @@ class DockerSiblingSandboxBackend:
                 detail=f"docker daemon unreachable: {e}",
             )
         return SandboxBackendHealth(status="ok")
+
+    # Sprint 8.5 T1 scaffolding — wake lands at T6 per ADR-004 §73-93 +
+    # spec §3.2 + §7.1 (load-bearing tombstone-first ordering pinned by
+    # the conformance test at T9). NotImplementedError stub fails loudly
+    # + documents the contract per AGENTS.md production-grade rule.
+
+    async def wake(
+        self,
+        session_id: str,
+        *,
+        actor: Actor,
+        tenant_id: str,
+    ) -> SandboxSession:
+        raise NotImplementedError(
+            "DockerSiblingSandboxBackend.wake lands at Sprint 8.5 T6 per "
+            "ADR-004 §73-93 + spec §3.2 + §7.1. T6 wires the 7-step "
+            "wake pipeline (tombstone-first via CheckpointStore.load_tombstone "
+            "→ admit_policy revalidate → fresh container → tar xzf workspace "
+            "→ emit sandbox.lifecycle.woken). T1 ships the Protocol "
+            "declaration + this scaffolding stub."
+        )
 
     # ------------------------------------------------------------------
     # Internal — dual-container topology builders

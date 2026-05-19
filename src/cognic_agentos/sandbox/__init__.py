@@ -42,6 +42,7 @@ from cognic_agentos.sandbox.policy import (
     validate_policy_shape,
 )
 from cognic_agentos.sandbox.protocol import (
+    CheckpointId,
     ProxyAccessOutcome,
     ProxyAccessRecord,
     SandboxBackend,
@@ -198,6 +199,7 @@ async def sandbox_session(
 __all__ = [
     "CanonicalImageCatalog",
     "CatalogProtocol",
+    "CheckpointId",
     "CosignVerifyResult",
     "CredentialAdapter",
     "DockerSiblingSandboxBackend",

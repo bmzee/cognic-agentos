@@ -17,11 +17,12 @@ time per ``feedback_verify_code_citations_at_doc_write``:
   ``record_builder`` is ``sync (captured: T) -> DecisionRecord``.
 
 Drift-detector reminder from spec line 808 + ``feedback_drift_detector_
-test_only_no_runtime_import``: ``TestSandboxLifecycleEventVocabHas8Values``
-pins the count + the exact strings as a test-only check (the production
-module re-uses the ``SandboxLifecycleEvent`` Literal from
-``sandbox/protocol.py`` directly — there is no runtime cross-module
-copy that needs lockstep enforcement).
+test_only_no_runtime_import``: ``TestSandboxLifecycleEventVocabHas12Values``
+(Sprint 8.5 T1 extended from 8 → 12; renamed) pins the count + the
+exact strings as a test-only check (the production module re-uses the
+``SandboxLifecycleEvent`` Literal from ``sandbox/protocol.py`` directly
+— there is no runtime cross-module copy that needs lockstep
+enforcement).
 """
 
 from __future__ import annotations
@@ -140,8 +141,14 @@ class TestEventTaxonomyAndChainRowShape:
             )
 
 
-class TestAllEightEventsReachable:
-    """Pin that all 8 events have working emit paths."""
+class TestAllLifecycleEventsReachable:
+    """Pin that all current ``SandboxLifecycleEvent`` values have working
+    emit paths. Count-neutral (parametrizes over the live
+    ``typing.get_args(SandboxLifecycleEvent)``) so the test
+    automatically covers Sprint-8.5's 4 new events alongside the
+    Sprint-8A 8 without manual count maintenance — the count guard
+    lives separately at ``TestSandboxLifecycleEventVocabHas12Values``.
+    """
 
     @pytest.mark.parametrize("event", list(typing.get_args(SandboxLifecycleEvent)))
     async def test_each_event_emits_chain_row_without_error(self, event: str) -> None:
@@ -163,15 +170,22 @@ class TestAllEightEventsReachable:
 # ---------------------------------------------------------------------------
 
 
-class TestSandboxLifecycleEventVocabHas8Values:
-    """Spec line 808 + §979 — pin the 8-value count + the exact strings.
+class TestSandboxLifecycleEventVocabHas12Values:
+    """Spec line 808 + §979 + Sprint 8.5 §3.3 — pin the 12-value count
+    + the exact strings.
 
     No ``warm_pool.replenished`` per the user-locked taxonomy at §4.3 —
     replenishment is the *cause*; the *event* is still ``precreated``.
+
+    Sprint 8.5 T1 extended 8 → 12 (4 new events per spec §3.3).
+    Tombstoning is a STORAGE artifact NOT a lifecycle event — destroy()
+    reuses the 8A ``sandbox.lifecycle.destroyed`` event with 2 new
+    conditional payload keys per spec §5.1.
     """
 
     _EXPECTED: typing.ClassVar[frozenset[str]] = frozenset(
         {
+            # Sprint 8A — 8 values
             "sandbox.lifecycle.created",
             "sandbox.lifecycle.exec_completed",
             "sandbox.lifecycle.destroyed",
@@ -180,11 +194,16 @@ class TestSandboxLifecycleEventVocabHas8Values:
             "sandbox.warm_pool.precreated",
             "sandbox.warm_pool.checked_out",
             "sandbox.warm_pool.drained",
+            # Sprint 8.5 T1 — 4 new events per spec §3.3
+            "sandbox.lifecycle.checkpointed",
+            "sandbox.lifecycle.suspended",
+            "sandbox.lifecycle.woken",
+            "sandbox.lifecycle.checkpoint_purged",
         }
     )
 
-    def test_event_count_is_exactly_eight(self) -> None:
-        assert len(typing.get_args(SandboxLifecycleEvent)) == 8
+    def test_event_count_is_exactly_twelve(self) -> None:
+        assert len(typing.get_args(SandboxLifecycleEvent)) == 12
 
     def test_event_strings_match_spec_table_exactly(self) -> None:
         actual = frozenset(typing.get_args(SandboxLifecycleEvent))

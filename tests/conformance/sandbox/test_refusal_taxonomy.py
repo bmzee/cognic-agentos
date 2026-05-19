@@ -85,13 +85,14 @@ class TestRefusalTaxonomyRegistrationCoverage:
             f"values to the production Literal at protocol.py:34-50."
         )
 
-    def test_refusal_reason_count_locked_at_fifteen(self) -> None:
+    def test_refusal_reason_count_locked_at_twenty_one(self) -> None:
         """Crisp value-count guard — separate from the membership
         assertion so drift in size shows a clean diagnostic.
 
-        If this fails because the count is no longer 15, update the
-        constant here AND ensure ``TRIGGERS_BY_REASON`` has a matching
-        entry for the new value. NEVER update this guard without also
-        updating the dispatch.
+        Sprint 8.5 T1 extended 15 → 21 (6 new wake-time arms per spec
+        §3.3). If this fails because the count is no longer 21, update
+        the constant here AND ensure ``TRIGGERS_BY_REASON`` has a
+        matching entry for the new value. NEVER update this guard
+        without also updating the dispatch.
         """
-        assert len(get_args(SandboxRefusalReason)) == 15
+        assert len(get_args(SandboxRefusalReason)) == 21

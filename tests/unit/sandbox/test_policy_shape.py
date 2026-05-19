@@ -15,6 +15,7 @@ import typing
 import pytest
 
 from cognic_agentos.sandbox import (
+    CheckpointId,
     PackAdmissionContext,
     SandboxLifecycleEvent,
     SandboxLifecycleRefused,
@@ -28,10 +29,12 @@ from cognic_agentos.sandbox import (
 class TestClosedEnumPartitionInvariants:
     """Pin the wire-protocol-public closed-enum values + counts."""
 
-    def test_sandbox_refusal_reason_has_exactly_15_values(self) -> None:
+    def test_sandbox_refusal_reason_has_exactly_21_values(self) -> None:
+        # Sprint 8.5 T1 extended 15 → 21 (6 new wake-time arms per spec §3.3).
         values = typing.get_args(SandboxRefusalReason)
-        assert len(values) == 15, (
-            f"SandboxRefusalReason must have 15 values per spec §4.1; found {len(values)}: {values}"
+        assert len(values) == 21, (
+            f"SandboxRefusalReason must have 21 values per spec §4.1 + 8.5 §3.3; "
+            f"found {len(values)}: {values}"
         )
 
     def test_sandbox_policy_violation_reason_has_exactly_6_values(self) -> None:
@@ -44,10 +47,12 @@ class TestClosedEnumPartitionInvariants:
             f"T10c R1 P1.2; found {len(values)}: {values}"
         )
 
-    def test_sandbox_lifecycle_event_has_exactly_8_values(self) -> None:
+    def test_sandbox_lifecycle_event_has_exactly_12_values(self) -> None:
+        # Sprint 8.5 T1 extended 8 → 12 (4 new events per spec §3.3).
         values = typing.get_args(SandboxLifecycleEvent)
-        assert len(values) == 8, (
-            f"SandboxLifecycleEvent must have 8 values per spec §4.3; found {len(values)}: {values}"
+        assert len(values) == 12, (
+            f"SandboxLifecycleEvent must have 12 values per spec §4.3 + 8.5 §3.3; "
+            f"found {len(values)}: {values}"
         )
 
     def test_sandbox_refusal_reason_includes_high_risk_pre_13_5(self) -> None:
@@ -67,10 +72,12 @@ class TestClosedEnumPartitionInvariants:
         assert "sandbox.warm_pool.precreated" in events
 
     def test_sandbox_refusal_reason_canonical_values_present(self) -> None:
-        """Spot-check the 15-value Literal contains the canonical set
-        documented in spec §4.1 (full vocabulary)."""
+        """Spot-check the 21-value Literal contains the canonical set
+        documented in spec §4.1 (8A 15 vocab) + spec §3.3 (8.5 6 new
+        wake-time arms)."""
         values = set(typing.get_args(SandboxRefusalReason))
         expected = {
+            # Sprint 8A — 15 values
             "sandbox_credential_adapter_not_configured",
             "sandbox_runtime_deps_unsupported_in_production",
             "sandbox_high_risk_tier_refused_pre_13_5",
@@ -86,6 +93,44 @@ class TestClosedEnumPartitionInvariants:
             "sandbox_policy_rego_denied",
             "sandbox_backend_unavailable",
             "sandbox_warm_pool_drained",
+            # Sprint 8.5 T1 — 6 new wake-time arms (spec §3.3)
+            "sandbox_wake_checkpoint_not_found",
+            "sandbox_wake_checkpoint_corrupt",
+            "sandbox_wake_checkpoint_retention_expired",
+            "sandbox_wake_session_tombstoned",
+            "sandbox_wake_tenant_mismatch",
+            "sandbox_wake_policy_revalidation_failed",
+        }
+        assert values == expected, f"drift: {values ^ expected}"
+
+    def test_sandbox_lifecycle_event_canonical_values_present(self) -> None:
+        """Spot-check the 12-value Literal contains the canonical set
+        documented in spec §4.3 (8A 8 events) + spec §3.3 (8.5 4 new).
+
+        Sprint 8.5 T1 introduces this assertion (mirrors the
+        SandboxRefusalReason canonical-values pin); locks the lifecycle
+        event vocabulary against name drift independently from the
+        count guard.
+        """
+        values = set(typing.get_args(SandboxLifecycleEvent))
+        expected = {
+            # Sprint 8A — 8 events
+            "sandbox.lifecycle.created",
+            "sandbox.lifecycle.exec_completed",
+            "sandbox.lifecycle.destroyed",
+            "sandbox.lifecycle.refused",
+            "sandbox.policy.violated",
+            "sandbox.warm_pool.precreated",
+            "sandbox.warm_pool.checked_out",
+            "sandbox.warm_pool.drained",
+            # Sprint 8.5 T1 — 4 new (spec §3.3); tombstoning is a STORAGE
+            # artifact, NOT a lifecycle event (destroy() reuses 8A's
+            # sandbox.lifecycle.destroyed with 2 new conditional payload
+            # keys per spec §5.1).
+            "sandbox.lifecycle.checkpointed",
+            "sandbox.lifecycle.suspended",
+            "sandbox.lifecycle.woken",
+            "sandbox.lifecycle.checkpoint_purged",
         }
         assert values == expected, f"drift: {values ^ expected}"
 
@@ -101,6 +146,44 @@ class TestClosedEnumPartitionInvariants:
             "egress_audit_unreadable",
         }
         assert values == expected, f"drift: {values ^ expected}"
+
+
+class TestSandboxPublicSurfaceExports:
+    """Pin the wire-public surface re-exported from
+    ``cognic_agentos.sandbox.__init__``. Sprint 8.5 T1 adds
+    ``CheckpointId`` to the public surface; this regression pins it +
+    locks the canonical import path callers (CheckpointStore at T3 +
+    backend wake() impls at T6/T7) depend on.
+    """
+
+    def test_checkpoint_id_is_importable_from_package_root(self) -> None:
+        """``from cognic_agentos.sandbox import CheckpointId`` MUST succeed.
+
+        CheckpointId is the return type of the wire-public
+        ``SandboxSession.checkpoint()`` Protocol method per spec §3.4;
+        the public sandbox package re-export is the canonical import
+        path (NOT ``cognic_agentos.sandbox.protocol.CheckpointId``
+        directly — internal module). Without this re-export,
+        consumer-side imports break + the public API diverges from the
+        rest of the Protocol-facing types (already re-exported here).
+        """
+        # Module-level import already exercised the path at file load;
+        # this test additionally pins __all__ membership.
+        from cognic_agentos import sandbox as sandbox_pkg
+
+        assert "CheckpointId" in sandbox_pkg.__all__, (
+            "CheckpointId MUST be listed in cognic_agentos.sandbox.__all__ "
+            "(Sprint 8.5 T1 public-surface re-export)"
+        )
+        assert hasattr(sandbox_pkg, "CheckpointId"), (
+            "CheckpointId MUST be importable from cognic_agentos.sandbox"
+        )
+        # Verify the canonical-vs-public types are the same object —
+        # protects against a future refactor that creates a divergent
+        # re-export pointing at a different NewType.
+        from cognic_agentos.sandbox.protocol import CheckpointId as _Canonical
+
+        assert CheckpointId is _Canonical
 
 
 class TestRiskTierDriftDetectorTestOnly:
