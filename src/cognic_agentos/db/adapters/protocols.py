@@ -23,6 +23,7 @@ registry's ``kind`` field is unconstrained, so Sprint 11.5 can add
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol, runtime_checkable
 
@@ -200,6 +201,72 @@ class ObjectStoreAdapter(Protocol):
         Sprint 8 ships). R2-#1 reviewer-fix: this caveat is required
         because the local driver fails loud per AGENTS.md
         production-grade rule.
+        """
+        ...
+
+    def list_prefix(
+        self,
+        bucket: str,
+        prefix: str,
+    ) -> AsyncIterator[str]:
+        """Lazily yield keys under ``bucket/prefix`` in a **deterministic
+        per-driver order** (NOT necessarily globally lexicographic — see
+        the "Order contract" paragraphs below for the per-driver
+        semantics).
+
+        **Async-generator shape — NOT a coroutine.** Declared as plain
+        ``def`` returning ``AsyncIterator[str]`` (NOT ``async def``).
+        Implementations are async-generator functions (``async def`` +
+        ``yield``); calling the method returns an ``AsyncIterator``
+        DIRECTLY without await. PEP 525 + ``typing.AsyncIterator``
+        convention.
+
+        The wrong shape — ``async def f() -> AsyncIterator[str]`` — would
+        type as "coroutine returning an AsyncIterator" and force callers
+        to ``async for x in (await f())`` instead of the natural
+        ``async for x in f()``. This Protocol declaration locks the
+        right call shape across all driver implementations. Pinned by
+        ``tests/unit/db/test_object_store_adapter_list_prefix.py::TestListPrefixProtocolShape``.
+
+        Caller pattern (the only supported one):
+
+            async for key in object_store.list_prefix("bucket", "prefix/"):
+                ...
+
+        Yields full keys (NOT relative-to-prefix) in a **deterministic
+        per-driver order**. The Sprint-4 ``local_fs`` driver uses
+        depth-first traversal with sorted-per-directory order; future
+        ``s3`` drivers will use ``ListObjectsV2`` which yields globally
+        lexicographic order. These differ for keys spanning directory
+        boundaries — e.g., keys ``a/z`` and ``a.txt`` yield
+        ``["a/z", "a.txt"]`` under ``local_fs`` (depth-first into ``a/``
+        first) but ``["a.txt", "a/z"]`` under S3 (``.`` < ``/`` in
+        ASCII). The Protocol guarantees DETERMINISM (stable within a
+        driver across calls with the same state); callers requiring a
+        specific cross-driver order (e.g., globally lexicographic) MUST
+        re-sort the yielded keys. Sprint 8.5 ``CheckpointStore`` callers
+        do not depend on order (``load_latest()`` picks by ``created_at``
+        from metadata; ``purge_expired()`` is order-independent).
+
+        Empty result is a normal empty iterator (NOT an exception).
+        Implementations MUST be lazy — yielding one key per loop
+        iteration rather than loading the full key list into memory — so
+        reaper sweeps over multi-million-key tenants do not OOM.
+        Globally-lexicographic order is NOT compatible with the
+        single-pass lazy contract (would require buffering or a
+        merge-sort across directories); the per-driver determinism
+        contract is the deliberate trade-off.
+
+        The Sprint-4 ``local_fs`` driver walks the prefix directory via
+        ``os.scandir()`` recursively (async-generator function yielding
+        one key at a time) with a dual symlink-escape defence per Sprint
+        8.5 spec §3.5 + §9. Future ``s3`` drivers map to
+        ``ListObjectsV2`` with continuation-token pagination.
+
+        Sprint 8.5 added this method as an additive wire-contract change
+        to the Sprint-4 critical-controls Protocol per ADR-009 §"Wave-1
+        ObjectStoreAdapter consumers" — required by
+        ``CheckpointStore.load_latest()`` + ``purge_expired()``.
         """
         ...
 
