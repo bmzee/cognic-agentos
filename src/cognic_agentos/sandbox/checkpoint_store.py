@@ -95,6 +95,7 @@ logger = logging.getLogger(__name__)
 _BUCKET = "sandbox-checkpoints"
 _METADATA_SUFFIX = ".metadata.json"
 _SNAPSHOT_SUFFIX = ".snapshot"
+_SUSPEND_EVENT_ID_SUFFIX = ".suspend_event_id"
 _TOMBSTONE_BASENAME = "_tombstoned.json"
 
 _HEX_RE = re.compile(r"^[0-9a-fA-F]{32}$")
@@ -1147,11 +1148,17 @@ class CheckpointStore:
         validated_id = _validate_checkpoint_id_or_raise(checkpoint_id)
         snapshot_key = f"{tenant_id}/{session_id}/{validated_id}{_SNAPSHOT_SUFFIX}"
         metadata_key = f"{tenant_id}/{session_id}/{validated_id}{_METADATA_SUFFIX}"
+        # Sprint 8.5 T6 DockerSibling stores the suspend→wake linkage
+        # record_id as an optional sibling blob. purge_by_id owns the
+        # checkpoint artifact lifecycle, so it must remove that sibling
+        # as well; otherwise reaper/cap purges leave stale linkage bytes
+        # after metadata + snapshot are gone.
+        suspend_event_id_key = f"{tenant_id}/{session_id}/{validated_id}{_SUSPEND_EVENT_ID_SUFFIX}"
         # Storage-level deletes are idempotent under FileNotFoundError —
         # the metadata or snapshot may have been removed by a prior
         # partial purge, OR the reaper's parallel sweep may have
         # already taken it.
-        for k in (snapshot_key, metadata_key):
+        for k in (snapshot_key, metadata_key, suspend_event_id_key):
             with contextlib.suppress(FileNotFoundError):
                 await self._object_store.delete(_BUCKET, k)
         # Emit the chain row via the T2 helper.

@@ -596,6 +596,33 @@ class TestPurgeById:
         assert payload["checkpoint_id"] == cid
         assert payload["purge_reason"] == "retention_expired"
 
+    async def test_purge_by_id_deletes_suspend_event_id_side_blob(
+        self,
+        store: CheckpointStore,
+        object_store: LocalObjectStoreAdapter,
+    ) -> None:
+        """T6 DockerSibling writes an optional
+        ``<checkpoint>.suspend_event_id`` sibling. The CheckpointStore
+        purge lifecycle must remove it with snapshot + metadata so
+        reaper/cap purges do not leave stale suspend-linkage bytes."""
+        cid = await _persist_one(store)
+        await object_store.put(
+            BUCKET,
+            f"tenant-a/sess-1/{cid}.suspend_event_id",
+            b"11111111-1111-1111-1111-111111111111",
+            retention_seconds=None,
+        )
+
+        await store.purge_by_id(
+            session_id="sess-1",
+            tenant_id="tenant-a",
+            checkpoint_id=CheckpointId(cid),
+            purge_reason="retention_expired",
+        )
+
+        with pytest.raises(FileNotFoundError):
+            await object_store.get(BUCKET, f"tenant-a/sess-1/{cid}.suspend_event_id")
+
     @pytest.mark.parametrize(
         "reason",
         [
