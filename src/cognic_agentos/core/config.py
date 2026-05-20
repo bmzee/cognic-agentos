@@ -1190,6 +1190,51 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- Sandbox checkpoint / resumable-session (Sprint 8.5 per ADR-004) ---
+    # Consumed by ``sandbox/checkpoint_store.py`` + ``sandbox/reaper.py``
+    # via the structural ``_CheckpointSettings`` Protocol — the real
+    # ``Settings`` conforms once these three fields exist. Bank overlays
+    # MAY tighten via the COGNIC_SANDBOX_CHECKPOINT_* env vars.
+    sandbox_checkpoint_retention_s: int = Field(
+        default=86_400,
+        ge=60,
+        le=31_536_000,
+        description=(
+            "Sprint 8.5 — kernel-level retention floor for sandbox "
+            "checkpoints. Bank overlays MAY tighten via env var; per-tenant "
+            "Rego policy extension deferred to a later sprint per ADR-015. "
+            "Checkpoints are purged by the reaper after this window."
+        ),
+    )
+    sandbox_max_checkpoints_per_session: int = Field(
+        default=10,
+        ge=1,
+        le=1000,
+        description=(
+            "Sprint 8.5 — per-session checkpoint cap. When a session would "
+            "exceed this cap on checkpoint(), the OLDEST checkpoint that is "
+            "OUTSIDE its retention window is purged (emits "
+            "sandbox.lifecycle.checkpoint_purged with "
+            "purge_reason='max_per_session_cap'). If EVERY existing "
+            "checkpoint is INSIDE its retention window (eviction would be "
+            "blocked by retention per §4.3 amended), persist() raises "
+            "CheckpointMaxPerSessionRetentionLocked WITHOUT writing the new "
+            "checkpoint AND WITHOUT emitting any checkpoint_purged chain "
+            "row — operator response is to lower retention OR raise this cap."
+        ),
+    )
+    sandbox_reaper_interval_s: int = Field(
+        default=300,
+        ge=10,
+        le=3600,
+        description=(
+            "Sprint 8.5 — background reaper sweep interval. Reaper walks "
+            "all checkpoints + purges any past their retention_window_s. "
+            "Shorter intervals catch expirations faster; longer intervals "
+            "reduce I/O."
+        ),
+    )
+
     # --- Build metadata ----------------------------------------------
     # Wired by the Dockerfile / CI at image-build time; defaults make
     # local-dev introspection useful without requiring an explicit env.
