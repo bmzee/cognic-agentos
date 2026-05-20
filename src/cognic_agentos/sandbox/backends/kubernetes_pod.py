@@ -386,6 +386,7 @@ def _build_pod_spec(
     policy: SandboxPolicy,
     session_id: str,
     tenant_id: str,
+    egress_proxy_image: str,
 ) -> dict[str, Any]:
     """Construct the V1Pod body dict for the two-container Pod.
 
@@ -525,7 +526,7 @@ def _build_pod_spec(
                 },
                 {
                     "name": _PROXY_SIDECAR_CONTAINER_NAME,
-                    "image": _CANONICAL_EGRESS_PROXY_IMAGE,
+                    "image": egress_proxy_image,
                     "securityContext": security_context,
                     "volumeMounts": [proxy_log_mount],
                     # No resource caps on the sidecar — the cluster-
@@ -718,6 +719,7 @@ class KubernetesPodSandboxBackend:
         settings: Settings,
         warm_pool: SandboxWarmPool | None = None,
         checkpoint_store: CheckpointStore | None = None,
+        egress_proxy_image: str | None = None,
     ) -> None:
         self._kube = kube_api_client
         self._namespace = namespace
@@ -740,6 +742,19 @@ class KubernetesPodSandboxBackend:
         # never checkpointed cannot have tombstones. Mirrors
         # docker_sibling.py:790,810 verbatim.
         self._checkpoint_store = checkpoint_store
+        # #477 §5 — narrow egress-proxy image seam. Mirrors
+        # docker_sibling.py exactly: explicit None-check (NOT ``or``) so
+        # an empty string fails fast rather than silently falling back
+        # to the placeholder canonical proxy. Production callers omit
+        # the kwarg -> None -> the canonical default.
+        if egress_proxy_image is not None and not egress_proxy_image.strip():
+            raise ValueError(
+                "egress_proxy_image, when provided, must be a non-empty "
+                "OCI ref; got an empty/blank string"
+            )
+        self._egress_proxy_image: str = (
+            _CANONICAL_EGRESS_PROXY_IMAGE if egress_proxy_image is None else egress_proxy_image
+        )
 
     # ------------------------------------------------------------------
     # SandboxBackend Protocol surface
@@ -828,12 +843,12 @@ class KubernetesPodSandboxBackend:
         # without this gate, a compromised registry could land an
         # unverified proxy as a trusted enforcement point. Refuses
         # session creation BEFORE any K8s API call.
-        _, proxy_image_digest = _CANONICAL_EGRESS_PROXY_IMAGE.rsplit("@", 1)
+        _, proxy_image_digest = self._egress_proxy_image.rsplit("@", 1)
         if not self._catalog.is_canonical(proxy_image_digest):
             raise SandboxLifecycleRefused(
                 "sandbox_image_digest_not_in_canonical_catalog",
                 detail=(
-                    f"proxy sidecar image {_CANONICAL_EGRESS_PROXY_IMAGE} "
+                    f"proxy sidecar image {self._egress_proxy_image} "
                     f"not in canonical catalog (digest {proxy_image_digest}) "
                     f"— egress enforcement component MUST be catalog-verified "
                     f"per spec §9 + the docker_sibling R1 P1.1 cross-backend "
@@ -844,7 +859,12 @@ class KubernetesPodSandboxBackend:
         await self._catalog.verify_sbom_policy_or_refuse(proxy_image_digest, tenant_id=tenant_id)
 
         # 5. Build the K8s object specs via pure helpers
-        pod_spec = _build_pod_spec(policy=policy, session_id=session_id, tenant_id=tenant_id)
+        pod_spec = _build_pod_spec(
+            policy=policy,
+            session_id=session_id,
+            tenant_id=tenant_id,
+            egress_proxy_image=self._egress_proxy_image,
+        )
         netpol_spec = _build_network_policy_spec(session_id=session_id, tenant_id=tenant_id)
 
         # 6. Create NetworkPolicy FIRST so egress lockdown is active
@@ -1497,7 +1517,10 @@ class KubernetesPodSandboxBackend:
         pod_name = _pod_name(session_id)
         netpol_name = _network_policy_name(session_id)
         pod_spec = _build_pod_spec(
-            policy=metadata.policy, session_id=session_id, tenant_id=tenant_id
+            policy=metadata.policy,
+            session_id=session_id,
+            tenant_id=tenant_id,
+            egress_proxy_image=self._egress_proxy_image,
         )
         netpol_spec = _build_network_policy_spec(session_id=session_id, tenant_id=tenant_id)
 
