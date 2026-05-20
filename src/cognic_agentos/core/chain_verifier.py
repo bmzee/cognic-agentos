@@ -325,8 +325,8 @@ class ChainVerifier:
            ``payload["restored_from_checkpoint_id"]``.
 
         Plus two reviewer-mandated bank-evidence invariants that go
-        BEYOND the spec §5.2 baseline 5 steps (a §5.2 amendment should
-        record them):
+        BEYOND the spec §5.2 baseline 5 steps (recorded in the
+        Sprint 8.5 T8 §5.2 amendment, review round 2026-05-20):
 
         6. **Tenant-isolation parity** — assert the suspended row's
            ``tenant_id`` (a decision_history ROW COLUMN, not a payload

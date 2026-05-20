@@ -221,13 +221,15 @@ _PROXY_LOG_DIR: str = "/var/log/cognic-proxy"
 
 #: Writable workspace path inside the sandbox container. Wire-public
 #: across the workspace-tar checkpoint mechanism (spec §7.2): ``tar
-#: czf - -C /workspace .`` on checkpoint + ``tar xzf <tmp> -C
-#: /workspace`` on restore. ``readOnlyRootFilesystem=True`` (per
+#: czf - -C /workspace .`` on checkpoint + ``head -c N | tar xzf - -C
+#: /workspace`` on restore (the P1.3-safe pipeline — no temp file
+#: staged on disk; ``head -c N`` gives ``tar`` clean stdin EOF under
+#: the v4 exec subprotocol). ``readOnlyRootFilesystem=True`` (per
 #: ``_build_security_context``) makes the root FS read-only; the
 #: Sprint 8.5 T7 emptyDir mount makes EXACTLY this path writable.
-#: The mount path + the tar -C target + the restore tmp prefix MUST
-#: agree — drift here breaks the wake-restore round-trip under
-#: OpenShift restricted-v2 SCC. Pinned by
+#: The mount path + the checkpoint tar ``-C`` source + the restore
+#: tar ``-C`` target MUST agree — drift here breaks the wake-restore
+#: round-trip under OpenShift restricted-v2 SCC. Pinned by
 #: ``test_pod_spec_writable_workspace_mount_path_matches_restore_target``
 #: (regression in ``test_kubernetes_pod_pure_helpers.py``).
 _SANDBOX_WORKSPACE_PATH: str = "/workspace"
@@ -436,7 +438,8 @@ def _build_pod_spec(
     # makes the container's root filesystem read-only. Without an
     # explicit writable mount, the sandbox cannot write to
     # ``/workspace`` for normal workload state OR for the T7 wake-
-    # restore tar-extraction temp file. An ``emptyDir`` volume mounted
+    # restore tar extraction (``head -c N | tar xzf - -C /workspace``
+    # — extracts in place, no temp file). An ``emptyDir`` volume mounted
     # at ``/workspace`` provides per-Pod ephemeral writable storage
     # backed by the node's local disk (default) or tmpfs (when
     # ``medium: Memory`` is set; we use default disk-backed to support
