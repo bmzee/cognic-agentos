@@ -60,6 +60,7 @@ from cognic_agentos.sandbox.backends.kubernetes_pod import (
     KubernetesPodSession,
 )
 from cognic_agentos.sandbox.protocol import (
+    CheckpointId,
     SandboxBackendHealth,
     SandboxPolicyViolated,
 )
@@ -1131,6 +1132,48 @@ class TestOpenPodExecStream:
         assert stdout == b"stdout"
 
     @pytest.mark.asyncio
+    async def test_timeout_during_stream_propagates(self) -> None:
+        """kubernetes_pod.py:1747-1748 — a TimeoutError raised inside
+        the ``asyncio.timeout(walltime_s)`` block is re-raised so
+        exec()'s body catches + classifies it as walltime_cap_exceeded.
+        """
+        backend = _make_backend()
+
+        class _RaisingWsCtx:
+            async def __aenter__(self) -> Any:
+                raise TimeoutError
+
+            async def __aexit__(self, *exc: Any) -> None:
+                return None
+
+        class _AwaitableRaisingCtx:
+            def __await__(self) -> Any:
+                async def _r() -> _RaisingWsCtx:
+                    return _RaisingWsCtx()
+
+                return _r().__await__()
+
+        mock_ws_api = MagicMock()
+        mock_ws_api.connect_get_namespaced_pod_exec = MagicMock(return_value=_AwaitableRaisingCtx())
+        mock_ws_client = MagicMock()
+        mock_ws_client.close = AsyncMock()
+        from kubernetes_asyncio.stream import WsApiClient as _RealWsApiClient
+
+        patched_ws = MagicMock(side_effect=lambda **_k: mock_ws_client)
+        patched_ws.parse_error_data = _RealWsApiClient.parse_error_data
+        with (
+            patch(
+                "cognic_agentos.sandbox.backends.kubernetes_pod.WsApiClient",
+                patched_ws,
+            ),
+            patch("kubernetes_asyncio.client.CoreV1Api", return_value=mock_ws_api),
+            pytest.raises(TimeoutError),
+        ):
+            await backend._open_pod_exec_stream(
+                pod_name="p", container_name="sandbox", command=["x"], walltime_s=5.0
+            )
+
+    @pytest.mark.asyncio
     async def test_closes_ws_client_in_finally(self) -> None:
         backend = _make_backend()
         mock_ws_api = MagicMock()
@@ -1456,3 +1499,839 @@ class TestCpuMonitorTrailingSleep:
                 cpu_violated_event=event,
             )
         assert not event.is_set()
+
+
+# ---------------------------------------------------------------------------
+# Sprint 8.5 T12 coverage repair — checkpoint / suspend / wake green paths
+# ---------------------------------------------------------------------------
+#
+# The Sprint-8.5 T7 wake()/checkpoint()/suspend() resumable-session code
+# has its end-to-end tests env-gated behind COGNIC_RUN_K8S_SANDBOX=1
+# (test_kubernetes_pod_checkpoint.py). The non-env-gated unit file
+# test_kubernetes_pod_checkpoint_unit.py covers the refusal taxonomy but
+# NOT the green-path resource-creation Steps 6-8 of wake(), the green-
+# path _do_checkpoint/_do_suspend bodies, or the K8s exec helpers
+# (_create_workspace_tar_k8s / _restore_workspace_tar /
+# _open_pod_exec_stream_with_stdin / _wait_for_pod_ready /
+# _read_suspend_event_id).
+#
+# These classes mock kubernetes_asyncio + the CheckpointStore so the
+# green paths run in unit-only CI. Every test names the production
+# branch it covers + the doctrine that branch implements.
+
+
+class _StubCheckpointMetadata:
+    """Minimal stand-in for CheckpointMetadata as consumed by wake()."""
+
+    def __init__(
+        self,
+        *,
+        checkpoint_id: str = "c" * 32,
+        tenant_id: str = "t-1",
+        policy: SandboxPolicy = _POLICY_NO_BUDGET,
+        pack_context: PackAdmissionContext = _PACK_CTX,
+        created_at: datetime | None = None,
+        retention_window_s: int = 86_400,
+    ) -> None:
+        self.checkpoint_id = checkpoint_id
+        self.tenant_id = tenant_id
+        self.policy = policy
+        self.pack_context = pack_context
+        self.created_at = created_at or datetime.now(UTC)
+        self.retention_window_s = retention_window_s
+
+
+def _make_backend_with_checkpoint_store(checkpoint_store: Any) -> KubernetesPodSandboxBackend:
+    """Construct a backend with a (mocked) CheckpointStore wired."""
+    catalog = MagicMock()
+    catalog.is_canonical.return_value = True
+    catalog.is_tenant_allow_listed.return_value = True
+    catalog.verify_cosign_or_refuse = AsyncMock()
+    catalog.verify_sbom_policy_or_refuse = AsyncMock()
+    rego = AsyncMock()
+    decision = MagicMock(allow=True, reasoning="")
+    rego.evaluate = AsyncMock(return_value=decision)
+    settings = MagicMock(
+        sandbox_per_tenant_max_cpu=4.0,
+        sandbox_per_tenant_max_memory=4096,
+        sandbox_per_tenant_max_walltime=300.0,
+    )
+    kube_api_client = MagicMock()
+    kube_api_client.configuration = MagicMock()
+    return KubernetesPodSandboxBackend(
+        kube_api_client=kube_api_client,
+        namespace="test-ns",
+        image_catalog=catalog,
+        credential_adapter=MagicMock(),
+        rego_engine=rego,
+        audit_store=MagicMock(),
+        decision_history_store=AsyncMock(),
+        settings=settings,
+        warm_pool=None,
+        checkpoint_store=checkpoint_store,
+    )
+
+
+class TestCheckpointStoreNotWiredRaises:
+    """kubernetes_pod.py:1328-1333, 2238-2244, 2345-2349 — wake() /
+    _do_checkpoint() / _do_suspend() each raise NotImplementedError
+    pointing at the spec when no CheckpointStore is wired at
+    construction time. Production-grade fail-loud contract — a missing
+    store must NOT silently no-op.
+    """
+
+    @pytest.mark.asyncio
+    async def test_wake_raises_not_implemented_without_checkpoint_store(self) -> None:
+        backend = _make_backend()  # no checkpoint_store kwarg
+        with pytest.raises(NotImplementedError, match=r"wake requires a CheckpointStore"):
+            await backend.wake("s-1", actor=_ACTOR, tenant_id="t-1")
+
+    @pytest.mark.asyncio
+    async def test_do_checkpoint_raises_not_implemented_without_store(self) -> None:
+        backend = _make_backend()  # no checkpoint_store kwarg
+        session = _make_session()
+        with pytest.raises(NotImplementedError, match=r"checkpoint requires a CheckpointStore"):
+            await backend._do_checkpoint(session, "label-x")
+
+    @pytest.mark.asyncio
+    async def test_do_suspend_raises_not_implemented_without_store(self) -> None:
+        backend = _make_backend()  # no checkpoint_store kwarg
+        session = _make_session()
+        with pytest.raises(NotImplementedError, match=r"suspend requires a CheckpointStore"):
+            await backend._do_suspend(session)
+
+
+class TestDoCheckpointGreenPath:
+    """kubernetes_pod.py:2257-2290 — _do_checkpoint() green path:
+    workspace tar -> CheckpointStore.persist -> policy_digest ->
+    sandbox_lifecycle_checkpointed emission -> return checkpoint_id.
+    """
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_persists_tar_and_emits_audit(self) -> None:
+        store = AsyncMock()
+        store.persist = AsyncMock(return_value="cp-id-123")
+        backend = _make_backend_with_checkpoint_store(store)
+        session = _make_session()
+        with (
+            patch.object(backend, "_create_workspace_tar_k8s", AsyncMock(return_value=b"tarbytes")),
+            patch(
+                "cognic_agentos.sandbox.backends.kubernetes_pod.sandbox_lifecycle_checkpointed",
+                AsyncMock(),
+            ) as emit,
+        ):
+            checkpoint_id = await backend._do_checkpoint(session, "my-label")
+        assert checkpoint_id == "cp-id-123"
+        # persist() received the tar bytes + the reserved-label vault contract.
+        store.persist.assert_awaited_once()
+        persist_kwargs = store.persist.call_args.kwargs
+        assert persist_kwargs["snapshot_bytes"] == b"tarbytes"
+        assert persist_kwargs["label"] == "my-label"
+        assert persist_kwargs["vault_lease_refs"] == ()
+        # audit emission carries the checkpoint_id + a policy_digest.
+        emit.assert_awaited_once()
+        emit_kwargs = emit.call_args.kwargs
+        assert emit_kwargs["checkpoint_id"] == "cp-id-123"
+        assert emit_kwargs["label"] == "my-label"
+        assert isinstance(emit_kwargs["policy_digest"], str)
+        assert len(emit_kwargs["policy_digest"]) == 64  # sha256 hexdigest
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_on_suspended_session_raises_runtime_error(self) -> None:
+        """kubernetes_pod.py:2245-2255 — a suspended session can no
+        longer be checkpoint()ed; surfaces fail-loud pointing at wake()."""
+        store = AsyncMock()
+        backend = _make_backend_with_checkpoint_store(store)
+        session = _make_session()
+        session._suspended = True
+        with pytest.raises(RuntimeError, match=r"suspend\(\)ed.*wake"):
+            await backend._do_checkpoint(session, "label")
+
+
+class TestDoSuspendGreenPath:
+    """kubernetes_pod.py:2359-2405 — _do_suspend() green path: final
+    checkpoint -> teardown -> suspended audit row -> side-blob write ->
+    flip _suspended. P2.r2 ordering: teardown BEFORE the audit row.
+    """
+
+    @pytest.mark.asyncio
+    async def test_suspend_orders_teardown_then_audit_then_sideblob(self) -> None:
+        import uuid as _uuid
+
+        store = AsyncMock()
+        backend = _make_backend_with_checkpoint_store(store)
+        session = _make_session()
+        call_order: list[str] = []
+
+        async def _checkpoint(_s: Any, label: str) -> str:
+            call_order.append(f"checkpoint:{label}")
+            return "final-cp"
+
+        async def _teardown(**_kw: Any) -> None:
+            call_order.append("teardown")
+
+        record_id = _uuid.uuid4()
+
+        async def _suspended_emit(*_a: Any, **_kw: Any) -> tuple[Any, str]:
+            call_order.append("audit")
+            return record_id, "newhash"
+
+        async def _write_blob(**_kw: Any) -> None:
+            call_order.append("sideblob")
+
+        with (
+            patch.object(backend, "_do_checkpoint", _checkpoint),
+            patch.object(backend, "_teardown_session_state", _teardown),
+            patch(
+                "cognic_agentos.sandbox.backends.kubernetes_pod.sandbox_lifecycle_suspended",
+                _suspended_emit,
+            ),
+            patch.object(backend, "_write_suspend_event_id", _write_blob),
+        ):
+            await backend._do_suspend(session)
+        # P2.r2 ordering: final checkpoint -> teardown -> audit -> side-blob.
+        assert call_order == [
+            "checkpoint:__suspend__",
+            "teardown",
+            "audit",
+            "sideblob",
+        ]
+        # Step 5 — _suspended flag flipped last.
+        assert session._suspended is True
+
+    @pytest.mark.asyncio
+    async def test_suspend_on_already_suspended_session_raises(self) -> None:
+        """kubernetes_pod.py:2350-2357 — double-suspend is a usage bug;
+        surfaces fail-loud (NOT a no-op)."""
+        store = AsyncMock()
+        backend = _make_backend_with_checkpoint_store(store)
+        session = _make_session()
+        session._suspended = True
+        with pytest.raises(RuntimeError, match=r"already suspended"):
+            await backend._do_suspend(session)
+
+
+class TestWakeGreenPathStepsSixToEight:
+    """kubernetes_pod.py:1494-1558 — wake() Steps 6-8: create fresh
+    NetworkPolicy + Pod, wait readiness, restore workspace tar, build
+    a fresh KubernetesPodSession with the ORIGINAL session_id +
+    warm_pool_hit=False, emit sandbox.lifecycle.woken.
+    """
+
+    @pytest.mark.asyncio
+    async def test_wake_creates_resources_and_returns_session(self) -> None:
+        metadata = _StubCheckpointMetadata(tenant_id="t-1")
+        store = AsyncMock()
+        store.load_tombstone = AsyncMock(return_value=None)
+        store.load_latest = AsyncMock(return_value=(metadata, b"snapshot"))
+        backend = _make_backend_with_checkpoint_store(store)
+
+        import uuid as _uuid
+
+        suspend_event_id = _uuid.uuid4()
+        with (
+            patch(
+                "cognic_agentos.sandbox.backends.kubernetes_pod.admit_policy",
+                AsyncMock(),
+            ),
+            patch.object(
+                backend, "_read_suspend_event_id", AsyncMock(return_value=suspend_event_id)
+            ),
+            patch.object(backend, "_create_network_policy", AsyncMock()) as create_np,
+            patch.object(backend, "_create_pod", AsyncMock()) as create_pod,
+            patch.object(backend, "_wait_for_pod_ready", AsyncMock()) as wait_ready,
+            patch.object(backend, "_restore_workspace_tar", AsyncMock()) as restore,
+            patch(
+                "cognic_agentos.sandbox.backends.kubernetes_pod.sandbox_lifecycle_woken",
+                AsyncMock(),
+            ) as woken,
+        ):
+            session = await backend.wake("orig-sess", actor=_ACTOR, tenant_id="t-1")
+        # Step 6 — NetworkPolicy created BEFORE the Pod (egress lockdown).
+        create_np.assert_awaited_once()
+        create_pod.assert_awaited_once()
+        wait_ready.assert_awaited_once()
+        restore.assert_awaited_once()
+        # Step 7 — session preserves the ORIGINAL session_id; cold start.
+        assert isinstance(session, KubernetesPodSession)
+        assert session.session_id == "orig-sess"
+        assert session.warm_pool_hit is False
+        # Step 8 — woken emission carries the linkage payload.
+        woken.assert_awaited_once()
+        woken_kwargs = woken.call_args.kwargs
+        assert woken_kwargs["session_id"] == "orig-sess"
+        assert woken_kwargs["restored_from_checkpoint_id"] == metadata.checkpoint_id
+        assert woken_kwargs["suspend_event_id"] == suspend_event_id
+
+    @pytest.mark.asyncio
+    async def test_wake_tears_down_on_resource_creation_failure(self) -> None:
+        """kubernetes_pod.py:1514-1523 — a failure during Step 6
+        (Pod-creation / readiness / restore) tears down whatever was
+        created + re-raises so the caller sees the failure."""
+        metadata = _StubCheckpointMetadata(tenant_id="t-1")
+        store = AsyncMock()
+        store.load_tombstone = AsyncMock(return_value=None)
+        store.load_latest = AsyncMock(return_value=(metadata, b"snapshot"))
+        backend = _make_backend_with_checkpoint_store(store)
+
+        import uuid as _uuid
+
+        with (
+            patch(
+                "cognic_agentos.sandbox.backends.kubernetes_pod.admit_policy",
+                AsyncMock(),
+            ),
+            patch.object(backend, "_read_suspend_event_id", AsyncMock(return_value=_uuid.uuid4())),
+            patch.object(backend, "_create_network_policy", AsyncMock()),
+            patch.object(backend, "_create_pod", AsyncMock()),
+            patch.object(
+                backend,
+                "_wait_for_pod_ready",
+                AsyncMock(side_effect=RuntimeError("pod never ready")),
+            ),
+            patch.object(backend, "_teardown_session_state", AsyncMock()) as teardown,
+        ):
+            with pytest.raises(RuntimeError, match="pod never ready"):
+                await backend.wake("orig-sess", actor=_ACTOR, tenant_id="t-1")
+        # Teardown ran on the failure path (idempotent, suppressed).
+        teardown.assert_awaited_once()
+
+
+class TestCreateWorkspaceTarK8s:
+    """kubernetes_pod.py:2424-2436 — _create_workspace_tar_k8s runs
+    ``tar czf -`` via pods/exec; non-zero exit -> RuntimeError.
+    """
+
+    @pytest.mark.asyncio
+    async def test_returns_tar_bytes_on_zero_exit(self) -> None:
+        backend = _make_backend()
+        session = _make_session()
+        with patch.object(
+            backend,
+            "_open_pod_exec_stream",
+            AsyncMock(return_value=(b"tar-data", b"", 0)),
+        ) as stream:
+            result = await backend._create_workspace_tar_k8s(session=session)
+        assert result == b"tar-data"
+        stream_kwargs = stream.call_args.kwargs
+        assert stream_kwargs["command"] == ["tar", "czf", "-", "-C", "/workspace", "."]
+
+    @pytest.mark.asyncio
+    async def test_raises_runtime_error_on_nonzero_exit(self) -> None:
+        backend = _make_backend()
+        session = _make_session()
+        with patch.object(
+            backend,
+            "_open_pod_exec_stream",
+            AsyncMock(return_value=(b"", b"tar: permission denied", 2)),
+        ):
+            with pytest.raises(RuntimeError, match=r"tar czf /workspace.*exited 2"):
+                await backend._create_workspace_tar_k8s(session=session)
+
+
+class TestRestoreWorkspaceTar:
+    """kubernetes_pod.py:2499-2518 — _restore_workspace_tar builds the
+    head -c N | tar xzf pipeline; non-zero exit -> RuntimeError.
+    """
+
+    @pytest.mark.asyncio
+    async def test_restore_uses_head_minus_c_known_length_pattern(self) -> None:
+        backend = _make_backend()
+        snapshot = b"x" * 4096
+        with patch.object(
+            backend,
+            "_open_pod_exec_stream_with_stdin",
+            AsyncMock(return_value=(b"", b"", 0)),
+        ) as stream:
+            await backend._restore_workspace_tar(session_id="s-1", snapshot_bytes=snapshot)
+        stream_kwargs = stream.call_args.kwargs
+        # The byte-count is interpolated into the head -c N command.
+        assert stream_kwargs["command"] == [
+            "sh",
+            "-c",
+            "head -c 4096 | tar xzf - -C /workspace",
+        ]
+        assert stream_kwargs["stdin_bytes"] == snapshot
+
+    @pytest.mark.asyncio
+    async def test_restore_raises_runtime_error_on_nonzero_exit(self) -> None:
+        backend = _make_backend()
+        with patch.object(
+            backend,
+            "_open_pod_exec_stream_with_stdin",
+            AsyncMock(return_value=(b"", b"tar: corrupt archive", 1)),
+        ):
+            with pytest.raises(RuntimeError, match=r"workspace tar restore.*exited 1"):
+                await backend._restore_workspace_tar(session_id="s-1", snapshot_bytes=b"data")
+
+
+class TestOpenPodExecStreamWithStdin:
+    """kubernetes_pod.py:2579-2655 — _open_pod_exec_stream_with_stdin
+    pipes stdin on channel 0 + consumes STDOUT/STDERR/ERROR channels.
+    Defence-in-depth: no ERROR-channel frame -> exit_code forced to -1.
+    """
+
+    @staticmethod
+    def _patch_stdin_ctx(
+        messages: list[_FakeWsMessage], sent: list[bytes] | None = None
+    ) -> tuple[Any, Any, Any]:
+        """Build the patched WsApiClient + CoreV1Api + a stdin-capable
+        _FakeWsCtx subclass that records send_bytes calls."""
+
+        class _StdinWsCtx(_FakeWsCtx):
+            async def send_bytes(self, data: bytes) -> None:
+                if sent is not None:
+                    sent.append(data)
+
+        mock_ws_api = MagicMock()
+        mock_ws_api.connect_get_namespaced_pod_exec = MagicMock(
+            return_value=_FakeAwaitableWsCtx(messages)
+        )
+        mock_ws_client = MagicMock()
+        mock_ws_client.close = AsyncMock()
+        from kubernetes_asyncio.stream import WsApiClient as _RealWsApiClient
+
+        patched_ws = MagicMock(side_effect=lambda **_k: mock_ws_client)
+        patched_ws.parse_error_data = _RealWsApiClient.parse_error_data
+        return patched_ws, mock_ws_api, _StdinWsCtx(messages)
+
+    @pytest.mark.asyncio
+    async def test_sends_stdin_and_parses_error_channel_exit_code(self) -> None:
+        backend = _make_backend()
+        messages = [
+            _FakeWsMessage(b"\x01" + b"restore-stdout"),
+            _FakeWsMessage(b"\x02" + b"restore-stderr"),
+            _FakeWsMessage(b"\x03" + json.dumps({"status": "Success"}).encode("utf-8")),
+            _FakeWsMessage(b""),  # empty payload — skipped
+            _FakeWsMessage(b"\x05" + b"unknown-channel"),  # ignored
+        ]
+        sent: list[bytes] = []
+        patched_ws, mock_ws_api, stdin_ctx = self._patch_stdin_ctx(messages, sent)
+        with (
+            patch(
+                "cognic_agentos.sandbox.backends.kubernetes_pod.WsApiClient",
+                patched_ws,
+            ),
+            patch("kubernetes_asyncio.client.CoreV1Api", return_value=mock_ws_api),
+            patch.object(_FakeAwaitableWsCtx, "__await__", autospec=True) as _await,
+        ):
+
+            def _resolve(_self: Any) -> Any:
+                async def _r() -> Any:
+                    return stdin_ctx
+
+                return _r().__await__()
+
+            _await.side_effect = _resolve
+            stdout, stderr, exit_code = await backend._open_pod_exec_stream_with_stdin(
+                pod_name="p",
+                container_name="sandbox",
+                command=["sh", "-c", "x"],
+                stdin_bytes=b"payload",
+                walltime_s=5.0,
+            )
+        # stdin frame is channel-0-prefixed + carries the full payload.
+        assert sent == [b"\x00" + b"payload"]
+        assert stdout == b"restore-stdout"
+        assert stderr == b"restore-stderr"
+        # parse_error_data on a Success status yields exit 0.
+        assert exit_code == 0
+
+    @pytest.mark.asyncio
+    async def test_no_error_channel_frame_forces_exit_minus_one(self) -> None:
+        """Defence-in-depth at kubernetes_pod.py:2643-2651 — the
+        iterator exited without delivering an ERROR-channel frame;
+        exit_code is forced to -1 so a silent exit-zero green path
+        cannot fire on a stream-truncation regression."""
+        backend = _make_backend()
+        messages = [_FakeWsMessage(b"\x01" + b"only-stdout")]
+        patched_ws, mock_ws_api, stdin_ctx = self._patch_stdin_ctx(messages)
+        with (
+            patch(
+                "cognic_agentos.sandbox.backends.kubernetes_pod.WsApiClient",
+                patched_ws,
+            ),
+            patch("kubernetes_asyncio.client.CoreV1Api", return_value=mock_ws_api),
+            patch.object(_FakeAwaitableWsCtx, "__await__", autospec=True) as _await,
+        ):
+
+            def _resolve(_self: Any) -> Any:
+                async def _r() -> Any:
+                    return stdin_ctx
+
+                return _r().__await__()
+
+            _await.side_effect = _resolve
+            _stdout, _stderr, exit_code = await backend._open_pod_exec_stream_with_stdin(
+                pod_name="p",
+                container_name="sandbox",
+                command=["sh", "-c", "x"],
+                stdin_bytes=b"data",
+                walltime_s=5.0,
+            )
+        assert exit_code == -1
+
+    @pytest.mark.asyncio
+    async def test_malformed_error_channel_payload_sets_exit_minus_one(self) -> None:
+        """kubernetes_pod.py:2636-2641 — a malformed ERROR-channel
+        payload is caught + exit_code set to -1 (non-green sentinel)."""
+        backend = _make_backend()
+        messages = [_FakeWsMessage(b"\x03" + b"not-valid-json")]
+        patched_ws, mock_ws_api, stdin_ctx = self._patch_stdin_ctx(messages)
+        with (
+            patch(
+                "cognic_agentos.sandbox.backends.kubernetes_pod.WsApiClient",
+                patched_ws,
+            ),
+            patch("kubernetes_asyncio.client.CoreV1Api", return_value=mock_ws_api),
+            patch.object(_FakeAwaitableWsCtx, "__await__", autospec=True) as _await,
+        ):
+
+            def _resolve(_self: Any) -> Any:
+                async def _r() -> Any:
+                    return stdin_ctx
+
+                return _r().__await__()
+
+            _await.side_effect = _resolve
+            _stdout, _stderr, exit_code = await backend._open_pod_exec_stream_with_stdin(
+                pod_name="p",
+                container_name="sandbox",
+                command=["sh", "-c", "x"],
+                stdin_bytes=b"data",
+                walltime_s=5.0,
+            )
+        assert exit_code == -1
+
+
+class TestWaitForPodReady:
+    """kubernetes_pod.py:2684-2716 — _wait_for_pod_ready polls Pod
+    status until the sandbox container is ready; bounded by the
+    readiness timeout.
+    """
+
+    @pytest.mark.asyncio
+    async def test_returns_when_sandbox_container_ready(self) -> None:
+        backend = _make_backend()
+        cs = MagicMock()
+        cs.name = _SANDBOX_CONTAINER_NAME
+        cs.ready = True
+        pod = MagicMock()
+        pod.status.container_statuses = [cs]
+        with patch(
+            "kubernetes_asyncio.client.CoreV1Api",
+            return_value=MagicMock(read_namespaced_pod_status=AsyncMock(return_value=pod)),
+        ):
+            await backend._wait_for_pod_ready(pod_name="p")  # returns, no raise
+
+    @pytest.mark.asyncio
+    async def test_skips_non_sandbox_container_then_returns_on_ready(self) -> None:
+        """kubernetes_pod.py:2699-2700 — the proxy sidecar appears first
+        in container_statuses; the loop ``continue``s past it + finds
+        the ready sandbox container."""
+        backend = _make_backend()
+        cs_proxy = MagicMock()
+        cs_proxy.name = "egress-proxy"  # non-sandbox — continue
+        cs_proxy.ready = True
+        cs_sandbox = MagicMock()
+        cs_sandbox.name = _SANDBOX_CONTAINER_NAME
+        cs_sandbox.ready = True
+        pod = MagicMock()
+        pod.status.container_statuses = [cs_proxy, cs_sandbox]
+        with patch(
+            "kubernetes_asyncio.client.CoreV1Api",
+            return_value=MagicMock(read_namespaced_pod_status=AsyncMock(return_value=pod)),
+        ):
+            await backend._wait_for_pod_ready(pod_name="p")  # returns, no raise
+
+    @pytest.mark.asyncio
+    async def test_polls_past_not_ready_then_ready(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Container present but not-ready -> poll loop continues ->
+        next read shows ready -> return. Covers the ready=False branch +
+        the trailing sleep."""
+        monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+        backend = _make_backend()
+        cs_not_ready = MagicMock()
+        cs_not_ready.name = _SANDBOX_CONTAINER_NAME
+        cs_not_ready.ready = False
+        cs_not_ready.state = MagicMock()
+        cs_ready = MagicMock()
+        cs_ready.name = _SANDBOX_CONTAINER_NAME
+        cs_ready.ready = True
+        pod_pending = MagicMock()
+        pod_pending.status.container_statuses = [cs_not_ready]
+        pod_ready = MagicMock()
+        pod_ready.status.container_statuses = [cs_ready]
+        with patch(
+            "kubernetes_asyncio.client.CoreV1Api",
+            return_value=MagicMock(
+                read_namespaced_pod_status=AsyncMock(side_effect=[pod_pending, pod_ready])
+            ),
+        ):
+            await backend._wait_for_pod_ready(pod_name="p")
+
+    @pytest.mark.asyncio
+    async def test_continues_polling_on_api_exception_then_succeeds(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """kubernetes_pod.py:2693-2694 — a transient ApiException during
+        status read is treated as transient: keep polling."""
+        monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+        backend = _make_backend()
+        cs_ready = MagicMock()
+        cs_ready.name = _SANDBOX_CONTAINER_NAME
+        cs_ready.ready = True
+        pod_ready = MagicMock()
+        pod_ready.status.container_statuses = [cs_ready]
+        with patch(
+            "kubernetes_asyncio.client.CoreV1Api",
+            return_value=MagicMock(
+                read_namespaced_pod_status=AsyncMock(
+                    side_effect=[ApiException(status=503, reason="apiserver hiccup"), pod_ready]
+                )
+            ),
+        ):
+            await backend._wait_for_pod_ready(pod_name="p")
+
+    @pytest.mark.asyncio
+    async def test_no_sandbox_container_in_status_keeps_polling(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """kubernetes_pod.py:2706-2708 — the for/else: no sandbox
+        container in status yet (still pending) -> keep polling."""
+        monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+        backend = _make_backend()
+        cs_ready = MagicMock()
+        cs_ready.name = _SANDBOX_CONTAINER_NAME
+        cs_ready.ready = True
+        pod_pending = MagicMock()
+        pod_pending.status.container_statuses = None  # no statuses -> for/else
+        pod_pending.status.phase = "Pending"
+        pod_ready = MagicMock()
+        pod_ready.status.container_statuses = [cs_ready]
+        with patch(
+            "kubernetes_asyncio.client.CoreV1Api",
+            return_value=MagicMock(
+                read_namespaced_pod_status=AsyncMock(side_effect=[pod_pending, pod_ready])
+            ),
+        ):
+            await backend._wait_for_pod_ready(pod_name="p")
+
+    @pytest.mark.asyncio
+    async def test_raises_runtime_error_on_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """kubernetes_pod.py:2710-2715 — the Pod never becomes ready
+        before the deadline -> RuntimeError carrying the last status."""
+        monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+        # Force the deadline to be already in the past so the first
+        # post-read deadline check fires.
+        loop = asyncio.get_event_loop()
+        real_time = loop.time
+        times = iter([0.0, 1e9])  # start time, then way past deadline
+
+        def _fake_time() -> float:
+            try:
+                return next(times)
+            except StopIteration:
+                return real_time()
+
+        monkeypatch.setattr(loop, "time", _fake_time)
+        backend = _make_backend()
+        cs_not_ready = MagicMock()
+        cs_not_ready.name = _SANDBOX_CONTAINER_NAME
+        cs_not_ready.ready = False
+        cs_not_ready.state = MagicMock()
+        pod_pending = MagicMock()
+        pod_pending.status.container_statuses = [cs_not_ready]
+        with patch(
+            "kubernetes_asyncio.client.CoreV1Api",
+            return_value=MagicMock(read_namespaced_pod_status=AsyncMock(return_value=pod_pending)),
+        ):
+            with pytest.raises(RuntimeError, match=r"did not become ready within"):
+                await backend._wait_for_pod_ready(pod_name="p")
+
+
+class TestReadSuspendEventId:
+    """kubernetes_pod.py:2764-2781 — _read_suspend_event_id reads the
+    side-blob; missing / non-UTF-8 / non-UUID bytes surface as
+    _SuspendEventIdCorruptError (the corrupt-checkpoint taxonomy).
+    """
+
+    @pytest.mark.asyncio
+    async def test_returns_uuid_on_valid_side_blob(self) -> None:
+        import uuid as _uuid
+
+        record_id = _uuid.uuid4()
+        object_store = AsyncMock()
+        object_store.get = AsyncMock(return_value=str(record_id).encode("utf-8"))
+        checkpoint_store = MagicMock()
+        checkpoint_store._object_store = object_store
+        backend = _make_backend_with_checkpoint_store(checkpoint_store)
+        result = await backend._read_suspend_event_id(
+            session_id="s-1", tenant_id="t-1", checkpoint_id=CheckpointId("c" * 32)
+        )
+        assert result == record_id
+
+    @pytest.mark.asyncio
+    async def test_raises_corrupt_on_missing_side_blob(self) -> None:
+        from cognic_agentos.sandbox.backends.kubernetes_pod import (
+            _SuspendEventIdCorruptError,
+        )
+
+        object_store = AsyncMock()
+        object_store.get = AsyncMock(side_effect=FileNotFoundError("no such blob"))
+        checkpoint_store = MagicMock()
+        checkpoint_store._object_store = object_store
+        backend = _make_backend_with_checkpoint_store(checkpoint_store)
+        with pytest.raises(_SuspendEventIdCorruptError, match="missing suspend_event_id"):
+            await backend._read_suspend_event_id(
+                session_id="s-1", tenant_id="t-1", checkpoint_id=CheckpointId("c" * 32)
+            )
+
+    @pytest.mark.asyncio
+    async def test_raises_corrupt_on_non_utf8_side_blob(self) -> None:
+        """kubernetes_pod.py:2774-2777 — non-UTF-8 bytes -> corrupt."""
+        from cognic_agentos.sandbox.backends.kubernetes_pod import (
+            _SuspendEventIdCorruptError,
+        )
+
+        object_store = AsyncMock()
+        object_store.get = AsyncMock(return_value=b"\xff\xfe\xfd")  # invalid UTF-8
+        checkpoint_store = MagicMock()
+        checkpoint_store._object_store = object_store
+        backend = _make_backend_with_checkpoint_store(checkpoint_store)
+        with pytest.raises(_SuspendEventIdCorruptError, match="not UTF-8"):
+            await backend._read_suspend_event_id(
+                session_id="s-1", tenant_id="t-1", checkpoint_id=CheckpointId("c" * 32)
+            )
+
+    @pytest.mark.asyncio
+    async def test_raises_corrupt_on_non_uuid_side_blob(self) -> None:
+        """kubernetes_pod.py:2778-2781 — well-formed UTF-8 that is not
+        a UUID -> corrupt."""
+        from cognic_agentos.sandbox.backends.kubernetes_pod import (
+            _SuspendEventIdCorruptError,
+        )
+
+        object_store = AsyncMock()
+        object_store.get = AsyncMock(return_value=b"definitely-not-a-uuid")
+        checkpoint_store = MagicMock()
+        checkpoint_store._object_store = object_store
+        backend = _make_backend_with_checkpoint_store(checkpoint_store)
+        with pytest.raises(_SuspendEventIdCorruptError, match="not a UUID"):
+            await backend._read_suspend_event_id(
+                session_id="s-1", tenant_id="t-1", checkpoint_id=CheckpointId("c" * 32)
+            )
+
+
+class TestWriteSuspendEventId:
+    """kubernetes_pod.py:2737-2744 — _write_suspend_event_id persists
+    the record_id UUID under the per-tenant checkpoint prefix.
+    """
+
+    @pytest.mark.asyncio
+    async def test_writes_uuid_under_per_tenant_prefix(self) -> None:
+        import uuid as _uuid
+
+        record_id = _uuid.uuid4()
+        object_store = AsyncMock()
+        object_store.put = AsyncMock()
+        checkpoint_store = MagicMock()
+        checkpoint_store._object_store = object_store
+        backend = _make_backend_with_checkpoint_store(checkpoint_store)
+        await backend._write_suspend_event_id(
+            session_id="s-1",
+            tenant_id="t-1",
+            checkpoint_id=CheckpointId("c" * 32),
+            record_id=record_id,
+        )
+        object_store.put.assert_awaited_once()
+        args = object_store.put.call_args.args
+        assert args[0] == "sandbox-checkpoints"
+        assert args[1] == f"t-1/s-1/{'c' * 32}.suspend_event_id"
+        assert args[2] == str(record_id).encode("utf-8")
+
+
+class TestSessionHasPersistedCheckpointsNonMetadataKey:
+    """kubernetes_pod.py:1235->1232 — _session_has_persisted_checkpoints
+    skips keys that do NOT end with .metadata.json (the false branch
+    of the endswith check) and continues the prefix scan.
+    """
+
+    @pytest.mark.asyncio
+    async def test_skips_non_metadata_keys_then_finds_metadata(self) -> None:
+        async def _list_prefix(_bucket: str, _prefix: str) -> Any:
+            for key in [
+                "t-1/s-1/abc.snapshot",  # non-metadata — skipped (false branch)
+                "t-1/s-1/abc.suspend_event_id",  # non-metadata — skipped
+                "t-1/s-1/abc.metadata.json",  # matches -> True
+            ]:
+                yield key
+
+        object_store = MagicMock()
+        object_store.list_prefix = _list_prefix
+        checkpoint_store = MagicMock()
+        checkpoint_store._object_store = object_store
+        backend = _make_backend_with_checkpoint_store(checkpoint_store)
+        result = await backend._session_has_persisted_checkpoints(session_id="s-1", tenant_id="t-1")
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_returns_false_when_only_non_metadata_keys(self) -> None:
+        async def _list_prefix(_bucket: str, _prefix: str) -> Any:
+            for key in ["t-1/s-1/abc.snapshot", "t-1/s-1/abc.suspend_event_id"]:
+                yield key
+
+        object_store = MagicMock()
+        object_store.list_prefix = _list_prefix
+        checkpoint_store = MagicMock()
+        checkpoint_store._object_store = object_store
+        backend = _make_backend_with_checkpoint_store(checkpoint_store)
+        result = await backend._session_has_persisted_checkpoints(session_id="s-1", tenant_id="t-1")
+        assert result is False
+
+
+class TestSessionCheckpointSuspendDelegation:
+    """kubernetes_pod.py:670-674 — KubernetesPodSession.checkpoint /
+    suspend delegate to the backend's _do_* methods.
+    """
+
+    @pytest.mark.asyncio
+    async def test_session_checkpoint_delegates_to_backend(self) -> None:
+        backend_mock = AsyncMock()
+        backend_mock._do_checkpoint = AsyncMock(return_value="cp-99")
+        session = KubernetesPodSession(
+            session_id="s-1",
+            tenant_id="t-1",
+            policy=_POLICY_NO_BUDGET,
+            pack_context=_PACK_CTX,
+            created_at=datetime.now(UTC),
+            warm_pool_hit=False,
+            _backend=backend_mock,
+            _pod_name="sb-s-1",
+            _network_policy_name="np-s-1",
+            _namespace="test-ns",
+            _actor_subject="test",
+        )
+        result = await session.checkpoint("label-x")
+        assert result == "cp-99"
+        backend_mock._do_checkpoint.assert_awaited_once_with(session, "label-x")
+
+    @pytest.mark.asyncio
+    async def test_session_suspend_delegates_to_backend(self) -> None:
+        backend_mock = AsyncMock()
+        backend_mock._do_suspend = AsyncMock()
+        session = KubernetesPodSession(
+            session_id="s-1",
+            tenant_id="t-1",
+            policy=_POLICY_NO_BUDGET,
+            pack_context=_PACK_CTX,
+            created_at=datetime.now(UTC),
+            warm_pool_hit=False,
+            _backend=backend_mock,
+            _pod_name="sb-s-1",
+            _network_policy_name="np-s-1",
+            _namespace="test-ns",
+            _actor_subject="test",
+        )
+        await session.suspend()
+        backend_mock._do_suspend.assert_awaited_once_with(session)
