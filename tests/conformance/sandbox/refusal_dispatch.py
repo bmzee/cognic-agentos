@@ -343,13 +343,23 @@ async def _trigger_sandbox_warm_pool_drained(
     yield
 
 
-# Sprint 8.5 T1 — 6 new wake-time refusal triggers per spec §3.3.
-# Forward declarations only: substantive setup logic (pre-place
-# tombstone sentinel, malformed metadata, etc.) lands at T9 alongside
-# the CheckpointStore (T3) + the backend wake() impls (T6/T7). At T1,
-# these are no-op `yield` envelopes that register the closed-enum
-# membership pin (same pattern as the Sprint 8B T8B-a forward
-# declarations for the 15 8A admission-arm triggers).
+# Sprint 8.5 — 6 wake-time refusal triggers per spec §3.3.
+#
+# No-op `yield` envelopes — IDENTICAL pattern to the 15 Sprint-8A
+# admission-arm triggers above. The TRIGGERS_BY_REASON registry exists
+# for the closed-enum REGISTRATION membership pin at
+# test_refusal_taxonomy.py (tightening edit A); it is NOT a
+# behaviour-fan-out harness. Per-value wake() behaviour coverage lives
+# in the per-backend wake unit suite under `tests/unit/sandbox/`
+# (single-backend scope) + the cross-backend
+# `tests/conformance/sandbox/test_wake_session_tombstoned_conformance.py`
+# (tombstone-first parity; multi-backend scope).
+#
+# T1 seeded these as "forward declarations" anticipating that T9 would
+# add substantive bodies — but T9's conformance tests use
+# self-contained inline setup and never drive the registry, so wiring
+# bodies here would be unreachable dead code. The triggers therefore
+# stay no-op envelopes, consistent with all 15 admission triggers.
 
 
 @asynccontextmanager
@@ -360,9 +370,11 @@ async def _trigger_sandbox_wake_checkpoint_not_found(
     """Trigger envelope for the wake-time checkpoint-not-found refusal
     at ``src/cognic_agentos/sandbox/protocol.py`` ``wake()`` step 1(b).
 
-    Sprint 8.5 T1 forward declaration — substantive setup (call wake()
-    with a session_id that has NO persisted checkpoint AND no tombstone)
-    lands at T9 once T3's CheckpointStore + T6/T7's wake() impls land.
+    No-op registration envelope (same pattern as the 15 admission-arm
+    triggers above). Behaviour coverage — call wake() with a session_id
+    that has NO persisted checkpoint AND no tombstone → expect
+    ``sandbox_wake_checkpoint_not_found`` — lives in the per-backend
+    wake unit suite under ``tests/unit/sandbox/``.
     """
     yield
 
@@ -375,9 +387,10 @@ async def _trigger_sandbox_wake_checkpoint_corrupt(
     """Trigger envelope for the wake-time corrupt-metadata refusal at
     ``src/cognic_agentos/sandbox/protocol.py`` ``wake()`` step 1(c).
 
-    Sprint 8.5 T1 forward declaration — substantive setup (pre-place
-    malformed metadata.json so from_storage_payload() raises ValueError)
-    lands at T9.
+    No-op registration envelope. Behaviour coverage — pre-place
+    malformed metadata.json so ``from_storage_payload()`` raises
+    ``ValueError`` → expect ``sandbox_wake_checkpoint_corrupt`` — lives
+    at ``tests/unit/sandbox/test_wake_checkpoint_corrupt.py``.
     """
     yield
 
@@ -390,9 +403,10 @@ async def _trigger_sandbox_wake_checkpoint_retention_expired(
     """Trigger envelope for the wake-time retention-expired refusal at
     ``src/cognic_agentos/sandbox/protocol.py`` ``wake()`` step 3.
 
-    Sprint 8.5 T1 forward declaration — substantive setup (pre-place
-    metadata.json with created_at older than retention_window_s) lands
-    at T9.
+    No-op registration envelope. Behaviour coverage — pre-place
+    metadata.json with ``created_at`` older than ``retention_window_s``
+    → expect ``sandbox_wake_checkpoint_retention_expired`` — lives in
+    the per-backend wake unit suite under ``tests/unit/sandbox/``.
     """
     yield
 
@@ -406,9 +420,11 @@ async def _trigger_sandbox_wake_session_tombstoned(
     ``src/cognic_agentos/sandbox/protocol.py`` ``wake()`` step 1(a) —
     the P1.r6 fail-closed path that also catches `TombstoneCorruptError`.
 
-    Sprint 8.5 T1 forward declaration — substantive setup (pre-place
-    `<tenant>/<session>/_tombstoned.json` sentinel via
-    `CheckpointStore.tombstone_session()`) lands at T9.
+    No-op registration envelope. Behaviour coverage — single-backend
+    closed-enum + detail-field invariants at
+    ``tests/unit/sandbox/test_wake_session_tombstoned.py``;
+    cross-backend tombstone-first parity at
+    ``tests/conformance/sandbox/test_wake_session_tombstoned_conformance.py``.
     """
     yield
 
@@ -421,10 +437,12 @@ async def _trigger_sandbox_wake_tenant_mismatch(
     """Trigger envelope for the wake-time tenant-mismatch refusal at
     ``src/cognic_agentos/sandbox/protocol.py`` ``wake()`` step 2.
 
-    Sprint 8.5 T1 forward declaration — substantive setup (pre-place
+    No-op registration envelope. Behaviour coverage — pre-place
     metadata under tenant-a; call wake with tenant_id=tenant-b for
-    defence-in-depth past the prefix-keyed lookup) lands at T9.
-    Pins the extra design lock: session_id alone is NEVER authorization.
+    defence-in-depth past the prefix-keyed lookup → expect
+    ``sandbox_wake_tenant_mismatch`` — lives at
+    ``tests/unit/sandbox/test_wake_tenant_mismatch.py``. Pins the extra
+    design lock: session_id alone is NEVER authorization.
     """
     yield
 
@@ -439,9 +457,11 @@ async def _trigger_sandbox_wake_policy_revalidation_failed(
     lock — wake re-runs admit_policy against LIVE tenant policy / catalog
     / Rego / settings).
 
-    Sprint 8.5 T1 forward declaration — substantive setup (pre-place
-    metadata under an older-passing policy; tighten live tenant Settings
-    so revalidation refuses) lands at T9.
+    No-op registration envelope. Behaviour coverage — pre-place
+    metadata under an older-passing policy; tighten live tenant
+    Settings so revalidation refuses → expect
+    ``sandbox_wake_policy_revalidation_failed`` — lives at
+    ``tests/unit/sandbox/test_wake_admit_policy_revalidation.py``.
     """
     yield
 
@@ -482,9 +502,10 @@ TRIGGERS_BY_REASON: dict[str, TriggerFactory] = {
     "sandbox_policy_rego_denied": _trigger_sandbox_policy_rego_denied,
     "sandbox_backend_unavailable": _trigger_sandbox_backend_unavailable,
     "sandbox_warm_pool_drained": _trigger_sandbox_warm_pool_drained,
-    # Sprint 8.5 T1 — 6 new wake-time triggers (forward declarations;
-    # substantive bodies land at T9 alongside T3 CheckpointStore +
-    # T6/T7 backend wake() impls).
+    # Sprint 8.5 — 6 wake-time triggers. No-op registration envelopes
+    # (same pattern as the 15 admission-arm triggers); the registry is
+    # the closed-enum membership pin, not a behaviour harness — see the
+    # section comment above the wake-time trigger block.
     "sandbox_wake_checkpoint_not_found": _trigger_sandbox_wake_checkpoint_not_found,
     "sandbox_wake_checkpoint_corrupt": _trigger_sandbox_wake_checkpoint_corrupt,
     "sandbox_wake_checkpoint_retention_expired": (
