@@ -89,9 +89,14 @@ ActionOutcome = Literal["accepted", "rejected"]
 #:       AFTER the gate passed)
 #:     ``action_backend_deferred_to_sprint_13_5`` (approve / deny stubs)
 #:     ``action_backend_deferred_no_run_primitive`` (cancel_run /
-#:       interrupt / resume — no agent_run primitive yet)
-#:     ``action_backend_deferred_sandbox_unwired`` (resume payload
-#:       routing — sandbox primitive lands at Sprint 8)
+#:       interrupt / resume — no agent_run primitive in Wave 1; the
+#:       resume arm joined at Sprint 8.5 T11)
+#:     ``action_backend_deferred_sandbox_unwired`` — RESERVED, currently
+#:       UNMAPPED. Sprint 7B.4 mapped ``resume`` here; Sprint 8.5 T11
+#:       remapped ``resume`` to ``action_backend_deferred_no_run_primitive``
+#:       (the honest blocker is the missing run→session identity seam,
+#:       not an unwired sandbox). Retained in the wire-public enum —
+#:       removing it is a separate enum-shrink wire decision.
 ActionRejectionReason = Literal[
     "action_backend_deferred_to_sprint_13_5",
     "action_backend_deferred_no_run_primitive",
@@ -169,9 +174,19 @@ class InterruptActionRequest(_BaseActionRequest):
 
 
 class ResumeActionRequest(_BaseActionRequest):
-    """``action_class="resume"`` — resumes a suspended agent run with
-    an optional payload. Sprint-8 wires the sandbox primitive; T11
-    handler emits the deferred-stub reason until then."""
+    """``action_class="resume"`` — resumes a suspended agent run by
+    ``run_id``, with an optional ``payload``.
+
+    Sprint 8.5 ships the sandbox ``wake()`` primitive, but the planned
+    ``resume`` → ``wake()`` lift was rejected at the Sprint-8.5 T11
+    review: ``run_id`` is an application/run identifier while
+    ``wake()`` keys on a sandbox ``session_id``, and Wave 1 has no
+    agent_run primitive to resolve one to the other. The T11 handler
+    therefore keeps emitting a deferred-stub reason —
+    ``action_backend_deferred_no_run_primitive`` (NOT the now-false
+    ``action_backend_deferred_sandbox_unwired``). ``payload`` is
+    accepted on the wire but not yet routed. The resumable-run UX
+    lands with the Sprint 13.5 approval engine."""
 
     action_class: Literal["resume"] = "resume"
     run_id: str

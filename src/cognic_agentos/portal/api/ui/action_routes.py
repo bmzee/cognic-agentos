@@ -80,10 +80,25 @@ _LOG = logging.getLogger(__name__)
 #:
 #:   - ``approve`` / ``deny`` → ``action_backend_deferred_to_sprint_13_5``:
 #:     the approval-engine primitive lands at Sprint 13.5 per ADR-014.
-#:   - ``cancel_run`` / ``interrupt`` → ``action_backend_deferred_no_run_primitive``:
-#:     no ``agent_run`` primitive in Wave 1; lands at Sprint 11.5.
-#:   - ``resume`` → ``action_backend_deferred_sandbox_unwired``:
-#:     sandbox resume primitive lands at Sprint 8.
+#:   - ``cancel_run`` / ``interrupt`` / ``resume`` →
+#:     ``action_backend_deferred_no_run_primitive``: no ``agent_run``
+#:     primitive in Wave 1; lands at Sprint 11.5. ``resume`` joined
+#:     this group at Sprint 8.5 T11 — see the note below.
+#:
+#: Sprint 8.5 T11 note: the plan called for lifting ``resume`` to a
+#: ``sandbox.wake()`` dispatch. That lift was REJECTED at review.
+#: ``ResumeActionRequest`` carries a ``run_id`` (an application/run
+#: identifier); ``SandboxBackend.wake()`` keys on a sandbox
+#: ``session_id``. Wave 1 has no agent_run primitive and therefore no
+#: authoritative run→session resolver — routing ``run_id`` straight
+#: into ``wake()`` would fake an identity contract at the wrong
+#: layer. So ``resume`` stays a deferred stub; only its now-FALSE
+#: reason ``action_backend_deferred_sandbox_unwired`` (the sandbox IS
+#: wired as of Sprint 8.5) is corrected to the honest no-run-primitive
+#: reason. ``action_backend_deferred_sandbox_unwired`` is consequently
+#: UNMAPPED — retained in the wire-public ``ActionRejectionReason``
+#: enum because removing it is a separate enum-shrink wire decision,
+#: out of T11 scope.
 #:
 #: ``submit_elicitation`` is NOT in this map — it routes through the
 #: T8 elicitation gate + adapter.handle_submission call.
@@ -92,7 +107,7 @@ _STUB_REASONS: dict[ActionClass, ActionRejectionReason] = {
     "deny": "action_backend_deferred_to_sprint_13_5",
     "cancel_run": "action_backend_deferred_no_run_primitive",
     "interrupt": "action_backend_deferred_no_run_primitive",
-    "resume": "action_backend_deferred_sandbox_unwired",
+    "resume": "action_backend_deferred_no_run_primitive",
 }
 
 

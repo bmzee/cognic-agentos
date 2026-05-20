@@ -150,7 +150,7 @@ class TestStubsReturn200WithDeferredReason:
             ("deny", "action_backend_deferred_to_sprint_13_5"),
             ("cancel_run", "action_backend_deferred_no_run_primitive"),
             ("interrupt", "action_backend_deferred_no_run_primitive"),
-            ("resume", "action_backend_deferred_sandbox_unwired"),
+            ("resume", "action_backend_deferred_no_run_primitive"),
         ],
     )
     async def test_stub_emits_2_chain_rows(
@@ -179,6 +179,49 @@ class TestStubsReturn200WithDeferredReason:
         # 2 chain rows: submitted + rejected. Order matters for
         # examiner trace assembly (submitted FIRST so resolution can
         # reference its event_id as the ``submitted_event_id`` cursor).
+        rows = await _read_recent_decision_history_rows(broker)
+        assert any(row.event_type == "frontend_action.submitted" for row in rows)
+        assert any(row.event_type == "frontend_action.rejected" for row in rows)
+
+
+class TestResumeStaysDeferredPendingRunIdentitySeam:
+    """Sprint 8.5 T11 — the planned ``resume`` -> ``sandbox.wake()``
+    lift was REJECTED at review.
+
+    ``ResumeActionRequest`` carries a ``run_id`` (an application/run
+    identifier); ``SandboxBackend.wake()`` keys on a sandbox
+    ``session_id``. Wave 1 has no agent_run primitive and therefore no
+    authoritative run->session resolver — routing ``run_id`` straight
+    into ``wake()`` would be a faked identity contract at exactly the
+    wrong layer. ``resume`` stays a deferred stub; only the now-FALSE
+    reason ``action_backend_deferred_sandbox_unwired`` (the sandbox IS
+    wired as of Sprint 8.5) is corrected to the honest
+    ``action_backend_deferred_no_run_primitive``. No new enum value;
+    no UI-event-surface broadening. The resumable-run UX lands with
+    the Sprint 13.5 approval engine per spec §1028.
+    """
+
+    @pytest.mark.asyncio
+    async def test_resume_rejects_through_route_with_honest_reason(
+        self, app_with_scopes: FastAPI, broker: UIEventBroker
+    ) -> None:
+        """``resume`` rejects via the real POST route (not a shortcut)
+        with the honest no-run-primitive reason — and NEVER with the
+        stale sandbox-unwired reason."""
+        async with _async_client(app_with_scopes) as c:
+            r = await c.post(
+                "/api/v1/ui/actions",
+                json={"action_class": "resume", "run_id": "run_1"},
+            )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["outcome"] == "rejected"
+        # Honest blocker: no run->session identity seam in Wave 1.
+        assert body["reason"] == "action_backend_deferred_no_run_primitive"
+        # The Sprint-7B.4 reason is now factually false (the sandbox
+        # primitive IS wired) — the route MUST NOT emit it.
+        assert body["reason"] != "action_backend_deferred_sandbox_unwired"
+        # Still a genuine route dispatch — submitted + rejected pair.
         rows = await _read_recent_decision_history_rows(broker)
         assert any(row.event_type == "frontend_action.submitted" for row in rows)
         assert any(row.event_type == "frontend_action.rejected" for row in rows)
