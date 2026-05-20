@@ -251,9 +251,15 @@ class LocalObjectStoreAdapter:
         bucket_root_target = self._root / bucket
         try:
             bucket_root_resolved = bucket_root_target.resolve()
-        except OSError:
+        except (OSError, RuntimeError):
+            # RuntimeError: Python 3.12 pathlib raises RuntimeError
+            # ("Symlink loop from ...") for a symlink loop encountered
+            # during resolve(); OSError covers other filesystem errors.
+            # Both fail-closed to the PathTraversalError taxonomy so a
+            # caller's `except PathTraversalError` catches a loop.
             raise PathTraversalError(
-                f"failed to resolve bucket root {bucket_root_target!s}"
+                f"failed to resolve bucket root {bucket_root_target!s} "
+                f"(filesystem error or symlink loop detected)"
             ) from None
         if not bucket_root_resolved.is_relative_to(self._root):
             raise PathTraversalError(
@@ -265,9 +271,18 @@ class LocalObjectStoreAdapter:
         prefix_target = bucket_root_resolved / prefix if prefix else bucket_root_resolved
         try:
             prefix_resolved = prefix_target.resolve()
-        except OSError:
-            # Prefix doesn't exist yet — yield empty iterator (NOT an error).
-            return
+        except (OSError, RuntimeError):
+            # A resolution FAILURE here is a genuine error, not a benign
+            # missing prefix: resolve(strict=False) does NOT raise for a
+            # non-existent path (that case is handled by the
+            # exists()/is_dir() guard below). The only inputs that reach
+            # this except are a symlink loop (Python 3.12 pathlib raises
+            # RuntimeError) or a filesystem error (OSError) — both
+            # fail-closed to the PathTraversalError taxonomy.
+            raise PathTraversalError(
+                f"failed to resolve prefix {prefix_target!s} "
+                f"(filesystem error or symlink loop detected)"
+            ) from None
         if not prefix_resolved.is_relative_to(bucket_root_resolved):
             raise PathTraversalError(
                 f"resolved prefix {prefix_resolved!s} is not under bucket root "
@@ -328,11 +343,16 @@ class LocalObjectStoreAdapter:
             entry_path = Path(entry.path)
             try:
                 entry_resolved = entry_path.resolve()
-            except OSError:
-                # Symlink target gone OR loop OR permission denied; skip
-                # silently (do NOT yield broken/dangling entries as keys;
-                # do NOT raise — a sweep over a multi-million-key tenant
-                # should not abort on one bad symlink).
+            except (OSError, RuntimeError):
+                # Symlink loop (Python 3.12 pathlib raises RuntimeError)
+                # OR permission denied (OSError); skip this entry
+                # silently. This site DELIBERATELY does not raise: a
+                # sweep over a multi-million-key tenant must not abort
+                # on one bad/looping symlink — raising here would be a
+                # DoS vector (a single planted loop symlink could kill
+                # every list_prefix call). A merely-dangling symlink
+                # (target gone) does NOT reach here — resolve(strict=
+                # False) returns the path without raising for that.
                 continue
 
             # Check 1: resolved target under self._root.
@@ -622,7 +642,22 @@ class LocalObjectStoreAdapter:
     def _get_sync(self, target: Path) -> bytes:
         # Re-resolve the target at read time so a symlink swapped in
         # between validate-time and read-time can't escape the root.
-        resolved = target.resolve(strict=True)
+        try:
+            resolved = target.resolve(strict=True)
+        except FileNotFoundError:
+            # Genuine absent object — preserve get()'s documented
+            # FileNotFoundError contract (NOT a path-traversal event).
+            # Must be caught BEFORE the (OSError, RuntimeError) arm
+            # because FileNotFoundError is an OSError subclass.
+            raise
+        except (OSError, RuntimeError):
+            # Symlink loop (Python 3.12 pathlib raises RuntimeError, not
+            # OSError) OR another filesystem error during resolution —
+            # fail-closed to the PathTraversalError taxonomy, same as
+            # the four list_prefix / _validate_and_resolve resolve-guards.
+            raise PathTraversalError(
+                f"failed to resolve {target!s} (filesystem error or symlink loop detected)"
+            ) from None
         if not resolved.is_relative_to(self._root):
             raise PathTraversalError(
                 f"resolved path {resolved!s} is not under root {self._root!s} "
@@ -753,9 +788,14 @@ class LocalObjectStoreAdapter:
         # this catches symlinks anywhere in the path that escape root.
         try:
             resolved_parent = target.parent.resolve()
-        except OSError:
-            # Filesystem error during resolution: fail closed.
-            raise PathTraversalError(f"failed to resolve parent of {target!s}") from None
+        except (OSError, RuntimeError):
+            # Filesystem error (OSError) OR symlink loop (Python 3.12
+            # pathlib raises RuntimeError) during resolution: fail
+            # closed to the PathTraversalError taxonomy.
+            raise PathTraversalError(
+                f"failed to resolve parent of {target!s} "
+                f"(filesystem error or symlink loop detected)"
+            ) from None
         if not resolved_parent.is_relative_to(self._root):
             raise PathTraversalError(
                 f"resolved parent {resolved_parent!s} is not under root "

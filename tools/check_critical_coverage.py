@@ -1492,6 +1492,79 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     #     surface + the on-gate ``docker_sibling.py`` consumer
     #     surface; promoting here would double-count the same enforcement.
     ("src/cognic_agentos/sandbox/backends/kubernetes_pod.py", 0.95, 0.90),
+    #
+    # ------------------------------------------------------------------
+    # Sprint 8.5 T12 — resumable-session-API gate promotion (+2 → 73).
+    # ------------------------------------------------------------------
+    # Per spec §9 the 2 modules below are promoted to the durable gate
+    # at the standard 95% line / 90% branch floor. The user-locked
+    # tightening edit B (``feedback_verify_promotion_meets_floor_at_
+    # promotion_time``) ran ``tools/check_critical_coverage.py`` against
+    # a FRESH full-suite ``coverage.json`` IN THE SAME COMMIT as this
+    # ``_CRITICAL_FILES`` extension — NOT just the count-guard bump. The
+    # 2026-05-20 promotion run found BOTH modules below floor on fresh
+    # data (``checkpoint_store.py`` 89.90% line / 85.48% branch;
+    # ``local_object_store_adapter.py`` 92.58% line); the SAME commit
+    # lands the focused negative-path repair
+    # (``test_checkpoint_store_coverage.py`` +
+    # ``test_local_object_store_adapter_coverage.py``) bringing both to
+    # 99%+ line / 99%+ branch. The repair ALSO surfaced + fixed a real
+    # taxonomy gap in the promoted adapter: Python 3.12 ``Path.resolve()``
+    # raises ``RuntimeError`` (not ``OSError``) on a symlink loop, so the
+    # adapter's four ``except OSError`` resolve-guards did not catch
+    # loops — fixed to ``except (OSError, RuntimeError)`` in this commit.
+    #
+    #   * ``sandbox/checkpoint_store.py`` — the substantive tenant-
+    #     isolation + retention enforcement boundary of the Sprint-8.5
+    #     resumable-session API. Owns the ``CheckpointStore`` orchestrator
+    #     (persist / load_latest / tombstone_session / load_tombstone /
+    #     purge_expired / purge_by_id), the ``CheckpointMetadata`` /
+    #     ``VaultLeaseRef`` / ``TombstoneRecord`` frozen wire-public
+    #     dataclasses, and the ``TombstoneCorruptError`` /
+    #     ``CheckpointMaxPerSessionRetentionLocked`` typed exceptions.
+    #     ON the gate because: checkpoint bytes are keyed by
+    #     ``<tenant_id>/<session_id>/`` — the per-tenant prefix IS the
+    #     cross-tenant isolation boundary; ``from_storage_payload`` is
+    #     the wake-time evidence parser (a malformed-blob branch that
+    #     raised a raw ``TypeError`` instead of ``ValueError`` would
+    #     surface the WRONG wake-time closed-enum refusal taxonomy);
+    #     ``load_tombstone`` raising ``TombstoneCorruptError`` on a
+    #     tampered sentinel (P1.r6 fail-closed) is what stops a
+    #     destroyed session from looking restorable; retention-window
+    #     enforcement at ``purge_expired`` is the regulator-erasure
+    #     surface.
+    #   * ``db/adapters/local_object_store_adapter.py`` — Sprint-4 driver
+    #     promoted because Sprint 8.5's ``list_prefix()`` Protocol
+    #     extension (spec §3.5) makes it a RUNTIME checkpoint tenant-
+    #     isolation enforcement surface: ``CheckpointStore.load_latest()``
+    #     + ``purge_expired()`` walk per-tenant ``<tenant>/<session>/``
+    #     prefixes via ``list_prefix``, and the driver's dual root-safety
+    #     check (every resolved dir + file must canonicalise under BOTH
+    #     ``self._root`` AND the prefix subtree) is what stops a tenant-a
+    #     symlink pointing at tenant-b's checkpoints from leaking into
+    #     tenant-a's listing. A ``..`` traversal OR a cross-prefix
+    #     symlink leak here bypasses the tenant-isolation invariant.
+    #     Promoted alongside ``checkpoint_store.py`` because Sprint 8.5
+    #     adds the new substantive enforcement surface — NOT because 8.5
+    #     is the first runtime consumer (the driver already backs
+    #     ``protocol/supply_chain.py`` Sigstore bundles + plugin-registry
+    #     admission fixtures per P3.r6).
+    #
+    # OFF the durable gate per spec §4.2 + Doctrine F (with explicit
+    # carve-out rationale; same precedent as Sprint 8A's
+    # ``sandbox/audit.py`` + Sprint 8B's ``sandbox/backend_factory.py``):
+    #
+    #   * ``sandbox/reaper.py`` — ``CheckpointReaper``: a thin asyncio
+    #     loop (``run_once`` / ``run_forever``) wrapping the on-gate
+    #     ``CheckpointStore.purge_expired()``. NOT-CC per spec §4.2 — the
+    #     substantive retention-floor enforcement lives in
+    #     ``checkpoint_store.py`` (which IS on the gate); the reaper
+    #     carries only schedule + loop + exception-survival glue. Pinned
+    #     by ``tests/unit/sandbox/test_reaper.py``. Promoting it would
+    #     measure loop-glue coverage where the enforcement is already
+    #     gated — same Doctrine F precedent as ``sandbox/audit.py``.
+    ("src/cognic_agentos/sandbox/checkpoint_store.py", 0.95, 0.90),
+    ("src/cognic_agentos/db/adapters/local_object_store_adapter.py", 0.95, 0.90),
 )
 
 

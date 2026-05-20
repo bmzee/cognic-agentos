@@ -35,10 +35,11 @@ import pytest
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _GATE_TOOL_PATH = _REPO_ROOT / "tools" / "check_critical_coverage.py"
 
-#: Entry count after the Sprint 8A T12 promotions (63 at the 7B.4
-#: T13 close + 7 sandbox modules = 70). Bump this in lockstep with
-#: any deliberate ``_CRITICAL_FILES`` change.
-_EXPECTED_ENTRY_COUNT = 71
+#: Entry count after the Sprint 8.5 T12 promotions (63 at the 7B.4
+#: T13 close + 7 Sprint-8A sandbox modules = 70; + 1 Sprint-8B K8s
+#: backend = 71; + 2 Sprint-8.5 modules = 73). Bump this in lockstep
+#: with any deliberate ``_CRITICAL_FILES`` change.
+_EXPECTED_ENTRY_COUNT = 73
 
 #: The 5 modules Sprint 7B.3 promoted to the durable gate, each by its
 #: own landing commit (T3-T6 panels + T7 composer). All ride the
@@ -311,5 +312,50 @@ def test_sprint_8b_off_gate_modules_absent(gate_tool: ModuleType, off_gate_modul
 
     A future edit that promotes either without revisiting the carve-out
     rationale fails here, forcing a deliberate review."""
+    paths = {path for path, _line, _branch in gate_tool._CRITICAL_FILES}
+    assert off_gate_module not in paths
+
+
+# ---------------------------------------------------------------------------
+# Sprint 8.5 T12 — resumable-session-API gate promotion (+2 → 73)
+# ---------------------------------------------------------------------------
+
+#: The 2 modules Sprint 8.5 T12 promotes to the durable gate. The
+#: tightening edit B (``feedback_verify_promotion_meets_floor_at_promotion_time``)
+#: requires this commit ALSO run ``tools/check_critical_coverage.py``
+#: against fresh ``coverage.json`` — NOT just this count-guard bump. The
+#: 2026-05-20 promotion run found BOTH below floor on fresh data and
+#: landed the same-commit focused negative-path repair
+#: (``test_checkpoint_store_coverage.py`` +
+#: ``test_local_object_store_adapter_coverage.py``).
+_SPRINT_8_5_GATE_MODULES = (
+    "src/cognic_agentos/sandbox/checkpoint_store.py",
+    "src/cognic_agentos/db/adapters/local_object_store_adapter.py",
+)
+
+#: The 1 NEW Sprint 8.5 module deliberately kept OFF the durable gate
+#: per spec §4.2 + Doctrine F — ``sandbox/reaper.py`` is a thin asyncio
+#: loop wrapping the on-gate ``checkpoint_store.py`` ``purge_expired()``;
+#: the substantive retention enforcement is already gated.
+_SPRINT_8_5_OFF_GATE_MODULES = ("src/cognic_agentos/sandbox/reaper.py",)
+
+
+def test_sprint_8_5_modules_present_with_standard_floors(
+    gate_tool: ModuleType,
+) -> None:
+    """The 2 Sprint 8.5 T12 promotions are on the gate at the 95/90 floor."""
+    by_path = {path: (line, branch) for path, line, branch in gate_tool._CRITICAL_FILES}
+    for module in _SPRINT_8_5_GATE_MODULES:
+        assert module in by_path, f"Sprint 8.5 module missing from gate: {module}"
+        assert by_path[module] == (0.95, 0.90), (
+            f"{module} must ride the standard 95%-line / 90%-branch floor"
+        )
+
+
+@pytest.mark.parametrize("off_gate_module", _SPRINT_8_5_OFF_GATE_MODULES)
+def test_sprint_8_5_off_gate_modules_absent(gate_tool: ModuleType, off_gate_module: str) -> None:
+    """``sandbox/reaper.py`` stays OFF the durable gate per the spec
+    §4.2 + Doctrine F carve-out. A future edit that promotes it without
+    revisiting the rationale fails here, forcing a deliberate review."""
     paths = {path for path, _line, _branch in gate_tool._CRITICAL_FILES}
     assert off_gate_module not in paths
