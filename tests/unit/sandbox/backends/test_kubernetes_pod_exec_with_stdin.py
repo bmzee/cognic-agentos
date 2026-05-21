@@ -24,11 +24,14 @@ frame, NOT EOF. The intermediate fix attempt that sent
 have left ``tar xzf -`` hanging on stdin until walltime.
 
 **The protocol-agnostic resolution.** ``_restore_workspace_tar``
-wraps the tar in ``sh -c "head -c <N> > <tmp> && tar xzf <tmp> -C
-/workspace && rm -f <tmp>"`` so the remote command consumes exactly
-N bytes from stdin then exits naturally — no stdin EOF needed. The
-helper now sends EXACTLY ONE frame (the stdin payload) + iterates
-until the server-side websocket closes naturally.
+wraps the tar in ``sh -c "head -c <N> | tar xzf -
+--strip-components=1 --no-overwrite-dir -C /workspace"`` so the
+remote command consumes exactly N bytes from stdin then exits
+naturally — no stdin EOF needed. The ``--strip-components=1`` flag
+skips the archive's ``./`` entry so GNU tar never tries to chmod or
+utime the existing OpenShift ``emptyDir`` mount root. The helper now
+sends EXACTLY ONE frame (the stdin payload) + iterates until the
+server-side websocket closes naturally.
 
 Regressions in this file (8 total):
 
@@ -40,9 +43,9 @@ Regressions in this file (8 total):
    Fires if a future upgrade switches to v5 (at which point the head
    -c workaround can be replaced with a v5 close frame).
 3. ``test_restore_workspace_tar_uses_head_minus_c_known_length_pattern``
-   — pins the ``sh -c "head -c <N> > <tmp> && tar xzf ... && rm -f
-   <tmp>"`` command shape with the byte-count matching the snapshot
-   length + per-session temp path.
+   — pins the ``sh -c "head -c <N> | tar xzf -
+   --strip-components=1 --no-overwrite-dir -C /workspace"`` command
+   shape with the byte-count matching the snapshot length.
 4. ``test_helper_reads_all_frames_before_natural_close`` — LOAD-
    BEARING op-order pin. Every read precedes close; the ERROR-
    channel read specifically precedes close.
@@ -361,14 +364,17 @@ async def test_restore_workspace_tar_uses_head_minus_c_known_length_pattern(
     """**LOAD-BEARING protocol-agnostic restore.**
 
     ``_restore_workspace_tar`` MUST invoke the helper with a
-    ``sh -c "head -c <N> | tar xzf - -C /workspace"`` pipeline shape
-    where ``N == len(snapshot_bytes)``. The pipeline shape (head
-    piped directly to tar) avoids disk-staging a temp file —
-    required because Sprint 8.5 T7 P1.3 only declared ``/workspace``
-    as writable; ``/tmp`` (and every other path) remains read-only
-    under ``readOnlyRootFilesystem=True``. The known-length
-    consumption is what lets the remote command exit naturally
-    under the v4 subprotocol (which cannot signal stdin EOF).
+    ``sh -c "head -c <N> | tar xzf - --strip-components=1 --no-overwrite-dir -C
+    /workspace"`` pipeline shape where ``N == len(snapshot_bytes)``.
+    The pipeline shape (head piped directly to tar) avoids
+    disk-staging a temp file — required because Sprint 8.5 T7 P1.3
+    only declared ``/workspace`` as writable; ``/tmp`` (and every
+    other path) remains read-only under ``readOnlyRootFilesystem=True``.
+    The known-length consumption is what lets the remote command exit
+    naturally under the v4 subprotocol (which cannot signal stdin
+    EOF). ``--strip-components=1`` is load-bearing on OpenShift
+    ``emptyDir`` because it skips the archive's ``.`` entry; the
+    arbitrary namespace UID cannot chmod or utime the mount root.
 
     TM-revert intent A: replace the wrapper with
     ``["tar", "xzf", "-", "-C", "/workspace"]`` (the original
@@ -420,6 +426,15 @@ async def test_restore_workspace_tar_uses_head_minus_c_known_length_pattern(
         "hang waiting for bytes that never arrive."
     )
     assert "tar xzf -" in shell, f"tar MUST read its archive from stdin (the pipe); got: {shell!r}"
+    assert "--strip-components=1" in shell, (
+        "restore command MUST skip the archive's leading ./ component "
+        "so GNU tar does not try to chmod/utime the existing OpenShift "
+        f"emptyDir mount root. Got: {shell!r}"
+    )
+    assert "--no-overwrite-dir" in shell, (
+        "restore command keeps --no-overwrite-dir as an extra guard for "
+        f"pre-existing directories below /workspace. Got: {shell!r}"
+    )
     assert "-C /workspace" in shell, (
         f"extraction target MUST be /workspace (the writable emptyDir mount); got: {shell!r}"
     )

@@ -84,15 +84,6 @@ _ACTOR = Actor(
     scopes=frozenset(),
     actor_type="human",
 )
-_POLICY = SandboxPolicy(
-    cpu_cores=0.5,
-    cpu_time_budget_s=None,
-    memory_mb=256,
-    walltime_s=30.0,
-    runtime_image="cognic/sandbox-runtime-python:v1@sha256:" + "a" * 64,
-    egress_allow_list=(),
-    vault_path=None,
-)
 _PACK_CTX = PackAdmissionContext(
     pack_id="cognic.conformance",
     pack_version="v1",
@@ -102,6 +93,23 @@ _PACK_CTX = PackAdmissionContext(
     profile="production",
 )
 _TOMBSTONED_REASON = "sandbox_wake_session_tombstoned"
+
+
+@pytest.fixture
+def policy(fixture_runtime_image: str) -> SandboxPolicy:
+    """Conformance ``SandboxPolicy`` — ``runtime_image`` flows from the
+    conftest fixture (runtime fixture ref in fixture mode, canonical
+    placeholder otherwise). All other fields unchanged from the
+    pre-#477 ``_POLICY`` constant."""
+    return SandboxPolicy(
+        cpu_cores=0.5,
+        cpu_time_budget_s=None,
+        memory_mb=256,
+        walltime_s=30.0,
+        runtime_image=fixture_runtime_image,
+        egress_allow_list=(),
+        vault_path=None,
+    )
 
 
 def _bypass_catalog_trust_gate(backend: Any, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -127,7 +135,9 @@ def _bypass_catalog_trust_gate(backend: Any, monkeypatch: pytest.MonkeyPatch) ->
     )
 
 
-async def _tombstoned_session(backend: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
+async def _tombstoned_session(
+    backend: Any, monkeypatch: pytest.MonkeyPatch, policy: SandboxPolicy
+) -> Any:
     """create() → checkpoint() → destroy() — the production tombstone
     path.
 
@@ -142,7 +152,7 @@ async def _tombstoned_session(backend: Any, monkeypatch: pytest.MonkeyPatch) -> 
     """
     _bypass_catalog_trust_gate(backend, monkeypatch)
     session = await backend.create(
-        _POLICY,
+        policy,
         actor=_ACTOR,
         tenant_id=_TENANT,
         pack_context=_PACK_CTX,
@@ -161,11 +171,12 @@ class TestWakeSessionTombstonedConformance:
         self,
         backend: Any,
         monkeypatch: pytest.MonkeyPatch,
+        policy: SandboxPolicy,
     ) -> None:
         """(a) A tombstoned session → ``wake()`` refuses fail-closed
         with the ``sandbox_wake_session_tombstoned`` closed-enum
         reason."""
-        session = await _tombstoned_session(backend, monkeypatch)
+        session = await _tombstoned_session(backend, monkeypatch, policy)
 
         with pytest.raises(SandboxLifecycleRefused) as excinfo:
             await backend.wake(session.session_id, actor=_ACTOR, tenant_id=_TENANT)
@@ -175,6 +186,7 @@ class TestWakeSessionTombstonedConformance:
         self,
         backend: Any,
         monkeypatch: pytest.MonkeyPatch,
+        policy: SandboxPolicy,
     ) -> None:
         """(b) Tombstone + valid checkpoint metadata on disk → ``wake()``
         REFUSES, it does NOT restore.
@@ -187,7 +199,7 @@ class TestWakeSessionTombstonedConformance:
         tombstoned session trips the wrap — this is the load-bearing
         tombstone-first ordering proof.
         """
-        session = await _tombstoned_session(backend, monkeypatch)
+        session = await _tombstoned_session(backend, monkeypatch, policy)
 
         # A restore path genuinely exists — load_latest() succeeds and
         # returns the persisted metadata + snapshot bytes.
@@ -230,6 +242,7 @@ class TestWakeSessionTombstonedConformance:
         self,
         backend: Any,
         monkeypatch: pytest.MonkeyPatch,
+        policy: SandboxPolicy,
     ) -> None:
         """(c) Corrupt ``_tombstoned.json`` + valid checkpoint metadata
         → ``wake()`` refuses with ``sandbox_wake_session_tombstoned``
@@ -239,7 +252,7 @@ class TestWakeSessionTombstonedConformance:
         fail-OPEN — proceed to ``load_latest()`` and restore a session
         the operator intended to destroy.
         """
-        session = await _tombstoned_session(backend, monkeypatch)
+        session = await _tombstoned_session(backend, monkeypatch, policy)
 
         # Overwrite the well-formed sentinel with malformed bytes. The
         # key is the spec §4.1 storage-layout contract — imported from

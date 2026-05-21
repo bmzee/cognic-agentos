@@ -221,10 +221,13 @@ _PROXY_LOG_DIR: str = "/var/log/cognic-proxy"
 
 #: Writable workspace path inside the sandbox container. Wire-public
 #: across the workspace-tar checkpoint mechanism (spec §7.2): ``tar
-#: czf - -C /workspace .`` on checkpoint + ``head -c N | tar xzf - -C
-#: /workspace`` on restore (the P1.3-safe pipeline — no temp file
-#: staged on disk; ``head -c N`` gives ``tar`` clean stdin EOF under
-#: the v4 exec subprotocol). ``readOnlyRootFilesystem=True`` (per
+#: czf - -C /workspace .`` on checkpoint + ``head -c N | tar xzf -
+#: --strip-components=1 --no-overwrite-dir -C /workspace`` on restore (the P1.3-safe
+#: pipeline — no temp file staged on disk; ``head -c N`` gives
+#: ``tar`` clean stdin EOF under the v4 exec subprotocol, and
+#: ``--strip-components=1`` skips the archive's ``./`` entry so tar
+#: never rewrites the existing emptyDir mount-root metadata under
+#: OpenShift arbitrary UIDs). ``readOnlyRootFilesystem=True`` (per
 #: ``_build_security_context``) makes the root FS read-only; the
 #: Sprint 8.5 T7 emptyDir mount makes EXACTLY this path writable.
 #: The mount path + the checkpoint tar ``-C`` source + the restore
@@ -280,19 +283,28 @@ _CGROUP_V2_CPU_STAT_PATH: str = "/sys/fs/cgroup/cpu.stat"
 #: falls back to v1 on failure.
 _CGROUP_V1_CPUACCT_PATH: str = "/sys/fs/cgroup/cpuacct/cpuacct.usage"
 
-#: Sprint 8.5 T7 — interval between pod-readiness polls during wake().
-#: kubelet typically transitions a freshly-created Pod through
-#: ``Pending → Running`` within a few hundred milliseconds; 0.25s
-#: strikes a balance between latency to first exec + apiserver load.
+#: Sprint 8.5 T7 / #477 — interval between pod readiness/deletion
+#: polls during wake(), create(), and deterministic-name teardown.
+#: kubelet typically transitions a freshly-created/deleted Pod within
+#: a few hundred milliseconds; 0.25s strikes a balance between
+#: latency to first exec / wake recreate + apiserver load.
 _POD_READY_POLL_INTERVAL_S: float = 0.25
 
-#: Sprint 8.5 T7 — maximum seconds to wait for a freshly-created Pod
-#: to become ready before the tar-restore exec stream opens. Bounded
-#: so a misconfigured cluster cannot wedge wake() indefinitely. A
-#: timeout surfaces as ``RuntimeError`` which the outer try/except in
-#: ``wake()`` translates to teardown + re-raise — the caller sees the
-#: failure + the partial state is cleaned up.
+#: Sprint 8.5 T7 / #477 — maximum seconds to wait for a
+#: freshly-created Pod to become ready before create() returns or the
+#: wake tar-restore exec stream opens. Bounded so a misconfigured
+#: cluster cannot wedge wake()/create() indefinitely. A timeout
+#: surfaces as ``RuntimeError`` which the outer try/except translates
+#: to teardown + re-raise — the caller sees the failure + the partial
+#: state is cleaned up.
 _POD_READY_TIMEOUT_S: float = 30.0
+
+#: #477 live CRC proof — maximum seconds to wait after deleting a Pod
+#: whose name will be reused on wake. Kubernetes deletion is
+#: asynchronous: immediately recreating ``sb-<session_id>`` can fail
+#: with ``409 AlreadyExists: object is being deleted`` unless teardown
+#: waits for the apiserver to report 404.
+_POD_DELETE_TIMEOUT_S: float = 30.0
 
 
 class _SuspendEventIdCorruptError(ValueError):
@@ -386,6 +398,7 @@ def _build_pod_spec(
     policy: SandboxPolicy,
     session_id: str,
     tenant_id: str,
+    egress_proxy_image: str,
 ) -> dict[str, Any]:
     """Construct the V1Pod body dict for the two-container Pod.
 
@@ -438,8 +451,10 @@ def _build_pod_spec(
     # makes the container's root filesystem read-only. Without an
     # explicit writable mount, the sandbox cannot write to
     # ``/workspace`` for normal workload state OR for the T7 wake-
-    # restore tar extraction (``head -c N | tar xzf - -C /workspace``
-    # — extracts in place, no temp file). An ``emptyDir`` volume mounted
+    # restore tar extraction (``head -c N | tar xzf -
+    # --strip-components=1 --no-overwrite-dir -C /workspace`` —
+    # extracts in place while skipping the archive's ``./`` entry, no
+    # temp file). An ``emptyDir`` volume mounted
     # at ``/workspace`` provides per-Pod ephemeral writable storage
     # backed by the node's local disk (default) or tmpfs (when
     # ``medium: Memory`` is set; we use default disk-backed to support
@@ -525,7 +540,7 @@ def _build_pod_spec(
                 },
                 {
                     "name": _PROXY_SIDECAR_CONTAINER_NAME,
-                    "image": _CANONICAL_EGRESS_PROXY_IMAGE,
+                    "image": egress_proxy_image,
                     "securityContext": security_context,
                     "volumeMounts": [proxy_log_mount],
                     # No resource caps on the sidecar — the cluster-
@@ -718,6 +733,7 @@ class KubernetesPodSandboxBackend:
         settings: Settings,
         warm_pool: SandboxWarmPool | None = None,
         checkpoint_store: CheckpointStore | None = None,
+        egress_proxy_image: str | None = None,
     ) -> None:
         self._kube = kube_api_client
         self._namespace = namespace
@@ -740,6 +756,19 @@ class KubernetesPodSandboxBackend:
         # never checkpointed cannot have tombstones. Mirrors
         # docker_sibling.py:790,810 verbatim.
         self._checkpoint_store = checkpoint_store
+        # #477 §5 — narrow egress-proxy image seam. Mirrors
+        # docker_sibling.py exactly: explicit None-check (NOT ``or``) so
+        # an empty string fails fast rather than silently falling back
+        # to the placeholder canonical proxy. Production callers omit
+        # the kwarg -> None -> the canonical default.
+        if egress_proxy_image is not None and not egress_proxy_image.strip():
+            raise ValueError(
+                "egress_proxy_image, when provided, must be a non-empty "
+                "OCI ref; got an empty/blank string"
+            )
+        self._egress_proxy_image: str = (
+            _CANONICAL_EGRESS_PROXY_IMAGE if egress_proxy_image is None else egress_proxy_image
+        )
 
     # ------------------------------------------------------------------
     # SandboxBackend Protocol surface
@@ -771,7 +800,8 @@ class KubernetesPodSandboxBackend:
         3. Cold-create the K8s objects in order: NetworkPolicy
            FIRST (egress lockdown ACTIVE before the Pod starts;
            defends against the brief window a Pod might start
-           with default-namespace egress), then Pod.
+           with default-namespace egress), then Pod, then wait for
+           Pod readiness before exposing the session to callers.
         4. Emit ``lifecycle.created(warm_pool_hit=False)`` + return
            the :class:`KubernetesPodSession`.
 
@@ -828,12 +858,12 @@ class KubernetesPodSandboxBackend:
         # without this gate, a compromised registry could land an
         # unverified proxy as a trusted enforcement point. Refuses
         # session creation BEFORE any K8s API call.
-        _, proxy_image_digest = _CANONICAL_EGRESS_PROXY_IMAGE.rsplit("@", 1)
+        _, proxy_image_digest = self._egress_proxy_image.rsplit("@", 1)
         if not self._catalog.is_canonical(proxy_image_digest):
             raise SandboxLifecycleRefused(
                 "sandbox_image_digest_not_in_canonical_catalog",
                 detail=(
-                    f"proxy sidecar image {_CANONICAL_EGRESS_PROXY_IMAGE} "
+                    f"proxy sidecar image {self._egress_proxy_image} "
                     f"not in canonical catalog (digest {proxy_image_digest}) "
                     f"— egress enforcement component MUST be catalog-verified "
                     f"per spec §9 + the docker_sibling R1 P1.1 cross-backend "
@@ -844,15 +874,27 @@ class KubernetesPodSandboxBackend:
         await self._catalog.verify_sbom_policy_or_refuse(proxy_image_digest, tenant_id=tenant_id)
 
         # 5. Build the K8s object specs via pure helpers
-        pod_spec = _build_pod_spec(policy=policy, session_id=session_id, tenant_id=tenant_id)
+        pod_spec = _build_pod_spec(
+            policy=policy,
+            session_id=session_id,
+            tenant_id=tenant_id,
+            egress_proxy_image=self._egress_proxy_image,
+        )
         netpol_spec = _build_network_policy_spec(session_id=session_id, tenant_id=tenant_id)
 
         # 6. Create NetworkPolicy FIRST so egress lockdown is active
-        # BEFORE the Pod starts. Then create the Pod. On any failure
-        # in either step, teardown anything we created.
+        # BEFORE the Pod starts. Then create the Pod and wait for the
+        # kubelet to report both containers ready before returning a
+        # session. create() is a live-use boundary: the caller's first
+        # session.exec() may happen immediately, and pods/exec against
+        # a just-created-but-not-running Pod fails as an HTTP 500
+        # websocket handshake instead of exercising the workload.
+        # On any failure in create or readiness, teardown anything we
+        # created.
         try:
             await self._create_network_policy(netpol_spec)
             await self._create_pod(pod_spec)
+            await self._wait_for_pod_ready(pod_name=pod_name)
         except Exception:
             await self._teardown_session_state(
                 pod_name=pod_name,
@@ -1313,8 +1355,9 @@ class KubernetesPodSandboxBackend:
            state and mapped to ``sandbox_wake_checkpoint_corrupt`` before
            any fresh K8s resources are created.
         6. Create fresh Pod + NetworkPolicy; wait for Pod readiness;
-           restore workspace tar via ``tar xzf - -C /workspace`` over
-           the pods/exec channel.
+           restore workspace tar via ``tar xzf -
+           --strip-components=1 --no-overwrite-dir -C /workspace``
+           over the pods/exec channel.
         7. Build fresh ``KubernetesPodSession`` with ORIGINAL
            session_id + new pod (deterministic name from session_id) +
            ``warm_pool_hit=False``.
@@ -1497,7 +1540,10 @@ class KubernetesPodSandboxBackend:
         pod_name = _pod_name(session_id)
         netpol_name = _network_policy_name(session_id)
         pod_spec = _build_pod_spec(
-            policy=metadata.policy, session_id=session_id, tenant_id=tenant_id
+            policy=metadata.policy,
+            session_id=session_id,
+            tenant_id=tenant_id,
+            egress_proxy_image=self._egress_proxy_image,
         )
         netpol_spec = _build_network_policy_spec(session_id=session_id, tenant_id=tenant_id)
 
@@ -1629,14 +1675,28 @@ class KubernetesPodSandboxBackend:
         await self._delete_network_policy_if_exists(network_policy_name)
 
     async def _delete_pod_if_exists(self, name: str) -> None:
-        """Delete a pod by name; swallow ApiException 404."""
+        """Delete a Pod by name and wait until the apiserver reports
+        it gone; swallow ApiException 404.
+
+        The wait is load-bearing for suspend→wake: pod names are
+        deterministic from session_id, so wake recreates the same
+        ``sb-<session_id>`` name that suspend just deleted. K8s pod
+        deletion is asynchronous; returning before the old object is
+        actually gone lets wake race into ``409 AlreadyExists`` with
+        "object is being deleted".
+        """
         api = kube_client.CoreV1Api(self._kube)
         try:
-            await api.delete_namespaced_pod(name=name, namespace=self._namespace)
+            await api.delete_namespaced_pod(
+                name=name,
+                namespace=self._namespace,
+                grace_period_seconds=0,
+            )
         except kube_client.ApiException as e:
             if e.status == 404:
                 return  # benign: already gone
             raise
+        await self._wait_for_pod_deleted(pod_name=name)
 
     async def _delete_network_policy_if_exists(self, name: str) -> None:
         """Delete a NetworkPolicy by name; swallow ApiException 404."""
@@ -1647,6 +1707,34 @@ class KubernetesPodSandboxBackend:
             if e.status == 404:
                 return  # benign: already gone
             raise
+
+    async def _wait_for_pod_deleted(self, *, pod_name: str) -> None:
+        """Poll Pod status until deletion is observed as ApiException 404."""
+        deadline = asyncio.get_event_loop().time() + _POD_DELETE_TIMEOUT_S
+        api = kube_client.CoreV1Api(self._kube)
+        last_status_repr = "delete accepted"
+        while True:
+            try:
+                pod = await api.read_namespaced_pod_status(
+                    name=pod_name,
+                    namespace=self._namespace,
+                )
+            except kube_client.ApiException as e:
+                if getattr(e, "status", None) == 404:
+                    return
+                last_status_repr = f"api_exception status={getattr(e, 'status', '?')}"
+            else:
+                phase = getattr(getattr(pod, "status", None), "phase", "?")
+                deletion_ts = getattr(getattr(pod, "metadata", None), "deletion_timestamp", None)
+                last_status_repr = f"phase={phase!r} deletion_timestamp={deletion_ts!r}"
+
+            if asyncio.get_event_loop().time() >= deadline:
+                raise RuntimeError(
+                    f"pod {pod_name!r} was not deleted within "
+                    f"{_POD_DELETE_TIMEOUT_S}s; last observed status="
+                    f"{last_status_repr}"
+                )
+            await asyncio.sleep(_POD_READY_POLL_INTERVAL_S)
 
     # ------------------------------------------------------------------
     # T8B-c — exec() I/O helpers (pods/exec websocket + pod status
@@ -2467,11 +2555,22 @@ class KubernetesPodSandboxBackend:
         pipe to tar closes which gives tar clean stdin EOF; tar
         extracts to ``/workspace`` and exits; the remote ``sh -c``
         exits with tar's exit code; kubelet writes the ERROR-channel
-        frame + closes the websocket. No stdin EOF signal required at
-        the websocket layer + no temp file staged on disk.
+        frame + closes the websocket.
+
+        ``--strip-components=1`` is load-bearing on OpenShift
+        ``emptyDir`` mounts: the checkpoint archive contains entries
+        such as ``./marker.txt`` plus the ``.`` directory entry, but
+        the arbitrary namespace UID cannot chmod/utime the mount root.
+        Stripping the leading ``./`` component restores the contents
+        beneath ``/workspace`` while skipping the root-directory entry
+        entirely. ``--no-overwrite-dir`` is retained as an extra guard
+        for pre-existing directories below the mount root. No stdin
+        EOF signal required at the websocket layer + no temp file
+        staged on disk.
 
         Command shape (wire-public; pinned by regression):
-        ``["sh", "-c", f"head -c {N} | tar xzf - -C {workspace}"]``
+        ``["sh", "-c", f"head -c {N} | tar xzf -
+        --strip-components=1 --no-overwrite-dir -C {workspace}"]``
         where ``N = len(snapshot_bytes)`` and ``workspace =
         _SANDBOX_WORKSPACE_PATH`` (``/workspace``). The pipeline
         eliminates the temp-file collision risk that an in-workspace
@@ -2501,10 +2600,14 @@ class KubernetesPodSandboxBackend:
         """
         pod_name = _pod_name(session_id)
         tar_len = len(snapshot_bytes)
+        shell_cmd = (
+            f"head -c {tar_len} | tar xzf - --strip-components=1 "
+            f"--no-overwrite-dir -C {_SANDBOX_WORKSPACE_PATH}"
+        )
         restore_cmd = [
             "sh",
             "-c",
-            f"head -c {tar_len} | tar xzf - -C {_SANDBOX_WORKSPACE_PATH}",
+            shell_cmd,
         ]
         _stdout, stderr, exit_code = await self._open_pod_exec_stream_with_stdin(
             pod_name=pod_name,
@@ -2661,13 +2764,12 @@ class KubernetesPodSandboxBackend:
         """Poll the Pod's status until the sandbox container is ready,
         bounded by ``_POD_READY_TIMEOUT_S``.
 
-        Sprint 8.5 T7 — added because wake()'s tar-restore exec stream
-        races kubelet's pod-start. The existing exec() callers in
-        Sprint 8B happen after the caller has already exec()d
-        something else into a long-running Pod, so they implicitly
-        rely on the Pod being ready. Wake() is the only call site
-        that opens the websocket against a freshly-created Pod where
-        kubelet may still be pulling images / starting init.
+        Sprint 8.5 T7 added this for wake()'s tar-restore exec stream;
+        #477 live CRC proof extended the same readiness gate to cold
+        create() because callers may immediately exec into a freshly
+        returned session. Without the wait, pods/exec can race kubelet
+        startup and fail with an HTTP 500 websocket handshake before
+        the workload ever runs.
 
         Readiness contract: the sandbox container's
         ``ContainerStatus.ready == True``. Per K8s wire-contract that
@@ -2677,8 +2779,8 @@ class KubernetesPodSandboxBackend:
         _build_pod_spec), so ``ready`` is True as soon as the
         kubelet's container runtime reports "Running".
 
-        Timeout → ``RuntimeError`` — the outer try/except in wake()
-        translates this to teardown + re-raise.
+        Timeout → ``RuntimeError`` — the outer try/except in create()
+        / wake() translates this to teardown + re-raise.
 
         Status read failures (ApiException) are treated as transient:
         keep polling until the timeout fires. A real, persistent

@@ -136,6 +136,15 @@ _PROXY_PORT: int = 3128
 #: chain.
 _PROXY_LOG_PATH: str = "/var/log/cognic-proxy/access.jsonl"
 
+#: Canonical egress-proxy image. Sprint 8A T6's catalog gate publishes
+#: the cosign-signed digest; per
+#: ``feedback_canonical_artifact_not_oss_substitute`` this is the real
+#: ``cognic/sandbox-egress-proxy`` artifact, NOT an OSS substitute.
+#: #477 §5 — the default for the ``egress_proxy_image`` constructor
+#: seam: production callers omit the kwarg and get this byte-identical
+#: value.
+_CANONICAL_EGRESS_PROXY_IMAGE: str = "cognic/sandbox-egress-proxy:v1@sha256:" + "d" * 64
+
 #: Non-root user:group spec-locked for both sandbox + proxy sidecar
 #: containers per spec §7 + ADR-004 amendment ("never run as root
 #: inside the sandbox"). 65534:65534 is the conventional nobody:nogroup
@@ -788,6 +797,7 @@ class DockerSiblingSandboxBackend:
         settings: Settings,
         warm_pool: SandboxWarmPool | None = None,
         checkpoint_store: CheckpointStore | None = None,
+        egress_proxy_image: str | None = None,
     ) -> None:
         self._docker = docker_client
         self._catalog = image_catalog
@@ -808,6 +818,19 @@ class DockerSiblingSandboxBackend:
         # tombstone path is a no-op without it — sessions that have
         # never checkpointed cannot have tombstones.
         self._checkpoint_store = checkpoint_store
+        # #477 §5 — narrow egress-proxy image seam. Explicit None-check
+        # (NOT ``or``): an empty string must fail fast, never silently
+        # fall back to the placeholder canonical proxy. Production
+        # callers omit the kwarg -> None -> the canonical default; an
+        # env-gated test may inject a fixture proxy ref.
+        if egress_proxy_image is not None and not egress_proxy_image.strip():
+            raise ValueError(
+                "egress_proxy_image, when provided, must be a non-empty "
+                "OCI ref; got an empty/blank string"
+            )
+        self._egress_proxy_image: str = (
+            _CANONICAL_EGRESS_PROXY_IMAGE if egress_proxy_image is None else egress_proxy_image
+        )
 
     # ------------------------------------------------------------------
     # SandboxBackend Protocol surface
@@ -1759,12 +1782,12 @@ class DockerSiblingSandboxBackend:
         trusted enforcement point. Pinned by
         ``TestProxyImageGoesThroughCatalogVerification``.
         """
-        # The canonical proxy image — Sprint 8A T6 catalog gate
-        # publishes the cosign-signed digest. Per
-        # feedback_canonical_artifact_not_oss_substitute, this is the
-        # real cognic/sandbox-egress-proxy artifact — not an OSS
-        # substitute.
-        proxy_image = "cognic/sandbox-egress-proxy:v1@sha256:" + "d" * 64
+        # The egress-proxy image — #477 §5: the constructor-resolved
+        # seam value (``_egress_proxy_image``). Defaults to the
+        # canonical ``_CANONICAL_EGRESS_PROXY_IMAGE`` for production
+        # callers; an env-gated test may inject a fixture ref. Either
+        # way it flows through the SAME catalog trust gate below.
+        proxy_image = self._egress_proxy_image
 
         # R1 P1.1 — canonical-set membership + cosign + SBOM verify
         # on the proxy image. Same gate as admit_policy uses on

@@ -40,6 +40,7 @@ pytest.importorskip("kubernetes_asyncio")
 
 from cognic_agentos.sandbox import PackAdmissionContext, SandboxPolicy
 from cognic_agentos.sandbox.backends.kubernetes_pod import (
+    _CANONICAL_EGRESS_PROXY_IMAGE,
     _PROXY_LOG_DIR,
     _PROXY_LOG_PATH,
     _PROXY_PORT,
@@ -77,6 +78,48 @@ _PACK_CTX = PackAdmissionContext(
     declares_dynamic_install=False,
     profile="production",
 )
+
+
+def _build_default_pod_spec(**kwargs: Any) -> dict[str, Any]:
+    """Call ``_build_pod_spec`` with the canonical proxy image default.
+
+    #477 T2 made ``egress_proxy_image`` a REQUIRED keyword on
+    ``_build_pod_spec`` (no silent canonical fallback in production —
+    every production call site passes it explicitly). Every
+    pre-existing ``_build_pod_spec(...)`` call in this module is routed
+    through this wrapper so it keeps compiling; the two
+    ``test_build_pod_spec_*_proxy_image`` tests below call
+    ``_build_pod_spec`` directly with an explicit ``egress_proxy_image=``.
+    """
+    kwargs.setdefault("egress_proxy_image", _CANONICAL_EGRESS_PROXY_IMAGE)
+    return _build_pod_spec(**kwargs)
+
+
+def _proxy_container(pod_spec: dict[str, Any]) -> dict[str, Any]:
+    """Return the egress-proxy sidecar container dict from a pod spec."""
+    containers = pod_spec["spec"]["containers"]
+    return next(c for c in containers if c["name"] == _PROXY_SIDECAR_CONTAINER_NAME)
+
+
+def test_build_pod_spec_default_proxy_image() -> None:
+    spec = _build_pod_spec(
+        policy=_POLICY,
+        session_id="s-1",
+        tenant_id="t-1",
+        egress_proxy_image=_CANONICAL_EGRESS_PROXY_IMAGE,
+    )
+    assert _proxy_container(spec)["image"] == _CANONICAL_EGRESS_PROXY_IMAGE
+
+
+def test_build_pod_spec_injected_proxy_image() -> None:
+    ref = "registry.example/cognic-sandbox-egress-proxy-fixture@sha256:" + "e" * 64
+    spec = _build_pod_spec(
+        policy=_POLICY,
+        session_id="s-1",
+        tenant_id="t-1",
+        egress_proxy_image=ref,
+    )
+    assert _proxy_container(spec)["image"] == ref
 
 
 # ---------------------------------------------------------------------------
@@ -228,12 +271,12 @@ class TestBuildPodSpec:
     the sidecar's proxy port is the ONLY outbound path."""
 
     def test_pod_spec_apiversion_and_kind(self) -> None:
-        spec = _build_pod_spec(policy=_POLICY, session_id="s-1", tenant_id="t-1")
+        spec = _build_default_pod_spec(policy=_POLICY, session_id="s-1", tenant_id="t-1")
         assert spec["apiVersion"] == "v1"
         assert spec["kind"] == "Pod"
 
     def test_pod_spec_name_matches_pod_name_helper(self) -> None:
-        spec = _build_pod_spec(
+        spec = _build_default_pod_spec(
             policy=_POLICY,
             session_id="abcd1234efgh5678ijkl9012mnop3456",
             tenant_id="t-1",
@@ -245,22 +288,22 @@ class TestBuildPodSpec:
         per-session egress policy to this pod. Drift would silently
         unbind the NetworkPolicy from the pod — every session would
         get default-namespace egress (no lockdown)."""
-        spec = _build_pod_spec(policy=_POLICY, session_id="s-1", tenant_id="t-1")
+        spec = _build_default_pod_spec(policy=_POLICY, session_id="s-1", tenant_id="t-1")
         labels = spec["metadata"]["labels"]
         assert labels[_SESSION_ID_LABEL] == "s-1"
         assert labels[_TENANT_ID_LABEL] == "t-1"
 
     def test_pod_spec_has_exactly_two_containers(self) -> None:
-        spec = _build_pod_spec(policy=_POLICY, session_id="s-1", tenant_id="t-1")
+        spec = _build_default_pod_spec(policy=_POLICY, session_id="s-1", tenant_id="t-1")
         assert len(spec["spec"]["containers"]) == 2
 
     def test_pod_spec_container_names_are_sandbox_and_egress_proxy(self) -> None:
-        spec = _build_pod_spec(policy=_POLICY, session_id="s-1", tenant_id="t-1")
+        spec = _build_default_pod_spec(policy=_POLICY, session_id="s-1", tenant_id="t-1")
         names = {c["name"] for c in spec["spec"]["containers"]}
         assert names == {_SANDBOX_CONTAINER_NAME, _PROXY_SIDECAR_CONTAINER_NAME}
 
     def test_pod_spec_sandbox_container_uses_policy_runtime_image(self) -> None:
-        spec = _build_pod_spec(policy=_POLICY, session_id="s-1", tenant_id="t-1")
+        spec = _build_default_pod_spec(policy=_POLICY, session_id="s-1", tenant_id="t-1")
         sandbox = next(
             c for c in spec["spec"]["containers"] if c["name"] == _SANDBOX_CONTAINER_NAME
         )
@@ -273,7 +316,7 @@ class TestBuildPodSpec:
         proxy). The image string carries a sha256 digest suffix so
         the kubelet pulls the exact bytes the supply-chain pipeline
         signed."""
-        spec = _build_pod_spec(policy=_POLICY, session_id="s-1", tenant_id="t-1")
+        spec = _build_default_pod_spec(policy=_POLICY, session_id="s-1", tenant_id="t-1")
         proxy = next(
             c for c in spec["spec"]["containers"] if c["name"] == _PROXY_SIDECAR_CONTAINER_NAME
         )
@@ -285,7 +328,7 @@ class TestBuildPodSpec:
         containers share network namespace inside a single Pod; the
         sandbox's HTTP_PROXY targets the proxy sidecar via shared
         localhost. NOT a separate ClusterIP Service."""
-        spec = _build_pod_spec(policy=_POLICY, session_id="s-1", tenant_id="t-1")
+        spec = _build_default_pod_spec(policy=_POLICY, session_id="s-1", tenant_id="t-1")
         sandbox = next(
             c for c in spec["spec"]["containers"] if c["name"] == _SANDBOX_CONTAINER_NAME
         )
@@ -297,7 +340,7 @@ class TestBuildPodSpec:
         """Per Sprint 8A T10a doctrine — NO_PROXY env var would
         create an egress-bypass class the allow-list does not cover.
         Pod spec MUST NOT set NO_PROXY (or its lowercase variant)."""
-        spec = _build_pod_spec(policy=_POLICY, session_id="s-1", tenant_id="t-1")
+        spec = _build_default_pod_spec(policy=_POLICY, session_id="s-1", tenant_id="t-1")
         sandbox = next(
             c for c in spec["spec"]["containers"] if c["name"] == _SANDBOX_CONTAINER_NAME
         )
@@ -309,14 +352,14 @@ class TestBuildPodSpec:
         """Per ADR-004 §30 — both containers run with the OpenShift-
         compatible SecurityContext. Drift on either container weakens
         the sandbox boundary."""
-        spec = _build_pod_spec(policy=_POLICY, session_id="s-1", tenant_id="t-1")
+        spec = _build_default_pod_spec(policy=_POLICY, session_id="s-1", tenant_id="t-1")
         sandbox = next(
             c for c in spec["spec"]["containers"] if c["name"] == _SANDBOX_CONTAINER_NAME
         )
         assert sandbox["securityContext"] == _build_security_context()
 
     def test_pod_spec_proxy_sidecar_carries_security_context(self) -> None:
-        spec = _build_pod_spec(policy=_POLICY, session_id="s-1", tenant_id="t-1")
+        spec = _build_default_pod_spec(policy=_POLICY, session_id="s-1", tenant_id="t-1")
         proxy = next(
             c for c in spec["spec"]["containers"] if c["name"] == _PROXY_SIDECAR_CONTAINER_NAME
         )
@@ -327,7 +370,7 @@ class TestBuildPodSpec:
         container MUST NOT be silently restarted (the failure
         signal would be lost). Restart policy Never matches the
         per-session lifetime contract."""
-        spec = _build_pod_spec(policy=_POLICY, session_id="s-1", tenant_id="t-1")
+        spec = _build_default_pod_spec(policy=_POLICY, session_id="s-1", tenant_id="t-1")
         assert spec["spec"]["restartPolicy"] == "Never"
 
     def test_pod_spec_sandbox_container_carries_resource_limits(self) -> None:
@@ -337,7 +380,7 @@ class TestBuildPodSpec:
         kill at the memory limit surfaces as exit_code 137 +
         ContainerStatus.lastState.terminated.reason=OOMKilled
         (handled at exec time in T8B-c)."""
-        spec = _build_pod_spec(policy=_POLICY, session_id="s-1", tenant_id="t-1")
+        spec = _build_default_pod_spec(policy=_POLICY, session_id="s-1", tenant_id="t-1")
         sandbox = next(
             c for c in spec["spec"]["containers"] if c["name"] == _SANDBOX_CONTAINER_NAME
         )
@@ -372,7 +415,7 @@ class TestPodSpecWritableMountContract:
     """
 
     def _spec(self) -> dict[str, Any]:
-        return _build_pod_spec(policy=_POLICY, session_id="s-1", tenant_id="t-1")
+        return _build_default_pod_spec(policy=_POLICY, session_id="s-1", tenant_id="t-1")
 
     def test_pod_spec_declares_emptydir_volume_for_workspace(self) -> None:
         """A single ``emptyDir`` volume named ``workspace`` MUST be
@@ -479,7 +522,7 @@ class TestPodSpecProxyLogWritableMount:
     """
 
     def _spec(self) -> dict[str, Any]:
-        return _build_pod_spec(policy=_POLICY, session_id="s-1", tenant_id="t-1")
+        return _build_default_pod_spec(policy=_POLICY, session_id="s-1", tenant_id="t-1")
 
     def test_pod_spec_declares_emptydir_volume_for_proxy_log(self) -> None:
         """A single ``emptyDir`` volume named ``proxy-log`` MUST be

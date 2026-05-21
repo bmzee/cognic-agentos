@@ -12,9 +12,11 @@ preflight decision: NO kind in CI; live-cluster runs are deliberately
 env-gated.
 
 Per spec §7.2: checkpoint() runs ``tar czf - -C /workspace .`` over
-the K8s pods/exec websocket; wake() runs ``tar xzf - -C /workspace``
-on the fresh Pod via the STDIN_CHANNEL of a new pods/exec websocket.
-Round-trip MUST preserve workspace contents.
+the K8s pods/exec websocket; wake() runs ``head -c N | tar xzf -
+--strip-components=1 --no-overwrite-dir -C /workspace`` on the fresh
+Pod via the STDIN_CHANNEL of a new pods/exec websocket. Round-trip
+MUST preserve workspace contents without rewriting the OpenShift
+``emptyDir`` mount-root metadata.
 
 Per spec §3.1 Q1 lock: workspace-tar (NOT CRIU + NOT pod commit).
 Wave-1 doctrine.
