@@ -73,10 +73,15 @@ REGISTRY_ROUTE="$(oc get route default-route -n openshift-image-registry \
 echo "registry route: ${REGISTRY_ROUTE}"
 oc registry login --registry="${REGISTRY_ROUTE}" --insecure=true
 
-# 1e. Create the namespace the sandbox backend launches Pods into.
-#     The conformance conftest defaults COGNIC_K8S_SANDBOX_NAMESPACE to
-#     `cognic-sandbox`.
-oc new-project cognic-sandbox
+# 1e. Create the namespace the sandbox backend launches Pods into,
+#     then grant CRC's regular `developer` user admin in that namespace.
+#     The cluster-admin kubeadmin user is used only for setup. The
+#     acceptance run itself switches to `developer` so the Pods are
+#     admitted by restricted-v2, not the kubeadmin-only anyuid SCC.
+#     The conformance conftest defaults COGNIC_K8S_SANDBOX_NAMESPACE
+#     to `cognic-sandbox`.
+oc get project cognic-sandbox >/dev/null 2>&1 || oc new-project cognic-sandbox
+oc adm policy add-role-to-user admin developer -n cognic-sandbox
 
 # 1f. Give the cluster pull access to the registry ROUTE. The fixture
 #     refs captured in step 3 are route-host refs — T5 feeds the SAME
@@ -105,12 +110,26 @@ oc secrets link default crc-fixture-pull --for=pull -n cognic-sandbox
 # ServiceAccount's pull secrets before the acceptance run.
 oc get serviceaccount default -n cognic-sandbox \
   -o jsonpath='{.imagePullSecrets[*].name}'; echo
+
+# 1g. Switch kubeconfig to the regular CRC developer user for the
+#     actual proof run. This is load-bearing: if pytest runs as
+#     kubeadmin, OpenShift selects the anyuid SCC, which is not the
+#     restricted-v2 posture #477 is meant to prove.
+oc login -u developer -p developer https://api.crc.testing:6443
+oc project cognic-sandbox
+oc auth can-i use scc/restricted-v2
+oc auth can-i use scc/anyuid
 ```
 
 `oc login` writes `~/.kube/config`; the conformance conftest's `kubernetes_pod`
 arm loads that default kubeconfig (it tries in-cluster config first, then falls
-back to the default kubeconfig). No `KUBECONFIG` export is required if `oc
-login` targeted the default config.
+back to the default kubeconfig). No `KUBECONFIG` export is required if the final
+step-1g `oc login` targeted the default config.
+
+The step-1g SCC checks must print `yes` for `restricted-v2` and `no` for
+`anyuid`. Record those two lines in the evidence file. A proof run as
+`kubeadmin` is not authoritative for #477 because it does not exercise the
+restricted-v2 SCC path.
 
 > **TLS note.** CRC's registry route uses a cluster-signed certificate. If
 > `docker push` (step 3) fails certificate verification, either add
