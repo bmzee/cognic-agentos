@@ -1904,3 +1904,11 @@ class TestSprint85CheckpointSettings:
         field = Settings.model_fields["sandbox_max_checkpoints_per_session"]
         assert field.description is not None
         assert "CheckpointMaxPerSessionRetentionLocked" in field.description
+
+    def test_sandbox_reaper_enabled_defaults_false(self) -> None:
+        """#489 — the production checkpoint reaper is OFF by default.
+        AgentOS production runs multiple Kubernetes replicas and the
+        Sprint 8.5 reaper is single-instance by design; an operator must
+        explicitly enable it on exactly one instance."""
+        s = Settings(_env_file=None, runtime_profile="prod")  # type: ignore[call-arg]
+        assert s.sandbox_reaper_enabled is False

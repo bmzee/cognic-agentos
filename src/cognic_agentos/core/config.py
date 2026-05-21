@@ -1234,6 +1234,21 @@ class Settings(BaseSettings):
             "reduce I/O."
         ),
     )
+    sandbox_reaper_enabled: bool = Field(
+        default=False,
+        description=(
+            "#489 — gates the production checkpoint-retention reaper. "
+            "Default OFF: AgentOS production runs multiple Kubernetes "
+            "replicas, and the Sprint 8.5 reaper is single-instance by "
+            "design (N replicas => N reapers => duplicate "
+            "sandbox.lifecycle.checkpoint_purged audit rows; byte-level "
+            "deletes stay idempotent). Operators set this true on EXACTLY "
+            "ONE instance (or a dedicated single-replica reaper "
+            "Deployment). Cross-instance leader election is deferred to "
+            "Sprint 10.5. When false, create_prod_app starts no reaper and "
+            "logs a disabled-posture line at startup."
+        ),
+    )
 
     # --- Build metadata ----------------------------------------------
     # Wired by the Dockerfile / CI at image-build time; defaults make
