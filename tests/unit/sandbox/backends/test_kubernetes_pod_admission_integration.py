@@ -340,6 +340,7 @@ class TestProxyImageGoesThroughCatalogVerification:
         # without raising downstream.
         backend._create_network_policy = AsyncMock(return_value=None)  # type: ignore[method-assign]
         backend._create_pod = AsyncMock(return_value=None)  # type: ignore[method-assign]
+        backend._wait_for_pod_ready = AsyncMock(return_value=None)  # type: ignore[method-assign]
         backend._emit_lifecycle_created = AsyncMock(return_value=None)  # type: ignore[method-assign]
 
         await backend.create(
@@ -361,8 +362,10 @@ class TestProxyImageGoesThroughCatalogVerification:
 class TestGreenPathCallsK8sApiInOrder:
     """Green-path create() invokes the K8s API in load-bearing
     order: NetworkPolicy FIRST (egress lockdown active before the
-    Pod starts) → Pod second. Drift would briefly allow the Pod to
-    run with default-namespace egress."""
+    Pod starts) → Pod second → wait for Pod readiness before returning
+    a session that callers may immediately exec into. Drift would
+    briefly allow the Pod to run with default-namespace egress or race
+    the first pods/exec websocket against kubelet startup."""
 
     async def test_create_calls_network_policy_before_pod(self) -> None:
         backend = _backend()
@@ -374,8 +377,13 @@ class TestGreenPathCallsK8sApiInOrder:
         async def _record_pod(body: dict[str, object]) -> None:
             call_order.append("pod")
 
+        async def _record_ready(*, pod_name: str) -> None:
+            assert pod_name.startswith("sb-")
+            call_order.append("wait_ready")
+
         backend._create_network_policy = _record_netpol  # type: ignore[method-assign]
         backend._create_pod = _record_pod  # type: ignore[method-assign]
+        backend._wait_for_pod_ready = _record_ready  # type: ignore[method-assign]
         backend._emit_lifecycle_created = AsyncMock(return_value=None)  # type: ignore[method-assign]
 
         await backend.create(
@@ -385,7 +393,7 @@ class TestGreenPathCallsK8sApiInOrder:
             pack_context=_valid_pack_context(),
             use_warm_pool=False,
         )
-        assert call_order == ["network_policy", "pod"]
+        assert call_order == ["network_policy", "pod", "wait_ready"]
 
     async def test_create_returns_kubernetespod_session_with_required_fields(
         self,
@@ -393,6 +401,7 @@ class TestGreenPathCallsK8sApiInOrder:
         backend = _backend()
         backend._create_network_policy = AsyncMock(return_value=None)  # type: ignore[method-assign]
         backend._create_pod = AsyncMock(return_value=None)  # type: ignore[method-assign]
+        backend._wait_for_pod_ready = AsyncMock(return_value=None)  # type: ignore[method-assign]
         backend._emit_lifecycle_created = AsyncMock(return_value=None)  # type: ignore[method-assign]
         actor = _actor()
         pack_ctx = _valid_pack_context()
@@ -483,6 +492,7 @@ class TestCreateRollsBackOnK8sApiFailure:
 
         backend._create_network_policy = AsyncMock(return_value=None)  # type: ignore[method-assign]
         backend._create_pod = AsyncMock(return_value=None)  # type: ignore[method-assign]
+        backend._wait_for_pod_ready = AsyncMock(return_value=None)  # type: ignore[method-assign]
         backend._delete_network_policy_if_exists = _delete_netpol  # type: ignore[method-assign]
         backend._delete_pod_if_exists = _delete_pod  # type: ignore[method-assign]
 
@@ -523,6 +533,7 @@ class TestDestroyEmitsLifecycleEventOnceAndIsIdempotent:
         backend = _backend()
         backend._create_network_policy = AsyncMock(return_value=None)  # type: ignore[method-assign]
         backend._create_pod = AsyncMock(return_value=None)  # type: ignore[method-assign]
+        backend._wait_for_pod_ready = AsyncMock(return_value=None)  # type: ignore[method-assign]
         backend._emit_lifecycle_created = AsyncMock(return_value=None)  # type: ignore[method-assign]
         session = await backend.create(
             _valid_policy(),
@@ -547,6 +558,7 @@ class TestDestroyEmitsLifecycleEventOnceAndIsIdempotent:
         backend = _backend()
         backend._create_network_policy = AsyncMock(return_value=None)  # type: ignore[method-assign]
         backend._create_pod = AsyncMock(return_value=None)  # type: ignore[method-assign]
+        backend._wait_for_pod_ready = AsyncMock(return_value=None)  # type: ignore[method-assign]
         backend._emit_lifecycle_created = AsyncMock(return_value=None)  # type: ignore[method-assign]
         session = await backend.create(
             _valid_policy(),
@@ -631,6 +643,39 @@ class TestTeardownIsIdempotentAgainstApiException404:
         monkeypatch.setattr(kube_client, "CoreV1Api", lambda *a, **kw: api)
         # Should not raise.
         await backend._delete_pod_if_exists("sb-deadbeef")
+
+    async def test_delete_pod_waits_for_apiserver_404_after_delete(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Suspend→wake reuses the deterministic Pod name. Deletion is
+        asynchronous, so _delete_pod_if_exists must not return until the
+        apiserver reports 404; otherwise immediate wake can fail with
+        409 AlreadyExists / object is being deleted."""
+        backend = _backend()
+        from kubernetes_asyncio import client as kube_client
+
+        pod_deleting = MagicMock()
+        pod_deleting.status.phase = "Running"
+        pod_deleting.metadata.deletion_timestamp = "2026-05-21T00:00:00Z"
+        api = MagicMock()
+        api.delete_namespaced_pod = AsyncMock(return_value=None)
+        api.read_namespaced_pod_status = AsyncMock(
+            side_effect=[
+                pod_deleting,
+                kube_client.ApiException(status=404, reason="Not Found"),
+            ]
+        )
+        monkeypatch.setattr(kube_client, "CoreV1Api", lambda *a, **kw: api)
+        monkeypatch.setattr("asyncio.sleep", AsyncMock())
+
+        await backend._delete_pod_if_exists("sb-deadbeef")
+
+        api.delete_namespaced_pod.assert_awaited_once_with(
+            name="sb-deadbeef",
+            namespace="test-ns",
+            grace_period_seconds=0,
+        )
+        assert api.read_namespaced_pod_status.await_count == 2
 
     async def test_delete_pod_propagates_non_404_api_exception(
         self, monkeypatch: pytest.MonkeyPatch

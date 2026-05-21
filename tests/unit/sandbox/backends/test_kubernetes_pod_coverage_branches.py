@@ -844,6 +844,56 @@ class TestDeleteHelpersIdempotency:
             await backend._delete_pod_if_exists("ghost")
 
     @pytest.mark.asyncio
+    async def test_delete_pod_waits_until_status_returns_404(self) -> None:
+        """kubernetes_pod.py:_delete_pod_if_exists — successful delete
+        waits for final 404 so suspend→wake cannot race deterministic
+        Pod-name reuse into 409 AlreadyExists."""
+        backend = _make_backend()
+        pod_deleting = MagicMock()
+        pod_deleting.status.phase = "Running"
+        pod_deleting.metadata.deletion_timestamp = "2026-05-21T00:00:00Z"
+        api = MagicMock(
+            delete_namespaced_pod=AsyncMock(return_value=None),
+            read_namespaced_pod_status=AsyncMock(
+                side_effect=[
+                    pod_deleting,
+                    ApiException(status=404, reason="gone"),
+                ]
+            ),
+        )
+        with (
+            patch("kubernetes_asyncio.client.CoreV1Api", return_value=api),
+            patch("asyncio.sleep", AsyncMock()),
+        ):
+            await backend._delete_pod_if_exists("deleting")
+        api.delete_namespaced_pod.assert_awaited_once_with(
+            name="deleting",
+            namespace="test-ns",
+            grace_period_seconds=0,
+        )
+        assert api.read_namespaced_pod_status.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_wait_for_pod_deleted_times_out_when_status_never_404(self) -> None:
+        """kubernetes_pod.py:_wait_for_pod_deleted timeout branch —
+        persistent non-404 status read does not spin forever."""
+        backend = _make_backend()
+        pod_deleting = MagicMock()
+        pod_deleting.status.phase = "Terminating"
+        pod_deleting.metadata.deletion_timestamp = "2026-05-21T00:00:00Z"
+        api = MagicMock(
+            read_namespaced_pod_status=AsyncMock(return_value=pod_deleting),
+        )
+        loop = asyncio.get_event_loop()
+        times = iter([0.0, 31.0])
+        with (
+            patch("kubernetes_asyncio.client.CoreV1Api", return_value=api),
+            patch.object(loop, "time", side_effect=lambda: next(times)),
+            pytest.raises(RuntimeError, match="was not deleted within"),
+        ):
+            await backend._wait_for_pod_deleted(pod_name="stuck")
+
+    @pytest.mark.asyncio
     async def test_delete_pod_reraises_non_404(self) -> None:
         backend = _make_backend()
         with (
@@ -1831,7 +1881,8 @@ class TestCreateWorkspaceTarK8s:
 
 class TestRestoreWorkspaceTar:
     """kubernetes_pod.py:2499-2518 — _restore_workspace_tar builds the
-    head -c N | tar xzf pipeline; non-zero exit -> RuntimeError.
+    head -c N | tar xzf --strip-components=1 pipeline; non-zero
+    exit -> RuntimeError.
     """
 
     @pytest.mark.asyncio
@@ -1849,7 +1900,7 @@ class TestRestoreWorkspaceTar:
         assert stream_kwargs["command"] == [
             "sh",
             "-c",
-            "head -c 4096 | tar xzf - -C /workspace",
+            "head -c 4096 | tar xzf - --strip-components=1 --no-overwrite-dir -C /workspace",
         ]
         assert stream_kwargs["stdin_bytes"] == snapshot
 

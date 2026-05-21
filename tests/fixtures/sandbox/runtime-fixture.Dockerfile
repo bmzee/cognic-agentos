@@ -13,12 +13,17 @@
 # auto-creates a fresh anonymous volume there at container start, and
 # a volume mount is writable even under ReadonlyRootfs=True. chmod
 # 0777 (world-writable) is acceptable for a throwaway test fixture and
-# sidesteps UID-matching across the Docker non-root user (65534:65534
-# per docker_sibling.py:147) and OpenShift restricted-v2 arbitrary
-# UIDs. Under K8s the backend's own emptyDir mount at /workspace
-# supersedes the VOLUME — harmless.
+# sidesteps UID-matching across Docker's non-root user
+# (65534:65534 per docker_sibling.py:147) and OpenShift
+# restricted-v2 arbitrary UIDs. The image still declares USER
+# 65534:65534 so Kubernetes runAsNonRoot can prove the image default
+# is non-root before the container starts; OpenShift restricted-v2 may
+# still assign a namespace-range UID at admission. Under K8s the
+# backend's own emptyDir mount at /workspace supersedes the VOLUME —
+# harmless.
 FROM debian:bookworm-slim
 RUN mkdir -p /workspace && chmod 0777 /workspace
 VOLUME ["/workspace"]
 WORKDIR /workspace
+USER 65534:65534
 CMD ["sleep", "infinity"]

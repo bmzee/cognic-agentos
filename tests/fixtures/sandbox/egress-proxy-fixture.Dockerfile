@@ -17,8 +17,12 @@
 # log -> egress_audit_unreadable. So the CMD touches the file after
 # the mount is in place, then stays alive. chmod 0777 + VOLUME keeps
 # the dir writable under ReadonlyRootfs=True for the Docker leg;
-# under K8s the backend's emptyDir mount supersedes the VOLUME.
+# under K8s the backend's emptyDir mount supersedes the VOLUME. USER
+# 65534:65534 lets Kubernetes runAsNonRoot validate the image default
+# before container start; OpenShift restricted-v2 may still assign a
+# namespace-range UID at admission.
 FROM debian:bookworm-slim
 RUN mkdir -p /var/log/cognic-proxy && chmod 0777 /var/log/cognic-proxy
 VOLUME ["/var/log/cognic-proxy"]
+USER 65534:65534
 CMD ["sh", "-c", "touch /var/log/cognic-proxy/access.jsonl && exec sleep infinity"]

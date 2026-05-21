@@ -810,14 +810,19 @@ Not pytest-TDD-able — the verification is `docker build` (covered by the runbo
 # auto-creates a fresh anonymous volume there at container start, and
 # a volume mount is writable even under ReadonlyRootfs=True. chmod
 # 0777 (world-writable) is acceptable for a throwaway test fixture and
-# sidesteps UID-matching across the Docker non-root user (65534:65534
-# per docker_sibling.py:147) and OpenShift restricted-v2 arbitrary
-# UIDs. Under K8s the backend's own emptyDir mount at /workspace
-# supersedes the VOLUME — harmless.
+# sidesteps UID-matching across Docker's non-root user
+# (65534:65534 per docker_sibling.py:147) and OpenShift
+# restricted-v2 arbitrary UIDs. The image still declares USER
+# 65534:65534 so Kubernetes runAsNonRoot can prove the image default
+# is non-root before the container starts; OpenShift restricted-v2 may
+# still assign a namespace-range UID at admission. Under K8s the
+# backend's own emptyDir mount at /workspace supersedes the VOLUME —
+# harmless.
 FROM debian:bookworm-slim
 RUN mkdir -p /workspace && chmod 0777 /workspace
 VOLUME ["/workspace"]
 WORKDIR /workspace
+USER 65534:65534
 CMD ["sleep", "infinity"]
 ```
 
@@ -845,10 +850,14 @@ CMD ["sleep", "infinity"]
 # log -> egress_audit_unreadable. So the CMD touches the file after
 # the mount is in place, then stays alive. chmod 0777 + VOLUME keeps
 # the dir writable under ReadonlyRootfs=True for the Docker leg;
-# under K8s the backend's emptyDir mount supersedes the VOLUME.
+# under K8s the backend's emptyDir mount supersedes the VOLUME. USER
+# 65534:65534 lets Kubernetes runAsNonRoot validate the image default
+# before container start; OpenShift restricted-v2 may still assign a
+# namespace-range UID at admission.
 FROM debian:bookworm-slim
 RUN mkdir -p /var/log/cognic-proxy && chmod 0777 /var/log/cognic-proxy
 VOLUME ["/var/log/cognic-proxy"]
+USER 65534:65534
 CMD ["sh", "-c", "touch /var/log/cognic-proxy/access.jsonl && exec sleep infinity"]
 ```
 
@@ -1224,7 +1233,7 @@ git commit -m "docs(477): T6 — CRC live-proof runbook"
 
 - [ ] **Step 1: Write the template**
 
-Author `docs/evidence/477-live-proof-results.md` as a placeholder template (no fabricated results) capturing, per run: date, operator, CRC / OpenShift / Docker versions, the 2 captured fixture image RepoDigests exercised, the `pytest` output of the single symmetric acceptance run (both backend arms + tombstone-first wake), and a pass/fail line per AC1-AC5. Include a header stating: "#477 stays OPEN until a passing run is recorded below."
+Author `docs/evidence/477-live-proof-results.md` as a placeholder template (no fabricated results) capturing, per run: date, operator, CRC / OpenShift / Docker versions, the 2 captured fixture image RepoDigests exercised, the `pytest` output of the single symmetric acceptance run (both backend arms + tombstone-first wake), and a pass/fail line per AC1-AC5. Include a header stating: "#477 stays OPEN until a passing run is recorded below." The 2026-05-21 live run later filled this template with witnessed passing output, which is recorded in the evidence file.
 
 - [ ] **Step 2: Commit**
 
@@ -1251,22 +1260,22 @@ Expected: ruff/format/mypy clean; full suite green; `check_critical_coverage.py`
 
 - [ ] **Step 2: Verify the non-live acceptance criteria**
 
-Confirm AC6 (architecture import-regression test passes), AC7 (gate green), AC8-AC12 (the seam tests from T1/T2) all pass. AC1-AC5 are the **live** criteria — they are NOT verifiable in this session; they are proven later by the operator running the T6 runbook and recording results in the T7 evidence file.
+Confirm AC6 (architecture import-regression test passes), AC7 (gate green), AC8-AC12 (the seam tests from T1/T2) all pass. AC1-AC5 are the **live** criteria — the original plan expected them to be proven later by an operator running the T6 runbook and recording results in the T7 evidence file. The 2026-05-21 run did exactly that: the evidence file now records the witnessed 8-pass Docker + CRC/OpenShift run.
 
 - [ ] **Step 3: Halt-before-commit summary**
 
-Produce a summary: artifacts delivered, the 2 CC commits (T1/T2) flagged, AC6-AC12 green, AC1-AC5 pending the live runbook, #477 still OPEN per the spec §10 completion rule. No closeout doc — #477 is not "done" until live results land.
+Produce a summary: artifacts delivered, the 2 planned CC seam commits (T1/T2) flagged, AC6-AC12 green, and AC1-AC5 status tied to the evidence file. After the 2026-05-21 live run, AC1-AC5 are no longer pending: `docs/evidence/477-live-proof-results.md` records the passing symmetric Docker + CRC/OpenShift acceptance run. No closeout doc — the evidence file is the closeout artifact for #477.
 
 - [ ] **Step 4: Update task #477**
 
-Leave task #477 `pending` (artifacts shipped, live proof outstanding) — its description is satisfied only when `docs/evidence/477-live-proof-results.md` records a passing run.
+After the evidence file records a passing run, task #477 is eligible to close. If the evidence block is absent or failing, leave #477 `pending`.
 
 ---
 
 ## Self-Review
 
 **1. Spec coverage:**
-- §4.1/§4.2 fixture images → T4. §4.3 digest materialization → T5 (`resolve_fixture_refs`) + T6 (runbook capture steps). §5 seam → T1 (Docker) + T2 (K8s). §6 env vars → T5. §7 `_FixtureOnlySandboxCatalog` + import-regression → T3. §8 conftest + conformance-test wiring → T5. §9 runbook → T6. §10 evidence file → T7. §11 ACs: AC6/AC8-AC12 → T1/T2/T3 tests; AC7 → T8; AC1-AC5 → live runbook (T6/T7), explicitly out of this session's reach. No gaps.
+- §4.1/§4.2 fixture images → T4. §4.3 digest materialization → T5 (`resolve_fixture_refs`) + T6 (runbook capture steps). §5 seam → T1 (Docker) + T2 (K8s). §6 env vars → T5. §7 `_FixtureOnlySandboxCatalog` + import-regression → T3. §8 conftest + conformance-test wiring → T5. §9 runbook → T6. §10 evidence file → T7. §11 ACs: AC6/AC8-AC12 → T1/T2/T3 tests; AC7 → T8; AC1-AC5 → live runbook (T6/T7), now satisfied by the witnessed 2026-05-21 evidence entry. Live execution also surfaced extra KubernetesPod backend fixes (create readiness, delete wait, OpenShift-safe restore flags) that were reconciled back into the spec as a live-proof amendment. No gaps.
 
 **2. Placeholder scan:** No "TBD"/"handle edge cases"/"similar to". Every code step shows code; every command shows expected output. T4 step 3 and the live ACs are explicitly marked non-gating / operator-run, not placeholders.
 

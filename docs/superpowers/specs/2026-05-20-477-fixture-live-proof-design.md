@@ -1,8 +1,8 @@
 # #477 — Sandbox fixture-image path for live `checkpoint`/`suspend`/`wake` proof — Design Spec
 
 **Date:** 2026-05-20
-**Status:** APPROVED (brainstorm 2026-05-20; 5 design-call questions Q1-Q5 + 4 review rounds resolved — see §13; user-approved 2026-05-20).
-**Scope:** A minimal **test-only** fixture-image path — plus exactly one narrowly-scoped production-code seam — that unblocks the env-gated cross-backend sandbox conformance suite so `checkpoint → suspend → wake` can be proven against a live Docker daemon and a live OpenShift/CRC cluster. Closes the operational-proof gap tracked as task **#477** (carried open by the Sprint 8.5 closeout + PR #30).
+**Status:** APPROVED (brainstorm 2026-05-20; 5 design-call questions Q1-Q5 + 4 review rounds resolved — see §13; user-approved 2026-05-20; live-proof amendment recorded 2026-05-21).
+**Scope:** A minimal **test-only** fixture-image path — plus one narrowly-scoped production-code egress-proxy-image seam and live-proof-discovered KubernetesPod hardening fixes — that unblocks the env-gated cross-backend sandbox conformance suite so `checkpoint → suspend → wake` can be proven against a live Docker daemon and a live OpenShift/CRC cluster. Closes the operational-proof gap tracked as task **#477** (carried open by the Sprint 8.5 closeout + PR #30).
 **Brainstorming source:** session of 2026-05-20; 5 design-call questions answered inline (see §13).
 
 ---
@@ -34,15 +34,16 @@ and **never** as "canonical image family proven" or "sandbox runtime images prod
 **Ships:**
 - 2 test-only fixture Dockerfiles (§4).
 - **Exactly one narrowly-scoped production-code seam** — an optional egress-proxy-image constructor kwarg on both backends, production default unchanged (§5).
+- **Live-proof-discovered KubernetesPod fixes** — bounded Pod-readiness wait before `create()` returns, deterministic-name delete wait before wake recreates a Pod, and OpenShift-safe K8s tar restore flags. These were not planned scope; the CRC acceptance run surfaced them as pre-existing backend bugs that blocked the proof (§13 "Live proof amendment").
 - 3 test-only env vars — the fixture-mode flag `COGNIC_USE_LOCAL_FIXTURE_SANDBOX_IMAGES` plus the 2 digest-ref vars `COGNIC_FIXTURE_RUNTIME_IMAGE_REF` / `COGNIC_FIXTURE_PROXY_IMAGE_REF` (§6, §4.3).
 - 1 test-only catalog double `_FixtureOnlySandboxCatalog` (§7).
-- Conftest wiring in the 2 existing sandbox test conftests (§8).
+- Conftest wiring in the existing conformance sandbox conftest plus policy parameterization in the 2 conformance test files (§8).
 - 1 CRC runbook doc (§9).
 - 1 evidence-results file + completion rule (§10).
 - Tests: the seam tests (§5), an architecture import-regression test (§7), and the live-proof conformance runs (§11).
 
 **Does NOT ship** (out of scope — see §12):
-- Any `src/` change beyond the §5 seam. In particular `sandbox/catalog.py` (`CanonicalImageCatalog`, a critical-controls module) is **untouched**, and no catalog gating is added, removed, or bypassed in production.
+- Any production supply-chain/catalog change. In particular `sandbox/catalog.py` (`CanonicalImageCatalog`, a critical-controls module) is **untouched**, and no catalog gating is added, removed, or bypassed in production.
 - cosign/SBOM/supply-chain proof of the real canonical images.
 - The 3 canonical runtime variants (`sandbox-runtime-python` / `-shell` / `-data`).
 - `COGNIC_USE_LOCAL_FIXTURE_PROXY` production wiring (Sprint 14).
@@ -60,10 +61,11 @@ Both Dockerfiles live test-only under `tests/fixtures/sandbox/`. Each carries a 
 
 - **Base:** `debian:bookworm-slim`. Chosen for GNU `tar` — alpine/busybox `tar` has known symlink and xattr edge-case behaviour that would muddy the symlink + exec-bit preservation proof (AC4). GNU tar gives deterministic, well-understood preservation semantics.
 - **Must support:**
-  - running shell commands via the backend exec path (Docker `exec` + the K8s v4-channel `exec` with the `head -c N | tar xzf -` restore pipeline).
+  - running shell commands via the backend exec path (Docker `exec` + the K8s v4-channel `exec` with the `head -c N | tar xzf - --strip-components=1 --no-overwrite-dir -C /workspace` restore pipeline).
   - read/write access to `/workspace`.
-  - `tar czf - -C /workspace .` on checkpoint and `head -c N | tar xzf - -C /workspace` on restore, preserving symlinks and executable bits.
+  - `tar czf - -C /workspace .` on checkpoint and `head -c N | tar xzf - --strip-components=1 --no-overwrite-dir -C /workspace` on K8s restore, preserving symlinks and executable bits without rewriting the OpenShift `emptyDir` mount-root metadata.
 - **Contains:** a shell (`bash`), GNU `coreutils`, GNU `tar`. Nothing else — it is a runtime *fixture*, not a real runtime image.
+- **Image user:** declares `USER 65534:65534`. DockerSibling also sets `User=65534:65534` at container create, but Kubernetes `runAsNonRoot=True` validates the image default before start; an unspecified/root image user is refused before the live proof reaches `exec()`.
 - **Supplied to the backend** via `SandboxPolicy.runtime_image` (`policy.py:166`) — the runtime image is caller-supplied through the policy/admission context, so the test simply constructs the policy with the runtime fixture's full OCI ref. No production-code seam is needed for the runtime image.
 
 ### 4.2 `cognic-sandbox-egress-proxy-fixture`
@@ -76,6 +78,7 @@ The T7 review found the K8s backend's most fragile surface is the proxy-log read
   - not block green-path `exec()`.
 - **Log shape — explicitly confirmed acceptable as empty.** The backend parser `_parse_proxy_log_jsonl` (`sandbox/backends/docker_sibling.py:303`) iterates `raw.splitlines()`, silently skips blank lines, and returns an empty tuple `()` on empty input. An **empty, readable, append-only `access.jsonl`** is therefore a fully valid green-path result — it yields zero `ProxyAccessRecord`s, which is correct when the workload made no egress requests. The fixture proxy **does NOT need to emit real access records.** It needs only: file present + readable + sidecar alive. The distinction is load-bearing — `egress_audit_unreadable` fires on an *unreadable* log (sidecar gone / `cat` non-zero), never on an *empty* one.
 - **Contains:** a minimal long-lived process (e.g. a shell loop or a tiny script) that creates the log file and stays alive. Not a real filtering/forwarding proxy.
+- **Image user:** declares `USER 65534:65534` for the same Kubernetes `runAsNonRoot=True` validation reason as the runtime fixture.
 - **Supplied to the backend** via the §5 seam — the proxy image is AgentOS-owned backend-internal infrastructure, not caller-supplied, so it requires a production-code injection point (see §5).
 
 ### 4.3 Image production + digest materialization
@@ -151,7 +154,7 @@ A `CatalogProtocol`-conformant test double, defined in `tests/conformance/sandbo
 
 **Conftest changes** — when `COGNIC_USE_LOCAL_FIXTURE_SANDBOX_IMAGES=1`, the conformance conftest (0) reads + validates the two §4.3 ref env vars (`COGNIC_FIXTURE_RUNTIME_IMAGE_REF`, `COGNIC_FIXTURE_PROXY_IMAGE_REF`) — fail-fast if either is absent or not `@sha256:`-shaped; (a) swaps the canonical-image preflight to inspect the 2 fixture refs instead of the 4 canonical refs; (b) constructs the env-gated backend with `_FixtureOnlySandboxCatalog` (built from the 2 refs); (c) passes the proxy fixture ref via the §5 `egress_proxy_image` constructor kwarg; and (d) exposes a `runtime_image` (or whole-`policy`) **pytest fixture** that yields the runtime fixture ref. When the flag is unset, behaviour is unchanged.
 
-**Conformance test-file changes (required — P1, review round 3).** The 2 conformance test files' module-level `_POLICY` constants hardcode the runtime image, so a conftest-only change cannot reach them — the tests would still call `backend.create(_POLICY, …)` with the nonexistent `a*64` canonical runtime, and #477's accepted proof (AC1-AC4) would never actually exercise the fixture image. #477 therefore **parameterizes the runtime image in both conformance test files**: the `runtime_image` is sourced from the conftest fixture in (d) rather than baked into a module constant. Flag unset → the fixture yields the canonical placeholder (today's behaviour — the module skips in CI anyway via the §9 symmetric env-gate); flag set → the runtime fixture ref. This is a test-file change, in scope; the production `SandboxPolicy` type and all of `src/` (beyond the §5 seam) are untouched.
+**Conformance test-file changes (required — P1, review round 3).** The 2 conformance test files' module-level `_POLICY` constants hardcode the runtime image, so a conftest-only change cannot reach them — the tests would still call `backend.create(_POLICY, …)` with the nonexistent `a*64` canonical runtime, and #477's accepted proof (AC1-AC4) would never actually exercise the fixture image. #477 therefore **parameterizes the runtime image in both conformance test files**: the `runtime_image` is sourced from the conftest fixture in (d) rather than baked into a module constant. Flag unset → the fixture yields the canonical placeholder (today's behaviour — the module skips in CI anyway via the §9 symmetric env-gate); flag set → the runtime fixture ref. This is a test-file change, in scope. The production `SandboxPolicy` type remains untouched; the later live-proof amendment (§13) documents the additional KubernetesPod backend fixes discovered only by the CRC run.
 
 ## 9. CRC runbook
 
@@ -161,18 +164,18 @@ A new doc, `docs/runbooks/477-live-sandbox-proof.md`, gives the step-by-step liv
 3. **Build the 2 fixture images** — `docker build` against the §4 Dockerfiles (one runtime fixture, one egress-proxy fixture).
 4. **Push + capture digests** — push both fixture images to the CRC-internal-registry route; capture each image's post-push `RepoDigest` per §4.3 step 3. The two resulting `<route>/name@sha256:<digest>` strings are the fixture refs — pullable by both the host Docker daemon (via the route) and CRC.
 5. **Export the test env** — `COGNIC_RUN_DOCKER_SANDBOX=1` + `COGNIC_RUN_K8S_SANDBOX=1` + `COGNIC_USE_LOCAL_FIXTURE_SANDBOX_IMAGES=1` + `COGNIC_FIXTURE_RUNTIME_IMAGE_REF=<captured runtime ref>` + `COGNIC_FIXTURE_PROXY_IMAGE_REF=<captured proxy ref>`.
-6. **Acceptance run — single invocation; DO NOT split per backend.** Both T9 conformance modules carry a module-level `skipif` requiring **BOTH** backend env vars (the wake module also `pytest.mark.require_both_backends`) — symmetric gating, because a tombstone-first parity test that ran only one backend would false-green. A run with only one backend env var would **skip the whole module**. With step 5's env exported, run the conformance suite (`tests/conformance/sandbox/`) **once** — the single run exercises both the `docker_sibling` and `kubernetes_pod` arms. The per-runtime preparation (steps 2-4) may be staged; the acceptance run may not be split.
+6. **Acceptance run — single invocation; DO NOT split per backend.** Both T9 conformance modules carry a module-level `skipif` requiring **BOTH** backend env vars (the wake module also `pytest.mark.require_both_backends`) — symmetric gating, because a tombstone-first parity test that ran only one backend would false-green. A run with only one backend env var would **skip the whole module**. With step 5's env exported, run exactly the two #477 fixture-wired modules (`test_checkpoint_round_trip.py` + `test_wake_session_tombstoned_conformance.py`) **once** — the single run exercises both the `docker_sibling` and `kubernetes_pod` arms. The per-runtime preparation (steps 2-4) may be staged; the acceptance run may not be split.
 7. **Exact `pytest` invocation** for the acceptance run, with expected pass output for both backend arms.
 
 **#477's live proof is the conformance suite only.** The env-gated *backend checkpoint* tests (`tests/unit/sandbox/backends/test_docker_sibling_checkpoint.py`, `test_kubernetes_pod_checkpoint.py`) are deliberately NOT in scope — see §12 + §8 for why a conftest-only fixture wiring cannot reach their bespoke `_POLICY` / mock-catalog fixtures, and §13 review-round-2 for the decision.
 
-- **Primary documented target: OpenShift Local / CRC.** It exercises the SCC behaviour, non-root UID allocation, `readOnlyRootFilesystem`, emptyDir writable mounts, NetworkPolicy, and image-pull-into-cluster paths the `KubernetesPodSandboxBackend` actually implements.
+- **Primary documented target: OpenShift Local / CRC.** It exercises the SCC behaviour, non-root UID allocation, `readOnlyRootFilesystem`, emptyDir writable mounts, NetworkPolicy, and image-pull-into-cluster paths the `KubernetesPodSandboxBackend` actually implements. Cluster-admin setup is allowed, but the acceptance run must use CRC's regular `developer` user (or an equivalent non-anyuid user) so OpenShift selects restricted-v2 rather than kubeadmin's anyuid SCC.
 - **Alternate supported target:** a remote OpenShift cluster, if the operator configures image pull from a reachable registry. The runbook documents this as an alternate with the extra registry/credentials steps.
 - **Not accepted as full #477 proof:** plain Docker Desktop Kubernetes or `kind`. They are plain K8s, not OpenShift — the restricted-v2 SCC + `MustRunAsRange` paths the backend targets would not be exercised. If a run uses one of these, the evidence file MUST mark that leg explicitly weaker / non-authoritative.
 
 ## 10. Evidence file + completion rule
 
-A new file, `docs/evidence/477-live-proof-results.md`, is committed as part of #477 as a **template with placeholders** (no fabricated results). It captures, per run:
+A new file, `docs/evidence/477-live-proof-results.md`, was committed as part of #477 as a **template with placeholders** (no fabricated results). The 2026-05-21 live proof appended a witnessed passing run to that file. It captures, per run:
 - date, operator, CRC version, OpenShift version, Docker version
 - the two captured fixture image refs (post-push RepoDigests per §4.3) actually exercised
 - the `pytest` output for the single symmetric acceptance run (§9 step 6) — both backend arms of the checkpoint round-trip + the tombstone-first wake
@@ -201,7 +204,7 @@ All criteria are worded as fixture-image proof. None claims canonical-image prod
 
 ## 12. Out of scope
 
-- **Any `src/` production-code change beyond the single §5 egress-proxy-image seam.** In particular `sandbox/catalog.py` / `CanonicalImageCatalog` (critical-controls) is untouched, and no catalog gating is added, removed, or bypassed in production.
+- **Any production supply-chain/catalog change.** In particular `sandbox/catalog.py` / `CanonicalImageCatalog` (critical-controls) is untouched, and no catalog gating is added, removed, or bypassed in production. The 2026-05-21 live proof did add KubernetesPod backend hardening in `src/` because CRC exposed pre-existing readiness, deletion, and restore bugs that blocked AC1-AC5; those fixes are recorded in §13 and are no longer out of scope.
 - **Supply-chain admission proof of the real canonical images** — cosign signature verification, SBOM policy on the canonical set. Covered by existing catalog/admission tests; not re-proven here.
 - **Canonical-image publication / signing / cataloging** — Sprint 14 deploy kit.
 - **The 3 canonical runtime variants** (`sandbox-runtime-python` / `-shell` / `-data`) — #477 ships a single runtime fixture.
@@ -236,9 +239,16 @@ All criteria are worded as fixture-image proof. None claims canonical-image prod
 **Review round 4 (2026-05-20) — digest-materialization gap closed:**
 - **P1 — fixture refs are digest-pinned but the runbook did not materialize runnable digests.** Verified against the existing constraints: `policy.py` `_validate_image_ref` mandates an `@sha256:<64-hex>` suffix on `runtime_image` (Stage-1 shape gate, not bypassed by the catalog double), and the K8s proxy gate at `kubernetes_pod.py:831` does `.rsplit("@", 1)` — yet a plain local `docker build` produces no repository digest. New **§4.3** added: build → push to a single registry reachable by both the host Docker daemon and CRC (documented primary: CRC's internal registry via its default route) → capture the post-push `RepoDigest` for each image → surface the two captured refs through two test-only env vars (`COGNIC_FIXTURE_RUNTIME_IMAGE_REF` / `COGNIC_FIXTURE_PROXY_IMAGE_REF`) the conftest reads + fail-fast-validates. §6 broadened to the flag + 2 ref vars; §8 conftest step (0) reads/validates them; §9 runbook restructured to build → push → capture → export → single run; §10 evidence file now records the captured refs. Without this, AC1/AC2 would fail before exercising `checkpoint`/`suspend`/`wake`.
 
+**Live proof amendment (2026-05-21) — CRC run surfaced pre-existing KubernetesPod bugs:**
+- **Fixture image default user.** OpenShift refused the original fixture images before `exec()` because the Pod security context had `runAsNonRoot=True` and the images had no non-root default user. Resolution: both fixture Dockerfiles declare `USER 65534:65534`; the runbook also requires the acceptance run to use CRC's regular `developer` user so Pods exercise restricted-v2 rather than kubeadmin's anyuid SCC.
+- **Cold create readiness race.** `KubernetesPodSandboxBackend.create()` returned immediately after Pod creation, so the conformance test's first `session.exec()` could race kubelet startup and fail as a pods/exec websocket HTTP 500. Resolution: `create()` now waits for Pod readiness before returning, with bounded timeout + teardown on failure.
+- **Suspend→wake deterministic-name deletion race.** `suspend()` deletes `sb-<session_id>`, but Kubernetes deletion is asynchronous; immediate wake could recreate the same deterministic Pod name before deletion completed and fail with `409 AlreadyExists`. Resolution: `_delete_pod_if_exists()` deletes with zero grace and waits until the apiserver reports 404, with a bounded timeout.
+- **OpenShift emptyDir restore metadata.** The checkpoint archive contains the `./` directory entry; restoring as an arbitrary restricted-v2 UID could not chmod/utime the `/workspace` emptyDir mount root. `--no-overwrite-dir` alone was insufficient because GNU tar still tried to chmod `.`. Resolution: K8s restore uses `head -c N | tar xzf - --strip-components=1 --no-overwrite-dir -C /workspace`, which strips the leading `./` component and restores contents without rewriting mount-root metadata.
+- **Evidence.** The witnessed symmetric acceptance run on Docker + CRC passed 8/8 and is recorded in `docs/evidence/477-live-proof-results.md` with fixture digests, tool versions, and SCC posture (`restricted-v2=yes`, `anyuid=no`).
+
 ## Self-review notes
 
 - **Placeholder scan:** No TBDs. Image base (`debian:bookworm-slim`), the env-var name, the seam kwarg name, the catalog-double name, file paths, and 12 acceptance criteria (AC1-AC12) are all concrete.
-- **Internal consistency:** §1 scope (runtime mechanics, not supply chain) is consistent with §7 (catalog double no-op-passes cosign/SBOM for 2 digests) and §12 (supply-chain out of scope). §2 "ships exactly one src seam" is consistent with §5 and with §12's "no src change beyond §5." §5's "injected image still flows through the catalog gate" is consistent with §7's "both fixture digests allowlisted" and AC10. The §6 "unreachable from production code" claim is consistent with §5 (seam driven only by constructor kwarg, no Settings/env path) and §7's import-regression test (AC6 + AC11). §8's three-file modification set (1 conformance conftest + 2 conformance test files) is consistent with §9's single-symmetric-run acceptance and with AC1-AC3 being arms of that one run.
-- **Scope check:** One focused effort — test fixtures + conftest wiring + docs + one narrow production seam. Appropriately sized for a single implementation plan (~0.4-0.7 WU).
+- **Internal consistency:** §1 scope (runtime mechanics, not supply chain) is consistent with §7 (catalog double no-op-passes cosign/SBOM for 2 digests) and §12 (supply-chain out of scope). §2 now distinguishes the originally-planned egress-proxy-image seam from the live-proof-discovered KubernetesPod hardening fixes recorded in §13. §5's "injected image still flows through the catalog gate" is consistent with §7's "both fixture digests allowlisted" and AC10. The §6 "unreachable from production code" claim is consistent with §5 (seam driven only by constructor kwarg, no Settings/env path) and §7's import-regression test (AC6 + AC11). §8's three-file modification set (1 conformance conftest + 2 conformance test files) is consistent with §9's single-symmetric-run acceptance and with AC1-AC3 being arms of that one run.
+- **Scope check:** Focused effort — test fixtures + conftest wiring + docs + one narrow production seam, plus bounded KubernetesPod live-proof fixes discovered by the actual CRC acceptance run. The live-proof fixes are not supply-chain or catalog scope; they are backend-mechanics defects the proof was designed to expose.
 - **Ambiguity check:** The egress-proxy fixture's required behaviour (the T7 failure surface) is resolved explicitly in §4.2 against `_parse_proxy_log_jsonl`. The seam's production-default-preservation is explicit in §5 (byte-identical default path). "Live proof" is unambiguously scoped to fixture images in §1 / §11 / the acceptance-wording lock. The digest-axis/local-build mismatch is resolved in §4.3 (build → push → capture RepoDigest → 2 test-only ref env vars), consistent with §6 (3 test-only env vars), §8 conftest step (0), and the §9 build/push/capture/export runbook order.
