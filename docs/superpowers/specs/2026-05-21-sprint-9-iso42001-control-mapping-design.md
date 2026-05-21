@@ -177,13 +177,15 @@ Locked design:
 - **Production wiring — a request-time FastAPI dependency.** `app.state.adapters` is
   populated by `create_app`'s lifespan *after* `open_all()` — i.e. after the compliance
   router has already been mounted — so the route package **cannot** closure-capture the
-  engine at mount time. Instead `portal/api/compliance/` defines a request-time
-  dependency `_require_relational_engine(request) -> AsyncEngine` that reads
-  `request.app.state.adapters.relational.engine` per request and **fails loud**
-  (HTTP 503) when `app.state.adapters` is `None` (adapters not built / not configured)
-  or the engine is otherwise unavailable. The resolved `AsyncEngine` is passed into
-  `export_evidence_pack` / the trace reader. `adapters.relational.engine` is the
-  `RelationalAdapter.engine` accessor added by #489.
+  adapter pool at mount time. Instead `portal/api/compliance/` defines a request-time
+  dependency `_require_adapters(request) -> Adapters` that reads
+  `request.app.state.adapters` per request and **fails loud** (HTTP 503) when it is
+  `None` (adapters not built / not configured). The route then passes
+  `adapters.relational.engine` **and** `adapters.secret` into `export_evidence_pack` —
+  both are needed: the engine for the read seam, and the `SecretAdapter` to resolve a
+  `vault://` evidence-pack signing key (§6.3). `adapters.relational.engine` is the
+  `RelationalAdapter.engine` accessor added by #489. The trace reader (`walk_trace`)
+  takes the same `AsyncEngine`.
 - **Tests** pass an in-memory `AsyncEngine` directly to the `export_evidence_pack` /
   trace-reader functions, bypassing the route dependency.
 
@@ -234,7 +236,13 @@ powers, kept as separate atoms so bank overlays can grant them independently:
   `frozenset[PackRBACScope | UIRBACScope | ComplianceRBACScope]` so an examiner `Actor`
   can carry the compliance scopes — exactly mirroring the Sprint-7B.4 widening that
   added `UIRBACScope`. `portal/rbac/actor.py` is listed in §13 files-touched.
-- The `scopes.py` + `actor.py` changes get explicit RBAC stop-rule review.
+- **`RequireScope` widening (required).** `portal/rbac/enforcement.py` types the
+  `RequireScope(scope)` factory parameter as `PackRBACScope | UIRBACScope`. Sprint 9
+  widens it to `PackRBACScope | UIRBACScope | ComplianceRBACScope` so the compliance
+  endpoints can gate on the new scopes — without it `RequireScope("compliance.…")` is a
+  `mypy` error.
+- All **three** RBAC files — `scopes.py`, `actor.py`, `enforcement.py` — get explicit
+  RBAC stop-rule review.
 
 ## 9. Control-tagging gap-fill
 
@@ -260,7 +268,8 @@ aspiration the registry enables incrementally, not a Sprint-9 retrofit.
   `evidence_pack.py` — they define examiner-facing evidence format, control mapping,
   integrity proof, and signing. Gate count **73 → 77**; verified against fresh
   `coverage.json` at promotion time per `feedback_verify_promotion_meets_floor_at_promotion_time`.
-- `portal/rbac/scopes.py` change is an RBAC stop-rule touch (§8.3) — reviewed.
+- The RBAC changes — `portal/rbac/scopes.py` + `actor.py` + `enforcement.py` (§8.3) —
+  are stop-rule touches; all three get explicit RBAC stop-rule review.
 - `core/audit.py`, `core/decision_history.py`, `core/canonical.py` — **not modified**
   (by design — §3 dependency arrow, §5 read seam, §7 no store-method additions).
 - The tagging gap-fill (§9) makes one-line `iso_controls=` additions at emission sites
@@ -315,9 +324,10 @@ modules in §11.
 **Modified:** `core/config.py` (`evidence_pack_signing_key_path` setting);
 `portal/rbac/scopes.py` (`ComplianceRBACScope` family + `EXAMINER_COMPLIANCE_SCOPES`);
 `portal/rbac/actor.py` (`Actor.scopes` widened to include `ComplianceRBACScope`);
-`portal/api/app.py` (mount the compliance router); emission sites identified by the §9
-gap-fill audit; `tools/check_critical_coverage.py` (gate 73 → 77); `docs/BUILD_PLAN.md`
-§752 (status at sprint close).
+`portal/rbac/enforcement.py` (`RequireScope` `scope` param widened to accept
+`ComplianceRBACScope`); `portal/api/app.py` (mount the compliance router); emission
+sites identified by the §9 gap-fill audit; `tools/check_critical_coverage.py` (gate
+73 → 77); `docs/BUILD_PLAN.md` §752 (status at sprint close).
 
 ## 14. BUILD_PLAN reconciliation notes
 
