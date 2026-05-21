@@ -54,6 +54,12 @@ class InMemoryRelationalAdapter:
             raise RuntimeError("connect() must be awaited first")
         return self._session_factory()
 
+    @property
+    def engine(self) -> AsyncEngine:
+        if self._engine is None:
+            raise RuntimeError("connect() must be awaited first")
+        return self._engine
+
     async def run_migrations(self, dir: str) -> None:
         # Tests don't need real migrations; presence of method satisfies
         # protocol structural conformance. Test-fixture path may legitimately
