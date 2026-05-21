@@ -46,6 +46,12 @@ class PostgresAdapter:
             raise RuntimeError("connect() must be awaited first")
         return self._session_factory()
 
+    @property
+    def engine(self) -> AsyncEngine:
+        if self._engine is None:
+            raise RuntimeError("connect() must be awaited first")
+        return self._engine
+
     async def run_migrations(self, dir: str | None = None) -> None:
         """Run Alembic upgrade head against this adapter's database URL.
 

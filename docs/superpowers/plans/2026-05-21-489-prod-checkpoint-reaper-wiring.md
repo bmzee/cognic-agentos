@@ -114,6 +114,7 @@ git commit -m "feat(489): T1 — sandbox_reaper_enabled setting (default OFF)"
 - Modify: `src/cognic_agentos/db/adapters/postgres_adapter.py` (after `session()`, line 47)
 - Modify: `src/cognic_agentos/db/adapters/oracle_adapter.py` (after `session()`, line 49)
 - Modify: `tests/support/adapter_fixtures.py` (after `InMemoryRelationalAdapter.session()`, line 55)
+- Modify: `tests/unit/db/test_adapter_protocols.py` (`FakeRelational` conformance stub + `test_relational_methods` shape tuple — the stub is itself a relational-adapter implementation that the protocol change breaks)
 - Test: `tests/unit/db/test_relational_adapter_engine.py` (create)
 
 - [ ] **Step 1: Write the failing test**
@@ -253,20 +254,50 @@ identical block:
 
 (`AsyncEngine` is already imported in all three files.)
 
-- [ ] **Step 5: Run test to verify it passes**
+- [ ] **Step 5: Update the protocol-conformance stub + shape test**
+
+Adding `engine` to the `RelationalAdapter` Protocol breaks
+`tests/unit/db/test_adapter_protocols.py`: its `FakeRelational` conformance stub is
+itself a relational-adapter implementation and now lacks `engine`, and
+`test_relational_methods` enumerates the protocol's member names. Update both — this is
+part of "the protocol change is tested for every relational adapter implementation".
+
+In `tests/unit/db/test_adapter_protocols.py`, add the import:
+
+```python
+from sqlalchemy.ext.asyncio import AsyncEngine
+```
+
+Add `"engine"` to the `test_relational_methods` name tuple:
+
+```python
+        for name in ("connect", "session", "engine", "run_migrations", "close", "health_check"):
+```
+
+Add the `engine` property to the `FakeRelational` stub, immediately after `session()`.
+The `...` body is runtime-correct (it returns `None`, so the `@runtime_checkable`
+`isinstance` presence check still passes); the `# type: ignore[empty-body]` suppresses
+mypy's static empty-body complaint, which does not apply to the genuinely-empty
+structural-conformance stub:
+
+```python
+            @property
+            def engine(self) -> AsyncEngine: ...  # type: ignore[empty-body]
+```
+
+- [ ] **Step 6: Run tests to verify they pass**
 
 Run: `uv run pytest tests/unit/db/test_relational_adapter_engine.py -v`
 Expected: PASS — 6 tests (3 adapters × 2 cases).
 
-Then confirm no existing adapter-protocol conformance test regressed:
 Run: `uv run pytest tests/unit/db/ -q`
-Expected: PASS — `@runtime_checkable` isinstance checks only verify attribute presence,
-and all three adapters now have `engine`.
+Expected: PASS — the new test plus the updated `test_adapter_protocols.py`; no
+regressions.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add src/cognic_agentos/db/adapters/protocols.py src/cognic_agentos/db/adapters/postgres_adapter.py src/cognic_agentos/db/adapters/oracle_adapter.py tests/support/adapter_fixtures.py tests/unit/db/test_relational_adapter_engine.py
+git add src/cognic_agentos/db/adapters/protocols.py src/cognic_agentos/db/adapters/postgres_adapter.py src/cognic_agentos/db/adapters/oracle_adapter.py tests/support/adapter_fixtures.py tests/unit/db/test_adapter_protocols.py tests/unit/db/test_relational_adapter_engine.py
 git commit -m "feat(489): T2 — RelationalAdapter.engine accessor"
 ```
 

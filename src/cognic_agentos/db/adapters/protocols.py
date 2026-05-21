@@ -27,6 +27,8 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol, runtime_checkable
 
+from sqlalchemy.ext.asyncio import AsyncEngine
+
 AdapterStatus = Literal["ok", "degraded", "unreachable"]
 
 
@@ -96,6 +98,19 @@ class RelationalAdapter(Protocol):
 
     async def connect(self) -> None: ...
     def session(self) -> Any: ...
+
+    @property
+    def engine(self) -> AsyncEngine:
+        """The live SQLAlchemy AsyncEngine, owned and lifecycle-managed by
+        the adapter — created by connect(), disposed by close().
+
+        Read-only: consumers (e.g. the #489 checkpoint stores that build
+        AuditStore / DecisionHistoryStore) use it but MUST NOT dispose it.
+        Accessed before connect() it raises RuntimeError — fail loud
+        rather than yield a half-live handle.
+        """
+        ...
+
     async def run_migrations(self, dir: str) -> None: ...
     async def close(self) -> None: ...
     async def health_check(self) -> AdapterHealth: ...

@@ -10,13 +10,14 @@ sprint's protocol surface.
 from __future__ import annotations
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from cognic_agentos.db.adapters import protocols as P
 
 
 class TestProtocolShape:
     def test_relational_methods(self) -> None:
-        for name in ("connect", "session", "run_migrations", "close", "health_check"):
+        for name in ("connect", "session", "engine", "run_migrations", "close", "health_check"):
             assert hasattr(P.RelationalAdapter, name), f"missing {name}"
 
     def test_vector_methods(self) -> None:
@@ -50,6 +51,9 @@ class TestImplementsProtocol:
             async def connect(self) -> None: ...
             def session(self) -> object:
                 return object()
+
+            @property
+            def engine(self) -> AsyncEngine: ...  # type: ignore[empty-body]
 
             async def run_migrations(self, dir: str) -> None: ...
             async def close(self) -> None: ...
