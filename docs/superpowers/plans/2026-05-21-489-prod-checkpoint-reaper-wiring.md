@@ -509,8 +509,8 @@ from typing import TYPE_CHECKING, Any, cast
 import pytest
 
 from cognic_agentos.core.config import Settings
+from cognic_agentos.db.adapters import AdapterRegistry
 from cognic_agentos.db.adapters.local_object_store_adapter import LocalObjectStoreAdapter
-from cognic_agentos.db.adapters.registry import AdapterRegistry
 from cognic_agentos.portal.api.app import create_app
 from tests.support.adapter_fixtures import (
     InMemoryEmbeddingAdapter,
@@ -550,14 +550,22 @@ def _memory_registry() -> AdapterRegistry:
 
 
 def _memory_settings(*, reaper_enabled: bool, object_store_root: Path) -> Settings:
+    """A Settings with all five non-object-store drivers set to ``memory``
+    and the real local_fs object store rooted at a per-test tmp path. The
+    ``*_driver`` field names — db / vector / secret / embed / obs — match
+    core/config.py; the registry above keys by adapter *kind*."""
     return Settings(  # type: ignore[call-arg]
         _env_file=None,
-        runtime_profile="prod",
         db_driver="memory",
         vector_driver="memory",
         secret_driver="memory",
-        embedding_driver="memory",
-        observability_driver="memory",
+        embed_driver="memory",
+        obs_driver="memory",
+        database_url=None,
+        qdrant_url=None,
+        vault_addr=None,
+        embedding_base_url=None,
+        langfuse_host=None,
         object_store_driver="local_fs",
         local_object_store_root=object_store_root,
         sandbox_reaper_enabled=reaper_enabled,
@@ -642,7 +650,7 @@ async def test_reaper_cancelled_before_adapters_closed(tmp_path: Path) -> None:
     assert observed["reaper_done_at_close"] is True
 
 
-async def test_lifespan_propagates_helper_fail_loud(
+async def test_lifespan_propagates_helper_fail_loud_and_closes_pool(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """#489 spec §4.3.2 — when the setting-driven store builder fails loud
@@ -651,9 +659,17 @@ async def test_lifespan_propagates_helper_fail_loud(
     an object store (factory.py resolves it unconditionally), so those
     unavailable-adapter states cannot be reached through the lifespan's
     own build path — they are exercised by monkeypatching the builder to
-    raise. This pins the lifespan integration contract: there is no
-    try/except around _build_checkpoint_store_from_adapters, so any builder
-    fail-loud surfaces as a startup failure."""
+    raise.
+
+    Pins the lifespan integration contract: the builder runs INSIDE the
+    inner try/finally, so a builder fail-loud still closes the adapter
+    pool — a failed startup never leaks an opened pool (R1 review P1)."""
+    closed: dict[str, bool] = {"relational": False}
+
+    class _CloseRecordingRelational(InMemoryRelationalAdapter):
+        async def close(self) -> None:
+            closed["relational"] = True
+            await super().close()
 
     def _boom(adapters: object, settings: object) -> object:
         raise RuntimeError("simulated builder fail-loud")
@@ -662,12 +678,16 @@ async def test_lifespan_propagates_helper_fail_loud(
         "cognic_agentos.portal.api.app._build_checkpoint_store_from_adapters",
         _boom,
     )
+    r = _memory_registry()
+    r.register("relational", "memory", _CloseRecordingRelational)
     settings = _memory_settings(reaper_enabled=True, object_store_root=tmp_path)
-    app = create_app(settings, adapter_registry=_memory_registry())
+    app = create_app(settings, adapter_registry=r)
 
     with pytest.raises(RuntimeError, match="simulated builder fail-loud"):
         async with app.router.lifespan_context(app):
             pass
+
+    assert closed["relational"] is True
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -677,71 +697,42 @@ Expected: FAIL — `test_setting_driven_reaper_starts_when_enabled` finds
 `app.state.reaper_task is None` (the lifespan does not yet build a setting-driven
 reaper); `test_setting_driven_fails_loud_without_adapter_registry` does not raise;
 `test_disabled_by_default_starts_no_reaper_and_logs` finds no `sandbox.reaper.disabled`
-log record; `test_lifespan_propagates_helper_fail_loud` does not raise (the lifespan
-does not yet call the builder).
+log record; `test_lifespan_propagates_helper_fail_loud_and_closes_pool` does not raise
+(the lifespan does not yet call the builder).
 
 - [ ] **Step 3: Write the implementation — restructure the lifespan**
 
+> **R1 review correction (P1 + P2).** The lifespan block below is the **corrected,
+> committed structure** — tightened during review so a startup failure can never leak
+> a background task (P2 — the SSE reap task) or an opened adapter pool (P1).
+> `reap_task` + `reaper_task` are declared and the outer `try/finally` cleanup envelope
+> opens BEFORE any background task is created or any fail-loud check runs; the
+> setting-driven store build sits INSIDE the inner `try/finally` so a builder
+> fail-loud still runs `adapters.close_all()`.
+
 In `src/cognic_agentos/portal/api/app.py`, replace the entire `lifespan` function body
-from line 298 (`@asynccontextmanager`) through the end of the outer `finally` block
-(line 388) with:
+(the `@asynccontextmanager` ... `async def lifespan` block through the end of its outer
+`finally`) with:
 
 ```python
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        # Sprint-7B.4 T6: SSE-subscriber reap task. Unchanged by #489.
+        # Sprint-7B.4 T6 + #489: lifespan-managed background tasks. All
+        # synchronous-object state attaches (gateway_ledger,
+        # plugin_registry, actor_binder, pack_record_store, trust_gate,
+        # trust_root_resolver, decision_history_store, audit_store,
+        # ui_event_emitter, ui_event_broker) happen at module level right
+        # after `app = FastAPI(...)` below. The SSE reap_task + the
+        # checkpoint reaper_task belong in lifespan because they need an
+        # asyncio event loop + clean cancellation on shutdown.
+        #
+        # #489: reap_task + reaper_task are declared AND the outer
+        # try/finally cleanup envelope is opened BEFORE any background
+        # task is created or any fail-loud check runs — so a startup
+        # failure (e.g. the setting-driven fail-loud raise) can never leak
+        # a created task.
         reap_task: asyncio.Task[None] | None = None
-        broker_for_lifespan = app.state.ui_event_broker
-        if broker_for_lifespan is not None and settings is not None:
-            _idle_s = settings.ui_event_stream_idle_timeout_s
-
-            async def _reap_loop() -> None:
-                """Periodic SSE-subscriber reaper. Runs at 1/3 the idle
-                timeout so a stale subscriber is detected within one reap
-                window; logs + swallows any per-iteration exception so a
-                single failure does NOT kill the loop for the whole
-                process lifetime."""
-                while True:
-                    await asyncio.sleep(_idle_s / 3)
-                    try:
-                        broker_for_lifespan.reap_idle(datetime.now(UTC))
-                    except Exception:
-                        logger.exception("ui.broker.reap_idle_failed")
-
-            reap_task = asyncio.create_task(_reap_loop())
-
-        # --- Checkpoint reaper (Sprint 8.5 T10 + #489) ---------------------
-        # Precedence: an explicit create_app(checkpoint_store=...) injection
-        # wins and needs NO adapter pool (preserves the T10 test seam,
-        # including the adapter_registry-None path). Otherwise the #489
-        # setting-driven path builds the store from the live adapter pool
-        # AFTER open_all() when sandbox_reaper_enabled is set.
         reaper_task: asyncio.Task[None] | None = None
-        injected_store = app.state.checkpoint_store
-        setting_driven_reaper = (
-            injected_store is None and settings.sandbox_reaper_enabled
-        )
-
-        # #489 spec §4.3.2 — fail loud. An operator who set
-        # sandbox_reaper_enabled=true on a deployment with no adapter pool
-        # gets a startup failure, never a silent no-op. Scoped to the
-        # setting-driven path only: the explicit-injection path below never
-        # reaches here, so injecting a store never fails for adapter reasons.
-        if setting_driven_reaper and adapter_registry is None:
-            raise RuntimeError(
-                "sandbox_reaper_enabled=true but no adapter registry is "
-                "configured. The setting-driven checkpoint reaper requires "
-                "the production adapter pool — launch via create_prod_app, "
-                "or inject create_app(checkpoint_store=...)."
-            )
-
-        def _start_checkpoint_reaper(store: CheckpointStore) -> asyncio.Task[None]:
-            # Local import keeps the portal import graph sandbox-free until
-            # a reaper is actually wired (Sprint 8.5 T10 doctrine).
-            from cognic_agentos.sandbox.reaper import CheckpointReaper
-
-            reaper = CheckpointReaper(checkpoint_store=store, settings=settings)
-            return asyncio.create_task(reaper.run_forever())
 
         async def _shutdown_checkpoint_reaper() -> None:
             # cancel() then await so CancelledError propagates cleanly to
@@ -754,15 +745,73 @@ from line 298 (`@asynccontextmanager`) through the end of the outer `finally` bl
                 with suppress(asyncio.CancelledError):
                     await reaper_task
 
-        # Explicit-injection reaper starts immediately — the injected store
-        # is self-contained (its own engine + object store), no adapter
-        # pool needed.
-        if injected_store is not None:
-            reaper_task = _start_checkpoint_reaper(injected_store)
-            app.state.reaper_task = reaper_task
-            logger.info("sandbox.reaper.started", extra={"source": "explicit_injection"})
+        def _start_checkpoint_reaper(store: CheckpointStore) -> asyncio.Task[None]:
+            # Local import keeps the portal import graph sandbox-free until
+            # a reaper is actually wired (Sprint 8.5 T10 doctrine).
+            from cognic_agentos.sandbox.reaper import CheckpointReaper
+
+            reaper = CheckpointReaper(checkpoint_store=store, settings=settings)
+            return asyncio.create_task(reaper.run_forever())
 
         try:
+            # Sprint-7B.4 T6: SSE-subscriber reap task.
+            broker_for_lifespan = app.state.ui_event_broker
+            if broker_for_lifespan is not None and settings is not None:
+                _idle_s = settings.ui_event_stream_idle_timeout_s
+
+                async def _reap_loop() -> None:
+                    """Periodic SSE-subscriber reaper. Runs at 1/3 the idle
+                    timeout so a stale subscriber is detected within one
+                    reap window; logs + swallows any per-iteration
+                    exception so a single failure does NOT kill the loop
+                    for the entire process lifetime."""
+                    while True:
+                        await asyncio.sleep(_idle_s / 3)
+                        try:
+                            broker_for_lifespan.reap_idle(datetime.now(UTC))
+                        except Exception:
+                            logger.exception("ui.broker.reap_idle_failed")
+
+                reap_task = asyncio.create_task(_reap_loop())
+
+            # --- Checkpoint reaper (Sprint 8.5 T10 + #489) -----------------
+            # Precedence: an explicit create_app(checkpoint_store=...)
+            # injection wins and needs NO adapter pool (preserves the
+            # Sprint 8.5 T10 test seam, incl. the adapter_registry-None
+            # path). Otherwise the #489 setting-driven path builds the
+            # store from the live adapter pool AFTER open_all().
+            injected_store = app.state.checkpoint_store
+            setting_driven_reaper = injected_store is None and settings.sandbox_reaper_enabled
+
+            # #489 spec §4.3.2 — fail loud. An operator who set
+            # sandbox_reaper_enabled=true on a deployment with no adapter
+            # pool gets a startup failure, never a silent no-op. The raise
+            # is INSIDE this outer try so the cleanup envelope cancels any
+            # background task already created above. Scoped to the
+            # setting-driven path only — the explicit-injection path never
+            # reaches here, so injecting a store never fails for adapter
+            # reasons.
+            if setting_driven_reaper and adapter_registry is None:
+                raise RuntimeError(
+                    "sandbox_reaper_enabled=true but no adapter registry "
+                    "is configured. The setting-driven checkpoint reaper "
+                    "requires the production adapter pool — launch via "
+                    "create_prod_app, or inject "
+                    "create_app(checkpoint_store=...)."
+                )
+
+            # Explicit-injection reaper starts immediately — the injected
+            # store is self-contained (its own engine + object store); no
+            # adapter pool needed, so this path works on the
+            # adapter_registry-None branch too.
+            if injected_store is not None:
+                reaper_task = _start_checkpoint_reaper(injected_store)
+                app.state.reaper_task = reaper_task
+                logger.info(
+                    "sandbox.reaper.started",
+                    extra={"source": "explicit_injection"},
+                )
+
             if adapter_registry is None:
                 app.state.adapters = None
                 yield
@@ -779,70 +828,73 @@ from line 298 (`@asynccontextmanager`) through the end of the outer `finally` bl
             adapters = build_adapters(settings, registry=adapter_registry)
             await adapters.open_all()
             app.state.adapters = adapters
-
-            # #489 — setting-driven reaper: build the CheckpointStore from
-            # the live adapter pool AFTER open_all() so the relational
-            # adapter's engine is connected.
-            if setting_driven_reaper:
-                store = _build_checkpoint_store_from_adapters(adapters, settings)
-                reaper_task = _start_checkpoint_reaper(store)
-                app.state.reaper_task = reaper_task
-                logger.info(
-                    "sandbox.reaper.started",
-                    extra={
-                        "source": "settings",
-                        "interval_s": settings.sandbox_reaper_interval_s,
-                    },
-                )
-            elif injected_store is None:
-                # Default posture — no reaper. Loud log so an operator who
-                # never enabled it sees why checkpoint retention is not
-                # sweeping.
-                logger.info(
-                    "sandbox.reaper.disabled",
-                    extra={
-                        "remediation": (
-                            "set sandbox_reaper_enabled=true on EXACTLY ONE "
-                            "instance to run the resumable-session "
-                            "retention sweep (single-instance posture per "
-                            "spec §13; Sprint 10.5 adds leader election)"
-                        ),
-                    },
-                )
-
             try:
+                # #489 — setting-driven reaper: build the CheckpointStore
+                # from the live adapter pool AFTER open_all() so the
+                # relational adapter's engine is connected. This build is
+                # INSIDE the inner try so a builder fail-loud still runs
+                # close_all() + clears app.state.adapters.
+                if setting_driven_reaper:
+                    store = _build_checkpoint_store_from_adapters(adapters, settings)
+                    reaper_task = _start_checkpoint_reaper(store)
+                    app.state.reaper_task = reaper_task
+                    logger.info(
+                        "sandbox.reaper.started",
+                        extra={
+                            "source": "settings",
+                            "interval_s": settings.sandbox_reaper_interval_s,
+                        },
+                    )
+                elif injected_store is None:
+                    # Default posture — no reaper. Loud log so an operator
+                    # who never enabled it sees why checkpoint retention
+                    # is not sweeping.
+                    logger.info(
+                        "sandbox.reaper.disabled",
+                        extra={
+                            "remediation": (
+                                "set sandbox_reaper_enabled=true on "
+                                "EXACTLY ONE instance to run the "
+                                "resumable-session retention sweep "
+                                "(single-instance posture per spec §13; "
+                                "Sprint 10.5 adds leader election)"
+                            ),
+                        },
+                    )
+
                 yield
             finally:
-                # #489 — cancel the reaper BEFORE close_all() so the shared
-                # adapter-owned engine is never disposed under an in-flight
-                # sweep.
+                # #489 — cancel the reaper BEFORE close_all() so the
+                # shared adapter-owned engine is never disposed under an
+                # in-flight sweep.
                 await _shutdown_checkpoint_reaper()
                 await adapters.close_all()
                 app.state.adapters = None
         finally:
-            # Sprint-7B.4 T6: SSE reap-task cleanup. Always runs, even on
-            # the adapter-registry-None early-return path.
+            # All background tasks created above are cancelled here. This
+            # envelope opened BEFORE any task creation, so a startup
+            # failure (e.g. the setting-driven fail-loud raise) can never
+            # leak the SSE reap task or the checkpoint reaper.
             if reap_task is not None:
                 reap_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await reap_task
-            # Catch-all for the adapter_registry-None early-return path,
-            # where the inner finally never ran. _shutdown_checkpoint_reaper
-            # is idempotent (done() guard), so the main path's double call
-            # is a safe no-op.
             await _shutdown_checkpoint_reaper()
 ```
 
 Notes for the implementer:
-- `settings` is non-`None` for the whole function — line 291 (`settings = settings or
-  get_settings()`) runs before `lifespan` is defined, and the closure captures the
-  narrowed `Settings`. The pre-#489 SSE block keeps its redundant `settings is not None`
-  check; leave it as-is to minimise the diff.
-- The pre-startup `app.state.reaper_task = None` seed at line 472 is unchanged — it
-  still guarantees the attribute exists before startup.
+- `settings` is non-`None` for the whole function — `settings = settings or
+  get_settings()` runs in `create_app` before `lifespan` is defined, and the closure
+  captures the narrowed `Settings`. The SSE block keeps a redundant `settings is not
+  None` check; harmless.
+- The pre-startup `app.state.reaper_task = None` seed (in the eager-attach block) is
+  unchanged — it guarantees the attribute exists before startup.
 - `CheckpointStore` in the `_start_checkpoint_reaper` type annotation resolves via the
-  existing `TYPE_CHECKING` import at app.py line 88 (`from __future__ import
-  annotations` makes the annotation a string).
+  existing `TYPE_CHECKING` import (`from __future__ import annotations` makes the
+  annotation a string).
+- `reap_task` + `reaper_task` are declared before the outer `try`, and both helper
+  closures are defined before it, so the outer `finally` always cancels whatever was
+  created — no startup-failure path can leak a background task or an opened pool.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -995,7 +1047,7 @@ each backed by a passing test or a gate result:
 - AC1 — `sandbox_reaper_enabled` defaults `False` → `test_sandbox_reaper_enabled_defaults_false`.
 - AC2 — `RelationalAdapter.engine` on all three adapters → `test_relational_adapter_engine.py`.
 - AC3 — setting-driven reaper runs → `test_setting_driven_reaper_starts_when_enabled`.
-- AC4 — fail-loud on missing adapters → `test_setting_driven_fails_loud_without_adapter_registry` (lifespan, no registry) + `test_fails_loud_when_object_store_missing` + `test_fails_loud_when_relational_engine_unavailable` (helper — both unavailable-dependency paths, each raising a dependency-naming RuntimeError) + `test_lifespan_propagates_helper_fail_loud` (lifespan does not swallow a builder fail-loud). build_adapters resolves the object store unconditionally, so the object-store / engine unavailable states are unreachable through the lifespan's own build path and are pinned at the helper unit-test level plus the monkeypatch propagation test.
+- AC4 — fail-loud on missing adapters → `test_setting_driven_fails_loud_without_adapter_registry` (lifespan, no registry) + `test_fails_loud_when_object_store_missing` + `test_fails_loud_when_relational_engine_unavailable` (helper — both unavailable-dependency paths, each raising a dependency-naming RuntimeError) + `test_lifespan_propagates_helper_fail_loud_and_closes_pool` (lifespan does not swallow a builder fail-loud AND still closes the adapter pool). build_adapters resolves the object store unconditionally, so the object-store / engine unavailable states are unreachable through the lifespan's own build path and are pinned at the helper unit-test level plus the monkeypatch propagation test.
 - AC5 — explicit-injection seam intact → `test_explicit_injection_wins_and_never_fails_loud` + `test_reaper_lifespan_wiring.py` still green.
 - AC6 — reaper cancelled before `close_all()` → `test_reaper_cancelled_before_adapters_closed`.
 - AC7 — default path: no reaper + disabled log → `test_disabled_by_default_starts_no_reaper_and_logs`.
