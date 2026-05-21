@@ -186,6 +186,50 @@ def _build_router(settings: Settings) -> APIRouter:
     return router
 
 
+def _build_checkpoint_store_from_adapters(
+    adapters: Adapters,
+    settings: Settings,
+) -> CheckpointStore:
+    """#489 — construct a production CheckpointStore from the live adapter pool.
+
+    The checkpoint stores reuse the relational adapter's own AsyncEngine
+    (read-only — they never dispose it; the adapter owns its lifecycle)
+    and the bundled object-store adapter. Called by the lifespan ONLY
+    after build_adapters() + open_all(), so adapters.relational.engine is
+    connected.
+
+    Fails loud — naming the missing dependency — when the object store OR
+    the relational engine is unavailable. A setting-driven reaper an
+    operator explicitly enabled must never be silently disabled (#489 spec
+    §4.3.2 / AC4). The relational-engine-unavailable RuntimeError (raised
+    by the RelationalAdapter.engine property when the adapter is not
+    connected) is caught and re-raised with a dependency-naming message so
+    both fail-loud paths are symmetric.
+    """
+    from cognic_agentos.sandbox.checkpoint_store import CheckpointStore
+
+    if adapters.object_store is None:
+        raise RuntimeError(
+            "sandbox_reaper_enabled=true but no object-store adapter is "
+            "configured — the checkpoint reaper cannot run without "
+            "persistent checkpoint storage."
+        )
+    try:
+        engine = adapters.relational.engine
+    except RuntimeError as exc:
+        raise RuntimeError(
+            "sandbox_reaper_enabled=true but the relational adapter "
+            "engine is unavailable — the checkpoint reaper cannot run "
+            "without a database connection."
+        ) from exc
+    return CheckpointStore(
+        object_store=adapters.object_store,
+        audit_store=AuditStore(engine),
+        decision_history_store=DecisionHistoryStore(engine),
+        settings=settings,
+    )
+
+
 def create_app(
     settings: Settings | None = None,
     *,
