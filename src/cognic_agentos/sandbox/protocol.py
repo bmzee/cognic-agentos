@@ -10,6 +10,19 @@ Sprint 8A ships:
 * `SandboxExecResult` + `SandboxBackendHealth` result types
 * `SandboxSession` + `SandboxBackend` Protocols
 
+Sprint 8.5 T1 extends:
+* `SandboxRefusalReason` 15 → 21 values (6 new wake-time arms per
+  spec §3.3).
+* `SandboxLifecycleEvent` 8 → 12 values (4 new per spec §3.3).
+* `SandboxSession` Protocol with `checkpoint()` + `suspend()` per
+  spec §3.1.
+* `SandboxBackend` Protocol with `wake()` per spec §3.2.
+* `CheckpointId` NewType — declared HERE (not in
+  `sandbox/checkpoint_store.py` as spec §3.4 listed) because the
+  Protocol method `checkpoint()` returns it; T3's checkpoint_store
+  imports the canonical declaration from this module. Plan-vs-reality
+  drift documented in the T1 commit body.
+
 Stage-2 async admission (`admit_policy`) lives in T5 (`sandbox/admission.py`);
 Stage-1 pure shape validation (`validate_policy_shape`) lives in T3
 (`sandbox/policy.py`). Both stages are sequenced inside admit_policy
@@ -20,18 +33,33 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Literal, NewType, Protocol, runtime_checkable
 
 # ---------------------------------------------------------------------------
 # Closed-enum vocabularies — wire-protocol-public per spec §4
 # ---------------------------------------------------------------------------
 
-#: 15-value closed-enum for sandbox-creation refusals (spec §4.1).
+#: 21-value closed-enum for sandbox lifecycle refusals (Sprint 8A spec
+#: §4.1 + Sprint 8.5 spec §3.3 extension). Covers BOTH:
+#:
+#: * 15 admission/create refusals (Sprint 8A) — `admit_policy` + Stage-1
+#:   shape validation + backend availability + warm-pool drain.
+#: * 6 wake-time refusals (Sprint 8.5 T1) — `wake()` step 1-4 rejection
+#:   classes: tombstone-first (with TombstoneCorruptError fail-closed
+#:   per P1.r6) / not-found / corrupt-metadata / tenant-mismatch /
+#:   retention-expired / policy-revalidation-failed. Wake-time taxonomy
+#:   is wake-specific per spec §2.3 — the original 8A admission reason
+#:   (if any) lives in the refusal's ``detail`` field for examiner
+#:   traceability.
 #:
 #: Drift between this Literal and consumer error-handling is caught at
 #: module load by the partition-invariant test at
-#: ``tests/unit/sandbox/test_policy_shape.py``.
+#: ``tests/unit/sandbox/test_policy_shape.py`` (count guard +
+#: canonical-values pin) and at the cross-backend dispatch level by
+#: ``tests/conformance/sandbox/test_refusal_taxonomy.py`` (membership
+#: pin against TRIGGERS_BY_REASON).
 SandboxRefusalReason = Literal[
+    # Sprint 8A (15 values, unchanged):
     "sandbox_credential_adapter_not_configured",
     "sandbox_runtime_deps_unsupported_in_production",
     "sandbox_high_risk_tier_refused_pre_13_5",
@@ -47,6 +75,16 @@ SandboxRefusalReason = Literal[
     "sandbox_policy_rego_denied",
     "sandbox_backend_unavailable",
     "sandbox_warm_pool_drained",
+    # Sprint 8.5 T1 — 6 new wake-time refusal reasons per spec §3.3.
+    # Wake-time taxonomy is wake-specific per spec §2.3 — the original
+    # 8A admission-time reason (if any) lives in the refusal's `detail`
+    # field for examiner traceability.
+    "sandbox_wake_checkpoint_not_found",
+    "sandbox_wake_checkpoint_corrupt",
+    "sandbox_wake_checkpoint_retention_expired",
+    "sandbox_wake_session_tombstoned",
+    "sandbox_wake_tenant_mismatch",
+    "sandbox_wake_policy_revalidation_failed",
 ]
 
 #: 6-value closed-enum for runtime policy violations during ``exec``
@@ -78,12 +116,24 @@ SandboxPolicyViolationReason = Literal[
     "egress_audit_unreadable",
 ]
 
-#: 8-value closed-enum for audit chain-row decision_type discriminator
-#: (spec §4.3).
+#: 12-value closed-enum for audit chain-row decision_type discriminator
+#: (Sprint 8A spec §4.3 + Sprint 8.5 spec §3.3 extension). Covers:
+#:
+#: * 8 Sprint-8A lifecycle events (created / exec_completed / destroyed
+#:   / refused / policy.violated / warm_pool.precreated / .checked_out
+#:   / .drained).
+#: * 4 Sprint-8.5 events (checkpointed / suspended / woken /
+#:   checkpoint_purged).
+#:
+#: Tombstoning is a STORAGE artifact NOT a lifecycle event — destroy()
+#: reuses 8A's ``sandbox.lifecycle.destroyed`` with 2 new conditional
+#: payload keys (``retained_until`` + ``tombstone_object_key``) per
+#: spec §5.1 P1.r4.
 #:
 #: User-locked taxonomy: replenishment is the cause; the event is
 #: still ``precreated``. No ``warm_pool.replenished`` value.
 SandboxLifecycleEvent = Literal[
+    # Sprint 8A (8 values, unchanged):
     "sandbox.lifecycle.created",
     "sandbox.lifecycle.exec_completed",
     "sandbox.lifecycle.destroyed",
@@ -92,7 +142,36 @@ SandboxLifecycleEvent = Literal[
     "sandbox.warm_pool.precreated",
     "sandbox.warm_pool.checked_out",
     "sandbox.warm_pool.drained",
+    # Sprint 8.5 T1 — 4 new lifecycle events per spec §3.3.
+    # Tombstoning is a STORAGE artifact, NOT a lifecycle event — destroy()
+    # reuses 8A's sandbox.lifecycle.destroyed with 2 new conditional
+    # payload keys per spec §5.1.
+    "sandbox.lifecycle.checkpointed",
+    "sandbox.lifecycle.suspended",
+    "sandbox.lifecycle.woken",
+    "sandbox.lifecycle.checkpoint_purged",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Sprint 8.5 T1 — CheckpointId NewType (wire-public per spec §3.4).
+# ---------------------------------------------------------------------------
+
+#: Opaque identifier for a persisted checkpoint. Declared in this
+#: module (NOT in ``sandbox/checkpoint_store.py`` as spec §3.4 listed)
+#: because the ``SandboxSession.checkpoint()`` Protocol method below
+#: returns it; the Protocol module is the canonical home for types
+#: used in Protocol signatures. T3's checkpoint_store imports this
+#: declaration rather than re-declaring its own.
+#:
+#: ``NewType`` is a static-analysis hint that does NOT enforce runtime
+#: opacity (an arbitrary ``str`` can still be cast to ``CheckpointId``
+#: at runtime). Runtime construction discipline is enforced by T3's
+#: ``CheckpointStore.mint_checkpoint_id()`` (uuid4 hex — the ONLY
+#: mint site in production code) + ``_validate_checkpoint_id_or_raise``
+#: helper (raises ValueError on non-32-char-hex strings) at every
+#: store entry point.
+CheckpointId = NewType("CheckpointId", str)
 
 
 # ---------------------------------------------------------------------------
@@ -249,6 +328,40 @@ class SandboxSession(Protocol):
 
     async def destroy(self) -> None: ...
 
+    # Sprint 8.5 T1 — checkpoint + suspend per spec §3.1 + Q1 lock.
+
+    async def checkpoint(self, label: str) -> CheckpointId:
+        """Persist a workspace-tar snapshot + env metadata + Vault lease
+        refs to the CheckpointStore. Emits
+        ``sandbox.lifecycle.checkpointed``. Returns the opaque
+        ``CheckpointId``; same session can checkpoint multiple times
+        (subject to ``Settings.sandbox_max_checkpoints_per_session``).
+
+        Per spec §2.4 amended (Q4 lock): ``vault_lease_refs`` is always
+        empty in Sprint 8.5 — vault-bearing sessions are unreachable
+        today via the existing 8A
+        ``sandbox_credential_adapter_not_configured`` admission-time
+        refusal. Sprint 10 fills lease refs when
+        ``VaultCredentialAdapter`` lands + the ``CredentialAdapter``
+        Protocol extension lands.
+        """
+
+    async def suspend(self) -> None:
+        """Take a final checkpoint (label='__suspend__') and release the
+        underlying container/Pod. Subsequent ``exec()`` calls on this
+        session raise. ``wake()`` restores the session in a fresh backend
+        resource. Emits ``sandbox.lifecycle.suspended``.
+
+        Vault-lease revocation is OUT OF SCOPE for Sprint 8.5 per spec
+        §2.4 amended — the existing Sprint-8A
+        ``sandbox_credential_adapter_not_configured`` admission-time
+        refusal prevents any vault-bearing session from existing in the
+        first place, so there is no lease to revoke here.
+        Lease-revocation logic lands at Sprint 10 alongside the real
+        ``VaultCredentialAdapter`` + the ``CredentialAdapter`` Protocol
+        extension.
+        """
+
 
 @runtime_checkable
 class SandboxBackend(Protocol):
@@ -316,3 +429,58 @@ class SandboxBackend(Protocol):
 
     async def health(self) -> SandboxBackendHealth:
         """Backend readiness check. Used by ``/readyz`` and at startup."""
+
+    # Sprint 8.5 T1 — wake per spec §3.2 + Q5 identity-seam lock.
+
+    async def wake(
+        self,
+        session_id: str,
+        *,
+        actor: Actor,
+        tenant_id: str,
+    ) -> SandboxSession:
+        """Restore a suspended session from its latest checkpoint.
+
+        Pipeline (security-reviewed ordering per spec §3.2 step 1-7):
+
+        1. ``CheckpointStore.load_tombstone(session_id, tenant_id)``
+           FIRST. Three failure modes (NOT folded — closed-enum
+           distinction load-bearing for examiner incident-response):
+             (a) Non-None ``TombstoneRecord`` OR raised
+                 ``TombstoneCorruptError`` (P1.r6 fail-closed) →
+                 ``SandboxLifecycleRefused("sandbox_wake_session_tombstoned")``
+                 with tombstone metadata in ``detail``. CHECKED FIRST
+                 via the dedicated ``load_tombstone()`` read helper —
+                 NOT folded into ``load_latest()``.
+             (b) No tombstone AND metadata missing/purged →
+                 ``sandbox_wake_checkpoint_not_found``.
+             (c) No tombstone, metadata bytes exist but
+                 ``from_storage_payload()`` raises ``ValueError`` →
+                 ``sandbox_wake_checkpoint_corrupt`` with the
+                 ``ValueError`` message in ``detail``.
+        2. Cross-check ``metadata.tenant_id`` against caller
+           ``tenant_id`` kwarg (defence-in-depth past the prefix-keyed
+           lookup). Mismatch → ``sandbox_wake_tenant_mismatch``.
+        3. Check ``metadata.retention_window_s`` against
+           ``now - metadata.created_at``. Expired →
+           ``sandbox_wake_checkpoint_retention_expired``.
+        4. Re-run ``admit_policy`` against LIVE tenant policy / catalog
+           / Rego / settings. Refusal →
+           ``sandbox_wake_policy_revalidation_failed`` (with the
+           original 8A reason in ``detail`` per spec §2.3).
+        5. Create fresh backend resource; restore workspace-tar
+           snapshot into ``/workspace``. No vault-lease re-issue per
+           spec §2.4 amended.
+        6. Return fresh ``SandboxSession`` with ORIGINAL ``session_id``
+           + new container/Pod IDs.
+        7. Emit ``sandbox.lifecycle.woken`` chain row with payload keys
+           ``suspend_event_id`` + ``restored_from_checkpoint_id`` for
+           the chain-verifier walk (no schema migration; linkage lives
+           in payload per spec §5.2).
+
+        ``actor`` + ``tenant_id`` keyword-only per Q5 — identity seam
+        forward-compat for Sprint 10.5 ``SchedulerEngine.submit()`` wrap
+        per ADR-022. Extra design lock: ``session_id`` alone is NEVER
+        authorization — the tenant_id cross-check at step 2 is the
+        defence-in-depth identity boundary.
+        """

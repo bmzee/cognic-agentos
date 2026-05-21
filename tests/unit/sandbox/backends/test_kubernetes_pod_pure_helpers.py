@@ -28,6 +28,8 @@ an OpenShift-incompatible spec.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 # Per feedback_verify_dep_availability_at_implementation — gracefully
@@ -38,9 +40,12 @@ pytest.importorskip("kubernetes_asyncio")
 
 from cognic_agentos.sandbox import PackAdmissionContext, SandboxPolicy
 from cognic_agentos.sandbox.backends.kubernetes_pod import (
+    _PROXY_LOG_DIR,
+    _PROXY_LOG_PATH,
     _PROXY_PORT,
     _PROXY_SIDECAR_CONTAINER_NAME,
     _SANDBOX_CONTAINER_NAME,
+    _SANDBOX_WORKSPACE_PATH,
     _SESSION_ID_LABEL,
     _TENANT_ID_LABEL,
     _build_network_policy_spec,
@@ -341,6 +346,215 @@ class TestBuildPodSpec:
         assert limits["cpu"] == "500m"
         # memory_mb=256 → "256Mi" (Mebibytes; K8s canonical form)
         assert limits["memory"] == "256Mi"
+
+
+# ---------------------------------------------------------------------------
+# Writable-mount contract — Sprint 8.5 T7 P1.3 fix
+# ---------------------------------------------------------------------------
+
+
+class TestPodSpecWritableMountContract:
+    """**LOAD-BEARING Sprint 8.5 T7 P1.3 regressions.**
+
+    ``readOnlyRootFilesystem=True`` makes the container root FS
+    read-only — without an explicit writable mount, the sandbox
+    cannot write to ``/workspace`` at all (for either normal workload
+    state OR the wake-restore tar-extraction). An ``emptyDir`` volume
+    mounted at ``/workspace`` is the canonical fix; pinned here so a
+    future refactor that drops the mount fails CI rather than fails
+    silently at live-K8s admission time.
+
+    Mount-path agreement with the restore command + the tar-czf
+    checkpoint command is the LOAD-BEARING invariant. Drift between
+    pod-spec mountPath, ``_create_workspace_tar_k8s`` ``-C`` target,
+    and ``_restore_workspace_tar`` ``-C`` target would break the
+    suspend → wake round-trip on real OpenShift.
+    """
+
+    def _spec(self) -> dict[str, Any]:
+        return _build_pod_spec(policy=_POLICY, session_id="s-1", tenant_id="t-1")
+
+    def test_pod_spec_declares_emptydir_volume_for_workspace(self) -> None:
+        """A single ``emptyDir`` volume named ``workspace`` MUST be
+        declared so the kubelet provisions per-Pod ephemeral writable
+        storage. emptyDir is OpenShift-restricted-v2 SCC-permitted
+        out of the box."""
+        spec = self._spec()
+        volumes = spec["spec"].get("volumes", [])
+        workspace_volumes = [v for v in volumes if v.get("name") == "workspace"]
+        assert len(workspace_volumes) == 1, (
+            f"expected exactly one volume named 'workspace'; got: {volumes!r}. "
+            "Without this volume the sandbox cannot write to /workspace "
+            "under readOnlyRootFilesystem=True."
+        )
+        vol = workspace_volumes[0]
+        assert "emptyDir" in vol, (
+            f"workspace volume MUST be backed by emptyDir (OpenShift SCC "
+            f"compatibility); got: {vol!r}. hostPath/PVC/configMap require "
+            "additional SCC allow-list entries."
+        )
+
+    def test_pod_spec_mounts_workspace_on_sandbox_container(self) -> None:
+        """The sandbox container MUST mount the workspace volume at
+        the wire-public ``/workspace`` path so tar create/restore
+        target the same writable surface."""
+        spec = self._spec()
+        containers = spec["spec"]["containers"]
+        sandbox = next(c for c in containers if c["name"] == _SANDBOX_CONTAINER_NAME)
+        mounts = sandbox.get("volumeMounts", [])
+        workspace_mounts = [m for m in mounts if m.get("name") == "workspace"]
+        assert len(workspace_mounts) == 1, (
+            f"sandbox container MUST have exactly one volumeMount named "
+            f"'workspace'; got: {mounts!r}"
+        )
+        m = workspace_mounts[0]
+        assert m["mountPath"] == _SANDBOX_WORKSPACE_PATH, (
+            f"workspace mountPath MUST equal _SANDBOX_WORKSPACE_PATH "
+            f"({_SANDBOX_WORKSPACE_PATH!r}); got: {m['mountPath']!r}. Drift "
+            "between the pod-spec mountPath and the tar -C target breaks "
+            "the wake-restore round-trip on real K8s."
+        )
+
+    def test_pod_spec_does_not_mount_workspace_on_proxy_sidecar(self) -> None:
+        """The proxy sidecar has no workspace concept + MUST NOT mount
+        the workspace volume — would leak the sandbox workspace
+        across the network-namespace boundary into a process the
+        sandbox container does not control."""
+        spec = self._spec()
+        containers = spec["spec"]["containers"]
+        proxy = next(c for c in containers if c["name"] == _PROXY_SIDECAR_CONTAINER_NAME)
+        proxy_mounts = proxy.get("volumeMounts", [])
+        workspace_mounts = [m for m in proxy_mounts if m.get("name") == "workspace"]
+        assert workspace_mounts == [], (
+            f"proxy sidecar MUST NOT mount the workspace volume; got: {proxy_mounts!r}"
+        )
+
+    def test_pod_spec_writable_workspace_mount_path_matches_restore_target(
+        self,
+    ) -> None:
+        """The mountPath declared in the pod spec MUST equal the path
+        used as the tar ``-C`` target in BOTH ``_create_workspace_tar_k8s``
+        and ``_restore_workspace_tar``. Drift would mean either the
+        checkpoint snapshots an empty directory OR the restore
+        extracts to a read-only path → EROFS.
+
+        Validates the agreement via the shared
+        ``_SANDBOX_WORKSPACE_PATH`` constant — the single source of
+        truth that pod-spec + checkpoint + restore all read.
+        """
+        spec = self._spec()
+        containers = spec["spec"]["containers"]
+        sandbox = next(c for c in containers if c["name"] == _SANDBOX_CONTAINER_NAME)
+        workspace_mount = next(m for m in sandbox["volumeMounts"] if m["name"] == "workspace")
+        # Pod-spec mount path must be the canonical constant.
+        assert workspace_mount["mountPath"] == _SANDBOX_WORKSPACE_PATH
+        # The canonical constant value itself is wire-public.
+        assert _SANDBOX_WORKSPACE_PATH == "/workspace", (
+            f"_SANDBOX_WORKSPACE_PATH MUST equal '/workspace' (wire-public "
+            f"across docker_sibling + kubernetes_pod backends per spec §7); "
+            f"got {_SANDBOX_WORKSPACE_PATH!r}. A change here would break the "
+            "cross-backend conformance pin at T9."
+        )
+
+
+class TestPodSpecProxyLogWritableMount:
+    """**LOAD-BEARING Sprint 8.5 T7 P1.4 regressions.**
+
+    The egress-proxy sidecar writes ``access.jsonl`` to
+    ``_PROXY_LOG_PATH`` on every outbound request. Under
+    ``readOnlyRootFilesystem=True`` the sidecar cannot create the
+    file without an explicit writable mount at ``_PROXY_LOG_DIR``.
+    The exec() green path reads that file via ``cat`` and fail-closes
+    with ``egress_audit_unreadable`` if the read fails — without
+    this mount EVERY normal ``session.exec()`` on a real OpenShift
+    Pod would fail-closed before checkpoint/suspend/wake is even
+    reachable.
+
+    Defence-in-depth invariant: the workload-side sandbox container
+    MUST NOT have access to the proxy's audit log volume. The proxy
+    log is AgentOS-owned evidence — granting the sandbox read access
+    would let a compromised workload observe + correlate other
+    workloads' upstream calls; granting write access would let the
+    workload tamper with its own evidence.
+    """
+
+    def _spec(self) -> dict[str, Any]:
+        return _build_pod_spec(policy=_POLICY, session_id="s-1", tenant_id="t-1")
+
+    def test_pod_spec_declares_emptydir_volume_for_proxy_log(self) -> None:
+        """A single ``emptyDir`` volume named ``proxy-log`` MUST be
+        declared. emptyDir keeps the volume per-Pod ephemeral + node-
+        local; the audit log lives only as long as the session."""
+        spec = self._spec()
+        volumes = spec["spec"].get("volumes", [])
+        matches = [v for v in volumes if v.get("name") == "proxy-log"]
+        assert len(matches) == 1, (
+            f"expected exactly one volume named 'proxy-log'; got: {volumes!r}. "
+            "Without this volume the canonical egress-proxy sidecar cannot "
+            "write its access.jsonl under readOnlyRootFilesystem=True; every "
+            "green session.exec() would fail-closed with egress_audit_unreadable."
+        )
+        assert "emptyDir" in matches[0]
+
+    def test_pod_spec_mounts_proxy_log_on_sidecar(self) -> None:
+        """The proxy sidecar container MUST mount the ``proxy-log``
+        volume at ``_PROXY_LOG_DIR`` so the canonical proxy image can
+        create + append to ``_PROXY_LOG_PATH``."""
+        spec = self._spec()
+        containers = spec["spec"]["containers"]
+        proxy = next(c for c in containers if c["name"] == _PROXY_SIDECAR_CONTAINER_NAME)
+        mounts = proxy.get("volumeMounts", [])
+        matches = [m for m in mounts if m.get("name") == "proxy-log"]
+        assert len(matches) == 1, (
+            f"proxy sidecar MUST have exactly one volumeMount named 'proxy-log'; got: {mounts!r}"
+        )
+        m = matches[0]
+        assert m["mountPath"] == _PROXY_LOG_DIR, (
+            f"proxy-log mountPath MUST equal _PROXY_LOG_DIR ({_PROXY_LOG_DIR!r}); "
+            f"got: {m['mountPath']!r}. The proxy writes to _PROXY_LOG_PATH "
+            f"({_PROXY_LOG_PATH!r}) which lives under this directory; drift "
+            "leaves the log path read-only + breaks every green exec."
+        )
+
+    def test_pod_spec_does_not_leak_proxy_log_onto_sandbox(self) -> None:
+        """**LOAD-BEARING isolation pin.**
+
+        The sandbox container MUST NOT mount the ``proxy-log`` volume.
+        Granting workload-side read access would let a compromised
+        workload observe other workloads' upstream calls + correlate
+        timing; granting write access would let the workload tamper
+        with its own audit evidence. Either is unacceptable.
+        """
+        spec = self._spec()
+        containers = spec["spec"]["containers"]
+        sandbox = next(c for c in containers if c["name"] == _SANDBOX_CONTAINER_NAME)
+        sandbox_mounts = sandbox.get("volumeMounts", [])
+        leaked = [m for m in sandbox_mounts if m.get("name") == "proxy-log"]
+        assert leaked == [], (
+            f"sandbox container MUST NOT mount the proxy-log volume; got: "
+            f"{sandbox_mounts!r}. The proxy audit log is AgentOS-owned "
+            "evidence; mounting it on the sandbox lets the workload tamper "
+            "with its own egress audit trail."
+        )
+
+    def test_proxy_log_dir_is_parent_of_proxy_log_path(self) -> None:
+        """Drift detector — ``_PROXY_LOG_DIR`` must be the parent
+        directory of ``_PROXY_LOG_PATH``. The module-load ``if not
+        ...: raise RuntimeError(...)`` guard in ``kubernetes_pod.py``
+        enforces this at import time (explicit raise — NOT ``assert``
+        — so it survives ``python -O``); this test pins the contract
+        independently so a refactor that relaxes or removes that
+        guard is still caught in CI."""
+        assert _PROXY_LOG_PATH.startswith(_PROXY_LOG_DIR + "/"), (
+            f"_PROXY_LOG_DIR ({_PROXY_LOG_DIR!r}) must be the parent dir "
+            f"of _PROXY_LOG_PATH ({_PROXY_LOG_PATH!r}); the proxy log "
+            "would otherwise live outside the mounted writable directory."
+        )
+        # Pin the canonical values themselves so a future relocation
+        # of either constant is a deliberate decision rather than an
+        # accidental refactor.
+        assert _PROXY_LOG_DIR == "/var/log/cognic-proxy"
+        assert _PROXY_LOG_PATH == "/var/log/cognic-proxy/access.jsonl"
 
 
 # ---------------------------------------------------------------------------

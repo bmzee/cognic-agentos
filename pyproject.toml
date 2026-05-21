@@ -262,6 +262,7 @@ markers = [
     "oracle: tests requiring the live Oracle XE compose overlay (env-gated via COGNIC_RUN_ORACLE_INTEGRATION=1)",
     "postgres: tests requiring the live Postgres compose service (env-gated via COGNIC_RUN_POSTGRES_INTEGRATION=1)",
     "a2a_upstream: env-gated upstream A2A schema-drift gate (Sprint-6 T6, env-gated via COGNIC_RUN_A2A_UPSTREAM=1; CI runs on the a2a-spec-drift lane)",
+    "require_both_backends: Sprint-8.5 T9 cross-backend conformance — once BOTH COGNIC_RUN_DOCKER_SANDBOX=1 and COGNIC_RUN_K8S_SANDBOX=1 are set, a per-backend runtime that is unavailable FAILS the run instead of skipping (a one-backend skip alongside a passing sibling would be a false-green for a parity gate)",
 ]
 
 [tool.ruff]

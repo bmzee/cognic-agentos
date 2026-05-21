@@ -57,19 +57,30 @@ import hashlib
 import json
 import uuid as _uuid
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import aiodocker
 
+from cognic_agentos.core.canonical import canonical_bytes
 from cognic_agentos.sandbox.admission import (
     CatalogProtocol,
     CredentialAdapter,
     admit_policy,
 )
-from cognic_agentos.sandbox.audit import emit_sandbox_event
+from cognic_agentos.sandbox.audit import (
+    emit_sandbox_event,
+    sandbox_lifecycle_checkpointed,
+    sandbox_lifecycle_suspended,
+    sandbox_lifecycle_woken,
+)
+from cognic_agentos.sandbox.checkpoint_store import (
+    CheckpointStore,
+    TombstoneCorruptError,
+)
 from cognic_agentos.sandbox.policy import PackAdmissionContext, SandboxPolicy
 from cognic_agentos.sandbox.protocol import (
+    CheckpointId,
     ProxyAccessRecord,
     SandboxBackendHealth,
     SandboxExecResult,
@@ -146,6 +157,10 @@ _CPU_PERIOD_US: int = 100_000
 #: within ~500ms of budget overage, loose enough to avoid stressing
 #: the docker daemon's stats endpoint.
 _CPU_BUDGET_POLL_INTERVAL_S: float = 0.5
+
+
+class _SuspendEventIdCorruptError(ValueError):
+    """Internal fail-closed marker for malformed suspend→wake linkage."""
 
 
 # ---------------------------------------------------------------------------
@@ -683,6 +698,15 @@ class DockerSiblingSession:
     #: no egress network); teardown safely no-ops on missing-named
     #: networks (the DockerError 404 swallow path).
     _egress_network_name: str = field(repr=False, default="")
+    #: Sprint 8.5 T6 — suspend() flips this True so subsequent exec()
+    #: calls raise per spec §3.1: "Subsequent ``exec()`` calls on this
+    #: session raise. wake() restores the session in a fresh backend
+    #: resource". Defence-in-depth past container teardown: the
+    #: underlying container is gone after suspend(), so the Docker
+    #: API call would also fail — but this surfaces a clear
+    #: SandboxLifecycleRefused with the wake-pointer rather than a
+    #: raw aiodocker DockerError.
+    _suspended: bool = field(repr=False, default=False)
 
     async def exec(
         self,
@@ -690,10 +714,48 @@ class DockerSiblingSession:
         *,
         timeout_s: float | None = None,
     ) -> SandboxExecResult:
+        if self._suspended:
+            # Sprint 8.5 T6 — spec §3.1 + spec §8 test row
+            # test_session_lifecycle_after_suspend.py. exec() on a
+            # suspended session refuses fail-loud with a wake-pointer
+            # so the caller knows to wake() first.
+            #
+            # NOT a SandboxLifecycleRefused — that closed-enum is
+            # admission + wake-time only; using a wake-time value here
+            # would mis-classify the failure mode in the wire-public
+            # taxonomy. The session-lifetime invariant is a usage error,
+            # NOT a wake refusal. RuntimeError keeps the closed-enum
+            # vocabulary unpolluted while still failing loud.
+            raise RuntimeError(
+                f"session {self.session_id} was suspend()ed; "
+                f"exec() is no longer valid — call "
+                f"SandboxBackend.wake(session_id) to restore the "
+                f"session in a fresh container per spec §3.2"
+            )
         return await self._backend.exec(self, command, timeout_s=timeout_s)
 
     async def destroy(self) -> None:
         await self._backend.destroy(self)
+
+    # Sprint 8.5 T6 — checkpoint + suspend implementations per spec
+    # §3.1 + §7.1. Delegate to backend so the docker / aiodocker
+    # call sites stay in one module + backend can own the
+    # CheckpointStore + audit-emit wiring. Implementations:
+    #
+    # * ``checkpoint(label)`` — exec ``tar czf - -C /workspace .`` in
+    #   the running container, capture stdout bytes, build
+    #   ``CheckpointMetadata``, call ``CheckpointStore.persist()``,
+    #   emit ``sandbox.lifecycle.checkpointed``, return id.
+    # * ``suspend()`` — take final checkpoint with ``label="__suspend__"``,
+    #   emit ``sandbox.lifecycle.suspended`` (capture record_id +
+    #   write to side-blob), tear down container + sidecar +
+    #   networks, mark ``_suspended=True``.
+
+    async def checkpoint(self, label: str) -> CheckpointId:
+        return await self._backend._do_checkpoint(self, label)
+
+    async def suspend(self) -> None:
+        await self._backend._do_suspend(self)
 
 
 # ---------------------------------------------------------------------------
@@ -725,6 +787,7 @@ class DockerSiblingSandboxBackend:
         decision_history_store: DecisionHistoryStore,
         settings: Settings,
         warm_pool: SandboxWarmPool | None = None,
+        checkpoint_store: CheckpointStore | None = None,
     ) -> None:
         self._docker = docker_client
         self._catalog = image_catalog
@@ -734,6 +797,17 @@ class DockerSiblingSandboxBackend:
         self._dh = decision_history_store
         self._settings = settings
         self._warm_pool = warm_pool
+        # Sprint 8.5 T6 — optional wiring for the CheckpointStore +
+        # tombstone seam. checkpoint() / suspend() / wake() / destroy()'s
+        # tombstone branch ALL require it. None is the Sprint-8A default
+        # (callers that never use Sprint 8.5 checkpoints can leave it
+        # unwired); the three Sprint-8.5 methods refuse fail-loud when
+        # called against a backend without a checkpoint_store wired
+        # (NotImplementedError with explicit "wire CheckpointStore"
+        # pointer per CLAUDE.md production-grade rule). destroy()'s
+        # tombstone path is a no-op without it — sessions that have
+        # never checkpointed cannot have tombstones.
+        self._checkpoint_store = checkpoint_store
 
     # ------------------------------------------------------------------
     # SandboxBackend Protocol surface
@@ -1183,6 +1257,23 @@ class DockerSiblingSandboxBackend:
         Emission-idempotency: ``session._destroyed`` flag is set on
         the first call so a second ``destroy()`` (idempotent contract)
         does NOT emit a second chain row.
+
+        Sprint 8.5 T6 + P1.r4 tombstone redesign: if the session has
+        persisted checkpoints (any checkpoint() or suspend() call), the
+        backend additionally calls
+        ``CheckpointStore.tombstone_session(session_id, tenant_id,
+        tombstoned_by=session._actor_subject)`` to write the
+        ``<tenant>/<session>/_tombstoned.json`` sentinel. The destroyed
+        chain row then carries TWO extra payload keys (``retained_until``
+        + ``tombstone_object_key``) so examiners can correlate destroy →
+        tombstone → eventual reaper purge. Sessions with NO persisted
+        checkpoints skip the tombstone write — nothing to retain — and
+        emit the destroyed event without the extension keys.
+
+        Wake() against a tombstoned session refuses with
+        ``sandbox_wake_session_tombstoned`` per spec §3.2 step 1(a) —
+        destroyed sessions are NOT wakeable even though the checkpoint
+        bytes might still be on disk pending reaper sweep.
         """
         # Pull the docker-specific fields off the session — only
         # DockerSiblingSession carries them; cross-backend session
@@ -1201,18 +1292,79 @@ class DockerSiblingSandboxBackend:
             egress_net_name=session._egress_network_name,
             sidecar_name=session._sidecar_container_name,
         )
-        if not already_destroyed:
-            # R2 P1.2 reviewer fix — emit BEFORE setting the flag, so
-            # a transient audit-append failure leaves ``_destroyed``
-            # False and a retry destroy() will retry the emission.
-            # Earlier ordering set the flag first and lost the
-            # destroyed row permanently on any audit failure.
-            # The retry contract is intentional: docker teardown is
-            # idempotent (the _teardown_session_state helper swallows
-            # "not found" DockerError) so calling destroy() twice
-            # after a transient emit failure is safe.
-            await self._emit_lifecycle_destroyed(session=session)
-            session._destroyed = True
+        if already_destroyed:
+            return
+
+        # Sprint 8.5 T6 — tombstone the session if it has persisted
+        # checkpoints. Per spec §3.1 destroy() behavior extension +
+        # P1.r4 tombstone redesign: the tombstone seam writes the
+        # sentinel so wake() can fail-closed even before the reaper
+        # has swept the checkpoint bytes.
+        #
+        # tombstoned_by comes from session._actor_subject (per spec
+        # §3.1: "destroy() takes no actor parameter; the session's
+        # stored _actor_subject is the authoritative source of 'who
+        # owned this session' for audit-row attribution"). NOT
+        # actor.subject — destroy() has no actor kwarg per the
+        # Sprint-8A Protocol signature.
+        retained_until_str: str | None = None
+        tombstone_object_key: str | None = None
+        if self._checkpoint_store is not None:
+            has_checkpoints = await self._session_has_persisted_checkpoints(
+                session_id=session.session_id,
+                tenant_id=session.tenant_id,
+            )
+            if has_checkpoints:
+                tombstone_object_key = await self._checkpoint_store.tombstone_session(
+                    session_id=session.session_id,
+                    tenant_id=session.tenant_id,
+                    tombstoned_by=session._actor_subject,
+                )
+                retention_window_s = int(
+                    self._checkpoint_store._settings.sandbox_checkpoint_retention_s
+                )
+                retained_until_str = (
+                    datetime.now(UTC) + timedelta(seconds=retention_window_s)
+                ).isoformat()
+
+        # R2 P1.2 reviewer fix — emit BEFORE setting the flag, so
+        # a transient audit-append failure leaves ``_destroyed``
+        # False and a retry destroy() will retry the emission.
+        # Earlier ordering set the flag first and lost the
+        # destroyed row permanently on any audit failure.
+        # The retry contract is intentional: docker teardown is
+        # idempotent (the _teardown_session_state helper swallows
+        # "not found" DockerError) so calling destroy() twice
+        # after a transient emit failure is safe. The tombstone
+        # write upstream is ALSO idempotent — a retry destroy()
+        # gets back the existing sentinel key (per spec §4.1).
+        await self._emit_lifecycle_destroyed(
+            session=session,
+            retained_until=retained_until_str,
+            tombstone_object_key=tombstone_object_key,
+        )
+        session._destroyed = True
+
+    async def _session_has_persisted_checkpoints(
+        self,
+        *,
+        session_id: str,
+        tenant_id: str,
+    ) -> bool:
+        """True iff at least one ``.metadata.json`` blob exists under
+        ``<tenant>/<session>/``. Used by destroy() to gate the
+        tombstone branch per spec §3.1: only sessions with checkpoints
+        get a tombstone (immediate-destroy sessions emit destroyed
+        without the extension payload keys).
+        """
+        assert self._checkpoint_store is not None  # narrowed by caller
+        prefix = f"{tenant_id}/{session_id}/"
+        async for key in self._checkpoint_store._object_store.list_prefix(
+            "sandbox-checkpoints", prefix
+        ):
+            if key.endswith(".metadata.json"):
+                return True
+        return False
 
     async def health(self) -> SandboxBackendHealth:
         """Backend readiness check — pings the docker daemon.
@@ -1228,6 +1380,305 @@ class DockerSiblingSandboxBackend:
                 detail=f"docker daemon unreachable: {e}",
             )
         return SandboxBackendHealth(status="ok")
+
+    # Sprint 8.5 T6 — wake() pipeline per spec §3.2 + §7.1.
+    # LOAD-BEARING tombstone-first ordering: CheckpointStore.load_tombstone()
+    # MUST be called BEFORE load_latest(). Pinned by the unit test at
+    # test_wake_session_tombstoned.py + the cross-backend conformance
+    # regression at T9. See the docstring below for the full step list.
+
+    async def wake(
+        self,
+        session_id: str,
+        *,
+        actor: Actor,
+        tenant_id: str,
+    ) -> SandboxSession:
+        """Restore a suspended session per spec §3.2 + §7.1.
+
+        Pipeline (step ordering is wire-public + tombstone-first is
+        LOAD-BEARING):
+
+        1. ``CheckpointStore.load_tombstone(session_id, tenant_id)``
+           **FIRST** — three failure modes:
+             (a) Non-None ``TombstoneRecord`` →
+                 ``sandbox_wake_session_tombstoned`` carrying tombstone
+                 metadata in ``detail``.
+             (a-prime) ``TombstoneCorruptError`` raised (P1.r6
+                 fail-closed) → SAME ``sandbox_wake_session_tombstoned``
+                 closed-enum with the corrupt-exception message in
+                 ``detail``. Operator intent ("destroyed = MUST NOT
+                 wake") survives degradation.
+             (b) ``None`` returned → fall through to load_latest().
+                 load_latest() raises ``sandbox_wake_checkpoint_not_found``
+                 on missing metadata (propagates AS-IS); raises
+                 ``ValueError`` from ``from_storage_payload`` on corrupt
+                 metadata — caught here + mapped to
+                 ``sandbox_wake_checkpoint_corrupt``.
+        2. Cross-check ``metadata.tenant_id`` against caller
+           ``tenant_id`` (defence-in-depth past prefix-keyed lookup).
+           Mismatch → ``sandbox_wake_tenant_mismatch``.
+        3. Retention check: ``now - metadata.created_at >=
+           metadata.retention_window_s`` → ``sandbox_wake_checkpoint_retention_expired``
+           (defence-in-depth past reaper).
+        4. Re-run ``admit_policy(...)`` against LIVE tenant policy /
+           catalog / Rego / settings. Any ``SandboxLifecycleRefused``
+           re-wrapped as ``sandbox_wake_policy_revalidation_failed``
+           with original reason + detail in ``detail`` per spec §2.3.
+        5. Read the suspend linkage side-blob written by suspend().
+           Missing or malformed linkage is treated as corrupt checkpoint
+           state and mapped to ``sandbox_wake_checkpoint_corrupt`` before
+           any fresh Docker resources are created.
+        6. Create fresh container + sidecar + networks; restore
+           workspace tar via ``tar xzf - -C /workspace`` over the
+           exec channel.
+        7. Build fresh ``DockerSiblingSession`` with ORIGINAL
+           session_id + new container ID + ``warm_pool_hit=False``.
+        8. Emit ``sandbox.lifecycle.woken`` with payload keys
+           ``suspend_event_id`` (read from the side-blob written at
+           suspend-time) + ``restored_from_checkpoint_id`` (the
+           loaded metadata's ``checkpoint_id``).
+
+        ``actor`` + ``tenant_id`` are keyword-only per Q5 identity-seam
+        lock. ``session_id`` alone is NEVER authorization — the
+        tenant_id cross-check at step 2 is the defence-in-depth
+        identity boundary per spec §2.6.
+        """
+        if self._checkpoint_store is None:
+            raise NotImplementedError(
+                "DockerSiblingSandboxBackend.wake requires a CheckpointStore "
+                "to be wired at construction time. Pass checkpoint_store=... "
+                "to __init__ per spec §3.2 + §7.1."
+            )
+
+        # ------------------------------------------------------------------
+        # Step 1 — tombstone-first ordering. LOAD-BEARING.
+        # ------------------------------------------------------------------
+        # The tombstone check MUST run BEFORE load_latest(). A
+        # destroyed session may still have checkpoint bytes on disk
+        # (the reaper purges asynchronously per spec §4.3); checking
+        # load_latest first would surface a destroyed-but-not-yet-reaped
+        # session as restorable, which is the wrong taxonomy +
+        # violates operator intent.
+        try:
+            tombstone = await self._checkpoint_store.load_tombstone(
+                session_id=session_id,
+                tenant_id=tenant_id,
+            )
+        except TombstoneCorruptError as corrupt:
+            # P1.r6 fail-closed: a corrupt tombstone surfaces as the
+            # SAME closed-enum value as a well-formed tombstone — the
+            # operator's destroy() intent survives tampering. The
+            # corrupt message lives in ``detail`` for incident-response
+            # traceability.
+            raise SandboxLifecycleRefused(
+                "sandbox_wake_session_tombstoned",
+                detail=f"tombstone sentinel corrupt: {corrupt}",
+            ) from corrupt
+        if tombstone is not None:
+            raise SandboxLifecycleRefused(
+                "sandbox_wake_session_tombstoned",
+                detail=(
+                    f"session {session_id} was tombstoned at "
+                    f"{tombstone.tombstoned_at.isoformat()} by "
+                    f"{tombstone.tombstoned_by!r}; retained_until="
+                    f"{tombstone.retained_until.isoformat()}"
+                ),
+            )
+
+        # Step 1(b)/(c) — load latest checkpoint metadata + bytes.
+        # load_latest() raises sandbox_wake_checkpoint_not_found on
+        # missing; we propagate AS-IS. It raises ValueError from
+        # from_storage_payload on corrupt metadata; we catch + map.
+        try:
+            metadata, snapshot_bytes = await self._checkpoint_store.load_latest(
+                session_id=session_id,
+                tenant_id=tenant_id,
+            )
+        except ValueError as corrupt_meta:
+            # Step 1(c) — corrupt metadata bytes on disk. Distinguish
+            # from sandbox_wake_session_tombstoned (operator destroy)
+            # + sandbox_wake_checkpoint_not_found (genuinely absent).
+            raise SandboxLifecycleRefused(
+                "sandbox_wake_checkpoint_corrupt",
+                detail=f"metadata bytes on disk are malformed: {corrupt_meta}",
+            ) from corrupt_meta
+
+        # ------------------------------------------------------------------
+        # Step 2 — tenant cross-check (defence-in-depth).
+        # ------------------------------------------------------------------
+        # load_latest() is keyed by (tenant_id, session_id) prefix so a
+        # cross-tenant query would already return not_found via the
+        # prefix-keyed isolation. This second check defends against
+        # an in-process refactor that bypasses prefix isolation OR a
+        # storage-layer race that returned metadata from a different
+        # tenant. Per spec §2.6 extra design lock: session_id alone is
+        # NEVER authorization; the tenant_id cross-check IS the
+        # defence-in-depth identity boundary.
+        if metadata.tenant_id != tenant_id:
+            raise SandboxLifecycleRefused(
+                "sandbox_wake_tenant_mismatch",
+                detail=(
+                    f"caller tenant_id={tenant_id!r} does not match "
+                    f"metadata.tenant_id={metadata.tenant_id!r} for "
+                    f"session {session_id}; per-tenant prefix isolation "
+                    f"should have caught this — surfacing fail-loud"
+                ),
+            )
+
+        # ------------------------------------------------------------------
+        # Step 3 — retention check (defence-in-depth past reaper).
+        # ------------------------------------------------------------------
+        # The reaper sweeps asynchronously per spec §4.3 + §6 reaper
+        # interval (default 5 min). A just-expired checkpoint may
+        # still be on disk between expiry + the next reaper run; wake
+        # MUST refuse independently of reaper progress.
+        now = datetime.now(UTC)
+        age_s = (now - metadata.created_at).total_seconds()
+        if age_s >= metadata.retention_window_s:
+            raise SandboxLifecycleRefused(
+                "sandbox_wake_checkpoint_retention_expired",
+                detail=(
+                    f"checkpoint {metadata.checkpoint_id} created at "
+                    f"{metadata.created_at.isoformat()} is "
+                    f"{age_s:.1f}s old; retention_window_s="
+                    f"{metadata.retention_window_s}"
+                ),
+            )
+
+        # ------------------------------------------------------------------
+        # Step 4 — admit_policy revalidate against LIVE tenant state.
+        # ------------------------------------------------------------------
+        # Per spec §2.3 Q3 lock: wake() re-runs admit_policy against
+        # the LIVE catalog / Rego / settings — a session admitted under
+        # the old tenant max could no longer admit today (the operator
+        # tightened limits between suspend + wake). Any Sprint-8A
+        # refusal re-wraps as the wake-time
+        # sandbox_wake_policy_revalidation_failed with the original
+        # reason + detail in `detail` for examiner traceability.
+        #
+        # This is the seam that catches vault-bearing wakes per spec
+        # §2.4 amended (Q4 lock): metadata.policy.vault_path set + wired
+        # adapter = KernelDefaultCredentialAdapter → admit_policy step 3
+        # raises sandbox_credential_adapter_not_configured → we re-wrap
+        # as sandbox_wake_policy_revalidation_failed. NO CredentialAdapter
+        # Protocol modification needed.
+        try:
+            await admit_policy(
+                metadata.policy,
+                tenant_id=tenant_id,
+                actor=actor,
+                pack_context=metadata.pack_context,
+                catalog=self._catalog,
+                credential_adapter=self._credential_adapter,
+                rego_engine=self._rego,
+                settings=self._settings,
+            )
+        except SandboxLifecycleRefused as original:
+            raise SandboxLifecycleRefused(
+                "sandbox_wake_policy_revalidation_failed",
+                detail=f"original={original.reason}: {original.detail}",
+            ) from original
+
+        # ------------------------------------------------------------------
+        # Step 5 — read suspend-event linkage BEFORE creating resources.
+        # ------------------------------------------------------------------
+        # The linkage blob is part of the suspend→wake integrity contract.
+        # Missing or malformed bytes mean the checkpoint cannot be proven to
+        # come from a suspend event, so wake refuses at this seam instead of
+        # emitting a NIL UUID and deferring failure to the T8 verifier.
+        try:
+            suspend_event_id = await self._read_suspend_event_id(
+                session_id=session_id,
+                tenant_id=tenant_id,
+                checkpoint_id=metadata.checkpoint_id,
+            )
+        except _SuspendEventIdCorruptError as corrupt_linkage:
+            raise SandboxLifecycleRefused(
+                "sandbox_wake_checkpoint_corrupt",
+                detail=f"suspend_event_id linkage is malformed or missing: {corrupt_linkage}",
+            ) from corrupt_linkage
+
+        # ------------------------------------------------------------------
+        # Step 6 — create fresh container + sidecar + networks; restore
+        # workspace tar via the exec channel.
+        # ------------------------------------------------------------------
+        # session_id is preserved from the original (continuity is the
+        # whole point); network + sidecar names are derived
+        # deterministically from session_id by the same helpers create()
+        # uses, so a wake-then-destroy works the same way as a
+        # cold-create-then-destroy.
+        internal_net_name = _internal_network_name(session_id)
+        egress_net_name = _egress_network_name(session_id)
+        sidecar_name = _proxy_sidecar_container_name(session_id)
+
+        await self._create_internal_network(internal_net_name)
+        await self._create_egress_network(egress_net_name)
+        try:
+            await self._start_proxy_sidecar(
+                policy=metadata.policy,
+                session_id=session_id,
+                container_name=sidecar_name,
+                internal_net_name=internal_net_name,
+                egress_net_name=egress_net_name,
+                tenant_id=tenant_id,
+            )
+            await self._start_sandbox_container(
+                policy=metadata.policy,
+                session_id=session_id,
+                internal_net_name=internal_net_name,
+            )
+            # Restore the workspace tar into /workspace via docker exec.
+            await self._restore_workspace_tar(
+                session_id=session_id,
+                snapshot_bytes=snapshot_bytes,
+            )
+        except Exception:
+            # Tear down anything we managed to create + re-raise so
+            # the caller sees the failure. Idempotent destroy methods
+            # make this safe even on partial-create failures.
+            await self._teardown_session_state(
+                session_id=session_id,
+                internal_net_name=internal_net_name,
+                egress_net_name=egress_net_name,
+                sidecar_name=sidecar_name,
+            )
+            raise
+
+        # ------------------------------------------------------------------
+        # Step 7 — build fresh DockerSiblingSession with ORIGINAL
+        # session_id.
+        # ------------------------------------------------------------------
+        session = DockerSiblingSession(
+            session_id=session_id,
+            policy=metadata.policy,
+            tenant_id=tenant_id,
+            pack_context=metadata.pack_context,
+            created_at=datetime.now(UTC),
+            warm_pool_hit=False,
+            _backend=self,
+            _internal_network_name=internal_net_name,
+            _sidecar_container_name=sidecar_name,
+            _actor_subject=actor.subject,
+            _egress_network_name=egress_net_name,
+        )
+
+        # ------------------------------------------------------------------
+        # Step 8 — emit sandbox.lifecycle.woken with linkage payload.
+        # ------------------------------------------------------------------
+        # The suspend_event_id linkage points back at the suspended row's
+        # primary-key record_id. Step 5 already validated it fail-closed so
+        # the chain row never carries a NIL placeholder.
+        await sandbox_lifecycle_woken(
+            self._dh,
+            tenant_id=tenant_id,
+            actor_id=actor.subject,
+            trace_id="",
+            session_id=session_id,
+            restored_from_checkpoint_id=metadata.checkpoint_id,
+            suspend_event_id=suspend_event_id,
+        )
+        return session
 
     # ------------------------------------------------------------------
     # Internal — dual-container topology builders
@@ -1637,15 +2088,36 @@ class DockerSiblingSandboxBackend:
         self,
         *,
         session: DockerSiblingSession,
+        retained_until: str | None = None,
+        tombstone_object_key: str | None = None,
     ) -> None:
         """Emit ``sandbox.lifecycle.destroyed`` per spec §4.3 wire-public
-        payload ``{duration_s: float}`` + R1 P1.2 reviewer fix.
+        payload ``{duration_s: float}`` + R1 P1.2 reviewer fix +
+        Sprint 8.5 T6 P1.r4 tombstone-extension payload keys.
 
         ``duration_s`` is computed from
         ``datetime.now(UTC) - session.created_at`` so examiners can
         audit session lifetime. The destroy() caller-side idempotency
         flag (``session._destroyed``) ensures repeat destroy() calls
         do NOT emit a second row.
+
+        Sprint 8.5 T6 extension per spec §3.1 + spec §5.1 audit.py
+        contract: when the destroyed session had persisted checkpoints,
+        the payload additionally carries TWO conditional keys:
+
+        * ``retained_until`` — ISO 8601 string of
+          ``now + settings.sandbox_checkpoint_retention_s`` at destroy()
+          time.
+        * ``tombstone_object_key`` — the
+          ``<tenant>/<session>/_tombstoned.json`` storage key returned
+          by ``CheckpointStore.tombstone_session()``.
+
+        Presence of both keys is the wire-public marker that retention
+        is in effect for this session's checkpoints. Absence (the
+        Sprint-8A baseline path: session was created + destroyed
+        without ever calling checkpoint()) means immediate physical
+        destroy — no tombstone needed because there was nothing to
+        retain.
 
         ``actor_id`` carries ``session._actor_subject`` from the
         original create() call (the caller who owns the session
@@ -1654,6 +2126,11 @@ class DockerSiblingSandboxBackend:
         ``_emit_lifecycle_created``.
         """
         duration_s = (datetime.now(UTC) - session.created_at).total_seconds()
+        payload: dict[str, Any] = {"duration_s": duration_s}
+        if retained_until is not None:
+            payload["retained_until"] = retained_until
+        if tombstone_object_key is not None:
+            payload["tombstone_object_key"] = tombstone_object_key
         await emit_sandbox_event(
             self._dh,
             event="sandbox.lifecycle.destroyed",
@@ -1661,8 +2138,366 @@ class DockerSiblingSandboxBackend:
             actor_id=session._actor_subject,
             trace_id="",
             session_id=session.session_id,
-            payload={"duration_s": duration_s},
+            payload=payload,
         )
+
+    # ------------------------------------------------------------------
+    # Sprint 8.5 T6 — checkpoint / suspend / wake / tar helpers
+    # ------------------------------------------------------------------
+
+    async def _do_checkpoint(
+        self,
+        session: DockerSiblingSession,
+        label: str,
+    ) -> CheckpointId:
+        """Take a workspace-tar snapshot + persist + emit audit row.
+
+        Spec §7.1 mechanic — ``aiodocker`` exec
+        ``tar czf - -C /workspace .`` into the running container,
+        capture the tar bytes from stdout, hand to
+        ``CheckpointStore.persist()``. ``label="__suspend__"`` is
+        reserved for the suspend-time call from ``_do_suspend``.
+
+        Q4 lock per spec §2.4 amended: ``vault_lease_refs=()`` always
+        in Sprint 8.5 — vault-bearing sessions are unreachable via the
+        existing 8A ``sandbox_credential_adapter_not_configured``
+        admission-time refusal.
+        """
+        if self._checkpoint_store is None:
+            raise NotImplementedError(
+                "DockerSiblingSession.checkpoint requires a CheckpointStore "
+                "to be wired at backend construction time. Pass "
+                "checkpoint_store=... to DockerSiblingSandboxBackend.__init__ "
+                "per spec §3.1 + §7.1."
+            )
+        if session._suspended:
+            # Spec §3.1: suspended sessions are no longer usable. The
+            # container is also gone (suspend tore it down), so the
+            # exec would also fail — surfacing fail-loud here gives a
+            # better error.
+            raise RuntimeError(
+                f"session {session.session_id} was suspend()ed; "
+                f"checkpoint() is no longer valid — call "
+                f"SandboxBackend.wake(session_id) to restore the "
+                f"session in a fresh container per spec §3.2"
+            )
+
+        snapshot_bytes = await self._create_workspace_tar(session_id=session.session_id)
+
+        checkpoint_id = await self._checkpoint_store.persist(
+            session_id=session.session_id,
+            tenant_id=session.tenant_id,
+            label=label,
+            snapshot_bytes=snapshot_bytes,
+            policy=session.policy,
+            pack_context=session.pack_context,
+            vault_lease_refs=(),
+        )
+
+        # policy_digest = sha256(canonical_bytes(policy_as_dict)).
+        # Per spec §5.1 + audit.py docstring: a caller-supplied hash
+        # of the persisted policy for the chain-verifier's cross-verify
+        # against the admit_policy decision.
+        policy_dict = self._policy_to_canonical_dict(session.policy)
+        policy_digest = hashlib.sha256(canonical_bytes(policy_dict)).hexdigest()
+
+        await sandbox_lifecycle_checkpointed(
+            self._dh,
+            tenant_id=session.tenant_id,
+            actor_id=session._actor_subject,
+            trace_id="",
+            session_id=session.session_id,
+            checkpoint_id=checkpoint_id,
+            label=label,
+            policy_digest=policy_digest,
+        )
+        return checkpoint_id
+
+    async def _do_suspend(self, session: DockerSiblingSession) -> None:
+        """Take final checkpoint + tear down + emit suspended + write
+        wake linkage.
+
+        Spec §3.1 + §7.1 + the T2 ``sandbox_lifecycle_suspended``
+        helper contract: the suspended chain row is emitted **after**
+        the container/Pod is released, so "suspended row exists" ⇒
+        "runtime resources released" for examiners. Bank-grade
+        evidence semantics require that the chain claim cannot
+        over-state reality: a "suspended" row that fires while the
+        container is still running OR before the linkage is durable
+        would let chain readers infer state that does not yet hold.
+
+        Ordering (P2.r2 reorder per the reviewer round that closed
+        the audit-overstatement failure window):
+
+            Step 1 — final checkpoint with label='__suspend__'.
+            Step 2 — tear down container + sidecar + networks.
+                     **MUST succeed before the audit row is emitted.**
+            Step 3 — emit sandbox.lifecycle.suspended; capture the
+                     returned record_id UUID.
+            Step 4 — write the suspend_event_id side-blob so wake()
+                     can read the record_id back. A failure here
+                     leaves the chain row in place + the side-blob
+                     absent; subsequent wake() refuses with
+                     sandbox_wake_checkpoint_corrupt per the P1.r6
+                     parser-fail-closed contract.
+            Step 5 — flip session._suspended (cosmetic; the in-process
+                     state lock after the chain + filesystem state are
+                     committed).
+
+        Failure-window semantics (regressions pin all of these):
+
+        * Step 2 fails (teardown raises): no audit row, no side-blob,
+          session is observably alive. Caller retries or destroys.
+        * Step 3 fails (audit emit raises): no chain row, no side-
+          blob; container already torn down. The session is
+          'phantom-released' from the chain's perspective — examiners
+          see no suspended evidence. This is conservative (no false
+          claim) but means a subsequent ``destroy()`` is needed to
+          reconcile state via the destroyed row.
+        * Step 4 fails (side-blob write raises): chain row exists,
+          container released, wake-linkage missing. Wake refuses with
+          ``sandbox_wake_checkpoint_corrupt`` (already pinned by
+          ``test_wake_checkpoint_corrupt.py``); a subsequent
+          ``destroy()`` tombstones normally.
+
+        Vault-lease revocation is OUT OF SCOPE per spec §2.4 amended:
+        the existing 8A ``sandbox_credential_adapter_not_configured``
+        admission-time refusal prevents any vault-bearing session from
+        existing in the first place.
+        """
+        if self._checkpoint_store is None:
+            raise NotImplementedError(
+                "DockerSiblingSession.suspend requires a CheckpointStore "
+                "to be wired at backend construction time."
+            )
+        if session._suspended:
+            # Idempotent guard — a double-suspend on the same session is
+            # a usage bug; surface fail-loud (NOT a no-op) so the caller
+            # learns.
+            raise RuntimeError(
+                f"session {session.session_id} is already suspended; "
+                f"call SandboxBackend.wake(session_id) to restore"
+            )
+
+        # Step 1 — final checkpoint with the reserved __suspend__ label.
+        final_checkpoint_id = await self._do_checkpoint(session, "__suspend__")
+
+        # Step 2 — tear down container + sidecar + networks BEFORE the
+        # audit row is emitted. Spec contract: "suspended row" ⇒
+        # "resources released". The audit-helper docstring at T2
+        # explicitly says this helper is called "after ... the
+        # container/Pod is released" — reordering aligns code with
+        # contract.
+        await self._teardown_session_state(
+            session_id=session.session_id,
+            internal_net_name=session._internal_network_name,
+            egress_net_name=session._egress_network_name,
+            sidecar_name=session._sidecar_container_name,
+        )
+
+        # Step 3 — emit sandbox.lifecycle.suspended; capture record_id
+        # for the wake-time linkage payload key per spec §5.1. Audit
+        # row is only emitted if teardown above succeeded; chain claim
+        # therefore cannot over-state runtime state.
+        record_id, _new_hash = await sandbox_lifecycle_suspended(
+            self._dh,
+            tenant_id=session.tenant_id,
+            actor_id=session._actor_subject,
+            trace_id="",
+            session_id=session.session_id,
+            final_checkpoint_id=final_checkpoint_id,
+        )
+
+        # Step 4 — write the suspend_event_id side-blob so wake() can
+        # read the record_id back. Failure here leaves the chain row +
+        # the side-blob absent: wake refuses
+        # sandbox_wake_checkpoint_corrupt per the P1.r6 parser-fail-
+        # closed contract pinned by ``test_wake_checkpoint_corrupt.py
+        # ::TestSuspendEventIdSideBlobSurfacesAsCorrupt``.
+        await self._write_suspend_event_id(
+            session_id=session.session_id,
+            tenant_id=session.tenant_id,
+            checkpoint_id=final_checkpoint_id,
+            record_id=record_id,
+        )
+
+        # Step 5 — flip the _suspended flag. Cosmetic now: both the
+        # chain row + the side-blob are committed; the in-process
+        # state lock prevents exec/checkpoint on the suspended
+        # session. A failure HERE is effectively impossible (simple
+        # attribute set), but ordering it last makes the invariant
+        # "_suspended=True ⇒ everything before is durable" hold by
+        # construction.
+        session._suspended = True
+
+    async def _create_workspace_tar(self, *, session_id: str) -> bytes:
+        """Run ``tar czf - -C /workspace .`` inside the container; return
+        the gzipped tar bytes from stdout.
+
+        Per spec §7.1: the workspace-tar mechanic is the cross-backend
+        wire-public contract — both DockerSibling AND KubernetesPod use
+        the same tar/untar shape so cross-backend checkpoints round-trip
+        via the conformance suite at T9.
+        """
+        container = await self._docker.containers.get(session_id)
+        exec_obj = await container.exec(
+            cmd=["tar", "czf", "-", "-C", "/workspace", "."],
+            stdout=True,
+            stderr=True,
+            user=_NON_ROOT_USER,
+        )
+        chunks: list[bytes] = []
+        stderr_chunks: list[bytes] = []
+        async with exec_obj.start(detach=False) as stream:
+            while True:
+                message = await stream.read_out()
+                if message is None:
+                    break
+                if message.stream == 1:
+                    chunks.append(message.data)
+                elif message.stream == 2:
+                    stderr_chunks.append(message.data)
+        inspect = await exec_obj.inspect()
+        exit_code = int(inspect.get("ExitCode") or 0)
+        if exit_code != 0:
+            stderr_text = b"".join(stderr_chunks).decode("utf-8", errors="replace")
+            raise RuntimeError(
+                f"tar czf /workspace inside session {session_id} exited "
+                f"{exit_code}; stderr={stderr_text!r}"
+            )
+        return b"".join(chunks)
+
+    async def _restore_workspace_tar(
+        self,
+        *,
+        session_id: str,
+        snapshot_bytes: bytes,
+    ) -> None:
+        """Run ``tar xzf - -C /workspace`` inside the container, piping
+        the snapshot bytes on stdin.
+
+        Counterpart to ``_create_workspace_tar``; cross-backend
+        conformance pin per spec §7.3.
+        """
+        container = await self._docker.containers.get(session_id)
+        exec_obj = await container.exec(
+            cmd=["tar", "xzf", "-", "-C", "/workspace"],
+            stdout=True,
+            stderr=True,
+            stdin=True,
+            user=_NON_ROOT_USER,
+        )
+        stderr_chunks: list[bytes] = []
+        async with exec_obj.start(detach=False) as stream:
+            await stream.write_in(snapshot_bytes)
+            # Close stdin half so tar sees EOF + processes the archive.
+            with contextlib.suppress(Exception):
+                await stream.close()
+            while True:
+                message = await stream.read_out()
+                if message is None:
+                    break
+                if message.stream == 2:
+                    stderr_chunks.append(message.data)
+        inspect = await exec_obj.inspect()
+        exit_code = int(inspect.get("ExitCode") or 0)
+        if exit_code != 0:
+            stderr_text = b"".join(stderr_chunks).decode("utf-8", errors="replace")
+            raise RuntimeError(
+                f"tar xzf /workspace inside session {session_id} exited "
+                f"{exit_code}; stderr={stderr_text!r}"
+            )
+
+    async def _write_suspend_event_id(
+        self,
+        *,
+        session_id: str,
+        tenant_id: str,
+        checkpoint_id: CheckpointId,
+        record_id: _uuid.UUID,
+    ) -> None:
+        """Persist the suspend-emitted ``record_id`` so wake() can read
+        it back at restore-time per spec §5.2 + the T6 plan-amendment.
+
+        Storage layout — sibling blob at
+        ``<tenant>/<session>/<checkpoint>.suspend_event_id`` carrying
+        the UUID as a UTF-8 string. Stays in the same per-tenant prefix
+        as the snapshot + metadata so tenant isolation comes for free +
+        the existing reaper / tombstone lifecycle covers cleanup.
+        """
+        assert self._checkpoint_store is not None  # narrowed by callers
+        key = f"{tenant_id}/{session_id}/{checkpoint_id}.suspend_event_id"
+        await self._checkpoint_store._object_store.put(
+            "sandbox-checkpoints",
+            key,
+            str(record_id).encode("utf-8"),
+            retention_seconds=None,
+        )
+
+    async def _read_suspend_event_id(
+        self,
+        *,
+        session_id: str,
+        tenant_id: str,
+        checkpoint_id: CheckpointId,
+    ) -> _uuid.UUID:
+        """Read back the suspend_event_id side-blob written at suspend()
+        time.
+
+        Missing or malformed bytes are part of the corrupt-checkpoint
+        taxonomy. Wake maps ``_SuspendEventIdCorruptError`` to
+        ``sandbox_wake_checkpoint_corrupt`` before restoring any Docker
+        resources; the T8 chain-verifier keeps the same invariant as
+        defence-in-depth, not as the first fail-closed seam.
+        """
+        assert self._checkpoint_store is not None  # narrowed by callers
+        key = f"{tenant_id}/{session_id}/{checkpoint_id}.suspend_event_id"
+        try:
+            raw = await self._checkpoint_store._object_store.get("sandbox-checkpoints", key)
+        except FileNotFoundError as exc:
+            raise _SuspendEventIdCorruptError(
+                f"missing suspend_event_id side-blob at {key!r}"
+            ) from exc
+        try:
+            return _uuid.UUID(raw.decode("utf-8").strip())
+        except UnicodeDecodeError as exc:
+            raise _SuspendEventIdCorruptError(
+                f"suspend_event_id side-blob at {key!r} is not UTF-8: {exc}"
+            ) from exc
+        except ValueError as exc:
+            raise _SuspendEventIdCorruptError(
+                f"suspend_event_id side-blob at {key!r} is not a UUID: {exc}"
+            ) from exc
+
+    @staticmethod
+    def _policy_to_canonical_dict(policy: SandboxPolicy) -> dict[str, Any]:
+        """Convert SandboxPolicy to a canonical-bytes-safe dict for
+        policy_digest computation. Mirrors the
+        ``CheckpointMetadata.to_storage_payload`` policy sub-tree shape
+        per spec §3.4 — drift between this dict + that one would mean
+        the policy_digest on the checkpointed row would not match
+        the policy_digest a chain-verifier could re-compute from the
+        persisted metadata.
+        """
+        return {
+            "cpu_cores": policy.cpu_cores,
+            "cpu_time_budget_s": policy.cpu_time_budget_s,
+            "memory_mb": policy.memory_mb,
+            "walltime_s": policy.walltime_s,
+            "runtime_image": policy.runtime_image,
+            "egress_allow_list": list(policy.egress_allow_list),
+            "vault_path": policy.vault_path,
+            "read_only_root": policy.read_only_root,
+            "writable_mounts": [
+                {
+                    "host_path": m.host_path,
+                    "container_path": m.container_path,
+                    "read_only": m.read_only,
+                }
+                for m in policy.writable_mounts
+            ],
+            "warm_pool_key": policy.warm_pool_key,
+        }
 
 
 # Re-exports so the SandboxLifecycleRefused class is importable from

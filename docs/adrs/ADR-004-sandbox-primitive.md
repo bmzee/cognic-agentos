@@ -81,14 +81,31 @@ checkpoint_id = await session.checkpoint(label="before_payment_action")
 await session.suspend()           # container released; state persisted
 
 # Different process / after harness restart:
-session = await sandbox.wake(session_id)  # restores from latest checkpoint
+# Note: session_id alone is NEVER authorization — wake() takes actor +
+# tenant_id keyword-only per Q5 lock + the extra
+# "session_id-never-authorization" design lock. Cross-tenant attempts
+# refuse fail-closed via sandbox_wake_tenant_mismatch.
+session = await sandbox.wake(session_id, actor=actor, tenant_id=tenant_id)
 result = await session.exec(next_command)
 await session.destroy()
 ```
 
-**Checkpoint storage:** filesystem deltas (overlay-fs snapshots) + env metadata + Vault lease references. Stored in `ObjectStoreAdapter` (per ADR-009) with per-tenant retention policy (default 24h; long-running workflow tenants extend via Rego policy per ADR-015).
+**Checkpoint storage:** writable workspace tar snapshot (the canonical `/workspace` mount on every sandbox-runtime image) + env metadata + Vault lease references. Stored in `ObjectStoreAdapter` (per ADR-009) with per-tenant retention policy (default 24h; long-running workflow tenants extend via Rego policy per ADR-015 — deferred to a later sprint).
 
-**Audit:** `sandbox.checkpoint` and `sandbox.wake` events hash-chain into `decision_history`. Chain verifier walks suspend → wake transitions to prove no state forgery.
+Wave-1 explicitly does **NOT** use CRIU or container-layer commits — `tar` of `/workspace` is the cross-backend wire-public contract (DockerSibling via aiodocker exec; KubernetesPod via kubernetes_asyncio multiplexed-websocket exec). Both backends ship the same workspace-tar mechanism per Sprint 8.5 spec §7. Mid-process state preservation (CRIU, docker commit) is deferred to Wave-2 if banks demand it; would require node-level privileges incompatible with OpenShift restricted SCC.
+
+**Sprint 8.5 design locks** (Q1-Q5 from 2026-05-18 brainstorming + extra session_id-never-authorization lock):
+
+1. **Q1 — workspace-tar mechanism.** Cross-backend wire contract: `tar` of `/workspace`. NOT CRIU; NOT `docker commit`. Both Wave-1 backends ship the same shape.
+2. **Q2 — dedicated `sandbox.lifecycle.checkpoint_purged` audit event.** Reaper emits one chain row per purge; NOT folded into `sandbox.lifecycle.destroyed`.
+3. **Q3 — wake-time policy revalidation.** `wake()` reruns `admit_policy()` against the LIVE tenant policy / catalog / Rego / settings. Refusal surfaces as `sandbox_wake_policy_revalidation_failed` (wake-time taxonomy is wake-specific; original 8A reason lives in `detail`).
+4. **Q4 — fail-loud Vault-lease path NOW; NO `CredentialAdapter` extension in Sprint 8.5.** The existing Sprint-8A `sandbox_credential_adapter_not_configured` admission-time refusal prevents vault-bearing sessions from being created today, so no vault-bearing wake is reachable. Sprint 10 ships the real `VaultCredentialAdapter` + `mint_lease`/`revoke_lease` Protocol extension.
+5. **Q5 — `wake(session_id, *, actor, tenant_id)` Protocol signature.** Identity seam forward-compat for Sprint 10.5 `SchedulerEngine.submit()` wrap per ADR-022.
+6. **Extra lock — session_id alone is NEVER authorization.** `wake()` cross-checks caller `tenant_id` kwarg against `metadata.tenant_id` and refuses fail-closed via `sandbox_wake_tenant_mismatch` on mismatch (defence-in-depth past the prefix-keyed lookup).
+
+**Tombstone semantics for `destroy()`** (Sprint 8.5 design call): `destroy()` of a session with persisted checkpoints writes a `<tenant>/<session>/_tombstoned.json` sentinel via `CheckpointStore.tombstone_session()`; checkpoint bytes are retained until the reaper sweep after the per-tenant retention window. Wake() refuses tombstoned sessions fail-closed via the new `sandbox_wake_session_tombstoned` closed-enum reason. Malformed tombstone surfaces as the SAME closed-enum value via the `TombstoneCorruptError` fail-closed path (operator intent "destroyed = MUST NOT wake" survives degradation).
+
+**Audit:** `sandbox.lifecycle.checkpointed` / `sandbox.lifecycle.suspended` / `sandbox.lifecycle.woken` / `sandbox.lifecycle.checkpoint_purged` events hash-chain into `decision_history` per ADR-006 (4 new event types). Chain verifier walks suspend → wake transitions via explicit payload keys (`suspend_event_id` + `restored_from_checkpoint_id`) to prove no state forgery — no `decision_history` schema migration needed.
 
 **What this enables:** long-running multi-step workflows that survive harness restarts; operator pause/resume for compliance review of paused agent state; multi-day agent loops awaiting external input; time-travel debugging.
 

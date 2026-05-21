@@ -28,7 +28,14 @@ from cognic_agentos.sandbox.admission import (
     KernelDefaultCredentialAdapter,
     admit_policy,
 )
-from cognic_agentos.sandbox.audit import emit_sandbox_event
+from cognic_agentos.sandbox.audit import (
+    PurgeReason,
+    emit_sandbox_event,
+    sandbox_lifecycle_checkpoint_purged,
+    sandbox_lifecycle_checkpointed,
+    sandbox_lifecycle_suspended,
+    sandbox_lifecycle_woken,
+)
 from cognic_agentos.sandbox.catalog import (
     CanonicalImageCatalog,
     CosignVerifyResult,
@@ -42,6 +49,7 @@ from cognic_agentos.sandbox.policy import (
     validate_policy_shape,
 )
 from cognic_agentos.sandbox.protocol import (
+    CheckpointId,
     ProxyAccessOutcome,
     ProxyAccessRecord,
     SandboxBackend,
@@ -198,6 +206,7 @@ async def sandbox_session(
 __all__ = [
     "CanonicalImageCatalog",
     "CatalogProtocol",
+    "CheckpointId",
     "CosignVerifyResult",
     "CredentialAdapter",
     "DockerSiblingSandboxBackend",
@@ -208,6 +217,7 @@ __all__ = [
     "ProxyAccessOutcome",
     "ProxyAccessRecord",
     "ProxyAccessRefusalReason",
+    "PurgeReason",
     "RiskTier",
     "SBOMVerifyResult",
     "SandboxBackend",
@@ -227,6 +237,10 @@ __all__ = [
     "emit_sandbox_event",
     "proxy_log_to_chain_payload",
     "render_proxy_config",
+    "sandbox_lifecycle_checkpoint_purged",
+    "sandbox_lifecycle_checkpointed",
+    "sandbox_lifecycle_suspended",
+    "sandbox_lifecycle_woken",
     "sandbox_session",
     "validate_policy_shape",
 ]

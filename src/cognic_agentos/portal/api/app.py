@@ -81,6 +81,12 @@ if TYPE_CHECKING:
     # pulling the engine module into the import graph.
     from cognic_agentos.core.policy.engine import OPAEngine
 
+    # Sprint 8.5 T10: type-only ref for the create_app ``checkpoint_store``
+    # kwarg. The runtime ``CheckpointReaper`` import is local to the
+    # lifespan (only pulled in when a store is actually wired) so the
+    # portal import graph stays free of the sandbox package by default.
+    from cognic_agentos.sandbox.checkpoint_store import CheckpointStore
+
 logger = logging.getLogger(__name__)
 
 
@@ -220,6 +226,14 @@ def create_app(
     broker: UIEventBroker | None = None,
     elicitation_adapter: ElicitationAdapter | None = None,
     rego_engine: OPAEngine | None = None,
+    # Sprint 8.5 T10: optional checkpoint-reaper wiring seam. When a
+    # CheckpointStore is provided, the FastAPI lifespan starts a
+    # single-instance CheckpointReaper background task (retention-floor
+    # enforcement per ADR-004 / spec §4.2) and cancels it on shutdown.
+    # When None — the dev / test / pack-only default — NO reaper task is
+    # created and startup is unaffected. Same opt-in None-default
+    # pattern as every other dependency on this factory.
+    checkpoint_store: CheckpointStore | None = None,
 ) -> FastAPI:
     """Build and return the FastAPI application.
 
@@ -312,8 +326,27 @@ def create_app(
 
             reap_task = asyncio.create_task(_reap_loop())
 
-        # Outer try/finally guarantees the reap task is cancelled even
-        # on the adapter-registry-None early-return path below.
+        # Sprint 8.5 T10 — single-instance CheckpointReaper background
+        # task. Created HERE (inside the one-shot lifespan; not per
+        # request, not at import) so it starts exactly once per AgentOS
+        # process per spec §13. Skipped entirely when no CheckpointStore
+        # is wired — the dev / test / pack-only path MUST NOT fail
+        # startup. The runtime CheckpointReaper import is local so the
+        # portal import graph stays sandbox-free unless a store is wired.
+        reaper_task: asyncio.Task[None] | None = None
+        checkpoint_store_for_lifespan = app.state.checkpoint_store
+        if checkpoint_store_for_lifespan is not None and settings is not None:
+            from cognic_agentos.sandbox.reaper import CheckpointReaper
+
+            _reaper = CheckpointReaper(
+                checkpoint_store=checkpoint_store_for_lifespan,
+                settings=settings,
+            )
+            reaper_task = asyncio.create_task(_reaper.run_forever())
+        app.state.reaper_task = reaper_task
+
+        # Outer try/finally guarantees both background tasks are
+        # cancelled even on the adapter-registry-None early-return path.
         try:
             if adapter_registry is None:
                 app.state.adapters = None
@@ -343,6 +376,16 @@ def create_app(
                 reap_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await reap_task
+            # Sprint 8.5 T10: checkpoint-reaper cleanup. cancel() then
+            # await so CancelledError propagates cleanly to the task
+            # boundary — the reaper re-raises it out of run_forever (it
+            # NEVER swallows cancellation); suppress() here absorbs it
+            # at the OWNER awaiting its own cancelled task. No zombie
+            # reaper task survives the lifespan.
+            if reaper_task is not None:
+                reaper_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await reaper_task
 
     app = FastAPI(
         title="Cognic AgentOS",
@@ -419,6 +462,14 @@ def create_app(
     app.state.elicitation_adapter = elicitation_adapter
     app.state.rego_engine = rego_engine
     app.state.settings = settings
+    # Sprint 8.5 T10: checkpoint-reaper wiring seam. ``checkpoint_store``
+    # is attached eagerly so the lifespan can read it off app.state
+    # (mirrors the ``ui_event_broker`` pattern); ``reaper_task`` is
+    # pre-seeded to None so introspection — and the lifespan-wiring
+    # tests' pre-startup assertion — see a defined attribute before
+    # startup creates the task.
+    app.state.checkpoint_store = checkpoint_store
+    app.state.reaper_task = None
 
     # Middleware add order is OUTER-LAST in Starlette: the call chain
     # walks the most-recently-added middleware first. We want the

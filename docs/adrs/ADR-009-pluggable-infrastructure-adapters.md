@@ -34,7 +34,7 @@ Six `Protocol` (PEP 544) interfaces in `cognic_agentos.db.adapters.protocols`:
 | `VectorAdapter` | `ensure_collection(name, dim, metric)`, `upsert(items)`, `search(vector, k, filter)`, `delete(ids)`, `health_check()` |
 | `SecretAdapter` | `read(path)`, `write(path, value)`, `lease(path, ttl_s)`, `revoke(lease_id)`, `health_check()` |
 | `EmbeddingAdapter` | `embed(texts) -> list[list[float]]`, `dimensions`, `health_check()` |
-| `ObjectStoreAdapter` | `put(bucket, key, body)`, `get(bucket, key)`, `delete(bucket, key)`, `presign(bucket, key, ttl_s)`, `health_check()` |
+| `ObjectStoreAdapter` | `put(bucket, key, body)`, `get(bucket, key)`, `delete(bucket, key)`, `presign(bucket, key, ttl_s)`, `list_prefix(bucket, prefix)` (Sprint 8.5 T0.5 additive extension — async-generator yielding keys under `bucket/prefix` in deterministic per-driver order; local_fs uses depth-first sorted-per-directory, future S3 uses globally-lex via `ListObjectsV2`; required by Sprint 8.5 `CheckpointStore.load_latest()` + `purge_expired()`; the local driver reserves keys ending `.retention` + the bucket-root `.tmp/` + `.cognic_health_probe` namespaces at the put/list validator boundary), `health_check()` |
 | `ObservabilityAdapter` | `emit_trace(...)`, `emit_metric(...)`, `flush()`, `health_check()` |
 
 (LLM provider routing already lives behind LiteLLM gateway — same pattern, different layer.)
@@ -185,6 +185,7 @@ Banks know exactly which adapter is in use and can audit the source.
 | **Sprint 1** | Protocol definitions + Postgres + Qdrant + Vault + Ollama + Langfuse_OTel adapters (all bundled). Adapter factory in `db/adapters/factory.py`. `MemoryAdapter` reference implementations for tests. |
 | **Sprint 4** | Adapter packs go through plugin trust gate (per ADR-002). Conformance test suite published. |
 | **Sprint 8** | S3/MinIO ObjectStoreAdapter (for evidence packs). |
+| **Sprint 8.5** | `ObjectStoreAdapter.list_prefix()` Protocol extension (additive async-generator method); Sprint-4 `local_fs` driver gains the method; future S3 driver MUST implement via `ListObjectsV2`. NEW `sandbox-checkpoints` bucket consumer per Sprint 8.5 spec §4.1 — `CheckpointStore.load_latest()` + `purge_expired()` walk per-tenant `<tenant>/<session>/` prefixes via `list_prefix()`. Local driver reserves `.retention` key suffix + bucket-root `.tmp/` + `.cognic_health_probe` namespaces at the put/list validator boundary so list_prefix() can unambiguously filter adapter-internal artefacts. |
 | **Phase 5+** | First alternative adapter pack POC: `cognic-vector-chroma`. Validates the pack-author experience. |
 
 ## References

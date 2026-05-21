@@ -1819,3 +1819,88 @@ class TestSprint7B1PackKindVocabulary:
             "revoked",
             "uninstalled",
         }
+
+
+class TestSprint85CheckpointSettings:
+    """Settings tests for the Sprint 8.5 sandbox-checkpoint surface.
+
+    Per spec §6 — three additive global Settings fields with explicit
+    Field bounds. ``sandbox/reaper.py`` + ``sandbox/checkpoint_store.py``
+    read these via the structural ``_CheckpointSettings`` Protocol; the
+    real ``Settings`` only conforms once these three fields exist.
+    """
+
+    def test_checkpoint_settings_defaults(self) -> None:
+        """Defaults match spec §6: 24h retention floor / 10-per-session
+        cap / 5-minute reaper sweep cadence."""
+        s = Settings(_env_file=None, runtime_profile="prod")  # type: ignore[call-arg]
+        assert s.sandbox_checkpoint_retention_s == 86_400
+        assert s.sandbox_max_checkpoints_per_session == 10
+        assert s.sandbox_reaper_interval_s == 300
+
+    def test_checkpoint_retention_bounds(self) -> None:
+        """Retention floor band: 60s .. 1 year. Below/above is refused."""
+        with pytest.raises(ValidationError, match="greater than or equal to 60"):
+            Settings(  # type: ignore[call-arg]
+                _env_file=None,
+                runtime_profile="prod",
+                sandbox_checkpoint_retention_s=59,
+            )
+        with pytest.raises(ValidationError, match="less than or equal to 31536000"):
+            Settings(  # type: ignore[call-arg]
+                _env_file=None,
+                runtime_profile="prod",
+                sandbox_checkpoint_retention_s=31_536_001,
+            )
+
+    def test_max_checkpoints_per_session_bounds(self) -> None:
+        """Per-session cap band: 1 .. 1000. A cap of 0 would make every
+        checkpoint() refuse; above 1000 is an unbounded-storage risk."""
+        with pytest.raises(ValidationError, match="greater than or equal to 1"):
+            Settings(  # type: ignore[call-arg]
+                _env_file=None,
+                runtime_profile="prod",
+                sandbox_max_checkpoints_per_session=0,
+            )
+        with pytest.raises(ValidationError, match="less than or equal to 1000"):
+            Settings(  # type: ignore[call-arg]
+                _env_file=None,
+                runtime_profile="prod",
+                sandbox_max_checkpoints_per_session=1001,
+            )
+
+    def test_reaper_interval_bounds(self) -> None:
+        """Reaper sweep cadence band: 10s .. 1 hour."""
+        with pytest.raises(ValidationError, match="greater than or equal to 10"):
+            Settings(  # type: ignore[call-arg]
+                _env_file=None,
+                runtime_profile="prod",
+                sandbox_reaper_interval_s=9,
+            )
+        with pytest.raises(ValidationError, match="less than or equal to 3600"):
+            Settings(  # type: ignore[call-arg]
+                _env_file=None,
+                runtime_profile="prod",
+                sandbox_reaper_interval_s=3601,
+            )
+
+    def test_checkpoint_settings_load_from_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Bank overlays tighten the retention floor + caps via env var
+        per spec §6 / ADR-015."""
+        monkeypatch.setenv("COGNIC_SANDBOX_CHECKPOINT_RETENTION_S", "3600")
+        monkeypatch.setenv("COGNIC_SANDBOX_MAX_CHECKPOINTS_PER_SESSION", "5")
+        monkeypatch.setenv("COGNIC_SANDBOX_REAPER_INTERVAL_S", "30")
+        s = Settings(_env_file=None, runtime_profile="prod")  # type: ignore[call-arg]
+        assert s.sandbox_checkpoint_retention_s == 3600
+        assert s.sandbox_max_checkpoints_per_session == 5
+        assert s.sandbox_reaper_interval_s == 30
+
+    def test_max_checkpoints_description_carries_p3r5_wording(self) -> None:
+        """The §4.3-amended conditional-eviction wording (P3.r5) must
+        survive in the field description — operators diagnosing a
+        retention-locked persist() depend on the
+        CheckpointMaxPerSessionRetentionLocked exception name being
+        discoverable from the Settings field itself."""
+        field = Settings.model_fields["sandbox_max_checkpoints_per_session"]
+        assert field.description is not None
+        assert "CheckpointMaxPerSessionRetentionLocked" in field.description
