@@ -35,12 +35,54 @@ pytest.importorskip("aiodocker")
 pytest.importorskip("kubernetes_asyncio")
 
 
+from tests.conformance.sandbox.fixture_catalog import (
+    _FixtureOnlySandboxCatalog,
+    resolve_fixture_refs,
+)
+
 _CANONICAL_SPRINT_8A_IMAGES = (
     "cognic/sandbox-runtime-python:v1@sha256:" + "a" * 64,
     "cognic/sandbox-runtime-shell:v1@sha256:" + "b" * 64,
     "cognic/sandbox-runtime-data:v1@sha256:" + "c" * 64,
     "cognic/sandbox-egress-proxy:v1@sha256:" + "d" * 64,
 )
+
+
+def _resolve_image_layer(tmp_path: Path) -> tuple[tuple[str, ...], Any, str | None]:
+    """Return ``(preflight_image_set, catalog, egress_proxy_image)``.
+
+    Fixture mode (``COGNIC_USE_LOCAL_FIXTURE_SANDBOX_IMAGES=1``): the 2
+    fixture refs + a ``_FixtureOnlySandboxCatalog`` + the proxy ref.
+    Default: the 4 canonical refs + a real ``CanonicalImageCatalog`` +
+    ``None`` (the backend's ``egress_proxy_image`` seam then resolves to
+    its canonical default — byte-identical to today's behaviour).
+    """
+    fixture_refs = resolve_fixture_refs()
+    if fixture_refs is not None:
+        runtime_ref, proxy_ref = fixture_refs
+        catalog: Any = _FixtureOnlySandboxCatalog(runtime_ref=runtime_ref, proxy_ref=proxy_ref)
+        return (runtime_ref, proxy_ref), catalog, proxy_ref
+    from cognic_agentos.sandbox.catalog import CanonicalImageCatalog
+
+    trust_root = tmp_path / "cognic-cosign.pub"
+    trust_root.write_text("# fixture trust root for conformance suite")
+    catalog = CanonicalImageCatalog(
+        canonical_refs=frozenset(_CANONICAL_SPRINT_8A_IMAGES),
+        tenant_trust_roots={"t-conformance": trust_root},
+        tenant_allow_lists={"t-conformance": frozenset()},
+    )
+    return _CANONICAL_SPRINT_8A_IMAGES, catalog, None
+
+
+@pytest.fixture
+def fixture_runtime_image() -> str:
+    """The runtime image ref the conformance ``SandboxPolicy`` must use:
+    the runtime fixture ref in fixture mode, else the canonical
+    placeholder (today's value — env-gated modules skip in CI anyway)."""
+    fixture_refs = resolve_fixture_refs()
+    if fixture_refs is not None:
+        return fixture_refs[0]
+    return "cognic/sandbox-runtime-python:v1@sha256:" + "a" * 64
 
 
 def _backend_unavailable(request: Any, message: str) -> None:
@@ -175,7 +217,6 @@ async def backend(request, tmp_path):
         from cognic_agentos.sandbox.backends.docker_sibling import (
             DockerSiblingSandboxBackend,
         )
-        from cognic_agentos.sandbox.catalog import CanonicalImageCatalog
 
         docker = aiodocker.Docker()
         # ``engine`` is built inside the try (after the canonical-image
@@ -185,7 +226,8 @@ async def backend(request, tmp_path):
         # Canonical-artifact preflight — skip if any canonical image
         # missing per feedback_canonical_artifact_not_oss_substitute.
         try:
-            for ref in _CANONICAL_SPRINT_8A_IMAGES:
+            image_set, catalog, egress_proxy_image = _resolve_image_layer(tmp_path)
+            for ref in image_set:
                 try:
                     await docker.images.inspect(ref)
                 except aiodocker.exceptions.DockerError as e:
@@ -198,13 +240,6 @@ async def backend(request, tmp_path):
                         f"digests are published by Sprint-14 deploy kit.",
                     )
 
-            trust_root = tmp_path / "cognic-cosign.pub"
-            trust_root.write_text("# fixture trust root for conformance suite")
-            catalog = CanonicalImageCatalog(
-                canonical_refs=frozenset(_CANONICAL_SPRINT_8A_IMAGES),
-                tenant_trust_roots={"t-conformance": trust_root},
-                tenant_allow_lists={"t-conformance": frozenset()},
-            )
             rego = AsyncMock()
             decision = MagicMock()
             decision.allow = True
@@ -235,6 +270,7 @@ async def backend(request, tmp_path):
                 settings=settings,
                 warm_pool=None,
                 checkpoint_store=checkpoint_store,
+                egress_proxy_image=egress_proxy_image,
             )
         finally:
             await docker.close()
@@ -267,7 +303,6 @@ async def backend(request, tmp_path):
         from cognic_agentos.sandbox.backends.kubernetes_pod import (
             KubernetesPodSandboxBackend,
         )
-        from cognic_agentos.sandbox.catalog import CanonicalImageCatalog
 
         # Load cluster config — prefer in-cluster (when running
         # inside a pod with a ServiceAccount) else fall back to
@@ -291,13 +326,7 @@ async def backend(request, tmp_path):
         # conditionally without a NameError (it is built mid-try).
         engine = None
         try:
-            trust_root = tmp_path / "cognic-cosign.pub"
-            trust_root.write_text("# fixture trust root for conformance suite")
-            catalog = CanonicalImageCatalog(
-                canonical_refs=frozenset(_CANONICAL_SPRINT_8A_IMAGES),
-                tenant_trust_roots={"t-conformance": trust_root},
-                tenant_allow_lists={"t-conformance": frozenset()},
-            )
+            _image_set, catalog, egress_proxy_image = _resolve_image_layer(tmp_path)
             rego = AsyncMock()
             decision = MagicMock()
             decision.allow = True
@@ -329,6 +358,7 @@ async def backend(request, tmp_path):
                 settings=settings,
                 warm_pool=None,
                 checkpoint_store=checkpoint_store,
+                egress_proxy_image=egress_proxy_image,
             )
         finally:
             await api_client.close()

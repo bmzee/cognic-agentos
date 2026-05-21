@@ -63,15 +63,6 @@ _ACTOR = Actor(
     scopes=frozenset(),
     actor_type="human",
 )
-_POLICY = SandboxPolicy(
-    cpu_cores=0.5,
-    cpu_time_budget_s=None,
-    memory_mb=256,
-    walltime_s=30.0,
-    runtime_image="cognic/sandbox-runtime-python:v1@sha256:" + "a" * 64,
-    egress_allow_list=(),
-    vault_path=None,
-)
 _PACK_CTX = PackAdmissionContext(
     pack_id="cognic.conformance",
     pack_version="v1",
@@ -80,6 +71,23 @@ _PACK_CTX = PackAdmissionContext(
     declares_dynamic_install=False,
     profile="production",
 )
+
+
+@pytest.fixture
+def policy(fixture_runtime_image: str) -> SandboxPolicy:
+    """Conformance ``SandboxPolicy`` — ``runtime_image`` flows from the
+    conftest fixture (runtime fixture ref in fixture mode, canonical
+    placeholder otherwise). All other fields unchanged from the
+    pre-#477 ``_POLICY`` constant."""
+    return SandboxPolicy(
+        cpu_cores=0.5,
+        cpu_time_budget_s=None,
+        memory_mb=256,
+        walltime_s=30.0,
+        runtime_image=fixture_runtime_image,
+        egress_allow_list=(),
+        vault_path=None,
+    )
 
 
 def _bypass_catalog_trust_gate(backend: Any, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -111,6 +119,7 @@ def _bypass_catalog_trust_gate(backend: Any, monkeypatch: pytest.MonkeyPatch) ->
 async def test_checkpoint_round_trip_preserves_workspace_state(
     backend: Any,
     monkeypatch: pytest.MonkeyPatch,
+    policy: SandboxPolicy,
 ) -> None:
     """checkpoint() → suspend() → wake() → exec() round-trips the
     /workspace contents. The SAME assertion runs against both Wave-1
@@ -123,7 +132,7 @@ async def test_checkpoint_round_trip_preserves_workspace_state(
     _bypass_catalog_trust_gate(backend, monkeypatch)
 
     session = await backend.create(
-        _POLICY,
+        policy,
         actor=_ACTOR,
         tenant_id=_TENANT,
         pack_context=_PACK_CTX,

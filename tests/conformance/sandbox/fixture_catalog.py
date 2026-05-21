@@ -18,7 +18,58 @@ MUST NOT be imported or referenced by any ``src/`` module — pinned by
 
 from __future__ import annotations
 
+import os
+
+from cognic_agentos.sandbox.policy import _validate_image_ref
 from cognic_agentos.sandbox.protocol import SandboxLifecycleRefused
+
+# ``_validate_image_ref`` is the SOURCE-OF-TRUTH Stage-1 OCI-ref
+# validator (repository shape via ``_OCI_REPO_TAG_RE`` + digest via
+# ``_SHA256_DIGEST_RE``). Importing this underscore-prefixed src helper
+# into test-support code is intentional: test code MAY import src
+# internals — the forbidden direction is src -> test (pinned by T3's
+# architecture guard). Reusing it means the conftest boundary rejects
+# EXACTLY what admission rejects, with zero drift, and a bare
+# ``"@sha256:" in val`` substring check (which would accept
+# ``reg/p@sha256:bad``) is avoided.
+#
+# ``SandboxLifecycleRefused`` is imported from ``sandbox.protocol`` —
+# its definition home — NOT from ``sandbox.admission`` (which only
+# re-imports it without re-exporting; importing it from there triggers
+# a mypy ``attr-defined`` error). Matches the existing import below.
+
+_FLAG = "COGNIC_USE_LOCAL_FIXTURE_SANDBOX_IMAGES"
+_RUNTIME_VAR = "COGNIC_FIXTURE_RUNTIME_IMAGE_REF"
+_PROXY_VAR = "COGNIC_FIXTURE_PROXY_IMAGE_REF"
+
+
+def resolve_fixture_refs() -> tuple[str, str] | None:
+    """Return ``(runtime_ref, proxy_ref)`` when fixture mode is on, else None.
+
+    Fail-fast (``RuntimeError``) if the flag is set but a ref env var is
+    missing or not a valid digest-pinned OCI ref (#477 §4.3). Ref shape
+    is validated by the source-of-truth Stage-1 validator
+    ``cognic_agentos.sandbox.policy._validate_image_ref`` — the same
+    check admission runs. No silent skip, no placeholder fallback.
+    """
+    if os.environ.get(_FLAG) != "1":
+        return None
+    refs: list[str] = []
+    for var in (_RUNTIME_VAR, _PROXY_VAR):
+        val = os.environ.get(var, "").strip()
+        if not val:
+            raise RuntimeError(
+                f"{_FLAG}=1 but {var} is unset — see docs/runbooks/477-live-sandbox-proof.md"
+            )
+        try:
+            _validate_image_ref(val)
+        except SandboxLifecycleRefused as exc:
+            raise RuntimeError(
+                f"{var}={val!r} is not a valid digest-pinned OCI ref "
+                "(repository[:tag]@sha256:<64 lowercase hex>)"
+            ) from exc
+        refs.append(val)
+    return refs[0], refs[1]
 
 
 def _digest_of(ref: str) -> str:
