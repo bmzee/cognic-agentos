@@ -1,7 +1,7 @@
 # #489 — Production checkpoint-reaper wiring — design
 
 **Date:** 2026-05-21
-**Status:** design — approved, pending spec review
+**Status:** approved — see implementation plan `docs/superpowers/plans/2026-05-21-489-prod-checkpoint-reaper-wiring.md`
 **Subsystem:** sandbox primitive (resumable-session retention) + portal app factory + persistence adapters
 **Relevant ADRs:** ADR-004 (sandbox primitive / resumable session API), ADR-009 (pluggable infrastructure adapters), ADR-006 (audit-chain evidence)
 
