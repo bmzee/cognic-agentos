@@ -983,10 +983,11 @@ The app logs its reaper posture once at startup, on logger
 ## Fail-loud behaviour
 
 If `sandbox_reaper_enabled=true` but the production adapters are missing or
-unusable — no adapter registry, or no object-store adapter — the process
-**fails to start** with a `RuntimeError` naming the missing dependency.
-This is intentional: an operator who explicitly asked for the reaper is
-never silently given a no-op. Fix the adapter configuration and restart.
+unusable — no adapter registry, no object-store adapter, or the relational
+adapter engine unavailable — the process **fails to start** with a
+`RuntimeError` naming the missing dependency. This is intentional: an
+operator who explicitly asked for the reaper is never silently given a
+no-op. Fix the adapter configuration and restart.
 ```
 
 - [ ] **Step 2: Verify the doc has no whitespace errors**
