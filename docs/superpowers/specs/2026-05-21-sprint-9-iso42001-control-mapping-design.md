@@ -22,7 +22,9 @@ governance-hook control tagging, and a signed, tamper-evident evidence-pack expo
   evidence-pack exporter, evidence-pack signing.
 - Two examiner portal endpoints under a new `portal/api/compliance/` route package.
 - Two new RBAC scopes for those endpoints.
-- Control-tagging **gap-fill** so each of the 8 ADR-006 controls has ≥1 hook emitting it.
+- Control-tagging — canonicalize the evidence tags on every ADR-006 control with a
+  built emission surface; explicitly record (with reasons) the controls whose hook
+  surfaces do not exist yet (Sprint-9 T8 audit, §9).
 
 **Already in place — not re-touched:** the `iso_controls: tuple[str, ...]` field on
 `AuditEvent` / `DecisionRecord`, the `iso_controls` DB columns, and `append`
@@ -59,13 +61,22 @@ e.g. `ISO42001.A.6.2.5`. The codebase today emits a mix (`A.7.4` raw *and*
 `display` field carries the bare `A.x.y` for human-facing surfaces. The registry
 exposes a closed-enum `Literal` of the 8 canonical IDs.
 
-Each registry entry: `control_id` (canonical), `display`, `title`, and
-`intended_hooks` — the Cognic hook(s) from ADR-006's table that should tag this control.
+Each registry entry: `control_id` (canonical), `display`, `title`,
+`intended_hooks` — the Cognic hook(s) from ADR-006's table that should tag this control
+— `hook_status` (Sprint-9 T8 amendment): `"implemented"` when a built emission surface
+already tags the control, `"deferred"` when the intended hook surface does not exist
+yet — and `deferred_reason`: a short reason string on every `deferred` entry (`""` for
+`implemented`), the registry-resident form of §9.1's audit-table reason so the registry
+is self-describing. Both `hook_status` and `deferred_reason` are **registry-only** —
+they are **not** added to the evidence-pack `manifest.json` (that would be a separate
+evidence-pack-format stop-rule change).
 
-The registry provides a coverage-audit helper used by the test suite to assert **8/8
-controls each have ≥1 hook emitting the canonical ID**. The registry is *read* by the
-evidence-pack exporter to build the per-control coverage section; it is **never**
-imported by `core/` (dependency arrow: `compliance/` → `core/`, never the reverse).
+The registry provides a coverage-audit helper used by the test suite to assert that
+**every `implemented` control has ≥1 hook emitting the canonical ID, and every
+`deferred` control is explicitly recorded** — registry coverage stays 8/8, evidenced
+coverage is 3/8 at Sprint-9 close (§9). The registry is *read* by the evidence-pack
+exporter to build the per-control coverage section; it is **never** imported by `core/`
+(dependency arrow: `compliance/` → `core/`, never the reverse).
 
 ## 5. Merkle helper — `merkle.py`
 
@@ -244,19 +255,54 @@ powers, kept as separate atoms so bank overlays can grant them independently:
 - All **three** RBAC files — `scopes.py`, `actor.py`, `enforcement.py` — get explicit
   RBAC stop-rule review.
 
-## 9. Control-tagging gap-fill
+## 9. Control-tagging — canonicalize-what-exists + explicit deferrals
 
-One Sprint-9 task audits the 8 ADR-006 controls against current emission sites and wires
-`iso_controls=(...)` **explicitly at the call site** where a control has no hook —
-**no** auto-lookup / default injection in `AuditStore` / `DecisionHistoryStore` (that
-would invert the `compliance/` → `core/` dependency arrow). Existing emitters of an
-ADR-006 control that use the raw `A.x.y` form are reconciled to the canonical
-`ISO42001.A.x.y` form. Existing tags for **non-ADR-006** codes (e.g. `packs/lifecycle.py`'s
-`A.5.31` / `A.5.32`) are left untouched — out of the Wave-1 8.
+**Amended Sprint-9 T8 (2026-05-22).** The T8 source-of-truth audit (§9.1) found the
+original "8/8 hook coverage" premise unachievable: 5 of the 8 controls have no built
+emission surface, and 3 of those reference code that does not exist yet
+(`core/auto_degradation.py`, `retrieval/citation_verifier.py`, a `compliance_checker`,
+`decision_history.export_for_subject`). Sprint 9 therefore ships **honest partial
+coverage** — it canonicalizes the evidence tags that real emissions already produce and
+records the rest as explicit `deferred` registry entries. It does **not** fake 8/8 and
+does **not** expand into building five new instrumented subsystems.
 
-The registry's coverage-audit test proves **8/8** controls each have ≥1 hook emitting
-the canonical ID. ADR-006's "every governance hook tags" remains the long-term
-aspiration the registry enables incrementally, not a Sprint-9 retrofit.
+### 9.1 T8 audit — source-of-truth control inventory
+
+| Control | `hook_status` | Finding |
+|---|---|---|
+| `A.9.2` | `implemented` | `llm/gateway.py` — 6 sites emit canonical `ISO42001.A.9.2`. Clean. |
+| `A.7.4` | `implemented` | Canonical at `core/guardrails.py:260`, `core/policy/engine.py:506/535/604`. **Raw `A.7.4`** at `protocol/trust_gate.py:672`, `protocol/plugin_registry.py:616`, `:638` — T9 reconciles these 3. |
+| `A.6.2.5` | `implemented` | `sandbox/audit.py:191` emits raw `A.6.2.5` — T9 reconciles to canonical. |
+| `A.6.2.6` | `deferred` | `portal/rbac/` emits no `audit_event` / `decision_history` chain rows; no taggable surface. |
+| `A.7.6` | `deferred` | `core/auto_degradation.py` does not exist; no `compliance_checker`. |
+| `A.8.2` | `deferred` | `retrieval/citation_verifier.py` does not exist (`retrieval/` is empty). |
+| `A.8.5` | `deferred` | `llm/gateway.py` emits A.9.2 (operational logging) on the completion path; nothing emits A.8.5. |
+| `A.10.2` | `deferred` | `core/decision_history.py` has no `export_for_subject` / regulator-export method. |
+
+### 9.2 T9 scope (rescoped per the T8 audit)
+
+T9 wires **only** the canonical-form reconciliation of emissions that already exist —
+`iso_controls=(...)` edited **explicitly at the call site**, **no** auto-lookup / default
+injection in `AuditStore` / `DecisionHistoryStore` (that would invert the `compliance/`
+→ `core/` dependency arrow). The four raw-form sites for the 3 `implemented` controls:
+
+- `sandbox/audit.py:191` — `("A.6.2.5",)` → `("ISO42001.A.6.2.5",)`
+- `protocol/trust_gate.py:672` — `("A.7.4",)` → `("ISO42001.A.7.4",)`
+- `protocol/plugin_registry.py:616` + `:638` — `("A.7.4",)` → `("ISO42001.A.7.4",)`
+
+These touch a sandbox enforcement boundary (`sandbox/audit.py`) and stop-rule /
+critical-control surfaces (`protocol/trust_gate.py`, `protocol/plugin_registry.py`):
+string-only evidence-tag edits, but governance-visible — T9 gets explicit human
+stop-rule review. Existing tags for **non-ADR-006** codes (`packs/lifecycle.py`'s
+`A.5.31` / `A.5.32`, `protocol/ui_events.py`'s `A.5.31`) are left untouched.
+
+T9 also adds the `hook_status` field to `ControlEntry` (registry-only) and marks the 5
+`deferred` controls with their §9.1 reasons. The coverage-audit test (§11) asserts the
+3 `implemented` controls emit canonically and the 5 `deferred` are explicitly recorded.
+
+ADR-006's "every governance hook tags" remains the long-term aspiration — the 5
+`deferred` controls are wired in the sprints that build their hook surfaces, not
+retrofitted here.
 
 ## 10. Critical-controls / stop-rule treatment
 
@@ -272,14 +318,19 @@ aspiration the registry enables incrementally, not a Sprint-9 retrofit.
   are stop-rule touches; all three get explicit RBAC stop-rule review.
 - `core/audit.py`, `core/decision_history.py`, `core/canonical.py` — **not modified**
   (by design — §3 dependency arrow, §5 read seam, §7 no store-method additions).
-- The tagging gap-fill (§9) makes one-line `iso_controls=` additions at emission sites
-  in `core/` and elsewhere — small, explicit, reviewable; no contract changes.
+- The tagging reconciliation (§9.2) makes string-only `iso_controls=` edits at four
+  existing emission sites — `sandbox/audit.py` (sandbox enforcement boundary) +
+  `protocol/trust_gate.py` + `protocol/plugin_registry.py` (stop-rule / critical-control
+  surfaces). Governance-visible; T9 gets explicit human stop-rule review. No contract
+  changes; `core/audit.py` / `core/decision_history.py` / `core/canonical.py` untouched.
 
 ## 11. Testing
 
 Per BUILD_PLAN §764 plus module-level coverage for the gate:
-- `test_control_mapping.py` — every ADR-006 control has ≥1 hook emitting its canonical
-  ID (registry coverage-audit helper); 8/8.
+- `test_control_mapping.py` — every `implemented` ADR-006 control (A.9.2, A.7.4,
+  A.6.2.5) emits its canonical ID, and every `deferred` control (A.6.2.6, A.7.6, A.8.2,
+  A.8.5, A.10.2) is explicitly recorded with a reason (registry coverage-audit helper):
+  3 implemented + 5 deferred, registry 8/8.
 - `test_evidence_pack.py` — generate a pack; validate the Merkle root; validate the
   cosign signature + Sigstore bundle.
 - `test_evidence_pack_completeness.py` — the pack contains every in-scope audit + decision
@@ -306,8 +357,10 @@ Per BUILD_PLAN §764 plus module-level coverage for the gate:
 - **AC5** — `GET /api/v1/compliance/evidence-pack` + `GET /api/v1/traces/{trace_id}` live
   under `portal/api/compliance/`, gated by the two new scopes + tenant isolation;
   cross-tenant requests get 404/empty.
-- **AC6** — 8/8 ADR-006 controls each have ≥1 hook emitting the canonical ID
-  (`test_control_mapping.py`).
+- **AC6** — the registry holds all 8 ADR-006 controls; the 3 `implemented` controls
+  (A.9.2, A.7.4, A.6.2.5) each emit the canonical ID and the 5 `deferred` controls are
+  explicitly recorded with reasons (`test_control_mapping.py`) — honest partial coverage
+  per the T8 audit (§9), not faked 8/8.
 - **AC7** — a trace timeline reconstructs a run from `_decision_history` without UI
   event-stream state.
 - **AC8** — the 4 compliance modules pass the 95/90 critical-controls gate; gate 73 → 77.
@@ -326,7 +379,7 @@ modules in §11.
 `portal/rbac/actor.py` (`Actor.scopes` widened to include `ComplianceRBACScope`);
 `portal/rbac/enforcement.py` (`RequireScope` `scope` param widened to accept
 `ComplianceRBACScope`); `portal/api/app.py` (mount the compliance router); emission
-sites identified by the §9 gap-fill audit; `tools/check_critical_coverage.py` (gate
+sites identified by the §9.1 T8 audit; `tools/check_critical_coverage.py` (gate
 73 → 77); `docs/BUILD_PLAN.md` §752 (status at sprint close).
 
 ## 14. BUILD_PLAN reconciliation notes

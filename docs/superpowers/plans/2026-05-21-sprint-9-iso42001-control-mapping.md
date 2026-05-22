@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build the ISO 42001 control-mapping evidence layer — a control registry, a signed tamper-evident evidence-pack export, two examiner portal endpoints, and 8/8 control-tagging coverage — without modifying any `core/` critical-controls module.
+**Goal:** Build the ISO 42001 control-mapping evidence layer — a control registry, a signed tamper-evident evidence-pack export, two examiner portal endpoints, and honest control-tag coverage (3 ADR-006 controls evidenced canonically, 5 explicitly deferred per the T8 audit) — without modifying any `core/` critical-controls module.
 
 **Architecture:** A new `compliance/iso42001/` package (registry + domain-separated Merkle + cosign signing + evidence-pack exporter) reads `decision_history` / `audit_event` through an injected `AsyncEngine` and the exported `_decision_history` / `_audit_event` Table objects — never touching `core/audit.py`, `core/decision_history.py`, or `core/canonical.py`. Two examiner endpoints ship in a new `portal/api/compliance/` route package; a new `ComplianceRBACScope` family gates them.
 
@@ -31,13 +31,19 @@ explicit token. T0 (the design spec) is already committed at `a37d83b` on branch
   `portal/rbac/actor.py` (`Actor.scopes` widens), and `portal/rbac/enforcement.py`
   (`RequireScope` `scope` param widens). The T5 halt summary must call for explicit RBAC
   stop-rule review of all three.
+- **T9 reconciles ADR-006 evidence tags across three governance-visible files**
+  (rescoped per the T8 audit) — `sandbox/audit.py` (sandbox enforcement boundary),
+  `protocol/trust_gate.py` + `protocol/plugin_registry.py` (stop-rule / critical-control
+  surfaces). String-only `iso_controls=` raw→canonical edits; the T9 halt summary must
+  request explicit human stop-rule review of all three.
 - **T10 promotes the 4 new `compliance/iso42001/` runtime modules to the
   critical-controls coverage gate** (95% line / 90% branch); gate count 73 → 77,
   verified against fresh `coverage.json` at promotion time.
 - **NO edits to `core/audit.py`, `core/decision_history.py`, `core/canonical.py`.** The
   `iso_controls` field + columns + `append` persistence already exist; Sprint 9 reads
-  these modules' exported Table objects but never modifies their source. T9 tagging
-  edits add `iso_controls=` at emission *call sites* in other modules.
+  these modules' exported Table objects but never modifies their source. T9 reconciles
+  raw `iso_controls=` tags to canonical form at emission *call sites* in other modules
+  (never `core/`).
 
 ## File Structure
 
@@ -59,7 +65,7 @@ explicit token. T0 (the design spec) is already committed at `a37d83b` on branch
 | `src/cognic_agentos/portal/rbac/enforcement.py` | Modified | `RequireScope` `scope` param widened to accept `ComplianceRBACScope`. **Stop-rule.** |
 | `src/cognic_agentos/portal/api/app.py` | Modified | Mount the compliance router. |
 | `tools/check_critical_coverage.py` | Modified | Gate 73 → 77 (T10). |
-| various emission sites | Modified | T9 tagging gap-fill — `iso_controls=` additions. |
+| `sandbox/audit.py`, `protocol/trust_gate.py`, `protocol/plugin_registry.py` | Modified | T9 — raw `iso_controls=` → canonical (3 governance-visible files; stop-rule). |
 | `tests/unit/compliance/iso42001/*` | Created | Unit tests (per task). |
 | `tests/unit/portal/api/compliance/*` | Created | Endpoint tests. |
 
@@ -2449,39 +2455,107 @@ control — `covered-canonical` / `covered-raw-needs-reconcile` / `gap`. For eac
 Present the audit table to the human. T9's tagging edits are scoped strictly to the
 sites this audit names — no casual edits beyond them. No commit (research only).
 
+### T8 outcome (2026-05-22) — Option 1 approved
+
+The audit found the "8/8 hook coverage" premise unachievable: 5 of 8 controls have no
+built emission surface, and 3 of those reference code that does not exist
+(`core/auto_degradation.py`, `retrieval/citation_verifier.py`, a `compliance_checker`,
+`decision_history.export_for_subject`). The authoritative audit table is recorded in
+the spec at §9.1.
+
+| Control | `hook_status` | T9 action |
+|---|---|---|
+| `A.9.2` | `implemented` | none — already canonical (`llm/gateway.py`). |
+| `A.7.4` | `implemented` | reconcile raw → canonical: `protocol/trust_gate.py:672`, `protocol/plugin_registry.py:616`, `:638`. |
+| `A.6.2.5` | `implemented` | reconcile raw → canonical: `sandbox/audit.py:191`. |
+| `A.6.2.6` | `deferred` | none — `portal/rbac/` has no chain-emission surface. |
+| `A.7.6` | `deferred` | none — `core/auto_degradation.py` / `compliance_checker` do not exist. |
+| `A.8.2` | `deferred` | none — `retrieval/citation_verifier.py` does not exist. |
+| `A.8.5` | `deferred` | none — no A.8.5 emission on the gateway completion path. |
+| `A.10.2` | `deferred` | none — no `decision_history.export_for_subject`. |
+
+**Decision:** human approved **Option 1** — Sprint 9 ships honest partial coverage
+(registry 8/8, evidenced 3/8 + 5 explicit `deferred`). The spec was amended first (§2,
+§4, §9, §10, §11, AC6); T9 is rescoped below. The 5 `deferred` controls are wired in the
+sprints that build their hook surfaces — NOT retrofitted here, NOT faked.
+
 ---
 
-## Task 9: Control-tagging gap-fill → 8/8
+## Task 9: Control-tagging — canonicalize evidence tags + `hook_status`  **(STOP-RULE: governance-tag edits)**
+
+Rescoped per the T8 audit + Option-1 decision (see the T8 outcome above + spec §9). T9
+canonicalizes the 4 raw-form emission sites of the 3 `implemented` controls and adds the
+registry `hook_status` field — it does **not** fake 8/8.
 
 **Files:**
-- Modify: the emission sites named by the Task 8 audit (explicit `iso_controls=` additions)
+- Modify: `src/cognic_agentos/compliance/iso42001/controls.py` — add `hook_status` to `ControlEntry` + the 8 entries (amends T1)
+- Modify: `src/cognic_agentos/compliance/iso42001/__init__.py` — re-export `HookStatus`
+- Modify: `src/cognic_agentos/sandbox/audit.py` — raw `A.6.2.5` → canonical (**sandbox enforcement boundary**)
+- Modify: `src/cognic_agentos/protocol/trust_gate.py` — raw `A.7.4` → canonical (**stop-rule / critical-control**)
+- Modify: `src/cognic_agentos/protocol/plugin_registry.py` — raw `A.7.4` ×2 → canonical (**stop-rule / critical-control**)
 - Test: `tests/unit/compliance/iso42001/test_control_mapping.py`
 
-- [ ] **Step 1: Write the failing test**
+The three emission-site files are governance-visible — string-only evidence-tag edits,
+but the T9 halt summary MUST request explicit human stop-rule review of all three.
 
-`test_control_mapping.py` exercises each of the 8 controls' hook and asserts the hook
-emits the canonical `ISO42001.A.x.y` into `iso_controls`; it builds the observed-set and
-asserts `audit_coverage(observed)` is `True` for all 8. Parametrized over the 8 controls.
+- [ ] **Step 1: Rework the registry — `controls.py`**
 
-- [ ] **Step 2: Run test to verify it fails**
+Add a closed-enum `HookStatus = Literal["implemented", "deferred"]` + two fields on
+`ControlEntry` — `hook_status` and `deferred_reason: str` (a short reason on every
+`deferred` entry, `""` for `implemented`; the registry-resident form of §9.1's reason).
+Mark A.9.2 / A.7.4 / A.6.2.5 `"implemented"` (`deferred_reason=""`); A.6.2.6 / A.7.6 /
+A.8.2 / A.8.5 / A.10.2 `"deferred"` with their §9.1 reason.
 
-Expected: FAIL on the controls the Task 8 audit flagged as `gap` / `raw`.
+Rework `audit_coverage` to the implemented/deferred model — the T1 form
+(`audit_coverage(emitted) -> dict[str, bool]`, "covered iff emitted") wrongly reports
+every `deferred` control as `False`, indistinguishable from a real gap. Replace it with
+a frozen `ControlCoverage` (`control_id`, `hook_status`, `emitted: bool`,
+`deferred_reason`) and `audit_coverage(emitted: set[str]) -> dict[str, ControlCoverage]`
+— one honest record per control. An `implemented` control is correctly covered iff
+`emitted`; a `deferred` control is correctly recorded iff NOT `emitted` AND
+`deferred_reason` is non-empty.
 
-- [ ] **Step 3: Wire the gap-fill edits**
+All four new names are **registry-only** — NOT added to the evidence-pack manifest;
+`evidence_pack._per_control_coverage` is untouched. Re-export `HookStatus` +
+`ControlCoverage` from `__init__.py`.
 
-At each site named by the Task 8 audit, add `iso_controls=("ISO42001.A.x.y",)` (or merge
-into an existing tuple) **explicitly at the call site**. Reconcile raw-`A.x.y` emitters
-of the 8 ADR-006 controls to the canonical `ISO42001.` form. Do **not** touch non-ADR-006
-codes (`A.5.31` / `A.5.32` in `protocol/ui_events.py`). No auto-lookup added to
-`AuditStore` / `DecisionHistoryStore`.
+- [ ] **Step 2: Write the failing test — `test_control_mapping.py`**
 
-- [ ] **Step 4: Run test to verify it passes** — PASS, 8/8.
+`test_control_mapping.py`:
+- builds the observed canonical-emission set by reading the actual emission sites the
+  T8 audit named (NOT by re-reading the registry — so a raw-form regression is caught);
+- drives the assertions through `audit_coverage(observed)`: every `implemented` control
+  has `emitted is True`; every `deferred` control has `emitted is False`,
+  `hook_status == "deferred"`, and a non-empty `deferred_reason`; every `implemented`
+  control has `deferred_reason == ""`;
+- asserts the registry still holds all 8 controls (`control_ids()` unchanged);
+- asserts no raw `("A.x.y",)` form survives at the 4 audited sites.
 
-- [ ] **Step 5: Commit (halt-before-commit first)**
+- [ ] **Step 3: Run test to verify it fails** — FAIL: the 3 raw sites still emit
+  `("A.x.y",)`; `hook_status` does not exist.
+
+- [ ] **Step 4: Reconcile the 4 raw emission sites**
+
+String-only edits, explicit at each call site:
+- `sandbox/audit.py:191` — `iso_controls=("A.6.2.5",)` → `iso_controls=("ISO42001.A.6.2.5",)`
+- `protocol/trust_gate.py:672` — `iso_controls=("A.7.4",)` → `iso_controls=("ISO42001.A.7.4",)`
+- `protocol/plugin_registry.py:616` + `:638` — `iso_controls=("A.7.4",)` → `iso_controls=("ISO42001.A.7.4",)`
+
+Do **not** touch non-ADR-006 codes (`A.5.31` / `A.5.32` in `protocol/ui_events.py` /
+`packs/lifecycle.py`). No auto-lookup added to `AuditStore` / `DecisionHistoryStore`.
+
+- [ ] **Step 5: Run test to verify it passes** — PASS — 3 implemented canonical, 5
+  deferred recorded, registry 8/8.
+
+- [ ] **Step 6: Commit (halt-before-commit first — STOP-RULE summary)**
+
+The halt summary MUST flag the 3 governance-visible emission-site files
+(`sandbox/audit.py`, `protocol/trust_gate.py`, `protocol/plugin_registry.py`) for
+explicit human stop-rule review.
 
 ```bash
-git add tests/unit/compliance/iso42001/test_control_mapping.py <each audited emission-site file>
-git commit -m "feat(sprint-9): T9 — control-tagging gap-fill (8/8 ADR-006 coverage)"
+git add src/cognic_agentos/compliance/iso42001/controls.py src/cognic_agentos/compliance/iso42001/__init__.py src/cognic_agentos/sandbox/audit.py src/cognic_agentos/protocol/trust_gate.py src/cognic_agentos/protocol/plugin_registry.py tests/unit/compliance/iso42001/test_control_mapping.py
+git commit -m "feat(sprint-9): T9 — canonicalize ADR-006 evidence tags + hook_status (STOP-RULE)"
 ```
 
 ---
@@ -2541,8 +2615,9 @@ git commit -m "chore(sprint-9): T10 — critical-controls gate uplift 73->77 + B
 
 **1. Spec coverage.** §3 module structure → T1-T4, T6-T7; §4 registry → T1; §5 Merkle →
 T2; §6 evidence pack + signing → T3-T4; §7 read seam (`engine: AsyncEngine`,
-`_require_adapters`) → T6; §8 endpoints + RBAC → T5-T7; §9 tagging gap-fill →
-T8-T9; §10 critical-controls/stop-rule → T4/T5/T10 flags; §11 testing → tests in every
+`_require_adapters`) → T6; §8 endpoints + RBAC → T5-T7; §9 tagging reconciliation →
+T8-T9 (rescoped per the T8 audit — canonicalize-what-exists + explicit deferrals);
+§10 critical-controls/stop-rule → T4/T5/T9/T10 flags; §11 testing → tests in every
 task; §12 AC1-AC9 → T10 Step 6. No gaps.
 
 **2. Placeholder scan.** Every code task carries literal complete code — the registry
