@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from cognic_agentos.compliance.iso42001.signing import (
+    CosignArtifacts,
     EvidencePackSigningError,
     SigningIdentity,
     cosign_sign_blob,
@@ -67,15 +68,15 @@ async def test_cosign_sign_blob_fails_loud_when_cosign_absent(
         await cosign_sign_blob(b"{}", SigningIdentity(identity="x", pem=b"k"))
 
 
-def test_validate_artifacts_rejects_empty_signature() -> None:
-    from cognic_agentos.compliance.iso42001.signing import _validate_artifacts
+def test_validate_cosign_artifacts_rejects_empty_signature() -> None:
+    from cognic_agentos.compliance.iso42001.signing import validate_cosign_artifacts
 
     with pytest.raises(EvidencePackSigningError, match="empty signature"):
-        _validate_artifacts(b"", b"bundle-bytes")
+        validate_cosign_artifacts(CosignArtifacts(signature=b"", bundle=b"bundle-bytes"))
 
 
-def test_validate_artifacts_rejects_empty_bundle() -> None:
-    from cognic_agentos.compliance.iso42001.signing import _validate_artifacts
+def test_validate_cosign_artifacts_rejects_empty_bundle() -> None:
+    from cognic_agentos.compliance.iso42001.signing import validate_cosign_artifacts
 
     with pytest.raises(EvidencePackSigningError, match="empty Sigstore bundle"):
-        _validate_artifacts(b"sig-bytes", b"")
+        validate_cosign_artifacts(CosignArtifacts(signature=b"sig-bytes", bundle=b""))

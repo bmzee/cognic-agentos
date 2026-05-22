@@ -524,6 +524,7 @@ from pathlib import Path
 import pytest
 
 from cognic_agentos.compliance.iso42001.signing import (
+    CosignArtifacts,
     EvidencePackSigningError,
     SigningIdentity,
     cosign_sign_blob,
@@ -584,18 +585,18 @@ async def test_cosign_sign_blob_fails_loud_when_cosign_absent(
         await cosign_sign_blob(b"{}", SigningIdentity(identity="x", pem=b"k"))
 
 
-def test_validate_artifacts_rejects_empty_signature() -> None:
-    from cognic_agentos.compliance.iso42001.signing import _validate_artifacts
+def test_validate_cosign_artifacts_rejects_empty_signature() -> None:
+    from cognic_agentos.compliance.iso42001.signing import validate_cosign_artifacts
 
     with pytest.raises(EvidencePackSigningError, match="empty signature"):
-        _validate_artifacts(b"", b"bundle-bytes")
+        validate_cosign_artifacts(CosignArtifacts(signature=b"", bundle=b"bundle-bytes"))
 
 
-def test_validate_artifacts_rejects_empty_bundle() -> None:
-    from cognic_agentos.compliance.iso42001.signing import _validate_artifacts
+def test_validate_cosign_artifacts_rejects_empty_bundle() -> None:
+    from cognic_agentos.compliance.iso42001.signing import validate_cosign_artifacts
 
     with pytest.raises(EvidencePackSigningError, match="empty Sigstore bundle"):
-        _validate_artifacts(b"sig-bytes", b"")
+        validate_cosign_artifacts(CosignArtifacts(signature=b"sig-bytes", bundle=b""))
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -805,18 +806,23 @@ async def cosign_sign_blob(manifest: bytes, identity: SigningIdentity) -> Cosign
         signature = sig_file.read_bytes()
         bundle = bundle_file.read_bytes()
         # tempdir (incl. the key file) is removed on context exit.
-        _validate_artifacts(signature, bundle)
-        return CosignArtifacts(signature=signature, bundle=bundle)
+        artifacts = CosignArtifacts(signature=signature, bundle=bundle)
+        validate_cosign_artifacts(artifacts)
+        return artifacts
 
 
-def _validate_artifacts(signature: bytes, bundle: bytes) -> None:
-    """Reject empty cosign outputs — an empty .sig / .bundle.sigstore is a
-    structurally-complete but UNVERIFIABLE examiner artifact. cli/sign.py
+def validate_cosign_artifacts(artifacts: CosignArtifacts) -> None:
+    """Reject empty signing outputs — an empty .sig / .bundle.sigstore is
+    a structurally-complete but UNVERIFIABLE examiner artifact. cli/sign.py
     treats empty signing outputs as a failure; mirror that, fail-loud
-    (cosign can exit 0 yet leave a zero-byte output on some error paths)."""
-    if not signature:
+    (cosign can exit 0 yet leave a zero-byte output on some error paths).
+
+    Public so the evidence-pack exporter can re-validate ANY injected
+    signer's output — the ``signer`` seam in evidence_pack.py accepts
+    test / custom signers, not only cosign_sign_blob's own output."""
+    if not artifacts.signature:
         raise EvidencePackSigningError("cosign produced an empty signature.")
-    if not bundle:
+    if not artifacts.bundle:
         raise EvidencePackSigningError("cosign produced an empty Sigstore bundle.")
 ```
 
@@ -860,26 +866,71 @@ from __future__ import annotations
 import io
 import json
 import tarfile
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
-from sqlalchemy.ext.asyncio import create_async_engine
+import pytest
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
+from cognic_agentos.compliance.iso42001.controls import ISO42001_CONTROLS
 from cognic_agentos.compliance.iso42001.evidence_pack import export_evidence_pack
 from cognic_agentos.compliance.iso42001.merkle import merkle_root
-from cognic_agentos.compliance.iso42001.signing import CosignArtifacts, SigningIdentity
+from cognic_agentos.compliance.iso42001.signing import (
+    CosignArtifacts,
+    EvidencePackSigningError,
+    SigningIdentity,
+)
 from cognic_agentos.core.audit import AuditEvent, AuditStore, _chain_heads, _metadata
 from cognic_agentos.core.canonical import ZERO_HASH
 from cognic_agentos.core.decision_history import DecisionHistoryStore, DecisionRecord
 
 _WIDE = (datetime(2000, 1, 1, tzinfo=UTC), datetime(2100, 1, 1, tzinfo=UTC))
 
+#: The 12 wire-public manifest.json keys (stop-rule contract).
+_MANIFEST_KEYS = {
+    "schema_version",
+    "agentos_version",
+    "tenant_id",
+    "period_start",
+    "period_end",
+    "generated_at",
+    "merkle_algorithm",
+    "merkle_root",
+    "audit_event_row_count",
+    "decision_history_row_count",
+    "signing_identity",
+    "per_control_coverage",
+}
+
+#: The DB-column key set of one serialised chain row (audit_event and
+#: decision_history carry the identical 15 column names).
+_ROW_COLUMNS = {
+    "record_id",
+    "sequence",
+    "schema_version",
+    "tenant_id",
+    "prev_hash",
+    "hash",
+    "created_at",
+    "event_type",
+    "request_id",
+    "trace_id",
+    "span_id",
+    "langfuse_trace_id",
+    "provider_label",
+    "iso_controls",
+    "payload",
+}
+
 
 async def _fake_signer(manifest: bytes, identity: SigningIdentity) -> CosignArtifacts:
     return CosignArtifacts(signature=b"fake-sig", bundle=b"fake-bundle")
 
 
-async def _seeded_engine(tmp_path: Path):
+async def _seeded_engine(
+    tmp_path: Path,
+) -> tuple[AsyncEngine, AuditStore, DecisionHistoryStore]:
     """File-backed sqlite engine with the governance schema + chain heads,
     plus AuditStore / DecisionHistoryStore for seeding."""
     engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'ev.db'}")
@@ -913,34 +964,145 @@ def _members(tar_bytes: bytes) -> dict[str, bytes]:
         return out
 
 
+def _assert_row_encoding(row: dict[str, object]) -> None:
+    """Pin the wire encoding of one serialised chain row (stop-rule)."""
+    assert set(row) == _ROW_COLUMNS
+    for col in ("prev_hash", "hash"):
+        value = row[col]
+        assert isinstance(value, str)
+        assert len(value) == 64
+        assert value == value.lower()
+        bytes.fromhex(value)  # raises if not lowercase hex
+    created_at = row["created_at"]
+    assert isinstance(created_at, str)
+    datetime.fromisoformat(created_at)  # raises if not ISO-8601
+    record_id = row["record_id"]
+    assert isinstance(record_id, str)
+    uuid.UUID(record_id)  # raises if not a UUID string
+    assert isinstance(row["payload"], dict)
+    assert isinstance(row["iso_controls"], list)
+
+
 async def test_export_produces_signed_tarball_with_pinned_members(tmp_path: Path) -> None:
     engine, audit, dh = await _seeded_engine(tmp_path)
     await audit.append(
-        AuditEvent(event_type="audit.test", request_id="r1", payload={},
-                   tenant_id="t-1", iso_controls=("ISO42001.A.9.2",))
+        AuditEvent(
+            event_type="audit.test",
+            request_id="r1",
+            payload={},
+            tenant_id="t-1",
+            iso_controls=("ISO42001.A.9.2",),
+        )
     )
     await dh.append(
-        DecisionRecord(decision_type="d.test", request_id="r2", payload={"k": "v"},
-                       tenant_id="t-1", iso_controls=("ISO42001.A.7.4",))
+        DecisionRecord(
+            decision_type="d.test",
+            request_id="r2",
+            payload={"k": "v"},
+            tenant_id="t-1",
+            iso_controls=("ISO42001.A.7.4",),
+        )
     )
     tar_bytes = await export_evidence_pack(
-        engine=engine, tenant_id="t-1",
-        period_start=_WIDE[0], period_end=_WIDE[1],
-        signing_key_path=_pem(tmp_path), secret_adapter=None, signer=_fake_signer,
+        engine=engine,
+        tenant_id="t-1",
+        period_start=_WIDE[0],
+        period_end=_WIDE[1],
+        signing_key_path=_pem(tmp_path),
+        secret_adapter=None,
+        signer=_fake_signer,
     )
     members = _members(tar_bytes)
     assert set(members) == {
-        "manifest.json", "manifest.json.sig", "manifest.json.bundle.sigstore",
-        "audit_event.jsonl", "decision_history.jsonl",
+        "manifest.json",
+        "manifest.json.sig",
+        "manifest.json.bundle.sigstore",
+        "audit_event.jsonl",
+        "decision_history.jsonl",
     }
+    # The cosign artifact members are the signer's outputs verbatim.
+    assert members["manifest.json.sig"] == b"fake-sig"
+    assert members["manifest.json.bundle.sigstore"] == b"fake-bundle"
+
     manifest = json.loads(members["manifest.json"])
+    # manifest.json IS the canonical compact form (sorted keys, tight separators).
+    assert members["manifest.json"] == json.dumps(
+        manifest, separators=(",", ":"), sort_keys=True
+    ).encode("utf-8")
+    # Exactly the 12 wire-public manifest keys — no more, no fewer.
+    assert set(manifest) == _MANIFEST_KEYS
     assert manifest["schema_version"] == 1
     assert manifest["tenant_id"] == "t-1"
     assert manifest["merkle_algorithm"] == "iso42001-evidence-merkle-v1"
     assert manifest["signing_identity"] == _pem(tmp_path)
     assert manifest["audit_event_row_count"] == 1
     assert manifest["decision_history_row_count"] == 1
-    assert "per_control_coverage" in manifest
+
+    # per_control_coverage carries all 8 registry controls verbatim, with
+    # display + title from the registry and the seeded controls counted.
+    coverage = manifest["per_control_coverage"]
+    assert set(coverage) == {entry.control_id for entry in ISO42001_CONTROLS}
+    for entry in ISO42001_CONTROLS:
+        cell = coverage[entry.control_id]
+        assert cell["display"] == entry.display
+        assert cell["title"] == entry.title
+    seeded = {"ISO42001.A.9.2", "ISO42001.A.7.4"}
+    for cid, cell in coverage.items():
+        assert cell["tagged_row_count"] == (1 if cid in seeded else 0)
+
+
+async def test_jsonl_row_encoding_is_pinned(tmp_path: Path) -> None:
+    engine, audit, dh = await _seeded_engine(tmp_path)
+    await audit.append(
+        AuditEvent(
+            event_type="a",
+            request_id="r1",
+            payload={"x": 1},
+            tenant_id="t-1",
+            iso_controls=("ISO42001.A.9.2",),
+        )
+    )
+    await audit.append(
+        AuditEvent(
+            event_type="a",
+            request_id="r2",
+            payload={"x": 2},
+            tenant_id="t-1",
+            iso_controls=("ISO42001.A.9.2",),
+        )
+    )
+    await dh.append(
+        DecisionRecord(
+            decision_type="d",
+            request_id="r3",
+            payload={"y": 3},
+            tenant_id="t-1",
+            iso_controls=("ISO42001.A.7.4",),
+        )
+    )
+    tar_bytes = await export_evidence_pack(
+        engine=engine,
+        tenant_id="t-1",
+        period_start=_WIDE[0],
+        period_end=_WIDE[1],
+        signing_key_path=_pem(tmp_path),
+        secret_adapter=None,
+        signer=_fake_signer,
+    )
+    members = _members(tar_bytes)
+    audit_jsonl = members["audit_event.jsonl"]
+    dh_jsonl = members["decision_history.jsonl"]
+    # Non-empty JSONL is newline-terminated.
+    assert audit_jsonl.endswith(b"\n")
+    assert dh_jsonl.endswith(b"\n")
+    audit_rows = [json.loads(line) for line in audit_jsonl.splitlines()]
+    dh_rows = [json.loads(line) for line in dh_jsonl.splitlines()]
+    for row in (*audit_rows, *dh_rows):
+        _assert_row_encoding(row)
+    # The audit chain exports sequence-ascending (deterministic Merkle order).
+    sequences = [row["sequence"] for row in audit_rows]
+    assert len(sequences) == 2
+    assert sequences == sorted(sequences)
 
 
 async def test_export_merkle_root_recomputes_from_bundled_rows(tmp_path: Path) -> None:
@@ -948,8 +1110,13 @@ async def test_export_merkle_root_recomputes_from_bundled_rows(tmp_path: Path) -
     await audit.append(AuditEvent(event_type="a", request_id="r1", payload={}, tenant_id="t-1"))
     await dh.append(DecisionRecord(decision_type="d", request_id="r2", payload={}, tenant_id="t-1"))
     tar_bytes = await export_evidence_pack(
-        engine=engine, tenant_id="t-1", period_start=_WIDE[0], period_end=_WIDE[1],
-        signing_key_path=_pem(tmp_path), secret_adapter=None, signer=_fake_signer,
+        engine=engine,
+        tenant_id="t-1",
+        period_start=_WIDE[0],
+        period_end=_WIDE[1],
+        signing_key_path=_pem(tmp_path),
+        secret_adapter=None,
+        signer=_fake_signer,
     )
     members = _members(tar_bytes)
     manifest = json.loads(members["manifest.json"])
@@ -971,14 +1138,55 @@ async def test_export_excludes_other_tenant_rows(tmp_path: Path) -> None:
     await audit.append(AuditEvent(event_type="a", request_id="r2", payload={}, tenant_id="t-2"))
     await dh.append(DecisionRecord(decision_type="d", request_id="r3", payload={}, tenant_id="t-2"))
     tar_bytes = await export_evidence_pack(
-        engine=engine, tenant_id="t-1", period_start=_WIDE[0], period_end=_WIDE[1],
-        signing_key_path=_pem(tmp_path), secret_adapter=None, signer=_fake_signer,
+        engine=engine,
+        tenant_id="t-1",
+        period_start=_WIDE[0],
+        period_end=_WIDE[1],
+        signing_key_path=_pem(tmp_path),
+        secret_adapter=None,
+        signer=_fake_signer,
     )
     members = _members(tar_bytes)
     audit_lines = members["audit_event.jsonl"].splitlines()
     assert len(audit_lines) == 1
     assert json.loads(audit_lines[0])["tenant_id"] == "t-1"
     assert members["decision_history.jsonl"] == b""  # no t-1 decision rows
+
+
+async def test_export_rejects_signer_returning_empty_signature(tmp_path: Path) -> None:
+    engine, *_ = await _seeded_engine(tmp_path)
+
+    async def _empty_sig_signer(manifest: bytes, identity: SigningIdentity) -> CosignArtifacts:
+        return CosignArtifacts(signature=b"", bundle=b"bundle")
+
+    with pytest.raises(EvidencePackSigningError, match="empty signature"):
+        await export_evidence_pack(
+            engine=engine,
+            tenant_id="t-1",
+            period_start=_WIDE[0],
+            period_end=_WIDE[1],
+            signing_key_path=_pem(tmp_path),
+            secret_adapter=None,
+            signer=_empty_sig_signer,
+        )
+
+
+async def test_export_rejects_signer_returning_empty_bundle(tmp_path: Path) -> None:
+    engine, *_ = await _seeded_engine(tmp_path)
+
+    async def _empty_bundle_signer(manifest: bytes, identity: SigningIdentity) -> CosignArtifacts:
+        return CosignArtifacts(signature=b"sig", bundle=b"")
+
+    with pytest.raises(EvidencePackSigningError, match="empty Sigstore bundle"):
+        await export_evidence_pack(
+            engine=engine,
+            tenant_id="t-1",
+            period_start=_WIDE[0],
+            period_end=_WIDE[1],
+            signing_key_path=_pem(tmp_path),
+            secret_adapter=None,
+            signer=_empty_bundle_signer,
+        )
 ```
 
 `tests/unit/compliance/iso42001/test_evidence_pack_completeness.py`:
@@ -1026,7 +1234,9 @@ async def test_pack_contains_exactly_the_in_window_rows(tmp_path: Path) -> None:
         for chain_id in ("audit_event", "decision_history"):
             await conn.execute(
                 _chain_heads.insert().values(
-                    chain_id=chain_id, latest_sequence=0, latest_hash=ZERO_HASH,
+                    chain_id=chain_id,
+                    latest_sequence=0,
+                    latest_hash=ZERO_HASH,
                     updated_at=datetime.now(UTC),
                 )
             )
@@ -1034,9 +1244,7 @@ async def test_pack_contains_exactly_the_in_window_rows(tmp_path: Path) -> None:
     # Seed 3 t-1 audit rows; created_at is server-set on append, so UPDATE
     # each to a controlled timestamp keyed by its (unique) request_id.
     for rid in ("in-a", "in-b", "out"):
-        await audit.append(
-            AuditEvent(event_type="a", request_id=rid, payload={}, tenant_id="t-1")
-        )
+        await audit.append(AuditEvent(event_type="a", request_id=rid, payload={}, tenant_id="t-1"))
     base = datetime(2026, 6, 1, tzinfo=UTC)
     stamps = {
         "in-a": base,
@@ -1046,14 +1254,16 @@ async def test_pack_contains_exactly_the_in_window_rows(tmp_path: Path) -> None:
     async with engine.begin() as conn:
         for rid, ts in stamps.items():
             await conn.execute(
-                update(_audit_event)
-                .where(_audit_event.c.request_id == rid)
-                .values(created_at=ts)
+                update(_audit_event).where(_audit_event.c.request_id == rid).values(created_at=ts)
             )
     tar_bytes = await export_evidence_pack(
-        engine=engine, tenant_id="t-1",
-        period_start=base, period_end=base + timedelta(days=1),
-        signing_key_path=_pem(tmp_path), secret_adapter=None, signer=_fake_signer,
+        engine=engine,
+        tenant_id="t-1",
+        period_start=base,
+        period_end=base + timedelta(days=1),
+        signing_key_path=_pem(tmp_path),
+        secret_adapter=None,
+        signer=_fake_signer,
     )
     with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:gz") as tar:
         f = tar.extractfile("audit_event.jsonl")
@@ -1104,6 +1314,7 @@ from cognic_agentos.compliance.iso42001.signing import (
     SigningIdentity,
     cosign_sign_blob,
     resolve_signing_identity,
+    validate_cosign_artifacts,
 )
 from cognic_agentos.core.audit import _audit_event
 from cognic_agentos.core.decision_history import _decision_history
@@ -1219,18 +1430,12 @@ async def export_evidence_pack(
         key_path=signing_key_path, secret_adapter=secret_adapter
     )
     async with engine.connect() as conn:
-        audit_rows = await _query_chain(
-            conn, _audit_event, tenant_id, period_start, period_end
-        )
-        dh_rows = await _query_chain(
-            conn, _decision_history, tenant_id, period_start, period_end
-        )
+        audit_rows = await _query_chain(conn, _audit_event, tenant_id, period_start, period_end)
+        dh_rows = await _query_chain(conn, _decision_history, tenant_id, period_start, period_end)
 
     # Merkle leaves: audit_event chain THEN decision_history chain, each
     # already sequence-ordered; leaf input = the row's raw `hash` bytes.
-    leaves = [r._mapping["hash"] for r in audit_rows] + [
-        r._mapping["hash"] for r in dh_rows
-    ]
+    leaves = [r._mapping["hash"] for r in audit_rows] + [r._mapping["hash"] for r in dh_rows]
     root = merkle_root(leaves)
 
     manifest = {
@@ -1247,11 +1452,13 @@ async def export_evidence_pack(
         "signing_identity": identity.identity,
         "per_control_coverage": _per_control_coverage([*audit_rows, *dh_rows]),
     }
-    manifest_bytes = json.dumps(
-        manifest, separators=(",", ":"), sort_keys=True
-    ).encode("utf-8")
+    manifest_bytes = json.dumps(manifest, separators=(",", ":"), sort_keys=True).encode("utf-8")
 
     artifacts = await signer(manifest_bytes, identity)
+    # The `signer` seam accepts test / custom signers, not only the
+    # default cosign_sign_blob — re-validate the output here so no signer
+    # path can produce a structurally-complete but unverifiable pack.
+    validate_cosign_artifacts(artifacts)
 
     return _build_tarball(
         manifest=manifest_bytes,

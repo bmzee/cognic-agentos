@@ -174,16 +174,21 @@ async def cosign_sign_blob(manifest: bytes, identity: SigningIdentity) -> Cosign
         signature = sig_file.read_bytes()
         bundle = bundle_file.read_bytes()
         # tempdir (incl. the key file) is removed on context exit.
-        _validate_artifacts(signature, bundle)
-        return CosignArtifacts(signature=signature, bundle=bundle)
+        artifacts = CosignArtifacts(signature=signature, bundle=bundle)
+        validate_cosign_artifacts(artifacts)
+        return artifacts
 
 
-def _validate_artifacts(signature: bytes, bundle: bytes) -> None:
-    """Reject empty cosign outputs — an empty .sig / .bundle.sigstore is a
-    structurally-complete but UNVERIFIABLE examiner artifact. cli/sign.py
+def validate_cosign_artifacts(artifacts: CosignArtifacts) -> None:
+    """Reject empty signing outputs — an empty .sig / .bundle.sigstore is
+    a structurally-complete but UNVERIFIABLE examiner artifact. cli/sign.py
     treats empty signing outputs as a failure; mirror that, fail-loud
-    (cosign can exit 0 yet leave a zero-byte output on some error paths)."""
-    if not signature:
+    (cosign can exit 0 yet leave a zero-byte output on some error paths).
+
+    Public so the evidence-pack exporter can re-validate ANY injected
+    signer's output — the ``signer`` seam in evidence_pack.py accepts
+    test / custom signers, not only cosign_sign_blob's own output."""
+    if not artifacts.signature:
         raise EvidencePackSigningError("cosign produced an empty signature.")
-    if not bundle:
+    if not artifacts.bundle:
         raise EvidencePackSigningError("cosign produced an empty Sigstore bundle.")
