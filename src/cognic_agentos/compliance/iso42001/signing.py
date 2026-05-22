@@ -122,9 +122,13 @@ async def cosign_sign_blob(manifest: bytes, identity: SigningIdentity) -> Cosign
     """``cosign sign-blob`` over ``manifest``. Fail-loud if cosign is
     absent, times out, exits non-zero, or fails to produce both outputs.
 
-    argv mirrors cli/sign.py's _exec_cosign_sign_blob:
-      cosign sign-blob --yes --key <key> --output-signature <sig>
-        --bundle <bundle> <blob>
+    argv follows cli/sign.py's list-form subprocess shape, with
+    --use-signing-config=false + --new-bundle-format=false so cosign v3
+    still writes the separate --output-signature artifact and a bundle
+    that `verify-blob --signature --bundle` accepts (the Sprint 9
+    evidence-pack wire shape):
+      cosign sign-blob --yes --use-signing-config=false --new-bundle-format=false
+        --key <key> --output-signature <sig> --bundle <bundle> <blob>
     """
     cosign = shutil.which("cosign")
     if cosign is None:
@@ -145,6 +149,8 @@ async def cosign_sign_blob(manifest: bytes, identity: SigningIdentity) -> Cosign
             cosign,
             "sign-blob",
             "--yes",
+            "--use-signing-config=false",
+            "--new-bundle-format=false",
             "--key",
             str(key_file),
             "--output-signature",

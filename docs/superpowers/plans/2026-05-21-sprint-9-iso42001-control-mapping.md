@@ -760,9 +760,13 @@ async def cosign_sign_blob(manifest: bytes, identity: SigningIdentity) -> Cosign
     """``cosign sign-blob`` over ``manifest``. Fail-loud if cosign is
     absent, times out, exits non-zero, or fails to produce both outputs.
 
-    argv mirrors cli/sign.py's _exec_cosign_sign_blob:
-      cosign sign-blob --yes --key <key> --output-signature <sig>
-        --bundle <bundle> <blob>
+    argv follows cli/sign.py's list-form subprocess shape, with
+    --use-signing-config=false + --new-bundle-format=false so cosign v3
+    still writes the separate --output-signature artifact and a bundle
+    that `verify-blob --signature --bundle` accepts (the Sprint 9
+    evidence-pack wire shape):
+      cosign sign-blob --yes --use-signing-config=false --new-bundle-format=false
+        --key <key> --output-signature <sig> --bundle <bundle> <blob>
     """
     cosign = shutil.which("cosign")
     if cosign is None:
@@ -783,6 +787,8 @@ async def cosign_sign_blob(manifest: bytes, identity: SigningIdentity) -> Cosign
             cosign,
             "sign-blob",
             "--yes",
+            "--use-signing-config=false",
+            "--new-bundle-format=false",
             "--key",
             str(key_file),
             "--output-signature",
@@ -2590,7 +2596,8 @@ git commit -m "feat(sprint-9): T9 — canonicalize ADR-006 evidence tags + hook_
 - Modify: `tools/check_critical_coverage.py` (+4 entries → 77)
 - Modify: `tests/unit/tools/test_check_critical_coverage.py` (count-guard 73→77 + a Sprint-9 gate/off-gate block mirroring the Sprint-8.5 block)
 - Create: `tests/unit/compliance/iso42001/test_signing_coverage.py` + `test_merkle_coverage.py` (T10 negative-path coverage top-up — see Step 4)
-- Modify: `docs/BUILD_PLAN.md` §752 (Sprint 9 → READY-FOR-GATE — not yet CLOSED; AC4 pending)
+- Modify: `docs/BUILD_PLAN.md` §752 (T10 → READY-FOR-GATE; AC4 follow-up → CLOSED
+  once external `cosign verify-blob` evidence is recorded)
 
 - [ ] **Step 1: Add the 4 compliance modules to the coverage gate**
 
@@ -2629,14 +2636,14 @@ any of the 4 is below floor, add focused negative-path tests in the SAME task an
 
 Flip the Sprint 9 entry to a **READY-FOR-GATE** status (branch + critical-controls
 73→77 + AC summary). Sprint 9 is marked **CLOSED** only after AC4 (a generated evidence
-pack passing external `cosign verify-blob`) is run + recorded — `cosign` is not
-available in the build session, so AC4 is a tracked pre-CLOSE follow-up; do **not** mark
-Sprint 9 CLOSED while a numbered acceptance criterion is unmet.
+pack passing external `cosign verify-blob`) is run + recorded; do **not** mark Sprint 9
+CLOSED while a numbered acceptance criterion is unmet. The post-T10 AC4 follow-up
+records that evidence and flips `BUILD_PLAN` to CLOSED.
 
 - [ ] **Step 6: Verify acceptance criteria** — AC1-AC3 + AC5-AC9 (spec §12), each backed
-  by a passing test or gate result; record **AC4** (a generated evidence pack passing
-  external `cosign verify-blob`) as a tracked pre-CLOSE follow-up — `cosign` is not
-  available in the build session.
+  by a passing test or gate result. AC4 is verified in the post-T10 follow-up by running
+  external `cosign verify-blob` against a generated evidence pack and recording the
+  output in `docs/evidence/sprint-9-ac4-cosign-verify.md`.
 
 - [ ] **Step 7: Commit (halt-before-commit first)**
 
@@ -2649,6 +2656,54 @@ git add tools/check_critical_coverage.py \
         docs/superpowers/plans/2026-05-21-sprint-9-iso42001-control-mapping.md
 git commit -m "chore(sprint-9): T10 — critical-controls gate uplift 73->77 + BUILD_PLAN status"
 ```
+
+---
+
+## Post-T10 AC4 follow-up: external cosign verify + CLOSED flip
+
+**Why this exists:** T10 correctly left Sprint 9 READY-FOR-GATE because external
+`cosign verify-blob` had not run. The AC4 follow-up runs the live tool, records the
+evidence, and flips `BUILD_PLAN` to CLOSED.
+
+**Files:**
+- Modify: `src/cognic_agentos/compliance/iso42001/signing.py`
+- Modify: `tests/unit/compliance/iso42001/test_signing_coverage.py`
+- Create: `docs/evidence/sprint-9-ac4-cosign-verify.md`
+- Modify: `docs/BUILD_PLAN.md` §752 (Sprint 9 → CLOSED; AC4 evidence linked)
+- Modify: this plan section (AC4 follow-up reconciliation)
+
+**Compatibility finding:** cosign v3.0.6 defaults to the new signing-config/new-bundle
+path. With Sprint 9's original argv, `cosign sign-blob` can exit 0 while ignoring
+`--output-signature`, producing only a bundle; with `--use-signing-config=false` only,
+cosign writes `.sig` but produces a new-format bundle that `verify-blob --signature
+--bundle` refuses. The signing argv therefore pins both compatibility flags:
+
+```text
+--use-signing-config=false --new-bundle-format=false
+```
+
+**Regression test:** `test_cosign_sign_blob_pins_v3_compat_flags_for_sig_and_bundle`
+asserts both flags are present in the subprocess argv.
+
+**External verification output:**
+
+```text
+Verified OK
+```
+
+**Independent Merkle recomputation output:**
+
+```text
+manifest_merkle_root=48aa30cf18a44b06bbe8e2dccbbb5619621889b0cd615f475ba1c8950bafb7c0
+recomputed_merkle_root=48aa30cf18a44b06bbe8e2dccbbb5619621889b0cd615f475ba1c8950bafb7c0
+audit_event_rows=1
+decision_history_rows=1
+match=True
+```
+
+**Result:** AC4 is satisfied for the generated pack recorded in
+`docs/evidence/sprint-9-ac4-cosign-verify.md`; Sprint 9 is CLOSED in
+`docs/BUILD_PLAN.md`.
 
 ---
 

@@ -137,6 +137,24 @@ async def test_cosign_sign_blob_success(monkeypatch: pytest.MonkeyPatch) -> None
     assert artifacts == CosignArtifacts(signature=b"real-sig", bundle=b"real-bundle")
 
 
+async def test_cosign_sign_blob_pins_v3_compat_flags_for_sig_and_bundle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[str] = []
+
+    async def _exec(*argv: str, **_kwargs: object) -> _FakeProc:
+        captured.extend(argv)
+        Path(argv[argv.index("--output-signature") + 1]).write_bytes(b"SIG")
+        Path(argv[argv.index("--bundle") + 1]).write_bytes(b"BUNDLE")
+        return _FakeProc(0, b"")
+
+    _arm_cosign(monkeypatch, _exec)
+    await cosign_sign_blob(b"{}", _IDENTITY)
+
+    assert "--use-signing-config=false" in captured
+    assert "--new-bundle-format=false" in captured
+
+
 async def test_cosign_sign_blob_raises_on_nonzero_exit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
