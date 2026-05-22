@@ -2488,11 +2488,12 @@ canonicalizes the 4 raw-form emission sites of the 3 `implemented` controls and 
 registry `hook_status` field — it does **not** fake 8/8.
 
 **Files:**
-- Modify: `src/cognic_agentos/compliance/iso42001/controls.py` — add `hook_status` to `ControlEntry` + the 8 entries (amends T1)
-- Modify: `src/cognic_agentos/compliance/iso42001/__init__.py` — re-export `HookStatus`
+- Modify: `src/cognic_agentos/compliance/iso42001/controls.py` — rework the registry: `hook_status` + `deferred_reason` on `ControlEntry`, new `ControlCoverage` + reworked `audit_coverage` (amends T1)
+- Modify: `src/cognic_agentos/compliance/iso42001/__init__.py` — re-export `HookStatus` + `ControlCoverage`
 - Modify: `src/cognic_agentos/sandbox/audit.py` — raw `A.6.2.5` → canonical (**sandbox enforcement boundary**)
 - Modify: `src/cognic_agentos/protocol/trust_gate.py` — raw `A.7.4` → canonical (**stop-rule / critical-control**)
 - Modify: `src/cognic_agentos/protocol/plugin_registry.py` — raw `A.7.4` ×2 → canonical (**stop-rule / critical-control**)
+- Modify: 7 downstream test files that pinned the old raw `A.x.y` form — `tests/unit/sandbox/test_audit_event_taxonomy.py`, `test_warm_pool.py`, `backends/test_docker_sibling_audit_emission.py`, `backends/test_docker_sibling_egress_classification.py`, `backends/test_docker_sibling_exec_classification.py`, `tests/unit/protocol/test_trust_gate.py`, `test_plugin_registry.py` — reconcile their `iso_controls` assertions to the canonical form
 - Test: `tests/unit/compliance/iso42001/test_control_mapping.py`
 
 The three emission-site files are governance-visible — string-only evidence-tag edits,
@@ -2529,7 +2530,7 @@ All four new names are **registry-only** — NOT added to the evidence-pack mani
   `hook_status == "deferred"`, and a non-empty `deferred_reason`; every `implemented`
   control has `deferred_reason == ""`;
 - asserts the registry still holds all 8 controls (`control_ids()` unchanged);
-- asserts no raw `("A.x.y",)` form survives at the 4 audited sites.
+- asserts no raw `("A.x.y",)` form survives in the 3 reconciled files.
 
 - [ ] **Step 3: Run test to verify it fails** — FAIL: the 3 raw sites still emit
   `("A.x.y",)`; `hook_status` does not exist.
@@ -2541,8 +2542,19 @@ String-only edits, explicit at each call site:
 - `protocol/trust_gate.py:672` — `iso_controls=("A.7.4",)` → `iso_controls=("ISO42001.A.7.4",)`
 - `protocol/plugin_registry.py:616` + `:638` — `iso_controls=("A.7.4",)` → `iso_controls=("ISO42001.A.7.4",)`
 
+`sandbox/audit.py`'s module + helper docstrings document the emitted tag value —
+reconcile those to the canonical form in the same edit so the stop-rule module's
+self-documented contract matches the code.
+
 Do **not** touch non-ADR-006 codes (`A.5.31` / `A.5.32` in `protocol/ui_events.py` /
 `packs/lifecycle.py`). No auto-lookup added to `AuditStore` / `DecisionHistoryStore`.
+
+Reconciling the emitted value cascades to every existing test that pinned the old raw
+`("A.x.y",)` form — 15 test cases across the 7 downstream test files in the Files list
+(e.g. `assert built.iso_controls == ("A.6.2.5",)`). Reconcile each such assertion to the
+canonical `("ISO42001.A.x.y",)` form in the SAME task; afterwards the raw-form
+regression is pinned by `test_control_mapping.py`'s
+`test_no_raw_form_survives_at_reconciled_sites`.
 
 - [ ] **Step 5: Run test to verify it passes** — PASS — 3 implemented canonical, 5
   deferred recorded, registry 8/8.
@@ -2554,7 +2566,19 @@ The halt summary MUST flag the 3 governance-visible emission-site files
 explicit human stop-rule review.
 
 ```bash
-git add src/cognic_agentos/compliance/iso42001/controls.py src/cognic_agentos/compliance/iso42001/__init__.py src/cognic_agentos/sandbox/audit.py src/cognic_agentos/protocol/trust_gate.py src/cognic_agentos/protocol/plugin_registry.py tests/unit/compliance/iso42001/test_control_mapping.py
+git add src/cognic_agentos/compliance/iso42001/controls.py \
+        src/cognic_agentos/compliance/iso42001/__init__.py \
+        src/cognic_agentos/sandbox/audit.py \
+        src/cognic_agentos/protocol/trust_gate.py \
+        src/cognic_agentos/protocol/plugin_registry.py \
+        tests/unit/compliance/iso42001/test_control_mapping.py \
+        tests/unit/sandbox/test_audit_event_taxonomy.py \
+        tests/unit/sandbox/test_warm_pool.py \
+        tests/unit/sandbox/backends/test_docker_sibling_audit_emission.py \
+        tests/unit/sandbox/backends/test_docker_sibling_egress_classification.py \
+        tests/unit/sandbox/backends/test_docker_sibling_exec_classification.py \
+        tests/unit/protocol/test_trust_gate.py \
+        tests/unit/protocol/test_plugin_registry.py
 git commit -m "feat(sprint-9): T9 — canonicalize ADR-006 evidence tags + hook_status (STOP-RULE)"
 ```
 

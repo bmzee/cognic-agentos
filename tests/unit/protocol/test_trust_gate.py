@@ -702,7 +702,7 @@ class TestTimeout:
         assert row["payload"]["pack_id"] == "slow_pack"
         assert row["payload"]["version"] == "1.0.0"
         assert row["payload"]["timeout_s"] == 0.5
-        assert "A.7.4" in (row["iso_controls"] or [])
+        assert "ISO42001.A.7.4" in (row["iso_controls"] or [])
 
 
 # ---------------------------------------------------------------------------

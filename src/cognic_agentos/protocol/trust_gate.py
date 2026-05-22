@@ -669,7 +669,7 @@ class TrustGate:
                 "version": version,
                 "timeout_s": timeout_s,
             },
-            iso_controls=("A.7.4",),
+            iso_controls=("ISO42001.A.7.4",),
         )
         await self._audit_store.append(event)
 

@@ -26,8 +26,8 @@ compose time per ``feedback_verify_code_citations_at_doc_write``:
   INSIDE the chain-head ``FOR UPDATE`` lock; for audit-only events with
   no state precondition, the closure is a no-op that returns ``None``.
 
-ISO 42001 mapping: every chain row tagged with ``("A.6.2.5",)`` per
-ADR-006 amendment (sandbox lifecycle audit).
+ISO 42001 mapping: every chain row tagged with the canonical
+``("ISO42001.A.6.2.5",)`` per ADR-006 amendment (sandbox lifecycle audit).
 """
 
 from __future__ import annotations
@@ -133,7 +133,7 @@ async def emit_sandbox_event(
 ) -> tuple[uuid.UUID, bytes]:
     """Emit one sandbox lifecycle event into the chain.
 
-    Tagged with ISO 42001 ``A.6.2.5`` per ADR-006 amendment.
+    Tagged with the canonical ISO 42001 ID ``ISO42001.A.6.2.5`` per ADR-006.
 
     Returns the ``(record_id, new_hash)`` tuple from
     ``DecisionHistoryStore.append_with_precondition`` per
@@ -188,7 +188,7 @@ async def emit_sandbox_event(
             actor_id=actor_id,
             tenant_id=tenant_id,
             trace_id=trace_id,
-            iso_controls=("A.6.2.5",),
+            iso_controls=("ISO42001.A.6.2.5",),
         )
 
     return await decision_history_store.append_with_precondition(

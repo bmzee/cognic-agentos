@@ -613,7 +613,7 @@ class PluginRegistry:
                     request_id=request_id,
                     tenant_id=tenant_id,
                     payload=_outcome_payload(outcome, record),
-                    iso_controls=("A.7.4",),
+                    iso_controls=("ISO42001.A.7.4",),
                 )
             else:
                 # Type narrowing: ``_validate_register_args`` guarantees
@@ -635,7 +635,7 @@ class PluginRegistry:
                     request_id=request_id,
                     tenant_id=tenant_id,
                     payload=_outcome_payload(outcome, record),
-                    iso_controls=("A.7.4",),
+                    iso_controls=("ISO42001.A.7.4",),
                 )
             # Audit FIRST so a chain-emission failure aborts the whole
             # register call — the in-memory ``_records`` dict never

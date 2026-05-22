@@ -580,7 +580,7 @@ class TestExecCompletedAuditEmission:
         # proxy_log carried on the chain row payload
         assert "proxy_log" in record.payload
         assert len(record.payload["proxy_log"]) == 1
-        assert record.iso_controls == ("A.6.2.5",)
+        assert record.iso_controls == ("ISO42001.A.6.2.5",)
 
     @pytest.mark.asyncio
     async def test_egress_refusal_emits_policy_violated_NOT_exec_completed(

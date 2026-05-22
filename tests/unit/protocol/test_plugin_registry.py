@@ -420,7 +420,7 @@ class TestRegisterSuccess:
             _make_pack(), attestation_grade="full", signature_digest=_TEST_SIGNATURE_DIGEST
         )
         rows = await _read_audit_events(engine)
-        assert "A.7.4" in (rows[0]["iso_controls"] or [])
+        assert "ISO42001.A.7.4" in (rows[0]["iso_controls"] or [])
 
 
 # ---------------------------------------------------------------------------

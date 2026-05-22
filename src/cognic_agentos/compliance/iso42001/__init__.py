@@ -3,7 +3,9 @@
 from cognic_agentos.compliance.iso42001.controls import (
     ISO42001_CONTROLS,
     ComplianceControlId,
+    ControlCoverage,
     ControlEntry,
+    HookStatus,
     audit_coverage,
     control_ids,
 )
@@ -11,7 +13,9 @@ from cognic_agentos.compliance.iso42001.controls import (
 __all__ = [
     "ISO42001_CONTROLS",
     "ComplianceControlId",
+    "ControlCoverage",
     "ControlEntry",
+    "HookStatus",
     "audit_coverage",
     "control_ids",
 ]

@@ -799,7 +799,7 @@ class TestPolicyViolatedAuditEmission:
         assert record.payload["reason"] == "walltime_cap_exceeded"
         assert record.payload["session_id"] == session.session_id
         assert record.actor_id == _ACTOR.subject
-        assert record.iso_controls == ("A.6.2.5",)
+        assert record.iso_controls == ("ISO42001.A.6.2.5",)
 
     @pytest.mark.asyncio
     async def test_memory_violation_emits_policy_violated_row(

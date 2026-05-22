@@ -85,7 +85,7 @@ class TestEventTaxonomyAndChainRowShape:
         self,
     ) -> None:
         """Audit emission for ``sandbox.lifecycle.created`` builds a
-        ``DecisionRecord`` with ``iso_controls=('A.6.2.5',)`` per
+        ``DecisionRecord`` with ``iso_controls=('ISO42001.A.6.2.5',)`` per
         ADR-006 amendment + ``session_id`` on payload (NOT a top-level
         ``DecisionRecord`` field)."""
 
@@ -106,7 +106,7 @@ class TestEventTaxonomyAndChainRowShape:
 
         assert isinstance(built, DecisionRecord)
         assert built.decision_type == "sandbox.lifecycle.created"
-        assert built.iso_controls == ("A.6.2.5",)
+        assert built.iso_controls == ("ISO42001.A.6.2.5",)
         assert built.tenant_id == "t-1"
         assert built.actor_id == "s-1"
         assert built.trace_id == "trace-1"
@@ -431,7 +431,7 @@ class TestSandboxLifecycleCheckpointedHelper:
         built = await _drive_emit_and_capture(store)
 
         assert built.decision_type == "sandbox.lifecycle.checkpointed"
-        assert built.iso_controls == ("A.6.2.5",)
+        assert built.iso_controls == ("ISO42001.A.6.2.5",)
         assert built.tenant_id == "t-1"
         # Per spec §5.1 — 5 payload keys (4 helper-supplied + session_id
         # threaded by emit_sandbox_event).
@@ -500,7 +500,7 @@ class TestSandboxLifecycleSuspendedHelper:
         built = await _drive_emit_and_capture(store)
 
         assert built.decision_type == "sandbox.lifecycle.suspended"
-        assert built.iso_controls == ("A.6.2.5",)
+        assert built.iso_controls == ("ISO42001.A.6.2.5",)
         # Per spec §5.1 — 2 payload keys (1 helper-supplied + session_id).
         assert set(built.payload.keys()) == {"final_checkpoint_id", "session_id"}
         assert built.payload["final_checkpoint_id"] == "b" * 32
@@ -534,7 +534,7 @@ class TestSandboxLifecycleWokenHelper:
         built = await _drive_emit_and_capture(store)
 
         assert built.decision_type == "sandbox.lifecycle.woken"
-        assert built.iso_controls == ("A.6.2.5",)
+        assert built.iso_controls == ("ISO42001.A.6.2.5",)
         # Per spec §5.1 — 3 payload keys (2 helper-supplied + session_id).
         assert set(built.payload.keys()) == {
             "restored_from_checkpoint_id",
@@ -580,7 +580,7 @@ class TestSandboxLifecycleCheckpointPurgedHelper:
         built = await _drive_emit_and_capture(store)
 
         assert built.decision_type == "sandbox.lifecycle.checkpoint_purged"
-        assert built.iso_controls == ("A.6.2.5",)
+        assert built.iso_controls == ("ISO42001.A.6.2.5",)
         # Per spec §5.1 — 3 payload keys (2 helper-supplied + session_id).
         assert set(built.payload.keys()) == {
             "checkpoint_id",
