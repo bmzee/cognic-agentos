@@ -33,7 +33,9 @@ def build_compliance_routes(*, settings: Settings) -> APIRouter:
     from cognic_agentos.portal.api.compliance.evidence_pack_routes import (
         build_evidence_pack_routes,
     )
+    from cognic_agentos.portal.api.compliance.trace_routes import build_trace_routes
 
     router = APIRouter()
     router.include_router(build_evidence_pack_routes(settings=settings))
+    router.include_router(build_trace_routes(settings=settings))
     return router
