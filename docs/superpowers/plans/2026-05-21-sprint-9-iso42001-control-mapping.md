@@ -292,8 +292,8 @@ import hashlib
 import pytest
 
 from cognic_agentos.compliance.iso42001.merkle import (
-    merkle_root,
     inclusion_proof,
+    merkle_root,
     verify_inclusion,
 )
 
@@ -351,6 +351,26 @@ def test_inclusion_proof_rejects_wrong_leaf() -> None:
     root = merkle_root(leaves)
     proof = inclusion_proof(leaves, 0)
     assert verify_inclusion(_C, 0, proof, root) is False
+
+
+def test_inclusion_proof_rejects_wrong_index() -> None:
+    # Correct leaf, correct proof for position 2 — but the verifier is
+    # told the leaf sits at position 0. The proof's L/R/P side sequence
+    # encodes position 2; verify_inclusion MUST bind `index` and reject.
+    leaves = [_A, _B, _C, b"\x44" * 32]
+    root = merkle_root(leaves)
+    proof = inclusion_proof(leaves, 2)
+    assert verify_inclusion(_C, 0, proof, root) is False
+
+
+@pytest.mark.parametrize("idx", [0, 1, 2])
+def test_inclusion_proof_round_trips_odd_tree(idx: int) -> None:
+    # A 3-leaf tree forces a lone-promotion level — exercises the "P"
+    # proof element and index reconstruction across a skipped node.
+    leaves = [_A, _B, _C]
+    root = merkle_root(leaves)
+    proof = inclusion_proof(leaves, idx)
+    assert verify_inclusion(leaves[idx], idx, proof, root) is True
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -406,8 +426,13 @@ def merkle_root(row_hashes: list[bytes]) -> bytes:
 
 
 def inclusion_proof(row_hashes: list[bytes], index: int) -> list[tuple[bytes, str]]:
-    """Sibling-path proof for leaf ``index``: list of (sibling_hash, side)
-    where side is "L" or "R" relative to the proven node."""
+    """Sibling-path proof for leaf ``index``: one ``(sibling, side)`` entry
+    per tree level. ``side`` is ``"L"`` (sibling on the left of the proven
+    node), ``"R"`` (sibling on the right), or ``"P"`` (the proven node was
+    the lone odd-one-out and was promoted unchanged — there is no sibling,
+    so the entry's hash is ``b""``). Emitting an entry at *every* level —
+    including lone-promotion levels — makes the side sequence an
+    unambiguous encoding of ``index``, which ``verify_inclusion`` binds."""
     if not 0 <= index < len(row_hashes):
         raise IndexError(f"leaf index {index} out of range for {len(row_hashes)} leaves")
     level = [_leaf_hash(h) for h in row_hashes]
@@ -423,7 +448,8 @@ def inclusion_proof(row_hashes: list[bytes], index: int) -> list[tuple[bytes, st
             proof.append((level[pos - 1], "L"))
         elif pos + 1 < len(level):
             proof.append((level[pos + 1], "R"))
-        # else: lone promoted node — no sibling at this level.
+        else:
+            proof.append((b"", "P"))  # lone promoted node — no sibling
         pos //= 2
         level = nxt
     return proof
@@ -432,17 +458,31 @@ def inclusion_proof(row_hashes: list[bytes], index: int) -> list[tuple[bytes, st
 def verify_inclusion(
     row_hash: bytes, index: int, proof: list[tuple[bytes, str]], root: bytes
 ) -> bool:
-    """True iff ``row_hash`` at ``index`` is included under ``root``."""
+    """True iff ``row_hash`` is the leaf at position ``index`` under
+    ``root``. Binds all three: the proof's ``L``/``R``/``P`` sides are both
+    folded into ``root`` AND reconstruct ``index`` — a proof generated for
+    a different position fails the index check even when its sibling
+    hashes are otherwise valid. A malformed side fails closed."""
     acc = _leaf_hash(row_hash)
-    for sibling, side in proof:
-        acc = _node_hash(sibling, acc) if side == "L" else _node_hash(acc, sibling)
-    return acc == root
+    reconstructed = 0
+    for bit, (sibling, side) in enumerate(proof):
+        if side == "L":
+            acc = _node_hash(sibling, acc)
+            reconstructed |= 1 << bit
+        elif side == "R":
+            acc = _node_hash(acc, sibling)
+        elif side == "P":
+            pass  # lone promotion — acc unchanged, this index bit is 0
+        else:
+            return False  # malformed proof — fail closed
+    return acc == root and reconstructed == index
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `uv run pytest tests/unit/compliance/iso42001/test_merkle.py -v`
-Expected: PASS — 11 tests (8 + 4 parametrized − overlap; expect 11 reported).
+Expected: PASS — 15 tests (8 non-parametrized + 7 parametrized: `round_trips` ×4,
+`round_trips_odd_tree` ×3).
 
 - [ ] **Step 5: Commit (halt-before-commit first)**
 
