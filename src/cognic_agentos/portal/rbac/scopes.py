@@ -102,6 +102,24 @@ UIRBACScope = Literal[
 ]
 
 
+#: #sprint-9 — ISO 42001 compliance evidence scopes (ADR-006). Two atoms:
+#: bulk evidence-pack disclosure vs targeted forensic trace lookup.
+ComplianceRBACScope = Literal[
+    "compliance.evidence_pack.read",
+    "compliance.trace.read",
+]
+
+
+#: Examiner-role compliance grant. Bank-overlay examiner binders grant
+#: EXAMINER_SCOPES | EXAMINER_COMPLIANCE_SCOPES.
+EXAMINER_COMPLIANCE_SCOPES: frozenset[ComplianceRBACScope] = frozenset(
+    {
+        "compliance.evidence_pack.read",
+        "compliance.trace.read",
+    }
+)
+
+
 #: Set type carried on :class:`~cognic_agentos.portal.rbac.actor.Actor`
 #: instances and consumed by :class:`RequireScope`. The frozenset is
 #: chosen for membership-test O(1) + immutability (matches the frozen

@@ -1508,8 +1508,8 @@ from __future__ import annotations
 import typing
 
 from cognic_agentos.portal.rbac.scopes import (
-    ComplianceRBACScope,
     EXAMINER_COMPLIANCE_SCOPES,
+    ComplianceRBACScope,
 )
 
 
@@ -1521,8 +1521,9 @@ def test_compliance_scope_family_has_exactly_two_values() -> None:
 
 
 def test_examiner_compliance_scopes_holds_both() -> None:
-    assert EXAMINER_COMPLIANCE_SCOPES == frozenset(
-        {"compliance.evidence_pack.read", "compliance.trace.read"}
+    assert (
+        frozenset({"compliance.evidence_pack.read", "compliance.trace.read"})
+        == EXAMINER_COMPLIANCE_SCOPES
     )
 
 
@@ -1542,8 +1543,6 @@ def test_require_scope_signature_accepts_compliance_scopes() -> None:
     """Pins the `enforcement.py` widening at TEST time, not just mypy:
     `RequireScope`'s `scope` parameter must accept the compliance-scope
     family. Without the Step-4 enforcement widening this fails."""
-    import typing
-
     from cognic_agentos.portal.rbac import enforcement
 
     hints = typing.get_type_hints(enforcement.RequireScope)
