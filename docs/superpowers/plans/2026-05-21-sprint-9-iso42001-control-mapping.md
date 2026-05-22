@@ -520,7 +520,6 @@ Create `tests/unit/compliance/iso42001/test_signing.py`:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -530,16 +529,7 @@ from cognic_agentos.compliance.iso42001.signing import (
     cosign_sign_blob,
     resolve_signing_identity,
 )
-
-
-class _StubSecretAdapter:
-    """Minimal SecretAdapter — only read() is exercised by signing."""
-
-    def __init__(self, store: dict[str, dict[str, Any]]) -> None:
-        self._store = store
-
-    async def read(self, path: str) -> dict[str, Any]:
-        return self._store[path]
+from tests.support.adapter_fixtures import InMemorySecretAdapter
 
 
 async def test_resolve_raises_when_key_path_unset() -> None:
@@ -554,9 +544,7 @@ async def test_resolve_raises_on_unknown_uri_scheme() -> None:
 
 async def test_resolve_vault_uri_requires_secret_adapter() -> None:
     with pytest.raises(EvidencePackSigningError, match="SecretAdapter"):
-        await resolve_signing_identity(
-            key_path="vault://secret/evidence-key", secret_adapter=None
-        )
+        await resolve_signing_identity(key_path="vault://secret/evidence-key", secret_adapter=None)
 
 
 async def test_resolve_pem_path_reads_file_and_records_path_identity(
@@ -571,9 +559,8 @@ async def test_resolve_pem_path_reads_file_and_records_path_identity(
 
 async def test_resolve_vault_records_the_uri_not_a_temp_path() -> None:
     # cli/sign.py's Vault contract: the `key` field (here a str).
-    adapter = _StubSecretAdapter(
-        {"secret/evidence-key": {"key": "-----BEGIN PRIVATE KEY-----\nyyy\n"}}
-    )
+    adapter = InMemorySecretAdapter()
+    await adapter.write("secret/evidence-key", {"key": "-----BEGIN PRIVATE KEY-----\nyyy\n"})
     identity = await resolve_signing_identity(
         key_path="vault://secret/evidence-key", secret_adapter=adapter
     )
@@ -583,21 +570,16 @@ async def test_resolve_vault_records_the_uri_not_a_temp_path() -> None:
 
 
 async def test_resolve_vault_accepts_bytes_key_material() -> None:
-    adapter = _StubSecretAdapter(
-        {"secret/k": {"key": b"-----BEGIN PRIVATE KEY-----\nzzz\n"}}
-    )
-    identity = await resolve_signing_identity(
-        key_path="vault://secret/k", secret_adapter=adapter
-    )
+    adapter = InMemorySecretAdapter()
+    await adapter.write("secret/k", {"key": b"-----BEGIN PRIVATE KEY-----\nzzz\n"})
+    identity = await resolve_signing_identity(key_path="vault://secret/k", secret_adapter=adapter)
     assert identity.pem == b"-----BEGIN PRIVATE KEY-----\nzzz\n"
 
 
 async def test_cosign_sign_blob_fails_loud_when_cosign_absent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        "cognic_agentos.compliance.iso42001.signing.shutil.which", lambda _: None
-    )
+    monkeypatch.setattr("cognic_agentos.compliance.iso42001.signing.shutil.which", lambda _: None)
     with pytest.raises(EvidencePackSigningError, match="cosign binary not found"):
         await cosign_sign_blob(b"{}", SigningIdentity(identity="x", pem=b"k"))
 
@@ -703,7 +685,7 @@ class CosignArtifacts:
 
 
 async def resolve_signing_identity(
-    *, key_path: str | None, secret_adapter: "SecretAdapter | None"
+    *, key_path: str | None, secret_adapter: SecretAdapter | None
 ) -> SigningIdentity:
     """Resolve ``Settings.evidence_pack_signing_key_path`` to signing
     material. Fail-loud on every error path."""
@@ -722,9 +704,7 @@ async def resolve_signing_identity(
     return _resolve_pem_path(key_path)
 
 
-async def _resolve_vault(
-    key_path: str, secret_adapter: "SecretAdapter | None"
-) -> SigningIdentity:
+async def _resolve_vault(key_path: str, secret_adapter: SecretAdapter | None) -> SigningIdentity:
     if secret_adapter is None:
         raise EvidencePackSigningError(
             f"{key_path} requires a SecretAdapter to resolve; none is wired."
@@ -769,9 +749,7 @@ def _resolve_pem_path(key_path: str) -> SigningIdentity:
     return SigningIdentity(identity=key_path, pem=pem)
 
 
-async def cosign_sign_blob(
-    manifest: bytes, identity: SigningIdentity
-) -> CosignArtifacts:
+async def cosign_sign_blob(manifest: bytes, identity: SigningIdentity) -> CosignArtifacts:
     """``cosign sign-blob`` over ``manifest``. Fail-loud if cosign is
     absent, times out, exits non-zero, or fails to produce both outputs.
 
@@ -809,9 +787,7 @@ async def cosign_sign_blob(
             stderr=asyncio.subprocess.PIPE,
         )
         try:
-            _, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=_COSIGN_TIMEOUT_S
-            )
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=_COSIGN_TIMEOUT_S)
         except TimeoutError as exc:
             proc.kill()
             await proc.wait()
