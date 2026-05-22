@@ -2587,7 +2587,10 @@ git commit -m "feat(sprint-9): T9 — canonicalize ADR-006 evidence tags + hook_
 ## Task 10: Gate ladder + critical-controls promotion + BUILD_PLAN status
 
 **Files:**
-- Modify: `tools/check_critical_coverage.py` (4 new entries), `docs/BUILD_PLAN.md` §752
+- Modify: `tools/check_critical_coverage.py` (+4 entries → 77)
+- Modify: `tests/unit/tools/test_check_critical_coverage.py` (count-guard 73→77 + a Sprint-9 gate/off-gate block mirroring the Sprint-8.5 block)
+- Create: `tests/unit/compliance/iso42001/test_signing_coverage.py` + `test_merkle_coverage.py` (T10 negative-path coverage top-up — see Step 4)
+- Modify: `docs/BUILD_PLAN.md` §752 (Sprint 9 → READY-FOR-GATE — not yet CLOSED; AC4 pending)
 
 - [ ] **Step 1: Add the 4 compliance modules to the coverage gate**
 
@@ -2600,7 +2603,10 @@ In `tools/check_critical_coverage.py`, append to `_CRITICAL_FILES`:
     ("src/cognic_agentos/compliance/iso42001/evidence_pack.py", 0.95, 0.90),
 ```
 
-Update any count-guard test for `_CRITICAL_FILES` length (73 → 77).
+Update the count-guard test (`tests/unit/tools/test_check_critical_coverage.py`):
+`_EXPECTED_ENTRY_COUNT` 73 → 77, plus a Sprint-9 gate/off-gate block (the 4 promoted
+modules + the 3 `portal/api/compliance/` route modules kept off-gate) mirroring the
+Sprint-8.5 block's structure.
 
 - [ ] **Step 2: Run the full lint + type gate**
 
@@ -2621,16 +2627,27 @@ any of the 4 is below floor, add focused negative-path tests in the SAME task an
 
 - [ ] **Step 5: Update `docs/BUILD_PLAN.md` §752**
 
-Flip the Sprint 9 entry to CLOSED with the branch + critical-controls 73→77 note.
+Flip the Sprint 9 entry to a **READY-FOR-GATE** status (branch + critical-controls
+73→77 + AC summary). Sprint 9 is marked **CLOSED** only after AC4 (a generated evidence
+pack passing external `cosign verify-blob`) is run + recorded — `cosign` is not
+available in the build session, so AC4 is a tracked pre-CLOSE follow-up; do **not** mark
+Sprint 9 CLOSED while a numbered acceptance criterion is unmet.
 
-- [ ] **Step 6: Verify acceptance criteria AC1–AC9** (spec §12), each backed by a passing
-  test or gate result.
+- [ ] **Step 6: Verify acceptance criteria** — AC1-AC3 + AC5-AC9 (spec §12), each backed
+  by a passing test or gate result; record **AC4** (a generated evidence pack passing
+  external `cosign verify-blob`) as a tracked pre-CLOSE follow-up — `cosign` is not
+  available in the build session.
 
 - [ ] **Step 7: Commit (halt-before-commit first)**
 
 ```bash
-git add tools/check_critical_coverage.py docs/BUILD_PLAN.md <count-guard test if changed>
-git commit -m "chore(sprint-9): T10 — critical-controls gate uplift 73->77 + BUILD_PLAN close"
+git add tools/check_critical_coverage.py \
+        tests/unit/tools/test_check_critical_coverage.py \
+        tests/unit/compliance/iso42001/test_signing_coverage.py \
+        tests/unit/compliance/iso42001/test_merkle_coverage.py \
+        docs/BUILD_PLAN.md \
+        docs/superpowers/plans/2026-05-21-sprint-9-iso42001-control-mapping.md
+git commit -m "chore(sprint-9): T10 — critical-controls gate uplift 73->77 + BUILD_PLAN status"
 ```
 
 ---

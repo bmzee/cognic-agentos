@@ -9,7 +9,7 @@ test noticing, because the production ``main()`` only checks the
 coverage of whatever entries happen to be present.
 
 This is the self-test the Round-19 plan patch mandates. It pins:
-  * the exact entry count (60 after the Sprint 7B.3 T3-T7 promotions);
+  * the exact entry count (see ``_EXPECTED_ENTRY_COUNT`` — bumped per sprint);
   * the presence + floors of the 5 Sprint 7B.3 modules promoted
     incrementally during T3-T7 (4 evidence panels + the 5-gate
     composer);
@@ -35,11 +35,12 @@ import pytest
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _GATE_TOOL_PATH = _REPO_ROOT / "tools" / "check_critical_coverage.py"
 
-#: Entry count after the Sprint 8.5 T12 promotions (63 at the 7B.4
+#: Entry count after the Sprint 9 T10 promotions (63 at the 7B.4
 #: T13 close + 7 Sprint-8A sandbox modules = 70; + 1 Sprint-8B K8s
-#: backend = 71; + 2 Sprint-8.5 modules = 73). Bump this in lockstep
-#: with any deliberate ``_CRITICAL_FILES`` change.
-_EXPECTED_ENTRY_COUNT = 73
+#: backend = 71; + 2 Sprint-8.5 modules = 73; + 4 Sprint-9
+#: compliance/iso42001 modules = 77). Bump this in lockstep with any
+#: deliberate ``_CRITICAL_FILES`` change.
+_EXPECTED_ENTRY_COUNT = 77
 
 #: The 5 modules Sprint 7B.3 promoted to the durable gate, each by its
 #: own landing commit (T3-T6 panels + T7 composer). All ride the
@@ -357,5 +358,54 @@ def test_sprint_8_5_off_gate_modules_absent(gate_tool: ModuleType, off_gate_modu
     """``sandbox/reaper.py`` stays OFF the durable gate per the spec
     §4.2 + Doctrine F carve-out. A future edit that promotes it without
     revisiting the rationale fails here, forcing a deliberate review."""
+    paths = {path for path, _line, _branch in gate_tool._CRITICAL_FILES}
+    assert off_gate_module not in paths
+
+
+# ---------------------------------------------------------------------------
+# Sprint 9 T10 — ISO 42001 control-mapping gate promotion (+4 → 77)
+# ---------------------------------------------------------------------------
+
+#: The 4 modules Sprint 9 T10 promotes to the durable gate — the
+#: compliance/iso42001 evidence layer (ADR-006). Per
+#: ``feedback_verify_promotion_meets_floor_at_promotion_time`` the T10
+#: commit ALSO runs ``tools/check_critical_coverage.py`` against fresh
+#: ``coverage.json`` — not just this count-guard bump.
+_SPRINT_9_GATE_MODULES = (
+    "src/cognic_agentos/compliance/iso42001/controls.py",
+    "src/cognic_agentos/compliance/iso42001/merkle.py",
+    "src/cognic_agentos/compliance/iso42001/signing.py",
+    "src/cognic_agentos/compliance/iso42001/evidence_pack.py",
+)
+
+#: The 3 NEW Sprint 9 portal route modules deliberately kept OFF the
+#: durable gate — ``portal/api/compliance/`` is portal-surface routing,
+#: not the iso42001 runtime; same off-gate treatment as the Sprint-7B.2
+#: ``inspection_routes.py`` precedent. The substantive evidence logic is
+#: gated via the 4 ``_SPRINT_9_GATE_MODULES`` above.
+_SPRINT_9_OFF_GATE_MODULES = (
+    "src/cognic_agentos/portal/api/compliance/router.py",
+    "src/cognic_agentos/portal/api/compliance/evidence_pack_routes.py",
+    "src/cognic_agentos/portal/api/compliance/trace_routes.py",
+)
+
+
+def test_sprint_9_modules_present_with_standard_floors(
+    gate_tool: ModuleType,
+) -> None:
+    """The 4 Sprint 9 T10 promotions are on the gate at the 95/90 floor."""
+    by_path = {path: (line, branch) for path, line, branch in gate_tool._CRITICAL_FILES}
+    for module in _SPRINT_9_GATE_MODULES:
+        assert module in by_path, f"Sprint 9 module missing from gate: {module}"
+        assert by_path[module] == (0.95, 0.90), (
+            f"{module} must ride the standard 95%-line / 90%-branch floor"
+        )
+
+
+@pytest.mark.parametrize("off_gate_module", _SPRINT_9_OFF_GATE_MODULES)
+def test_sprint_9_off_gate_modules_absent(gate_tool: ModuleType, off_gate_module: str) -> None:
+    """The ``portal/api/compliance/`` route modules stay OFF the durable
+    gate. A future edit that promotes one without revisiting the
+    rationale fails here, forcing a deliberate review."""
     paths = {path for path, _line, _branch in gate_tool._CRITICAL_FILES}
     assert off_gate_module not in paths

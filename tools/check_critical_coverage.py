@@ -1565,6 +1565,14 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     #     gated — same Doctrine F precedent as ``sandbox/audit.py``.
     ("src/cognic_agentos/sandbox/checkpoint_store.py", 0.95, 0.90),
     ("src/cognic_agentos/db/adapters/local_object_store_adapter.py", 0.95, 0.90),
+    # Sprint 9 T10 — ISO 42001 control-mapping evidence layer (ADR-006):
+    # the registry, the domain-separated Merkle tree, cosign signing,
+    # and the evidence-pack exporter — they define examiner-facing
+    # evidence format, control mapping, integrity proof, and signing.
+    ("src/cognic_agentos/compliance/iso42001/controls.py", 0.95, 0.90),
+    ("src/cognic_agentos/compliance/iso42001/merkle.py", 0.95, 0.90),
+    ("src/cognic_agentos/compliance/iso42001/signing.py", 0.95, 0.90),
+    ("src/cognic_agentos/compliance/iso42001/evidence_pack.py", 0.95, 0.90),
 )
 
 
