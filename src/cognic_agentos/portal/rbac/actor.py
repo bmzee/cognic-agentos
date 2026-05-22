@@ -35,6 +35,7 @@ import pydantic
 from fastapi import Request
 
 from cognic_agentos.portal.rbac.scopes import (  # noqa: F401  (ScopeSet kept for legacy bank-overlay re-export)
+    ComplianceRBACScope,
     PackRBACScope,
     ScopeSet,
     UIRBACScope,
@@ -79,7 +80,11 @@ class Actor(pydantic.BaseModel):
     #: who also drives the portal UI: pack.review.* AND ui.tenant_stream +
     #: ui.action.approve). Additive widening — every pre-T5 actor that
     #: carried only PackRBACScope values still constructs cleanly.
-    scopes: frozenset[PackRBACScope | UIRBACScope]
+    #: Sprint 9 T5 — further widened with ``ComplianceRBACScope`` so an
+    #: examiner actor can carry compliance.evidence_pack.read /
+    #: compliance.trace.read (ADR-006). Additive — pre-Sprint-9 actors
+    #: still construct cleanly.
+    scopes: frozenset[PackRBACScope | UIRBACScope | ComplianceRBACScope]
     actor_type: ActorType
 
 

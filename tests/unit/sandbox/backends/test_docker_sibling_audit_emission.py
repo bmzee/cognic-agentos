@@ -168,7 +168,7 @@ class TestLifecycleCreatedEmittedOnColdPath:
         assert record.payload["session_id"] == session.session_id
         assert record.actor_id == "consumer-actor-id"
         assert record.tenant_id == "t-1"
-        assert record.iso_controls == ("A.6.2.5",)
+        assert record.iso_controls == ("ISO42001.A.6.2.5",)
 
 
 class TestLifecycleCreatedEmittedOnWarmPath:
@@ -266,7 +266,7 @@ class TestLifecycleDestroyedEmission:
         assert record.payload["duration_s"] >= 0.0
         assert record.payload["session_id"] == session.session_id
         assert record.actor_id == "consumer-actor-id"
-        assert record.iso_controls == ("A.6.2.5",)
+        assert record.iso_controls == ("ISO42001.A.6.2.5",)
 
     @pytest.mark.asyncio
     async def test_second_destroy_does_not_emit_second_chain_row(

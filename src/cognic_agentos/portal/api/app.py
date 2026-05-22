@@ -722,6 +722,17 @@ def create_app(
             },
         )
 
+    # Sprint 9 T6: compliance route-package mount (ADR-006). Gated on
+    # ``actor_binder is not None`` — the examiner evidence-pack / trace
+    # endpoints declare per-route ``RequireScope(...)`` deps that need a
+    # bound Actor identity; no ``pack_record_store`` dependency (the
+    # compliance surface reads governance chains via the adapter pool,
+    # not the pack store).
+    if actor_binder is not None:
+        from cognic_agentos.portal.api.compliance.router import build_compliance_routes
+
+        app.include_router(build_compliance_routes(settings=settings))
+
     # Sprint-7B.4 T12: UI router mount + .well-known registration.
     # Gated on ``portal_broker is not None`` — pack-only deployments
     # that don't wire the T6 deps OR the ``broker=`` kwarg get NO UI

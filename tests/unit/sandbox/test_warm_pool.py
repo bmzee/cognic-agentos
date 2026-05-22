@@ -521,7 +521,7 @@ class TestAuditEmission:
         assert record.decision_type == "sandbox.warm_pool.precreated"
         assert record.payload["pool_key"] == "python-interactive"
         assert record.payload["pool_size_after"] == 1
-        assert record.iso_controls == ("A.6.2.5",)
+        assert record.iso_controls == ("ISO42001.A.6.2.5",)
 
     @pytest.mark.asyncio
     async def test_checkout_hit_emits_warm_pool_checked_out_event(self) -> None:

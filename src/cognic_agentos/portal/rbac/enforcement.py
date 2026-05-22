@@ -37,7 +37,11 @@ from cognic_agentos.portal.rbac.actor import (
     ActorBinder,
     ActorBinderUnauthenticated,
 )
-from cognic_agentos.portal.rbac.scopes import PackRBACScope, UIRBACScope
+from cognic_agentos.portal.rbac.scopes import (
+    ComplianceRBACScope,
+    PackRBACScope,
+    UIRBACScope,
+)
 
 if TYPE_CHECKING:
     from cognic_agentos.protocol.ui_events import RBACDenialType, UIEventBroker
@@ -233,7 +237,9 @@ async def _bind_actor(request: Request) -> Actor:
         ) from None
 
 
-def RequireScope(scope: PackRBACScope | UIRBACScope) -> Callable[..., Awaitable[Actor]]:
+def RequireScope(
+    scope: PackRBACScope | UIRBACScope | ComplianceRBACScope,
+) -> Callable[..., Awaitable[Actor]]:
     """FastAPI dependency factory — admit the request iff the bound
     :class:`Actor` holds ``scope``.
 
@@ -241,6 +247,10 @@ def RequireScope(scope: PackRBACScope | UIRBACScope) -> Callable[..., Awaitable[
     :data:`PackRBACScope` and :data:`UIRBACScope` (the T11 POST /actions
     + T10 SSE endpoints depend on this widening — they call
     ``RequireScope("ui.action.approve")`` etc.).
+
+    Sprint-9 T5 further widened it with :data:`ComplianceRBACScope` so
+    the ADR-006 examiner endpoints can call
+    ``RequireScope("compliance.evidence_pack.read")`` etc.
 
     Sprint-7B.4 T6 converted the inner dependency to async so the
     denial path can ``await broker.emit_rbac_denial`` via the shared

@@ -589,6 +589,19 @@ class Settings(BaseSettings):
             "cannot leak into production deployments. Sprint-7A T1."
         ),
     )
+    evidence_pack_signing_key_path: str | None = Field(
+        default=None,
+        description=(
+            "#sprint-9 — operator-provided signing key for ISO 42001 "
+            "evidence-pack manifests (ADR-006). DISTINCT from "
+            "signing_key_path (pack-publisher identity for `agentos sign "
+            "--bundle`): this is the AgentOS *instance* trust identity. "
+            "Accepts `vault://secret/...` (production-preferred, resolved "
+            "via SecretAdapter) or a filesystem PEM path (operator escape "
+            "hatch). Unset => evidence-pack export fails loud; an unsigned "
+            "examiner artifact is forbidden."
+        ),
+    )
     signing_trust_root_path: str | None = Field(
         default=None,
         description=(

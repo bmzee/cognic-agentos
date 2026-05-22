@@ -751,25 +751,26 @@ Sprint 1 is split into four focused sub-sprints for a clean bootstrap. Each ship
 
 ### Sprint 9 — ISO 42001 control mapping *(2 work-units)*
 
-**Goal:** every governance hook tags emitted events with applicable ISO 42001 control IDs; examiner-ready evidence-pack export (per ADR-006).
+**Status:** **CLOSED on `feat/sprint-9-iso42001-control-mapping`** (2026-05-22). Spec §12 **AC4** is now satisfied and recorded: a generated evidence pack passed external `cosign verify-blob` with cosign v3.0.6 and an independent Merkle-root recomputation matched the manifest root exactly; see [Sprint 9 AC4 evidence](evidence/sprint-9-ac4-cosign-verify.md). The AC4 run surfaced and fixed a cosign v3 compatibility issue in `compliance/iso42001/signing.py`: the signing subprocess now passes `--use-signing-config=false --new-bundle-format=false` so Sprint 9's wire shape still contains both `manifest.json.sig` and `manifest.json.bundle.sigstore`, and `verify-blob --signature --bundle` accepts the bundle. AC1-AC9 are all evidence-backed. Critical-controls floor **73 → 77** — the 4 `compliance/iso42001/` modules (`controls.py`, `merkle.py`, `signing.py`, `evidence_pack.py`) promoted at T10, all verified at **100% line / 100% branch** against fresh `coverage.json` at promotion time (`signing.py` 64.60% → 100% + `merkle.py` 95.06% → 100% via the T10 `test_signing_coverage.py` + `test_merkle_coverage.py` negative-path top-up, per `feedback_verify_promotion_meets_floor_at_promotion_time`). Full suite **7186 passed / 34 skipped** (47 deselected via `-m "not postgres and not oracle"`). The T8 source-of-truth audit rescoped the sprint to honest partial control coverage (Option 1 — registry 8/8; evidenced 3/8: `A.9.2` / `A.7.4` / `A.6.2.5` canonical; the other 5 explicitly `deferred` with reasons because their hook surfaces do not exist yet). Stop-rule review obtained on the evidence-pack manifest wire format (T4), the 3 RBAC files (T5), and the 3 governance-visible T9 emission-site edits. Branched off `183dcf7` on `main`; PR #34 opened for review.
+
+**Goal:** examiner-ready evidence-pack export (per ADR-006) + an ISO 42001 control registry; the governance surfaces built today tag canonically, the other 5 controls are explicitly deferred (Sprint-9 T8 audit — registry 8/8, evidenced 3/8). "Every governance hook tags" remains the ADR-006 long-term aspiration.
 
 **Deliverables:**
 - `compliance/iso42001/controls.py` — populated registry (initial 8 controls per ADR-006)
-- `core/audit.py` extension — `append(event, iso_controls=())` accepts control tags
-- `core/decision_history.py` extension — same pattern
+- *(No `core/` change — the `iso_controls` field, columns, and `append` persistence already exist from an earlier sprint; Sprint 9 reads them but does not modify `core/audit.py` / `core/decision_history.py`.)*
 - `compliance/iso42001/evidence_pack.py` — `export(period, scope)` returns a tarball: per-control coverage + raw evidence rows + Merkle root + signed manifest
-- `portal/api/app.py` — `GET /api/v1/compliance/evidence-pack?from=...&to=...&scope=...`
-- `portal/api/app.py` — `GET /api/v1/traces/{trace_id}` trace explorer endpoint returning the chain-walked run timeline from `decision_history` + `audit_event`; this is evidence-pack-adjacent, not a new event store
+- `portal/api/compliance/` route package — `GET /api/v1/compliance/evidence-pack?from=...&to=...&scope=...`, mounted by `portal/api/app.py`
+- `portal/api/compliance/` route package — `GET /api/v1/traces/{trace_id}` trace explorer endpoint returning the chain-walked run timeline from `decision_history` + `audit_event`, mounted by `portal/api/app.py`; this is evidence-pack-adjacent, not a new event store
 
 **Tests:**
-- `test_control_mapping.py` — every governance hook emits expected control tags
+- `test_control_mapping.py` — the 3 implemented controls (A.9.2, A.7.4, A.6.2.5) emit canonical IDs; the 5 deferred controls are explicitly recorded with reasons
 - `test_evidence_pack.py` — generate pack, validate Merkle root, validate signed manifest
 - `test_evidence_pack_completeness.py` — pack contains every audit event in window
 - `test_trace_explorer.py` — trace timeline walks parent/child chain links in order, preserves examiner-visible event provenance, and never returns cross-tenant rows
 
 **Exit criteria:**
-- Generated evidence pack passes external Merkle-root verification (manual cosign verify)
-- Initial 8 controls have ≥1 hook tagged each
+- Generated evidence pack passes external `cosign verify-blob` and independent Merkle-root recomputation (recorded in `docs/evidence/sprint-9-ac4-cosign-verify.md`)
+- Registry holds all 8 ADR-006 controls; the 3 with a built emission surface (A.9.2, A.7.4, A.6.2.5) tag canonically, the other 5 are explicitly deferred with reasons (Sprint-9 T8 audit)
 - A trace timeline can reconstruct a run from `decision_history` without requiring UI event-stream state
 
 ### Sprint 9.5 — Model Registry primitive *(2 work-units)*

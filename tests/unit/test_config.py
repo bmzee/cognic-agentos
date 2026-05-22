@@ -1912,3 +1912,10 @@ class TestSprint85CheckpointSettings:
         explicitly enable it on exactly one instance."""
         s = Settings(_env_file=None, runtime_profile="prod")  # type: ignore[call-arg]
         assert s.sandbox_reaper_enabled is False
+
+
+def test_evidence_pack_signing_key_path_defaults_none() -> None:
+    """#sprint-9 — evidence-pack signing identity is operator-provided;
+    unset by default (export fails loud when unset)."""
+    s = Settings(_env_file=None)  # type: ignore[call-arg]
+    assert s.evidence_pack_signing_key_path is None
