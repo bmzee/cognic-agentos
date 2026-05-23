@@ -773,9 +773,62 @@ Sprint 1 is split into four focused sub-sprints for a clean bootstrap. Each ship
 - Registry holds all 8 ADR-006 controls; the 3 with a built emission surface (A.9.2, A.7.4, A.6.2.5) tag canonically, the other 5 are explicitly deferred with reasons (Sprint-9 T8 audit)
 - A trace timeline can reconstruct a run from `decision_history` without requiring UI event-stream state
 
-### Sprint 9.5 — Model Registry primitive *(2 work-units)*
+### Sprint 9.5 — Model Registry primitive *(2 work-units; SPLIT)*
+
+**Status — 2026-05-23:** Sprint 9.5a (domain + portal + Z-close) **implemented on `feat/sprint-9.5-model-registry`; PR/merge pending**. Sprint 9.5b (gateway-ledger linkage + `/usage` + `/effective-routing` extension) **deferred to its own PR** per the 9.5a cut-line decision — Block C touches a different risk cluster (`core/config.py`, `llm/gateway.py`, ledger linkage) that deserves separate review/PR surface.
 
 **Goal:** AgentOS tracks the lifecycle of every model it routes a request through (per ADR-013). Metadata + audit layer; no GPU work, no fine-tuning logic. Closes the procurement gap on "which fine-tuned model handled which case" without bringing batch training into the runtime.
+
+**Sprint 9.5a implemented on `feat/sprint-9.5-model-registry` (PR/merge pending) — Block A + Block B + Z-close:**
+
+*Domain (Block A — `models/` subsystem):*
+- `models/registry.py` — pure-functional lifecycle state machine; closed-enum **12-value** `ModelLifecycleRefusalReason` (cumulative 9 → 12: A3 R1 P1 added `model_register_initial_state_not_proposed`; A4 R1 P1 added `model_promote_signature_expected_refs_missing`; A4 R1 P2 added `model_transition_name_unknown`); 5-value `MODEL_LIFECYCLE_ISO_CONTROLS` stamped on every chain row.
+- `models/storage.py` — Postgres+Oracle `ModelRecordStore`; A6.0 `_lifecycle_payload` ships the immutable evidence snapshot (17 keys carrying the lineage facts each ISO control claim depends on — see ADR-013 §"Tag coverage vs evidence coverage"); A5 read methods (`load_by_model_id`, `list_for_tenant(tenant_id, *, limit, cursor, state)`, `load_lifecycle_history`).
+- `models/trust.py` — cosign verifier; same subprocess discipline as `protocol/trust_gate.py`; bundle-only argv shape; `sigstore_bundle_digest` helper feeds the route's recompute-before-cosign evidence-integrity gate.
+- `db/migrations/versions/20260522_0004_model_registry.py` — Alembic dual-dialect; 18-column `models` table + per-tenant + per-state index + `(model_id, ts)` index on existing `gateway_call_ledger`.
+- ISO 42001 control mapping (`compliance/iso42001/controls.py`) — A6 promoted 4 controls from `deferred` to `implemented`: A.6.2.6 / A.8.2 / A.8.5 / A.10.2. **A.7.6 stays deferred** with the sharper reason ("reviewer-attested risk evidence in 9.5; machine-verified ADR-011 deferred to Sprint 13"). Counts move 3/5 → 7/1.
+
+*Portal (Block B — `portal/api/models/` + RBAC):*
+- `portal/rbac/scopes.py` — `ModelRBACScope` 8-value Literal: `model.register`, `model.promote.eval_passed`, `model.promote.tenant_approved`, `model.promote.serving`, **`model.promote.deprecated` (+1 vs original 7-scope enumeration)**, `model.retire`, `model.audit.read`, `model.usage.read`.
+- `portal/rbac/actor.py` + `enforcement.py` — additive widening to accept `ModelRBACScope`; public `bind_actor` alias for body-aware authz handlers.
+- `portal/rbac/model_tenant_isolation.py` — `RequireModelTenantOwnership` with the **wire-body collapse** invariant: cross-tenant + unknown both render as 404 `model_not_found` so a probe cannot distinguish; internal log retains `tenant_id_mismatch` for ops/SIEM. Two Literals + asymmetry contract (4 internal × 3 wire-public).
+- `portal/api/models/dto.py` — Pydantic v2 DTOs; `PromoteTargetState` 4-value Literal; field sets pinned by exact-set + alignment-to-storage tests.
+- `portal/api/models/lifecycle_routes.py` — register/promote/retire with cosign path-containment helper (7 documented guard reasons including the B4 R2 P2 tenant_id + tenant-root validation) + B4 R2 P1 recompute-bundle-digest-before-cosign evidence-integrity gate.
+- `portal/api/models/inspection_routes.py` — list (tenant-scoped, with `?state=` filter per BUILD_PLAN §789 + spec §6.2 honoured at B5 R2 P2) + detail + audit; bare-list registered on parent for slashless path.
+- `portal/api/models/router.py` + `portal/api/app.py` — `build_models_router` composition + conditional create_app mount (3-state: all-deps→mount + flag=True; some→warning; zero→silent).
+
+*Close (Z1 + Z2 + Z3):*
+- **Z1 critical-controls gate (77 → 81)** — promoted 4 modules to the durable per-file 95%/90% floor: `models/registry.py`, `models/storage.py`, `models/trust.py`, `portal/api/models/lifecycle_routes.py`. Plan-of-record nominated 5; live promoted 4 (`portal/api/models/inspection_routes.py` stays off-gate per Doctrine F — pure-read; no transition() calls; CC risk covered by `models/storage.py` being on the gate).
+- **Z2 real-cosign two-layer proof** — env-gated on `COGNIC_RUN_COSIGN_INTEGRATION=1`; Layer 1 hits `ModelTrustGate.verify_model_signature` directly; Layer 2 threads byte-coupled bundle digest through the route + storage pipeline. Confirms bundle-only `cosign verify-blob` argv shape works at the target cosign version. Private key in tmp_path/mktemp + wiped; `.gitignore` defence-in-depth for `*.key`/`*.pem`.
+- **Z3 doc reconciliation** (this section + ADR-013 amendments + AGENTS.md additions + spec §2.1 enum 9 → 12).
+
+**10 new feedback memories** filed during the sprint, each preventing a distinct bug class:
+- `feedback_chain_payload_is_evidence_snapshot.md` (A6 R1 P1) — chain rows carry evidence facts, not just join keys
+- `feedback_wire_body_collapse_cross_tenant_invisibility.md` (B2 R1) — cross-tenant + unknown indistinguishable at wire body
+- `feedback_pep563_breaks_closure_local_depends.md` (B2 RED) — omit `from __future__ import annotations` from modules with closure-local FastAPI Depends
+- `feedback_plan_reconciliation_in_tree_before_halt.md` (B2 P3 + B3 P3 — second-occurrence pattern recognition) — plan edits MUST be in tree BEFORE composing HALT
+- `feedback_recompute_derived_facts_not_just_wrapper.md` (B4 R2 P1) — chain-carried derived facts (hashes/digests) MUST be recomputed before write; wrapper verdict ≠ claim truthfulness
+- `feedback_resolve_then_validate_path_containment.md` (B4 R2 P2) — path containment requires syntax validate → resolve → resolved-invariant validate
+- `feedback_test_fixture_byte_coupling_for_crypto_claims.md` (B4 R2 P1 fixup) — test payloads compute hash from same bytes fixture writes; never placeholder
+- `feedback_bare_prefix_endpoints_register_on_parent.md` (B5 mid-impl) — FastAPI rejects empty-prefix include of empty-path-route sub-router; split bare handlers to register on parent
+- `feedback_spec_promised_optional_handler_params.md` (B5 R2 P2) — spec-documented optional handler params MUST surface on the handler signature
+- `feedback_conditional_router_mount_partial_config_warning.md` (B5 mount design) — feature-router mounts with multiple deps follow 3-state decision (all→mount; some→warn; zero→silent)
+
+**Sprint 9.5b (DEFERRED — separate PR):**
+
+*Gateway linkage (Block C):*
+- `Settings.llm_model_id_map: dict[str, str]` (Forge → model_id resolver config) — CC stop-rule, touches `core/config.py`
+- `llm/gateway.py` writes `gateway_call_ledger.model_id` on every successful LLM call (sets the Sprint-3-reserved column) — CC stop-rule, touches `llm/gateway.py` (cloud-policy enforcer)
+- `GET /api/v1/models/{id}/usage?from&to` — aggregate query over `gateway_call_ledger`
+- `GET /api/v1/system/effective-routing` extension — per-tenant recent-call breakdown surfaces `model_id` next to the LiteLLM alias (provider-honesty per ADR-007)
+- The per-call `decision_history.payload["model_id"]` linkage extension for every LLM-call event (separate from the model.lifecycle.* chain that Sprint 9.5a already ships)
+
+Block C tests:
+- `test_decision_history_model_id.py` — every gateway call after Sprint 9.5b records `model_id`
+- `test_provider_honesty_model_id.py` — `/effective-routing` surfaces `model_id`
+- `test_model_usage_endpoint.py` — aggregate query semantics + RBAC gate (`model.usage.read`)
+
+**Original Sprint 9.5 deliverable list (kept below for historical reference; the consolidated 9.5a-implemented + 9.5b-deferred summary above is the source of truth):**
 
 **Deliverables:**
 

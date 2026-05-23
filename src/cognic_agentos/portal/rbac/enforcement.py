@@ -39,6 +39,7 @@ from cognic_agentos.portal.rbac.actor import (
 )
 from cognic_agentos.portal.rbac.scopes import (
     ComplianceRBACScope,
+    ModelRBACScope,
     PackRBACScope,
     UIRBACScope,
 )
@@ -238,7 +239,7 @@ async def _bind_actor(request: Request) -> Actor:
 
 
 def RequireScope(
-    scope: PackRBACScope | UIRBACScope | ComplianceRBACScope,
+    scope: PackRBACScope | UIRBACScope | ComplianceRBACScope | ModelRBACScope,
 ) -> Callable[..., Awaitable[Actor]]:
     """FastAPI dependency factory — admit the request iff the bound
     :class:`Actor` holds ``scope``.
@@ -251,6 +252,15 @@ def RequireScope(
     Sprint-9 T5 further widened it with :data:`ComplianceRBACScope` so
     the ADR-006 examiner endpoints can call
     ``RequireScope("compliance.evidence_pack.read")`` etc.
+
+    Sprint-9.5 B1 further widened it with :data:`ModelRBACScope` so the
+    ADR-013 model-registry endpoints can call
+    ``RequireScope("model.register")`` / ``RequireScope("model.audit.read")``
+    / ``RequireScope("model.promote.<target_state>")`` etc. The body-aware
+    POST /promote handler resolves the target scope per-request from the
+    body's ``target_state`` and constructs a fresh ``RequireScope`` per
+    target (the per-target dep itself is cheap; the actor bind is shared
+    via the FastAPI sub-dep cache).
 
     Sprint-7B.4 T6 converted the inner dependency to async so the
     denial path can ``await broker.emit_rbac_denial`` via the shared
@@ -288,3 +298,23 @@ def RequireScope(
         return actor
 
     return dependency
+
+
+#: Sprint 9.5 B1 — public alias for the internal :func:`_bind_actor`
+#: FastAPI dependency. Body-aware authz routes (the upcoming Block-B4
+#: ``POST /api/v1/models/{model_id}/promote``, where the required scope
+#: depends on the request body's ``target_state``) declare
+#: ``Annotated[Actor, Depends(bind_actor)]`` to receive the bound actor
+#: directly without a fixed :func:`RequireScope` wrapper, then resolve
+#: the per-request scope inside the handler body and apply a body-aware
+#: scope check.
+#:
+#: **Aliased by identity rebinding** (``bind_actor = _bind_actor``), NOT
+#: by a forwarding wrapper. FastAPI's sub-dep cache keys on the
+#: dependency callable's identity; ``Depends(bind_actor)`` and
+#: ``Depends(_bind_actor)`` resolving to the same object means a single
+#: actor bind serves both the public-alias dep AND any :func:`RequireScope`
+#: / :func:`RequireTenantOwnership` sub-deps on the same request — no
+#: re-bind of the same Actor twice per request. Pinned by
+#: :file:`tests/unit/portal/rbac/test_model_scopes.py::TestBindActorPublicAlias`.
+bind_actor = _bind_actor

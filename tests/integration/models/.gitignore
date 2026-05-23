@@ -1,0 +1,8 @@
+# Defence-in-depth — private cosign keys MUST never enter the repo.
+# The Z2 real-cosign proof generates keypairs in tmp_path + wipes
+# the private key after signing; this .gitignore covers the case
+# where a future maintainer accidentally writes a key into the
+# integration test dir (or switches to a fixture-based approach
+# per the plan's Step 1 Option (b) and forgets the file hygiene).
+*.key
+*.pem

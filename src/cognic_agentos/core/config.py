@@ -548,6 +548,23 @@ class Settings(BaseSettings):
             "Sprint-7A consumer: ``cli/sign.py`` (T14)."
         ),
     )
+    # ----- Sprint-9.5 B4 Model Registry settings (per ADR-013) ---------
+    model_artifact_root: str = Field(
+        default="/var/lib/cognic/model-artifacts",
+        description=(
+            "Filesystem root under which model-artefact refs "
+            "(``signed_artifact_ref`` / ``sigstore_bundle_ref``) resolve, "
+            "scoped per-tenant: ``<root>/<tenant_id>/<relative_ref>``. The "
+            "per-tenant cosign trust root resolves to "
+            "``<root>/<tenant_id>/trust-root.pub``. Consumed by "
+            "``portal/api/models/lifecycle_routes.py``'s "
+            "``_resolve_under_tenant_root`` cosign path-containment helper "
+            "(rejects absolute paths / URI schemes / ``..`` segments / "
+            "symlinks escaping the tenant root / wrong-tenant crossings / "
+            "missing or non-file targets). Wave-1 — object-store-backed "
+            "fetch is a Wave-2 seam (ADR-009)."
+        ),
+    )
     # ----- Sprint-7A T1 settings (per the Sprint-7A plan-of-record) -----
     syft_path: str | None = Field(
         default=None,

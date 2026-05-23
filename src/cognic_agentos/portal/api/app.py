@@ -51,6 +51,8 @@ from cognic_agentos.db.adapters import (
     load_bundled_adapters,
 )
 from cognic_agentos.llm.ledger import GatewayCallLedger
+from cognic_agentos.models.storage import ModelRecordStore
+from cognic_agentos.models.trust import ModelTrustGate
 from cognic_agentos.observability import (
     bind_request_id,
     configure_logging,
@@ -62,6 +64,7 @@ from cognic_agentos.observability import (
     silence_uvicorn_access_log,
 )
 from cognic_agentos.packs.storage import PackRecordStore
+from cognic_agentos.portal.api.models import build_models_router
 from cognic_agentos.portal.api.packs import build_packs_router
 from cognic_agentos.portal.api.system_routes import build_system_router
 from cognic_agentos.portal.rbac.actor import ActorBinder
@@ -240,6 +243,8 @@ def create_app(
     pack_record_store: PackRecordStore | None = None,
     trust_gate: TrustGate | None = None,
     trust_root_resolver: TrustRootResolver | None = None,
+    model_registry_store: ModelRecordStore | None = None,
+    model_trust_gate: ModelTrustGate | None = None,
     # Sprint-7B.4 T6: backward-compatible optional deps (None-default
     # follows the 7B.3 T9 trust_gate / trust_root_resolver precedent).
     # When all 3 are wired AND settings is non-None, create_app constructs
@@ -718,6 +723,63 @@ def create_app(
                     "route would surface a confusing 500 at request "
                     "time. The wiring boundary refuses earlier so "
                     "misconfig is caught at startup."
+                ),
+            },
+        )
+
+    # ──────────────────────────────────────────────────────────────────
+    # Sprint 9.5 B5 — Model Registry router mount (ADR-013).
+    #
+    # Gated on all three deps being supplied: ``actor_binder`` (any
+    # portal-API enforcement needs a source of Actor identity) +
+    # ``model_registry_store`` (the storage primitive) +
+    # ``model_trust_gate`` (cosign verifier for promote_eval_passed).
+    # ``app.state.models_router_mounted`` is the introspection flag
+    # tests use to assert mount/no-mount decision; matches the
+    # ``pack_router_mounted`` pattern above. Partial config (one or
+    # both model deps supplied but the trio is incomplete) emits a
+    # single structured warning so operators see the misconfig at
+    # startup rather than at first-request 404.
+    # ──────────────────────────────────────────────────────────────────
+    app.state.models_router_mounted = False
+    _model_deps_supplied = (model_registry_store is not None) + (model_trust_gate is not None)
+    if (
+        actor_binder is not None
+        and model_registry_store is not None
+        and model_trust_gate is not None
+    ):
+        app.state.model_registry_store = model_registry_store
+        app.state.model_trust_gate = model_trust_gate
+        app.include_router(
+            build_models_router(
+                store=model_registry_store,
+                trust_gate=model_trust_gate,
+                settings=settings,
+            )
+        )
+        app.state.models_router_mounted = True
+    elif _model_deps_supplied > 0:
+        # Partial config — at least one model dep supplied, but the
+        # trio is incomplete. Emit a single structured warning so
+        # operator-bootstrap miss is visible at startup, NOT silently
+        # no-mount. Pack-only deployments (zero model deps) skip this
+        # branch and stay quiet per the user invariant.
+        logger.warning(
+            "portal.models_router_unmounted_partial_config",
+            extra={
+                "reason": "models_router_partial_config",
+                "actor_binder_supplied": actor_binder is not None,
+                "model_registry_store_supplied": model_registry_store is not None,
+                "model_trust_gate_supplied": model_trust_gate is not None,
+                "remediation": (
+                    "Wave-1 model registry needs all three of: "
+                    "actor_binder + model_registry_store + "
+                    "model_trust_gate. Supply all three at create_app "
+                    "to mount the /api/v1/models router; the partial "
+                    "set leaves the router unmounted and every "
+                    "/api/v1/models/* request would 404 at the FastAPI "
+                    "level. The warning fires once at startup so the "
+                    "wiring miss is visible immediately."
                 ),
             },
         )

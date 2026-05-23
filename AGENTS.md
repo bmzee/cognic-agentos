@@ -50,7 +50,7 @@ Stop for human review when touching:
 - RBAC (`portal/rbac/`)
 - Wire-protocol contracts (MCP / A2A schemas, including A2A protobuf source + version-negotiation)
 - Evidence-pack format (changes how examiners audit)
-- Model registry lifecycle transitions (`models/` + `models/trust.py`)
+- Model registry lifecycle transitions (`models/` + `models/trust.py` + `portal/api/models/lifecycle_routes.py` — register/promote/retire route module added at Sprint 9.5 B4 owns the cosign path-containment helper `_resolve_under_tenant_root` per the resolve-then-validate doctrine, the cosign-OUTSIDE-transaction `_verify_record_signature` with the B4 R2 P1 bundle-digest recompute-before-cosign evidence-integrity gate, the body-aware promote-scope resolution + HumanActor gate when `target_state="serving"`, the state-aware HumanActor gate at `/retire` when current state is `serving`, and the wire-body-collapse cross-tenant invisibility contract (`portal/rbac/model_tenant_isolation.py` — model module ships the stronger wire-collapse than the pack equivalent: cross-tenant + unknown both render as 404 `model_not_found` so a probe cannot distinguish; internal log retains `tenant_id_mismatch` for ops + SIEM correlation))
 - Pack data-governance contracts (`packs/evidence/data_governance.py`, runtime DLP enforcement)
 - Kill-switch / quota enforcement (`core/emergency/kill_switches.py`, `core/emergency/quotas.py`)
 - Policy-as-code engine (`core/policy/engine.py` + Rego bundles in `policies/_default/`)
@@ -205,7 +205,10 @@ The resumable-session API (`checkpoint()` / `suspend()` / `wake()` per ADR-004 �
 - `subagent/` (privilege de-escalation boundary)
 
 *Model + data governance:*
-- `models/registry.py` + `models/trust.py` (per ADR-013 — lifecycle state machine + signature verification)
+- `models/registry.py` (per ADR-013 — pure-functional lifecycle state machine; closed-enum 12-value `ModelLifecycleRefusalReason` per spec §2.1; 5-value `MODEL_LIFECYCLE_ISO_CONTROLS` stamped on every `model.lifecycle.*` chain row per spec §4.2). Sprint 9.5 Z1.
+- `models/storage.py` (per ADR-013 — Postgres/Oracle `ModelRecordStore`; `DecisionHistoryStore.append_with_precondition` consumer driving register/promote/retire; A6.0 `_lifecycle_payload` carries the 17-field immutable evidence snapshot per the chain-payload-is-evidence-snapshot doctrine — `signature_digest` / `eval_results_ref` / lineage fields land ON the chain row, NOT just on the mutable table column; A5 read methods including `list_for_tenant(tenant_id, *, limit, cursor, state)` whose `WHERE tenant_id` IS the cross-tenant boundary). Sprint 9.5 Z1.
+- `models/trust.py` (per ADR-013 — cosign artefact verification gate; same subprocess discipline as `protocol/trust_gate.py` — list-form argv, no shell, frozen 2-key env, asyncio timeout + SIGKILL + reap, exit-code-only verdict; bundle-only `cosign verify-blob` argv shape verified end-to-end at the target cosign version by the Sprint 9.5 Z2 real-cosign two-layer proof at `tests/integration/models/test_real_cosign_proof.py`; the `sigstore_bundle_digest` helper is consumed by the route's recompute-before-cosign evidence-integrity gate). Sprint 9.5 Z1.
+- `portal/api/models/lifecycle_routes.py` (per ADR-013 — register/promote/retire route module; owns the 7-value closed-enum guard set on `_resolve_under_tenant_root` per the resolve-then-validate-path-containment doctrine + the body-aware promote-scope resolution + the state-aware human gates). Standing-offer §30: `from __future__ import annotations` INTENTIONALLY OMITTED so FastAPI can resolve `Annotated[..., Depends(<closure-local>)]` eagerly. Sprint 9.5 Z1.
 - `packs/evidence/data_governance.py` + the manifest-driven DLP enforcement runtime (per ADR-017)
 - `core/memory/` (per ADR-019 — what an agent may remember/forget/export/redact/reuse across sessions)
 
