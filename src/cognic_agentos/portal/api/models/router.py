@@ -21,6 +21,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from cognic_agentos.core.config import Settings
+from cognic_agentos.llm.ledger import GatewayCallLedger
 from cognic_agentos.models.storage import ModelRecordStore
 from cognic_agentos.models.trust import ModelTrustGate
 from cognic_agentos.portal.api.models.inspection_routes import (
@@ -43,6 +44,7 @@ def build_models_router(
     store: ModelRecordStore,
     trust_gate: ModelTrustGate,
     settings: Settings,
+    ledger: GatewayCallLedger | None = None,
 ) -> APIRouter:
     """Compose the model-registry portal router.
 
@@ -54,12 +56,16 @@ def build_models_router(
       prefix; the parent's prefix flows down).
     * The B5 bare-list endpoint (GET ``/api/v1/models``) — registered
       DIRECTLY on the parent so the path stays slashless.
-    * The B5 ``{model_id}`` sub-router (GET detail + GET audit) —
-      mounted via ``include_router``.
+    * The B5 ``{model_id}`` sub-router (GET detail + GET audit + the
+      C3 GET usage) — mounted via ``include_router``.
 
-    Wire-protocol surface: 6 endpoints total under
-    ``/api/v1/models``. ``/usage`` is Block C (Task C3) and is NOT
-    mounted here.
+    Wire-protocol surface: 7 endpoints total under
+    ``/api/v1/models`` (POST register / POST promote / POST retire /
+    GET list / GET detail / GET audit / GET usage). The C3
+    ``/usage`` endpoint is mounted REGARDLESS of ledger presence per
+    the PR #35 R2 plan-patch D7 user-locked policy — the handler
+    returns 503 ``gateway_ledger_not_configured`` if the backend is
+    not wired at call time.
     """
     router = APIRouter(prefix=MODEL_ROUTER_PREFIX, tags=["models"])
     # The two BARE-PREFIX endpoints (POST register + GET list) are
@@ -71,11 +77,14 @@ def build_models_router(
     register_model_lifecycle_register(router, store=store)
     register_model_inspection_list(router, store=store)
     # The ``{model_id}``-keyed sub-routers — both are include_router-
-    # safe because every route inside them has a non-empty path.
+    # safe because every route inside them has a non-empty path. The
+    # C3 ``ledger`` kwarg threads to ``build_model_inspection_routes``
+    # so the ``/usage`` handler can read it; ``None`` (the default)
+    # triggers the D7 503-policy path at call time.
     router.include_router(
         build_model_lifecycle_routes(store=store, trust_gate=trust_gate, settings=settings)
     )
-    router.include_router(build_model_inspection_routes(store=store))
+    router.include_router(build_model_inspection_routes(store=store, ledger=ledger))
     return router
 
 

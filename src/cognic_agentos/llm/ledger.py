@@ -25,8 +25,14 @@ where the gateway knows whether LiteLLM dispatched.
 Read-side (``read_recent_calls``) serves the provider-honesty
 endpoint (T9 ``/api/v1/system/effective-routing``).
 
-Sprint 3 contract — ``model_id`` is always ``None`` on write;
-Sprint 9.5 (ADR-013 model registry) backfills.
+Sprint 3 — 9.5a contract — ``model_id`` was reserved + always written
+as ``None`` (the column existed in the row dataclass + table, but the
+two gateway construction sites in ``llm/gateway.py`` hardcoded ``None``).
+Sprint 9.5b C2 (ADR-013) — gateway now threads
+``Settings.llm_model_id_map[litellm_alias]`` into write-site
+``model_id``; unmapped aliases still write ``None`` (the honest posture
+per ADR-007 — the gateway never invents a ``model_id``). No backfill
+of historical rows; pre-C2 rows stay ``model_id IS NULL`` permanently.
 
 References:
 - Plan Decision-Locking §5 (audit + decision-history emission contract,
@@ -193,6 +199,50 @@ class GatewayCallLedger:
                 GatewayCallRow(**_normalise_row_for_construction(dict(r._mapping)))
                 for r in result.fetchall()
             ]
+
+    async def count_by_model_id(
+        self,
+        *,
+        model_id: str,
+        since: _dt.datetime,
+        until: _dt.datetime,
+    ) -> int:
+        """Sprint 9.5b C3 — count ledger rows with the given
+        ``model_id`` in ``[since, until]``.
+
+        Used by ``GET /api/v1/models/{model_id}/usage`` to report
+        the per-call invocation count for a registered model.
+
+        Contract per the user-locked PR #35 R2 C3 review bar #1:
+
+        - **Exact match** on ``model_id`` (SQL ``=``; NOT ``LIKE`` /
+          ``IN`` / substring). A query for ``"m-a"`` MUST NOT match
+          rows with ``model_id="m-a-extended"`` or ``"prefix-m-a"``.
+        - **Time-bounded** to ``[since, until]`` (inclusive both ends).
+          The aggregate NEVER does a full-table scan.
+        - **Returns zero** for unknown ``model_id`` (no calls yet,
+          pre-C2 historical-only window, or a pre-registration
+          probe). NEVER raises on missing identity.
+        - **Ignores NULL ``model_id`` rows.** SQL ``column == 'x'``
+          does NOT match NULL, so pre-C2 historical rows + unmapped-
+          alias post-C2 rows are transparently excluded — they
+          NEVER count against any model_id query, including the
+          literal string ``"None"``.
+
+        Index-served by ``ix_gateway_call_ledger_model_id_ts``
+        (btree on ``(model_id, ts)``, created in migration 0004).
+        Both filter columns hit the index leading edge so the query
+        is sub-millisecond on Postgres / Oracle for any practical
+        window + model cardinality.
+        """
+        async with self._engine.connect() as conn:
+            result = await conn.execute(
+                sa.select(sa.func.count(_ledger_table.c.id))
+                .where(_ledger_table.c.model_id == model_id)
+                .where(_ledger_table.c.ts >= since)
+                .where(_ledger_table.c.ts <= until)
+            )
+            return int(result.scalar_one())
 
 
 def _normalise_row_for_construction(mapping: dict[str, _t.Any]) -> dict[str, _t.Any]:

@@ -22,8 +22,14 @@ Per the user-locked B5 invariants:
    ``model_registry_store`` + ``model_trust_gate``) are supplied.
    Partial config emits a structured warning log + the
    ``app.state.models_router_mounted`` flag reflects the decision.
-5. NO ``/usage`` endpoint in B5 (deferred to Block C, which has not
-   yet been authorised).
+5. (Sprint 9.5b C3 note — INVARIANT EXPIRED) — the original
+   user-locked B5 invariant #5 ("NO ``/usage`` endpoint in B5,
+   deferred to Block C") expired at C3 when ``/usage`` landed in
+   ``inspection_routes.py``. The transitional pin
+   ``TestUsageEndpointDeferredToBlockC`` was REMOVED in the C3
+   commit per the PR #35 R2 plan-patch D3 deferral-expiry rationale;
+   the positive C3 replacement lives at
+   ``tests/unit/portal/api/models/test_usage_endpoint.py``.
 
 Standing-offer §30 invariant: ``from __future__ import annotations``
 is safe here — the conftest fixtures and these test functions do
@@ -41,7 +47,9 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy.ext.asyncio import AsyncEngine
 
+from cognic_agentos.llm.ledger import GatewayCallLedger
 from cognic_agentos.models.storage import ModelRecordStore
 
 # ──────────────────────────────────────────────────────────────────────
@@ -433,25 +441,13 @@ class TestInspectionAuditEndpoint:
 
 
 # ──────────────────────────────────────────────────────────────────────
-# 4. B5 deliberately excludes /usage (user-locked invariant #5)
+# 4. (Sprint 9.5b C3 — invariant EXPIRED) B5 deliberately excluded
+#    /usage; that deferral expired at C3 when /usage landed. The
+#    transitional pin ``TestUsageEndpointDeferredToBlockC`` was
+#    REMOVED in the C3 commit per the PR #35 R2 plan-patch D3
+#    deferral-expiry rationale; the positive C3 replacement lives
+#    at ``tests/unit/portal/api/models/test_usage_endpoint.py``.
 # ──────────────────────────────────────────────────────────────────────
-
-
-class TestUsageEndpointDeferredToBlockC:
-    """User-locked B5 invariant #5 — the ``/usage`` endpoint is
-    Block C territory (Task C3 per plan). Pinning its absence at the
-    router level so a regression that prematurely lands it in B5
-    surfaces here."""
-
-    async def test_usage_endpoint_not_present_in_b5(self, make_app: Callable[..., FastAPI]) -> None:
-        app = make_app(scopes=frozenset({"model.audit.read"}))
-        # The compiled routes MUST NOT include /api/v1/models/{id}/usage.
-        compiled_paths = [r.path for r in app.routes]  # type: ignore[attr-defined]
-        usage_paths = [p for p in compiled_paths if p.endswith("/usage")]
-        assert usage_paths == [], (
-            f"B5 must NOT register the /usage endpoint (deferred to Block C); "
-            f"found: {usage_paths!r}"
-        )
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -612,4 +608,102 @@ class TestCreateAppMount:
         ]
         assert partial_logs == [], (
             "pack-only deployment emitted partial-config warning despite supplying zero model deps"
+        )
+
+    # ── Sprint 9.5b C3 + plan-patch D7 — 4-state mount warning ──
+
+    def test_mount_emits_4state_warning_when_gateway_ledger_missing(
+        self,
+        all_three_deps: dict[str, Any],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """**User-locked review bar #8** (PR #35 R2 C3 directive +
+        D7 plan-patch) — when all 3 model deps are supplied AND the
+        models router mounts AND ``gateway_ledger is None``, emit
+        the 4th-state structured warning
+        ``portal.models.gateway_ledger_not_wired_partial_9_5b_config``.
+        Operators see the partial 9.5b config at startup, not only
+        at first ``/usage`` call (which would surface as 503
+        ``gateway_ledger_not_configured``)."""
+        from cognic_agentos.portal.api.app import create_app
+
+        # gateway_ledger NOT supplied (default None).
+        with caplog.at_level(logging.WARNING):
+            app = create_app(**all_three_deps)
+        # Mount still succeeds — the 4th state is "mounted with a
+        # partial backend", NOT "refuse to mount".
+        assert app.state.models_router_mounted is True
+        # The 4-state warning fires.
+        ledger_warnings = [
+            r
+            for r in caplog.records
+            if "portal.models.gateway_ledger_not_wired_partial_9_5b_config" in r.getMessage()
+        ]
+        assert len(ledger_warnings) >= 1, (
+            "expected at least one gateway_ledger_not_wired_partial_9_5b_config "
+            f"warning when models mount with gateway_ledger=None; got: "
+            f"{[(r.levelname, r.getMessage()) for r in caplog.records]}"
+        )
+        # The 3-state partial-config warning does NOT fire — this is
+        # the 4th state, not the 3-state partial-deps state.
+        partial_3state = [
+            r for r in caplog.records if "models_router_unmounted_partial_config" in r.getMessage()
+        ]
+        assert partial_3state == [], (
+            "4th-state warning path must not also trip the 3-state "
+            "partial-config warning (the 3-state warning is for the "
+            "partial-MODEL-deps case, not the missing-ledger case)"
+        )
+
+    def test_mount_does_not_emit_4state_warning_when_gateway_ledger_supplied(
+        self,
+        all_three_deps: dict[str, Any],
+        engine: AsyncEngine,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Bar #8 negative — when ``gateway_ledger`` IS supplied
+        alongside the 3 model deps, the 4-state warning does NOT
+        fire (the 4th state is reserved for the missing-ledger
+        scenario only)."""
+        from cognic_agentos.portal.api.app import create_app
+
+        all_three_deps["gateway_ledger"] = GatewayCallLedger(engine)
+        with caplog.at_level(logging.WARNING):
+            app = create_app(**all_three_deps)
+        assert app.state.models_router_mounted is True
+        ledger_warnings = [
+            r
+            for r in caplog.records
+            if "portal.models.gateway_ledger_not_wired_partial_9_5b_config" in r.getMessage()
+        ]
+        assert ledger_warnings == [], (
+            "4-state warning fired despite gateway_ledger being supplied; "
+            "the warning is for the missing-ledger scenario ONLY"
+        )
+
+    def test_mount_does_not_emit_4state_warning_when_models_router_not_mounted(
+        self,
+        all_three_deps: dict[str, Any],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Bar #8 second negative — when the models router is NOT
+        mounted (some model dep missing → 3-state partial-config
+        path), the 4-state warning does NOT fire. The 4-state
+        warning is scoped to the MOUNTED branch; a not-mounted
+        router has no /usage to return 503 from, so the warning
+        would be noise."""
+        from cognic_agentos.portal.api.app import create_app
+
+        all_three_deps.pop("model_registry_store")
+        with caplog.at_level(logging.WARNING):
+            app = create_app(**all_three_deps)
+        assert app.state.models_router_mounted is False
+        ledger_warnings = [
+            r
+            for r in caplog.records
+            if "portal.models.gateway_ledger_not_wired_partial_9_5b_config" in r.getMessage()
+        ]
+        assert ledger_warnings == [], (
+            "4-state warning fired despite models router not being mounted; "
+            "the warning is scoped to the MOUNTED branch only"
         )

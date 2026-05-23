@@ -74,7 +74,12 @@ def _row(
     request_id: str | None = None,
     tier: str = "tier1",
     litellm_alias: str = "cognic-tier1-dev",
+    model_id: str | None = None,
 ) -> GatewayCallRow:
+    # Sprint 9.5b C3 extension: ``model_id`` kwarg lands at the end
+    # of the signature for backward-compat with existing callers
+    # (they pass no ``model_id``; the None default keeps their
+    # behavior identical to the pre-C3 hardcode at this line).
     return GatewayCallRow(
         id=uuid.uuid4(),
         ts=_dt.datetime.now(_dt.UTC) - _dt.timedelta(minutes=age_minutes),
@@ -88,7 +93,7 @@ def _row(
         provenance=provenance,
         latency_ms=42,
         outcome=outcome,
-        model_id=None,
+        model_id=model_id,
     )
 
 
@@ -421,3 +426,142 @@ class TestStableShape:
             "drift_count",
             "chip",
         }
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Sprint 9.5b C3 — recent_call_details surfaces model_id per row
+# (wire-protocol-public additive extension per ADR-007)
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestRecentCallDetailsModelId:
+    """**User-locked review bar #6 + #7** (PR #35 R2 C3 directive
+    verbatim):
+
+    6. ``/effective-routing`` adds ``model_id`` only to
+       ``recent_call_details`` / ``_row_dict``; ``recent_calls``
+       count-map stays unchanged.
+    7. Backward compatibility: the existing 11 ``_row_dict`` keys
+       remain, and unmapped aliases surface ``model_id=None``.
+
+    The ``model_id`` extension on ``_row_dict`` at
+    ``system_routes.py:105`` is the ADR-007 provider-honesty
+    wire-protocol-public additive surface; existing consumers tolerate
+    added dict keys per JSON's superset rule, so the change is
+    backward-compatible.
+    """
+
+    async def test_recent_call_details_includes_model_id_for_mapped_alias(
+        self, empty_ledger: GatewayCallLedger
+    ) -> None:
+        """Bar #6 — when a row carries ``model_id="m-a"`` (the
+        post-C2 mapped-alias path), ``recent_call_details``
+        surfaces it verbatim."""
+        await empty_ledger.write_row(
+            _row(
+                upstream_model="ollama/qwen3:8b",
+                external=False,
+                provenance="resolved",
+                model_id="m-a",
+                request_id="req-c3-mapped",
+            )
+        )
+        client = _client(Settings(runtime_profile="prod"), ledger=empty_ledger)
+        with client:
+            body = client.get("/api/v1/system/effective-routing").json()
+        details = body["recent_call_details"]
+        assert len(details) == 1
+        assert details[0]["request_id"] == "req-c3-mapped"
+        assert details[0]["model_id"] == "m-a"
+
+    async def test_recent_call_details_surfaces_none_for_unmapped_alias(
+        self, empty_ledger: GatewayCallLedger
+    ) -> None:
+        """Bar #7 — when a row carries ``model_id=None`` (the pre-C2
+        historical OR the unmapped-alias post-C2 path), the entry
+        includes ``"model_id": None`` EXPLICITLY (key present, value
+        ``None`` — NOT key-absent). The honest posture per ADR-007:
+        the gateway never invents a model_id; missing-model identity
+        surfaces as explicit ``null`` on the wire so operators see
+        the gap rather than silently absorbing it."""
+        await empty_ledger.write_row(
+            _row(
+                upstream_model="ollama/qwen3:8b",
+                external=False,
+                provenance="resolved",
+                model_id=None,
+                request_id="req-c3-unmapped",
+            )
+        )
+        client = _client(Settings(runtime_profile="prod"), ledger=empty_ledger)
+        with client:
+            body = client.get("/api/v1/system/effective-routing").json()
+        details = body["recent_call_details"]
+        assert len(details) == 1
+        assert "model_id" in details[0], (
+            "model_id key MUST be present on every entry; explicit "
+            "None is the honest posture for unmapped aliases"
+        )
+        assert details[0]["model_id"] is None
+
+    async def test_recent_call_details_keeps_existing_11_keys(
+        self, empty_ledger: GatewayCallLedger
+    ) -> None:
+        """Bar #7 backward-compat — the C3 additive extension MUST
+        preserve every one of the existing 11 ``_row_dict`` keys.
+        Catches a future regression that accidentally drops one of
+        the original 11 keys while adding the 12th. Sibling to the
+        TestStableShape top-level-keys pin above; this one pins the
+        per-row shape."""
+        await empty_ledger.write_row(
+            _row(
+                upstream_model="ollama/qwen3:8b",
+                external=False,
+                provenance="resolved",
+                model_id="m-a",
+            )
+        )
+        client = _client(Settings(runtime_profile="prod"), ledger=empty_ledger)
+        with client:
+            body = client.get("/api/v1/system/effective-routing").json()
+        details = body["recent_call_details"]
+        assert len(details) == 1
+        assert set(details[0].keys()) == {
+            "ts",
+            "request_id",
+            "tenant_id",
+            "tier",
+            "litellm_alias",
+            "upstream_model",
+            "upstream_api_base",
+            "external",
+            "provenance",
+            "outcome",
+            "latency_ms",
+            "model_id",  # the C3 12th key
+        }
+
+    async def test_recent_calls_count_map_is_keyed_by_upstream_model_not_model_id(
+        self, empty_ledger: GatewayCallLedger
+    ) -> None:
+        """Bar #6 — the ``recent_calls`` count-map at
+        ``system_routes.py:241`` is NOT touched by C3. It stays
+        ``dict[upstream_model, count]``. A regression that
+        accidentally re-keys it by ``model_id`` would surface
+        here (e.g. a future refactor that copy-pastes the C3
+        ``_row_dict`` change into the count aggregation)."""
+        await empty_ledger.write_row(
+            _row(
+                upstream_model="ollama/qwen3:8b",
+                external=False,
+                provenance="resolved",
+                model_id="m-a",
+            )
+        )
+        client = _client(Settings(runtime_profile="prod"), ledger=empty_ledger)
+        with client:
+            body = client.get("/api/v1/system/effective-routing").json()
+        # The count-map key MUST be the upstream_model string, NOT the model_id.
+        assert "ollama/qwen3:8b" in body["recent_calls"]
+        assert "m-a" not in body["recent_calls"]
+        assert body["recent_calls"]["ollama/qwen3:8b"] == 1

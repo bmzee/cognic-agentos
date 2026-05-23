@@ -39,11 +39,13 @@ at request time. Per
 ``[[feedback_pep563_breaks_closure_local_depends]]``.
 """
 
+import datetime
 import logging
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 
+from cognic_agentos.llm.ledger import GatewayCallLedger
 from cognic_agentos.models.registry import ModelLifecycleState
 from cognic_agentos.models.storage import ModelRecord, ModelRecordStore
 from cognic_agentos.portal.api.models.dto import (
@@ -119,25 +121,42 @@ def register_model_inspection_list(parent: APIRouter, *, store: ModelRecordStore
         return [ModelResponse.model_validate(r) for r in records]
 
 
-def build_model_inspection_routes(*, store: ModelRecordStore) -> APIRouter:
-    """The two ``{model_id}``-keyed inspection sub-handlers (detail +
-    audit). ``/usage`` is Block C — NOT mounted here.
+def build_model_inspection_routes(
+    *,
+    store: ModelRecordStore,
+    ledger: GatewayCallLedger | None = None,
+) -> APIRouter:
+    """The ``{model_id}``-keyed inspection sub-handlers (detail +
+    audit) plus the Sprint 9.5b C3 ``/usage`` endpoint.
 
-    Both endpoints flow through :class:`RequireModelTenantOwnership`
+    All endpoints flow through :class:`RequireModelTenantOwnership`
     which collapses cross-tenant + unknown to a 404
     ``model_not_found`` per the B2 R1 wire-body-collapse contract —
     a probe cannot distinguish "model exists in another tenant" from
     "no such model" by reading the response body.
+
+    The ``ledger: GatewayCallLedger | None = None`` kwarg is the
+    Sprint 9.5b C3 + PR #35 R2 plan-patch D7 user-locked policy
+    surface: ``/usage`` mounts REGARDLESS of ledger presence; if the
+    backend is not wired at call time the handler returns 503
+    ``gateway_ledger_not_configured`` (NOT 404, which would look like
+    route drift; NOT silent-skip, which would hide the partial
+    config). Security gates (scope + tenant) run BEFORE the 503
+    ledger check via FastAPI's dep-chain ordering — a missing-scope
+    caller still sees 403 ``scope_not_held``; a cross-tenant probe
+    still sees 404 ``model_not_found``.
     """
     router = APIRouter()
     _require_audit = RequireScope("model.audit.read")
+    _require_usage = RequireScope("model.usage.read")
     _require_tenant_ownership = RequireModelTenantOwnership(model_id_param="model_id")
 
-    # Register the audit endpoint BEFORE the detail endpoint so the
-    # more-specific path-segment (``/{model_id}/audit``) is matched
-    # before the broader ``/{model_id}`` pattern. FastAPI's
-    # path-segment-exact matcher does not require this for correctness
-    # today, but defensive ordering documented inline.
+    # Register the audit + usage endpoints BEFORE the detail endpoint
+    # so the more-specific path-segments
+    # (``/{model_id}/audit`` and ``/{model_id}/usage``) match before
+    # the broader ``/{model_id}`` pattern. FastAPI's path-segment-
+    # exact matcher does not require this for correctness today,
+    # but defensive ordering documented inline.
 
     @router.get(
         "/{model_id}/audit",
@@ -154,6 +173,44 @@ def build_model_inspection_routes(*, store: ModelRecordStore) -> APIRouter:
         del actor
         history = await store.load_lifecycle_history(record.model_id)
         return [ModelLifecycleEventResponse.model_validate(event) for event in history]
+
+    @router.get(
+        "/{model_id}/usage",
+        summary="Per-call invocation count from gateway ledger (Sprint 9.5b C3)",
+    )
+    async def get_usage(
+        actor: Annotated[Actor, Depends(_require_usage)],
+        record: Annotated[ModelRecord, Depends(_require_tenant_ownership)],
+        from_: Annotated[datetime.datetime, Query(alias="from")],
+        to: Annotated[datetime.datetime, Query()],
+    ) -> dict[str, str | int]:
+        """Sprint 9.5b C3 + PR #35 R2 plan-patch D7 user-locked
+        policy — ``/usage`` is a documented public endpoint once
+        9.5b lands. When the gateway ledger backend is not wired,
+        return 503 closed-enum ``gateway_ledger_not_configured`` so
+        operators see "backend not wired" rather than a 404 that
+        would look like route drift.
+
+        Security-gates-first dep-chain ordering: ``RequireScope`` +
+        ``RequireModelTenantOwnership`` STILL run BEFORE the 503
+        ledger check (the FastAPI dep chain resolves dependencies
+        before the handler body), so a missing-scope caller sees
+        403 ``scope_not_held`` and a cross-tenant probe sees 404
+        ``model_not_found`` — the 503 is a backend-config signal,
+        NOT a security signal.
+        """
+        del actor
+        if ledger is None:
+            raise HTTPException(
+                status_code=503,
+                detail={"reason": "gateway_ledger_not_configured"},
+            )
+        count = await ledger.count_by_model_id(
+            model_id=record.model_id,
+            since=from_,
+            until=to,
+        )
+        return {"model_id": record.model_id, "count": count}
 
     @router.get(
         "/{model_id}",

@@ -106,7 +106,19 @@ def _row_dict(row: GatewayCallRow) -> dict[str, Any]:
     """Stable per-row JSON shape. Field naming mirrors the ledger
     column names so operators searching the audit trail see the same
     keys here and in their database tooling. Round-6 reviewer-P1:
-    api_base + provenance come from the persisted row."""
+    api_base + provenance come from the persisted row.
+
+    Sprint 9.5b C3 + PR #35 R2 plan-patch D2/D5/D6 — the 12th key
+    ``model_id`` is the ADR-007 provider-honesty wire-protocol-public
+    additive extension. Pre-C2 historical rows carry ``model_id=None``
+    (the column existed in the row dataclass + table but the gateway
+    hardcoded ``None``); post-C2 rows carry the value threaded from
+    ``Settings.llm_model_id_map[litellm_alias]`` or ``None`` for an
+    unmapped alias (the honest posture — the gateway never invents
+    a ``model_id``). The ``recent_calls`` count-map at
+    ``effective_routing()`` (line ~241) is NOT touched by C3 — it
+    stays keyed by ``upstream_model``.
+    """
     return {
         "ts": row.ts.isoformat(),
         "request_id": row.request_id,
@@ -119,6 +131,7 @@ def _row_dict(row: GatewayCallRow) -> dict[str, Any]:
         "provenance": row.provenance,
         "outcome": row.outcome,
         "latency_ms": row.latency_ms,
+        "model_id": row.model_id,
     }
 
 

@@ -505,6 +505,25 @@ class Settings(BaseSettings):
             "intentionally relax based on their perimeter risk."
         ),
     )
+    llm_model_id_map: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Sprint 9.5b C1 (ADR-013) — maps a resolved LiteLLM alias "
+            "to a stable ``model_id`` from the Model Registry. Sprint "
+            "9.5b C2's gateway sets ``GatewayCallRow.model_id`` via "
+            "``self._settings.llm_model_id_map.get(litellm_alias)`` at "
+            "the two ledger-write construction sites; an unmapped alias "
+            "writes ``model_id=None`` + the existing 'unmapped alias' "
+            "log path — the gateway never invents a ``model_id``. A "
+            "future sprint may replace this static map with registry-"
+            "backed dynamic resolution. Env-var form is JSON-encoded "
+            '(e.g. \'{"cognic-tier1-dev": "cognic-tier1-acme-v1"}\'); '
+            "invalid JSON / non-string keys or values fail at "
+            "settings-load time via the ``dict[str, str]`` annotation "
+            "(fail-loud invariant: operators see misconfiguration at "
+            "startup, never as a runtime mystery)."
+        ),
+    )
 
     # --- Sprint 4 — Plugin registry + trust gate + policy seed ---------
     # Per ADRs 002 (MCP plugin protocol — cosign trust gate +
