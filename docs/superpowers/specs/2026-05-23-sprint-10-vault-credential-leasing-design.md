@@ -365,6 +365,21 @@ async def admit_policy(
 
 Default `()` keeps existing callers backward-compat (zero impact on Sprint-8A and earlier admission paths).
 
+**Pre-Rego validation step (NEW): kernel-boundary cross-tenant check.** When `requires_credentials` is non-empty, `admit_policy` first validates that every `VaultLeaseRequest.tenant_id` matches the originating `Actor.tenant_id`. The `VaultLeaseRequest` itself CANNOT enforce this — per §3.1's architectural-arrow contract the request carries only the projected `VaultLeaseActorRef` (`actor_subject` + `actor_type`), not the full Actor with its tenant_id. The check therefore lives at the `sandbox/admission.py` kernel boundary, where both the request shape AND the originating Actor are in scope:
+
+```python
+if requires_credentials:
+    for req in requires_credentials:
+        if req.tenant_id != actor.tenant_id:
+            raise SandboxLifecycleRefused(
+                reason="sandbox_credential_request_tenant_mismatch",
+                detail=f"tenant_id={req.tenant_id} != actor.tenant_id={actor.tenant_id}",
+            )
+    # Then: sentinel-adapter check (existing Sprint-8A reason), Rego eval below, etc.
+```
+
+This refusal is **NOT** a mint failure (§7.1) — it fires BEFORE any Vault round-trip; the categorical fit is admission-time request-validation alongside the Rego cap rule (§5.1). Pinned by `test_admit_credentials.py::test_admit_policy_refuses_cross_tenant_request` (see §9.1).
+
 The Rego input dict gains a new top-level key:
 ```python
 rego_input = {
@@ -543,18 +558,23 @@ Per AGENTS.md L48 + L150, `policies/_default/sandbox.rego` is a stop-rule. The n
 
 ## 6. Audit & closed-enum extensions
 
-### 6.1 `SandboxRefusalReason` — 21 → 25 (+4: 3 new mint-failure values + 1 new TTL-cap value)
+### 6.1 `SandboxRefusalReason` — 21 → 26 (+5)
 
-**Self-correction during spec write:** brainstorm Round 1 said "Sprint 10 → 24" (i.e., +3 mint-failure values only). But §5.1 adds a 4th new refusal value for the Rego TTL-cap-exceeded path (`sandbox_credential_ttl_exceeds_tenant_max`). Correct net: 21 → 25.
+**Five new closed-enum refusal values land at Sprint 10:**
+
+- **3 Vault-round-trip mint failures** at `create()` post-admission (per §7.1 — Vault unavailable / secret_path 404 / auth 403)
+- **1 admission-time Rego cap refusal** for the per-tenant max TTL rule (per §5.1 — `sandbox_credential_ttl_exceeds_tenant_max`)
+- **1 kernel-boundary request-validation refusal** for the tenant_id ↔ Actor.tenant_id consistency check (`sandbox_credential_request_tenant_mismatch`; see §4.1 + §3.1). This validation is owned by the request-meets-actor boundary in `sandbox/admission.py` — `VaultLeaseRequest` itself cannot enforce the consistency without re-introducing the architectural-arrow violation (per §3.1 the request only carries the projected `VaultLeaseActorRef`, not the full `Actor`).
 
 | Existing (21) | Sprint 10 additions |
 |---|---|
-| Sprint 8A (15 values; unchanged) | `sandbox_credential_mint_failed_vault_unavailable` — Vault 5xx or network failure |
-| Sprint 8.5 (6 wake-time values; unchanged) | `sandbox_credential_mint_failed_secret_path_unknown` — Vault 404 on secret_path |
-| | `sandbox_credential_mint_failed_auth_denied` — Vault 403 on secret_path |
-| | `sandbox_credential_ttl_exceeds_tenant_max` — Rego rule 6 refusal |
+| Sprint 8A (15 values; unchanged) | `sandbox_credential_mint_failed_vault_unavailable` — Vault 5xx or network failure (§7.1) |
+| Sprint 8.5 (6 wake-time values; unchanged) | `sandbox_credential_mint_failed_secret_path_unknown` — Vault 404 on secret_path (§7.1) |
+| | `sandbox_credential_mint_failed_auth_denied` — Vault 403 on secret_path (§7.1) |
+| | `sandbox_credential_ttl_exceeds_tenant_max` — Rego rule 6 admission-time refusal (§5.1) |
+| | `sandbox_credential_request_tenant_mismatch` — kernel-boundary validation: `VaultLeaseRequest.tenant_id != Actor.tenant_id` (§4.1; owned by `sandbox/admission.py` since the projected `VaultLeaseActorRef` doesn't carry full Actor) |
 
-**Total: 21 → 25** (+4). I'll update the spec's net-count claim accordingly; brainstorm Round 1 understated by 1.
+**Total: 21 → 26** (+5).
 
 ### 6.2 `SandboxLifecycleEvent` — 12 → 15 (+3)
 
@@ -625,7 +645,8 @@ Three failure modes, each mapped to a distinct closed-enum refusal:
 
 | Stage | Failure | Outcome |
 |---|---|---|
-| Admission | Rego rule 6 trips (TTL cap exceeded) | `SandboxLifecycleRefused(sandbox_credential_ttl_exceeds_tenant_max)` — pure policy decision, NO Vault touched |
+| Admission — kernel-boundary check | `VaultLeaseRequest.tenant_id != Actor.tenant_id` (cross-tenant request) | `SandboxLifecycleRefused(sandbox_credential_request_tenant_mismatch)` — pre-Rego, pre-Vault; pure request-shape validation at the kernel boundary (§4.1) |
+| Admission — Rego rule 6 | TTL cap exceeded | `SandboxLifecycleRefused(sandbox_credential_ttl_exceeds_tenant_max)` — pure policy decision, NO Vault touched (§5.1) |
 | Create — mint | First lease fails (Vault unavailable) | `SandboxLifecycleRefused(sandbox_credential_mint_failed_vault_unavailable)` — no leases minted, no cleanup needed |
 | Create — mint | Nth lease fails (after N-1 minted) | Revoke N-1 already-minted leases (best-effort) → `SandboxLifecycleRefused(...)` for the failed Nth |
 | Create — mint | Any backend failure post-mint (image pull, network setup, etc.) | Revoke ALL minted leases (best-effort) → propagate the backend error |
@@ -646,7 +667,7 @@ Three failure modes, each mapped to a distinct closed-enum refusal:
 | `db/adapters/vault_adapter.py` | ON the gate (Sprint 1C) | REFACTOR to consume shared transport; public API unchanged | Stays ON the gate; floor-pin during touching commit |
 | `core/config.py` | ON the gate (via `core/` stop-rule) | EXTEND with 2-3 Sprint 10 settings | Stays ON the gate |
 | `policies/_default/sandbox.rego` | Stop-rule policy bundle | EXTEND with rule 6 + closed-enum reason | Stop-rule; AGENTS.md L150 stop-rule entry update |
-| `sandbox/protocol.py` | (Sprint 8.5) `SandboxRefusalReason` 21-value | EXTEND to 25-value | n/a — typing module |
+| `sandbox/protocol.py` | (Sprint 8.5) `SandboxRefusalReason` 21-value | EXTEND to 26-value (+5; see §6.1 for the new 5-value enumeration) | n/a — typing module |
 | `sandbox/audit.py` | OFF gate per Doctrine F | EXTEND with 3 new lifecycle event payloads | Stays OFF gate (Doctrine F still applies; CC-adjacent extension) |
 | `sandbox/backends/docker_sibling.py` + `kubernetes_pod.py` | ON the gate (Sprint 8B) | EXTEND `create()` with `requires_credentials` mint + `destroy()` with revoke | Stay ON the gate; floor-pin during touching commit |
 
@@ -759,7 +780,7 @@ Suggested task arc (8-10 tasks; 2 work-units total):
 6. **T6 — `sandbox/credentials.py` real `VaultCredentialAdapter`** (depends on T4 + T5; the off-gate-to-on-gate promotion target).
 7. **T7 — `admit_policy()` signature + Rego input extension** (CC stop-rule; depends on T5; threads `requires_credentials` + the Actor → `VaultLeaseActorRef` projection at the call site).
 8. **T8 — `policies/_default/sandbox.rego` rule 6 + TTL cap** (stop-rule; depends on T7).
-9. **T9 — `sandbox/protocol.py` closed-enum extensions** (`SandboxRefusalReason` 21 → 25, `SandboxLifecycleEvent` 12 → 15) + `sandbox/audit.py` lifecycle event payloads (depends on T7+T8).
+9. **T9 — `sandbox/protocol.py` closed-enum extensions** (`SandboxRefusalReason` 21 → 26, `SandboxLifecycleEvent` 12 → 15) + `sandbox/audit.py` lifecycle event payloads (depends on T7+T8).
 10. **T10 — Backend-side create/destroy threading** (Docker + K8s — `SandboxBackend.create()` per-backend; mint at create post-admission, revoke fail-soft at destroy; depends on T6+T7+T9). **NOT a new `sandbox/session.py` module** — the BUILD_PLAN §10 name is stale; Sprint 8A landed the session machinery via `sandbox/protocol.py::SandboxBackend.create()` + per-backend implementations.
 11. **Z1 — CC gate promotion (+3 → 84) + fresh coverage verification** (depends on all preceding tasks; promotes `core/vault.py` + `core/_vault_transport.py` + `sandbox/credentials.py`).
 12. **Z2 — Real-Vault integration proof (env-gated)** (depends on T6+T10).
