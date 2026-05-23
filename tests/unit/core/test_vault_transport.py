@@ -179,7 +179,10 @@ class TestVaultTransportDomainMethods:
             cls.return_value = mock
             transport = _make_transport()
             await transport.revoke("L-1")
-        mock.sys.revoke_lease.assert_called_once_with("L-1")
+        # Kwarg form matches the Sprint-1C VaultAdapter call-shape
+        # convention pinned at
+        # tests/unit/db/test_vault_adapter.py::TestLeaseRevoke::test_revoke.
+        mock.sys.revoke_lease.assert_called_once_with(lease_id="L-1")
 
     async def test_health_check_returns_ok_when_initialized_and_unsealed(self) -> None:
         """T2 #9 (R3 P1 update) — ``health_check()`` calls

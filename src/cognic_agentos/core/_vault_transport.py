@@ -298,7 +298,12 @@ class VaultTransport:
         per spec §7.2)."""
 
         def _revoke() -> None:
-            self._ensure_client().sys.revoke_lease(lease_id)
+            # Kwarg form ``lease_id=lease_id`` (not positional) matches
+            # the Sprint-1C VaultAdapter call-shape convention pinned at
+            # ``tests/unit/db/test_vault_adapter.py::TestLeaseRevoke::test_revoke``
+            # — preserves the test assertion as T3 refactors the adapter
+            # to delegate revoke through this transport.
+            self._ensure_client().sys.revoke_lease(lease_id=lease_id)
 
         await self._execute_with_retry(_revoke)
 
