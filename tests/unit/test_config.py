@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
+from pydantic_settings import SettingsError
 
 from cognic_agentos.core import config as config_module
 from cognic_agentos.core.config import (
@@ -1919,3 +1920,150 @@ def test_evidence_pack_signing_key_path_defaults_none() -> None:
     unset by default (export fails loud when unset)."""
     s = Settings(_env_file=None)  # type: ignore[call-arg]
     assert s.evidence_pack_signing_key_path is None
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Sprint 9.5b C1 — Settings.llm_model_id_map (ADR-013)
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestC1LLMModelIdMap:
+    """Sprint 9.5b C1 — ``Settings.llm_model_id_map`` alias→model_id
+    config seam per ADR-013. **User-locked review bar (PR #35 R2
+    plan-patch D7 — verbatim from user message):**
+
+    1. ``llm_model_id_map: dict[str, str]`` defaults to ``{}``.
+    2. Env input works through ``COGNIC_LLM_MODEL_ID_MAP``.
+    3. Invalid JSON / non-string keys or values fail at settings-load
+       time.
+    4. Existing gateway/config behavior stays unchanged when the map
+       is empty (asserted implicitly — the gate-ladder pytest sweep
+       across the existing gateway test suite is the proof; default
+       ``{}`` is the no-op baseline).
+    5. No gateway behavior yet in C1; C2 consumes it.
+
+    Each bar item maps to ≥1 test below per the
+    [[feedback_strict_review_off_gate]] discipline.
+    """
+
+    def test_llm_model_id_map_defaults_to_empty_dict(self) -> None:
+        """Bar #1 — default is the empty dict; opt-in by env-var only."""
+        s = Settings(_env_file=None)  # type: ignore[call-arg]
+        assert s.llm_model_id_map == {}
+
+    def test_llm_model_id_map_accepts_json_env_form(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Bar #2 — JSON-encoded env-var path. The setting accepts the
+        canonical alias→model_id mapping shape used by Sprint 9.5b
+        C2's gateway lookup."""
+        monkeypatch.setenv(
+            "COGNIC_LLM_MODEL_ID_MAP",
+            '{"cognic-tier1-dev": "cognic-tier1-acme-v1"}',
+        )
+        s = Settings(_env_file=None)  # type: ignore[call-arg]
+        assert s.llm_model_id_map == {"cognic-tier1-dev": "cognic-tier1-acme-v1"}
+
+    def test_llm_model_id_map_accepts_multi_entry_env_form(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Bar #2 — multi-entry JSON (the realistic prod shape with
+        multiple tier-aliases mapped to multiple registered models)."""
+        monkeypatch.setenv(
+            "COGNIC_LLM_MODEL_ID_MAP",
+            '{"cognic-tier1-dev": "cognic-tier1-acme-v1", '
+            '"cognic-tier2-dev": "cognic-tier2-acme-v1"}',
+        )
+        s = Settings(_env_file=None)  # type: ignore[call-arg]
+        assert s.llm_model_id_map == {
+            "cognic-tier1-dev": "cognic-tier1-acme-v1",
+            "cognic-tier2-dev": "cognic-tier2-acme-v1",
+        }
+
+    def test_llm_model_id_map_rejects_invalid_json_at_load_time(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Bar #3 — invalid JSON syntax fails at settings-load time
+        (NOT at gateway-call time). The fail-loud invariant is
+        critical: operators must see the misconfiguration at startup,
+        not surface it as a runtime mystery hours later.
+
+        The exception class is implementation-specific: invalid JSON
+        syntax is rejected by pydantic-settings at the source-read
+        layer (``SettingsError``, BEFORE the Pydantic validator
+        runs); a JSON-decodable-but-shape-invalid input (e.g. an
+        array, or a dict with non-string values) is rejected by the
+        ``dict[str, str]`` validator (``ValidationError``). Both
+        satisfy the "fails at settings-load time" contract; pinning
+        both classes catches a future pydantic-settings refactor
+        that moves the boundary."""
+        monkeypatch.setenv("COGNIC_LLM_MODEL_ID_MAP", "not-json{")
+        with pytest.raises((ValidationError, SettingsError)):
+            Settings(_env_file=None)  # type: ignore[call-arg]
+
+    def test_llm_model_id_map_rejects_json_non_dict_shape(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Bar #3 — valid JSON that is not a dict (e.g. an array)
+        rejected at load time. ``dict[str, str]`` annotation is the
+        gate."""
+        monkeypatch.setenv("COGNIC_LLM_MODEL_ID_MAP", '["a", "b"]')
+        with pytest.raises(ValidationError):
+            Settings(_env_file=None)  # type: ignore[call-arg]
+
+    def test_llm_model_id_map_rejects_non_string_values(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Bar #3 — JSON dict with a non-string value (e.g. int 123)
+        rejected at load time per the ``dict[str, str]`` annotation."""
+        monkeypatch.setenv("COGNIC_LLM_MODEL_ID_MAP", '{"cognic-tier1-dev": 123}')
+        with pytest.raises(ValidationError):
+            Settings(_env_file=None)  # type: ignore[call-arg]
+
+    def test_llm_model_id_map_rejects_null_value(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Bar #3 — JSON ``null`` value rejected. The annotation is
+        ``dict[str, str]``, NOT ``dict[str, str | None]`` — an alias
+        either maps to a model_id or is absent from the map; null is
+        not a meaningful state."""
+        monkeypatch.setenv("COGNIC_LLM_MODEL_ID_MAP", '{"cognic-tier1-dev": null}')
+        with pytest.raises(ValidationError):
+            Settings(_env_file=None)  # type: ignore[call-arg]
+
+    def test_llm_model_id_map_rejects_non_string_keys_at_construction(self) -> None:
+        """Bar #3 — non-string KEYS fail at settings-load time
+        (user-found PR #35 R2 C1 coverage pin). JSON env input cannot
+        express non-string object keys (the JSON spec mandates string
+        keys at the syntax layer), so this case is unreachable via
+        ``COGNIC_LLM_MODEL_ID_MAP=...`` and must be pinned via direct
+        construction. Pydantic v2's ``dict[str, str]`` validator
+        rejects the int key at construction; the test pins the
+        contract so a future relaxation of the annotation surface
+        (e.g. ``dict[Any, Any]``) would be caught here, NOT discovered
+        as a runtime mystery when an operator passes a misshapen
+        config dict programmatically."""
+        with pytest.raises(ValidationError):
+            Settings(  # type: ignore[call-arg]
+                _env_file=None,
+                llm_model_id_map={1: "cognic-tier1-acme-v1"},  # type: ignore[dict-item]
+            )
+
+    def test_c1_does_not_touch_llm_gateway_module(self) -> None:
+        """Bar #5 — bisection-clean C1 invariant. The C1 commit adds
+        ``llm_model_id_map`` to ``Settings`` ONLY; gateway consumption
+        is C2 territory. A regression that prematurely wires the field
+        into ``gateway.py`` would surface as C2 work creeping into C1.
+
+        Pinned by source-grep (mirrors the AST-style pin pattern at
+        ``tests/unit/llm/test_gateway_model_id.py`` that C2 will
+        land). This test is intended to be DELETED at C2 — the C2
+        commit will land the lookup expression that this test forbids,
+        AND the test for that expression's presence supersedes this
+        one."""
+        from pathlib import Path
+
+        import cognic_agentos
+
+        root = Path(cognic_agentos.__file__).resolve().parent
+        gateway_src = (root / "llm" / "gateway.py").read_text(encoding="utf-8")
+        assert "llm_model_id_map" not in gateway_src, (
+            "C1 must NOT consume llm_model_id_map in llm/gateway.py; "
+            "that is C2 territory (bisection-clean invariant)"
+        )
