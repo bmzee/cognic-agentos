@@ -315,38 +315,34 @@ async def _verify_record_signature(
 # ──────────────────────────────────────────────────────────────────────
 
 
-def build_model_lifecycle_routes(
+def register_model_lifecycle_register(
+    parent: APIRouter,
     *,
     store: ModelRecordStore,
-    trust_gate: ModelTrustGate,
-    settings: Settings,
-) -> APIRouter:
-    """Build the model-registry lifecycle router (register / promote /
-    retire). Mounted by ``build_models_router`` (B5) under the parent
-    ``/api/v1/models`` prefix.
+) -> None:
+    """Register the bare ``POST /`` register endpoint DIRECTLY on the
+    parent router so the compiled path is exactly the parent's
+    prefix (``/api/v1/models``) with NO trailing slash.
 
-    The factory captures ``store`` / ``trust_gate`` / ``settings`` in
-    the closure so handlers do not re-resolve them from
-    ``request.app.state`` — eager wiring keeps the dependency injection
-    simple + sub-dep cache effective.
+    Sibling to :func:`register_model_inspection_list` — both bare-
+    prefix endpoints (the POST register + the GET list) MUST be
+    registered on the parent rather than in a sub-router include,
+    because FastAPI's :meth:`APIRouter.include_router` rejects an
+    empty-prefix include of a sub-router that contains an empty-
+    path route (``FastAPIError: Prefix and path cannot be both
+    empty``). Same R33 P2 doctrine as pack
+    ``register_inspection_list``: the slashless path IS the
+    wire-protocol contract, NOT the trailing-slash 307-redirect
+    target.
+
+    Per the user-locked B4 invariant: ``tenant_id`` MUST come from
+    the resolved actor, NEVER the client body. Pinned at the DTO
+    layer (``tenant_id_absent`` field-set check) AND at the route
+    layer (handler assigns ``tenant_id=actor.tenant_id``).
     """
-    router = APIRouter()
-
-    # Closure-local dependency instances — referenced via
-    # ``Annotated[..., Depends(<local>)]`` inside the handlers below.
-    # ``from __future__ import annotations`` is intentionally omitted
-    # at the module top so FastAPI's signature inspection resolves
-    # these names eagerly (not via PEP 563 string-deferred lookup
-    # against globals only).
     _require_register = RequireScope("model.register")
-    _require_retire = RequireScope("model.retire")
-    _require_tenant_ownership = RequireModelTenantOwnership(model_id_param="model_id")
 
-    # ──────────────────────────────────────────────────────────────────
-    # POST /  — register (genesis)
-    # ──────────────────────────────────────────────────────────────────
-
-    @router.post(
+    @parent.post(
         "",
         summary="Register a new model (genesis: state=proposed)",
         response_model=ModelResponse,
@@ -410,6 +406,39 @@ def build_model_lifecycle_routes(
                 status_code=500, detail={"reason": "register_load_back_failed"}
             )
         return ModelResponse.model_validate(loaded)
+
+
+def build_model_lifecycle_routes(
+    *,
+    store: ModelRecordStore,
+    trust_gate: ModelTrustGate,
+    settings: Settings,
+) -> APIRouter:
+    """Build the ``{model_id}``-keyed lifecycle sub-router (promote +
+    retire). Mounted by ``build_models_router`` (B5) under the parent
+    ``/api/v1/models`` prefix via :meth:`APIRouter.include_router`.
+
+    The bare POST register endpoint is registered DIRECTLY on the
+    parent router via :func:`register_model_lifecycle_register` (sibling
+    pattern to :func:`register_model_inspection_list`); this sub-router
+    contains only the ``{model_id}/...`` handlers so the include works
+    cleanly under no-prefix composition.
+
+    The factory captures ``store`` / ``trust_gate`` / ``settings`` in
+    the closure so handlers do not re-resolve them from
+    ``request.app.state`` — eager wiring keeps the dependency injection
+    simple + sub-dep cache effective.
+    """
+    router = APIRouter()
+
+    # Closure-local dependency instances — referenced via
+    # ``Annotated[..., Depends(<local>)]`` inside the handlers below.
+    # ``from __future__ import annotations`` is intentionally omitted
+    # at the module top so FastAPI's signature inspection resolves
+    # these names eagerly (not via PEP 563 string-deferred lookup
+    # against globals only).
+    _require_retire = RequireScope("model.retire")
+    _require_tenant_ownership = RequireModelTenantOwnership(model_id_param="model_id")
 
     # ──────────────────────────────────────────────────────────────────
     # POST /{model_id}/promote  — body-aware scope + serving human gate
@@ -651,4 +680,5 @@ del _prefix
 
 __all__ = [
     "build_model_lifecycle_routes",
+    "register_model_lifecycle_register",
 ]

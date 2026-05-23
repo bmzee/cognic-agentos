@@ -31,9 +31,7 @@ from cognic_agentos.core.canonical import ZERO_HASH
 from cognic_agentos.core.config import Settings
 from cognic_agentos.models.storage import ModelRecordStore
 from cognic_agentos.models.trust import ModelTrustGate
-from cognic_agentos.portal.api.models.lifecycle_routes import (
-    build_model_lifecycle_routes,
-)
+from cognic_agentos.portal.api.models import build_models_router
 from cognic_agentos.portal.rbac.actor import Actor
 
 
@@ -140,9 +138,11 @@ def make_app(
         app = FastAPI()
         app.state.model_registry_store = store
         app.state.actor_binder = _StubBinder(actor)
+        # B5: mount the COMPOSED router (lifecycle + inspection) via
+        # build_models_router. The router carries the MODEL_ROUTER_PREFIX
+        # internally — no extra prefix on include_router.
         app.include_router(
-            build_model_lifecycle_routes(store=store, trust_gate=trust_gate, settings=settings),
-            prefix="/api/v1/models",
+            build_models_router(store=store, trust_gate=trust_gate, settings=settings)
         )
         return app
 
