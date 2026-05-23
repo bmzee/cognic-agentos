@@ -6,6 +6,7 @@ import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 from sqlalchemy import func, select
@@ -19,7 +20,7 @@ from cognic_agentos.models.registry import (
     ModelLifecycleRefused,
 )
 from cognic_agentos.models.storage import (
-    ModelNotFound,  # noqa: F401  (exported by storage; used by A4 tests)
+    ModelNotFound,
     ModelRecord,
     ModelRecordStore,
     _models,
@@ -63,15 +64,34 @@ def _make_record(model_id: str = "cognic-tier1-acme-v1") -> ModelRecord:
         training_data_fingerprint="b" * 64,
         eval_results_ref=None,
         adversarial_pass_rate=None,
-        signature_digest=None,
-        signed_artifact_ref=None,
-        sigstore_bundle_ref=None,
+        # Signed-by-default for A4: register() only stores the refs
+        # as metadata (no signature check at genesis), but
+        # promote_eval_passed REQUIRES the caller to bind the cosign
+        # verdict to all 3 of these (A4 R1 P1 fix). Tests that want
+        # an unsigned record can model_copy to None.
+        signature_digest="a" * 64,
+        signed_artifact_ref="v1/artefact.bin",
+        sigstore_bundle_ref="v1/bundle.sigstore",
         serving_endpoint=None,
         lifecycle_state="proposed",
         last_actor="forge-bot",
         created_at=now,
         updated_at=now,
     )
+
+
+def _signed_record_args(rec: ModelRecord) -> dict[str, Any]:
+    """The 3 ``expected_*`` kwargs binding a ``promote_eval_passed``
+    cosign verdict to a specific record's artefact refs/digest —
+    required for every successful ``promote_eval_passed`` call
+    (A4 R1 P1 fix; the locked precondition re-checks byte-identical
+    via the same values).
+    """
+    return {
+        "expected_signed_artifact_ref": rec.signed_artifact_ref,
+        "expected_sigstore_bundle_ref": rec.sigstore_bundle_ref,
+        "expected_signature_digest": rec.signature_digest,
+    }
 
 
 async def _count_chain_rows(eng: AsyncEngine) -> int:
@@ -214,3 +234,586 @@ async def test_genesis_chain_event_is_model_lifecycle_proposed(
 
 async def test_load_returns_none_for_unknown(store: ModelRecordStore) -> None:
     assert await store.load(uuid.uuid4()) is None
+
+
+# ===========================================================================
+# A4 — ModelRecordStore.transition() (promote / retire)
+# ===========================================================================
+
+
+async def _read_eval_fields(eng: AsyncEngine, row_id: uuid.UUID) -> tuple[str | None, float | None]:
+    """Project eval_results_ref + adversarial_pass_rate from the row."""
+    async with eng.connect() as conn:
+        row = (
+            await conn.execute(
+                select(
+                    _models.c.eval_results_ref,
+                    _models.c.adversarial_pass_rate,
+                ).where(_models.c.id == row_id)
+            )
+        ).first()
+    if row is None:
+        return (None, None)
+    return (row.eval_results_ref, row.adversarial_pass_rate)
+
+
+async def test_transition_keyword_only_signature_enforced(
+    store: ModelRecordStore,
+) -> None:
+    """Pin 1: transition() is keyword-only. Positional calls fail
+    fast — positional misuse is a state-machine bug class the
+    keyword-only contract eliminates at the call site.
+    """
+    fresh_id = uuid.uuid4()
+    with pytest.raises(TypeError):
+        # All positional — must fail at call time, not after some
+        # side effect.
+        await store.transition(  # type: ignore[misc]
+            fresh_id, "promote_eval_passed", "x", "human", "rp"
+        )
+
+
+async def test_transition_unknown_row_raises_model_not_found(
+    store: ModelRecordStore, engine: AsyncEngine
+) -> None:
+    """Pin 2: unknown row_id raises ModelNotFound — distinct from
+    ModelLifecycleRefused so route handlers can dispatch 404 vs 409.
+    Asserts no chain row appended on the not-found path.
+    """
+    chain_before = await _count_chain_rows(engine)
+    with pytest.raises(ModelNotFound):
+        await store.transition(
+            row_id=uuid.uuid4(),
+            transition="retire",
+            actor_id="op",
+            actor_type="human",
+            request_id="r-nf",
+        )
+    assert await _count_chain_rows(engine) == chain_before
+
+
+async def test_promote_eval_passed_refused_when_signature_not_verified(
+    store: ModelRecordStore, engine: AsyncEngine
+) -> None:
+    """Pin 3: promote_eval_passed refused BEFORE the transaction opens
+    when signature_verified is not True — no chain row attempted.
+    """
+    rec = _make_record()
+    await store.register(rec, request_id="r1", actor_id="x", actor_type="service")
+    chain_before = await _count_chain_rows(engine)
+    state_before = await _read_state(engine, rec.id)
+    with pytest.raises(ModelLifecycleRefused) as ei:
+        await store.transition(
+            row_id=rec.id,
+            transition="promote_eval_passed",
+            actor_id="reviewer",
+            actor_type="human",
+            request_id="rp",
+            signature_verified=False,
+        )
+    assert ei.value.reason == "model_promote_signature_verification_failed"
+    assert await _count_chain_rows(engine) == chain_before
+    assert await _read_state(engine, rec.id) == state_before
+
+
+async def test_promote_eval_passed_advances_state(
+    store: ModelRecordStore, engine: AsyncEngine
+) -> None:
+    """Happy path: promote_eval_passed with signature_verified=True
+    advances the state cache + appends one chain row.
+    """
+    rec = _make_record()
+    await store.register(rec, request_id="r1", actor_id="x", actor_type="service")
+    chain_before = await _count_chain_rows(engine)
+    record_id, h = await store.transition(
+        row_id=rec.id,
+        transition="promote_eval_passed",
+        actor_id="reviewer",
+        actor_type="human",
+        request_id="rp",
+        signature_verified=True,
+        **_signed_record_args(rec),
+    )
+    assert await _count_chain_rows(engine) == chain_before + 1
+    assert await _read_state(engine, rec.id) == "eval_passed"
+    assert isinstance(record_id, uuid.UUID)
+    assert isinstance(h, bytes) and len(h) == 32
+
+
+@pytest.mark.parametrize(
+    "changed_field,changed_value",
+    [
+        ("signed_artifact_ref", "v2/artefact.bin"),
+        ("sigstore_bundle_ref", "v2/bundle.sigstore"),
+        ("signature_digest", "f" * 64),
+    ],
+)
+async def test_promote_eval_passed_refused_when_refs_changed_during_promote(
+    store: ModelRecordStore,
+    engine: AsyncEngine,
+    changed_field: str,
+    changed_value: str,
+) -> None:
+    """Pin 4: cosign TOCTOU guard re-checks all three artefact
+    identity fields under the row lock against the caller's
+    expected_* kwargs. Mismatch on ANY of the three (artefact ref /
+    bundle ref / digest) raises
+    model_promote_signature_refs_changed_during_promote — rolls back
+    state + chain (no chain row, no state mutation). Mirrors
+    packs/storage.py's expected_manifest_digest race fix.
+    """
+    from sqlalchemy import update as _sa_update
+
+    rec = _make_record().model_copy(
+        update={
+            "signed_artifact_ref": "v1/artefact.bin",
+            "sigstore_bundle_ref": "v1/bundle.sigstore",
+            "signature_digest": "a" * 64,
+        }
+    )
+    await store.register(rec, request_id="r1", actor_id="x", actor_type="service")
+    # Simulate concurrent admin update of ONE field AFTER the route
+    # handler's pre-lock read + cosign verify, BEFORE the locked
+    # precondition runs.
+    async with engine.begin() as conn:
+        await conn.execute(
+            _sa_update(_models)
+            .where(_models.c.id == rec.id)
+            .values(**{changed_field: changed_value})
+        )
+    chain_before = await _count_chain_rows(engine)
+    with pytest.raises(ModelLifecycleRefused) as ei:
+        await store.transition(
+            row_id=rec.id,
+            transition="promote_eval_passed",
+            actor_id="reviewer",
+            actor_type="human",
+            request_id="rp",
+            signature_verified=True,
+            # The caller threads what cosign verified pre-lock.
+            expected_signed_artifact_ref="v1/artefact.bin",
+            expected_sigstore_bundle_ref="v1/bundle.sigstore",
+            expected_signature_digest="a" * 64,
+        )
+    assert ei.value.reason == "model_promote_signature_refs_changed_during_promote"
+    # Rolled back — no chain row, state cache still at proposed.
+    assert await _count_chain_rows(engine) == chain_before
+    assert await _read_state(engine, rec.id) == "proposed"
+
+
+async def test_invalid_state_pair_refused_and_rolled_back(
+    store: ModelRecordStore, engine: AsyncEngine
+) -> None:
+    """Pin 6: validate_transition runs under the row-locked current
+    state. proposed → serving is not a legal pair — refused
+    model_transition_invalid_state_pair; rolls back (no chain row,
+    state unchanged).
+    """
+    rec = _make_record()
+    await store.register(rec, request_id="r1", actor_id="x", actor_type="service")
+    chain_before = await _count_chain_rows(engine)
+    with pytest.raises(ModelLifecycleRefused) as ei:
+        await store.transition(
+            row_id=rec.id,
+            transition="promote_serving",  # not legal from proposed
+            actor_id="op",
+            actor_type="human",
+            request_id="r-bad",
+        )
+    assert ei.value.reason == "model_transition_invalid_state_pair"
+    assert await _count_chain_rows(engine) == chain_before
+    assert await _read_state(engine, rec.id) == "proposed"
+
+
+async def test_promote_tenant_approved_refused_without_eval_evidence(
+    store: ModelRecordStore, engine: AsyncEngine
+) -> None:
+    """Pin 5a: promote_tenant_approved evidence shape gate refuses
+    model_promote_eval_evidence_missing when either eval_results_ref
+    or adversarial_pass_rate is None. Rolls back inside the
+    transaction (no state update, no chain row).
+    """
+    rec = _make_record()
+    await store.register(rec, request_id="r1", actor_id="x", actor_type="service")
+    await store.transition(
+        row_id=rec.id,
+        transition="promote_eval_passed",
+        actor_id="r",
+        actor_type="human",
+        request_id="r2",
+        signature_verified=True,
+        **_signed_record_args(rec),
+    )
+    chain_before = await _count_chain_rows(engine)
+    with pytest.raises(ModelLifecycleRefused) as ei:
+        await store.transition(
+            row_id=rec.id,
+            transition="promote_tenant_approved",
+            actor_id="r",
+            actor_type="human",
+            request_id="r3",
+            # eval_results_ref + adversarial_pass_rate both omitted
+        )
+    assert ei.value.reason == "model_promote_eval_evidence_missing"
+    assert await _count_chain_rows(engine) == chain_before
+    assert await _read_state(engine, rec.id) == "eval_passed"
+
+
+@pytest.mark.parametrize(
+    "eval_ref,pass_rate",
+    [
+        ("", 0.99),  # blank ref
+        ("   ", 0.99),  # whitespace-only ref
+        ("evalpack://run/1", -0.1),  # negative pass rate
+        ("evalpack://run/1", 1.1),  # above 1
+    ],
+)
+async def test_promote_tenant_approved_refused_when_eval_evidence_malformed(
+    store: ModelRecordStore,
+    engine: AsyncEngine,
+    eval_ref: str,
+    pass_rate: float,
+) -> None:
+    """Pin 5b: shape gate rejects blank / whitespace / out-of-range
+    values under the transaction. Rolls back (no state update, no
+    chain row).
+    """
+    rec = _make_record()
+    await store.register(rec, request_id="r1", actor_id="x", actor_type="service")
+    await store.transition(
+        row_id=rec.id,
+        transition="promote_eval_passed",
+        actor_id="r",
+        actor_type="human",
+        request_id="r2",
+        signature_verified=True,
+        **_signed_record_args(rec),
+    )
+    chain_before = await _count_chain_rows(engine)
+    with pytest.raises(ModelLifecycleRefused) as ei:
+        await store.transition(
+            row_id=rec.id,
+            transition="promote_tenant_approved",
+            actor_id="r",
+            actor_type="human",
+            request_id="r3",
+            eval_results_ref=eval_ref,
+            adversarial_pass_rate=pass_rate,
+        )
+    assert ei.value.reason == "model_promote_eval_evidence_malformed"
+    assert await _count_chain_rows(engine) == chain_before
+    assert await _read_state(engine, rec.id) == "eval_passed"
+
+
+async def test_promote_eval_passed_does_not_set_eval_fields_on_row(
+    store: ModelRecordStore, engine: AsyncEngine
+) -> None:
+    """Pin 7: successful promote_eval_passed updates ONLY
+    lifecycle_state + last_actor + updated_at. Even if the caller
+    inadvertently passes eval_results_ref / adversarial_pass_rate
+    kwargs (which only tenant_approved should set), they MUST NOT
+    leak onto the row.
+    """
+    rec = _make_record()  # eval fields start as None
+    await store.register(rec, request_id="r1", actor_id="x", actor_type="service")
+    pre_eval_ref, pre_rate = await _read_eval_fields(engine, rec.id)
+    assert pre_eval_ref is None
+    assert pre_rate is None
+
+    await store.transition(
+        row_id=rec.id,
+        transition="promote_eval_passed",
+        actor_id="r",
+        actor_type="human",
+        request_id="rp",
+        signature_verified=True,
+        **_signed_record_args(rec),
+        # Inadvertently passed — MUST NOT stick on a non-tenant-approved
+        # promote.
+        eval_results_ref="should-not-stick",
+        adversarial_pass_rate=0.5,
+    )
+    post_eval_ref, post_rate = await _read_eval_fields(engine, rec.id)
+    assert post_eval_ref is None, (
+        f"promote_eval_passed must NOT set eval_results_ref; got {post_eval_ref!r}"
+    )
+    assert post_rate is None, (
+        f"promote_eval_passed must NOT set adversarial_pass_rate; got {post_rate!r}"
+    )
+
+
+async def test_promote_tenant_approved_sets_eval_fields_on_row(
+    store: ModelRecordStore, engine: AsyncEngine
+) -> None:
+    """Pin 7 (positive side): a successful promote_tenant_approved
+    DOES set eval_results_ref + adversarial_pass_rate on the row
+    (the evidence is what justified the approval — it has to land).
+    """
+    rec = _make_record()
+    await store.register(rec, request_id="r1", actor_id="x", actor_type="service")
+    await store.transition(
+        row_id=rec.id,
+        transition="promote_eval_passed",
+        actor_id="r",
+        actor_type="human",
+        request_id="r2",
+        signature_verified=True,
+        **_signed_record_args(rec),
+    )
+    await store.transition(
+        row_id=rec.id,
+        transition="promote_tenant_approved",
+        actor_id="reviewer",
+        actor_type="human",
+        request_id="r3",
+        eval_results_ref="evalpack://run/42",
+        adversarial_pass_rate=0.999,
+    )
+    eval_ref, pass_rate = await _read_eval_fields(engine, rec.id)
+    assert eval_ref == "evalpack://run/42"
+    assert pass_rate == 0.999
+
+
+async def test_transition_chain_row_shape_pins_decision_type_and_payload(
+    store: ModelRecordStore, engine: AsyncEngine
+) -> None:
+    """Pin 8: chain row is model.lifecycle.<target_state> with
+    from_state, to_state, actor_type, model_id, and iso_controls
+    exactly MODEL_LIFECYCLE_ISO_CONTROLS (as a LIST in payload —
+    canonical-form rule).
+    """
+    rec = _make_record()
+    await store.register(rec, request_id="r1", actor_id="x", actor_type="service")
+    await store.transition(
+        row_id=rec.id,
+        transition="promote_eval_passed",
+        actor_id="reviewer",
+        actor_type="human",
+        request_id="rp",
+        signature_verified=True,
+        **_signed_record_args(rec),
+    )
+    # Read the LATEST chain row (the promote_eval_passed one — sequence
+    # 2; the genesis at sequence 1).
+    async with engine.connect() as conn:
+        row = (
+            await conn.execute(
+                select(
+                    _decision_history.c.event_type,
+                    _decision_history.c.payload,
+                    _decision_history.c.iso_controls,
+                )
+                .order_by(_decision_history.c.sequence.desc())
+                .limit(1)
+            )
+        ).first()
+    assert row is not None
+    assert row.event_type == "model.lifecycle.eval_passed"
+    assert row.payload["from_state"] == "proposed"
+    assert row.payload["to_state"] == "eval_passed"
+    assert row.payload["actor_type"] == "human"
+    assert row.payload["model_id"] == rec.model_id
+    assert row.payload["iso_controls"] == list(MODEL_LIFECYCLE_ISO_CONTROLS)
+    assert isinstance(row.payload["iso_controls"], list)
+    assert row.iso_controls == list(MODEL_LIFECYCLE_ISO_CONTROLS)
+
+
+async def test_full_proposed_to_retired_lifecycle(
+    store: ModelRecordStore, engine: AsyncEngine
+) -> None:
+    """Full happy chain: proposed → eval_passed → tenant_approved →
+    serving → retired. Five chain rows total (1 genesis + 4
+    transitions); final state retired; eval fields set at
+    tenant_approved.
+    """
+    rec = _make_record()
+    chain_before = await _count_chain_rows(engine)
+    await store.register(rec, request_id="r0", actor_id="x", actor_type="service")
+    await store.transition(
+        row_id=rec.id,
+        transition="promote_eval_passed",
+        actor_id="r",
+        actor_type="human",
+        request_id="r1",
+        signature_verified=True,
+        **_signed_record_args(rec),
+    )
+    await store.transition(
+        row_id=rec.id,
+        transition="promote_tenant_approved",
+        actor_id="r",
+        actor_type="human",
+        request_id="r2",
+        eval_results_ref="evalpack://run/1",
+        adversarial_pass_rate=0.999,
+    )
+    await store.transition(
+        row_id=rec.id,
+        transition="promote_serving",
+        actor_id="op",
+        actor_type="human",
+        request_id="r3",
+    )
+    await store.transition(
+        row_id=rec.id,
+        transition="retire",
+        actor_id="op",
+        actor_type="human",
+        request_id="r4",
+    )
+    assert await _count_chain_rows(engine) == chain_before + 5
+    final = await store.load(rec.id)
+    assert final is not None
+    assert final.lifecycle_state == "retired"
+    assert final.eval_results_ref == "evalpack://run/1"
+    assert final.adversarial_pass_rate == 0.999
+
+
+# ===========================================================================
+# A4 R1 P1 — TOCTOU guard cannot be bypassed by omitting expected refs
+# ===========================================================================
+
+
+@pytest.mark.parametrize(
+    "missing_field",
+    [
+        "expected_signed_artifact_ref",
+        "expected_sigstore_bundle_ref",
+        "expected_signature_digest",
+    ],
+)
+async def test_promote_eval_passed_refused_when_expected_refs_missing(
+    store: ModelRecordStore, engine: AsyncEngine, missing_field: str
+) -> None:
+    """A4 R1 P1: promote_eval_passed REQUIRES the caller to bind the
+    cosign verdict to ALL THREE artefact refs/digest. Missing any of
+    them refuses ``model_promote_signature_expected_refs_missing``
+    BEFORE the transaction opens — no chain row attempted, state
+    unchanged. Without this gate the TOCTOU re-check inside the
+    locked precondition would be silently skippable (the existing
+    ``if expected_signed_artifact_ref is not None`` guard would
+    short-circuit on None), letting a caller claim ``cosign verified``
+    without binding the verdict to any specific artefact.
+    """
+    rec = _make_record()
+    await store.register(rec, request_id="r1", actor_id="x", actor_type="service")
+    args = _signed_record_args(rec)
+    args[missing_field] = None  # blank out one of the 3 expected_* kwargs
+    chain_before = await _count_chain_rows(engine)
+    with pytest.raises(ModelLifecycleRefused) as ei:
+        await store.transition(
+            row_id=rec.id,
+            transition="promote_eval_passed",
+            actor_id="r",
+            actor_type="human",
+            request_id="rp",
+            signature_verified=True,
+            **args,
+        )
+    assert ei.value.reason == "model_promote_signature_expected_refs_missing"
+    assert await _count_chain_rows(engine) == chain_before
+    assert await _read_state(engine, rec.id) == "proposed"
+
+
+async def test_promote_eval_passed_signature_failure_precedes_missing_refs(
+    store: ModelRecordStore, engine: AsyncEngine
+) -> None:
+    """Refusal precedence: ``signature_verification_failed`` fires
+    BEFORE the ``expected_refs_missing`` gate. If cosign rejected the
+    artefact (``signature_verified=False``), the missing-refs case is
+    moot — there is nothing to bind. The ordering is pinned so a
+    future refactor doesn't accidentally invert the precedence and
+    surface the wrong refusal reason on a cosign rejection.
+    """
+    rec = _make_record()
+    await store.register(rec, request_id="r1", actor_id="x", actor_type="service")
+    chain_before = await _count_chain_rows(engine)
+    with pytest.raises(ModelLifecycleRefused) as ei:
+        await store.transition(
+            row_id=rec.id,
+            transition="promote_eval_passed",
+            actor_id="r",
+            actor_type="human",
+            request_id="rp",
+            signature_verified=False,  # cosign rejected
+            # No expected_* — WOULD trigger expected_refs_missing if
+            # precedence were inverted. The verification gate must
+            # fire first.
+        )
+    assert ei.value.reason == "model_promote_signature_verification_failed"
+    assert await _count_chain_rows(engine) == chain_before
+
+
+# ===========================================================================
+# A4 R1 P2 — Unknown transition name surfaces the closed-enum refusal
+# ===========================================================================
+
+
+async def test_transition_refuses_unknown_transition_name(
+    store: ModelRecordStore, engine: AsyncEngine
+) -> None:
+    """A4 R1 P2: out-of-vocabulary ``transition`` name gets the
+    closed-enum refusal ``model_transition_name_unknown`` — NOT a raw
+    ``KeyError`` from the ``_TRANSITION_TO_TARGET_STATE`` lookup.
+    Type hints do not protect runtime callers; mirrors
+    ``packs/storage.py:742-743``'s preflight transition-name guard.
+    """
+    rec = _make_record()
+    await store.register(rec, request_id="r1", actor_id="x", actor_type="service")
+    chain_before = await _count_chain_rows(engine)
+    with pytest.raises(ModelLifecycleRefused) as ei:
+        await store.transition(
+            row_id=rec.id,
+            transition="promote_to_nowhere",  # type: ignore[arg-type]
+            actor_id="r",
+            actor_type="human",
+            request_id="r-bad",
+        )
+    assert ei.value.reason == "model_transition_name_unknown"
+    assert await _count_chain_rows(engine) == chain_before
+
+
+# ===========================================================================
+# A4 R1 P3 — Pin 7 completion: last_actor + updated_at update assertions
+# ===========================================================================
+
+
+async def test_transition_updates_last_actor_and_updated_at(
+    store: ModelRecordStore, engine: AsyncEngine
+) -> None:
+    """Pin 7 (complete coverage): successful transitions update
+    ``lifecycle_state`` + ``last_actor`` + ``updated_at``. The other
+    A4 tests cover ``lifecycle_state`` via ``_read_state``; this test
+    pins ``last_actor`` (actor-id propagation) and ``updated_at``
+    (monotonic advancement) explicitly. Without these assertions a
+    regression that dropped either field from the values dict at
+    ``storage.py``'s state-cache UPDATE would slip past A4 coverage.
+    """
+    import asyncio
+
+    rec = _make_record()  # last_actor="forge-bot" by default
+    await store.register(rec, request_id="r1", actor_id="forge-bot", actor_type="service")
+    before = await store.load(rec.id)
+    assert before is not None
+    assert before.last_actor == "forge-bot"
+    # Tiny sleep so datetime.now(UTC) at the next call is strictly
+    # later than register-time on fast systems.
+    await asyncio.sleep(0.001)
+    await store.transition(
+        row_id=rec.id,
+        transition="promote_eval_passed",
+        actor_id="reviewer-alice",
+        actor_type="human",
+        request_id="rp",
+        signature_verified=True,
+        **_signed_record_args(rec),
+    )
+    after = await store.load(rec.id)
+    assert after is not None
+    assert after.last_actor == "reviewer-alice", (
+        f"last_actor should reflect the transition actor; got {after.last_actor!r}"
+    )
+    assert after.updated_at > before.updated_at, (
+        f"updated_at should advance strictly; "
+        f"before={before.updated_at!r}, after={after.updated_at!r}"
+    )

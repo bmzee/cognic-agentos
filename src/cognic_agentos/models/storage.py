@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Final, get_args
 
 import pydantic
@@ -32,6 +32,7 @@ from sqlalchemy import (
     Uuid,
     insert,
     select,
+    update,
 )
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
@@ -43,6 +44,7 @@ from cognic_agentos.models.registry import (
     ModelLifecycleRefused,
     ModelLifecycleState,
     ModelTransition,
+    validate_transition,
 )
 
 MODEL_ID_MAX_LEN: Final[int] = 128
@@ -306,6 +308,168 @@ class ModelRecordStore:
         async with self._engine.connect() as conn:
             row = (await conn.execute(select(_models).where(_models.c.id == row_id))).first()
         return _row_to_record(dict(row._mapping)) if row is not None else None
+
+    async def transition(
+        self,
+        *,
+        row_id: uuid.UUID,
+        transition: ModelTransition,
+        actor_id: str,
+        actor_type: str,
+        request_id: str,
+        signature_verified: bool | None = None,
+        eval_results_ref: str | None = None,
+        adversarial_pass_rate: float | None = None,
+        expected_signed_artifact_ref: str | None = None,
+        expected_sigstore_bundle_ref: str | None = None,
+        expected_signature_digest: str | None = None,
+    ) -> tuple[uuid.UUID, bytes]:
+        """Advance the lifecycle. Keyword-only; positional misuse is
+        a state-machine bug class.
+
+        Path-specific gates (design spec §2.3 + §4.1; plan amendment
+        R1 P1 TOCTOU):
+
+        - ``promote_eval_passed``: ``signature_verified`` is the
+          cosign verdict computed by the caller OUTSIDE this
+          transaction (route handler runs the subprocess pre-lock).
+          Required ``True``; otherwise refused
+          ``model_promote_signature_verification_failed`` BEFORE the
+          transaction opens — no chain row attempted. Inside the
+          locked precondition the TOCTOU guard re-checks that the
+          row's ``signed_artifact_ref`` / ``sigstore_bundle_ref`` /
+          ``signature_digest`` are byte-identical to the caller's
+          ``expected_*`` kwargs (what cosign verified pre-lock);
+          mismatch refuses
+          ``model_promote_signature_refs_changed_during_promote``.
+        - ``promote_tenant_approved``: ``eval_results_ref`` +
+          ``adversarial_pass_rate`` are validated under the lock for
+          presence (missing) and shape (blank / out-of-range);
+          missing -> ``model_promote_eval_evidence_missing``;
+          malformed -> ``model_promote_eval_evidence_malformed``.
+          On the successful path BOTH fields are persisted on the
+          row alongside the state-cache update — they are the only
+          fields outside ``lifecycle_state`` / ``last_actor`` /
+          ``updated_at`` that ``transition()`` ever writes.
+        - All transitions: ``validate_transition`` runs under the
+          row-locked view; refusal raises ``ModelLifecycleRefused``
+          and rolls back (no chain row, no state mutation).
+
+        Returns ``(chain_record_id, new_chain_hash)`` from
+        ``DecisionHistoryStore.append_with_precondition``.
+
+        Raises:
+            ModelNotFound: when ``row_id`` has no row in ``models``.
+            ModelLifecycleRefused: state-machine refusals + the
+                shape/TOCTOU/signature-verification refusals above.
+        """
+        # P2 preflight transition-name guard — out-of-vocab transition
+        # gets the closed-enum refusal, not a raw KeyError. Type hints
+        # do NOT protect runtime callers; mirrors packs/storage.py's
+        # preflight guard at packs/storage.py:742-743.
+        if transition not in _TRANSITION_TO_TARGET_STATE:
+            raise ModelLifecycleRefused("model_transition_name_unknown")
+
+        target_state = _TRANSITION_TO_TARGET_STATE[transition]
+
+        # Pre-transaction gates for promote_eval_passed (the subprocess
+        # ran in the route handler; only the bool verdict + the
+        # caller-bound expected_* refs reach storage). No chain row
+        # attempted; nothing to roll back.
+        if transition == "promote_eval_passed":
+            # Cosign verification verdict — must be exactly True.
+            if signature_verified is not True:
+                raise ModelLifecycleRefused("model_promote_signature_verification_failed")
+            # P1 (A4 R1): TOCTOU is meaningless if the caller doesn't
+            # bind the cosign verdict to specific artefact refs/digest.
+            # ALL THREE expected_* values are mandatory for
+            # promote_eval_passed — the locked precondition's re-check
+            # is what guarantees the verdict still applies to the row
+            # we're about to promote.
+            if (
+                expected_signed_artifact_ref is None
+                or expected_sigstore_bundle_ref is None
+                or expected_signature_digest is None
+            ):
+                raise ModelLifecycleRefused("model_promote_signature_expected_refs_missing")
+
+        async def _precondition(
+            conn: AsyncConnection, prev_sequence: int, prev_hash: bytes
+        ) -> ModelRecord:
+            row = (
+                await conn.execute(select(_models).where(_models.c.id == row_id).with_for_update())
+            ).first()
+            if row is None:
+                raise ModelNotFound(row_id)
+            current = _row_to_record(dict(row._mapping))
+
+            # TOCTOU guard for promote_eval_passed — cosign verified
+            # the refs/digest OUTSIDE this transaction; the caller
+            # threads what it verified as expected_* kwargs and we
+            # re-check byte-identical under the lock. Mirrors
+            # packs/storage.py's expected_manifest_digest race fix.
+            # For non-promote_eval_passed paths the kwargs stay None
+            # and the check is skipped.
+            if expected_signed_artifact_ref is not None and (
+                current.signed_artifact_ref != expected_signed_artifact_ref
+                or current.sigstore_bundle_ref != expected_sigstore_bundle_ref
+                or current.signature_digest != expected_signature_digest
+            ):
+                raise ModelLifecycleRefused("model_promote_signature_refs_changed_during_promote")
+
+            # In-memory precondition: tenant_approved eval-evidence
+            # shape. Both fields required + ref non-blank + rate in
+            # [0, 1]. Refusal rolls back inside the transaction (no
+            # state update, no chain row).
+            if transition == "promote_tenant_approved":
+                if eval_results_ref is None or adversarial_pass_rate is None:
+                    raise ModelLifecycleRefused("model_promote_eval_evidence_missing")
+                if not eval_results_ref.strip() or not (0.0 <= adversarial_pass_rate <= 1.0):
+                    raise ModelLifecycleRefused("model_promote_eval_evidence_malformed")
+
+            # State-machine validator under the row-locked from_state.
+            reason = validate_transition(
+                from_state=current.lifecycle_state,
+                to_state=target_state,
+                transition=transition,
+            )
+            if reason is not None:
+                raise ModelLifecycleRefused(reason)
+
+            # State-cache UPDATE. Only lifecycle_state + last_actor +
+            # updated_at on every transition; eval_results_ref +
+            # adversarial_pass_rate ONLY on tenant_approved (the
+            # evidence that justified the approval is what gets
+            # persisted).
+            values: dict[str, Any] = {
+                "lifecycle_state": target_state,
+                "last_actor": actor_id,
+                "updated_at": datetime.now(UTC),
+            }
+            if transition == "promote_tenant_approved":
+                values["eval_results_ref"] = eval_results_ref
+                values["adversarial_pass_rate"] = adversarial_pass_rate
+            await conn.execute(update(_models).where(_models.c.id == row_id).values(**values))
+            return current
+
+        def _build_record(captured: ModelRecord) -> DecisionRecord:
+            return DecisionRecord(
+                decision_type=f"model.lifecycle.{target_state}",
+                request_id=request_id,
+                actor_id=actor_id,
+                tenant_id=captured.tenant_id,
+                payload=_lifecycle_payload(
+                    captured,
+                    from_state=captured.lifecycle_state,
+                    to_state=target_state,
+                    actor_type=actor_type,
+                ),
+                iso_controls=MODEL_LIFECYCLE_ISO_CONTROLS,
+            )
+
+        return await self._history.append_with_precondition(
+            record_builder=_build_record, precondition=_precondition
+        )
 
 
 __all__ = [

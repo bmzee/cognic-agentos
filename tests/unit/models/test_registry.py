@@ -43,20 +43,32 @@ def test_transition_is_canonical_5_tuple() -> None:
     }
 
 
-def test_refusal_reason_has_exactly_ten_pinned_values() -> None:
+def test_refusal_reason_has_exactly_twelve_pinned_values() -> None:
     # Wire-protocol contract — every model lifecycle 409 refusal body carries one.
-    # A3 R1 P1: 10th value `model_register_initial_state_not_proposed` closes
-    # the genesis-state-not-proposed bypass (a direct store caller could
-    # otherwise register a row already in `serving`/`retired` while register()
-    # emitted a model.lifecycle.proposed chain row, bypassing every transition
-    # gate). Spec §2.1 bumped 9 → 10 via Z3 doc-reconciliation.
+    #
+    # Enum history (each amendment driven by a real reviewer finding):
+    #  - A3 R1 P1: 5th value model_register_initial_state_not_proposed —
+    #    closes the genesis-state-not-proposed bypass (caller could
+    #    register a row already in serving/retired while register()
+    #    emitted model.lifecycle.proposed).
+    #  - A4 R1 P1: 8th value model_promote_signature_expected_refs_missing —
+    #    closes the TOCTOU-skip bypass (caller could pass
+    #    signature_verified=True with no expected_* kwargs, leaving the
+    #    cosign verdict unbound to any artefact refs).
+    #  - A4 R1 P2: 3rd value model_transition_name_unknown — closes the
+    #    raw-KeyError leak when transition is out-of-vocabulary
+    #    (mirrors packs/storage.py's preflight transition-name guard).
+    #
+    # Spec §2.1 bumped 9 -> 12 cumulatively via Z3 doc-reconciliation.
     assert set(get_args(ModelLifecycleRefusalReason)) == {
         "model_transition_invalid_state_pair",
         "model_transition_state_unknown",
+        "model_transition_name_unknown",
         "model_transition_from_terminal_state",
         "model_register_duplicate_id",
         "model_register_initial_state_not_proposed",
         "model_promote_signature_verification_failed",
+        "model_promote_signature_expected_refs_missing",
         "model_promote_signature_refs_changed_during_promote",
         "model_promote_eval_evidence_missing",
         "model_promote_eval_evidence_malformed",

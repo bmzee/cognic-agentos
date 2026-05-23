@@ -41,15 +41,21 @@ ModelTransition = Literal[
 ]
 
 #: Closed-enum refusal vocabulary — the wire-protocol contract carried in
-#: every 409 refusal body. Nine values, pinned (design spec §2.1). A
-#: missing reason lands as a reviewed spec amendment first.
+#: every 409 refusal body. Twelve values, pinned (design spec §2.1, bumped
+#: 9 → 12 cumulatively via Z3 doc-reconciliation: A3 R1 P1 added
+#: model_register_initial_state_not_proposed; A4 R1 P1 added
+#: model_promote_signature_expected_refs_missing; A4 R1 P2 added
+#: model_transition_name_unknown). A missing reason lands as a reviewed
+#: spec amendment first.
 ModelLifecycleRefusalReason = Literal[
     "model_transition_invalid_state_pair",
     "model_transition_state_unknown",
+    "model_transition_name_unknown",
     "model_transition_from_terminal_state",
     "model_register_duplicate_id",
     "model_register_initial_state_not_proposed",
     "model_promote_signature_verification_failed",
+    "model_promote_signature_expected_refs_missing",
     "model_promote_signature_refs_changed_during_promote",
     "model_promote_eval_evidence_missing",
     "model_promote_eval_evidence_malformed",
