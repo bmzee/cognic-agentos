@@ -48,6 +48,7 @@ ModelLifecycleRefusalReason = Literal[
     "model_transition_state_unknown",
     "model_transition_from_terminal_state",
     "model_register_duplicate_id",
+    "model_register_initial_state_not_proposed",
     "model_promote_signature_verification_failed",
     "model_promote_signature_refs_changed_during_promote",
     "model_promote_eval_evidence_missing",
