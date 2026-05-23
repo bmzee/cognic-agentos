@@ -36,6 +36,7 @@ from fastapi import Request
 
 from cognic_agentos.portal.rbac.scopes import (  # noqa: F401  (ScopeSet kept for legacy bank-overlay re-export)
     ComplianceRBACScope,
+    ModelRBACScope,
     PackRBACScope,
     ScopeSet,
     UIRBACScope,
@@ -84,7 +85,13 @@ class Actor(pydantic.BaseModel):
     #: examiner actor can carry compliance.evidence_pack.read /
     #: compliance.trace.read (ADR-006). Additive — pre-Sprint-9 actors
     #: still construct cleanly.
-    scopes: frozenset[PackRBACScope | UIRBACScope | ComplianceRBACScope]
+    #: Sprint 9.5 B1 — further widened with ``ModelRBACScope`` so a
+    #: model-registry-capable actor can carry model.* scopes (register
+    #: / promote.* / retire / audit.read / usage.read) alongside any
+    #: other scope family. Additive — pre-9.5 actors still construct
+    #: cleanly. Pinned by
+    #: ``tests/unit/portal/rbac/test_model_scopes.py::TestActorAcceptsModelScopes``.
+    scopes: frozenset[PackRBACScope | UIRBACScope | ComplianceRBACScope | ModelRBACScope]
     actor_type: ActorType
 
 

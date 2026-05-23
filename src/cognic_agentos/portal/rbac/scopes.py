@@ -110,6 +110,70 @@ ComplianceRBACScope = Literal[
 ]
 
 
+#: Sprint 9.5 B1 — Model Registry RBAC scopes per ADR-013 + spec §6.3.
+#: Eight values, covering the 6 portal endpoints planned at B4-B5 (list
+#: / detail / audit share ``model.audit.read``; ``POST /promote`` is
+#: body-aware, mapping ``target_state`` to ``model.promote.<target_state>``
+#: at the route handler):
+#:
+#:   1. ``model.register``                  ← POST /api/v1/models
+#:   2. ``model.promote.eval_passed``       ← POST /…/promote (body-routed)
+#:   3. ``model.promote.tenant_approved``   ← POST /…/promote (body-routed)
+#:   4. ``model.promote.serving``           ← POST /…/promote (body-routed;
+#:                                            + RequireHumanActor)
+#:   5. ``model.promote.deprecated``        ← POST /…/promote (body-routed)
+#:                                            +1 vs BUILD_PLAN §796-802's
+#:                                            7-value enumeration — see
+#:                                            spec §8 reconciliation
+#:   6. ``model.retire``                    ← POST /api/v1/models/{id}/retire
+#:   7. ``model.audit.read``                ← GET /…, GET /{id}, GET /{id}/audit
+#:   8. ``model.usage.read``                ← GET /{id}/usage (Block C)
+#:
+#: **Value-disjoint from :data:`PackRBACScope` / :data:`UIRBACScope` /
+#: :data:`ComplianceRBACScope`** by namespace separation (every model
+#: scope is ``model.*``; no other family is). Overlap would create a
+#: wire-protocol ambiguity where a single 403 denial reason could match
+#: multiple scope families. Pinned by
+#: :file:`tests/unit/portal/rbac/test_model_scopes.py::TestModelScopesDisjointFromOtherFamilies`.
+#:
+#: Wire-protocol contract — every 403 ``scope_not_held`` denial body on
+#: the model-registry surface carries one of these as
+#: ``required_scope``. ANY drift here is a wire-protocol break.
+#:
+#: Style note: plain ``= Literal[...]`` (no ``TypeAlias`` annotation)
+#: to match the Sprint-7B.1 / 7B.2 / 7B.4 / 9 repo convention at
+#: ``packs/lifecycle.py:111`` + :data:`PackRBACScope` /
+#: :data:`UIRBACScope` / :data:`ComplianceRBACScope` above.
+ModelRBACScope = Literal[
+    "model.register",
+    "model.promote.eval_passed",
+    "model.promote.tenant_approved",
+    "model.promote.serving",
+    "model.promote.deprecated",
+    "model.retire",
+    "model.audit.read",
+    "model.usage.read",
+]
+
+
+#: All 8 model-lifecycle scopes as a frozenset, for bank-overlay binders
+#: that mint a model-only actor scope set. MUST stay 1:1 with the
+#: :data:`ModelRBACScope` Literal — pinned by
+#: :file:`tests/unit/portal/rbac/test_model_scopes.py::TestModelLifecycleScopesFrozenset`.
+MODEL_LIFECYCLE_SCOPES: frozenset[ModelRBACScope] = frozenset(
+    {
+        "model.register",
+        "model.promote.eval_passed",
+        "model.promote.tenant_approved",
+        "model.promote.serving",
+        "model.promote.deprecated",
+        "model.retire",
+        "model.audit.read",
+        "model.usage.read",
+    }
+)
+
+
 #: Examiner-role compliance grant. Bank-overlay examiner binders grant
 #: EXAMINER_SCOPES | EXAMINER_COMPLIANCE_SCOPES.
 EXAMINER_COMPLIANCE_SCOPES: frozenset[ComplianceRBACScope] = frozenset(
