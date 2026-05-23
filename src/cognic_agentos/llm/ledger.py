@@ -25,8 +25,14 @@ where the gateway knows whether LiteLLM dispatched.
 Read-side (``read_recent_calls``) serves the provider-honesty
 endpoint (T9 ``/api/v1/system/effective-routing``).
 
-Sprint 3 contract — ``model_id`` is always ``None`` on write;
-Sprint 9.5 (ADR-013 model registry) backfills.
+Sprint 3 — 9.5a contract — ``model_id`` was reserved + always written
+as ``None`` (the column existed in the row dataclass + table, but the
+two gateway construction sites in ``llm/gateway.py`` hardcoded ``None``).
+Sprint 9.5b C2 (ADR-013) — gateway now threads
+``Settings.llm_model_id_map[litellm_alias]`` into write-site
+``model_id``; unmapped aliases still write ``None`` (the honest posture
+per ADR-007 — the gateway never invents a ``model_id``). No backfill
+of historical rows; pre-C2 rows stay ``model_id IS NULL`` permanently.
 
 References:
 - Plan Decision-Locking §5 (audit + decision-history emission contract,

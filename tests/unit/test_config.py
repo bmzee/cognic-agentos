@@ -2045,25 +2045,14 @@ class TestC1LLMModelIdMap:
                 llm_model_id_map={1: "cognic-tier1-acme-v1"},  # type: ignore[dict-item]
             )
 
-    def test_c1_does_not_touch_llm_gateway_module(self) -> None:
-        """Bar #5 — bisection-clean C1 invariant. The C1 commit adds
-        ``llm_model_id_map`` to ``Settings`` ONLY; gateway consumption
-        is C2 territory. A regression that prematurely wires the field
-        into ``gateway.py`` would surface as C2 work creeping into C1.
-
-        Pinned by source-grep (mirrors the AST-style pin pattern at
-        ``tests/unit/llm/test_gateway_model_id.py`` that C2 will
-        land). This test is intended to be DELETED at C2 — the C2
-        commit will land the lookup expression that this test forbids,
-        AND the test for that expression's presence supersedes this
-        one."""
-        from pathlib import Path
-
-        import cognic_agentos
-
-        root = Path(cognic_agentos.__file__).resolve().parent
-        gateway_src = (root / "llm" / "gateway.py").read_text(encoding="utf-8")
-        assert "llm_model_id_map" not in gateway_src, (
-            "C1 must NOT consume llm_model_id_map in llm/gateway.py; "
-            "that is C2 territory (bisection-clean invariant)"
-        )
+    # NOTE: ``test_c1_does_not_touch_llm_gateway_module`` was REMOVED
+    # at Sprint 9.5b C2 per the user-locked review-bar item #5 ("the
+    # transitional C1 'gateway does not mention llm_model_id_map'
+    # test is deleted in the same commit and replaced with a positive
+    # C2 pin"). The positive replacement lives at
+    # ``tests/unit/llm/test_gateway_model_id.py`` —
+    # ``test_construction_sites_use_settings_llm_model_id_map_get``
+    # asserts the lookup expression appears at EXACTLY 2 sites
+    # (the strict + best-effort ledger-write helpers). The deletion
+    # is the documented action when the deferral expires; see the C2
+    # commit body for the bisection-clean rationale.

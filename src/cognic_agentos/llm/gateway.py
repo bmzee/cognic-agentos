@@ -759,7 +759,7 @@ class LLMGateway:
                     provenance=resolved.provenance,
                     latency_ms=int((_time.monotonic() - flow_start) * 1000),
                     outcome=outcome,
-                    model_id=None,
+                    model_id=self._settings.llm_model_id_map.get(litellm_alias),
                 )
             )
         except Exception as ledger_exc:
@@ -808,7 +808,7 @@ class LLMGateway:
                     provenance="no_dispatch",
                     latency_ms=int((_time.monotonic() - flow_start) * 1000),
                     outcome=outcome,
-                    model_id=None,
+                    model_id=self._settings.llm_model_id_map.get(litellm_alias),
                 )
             )
         except Exception:
