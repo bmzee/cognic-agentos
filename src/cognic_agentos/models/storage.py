@@ -37,7 +37,11 @@ from sqlalchemy import (
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from cognic_agentos.core.audit import _metadata
-from cognic_agentos.core.decision_history import DecisionHistoryStore, DecisionRecord
+from cognic_agentos.core.decision_history import (
+    DecisionHistoryStore,
+    DecisionRecord,
+    _decision_history,
+)
 from cognic_agentos.models.registry import (
     MODEL_LIFECYCLE_ISO_CONTROLS,
     ModelKind,
@@ -470,6 +474,102 @@ class ModelRecordStore:
         return await self._history.append_with_precondition(
             record_builder=_build_record, precondition=_precondition
         )
+
+    async def load_by_model_id(self, model_id: str) -> ModelRecord | None:
+        """Read-only load by the natural ``model_id`` string identity
+        (the wire path-param). Mirrors :meth:`load` but keys on the
+        unique ``model_id`` column instead of the surrogate ``id`` PK.
+        Consumed by ``RequireModelTenantOwnership`` at the portal
+        admission seam (B2) — ``None`` maps to 404 there.
+        """
+        async with self._engine.connect() as conn:
+            row = (
+                await conn.execute(select(_models).where(_models.c.model_id == model_id))
+            ).first()
+        return _row_to_record(dict(row._mapping)) if row is not None else None
+
+    async def list_for_tenant(
+        self,
+        tenant_id: str,
+        *,
+        limit: int = 50,
+        cursor: uuid.UUID | None = None,
+        state: ModelLifecycleState | None = None,
+    ) -> list[ModelRecord]:
+        """Tenant-scoped paginated list. The ``WHERE tenant_id ==
+        :tenant_id`` clause IS the tenant boundary — cross-tenant
+        rows MUST NOT appear in another tenant's list (the inspection-
+        list endpoint has no actor-side filter; the SQL filter is
+        authoritative).
+
+        Deterministic ordering by the surrogate ``id`` PK ASC + cursor
+        on ``WHERE id > cursor`` — mirrors
+        ``packs/storage.py:_build_list_for_tenant_stmt``. The
+        ``state`` keyword filters to a single :data:`ModelLifecycleState`;
+        omitted → all states.
+        """
+        stmt = select(_models).where(_models.c.tenant_id == tenant_id).order_by(_models.c.id)
+        if state is not None:
+            stmt = stmt.where(_models.c.lifecycle_state == state)
+        if cursor is not None:
+            stmt = stmt.where(_models.c.id > cursor)
+        stmt = stmt.limit(limit)
+        async with self._engine.connect() as conn:
+            rows = (await conn.execute(stmt)).all()
+        return [_row_to_record(dict(r._mapping)) for r in rows]
+
+    async def load_lifecycle_history(self, model_id: str) -> list[DecisionRecord]:
+        """Walk the ``decision_history`` chain for every event whose
+        ``event_type LIKE 'model.lifecycle.%'`` AND whose
+        ``payload['model_id']`` matches ``model_id`` EXACTLY (string
+        equality — NOT a LIKE/substring match). Sorted by
+        ``sequence`` ASC (oldest first); includes genesis + every
+        subsequent transition.
+
+        Mirrors ``packs/storage.py:load_lifecycle_history`` — the
+        JSON-key client-side filter pattern (dialect-portable across
+        Postgres / Oracle / SQLite). Returns reconstructed
+        :class:`DecisionRecord` instances with ``actor_id=None``
+        (the actor identity is carried inside ``payload['actor_id']``
+        per the canonical-form merge at append time;
+        ``DecisionRecord.actor_id`` is a caller-side input, not a
+        chain-row column).
+        """
+        async with self._engine.connect() as conn:
+            rows = (
+                await conn.execute(
+                    select(
+                        _decision_history.c.event_type,
+                        _decision_history.c.request_id,
+                        _decision_history.c.tenant_id,
+                        _decision_history.c.payload,
+                        _decision_history.c.iso_controls,
+                        _decision_history.c.sequence,
+                    )
+                    .where(_decision_history.c.event_type.like("model.lifecycle.%"))
+                    .order_by(_decision_history.c.sequence)
+                )
+            ).all()
+        history: list[DecisionRecord] = []
+        for row in rows:
+            payload: dict[str, Any] = row.payload or {}
+            # EXACT string-equality filter on payload['model_id'] —
+            # never LIKE/substring; the chain payload always carries
+            # model_id as a top-level string (per _lifecycle_payload).
+            if payload.get("model_id") != model_id:
+                continue
+            iso_controls_raw = row.iso_controls or []
+            history.append(
+                DecisionRecord(
+                    decision_type=row.event_type,
+                    request_id=row.request_id,
+                    payload=payload,
+                    actor_id=None,
+                    tenant_id=row.tenant_id,
+                    iso_controls=tuple(iso_controls_raw),
+                )
+            )
+        return history
 
 
 __all__ = [

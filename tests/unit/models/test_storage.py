@@ -817,3 +817,212 @@ async def test_transition_updates_last_actor_and_updated_at(
         f"updated_at should advance strictly; "
         f"before={before.updated_at!r}, after={after.updated_at!r}"
     )
+
+
+# ===========================================================================
+# A5 — read methods: load_by_model_id, list_for_tenant, load_lifecycle_history
+# ===========================================================================
+
+
+async def test_load_by_model_id_returns_record(
+    store: ModelRecordStore, engine: AsyncEngine
+) -> None:
+    """Natural-identity lookup — keys by the wire `model_id` (the
+    portal path-param). Mirrors A3's surrogate-id ``load(row_id)`` but
+    on the unique String column.
+    """
+    rec = _make_record("m-natural-lookup")
+    await store.register(rec, request_id="r1", actor_id="x", actor_type="service")
+    loaded = await store.load_by_model_id("m-natural-lookup")
+    assert loaded is not None
+    assert loaded.id == rec.id
+    assert loaded.model_id == rec.model_id
+    assert loaded.tenant_id == rec.tenant_id
+
+
+async def test_load_by_model_id_returns_none_for_unknown(
+    store: ModelRecordStore,
+) -> None:
+    """Unknown model_id returns None (not raise) — consumed by
+    ``RequireModelTenantOwnership`` which maps None → 404."""
+    assert await store.load_by_model_id("no-such-model") is None
+
+
+async def test_list_for_tenant_scopes_by_tenant(
+    store: ModelRecordStore, engine: AsyncEngine
+) -> None:
+    """The ``WHERE tenant_id == :tenant_id`` clause IS the tenant
+    boundary. Cross-tenant rows MUST NOT appear in another tenant's
+    list — the inspection-list endpoint has no actor-side filter; the
+    SQL filter is authoritative.
+    """
+    a1 = _make_record("acme-1").model_copy(update={"tenant_id": "tenant-acme"})
+    a2 = _make_record("acme-2").model_copy(update={"tenant_id": "tenant-acme"})
+    other = _make_record("other-1").model_copy(update={"tenant_id": "tenant-other"})
+    for r in (a1, a2, other):
+        await store.register(r, request_id=f"r-{r.model_id}", actor_id="x", actor_type="service")
+    acme_results = await store.list_for_tenant("tenant-acme")
+    acme_model_ids = {r.model_id for r in acme_results}
+    assert acme_model_ids == {"acme-1", "acme-2"}
+    assert "other-1" not in acme_model_ids
+    # Inverse direction also pinned.
+    other_results = await store.list_for_tenant("tenant-other")
+    assert {r.model_id for r in other_results} == {"other-1"}
+
+
+async def test_list_for_tenant_state_filter(store: ModelRecordStore, engine: AsyncEngine) -> None:
+    """Optional ``state`` keyword filters to a single
+    ``lifecycle_state``. Pin both halves of the partition (proposed-only
+    + eval_passed-only) so a regression that drops the WHERE clause
+    is caught.
+    """
+    a = _make_record("filter-a")
+    b = _make_record("filter-b")
+    for r in (a, b):
+        await store.register(r, request_id=f"r-{r.model_id}", actor_id="x", actor_type="service")
+    # Promote a → eval_passed; b stays at proposed.
+    await store.transition(
+        row_id=a.id,
+        transition="promote_eval_passed",
+        actor_id="r",
+        actor_type="human",
+        request_id="rp",
+        signature_verified=True,
+        **_signed_record_args(a),
+    )
+    proposed_only = await store.list_for_tenant("tenant-acme", state="proposed")
+    assert {r.model_id for r in proposed_only} == {"filter-b"}
+    eval_only = await store.list_for_tenant("tenant-acme", state="eval_passed")
+    assert {r.model_id for r in eval_only} == {"filter-a"}
+
+
+async def test_list_for_tenant_paginates_deterministically(
+    store: ModelRecordStore, engine: AsyncEngine
+) -> None:
+    """Cursor + limit paginate over a deterministic ASCENDING order on
+    the surrogate ``id`` PK. No duplicates across pages, no skips,
+    repeatable order. Mirrors ``packs/storage.py``'s
+    ``_build_list_for_tenant_stmt`` pattern (``order_by(id) + WHERE
+    id > cursor``).
+    """
+    # Register 5 records into the same tenant.
+    recs = [_make_record(f"m-page-{i}") for i in range(5)]
+    for r in recs:
+        await store.register(r, request_id=f"r-{r.model_id}", actor_id="x", actor_type="service")
+    # Page 1: limit=2, no cursor → first 2 by ascending id.
+    page1 = await store.list_for_tenant("tenant-acme", limit=2)
+    assert len(page1) == 2
+    # Page 2: cursor=last id from page 1 → next 2.
+    page2 = await store.list_for_tenant("tenant-acme", limit=2, cursor=page1[-1].id)
+    assert len(page2) == 2
+    # Page 3: cursor=last id from page 2 → final 1.
+    page3 = await store.list_for_tenant("tenant-acme", limit=2, cursor=page2[-1].id)
+    assert len(page3) == 1
+    # No duplicates across pages; all 5 covered.
+    all_ids = {r.id for r in page1} | {r.id for r in page2} | {r.id for r in page3}
+    assert all_ids == {r.id for r in recs}
+    # Repeatability — same query yields same order.
+    page1_again = await store.list_for_tenant("tenant-acme", limit=2)
+    assert [r.id for r in page1] == [r.id for r in page1_again]
+
+
+async def test_load_lifecycle_history_walks_chain_oldest_first(
+    store: ModelRecordStore, engine: AsyncEngine
+) -> None:
+    """History reconstructs from ``decision_history`` rows where
+    ``event_type LIKE 'model.lifecycle.%'`` filtered by
+    ``payload['model_id']``. Order is ``sequence ASC`` (oldest first);
+    includes genesis + all transitions.
+    """
+    rec = _make_record("m-history")
+    await store.register(rec, request_id="r1", actor_id="x", actor_type="service")
+    await store.transition(
+        row_id=rec.id,
+        transition="promote_eval_passed",
+        actor_id="r",
+        actor_type="human",
+        request_id="r2",
+        signature_verified=True,
+        **_signed_record_args(rec),
+    )
+    await store.transition(
+        row_id=rec.id,
+        transition="promote_tenant_approved",
+        actor_id="r",
+        actor_type="human",
+        request_id="r3",
+        eval_results_ref="evalpack://run/1",
+        adversarial_pass_rate=0.999,
+    )
+    history = await store.load_lifecycle_history("m-history")
+    assert [h.decision_type for h in history] == [
+        "model.lifecycle.proposed",
+        "model.lifecycle.eval_passed",
+        "model.lifecycle.tenant_approved",
+    ]
+    # Each event carries model_id in payload + iso_controls (tuple).
+    for h in history:
+        assert h.payload["model_id"] == "m-history"
+        assert h.iso_controls == tuple(MODEL_LIFECYCLE_ISO_CONTROLS)
+
+
+async def test_load_lifecycle_history_filters_exactly_by_model_id(
+    store: ModelRecordStore, engine: AsyncEngine
+) -> None:
+    """Defence-in-depth: history MUST NOT leak other models' rows.
+    Two distinct models register into the SAME tenant; each
+    load_lifecycle_history call returns only that model's chain rows.
+    """
+    a = _make_record("model-a")
+    b = _make_record("model-b")
+    for r in (a, b):
+        await store.register(r, request_id=f"r-{r.model_id}", actor_id="x", actor_type="service")
+    await store.transition(
+        row_id=a.id,
+        transition="promote_eval_passed",
+        actor_id="r",
+        actor_type="human",
+        request_id="r-a-promote",
+        signature_verified=True,
+        **_signed_record_args(a),
+    )
+    a_history = await store.load_lifecycle_history("model-a")
+    b_history = await store.load_lifecycle_history("model-b")
+    # Exact match on payload['model_id'] — every row's model_id matches.
+    assert [h.payload["model_id"] for h in a_history] == ["model-a", "model-a"]
+    assert [h.payload["model_id"] for h in b_history] == ["model-b"]
+    assert len(a_history) == 2  # genesis + eval_passed
+    assert len(b_history) == 1  # genesis only
+
+
+async def test_load_lifecycle_history_does_not_substring_match(
+    store: ModelRecordStore, engine: AsyncEngine
+) -> None:
+    """Defence against a regression to LIKE / substring filtering on
+    ``payload['model_id']``. A model_id 'foo' MUST NOT match 'foo-long'
+    or any other superstring. Pinned because the SQL filter is
+    ``event_type LIKE 'model.lifecycle.%'`` (substring on event_type
+    is correct) + a Python-side EXACT-equality on payload['model_id']
+    (substring would be wrong).
+    """
+    short = _make_record("foo")
+    long_ = _make_record("foo-long")
+    for r in (short, long_):
+        await store.register(r, request_id=f"r-{r.model_id}", actor_id="x", actor_type="service")
+    foo_history = await store.load_lifecycle_history("foo")
+    assert len(foo_history) == 1, (
+        f"'foo' MUST NOT match 'foo-long'; got {[h.payload['model_id'] for h in foo_history]!r}"
+    )
+    assert foo_history[0].payload["model_id"] == "foo"
+    long_history = await store.load_lifecycle_history("foo-long")
+    assert len(long_history) == 1
+    assert long_history[0].payload["model_id"] == "foo-long"
+
+
+async def test_load_lifecycle_history_returns_empty_for_unknown(
+    store: ModelRecordStore,
+) -> None:
+    """Unknown model_id returns empty list (not error). Pinned because
+    the chain filter naturally yields 0 matches; no special-case
+    handling needed."""
+    assert await store.load_lifecycle_history("no-such-model") == []
