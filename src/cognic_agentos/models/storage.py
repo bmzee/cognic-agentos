@@ -211,19 +211,75 @@ def _lifecycle_payload(
     to_state: ModelLifecycleState,
     actor_type: str,
 ) -> dict[str, Any]:
-    """Build the ``model.lifecycle.*`` chain-row payload. ``iso_controls``
-    is a LIST inside the payload (the Sprint-2 canonical-form rejects
-    tuples in chain payloads); the registry-level
-    :data:`MODEL_LIFECYCLE_ISO_CONTROLS` tuple stays the source-of-truth
-    tag set, and the :class:`DecisionRecord.iso_controls` field
-    separately receives the tuple.
+    """Build the ``model.lifecycle.*`` chain-row payload — the
+    **immutable evidence snapshot** of the (post-update) model record
+    at the time of the transition.
+
+    Per spec §4.1: the payload carries ``model_id`` (event subject),
+    ``from_state``, ``to_state``, ``kind``, ``last_actor``,
+    ``actor_type``, **and the transition-relevant evidence**
+    (``signature_digest`` on the ``eval_passed`` row,
+    ``eval_results_ref`` + ``adversarial_pass_rate`` on the
+    ``tenant_approved`` row, ``serving_endpoint`` on the ``serving``
+    row when populated at register time).
+
+    Per spec §4.2 each ISO control tag is backed by a specific field
+    surfaced on this payload — the hash-chained row, NOT the mutable
+    ``models`` table column, IS the authoritative evidence per
+    ADR-006:
+
+    * ``A.6.2.6`` (roles & responsibilities) — ``last_actor`` +
+      ``actor_type`` + the ``from_state``/``to_state`` transition
+      itself.
+    * ``A.7.4``  (impact assessment) — ``eval_results_ref``.
+    * ``A.8.2``  (data quality) — ``training_data_fingerprint``.
+    * ``A.8.5``  (system development) — ``recipe_hash`` +
+      ``base_model``.
+    * ``A.10.2`` (stakeholder transparency) — ``version`` (lineage) +
+      ``serving_endpoint`` (when set) + the lifecycle event itself.
+
+    All nullable model-state fields persist as their ACTUAL value —
+    ``None`` at lifecycle stages where the value has not yet been
+    populated IS the evidence (the chain row records the
+    known/unknown state at that transition; an examiner reading
+    ``eval_results_ref is None`` on a ``proposed`` row knows
+    eval has not yet run).
+
+    ``iso_controls`` is a LIST inside the payload (the Sprint-2
+    canonical-form rejects tuples in chain payloads); the
+    registry-level :data:`MODEL_LIFECYCLE_ISO_CONTROLS` tuple stays
+    the source-of-truth tag set, and the
+    :class:`DecisionRecord.iso_controls` field separately receives
+    the tuple.
     """
     return {
+        # Event subject + identity facts (immutable across the lifecycle).
         "model_id": record.model_id,
         "kind": record.kind,
+        "version": record.version,
+        "base_model": record.base_model,
+        # Training/data identity (A.8.2 + A.8.5 evidence).
+        "recipe_hash": record.recipe_hash,
+        "training_data_fingerprint": record.training_data_fingerprint,
+        # Cosign artefact identity (populated at register time;
+        # promote_eval_passed re-verifies under the lock).
+        "signature_digest": record.signature_digest,
+        "signed_artifact_ref": record.signed_artifact_ref,
+        "sigstore_bundle_ref": record.sigstore_bundle_ref,
+        # Eval / adversarial evidence (populated by the
+        # promote_tenant_approved transition; post-update record so
+        # the row reflects the SET values, not the pre-update None).
+        "eval_results_ref": record.eval_results_ref,
+        "adversarial_pass_rate": record.adversarial_pass_rate,
+        # Serving endpoint (A.10.2 transparency — set at register
+        # when known; None at earlier stages is honest evidence).
+        "serving_endpoint": record.serving_endpoint,
+        # Actor identity + transition facts.
+        "last_actor": record.last_actor,
+        "actor_type": actor_type,
         "from_state": from_state,
         "to_state": to_state,
-        "actor_type": actor_type,
+        # ISO 42001 control-tag set (canonical-form rejects tuples).
         "iso_controls": list(MODEL_LIFECYCLE_ISO_CONTROLS),
     }
 
@@ -376,6 +432,18 @@ class ModelRecordStore:
 
         target_state = _TRANSITION_TO_TARGET_STATE[transition]
 
+        # A6 payload-evidence fix — closure-captured PRE-UPDATE
+        # lifecycle_state, threaded from ``_precondition`` (which sees
+        # the row under SELECT...FOR UPDATE) into ``_build_record``
+        # (which builds the chain payload). MUST be captured here
+        # because ``_precondition`` returns the POST-UPDATE record so
+        # the chain payload's evidence fields reflect the just-written
+        # state for eval_results_ref / adversarial_pass_rate; that
+        # overlay sets ``record.lifecycle_state`` to ``target_state``,
+        # which would silently corrupt ``from_state`` if we read it
+        # off the returned record.
+        from_state_capture: ModelLifecycleState | None = None
+
         # Pre-transaction gates for promote_eval_passed (the subprocess
         # ran in the route handler; only the bool verdict + the
         # caller-bound expected_* refs reach storage). No chain row
@@ -400,12 +468,20 @@ class ModelRecordStore:
         async def _precondition(
             conn: AsyncConnection, prev_sequence: int, prev_hash: bytes
         ) -> ModelRecord:
+            nonlocal from_state_capture
             row = (
                 await conn.execute(select(_models).where(_models.c.id == row_id).with_for_update())
             ).first()
             if row is None:
                 raise ModelNotFound(row_id)
             current = _row_to_record(dict(row._mapping))
+            # Capture the PRE-UPDATE lifecycle_state — this is the
+            # chain row's ``from_state``. Captured BEFORE validate /
+            # UPDATE / overlay so the overlay's ``lifecycle_state =
+            # target_state`` does not stomp it (A6 evidence-snapshot
+            # invariant: chain row carries genuine pre→post transition
+            # facts).
+            from_state_capture = current.lifecycle_state
 
             # TOCTOU guard for promote_eval_passed — cosign verified
             # the refs/digest OUTSIDE this transaction; the caller
@@ -454,7 +530,20 @@ class ModelRecordStore:
                 values["eval_results_ref"] = eval_results_ref
                 values["adversarial_pass_rate"] = adversarial_pass_rate
             await conn.execute(update(_models).where(_models.c.id == row_id).values(**values))
-            return current
+            # Post-update record (A6 evidence-snapshot fix): apply the
+            # ``values`` overlay onto ``current`` so the chain payload
+            # built by ``_build_record`` reflects the POST-UPDATE state
+            # for the fields just written. Returning the PRE-UPDATE
+            # record (the pre-fix shape) would make a
+            # ``tenant_approved`` chain row's
+            # ``payload["eval_results_ref"]`` show the register-time
+            # ``None`` instead of the freshly-set evidence ref —
+            # silently breaking the ADR-006 evidence-integrity
+            # invariant. ``ModelRecord`` is frozen + ``extra="forbid"``;
+            # ``model_copy(update=...)`` rebinds the listed fields
+            # without revalidation (the values dict's keys are 1:1
+            # ModelRecord field names by construction).
+            return current.model_copy(update=values)
 
         def _build_record(captured: ModelRecord) -> DecisionRecord:
             return DecisionRecord(
@@ -464,7 +553,10 @@ class ModelRecordStore:
                 tenant_id=captured.tenant_id,
                 payload=_lifecycle_payload(
                     captured,
-                    from_state=captured.lifecycle_state,
+                    # PRE-UPDATE state captured in _precondition — NOT
+                    # captured.lifecycle_state (the overlay set that to
+                    # target_state).
+                    from_state=from_state_capture,
                     to_state=target_state,
                     actor_type=actor_type,
                 ),

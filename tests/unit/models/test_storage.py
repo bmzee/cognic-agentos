@@ -1026,3 +1026,303 @@ async def test_load_lifecycle_history_returns_empty_for_unknown(
     the chain filter naturally yields 0 matches; no special-case
     handling needed."""
     assert await store.load_lifecycle_history("no-such-model") == []
+
+
+# ──────────────────────────────────────────────────────────────────────
+# A6 evidence-payload extension (model.lifecycle.* chain row carries
+# the immutable evidence snapshot per spec §4.1 + §4.2). The four
+# tests below pin that each transition's chain row payload carries the
+# field set that backs its ISO control claim. test_tenant_approved...
+# is the explicit regression for the pre-update record bug class
+# (storage.py:526 ``return current.model_copy(update=values)`` — if a
+# future refactor reverted to ``return current``, the post-update
+# eval_results_ref + adversarial_pass_rate would show their register-
+# time None and the assertion would fail; TM-revert verified).
+# ──────────────────────────────────────────────────────────────────────
+
+
+async def test_genesis_chain_row_carries_identity_evidence_fields(
+    store: ModelRecordStore,
+) -> None:
+    """Genesis ``model.lifecycle.proposed`` chain row payload carries
+    the identity-and-lineage fields that back the ISO control claims:
+
+    * ``base_model`` + ``recipe_hash``    — A.8.5 (system development)
+    * ``training_data_fingerprint``       — A.8.2 (data quality)
+    * ``version``                         — A.10.2 (lineage / transparency)
+
+    These are immutable across the lifecycle (register-time values);
+    every later transition row carries them too because the payload
+    helper reads them off the post-update record.
+    """
+    rec = _make_record("m-identity")
+    await store.register(rec, request_id="r1", actor_id="a", actor_type="service")
+    history = await store.load_lifecycle_history(rec.model_id)
+    assert len(history) == 1
+    payload = history[0].payload
+    assert payload["base_model"] == rec.base_model
+    assert payload["version"] == rec.version
+    assert payload["recipe_hash"] == rec.recipe_hash
+    assert payload["training_data_fingerprint"] == rec.training_data_fingerprint
+    # Nullable lifecycle-state-dependent fields are None at genesis —
+    # that None IS the evidence (eval has not run, model is not serving).
+    assert payload["eval_results_ref"] is None
+    assert payload["adversarial_pass_rate"] is None
+    assert payload["serving_endpoint"] is None
+
+
+async def test_eval_passed_chain_row_carries_cosign_evidence_fields(
+    store: ModelRecordStore,
+) -> None:
+    """The ``eval_passed`` chain row payload carries the cosign-verified
+    artefact identity that justified the proposed → eval_passed
+    promotion: ``signature_digest`` + ``signed_artifact_ref`` +
+    ``sigstore_bundle_ref``. These are populated at register time and
+    re-verified under the precondition's TOCTOU lock.
+    """
+    rec = _make_record("m-cosign")
+    await store.register(rec, request_id="r1", actor_id="a", actor_type="service")
+    await store.transition(
+        row_id=rec.id,
+        transition="promote_eval_passed",
+        actor_id="a",
+        actor_type="human",
+        request_id="r2",
+        signature_verified=True,
+        **_signed_record_args(rec),
+    )
+    history = await store.load_lifecycle_history(rec.model_id)
+    eval_passed = next(h for h in history if h.decision_type == "model.lifecycle.eval_passed")
+    payload = eval_passed.payload
+    assert payload["signature_digest"] == rec.signature_digest
+    assert payload["signed_artifact_ref"] == rec.signed_artifact_ref
+    assert payload["sigstore_bundle_ref"] == rec.sigstore_bundle_ref
+    # from_state / to_state — pin the from_state-capture fix at
+    # storage.py:434 (closure-captured PRE-UPDATE lifecycle_state).
+    assert payload["from_state"] == "proposed"
+    assert payload["to_state"] == "eval_passed"
+
+
+async def test_tenant_approved_chain_row_carries_post_update_eval_evidence(
+    store: ModelRecordStore,
+) -> None:
+    """The ``tenant_approved`` chain row payload reflects the
+    **post-update** state for ``eval_results_ref`` +
+    ``adversarial_pass_rate`` — the two fields set BY this transition
+    (storage.py:509-511 ``values["eval_results_ref"] = …``).
+
+    **A6 regression for the pre-update payload bug class.** If
+    ``transition()._precondition`` returned the PRE-update record
+    (as A4 originally shipped — storage.py:526 was previously
+    ``return current``), the chain payload would show
+    ``eval_results_ref is None`` and ``adversarial_pass_rate is None``
+    because the register-time values were both None and the UPDATE
+    inside the precondition closure sets the new values AFTER
+    ``current`` is captured. The pre-update record carries the
+    None values; the post-update record (the
+    ``current.model_copy(update=values)`` overlay) carries the set
+    values — the entire ADR-006 evidence-integrity invariant for
+    this transition.
+
+    TM-revert verified: reverting storage.py:526 to ``return current``
+    makes this test fail with
+    ``AssertionError: assert None == 'eval-runs/2026-05-23/passed'``.
+    """
+    rec = _make_record("m-tenant")
+    await store.register(rec, request_id="r1", actor_id="a", actor_type="service")
+    # Pre-condition for the regression: register-time values are None.
+    assert rec.eval_results_ref is None
+    assert rec.adversarial_pass_rate is None
+    await store.transition(
+        row_id=rec.id,
+        transition="promote_eval_passed",
+        actor_id="a",
+        actor_type="human",
+        request_id="r2",
+        signature_verified=True,
+        **_signed_record_args(rec),
+    )
+    await store.transition(
+        row_id=rec.id,
+        transition="promote_tenant_approved",
+        actor_id="a",
+        actor_type="human",
+        request_id="r3",
+        eval_results_ref="eval-runs/2026-05-23/passed",
+        adversarial_pass_rate=0.995,
+    )
+    history = await store.load_lifecycle_history(rec.model_id)
+    tenant_approved = next(
+        h for h in history if h.decision_type == "model.lifecycle.tenant_approved"
+    )
+    payload = tenant_approved.payload
+    # The entire point of the post-update overlay — these MUST be the
+    # newly written values, NOT the register-time None.
+    assert payload["eval_results_ref"] == "eval-runs/2026-05-23/passed"
+    assert payload["adversarial_pass_rate"] == 0.995
+    # from_state correctness — pin the from_state-capture fix.
+    assert payload["from_state"] == "eval_passed"
+    assert payload["to_state"] == "tenant_approved"
+    # Identity fields still carried (immutable through the lifecycle).
+    assert payload["model_id"] == rec.model_id
+    assert payload["base_model"] == rec.base_model
+
+
+async def test_serving_chain_row_carries_serving_endpoint(
+    store: ModelRecordStore,
+) -> None:
+    """The ``serving`` chain row carries ``serving_endpoint`` when the
+    value was set at register time (Wave-1 contract: serving_endpoint
+    is immutable; set at registration; lifecycle just promotes through
+    states without rewriting it).
+
+    Null at earlier states is fine evidence; the serving row should
+    surface the endpoint value if it was set before promotion (user
+    invariant — A6 P1 Path A scope clause).
+    """
+    rec = _make_record("m-serving").model_copy(
+        update={"serving_endpoint": "https://inference.cognic.test/v1/m-serving"}
+    )
+    await store.register(rec, request_id="r1", actor_id="a", actor_type="service")
+    # Earlier states surface the value too (it is immutable, set at
+    # register) — pin the chain-of-evidence rule.
+    genesis_history = await store.load_lifecycle_history(rec.model_id)
+    assert (
+        genesis_history[0].payload["serving_endpoint"]
+        == "https://inference.cognic.test/v1/m-serving"
+    )
+    await store.transition(
+        row_id=rec.id,
+        transition="promote_eval_passed",
+        actor_id="a",
+        actor_type="human",
+        request_id="r2",
+        signature_verified=True,
+        **_signed_record_args(rec),
+    )
+    await store.transition(
+        row_id=rec.id,
+        transition="promote_tenant_approved",
+        actor_id="a",
+        actor_type="human",
+        request_id="r3",
+        eval_results_ref="eval-runs/2026-05-23/passed",
+        adversarial_pass_rate=0.995,
+    )
+    await store.transition(
+        row_id=rec.id,
+        transition="promote_serving",
+        actor_id="a",
+        actor_type="human",
+        request_id="r4",
+    )
+    history = await store.load_lifecycle_history(rec.model_id)
+    serving = next(h for h in history if h.decision_type == "model.lifecycle.serving")
+    assert serving.payload["serving_endpoint"] == "https://inference.cognic.test/v1/m-serving"
+    assert serving.payload["from_state"] == "tenant_approved"
+    assert serving.payload["to_state"] == "serving"
+
+
+async def test_chain_row_payload_pins_exact_key_set_and_last_actor_propagation(
+    store: ModelRecordStore,
+) -> None:
+    """The model.lifecycle.* chain-row payload key set is
+    wire-protocol-public per ADR-006 evidence-pack export. A future
+    edit that drops a field from ``_lifecycle_payload`` (e.g.,
+    ``last_actor`` or ``kind``) would be invisible to the per-field
+    evidence tests above — they assert subsets only. **This test
+    pins the EXACT 17-key set** so adding / removing a key requires
+    updating this assertion in lockstep.
+
+    Also pins ``last_actor`` → ``actor_id`` post-update propagation
+    (A.6.2.6 roles & responsibilities evidence). After
+    ``transition()`` applies ``values["last_actor"] = actor_id`` via
+    the post-update overlay, the chain row payload's ``last_actor``
+    field MUST reflect the transition's actor — NOT the register-time
+    actor that persisted on the row before this transition. The
+    test triggers a register (``actor_id="forge-bot"``) followed by
+    ``promote_eval_passed`` (``actor_id="alice-reviewer"``) on the
+    same model and asserts both chain rows carry their respective
+    actor — proving the overlay propagates the new actor through
+    ``current.model_copy(update=values)`` rather than leaking the
+    register-time value.
+    """
+    rec = _make_record("m-keyset")
+    await store.register(rec, request_id="r1", actor_id="forge-bot", actor_type="service")
+    await store.transition(
+        row_id=rec.id,
+        transition="promote_eval_passed",
+        actor_id="alice-reviewer",
+        actor_type="human",
+        request_id="r2",
+        signature_verified=True,
+        **_signed_record_args(rec),
+    )
+    history = await store.load_lifecycle_history(rec.model_id)
+    eval_passed = next(h for h in history if h.decision_type == "model.lifecycle.eval_passed")
+    payload = eval_passed.payload
+
+    # EXACT 18-key set — drift in either direction (adding without
+    # updating this set, or dropping a field) trips this assertion.
+    # Composition: 17 keys built by ``_lifecycle_payload`` plus 1
+    # ``actor_id`` key auto-merged by
+    # ``DecisionHistoryStore.append`` from ``DecisionRecord.actor_id``
+    # at write time per the Sprint-2 canonical-form contract
+    # (``core/decision_history.py:60-110`` — actor_id is part of the
+    # hashed payload, surfaced into ``payload["actor_id"]`` so the
+    # canonical bytes are stable). The result: every persisted
+    # ``model.lifecycle.*`` chain row carries BOTH ``last_actor``
+    # (this module's spec-§4.1 explicit field, populated from
+    # ``record.last_actor`` after the post-update overlay) AND
+    # ``actor_id`` (the canonical-form auto-merge from
+    # ``DecisionRecord.actor_id``). The two values are identical by
+    # construction — pinned below.
+    expected_keys = {
+        # 17 keys built by _lifecycle_payload (storage.py — A6 fix).
+        "model_id",
+        "kind",
+        "version",
+        "base_model",
+        "recipe_hash",
+        "training_data_fingerprint",
+        "signature_digest",
+        "signed_artifact_ref",
+        "sigstore_bundle_ref",
+        "eval_results_ref",
+        "adversarial_pass_rate",
+        "serving_endpoint",
+        "last_actor",
+        "actor_type",
+        "from_state",
+        "to_state",
+        "iso_controls",
+        # +1 auto-merged by DecisionHistoryStore.append at chain-row
+        # write time: payload["actor_id"] = DecisionRecord.actor_id.
+        "actor_id",
+    }
+    actual_keys = set(payload.keys())
+    assert actual_keys == expected_keys, (
+        f"chain payload key set diverged from spec §4.1 — "
+        f"missing: {expected_keys - actual_keys!r}; "
+        f"extra: {actual_keys - expected_keys!r}"
+    )
+
+    # Post-update overlay propagation of the new actor — A.6.2.6
+    # roles & responsibilities evidence. The eval_passed chain row's
+    # last_actor MUST be the transition's actor, not the register-
+    # time actor (which would mean the overlay never set last_actor).
+    assert payload["last_actor"] == "alice-reviewer"
+    assert payload["actor_type"] == "human"
+    # The auto-merged actor_id MUST agree with the explicit
+    # last_actor — pins the two channels (post-update overlay +
+    # canonical-form merge) in lockstep. Divergence would mean
+    # either DecisionRecord.actor_id is wrong OR the values overlay
+    # never reached the payload helper.
+    assert payload["actor_id"] == payload["last_actor"] == "alice-reviewer"
+    # Genesis row on the SAME model records the prior actor — pins
+    # the contrast so the test would still fail under a regression
+    # that leaked the genesis actor into the eval_passed payload.
+    genesis = next(h for h in history if h.decision_type == "model.lifecycle.proposed")
+    assert genesis.payload["last_actor"] == "forge-bot"
+    assert genesis.payload["actor_id"] == "forge-bot"
+    assert genesis.payload["actor_type"] == "service"
