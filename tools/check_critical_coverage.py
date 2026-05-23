@@ -1573,6 +1573,181 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     ("src/cognic_agentos/compliance/iso42001/merkle.py", 0.95, 0.90),
     ("src/cognic_agentos/compliance/iso42001/signing.py", 0.95, 0.90),
     ("src/cognic_agentos/compliance/iso42001/evidence_pack.py", 0.95, 0.90),
+    #
+    # ------------------------------------------------------------------
+    # Sprint 9.5 Z1 — Model Registry primitive durable critical-controls
+    # modules (gate 77 → 81).
+    # ------------------------------------------------------------------
+    # Per ADR-013 + the Sprint-9.5 spec §10 Z1 closeout, the 4 modules
+    # below are promoted to the durable gate at the standard 95% line /
+    # 90% branch floor. The user-locked tightening edit B per
+    # ``feedback_verify_promotion_meets_floor_at_promotion_time`` ran
+    # ``tools/check_critical_coverage.py`` against a FRESH full-suite
+    # ``coverage.json`` IN THE SAME COMMIT as this ``_CRITICAL_FILES``
+    # extension — NOT just the count-guard ``_EXPECTED_ENTRY_COUNT``
+    # bump in the self-test. The 2026-05-23 promotion run found 3/4
+    # modules at 100% line / 100% branch on fresh data AND
+    # ``portal/api/models/lifecycle_routes.py`` BELOW floor at 91.08%
+    # line (4 branches missing: 3 ``_verify_record_signature`` early-
+    # returns + 2 ``ModelNotFound`` race paths + the
+    # ``retire_model`` ``ModelLifecycleRefused`` catch); the SAME
+    # commit lands the focused negative-path repair
+    # (``TestVerifyRecordSignatureEarlyReturns`` 3 tests +
+    # ``TestPromoteRetireRacePaths`` 2 tests +
+    # ``TestRetireLifecycleRefused`` 1 test = 6 floor-pin tests
+    # appended to ``tests/unit/portal/api/models/test_lifecycle_routes.py``)
+    # bringing lifecycle_routes.py to 100% line / 100% branch.
+    #
+    # The 4 modules promoted form the Model Registry primitive's
+    # substantive enforcement surface per ADR-013 + AGENTS.md
+    # "Model registry lifecycle transitions" stop rule:
+    #
+    #   * ``models/registry.py`` — pure-functional ``ModelRecord``
+    #     lifecycle state machine. Owns the closed-enum 12-value
+    #     ``ModelLifecycleRefusalReason`` Literal (the wire-protocol
+    #     contract for every 409 lifecycle refusal body) + the
+    #     6-value ``ModelLifecycleState`` + 4-value ``ModelKind`` +
+    #     5-value ``ModelTransition`` Literals + the 5-value
+    #     ``MODEL_LIFECYCLE_ISO_CONTROLS`` tuple stamped on every
+    #     ``model.lifecycle.*`` chain row. ``validate_transition(*,
+    #     from_state, to_state, transition)`` is the pure-functional
+    #     state-machine validator at ``registry.py:116``;
+    #     ``ModelLifecycleRefused(reason)`` carries ONLY the
+    #     closed-enum reason — no transition field on the exception.
+    #     Drift in any of the 4 Literals or the validate_transition
+    #     refusal precedence (state-vocab → re-retire-idempotency →
+    #     terminal-state-guard → generic-legal-pair) is
+    #     wire-protocol-public regression.
+    #   * ``models/storage.py`` — Postgres + Oracle ``ModelRecordStore``
+    #     at ``storage.py:206``; the
+    #     ``DecisionHistoryStore.append_with_precondition`` consumer
+    #     that drives every model-lifecycle transition through the
+    #     Sprint-2.5 atomic primitive. Owns the ``register()`` genesis
+    #     path (INSERT ``proposed`` + append ``model.lifecycle.proposed``
+    #     chain row atomically); the ``transition()`` promote/retire
+    #     path with the A4 R1 P1 TOCTOU re-check + the 12-value refusal
+    #     vocabulary; the A6.0 ``_lifecycle_payload`` immutable
+    #     evidence snapshot helper (17 fields covering the per-spec
+    #     §4.1 + §4.2 control-tag evidence binding); the
+    #     ``load_by_model_id`` / ``list_for_tenant(tenant_id, *,
+    #     limit, cursor, state)`` / ``load_lifecycle_history`` read
+    #     methods (A5). The B4 R2 P1 ``signature_digest`` recompute-
+    #     before-cosign evidence-integrity contract depends on this
+    #     module storing the digest faithfully; the B5 ``?state=``
+    #     filter contract depends on ``list_for_tenant``'s ``state``
+    #     kwarg being honest. Tenant-isolation enforcement boundary:
+    #     the ``WHERE tenant_id == :tenant_id`` clause in
+    #     ``list_for_tenant`` IS the cross-tenant boundary (no
+    #     application-side filter; defence-in-depth at the storage
+    #     layer).
+    #   * ``models/trust.py`` — cosign artefact verification gate per
+    #     ADR-013. ``ModelTrustGate.verify_model_signature(*,
+    #     signed_artifact_path, sigstore_bundle_path,
+    #     tenant_trust_root)`` mirrors the ``protocol/trust_gate.py``
+    #     cosign subprocess discipline exactly (list-form argv, no
+    #     shell, frozen 2-key subprocess env at module-scope
+    #     ``_SUBPROCESS_ENV`` = ``{"PATH": "/usr/local/bin:/usr/bin",
+    #     "HOME": "/tmp"}``, asyncio timeout + SIGKILL + reap,
+    #     exit-code-only verdict — stdout/stderr never parsed).
+    #     Module-level ``sigstore_bundle_digest(path) -> str`` helper
+    #     (SHA-256 hex over the raw bundle bytes, chunked 64 KiB)
+    #     — the B4 R2 P1 evidence-integrity invariant for
+    #     ``record.signature_digest == sha256(bundle_bytes)`` runs
+    #     here. The 3-arg bundle-only argv shape (cosign verify-blob
+    #     --key <trust> --bundle <bundle> <artefact>; no
+    #     --signature flag) is pinned by the A2 R1 argv-shape
+    #     regression — Sigstore bundles carry the signature inside
+    #     the bundle, NOT as a separate --signature payload.
+    #   * ``portal/api/models/lifecycle_routes.py`` — register /
+    #     promote / retire route module (B4). CC at the route layer:
+    #     owns the cosign path-containment helper
+    #     ``_resolve_under_tenant_root`` (rejects 7 documented attack
+    #     classes: tenant_id_invalid + tenant_root_escapes_root +
+    #     absolute_path + uri_scheme + traversal_segment +
+    #     escapes_tenant_root + missing_or_not_file — per the B4 R2
+    #     P2 #2 tenant-id + tenant-root containment fix); the cosign-
+    #     OUTSIDE-transaction helper ``_verify_record_signature`` with
+    #     the B4 R2 P1 ``sigstore_bundle_digest`` recompute-before-
+    #     cosign evidence-integrity check; the body-aware promote
+    #     scope resolution (``model.promote.<target_state>``) +
+    #     HumanActor gate for ``target_state=="serving"``; the state-
+    #     aware HumanActor gate at ``/retire`` (only fires when
+    #     current ``lifecycle_state == "serving"``). All three
+    #     handlers thread the closed-enum refusal reasons from
+    #     storage's state machine onto the 409 wire body per the B2
+    #     R1 wire-body-collapse contract; the ``ModelNotFound`` race
+    #     paths surface as 404 ``model_not_found``. Standing-offer
+    #     §30 invariant: ``from __future__ import annotations`` is
+    #     INTENTIONALLY OMITTED so FastAPI's ``inspect.signature()``
+    #     can resolve ``Annotated[..., Depends(<closure-local>)]``
+    #     against closure-local dependency instances (``_require_retire``
+    #     + ``_require_tenant_ownership`` live inside
+    #     ``build_model_lifecycle_routes``; the bare-POST register
+    #     endpoint moves to ``register_model_lifecycle_register(parent,
+    #     *, store)`` per the B5 lifecycle-routes split — see
+    #     ``feedback_bare_prefix_endpoints_register_on_parent``).
+    #
+    # OFF the durable gate per Doctrine F (with explicit carve-out
+    # rationale; same precedent as Sprint 8A's ``sandbox/audit.py`` +
+    # Sprint 8B's ``sandbox/backend_factory.py`` + Sprint 8.5's
+    # ``sandbox/reaper.py``):
+    #
+    #   * ``portal/api/models/inspection_routes.py`` (B5) — pure-read
+    #     list / detail / audit endpoints; no ``store.transition()``
+    #     calls; no Human-only-decisions enforcement boundary; no
+    #     cosign verification. Same R32 doctrine as the pack
+    #     ``inspection_routes.py``: pure-read inspection module owns
+    #     no chain-row write and no Human-only-decisions enforcement
+    #     boundary; CC risk for the tenant-isolation surface is
+    #     covered by ``models/storage.py``'s ``list_for_tenant`` +
+    #     ``load_by_model_id`` being on the gate (the WHERE clause
+    #     IS the boundary).
+    #   * ``portal/api/models/router.py`` (B5) — composition glue
+    #     (``build_models_router`` factory that mounts the bare-POST
+    #     register + bare-GET list directly on the parent router +
+    #     includes the ``{model_id}``-keyed lifecycle + inspection
+    #     sub-routers). No decision logic; no closed-enum vocabulary;
+    #     no refusal taxonomy. Same Doctrine F precedent as
+    #     ``portal/api/packs/router.py``.
+    #   * ``portal/api/models/dto.py`` (B3) — pure type-only DTOs
+    #     (``ModelBaseModel`` frozen + ``extra="forbid"`` base +
+    #     ``RegisterModelRequest`` + ``PromoteModelRequest`` +
+    #     ``ModelResponse`` + ``ModelLifecycleEventResponse`` +
+    #     ``ModelDetailResponse`` + the 4-value ``PromoteTargetState``
+    #     Literal). Same precedent as ``portal/api/packs/dto.py`` +
+    #     ``portal/api/ui/dto.py`` — DTO type contracts are caught at
+    #     Pydantic parse time + static type checks; coverage on a
+    #     pure-DTO module would measure runtime-import + class-
+    #     decoration lines only.
+    #   * ``portal/rbac/model_tenant_isolation.py`` (B2) — although
+    #     this module owns the wire-public ``ModelTenantIsolationFailure``
+    #     (4 internal) + ``ModelTenantIsolationWireReason`` (3
+    #     wire-public) closed-enum vocabulary AND the user-locked B2
+    #     wire-body-collapse doctrine (cross-tenant → ``model_not_found``
+    #     at the wire), it is NOT in the AGENTS.md model-registry
+    #     stop-rule list. The CC risk is fully covered by the
+    #     11-test ``TestModelTenantIsolationVocabulary`` +
+    #     ``TestWireShapeParityPin`` + the integration tests at
+    #     ``test_lifecycle_routes.py`` (which already exercise the
+    #     wire-body collapse via the on-gate lifecycle_routes.py
+    #     handler). Same Doctrine F precedent as the pack
+    #     ``portal/rbac/tenant_isolation.py`` (which IS on the gate
+    #     via T12 promotion alongside the other 5 portal/rbac/
+    #     primitives) — but B2 ships a NEW module under portal/rbac/
+    #     and the user-locked invariant + the test surface together
+    #     pin the wire-body-collapse contract without needing
+    #     promotion.  Promotion-equity decision: same Doctrine F
+    #     pattern as the Sprint-7B.2 split between the on-gate pack
+    #     ``tenant_isolation.py`` and the off-gate
+    #     ``portal/api/packs/router.py`` — the model module's
+    #     stronger wire-collapse behaviour is pinned by its own
+    #     ``TestModelTenantIsolationVocabulary`` (4-test) +
+    #     ``TestWireShapeParityPin`` (1-test) suite, leaving the
+    #     route-layer integration as the cross-coverage anchor.
+    ("src/cognic_agentos/models/registry.py", 0.95, 0.90),
+    ("src/cognic_agentos/models/storage.py", 0.95, 0.90),
+    ("src/cognic_agentos/models/trust.py", 0.95, 0.90),
+    ("src/cognic_agentos/portal/api/models/lifecycle_routes.py", 0.95, 0.90),
 )
 
 

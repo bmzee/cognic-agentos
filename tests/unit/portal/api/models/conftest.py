@@ -123,10 +123,22 @@ def make_app(
         scopes: frozenset[str] = frozenset(),
         actor_type: str = "human",
         cosign_exit_zero: bool = True,
+        cosign_missing: bool = False,
     ) -> FastAPI:
+        # Z1 coverage-floor extension: cosign_missing=True points
+        # settings.cosign_path at a non-existent binary so
+        # ModelTrustGate.__init__'s ``which(configured)`` returns None,
+        # exercising the ``ModelSignatureVerificationError`` early-
+        # return branch of ``_verify_record_signature`` (lifecycle_routes
+        # lines 309-310).
+        cosign_path = (
+            "/no/such/cosign-binary-z1-floor-test"
+            if cosign_missing
+            else str(make_cosign(cosign_exit_zero))
+        )
         settings = Settings(
             model_artifact_root=str(artefact_tree),
-            cosign_path=str(make_cosign(cosign_exit_zero)),
+            cosign_path=cosign_path,
         )
         trust_gate = ModelTrustGate(settings)
         actor = Actor(

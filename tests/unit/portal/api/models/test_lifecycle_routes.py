@@ -36,6 +36,7 @@ import hashlib
 import logging
 import re
 import sys
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -987,3 +988,187 @@ class TestStructuredLogEmission:
         records = [r for r in caplog.records if r.getMessage() == "portal.models.register_refused"]
         assert len(records) == 1
         assert records[0].reason == "model_register_duplicate_id"  # type: ignore[attr-defined]
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 9. Z1 coverage-floor pins — focused negative-path tests added at
+#    promotion time per the
+#    `[[feedback_verify_promotion_meets_floor_at_promotion_time]]`
+#    doctrine. Brings `lifecycle_routes.py` from 91.08% → ≥95% line.
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestVerifyRecordSignatureEarlyReturns:
+    """Floor pins for the three early-return branches of
+    :func:`_verify_record_signature` (the cosign-OUTSIDE-transaction
+    helper). All three branches return ``False`` → the route maps to
+    409 ``model_promote_signature_verification_failed`` per the B2 R1
+    wire-body-collapse doctrine."""
+
+    async def test_none_signature_digest_returns_false(
+        self,
+        make_app: Any,
+        client_register: AsyncClient,
+    ) -> None:
+        """Line 260 — when ``record.signature_digest is None`` (client
+        omitted the field at register time), ``_verify_record_signature``
+        fail-closes BEFORE attempting path resolution. The DTO marks
+        the field optional (``str | None = None``), so a client CAN
+        omit it; storage stores None; promote_eval_passed then surfaces
+        the closed-enum refusal."""
+        payload = {**_REGISTER_PAYLOAD, "model_id": "m-no-sig-digest"}
+        payload.pop("signature_digest")
+        await client_register.post("/api/v1/models", json=payload)
+        app = make_app(scopes=frozenset({"model.promote.eval_passed"}))
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post(
+                "/api/v1/models/m-no-sig-digest/promote",
+                json={"target_state": "eval_passed"},
+            )
+        assert response.status_code == 409
+        assert response.json()["detail"]["reason"] == "model_promote_signature_verification_failed"
+
+    async def test_oserror_on_bundle_digest_read_returns_false(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        make_app: Any,
+        client_register: AsyncClient,
+    ) -> None:
+        """Lines 287-288 — when ``sigstore_bundle_digest(bundle)``
+        raises OSError mid-read (transient FS error / permission
+        revoked between resolve + read), ``_verify_record_signature``
+        fail-closes with False. Monkeypatch the module-level helper
+        to simulate the OSError without needing real FS interference."""
+        from cognic_agentos.portal.api.models import lifecycle_routes
+
+        def _raise_oserror(_path: Path) -> str:
+            raise OSError("Z1 floor test — simulated bundle read failure")
+
+        monkeypatch.setattr(lifecycle_routes, "sigstore_bundle_digest", _raise_oserror)
+        await client_register.post(
+            "/api/v1/models",
+            json={**_REGISTER_PAYLOAD, "model_id": "m-bundle-oserror"},
+        )
+        app = make_app(scopes=frozenset({"model.promote.eval_passed"}))
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post(
+                "/api/v1/models/m-bundle-oserror/promote",
+                json={"target_state": "eval_passed"},
+            )
+        assert response.status_code == 409
+        assert response.json()["detail"]["reason"] == "model_promote_signature_verification_failed"
+
+    async def test_cosign_binary_missing_returns_false(
+        self,
+        make_app: Any,
+        client_register: AsyncClient,
+    ) -> None:
+        """Lines 309-310 — when cosign cannot run at all (binary
+        missing on PATH; ModelTrustGate's ``which(configured)``
+        returned None at construction; ``verify_model_signature``
+        raises ``ModelSignatureVerificationError``),
+        ``_verify_record_signature`` fail-closes with False. The
+        conftest's ``cosign_missing=True`` option points
+        settings.cosign_path at a non-existent binary."""
+        await client_register.post(
+            "/api/v1/models",
+            json={**_REGISTER_PAYLOAD, "model_id": "m-no-cosign-bin"},
+        )
+        app = make_app(
+            scopes=frozenset({"model.promote.eval_passed"}),
+            cosign_missing=True,
+        )
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post(
+                "/api/v1/models/m-no-cosign-bin/promote",
+                json={"target_state": "eval_passed"},
+            )
+        assert response.status_code == 409
+        assert response.json()["detail"]["reason"] == "model_promote_signature_verification_failed"
+
+
+class TestPromoteRetireRacePaths:
+    """Floor pins for the ``except ModelNotFound`` race-path branches
+    in ``promote_model`` (lines 545-559) and ``retire_model`` (lines
+    626-637). The race: a model deleted between the
+    ``RequireModelTenantOwnership`` guard's load and the
+    ``store.transition`` call. Monkeypatch the store method to
+    simulate the race deterministically."""
+
+    async def test_promote_model_not_found_race_returns_404(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        store: ModelRecordStore,
+        make_app: Any,
+        client_register: AsyncClient,
+    ) -> None:
+        from cognic_agentos.models.storage import ModelNotFound
+
+        await client_register.post(
+            "/api/v1/models",
+            json={**_REGISTER_PAYLOAD, "model_id": "m-promote-race"},
+        )
+
+        async def _raise_not_found(**kwargs: Any) -> None:
+            raise ModelNotFound(uuid.uuid4())
+
+        monkeypatch.setattr(store, "transition", _raise_not_found)
+        app = make_app(scopes=frozenset({"model.promote.eval_passed"}))
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post(
+                "/api/v1/models/m-promote-race/promote",
+                json={"target_state": "eval_passed"},
+            )
+        assert response.status_code == 404
+        assert response.json()["detail"]["reason"] == "model_not_found"
+
+    async def test_retire_model_not_found_race_returns_404(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        store: ModelRecordStore,
+        make_app: Any,
+        client_register: AsyncClient,
+    ) -> None:
+        from cognic_agentos.models.storage import ModelNotFound
+
+        await client_register.post(
+            "/api/v1/models",
+            json={**_REGISTER_PAYLOAD, "model_id": "m-retire-race"},
+        )
+
+        async def _raise_not_found(**kwargs: Any) -> None:
+            raise ModelNotFound(uuid.uuid4())
+
+        monkeypatch.setattr(store, "transition", _raise_not_found)
+        app = make_app(scopes=frozenset({"model.retire"}))
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post("/api/v1/models/m-retire-race/retire")
+        assert response.status_code == 404
+        assert response.json()["detail"]["reason"] == "model_not_found"
+
+
+class TestRetireLifecycleRefused:
+    """Floor pin for ``retire_model``'s ``except ModelLifecycleRefused``
+    branch (lines 638-650). Natural trigger: register + retire +
+    retire-again — the state-machine validator at
+    ``models/registry.py:validate_transition`` refuses with
+    ``model_retire_already_retired`` (re-retire idempotency takes
+    precedence over the generic terminal-state guard)."""
+
+    async def test_double_retire_returns_409_already_retired(
+        self,
+        make_app: Any,
+        client_register: AsyncClient,
+    ) -> None:
+        await client_register.post(
+            "/api/v1/models",
+            json={**_REGISTER_PAYLOAD, "model_id": "m-double-retire"},
+        )
+        app = make_app(scopes=frozenset({"model.retire"}))
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            first = await client.post("/api/v1/models/m-double-retire/retire")
+            assert first.status_code == 200, first.text
+            assert first.json()["lifecycle_state"] == "retired"
+            second = await client.post("/api/v1/models/m-double-retire/retire")
+        assert second.status_code == 409
+        assert second.json()["detail"]["reason"] == "model_retire_already_retired"

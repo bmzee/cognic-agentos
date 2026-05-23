@@ -38,9 +38,10 @@ _GATE_TOOL_PATH = _REPO_ROOT / "tools" / "check_critical_coverage.py"
 #: Entry count after the Sprint 9 T10 promotions (63 at the 7B.4
 #: T13 close + 7 Sprint-8A sandbox modules = 70; + 1 Sprint-8B K8s
 #: backend = 71; + 2 Sprint-8.5 modules = 73; + 4 Sprint-9
-#: compliance/iso42001 modules = 77). Bump this in lockstep with any
-#: deliberate ``_CRITICAL_FILES`` change.
-_EXPECTED_ENTRY_COUNT = 77
+#: compliance/iso42001 modules = 77; + 4 Sprint-9.5 Z1 Model Registry
+#: modules (registry / storage / trust + portal lifecycle routes) = 81).
+#: Bump this in lockstep with any deliberate ``_CRITICAL_FILES`` change.
+_EXPECTED_ENTRY_COUNT = 81
 
 #: The 5 modules Sprint 7B.3 promoted to the durable gate, each by its
 #: own landing commit (T3-T6 panels + T7 composer). All ride the
