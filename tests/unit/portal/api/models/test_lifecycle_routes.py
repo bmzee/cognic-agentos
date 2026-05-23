@@ -117,6 +117,44 @@ class TestRegisterEndpoint:
         response = await client_register.post("/api/v1/models", json=bad_payload)
         assert response.status_code == 422
 
+    async def test_register_refused_when_actor_tenant_id_missing(
+        self,
+        make_app: Any,
+        store: Any,
+        engine: Any,
+    ) -> None:
+        """PR #35 R1 P2.1 reviewer fix — preflight guard fires when
+        ``actor.tenant_id`` is empty even with ``model.register`` scope
+        held. A misconfigured binder must not be able to mint a
+        ``tenant_id=""`` row plus a ``model.lifecycle.proposed`` chain
+        row tagged to no tenant. Watchpoint: 500 + closed-enum reason
+        AND zero side effects (no row + no chain row).
+        """
+        from sqlalchemy import select
+
+        from cognic_agentos.core.audit import _chain_heads
+        from cognic_agentos.models.storage import _models
+
+        app = make_app(tenant_id="", scopes=frozenset({"model.register"}))
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post("/api/v1/models", json=_REGISTER_PAYLOAD)
+        assert response.status_code == 500
+        assert response.json()["detail"]["reason"] == "actor_tenant_id_missing"
+        # Watchpoint 1: zero rows in models table (no INSERT ran).
+        async with engine.connect() as conn:
+            row_count = (await conn.execute(select(_models.c.id).limit(1))).first()
+        assert row_count is None, "P2.1 guard must short-circuit BEFORE store.register()"
+        # Watchpoint 2: decision_history chain head still at sequence 0.
+        async with engine.connect() as conn:
+            seq = (
+                await conn.execute(
+                    select(_chain_heads.c.latest_sequence).where(
+                        _chain_heads.c.chain_id == "decision_history"
+                    )
+                )
+            ).scalar_one()
+        assert seq == 0, "P2.1 guard must short-circuit BEFORE chain row append"
+
 
 # ──────────────────────────────────────────────────────────────────────
 # 2. Promote endpoint — body-aware authz + cosign gate
@@ -657,6 +695,57 @@ class TestPathContainmentDirectHelper:
             )
 
     @pytest.mark.skipif(sys.platform == "win32", reason="symlink semantics differ on Windows")
+    def test_symlink_loop_at_tenant_dir_translated_to_tenant_root_escapes_root(
+        self, tmp_path: Path
+    ) -> None:
+        """PR #35 R1 P2.2 reviewer fix — Python 3.12 ``Path.resolve()``
+        raises ``RuntimeError`` (NOT ``OSError``) on a symlink loop.
+        Without the helper's per-resolve ``except (OSError, RuntimeError)``
+        wrap, a loop at the tenant-directory tier would surface as an
+        unhandled 500 instead of the ``tenant_root_escapes_root``
+        closed-enum reason. Direct-helper pin so the regression catches
+        a future refactor that drops RuntimeError from the inner
+        except even if the wrapper still defensively catches it.
+        """
+        root = tmp_path / "loop_root"
+        root.mkdir()
+        # Build a 2-symlink loop at the tenant-directory tier:
+        # ``<root>/tenant-acme`` -> ``<root>/loop_b`` -> ``<root>/tenant-acme``.
+        # ``(root / "tenant-acme").resolve(strict=True)`` walks the
+        # chain and raises ``RuntimeError("Symlink loop")`` on Python
+        # 3.12.
+        (root / "tenant-acme").symlink_to(root / "loop_b")
+        (root / "loop_b").symlink_to(root / "tenant-acme")
+        with pytest.raises(ValueError, match="tenant_root_escapes_root"):
+            _resolve_under_tenant_root(
+                relative_ref="any.bin",
+                tenant_id="tenant-acme",
+                root=root,
+            )
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="symlink semantics differ on Windows")
+    def test_symlink_loop_at_candidate_translated_to_escapes_tenant_root(self, root: Path) -> None:
+        """PR #35 R1 P2.2 reviewer fix — a candidate-tier symlink loop
+        inside an otherwise-valid tenant tree must surface as
+        ``escapes_tenant_root`` (the same closed-enum a non-loop
+        symlink escape uses), NOT as an unhandled ``RuntimeError``.
+        Distinct from the tenant-directory tier loop above — the inner
+        try/except wrap at the candidate ``Path.resolve(strict=False)``
+        site is what catches this case.
+        """
+        tenant = root / "tenant-acme"
+        loop_a = tenant / "loop_a"
+        loop_b = tenant / "loop_b"
+        loop_a.symlink_to(loop_b)
+        loop_b.symlink_to(loop_a)
+        with pytest.raises(ValueError, match="escapes_tenant_root"):
+            _resolve_under_tenant_root(
+                relative_ref="loop_a",
+                tenant_id="tenant-acme",
+                root=root,
+            )
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="symlink semantics differ on Windows")
     @pytest.mark.parametrize("ref_kind", ["signed_artifact_ref", "sigstore_bundle_ref"])
     def test_symlink_wrong_tenant_crossing_refused(self, root: Path, ref_kind: str) -> None:
         """A symlink inside ``tenant-acme`` pointing to a file under
@@ -892,6 +981,38 @@ class TestPathContainmentIntegratesWithCosignGate:
         protected (per user pin #2 "test surface should pin both
         artifact and bundle refs")."""
         payload = {**_REGISTER_PAYLOAD, "sigstore_bundle_ref": "/etc/passwd"}
+        await client_register.post("/api/v1/models", json=payload)
+        app = make_app(scopes=frozenset({"model.promote.eval_passed"}))
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.post(
+                f"/api/v1/models/{payload['model_id']}/promote",
+                json={"target_state": "eval_passed"},
+            )
+        assert response.status_code == 409
+        assert response.json()["detail"]["reason"] == "model_promote_signature_verification_failed"
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="symlink semantics differ on Windows")
+    async def test_symlink_loop_candidate_blocks_promote_eval_passed(
+        self,
+        make_app: Any,
+        client_register: AsyncClient,
+        artefact_tree: Path,
+    ) -> None:
+        """PR #35 R1 P2.2 reviewer fix — end-to-end pin that a symlink
+        loop inside the tenant artefact tree surfaces at the route
+        boundary as ``model_promote_signature_verification_failed``
+        (NOT 500). Without the helper's per-resolve
+        ``except (OSError, RuntimeError)`` wrap AND the wrapper's
+        defensive ``RuntimeError`` catch, the Python 3.12 ``RuntimeError``
+        from ``Path.resolve()`` on a symlink loop would escape the
+        public closed-enum gate.
+        """
+        tenant = artefact_tree / "tenant-acme"
+        loop_a = tenant / "loop_a"
+        loop_b = tenant / "loop_b"
+        loop_a.symlink_to(loop_b)
+        loop_b.symlink_to(loop_a)
+        payload = {**_REGISTER_PAYLOAD, "signed_artifact_ref": "loop_a"}
         await client_register.post("/api/v1/models", json=payload)
         app = make_app(scopes=frozenset({"model.promote.eval_passed"}))
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:

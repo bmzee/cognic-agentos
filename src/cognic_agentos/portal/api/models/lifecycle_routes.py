@@ -181,15 +181,32 @@ def _resolve_under_tenant_root(
     # ``tenant_root_escapes_root`` reason — operator-discipline
     # invariant is "tenant directories are real directories, never
     # symlinks", regardless of where the symlink points.
-    resolved_root = root.resolve(strict=True)
-    tenant_root = (root / tenant_id).resolve(strict=True)
+    #
+    # PR #35 R1 P2 reviewer fix — Python 3.12 ``Path.resolve()`` raises
+    # ``RuntimeError`` (NOT ``OSError``) on a symlink loop. Wrap each
+    # ``resolve()`` call site so a loop translates to the matching
+    # closed-enum reason (tenant-tier loop → ``tenant_root_escapes_root``;
+    # candidate-tier loop → ``escapes_tenant_root``) instead of leaking
+    # the raw ``RuntimeError`` to the caller — without this the wrapper
+    # at ``_verify_record_signature`` would 500 instead of translating
+    # to the public ``model_promote_signature_verification_failed``
+    # gate. Same lesson learned at Sprint-8.5 T12 for
+    # ``db/adapters/local_object_store_adapter.py``.
+    try:
+        resolved_root = root.resolve(strict=True)
+        tenant_root = (root / tenant_id).resolve(strict=True)
+    except (OSError, RuntimeError):
+        raise ValueError("tenant_root_escapes_root") from None
     try:
         tenant_root.relative_to(resolved_root)
     except ValueError:
         raise ValueError("tenant_root_escapes_root") from None
     if tenant_root.name != tenant_id:
         raise ValueError("tenant_root_escapes_root")
-    candidate = (tenant_root / relative_ref).resolve(strict=False)
+    try:
+        candidate = (tenant_root / relative_ref).resolve(strict=False)
+    except (OSError, RuntimeError):
+        raise ValueError("escapes_tenant_root") from None
     try:
         candidate.relative_to(tenant_root)
     except ValueError:
@@ -275,7 +292,15 @@ async def _verify_record_signature(
             tenant_id=record.tenant_id,
             root=root,
         )
-    except (ValueError, OSError):
+    except (ValueError, OSError, RuntimeError):
+        # PR #35 R1 P2 reviewer fix — Python 3.12 ``Path.resolve()``
+        # raises ``RuntimeError`` on symlink loops. The helper above
+        # translates RuntimeError → closed-enum ValueError at each
+        # ``resolve()`` site; including RuntimeError here is belt-and-
+        # braces defence so a future refactor that adds a new resolve
+        # site without the inner translation still surfaces as the
+        # public ``model_promote_signature_verification_failed`` gate
+        # instead of an unhandled 500.
         return False
     # B4 R1 P1 — verify the bundle's actual SHA-256 matches the
     # claim BEFORE running cosign. A mismatch means the chain
@@ -351,6 +376,30 @@ def register_model_lifecycle_register(
         body: RegisterModelRequest,
         actor: Annotated[Actor, Depends(_require_register)],
     ) -> ModelResponse:
+        # PR #35 R1 P2 reviewer fix — preflight guard. The bare-prefix
+        # POST /api/v1/models route has no path-param so
+        # RequireModelTenantOwnership cannot run; the handler assigns
+        # ``tenant_id=actor.tenant_id`` directly. With a misconfigured
+        # binder holding ``model.register`` but emitting ``tenant_id=""``
+        # this would persist a tenant_id="" model row + emit a
+        # ``model.lifecycle.proposed`` chain row tagged to no tenant.
+        # Mirror the inspection_routes.py:107 preflight + the
+        # ``RequireModelTenantOwnership`` 500 emission shape so the
+        # bare-prefix and path-param endpoints share one fail-loud
+        # contract for the same enforcement gap.
+        if not actor.tenant_id:
+            _LOG.error(
+                "portal.models.actor_tenant_id_missing",
+                extra={
+                    "reason": "actor_tenant_id_missing",
+                    "actor_subject": actor.subject,
+                    "endpoint": "POST /api/v1/models",
+                },
+            )
+            raise HTTPException(
+                status_code=500,
+                detail={"reason": "actor_tenant_id_missing"},
+            )
         now = datetime.now(UTC)
         record = ModelRecord(
             id=uuid.uuid4(),
