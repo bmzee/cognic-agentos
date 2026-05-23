@@ -291,6 +291,28 @@ class Settings(BaseSettings):
         default=None,
         description="Vault Enterprise namespace (None = default namespace).",
     )
+    vault_http_timeout_s: float = Field(
+        default=10.0,
+        gt=0.0,
+        le=60.0,
+        description=(
+            "Sprint 10 (T2) — per-request timeout for the shared "
+            "VaultTransport (seconds). Bounded ``0 < x ≤ 60`` per "
+            "spec §3.5; misconfig fails loud at Settings construction."
+        ),
+    )
+    vault_http_max_retries: int = Field(
+        default=3,
+        ge=0,
+        le=10,
+        description=(
+            "Sprint 10 (T2) — bounded exponential-backoff retry count "
+            "for transient hvac failures from the shared VaultTransport. "
+            "Bounded ``0 ≤ x ≤ 10`` (0 = no retries; 10 = ~10s "
+            "worst-case backoff per call); misconfig fails loud at "
+            "Settings construction."
+        ),
+    )
 
     embed_driver: str = Field(
         default="ollama",
