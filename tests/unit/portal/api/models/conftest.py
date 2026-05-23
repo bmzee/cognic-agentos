@@ -29,10 +29,20 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from cognic_agentos.core.audit import _chain_heads, _metadata
 from cognic_agentos.core.canonical import ZERO_HASH
 from cognic_agentos.core.config import Settings
+from cognic_agentos.llm.ledger import GatewayCallLedger, _ledger_table
 from cognic_agentos.models.storage import ModelRecordStore
 from cognic_agentos.models.trust import ModelTrustGate
 from cognic_agentos.portal.api.models import build_models_router
 from cognic_agentos.portal.rbac.actor import Actor
+
+# Sprint 9.5b C3 — sentinel for the ``gateway_ledger`` kwarg.
+# ``make_app(gateway_ledger=_LEDGER_DEFAULT)`` (the implicit default)
+# mints a real ``GatewayCallLedger(engine)`` backed by the test
+# engine, so the 4 pre-existing test files that call ``make_app(...)``
+# without the kwarg stay backward-compat. Explicit
+# ``gateway_ledger=None`` overrides to the D7 503-path scenario; an
+# explicit instance overrides to a custom-wired ledger.
+_LEDGER_DEFAULT: Any = object()
 
 
 class _StubBinder:
@@ -51,6 +61,12 @@ async def engine(tmp_path: Path) -> AsyncIterator[AsyncEngine]:
     eng = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'b4.db'}")
     async with eng.begin() as conn:
         await conn.run_sync(_metadata.create_all)
+        # Sprint 9.5b C3 — also create the gateway_call_ledger table
+        # so ``make_app``'s default ``GatewayCallLedger(engine)`` has
+        # somewhere to write. ``_ledger_table`` lives on a SEPARATE
+        # ``MetaData()`` instance from ``_metadata`` (per
+        # ``llm/ledger.py:133``) so both creates are needed.
+        await conn.run_sync(_ledger_table.metadata.create_all)
         for chain_id in ("audit_event", "decision_history"):
             await conn.execute(
                 _chain_heads.insert().values(
@@ -107,13 +123,16 @@ def make_cosign(tmp_path: Path) -> Callable[[bool], Path]:
 @pytest.fixture
 def make_app(
     store: ModelRecordStore,
+    engine: AsyncEngine,
     artefact_tree: Path,
     make_cosign: Callable[[bool], Path],
 ) -> Callable[..., FastAPI]:
     """Build a bare FastAPI app with the model lifecycle router
     direct-mounted under ``/api/v1/models`` (NOT ``create_app`` — that
     integration lands in B5). The factory accepts overrides for actor
-    identity / tenant / scopes / actor_type and the cosign verdict.
+    identity / tenant / scopes / actor_type, the cosign verdict, and
+    the C3 ``gateway_ledger`` (default: real instance backed by the
+    test engine; explicit ``None`` for the D7 503-path tests).
     """
 
     def _build(
@@ -124,6 +143,7 @@ def make_app(
         actor_type: str = "human",
         cosign_exit_zero: bool = True,
         cosign_missing: bool = False,
+        gateway_ledger: Any = _LEDGER_DEFAULT,
     ) -> FastAPI:
         # Z1 coverage-floor extension: cosign_missing=True points
         # settings.cosign_path at a non-existent binary so
@@ -147,14 +167,34 @@ def make_app(
             scopes=scopes,  # type: ignore[arg-type]
             actor_type=actor_type,  # type: ignore[arg-type]
         )
+        # Sprint 9.5b C3 — sentinel-pattern resolution of the
+        # ``gateway_ledger`` kwarg. The implicit default mints a real
+        # ledger backed by the test engine so the 4 pre-existing test
+        # files (test_dto.py, test_inspection_routes.py,
+        # test_lifecycle_routes.py, the integration test) stay
+        # backward-compat without any signature surgery; explicit
+        # ``None`` overrides to the D7 503-path scenario; an explicit
+        # instance overrides to a custom-wired ledger.
+        ledger: GatewayCallLedger | None = (
+            GatewayCallLedger(engine) if gateway_ledger is _LEDGER_DEFAULT else gateway_ledger
+        )
         app = FastAPI()
         app.state.model_registry_store = store
         app.state.actor_binder = _StubBinder(actor)
         # B5: mount the COMPOSED router (lifecycle + inspection) via
         # build_models_router. The router carries the MODEL_ROUTER_PREFIX
-        # internally — no extra prefix on include_router.
+        # internally — no extra prefix on include_router. C3 threads
+        # the optional ``ledger`` kwarg through; ``None`` (the D7
+        # opt-in) yields the 503 ``gateway_ledger_not_configured``
+        # surface on /usage while keeping the other 5 model endpoints
+        # mounted and functional.
         app.include_router(
-            build_models_router(store=store, trust_gate=trust_gate, settings=settings)
+            build_models_router(
+                store=store,
+                trust_gate=trust_gate,
+                settings=settings,
+                ledger=ledger,
+            )
         )
         return app
 

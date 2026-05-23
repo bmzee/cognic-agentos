@@ -750,14 +750,44 @@ def create_app(
     ):
         app.state.model_registry_store = model_registry_store
         app.state.model_trust_gate = model_trust_gate
+        # Sprint 9.5b C3 — thread the existing ``gateway_ledger`` kwarg
+        # (already constructed by the create_app caller for the Sprint 3
+        # T9 ``/effective-routing`` surface, attached at
+        # ``app.state.gateway_ledger`` below) into the models router.
+        # The same ``GatewayCallLedger`` instance now feeds BOTH
+        # ``/effective-routing`` AND the new ``/usage``; NO new
+        # construction. ``gateway_ledger`` may be None — see the
+        # 4-state warning immediately below.
         app.include_router(
             build_models_router(
                 store=model_registry_store,
                 trust_gate=model_trust_gate,
                 settings=settings,
+                ledger=gateway_ledger,
             )
         )
         app.state.models_router_mounted = True
+        # Sprint 9.5b C3 + PR #35 R2 plan-patch D7 — 4-state mount
+        # warning. The models router is mounted (3 deps present) but
+        # the gateway_ledger backend is missing. Operators see the
+        # partial 9.5b config at startup, not only at first /usage
+        # call (which surfaces as 503 gateway_ledger_not_configured).
+        # The warning does NOT block the mount — the 5 other model
+        # endpoints (register, promote, retire, list, detail, audit)
+        # work fine without the ledger; only /usage is affected.
+        if gateway_ledger is None:
+            logger.warning(
+                "portal.models.gateway_ledger_not_wired_partial_9_5b_config",
+                extra={
+                    "reason": "gateway_ledger_not_configured",
+                    "endpoints_returning_503": ["/api/v1/models/{model_id}/usage"],
+                    "note": (
+                        "models router mounted with model deps; "
+                        "gateway_ledger missing — /usage will return "
+                        "503 until the ledger is wired."
+                    ),
+                },
+            )
     elif _model_deps_supplied > 0:
         # Partial config — at least one model dep supplied, but the
         # trio is incomplete. Emit a single structured warning so
