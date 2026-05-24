@@ -31,6 +31,7 @@ per the round-4 single-seam contract.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Literal, NewType, Protocol, runtime_checkable
@@ -382,6 +383,7 @@ class SandboxBackendHealth:
 # Uses ``TYPE_CHECKING`` (NOT ``if False``) so mypy resolves the
 # annotations at the T3 halt gate per the round-3 R3 P1 #1 fix.
 if TYPE_CHECKING:
+    from cognic_agentos.core.vault import CredentialLease, VaultLeaseRequest
     from cognic_agentos.portal.rbac.actor import Actor
     from cognic_agentos.sandbox.policy import PackAdmissionContext, SandboxPolicy
 
@@ -403,6 +405,17 @@ class SandboxSession(Protocol):
     pack_context: PackAdmissionContext
     created_at: datetime
     warm_pool_hit: bool
+    #: Sprint 10 T10 — leases minted at ``create()`` post-admission per
+    #: spec §3.6 + §4.2. Immutable post-construction (mid-life mutation
+    #: out of scope Wave-1). Empty tuple keeps Sprint-8A backward-compat
+    #: for lease-less cold-create + warm-pool members. Iterated by the
+    #: backend at ``destroy()`` for the per-lease fail-soft revoke loop
+    #: per spec §4.3 + §7.2. ALSO gates the Q5 LOCK at spec §4.5 —
+    #: non-empty ``active_leases`` forces ``checkpoint()`` + ``suspend()``
+    #: to raise ``NotImplementedError`` pointing at Sprint 10.x
+    #: (production-grade fail-loud scaffolding; checkpoint/suspend/wake
+    #: on a leased session is out-of-scope at Sprint 10).
+    active_leases: tuple[CredentialLease, ...]
 
     async def exec(
         self,
@@ -422,13 +435,14 @@ class SandboxSession(Protocol):
         ``CheckpointId``; same session can checkpoint multiple times
         (subject to ``Settings.sandbox_max_checkpoints_per_session``).
 
-        Per spec §2.4 amended (Q4 lock): ``vault_lease_refs`` is always
-        empty in Sprint 8.5 — vault-bearing sessions are unreachable
-        today via the existing 8A
-        ``sandbox_credential_adapter_not_configured`` admission-time
-        refusal. Sprint 10 fills lease refs when
-        ``VaultCredentialAdapter`` lands + the ``CredentialAdapter``
-        Protocol extension lands.
+        Sprint 10 T10 Q5 LOCK (spec §4.5): when ``self.active_leases``
+        is non-empty, concrete session implementations MUST raise
+        ``NotImplementedError`` pointing at Sprint 10.x — checkpoint /
+        suspend / wake on a leased session is out of scope at Sprint
+        10 (production-grade fail-loud scaffolding per AGENTS.md;
+        choosing the leased-session checkpoint model — re-mint at
+        wake vs revoke-at-suspend vs token-in-checkpoint — is the
+        follow-up sprint's call).
         """
 
     async def suspend(self) -> None:
@@ -437,14 +451,14 @@ class SandboxSession(Protocol):
         session raise. ``wake()`` restores the session in a fresh backend
         resource. Emits ``sandbox.lifecycle.suspended``.
 
-        Vault-lease revocation is OUT OF SCOPE for Sprint 8.5 per spec
-        §2.4 amended — the existing Sprint-8A
-        ``sandbox_credential_adapter_not_configured`` admission-time
-        refusal prevents any vault-bearing session from existing in the
-        first place, so there is no lease to revoke here.
-        Lease-revocation logic lands at Sprint 10 alongside the real
-        ``VaultCredentialAdapter`` + the ``CredentialAdapter`` Protocol
-        extension.
+        Sprint 10 T10 Q5 LOCK (spec §4.5): same fail-loud contract as
+        ``checkpoint()`` above — when ``self.active_leases`` is
+        non-empty concrete implementations raise
+        ``NotImplementedError`` pointing at Sprint 10.x. The premise
+        of the Sprint-8.5 Q4 lock (``vault_lease_refs=()`` always; no
+        vault-bearing sessions exist) breaks at Sprint 10; the Q5
+        lock defers the resolution to a follow-up sprint rather than
+        silently dropping leases at suspend / wake.
         """
 
 
@@ -467,6 +481,7 @@ class SandboxBackend(Protocol):
         tenant_id: str,
         pack_context: PackAdmissionContext,
         use_warm_pool: bool = True,
+        requires_credentials: Sequence[VaultLeaseRequest] = (),
     ) -> SandboxSession:
         """Admit + create a sandbox session.
 
@@ -485,6 +500,25 @@ class SandboxBackend(Protocol):
         replenishment contract — ``SandboxWarmPool.precreate`` calls
         this so it never consumes an existing pool member; round-1 P1
         reviewer fix).
+
+        ``requires_credentials``: Sprint 10 T10 — sequence of
+        ``VaultLeaseRequest`` describing the dynamic credentials the
+        sandbox needs minted at create() per spec §4.2. Default ``()``
+        keeps existing Sprint-8A callers backward-compat. When
+        non-empty: (1) admit_policy's cross-tenant guard + Rego TTL
+        cap fire BEFORE any Vault round-trip; (2) the warm-pool
+        checkout is SKIPPED per spec §4.2.1 (warm members lack actor
+        context for leases); (3) AFTER admit_policy succeeds the
+        backend mints each lease in order via
+        ``credential_adapter.mint_lease(request)``; (4) on any mid-batch
+        mint failure, leases already minted in this attempt are revoked
+        best-effort then ``SandboxLifecycleRefused`` is raised with the
+        mapped ``sandbox_credential_mint_failed_*`` closed-enum reason
+        per spec §7.1; (5) on success the minted leases land on
+        ``session.active_leases`` for the per-lease destroy-time revoke
+        loop. ``Sequence`` (NOT ``list``) so the empty-tuple default is
+        type-consistent with the annotation and matches the live T7
+        ``admit_policy`` signature.
         """
 
     async def exec(

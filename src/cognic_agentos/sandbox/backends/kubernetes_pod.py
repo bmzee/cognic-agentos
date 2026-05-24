@@ -85,6 +85,7 @@ import hashlib
 import json
 import logging
 import uuid as _uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -100,6 +101,7 @@ from kubernetes_asyncio.stream.ws_client import (
 )
 
 from cognic_agentos.core.canonical import canonical_bytes
+from cognic_agentos.core.vault import CredentialLease, VaultLeaseRequest
 from cognic_agentos.sandbox.admission import (
     CatalogProtocol,
     CredentialAdapter,
@@ -638,6 +640,20 @@ class KubernetesPodSession:
     _pod_name: str = field(repr=False)
     _network_policy_name: str = field(repr=False)
     _namespace: str = field(repr=False)
+    #: Sprint 10 T10 — Protocol-compat shim per spec §3.6. Tuple
+    #: (NOT list) — immutable post-construction. Default empty tuple
+    #: keeps Sprint-8B/8.5 construction paths backward-compat.
+    #: **The K8s mint/revoke wiring + Q5 LOCK on checkpoint/suspend
+    #: lands in the T10 K8s commit (next halt-before-commit cycle)** —
+    #: this field declaration is the Protocol-compat shim needed to
+    #: keep the branch bisection-clean (mypy SandboxSession structural
+    #: conformance) when T10 Docker lands first per the user-locked
+    #: 2-commit split. The K8s ``KubernetesPodSandboxBackend.create()``
+    #: in this commit raises ``NotImplementedError`` on non-empty
+    #: ``requires_credentials`` so no caller can accidentally trip
+    #: the unwired path; the T10 K8s commit replaces the raise with
+    #: the real mint loop + active_leases assignment.
+    active_leases: tuple[CredentialLease, ...] = ()
     _actor_subject: str = field(repr=False, default="")
     _destroyed: bool = field(repr=False, default=False)
     #: Sprint 8.5 T7 — suspend() flips this True so subsequent exec()
@@ -782,9 +798,20 @@ class KubernetesPodSandboxBackend:
         tenant_id: str,
         pack_context: PackAdmissionContext,
         use_warm_pool: bool = True,
+        requires_credentials: Sequence[VaultLeaseRequest] = (),
     ) -> SandboxSession:
         """Admit + create a sandbox session per spec §6.1 + ADR-004
         amendment.
+
+        Sprint 10 T10 Protocol-compat shim — the ``requires_credentials``
+        kwarg is accepted at the Protocol surface per spec §4.2 so
+        ``KubernetesPodSandboxBackend`` structurally conforms to the
+        updated ``SandboxBackend`` Protocol. **The K8s mint/revoke
+        wiring + Q5 LOCK lands in the T10 K8s commit (next
+        halt-before-commit cycle)**; this commit fail-louds on
+        non-empty input so no caller can accidentally trip the unwired
+        path before the implementation lands. The Docker backend
+        already ships the full T10 wiring at ``docker_sibling.py``.
 
         Step ordering (mirrors docker_sibling's pattern for cross-
         backend behavioural equivalence):
@@ -810,6 +837,25 @@ class KubernetesPodSandboxBackend:
         leak. No ``lifecycle.created`` emitted on the failure path
         because the session never reached a running state.
         """
+        # Sprint 10 T10 Protocol-compat shim — fail-loud on non-empty
+        # requires_credentials per spec §4.2 + the production-grade
+        # rule. The Docker backend ships the full mint/revoke wiring
+        # at docker_sibling.py:create() / destroy(). The K8s wiring
+        # lands in the T10 K8s commit (next halt-before-commit cycle);
+        # this raise prevents any caller from accidentally using the
+        # K8s credential-leasing path before that lands. Bisection
+        # invariant: every commit on the branch lints clean on its
+        # own; this raise is the runtime half of the static-conformance
+        # shim (the field + signature additions are the static half).
+        if requires_credentials:
+            raise NotImplementedError(
+                "KubernetesPodSandboxBackend.create(requires_credentials=...) "
+                "is not yet wired — Sprint 10 T10 lands the K8s mint/revoke "
+                "implementation in the next halt-before-commit cycle (the "
+                "Docker backend already ships the full wiring at "
+                "docker_sibling.py). Pass requires_credentials=() OR use the "
+                "Docker backend until the T10 K8s commit lands."
+            )
         # 1. Warm-pool checkout (if wired + caller asked for it)
         if use_warm_pool and self._warm_pool is not None:
             warm = await self._warm_pool.checkout(
