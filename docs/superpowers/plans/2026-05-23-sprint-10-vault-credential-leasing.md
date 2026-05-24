@@ -65,7 +65,7 @@ tests/integration/sandbox/test_real_vault_credential_lifecycle.py  (Z2 — env-g
 src/cognic_agentos/db/adapters/vault_adapter.py                (T3 — CC)
 src/cognic_agentos/sandbox/credentials.py                     (T6 — CC, off-gate → on-gate)
 src/cognic_agentos/sandbox/admission.py                       (T5 + T7 — CC)
-src/cognic_agentos/sandbox/protocol.py                        (T9 — closed-enum extensions)
+src/cognic_agentos/sandbox/protocol.py                        (T7 + T9 — closed-enum extensions; T7 adds only `sandbox_credential_request_tenant_mismatch` 21→22, T9 adds remaining 4 22→26)
 src/cognic_agentos/sandbox/audit.py                           (T9 — new payloads; NOT-CC per Doctrine F)
 src/cognic_agentos/sandbox/backends/docker_sibling.py         (T10 — CC)
 src/cognic_agentos/sandbox/backends/kubernetes_pod.py         (T10 — CC)
@@ -75,6 +75,7 @@ policies/_default/sandbox.rego                                (T8 — stop-rule 
 tests/unit/db/test_vault_adapter.py                           (T3 — refactor-impact tests)
 tests/unit/test_config.py                                     (T2 + T4 + T8 — new settings tests)
 tests/unit/sandbox/test_admission_pipeline.py                 (T7 — backward-compat regression)
+tests/unit/sandbox/test_policy_shape.py                       (T7 — bump SandboxRefusalReason count guard 21 → 22 for `sandbox_credential_request_tenant_mismatch`; T9 bumps it again 22 → 26)
 tests/unit/sandbox/test_audit.py                              (T9 — new payload tests)
 tests/unit/sandbox/backends/test_docker_sibling_lifecycle.py  (T10 — create/destroy threading)
 tests/unit/sandbox/backends/test_kubernetes_pod_lifecycle.py  (T10 — create/destroy threading)
@@ -963,12 +964,18 @@ Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
 
 ---
 
-### Task T7: `admit_policy()` signature + Rego input + Actor→VaultLeaseActorRef projection  [CC — HALT]
+### Task T7: `admit_policy()` signature + Rego input + Actor→VaultLeaseActorRef projection + `sandbox_credential_request_tenant_mismatch` Literal extension  [CC — HALT]
+
+**Scope locks (Round-0 review):**
+* T7 is admission threading + actor projection + sentinel refusal + cross-tenant request check + the ONE closed-enum value (`sandbox_credential_request_tenant_mismatch`) that T7's own raise statement needs. The other 4 Sprint-10 `SandboxRefusalReason` values (3 `sandbox_credential_mint_failed_*` + 1 `sandbox_credential_ttl_exceeds_tenant_max`) land in T9.
+* T7 MUST NOT touch `core.vault.lease_credential` / `core.vault.revoke_credential` and MUST NOT collapse any of the T4 4-value taxonomy (`VaultUnavailable` / `VaultPathNotFound` / `VaultAuthDenied` / `VaultProtocolError`) into `SandboxLifecycleRefused`. The mint-exception collapse to `sandbox_credential_mint_failed_*` is **T10**'s job (the backend `create()` + `destroy()` seam where `mint_lease` is actually called); T7 is admission-time only and never reaches the mint pathway.
 
 **Files:**
 - Modify: `src/cognic_agentos/sandbox/admission.py` (extend `admit_policy()`)
+- Modify: `src/cognic_agentos/sandbox/protocol.py` (add ONLY `sandbox_credential_request_tenant_mismatch` to `SandboxRefusalReason` — the other 4 Sprint-10 values stay in T9)
 - Create: `tests/unit/sandbox/test_admit_credentials.py`
 - Modify: `tests/unit/sandbox/test_admission_pipeline.py` (backward-compat regression for default `requires_credentials=()`)
+- Modify: `tests/unit/sandbox/test_policy_shape.py` (extend the count guard 21 → 22 + add the new value to the canonical-values pin)
 
 - [ ] **Step 1: Write failing tests for the admission threading**
 
@@ -1116,7 +1123,25 @@ async def test_admit_policy_refuses_cross_tenant_request_at_construction() -> No
 `uv run pytest tests/unit/sandbox/test_admit_credentials.py -q`
 Expected: FAIL.
 
-- [ ] **Step 3: Extend `admit_policy()`**
+- [ ] **Step 3a: Extend `SandboxRefusalReason` Literal with `sandbox_credential_request_tenant_mismatch`**
+
+In `src/cognic_agentos/sandbox/protocol.py` — append to the existing `SandboxRefusalReason` Literal (21 → 22 net):
+
+```python
+SandboxRefusalReason = Literal[
+    # ... existing 21 values from Sprint 8A + 8.5 ...
+    # Sprint 10 T7 — kernel-boundary cross-tenant request guard per spec §4.1.
+    # The other 4 Sprint-10 values (3 mint-failure + 1 TTL cap) land in T9
+    # at the create/mint boundary that actually raises them.
+    "sandbox_credential_request_tenant_mismatch",
+]
+```
+
+Update `tests/unit/sandbox/test_policy_shape.py`: bump the count guard 21 → 22 + add `sandbox_credential_request_tenant_mismatch` to the canonical-values pin.
+
+Rationale: `SandboxLifecycleRefused.reason: SandboxRefusalReason` (Literal). T7's Step 3b raise statement uses the new value; the Literal MUST be extended in the same commit so mypy passes against the post-T7 working tree (bisection invariant — every commit on the branch must lint clean on its own).
+
+- [ ] **Step 3b: Extend `admit_policy()`**
 
 In `src/cognic_agentos/sandbox/admission.py`:
 
@@ -1169,7 +1194,7 @@ async def admit_policy(
     # ... evaluate rego ...
 ```
 
-NOTE: `sandbox_credential_request_tenant_mismatch` is the 5th Sprint-10 `SandboxRefusalReason` value enumerated in spec §6.1 (21 → 26 net). T7 implements the kernel-boundary check that raises it; T9 extends the `SandboxRefusalReason` Literal to include it alongside the other 4 Sprint-10 values.
+NOTE: `sandbox_credential_request_tenant_mismatch` is one of 5 Sprint-10 `SandboxRefusalReason` values enumerated in spec §6.1 (21 → 26 net across the sprint). T7 BOTH adds this value to the Literal (Step 3a — 21 → 22) AND raises it (Step 3b — the kernel-boundary cross-tenant guard). T9 adds the OTHER 4 Sprint-10 values (3 `sandbox_credential_mint_failed_*` + 1 `sandbox_credential_ttl_exceeds_tenant_max`; 22 → 26) at the create/mint boundary where they are actually raised. This split is a bisection-invariant fix (Round-0 review): every intermediate commit on the branch must lint clean on its own — so the value lands in the same commit as its raise.
 
 - [ ] **Step 4: Run — verify pass**
 
@@ -1183,13 +1208,15 @@ Expected: clean.
 
 - [ ] **Step 6: HALT-BEFORE-COMMIT — sandbox/admission.py CC review**
 
-`sandbox/admission.py` is ON the gate. Present the diff; map watchpoints (default `()` kwarg backward-compat; cross-tenant check at the kernel boundary; sentinel-adapter refusal preserves Sprint-8A reason; Rego input dict gains top-level `requires_credentials` key; NEW `sandbox_credential_request_tenant_mismatch` reason flagged for T9 inclusion). Commit only after approval:
+`sandbox/admission.py` AND `sandbox/protocol.py` are BOTH on the gate. Present the diff; map watchpoints (default `()` kwarg backward-compat; cross-tenant check at the kernel boundary; sentinel-adapter refusal preserves Sprint-8A reason; Rego input dict gains top-level `requires_credentials` key; NEW `sandbox_credential_request_tenant_mismatch` reason added to the Literal IN THIS COMMIT alongside its raise site so mypy stays clean against the post-T7 tree; NO mint-exception collapse — that's T10). Commit only after approval:
 
 ```bash
 git add src/cognic_agentos/sandbox/admission.py \
+        src/cognic_agentos/sandbox/protocol.py \
         tests/unit/sandbox/test_admit_credentials.py \
-        tests/unit/sandbox/test_admission_pipeline.py
-git commit -m "feat(sprint-10): admit_policy threads requires_credentials + Rego input (T7)
+        tests/unit/sandbox/test_admission_pipeline.py \
+        tests/unit/sandbox/test_policy_shape.py
+git commit -m "feat(sprint-10): admit_policy threads requires_credentials + Rego input + sandbox_credential_request_tenant_mismatch Literal (T7)
 
 Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
 ```
@@ -1352,7 +1379,7 @@ Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
 - Modify: `src/cognic_agentos/sandbox/audit.py` (3 new lifecycle event payloads — NOT-CC per Doctrine F)
 - Modify: `tests/unit/sandbox/test_audit.py` (3 new payload-shape tests)
 
-NOTE: spec §6.1 enumerates **5 new Sprint-10 refusal values** (21 → 26 net): 3 mint-failure values per §7.1, 1 Rego TTL-cap value per §5.1, 1 kernel-boundary cross-tenant value per §4.1. T9 extends the `SandboxRefusalReason` Literal to include all 5; the count assertion below pins `len(actual) == 26`.
+NOTE: spec §6.1 enumerates **5 new Sprint-10 refusal values** (21 → 26 net across the sprint): 3 mint-failure values per §7.1, 1 Rego TTL-cap value per §5.1, 1 kernel-boundary cross-tenant value per §4.1. Per the Round-0 bisection-invariant fix, the kernel-boundary value (`sandbox_credential_request_tenant_mismatch`) was added in T7 alongside its raise site (21 → 22). **T9 adds the REMAINING 4 values** (3 `sandbox_credential_mint_failed_*` + 1 `sandbox_credential_ttl_exceeds_tenant_max`; 22 → 26) at the create/mint boundary where they are actually raised. The final-state count assertion below still pins `len(actual) == 26` because it is a destination check, not a delta.
 
 - [ ] **Step 1: Write failing tests for the closed-enum extensions**
 
@@ -1411,13 +1438,14 @@ In `src/cognic_agentos/sandbox/protocol.py`:
 
 ```python
 SandboxRefusalReason = Literal[
-    # ... existing 21 values ...
-    # Sprint 10 — 5 new values:
+    # ... existing 21 Sprint-8A + 8.5 values ...
+    # Sprint 10 T7 (already added) — kernel-boundary cross-tenant guard:
+    "sandbox_credential_request_tenant_mismatch",
+    # Sprint 10 T9 — 4 new mint-boundary values added HERE:
     "sandbox_credential_mint_failed_vault_unavailable",
     "sandbox_credential_mint_failed_secret_path_unknown",
     "sandbox_credential_mint_failed_auth_denied",
     "sandbox_credential_ttl_exceeds_tenant_max",
-    "sandbox_credential_request_tenant_mismatch",
 ]
 
 SandboxLifecycleEvent = Literal[
