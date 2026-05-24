@@ -27,7 +27,7 @@
 
 3. **VaultLeaseActorRef is in `core/vault.py`, NOT a new module.** Spec §3.1 declares the projection inline in `core/vault.py`. The projection IS NOT extracted into `core/_lease_audit.py` or similar — it's tightly coupled to `VaultLeaseRequest` and there's no other consumer.
 
-4. **`requires_credentials=()` default everywhere.** Spec §4.1 `admit_policy()` extension uses `requires_credentials: list[VaultLeaseRequest] = ()` (empty tuple default). Every existing test that calls `admit_policy()` without the kwarg STAYS GREEN — zero regression on the Sprint-8A admission surface. Pin this with a backward-compat test in T7.
+4. **`requires_credentials=()` default everywhere.** Spec §4.1 `admit_policy()` extension uses `requires_credentials: Sequence[VaultLeaseRequest] = ()` (empty tuple default with `Sequence` annotation — NOT `list[...]`; the empty-tuple default would be mypy-hostile against a `list` annotation and would not match the live T7 signature at `sandbox/admission.py:261`). Every existing test that calls `admit_policy()` without the kwarg STAYS GREEN — zero regression on the Sprint-8A admission surface. Pin this with a backward-compat test in T7.
 
 5. **NO `sandbox/session.py` module created.** Per spec §1 BUILD_PLAN doc-drift flag: BUILD_PLAN §10 names `sandbox/session.py` but no such module exists in the live tree. Sprint 10's "sandbox session integration" lands as:
    - Protocol extension on `SandboxBackend.create()` (in `sandbox/protocol.py`)
@@ -1162,7 +1162,7 @@ async def admit_policy(
     credential_adapter: CredentialAdapter,
     rego_engine: OPAEngine,
     settings: Settings,
-    requires_credentials: list[VaultLeaseRequest] = (),  # NEW Sprint 10
+    requires_credentials: Sequence[VaultLeaseRequest] = (),  # NEW Sprint 10
 ) -> None:
     # ... existing Stage-1 + Stage-2 logic ...
 
@@ -1976,25 +1976,100 @@ Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
 
 ---
 
-### Task T10: Backend-side `create()` + `destroy()` threading  [CC — HALT × 2 (one per backend)]
+### Task T10: Backend-side `create()` + `destroy()` threading  [CC — HALT × 3 (T10 pre-flight doc-patch + Docker + K8s)]
 
-**Files:**
-- Modify: `src/cognic_agentos/sandbox/protocol.py` (extend `SandboxBackend.create()` Protocol signature)
-- Modify: `src/cognic_agentos/sandbox/backends/docker_sibling.py` (mint at create, revoke at destroy)
-- Modify: `src/cognic_agentos/sandbox/backends/kubernetes_pod.py` (same)
-- Modify: `tests/unit/sandbox/backends/test_docker_sibling_lifecycle.py` (lifecycle tests)
-- Modify: `tests/unit/sandbox/backends/test_kubernetes_pod_lifecycle.py` (lifecycle tests)
-- Create: `tests/unit/sandbox/test_credential_lifecycle.py` (cross-backend abstract tests)
+**Files (T10 pre-flight doc-only commit, lands first per the Gap A-D pre-flight resolution at 2026-05-24):**
+- Modify: `docs/superpowers/specs/2026-05-23-sprint-10-vault-credential-leasing-design.md`
+  - NEW §3.6 — `SandboxSession.active_leases` extension
+  - §4.2 — T9 reconciliation preamble + NEW §4.2.1 warm-pool short-circuit rule
+  - §4.3 — T9 reconciliation preamble
+  - NEW §4.5 — Q5 LOCK (checkpoint/suspend/wake on leased sessions OUT OF SCOPE; `NotImplementedError` fail-loud scaffolding)
+  - §7.3 — new decision-matrix row for the Q5-locked checkpoint/suspend path
+- Modify: `docs/superpowers/plans/2026-05-23-sprint-10-vault-credential-leasing.md` (this file — T10 fileset + step breakdown + Self-Review patch-log)
 
-This task is **TWO halt-before-commit cycles** — one per backend — because each backend is independently CC.
+**Files (T10 Docker code commit):**
+- Modify: `src/cognic_agentos/sandbox/protocol.py`
+  - Extend `SandboxBackend.create()` Protocol signature with `requires_credentials: Sequence[VaultLeaseRequest] = ()` kwarg per §4.2 (`Sequence` NOT `list` — empty-tuple default is type-consistent with `Sequence` and matches the live T7 `admit_policy` signature at `sandbox/admission.py:261`)
+  - Extend `SandboxSession` Protocol with `active_leases: tuple[CredentialLease, ...]` field per §3.6 (stop-rule Protocol shape change)
+- Modify: `src/cognic_agentos/sandbox/backends/docker_sibling.py`
+  - Extend `DockerSiblingSession` dataclass with `active_leases: tuple[CredentialLease, ...] = ()` field
+  - `DockerSiblingSandboxBackend.create()` — warm-pool short-circuit refused when `requires_credentials` non-empty per §4.2.1; mint loop between `admit_policy` and topology build per §4.2; on mint failure, best-effort revoke of leases already minted + raise `SandboxLifecycleRefused(reason=_map_mint_exception(exc), ...)` per §7.1
+  - `DockerSiblingSandboxBackend.destroy()` — fail-soft revoke loop per §4.3 + §7.2; emit T9 typed helpers; do NOT touch the existing tombstone / idempotency / lifecycle.destroyed emission path
+  - `DockerSiblingSession.checkpoint()` + `DockerSiblingSession.suspend()` — fail-loud `NotImplementedError` when `active_leases` non-empty per §4.5 Q5 LOCK
+- Modify: `tests/unit/sandbox/backends/test_docker_sibling_lifecycle.py` (lifecycle tests covering: mint-post-admission, revoke-at-destroy, fail-soft revoke, mint-failure best-effort cleanup, warm-pool short-circuit on `requires_credentials` non-empty, checkpoint/suspend `NotImplementedError` on leased session)
+- Create: `tests/unit/sandbox/test_credential_lifecycle.py` (cross-backend abstract conformance tests — applied to BOTH backends via parametrized fixture in T10 K8s commit)
 
-Implementation pattern per spec §4.2 + §4.3 — mint post-admission with try/except mapping; revoke fail-soft with structured audit emission.
+**Files (T10 K8s code commit):**
+- Modify: `src/cognic_agentos/sandbox/backends/kubernetes_pod.py` (same shape as Docker — Session field, create mint loop with warm-pool short-circuit, destroy revoke loop, checkpoint/suspend Q5 lock)
+- Modify: `tests/unit/sandbox/backends/test_kubernetes_pod_lifecycle.py`
+- Modify: `tests/unit/sandbox/test_credential_lifecycle.py` (extend the cross-backend conformance to include K8s)
 
-- [ ] **Step 1: Extend Protocol + Step 2-4: per-backend implementation + Step 5: cross-backend lifecycle pin**
+This task is **THREE halt-before-commit cycles** — pre-flight doc-patch + Docker + K8s — because the Protocol stop-rule + Q5 LOCK doctrinal decision (Gap A + C from the 2026-05-24 T10 pre-flight review) MUST land before any backend code touches the Protocol shape, and each backend is independently CC.
 
-(See spec §4.2 + §4.3 for the full pseudocode. Each backend test asserts: mint happens after admission, before exec; destroy revokes leases (best-effort) + emits structured events; fail-soft on Vault unavailability during revoke.)
+Implementation pattern per spec §4.2 + §4.3 + §4.2.1 (warm-pool rule) + §4.5 (Q5 LOCK) — mint post-admission with try/except mapping; revoke fail-soft with structured audit emission via the T9 typed helpers; checkpoint/suspend fail-loud on leased sessions.
 
-- [ ] **Step 6 (Docker): HALT-BEFORE-COMMIT — docker_sibling.py CC review**
+- [ ] **Step 1 (pre-flight doc-patch): commit the spec + plan doc-patch resolving Gaps A-D**
+
+Halt. Commit:
+```bash
+git add docs/superpowers/specs/2026-05-23-sprint-10-vault-credential-leasing-design.md \
+        docs/superpowers/plans/2026-05-23-sprint-10-vault-credential-leasing.md
+git commit -m "docs(sprint-10): T10 pre-flight — spec §3.6 + §4.2.1 + §4.5 Q5 LOCK + T9 reconciliation + Sequence[VaultLeaseRequest] type fix; plan T10 fileset
+
+T10 plan-review against post-T9 codebase surfaced 5 doctrinal gaps
+that need explicit resolution before any backend code:
+
+* Gap A — SandboxSession Protocol shape needs an active_leases:
+  tuple[CredentialLease, ...] field; spec §4.3 destroy iterates
+  session.active_leases but the Protocol at protocol.py:390-448 has
+  no such field. Doc patch adds new §3.6 documenting the extension.
+
+* Gap B — warm-pool short-circuit at create() runs BEFORE admit_policy
+  (docker_sibling.py:866-902), so a warm hit on a credentialed create()
+  call would silently bypass cross-tenant + Rego TTL checks AND mint.
+  Doc patch adds new §4.2.1: requires_credentials non-empty forces
+  cold-create; warm-pool checkout is skipped.
+
+* Gap C — Sprint 8.5 Q4 lock (vault_lease_refs=() always) breaks at
+  T10 because vault sessions now exist. Doc patch adds new §4.5 Q5
+  LOCK: SandboxSession.checkpoint() + .suspend() raise
+  NotImplementedError when active_leases is non-empty
+  (production-grade fail-loud scaffolding pointing at Sprint 10.x).
+  NOT a wire-protocol refusal value; Protocol-method-body scaffolding
+  per AGENTS.md production-grade rule.
+
+* Gap D — spec §4.2 + §4.3 pseudocode predates T9 typed helpers; the
+  generic self._audit.emit() pattern + hand-built detail dicts read
+  as authoritative for future readers. Doc patch adds T9
+  reconciliation preambles to both sections naming the live helper
+  signatures at sandbox/audit.py:490-.
+
+* Gap E — requires_credentials: list[VaultLeaseRequest] = () appeared
+  at 6 sites across spec + plan (architecture summary + §4.1 + §4.2
+  signature recipes + T7 + T10 plan recipes). Type-inconsistent: the
+  default () is a tuple, not a list — mypy-hostile against a list[...]
+  annotation. Also disagrees with the live T7 signature at
+  sandbox/admission.py:261 which uses Sequence[VaultLeaseRequest] = ().
+  T7 shipped correctly because the implementer caught the divergence;
+  the plan recipe was the doctrine drift. Doc patch updates all 6 sites
+  to Sequence[VaultLeaseRequest] = () so the T10 implementer can copy
+  the recipe verbatim into SandboxBackend.create() without re-discovering
+  the type fix.
+
+Adds a §7.3 decision-matrix row for the Q5-locked checkpoint/suspend
+path. Plan T10 fileset extended to call out the Protocol stop-rule
+shape change as an explicit sub-bullet + step breakdown expanded into
+3 halt-before-commit cycles (pre-flight doc + Docker + K8s) instead
+of the original 2.
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
+```
+
+- [ ] **Step 2 (Docker): Protocol extension + Session-shape + create mint loop + destroy revoke loop + Q5 lock**
+
+TDD per spec §4.2 + §4.3 + §4.2.1 + §4.5. Each test asserts: mint happens after admission, before topology build; destroy revokes leases (best-effort) + emits structured T9 events; fail-soft on Vault unavailability during revoke; warm-pool short-circuited when `requires_credentials` non-empty; checkpoint/suspend raise on leased session.
+
+- [ ] **Step 3 (Docker): HALT-BEFORE-COMMIT — docker_sibling.py CC review**
 
 Halt. Commit:
 ```bash
@@ -2007,12 +2082,17 @@ git commit -m "feat(sprint-10): DockerSibling backend create/destroy threads cre
 Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
 ```
 
-- [ ] **Step 7 (K8s): HALT-BEFORE-COMMIT — kubernetes_pod.py CC review**
+- [ ] **Step 4 (K8s): same shape against kubernetes_pod.py**
+
+TDD per the same spec sections. The conformance test at `tests/unit/sandbox/test_credential_lifecycle.py` extends to cover BOTH backends via parametrized fixture so the contract drift between them is pinned at one site.
+
+- [ ] **Step 5 (K8s): HALT-BEFORE-COMMIT — kubernetes_pod.py CC review**
 
 Halt. Commit:
 ```bash
 git add src/cognic_agentos/sandbox/backends/kubernetes_pod.py \
-        tests/unit/sandbox/backends/test_kubernetes_pod_lifecycle.py
+        tests/unit/sandbox/backends/test_kubernetes_pod_lifecycle.py \
+        tests/unit/sandbox/test_credential_lifecycle.py
 git commit -m "feat(sprint-10): KubernetesPod backend create/destroy threads credential lifecycle (T10 K8s)
 
 Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
@@ -2165,10 +2245,13 @@ Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
 | §3.3 core/vault.py public API | T4 |
 | §3.4 token shape passthrough | T4 |
 | §3.5 VaultTransport | T2 |
+| §3.6 SandboxSession.active_leases extension | T10 (pre-flight doc-patch + Docker + K8s) |
 | §4.1 admit_policy signature extension | T7 |
 | §4.2 mint at create() post-admission | T10 |
+| §4.2.1 warm-pool short-circuit on `requires_credentials` | T10 (pre-flight doc-patch + per-backend implementation) |
 | §4.3 revoke at destroy() fail-soft | T10 |
 | §4.4 CredentialAdapter Protocol extension | T5 |
+| §4.5 Q5 LOCK — checkpoint/suspend on leased sessions out of scope (NotImplementedError fail-loud) | T10 (pre-flight doc-patch + per-backend implementation) |
 | §5 sandbox.rego rule 6 | T8 |
 | §6.1 SandboxRefusalReason 21 → 26 (5 new values: 3 mint failures + 1 TTL cap + 1 cross-tenant) | T7 (cross-tenant value + Stage-2 raise — `sandbox_credential_request_tenant_mismatch`) + T9 (4 Literal entries: 3 mint-failure + 1 TTL-cap) + T10 (3 mint-failure Stage-2 raise sites at backend `create()`). TTL-cap is Literal-only — no Stage-2 raise site at T9 or T10; cap continues to surface as `sandbox_policy_rego_denied` until Rego-reason surfacing lands in a future task per §7.3 amendment. |
 | §6.2 SandboxLifecycleEvent 12 → 15 | T9 |
@@ -2193,11 +2276,23 @@ Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
 - `CredentialLease(lease_id, request, token, minted_at, ttl_s_granted, expires_at)` — matches §3.2
 - `VaultLeaseActorRef(actor_subject, actor_type)` — 2-field; `actor_type: Literal["human", "service"]` matches portal/rbac/actor's contract
 
-**Cross-task dependency ordering**: T2 → T3 (adapter refactor depends on transport) → T4 (core/vault depends on transport) → T5 (Protocol extension is independent of T4 BUT T6 needs both) → T6 (depends on T4 + T5) → T7 (depends on T5; needs VaultLeaseRequest from T4) → T8 (independent Rego work) → T9 (depends on T7 for the cross-tenant refusal value) → T10 (depends on T6 + T7 + T9). Z1 (depends on all preceding). Z2 (depends on T6 + T10). Z3 (depends on Z1 + Z2). No cycles.
+**Cross-task dependency ordering**: T2 → T3 (adapter refactor depends on transport) → T4 (core/vault depends on transport) → T5 (Protocol extension is independent of T4 BUT T6 needs both) → T6 (depends on T4 + T5) → T7 (depends on T5; needs VaultLeaseRequest from T4) → T8 (independent Rego work) → T9 (depends on T7 for the cross-tenant refusal value) → T10 (depends on T6 + T7 + T9; T10 itself splits into 3 halt-before-commit cycles — pre-flight doc-patch + Docker + K8s — per the 2026-05-24 T10 pre-flight reconciliation below). Z1 (depends on all preceding). Z2 (depends on T6 + T10). Z3 (depends on Z1 + Z2). No cycles.
 
 **Flagged for execution-time clarification:**
 1. **T8 token-shape test fixture detail** — the spec leaves the test-fixture Vault HTTP response shape to the implementer. Pin against the actual hvac response shape at T8 implementation time.
-2. **T10 backend-side implementation symmetry** — Docker + K8s land in TWO separate halt-before-commit commits (one per backend) for clean bisection per the Sprint 8B precedent.
+2. **T10 backend-side implementation symmetry** — Docker + K8s land in TWO separate halt-before-commit commits (one per backend) for clean bisection per the Sprint 8B precedent; T10 pre-flight doc-patch (Gaps A-D) lands in a THIRD halt-before-commit commit FIRST per the 2026-05-24 reconciliation entry below.
+
+**Patch log:**
+
+*Round 2 (2026-05-24, T10 pre-flight — 5 doctrinal gaps surfaced + resolved before any backend code):*
+
+- **Gap A** — `SandboxSession.active_leases` Protocol extension was missing from the T10 fileset; spec §4.3 iterates `session.active_leases` but the Protocol shape at `protocol.py:390-448` has no such field. Resolution: NEW spec §3.6 + T10 fileset sub-bullet calling out the Protocol stop-rule shape change.
+- **Gap B** — warm-pool short-circuit interaction with `requires_credentials` was undefined; the existing 8A path returns warm members BEFORE running admit_policy, so a credentialed warm hit would silently bypass cross-tenant + Rego TTL + mint. Resolution: NEW spec §4.2.1 documenting the rule — `requires_credentials` non-empty forces cold-create; warm-pool checkout is skipped.
+- **Gap C** — checkpoint/suspend/wake on a leased session was undefined; the Sprint 8.5 Q4 lock's premise ("no vault sessions exist") breaks at T10. Resolution: NEW spec §4.5 Q5 LOCK — `SandboxSession.checkpoint()` + `.suspend()` raise `NotImplementedError` when `active_leases` is non-empty (production-grade fail-loud scaffolding pointing at Sprint 10.x). NOT a wire-protocol refusal value per the rationale at §4.5.
+- **Gap D** — spec §4.2 + §4.3 pseudocode predated T9 typed helpers; the generic `self._audit.emit()` pattern + hand-built `detail` dicts read as authoritative. Resolution: T9 reconciliation preambles added to §4.2 + §4.3 naming the live helper signatures at `sandbox/audit.py:490-`.
+- **Gap E** — `requires_credentials: list[VaultLeaseRequest] = ()` appeared at 6 sites across the spec + plan (architecture summary, §4.1 + §4.2 signature recipes, T7 + T10 plan recipes). Type-inconsistent: the default `()` is a tuple, NOT a list — mypy-hostile against a `list[...]` annotation. Also disagrees with the live T7 signature at `sandbox/admission.py:261` which uses `Sequence[VaultLeaseRequest] = ()`. T7 itself shipped correctly because the implementer caught the divergence; the plan recipe was the doctrine drift. Resolution: all 6 sites patched to `Sequence[VaultLeaseRequest] = ()` so the T10 implementer can copy the recipe verbatim into `SandboxBackend.create()` without re-discovering the type fix.
+
+All 5 gaps landed in a single doc-only commit BEFORE any T10 backend code (Step 1 of the revised T10 step breakdown above). T10 step count changed from 2 halt-before-commit commits (Docker + K8s) to 3 (pre-flight doc + Docker + K8s) per the same reconciliation.
 
 ---
 

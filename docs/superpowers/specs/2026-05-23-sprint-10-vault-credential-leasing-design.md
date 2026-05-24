@@ -19,7 +19,7 @@ This BUILD_PLAN line is doc drift from the original ADR-004 sketch; per the esta
 |---|---|
 | A — Vault adapter scope | NEW `core/vault.py` distinct from `db/adapters/vault_adapter.py`. Persistent secret fetch vs short-TTL credential leasing are different contracts. |
 | B — lease/token semantics | `CredentialLease` (NEW dataclass) is durable; `token` is ephemeral credential material handed to the sandbox. `VaultLeaseRequest` carries `secret_path + ttl_s + tenant_id + actor_ref + scope_label`; the `actor_ref` field is a core-owned `VaultLeaseActorRef` projection (`actor_subject + actor_type`) to keep `core/vault.py` independent of `portal/rbac/Actor` per the architectural-arrow contract (see §3.1). |
-| C — sandbox seam | Separate `requires_credentials: list[VaultLeaseRequest]` kwarg threaded through `create()`/`admit_policy()`, NOT stuffed into `SandboxPolicy`. |
+| C — sandbox seam | Separate `requires_credentials: Sequence[VaultLeaseRequest]` kwarg threaded through `create()`/`admit_policy()`, NOT stuffed into `SandboxPolicy`. Default `()` (empty tuple) — `Sequence` (NOT `list`) so the empty-tuple default is type-consistent with the annotation and matches the live T7 signature at `sandbox/admission.py:261`. |
 | D — TTL cap policy | Rego-driven in `policies/_default/sandbox.rego`. Settings only carry static adapter/bootstrap config. Flat per-tenant cap in Wave 1 (no per-class). |
 | E — revoke-on-destroy | Fail-soft operationally (don't block cleanup), fail-loud in evidence (emit `sandbox.lifecycle.lease_revoke_failed`). Single attempt. Vault-side TTL is the operational safety net. |
 | F — mint timing | Mint at sandbox `create()` AFTER admission allows + BEFORE exec. Admission stays a pure policy decision; create performs the Vault side-effect. |
@@ -326,6 +326,29 @@ class VaultTransport:
 
 Concrete implementation wraps a shared `hvac.Client` (matches existing Sprint 1C pattern at `db/adapters/vault_adapter.py`); each method invokes the sync hvac call via `asyncio.to_thread` to keep the event loop cooperative. **Wave-1 static-token authentication only** — `Settings.vault_addr` + `Settings.vault_token` + `Settings.vault_namespace` are operator-pre-provided; no AppRole or Kubernetes ServiceAccount auth flows (those would need additional Settings + transport-level auth-state management; deferred per §10). Bounded exponential backoff on transient hvac exceptions (mirrors `protocol/mcp_authz.py` retry pattern); per-request timeout from `Settings.vault_http_timeout_s` (NEW; see §8.2).
 
+### 3.6 `SandboxSession.active_leases` extension (T10 pre-flight amendment)
+
+Sprint-8A's `SandboxSession` Protocol carries 6 fields (`session_id`, `policy`, `tenant_id`, `pack_context`, `created_at`, `warm_pool_hit`). Sprint 10 T10 EXTENDS it with one additional field:
+
+```python
+@runtime_checkable
+class SandboxSession(Protocol):
+    # ... existing 6 fields unchanged ...
+    active_leases: tuple[CredentialLease, ...]  # NEW Sprint 10 T10
+```
+
+**Why a Protocol extension, not a side-table:**
+
+- §4.3 destroy-path revoke iterates `for lease in session.active_leases:` — the leases must be reachable from the `SandboxSession` instance the backend receives at `destroy(session)`. A side-table keyed by `session_id` would add infra (state store, race semantics, init/teardown ordering) without changing the revoke contract.
+- Each backend's concrete session dataclass (`DockerSiblingSession`, `KubernetesPodSession`) gains the field. The empty-tuple default keeps existing 8A construction paths (warm-pool members, lease-less cold-create) backward-compatible — no caller-side change required.
+- The field is a `tuple[CredentialLease, ...]` (NOT `list`) so a session's lease set is immutable post-create. Mid-life mutation is out of scope for Wave-1; if a session needs additional leases the caller creates a new session.
+
+**Why `active_leases` and not `vault_lease_refs` (the checkpoint-store naming):**
+
+- `vault_lease_refs` is `CheckpointMetadata`'s field for the persisted-snapshot side (Sprint 8.5 spec §2.4 Q4 lock) — it currently always carries `()` because no path could mint leases. The runtime-side `active_leases` is a SEPARATE concept (live sessions hold full `CredentialLease` objects with tokens; checkpoint references would be lease-id-only). T10 does NOT extend `vault_lease_refs` per the §4.5 Q5 lock below; the runtime-side naming is therefore deliberately distinct.
+
+**Wire-protocol contract:** `SandboxSession` is a stop-rule Protocol per AGENTS.md sandbox isolation-boundary entry; the field addition is a Protocol-shape change. Every concrete `SandboxSession` implementation across backends (Wave-1 Docker + K8s; Wave-2 gVisor / Firecracker / Kata / rootless Docker; future test fixtures) MUST carry the new field. Pinned by the conformance test at `tests/conformance/sandbox/test_backend_conformance.py` extension at T10.
+
 ---
 
 ## 4. Sandbox integration
@@ -359,7 +382,7 @@ async def admit_policy(
     credential_adapter: CredentialAdapter,
     rego_engine: OPAEngine,
     settings: Settings,
-    requires_credentials: list[VaultLeaseRequest] = (),  # NEW
+    requires_credentials: Sequence[VaultLeaseRequest] = (),  # NEW
 ) -> None:
 ```
 
@@ -404,11 +427,13 @@ Note: `tenant_id` + `actor` are stripped from each entry in the Rego input — t
 
 ### 4.2 Mint at `create()` post-admission
 
+**T9 reconciliation note (post-T9):** the pseudocode below uses `self._audit.emit("event_name", lease)` for brevity. The actual T10 implementation uses the typed audit helpers per §6.2 — `sandbox_lifecycle_lease_minted(decision_history_store, *, lease, trace_id, session_id)` etc. Every payload field except `vault_error` (lease_revoke_failed only) is DERIVED inside the helper from the `CredentialLease`; do NOT pass a hand-built `detail` dict. The pseudocode here predates T9 and is kept inline only because the higher-level structure (admit → mint → continue or revoke-and-refuse) is unchanged. See `src/cognic_agentos/sandbox/audit.py:490-` for the live helper signatures.
+
 Pseudocode for the sandbox create path (per backend; both `DockerSibling` and `KubernetesPod` follow the same shape):
 
 ```python
 async def create(self, *, policy, tenant_id, actor, pack_context,
-                  requires_credentials: list[VaultLeaseRequest] = ()):
+                  requires_credentials: Sequence[VaultLeaseRequest] = ()):
     # Step 1 — Admission (Stage-2 trust-gate-equivalent decision)
     await admit_policy(
         policy=policy,
@@ -458,7 +483,21 @@ async def create(self, *, policy, tenant_id, actor, pack_context,
     return session
 ```
 
+#### 4.2.1 Warm-pool short-circuit interaction with `requires_credentials`
+
+`SandboxBackend.create()` today (Sprint 8A + 8B) attempts warm-pool checkout BEFORE running `admit_policy` (e.g. `docker_sibling.py:866-902`). On warm hit, the backend returns the warm member without running admission or mint. This path is incompatible with `requires_credentials`:
+
+- `requires_credentials` is per-call kwarg (NOT a `SandboxPolicy` field — confirmed at `sandbox/policy.py`); the warm-pool key (derived from `policy` + `pack_context`) cannot match leases that didn't exist at warm-up time.
+- Warm-pool members are pre-created without an actor context — they cannot carry actor-scoped lease evidence.
+- A warm hit on a credentialed `create()` call would silently bypass the cross-tenant kernel-boundary check (§4.1) AND the Rego TTL-cap (§5.1) AND the mint step (§4.2 Step 2).
+
+**Rule:** when `requires_credentials` is non-empty, `SandboxBackend.create()` SKIPS the warm-pool checkout entirely and forces the cold-create path. The warm-pool short-circuit at the top of `create()` short-circuits only when `requires_credentials` is empty (the existing 8A backward-compat path). T10 documents the rule in the `create()` docstring of both backends and pins it with a per-backend regression test that asserts a warm-pool fixture is NOT consulted when `requires_credentials=[<request>]` is passed.
+
+Future work: a separate warm-pool-with-credentials primitive (pre-mint leases at warm-up against a service-account actor; re-key per-tenant) could lift this restriction, but it adds substantial complexity (per-actor warm-pool keys, lease lifetime vs warm-pool TTL coordination, re-mint at checkout) and is OUT OF SCOPE for Sprint 10.
+
 ### 4.3 Revoke at `destroy()` — fail-soft
+
+**T9 reconciliation note (post-T9):** the pseudocode below passes a hand-built `detail={"vault_error": ..., "auto_expiry_at": ..., "lease_id": ..., "secret_path": ..., "scope_label": ...}` dict. The actual T10 implementation calls the T9 typed helper `sandbox_lifecycle_lease_revoke_failed(decision_history_store, *, lease, trace_id, session_id, vault_error)`. Every payload key in the §6.2 contract except `vault_error` is DERIVED from the `CredentialLease` by the helper — `auto_expiry_at` is rendered from `lease.expires_at.isoformat()` inside the helper (NOT caller-supplied), closing the silent-lie bug class per the T9 R2 fix. The pseudocode here predates T9 and is kept inline only because the higher-level structure (single revoke attempt → on failure emit revoke_failed + continue) is unchanged. See `src/cognic_agentos/sandbox/audit.py:561-` for the live helper signature.
 
 ```python
 async def destroy(self, session):
@@ -513,6 +552,35 @@ class CredentialAdapter(Protocol):
 The concrete `VaultCredentialAdapter` implements all 3 methods; `mint_lease` + `revoke_lease` delegate to `core/vault.py`'s top-level `lease_credential` + `revoke_credential` functions (the Protocol method is a thin instance-bound wrapper for type safety + dependency injection).
 
 The Sprint-8A `KernelDefaultCredentialAdapter` sentinel must ALSO extend with stub implementations of `mint_lease` + `revoke_lease` that raise `NotImplementedError` pointing at Sprint 10 (production-grade rule — fail loud). The existing `isinstance(credential_adapter, KernelDefaultCredentialAdapter)` check in `admit_policy` continues to refuse policies that declare `vault_path:`; the new `requires_credentials` kwarg gets a NEW refusal: if `requires_credentials` is non-empty AND the adapter is the sentinel, refuse at admission with the existing `sandbox_credential_adapter_not_configured` reason (no new refusal value needed — extends the existing one's semantic).
+
+### 4.5 Q5 LOCK — checkpoint / suspend / wake on a leased session is OUT OF SCOPE at Sprint 10
+
+**Background.** Sprint 8.5 froze `CheckpointMetadata.vault_lease_refs=()` always (Q4 lock at spec §2.4), justified by "the Sprint-8A `sandbox_credential_adapter_not_configured` admission-time refusal prevents any vault-bearing session from existing in the first place" (see `protocol.py:425-447` + `docker_sibling.py:2184-2217` + `kubernetes_pod.py:2323-2357`). T6 + T7 + T9 already lifted that prevention at the admit_policy boundary; T10 wires the first path that actually mints + attaches leases to a session. The Q4 lock's premise breaks at T10.
+
+**The two paths the Q4-lock premise covered:**
+
+- `SandboxSession.checkpoint(label)` — persists a workspace snapshot + env metadata + lease refs. Pre-T10: lease refs always `()` because no leases. Post-T10: `session.active_leases` is non-empty for credentialed sessions, but the persist path silently drops them.
+- `SandboxSession.suspend()` — final checkpoint then container/Pod release. Pre-T10: nothing to revoke. Post-T10: tearing down the container with non-empty `active_leases` leaks the leases (no revoke, no audit row); wake() restores a leaseless session.
+
+**Q5 LOCK — T10 scope decision (production-grade fail-loud):**
+
+T10 makes `SandboxSession.checkpoint(label)` and `SandboxSession.suspend()` raise `NotImplementedError` when `session.active_leases` is non-empty. The error message points at a follow-up sprint (`Sprint 10.x`) and references this §4.5. This is per the AGENTS.md production-grade rule's scaffolding clause ("stubs that raise `NotImplementedError` pointing at an ADR are acceptable scaffolding — they fail loudly and document the contract; silent in-process fallbacks that pretend to work are not").
+
+**Why NotImplementedError, not a new wire-protocol refusal value:**
+
+- `checkpoint()` and `suspend()` are Python-level `SandboxSession` Protocol methods, not HTTP endpoints — there is no wire-protocol-public refusal-value channel to extend.
+- A wire-protocol refusal would require a new `SandboxRefusalReason` Literal entry (`sandbox_session_checkpoint_refused_active_leases` and similar), which is a wire-protocol-public closed-enum extension that bank-overlay consumers would have to handle. The follow-up sprint that resolves leased-session checkpoint/suspend would then likely need to RETIRE the refusal value, which is a wire-protocol-public BREAKING change.
+- `NotImplementedError` at the Protocol-method body is honest scaffolding: it fails loud, documents the deferred contract, and the future-sprint resolution simply replaces the body with the real path without touching any wire-protocol surface.
+
+**What the follow-up sprint (Sprint 10.x) owns:**
+
+- Decide the leased-session checkpoint/suspend/wake model: re-mint at wake (most correct — Vault leases are short-TTL anyway) vs revoke-at-suspend-then-refuse-wake (operational simplicity) vs token-in-checkpoint (high blast-radius, ruled out by §3.4 "token contents NEVER appear on the chain row" — and the same logic extends to checkpoint persistence per AGENTS.md "Wire-protocol contracts").
+- Lift the Q4-lock comments at `protocol.py:425-431` + `protocol.py:440-447` and the `vault_lease_refs=()` hardcodes at the suspend-path call sites in both backends.
+- Update `CheckpointMetadata.vault_lease_refs` shape if needed (today it's a placeholder field with always-empty value).
+
+**T10 plumbing of the Q5 lock:**
+
+The fail-loud check lives in the concrete session classes (`DockerSiblingSession.checkpoint/suspend` and `KubernetesPodSession.checkpoint/suspend`), NOT in the base Protocol. The Protocol method docstrings reference §4.5 for the contract; concrete implementations check `if self.active_leases: raise NotImplementedError(...)` at the top of each method body. Pinned by per-backend regression tests that admit a leased session and assert checkpoint/suspend raise.
 
 ---
 
@@ -676,6 +744,7 @@ Three failure modes, each mapped to a distinct closed-enum refusal:
 | Create — mint | Nth lease fails (after N-1 minted) | Revoke N-1 already-minted leases (best-effort) → `SandboxLifecycleRefused(...)` for the failed Nth |
 | Create — mint | Any backend failure post-mint (image pull, network setup, etc.) | Revoke ALL minted leases (best-effort) → propagate the backend error |
 | Destroy — revoke | Any single lease revoke fails | Emit `sandbox.lifecycle.lease_revoke_failed` + continue destroy() |
+| Session — checkpoint OR suspend on `active_leases != ()` | Leased session attempts to persist OR release | `NotImplementedError` pointing at Sprint 10.x per the Q5 LOCK at §4.5 — production-grade fail-loud scaffolding; NOT a wire-protocol refusal value (the Q5 lock's rationale lives at §4.5) |
 
 ---
 
