@@ -33,10 +33,17 @@ class TestClosedEnumPartitionInvariants:
         # Sprint 8.5 T1 extended 15 → 21 (6 new wake-time arms per spec §3.3).
         # Sprint 10 T7 extended 21 → 22 (1 kernel-boundary cross-tenant guard
         # per Sprint-10 spec §4.1 — `sandbox_credential_request_tenant_mismatch`).
-        # The other 4 Sprint-10 values (3 mint-failure + 1 TTL cap) land in T9
-        # at the create/mint boundary; T7 owns ONLY the value its own raise
-        # statement needs, per the bisection-invariant doctrine (every commit
-        # on the branch must lint clean on its own).
+        # The remaining 4 Sprint-10 values are lifted into the Literal at T9
+        # (count guard bumps 22 → 26 at the T9 commit). 3
+        # `sandbox_credential_mint_failed_*` values gain their Stage-2 raise
+        # sites at T10's backend `create()` post-admission per spec §7.1; the
+        # 4th value `sandbox_credential_ttl_exceeds_tenant_max` is Literal-only
+        # — the cap continues to surface as `sandbox_policy_rego_denied`
+        # because `OPAEngine.Decision` has no per-rule-name channel (Rego-reason
+        # surfacing deferred to a future task per spec §7.3 amendment). T7
+        # owns ONLY the value its own raise statement needs, per the
+        # bisection-invariant doctrine (every commit on the branch must lint
+        # clean on its own).
         values = typing.get_args(SandboxRefusalReason)
         assert len(values) == 22, (
             f"SandboxRefusalReason must have 22 values per spec §4.1 + 8.5 §3.3 + 10 §4.1; "
@@ -81,9 +88,15 @@ class TestClosedEnumPartitionInvariants:
         """Spot-check the 22-value Literal contains the canonical set
         documented in spec §4.1 (8A 15 vocab) + spec §3.3 (8.5 6 new
         wake-time arms) + Sprint-10 spec §4.1 (T7 1 new kernel-boundary
-        cross-tenant guard). The remaining 4 Sprint-10 values (3
-        mint-failure + 1 TTL cap) land in T9; this set is bumped 22 → 26
-        at the T9 commit."""
+        cross-tenant guard). The remaining 4 Sprint-10 values are lifted
+        into the Literal at T9 (this set bumped 22 → 26 at the T9
+        commit). 3 `sandbox_credential_mint_failed_*` values gain
+        Stage-2 raise sites at T10's backend `create()` post-admission
+        per spec §7.1; the 4th value `sandbox_credential_ttl_exceeds_tenant_max`
+        is Literal-only — the cap continues to surface as
+        `sandbox_policy_rego_denied` (Rego-reason surfacing through
+        `OPAEngine.Decision` deferred to a future task per spec §7.3
+        amendment)."""
         values = set(typing.get_args(SandboxRefusalReason))
         expected = {
             # Sprint 8A — 15 values

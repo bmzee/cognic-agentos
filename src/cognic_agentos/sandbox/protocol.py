@@ -59,12 +59,17 @@ from typing import TYPE_CHECKING, Literal, NewType, Protocol, runtime_checkable
 #:   cannot enforce it at construction time (the architectural arrow
 #:   runs ``sandbox → core``, never the other direction).
 #:
-#: Sprint 10 T9 will extend this Literal again 22 → 26 (3
-#: ``sandbox_credential_mint_failed_*`` reasons + 1
-#: ``sandbox_credential_ttl_exceeds_tenant_max``) at the create/mint
-#: boundary where those reasons are actually raised; T7 owns ONLY the
-#: value its own raise statement needs per the bisection-invariant
-#: doctrine (every commit on the branch must lint clean on its own).
+#: Sprint 10 T9 will extend this Literal again 22 → 26: 3
+#: ``sandbox_credential_mint_failed_*`` reasons (matching Stage-2 raise
+#: sites land at T10's backend ``create()`` post-admission per spec
+#: §7.1) + 1 ``sandbox_credential_ttl_exceeds_tenant_max`` (Literal
+#: entry only; no T9/T10 Stage-2 raise site — the cap continues to
+#: surface as ``sandbox_policy_rego_denied`` because
+#: ``OPAEngine.Decision`` carries no per-rule-name channel; Rego-reason
+#: surfacing is deferred to a future task per spec §7.3 amendment).
+#: T7 owns ONLY the value its own raise statement needs per the
+#: bisection-invariant doctrine (every commit on the branch must lint
+#: clean on its own).
 #:
 #: Drift between this Literal and consumer error-handling is caught at
 #: module load by the partition-invariant test at

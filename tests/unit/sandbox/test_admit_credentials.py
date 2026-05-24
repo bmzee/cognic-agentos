@@ -204,9 +204,14 @@ class TestAdmitPolicyRequiresCredentialsSentinelRefusal:
         new closed-enum value.
 
         T7 scope lock: the 3 ``sandbox_credential_mint_failed_*`` reasons
-        + 1 ``sandbox_credential_ttl_exceeds_tenant_max`` land in T9 at
-        the create/mint boundary; T7 admission threading reuses the
-        existing sentinel-refusal vocabulary."""
+        land in T9 (Literal) + T10 (Stage-2 raise at backend
+        ``create()`` post-admission per spec §7.1). The 4th Sprint-10
+        value ``sandbox_credential_ttl_exceeds_tenant_max`` lands in T9
+        (Literal only; no Stage-2 raise — the cap continues to surface
+        as ``sandbox_policy_rego_denied`` per spec §7.3 amendment, since
+        ``OPAEngine.Decision`` has no per-rule-name channel; Rego-reason
+        surfacing is deferred to a future task). T7 admission threading
+        reuses the existing sentinel-refusal vocabulary."""
 
         with pytest.raises(SandboxLifecycleRefused) as exc:
             await admit_policy(

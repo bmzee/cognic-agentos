@@ -176,10 +176,16 @@ class TestSandboxRegoRule6CredentialTTLCap:
     async def test_rule_6_refuses_when_ttl_exceeds_kernel_default(self, engine: OPAEngine) -> None:
         """``ttl_s`` (7200) > kernel default (900) → refuse.
 
-        Sprint 10 T9 lifts the Stage-2 mapping into the specific
-        closed-enum reason ``sandbox_credential_ttl_exceeds_tenant_max``;
-        at T8 the refusal surfaces via the existing
-        ``sandbox_policy_rego_denied`` arm at ``admission.py:584-588``.
+        Sprint 10 T9 lifts the closed-enum reason
+        ``sandbox_credential_ttl_exceeds_tenant_max`` into the
+        ``SandboxRefusalReason`` Literal but does NOT wire a Stage-2
+        mapping; T8 + T9 both continue to surface the refusal via the
+        existing ``sandbox_policy_rego_denied`` arm at
+        ``admission.py:601-603``. Rego-reason surfacing through
+        ``OPAEngine.Decision`` is deferred to a future task per spec
+        §7.3 amendment (the current ``Decision`` shape exposes only
+        ``allow`` + the decision-point-derived generic ``reasoning``;
+        no per-rule-name channel exists).
         """
         d = await engine.evaluate(
             decision_point=SANDBOX_DECISION_POINT,

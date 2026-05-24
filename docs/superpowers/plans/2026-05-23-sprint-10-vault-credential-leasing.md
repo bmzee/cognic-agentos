@@ -1131,8 +1131,14 @@ In `src/cognic_agentos/sandbox/protocol.py` — append to the existing `SandboxR
 SandboxRefusalReason = Literal[
     # ... existing 21 values from Sprint 8A + 8.5 ...
     # Sprint 10 T7 — kernel-boundary cross-tenant request guard per spec §4.1.
-    # The other 4 Sprint-10 values (3 mint-failure + 1 TTL cap) land in T9
-    # at the create/mint boundary that actually raises them.
+    # The remaining 4 Sprint-10 values are lifted into the Literal at T9.
+    # The 3 ``sandbox_credential_mint_failed_*`` values get their Stage-2
+    # raise sites at T10's backend ``create()`` post-admission (per spec
+    # §7.1). The 4th value ``sandbox_credential_ttl_exceeds_tenant_max``
+    # is Literal-only — the cap continues to surface as
+    # ``sandbox_policy_rego_denied`` because ``OPAEngine.Decision`` has no
+    # per-rule-name channel (Rego-reason surfacing deferred to a future
+    # task per spec §7.3 amendment).
     "sandbox_credential_request_tenant_mismatch",
 ]
 ```
@@ -1194,7 +1200,7 @@ async def admit_policy(
     # ... evaluate rego ...
 ```
 
-NOTE: `sandbox_credential_request_tenant_mismatch` is one of 5 Sprint-10 `SandboxRefusalReason` values enumerated in spec §6.1 (21 → 26 net across the sprint). T7 BOTH adds this value to the Literal (Step 3a — 21 → 22) AND raises it (Step 3b — the kernel-boundary cross-tenant guard). T9 adds the OTHER 4 Sprint-10 values (3 `sandbox_credential_mint_failed_*` + 1 `sandbox_credential_ttl_exceeds_tenant_max`; 22 → 26) at the create/mint boundary where they are actually raised. This split is a bisection-invariant fix (Round-0 review): every intermediate commit on the branch must lint clean on its own — so the value lands in the same commit as its raise.
+NOTE: `sandbox_credential_request_tenant_mismatch` is one of 5 Sprint-10 `SandboxRefusalReason` values enumerated in spec §6.1 (21 → 26 net across the sprint). T7 BOTH adds this value to the Literal (Step 3a — 21 → 22) AND raises it (Step 3b — the kernel-boundary cross-tenant guard). T9 adds the OTHER 4 Sprint-10 values to the Literal (22 → 26): 3 `sandbox_credential_mint_failed_*` values gain their Stage-2 raise sites at T10's backend `create()` post-admission (per spec §7.1); the 4th value `sandbox_credential_ttl_exceeds_tenant_max` is Literal-only — the cap continues to surface as `sandbox_policy_rego_denied` because `OPAEngine.Decision` has no per-rule-name channel (Rego-reason surfacing deferred to a future task per spec §7.3 amendment). The bisection-invariant fix (Round-0 review) requires every intermediate commit on the branch to lint clean on its own — so each value lands no later than the commit that raises it, but Literal-only values can land earlier without their Stage-2 mapping when the engine surface doesn't yet support per-rule routing.
 
 - [ ] **Step 4: Run — verify pass**
 
@@ -1235,7 +1241,7 @@ Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
 **Doctrine notes (post plan-patch):**
 
 - The existing bundle is pure allow-conjunction with `default allow := false`. A standalone `deny[reason] { … }` rule has NO EFFECT on the wire because (a) the existing `allow if { … }` does not gate on `count(deny) == 0` and (b) the `OPAEngine.evaluate` wrapper returns `Decision(allow: bool, rule_matched, reasoning, decision_data)` — no `deny` set is surfaced to Python. Rule 6 lands as a positive helper joined to `allow if` so it actually refuses.
-- The specific closed-enum reason `sandbox_credential_ttl_exceeds_tenant_max` is RESERVED at T8 and LIFTED into the `SandboxRefusalReason` Literal at T9 alongside the matching Stage-2 mapping. For T8 the cap is enforced — TTL-exceeded → `decision.allow=false` → existing Stage-2 mapping at `admission.py:584-588` raises `SandboxLifecycleRefused("sandbox_policy_rego_denied", …)`. Bisection invariant: T8 adds NO Python `SandboxRefusalReason` Literal entry for the new string AND NO Python raise / mapping site. Mentions outside the Rego bundle (this plan, the spec, the rule comment block, two test docstrings, one Protocol module docstring) are explanatory documentation only.
+- The specific closed-enum reason `sandbox_credential_ttl_exceeds_tenant_max` is RESERVED at T8 and LIFTED into the `SandboxRefusalReason` Literal at T9. T9 does NOT wire a matching Stage-2 mapping — `OPAEngine.Decision` exposes only `allow` + the decision-point-derived generic `reasoning`, with no per-rule-name channel that could distinguish "rule 6 fired vs rule 5 fired", so admission.py's single generic arm at `admission.py:601-603` is the only Stage-2 mapping today. For T8 + T9 + T10 the cap is enforced at the wire — TTL-exceeded → `decision.allow=false` → `SandboxLifecycleRefused("sandbox_policy_rego_denied", …)`. Rego-reason surfacing through `OPAEngine.Decision` is deferred to a future task (a follow-up sprint adds either a per-rule deny-set carried via `decision_data` or a `rule_name` channel on `Decision`, plus the admission.py dispatch wiring). Bisection invariant: T8 adds NO Python `SandboxRefusalReason` Literal entry for the new string AND NO Python raise / mapping site. Mentions outside the Rego bundle (this plan, the spec, the rule comment block, two test docstrings, one Protocol module docstring) are explanatory documentation only.
 - OPA-bearing tests follow the env-gated `opa_required` skipif pattern from `tests/unit/policies/test_sandbox_rego.py:50-55` — CI lanes with `opa` on PATH run the matrix; lanes without skip it.
 
 - [ ] **Step 1: Write failing tests for the TTL cap rule**
@@ -1378,9 +1384,13 @@ class TestSandboxRegoRule6CredentialTTLCap:
         self, engine: OPAEngine
     ) -> None:
         """ttl_s (7200) > kernel default (900) → refuse. T9 lifts the
-        Stage-2 mapping into the specific closed-enum reason
-        `sandbox_credential_ttl_exceeds_tenant_max`; T8 surfaces the
-        refusal via the existing `sandbox_policy_rego_denied` arm."""
+        closed-enum reason `sandbox_credential_ttl_exceeds_tenant_max`
+        into the `SandboxRefusalReason` Literal but does NOT wire a
+        Stage-2 mapping; T8 + T9 both continue to surface the refusal
+        via the existing `sandbox_policy_rego_denied` arm at
+        `admission.py:601-603` because `OPAEngine.Decision` has no
+        per-rule-name channel (Rego-reason surfacing deferred to a
+        future task per spec §7.3 amendment)."""
         d = await engine.evaluate(
             decision_point=SANDBOX_DECISION_POINT,
             input=_safe_allow_input_with_credentials(ttl_s=7200),
@@ -1507,10 +1517,13 @@ Per spec §5.1 (post-patch — positive helper, not `deny[reason]`):
 # `deny` set to Python — a standalone `deny[reason]` rule would be
 # inert). Closed-enum reason `sandbox_credential_ttl_exceeds_tenant_max`
 # is reserved here as a string comment ONLY at T8; T9 lifts it into
-# the SandboxRefusalReason Literal alongside the matching Stage-2
-# mapping. For T8 a TTL-exceeded request surfaces through the
-# existing `not decision.allow → sandbox_policy_rego_denied` arm
-# at admission.py:584-588.
+# the SandboxRefusalReason Literal but does NOT wire a Stage-2 mapping
+# (no T9/T10 raise site for the value) — OPAEngine.Decision has no
+# per-rule-name channel, so admission.py's single generic arm at
+# admission.py:601-603 stays the only Stage-2 mapping. The cap
+# continues to surface as `sandbox_policy_rego_denied` for T8 + T9 +
+# T10; Rego-reason surfacing is deferred to a future task per spec
+# §7.3 amendment.
 #
 # Sprint-8A T11 R2-R3 pure-Rego defence-in-depth contract: the
 # `is_number(cred.ttl_s)` guard inside the helper ensures malformed
@@ -1613,7 +1626,7 @@ Two CC surfaces touched: `policies/_default/sandbox.rego` (stop-rule policy bund
 | admission.py Step 9 threads `kernel_default.max_credential_ttl_s` | Existing `tests/unit/sandbox/test_admission_pipeline.py` Rego-input-shape regressions verify the dict shape under mocked OPA (T7 added similar regressions for `requires_credentials`) |
 
 Doctrine confirmations:
-- Bisection invariant: T8 adds NO Python `SandboxRefusalReason` Literal entry for `sandbox_credential_ttl_exceeds_tenant_max` AND NO Python raise / mapping site. Mentions outside the Rego bundle (this plan, the spec, the rule comment block, two test docstrings, one Protocol module docstring) are explanatory documentation only. T9 lifts the Literal value + matching Stage-2 mapping in the same commit.
+- Bisection invariant: T8 adds NO Python `SandboxRefusalReason` Literal entry for `sandbox_credential_ttl_exceeds_tenant_max` AND NO Python raise / mapping site. Mentions outside the Rego bundle (this plan, the spec, the rule comment block, two test docstrings, one Protocol module docstring) are explanatory documentation only. T9 lifts the Literal value ONLY; no Stage-2 mapping is wired in T9 (Rego-reason surfacing through `OPAEngine.Decision` is deferred to a future task per spec §7.3 amendment — the current `Decision` shape exposes only `allow` + the decision-point-derived generic `reasoning`, no per-rule-name channel exists; the cap continues to surface as `sandbox_policy_rego_denied`).
 - Bank overlays may TIGHTEN the cap (lower TTL ceiling via `tenant.overlay.max_credential_ttl_s`); LOOSENING the kernel default requires a coordinated kernel + ADR amendment.
 - Wave-1 admission.py omits `tenant.overlay` per spec §5.2; future-sprint hook covers per-tenant raise plumbing.
 
@@ -1632,107 +1645,321 @@ Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
 
 ---
 
-### Task T9: closed-enum extensions — `SandboxRefusalReason` 21 → 26; `SandboxLifecycleEvent` 12 → 15
+### Task T9: closed-enum extensions — `SandboxRefusalReason` 22 → 26 (+4); `SandboxLifecycleEvent` 12 → 15 (+3)
 
 **Files:**
-- Modify: `src/cognic_agentos/sandbox/protocol.py` (closed-enum extensions)
-- Modify: `src/cognic_agentos/sandbox/audit.py` (3 new lifecycle event payloads — NOT-CC per Doctrine F)
-- Modify: `tests/unit/sandbox/test_audit.py` (3 new payload-shape tests)
+- Modify: `src/cognic_agentos/sandbox/protocol.py` (closed-enum extensions — CC stop-rule per AGENTS.md L48)
+- Modify: `src/cognic_agentos/sandbox/audit.py` (3 new typed helper functions for lease lifecycle events — NOT-CC per Doctrine F; mirrors Sprint 8.5 T2 typed-helper pattern at `audit.py:222-391`)
+- Modify: `src/cognic_agentos/sandbox/__init__.py` (re-export the 3 new typed helpers + add to `__all__` — mirrors Sprint 8.5 T2 precedent at `__init__.py:31-38` + `__all__` at L240-243)
+- Modify: `tests/unit/sandbox/test_audit_event_taxonomy.py` (3 new payload-shape test classes following `TestSandboxLifecycleCheckpointedHelper` pattern at L409-479; extend `TestSandboxAuditPublicSurfaceExports` 4-helper pin at L734-800 → 7)
+- Modify: `tests/unit/sandbox/test_policy_shape.py` (bump count guards: `SandboxRefusalReason` 22 → 26 at L32-46; `SandboxLifecycleEvent` 12 → 15 at L56-62; extend canonical-values pins at L80-117 + L119-148 with the 4 + 3 new entries; rename `_22_values` → `_26_values` + `_12_values` → `_15_values`)
 
-NOTE: spec §6.1 enumerates **5 new Sprint-10 refusal values** (21 → 26 net across the sprint): 3 mint-failure values per §7.1, 1 Rego TTL-cap value per §5.1, 1 kernel-boundary cross-tenant value per §4.1. Per the Round-0 bisection-invariant fix, the kernel-boundary value (`sandbox_credential_request_tenant_mismatch`) was added in T7 alongside its raise site (21 → 22). **T9 adds the REMAINING 4 values** (3 `sandbox_credential_mint_failed_*` + 1 `sandbox_credential_ttl_exceeds_tenant_max`; 22 → 26) at the create/mint boundary where they are actually raised. The final-state count assertion below still pins `len(actual) == 26` because it is a destination check, not a delta.
+NOTE: spec §6.1 enumerates **5 new Sprint-10 refusal values** (21 → 26 net across the sprint): 3 mint-failure values per §7.1, 1 Rego TTL-cap value per §5.1, 1 kernel-boundary cross-tenant value per §4.1. Per the Round-0 bisection-invariant fix, the kernel-boundary value (`sandbox_credential_request_tenant_mismatch`) was added in T7 alongside its raise site (21 → 22). **T9 adds the REMAINING 4 values to the Literal** (22 → 26):
 
-- [ ] **Step 1: Write failing tests for the closed-enum extensions**
+- **3 `sandbox_credential_mint_failed_*` values** — Literal entries land at T9. The matching Stage-2 raise sites land at **T10's backend `create()` post-admission** per spec §7.1 (the create-time mint exception → SandboxRefusalReason mapping).
+- **1 `sandbox_credential_ttl_exceeds_tenant_max` value** — **Literal entry only at T9, no Stage-2 raise site at T9 or T10**. The cap continues to surface at runtime as `sandbox_policy_rego_denied` because `OPAEngine.Decision` (at `core/policy/engine.py:148-150`) carries only `allow` + the decision-point-derived generic `reasoning`, with no per-rule-name channel that could distinguish "rule 6 fired vs rule 5 fired". Rego-reason surfacing through `OPAEngine.Decision` is **deferred to a future task** (a follow-up sprint adds either a per-rule deny-set carried via `decision_data` or a `rule_name` channel on `Decision`, plus the admission.py dispatch wiring that translates per-rule denies to specific `SandboxRefusalReason` values). T9's bare Literal lift gives that future task a stable closed-enum target without imposing wire-protocol-public engine work in Sprint 10. See spec §7.3 amendment.
 
-Append to `tests/unit/sandbox/test_audit.py`:
+The final-state count assertion below pins `len(actual) == 26` because it is a destination check, not a delta. Bisection-invariant compliance: T9's commit lints clean on its own (the 4 new Literal entries have no orphaned `raise SandboxLifecycleRefused(value, ...)` callers — the 3 mint-failure callers land at T10; the TTL-cap value has no caller by design).
+
+**Helper input-shape lock (Step 2 anticipation):** The 3 new typed helpers accept a single positional `lease: CredentialLease` argument + the standard `decision_history_store` + tenant/actor/trace/session keyword-only args (mirrors the kwarg shape of the Sprint 8.5 T2 helpers). `sandbox_lifecycle_lease_revoke_failed` additionally accepts `vault_error: str` + `auto_expiry_at_iso: str` keyword-only args. **Why `CredentialLease` single positional vs the Sprint 8.5 T2 kwargs-only pattern:** all 10 always-fields in spec §6.2 are reachable from one `CredentialLease` reference (the dataclass at `core/vault.py:152` nests `request: VaultLeaseRequest`, which nests `actor_ref: VaultLeaseActorRef`); accepting separate kwargs would force T10's backend create()/destroy() call sites into 10-kwarg blocks per emit + open a bug class where a caller passes a `tenant_id` independent of `request.tenant_id`. The Sprint 8.5 T2 helpers couldn't use this pattern because their inputs were unrelated values (`checkpoint_id` + `label` + `policy_digest`); the Sprint-10 helpers naturally share one dataclass.
+
+**Payload contract per spec §6.2:** 10 always-fields on every lease event (lease_id, request.secret_path, request.scope_label, request.tenant_id, request.actor_ref.actor_subject, request.actor_ref.actor_type, request.ttl_s, lease.ttl_s_granted, lease.minted_at as tz-aware ISO string, lease.expires_at as tz-aware ISO string) + `session_id` threaded by `emit_sandbox_event` = 11 keys on `lease_minted` / `lease_revoked` chain rows. `lease_revoke_failed` adds 2 more (`vault_error` + `auto_expiry_at`) = 13 keys. Token contents NEVER appear on the chain row; examiners trace by `lease_id` + `secret_path` + `scope_label`.
+
+- [ ] **Step 1: Write failing tests (RED) — payload-shape + Literal extensions**
+
+**1a.** Append to `tests/unit/sandbox/test_audit_event_taxonomy.py` — 3 new test classes following the `TestSandboxLifecycleCheckpointedHelper` pattern at `test_audit_event_taxonomy.py:409-479`. Each test class uses the existing `_make_store_mock()` + `_drive_emit_and_capture()` helpers at `:53-75` (no new boilerplate). Reference test shape (`TestSandboxLifecycleLeaseMintedHelper.test_emits_with_correct_event_type_and_payload_keys`):
 
 ```python
-def test_sandbox_refusal_reason_includes_sprint_10_values() -> None:
-    """T9 — 5 new Sprint 10 refusal values added."""
-    from typing import get_args
-    from cognic_agentos.sandbox.protocol import SandboxRefusalReason
-
-    sprint_10_values = {
-        "sandbox_credential_mint_failed_vault_unavailable",
-        "sandbox_credential_mint_failed_secret_path_unknown",
-        "sandbox_credential_mint_failed_auth_denied",
-        "sandbox_credential_ttl_exceeds_tenant_max",
-        "sandbox_credential_request_tenant_mismatch",
-    }
-    actual = set(get_args(SandboxRefusalReason))
-    assert sprint_10_values.issubset(actual)
-    assert len(actual) == 26
-
-
-def test_sandbox_lifecycle_event_includes_sprint_10_values() -> None:
-    """T9 — 3 new Sprint 10 lifecycle event values added."""
-    from typing import get_args
-    from cognic_agentos.sandbox.protocol import SandboxLifecycleEvent
-
-    sprint_10_values = {
-        "sandbox.lifecycle.lease_minted",
-        "sandbox.lifecycle.lease_revoked",
-        "sandbox.lifecycle.lease_revoke_failed",
-    }
-    actual = set(get_args(SandboxLifecycleEvent))
-    assert sprint_10_values.issubset(actual)
-    assert len(actual) == 15
+@pytest.fixture
+def _sample_lease() -> CredentialLease:
+    """Sample CredentialLease with request.ttl_s (900) != lease.ttl_s_granted
+    (600) so the regression below pins that BOTH appear distinctly on the
+    chain row payload — spec §6.2 makes the request-vs-granted distinction
+    load-bearing for examiner evidence."""
+    from datetime import UTC, datetime, timedelta
+    from cognic_agentos.core.vault import (
+        CredentialLease, VaultLeaseActorRef, VaultLeaseRequest,
+    )
+    minted_at = datetime(2026, 5, 24, 10, 0, 0, tzinfo=UTC)
+    return CredentialLease(
+        lease_id="vault/leases/db/abc123",
+        request=VaultLeaseRequest(
+            secret_path="database/creds/payments-read",
+            ttl_s=900,
+            tenant_id="t-1",
+            actor_ref=VaultLeaseActorRef(
+                actor_subject="user-42", actor_type="human",
+            ),
+            scope_label="payments-read",
+        ),
+        token="vault-token-NEVER-on-chain",
+        minted_at=minted_at,
+        ttl_s_granted=600,
+        expires_at=minted_at + timedelta(seconds=600),
+    )
 
 
-def test_lease_minted_payload_carries_audit_evidence(...):
-    """T9 — sandbox.lifecycle.lease_minted chain row carries all 9 evidence
-    fields per spec §6.2 (lease_id + request.secret_path + scope_label +
-    tenant_id + actor_ref.actor_subject + actor_ref.actor_type + ttl_s +
-    ttl_s_granted + minted_at + expires_at)."""
-    # ... full payload-shape assertion ...
+class TestSandboxLifecycleLeaseMintedHelper:
+    async def test_emits_with_correct_event_type_and_payload_keys(
+        self, _sample_lease: CredentialLease
+    ) -> None:
+        store = _make_store_mock()
+        await sandbox_lifecycle_lease_minted(
+            store, lease=_sample_lease,
+            tenant_id="t-1", actor_id="user-42",
+            trace_id="trace-1", session_id="sess-1",
+        )
+        built = await _drive_emit_and_capture(store)
+        assert built.decision_type == "sandbox.lifecycle.lease_minted"
+        assert built.iso_controls == ("ISO42001.A.6.2.5",)
+        # spec §6.2: 10 always-fields + session_id threaded by wrapper = 11
+        assert set(built.payload.keys()) == {
+            "lease_id", "secret_path", "scope_label", "tenant_id",
+            "actor_subject", "actor_type", "ttl_s", "ttl_s_granted",
+            "minted_at", "expires_at", "session_id",
+        }
+        # spec §6.2 load-bearing: request.ttl_s (900) MUST appear distinctly
+        # from lease.ttl_s_granted (600); collapsing them would erase the
+        # examiner-evidence distinction between "what was requested" and
+        # "what Vault granted".
+        assert built.payload["ttl_s"] == 900
+        assert built.payload["ttl_s_granted"] == 600
 
+    async def test_token_contents_never_appear_on_chain_row(
+        self, _sample_lease: CredentialLease
+    ) -> None:
+        store = _make_store_mock()
+        await sandbox_lifecycle_lease_minted(
+            store, lease=_sample_lease,
+            tenant_id="t-1", actor_id="user-42",
+            trace_id="trace-1", session_id="sess-1",
+        )
+        built = await _drive_emit_and_capture(store)
+        assert "token" not in built.payload
+        # Defence-in-depth: token value MUST NOT appear ANYWHERE in payload
+        for k, v in built.payload.items():
+            assert "vault-token-NEVER-on-chain" not in str(v), (
+                f"token leak via payload key {k!r}: {v!r}"
+            )
 
-def test_lease_revoke_failed_payload_carries_vault_error_and_auto_expiry(...):
-    """T9 — sandbox.lifecycle.lease_revoke_failed payload carries
-    vault_error + auto_expiry_at IN ADDITION to the standard fields."""
-    # ... assertion ...
+    async def test_minted_at_and_expires_at_are_tz_aware_iso_strings(
+        self, _sample_lease: CredentialLease
+    ) -> None:
+        from datetime import datetime
+        store = _make_store_mock()
+        await sandbox_lifecycle_lease_minted(
+            store, lease=_sample_lease,
+            tenant_id="t-1", actor_id="user-42",
+            trace_id="trace-1", session_id="sess-1",
+        )
+        built = await _drive_emit_and_capture(store)
+        for k in ("minted_at", "expires_at"):
+            parsed = datetime.fromisoformat(built.payload[k])
+            assert parsed.tzinfo is not None
+            assert parsed.utcoffset() is not None
 ```
 
-- [ ] **Step 2: Extend `SandboxRefusalReason` + `SandboxLifecycleEvent`**
+Mirror with `TestSandboxLifecycleLeaseRevokedHelper` (same 11-key shape but `decision_type == "sandbox.lifecycle.lease_revoked"`) and `TestSandboxLifecycleLeaseRevokeFailedHelper` (13-key shape — adds `vault_error` + `auto_expiry_at`; pin `vault_error` is a string + `auto_expiry_at` parses as tz-aware ISO).
 
-In `src/cognic_agentos/sandbox/protocol.py`:
+**1b.** Extend `TestSandboxAuditPublicSurfaceExports` at `test_audit_event_taxonomy.py:734-800` from 4 helpers to 7: add `sandbox_lifecycle_lease_minted`, `sandbox_lifecycle_lease_revoked`, `sandbox_lifecycle_lease_revoke_failed` to both the `__all__` membership assertion AND the canonical-objects identity assertion at `:781-800`.
+
+**1c.** Update `tests/unit/sandbox/test_policy_shape.py` count guards + canonical-values pins:
+
+```python
+# rename + bump: test_sandbox_refusal_reason_has_exactly_22_values
+#             →  test_sandbox_refusal_reason_has_exactly_26_values
+def test_sandbox_refusal_reason_has_exactly_26_values(self) -> None:
+    # Sprint 10 T9 extended 22 → 26 (4 new Sprint-10 values lifted into
+    # the Literal: 3 sandbox_credential_mint_failed_* + 1
+    # sandbox_credential_ttl_exceeds_tenant_max). The 3 mint-failure
+    # values gain Stage-2 raise sites at T10's backend create() per
+    # spec §7.1; the TTL-cap value is Literal-only (cap continues to
+    # surface as sandbox_policy_rego_denied — Rego-reason surfacing
+    # deferred per spec §7.3 amendment).
+    values = typing.get_args(SandboxRefusalReason)
+    assert len(values) == 26, (
+        f"SandboxRefusalReason must have 26 values per spec §4.1 + "
+        f"8.5 §3.3 + 10 §4.1 + 10 §6.1; found {len(values)}: {values}"
+    )
+
+# rename + bump: test_sandbox_lifecycle_event_has_exactly_12_values
+#             →  test_sandbox_lifecycle_event_has_exactly_15_values
+def test_sandbox_lifecycle_event_has_exactly_15_values(self) -> None:
+    # Sprint 10 T9 extended 12 → 15 (3 new lease lifecycle events per
+    # spec §6.2: sandbox.lifecycle.lease_minted / .lease_revoked /
+    # .lease_revoke_failed).
+    values = typing.get_args(SandboxLifecycleEvent)
+    assert len(values) == 15, (
+        f"SandboxLifecycleEvent must have 15 values per spec §4.3 + "
+        f"8.5 §3.3 + 10 §6.2; found {len(values)}: {values}"
+    )
+```
+
+Extend `test_sandbox_refusal_reason_canonical_values_present` at `:80-117` `expected` set with the 4 new strings + update its docstring. Extend `test_sandbox_lifecycle_event_canonical_values_present` at `:119-148` `expected` set with the 3 new events + update its docstring.
+
+**1d.** Run the failing tests to verify RED:
+
+```bash
+uv run pytest tests/unit/sandbox/test_audit_event_taxonomy.py tests/unit/sandbox/test_policy_shape.py -q
+```
+
+Expected: FAIL — `ImportError` on the 3 new helper imports + `AssertionError` on the count guards (22 ≠ 26, 12 ≠ 15) + `AssertionError` on the canonical-values drift.
+
+- [ ] **Step 2: Implement (GREEN) — Literal extensions + 3 typed helpers + public re-exports**
+
+**2a.** In `src/cognic_agentos/sandbox/protocol.py` — append to the `SandboxRefusalReason` Literal after the T7 line at `protocol.py:112`:
 
 ```python
 SandboxRefusalReason = Literal[
-    # ... existing 21 Sprint-8A + 8.5 values ...
-    # Sprint 10 T7 (already added) — kernel-boundary cross-tenant guard:
+    # ... existing 22 values from Sprint 8A + 8.5 + Sprint 10 T7 ...
     "sandbox_credential_request_tenant_mismatch",
-    # Sprint 10 T9 — 4 new mint-boundary values added HERE:
+    # Sprint 10 T9 — 4 new values per spec §6.1.
+    # 3 mint-failure values (Stage-2 raise sites at T10's backend
+    # create() per spec §7.1):
     "sandbox_credential_mint_failed_vault_unavailable",
     "sandbox_credential_mint_failed_secret_path_unknown",
     "sandbox_credential_mint_failed_auth_denied",
+    # 1 TTL-cap value (Literal-only; no T9/T10 Stage-2 raise site;
+    # cap continues to surface as sandbox_policy_rego_denied — see
+    # spec §7.3 amendment + module docstring above):
     "sandbox_credential_ttl_exceeds_tenant_max",
 ]
+```
 
+Append to the `SandboxLifecycleEvent` Literal at `protocol.py:160`:
+
+```python
 SandboxLifecycleEvent = Literal[
     # ... existing 12 values ...
-    # Sprint 10 — 3 new lifecycle events:
+    # Sprint 10 — 3 lease lifecycle events per spec §6.2:
     "sandbox.lifecycle.lease_minted",
     "sandbox.lifecycle.lease_revoked",
     "sandbox.lifecycle.lease_revoke_failed",
 ]
 ```
 
-In `src/cognic_agentos/sandbox/audit.py`: add 3 payload converters for the new events per spec §6.2 (must include `request.actor_ref.actor_subject` + `request.actor_ref.actor_type` + the standard 7 other fields).
+Update the module docstring count-summary block at `protocol.py:42-67` to reflect the 26 + 15 destinations.
 
-- [ ] **Step 3: Run — verify pass**
+**2b.** In `src/cognic_agentos/sandbox/audit.py` — append 3 typed helpers following the Sprint 8.5 T2 pattern at `audit.py:222-391`. Reference shape for `sandbox_lifecycle_lease_minted`:
 
-`uv run pytest tests/unit/sandbox/test_audit.py -q`
+```python
+async def sandbox_lifecycle_lease_minted(
+    decision_history_store: DecisionHistoryStore,
+    *,
+    lease: "CredentialLease",
+    tenant_id: str,
+    actor_id: str,
+    trace_id: str,
+    session_id: str,
+) -> tuple[uuid.UUID, bytes]:
+    """Emit ``sandbox.lifecycle.lease_minted`` per spec §6.2.
+
+    Called from ``SandboxBackend.create()`` (T10) after each successful
+    ``mint_lease()`` round-trip. Payload-shape contract per spec §6.2:
+    10 always-fields (lease_id + 6 request projections + 3 lease
+    projections) + ``session_id`` threaded by ``emit_sandbox_event``.
+
+    ``minted_at`` + ``expires_at`` rendered as tz-aware ISO 8601 strings
+    (the dataclass fields are ``datetime`` per ``core/vault.py:170-172``;
+    canonical_bytes rejects ``datetime`` so the helper serialises per
+    ``feedback_evidence_boundary_runtime_validation``).
+
+    Token contents are NEVER projected onto the payload (spec §6.2);
+    examiners trace by ``lease_id`` + ``secret_path`` + ``scope_label``.
+    """
+    return await emit_sandbox_event(
+        decision_history_store,
+        event="sandbox.lifecycle.lease_minted",
+        tenant_id=tenant_id,
+        actor_id=actor_id,
+        trace_id=trace_id,
+        session_id=session_id,
+        payload=_project_lease_evidence_payload(lease),
+    )
+
+
+def _project_lease_evidence_payload(lease: "CredentialLease") -> dict[str, Any]:
+    """spec §6.2 10-key always-projection from CredentialLease.
+
+    Single source of truth for the lease_minted / lease_revoked /
+    lease_revoke_failed payload base (revoke_failed adds 2 conditional
+    keys at its helper boundary). Pins the shape against drift in
+    CredentialLease / VaultLeaseRequest / VaultLeaseActorRef.
+    """
+    return {
+        "lease_id": lease.lease_id,
+        "secret_path": lease.request.secret_path,
+        "scope_label": lease.request.scope_label,
+        "tenant_id": lease.request.tenant_id,
+        "actor_subject": lease.request.actor_ref.actor_subject,
+        "actor_type": lease.request.actor_ref.actor_type,
+        "ttl_s": lease.request.ttl_s,
+        "ttl_s_granted": lease.ttl_s_granted,
+        "minted_at": lease.minted_at.isoformat(),
+        "expires_at": lease.expires_at.isoformat(),
+    }
+```
+
+Mirror `sandbox_lifecycle_lease_revoked` (same projection, different event-type). `sandbox_lifecycle_lease_revoke_failed` adds `vault_error: str` + `auto_expiry_at_iso: str` kwargs + extends the projection with those two keys.
+
+**2c.** In `src/cognic_agentos/sandbox/__init__.py` — extend the `cognic_agentos.sandbox.audit` import group at `:31-38` + the `__all__` list at `:240-243` with the 3 new helper names (mirrors the Sprint 8.5 T2 re-export pattern landed there).
+
+**2d.** Run the green check:
+
+```bash
+uv run pytest tests/unit/sandbox/test_audit_event_taxonomy.py tests/unit/sandbox/test_policy_shape.py -q
+```
+
 Expected: GREEN.
 
-- [ ] **Step 4: Gate ladder + HALT-BEFORE-COMMIT — sandbox/protocol.py review**
+- [ ] **Step 3: Gate ladder (halt prep) — full-tree ruff/format/mypy + focused suite**
 
-`sandbox/protocol.py` is the wire-public closed-enum surface for the sandbox primitive. Present the diff; map watchpoints (5 new refusal values not 4 — T7 introduced the cross-tenant guard; 3 new lifecycle event values; payload conversions include the actor_ref projection NOT the full Actor; token contents NEVER persisted). Commit only after approval:
+Per `[[feedback_full_gate_pre_commit]]` + `[[feedback_gate_ladder_per_microfix]]`:
+
+```bash
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy src tests
+uv run pytest tests/unit/sandbox/ tests/unit/policies/test_sandbox_rego.py tests/unit/policies/test_sandbox_rego_credentials.py -q
+git diff --check
+```
+
+Expected: all clean.
+
+- [ ] **Step 4: HALT-BEFORE-COMMIT — sandbox/protocol.py CC review**
+
+`sandbox/protocol.py` is on the AGENTS.md L48 critical-controls list (wire-public closed-enum surface for the sandbox primitive). Present the staged diff + map watchpoints:
+
+- **4 new `SandboxRefusalReason` values not 5** — T7 already shipped `sandbox_credential_request_tenant_mismatch`. Final-state count 26.
+- **3 new `SandboxLifecycleEvent` values**. Final-state count 15.
+- **TTL-cap value is Literal-only** — NO Stage-2 raise site for `sandbox_credential_ttl_exceeds_tenant_max` at T9 (and none at T10 per spec §7.3 amendment); cap continues to surface as `sandbox_policy_rego_denied`. Rego-reason surfacing deferred to a future task.
+- **3 mint-failure Literal entries have no orphan raisers at T9** — T10's backend `create()` post-admission wires the Stage-2 raise sites per spec §7.1; T9's commit lints clean because mypy doesn't reject Literal members that lack callers.
+- **Payload projection uses `actor_ref` not full `Actor`** — `VaultLeaseActorRef` carries `actor_subject` + `actor_type` only (per spec §3.1 / `core/vault.py:113`); the kernel chain never sees `portal/rbac/Actor`.
+- **Token contents NEVER on chain row** — pinned by `test_token_contents_never_appear_on_chain_row` regression.
+- **`request.ttl_s` ≠ `lease.ttl_s_granted` distinct surfacing** — pinned by sample-lease fixture using 900 vs 600.
+
+Commit only after explicit approval:
 
 ```bash
 git add src/cognic_agentos/sandbox/protocol.py \
         src/cognic_agentos/sandbox/audit.py \
-        tests/unit/sandbox/test_audit.py
-git commit -m "feat(sprint-10): closed-enum extensions — SandboxRefusalReason 26 + SandboxLifecycleEvent 15 (T9)
+        src/cognic_agentos/sandbox/__init__.py \
+        tests/unit/sandbox/test_audit_event_taxonomy.py \
+        tests/unit/sandbox/test_policy_shape.py
+git commit -m "feat(sprint-10): T9 closed-enum extensions — SandboxRefusalReason 22 → 26 (+4) + SandboxLifecycleEvent 12 → 15 (+3) + 3 typed helpers (CRITICAL CONTROLS — sandbox/protocol.py stop-rule)
+
+T9 lifts 4 new SandboxRefusalReason Literal entries: 3
+sandbox_credential_mint_failed_* values whose Stage-2 raise sites
+land at T10's backend create() per spec §7.1, plus 1
+sandbox_credential_ttl_exceeds_tenant_max value that is Literal-only
+(NO Stage-2 raise site at T9 or T10 — the cap continues to surface as
+sandbox_policy_rego_denied because OPAEngine.Decision has no per-rule-
+name channel; Rego-reason surfacing deferred to a future task per spec
+§7.3 amendment). T9 lifts 3 SandboxLifecycleEvent Literal entries
+(.lease_minted / .lease_revoked / .lease_revoke_failed) + 3 typed
+audit helpers per spec §6.2 (10 always-fields + session_id; 2 extra
+on revoke_failed). T10 owns mint-failure Stage-2 mapping; T9 does
+not touch admission.py.
 
 Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
 ```
@@ -1933,7 +2160,7 @@ Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
 | §4.3 revoke at destroy() fail-soft | T10 |
 | §4.4 CredentialAdapter Protocol extension | T5 |
 | §5 sandbox.rego rule 6 | T8 |
-| §6.1 SandboxRefusalReason 21 → 26 (5 new values: 3 mint failures + 1 TTL cap + 1 cross-tenant) | T9 (Literal extension) + T7 (cross-tenant check at kernel boundary) |
+| §6.1 SandboxRefusalReason 21 → 26 (5 new values: 3 mint failures + 1 TTL cap + 1 cross-tenant) | T7 (cross-tenant value + Stage-2 raise — `sandbox_credential_request_tenant_mismatch`) + T9 (4 Literal entries: 3 mint-failure + 1 TTL-cap) + T10 (3 mint-failure Stage-2 raise sites at backend `create()`). TTL-cap is Literal-only — no Stage-2 raise site at T9 or T10; cap continues to surface as `sandbox_policy_rego_denied` until Rego-reason surfacing lands in a future task per §7.3 amendment. |
 | §6.2 SandboxLifecycleEvent 12 → 15 | T9 |
 | §6.3 SandboxPolicyViolationReason unchanged | (no task) |
 | §7.1 mint-failure taxonomy | T4 (exception classes) + T10 (handler-side mapping) |
