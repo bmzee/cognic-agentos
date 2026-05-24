@@ -77,7 +77,7 @@ from cognic_agentos.sandbox.admission import (
 class VaultCredentialAdapter:
     """Real CredentialAdapter implementation per ADR-004 §102 Q4 LOCK.
 
-    Sprint 10 ships this as the production replacement for the
+    Sprint 10 shipped this as the production replacement for the
     Sprint-8A fail-loud :class:`KernelDefaultCredentialAdapter`
     sentinel. Banks wire this in ``create_app()`` with a configured
     :class:`VaultTransport`.

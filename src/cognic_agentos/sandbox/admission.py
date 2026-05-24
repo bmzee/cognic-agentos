@@ -97,8 +97,9 @@ class CatalogProtocol(Protocol):
 @runtime_checkable
 class CredentialAdapter(Protocol):
     """Structural contract for runtime secret retrieval + dynamic
-    credential leasing. Sprint 10 T6 ships the first concrete
-    ``VaultCredentialAdapter`` per ADR-009. Wave-1 ships only the
+    credential leasing. Sprint 10 T6 shipped the first concrete
+    ``VaultCredentialAdapter`` per ADR-009 (in
+    ``sandbox/credentials.py``). The kernel still defaults to the
     fail-loud ``KernelDefaultCredentialAdapter`` sentinel below —
     admit_policy refuses any ``SandboxPolicy.vault_path`` non-None
     when the wired adapter is the sentinel.
@@ -157,10 +158,10 @@ class KernelDefaultCredentialAdapter:
     refuses any policy declaring ``vault_path`` while this sentinel
     is wired.
 
-    Sprint 10 T6 ships ``VaultCredentialAdapter`` as the first real
-    concrete implementation per ADR-009. Until then, operators MUST
-    EITHER wire a real adapter OR ensure no pack ever sets a
-    non-None ``vault_path`` / declares ``requires_credentials``.
+    Sprint 10 T6 shipped ``VaultCredentialAdapter`` as the first real
+    concrete implementation per ADR-009. Operators MUST EITHER wire a
+    real adapter OR ensure no pack ever sets a non-None ``vault_path``
+    / declares ``requires_credentials``.
 
     The class is intentionally NOT a Protocol subclass — admit_policy
     uses an explicit ``isinstance(credential_adapter,
@@ -186,7 +187,7 @@ class KernelDefaultCredentialAdapter:
         raise NotImplementedError(
             "KernelDefaultCredentialAdapter is a fail-loud sentinel; "
             "admit_policy should have refused before this method is "
-            f"called. Got fetch_secret({path!r}). Sprint 10 ships "
+            f"called. Got fetch_secret({path!r}). Sprint 10 shipped "
             "VaultCredentialAdapter as the first real CredentialAdapter "
             "implementation per ADR-009."
         )
@@ -200,7 +201,7 @@ class KernelDefaultCredentialAdapter:
             "KernelDefaultCredentialAdapter is a fail-loud sentinel; "
             "admit_policy should have refused before this method is "
             f"called. Got mint_lease(secret_path={request.secret_path!r}). "
-            "Sprint 10 ships VaultCredentialAdapter as the first real "
+            "Sprint 10 shipped VaultCredentialAdapter as the first real "
             "CredentialAdapter implementation per ADR-009; wire it in "
             "create_app() before any pack/sandbox declares "
             "requires_credentials."
@@ -210,7 +211,7 @@ class KernelDefaultCredentialAdapter:
         raise NotImplementedError(
             "KernelDefaultCredentialAdapter is a fail-loud sentinel; "
             "admit_policy should have refused before this method is "
-            f"called. Got revoke_lease({lease_id!r}). Sprint 10 ships "
+            f"called. Got revoke_lease({lease_id!r}). Sprint 10 shipped "
             "VaultCredentialAdapter as the first real CredentialAdapter "
             "implementation per ADR-009; wire it in create_app() before "
             "any pack/sandbox declares requires_credentials."
@@ -368,7 +369,7 @@ async def admit_policy(
             "sandbox_credential_adapter_not_configured",
             detail=(
                 f"policy.vault_path={policy.vault_path!r} requires a real "
-                f"CredentialAdapter; Sprint 10 ships VaultCredentialAdapter "
+                f"CredentialAdapter; Sprint 10 shipped VaultCredentialAdapter "
                 f"as the first real implementation per ADR-009"
             ),
         )
@@ -430,7 +431,7 @@ async def admit_policy(
                 detail=(
                     f"requires_credentials is non-empty "
                     f"({len(requires_credentials)} request(s)) but only the "
-                    f"fail-loud sentinel adapter is wired; Sprint 10 ships "
+                    f"fail-loud sentinel adapter is wired; Sprint 10 shipped "
                     f"VaultCredentialAdapter as the first real implementation "
                     f"per ADR-009"
                 ),
