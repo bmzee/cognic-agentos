@@ -37,10 +37,21 @@ Module surface:
   succeeded but response is malformed" which examiners read as
   "Vault is functionally unavailable" — same external observable).
 * :func:`lease_credential` — async entry-point. Calls
-  ``transport.lease(secret_path, ttl_s)`` (the NEW dynamic-secret
-  write-with-ttl-kwarg API path; T4 IS the consumer the T3 lease
-  carve-out was reserved for). Maps hvac exceptions → 4-value
-  taxonomy.
+  ``transport.lease(secret_path, ttl_s)`` — the read-style dynamic-
+  secret lease path per the Z2 Gap Q amendment (Sprint 10 round-9,
+  2026-05-24); ``ttl_s`` is informational at Wave 1 (Vault's role-
+  side ``default_ttl`` / ``max_ttl`` are authoritative). T4 IS the
+  consumer the T3 ``transport.lease`` carve-out was reserved for —
+  the Sprint-1C ``VaultAdapter.lease()`` funnels through
+  ``transport.read(path)`` to produce a :class:`SecretLease` shape,
+  while T4's ``lease_credential`` funnels through
+  ``transport.lease(path, ttl_s)`` to produce a :class:`CredentialLease`
+  shape. Both transport methods delegate to ``client.read(path)`` at
+  the hvac level post-Gap-Q; the distinct method names exist so the
+  two consumer-shape contracts can evolve independently (e.g. PKI
+  write-style support lands as a separate ``transport`` method —
+  NOT a runtime overload of ``lease()``). Maps hvac exceptions →
+  4-value taxonomy.
 * :func:`revoke_credential` — async tombstone for a minted lease.
   Caller (T10 sandbox ``destroy()``) wraps in fail-soft try/except
   per spec §7.2 — but the underlying exception class still needs to
@@ -218,11 +229,22 @@ async def lease_credential(
 ) -> CredentialLease:
     """Mint a dynamic credential lease against Vault.
 
-    Calls ``transport.lease(secret_path, ttl_s)`` — the NEW dynamic-
-    secret write-with-ttl-kwarg API path. T4 IS the consumer the T3
-    ``VaultAdapter.lease()`` carve-out was reserved for; the Sprint-1C
-    kernel-secrets adapter funnels through ``transport.read(path)``
-    to preserve its own wire contract.
+    Calls ``transport.lease(secret_path, ttl_s)`` — the read-style
+    dynamic-secret lease path per the Z2 Gap Q amendment (Sprint 10
+    round-9, 2026-05-24). ``ttl_s`` is informational at Wave 1 — Vault's
+    role-side ``default_ttl`` / ``max_ttl`` are authoritative, and
+    :attr:`CredentialLease.ttl_s_granted` reflects whatever Vault
+    returns in the response's ``lease_duration`` field. T4 IS the
+    consumer the T3 ``transport.lease`` carve-out was reserved for —
+    the Sprint-1C ``VaultAdapter.lease()`` funnels through
+    ``transport.read(path)`` to produce a :class:`SecretLease` shape,
+    while T4's ``lease_credential`` funnels through
+    ``transport.lease(path, ttl_s)`` to produce a :class:`CredentialLease`
+    shape. Both transport methods delegate to ``client.read(path)`` at
+    the hvac level post-Gap-Q; the distinct method names exist so the
+    two consumer-shape contracts can evolve independently (e.g. PKI
+    write-style support lands as a separate ``transport`` method —
+    NOT a runtime overload of ``lease()`` per spec §3.5).
 
     Exception mapping (spec §7.1):
 

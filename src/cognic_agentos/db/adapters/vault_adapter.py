@@ -14,11 +14,20 @@ one static-token auth context, one retry discipline.
 
 T3 user-locked carve-out: ``VaultAdapter.lease()`` MUST funnel
 through ``transport.read(path)`` (NOT ``transport.lease(path, ttl_s)``)
-to preserve the Sprint-1C wire contract (``client.read(path)`` →
-``SecretLease`` shape). ``transport.lease`` is the NEW dynamic-secret
-write-with-ttl-kwarg API reserved for T4's
-``core/vault.py::lease_credential`` consumer; the kernel-secrets
-adapter MUST NOT switch to it without an explicit ADR amendment.
+to preserve the Sprint-1C wire contract (the response is wrapped in
+a Sprint-1C :class:`SecretLease` shape). ``transport.lease`` is the
+T4-consumer API that wraps the raw hvac response in
+:class:`cognic_agentos.core.vault.CredentialLease` for the dynamic-
+secret leasing path at ``core/vault.py::lease_credential``; the
+kernel-secrets adapter MUST NOT switch to it without an explicit
+ADR amendment. Post-Z2-Gap-Q (Sprint 10 round-9, 2026-05-24) both
+``transport.read`` and ``transport.lease`` delegate to
+``client.read(path)`` at the hvac level — the carve-out remains
+load-bearing because the two transport methods exist to give the
+two distinct consumer-shape contracts (SecretLease vs CredentialLease)
+independent forward-evolution surfaces (e.g. future PKI write-style
+support lands as a separate transport method, not a runtime
+overload of ``lease()``).
 
 T3 health mapping (R3 contract preservation): the adapter maps the
 4-state :class:`cognic_agentos.core._vault_transport.VaultTransportProbe`
@@ -107,12 +116,18 @@ class VaultAdapter:
     async def lease(self, path: str, ttl_s: int) -> SecretLease:
         # Sprint 10 T3 USER-LOCKED CARVE-OUT: lease() funnels through
         # transport.read(), NOT transport.lease(), to preserve the
-        # Sprint-1C wire contract (client.read(path) → SecretLease
-        # shape). transport.lease() is the NEW dynamic-secret
-        # write-with-ttl-kwarg API reserved for T4's
-        # core/vault.py::lease_credential consumer; switching to it
+        # Sprint-1C wire contract (response wrapped in the Sprint-1C
+        # SecretLease shape below). transport.lease() is the T4-
+        # consumer API that wraps the raw hvac response in
+        # core.vault.CredentialLease for the dynamic-secret leasing
+        # path at core/vault.py::lease_credential; switching to it
         # here would change the Sprint-1C semantic + break the pinned
-        # TestLeaseRevoke::test_lease assertion. Pinned by
+        # TestLeaseRevoke::test_lease assertion. Post-Z2-Gap-Q (Sprint
+        # 10 round-9, 2026-05-24) both transport.read + transport.lease
+        # delegate to client.read(path) at the hvac level — the carve-
+        # out remains load-bearing because the two transport methods
+        # give the two distinct consumer-shape contracts independent
+        # forward-evolution surfaces. Pinned by
         # test_lease_uses_transport_read_not_transport_lease at T3.
         resp = await self._ensure_transport().read(path)
         if resp is None:

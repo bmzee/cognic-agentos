@@ -195,13 +195,20 @@ class TestT3TransportInjection:
     adapter's).
 
     Sprint 10 T3 user-locked carve-out: ``VaultAdapter.lease()``
-    MUST continue to use ``client.read(path)`` (now via
-    ``transport.read(path)``) — NOT ``transport.lease(path, ttl_s)``
-    which is the NEW dynamic-secret API reserved for T4's
-    ``core/vault.py::lease_credential``. Switching ``VaultAdapter.lease``
+    MUST continue to funnel through ``transport.read(path)`` — NOT
+    ``transport.lease(path, ttl_s)`` which is the T4-consumer API
+    reserved for ``core/vault.py::lease_credential`` (wraps the raw
+    hvac response in ``core.vault.CredentialLease``, NOT the
+    Sprint-1C ``SecretLease`` shape). Switching ``VaultAdapter.lease``
     to ``transport.lease`` would change the Sprint-1C wire contract
-    (read-with-SecretLease-shape → write-with-ttl-kwarg) and break
-    the pinned ``TestLeaseRevoke::test_lease`` assertion.
+    (SecretLease consumer shape → CredentialLease consumer shape)
+    and break the pinned ``TestLeaseRevoke::test_lease`` assertion.
+    Post-Z2-Gap-Q (Sprint 10 round-9, 2026-05-24) both
+    ``transport.read`` and ``transport.lease`` delegate to
+    ``client.read(path)`` at the hvac level — the carve-out remains
+    load-bearing because the two transport methods give the two
+    distinct consumer-shape contracts independent forward-evolution
+    surfaces.
     """
 
     def test_accepts_optional_transport_kwarg(self) -> None:
@@ -258,18 +265,20 @@ class TestT3TransportInjection:
     async def test_lease_uses_transport_read_not_transport_lease(self) -> None:
         """T3 #4 — USER-LOCKED CARVE-OUT pin (R0 review of T3 plan).
         ``VaultAdapter.lease()`` MUST funnel through
-        ``transport.read(path)`` — preserving the Sprint-1C
-        ``client.read(path)`` → ``SecretLease`` shape — and MUST NOT
-        funnel through ``transport.lease(path, ttl_s)`` (which is the
-        NEW dynamic-secret-write-with-ttl API reserved for T4's
-        ``core/vault.py::lease_credential`` consumer).
+        ``transport.read(path)`` — wrapping the response in the
+        Sprint-1C ``SecretLease`` shape — and MUST NOT funnel
+        through ``transport.lease(path, ttl_s)`` (which is the
+        T4-consumer API reserved for ``core/vault.py::lease_credential``;
+        wraps the raw hvac response in ``core.vault.CredentialLease``,
+        a distinct consumer-shape contract).
 
         Switching ``VaultAdapter.lease`` to ``transport.lease`` would
-        change the Sprint-1C wire contract from ``read`` to
-        ``write-with-ttl-kwarg`` and break the pinned
+        change the Sprint-1C consumer-shape contract (SecretLease →
+        CredentialLease) and break the pinned
         ``TestLeaseRevoke::test_lease`` mock expectation
-        (``mock.read.return_value = {...}`` → would silently no-op
-        because the adapter would call ``write`` instead).
+        (``transport.lease.assert_not_called()`` would fail, and the
+        adapter would return the T4 ``CredentialLease`` consumer
+        shape instead of the Sprint-1C ``SecretLease`` shape).
         """
         from unittest.mock import AsyncMock
 

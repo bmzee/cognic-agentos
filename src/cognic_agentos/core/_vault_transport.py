@@ -272,18 +272,49 @@ class VaultTransport:
         return await self._execute_with_retry(_write)
 
     async def lease(self, path: str, ttl_s: int) -> dict[str, Any] | None:
-        """Mint a dynamic-secret lease at ``path`` with the requested
-        TTL. Wraps :meth:`hvac.Client.write` with a ``ttl='<N>s'``
-        kwarg (dynamic-secret-backend convention: TTL encoded as a
-        '<seconds>s' string) via :func:`asyncio.to_thread` + bounded
-        retry. Returns the raw hvac response shape on success
-        (caller — :func:`cognic_agentos.core.vault.lease_credential`
-        at T4 — composes the :class:`CredentialLease` from this raw
-        response). Returns ``None`` if hvac returns ``None`` (rare
-        for dynamic-secret leases but possible)."""
+        """Mint a dynamic-secret lease at ``path``. Wraps
+        :meth:`hvac.Client.read` (HTTP ``GET /v1/<path>``) via
+        :func:`asyncio.to_thread` + bounded retry. Returns the raw
+        hvac response shape on success (caller —
+        :func:`cognic_agentos.core.vault.lease_credential` at T4 —
+        composes the :class:`CredentialLease` from this raw response).
+        Returns ``None`` if hvac returns ``None`` (rare for dynamic-
+        secret leases but possible).
+
+        **Z2 Gap Q amendment (Sprint 10 round-9, 2026-05-24).** Pre-
+        Gap-Q this method used ``client.write(path, ttl=f"{ttl_s}s")``
+        — POST ``/v1/<path>`` with a ``{"ttl": "900s"}`` body — under
+        the assumption it was the unified write-with-ttl dynamic-
+        secret shape across all Vault backends. Z2's live proof
+        execution against a real ``database/creds/<role>`` endpoint
+        returned HTTP 405 unsupported operation, surfacing that Vault's
+        dominant dynamic-secret endpoints (database/aws/gcp) are
+        GET-only. Only PKI (``pki/issue/<role>``) accepts POST-with-ttl
+        because it needs CN/SAN body params. Per spec §3.4 HTTP-verb
+        table + §3.5 implementation-shape note: Wave-1 default is the
+        read-style ``client.read(path)``; PKI write-style support is
+        future engine-specific work (would land as a separate
+        transport method e.g. ``lease_with_body(path, body)``, NOT a
+        runtime fallback-on-405 heuristic).
+
+        ``ttl_s`` is preserved on the method signature for caller
+        wire-protocol stability + for the ``CredentialLease.request.ttl_s``
+        audit-evidence projection, but is **informational at Wave 1** —
+        Vault's role-side ``default_ttl`` / ``max_ttl`` are authoritative,
+        and :attr:`CredentialLease.ttl_s_granted` reflects whatever
+        Vault returns in the response's ``lease_duration`` field.
+        Future Wave-2 engine-specific TTL enforcement (e.g. client-side
+        cap when ``ttl_s_granted > ttl_s`` requested) lands as a
+        separate amendment.
+        """
+        # ``ttl_s`` reserved per the spec §3.5 Wave-1 informational
+        # semantic; current implementation does not pass it to Vault.
+        # Explicit ``del`` matches the same reservation pattern used at
+        # ``core/vault.lease_credential``'s ``settings`` arg.
+        del ttl_s
 
         def _lease() -> dict[str, Any] | None:
-            result = self._ensure_client().write(path, ttl=f"{ttl_s}s")
+            result = self._ensure_client().read(path)
             return dict(result) if result is not None else None
 
         return await self._execute_with_retry(_lease)

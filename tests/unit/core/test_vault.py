@@ -17,8 +17,17 @@ CRITICAL CONTROL — `core/vault.py` is on the gate from day 1 by the
   at T6 collapses it to ``sandbox_credential_mint_failed_vault_unavailable``
   for closed-enum stability per spec §6.1 / §7.1 last row.
 * ``lease_credential`` calls ``transport.lease(secret_path, ttl_s)``
-  (the NEW dynamic-secret-write-with-ttl-kwarg API path); T4 IS the
-  consumer the T3 lease carve-out was reserved for.
+  — the read-style dynamic-secret lease path per the Z2 Gap Q
+  amendment (Sprint 10 round-9, 2026-05-24). ``ttl_s`` is informational
+  at Wave 1 (Vault's role-side ``default_ttl`` / ``max_ttl`` are
+  authoritative). T4 IS the consumer the T3 ``transport.lease``
+  carve-out was reserved for — the Sprint-1C ``VaultAdapter.lease``
+  funnels through ``transport.read`` (Sprint-1C ``SecretLease``
+  consumer shape) while T4's ``lease_credential`` funnels through
+  ``transport.lease`` (``CredentialLease`` consumer shape). Post-
+  Gap-Q both transport methods delegate to ``client.read(path)`` at
+  the hvac level; the carve-out remains load-bearing because the two
+  distinct consumer-shape contracts evolve independently.
 * ``revoke_credential`` calls ``transport.revoke(lease_id)``.
 * Token shape stays ``dict[str, str]`` passthrough — kernel does NOT
   normalise across backends (DB vs cloud vs PKI all surface their
@@ -317,12 +326,17 @@ class TestLeaseCredentialHappyPath:
 
     async def test_calls_transport_lease_with_secret_path_and_ttl_s(self) -> None:
         """T4 #17 — ``lease_credential`` calls
-        ``transport.lease(secret_path, ttl_s)`` — the NEW
-        dynamic-secret API path. T4 IS the consumer the T3 lease
-        carve-out was reserved for (Sprint-1C ``VaultAdapter.lease``
-        uses ``transport.read`` to preserve its own wire contract;
-        ``lease_credential`` uses ``transport.lease`` which is the
-        write-with-ttl-kwarg path)."""
+        ``transport.lease(secret_path, ttl_s)`` — the read-style
+        dynamic-secret lease path per Z2 Gap Q (Sprint 10 round-9,
+        2026-05-24). T4 IS the consumer the T3 ``transport.lease``
+        carve-out was reserved for: Sprint-1C ``VaultAdapter.lease``
+        funnels through ``transport.read`` (Sprint-1C ``SecretLease``
+        consumer shape); ``lease_credential`` funnels through
+        ``transport.lease`` (``CredentialLease`` consumer shape).
+        Post-Gap-Q both transport methods delegate to
+        ``client.read(path)`` at the hvac level; the distinct
+        method names persist so the two consumer-shape contracts can
+        evolve independently."""
         transport = _mock_transport(lease_return=_happy_lease_payload())
         await lease_credential(_request(ttl_s=1800), transport=transport, settings=_settings())
         transport.lease.assert_awaited_once_with("database/creds/payment-readonly", 1800)

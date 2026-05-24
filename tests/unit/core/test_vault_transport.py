@@ -145,16 +145,35 @@ class TestVaultTransportDomainMethods:
             await transport.write("secret/data/test", {"k": "v"})
         mock.write.assert_called_once_with("secret/data/test", k="v")
 
-    async def test_lease_writes_with_ttl_kwarg(self) -> None:
-        """T2 #7 — ``lease(path, ttl_s)`` wraps
-        ``client.write(path, ttl='<N>s')`` via ``asyncio.to_thread``
-        (dynamic-secret-backend convention: ttl encoded as
-        '<seconds>s' string). Raw hvac response returned — caller
-        normalises shape (e.g. core/vault.py::lease_credential
-        builds CredentialLease from the response)."""
+    async def test_lease_reads_via_hvac_client_read(self) -> None:
+        """T2 #7 (Z2 Gap Q round-9 amendment, 2026-05-24) —
+        ``lease(path, ttl_s)`` wraps ``client.read(path)`` via
+        ``asyncio.to_thread`` (HTTP ``GET /v1/<path>``). Raw hvac
+        response returned — caller normalises shape (e.g.
+        ``core/vault.py::lease_credential`` builds ``CredentialLease``
+        from the response).
+
+        Pre-Gap-Q this test asserted ``client.write(path, ttl='900s')``
+        per the legacy write-with-ttl assumption; Z2's live proof
+        against a real ``database/creds/<role>`` endpoint returned
+        HTTP 405 unsupported operation, surfacing that Vault's
+        dominant dynamic-secret endpoints (database/aws/gcp) are
+        GET-only. Per spec §3.4 HTTP-verb table + §3.5 implementation-
+        shape note: Wave-1 default is the read-style ``client.read(path)``;
+        ``ttl_s`` is informational at Wave 1 (Vault's role-side
+        ``default_ttl`` / ``max_ttl`` are authoritative).
+
+        Load-bearing pins:
+        * ``mock.read`` is called exactly once with the secret path.
+        * ``mock.write`` is NEVER called from the lease path (no
+          fallback-to-write-on-405 heuristic — PKI write-style support
+          is future engine-specific work, not a runtime fallback).
+        * ``ttl_s`` is NOT forwarded as any kwarg to hvac (informational
+          per spec §3.5).
+        """
         with patch("cognic_agentos.core._vault_transport.hvac.Client") as cls:
             mock = MagicMock()
-            mock.write.return_value = {
+            mock.read.return_value = {
                 "lease_id": "L-1",
                 "lease_duration": 900,
                 "data": {"username": "u", "password": "p"},
@@ -162,7 +181,11 @@ class TestVaultTransportDomainMethods:
             cls.return_value = mock
             transport = _make_transport()
             result = await transport.lease("database/creds/payment-readonly", 900)
-        mock.write.assert_called_once_with("database/creds/payment-readonly", ttl="900s")
+        mock.read.assert_called_once_with("database/creds/payment-readonly")
+        # No fallback-to-write on the lease path — Gap Q load-bearing
+        # pin. PKI write-style support is future engine-specific work
+        # (separate transport method), NOT a runtime fallback.
+        mock.write.assert_not_called()
         assert result is not None
         assert result["lease_id"] == "L-1"
         assert result["lease_duration"] == 900
