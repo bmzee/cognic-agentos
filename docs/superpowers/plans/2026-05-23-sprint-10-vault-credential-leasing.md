@@ -76,7 +76,7 @@ tests/unit/db/test_vault_adapter.py                           (T3 — refactor-i
 tests/unit/test_config.py                                     (T2 + T4 + T8 — new settings tests)
 tests/unit/sandbox/test_admission_pipeline.py                 (T7 — backward-compat regression)
 tests/unit/sandbox/test_policy_shape.py                       (T7 — bump SandboxRefusalReason count guard 21 → 22 for `sandbox_credential_request_tenant_mismatch`; T9 bumps it again 22 → 26)
-tests/unit/sandbox/test_audit.py                              (T9 — new payload tests)
+tests/unit/sandbox/test_audit_event_taxonomy.py               (T9 — new payload tests)
 tests/unit/sandbox/backends/test_docker_sibling_lifecycle.py  (T10 — create/destroy threading)
 tests/unit/sandbox/backends/test_kubernetes_pod_lifecycle.py  (T10 — create/destroy threading)
 tests/unit/tools/test_check_critical_coverage.py              (Z1 — bump _EXPECTED_ENTRY_COUNT 81 → 84)
@@ -1661,9 +1661,15 @@ NOTE: spec §6.1 enumerates **5 new Sprint-10 refusal values** (21 → 26 net ac
 
 The final-state count assertion below pins `len(actual) == 26` because it is a destination check, not a delta. Bisection-invariant compliance: T9's commit lints clean on its own (the 4 new Literal entries have no orphaned `raise SandboxLifecycleRefused(value, ...)` callers — the 3 mint-failure callers land at T10; the TTL-cap value has no caller by design).
 
-**Helper input-shape lock (Step 2 anticipation):** The 3 new typed helpers accept a single positional `lease: CredentialLease` argument + the standard `decision_history_store` + tenant/actor/trace/session keyword-only args (mirrors the kwarg shape of the Sprint 8.5 T2 helpers). `sandbox_lifecycle_lease_revoke_failed` additionally accepts `vault_error: str` + `auto_expiry_at_iso: str` keyword-only args. **Why `CredentialLease` single positional vs the Sprint 8.5 T2 kwargs-only pattern:** all 10 always-fields in spec §6.2 are reachable from one `CredentialLease` reference (the dataclass at `core/vault.py:152` nests `request: VaultLeaseRequest`, which nests `actor_ref: VaultLeaseActorRef`); accepting separate kwargs would force T10's backend create()/destroy() call sites into 10-kwarg blocks per emit + open a bug class where a caller passes a `tenant_id` independent of `request.tenant_id`. The Sprint 8.5 T2 helpers couldn't use this pattern because their inputs were unrelated values (`checkpoint_id` + `label` + `policy_digest`); the Sprint-10 helpers naturally share one dataclass.
+**Helper input-shape lock (Step 2 anticipation):** The 3 new typed helpers accept a single positional `lease: CredentialLease` argument + the standard `decision_history_store` + `trace_id` + `session_id` keyword-only args. **`tenant_id` and `actor_id` are DERIVED inside the helper from `lease.request.tenant_id` and `lease.request.actor_ref.actor_subject`** (NOT accepted as separate kwargs). `sandbox_lifecycle_lease_revoke_failed` additionally accepts `vault_error: str` keyword-only (the only field not derivable from `CredentialLease` — it carries the Vault HTTP error string the backend captured).
 
-**Payload contract per spec §6.2:** 10 always-fields on every lease event (lease_id, request.secret_path, request.scope_label, request.tenant_id, request.actor_ref.actor_subject, request.actor_ref.actor_type, request.ttl_s, lease.ttl_s_granted, lease.minted_at as tz-aware ISO string, lease.expires_at as tz-aware ISO string) + `session_id` threaded by `emit_sandbox_event` = 11 keys on `lease_minted` / `lease_revoked` chain rows. `lease_revoke_failed` adds 2 more (`vault_error` + `auto_expiry_at`) = 13 keys. Token contents NEVER appear on the chain row; examiners trace by `lease_id` + `secret_path` + `scope_label`.
+**Why derive the chain-metadata tenant_id + actor_id from the lease:** the helper sets BOTH `DecisionRecord.tenant_id` (chain metadata) AND `payload["tenant_id"]` (chain-payload evidence) — if those two sources are independent kwargs, a caller can pass `DecisionRecord.tenant_id="A"` while the lease carries `request.tenant_id="B"` and the chain row goes out with contradictory evidence (the bug class T9-review-round-4 P1 caught). Deriving from one source by construction closes the bug class — there is no caller-supplied channel for tenant_id / actor_id at the helper boundary.
+
+**Why derive `auto_expiry_at` from `lease.expires_at`:** spec §6.2 line 624 says `auto_expiry_at` IS `expires_at` (surfaced separately for the examiner's "this lease should auto-expire on its own" claim). Accepting `auto_expiry_at_iso` as a caller kwarg would re-open the silent-lie bug class (caller could pass an arbitrary string disagreeing with `expires_at`). If a future scenario needs server-canonical expiry differing from client-computed value, that requires a spec/plan amendment + a validating kwarg with `parse + tz-aware + cross-check` enforcement.
+
+**Why `CredentialLease` single positional vs the Sprint 8.5 T2 kwargs-only pattern:** all 10 always-fields in spec §6.2 are reachable from one `CredentialLease` reference (the dataclass at `core/vault.py:152` nests `request: VaultLeaseRequest`, which nests `actor_ref: VaultLeaseActorRef`); accepting separate kwargs would force T10's backend create()/destroy() call sites into 10-kwarg blocks per emit + open the contradictory-evidence bug class. The Sprint 8.5 T2 helpers couldn't use this pattern because their inputs were unrelated values (`checkpoint_id` + `label` + `policy_digest`); the Sprint-10 helpers naturally share one dataclass.
+
+**Payload contract per spec §6.2:** 10 always-fields on every lease event (lease_id, request.secret_path, request.scope_label, request.tenant_id, request.actor_ref.actor_subject, request.actor_ref.actor_type, request.ttl_s, lease.ttl_s_granted, lease.minted_at as tz-aware ISO string, lease.expires_at as tz-aware ISO string) + `session_id` threaded by `emit_sandbox_event` = 11 keys on `lease_minted` / `lease_revoked` chain rows. `lease_revoke_failed` adds 2 more (`vault_error` caller-supplied + `auto_expiry_at` derived from `lease.expires_at`) = 13 keys. Token contents NEVER appear on the chain row; examiners trace by `lease_id` + `secret_path` + `scope_label`.
 
 - [ ] **Step 1: Write failing tests (RED) — payload-shape + Literal extensions**
 
@@ -1847,8 +1853,6 @@ async def sandbox_lifecycle_lease_minted(
     decision_history_store: DecisionHistoryStore,
     *,
     lease: "CredentialLease",
-    tenant_id: str,
-    actor_id: str,
     trace_id: str,
     session_id: str,
 ) -> tuple[uuid.UUID, bytes]:
@@ -1858,6 +1862,12 @@ async def sandbox_lifecycle_lease_minted(
     ``mint_lease()`` round-trip. Payload-shape contract per spec §6.2:
     10 always-fields (lease_id + 6 request projections + 3 lease
     projections) + ``session_id`` threaded by ``emit_sandbox_event``.
+
+    ``DecisionRecord.tenant_id`` AND ``DecisionRecord.actor_id`` are
+    DERIVED from ``lease.request.tenant_id`` +
+    ``lease.request.actor_ref.actor_subject`` — NOT accepted as
+    separate kwargs. The derive closes the contradictory-evidence
+    bug class by construction.
 
     ``minted_at`` + ``expires_at`` rendered as tz-aware ISO 8601 strings
     (the dataclass fields are ``datetime`` per ``core/vault.py:170-172``;
@@ -1870,8 +1880,8 @@ async def sandbox_lifecycle_lease_minted(
     return await emit_sandbox_event(
         decision_history_store,
         event="sandbox.lifecycle.lease_minted",
-        tenant_id=tenant_id,
-        actor_id=actor_id,
+        tenant_id=lease.request.tenant_id,
+        actor_id=lease.request.actor_ref.actor_subject,
         trace_id=trace_id,
         session_id=session_id,
         payload=_project_lease_evidence_payload(lease),
@@ -1900,7 +1910,7 @@ def _project_lease_evidence_payload(lease: "CredentialLease") -> dict[str, Any]:
     }
 ```
 
-Mirror `sandbox_lifecycle_lease_revoked` (same projection, different event-type). `sandbox_lifecycle_lease_revoke_failed` adds `vault_error: str` + `auto_expiry_at_iso: str` kwargs + extends the projection with those two keys.
+Mirror `sandbox_lifecycle_lease_revoked` (same projection, same chain-metadata derive, different event-type). `sandbox_lifecycle_lease_revoke_failed` adds a single `vault_error: str` kwarg (the only field not derivable from CredentialLease) and extends the projection with TWO keys: `vault_error` (caller-supplied) + `auto_expiry_at` (DERIVED from `lease.expires_at.isoformat()` per spec §6.2 line 624 — NOT a caller-supplied kwarg, which would re-open the silent-lie bug class).
 
 **2c.** In `src/cognic_agentos/sandbox/__init__.py` — extend the `cognic_agentos.sandbox.audit` import group at `:31-38` + the `__all__` list at `:240-243` with the 3 new helper names (mirrors the Sprint 8.5 T2 re-export pattern landed there).
 

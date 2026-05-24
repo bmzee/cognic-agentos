@@ -625,7 +625,7 @@ Each event's chain-row payload carries:
 
 **Token contents NEVER appear on the chain row.** Examiners trace by `lease_id` + `secret_path` + `scope_label`.
 
-ISO 42001 tags: per ADR-006 §A.6.2.5 (sandbox lifecycle events), all 3 new values join the existing 12 under the `A.6.2.5` tag. The audit-event taxonomy test at `tests/unit/sandbox/test_audit.py` extends to cover the new 3.
+ISO 42001 tags: per ADR-006 §A.6.2.5 (sandbox lifecycle events), all 3 new values join the existing 12 under the `A.6.2.5` tag. The audit-event taxonomy test at `tests/unit/sandbox/test_audit_event_taxonomy.py` extends to cover the new 3.
 
 ### 6.3 `SandboxPolicyViolationReason` — UNCHANGED at 6
 
@@ -750,7 +750,7 @@ Mirror Sprint 9.5 Z2's real-cosign two-layer proof pattern:
 |---|---|
 | `tests/unit/test_config.py` | 3-4 tests for new Sprint 10 settings (defaults + bounds + env-var input + invalid-value refusal) |
 | `tests/unit/sandbox/test_admission_pipeline.py` | Backward-compat: existing tests pass with default `requires_credentials=()` (zero impact) |
-| `tests/unit/sandbox/test_audit.py` | 3 new payload-shape tests for the new lifecycle events |
+| `tests/unit/sandbox/test_audit_event_taxonomy.py` | 3 new payload-shape tests for the new lifecycle events |
 | `tests/unit/db/test_vault_adapter.py` | Refactor-impact tests: `VaultAdapter` delegates hvac calls to the shared `VaultTransport`; backward-compat for `__init__(addr, token, namespace)` 3-arg shape (no `transport=` kwarg required for existing callers; defaults to lazily building one). |
 | `tests/unit/sandbox/backends/test_docker_sibling_lifecycle.py` | NEW backend-side test: `create(requires_credentials=[...])` mints + injects tokens into container env; destroy revokes |
 | `tests/unit/sandbox/backends/test_kubernetes_pod_lifecycle.py` | Same as above for K8s backend |

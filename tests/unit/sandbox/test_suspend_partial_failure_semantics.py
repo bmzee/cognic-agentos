@@ -85,6 +85,9 @@ class _StubSettings:
     sandbox_per_tenant_max_cpu: float = 4.0
     sandbox_per_tenant_max_memory: int = 4096
     sandbox_per_tenant_max_walltime: float = 300.0
+    # Sprint 10 T8 added — admit_policy Step 9 threads
+    # input.kernel_default.max_credential_ttl_s into Rego input.
+    sandbox_kernel_default_max_credential_ttl_s: int = 900
 
 
 def _valid_policy() -> SandboxPolicy:

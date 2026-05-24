@@ -29,24 +29,23 @@ from cognic_agentos.sandbox import (
 class TestClosedEnumPartitionInvariants:
     """Pin the wire-protocol-public closed-enum values + counts."""
 
-    def test_sandbox_refusal_reason_has_exactly_22_values(self) -> None:
+    def test_sandbox_refusal_reason_has_exactly_26_values(self) -> None:
         # Sprint 8.5 T1 extended 15 → 21 (6 new wake-time arms per spec §3.3).
         # Sprint 10 T7 extended 21 → 22 (1 kernel-boundary cross-tenant guard
         # per Sprint-10 spec §4.1 — `sandbox_credential_request_tenant_mismatch`).
-        # The remaining 4 Sprint-10 values are lifted into the Literal at T9
-        # (count guard bumps 22 → 26 at the T9 commit). 3
-        # `sandbox_credential_mint_failed_*` values gain their Stage-2 raise
-        # sites at T10's backend `create()` post-admission per spec §7.1; the
-        # 4th value `sandbox_credential_ttl_exceeds_tenant_max` is Literal-only
-        # — the cap continues to surface as `sandbox_policy_rego_denied`
-        # because `OPAEngine.Decision` has no per-rule-name channel (Rego-reason
-        # surfacing deferred to a future task per spec §7.3 amendment). T7
-        # owns ONLY the value its own raise statement needs, per the
-        # bisection-invariant doctrine (every commit on the branch must lint
-        # clean on its own).
+        # Sprint 10 T9 extended 22 → 26 (4 new values lifted into the Literal:
+        # 3 `sandbox_credential_mint_failed_*` values + 1
+        # `sandbox_credential_ttl_exceeds_tenant_max`). The 3 mint-failure
+        # values gain Stage-2 raise sites at T10's backend `create()`
+        # post-admission per Sprint-10 spec §7.1; the TTL-cap value is
+        # Literal-only — the cap continues to surface as
+        # `sandbox_policy_rego_denied` because `OPAEngine.Decision` has no
+        # per-rule-name channel (Rego-reason surfacing deferred to a future
+        # task per Sprint-10 spec §7.3 amendment).
         values = typing.get_args(SandboxRefusalReason)
-        assert len(values) == 22, (
-            f"SandboxRefusalReason must have 22 values per spec §4.1 + 8.5 §3.3 + 10 §4.1; "
+        assert len(values) == 26, (
+            f"SandboxRefusalReason must have 26 values per spec §4.1 + "
+            f"8.5 §3.3 + 10 §4.1 + 10 §6.1; "
             f"found {len(values)}: {values}"
         )
 
@@ -60,11 +59,14 @@ class TestClosedEnumPartitionInvariants:
             f"T10c R1 P1.2; found {len(values)}: {values}"
         )
 
-    def test_sandbox_lifecycle_event_has_exactly_12_values(self) -> None:
+    def test_sandbox_lifecycle_event_has_exactly_15_values(self) -> None:
         # Sprint 8.5 T1 extended 8 → 12 (4 new events per spec §3.3).
+        # Sprint 10 T9 extended 12 → 15 (3 new lease lifecycle events per
+        # Sprint-10 spec §6.2: sandbox.lifecycle.lease_minted /
+        # .lease_revoked / .lease_revoke_failed).
         values = typing.get_args(SandboxLifecycleEvent)
-        assert len(values) == 12, (
-            f"SandboxLifecycleEvent must have 12 values per spec §4.3 + 8.5 §3.3; "
+        assert len(values) == 15, (
+            f"SandboxLifecycleEvent must have 15 values per spec §4.3 + 8.5 §3.3 + 10 §6.2; "
             f"found {len(values)}: {values}"
         )
 
@@ -85,18 +87,17 @@ class TestClosedEnumPartitionInvariants:
         assert "sandbox.warm_pool.precreated" in events
 
     def test_sandbox_refusal_reason_canonical_values_present(self) -> None:
-        """Spot-check the 22-value Literal contains the canonical set
+        """Spot-check the 26-value Literal contains the canonical set
         documented in spec §4.1 (8A 15 vocab) + spec §3.3 (8.5 6 new
         wake-time arms) + Sprint-10 spec §4.1 (T7 1 new kernel-boundary
-        cross-tenant guard). The remaining 4 Sprint-10 values are lifted
-        into the Literal at T9 (this set bumped 22 → 26 at the T9
-        commit). 3 `sandbox_credential_mint_failed_*` values gain
+        cross-tenant guard) + Sprint-10 spec §6.1 (T9 4 new values: 3
+        mint-failure + 1 TTL-cap). The 3 mint-failure values gain
         Stage-2 raise sites at T10's backend `create()` post-admission
-        per spec §7.1; the 4th value `sandbox_credential_ttl_exceeds_tenant_max`
-        is Literal-only — the cap continues to surface as
-        `sandbox_policy_rego_denied` (Rego-reason surfacing through
-        `OPAEngine.Decision` deferred to a future task per spec §7.3
-        amendment)."""
+        per Sprint-10 spec §7.1; the TTL-cap value
+        `sandbox_credential_ttl_exceeds_tenant_max` is Literal-only —
+        the cap continues to surface as `sandbox_policy_rego_denied`
+        (Rego-reason surfacing through `OPAEngine.Decision` deferred to
+        a future task per Sprint-10 spec §7.3 amendment)."""
         values = set(typing.get_args(SandboxRefusalReason))
         expected = {
             # Sprint 8A — 15 values
@@ -126,12 +127,23 @@ class TestClosedEnumPartitionInvariants:
             # (Sprint-10 spec §4.1; raised by admit_policy when
             # VaultLeaseRequest.tenant_id != actor.tenant_id).
             "sandbox_credential_request_tenant_mismatch",
+            # Sprint 10 T9 — 3 mint-failure values (Stage-2 raise sites
+            # at T10's backend create() per Sprint-10 spec §7.1):
+            "sandbox_credential_mint_failed_vault_unavailable",
+            "sandbox_credential_mint_failed_secret_path_unknown",
+            "sandbox_credential_mint_failed_auth_denied",
+            # Sprint 10 T9 — 1 TTL-cap value (Literal-only; no T9/T10
+            # Stage-2 raise site — cap continues to surface as
+            # sandbox_policy_rego_denied per Sprint-10 spec §7.3
+            # amendment).
+            "sandbox_credential_ttl_exceeds_tenant_max",
         }
         assert values == expected, f"drift: {values ^ expected}"
 
     def test_sandbox_lifecycle_event_canonical_values_present(self) -> None:
-        """Spot-check the 12-value Literal contains the canonical set
-        documented in spec §4.3 (8A 8 events) + spec §3.3 (8.5 4 new).
+        """Spot-check the 15-value Literal contains the canonical set
+        documented in spec §4.3 (8A 8 events) + spec §3.3 (8.5 4 new) +
+        Sprint-10 spec §6.2 (T9 3 new lease lifecycle events).
 
         Sprint 8.5 T1 introduces this assertion (mirrors the
         SandboxRefusalReason canonical-values pin); locks the lifecycle
@@ -157,6 +169,12 @@ class TestClosedEnumPartitionInvariants:
             "sandbox.lifecycle.suspended",
             "sandbox.lifecycle.woken",
             "sandbox.lifecycle.checkpoint_purged",
+            # Sprint 10 T9 — 3 new lease lifecycle events per Sprint-10
+            # spec §6.2 (emitted from SandboxBackend.create() +
+            # .destroy() at T10).
+            "sandbox.lifecycle.lease_minted",
+            "sandbox.lifecycle.lease_revoked",
+            "sandbox.lifecycle.lease_revoke_failed",
         }
         assert values == expected, f"drift: {values ^ expected}"
 

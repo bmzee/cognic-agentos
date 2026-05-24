@@ -39,9 +39,9 @@ from typing import TYPE_CHECKING, Literal, NewType, Protocol, runtime_checkable
 # Closed-enum vocabularies — wire-protocol-public per spec §4
 # ---------------------------------------------------------------------------
 
-#: 22-value closed-enum for sandbox lifecycle refusals (Sprint 8A spec
-#: §4.1 + Sprint 8.5 spec §3.3 extension + Sprint 10 spec §4.1 T7).
-#: Covers:
+#: 26-value closed-enum for sandbox lifecycle refusals (Sprint 8A spec
+#: §4.1 + Sprint 8.5 spec §3.3 extension + Sprint 10 spec §4.1 T7 +
+#: Sprint 10 spec §6.1 T9). Covers:
 #:
 #: * 15 admission/create refusals (Sprint 8A) — `admit_policy` + Stage-1
 #:   shape validation + backend availability + warm-pool drain.
@@ -58,18 +58,30 @@ from typing import TYPE_CHECKING, Literal, NewType, Protocol, runtime_checkable
 #:   owned by ``admit_policy`` because ``VaultLeaseRequest`` itself
 #:   cannot enforce it at construction time (the architectural arrow
 #:   runs ``sandbox → core``, never the other direction).
-#:
-#: Sprint 10 T9 will extend this Literal again 22 → 26: 3
-#: ``sandbox_credential_mint_failed_*`` reasons (matching Stage-2 raise
-#: sites land at T10's backend ``create()`` post-admission per spec
-#: §7.1) + 1 ``sandbox_credential_ttl_exceeds_tenant_max`` (Literal
-#: entry only; no T9/T10 Stage-2 raise site — the cap continues to
-#: surface as ``sandbox_policy_rego_denied`` because
-#: ``OPAEngine.Decision`` carries no per-rule-name channel; Rego-reason
-#: surfacing is deferred to a future task per spec §7.3 amendment).
-#: T7 owns ONLY the value its own raise statement needs per the
-#: bisection-invariant doctrine (every commit on the branch must lint
-#: clean on its own).
+#: * 3 Vault mint-failure refusals (Sprint 10 T9 Literal; Sprint 10 T10
+#:   Stage-2 raise sites at backend ``create()`` post-admission per
+#:   Sprint-10 spec §7.1) — ``sandbox_credential_mint_failed_vault_unavailable``
+#:   (Vault 5xx / network failure / ``VaultProtocolError`` collapse) /
+#:   ``sandbox_credential_mint_failed_secret_path_unknown`` (Vault 404
+#:   on secret_path) / ``sandbox_credential_mint_failed_auth_denied``
+#:   (Vault 403 on secret_path / auth method denied). T9 lifts the
+#:   Literal entries only; T10 wires the create-time mapping from the
+#:   ``core/vault`` 4-value exception taxonomy.
+#: * 1 Rego TTL-cap refusal (Sprint 10 T9 Literal ONLY; **NO Stage-2
+#:   raise site at T9 or T10**) — ``sandbox_credential_ttl_exceeds_tenant_max``.
+#:   The ``policies/_default/sandbox.rego`` rule 6 fires + denies, but
+#:   ``OPAEngine.Decision`` (at ``core/policy/engine.py:148-150``)
+#:   exposes only ``allow`` + the decision-point-derived generic
+#:   ``reasoning`` with no per-rule-name channel, so admission.py's
+#:   single generic arm at ``admission.py:601-603`` continues to
+#:   surface the cap as ``sandbox_policy_rego_denied``. Rego-reason
+#:   surfacing through ``OPAEngine.Decision`` is deferred to a future
+#:   task per Sprint-10 spec §7.3 amendment (the follow-up adds either
+#:   a per-rule deny-set carried via ``decision_data`` or a
+#:   ``rule_name`` channel on ``Decision``, plus the admission.py
+#:   dispatch wiring). T9's bare Literal lift gives that future task a
+#:   stable closed-enum target without imposing wire-protocol-public
+#:   engine work in Sprint 10.
 #:
 #: Drift between this Literal and consumer error-handling is caught at
 #: module load by the partition-invariant test at
@@ -107,14 +119,38 @@ SandboxRefusalReason = Literal[
     # Sprint 10 T7 — kernel-boundary cross-tenant request guard per
     # Sprint-10 spec §4.1. Raised by admit_policy when any
     # VaultLeaseRequest in ``requires_credentials`` has
-    # ``tenant_id != actor.tenant_id``. The other 4 Sprint-10 reasons
-    # (3 mint-failure + 1 TTL cap) land in T9 at the create/mint
-    # boundary that raises them; T7 owns ONLY this value because the
-    # admit_policy raise statement needs it and every intermediate
+    # ``tenant_id != actor.tenant_id``. The remaining 4 Sprint-10
+    # reasons are lifted by T9 below; T7 owns ONLY this value because
+    # the admit_policy raise statement needs it and every intermediate
     # commit on the branch must lint clean on its own (mypy treats
     # SandboxLifecycleRefused.reason as the SandboxRefusalReason
     # Literal — raising a not-yet-declared value would fail mypy).
     "sandbox_credential_request_tenant_mismatch",
+    # Sprint 10 T9 — 3 Vault mint-failure values per Sprint-10 spec
+    # §6.1 + §7.1. Literal entries land at T9; the matching Stage-2
+    # raise sites land at T10's backend ``create()`` post-admission
+    # (the create-time mapping from the ``core/vault`` 4-value
+    # exception taxonomy: ``VaultUnavailable`` /
+    # ``VaultPathNotFound`` / ``VaultAuthDenied`` /
+    # ``VaultProtocolError`` collapse). T9's commit lints clean
+    # because mypy does not reject Literal members that lack callers.
+    "sandbox_credential_mint_failed_vault_unavailable",
+    "sandbox_credential_mint_failed_secret_path_unknown",
+    "sandbox_credential_mint_failed_auth_denied",
+    # Sprint 10 T9 — 1 Rego TTL-cap value per Sprint-10 spec §6.1.
+    # **Literal-only at T9; NO Stage-2 raise site at T9 or T10.** The
+    # ``policies/_default/sandbox.rego`` rule 6 fires + denies, but
+    # ``OPAEngine.Decision`` (at ``core/policy/engine.py:148-150``)
+    # exposes only ``allow`` + the decision-point-derived generic
+    # ``reasoning`` with no per-rule-name channel that could
+    # distinguish "rule 6 fired vs rule 5 fired" — so admission.py's
+    # single generic arm at ``admission.py:601-603`` continues to
+    # surface the cap as ``sandbox_policy_rego_denied``. Rego-reason
+    # surfacing through ``OPAEngine.Decision`` is deferred to a
+    # future task per Sprint-10 spec §7.3 amendment. T9's bare
+    # Literal lift gives that future task a stable closed-enum target
+    # without imposing wire-protocol-public engine work in Sprint 10.
+    "sandbox_credential_ttl_exceeds_tenant_max",
 ]
 
 #: 6-value closed-enum for runtime policy violations during ``exec``
@@ -146,14 +182,20 @@ SandboxPolicyViolationReason = Literal[
     "egress_audit_unreadable",
 ]
 
-#: 12-value closed-enum for audit chain-row decision_type discriminator
-#: (Sprint 8A spec §4.3 + Sprint 8.5 spec §3.3 extension). Covers:
+#: 15-value closed-enum for audit chain-row decision_type discriminator
+#: (Sprint 8A spec §4.3 + Sprint 8.5 spec §3.3 + Sprint 10 spec §6.2).
+#: Covers:
 #:
 #: * 8 Sprint-8A lifecycle events (created / exec_completed / destroyed
 #:   / refused / policy.violated / warm_pool.precreated / .checked_out
 #:   / .drained).
 #: * 4 Sprint-8.5 events (checkpointed / suspended / woken /
 #:   checkpoint_purged).
+#: * 3 Sprint-10 lease lifecycle events (lease_minted / lease_revoked
+#:   / lease_revoke_failed) — emitted from ``SandboxBackend.create()``
+#:   post-admission + ``destroy()`` per Sprint-10 spec §4.2 + §4.3 +
+#:   §6.2. Typed helpers live at ``sandbox/audit.py`` per the Sprint
+#:   8.5 T2 typed-helper pattern; backend call sites land at T10.
 #:
 #: Tombstoning is a STORAGE artifact NOT a lifecycle event — destroy()
 #: reuses 8A's ``sandbox.lifecycle.destroyed`` with 2 new conditional
@@ -180,6 +222,19 @@ SandboxLifecycleEvent = Literal[
     "sandbox.lifecycle.suspended",
     "sandbox.lifecycle.woken",
     "sandbox.lifecycle.checkpoint_purged",
+    # Sprint 10 T9 — 3 new lease lifecycle events per Sprint-10 spec
+    # §6.2. lease_minted emitted from SandboxBackend.create() per
+    # successful mint_lease() round-trip (T10); lease_revoked emitted
+    # from SandboxBackend.destroy() per successful revoke round-trip
+    # (T10); lease_revoke_failed emitted from destroy() per failed
+    # revoke (fail-soft per spec §7.2). Typed helpers at
+    # ``sandbox/audit.py`` enforce the 10-key always-payload contract
+    # (lease_minted / lease_revoked: 10 fields + session_id;
+    # lease_revoke_failed: 10 fields + session_id + vault_error +
+    # auto_expiry_at).
+    "sandbox.lifecycle.lease_minted",
+    "sandbox.lifecycle.lease_revoked",
+    "sandbox.lifecycle.lease_revoke_failed",
 ]
 
 
