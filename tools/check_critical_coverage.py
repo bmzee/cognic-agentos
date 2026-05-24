@@ -1391,15 +1391,17 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     #     the integration tests of ``backends/docker_sibling.py``. CC
     #     risk covered upstream; promoting here would measure runtime-
     #     import + delegation lines only.
-    #   * ``sandbox/credentials.py`` — re-export shim (38 lines; zero
-    #     new logic) per the ``feedback_consumer_owned_protocol_for_unlanded_dep``
-    #     resolution. The canonical home of ``CredentialAdapter`` +
-    #     ``KernelDefaultCredentialAdapter`` is ``sandbox/admission.py``
-    #     (which IS on the gate); ``sandbox/credentials.py`` re-exports
-    #     them so Sprint 10's real ``VaultCredentialAdapter`` can
-    #     replace the canonical-home module without rewriting consumers
-    #     that import from ``sandbox.credentials``. Sprint 10's real
-    #     adapter goes ON the gate when it lands.
+    #
+    # NOTE — ``sandbox/credentials.py`` was an off-gate Sprint 8A
+    # carve-out (re-export shim covering the canonical home at
+    # ``sandbox/admission.py``) but moved ON the gate at Sprint 10 Z1
+    # alongside the real ``VaultCredentialAdapter`` implementation,
+    # executing the long-standing "Sprint 10's real adapter goes ON
+    # the gate when it lands" promise. The Z1 promotion entry lives
+    # below in the Sprint 10 Z1 section; the matching test-suite pin
+    # is ``test_sprint_10_modules_present_with_standard_floors`` +
+    # the removal from ``_SPRINT_8A_OFF_GATE_MODULES`` at
+    # ``tests/unit/tools/test_check_critical_coverage.py``.
     ("src/cognic_agentos/sandbox/protocol.py", 0.95, 0.90),
     ("src/cognic_agentos/sandbox/policy.py", 0.95, 0.90),
     ("src/cognic_agentos/sandbox/admission.py", 0.95, 0.90),
@@ -1460,8 +1462,10 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     #     "re-gate-ladder after auto-fix" one).
     #
     # OFF the durable gate per Doctrine F (with explicit carve-out
-    # rationale; same precedent as Sprint 8A's
-    # ``sandbox/audit.py`` + ``sandbox/credentials.py``):
+    # rationale; same precedent as Sprint 8A's ``sandbox/audit.py``;
+    # the Sprint-8A ``sandbox/credentials.py`` carve-out was promoted
+    # at Sprint 10 Z1 alongside the real ``VaultCredentialAdapter``,
+    # so it no longer applies as an off-gate precedent):
     #
     #   * ``sandbox/backend_factory.py`` — pure selection seam (130 LoC).
     #     The wire-protocol-public contract IS the
@@ -1748,6 +1752,49 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     ("src/cognic_agentos/models/storage.py", 0.95, 0.90),
     ("src/cognic_agentos/models/trust.py", 0.95, 0.90),
     ("src/cognic_agentos/portal/api/models/lifecycle_routes.py", 0.95, 0.90),
+    # Sprint 10 Z1 — Vault credential-leasing critical-controls
+    # quartet. All 4 ride the same single strict 95% line / 90%
+    # branch floor as the modules above:
+    #
+    #   * ``core/vault.py`` (T4) — dynamic credential leasing
+    #     primitive. ``core/`` stop-rule per AGENTS.md L48; owns
+    #     the wire-public 4-value Vault exception taxonomy
+    #     (``VaultUnavailable`` / ``VaultPathNotFound`` /
+    #     ``VaultAuthDenied`` / ``VaultProtocolError``) that
+    #     drives the sandbox-side closed-enum collapse.
+    #
+    #   * ``core/_vault_transport.py`` (T2) — shared hvac
+    #     transport (read/write/lease/revoke + retry + auth
+    #     state). Carries auth/retry/connection management for
+    #     Vault; ``core/`` stop-rule by automatic rule.
+    #
+    #   * ``sandbox/credentials.py`` (T6) — real
+    #     ``VaultCredentialAdapter`` implementing the
+    #     ``CredentialAdapter`` Protocol's ``mint_lease`` +
+    #     ``revoke_lease`` extension. Executes the AGENTS.md
+    #     L188 off-gate → on-gate promotion promise that was
+    #     reserved at Sprint 8A.
+    #
+    #   * ``sandbox/backends/_shared_credentials.py`` (T10 K8s
+    #     round-2 Gap I) — dependency-neutral cross-backend
+    #     Vault exception → ``SandboxRefusalReason`` closed-
+    #     enum mapping table. Wire-protocol-public artifact
+    #     owner per Round-7 Gap O — Docker + K8s MUST agree on
+    #     the mapping (drift = wire-protocol regression where
+    #     the same Vault exception surfaces as different refusal
+    #     reasons to bank-overlay consumers). Doctrinal fit is
+    #     wire-public-artifact owner (like ``core/canonical.py``,
+    #     ON-gate), NOT consumer-owned helper (like
+    #     ``sandbox/backends/_shared_exec.py``, OFF-gate per
+    #     Doctrine F). The Doctrine F framing does NOT apply
+    #     because ``_shared_credentials.py`` is genuinely
+    #     cross-backend infrastructure — both backends import
+    #     symmetrically from a neutral location, not one-
+    #     backend-owns-and-extracts.
+    ("src/cognic_agentos/core/vault.py", 0.95, 0.90),
+    ("src/cognic_agentos/core/_vault_transport.py", 0.95, 0.90),
+    ("src/cognic_agentos/sandbox/credentials.py", 0.95, 0.90),
+    ("src/cognic_agentos/sandbox/backends/_shared_credentials.py", 0.95, 0.90),
 )
 
 
