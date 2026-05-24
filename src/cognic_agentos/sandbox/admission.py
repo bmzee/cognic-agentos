@@ -51,6 +51,7 @@ from cognic_agentos.sandbox.protocol import SandboxLifecycleRefused
 if TYPE_CHECKING:
     from cognic_agentos.core.config import Settings
     from cognic_agentos.core.policy.engine import OPAEngine
+    from cognic_agentos.core.vault import CredentialLease, VaultLeaseRequest
     from cognic_agentos.portal.rbac.actor import Actor
 
 
@@ -94,17 +95,50 @@ class CatalogProtocol(Protocol):
 
 @runtime_checkable
 class CredentialAdapter(Protocol):
-    """Structural contract for runtime secret retrieval. Sprint 10
-    ships the first concrete ``VaultCredentialAdapter`` per ADR-009.
-    Wave-1 ships only the fail-loud ``KernelDefaultCredentialAdapter``
-    sentinel below — admit_policy refuses any
-    ``SandboxPolicy.vault_path`` non-None when the wired adapter is
-    the sentinel."""
+    """Structural contract for runtime secret retrieval + dynamic
+    credential leasing. Sprint 10 T6 ships the first concrete
+    ``VaultCredentialAdapter`` per ADR-009. Wave-1 ships only the
+    fail-loud ``KernelDefaultCredentialAdapter`` sentinel below —
+    admit_policy refuses any ``SandboxPolicy.vault_path`` non-None
+    when the wired adapter is the sentinel.
+
+    Sprint 10 T5 extension (ADR-004 §102 + spec §3.3): the Protocol
+    now declares the dual lease API (``mint_lease`` / ``revoke_lease``)
+    alongside ``fetch_secret``. ``fetch_secret`` is the Sprint-8A
+    static-secret read path (kept for backward-compat with
+    operator-supplied custom adapters); ``mint_lease`` / ``revoke_lease``
+    are the Sprint-10 dynamic-secret leasing surface that the sandbox
+    boundary calls when ``policy.requires_credentials`` is set.
+
+    Operator-supplied real adapters MUST implement all 3 methods. A
+    pre-T5 single-method object no longer structurally conforms —
+    pinned by
+    ``tests/unit/sandbox/test_credential_adapter_stub.py::TestProtocolShape::test_pre_t5_fetch_secret_only_object_no_longer_satisfies_protocol``.
+    """
 
     async def fetch_secret(self, path: str) -> str | None:
         """Return the secret value at ``path`` or None if not found.
         Implementations MUST surface auth / network failures as
         exceptions (NOT silent None) so the caller can audit."""
+
+    # Sprint 10 T5 — dual lease API per ADR-004 §102 Q4 LOCK + spec §3.3.
+    # Implementations delegate to ``core.vault.lease_credential`` /
+    # ``core.vault.revoke_credential`` (or compose with operator-policy
+    # hooks). Exception taxonomy is the 4-value ``VaultUnavailable`` /
+    # ``VaultPathNotFound`` / ``VaultAuthDenied`` / ``VaultProtocolError``
+    # set declared in ``core/vault.py``; T6's ``VaultCredentialAdapter``
+    # collapses these to the matching ``sandbox_credential_mint_failed_*``
+    # closed-enum at the sandbox boundary.
+    async def mint_lease(self, request: VaultLeaseRequest) -> CredentialLease:
+        """Mint a dynamic credential lease for the given request.
+        Returns a ``CredentialLease`` with the granted token + TTL.
+        Raises one of the 4 ``core.vault`` taxonomy exceptions on
+        failure."""
+
+    async def revoke_lease(self, lease_id: str) -> None:
+        """Revoke a previously-minted lease by Vault lease ID.
+        Returns None on success; raises one of the 4 ``core.vault``
+        taxonomy exceptions on failure."""
 
 
 # ---------------------------------------------------------------------------
@@ -119,10 +153,10 @@ class KernelDefaultCredentialAdapter:
     refuses any policy declaring ``vault_path`` while this sentinel
     is wired.
 
-    Sprint 10 ships ``VaultCredentialAdapter`` as the first real
+    Sprint 10 T6 ships ``VaultCredentialAdapter`` as the first real
     concrete implementation per ADR-009. Until then, operators MUST
     EITHER wire a real adapter OR ensure no pack ever sets a
-    non-None ``vault_path``.
+    non-None ``vault_path`` / declares ``requires_credentials``.
 
     The class is intentionally NOT a Protocol subclass — admit_policy
     uses an explicit ``isinstance(credential_adapter,
@@ -131,6 +165,17 @@ class KernelDefaultCredentialAdapter:
     conforms to ``CredentialAdapter`` will NOT match the isinstance
     check (verified by the test
     ``test_isinstance_check_distinguishes_stub_from_real_adapter``).
+
+    Sprint 10 T5 extension: the sentinel gains fail-loud
+    ``mint_lease`` / ``revoke_lease`` methods that mirror
+    ``fetch_secret``'s production-grade error-message convention
+    (cite Sprint 10 + ADR-009 + ``VaultCredentialAdapter`` +
+    "fail-loud sentinel" + echo input for debugging). The Sprint 10
+    pre-Sprint-13.5 admission guard already refuses any policy
+    requesting credentials when the sentinel is wired (sibling
+    ``sandbox_credential_adapter_not_configured`` arm), so these
+    fail-loud raises are defence-in-depth — they catch a future
+    refactor that lets the sentinel reach the mint/revoke pathway.
     """
 
     async def fetch_secret(self, path: str) -> str | None:
@@ -140,6 +185,31 @@ class KernelDefaultCredentialAdapter:
             f"called. Got fetch_secret({path!r}). Sprint 10 ships "
             "VaultCredentialAdapter as the first real CredentialAdapter "
             "implementation per ADR-009."
+        )
+
+    # Sprint 10 T5 — fail-loud sentinel methods for the dual lease
+    # API per ADR-004 §102 + spec §3.3. Mirrors ``fetch_secret``'s
+    # error-message convention (Sprint 10 + ADR-009 + "fail-loud
+    # sentinel" + echo input for debugging).
+    async def mint_lease(self, request: VaultLeaseRequest) -> CredentialLease:
+        raise NotImplementedError(
+            "KernelDefaultCredentialAdapter is a fail-loud sentinel; "
+            "admit_policy should have refused before this method is "
+            f"called. Got mint_lease(secret_path={request.secret_path!r}). "
+            "Sprint 10 ships VaultCredentialAdapter as the first real "
+            "CredentialAdapter implementation per ADR-009; wire it in "
+            "create_app() before any pack/sandbox declares "
+            "requires_credentials."
+        )
+
+    async def revoke_lease(self, lease_id: str) -> None:
+        raise NotImplementedError(
+            "KernelDefaultCredentialAdapter is a fail-loud sentinel; "
+            "admit_policy should have refused before this method is "
+            f"called. Got revoke_lease({lease_id!r}). Sprint 10 ships "
+            "VaultCredentialAdapter as the first real CredentialAdapter "
+            "implementation per ADR-009; wire it in create_app() before "
+            "any pack/sandbox declares requires_credentials."
         )
 
 
