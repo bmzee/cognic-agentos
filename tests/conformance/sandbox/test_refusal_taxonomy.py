@@ -85,14 +85,20 @@ class TestRefusalTaxonomyRegistrationCoverage:
             f"values to the production Literal at protocol.py:34-50."
         )
 
-    def test_refusal_reason_count_locked_at_twenty_one(self) -> None:
+    def test_refusal_reason_count_locked_at_twenty_six(self) -> None:
         """Crisp value-count guard — separate from the membership
         assertion so drift in size shows a clean diagnostic.
 
         Sprint 8.5 T1 extended 15 → 21 (6 new wake-time arms per spec
-        §3.3). If this fails because the count is no longer 21, update
-        the constant here AND ensure ``TRIGGERS_BY_REASON`` has a
-        matching entry for the new value. NEVER update this guard
-        without also updating the dispatch.
+        §3.3). Sprint 10 T7 extended 21 → 22 (kernel-boundary
+        cross-tenant guard ``sandbox_credential_request_tenant_mismatch``).
+        Sprint 10 T9 extended 22 → 26 (3 ``sandbox_credential_mint_failed_*``
+        values with Stage-2 raise sites at T10 backend create(); 1
+        ``sandbox_credential_ttl_exceeds_tenant_max`` value that is
+        Literal-only per spec §7.3 amendment — no Stage-2 raise site).
+        If this fails because the count is no longer 26, update the
+        constant here AND ensure ``TRIGGERS_BY_REASON`` has a matching
+        entry for the new value. NEVER update this guard without also
+        updating the dispatch.
         """
-        assert len(get_args(SandboxRefusalReason)) == 21
+        assert len(get_args(SandboxRefusalReason)) == 26

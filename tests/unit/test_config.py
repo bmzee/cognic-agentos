@@ -2056,3 +2056,112 @@ class TestC1LLMModelIdMap:
     # (the strict + best-effort ledger-write helpers). The deletion
     # is the documented action when the deferral expires; see the C2
     # commit body for the bisection-clean rationale.
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Sprint 10 T2 — Settings.vault_http_timeout_s + vault_http_max_retries
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestT2VaultHTTPSettings:
+    """Sprint 10 T2 — two new Settings fields drive the shared
+    ``VaultTransport`` per spec §3.5 + §8.2: ``vault_http_timeout_s``
+    (per-request hvac timeout in seconds; bounded ``0 < x ≤ 60``)
+    and ``vault_http_max_retries`` (bounded exponential-backoff
+    count; bounded ``0 ≤ x ≤ 10``).
+
+    Mirrors the Sprint 9.5b C1 pattern: bounded settings + invalid-
+    value-fails-loud at construction time so misconfigured operators
+    see the error at startup, not at first Vault round-trip.
+    """
+
+    def test_vault_http_timeout_s_default(self) -> None:
+        """T2 #11 — ``vault_http_timeout_s`` defaults to ``10.0``
+        seconds; Sprint-1C VaultAdapter convention preserved."""
+        s = Settings(_env_file=None)  # type: ignore[call-arg]
+        assert s.vault_http_timeout_s == 10.0
+
+    def test_vault_http_max_retries_default(self) -> None:
+        """T2 #12 — ``vault_http_max_retries`` defaults to ``3``
+        (bounded exponential-backoff for transient hvac failures)."""
+        s = Settings(_env_file=None)  # type: ignore[call-arg]
+        assert s.vault_http_max_retries == 3
+
+    def test_vault_http_timeout_s_must_be_positive(self) -> None:
+        """T2 #13 — ``vault_http_timeout_s > 0``; fail-loud on a
+        zero or negative value (would hang forever or never
+        complete; misconfigured operator must see the error at
+        startup)."""
+        with pytest.raises(ValidationError):
+            Settings(_env_file=None, vault_http_timeout_s=0.0)  # type: ignore[call-arg]
+
+    def test_vault_http_timeout_s_must_be_bounded(self) -> None:
+        """T2 #14 — ``vault_http_timeout_s ≤ 60.0``; defensive upper
+        bound matches the 60s ceiling on most HTTP-client timeouts.
+        Operators wanting a longer timeout must use a different
+        primitive (e.g. background poll loop), not extend
+        per-request timeout indefinitely."""
+        with pytest.raises(ValidationError):
+            Settings(_env_file=None, vault_http_timeout_s=120.0)  # type: ignore[call-arg]
+
+    def test_vault_http_max_retries_must_be_non_negative(self) -> None:
+        """T2 #15 — ``vault_http_max_retries ≥ 0`` (0 = no retries
+        is a legitimate setting; negative is misconfig)."""
+        with pytest.raises(ValidationError):
+            Settings(_env_file=None, vault_http_max_retries=-1)  # type: ignore[call-arg]
+
+    def test_vault_http_max_retries_must_be_bounded(self) -> None:
+        """T2 #16 — ``vault_http_max_retries ≤ 10``; defensive upper
+        bound on retry count (10 retries x bounded backoff = bounded
+        total wall-clock; higher values would let a misconfigured
+        operator hang the gateway for minutes per call)."""
+        with pytest.raises(ValidationError):
+            Settings(_env_file=None, vault_http_max_retries=100)  # type: ignore[call-arg]
+
+
+class TestT8SandboxKernelDefaultMaxCredentialTtl:
+    """Sprint 10 T8 — ``Settings.sandbox_kernel_default_max_credential_ttl_s``
+    drives the per-tenant max credential TTL cap per spec §5.1 + §5.2.
+
+    The Setting is threaded into the Rego input dict's
+    ``kernel_default.max_credential_ttl_s`` field at
+    ``sandbox/admission.py`` Step 9 and consumed by
+    ``policies/_default/sandbox.rego`` rule 6 (positive
+    ``_credential_ttl_within_tenant_max`` helper joined to the
+    ``allow if`` conjunction). Bank overlays may raise via the Rego
+    ``tenant.overlay.max_credential_ttl_s`` path (per-tenant overlay
+    plumbing is a future-sprint hook); LOOSENING the kernel default
+    requires a coordinated kernel + ADR amendment per the stop-rule
+    policy bundle precedent at AGENTS.md L150.
+    """
+
+    def test_default_is_900_seconds(self) -> None:
+        """T8 #1 — kernel default = 900s (15 minutes) per the
+        conservative-Wave-1-default doctrine in spec §5.2."""
+        s = Settings(_env_file=None)  # type: ignore[call-arg]
+        assert s.sandbox_kernel_default_max_credential_ttl_s == 900
+
+    def test_lower_bound_60_seconds(self) -> None:
+        """T8 #2 — ``sandbox_kernel_default_max_credential_ttl_s ≥ 60``
+        (1-minute floor: shorter TTLs cause an unacceptable Vault-mint
+        round-trip rate; misconfig must fail at startup, not at first
+        admission)."""
+        # 60s is the floor — accepted.
+        s = Settings(_env_file=None, sandbox_kernel_default_max_credential_ttl_s=60)  # type: ignore[call-arg]
+        assert s.sandbox_kernel_default_max_credential_ttl_s == 60
+        # 59s is below the floor — refused.
+        with pytest.raises(ValidationError):
+            Settings(_env_file=None, sandbox_kernel_default_max_credential_ttl_s=59)  # type: ignore[call-arg]
+
+    def test_upper_bound_86400_seconds(self) -> None:
+        """T8 #3 — ``sandbox_kernel_default_max_credential_ttl_s ≤ 86400``
+        (24-hour ceiling: longer kernel-default TTLs widen the
+        compromise window unacceptably; bank overlays raise via
+        Rego ``tenant.overlay.max_credential_ttl_s`` per spec §5.2,
+        not by raising the kernel-default ceiling)."""
+        # 86400s is the ceiling — accepted.
+        s = Settings(_env_file=None, sandbox_kernel_default_max_credential_ttl_s=86400)  # type: ignore[call-arg]
+        assert s.sandbox_kernel_default_max_credential_ttl_s == 86400
+        # 86401s is above the ceiling — refused.
+        with pytest.raises(ValidationError):
+            Settings(_env_file=None, sandbox_kernel_default_max_credential_ttl_s=86401)  # type: ignore[call-arg]

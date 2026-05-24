@@ -466,6 +466,103 @@ async def _trigger_sandbox_wake_policy_revalidation_failed(
     yield
 
 
+@asynccontextmanager
+async def _trigger_sandbox_credential_request_tenant_mismatch(
+    backend: Any,
+    ctx: Any,
+) -> AsyncIterator[None]:
+    """Sprint 10 T7 — trigger envelope for the kernel-boundary
+    cross-tenant guard at ``sandbox/admission.py``.
+
+    No-op registration envelope. Behaviour coverage —
+    ``admit_policy`` is called with a ``requires_credentials`` whose
+    ``VaultLeaseRequest.tenant_id`` differs from
+    ``actor.tenant_id`` → expect
+    ``sandbox_credential_request_tenant_mismatch`` — lives at
+    ``tests/unit/sandbox/test_admit_credentials.py::test_admit_policy_refuses_cross_tenant_request``.
+    """
+    yield
+
+
+@asynccontextmanager
+async def _trigger_sandbox_credential_mint_failed_vault_unavailable(
+    backend: Any,
+    ctx: Any,
+) -> AsyncIterator[None]:
+    """Sprint 10 T10 — trigger envelope for the Vault-unavailable
+    mint failure mapped at backend ``create()`` post-admission per
+    spec §7.1.
+
+    No-op registration envelope. Behaviour coverage — Docker:
+    ``tests/unit/sandbox/backends/test_docker_sibling_credentials.py::TestMintFailureClosedEnumMapping``
+    parametrize row for ``VaultUnavailable`` (AND
+    ``VaultProtocolError`` per the spec §7.1 collapse). K8s parallel
+    lands at the T10 K8s commit's
+    ``test_kubernetes_pod_credentials.py``. Closed-enum collapse
+    rationale lives in ``_mint_exception_to_refusal_reason`` at
+    ``sandbox/backends/docker_sibling.py``.
+    """
+    yield
+
+
+@asynccontextmanager
+async def _trigger_sandbox_credential_mint_failed_secret_path_unknown(
+    backend: Any,
+    ctx: Any,
+) -> AsyncIterator[None]:
+    """Sprint 10 T10 — trigger envelope for the Vault 404
+    mint failure mapped at backend ``create()`` post-admission per
+    spec §7.1.
+
+    No-op registration envelope. Behaviour coverage — Docker:
+    ``tests/unit/sandbox/backends/test_docker_sibling_credentials.py::TestMintFailureClosedEnumMapping``
+    parametrize row for ``VaultPathNotFound``. K8s parallel at the
+    T10 K8s commit.
+    """
+    yield
+
+
+@asynccontextmanager
+async def _trigger_sandbox_credential_mint_failed_auth_denied(
+    backend: Any,
+    ctx: Any,
+) -> AsyncIterator[None]:
+    """Sprint 10 T10 — trigger envelope for the Vault 403
+    mint failure mapped at backend ``create()`` post-admission per
+    spec §7.1.
+
+    No-op registration envelope. Behaviour coverage — Docker:
+    ``tests/unit/sandbox/backends/test_docker_sibling_credentials.py::TestMintFailureClosedEnumMapping``
+    parametrize row for ``VaultAuthDenied``. K8s parallel at the
+    T10 K8s commit.
+    """
+    yield
+
+
+@asynccontextmanager
+async def _trigger_sandbox_credential_ttl_exceeds_tenant_max(
+    backend: Any,
+    ctx: Any,
+) -> AsyncIterator[None]:
+    """Sprint 10 T9 (Literal lift only) — trigger envelope for the
+    per-tenant max-credential-TTL cap value.
+
+    No-op registration envelope. **Special case: NO Stage-2 raise
+    site at T9 or T10** per spec §7.3 amendment —
+    ``OPAEngine.Decision`` exposes only ``allow`` + generic
+    ``reasoning`` with no per-rule-name channel, so the
+    ``sandbox.rego`` rule-6 cap-exceeded denial continues to surface
+    as the generic ``sandbox_policy_rego_denied`` at
+    ``admission.py:601-603``. The closed-enum value is reserved on
+    the Literal for the follow-up Rego-reason-surfacing task (a
+    per-rule deny-set carried via ``decision_data`` OR a
+    ``rule_name`` channel on ``Decision``). This trigger envelope
+    is REGISTERED so the membership pin stays green; behaviour
+    coverage lands when the Rego-reason-surfacing task ships.
+    """
+    yield
+
+
 #: Public registry — maps every wire-public ``SandboxRefusalReason``
 #: value to a trigger factory. The membership pin at
 #: ``test_refusal_taxonomy.py`` asserts this dict's keyset equals
@@ -475,7 +572,7 @@ async def _trigger_sandbox_wake_policy_revalidation_failed(
 #: When adding a new ``SandboxRefusalReason`` value at
 #: ``src/cognic_agentos/sandbox/protocol.py:34-50``, add the
 #: corresponding trigger factory above + register it here. The
-#: ``test_refusal_reason_count_locked_at_twenty_one`` regression
+#: ``test_refusal_reason_count_locked_at_twenty_six`` regression
 #: also needs its hard-coded count updated.
 TRIGGERS_BY_REASON: dict[str, TriggerFactory] = {
     # Sprint 8A — 15 admission-arm triggers
@@ -514,4 +611,25 @@ TRIGGERS_BY_REASON: dict[str, TriggerFactory] = {
     "sandbox_wake_session_tombstoned": _trigger_sandbox_wake_session_tombstoned,
     "sandbox_wake_tenant_mismatch": _trigger_sandbox_wake_tenant_mismatch,
     "sandbox_wake_policy_revalidation_failed": _trigger_sandbox_wake_policy_revalidation_failed,
+    # Sprint 10 — 5 credential-leasing values (4 lifted at T9 + 1
+    # lifted at T7 cross-tenant guard). The 3 mint-failure values
+    # get their Stage-2 raise sites at T10 backend create(); the
+    # cross-tenant value's Stage-2 raise lives in
+    # sandbox/admission.py since T7; the TTL-cap value is Literal-
+    # only per spec §7.3 (Rego-reason surfacing deferred).
+    "sandbox_credential_request_tenant_mismatch": (
+        _trigger_sandbox_credential_request_tenant_mismatch
+    ),
+    "sandbox_credential_mint_failed_vault_unavailable": (
+        _trigger_sandbox_credential_mint_failed_vault_unavailable
+    ),
+    "sandbox_credential_mint_failed_secret_path_unknown": (
+        _trigger_sandbox_credential_mint_failed_secret_path_unknown
+    ),
+    "sandbox_credential_mint_failed_auth_denied": (
+        _trigger_sandbox_credential_mint_failed_auth_denied
+    ),
+    "sandbox_credential_ttl_exceeds_tenant_max": (
+        _trigger_sandbox_credential_ttl_exceeds_tenant_max
+    ),
 }

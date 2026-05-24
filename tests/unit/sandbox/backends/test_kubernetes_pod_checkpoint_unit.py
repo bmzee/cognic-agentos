@@ -85,6 +85,11 @@ class _StubSettings:
     sandbox_checkpoint_retention_s: int = 86_400
     sandbox_max_checkpoints_per_session: int = 10
     sandbox_reaper_interval_s: int = 300
+    # Sprint 10 T8 added — admit_policy reads this Setting at Step 9
+    # to thread input.kernel_default.max_credential_ttl_s into the
+    # Rego input. T9 hardening: this stub MUST carry the field to keep
+    # wake-time admit_policy revalidation green.
+    sandbox_kernel_default_max_credential_ttl_s: int = 900
 
 
 def _policy() -> SandboxPolicy:

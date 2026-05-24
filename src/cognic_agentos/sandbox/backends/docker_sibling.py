@@ -56,6 +56,7 @@ import contextlib
 import hashlib
 import json
 import uuid as _uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -63,6 +64,14 @@ from typing import TYPE_CHECKING, Any
 import aiodocker
 
 from cognic_agentos.core.canonical import canonical_bytes
+from cognic_agentos.core.vault import (
+    CredentialLease,
+    VaultAuthDenied,
+    VaultLeaseRequest,
+    VaultPathNotFound,
+    VaultProtocolError,
+    VaultUnavailable,
+)
 from cognic_agentos.sandbox.admission import (
     CatalogProtocol,
     CredentialAdapter,
@@ -71,8 +80,14 @@ from cognic_agentos.sandbox.admission import (
 from cognic_agentos.sandbox.audit import (
     emit_sandbox_event,
     sandbox_lifecycle_checkpointed,
+    sandbox_lifecycle_lease_minted,
+    sandbox_lifecycle_lease_revoke_failed,
+    sandbox_lifecycle_lease_revoked,
     sandbox_lifecycle_suspended,
     sandbox_lifecycle_woken,
+)
+from cognic_agentos.sandbox.backends._shared_credentials import (
+    _mint_exception_to_refusal_reason,
 )
 from cognic_agentos.sandbox.checkpoint_store import (
     CheckpointStore,
@@ -173,7 +188,8 @@ class _SuspendEventIdCorruptError(ValueError):
 
 
 # ---------------------------------------------------------------------------
-# Pure-functional helpers (unit-tested at test_docker_sibling_pure_helpers.py)
+# Pure-functional helpers (unit-tested at test_docker_sibling_pure_helpers.py
+# + test_docker_sibling_credentials.py)
 # ---------------------------------------------------------------------------
 
 
@@ -698,6 +714,14 @@ class DockerSiblingSession:
     _backend: DockerSiblingSandboxBackend = field(repr=False)
     _internal_network_name: str = field(repr=False)
     _sidecar_container_name: str = field(repr=False)
+    #: Sprint 10 T10 — public Protocol field per spec §3.6. Tuple
+    #: (NOT list) — immutable post-construction; mid-life mutation is
+    #: out of scope Wave-1. Default empty tuple keeps the Sprint-8A
+    #: warm-pool + lease-less cold-create constructors backward-compat.
+    #: Iterated by ``DockerSiblingSandboxBackend.destroy()`` for the
+    #: per-lease fail-soft revoke loop per spec §4.3 + §7.2; gates the
+    #: Q5 LOCK at ``checkpoint()`` + ``suspend()`` per spec §4.5.
+    active_leases: tuple[CredentialLease, ...] = ()
     _actor_subject: str = field(repr=False, default="")
     _destroyed: bool = field(repr=False, default=False)
     #: T10c — per-session egress network name (dual-bridge topology
@@ -761,10 +785,44 @@ class DockerSiblingSession:
     #   networks, mark ``_suspended=True``.
 
     async def checkpoint(self, label: str) -> CheckpointId:
+        self._raise_q5_lock_if_leased("checkpoint")
         return await self._backend._do_checkpoint(self, label)
 
     async def suspend(self) -> None:
+        self._raise_q5_lock_if_leased("suspend")
         await self._backend._do_suspend(self)
+
+    def _raise_q5_lock_if_leased(self, op: str) -> None:
+        """Sprint 10 T10 Q5 LOCK per spec §4.5 — production-grade
+        fail-loud scaffolding pointing at Sprint 10.x.
+
+        When ``self.active_leases`` is non-empty, ``checkpoint()`` and
+        ``suspend()`` MUST raise ``NotImplementedError`` rather than
+        silently dropping the leases at suspend (no revoke event, no
+        audit trail) or silently persisting an empty
+        ``vault_lease_refs`` to the checkpoint metadata. Resolving the
+        leased-session checkpoint / suspend / wake model (re-mint at
+        wake vs revoke-at-suspend vs token-in-checkpoint) is the
+        follow-up sprint's call per §4.5 + AGENTS.md production-grade
+        rule.
+
+        NOT a wire-protocol refusal value — ``checkpoint()`` and
+        ``suspend()`` are Python-level Protocol methods, not HTTP
+        endpoints; a refusal value would have to be retired by the
+        follow-up sprint (wire-protocol-public breaking change).
+        """
+        if not self.active_leases:
+            return
+        raise NotImplementedError(
+            f"DockerSiblingSession.{op}() on a leased session "
+            f"(active_leases count={len(self.active_leases)}) is "
+            "out of scope at Sprint 10 per spec §4.5 Q5 LOCK; a "
+            "follow-up Sprint 10.x sprint resolves the leased-session "
+            "checkpoint / suspend / wake model (re-mint at wake vs "
+            "revoke-at-suspend vs token-in-checkpoint). The Sprint-8.5 "
+            "Q4 lock's vault_lease_refs=() premise breaks at Sprint 10; "
+            "fail loud rather than silently drop leases."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -844,26 +902,45 @@ class DockerSiblingSandboxBackend:
         tenant_id: str,
         pack_context: PackAdmissionContext,
         use_warm_pool: bool = True,
+        requires_credentials: Sequence[VaultLeaseRequest] = (),
     ) -> SandboxSession:
         """Admit + create a sandbox session per spec §6.1.
 
         Step ordering:
-        1. If ``use_warm_pool`` + ``self._warm_pool`` wired, attempt
+        1. If ``use_warm_pool`` + ``self._warm_pool`` wired AND
+           ``requires_credentials`` empty per spec §4.2.1, attempt
            checkout; on hit, return + emit ``warm_pool.checked_out``
            + ``lifecycle.created(warm_pool_hit=True)``.
         2. Run ``admit_policy`` (Stage-1 + Stage-2; raises
            ``SandboxLifecycleRefused`` on any admission failure).
-        3. Cold-create the dual-container topology (internal network
-           + proxy sidecar + sandbox container).
-        4. Emit ``lifecycle.created(warm_pool_hit=False)`` + return
-           the ``DockerSiblingSession``.
+        3. Sprint 10 T10: mint each ``requires_credentials`` lease in
+           order via ``self._credential_adapter.mint_lease(request)``
+           per spec §4.2. Emit ``sandbox.lifecycle.lease_minted`` per
+           mint. On any mid-batch mint failure: best-effort revoke
+           any leases already minted in this attempt, then raise
+           ``SandboxLifecycleRefused`` with the mapped
+           ``sandbox_credential_mint_failed_*`` closed-enum reason
+           per spec §7.1.
+        4. Cold-create the dual-container topology (internal network
+           + proxy sidecar + sandbox container). On topology failure
+           post-mint: best-effort revoke ALL minted leases per spec
+           §7.3 row "Create — mint | Any backend failure post-mint",
+           then re-raise the topology error.
+        5. Emit ``lifecycle.created(warm_pool_hit=False)`` + return
+           the ``DockerSiblingSession`` (with ``active_leases`` set
+           to the minted-leases tuple).
 
         T10a scope: lifecycle + topology only. T10b adds cgroup-cap
         derivation to the container config; T10c adds the proxy
         sidecar's ALLOW_LIST + proxy_log seam.
         """
-        # 1. Warm-pool checkout (if wired + caller asked for it)
-        if use_warm_pool and self._warm_pool is not None:
+        # 1. Warm-pool checkout (if wired + caller asked for it AND
+        #    no credentials requested). Sprint 10 spec §4.2.1: warm
+        #    members were pre-created without an actor context, so a
+        #    warm hit on a credentialed create() would silently bypass
+        #    the cross-tenant + Rego TTL + mint chain. Force cold-create
+        #    when requires_credentials is non-empty.
+        if use_warm_pool and self._warm_pool is not None and not requires_credentials:
             warm = await self._warm_pool.checkout(
                 policy, tenant_id=tenant_id, pack_context=pack_context
             )
@@ -911,23 +988,48 @@ class DockerSiblingSandboxBackend:
             credential_adapter=self._credential_adapter,
             rego_engine=self._rego,
             settings=self._settings,
+            requires_credentials=requires_credentials,
         )
 
-        # 3. Mint session_id + derive deterministic names
+        # 3. Sprint 10 T10 — single post-admission cleanup envelope per
+        #    spec §7.3 row "Create — mint | Any backend failure
+        #    post-mint" + the reviewer P1 fix at T10 Docker round 2:
+        #    minted leases MUST be best-effort revoked on ANY
+        #    post-mint exception (mint-time Vault failure / audit
+        #    emit failure mid-batch / topology failure / Session
+        #    construct / lifecycle.created emit failure). Pre-fix
+        #    code had three nested try/except blocks where the inner
+        #    audit-emit catch swallowed only Vault taxonomy
+        #    exceptions, leaving non-Vault audit failures as
+        #    lease-leak paths (the lease IS active in Vault but
+        #    create() aborts → destroy() never called → revoke
+        #    never fired → lease lives until its server-side TTL
+        #    expires). The single envelope below collapses all
+        #    post-admission failure paths onto one revoke + teardown
+        #    + propagate contract.
+        #
+        #    trace_id="" matches the existing 8A/8.5 audit emitters
+        #    in this module pending request-bound trace threading.
+        minted_leases: list[CredentialLease] = []
         session_id = _uuid.uuid4().hex
         internal_net_name = _internal_network_name(session_id)
         egress_net_name = _egress_network_name(session_id)
         sidecar_name = _proxy_sidecar_container_name(session_id)
-
-        # 4. Build the dual-bridge topology per spec §10.1:
-        #    * internal network (Internal=true; no external gateway;
-        #      sandbox + sidecar attached)
-        #    * egress network (external gateway; ONLY sidecar attached
-        #      — dual-homed for outbound traffic)
-        # T10c added the egress network; T10a/T10b only had internal.
-        await self._create_internal_network(internal_net_name)
-        await self._create_egress_network(egress_net_name)
         try:
+            # 3a. Mint leases per spec §4.2 — per request, in order.
+            for request in requires_credentials:
+                lease = await self._credential_adapter.mint_lease(request)
+                minted_leases.append(lease)
+                await sandbox_lifecycle_lease_minted(
+                    self._dh,
+                    lease=lease,
+                    trace_id="",
+                    session_id=session_id,
+                )
+
+            # 3b. Build the dual-bridge topology per spec §10.1.
+            await self._create_internal_network(internal_net_name)
+            await self._create_egress_network(egress_net_name)
             await self._start_proxy_sidecar(
                 policy=policy,
                 session_id=session_id,
@@ -941,62 +1043,143 @@ class DockerSiblingSandboxBackend:
                 session_id=session_id,
                 internal_net_name=internal_net_name,
             )
-        except Exception:
-            # Tear down anything we managed to create + re-raise.
-            # Idempotent destroy methods make this safe even on
-            # partial-create failures. No lifecycle.created emitted
-            # because the session never reached a running state.
-            await self._teardown_session_state(
+
+            # 3c. Session construct + lifecycle.created emit per spec
+            #     §4.3 + R1 P1.1 reviewer fix.
+            session = DockerSiblingSession(
+                session_id=session_id,
+                policy=policy,
+                tenant_id=tenant_id,
+                pack_context=pack_context,
+                created_at=datetime.now(UTC),
+                warm_pool_hit=False,
+                _backend=self,
+                _internal_network_name=internal_net_name,
+                _sidecar_container_name=sidecar_name,
+                active_leases=tuple(minted_leases),
+                _actor_subject=actor.subject,
+                _egress_network_name=egress_net_name,
+            )
+            await self._emit_lifecycle_created(
+                session=session,
+                actor=actor,
+                warm_pool_hit=False,
+            )
+        except asyncio.CancelledError:
+            # Reviewer P1 fix at T10 Docker round 3:
+            # ``asyncio.CancelledError`` subclasses ``BaseException``
+            # NOT ``Exception`` (Python 3.8+ change; MRO is
+            # ``[CancelledError, BaseException, object]``;
+            # ``issubclass(asyncio.CancelledError, Exception) is
+            # False``). The ``except Exception`` arm below DOES NOT
+            # catch it, so a create() task cancelled mid-flight after
+            # a successful mint would skip cleanup entirely and leak
+            # the lease (lease active in Vault, no Session returned
+            # for destroy(), no future revoke until server-side TTL
+            # expires).
+            #
+            # MUST come BEFORE ``except Exception`` (would not match
+            # otherwise; clarity-only ordering since CancelledError
+            # isn't a subclass of either VaultException or Exception
+            # — neither lower arm would ever catch it). Cleanup helper
+            # is invoked then cancellation re-raised UNCHANGED —
+            # NEVER swallowed: cancellation semantics must propagate
+            # so the asyncio task hierarchy can finish tearing down.
+            # If a nested re-cancel hits the helper itself, Vault
+            # TTL is the final operational safety net per spec §7.2.
+            await self._cleanup_post_admission_failure(
+                minted_leases=minted_leases,
                 session_id=session_id,
                 internal_net_name=internal_net_name,
                 egress_net_name=egress_net_name,
                 sidecar_name=sidecar_name,
             )
             raise
-
-        session = DockerSiblingSession(
-            session_id=session_id,
-            policy=policy,
-            tenant_id=tenant_id,
-            pack_context=pack_context,
-            created_at=datetime.now(UTC),
-            warm_pool_hit=False,
-            _backend=self,
-            _internal_network_name=internal_net_name,
-            _sidecar_container_name=sidecar_name,
-            _actor_subject=actor.subject,
-            _egress_network_name=egress_net_name,
-        )
-        # 5. Emit lifecycle.created(warm_pool_hit=False) per spec §4.3
-        # + R1 P1.1 reviewer fix — cold-create path was previously
-        # absent from the evidence chain, leaving successful sandbox
-        # starts unauditable.
-        #
-        # R2 P1.1 — wrap in cleanup envelope. Without it, an
-        # audit-append failure here would leave both containers + the
-        # internal network running, and the caller would never
-        # receive the session to clean up. Fail-closed: tear down the
-        # whole session state + re-raise so the caller sees the audit
-        # failure. We use _teardown_session_state directly (NOT
-        # destroy()) because the session never reached the consumer
-        # — no lifecycle.destroyed row should be emitted since no
-        # lifecycle.created was ever successful.
-        try:
-            await self._emit_lifecycle_created(
-                session=session,
-                actor=actor,
-                warm_pool_hit=False,
+        except (
+            VaultUnavailable,
+            VaultPathNotFound,
+            VaultAuthDenied,
+            VaultProtocolError,
+        ) as exc:
+            # Vault-specific mint-failure path — closed-enum mapping
+            # per spec §7.1 + the standard post-mint cleanup.
+            await self._cleanup_post_admission_failure(
+                minted_leases=minted_leases,
+                session_id=session_id,
+                internal_net_name=internal_net_name,
+                egress_net_name=egress_net_name,
+                sidecar_name=sidecar_name,
             )
+            raise SandboxLifecycleRefused(
+                reason=_mint_exception_to_refusal_reason(exc),
+                detail=str(exc),
+            ) from exc
         except Exception:
-            with contextlib.suppress(Exception):
-                await self._teardown_session_state(
-                    session_id=session_id,
-                    internal_net_name=internal_net_name,
-                    egress_net_name=egress_net_name,
-                    sidecar_name=sidecar_name,
-                )
+            # ANY other post-admission failure (audit emit / topology /
+            # Session construct / lifecycle.created emit / etc.): same
+            # cleanup + propagate the ORIGINAL exception unchanged per
+            # spec §7.3 row "Any backend failure post-mint". Reviewer
+            # P1 fix at round 2: pre-refactor this branch did not exist
+            # as a single envelope and the inner topology +
+            # lifecycle.created envelopes did NOT revoke minted_leases
+            # — non-Vault audit emit failures leaked the leases.
+            await self._cleanup_post_admission_failure(
+                minted_leases=minted_leases,
+                session_id=session_id,
+                internal_net_name=internal_net_name,
+                egress_net_name=egress_net_name,
+                sidecar_name=sidecar_name,
+            )
             raise
         return session
+
+    async def _cleanup_post_admission_failure(
+        self,
+        *,
+        minted_leases: list[CredentialLease],
+        session_id: str,
+        internal_net_name: str,
+        egress_net_name: str,
+        sidecar_name: str,
+    ) -> None:
+        """Sprint 10 T10 — shared post-admission cleanup envelope per
+        spec §7.3 row "Any backend failure post-mint".
+
+        Called from all three ``except`` arms of ``create()``'s
+        post-admission cleanup envelope (``asyncio.CancelledError`` +
+        Vault taxonomy + everything-else). Best-effort revoke +
+        best-effort teardown — both stages wrap their await in
+        ``contextlib.suppress(Exception)`` so a Vault revoke 5xx
+        does not block topology teardown and a Docker DockerError
+        does not block subsequent stages. **Suppresses ordinary
+        cleanup exceptions; cancellation may still interrupt** —
+        ``contextlib.suppress(Exception)`` deliberately does NOT
+        catch ``BaseException`` subclasses (``CancelledError`` /
+        ``KeyboardInterrupt`` / ``SystemExit``), so a nested
+        re-cancel during cleanup propagates out of this helper.
+        Vault server-side TTL is the operational safety net for that
+        edge case per spec §7.2. The Docker teardown methods
+        (network delete / container delete) swallow 404s on entities
+        that were never created so unconditional invocation is safe
+        even when an early-loop exception aborted before any
+        topology call.
+
+        Order: revoke leases FIRST (less time for the in-flight lease
+        to be used by a still-running container), then teardown
+        topology. Both stages independently swallow ordinary
+        exceptions so a single revoke failure does not block
+        topology teardown and vice-versa.
+        """
+        for already_minted in minted_leases:
+            with contextlib.suppress(Exception):
+                await self._credential_adapter.revoke_lease(already_minted.lease_id)
+        with contextlib.suppress(Exception):
+            await self._teardown_session_state(
+                session_id=session_id,
+                internal_net_name=internal_net_name,
+                egress_net_name=egress_net_name,
+                sidecar_name=sidecar_name,
+            )
 
     async def exec(
         self,
@@ -1309,12 +1492,107 @@ class DockerSiblingSandboxBackend:
             )
 
         already_destroyed = session._destroyed
-        await self._teardown_session_state(
-            session_id=session.session_id,
-            internal_net_name=session._internal_network_name,
-            egress_net_name=session._egress_network_name,
-            sidecar_name=session._sidecar_container_name,
-        )
+        teardown_succeeded = False
+        try:
+            await self._teardown_session_state(
+                session_id=session.session_id,
+                internal_net_name=session._internal_network_name,
+                egress_net_name=session._egress_network_name,
+                sidecar_name=session._sidecar_container_name,
+            )
+            teardown_succeeded = True
+        finally:
+            # Sprint 10 T10 Docker round-5 reviewer-P2 fix + round-6
+            # reviewer-P1 follow-up (2026-05-24): revoke active Vault
+            # leases best-effort EVEN WHEN teardown raised AND surface
+            # audit-emit failures on the normal path so banks see
+            # them per spec §7.2 ("audit evidence for every revoke
+            # failure"). The P2 fix wrapped the audit emits in
+            # ``contextlib.suppress(Exception)`` UNCONDITIONALLY which
+            # silently swallowed audit-chain failures on the normal
+            # path — that violated the bank-grade evidence contract.
+            # Conditional-suppress per ``teardown_succeeded`` resolves
+            # the tension between the two correctness requirements:
+            #
+            # * teardown_succeeded=False (teardown raised) — suppress
+            #   audit-emit exceptions so the ORIGINAL teardown
+            #   exception propagates per Python finally-block
+            #   semantics (a new exception from finally would
+            #   shadow the try-block's exception unless suppressed).
+            # * teardown_succeeded=True (normal path) — audit-emit
+            #   failures PROPAGATE so operators see audit-chain
+            #   problems rather than silently lose revoke evidence
+            #   per spec §7.2's bank-grade contract.
+            #
+            # Gated on ``not already_destroyed`` so the idempotent
+            # second destroy does NOT re-emit lease events. The Vault
+            # revoke itself is intentionally NOT wrapped in suppress —
+            # its own try/except routes failures to
+            # lease_revoke_failed audit so each lease attempt is
+            # independently best-effort. Runs BEFORE the tombstone +
+            # lifecycle.destroyed branch below so the chain row
+            # order stays: revoke[_failed] → (if teardown succeeded)
+            # tombstone → lifecycle.destroyed.
+            if not already_destroyed:
+                # Capture the FIRST normal-path audit-emit exception
+                # so we can raise it AFTER every lease got its
+                # revoke attempt per spec §7.2's single-attempt-
+                # per-lease cleanup contract. Round-3 reviewer-P1
+                # propagated immediately, which aborted the loop on
+                # multi-lease destroys (Gap N). Round-4 reviewer-P2
+                # fix: keep attempting + emit for every lease,
+                # remember first emit exception, raise after loop.
+                first_normal_path_emit_exc: BaseException | None = None
+
+                async def _emit_revoke_event(coro: Any) -> None:
+                    nonlocal first_normal_path_emit_exc
+                    if teardown_succeeded:
+                        # Normal path — capture first emit exception
+                        # but continue so the rest of the loop runs
+                        # per spec §7.2.
+                        try:
+                            await coro
+                        except Exception as exc:
+                            if first_normal_path_emit_exc is None:
+                                first_normal_path_emit_exc = exc
+                    else:
+                        # Teardown-failure path — suppress so the
+                        # original teardown exception propagates per
+                        # Python finally-block semantics.
+                        with contextlib.suppress(Exception):
+                            await coro
+
+                for lease in session.active_leases:
+                    try:
+                        await self._credential_adapter.revoke_lease(lease.lease_id)
+                    except Exception as exc:
+                        await _emit_revoke_event(
+                            sandbox_lifecycle_lease_revoke_failed(
+                                self._dh,
+                                lease=lease,
+                                trace_id="",
+                                session_id=session.session_id,
+                                vault_error=str(exc),
+                            )
+                        )
+                        continue
+                    await _emit_revoke_event(
+                        sandbox_lifecycle_lease_revoked(
+                            self._dh,
+                            lease=lease,
+                            trace_id="",
+                            session_id=session.session_id,
+                        )
+                    )
+
+                # Normal-path-only: raise the FIRST captured emit
+                # exception AFTER every lease attempted its revoke.
+                # On the teardown-failure path
+                # first_normal_path_emit_exc stays None (the inner
+                # suppress swallows emit failures so the original
+                # teardown exception wins).
+                if first_normal_path_emit_exc is not None:
+                    raise first_normal_path_emit_exc
         if already_destroyed:
             return
 

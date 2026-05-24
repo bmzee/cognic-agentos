@@ -67,6 +67,13 @@ class _StubSettings:
     sandbox_per_tenant_max_walltime: float = 300.0
     sandbox_checkpoint_retention_s: int = 86_400
     sandbox_max_checkpoints_per_session: int = 10
+    # Sprint 10 T8 added — admit_policy reads this Setting at Step 9
+    # to thread input.kernel_default.max_credential_ttl_s into the
+    # Rego input. T9 hardening: this stub MUST carry the field to keep
+    # wake-time admit_policy revalidation green (per the
+    # feedback_verify_promotion_meets_floor_at_promotion_time +
+    # feedback_full_gate_pre_commit doctrines).
+    sandbox_kernel_default_max_credential_ttl_s: int = 900
     sandbox_reaper_interval_s: int = 300
 
 

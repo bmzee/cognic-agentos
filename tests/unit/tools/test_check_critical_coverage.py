@@ -35,13 +35,16 @@ import pytest
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _GATE_TOOL_PATH = _REPO_ROOT / "tools" / "check_critical_coverage.py"
 
-#: Entry count after the Sprint 9 T10 promotions (63 at the 7B.4
+#: Entry count after the Sprint 10 Z1 promotions (63 at the 7B.4
 #: T13 close + 7 Sprint-8A sandbox modules = 70; + 1 Sprint-8B K8s
 #: backend = 71; + 2 Sprint-8.5 modules = 73; + 4 Sprint-9
 #: compliance/iso42001 modules = 77; + 4 Sprint-9.5 Z1 Model Registry
-#: modules (registry / storage / trust + portal lifecycle routes) = 81).
+#: modules (registry / storage / trust + portal lifecycle routes) = 81;
+#: + 4 Sprint-10 Z1 Vault credential-leasing modules
+#: (core/vault + core/_vault_transport + sandbox/credentials +
+#: sandbox/backends/_shared_credentials per Round-7 Gap O) = 85).
 #: Bump this in lockstep with any deliberate ``_CRITICAL_FILES`` change.
-_EXPECTED_ENTRY_COUNT = 81
+_EXPECTED_ENTRY_COUNT = 85
 
 #: The 5 modules Sprint 7B.3 promoted to the durable gate, each by its
 #: own landing commit (T3-T6 panels + T7 composer). All ride the
@@ -214,17 +217,16 @@ _SPRINT_8A_GATE_MODULES = (
 #:   ``core/decision_history.py`` + ``core/canonical.py``. Bugs in the
 #:   event-payload-rendering surface through the 8-event taxonomy unit
 #:   test + the integration tests of ``backends/docker_sibling.py``.
-#: - ``sandbox/credentials.py``: re-export shim (38 lines; zero new
-#:   logic). Canonical home of ``CredentialAdapter`` +
-#:   ``KernelDefaultCredentialAdapter`` is ``sandbox/admission.py``
-#:   (which IS on the gate); ``sandbox/credentials.py`` re-exports so
-#:   Sprint 10's real ``VaultCredentialAdapter`` can replace the
-#:   canonical-home module without rewriting consumers. Sprint 10's
-#:   real adapter goes ON the gate when it lands.
-_SPRINT_8A_OFF_GATE_MODULES = (
-    "src/cognic_agentos/sandbox/audit.py",
-    "src/cognic_agentos/sandbox/credentials.py",
-)
+#:
+#: NOTE — ``sandbox/credentials.py`` was an off-gate carve-out at
+#: Sprint 8A (re-export shim covering the canonical home at
+#: ``sandbox/admission.py``) but was PROMOTED to the durable gate at
+#: Sprint 10 Z1 alongside the real ``VaultCredentialAdapter``
+#: implementation (per AGENTS.md L188's "Sprint 10's real adapter
+#: goes ON the gate when it lands" promise). The Sprint-10 Z1
+#: promotion test ``test_sprint_10_modules_present_with_standard_floors``
+#: now pins it on-gate; removed from this 8A off-gate list.
+_SPRINT_8A_OFF_GATE_MODULES = ("src/cognic_agentos/sandbox/audit.py",)
 
 
 def test_sprint_8a_modules_present_with_standard_floors(
@@ -241,12 +243,14 @@ def test_sprint_8a_modules_present_with_standard_floors(
 
 @pytest.mark.parametrize("off_gate_module", _SPRINT_8A_OFF_GATE_MODULES)
 def test_sprint_8a_off_gate_modules_absent(gate_tool: ModuleType, off_gate_module: str) -> None:
-    """2 Sprint 8A modules stay OFF the durable gate per the in-source
-    8A docstring carve-outs (``sandbox/audit.py`` thin chain-row
-    converter + ``sandbox/credentials.py`` re-export shim).
+    """1 remaining Sprint 8A module stays OFF the durable gate per the
+    in-source 8A docstring carve-out (``sandbox/audit.py`` thin
+    chain-row converter; ``sandbox/credentials.py`` was promoted at
+    Sprint 10 Z1 per the AGENTS.md L188 promise).
 
-    A future edit that promotes either without revisiting the spec §17
-    rationale fails here, forcing a deliberate review."""
+    A future edit that promotes ``sandbox/audit.py`` without
+    revisiting the spec §17 rationale fails here, forcing a deliberate
+    review."""
     paths = {path for path, _line, _branch in gate_tool._CRITICAL_FILES}
     assert off_gate_module not in paths
 
@@ -408,5 +412,70 @@ def test_sprint_9_off_gate_modules_absent(gate_tool: ModuleType, off_gate_module
     """The ``portal/api/compliance/`` route modules stay OFF the durable
     gate. A future edit that promotes one without revisiting the
     rationale fails here, forcing a deliberate review."""
+    paths = {path for path, _line, _branch in gate_tool._CRITICAL_FILES}
+    assert off_gate_module not in paths
+
+
+#: The 4 Sprint 10 Z1 promotions (Vault credential-leasing quartet).
+#: All ride the standard 95%-line / 90%-branch floor. The 4th entry
+#: (``sandbox/backends/_shared_credentials.py``) was added per the
+#: Round-7 Gap O doctrinal-fit decision — wire-protocol-public
+#: artifact owner (Vault exception → ``SandboxRefusalReason`` closed-
+#: enum mapping), not consumer-owned helper.
+_SPRINT_10_GATE_MODULES = (
+    "src/cognic_agentos/core/vault.py",
+    "src/cognic_agentos/core/_vault_transport.py",
+    "src/cognic_agentos/sandbox/credentials.py",
+    "src/cognic_agentos/sandbox/backends/_shared_credentials.py",
+)
+
+
+#: Sandbox-tree modules that explicitly STAY OFF the gate per the
+#: Doctrine F carve-out precedent (consumer-owned helpers /
+#: thin-glue modules whose substantive enforcement lives in their
+#: on-gate consumers). A future promotion of any of these would
+#: revisit the doctrinal-fit rationale at the consumer-owned-helper
+#: vs wire-public-artifact-owner boundary — distinct from the Gap O
+#: Sprint-10 decision that promoted ``_shared_credentials.py``
+#: precisely because it's NOT consumer-owned.
+_SPRINT_10_OFF_GATE_MODULES = (
+    # Consumer-owned: K8s primary consumer; Docker inlines the equivalent.
+    "src/cognic_agentos/sandbox/backends/_shared_exec.py",
+    # Thin chain-row converter for the sandbox lifecycle event taxonomies;
+    # substantive audit-chain invariants enforced upstream by the on-gate
+    # core/audit.py + core/decision_history.py + core/canonical.py.
+    "src/cognic_agentos/sandbox/audit.py",
+    # Pure selection seam (~130 LoC); wire-protocol-public contract is
+    # the Settings.sandbox_backend Literal arm set + the
+    # COGNIC_SANDBOX_BACKEND env-var override per ADR-004 §32 (drift
+    # detector at tests/unit/sandbox/test_backend_factory.py pins
+    # lockstep). Substantive enforcement lives in the chosen backend's
+    # methods which ARE both on the gate.
+    "src/cognic_agentos/sandbox/backend_factory.py",
+)
+
+
+def test_sprint_10_modules_present_with_standard_floors(
+    gate_tool: ModuleType,
+) -> None:
+    """The 4 Sprint 10 Z1 promotions are on the gate at the 95/90 floor."""
+    by_path = {path: (line, branch) for path, line, branch in gate_tool._CRITICAL_FILES}
+    for module in _SPRINT_10_GATE_MODULES:
+        assert module in by_path, f"Sprint 10 module missing from gate: {module}"
+        assert by_path[module] == (0.95, 0.90), (
+            f"{module} must ride the standard 95%-line / 90%-branch floor"
+        )
+
+
+@pytest.mark.parametrize("off_gate_module", _SPRINT_10_OFF_GATE_MODULES)
+def test_sprint_10_off_gate_modules_absent(gate_tool: ModuleType, off_gate_module: str) -> None:
+    """The 3 sandbox-tree Doctrine F carve-outs stay OFF the durable
+    gate. A future edit that promotes one without revisiting the
+    consumer-owned-helper vs wire-public-artifact-owner doctrinal
+    fit fails here, forcing a deliberate review (the Round-7 Gap O
+    pre-flight is the precedent: ``_shared_credentials.py`` got
+    promoted ONLY after the wire-public-artifact-owner case was
+    explicit; same scrutiny required for any future sandbox-tree
+    promotion)."""
     paths = {path for path, _line, _branch in gate_tool._CRITICAL_FILES}
     assert off_gate_module not in paths

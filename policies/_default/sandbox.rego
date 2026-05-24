@@ -116,6 +116,7 @@ allow if {
 	_credential_precondition_satisfied
 	_runtime_image_authorised
 	_egress_http_only
+	_credential_ttl_within_tenant_max
 }
 
 # When no tenant_max is provided the caller is the kernel default
@@ -204,4 +205,65 @@ _has_invalid_egress_entry if {
 	contains(entry, "://")
 	not startswith(entry, "http://")
 	not startswith(entry, "https://")
+}
+
+# Rule 6 (Sprint 10) — per-tenant max credential TTL cap per ADR-004
+# §25/§68/§102 + spec §5.1/§5.2. Wave-1 flat cap: every
+# `requires_credentials` entry's `ttl_s` must be <= the tenant's
+# configured `max_credential_ttl_s`. Positive helper joined to the
+# `allow if` conjunction so the cap actually refuses on the wire (the
+# existing bundle has no `count(deny) == 0` precondition and the
+# `OPAEngine.evaluate` wrapper returns `Decision(allow: bool, ...)`
+# with NO `deny` set surfaced to Python — a standalone `deny[reason]`
+# rule would be inert).
+#
+# Closed-enum reason `sandbox_credential_ttl_exceeds_tenant_max` is
+# RESERVED here for Sprint 10 T9 (lifted into the SandboxRefusalReason
+# Literal alongside the matching Stage-2 caller mapping). At T8 a
+# TTL-exceeded request surfaces through the existing
+# `not decision.allow → SandboxLifecycleRefused("sandbox_policy_rego_denied")`
+# arm at sandbox/admission.py:584-588. Bisection-clean.
+#
+# Sprint-8A T11 R2-R3 pure-Rego defence-in-depth: the
+# `is_number(cred.ttl_s)` guard inside the helper ensures malformed
+# types (string, null, object) refuse fail-closed without an NPE.
+# Without the type guard, Rego's `"not-an-int" <= 900` is undefined
+# and would silently allow.
+#
+# Absent OR empty `requires_credentials` (Sprint-8A admission paths
+# that never opt into dynamic-lease declarations) is vacuously
+# satisfied. Two arms mirror the existing 2-arm
+# `_credential_precondition_satisfied` pattern at L137-144:
+#   (i) absent — pre-T7 input shape entirely; OR
+#   (ii) present — every entry's ttl_s passes the cap (`every` over
+#        an empty list also holds, so T7-compatible callers passing
+#        the default empty list also pass via this arm).
+# Without arm (i) the helper would be undefined on pre-T7-shape input
+# (Rego's `every x in undefined { ... }` is undefined), which would
+# refuse every existing Sprint-8A admission path the moment rule 6
+# joins the `allow if` conjunction.
+_credential_ttl_within_tenant_max if {
+	not input.requires_credentials
+}
+
+_credential_ttl_within_tenant_max if {
+	every cred in input.requires_credentials {
+		is_number(cred.ttl_s)
+		cred.ttl_s <= tenant_max_credential_ttl_s
+	}
+}
+
+# Tenant overlay first (bank-overlay raise via
+# `input.tenant.overlay.max_credential_ttl_s`), kernel default
+# fallback (`input.kernel_default.max_credential_ttl_s`) — Wave-1
+# admission.py omits the `tenant.overlay` key entirely per spec
+# §5.2; the `else` branch always fires for Wave-1 deployments.
+# Bank-overlay plumbing for the tenant overlay path is a
+# future-sprint hook. Bank overlays may TIGHTEN the cap (lower
+# TTL ceiling); LOOSENING the kernel default requires a
+# coordinated kernel + ADR amendment per AGENTS.md L150.
+tenant_max_credential_ttl_s := ttl if {
+	ttl := input.tenant.overlay.max_credential_ttl_s
+} else := ttl if {
+	ttl := input.kernel_default.max_credential_ttl_s
 }

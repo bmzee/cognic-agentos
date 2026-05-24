@@ -1,4 +1,4 @@
-"""Sprint 8A T8 — credentials.py re-export shim.
+"""Sprint 8A T8 — credentials.py re-export shim + Sprint 10 T5 Protocol extension.
 
 Pins that:
 
@@ -8,20 +8,26 @@ Pins that:
 * `sandbox.__init__` exposes both import paths and they resolve to the
   same objects.
 * `KernelDefaultCredentialAdapter` satisfies the @runtime_checkable
-  `CredentialAdapter` Protocol.
+  `CredentialAdapter` Protocol — including the Sprint 10 T5
+  ``mint_lease`` / ``revoke_lease`` methods.
 * `fetch_secret` raises `NotImplementedError` with the actual T5-committed
   stub message (cites Sprint 10 + ADR-009 + ``VaultCredentialAdapter`` +
   "fail-loud sentinel"; ADR-009 is the canonical pluggable-adapter ADR,
   ADR-004's credential-scope is the architectural intent).
+* Sprint 10 T5: ``mint_lease`` / ``revoke_lease`` ALSO raise
+  ``NotImplementedError`` with parity wording (cite Sprint 10 + ADR-009
+  + ``VaultCredentialAdapter`` + "fail-loud sentinel" + echo the
+  request/lease_id for debugging) — pinned per the same fail-loud +
+  ADR-pointer rule.
 * Defence-in-depth: when ``policy.vault_path is None``, admit_policy
   NEVER calls ``fetch_secret`` on the wired adapter, regardless of
   which adapter is wired (the admission step-3 check is gated on
   ``vault_path is not None``).
-
-The richer ``CredentialLease + mint_lease/revoke_lease`` lease API
-belongs to Sprint 10's concrete ``VaultCredentialAdapter`` design and
-is intentionally NOT part of the Wave-1 ``CredentialAdapter`` Protocol;
-``test_credential_adapter_declares_fetch_secret_only`` pins this.
+* Sprint 10 T5 Protocol-extension contract: the Protocol now declares
+  ``fetch_secret`` + ``mint_lease`` + ``revoke_lease``; pre-T5 objects
+  declaring ONLY ``fetch_secret`` no longer structurally conform to
+  the extended Protocol — this is the INTENTIONAL Protocol-shape
+  change per ADR-004 §102 + the spec §3.3 dual-API design.
 """
 
 from __future__ import annotations
@@ -96,32 +102,57 @@ class TestProtocolShape:
         adapter = KernelDefaultCredentialAdapter()
         assert isinstance(adapter, CredentialAdapter)
 
-    def test_credential_adapter_declares_fetch_secret_only(self) -> None:
-        """T5 landed the single-method ``fetch_secret`` API. The
-        richer ``mint_lease/revoke_lease`` lease API belongs to
-        Sprint 10's concrete ``VaultCredentialAdapter`` design —
-        adding it to the Wave-1 Protocol would be scope creep. This
-        pin catches an accidental re-introduction of the lease API
-        onto the Protocol."""
-        # Walk public attributes the Protocol declares. The Protocol
-        # is structural so we check the canonical method exists and
-        # the Sprint-10 lease methods do NOT.
+    def test_credential_adapter_declares_fetch_secret_plus_lease_api(self) -> None:
+        """Sprint 10 T5 — the Protocol now declares ``fetch_secret``
+        (Sprint 8A) + ``mint_lease`` + ``revoke_lease`` (Sprint 10
+        per ADR-004 §102 + spec §3.3 dual-API design). This pin is
+        the INVERSE of the T8-era
+        ``test_credential_adapter_declares_fetch_secret_only`` —
+        T5 deliberately lifts the lease API onto the wire-protocol-
+        public Protocol surface so T6's ``VaultCredentialAdapter`` +
+        any future operator-supplied real adapter can be wired into
+        ``admit_policy``'s ``credential_adapter`` kwarg without a
+        second Protocol type for the lease pathway."""
         public_names = {name for name in dir(CredentialAdapter) if not name.startswith("_")}
         assert "fetch_secret" in public_names, (
             "CredentialAdapter Protocol must declare fetch_secret per "
-            "the T5-committed single-method API"
+            "the T5-committed Sprint-8A single-method API"
         )
-        # Negative pins for the Sprint-10 lease API that T8's
-        # pre-patch plan body incorrectly tried to add.
-        assert "mint_lease" not in public_names, (
-            "mint_lease belongs to Sprint 10's VaultCredentialAdapter "
-            "design, NOT the Wave-1 Protocol. See Post-T8 implementation "
-            "notes in the plan-of-record."
+        assert "mint_lease" in public_names, (
+            "CredentialAdapter Protocol MUST declare mint_lease per "
+            "Sprint 10 T5 extension (ADR-004 §102 + spec §3.3)"
         )
-        assert "revoke_lease" not in public_names, (
-            "revoke_lease belongs to Sprint 10's VaultCredentialAdapter "
-            "design, NOT the Wave-1 Protocol. See Post-T8 implementation "
-            "notes in the plan-of-record."
+        assert "revoke_lease" in public_names, (
+            "CredentialAdapter Protocol MUST declare revoke_lease per "
+            "Sprint 10 T5 extension (ADR-004 §102 + spec §3.3)"
+        )
+
+    def test_pre_t5_fetch_secret_only_object_no_longer_satisfies_protocol(self) -> None:
+        """Sprint 10 T5 — INTENTIONAL PROTOCOL-SHAPE BREAK pin.
+        An object declaring ONLY ``fetch_secret`` (the pre-T5
+        single-method shape) MUST NO LONGER structurally conform
+        to the post-T5 Protocol. ``@runtime_checkable`` Protocols
+        use ``hasattr`` over every declared method; an object
+        missing ``mint_lease`` / ``revoke_lease`` fails the
+        ``isinstance`` check.
+
+        This pin documents the intentional break + catches a
+        future regression that drops one of the lease methods
+        from the Protocol (which would silently re-admit the
+        pre-T5 shape and break T6's
+        ``VaultCredentialAdapter``-conformance expectations)."""
+
+        class PreT5OnlyFetchSecret:
+            async def fetch_secret(self, path: str) -> str | None:
+                return None
+
+        adapter = PreT5OnlyFetchSecret()
+        assert not isinstance(adapter, CredentialAdapter), (
+            "Post-T5 CredentialAdapter Protocol requires all 3 methods "
+            "(fetch_secret + mint_lease + revoke_lease). A pre-T5 "
+            "object declaring only fetch_secret must fail the "
+            "isinstance check — pin catches accidental Protocol "
+            "shrink that would silently re-admit the pre-T5 shape."
         )
 
 
@@ -156,6 +187,82 @@ class TestStubFailsLoudWithSprintTenPointer:
             await adapter.fetch_secret("secret/prod/db-password")
         msg = str(exc.value)
         assert "'secret/prod/db-password'" in msg
+
+    @pytest.mark.asyncio
+    async def test_mint_lease_raises_not_implemented_with_sprint_10_pointer(
+        self,
+    ) -> None:
+        """Sprint 10 T5 — ``mint_lease`` MUST fail loud with parity
+        wording to ``fetch_secret`` per the AGENTS.md production-grade
+        rule: cite Sprint 10 + ADR-009 + ``VaultCredentialAdapter`` +
+        "fail-loud sentinel". Same convention as the existing
+        ``fetch_secret`` pin at
+        ``test_fetch_secret_raises_not_implemented_with_sprint_10_pointer``."""
+        from cognic_agentos.core.vault import VaultLeaseActorRef, VaultLeaseRequest
+
+        adapter = KernelDefaultCredentialAdapter()
+        request = VaultLeaseRequest(
+            secret_path="database/creds/payment-readonly",
+            ttl_s=900,
+            tenant_id="t-1",
+            actor_ref=VaultLeaseActorRef(actor_subject="u-1", actor_type="human"),
+            scope_label="payment-readonly-test",
+        )
+        with pytest.raises(NotImplementedError) as exc:
+            await adapter.mint_lease(request)
+        msg = str(exc.value)
+        assert "Sprint 10" in msg
+        assert "ADR-009" in msg
+        assert "VaultCredentialAdapter" in msg
+        assert "fail-loud sentinel" in msg
+
+    @pytest.mark.asyncio
+    async def test_mint_lease_echoes_request_secret_path_in_error(self) -> None:
+        """Sprint 10 T5 — ``mint_lease`` error message echoes the
+        request's ``secret_path`` (repr'd) so debugging logs can
+        identify which credential lease attempt fired the sentinel.
+        Mirrors the existing ``fetch_secret`` path-echo convention."""
+        from cognic_agentos.core.vault import VaultLeaseActorRef, VaultLeaseRequest
+
+        adapter = KernelDefaultCredentialAdapter()
+        request = VaultLeaseRequest(
+            secret_path="database/creds/payment-readonly",
+            ttl_s=900,
+            tenant_id="t-1",
+            actor_ref=VaultLeaseActorRef(actor_subject="u-1", actor_type="human"),
+            scope_label="payment-readonly-test",
+        )
+        with pytest.raises(NotImplementedError) as exc:
+            await adapter.mint_lease(request)
+        msg = str(exc.value)
+        assert "'database/creds/payment-readonly'" in msg
+
+    @pytest.mark.asyncio
+    async def test_revoke_lease_raises_not_implemented_with_sprint_10_pointer(
+        self,
+    ) -> None:
+        """Sprint 10 T5 — ``revoke_lease`` MUST fail loud with parity
+        wording to ``fetch_secret`` + ``mint_lease`` per the
+        AGENTS.md production-grade rule."""
+        adapter = KernelDefaultCredentialAdapter()
+        with pytest.raises(NotImplementedError) as exc:
+            await adapter.revoke_lease("database/creds/payment-readonly/lease-abc-123")
+        msg = str(exc.value)
+        assert "Sprint 10" in msg
+        assert "ADR-009" in msg
+        assert "VaultCredentialAdapter" in msg
+        assert "fail-loud sentinel" in msg
+
+    @pytest.mark.asyncio
+    async def test_revoke_lease_echoes_lease_id_in_error(self) -> None:
+        """Sprint 10 T5 — ``revoke_lease`` error message echoes the
+        ``lease_id`` (repr'd) so debugging logs can identify which
+        lease was being revoked when the sentinel fired."""
+        adapter = KernelDefaultCredentialAdapter()
+        with pytest.raises(NotImplementedError) as exc:
+            await adapter.revoke_lease("database/creds/payment-readonly/lease-abc-123")
+        msg = str(exc.value)
+        assert "'database/creds/payment-readonly/lease-abc-123'" in msg
 
 
 class TestSandboxesWithoutCredentialsUnaffected:

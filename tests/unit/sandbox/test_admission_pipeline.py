@@ -115,12 +115,21 @@ def _valid_pack_context(**overrides: object) -> PackAdmissionContext:
 
 def _passing_settings() -> MagicMock:
     """A Settings mock whose tenant caps comfortably exceed every
-    fixture policy. Sandbox-prefixed per the in-repo Settings convention."""
+    fixture policy. Sandbox-prefixed per the in-repo Settings convention.
+
+    Sprint 10 T8 — ``sandbox_kernel_default_max_credential_ttl_s`` is
+    set to a stable concrete value (900s — the kernel default per spec
+    §5.2). A bare MagicMock would synthesise a fresh MagicMock per
+    attribute access, breaking the T7 byte-shape-equivalence regression
+    at ``test_no_kwarg_and_explicit_empty_kwarg_are_byte_shape_equivalent``
+    (each call's input dict would carry a different MagicMock id for
+    the ``kernel_default.max_credential_ttl_s`` slot)."""
 
     return MagicMock(
         sandbox_per_tenant_max_cpu=4.0,
         sandbox_per_tenant_max_memory=1024,
         sandbox_per_tenant_max_walltime=300.0,
+        sandbox_kernel_default_max_credential_ttl_s=900,
     )
 
 
@@ -502,6 +511,61 @@ class TestAdmissionHappyPath:
         rego_input = rego.evaluate.call_args.kwargs["input"]
         assert rego_input["runtime_image_in_canonical_set"] is False
         assert rego_input["runtime_image_in_tenant_allow_list"] is True
+
+
+class TestSprint10T7RequiresCredentialsBackwardCompat:
+    """Sprint 10 T7 — `admit_policy` gains a keyword-only
+    ``requires_credentials: Sequence[VaultLeaseRequest] = ()`` kwarg.
+    Every Sprint-8A call site in this test module passes NO kwarg —
+    the default empty value MUST be a complete byte-shape no-op for
+    backward-compat. The substantive T7 tests live in
+    ``tests/unit/sandbox/test_admit_credentials.py``; this class pins
+    the no-kwarg ≡ explicit-empty-kwarg equivalence so a future
+    refactor that changes the default away from ``()`` is caught HERE
+    rather than only at the dedicated T7 file."""
+
+    async def test_no_kwarg_and_explicit_empty_kwarg_are_byte_shape_equivalent(
+        self,
+    ) -> None:
+        """Call admit_policy twice with the same fixtures — once
+        omitting ``requires_credentials`` entirely, once passing
+        ``requires_credentials=()`` explicitly — and assert the Rego
+        input dicts are byte-shape identical."""
+
+        rego_implicit = _passing_rego()
+        await admit_policy(
+            _valid_policy(),
+            tenant_id="t-1",
+            actor=MagicMock(),
+            pack_context=_valid_pack_context(),
+            catalog=_passing_catalog(),
+            credential_adapter=AsyncMock(spec=CredentialAdapter),
+            rego_engine=rego_implicit,
+            settings=_passing_settings(),
+            # No `requires_credentials` kwarg.
+        )
+
+        rego_explicit = _passing_rego()
+        await admit_policy(
+            _valid_policy(),
+            tenant_id="t-1",
+            actor=MagicMock(),
+            pack_context=_valid_pack_context(),
+            catalog=_passing_catalog(),
+            credential_adapter=AsyncMock(spec=CredentialAdapter),
+            rego_engine=rego_explicit,
+            settings=_passing_settings(),
+            requires_credentials=(),
+        )
+
+        implicit_input = rego_implicit.evaluate.call_args.kwargs["input"]
+        explicit_input = rego_explicit.evaluate.call_args.kwargs["input"]
+        assert implicit_input == explicit_input
+        # Both paths MUST produce the empty-list shape (NOT a missing
+        # key — bundle reads ``count(input.requires_credentials)``
+        # unconditionally).
+        assert implicit_input["requires_credentials"] == []
+        assert explicit_input["requires_credentials"] == []
 
 
 # ---------------------------------------------------------------------------

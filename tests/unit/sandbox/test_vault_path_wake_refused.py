@@ -226,21 +226,37 @@ class TestVaultBearingWakeRefuses:
         assert "sandbox_credential_adapter_not_configured" in exc.value.detail
 
 
-class TestNoCredentialAdapterModified:
-    def test_credentials_module_imports_only_kernel_default(self) -> None:
-        """Q4 lock proof: cognic_agentos.sandbox.credentials still
-        re-exports KernelDefaultCredentialAdapter + CredentialAdapter
-        Protocol only — NO new Vault* / Real* adapter class."""
+class TestCredentialAdapterPostSprint10T6:
+    """Sprint 10 T6 lifted the Sprint-8.5 Q4 lock: Sprint 10 T6 SHIPS
+    the real ``VaultCredentialAdapter`` at ``sandbox.credentials``.
+
+    This test (formerly ``TestNoCredentialAdapterModified``) was the
+    Sprint-8.5-scoped negative pin proving 8.5 itself didn't touch
+    the Protocol. The lock was time-bounded to Sprint 8.5; Sprint 10
+    intentionally adds the real adapter. The test is reframed to its
+    positive post-T6 inverse: re-exports SURVIVE the shim replacement
+    AND the real adapter is now present."""
+
+    def test_credentials_module_exports_post_t6_adapter_surface(self) -> None:
+        """Sprint 10 T6 — sandbox.credentials post-T6 export surface:
+        * Sprint-8A re-exports SURVIVE (CredentialAdapter +
+          KernelDefaultCredentialAdapter still re-exported from
+          sandbox.admission — same-object identity pinned by
+          ``tests/unit/sandbox/test_credentials.py::TestReExportsAndConformance``).
+        * Sprint-10 T6 NEW: VaultCredentialAdapter is now present and
+          is the real adapter banks wire in create_app()."""
         import cognic_agentos.sandbox.credentials as creds
 
         public = [n for n in dir(creds) if not n.startswith("_")]
-        # Sprint 8A surface — both names re-exported from admission.
+        # Sprint-8A re-exports MUST survive.
         assert "KernelDefaultCredentialAdapter" in public
         assert "CredentialAdapter" in public
-        # Sprint 8.5 T6 MUST NOT add new adapter classes.
-        for name in public:
-            obj = getattr(creds, name)
-            # Inspecting class names defensively for any "Vault*" /
-            # "Real*" adapter that would violate the Q4 lock.
-            if isinstance(obj, type):
-                assert "Vault" not in name, f"Sprint 8.5 T6 must not add {name}"
+        # Sprint-10 T6 — real adapter is NOW present.
+        assert "VaultCredentialAdapter" in public, (
+            "Sprint 10 T6 ships VaultCredentialAdapter in "
+            "sandbox.credentials — the Sprint-8.5 Q4 lock that "
+            "forbade Vault* / Real* classes here is INTENTIONALLY "
+            "lifted at T6. See "
+            "tests/unit/sandbox/test_credentials.py for the post-T6 "
+            "contract."
+        )

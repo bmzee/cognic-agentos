@@ -17,9 +17,10 @@ time per ``feedback_verify_code_citations_at_doc_write``:
   ``record_builder`` is ``sync (captured: T) -> DecisionRecord``.
 
 Drift-detector reminder from spec line 808 + ``feedback_drift_detector_
-test_only_no_runtime_import``: ``TestSandboxLifecycleEventVocabHas12Values``
-(Sprint 8.5 T1 extended from 8 → 12; renamed) pins the count + the
-exact strings as a test-only check (the production module re-uses the
+test_only_no_runtime_import``: ``TestSandboxLifecycleEventVocabHas15Values``
+(Sprint 8.5 T1 extended 8 → 12; Sprint 10 T9 extended 12 → 15; class
+renamed each time the count bumps) pins the count + the exact strings
+as a test-only check (the production module re-uses the
 ``SandboxLifecycleEvent`` Literal from ``sandbox/protocol.py`` directly
 — there is no runtime cross-module copy that needs lockstep
 enforcement).
@@ -29,17 +30,26 @@ from __future__ import annotations
 
 import typing
 import uuid
+from datetime import UTC, datetime, timedelta
 from typing import cast
 from unittest.mock import AsyncMock
 
 import pytest
 
 from cognic_agentos.core.decision_history import DecisionRecord
+from cognic_agentos.core.vault import (
+    CredentialLease,
+    VaultLeaseActorRef,
+    VaultLeaseRequest,
+)
 from cognic_agentos.sandbox import (
     CheckpointId,
     SandboxLifecycleEvent,
     sandbox_lifecycle_checkpoint_purged,
     sandbox_lifecycle_checkpointed,
+    sandbox_lifecycle_lease_minted,
+    sandbox_lifecycle_lease_revoke_failed,
+    sandbox_lifecycle_lease_revoked,
     sandbox_lifecycle_suspended,
     sandbox_lifecycle_woken,
 )
@@ -154,7 +164,7 @@ class TestAllLifecycleEventsReachable:
     ``typing.get_args(SandboxLifecycleEvent)``) so the test
     automatically covers Sprint-8.5's 4 new events alongside the
     Sprint-8A 8 without manual count maintenance — the count guard
-    lives separately at ``TestSandboxLifecycleEventVocabHas12Values``.
+    lives separately at ``TestSandboxLifecycleEventVocabHas15Values``.
     """
 
     @pytest.mark.parametrize("event", list(typing.get_args(SandboxLifecycleEvent)))
@@ -177,14 +187,19 @@ class TestAllLifecycleEventsReachable:
 # ---------------------------------------------------------------------------
 
 
-class TestSandboxLifecycleEventVocabHas12Values:
-    """Spec line 808 + §979 + Sprint 8.5 §3.3 — pin the 12-value count
-    + the exact strings.
+class TestSandboxLifecycleEventVocabHas15Values:
+    """Spec line 808 + §979 + Sprint 8.5 §3.3 + Sprint-10 §6.2 — pin
+    the 15-value count + the exact strings.
 
     No ``warm_pool.replenished`` per the user-locked taxonomy at §4.3 —
     replenishment is the *cause*; the *event* is still ``precreated``.
 
     Sprint 8.5 T1 extended 8 → 12 (4 new events per spec §3.3).
+    Sprint 10 T9 extended 12 → 15 (3 new lease lifecycle events per
+    Sprint-10 spec §6.2: lease_minted / lease_revoked /
+    lease_revoke_failed; emitted from SandboxBackend.create() +
+    .destroy() at T10).
+
     Tombstoning is a STORAGE artifact NOT a lifecycle event — destroy()
     reuses the 8A ``sandbox.lifecycle.destroyed`` event with 2 new
     conditional payload keys per spec §5.1.
@@ -206,11 +221,17 @@ class TestSandboxLifecycleEventVocabHas12Values:
             "sandbox.lifecycle.suspended",
             "sandbox.lifecycle.woken",
             "sandbox.lifecycle.checkpoint_purged",
+            # Sprint 10 T9 — 3 new lease lifecycle events per
+            # Sprint-10 spec §6.2 (emitted from SandboxBackend.create()
+            # + .destroy() at T10).
+            "sandbox.lifecycle.lease_minted",
+            "sandbox.lifecycle.lease_revoked",
+            "sandbox.lifecycle.lease_revoke_failed",
         }
     )
 
-    def test_event_count_is_exactly_twelve(self) -> None:
-        assert len(typing.get_args(SandboxLifecycleEvent)) == 12
+    def test_event_count_is_exactly_fifteen(self) -> None:
+        assert len(typing.get_args(SandboxLifecycleEvent)) == 15
 
     def test_event_strings_match_spec_table_exactly(self) -> None:
         actual = frozenset(typing.get_args(SandboxLifecycleEvent))
@@ -757,6 +778,13 @@ class TestSandboxAuditPublicSurfaceExports:
             "sandbox_lifecycle_suspended",
             "sandbox_lifecycle_woken",
             "sandbox_lifecycle_checkpoint_purged",
+            # Sprint 10 T9 — 3 new lease lifecycle helpers per spec §6.2
+            # (`sandbox_lifecycle_lease_minted` / `_revoked` /
+            # `_revoke_failed`). Sprint 10 T10 backend create()/destroy()
+            # call sites depend on the package-root import path.
+            "sandbox_lifecycle_lease_minted",
+            "sandbox_lifecycle_lease_revoked",
+            "sandbox_lifecycle_lease_revoke_failed",
         }
 
         # __all__ membership pin — drift in this set breaks the public
@@ -765,7 +793,7 @@ class TestSandboxAuditPublicSurfaceExports:
         all_set = set(sandbox_pkg.__all__)
         missing = expected_t2_exports - all_set
         assert not missing, (
-            f"T2 wire-public names MUST be in cognic_agentos.sandbox.__all__; "
+            f"T2 + T9 wire-public names MUST be in cognic_agentos.sandbox.__all__; "
             f"missing: {sorted(missing)}"
         )
 
@@ -775,7 +803,7 @@ class TestSandboxAuditPublicSurfaceExports:
         for name in expected_t2_exports:
             assert hasattr(sandbox_pkg, name), (
                 f"{name!r} MUST be importable from cognic_agentos.sandbox "
-                f"(Sprint 8.5 T2 public-surface re-export)"
+                f"(Sprint 8.5 T2 + Sprint 10 T9 public-surface re-export)"
             )
 
     def test_root_reexports_are_canonical_objects(self) -> None:
@@ -799,3 +827,423 @@ class TestSandboxAuditPublicSurfaceExports:
             sandbox_pkg.sandbox_lifecycle_checkpoint_purged
             is audit_module.sandbox_lifecycle_checkpoint_purged
         )
+        # Sprint 10 T9 — 3 new lease lifecycle helpers.
+        assert (
+            sandbox_pkg.sandbox_lifecycle_lease_minted
+            is audit_module.sandbox_lifecycle_lease_minted
+        )
+        assert (
+            sandbox_pkg.sandbox_lifecycle_lease_revoked
+            is audit_module.sandbox_lifecycle_lease_revoked
+        )
+        assert (
+            sandbox_pkg.sandbox_lifecycle_lease_revoke_failed
+            is audit_module.sandbox_lifecycle_lease_revoke_failed
+        )
+
+
+# ---------------------------------------------------------------------------
+# Sprint 10 T9 — 3 new typed helpers for lease lifecycle events per spec §6.2.
+#
+# Payload-shape contract per spec §6.2:
+#   - 10 always-fields on lease_minted + lease_revoked:
+#       lease_id, secret_path, scope_label, tenant_id, actor_subject,
+#       actor_type, ttl_s, ttl_s_granted, minted_at (tz-aware ISO),
+#       expires_at (tz-aware ISO)
+#   - lease_revoke_failed adds 2 conditional keys:
+#       vault_error (Vault HTTP error string; caller-supplied — the only
+#         field not derivable from CredentialLease), auto_expiry_at
+#         (== expires_at per spec §6.2 line 624; DERIVED inside the
+#         helper from lease.expires_at.isoformat())
+#   - `session_id` threaded by emit_sandbox_event = 11 / 13 total keys
+#
+# Helper input-shape lock — single-source-of-truth derive (per plan
+# T9 Step 2 + the round-4 P1 review fixes):
+#   - lease: CredentialLease (single positional) — all 10 payload
+#     always-fields derived from one frozen dataclass.
+#   - DecisionRecord.tenant_id AND DecisionRecord.actor_id are also
+#     DERIVED inside the helper from lease.request.tenant_id +
+#     lease.request.actor_ref.actor_subject (NOT accepted as separate
+#     kwargs). Closes the contradictory-evidence bug class by
+#     construction: there is no caller-supplied channel through which
+#     a caller could pass chain-metadata tenant/actor disagreeing with
+#     the lease-payload tenant/actor.
+#   - trace_id + session_id remain caller-supplied (session-scoped +
+#     trace-scoped; NOT lease-scoped).
+#   - vault_error: str on revoke_failed — the ONLY caller-supplied
+#     extra kwarg (carries the Vault HTTP error string the backend
+#     captured during the failed revoke). auto_expiry_at is NOT a
+#     kwarg — accepting it as a caller string would re-open the
+#     silent-lie bug class where a caller could pass an arbitrary
+#     string disagreeing with expires_at; the helper derives it
+#     from lease.expires_at instead, matching spec §6.2 line 624.
+#
+# Live signatures (pinned by the per-helper test classes below):
+#   sandbox_lifecycle_lease_minted(store, *, lease, trace_id, session_id)
+#   sandbox_lifecycle_lease_revoked(store, *, lease, trace_id, session_id)
+#   sandbox_lifecycle_lease_revoke_failed(
+#       store, *, lease, trace_id, session_id, vault_error,
+#   )
+#
+# Spec §6.2 + AGENTS.md "Wire-protocol contracts": token contents NEVER
+# appear on the chain row. Examiners trace by lease_id + secret_path +
+# scope_label.
+# ---------------------------------------------------------------------------
+
+
+def _make_sample_lease() -> CredentialLease:
+    """Sample CredentialLease with ``request.ttl_s`` (900) != ``ttl_s_granted``
+    (600).
+
+    The distinct values pin spec §6.2's load-bearing distinction between
+    "what was requested" and "what Vault actually granted" — collapsing
+    them in the payload projection would erase the examiner-evidence
+    distinction. The token value is a recognisable sentinel so the
+    "never on chain row" defence-in-depth assertion can scan all payload
+    values for it.
+    """
+    minted_at = datetime(2026, 5, 24, 10, 0, 0, tzinfo=UTC)
+    return CredentialLease(
+        lease_id="vault/leases/db/abc123",
+        request=VaultLeaseRequest(
+            secret_path="database/creds/payments-read",
+            ttl_s=900,
+            tenant_id="t-1",
+            actor_ref=VaultLeaseActorRef(
+                actor_subject="user-42",
+                actor_type="human",
+            ),
+            scope_label="payments-read",
+        ),
+        # CredentialLease.token is dict[str, str] per core/vault.py:169
+        # (Vault returns dict-shaped credentials per backend — DB
+        # exposes {username, password}; AWS STS exposes
+        # {access_key, secret_key, session_token}; PKI exposes
+        # {certificate, private_key, ca_chain}). Sentinel placed
+        # inside the dict so the defence-in-depth scan below still
+        # detects accidental token-leak via str(payload_value).
+        token={"password": "vault-token-NEVER-on-chain"},
+        minted_at=minted_at,
+        ttl_s_granted=600,
+        expires_at=minted_at + timedelta(seconds=600),
+    )
+
+
+_EXPECTED_LEASE_PAYLOAD_KEYS: frozenset[str] = frozenset(
+    {
+        "lease_id",
+        "secret_path",
+        "scope_label",
+        "tenant_id",
+        "actor_subject",
+        "actor_type",
+        "ttl_s",
+        "ttl_s_granted",
+        "minted_at",
+        "expires_at",
+        "session_id",  # threaded by emit_sandbox_event
+    }
+)
+
+
+class TestSandboxLifecycleLeaseMintedHelper:
+    """Pin the spec §6.2 payload-shape contract for the
+    ``sandbox.lifecycle.lease_minted`` helper.
+
+    Called from ``SandboxBackend.create()`` (T10) after each successful
+    ``mint_lease()`` round-trip per spec §7.1. Payload contract: 10
+    always-fields + ``session_id``.
+    """
+
+    async def test_emits_with_correct_event_type_and_payload_keys(self) -> None:
+        store = _make_store_mock()
+        lease = _make_sample_lease()
+
+        await sandbox_lifecycle_lease_minted(
+            store,
+            lease=lease,
+            trace_id="trace-1",
+            session_id="sess-1",
+        )
+        built = await _drive_emit_and_capture(store)
+
+        assert built.decision_type == "sandbox.lifecycle.lease_minted"
+        assert built.iso_controls == ("ISO42001.A.6.2.5",)
+        # Chain-metadata DERIVED from lease (no caller-supplied
+        # tenant_id / actor_id kwargs — the helper signature itself
+        # closes the contradictory-evidence bug class).
+        assert built.tenant_id == lease.request.tenant_id == "t-1"
+        assert built.actor_id == lease.request.actor_ref.actor_subject == "user-42"
+        assert built.trace_id == "trace-1"
+        # spec §6.2 — exactly 11 payload keys (10 always-fields +
+        # session_id threaded by emit_sandbox_event).
+        assert set(built.payload.keys()) == _EXPECTED_LEASE_PAYLOAD_KEYS
+        # Per-field value pins.
+        assert built.payload["lease_id"] == "vault/leases/db/abc123"
+        assert built.payload["secret_path"] == "database/creds/payments-read"
+        assert built.payload["scope_label"] == "payments-read"
+        assert built.payload["tenant_id"] == "t-1"
+        assert built.payload["actor_subject"] == "user-42"
+        assert built.payload["actor_type"] == "human"
+        assert built.payload["session_id"] == "sess-1"
+
+    async def test_request_ttl_and_granted_ttl_surface_distinctly(self) -> None:
+        """Spec §6.2 load-bearing: request.ttl_s (900) MUST appear
+        distinctly from lease.ttl_s_granted (600).
+
+        Collapsing them in the payload projection would erase the
+        examiner-evidence distinction between "what was requested" and
+        "what Vault actually granted" — banks need both to audit
+        whether Vault is honouring or capping per-secret TTL requests.
+        """
+        store = _make_store_mock()
+        lease = _make_sample_lease()
+
+        await sandbox_lifecycle_lease_minted(
+            store,
+            lease=lease,
+            trace_id="trace-1",
+            session_id="sess-1",
+        )
+        built = await _drive_emit_and_capture(store)
+
+        assert built.payload["ttl_s"] == 900
+        assert built.payload["ttl_s_granted"] == 600
+        assert built.payload["ttl_s"] != built.payload["ttl_s_granted"]
+
+    async def test_token_contents_never_appear_on_chain_row(self) -> None:
+        """Spec §6.2 + AGENTS.md "Wire-protocol contracts": token
+        contents MUST NOT appear on the chain row.
+
+        Defence-in-depth: scans ALL payload values for the sentinel
+        token string so a future refactor adding a stringified
+        ``CredentialLease`` field (e.g. via ``__repr__`` or
+        ``dataclasses.asdict``) cannot silently leak the token. Banks
+        trace leases by ``lease_id`` + ``secret_path`` + ``scope_label``;
+        the bearer token is the actual Vault credential and stays out of
+        the audit chain.
+        """
+        store = _make_store_mock()
+        lease = _make_sample_lease()
+
+        await sandbox_lifecycle_lease_minted(
+            store,
+            lease=lease,
+            trace_id="trace-1",
+            session_id="sess-1",
+        )
+        built = await _drive_emit_and_capture(store)
+
+        assert "token" not in built.payload
+        for key, value in built.payload.items():
+            assert "vault-token-NEVER-on-chain" not in str(value), (
+                f"token leak via payload key {key!r}: {value!r}"
+            )
+
+    async def test_minted_at_and_expires_at_are_tz_aware_iso_strings(self) -> None:
+        """Per ``feedback_evidence_boundary_runtime_validation``: the
+        helper serialises ``datetime`` fields to ISO 8601 strings AND
+        the strings round-trip back to tz-aware ``datetime`` (both
+        ``tzinfo is not None`` AND ``utcoffset() is not None``).
+
+        Naive datetimes silently corrupt examiner timelines across
+        timezones; the chain-payload-canonical-bytes layer also rejects
+        ``datetime`` directly (Sprint-2 doctrine), so the helper MUST
+        serialise.
+        """
+        store = _make_store_mock()
+        lease = _make_sample_lease()
+
+        await sandbox_lifecycle_lease_minted(
+            store,
+            lease=lease,
+            trace_id="trace-1",
+            session_id="sess-1",
+        )
+        built = await _drive_emit_and_capture(store)
+
+        for key in ("minted_at", "expires_at"):
+            parsed = datetime.fromisoformat(built.payload[key])
+            assert parsed.tzinfo is not None, (
+                f"{key} MUST be tz-aware per feedback_evidence_boundary_runtime_validation"
+            )
+            assert parsed.utcoffset() is not None, (
+                f"{key} tz-aware check requires BOTH tzinfo + utcoffset()"
+            )
+
+
+class TestSandboxLifecycleLeaseRevokedHelper:
+    """Pin the spec §6.2 payload-shape contract for the
+    ``sandbox.lifecycle.lease_revoked`` helper.
+
+    Called from ``SandboxBackend.destroy()`` (T10) per successful
+    revoke round-trip per spec §4.3 + §7.2. Same 11-key payload as
+    ``lease_minted`` — the destroy path emits the same lease
+    projection so examiners can correlate mint + revoke rows by
+    ``lease_id``.
+    """
+
+    async def test_emits_with_correct_event_type_and_payload_keys(self) -> None:
+        store = _make_store_mock()
+        lease = _make_sample_lease()
+
+        await sandbox_lifecycle_lease_revoked(
+            store,
+            lease=lease,
+            trace_id="trace-1",
+            session_id="sess-1",
+        )
+        built = await _drive_emit_and_capture(store)
+
+        assert built.decision_type == "sandbox.lifecycle.lease_revoked"
+        assert built.iso_controls == ("ISO42001.A.6.2.5",)
+        # Chain-metadata DERIVED from lease (same derive as
+        # lease_minted — proves per-lease chain rows carry identical
+        # tenant/actor evidence end-to-end).
+        assert built.tenant_id == lease.request.tenant_id == "t-1"
+        assert built.actor_id == lease.request.actor_ref.actor_subject == "user-42"
+        # Same 11-key payload as lease_minted.
+        assert set(built.payload.keys()) == _EXPECTED_LEASE_PAYLOAD_KEYS
+        assert built.payload["lease_id"] == "vault/leases/db/abc123"
+        assert built.payload["session_id"] == "sess-1"
+
+    async def test_token_contents_never_appear_on_chain_row(self) -> None:
+        store = _make_store_mock()
+        lease = _make_sample_lease()
+
+        await sandbox_lifecycle_lease_revoked(
+            store,
+            lease=lease,
+            trace_id="trace-1",
+            session_id="sess-1",
+        )
+        built = await _drive_emit_and_capture(store)
+
+        for key, value in built.payload.items():
+            assert "vault-token-NEVER-on-chain" not in str(value), (
+                f"token leak via payload key {key!r}: {value!r}"
+            )
+
+
+class TestSandboxLifecycleLeaseRevokeFailedHelper:
+    """Pin the spec §6.2 + §7.2 payload-shape contract for the
+    ``sandbox.lifecycle.lease_revoke_failed`` helper.
+
+    Called from ``SandboxBackend.destroy()`` (T10) per FAILED revoke
+    per spec §7.2 fail-soft policy: single attempt, on failure emit
+    + continue destroy() (do NOT raise). Payload adds 2 conditional
+    keys to the 11-key base:
+
+    * ``vault_error`` — Vault HTTP error string (caller-supplied; the
+      only field not derivable from CredentialLease).
+    * ``auto_expiry_at`` — DERIVED from ``lease.expires_at`` per spec
+      §6.2 line 624 (NOT caller-supplied; accepting it as a caller
+      string would re-open the silent-lie bug class where a caller
+      could pass an arbitrary string disagreeing with ``expires_at``).
+    """
+
+    async def test_emits_with_correct_event_type_and_payload_keys(self) -> None:
+        store = _make_store_mock()
+        lease = _make_sample_lease()
+
+        await sandbox_lifecycle_lease_revoke_failed(
+            store,
+            lease=lease,
+            trace_id="trace-1",
+            session_id="sess-1",
+            vault_error="Vault HTTP 503: service unavailable",
+        )
+        built = await _drive_emit_and_capture(store)
+
+        assert built.decision_type == "sandbox.lifecycle.lease_revoke_failed"
+        assert built.iso_controls == ("ISO42001.A.6.2.5",)
+        # Chain-metadata DERIVED from lease (same derive as
+        # lease_minted / lease_revoked above).
+        assert built.tenant_id == lease.request.tenant_id == "t-1"
+        assert built.actor_id == lease.request.actor_ref.actor_subject == "user-42"
+        # spec §6.2 — 13 payload keys (11 base + vault_error +
+        # auto_expiry_at).
+        expected_keys = _EXPECTED_LEASE_PAYLOAD_KEYS | {
+            "vault_error",
+            "auto_expiry_at",
+        }
+        assert set(built.payload.keys()) == expected_keys
+
+    async def test_auto_expiry_at_is_derived_from_lease_expires_at(self) -> None:
+        """Spec §6.2 line 624: ``auto_expiry_at`` MUST equal
+        ``expires_at`` (surfaced separately for the examiner's "this
+        lease should auto-expire on its own" claim).
+
+        Pin: the helper DERIVES ``auto_expiry_at`` from
+        ``lease.expires_at`` — there is no caller-supplied kwarg
+        through which a caller could pass an arbitrary string that
+        disagrees with ``expires_at``. This regression closes the
+        silent-lie bug class by construction.
+        """
+        store = _make_store_mock()
+        lease = _make_sample_lease()
+        expected_derived_auto_expiry = lease.expires_at.isoformat()
+
+        await sandbox_lifecycle_lease_revoke_failed(
+            store,
+            lease=lease,
+            trace_id="trace-1",
+            session_id="sess-1",
+            vault_error="Vault HTTP 503: service unavailable",
+        )
+        built = await _drive_emit_and_capture(store)
+
+        # Derive pin: payload value MUST match lease.expires_at
+        # serialised — the helper is the single mint site.
+        assert built.payload["auto_expiry_at"] == expected_derived_auto_expiry
+        # Cross-row consistency: auto_expiry_at MUST equal the
+        # payload's own expires_at projection (both derived from the
+        # same lease.expires_at; serialisation is byte-identical).
+        assert built.payload["auto_expiry_at"] == built.payload["expires_at"]
+
+    async def test_vault_error_carries_forensic_evidence(self) -> None:
+        """Per spec §6.2 + §7.2: ``vault_error`` is the Vault HTTP error
+        string (forensic evidence for SOC + bank compliance review).
+        Only caller-supplied field (cannot be derived from
+        ``CredentialLease``).
+        """
+        store = _make_store_mock()
+        lease = _make_sample_lease()
+
+        await sandbox_lifecycle_lease_revoke_failed(
+            store,
+            lease=lease,
+            trace_id="trace-1",
+            session_id="sess-1",
+            vault_error="Vault HTTP 503: service unavailable",
+        )
+        built = await _drive_emit_and_capture(store)
+
+        assert built.payload["vault_error"] == "Vault HTTP 503: service unavailable"
+        # auto_expiry_at MUST be tz-aware (same evidence-boundary rule
+        # as minted_at / expires_at).
+        parsed = datetime.fromisoformat(built.payload["auto_expiry_at"])
+        assert parsed.tzinfo is not None
+        assert parsed.utcoffset() is not None
+
+    async def test_token_contents_never_appear_on_chain_row(self) -> None:
+        """Defence-in-depth: even on revoke-failed (where the lease
+        is unrevoked + the token is still valid in Vault), the token
+        contents MUST NOT appear on the chain row.
+        """
+        store = _make_store_mock()
+        lease = _make_sample_lease()
+
+        await sandbox_lifecycle_lease_revoke_failed(
+            store,
+            lease=lease,
+            trace_id="trace-1",
+            session_id="sess-1",
+            vault_error="Vault HTTP 503: service unavailable",
+        )
+        built = await _drive_emit_and_capture(store)
+
+        for key, value in built.payload.items():
+            assert "vault-token-NEVER-on-chain" not in str(value), (
+                f"token leak via payload key {key!r}: {value!r}"
+            )

@@ -31,6 +31,7 @@ per the round-4 single-seam contract.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Literal, NewType, Protocol, runtime_checkable
@@ -39,8 +40,9 @@ from typing import TYPE_CHECKING, Literal, NewType, Protocol, runtime_checkable
 # Closed-enum vocabularies — wire-protocol-public per spec §4
 # ---------------------------------------------------------------------------
 
-#: 21-value closed-enum for sandbox lifecycle refusals (Sprint 8A spec
-#: §4.1 + Sprint 8.5 spec §3.3 extension). Covers BOTH:
+#: 26-value closed-enum for sandbox lifecycle refusals (Sprint 8A spec
+#: §4.1 + Sprint 8.5 spec §3.3 extension + Sprint 10 spec §4.1 T7 +
+#: Sprint 10 spec §6.1 T9). Covers:
 #:
 #: * 15 admission/create refusals (Sprint 8A) — `admit_policy` + Stage-1
 #:   shape validation + backend availability + warm-pool drain.
@@ -51,6 +53,36 @@ from typing import TYPE_CHECKING, Literal, NewType, Protocol, runtime_checkable
 #:   is wake-specific per spec §2.3 — the original 8A admission reason
 #:   (if any) lives in the refusal's ``detail`` field for examiner
 #:   traceability.
+#: * 1 kernel-boundary cross-tenant guard (Sprint 10 T7) — raised by
+#:   ``admit_policy`` when ``VaultLeaseRequest.tenant_id`` does not
+#:   match the admitting ``actor.tenant_id``. The cross-tenant check is
+#:   owned by ``admit_policy`` because ``VaultLeaseRequest`` itself
+#:   cannot enforce it at construction time (the architectural arrow
+#:   runs ``sandbox → core``, never the other direction).
+#: * 3 Vault mint-failure refusals (Sprint 10 T9 Literal; Sprint 10 T10
+#:   Stage-2 raise sites at backend ``create()`` post-admission per
+#:   Sprint-10 spec §7.1) — ``sandbox_credential_mint_failed_vault_unavailable``
+#:   (Vault 5xx / network failure / ``VaultProtocolError`` collapse) /
+#:   ``sandbox_credential_mint_failed_secret_path_unknown`` (Vault 404
+#:   on secret_path) / ``sandbox_credential_mint_failed_auth_denied``
+#:   (Vault 403 on secret_path / auth method denied). T9 lifts the
+#:   Literal entries only; T10 wires the create-time mapping from the
+#:   ``core/vault`` 4-value exception taxonomy.
+#: * 1 Rego TTL-cap refusal (Sprint 10 T9 Literal ONLY; **NO Stage-2
+#:   raise site at T9 or T10**) — ``sandbox_credential_ttl_exceeds_tenant_max``.
+#:   The ``policies/_default/sandbox.rego`` rule 6 fires + denies, but
+#:   ``OPAEngine.Decision`` (at ``core/policy/engine.py:148-150``)
+#:   exposes only ``allow`` + the decision-point-derived generic
+#:   ``reasoning`` with no per-rule-name channel, so admission.py's
+#:   single generic arm at ``admission.py:601-603`` continues to
+#:   surface the cap as ``sandbox_policy_rego_denied``. Rego-reason
+#:   surfacing through ``OPAEngine.Decision`` is deferred to a future
+#:   task per Sprint-10 spec §7.3 amendment (the follow-up adds either
+#:   a per-rule deny-set carried via ``decision_data`` or a
+#:   ``rule_name`` channel on ``Decision``, plus the admission.py
+#:   dispatch wiring). T9's bare Literal lift gives that future task a
+#:   stable closed-enum target without imposing wire-protocol-public
+#:   engine work in Sprint 10.
 #:
 #: Drift between this Literal and consumer error-handling is caught at
 #: module load by the partition-invariant test at
@@ -85,6 +117,41 @@ SandboxRefusalReason = Literal[
     "sandbox_wake_session_tombstoned",
     "sandbox_wake_tenant_mismatch",
     "sandbox_wake_policy_revalidation_failed",
+    # Sprint 10 T7 — kernel-boundary cross-tenant request guard per
+    # Sprint-10 spec §4.1. Raised by admit_policy when any
+    # VaultLeaseRequest in ``requires_credentials`` has
+    # ``tenant_id != actor.tenant_id``. The remaining 4 Sprint-10
+    # reasons are lifted by T9 below; T7 owns ONLY this value because
+    # the admit_policy raise statement needs it and every intermediate
+    # commit on the branch must lint clean on its own (mypy treats
+    # SandboxLifecycleRefused.reason as the SandboxRefusalReason
+    # Literal — raising a not-yet-declared value would fail mypy).
+    "sandbox_credential_request_tenant_mismatch",
+    # Sprint 10 T9 — 3 Vault mint-failure values per Sprint-10 spec
+    # §6.1 + §7.1. Literal entries land at T9; the matching Stage-2
+    # raise sites land at T10's backend ``create()`` post-admission
+    # (the create-time mapping from the ``core/vault`` 4-value
+    # exception taxonomy: ``VaultUnavailable`` /
+    # ``VaultPathNotFound`` / ``VaultAuthDenied`` /
+    # ``VaultProtocolError`` collapse). T9's commit lints clean
+    # because mypy does not reject Literal members that lack callers.
+    "sandbox_credential_mint_failed_vault_unavailable",
+    "sandbox_credential_mint_failed_secret_path_unknown",
+    "sandbox_credential_mint_failed_auth_denied",
+    # Sprint 10 T9 — 1 Rego TTL-cap value per Sprint-10 spec §6.1.
+    # **Literal-only at T9; NO Stage-2 raise site at T9 or T10.** The
+    # ``policies/_default/sandbox.rego`` rule 6 fires + denies, but
+    # ``OPAEngine.Decision`` (at ``core/policy/engine.py:148-150``)
+    # exposes only ``allow`` + the decision-point-derived generic
+    # ``reasoning`` with no per-rule-name channel that could
+    # distinguish "rule 6 fired vs rule 5 fired" — so admission.py's
+    # single generic arm at ``admission.py:601-603`` continues to
+    # surface the cap as ``sandbox_policy_rego_denied``. Rego-reason
+    # surfacing through ``OPAEngine.Decision`` is deferred to a
+    # future task per Sprint-10 spec §7.3 amendment. T9's bare
+    # Literal lift gives that future task a stable closed-enum target
+    # without imposing wire-protocol-public engine work in Sprint 10.
+    "sandbox_credential_ttl_exceeds_tenant_max",
 ]
 
 #: 6-value closed-enum for runtime policy violations during ``exec``
@@ -116,14 +183,20 @@ SandboxPolicyViolationReason = Literal[
     "egress_audit_unreadable",
 ]
 
-#: 12-value closed-enum for audit chain-row decision_type discriminator
-#: (Sprint 8A spec §4.3 + Sprint 8.5 spec §3.3 extension). Covers:
+#: 15-value closed-enum for audit chain-row decision_type discriminator
+#: (Sprint 8A spec §4.3 + Sprint 8.5 spec §3.3 + Sprint 10 spec §6.2).
+#: Covers:
 #:
 #: * 8 Sprint-8A lifecycle events (created / exec_completed / destroyed
 #:   / refused / policy.violated / warm_pool.precreated / .checked_out
 #:   / .drained).
 #: * 4 Sprint-8.5 events (checkpointed / suspended / woken /
 #:   checkpoint_purged).
+#: * 3 Sprint-10 lease lifecycle events (lease_minted / lease_revoked
+#:   / lease_revoke_failed) — emitted from ``SandboxBackend.create()``
+#:   post-admission + ``destroy()`` per Sprint-10 spec §4.2 + §4.3 +
+#:   §6.2. Typed helpers live at ``sandbox/audit.py`` per the Sprint
+#:   8.5 T2 typed-helper pattern; backend call sites land at T10.
 #:
 #: Tombstoning is a STORAGE artifact NOT a lifecycle event — destroy()
 #: reuses 8A's ``sandbox.lifecycle.destroyed`` with 2 new conditional
@@ -150,6 +223,19 @@ SandboxLifecycleEvent = Literal[
     "sandbox.lifecycle.suspended",
     "sandbox.lifecycle.woken",
     "sandbox.lifecycle.checkpoint_purged",
+    # Sprint 10 T9 — 3 new lease lifecycle events per Sprint-10 spec
+    # §6.2. lease_minted emitted from SandboxBackend.create() per
+    # successful mint_lease() round-trip (T10); lease_revoked emitted
+    # from SandboxBackend.destroy() per successful revoke round-trip
+    # (T10); lease_revoke_failed emitted from destroy() per failed
+    # revoke (fail-soft per spec §7.2). Typed helpers at
+    # ``sandbox/audit.py`` enforce the 10-key always-payload contract
+    # (lease_minted / lease_revoked: 10 fields + session_id;
+    # lease_revoke_failed: 10 fields + session_id + vault_error +
+    # auto_expiry_at).
+    "sandbox.lifecycle.lease_minted",
+    "sandbox.lifecycle.lease_revoked",
+    "sandbox.lifecycle.lease_revoke_failed",
 ]
 
 
@@ -297,6 +383,7 @@ class SandboxBackendHealth:
 # Uses ``TYPE_CHECKING`` (NOT ``if False``) so mypy resolves the
 # annotations at the T3 halt gate per the round-3 R3 P1 #1 fix.
 if TYPE_CHECKING:
+    from cognic_agentos.core.vault import CredentialLease, VaultLeaseRequest
     from cognic_agentos.portal.rbac.actor import Actor
     from cognic_agentos.sandbox.policy import PackAdmissionContext, SandboxPolicy
 
@@ -318,6 +405,17 @@ class SandboxSession(Protocol):
     pack_context: PackAdmissionContext
     created_at: datetime
     warm_pool_hit: bool
+    #: Sprint 10 T10 — leases minted at ``create()`` post-admission per
+    #: spec §3.6 + §4.2. Immutable post-construction (mid-life mutation
+    #: out of scope Wave-1). Empty tuple keeps Sprint-8A backward-compat
+    #: for lease-less cold-create + warm-pool members. Iterated by the
+    #: backend at ``destroy()`` for the per-lease fail-soft revoke loop
+    #: per spec §4.3 + §7.2. ALSO gates the Q5 LOCK at spec §4.5 —
+    #: non-empty ``active_leases`` forces ``checkpoint()`` + ``suspend()``
+    #: to raise ``NotImplementedError`` pointing at Sprint 10.x
+    #: (production-grade fail-loud scaffolding; checkpoint/suspend/wake
+    #: on a leased session is out-of-scope at Sprint 10).
+    active_leases: tuple[CredentialLease, ...]
 
     async def exec(
         self,
@@ -337,13 +435,14 @@ class SandboxSession(Protocol):
         ``CheckpointId``; same session can checkpoint multiple times
         (subject to ``Settings.sandbox_max_checkpoints_per_session``).
 
-        Per spec §2.4 amended (Q4 lock): ``vault_lease_refs`` is always
-        empty in Sprint 8.5 — vault-bearing sessions are unreachable
-        today via the existing 8A
-        ``sandbox_credential_adapter_not_configured`` admission-time
-        refusal. Sprint 10 fills lease refs when
-        ``VaultCredentialAdapter`` lands + the ``CredentialAdapter``
-        Protocol extension lands.
+        Sprint 10 T10 Q5 LOCK (spec §4.5): when ``self.active_leases``
+        is non-empty, concrete session implementations MUST raise
+        ``NotImplementedError`` pointing at Sprint 10.x — checkpoint /
+        suspend / wake on a leased session is out of scope at Sprint
+        10 (production-grade fail-loud scaffolding per AGENTS.md;
+        choosing the leased-session checkpoint model — re-mint at
+        wake vs revoke-at-suspend vs token-in-checkpoint — is the
+        follow-up sprint's call).
         """
 
     async def suspend(self) -> None:
@@ -352,14 +451,14 @@ class SandboxSession(Protocol):
         session raise. ``wake()`` restores the session in a fresh backend
         resource. Emits ``sandbox.lifecycle.suspended``.
 
-        Vault-lease revocation is OUT OF SCOPE for Sprint 8.5 per spec
-        §2.4 amended — the existing Sprint-8A
-        ``sandbox_credential_adapter_not_configured`` admission-time
-        refusal prevents any vault-bearing session from existing in the
-        first place, so there is no lease to revoke here.
-        Lease-revocation logic lands at Sprint 10 alongside the real
-        ``VaultCredentialAdapter`` + the ``CredentialAdapter`` Protocol
-        extension.
+        Sprint 10 T10 Q5 LOCK (spec §4.5): same fail-loud contract as
+        ``checkpoint()`` above — when ``self.active_leases`` is
+        non-empty concrete implementations raise
+        ``NotImplementedError`` pointing at Sprint 10.x. The premise
+        of the Sprint-8.5 Q4 lock (``vault_lease_refs=()`` always; no
+        vault-bearing sessions exist) breaks at Sprint 10; the Q5
+        lock defers the resolution to a follow-up sprint rather than
+        silently dropping leases at suspend / wake.
         """
 
 
@@ -382,6 +481,7 @@ class SandboxBackend(Protocol):
         tenant_id: str,
         pack_context: PackAdmissionContext,
         use_warm_pool: bool = True,
+        requires_credentials: Sequence[VaultLeaseRequest] = (),
     ) -> SandboxSession:
         """Admit + create a sandbox session.
 
@@ -400,6 +500,25 @@ class SandboxBackend(Protocol):
         replenishment contract — ``SandboxWarmPool.precreate`` calls
         this so it never consumes an existing pool member; round-1 P1
         reviewer fix).
+
+        ``requires_credentials``: Sprint 10 T10 — sequence of
+        ``VaultLeaseRequest`` describing the dynamic credentials the
+        sandbox needs minted at create() per spec §4.2. Default ``()``
+        keeps existing Sprint-8A callers backward-compat. When
+        non-empty: (1) admit_policy's cross-tenant guard + Rego TTL
+        cap fire BEFORE any Vault round-trip; (2) the warm-pool
+        checkout is SKIPPED per spec §4.2.1 (warm members lack actor
+        context for leases); (3) AFTER admit_policy succeeds the
+        backend mints each lease in order via
+        ``credential_adapter.mint_lease(request)``; (4) on any mid-batch
+        mint failure, leases already minted in this attempt are revoked
+        best-effort then ``SandboxLifecycleRefused`` is raised with the
+        mapped ``sandbox_credential_mint_failed_*`` closed-enum reason
+        per spec §7.1; (5) on success the minted leases land on
+        ``session.active_leases`` for the per-lease destroy-time revoke
+        loop. ``Sequence`` (NOT ``list``) so the empty-tuple default is
+        type-consistent with the annotation and matches the live T7
+        ``admit_policy`` signature.
         """
 
     async def exec(
