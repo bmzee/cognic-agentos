@@ -2181,25 +2181,45 @@ Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
 - Create: `tests/integration/sandbox/test_real_vault_credential_lifecycle.py`
 
 Mirror Sprint 9.5 Z2 real-cosign two-layer proof:
-- Layer 1: direct `lease_credential` + `revoke_credential` round-trip against a real `vault` binary on PATH (or test Vault server URL via `COGNIC_VAULT_TEST_ADDR`)
-- Layer 2: full sandbox `create()` + `destroy()` with `requires_credentials` against real Vault → assert lease minted at create, revoked at destroy, audit events emitted
+- **Layer 1**: direct `lease_credential` + `revoke_credential` round-trip against a pre-running real Vault server reachable at `COGNIC_VAULT_TEST_ADDR` (token from `COGNIC_VAULT_TEST_TOKEN`). Exercises the `core/vault.py` primitive end-to-end via the actual hvac transport.
+- **Layer 2**: full sandbox `create()` + `destroy()` with `requires_credentials` against real Vault using the **Docker backend only** (per Q1 below) → assert lease minted at create, revoked at destroy, audit events emitted with real Vault lease IDs.
 
-Env-gated on `COGNIC_RUN_VAULT_INTEGRATION=1`. Fail-loud on missing `vault` binary OR unreachable server (no silent skip).
+Env-gated on `COGNIC_RUN_VAULT_INTEGRATION=1`. Fail-loud (`AssertionError`, NOT `pytest.skip`) on missing `COGNIC_VAULT_TEST_ADDR` / `COGNIC_VAULT_TEST_TOKEN` OR unreachable server OR missing dynamic secrets engine (no silent skip).
 
-- [ ] **Step 1: Implement test file (~150-200 LoC)**
+**Z2 pre-flight Q-locks (Round-8, 2026-05-24):**
 
-Pattern from `tests/integration/models/test_real_cosign_proof.py`. Skip when env var not set; raise loud diagnostic when env var set but `vault` binary missing.
+- **Q1 — Layer 2 backend: Docker only.** Z2 proves REAL VAULT integration, not cross-backend coverage. The cross-backend lifecycle parity (mint mapping × 4 params + destroy fail-soft + Q5 LOCK × 2) is already pinned at the mocked level by the parametrized conformance file `tests/unit/sandbox/test_credential_lifecycle.py`. Adding K8s Layer 2 would add cluster-setup complexity without new Vault-specific evidence. K8s real-Vault proof is a natural follow-up alongside any future Sprint 8B-style env-gated K8s integration lane.
 
-- [ ] **Step 2: Local proof run** (developer machine + dev Vault server)
+- **Q2 — Env contract: pre-running Vault server only.** Require `COGNIC_RUN_VAULT_INTEGRATION=1` + `COGNIC_VAULT_TEST_ADDR` + `COGNIC_VAULT_TEST_TOKEN`. If opt-in is set and either env var is missing or the server is unreachable, the fixture raises `AssertionError` with a structured diagnostic — pytest reports ERROR (not SKIP) per the Sprint 9.5 Z2 fail-loud convention. The `vault` binary-on-PATH alternative (which would have implied in-test `vault server -dev` spin-up + token capture + tear-down) is dropped — operator pre-bootstraps the dev server in a separate terminal per the closeout-note recipe.
 
+- **Q3 — Secrets engine: true dynamic backend, not kv-v2.** The fixture requires a pre-configured dynamic secrets engine + role at the `COGNIC_VAULT_TEST_SECRET_PATH` (default `database/creds/test-role`); fixture fails loud if the engine + role is not configured. Z2's job is to be the operational proof of the `lease_credential` DYNAMIC-lease path that `core/vault.py` actually owns — degrading to kv-v2 would let dynamic-lease shape drift undetected. The Vault bootstrap notes (enable database backend + create test role + grant token policy) ship in the commit body + the closeout note so operators can reproduce.
+
+- [ ] **Step 1: Implement test file (~250-350 LoC)**
+
+Pattern from `tests/integration/models/test_real_cosign_proof.py`. Skip when `COGNIC_RUN_VAULT_INTEGRATION` not set; raise loud `AssertionError` when env var set but `COGNIC_VAULT_TEST_ADDR` / `COGNIC_VAULT_TEST_TOKEN` are missing OR the server is unreachable OR the dynamic secrets engine + role at `COGNIC_VAULT_TEST_SECRET_PATH` is unconfigured. Sized at ~250-350 LoC to match the Sprint 9.5 Z2 cosign-proof (334 LoC) — the original `~150-200` plan estimate undercounted the Layer-2 backend wiring + fail-loud diagnostics overhead.
+
+- [ ] **Step 2: Local proof run** (developer machine + pre-running dev Vault server)
+
+Bootstrap the Vault dev server in a separate terminal first:
+```bash
+vault server -dev -dev-root-token-id=root
+# Then (in a fresh terminal):
+export VAULT_ADDR=http://localhost:8200
+export VAULT_TOKEN=root
+vault secrets enable database
+# Configure a test database role per the closeout-note recipe.
+```
+
+Then run the proof:
 ```bash
 COGNIC_RUN_VAULT_INTEGRATION=1 \
 COGNIC_VAULT_TEST_ADDR=http://localhost:8200 \
 COGNIC_VAULT_TEST_TOKEN=root \
+COGNIC_VAULT_TEST_SECRET_PATH=database/creds/test-role \
 uv run pytest tests/integration/sandbox/test_real_vault_credential_lifecycle.py -v
 ```
 
-Expected: BOTH layers pass against real Vault. Document the run in the closeout note.
+Expected: BOTH layers pass against real Vault with real dynamic lease IDs. Document the run in the closeout note + the commit body. Per `[[feedback_local_verification_vs_live_operational_proof]]`: commit body MUST scope honestly as "locally verified, not CI-proven" (default pytest invocations skip the module; the env-gated CI lane is a follow-up infra task).
 
 - [ ] **Step 3: HALT-BEFORE-COMMIT — Z2 proof commit**
 
@@ -2343,6 +2363,18 @@ All 5 gaps landed in a single doc-only commit BEFORE any T10 backend code (Step 
 *Round 7 (2026-05-24, Z1 pre-flight — 1 doctrinal-fit decision on the CC gate promotion fileset; bumps the Z1 plan from +3 to +4):*
 
 - **Gap O** (surfaced at Z1 pre-flight plan-review, 2026-05-24) — the original Z1 plan promoted 3 modules (`core/vault.py` + `core/_vault_transport.py` + `sandbox/credentials.py`) to the durable critical-controls coverage gate (81 → 84). The Z1 pre-flight surfaced a 4th candidate: `sandbox/backends/_shared_credentials.py`, landed at T10 K8s round-2 (Gap I) as the dependency-neutral home for the cross-backend Vault-exception → `SandboxRefusalReason` closed-enum mapping. The doctrinal-fit question: does the existing Doctrine F carve-out for `_shared_exec.py` (consumer-owned helper, kept OFF-gate) apply, or is `_shared_credentials.py` a wire-protocol-public-artifact owner (like `core/canonical.py`, kept ON-gate)? Resolution: ON-gate promotion (+4 → 85). The decisive factor — `_shared_credentials.py` owns a WIRE-PROTOCOL-PUBLIC mapping table that Docker + K8s MUST agree on (drift between backends = wire-protocol regression where the same Vault exception surfaces as different `SandboxRefusalReason` values to bank-overlay consumers); this is hard cross-backend invariant, not soft behavior. Doctrine F's "consumer-owned helper" framing does NOT fit because the module is genuinely cross-backend infrastructure (both backends import symmetrically from a neutral location), not one-backend-owns-and-extracts. Pre-flight coverage measurement confirmed all 4 modules at or above the 95/90 floor on the existing test surface (`_shared_credentials.py` at 100/100 via the 8 dedicated tests in `test_shared_credentials.py` plus the 8 cross-backend conformance tests in `test_credential_lifecycle.py`); no focused negative-path repair expected at Z1 promotion commit time. Z1 fileset + Z3 doc-reconciliation entries patched in this round to reflect +4 → 85 + the new `_shared_credentials.py` AGENTS.md entry alongside the existing `_shared_exec.py` carve-out.
+
+*Round 8 (2026-05-24, Z2 pre-flight — 3 Q-locks on the real-Vault integration proof shape; tightens the Z2 plan from the open recipe to the locked recipe before any test-file code lands):*
+
+- **Gap P** (surfaced at Z2 pre-flight plan-review, 2026-05-24) — the original Z2 plan left 3 shape decisions open: (a) Layer 2 backend coverage, (b) env-var contract (binary-on-PATH vs pre-running-server), (c) secrets-engine choice (kv-v2 vs true dynamic backend). Z2 pre-flight locked all 3:
+
+  - **Q1 — Layer 2 backend: Docker only.** Z2 proves REAL VAULT integration, not cross-backend coverage. The cross-backend lifecycle parity is already pinned at the mocked level by the parametrized conformance file (`TestCrossBackendMintFailureMapping × 4 × 2` + `TestCrossBackendDestroyFailSoft × 1 × 2` + `TestCrossBackendQ5Lock × 2 × 2` + the round-3+4 audit-emit + teardown-failure regressions). Adding K8s Layer 2 would add cluster-setup complexity without new Vault-specific evidence. K8s real-Vault proof is a natural follow-up alongside any future Sprint 8B-style env-gated K8s integration lane.
+
+  - **Q2 — Env contract: pre-running Vault server only.** Require `COGNIC_RUN_VAULT_INTEGRATION=1` + `COGNIC_VAULT_TEST_ADDR` + `COGNIC_VAULT_TEST_TOKEN`. If opt-in is set and either env var is missing OR the server is unreachable, the fixture raises `AssertionError` with a structured diagnostic — pytest reports ERROR (not SKIP) per the Sprint 9.5 Z2 fail-loud convention. The `vault` binary-on-PATH alternative was dropped because the in-test `vault server -dev` spin-up adds substantial complexity (background process + token capture + tear-down) without operational benefit — the developer pre-bootstraps the dev server in a separate terminal per the closeout-note recipe instead.
+
+  - **Q3 — Secrets engine: true dynamic backend, not kv-v2.** The fixture requires a pre-configured dynamic secrets engine + role at `COGNIC_VAULT_TEST_SECRET_PATH` (default `database/creds/test-role`); fixture fails loud if the engine + role is not configured. Z2's job is to be the operational proof of the `lease_credential` DYNAMIC-lease path that `core/vault.py` actually owns — degrading to kv-v2 (which `vault server -dev` auto-enables) would let the dynamic-lease shape drift undetected because kv-v2 reads don't exercise the same `transport.lease(path, ttl_s)` write-with-ttl HTTP path. The bootstrap notes (enable database backend + create test role + grant token policy) ship in the commit body + the closeout note.
+
+  Also patched in this round: Step 1 LoC estimate corrected from `~150-200` to `~250-350` to match the Sprint 9.5 Z2 cosign-proof scale (334 LoC) — the original undercounted the Layer-2 backend wiring + fail-loud diagnostics overhead. Step 2 recipe updated with the bootstrap commands + the 4th env var (`COGNIC_VAULT_TEST_SECRET_PATH`).
 
 ---
 
