@@ -86,6 +86,9 @@ from cognic_agentos.sandbox.audit import (
     sandbox_lifecycle_suspended,
     sandbox_lifecycle_woken,
 )
+from cognic_agentos.sandbox.backends._shared_credentials import (
+    _mint_exception_to_refusal_reason,
+)
 from cognic_agentos.sandbox.checkpoint_store import (
     CheckpointStore,
     TombstoneCorruptError,
@@ -98,7 +101,6 @@ from cognic_agentos.sandbox.protocol import (
     SandboxExecResult,
     SandboxLifecycleRefused,
     SandboxPolicyViolated,
-    SandboxRefusalReason,
     SandboxSession,
 )
 from cognic_agentos.sandbox.proxy import render_proxy_config
@@ -189,43 +191,6 @@ class _SuspendEventIdCorruptError(ValueError):
 # Pure-functional helpers (unit-tested at test_docker_sibling_pure_helpers.py
 # + test_docker_sibling_credentials.py)
 # ---------------------------------------------------------------------------
-
-
-def _mint_exception_to_refusal_reason(
-    exc: VaultUnavailable | VaultPathNotFound | VaultAuthDenied | VaultProtocolError,
-) -> SandboxRefusalReason:
-    """Sprint 10 T10 — collapse the 4-value ``core.vault`` exception
-    taxonomy onto the 3-value ``sandbox_credential_mint_failed_*``
-    closed-enum vocabulary per spec §7.1.
-
-    ``VaultProtocolError`` collapses to ``vault_unavailable`` for
-    closed-enum stability per spec §6.1 / §7.1 last row — the
-    ``detail`` field on the raised ``SandboxLifecycleRefused`` carries
-    the malformed-response specifics so operators can correlate the
-    protocol-error pattern in Langfuse / Dynatrace without expanding
-    the wire-public closed-enum surface.
-
-    Pure-functional + module-level so the T9 typed-helper consumers +
-    K8s backend can share the SAME mapping table at one site
-    (cross-backend invariant: drift between Docker + K8s mint-failure
-    mapping is wire-protocol-public regression).
-    """
-    if isinstance(exc, VaultUnavailable):
-        return "sandbox_credential_mint_failed_vault_unavailable"
-    if isinstance(exc, VaultPathNotFound):
-        return "sandbox_credential_mint_failed_secret_path_unknown"
-    if isinstance(exc, VaultAuthDenied):
-        return "sandbox_credential_mint_failed_auth_denied"
-    if isinstance(exc, VaultProtocolError):
-        return "sandbox_credential_mint_failed_vault_unavailable"
-    # Static-typing safety net: the parameter type union exhausts the
-    # 4-value taxonomy; this arm is unreachable at runtime but keeps
-    # mypy happy on the function's return-type contract.
-    raise AssertionError(  # pragma: no cover
-        f"_mint_exception_to_refusal_reason: unexpected exception type "
-        f"{type(exc).__name__}; expected one of VaultUnavailable / "
-        f"VaultPathNotFound / VaultAuthDenied / VaultProtocolError"
-    )
 
 
 def _internal_network_name(session_id: str) -> str:
@@ -1527,47 +1492,109 @@ class DockerSiblingSandboxBackend:
             )
 
         already_destroyed = session._destroyed
-        await self._teardown_session_state(
-            session_id=session.session_id,
-            internal_net_name=session._internal_network_name,
-            egress_net_name=session._egress_network_name,
-            sidecar_name=session._sidecar_container_name,
-        )
+        teardown_succeeded = False
+        try:
+            await self._teardown_session_state(
+                session_id=session.session_id,
+                internal_net_name=session._internal_network_name,
+                egress_net_name=session._egress_network_name,
+                sidecar_name=session._sidecar_container_name,
+            )
+            teardown_succeeded = True
+        finally:
+            # Sprint 10 T10 Docker round-5 reviewer-P2 fix + round-6
+            # reviewer-P1 follow-up (2026-05-24): revoke active Vault
+            # leases best-effort EVEN WHEN teardown raised AND surface
+            # audit-emit failures on the normal path so banks see
+            # them per spec §7.2 ("audit evidence for every revoke
+            # failure"). The P2 fix wrapped the audit emits in
+            # ``contextlib.suppress(Exception)`` UNCONDITIONALLY which
+            # silently swallowed audit-chain failures on the normal
+            # path — that violated the bank-grade evidence contract.
+            # Conditional-suppress per ``teardown_succeeded`` resolves
+            # the tension between the two correctness requirements:
+            #
+            # * teardown_succeeded=False (teardown raised) — suppress
+            #   audit-emit exceptions so the ORIGINAL teardown
+            #   exception propagates per Python finally-block
+            #   semantics (a new exception from finally would
+            #   shadow the try-block's exception unless suppressed).
+            # * teardown_succeeded=True (normal path) — audit-emit
+            #   failures PROPAGATE so operators see audit-chain
+            #   problems rather than silently lose revoke evidence
+            #   per spec §7.2's bank-grade contract.
+            #
+            # Gated on ``not already_destroyed`` so the idempotent
+            # second destroy does NOT re-emit lease events. The Vault
+            # revoke itself is intentionally NOT wrapped in suppress —
+            # its own try/except routes failures to
+            # lease_revoke_failed audit so each lease attempt is
+            # independently best-effort. Runs BEFORE the tombstone +
+            # lifecycle.destroyed branch below so the chain row
+            # order stays: revoke[_failed] → (if teardown succeeded)
+            # tombstone → lifecycle.destroyed.
+            if not already_destroyed:
+                # Capture the FIRST normal-path audit-emit exception
+                # so we can raise it AFTER every lease got its
+                # revoke attempt per spec §7.2's single-attempt-
+                # per-lease cleanup contract. Round-3 reviewer-P1
+                # propagated immediately, which aborted the loop on
+                # multi-lease destroys (Gap N). Round-4 reviewer-P2
+                # fix: keep attempting + emit for every lease,
+                # remember first emit exception, raise after loop.
+                first_normal_path_emit_exc: BaseException | None = None
+
+                async def _emit_revoke_event(coro: Any) -> None:
+                    nonlocal first_normal_path_emit_exc
+                    if teardown_succeeded:
+                        # Normal path — capture first emit exception
+                        # but continue so the rest of the loop runs
+                        # per spec §7.2.
+                        try:
+                            await coro
+                        except Exception as exc:
+                            if first_normal_path_emit_exc is None:
+                                first_normal_path_emit_exc = exc
+                    else:
+                        # Teardown-failure path — suppress so the
+                        # original teardown exception propagates per
+                        # Python finally-block semantics.
+                        with contextlib.suppress(Exception):
+                            await coro
+
+                for lease in session.active_leases:
+                    try:
+                        await self._credential_adapter.revoke_lease(lease.lease_id)
+                    except Exception as exc:
+                        await _emit_revoke_event(
+                            sandbox_lifecycle_lease_revoke_failed(
+                                self._dh,
+                                lease=lease,
+                                trace_id="",
+                                session_id=session.session_id,
+                                vault_error=str(exc),
+                            )
+                        )
+                        continue
+                    await _emit_revoke_event(
+                        sandbox_lifecycle_lease_revoked(
+                            self._dh,
+                            lease=lease,
+                            trace_id="",
+                            session_id=session.session_id,
+                        )
+                    )
+
+                # Normal-path-only: raise the FIRST captured emit
+                # exception AFTER every lease attempted its revoke.
+                # On the teardown-failure path
+                # first_normal_path_emit_exc stays None (the inner
+                # suppress swallows emit failures so the original
+                # teardown exception wins).
+                if first_normal_path_emit_exc is not None:
+                    raise first_normal_path_emit_exc
         if already_destroyed:
             return
-
-        # Sprint 10 T10 — revoke active Vault leases fail-soft per
-        # spec §4.3 + §7.2. Single attempt per lease; on failure emit
-        # ``sandbox.lifecycle.lease_revoke_failed`` carrying the Vault
-        # error string + continue cleanup. Never raise — Vault TTL is
-        # the operational safety net per spec §7.2; blocking destroy()
-        # on Vault unavailability would orphan sandbox backend
-        # resources. Runs AFTER teardown (the container is already
-        # gone — minimizes the in-flight lease-use window) + BEFORE
-        # tombstone + lifecycle.destroyed so the per-lease chain rows
-        # land in audit order: revoke[_failed] → tombstone (if any)
-        # → lifecycle.destroyed. Gated on ``not already_destroyed``
-        # (via the early-return above) so the idempotent second
-        # destroy does NOT re-emit lease events.
-        for lease in session.active_leases:
-            try:
-                await self._credential_adapter.revoke_lease(lease.lease_id)
-            except Exception as exc:
-                await sandbox_lifecycle_lease_revoke_failed(
-                    self._dh,
-                    lease=lease,
-                    trace_id="",
-                    session_id=session.session_id,
-                    vault_error=str(exc),
-                )
-                # Continue cleanup per spec §7.2 — do NOT raise.
-                continue
-            await sandbox_lifecycle_lease_revoked(
-                self._dh,
-                lease=lease,
-                trace_id="",
-                session_id=session.session_id,
-            )
 
         # Sprint 8.5 T6 — tombstone the session if it has persisted
         # checkpoints. Per spec §3.1 destroy() behavior extension +

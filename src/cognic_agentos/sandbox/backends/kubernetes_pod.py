@@ -101,7 +101,14 @@ from kubernetes_asyncio.stream.ws_client import (
 )
 
 from cognic_agentos.core.canonical import canonical_bytes
-from cognic_agentos.core.vault import CredentialLease, VaultLeaseRequest
+from cognic_agentos.core.vault import (
+    CredentialLease,
+    VaultAuthDenied,
+    VaultLeaseRequest,
+    VaultPathNotFound,
+    VaultProtocolError,
+    VaultUnavailable,
+)
 from cognic_agentos.sandbox.admission import (
     CatalogProtocol,
     CredentialAdapter,
@@ -110,8 +117,24 @@ from cognic_agentos.sandbox.admission import (
 from cognic_agentos.sandbox.audit import (
     emit_sandbox_event,
     sandbox_lifecycle_checkpointed,
+    sandbox_lifecycle_lease_minted,
+    sandbox_lifecycle_lease_revoke_failed,
+    sandbox_lifecycle_lease_revoked,
     sandbox_lifecycle_suspended,
     sandbox_lifecycle_woken,
+)
+from cognic_agentos.sandbox.backends._shared_credentials import (
+    # Sprint 10 T10 K8s round-2 reviewer-P1 fix: the helper lives in
+    # the dependency-neutral _shared_credentials module (NOT in
+    # docker_sibling) so K8s-only deployments without the sandbox-
+    # docker extra do not couple to ``aiodocker`` at import time per
+    # the optional-extra boundary documented at
+    # ``sandbox/__init__.py``. Earlier T10 K8s round-1 imported this
+    # directly from docker_sibling; reviewer caught the import-time
+    # coupling regression by running a blocked-import probe. The
+    # _shared_credentials module imports ONLY from core.vault +
+    # sandbox.protocol — no backend-specific deps.
+    _mint_exception_to_refusal_reason,
 )
 from cognic_agentos.sandbox.backends._shared_exec import (
     _classify_exec_failure,
@@ -702,10 +725,41 @@ class KubernetesPodSession:
     # + audit-emit wiring. Symmetric with docker_sibling.py:740-758.
 
     async def checkpoint(self, label: str) -> CheckpointId:
+        self._raise_q5_lock_if_leased("checkpoint")
         return await self._backend._do_checkpoint(self, label)
 
     async def suspend(self) -> None:
+        self._raise_q5_lock_if_leased("suspend")
         await self._backend._do_suspend(self)
+
+    def _raise_q5_lock_if_leased(self, op: str) -> None:
+        """Sprint 10 T10 Q5 LOCK per spec §4.5 — production-grade
+        fail-loud scaffolding pointing at Sprint 10.x.
+
+        Mirrors ``DockerSiblingSession._raise_q5_lock_if_leased`` per
+        the cross-backend-symmetry contract at spec §4.5 closing
+        paragraph ("the fail-loud check lives in the concrete
+        session classes... NOT in the base Protocol"). Cross-backend
+        parity pinned by the parametrized regressions at
+        ``tests/unit/sandbox/test_credential_lifecycle.py``.
+
+        Resolution of the leased-session checkpoint/suspend/wake
+        model (re-mint at wake vs revoke-at-suspend vs
+        token-in-checkpoint) is the follow-up Sprint 10.x call per
+        the same spec §4.5 rationale.
+        """
+        if not self.active_leases:
+            return
+        raise NotImplementedError(
+            f"KubernetesPodSession.{op}() on a leased session "
+            f"(active_leases count={len(self.active_leases)}) is "
+            "out of scope at Sprint 10 per spec §4.5 Q5 LOCK; a "
+            "follow-up Sprint 10.x sprint resolves the leased-session "
+            "checkpoint / suspend / wake model (re-mint at wake vs "
+            "revoke-at-suspend vs token-in-checkpoint). The Sprint-8.5 "
+            "Q4 lock's vault_lease_refs=() premise breaks at Sprint 10; "
+            "fail loud rather than silently drop leases."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -837,27 +891,15 @@ class KubernetesPodSandboxBackend:
         leak. No ``lifecycle.created`` emitted on the failure path
         because the session never reached a running state.
         """
-        # Sprint 10 T10 Protocol-compat shim — fail-loud on non-empty
-        # requires_credentials per spec §4.2 + the production-grade
-        # rule. The Docker backend ships the full mint/revoke wiring
-        # at docker_sibling.py:create() / destroy(). The K8s wiring
-        # lands in the T10 K8s commit (next halt-before-commit cycle);
-        # this raise prevents any caller from accidentally using the
-        # K8s credential-leasing path before that lands. Bisection
-        # invariant: every commit on the branch lints clean on its
-        # own; this raise is the runtime half of the static-conformance
-        # shim (the field + signature additions are the static half).
-        if requires_credentials:
-            raise NotImplementedError(
-                "KubernetesPodSandboxBackend.create(requires_credentials=...) "
-                "is not yet wired — Sprint 10 T10 lands the K8s mint/revoke "
-                "implementation in the next halt-before-commit cycle (the "
-                "Docker backend already ships the full wiring at "
-                "docker_sibling.py). Pass requires_credentials=() OR use the "
-                "Docker backend until the T10 K8s commit lands."
-            )
-        # 1. Warm-pool checkout (if wired + caller asked for it)
-        if use_warm_pool and self._warm_pool is not None:
+        # 1. Warm-pool checkout (if wired + caller asked for it AND
+        #    no credentials requested). Sprint 10 spec §4.2.1: warm
+        #    members were pre-created without an actor context for
+        #    leases; a warm hit on a credentialed call would silently
+        #    bypass cross-tenant + Rego TTL + mint per the same
+        #    reasoning that drives the Docker backend's short-circuit
+        #    at docker_sibling.py:920. Force cold-create when
+        #    requires_credentials is non-empty.
+        if use_warm_pool and self._warm_pool is not None and not requires_credentials:
             warm = await self._warm_pool.checkout(
                 policy, tenant_id=tenant_id, pack_context=pack_context
             )
@@ -891,6 +933,7 @@ class KubernetesPodSandboxBackend:
             credential_adapter=self._credential_adapter,
             rego_engine=self._rego,
             settings=self._settings,
+            requires_credentials=requires_credentials,
         )
 
         # 3. Mint session_id + derive deterministic names
@@ -899,11 +942,16 @@ class KubernetesPodSandboxBackend:
         netpol_name = _network_policy_name(session_id)
 
         # 4. Pre-flight canonical-image catalog verification on the
-        # PROXY image, mirroring docker_sibling's _start_proxy_sidecar
-        # R1 P1.1 gate. The proxy IS the egress-enforcement component;
-        # without this gate, a compromised registry could land an
-        # unverified proxy as a trusted enforcement point. Refuses
-        # session creation BEFORE any K8s API call.
+        # PROXY image. K8s-specific gate — the proxy IS the egress-
+        # enforcement component; without this gate, a compromised
+        # registry could land an unverified proxy as a trusted
+        # enforcement point. Refuses session creation BEFORE any K8s
+        # API call AND BEFORE the mint loop so a proxy-refusal never
+        # leaves leases needing cleanup. Pinned by
+        # ``TestKubernetesPreflightProxyRefusalDoesNotMint`` — a
+        # future refactor that reorders this AFTER the mint loop
+        # would silently allocate leases for sessions that
+        # proxy-refusal aborts.
         _, proxy_image_digest = self._egress_proxy_image.rsplit("@", 1)
         if not self._catalog.is_canonical(proxy_image_digest):
             raise SandboxLifecycleRefused(
@@ -919,7 +967,8 @@ class KubernetesPodSandboxBackend:
         await self._catalog.verify_cosign_or_refuse(proxy_image_digest, tenant_id=tenant_id)
         await self._catalog.verify_sbom_policy_or_refuse(proxy_image_digest, tenant_id=tenant_id)
 
-        # 5. Build the K8s object specs via pure helpers
+        # 5. Build the K8s object specs via pure helpers (no state
+        # allocated — safe to do outside the cleanup envelope).
         pod_spec = _build_pod_spec(
             policy=policy,
             session_id=session_id,
@@ -928,59 +977,149 @@ class KubernetesPodSandboxBackend:
         )
         netpol_spec = _build_network_policy_spec(session_id=session_id, tenant_id=tenant_id)
 
-        # 6. Create NetworkPolicy FIRST so egress lockdown is active
-        # BEFORE the Pod starts. Then create the Pod and wait for the
-        # kubelet to report both containers ready before returning a
-        # session. create() is a live-use boundary: the caller's first
-        # session.exec() may happen immediately, and pods/exec against
-        # a just-created-but-not-running Pod fails as an HTTP 500
-        # websocket handshake instead of exercising the workload.
-        # On any failure in create or readiness, teardown anything we
-        # created.
+        # 6. Sprint 10 T10 K8s — SINGLE post-admission cleanup envelope
+        # per spec §7.3 row "Any backend failure post-mint", mirroring
+        # the Docker backend's round-2 + round-3 reviewer P1 shape.
+        # Three except arms: asyncio.CancelledError (round-3 P1 —
+        # subclasses BaseException NOT Exception per Python 3.8+ MRO,
+        # so the generic-Exception arm does NOT catch it; without the
+        # explicit arm a cancelled create() task would skip cleanup
+        # and leak the lease), Vault taxonomy → SandboxLifecycleRefused
+        # closed-enum mapping per spec §7.1, generic Exception →
+        # propagate UNCHANGED per spec §7.3.
+        #
+        # All three arms converge on _cleanup_post_admission_failure
+        # (K8s-shape helper — pod_name + network_policy_name args
+        # vs Docker's 4-arg form).
+        minted_leases: list[CredentialLease] = []
         try:
+            # 6a. Mint leases per spec §4.2 — per request, in order.
+            for request in requires_credentials:
+                lease = await self._credential_adapter.mint_lease(request)
+                minted_leases.append(lease)
+                await sandbox_lifecycle_lease_minted(
+                    self._dh,
+                    lease=lease,
+                    trace_id="",
+                    session_id=session_id,
+                )
+
+            # 6b. Create NetworkPolicy FIRST so egress lockdown is
+            # active BEFORE the Pod starts. Then create the Pod and
+            # wait for the kubelet to report both containers ready
+            # before exposing the session to callers.
             await self._create_network_policy(netpol_spec)
             await self._create_pod(pod_spec)
             await self._wait_for_pod_ready(pod_name=pod_name)
-        except Exception:
-            await self._teardown_session_state(
-                pod_name=pod_name,
-                network_policy_name=netpol_name,
+
+            # 6c. Session construct + lifecycle.created emit per spec
+            # §4.3.
+            session = KubernetesPodSession(
+                session_id=session_id,
+                policy=policy,
+                tenant_id=tenant_id,
+                pack_context=pack_context,
+                created_at=datetime.now(UTC),
+                warm_pool_hit=False,
+                _backend=self,
+                _pod_name=pod_name,
+                _network_policy_name=netpol_name,
+                _namespace=self._namespace,
+                active_leases=tuple(minted_leases),
+                _actor_subject=actor.subject,
             )
-            raise
-
-        session = KubernetesPodSession(
-            session_id=session_id,
-            policy=policy,
-            tenant_id=tenant_id,
-            pack_context=pack_context,
-            created_at=datetime.now(UTC),
-            warm_pool_hit=False,
-            _backend=self,
-            _pod_name=pod_name,
-            _network_policy_name=netpol_name,
-            _namespace=self._namespace,
-            _actor_subject=actor.subject,
-        )
-
-        # 7. Emit lifecycle.created(warm_pool_hit=False) per spec
-        # §4.3. Cleanup envelope — a transient audit failure here
-        # would leave the Pod + NetworkPolicy running with the
-        # caller never receiving the session to clean up.
-        # Fail-closed: tear down + re-raise.
-        try:
             await self._emit_lifecycle_created(
                 session=session,
                 actor=actor,
                 warm_pool_hit=False,
             )
+        except asyncio.CancelledError:
+            # See docker_sibling.py:create() cancellation-arm comment
+            # for the full rationale. Summary: asyncio.CancelledError
+            # subclasses BaseException not Exception, so the generic-
+            # Exception arm doesn't catch it. Cleanup helper then
+            # re-raise UNCHANGED — never swallow cancellation.
+            await self._cleanup_post_admission_failure(
+                minted_leases=minted_leases,
+                pod_name=pod_name,
+                network_policy_name=netpol_name,
+            )
+            raise
+        except (
+            VaultUnavailable,
+            VaultPathNotFound,
+            VaultAuthDenied,
+            VaultProtocolError,
+        ) as exc:
+            await self._cleanup_post_admission_failure(
+                minted_leases=minted_leases,
+                pod_name=pod_name,
+                network_policy_name=netpol_name,
+            )
+            raise SandboxLifecycleRefused(
+                reason=_mint_exception_to_refusal_reason(exc),
+                detail=str(exc),
+            ) from exc
         except Exception:
-            with contextlib.suppress(Exception):
-                await self._teardown_session_state(
-                    pod_name=pod_name,
-                    network_policy_name=netpol_name,
-                )
+            await self._cleanup_post_admission_failure(
+                minted_leases=minted_leases,
+                pod_name=pod_name,
+                network_policy_name=netpol_name,
+            )
             raise
         return session
+
+    async def _cleanup_post_admission_failure(
+        self,
+        *,
+        minted_leases: list[CredentialLease],
+        pod_name: str,
+        network_policy_name: str,
+    ) -> None:
+        """Sprint 10 T10 K8s — shared post-admission cleanup envelope
+        per spec §7.3 row "Any backend failure post-mint".
+
+        K8s analog of ``DockerSiblingSandboxBackend._cleanup_post_admission_failure``.
+        Called from all three ``except`` arms of ``create()``'s
+        post-admission cleanup envelope (``asyncio.CancelledError`` +
+        Vault taxonomy + everything-else). Best-effort revoke +
+        best-effort teardown — both stages wrap their await in
+        ``contextlib.suppress(Exception)`` so a Vault revoke 5xx does
+        not block topology teardown and a K8s ApiException does not
+        block subsequent stages. **Suppresses ordinary cleanup
+        exceptions; cancellation may still interrupt** —
+        ``contextlib.suppress(Exception)`` deliberately does NOT catch
+        ``BaseException`` subclasses (``CancelledError`` /
+        ``KeyboardInterrupt`` / ``SystemExit``), so a nested re-cancel
+        during cleanup propagates out of this helper. Vault
+        server-side TTL is the operational safety net for that edge
+        case per spec §7.2. The K8s ``_teardown_session_state`` swallows
+        404s on entities that were never created so unconditional
+        invocation is safe even when an early-loop exception aborted
+        before any topology call.
+
+        Differs from Docker's helper only in signature shape — K8s
+        teardown takes ``pod_name + network_policy_name`` (vs Docker's
+        4-arg internal/egress/sidecar form). The cross-backend
+        SYMMETRY of behaviour (revoke first, teardown second, swallow
+        ordinary exceptions, propagate cancellation) is pinned by the
+        parametrized regressions at
+        ``tests/unit/sandbox/test_credential_lifecycle.py``.
+
+        Order: revoke leases FIRST (less time for the in-flight lease
+        to be used by a still-running Pod), then teardown topology.
+        Both stages independently swallow ordinary exceptions so a
+        single revoke failure does not block topology teardown and
+        vice-versa.
+        """
+        for already_minted in minted_leases:
+            with contextlib.suppress(Exception):
+                await self._credential_adapter.revoke_lease(already_minted.lease_id)
+        with contextlib.suppress(Exception):
+            await self._teardown_session_state(
+                pod_name=pod_name,
+                network_policy_name=network_policy_name,
+            )
 
     async def exec(
         self,
@@ -1249,10 +1388,106 @@ class KubernetesPodSandboxBackend:
             )
 
         already_destroyed = session._destroyed
-        await self._teardown_session_state(
-            pod_name=session._pod_name,
-            network_policy_name=session._network_policy_name,
-        )
+        teardown_succeeded = False
+        try:
+            await self._teardown_session_state(
+                pod_name=session._pod_name,
+                network_policy_name=session._network_policy_name,
+            )
+            teardown_succeeded = True
+        finally:
+            # Sprint 10 T10 K8s round-2 reviewer-P2 fix + round-3
+            # reviewer-P1 follow-up (2026-05-24): revoke active Vault
+            # leases best-effort EVEN WHEN teardown raised AND
+            # surface audit-emit failures on the normal path so banks
+            # see them per spec §7.2 ("audit evidence for every
+            # revoke failure"). Same conditional-suppress shape as
+            # the Docker counterpart at ``docker_sibling.py``'s
+            # destroy() — cross-backend invariant pinned by both
+            # ``TestCrossBackendDestroyRevokesEvenWhenTeardownRaises``
+            # AND ``TestCrossBackendDestroyAuditEmitConditionalSuppress``
+            # in ``tests/unit/sandbox/test_credential_lifecycle.py``.
+            #
+            # K8s ``_teardown_session_state`` intentionally propagates
+            # non-404 ApiException per its docstring ("fail-closed
+            # so a real teardown failure does not silently leak").
+            # Without this try/finally the original T10 K8s destroy()
+            # exited on the teardown exception BEFORE the revoke
+            # loop ran, leaving active leases to TTL.
+            #
+            # Two-axis correctness contract (per the conditional
+            # suppress):
+            # * teardown_succeeded=False — suppress audit-emit
+            #   exceptions so the ORIGINAL teardown exception
+            #   propagates per Python finally-block semantics.
+            # * teardown_succeeded=True — audit-emit failures
+            #   PROPAGATE per spec §7.2's bank-grade contract.
+            #
+            # Gated on ``not already_destroyed`` so the idempotent
+            # second destroy does NOT re-emit lease events. The
+            # Vault revoke itself is intentionally NOT wrapped in
+            # suppress — its own try/except routes failures to
+            # lease_revoke_failed audit so each lease attempt is
+            # independently best-effort per §7.2.
+            if not already_destroyed:
+                # Capture the FIRST normal-path audit-emit exception
+                # so we can raise it AFTER every lease got its
+                # revoke attempt per spec §7.2's single-attempt-
+                # per-lease cleanup contract. Round-3 reviewer-P1
+                # propagated immediately, which aborted the loop on
+                # multi-lease destroys (Gap N). Round-4 reviewer-P2
+                # fix: keep attempting + emit for every lease,
+                # remember first emit exception, raise after loop.
+                # Same shape as the Docker counterpart at
+                # ``docker_sibling.py``'s destroy() — cross-backend
+                # invariant pinned by
+                # ``TestCrossBackendDestroyAuditEmitConditionalSuppress``
+                # at ``tests/unit/sandbox/test_credential_lifecycle.py``.
+                first_normal_path_emit_exc: BaseException | None = None
+
+                async def _emit_revoke_event(coro: Any) -> None:
+                    nonlocal first_normal_path_emit_exc
+                    if teardown_succeeded:
+                        try:
+                            await coro
+                        except Exception as exc:
+                            if first_normal_path_emit_exc is None:
+                                first_normal_path_emit_exc = exc
+                    else:
+                        with contextlib.suppress(Exception):
+                            await coro
+
+                for lease in session.active_leases:
+                    try:
+                        await self._credential_adapter.revoke_lease(lease.lease_id)
+                    except Exception as exc:
+                        await _emit_revoke_event(
+                            sandbox_lifecycle_lease_revoke_failed(
+                                self._dh,
+                                lease=lease,
+                                trace_id="",
+                                session_id=session.session_id,
+                                vault_error=str(exc),
+                            )
+                        )
+                        continue
+                    await _emit_revoke_event(
+                        sandbox_lifecycle_lease_revoked(
+                            self._dh,
+                            lease=lease,
+                            trace_id="",
+                            session_id=session.session_id,
+                        )
+                    )
+
+                # Normal-path-only: raise the FIRST captured emit
+                # exception AFTER every lease attempted its revoke.
+                # On the teardown-failure path
+                # first_normal_path_emit_exc stays None (the inner
+                # suppress swallows emit failures so the original
+                # teardown exception wins).
+                if first_normal_path_emit_exc is not None:
+                    raise first_normal_path_emit_exc
         if already_destroyed:
             return
 
