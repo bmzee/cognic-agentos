@@ -80,12 +80,12 @@ tests/unit/sandbox/test_audit_event_taxonomy.py               (T9 — new payloa
 tests/unit/sandbox/backends/test_docker_sibling_credentials.py    (T10 Docker — NEW pure-unit file per Gap F resolution; the env-gated test_docker_sibling_lifecycle.py stays untouched)
 tests/unit/sandbox/backends/test_kubernetes_pod_credentials.py    (T10 K8s — NEW pure-unit file per Gap F carry-forward; the env-gated test_kubernetes_pod_lifecycle.py stays untouched)
 tests/unit/sandbox/test_credential_lifecycle.py                   (T10 — NEW cross-backend conformance scaffold; T10 Docker ships the "docker" parametrize; T10 K8s appends "k8s")
-tests/unit/tools/test_check_critical_coverage.py              (Z1 — bump _EXPECTED_ENTRY_COUNT 81 → 84)
+tests/unit/tools/test_check_critical_coverage.py              (Z1 — bump _EXPECTED_ENTRY_COUNT 81 → 85; +4 per Round-7 pre-flight per Gap O)
 
-docs/BUILD_PLAN.md                                            (Z3 — patch §10 stale sandbox/session.py name + reflect +3 CC promotion)
+docs/BUILD_PLAN.md                                            (Z3 — patch §10 stale sandbox/session.py name + reflect +4 CC promotion)
 docs/adrs/ADR-004-sandbox-primitive.md                        (Z3 — mark §25 + §68 + §102 Sprint 10 deferred-then-landed)
-AGENTS.md                                                     (Z3 — mark sandbox/credentials.py promotion executed; add core/vault.py + core/_vault_transport.py to CC list)
-tools/check_critical_coverage.py                              (Z1 — +3 entries; bump _EXPECTED_ENTRY_COUNT 81 → 84)
+AGENTS.md                                                     (Z3 — mark sandbox/credentials.py promotion executed; add core/vault.py + core/_vault_transport.py + sandbox/backends/_shared_credentials.py to CC list)
+tools/check_critical_coverage.py                              (Z1 — +4 entries; bump _EXPECTED_ENTRY_COUNT 81 → 85; the 4th entry is sandbox/backends/_shared_credentials.py per Round-7 Gap O)
 ```
 
 ### Untouched (DO NOT MODIFY)
@@ -2101,11 +2101,13 @@ Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
 
 ---
 
-### Task Z1: CC gate promotion (+3 → 84) + fresh coverage verification  [CC — HALT]
+### Task Z1: CC gate promotion (+4 → 85) + fresh coverage verification  [CC — HALT]
 
 **Files:**
-- Modify: `tools/check_critical_coverage.py` (+3 entries; bump `_EXPECTED_ENTRY_COUNT` 81 → 84)
+- Modify: `tools/check_critical_coverage.py` (+4 entries; bump `_EXPECTED_ENTRY_COUNT` 81 → 85)
 - Modify: `tests/unit/tools/test_check_critical_coverage.py` (bump count + per-module presence tests)
+
+**Note (Round-7 Gap O lock):** the original Z1 fileset planned +3 (`core/vault.py` + `core/_vault_transport.py` + `sandbox/credentials.py`). The Z1 pre-flight added `sandbox/backends/_shared_credentials.py` as the 4th entry — the module owns a wire-protocol-public mapping table (Vault exception → `SandboxRefusalReason` closed-enum) that Docker + K8s MUST agree on; drift = wire-protocol regression. Doctrinal fit is wire-public-artifact-owner (like `core/canonical.py`), NOT consumer-owned-helper (like `_shared_exec.py`). Full rationale in the Self-Review Round-7 patch-log entry below.
 
 - [ ] **Step 1: Run fresh coverage on full suite + branch coverage**
 
@@ -2113,9 +2115,9 @@ Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
 uv run pytest --cov=cognic_agentos --cov-branch --cov-report=json -q
 ```
 
-Capture `coverage.json`. Verify ALL 3 new CC candidates (`core/vault.py` + `core/_vault_transport.py` + `sandbox/credentials.py`) at ≥95% line / ≥90% branch.
+Capture `coverage.json`. Verify ALL 4 new CC candidates (`core/vault.py` + `core/_vault_transport.py` + `sandbox/credentials.py` + `sandbox/backends/_shared_credentials.py`) at ≥95% line / ≥90% branch. Pre-flight measurement at 2026-05-24 confirmed: `core/vault.py` 100/100, `core/_vault_transport.py` 98/91.7, `sandbox/credentials.py` 100/100, `sandbox/backends/_shared_credentials.py` 100/100 — all clear floor on the existing test surface, no focused negative-path repair expected at promotion time.
 
-- [ ] **Step 2: Add the 3 entries + bump count**
+- [ ] **Step 2: Add the 4 entries + bump count**
 
 In `tools/check_critical_coverage.py`:
 
@@ -2125,10 +2127,11 @@ _CRITICAL_FILES = (
     ("src/cognic_agentos/core/vault.py", 0.95, 0.90),
     ("src/cognic_agentos/core/_vault_transport.py", 0.95, 0.90),
     ("src/cognic_agentos/sandbox/credentials.py", 0.95, 0.90),
+    ("src/cognic_agentos/sandbox/backends/_shared_credentials.py", 0.95, 0.90),
 )
 ```
 
-In `tests/unit/tools/test_check_critical_coverage.py`: bump `_EXPECTED_ENTRY_COUNT` 81 → 84; add per-module-presence tests for the 3 new entries.
+In `tests/unit/tools/test_check_critical_coverage.py`: bump `_EXPECTED_ENTRY_COUNT` 81 → 85; add per-module-presence tests for the 4 new entries.
 
 - [ ] **Step 3: Run gate against fresh coverage in the SAME commit**
 
@@ -2136,13 +2139,13 @@ In `tests/unit/tools/test_check_critical_coverage.py`: bump `_EXPECTED_ENTRY_COU
 uv run python tools/check_critical_coverage.py
 ```
 
-Expected: 84/84 PASS. If ANY module is below floor, focused negative-path repair in this SAME commit (per the Sprint 9.5 Z1 precedent).
+Expected: 85/85 PASS. If ANY module is below floor, focused negative-path repair in this SAME commit (per the Sprint 9.5 Z1 precedent + `[[feedback_verify_promotion_meets_floor_at_promotion_time]]`).
 
 - [ ] **Step 4: HALT-BEFORE-COMMIT — Z1 promotion review**
 
 Per `[[feedback_verify_promotion_meets_floor_at_promotion_time]]`. Present:
-- Fresh `coverage.json` excerpt for the 3 promoted modules
-- `check_critical_coverage.py` output showing 84/84 PASS
+- Fresh `coverage.json` excerpt for the 4 promoted modules
+- `check_critical_coverage.py` output showing 85/85 PASS
 - Any focused negative-path test additions
 
 Commit only after approval:
@@ -2150,7 +2153,22 @@ Commit only after approval:
 ```bash
 git add tools/check_critical_coverage.py \
         tests/unit/tools/test_check_critical_coverage.py
-git commit -m "feat(sprint-10): CC gate promotion +3 (81 → 84) — Z1
+git commit -m "feat(sprint-10): CC gate promotion +4 (81 → 85) — Z1
+
+Promotes 4 modules to the durable critical-controls coverage gate:
+* core/vault.py — Sprint 10 T4 lease primitive (core/ stop-rule)
+* core/_vault_transport.py — Sprint 10 T2 shared hvac transport
+  (core/ stop-rule)
+* sandbox/credentials.py — Sprint 10 T6 real VaultCredentialAdapter
+  (executes the AGENTS.md L188 off-gate → on-gate promotion promise)
+* sandbox/backends/_shared_credentials.py — Sprint 10 T10 K8s
+  round-2 promotion (Gap I); the dependency-neutral cross-backend
+  Vault-exception → SandboxRefusalReason closed-enum mapping table.
+  Wire-protocol-public artifact owner (like core/canonical.py) per
+  the Round-7 Gap O doctrinal fit — NOT a consumer-owned helper
+  (the Doctrine F precedent that keeps _shared_exec.py off-gate
+  does NOT apply because _shared_credentials.py is symmetric
+  cross-backend infrastructure, not one-backend-owns-and-extracts).
 
 Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
 ```
@@ -2205,7 +2223,7 @@ Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
 - [ ] **Step 1: BUILD_PLAN §10 patches**
 
 - Patch the stale `sandbox/session.py` name — Sprint 10 lands as `SandboxBackend.create()` per-backend, not a new module
-- Reflect the +3 CC promotion (81 → 84)
+- Reflect the +4 CC promotion (81 → 85) per Round-7 Gap O
 - Mark Sprint 10 as MERGED once PR lands
 
 - [ ] **Step 2: ADR-004 patches**
@@ -2216,8 +2234,9 @@ Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
 
 - [ ] **Step 3: AGENTS.md patches**
 
-- L48 critical-controls list: add `core/vault.py` + `core/_vault_transport.py`
+- L48 critical-controls list: add `core/vault.py` + `core/_vault_transport.py` + `sandbox/backends/_shared_credentials.py` (the 4th promotion landed at Z1 per Round-7 Gap O)
 - L188: mark the `sandbox/credentials.py` off-gate → on-gate promotion as EXECUTED at Sprint 10 Z1
+- Add a new AGENTS.md entry for `sandbox/backends/_shared_credentials.py` describing it as the wire-protocol-public cross-backend Vault-exception → `SandboxRefusalReason` closed-enum mapping (mirroring the existing `_shared_exec.py` carve-out entry but flipped to ON-gate per the Gap O doctrinal-fit rationale)
 
 - [ ] **Step 4: HALT-BEFORE-COMMIT — doc-reconciliation review**
 
@@ -2320,6 +2339,10 @@ All 5 gaps landed in a single doc-only commit BEFORE any T10 backend code (Step 
 *Round 6 (2026-05-24, T10 K8s code-time — 1 reviewer P2 finding on the round-3 fix's sharp edge; both backends; bundled into the same T10 K8s commit):*
 
 - **Gap N** (surfaced at T10 K8s round-4 reviewer P2, 2026-05-24) — the Gap-K round-3 conditional-suppress fix propagated audit-emit exceptions IMMEDIATELY on the normal path. With multiple active leases, an emit failure on lease 1 aborted the loop BEFORE lease 2 got its revoke attempt — leaving Vault TTL as the first line of defence for the remaining leases, undercutting spec §7.2's single-attempt-per-lease cleanup contract. Resolution: per-iteration `_emit_revoke_event(coro)` now captures the FIRST normal-path emit exception in a `nonlocal first_normal_path_emit_exc` slot, continues the loop so every lease gets its revoke + emit attempt, then raises the captured exception AFTER the loop completes (still inside the `finally` block, BEFORE the tombstone + `lifecycle.destroyed` branches so a successful-emit cleanup never proceeds to the post-revoke flow). On the teardown-failure path the inner `contextlib.suppress(Exception)` stays — `first_normal_path_emit_exc` is never set so the original teardown exception still wins per Python finally semantics. Bank-grade audit-evidence contract still surfaces (operator sees the exception) AND every lease gets its single attempt per §7.2. Cross-backend invariant pinned by NEW `test_destroy_normal_path_still_revokes_remaining_leases_after_emit_failure` in `TestCrossBackendDestroyAuditEmitConditionalSuppress` — 2-lease scenario where lease 1's emit raises, asserts both `pytest.raises` on the captured exception AND `adapter.revoke_calls == ["lease-1", "lease-2"]`.
+
+*Round 7 (2026-05-24, Z1 pre-flight — 1 doctrinal-fit decision on the CC gate promotion fileset; bumps the Z1 plan from +3 to +4):*
+
+- **Gap O** (surfaced at Z1 pre-flight plan-review, 2026-05-24) — the original Z1 plan promoted 3 modules (`core/vault.py` + `core/_vault_transport.py` + `sandbox/credentials.py`) to the durable critical-controls coverage gate (81 → 84). The Z1 pre-flight surfaced a 4th candidate: `sandbox/backends/_shared_credentials.py`, landed at T10 K8s round-2 (Gap I) as the dependency-neutral home for the cross-backend Vault-exception → `SandboxRefusalReason` closed-enum mapping. The doctrinal-fit question: does the existing Doctrine F carve-out for `_shared_exec.py` (consumer-owned helper, kept OFF-gate) apply, or is `_shared_credentials.py` a wire-protocol-public-artifact owner (like `core/canonical.py`, kept ON-gate)? Resolution: ON-gate promotion (+4 → 85). The decisive factor — `_shared_credentials.py` owns a WIRE-PROTOCOL-PUBLIC mapping table that Docker + K8s MUST agree on (drift between backends = wire-protocol regression where the same Vault exception surfaces as different `SandboxRefusalReason` values to bank-overlay consumers); this is hard cross-backend invariant, not soft behavior. Doctrine F's "consumer-owned helper" framing does NOT fit because the module is genuinely cross-backend infrastructure (both backends import symmetrically from a neutral location), not one-backend-owns-and-extracts. Pre-flight coverage measurement confirmed all 4 modules at or above the 95/90 floor on the existing test surface (`_shared_credentials.py` at 100/100 via the 8 dedicated tests in `test_shared_credentials.py` plus the 8 cross-backend conformance tests in `test_credential_lifecycle.py`); no focused negative-path repair expected at Z1 promotion commit time. Z1 fileset + Z3 doc-reconciliation entries patched in this round to reflect +4 → 85 + the new `_shared_credentials.py` AGENTS.md entry alongside the existing `_shared_exec.py` carve-out.
 
 ---
 
