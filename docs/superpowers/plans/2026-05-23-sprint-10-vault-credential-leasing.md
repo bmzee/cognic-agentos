@@ -1235,7 +1235,7 @@ Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
 **Doctrine notes (post plan-patch):**
 
 - The existing bundle is pure allow-conjunction with `default allow := false`. A standalone `deny[reason] { … }` rule has NO EFFECT on the wire because (a) the existing `allow if { … }` does not gate on `count(deny) == 0` and (b) the `OPAEngine.evaluate` wrapper returns `Decision(allow: bool, rule_matched, reasoning, decision_data)` — no `deny` set is surfaced to Python. Rule 6 lands as a positive helper joined to `allow if` so it actually refuses.
-- The specific closed-enum reason `sandbox_credential_ttl_exceeds_tenant_max` is RESERVED at T8 (string only inside `.rego` — comment / rule comment, never a Python raise site) and LIFTED into the `SandboxRefusalReason` Literal at T9 alongside the matching Stage-2 mapping. For T8 the cap is enforced — TTL-exceeded → `decision.allow=false` → existing Stage-2 mapping at `admission.py:584-588` raises `SandboxLifecycleRefused("sandbox_policy_rego_denied", …)`. Bisection-clean.
+- The specific closed-enum reason `sandbox_credential_ttl_exceeds_tenant_max` is RESERVED at T8 and LIFTED into the `SandboxRefusalReason` Literal at T9 alongside the matching Stage-2 mapping. For T8 the cap is enforced — TTL-exceeded → `decision.allow=false` → existing Stage-2 mapping at `admission.py:584-588` raises `SandboxLifecycleRefused("sandbox_policy_rego_denied", …)`. Bisection invariant: T8 adds NO Python `SandboxRefusalReason` Literal entry for the new string AND NO Python raise / mapping site. Mentions outside the Rego bundle (this plan, the spec, the rule comment block, two test docstrings, one Protocol module docstring) are explanatory documentation only.
 - OPA-bearing tests follow the env-gated `opa_required` skipif pattern from `tests/unit/policies/test_sandbox_rego.py:50-55` — CI lanes with `opa` on PATH run the matrix; lanes without skip it.
 
 - [ ] **Step 1: Write failing tests for the TTL cap rule**
@@ -1515,6 +1515,22 @@ Per spec §5.1 (post-patch — positive helper, not `deny[reason]`):
 # Sprint-8A T11 R2-R3 pure-Rego defence-in-depth contract: the
 # `is_number(cred.ttl_s)` guard inside the helper ensures malformed
 # types (string, null, object) refuse fail-closed without an NPE.
+#
+# 2-arm pattern (post-RED-discovery) mirrors the existing
+# `_credential_precondition_satisfied` helper at sandbox.rego:137-144:
+#   (i) absent  — pre-T7 input shape entirely (Sprint-8A admission
+#                 paths that never opt into dynamic-lease declarations);
+#                 LOAD-BEARING because Rego's `every x in undefined { … }`
+#                 is undefined (not vacuously true), so without arm (i)
+#                 every existing Sprint-8A admission path refuses the
+#                 moment rule 6 joins the `allow if` conjunction.
+#   (ii) present — every entry's ttl_s passes the cap (`every` over
+#                  an empty list also holds, so T7-compatible callers
+#                  passing `requires_credentials: []` pass via arm (ii)).
+
+_credential_ttl_within_tenant_max if {
+    not input.requires_credentials
+}
 
 _credential_ttl_within_tenant_max if {
     every cred in input.requires_credentials {
@@ -1597,7 +1613,7 @@ Two CC surfaces touched: `policies/_default/sandbox.rego` (stop-rule policy bund
 | admission.py Step 9 threads `kernel_default.max_credential_ttl_s` | Existing `tests/unit/sandbox/test_admission_pipeline.py` Rego-input-shape regressions verify the dict shape under mocked OPA (T7 added similar regressions for `requires_credentials`) |
 
 Doctrine confirmations:
-- Bisection invariant: `sandbox_credential_ttl_exceeds_tenant_max` string lives ONLY inside `.rego` (comment) at T8 — no Python raise site. T9 lifts the Literal value + matching Stage-2 mapping in the same commit.
+- Bisection invariant: T8 adds NO Python `SandboxRefusalReason` Literal entry for `sandbox_credential_ttl_exceeds_tenant_max` AND NO Python raise / mapping site. Mentions outside the Rego bundle (this plan, the spec, the rule comment block, two test docstrings, one Protocol module docstring) are explanatory documentation only. T9 lifts the Literal value + matching Stage-2 mapping in the same commit.
 - Bank overlays may TIGHTEN the cap (lower TTL ceiling via `tenant.overlay.max_credential_ttl_s`); LOOSENING the kernel default requires a coordinated kernel + ADR amendment.
 - Wave-1 admission.py omits `tenant.overlay` per spec §5.2; future-sprint hook covers per-tenant raise plumbing.
 

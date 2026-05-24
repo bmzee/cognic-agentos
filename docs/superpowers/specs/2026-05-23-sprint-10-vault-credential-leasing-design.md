@@ -530,6 +530,25 @@ Adds a 6th admission rule (Sprint-8A T11 shipped 5). The existing bundle is pure
 # Sprint-8A T11 R2-R3 pure-Rego defence-in-depth contract
 # (is_number type guard + numeric comparison both inside the
 # helper so malformed shapes refuse fail-closed without NPE).
+#
+# 2-arm pattern mirrors the existing `_credential_precondition_satisfied`
+# helper at sandbox.rego:137-144:
+#   (i) absent  — pre-T7 input shape entirely (Sprint-8A admission
+#                 paths that never opt into dynamic-lease declarations);
+#   (ii) present — every entry's ttl_s passes the cap (`every` over
+#                  an empty list also holds, so T7-compatible callers
+#                  passing the default empty list also pass via arm
+#                  (ii); admission.py threads `requires_credentials: []`
+#                  on the no-kwarg path).
+# Arm (i) is load-bearing: without it the helper would be undefined
+# on pre-T7-shape input (Rego's `every x in undefined { … }` is
+# undefined, not vacuously true), which would refuse every existing
+# Sprint-8A admission path the moment rule 6 joins the `allow if`
+# conjunction.
+
+_credential_ttl_within_tenant_max if {
+    not input.requires_credentials
+}
 
 _credential_ttl_within_tenant_max if {
     every cred in input.requires_credentials {
@@ -546,9 +565,9 @@ tenant_max_credential_ttl_s := ttl if {
 }
 ```
 
-The existing `allow if { … }` conjunction extends with `_credential_ttl_within_tenant_max` so the cap participates in the admit decision. The empty-list base case (no credential requests) is vacuously satisfied by Rego's `every` over an empty collection.
+The existing `allow if { … }` conjunction extends with `_credential_ttl_within_tenant_max` so the cap participates in the admit decision. The 2-arm pattern correctly handles all three shapes: absent key (Sprint-8A backward-compat), empty list (T7 callers with no dynamic-lease declarations), and non-empty list (Sprint 10 dynamic-lease admission).
 
-Closed-enum impact: ONE new refusal value `sandbox_credential_ttl_exceeds_tenant_max` is RESERVED here for Sprint 10 T9, where it lifts into the `SandboxRefusalReason` Literal alongside the closed-enum surfacing mechanism (Stage-2 caller maps the Rego-rule-specific refusal to the Literal value). For T8 the cap is enforced — a TTL-exceeded request returns `decision.allow=false` and surfaces through the existing Stage-2 mapping `not decision.allow → SandboxLifecycleRefused("sandbox_policy_rego_denied", …)`. T9 closes the loop with the specific Literal value (see §6.1). The bisection invariant holds because T8 references the new string ONLY inside `.rego` (a comment / future-reservation reference, never a raise site).
+Closed-enum impact: ONE new refusal value `sandbox_credential_ttl_exceeds_tenant_max` is RESERVED here for Sprint 10 T9, where it lifts into the `SandboxRefusalReason` Literal alongside the closed-enum surfacing mechanism (Stage-2 caller maps the Rego-rule-specific refusal to the Literal value). For T8 the cap is enforced — a TTL-exceeded request returns `decision.allow=false` and surfaces through the existing Stage-2 mapping `not decision.allow → SandboxLifecycleRefused("sandbox_policy_rego_denied", …)`. T9 closes the loop with the specific Literal value (see §6.1). The bisection invariant holds because T8 adds NO Python `SandboxRefusalReason` Literal entry for the new string AND NO Python raise / mapping site — every mention outside the Rego bundle (this spec, the plan, the rule comment block, two test docstrings, one Protocol module docstring) is explanatory documentation pointing forward to T9, not an executable reference.
 
 ### 5.2 Kernel default + tenant overlay
 

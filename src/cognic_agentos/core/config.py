@@ -1241,6 +1241,34 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Sprint 10 T8 — per-tenant max credential lease TTL cap per
+    # ADR-004 §25/§68/§102 + spec §5.1/§5.2. The kernel default
+    # (15 minutes) is threaded by sandbox/admission.py Step 9 into
+    # the Rego input dict's `kernel_default.max_credential_ttl_s`
+    # field and consumed by policies/_default/sandbox.rego rule 6
+    # (positive `_credential_ttl_within_tenant_max` helper joined
+    # to the `allow if` conjunction). Bank overlays raise via the
+    # Rego `tenant.overlay.max_credential_ttl_s` path (per-tenant
+    # overlay plumbing is a future-sprint hook); LOOSENING the
+    # kernel default requires a coordinated kernel + ADR amendment
+    # per the stop-rule policy bundle precedent at AGENTS.md L150.
+    sandbox_kernel_default_max_credential_ttl_s: int = Field(
+        default=900,
+        ge=60,
+        le=86400,
+        description=(
+            "Sprint 10 — kernel default per-tenant max credential lease "
+            "TTL (seconds). Threaded into the Rego input dict's "
+            "kernel_default.max_credential_ttl_s field at sandbox/"
+            "admission.py Step 9; consumed by policies/_default/"
+            "sandbox.rego rule 6 (per-tenant max credential TTL cap). "
+            "Bank overlays may raise via Rego tenant.overlay."
+            "max_credential_ttl_s (per-tenant overlay plumbing is a "
+            "future-sprint hook). Wave-1 flat cap; per-secret-class "
+            "caps are future work."
+        ),
+    )
+
     # Sprint 8B — backend selection seam per ADR-004 amendment §32 +
     # the 2026-05-17 preflight decision. AgentOS owns the default
     # selection seam; bank overlays MAY override via the

@@ -115,12 +115,21 @@ def _valid_pack_context(**overrides: object) -> PackAdmissionContext:
 
 def _passing_settings() -> MagicMock:
     """A Settings mock whose tenant caps comfortably exceed every
-    fixture policy. Sandbox-prefixed per the in-repo Settings convention."""
+    fixture policy. Sandbox-prefixed per the in-repo Settings convention.
+
+    Sprint 10 T8 — ``sandbox_kernel_default_max_credential_ttl_s`` is
+    set to a stable concrete value (900s — the kernel default per spec
+    §5.2). A bare MagicMock would synthesise a fresh MagicMock per
+    attribute access, breaking the T7 byte-shape-equivalence regression
+    at ``test_no_kwarg_and_explicit_empty_kwarg_are_byte_shape_equivalent``
+    (each call's input dict would carry a different MagicMock id for
+    the ``kernel_default.max_credential_ttl_s`` slot)."""
 
     return MagicMock(
         sandbox_per_tenant_max_cpu=4.0,
         sandbox_per_tenant_max_memory=1024,
         sandbox_per_tenant_max_walltime=300.0,
+        sandbox_kernel_default_max_credential_ttl_s=900,
     )
 
 

@@ -579,6 +579,23 @@ async def admit_policy(
                 }
                 for req in requires_credentials
             ],
+            # Sprint 10 T8 — kernel default credential-TTL cap threading
+            # per spec §5.2. Rule 6 (per-tenant max credential TTL) at
+            # ``policies/_default/sandbox.rego`` reads
+            # ``input.kernel_default.max_credential_ttl_s`` and falls
+            # back from ``input.tenant.overlay.max_credential_ttl_s``
+            # via the bundle's ``else`` branch. Wave-1 admission.py
+            # omits the ``tenant.overlay`` key entirely; the ``else``
+            # branch always fires for Wave-1 deployments. Bank-overlay
+            # plumbing for ``tenant.overlay.max_credential_ttl_s`` is a
+            # future-sprint hook (per-tenant raise of the cap).
+            #
+            # The Setting itself is bounded ``[60, 86400]`` at
+            # ``core/config.py``; misconfig fails at startup, not at
+            # first admission.
+            "kernel_default": {
+                "max_credential_ttl_s": settings.sandbox_kernel_default_max_credential_ttl_s,
+            },
         },
     )
     if not decision.allow:
