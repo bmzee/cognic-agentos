@@ -23,7 +23,7 @@ This BUILD_PLAN line is doc drift from the original ADR-004 sketch; per the esta
 | D — TTL cap policy | Rego-driven in `policies/_default/sandbox.rego`. Settings only carry static adapter/bootstrap config. Flat per-tenant cap in Wave 1 (no per-class). |
 | E — revoke-on-destroy | Fail-soft operationally (don't block cleanup), fail-loud in evidence (emit `sandbox.lifecycle.lease_revoke_failed`). Single attempt. Vault-side TTL is the operational safety net. |
 | F — mint timing | Mint at sandbox `create()` AFTER admission allows + BEFORE exec. Admission stays a pure policy decision; create performs the Vault side-effect. |
-| G — CC promotion | Single Z-style promotion at sprint close. **THREE modules: `core/vault.py` (new) + `core/_vault_transport.py` (new) + `sandbox/credentials.py` (promoted off-gate → on-gate per AGENTS.md L188's explicit promise).** Both new `core/` modules are automatically CC by the `core/` stop-rule (AGENTS.md L48). Net **81 → 84**. The brainstorm-Round-1 count of "+2 → 83" missed `_vault_transport.py`; corrected here. |
+| G — CC promotion | Single Z-style promotion at sprint close. **FOUR modules: `core/vault.py` (new) + `core/_vault_transport.py` (new) + `sandbox/credentials.py` (promoted off-gate → on-gate per AGENTS.md L188's explicit promise) + `sandbox/backends/_shared_credentials.py` (new at T10 K8s round-2 Gap I; promoted per Round-7 Gap O as wire-protocol-public mapping-table owner — doctrinal fit = wire-public-artifact owner like `core/canonical.py`, NOT consumer-owned helper like `_shared_exec.py`).** Both new `core/` modules are automatically CC by the `core/` stop-rule (AGENTS.md L48). Net **81 → 85**. The brainstorm-Round-1 count of "+2 → 83" missed `_vault_transport.py`; the Z1 pre-flight Round-7 Gap O lock added `_shared_credentials.py` as the 4th module after T10 K8s landed it. |
 | Q1 — lease-shape relationship to Sprint-8.5 | **B1 — Distinct types.** `core/vault.py::CredentialLease` is a NEW dataclass; Sprint-8.5's `sandbox/checkpoint_store.py::VaultLeaseRef` stays untouched and checkpoint-specific. Semantics differ wide enough (long-lived/singular checkpoint-key vs short-lived/plural/revoked-on-destroy operation-credentials) that sharing would muddy both contracts. |
 | Q2 — Vault transport sharing | **H1 — Shared underlying transport.** Extract `core/_vault_transport.py` (NEW) carrying the shared `hvac.Client` + static-token auth context + retry mechanics (wraps hvac's sync calls via `asyncio.to_thread`). Two public adapter surfaces consume it: `db/adapters/vault_adapter.py` (existing; persistent secret fetch) + `core/vault.py` (NEW; dynamic credential leasing). One Vault transport discipline; two distinct domain APIs. |
 
@@ -286,6 +286,15 @@ Sprint 10 surfaces the token as `dict[str, str]` passthrough — we don't try to
 
 **Pin:** test that `token` is `dict[str, str]` (NOT typed/tagged); examiners audit by `lease_id` + `request.secret_path` + `request.scope_label`, NOT by token contents.
 
+**HTTP verb per engine (Z2 Gap Q amendment, 2026-05-24).** The 4 dynamic backends in the table above split into two HTTP-shape camps that `core/vault.py::lease_credential` MUST handle correctly:
+
+| HTTP shape | Engines | hvac call |
+|---|---|---|
+| **Read-style (GET `/v1/<path>`)** — dominant pattern | `database/creds/<role>`, `aws/creds/<role>`, `gcp/key/<role>` | `client.read(path)` |
+| Write-style (POST `/v1/<path>` with body) — outlier | `pki/issue/<role>` (needs CN / SAN / TTL body params) | `client.write(path, common_name=..., ttl="900s")` |
+
+Sprint 10 Wave-1 targets the **read-style default** because it covers 3 of the 4 listed engines + matches the Vault documented dynamic-credential pattern. `transport.lease(path, ttl_s)` issues `client.read(path)`; the client-side `ttl_s` is **informational at Wave 1** (Vault's role-side `default_ttl` / `max_ttl` are authoritative, and `CredentialLease.ttl_s_granted` pulls from the response's `lease_duration` field). PKI write-style is **future engine-specific support** — would land as a separate transport method or an engine-kind hint, NOT a runtime fallback on 405. The original Wave-1 implementation attempted POST-with-ttl for the unified shape; Z2's live proof at 2026-05-24 surfaced a 405 against `database/creds/<role>` and drove this amendment (see Round-9 Gap Q in the plan patch-log).
+
 ### 3.5 `VaultTransport` — shared transport
 
 ```python
@@ -325,6 +334,8 @@ class VaultTransport:
 ```
 
 Concrete implementation wraps a shared `hvac.Client` (matches existing Sprint 1C pattern at `db/adapters/vault_adapter.py`); each method invokes the sync hvac call via `asyncio.to_thread` to keep the event loop cooperative. **Wave-1 static-token authentication only** — `Settings.vault_addr` + `Settings.vault_token` + `Settings.vault_namespace` are operator-pre-provided; no AppRole or Kubernetes ServiceAccount auth flows (those would need additional Settings + transport-level auth-state management; deferred per §10). Bounded exponential backoff on transient hvac exceptions (mirrors `protocol/mcp_authz.py` retry pattern); per-request timeout from `Settings.vault_http_timeout_s` (NEW; see §8.2).
+
+**`lease()` implementation shape (Z2 Gap Q amendment, 2026-05-24).** `lease(path, ttl_s)` delegates to `client.read(path)` (GET `/v1/<path>`), NOT `client.write(path, ttl=...)`. Vault's dominant dynamic-secret backends (database / aws / gcp; see §3.4 HTTP-verb table) are GET endpoints; POST-with-ttl returns HTTP 405 against them. The `ttl_s` argument is captured on the resulting `CredentialLease.request.ttl_s` for examiner audit but is **informational at Wave 1** — Vault's role-side `default_ttl` / `max_ttl` are authoritative, and `CredentialLease.ttl_s_granted` reflects whatever Vault returns in `lease_duration`. Future Wave-2 engine-specific TTL enforcement (e.g. client-side cap if `ttl_s_granted > ttl_s` requested) lands as a separate amendment; the Wave-1 contract is "Vault is authoritative for TTL bounds". PKI write-style support is also future engine-specific work — a separate transport method (e.g. `lease_with_body(path, body)`) avoids overloading `lease()` with engine-detection heuristics.
 
 ### 3.6 `SandboxSession.active_leases` extension (T10 pre-flight amendment)
 
@@ -765,7 +776,7 @@ Three failure modes, each mapped to a distinct closed-enum refusal:
 | `sandbox/audit.py` | OFF gate per Doctrine F | EXTEND with 3 new lifecycle event payloads | Stays OFF gate (Doctrine F still applies; CC-adjacent extension) |
 | `sandbox/backends/docker_sibling.py` + `kubernetes_pod.py` | ON the gate (Sprint 8B) | EXTEND `create()` with `requires_credentials` mint + `destroy()` with revoke | Stay ON the gate; floor-pin during touching commit |
 
-**Z-style promotion at sprint close: +3 modules (81 → 84)** — `core/vault.py` + `core/_vault_transport.py` + `sandbox/credentials.py`. Brainstorm Round 1's "+2 → 83" undercount missed `_vault_transport.py`'s automatic CC inclusion by `core/` stop-rule.
+**Z-style promotion at sprint close: +4 modules (81 → 85)** — `core/vault.py` + `core/_vault_transport.py` + `sandbox/credentials.py` + `sandbox/backends/_shared_credentials.py`. Brainstorm Round 1's "+2 → 83" undercount missed `_vault_transport.py`'s automatic CC inclusion by `core/` stop-rule; the Z1 pre-flight Round-7 Gap O lock added `_shared_credentials.py` as the 4th module after T10 K8s landed it (wire-protocol-public mapping-table owner — Vault exception → `SandboxRefusalReason` closed-enum mapping that Docker + K8s MUST agree on; doctrinal fit = wire-public-artifact owner like `core/canonical.py`, NOT consumer-owned helper like `_shared_exec.py`).
 
 ### 8.2 New settings in `core/config.py` (Sprint 10)
 
@@ -782,17 +793,17 @@ Bounded settings (positive, ≤cap); pin via `test_config.py` extension (mirror 
 
 Per `[[feedback_verify_promotion_meets_floor_at_promotion_time]]`:
 - Run `tools/check_critical_coverage.py` against fresh `coverage.json` (full suite, `--cov-branch`) in the SAME commit as the `_CRITICAL_FILES` extension
-- **All 3 new modules** (`core/vault.py` + `core/_vault_transport.py` + `sandbox/credentials.py`) must reach 95/90 line/branch floors BEFORE the gate-count bump lands
+- **All 4 new modules** (`core/vault.py` + `core/_vault_transport.py` + `sandbox/credentials.py` + `sandbox/backends/_shared_credentials.py`) must reach 95/90 line/branch floors BEFORE the gate-count bump lands
 - If any is below floor: focused negative-path repair in the SAME commit (per Sprint 9.5 Z1 precedent at lifecycle_routes.py 91.08% repair)
-- Gate count bump: `_EXPECTED_ENTRY_COUNT` **81 → 84** + **3 new `_CRITICAL_FILES` tuple entries** with the 0.95 / 0.90 floors
+- Gate count bump: `_EXPECTED_ENTRY_COUNT` **81 → 85** + **4 new `_CRITICAL_FILES` tuple entries** with the 0.95 / 0.90 floors. The 4th entry (`sandbox/backends/_shared_credentials.py`) was added at Z1 pre-flight per Round-7 Gap O (see decision-table row G above + the plan Round-7 patch-log entry for the doctrinal-fit rationale).
 
 ### 8.4 Real-Vault integration test (Z2-style)
 
 Mirror Sprint 9.5 Z2's real-cosign two-layer proof pattern:
-- Env-gated on `COGNIC_RUN_VAULT_INTEGRATION=1`
-- Layer 1: direct `lease_credential` + `revoke_credential` round-trip against a real `vault` binary on PATH (or a test Vault server URL)
-- Layer 2: full sandbox `create()` + `destroy()` with `requires_credentials` against a real Vault → assert lease minted at create, revoked at destroy, lease metadata visible in audit events
-- Fail-loud on missing `vault` binary or Vault server (no silent skip; mirrors `feedback_canonical_artifact_not_oss_substitute`)
+- Env-gated on `COGNIC_RUN_VAULT_INTEGRATION=1` + `COGNIC_VAULT_TEST_ADDR` + `COGNIC_VAULT_TEST_TOKEN` + `COGNIC_VAULT_TEST_SECRET_PATH` (4 env vars per the Round-8 Q2 lock — pre-running Vault server only; the binary-on-PATH alternative was dropped at Z2 pre-flight)
+- Layer 1: direct `lease_credential` + `revoke_credential` round-trip against the pre-running Vault server with a configured DYNAMIC secrets engine + role at `COGNIC_VAULT_TEST_SECRET_PATH` (per Round-8 Q3 — true dynamic backend, NOT kv-v2). Exercises the read-style HTTP path documented in §3.4 / §3.5 / Round-9 Gap Q.
+- Layer 2: full sandbox `create()` + `destroy()` with `requires_credentials` against the real Vault using the **Docker backend only** (per Round-8 Q1) → assert lease minted at create, revoked at destroy, lease metadata visible in audit events
+- Fail-loud (`AssertionError`, NOT `pytest.skip`) on any missing env var, unreachable server, or unconfigured secrets engine (no silent skip; mirrors `[[feedback_canonical_artifact_not_oss_substitute]]`)
 
 ---
 
@@ -876,10 +887,10 @@ Suggested task arc (8-10 tasks; 2 work-units total):
 8. **T8 — `policies/_default/sandbox.rego` rule 6 + TTL cap** (stop-rule; depends on T7).
 9. **T9 — `sandbox/protocol.py` closed-enum extensions** (`SandboxRefusalReason` 21 → 26, `SandboxLifecycleEvent` 12 → 15) + `sandbox/audit.py` lifecycle event payloads (depends on T7+T8).
 10. **T10 — Backend-side create/destroy threading** (Docker + K8s — `SandboxBackend.create()` per-backend; mint at create post-admission, revoke fail-soft at destroy; depends on T6+T7+T9). **NOT a new `sandbox/session.py` module** — the BUILD_PLAN §10 name is stale; Sprint 8A landed the session machinery via `sandbox/protocol.py::SandboxBackend.create()` + per-backend implementations.
-11. **Z1 — CC gate promotion (+3 → 84) + fresh coverage verification** (depends on all preceding tasks; promotes `core/vault.py` + `core/_vault_transport.py` + `sandbox/credentials.py`).
+11. **Z1 — CC gate promotion (+4 → 85) + fresh coverage verification** (depends on all preceding tasks; promotes `core/vault.py` + `core/_vault_transport.py` + `sandbox/credentials.py` + `sandbox/backends/_shared_credentials.py` — the 4th module added at Z1 pre-flight per Round-7 Gap O).
 12. **Z2 — Real-Vault integration proof (env-gated)** (depends on T6+T10).
 13. **Z3 — Doc reconciliation:**
-    - BUILD_PLAN §10 (correct the stale `sandbox/session.py` name; reflect the 3-module CC promotion)
+    - BUILD_PLAN §10 (correct the stale `sandbox/session.py` name; reflect the 4-module CC promotion)
     - ADR-004 §25/§68/§102 (note Sprint 10 has landed the `VaultCredentialAdapter` + `mint_lease`/`revoke_lease` Protocol extension)
     - AGENTS.md L188 (mark the `sandbox/credentials.py` promotion as executed)
     - AGENTS.md L48 critical-controls list (add `core/vault.py` + `core/_vault_transport.py` if not already implicit via the `core/` stop-rule)

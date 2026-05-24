@@ -36,9 +36,9 @@
 
    The BUILD_PLAN line gets patched in Z3.
 
-6. **Real-Vault Z2 proof — env-gated.** Z2 runs against a real `vault` binary + a test Vault server (HashiCorp `vault server -dev` is acceptable for dev/CI; bank deployments use prod Vault). Opt-in via `COGNIC_RUN_VAULT_INTEGRATION=1`. Fail-loud on missing `vault` binary OR unreachable server. Mirrors the Sprint 9.5 Z2 real-cosign proof pattern. The Z2 proof confirms (a) static-token auth works at the target Vault version; (b) `database/creds/<role>` returns the expected `{username, password}` shape; (c) revoke against a real lease succeeds + auto-expiry works as the safety net.
+6. **Real-Vault Z2 proof — env-gated against a pre-running server.** Z2 runs against a pre-running Vault server (operator bootstraps `vault server -dev` in a separate terminal; bank deployments use prod Vault) per the Round-8 Q2 lock. Opt-in via `COGNIC_RUN_VAULT_INTEGRATION=1` + `COGNIC_VAULT_TEST_ADDR` + `COGNIC_VAULT_TEST_TOKEN` + `COGNIC_VAULT_TEST_SECRET_PATH` (4 env vars). Fail-loud (`AssertionError`, NOT `pytest.skip`) on any missing env var OR unreachable server OR unconfigured dynamic secrets engine at the secret_path. The `vault` binary-on-PATH alternative was dropped at Z2 pre-flight (would have implied in-test `vault server -dev` spin-up complexity without operational benefit). Mirrors the Sprint 9.5 Z2 real-cosign proof pattern. The Z2 proof confirms (a) static-token auth works at the target Vault version; (b) `database/creds/<role>` returns the expected `{username, password}` shape via the read-style HTTP path per Round-9 Gap Q; (c) revoke against a real lease succeeds + auto-expiry works as the safety net.
 
-7. **CC gate promotion at Z1 — fresh coverage verification per `[[feedback_verify_promotion_meets_floor_at_promotion_time]]`.** All 3 promoted modules (`core/vault.py` + `core/_vault_transport.py` + `sandbox/credentials.py`) must reach 95/90 line/branch floor on fresh `coverage.json` from a full-suite `--cov-branch` run IN THE SAME Z1 commit; focused negative-path repair lands in the same commit if any module is below floor.
+7. **CC gate promotion at Z1 — fresh coverage verification per `[[feedback_verify_promotion_meets_floor_at_promotion_time]]`.** All 4 promoted modules (`core/vault.py` + `core/_vault_transport.py` + `sandbox/credentials.py` + `sandbox/backends/_shared_credentials.py`) must reach 95/90 line/branch floor on fresh `coverage.json` from a full-suite `--cov-branch` run IN THE SAME Z1 commit; focused negative-path repair lands in the same commit if any module is below floor. The 4th module (`_shared_credentials.py`) was added at Z1 pre-flight per Round-7 Gap O (wire-protocol-public mapping-table owner; doctrinal fit = wire-public-artifact owner like `core/canonical.py`, NOT consumer-owned helper like `_shared_exec.py`).
 
 ---
 
@@ -249,11 +249,20 @@ class VaultTransport:
 
     async def lease(self, path: str, ttl_s: int) -> dict[str, Any]:
         """Mint a dynamic-secret lease at ``path`` with the requested TTL.
-        Returns the raw hvac response (caller normalises shape)."""
+        Returns the raw hvac response (caller normalises shape).
+
+        Z2 Gap Q amendment (2026-05-24): delegates to ``client.read(path)``
+        (GET /v1/<path>), NOT ``client.write(path, ttl=...)``. The
+        dominant dynamic backends (database / aws / gcp) are GET-only;
+        POST-with-ttl returns HTTP 405 against them. ``ttl_s`` is
+        informational at Wave 1 — Vault's role-side default_ttl /
+        max_ttl are authoritative; CredentialLease.ttl_s_granted
+        reflects the response's lease_duration. See spec §3.4
+        HTTP-verb table + §3.5 lease() implementation shape note.
+        PKI write-style support is future engine-specific work.
+        """
         def _lease() -> dict[str, Any]:
-            return self._ensure_client().write(
-                path, **{"ttl": f"{ttl_s}s"}
-            )
+            return self._ensure_client().read(path)
         return await asyncio.to_thread(_lease)
 
     async def revoke(self, lease_id: str) -> None:
@@ -2372,9 +2381,30 @@ All 5 gaps landed in a single doc-only commit BEFORE any T10 backend code (Step 
 
   - **Q2 — Env contract: pre-running Vault server only.** Require `COGNIC_RUN_VAULT_INTEGRATION=1` + `COGNIC_VAULT_TEST_ADDR` + `COGNIC_VAULT_TEST_TOKEN`. If opt-in is set and either env var is missing OR the server is unreachable, the fixture raises `AssertionError` with a structured diagnostic — pytest reports ERROR (not SKIP) per the Sprint 9.5 Z2 fail-loud convention. The `vault` binary-on-PATH alternative was dropped because the in-test `vault server -dev` spin-up adds substantial complexity (background process + token capture + tear-down) without operational benefit — the developer pre-bootstraps the dev server in a separate terminal per the closeout-note recipe instead.
 
-  - **Q3 — Secrets engine: true dynamic backend, not kv-v2.** The fixture requires a pre-configured dynamic secrets engine + role at `COGNIC_VAULT_TEST_SECRET_PATH` (default `database/creds/test-role`); fixture fails loud if the engine + role is not configured. Z2's job is to be the operational proof of the `lease_credential` DYNAMIC-lease path that `core/vault.py` actually owns — degrading to kv-v2 (which `vault server -dev` auto-enables) would let the dynamic-lease shape drift undetected because kv-v2 reads don't exercise the same `transport.lease(path, ttl_s)` write-with-ttl HTTP path. The bootstrap notes (enable database backend + create test role + grant token policy) ship in the commit body + the closeout note.
+  - **Q3 — Secrets engine: true dynamic backend, not kv-v2.** The fixture requires a pre-configured dynamic secrets engine + role at `COGNIC_VAULT_TEST_SECRET_PATH` (default `database/creds/test-role`); fixture fails loud if the engine + role is not configured. Z2's job is to be the operational proof of the `lease_credential` DYNAMIC-lease path that `core/vault.py` actually owns — degrading to kv-v2 (which `vault server -dev` auto-enables) would let the dynamic-lease shape drift undetected because kv-v2 reads don't exercise the same `transport.lease(path, ttl_s)` HTTP path. The bootstrap notes (enable database backend + create test role + grant token policy) ship in the commit body + the closeout note.
 
   Also patched in this round: Step 1 LoC estimate corrected from `~150-200` to `~250-350` to match the Sprint 9.5 Z2 cosign-proof scale (334 LoC) — the original undercounted the Layer-2 backend wiring + fail-loud diagnostics overhead. Step 2 recipe updated with the bootstrap commands + the 4th env var (`COGNIC_VAULT_TEST_SECRET_PATH`).
+
+*Round 9 (2026-05-24, Z2 live-proof-time — 1 production-code gap surfaced by the actual live Vault round-trip; doc patch lands first, then the CC production fix + unit-test updates, then Z2 re-run + commit):*
+
+- **Gap Q** (surfaced at Z2 live-proof execution against the operator-bootstrapped Vault + Postgres setup, 2026-05-24) — Layer 1's first `lease_credential` call against `database/creds/test-role` returned HTTP 405 unsupported operation. Root cause: `core/_vault_transport.py::lease()` was implemented as `client.write(path, ttl=f"{ttl_s}s")` (POST `/v1/<path>` with `{"ttl": "900s"}` body), but Vault's dominant dynamic-secret endpoints (`database/creds/<role>` / `aws/creds/<role>` / `gcp/key/<role>`) are GET-only. POST returns 405 against them; only PKI (`pki/issue/<role>`) accepts POST-with-ttl because it needs CN/SAN body params. The Wave-1 production code was effectively broken for 3 of the 4 dynamic engines that spec §3.4 explicitly targets — T4 unit tests at `test_vault_transport.py` + `test_vault.py` mocked `client.write(path, ttl=...)` returning a fake `{lease_id, lease_duration, data}` response, which papered over the gap (canonical `[[feedback_test_fixture_papers_over_production_gap]]` failure mode that Z2's live proof is designed to catch).
+
+  Independent verification by the operator with a direct `hvac.Client.read("database/creds/test-role")` probe against the same Vault server confirmed the read-style shape works end-to-end — returns `{lease_id, lease_duration: 3600, renewable: True, data: {username, password}}` matching exactly what `core/vault.py::lease_credential` expects on the response side.
+
+  Resolution: **Option A** (fix production code; locked over Option B which would have switched Z2 to PKI to dodge the gap). Production fix shape:
+
+  * `core/_vault_transport.py::lease()` — implementation switches from `client.write(path, ttl=f"{ttl_s}s")` to `client.read(path)`. The `ttl_s` argument is preserved on the method signature (no wire-protocol break to T4 callers) but becomes **informational at Wave 1** — Vault's role-side `default_ttl` / `max_ttl` are authoritative, and `CredentialLease.ttl_s_granted` already pulls from the response's `lease_duration` field. Method docstring documents the change + forward note that engine-specific TTL enforcement is future Wave-2 work.
+  * Spec §3.4 — NEW HTTP-verb table documenting the read-style-vs-write-style split across the 4 dynamic engines; explicit "Wave 1 targets the read-style default; PKI write-style is future engine-specific support".
+  * Spec §3.5 — NEW `lease()` implementation-shape note explaining the GET delegation + Wave-1 TTL semantics.
+  * Plan T2 recipe — `lease()` example updated to `client.read(path)` with the Gap Q context + spec cross-references inline in the docstring.
+  * Plan Self-Review patch-log — this Round-9 entry naming the gap + the production-fix sequence (doc patch → CC stop-rule production fix + unit-test updates → Z2 re-run → Z2 commit).
+
+  Unit-test impact:
+  * `tests/unit/core/test_vault_transport.py` — `test_lease_*` tests mock `client.read` instead of `client.write` for the lease path.
+  * `tests/unit/core/test_vault.py` — `test_lease_credential_*` tests mock `transport.lease` (high-level) — these likely DON'T need changes because they mock the transport's `lease()` return value directly; the production swap from `client.write` to `client.read` happens INSIDE the transport. To be verified at the production-fix commit.
+  * `tests/unit/sandbox/test_credentials.py` — `VaultCredentialAdapter` tests delegate to `lease_credential`; same delegation argument — likely no changes. Verified at the production-fix commit.
+
+  Bisection invariant + CC stop-rule: `_vault_transport.py` is ON the durable critical-controls coverage gate as of Z1 commit `c10a888`; the production-fix commit is a CC stop-rule edit requiring halt-before-commit + the full reviewer-strict bar. The doc-only patch lands FIRST (this commit) so the spec/plan record the doctrinal amendment before the production code changes, matching the same pre-flight-doctrine pattern used for Gaps A-D + F + I-P. The Z2 file itself stays untracked until the production fix lands AND the live proof passes — Z2's value is the live proof, not the fixture contract.
 
 ---
 
