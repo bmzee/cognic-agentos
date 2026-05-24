@@ -39,8 +39,9 @@ from typing import TYPE_CHECKING, Literal, NewType, Protocol, runtime_checkable
 # Closed-enum vocabularies — wire-protocol-public per spec §4
 # ---------------------------------------------------------------------------
 
-#: 21-value closed-enum for sandbox lifecycle refusals (Sprint 8A spec
-#: §4.1 + Sprint 8.5 spec §3.3 extension). Covers BOTH:
+#: 22-value closed-enum for sandbox lifecycle refusals (Sprint 8A spec
+#: §4.1 + Sprint 8.5 spec §3.3 extension + Sprint 10 spec §4.1 T7).
+#: Covers:
 #:
 #: * 15 admission/create refusals (Sprint 8A) — `admit_policy` + Stage-1
 #:   shape validation + backend availability + warm-pool drain.
@@ -51,6 +52,19 @@ from typing import TYPE_CHECKING, Literal, NewType, Protocol, runtime_checkable
 #:   is wake-specific per spec §2.3 — the original 8A admission reason
 #:   (if any) lives in the refusal's ``detail`` field for examiner
 #:   traceability.
+#: * 1 kernel-boundary cross-tenant guard (Sprint 10 T7) — raised by
+#:   ``admit_policy`` when ``VaultLeaseRequest.tenant_id`` does not
+#:   match the admitting ``actor.tenant_id``. The cross-tenant check is
+#:   owned by ``admit_policy`` because ``VaultLeaseRequest`` itself
+#:   cannot enforce it at construction time (the architectural arrow
+#:   runs ``sandbox → core``, never the other direction).
+#:
+#: Sprint 10 T9 will extend this Literal again 22 → 26 (3
+#: ``sandbox_credential_mint_failed_*`` reasons + 1
+#: ``sandbox_credential_ttl_exceeds_tenant_max``) at the create/mint
+#: boundary where those reasons are actually raised; T7 owns ONLY the
+#: value its own raise statement needs per the bisection-invariant
+#: doctrine (every commit on the branch must lint clean on its own).
 #:
 #: Drift between this Literal and consumer error-handling is caught at
 #: module load by the partition-invariant test at
@@ -85,6 +99,17 @@ SandboxRefusalReason = Literal[
     "sandbox_wake_session_tombstoned",
     "sandbox_wake_tenant_mismatch",
     "sandbox_wake_policy_revalidation_failed",
+    # Sprint 10 T7 — kernel-boundary cross-tenant request guard per
+    # Sprint-10 spec §4.1. Raised by admit_policy when any
+    # VaultLeaseRequest in ``requires_credentials`` has
+    # ``tenant_id != actor.tenant_id``. The other 4 Sprint-10 reasons
+    # (3 mint-failure + 1 TTL cap) land in T9 at the create/mint
+    # boundary that raises them; T7 owns ONLY this value because the
+    # admit_policy raise statement needs it and every intermediate
+    # commit on the branch must lint clean on its own (mypy treats
+    # SandboxLifecycleRefused.reason as the SandboxRefusalReason
+    # Literal — raising a not-yet-declared value would fail mypy).
+    "sandbox_credential_request_tenant_mismatch",
 ]
 
 #: 6-value closed-enum for runtime policy violations during ``exec``

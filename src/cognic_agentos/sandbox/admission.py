@@ -39,6 +39,7 @@ pins lockstep with the ADR-014 canonical 8-value ``RiskTier`` Literal.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from cognic_agentos.sandbox.policy import (
@@ -127,8 +128,11 @@ class CredentialAdapter(Protocol):
     # hooks). Exception taxonomy is the 4-value ``VaultUnavailable`` /
     # ``VaultPathNotFound`` / ``VaultAuthDenied`` / ``VaultProtocolError``
     # set declared in ``core/vault.py``; T6's ``VaultCredentialAdapter``
-    # collapses these to the matching ``sandbox_credential_mint_failed_*``
-    # closed-enum at the sandbox boundary.
+    # PRESERVES this taxonomy unchanged (user-locked T6 correction #2 +
+    # patched plan §"Scope locks") — the collapse to
+    # ``sandbox_credential_mint_failed_*`` closed-enum values belongs at
+    # T10's backend create() / destroy() seam where ``mint_lease`` is
+    # actually called, NOT at this Protocol's implementations.
     async def mint_lease(self, request: VaultLeaseRequest) -> CredentialLease:
         """Mint a dynamic credential lease for the given request.
         Returns a ``CredentialLease`` with the granted token + TTL.
@@ -254,6 +258,7 @@ async def admit_policy(
     credential_adapter: CredentialAdapter,
     rego_engine: OPAEngine,
     settings: Settings,
+    requires_credentials: Sequence[VaultLeaseRequest] = (),
 ) -> None:
     """Admission pipeline per spec §6.1 — the single seam every
     backend MUST call.
@@ -267,9 +272,27 @@ async def admit_policy(
     ``tests/unit/sandbox/test_admission_pipeline.py::
     TestAdmissionPipelineOrderingInvariants``):
 
-      3. credential-adapter check (fail-loud if vault_path set but
-         only the sentinel adapter is wired)
+      3. credential-adapter check — Sprint-8A static-secret path:
+         ``policy.vault_path is not None`` AND only the sentinel
+         adapter is wired → ``sandbox_credential_adapter_not_configured``.
      3a. dynamic-install refusal (production profile only)
+     3b. (Sprint 10 T7) dynamic-lease admission block — runs ONLY when
+         ``requires_credentials`` is non-empty. Two internal arms in
+         fixed order:
+           (i) Cross-tenant guard FIRST — any VaultLeaseRequest whose
+               ``tenant_id`` does not match ``actor.tenant_id`` raises
+               ``sandbox_credential_request_tenant_mismatch``. The
+               check lives HERE (not on VaultLeaseRequest itself)
+               because core/vault has NO knowledge of the requesting
+               Actor — the architectural arrow runs sandbox → core.
+          (ii) Sentinel-adapter guard SECOND — after every request
+               passes the cross-tenant gate, if only the sentinel
+               adapter is wired raise the EXISTING Sprint-8A
+               ``sandbox_credential_adapter_not_configured`` reason
+               (T7 scope lock — NO new closed-enum value).
+         Internal ordering pinned by ``tests/unit/sandbox/
+         test_admit_credentials.py::TestAdmitPolicyRefusesCrossTenantRequest::
+         test_cross_tenant_check_wins_over_sentinel_adapter_check``.
       4. high-risk-tier transitional refusal (6 ADR-014 tiers)
       5. tenant-max check (cpu_cores / memory_mb / walltime_s)
       6. image-catalog membership (canonical OR per-tenant allow-list)
@@ -304,6 +327,15 @@ async def admit_policy(
         rego_engine: the OPA evaluator (Sprint 4 ``OPAEngine``)
         settings: the Settings container; admit_policy reads
             ``sandbox_per_tenant_max_*`` fields (extended in T5)
+        requires_credentials: Sprint 10 T7 — sequence of
+            VaultLeaseRequest the admitting pack declares it will
+            need. Default ``()`` is a complete byte-shape no-op for
+            Sprint-8A callers; when non-empty, admit_policy runs two
+            additional checks at Step 3 (sentinel-adapter refusal
+            reuses existing ``sandbox_credential_adapter_not_configured``)
+            and Step 3b (cross-tenant guard raises new
+            ``sandbox_credential_request_tenant_mismatch``) and threads
+            the per-request shape into the Rego input dict at Step 9.
 
     Returns:
         None on green-path (all 9 steps passed).
@@ -323,7 +355,12 @@ async def admit_policy(
 
     # Stage 2 — async admission below (steps 3 through 9 per spec §6.1).
 
-    # Step 3 — credential-adapter check
+    # Step 3 — credential-adapter check (Sprint 8A static-secret path).
+    # Unchanged from Sprint 8A: refuses when ``policy.vault_path`` is
+    # non-None AND only the fail-loud sentinel adapter is wired.
+    # The Sprint-10 dynamic-lease counterpart (non-empty
+    # ``requires_credentials`` + sentinel) lives at Step 3b BELOW so
+    # the cross-tenant check inside that block can run FIRST.
     if policy.vault_path is not None and isinstance(
         credential_adapter, KernelDefaultCredentialAdapter
     ):
@@ -345,6 +382,59 @@ async def admit_policy(
                 f"profile=production; dev profile bypasses this gate"
             ),
         )
+
+    # Step 3b — Sprint 10 T7 dynamic-lease admission block (per spec §6.1
+    # + plan §1166-1180). Two refusal arms run in fixed order INSIDE
+    # this block; ordering is load-bearing per the round-1 user-found
+    # finding pinned by
+    # ``test_cross_tenant_check_wins_over_sentinel_adapter_check``:
+    #
+    #   (i) Cross-tenant guard FIRST. Any VaultLeaseRequest whose
+    #       ``tenant_id`` does not match ``actor.tenant_id`` raises the
+    #       NEW closed-enum reason
+    #       ``sandbox_credential_request_tenant_mismatch``. The check
+    #       lives HERE (not on VaultLeaseRequest itself) because
+    #       core/vault has NO knowledge of the requesting Actor — the
+    #       architectural arrow runs sandbox → core, never the other
+    #       direction.
+    #
+    #  (ii) Sentinel-adapter guard SECOND. If every request passed the
+    #       cross-tenant check AND only the fail-loud sentinel adapter
+    #       is wired, refuse with the EXISTING Sprint-8A
+    #       ``sandbox_credential_adapter_not_configured`` reason
+    #       (NOT a new closed-enum value — T7 scope lock).
+    #
+    # Why this order matters: a sentinel-wired + cross-tenant request
+    # is BOTH problems at once, but the cross-tenant signal is the
+    # more security-critical refusal — masking it behind the
+    # sentinel-not-configured reason would hide a tenant-isolation
+    # violation under a generic ops-config message, and a future
+    # adapter rewire would silently unmask the violation rather than
+    # report it at the original refusal.
+    if requires_credentials:
+        # (i) Cross-tenant guard — FIRST.
+        for request in requires_credentials:
+            if request.tenant_id != actor.tenant_id:
+                raise SandboxLifecycleRefused(
+                    "sandbox_credential_request_tenant_mismatch",
+                    detail=(
+                        f"VaultLeaseRequest.tenant_id={request.tenant_id!r} does not "
+                        f"match actor.tenant_id={actor.tenant_id!r} "
+                        f"(secret_path={request.secret_path!r})"
+                    ),
+                )
+        # (ii) Sentinel-adapter guard — SECOND.
+        if isinstance(credential_adapter, KernelDefaultCredentialAdapter):
+            raise SandboxLifecycleRefused(
+                "sandbox_credential_adapter_not_configured",
+                detail=(
+                    f"requires_credentials is non-empty "
+                    f"({len(requires_credentials)} request(s)) but only the "
+                    f"fail-loud sentinel adapter is wired; Sprint 10 ships "
+                    f"VaultCredentialAdapter as the first real implementation "
+                    f"per ADR-009"
+                ),
+            )
 
     # Step 4 — high-risk-tier transitional refusal (pre-Sprint-13.5)
     if pack_context.risk_tier in _HIGH_RISK_TIERS_PRE_13_5:
@@ -468,6 +558,27 @@ async def admit_policy(
             "runtime_image_in_canonical_set": runtime_image_in_canonical_set,
             "runtime_image_in_tenant_allow_list": runtime_image_in_tenant_allow_list,
             "tenant_id": tenant_id,
+            # Sprint 10 T7 — per-request projection threads the dynamic-
+            # lease declarations into the Rego bundle. The 3-key shape
+            # ({secret_path, ttl_s, scope_label}) intentionally OMITS
+            # actor / tenant identity: the kernel-boundary cross-tenant
+            # guard at Step 3b runs BEFORE Rego, so by the time the
+            # bundle sees this list every entry's tenant has already
+            # been validated against actor.tenant_id. Letting the bundle
+            # re-decide tenant identity per request would be the exact
+            # drift the kernel-boundary check defends against.
+            # Default ``()`` callers produce an empty list (NOT a
+            # missing key) so the bundle can read
+            # ``count(input.requires_credentials)`` unconditionally
+            # without a key-presence guard.
+            "requires_credentials": [
+                {
+                    "secret_path": req.secret_path,
+                    "ttl_s": req.ttl_s,
+                    "scope_label": req.scope_label,
+                }
+                for req in requires_credentials
+            ],
         },
     )
     if not decision.allow:
