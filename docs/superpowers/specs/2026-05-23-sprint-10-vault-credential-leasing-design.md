@@ -520,35 +520,41 @@ The Sprint-8A `KernelDefaultCredentialAdapter` sentinel must ALSO extend with st
 
 ### 5.1 New Rego rule at `policies/_default/sandbox.rego`
 
-Adds a 6th admission rule (Sprint-8A T11 shipped 5):
+Adds a 6th admission rule (Sprint-8A T11 shipped 5). The existing bundle is pure allow-conjunction with `default allow := false`; rule 6 follows the same pattern so it actually refuses (a standalone `deny[reason]` set in this bundle would be inert — nothing in `OPAEngine.evaluate`'s `Decision(allow, rule_matched, reasoning, decision_data)` return surfaces a `deny` set to Python, and the existing `allow if { … }` does not gate on `count(deny) == 0`):
 
 ```rego
 # Rule 6 (Sprint 10) — per-tenant max credential TTL cap.
 # Wave-1 flat cap: every requires_credentials entry's ttl_s must
-# be <= the tenant's configured max_credential_ttl_s.
+# be <= the tenant's configured max_credential_ttl_s. Positive
+# helper joined to the `allow if` conjunction; matches the
+# Sprint-8A T11 R2-R3 pure-Rego defence-in-depth contract
+# (is_number type guard + numeric comparison both inside the
+# helper so malformed shapes refuse fail-closed without NPE).
 
-deny[reason] {
-    some i
-    cred := input.requires_credentials[i]
-    cred.ttl_s > tenant_max_credential_ttl_s
-    reason := "sandbox_credential_ttl_exceeds_tenant_max"
+_credential_ttl_within_tenant_max if {
+    every cred in input.requires_credentials {
+        is_number(cred.ttl_s)
+        cred.ttl_s <= tenant_max_credential_ttl_s
+    }
 }
 
-tenant_max_credential_ttl_s := ttl {
-    # Tenant overlay first, kernel default fallback
+tenant_max_credential_ttl_s := ttl if {
+    # Tenant overlay first, kernel default fallback.
     ttl := input.tenant.overlay.max_credential_ttl_s
-} else := ttl {
+} else := ttl if {
     ttl := input.kernel_default.max_credential_ttl_s
 }
 ```
 
-Closed-enum impact: ONE new refusal value `sandbox_credential_ttl_exceeds_tenant_max` (lifted into `SandboxRefusalReason`; see §6.1).
+The existing `allow if { … }` conjunction extends with `_credential_ttl_within_tenant_max` so the cap participates in the admit decision. The empty-list base case (no credential requests) is vacuously satisfied by Rego's `every` over an empty collection.
+
+Closed-enum impact: ONE new refusal value `sandbox_credential_ttl_exceeds_tenant_max` is RESERVED here for Sprint 10 T9, where it lifts into the `SandboxRefusalReason` Literal alongside the closed-enum surfacing mechanism (Stage-2 caller maps the Rego-rule-specific refusal to the Literal value). For T8 the cap is enforced — a TTL-exceeded request returns `decision.allow=false` and surfaces through the existing Stage-2 mapping `not decision.allow → SandboxLifecycleRefused("sandbox_policy_rego_denied", …)`. T9 closes the loop with the specific Literal value (see §6.1). The bisection invariant holds because T8 references the new string ONLY inside `.rego` (a comment / future-reservation reference, never a raise site).
 
 ### 5.2 Kernel default + tenant overlay
 
-`policies/_default/sandbox.rego` ships `kernel_default.max_credential_ttl_s = 900` (15 minutes) per the conservative-Wave-1-default doctrine. Bank overlays raise it (e.g. CRC bank overlay sets `tenant.overlay.max_credential_ttl_s = 3600` for their long-running batch jobs).
+The kernel default `max_credential_ttl_s = 900` (15 minutes) is owned by **`Settings.sandbox_kernel_default_max_credential_ttl_s: int = 900`** (NEW, `core/config.py`) per the conservative-Wave-1-default doctrine. Bank overlays raise it (e.g. CRC bank overlay sets `tenant.overlay.max_credential_ttl_s = 3600` for their long-running batch jobs).
 
-`Settings.sandbox_kernel_default_max_credential_ttl_s: int = 900` (NEW, `core/config.py`) carries the value into the Rego input dict's `kernel_default` substructure (mirrors how other kernel-default caps are threaded).
+`sandbox/admission.py` Step 9 threads the Settings value into the Rego input dict as **`input.kernel_default.max_credential_ttl_s`** (mirrors how the existing `tenant_max.{cpu_cores, memory_mb, walltime_s}` flat caps are threaded from their Settings counterparts at `admission.py:539-543`). `policies/_default/sandbox.rego` itself ships NO TTL constant — the bundle reads the value from the input dict and falls back from `input.tenant.overlay.max_credential_ttl_s` to `input.kernel_default.max_credential_ttl_s` via the `else` branch shown in §5.1. Wave-1 omits the `tenant.overlay` key entirely from the admission.py input dict; the Rego `else` branch handles absent-overlay deployments. Bank-overlay plumbing for `tenant.overlay.max_credential_ttl_s` (per-tenant raise) is a future-sprint hook (out of scope for Sprint 10).
 
 ### 5.3 Wire-protocol-public — sandbox.rego is a stop-rule policy bundle
 

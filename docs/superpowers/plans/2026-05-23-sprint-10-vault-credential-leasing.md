@@ -64,7 +64,7 @@ tests/integration/sandbox/test_real_vault_credential_lifecycle.py  (Z2 — env-g
 ```
 src/cognic_agentos/db/adapters/vault_adapter.py                (T3 — CC)
 src/cognic_agentos/sandbox/credentials.py                     (T6 — CC, off-gate → on-gate)
-src/cognic_agentos/sandbox/admission.py                       (T5 + T7 — CC)
+src/cognic_agentos/sandbox/admission.py                       (T5 + T7 + T8 — CC; T8 threads `input.kernel_default.max_credential_ttl_s` into Step 9 Rego input)
 src/cognic_agentos/sandbox/protocol.py                        (T7 + T9 — closed-enum extensions; T7 adds only `sandbox_credential_request_tenant_mismatch` 21→22, T9 adds remaining 4 22→26)
 src/cognic_agentos/sandbox/audit.py                           (T9 — new payloads; NOT-CC per Doctrine F)
 src/cognic_agentos/sandbox/backends/docker_sibling.py         (T10 — CC)
@@ -1223,115 +1223,327 @@ Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
 
 ---
 
-### Task T8: `policies/_default/sandbox.rego` rule 6 + TTL cap  [CC — HALT; stop-rule policy bundle]
+### Task T8: `policies/_default/sandbox.rego` rule 6 + TTL cap  [CC — HALT; stop-rule policy bundle + CC admission seam]
 
 **Files:**
-- Modify: `policies/_default/sandbox.rego` (add rule 6)
-- Create: `tests/unit/policies/test_sandbox_rego_credentials.py`
+- Modify: `policies/_default/sandbox.rego` (add rule 6 as positive `_credential_ttl_within_tenant_max` helper + extend `allow if` conjunction)
 - Modify: `src/cognic_agentos/core/config.py` (add `sandbox_kernel_default_max_credential_ttl_s`)
+- Modify: `src/cognic_agentos/sandbox/admission.py` (Step 9 Rego input dict — thread `kernel_default.max_credential_ttl_s` from Settings; CRITICAL CONTROLS, halt-before-commit)
+- Create: `tests/unit/policies/test_sandbox_rego_credentials.py` (env-gated OPA matrix mirroring `tests/unit/policies/test_sandbox_rego.py` fixture pattern)
+- Modify: `tests/unit/test_config.py` (default + bounds for new Setting)
+
+**Doctrine notes (post plan-patch):**
+
+- The existing bundle is pure allow-conjunction with `default allow := false`. A standalone `deny[reason] { … }` rule has NO EFFECT on the wire because (a) the existing `allow if { … }` does not gate on `count(deny) == 0` and (b) the `OPAEngine.evaluate` wrapper returns `Decision(allow: bool, rule_matched, reasoning, decision_data)` — no `deny` set is surfaced to Python. Rule 6 lands as a positive helper joined to `allow if` so it actually refuses.
+- The specific closed-enum reason `sandbox_credential_ttl_exceeds_tenant_max` is RESERVED at T8 (string only inside `.rego` — comment / rule comment, never a Python raise site) and LIFTED into the `SandboxRefusalReason` Literal at T9 alongside the matching Stage-2 mapping. For T8 the cap is enforced — TTL-exceeded → `decision.allow=false` → existing Stage-2 mapping at `admission.py:584-588` raises `SandboxLifecycleRefused("sandbox_policy_rego_denied", …)`. Bisection-clean.
+- OPA-bearing tests follow the env-gated `opa_required` skipif pattern from `tests/unit/policies/test_sandbox_rego.py:50-55` — CI lanes with `opa` on PATH run the matrix; lanes without skip it.
 
 - [ ] **Step 1: Write failing tests for the TTL cap rule**
 
 Create `tests/unit/policies/test_sandbox_rego_credentials.py`:
 
 ```python
-"""Sprint 10 T8 — sandbox.rego rule 6 — per-tenant max credential TTL."""
+"""Sprint 10 T8 — sandbox.rego rule 6 — per-tenant max credential TTL.
+
+Direct-OPA matrix mirroring tests/unit/policies/test_sandbox_rego.py
+(Sprint-8A T11). Skipped on systems without the ``opa`` binary on
+PATH; the non-OPA path is covered by the AsyncMock(OPAEngine) matrix
+at tests/unit/sandbox/test_admission_pipeline.py.
+"""
 
 from __future__ import annotations
 
+import shutil
+from collections.abc import AsyncGenerator
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
 import pytest
+from sqlalchemy.ext.asyncio import create_async_engine
 
-from cognic_agentos.core.opa import OPAEngine  # or wherever Rego eval lives
-from cognic_agentos.core.config import Settings
+from cognic_agentos.core.audit import AuditStore, _chain_heads, _metadata
+from cognic_agentos.core.canonical import ZERO_HASH
+from cognic_agentos.core.decision_history import DecisionHistoryStore
+from cognic_agentos.core.policy.engine import OPAEngine
 
-
-def _input_with_credential_ttl(ttl_s: int, tenant_overlay_max: int | None = None) -> dict:
-    """Build a Rego input dict with one credential request."""
-    return {
-        "policy": {...},  # minimal valid policy shape
-        "tenant": {
-            "overlay": {"max_credential_ttl_s": tenant_overlay_max} if tenant_overlay_max else {},
-        },
-        "kernel_default": {"max_credential_ttl_s": 900},
-        "requires_credentials": [{
-            "secret_path": "database/creds/x",
-            "ttl_s": ttl_s,
-            "scope_label": "s",
-        }],
-        # ... other required input fields per existing sandbox.rego shape ...
-    }
+opa_required = pytest.mark.skipif(
+    shutil.which("opa") is None,
+    reason="opa binary not installed — skip the direct-OPA smoke; the "
+    "Stage-2 admission unit-test suite covers the Rego dispatch matrix "
+    "via AsyncMock at tests/unit/sandbox/test_admission_pipeline.py",
+)
 
 
-def test_rule_6_admits_when_ttl_under_kernel_default() -> None:
-    """T8 #1 — credential request with ttl_s ≤ kernel default cap → admit."""
-    engine = OPAEngine.load("policies/_default/sandbox.rego")
-    result = engine.evaluate("data.cognic.sandbox.admit", _input_with_credential_ttl(600))
-    assert result["allow"] is True
-    assert "sandbox_credential_ttl_exceeds_tenant_max" not in result.get("deny", [])
+SANDBOX_DECISION_POINT = "data.cognic.sandbox.admit.allow"
 
 
-def test_rule_6_refuses_when_ttl_exceeds_kernel_default() -> None:
-    """T8 #2 — credential request with ttl_s > kernel default cap → deny."""
-    engine = OPAEngine.load("policies/_default/sandbox.rego")
-    result = engine.evaluate("data.cognic.sandbox.admit", _input_with_credential_ttl(7200))
-    assert result["allow"] is False
-    assert "sandbox_credential_ttl_exceeds_tenant_max" in result.get("deny", [])
-
-
-def test_rule_6_respects_tenant_overlay() -> None:
-    """T8 #3 — tenant overlay raises the cap above kernel default."""
-    engine = OPAEngine.load("policies/_default/sandbox.rego")
-    result = engine.evaluate(
-        "data.cognic.sandbox.admit",
-        _input_with_credential_ttl(1800, tenant_overlay_max=3600),
+@pytest.fixture
+async def engine(tmp_path: Path) -> AsyncGenerator[OPAEngine, None]:
+    """Real OPAEngine over an in-memory SQLite audit + decision_history
+    pair (mirrors test_sandbox_rego.py:61-92). Seeds both chain heads
+    with ZERO_HASH at sequence 0 so the per-evaluate hash-chain append
+    has a parent."""
+    url = f"sqlite+aiosqlite:///{tmp_path / 'sandbox_rego_credentials_test.db'}"
+    sa_engine = create_async_engine(url)
+    async with sa_engine.begin() as conn:
+        await conn.run_sync(_metadata.create_all)
+        for chain_id in ("audit_event", "decision_history"):
+            await conn.execute(
+                _chain_heads.insert().values(
+                    chain_id=chain_id,
+                    latest_sequence=0,
+                    latest_hash=ZERO_HASH,
+                    updated_at=datetime.now(UTC),
+                )
+            )
+    audit = AuditStore(sa_engine)
+    dh = DecisionHistoryStore(sa_engine)
+    yield await OPAEngine.create(
+        bundle_path=Path("policies/_default/sandbox.rego"),
+        audit_store=audit,
+        decision_history_store=dh,
     )
-    assert result["allow"] is True
+    await sa_engine.dispose()
 
 
-def test_rule_6_pure_rego_type_check_defense() -> None:
-    """T8 #4 — Sprint-8A T11 R2-R3 defense-in-depth: rule 6 is PURE Rego;
-    malformed type at the input slot is REFUSED (NOT NPE'd)."""
-    engine = OPAEngine.load("policies/_default/sandbox.rego")
-    bad_input = _input_with_credential_ttl(600)
-    bad_input["requires_credentials"][0]["ttl_s"] = "not-an-int"  # malformed shape
-    result = engine.evaluate("data.cognic.sandbox.admit", bad_input)
-    assert result["allow"] is False
+def _safe_allow_input_with_credentials(
+    *,
+    ttl_s: int,
+    tenant_overlay_max: int | None = None,
+    kernel_default_max: int = 900,
+) -> dict[str, Any]:
+    """Happy-path admission input + one credential request. Mirrors
+    test_sandbox_rego.py's _safe_allow_input shape so the rest of the
+    `allow if` conjunction passes; the only knob each test exercises
+    is the TTL cap arm.
+
+    The `tenant` key is omitted entirely when `tenant_overlay_max`
+    is None — matches the Wave-1 admission.py wire shape per spec
+    §5.2 (admission.py omits tenant.overlay; the Rego `else` branch
+    falls back to kernel_default)."""
+    payload: dict[str, Any] = {
+        "pack_context": {
+            "risk_tier": "internal_write",
+            "declares_dynamic_install": False,
+            "profile": "production",
+        },
+        "policy": {
+            "cpu_cores": 0.5,
+            "memory_mb": 256,
+            "walltime_s": 30,
+            "egress_allow_list": ["api.example.com"],
+            "vault_path": None,
+        },
+        "tenant_max": {"cpu_cores": 4.0, "memory_mb": 1024, "walltime_s": 300},
+        "credential_adapter_wired": True,
+        "runtime_image_in_canonical_set": True,
+        "runtime_image_in_tenant_allow_list": False,
+        "kernel_default": {"max_credential_ttl_s": kernel_default_max},
+        "requires_credentials": [
+            {
+                "secret_path": "database/creds/x",
+                "ttl_s": ttl_s,
+                "scope_label": "s",
+            }
+        ],
+    }
+    if tenant_overlay_max is not None:
+        payload["tenant"] = {
+            "overlay": {"max_credential_ttl_s": tenant_overlay_max},
+        }
+    return payload
+
+
+@opa_required
+class TestSandboxRegoRule6CredentialTTLCap:
+    """Direct-OPA matrix for rule 6 — per-tenant max credential TTL.
+    Positive-conjunction style matching the bundle's existing
+    `_within_tenant_max` / `_credential_precondition_satisfied` /
+    `_runtime_image_authorised` / `_egress_http_only` helpers."""
+
+    @pytest.mark.asyncio
+    async def test_rule_6_admits_when_ttl_under_kernel_default(
+        self, engine: OPAEngine
+    ) -> None:
+        """ttl_s (600) <= kernel default (900) → allow."""
+        d = await engine.evaluate(
+            decision_point=SANDBOX_DECISION_POINT,
+            input=_safe_allow_input_with_credentials(ttl_s=600),
+        )
+        assert d.allow is True
+
+    @pytest.mark.asyncio
+    async def test_rule_6_refuses_when_ttl_exceeds_kernel_default(
+        self, engine: OPAEngine
+    ) -> None:
+        """ttl_s (7200) > kernel default (900) → refuse. T9 lifts the
+        Stage-2 mapping into the specific closed-enum reason
+        `sandbox_credential_ttl_exceeds_tenant_max`; T8 surfaces the
+        refusal via the existing `sandbox_policy_rego_denied` arm."""
+        d = await engine.evaluate(
+            decision_point=SANDBOX_DECISION_POINT,
+            input=_safe_allow_input_with_credentials(ttl_s=7200),
+        )
+        assert d.allow is False
+
+    @pytest.mark.asyncio
+    async def test_rule_6_respects_tenant_overlay_raise(
+        self, engine: OPAEngine
+    ) -> None:
+        """Tenant overlay raises cap above kernel default. ttl_s=1800
+        > kernel_default=900 but <= tenant_overlay=3600 → allow."""
+        d = await engine.evaluate(
+            decision_point=SANDBOX_DECISION_POINT,
+            input=_safe_allow_input_with_credentials(
+                ttl_s=1800, tenant_overlay_max=3600
+            ),
+        )
+        assert d.allow is True
+
+    @pytest.mark.asyncio
+    async def test_rule_6_refuses_when_ttl_exceeds_tenant_overlay(
+        self, engine: OPAEngine
+    ) -> None:
+        """Tenant overlay also caps. ttl_s=7200 > tenant_overlay=3600
+        → refuse (overlay raise doesn't bypass the cap)."""
+        d = await engine.evaluate(
+            decision_point=SANDBOX_DECISION_POINT,
+            input=_safe_allow_input_with_credentials(
+                ttl_s=7200, tenant_overlay_max=3600
+            ),
+        )
+        assert d.allow is False
+
+    @pytest.mark.asyncio
+    async def test_rule_6_admits_when_requires_credentials_is_empty(
+        self, engine: OPAEngine
+    ) -> None:
+        """Empty requires_credentials list (no dynamic-lease requests)
+        is vacuously satisfied by the `every` quantifier — pinned so
+        T7 backward-compat callers passing the default empty list
+        don't trip rule 6."""
+        payload = _safe_allow_input_with_credentials(ttl_s=600)
+        payload["requires_credentials"] = []
+        d = await engine.evaluate(
+            decision_point=SANDBOX_DECISION_POINT,
+            input=payload,
+        )
+        assert d.allow is True
+
+    @pytest.mark.asyncio
+    async def test_rule_6_pure_rego_type_check_defense_in_depth(
+        self, engine: OPAEngine
+    ) -> None:
+        """Sprint-8A T11 R2-R3 pure-Rego defence-in-depth: malformed
+        type at ttl_s (string instead of number) is REFUSED — the
+        `is_number(cred.ttl_s)` guard inside the helper means the
+        rule's conjunction fails fail-closed without an NPE."""
+        bad = _safe_allow_input_with_credentials(ttl_s=600)
+        bad["requires_credentials"][0]["ttl_s"] = "not-an-int"
+        d = await engine.evaluate(
+            decision_point=SANDBOX_DECISION_POINT,
+            input=bad,
+        )
+        assert d.allow is False
+
+    @pytest.mark.asyncio
+    async def test_rule_6_refuses_with_mixed_request_list_when_one_exceeds(
+        self, engine: OPAEngine
+    ) -> None:
+        """Pins the `every` semantics: a list with one OK + one
+        over-cap entry MUST refuse the WHOLE policy (rule 5's
+        equivalent egress-list test at test_sandbox_rego.py:347-364
+        is the pattern we mirror)."""
+        bad = _safe_allow_input_with_credentials(ttl_s=600)
+        bad["requires_credentials"].append(
+            {"secret_path": "database/creds/y", "ttl_s": 7200, "scope_label": "s2"}
+        )
+        d = await engine.evaluate(
+            decision_point=SANDBOX_DECISION_POINT,
+            input=bad,
+        )
+        assert d.allow is False
+```
+
+Also append to `tests/unit/test_config.py`:
+
+```python
+class TestSandboxKernelDefaultMaxCredentialTtl:
+    """Sprint 10 T8 — Settings.sandbox_kernel_default_max_credential_ttl_s
+    default + bounds (per spec §5.2 + Field constraints)."""
+
+    def test_default_is_900_seconds(self) -> None:
+        s = Settings()
+        assert s.sandbox_kernel_default_max_credential_ttl_s == 900
+
+    def test_lower_bound_60_seconds(self) -> None:
+        Settings(sandbox_kernel_default_max_credential_ttl_s=60)  # min ok
+        with pytest.raises(ValueError):
+            Settings(sandbox_kernel_default_max_credential_ttl_s=59)
+
+    def test_upper_bound_86400_seconds(self) -> None:
+        Settings(sandbox_kernel_default_max_credential_ttl_s=86400)  # max ok
+        with pytest.raises(ValueError):
+            Settings(sandbox_kernel_default_max_credential_ttl_s=86401)
 ```
 
 - [ ] **Step 2: Run — verify failure**
 
-`uv run pytest tests/unit/policies/test_sandbox_rego_credentials.py -q`
-Expected: FAIL.
+`uv run pytest tests/unit/policies/test_sandbox_rego_credentials.py tests/unit/test_config.py::TestSandboxKernelDefaultMaxCredentialTtl -q`
+Expected: FAIL (config Setting missing; rule 6 not in bundle).
 
-- [ ] **Step 3: Add rule 6 to `policies/_default/sandbox.rego`**
+- [ ] **Step 3: Add rule 6 to `policies/_default/sandbox.rego`** (positive helper joined to `allow if` conjunction)
 
-Per spec §5.1:
+Per spec §5.1 (post-patch — positive helper, not `deny[reason]`):
 
 ```rego
 # Rule 6 (Sprint 10) — per-tenant max credential TTL cap.
 # Wave-1 flat cap: every requires_credentials entry's ttl_s must
-# be <= the tenant's configured max_credential_ttl_s.
+# be <= the tenant's configured max_credential_ttl_s. Positive
+# helper added to the `allow if` conjunction so the cap actually
+# refuses on the wire (the existing bundle has no `count(deny) == 0`
+# precondition + the OPAEngine.evaluate wrapper does not surface a
+# `deny` set to Python — a standalone `deny[reason]` rule would be
+# inert). Closed-enum reason `sandbox_credential_ttl_exceeds_tenant_max`
+# is reserved here as a string comment ONLY at T8; T9 lifts it into
+# the SandboxRefusalReason Literal alongside the matching Stage-2
+# mapping. For T8 a TTL-exceeded request surfaces through the
+# existing `not decision.allow → sandbox_policy_rego_denied` arm
+# at admission.py:584-588.
+#
+# Sprint-8A T11 R2-R3 pure-Rego defence-in-depth contract: the
+# `is_number(cred.ttl_s)` guard inside the helper ensures malformed
+# types (string, null, object) refuse fail-closed without an NPE.
 
-deny[reason] {
-    some i
-    cred := input.requires_credentials[i]
-    is_number(cred.ttl_s)                          # defense-in-depth type check
-    cred.ttl_s > tenant_max_credential_ttl_s
-    reason := "sandbox_credential_ttl_exceeds_tenant_max"
+_credential_ttl_within_tenant_max if {
+    every cred in input.requires_credentials {
+        is_number(cred.ttl_s)
+        cred.ttl_s <= tenant_max_credential_ttl_s
+    }
 }
 
-# Defense-in-depth: malformed type at the ttl_s slot also denies.
-deny[reason] {
-    some i
-    cred := input.requires_credentials[i]
-    not is_number(cred.ttl_s)
-    reason := "sandbox_credential_ttl_exceeds_tenant_max"  # collapsed for closed-enum stability
-}
-
-tenant_max_credential_ttl_s := ttl {
+tenant_max_credential_ttl_s := ttl if {
+    # Tenant overlay first (bank-overlay raise),
+    # kernel default fallback (Wave-1 admission.py omits the
+    # `tenant.overlay` key entirely — `else` branch always fires).
     ttl := input.tenant.overlay.max_credential_ttl_s
-} else := ttl {
+} else := ttl if {
     ttl := input.kernel_default.max_credential_ttl_s
+}
+```
+
+AND extend the existing `allow if { … }` conjunction at `sandbox.rego:112-119` to include `_credential_ttl_within_tenant_max`:
+
+```rego
+allow if {
+    input.pack_context.risk_tier in safe_tiers
+    not input.pack_context.risk_tier in high_risk_tiers
+    _within_tenant_max
+    _credential_precondition_satisfied
+    _runtime_image_authorised
+    _egress_http_only
+    _credential_ttl_within_tenant_max
 }
 ```
 
@@ -1342,30 +1554,62 @@ sandbox_kernel_default_max_credential_ttl_s: int = Field(
     default=900,
     ge=60,
     le=86400,
-    description="Sprint 10 — kernel default per-tenant max credential lease TTL (seconds). Bank overlays may raise via Rego tenant.overlay.max_credential_ttl_s. Wave-1 flat cap; per-secret-class caps are future work.",
+    description="Sprint 10 — kernel default per-tenant max credential lease TTL (seconds). Threaded into the Rego input dict's `kernel_default.max_credential_ttl_s` field at sandbox/admission.py Step 9; consumed by policies/_default/sandbox.rego rule 6 (per-tenant max credential TTL cap). Bank overlays may raise via Rego tenant.overlay.max_credential_ttl_s (per-tenant overlay plumbing is a future-sprint hook). Wave-1 flat cap; per-secret-class caps are future work.",
 )
+```
+
+Extend `src/cognic_agentos/sandbox/admission.py` Step 9 Rego input dict at `admission.py:514-583` (after the `requires_credentials` projection block) by adding:
+
+```python
+# Sprint 10 T8 — kernel default TTL cap threading per spec §5.2.
+# Rule 6 (per-tenant max credential TTL) reads
+# `input.kernel_default.max_credential_ttl_s` and falls back from
+# `input.tenant.overlay.max_credential_ttl_s` via the bundle's `else`
+# branch. Wave-1 admission.py omits the `tenant.overlay` key entirely;
+# bank-overlay plumbing is a future-sprint hook.
+"kernel_default": {
+    "max_credential_ttl_s": settings.sandbox_kernel_default_max_credential_ttl_s,
+},
 ```
 
 - [ ] **Step 4: Run — verify pass**
 
-`uv run pytest tests/unit/policies/test_sandbox_rego_credentials.py tests/unit/test_config.py -q`
-Expected: GREEN.
+`uv run pytest tests/unit/policies/test_sandbox_rego_credentials.py tests/unit/test_config.py::TestSandboxKernelDefaultMaxCredentialTtl tests/unit/sandbox/test_admission_pipeline.py tests/unit/policies/test_sandbox_rego.py -q`
+Expected: GREEN (new tests pass; existing pipeline + Sprint-8A bundle matrix preserved).
 
 - [ ] **Step 5: Gate ladder**
 
 `uv run ruff check . && uv run ruff format --check . && uv run mypy src tests`
-Expected: clean.
+Expected: clean (full-tree per `[[feedback_full_gate_pre_commit]]`).
 
-- [ ] **Step 6: HALT-BEFORE-COMMIT — sandbox.rego stop-rule review**
+- [ ] **Step 6: HALT-BEFORE-COMMIT — sandbox.rego + admission.py CC review**
 
-`policies/_default/sandbox.rego` is a stop-rule policy bundle per AGENTS.md L150. Present the diff; map watchpoints (rule 6 is PURE Rego per the Sprint-8A T11 R2-R3 contract; defense-in-depth type check catches malformed input; closed-enum reason `sandbox_credential_ttl_exceeds_tenant_max` added; kernel default = 900s, bank overlays raise; loosening the kernel default requires coordinated kernel + ADR amendment per existing precedent). Commit only after approval:
+Two CC surfaces touched: `policies/_default/sandbox.rego` (stop-rule policy bundle per AGENTS.md L150) AND `sandbox/admission.py` (stop-rule per AGENTS.md L48). Present the diff; map watchpoints to pinning regressions:
+
+| Watchpoint | Pinned by |
+|---|---|
+| Rule 6 actually refuses (not inert `deny[]`) | `test_rule_6_refuses_when_ttl_exceeds_kernel_default` + `test_rule_6_refuses_when_ttl_exceeds_tenant_overlay` |
+| Rule 6 is PURE Rego — `is_number` defence-in-depth | `test_rule_6_pure_rego_type_check_defense_in_depth` |
+| Empty `requires_credentials` (T7 backward-compat) admits | `test_rule_6_admits_when_requires_credentials_is_empty` |
+| `every` semantics (one-bad-entry-fails-list) | `test_rule_6_refuses_with_mixed_request_list_when_one_exceeds` |
+| Tenant overlay raise path works | `test_rule_6_respects_tenant_overlay_raise` |
+| Settings default + bounds | `TestSandboxKernelDefaultMaxCredentialTtl` (3 arms) |
+| admission.py Step 9 threads `kernel_default.max_credential_ttl_s` | Existing `tests/unit/sandbox/test_admission_pipeline.py` Rego-input-shape regressions verify the dict shape under mocked OPA (T7 added similar regressions for `requires_credentials`) |
+
+Doctrine confirmations:
+- Bisection invariant: `sandbox_credential_ttl_exceeds_tenant_max` string lives ONLY inside `.rego` (comment) at T8 — no Python raise site. T9 lifts the Literal value + matching Stage-2 mapping in the same commit.
+- Bank overlays may TIGHTEN the cap (lower TTL ceiling via `tenant.overlay.max_credential_ttl_s`); LOOSENING the kernel default requires a coordinated kernel + ADR amendment.
+- Wave-1 admission.py omits `tenant.overlay` per spec §5.2; future-sprint hook covers per-tenant raise plumbing.
+
+Commit (match Sprint-10 convention):
 
 ```bash
 git add policies/_default/sandbox.rego \
         src/cognic_agentos/core/config.py \
+        src/cognic_agentos/sandbox/admission.py \
         tests/unit/policies/test_sandbox_rego_credentials.py \
         tests/unit/test_config.py
-git commit -m "feat(sprint-10): sandbox.rego rule 6 — per-tenant max credential TTL cap (T8)
+git commit -m "feat(sprint-10): T8 sandbox.rego rule 6 — per-tenant max credential TTL cap (CRITICAL CONTROLS — stop-rule policy bundle)
 
 Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
 ```
