@@ -29,7 +29,7 @@ from cognic_agentos.sandbox import (
 class TestClosedEnumPartitionInvariants:
     """Pin the wire-protocol-public closed-enum values + counts."""
 
-    def test_sandbox_refusal_reason_has_exactly_26_values(self) -> None:
+    def test_sandbox_refusal_reason_has_exactly_27_values(self) -> None:
         # Sprint 8.5 T1 extended 15 → 21 (6 new wake-time arms per spec §3.3).
         # Sprint 10 T7 extended 21 → 22 (1 kernel-boundary cross-tenant guard
         # per Sprint-10 spec §4.1 — `sandbox_credential_request_tenant_mismatch`).
@@ -42,10 +42,14 @@ class TestClosedEnumPartitionInvariants:
         # `sandbox_policy_rego_denied` because `OPAEngine.Decision` has no
         # per-rule-name channel (Rego-reason surfacing deferred to a future
         # task per Sprint-10 spec §7.3 amendment).
+        # Sprint 10.1 extended 26 → 27 (1 post-mint granted-vs-requested
+        # TTL refusal — `sandbox_credential_lease_ttl_grant_exceeds_request`
+        # — for the new `VaultLeaseGrantExceedsRequest` exception at
+        # `core/vault.lease_credential` per ADR-004 §25 amendment).
         values = typing.get_args(SandboxRefusalReason)
-        assert len(values) == 26, (
-            f"SandboxRefusalReason must have 26 values per spec §4.1 + "
-            f"8.5 §3.3 + 10 §4.1 + 10 §6.1; "
+        assert len(values) == 27, (
+            f"SandboxRefusalReason must have 27 values per spec §4.1 + "
+            f"8.5 §3.3 + 10 §4.1 + 10 §6.1 + 10.1 ADR-004 §25 amendment; "
             f"found {len(values)}: {values}"
         )
 
@@ -87,17 +91,24 @@ class TestClosedEnumPartitionInvariants:
         assert "sandbox.warm_pool.precreated" in events
 
     def test_sandbox_refusal_reason_canonical_values_present(self) -> None:
-        """Spot-check the 26-value Literal contains the canonical set
+        """Spot-check the 27-value Literal contains the canonical set
         documented in spec §4.1 (8A 15 vocab) + spec §3.3 (8.5 6 new
         wake-time arms) + Sprint-10 spec §4.1 (T7 1 new kernel-boundary
         cross-tenant guard) + Sprint-10 spec §6.1 (T9 4 new values: 3
-        mint-failure + 1 TTL-cap). The 3 mint-failure values gain
+        mint-failure + 1 TTL-cap) + Sprint-10.1 ADR-004 §25 amendment
+        (1 new post-mint granted-vs-requested TTL refusal
+        `sandbox_credential_lease_ttl_grant_exceeds_request` mapped
+        from the new `VaultLeaseGrantExceedsRequest` exception at
+        `core/vault.lease_credential`). The 3 mint-failure values gain
         Stage-2 raise sites at T10's backend `create()` post-admission
         per Sprint-10 spec §7.1; the TTL-cap value
         `sandbox_credential_ttl_exceeds_tenant_max` is Literal-only —
         the cap continues to surface as `sandbox_policy_rego_denied`
         (Rego-reason surfacing through `OPAEngine.Decision` deferred to
-        a future task per Sprint-10 spec §7.3 amendment)."""
+        a future task per Sprint-10 spec §7.3 amendment). The
+        Sprint-10.1 TTL-grant refusal IS wired (5th arm in the shared
+        mapping helper + 5-value backend except-tuples in the same
+        commit per Finding B of the 2026-05-24 plan-review round 1)."""
         values = set(typing.get_args(SandboxRefusalReason))
         expected = {
             # Sprint 8A — 15 values
@@ -137,6 +148,15 @@ class TestClosedEnumPartitionInvariants:
             # sandbox_policy_rego_denied per Sprint-10 spec §7.3
             # amendment).
             "sandbox_credential_ttl_exceeds_tenant_max",
+            # Sprint 10.1 — 1 post-mint granted-vs-requested TTL refusal
+            # per ADR-004 §25 amendment. Mapped from the new
+            # VaultLeaseGrantExceedsRequest exception (5th value in the
+            # core/vault closed taxonomy) at the sandbox boundary via
+            # _shared_credentials._mint_exception_to_refusal_reason.
+            # Wired at the backend create() Stage-2 except-tuple in the
+            # SAME commit as this Literal extension per Finding B of
+            # the 2026-05-24 plan-review round 1.
+            "sandbox_credential_lease_ttl_grant_exceeds_request",
         }
         assert values == expected, f"drift: {values ^ expected}"
 

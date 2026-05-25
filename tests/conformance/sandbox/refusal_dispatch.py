@@ -563,6 +563,30 @@ async def _trigger_sandbox_credential_ttl_exceeds_tenant_max(
     yield
 
 
+@asynccontextmanager
+async def _trigger_sandbox_credential_lease_ttl_grant_exceeds_request(
+    backend: Any,
+    ctx: Any,
+) -> AsyncIterator[None]:
+    """Sprint 10.1 — trigger envelope for the post-mint
+    granted-vs-requested TTL refusal raised by
+    ``core/vault.lease_credential`` when
+    ``ttl_s_granted > request.ttl_s`` per ADR-004 §25 amendment.
+
+    No-op registration envelope. Behaviour coverage at the kernel
+    layer lives in
+    ``tests/unit/core/test_vault.py::TestLeaseCredentialTTLGrantEnforcement``;
+    cross-backend mapping coverage lives at
+    ``tests/unit/sandbox/backends/test_shared_credentials.py::TestMintExceptionToRefusalReasonMapping``
+    (5th parametrize row) + the per-backend create() except-tuple
+    regressions at
+    ``tests/unit/sandbox/backends/test_docker_sibling_credentials.py::TestGrantExceedsRequestClosedEnumMapping``
+    +
+    ``tests/unit/sandbox/backends/test_kubernetes_pod_credentials.py::TestKubernetesGrantExceedsRequestClosedEnumMapping``.
+    """
+    yield
+
+
 #: Public registry — maps every wire-public ``SandboxRefusalReason``
 #: value to a trigger factory. The membership pin at
 #: ``test_refusal_taxonomy.py`` asserts this dict's keyset equals
@@ -572,7 +596,7 @@ async def _trigger_sandbox_credential_ttl_exceeds_tenant_max(
 #: When adding a new ``SandboxRefusalReason`` value at
 #: ``src/cognic_agentos/sandbox/protocol.py:34-50``, add the
 #: corresponding trigger factory above + register it here. The
-#: ``test_refusal_reason_count_locked_at_twenty_six`` regression
+#: ``test_refusal_reason_count_locked_at_twenty_seven`` regression
 #: also needs its hard-coded count updated.
 TRIGGERS_BY_REASON: dict[str, TriggerFactory] = {
     # Sprint 8A — 15 admission-arm triggers
@@ -631,5 +655,13 @@ TRIGGERS_BY_REASON: dict[str, TriggerFactory] = {
     ),
     "sandbox_credential_ttl_exceeds_tenant_max": (
         _trigger_sandbox_credential_ttl_exceeds_tenant_max
+    ),
+    # Sprint 10.1 — post-mint granted-vs-requested TTL refusal
+    # (VaultLeaseGrantExceedsRequest mapped at the sandbox boundary per
+    # ADR-004 §25 amendment). Wired at the backend create() Stage-2
+    # except-tuple in the SAME commit as this trigger registration per
+    # Finding B of the 2026-05-24 plan-review round 1.
+    "sandbox_credential_lease_ttl_grant_exceeds_request": (
+        _trigger_sandbox_credential_lease_ttl_grant_exceeds_request
     ),
 }

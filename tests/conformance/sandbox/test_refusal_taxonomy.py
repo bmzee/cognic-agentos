@@ -85,7 +85,7 @@ class TestRefusalTaxonomyRegistrationCoverage:
             f"values to the production Literal at protocol.py:34-50."
         )
 
-    def test_refusal_reason_count_locked_at_twenty_six(self) -> None:
+    def test_refusal_reason_count_locked_at_twenty_seven(self) -> None:
         """Crisp value-count guard — separate from the membership
         assertion so drift in size shows a clean diagnostic.
 
@@ -96,9 +96,13 @@ class TestRefusalTaxonomyRegistrationCoverage:
         values with Stage-2 raise sites at T10 backend create(); 1
         ``sandbox_credential_ttl_exceeds_tenant_max`` value that is
         Literal-only per spec §7.3 amendment — no Stage-2 raise site).
-        If this fails because the count is no longer 26, update the
+        Sprint 10.1 extended 26 → 27 (1 post-mint granted-vs-requested
+        TTL refusal ``sandbox_credential_lease_ttl_grant_exceeds_request``
+        for the new ``VaultLeaseGrantExceedsRequest`` exception at
+        ``core/vault.lease_credential`` per ADR-004 §25 amendment).
+        If this fails because the count is no longer 27, update the
         constant here AND ensure ``TRIGGERS_BY_REASON`` has a matching
         entry for the new value. NEVER update this guard without also
         updating the dispatch.
         """
-        assert len(get_args(SandboxRefusalReason)) == 26
+        assert len(get_args(SandboxRefusalReason)) == 27

@@ -581,6 +581,76 @@ class TestMintFailureClosedEnumMapping:
         assert exc_info.value.reason == expected_reason
 
 
+class TestGrantExceedsRequestClosedEnumMapping:
+    """Sprint 10.1 — pin that ``create()`` refuses with
+    ``SandboxRefusalReason("sandbox_credential_lease_ttl_grant_exceeds_request")``
+    when the credential adapter raises
+    :class:`VaultLeaseGrantExceedsRequest` (the post-mint
+    granted-vs-requested TTL refusal at
+    ``core/vault.lease_credential`` per ADR-004 §25 amendment).
+
+    Lands alongside the closed-enum + cross-backend mapping + backend
+    except-tuple extension in the SAME commit per Finding B of the
+    2026-05-24 plan-review round 1 — the 4-value backend except-tuple
+    at ``docker_sibling.py:1099-1103`` does NOT auto-catch the new
+    exception just because the shared mapping helper accepts it.
+
+    Uses the REAL helpers (``_make_backend`` /
+    ``_StubCredentialAdapter`` / ``_POLICY`` / ``_ACTOR`` /
+    ``_PACK_CTX`` / ``_make_lease_request``) per Finding D of the
+    2026-05-24 plan-review round 1.
+    """
+
+    @pytest.mark.asyncio
+    async def test_create_refuses_when_grant_exceeds_request_ttl_s(self) -> None:
+        from cognic_agentos.core.vault import VaultLeaseGrantExceedsRequest
+
+        adapter = _StubCredentialAdapter()
+        # Synthetic message includes lease_id token to mirror the
+        # production-path format (per Finding 3 of the 2026-05-24
+        # plan-review round 2 — backends pass ``detail=str(exc)`` to
+        # ``SandboxLifecycleRefused``, so the lease_id must live in the
+        # formatted message to reach the chain payload).
+        adapter.queue_mint_result(
+            VaultLeaseGrantExceedsRequest(
+                "grant=3600 > request=900 "
+                "lease_id='database/creds/test-role/lease-z' "
+                "cleanup revoke_outcome=revoked.",
+                lease_id="database/creds/test-role/lease-z",
+                revoke_outcome="revoked",
+            )
+        )
+        backend = _make_backend(credential_adapter=adapter)
+        req = _make_lease_request()
+
+        with (
+            patch(
+                "cognic_agentos.sandbox.backends.docker_sibling.admit_policy",
+                new=AsyncMock(return_value=None),
+            ),
+            pytest.raises(SandboxLifecycleRefused) as exc_info,
+        ):
+            await backend.create(
+                _POLICY,
+                actor=_ACTOR,
+                tenant_id="t-1",
+                pack_context=_PACK_CTX,
+                use_warm_pool=False,
+                requires_credentials=(req,),
+            )
+
+        assert exc_info.value.reason == ("sandbox_credential_lease_ttl_grant_exceeds_request")
+        # Detail field carries the original exception message for
+        # examiner traceability. Finding 3 of the 2026-05-24 plan-review
+        # round 2 — lease_id MUST surface through the backend's detail
+        # string so audit + observability can correlate refused-lease
+        # events with the Vault-side dangling lease (relevant when
+        # revoke_outcome="revoke_failed").
+        detail = str(exc_info.value)
+        assert "3600" in detail
+        assert "database/creds/test-role/lease-z" in detail
+
+
 class TestMintFailureBestEffortCleanup:
     """spec §7.1 line 649 — on mid-batch mint failure, leases already
     minted in the same create() attempt MUST be revoked (best-effort)
