@@ -3,10 +3,13 @@
 Dependency-neutral home for cross-backend pure-functional credential
 helpers that BOTH ``docker_sibling`` AND ``kubernetes_pod`` need.
 
-Owns ``_mint_exception_to_refusal_reason`` — the 4-value
-``core.vault`` exception taxonomy → 3-value
-``sandbox_credential_mint_failed_*`` ``SandboxRefusalReason``
-closed-enum mapping per Sprint-10 spec §7.1.
+Owns ``_mint_exception_to_refusal_reason`` — the 5-value
+``core.vault`` exception taxonomy → 4-value ``sandbox_credential_*``
+``SandboxRefusalReason`` closed-enum mapping per Sprint-10 spec §7.1
++ Sprint-10.1 amendment per ADR-004 §25 (3 hvac-mapped values map to
+``sandbox_credential_mint_failed_*`` + the 5th
+``VaultLeaseGrantExceedsRequest`` value maps to its own
+``sandbox_credential_lease_ttl_grant_exceeds_request`` value).
 
 **Why this module exists** (Sprint 10 T10 K8s round-2 reviewer P1
 fix, 2026-05-24): the first iteration of T10 K8s imported
@@ -24,8 +27,11 @@ precedent set by ``_shared_exec.py`` (consumer-owned helpers
 extracted when a second backend needed them).
 
 **Dependency contract**: this module imports ONLY from
-``cognic_agentos.core.vault`` (for the 4 Vault exception classes)
-and ``cognic_agentos.sandbox.protocol`` (for the
+``cognic_agentos.core.vault`` (for the 5 Vault exception classes
+post-Sprint-10.1: ``VaultUnavailable`` / ``VaultPathNotFound`` /
+``VaultAuthDenied`` / ``VaultProtocolError`` /
+``VaultLeaseGrantExceedsRequest``) and
+``cognic_agentos.sandbox.protocol`` (for the
 ``SandboxRefusalReason`` Literal). Adding a backend-specific
 import (aiodocker / kubernetes_asyncio / any other) would
 re-introduce the same coupling bug class — pinned by the test-only

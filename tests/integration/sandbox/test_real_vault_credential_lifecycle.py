@@ -15,7 +15,9 @@ Task Z2):
     primitive proof; if Layer 1 fails, ``core/vault.py``'s
     ``transport.lease(secret_path, ttl_s)`` read-style HTTP shape
     (per Round-9 Gap Q — delegates to ``client.read(path)`` at the
-    hvac level; ``ttl_s`` is Wave-1 informational) is broken against
+    hvac level; ``ttl_s`` is NOT wire-forwarded to Vault but is
+    load-bearing post-mint in ``core/vault.lease_credential`` per
+    Sprint-10.1 amendment to ADR-004 §25) is broken against
     the target Vault version + dynamic backend.
 
   **Layer 2 — Docker backend end-to-end.** Same real
@@ -72,7 +74,9 @@ configuration at that point is a broken environment, NOT a non-issue
 fixture exercises the actual ``transport.lease(secret_path, ttl_s)``
 read-style HTTP path that ``core/vault.py`` owns (per Round-9
 Gap Q — ``client.read(path)`` at the hvac level; ``ttl_s`` is
-Wave-1 informational). ``vault server -dev`` auto-enables kv-v2
+NOT wire-forwarded to Vault but is load-bearing post-mint in
+``core/vault.lease_credential`` per Sprint-10.1 amendment to ADR-004
+§25). ``vault server -dev`` auto-enables kv-v2
 but ``CredentialAdapter.mint_lease`` → ``lease_credential`` →
 ``transport.lease`` wraps the response in the T4 ``CredentialLease``
 consumer-shape contract (NOT the Sprint-1C ``SecretLease`` shape

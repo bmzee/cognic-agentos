@@ -319,12 +319,21 @@ class TestFetchSecretHappyPathAndShapeContract:
 
 
 class TestMintLeasePreservesTaxonomy:
-    """User correction #2 (Round-0): no closed-enum collapse in T6.
-    mint_lease delegates to core.vault.lease_credential; the 4-value
-    exception taxonomy (VaultUnavailable / VaultPathNotFound /
-    VaultAuthDenied / VaultProtocolError) propagates UNCHANGED. The
-    sandbox-closed-enum collapse to ``sandbox_credential_mint_failed_*``
-    belongs at the admission boundary (T7+), NOT here."""
+    """User correction #2 (Round-0) + Sprint-10.1 amendment per ADR-004
+    §25: no closed-enum collapse in T6. mint_lease delegates to
+    core.vault.lease_credential; the ``core.vault`` exception taxonomy
+    propagates UNCHANGED — ``mint_lease`` can surface the full 5-value
+    taxonomy post-Sprint-10.1 (VaultUnavailable / VaultPathNotFound /
+    VaultAuthDenied / VaultProtocolError / VaultLeaseGrantExceedsRequest
+    — the 5th is raised by ``core.vault.lease_credential`` when the
+    post-mint TTL gate fires, with best-effort ``transport.revoke``
+    before the raise); ``revoke_lease`` remains scoped to the
+    hvac/transport-error 4-value subset (VaultUnavailable /
+    VaultPathNotFound / VaultAuthDenied / VaultProtocolError) because
+    revoke has no granted-vs-requested concept. The sandbox-closed-enum
+    collapse to ``sandbox_credential_*`` belongs at the admission
+    boundary (T7+ + the Sprint-10.1 backend except-tuple extension
+    4 → 5 to also catch ``VaultLeaseGrantExceedsRequest``), NOT here."""
 
     async def test_mint_lease_returns_credential_lease_on_happy_path(self) -> None:
         """T6 — mint_lease delegates to core.vault.lease_credential
