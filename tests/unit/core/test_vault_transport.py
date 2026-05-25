@@ -160,16 +160,22 @@ class TestVaultTransportDomainMethods:
         dominant dynamic-secret endpoints (database/aws/gcp) are
         GET-only. Per spec §3.4 HTTP-verb table + §3.5 implementation-
         shape note: Wave-1 default is the read-style ``client.read(path)``;
-        ``ttl_s`` is informational at Wave 1 (Vault's role-side
-        ``default_ttl`` / ``max_ttl`` are authoritative).
+        ``ttl_s`` is NOT wire-forwarded to Vault at this transport layer
+        (Vault's role-side ``default_ttl`` / ``max_ttl`` are authoritative
+        for what the wire returns) but is load-bearing kernel-side
+        post-Sprint-10.1 — ``core/vault.lease_credential`` enforces
+        ``ttl_s_granted <= request.ttl_s`` post-mint via the new
+        ``VaultLeaseGrantExceedsRequest`` exception per ADR-004 §25
+        amendment.
 
         Load-bearing pins:
         * ``mock.read`` is called exactly once with the secret path.
         * ``mock.write`` is NEVER called from the lease path (no
           fallback-to-write-on-405 heuristic — PKI write-style support
           is future engine-specific work, not a runtime fallback).
-        * ``ttl_s`` is NOT forwarded as any kwarg to hvac (informational
-          per spec §3.5).
+        * ``ttl_s`` is NOT forwarded as any kwarg to hvac (NOT
+          wire-forwarded per spec §3.5; kernel-side enforcement at
+          ``core/vault.lease_credential`` per Sprint-10.1 amendment).
         """
         with patch("cognic_agentos.core._vault_transport.hvac.Client") as cls:
             mock = MagicMock()

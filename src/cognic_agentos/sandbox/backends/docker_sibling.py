@@ -67,6 +67,7 @@ from cognic_agentos.core.canonical import canonical_bytes
 from cognic_agentos.core.vault import (
     CredentialLease,
     VaultAuthDenied,
+    VaultLeaseGrantExceedsRequest,  # Sprint 10.1 — Finding B of plan-review round 1
     VaultLeaseRequest,
     VaultPathNotFound,
     VaultProtocolError,
@@ -1100,9 +1101,16 @@ class DockerSiblingSandboxBackend:
             VaultPathNotFound,
             VaultAuthDenied,
             VaultProtocolError,
+            VaultLeaseGrantExceedsRequest,  # Sprint 10.1 — Finding B of plan-review round 1
         ) as exc:
             # Vault-specific mint-failure path — closed-enum mapping
             # per spec §7.1 + the standard post-mint cleanup.
+            # Sprint 10.1: tuple extended 4 → 5 to also catch
+            # `VaultLeaseGrantExceedsRequest` (post-mint
+            # granted-vs-requested TTL refusal per ADR-004 §25
+            # amendment); mapping helper at `_shared_credentials.py`
+            # was extended in the SAME commit per Finding B so the new
+            # exception cannot escape uncaught at the backend boundary.
             await self._cleanup_post_admission_failure(
                 minted_leases=minted_leases,
                 session_id=session_id,

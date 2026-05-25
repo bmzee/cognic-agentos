@@ -465,6 +465,69 @@ class TestKubernetesMintLoopPostAdmission:
 # ---------------------------------------------------------------------------
 
 
+class TestKubernetesGrantExceedsRequestClosedEnumMapping:
+    """Sprint 10.1 — K8s analog of the Docker
+    ``TestGrantExceedsRequestClosedEnumMapping`` regression. Pins that
+    K8s ``create()`` refuses with
+    ``SandboxRefusalReason("sandbox_credential_lease_ttl_grant_exceeds_request")``
+    when the credential adapter raises
+    :class:`VaultLeaseGrantExceedsRequest` (the post-mint
+    granted-vs-requested TTL refusal at
+    ``core/vault.lease_credential`` per ADR-004 §25 amendment).
+
+    Lands alongside the closed-enum + cross-backend mapping + backend
+    except-tuple extension in the SAME commit per Finding B of the
+    2026-05-24 plan-review round 1 — the 4-value backend except-tuple
+    at ``kubernetes_pod.py:1049-1053`` does NOT auto-catch the new
+    exception just because the shared mapping helper accepts it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_create_refuses_when_grant_exceeds_request_ttl_s(self) -> None:
+        from cognic_agentos.core.vault import VaultLeaseGrantExceedsRequest
+
+        adapter = _StubCredentialAdapter()
+        # Synthetic message includes lease_id token to mirror the
+        # production-path format (Finding 3 of the 2026-05-24
+        # plan-review round 2). K8s analog of the Docker regression.
+        adapter.queue_mint_result(
+            VaultLeaseGrantExceedsRequest(
+                "grant=3600 > request=900 "
+                "lease_id='database/creds/test-role/lease-z' "
+                "cleanup revoke_outcome=revoked.",
+                lease_id="database/creds/test-role/lease-z",
+                revoke_outcome="revoked",
+            )
+        )
+        backend = _make_backend(credential_adapter=adapter)
+        req = _make_lease_request()
+
+        with (
+            patch(
+                "cognic_agentos.sandbox.backends.kubernetes_pod.admit_policy",
+                new=AsyncMock(return_value=None),
+            ),
+            pytest.raises(SandboxLifecycleRefused) as exc_info,
+        ):
+            await backend.create(
+                _POLICY,
+                actor=_ACTOR,
+                tenant_id="t-1",
+                pack_context=_PACK_CTX,
+                use_warm_pool=False,
+                requires_credentials=(req,),
+            )
+
+        assert exc_info.value.reason == ("sandbox_credential_lease_ttl_grant_exceeds_request")
+        # Detail field carries the original exception message.
+        # lease_id MUST surface through the backend's detail string —
+        # cross-backend invariant per Finding 3 of the 2026-05-24
+        # plan-review round 2.
+        detail = str(exc_info.value)
+        assert "3600" in detail
+        assert "database/creds/test-role/lease-z" in detail
+
+
 class TestKubernetesMintFailureBestEffortCleanup:
     """spec §7.1 line 649 — mid-batch mint failure best-effort
     revokes leases minted earlier in the same create() attempt.

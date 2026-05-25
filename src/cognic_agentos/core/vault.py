@@ -23,14 +23,18 @@ Module surface:
   — kernel does NOT normalise across backends (DB exposes
   ``{username, password}``; AWS STS exposes
   ``{access_key, secret_key, session_token}``; etc.).
-* 4-value exception taxonomy: :class:`VaultUnavailable` /
+* 5-value exception taxonomy: :class:`VaultUnavailable` /
   :class:`VaultPathNotFound` / :class:`VaultAuthDenied` /
-  :class:`VaultProtocolError`. Distinct types so the T6
+  :class:`VaultProtocolError` / :class:`VaultLeaseGrantExceedsRequest`
+  (Sprint 10.1 amendment — post-mint granted-vs-requested TTL
+  enforcement; raises with best-effort ``transport.revoke`` before
+  the raise so an over-cap lease does not leak into Vault's role
+  default_ttl window; carries ``lease_id`` + ``revoke_outcome ∈
+  {"revoked", "revoke_failed"}`` attributes). Distinct types so the T6
   :class:`VaultCredentialAdapter` at the sandbox boundary can map each
-  to the matching ``sandbox_credential_mint_failed_*`` closed-enum
-  refusal reason per spec §7.1. :class:`VaultProtocolError` is
-  intentionally distinct in ``core/`` — the sandbox boundary at T6
-  collapses it to
+  to the matching ``sandbox_credential_*`` closed-enum refusal reason
+  per spec §7.1. :class:`VaultProtocolError` is intentionally distinct
+  in ``core/`` — the sandbox boundary at T6 collapses it to
   ``sandbox_credential_mint_failed_vault_unavailable`` for closed-enum
   stability (the operator surface stays at the documented
   taxonomy; the protocol-error case is a synthesis of "transport
@@ -39,8 +43,14 @@ Module surface:
 * :func:`lease_credential` — async entry-point. Calls
   ``transport.lease(secret_path, ttl_s)`` — the read-style dynamic-
   secret lease path per the Z2 Gap Q amendment (Sprint 10 round-9,
-  2026-05-24); ``ttl_s`` is informational at Wave 1 (Vault's role-
-  side ``default_ttl`` / ``max_ttl`` are authoritative). T4 IS the
+  2026-05-24); ``ttl_s`` is NOT passed to Vault on the wire (the
+  dominant dynamic-secret endpoints are GET-only), but Sprint 10.1
+  upgrades the kernel-side semantic per ADR-004 §25 amendment:
+  ``lease_credential`` now enforces ``ttl_s_granted <= request.ttl_s``
+  post-mint via the new :class:`VaultLeaseGrantExceedsRequest` exception
+  (with best-effort ``transport.revoke(lease_id)`` before raise) so
+  Vault's role-side ``default_ttl`` / ``max_ttl`` cannot silently
+  exceed AgentOS' cap. T4 IS the
   consumer the T3 ``transport.lease`` carve-out was reserved for —
   the Sprint-1C ``VaultAdapter.lease()`` funnels through
   ``transport.read(path)`` to produce a :class:`SecretLease` shape,
@@ -51,7 +61,9 @@ Module surface:
   two consumer-shape contracts can evolve independently (e.g. PKI
   write-style support lands as a separate ``transport`` method —
   NOT a runtime overload of ``lease()``). Maps hvac exceptions →
-  4-value taxonomy.
+  5-value taxonomy (Sprint 10.1 amendment) + enforces
+  ``ttl_s_granted <= request.ttl_s`` post-mint with best-effort
+  revoke before raise.
 * :func:`revoke_credential` — async tombstone for a minted lease.
   Caller (T10 sandbox ``destroy()``) wraps in fail-soft try/except
   per spec §7.2 — but the underlying exception class still needs to
@@ -216,6 +228,54 @@ class VaultProtocolError(Exception):
     correlate the protocol-error pattern in Langfuse / Dynatrace."""
 
 
+class VaultLeaseGrantExceedsRequest(Exception):
+    """Sprint 10.1 — Vault returned a ``lease_duration`` greater than the
+    requested ``ttl_s``. This indicates a Vault role configuration whose
+    ``default_ttl`` / ``max_ttl`` exceeds AgentOS' cap; the per-tenant
+    cap declared at the Rego rule-6 level (``sandbox.rego`` rule 6 +
+    spec §6.1) gates the REQUESTED TTL but cannot gate the GRANTED TTL
+    because the cap is evaluated before the Vault round-trip.
+
+    Carries ``lease_id`` (the Vault-issued lease id the kernel attempted
+    to revoke before raising) + ``revoke_outcome`` (``"revoked"`` if
+    cleanup succeeded; ``"revoke_failed"`` if the best-effort
+    ``transport.revoke(lease_id)`` raised — in which case the revoke
+    exception is chained via ``__cause__``). Operators reading
+    ``revoke_outcome="revoke_failed"`` MUST investigate the dangling
+    Vault lease (it will only expire at the Vault role's
+    ``default_ttl`` / ``max_ttl``).
+
+    The formatted exception message ALSO includes the ``lease_id`` token
+    (not only the attribute) because the sandbox backend raises
+    ``SandboxLifecycleRefused(reason, detail=str(exc))`` — only the
+    message text reaches the chain payload (per Finding 3 of the
+    2026-05-24 plan-review round 2).
+
+    Mapped at the sandbox boundary (via
+    ``sandbox/backends/_shared_credentials.py``) to the wire-public
+    ``SandboxRefusalReason("sandbox_credential_lease_ttl_grant_exceeds_request")``
+    closed-enum value. Mirrors the
+    ``[[feedback_recompute_derived_facts_not_just_wrapper]]`` doctrine:
+    Rego cap fires pre-mint against the request; this exception fires
+    post-mint against the actual grant; both layers together prevent
+    over-cap leases regardless of where the misconfiguration lives.
+
+    The 5th member of the closed ``core/vault`` exception taxonomy per
+    Sprint-10.1 amendment of ADR-004 §25.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        lease_id: str,
+        revoke_outcome: Literal["revoked", "revoke_failed"],
+    ) -> None:
+        super().__init__(message)
+        self.lease_id = lease_id
+        self.revoke_outcome = revoke_outcome
+
+
 # ──────────────────────────────────────────────────────────────────────
 # 4. Public async API (spec §3.3).
 # ──────────────────────────────────────────────────────────────────────
@@ -231,10 +291,15 @@ async def lease_credential(
 
     Calls ``transport.lease(secret_path, ttl_s)`` — the read-style
     dynamic-secret lease path per the Z2 Gap Q amendment (Sprint 10
-    round-9, 2026-05-24). ``ttl_s`` is informational at Wave 1 — Vault's
-    role-side ``default_ttl`` / ``max_ttl`` are authoritative, and
-    :attr:`CredentialLease.ttl_s_granted` reflects whatever Vault
-    returns in the response's ``lease_duration`` field. T4 IS the
+    round-9, 2026-05-24). ``ttl_s`` is NOT passed to Vault on the wire
+    — Vault's role-side ``default_ttl`` / ``max_ttl`` are authoritative
+    for what the wire returns, and :attr:`CredentialLease.ttl_s_granted`
+    reflects whatever Vault hands back in the response's ``lease_duration``
+    field. Sprint 10.1 amendment to ADR-004 §25: this function now
+    refuses with :class:`VaultLeaseGrantExceedsRequest` (after a
+    best-effort ``transport.revoke(lease_id)``) when
+    ``ttl_s_granted > request.ttl_s``, complementing the Rego rule-6
+    pre-mint cap with a post-mint kernel-side gate. T4 IS the
     consumer the T3 ``transport.lease`` carve-out was reserved for —
     the Sprint-1C ``VaultAdapter.lease()`` funnels through
     ``transport.read(path)`` to produce a :class:`SecretLease` shape,
@@ -268,10 +333,26 @@ async def lease_credential(
     * **anything else** (unexpected hvac subclass, unforeseen
       transport-layer exception, etc.) → :class:`VaultProtocolError`
       per spec §7.1 "anything else" row. The closed taxonomy is the
-      contract — no exception escapes outside the 4-value set.
+      contract — no exception escapes outside the 5-value set
+      (Sprint 10.1 amendment).
       :class:`asyncio.CancelledError` inherits ``BaseException`` (not
       ``Exception``) under modern Python so it correctly passes through
       uncaught when the caller cancels the task.
+    * ``response['lease_duration'] > request.ttl_s`` →
+      :class:`VaultLeaseGrantExceedsRequest` (Sprint 10.1 — finding #2
+      from post-merge review of PR #38; granted-vs-requested TTL
+      enforcement post-mint, complementing the Rego rule-6 pre-mint
+      cap per ADR-004 §25 amendment). Best-effort
+      ``transport.revoke(lease_id)`` runs BEFORE the raise so an
+      over-cap lease does not leak into Vault's role
+      ``default_ttl`` / ``max_ttl`` window; revoke failure does NOT
+      mask the TTL refusal — the exception still raises, with
+      ``revoke_outcome="revoke_failed"`` + the revoke exception
+      chained via ``__cause__``. The formatted message string also
+      includes the ``lease_id`` token (not only the attribute) so the
+      sandbox backend's ``SandboxLifecycleRefused(detail=str(exc))``
+      carries the dangling-lease correlator through to the chain
+      payload (Finding 3 of the 2026-05-24 plan-review round 2).
 
     ``settings`` is currently unused but reserved for future
     operator-policy hooks (per-call TTL clamps, audit context, etc.)
@@ -329,6 +410,60 @@ async def lease_credential(
             f"Vault returned non-integer lease_duration at {request.secret_path!r}: "
             f"got {granted_raw!r}"
         ) from exc
+
+    # Sprint 10.1 — granted-vs-requested TTL enforcement per ADR-004 §25
+    # amendment. The Rego rule-6 cap gates the REQUESTED ttl pre-mint;
+    # this gate fires post-mint against the ACTUAL grant. Together they
+    # prevent over-cap leases regardless of whether the misconfiguration
+    # lives in the caller (requested too high; caught by Rego) or in
+    # Vault (role default_ttl/max_ttl exceeds the cap; caught here).
+    # Per [[feedback_recompute_derived_facts_not_just_wrapper]] — do not
+    # trust the wrapper's verdict for the claim; recompute against the
+    # source data.
+    if ttl_s_granted > request.ttl_s:
+        # Best-effort revoke per Finding A of the 2026-05-24 plan-review
+        # round 1: AgentOS minted the credential via Vault; refusing it
+        # without revoking would leak the dynamic credential into
+        # Vault's role default_ttl/max_ttl window. Revoke failure does
+        # NOT mask the TTL refusal — the exception still raises;
+        # revoke_outcome attribute distinguishes the two cases for the
+        # audit trail.
+        revoke_outcome: Literal["revoked", "revoke_failed"] = "revoked"
+        revoke_cause: Exception | None = None
+        try:
+            await transport.revoke(lease_id)
+        except Exception as revoke_exc:
+            # Catch broadly — we are already in the refusal path and
+            # MUST raise the TTL exception regardless of revoke outcome.
+            # asyncio.CancelledError still passes through (inherits
+            # BaseException, not Exception).
+            revoke_outcome = "revoke_failed"
+            revoke_cause = revoke_exc
+        # Note (Sprint 10.1 plan-review round 2, Finding 3): lease_id
+        # is in the FORMATTED MESSAGE STRING (not only on the attribute)
+        # because the sandbox backends raise
+        # ``SandboxLifecycleRefused(reason, detail=str(exc))`` — only the
+        # message text reaches the chain payload. Without lease_id in
+        # the string, operators reading a ``revoke_outcome="revoke_failed"``
+        # refusal cannot correlate it to the dangling Vault lease.
+        message = (
+            f"Vault granted ttl_s_granted={ttl_s_granted} for "
+            f"{request.secret_path!r} but the request asked for "
+            f"ttl_s={request.ttl_s}. Vault role default_ttl/max_ttl "
+            f"likely exceeds the AgentOS cap; tighten the Vault role "
+            f"configuration to match the per-tenant max_credential_ttl_s "
+            f"setting (see spec §6.1). lease_id={lease_id!r}; "
+            f"cleanup revoke_outcome={revoke_outcome}."
+        )
+        refusal = VaultLeaseGrantExceedsRequest(
+            message,
+            lease_id=lease_id,
+            revoke_outcome=revoke_outcome,
+        )
+        if revoke_cause is not None:
+            raise refusal from revoke_cause
+        raise refusal
+
     expires_at = minted_at + _dt.timedelta(seconds=ttl_s_granted)
 
     # Token = passthrough of response['data']. dict() copies to detach
@@ -373,9 +508,17 @@ async def revoke_credential(
     sandbox audit emits ``sandbox.lifecycle.lease_revoke_failed``
     carrying the exception class name).
 
-    Exception mapping mirrors :func:`lease_credential` (spec §7.1) —
-    including the ``except Exception`` catch-all that ensures every
-    failure surface stays inside the closed 4-value taxonomy.
+    Revoke-side exception mapping mirrors the hvac/transport-error
+    subset of :func:`lease_credential` (spec §7.1); because revoke has
+    no granted-vs-requested TTL concept, it maps failures into the
+    original 4 hvac/transport taxonomy classes
+    (``VaultUnavailable`` / ``VaultPathNotFound`` / ``VaultAuthDenied`` /
+    ``VaultProtocolError``) — the 5th class
+    :class:`VaultLeaseGrantExceedsRequest` (Sprint 10.1 amendment per
+    ADR-004 §25) is raised only by ``lease_credential``'s post-mint
+    enforcement check and has no corresponding code path on the
+    revoke surface. The ``except Exception`` catch-all ensures every
+    revoke-side failure surface stays inside the closed taxonomy.
     :class:`asyncio.CancelledError` inherits ``BaseException`` so it
     correctly passes through uncaught on cooperative cancellation.
     """
@@ -394,9 +537,11 @@ async def revoke_credential(
     except (hvac.exceptions.Forbidden, hvac.exceptions.Unauthorized) as exc:
         raise VaultAuthDenied(f"Vault auth denied on revoke of {lease_id!r}: {exc}") from exc
     except Exception as exc:
-        # Spec §7.1 "anything else" row — closed-taxonomy guarantee
-        # mirrors lease_credential's catch-all so revoke can never
-        # surface an exception class outside the 4-value set.
+        # Spec §7.1 "anything else" row — closed-taxonomy guarantee for
+        # revoke-side hvac/transport errors; mirrors lease_credential's
+        # catch-all on the hvac/transport-error subset so revoke can
+        # never surface an exception class outside the closed
+        # core/vault taxonomy.
         raise VaultProtocolError(
             f"Vault returned an unexpected error on revoke of "
             f"{lease_id!r}: {type(exc).__name__}: {exc}"
@@ -407,6 +552,7 @@ __all__ = [
     "CredentialLease",
     "VaultAuthDenied",
     "VaultLeaseActorRef",
+    "VaultLeaseGrantExceedsRequest",  # NEW per Sprint 10.1 amendment
     "VaultLeaseRequest",
     "VaultPathNotFound",
     "VaultProtocolError",

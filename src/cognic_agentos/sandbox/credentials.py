@@ -32,19 +32,29 @@ module ships the corrected behaviour:
   surfacing the malformed response rather than silently masking it
   as a not-found absence.
 
-USER-LOCKED CORRECTION #2 (Round-0 review): ``mint_lease`` /
-``revoke_lease`` PRESERVE the T4 4-value exception taxonomy
+USER-LOCKED CORRECTION #2 (Round-0 review + Sprint-10.1 amendment per
+ADR-004 §25): ``mint_lease`` / ``revoke_lease`` PRESERVE the
+``core.vault`` exception taxonomy unchanged — ``mint_lease`` can
+surface the full 5-value taxonomy post-Sprint-10.1
 (:class:`VaultUnavailable` / :class:`VaultPathNotFound` /
-:class:`VaultAuthDenied` / :class:`VaultProtocolError`). The
-sandbox-closed-enum collapse to
-``sandbox_credential_mint_failed_*`` belongs at the
-create / admission boundary that raises
-:class:`SandboxLifecycleRefused` (Sprint 10 T7+), NOT inside this
-thin adapter. The runtime code (i.e. non-docstring source — imports,
+:class:`VaultAuthDenied` / :class:`VaultProtocolError` /
+:class:`VaultLeaseGrantExceedsRequest` — the 5th is raised by
+:func:`cognic_agentos.core.vault.lease_credential` when the post-mint
+TTL gate fires, with best-effort ``transport.revoke`` before the
+raise); ``revoke_lease`` remains scoped to the hvac/transport-error
+4-value subset (:class:`VaultUnavailable` /
+:class:`VaultPathNotFound` / :class:`VaultAuthDenied` /
+:class:`VaultProtocolError`) because revoke has no granted-vs-requested
+concept. The sandbox-closed-enum collapse to ``sandbox_credential_*``
+belongs at the create / admission boundary that raises
+:class:`SandboxLifecycleRefused` (Sprint 10 T7+ + the Sprint-10.1
+backend except-tuple extension 4 → 5 to also catch
+:class:`VaultLeaseGrantExceedsRequest`), NOT inside this thin
+adapter. The runtime code (i.e. non-docstring source — imports,
 raises, and string literals at code positions) intentionally contains
 ZERO references to ``SandboxRefusalReason`` / ``SandboxLifecycleRefused``
-/ ``sandbox_credential_mint_failed_`` — pinned by the AST-walk
-regression at
+/ ``sandbox_credential_mint_failed_`` / ``sandbox_credential_lease_ttl_grant_exceeds_request``
+— pinned by the AST-walk regression at
 ``tests/unit/sandbox/test_credentials.py::TestNoClosedEnumMappingCreepInT6``,
 which deliberately exempts docstring positions so this intent-
 documentation prose (which necessarily names the closed-enum types)

@@ -382,10 +382,27 @@ def session_factory(
 
 
 class TestCrossBackendMintFailureMapping:
-    """spec §7.1 — every backend MUST collapse the 4-value core.vault
-    exception taxonomy onto the same 3-value
+    """spec §7.1 — every backend MUST collapse the hvac-mapped subset
+    of the 5-value core.vault exception taxonomy (4 hvac-mapped values:
+    ``VaultUnavailable`` / ``VaultPathNotFound`` / ``VaultAuthDenied``
+    / ``VaultProtocolError``) onto the 3-value
     ``sandbox_credential_mint_failed_*`` closed-enum vocabulary.
-    Drift between backends is wire-protocol-public regression."""
+    Drift between backends is wire-protocol-public regression.
+
+    Sprint-10.1 amendment per ADR-004 §25 — the 5th value
+    ``VaultLeaseGrantExceedsRequest`` (post-mint granted-vs-requested
+    TTL refusal) maps to its OWN closed-enum value
+    ``sandbox_credential_lease_ttl_grant_exceeds_request`` (NOT one
+    of the ``mint_failed_*`` set) at the same cross-backend boundary;
+    that mapping is covered by the dedicated Sprint-10.1 backend test
+    classes at
+    ``tests/unit/sandbox/backends/test_docker_sibling_credentials.py::TestGrantExceedsRequestClosedEnumMapping``
+    +
+    ``tests/unit/sandbox/backends/test_kubernetes_pod_credentials.py::TestKubernetesGrantExceedsRequestClosedEnumMapping``
+    rather than as a 5th parametrize row here, because the new
+    exception's source (post-mint enforcement) is conceptually
+    distinct from the hvac-mapped mint-failure path this class
+    covers."""
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(

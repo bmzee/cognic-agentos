@@ -26,12 +26,22 @@ Critical-controls module under test per AGENTS.md: ``sandbox/admission.py``
 
 T7 SCOPE LOCK (Round-0 review, plan §"Scope locks"): T7 MUST NOT touch
 ``core.vault.lease_credential`` / ``core.vault.revoke_credential`` and
-MUST NOT collapse any of the 4-value T4 taxonomy
+MUST NOT collapse any of the 4 T4 hvac-mapped taxonomy values
 (``VaultUnavailable`` / ``VaultPathNotFound`` / ``VaultAuthDenied`` /
-``VaultProtocolError``) into ``SandboxLifecycleRefused``. The
-mint-exception collapse to ``sandbox_credential_mint_failed_*`` is
-**T10**'s job (the backend ``create()`` + ``destroy()`` seam where
-``mint_lease`` is actually called); T7 is admission-time only and
+``VaultProtocolError``) into ``SandboxLifecycleRefused``. The 5th
+``core.vault`` taxonomy value ``VaultLeaseGrantExceedsRequest``
+(Sprint-10.1 amendment per ADR-004 §25) is a post-mint kernel-side
+raise from ``core.vault.lease_credential`` and is therefore ALSO
+out of T7 scope — T7 stays admission-time only, NEVER reaches the
+mint-time path that could raise the 5th value, and never collapses
+any taxonomy value into ``SandboxLifecycleRefused``. The
+mint-exception collapse to ``sandbox_credential_*`` (3
+``mint_failed_*`` values for the hvac-mapped subset + 1
+``lease_ttl_grant_exceeds_request`` for the Sprint-10.1 5th value)
+is **T10**'s job (the backend ``create()`` + ``destroy()`` seam where
+``mint_lease`` is actually called), plus the Sprint-10.1 amendment
+that extended the T10 except-tuple 4 → 5 to also catch
+``VaultLeaseGrantExceedsRequest``; T7 is admission-time only and
 never reaches the mint pathway.
 """
 

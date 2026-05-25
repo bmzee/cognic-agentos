@@ -124,21 +124,32 @@ class CredentialAdapter(Protocol):
         exceptions (NOT silent None) so the caller can audit."""
 
     # Sprint 10 T5 — dual lease API per ADR-004 §102 Q4 LOCK + spec §3.3.
-    # Implementations delegate to ``core.vault.lease_credential`` /
+    # Sprint 10.1 amendment per ADR-004 §25: the ``core/vault`` exception
+    # taxonomy grew 4 → 5 values (added ``VaultLeaseGrantExceedsRequest``
+    # for the post-mint granted-vs-requested TTL refusal). Implementations
+    # delegate to ``core.vault.lease_credential`` /
     # ``core.vault.revoke_credential`` (or compose with operator-policy
-    # hooks). Exception taxonomy is the 4-value ``VaultUnavailable`` /
-    # ``VaultPathNotFound`` / ``VaultAuthDenied`` / ``VaultProtocolError``
-    # set declared in ``core/vault.py``; T6's ``VaultCredentialAdapter``
-    # PRESERVES this taxonomy unchanged (user-locked T6 correction #2 +
-    # patched plan §"Scope locks") — the collapse to
-    # ``sandbox_credential_mint_failed_*`` closed-enum values belongs at
-    # T10's backend create() / destroy() seam where ``mint_lease`` is
+    # hooks). ``mint_lease`` can surface the full 5-value taxonomy
+    # (``VaultUnavailable`` / ``VaultPathNotFound`` / ``VaultAuthDenied``
+    # / ``VaultProtocolError`` / ``VaultLeaseGrantExceedsRequest``);
+    # ``revoke_lease`` remains scoped to the hvac/transport-error 4-value
+    # subset because revoke has no granted-vs-requested concept. T6's
+    # ``VaultCredentialAdapter`` PRESERVES this taxonomy unchanged
+    # (user-locked T6 correction #2 + patched plan §"Scope locks") —
+    # the collapse to ``sandbox_credential_*`` closed-enum values belongs
+    # at T10's backend create() / destroy() seam where ``mint_lease`` is
     # actually called, NOT at this Protocol's implementations.
     async def mint_lease(self, request: VaultLeaseRequest) -> CredentialLease:
         """Mint a dynamic credential lease for the given request.
         Returns a ``CredentialLease`` with the granted token + TTL.
-        Raises one of the 4 ``core.vault`` taxonomy exceptions on
-        failure."""
+        Raises one of the 5-value ``core.vault`` taxonomy exceptions on
+        failure (``VaultUnavailable`` / ``VaultPathNotFound`` /
+        ``VaultAuthDenied`` / ``VaultProtocolError`` /
+        ``VaultLeaseGrantExceedsRequest`` — the 5th is post-Sprint-10.1
+        per ADR-004 §25 amendment, raised by
+        ``core/vault.lease_credential`` when the server-granted
+        ``ttl_s_granted > request.ttl_s``, with best-effort
+        ``transport.revoke`` before the raise)."""
 
     async def revoke_lease(self, lease_id: str) -> None:
         """Revoke a previously-minted lease by Vault lease ID.

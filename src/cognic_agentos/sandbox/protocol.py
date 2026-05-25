@@ -40,7 +40,7 @@ from typing import TYPE_CHECKING, Literal, NewType, Protocol, runtime_checkable
 # Closed-enum vocabularies — wire-protocol-public per spec §4
 # ---------------------------------------------------------------------------
 
-#: 26-value closed-enum for sandbox lifecycle refusals (Sprint 8A spec
+#: 27-value closed-enum for sandbox lifecycle refusals (Sprint 8A spec
 #: §4.1 + Sprint 8.5 spec §3.3 extension + Sprint 10 spec §4.1 T7 +
 #: Sprint 10 spec §6.1 T9). Covers:
 #:
@@ -67,7 +67,12 @@ from typing import TYPE_CHECKING, Literal, NewType, Protocol, runtime_checkable
 #:   on secret_path) / ``sandbox_credential_mint_failed_auth_denied``
 #:   (Vault 403 on secret_path / auth method denied). T9 lifts the
 #:   Literal entries only; T10 wires the create-time mapping from the
-#:   ``core/vault`` 4-value exception taxonomy.
+#:   then-4-value ``core/vault`` exception taxonomy (the 5th value
+#:   ``VaultLeaseGrantExceedsRequest`` extended the taxonomy at
+#:   Sprint 10.1 per ADR-004 §25 amendment; its sandbox-boundary
+#:   mapping target is the SEPARATE
+#:   ``sandbox_credential_lease_ttl_grant_exceeds_request`` value
+#:   bulleted below, NOT one of the ``mint_failed_*`` set).
 #: * 1 Rego TTL-cap refusal (Sprint 10 T9 Literal ONLY; **NO Stage-2
 #:   raise site at T9 or T10**) — ``sandbox_credential_ttl_exceeds_tenant_max``.
 #:   The ``policies/_default/sandbox.rego`` rule 6 fires + denies, but
@@ -83,6 +88,29 @@ from typing import TYPE_CHECKING, Literal, NewType, Protocol, runtime_checkable
 #:   dispatch wiring). T9's bare Literal lift gives that future task a
 #:   stable closed-enum target without imposing wire-protocol-public
 #:   engine work in Sprint 10.
+#: * 1 post-mint granted-vs-requested TTL refusal (Sprint 10.1 — finding
+#:   #2 amendment per ADR-004 §25) — ``sandbox_credential_lease_ttl_grant_exceeds_request``.
+#:   Mapped from the new ``core/vault.VaultLeaseGrantExceedsRequest``
+#:   exception (5th value in the ``core/vault`` closed taxonomy;
+#:   carries ``lease_id`` + ``revoke_outcome ∈ {"revoked",
+#:   "revoke_failed"}`` attrs + includes the ``lease_id`` token in the
+#:   formatted message string so the backend
+#:   ``SandboxLifecycleRefused.detail=str(exc)`` preserves the
+#:   dangling-lease correlator per Finding 3 of plan-review round 2)
+#:   at the sandbox boundary via
+#:   ``_shared_credentials._mint_exception_to_refusal_reason``. Wired
+#:   at the backend ``create()`` Stage-2 except-tuple via the same
+#:   shape as the existing ``sandbox_credential_mint_failed_*``
+#:   triggers; both backends' (``docker_sibling.py`` +
+#:   ``kubernetes_pod.py``) post-mint cleanup except-tuples extended
+#:   4 → 5 in the SAME commit as the Literal extension per Finding B
+#:   of plan-review round 1 (no intermediate state where the new
+#:   exception escapes uncaught at the backend boundary). Complements
+#:   the Rego rule-6 pre-mint cap (``sandbox_credential_ttl_exceeds_tenant_max``)
+#:   — together they prevent over-cap leases regardless of whether
+#:   the caller asked too high (caught by Rego) or the Vault role
+#:   default_ttl is too loose (caught here) per the
+#:   ``[[feedback_recompute_derived_facts_not_just_wrapper]]`` doctrine.
 #:
 #: Drift between this Literal and consumer error-handling is caught at
 #: module load by the partition-invariant test at
@@ -152,6 +180,19 @@ SandboxRefusalReason = Literal[
     # Literal lift gives that future task a stable closed-enum target
     # without imposing wire-protocol-public engine work in Sprint 10.
     "sandbox_credential_ttl_exceeds_tenant_max",
+    # Sprint 10.1 — finding #2 from post-merge review of PR #38.
+    # Post-mint granted-vs-requested TTL enforcement at `core/vault.py`.
+    # Complements `sandbox_credential_ttl_exceeds_tenant_max` (the Rego
+    # rule-6 pre-mint cap, Literal-only at Sprint 10 T9). The new
+    # post-mint enforcement RAISES; the closed-enum value surfaces via
+    # `_shared_credentials._mint_exception_to_refusal_reason` at the
+    # backend `create()` Stage-2 except-tuple, same shape as the existing
+    # `sandbox_credential_mint_failed_*` triggers per Sprint-10 spec
+    # §7.1 amendment. Backend except-tuples extended in the SAME commit
+    # to catch `VaultLeaseGrantExceedsRequest` per Finding B of the
+    # 2026-05-24 plan-review round 1 (no intermediate state where the
+    # new exception escapes backends uncaught).
+    "sandbox_credential_lease_ttl_grant_exceeds_request",
 ]
 
 #: 6-value closed-enum for runtime policy violations during ``exec``

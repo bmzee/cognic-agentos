@@ -299,16 +299,29 @@ class VaultTransport:
 
         ``ttl_s`` is preserved on the method signature for caller
         wire-protocol stability + for the ``CredentialLease.request.ttl_s``
-        audit-evidence projection, but is **informational at Wave 1** —
-        Vault's role-side ``default_ttl`` / ``max_ttl`` are authoritative,
-        and :attr:`CredentialLease.ttl_s_granted` reflects whatever
-        Vault returns in the response's ``lease_duration`` field.
-        Future Wave-2 engine-specific TTL enforcement (e.g. client-side
-        cap when ``ttl_s_granted > ttl_s`` requested) lands as a
-        separate amendment.
+        audit-evidence projection. Pre-Sprint-10.1 this comment said
+        "informational at Wave 1"; Sprint 10.1 upgrades the contract
+        per ADR-004 §25 amendment — :func:`cognic_agentos.core.vault.lease_credential`
+        now enforces ``ttl_s_granted <= request.ttl_s`` post-mint via
+        the new :class:`cognic_agentos.core.vault.VaultLeaseGrantExceedsRequest`
+        exception (with best-effort ``transport.revoke(lease_id)``
+        before raise), complementing the Rego rule-6 pre-mint cap.
+        ``ttl_s`` is still NOT passed to Vault on the wire (per Z2
+        Gap Q, the dominant dynamic-secret endpoints are GET-only);
+        Vault's role-side ``default_ttl`` / ``max_ttl`` remain
+        authoritative for what the wire actually returns, but the
+        kernel-side enforcement gate now refuses the lease (and
+        revokes it) if the wire-returned value exceeds the request.
         """
-        # ``ttl_s`` reserved per the spec §3.5 Wave-1 informational
-        # semantic; current implementation does not pass it to Vault.
+        # ``ttl_s`` is NOT passed to Vault on the wire at this
+        # transport layer — the dominant dynamic-secret endpoints are
+        # GET-only per Z2 Gap Q. Sprint 10.1 amendment to ADR-004 §25:
+        # the kernel-side ``core/vault.lease_credential`` now enforces
+        # ``ttl_s_granted <= request.ttl_s`` post-mint via the new
+        # :class:`VaultLeaseGrantExceedsRequest` exception (with
+        # best-effort revoke before raise) so the transport's
+        # caller-pinned ``ttl_s`` IS a load-bearing audit + enforcement
+        # value even though it never reaches the Vault wire.
         # Explicit ``del`` matches the same reservation pattern used at
         # ``core/vault.lease_credential``'s ``settings`` arg.
         del ttl_s

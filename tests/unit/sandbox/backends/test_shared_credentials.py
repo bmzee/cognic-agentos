@@ -203,6 +203,7 @@ class TestSharedCredentialsBlockedImportProbe:
 
 from cognic_agentos.core.vault import (  # noqa: E402 — after blocked-import probe
     VaultAuthDenied,
+    VaultLeaseGrantExceedsRequest,
     VaultPathNotFound,
     VaultProtocolError,
     VaultUnavailable,
@@ -235,9 +236,54 @@ class TestMintExceptionToRefusalReasonMapping:
                 # last row.
                 "sandbox_credential_mint_failed_vault_unavailable",
             ),
+            (
+                # Sprint 10.1 — 5th arm per ADR-004 §25 amendment.
+                # Post-mint granted-vs-requested TTL refusal raised
+                # by core/vault.lease_credential when
+                # ttl_s_granted > request.ttl_s. Maps to its OWN
+                # closed-enum value (NOT one of the
+                # sandbox_credential_mint_failed_* values) because
+                # it is conceptually a post-mint refusal, not a
+                # mint failure.
+                lambda: VaultLeaseGrantExceedsRequest(
+                    "grant=3600 > request=900",
+                    lease_id="database/creds/test-role/lease-z",
+                    revoke_outcome="revoked",
+                ),
+                "sandbox_credential_lease_ttl_grant_exceeds_request",
+            ),
         ],
     )
     def test_each_vault_exception_maps_to_expected_closed_enum(
         self, exc_factory: object, expected_reason: str
     ) -> None:
         assert _mint_exception_to_refusal_reason(exc_factory()) == expected_reason  # type: ignore[operator]
+
+
+class TestSharedCredentialsParameterTypeUnion:
+    """Sprint 10.1 — pin that the parameter type union of
+    ``_mint_exception_to_refusal_reason`` is extended from 4-value to
+    5-value to accept :class:`VaultLeaseGrantExceedsRequest`.
+
+    Closes Finding C of the 2026-05-24 plan-review round 1:
+    ``_shared_credentials.py:43`` has ``from __future__ import
+    annotations`` so the raw ``inspect.signature(...).annotation`` is a
+    string under PEP 563. ``typing.get_type_hints()`` resolves the
+    string back to the real Union type; only then does ``get_args()``
+    return the actual member tuple.
+    """
+
+    def test_parameter_type_union_includes_grant_exceeds_request(self) -> None:
+        import typing
+
+        hints = typing.get_type_hints(_mint_exception_to_refusal_reason)
+        union_members = typing.get_args(hints["exc"])
+        assert VaultLeaseGrantExceedsRequest in union_members, (
+            f"_mint_exception_to_refusal_reason parameter union missing "
+            f"VaultLeaseGrantExceedsRequest; got members: {union_members}"
+        )
+        assert len(union_members) == 5, (
+            f"_mint_exception_to_refusal_reason parameter union must "
+            f"have 5 members (was 4 pre-Sprint-10.1); got "
+            f"{len(union_members)}: {union_members}"
+        )

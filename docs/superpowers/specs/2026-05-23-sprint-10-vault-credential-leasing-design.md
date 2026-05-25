@@ -293,7 +293,7 @@ Sprint 10 surfaces the token as `dict[str, str]` passthrough — we don't try to
 | **Read-style (GET `/v1/<path>`)** — dominant pattern | `database/creds/<role>`, `aws/creds/<role>`, `gcp/key/<role>` | `client.read(path)` |
 | Write-style (POST `/v1/<path>` with body) — outlier | `pki/issue/<role>` (needs CN / SAN / TTL body params) | `client.write(path, common_name=..., ttl="900s")` |
 
-Sprint 10 Wave-1 targets the **read-style default** because it covers 3 of the 4 listed engines + matches the Vault documented dynamic-credential pattern. `transport.lease(path, ttl_s)` issues `client.read(path)`; the client-side `ttl_s` is **informational at Wave 1** (Vault's role-side `default_ttl` / `max_ttl` are authoritative, and `CredentialLease.ttl_s_granted` pulls from the response's `lease_duration` field). PKI write-style is **future engine-specific support** — would land as a separate transport method or an engine-kind hint, NOT a runtime fallback on 405. The original Wave-1 implementation attempted POST-with-ttl for the unified shape; Z2's live proof at 2026-05-24 surfaced a 405 against `database/creds/<role>` and drove this amendment (see Round-9 Gap Q in the plan patch-log).
+Sprint 10 Wave-1 targets the **read-style default** because it covers 3 of the 4 listed engines + matches the Vault documented dynamic-credential pattern. `transport.lease(path, ttl_s)` issues `client.read(path)`; the client-side `ttl_s` is **NOT passed to Vault on the wire** (Vault's role-side `default_ttl` / `max_ttl` are authoritative for what the wire returns, and `CredentialLease.ttl_s_granted` pulls from the response's `lease_duration` field). **Sprint 10.1 amendment (2026-05-25, per ADR-004 §25 amendment):** the pre-Sprint-10.1 description of `ttl_s` as "informational at Wave 1" is upgraded — `ttl_s` is now ENFORCED post-mint by `core/vault.lease_credential`: when `ttl_s_granted > request.ttl_s`, `lease_credential` best-effort-revokes the just-minted Vault lease then raises `VaultLeaseGrantExceedsRequest` (5th value in the `core/vault` closed taxonomy; mapped at the sandbox boundary to `sandbox_credential_lease_ttl_grant_exceeds_request`). PKI write-style is **future engine-specific support** — would land as a separate transport method or an engine-kind hint, NOT a runtime fallback on 405. The original Wave-1 implementation attempted POST-with-ttl for the unified shape; Z2's live proof at 2026-05-24 surfaced a 405 against `database/creds/<role>` and drove the Gap Q amendment (see Round-9 Gap Q in the plan patch-log).
 
 ### 3.5 `VaultTransport` — shared transport
 
@@ -335,7 +335,9 @@ class VaultTransport:
 
 Concrete implementation wraps a shared `hvac.Client` (matches existing Sprint 1C pattern at `db/adapters/vault_adapter.py`); each method invokes the sync hvac call via `asyncio.to_thread` to keep the event loop cooperative. **Wave-1 static-token authentication only** — `Settings.vault_addr` + `Settings.vault_token` + `Settings.vault_namespace` are operator-pre-provided; no AppRole or Kubernetes ServiceAccount auth flows (those would need additional Settings + transport-level auth-state management; deferred per §10). Bounded exponential backoff on transient hvac exceptions (mirrors `protocol/mcp_authz.py` retry pattern); per-request timeout from `Settings.vault_http_timeout_s` (NEW; see §8.2).
 
-**`lease()` implementation shape (Z2 Gap Q amendment, 2026-05-24).** `lease(path, ttl_s)` delegates to `client.read(path)` (GET `/v1/<path>`), NOT `client.write(path, ttl=...)`. Vault's dominant dynamic-secret backends (database / aws / gcp; see §3.4 HTTP-verb table) are GET endpoints; POST-with-ttl returns HTTP 405 against them. The `ttl_s` argument is captured on the resulting `CredentialLease.request.ttl_s` for examiner audit but is **informational at Wave 1** — Vault's role-side `default_ttl` / `max_ttl` are authoritative, and `CredentialLease.ttl_s_granted` reflects whatever Vault returns in `lease_duration`. Future Wave-2 engine-specific TTL enforcement (e.g. client-side cap if `ttl_s_granted > ttl_s` requested) lands as a separate amendment; the Wave-1 contract is "Vault is authoritative for TTL bounds". PKI write-style support is also future engine-specific work — a separate transport method (e.g. `lease_with_body(path, body)`) avoids overloading `lease()` with engine-detection heuristics.
+**`lease()` implementation shape (Z2 Gap Q amendment, 2026-05-24).** `lease(path, ttl_s)` delegates to `client.read(path)` (GET `/v1/<path>`), NOT `client.write(path, ttl=...)`. Vault's dominant dynamic-secret backends (database / aws / gcp; see §3.4 HTTP-verb table) are GET endpoints; POST-with-ttl returns HTTP 405 against them. The `ttl_s` argument is captured on the resulting `CredentialLease.request.ttl_s` for examiner audit but is NOT passed to Vault on the wire — Vault's role-side `default_ttl` / `max_ttl` are authoritative for what the wire returns, and `CredentialLease.ttl_s_granted` reflects whatever Vault returns in `lease_duration`. PKI write-style support is future engine-specific work — a separate transport method (e.g. `lease_with_body(path, body)`) avoids overloading `lease()` with engine-detection heuristics.
+
+**Sprint 10.1 amendment (2026-05-25, per ADR-004 §25 amendment).** The pre-Sprint-10.1 wording "informational at Wave 1" is **upgraded to "enforced client-side post-mint + best-effort revoke on refusal":** `core/vault.lease_credential` now compares `ttl_s_granted` against `request.ttl_s` after parsing the Vault response and refuses with the new wire-protocol-public exception class `VaultLeaseGrantExceedsRequest` when `ttl_s_granted > request.ttl_s`. Before raising, the kernel attempts `transport.revoke(lease_id)` so the dynamic Vault credential does not leak into the role's `default_ttl` / `max_ttl` window; revoke failure does NOT mask the TTL refusal (the exception still raises, with `revoke_outcome="revoke_failed"` + the revoke exception chained via `__cause__`). The `ttl_s` arg is still NOT passed to Vault on the wire (the GET-only constraint above is unchanged); Vault's role-side `default_ttl` / `max_ttl` remain authoritative for what the wire returns, but the kernel now rejects the lease (and best-effort-revokes it) if the wire-returned value exceeds the request. Closes finding #2 of the 2026-05-24 post-merge review of PR #38.
 
 ### 3.6 `SandboxSession.active_leases` extension (T10 pre-flight amendment)
 
@@ -662,7 +664,7 @@ Per AGENTS.md L48 + L150, `policies/_default/sandbox.rego` is a stop-rule. The n
 
 ## 6. Audit & closed-enum extensions
 
-### 6.1 `SandboxRefusalReason` — 21 → 26 (+5)
+### 6.1 `SandboxRefusalReason` — 21 → 26 → 27 (+5 at Sprint 10; +1 at Sprint 10.1)
 
 **Five new closed-enum refusal values land at Sprint 10:**
 
@@ -678,7 +680,15 @@ Per AGENTS.md L48 + L150, `policies/_default/sandbox.rego` is a stop-rule. The n
 | | `sandbox_credential_ttl_exceeds_tenant_max` — Rego rule 6 admission-time refusal (§5.1). **Literal value reserved on `SandboxRefusalReason` at T9; no T9/T10 Stage-2 raise site** — the cap continues to surface at runtime as `sandbox_policy_rego_denied` until Rego-reason surfacing through `OPAEngine.Decision` lands (deferred to a future task per §7.3 amendment) |
 | | `sandbox_credential_request_tenant_mismatch` — kernel-boundary validation: `VaultLeaseRequest.tenant_id != Actor.tenant_id` (§4.1; owned by `sandbox/admission.py` since the projected `VaultLeaseActorRef` doesn't carry full Actor) |
 
-**Total: 21 → 26** (+5).
+**Total Sprint 10: 21 → 26** (+5).
+
+**Sprint 10.1 amendment (2026-05-25, per ADR-004 §25 amendment).** One additional closed-enum value lands for the post-mint granted-vs-requested TTL refusal:
+
+| Existing (26) | Sprint 10.1 addition |
+|---|---|
+| Sprint 8A + 8.5 + 10 (26 values; unchanged) | `sandbox_credential_lease_ttl_grant_exceeds_request` — post-mint refusal raised by `core/vault.lease_credential` when `ttl_s_granted > request.ttl_s` per ADR-004 §25 amendment. Mapped from the new `VaultLeaseGrantExceedsRequest` exception (5th value in the `core/vault` closed taxonomy) at the sandbox boundary via `_shared_credentials._mint_exception_to_refusal_reason`. Wired at the backend `create()` Stage-2 except-tuple in both Docker + K8s in the SAME commit as the Literal extension per Finding B of plan-review round 1 (no intermediate state where the new exception escapes uncaught). Complements `sandbox_credential_ttl_exceeds_tenant_max` (Rego rule-6 pre-mint cap) — together they prevent over-cap leases regardless of whether the misconfiguration lives in the caller (requested too high; caught by Rego) or in Vault (role default_ttl/max_ttl exceeds the cap; caught here) per the `[[feedback_recompute_derived_facts_not_just_wrapper]]` doctrine. |
+
+**Total Sprint 10.1: 26 → 27** (+1).
 
 ### 6.2 `SandboxLifecycleEvent` — 12 → 15 (+3)
 
@@ -724,6 +734,7 @@ Three failure modes, each mapped to a distinct closed-enum refusal:
 | 404 on secret_path | `VaultPathNotFound` | `sandbox_credential_mint_failed_secret_path_unknown` |
 | 403 on secret_path (auth method denied) | `VaultAuthDenied` | `sandbox_credential_mint_failed_auth_denied` |
 | Anything else (malformed response, unexpected 2xx without lease_id, etc.) | `VaultProtocolError` | `sandbox_credential_mint_failed_vault_unavailable` (collapse for closed-enum stability; `detail` field carries specifics) |
+| `lease_duration > request.ttl_s` (post-mint) — Sprint 10.1 amendment per ADR-004 §25 | `VaultLeaseGrantExceedsRequest` (NEW; 5th value in `core/vault` taxonomy; carries `lease_id` + `revoke_outcome ∈ {"revoked", "revoke_failed"}` attributes; best-effort `transport.revoke(lease_id)` runs BEFORE the raise; formatted message includes `lease_id={lease_id!r}` token so `SandboxLifecycleRefused.detail=str(exc)` carries the correlator through to the chain payload per Finding 3 of plan-review round 2) | `sandbox_credential_lease_ttl_grant_exceeds_request` (NEW; 27th value) — complements the Rego rule-6 pre-mint cap (`sandbox_credential_ttl_exceeds_tenant_max`); together they prevent over-cap leases regardless of whether the caller asked too high (caught by Rego) or the Vault role default_ttl is too loose (caught here) |
 
 **On any mint failure mid-batch:** revoke leases already minted in the same `create()` attempt (best-effort); refuse the sandbox creation with the first-encountered refusal reason. No partial sandboxes.
 
@@ -854,6 +865,8 @@ Explicitly deferred to future sprints or out-of-band tooling:
 - **Vault auth methods beyond static token.** Sprint-1C and Sprint 10 both consume the operator-pre-minted `Settings.vault_token` only — there are no AppRole / Kubernetes ServiceAccount / JWT-OIDC auth settings in `core/config.py` today. Adding those flows needs (a) new `Settings.vault_approle_role_id` / `vault_approle_secret_id` / `vault_k8s_role` / `vault_k8s_jwt_path` settings, (b) transport-level periodic-refresh logic (the dynamic-auth flows return a renewable token; static doesn't), (c) consideration of credential storage / rotation. Future work after Sprint 10 ships static-token Wave 1.
 - **Scheduler-time admission.** ADR-022 Sprint 10.5 wraps `sandbox.create()` in `SchedulerEngine.submit()`; the `requires_credentials` shape Sprint 10 ships flows through unchanged. No Sprint-10 scheduler hooks.
 - **Cognic Forge (model-leasing).** ADR-013 §"Wave 2" sets Forge as a separate repo; this sprint does NOT extend `core/vault.py` to model-artifact leasing.
+
+**Sprint 10.1 amendment (2026-05-25, per ADR-004 §25 amendment).** The Z2 module-load preamble's fail-loud contract is now ALSO enforced at module-load time: when `COGNIC_RUN_VAULT_INTEGRATION=1` is set, missing `hvac` / `aiodocker` extras raise `ImportError` at module load (pytest reports a collection error → fail-loud per the "opt-in means prove it or fail" contract). When the env var is unset, the silent-skip path via `pytest.importorskip` is preserved for casual local-only `uv run pytest` invocations. Pinned by `tests/unit/test_z2_import_fail_loud_contract.py` (subprocess shim that simulates missing extras + asserts `ImportError` in opted-in mode + asserts `pytest.skip.Exception` in not-opted-in mode). Closes finding #3 of the 2026-05-24 post-merge review of PR #38.
 
 ---
 

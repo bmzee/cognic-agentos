@@ -104,6 +104,7 @@ from cognic_agentos.core.canonical import canonical_bytes
 from cognic_agentos.core.vault import (
     CredentialLease,
     VaultAuthDenied,
+    VaultLeaseGrantExceedsRequest,  # Sprint 10.1 — Finding B of plan-review round 1
     VaultLeaseRequest,
     VaultPathNotFound,
     VaultProtocolError,
@@ -1050,7 +1051,14 @@ class KubernetesPodSandboxBackend:
             VaultPathNotFound,
             VaultAuthDenied,
             VaultProtocolError,
+            VaultLeaseGrantExceedsRequest,  # Sprint 10.1 — Finding B of plan-review round 1
         ) as exc:
+            # Sprint 10.1: tuple extended 4 → 5 to also catch the new
+            # `VaultLeaseGrantExceedsRequest` (post-mint granted-vs-
+            # requested TTL refusal per ADR-004 §25 amendment); shared
+            # mapping helper at `_shared_credentials.py` was extended
+            # in the SAME commit per Finding B so the new exception
+            # cannot escape uncaught at the K8s backend boundary.
             await self._cleanup_post_admission_failure(
                 minted_leases=minted_leases,
                 pod_name=pod_name,
