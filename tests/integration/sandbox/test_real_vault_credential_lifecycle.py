@@ -108,10 +108,23 @@ In a separate terminal, with vault binary on PATH::
         db_name=test-db \\
         creation_statements="CREATE ROLE \\"{{n}}\\" WITH LOGIN PASSWORD \
 '{{p}}' VALID UNTIL '{{e}}';" \\
-        default_ttl="1h" \\
+        default_ttl="600" \\
         max_ttl="24h"
     # (substitute {{name}} / {{password}} / {{expiration}} for
     # {{n}} / {{p}} / {{e}} above for the same line-limit reason.)
+
+**Sprint 10.1 amendment (per ADR-004 §25)**: default_ttl was previously
+documented as "1h" (3600s) but Z2 cells now use request.ttl_s=900 (the
+``_make_lease_request`` default), which the new Sprint-10.1
+granted-vs-requested TTL enforcement at
+``core/vault.lease_credential`` would refuse (3600 > 900). Operators
+who previously ran the bootstrap with ``default_ttl="1h"`` MUST rerun
+the role write with ``default_ttl="600"`` as shown above. The new
+``default_ttl=600`` supports BOTH the positive-path cell
+(``request.ttl_s=900`` > ``grant=600`` → allow) AND the negative-path
+cells (``request.ttl_s=300`` < ``grant=600`` → refuse with
+:class:`VaultLeaseGrantExceedsRequest` + best-effort revoke), proving
+the cap fires against real Vault end-to-end.
 
 Then run::
 
@@ -137,37 +150,66 @@ from urllib.request import Request, urlopen
 
 import pytest
 
-pytest.importorskip("hvac")
-pytest.importorskip("aiodocker")
+_VAULT_OPTED_IN = os.environ.get("COGNIC_RUN_VAULT_INTEGRATION") == "1"
 
-from cognic_agentos.core._vault_transport import VaultTransport
-from cognic_agentos.core.vault import (
+if _VAULT_OPTED_IN:
+    # Sprint 10.1 finding #3 fix (per ADR-004 §25 amendment + spec §10
+    # amendment): opt-in means "extras must be installed". Plain
+    # ``import`` raises ``ImportError`` at module load → pytest reports
+    # collection error → operator sees "missing extra" instead of
+    # "silently skipped". Matches the spec §10 "opt-in means prove it
+    # or fail" contract. Pinned by
+    # ``tests/unit/test_z2_import_fail_loud_contract.py``.
+    import aiodocker  # noqa: F401
+    import hvac  # noqa: F401
+else:
+    # Default casual-run path: missing extras → skip with the
+    # standard pytest message. The pytestmark below also skips the
+    # whole module unless opted in, so this importorskip is
+    # belt-and-suspenders for the rare case where someone runs this
+    # file directly with the env var unset.
+    pytest.importorskip("hvac")
+    pytest.importorskip("aiodocker")
+
+
+# fail-loud `if _VAULT_OPTED_IN:` per Sprint-10.1 ADR-004 §25 amendment
+# finding #3 fix) is non-import statements, so ruff's E402 carve-out
+# for `pytest.importorskip(...)` no longer applies to subsequent
+# downstream imports. Per-import noqa is the minimal disruption that
+# preserves the conditional-fail-loud pattern.
+from cognic_agentos.core._vault_transport import VaultTransport  # noqa: E402
+from cognic_agentos.core.vault import (  # noqa: E402
     CredentialLease,
     VaultLeaseActorRef,
+    VaultLeaseGrantExceedsRequest,
     VaultLeaseRequest,
     VaultPathNotFound,
     lease_credential,
     revoke_credential,
 )
-from cognic_agentos.portal.rbac.actor import Actor
-from cognic_agentos.sandbox import PackAdmissionContext, SandboxPolicy
-from cognic_agentos.sandbox.backends.docker_sibling import (
+from cognic_agentos.portal.rbac.actor import Actor  # noqa: E402
+from cognic_agentos.sandbox import PackAdmissionContext, SandboxPolicy  # noqa: E402
+from cognic_agentos.sandbox.backends.docker_sibling import (  # noqa: E402
     DockerSiblingSandboxBackend,
     DockerSiblingSession,
 )
-from cognic_agentos.sandbox.credentials import VaultCredentialAdapter
+from cognic_agentos.sandbox.credentials import VaultCredentialAdapter  # noqa: E402
+from cognic_agentos.sandbox.protocol import SandboxLifecycleRefused  # noqa: E402
 
 # Module-level env-gate. Default pytest invocations skip; opting in
-# requires the env var. Skip message names the env var explicitly so
-# operators reading "SKIPPED [N]" output know how to opt in.
+# requires the env var. Reuses ``_VAULT_OPTED_IN`` from the import
+# preamble above so the env-gate evaluates once.
 pytestmark = pytest.mark.skipif(
-    os.environ.get("COGNIC_RUN_VAULT_INTEGRATION") != "1",
+    not _VAULT_OPTED_IN,
     reason=(
         "real-Vault Z2 proof; opt in via COGNIC_RUN_VAULT_INTEGRATION=1 "
         "(requires pre-running Vault server + COGNIC_VAULT_TEST_ADDR + "
         "COGNIC_VAULT_TEST_TOKEN + COGNIC_VAULT_TEST_SECRET_PATH + a "
         "configured dynamic secrets engine at the secret_path — fails "
-        "loud if any of the above is missing)"
+        "loud if any of the above is missing). When opted in, missing "
+        "hvac/aiodocker extras ALSO fail loud at module load per "
+        "Sprint-10.1 ADR-004 §25 amendment finding #3 fix; pinned by "
+        "tests/unit/test_z2_import_fail_loud_contract.py."
     ),
 )
 
@@ -340,6 +382,26 @@ async def test_layer1_lease_credential_returns_real_dynamic_lease(
         f"Vault returned non-positive ttl_s_granted={lease.ttl_s_granted}; "
         f"role may be misconfigured"
     )
+    # Sprint 10.1 finding #2 regression — granted TTL must not exceed
+    # requested TTL. With the bootstrap default_ttl=600 + request.ttl_s=900
+    # (the _make_lease_request default), grant=600 < request=900 so this
+    # assertion passes; before the Sprint-10.1 kernel-side enforcement
+    # at core/vault.lease_credential, a Vault role with default_ttl=1h
+    # (3600s) would have made grant > request but no exception fired.
+    # The negative-path test below
+    # (test_layer1_real_vault_refuses_when_role_default_ttl_exceeds_request)
+    # proves the refusal fires when grant > request.
+    assert lease.ttl_s_granted <= request.ttl_s, (
+        f"Sprint 10.1 finding #2 — Vault granted ttl_s_granted="
+        f"{lease.ttl_s_granted} but the request asked for "
+        f"ttl_s={request.ttl_s}. The kernel-side enforcement at "
+        f"core/vault.lease_credential should have refused with "
+        f"VaultLeaseGrantExceedsRequest BEFORE the lease landed; "
+        f"if this assertion fires, either the enforcement regressed "
+        f"OR the bootstrap role config has default_ttl > 900s and "
+        f"this cell should be running against the negative-path "
+        f"cell instead."
+    )
     assert isinstance(lease.token, dict), (
         f"lease.token must be dict[str, str]; got {type(lease.token).__name__}"
     )
@@ -383,6 +445,61 @@ async def test_layer1_revoke_credential_idempotent_after_real_revoke(
 
     with contextlib.suppress(Exception):
         await revoke_credential(lease.lease_id, transport=transport)
+
+
+@pytest.mark.asyncio
+async def test_layer1_real_vault_refuses_when_role_default_ttl_exceeds_request(
+    real_vault_setup: dict[str, Any],
+) -> None:
+    """Sprint 10.1 finding #2 negative-path proof — when the requested
+    ttl_s is LESS than the Vault role's default_ttl, lease_credential
+    MUST raise :class:`VaultLeaseGrantExceedsRequest`. With the
+    bootstrap default_ttl=600 + request.ttl_s=300, grant=600 > request=300
+    → the kernel-side post-mint enforcement at ``core/vault.lease_credential``
+    fires + best-effort revoke runs before the raise.
+
+    This is the positive proof that the new enforcement WORKS against
+    real Vault — not just against mocked responses in the unit tests
+    at ``tests/unit/core/test_vault.py::TestLeaseCredentialTTLGrantEnforcement``.
+    """
+    transport: VaultTransport = real_vault_setup["transport"]
+    settings = real_vault_setup["settings"]
+    secret_path: str = real_vault_setup["secret_path"]
+
+    # Request 300s; bootstrap role default_ttl=600s → grant > request
+    # → expect VaultLeaseGrantExceedsRequest.
+    request = _make_lease_request(secret_path, ttl_s=300)
+    with pytest.raises(VaultLeaseGrantExceedsRequest) as exc_info:
+        await lease_credential(
+            request,
+            transport=transport,
+            settings=settings,
+        )
+
+    # The exception must carry the lease_id of the credential Vault
+    # issued (which the kernel then best-effort-revoked before raising).
+    assert exc_info.value.lease_id, (
+        "VaultLeaseGrantExceedsRequest.lease_id must carry the "
+        "Vault-issued lease_id so operators can correlate the refusal "
+        "with the (revoked or dangling) Vault lease"
+    )
+    # Best-effort revoke against a healthy real Vault should have
+    # succeeded; revoke_outcome must be "revoked" not "revoke_failed".
+    # If this fires as "revoke_failed", operators MUST investigate the
+    # dangling Vault lease (per the exception docstring guidance).
+    assert exc_info.value.revoke_outcome == "revoked", (
+        f"Expected best-effort revoke to succeed against healthy real "
+        f"Vault; got revoke_outcome={exc_info.value.revoke_outcome!r}. "
+        f"If this is 'revoke_failed', the Vault lease at "
+        f"{exc_info.value.lease_id!r} may be dangling until its "
+        f"role default_ttl ({real_vault_setup.get('role_default_ttl', '600')}s) "
+        f"naturally expires."
+    )
+    # Message string must carry the lease_id token so the sandbox
+    # backend's SandboxLifecycleRefused(detail=str(exc)) flows the
+    # correlator through to the chain payload (Finding 3 of
+    # plan-review round 2).
+    assert exc_info.value.lease_id in str(exc_info.value)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -511,6 +628,21 @@ async def test_layer2_docker_create_destroy_threads_real_vault_lease_id_end_to_e
     real_lease = session.active_leases[0]
     assert real_lease.lease_id, "Real Vault returned an empty lease_id"
     assert real_lease.ttl_s_granted > 0
+    # Sprint 10.1 finding #2 regression at Layer 2 — same contract as
+    # the Layer 1 cell above. With bootstrap default_ttl=600 +
+    # request.ttl_s=900, grant=600 < request=900; the kernel-side
+    # post-mint enforcement at core/vault.lease_credential refuses
+    # any case where grant > request via VaultLeaseGrantExceedsRequest,
+    # so a Layer 2 lease that made it onto session.active_leases MUST
+    # have grant <= request. Failure here means either the enforcement
+    # regressed OR the role default_ttl is misconfigured.
+    assert real_lease.ttl_s_granted <= request.ttl_s, (
+        f"Sprint 10.1 finding #2 — Real Vault granted ttl_s_granted="
+        f"{real_lease.ttl_s_granted} but the request asked for "
+        f"ttl_s={request.ttl_s}; backend create() should have refused "
+        f"with sandbox_credential_lease_ttl_grant_exceeds_request "
+        f"BEFORE returning a session."
+    )
     assert real_lease.expires_at > datetime.now(UTC)
     assert real_lease.request == request
 
@@ -551,3 +683,93 @@ async def test_layer2_docker_create_destroy_threads_real_vault_lease_id_end_to_e
         f"Expected exactly 1 lease_revoked emit; got {len(revoked_records)}"
     )
     assert revoked_records[0].payload["lease_id"] == real_lease.lease_id
+
+
+@pytest.mark.asyncio
+async def test_layer2_docker_refuses_when_role_default_ttl_exceeds_request(
+    real_vault_setup: dict[str, Any],
+) -> None:
+    """Sprint 10.1 finding #2 negative-path proof at Layer 2 —
+    K8s-or-Docker-agnostic invariant that ``backend.create()`` refuses
+    with ``SandboxLifecycleRefused(reason="sandbox_credential_lease_ttl_grant_exceeds_request")``
+    when the requested ttl_s is LESS than the Vault role's default_ttl.
+
+    Full end-to-end proof: real ``VaultCredentialAdapter`` →
+    ``core/vault.lease_credential`` → real Vault returns grant > request
+    → kernel best-effort revoke runs → kernel raises
+    ``VaultLeaseGrantExceedsRequest`` → Docker backend except-tuple
+    catches the new exception (Sprint 10.1 Task 2 wiring per Finding
+    B of plan-review round 1) → ``_shared_credentials._mint_exception_to_refusal_reason``
+    maps to the new closed-enum value →
+    ``SandboxLifecycleRefused(reason=..., detail=str(exc))`` raised.
+    """
+    adapter: VaultCredentialAdapter = real_vault_setup["adapter"]
+    settings = real_vault_setup["settings"]
+    secret_path: str = real_vault_setup["secret_path"]
+
+    dh_store = AsyncMock()
+    dh_store.append_with_precondition.return_value = (uuid.uuid4(), b"\x00" * 32)
+    backend = _make_layer2_backend(adapter=adapter, dh_store=dh_store, settings=settings)
+
+    actor = Actor(
+        subject="z2-test-actor",
+        tenant_id="t-z2-real",
+        scopes=frozenset(),
+        actor_type="service",
+    )
+    pack_ctx = PackAdmissionContext(
+        pack_id="cognic.z2_real_vault",
+        pack_version="v1.0.0",
+        pack_artifact_digest="sha256:" + "1" * 64,
+        risk_tier="internal_write",
+        declares_dynamic_install=False,
+        profile="production",
+    )
+    policy = SandboxPolicy(
+        cpu_cores=0.5,
+        cpu_time_budget_s=None,
+        memory_mb=256,
+        walltime_s=30.0,
+        runtime_image="cognic/sandbox-runtime-python:v1@sha256:" + "a" * 64,
+        egress_allow_list=("httpbin.org",),
+        vault_path=None,
+    )
+    # Request 300s; bootstrap role default_ttl=600s → grant > request
+    # → expect backend create() to refuse with the new closed-enum.
+    request = _make_lease_request(secret_path, ttl_s=300)
+
+    with (
+        patch(
+            "cognic_agentos.sandbox.backends.docker_sibling.admit_policy",
+            new=AsyncMock(return_value=None),
+        ),
+        pytest.raises(SandboxLifecycleRefused) as exc_info,
+    ):
+        await backend.create(
+            policy,
+            actor=actor,
+            tenant_id="t-z2-real",
+            pack_context=pack_ctx,
+            use_warm_pool=False,
+            requires_credentials=(request,),
+        )
+
+    assert exc_info.value.reason == ("sandbox_credential_lease_ttl_grant_exceeds_request"), (
+        f"Expected sandbox_credential_lease_ttl_grant_exceeds_request "
+        f"refusal; got {exc_info.value.reason!r}. If the refusal landed "
+        f"on a different reason, either the cross-backend mapping at "
+        f"_shared_credentials.py is wrong OR the Vault role default_ttl "
+        f"is not exceeding the request — re-check bootstrap config."
+    )
+    # detail=str(exc) carries the underlying VaultLeaseGrantExceedsRequest
+    # message which includes the lease_id token (Finding 3 of plan-review
+    # round 2). Both pinning regressions: detail is non-empty + names
+    # numbers from the over-grant scenario.
+    detail = str(exc_info.value)
+    assert "300" in detail
+    # The lease_id from real Vault is dynamic; we can't hard-code it,
+    # but we can verify the lease_id= prefix is in the detail string
+    # per the kernel-side message format at core/vault.py.
+    assert "lease_id=" in detail, (
+        f"detail must carry lease_id= prefix for chain-payload traceability; got: {detail!r}"
+    )
