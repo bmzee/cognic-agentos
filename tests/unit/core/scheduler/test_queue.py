@@ -63,6 +63,79 @@ class TestBoundedQueueFIFO:
         assert q.peek() == "b"
 
 
+class TestBoundedQueueConstructorValidation:
+    """Z1a focused negative-path coverage — pin constructor bounded-
+    invariant raises (queue.py lines 51 + 53). The runtime guards
+    here are wire-protocol-public: a caller passing zero/negative
+    values would silently produce a queue that can never accept work
+    OR an SLA that never reports usable retry-after."""
+
+    def test_max_depth_zero_raises(self):
+        with pytest.raises(ValueError, match="max_depth must be >= 1"):
+            BoundedQueue(max_depth=0, class_sla_s=5.0)
+
+    def test_max_depth_negative_raises(self):
+        with pytest.raises(ValueError, match="max_depth must be >= 1"):
+            BoundedQueue(max_depth=-1, class_sla_s=5.0)
+
+    def test_class_sla_s_zero_raises(self):
+        with pytest.raises(ValueError, match="class_sla_s must be > 0"):
+            BoundedQueue(max_depth=4, class_sla_s=0)
+
+    def test_class_sla_s_negative_raises(self):
+        with pytest.raises(ValueError, match="class_sla_s must be > 0"):
+            BoundedQueue(max_depth=4, class_sla_s=-0.1)
+
+
+class TestBoundedQueueMaxDepthProperty:
+    """Z1a focused coverage — pin BoundedQueue.max_depth public
+    property (queue.py line 70) which exposes the constructor value
+    for SchedulerEngine introspection."""
+
+    def test_max_depth_property_returns_constructor_value(self):
+        q = BoundedQueue(max_depth=7, class_sla_s=5.0)
+        assert q.max_depth == 7
+
+
+class TestBoundedQueueRemoveNotFound:
+    """Z1a focused coverage — pin BoundedQueue.remove false-branch
+    paths (queue.py lines 116→117 + 120). The round-5 engine consumer
+    relies on remove returning False (not raising) when a task_id is
+    not in the queue, so the engine's defensive remove() calls during
+    terminal-state transitions stay idempotent."""
+
+    def test_remove_returns_false_when_item_not_in_queue(self):
+        q = BoundedQueue(max_depth=4, class_sla_s=5.0)
+        q.enqueue("a")
+        q.enqueue("b")
+        # Item never enqueued
+        assert q.remove("c") is False
+        # Queue contents unchanged
+        assert q.depth == 2
+        assert q.peek() == "a"
+
+    def test_remove_returns_false_on_empty_queue(self):
+        q = BoundedQueue(max_depth=4, class_sla_s=5.0)
+        assert q.remove("anything") is False
+
+
+class TestComputeRetryAfterOnEmptyQueue:
+    """Z1a focused coverage — pin compute_retry_after_s empty-queue
+    fallback (queue.py line 138). The SchedulerEngine refused_queue_full
+    path consults compute_retry_after_s when the queue is full + cap
+    saturated, but the helper must also return a sensible value on an
+    empty queue for direct caller introspection."""
+
+    def test_empty_queue_returns_ceil_class_sla(self):
+        q = BoundedQueue(max_depth=4, class_sla_s=2.5)
+        assert q.compute_retry_after_s() == 3  # ceil(2.5)
+
+    def test_empty_queue_clamps_to_minimum_one_second(self):
+        """Even when class_sla_s rounds to 0, the floor stays 1."""
+        q = BoundedQueue(max_depth=4, class_sla_s=0.001)
+        assert q.compute_retry_after_s() == 1
+
+
 class TestRetryAfterCalculation:
     """Spec §4.3 case 3 — retry_after_s derived from oldest queued task's
     age + class SLA. Round-6 reviewer P2 fix: age is computed

@@ -42,9 +42,12 @@ _GATE_TOOL_PATH = _REPO_ROOT / "tools" / "check_critical_coverage.py"
 #: modules (registry / storage / trust + portal lifecycle routes) = 81;
 #: + 4 Sprint-10 Z1 Vault credential-leasing modules
 #: (core/vault + core/_vault_transport + sandbox/credentials +
-#: sandbox/backends/_shared_credentials per Round-7 Gap O) = 85).
+#: sandbox/backends/_shared_credentials per Round-7 Gap O) = 85;
+#: + 3 Sprint-10.5a Z1a runtime scheduler primitive modules
+#: (core/scheduler/engine + core/scheduler/queue + core/scheduler/storage
+#: per ADR-022 + spec §6.1) = 88).
 #: Bump this in lockstep with any deliberate ``_CRITICAL_FILES`` change.
-_EXPECTED_ENTRY_COUNT = 85
+_EXPECTED_ENTRY_COUNT = 88
 
 #: The 5 modules Sprint 7B.3 promoted to the durable gate, each by its
 #: own landing commit (T3-T6 panels + T7 composer). All ride the

@@ -1085,3 +1085,78 @@ def test_round7_p1_promotion_refused_reason_vocabulary_in_lockstep_with_literal(
     assert (
         frozenset(t_.get_args(SchedulerPromotionRefusedReason)) == _VALID_PROMOTION_REFUSED_REASONS
     )
+
+
+# --- Z1a focused negative-path repair (gate-promotion coverage) ---------
+
+
+async def test_z1a_reap_expired_skips_class_with_no_ttl_configured(
+    engine_db: AsyncEngine,
+    caps: ConcurrencyCaps,
+    class_settings: dict[str, tuple[int, float]],
+) -> None:
+    """Z1a focused coverage — pin engine.py:595 ``continue`` branch
+    (reap_expired with no TTL configured for a queued task's class).
+    Without a TTL entry, the task is left in place per the per-class
+    opt-in contract."""
+    engine = _make_engine(db=engine_db, caps=caps, class_settings=class_settings)
+    # Saturate interactive cap (2) so the third submit queues
+    await engine.submit(submit_input=_make_submit_input(actor_subject="svc-a1"), request_id="r-1")
+    await engine.submit(submit_input=_make_submit_input(actor_subject="svc-a2"), request_id="r-2")
+    queued = await engine.submit(
+        submit_input=_make_submit_input(actor_subject="svc-a3"), request_id="r-3"
+    )
+    assert queued.outcome == "accepted_queued"
+    queued_id = uuid.UUID(queued.task_id)
+    # Force enqueued_at to far in the past so age check would otherwise fire
+    attribution = engine._queued_attribution[queued_id]
+    aged = type(attribution)(
+        tenant_id=attribution.tenant_id,
+        class_=attribution.class_,
+        pack_id=attribution.pack_id,
+        actor_subject=attribution.actor_subject,
+        enqueued_at=datetime(2000, 1, 1, tzinfo=UTC),
+    )
+    engine._queued_attribution[queued_id] = aged
+    # Reap with ONLY background TTL configured — interactive class
+    # (the queued task's class) has no entry → skip path fires
+    expired_count = await engine.reap_expired(
+        queue_ttl_s_per_class={"background": 5.0},
+        request_id="r-reap",
+    )
+    assert expired_count == 0
+    assert queued_id in engine._queued_attribution
+    assert await _read_state(engine_db, queued_id) == "pending"
+
+
+async def test_z1a_read_state_raises_scheduler_task_not_found_on_unknown_uuid(
+    engine_db: AsyncEngine,
+    caps: ConcurrencyCaps,
+    class_settings: dict[str, tuple[int, float]],
+) -> None:
+    """Z1a focused coverage — pin engine.py:776-780 SchedulerTaskNotFound
+    raise path. _read_state is called by fail() + cancel() to probe
+    storage; an unknown task_id MUST raise the typed exception rather
+    than crash with AttributeError on the None row."""
+    from cognic_agentos.core.scheduler.storage import SchedulerTaskNotFound
+
+    engine = _make_engine(db=engine_db, caps=caps, class_settings=class_settings)
+    bogus_id = uuid.uuid4()
+    actor = TaskActor(subject="admin", tenant_id="tenant-a", actor_type="human")
+    with pytest.raises(SchedulerTaskNotFound):
+        await engine.cancel(
+            bogus_id,
+            actor=actor,
+            reason="actor_cancelled",
+            request_id="req-cancel",
+        )
+    with pytest.raises(SchedulerTaskNotFound):
+        await engine.fail(
+            bogus_id,
+            payload=TaskFailedPayload(
+                reason="scheduler_task_failed_sandbox_create_refused",
+                sandbox_refusal_reason=None,
+                sandbox_event_id=None,
+            ),
+            request_id="req-fail",
+        )

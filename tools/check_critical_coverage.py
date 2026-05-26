@@ -1795,6 +1795,50 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     ("src/cognic_agentos/core/_vault_transport.py", 0.95, 0.90),
     ("src/cognic_agentos/sandbox/credentials.py", 0.95, 0.90),
     ("src/cognic_agentos/sandbox/backends/_shared_credentials.py", 0.95, 0.90),
+    # --- Sprint 10.5a Z1a — runtime scheduler primitive (ADR-022) -----
+    # core/ stop-rule per AGENTS.md. Promoted to the durable critical-
+    # controls coverage gate at the standard 95% line / 90% branch
+    # floor per the user-locked tightening edit B per
+    # [[feedback_verify_promotion_meets_floor_at_promotion_time]] —
+    # gate runs against fresh ``--cov-branch coverage.json`` in this
+    # same Z1a commit. Z1a focused-coverage repair (+11 tests: 9
+    # in test_queue.py — constructor validation x4, max_depth
+    # property x1, remove-not-found x2, retry-after-on-empty x2;
+    # +2 in test_engine.py — reap_expired skip-no-TTL, _read_state
+    # SchedulerTaskNotFound) brought engine.py 99.08%/94.74%,
+    # queue.py 100%/100%, storage.py 100%/100% — all above floor.
+    #
+    # Module rationale:
+    #   * ``core/scheduler/engine.py`` — public seam orchestrating
+    #     storage + queue + concurrency caps + 4 consumer-owned seam
+    #     Protocols (Quota / KillSwitch / ParentBudget / PackState) +
+    #     policy_evaluator callable. Owns the 7-method public surface
+    #     (submit / mark_running / complete / fail / cancel / preempt
+    #     / reap_expired); owns the `SchedulerPromotionRefused` typed
+    #     exception with 2-value closed-enum reason (`caps_saturated`
+    #     / `not_at_queue_head`); owns the `parent_task_id` fail-loud
+    #     pre-T10 guard; owns the durable-first promotion ordering
+    #     contract (storage.transition succeeds BEFORE in-memory
+    #     bookkeeping mutates per round-7 reviewer P2).
+    #   * ``core/scheduler/queue.py`` — `BoundedQueue` (FIFO + bounded
+    #     depth + dynamic wall-clock aging via injectable clock seam
+    #     + `peek` for round-7 FIFO-head probe) + `ConcurrencyCaps`
+    #     frozen dataclass. The bounded-invariant runtime guards here
+    #     are wire-protocol-public for the SchedulerEngine consumer +
+    #     the Settings-layer mirror at `core/config.py` (T6).
+    #   * ``core/scheduler/storage.py`` — Postgres-backed
+    #     `SchedulerStorage`; `DecisionHistoryStore.append_with_precondition`
+    #     consumer driving `submit()` (genesis) + `transition()`
+    #     (state-machine) + `record_admission_refused()` (audit-only,
+    #     no scheduler_tasks row). Owns the `_LockedTaskSnapshot` full
+    #     evidence-snapshot threading from row-locked SELECT FOR
+    #     UPDATE to chain payload per
+    #     [[feedback_chain_payload_is_evidence_snapshot]]; owns the
+    #     `_VALID_REFUSAL_REASONS` runtime closed-enum guard on the
+    #     `scheduler.admission_refused` chain row.
+    ("src/cognic_agentos/core/scheduler/engine.py", 0.95, 0.90),
+    ("src/cognic_agentos/core/scheduler/queue.py", 0.95, 0.90),
+    ("src/cognic_agentos/core/scheduler/storage.py", 0.95, 0.90),
 )
 
 
