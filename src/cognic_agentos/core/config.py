@@ -1349,6 +1349,88 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- Sprint 10.5a T6 — scheduler primitive Settings (ADR-022) ----
+    # Per spec §4.1 + §4.5: 7 bounded-invariant fields consumed by
+    # SchedulerEngine at engine construction time + reap_expired() at
+    # the operator reconciler-loop call site. Defaults are operator-
+    # tunable; the gt=0 floor is wire-protocol-public for the
+    # ConcurrencyCaps + BoundedQueue primitives that consume them.
+    # Bounded-invariant tests at
+    # ``tests/unit/test_config.py::TestSprint105SchedulerSettings``
+    # mirror the same gt=0 floor pinned at
+    # ``tests/unit/core/scheduler/test_queue.py::TestConcurrencyCapsBounded``.
+    scheduler_queue_depth_interactive: int = Field(
+        default=32,
+        gt=0,
+        description=(
+            "Sprint 10.5a — per-(tenant, interactive) BoundedQueue max "
+            "depth. SchedulerEngine raises refused_queue_full when an "
+            "interactive submission cannot be admitted because all caps "
+            "are saturated AND the queue is at this depth."
+        ),
+    )
+    scheduler_queue_depth_background: int = Field(
+        default=256,
+        gt=0,
+        description=(
+            "Sprint 10.5a — per-(tenant, background) BoundedQueue max "
+            "depth. Higher than interactive per spec §4.3: background "
+            "workloads tolerate deeper queues; interactive submissions "
+            "need lower retry-after latency."
+        ),
+    )
+    scheduler_per_tenant_interactive: int = Field(
+        default=32,
+        gt=0,
+        description=(
+            "Sprint 10.5a — per-tenant concurrent-interactive-task cap "
+            "(ConcurrencyCaps.per_tenant_interactive). Engine refuses "
+            "queue admission when this is exceeded AND the queue is at "
+            "max depth (refused_queue_full); otherwise enqueues."
+        ),
+    )
+    scheduler_per_tenant_background: int = Field(
+        default=64,
+        gt=0,
+        description=(
+            "Sprint 10.5a — per-tenant concurrent-background-task cap "
+            "(ConcurrencyCaps.per_tenant_background). Per spec §4.5, "
+            "background tenant cap is a separate axis from interactive."
+        ),
+    )
+    scheduler_per_pack: int = Field(
+        default=8,
+        gt=0,
+        description=(
+            "Sprint 10.5a — per-pack concurrent-task cap "
+            "(ConcurrencyCaps.per_pack). Applies uniformly to "
+            "interactive + background classes."
+        ),
+    )
+    scheduler_per_actor: int = Field(
+        default=4,
+        gt=0,
+        description=(
+            "Sprint 10.5a — per-actor (subject) concurrent-task cap "
+            "(ConcurrencyCaps.per_actor). Applies uniformly to "
+            "interactive + background classes."
+        ),
+    )
+    scheduler_queue_ttl_s: int = Field(
+        default=3600,
+        gt=0,
+        description=(
+            "Sprint 10.5a — queue TTL (seconds) consumed by "
+            "SchedulerEngine.reap_expired() per spec §4.4. A queued "
+            "task whose age exceeds this value is transitioned "
+            "pending → expired, quota released, removed from queue, "
+            "and emits scheduler.task_expired chain row. Single value "
+            "applied to BOTH interactive + background classes in "
+            "Wave-1; per-class TTL is a future extension if operator "
+            "tuning warrants it."
+        ),
+    )
+
     # --- Build metadata ----------------------------------------------
     # Wired by the Dockerfile / CI at image-build time; defaults make
     # local-dev introspection useful without requiring an explicit env.
