@@ -17,9 +17,11 @@ from cognic_agentos.core.scheduler._types import (
     SchedulerTaskFailedReason,
     SchedulerTaskPreemptedReason,
     SchedulerTaskState,
+    SchedulerTransitionRefused,
     SubmitInput,
     TaskActor,
     TaskFailedPayload,
+    validate_transition,
 )
 
 __all__ = [
@@ -33,7 +35,9 @@ __all__ = [
     "SchedulerTaskFailedReason",
     "SchedulerTaskPreemptedReason",
     "SchedulerTaskState",
+    "SchedulerTransitionRefused",
     "SubmitInput",
     "TaskActor",
     "TaskFailedPayload",
+    "validate_transition",
 ]

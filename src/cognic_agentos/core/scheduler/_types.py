@@ -116,3 +116,51 @@ class TaskFailedPayload:
 # --- ISO 42001 control tagging (spec §4.9) --------------------------------
 
 SCHEDULER_ISO_CONTROLS: Final[tuple[str, ...]] = ("A.6.2.5",)
+
+
+# --- State machine (spec §4.4 amended) -------------------------------------
+
+_VALID_TRANSITIONS: Final[frozenset[tuple[SchedulerTaskState, SchedulerTaskState]]] = frozenset(
+    {
+        # From pending (4 transitions: 2 ADR-022 base + 2 new amendments)
+        ("pending", "running"),
+        ("pending", "expired"),
+        ("pending", "failed"),  # NEW per spec §4.4 amendment
+        ("pending", "cancelled"),  # NEW per spec §4.4 amendment
+        # From running (4 transitions; quota_exhausted now preempted not cancelled)
+        ("running", "completed"),
+        ("running", "failed"),
+        ("running", "cancelled"),
+        ("running", "preempted"),
+    }
+)
+
+
+class SchedulerTransitionRefused(Exception):
+    """Raised by validate_transition on illegal state pair.
+
+    Thin wrapper carrying only the closed-enum refusal reason — no
+    transition_name field on the exception (mirrors
+    packs/lifecycle.LifecycleTransitionRefused pattern).
+    """
+
+    def __init__(self, reason: Literal["scheduler_transition_invalid_state_pair"]) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+def validate_transition(
+    *,
+    from_state: SchedulerTaskState,
+    to_state: SchedulerTaskState,
+) -> None:
+    """Pure-functional state-machine validator. No I/O; no DB access.
+
+    Mirrors packs/lifecycle.validate_transition pattern. Keyword-only
+    args eliminate positional-misuse bug class at the call site.
+
+    Raises SchedulerTransitionRefused on illegal state pair; returns
+    None on legal pair.
+    """
+    if (from_state, to_state) not in _VALID_TRANSITIONS:
+        raise SchedulerTransitionRefused("scheduler_transition_invalid_state_pair")
