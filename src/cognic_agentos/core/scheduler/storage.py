@@ -29,6 +29,7 @@ Every edit is halt-before-commit per
 
 from __future__ import annotations
 
+import typing
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -56,6 +57,7 @@ from cognic_agentos.core.decision_history import (
 )
 from cognic_agentos.core.scheduler._types import (
     SCHEDULER_ISO_CONTROLS,
+    SchedulerRefusalReason,
     SchedulerTaskState,
     SubmitInput,
 )
@@ -115,6 +117,16 @@ _STATE_TO_DECISION_TYPE: Final[dict[SchedulerTaskState, str]] = {
     "preempted": "scheduler.task_preempted",
     "expired": "scheduler.task_expired",
 }
+
+#: Round-6 reviewer P2 fix: wire-public closed-enum guard for the
+#: ``scheduler.admission_refused`` chain row's ``payload.reason``
+#: field. Mirrors the ``_STATE_TO_DECISION_TYPE`` preflight pattern —
+#: any value outside the 5-value ``SchedulerRefusalReason`` Literal
+#: raises ``ValueError`` BEFORE the chain row is persisted so a
+#: caller-side bug cannot smuggle a non-enum value into hash-chained
+#: evidence. Built from the Literal at module load via ``get_args`` so
+#: drift between the Literal and the guard is impossible.
+_VALID_REFUSAL_REASONS: Final[frozenset[str]] = frozenset(typing.get_args(SchedulerRefusalReason))
 
 #: SQLAlchemy Core Table for the scheduler task store, registered against
 #: the shared ``core.audit._metadata`` so ``_metadata.create_all`` (tests)
@@ -256,6 +268,86 @@ class SchedulerStorage:
             }
             return DecisionRecord(
                 decision_type="scheduler.admission_accepted",
+                request_id=request_id,
+                payload=payload,
+                actor_id=submit_input.actor.subject,
+                tenant_id=submit_input.tenant_id,
+                iso_controls=SCHEDULER_ISO_CONTROLS,
+            )
+
+        return await self._history.append_with_precondition(
+            record_builder=_build_record,
+            precondition=_precondition,
+        )
+
+    async def record_admission_refused(
+        self,
+        *,
+        refused_task_id: uuid.UUID,
+        submit_input: SubmitInput,
+        reason: SchedulerRefusalReason,
+        request_id: str,
+        policy_reason: str | None = None,
+    ) -> tuple[uuid.UUID, bytes]:
+        """Emit a ``scheduler.admission_refused`` chain row for an
+        admission outcome that was refused. NO row inserted into
+        ``scheduler_tasks`` — the task was never admitted; the chain
+        row alone records the refusal for the audit substrate.
+
+        Per spec §4.9 audit-event taxonomy: ``scheduler.admission_refused``
+        carries ``payload.reason`` (the wire-public closed-enum
+        ``SchedulerRefusalReason`` value) + ``payload.policy_reason``
+        (the internal diagnostic string, audit-only per round-4 P2
+        vocabulary separation).
+
+        Added per round-5 reviewer P1 #5 — the engine's refusal paths
+        (kill-switch, policy, quota, queue-full, pack-not-installed)
+        previously returned ``AdmissionDecision`` to the caller without
+        emitting any chain row, leaving an audit-pack gap.
+
+        ``refused_task_id`` is the UUID the engine would have used had
+        admission succeeded. It is recorded in the chain payload so
+        operators can correlate refusal audit rows to the request that
+        produced them (e.g. for retry-loop analysis).
+
+        Round-6 reviewer P2 fix: runtime preflight guard rejects any
+        ``reason`` value outside the closed-enum ``SchedulerRefusalReason``
+        Literal BEFORE the chain row is persisted. The Literal type
+        annotation alone is insufficient — Python does not enforce
+        Literal at runtime, so a caller bug or runtime-built string
+        could silently land non-enum values in hash-chained evidence.
+        """
+        if reason not in _VALID_REFUSAL_REASONS:
+            raise ValueError(
+                f"scheduler_admission_refused_reason_not_in_closed_enum: "
+                f"reason={reason!r} not in {sorted(_VALID_REFUSAL_REASONS)!r}"
+            )
+        now = datetime.now(UTC)
+
+        async def _precondition(conn: AsyncConnection, _prev_seq: int, _prev_hash: bytes) -> None:
+            # Refusal events have NO scheduler_tasks row insert — task
+            # was never admitted. The chain row is the only persisted
+            # evidence.
+            return None
+
+        def _build_record(_: None) -> DecisionRecord:
+            payload: dict[str, Any] = {
+                "task_id": str(refused_task_id),
+                "tenant_id": submit_input.tenant_id,
+                "pack_id": submit_input.pack_id,
+                "actor_subject": submit_input.actor.subject,
+                "actor_type": submit_input.actor.actor_type,
+                "class_": submit_input.class_,
+                "pack_kind": submit_input.pack_kind,
+                "pack_risk_tier": submit_input.pack_risk_tier,
+                "requested_estimated_tokens": (submit_input.requested_estimated_tokens),
+                "parent_task_id": submit_input.parent_task_id,
+                "submitted_at": now.isoformat(),
+                "reason": reason,
+                "policy_reason": policy_reason,
+            }
+            return DecisionRecord(
+                decision_type="scheduler.admission_refused",
                 request_id=request_id,
                 payload=payload,
                 actor_id=submit_input.actor.subject,

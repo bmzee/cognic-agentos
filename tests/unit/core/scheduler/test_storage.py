@@ -584,3 +584,54 @@ async def test_transition_payload_extras_threaded_into_chain_row(
     assert payload["reason"] == "scheduler_task_failed_sandbox_create_refused"
     assert payload["sandbox_refusal_reason"] == "sandbox_credential_projection_field_set_mismatch"
     assert payload["sandbox_event_id"] == "evt-abc-123"
+
+
+# --- Round-6 reviewer regression coverage --------------------------------
+
+
+async def test_round6_record_admission_refused_accepts_each_closed_enum_value(
+    store: SchedulerStorage,
+    engine: AsyncEngine,
+) -> None:
+    """Round-6 reviewer P2 — every SchedulerRefusalReason Literal
+    value must clear the runtime preflight guard."""
+    valid_reasons = (
+        "refused_queue_full",
+        "refused_quota_exhausted",
+        "refused_policy_denied",
+        "refused_kill_switch_active",
+        "refused_pack_not_installed",
+    )
+    pre = await _count_chain_rows(engine)
+    for i, reason in enumerate(valid_reasons):
+        await store.record_admission_refused(
+            refused_task_id=uuid.uuid4(),
+            submit_input=_make_submit_input(),
+            reason=reason,  # type: ignore[arg-type]
+            request_id=f"req-{i}",
+        )
+    post = await _count_chain_rows(engine)
+    assert post == pre + len(valid_reasons)
+
+
+async def test_round6_record_admission_refused_rejects_unknown_reason(
+    store: SchedulerStorage,
+    engine: AsyncEngine,
+) -> None:
+    """Round-6 reviewer P2 — the wire-public closed-enum guard rejects
+    any value outside the 5-value SchedulerRefusalReason Literal
+    BEFORE the chain row is persisted. Without this guard, a caller
+    bug could smuggle a non-enum string into hash-chained evidence
+    where downstream examiners + bank-overlay consumers would see an
+    unrecognised refusal reason."""
+    pre = await _count_chain_rows(engine)
+    with pytest.raises(ValueError, match="scheduler_admission_refused_reason_not_in_closed_enum"):
+        await store.record_admission_refused(
+            refused_task_id=uuid.uuid4(),
+            submit_input=_make_submit_input(),
+            reason="refused_made_up_reason",  # type: ignore[arg-type]
+            request_id="req-bogus",
+        )
+    # No chain row written
+    post = await _count_chain_rows(engine)
+    assert post == pre

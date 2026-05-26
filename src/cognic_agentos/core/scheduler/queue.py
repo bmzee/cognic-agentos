@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import math
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from cognic_agentos.core.scheduler._types import SchedulerPriorityClass
 
@@ -38,15 +40,26 @@ class BoundedQueue:
     composes one instance per (tenant, class) pair.
     """
 
-    def __init__(self, *, max_depth: int, class_sla_s: float) -> None:
+    def __init__(
+        self,
+        *,
+        max_depth: int,
+        class_sla_s: float,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
         if max_depth < 1:
             raise ValueError(f"max_depth must be >= 1; got {max_depth}")
         if class_sla_s <= 0:
             raise ValueError(f"class_sla_s must be > 0; got {class_sla_s}")
         self._max_depth = max_depth
         self._class_sla_s = class_sla_s
-        # _entries: deque of (item, oldest_age_s) tuples in FIFO order
-        self._entries: deque[tuple[object, float]] = deque()
+        #: Round-6 reviewer P2 fix: queue ages tasks dynamically against
+        #: wall-clock now, not against a static value captured at
+        #: enqueue. The clock seam exists so tests can pin retry-after
+        #: math deterministically without freezing the entire process.
+        self._clock: Callable[[], datetime] = clock or (lambda: datetime.now(UTC))
+        # _entries: deque of (item, enqueue_datetime) tuples in FIFO order
+        self._entries: deque[tuple[object, datetime]] = deque()
 
     @property
     def depth(self) -> int:
@@ -56,8 +69,11 @@ class BoundedQueue:
     def max_depth(self) -> int:
         return self._max_depth
 
-    def enqueue(self, item: object, *, oldest_age_s: float) -> None:
-        """Append item with its age-at-enqueue timestamp.
+    def enqueue(self, item: object) -> None:
+        """Append item, capturing its enqueue timestamp via the clock
+        seam. The captured timestamp is what ``compute_retry_after_s``
+        ages against (round-6 reviewer P2 fix — replaces the static
+        ``oldest_age_s`` parameter that never aged).
 
         Raises QueueFull when at max_depth.
         """
@@ -66,7 +82,7 @@ class BoundedQueue:
                 f"BoundedQueue at max_depth={self._max_depth}; "
                 f"retry_after_s={self.compute_retry_after_s()}"
             )
-        self._entries.append((item, oldest_age_s))
+        self._entries.append((item, self._clock()))
 
     def dequeue(self) -> object:
         """Pop and return oldest item (FIFO).
@@ -76,18 +92,53 @@ class BoundedQueue:
         item, _ = self._entries.popleft()
         return item
 
+    def peek(self) -> object | None:
+        """Return the oldest item (FIFO head) WITHOUT removing it,
+        or ``None`` when the queue is empty.
+
+        Round-7 reviewer P1 fix — SchedulerEngine.mark_running consults
+        this to enforce FIFO-within-class promotion. Pre-round-7 the
+        engine allowed promotion of any queued task_id the caller
+        passed, silently violating the locked FIFO contract.
+        """
+        if not self._entries:
+            return None
+        item, _ = self._entries[0]
+        return item
+
+    def remove(self, item: object) -> bool:
+        """Remove the first entry whose item equals ``item``. Returns
+        True if removed; False if not found. Used by SchedulerEngine
+        to unwind queued tasks on cancel/fail (round-5 P1 #3 fix) and
+        to roll back the queued path on storage failure (round-5 P1
+        #4 fix).
+        """
+        for index, (entry_item, _) in enumerate(self._entries):
+            if entry_item == item:
+                del self._entries[index]
+                return True
+        return False
+
     def compute_retry_after_s(self) -> int:
         """Spec §4.3 case 3: retry_after_s = max(1, ceil(class_sla_s - oldest_age_s)).
 
+        Round-6 reviewer P2 fix: ``oldest_age_s`` now derives from
+        ``self._clock() - oldest_entry_enqueued_at`` so the value
+        actually ages as the task waits. The pre-round-6 implementation
+        captured a static value at enqueue and never updated it, so a
+        queue that had waited 4.9s on a 5s SLA still reported 5s
+        retry — misleading backpressure semantics.
+
         Clamped to minimum 1 second so clients don't hot-loop on
-        retry. When oldest_age_s already exceeds class_sla_s, the
-        ceil delta would be 0 or negative; clamp to 1.
+        retry. When the oldest age already exceeds class_sla_s, the
+        ceil delta is 0 or negative; clamp to 1.
         """
         if not self._entries:
             # No oldest to compute against; return class SLA as best guess
             return max(1, math.ceil(self._class_sla_s))
         # Oldest entry is at the front of the deque per FIFO contract
-        _, oldest_age_s = self._entries[0]
+        _, oldest_enqueued_at = self._entries[0]
+        oldest_age_s = (self._clock() - oldest_enqueued_at).total_seconds()
         delta = self._class_sla_s - oldest_age_s
         return max(1, math.ceil(delta))
 
