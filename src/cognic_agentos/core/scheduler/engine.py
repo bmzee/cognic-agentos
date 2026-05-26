@@ -62,6 +62,7 @@ from cognic_agentos.core.scheduler._types import (
     SubmitInput,
     TaskFailedPayload,
 )
+from cognic_agentos.core.scheduler.policy import PolicyDecision as PolicyDecision
 from cognic_agentos.core.scheduler.queue import (
     BoundedQueue,
     ConcurrencyCaps,
@@ -69,22 +70,17 @@ from cognic_agentos.core.scheduler.queue import (
 )
 from cognic_agentos.core.scheduler.storage import SchedulerStorage
 
-
-@dataclass(frozen=True)
-class PolicyDecision:
-    """T8 SchedulerPolicy returns this shape; engine consumes it.
-
-    ``policy_reason`` is the INTERNAL diagnostic string (e.g. from the
-    Rego bundle or fail-closed OPAEngineError); NEVER added to the
-    wire-public ``SchedulerRefusalReason`` Literal. The engine maps
-    any deny → public ``refused_policy_denied`` outcome with
-    ``policy_reason`` carried in ``AdmissionDecision.policy_reason``
-    for audit-payload-only correlation per the round-4 P2 vocabulary
-    separation.
-    """
-
-    allow: bool
-    policy_reason: str | None
+# Re-export contract — the historical T5-era import path
+# ``from cognic_agentos.core.scheduler.engine import PolicyDecision``
+# continues to work because the symbol is bound at module load via the
+# import above. T8 re-homes the canonical definition to
+# ``core/scheduler/policy.py`` (the producer module) per plan §1169;
+# engine remains the consumer + the back-compat re-export site.
+# NOTE: deliberately NO ``__all__`` declaration — this module exposes
+# multiple public symbols (SchedulerEngine, SchedulerPromotionRefused,
+# SchedulerPromotionRefusedReason, _VALID_PROMOTION_REFUSED_REASONS,
+# PolicyDecision, PolicyEvaluator) that downstream consumers import by
+# name; an ``__all__`` would risk silently breaking those import paths.
 
 
 #: Policy evaluator callable shape. T8 SchedulerPolicy will conform.
