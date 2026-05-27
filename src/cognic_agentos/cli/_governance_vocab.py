@@ -61,6 +61,42 @@ Purpose = Literal[
 ]
 
 
+#: Wave-1 catalogue of per-credential **purpose categories** for the
+#: per-credential ``purpose_category`` field declared in pack
+#: manifests' ``[credentials.<logical_name>]`` blocks per ADR-017 +
+#: Sprint 10.6 spec §5.1.
+#:
+#: Distinct from :data:`Purpose` (pack-scoped business purpose). A
+#: pack with ``[data_governance].purpose = "transaction_processing"``
+#: may declare multiple ``[credentials.<name>]`` blocks each carrying
+#: their own ``purpose_category`` value — e.g. the same transaction-
+#: processing pack might use ``application_database_read`` for one
+#: credential and ``external_api_authentication`` for another. The
+#: per-credential category is the finer-grained signal SIEM consumers
+#: filter by; the pack-scoped :data:`Purpose` remains the broader
+#: business-context tag.
+#:
+#: Wire-protocol-public — landing surfaces are (a) the signed-artifact
+#: bundle at build time via the T14 ``cli/validators/credentials.py``
+#: validator; (b) the T18 ``sandbox/projection.py`` planner's metadata
+#: + the T21 ``SandboxBackend.create()`` lifecycle integration emitting
+#: ``sandbox.lifecycle.*`` chain rows for projection events; (c) SIEM
+#: consumers filtering credential events by purpose. Drift detector
+#: at ``tests/unit/cli/test_purpose_category_vocab.py`` pins both
+#: count + canonical value-set. Additive Wave-2 expansion is safe;
+#: removal of a value or rename is a wire-protocol break.
+PurposeCategory = Literal[
+    "application_database_read",
+    "application_database_write",
+    "audit_log_write",
+    "external_api_authentication",
+    "cryptographic_signing",
+    "cryptographic_decryption",
+    "service_account_token",
+    "monitoring_endpoint_access",
+]
+
+
 #: Catalogue of retention policies a pack may declare in
 #: ``[tool.cognic.data_governance].retention_policy``. The
 #: ``regulator_floor`` policy is special-cased by the data-governance
@@ -281,6 +317,7 @@ __all__ = [
     "HookOrderingClass",
     "HookPhase",
     "Purpose",
+    "PurposeCategory",
     "RetentionPolicy",
     "RiskTier",
 ]
