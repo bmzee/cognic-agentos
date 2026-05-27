@@ -2165,3 +2165,103 @@ class TestT8SandboxKernelDefaultMaxCredentialTtl:
         # 86401s is above the ceiling — refused.
         with pytest.raises(ValidationError):
             Settings(_env_file=None, sandbox_kernel_default_max_credential_ttl_s=86401)  # type: ignore[call-arg]
+
+
+class TestSprint105SchedulerSettings:
+    """Sprint 10.5a T6 — ADR-022 scheduler primitive Settings (spec §4.1
+    + §4.5). Tests pin BOUNDED INVARIANTS (each cap must be positive
+    integer; the queue TTL must be at least 1 second) rather than
+    specific defaults — defaults are operator-tunable per the plan-of-
+    record but the invariants are wire-protocol-public for the
+    SchedulerEngine + reap_expired wiring at T11.
+
+    Mirrors the ConcurrencyCaps + BoundedQueue bounded-invariant tests
+    at ``tests/unit/core/scheduler/test_queue.py`` so the Settings
+    layer + the in-memory primitives reject the same illegal-shape
+    inputs.
+    """
+
+    def test_all_seven_scheduler_settings_have_positive_defaults(self) -> None:
+        """All 7 fields must satisfy the bounded invariant — defaults
+        can change per operator tuning; positive-integer bound cannot."""
+        from cognic_agentos.core.config import Settings
+
+        s = Settings(_env_file=None)  # type: ignore[call-arg]
+        assert s.scheduler_queue_depth_interactive >= 1
+        assert s.scheduler_queue_depth_background >= 1
+        assert s.scheduler_per_tenant_interactive >= 1
+        assert s.scheduler_per_tenant_background >= 1
+        assert s.scheduler_per_pack >= 1
+        assert s.scheduler_per_actor >= 1
+        assert s.scheduler_queue_ttl_s >= 1
+
+    def test_queue_depth_interactive_rejects_zero(self) -> None:
+        from cognic_agentos.core.config import Settings
+
+        with pytest.raises(ValidationError):
+            Settings(_env_file=None, scheduler_queue_depth_interactive=0)  # type: ignore[call-arg]
+
+    def test_queue_depth_background_rejects_zero(self) -> None:
+        from cognic_agentos.core.config import Settings
+
+        with pytest.raises(ValidationError):
+            Settings(_env_file=None, scheduler_queue_depth_background=0)  # type: ignore[call-arg]
+
+    def test_per_tenant_interactive_rejects_zero(self) -> None:
+        from cognic_agentos.core.config import Settings
+
+        with pytest.raises(ValidationError):
+            Settings(_env_file=None, scheduler_per_tenant_interactive=0)  # type: ignore[call-arg]
+
+    def test_per_tenant_background_rejects_zero(self) -> None:
+        from cognic_agentos.core.config import Settings
+
+        with pytest.raises(ValidationError):
+            Settings(_env_file=None, scheduler_per_tenant_background=0)  # type: ignore[call-arg]
+
+    def test_per_pack_rejects_zero(self) -> None:
+        from cognic_agentos.core.config import Settings
+
+        with pytest.raises(ValidationError):
+            Settings(_env_file=None, scheduler_per_pack=0)  # type: ignore[call-arg]
+
+    def test_per_actor_rejects_zero(self) -> None:
+        from cognic_agentos.core.config import Settings
+
+        with pytest.raises(ValidationError):
+            Settings(_env_file=None, scheduler_per_actor=0)  # type: ignore[call-arg]
+
+    def test_queue_ttl_s_rejects_zero(self) -> None:
+        from cognic_agentos.core.config import Settings
+
+        with pytest.raises(ValidationError):
+            Settings(_env_file=None, scheduler_queue_ttl_s=0)  # type: ignore[call-arg]
+
+    def test_queue_ttl_s_rejects_negative(self) -> None:
+        from cognic_agentos.core.config import Settings
+
+        with pytest.raises(ValidationError):
+            Settings(_env_file=None, scheduler_queue_ttl_s=-1)  # type: ignore[call-arg]
+
+    def test_per_actor_accepts_minimum_one(self) -> None:
+        """Bounded-invariant pin: each cap must accept its minimum
+        valid value (1). Defaults are higher but the FLOOR is 1."""
+        from cognic_agentos.core.config import Settings
+
+        s = Settings(_env_file=None, scheduler_per_actor=1)  # type: ignore[call-arg]
+        assert s.scheduler_per_actor == 1
+
+    def test_operator_overrides_accepted(self) -> None:
+        """Operator overrides must flow through Pydantic — confirms
+        the fields are not accidentally read-only or property-shadowed."""
+        from cognic_agentos.core.config import Settings
+
+        s = Settings(  # type: ignore[call-arg]
+            _env_file=None,
+            scheduler_queue_depth_interactive=64,
+            scheduler_per_tenant_background=128,
+            scheduler_queue_ttl_s=600,
+        )
+        assert s.scheduler_queue_depth_interactive == 64
+        assert s.scheduler_per_tenant_background == 128
+        assert s.scheduler_queue_ttl_s == 600
