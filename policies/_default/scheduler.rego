@@ -8,13 +8,11 @@
 #   data.cognic.scheduler.admit.refusal_reason → string (3-value
 #                                                 closed-enum)
 #
-# Wire-protocol-public policy bundle. Scheduled to join the AGENTS.md
+# Wire-protocol-public policy bundle. Enrolled in the AGENTS.md
 # stop-rule policy-bundle list at Sprint-10.5b Z1b alongside
 # elicitation.rego / sampling.rego / sandbox.rego / supply_chain.rego.
-# Until Z1b lands, edits to this bundle are still halt-before-commit
-# per the plan's stop-rule treatment of 10.5b — the AGENTS.md entry is
-# the durable enforcement, but the doctrinal status starts at T7.
-# Bank overlays MAY TIGHTEN (add more refusal conditions, refuse on
+# Every edit is halt-before-commit per [[feedback_strict_review_off_gate]];
+# bank overlays MAY TIGHTEN (add more refusal conditions, refuse on
 # tighter tier sets, require explicit per-pack allow-listing).
 # LOOSENING the kernel defaults requires a coordinated kernel + ADR
 # amendment.

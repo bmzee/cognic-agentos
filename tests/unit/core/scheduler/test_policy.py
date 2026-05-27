@@ -399,3 +399,252 @@ class TestSchedulerPolicySubprocessEnvParity:
 
         assert set(scheduler_policy_env.keys()) == {"PATH", "HOME"}
         assert scheduler_policy_env["HOME"] == "/tmp"
+
+
+# --- Z1b focused-coverage repair: _fetch_refusal_reason error paths -----
+#
+# Per [[feedback_verify_promotion_meets_floor_at_promotion_time]], Z1b
+# gate-promotion runs the coverage check against fresh data in the SAME
+# commit. The opa_required tests above cover the happy paths (allow=true
+# + deny-with-reason); these tests cover the subprocess error paths in
+# ``_fetch_refusal_reason`` that the OPA-binary path doesn't naturally
+# exercise. All use a stub OPAEngine + monkeypatched subprocess.run so
+# they're OPA-binary-independent.
+
+
+class _StubOPAEngineForRefusalReason:
+    """Minimal stub exposing only the 3 attrs ``_fetch_refusal_reason``
+    reads off the injected OPAEngine: ``_opa_path`` / ``_bundle_path``
+    / ``_eval_timeout_s``. Construct with ``opa_path=None`` to exercise
+    the OpaNotInstalledError path at policy.py:270; default opa_path
+    is just a sentinel string + tests monkeypatch subprocess.run to
+    avoid actually invoking opa."""
+
+    def __init__(
+        self,
+        *,
+        opa_path: str | None = "/fake/opa",
+        bundle_path: Path = SCHEDULER_BUNDLE_PATH,
+        eval_timeout_s: float = 5.0,
+    ) -> None:
+        self._opa_path = opa_path
+        self._bundle_path = bundle_path
+        self._eval_timeout_s = eval_timeout_s
+
+
+class TestSchedulerPolicyFetchRefusalReasonErrorPaths:
+    """Targeted coverage for the ``_fetch_refusal_reason`` subprocess
+    error paths (Z1b gate-promotion repair). Each test exercises one
+    branch of the helper's try/except + result-shape validation chain
+    so the 95% line / 90% branch floor is met on fresh coverage data."""
+
+    def test_opa_path_none_raises_opa_not_installed(self) -> None:
+        """policy.py:269-273 — when the injected OPAEngine has
+        ``_opa_path = None``, the helper short-circuits with
+        ``OpaNotInstalledError`` without invoking subprocess."""
+        policy = SchedulerPolicy(opa_engine=_StubOPAEngineForRefusalReason(opa_path=None))  # type: ignore[arg-type]
+        with pytest.raises(OpaNotInstalledError, match="opa not found on PATH"):
+            policy._fetch_refusal_reason({})
+
+    def test_subprocess_timeout_translates_to_rego_evaluation_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """policy.py:296-299 — ``subprocess.TimeoutExpired`` translates
+        to ``RegoEvaluationError`` with a timeout message."""
+        import subprocess as subprocess_module
+
+        def _raise_timeout(*args: Any, **kwargs: Any) -> Any:
+            raise subprocess_module.TimeoutExpired(cmd=args[0], timeout=5.0)
+
+        monkeypatch.setattr("cognic_agentos.core.scheduler.policy.subprocess.run", _raise_timeout)
+        policy = SchedulerPolicy(opa_engine=_StubOPAEngineForRefusalReason())  # type: ignore[arg-type]
+        with pytest.raises(RegoEvaluationError, match="evaluate timeout"):
+            policy._fetch_refusal_reason({})
+
+    def test_file_not_found_translates_to_opa_not_installed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """policy.py:300-304 — ``FileNotFoundError`` from
+        ``subprocess.run`` (binary missing) translates to
+        ``OpaNotInstalledError``."""
+
+        def _raise_filenotfound(*args: Any, **kwargs: Any) -> Any:
+            raise FileNotFoundError("/fake/opa")
+
+        monkeypatch.setattr(
+            "cognic_agentos.core.scheduler.policy.subprocess.run", _raise_filenotfound
+        )
+        policy = SchedulerPolicy(opa_engine=_StubOPAEngineForRefusalReason())  # type: ignore[arg-type]
+        with pytest.raises(OpaNotInstalledError, match="opa binary not found at pinned path"):
+            policy._fetch_refusal_reason({})
+
+    def test_nonzero_returncode_raises_rego_evaluation_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """policy.py:306-310 — non-zero exit code from opa subprocess
+        translates to ``RegoEvaluationError`` carrying the stderr repr."""
+        import subprocess as subprocess_module
+
+        def _return_nonzero(*args: Any, **kwargs: Any) -> Any:
+            return subprocess_module.CompletedProcess(
+                args=args[0],
+                returncode=1,
+                stdout="",
+                stderr="opa: bundle invalid",
+            )
+
+        monkeypatch.setattr("cognic_agentos.core.scheduler.policy.subprocess.run", _return_nonzero)
+        policy = SchedulerPolicy(opa_engine=_StubOPAEngineForRefusalReason())  # type: ignore[arg-type]
+        with pytest.raises(RegoEvaluationError, match="non-zero exit"):
+            policy._fetch_refusal_reason({})
+
+    def test_malformed_json_stdout_raises_rego_evaluation_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """policy.py:312-317 — JSON decode failure on stdout translates
+        to ``RegoEvaluationError``."""
+        import subprocess as subprocess_module
+
+        def _return_malformed_json(*args: Any, **kwargs: Any) -> Any:
+            return subprocess_module.CompletedProcess(
+                args=args[0],
+                returncode=0,
+                stdout="not-json{",
+                stderr="",
+            )
+
+        monkeypatch.setattr(
+            "cognic_agentos.core.scheduler.policy.subprocess.run", _return_malformed_json
+        )
+        policy = SchedulerPolicy(opa_engine=_StubOPAEngineForRefusalReason())  # type: ignore[arg-type]
+        with pytest.raises(RegoEvaluationError, match="malformed JSON"):
+            policy._fetch_refusal_reason({})
+
+    def test_non_dict_json_root_raises_rego_evaluation_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """policy.py:318-321 — JSON parses to a list (not dict)
+        translates to ``RegoEvaluationError``."""
+        import subprocess as subprocess_module
+
+        def _return_list_json(*args: Any, **kwargs: Any) -> Any:
+            return subprocess_module.CompletedProcess(
+                args=args[0],
+                returncode=0,
+                stdout="[]",
+                stderr="",
+            )
+
+        monkeypatch.setattr(
+            "cognic_agentos.core.scheduler.policy.subprocess.run", _return_list_json
+        )
+        policy = SchedulerPolicy(opa_engine=_StubOPAEngineForRefusalReason())  # type: ignore[arg-type]
+        with pytest.raises(RegoEvaluationError, match="not an object"):
+            policy._fetch_refusal_reason({})
+
+    def test_empty_result_array_raises_rego_evaluation_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """policy.py:322-324 — ``result: []`` (no rule matched)
+        translates to ``RegoEvaluationError``."""
+        import subprocess as subprocess_module
+
+        def _return_empty_result(*args: Any, **kwargs: Any) -> Any:
+            return subprocess_module.CompletedProcess(
+                args=args[0],
+                returncode=0,
+                stdout='{"result": []}',
+                stderr="",
+            )
+
+        monkeypatch.setattr(
+            "cognic_agentos.core.scheduler.policy.subprocess.run", _return_empty_result
+        )
+        policy = SchedulerPolicy(opa_engine=_StubOPAEngineForRefusalReason())  # type: ignore[arg-type]
+        with pytest.raises(RegoEvaluationError, match="empty result set"):
+            policy._fetch_refusal_reason({})
+
+    def test_unexpected_result_shape_raises_rego_evaluation_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """policy.py:325-328 — result has unexpected shape (missing
+        ``expressions`` key) translates to ``RegoEvaluationError``."""
+        import subprocess as subprocess_module
+
+        def _return_unexpected_shape(*args: Any, **kwargs: Any) -> Any:
+            return subprocess_module.CompletedProcess(
+                args=args[0],
+                returncode=0,
+                stdout='{"result": [{"unexpected": "shape"}]}',
+                stderr="",
+            )
+
+        monkeypatch.setattr(
+            "cognic_agentos.core.scheduler.policy.subprocess.run", _return_unexpected_shape
+        )
+        policy = SchedulerPolicy(opa_engine=_StubOPAEngineForRefusalReason())  # type: ignore[arg-type]
+        with pytest.raises(RegoEvaluationError, match="result shape unexpected"):
+            policy._fetch_refusal_reason({})
+
+    def test_non_string_expression_value_raises_rego_evaluation_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """policy.py:329-332 — when ``expressions[0]['value']`` is not
+        a string (e.g. opa returned a bool for a refusal_reason
+        decision point), translate to ``RegoEvaluationError``."""
+        import subprocess as subprocess_module
+
+        def _return_non_string_value(*args: Any, **kwargs: Any) -> Any:
+            return subprocess_module.CompletedProcess(
+                args=args[0],
+                returncode=0,
+                stdout='{"result": [{"expressions": [{"value": 42}]}]}',
+                stderr="",
+            )
+
+        monkeypatch.setattr(
+            "cognic_agentos.core.scheduler.policy.subprocess.run", _return_non_string_value
+        )
+        policy = SchedulerPolicy(opa_engine=_StubOPAEngineForRefusalReason())  # type: ignore[arg-type]
+        with pytest.raises(RegoEvaluationError, match="not string"):
+            policy._fetch_refusal_reason({})
+
+
+class TestSchedulerPolicyEvaluateDenyPathRefusalReasonFailClosed:
+    """Z1b coverage — pins ``policy.py:197-201`` fail-closed path
+    (when allow=False AND _fetch_refusal_reason raises, return
+    ``PolicyDecision(allow=False, policy_reason="opa_unavailable")``).
+    The deny verdict is preserved even when we can't determine the
+    specific reason."""
+
+    @pytest.mark.asyncio
+    async def test_deny_path_fetch_refusal_reason_failure_fails_closed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When OPAEngine.evaluate returns allow=False AND the
+        subsequent ``_fetch_refusal_reason`` call raises (subprocess
+        timeout, malformed output, etc), the policy MUST still
+        return ``PolicyDecision(allow=False, policy_reason="opa_unavailable")``
+        — the deny verdict stands; we just can't surface the
+        specific Rego reason."""
+        from cognic_agentos.core.policy.engine import Decision
+
+        class _DenyStubEngine:
+            async def evaluate(self, *, decision_point: str, input: dict[str, Any]) -> Decision:
+                return Decision(
+                    allow=False,
+                    rule_matched=decision_point,
+                    reasoning="rule matched: deny (default)",
+                    decision_data=None,
+                )
+
+        policy = SchedulerPolicy(opa_engine=_DenyStubEngine())  # type: ignore[arg-type]
+
+        # Force _fetch_refusal_reason to raise by monkeypatching it
+        # to raise RegoEvaluationError directly
+        def _raise_rego_error(rego_input: dict[str, Any]) -> str:
+            raise RegoEvaluationError("simulated reason-fetch failure")
+
+        monkeypatch.setattr(policy, "_fetch_refusal_reason", _raise_rego_error)
+        decision = await policy.evaluate(_make_submit_input())
+        assert decision == PolicyDecision(allow=False, policy_reason="opa_unavailable")

@@ -1839,6 +1839,37 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     ("src/cognic_agentos/core/scheduler/engine.py", 0.95, 0.90),
     ("src/cognic_agentos/core/scheduler/queue.py", 0.95, 0.90),
     ("src/cognic_agentos/core/scheduler/storage.py", 0.95, 0.90),
+    # --- Sprint 10.5b Z1b — SchedulerPolicy Rego eval glue (ADR-022) ---
+    # core/ stop-rule per AGENTS.md L48. Promoted at Sprint-10.5b Z1b
+    # alongside the AGENTS.md stop-rule entry for
+    # `policies/_default/scheduler.rego`. Gate runs against fresh
+    # `--cov-branch coverage.json` in this same Z1b commit per
+    # [[feedback_verify_promotion_meets_floor_at_promotion_time]].
+    # Z1b focused-coverage repair (+10 tests in
+    # `TestSchedulerPolicyFetchRefusalReasonErrorPaths` +
+    # `TestSchedulerPolicyEvaluateDenyPathRefusalReasonFailClosed`)
+    # brought policy.py from 73% to 100% line / 100% branch on the
+    # `_fetch_refusal_reason` subprocess error paths (timeout /
+    # FileNotFoundError / non-zero exit / malformed JSON / non-dict
+    # JSON / empty result / unexpected shape / non-string value) +
+    # the deny-path fetch-failure fail-closed envelope.
+    #
+    # Module rationale:
+    #   * ``core/scheduler/policy.py`` — `SchedulerPolicy` Rego eval
+    #     glue + `PolicyDecision` canonical home. Owns the wire-
+    #     protocol-public 8-key spec §4.8 input projection
+    #     (`_build_rego_input`), the deny-path string-fetch helper
+    #     (`_fetch_refusal_reason`) bridging from
+    #     `data.cognic.scheduler.admit.refusal_reason` to
+    #     `PolicyDecision.policy_reason`, the plan §1179 allow-path
+    #     suppression contract (allow=True ⇒ policy_reason=None),
+    #     and the fail-closed envelope mapping
+    #     `OpaNotInstalledError` / `RegoEvaluationError` to
+    #     `PolicyDecision(allow=False, policy_reason="opa_unavailable")`.
+    #     Subprocess invariants (PATH + HOME=/tmp; list-form argv;
+    #     finite timeout) lockstep-pinned with `core/policy/engine.py`
+    #     OPAEngine via a test-only drift detector.
+    ("src/cognic_agentos/core/scheduler/policy.py", 0.95, 0.90),
 )
 
 
