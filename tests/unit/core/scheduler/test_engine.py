@@ -916,21 +916,27 @@ async def test_round6_p1_reap_expired_ignores_tasks_under_ttl(
 # --- Round-7 reviewer regression coverage --------------------------------
 
 
-async def test_round7_p1_submit_with_parent_task_id_raises_not_implemented(
+async def test_t10_submit_with_parent_task_id_propagates_sentinel_not_implemented(
     engine_db: AsyncEngine,
     caps: ConcurrencyCaps,
     class_settings: dict[str, tuple[int, float]],
 ) -> None:
-    """Round-7 reviewer P1 — pre-Sprint-10.5b-T10, submitting with
-    ``parent_task_id`` set MUST fail loud (NotImplementedError pointing
-    at T10) rather than silently pass through without parent-budget
-    narrowing. The round-6 patch removed the call to
-    ``ParentBudgetResolver.remaining_budget_for`` (which previously
-    fired the sentinel as a side effect), losing the fail-loud guard
-    in the process. Round-7 restores it explicitly."""
+    """T10 fail-loud-via-sentinel — when ``parent_task_id`` is set and
+    no real ``ParentBudgetResolver`` is injected, the engine awaits
+    ``_NullParentBudgetResolver.remaining_budget_for`` which raises
+    ``NotImplementedError`` per the production-grade-rule sentinel
+    contract.
+
+    Replaces round-7's explicit-engine-guard pattern with the seam-
+    Protocol propagation per plan §1259. Difference: the round-7
+    guard fired BEFORE any seam consultation; the T10 fail-loud now
+    fires from INSIDE the resolver call. The exception text comes
+    from the sentinel (NOT the engine), so the match string is
+    different too.
+    """
     engine = _make_engine(db=engine_db, caps=caps, class_settings=class_settings)
     submit_input = _make_submit_input(parent_task_id="00000000-0000-0000-0000-000000000001")
-    with pytest.raises(NotImplementedError, match="parent-budget narrowing not wired"):
+    with pytest.raises(NotImplementedError, match="Sprint 11"):
         await engine.submit(submit_input=submit_input, request_id="req-child")
 
 
@@ -1395,3 +1401,227 @@ async def test_t9_invalid_second_terminal_attempt_does_not_release_twice(
     assert engine._pack_counts.get("pack-x", 0) == pack_count_before
     assert engine._actor_counts.get("svc-a", 0) == actor_count_before
     assert engine._running_attribution == running_attr_before
+
+
+# --- T10 ParentBudgetResolver narrowing integration --------------------
+
+
+async def _read_requested_estimated_tokens(eng: AsyncEngine, task_id: uuid.UUID) -> int:
+    """Read the persisted requested_estimated_tokens column for a task
+    so T10 narrowing tests can assert end-to-end that storage records
+    the narrowed value, not the original request."""
+    from sqlalchemy import select
+
+    async with eng.connect() as conn:
+        row = (
+            await conn.execute(
+                select(_scheduler_tasks.c.requested_estimated_tokens).where(
+                    _scheduler_tasks.c.task_id == task_id
+                )
+            )
+        ).first()
+    assert row is not None, f"no scheduler_tasks row for {task_id}"
+    return int(row.requested_estimated_tokens)
+
+
+async def test_t10_parent_budget_narrows_request_when_resolver_returns_smaller(
+    engine_db: AsyncEngine,
+    caps: ConcurrencyCaps,
+    class_settings: dict[str, tuple[int, float]],
+) -> None:
+    """T10 spec §4.10 + plan §1256 — when the parent's remaining
+    budget (300) is less than the child's requested estimate (500),
+    the engine narrows effective_estimated_tokens to 300. Quota
+    sees 300; storage records 300 (NOT 500). Closes the round-6
+    P1 #2 audit/quota-mismatch reviewer finding."""
+    resolver = _StubParentBudgetResolver(budget=300)
+    quota = _StubQuotaInterrogator(allow=True)
+    engine = _make_engine(
+        db=engine_db,
+        caps=caps,
+        class_settings=class_settings,
+        parent_budget=resolver,
+        quota=quota,
+    )
+    parent_uuid = "00000000-0000-0000-0000-000000000001"
+    decision = await engine.submit(
+        submit_input=_make_submit_input(parent_task_id=parent_uuid, requested_tokens=500),
+        request_id="req-child",
+    )
+    assert decision.outcome == "accepted_immediate"
+    # Resolver was consulted exactly once with the parent UUID
+    assert resolver.calls == [uuid.UUID(parent_uuid)]
+    # Storage row records the NARROWED value, not the original 500
+    persisted = await _read_requested_estimated_tokens(engine_db, uuid.UUID(decision.task_id))
+    assert persisted == 300
+
+
+async def test_t10_parent_budget_does_not_widen_when_resolver_returns_larger(
+    engine_db: AsyncEngine,
+    caps: ConcurrencyCaps,
+    class_settings: dict[str, tuple[int, float]],
+) -> None:
+    """T10 plan §1257 — when parent remaining (1000) > child request
+    (500), narrowing returns min(parent, child) = 500. Storage
+    records 500. The resolver call still happens (audit trail proves
+    the engine consulted the parent budget). compute_child_budget
+    helper's min() semantics are pinned by the T5 seams test;
+    this test pins the end-to-end engine wiring honors them."""
+    resolver = _StubParentBudgetResolver(budget=1000)
+    engine = _make_engine(
+        db=engine_db,
+        caps=caps,
+        class_settings=class_settings,
+        parent_budget=resolver,
+    )
+    parent_uuid = "00000000-0000-0000-0000-000000000002"
+    decision = await engine.submit(
+        submit_input=_make_submit_input(
+            parent_task_id=parent_uuid,
+            requested_tokens=500,
+        ),
+        request_id="req-child",
+    )
+    assert decision.outcome == "accepted_immediate"
+    # Round-1 P3 reviewer fix: pin the "resolver still called" contract
+    # explicitly. Without this assertion, the audit-trail claim in the
+    # docstring above is unverified — the consult-the-budget branch
+    # could silently drift to short-circuit on no-narrowing-needed
+    # cases (e.g. a future optimization peeking at request size before
+    # awaiting the resolver) and this test would still pass on
+    # persisted-tokens alone.
+    assert resolver.calls == [uuid.UUID(parent_uuid)]
+    persisted = await _read_requested_estimated_tokens(engine_db, uuid.UUID(decision.task_id))
+    assert persisted == 500
+
+
+async def test_t10_no_parent_task_id_passes_through_without_resolver_call(
+    engine_db: AsyncEngine,
+    caps: ConcurrencyCaps,
+    class_settings: dict[str, tuple[int, float]],
+) -> None:
+    """T10 plan §1258 — when parent_task_id is None, the engine
+    DOES NOT consult the parent_budget_resolver at all (no
+    NotImplementedError from default sentinel; no resolver.calls
+    recorded). Storage records the requested value verbatim."""
+    resolver = _StubParentBudgetResolver(budget=999)
+    engine = _make_engine(
+        db=engine_db,
+        caps=caps,
+        class_settings=class_settings,
+        parent_budget=resolver,
+    )
+    decision = await engine.submit(
+        submit_input=_make_submit_input(parent_task_id=None, requested_tokens=500),
+        request_id="req-root",
+    )
+    assert decision.outcome == "accepted_immediate"
+    # Resolver NEVER called when parent_task_id is None
+    assert resolver.calls == []
+    persisted = await _read_requested_estimated_tokens(engine_db, uuid.UUID(decision.task_id))
+    assert persisted == 500
+
+
+async def test_t10_narrowed_value_threads_into_quota_would_admit(
+    engine_db: AsyncEngine,
+    caps: ConcurrencyCaps,
+    class_settings: dict[str, tuple[int, float]],
+) -> None:
+    """T10 — round-6 P1 #2 reviewer finding closure: quota.would_admit
+    MUST see the NARROWED estimated_tokens (300), not the original
+    request (500). Without this, quota reservation can disagree with
+    the persisted scheduler_tasks row."""
+    resolver = _StubParentBudgetResolver(budget=300)
+    recorded_estimated_tokens: list[int] = []
+
+    class _RecordingQuotaInterrogator:
+        def __init__(self) -> None:
+            self.reservations: list[uuid.UUID] = []
+            self.releases: list[uuid.UUID] = []
+
+        async def would_admit(
+            self,
+            *,
+            task_id: uuid.UUID,
+            tenant_id: str,
+            pack_id: str,
+            estimated_tokens: int,
+        ) -> bool:
+            recorded_estimated_tokens.append(estimated_tokens)
+            return True
+
+        async def release_reservation(self, task_id: uuid.UUID) -> None:
+            return None
+
+    engine = _make_engine(
+        db=engine_db,
+        caps=caps,
+        class_settings=class_settings,
+        parent_budget=resolver,
+        quota=_RecordingQuotaInterrogator(),
+    )
+    await engine.submit(
+        submit_input=_make_submit_input(
+            parent_task_id="00000000-0000-0000-0000-000000000003",
+            requested_tokens=500,
+        ),
+        request_id="req-narrow",
+    )
+    # Quota saw the narrowed value, not the original 500
+    assert recorded_estimated_tokens == [300]
+
+
+async def test_t10_malformed_parent_task_id_raises_typed_input_invalid(
+    engine_db: AsyncEngine,
+    caps: ConcurrencyCaps,
+    class_settings: dict[str, tuple[int, float]],
+) -> None:
+    """T10 round-1 P2 reviewer fix: a non-None ``parent_task_id`` that
+    is not a valid UUID hex string MUST raise the documented typed
+    ``SchedulerSubmitInputInvalid`` BEFORE any seam consultation.
+    Without the explicit parse guard, a raw ValueError from
+    ``uuid.UUID(...)`` would bypass both the T10 fail-loud-via-sentinel
+    contract AND the closed-enum refusal taxonomy at the engine
+    boundary."""
+    from cognic_agentos.core.scheduler.engine import SchedulerSubmitInputInvalid
+
+    resolver = _StubParentBudgetResolver(budget=1000)
+    engine = _make_engine(
+        db=engine_db,
+        caps=caps,
+        class_settings=class_settings,
+        parent_budget=resolver,
+    )
+    with pytest.raises(SchedulerSubmitInputInvalid) as exc_info:
+        await engine.submit(
+            submit_input=_make_submit_input(parent_task_id="not-a-uuid"),
+            request_id="req-bad",
+        )
+    assert exc_info.value.field == "parent_task_id"
+    assert "not a valid UUID" in exc_info.value.reason
+    # Resolver was NEVER consulted — the typed exception fires BEFORE
+    # any seam call (pre-parse path; closes the round-1 P2 contract
+    # that a malformed input shape cannot reach the parent-budget seam)
+    assert resolver.calls == []
+
+
+def test_t10_invalid_field_literal_in_lockstep_with_constant() -> None:
+    """Round-1 P3 reviewer fix — drift detector pinning
+    :data:`SchedulerSubmitInputInvalidField` Literal arms against the
+    module-level ``_VALID_SUBMIT_INPUT_INVALID_FIELDS`` frozenset.
+    Mirrors the SchedulerPromotionRefusedReason drift detector
+    pattern already on the module. Drift = closed-enum doctrine
+    regression for the SchedulerSubmitInputInvalid.field surface."""
+    import typing as t_
+
+    from cognic_agentos.core.scheduler.engine import (
+        _VALID_SUBMIT_INPUT_INVALID_FIELDS,
+        SchedulerSubmitInputInvalidField,
+    )
+
+    assert (
+        frozenset(t_.get_args(SchedulerSubmitInputInvalidField))
+        == _VALID_SUBMIT_INPUT_INVALID_FIELDS
+    )
+    # Wave-1 invariant: exactly 1 field value
+    assert frozenset({"parent_task_id"}) == _VALID_SUBMIT_INPUT_INVALID_FIELDS

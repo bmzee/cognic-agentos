@@ -37,6 +37,7 @@ Wave-1 design choices:
 
 from __future__ import annotations
 
+import dataclasses
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -52,6 +53,7 @@ from cognic_agentos.core.scheduler._seams import (
     _NullPackStateInterrogator,
     _NullParentBudgetResolver,
     _NullQuotaInterrogator,
+    compute_child_budget,
 )
 from cognic_agentos.core.scheduler._types import (
     AdmissionDecision,
@@ -118,6 +120,51 @@ class _TaskAttribution:
 #:     violate the locked "FIFO within class" scheduler contract per
 #:     spec §4.3. Caller should promote the head first.
 SchedulerPromotionRefusedReason = Literal["caps_saturated", "not_at_queue_head"]
+
+
+#: Closed-enum field-name vocabulary for ``SchedulerSubmitInputInvalid``.
+#: Wave-1 has exactly 1 value (``parent_task_id``); future field-shape
+#: validations grow this Literal additively. Drift detector at
+#: ``test_t10_invalid_field_literal_in_lockstep_with_constant`` pins
+#: the Literal arms against the frozenset constant below.
+SchedulerSubmitInputInvalidField = Literal["parent_task_id"]
+
+#: Build-time invariant: vocabulary frozenset for AST-comparable drift
+#: detection (test imports both this set + the Literal + asserts
+#: equality, mirroring the ``SchedulerPromotionRefusedReason`` pattern
+#: at the top of this module).
+_VALID_SUBMIT_INPUT_INVALID_FIELDS: Final[frozenset[str]] = frozenset({"parent_task_id"})
+
+
+class SchedulerSubmitInputInvalid(Exception):
+    """Raised by ``submit()`` when a SubmitInput field fails engine-
+    boundary shape validation BEFORE any seam consultation.
+
+    Round-1 P2 reviewer fix: ``SubmitInput.parent_task_id`` is typed
+    as ``str | None`` for serialization convenience (HTTP / chain
+    payload) but the engine must parse it via ``uuid.UUID(...)``
+    before threading to :class:`~cognic_agentos.core.scheduler._seams.ParentBudgetResolver`
+    (whose ``remaining_budget_for`` accepts ``uuid.UUID``). A
+    malformed string would raise raw ``ValueError`` from the UUID
+    constructor, bypassing the documented T10 fail-loud-via-sentinel
+    contract. This typed exception catches the parse failure +
+    surfaces it with a closed-enum ``field`` + free-form ``reason``
+    for examiner correlation.
+
+    Round-1 P3 reviewer fix: ``field`` is typed as the closed-enum
+    :data:`SchedulerSubmitInputInvalidField` Literal (1-value Wave-1
+    vocabulary: ``parent_task_id``) rather than free-form ``str``.
+    Mirrors the :class:`SchedulerPromotionRefused` ``reason`` pattern.
+
+    Wave-1 coverage: ``parent_task_id`` malformed-UUID only. Future
+    field-shape validations grow the Literal additively + extend the
+    vocabulary frozenset in lockstep.
+    """
+
+    def __init__(self, *, field: SchedulerSubmitInputInvalidField, reason: str) -> None:
+        super().__init__(f"scheduler_submit_input_invalid: field={field} reason={reason}")
+        self.field: SchedulerSubmitInputInvalidField = field
+        self.reason = reason
 
 
 class SchedulerPromotionRefused(Exception):
@@ -236,32 +283,63 @@ class SchedulerEngine:
         """
         task_id = uuid.uuid4()
 
-        # Round-7 reviewer P1 fix: parent-budget narrowing is T10
-        # scope, but T5 MUST stay fail-loud when ``parent_task_id`` is
-        # set so a pre-T10 caller cannot accidentally bypass parent-
-        # budget inheritance by submitting child tasks before the
-        # ParentBudgetResolver wiring lands. The round-6 patch removed
-        # the narrowing call (which previously fired the sentinel
-        # NotImplementedError as a side effect) to fix the audit/quota
-        # mismatch — but lost the fail-loud guard with it. Restore
-        # the fail-loud explicitly. T10 lifts this raise when wiring
-        # the resolver + storage-side narrowed-tokens thread.
-        if submit_input.parent_task_id is not None:
-            raise NotImplementedError(
-                "scheduler parent-budget narrowing not wired pre-Sprint-10.5b T10; "
-                f"submit with parent_task_id={submit_input.parent_task_id!r} refused. "
-                "See ADR-022 + docs/superpowers/plans/2026-05-25-sprint-10.5-"
-                "scheduler-and-credential-projection.md (T10 narrowing wiring)."
-            )
+        # T10 parent-budget narrowing per ADR-005 + plan §1255-1259.
+        # When ``parent_task_id`` is set, consult ParentBudgetResolver
+        # for the parent's remaining token budget + narrow the child's
+        # requested estimate via the pure-functional helper. The
+        # narrowed value is threaded to BOTH quota.would_admit AND the
+        # storage row via a dataclasses.replace projection — closes
+        # the round-6 P1 #2 audit/quota-mismatch finding (quota was
+        # reserving the narrowed value while storage recorded the
+        # original request; T10 makes both see the same value).
+        #
+        # Fail-loud contract: when parent_task_id is set AND the
+        # default ``_NullParentBudgetResolver`` sentinel is wired (no
+        # real conformer injected), the await on remaining_budget_for
+        # propagates ``NotImplementedError`` per the production-grade-
+        # rule sentinel contract. Replaces round-7's explicit-engine-
+        # guard pattern — the failure mode is now seam-Protocol
+        # propagation, not engine pre-check.
         effective_tokens = submit_input.requested_estimated_tokens
+        if submit_input.parent_task_id is not None:
+            # Round-1 P2 reviewer fix: parse the str → UUID via
+            # explicit try/except so a malformed string surfaces as the
+            # documented typed SchedulerSubmitInputInvalid, NOT a raw
+            # ValueError. Without this guard, a caller bug (e.g.
+            # passing "not-a-uuid") would bypass the T10 fail-loud-via-
+            # sentinel contract because the parse would fail BEFORE the
+            # resolver call.
+            try:
+                parent_uuid = uuid.UUID(submit_input.parent_task_id)
+            except ValueError as exc:
+                raise SchedulerSubmitInputInvalid(
+                    field="parent_task_id",
+                    reason=(f"not a valid UUID string: {submit_input.parent_task_id!r}"),
+                ) from exc
+            parent_remaining = await self._parent_budget.remaining_budget_for(parent_uuid)
+            effective_tokens = compute_child_budget(
+                parent_remaining_budget=parent_remaining,
+                child_pack_quota=submit_input.requested_estimated_tokens,
+            )
+        # Project the narrowed value into a SubmitInput copy so
+        # downstream consumers (quota, storage, attribution, audit)
+        # see the same value. dataclasses.replace skipped when
+        # narrowing is a no-op (== original) to keep the identity
+        # check at the call site cheap.
+        effective_submit_input = (
+            submit_input
+            if effective_tokens == submit_input.requested_estimated_tokens
+            else dataclasses.replace(submit_input, requested_estimated_tokens=effective_tokens)
+        )
 
         # Step 2: pack installed?
         if not await self._pack_state.is_installed(
-            tenant_id=submit_input.tenant_id, pack_id=submit_input.pack_id
+            tenant_id=effective_submit_input.tenant_id,
+            pack_id=effective_submit_input.pack_id,
         ):
             await self._emit_admission_refused(
                 refused_task_id=task_id,
-                submit_input=submit_input,
+                submit_input=effective_submit_input,
                 reason="refused_pack_not_installed",
                 request_id=request_id,
             )
@@ -272,11 +350,12 @@ class SchedulerEngine:
 
         # Step 3: kill switch
         if await self._kill_switch.is_active(
-            tenant_id=submit_input.tenant_id, pack_id=submit_input.pack_id
+            tenant_id=effective_submit_input.tenant_id,
+            pack_id=effective_submit_input.pack_id,
         ):
             await self._emit_admission_refused(
                 refused_task_id=task_id,
-                submit_input=submit_input,
+                submit_input=effective_submit_input,
                 reason="refused_kill_switch_active",
                 request_id=request_id,
             )
@@ -287,11 +366,11 @@ class SchedulerEngine:
 
         # Step 4: policy
         if self._policy is not None:
-            policy_decision = await self._policy(submit_input)
+            policy_decision = await self._policy(effective_submit_input)
             if not policy_decision.allow:
                 await self._emit_admission_refused(
                     refused_task_id=task_id,
-                    submit_input=submit_input,
+                    submit_input=effective_submit_input,
                     reason="refused_policy_denied",
                     request_id=request_id,
                     policy_reason=policy_decision.policy_reason,
@@ -303,17 +382,19 @@ class SchedulerEngine:
                 )
 
         # Step 5: quota reservation (TRUE = reserves; FALSE = no
-        # reservation made)
+        # reservation made). T10 — quota sees the narrowed effective
+        # value, matching what storage will record per the round-6
+        # P1 #2 audit/quota-mismatch reviewer finding closure.
         reserved = await self._quota.would_admit(
             task_id=task_id,
-            tenant_id=submit_input.tenant_id,
-            pack_id=submit_input.pack_id,
+            tenant_id=effective_submit_input.tenant_id,
+            pack_id=effective_submit_input.pack_id,
             estimated_tokens=effective_tokens,
         )
         if not reserved:
             await self._emit_admission_refused(
                 refused_task_id=task_id,
-                submit_input=submit_input,
+                submit_input=effective_submit_input,
                 reason="refused_quota_exhausted",
                 request_id=request_id,
             )
@@ -330,7 +411,7 @@ class SchedulerEngine:
         try:
             decision = await self._do_admission_work(
                 task_id=task_id,
-                submit_input=submit_input,
+                submit_input=effective_submit_input,
                 request_id=request_id,
             )
         except BaseException:
@@ -354,7 +435,7 @@ class SchedulerEngine:
             # point + emitted their own row).
             await self._emit_admission_refused(
                 refused_task_id=task_id,
-                submit_input=submit_input,
+                submit_input=effective_submit_input,
                 reason="refused_queue_full",
                 request_id=request_id,
             )
