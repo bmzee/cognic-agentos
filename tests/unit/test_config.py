@@ -1572,6 +1572,39 @@ class TestSprint7AClosedEnumVocabulary:
                 "hook_pack_kind_constraint_violated",
                 "hook_entry_point_mismatch",
                 "hook_unresolved_reference",
+                # Credentials (Sprint 10.6 T14 — cli/validators/credentials.py
+                # per ADR-004 §25 + ADR-017). 18 [credentials.<name>] block
+                # refusals covering logical-name grammar + vault_path shape
+                # + expected_fields shape + ttl_s + purpose_category +
+                # purpose_description + per-block + pack-level + risk-tier
+                # gating + unknown-field rejection, plus 3 runtime block
+                # cross-validation refusals (expected_workload_gid required-
+                # for-credential-pack + invalid-range + without-credentials)
+                # owned by the same validator since they gate on credential
+                # block presence. T13 vocabulary scaffold per the plan-of-
+                # record at docs/superpowers/plans/2026-05-26-sprint-10.6-
+                # workload-credential-projection.md §83-122.
+                "credentials_logical_name_invalid_grammar",
+                "credentials_logical_name_duplicate",
+                "credentials_vault_path_empty",
+                "credentials_vault_path_invalid_chars",
+                "credentials_vault_path_invalid_shape",
+                "credentials_vault_path_exceeds_length",
+                "credentials_vault_path_duplicate_across_blocks",
+                "credentials_expected_fields_empty",
+                "credentials_expected_fields_count_exceeds_maximum",
+                "credentials_expected_fields_contains_duplicates",
+                "credentials_expected_fields_field_name_invalid_grammar",
+                "credentials_expected_fields_reserved_underscore_prefix",
+                "credentials_ttl_s_invalid",
+                "credentials_purpose_category_invalid_value",
+                "credentials_purpose_description_invalid_shape",
+                "credentials_count_exceeds_maximum",
+                "credentials_risk_tier_not_permitted_pre_13_5",
+                "credentials_unknown_field",
+                "runtime_expected_workload_gid_required_for_credential_pack",
+                "runtime_expected_workload_gid_invalid_range",
+                "runtime_expected_workload_gid_without_credentials",
             }
         )
 
