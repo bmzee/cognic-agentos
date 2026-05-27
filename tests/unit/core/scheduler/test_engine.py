@@ -1160,3 +1160,238 @@ async def test_z1a_read_state_raises_scheduler_task_not_found_on_unknown_uuid(
             ),
             request_id="req-fail",
         )
+
+
+# --- T9 seam-integration regressions (Option A doctrine — engine owns
+# pack_state + kill_switch + quota; policy owns Rego only). ---------------
+
+
+class _RaisingQuotaInterrogator:
+    """T9 stub: would_admit raises if ever called. Used to prove
+    upstream refusals (pack_state / kill_switch / policy) short-
+    circuit BEFORE engine consults quota."""
+
+    async def would_admit(self, **_: Any) -> bool:
+        raise AssertionError(
+            "would_admit must not be called when an upstream gate "
+            "(pack_state / kill_switch / policy) has already refused"
+        )
+
+    async def release_reservation(self, task_id: uuid.UUID) -> None:
+        # Allowed — release is idempotent per Protocol contract
+        return None
+
+
+class _RecordingPolicy:
+    """T9 stub: records every evaluate() call so the kill-switch-
+    beats-policy test can assert the policy was NEVER consulted when
+    kill_switch fired first."""
+
+    def __init__(self, allow: bool = True) -> None:
+        self.allow = allow
+        self.calls: list[SubmitInput] = []
+
+    async def __call__(self, submit_input: SubmitInput) -> PolicyDecision:
+        self.calls.append(submit_input)
+        return PolicyDecision(
+            allow=self.allow,
+            policy_reason=None if self.allow else "scheduler_high_risk_tier_refused_pre_13_5",
+        )
+
+
+async def test_t9_kill_switch_short_circuits_before_policy_evaluator(
+    engine_db: AsyncEngine,
+    caps: ConcurrencyCaps,
+    class_settings: dict[str, tuple[int, float]],
+) -> None:
+    """T9 ordering invariant (kill-switch beats policy): when
+    kill_switch=True AND policy would also deny, the public outcome
+    is refused_kill_switch_active AND the policy evaluator is
+    NEVER consulted. Pins the engine's submit() pipeline order
+    documented at engine.py:174 (Step 3 kill_switch BEFORE Step 4
+    policy)."""
+    recording_policy = _RecordingPolicy(allow=False)
+    engine = _make_engine(
+        db=engine_db,
+        caps=caps,
+        class_settings=class_settings,
+        kill_switch=_StubKillSwitchInterrogator(active=True),
+        policy=recording_policy,
+    )
+    decision = await engine.submit(submit_input=_make_submit_input(), request_id="req-1")
+    assert decision.outcome == "refused_kill_switch_active"
+    # Strict ordering: policy was NEVER called because kill_switch fired first
+    assert recording_policy.calls == []
+
+
+@pytest.mark.parametrize(
+    "refusal_scenario,expected_outcome",
+    [
+        ("pack_not_installed", "refused_pack_not_installed"),
+        ("kill_switch_active", "refused_kill_switch_active"),
+        ("policy_denied", "refused_policy_denied"),
+    ],
+)
+async def test_t9_upstream_refusals_never_call_quota_would_admit(
+    engine_db: AsyncEngine,
+    caps: ConcurrencyCaps,
+    class_settings: dict[str, tuple[int, float]],
+    refusal_scenario: str,
+    expected_outcome: str,
+) -> None:
+    """T9 invariant (1) + (2): upstream refusal gates (pack_state /
+    kill_switch / policy) short-circuit BEFORE engine consults
+    quota.would_admit. Pinning prevents future refactor from
+    silently inverting the order — a quota call on an upstream-
+    refused submission would be a phantom reservation."""
+    quota = _RaisingQuotaInterrogator()
+    kwargs: dict[str, Any] = {
+        "db": engine_db,
+        "caps": caps,
+        "class_settings": class_settings,
+        "quota": quota,
+    }
+    if refusal_scenario == "pack_not_installed":
+        kwargs["pack_state"] = _StubPackStateInterrogator(installed=False)
+    elif refusal_scenario == "kill_switch_active":
+        kwargs["kill_switch"] = _StubKillSwitchInterrogator(active=True)
+    elif refusal_scenario == "policy_denied":
+        kwargs["policy"] = _stub_policy_deny()
+    engine = _make_engine(**kwargs)
+    decision = await engine.submit(submit_input=_make_submit_input(), request_id="r-t9")
+    assert decision.outcome == expected_outcome
+    # The _RaisingQuotaInterrogator would have raised if would_admit had been called
+
+
+async def test_t9_complete_releases_quota_reservation_exactly_once(
+    engine_db: AsyncEngine,
+    caps: ConcurrencyCaps,
+    class_settings: dict[str, tuple[int, float]],
+) -> None:
+    """T9 invariant (4): successful complete() terminal release
+    fires exactly once. Mirrors test_complete_transitions_running_to_completed
+    but tightens the assertion to exact call count."""
+    quota = _StubQuotaInterrogator(allow=True)
+    engine = _make_engine(db=engine_db, caps=caps, class_settings=class_settings, quota=quota)
+    decision = await engine.submit(submit_input=_make_submit_input(), request_id="req-1")
+    task_id = uuid.UUID(decision.task_id)
+    await engine.mark_running(task_id, request_id="req-start")
+    await engine.complete(task_id, request_id="req-done")
+    assert quota.releases.count(task_id) == 1
+
+
+async def test_t9_fail_releases_quota_reservation_exactly_once(
+    engine_db: AsyncEngine,
+    caps: ConcurrencyCaps,
+    class_settings: dict[str, tuple[int, float]],
+) -> None:
+    """T9 invariant (4): fail() terminal release fires exactly once
+    on the running → failed path."""
+    quota = _StubQuotaInterrogator(allow=True)
+    engine = _make_engine(db=engine_db, caps=caps, class_settings=class_settings, quota=quota)
+    decision = await engine.submit(submit_input=_make_submit_input(), request_id="req-1")
+    task_id = uuid.UUID(decision.task_id)
+    await engine.mark_running(task_id, request_id="req-start")
+    await engine.fail(
+        task_id,
+        request_id="req-fail",
+        payload=TaskFailedPayload(
+            reason="scheduler_task_failed_sandbox_create_refused",
+            sandbox_refusal_reason=None,
+            sandbox_event_id=None,
+        ),
+    )
+    assert quota.releases.count(task_id) == 1
+
+
+@pytest.mark.parametrize("from_state", ["pending", "running"])
+async def test_t9_cancel_releases_quota_reservation_exactly_once(
+    engine_db: AsyncEngine,
+    caps: ConcurrencyCaps,
+    class_settings: dict[str, tuple[int, float]],
+    from_state: str,
+) -> None:
+    """T9 invariant (4): cancel() terminal release fires exactly once
+    on BOTH pending → cancelled (cancel-during-create per ADR-022
+    amendment) AND running → cancelled (cooperative cancellation per
+    spec §4.6) paths. Round-1 P2 reviewer fix — the original test
+    only covered the pending path while its docstring claimed both;
+    parametrize closes the gap."""
+    quota = _StubQuotaInterrogator(allow=True)
+    engine = _make_engine(db=engine_db, caps=caps, class_settings=class_settings, quota=quota)
+    decision = await engine.submit(submit_input=_make_submit_input(), request_id="req-1")
+    task_id = uuid.UUID(decision.task_id)
+    if from_state == "running":
+        # mark_running to advance to the running state before cancel
+        await engine.mark_running(task_id, request_id="req-start")
+    # Else: cancel from pending (no mark_running first)
+    actor = TaskActor(subject="admin", tenant_id="tenant-a", actor_type="human")
+    await engine.cancel(
+        task_id,
+        actor=actor,
+        reason="actor_cancelled",
+        request_id="req-cancel",
+    )
+    assert quota.releases.count(task_id) == 1
+    # Sanity: terminal state reached
+    assert await _read_state(engine_db, task_id) == "cancelled"
+
+
+async def test_t9_preempt_releases_quota_reservation_exactly_once(
+    engine_db: AsyncEngine,
+    caps: ConcurrencyCaps,
+    class_settings: dict[str, tuple[int, float]],
+) -> None:
+    """T9 invariant (4): preempt() terminal release fires exactly
+    once on the running → preempted path."""
+    quota = _StubQuotaInterrogator(allow=True)
+    engine = _make_engine(db=engine_db, caps=caps, class_settings=class_settings, quota=quota)
+    decision = await engine.submit(submit_input=_make_submit_input(), request_id="req-1")
+    task_id = uuid.UUID(decision.task_id)
+    await engine.mark_running(task_id, request_id="req-start")
+    await engine.preempt(task_id, request_id="req-preempt")
+    assert quota.releases.count(task_id) == 1
+
+
+async def test_t9_invalid_second_terminal_attempt_does_not_release_twice(
+    engine_db: AsyncEngine,
+    caps: ConcurrencyCaps,
+    class_settings: dict[str, tuple[int, float]],
+) -> None:
+    """T9 invariant (4) — refined per user-locked tweak #1: a second
+    complete() on an already-completed task hits storage's invalid-
+    state-transition path. _transition_terminal only releases AFTER
+    successful storage transition, so the second invalid attempt
+    MUST NOT mutate engine bookkeeping nor fire a second release.
+
+    Pins that the round-7 P2 durable-first ordering contract extends
+    to terminal transitions: bookkeeping (including release) gates on
+    storage success."""
+    quota = _StubQuotaInterrogator(allow=True)
+    engine = _make_engine(db=engine_db, caps=caps, class_settings=class_settings, quota=quota)
+    decision = await engine.submit(submit_input=_make_submit_input(), request_id="req-1")
+    task_id = uuid.UUID(decision.task_id)
+    await engine.mark_running(task_id, request_id="req-start")
+    await engine.complete(task_id, request_id="req-done")
+    # Snapshot post-first-complete state
+    releases_before = list(quota.releases)
+    tenant_count_before = engine._tenant_class_counts.get(("tenant-a", "interactive"), 0)
+    pack_count_before = engine._pack_counts.get("pack-x", 0)
+    actor_count_before = engine._actor_counts.get("svc-a", 0)
+    running_attr_before = dict(engine._running_attribution)
+    # Second complete — round-1 P2 fix: tighten the assertion from
+    # `pytest.raises(Exception)` to the specific typed exception +
+    # closed-enum reason. Without this, a bug that raised BEFORE the
+    # storage state-machine guard (e.g. a KeyError in attribution
+    # lookup) would silently pass the test.
+    from cognic_agentos.core.scheduler._types import SchedulerTransitionRefused
+
+    with pytest.raises(SchedulerTransitionRefused) as exc_info:
+        await engine.complete(task_id, request_id="req-done-again")
+    assert exc_info.value.reason == "scheduler_transition_invalid_state_pair"
+    # No second release; no further bookkeeping mutation
+    assert list(quota.releases) == releases_before
+    assert engine._tenant_class_counts.get(("tenant-a", "interactive"), 0) == tenant_count_before
+    assert engine._pack_counts.get("pack-x", 0) == pack_count_before
+    assert engine._actor_counts.get("svc-a", 0) == actor_count_before
+    assert engine._running_attribution == running_attr_before

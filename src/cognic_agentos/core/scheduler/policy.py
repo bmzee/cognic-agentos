@@ -63,12 +63,18 @@ to callers via ``SchedulerAdmissionOutcome``. The
 diagnostic that NEVER appears in the wire-public enum. Pinned by
 ``TestSchedulerPolicyVocabularyBoundary``.
 
-**T9 forward**: this module will be extended with a
-``KillSwitchInterrogator`` seam consultation (post-Rego check that
-adds ``policy_reason="kill_switch_active"`` on True) per plan §1210.
-The kill-switch path is deliberately INTERNAL to SchedulerPolicy
-rather than threaded through Rego — it's an operational kill switch,
-not a policy decision; the bundle remains policy-only.
+**Ownership boundary (T9 — Option A doctrine LOCKED)**: this module
+owns Rego policy ONLY. Operational gates (``pack_state`` /
+``kill_switch`` / ``quota`` / queue / caps) are owned by
+:class:`~cognic_agentos.core.scheduler.engine.SchedulerEngine`. Plan
+§1210's literal dual-consultation interpretation was REJECTED at T9
+kickoff because it conflated ADR-018 (emergency controls) with
+ADR-015 (policy-as-code) — kill_switch is an operational real-time
+emergency surface, NOT a policy decision; the bundle remains
+policy-only and the ``KillSwitchInterrogator`` seam stays
+engine-side. Pinned by ``tests/unit/core/scheduler/test_engine.py``
+T9 regressions: kill_switch-beats-policy ordering, upstream-refusals-
+never-call-quota, no-emergency-import AST guard.
 """
 
 from __future__ import annotations
@@ -147,8 +153,10 @@ class SchedulerPolicy:
     bundle (typically constructed once at AgentOS app startup +
     threaded through DI to the scheduler engine).
 
-    Wave-1 instance state: just the injected OPAEngine. T9 extends
-    this to also take a ``KillSwitchInterrogator`` seam.
+    Wave-1 instance state: just the injected OPAEngine. Kill-switch
+    consultation is engine-owned per the Option A doctrine LOCKED at
+    T9 kickoff (see module-header ownership boundary note above);
+    SchedulerPolicy does NOT take a ``KillSwitchInterrogator`` seam.
     """
 
     def __init__(self, *, opa_engine: OPAEngine) -> None:
@@ -210,8 +218,14 @@ class SchedulerPolicy:
             (string projection; bundle reads ``input.actor_subject``
             not ``input.actor.subject``).
           * ``current_tenant_concurrent_count``: Wave-1 stub value 0.
-            T9 wires the real per-tenant concurrent-task count from
-            ``SchedulerEngine._tenant_class_counts``.
+            A future task (post-T9) wires the real per-tenant
+            concurrent-task count from
+            ``SchedulerEngine._tenant_class_counts`` when the Rego
+            bundle starts consuming this input field. T9 deliberately
+            does NOT wire this — the bundle's Wave-1 rules
+            (`scheduler_class_unknown` / `..._high_risk_tier_..._pre_13_5`
+            / `scheduler_default_deny`) make no decisions on
+            concurrent count, so stub=0 is correct for Wave-1.
         """
         return {
             "tenant_id": submit_input.tenant_id,
@@ -220,7 +234,8 @@ class SchedulerPolicy:
             "class": submit_input.class_,
             "pack_kind": submit_input.pack_kind,
             "pack_risk_tier": submit_input.pack_risk_tier,
-            # Wave-1 stub: T9 wires real concurrent count
+            # Wave-1 stub — see _build_rego_input docstring above for
+            # the post-T9 wiring contract.
             "current_tenant_concurrent_count": 0,
             "requested_estimated_tokens": submit_input.requested_estimated_tokens,
         }
