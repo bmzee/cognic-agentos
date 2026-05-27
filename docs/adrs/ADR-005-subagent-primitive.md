@@ -67,8 +67,32 @@ Sub-agent spawn + return events map to ISO 42001 Annex A controls around **deleg
 3. **Phase 4.3**: Budget + depth caps + escalation on exceed
 4. **Phase 4.4**: Audit chain integrity test (Merkle proof over cross-agent events)
 
+## Sprint 10.5 amendment (2026-05-27) — `ParentBudgetResolver` seam wired
+
+Per ADR-022 §"Sub-agent budget inheritance — the Sprint 11 hook", sub-agent "budget narrowing" becomes a **scheduler operation** instead of a static config field. Sprint 10.5 (merged via PR #40, squash `6791eec`) landed the seam half of that contract in `core/scheduler/`; Sprint 11 will bind a real conformer.
+
+**Landed in 10.5 — scheduler-side seam contract:**
+
+- `core/scheduler/_seams.py` declares the **consumer-owned `ParentBudgetResolver` Protocol** per `[[feedback_consumer_owned_protocol_for_unlanded_dep]]`: `async def remaining_budget_for(parent_task_id: uuid.UUID) -> int`. The Protocol is declared in the scheduler module that needs it; Sprint 11 will provide a structurally-conforming implementation that reads from `subagent/` state, NOT inherit from this declaration.
+- `core/scheduler/_seams.py::_NullParentBudgetResolver` is the **fail-loud Wave-1 default sentinel** — `remaining_budget_for(...)` raises `NotImplementedError` referencing ADR-005. Pre-Sprint-11 deployments cannot accidentally see a synthetic-zero budget result; the failure mode is `NotImplementedError` propagating up to the caller.
+- `core/scheduler/engine.py::SchedulerEngine.submit(submit_input: SubmitInput, *, request_id: str)` is the public seam. The parent task ID is carried as an **optional field on `SubmitInput`** (`SubmitInput.parent_task_id: str | None = None` declared in `core/scheduler/_types.py:94`) — NOT as a `submit()` kwarg. `submit_input` is typed as a frozen dataclass so the parent linkage rides along with every other admission input through one immutable value. When `submit_input.parent_task_id is not None`:
+  1. **T10 typed-exception entrypoint**: `submit()` parses the str via `uuid.UUID(...)` wrapped in a try/except that translates `ValueError` to the typed `SchedulerSubmitInputInvalid(field="parent_task_id", reason=str(exc))` exception. The `field` arg is a closed-enum 1-value `SchedulerSubmitInputInvalidField = Literal["parent_task_id"]` declared in `core/scheduler/engine.py:133` — drift-detector pinned.
+  2. **Budget narrowing**: `await parent_budget.remaining_budget_for(parent_uuid)` (calls the injected resolver — `_NullParentBudgetResolver` raises by default) → `effective_tokens = compute_child_budget(parent_remaining_budget=..., child_pack_quota=submit_input.requested_estimated_tokens)` — pure-functional `min(...)` helper in `core/scheduler/_seams.py`.
+  3. **Narrowing threads all 5 admission gates**: the narrowed `effective_submit_input` (via `dataclasses.replace`) is threaded through pack_state → kill_switch → policy → quota → caps/queue + all 5 emit-admission-refused chain-row sites. This closes the audit/quota-mismatch class where quota saw narrowed values + storage saw original.
+- `core/scheduler/storage.py::SchedulerStorage.submit()` persists the parent linkage in `scheduler_tasks.parent_task_id` + threads it onto the `scheduler.admission_accepted` chain row's payload — examiners can walk the parent → child chain via decision_history without joining mutable state.
+
+**Still owned by Sprint 11 (sub-agent primitive) — NOT in 10.5:**
+
+- `subagent/spawn.py` — A2A-backed `invoke(prompt)` flow that constructs a `SubmitInput(..., parent_task_id=<parent task id>)` and calls `SchedulerEngine.submit(submit_input, request_id=...)` before child dispatch (per the BUILD_PLAN §10.5 + §11 contract).
+- The real `ParentBudgetResolver` conformer reading the parent's remaining budget snapshot from `subagent/` state.
+- Privilege de-escalation enforcement at the harness boundary (§"Privilege de-escalation rule" + §"Implementation phases / Phase 4.2").
+- Depth cap enforcement at the spawn seam (§"Recursion depth").
+
+**No semantic change to ADR-005's existing decisions** — Sprint 10.5 is additive: the scheduler is the runtime substrate that Sprint 11's sub-agent primitive will dispatch through. The §"Decision" section's "max tokens, wall-time, recursion depth" budget contract remains the cross-cutting policy declaration; how it's enforced at the runtime is now scheduler-mediated.
+
 ## References
 - [Anthropic — Sub-agents in Claude Code](https://docs.anthropic.com/en/docs/claude-code/sub-agents)
 - [The Architecture of Scale: Anthropic's Sub-Agents — Medium](https://medium.com/@jiten.p.oswal/the-architecture-of-scale-a-deep-dive-into-anthropics-sub-agents-6c4faae1abda)
 - ADR-003 (A2A — substrate for sub-agent spawning)
 - ADR-004 (sandbox — sub-agents may run in their own sandbox)
+- ADR-022 (runtime scheduler — Sprint 10.5 wires the `ParentBudgetResolver` seam)

@@ -1,7 +1,7 @@
 # ADR-022 — Runtime Scheduler / Work Queue
 
 ## Status
-**DRAFT** authored 2026-05-16. Pending review.
+**APPROVED for implementation** — DRAFT 2026-05-16 → APPROVED 2026-05-27. Scheduler-relevant portions implemented in **Sprint 10.5 (10.5a + 10.5b)**, merged to `main` via PR #40 (squash commit `6791eec`). The credential-projection sub-arc originally bundled as 10.5c was split to **Sprint 10.6** at the Z1b VALVE CHECK; see the §"Sprint 10.5 implementation closeout (2026-05-27)" addendum at the foot of this ADR.
 
 ## Context
 
@@ -54,21 +54,23 @@ Class is declared at `scheduler.submit(task, *, class_)` time and cannot change 
 
 `SchedulerEngine.submit()` returns a `SchedulerAdmissionOutcome` value carrying one of seven closed-enum outcomes. This vocabulary IS the wire-protocol contract for every caller dispatching on submit result. Drift between the Literal and consumer error-handling is caught at module load by a partition-invariant test.
 
-| Outcome | Meaning | HTTP analog (when surfaced via portal) |
+| Outcome (wire-public Literal value) | Meaning | HTTP analog (when surfaced via portal) |
 |---|---|---|
-| `scheduler_admission_accepted_immediate` | Concurrency cap had headroom; task moved straight to `running` | 202 Accepted |
-| `scheduler_admission_accepted_queued` | Queue had capacity; task is `pending` | 202 Accepted (+ `task_id`) |
-| `scheduler_admission_refused_queue_full` | Bounded queue full for (tenant, class); response carries `retry_after_s` derived from oldest queued task's age + class-specific SLA | 429 Too Many Requests |
-| `scheduler_admission_refused_quota_exhausted` | `core/emergency/quotas.py` refused at submit time | 429 + `quota_class` |
-| `scheduler_admission_refused_policy_denied` | `scheduler.rego` returned `allow=false`; carries `policy_reason` field | 403 |
-| `scheduler_admission_refused_kill_switch_active` | `core/emergency/kill_switches.py` flipped for the relevant scope (pack / tenant / cloud / feature) | 503 |
-| `scheduler_admission_refused_pack_not_installed` | Pack lifecycle state ≠ `installed` at admission | 409 |
+| `accepted_immediate` | Concurrency cap had headroom; task moved straight to `running` | 202 Accepted |
+| `accepted_queued` | Queue had capacity; task is `pending` | 202 Accepted (+ `task_id`) |
+| `refused_queue_full` | Bounded queue full for (tenant, class); response carries `retry_after_s` derived from oldest queued task's age + class-specific SLA | 429 Too Many Requests |
+| `refused_quota_exhausted` | `core/emergency/quotas.py` refused at submit time | 429 + `quota_class` |
+| `refused_policy_denied` | `scheduler.rego` returned `allow=false`; carries `policy_reason` field | 403 |
+| `refused_kill_switch_active` | `core/emergency/kill_switches.py` flipped for the relevant scope (pack / tenant / cloud / feature) | 503 |
+| `refused_pack_not_installed` | Pack lifecycle state ≠ `installed` at admission | 409 |
+
+> **Vocabulary note (Sprint 10.5 closeout — see addendum §1):** the DRAFT version of this table proposed the prefixed shape `scheduler_admission_<state>_<reason>` (e.g. `scheduler_admission_refused_queue_full`). During Sprint 10.5 implementation the vocabulary was tightened to the **unprefixed** shape shown above because the Literal type name (`SchedulerAdmissionOutcome`) already carries the `scheduler_admission` context — repeating it inside each value was redundant. The wire-public values landed in `core/scheduler/_types.py:21-31` are the unprefixed forms; this table now reflects the as-built contract.
 
 **Backpressure semantics (user-locked Wave-1):**
 
-1. If queue has capacity and concurrency cap has headroom → `scheduler_admission_accepted_immediate` (run now).
-2. If queue has capacity but concurrency cap is saturated → `scheduler_admission_accepted_queued` (FIFO wait; **do NOT refuse**).
-3. If queue is full for (tenant, class) → `scheduler_admission_refused_queue_full` with `retry_after_s`.
+1. If queue has capacity and concurrency cap has headroom → `accepted_immediate` (run now).
+2. If queue has capacity but concurrency cap is saturated → `accepted_queued` (FIFO wait; **do NOT refuse**).
+3. If queue is full for (tenant, class) → `refused_queue_full` with `retry_after_s`.
 4. If quota / policy / kill-switch / pack-state denies → refuse immediately with the matching closed-enum reason; audit-emit `scheduler.admission_refused` carrying the reason.
 
 The five refusal outcomes share a single `scheduler.admission_refused` audit event family; `payload.reason` discriminates. The two acceptance outcomes share `scheduler.admission_accepted`; `payload.outcome` discriminates immediate vs queued. **Seven closed-enum values across two event families** — small enough that examiners can hold the matrix in their head.
@@ -112,7 +114,7 @@ Three cap surfaces, all configurable per tenant + per scope. The numbers below a
 | Per-pack concurrent invocations within a tenant | 8 | Pack manifest (Sprint 7B.x extension) |
 | Per-actor concurrent submissions | 4 | RBAC binding (Sprint 7B.2 extension) |
 
-A cap that would be exceeded routes to the FIFO queue (not refusal). A FULL queue THEN routes to `scheduler_admission_refused_queue_full`. **Concurrency caps and queue capacity are orthogonal** — saturating the first enqueues, saturating both refuses.
+A cap that would be exceeded routes to the FIFO queue (not refusal). A FULL queue THEN routes to `refused_queue_full`. **Concurrency caps and queue capacity are orthogonal** — saturating the first enqueues, saturating both refuses.
 
 ### Cooperative cancellation
 
@@ -151,7 +153,7 @@ All events hash-chain into `decision_history`. The `task_id` field is the chain-
 
 ### Sub-agent budget inheritance — the Sprint 11 hook
 
-`SchedulerEngine.submit(task, *, parent_task_id=...)` accepts a parent task identifier. When a sub-agent invokes `tool_call`, the parent's remaining token budget is snapshotted at child-submit time and the child's quota reservation is narrowed accordingly. The child cannot exceed `min(child_pack_quota, parent_remaining_budget)`. Parent completion releases the child's residual budget back to the parent's pool.
+`SchedulerEngine.submit(submit_input, *, request_id)` accepts a `SubmitInput` frozen dataclass whose `parent_task_id: str | None` field carries the parent task identifier (per `core/scheduler/_types.py:94`). When a sub-agent invokes `tool_call`, the harness constructs a `SubmitInput(..., parent_task_id=<parent>)` and the parent's remaining token budget is snapshotted at child-submit time via the `ParentBudgetResolver` seam; the child's quota reservation is narrowed accordingly. The child cannot exceed `min(child_pack_quota, parent_remaining_budget)`. Parent completion releases the child's residual budget back to the parent's pool.
 
 This is the substantive ADR-005 amendment — sub-agent "budget narrowing" becomes a scheduler operation instead of a static config field that nobody enforces.
 
@@ -185,7 +187,7 @@ Four Python modules on the durable coverage gate (63 → 67) + one new AGENTS.md
 
 ### Positive
 - AgentOS earns the "operating system" claim — there is now a single point where every invocation passes through resource control.
-- Saturation produces a closed-enum refusal (`scheduler_admission_refused_queue_full` with `retry_after_s`) instead of arbitrary cascading failure.
+- Saturation produces a closed-enum refusal (`refused_queue_full` with `retry_after_s`) instead of arbitrary cascading failure.
 - Live customer-facing calls never starve behind background eval runs.
 - Sub-agent budget narrowing becomes a runtime-enforced operation, not a static config field.
 - Quota refusal moves from post-LLM-bill to pre-LLM-bill — saves money, surfaces the deny earlier.
@@ -209,20 +211,99 @@ Four Python modules on the durable coverage gate (63 → 67) + one new AGENTS.md
 
 **Cross-ADR amendments triggered by this approval:**
 
-- ADR-005 (sub-agent primitive): budget narrowing becomes a scheduler operation; replace the static `policy.budget` field semantics with `scheduler.submit(..., parent_task_id=...)` arithmetic.
+- ADR-005 (sub-agent primitive): budget narrowing becomes a scheduler operation; replace the static `policy.budget` field semantics with `SubmitInput(..., parent_task_id=...)` passed to `SchedulerEngine.submit(submit_input, request_id=...)` arithmetic.
 - ADR-014 (runtime tool approval): approval gate continues to fire before `scheduler.submit()` — high-risk-tier tools that require approval go through `approval.engine.wait_for_grant()` first, then `scheduler.submit()`. No semantic change; documented sequencing.
 - ADR-018 (emergency controls): quota check moves from gateway-call-time to scheduler-submit-time. Kill switches gain a `scheduler.admit_refusal` integration point so a flipped switch immediately drains the queue.
 - ADR-020 (UI event-stream contract): Wave-1 does NOT add a new typed event family. Scheduler audit + decision-history rows surface through the existing `decision_audit.event_appended` mirror (already wired in Sprint 6 via the decision_history → broker projection), keeping the Sprint 7B.4 11-family Wave-1 taxonomy stable. A first-class typed `scheduler.*` UI-event family — with per-event-type Pydantic models for `admission_accepted` / `admission_refused` / `task_started` / `task_completed` / `task_failed` / `task_cancelled` / `task_preempted` / `task_expired` — is a Wave-2 concern and will land as a future ADR-020 amendment.
 
+## Sprint 10.5 implementation closeout (2026-05-27)
+
+Sprint 10.5 (10.5a + 10.5b) merged to `main` as squash `6791eec` via PR #40 on 2026-05-27. The full Wave-1 admission + lifecycle + audit surface this ADR specifies is **landed and on the durable critical-controls coverage gate**. Implementation deviates from the original ADR in three substantive places:
+
+### 1. Closed-enum vocabularies + module set (with as-built deviations from §"Module layout" + §"Admission outcomes")
+
+**Wire-protocol-public Literals (10 total — the 5 most-load-bearing for wire contract are below; the 5 remaining values are listed in the next paragraph):**
+
+| Literal | Values | Source |
+|---|---|---|
+| `SchedulerAdmissionOutcome` | 7 (2 accepted + 5 refused) | `core/scheduler/_types.py:21` |
+| `SchedulerRefusalReason` | 5 (refusal subset; `payload.reason` discriminator) | `core/scheduler/_types.py:33` |
+| `SchedulerTaskState` | 7 (`pending` / `running` / `completed` / `failed` / `cancelled` / `preempted` / `expired`) | `core/scheduler/_types.py:41` |
+| `SchedulerPromotionRefusedReason` | 2 (`caps_saturated` / `not_at_queue_head`) | `core/scheduler/engine.py:125` |
+| `SchedulerSubmitInputInvalidField` | 1 (`parent_task_id` — malformed-UUID typed-exception field) | `core/scheduler/engine.py:133` |
+
+**Remaining 5 Literals in `_types.py`** (lower-traffic but still wire-public): `SchedulerPriorityClass` 2-value (`interactive` / `background`) at `:51`; `SchedulerTaskCancelledReason` 4-value at `:53` (the ADR-022 §"Cooperative cancellation" 5th value `quota_exhausted_in_flight` was deliberately split into the separate 1-value `SchedulerTaskPreemptedReason` Literal at `:60` because mid-flight quota exhaustion is semantically a preemption, not a cancellation — `running → preempted` not `running → cancelled` in the state machine); `SchedulerTaskFailedReason` 2-value at `:62`; `ActorType` 2-value at `:67`.
+
+**Vocabulary deviation — unprefixed values landed instead of prefixed:** the DRAFT version of the §"Admission outcomes" table above proposed `scheduler_admission_<state>_<reason>` (e.g. `scheduler_admission_refused_queue_full`). The as-built `SchedulerAdmissionOutcome` Literal at `_types.py:21-31` uses the **unprefixed** shape (`refused_queue_full`, etc.) because the Literal type name (`SchedulerAdmissionOutcome`) already carries the `scheduler_admission` context — repeating it inside each value was redundant. The original table was patched at this closeout to reflect the as-built shape, and the vocabulary-note callout immediately under the table flags the deviation for examiners reading the audit-event payloads.
+
+Module layout matches §"Module layout" — `core/scheduler/{engine,queue,storage,policy}.py` + `policies/_default/scheduler.rego` + `core/scheduler/_seams.py` (consumer-owned Protocol seams + fail-loud sentinels — see §3 below).
+
+### 2. Option A doctrine LOCKED — SchedulerPolicy owns Rego ONLY (plan §1210 literal-dual-consultation interpretation superseded)
+
+ADR-022's "Quota integration — at submit, not post-hoc" + "Policy integration — `scheduler.rego` bundle" sections, read literally, suggested `SchedulerPolicy` could be the single dispatch point that consults BOTH Rego AND `core/emergency/*` (quota + kill_switch). At T9 this was rejected because it conflated **ADR-018 (emergency controls — operational real-time emergency surface)** with **ADR-015 (policy-as-code — declarative bundle decision)**. Kill-switch is an operational gate, not a policy decision.
+
+**Locked ownership boundary:**
+- `SchedulerPolicy` owns **Rego policy ONLY** — wraps the `OPAEngine` at the `data.cognic.scheduler.admit.allow` decision point + maps the bundle's 3-value closed-enum `refusal_reason` document onto the wire-public `SchedulerAdmissionOutcome.refused_policy_denied` outcome. Plan §1179 suppression contract: on `allow=true`, `policy_reason` is suppressed to `None` (propagating the bundle's `scheduler_default_deny` document on a green admission row would be audit-misleading). Plan §1181 fail-closed envelope: any OPAEngine error → `PolicyDecision(allow=False, policy_reason="opa_unavailable")`.
+- `SchedulerEngine` owns the **operational gates** (pack_state → kill_switch → policy → quota → caps/queue ordering); the wire-public 5-value `SchedulerAdmissionOutcome` taxonomy is dispatched here, NOT in `SchedulerPolicy`.
+
+This makes the policy-vs-operational split explicit at the module boundary. AST guard `tests/unit/core/scheduler/test_architecture_no_emergency_import.py` pins that `core/scheduler/*` modules do NOT import from `cognic_agentos.core.emergency.*`; binding happens at AgentOS app startup via the consumer-owned seam Protocols.
+
+### 3. Substrate-independence seams via consumer-owned Protocols (per `[[feedback_consumer_owned_protocol_for_unlanded_dep]]`)
+
+The ADR §"Quota integration" + §"Sub-agent budget inheritance" sections describe `quotas.would_admit(...)` + `parent_remaining_budget` calls as if those downstream modules already existed. They don't — quota implementations land in Sprint 13.5 + sub-agent in Sprint 11. Sprint 10.5 declares the dependency contracts as **consumer-owned Protocols** in `core/scheduler/_seams.py`:
+
+| Protocol | Owner sprint (real conformer) | Wave-1 default |
+|---|---|---|
+| `QuotaInterrogator` | Sprint 13.5 | `_NullQuotaInterrogator` raises `NotImplementedError` pointing at ADR-018 |
+| `KillSwitchInterrogator` | Sprint 13.5 | `_NullKillSwitchInterrogator` raises `NotImplementedError` pointing at ADR-018 |
+| `ParentBudgetResolver` | Sprint 11 | `_NullParentBudgetResolver` raises `NotImplementedError` pointing at ADR-005 |
+| `PackStateInterrogator` | Sprint 13.5 (or earlier — Sprint 7B.x lifecycle integration) | `_NullPackStateInterrogator` raises `NotImplementedError` pointing at ADR-012 |
+| `SandboxAdapter` | Sprint 11+ (DI binder at startup wraps `sandbox.SandboxBackend`) | Optional kwarg; `mark_running` accepts `sandbox_adapter=None` |
+
+Fail-loud sentinels — NOT silent no-ops — preserve the AGENTS.md production-grade rule: an unbound consumer raises `NotImplementedError` referencing the relevant ADR.
+
+### 4. T11 SandboxAdapter — atomic create+destroy boundary (substrate independence)
+
+Scheduler → sandbox integration uses an **injected `SandboxAdapter` Protocol with an atomic create+destroy pair** declared in `core/scheduler/_seams.py`. Scheduler NEVER imports from `cognic_agentos.sandbox/*`. The atomic create+destroy API makes the "create without destroy → leak on storage-failure-after-create" bug class **unrepresentable at the type level** — replaced an earlier two-callable signature where the two methods could be passed independently.
+
+Upstream `SandboxLifecycleRefused` exceptions translate to scheduler-owned `SandboxCreateRefused` at the binder boundary; the AgentOS app's DI binder wraps the real `sandbox.SandboxBackend` into a structurally-conforming adapter. AST guard `tests/unit/core/scheduler/test_architecture_no_sandbox_import.py` pins the import boundary.
+
+### 5. Sprint 10.5c (workload credential projection) split to Sprint 10.6
+
+The Sprint 10.1 hotfix deferred-Finding-#1 work (the "minted leases on `session.active_leases` never reach the workload" gap) was originally bundled as 10.5c — a 4th block on top of 10.5a (foundation) + 10.5b (policy + integration seams). At the **Z1b VALVE CHECK** the cumulative wall-clock across T1-T11 + Z1a + Z1b crossed the 4.5 wu mitigation budget threshold per BUILD_PLAN.md §1272 ("Realistic range: 3-4.5 wu"; mitigation: split if it overruns Day 3). User decision: split 10.5c **as a whole** (never partial; no Docker-only-with-K8s-later asymmetry) into a new Sprint 10.6 with its own spec + plan-of-record. ADR-004 §25 + ADR-017 amendments triggered by credential-projection live in Sprint 10.6's closeout, NOT this ADR.
+
+Sprint 10.6's pre-execution gate: branch-cut from `main` post-this-closeout. Spec: `docs/superpowers/specs/2026-05-26-sprint-10.6-workload-credential-projection-design.md`. Plan: `docs/superpowers/plans/2026-05-26-sprint-10.6-workload-credential-projection.md`.
+
+### 6. Critical-controls coverage gate growth (§"Critical-controls scope" amended)
+
+The original §"Critical-controls scope" projected "Four Python modules on the durable coverage gate (63 → 67)". The actual base at the time Sprint 10.5 landed was 85 (Sprint 10 had grown the gate to 85 between this ADR's authoring and 10.5 landing). Actual growth: **85 → 89 (+4 modules at 95/90 floor on fresh `--cov-branch` data):** `core/scheduler/engine.py` + `core/scheduler/queue.py` + `core/scheduler/storage.py` + `core/scheduler/policy.py`. `policies/_default/scheduler.rego` joins the stop-rule policy bundle list (tracked separately from Python coverage gate). All 4 modules at or above floor on the promotion commits per `[[feedback_verify_promotion_meets_floor_at_promotion_time]]`: Z1a promoted engine + queue + storage (88/88 PASS); Z1b promoted policy (89/89 PASS); 89/89 PASS at the merge commit.
+
+### 7. Audit-event taxonomy unchanged from §"Audit event taxonomy"
+
+The 8-event `scheduler.*` taxonomy in §"Audit event taxonomy" (admission_accepted / admission_refused / task_started / task_completed / task_failed / task_cancelled / task_preempted / task_expired) ships as specified — all 8 events emitted via `core/scheduler/storage.py`'s `DecisionHistoryStore.append_with_precondition` consumer (Doctrine Lock D mirror; `_LockedTaskSnapshot` 11-field evidence-snapshot threading per the chain-payload-is-evidence-snapshot doctrine). All events tagged with ISO 42001 `A.6.2.5` as specified.
+
+### 8. Cross-ADR amendments triggered by this approval
+
+Each cross-ADR amendment listed in §"Implementation phases / Cross-ADR amendments" landed as a Sprint 10.5 closeout amendment in the target ADR file:
+- **ADR-005**: `ParentBudgetResolver` seam Protocol + T10 `effective_submit_input` narrowing
+- **ADR-014**: high-risk-tier refusal pre-13.5 mirrored in `scheduler.rego` (defense-in-depth twin to `sandbox.rego`)
+- **ADR-018**: seam Protocols only (`QuotaInterrogator` + `KillSwitchInterrogator`); substantive enforcement WAITS for Sprint 13.5
+- **ADR-020**: Wave-1 contract upheld — NO new typed UI event family for scheduler
+
 ## References
 
-- AGENTS.md "Critical-controls rule" + "Stop rules" — scheduler module-set added at Sprint 10.5
-- BUILD_PLAN.md Sprint 10.5 (to be added when this ADR is approved)
-- ADR-005 — Sub-agent primitive (amendment trigger)
-- ADR-014 — Runtime tool approval (sequencing relationship)
-- ADR-015 — Policy as code (scheduler.rego bundle)
-- ADR-018 — Emergency controls (quota integration amendment)
-- ADR-020 — UI event-stream contract (typed-event projection)
+- AGENTS.md "Critical-controls rule" + "Stop rules" — scheduler module-set added at Sprint 10.5 (gate 85 → 89); `policies/_default/scheduler.rego` added to stop-rule policy bundle list
+- BUILD_PLAN.md §10.5 — CLOSED on 2026-05-27 (squash `6791eec`)
+- ADR-005 — Sub-agent primitive (Sprint 10.5 amendment: `ParentBudgetResolver` seam wired)
+- ADR-014 — Runtime tool approval (Sprint 10.5 amendment: high-risk-tier refusal pre-13.5 mirrored)
+- ADR-015 — Policy as code (scheduler.rego bundle landed)
+- ADR-018 — Emergency controls (Sprint 10.5 amendment: seam Protocols only; Sprint 13.5 binds real conformers)
+- ADR-020 — UI event-stream contract (Sprint 10.5 amendment: no new typed UI event family; Wave-2 deferred)
 - `core/sla.py` (Sprint 2.5) — timer math primitive consumed by the scheduler
-- `core/emergency/quotas.py` (Sprint 13.5) — accumulation surface re-integrated as scheduler input
-- `subagent/policy.py` (Sprint 11) — budget narrowing semantics reified via scheduler.submit
+- `core/emergency/quotas.py` (Sprint 13.5) — accumulation surface re-integrated as scheduler input via `QuotaInterrogator` seam
+- `subagent/policy.py` (Sprint 11) — budget narrowing semantics reified via `SubmitInput(..., parent_task_id=...)` passed to `SchedulerEngine.submit(submit_input, request_id=...)` + `ParentBudgetResolver` seam
+- Sprint 10.5 spec: `docs/superpowers/specs/2026-05-25-sprint-10.5-scheduler-and-credential-projection-design.md`
+- Sprint 10.5 plan: `docs/superpowers/plans/2026-05-25-sprint-10.5-scheduler-and-credential-projection.md` (truncated at Z1b with VALVE CHECK deferral footer)
+- Sprint 10.5 closeout note: `docs/closeouts/2026-05-27-sprint-10.5-scheduler-primitive.md`
+- Sprint 10.6 spec: `docs/superpowers/specs/2026-05-26-sprint-10.6-workload-credential-projection-design.md`
+- Sprint 10.6 plan: `docs/superpowers/plans/2026-05-26-sprint-10.6-workload-credential-projection.md`
