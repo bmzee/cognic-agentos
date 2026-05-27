@@ -128,6 +128,61 @@ Operators see a real-time emergency dashboard (separate from the rest of the por
 
 Sprint 11.5 absorbs ~0.25 wu for the seed (single class, no portal API). Sprint 13.5 absorbs ~1.25 wu for the extension (now ~3 wu total combined with ADR-014, ADR-015, ADR-018). Sprint 14 grows from 2 → 2.5 wu.
 
+## Sprint 10.5 amendment (2026-05-27) — `QuotaInterrogator` + `KillSwitchInterrogator` consumer-owned seams (no implementations yet)
+
+Sprint 10.5 (merged via PR #40, squash `6791eec`) landed the **scheduler-side seams** for quota + kill-switch consultation but **NOT the substantive implementations**. Sprint 13.5 still owns the full `core/emergency/quotas.py` + `core/emergency/kill_switches.py` modules per this ADR's §"Implementation phases" (Sprint 11.5 seed + Sprint 13.5 extended).
+
+### Option A doctrine LOCKED — SchedulerPolicy owns Rego ONLY (per ADR-022 §"Sprint 10.5 implementation closeout / 2. Option A doctrine LOCKED")
+
+ADR-022's original wording (read literally) suggested `SchedulerPolicy` could be the single dispatch point that consults BOTH Rego AND `core/emergency/*` (quota + kill_switch). At T9 this was **rejected** because it conflated **ADR-018 (emergency controls — operational real-time emergency surface)** with **ADR-015 (policy-as-code — declarative bundle decision)**. Kill-switch and quota are operational gates, not policy decisions.
+
+**Locked ownership boundary:**
+- `SchedulerPolicy` (`core/scheduler/policy.py`) owns **Rego policy ONLY** — the `data.cognic.scheduler.admit.allow` decision point.
+- `SchedulerEngine` (`core/scheduler/engine.py`) owns the operational gates — kill_switch + quota + pack_state + queue/caps — invoked in deterministic order BEFORE / AFTER the policy gate per the 5-gate admission pipeline.
+
+### Consumer-owned Protocol seams declared in `core/scheduler/_seams.py`
+
+Per `[[feedback_consumer_owned_protocol_for_unlanded_dep]]` — the Protocols are declared in the scheduler module that needs them; Sprint 13.5's real `core/emergency/*` implementations will structurally conform.
+
+| Protocol | Method signature(s) — keyword-only args throughout | Sprint 13.5 conformer (planned) |
+|---|---|---|
+| `QuotaInterrogator` | `async def would_admit(*, task_id: uuid.UUID, tenant_id: str, pack_id: str, estimated_tokens: int) -> bool` AND `async def release_reservation(task_id: uuid.UUID) -> None` | `core/emergency/quotas.QuotaEngine` |
+| `KillSwitchInterrogator` | `async def is_active(*, tenant_id: str, pack_id: str) -> bool` | `core/emergency/kill_switches.KillSwitchEngine` |
+
+**`QuotaInterrogator` is a two-method API by design.** `would_admit(...)` atomically reserves `estimated_tokens` against tenant + pack budgets keyed by `task_id` on `True` return. `release_reservation(task_id)` releases the reservation on every terminal-state transition (`completed` / `failed` / `cancelled` / `preempted` / `expired`) AND is **idempotent** — calling on an unknown or already-released `task_id` is a no-op (terminal-state code paths may fire multiple times in failure scenarios and must not raise; this contract was locked at Sprint 10.5b T9). The `task_id` handle is what makes pre-execution quota reservation safe: without it the engine couldn't release on terminal-state without a separate accounting structure.
+
+**`KillSwitchInterrogator` uses `is_active(...)` not `is_killed(...)`.** The naming was deliberately chosen at T9 to match the conventional emergency-controls vocabulary ("kill switch is active" reads naturally; "is killed" suggests a past tense). The two-arg keyword-only signature (`tenant_id` + `pack_id`) is the minimum surface that lets Sprint 13.5 layer per-pack + per-tenant + per-feature kill scopes through a single Protocol call.
+
+### Fail-loud sentinels (Wave-1 default)
+
+- `_NullQuotaInterrogator.would_admit(*, task_id, tenant_id, pack_id, estimated_tokens)` raises `NotImplementedError` referencing ADR-018 §"Decision / Quotas — proactive budgets". `release_reservation(task_id)` does the same. Pre-Sprint-13.5 deployments cannot accidentally see a synthetic-allow result.
+- `_NullKillSwitchInterrogator.is_active(*, tenant_id, pack_id)` raises `NotImplementedError` referencing ADR-018 §"Decision / Kill switches — granular tier". Pre-Sprint-13.5 deployments cannot accidentally see a synthetic-not-active result.
+
+### Wire-public admission outcomes already in Wave-1 closed-enum
+
+Both refusal paths' outcome values are **already in the Sprint 10.5 `SchedulerAdmissionOutcome` Literal** at `core/scheduler/_types.py:21-31` (per ADR-022 §"Admission outcomes"). The actual wire-public enum values are unprefixed:
+
+- `refused_quota_exhausted` — emitted when the bound `QuotaInterrogator.would_admit()` returns `False`. **Substantive enforcement WAITS for Sprint 13.5.**
+- `refused_kill_switch_active` — emitted when the bound `KillSwitchInterrogator.is_active()` returns `True`. **Substantive enforcement WAITS for Sprint 13.5.**
+
+The Wave-1 closed-enum keys are stable: when Sprint 13.5 binds the real conformers, no scheduler wire-protocol change is needed. Bank-overlay consumers can already build error-handling against these closed-enum values today; the codepaths just route through the fail-loud sentinels until Sprint 13.5's DI binder hook lands.
+
+### Substrate independence — AST-pinned
+
+`core/scheduler/*` modules do NOT import from `cognic_agentos.core.emergency.*`. The binding happens at AgentOS app startup (the DI binder wires Sprint 13.5's real `QuotaEngine` + `KillSwitchEngine` into the seam slots on the `SchedulerEngine` constructor). Pinned by AST guard `tests/unit/core/scheduler/test_architecture_no_emergency_import.py` (PEP-328 relative-import resolver + 5 self-tests — drift would be caught at test time).
+
+### Quota-at-submit-time contract upheld (deferred to Sprint 13.5 binding)
+
+Per ADR-022 §"Quota integration — at submit, not post-hoc", quotas become a first-class scheduling input. Sprint 10.5 ships the **seam contract** that makes this possible; Sprint 13.5 will:
+
+1. Implement `core/emergency/quotas.QuotaEngine.would_admit(*, task_id, tenant_id, pack_id, estimated_tokens)` returning a `bool`, reading from the gateway-call ledger (per ADR-007) for accumulated usage + atomically reserving `estimated_tokens` keyed by `task_id` on `True` return.
+2. Implement `core/emergency/quotas.QuotaEngine.release_reservation(task_id)` (idempotent) wired to fire on every terminal-state transition from the Sprint 10.5 `SchedulerEngine`.
+3. Wire the engine into the AgentOS DI binder via the `QuotaInterrogator` seam slot.
+4. Land the `quota.refused_at_queue` chain event family (currently routes through the existing `scheduler.admission_refused` family with `payload.reason="refused_quota_exhausted"`).
+5. Wire the kill-switch parallel: `KillSwitchEngine.is_active(*, tenant_id, pack_id)` over the Redis-as-control-plane substrate per this ADR's §"Propagation guarantees".
+
+**No ADR-018 schedule change** — Sprint 13.5 still ships the full kill-switch + quota engine per the existing implementation phases table. Sprint 10.5's amendment is purely about the cross-sprint seam contract.
+
 ## References
 - ADR-005 (sub-agent depth caps — emergency-controls layer enforces these as quotas)
 - ADR-007 (gateway-call ledger — quota accounting source)
@@ -135,4 +190,5 @@ Sprint 11.5 absorbs ~0.25 wu for the seed (single class, no portal API). Sprint 
 - ADR-012 (pack revocation — durable counterpart)
 - ADR-014 (runtime approval — different layer; emergency stops what was approved)
 - ADR-015 (Rego policy — quota declarations)
+- ADR-022 (runtime scheduler — Sprint 10.5 wired `QuotaInterrogator` + `KillSwitchInterrogator` seam Protocols; substantive enforcement WAITS for Sprint 13.5)
 - [Anthropic — Managed Agents incident response patterns](https://www.anthropic.com/engineering/managed-agents)

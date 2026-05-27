@@ -130,10 +130,55 @@ Sprint 13.5 is a new sub-sprint introduced in Phase 4 alongside the eval/adversa
 
 **Why the transitional rule:** there is no safe way to allow customer-data / payment / regulator tools to invoke without an approval engine. "Just log it and let it run" violates the threat model. The tradeoff is eight calendar weeks (Sprint 5 → Sprint 13.5) where banks cannot use high-risk tools at all. Fix is not "lower the bar"; fix is "ship Sprint 13.5 on schedule."
 
+## Sprint 10.5 amendment (2026-05-27) — high-risk-tier refusal pre-13.5 mirrored in `scheduler.rego`
+
+Sprint 10.5 (merged via PR #40, squash `6791eec`) landed `policies/_default/scheduler.rego` as a wire-protocol-public default-deny admission bundle (joined the AGENTS.md stop-rule policy bundle list). Per the Sprint 8A precedent already shipped in `policies/_default/sandbox.rego`, the bundle ships an **explicit fail-closed refusal for all six high-risk risk tiers until the approval engine lands in Sprint 13.5**.
+
+**Mirror contract (defense-in-depth twin to `sandbox.rego`):**
+
+| Risk tier (from §"Risk tiers" above) | `scheduler.rego` Wave-1 outcome | Closed-enum refusal_reason |
+|---|---|---|
+| `read_only` | Admission allowed (subject to other gates: kill_switch / quota / queue / caps) | (allow=true) |
+| `internal_write` | Admission allowed | (allow=true) |
+| `customer_data_read` | **Refused** | `scheduler_high_risk_tier_refused_pre_13_5` |
+| `customer_data_write` | **Refused** | `scheduler_high_risk_tier_refused_pre_13_5` |
+| `payment_action` | **Refused** | `scheduler_high_risk_tier_refused_pre_13_5` |
+| `regulator_communication` | **Refused** | `scheduler_high_risk_tier_refused_pre_13_5` |
+| `cross_tenant` | **Refused** | `scheduler_high_risk_tier_refused_pre_13_5` |
+| `high_risk_custom` | **Refused** | `scheduler_high_risk_tier_refused_pre_13_5` |
+
+The 6-tier high-risk set is **disjoint by construction** from the 2-tier safe set (`read_only` + `internal_write`); pinned by closed-enum drift detectors in `tests/unit/policies/test_scheduler_rego.py`. No escalation-token bypass exists pre-13.5 — this is the same lift-at-Sprint-13.5 contract the sandbox bundle ships (`sandbox.rego::sandbox_high_risk_tier_refused_pre_13_5`). When the Sprint 13.5 approval engine lands, the kernel default-deny on these tiers will be removed (or lifted to a "requires approval" sentinel) coordinated with `core/approval/engine.py` + ADR amendment.
+
+**Refusal-reason precedence in `scheduler.rego`** (deterministic if/else chain per the bundle):
+1. `scheduler_class_unknown` (FIRST — admission cannot evaluate tier semantics until class is in vocabulary)
+2. `scheduler_high_risk_tier_refused_pre_13_5` (mirror of sandbox.rego — see table above)
+3. `scheduler_default_deny` (fall-through; also the `default refusal_reason` for shape-mismatched/missing-input cases the chain cannot evaluate)
+
+The 3-value closed-enum refusal vocabulary is wire-protocol-public + drift-detector-pinned.
+
+**Sequencing relationship — pre-13.5 vs post-13.5:**
+
+The sequencing changes at Sprint 13.5; Sprint 10.5 documents both states explicitly so future implementers can see the trajectory.
+
+**Pre-13.5 (the state shipped at Sprint 10.5):** there is **no approval engine** yet. High-risk-tier work simply cannot be admitted. Both `scheduler.rego` AND `sandbox.rego` fail-close on all six high-risk tiers via the closed-enum refusal values (`scheduler_high_risk_tier_refused_pre_13_5` + `sandbox_high_risk_tier_refused_pre_13_5`). The pre-13.5 contract is intentionally narrow — banks accept that high-risk tools are unreachable until the approval engine lands, rather than admitting them through a lower bar.
+
+**Post-13.5 (target state after Sprint 13.5 lands the approval engine + coordinated Rego amendment):**
+
+1. The Sprint 13.5 coordinated amendment **lifts or converts** the pre-13.5 Rego denials. Two viable shapes are still open and will be locked at Sprint 13.5 design time:
+   - **Lift**: the kernel default removes the hardcoded refusal entirely; admission is gated on the new `core/approval/engine.py` + tenant overlay policy. Cleanest but requires the approval engine to be the load-bearing gate.
+   - **Convert**: the kernel default converts the refusal into a `requires_approval` sentinel that the harness layer interprets as "must pass approval before scheduler.submit". The harness sees the sentinel, calls `approval.engine.wait_for_grant()`, then on grant resubmits to the scheduler.
+2. The new admission sequencing on the grant path: agent harness → `approval.engine.wait_for_grant(...)` (blocks; harness yields) → on grant → `SchedulerEngine.submit(submit_input, request_id=...)` → policy/quota/kill_switch/caps gates → admission outcome.
+3. **Coordinated amendment**: ADR-014 + ADR-022 + this ADR section + the `scheduler.rego` + `sandbox.rego` bundles all update at the same Sprint 13.5 closeout. Until then the Sprint 10.5 pre-13.5 hardcoded refusal stands.
+
+The scheduler does NOT short-circuit the approval flow in the post-13.5 design — it simply runs admission gates against a `SubmitInput` whose policy-permission has already been resolved by the upstream approval call. Approval is a harness-layer concern; admission control is a scheduler-layer concern; the layers compose cleanly because they operate on different inputs (approval consumes tool-call args; scheduler consumes pack/tier/budget/class).
+
+**Bank-overlay contract** (per AGENTS.md stop-rule policy bundle convention): bank overlays may TIGHTEN the kernel defaults (refuse additional class/tier combinations, narrow per-tenant caps); **loosening the kernel defaults requires a coordinated kernel + ADR amendment** (mirrors the `elicitation.rego` / `sampling.rego` / `supply_chain.rego` / `sandbox.rego` precedents).
+
 ## References
 - ADR-002 (MCP plugin protocol — pack manifests)
 - ADR-005 (sub-agent — sub-agent calls also flow through approval)
 - ADR-006 (ISO 42001 — control mappings)
 - ADR-012 (pack lifecycle — pack approval is the upstream gate)
+- ADR-022 (runtime scheduler — Sprint 10.5 mirrored the pre-13.5 high-risk-tier refusal in `scheduler.rego`)
 - [Anthropic — Managed Agents tool approval flows](https://www.anthropic.com/engineering/managed-agents)
 - [OpenAI Agents SDK — approval flows](https://openai.github.io/openai-agents-python/)

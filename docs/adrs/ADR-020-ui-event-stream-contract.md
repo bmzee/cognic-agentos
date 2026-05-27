@@ -127,6 +127,40 @@ Phases 1-4 total is **52.5 work-units** (BUILD_PLAN.md is the authoritative arit
 
 The +1.0 wu from this ADR is already included in the 52.5 floor; the absorbed ~0.75 wu makes Sprints 11.5 / 13.5 / 14 more likely to overrun (they're already on the optimistic-sprint list).
 
+## Sprint 10.5 amendment (2026-05-27) — Wave-1 contract upheld; no new typed `scheduler.*` UI event family
+
+Per ADR-022 §"Cross-ADR amendments / ADR-020" + §"What this is NOT / Not coupled to UI event-stream emission":
+
+> The scheduler emits audit events; the UI event broker (Sprint 7B.4) mirrors them onto its typed streams via the existing decision_history → broker projection — no new emission seam.
+
+Sprint 10.5 (merged via PR #40, squash `6791eec`) implemented this contract verbatim:
+
+### What landed
+
+- The 8-event `scheduler.*` audit-event taxonomy from ADR-022 §"Audit event taxonomy" (`admission_accepted` / `admission_refused` / `task_started` / `task_completed` / `task_failed` / `task_cancelled` / `task_preempted` / `task_expired`) flows through `core/scheduler/storage.py` → `DecisionHistoryStore.append_with_precondition` → `decision_history` rows.
+- The Sprint 7B.4 `UIEventBroker` (already on the durable critical-controls coverage gate as part of `protocol/ui_events.py`) mirrors **every** `decision_history` append onto the **existing** `decision_audit.event_appended` typed event via the projection wired in Sprint 6 — same seam every other audit-emitting subsystem uses.
+- **Wave-1 family count stays at 11** (the Sprint 7B.4 11-family closed-enum at `protocol/ui_events.py::_WAVE_1_FAMILIES`): `agent_run` / `tool_call` / `subagent` / `approval` / `artifact` / `interrupt` / `frontend_action` / `memory` / `decision_audit` / `policy` / `kill_switch`. No 12th family added for `scheduler`.
+
+### What did NOT land — deliberately
+
+- No new top-level `scheduler` family on the `_WAVE_1_FAMILIES` Final. A first-class typed UI event family with per-event-type Pydantic models for `admission_accepted` / `admission_refused` / `task_started` / `task_completed` / `task_failed` / `task_cancelled` / `task_preempted` / `task_expired` is a **Wave-2 concern** per ADR-022's original §"Cross-ADR amendments / ADR-020" wording. UIs that want scheduler-level observability today filter `decision_audit.event_appended` events by `event.payload.decision_type` matching the `scheduler.*` namespace.
+- No new SSE endpoint for scheduler-only streams; tenant + run streams already carry the mirrored `decision_audit.event_appended` events under existing RBAC (`ui.tenant_stream` + `ui.run_stream`).
+- No public `.well-known/cognic-ui-events.json` schema change — drift detector at `tests/unit/portal/api/ui/test_well_known_routes.py` was unchanged across Sprint 10.5.
+
+### Bank-overlay consumer contract (carried forward)
+
+UI consumers that need to surface scheduler state today walk the existing `decision_audit.event_appended` stream and dispatch on `payload.decision_type`. The 8 `scheduler.*` decision types are wire-protocol-public via the ADR-022 taxonomy + the `core/scheduler/storage.py` emit sites. When the Wave-2 typed family lands, the existing `decision_audit.event_appended` surface stays — the new typed family is an additive narrowing, not a replacement.
+
+### Reconnect safety upheld
+
+Per this ADR's §"Decision / Reconnect-safe" + Sprint 7B.4's `_DHReplaySnapshot` shape: scheduler-emitted `decision_audit.event_appended` events are replayable from the cursor-based catch-up endpoint identical to every other family. A UI that drops + reconnects pulls missed scheduler events from `decision_history` exactly the same way it pulls missed `policy.decision_evaluated` events.
+
+### Wave-2 follow-up tracked
+
+A future ADR-020 amendment (post-Phase-4 telemetry or bank demand) will introduce the typed `scheduler.*` family with the 8 per-event-type Pydantic models. Open question for that amendment: whether `scheduler.admission_refused` should split into 5 typed sub-events keyed by `payload.reason` (one per refusal closed-enum value) or stay as one event with the discriminated-payload union. Deferred until then.
+
+**No semantic change to ADR-020's existing decisions** — Sprint 10.5 is a confirmation of the original cross-ADR amendment contract, not a renegotiation.
+
 ## References
 - ADR-001 (UI is external — this contract is the interface)
 - ADR-003 (A2A artifacts → mirror to artifact events on the UI stream)
@@ -136,6 +170,7 @@ The +1.0 wu from this ADR is already included in the 52.5 floor; the absorbed ~0
 - ADR-017 (data governance → event payloads carry data-class metadata so UIs can render redaction badges)
 - ADR-018 (emergency controls → kill-switch event family)
 - ADR-019 (memory → memory event family)
+- ADR-022 (runtime scheduler — Sprint 10.5 confirmed: no new typed UI event family; scheduler audit flows through `decision_audit.event_appended`; Wave-2 deferred)
 - [AG-UI specification (draft)](https://github.com/ag-ui-protocol/ag-ui)
 - [LangGraph streaming docs](https://langchain-ai.github.io/langgraph/concepts/streaming/)
 - [OpenAI Agents SDK — streaming events](https://openai.github.io/openai-agents-python/)
