@@ -211,3 +211,80 @@ def compute_child_budget(
     if child_pack_quota < 0:
         raise ValueError(f"child_pack_quota must be >= 0; got {child_pack_quota}")
     return min(child_pack_quota, parent_remaining_budget)
+
+
+# --- Sprint 10.5b T11 — sandbox-substrate-independence exception ---------
+
+
+@runtime_checkable
+class SandboxAdapter(Protocol):
+    """T11 round-2 P1 — Scheduler-owned consumer Protocol for the
+    sandbox lifecycle. Atomic create + destroy pair: the scheduler
+    API makes it IMPOSSIBLE to inject just one half (which would
+    leak external sandbox resources on the storage-failure-after-
+    create path documented at the T11 round-1 P1 reviewer fix).
+
+    The AgentOS app's DI binder at startup supplies a structurally-
+    conforming object that wraps the real
+    ``cognic_agentos.sandbox.protocol.SandboxBackend`` (or the future-
+    equivalent ``cognic_agentos.subagent.*`` adapter for sub-agent-
+    bearing tasks). Scheduler NEVER imports from sandbox/* (pinned by
+    the AST guard at ``tests/unit/core/scheduler/test_architecture_no_sandbox_import.py``);
+    this Protocol is the scheduler-side declared contract per
+    [[feedback_consumer_owned_protocol_for_unlanded_dep]].
+
+    Two-method contract:
+      * ``create(task_id)`` — provision the workload sandbox for
+        ``task_id``. Raise :class:`SandboxCreateRefused` (THIS module's
+        typed exception, NOT the sandbox-layer's native
+        ``SandboxLifecycleRefused``) on a closed-set create refusal;
+        the DI binder translates upstream sandbox exceptions to this
+        scheduler-owned type. Generic exceptions propagate uncaught.
+      * ``destroy(task_id)`` — best-effort compensating cleanup
+        called by the engine when ``storage.transition`` fails AFTER
+        ``create`` succeeded. Idempotent: callers may invoke on an
+        already-destroyed task_id; implementations MUST NOT raise on
+        not-found.
+
+    The atomic-pair API is the round-2 P1 fix for the round-1 reviewer
+    finding — the prior signature (two separate callable kwargs)
+    documented the leak but allowed production miswiring; the
+    Protocol makes the leaky combination unrepresentable.
+    """
+
+    async def create(self, task_id: uuid.UUID) -> None: ...
+
+    async def destroy(self, task_id: uuid.UUID) -> None: ...
+
+
+class SandboxCreateRefused(Exception):
+    """Scheduler-owned typed exception representing a sandbox-create
+    refusal at the engine's mark_running call site.
+
+    **Substrate independence contract (T11)**: scheduler NEVER imports
+    from ``cognic_agentos.sandbox/*`` (pinned by the AST guard at
+    ``tests/unit/core/scheduler/test_architecture_no_sandbox_import.py``).
+    The AgentOS app's DI binder at startup wraps any
+    ``sandbox.SandboxLifecycleRefused`` (or future-equivalent typed
+    exception) into THIS scheduler-owned class before passing the
+    create callable to ``SchedulerEngine.mark_running``. Mirrors the
+    [[feedback_consumer_owned_protocol_for_unlanded_dep]] pattern at
+    a higher abstraction level — the scheduler owns the exception
+    shape it consumes; the sandbox layer owns its own.
+
+    Two attributes flow to the scheduler's
+    ``TaskFailedPayload``:
+      * ``reason``: free-form upstream sandbox closed-enum value
+        (e.g. ``"sandbox_credential_mint_failed_vault_path_not_found"``).
+        Threaded onto ``TaskFailedPayload.sandbox_refusal_reason``
+        for spec §5.8 step 7 cross-layer correlation.
+      * ``event_id``: chain-derived event id from the sandbox's
+        ``sandbox.lifecycle.create_refused`` audit row, or ``None``
+        if the create refusal happened pre-audit. Threaded onto
+        ``TaskFailedPayload.sandbox_event_id``.
+    """
+
+    def __init__(self, *, reason: str, event_id: str | None = None) -> None:
+        super().__init__(f"sandbox_create_refused: reason={reason} event_id={event_id!r}")
+        self.reason = reason
+        self.event_id = event_id

@@ -37,6 +37,7 @@ Wave-1 design choices:
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import uuid
 from collections.abc import Awaitable, Callable
@@ -49,6 +50,8 @@ from cognic_agentos.core.scheduler._seams import (
     PackStateInterrogator,
     ParentBudgetResolver,
     QuotaInterrogator,
+    SandboxAdapter,
+    SandboxCreateRefused,
     _NullKillSwitchInterrogator,
     _NullPackStateInterrogator,
     _NullParentBudgetResolver,
@@ -539,10 +542,55 @@ class SchedulerEngine:
         self._queued_attribution[task_id] = attribution
         return AdmissionDecision(outcome="accepted_queued", task_id=str(task_id))
 
-    async def mark_running(self, task_id: uuid.UUID, *, request_id: str) -> None:
+    async def mark_running(
+        self,
+        task_id: uuid.UUID,
+        *,
+        request_id: str,
+        sandbox_adapter: SandboxAdapter | None = None,
+    ) -> None:
         """Transition pending → running. Emits scheduler.task_started.
         Per spec §4.4 (post-amendment): running means workload has
         actually started.
+
+        T11 sandbox-routing seam (plan §1267-1282): when a
+        ``sandbox_adapter`` is provided, invoke ``adapter.create``
+        AFTER the FIFO + cap checks pass but BEFORE the durable
+        storage transition. On :class:`SandboxCreateRefused` from
+        ``adapter.create``, route the task to ``pending → failed``
+        via :meth:`fail` with :class:`TaskFailedPayload` carrying the
+        spec §5.8 step 7 cross-layer correlation. On any other
+        exception type, propagate uncaught (caller bug; the routing
+        seam does NOT silently swallow unknown failures under a
+        generic except clause). Scheduler-as-substrate independence —
+        :class:`SandboxAdapter` + :class:`SandboxCreateRefused` both
+        live in ``core/scheduler/_seams.py``; scheduler NEVER imports
+        from ``cognic_agentos.sandbox/*`` (pinned by the AST guard
+        at ``tests/unit/core/scheduler/test_architecture_no_sandbox_import.py``).
+        The AgentOS app's DI binder at startup wraps the real
+        ``sandbox.SandboxBackend`` into a structurally-conforming
+        :class:`SandboxAdapter` object before passing it in.
+
+        **T11 round-1 P1 — compensating-cleanup contract**: when
+        ``adapter.create`` SUCCEEDS but the subsequent
+        ``storage.transition`` FAILS (e.g. DB outage between create
+        and durable record), the external sandbox/workload is already
+        live while the scheduler row remains ``pending`` with no
+        ``scheduler.task_started`` chain row. The engine invokes
+        ``adapter.destroy(task_id)`` as best-effort cleanup BEFORE
+        re-raising the storage exception. Destroy exceptions are
+        caught + swallowed (telemetry hook future) so they don't
+        shadow the original storage exception.
+
+        **T11 round-2 P1 — atomic-pair API**: the round-1 reviewer
+        found that the two-kwarg signature
+        (``sandbox_create_fn`` + ``sandbox_destroy_fn``) ALLOWED
+        production miswiring (caller could pass create without
+        destroy, leaking the sandbox on storage failure). The
+        round-2 fix replaces both with a single ``sandbox_adapter``
+        Protocol-conforming object — the create + destroy methods
+        are atomic at the type level + a miswiring is now
+        unrepresentable in the API surface.
 
         Round-7 reviewer P1 fix — queued lifecycle ordering:
 
@@ -556,16 +604,24 @@ class SchedulerEngine:
              attribution. If still saturated, raise
              ``SchedulerPromotionRefused(reason="caps_saturated")``
              without mutating any state. Task stays queued for retry.
-          3. Issue the durable ``pending → running`` storage transition
+          3. **T11 sandbox-create step** — invoke
+             ``sandbox_adapter.create(task_id)`` if an adapter is
+             provided. On ``SandboxCreateRefused``, route to
+             ``self.fail(...)`` (which uses ``_transition_terminal``
+             and cleans the queue + releases quota via the failed-
+             state path). Counters never incremented because we
+             route before step 4. Generic exceptions propagate
+             uncaught.
+          4. Issue the durable ``pending → running`` storage transition
              FIRST. If storage fails, no in-memory bookkeeping has
              been touched, so re-raise propagates cleanly with engine
              state matching the persisted DB state.
-          4. ONLY ON SUCCESS, commit the bookkeeping: increment
+          5. ONLY ON SUCCESS, commit the bookkeeping: increment
              counters, migrate attribution
              ``_queued_attribution → _running_attribution``, and
              dequeue the task from the BoundedQueue.
 
-        The round-6 implementation reversed steps 3-4 — bookkeeping
+        The round-6 implementation reversed steps 4-5 — bookkeeping
         first, then storage — which left the engine ahead of the DB on
         storage failure. Durable-first order makes the engine state
         rollback-by-design (no rollback code needed because nothing
@@ -574,13 +630,14 @@ class SchedulerEngine:
         (no race between caps recheck and durable transition).
 
         For a task in ``_running_attribution`` (accepted_immediate
-        path — counters were already incremented at submit), just
-        issue the storage transition.
+        path — counters were already incremented at submit), the
+        sandbox-create step still fires if a callback is provided;
+        on refusal, ``self.fail(...)`` handles the running → failed
+        transition (the counters ARE decremented in this path because
+        the task was already counted at admit time).
 
-        For a task in neither tracking dict, just issue the storage
-        transition. This permits external callers / test fixtures to
-        drive transitions without engine bookkeeping; the storage
-        row's state-machine validator still gates the transition.
+        For a task in neither tracking dict, the sandbox-create step
+        still fires; storage transition follows on success.
         """
         queued_attr = self._queued_attribution.get(task_id)
         if queued_attr is not None:
@@ -600,7 +657,59 @@ class SchedulerEngine:
                 actor_count=actor_count,
             ):
                 raise SchedulerPromotionRefused(task_id, reason="caps_saturated")
-            # Step 3: durable transition FIRST (no in-memory mutation yet)
+            # T11 Step 3: sandbox-create (BEFORE durable transition so
+            # we can route to fail without flipping to running first;
+            # counters never incremented on the refusal path).
+            sandbox_created = False
+            if sandbox_adapter is not None:
+                if await self._route_sandbox_refusal(
+                    task_id=task_id,
+                    request_id=request_id,
+                    sandbox_adapter=sandbox_adapter,
+                ):
+                    return  # refusal already routed to failed state
+                sandbox_created = True
+            # Step 4: durable transition FIRST (no in-memory mutation
+            # yet). T11 round-1 P1 — when sandbox.create has succeeded
+            # above, wrap the storage transition in a destroy-on-failure
+            # envelope so a storage outage doesn't leak the external
+            # sandbox while the scheduler row stays pending.
+            try:
+                await self._storage.transition(
+                    task_id=task_id,
+                    from_state="pending",
+                    to_state="running",
+                    actor_id="scheduler-engine",
+                    request_id=request_id,
+                    payload_extras={},
+                )
+            except BaseException:
+                if sandbox_created and sandbox_adapter is not None:
+                    await self._call_destroy_on_storage_failure(
+                        task_id=task_id, sandbox_adapter=sandbox_adapter
+                    )
+                raise
+            # Step 5: only on success, commit bookkeeping
+            self._tenant_class_counts[tenant_class_key] = tenant_count + 1
+            self._pack_counts[queued_attr.pack_id] = pack_count + 1
+            self._actor_counts[queued_attr.actor_subject] = actor_count + 1
+            self._running_attribution[task_id] = queued_attr
+            del self._queued_attribution[task_id]
+            queue.remove(task_id)
+            return
+        # Non-queued path: accepted_immediate or external caller.
+        # T11 sandbox-create step also fires here; refusal routes to
+        # fail (which decrements running counters via _transition_terminal).
+        sandbox_created = False
+        if sandbox_adapter is not None:
+            if await self._route_sandbox_refusal(
+                task_id=task_id,
+                request_id=request_id,
+                sandbox_adapter=sandbox_adapter,
+            ):
+                return
+            sandbox_created = True
+        try:
             await self._storage.transition(
                 task_id=task_id,
                 from_state="pending",
@@ -609,23 +718,83 @@ class SchedulerEngine:
                 request_id=request_id,
                 payload_extras={},
             )
-            # Step 4: only on success, commit bookkeeping
-            self._tenant_class_counts[tenant_class_key] = tenant_count + 1
-            self._pack_counts[queued_attr.pack_id] = pack_count + 1
-            self._actor_counts[queued_attr.actor_subject] = actor_count + 1
-            self._running_attribution[task_id] = queued_attr
-            del self._queued_attribution[task_id]
-            queue.remove(task_id)
-            return
-        # Non-queued path: accepted_immediate or external caller
-        await self._storage.transition(
-            task_id=task_id,
-            from_state="pending",
-            to_state="running",
-            actor_id="scheduler-engine",
-            request_id=request_id,
-            payload_extras={},
-        )
+        except BaseException:
+            if sandbox_created and sandbox_adapter is not None:
+                await self._call_destroy_on_storage_failure(
+                    task_id=task_id, sandbox_adapter=sandbox_adapter
+                )
+            raise
+
+    async def _call_destroy_on_storage_failure(
+        self,
+        *,
+        task_id: uuid.UUID,
+        sandbox_adapter: SandboxAdapter,
+    ) -> None:
+        """T11 round-1 P1 — best-effort compensating cleanup when
+        ``sandbox_adapter.create`` succeeded but the subsequent
+        ``storage.transition`` failed. Without this, the external
+        sandbox/workload would leak (live) while the scheduler row
+        stayed in ``pending`` with no ``scheduler.task_started``
+        chain row.
+
+        Exceptions raised by ``sandbox_adapter.destroy`` are caught
+        + swallowed so they do NOT shadow the original storage
+        exception (which is propagating up the stack via the caller's
+        ``raise`` after this helper returns). The adapter
+        implementation's stderr / logging is the operator's
+        correlation surface for cleanup failures. Catches
+        ``Exception`` (not ``BaseException``) so cancellation and
+        system exits still propagate.
+
+        Round-2 P1 — the helper takes a full ``SandboxAdapter``
+        Protocol instance (atomic create+destroy pair) rather than
+        a standalone destroy callable. The caller must check
+        ``sandbox_adapter is not None`` before invoking; the helper
+        assumes a wired adapter (no None-guard inside).
+        """
+        # Best-effort: swallow so we don't shadow the original
+        # storage-transition exception. A future telemetry hook
+        # could record cleanup-failure correlation here.
+        with contextlib.suppress(Exception):
+            await sandbox_adapter.destroy(task_id)
+
+    async def _route_sandbox_refusal(
+        self,
+        *,
+        task_id: uuid.UUID,
+        request_id: str,
+        sandbox_adapter: SandboxAdapter,
+    ) -> bool:
+        """T11 helper — invoke ``sandbox_adapter.create`` and translate
+        any :class:`SandboxCreateRefused` to a ``pending → failed``
+        transition via :meth:`fail`. Returns True if a refusal was
+        routed (caller MUST short-circuit); False if create succeeded
+        (caller continues with the normal pending → running path).
+
+        Generic (non-SandboxCreateRefused) exceptions propagate
+        uncaught — the routing seam does NOT silently swallow unknown
+        failures. Pinned by
+        ``test_t11_unknown_sandbox_exception_propagates_uncaught``.
+
+        Round-2 P1 — the helper now takes the full ``SandboxAdapter``
+        Protocol (atomic create+destroy pair) rather than a standalone
+        ``create_fn`` callable.
+        """
+        try:
+            await sandbox_adapter.create(task_id)
+        except SandboxCreateRefused as exc:
+            await self.fail(
+                task_id,
+                payload=TaskFailedPayload(
+                    reason="scheduler_task_failed_sandbox_create_refused",
+                    sandbox_refusal_reason=exc.reason,
+                    sandbox_event_id=exc.event_id,
+                ),
+                request_id=request_id,
+            )
+            return True
+        return False
 
     async def reap_expired(
         self,

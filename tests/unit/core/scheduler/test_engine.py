@@ -1625,3 +1625,321 @@ def test_t10_invalid_field_literal_in_lockstep_with_constant() -> None:
     )
     # Wave-1 invariant: exactly 1 field value
     assert frozenset({"parent_task_id"}) == _VALID_SUBMIT_INPUT_INVALID_FIELDS
+
+
+# --- T11 sandbox-routing seam regressions (substrate independence) -------
+
+
+class _StubSandboxAdapter:
+    """Test stub conforming structurally to the SandboxAdapter
+    Protocol declared in core/scheduler/_seams.py. The atomic
+    create+destroy pair makes the round-1 reviewer's leak scenario
+    (create without destroy) UNREPRESENTABLE per the round-2 P1 fix.
+
+    ``create_raises`` injects a per-task create-side exception
+    (typically SandboxCreateRefused or a RuntimeError); ``destroy_raises``
+    injects a destroy-side exception (verifies the swallow contract).
+    Empty defaults = no-op success on both methods."""
+
+    def __init__(
+        self,
+        *,
+        create_raises: BaseException | None = None,
+        destroy_raises: BaseException | None = None,
+    ) -> None:
+        self.create_calls: list[uuid.UUID] = []
+        self.destroy_calls: list[uuid.UUID] = []
+        self._create_raises = create_raises
+        self._destroy_raises = destroy_raises
+
+    async def create(self, task_id: uuid.UUID) -> None:
+        self.create_calls.append(task_id)
+        if self._create_raises is not None:
+            raise self._create_raises
+
+    async def destroy(self, task_id: uuid.UUID) -> None:
+        self.destroy_calls.append(task_id)
+        if self._destroy_raises is not None:
+            raise self._destroy_raises
+
+
+async def test_t11_mark_running_with_no_sandbox_adapter_transitions_pending_to_running(
+    engine_db: AsyncEngine,
+    caps: ConcurrencyCaps,
+    class_settings: dict[str, tuple[int, float]],
+) -> None:
+    """T11 plan §1276 — when ``sandbox_adapter`` is None (non-
+    sandbox-bearing work), mark_running transitions pending →
+    running directly. Preserves the existing T5 behavior on the
+    default path."""
+    engine = _make_engine(db=engine_db, caps=caps, class_settings=class_settings)
+    decision = await engine.submit(submit_input=_make_submit_input(), request_id="req-1")
+    task_id = uuid.UUID(decision.task_id)
+    await engine.mark_running(task_id, request_id="req-start")
+    assert await _read_state(engine_db, task_id) == "running"
+
+
+async def test_t11_mark_running_invokes_sandbox_adapter_create_on_happy_path(
+    engine_db: AsyncEngine,
+    caps: ConcurrencyCaps,
+    class_settings: dict[str, tuple[int, float]],
+) -> None:
+    """T11 plan §1274 — when ``sandbox_adapter`` is provided AND
+    ``adapter.create`` returns None (success), mark_running invokes
+    create exactly once with the task_id THEN completes the pending
+    → running transition. Destroy is NOT called on the happy path."""
+    adapter = _StubSandboxAdapter()
+    engine = _make_engine(db=engine_db, caps=caps, class_settings=class_settings)
+    decision = await engine.submit(submit_input=_make_submit_input(), request_id="req-1")
+    task_id = uuid.UUID(decision.task_id)
+    await engine.mark_running(task_id, request_id="req-start", sandbox_adapter=adapter)
+    assert adapter.create_calls == [task_id]
+    assert adapter.destroy_calls == []  # happy path — destroy NEVER fires
+    assert await _read_state(engine_db, task_id) == "running"
+
+
+async def test_t11_mark_running_routes_sandbox_create_refused_to_failed_state(
+    engine_db: AsyncEngine,
+    caps: ConcurrencyCaps,
+    class_settings: dict[str, tuple[int, float]],
+) -> None:
+    """T11 plan §1275 — when ``adapter.create`` raises
+    SandboxCreateRefused, mark_running transitions pending → failed
+    with TaskFailedPayload carrying the cross-layer correlation
+    (reason + sandbox_refusal_reason + sandbox_event_id) per spec
+    §5.8 step 7. Destroy is NOT called (nothing was created)."""
+    from cognic_agentos.core.scheduler._seams import SandboxCreateRefused
+
+    adapter = _StubSandboxAdapter(
+        create_raises=SandboxCreateRefused(
+            reason="sandbox_credential_mint_failed_vault_path_not_found",
+            event_id="evt-sandbox-abc-123",
+        )
+    )
+    quota = _StubQuotaInterrogator(allow=True)
+    engine = _make_engine(db=engine_db, caps=caps, class_settings=class_settings, quota=quota)
+    decision = await engine.submit(submit_input=_make_submit_input(), request_id="req-1")
+    task_id = uuid.UUID(decision.task_id)
+    await engine.mark_running(task_id, request_id="req-start", sandbox_adapter=adapter)
+    # Task is failed, NOT running
+    assert await _read_state(engine_db, task_id) == "failed"
+    # Quota released exactly once via the failed-state terminal transition
+    assert quota.releases.count(task_id) == 1
+    # Destroy NOT called — nothing was created
+    assert adapter.destroy_calls == []
+
+
+async def test_t11_sandbox_refusal_chain_payload_carries_cross_layer_fields(
+    engine_db: AsyncEngine,
+    caps: ConcurrencyCaps,
+    class_settings: dict[str, tuple[int, float]],
+) -> None:
+    """T11 spec §5.8 step 7 — the scheduler.task_failed chain row
+    MUST carry reason + sandbox_refusal_reason + sandbox_event_id so
+    examiners can correlate the scheduler-side failure to the
+    upstream sandbox audit row."""
+    from sqlalchemy import desc, select
+
+    from cognic_agentos.core.decision_history import _decision_history
+    from cognic_agentos.core.scheduler._seams import SandboxCreateRefused
+
+    adapter = _StubSandboxAdapter(
+        create_raises=SandboxCreateRefused(
+            reason="sandbox_credential_projection_field_set_mismatch",
+            event_id="evt-sandbox-xyz-789",
+        )
+    )
+    engine = _make_engine(db=engine_db, caps=caps, class_settings=class_settings)
+    decision = await engine.submit(submit_input=_make_submit_input(), request_id="req-1")
+    task_id = uuid.UUID(decision.task_id)
+    await engine.mark_running(task_id, request_id="req-start", sandbox_adapter=adapter)
+    # Locate the scheduler.task_failed chain row.
+    # NOTE: column name is ``event_type`` per
+    # ``core/decision_history.py:195``, not ``decision_type`` (the
+    # decision_type Literal is the LOGICAL field name on
+    # DecisionRecord; storage flattens to event_type).
+    async with engine_db.connect() as conn:
+        row = (
+            await conn.execute(
+                select(_decision_history.c.payload)
+                .where(_decision_history.c.event_type == "scheduler.task_failed")
+                .order_by(desc(_decision_history.c.sequence))
+                .limit(1)
+            )
+        ).first()
+    assert row is not None, "no scheduler.task_failed chain row emitted on sandbox refusal"
+    payload = row.payload
+    assert isinstance(payload, dict)
+    assert payload["reason"] == "scheduler_task_failed_sandbox_create_refused"
+    assert payload["sandbox_refusal_reason"] == "sandbox_credential_projection_field_set_mismatch"
+    assert payload["sandbox_event_id"] == "evt-sandbox-xyz-789"
+
+
+async def test_t11_unknown_sandbox_exception_propagates_uncaught(
+    engine_db: AsyncEngine,
+    caps: ConcurrencyCaps,
+    class_settings: dict[str, tuple[int, float]],
+) -> None:
+    """T11 — only the documented SandboxCreateRefused typed exception
+    is translated to the failed-state path. A generic Exception from
+    ``adapter.create`` (a caller bug, not a sandbox-create refusal)
+    MUST propagate uncaught so the bug surfaces loudly."""
+    adapter = _StubSandboxAdapter(
+        create_raises=RuntimeError("buggy sandbox adapter — not a documented refusal")
+    )
+    engine = _make_engine(db=engine_db, caps=caps, class_settings=class_settings)
+    decision = await engine.submit(submit_input=_make_submit_input(), request_id="req-1")
+    task_id = uuid.UUID(decision.task_id)
+    with pytest.raises(RuntimeError, match="buggy sandbox adapter"):
+        await engine.mark_running(task_id, request_id="req-start", sandbox_adapter=adapter)
+    # Task remains in pending state (transition never happened)
+    assert await _read_state(engine_db, task_id) == "pending"
+
+
+async def test_t11_queued_promotion_with_sandbox_refusal_unwinds_cleanly(
+    engine_db: AsyncEngine,
+    caps: ConcurrencyCaps,
+    class_settings: dict[str, tuple[int, float]],
+) -> None:
+    """T11 queued-promotion edge case — when a queued task is being
+    promoted via mark_running AND adapter.create raises, the task
+    transitions pending → failed (NOT running). Counters must NOT
+    be incremented (the task never actually ran). Queue must be
+    cleaned via the failed terminal transition's queue-unwind path."""
+    from cognic_agentos.core.scheduler._seams import SandboxCreateRefused
+
+    adapter = _StubSandboxAdapter(
+        create_raises=SandboxCreateRefused(
+            reason="sandbox_runtime_image_not_in_canonical_set",
+            event_id="evt-sandbox-q-001",
+        )
+    )
+    quota = _StubQuotaInterrogator(allow=True)
+    engine = _make_engine(db=engine_db, caps=caps, class_settings=class_settings, quota=quota)
+    # Saturate caps (2) so the third task queues
+    a = await engine.submit(
+        submit_input=_make_submit_input(actor_subject="svc-a1"), request_id="r-1"
+    )
+    b = await engine.submit(
+        submit_input=_make_submit_input(actor_subject="svc-a2"), request_id="r-2"
+    )
+    await engine.mark_running(uuid.UUID(a.task_id), request_id="r-1-start")
+    await engine.mark_running(uuid.UUID(b.task_id), request_id="r-2-start")
+    queued = await engine.submit(
+        submit_input=_make_submit_input(actor_subject="svc-a3"), request_id="r-3"
+    )
+    queued_id = uuid.UUID(queued.task_id)
+    # Free a slot so the queued task can be promoted
+    await engine.complete(uuid.UUID(a.task_id), request_id="r-1-done")
+    counts_before_promotion = engine._tenant_class_counts[("tenant-a", "interactive")]
+    # Promote with a sandbox-refusing adapter
+    await engine.mark_running(queued_id, request_id="r-3-start", sandbox_adapter=adapter)
+    # Failed state, not running
+    assert await _read_state(engine_db, queued_id) == "failed"
+    # Queue + queued_attribution cleaned via the failed-state terminal
+    assert queued_id not in engine._queued_attribution
+    assert engine._queues[("tenant-a", "interactive")].depth == 0
+    # Counters NEVER incremented for the failed task
+    assert engine._tenant_class_counts[("tenant-a", "interactive")] == counts_before_promotion
+    # Quota released for the failed task
+    assert queued_id in quota.releases
+
+
+# --- T11 round-1+round-2 — compensating-cleanup regressions --------------
+
+
+async def test_t11_storage_failure_after_sandbox_create_invokes_adapter_destroy(
+    engine_db: AsyncEngine,
+    caps: ConcurrencyCaps,
+    class_settings: dict[str, tuple[int, float]],
+) -> None:
+    """T11 round-1 P1 + round-2 P1 — when adapter.create succeeds +
+    storage.transition fails, the engine MUST invoke adapter.destroy
+    as best-effort cleanup BEFORE re-raising the storage exception.
+    Round-2 P1: the SandboxAdapter Protocol makes the create+destroy
+    pair atomic at the type level — caller cannot pass just one."""
+    adapter = _StubSandboxAdapter()
+    engine = _make_engine(db=engine_db, caps=caps, class_settings=class_settings)
+    decision = await engine.submit(submit_input=_make_submit_input(), request_id="req-1")
+    task_id = uuid.UUID(decision.task_id)
+    # Monkeypatch storage.transition to fail AFTER create
+    original_transition = engine._storage.transition
+
+    async def _failing_transition(**kwargs: Any) -> Any:
+        raise RuntimeError("simulated storage outage between create and durable record")
+
+    engine._storage.transition = _failing_transition  # type: ignore[method-assign]
+    try:
+        with pytest.raises(RuntimeError, match="simulated storage outage"):
+            await engine.mark_running(task_id, request_id="req-start", sandbox_adapter=adapter)
+    finally:
+        engine._storage.transition = original_transition  # type: ignore[method-assign]
+    # Create was invoked once; destroy was invoked once as compensation
+    assert adapter.create_calls == [task_id]
+    assert adapter.destroy_calls == [task_id], (
+        "adapter.destroy MUST fire as compensating cleanup when "
+        "storage.transition fails after a successful adapter.create"
+    )
+
+
+async def test_t11_round2_p1_api_makes_destroy_unrepresentable_as_omittable() -> None:
+    """T11 round-2 P1 — the SandboxAdapter Protocol's create+destroy
+    pair is atomic at the type level. The prior round-1 implementation
+    accepted ``sandbox_create_fn`` + ``sandbox_destroy_fn`` as TWO
+    separate kwargs, allowing production miswiring (caller passes
+    create but forgets destroy → leak on storage failure). The round-2
+    fix replaces both with a single ``sandbox_adapter`` Protocol-
+    conforming object — the leaky combination is unrepresentable.
+
+    This drift detector pins the Protocol surface: SandboxAdapter
+    declares EXACTLY two methods (create + destroy). Drift here
+    would re-introduce the leak class."""
+    from cognic_agentos.core.scheduler._seams import SandboxAdapter
+
+    # Protocol class exposes both methods as attributes
+    assert hasattr(SandboxAdapter, "create")
+    assert hasattr(SandboxAdapter, "destroy")
+    # mark_running signature accepts ``sandbox_adapter`` (single) NOT
+    # the prior round-1 ``sandbox_create_fn`` / ``sandbox_destroy_fn``
+    import inspect
+
+    from cognic_agentos.core.scheduler.engine import SchedulerEngine
+
+    sig = inspect.signature(SchedulerEngine.mark_running)
+    assert "sandbox_adapter" in sig.parameters
+    assert "sandbox_create_fn" not in sig.parameters, (
+        "round-1 callable kwarg must be gone (round-2 atomic-pair fix)"
+    )
+    assert "sandbox_destroy_fn" not in sig.parameters, (
+        "round-1 callable kwarg must be gone (round-2 atomic-pair fix)"
+    )
+
+
+async def test_t11_destroy_exception_does_not_shadow_storage_exception(
+    engine_db: AsyncEngine,
+    caps: ConcurrencyCaps,
+    class_settings: dict[str, tuple[int, float]],
+) -> None:
+    """T11 round-1 P1 — when both storage.transition AND
+    adapter.destroy raise, the ORIGINAL storage exception MUST
+    propagate (not the destroy exception). Destroy failures are
+    swallowed by design."""
+    adapter = _StubSandboxAdapter(
+        destroy_raises=ValueError("destroy bug — must NOT shadow storage exception")
+    )
+    engine = _make_engine(db=engine_db, caps=caps, class_settings=class_settings)
+    decision = await engine.submit(submit_input=_make_submit_input(), request_id="req-1")
+    task_id = uuid.UUID(decision.task_id)
+    original_transition = engine._storage.transition
+
+    async def _failing_transition(**kwargs: Any) -> Any:
+        raise RuntimeError("simulated storage outage (original)")
+
+    engine._storage.transition = _failing_transition  # type: ignore[method-assign]
+    try:
+        with pytest.raises(RuntimeError, match="simulated storage outage \\(original\\)"):
+            await engine.mark_running(task_id, request_id="req-start", sandbox_adapter=adapter)
+    finally:
+        engine._storage.transition = original_transition  # type: ignore[method-assign]
+    # Destroy was called even though it raised — pin the call happened
+    assert adapter.destroy_calls == [task_id]
