@@ -173,6 +173,33 @@ class TestLogicalNameDuplicateDetection:
         reasons = {f.reason for f in findings}
         assert "credentials_logical_name_duplicate" in reasons
 
+    def test_helper_does_not_filter_grammar_on_malformed_duplicates(self) -> None:
+        # T14b reviewer-found doc-drift: the helper's contract is
+        # exact-string compare without grammar pre-filtering. A
+        # synthetic list-of-pairs with TWO copies of a malformed
+        # name will fire ``credentials_logical_name_duplicate``
+        # from the helper. End-to-end ``validate()`` would ALSO fire
+        # ``credentials_logical_name_invalid_grammar`` from its
+        # per-block grammar loop — but the helper itself emits
+        # only the duplicate refusal. This test pins the
+        # no-grammar-filtering contract so future callers
+        # consuming the helper directly know what to expect.
+        decl = _BASELINE["credentials"]["db_main"]
+        findings = _detect_duplicate_names([("DB_Main", decl), ("DB_Main", decl)])
+        reasons = {f.reason for f in findings}
+        assert "credentials_logical_name_duplicate" in reasons, (
+            "helper must fire duplicate refusal on exact-string-equal "
+            "malformed names — no grammar pre-filtering at the helper layer"
+        )
+        # The helper does NOT independently emit the grammar refusal;
+        # that's the per-block grammar check's job at the validate()
+        # level. Pin the helper's narrow scope:
+        assert "credentials_logical_name_invalid_grammar" not in reasons, (
+            "helper must NOT emit grammar refusals — its scope is "
+            "duplicate detection only; grammar is the per-block check's "
+            "responsibility"
+        )
+
 
 # ---------------------------------------------------------------------------
 # vault_path
@@ -301,6 +328,18 @@ class TestExpectedFieldsGrammar:
             {"credentials": {"db_main": {"expected_fields": ["user-name", "password"]}}},
         )
 
+    def test_field_name_exceeding_32_chars_refuses(self) -> None:
+        # Spec §5.1: each ``expected_fields`` entry matches
+        # ``^[a-z][a-z0-9_]{0,31}$`` (max 32 chars total). The T14b
+        # reviewer-found drift was that the earlier draft used
+        # ``^[a-z][a-z0-9_]*$`` (no length cap) which let 33+-char
+        # names pass. This regression pins the corrected regex.
+        too_long_field = "a" * 33  # 33 lowercase 'a's — fails length cap
+        _assert_refuses_with(
+            "credentials_expected_fields_field_name_invalid_grammar",
+            {"credentials": {"db_main": {"expected_fields": [too_long_field, "password"]}}},
+        )
+
 
 # ---------------------------------------------------------------------------
 # ttl_s
@@ -386,6 +425,137 @@ class TestUnknownField:
             "credentials_unknown_field",
             {"credentials": {"db_main": {"made_up_field": "x"}}},
         )
+
+
+# ---------------------------------------------------------------------------
+# Required-field enforcement (T14b reviewer fix per spec §5.1)
+# ---------------------------------------------------------------------------
+
+
+class TestRequiredFields:
+    """Spec §5.1 marks all 5 ``[credentials.<name>]`` block fields as
+    required (``vault_path``, ``expected_fields``, ``ttl_s``,
+    ``purpose_category``, ``purpose_description``). The pre-T14b
+    draft only ran per-field validators when the field key was
+    present in ``decl``, which silently admitted empty-block + any-
+    missing-field manifests. Fixed at T14b by calling each per-field
+    validator unconditionally via ``decl.get("xxx")`` — absent
+    fields forward ``None`` which each validator maps to the
+    closest closed-enum refusal for its field.
+
+    These regressions pin the required-field contract so a future
+    refactor that re-introduces the ``in`` check is caught
+    immediately. Without this contract, T15's wiring into
+    ``cli/validate.py`` would admit malformed signed manifests
+    that lack required credential fields.
+    """
+
+    def test_empty_dict_block_emits_all_5_required_field_refusals(self) -> None:
+        manifest: dict[str, Any] = {
+            "pack": {"name": "test-pack", "version": "0.1.0"},
+            "runtime": {"expected_workload_gid": 1000},
+            "risk_tier": {"tier": "internal_write"},
+            "credentials": {"db_main": {}},
+        }
+        findings = validate(manifest, Path("."))
+        refusal_reasons = {f.reason for f in findings if f.severity == "refusal"}
+        assert "credentials_vault_path_empty" in refusal_reasons
+        assert "credentials_expected_fields_empty" in refusal_reasons
+        assert "credentials_ttl_s_invalid" in refusal_reasons
+        assert "credentials_purpose_category_invalid_value" in refusal_reasons
+        assert "credentials_purpose_description_invalid_shape" in refusal_reasons
+
+    def test_missing_vault_path_refuses(self) -> None:
+        _assert_refuses_with(
+            "credentials_vault_path_empty",
+            {"credentials": {"db_main": {"vault_path": None}}},
+        )
+
+    def test_missing_expected_fields_refuses(self) -> None:
+        _assert_refuses_with(
+            "credentials_expected_fields_empty",
+            {"credentials": {"db_main": {"expected_fields": None}}},
+        )
+
+    def test_missing_ttl_s_refuses(self) -> None:
+        _assert_refuses_with(
+            "credentials_ttl_s_invalid",
+            {"credentials": {"db_main": {"ttl_s": None}}},
+        )
+
+    def test_missing_purpose_category_refuses(self) -> None:
+        _assert_refuses_with(
+            "credentials_purpose_category_invalid_value",
+            {"credentials": {"db_main": {"purpose_category": None}}},
+        )
+
+    def test_missing_purpose_description_refuses(self) -> None:
+        _assert_refuses_with(
+            "credentials_purpose_description_invalid_shape",
+            {"credentials": {"db_main": {"purpose_description": None}}},
+        )
+
+    def test_non_dict_block_emits_shape_refusal_and_all_5_missing_fields(self) -> None:
+        # T14b round-2 reviewer fix: non-dict block (e.g.,
+        # ``{"db_main": "not-a-dict"}``) used to slip through with
+        # zero refusals because ``_validate_credential_block`` had
+        # an early ``if not isinstance(decl, dict): return findings``
+        # short-circuit. Once T15 wires this validator into
+        # ``cli/validate.py``, that would admit malformed signed
+        # manifests with scalar credential declarations. The fix
+        # emits ONE ``credentials_unknown_field`` refusal carrying
+        # ``failure_mode="non_table"`` to flag the block-shape
+        # issue, then continues as if the block were empty so the
+        # 5 required-field-missing refusals also fire.
+        manifest: dict[str, Any] = {
+            "pack": {"name": "test-pack", "version": "0.1.0"},
+            "runtime": {"expected_workload_gid": 1000},
+            "risk_tier": {"tier": "internal_write"},
+            "credentials": {"db_main": "not-a-dict"},
+        }
+        findings = validate(manifest, Path("."))
+        refusal_reasons = {f.reason for f in findings if f.severity == "refusal"}
+        # Block-shape signal fires
+        assert "credentials_unknown_field" in refusal_reasons
+        # All 5 required-field-missing signals also fire
+        assert "credentials_vault_path_empty" in refusal_reasons
+        assert "credentials_expected_fields_empty" in refusal_reasons
+        assert "credentials_ttl_s_invalid" in refusal_reasons
+        assert "credentials_purpose_category_invalid_value" in refusal_reasons
+        assert "credentials_purpose_description_invalid_shape" in refusal_reasons
+        # The block-shape refusal carries the failure_mode discriminator
+        non_table_findings = [
+            f
+            for f in findings
+            if f.reason == "credentials_unknown_field"
+            and f.payload.get("failure_mode") == "non_table"
+        ]
+        assert len(non_table_findings) == 1, (
+            "exactly one credentials_unknown_field refusal with "
+            "failure_mode='non_table' must fire on a non-dict block"
+        )
+        assert non_table_findings[0].payload.get("block_type") == "str", (
+            "the non_table refusal must carry the actual block type"
+        )
+
+    def test_non_dict_block_with_list_value_fires_same_shape_refusal(self) -> None:
+        # Defensive coverage of a second non-dict shape (list value);
+        # ensures the non-dict guard is type-generic, not string-only.
+        manifest: dict[str, Any] = {
+            "pack": {"name": "test-pack", "version": "0.1.0"},
+            "runtime": {"expected_workload_gid": 1000},
+            "risk_tier": {"tier": "internal_write"},
+            "credentials": {"db_main": ["not", "a", "dict"]},
+        }
+        findings = validate(manifest, Path("."))
+        non_table_findings = [
+            f
+            for f in findings
+            if f.reason == "credentials_unknown_field"
+            and f.payload.get("failure_mode") == "non_table"
+        ]
+        assert len(non_table_findings) == 1
+        assert non_table_findings[0].payload.get("block_type") == "list"
 
 
 # ---------------------------------------------------------------------------

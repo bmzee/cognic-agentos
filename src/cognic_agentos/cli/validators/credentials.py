@@ -32,10 +32,19 @@ Precedence rules (locked by user guidance):
     BEFORE the general ``credentials_expected_fields_field_name_invalid_grammar``
     refusal so authors get an actionable error pointing at the
     reserved-prefix rule rather than a generic snake_case complaint.
-  - Logical-name grammar takes precedence over duplicate detection —
-    a name failing grammar is dropped from per-block field checks
-    AND from the duplicate detector's seen-set (no collateral
-    duplicate refusal on a malformed-name near-twin).
+  - Logical-name grammar fires independently of duplicate detection
+    at the :func:`validate` end-to-end level — a name failing
+    grammar is dropped from per-block field checks (no collateral
+    field refusals), but ``_detect_duplicate_names`` does NOT
+    pre-filter by grammar at the helper level. The end-to-end
+    trailing-space scenario (e.g., ``"db_main"`` vs ``"db_main "``)
+    works because exact-string compare distinguishes the two keys,
+    not because grammar pre-filters either of them. Callers
+    consuming ``_detect_duplicate_names`` directly with a synthetic
+    duplicate-preserving input (e.g., the future T15 orchestrator
+    overlay-merge surface) should pre-filter for grammar themselves
+    if they want grammar-clean dedup only — the helper's contract
+    is exact-string compare, period.
   - When the ``[risk_tier]`` block is absent, the credentials
     validator suppresses its own
     ``credentials_risk_tier_not_permitted_pre_13_5`` check — the
@@ -55,10 +64,10 @@ Wave-1 grammar / range constraints:
   - Vault paths: max 512 chars; valid chars are ``[A-Za-z0-9/_-]``;
     must contain at least one ``/``; no leading slash; no trailing
     slash; no double-slash.
-  - Expected-fields: 1-16 entries; each entry max 64 chars (covered
-    by the general field-name length implicit in
-    ``[a-z][a-z0-9_]*``); no underscore-prefix (reserved for kernel
-    internal field names); per-list uniqueness.
+  - Expected-fields: 1-16 entries; each entry matches
+    ``^[a-z][a-z0-9_]{0,31}$`` (max 32 chars per spec §5.1); no
+    underscore-prefix (reserved for kernel internal field names);
+    per-list uniqueness.
   - ttl_s: positive integer (> 0).
   - purpose_category: closed-enum
     :data:`cognic_agentos.cli._governance_vocab.PurposeCategory`.
@@ -89,7 +98,12 @@ _LOGICAL_NAME_MAX_LEN: Final[int] = 32
 _VAULT_PATH_VALID_CHARS_PATTERN: Final[_re.Pattern[str]] = _re.compile(r"^[A-Za-z0-9/_-]+$")
 _VAULT_PATH_MAX_LEN: Final[int] = 512
 
-_FIELD_NAME_PATTERN: Final[_re.Pattern[str]] = _re.compile(r"^[a-z][a-z0-9_]*$")
+#: Spec §5.1 grammar for ``expected_fields`` entries: leading lowercase
+#: letter + up to 31 trailing snake_case chars (max 32 total). Earlier
+#: T14 draft used ``^[a-z][a-z0-9_]*$`` (no length cap) which let 33+-
+#: char field names pass — corrected at T14b per the reviewer-found
+#: drift between the spec wording and the regex.
+_FIELD_NAME_PATTERN: Final[_re.Pattern[str]] = _re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 _EXPECTED_FIELDS_MAX_COUNT: Final[int] = 16
 
 _CREDENTIALS_MAX_COUNT: Final[int] = 16
@@ -157,11 +171,32 @@ def _detect_duplicate_names(
 
     Exact-string comparison only — no normalization (case-fold,
     trailing-whitespace strip, etc.) per the user-locked T14 design
-    guardrail. Logical names that share a stem but differ on
-    grammar (e.g., ``"db_main"`` vs ``"db_main "`` with trailing
-    space) are NOT considered duplicates here; the trailing-space
-    variant trips ``credentials_logical_name_invalid_grammar`` in
-    the per-block grammar check.
+    guardrail AND no grammar pre-filtering. Two implications:
+
+    1. Logical names that share a stem but differ on grammar
+       (e.g., ``"db_main"`` vs ``"db_main "`` with trailing space)
+       are NOT collateral duplicates here because the exact-string
+       compare distinguishes them. The trailing-space variant
+       independently trips ``credentials_logical_name_invalid_grammar``
+       in the per-block grammar check at :func:`validate`'s loop.
+    2. Logical names that ARE exact-string-equal but BOTH malformed
+       (e.g., a list-of-pairs input
+       ``[("DB_Main", decl), ("DB_Main", decl)]``) WILL fire both
+       ``credentials_logical_name_duplicate`` (from this helper)
+       AND ``credentials_logical_name_invalid_grammar`` (from the
+       per-block grammar check). Callers consuming this helper
+       outside :func:`validate` with a synthetic duplicate-
+       preserving input shape should pre-filter for grammar
+       themselves if they want grammar-clean dedup — the helper's
+       contract is exact-string compare, period.
+
+    Pinned by ``test_validator_credentials.py``'s
+    ``TestLogicalNameDuplicateDetection`` class: the
+    ``test_helper_fires_on_synthetic_list_of_pairs_duplicates``
+    test asserts the well-formed case; the T14b
+    ``test_helper_does_not_filter_grammar_on_malformed_duplicates``
+    test asserts the malformed-duplicate case fires both refusals
+    + documents the helper's no-grammar-filtering contract.
     """
     seen: set[str] = set()
     findings: list[ValidatorFinding] = []
@@ -216,14 +251,32 @@ def _validate_logical_name(name: str) -> list[ValidatorFinding]:
 
 def _validate_vault_path(name: str, vp: Any) -> list[ValidatorFinding]:
     """Validate the ``vault_path`` field for a single credential
-    block. Precedence: empty → short-circuit; otherwise length +
-    chars + shape (each runs independently; multiple may fire on a
-    single bad path that violates more than one constraint)."""
+    block. Precedence: empty (incl. missing field, i.e. ``vp is None``)
+    → short-circuit; non-string non-None type → ``invalid_shape``
+    short-circuit; otherwise length + chars + shape (each runs
+    independently; multiple may fire on a single bad path that
+    violates more than one constraint)."""
     findings: list[ValidatorFinding] = []
+    # T14b reviewer fix: spec §5.1 marks vault_path as a required
+    # field. ``vp is None`` (the missing-field case forwarded by
+    # ``_validate_credential_block``'s ``decl.get(...)`` call) maps
+    # to the same closed-enum refusal as an explicit empty string,
+    # giving authors a single consistent error.
+    if vp is None or vp == "":
+        findings.append(
+            _refusal(
+                reason="credentials_vault_path_empty",
+                message=(
+                    f"vault_path for [credentials.{name}] is missing or empty; "
+                    "declare the Vault secret path (e.g., 'database/creds/db-main')."
+                ),
+                logical_name=name,
+            )
+        )
+        return findings
     if not isinstance(vp, str):
-        # Non-string vault_path is a shape error; emit invalid_shape
-        # so the closed-enum surface stays narrow (no separate
-        # "wrong type" reason).
+        # Other non-string type — emit invalid_shape so the closed-
+        # enum surface stays narrow (no separate "wrong type" reason).
         findings.append(
             _refusal(
                 reason="credentials_vault_path_invalid_shape",
@@ -233,18 +286,6 @@ def _validate_vault_path(name: str, vp: Any) -> list[ValidatorFinding]:
                 ),
                 logical_name=name,
                 failure_mode="non_string",
-            )
-        )
-        return findings
-    if vp == "":
-        findings.append(
-            _refusal(
-                reason="credentials_vault_path_empty",
-                message=(
-                    f"vault_path for [credentials.{name}] is empty; declare "
-                    "the Vault secret path (e.g., 'database/creds/db-main')."
-                ),
-                logical_name=name,
             )
         )
         return findings
@@ -464,40 +505,89 @@ def _validate_purpose_description(name: str, pd: Any) -> list[ValidatorFinding]:
 def _validate_credential_block(name: str, decl: Any) -> list[ValidatorFinding]:
     """Validate a single ``[credentials.<name>]`` block. Caller has
     already grammar-checked ``name``; this validates the declaration
-    body. ``decl is None`` short-circuits (deep-merge sentinel for
-    test scenarios that remove a baseline block)."""
+    body.
+
+    Block-shape handling:
+
+    - ``decl is None``: deep-merge sentinel for test scenarios that
+      remove a baseline block; return ``[]`` silently. Real TOML
+      cannot produce ``None`` here (a section header always parses
+      to a dict).
+    - ``decl`` is not a dict (e.g., string, int, list): emit ONE
+      shape-flag refusal ``credentials_unknown_field`` with
+      ``payload.failure_mode="non_table"`` to make the malformed
+      block shape explicit, then continue as if the block were
+      empty ``{}`` so the 5 required-field-missing refusals also
+      fire — author sees both the root-cause shape error AND each
+      missing-field signal. The pre-T14b-round-2 fall-through
+      returned ``[]`` silently, which would have admitted
+      ``{"db_main": "not-a-dict"}`` once T15 wired this validator
+      into ``cli/validate.py``.
+    - ``decl`` is a dict: validate unknown-field + required-field
+      cascade against the real dict contents.
+    """
     if decl is None:
         return []
     findings: list[ValidatorFinding] = []
+
+    # T14b round-2 reviewer fix (P1): non-dict block → flag the shape
+    # error + treat as empty for the required-field cascade so the
+    # malformed-manifest-admission bug class is closed. Uses the
+    # ``failure_mode="non_table"`` shape the reviewer suggested
+    # (TOML terminology — a credentials block declared without a
+    # section header / inline table). The closed-enum
+    # ``credentials_unknown_field`` reason already carries the
+    # ``payload.failure_mode`` discriminator pattern (see the per-
+    # field unknown-key path below); extending it to cover block-
+    # shape failures keeps the closed-enum vocabulary stable.
     if not isinstance(decl, dict):
-        return findings
-
-    # Unknown-field detection runs alongside known-field validation
-    # (does not short-circuit) so authors get the full picture.
-    for key in decl:
-        if key not in _ALLOWED_BLOCK_FIELDS:
-            findings.append(
-                _refusal(
-                    reason="credentials_unknown_field",
-                    message=(
-                        f"[credentials.{name}].{key} is not a recognised "
-                        f"field; allowed: {sorted(_ALLOWED_BLOCK_FIELDS)!r}."
-                    ),
-                    logical_name=name,
-                    field=key,
-                )
+        findings.append(
+            _refusal(
+                reason="credentials_unknown_field",
+                message=(
+                    f"[credentials.{name}] must be a TOML table (dict); got "
+                    f"{type(decl).__name__!r}. Declare a section header "
+                    f"``[credentials.{name}]`` and populate the required fields."
+                ),
+                logical_name=name,
+                failure_mode="non_table",
+                block_type=type(decl).__name__,
             )
+        )
+        effective_decl: dict[str, Any] = {}
+    else:
+        effective_decl = decl
+        # Unknown-field detection runs only on real-dict blocks (no
+        # keys to inspect when the block isn't a dict); the non-dict
+        # path above already surfaced the block-shape issue.
+        for key in decl:
+            if key not in _ALLOWED_BLOCK_FIELDS:
+                findings.append(
+                    _refusal(
+                        reason="credentials_unknown_field",
+                        message=(
+                            f"[credentials.{name}].{key} is not a recognised "
+                            f"field; allowed: {sorted(_ALLOWED_BLOCK_FIELDS)!r}."
+                        ),
+                        logical_name=name,
+                        field=key,
+                    )
+                )
 
-    if "vault_path" in decl:
-        findings.extend(_validate_vault_path(name, decl["vault_path"]))
-    if "expected_fields" in decl:
-        findings.extend(_validate_expected_fields(name, decl["expected_fields"]))
-    if "ttl_s" in decl:
-        findings.extend(_validate_ttl_s(name, decl["ttl_s"]))
-    if "purpose_category" in decl:
-        findings.extend(_validate_purpose_category(name, decl["purpose_category"]))
-    if "purpose_description" in decl:
-        findings.extend(_validate_purpose_description(name, decl["purpose_description"]))
+    # T14b round-1 reviewer fix (P1): all 5 fields are required per
+    # spec §5.1; call each per-field validator unconditionally (using
+    # ``.get()`` so absent fields forward ``None``). Each per-field
+    # validator treats ``None`` as the closest closed-enum refusal
+    # for that field (empty / invalid / invalid_value / invalid_shape).
+    # The pre-T14b ``in`` check let an empty-dict block + any block
+    # missing any of the 5 required fields slip through silently,
+    # which would have admitted malformed signed manifests once T15
+    # wires this validator into ``cli/validate.py``.
+    findings.extend(_validate_vault_path(name, effective_decl.get("vault_path")))
+    findings.extend(_validate_expected_fields(name, effective_decl.get("expected_fields")))
+    findings.extend(_validate_ttl_s(name, effective_decl.get("ttl_s")))
+    findings.extend(_validate_purpose_category(name, effective_decl.get("purpose_category")))
+    findings.extend(_validate_purpose_description(name, effective_decl.get("purpose_description")))
 
     return findings
 
