@@ -29,7 +29,7 @@ from cognic_agentos.sandbox import (
 class TestClosedEnumPartitionInvariants:
     """Pin the wire-protocol-public closed-enum values + counts."""
 
-    def test_sandbox_refusal_reason_has_exactly_27_values(self) -> None:
+    def test_sandbox_refusal_reason_has_exactly_36_values(self) -> None:
         # Sprint 8.5 T1 extended 15 → 21 (6 new wake-time arms per spec §3.3).
         # Sprint 10 T7 extended 21 → 22 (1 kernel-boundary cross-tenant guard
         # per Sprint-10 spec §4.1 — `sandbox_credential_request_tenant_mismatch`).
@@ -46,10 +46,15 @@ class TestClosedEnumPartitionInvariants:
         # TTL refusal — `sandbox_credential_lease_ttl_grant_exceeds_request`
         # — for the new `VaultLeaseGrantExceedsRequest` exception at
         # `core/vault.lease_credential` per ADR-004 §25 amendment).
+        # Sprint 10.6 T16 extended 27 → 36 (9 new credential-projection
+        # refusal values per spec §5.1; Literal-only at T16 — the Stage-2
+        # raise sites live at the T18 `sandbox/projection.py` planner +
+        # the T21 lifecycle integration that lands later in the sprint).
         values = typing.get_args(SandboxRefusalReason)
-        assert len(values) == 27, (
-            f"SandboxRefusalReason must have 27 values per spec §4.1 + "
-            f"8.5 §3.3 + 10 §4.1 + 10 §6.1 + 10.1 ADR-004 §25 amendment; "
+        assert len(values) == 36, (
+            f"SandboxRefusalReason must have 36 values per spec §4.1 + "
+            f"8.5 §3.3 + 10 §4.1 + 10 §6.1 + 10.1 ADR-004 §25 amendment + "
+            f"10.6 §5.1 (9 credential-projection values); "
             f"found {len(values)}: {values}"
         )
 
@@ -91,7 +96,7 @@ class TestClosedEnumPartitionInvariants:
         assert "sandbox.warm_pool.precreated" in events
 
     def test_sandbox_refusal_reason_canonical_values_present(self) -> None:
-        """Spot-check the 27-value Literal contains the canonical set
+        """Exact-match guard on the 36-value Literal: the canonical set
         documented in spec §4.1 (8A 15 vocab) + spec §3.3 (8.5 6 new
         wake-time arms) + Sprint-10 spec §4.1 (T7 1 new kernel-boundary
         cross-tenant guard) + Sprint-10 spec §6.1 (T9 4 new values: 3
@@ -99,16 +104,20 @@ class TestClosedEnumPartitionInvariants:
         (1 new post-mint granted-vs-requested TTL refusal
         `sandbox_credential_lease_ttl_grant_exceeds_request` mapped
         from the new `VaultLeaseGrantExceedsRequest` exception at
-        `core/vault.lease_credential`). The 3 mint-failure values gain
-        Stage-2 raise sites at T10's backend `create()` post-admission
-        per Sprint-10 spec §7.1; the TTL-cap value
-        `sandbox_credential_ttl_exceeds_tenant_max` is Literal-only —
-        the cap continues to surface as `sandbox_policy_rego_denied`
-        (Rego-reason surfacing through `OPAEngine.Decision` deferred to
-        a future task per Sprint-10 spec §7.3 amendment). The
-        Sprint-10.1 TTL-grant refusal IS wired (5th arm in the shared
-        mapping helper + 5-value backend except-tuples in the same
-        commit per Finding B of the 2026-05-24 plan-review round 1)."""
+        `core/vault.lease_credential`) + Sprint-10.6 spec §5.1 (T16 9
+        new credential-projection values; Literal-only at T16 — T18
+        `sandbox/projection.py` planner + T21 lifecycle integration
+        own the Stage-2 raise sites later in the sprint). The 3
+        Sprint-10 mint-failure values gain Stage-2 raise sites at
+        T10's backend `create()` post-admission per Sprint-10 spec
+        §7.1; the TTL-cap value `sandbox_credential_ttl_exceeds_tenant_max`
+        is Literal-only — the cap continues to surface as
+        `sandbox_policy_rego_denied` (Rego-reason surfacing through
+        `OPAEngine.Decision` deferred to a future task per Sprint-10
+        spec §7.3 amendment). The Sprint-10.1 TTL-grant refusal IS
+        wired (5th arm in the shared mapping helper + 5-value backend
+        except-tuples in the same commit per Finding B of the
+        2026-05-24 plan-review round 1)."""
         values = set(typing.get_args(SandboxRefusalReason))
         expected = {
             # Sprint 8A — 15 values
@@ -157,6 +166,25 @@ class TestClosedEnumPartitionInvariants:
             # SAME commit as this Literal extension per Finding B of
             # the 2026-05-24 plan-review round 1.
             "sandbox_credential_lease_ttl_grant_exceeds_request",
+            # Sprint 10.6 T16 — 9 credential-projection refusals per
+            # spec §5.1. Wire-public closed-enum surface; Literal-only
+            # at T16 — Stage-2 raise sites land at T18
+            # ``sandbox/projection.py`` planner (field-set / value-
+            # shape checks) + T21 lifecycle integration (substrate
+            # preflight + workload-GID resolution). Trigger envelopes
+            # registered at T16 are honest no-op registration stubs
+            # pointing at T18/T21 behavior owners per the
+            # registration-coverage doctrine at
+            # ``tests/conformance/sandbox/test_refusal_taxonomy.py``.
+            "sandbox_credential_projection_field_set_mismatch",
+            "sandbox_credential_staging_path_not_tmpfs",
+            "sandbox_credential_projection_workload_gid_unknown",
+            "sandbox_credential_projection_image_gid_manifest_mismatch",
+            "sandbox_credential_projection_image_user_directive_non_numeric",
+            "sandbox_credential_projection_root_workload_refused",
+            "sandbox_credential_projection_field_value_non_string",
+            "sandbox_credential_projection_field_value_empty_string",
+            "sandbox_credential_projection_field_value_size_exceeded",
         }
         assert values == expected, f"drift: {values ^ expected}"
 
@@ -210,6 +238,56 @@ class TestClosedEnumPartitionInvariants:
             "egress_audit_unreadable",
         }
         assert values == expected, f"drift: {values ^ expected}"
+
+
+class TestSprint106CredentialProjectionRefusalReasons:
+    """Sprint 10.6 T16 — wire-public Literal extension drift detector.
+
+    Pins the 9 credential-projection refusal values added to
+    ``SandboxRefusalReason`` at T16 per spec §5.1. The dedicated
+    drift detector here is independent of the umbrella exact-match
+    test at
+    ``TestClosedEnumPartitionInvariants.test_sandbox_refusal_reason_canonical_values_present``
+    so a future drift in the 9 T16-specific values produces a crisp
+    diagnostic separate from the broader 36-value count drift.
+
+    All 9 values are Literal-only at T16 — Stage-2 raise sites land
+    at the T18 ``sandbox/projection.py`` planner (field-set + value-
+    shape checks) + the T21 lifecycle integration (substrate
+    preflight + workload-GID resolution). The conformance trigger
+    envelopes registered in ``tests/conformance/sandbox/refusal_dispatch.py``
+    at T16 are honest no-op registration stubs per the registration-
+    coverage doctrine; behavior coverage lives in the T18 planner
+    unit suite + T21 cross-backend conformance suite.
+    """
+
+    def test_count_is_thirty_six(self) -> None:
+        # Crisp count guard — separate from the membership assertion
+        # so drift in size shows a clean diagnostic. Mirrors the
+        # ``test_refusal_reason_count_locked_at_*`` pattern from the
+        # conformance suite.
+        assert len(typing.get_args(SandboxRefusalReason)) == 36
+
+    def test_all_nine_credential_projection_values_present(self) -> None:
+        values = set(typing.get_args(SandboxRefusalReason))
+        expected_new = {
+            "sandbox_credential_projection_field_set_mismatch",
+            "sandbox_credential_staging_path_not_tmpfs",
+            "sandbox_credential_projection_workload_gid_unknown",
+            "sandbox_credential_projection_image_gid_manifest_mismatch",
+            "sandbox_credential_projection_image_user_directive_non_numeric",
+            "sandbox_credential_projection_root_workload_refused",
+            "sandbox_credential_projection_field_value_non_string",
+            "sandbox_credential_projection_field_value_empty_string",
+            "sandbox_credential_projection_field_value_size_exceeded",
+        }
+        missing = expected_new - values
+        assert not missing, (
+            f"Sprint 10.6 T16 credential-projection refusal values "
+            f"missing from SandboxRefusalReason Literal: {sorted(missing)}. "
+            f"Add to protocol.py per spec §5.1; the runtime Stage-2 raise "
+            f"sites land at T18 + T21."
+        )
 
 
 class TestSandboxPublicSurfaceExports:
