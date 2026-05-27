@@ -17,7 +17,7 @@ time per ``feedback_verify_code_citations_at_doc_write``:
   ``record_builder`` is ``sync (captured: T) -> DecisionRecord``.
 
 Drift-detector reminder from spec line 808 + ``feedback_drift_detector_
-test_only_no_runtime_import``: ``TestSandboxLifecycleEventVocabHas15Values``
+test_only_no_runtime_import``: ``TestSandboxLifecycleEventVocabHas19Values``
 (Sprint 8.5 T1 extended 8 → 12; Sprint 10 T9 extended 12 → 15; class
 renamed each time the count bumps) pins the count + the exact strings
 as a test-only check (the production module re-uses the
@@ -164,7 +164,7 @@ class TestAllLifecycleEventsReachable:
     ``typing.get_args(SandboxLifecycleEvent)``) so the test
     automatically covers Sprint-8.5's 4 new events alongside the
     Sprint-8A 8 without manual count maintenance — the count guard
-    lives separately at ``TestSandboxLifecycleEventVocabHas15Values``.
+    lives separately at ``TestSandboxLifecycleEventVocabHas19Values``.
     """
 
     @pytest.mark.parametrize("event", list(typing.get_args(SandboxLifecycleEvent)))
@@ -187,9 +187,9 @@ class TestAllLifecycleEventsReachable:
 # ---------------------------------------------------------------------------
 
 
-class TestSandboxLifecycleEventVocabHas15Values:
-    """Spec line 808 + §979 + Sprint 8.5 §3.3 + Sprint-10 §6.2 — pin
-    the 15-value count + the exact strings.
+class TestSandboxLifecycleEventVocabHas19Values:
+    """Spec line 808 + §979 + Sprint 8.5 §3.3 + Sprint-10 §6.2 +
+    Sprint-10.6 §5.1 — pin the 19-value count + the exact strings.
 
     No ``warm_pool.replenished`` per the user-locked taxonomy at §4.3 —
     replenishment is the *cause*; the *event* is still ``precreated``.
@@ -199,6 +199,10 @@ class TestSandboxLifecycleEventVocabHas15Values:
     Sprint-10 spec §6.2: lease_minted / lease_revoked /
     lease_revoke_failed; emitted from SandboxBackend.create() +
     .destroy() at T10).
+    Sprint 10.6 T17 extended 15 → 19 (4 new credential-projection
+    lifecycle events per Sprint-10.6 spec §5.1; Literal-only at T17 —
+    emit call sites land at the T21 lifecycle integration when that
+    task lands later in the sprint).
 
     Tombstoning is a STORAGE artifact NOT a lifecycle event — destroy()
     reuses the 8A ``sandbox.lifecycle.destroyed`` event with 2 new
@@ -227,11 +231,21 @@ class TestSandboxLifecycleEventVocabHas15Values:
             "sandbox.lifecycle.lease_minted",
             "sandbox.lifecycle.lease_revoked",
             "sandbox.lifecycle.lease_revoke_failed",
+            # Sprint 10.6 T17 — 4 new credential-projection lifecycle
+            # events per spec §5.1. Literal-only at T17 — emit call
+            # sites land at T21 ``SandboxBackend.create()`` lifecycle
+            # integration when that task lands. Payload-shape contracts
+            # locked at T21 alongside the typed audit helpers
+            # (mirroring the Sprint-10 ``emit_lease_*`` pattern).
+            "sandbox.lifecycle.credentials_projected",
+            "sandbox.lifecycle.credentials_projection_failed",
+            "sandbox.lifecycle.credentials_projection_cleaned_up",
+            "sandbox.lifecycle.credentials_projection_cleanup_failed",
         }
     )
 
-    def test_event_count_is_exactly_fifteen(self) -> None:
-        assert len(typing.get_args(SandboxLifecycleEvent)) == 15
+    def test_event_count_is_exactly_nineteen(self) -> None:
+        assert len(typing.get_args(SandboxLifecycleEvent)) == 19
 
     def test_event_strings_match_spec_table_exactly(self) -> None:
         actual = frozenset(typing.get_args(SandboxLifecycleEvent))

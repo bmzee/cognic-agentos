@@ -289,8 +289,9 @@ SandboxPolicyViolationReason = Literal[
     "egress_audit_unreadable",
 ]
 
-#: 15-value closed-enum for audit chain-row decision_type discriminator
-#: (Sprint 8A spec §4.3 + Sprint 8.5 spec §3.3 + Sprint 10 spec §6.2).
+#: 19-value closed-enum for audit chain-row decision_type discriminator
+#: (Sprint 8A spec §4.3 + Sprint 8.5 spec §3.3 + Sprint 10 spec §6.2 +
+#: Sprint 10.6 spec §5.1 T17).
 #: Covers:
 #:
 #: * 8 Sprint-8A lifecycle events (created / exec_completed / destroyed
@@ -303,6 +304,19 @@ SandboxPolicyViolationReason = Literal[
 #:   post-admission + ``destroy()`` per Sprint-10 spec §4.2 + §4.3 +
 #:   §6.2. Typed helpers live at ``sandbox/audit.py`` per the Sprint
 #:   8.5 T2 typed-helper pattern; backend call sites land at T10.
+#: * 4 Sprint-10.6 T17 credential-projection lifecycle events
+#:   (credentials_projected / credentials_projection_failed /
+#:   credentials_projection_cleaned_up /
+#:   credentials_projection_cleanup_failed) — **Literal-only at T17**;
+#:   emit call sites land at the T21 ``SandboxBackend.create()``
+#:   lifecycle integration when that task lands later in Sprint 10.6.
+#:   T17 does NOT add typed audit helpers (mirroring the Sprint-10
+#:   ``emit_lease_*`` pattern); those will land at T21 alongside the
+#:   per-event payload-shape contracts. The generic ``emit_sandbox_event``
+#:   path at ``sandbox/audit.py`` accepts the 4 new event strings via
+#:   the count-neutral ``_VALID_EVENTS = frozenset(typing.get_args(
+#:   SandboxLifecycleEvent))`` membership check so any future caller
+#:   can emit them without raising at the audit-boundary gate.
 #:
 #: Tombstoning is a STORAGE artifact NOT a lifecycle event — destroy()
 #: reuses 8A's ``sandbox.lifecycle.destroyed`` with 2 new conditional
@@ -342,6 +356,30 @@ SandboxLifecycleEvent = Literal[
     "sandbox.lifecycle.lease_minted",
     "sandbox.lifecycle.lease_revoked",
     "sandbox.lifecycle.lease_revoke_failed",
+    # Sprint 10.6 T17 — 4 credential-projection lifecycle events per
+    # spec §5.1.
+    #
+    # **Literal-only at T17** — emit call sites land at the T21
+    # ``SandboxBackend.create()`` lifecycle integration when that
+    # task lands. Per-event payload-shape contracts (and the typed
+    # audit helpers that enforce them, mirroring the Sprint-10
+    # ``emit_lease_minted`` / ``emit_lease_revoked`` /
+    # ``emit_lease_revoke_failed`` pattern) will land at T21
+    # alongside the actual emit sites.
+    #
+    # The 4 events form a 2-pair lifecycle around the credential
+    # projection step:
+    #   * ``credentials_projected`` / ``credentials_projection_failed``
+    #     — emitted at the project-time step (T21 post-mint
+    #     mint-then-project loop).
+    #   * ``credentials_projection_cleaned_up`` /
+    #     ``credentials_projection_cleanup_failed`` — emitted at
+    #     the LIFO unwind step (T21 destroy() + on-failure cleanup
+    #     during the §5.8-step-5 cleanup ordering).
+    "sandbox.lifecycle.credentials_projected",
+    "sandbox.lifecycle.credentials_projection_failed",
+    "sandbox.lifecycle.credentials_projection_cleaned_up",
+    "sandbox.lifecycle.credentials_projection_cleanup_failed",
 ]
 
 

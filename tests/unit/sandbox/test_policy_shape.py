@@ -68,14 +68,19 @@ class TestClosedEnumPartitionInvariants:
             f"T10c R1 P1.2; found {len(values)}: {values}"
         )
 
-    def test_sandbox_lifecycle_event_has_exactly_15_values(self) -> None:
+    def test_sandbox_lifecycle_event_has_exactly_19_values(self) -> None:
         # Sprint 8.5 T1 extended 8 → 12 (4 new events per spec §3.3).
         # Sprint 10 T9 extended 12 → 15 (3 new lease lifecycle events per
         # Sprint-10 spec §6.2: sandbox.lifecycle.lease_minted /
         # .lease_revoked / .lease_revoke_failed).
+        # Sprint 10.6 T17 extended 15 → 19 (4 new credential-projection
+        # lifecycle events per spec §5.1; Literal-only at T17 — emit
+        # call sites land at the T21 lifecycle integration when that
+        # task lands later in the sprint).
         values = typing.get_args(SandboxLifecycleEvent)
-        assert len(values) == 15, (
-            f"SandboxLifecycleEvent must have 15 values per spec §4.3 + 8.5 §3.3 + 10 §6.2; "
+        assert len(values) == 19, (
+            f"SandboxLifecycleEvent must have 19 values per spec §4.3 + "
+            f"8.5 §3.3 + 10 §6.2 + 10.6 §5.1; "
             f"found {len(values)}: {values}"
         )
 
@@ -189,9 +194,13 @@ class TestClosedEnumPartitionInvariants:
         assert values == expected, f"drift: {values ^ expected}"
 
     def test_sandbox_lifecycle_event_canonical_values_present(self) -> None:
-        """Spot-check the 15-value Literal contains the canonical set
+        """Exact-match guard on the 19-value Literal: the canonical set
         documented in spec §4.3 (8A 8 events) + spec §3.3 (8.5 4 new) +
-        Sprint-10 spec §6.2 (T9 3 new lease lifecycle events).
+        Sprint-10 spec §6.2 (T9 3 new lease lifecycle events) +
+        Sprint-10.6 spec §5.1 (T17 4 new credential-projection lifecycle
+        events; Literal-only at T17 — emit call sites land at the T21
+        ``SandboxBackend.create()`` lifecycle integration when that task
+        lands later in the sprint).
 
         Sprint 8.5 T1 introduces this assertion (mirrors the
         SandboxRefusalReason canonical-values pin); locks the lifecycle
@@ -223,6 +232,18 @@ class TestClosedEnumPartitionInvariants:
             "sandbox.lifecycle.lease_minted",
             "sandbox.lifecycle.lease_revoked",
             "sandbox.lifecycle.lease_revoke_failed",
+            # Sprint 10.6 T17 — 4 new credential-projection lifecycle
+            # events per spec §5.1. Literal-only at T17 — emit call
+            # sites land at the T21 ``SandboxBackend.create()``
+            # lifecycle integration when that task lands. Per-event
+            # payload-shape contracts will be locked at T21 alongside
+            # the typed audit helpers (mirroring the Sprint-10
+            # ``emit_lease_minted`` / ``emit_lease_revoked`` /
+            # ``emit_lease_revoke_failed`` pattern).
+            "sandbox.lifecycle.credentials_projected",
+            "sandbox.lifecycle.credentials_projection_failed",
+            "sandbox.lifecycle.credentials_projection_cleaned_up",
+            "sandbox.lifecycle.credentials_projection_cleanup_failed",
         }
         assert values == expected, f"drift: {values ^ expected}"
 
@@ -287,6 +308,54 @@ class TestSprint106CredentialProjectionRefusalReasons:
             f"missing from SandboxRefusalReason Literal: {sorted(missing)}. "
             f"Add to protocol.py per spec §5.1; the runtime Stage-2 raise "
             f"sites land at T18 + T21."
+        )
+
+
+class TestSprint106CredentialProjectionLifecycleEvents:
+    """Sprint 10.6 T17 — wire-public Literal extension drift detector.
+
+    Pins the 4 credential-projection lifecycle events added to
+    ``SandboxLifecycleEvent`` at T17 per spec §5.1. The dedicated
+    drift detector here is independent of the umbrella exact-match
+    test at
+    ``TestClosedEnumPartitionInvariants.test_sandbox_lifecycle_event_canonical_values_present``
+    so a future drift in the 4 T17-specific values produces a crisp
+    diagnostic separate from the broader 19-value count drift.
+
+    All 4 values are Literal-only at T17 — emit call sites land at
+    the T21 ``SandboxBackend.create()`` lifecycle integration when
+    that task lands. T17 does NOT add typed audit helpers (mirroring
+    the Sprint-10 ``emit_lease_minted`` / ``emit_lease_revoked`` /
+    ``emit_lease_revoke_failed`` pattern); those will land at T21
+    alongside the per-event payload-shape contracts.
+
+    Naming style follows the existing ``sandbox.lifecycle.*`` taxonomy
+    convention (NOT the bare names shown in the Sprint 10.6 plan
+    snippet at §561-565 — the plan was patched at T17 commit time
+    per ``[[feedback_patch_plan_against_doctrine]]`` to reflect the
+    actual taxonomy style).
+    """
+
+    def test_count_is_nineteen(self) -> None:
+        # Crisp count guard — separate from the membership assertion
+        # so drift in size shows a clean diagnostic. Mirrors the T16
+        # ``TestSprint106CredentialProjectionRefusalReasons`` pattern.
+        assert len(typing.get_args(SandboxLifecycleEvent)) == 19
+
+    def test_all_four_credential_projection_events_present(self) -> None:
+        values = set(typing.get_args(SandboxLifecycleEvent))
+        expected_new = {
+            "sandbox.lifecycle.credentials_projected",
+            "sandbox.lifecycle.credentials_projection_failed",
+            "sandbox.lifecycle.credentials_projection_cleaned_up",
+            "sandbox.lifecycle.credentials_projection_cleanup_failed",
+        }
+        missing = expected_new - values
+        assert not missing, (
+            f"Sprint 10.6 T17 credential-projection lifecycle events "
+            f"missing from SandboxLifecycleEvent Literal: {sorted(missing)}. "
+            f"Add to protocol.py per spec §5.1; the runtime emit call "
+            f"sites land at the T21 lifecycle integration."
         )
 
 
