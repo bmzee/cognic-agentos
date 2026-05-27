@@ -73,8 +73,9 @@ Wave-1 grammar / range constraints:
     :data:`cognic_agentos.cli._governance_vocab.PurposeCategory`.
   - purpose_description: non-empty string, max 256 chars.
   - Per-pack credential count: max 16.
-  - expected_workload_gid: integer in [1, 65535]; required when
-    ``[credentials.*]`` blocks exist; forbidden when none exist.
+  - expected_workload_gid: integer in [1, 4294967295] (Linux 32-bit
+    kernel GID space; covers OpenShift ``MustRunAsRange``); required
+    when ``[credentials.*]`` blocks exist; forbidden when none exist.
 """
 
 from __future__ import annotations
@@ -109,7 +110,15 @@ _EXPECTED_FIELDS_MAX_COUNT: Final[int] = 16
 _CREDENTIALS_MAX_COUNT: Final[int] = 16
 _PURPOSE_DESCRIPTION_MAX_LEN: Final[int] = 256
 _GID_MIN: Final[int] = 1
-_GID_MAX: Final[int] = 65535
+# Linux kernel 32-bit GID space (2^32 - 1). Covers the OpenShift
+# ``MustRunAsRange`` allocation envelope (typically 1_000_000_000-
+# 1_000_999_999 per project; bank deployments routinely see GIDs
+# in that range). Sprint 10.6 T20 round-4 reviewer P1 bumped from
+# the previous 65535 cap which would have rejected every legitimate
+# OpenShift-namespaced workload per ``[[project_openshift_deployment_target]]``.
+# The K8s ``securityContext.fsGroup`` field uses int64 but the
+# kernel enforces 32-bit; this cap matches the kernel limit.
+_GID_MAX: Final[int] = 4_294_967_295
 
 #: Closed-enum ``PurposeCategory`` value-set, derived at module
 #: load from the build-time vocabulary literal per T12. Drift
@@ -666,7 +675,7 @@ def _cross_check_workload_gid(
 
     - Credentials present + no gid → ``..._required_for_credential_pack``
     - gid present + no credentials → ``..._without_credentials``
-    - gid out of [1, 65535] → ``..._invalid_range``
+    - gid out of [1, 4_294_967_295] → ``..._invalid_range``
     """
     findings: list[ValidatorFinding] = []
     runtime_block = data.get("runtime")

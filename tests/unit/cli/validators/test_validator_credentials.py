@@ -628,11 +628,22 @@ class TestExpectedWorkloadGid:
             {"runtime": {"expected_workload_gid": 0}},
         )
 
-    def test_gid_above_65535_refuses(self) -> None:
+    def test_gid_above_max_refuses(self) -> None:
+        # Sprint 10.6 T20 round-4: cap bumped from 65535 to
+        # 4_294_967_295 (Linux 32-bit kernel GID space) to support
+        # OpenShift ``MustRunAsRange`` allocations. Test now uses
+        # 2^32 (one above the new cap) instead of 65536.
         _assert_refuses_with(
             "runtime_expected_workload_gid_invalid_range",
-            {"runtime": {"expected_workload_gid": 65536}},
+            {"runtime": {"expected_workload_gid": 4_294_967_296}},
         )
+
+    def test_openshift_high_gid_accepted(self) -> None:
+        # Sprint 10.6 T20 round-4 — OpenShift ``MustRunAsRange``
+        # allocates GIDs in the 1_000_000_000+ range; the pre-T20
+        # validator capped at 65535 which would have rejected every
+        # legitimate OpenShift namespace allocation.
+        _assert_passes({"runtime": {"expected_workload_gid": 1_000_680_000}})
 
     def test_gid_negative_refuses(self) -> None:
         _assert_refuses_with(

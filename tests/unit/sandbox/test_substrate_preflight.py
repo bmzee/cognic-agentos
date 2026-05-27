@@ -47,6 +47,7 @@ from cognic_agentos.sandbox._preflight import (
     _parse_image_user_directive,
     _PreflightDowngradeReason,
     verify_docker_credential_projection_preflight,
+    verify_k8s_credential_projection_preflight,
 )
 from cognic_agentos.sandbox.protocol import SandboxLifecycleRefused, SandboxRefusalReason
 
@@ -766,3 +767,264 @@ class TestVerifyDockerPreflightProfileGuard:
                 dev_escape_enabled=True,
                 profile="prod",
             )
+
+
+# ---------------------------------------------------------------------------
+# Sprint 10.6 T20 Phase 1 — K8s preflight regressions
+# ---------------------------------------------------------------------------
+
+
+class TestVerifyK8sCredentialProjectionPreflight:
+    """Per Sprint 10.6 spec §5.5 K8s row + user-locked T20 entry
+    decisions:
+
+      * K8s primary GID source = ``[runtime].expected_workload_gid``
+        (pod-level ``fsGroup`` is INJECTED from this value; we don't
+        probe an existing pod's fsGroup).
+      * NO ``dev_escape_enabled`` / ``profile`` params — Docker-only
+        dev escape MUST NOT leak into K8s. The type-system absence
+        of these params makes the leak class unrepresentable.
+      * 2 refusal paths only (no image USER → no
+        ``image_user_directive_non_numeric``; no host tmpfs → no
+        ``staging_path_not_tmpfs``; we inject fsGroup → no
+        ``image_gid_manifest_mismatch``):
+          - ``expected_workload_gid is None`` →
+            ``sandbox_credential_projection_workload_gid_unknown``
+          - ``expected_workload_gid == 0`` →
+            ``sandbox_credential_projection_root_workload_refused``
+      * Happy-path returns ``PreflightResult`` with
+        ``resolved_gid=expected_workload_gid`` + ``file_mode=0o440``
+        + ``dir_mode=0o750`` + ``dev_escape_downgrade_reason=None``
+        (the file/dir modes are advisory data carried through to T21;
+        K8s ACTUALLY enforces via the Secret's ``defaultMode`` set by
+        the executor's pod-spec extension, NOT chmod).
+    """
+
+    def test_signature_has_no_dev_escape_enabled_param(self) -> None:
+        # The signature itself is the load-bearing leak-prevention
+        # contract — if a future refactor accidentally adds the param
+        # back, this regression fires. Type-system level prevention
+        # of the cross-backend leak class.
+        import inspect
+
+        sig = inspect.signature(verify_k8s_credential_projection_preflight)
+        param_names = set(sig.parameters.keys())
+        assert "dev_escape_enabled" not in param_names, (
+            f"verify_k8s_credential_projection_preflight MUST NOT accept "
+            f"dev_escape_enabled (Docker-only dev escape leak class); "
+            f"got params: {param_names}"
+        )
+
+    def test_signature_has_no_profile_param(self) -> None:
+        # Parallel guard: ``profile`` param is also Docker-specific
+        # (it gates dev-escape against the "dev" runtime profile);
+        # K8s preflight has neither.
+        import inspect
+
+        sig = inspect.signature(verify_k8s_credential_projection_preflight)
+        param_names = set(sig.parameters.keys())
+        assert "profile" not in param_names, (
+            f"verify_k8s_credential_projection_preflight MUST NOT accept "
+            f"profile (Docker-only param for dev-escape profile gating); "
+            f"got params: {param_names}"
+        )
+
+    def test_signature_accepts_only_expected_workload_gid(self) -> None:
+        # Lock the entire signature shape: exactly one
+        # keyword-only param ``expected_workload_gid: int | None``.
+        import inspect
+
+        sig = inspect.signature(verify_k8s_credential_projection_preflight)
+        param_names = list(sig.parameters.keys())
+        assert param_names == ["expected_workload_gid"], (
+            f"K8s preflight signature drift; expected exactly "
+            f"['expected_workload_gid']; got: {param_names}"
+        )
+        # The param MUST be keyword-only (defence against positional
+        # misuse from a future caller).
+        param = sig.parameters["expected_workload_gid"]
+        assert param.kind == inspect.Parameter.KEYWORD_ONLY, (
+            f"expected_workload_gid must be keyword-only; got {param.kind}"
+        )
+
+    def test_none_expected_workload_gid_raises_workload_gid_unknown(self) -> None:
+        from cognic_agentos.sandbox.protocol import SandboxLifecycleRefused
+
+        with pytest.raises(SandboxLifecycleRefused) as exc_info:
+            verify_k8s_credential_projection_preflight(expected_workload_gid=None)
+        assert exc_info.value.reason == "sandbox_credential_projection_workload_gid_unknown"
+
+    def test_zero_expected_workload_gid_raises_root_workload_refused(self) -> None:
+        from cognic_agentos.sandbox.protocol import SandboxLifecycleRefused
+
+        with pytest.raises(SandboxLifecycleRefused) as exc_info:
+            verify_k8s_credential_projection_preflight(expected_workload_gid=0)
+        assert exc_info.value.reason == "sandbox_credential_projection_root_workload_refused"
+
+    def test_valid_gid_returns_preflight_result_with_resolved_gid(self) -> None:
+        result = verify_k8s_credential_projection_preflight(expected_workload_gid=1000)
+        assert result.resolved_gid == 1000
+        assert result.file_mode == 0o440
+        assert result.dir_mode == 0o750
+        assert result.dev_escape_downgrade_reason is None
+
+    def test_valid_gid_high_value_returns_preflight_result(self) -> None:
+        # OpenShift ``MustRunAsRange`` allocates GIDs in 1_000_000_000+.
+        # T20 round-4 bumped the validator + preflight cap from 65535
+        # to 4_294_967_295 specifically so this happy path is reachable.
+        result = verify_k8s_credential_projection_preflight(expected_workload_gid=1000680000)
+        assert result.resolved_gid == 1000680000
+        assert result.dev_escape_downgrade_reason is None
+
+    def test_gid_at_kernel_max_returns_preflight_result(self) -> None:
+        # 2^32 - 1 = 4_294_967_295 — upper edge of the valid range.
+        result = verify_k8s_credential_projection_preflight(expected_workload_gid=4_294_967_295)
+        assert result.resolved_gid == 4_294_967_295
+
+    def test_negative_gid_raises_value_error(self) -> None:
+        # T20 round-4 reviewer P1: pre-fix any int (incl. -1) returned
+        # a successful PreflightResult, contradicting the build-time
+        # validator's [1, _GID_MAX] range. Defence-in-depth check.
+        with pytest.raises(ValueError, match="outside the Linux 32-bit"):
+            verify_k8s_credential_projection_preflight(expected_workload_gid=-1)
+
+    def test_gid_above_kernel_max_raises_value_error(self) -> None:
+        # 2^32 = 4_294_967_296 — one above the kernel cap.
+        with pytest.raises(ValueError, match="outside the Linux 32-bit"):
+            verify_k8s_credential_projection_preflight(expected_workload_gid=4_294_967_296)
+
+    def test_out_of_range_gid_takes_value_error_path_not_refusal(self) -> None:
+        # Out-of-range is programmer-error (validator should have
+        # caught it at build time), NOT a wire-public credential
+        # refusal. The exception type discriminates: SandboxLifecycleRefused
+        # routes to the audit chain as a wire-public refusal value;
+        # ValueError routes to the caller as a contract violation.
+        from cognic_agentos.sandbox.protocol import SandboxLifecycleRefused
+
+        with pytest.raises(ValueError):
+            verify_k8s_credential_projection_preflight(expected_workload_gid=-100)
+        try:
+            verify_k8s_credential_projection_preflight(expected_workload_gid=-100)
+        except SandboxLifecycleRefused:  # pragma: no cover
+            pytest.fail("Out-of-range GID must NOT raise SandboxLifecycleRefused")
+        except ValueError:
+            pass
+
+    def test_true_raises_value_error_not_preflight_result(self) -> None:
+        # T20 round-5 reviewer P1 — ``bool`` is a subclass of ``int``
+        # in Python, so ``True == 1`` would slip through the int-typed
+        # range check as a successful PreflightResult(resolved_gid=True).
+        # The validator at credentials.py rejects bools explicitly;
+        # the preflight MUST follow the same lockstep contract.
+        with pytest.raises(ValueError, match=r"must be int.*not bool"):
+            verify_k8s_credential_projection_preflight(expected_workload_gid=True)
+
+    def test_false_raises_value_error_not_root_workload_refused(self) -> None:
+        # T20 round-5 reviewer P1 — ``False == 0`` would pre-fix
+        # have surfaced as a wire-public
+        # ``sandbox_credential_projection_root_workload_refused``
+        # refusal. That masquerades a Python-type bug as a real
+        # credential refusal at the audit boundary. Fix: type check
+        # fires BEFORE the ``== 0`` value check, so False → ValueError
+        # (programmer error), NOT SandboxLifecycleRefused.
+        from cognic_agentos.sandbox.protocol import SandboxLifecycleRefused
+
+        with pytest.raises(ValueError, match=r"must be int.*not bool"):
+            verify_k8s_credential_projection_preflight(expected_workload_gid=False)
+        # Negative regression: NOT raising the SandboxLifecycleRefused
+        # path that the bare ``== 0`` check would have produced.
+        try:
+            verify_k8s_credential_projection_preflight(expected_workload_gid=False)
+        except SandboxLifecycleRefused:  # pragma: no cover
+            pytest.fail(
+                "False MUST NOT surface as root_workload_refused — "
+                "bool type guard must fire BEFORE the == 0 value check"
+            )
+        except ValueError:
+            pass
+
+    def test_bool_type_check_fires_before_value_checks(self) -> None:
+        # Bug-class regression: pin that the type check has precedence
+        # over the value-based refusal checks. If a future refactor
+        # reorders so the ``== 0`` check runs first, False would slip
+        # through as root_workload_refused again.
+        #
+        # AST-walk based regression: docstrings contain the literal
+        # text ``expected_workload_gid == 0`` as a contract reference,
+        # so a substring-match on the raw source would compare
+        # docstring position to code position. AST gives us just the
+        # function body statements, in source order.
+        import ast
+        import inspect
+
+        from cognic_agentos.sandbox._preflight import (
+            verify_k8s_credential_projection_preflight as _fn,
+        )
+
+        # ``inspect.getsource`` returns the function source with the
+        # same indentation it has in the file; top-level functions
+        # are at column 0 so ``ast.parse`` accepts it directly.
+        tree = ast.parse(inspect.getsource(_fn))
+        func = tree.body[0]
+        assert isinstance(func, ast.FunctionDef), "expected a FunctionDef"
+
+        # Find lineno of the first statement that contains an
+        # ``isinstance(... bool ...)`` call vs the first statement
+        # that contains a ``== 0`` comparison. AST stmt order = code
+        # execution order.
+        bool_lineno: int | None = None
+        zero_lineno: int | None = None
+        for stmt in func.body:
+            for node in ast.walk(stmt):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == "isinstance"
+                    and len(node.args) >= 2
+                    and isinstance(node.args[1], ast.Name)
+                    and node.args[1].id == "bool"
+                    and bool_lineno is None
+                ):
+                    bool_lineno = stmt.lineno
+                if (
+                    isinstance(node, ast.Compare)
+                    and isinstance(node.left, ast.Name)
+                    and node.left.id == "expected_workload_gid"
+                    and len(node.ops) == 1
+                    and isinstance(node.ops[0], ast.Eq)
+                    and len(node.comparators) == 1
+                    and isinstance(node.comparators[0], ast.Constant)
+                    and node.comparators[0].value == 0
+                    and zero_lineno is None
+                ):
+                    zero_lineno = stmt.lineno
+
+        assert bool_lineno is not None, "bool guard missing from function body"
+        assert zero_lineno is not None, "== 0 check missing from function body"
+        assert bool_lineno < zero_lineno, (
+            f"bool guard MUST appear before == 0 check; "
+            f"got bool at line {bool_lineno}, == 0 at line {zero_lineno}"
+        )
+
+    def test_dev_escape_env_var_has_no_effect_on_k8s(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # User-locked regression: even if the dev-escape env var is set
+        # at process scope, the K8s preflight signature has no
+        # acceptance point so the env var cannot trigger a downgrade.
+        # Documents the cross-backend non-leak contract at runtime.
+        monkeypatch.setenv("COGNIC_DEV_ALLOW_PERMISSIVE_CREDENTIAL_PROJECTION", "1")
+
+        from cognic_agentos.sandbox.protocol import SandboxLifecycleRefused
+
+        # workload_gid_unknown path — env var set, still refuses
+        with pytest.raises(SandboxLifecycleRefused) as exc_info:
+            verify_k8s_credential_projection_preflight(expected_workload_gid=None)
+        assert exc_info.value.reason == "sandbox_credential_projection_workload_gid_unknown"
+
+        # root_workload_refused path — env var set, still refuses
+        with pytest.raises(SandboxLifecycleRefused) as exc_info:
+            verify_k8s_credential_projection_preflight(expected_workload_gid=0)
+        assert exc_info.value.reason == "sandbox_credential_projection_root_workload_refused"
+
+        # Happy path — env var set, no downgrade in result
+        result = verify_k8s_credential_projection_preflight(expected_workload_gid=1000)
+        assert result.dev_escape_downgrade_reason is None

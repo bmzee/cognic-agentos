@@ -124,6 +124,15 @@ from cognic_agentos.sandbox.audit import (
     sandbox_lifecycle_suspended,
     sandbox_lifecycle_woken,
 )
+from cognic_agentos.sandbox.backends._k8s_executor import (
+    # Sprint 10.6 T20 — pure-functional helpers + pair-carrier for the
+    # _build_pod_spec credential-mount extension. Module imports ONLY
+    # from core + sandbox.projection; no kubernetes_asyncio coupling
+    # at import time per the same dependency-neutral pattern as
+    # _shared_credentials.
+    CredentialSecretMount,
+    compute_k8s_credential_volume_and_mount,
+)
 from cognic_agentos.sandbox.backends._shared_credentials import (
     # Sprint 10 T10 K8s round-2 reviewer-P1 fix: the helper lives in
     # the dependency-neutral _shared_credentials module (NOT in
@@ -425,6 +434,8 @@ def _build_pod_spec(
     session_id: str,
     tenant_id: str,
     egress_proxy_image: str,
+    credential_secrets: Sequence[CredentialSecretMount] = (),
+    workload_fs_group: int | None = None,
 ) -> dict[str, Any]:
     """Construct the V1Pod body dict for the two-container Pod.
 
@@ -529,6 +540,77 @@ def _build_pod_spec(
         "name": _PROXY_LOG_VOLUME_NAME,
         "mountPath": _PROXY_LOG_DIR,
     }
+
+    # Sprint 10.6 T20 — credential-projection extension. When
+    # ``credential_secrets`` is non-empty, build one (volume, mount)
+    # pair per credential and add them to the pod-level ``volumes``
+    # + the SANDBOX container's ``volumeMounts`` (NOT the proxy
+    # sidecar — credential bytes MUST NOT be visible to the egress
+    # proxy; same threat-model rationale as proxy-log being sidecar-
+    # only). T21 will populate ``credential_secrets`` from the
+    # mint-then-project loop's ``K8sExecutorResult`` outputs; today
+    # ``credential_secrets=()`` keeps the pod spec byte-identical to
+    # the pre-T20 shape (backward-compat for the 13+
+    # TestBuildPodSpec/TestPodSpecWritableMountContract regressions).
+    credential_volumes: list[dict[str, Any]] = []
+    credential_mounts: list[dict[str, Any]] = []
+    for cred in credential_secrets:
+        c_volume, c_mount = compute_k8s_credential_volume_and_mount(
+            logical_name=cred.logical_name,
+            secret_name=cred.secret_name,
+        )
+        credential_volumes.append(c_volume)
+        credential_mounts.append(c_mount)
+
+    # Sprint 10.6 T20 — pod-level fsGroup. When ``workload_fs_group``
+    # is provided, the kubelet recursively chgrp's the projected
+    # Secret files at mount time, granting the workload's GID
+    # group-read access without per-file chmod (the Secret's
+    # ``defaultMode: 0o440`` provides the file mode; fsGroup provides
+    # the group identity). Omitted by default so today's OpenShift
+    # MustRunAsRange flow continues to allocate GID from the
+    # namespace range.
+    pod_spec_body: dict[str, Any] = {
+        "restartPolicy": "Never",
+        "volumes": [workspace_volume, proxy_log_volume, *credential_volumes],
+        "containers": [
+            {
+                "name": _SANDBOX_CONTAINER_NAME,
+                "image": policy.runtime_image,
+                "env": sandbox_env,
+                "securityContext": security_context,
+                "volumeMounts": [workspace_mount, *credential_mounts],
+                "resources": {
+                    "limits": {
+                        "cpu": cpu_limit,
+                        "memory": memory_limit,
+                    },
+                    # K8s convention: requests = limits avoids
+                    # the BestEffort QoS class (which the kubelet
+                    # evicts first under node pressure). Burstable
+                    # is the safe middle.
+                    "requests": {
+                        "cpu": cpu_limit,
+                        "memory": memory_limit,
+                    },
+                },
+            },
+            {
+                "name": _PROXY_SIDECAR_CONTAINER_NAME,
+                "image": egress_proxy_image,
+                "securityContext": security_context,
+                "volumeMounts": [proxy_log_mount],
+                # No resource caps on the sidecar — the cluster-
+                # wide LimitRange installed by the deployment kit
+                # (Sprint 14) sets sensible defaults; sandbox-
+                # session-level caps belong on the workload
+                # container only.
+            },
+        ],
+    }
+    if workload_fs_group is not None:
+        pod_spec_body["securityContext"] = {"fsGroup": workload_fs_group}
+
     return {
         "apiVersion": "v1",
         "kind": "Pod",
@@ -539,44 +621,7 @@ def _build_pod_spec(
                 _TENANT_ID_LABEL: tenant_id,
             },
         },
-        "spec": {
-            "restartPolicy": "Never",
-            "volumes": [workspace_volume, proxy_log_volume],
-            "containers": [
-                {
-                    "name": _SANDBOX_CONTAINER_NAME,
-                    "image": policy.runtime_image,
-                    "env": sandbox_env,
-                    "securityContext": security_context,
-                    "volumeMounts": [workspace_mount],
-                    "resources": {
-                        "limits": {
-                            "cpu": cpu_limit,
-                            "memory": memory_limit,
-                        },
-                        # K8s convention: requests = limits avoids
-                        # the BestEffort QoS class (which the kubelet
-                        # evicts first under node pressure). Burstable
-                        # is the safe middle.
-                        "requests": {
-                            "cpu": cpu_limit,
-                            "memory": memory_limit,
-                        },
-                    },
-                },
-                {
-                    "name": _PROXY_SIDECAR_CONTAINER_NAME,
-                    "image": egress_proxy_image,
-                    "securityContext": security_context,
-                    "volumeMounts": [proxy_log_mount],
-                    # No resource caps on the sidecar — the cluster-
-                    # wide LimitRange installed by the deployment kit
-                    # (Sprint 14) sets sensible defaults; sandbox-
-                    # session-level caps belong on the workload
-                    # container only.
-                },
-            ],
-        },
+        "spec": pod_spec_body,
     }
 
 

@@ -292,6 +292,16 @@ class PreflightResult:
     dev_escape_downgrade_reason: _PreflightDowngradeReason | None
 
 
+#: Sprint 10.6 T20 round-4 — defence-in-depth GID range for the K8s
+#: preflight. Mirrors the build-time validator constants at
+#: ``cli/validators/credentials.py:_GID_MIN`` + ``_GID_MAX`` per the
+#: same OpenShift-support contract. NOT shared via a runtime
+#: cross-module import per ``[[feedback_drift_detector_test_only_no_runtime_import]]``;
+#: each module declares its own local copy and the test pins lockstep.
+_GID_MIN: Final[int] = 1
+_GID_MAX: Final[int] = 4_294_967_295
+
+
 _DEV_ESCAPE_NOT_IN_DEV_PROFILE_MESSAGE: Final[str] = (
     "COGNIC_DEV_ALLOW_PERMISSIVE_CREDENTIAL_PROJECTION is only "
     "available in the ``dev`` runtime profile per spec §5.5 + §180. "
@@ -480,7 +490,124 @@ def verify_docker_credential_projection_preflight(
     )
 
 
+# ---------------------------------------------------------------------------
+# Sprint 10.6 T20 Phase 1 — K8s preflight
+# ---------------------------------------------------------------------------
+
+
+def verify_k8s_credential_projection_preflight(
+    *,
+    expected_workload_gid: int | None,
+) -> PreflightResult:
+    """K8s-side substrate preflight per spec §5.5 K8s row + §5.8 step 2.
+
+    Critically differs from the Docker preflight in three ways:
+
+      1. **No** ``dev_escape_enabled`` / ``profile`` params. The
+         ``COGNIC_DEV_ALLOW_PERMISSIVE_CREDENTIAL_PROJECTION`` env
+         flag is Docker-only — the type-system absence of these params
+         here makes the cross-backend leak class unrepresentable.
+      2. **No** image USER directive parsing. K8s SecurityContext
+         supplies the UID/GID (via pod-level ``fsGroup`` injected from
+         this preflight's resolved value); the runtime image does not
+         own the workload identity.
+      3. **No** ``/proc/mounts`` tmpfs check. K8s Secrets are projected
+         by the kubelet into the pod's tmpfs (kubelet-managed); the
+         host filesystem has no AgentOS-side staging path.
+
+    The remaining surface is the GID-resolution + refusal axis:
+
+      * ``expected_workload_gid is None`` → raise
+        ``SandboxLifecycleRefused`` with
+        ``sandbox_credential_projection_workload_gid_unknown``.
+        ``None`` is a real refusal path — the K8s pack manifest may
+        omit ``[runtime].expected_workload_gid`` (no Docker-style image
+        USER fallback exists), so absence is unambiguous: refuse.
+      * ``expected_workload_gid == 0`` → raise
+        ``SandboxLifecycleRefused`` with
+        ``sandbox_credential_projection_root_workload_refused``.
+        Root workloads cannot receive projected credentials — same
+        non-negotiable contract as Docker. The K8s preflight has no
+        dev-escape downgrade path (per spec §180 "never available in
+        K8s; never available in production").
+      * Valid ``int`` GID → return ``PreflightResult`` with
+        ``resolved_gid=expected_workload_gid`` + ``file_mode=0o440`` +
+        ``dir_mode=0o750`` + ``dev_escape_downgrade_reason=None``.
+        T21 will use ``resolved_gid`` for the pod-level ``fsGroup``;
+        the file/dir modes are advisory data carried forward but K8s
+        ACTUALLY enforces via the Secret's ``defaultMode`` (set by
+        the executor's volume spec at ``defaultMode: 0o440``), NOT
+        chmod — the kubelet projects with the requested mode.
+    """
+    if expected_workload_gid is None:
+        raise SandboxLifecycleRefused(
+            "sandbox_credential_projection_workload_gid_unknown",
+            detail=(
+                "K8s preflight: [runtime].expected_workload_gid is None; "
+                "K8s has no image USER fallback (the runtime image does "
+                "not own the workload identity — SecurityContext does), "
+                "so a missing manifest GID is unambiguous refusal. "
+                "Declare expected_workload_gid in the pack manifest."
+            ),
+        )
+
+    # Sprint 10.6 T20 round-5 reviewer P1: ``bool`` is a subclass of
+    # ``int`` in Python, so ``True == 1`` and ``False == 0`` —
+    # without this explicit check ``True`` would slip through the
+    # range gate as a successful PreflightResult(resolved_gid=True),
+    # and ``False`` would surface as a wire-public
+    # ``root_workload_refused`` refusal (masquerading a Python-type
+    # bug as a credential refusal — semantic confusion at the audit
+    # boundary). Mirrors the build-time validator's bool guard at
+    # ``cli/validators/credentials.py``. Programmer-error contract
+    # violation → ValueError, NOT SandboxLifecycleRefused.
+    if not isinstance(expected_workload_gid, int) or isinstance(expected_workload_gid, bool):
+        raise ValueError(
+            f"expected_workload_gid must be int (not bool); "
+            f"got {type(expected_workload_gid).__name__} "
+            f"{expected_workload_gid!r}"
+        )
+
+    if expected_workload_gid == 0:
+        raise SandboxLifecycleRefused(
+            "sandbox_credential_projection_root_workload_refused",
+            detail=(
+                "K8s preflight: expected_workload_gid is 0 (root); "
+                "root workloads cannot receive projected credentials "
+                "per spec §5.5. No dev-escape downgrade available in "
+                "K8s (spec §180: never available in K8s; never available "
+                "in production)."
+            ),
+        )
+
+    # Sprint 10.6 T20 round-4: defence-in-depth range check mirroring
+    # the build-time validator at ``cli/validators/credentials.py``
+    # (``_GID_MIN=1``, ``_GID_MAX=4_294_967_295``). Reaching this
+    # branch at runtime means a caller either bypassed the manifest
+    # validator OR is invoking the preflight via a non-manifest code
+    # path (programmer-error contract violation, NOT a wire-public
+    # credential refusal). Raises ``ValueError`` per the T19 pattern
+    # for the opaque-token/relative-path grammar guards.
+    if expected_workload_gid < _GID_MIN or expected_workload_gid > _GID_MAX:
+        raise ValueError(
+            f"expected_workload_gid={expected_workload_gid!r} is outside "
+            f"the Linux 32-bit kernel GID range [{_GID_MIN}, {_GID_MAX}]. "
+            f"The build-time validator at cli/validators/credentials.py "
+            f"enforces the same range — reaching the runtime preflight "
+            f"with an out-of-range GID indicates a caller bypassed "
+            f"manifest validation. Programmer-error contract violation."
+        )
+
+    return PreflightResult(
+        resolved_gid=expected_workload_gid,
+        file_mode=_FILE_MODE_NORMAL,
+        dir_mode=_DIR_MODE_NORMAL,
+        dev_escape_downgrade_reason=None,
+    )
+
+
 __all__ = [
     "PreflightResult",
     "verify_docker_credential_projection_preflight",
+    "verify_k8s_credential_projection_preflight",
 ]

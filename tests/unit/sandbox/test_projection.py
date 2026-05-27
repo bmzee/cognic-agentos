@@ -171,7 +171,7 @@ class TestHappyPath:
         # Mode always 0o440 per spec §5.3
         assert all(entry.mode == 0o440 for entry in result.entries)
         # Relative paths = field names only (workload mounts at
-        # /run/credentials/<logical_name>/)
+        # /run/credentials/<logical_name>)
         assert {entry.relative_path for entry in result.entries} == {"username", "password"}
 
     def test_content_is_byte_exact_utf8(self) -> None:
