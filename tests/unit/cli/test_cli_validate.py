@@ -169,9 +169,19 @@ def test_run_validators_dispatches_to_every_validator(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Every per-concern validator (identity / a2a / mcp /
-    data_governance / risk_tier / supply_chain) is called exactly
-    once with ``(parsed_dict, pack_path)``. Pinning here catches a
-    future refactor that drops one of the six dispatch sites."""
+    data_governance / risk_tier / credentials / supply_chain) is
+    called exactly once with ``(parsed_dict, pack_path)``. Pinning
+    here catches a future refactor that drops one of the seven
+    dispatch sites.
+
+    Sprint 10.6 T15 extended this dispatch list with the credentials
+    validator (per ADR-004 §25 + ADR-017). Placement is AFTER
+    risk_tier (because credentials cross-validates on
+    ``[risk_tier].tier`` for the pre-13.5 high-risk-tier refusal)
+    and BEFORE supply_chain (logical concern separation; supply_chain
+    runs against the attestation paths which are independent of
+    credentials).
+    """
     from cognic_agentos.cli import validators
     from cognic_agentos.cli.validate import run_validators
 
@@ -192,6 +202,7 @@ def test_run_validators_dispatches_to_every_validator(
         "mcp",
         "data_governance",
         "risk_tier",
+        "credentials",
         "supply_chain",
     ):
         monkeypatch.setattr(getattr(validators, name), "validate", _make_recorder(name))
@@ -204,8 +215,78 @@ def test_run_validators_dispatches_to_every_validator(
         "mcp",
         "data_governance",
         "risk_tier",
+        "credentials",
         "supply_chain",
     ]
+
+
+def test_run_validators_aggregates_credentials_findings_when_block_malformed(
+    tmp_path: Path,
+) -> None:
+    """Sprint 10.6 T15 integration test: a manifest with a malformed
+    ``[credentials.<name>]`` block produces credentials-validator
+    refusals in the aggregated output. End-to-end exercise of the
+    T15 wiring; complements the dispatch-order test above by proving
+    the validator's findings reach the caller (not just that it was
+    invoked).
+
+    The test uses a real malformed manifest (missing all 5 required
+    fields in the credential block) rather than monkeypatching the
+    validator, so it doubles as a smoke test for the T14 +
+    T14b required-field + non-dict-block fixes flowing through the
+    orchestrator boundary.
+    """
+    from cognic_agentos.cli.validate import run_validators
+
+    body = (
+        "[pack]\n"
+        'pack_id = "cognic-tool-test"\n'
+        'kind = "tool"\n'
+        "\n"
+        "[identity]\n"
+        'agent_id = "did:web:example.com:tools:test"\n'
+        'display_name = "Test Tool"\n'
+        'provider_organization = "Example Org"\n'
+        'provider_url = "https://example.com"\n'
+        'oasf_capability_set = ["test.v1"]\n'
+        "\n"
+        "[data_governance]\n"
+        'data_classes = ["public", "internal"]\n'
+        'purpose = "operational_telemetry"\n'
+        'retention_policy = "none"\n'
+        "\n"
+        "[risk_tier]\n"
+        'tier = "read_only"\n'
+        "\n"
+        "[supply_chain]\n"
+        'attestation_paths = ["attestations/cosign.sig"]\n'
+        "\n"
+        "[runtime]\n"
+        "expected_workload_gid = 1000\n"
+        "\n"
+        # Empty [credentials.db_main] block: T14b required-field
+        # cascade should fire all 5 missing-field refusals through
+        # the orchestrator boundary.
+        "[credentials.db_main]\n"
+    )
+    _write_manifest(tmp_path, body)
+    # Materialise the attestation file referenced by the manifest
+    # so supply_chain doesn't refuse on missing-file (this test
+    # exercises the credentials validator path; sibling validators
+    # must not collateral-refuse).
+    attestation = tmp_path / "attestations" / "cosign.sig"
+    attestation.parent.mkdir(parents=True, exist_ok=True)
+    attestation.write_bytes(b".")
+
+    findings = run_validators(tmp_path)
+    refusal_reasons = {f.reason for f in findings if f.severity == "refusal"}
+    # All 5 required-field-missing refusals from T14b must surface
+    # in the aggregated output:
+    assert "credentials_vault_path_empty" in refusal_reasons
+    assert "credentials_expected_fields_empty" in refusal_reasons
+    assert "credentials_ttl_s_invalid" in refusal_reasons
+    assert "credentials_purpose_category_invalid_value" in refusal_reasons
+    assert "credentials_purpose_description_invalid_shape" in refusal_reasons
 
 
 def test_run_validators_aggregates_findings_in_dispatch_order(
