@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import UTC, datetime
+from urllib.parse import urlsplit
 
 # RFC-1123 label: 1-63 chars, alphanumeric start/end, hyphens allowed in the
 # middle only. No underscore, no leading/trailing hyphen, no empty label.
@@ -161,3 +163,233 @@ def render_tinyproxy_conf(*, filter_path: str, log_path: str, port: int = 3128) 
         )
         + "\n"
     )
+
+
+#: Sentinel host emitted when a host-less port-refusal cannot be unambiguously
+#: attributed to a single pending same-port CONNECT (fail-closed: never guess a
+#: host). Machine-detectable; tests pin this exact constant.
+AMBIGUOUS_HOST_SENTINEL = "__cognic_ambiguous_host__"
+
+#: Sentinel method emitted when a host-bearing outcome line (Established /
+#: filtered-domain) has no paired Request — e.g. a log-tail restart or truncated
+#: input. The host + outcome are known but the method is not; an explicit
+#: sentinel keeps the audit value machine-detectable rather than a silent "".
+UNKNOWN_METHOD_SENTINEL = "__cognic_unknown_method__"
+
+# tinyproxy LogLevel Info line prefix: ``<LEVEL>   <Mon DD HH:MM:SS.mmm> [<pid>]: <message>``.
+# The four relevant message bodies are matched against ``<message>`` (the text
+# after ``]: ``). We capture the timestamp segment for tz-aware rendering and the
+# message tail for per-type dispatch. Non-matching lines (opensock, getaddrinfo,
+# No upstream proxy, Closed connection, NOTICE shutdown, …) are noise: ignored.
+_LINE_RE = re.compile(
+    r"^\S+\s+(?P<ts>[A-Z][a-z]{2} +\d{1,2} \d{2}:\d{2}:\d{2}\.\d{3}) "
+    r"\[\d+\]: (?P<msg>.*)$"
+)
+
+# Request (file descriptor N): <METHOD> <TARGET> HTTP/1.1
+_REQUEST_RE = re.compile(
+    r"^Request \(file descriptor \d+\): (?P<method>\S+) (?P<target>\S+) HTTP/[\d.]+$"
+)
+
+# Established connection to host "<host>" using file descriptor M.
+_ESTABLISHED_RE = re.compile(r'^Established connection to host "(?P<host>[^"]*)" using ')
+
+# Proxying refused on filtered domain "<host>"
+_FILTERED_RE = re.compile(r'^Proxying refused on filtered domain "(?P<host>[^"]*)"$')
+
+# Refused CONNECT method on port <port>  (NO host on this line)
+_BAD_PORT_RE = re.compile(r"^Refused CONNECT method on port (?P<port>\d+)$")
+
+# tinyproxy omits the year from its timestamp; %b parses the abbreviated month.
+_TS_FORMAT = "%b %d %H:%M:%S.%f"
+
+
+def _parse_ts(ts: str, *, year: int) -> str:
+    """Parse a tinyproxy ``Mon DD HH:MM:SS.mmm`` prefix into a tz-aware UTC
+    ISO 8601 string (tinyproxy omits the year — supplied by the caller)."""
+    return datetime.strptime(ts, _TS_FORMAT).replace(year=year, tzinfo=UTC).isoformat()
+
+
+def _extract_host_port(method: str, target: str) -> tuple[str | None, int | None]:
+    """Extract ``(host, port)`` from a Request line's ``<METHOD> <TARGET>``.
+
+    * CONNECT targets are ``host:port`` (split on the LAST ``:`` so IPv6/odd
+      hosts keep their port boundary) — ``port`` is the int.
+    * Everything else (GET/POST/…) is an ``http://host/…`` URL — ``host`` via
+      ``urlsplit().hostname``; ``port`` is ``None`` (only CONNECT port-refusals
+      need port pairing).
+
+    Returns ``(None, None)`` if the target shape can't be parsed (defence: a
+    malformed Request line must not crash the mapper)."""
+    if method == "CONNECT":
+        host, sep, port_str = target.rpartition(":")
+        if not sep or not host:
+            return None, None
+        try:
+            return host, int(port_str)
+        except ValueError:
+            return None, None
+    host = urlsplit(target).hostname
+    return host, None
+
+
+def parse_tinyproxy_log(log_text: str, *, policy_id: str, year: int | None = None) -> list[dict]:
+    """Map tinyproxy ``LogLevel Info`` output to ProxyAccessRecord-shaped dicts.
+
+    Returns one dict per resolved request, in log order, each with keys
+    host / method / timestamp (tz-aware ISO 8601 str) / policy_id / outcome /
+    refusal_reason.
+
+    Correlation model (stateful, single pass; tinyproxy has no per-request id):
+      * Track pending Requests (FIFO) parsed from ``Request (...)`` lines.
+      * ``Established connection to host "<h>"`` -> ALLOWED. The host is in the
+        line; pair to the most-recent pending Request whose host == <h> (for the
+        method + request timestamp); remove it.
+      * ``Proxying refused on filtered domain "<h>"`` -> REFUSED /
+        ``not_in_allow_list``. Same host-in-line pairing.
+      * ``Refused CONNECT method on port <p>`` -> REFUSED /
+        ``non_http_connect_target``, method="CONNECT". This line has NO host.
+        Look at pending CONNECT Requests whose port == <p>:
+          - exactly ONE  -> host = that pending's host; remove it.
+          - zero OR >1   -> host = AMBIGUOUS_HOST_SENTINEL (fail-closed; do NOT
+                            pick one of the pending hosts).
+      * timestamp: parse the line's ``Mon DD HH:MM:SS.mmm`` prefix into a
+        tz-aware UTC datetime (tinyproxy omits the year -> use ``year`` if given,
+        else the current UTC year), rendered via ``.isoformat()``. Use the paired
+        Request's timestamp for paired records; the refusal line's timestamp for
+        an unpaired (sentinel) port-refusal.
+    """
+    resolved_year = year if year is not None else datetime.now(UTC).year
+
+    # Pending Requests not yet paired to an outcome line. Each entry carries the
+    # parsed host / method / port / request-timestamp so a later outcome line can
+    # adopt the Request's timestamp (the connection attempt's own clock).
+    pending: list[dict] = []
+    records: list[dict] = []
+
+    def _pop_pending_by_host(host: str) -> dict | None:
+        """Remove + return the MOST-RECENT pending Request whose host == host
+        (LIFO over the host match), else None."""
+        for i in range(len(pending) - 1, -1, -1):
+            if pending[i]["host"] == host:
+                return pending.pop(i)
+        return None
+
+    def _resolve_pending_connect_by_port(port: int) -> dict | None:
+        """Resolve a host-less ``Refused CONNECT method on port`` line.
+
+        If EXACTLY ONE pending CONNECT has port == port, remove + return it
+        (unambiguous ⇒ real host). Otherwise (zero OR >1) FLUSH every same-port
+        pending CONNECT and return None — the caller emits the sentinel.
+
+        Flushing is load-bearing (P1): a pending CONNECT to a ConnectPort-denied
+        port can ONLY ever produce more port-refusals, never an Established /
+        allowed line. Leaving ambiguous entries in ``pending`` would both leak in
+        a long-running tailer AND let a later host-bearing outcome mis-pair
+        against the stale CONNECT. Fail-closed: never guess among multiple."""
+        matches = [
+            i for i, p in enumerate(pending) if p["method"] == "CONNECT" and p["port"] == port
+        ]
+        if len(matches) == 1:
+            return pending.pop(matches[0])
+        # 0 or >1 -> sentinel; flush all same-port matches (reverse index order
+        # so earlier pops don't shift later indices) — tainted entries removed.
+        for i in reversed(matches):
+            pending.pop(i)
+        return None
+
+    for raw_line in log_text.splitlines():
+        line_match = _LINE_RE.match(raw_line)
+        if line_match is None:
+            continue  # not a tinyproxy Info line -> noise
+        ts_segment = line_match.group("ts")
+        message = line_match.group("msg")
+
+        req_match = _REQUEST_RE.match(message)
+        if req_match is not None:
+            method = req_match.group("method")
+            host, port = _extract_host_port(method, req_match.group("target"))
+            if host is None:
+                continue  # unparseable target -> drop the Request, do not pend
+            pending.append(
+                {
+                    "host": host,
+                    "method": method,
+                    "port": port,
+                    "timestamp": _parse_ts(ts_segment, year=resolved_year),
+                }
+            )
+            continue
+
+        est_match = _ESTABLISHED_RE.match(message)
+        if est_match is not None:
+            host = est_match.group("host")
+            paired = _pop_pending_by_host(host)
+            method = paired["method"] if paired is not None else UNKNOWN_METHOD_SENTINEL
+            timestamp = (
+                paired["timestamp"]
+                if paired is not None
+                else _parse_ts(ts_segment, year=resolved_year)
+            )
+            records.append(
+                {
+                    "host": host,
+                    "method": method,
+                    "timestamp": timestamp,
+                    "policy_id": policy_id,
+                    "outcome": "allowed",
+                    "refusal_reason": None,
+                }
+            )
+            continue
+
+        filt_match = _FILTERED_RE.match(message)
+        if filt_match is not None:
+            host = filt_match.group("host")
+            paired = _pop_pending_by_host(host)
+            method = paired["method"] if paired is not None else UNKNOWN_METHOD_SENTINEL
+            timestamp = (
+                paired["timestamp"]
+                if paired is not None
+                else _parse_ts(ts_segment, year=resolved_year)
+            )
+            records.append(
+                {
+                    "host": host,
+                    "method": method,
+                    "timestamp": timestamp,
+                    "policy_id": policy_id,
+                    "outcome": "refused",
+                    "refusal_reason": "not_in_allow_list",
+                }
+            )
+            continue
+
+        port_match = _BAD_PORT_RE.match(message)
+        if port_match is not None:
+            port = int(port_match.group("port"))
+            paired = _resolve_pending_connect_by_port(port)
+            if paired is not None:
+                host = paired["host"]
+                timestamp = paired["timestamp"]
+            else:
+                # Zero OR >1 pending same-port CONNECT -> fail-closed sentinel;
+                # the refusal line carries no host, so use its own timestamp.
+                host = AMBIGUOUS_HOST_SENTINEL
+                timestamp = _parse_ts(ts_segment, year=resolved_year)
+            records.append(
+                {
+                    "host": host,
+                    "method": "CONNECT",
+                    "timestamp": timestamp,
+                    "policy_id": policy_id,
+                    "outcome": "refused",
+                    "refusal_reason": "non_http_connect_target",
+                }
+            )
+            continue
+
+        # Matched the Info-line prefix but none of the four relevant messages
+        # (e.g. "No upstream proxy for ...") -> noise.
+
+    return records
