@@ -96,3 +96,27 @@ def render_filter_file(allow_list_json: str) -> str:
         lines.append(f"^{re.escape(element)}$")
 
     return "\n".join(lines)
+
+
+class ShimStartupError(Exception):
+    """Raised when the shim cannot start safely (e.g. SESSION_ID absent/empty).
+
+    The entrypoint treats this as refuse-startup — the proxy must NOT run and
+    emit audit records it cannot correlate to a session.
+    """
+
+
+def resolve_policy_id(env: dict[str, str]) -> str:
+    """Resolve the ProxyAccessRecord ``policy_id`` from the launch env.
+
+    ``policy_id = SESSION_ID`` (the per-session id the backend passes). Raises
+    :class:`ShimStartupError` if ``SESSION_ID`` is absent or empty — fail-closed:
+    never emit audit records with a missing/uncorrelatable policy_id.
+    """
+    session_id = env.get("SESSION_ID")
+    if not session_id:  # None or "" -> refuse startup
+        raise ShimStartupError(
+            "SESSION_ID env var is required (policy_id = SESSION_ID); refusing "
+            "to start rather than emit audit records with no session correlation."
+        )
+    return session_id
