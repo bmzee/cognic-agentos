@@ -20,15 +20,27 @@ Env-gated on ``COGNIC_RUN_DOCKER_CREDENTIAL_PROJECTION_INTEGRATION=1``. Requires
   dynamic-secret role configured (env vars: ``COGNIC_VAULT_TEST_ADDR``,
   ``COGNIC_VAULT_TEST_TOKEN``, ``COGNIC_VAULT_TEST_SECRET_PATH``, e.g.
   ``database/creds/test-role-z3``).
-* A real Docker daemon reachable from the AgentOS process UID.
-* A real canonical AgentOS runtime image — set ``COGNIC_Z3_RUNTIME_IMAGE``
-  to the digest-pinned ref (e.g. ``cognic/sandbox-runtime-python:sha256-…``).
-* The workload GID pinned by that canonical image's USER directive —
-  set ``COGNIC_Z3_EXPECTED_WORKLOAD_GID`` to a positive integer
-  matching the image's USER GID. The T19 substrate preflight fails
-  loud on declaration-vs-image mismatch; Z3 does NOT silently infer
-  the GID from image metadata (the inference would walk back the
-  T19 preflight invariant).
+* A real Docker daemon reachable from the AgentOS process UID, on a LINUX
+  execution surface — the docker-sibling substrate preflight reads
+  ``/proc/mounts`` + stages credentials under a shared host ``/dev/shm``, so
+  a macOS host cannot run it directly; use a Linux runner, or a Linux
+  container with ``--ipc=host`` + the docker socket mounted.
+* A digest-pinned runtime image (``…@sha256:<64-hex>``) — set
+  ``COGNIC_Z3_RUNTIME_IMAGE``. For the **canonical production proof**
+  (``test_z3_happy_path_real_vault_real_docker_one_credential``) this is the
+  real signed ``cognic/sandbox-runtime-python``. For the **fixture-mode
+  proof** (``test_z3_fixture_mode_docker_projection_mechanics``, additionally
+  opt-in via ``COGNIC_Z3_ALLOW_FIXTURE_IMAGES=1`` +
+  ``COGNIC_Z3_FIXTURE_EGRESS_PROXY_IMAGE``) it is a local fixture runtime
+  image. Fixture mode is dev/CI mechanics coverage and does NOT close the
+  canonical Z3 gate.
+* The workload GID pinned by that image's USER directive — set
+  ``COGNIC_Z3_EXPECTED_WORKLOAD_GID`` to a positive integer matching the
+  image's USER GID (the canonical image's USER for the production proof; the
+  fixture image's USER for fixture mode). The T19 substrate preflight fails
+  loud on declaration-vs-image mismatch; Z3 does NOT silently infer the GID
+  from image metadata (the inference would walk back the T19 preflight
+  invariant).
 
 **Import contract per Sprint 10.1 ADR-004 §25 amendment finding #3 —
 fail-loud-when-opted-in**:
@@ -40,8 +52,9 @@ fail-loud-when-opted-in**:
 * **Opt-in (env set)**: plain ``import hvac`` / ``import aiodocker``
   AFTER the skip gate. Missing optional extras at this point surface
   as ``ImportError`` → pytest collection error. Opt-in is the
-  "I have the canonical environment configured" contract; missing
-  extras are a broken environment, NOT a non-issue.
+  "I have the runtime environment configured" contract (canonical for the
+  production proof, fixture images for fixture mode); missing extras are a
+  broken environment, NOT a non-issue.
 
 The contract is mirrored from Sprint 10 Z2 at
 ``tests/integration/sandbox/test_real_vault_credential_lifecycle.py``; the
@@ -50,8 +63,9 @@ plan (parallel to ``tests/unit/test_z2_import_fail_loud_contract.py``).
 
 **Fail-loud configuration probes** (Z2 parity, landing at slice 2): when
 opted in but env vars unset, or Vault unreachable, or Docker daemon
-unreachable, or the canonical runtime image is unavailable, this suite
-raises ``AssertionError`` at fixture setup, NOT ``pytest.skip``. Opt-in
+unreachable, or the runtime image (canonical for the production proof,
+fixture for fixture mode) is unavailable, this suite raises
+``AssertionError`` at fixture setup, NOT ``pytest.skip``. Opt-in
 is a hard environmental claim; we don't pretend success.
 """
 
@@ -59,9 +73,10 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from unittest.mock import AsyncMock, MagicMock
 from urllib.request import Request, urlopen
 
@@ -75,8 +90,10 @@ if not _OPTED_IN:
         f"{_OPT_IN_ENV_VAR} unset; Sprint 10.6 Z3 live proof opt-out path "
         "per Sprint 10.1 ADR-004 §25 amendment finding #3 contract. Opt "
         "in via COGNIC_RUN_DOCKER_CREDENTIAL_PROJECTION_INTEGRATION=1 "
-        "with a pre-running Vault server + reachable Docker daemon + a "
-        "canonical runtime image (see module docstring for full env-var "
+        "with a pre-running Vault server + reachable Docker daemon (Linux "
+        "execution surface) + a digest-pinned runtime image — canonical for "
+        "the production proof, fixture for fixture mode (see module docstring "
+        "for full env-var "
         "contract).",
         allow_module_level=True,
     )
@@ -125,9 +142,14 @@ def real_docker_credential_setup() -> dict[str, Any]:
     reachability + return wired ``VaultTransport`` + ``VaultCredentialAdapter``.
 
     The 5 env vars are mandatory when the module-level env-gate is
-    opted in. Missing/empty values + unreachable Vault + unreachable
-    Docker + missing canonical runtime image + missing/malformed
-    expected workload GID all raise ``AssertionError`` with a
+    opted in. ``COGNIC_Z3_RUNTIME_IMAGE`` is the digest-pinned runtime
+    image — the canonical signed image for the production proof, OR a
+    fixture runtime image for the fixture-mode proof (the fixture-mode test
+    additionally requires ``COGNIC_Z3_ALLOW_FIXTURE_IMAGES=1`` +
+    ``COGNIC_Z3_FIXTURE_EGRESS_PROXY_IMAGE``, which it validates itself).
+    Missing/empty values + unreachable Vault + unreachable Docker + missing
+    runtime image + missing/malformed expected workload GID all raise
+    ``AssertionError`` with a
     structured diagnostic naming the bootstrap-notes pointer at the
     module docstring.
 
@@ -169,25 +191,27 @@ def real_docker_credential_setup() -> dict[str, Any]:
     )
     assert runtime_image, (
         "COGNIC_Z3_RUNTIME_IMAGE is unset/empty; opt-in env "
-        f"{_OPT_IN_ENV_VAR}=1 implies a canonical AgentOS runtime "
-        "image is pulled locally (e.g. "
-        "cognic/sandbox-runtime-python:sha256-…). See the module "
-        "docstring — Z3 doesn't guess the image because the "
-        "canonical-catalog contract is operator-owned."
+        f"{_OPT_IN_ENV_VAR}=1 implies a digest-pinned runtime image is "
+        "pulled locally — the canonical signed cognic/sandbox-runtime-python "
+        "for the canonical production proof, OR a fixture runtime image for "
+        "the fixture-mode proof. See the module docstring — Z3 doesn't guess "
+        "the image because the image contract is operator-owned."
     )
-    # The operator declares the workload GID their canonical runtime
-    # image actually pins via its USER directive. T19's substrate
-    # preflight will fail loud on mismatch between this declared GID
-    # and the image's parsed USER GID (per the T19 preflight doctrine
-    # — silent UID==GID inference from image metadata would walk back
-    # the preflight invariant). The fixture validates int-parseability
-    # + positive-non-root here so misconfiguration surfaces at fixture
-    # setup rather than from inside the preflight subprocess.
+    # The operator declares the workload GID the runtime image actually pins
+    # via its USER directive (the canonical image's USER for the production
+    # proof; the fixture image's USER for fixture mode). T19's substrate
+    # preflight will fail loud on mismatch between this declared GID and the
+    # image's parsed USER GID (per the T19 preflight doctrine — silent
+    # UID==GID inference from image metadata would walk back the preflight
+    # invariant). The fixture validates int-parseability + positive-non-root
+    # here so misconfiguration surfaces at fixture setup rather than from
+    # inside the preflight subprocess.
     assert expected_workload_gid_raw, (
         "COGNIC_Z3_EXPECTED_WORKLOAD_GID is unset/empty; opt-in env "
         f"{_OPT_IN_ENV_VAR}=1 requires the operator to declare the "
-        "workload GID pinned by the canonical runtime image's USER "
-        "directive. The T19 substrate preflight fails loud on "
+        "workload GID pinned by the runtime image's USER directive "
+        "(canonical image for the production proof; fixture image for "
+        "fixture mode). The T19 substrate preflight fails loud on "
         "image-vs-declaration mismatch — Z3 does NOT silently infer "
         "GID from image metadata."
     )
@@ -197,8 +221,8 @@ def real_docker_credential_setup() -> dict[str, Any]:
         raise AssertionError(
             f"COGNIC_Z3_EXPECTED_WORKLOAD_GID={expected_workload_gid_raw!r} "
             f"is not an integer; opt-in env {_OPT_IN_ENV_VAR}=1 requires "
-            f"a positive integer GID matching the canonical runtime "
-            f"image's USER directive."
+            f"a positive integer GID matching the runtime image's USER "
+            f"directive (canonical or fixture image)."
         ) from exc
     assert expected_workload_gid > 0, (
         f"COGNIC_Z3_EXPECTED_WORKLOAD_GID={expected_workload_gid} must be "
@@ -233,7 +257,8 @@ def real_docker_credential_setup() -> dict[str, Any]:
         f"unseal / standby status). See the module docstring."
     )
 
-    # Docker daemon + canonical runtime image reachability — async via
+    # Docker daemon + runtime image reachability (the image is canonical for
+    # the production proof, a fixture image for fixture mode) — async via
     # asyncio.run since the fixture is sync. One short-lived event loop
     # for the probe; the loop is closed by asyncio.run() before fixture
     # consumers' own pytest-asyncio loops take over.
@@ -258,9 +283,10 @@ def real_docker_credential_setup() -> dict[str, Any]:
                 # diagnostic verbatim.
                 if exc.status == 404:
                     raise AssertionError(
-                        f"Canonical runtime image {runtime_image!r} is "
-                        f"not present in the local Docker image store. "
-                        f"Opt-in env {_OPT_IN_ENV_VAR}=1 implies the "
+                        f"Runtime image {runtime_image!r} is not present in "
+                        f"the local Docker image store (canonical image for "
+                        f"the production proof; fixture image for fixture "
+                        f"mode). Opt-in env {_OPT_IN_ENV_VAR}=1 implies the "
                         f"image is pulled. Run `docker pull "
                         f"{runtime_image}` before opting in."
                     ) from exc
@@ -280,6 +306,19 @@ def real_docker_credential_setup() -> dict[str, Any]:
         sandbox_per_tenant_max_memory=4096,
         sandbox_per_tenant_max_walltime=300.0,
         sandbox_kernel_default_max_credential_ttl_s=3600,
+        # MUST be explicit values, NOT MagicMock auto-attrs: the Docker
+        # substrate preflight reads getattr(settings,
+        # "dev_escape_allow_permissive_credential_projection", False) +
+        # getattr(settings, "runtime_profile", "prod"). A bare MagicMock
+        # returns a TRUTHY MagicMock for both, which trips the preflight's
+        # dev-escape profile guard (dev_escape_enabled truthy + profile !=
+        # "dev" → ValueError) BEFORE the real checks run. Surfaced by the
+        # T28 live fixture run (the preflight only executes live on Linux).
+        # dev-escape OFF + a real RuntimeProfile means the fixture image
+        # (valid non-root USER 65534) passes the preflight on its own
+        # merits, no permissive downgrade.
+        dev_escape_allow_permissive_credential_projection=False,
+        runtime_profile="prod",
     )
     transport = VaultTransport(
         vault_addr=addr,
@@ -407,6 +446,7 @@ def _make_z3_layer2_backend(
     adapter: VaultCredentialAdapter,
     dh_store: AsyncMock,
     settings: MagicMock,
+    egress_proxy_image: str | None = None,
 ) -> tuple[DockerSiblingSandboxBackend, aiodocker.Docker]:
     """Construct a ``DockerSiblingSandboxBackend`` with a REAL aiodocker
     client + REAL ``VaultCredentialAdapter`` + STUBBED admit_policy seam
@@ -439,6 +479,11 @@ def _make_z3_layer2_backend(
     catalog.verify_sbom_policy_or_refuse = AsyncMock(return_value=None)
     rego = MagicMock()
     rego.evaluate = AsyncMock(return_value=MagicMock(allow=True, reasoning=""))
+    # T28 — egress_proxy_image is None by default → the backend resolves the
+    # canonical ``cognic/sandbox-egress-proxy`` placeholder (the CANONICAL
+    # proof's path). The fixture-mode proof injects the local fixture proxy
+    # ref here so it never reaches the canonical placeholder (which has no
+    # real image to start). Canonical callers pass nothing → unchanged.
     backend = DockerSiblingSandboxBackend(
         docker_client=docker,
         image_catalog=catalog,
@@ -448,6 +493,7 @@ def _make_z3_layer2_backend(
         decision_history_store=dh_store,
         settings=settings,
         warm_pool=None,
+        egress_proxy_image=egress_proxy_image,
     )
     return backend, docker
 
@@ -461,14 +507,20 @@ def _build_z3_actor() -> Actor:
     )
 
 
-def _build_z3_pack_context() -> PackAdmissionContext:
+def _build_z3_pack_context(
+    *, profile: Literal["production", "development"] = "production"
+) -> PackAdmissionContext:
+    # T28 — canonical callers use the default profile="production"; the
+    # fixture-mode proof passes profile="development" (the doctrinally-honest
+    # profile for fixture images — fixtures belong in development, never
+    # production). Additive: existing canonical callers are unchanged.
     return PackAdmissionContext(
         pack_id="cognic.z3_real_docker_projection",
         pack_version="v1.0.0",
         pack_artifact_digest="sha256:" + "1" * 64,
         risk_tier="internal_write",
         declares_dynamic_install=False,
-        profile="production",
+        profile=profile,
     )
 
 
@@ -484,8 +536,235 @@ def _build_z3_policy(*, runtime_image: str) -> SandboxPolicy:
     )
 
 
+async def _run_z3_docker_projection_mechanics(
+    *,
+    setup: dict[str, Any],
+    backend: DockerSiblingSandboxBackend,
+    docker_client: aiodocker.Docker,
+    events: list[tuple[str, dict[str, Any]]],
+    pack_ctx: PackAdmissionContext,
+    proof_label: str,
+) -> None:
+    """Shared Docker credential-projection MECHANICS spine for Z3 (T28).
+
+    Exercised by BOTH the canonical proof (real signed images,
+    ``profile="production"``, ``egress_proxy_image=None``) AND the fixture-mode
+    proof (local fixture images, ``profile="development"``, fixture proxy
+    injected). The mechanics — mint → project → mount → workload-read →
+    cleanup-then-revoke — are IDENTICAL across both; only the images + profile
+    differ at the call site. A single shared spine is the WHOLE POINT: a
+    passing fixture run guarantees the canonical run exercises the EXACT same
+    assertions, so fixture mode cannot quietly diverge from canonical mode.
+
+    ``proof_label`` is woven into failure messages so a failure names which
+    mode tripped it; the helper otherwise does NOT know or care whether it is
+    canonical or fixture.
+
+    *** Running this spine in fixture mode does NOT close the canonical Z3
+    gate. *** Fixture images are dev/CI stand-ins. The canonical-artifact
+    PRODUCTION proof (real signed ``cognic/sandbox-runtime-python`` + real
+    signed ``cognic/sandbox-egress-proxy@sha256:…``) is a SEPARATE gate that
+    stays OPEN until the operator runs this same spine against those real
+    images per ``[[feedback_canonical_artifact_not_oss_substitute]]``.
+    """
+    secret_path = setup["secret_path"]
+    runtime_image = setup["runtime_image"]
+    expected_workload_gid = setup["expected_workload_gid"]
+
+    actor = _build_z3_actor()
+    policy = _build_z3_policy(runtime_image=runtime_image)
+    request = _make_z3_lease_request(secret_path)
+    decl = _make_z3_credential_decl(request, logical_name="db_main")
+
+    # Outer try/finally guarantees ``docker_client.close()`` even on create()
+    # failure (no session) or a post-destroy assertion failure. session.destroy()
+    # cleans containers + networks but does NOT close the aiodocker client.
+    try:
+        session = await backend.create(
+            policy,
+            actor=actor,
+            tenant_id=_Z3_TENANT_ID,
+            pack_context=pack_ctx,
+            use_warm_pool=False,
+            requires_credentials=(request,),
+            credential_decls=(decl,),
+            expected_workload_gid=expected_workload_gid,
+        )
+        assert isinstance(session, DockerSiblingSession), (
+            f"[{proof_label}] expected a concrete DockerSiblingSession"
+        )
+
+        try:
+            # ── (1) Lease landed with a real Vault-issued lease_id + payload.
+            assert len(session.active_leases) == 1, (
+                f"[{proof_label}] expected exactly 1 active lease; got {len(session.active_leases)}"
+            )
+            lease = session.active_leases[0]
+            assert lease.lease_id, f"[{proof_label}] real Vault must issue a non-empty lease_id"
+            assert "username" in lease.token, (
+                f"[{proof_label}] expected 'username' in lease token; "
+                f"got keys {sorted(lease.token.keys())}"
+            )
+            assert "password" in lease.token, (
+                f"[{proof_label}] expected 'password' in lease token; "
+                f"got keys {sorted(lease.token.keys())}"
+            )
+
+            # ── (2) Projection landed exactly once (1:1 with active_leases).
+            assert len(session.active_projections) == 1, (
+                f"[{proof_label}] expected exactly 1 active projection; "
+                f"got {len(session.active_projections)}"
+            )
+            projection = session.active_projections[0]
+
+            # ── (3) Workload reads credential bytes byte-exactly. Compare
+            #        against session.active_leases[0].token (lease-specific
+            #        dynamic creds; NOT a separate Vault response).
+            for field in ("password", "username"):
+                cat_result = await session.exec(
+                    ["cat", f"/run/credentials/db_main/{field}"],
+                    timeout_s=10.0,
+                )
+                assert cat_result.exit_code == 0, (
+                    f"[{proof_label}] cat /run/credentials/db_main/{field} failed: "
+                    f"exit {cat_result.exit_code}; stderr={cat_result.stderr!r}"
+                )
+                assert cat_result.stdout == lease.token[field].encode("utf-8"), (
+                    f"[{proof_label}] mounted /run/credentials/db_main/{field} bytes "
+                    f"diverged from session.active_leases[0].token[{field!r}]"
+                )
+
+            # ── (4) Mount dir shows EXACTLY the expected_fields — no shadow
+            #        files (``_*``), no extras (T19 atomic-rename per spec §5.4).
+            ls_result = await session.exec(
+                ["ls", "-A", "/run/credentials/db_main/"],
+                timeout_s=10.0,
+            )
+            assert ls_result.exit_code == 0, (
+                f"[{proof_label}] ls /run/credentials/db_main/ failed: "
+                f"exit {ls_result.exit_code}; stderr={ls_result.stderr!r}"
+            )
+            listed = sorted(ls_result.stdout.decode("utf-8").split())
+            assert listed == ["password", "username"], (
+                f"[{proof_label}] mount dir listing diverged from declared "
+                f"expected_fields; saw {listed!r}"
+            )
+
+            # ── (5) Chain audit ordering on create(): lease_minted before
+            #        credentials_projected for the same logical credential.
+            create_suffixes = _emitted_event_suffixes(events)
+            assert "lease_minted" in create_suffixes
+            assert "credentials_projected" in create_suffixes
+            lease_minted_idx = create_suffixes.index("lease_minted")
+            projected_idx = create_suffixes.index("credentials_projected")
+            assert lease_minted_idx < projected_idx, (
+                f"[{proof_label}] lease_minted ({lease_minted_idx}) must precede "
+                f"credentials_projected ({projected_idx}) per spec §5.8 step 3; "
+                f"event order seen: {create_suffixes}"
+            )
+
+            # ── (5b) credentials_projected payload shape per spec §5.7.
+            projected_payloads = [
+                payload
+                for name, payload in events
+                if name == "sandbox.lifecycle.credentials_projected"
+            ]
+            assert len(projected_payloads) == 1, (
+                f"[{proof_label}] expected exactly 1 credentials_projected row; "
+                f"got {len(projected_payloads)}"
+            )
+            projected_payload = projected_payloads[0]
+            assert projected_payload["logical_name"] == "db_main"
+            assert projected_payload["vault_path"] == secret_path
+            assert projected_payload["tenant_id"] == _Z3_TENANT_ID
+            assert projected_payload["lease_id"] == lease.lease_id, (
+                f"[{proof_label}] credentials_projected lease_id diverged from the "
+                f"minted lease; payload={projected_payload['lease_id']!r}, "
+                f"lease={lease.lease_id!r}"
+            )
+            assert projected_payload["projected_field_count"] == 2, (
+                f"[{proof_label}] expected projected_field_count=2 (username + "
+                f"password); got: {projected_payload['projected_field_count']!r}"
+            )
+            assert projected_payload["purpose_category"] == "application_database_read", (
+                f"[{proof_label}] expected purpose_category=application_database_read; "
+                f"got: {projected_payload['purpose_category']!r}"
+            )
+            assert (
+                projected_payload["purpose_description"]
+                == "Z3 real-Vault dynamic credential projection proof."
+            )
+            # backend_resource_name is the Docker opaque host_staging_dir
+            # (the bind-mount source) per spec §5.7; must match the session's
+            # projection record exactly.
+            assert projected_payload["backend_resource_name"] == projection.host_staging_dir, (
+                f"[{proof_label}] credentials_projected backend_resource_name diverged "
+                f"from the projection's host_staging_dir; "
+                f"payload={projected_payload['backend_resource_name']!r}, "
+                f"projection={projection.host_staging_dir!r}"
+            )
+            assert projected_payload["session_id"] == session.session_id, (
+                f"[{proof_label}] credentials_projected session_id diverged from the "
+                f"session; payload={projected_payload['session_id']!r}, "
+                f"session={session.session_id!r}"
+            )
+            # Defence-in-depth: NO credential token value leaks into the chain
+            # payload (the §5.7 contract carries provenance, never field values).
+            rendered_payload = repr(projected_payload)
+            for secret_value in lease.token.values():
+                assert secret_value not in rendered_payload, (
+                    f"[{proof_label}] credentials_projected payload leaked a "
+                    f"credential token value — §5.7 carries provenance only, "
+                    f"never field values"
+                )
+
+            # ── (5c) Host staging dir EXISTS before destroy(). The docker-
+            #        sibling backend shares the host filesystem so the test
+            #        process can stat the opaque staging path directly.
+            assert Path(projection.host_staging_dir).exists(), (
+                f"[{proof_label}] host staging dir {projection.host_staging_dir!r} "
+                f"should exist after a successful projection (pre-destroy)"
+            )
+        finally:
+            # destroy() triggers the T21 LIFO unwind: projection cleanup FIRST
+            # (staging-dir delete + credentials_projection_cleaned_up) then Vault
+            # revoke (lease_revoked) per spec §5.8 step 5 — even on test-body
+            # failure, tear down to avoid leaking a container + a dangling lease.
+            await session.destroy()
+
+        # ── (6) Post-destroy chain ordering: credentials_projection_cleaned_up
+        #        MUST precede lease_revoked for the same logical credential.
+        final_suffixes = _emitted_event_suffixes(events)
+        assert "credentials_projection_cleaned_up" in final_suffixes, (
+            f"[{proof_label}] expected credentials_projection_cleaned_up after "
+            f"destroy(); event order seen: {final_suffixes}"
+        )
+        assert "lease_revoked" in final_suffixes, (
+            f"[{proof_label}] expected lease_revoked after destroy(); "
+            f"event order seen: {final_suffixes}"
+        )
+        cleanup_idx = final_suffixes.index("credentials_projection_cleaned_up")
+        revoke_idx = final_suffixes.index("lease_revoked")
+        assert cleanup_idx < revoke_idx, (
+            f"[{proof_label}] credentials_projection_cleaned_up ({cleanup_idx}) must "
+            f"precede lease_revoked ({revoke_idx}) per spec §5.8 step 5 LIFO "
+            f"ordering invariant; event order seen: {final_suffixes}"
+        )
+
+        # ── (7) Host staging dir GONE after destroy() — direct host filesystem
+        #        proof the credential bytes were wiped (T21 LIFO cleanup §5.8 step 5).
+        assert not Path(projection.host_staging_dir).exists(), (
+            f"[{proof_label}] host staging dir {projection.host_staging_dir!r} "
+            f"should be removed after destroy() (T21 LIFO projection cleanup)"
+        )
+    finally:
+        # aiodocker.Docker keeps an aiohttp ClientSession; session.destroy()
+        # releases container + network resources but does NOT close the client.
+        await docker_client.close()
+
+
 # ──────────────────────────────────────────────────────────────────────
-# Slice 2b — happy-path Z3 proof.
+# Slice 2b — happy-path Z3 proof (canonical + fixture-mode share the spine).
 # ──────────────────────────────────────────────────────────────────────
 
 
@@ -520,227 +799,122 @@ async def test_z3_happy_path_real_vault_real_docker_one_credential(
     credential per the T21 LIFO invariant (cleanup minimises the
     active-risk-surface window during teardown).
     """
+    # T28 — CANONICAL proof: real signed images, profile="production",
+    # egress_proxy_image=None (the backend resolves the canonical
+    # cognic/sandbox-egress-proxy default). The mint→project→mount→read→
+    # cleanup→revoke MECHANICS + every assertion live in the shared
+    # _run_z3_docker_projection_mechanics spine, which the fixture-mode test
+    # below ALSO drives — so the two modes cannot diverge. This canonical gate
+    # is the PRODUCTION-posture proof; it requires the operator-supplied real
+    # signed cognic/sandbox-runtime-python + cognic/sandbox-egress-proxy@sha256:…
+    # images.
     setup = real_docker_credential_setup
-    settings = setup["settings"]
-    adapter = setup["adapter"]
-    secret_path = setup["secret_path"]
-    runtime_image = setup["runtime_image"]
-    expected_workload_gid = setup["expected_workload_gid"]
-
     dh_store, events = _make_event_recorder()
     backend, docker_client = _make_z3_layer2_backend(
-        adapter=adapter, dh_store=dh_store, settings=settings
+        adapter=setup["adapter"], dh_store=dh_store, settings=setup["settings"]
+    )
+    await _run_z3_docker_projection_mechanics(
+        setup=setup,
+        backend=backend,
+        docker_client=docker_client,
+        events=events,
+        pack_ctx=_build_z3_pack_context(),
+        proof_label="canonical (real signed images, profile=production)",
     )
 
-    actor = _build_z3_actor()
-    pack_ctx = _build_z3_pack_context()
-    policy = _build_z3_policy(runtime_image=runtime_image)
-    request = _make_z3_lease_request(secret_path)
-    decl = _make_z3_credential_decl(request, logical_name="db_main")
 
-    # Outer try/finally guarantees ``docker_client.close()`` even on
-    # create() failure (no session assignment) or post-destroy assertion
-    # failure. ``session.destroy()`` cleans containers + networks but
-    # does NOT close the aiodocker client's aiohttp session.
-    try:
-        session = await backend.create(
-            policy,
-            actor=actor,
-            tenant_id=_Z3_TENANT_ID,
-            pack_context=pack_ctx,
-            use_warm_pool=False,
-            requires_credentials=(request,),
-            credential_decls=(decl,),
-            expected_workload_gid=expected_workload_gid,
-        )
-        # Narrow the SandboxSession Protocol to the concrete DockerSibling
-        # implementation so the active_projections assertion below is
-        # type-safe — active_projections is a T21 per-backend field, not
-        # on the upstream SandboxSession Protocol (active_leases is).
-        assert isinstance(session, DockerSiblingSession)
+# ──────────────────────────────────────────────────────────────────────
+# Slice 2b (fixture variant) — fixture-mode Docker projection MECHANICS proof
+# (T28). Drives the SAME _run_z3_docker_projection_mechanics spine as the
+# canonical proof above, against LOCAL FIXTURE images in profile="development".
+# Does NOT close the canonical Z3 gate.
+# ──────────────────────────────────────────────────────────────────────
 
-        try:
-            # ── (1) Lease landed on the session with a real Vault-issued
-            #        lease_id + the dynamic-credential payload.
-            assert len(session.active_leases) == 1, (
-                f"Expected exactly 1 active lease; got {len(session.active_leases)}"
-            )
-            lease = session.active_leases[0]
-            assert lease.lease_id, "real Vault must issue a non-empty lease_id"
-            assert "username" in lease.token, (
-                f"Expected 'username' field in lease token; got keys {sorted(lease.token.keys())}"
-            )
-            assert "password" in lease.token, (
-                f"Expected 'password' field in lease token; got keys {sorted(lease.token.keys())}"
-            )
 
-            # ── (2) Projection landed exactly once (1:1 with active_leases).
-            assert len(session.active_projections) == 1, (
-                f"Expected exactly 1 active projection; got {len(session.active_projections)}"
-            )
-            projection = session.active_projections[0]
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    os.environ.get("COGNIC_Z3_ALLOW_FIXTURE_IMAGES") != "1",
+    reason=(
+        "COGNIC_Z3_ALLOW_FIXTURE_IMAGES != 1 — the fixture-mode Docker "
+        "projection MECHANICS proof is opt-in SEPARATELY from the canonical "
+        "proof so a fixture run can never be mistaken for canonical-artifact "
+        "production proof. To run it: COGNIC_RUN_DOCKER_CREDENTIAL_PROJECTION_"
+        "INTEGRATION=1 + COGNIC_Z3_ALLOW_FIXTURE_IMAGES=1 + "
+        "COGNIC_Z3_FIXTURE_EGRESS_PROXY_IMAGE=<fixture proxy ref> + "
+        "COGNIC_Z3_RUNTIME_IMAGE=<fixture runtime ref> + "
+        "COGNIC_Z3_EXPECTED_WORKLOAD_GID=<fixture image USER GID>, and TARGET "
+        "this test specifically (the canonical test above fails without the "
+        "real signed images)."
+    ),
+)
+async def test_z3_fixture_mode_docker_projection_mechanics(
+    real_docker_credential_setup: dict[str, Any],
+) -> None:
+    """FIXTURE-MODE Docker projection MECHANICS proof — *** NOT a canonical
+    proof; does NOT close the canonical Z3 gate. ***
 
-            # ── (3) Workload reads credential bytes byte-exactly. Compare
-            #        against session.active_leases[0].token (lease-specific
-            #        dynamic creds; NOT a separate Vault response).
-            for field in ("password", "username"):
-                cat_result = await session.exec(
-                    ["cat", f"/run/credentials/db_main/{field}"],
-                    timeout_s=10.0,
-                )
-                assert cat_result.exit_code == 0, (
-                    f"cat /run/credentials/db_main/{field} failed: exit "
-                    f"{cat_result.exit_code}; stderr={cat_result.stderr!r}"
-                )
-                assert cat_result.stdout == lease.token[field].encode("utf-8"), (
-                    f"Mounted /run/credentials/db_main/{field} bytes "
-                    f"diverged from session.active_leases[0].token[{field!r}]"
-                )
+    Runs the SAME mint → project → mount → workload-read → cleanup-then-revoke
+    spine as the canonical happy-path test (via the shared
+    ``_run_z3_docker_projection_mechanics`` helper), but against LOCAL FIXTURE
+    images — ``COGNIC_Z3_RUNTIME_IMAGE`` = the fixture runtime image +
+    ``COGNIC_Z3_FIXTURE_EGRESS_PROXY_IMAGE`` = the fixture egress-proxy sidecar
+    — in ``profile="development"``. This proves the Docker projection MECHANICS
+    work end-to-end against real Vault + real Docker (valuable dev/CI coverage)
+    WITHOUT claiming the canonical-artifact production posture.
 
-            # ── (4) Mount directory shows EXACTLY the expected_fields —
-            #        no shadow files (``_*``), no extras. The T19 executor
-            #        deletes the staging directory's ``_*`` artefacts on
-            #        the final atomic rename per spec §5.4.
-            ls_result = await session.exec(
-                ["ls", "-A", "/run/credentials/db_main/"],
-                timeout_s=10.0,
-            )
-            assert ls_result.exit_code == 0, (
-                f"ls /run/credentials/db_main/ failed: exit "
-                f"{ls_result.exit_code}; stderr={ls_result.stderr!r}"
-            )
-            listed = sorted(ls_result.stdout.decode("utf-8").split())
-            assert listed == ["password", "username"], (
-                f"Mount directory listing diverged from declared expected_fields; saw {listed!r}"
-            )
+    The canonical Z3 gate (real signed ``cognic/sandbox-runtime-python`` + real
+    signed ``cognic/sandbox-egress-proxy@sha256:…``) remains OPEN until the
+    operator runs the canonical test above against those real images. Fixture
+    images are NOT a substitute for canonical artifacts per
+    ``[[feedback_canonical_artifact_not_oss_substitute]]``.
 
-            # ── (5) Chain audit ordering on the create() path: lease_minted
-            #        before credentials_projected for the same logical credential.
-            create_suffixes = _emitted_event_suffixes(events)
-            assert "lease_minted" in create_suffixes
-            assert "credentials_projected" in create_suffixes
-            lease_minted_idx = create_suffixes.index("lease_minted")
-            projected_idx = create_suffixes.index("credentials_projected")
-            assert lease_minted_idx < projected_idx, (
-                f"lease_minted ({lease_minted_idx}) must precede "
-                f"credentials_projected ({projected_idx}) per spec §5.8 "
-                f"step 3; event order seen: {create_suffixes}"
-            )
-
-            # ── (5b) credentials_projected payload shape per spec §5.7.
-            #         Mirrors the negative-path payload assertion so a
-            #         drift in backend_resource_name / projected_field_count
-            #         / purpose_* / session_id / derived lease fields fails
-            #         the test rather than passing on ordering alone.
-            projected_payloads = [
-                payload
-                for name, payload in events
-                if name == "sandbox.lifecycle.credentials_projected"
-            ]
-            assert len(projected_payloads) == 1, (
-                f"Expected exactly 1 credentials_projected row; got {len(projected_payloads)}"
-            )
-            projected_payload = projected_payloads[0]
-            assert projected_payload["logical_name"] == "db_main"
-            assert projected_payload["vault_path"] == secret_path
-            assert projected_payload["tenant_id"] == _Z3_TENANT_ID
-            assert projected_payload["lease_id"] == lease.lease_id, (
-                f"credentials_projected lease_id diverged from the minted "
-                f"lease; payload={projected_payload['lease_id']!r}, "
-                f"lease={lease.lease_id!r}"
-            )
-            assert projected_payload["projected_field_count"] == 2, (
-                f"Expected projected_field_count=2 (username + password); "
-                f"got: {projected_payload['projected_field_count']!r}"
-            )
-            assert projected_payload["purpose_category"] == "application_database_read", (
-                f"Expected purpose_category=application_database_read; got: "
-                f"{projected_payload['purpose_category']!r}"
-            )
-            assert (
-                projected_payload["purpose_description"]
-                == "Z3 real-Vault dynamic credential projection proof."
-            )
-            # backend_resource_name is the Docker opaque host_staging_dir
-            # (the bind-mount source) per spec §5.7; must match the
-            # session's projection record exactly.
-            assert projected_payload["backend_resource_name"] == projection.host_staging_dir, (
-                f"credentials_projected backend_resource_name diverged "
-                f"from the projection's host_staging_dir; payload="
-                f"{projected_payload['backend_resource_name']!r}, "
-                f"projection={projection.host_staging_dir!r}"
-            )
-            assert projected_payload["session_id"] == session.session_id, (
-                f"credentials_projected session_id diverged from the "
-                f"session; payload={projected_payload['session_id']!r}, "
-                f"session={session.session_id!r}"
-            )
-            # Defence-in-depth: NO credential token value leaks into the
-            # chain payload (the §5.7 contract carries provenance, never
-            # field values). Check the rendered payload against every
-            # minted secret value.
-            rendered_payload = repr(projected_payload)
-            for secret_value in lease.token.values():
-                assert secret_value not in rendered_payload, (
-                    "credentials_projected payload leaked a credential "
-                    "token value — §5.7 carries provenance only, never "
-                    "field values"
-                )
-
-            # ── (5c) Host staging dir EXISTS before destroy(). The T19
-            #         executor wrote credential bytes under the opaque
-            #         /dev/shm/cognic/<session>/<credential>/ path; the
-            #         docker-sibling backend shares the host filesystem
-            #         so the test process can stat it directly.
-            assert Path(projection.host_staging_dir).exists(), (
-                f"Host staging dir {projection.host_staging_dir!r} should "
-                f"exist after a successful projection (pre-destroy)"
-            )
-        finally:
-            # destroy() triggers the T21 LIFO unwind: projection cleanup
-            # FIRST (staging-dir delete + credentials_projection_cleaned_up
-            # event) then Vault revoke (lease_revoked event) per spec §5.8
-            # step 5 — even on test-body failure, we tear down to avoid
-            # leaking a Docker container + a dangling Vault lease.
-            await session.destroy()
-
-        # ── (6) Post-destroy chain ordering on the same logical credential:
-        #        credentials_projection_cleaned_up MUST precede lease_revoked.
-        final_suffixes = _emitted_event_suffixes(events)
-        assert "credentials_projection_cleaned_up" in final_suffixes, (
-            f"Expected credentials_projection_cleaned_up after destroy(); "
-            f"event order seen: {final_suffixes}"
-        )
-        assert "lease_revoked" in final_suffixes, (
-            f"Expected lease_revoked after destroy(); event order seen: {final_suffixes}"
-        )
-        cleanup_idx = final_suffixes.index("credentials_projection_cleaned_up")
-        revoke_idx = final_suffixes.index("lease_revoked")
-        assert cleanup_idx < revoke_idx, (
-            f"credentials_projection_cleaned_up ({cleanup_idx}) must "
-            f"precede lease_revoked ({revoke_idx}) per spec §5.8 step 5 "
-            f"LIFO ordering invariant (cleanup minimises the active-risk-"
-            f"surface window during teardown); event order seen: "
-            f"{final_suffixes}"
-        )
-
-        # ── (7) Host staging dir is GONE after destroy(). The T21 LIFO
-        #        cleanup (spec §5.8 step 5) removes the opaque staging
-        #        directory before the Vault revoke — direct host
-        #        filesystem proof that the credential bytes were wiped,
-        #        not just that the cleaned_up event was emitted.
-        assert not Path(projection.host_staging_dir).exists(), (
-            f"Host staging dir {projection.host_staging_dir!r} should be "
-            f"removed after destroy() (T21 LIFO projection cleanup per "
-            f"spec §5.8 step 5)"
-        )
-    finally:
-        # aiodocker.Docker keeps an aiohttp ClientSession internally;
-        # ``session.destroy()`` releases container + network resources
-        # but does NOT close the client session. Explicit close here
-        # avoids cross-test fd leaks + the "Unclosed client session"
-        # warning under aiohttp's GC.
-        await docker_client.close()
+    DOUBLE-gated opt-in: the module-level
+    ``COGNIC_RUN_DOCKER_CREDENTIAL_PROJECTION_INTEGRATION=1`` (shared with the
+    canonical proof) AND ``COGNIC_Z3_ALLOW_FIXTURE_IMAGES=1`` (this test only),
+    so a fixture run can never be silently mistaken for a production proof.
+    """
+    setup = real_docker_credential_setup
+    # Fail-loud (NOT skip) when opted in but the fixture proxy ref is unset —
+    # mirrors the module fixture's hard-environmental-claim contract. The
+    # canonical egress-proxy default is a placeholder digest with NO runnable
+    # image, so fixture mode MUST inject the fixture proxy explicitly.
+    fixture_proxy_image = os.environ.get("COGNIC_Z3_FIXTURE_EGRESS_PROXY_IMAGE", "").strip()
+    assert fixture_proxy_image, (
+        "COGNIC_Z3_FIXTURE_EGRESS_PROXY_IMAGE is unset/empty; opt-in env "
+        "COGNIC_Z3_ALLOW_FIXTURE_IMAGES=1 requires the local fixture egress-"
+        "proxy image ref (e.g. the cognic-sandbox-egress-proxy-fixture image). "
+        "The canonical egress-proxy default is a placeholder digest with no "
+        "runnable image, so fixture mode cannot fall back to it."
+    )
+    # Must be DIGEST-PINNED (``<ref>@sha256:<64-hex>``): the backend's proxy
+    # sidecar path does ``proxy_image.rsplit("@", 1)`` (docker_sibling.py) to
+    # extract the catalog-keyed digest — a tag-only ref raises a raw
+    # ValueError (not enough values to unpack) deep in the backend instead of
+    # this friendly fail-loud. Assert the digest form here so a tag-only
+    # fixture ref surfaces the env-contract diagnostic, not a backend unpack.
+    assert re.fullmatch(r".+@sha256:[0-9a-f]{64}", fixture_proxy_image), (
+        "COGNIC_Z3_FIXTURE_EGRESS_PROXY_IMAGE must be DIGEST-PINNED "
+        f"(<ref>@sha256:<64-hex>); got {fixture_proxy_image!r}. The backend "
+        "splits the proxy ref on '@' to read its catalog digest, so a "
+        "tag-only ref (e.g. ':v1') — or a malformed digest like "
+        "'@sha256:not-a-digest' — fails deep in the backend. Use the image's "
+        "RepoDigest form (docker inspect … --format '{{.RepoDigests}}')."
+    )
+    dh_store, events = _make_event_recorder()
+    backend, docker_client = _make_z3_layer2_backend(
+        adapter=setup["adapter"],
+        dh_store=dh_store,
+        settings=setup["settings"],
+        egress_proxy_image=fixture_proxy_image,
+    )
+    await _run_z3_docker_projection_mechanics(
+        setup=setup,
+        backend=backend,
+        docker_client=docker_client,
+        events=events,
+        pack_ctx=_build_z3_pack_context(profile="development"),
+        proof_label="FIXTURE images, profile=development — NOT canonical production proof",
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────
