@@ -49,15 +49,25 @@ Env-gated on ``COGNIC_RUN_K8S_CREDENTIAL_PROJECTION_INTEGRATION=1``. Requires:
   projected Secret via fsGroup supplementary-group membership. Root GID 0 is
   refused (``sandbox_credential_projection_root_workload_refused``); ``None`` is
   refused (``sandbox_credential_projection_workload_gid_unknown``).
-* A canonical AgentOS runtime image pullable by the cluster nodes — set
-  ``COGNIC_Z4_RUNTIME_IMAGE`` to the digest-pinned ref (e.g.
-  ``cognic/sandbox-runtime-python:sha256-…``). The happy path additionally
-  needs the canonical egress-proxy sidecar image pullable by the cluster (the
-  proxy is the egress-enforcement component the backend always co-schedules);
-  Z4 uses the backend's canonical default, so the operator's cluster image
-  cache must carry it. The negative path (two-credential LIFO) never reaches
-  Pod creation, so it needs neither image — only Secret create/delete + the
-  namespace.
+* A digest-pinned runtime image pullable by the cluster nodes — set
+  ``COGNIC_Z4_RUNTIME_IMAGE``. For the **canonical production proof**
+  (``test_z4_happy_path_…`` / ``test_z4_negative_path_…``) this is the real
+  signed ``cognic/sandbox-runtime-python`` + the canonical egress-proxy
+  sidecar default the backend co-schedules. For the **fixture-mode proofs**
+  (``test_z4_fixture_mode_…``, additionally opt-in via
+  ``COGNIC_Z4_ALLOW_FIXTURE_IMAGES=1`` + ``COGNIC_Z4_FIXTURE_EGRESS_PROXY_IMAGE``)
+  these are local fixture images (e.g. the imageStream internal-registry
+  ``cognic-sandbox-runtime-fixture@sha256:…`` + ``cognic-sandbox-egress-proxy-fixture@sha256:…``
+  refs). Fixture mode is dev/CI mechanics coverage; it does NOT close the
+  canonical Z4 gate. Both paths still REQUIRE digest-shaped runtime + proxy
+  refs — the shared fixture-setup gate asserts ``COGNIC_Z4_RUNTIME_IMAGE`` and
+  the backend validates the proxy ref before minting any lease (see
+  ``kubernetes_pod.py`` ~1065); fixture mode supplies fixture refs, canonical
+  mode real signed refs. What differs is what gets PULLED at runtime: the happy
+  path co-schedules the egress-proxy sidecar so it pulls + runs both images,
+  whereas the two-credential LIFO path refuses at the planner before any Pod is
+  created — so it never pulls the runtime/proxy images even though it still
+  validates their refs.
 
 **Import contract per Sprint 10.1 ADR-004 §25 amendment finding #3 —
 fail-loud-when-opted-in**:
@@ -69,8 +79,9 @@ fail-loud-when-opted-in**:
 * **Opt-in (env set)**: plain ``import kubernetes_asyncio`` / ``import hvac``
   AFTER the skip gate. Missing optional extras at this point surface as
   ``ImportError`` → pytest collection error. Opt-in is the "I have the
-  canonical environment configured" contract; missing extras are a broken
-  environment, NOT a non-issue.
+  runtime environment configured" contract (canonical images for the
+  production proof, fixture images for fixture mode); missing extras are a
+  broken environment, NOT a non-issue.
 
 The contract mirrors Sprint 10 Z2 at
 ``tests/integration/sandbox/test_real_vault_credential_lifecycle.py`` + the Z3
@@ -88,9 +99,10 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import uuid
 from collections.abc import AsyncIterator
-from typing import Any
+from typing import Any, Literal
 from unittest.mock import AsyncMock, MagicMock
 from urllib.request import Request, urlopen
 
@@ -105,8 +117,9 @@ if not _OPTED_IN:
         "per Sprint 10.1 ADR-004 §25 amendment finding #3 contract. Opt "
         "in via COGNIC_RUN_K8S_CREDENTIAL_PROJECTION_INTEGRATION=1 with a "
         "pre-running Vault server + a reachable Kubernetes cluster + a "
-        "writable namespace + a canonical runtime image (see module "
-        "docstring for the full env-var contract).",
+        "writable namespace + a digest-pinned runtime image — canonical for "
+        "the production proof, fixture for fixture mode (see module docstring "
+        "for the full env-var contract).",
         allow_module_level=True,
     )
 
@@ -241,13 +254,14 @@ def real_k8s_credential_setup() -> dict[str, Any]:
     )
     assert runtime_image, (
         "COGNIC_Z4_RUNTIME_IMAGE is unset/empty; opt-in env "
-        f"{_OPT_IN_ENV_VAR}=1 implies a canonical AgentOS runtime "
-        "image is pullable by the cluster nodes (e.g. "
-        "cognic/sandbox-runtime-python:sha256-…). The happy-path Pod "
-        "create needs it; the negative-path two-credential test refuses "
-        "before Pod creation so does not. See the module docstring — "
-        "Z4 doesn't guess the image because the canonical-catalog "
-        "contract is operator-owned."
+        f"{_OPT_IN_ENV_VAR}=1 implies a digest-pinned runtime image pullable "
+        "by the cluster nodes — the canonical signed cognic/sandbox-runtime-python "
+        "for the production proof, OR a fixture runtime image for fixture mode. "
+        "Required for ALL Z4 tests (this shared setup asserts it before any test "
+        "body runs); the happy path additionally PULLS it when the Pod is created, "
+        "while the negative-path two-credential test refuses at the planner before "
+        "any Pod is created so never pulls it. See the module docstring — Z4 "
+        "doesn't guess the image because the image contract is operator-owned."
     )
     # The operator declares the workload GID the pod runs with as its
     # pod-level ``fsGroup``. Unlike Z3 (Docker), this is NOT an image-USER
@@ -514,6 +528,7 @@ def _make_z4_layer2_backend(
     adapter: VaultCredentialAdapter,
     dh_store: AsyncMock,
     settings: MagicMock,
+    egress_proxy_image: str | None = None,
 ) -> KubernetesPodSandboxBackend:
     """Construct a ``KubernetesPodSandboxBackend`` with a REAL (fixture-
     owned) ``ApiClient`` + REAL ``VaultCredentialAdapter`` + STUBBED
@@ -536,6 +551,10 @@ def _make_z4_layer2_backend(
     catalog.verify_sbom_policy_or_refuse = AsyncMock(return_value=None)
     rego = MagicMock()
     rego.evaluate = AsyncMock(return_value=MagicMock(allow=True, reasoning=""))
+    # T29 — egress_proxy_image is None by default → the backend resolves the
+    # canonical egress-proxy default (the CANONICAL proof's path). The
+    # fixture-mode proofs inject the local fixture proxy digest ref here so it
+    # never reaches the canonical placeholder. Canonical callers pass nothing.
     return KubernetesPodSandboxBackend(
         kube_api_client=kube_api_client,
         namespace=namespace,
@@ -546,6 +565,7 @@ def _make_z4_layer2_backend(
         decision_history_store=dh_store,
         settings=settings,
         warm_pool=None,
+        egress_proxy_image=egress_proxy_image,
     )
 
 
@@ -558,14 +578,20 @@ def _build_z4_actor() -> Actor:
     )
 
 
-def _build_z4_pack_context() -> PackAdmissionContext:
+def _build_z4_pack_context(
+    *, profile: Literal["production", "development"] = "production"
+) -> PackAdmissionContext:
+    # T29 — canonical callers use the default profile="production"; the
+    # fixture-mode proofs pass profile="development" (the doctrinally-honest
+    # profile for fixture images). Additive: existing canonical callers
+    # are unchanged.
     return PackAdmissionContext(
         pack_id="cognic.z4_real_k8s_projection",
         pack_version="v1.0.0",
         pack_artifact_digest="sha256:" + "1" * 64,
         risk_tier="internal_write",
         declares_dynamic_install=False,
-        profile="production",
+        profile=profile,
     )
 
 
@@ -582,8 +608,248 @@ def _build_z4_policy(*, runtime_image: str) -> SandboxPolicy:
 
 
 # ──────────────────────────────────────────────────────────────────────
-# Slice 2b — happy-path Z4 proof.
+# Slice 2b — happy-path Z4 proof (canonical + fixture-mode share the spine).
 # ──────────────────────────────────────────────────────────────────────
+
+
+async def _run_z4_k8s_projection_mechanics(
+    *,
+    setup: dict[str, Any],
+    backend: KubernetesPodSandboxBackend,
+    kube_api_client: kube_client.ApiClient,
+    events: list[tuple[str, dict[str, Any]]],
+    pack_ctx: PackAdmissionContext,
+    proof_label: str,
+) -> None:
+    """Shared K8s credential-projection MECHANICS spine for Z4 (T29).
+
+    Exercised by BOTH the canonical proof (real signed images,
+    ``profile="production"``, ``egress_proxy_image=None``) AND the fixture-mode
+    proof (local fixture images, ``profile="development"``, fixture proxy
+    injected). The mechanics — mint → project (type=Opaque Secret) → mount
+    (pod ``fsGroup`` + ``defaultMode 0440``) → in-pod read → cleanup (Secret
+    delete) → revoke — are IDENTICAL across both; only the images + profile
+    differ at the call site. A single shared spine is the WHOLE POINT: a
+    passing fixture run guarantees the canonical run exercises the EXACT same
+    assertions, so fixture mode cannot quietly diverge.
+
+    ``proof_label`` is woven into the create-time failure messages so a failure
+    names which mode tripped it.
+
+    *** Running this spine in fixture mode does NOT close the canonical Z4
+    gate. *** Fixture images are dev/CI stand-ins; the canonical-artifact
+    PRODUCTION proof (real signed ``cognic/sandbox-runtime-python`` + real
+    signed ``cognic/sandbox-egress-proxy@sha256:…``) stays OPEN until the
+    operator runs this same spine against those real images per
+    ``[[feedback_canonical_artifact_not_oss_substitute]]``.
+    """
+    secret_path = setup["secret_path"]
+    namespace = setup["namespace"]
+    runtime_image = setup["runtime_image"]
+    expected_workload_gid = setup["expected_workload_gid"]
+    core = kube_client.CoreV1Api(kube_api_client)
+
+    actor = _build_z4_actor()
+    policy = _build_z4_policy(runtime_image=runtime_image)
+    request = _make_z4_lease_request(secret_path)
+    decl = _make_z4_credential_decl(request, logical_name="db_main")
+
+    # create() exercises Secret-create + Pod-create + NetworkPolicy-create
+    # RBAC. Surface a clear operator diagnostic on a K8s API error (e.g. 403).
+    # SandboxLifecycleRefused (admission / preflight) is deliberately NOT
+    # caught — that is a real refusal the happy path must not hit.
+    try:
+        session = await backend.create(
+            policy,
+            actor=actor,
+            tenant_id=_Z4_TENANT_ID,
+            pack_context=pack_ctx,
+            use_warm_pool=False,
+            requires_credentials=(request,),
+            credential_decls=(decl,),
+            expected_workload_gid=expected_workload_gid,
+        )
+    except kube_client.ApiException as exc:
+        raise AssertionError(
+            f"[{proof_label}] K8s API call during create() failed (HTTP "
+            f"{exc.status}: {exc.reason}). The fixture probe verifies "
+            f"Secret-LIST RBAC only; the happy path additionally needs "
+            f"Secret-create + Pod-create/delete + NetworkPolicy-create/delete "
+            f"RBAC in namespace {namespace!r}. A 403 here most likely means "
+            f"the test ServiceAccount is missing Pod or NetworkPolicy "
+            f"permissions. See the module docstring's bootstrap notes."
+        ) from exc
+
+    assert isinstance(session, KubernetesPodSession), (
+        f"[{proof_label}] expected a concrete KubernetesPodSession"
+    )
+
+    try:
+        # ── (1) Lease landed with a real Vault-issued lease_id + payload.
+        assert len(session.active_leases) == 1, (
+            f"[{proof_label}] expected exactly 1 active lease; got {len(session.active_leases)}"
+        )
+        lease = session.active_leases[0]
+        assert lease.lease_id, f"[{proof_label}] real Vault must issue a non-empty lease_id"
+        assert "username" in lease.token, (
+            f"[{proof_label}] expected 'username' in lease token; "
+            f"got keys {sorted(lease.token.keys())}"
+        )
+        assert "password" in lease.token, (
+            f"[{proof_label}] expected 'password' in lease token; "
+            f"got keys {sorted(lease.token.keys())}"
+        )
+
+        # ── (2) Projection landed exactly once (1:1 with active_leases).
+        assert len(session.active_projections) == 1, (
+            f"[{proof_label}] expected exactly 1 active projection; "
+            f"got {len(session.active_projections)}"
+        )
+        projection = session.active_projections[0]
+        secret_name = projection.secret_name
+
+        # ── (3) Workload reads credential bytes byte-exactly via the real Pod
+        #        exec (group-read via the pod fsGroup membership on the
+        #        mode-0440 Secret file).
+        for field in ("password", "username"):
+            cat_result = await session.exec(
+                ["cat", f"/run/credentials/db_main/{field}"],
+                timeout_s=15.0,
+            )
+            assert cat_result.exit_code == 0, (
+                f"[{proof_label}] cat /run/credentials/db_main/{field} failed: "
+                f"exit {cat_result.exit_code}; stderr={cat_result.stderr!r}"
+            )
+            assert cat_result.stdout == lease.token[field].encode("utf-8"), (
+                f"[{proof_label}] mounted /run/credentials/db_main/{field} bytes "
+                f"diverged from session.active_leases[0].token[{field!r}]"
+            )
+
+        # ── (4) Mount directory shows EXACTLY the declared expected_fields.
+        #        K8s projects Secret volumes via the kubelet's ATOMIC-UPDATE
+        #        SYMLINK FARM: a ``..data`` symlink + a ``..<timestamp>`` real
+        #        directory sit alongside the credential files (which are
+        #        symlinks into ``..data``). That is kubelet projection
+        #        machinery, NOT a shadow/extra — filter the ``..``-prefixed
+        #        entries and assert the REAL entries are exactly the declared
+        #        fields (the Docker bind-mount has no such farm; this is the
+        #        one spine assertion that is genuinely K8s-shaped — surfaced by
+        #        the T29 live fixture run).
+        ls_result = await session.exec(
+            ["ls", "-A", "/run/credentials/db_main/"],
+            timeout_s=15.0,
+        )
+        assert ls_result.exit_code == 0, (
+            f"[{proof_label}] ls /run/credentials/db_main/ failed: "
+            f"exit {ls_result.exit_code}; stderr={ls_result.stderr!r}"
+        )
+        listed = sorted(
+            entry
+            for entry in ls_result.stdout.decode("utf-8").split()
+            if not entry.startswith("..")
+        )
+        assert listed == ["password", "username"], (
+            f"[{proof_label}] mount dir listing (excluding the kubelet "
+            f"..data/..timestamp atomic-update farm) diverged from the declared "
+            f"expected_fields; saw {listed!r}"
+        )
+
+        # ── (5) Chain audit ordering on create(): lease_minted before
+        #        credentials_projected for the same logical credential.
+        create_suffixes = _emitted_event_suffixes(events)
+        assert "lease_minted" in create_suffixes
+        assert "credentials_projected" in create_suffixes
+        lease_minted_idx = create_suffixes.index("lease_minted")
+        projected_idx = create_suffixes.index("credentials_projected")
+        assert lease_minted_idx < projected_idx, (
+            f"[{proof_label}] lease_minted ({lease_minted_idx}) must precede "
+            f"credentials_projected ({projected_idx}) per spec §5.8 step 3; "
+            f"event order seen: {create_suffixes}"
+        )
+
+        # ── (5b) credentials_projected payload shape per spec §5.7.
+        projected_payloads = [
+            payload for name, payload in events if name == "sandbox.lifecycle.credentials_projected"
+        ]
+        assert len(projected_payloads) == 1, (
+            f"[{proof_label}] expected exactly 1 credentials_projected row; "
+            f"got {len(projected_payloads)}"
+        )
+        projected_payload = projected_payloads[0]
+        assert projected_payload["logical_name"] == "db_main"
+        assert projected_payload["vault_path"] == secret_path
+        assert projected_payload["tenant_id"] == _Z4_TENANT_ID
+        assert projected_payload["lease_id"] == lease.lease_id, (
+            f"[{proof_label}] credentials_projected lease_id diverged from the "
+            f"minted lease; payload={projected_payload['lease_id']!r}, "
+            f"lease={lease.lease_id!r}"
+        )
+        assert projected_payload["projected_field_count"] == 2, (
+            f"[{proof_label}] expected projected_field_count=2; "
+            f"got: {projected_payload['projected_field_count']!r}"
+        )
+        assert projected_payload["purpose_category"] == "application_database_read", (
+            f"[{proof_label}] expected purpose_category=application_database_read; "
+            f"got: {projected_payload['purpose_category']!r}"
+        )
+        assert (
+            projected_payload["purpose_description"]
+            == "Z4 real-Vault dynamic credential projection proof."
+        )
+        assert projected_payload["backend_resource_name"] == secret_name, (
+            f"[{proof_label}] credentials_projected backend_resource_name diverged "
+            f"from the projection's secret_name; "
+            f"payload={projected_payload['backend_resource_name']!r}, "
+            f"projection={secret_name!r}"
+        )
+        assert projected_payload["session_id"] == session.session_id, (
+            f"[{proof_label}] credentials_projected session_id diverged from the "
+            f"session; payload={projected_payload['session_id']!r}, "
+            f"session={session.session_id!r}"
+        )
+        # Defence-in-depth: NO credential token value leaks into the payload.
+        rendered_payload = repr(projected_payload)
+        for secret_value in lease.token.values():
+            assert secret_value not in rendered_payload, (
+                f"[{proof_label}] credentials_projected payload leaked a "
+                f"credential token value — §5.7 carries provenance only"
+            )
+
+        # ── (5c) The EXACT opaque Secret EXISTS on the cluster before destroy().
+        secret = await core.read_namespaced_secret(name=secret_name, namespace=namespace)
+        assert secret is not None, (
+            f"[{proof_label}] Secret {secret_name!r} should exist on the cluster "
+            f"after a successful projection (pre-destroy)"
+        )
+    finally:
+        await session.destroy()
+
+    # ── (6) Post-destroy chain ordering: cleaned_up before lease_revoked.
+    final_suffixes = _emitted_event_suffixes(events)
+    assert "credentials_projection_cleaned_up" in final_suffixes, (
+        f"[{proof_label}] expected credentials_projection_cleaned_up after "
+        f"destroy(); event order seen: {final_suffixes}"
+    )
+    assert "lease_revoked" in final_suffixes, (
+        f"[{proof_label}] expected lease_revoked after destroy(); "
+        f"event order seen: {final_suffixes}"
+    )
+    cleanup_idx = final_suffixes.index("credentials_projection_cleaned_up")
+    revoke_idx = final_suffixes.index("lease_revoked")
+    assert cleanup_idx < revoke_idx, (
+        f"[{proof_label}] credentials_projection_cleaned_up ({cleanup_idx}) must "
+        f"precede lease_revoked ({revoke_idx}) per spec §5.8 step 5 LIFO "
+        f"ordering; event order seen: {final_suffixes}"
+    )
+
+    # ── (7) The EXACT opaque Secret is GONE after destroy() — read → 404.
+    with pytest.raises(kube_client.ApiException) as exc_info:
+        await core.read_namespaced_secret(name=secret_name, namespace=namespace)
+    assert exc_info.value.status == 404, (
+        f"[{proof_label}] expected HTTP 404 reading Secret {secret_name!r} after "
+        f"destroy() (T21 LIFO cleanup per spec §5.8 step 5); got HTTP "
+        f"{exc_info.value.status}"
+    )
 
 
 @pytest.mark.asyncio
@@ -627,233 +893,31 @@ async def test_z4_happy_path_real_vault_real_k8s_one_credential(
     NetworkPolicy) so the operator's pre-merge audit gets an actionable
     diagnostic rather than a raw 403.
     """
+    # T29 — CANONICAL proof: real signed images, profile="production",
+    # egress_proxy_image=None (the backend resolves the canonical
+    # cognic/sandbox-egress-proxy default). The mint→project→mount→read→
+    # cleanup→revoke MECHANICS + every assertion live in the shared
+    # _run_z4_k8s_projection_mechanics spine, which the fixture-mode test
+    # below ALSO drives — so the two modes cannot diverge. This canonical gate
+    # is the PRODUCTION-posture proof; it requires the operator-supplied real
+    # signed cognic/sandbox-runtime-python + cognic/sandbox-egress-proxy@sha256:…
+    # images pullable by the cluster.
     setup = real_k8s_credential_setup
-    settings = setup["settings"]
-    adapter = setup["adapter"]
-    secret_path = setup["secret_path"]
-    namespace = setup["namespace"]
-    runtime_image = setup["runtime_image"]
-    expected_workload_gid = setup["expected_workload_gid"]
-
     dh_store, events = _make_event_recorder()
     backend = _make_z4_layer2_backend(
         kube_api_client=z4_kube_client,
-        namespace=namespace,
-        adapter=adapter,
+        namespace=setup["namespace"],
+        adapter=setup["adapter"],
         dh_store=dh_store,
-        settings=settings,
+        settings=setup["settings"],
     )
-    core = kube_client.CoreV1Api(z4_kube_client)
-
-    actor = _build_z4_actor()
-    pack_ctx = _build_z4_pack_context()
-    policy = _build_z4_policy(runtime_image=runtime_image)
-    request = _make_z4_lease_request(secret_path)
-    decl = _make_z4_credential_decl(request, logical_name="db_main")
-
-    # create() exercises more RBAC than the fixture's Secret-LIST probe:
-    # Secret-create + Pod-create + NetworkPolicy-create. Surface a clear
-    # operator diagnostic on a K8s API error (e.g. 403) so the missing
-    # piece is obvious. SandboxLifecycleRefused (admission / preflight) is
-    # deliberately NOT caught here — that is a real refusal the happy path
-    # must not hit, and masking it would hide a genuine bug.
-    try:
-        session = await backend.create(
-            policy,
-            actor=actor,
-            tenant_id=_Z4_TENANT_ID,
-            pack_context=pack_ctx,
-            use_warm_pool=False,
-            requires_credentials=(request,),
-            credential_decls=(decl,),
-            expected_workload_gid=expected_workload_gid,
-        )
-    except kube_client.ApiException as exc:
-        raise AssertionError(
-            f"K8s API call during create() failed (HTTP {exc.status}: "
-            f"{exc.reason}). The real_k8s_credential_setup fixture "
-            f"probe verifies Secret-LIST RBAC only; the happy path "
-            f"additionally needs Secret-create + Pod-create/delete + "
-            f"NetworkPolicy-create/delete RBAC in namespace {namespace!r}. "
-            f"A 403 here most likely means the test ServiceAccount is "
-            f"missing Pod or NetworkPolicy permissions. See the module "
-            f"docstring's bootstrap notes."
-        ) from exc
-
-    # Narrow the SandboxSession Protocol to the concrete K8s session so
-    # the active_projections assertion is type-safe — active_projections
-    # is a T21 per-backend field, not on the upstream SandboxSession
-    # Protocol (active_leases is).
-    assert isinstance(session, KubernetesPodSession)
-
-    try:
-        # ── (1) Lease landed with a real Vault-issued lease_id + payload.
-        assert len(session.active_leases) == 1, (
-            f"Expected exactly 1 active lease; got {len(session.active_leases)}"
-        )
-        lease = session.active_leases[0]
-        assert lease.lease_id, "real Vault must issue a non-empty lease_id"
-        assert "username" in lease.token, (
-            f"Expected 'username' field in lease token; got keys {sorted(lease.token.keys())}"
-        )
-        assert "password" in lease.token, (
-            f"Expected 'password' field in lease token; got keys {sorted(lease.token.keys())}"
-        )
-
-        # ── (2) Projection landed exactly once (1:1 with active_leases).
-        #        Capture the EXACT opaque Secret name now (while the
-        #        session is alive) for the precise post-destroy lookup.
-        assert len(session.active_projections) == 1, (
-            f"Expected exactly 1 active projection; got {len(session.active_projections)}"
-        )
-        projection = session.active_projections[0]
-        secret_name = projection.secret_name
-
-        # ── (3) Workload reads credential bytes byte-exactly via the real
-        #        Pod exec. Compare against session.active_leases[0].token
-        #        (lease-specific dynamic creds; NOT a separate Vault
-        #        response). Group-read works via the pod fsGroup
-        #        supplementary membership on the mode-0440 Secret file.
-        for field in ("password", "username"):
-            cat_result = await session.exec(
-                ["cat", f"/run/credentials/db_main/{field}"],
-                timeout_s=15.0,
-            )
-            assert cat_result.exit_code == 0, (
-                f"cat /run/credentials/db_main/{field} failed: exit "
-                f"{cat_result.exit_code}; stderr={cat_result.stderr!r}"
-            )
-            assert cat_result.stdout == lease.token[field].encode("utf-8"), (
-                f"Mounted /run/credentials/db_main/{field} bytes "
-                f"diverged from session.active_leases[0].token[{field!r}]"
-            )
-
-        # ── (4) Mount directory shows EXACTLY the declared expected_fields.
-        ls_result = await session.exec(
-            ["ls", "-A", "/run/credentials/db_main/"],
-            timeout_s=15.0,
-        )
-        assert ls_result.exit_code == 0, (
-            f"ls /run/credentials/db_main/ failed: exit "
-            f"{ls_result.exit_code}; stderr={ls_result.stderr!r}"
-        )
-        listed = sorted(ls_result.stdout.decode("utf-8").split())
-        assert listed == ["password", "username"], (
-            f"Mount directory listing diverged from declared expected_fields; saw {listed!r}"
-        )
-
-        # ── (5) Chain audit ordering on create(): lease_minted before
-        #        credentials_projected for the same logical credential.
-        create_suffixes = _emitted_event_suffixes(events)
-        assert "lease_minted" in create_suffixes
-        assert "credentials_projected" in create_suffixes
-        lease_minted_idx = create_suffixes.index("lease_minted")
-        projected_idx = create_suffixes.index("credentials_projected")
-        assert lease_minted_idx < projected_idx, (
-            f"lease_minted ({lease_minted_idx}) must precede "
-            f"credentials_projected ({projected_idx}) per spec §5.8 "
-            f"step 3; event order seen: {create_suffixes}"
-        )
-
-        # ── (5b) credentials_projected payload shape per spec §5.7.
-        #         backend_resource_name is the K8s opaque Secret name
-        #         (NOT a host path — the K8s analog of Z3's host_staging_dir).
-        projected_payloads = [
-            payload for name, payload in events if name == "sandbox.lifecycle.credentials_projected"
-        ]
-        assert len(projected_payloads) == 1, (
-            f"Expected exactly 1 credentials_projected row; got {len(projected_payloads)}"
-        )
-        projected_payload = projected_payloads[0]
-        assert projected_payload["logical_name"] == "db_main"
-        assert projected_payload["vault_path"] == secret_path
-        assert projected_payload["tenant_id"] == _Z4_TENANT_ID
-        assert projected_payload["lease_id"] == lease.lease_id, (
-            f"credentials_projected lease_id diverged from the minted "
-            f"lease; payload={projected_payload['lease_id']!r}, "
-            f"lease={lease.lease_id!r}"
-        )
-        assert projected_payload["projected_field_count"] == 2, (
-            f"Expected projected_field_count=2 (username + password); "
-            f"got: {projected_payload['projected_field_count']!r}"
-        )
-        assert projected_payload["purpose_category"] == "application_database_read", (
-            f"Expected purpose_category=application_database_read; got: "
-            f"{projected_payload['purpose_category']!r}"
-        )
-        assert (
-            projected_payload["purpose_description"]
-            == "Z4 real-Vault dynamic credential projection proof."
-        )
-        # backend_resource_name is the K8s opaque Secret name per spec
-        # §5.7; must match the session's projection record exactly.
-        assert projected_payload["backend_resource_name"] == secret_name, (
-            f"credentials_projected backend_resource_name diverged from "
-            f"the projection's secret_name; payload="
-            f"{projected_payload['backend_resource_name']!r}, "
-            f"projection={secret_name!r}"
-        )
-        assert projected_payload["session_id"] == session.session_id, (
-            f"credentials_projected session_id diverged from the session; "
-            f"payload={projected_payload['session_id']!r}, "
-            f"session={session.session_id!r}"
-        )
-        # Defence-in-depth: NO credential token value leaks into the chain
-        # payload (the §5.7 contract carries provenance, never field values).
-        rendered_payload = repr(projected_payload)
-        for secret_value in lease.token.values():
-            assert secret_value not in rendered_payload, (
-                "credentials_projected payload leaked a credential token "
-                "value — §5.7 carries provenance only, never field values"
-            )
-
-        # ── (5c) The EXACT opaque Secret EXISTS on the cluster before
-        #         destroy(). Targets the specific secret_name (not a broad
-        #         label selector) so a stale unrelated Z4 Secret cannot
-        #         influence the proof.
-        secret = await core.read_namespaced_secret(name=secret_name, namespace=namespace)
-        assert secret is not None, (
-            f"Secret {secret_name!r} should exist on the cluster after a "
-            f"successful projection (pre-destroy)"
-        )
-    finally:
-        # destroy() triggers the T21 LIFO unwind: projection cleanup FIRST
-        # (Secret delete + credentials_projection_cleaned_up) then Vault
-        # revoke (lease_revoked) per spec §5.8 step 5 — even on test-body
-        # failure, tear down to avoid leaking a Pod + a dangling Vault
-        # lease. The ApiClient itself is closed by the z4_kube_client
-        # fixture teardown, not here.
-        await session.destroy()
-
-    # ── (6) Post-destroy chain ordering on the same logical credential:
-    #        credentials_projection_cleaned_up MUST precede lease_revoked.
-    final_suffixes = _emitted_event_suffixes(events)
-    assert "credentials_projection_cleaned_up" in final_suffixes, (
-        f"Expected credentials_projection_cleaned_up after destroy(); "
-        f"event order seen: {final_suffixes}"
-    )
-    assert "lease_revoked" in final_suffixes, (
-        f"Expected lease_revoked after destroy(); event order seen: {final_suffixes}"
-    )
-    cleanup_idx = final_suffixes.index("credentials_projection_cleaned_up")
-    revoke_idx = final_suffixes.index("lease_revoked")
-    assert cleanup_idx < revoke_idx, (
-        f"credentials_projection_cleaned_up ({cleanup_idx}) must precede "
-        f"lease_revoked ({revoke_idx}) per spec §5.8 step 5 LIFO ordering "
-        f"invariant; event order seen: {final_suffixes}"
-    )
-
-    # ── (7) The EXACT opaque Secret is GONE after destroy(). read of the
-    #        specific secret_name raises ApiException 404 — direct cluster
-    #        proof that the T21 LIFO cleanup deleted THIS Secret (not just
-    #        that the cleaned_up event was emitted, and not masked by any
-    #        stale unrelated Z4 Secret).
-    with pytest.raises(kube_client.ApiException) as exc_info:
-        await core.read_namespaced_secret(name=secret_name, namespace=namespace)
-    assert exc_info.value.status == 404, (
-        f"Expected HTTP 404 reading Secret {secret_name!r} after destroy() "
-        f"(T21 LIFO projection cleanup per spec §5.8 step 5); got HTTP "
-        f"{exc_info.value.status}"
+    await _run_z4_k8s_projection_mechanics(
+        setup=setup,
+        backend=backend,
+        kube_api_client=z4_kube_client,
+        events=events,
+        pack_ctx=_build_z4_pack_context(),
+        proof_label="canonical (real signed images, profile=production)",
     )
 
 
@@ -895,6 +959,213 @@ async def test_z4_happy_path_real_vault_real_k8s_one_credential(
 # targets A's EXACT opaque ``secret_name`` (read → 404), not a broad label
 # count (the slice-2b reviewer lock applied to the unwind path).
 # ──────────────────────────────────────────────────────────────────────
+
+
+async def _run_z4_k8s_two_credential_lifo_mechanics(
+    *,
+    setup: dict[str, Any],
+    backend: KubernetesPodSandboxBackend,
+    kube_api_client: kube_client.ApiClient,
+    events: list[tuple[str, dict[str, Any]]],
+    pack_ctx: PackAdmissionContext,
+    proof_label: str,
+) -> None:
+    """Shared K8s two-credential LIFO-unwind MECHANICS spine for Z4 (T29).
+
+    Exercised by BOTH the canonical proof + the fixture-mode proof. The
+    K8s-distinctive risk surface: credential A projects (real Secret created),
+    credential B refuses at the T18 planner, A's Secret MUST be deleted before
+    A's Vault revoke, NO Pod is created, and the audit chain proves the
+    ordering credentials_projected(A) → credentials_projection_failed(B) →
+    credentials_projection_cleaned_up(A) → lease_revoked(A). Same spine for
+    canonical (real signed images) + fixture (dev fixture images) — only the
+    images + profile differ at the call site.
+
+    *** Fixture-mode does NOT close the canonical Z4 gate (see the happy-path
+    spine docstring + ``[[feedback_canonical_artifact_not_oss_substitute]]``). ***
+    """
+    secret_path = setup["secret_path"]
+    namespace = setup["namespace"]
+    expected_workload_gid = setup["expected_workload_gid"]
+    core = kube_client.CoreV1Api(kube_api_client)
+
+    actor = _build_z4_actor()
+    # runtime_image only matters for the (never-reached) Pod create; the policy
+    # still needs a valid runtime_image to pass admission shape.
+    policy = _build_z4_policy(runtime_image=setup["runtime_image"])
+
+    # Per-run unique logical names keep the label-selector proofs collision-free
+    # (grammar ^[a-z][a-z0-9_]{0,31}$; ≤32 chars).
+    run_suffix = uuid.uuid4().hex[:6]
+    logical_a = f"db_main_a_{run_suffix}"
+    logical_b = f"db_main_b_{run_suffix}"
+
+    # Both credentials mint from the SAME role; each lease() issues a distinct
+    # lease. A matches; B mismatches → refuses at the planner.
+    request_a = _make_z4_lease_request(secret_path)
+    request_b = _make_z4_lease_request(secret_path)
+    decl_a = _make_z4_credential_decl(request_a, logical_name=logical_a)
+    decl_b = _make_z4_credential_decl(
+        request_b,
+        logical_name=logical_b,
+        expected_fields=("token", "username"),
+    )
+
+    try:
+        await backend.create(
+            policy,
+            actor=actor,
+            tenant_id=_Z4_TENANT_ID,
+            pack_context=pack_ctx,
+            use_warm_pool=False,
+            requires_credentials=(request_a, request_b),
+            credential_decls=(decl_a, decl_b),
+            expected_workload_gid=expected_workload_gid,
+        )
+    except SandboxLifecycleRefused:
+        # Green path — B's field-set mismatch refused after A projected + unwound.
+        pass
+    except kube_client.ApiException as exc:
+        raise AssertionError(
+            f"[{proof_label}] K8s API call during create() failed (HTTP "
+            f"{exc.status}: {exc.reason}). This negative path exercises "
+            f"Secret-create + Secret-delete RBAC in namespace {namespace!r} "
+            f"(credential A's project-then-unwind); it does NOT reach "
+            f"Pod/NetworkPolicy creation. A 403 here most likely means the "
+            f"test ServiceAccount is missing Secret create/delete permissions."
+        ) from exc
+    else:
+        raise AssertionError(
+            f"[{proof_label}] create() should have raised SandboxLifecycleRefused "
+            f"on credential B's field-set mismatch, but returned a session. The "
+            f"two-credential LIFO negative path did not refuse."
+        )
+
+    suffixes = _emitted_event_suffixes(events)
+    # Each of these four events occurs EXACTLY ONCE (B's revoke is embedded in
+    # credentials_projection_failed.revoke_outcome — no separate lease_revoked
+    # row for B), so .index() is unambiguous.
+    for required in (
+        "credentials_projected",
+        "credentials_projection_failed",
+        "credentials_projection_cleaned_up",
+        "lease_revoked",
+    ):
+        assert suffixes.count(required) == 1, (
+            f"[{proof_label}] expected exactly 1 {required!r} event on the "
+            f"two-credential LIFO path; got {suffixes.count(required)}. "
+            f"event order: {suffixes}"
+        )
+    assert suffixes.count("lease_minted") == 2, (
+        f"[{proof_label}] expected exactly 2 lease_minted events (A + B both "
+        f"minted before B refused); got {suffixes.count('lease_minted')}. "
+        f"event order: {suffixes}"
+    )
+
+    projected_idx = suffixes.index("credentials_projected")
+    failed_idx = suffixes.index("credentials_projection_failed")
+    cleaned_idx = suffixes.index("credentials_projection_cleaned_up")
+    revoked_idx = suffixes.index("lease_revoked")
+    assert projected_idx < failed_idx < cleaned_idx < revoked_idx, (
+        f"[{proof_label}] expected LIFO ordering credentials_projected(A) "
+        f"({projected_idx}) < credentials_projection_failed(B) ({failed_idx}) < "
+        f"credentials_projection_cleaned_up(A) ({cleaned_idx}) < lease_revoked(A) "
+        f"({revoked_idx}) per spec §5.8 step 3 + step 5; event order: {suffixes}"
+    )
+
+    # Extract A's identifiers from credentials_projected(A) — create() raised +
+    # returned no session, so the chain row is the only handle on A's secret_name.
+    projected_payloads = [
+        payload for name, payload in events if name == "sandbox.lifecycle.credentials_projected"
+    ]
+    assert len(projected_payloads) == 1
+    projected_a = projected_payloads[0]
+    assert projected_a["logical_name"] == logical_a, (
+        f"[{proof_label}] credentials_projected must be for credential A "
+        f"({logical_a!r}); got logical_name={projected_a['logical_name']!r}"
+    )
+    a_secret_name = projected_a["backend_resource_name"]
+    a_session_id = projected_a["session_id"]
+
+    failed_payloads = [
+        payload
+        for name, payload in events
+        if name == "sandbox.lifecycle.credentials_projection_failed"
+    ]
+    assert len(failed_payloads) == 1
+    failed_b = failed_payloads[0]
+    assert failed_b["reason"] == "sandbox_credential_projection_field_set_mismatch", (
+        f"[{proof_label}] expected reason="
+        f"sandbox_credential_projection_field_set_mismatch; got: {failed_b['reason']!r}"
+    )
+    assert failed_b["logical_name"] == logical_b, (
+        f"[{proof_label}] credentials_projection_failed must be for credential B "
+        f"({logical_b!r}); got logical_name={failed_b['logical_name']!r}"
+    )
+    assert failed_b["expected_fields"] == ["token", "username"], (
+        f"[{proof_label}] expected alphabetized expected_fields=['token', "
+        f"'username']; got: {failed_b['expected_fields']!r}"
+    )
+    assert failed_b["actual_fields"] == ["password", "username"], (
+        f"[{proof_label}] expected alphabetized actual_fields=['password', "
+        f"'username']; got: {failed_b['actual_fields']!r}"
+    )
+    assert failed_b["extras"] == ["password"], (
+        f"[{proof_label}] expected extras=['password']; got: {failed_b['extras']!r}"
+    )
+    assert failed_b["missing"] == ["token"], (
+        f"[{proof_label}] expected missing=['token']; got: {failed_b['missing']!r}"
+    )
+    assert failed_b["revoke_outcome"] == "revoked", (
+        f"[{proof_label}] expected revoke_outcome='revoked'; got: {failed_b['revoke_outcome']!r}"
+    )
+
+    cleaned_payloads = [
+        payload
+        for name, payload in events
+        if name == "sandbox.lifecycle.credentials_projection_cleaned_up"
+    ]
+    assert len(cleaned_payloads) == 1
+    cleaned_a = cleaned_payloads[0]
+    assert cleaned_a["logical_name"] == logical_a, (
+        f"[{proof_label}] credentials_projection_cleaned_up must be for credential "
+        f"A ({logical_a!r}); got logical_name={cleaned_a['logical_name']!r}"
+    )
+    assert cleaned_a["cleanup_target"] == "secret_resource", (
+        f"[{proof_label}] expected K8s cleanup_target='secret_resource'; "
+        f"got: {cleaned_a['cleanup_target']!r}"
+    )
+
+    # ── (a) NO K8s Secret exists for credential B (refused before the executor).
+    b_secrets = await core.list_namespaced_secret(
+        namespace, label_selector=f"cognic/logical-name={logical_b}"
+    )
+    assert b_secrets.items == [], (
+        f"[{proof_label}] credential B ({logical_b!r}) must have NO K8s Secret — "
+        f"it refused at the planner before the executor ran; found "
+        f"{[s.metadata.name for s in b_secrets.items]}"
+    )
+
+    # ── (b) A's Secret was created (credentials_projected(A)) THEN deleted —
+    #        read A's EXACT opaque secret_name → HTTP 404.
+    with pytest.raises(kube_client.ApiException) as exc_info:
+        await core.read_namespaced_secret(name=a_secret_name, namespace=namespace)
+    assert exc_info.value.status == 404, (
+        f"[{proof_label}] expected HTTP 404 reading A's Secret {a_secret_name!r} "
+        f"after the LIFO unwind (spec §5.8 step 5 deletes A's Secret BEFORE "
+        f"revoking A's lease); got HTTP {exc_info.value.status} — A's Secret leaked"
+    )
+
+    # ── (c) Workload Pod never starts (refused at step 3, before topology).
+    session_pods = await core.list_namespaced_pod(
+        namespace,
+        label_selector=f"cognic.agentos.sandbox.session_id={a_session_id}",
+    )
+    assert session_pods.items == [], (
+        f"[{proof_label}] workload Pod must never start on the projection-refusal "
+        f"path; found pods {[p.metadata.name for p in session_pods.items]} for "
+        f"session {a_session_id!r}"
+    )
 
 
 @pytest.mark.asyncio
@@ -945,224 +1216,162 @@ async def test_z4_negative_path_two_credential_lifo_unwind(
     missing piece. The expected ``SandboxLifecycleRefused`` (B's field-set
     mismatch) is the green outcome and is NOT treated as an error.
     """
+    # T29 — CANONICAL two-credential LIFO proof: profile="production",
+    # egress_proxy_image=None. The full A-projects / B-refuses / A-unwound
+    # mechanics + every assertion live in the shared
+    # _run_z4_k8s_two_credential_lifo_mechanics spine, which the fixture-mode
+    # test below ALSO drives — so the two modes cannot diverge. Production-
+    # posture proof; requires operator-supplied real signed images.
     setup = real_k8s_credential_setup
-    settings = setup["settings"]
-    adapter = setup["adapter"]
-    secret_path = setup["secret_path"]
-    namespace = setup["namespace"]
-    expected_workload_gid = setup["expected_workload_gid"]
-
     dh_store, events = _make_event_recorder()
     backend = _make_z4_layer2_backend(
         kube_api_client=z4_kube_client,
-        namespace=namespace,
-        adapter=adapter,
+        namespace=setup["namespace"],
+        adapter=setup["adapter"],
         dh_store=dh_store,
-        settings=settings,
+        settings=setup["settings"],
     )
-    core = kube_client.CoreV1Api(z4_kube_client)
-
-    actor = _build_z4_actor()
-    pack_ctx = _build_z4_pack_context()
-    # runtime_image only matters for the (never-reached) Pod create; the
-    # policy still needs a valid runtime_image to pass admission shape.
-    policy = _build_z4_policy(runtime_image=setup["runtime_image"])
-
-    # Per-run unique logical names keep the label-selector proofs
-    # collision-free (grammar ^[a-z][a-z0-9_]{0,31}$; ≤32 chars).
-    run_suffix = uuid.uuid4().hex[:6]
-    logical_a = f"db_main_a_{run_suffix}"
-    logical_b = f"db_main_b_{run_suffix}"
-
-    # Both credentials mint from the SAME operator-configured role; each
-    # lease() issues a fresh distinct lease. A matches; B mismatches.
-    request_a = _make_z4_lease_request(secret_path)
-    request_b = _make_z4_lease_request(secret_path)
-    decl_a = _make_z4_credential_decl(request_a, logical_name=logical_a)
-    decl_b = _make_z4_credential_decl(
-        request_b,
-        logical_name=logical_b,
-        expected_fields=("token", "username"),
+    await _run_z4_k8s_two_credential_lifo_mechanics(
+        setup=setup,
+        backend=backend,
+        kube_api_client=z4_kube_client,
+        events=events,
+        pack_ctx=_build_z4_pack_context(),
+        proof_label="canonical (real signed images, profile=production)",
     )
 
-    # create() exercises Secret-create + Secret-delete RBAC on this path
-    # (project A then unwind A); it does NOT reach Pod / NetworkPolicy
-    # creation (refuses at step 3). Expected outcome is
-    # SandboxLifecycleRefused (B's field-set mismatch). A K8s ApiException
-    # means missing Secret RBAC — surface a clear operator diagnostic.
-    try:
-        await backend.create(
-            policy,
-            actor=actor,
-            tenant_id=_Z4_TENANT_ID,
-            pack_context=pack_ctx,
-            use_warm_pool=False,
-            requires_credentials=(request_a, request_b),
-            credential_decls=(decl_a, decl_b),
-            expected_workload_gid=expected_workload_gid,
-        )
-    except SandboxLifecycleRefused:
-        # Green path — B's field-set mismatch refused the create after A
-        # projected + was LIFO-unwound.
-        pass
-    except kube_client.ApiException as exc:
-        raise AssertionError(
-            f"K8s API call during create() failed (HTTP {exc.status}: "
-            f"{exc.reason}). This negative path exercises Secret-create + "
-            f"Secret-delete RBAC in namespace {namespace!r} (for credential "
-            f"A's project-then-unwind); it does NOT reach Pod/NetworkPolicy "
-            f"creation. A 403 here most likely means the test ServiceAccount "
-            f"is missing Secret create/delete permissions. See the module "
-            f"docstring's bootstrap notes."
-        ) from exc
-    else:
-        raise AssertionError(
-            "create() should have raised SandboxLifecycleRefused on "
-            "credential B's field-set mismatch, but returned a session. "
-            "The two-credential LIFO negative path did not refuse."
-        )
 
-    suffixes = _emitted_event_suffixes(events)
+# ──────────────────────────────────────────────────────────────────────
+# Slice 2b/3 (fixture variants) — fixture-mode K8s projection MECHANICS proofs
+# (T29). Drive the SAME shared spines as the canonical proofs above, against
+# LOCAL FIXTURE images in profile="development". Do NOT close the canonical Z4
+# gate. Double-gated: COGNIC_RUN_K8S_CREDENTIAL_PROJECTION_INTEGRATION=1 (module)
+# + COGNIC_Z4_ALLOW_FIXTURE_IMAGES=1 (these tests only).
+# ──────────────────────────────────────────────────────────────────────
 
-    # ── (3) Chain audit — the cross-credential LIFO ordering. Each of
-    #        these four events occurs EXACTLY ONCE (B's revoke is embedded
-    #        in credentials_projection_failed.revoke_outcome — no separate
-    #        lease_revoked row for B), so .index() is unambiguous.
-    for required in (
-        "credentials_projected",
-        "credentials_projection_failed",
-        "credentials_projection_cleaned_up",
-        "lease_revoked",
-    ):
-        assert suffixes.count(required) == 1, (
-            f"Expected exactly 1 {required!r} event on the two-credential "
-            f"LIFO path; got {suffixes.count(required)}. event order: {suffixes}"
-        )
-    # Two mints (A + B both minted before B's planner refusal).
-    assert suffixes.count("lease_minted") == 2, (
-        f"Expected exactly 2 lease_minted events (A + B both minted before "
-        f"B refused at the planner); got {suffixes.count('lease_minted')}. "
-        f"event order: {suffixes}"
-    )
 
-    projected_idx = suffixes.index("credentials_projected")
-    failed_idx = suffixes.index("credentials_projection_failed")
-    cleaned_idx = suffixes.index("credentials_projection_cleaned_up")
-    revoked_idx = suffixes.index("lease_revoked")
-    assert projected_idx < failed_idx < cleaned_idx < revoked_idx, (
-        f"Expected LIFO ordering credentials_projected(A) "
-        f"({projected_idx}) < credentials_projection_failed(B) "
-        f"({failed_idx}) < credentials_projection_cleaned_up(A) "
-        f"({cleaned_idx}) < lease_revoked(A) ({revoked_idx}) per spec §5.8 "
-        f"step 3 + step 5; event order seen: {suffixes}"
-    )
+def _z4_fixture_egress_proxy_image_or_fail() -> str:
+    """Read + validate COGNIC_Z4_FIXTURE_EGRESS_PROXY_IMAGE for the fixture-mode
+    proofs. Fail-loud (NOT skip) when opted in but unset/malformed — mirrors the
+    module fixture's hard-environmental-claim contract.
 
-    # ── Extract A's identifiers from the credentials_projected(A) payload.
-    #    create() raised + returned no session, so the chain row is the
-    #    only handle on A's opaque secret_name + session_id.
-    projected_payloads = [
-        payload for name, payload in events if name == "sandbox.lifecycle.credentials_projected"
-    ]
-    assert len(projected_payloads) == 1
-    projected_a = projected_payloads[0]
-    assert projected_a["logical_name"] == logical_a, (
-        f"credentials_projected must be for credential A ({logical_a!r}); "
-        f"got logical_name={projected_a['logical_name']!r}"
+    Must be DIGEST-PINNED (``<ref>@sha256:<64-hex>``): the backend's K8s proxy-
+    sidecar path splits the ref on ``@`` to read its catalog digest, so a
+    tag-only or malformed-digest ref fails deep in the backend instead of here.
+    """
+    ref = os.environ.get("COGNIC_Z4_FIXTURE_EGRESS_PROXY_IMAGE", "").strip()
+    assert ref, (
+        "COGNIC_Z4_FIXTURE_EGRESS_PROXY_IMAGE is unset/empty; opt-in env "
+        "COGNIC_Z4_ALLOW_FIXTURE_IMAGES=1 requires the cluster-pullable fixture "
+        "egress-proxy image ref (e.g. the internal-registry "
+        "cognic-sandbox-egress-proxy-fixture@sha256:… ref). The canonical "
+        "egress-proxy default is a placeholder digest with no runnable image, so "
+        "fixture mode cannot fall back to it."
     )
-    a_secret_name = projected_a["backend_resource_name"]
-    a_session_id = projected_a["session_id"]
+    assert re.fullmatch(r".+@sha256:[0-9a-f]{64}", ref), (
+        "COGNIC_Z4_FIXTURE_EGRESS_PROXY_IMAGE must be DIGEST-PINNED "
+        f"(<ref>@sha256:<64-hex>); got {ref!r}. The backend splits the proxy ref "
+        "on '@' to read its catalog digest, so a tag-only ref (e.g. ':v1') — or a "
+        "malformed digest like '@sha256:not-a-digest' — fails deep in the "
+        "backend. Use the imageStream internal-registry digest ref."
+    )
+    return ref
 
-    # ── credentials_projection_failed(B) payload shape per spec §5.7.
-    #    expected_fields / actual_fields / extras / missing all alphabetized.
-    failed_payloads = [
-        payload
-        for name, payload in events
-        if name == "sandbox.lifecycle.credentials_projection_failed"
-    ]
-    assert len(failed_payloads) == 1
-    failed_b = failed_payloads[0]
-    assert failed_b["reason"] == "sandbox_credential_projection_field_set_mismatch", (
-        f"Expected reason=sandbox_credential_projection_field_set_mismatch; "
-        f"got: {failed_b['reason']!r}"
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    os.environ.get("COGNIC_Z4_ALLOW_FIXTURE_IMAGES") != "1",
+    reason=(
+        "COGNIC_Z4_ALLOW_FIXTURE_IMAGES != 1 — the fixture-mode K8s projection "
+        "MECHANICS proof is opt-in SEPARATELY from the canonical proof so a "
+        "fixture run can never be mistaken for canonical-artifact production "
+        "proof. To run: COGNIC_RUN_K8S_CREDENTIAL_PROJECTION_INTEGRATION=1 + "
+        "COGNIC_Z4_ALLOW_FIXTURE_IMAGES=1 + COGNIC_Z4_FIXTURE_EGRESS_PROXY_IMAGE="
+        "<cluster-pullable digest ref> + COGNIC_Z4_RUNTIME_IMAGE=<fixture runtime "
+        "digest ref> + COGNIC_Z4_EXPECTED_WORKLOAD_GID=<in the namespace SCC "
+        "fsGroup range>, and TARGET this test (the canonical test fails without "
+        "the real signed images)."
+    ),
+)
+async def test_z4_fixture_mode_k8s_projection_mechanics(
+    real_k8s_credential_setup: dict[str, Any],
+    z4_kube_client: kube_client.ApiClient,
+) -> None:
+    """FIXTURE-MODE K8s projection MECHANICS proof — *** NOT a canonical proof;
+    does NOT close the canonical Z4 gate. ***
+
+    Drives the SAME _run_z4_k8s_projection_mechanics spine as the canonical
+    happy-path test, against LOCAL FIXTURE images (cluster-pullable
+    COGNIC_Z4_RUNTIME_IMAGE + COGNIC_Z4_FIXTURE_EGRESS_PROXY_IMAGE) in
+    profile="development". Proves the K8s mechanics — Secret create, fsGroup
+    mount, defaultMode 0440, in-pod read, Secret-delete cleanup — end-to-end
+    against real Vault + a real cluster, WITHOUT the canonical-artifact
+    production posture. The canonical Z4 gate (real signed
+    cognic/sandbox-runtime-python + cognic/sandbox-egress-proxy@sha256:…) stays
+    OPEN per ``[[feedback_canonical_artifact_not_oss_substitute]]``.
+    """
+    setup = real_k8s_credential_setup
+    fixture_proxy_image = _z4_fixture_egress_proxy_image_or_fail()
+    dh_store, events = _make_event_recorder()
+    backend = _make_z4_layer2_backend(
+        kube_api_client=z4_kube_client,
+        namespace=setup["namespace"],
+        adapter=setup["adapter"],
+        dh_store=dh_store,
+        settings=setup["settings"],
+        egress_proxy_image=fixture_proxy_image,
     )
-    assert failed_b["logical_name"] == logical_b, (
-        f"credentials_projection_failed must be for credential B "
-        f"({logical_b!r}); got logical_name={failed_b['logical_name']!r}"
-    )
-    assert failed_b["expected_fields"] == ["token", "username"], (
-        f"Expected alphabetized expected_fields=['token', 'username']; "
-        f"got: {failed_b['expected_fields']!r}"
-    )
-    assert failed_b["actual_fields"] == ["password", "username"], (
-        f"Expected alphabetized actual_fields=['password', 'username'] "
-        f"(real database/postgresql role response); got: "
-        f"{failed_b['actual_fields']!r}"
-    )
-    assert failed_b["extras"] == ["password"], (
-        f"Expected extras=['password'] (Vault returned, manifest didn't "
-        f"declare); got: {failed_b['extras']!r}"
-    )
-    assert failed_b["missing"] == ["token"], (
-        f"Expected missing=['token'] (manifest declared, Vault didn't "
-        f"return); got: {failed_b['missing']!r}"
-    )
-    assert failed_b["revoke_outcome"] == "revoked", (
-        f"Expected revoke_outcome='revoked' (real Vault revoke of B's "
-        f"just-minted lease should succeed); got: {failed_b['revoke_outcome']!r}"
+    await _run_z4_k8s_projection_mechanics(
+        setup=setup,
+        backend=backend,
+        kube_api_client=z4_kube_client,
+        events=events,
+        pack_ctx=_build_z4_pack_context(profile="development"),
+        proof_label="FIXTURE images, profile=development — NOT canonical production proof",
     )
 
-    # ── credentials_projection_cleaned_up(A) payload — confirm the
-    #    cleaned-up credential is A + the K8s cleanup target.
-    cleaned_payloads = [
-        payload
-        for name, payload in events
-        if name == "sandbox.lifecycle.credentials_projection_cleaned_up"
-    ]
-    assert len(cleaned_payloads) == 1
-    cleaned_a = cleaned_payloads[0]
-    assert cleaned_a["logical_name"] == logical_a, (
-        f"credentials_projection_cleaned_up must be for credential A "
-        f"({logical_a!r}); got logical_name={cleaned_a['logical_name']!r}"
-    )
-    assert cleaned_a["cleanup_target"] == "secret_resource", (
-        f"Expected K8s cleanup_target='secret_resource'; got: {cleaned_a['cleanup_target']!r}"
-    )
 
-    # ── (a) NO K8s Secret exists for credential B. B refused at the
-    #        planner BEFORE the executor, so no Secret was ever created.
-    #        List by B's per-run unique logical-name label (collision-free).
-    b_secrets = await core.list_namespaced_secret(
-        namespace, label_selector=f"cognic/logical-name={logical_b}"
-    )
-    assert b_secrets.items == [], (
-        f"Credential B ({logical_b!r}) must have NO K8s Secret — it refused "
-        f"at the planner before the executor ran; found "
-        f"{[s.metadata.name for s in b_secrets.items]}"
-    )
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    os.environ.get("COGNIC_Z4_ALLOW_FIXTURE_IMAGES") != "1",
+    reason=(
+        "COGNIC_Z4_ALLOW_FIXTURE_IMAGES != 1 — the fixture-mode two-credential "
+        "LIFO proof is opt-in SEPARATELY from the canonical proof (see "
+        "test_z4_fixture_mode_k8s_projection_mechanics for the full env contract)."
+    ),
+)
+async def test_z4_fixture_mode_two_credential_lifo(
+    real_k8s_credential_setup: dict[str, Any],
+    z4_kube_client: kube_client.ApiClient,
+) -> None:
+    """FIXTURE-MODE two-credential LIFO MECHANICS proof — *** NOT a canonical
+    proof; does NOT close the canonical Z4 gate. ***
 
-    # ── (b) A's Secret was created (proven by credentials_projected(A))
-    #        THEN deleted during the LIFO unwind — read A's EXACT opaque
-    #        secret_name → HTTP 404. Targets the specific name (not a broad
-    #        label count) so a stale unrelated Z4 Secret cannot mask the
-    #        deletion proof.
-    with pytest.raises(kube_client.ApiException) as exc_info:
-        await core.read_namespaced_secret(name=a_secret_name, namespace=namespace)
-    assert exc_info.value.status == 404, (
-        f"Expected HTTP 404 reading A's Secret {a_secret_name!r} after the "
-        f"LIFO unwind (spec §5.8 step 5 deletes A's Secret BEFORE revoking "
-        f"A's lease); got HTTP {exc_info.value.status} — A's Secret leaked"
+    Drives the SAME _run_z4_k8s_two_credential_lifo_mechanics spine as the
+    canonical negative-path test, against LOCAL FIXTURE images in
+    profile="development". Proves the K8s-distinctive LIFO risk surface — Secret
+    A created then DELETED before A's Vault revoke, NO Secret for B, NO Pod
+    created, and the audit-chain ordering — end-to-end against real Vault + a
+    real cluster, WITHOUT the canonical-artifact production posture. The
+    canonical Z4 gate stays OPEN per
+    ``[[feedback_canonical_artifact_not_oss_substitute]]``.
+    """
+    setup = real_k8s_credential_setup
+    fixture_proxy_image = _z4_fixture_egress_proxy_image_or_fail()
+    dh_store, events = _make_event_recorder()
+    backend = _make_z4_layer2_backend(
+        kube_api_client=z4_kube_client,
+        namespace=setup["namespace"],
+        adapter=setup["adapter"],
+        dh_store=dh_store,
+        settings=setup["settings"],
+        egress_proxy_image=fixture_proxy_image,
     )
-
-    # ── (c) Workload Pod never starts. The loop refused at step 3 (before
-    #        step 6 topology), so no Pod carries this session's label.
-    #        session_id extracted from the credentials_projected(A) payload.
-    session_pods = await core.list_namespaced_pod(
-        namespace,
-        label_selector=f"cognic.agentos.sandbox.session_id={a_session_id}",
-    )
-    assert session_pods.items == [], (
-        f"Workload Pod must never start on the projection-refusal path "
-        f"(create refuses at step 3, before step 6 topology); found pods "
-        f"{[p.metadata.name for p in session_pods.items]} for session "
-        f"{a_session_id!r}"
+    await _run_z4_k8s_two_credential_lifo_mechanics(
+        setup=setup,
+        backend=backend,
+        kube_api_client=z4_kube_client,
+        events=events,
+        pack_ctx=_build_z4_pack_context(profile="development"),
+        proof_label="FIXTURE images, profile=development — NOT canonical production proof",
     )
