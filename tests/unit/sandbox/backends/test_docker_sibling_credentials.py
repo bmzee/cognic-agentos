@@ -68,6 +68,7 @@ from cognic_agentos.sandbox import (
     PackAdmissionContext,
     SandboxPolicy,
 )
+from cognic_agentos.sandbox._preflight import PreflightResult
 from cognic_agentos.sandbox.backends.docker_sibling import (
     DockerSiblingSandboxBackend,
     DockerSiblingSession,
@@ -124,6 +125,30 @@ def _make_lease_request(
         tenant_id="t-1",
         actor_ref=_ACTOR_REF,
         scope_label=scope_label,
+    )
+
+
+def _make_credential_decl_for_request(
+    req: VaultLeaseRequest,
+    *,
+    logical_name: str = "app_role",
+) -> Any:
+    """Sprint 10.6 T21 — paired ``CredentialDecl`` derived from a
+    ``VaultLeaseRequest`` so the T21 pair-invariant guard passes
+    by construction (same vault_path / tenant_id / ttl_s).
+    Multi-credential tests pass distinct ``logical_name`` so the
+    per-credential audit rows stay disambiguated.
+    """
+    from cognic_agentos.sandbox.projection import CredentialDecl
+
+    return CredentialDecl(
+        logical_name=logical_name,
+        vault_path=req.secret_path,
+        expected_fields=["password", "username"],
+        ttl_s=req.ttl_s,
+        purpose_category="application_database_read",
+        purpose_description="Docker-backend conformance test.",
+        tenant_id=req.tenant_id,
     )
 
 
@@ -236,7 +261,7 @@ def _make_backend(
         sandbox_per_tenant_max_walltime=300.0,
         sandbox_kernel_default_max_credential_ttl_s=900,
     )
-    return DockerSiblingSandboxBackend(
+    backend = DockerSiblingSandboxBackend(
         docker_client=docker,
         image_catalog=catalog,
         credential_adapter=credential_adapter or KernelDefaultCredentialAdapter(),
@@ -246,6 +271,47 @@ def _make_backend(
         settings=settings,
         warm_pool=warm_pool,
     )
+    # Sprint 10.6 T21 — pre-mock the substrate preflight + cleanup-dir
+    # so tests that exercise create()/destroy() lifecycle don't try
+    # to read /proc/mounts or rm /dev/shm paths on macOS. Tests that
+    # need to drive preflight refusal override this with a side_effect.
+    backend._collect_preflight_result = AsyncMock(  # type: ignore[method-assign]
+        return_value=PreflightResult(
+            resolved_gid=1000,
+            file_mode=0o440,
+            dir_mode=0o750,
+            dev_escape_downgrade_reason=None,
+        )
+    )
+    backend._cleanup_projection_dir = AsyncMock(return_value=None)  # type: ignore[method-assign]
+
+    # Pre-mock the T19 executor seam so the existing mint-mechanics
+    # tests don't need ``/dev/shm/cognic`` on the host (the real
+    # executor writes credential bytes to that tmpfs path).
+    async def _stub_execute(
+        *, plan: Any, preflight: Any, session_opaque: str, credential_opaque: str
+    ) -> Any:
+        from cognic_agentos.sandbox.backends._docker_executor import (
+            ProjectionExecutorResult,
+        )
+
+        return ProjectionExecutorResult(
+            logical_name=plan.logical_name,
+            vault_path=plan.vault_path,
+            tenant_id=plan.tenant_id,
+            lease_id=plan.lease_id,
+            projected_field_count=plan.projected_field_count,
+            purpose_category=plan.purpose_category,
+            purpose_description=plan.purpose_description,
+            host_staging_dir=f"/dev/shm/cognic/{session_opaque}/{credential_opaque}",
+            container_mount_target=f"/run/credentials/{plan.logical_name}",
+            session_opaque=session_opaque,
+            credential_opaque=credential_opaque,
+            dev_escape_downgrade_reason=None,
+        )
+
+    backend._execute_projection_plan_docker = _stub_execute  # type: ignore[method-assign]
+    return backend
 
 
 # ---------------------------------------------------------------------------
@@ -368,6 +434,7 @@ class TestWarmPoolShortCircuitOnRequiresCredentials:
                 pack_context=_PACK_CTX,
                 use_warm_pool=True,
                 requires_credentials=(req,),
+                credential_decls=(_make_credential_decl_for_request(req),),
             )
 
         warm_pool.checkout.assert_not_called()
@@ -427,6 +494,10 @@ class TestCreateMintLoopPostAdmission:
                 pack_context=_PACK_CTX,
                 use_warm_pool=False,
                 requires_credentials=(req_a, req_b),
+                credential_decls=(
+                    _make_credential_decl_for_request(req_a, logical_name="cred_a"),
+                    _make_credential_decl_for_request(req_b, logical_name="cred_b"),
+                ),
             )
 
         assert [r.secret_path for r in adapter.mint_calls] == [
@@ -460,6 +531,7 @@ class TestCreateMintLoopPostAdmission:
                 pack_context=_PACK_CTX,
                 use_warm_pool=False,
                 requires_credentials=(req,),
+                credential_decls=(_make_credential_decl_for_request(req),),
             )
 
         admit_mock.assert_awaited_once()
@@ -491,6 +563,10 @@ class TestCreateMintLoopPostAdmission:
                 pack_context=_PACK_CTX,
                 use_warm_pool=False,
                 requires_credentials=(req_a, req_b),
+                credential_decls=(
+                    _make_credential_decl_for_request(req_a, logical_name="cred_a"),
+                    _make_credential_decl_for_request(req_b, logical_name="cred_b"),
+                ),
             )
 
         # Chain rows: 2 lease_minted (one per mint) + 1 lifecycle.created
@@ -576,6 +652,7 @@ class TestMintFailureClosedEnumMapping:
                 pack_context=_PACK_CTX,
                 use_warm_pool=False,
                 requires_credentials=(req,),
+                credential_decls=(_make_credential_decl_for_request(req),),
             )
 
         assert exc_info.value.reason == expected_reason
@@ -637,6 +714,7 @@ class TestGrantExceedsRequestClosedEnumMapping:
                 pack_context=_PACK_CTX,
                 use_warm_pool=False,
                 requires_credentials=(req,),
+                credential_decls=(_make_credential_decl_for_request(req),),
             )
 
         assert exc_info.value.reason == ("sandbox_credential_lease_ttl_grant_exceeds_request")
@@ -687,6 +765,16 @@ class TestMintFailureBestEffortCleanup:
                     _make_lease_request(secret_path="database/creds/a", scope_label="a"),
                     _make_lease_request(secret_path="database/creds/b", scope_label="b"),
                 ),
+                credential_decls=(
+                    _make_credential_decl_for_request(
+                        _make_lease_request(secret_path="database/creds/a", scope_label="a"),
+                        logical_name="cred_a",
+                    ),
+                    _make_credential_decl_for_request(
+                        _make_lease_request(secret_path="database/creds/b", scope_label="b"),
+                        logical_name="cred_b",
+                    ),
+                ),
             )
 
         assert exc_info.value.reason == "sandbox_credential_mint_failed_vault_unavailable"
@@ -723,6 +811,16 @@ class TestMintFailureBestEffortCleanup:
                 requires_credentials=(
                     _make_lease_request(secret_path="database/creds/a", scope_label="a"),
                     _make_lease_request(secret_path="database/creds/b", scope_label="b"),
+                ),
+                credential_decls=(
+                    _make_credential_decl_for_request(
+                        _make_lease_request(secret_path="database/creds/a", scope_label="a"),
+                        logical_name="cred_a",
+                    ),
+                    _make_credential_decl_for_request(
+                        _make_lease_request(secret_path="database/creds/b", scope_label="b"),
+                        logical_name="cred_b",
+                    ),
                 ),
             )
 
@@ -1057,6 +1155,7 @@ class TestPostMintCleanupOnNonVaultFailure:
                 pack_context=_PACK_CTX,
                 use_warm_pool=False,
                 requires_credentials=(_make_lease_request(),),
+                credential_decls=(_make_credential_decl_for_request(_make_lease_request()),),
             )
 
         # Best-effort cleanup MUST have revoked the minted lease
@@ -1102,6 +1201,7 @@ class TestPostMintCleanupOnNonVaultFailure:
                 pack_context=_PACK_CTX,
                 use_warm_pool=False,
                 requires_credentials=(_make_lease_request(),),
+                credential_decls=(_make_credential_decl_for_request(_make_lease_request()),),
             )
 
         # The minted lease MUST have been revoked best-effort before
@@ -1143,6 +1243,7 @@ class TestPostMintCleanupOnNonVaultFailure:
                 pack_context=_PACK_CTX,
                 use_warm_pool=False,
                 requires_credentials=(_make_lease_request(),),
+                credential_decls=(_make_credential_decl_for_request(_make_lease_request()),),
             )
 
         # MUST have revoked the minted lease before the emit exception
@@ -1198,6 +1299,7 @@ class TestPostMintCleanupOnNonVaultFailure:
                 pack_context=_PACK_CTX,
                 use_warm_pool=False,
                 requires_credentials=(_make_lease_request(),),
+                credential_decls=(_make_credential_decl_for_request(_make_lease_request()),),
             )
 
         # The lease MUST have been revoked before cancellation

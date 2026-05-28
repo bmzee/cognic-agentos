@@ -56,9 +56,10 @@ import contextlib
 import hashlib
 import json
 import uuid as _uuid
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import aiodocker
@@ -73,6 +74,13 @@ from cognic_agentos.core.vault import (
     VaultProtocolError,
     VaultUnavailable,
 )
+from cognic_agentos.sandbox._credentials_pair import (
+    verify_credentials_pair_invariants,
+)
+from cognic_agentos.sandbox._preflight import (
+    PreflightResult,
+    verify_docker_credential_projection_preflight,
+)
 from cognic_agentos.sandbox.admission import (
     CatalogProtocol,
     CredentialAdapter,
@@ -81,11 +89,21 @@ from cognic_agentos.sandbox.admission import (
 from cognic_agentos.sandbox.audit import (
     emit_sandbox_event,
     sandbox_lifecycle_checkpointed,
+    sandbox_lifecycle_credentials_projected,
+    sandbox_lifecycle_credentials_projection_cleaned_up,
+    sandbox_lifecycle_credentials_projection_cleanup_failed,
+    sandbox_lifecycle_credentials_projection_failed,
     sandbox_lifecycle_lease_minted,
     sandbox_lifecycle_lease_revoke_failed,
     sandbox_lifecycle_lease_revoked,
     sandbox_lifecycle_suspended,
     sandbox_lifecycle_woken,
+)
+from cognic_agentos.sandbox.backends._docker_executor import (
+    ProjectionExecutorResult,
+    derive_credential_opaque,
+    derive_session_opaque,
+    execute_projection_plan_docker,
 )
 from cognic_agentos.sandbox.backends._shared_credentials import (
     _mint_exception_to_refusal_reason,
@@ -95,6 +113,12 @@ from cognic_agentos.sandbox.checkpoint_store import (
     TombstoneCorruptError,
 )
 from cognic_agentos.sandbox.policy import PackAdmissionContext, SandboxPolicy
+from cognic_agentos.sandbox.projection import (
+    CredentialDecl,
+    ProjectionPlan,
+    ProjectionRefused,
+    compute_projection_plan,
+)
 from cognic_agentos.sandbox.protocol import (
     CheckpointId,
     ProxyAccessRecord,
@@ -192,6 +216,25 @@ class _SuspendEventIdCorruptError(ValueError):
 # Pure-functional helpers (unit-tested at test_docker_sibling_pure_helpers.py
 # + test_docker_sibling_credentials.py)
 # ---------------------------------------------------------------------------
+
+
+def _read_proc_mounts_file() -> str:
+    """Sprint 10.6 T21 — synchronous reader for ``/proc/mounts``.
+
+    Module-level helper (not a method) so the asyncio off-loading
+    in ``_collect_preflight_result`` can hand it to
+    ``asyncio.to_thread`` cleanly. Returns the file contents as a
+    single str; the T19 Phase 1 ``_check_shm_is_tmpfs`` parser
+    consumes this string.
+
+    No fallback / no exception suppression — a missing /proc/mounts
+    means we're running off-Linux (test environment without proper
+    mocking, OR a misconfigured deployment) and the preflight should
+    fail-loud rather than silently mistreat /dev/shm as tmpfs.
+    Tests inject ``backend._collect_preflight_result`` as a mock so
+    they never reach this helper.
+    """
+    return Path("/proc/mounts").read_text(encoding="utf-8")
 
 
 def _internal_network_name(session_id: str) -> str:
@@ -723,6 +766,15 @@ class DockerSiblingSession:
     #: per-lease fail-soft revoke loop per spec §4.3 + §7.2; gates the
     #: Q5 LOCK at ``checkpoint()`` + ``suspend()`` per spec §4.5.
     active_leases: tuple[CredentialLease, ...] = ()
+    #: Sprint 10.6 T21 — per-credential projection state for the
+    #: LIFO destroy() unwind. Aligns 1:1 with ``active_leases`` (same
+    #: order; same per-credential identity) so destroy() iterates
+    #: reversed pairs + does cleanup-before-revoke per credential per
+    #: spec §5.8 step 5. Empty tuple = no credential projections were
+    #: performed (the lease-less or mint-only Sprint-10 path). T21
+    #: create() sets this to the projected_stack contents on success;
+    #: destroy() iterates reversed pairs for the LIFO unwind.
+    active_projections: tuple[ProjectionExecutorResult, ...] = ()
     _actor_subject: str = field(repr=False, default="")
     _destroyed: bool = field(repr=False, default=False)
     #: T10c — per-session egress network name (dual-bridge topology
@@ -904,37 +956,67 @@ class DockerSiblingSandboxBackend:
         pack_context: PackAdmissionContext,
         use_warm_pool: bool = True,
         requires_credentials: Sequence[VaultLeaseRequest] = (),
+        credential_decls: Sequence[CredentialDecl] = (),
+        expected_workload_gid: int | None = None,
     ) -> SandboxSession:
-        """Admit + create a sandbox session per spec §6.1.
+        """Admit + create a sandbox session per spec §6.1 + §5.8
+        (Sprint 10.6 T21 mint-then-project lifecycle).
 
         Step ordering:
+        0. Sprint 10.6 T21 — pair guard at the very top per lock #1.
+           ``verify_credentials_pair_invariants`` raises
+           ``ValueError`` BEFORE any I/O on length-mismatch /
+           one-side-empty / per-index ``vault_path`` mismatch /
+           per-index ``tenant_id`` mismatch.
         1. If ``use_warm_pool`` + ``self._warm_pool`` wired AND
            ``requires_credentials`` empty per spec §4.2.1, attempt
            checkout; on hit, return + emit ``warm_pool.checked_out``
            + ``lifecycle.created(warm_pool_hit=True)``.
         2. Run ``admit_policy`` (Stage-1 + Stage-2; raises
            ``SandboxLifecycleRefused`` on any admission failure).
-        3. Sprint 10 T10: mint each ``requires_credentials`` lease in
-           order via ``self._credential_adapter.mint_lease(request)``
-           per spec §4.2. Emit ``sandbox.lifecycle.lease_minted`` per
-           mint. On any mid-batch mint failure: best-effort revoke
-           any leases already minted in this attempt, then raise
-           ``SandboxLifecycleRefused`` with the mapped
-           ``sandbox_credential_mint_failed_*`` closed-enum reason
-           per spec §7.1.
+        2.5. Sprint 10.6 T21 — substrate preflight when
+           ``credential_decls`` non-empty (Docker: tmpfs /
+           image-USER / GID / dev-escape per ``_collect_preflight_result``).
+           Refusal raises ``SandboxLifecycleRefused`` BEFORE any
+           mint; zero credential-projection events emitted.
+        3. Sprint 10.6 T21 — mint-then-project interleaved per spec
+           §5.8 step 3. For each ``(request, decl)`` pair in
+           manifest declaration order: mint lease → emit
+           ``lease_minted`` → compute T18 projection plan → either
+           execute T19 + emit ``credentials_projected`` (push to
+           ``projected_stack``) OR Path-2 refusal via
+           ``_handle_projection_refusal`` (revoke N + emit
+           ``credentials_projection_failed(revoke_outcome)`` + LIFO
+           unwind 1..N-1 + raise ``SandboxLifecycleRefused``).
         4. Cold-create the dual-container topology (internal network
-           + proxy sidecar + sandbox container). On topology failure
-           post-mint: best-effort revoke ALL minted leases per spec
-           §7.3 row "Create — mint | Any backend failure post-mint",
-           then re-raise the topology error.
+           + proxy sidecar + sandbox container). Credential bind-
+           mounts flow through ``_start_sandbox_container``'s
+           ``extra_mounts`` kwarg derived from ``projected_stack``
+           per the T21 lock #3 (each mount is read-only by
+           construction; mount target = ``/run/credentials/<logical_name>``
+           per spec §5.4). On Path 3 topology failure post-projection:
+           the cleanup envelope LIFO-unwinds ``projected_stack``
+           (cleanup-before-revoke per credential).
         5. Emit ``lifecycle.created(warm_pool_hit=False)`` + return
-           the ``DockerSiblingSession`` (with ``active_leases`` set
-           to the minted-leases tuple).
+           the ``DockerSiblingSession`` (with ``active_leases`` +
+           ``active_projections`` set to the per-credential state).
 
         T10a scope: lifecycle + topology only. T10b adds cgroup-cap
         derivation to the container config; T10c adds the proxy
-        sidecar's ALLOW_LIST + proxy_log seam.
+        sidecar's ALLOW_LIST + proxy_log seam. T21 layers the
+        mint-then-project loop + LIFO cleanup machinery on top
+        without modifying the topology/exec/destroy seams.
         """
+        # Sprint 10.6 T21 — pair guard FIRST per lock #1. Raises
+        # ``ValueError`` BEFORE warm pool / admission / mint / preflight
+        # so a malformed pair fails at the very top of the call stack.
+        # Reachable contract violations: one-side-empty, length-mismatch,
+        # per-index vault_path mismatch, per-index tenant_id mismatch.
+        verify_credentials_pair_invariants(
+            requires_credentials=requires_credentials,
+            credential_decls=credential_decls,
+        )
+
         # 1. Warm-pool checkout (if wired + caller asked for it AND
         #    no credentials requested). Sprint 10 spec §4.2.1: warm
         #    members were pre-created without an actor context, so a
@@ -1012,13 +1094,41 @@ class DockerSiblingSandboxBackend:
         #    trace_id="" matches the existing 8A/8.5 audit emitters
         #    in this module pending request-bound trace threading.
         minted_leases: list[CredentialLease] = []
+        projected_stack: list[tuple[CredentialLease, ProjectionExecutorResult]] = []
         session_id = _uuid.uuid4().hex
         internal_net_name = _internal_network_name(session_id)
         egress_net_name = _egress_network_name(session_id)
         sidecar_name = _proxy_sidecar_container_name(session_id)
+
+        # Sprint 10.6 T21 — substrate preflight runs AFTER admission +
+        # BEFORE the mint loop per spec §5.8 step 2 + user-locked
+        # sequencing #2. Preflight refusal raises SandboxLifecycleRefused
+        # directly — zero minted leases + zero projection events.
+        # Skipped entirely when no credentials are requested (saves the
+        # /proc/mounts read + docker image inspect on every credential-
+        # less sandbox).
+        preflight: PreflightResult | None = None
+        if credential_decls:
+            preflight = await self._collect_preflight_result(
+                policy=policy,
+                expected_workload_gid=expected_workload_gid,
+            )
+        # T21 — session opaque derived once per create() call; per-
+        # credential opaques derived inside the project step.
+        session_opaque = derive_session_opaque() if credential_decls else ""
+
         try:
-            # 3a. Mint leases per spec §4.2 — per request, in order.
-            for request in requires_credentials:
+            # 3a. Sprint 10.6 T21 — mint-then-project interleaved loop
+            #     per spec §5.8 step 3. For each (request, decl) pair
+            #     in manifest declaration order:
+            #       (a) mint lease → emit lease_minted
+            #       (b) compute T18 projection plan
+            #       (c) on ProjectionRefused: revoke N + emit
+            #           credentials_projection_failed(revoke_outcome) +
+            #           LIFO unwind 1..N-1 + raise SandboxLifecycleRefused
+            #       (d) on ProjectionPlan: execute T19 → emit
+            #           credentials_projected; push to projected_stack
+            for request, decl in zip(requires_credentials, credential_decls, strict=True):
                 lease = await self._credential_adapter.mint_lease(request)
                 minted_leases.append(lease)
                 await sandbox_lifecycle_lease_minted(
@@ -1028,7 +1138,59 @@ class DockerSiblingSandboxBackend:
                     session_id=session_id,
                 )
 
-            # 3b. Build the dual-bridge topology per spec §10.1.
+                plan_or_refused = compute_projection_plan(lease=lease, manifest_decl=decl)
+                if isinstance(plan_or_refused, ProjectionRefused):
+                    # Path 2 — revoke failed credential N (revoke-only;
+                    # no projection cleanup since it never projected) +
+                    # LIFO unwind 1..N-1. The helper clears the lists
+                    # in-band so the outer except envelope sees a
+                    # clean state on every exit path (normal return +
+                    # round-2 P1 audit-failure raise). The helper may
+                    # raise on audit-emit failure per round-2 P1; on
+                    # normal return we follow up with the
+                    # ``SandboxLifecycleRefused(reason)`` per the
+                    # standard Path-2 contract.
+                    await self._handle_projection_refusal(
+                        lease=lease,
+                        refused=plan_or_refused,
+                        session_id=session_id,
+                        minted_leases=minted_leases,
+                        projected_stack=projected_stack,
+                    )
+                    raise SandboxLifecycleRefused(
+                        plan_or_refused.reason,
+                        detail=(f"projection refused for credential {decl.logical_name!r}"),
+                    )
+
+                # ProjectionPlan path — execute T19 + emit projected.
+                assert preflight is not None  # mypy: non-None when credential_decls
+                credential_opaque = derive_credential_opaque()
+                executor_result = await self._execute_projection_plan_docker(
+                    plan=plan_or_refused,
+                    preflight=preflight,
+                    session_opaque=session_opaque,
+                    credential_opaque=credential_opaque,
+                )
+                projected_stack.append((lease, executor_result))
+                await sandbox_lifecycle_credentials_projected(
+                    self._dh,
+                    lease=lease,
+                    logical_name=decl.logical_name,
+                    projected_field_count=executor_result.projected_field_count,
+                    purpose_category=decl.purpose_category,
+                    purpose_description=decl.purpose_description,
+                    backend_resource_name=executor_result.host_staging_dir,
+                    trace_id="",
+                    session_id=session_id,
+                )
+
+            # 3b. Build the dual-bridge topology per spec §10.1. The
+            # credential bind-mounts (T21) flow through to the sandbox
+            # container as read-only extra_mounts.
+            credential_extra_mounts: list[tuple[str, str]] = [
+                (executor_result.host_staging_dir, executor_result.container_mount_target)
+                for _lease, executor_result in projected_stack
+            ]
             await self._create_internal_network(internal_net_name)
             await self._create_egress_network(egress_net_name)
             await self._start_proxy_sidecar(
@@ -1043,6 +1205,7 @@ class DockerSiblingSandboxBackend:
                 policy=policy,
                 session_id=session_id,
                 internal_net_name=internal_net_name,
+                extra_mounts=credential_extra_mounts,
             )
 
             # 3c. Session construct + lifecycle.created emit per spec
@@ -1058,6 +1221,14 @@ class DockerSiblingSandboxBackend:
                 _internal_network_name=internal_net_name,
                 _sidecar_container_name=sidecar_name,
                 active_leases=tuple(minted_leases),
+                # Sprint 10.6 T21 — surface the projection state to the
+                # session so destroy()'s LIFO unwind can call
+                # _cleanup_projected_credential per executor result in
+                # reverse manifest order (cleanup-before-revoke per
+                # spec §5.8 step 5).
+                active_projections=tuple(
+                    executor_result for _lease, executor_result in projected_stack
+                ),
                 _actor_subject=actor.subject,
                 _egress_network_name=egress_net_name,
             )
@@ -1090,6 +1261,7 @@ class DockerSiblingSandboxBackend:
             # TTL is the final operational safety net per spec §7.2.
             await self._cleanup_post_admission_failure(
                 minted_leases=minted_leases,
+                projected_stack=projected_stack,
                 session_id=session_id,
                 internal_net_name=internal_net_name,
                 egress_net_name=egress_net_name,
@@ -1113,6 +1285,7 @@ class DockerSiblingSandboxBackend:
             # exception cannot escape uncaught at the backend boundary.
             await self._cleanup_post_admission_failure(
                 minted_leases=minted_leases,
+                projected_stack=projected_stack,
                 session_id=session_id,
                 internal_net_name=internal_net_name,
                 egress_net_name=egress_net_name,
@@ -1133,6 +1306,7 @@ class DockerSiblingSandboxBackend:
             # — non-Vault audit emit failures leaked the leases.
             await self._cleanup_post_admission_failure(
                 minted_leases=minted_leases,
+                projected_stack=projected_stack,
                 session_id=session_id,
                 internal_net_name=internal_net_name,
                 egress_net_name=egress_net_name,
@@ -1145,6 +1319,7 @@ class DockerSiblingSandboxBackend:
         self,
         *,
         minted_leases: list[CredentialLease],
+        projected_stack: list[tuple[CredentialLease, ProjectionExecutorResult]],
         session_id: str,
         internal_net_name: str,
         egress_net_name: str,
@@ -1172,13 +1347,49 @@ class DockerSiblingSandboxBackend:
         even when an early-loop exception aborted before any
         topology call.
 
-        Order: revoke leases FIRST (less time for the in-flight lease
-        to be used by a still-running container), then teardown
-        topology. Both stages independently swallow ordinary
-        exceptions so a single revoke failure does not block
-        topology teardown and vice-versa.
+        Order (post-T21):
+          1. **Projection LIFO unwind FIRST** — per spec §5.8 step 5,
+             projection cleanup runs BEFORE Vault revoke per
+             credential. For each entry in reversed(projected_stack):
+             cleanup_projection_dir → emit cleaned_up/cleanup_failed
+             → revoke lease → emit lease_revoked/lease_revoke_failed.
+             Examiners see this exact ordering on the chain.
+          2. **Bare-revoke leftover unprojected leases** — handles
+             the Path-3 edge where mint succeeded but the projection
+             executor raised mid-loop (T19 execute_projection_plan_docker
+             I/O error). Per-lease set comparison via
+             ``projected_lease_ids`` to avoid double-revoke of any
+             lease already cleaned by Step 1.
+          3. **Topology teardown** — networks + containers cleaned
+             up via the existing best-effort ``_teardown_session_state``.
+             Stages 1+2+3 each independently swallow ordinary
+             exceptions so a single failure does not block the rest
+             of the cleanup envelope.
+
+        Pre-T21 (Sprint 10 T10) the order was revoke-leases-FIRST
+        then teardown. T21 reorders to projection-cleanup-before-
+        revoke per spec §5.8 step 5 — projection cleanup minimises
+        the active-risk-surface window during cleanup, AND splitting
+        revoke into per-projected-credential and bare-leftover
+        groups preserves the spec §7.2 fail-soft posture per group.
         """
-        for already_minted in minted_leases:
+        # Sprint 10.6 T21 — LIFO unwind of already-projected
+        # credentials. Per spec §5.8 step 5: per-credential
+        # cleanup-before-revoke ordering.
+        projected_lease_ids = {lease.lease_id for lease, _er in projected_stack}
+        for lease, executor_result in reversed(projected_stack):
+            await self._cleanup_projected_credential(
+                lease=lease,
+                executor_result=executor_result,
+                session_id=session_id,
+            )
+        # Bare-revoke leases that were minted but NEVER projected
+        # (mint-then-project loop raised an I/O error from
+        # execute_projection_plan_docker mid-loop). Reverse order
+        # for consistency with the LIFO unwind above.
+        for already_minted in reversed(minted_leases):
+            if already_minted.lease_id in projected_lease_ids:
+                continue  # already revoked via the projection unwind above
             with contextlib.suppress(Exception):
                 await self._credential_adapter.revoke_lease(already_minted.lease_id)
         with contextlib.suppress(Exception):
@@ -1188,6 +1399,344 @@ class DockerSiblingSandboxBackend:
                 egress_net_name=egress_net_name,
                 sidecar_name=sidecar_name,
             )
+
+    async def _cleanup_projected_credential(
+        self,
+        *,
+        lease: CredentialLease,
+        executor_result: ProjectionExecutorResult,
+        session_id: str,
+        emit_handler: Callable[[Coroutine[Any, Any, Any]], Awaitable[None]] | None = None,
+    ) -> None:
+        """Sprint 10.6 T21 — per-credential LIFO-unwind helper.
+
+        Per spec §5.8 step 5 ordering: projection cleanup FIRST
+        (best-effort rmdir of the staging dir), THEN Vault revoke.
+        Each sub-step emits its audit event before falling through
+        — examiners read ``cleaned_up`` then ``lease_revoked`` per
+        credential. On filesystem-cleanup failure the helper emits
+        ``credentials_projection_cleanup_failed`` (carries
+        partial_state + error_class + sanitized error) BEFORE
+        attempting the Vault revoke — cleanup-failed does NOT
+        block revoke per spec §5.8 step 5.
+
+        T21 round-2 reviewer P2 — Stage 1 is SPLIT into a filesystem
+        cleanup step (1a) + an audit emit step (1b). Pre-fix the
+        same ``try/except`` wrapped both; if filesystem cleanup
+        succeeded but the ``cleaned_up`` audit emit failed, the
+        helper wrongly emitted ``cleanup_failed`` with
+        ``partial_state="cleanup_projection_dir raised mid-unwind"``
+        — false evidence (cleanup actually succeeded). The split
+        ensures ``cleanup_failed`` only fires when the FS cleanup
+        ITSELF raised.
+
+        Slice-4 round-2 reviewer P1 — every audit emit goes through
+        an ``emit_handler`` callable that the caller chooses based
+        on context:
+
+          * ``None`` (default) — best-effort
+            ``contextlib.suppress(Exception)`` per the original
+            create()-cleanup posture. Suitable for Path-2 / Path-3
+            failure cleanup where the unwind is documenting state
+            cleanup happening alongside an already-raising
+            exception; a single audit-emit failure should NOT
+            block the rest of the unwind or override the original
+            exception.
+          * Caller-supplied — destroy()'s normal-path uses this to
+            CAPTURE audit-emit failures (continuing the LIFO
+            unwind) so the first captured exception can propagate
+            per spec §7.2 "audit evidence for every revoke
+            failure" — the same posture as the existing
+            ``_emit_revoke_event`` for the bare-revoke loop. The
+            caller is responsible for managing the captured
+            exception state (typically via a ``nonlocal``).
+
+        The credentials_projection_failed emit at the Path-2 entry
+        point (NOT here) still propagates its audit failures per
+        the T21 round-2 P1 fix — that's the ONE chance to record
+        "credential N refused projection with revoke_outcome X".
+        """
+        # Default emit handler: best-effort suppress (create()-cleanup posture).
+        if emit_handler is None:
+
+            async def _default_emit_handler(
+                coro: Coroutine[Any, Any, Any],
+            ) -> None:
+                with contextlib.suppress(Exception):
+                    await coro
+
+            emit_handler = _default_emit_handler
+
+        # Stage 1a: projection cleanup (filesystem).
+        cleanup_exc: Exception | None = None
+        try:
+            await self._cleanup_projection_dir(executor_result.host_staging_dir)
+        except Exception as exc:
+            cleanup_exc = exc
+
+        # Stage 1b: emit audit event reflecting Stage 1a's outcome.
+        # The branches are mutually exclusive: cleaned_up only when
+        # filesystem cleanup succeeded; cleanup_failed only when it
+        # raised. Emit failure routing now goes through the
+        # caller-supplied emit_handler so destroy()'s normal path
+        # can capture-and-propagate.
+        if cleanup_exc is None:
+            await emit_handler(
+                sandbox_lifecycle_credentials_projection_cleaned_up(
+                    self._dh,
+                    lease=lease,
+                    logical_name=executor_result.logical_name,
+                    cleanup_target="staging_dir",
+                    backend_resource_name=executor_result.host_staging_dir,
+                    trace_id="",
+                    session_id=session_id,
+                )
+            )
+        else:
+            await emit_handler(
+                sandbox_lifecycle_credentials_projection_cleanup_failed(
+                    self._dh,
+                    lease=lease,
+                    logical_name=executor_result.logical_name,
+                    cleanup_target="staging_dir",
+                    backend_resource_name=executor_result.host_staging_dir,
+                    partial_state="cleanup_projection_dir raised mid-unwind",
+                    error_class=type(cleanup_exc).__name__,
+                    error=str(cleanup_exc),
+                    trace_id="",
+                    session_id=session_id,
+                )
+            )
+
+        # Stage 2: Vault revoke (runs even if cleanup failed).
+        try:
+            await self._credential_adapter.revoke_lease(lease.lease_id)
+        except Exception as revoke_exc:
+            await emit_handler(
+                sandbox_lifecycle_lease_revoke_failed(
+                    self._dh,
+                    lease=lease,
+                    trace_id="",
+                    session_id=session_id,
+                    vault_error=str(revoke_exc),
+                )
+            )
+            return
+        await emit_handler(
+            sandbox_lifecycle_lease_revoked(
+                self._dh,
+                lease=lease,
+                trace_id="",
+                session_id=session_id,
+            )
+        )
+
+    async def _execute_projection_plan_docker(
+        self,
+        *,
+        plan: ProjectionPlan,
+        preflight: PreflightResult,
+        session_opaque: str,
+        credential_opaque: str,
+    ) -> ProjectionExecutorResult:
+        """Sprint 10.6 T21 — method seam over T19's
+        ``execute_projection_plan_docker`` module function. Mockable
+        in tests so the existing mint-mechanics test suite does not
+        need to provision ``/dev/shm/cognic`` on the host (the real
+        executor writes credential bytes to that tmpfs path).
+
+        Production calls the T19 module-level sync function with
+        ``base_staging_path=Path("/dev/shm/cognic")`` per spec §5.4.
+        """
+        return execute_projection_plan_docker(
+            plan=plan,
+            preflight=preflight,
+            session_opaque=session_opaque,
+            credential_opaque=credential_opaque,
+            base_staging_path=Path("/dev/shm/cognic"),
+        )
+
+    async def _cleanup_projection_dir(self, host_staging_dir: str) -> None:
+        """Sprint 10.6 T21 — async wrapper around T19's
+        ``cleanup_projection_dir`` (sync filesystem op). Off-loaded
+        to a thread to avoid blocking the asyncio event loop during
+        the LIFO unwind. Tests inject a mock here so the unwind path
+        runs without touching the real filesystem.
+        """
+        from cognic_agentos.sandbox.backends._docker_executor import (
+            cleanup_projection_dir as _sync_cleanup,
+        )
+
+        await asyncio.to_thread(_sync_cleanup, host_staging_dir)
+
+    async def _handle_projection_refusal(
+        self,
+        *,
+        lease: CredentialLease,
+        refused: ProjectionRefused,
+        session_id: str,
+        minted_leases: list[CredentialLease],
+        projected_stack: list[tuple[CredentialLease, ProjectionExecutorResult]],
+    ) -> None:
+        """Sprint 10.6 T21 Path 2 helper — per spec §5.8 step 3d.
+
+        Sequence:
+          1. Best-effort revoke lease N (just-minted; never projected).
+          2. Emit ``credentials_projection_failed`` for credential N
+             carrying ``revoke_outcome`` ∈ {``revoked``, ``revoke_failed``}.
+             NOTE: NO ``credentials_projection_cleaned_up`` for N — it
+             never projected, so there's no staging-dir to clean.
+          3. LIFO unwind ``projected_stack`` per spec §5.8 step 5
+             (cleanup-before-revoke per credential).
+
+        T21 round-2 reviewer P1 — the Stage-2 emit MUST propagate
+        on audit-store append failure. Pre-fix it was wrapped in
+        ``contextlib.suppress(Exception)`` which silently swallowed
+        the audit failure: ``create()`` would raise
+        ``SandboxLifecycleRefused(reason)`` as if the Path-2
+        evidence row had landed, but banks would have no chain row.
+        Mirrors the existing ``lease_minted`` /
+        ``credentials_projected`` posture in the main create() body
+        where audit-append failures propagate up through the
+        cleanup envelope.
+
+        The captured audit exception is held until AFTER Stage 3
+        completes — the LIFO unwind MUST run regardless so the
+        already-projected stack does not leak. After unwind:
+
+          * If audit exc was captured → raise it (this overrides
+            the caller's ``SandboxLifecycleRefused(reason)`` raise
+            because the audit failure is the more severe evidence
+            problem).
+          * Otherwise → return normally + caller raises
+            ``SandboxLifecycleRefused(reason)`` per the standard
+            Path-2 contract.
+
+        Stage 3 itself uses the existing best-effort posture per
+        ``_cleanup_projected_credential`` docstring — every audit
+        emit there is wrapped in ``contextlib.suppress(Exception)``
+        because those emits document cleanup that already happened.
+        The ONE evidence row that MUST land on Path 2 is the
+        ``credentials_projection_failed`` carrying the
+        ``revoke_outcome`` — that's the per-credential refusal
+        evidence the bank-grade contract depends on.
+        """
+        # Stage 1: revoke lease N + record outcome.
+        revoke_outcome: str
+        try:
+            await self._credential_adapter.revoke_lease(lease.lease_id)
+            revoke_outcome = "revoked"
+        except Exception:
+            revoke_outcome = "revoke_failed"
+
+        # Stage 2: emit credentials_projection_failed for N.
+        # Audit failure is CAPTURED (not suppressed) and surfaced
+        # AFTER the LIFO unwind completes per the round-2 P1 fix.
+        path2_audit_exc: BaseException | None = None
+        try:
+            await sandbox_lifecycle_credentials_projection_failed(
+                self._dh,
+                lease=lease,
+                logical_name=refused.logical_name,
+                reason=refused.reason,
+                expected_fields=refused.expected_fields,
+                actual_fields=refused.actual_fields,
+                extras=refused.extras,
+                missing=refused.missing,
+                revoke_outcome=revoke_outcome,  # type: ignore[arg-type]
+                field_name=refused.field_name,
+                actual_type=refused.actual_type,
+                actual_length=refused.actual_length,
+                actual_size=refused.actual_size,
+                cap=refused.cap,
+                trace_id="",
+                session_id=session_id,
+            )
+        except Exception as exc:
+            path2_audit_exc = exc
+
+        # Stage 3: LIFO unwind 1..N-1 (already-projected stack).
+        # Runs UNCONDITIONALLY — even if Stage 2's audit emit failed,
+        # the projected stack MUST be unwound so credential bytes
+        # are cleaned + leases revoked. Per-step best-effort posture
+        # lives inside _cleanup_projected_credential.
+        for prev_lease, prev_executor in reversed(projected_stack):
+            await self._cleanup_projected_credential(
+                lease=prev_lease,
+                executor_result=prev_executor,
+                session_id=session_id,
+            )
+
+        # Clear minted_leases + projected_stack BEFORE the audit-
+        # failure raise below. This helper has revoked + cleaned up
+        # all entries already; leaving them in the lists would cause
+        # the create()'s outer except envelope to re-revoke + re-
+        # cleanup, producing duplicate audit rows. Round-2 P1: clear
+        # is moved INTO the helper so the audit-failure exit path
+        # doesn't skip the caller's previous in-band clear() calls.
+        minted_leases.clear()
+        projected_stack.clear()
+
+        # Stage 4 (round-2 P1) — surface the Stage-2 audit failure
+        # if one occurred. Raised AFTER Stage 3 completes so the
+        # LIFO unwind runs regardless + AFTER the in-helper clear
+        # so the outer envelope sees a clean state.
+        if path2_audit_exc is not None:
+            raise path2_audit_exc
+
+    async def _collect_preflight_result(
+        self,
+        *,
+        policy: SandboxPolicy,
+        expected_workload_gid: int | None,
+    ) -> PreflightResult:
+        """Sprint 10.6 T21 — gather the inputs for the T19 Phase 1
+        substrate preflight + call the verifier.
+
+        Mockable seam: tests replace this method via ``AsyncMock`` to
+        drive preflight pass/refuse behaviour without real I/O. The
+        default production body reads ``/proc/mounts`` from the host
+        and inspects the runtime image's ``Config.User`` field via
+        ``aiodocker``, then delegates to
+        ``verify_docker_credential_projection_preflight``.
+        """
+        # The Docker preflight signature takes ``expected_workload_gid:
+        # int`` (not Optional). The runtime manifest validator at
+        # ``cli/validators/credentials.py`` already enforces a non-None
+        # value when ``[credentials]`` blocks are declared; reaching
+        # this seam with None means a non-manifest caller bypassed
+        # validation — programmer-error contract violation. Same
+        # pattern as the T19/T20 boundary-grammar guards.
+        if expected_workload_gid is None:
+            raise ValueError(
+                "expected_workload_gid MUST be provided when "
+                "credential_decls is non-empty; got None"
+            )
+        proc_mounts_content = await asyncio.to_thread(_read_proc_mounts_file)
+        image_user_directive = await self._inspect_image_user_directive(policy.runtime_image)
+        return verify_docker_credential_projection_preflight(
+            expected_workload_gid=expected_workload_gid,
+            image_user_directive=image_user_directive,
+            proc_mounts_content=proc_mounts_content,
+            dev_escape_enabled=getattr(
+                self._settings,
+                "dev_escape_allow_permissive_credential_projection",
+                False,
+            ),
+            profile=getattr(self._settings, "runtime_profile", "prod"),
+        )
+
+    async def _inspect_image_user_directive(self, image_ref: str) -> str | None:
+        """Sprint 10.6 T21 — inspect the runtime image's ``Config.User``
+        field. Default implementation queries ``aiodocker.images.inspect``;
+        tests override via ``AsyncMock`` for the no-I/O path.
+        Returns the raw USER string or ``None`` if the image has no
+        USER directive set.
+        """
+        image = await self._docker.images.inspect(image_ref)
+        config = image.get("Config", {}) if isinstance(image, dict) else {}
+        user = config.get("User")
+        return user if user else None
 
     async def exec(
         self,
@@ -1542,17 +2091,54 @@ class DockerSiblingSandboxBackend:
             # order stays: revoke[_failed] → (if teardown succeeded)
             # tombstone → lifecycle.destroyed.
             if not already_destroyed:
+                # Sprint 10.6 T21 slice 4 + slice-4 round-2 P1 —
+                # LIFO projection cleanup BEFORE per-credential
+                # revoke per spec §5.8 step 5. For each projected
+                # credential in reverse manifest order:
+                # cleanup_projection_dir → emit cleaned_up /
+                # cleanup_failed → revoke → emit lease_revoked /
+                # lease_revoke_failed. The per-credential helper
+                # ``_cleanup_projected_credential`` routes its
+                # audit emits through the shared
+                # ``_emit_revoke_event`` handler defined below so
+                # the existing spec §7.2 "capture first audit emit
+                # failure, continue, raise after loop" contract
+                # pinned by
+                # ``test_cross_backend_destroy_audit_emit_*`` covers
+                # projected leases AND bare-revoke leases on the
+                # normal-destroy path. Teardown-failure path still
+                # suppresses so the original teardown exception
+                # propagates per Python finally-block semantics.
+                #
+                # Pairing: session.active_leases and
+                # session.active_projections are 1:1 by manifest
+                # declaration order (set by create() on success).
+                # T21 invariant — the pair guard at create() entry
+                # makes asymmetry impossible.
+                projected_lease_ids: set[str] = {er.lease_id for er in session.active_projections}
+                # Index leases by lease_id so the LIFO walk picks
+                # the matching lease for each executor result.
+                leases_by_id: dict[str, CredentialLease] = {
+                    lease.lease_id: lease for lease in session.active_leases
+                }
+
                 # Capture the FIRST normal-path audit-emit exception
                 # so we can raise it AFTER every lease got its
-                # revoke attempt per spec §7.2's single-attempt-
-                # per-lease cleanup contract. Round-3 reviewer-P1
-                # propagated immediately, which aborted the loop on
-                # multi-lease destroys (Gap N). Round-4 reviewer-P2
-                # fix: keep attempting + emit for every lease,
-                # remember first emit exception, raise after loop.
+                # revoke + projection-cleanup attempt per spec §7.2's
+                # single-attempt-per-lease cleanup contract. Round-3
+                # reviewer-P1 propagated immediately, which aborted
+                # the loop on multi-lease destroys (Gap N). Round-4
+                # reviewer-P2 fix: keep attempting + emit for every
+                # lease, remember first emit exception, raise after
+                # loop. Slice-4 round-2 reviewer P1 extends the
+                # capture-and-continue posture to the projected
+                # credentials' audit emits via the shared handler
+                # injected into ``_cleanup_projected_credential``.
                 first_normal_path_emit_exc: BaseException | None = None
 
-                async def _emit_revoke_event(coro: Any) -> None:
+                async def _emit_revoke_event(
+                    coro: Coroutine[Any, Any, Any],
+                ) -> None:
                     nonlocal first_normal_path_emit_exc
                     if teardown_succeeded:
                         # Normal path — capture first emit exception
@@ -1570,7 +2156,47 @@ class DockerSiblingSandboxBackend:
                         with contextlib.suppress(Exception):
                             await coro
 
+                # Projection LIFO unwind — uses the same handler so
+                # projected leases' cleanup_dir / cleaned_up /
+                # cleanup_failed / lease_revoked / lease_revoke_failed
+                # audit emits share the destroy()-normal-path
+                # capture-and-propagate posture (round-2 P1 fix).
+                for executor_result in reversed(session.active_projections):
+                    paired_lease = leases_by_id.get(executor_result.lease_id)
+                    if paired_lease is None:
+                        # Defensive: pre-T21 sessions or test fixtures
+                        # could in theory produce a mismatched pair.
+                        # Skip rather than fail-loud — destroy() never
+                        # raises per spec §7.2.
+                        continue
+                    try:
+                        await self._cleanup_projected_credential(
+                            lease=paired_lease,
+                            executor_result=executor_result,
+                            session_id=session.session_id,
+                            emit_handler=_emit_revoke_event,
+                        )
+                    except Exception:
+                        # Non-audit exceptions (programmer-error in the
+                        # helper itself, not Vault/FS or audit emit
+                        # which are handled inside): continue the
+                        # unwind for the remaining credentials.
+                        continue
+
+                # T21 slice 4: this loop now ONLY handles bare-revoke
+                # of leases that do NOT have a matching projection
+                # entry (defence-in-depth for the legacy Sprint-10
+                # mint-only path which T21's pair guard makes
+                # unreachable from create() going forward; the loop
+                # filter via ``projected_lease_ids`` ensures double-
+                # revoke is impossible against the projection-unwind
+                # loop above).
                 for lease in session.active_leases:
+                    # T21 slice 4 — skip leases already revoked via
+                    # the projection-unwind loop above to prevent
+                    # double-revoke.
+                    if lease.lease_id in projected_lease_ids:
+                        continue
                     try:
                         await self._credential_adapter.revoke_lease(lease.lease_id)
                     except Exception as exc:
@@ -2127,19 +2753,34 @@ class DockerSiblingSandboxBackend:
         policy: SandboxPolicy,
         session_id: str,
         internal_net_name: str,
+        extra_mounts: Sequence[tuple[str, str]] = (),
     ) -> None:
         """Start the sandbox container on the internal network only.
 
-        T10a-scope: lifecycle + topology only. T10b will extend the
-        container config with cgroup caps (memory, cpu, walltime
-        machinery). T10c does not modify this method — proxy_log
-        materialisation happens at exec-time, not start-time.
+        T10a-scope: lifecycle + topology only. T10b extended the
+        container config with cgroup caps. T10c does not modify
+        this method — proxy_log materialisation happens at exec-time.
+
+        Sprint 10.6 T21 — ``extra_mounts`` kwarg accepts a Sequence
+        of ``(host_path, container_path)`` tuples for credential
+        projection bind-mounts (read-only by construction at this
+        seam — callers cannot request writable credential mounts).
+        Each pair surfaces as a Docker bind mount in the container
+        config's ``HostConfig.Binds`` list with the ``:ro`` flag.
         """
         config = _build_sandbox_container_config(
             policy=policy,
             session_id=session_id,
             internal_net_name=internal_net_name,
         )
+        if extra_mounts:
+            # Append read-only bind mounts for credential projection.
+            # ``HostConfig.Binds`` syntax: ``"<host>:<container>:ro"``.
+            host_config = config.setdefault("HostConfig", {})
+            existing_binds = list(host_config.get("Binds", []))
+            for host_path, container_path in extra_mounts:
+                existing_binds.append(f"{host_path}:{container_path}:ro")
+            host_config["Binds"] = existing_binds
         container = await self._docker.containers.create_or_replace(
             name=session_id,
             config=config,

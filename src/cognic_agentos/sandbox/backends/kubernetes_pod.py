@@ -85,7 +85,7 @@ import hashlib
 import json
 import logging
 import uuid as _uuid
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -110,6 +110,15 @@ from cognic_agentos.core.vault import (
     VaultProtocolError,
     VaultUnavailable,
 )
+from cognic_agentos.sandbox._credentials_pair import (
+    # Sprint 10.6 T21 — cross-backend pair-invariant guard. Same
+    # contract enforced by Docker create() at create-entry.
+    verify_credentials_pair_invariants,
+)
+from cognic_agentos.sandbox._preflight import (
+    PreflightResult,
+    verify_k8s_credential_projection_preflight,
+)
 from cognic_agentos.sandbox.admission import (
     CatalogProtocol,
     CredentialAdapter,
@@ -118,6 +127,10 @@ from cognic_agentos.sandbox.admission import (
 from cognic_agentos.sandbox.audit import (
     emit_sandbox_event,
     sandbox_lifecycle_checkpointed,
+    sandbox_lifecycle_credentials_projected,
+    sandbox_lifecycle_credentials_projection_cleaned_up,
+    sandbox_lifecycle_credentials_projection_cleanup_failed,
+    sandbox_lifecycle_credentials_projection_failed,
     sandbox_lifecycle_lease_minted,
     sandbox_lifecycle_lease_revoke_failed,
     sandbox_lifecycle_lease_revoked,
@@ -131,7 +144,11 @@ from cognic_agentos.sandbox.backends._k8s_executor import (
     # at import time per the same dependency-neutral pattern as
     # _shared_credentials.
     CredentialSecretMount,
+    K8sExecutorResult,
     compute_k8s_credential_volume_and_mount,
+    compute_k8s_secret_name,
+    compute_k8s_secret_spec,
+    derive_secret_opaque,
 )
 from cognic_agentos.sandbox.backends._shared_credentials import (
     # Sprint 10 T10 K8s round-2 reviewer-P1 fix: the helper lives in
@@ -155,6 +172,12 @@ from cognic_agentos.sandbox.checkpoint_store import (
     TombstoneCorruptError,
 )
 from cognic_agentos.sandbox.policy import PackAdmissionContext, SandboxPolicy
+from cognic_agentos.sandbox.projection import (
+    CredentialDecl,
+    ProjectionPlan,
+    ProjectionRefused,
+    compute_projection_plan,
+)
 from cognic_agentos.sandbox.protocol import (
     CheckpointId,
     ProxyAccessRecord,
@@ -709,20 +732,30 @@ class KubernetesPodSession:
     _pod_name: str = field(repr=False)
     _network_policy_name: str = field(repr=False)
     _namespace: str = field(repr=False)
-    #: Sprint 10 T10 — Protocol-compat shim per spec §3.6. Tuple
+    #: Sprint 10 T10 — public Protocol field per spec §3.6. Tuple
     #: (NOT list) — immutable post-construction. Default empty tuple
-    #: keeps Sprint-8B/8.5 construction paths backward-compat.
-    #: **The K8s mint/revoke wiring + Q5 LOCK on checkpoint/suspend
-    #: lands in the T10 K8s commit (next halt-before-commit cycle)** —
-    #: this field declaration is the Protocol-compat shim needed to
-    #: keep the branch bisection-clean (mypy SandboxSession structural
-    #: conformance) when T10 Docker lands first per the user-locked
-    #: 2-commit split. The K8s ``KubernetesPodSandboxBackend.create()``
-    #: in this commit raises ``NotImplementedError`` on non-empty
-    #: ``requires_credentials`` so no caller can accidentally trip
-    #: the unwired path; the T10 K8s commit replaces the raise with
-    #: the real mint loop + active_leases assignment.
+    #: keeps the Sprint-8B/8.5 lease-less + the Sprint-10.6 T21
+    #: credential-less construction paths backward-compat. Iterated
+    #: by ``destroy()`` for the per-lease fail-soft revoke loop per
+    #: spec §4.3 + §7.2; gates the Q5 LOCK at ``checkpoint()`` +
+    #: ``suspend()`` per spec §4.5. Sprint-10.6 T21 slice-5+6
+    #: extension: ``destroy()`` now LIFO-unwinds the paired
+    #: ``active_projections`` BEFORE the bare-revoke loop here per
+    #: spec §5.8 step 5 (Secret-delete-before-revoke per credential);
+    #: ``projected_lease_ids`` filter in the bare-revoke loop
+    #: prevents double-revoke.
     active_leases: tuple[CredentialLease, ...] = ()
+    #: Sprint 10.6 T21 slice 5+6 — per-credential projection state
+    #: for the LIFO destroy() unwind. Aligns 1:1 with
+    #: ``active_leases`` (same order; same per-credential identity by
+    #: lease_id) so destroy() iterates reversed pairs + does
+    #: Secret-delete-before-revoke per credential per spec §5.8 step
+    #: 5. Empty tuple = no credential projections were performed
+    #: (the lease-less or pre-T21 mint-only path). Slice-5 create()
+    #: sets this to the projected_stack contents on success; slice-6
+    #: destroy() iterates reversed pairs for the LIFO unwind.
+    #: Mirrors ``DockerSiblingSession.active_projections``.
+    active_projections: tuple[K8sExecutorResult, ...] = ()
     _actor_subject: str = field(repr=False, default="")
     _destroyed: bool = field(repr=False, default=False)
     #: Sprint 8.5 T7 — suspend() flips this True so subsequent exec()
@@ -899,23 +932,32 @@ class KubernetesPodSandboxBackend:
         pack_context: PackAdmissionContext,
         use_warm_pool: bool = True,
         requires_credentials: Sequence[VaultLeaseRequest] = (),
+        credential_decls: Sequence[CredentialDecl] = (),
+        expected_workload_gid: int | None = None,
     ) -> SandboxSession:
         """Admit + create a sandbox session per spec §6.1 + ADR-004
-        amendment.
+        amendment + Sprint-10.6 §5.8 (T21 mint-then-project lifecycle).
 
-        Sprint 10 T10 Protocol-compat shim — the ``requires_credentials``
-        kwarg is accepted at the Protocol surface per spec §4.2 so
-        ``KubernetesPodSandboxBackend`` structurally conforms to the
-        updated ``SandboxBackend`` Protocol. **The K8s mint/revoke
-        wiring + Q5 LOCK lands in the T10 K8s commit (next
-        halt-before-commit cycle)**; this commit fail-louds on
-        non-empty input so no caller can accidentally trip the unwired
-        path before the implementation lands. The Docker backend
-        already ships the full T10 wiring at ``docker_sibling.py``.
+        Sprint 10.6 T21 slice-5+6 — full mint-then-project lifecycle
+        wired (cross-backend parity with docker_sibling.create()).
+        ``requires_credentials`` + ``credential_decls`` paired per
+        the T21 pair-invariant guard (lock #1); preflight runs
+        AFTER admission + proxy verify + BEFORE the mint loop
+        (lock #2); per-credential Secret-create happens AFTER mint
+        AND BEFORE Pod create (lock #3 — the kubelet projects the
+        Secret into the Pod at container-start, so the Secret
+        resource has to exist by the time the Pod manifest is
+        submitted); Path-2 refusal LIFO-unwinds 1..N-1 with
+        Secret-delete-before-revoke per spec §5.8 step 5 (lock #4).
 
         Step ordering (mirrors docker_sibling's pattern for cross-
         backend behavioural equivalence):
 
+        0. Sprint 10.6 T21 — pair guard at the very top per lock #1.
+           ``verify_credentials_pair_invariants`` raises
+           ``ValueError`` BEFORE any I/O on length-mismatch /
+           one-side-empty / per-index ``vault_path`` mismatch /
+           per-index ``tenant_id`` mismatch.
         1. If ``use_warm_pool`` + ``self._warm_pool`` wired, attempt
            checkout; on hit, return + emit
            ``warm_pool.checked_out`` (pool's own seam) +
@@ -924,19 +966,52 @@ class KubernetesPodSandboxBackend:
            :class:`SandboxLifecycleRefused` on any admission
            failure). BACKEND-AGNOSTIC — same admission seam as
            docker_sibling.
-        3. Cold-create the K8s objects in order: NetworkPolicy
-           FIRST (egress lockdown ACTIVE before the Pod starts;
-           defends against the brief window a Pod might start
-           with default-namespace egress), then Pod, then wait for
-           Pod readiness before exposing the session to callers.
-        4. Emit ``lifecycle.created(warm_pool_hit=False)`` + return
-           the :class:`KubernetesPodSession`.
+        2.5. Sprint 10.6 T21 — substrate preflight when
+           ``credential_decls`` non-empty. K8s preflight signature
+           has NO ``dev_escape_enabled`` / ``profile`` params per
+           slice-1 lock #2 — Docker-only dev escape MUST NOT leak.
+           Refusal raises ``SandboxLifecycleRefused`` BEFORE any
+           mint; zero credential-projection events emitted.
+        3. Cold-create — mint session_id + names + proxy image
+           cosign+SBOM verify (K8s-specific; the proxy IS the
+           egress-enforcement component).
+        4. Sprint 10.6 T21 — mint-then-project interleaved per
+           spec §5.8 step 3. For each ``(request, decl)`` pair:
+           mint lease → emit ``lease_minted`` → compute T18 plan →
+           either execute K8s Secret-create via
+           ``_execute_k8s_projection`` + emit
+           ``credentials_projected`` (push to ``projected_stack``)
+           OR Path-2 refusal via ``_handle_projection_refusal``
+           (revoke N + emit ``credentials_projection_failed(revoke_outcome)``
+           + LIFO unwind 1..N-1 + raise).
+        5. Build pod_spec with credential_secrets + workload_fs_group
+           derived from ``projected_stack`` per T20 lock #3 (volume
+           name = opaque Secret name; pod-level fsGroup from
+           ``expected_workload_gid``).
+        6. Cold-create K8s objects: NetworkPolicy FIRST (egress
+           lockdown ACTIVE before the Pod starts), then Pod (now
+           with credential Secret volumes), wait for Pod readiness.
+        7. Emit ``lifecycle.created(warm_pool_hit=False)`` + return
+           the :class:`KubernetesPodSession` carrying
+           ``active_leases`` + ``active_projections`` (1:1 paired
+           for the T21 destroy() LIFO unwind).
 
         On any failure during cold-create, the cleanup envelope
-        invokes :meth:`_teardown_session_state` so no K8s objects
-        leak. No ``lifecycle.created`` emitted on the failure path
-        because the session never reached a running state.
+        ``_cleanup_post_admission_failure`` (extended at T21 slice 5
+        with ``projected_stack``) LIFO-unwinds projected credentials
+        BEFORE bare-revoke + topology teardown per spec §5.8 step 5.
+        No ``lifecycle.created`` emitted on the failure path because
+        the session never reached a running state.
         """
+        # Sprint 10.6 T21 — pair guard FIRST per lock #1. Raises
+        # ``ValueError`` BEFORE warm pool / admission / mint so a
+        # malformed pair fails at the very top of the call stack.
+        # Cross-backend invariant — same contract Docker enforces.
+        verify_credentials_pair_invariants(
+            requires_credentials=requires_credentials,
+            credential_decls=credential_decls,
+        )
+
         # 1. Warm-pool checkout (if wired + caller asked for it AND
         #    no credentials requested). Sprint 10 spec §4.2.1: warm
         #    members were pre-created without an actor context for
@@ -1013,14 +1088,24 @@ class KubernetesPodSandboxBackend:
         await self._catalog.verify_cosign_or_refuse(proxy_image_digest, tenant_id=tenant_id)
         await self._catalog.verify_sbom_policy_or_refuse(proxy_image_digest, tenant_id=tenant_id)
 
-        # 5. Build the K8s object specs via pure helpers (no state
-        # allocated — safe to do outside the cleanup envelope).
-        pod_spec = _build_pod_spec(
-            policy=policy,
-            session_id=session_id,
-            tenant_id=tenant_id,
-            egress_proxy_image=self._egress_proxy_image,
-        )
+        # Sprint 10.6 T21 slice 5 — K8s substrate preflight when
+        # credential_decls non-empty. Runs AFTER admission + proxy
+        # image verify + BEFORE the mint-then-project loop per spec
+        # §5.8 step 2. Refusal raises SandboxLifecycleRefused
+        # directly — zero minted leases + zero Secret-create calls +
+        # zero projection events. Skipped entirely when no credentials
+        # are requested.
+        preflight: PreflightResult | None = None
+        if credential_decls:
+            preflight = await self._collect_preflight_result(
+                expected_workload_gid=expected_workload_gid,
+            )
+
+        # 5. Build the netpol spec (pod spec construction MOVED to
+        # AFTER the projection loop so credential_secrets +
+        # workload_fs_group from projected_stack can flow into it
+        # per the T20 _build_pod_spec extension). The netpol spec
+        # has no credential dependency and can stay pre-build.
         netpol_spec = _build_network_policy_spec(session_id=session_id, tenant_id=tenant_id)
 
         # 6. Sprint 10 T10 K8s — SINGLE post-admission cleanup envelope
@@ -1036,11 +1121,24 @@ class KubernetesPodSandboxBackend:
         #
         # All three arms converge on _cleanup_post_admission_failure
         # (K8s-shape helper — pod_name + network_policy_name args
-        # vs Docker's 4-arg form).
+        # vs Docker's 4-arg form). Slice 5 extends the envelope's
+        # parameter list with ``projected_stack`` so the cleanup
+        # LIFO-unwinds Secrets-then-revokes per spec §5.8 step 5.
         minted_leases: list[CredentialLease] = []
+        projected_stack: list[tuple[CredentialLease, K8sExecutorResult]] = []
         try:
-            # 6a. Mint leases per spec §4.2 — per request, in order.
-            for request in requires_credentials:
+            # 6a. Sprint 10.6 T21 slice 5 — mint-then-project
+            # interleaved per spec §5.8 step 3. For each
+            # (request, decl) pair in manifest declaration order:
+            #   (a) mint lease → emit lease_minted
+            #   (b) compute T18 projection plan
+            #   (c) on ProjectionRefused: revoke N + emit
+            #       credentials_projection_failed(revoke_outcome) +
+            #       LIFO unwind 1..N-1 + raise SandboxLifecycleRefused
+            #   (d) on ProjectionPlan: derive secret_opaque +
+            #       compute_k8s_secret_spec + create_namespaced_secret +
+            #       emit credentials_projected; push to projected_stack
+            for request, decl in zip(requires_credentials, credential_decls, strict=True):
                 lease = await self._credential_adapter.mint_lease(request)
                 minted_leases.append(lease)
                 await sandbox_lifecycle_lease_minted(
@@ -1050,7 +1148,67 @@ class KubernetesPodSandboxBackend:
                     session_id=session_id,
                 )
 
-            # 6b. Create NetworkPolicy FIRST so egress lockdown is
+                plan_or_refused = compute_projection_plan(lease=lease, manifest_decl=decl)
+                if isinstance(plan_or_refused, ProjectionRefused):
+                    # Path 2 — revoke failed credential N (revoke-only;
+                    # no Secret was created for N) + LIFO unwind 1..N-1.
+                    # The helper clears the lists in-band so the outer
+                    # except envelope sees a clean state on every exit
+                    # path. The helper may raise on audit-emit failure
+                    # per the slice-3 round-2 P1 fix; on normal return
+                    # we follow up with SandboxLifecycleRefused per the
+                    # standard Path-2 contract.
+                    await self._handle_projection_refusal(
+                        lease=lease,
+                        refused=plan_or_refused,
+                        session_id=session_id,
+                        minted_leases=minted_leases,
+                        projected_stack=projected_stack,
+                    )
+                    raise SandboxLifecycleRefused(
+                        plan_or_refused.reason,
+                        detail=(f"projection refused for credential {decl.logical_name!r}"),
+                    )
+
+                # ProjectionPlan path — execute K8s projection + emit projected.
+                assert preflight is not None  # mypy: non-None when credential_decls
+                executor_result = await self._execute_k8s_projection(
+                    plan=plan_or_refused,
+                    session_id=session_id,
+                )
+                projected_stack.append((lease, executor_result))
+                await sandbox_lifecycle_credentials_projected(
+                    self._dh,
+                    lease=lease,
+                    logical_name=decl.logical_name,
+                    projected_field_count=executor_result.projected_field_count,
+                    purpose_category=decl.purpose_category,
+                    purpose_description=decl.purpose_description,
+                    backend_resource_name=executor_result.secret_name,
+                    trace_id="",
+                    session_id=session_id,
+                )
+
+            # 6b. Build pod_spec AFTER projection loop so credential_
+            # secrets + workload_fs_group derived from projected_stack
+            # flow into the T20 _build_pod_spec extension.
+            credential_secret_mounts: list[CredentialSecretMount] = [
+                CredentialSecretMount(
+                    logical_name=executor_result.logical_name,
+                    secret_name=executor_result.secret_name,
+                )
+                for _lease, executor_result in projected_stack
+            ]
+            pod_spec = _build_pod_spec(
+                policy=policy,
+                session_id=session_id,
+                tenant_id=tenant_id,
+                egress_proxy_image=self._egress_proxy_image,
+                credential_secrets=credential_secret_mounts,
+                workload_fs_group=(expected_workload_gid if credential_decls else None),
+            )
+
+            # 6c. Create NetworkPolicy FIRST so egress lockdown is
             # active BEFORE the Pod starts. Then create the Pod and
             # wait for the kubelet to report both containers ready
             # before exposing the session to callers.
@@ -1058,7 +1216,7 @@ class KubernetesPodSandboxBackend:
             await self._create_pod(pod_spec)
             await self._wait_for_pod_ready(pod_name=pod_name)
 
-            # 6c. Session construct + lifecycle.created emit per spec
+            # 6d. Session construct + lifecycle.created emit per spec
             # §4.3.
             session = KubernetesPodSession(
                 session_id=session_id,
@@ -1072,6 +1230,9 @@ class KubernetesPodSandboxBackend:
                 _network_policy_name=netpol_name,
                 _namespace=self._namespace,
                 active_leases=tuple(minted_leases),
+                active_projections=tuple(
+                    executor_result for _lease, executor_result in projected_stack
+                ),
                 _actor_subject=actor.subject,
             )
             await self._emit_lifecycle_created(
@@ -1087,6 +1248,8 @@ class KubernetesPodSandboxBackend:
             # re-raise UNCHANGED — never swallow cancellation.
             await self._cleanup_post_admission_failure(
                 minted_leases=minted_leases,
+                projected_stack=projected_stack,
+                session_id=session_id,
                 pod_name=pod_name,
                 network_policy_name=netpol_name,
             )
@@ -1106,6 +1269,8 @@ class KubernetesPodSandboxBackend:
             # cannot escape uncaught at the K8s backend boundary.
             await self._cleanup_post_admission_failure(
                 minted_leases=minted_leases,
+                projected_stack=projected_stack,
+                session_id=session_id,
                 pod_name=pod_name,
                 network_policy_name=netpol_name,
             )
@@ -1116,6 +1281,8 @@ class KubernetesPodSandboxBackend:
         except Exception:
             await self._cleanup_post_admission_failure(
                 minted_leases=minted_leases,
+                projected_stack=projected_stack,
+                session_id=session_id,
                 pod_name=pod_name,
                 network_policy_name=netpol_name,
             )
@@ -1126,6 +1293,8 @@ class KubernetesPodSandboxBackend:
         self,
         *,
         minted_leases: list[CredentialLease],
+        projected_stack: list[tuple[CredentialLease, K8sExecutorResult]],
+        session_id: str,
         pod_name: str,
         network_policy_name: str,
     ) -> None:
@@ -1154,18 +1323,55 @@ class KubernetesPodSandboxBackend:
         Differs from Docker's helper only in signature shape — K8s
         teardown takes ``pod_name + network_policy_name`` (vs Docker's
         4-arg internal/egress/sidecar form). The cross-backend
-        SYMMETRY of behaviour (revoke first, teardown second, swallow
-        ordinary exceptions, propagate cancellation) is pinned by the
-        parametrized regressions at
-        ``tests/unit/sandbox/test_credential_lifecycle.py``.
+        SYMMETRY of behaviour (T21 slice-5 order: projection LIFO
+        unwind FIRST → bare-revoke leftover unprojected leases →
+        topology teardown; swallow ordinary exceptions; propagate
+        cancellation) is pinned by the parametrized regressions at
+        ``tests/unit/sandbox/test_credential_lifecycle.py``. Pre-T21
+        the order was revoke-first then teardown; T21 reordered to
+        match spec §5.8 step 5 across both backends.
 
-        Order: revoke leases FIRST (less time for the in-flight lease
-        to be used by a still-running Pod), then teardown topology.
-        Both stages independently swallow ordinary exceptions so a
-        single revoke failure does not block topology teardown and
-        vice-versa.
+        Order (post-T21 slice 5):
+          1. **Projection LIFO unwind FIRST** — per spec §5.8 step 5,
+             projection cleanup (Secret delete) runs BEFORE Vault
+             revoke per credential. For each entry in
+             reversed(projected_stack):
+             delete_namespaced_secret → emit cleaned_up/cleanup_failed
+             → revoke lease → emit lease_revoked/lease_revoke_failed.
+          2. **Bare-revoke leftover unprojected leases** — handles
+             the Path-3 edge where mint succeeded but the Secret-
+             create failed mid-loop. Per-lease set comparison via
+             ``projected_lease_ids`` to avoid double-revoke.
+          3. **Topology teardown** — Pod + NetworkPolicy cleaned up
+             via the existing best-effort ``_teardown_session_state``.
+
+        Pre-T21 the order was revoke-leases-FIRST then teardown. T21
+        slice 5 reorders to projection-cleanup-before-revoke per spec
+        §5.8 step 5 — projection cleanup (Secret delete) minimises
+        the active-risk-surface window during cleanup.
         """
-        for already_minted in minted_leases:
+        # Sprint 10.6 T21 slice 5 — LIFO unwind of already-projected
+        # credentials. Per spec §5.8 step 5: per-credential
+        # Secret-delete-before-revoke ordering. Audit rows use the
+        # RAW session_id (NOT pod_name=``sb-<session_id>``) so the
+        # cleanup chain rows correlate cleanly with the earlier
+        # ``lease_minted`` / ``credentials_projected`` rows that
+        # the create() body emitted with the raw session_id.
+        # Round-2 P1 reviewer fix — pre-fix the cleanup envelope
+        # passed ``pod_name`` which broke chain correlation.
+        projected_lease_ids: set[str] = {lease.lease_id for lease, _er in projected_stack}
+        for lease, executor_result in reversed(projected_stack):
+            await self._cleanup_projected_credential(
+                lease=lease,
+                executor_result=executor_result,
+                session_id=session_id,
+            )
+
+        # Bare-revoke leases that were minted but NEVER projected
+        # (mint-then-project loop raised mid-Secret-create).
+        for already_minted in reversed(minted_leases):
+            if already_minted.lease_id in projected_lease_ids:
+                continue  # already revoked via the projection unwind above
             with contextlib.suppress(Exception):
                 await self._credential_adapter.revoke_lease(already_minted.lease_id)
         with contextlib.suppress(Exception):
@@ -1173,6 +1379,263 @@ class KubernetesPodSandboxBackend:
                 pod_name=pod_name,
                 network_policy_name=network_policy_name,
             )
+
+    # ------------------------------------------------------------------
+    # Sprint 10.6 T21 slice 5 — credential projection helpers
+    # ------------------------------------------------------------------
+
+    async def _collect_preflight_result(
+        self,
+        *,
+        expected_workload_gid: int | None,
+    ) -> PreflightResult:
+        """Sprint 10.6 T21 slice 5 — wraps T19 Phase 1's K8s
+        preflight verifier. Mockable seam: tests replace this method
+        via ``AsyncMock`` to drive preflight pass/refuse without
+        touching the verifier.
+
+        K8s preflight signature accepts ``int | None`` (the K8s
+        preflight has no image USER fallback; ``None`` is the
+        ``workload_gid_unknown`` refusal trigger per slice-1 lock #2).
+        Unlike Docker, the K8s preflight has NO dev_escape_enabled /
+        profile params — the cross-backend dev-escape-leak class is
+        prevented at the type-system level.
+        """
+        return verify_k8s_credential_projection_preflight(
+            expected_workload_gid=expected_workload_gid,
+        )
+
+    async def _execute_k8s_projection(
+        self,
+        *,
+        plan: ProjectionPlan,
+        session_id: str,
+    ) -> K8sExecutorResult:
+        """Sprint 10.6 T21 slice 5 — per-credential K8s Secret
+        creation.
+
+        Derives the opaque Secret name (``cognic-cred-<16-hex>``)
+        per spec §5.4, builds the Secret body via T20's
+        ``compute_k8s_secret_spec``, calls the K8s API to create
+        the Secret, and returns a ``K8sExecutorResult`` carrying
+        the audit metadata for the ``credentials_projected`` chain
+        row.
+
+        ``owner_references`` defaults to empty (per T20 user-locked
+        decision — Pod UID does not exist at Secret-create time);
+        T22-or-later can patch ownerReferences post-Pod-create for
+        defense-in-depth.
+        """
+        secret_opaque = derive_secret_opaque()
+        secret_name = compute_k8s_secret_name(secret_opaque=secret_opaque)
+        secret_spec = compute_k8s_secret_spec(
+            plan=plan,
+            secret_name=secret_name,
+            session_id=session_id,
+        )
+        await self._k8s_create_namespaced_secret(name=secret_name, body=secret_spec)
+        return K8sExecutorResult(
+            logical_name=plan.logical_name,
+            vault_path=plan.vault_path,
+            tenant_id=plan.tenant_id,
+            lease_id=plan.lease_id,
+            projected_field_count=plan.projected_field_count,
+            purpose_category=plan.purpose_category,
+            purpose_description=plan.purpose_description,
+            secret_name=secret_name,
+            container_mount_target=f"/run/credentials/{plan.logical_name}",
+            session_id=session_id,
+        )
+
+    async def _k8s_create_namespaced_secret(self, *, name: str, body: dict[str, Any]) -> None:
+        """Sprint 10.6 T21 slice 5 — mockable seam over the K8s
+        Secret-create API call. Production wraps
+        ``CoreV1Api.create_namespaced_secret``; tests inject
+        ``AsyncMock`` to drive create-success / create-failure
+        without a real cluster."""
+        api = kube_client.CoreV1Api(self._kube)
+        await api.create_namespaced_secret(
+            namespace=self._namespace,
+            body=body,  # type: ignore[arg-type]
+        )
+
+    async def _k8s_delete_namespaced_secret(self, *, name: str) -> None:
+        """Sprint 10.6 T21 slice 5 — mockable seam over the K8s
+        Secret-delete API call. Production wraps
+        ``CoreV1Api.delete_namespaced_secret``; tests inject
+        ``AsyncMock``. Swallows ``ApiException`` 404 so the unwind
+        is idempotent (mirrors the existing
+        ``_delete_pod_if_exists`` posture)."""
+        api = kube_client.CoreV1Api(self._kube)
+        try:
+            await api.delete_namespaced_secret(name=name, namespace=self._namespace)
+        except kube_client.ApiException as e:
+            if e.status == 404:
+                return
+            raise
+
+    async def _cleanup_projected_credential(
+        self,
+        *,
+        lease: CredentialLease,
+        executor_result: K8sExecutorResult,
+        session_id: str,
+        emit_handler: Callable[[Coroutine[Any, Any, Any]], Awaitable[None]] | None = None,
+    ) -> None:
+        """Sprint 10.6 T21 slice 5+6 — K8s per-credential LIFO-unwind
+        helper. Mirrors the Docker counterpart's structure (slice 4
+        round-2 P1) with K8s-specific cleanup target.
+
+        Per spec §5.8 step 5 ordering: Secret delete FIRST, THEN
+        Vault revoke. The Stage-1 split (1a FS-equivalent =
+        delete_namespaced_secret + 1b audit emit) preserves the
+        slice-4 round-2 P2 contract: ``cleanup_failed`` only fires
+        when the actual cleanup operation raised.
+
+        ``cleanup_target="secret_resource"`` on the cleaned_up /
+        cleanup_failed payload (vs Docker's ``"staging_dir"``).
+
+        ``emit_handler`` injection same posture as Docker:
+          * None (default) — best-effort suppress per create()-
+            cleanup posture.
+          * Caller-supplied — destroy()'s normal-path uses this to
+            CAPTURE audit-emit failures so the first captured
+            exception propagates per spec §7.2 "audit evidence for
+            every revoke failure".
+        """
+        if emit_handler is None:
+
+            async def _default_emit_handler(
+                coro: Coroutine[Any, Any, Any],
+            ) -> None:
+                with contextlib.suppress(Exception):
+                    await coro
+
+            emit_handler = _default_emit_handler
+
+        # Stage 1a: Secret delete.
+        cleanup_exc: Exception | None = None
+        try:
+            await self._k8s_delete_namespaced_secret(name=executor_result.secret_name)
+        except Exception as exc:
+            cleanup_exc = exc
+
+        # Stage 1b: emit cleaned_up OR cleanup_failed.
+        if cleanup_exc is None:
+            await emit_handler(
+                sandbox_lifecycle_credentials_projection_cleaned_up(
+                    self._dh,
+                    lease=lease,
+                    logical_name=executor_result.logical_name,
+                    cleanup_target="secret_resource",
+                    backend_resource_name=executor_result.secret_name,
+                    trace_id="",
+                    session_id=session_id,
+                )
+            )
+        else:
+            await emit_handler(
+                sandbox_lifecycle_credentials_projection_cleanup_failed(
+                    self._dh,
+                    lease=lease,
+                    logical_name=executor_result.logical_name,
+                    cleanup_target="secret_resource",
+                    backend_resource_name=executor_result.secret_name,
+                    partial_state=("delete_namespaced_secret raised mid-unwind"),
+                    error_class=type(cleanup_exc).__name__,
+                    error=str(cleanup_exc),
+                    trace_id="",
+                    session_id=session_id,
+                )
+            )
+
+        # Stage 2: Vault revoke (runs even if Secret-delete failed).
+        try:
+            await self._credential_adapter.revoke_lease(lease.lease_id)
+        except Exception as revoke_exc:
+            await emit_handler(
+                sandbox_lifecycle_lease_revoke_failed(
+                    self._dh,
+                    lease=lease,
+                    trace_id="",
+                    session_id=session_id,
+                    vault_error=str(revoke_exc),
+                )
+            )
+            return
+        await emit_handler(
+            sandbox_lifecycle_lease_revoked(
+                self._dh,
+                lease=lease,
+                trace_id="",
+                session_id=session_id,
+            )
+        )
+
+    async def _handle_projection_refusal(
+        self,
+        *,
+        lease: CredentialLease,
+        refused: ProjectionRefused,
+        session_id: str,
+        minted_leases: list[CredentialLease],
+        projected_stack: list[tuple[CredentialLease, K8sExecutorResult]],
+    ) -> None:
+        """Sprint 10.6 T21 slice 5 Path 2 helper — mirrors Docker's
+        ``_handle_projection_refusal`` exactly (slice-3 round-2 P1
+        contract). Stage 2 audit emit propagates on failure; Stage 3
+        LIFO unwind runs unconditionally; clear lists in-band before
+        the audit-failure raise so the outer envelope sees clean
+        state.
+        """
+        # Stage 1: revoke lease N + record outcome.
+        revoke_outcome: str
+        try:
+            await self._credential_adapter.revoke_lease(lease.lease_id)
+            revoke_outcome = "revoked"
+        except Exception:
+            revoke_outcome = "revoke_failed"
+
+        # Stage 2: emit credentials_projection_failed for N.
+        # Audit failure CAPTURED + surfaced AFTER Stage 3.
+        path2_audit_exc: BaseException | None = None
+        try:
+            await sandbox_lifecycle_credentials_projection_failed(
+                self._dh,
+                lease=lease,
+                logical_name=refused.logical_name,
+                reason=refused.reason,
+                expected_fields=refused.expected_fields,
+                actual_fields=refused.actual_fields,
+                extras=refused.extras,
+                missing=refused.missing,
+                revoke_outcome=revoke_outcome,  # type: ignore[arg-type]
+                field_name=refused.field_name,
+                actual_type=refused.actual_type,
+                actual_length=refused.actual_length,
+                actual_size=refused.actual_size,
+                cap=refused.cap,
+                trace_id="",
+                session_id=session_id,
+            )
+        except Exception as exc:
+            path2_audit_exc = exc
+
+        # Stage 3: LIFO unwind 1..N-1 (already-projected stack).
+        for prev_lease, prev_executor in reversed(projected_stack):
+            await self._cleanup_projected_credential(
+                lease=prev_lease,
+                executor_result=prev_executor,
+                session_id=session_id,
+            )
+
+        # Clear lists so outer envelope sees clean state.
+        minted_leases.clear()
+        projected_stack.clear()
+
+        # Surface Stage-2 audit failure if captured.
+        if path2_audit_exc is not None:
+            raise path2_audit_exc
 
     async def exec(
         self,
@@ -1483,22 +1946,26 @@ class KubernetesPodSandboxBackend:
             # lease_revoke_failed audit so each lease attempt is
             # independently best-effort per §7.2.
             if not already_destroyed:
+                # Sprint 10.6 T21 slice 6 — LIFO projection cleanup
+                # BEFORE per-credential revoke per spec §5.8 step 5.
+                # Mirrors the Docker slice-4 round-2 P1 contract:
+                # ``_emit_revoke_event`` shared across projection-
+                # unwind + bare-revoke loops; capture-and-continue on
+                # normal destroy, suppress on teardown-failure path.
+                projected_lease_ids: set[str] = {er.lease_id for er in session.active_projections}
+                leases_by_id: dict[str, CredentialLease] = {
+                    lease.lease_id: lease for lease in session.active_leases
+                }
+
                 # Capture the FIRST normal-path audit-emit exception
                 # so we can raise it AFTER every lease got its
-                # revoke attempt per spec §7.2's single-attempt-
-                # per-lease cleanup contract. Round-3 reviewer-P1
-                # propagated immediately, which aborted the loop on
-                # multi-lease destroys (Gap N). Round-4 reviewer-P2
-                # fix: keep attempting + emit for every lease,
-                # remember first emit exception, raise after loop.
-                # Same shape as the Docker counterpart at
-                # ``docker_sibling.py``'s destroy() — cross-backend
-                # invariant pinned by
-                # ``TestCrossBackendDestroyAuditEmitConditionalSuppress``
-                # at ``tests/unit/sandbox/test_credential_lifecycle.py``.
+                # revoke + projection-cleanup attempt per spec §7.2's
+                # single-attempt-per-lease cleanup contract.
                 first_normal_path_emit_exc: BaseException | None = None
 
-                async def _emit_revoke_event(coro: Any) -> None:
+                async def _emit_revoke_event(
+                    coro: Coroutine[Any, Any, Any],
+                ) -> None:
                     nonlocal first_normal_path_emit_exc
                     if teardown_succeeded:
                         try:
@@ -1510,7 +1977,33 @@ class KubernetesPodSandboxBackend:
                         with contextlib.suppress(Exception):
                             await coro
 
+                # Projection LIFO unwind FIRST — uses the shared handler
+                # so projected leases' Secret-delete / cleaned_up /
+                # cleanup_failed / lease_revoked / lease_revoke_failed
+                # audit emits share destroy()'s capture-and-propagate
+                # posture on normal path.
+                for executor_result in reversed(session.active_projections):
+                    paired_lease = leases_by_id.get(executor_result.lease_id)
+                    if paired_lease is None:
+                        continue  # defensive: T21 invariant guarantees pairing
+                    try:
+                        await self._cleanup_projected_credential(
+                            lease=paired_lease,
+                            executor_result=executor_result,
+                            session_id=session.session_id,
+                            emit_handler=_emit_revoke_event,
+                        )
+                    except Exception:
+                        continue
+
+                # Bare-revoke loop now skips leases already revoked
+                # via the projection-unwind loop above to prevent
+                # double-revoke. Defence-in-depth for the legacy
+                # pre-T21 mint-only path (T21's pair guard makes that
+                # path unreachable from create() going forward).
                 for lease in session.active_leases:
+                    if lease.lease_id in projected_lease_ids:
+                        continue
                     try:
                         await self._credential_adapter.revoke_lease(lease.lease_id)
                     except Exception as exc:
@@ -1534,8 +2027,8 @@ class KubernetesPodSandboxBackend:
                     )
 
                 # Normal-path-only: raise the FIRST captured emit
-                # exception AFTER every lease attempted its revoke.
-                # On the teardown-failure path
+                # exception AFTER every lease attempted its revoke +
+                # projection cleanup. On the teardown-failure path
                 # first_normal_path_emit_exc stays None (the inner
                 # suppress swallows emit failures so the original
                 # teardown exception wins).

@@ -53,7 +53,13 @@ from cognic_agentos.sandbox import (
     sandbox_lifecycle_suspended,
     sandbox_lifecycle_woken,
 )
-from cognic_agentos.sandbox.audit import emit_sandbox_event
+from cognic_agentos.sandbox.audit import (
+    emit_sandbox_event,
+    sandbox_lifecycle_credentials_projected,
+    sandbox_lifecycle_credentials_projection_cleaned_up,
+    sandbox_lifecycle_credentials_projection_cleanup_failed,
+    sandbox_lifecycle_credentials_projection_failed,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -799,6 +805,17 @@ class TestSandboxAuditPublicSurfaceExports:
             "sandbox_lifecycle_lease_minted",
             "sandbox_lifecycle_lease_revoked",
             "sandbox_lifecycle_lease_revoke_failed",
+            # Sprint 10.6 T21 — 4 new credential-projection lifecycle
+            # helpers per spec §5.7 + 2 closed-enum Literals (CleanupTarget /
+            # RevokeOutcome). Mirrors the Sprint-10 T9 public-surface
+            # promotion pattern. T21 backend create()/destroy() call sites
+            # depend on the package-root import path.
+            "CleanupTarget",
+            "RevokeOutcome",
+            "sandbox_lifecycle_credentials_projected",
+            "sandbox_lifecycle_credentials_projection_failed",
+            "sandbox_lifecycle_credentials_projection_cleaned_up",
+            "sandbox_lifecycle_credentials_projection_cleanup_failed",
         }
 
         # __all__ membership pin — drift in this set breaks the public
@@ -853,6 +870,26 @@ class TestSandboxAuditPublicSurfaceExports:
         assert (
             sandbox_pkg.sandbox_lifecycle_lease_revoke_failed
             is audit_module.sandbox_lifecycle_lease_revoke_failed
+        )
+        # Sprint 10.6 T21 — 4 new credential-projection lifecycle helpers
+        # + 2 closed-enum Literals.
+        assert sandbox_pkg.CleanupTarget is audit_module.CleanupTarget
+        assert sandbox_pkg.RevokeOutcome is audit_module.RevokeOutcome
+        assert (
+            sandbox_pkg.sandbox_lifecycle_credentials_projected
+            is audit_module.sandbox_lifecycle_credentials_projected
+        )
+        assert (
+            sandbox_pkg.sandbox_lifecycle_credentials_projection_failed
+            is audit_module.sandbox_lifecycle_credentials_projection_failed
+        )
+        assert (
+            sandbox_pkg.sandbox_lifecycle_credentials_projection_cleaned_up
+            is audit_module.sandbox_lifecycle_credentials_projection_cleaned_up
+        )
+        assert (
+            sandbox_pkg.sandbox_lifecycle_credentials_projection_cleanup_failed
+            is audit_module.sandbox_lifecycle_credentials_projection_cleanup_failed
         )
 
 
@@ -1260,4 +1297,530 @@ class TestSandboxLifecycleLeaseRevokeFailedHelper:
         for key, value in built.payload.items():
             assert "vault-token-NEVER-on-chain" not in str(value), (
                 f"token leak via payload key {key!r}: {value!r}"
+            )
+
+
+# ---------------------------------------------------------------------------
+# Sprint 10.6 T21 — credential-projection lifecycle event helpers per
+# spec §5.7. Mirrors the Sprint-10 lease_* helper test pattern: each
+# helper is a thin shim over ``emit_sandbox_event`` carrying the
+# canonical payload-shape contract.
+# ---------------------------------------------------------------------------
+
+
+_EXPECTED_CREDENTIALS_PROJECTED_PAYLOAD_KEYS: frozenset[str] = frozenset(
+    {
+        "logical_name",
+        "vault_path",
+        "tenant_id",
+        "lease_id",
+        "projected_field_count",
+        "purpose_category",
+        "purpose_description",
+        "backend_resource_name",
+        # Added by emit_sandbox_event.
+        "session_id",
+    }
+)
+
+
+class TestSandboxLifecycleCredentialsProjectedHelper:
+    """Pin spec §5.7 ``credentials_projected`` payload contract.
+
+    Emitted per-credential immediately after the per-backend executor
+    succeeds (Docker: bind-mount source ready; K8s: Secret created).
+    Payload base: 9 fields (8 explicit + ``session_id`` via
+    emit_sandbox_event). Examiners trace the per-credential mint→
+    project→cleanup→revoke chain via the per-row ``lease_id`` +
+    ``logical_name`` combination.
+    """
+
+    async def test_emits_with_correct_event_type_and_payload_keys(self) -> None:
+        store = _make_store_mock()
+        lease = _make_sample_lease()
+
+        await sandbox_lifecycle_credentials_projected(
+            store,
+            lease=lease,
+            logical_name="db_main",
+            projected_field_count=2,
+            purpose_category="application_database_read",
+            purpose_description="Read-only application database access.",
+            backend_resource_name="/dev/shm/cognic/abcdef0123456789/0123456789abcdef",
+            trace_id="trace-1",
+            session_id="sess-1",
+        )
+        built = await _drive_emit_and_capture(store)
+
+        assert built.decision_type == "sandbox.lifecycle.credentials_projected"
+        assert built.iso_controls == ("ISO42001.A.6.2.5",)
+        assert built.tenant_id == lease.request.tenant_id == "t-1"
+        assert built.actor_id == lease.request.actor_ref.actor_subject == "user-42"
+        assert built.trace_id == "trace-1"
+        assert set(built.payload.keys()) == _EXPECTED_CREDENTIALS_PROJECTED_PAYLOAD_KEYS
+        assert built.payload["logical_name"] == "db_main"
+        assert built.payload["vault_path"] == "database/creds/payments-read"
+        assert built.payload["tenant_id"] == "t-1"
+        assert built.payload["lease_id"] == "vault/leases/db/abc123"
+        assert built.payload["projected_field_count"] == 2
+        assert built.payload["purpose_category"] == "application_database_read"
+        assert built.payload["purpose_description"] == "Read-only application database access."
+        assert (
+            built.payload["backend_resource_name"]
+            == "/dev/shm/cognic/abcdef0123456789/0123456789abcdef"
+        )
+        assert built.payload["session_id"] == "sess-1"
+
+    async def test_vault_path_derives_from_lease_request_secret_path(self) -> None:
+        """The manifest decl + the Vault lease request both carry
+        vault_path; deriving from lease.request.secret_path pins the
+        single source of truth + closes the contradictory-evidence
+        bug class.
+        """
+        store = _make_store_mock()
+        lease = _make_sample_lease()
+
+        await sandbox_lifecycle_credentials_projected(
+            store,
+            lease=lease,
+            logical_name="db_main",
+            projected_field_count=2,
+            purpose_category="application_database_read",
+            purpose_description="Read-only application database access.",
+            backend_resource_name="/dev/shm/cognic/aaa/bbb",
+            trace_id="trace-1",
+            session_id="sess-1",
+        )
+        built = await _drive_emit_and_capture(store)
+        assert built.payload["vault_path"] == lease.request.secret_path
+
+    async def test_token_contents_never_appear_on_chain_row(self) -> None:
+        store = _make_store_mock()
+        lease = _make_sample_lease()
+
+        await sandbox_lifecycle_credentials_projected(
+            store,
+            lease=lease,
+            logical_name="db_main",
+            projected_field_count=2,
+            purpose_category="application_database_read",
+            purpose_description="Read-only application database access.",
+            backend_resource_name="/dev/shm/cognic/aaa/bbb",
+            trace_id="trace-1",
+            session_id="sess-1",
+        )
+        built = await _drive_emit_and_capture(store)
+        assert "token" not in built.payload
+        for key, value in built.payload.items():
+            assert "vault-token-NEVER-on-chain" not in str(value), (
+                f"token leak via payload key {key!r}: {value!r}"
+            )
+
+
+_EXPECTED_CREDENTIALS_PROJECTION_FAILED_PAYLOAD_KEYS: frozenset[str] = frozenset(
+    {
+        "logical_name",
+        "vault_path",
+        "tenant_id",
+        "lease_id",
+        "reason",
+        "expected_fields",
+        "actual_fields",
+        "extras",
+        "missing",
+        "revoke_outcome",
+        # Added by emit_sandbox_event.
+        "session_id",
+    }
+)
+
+
+class TestSandboxLifecycleCredentialsProjectionFailedHelper:
+    """Pin spec §5.7 ``credentials_projection_failed`` payload contract.
+
+    Emitted per-credential when T18 planner returns ``ProjectionRefused``
+    OR a downstream executor raises. Per spec §5.8 step 3d: AFTER the
+    failed credential's lease is best-effort-revoked. Carries
+    ``revoke_outcome`` ∈ {``revoked``, ``revoke_failed``} so examiners
+    correlate the revoke result with the projection-failure row.
+    """
+
+    async def test_emits_with_correct_event_type_and_payload_keys(self) -> None:
+        store = _make_store_mock()
+        lease = _make_sample_lease()
+
+        await sandbox_lifecycle_credentials_projection_failed(
+            store,
+            lease=lease,
+            logical_name="db_main",
+            reason="sandbox_credential_projection_field_set_mismatch",
+            expected_fields=("password", "username"),
+            actual_fields=("api_key", "username"),
+            extras=("api_key",),
+            missing=("password",),
+            revoke_outcome="revoked",
+            trace_id="trace-1",
+            session_id="sess-1",
+        )
+        built = await _drive_emit_and_capture(store)
+
+        assert built.decision_type == "sandbox.lifecycle.credentials_projection_failed"
+        assert built.iso_controls == ("ISO42001.A.6.2.5",)
+        assert built.tenant_id == "t-1"
+        assert built.actor_id == "user-42"
+        assert set(built.payload.keys()) == _EXPECTED_CREDENTIALS_PROJECTION_FAILED_PAYLOAD_KEYS
+        assert built.payload["reason"] == ("sandbox_credential_projection_field_set_mismatch")
+        # spec §5.7 — lists (not tuples) per Sprint-2 canonical_bytes contract.
+        assert built.payload["expected_fields"] == ["password", "username"]
+        assert built.payload["actual_fields"] == ["api_key", "username"]
+        assert built.payload["extras"] == ["api_key"]
+        assert built.payload["missing"] == ["password"]
+        assert built.payload["revoke_outcome"] == "revoked"
+
+    async def test_revoke_outcome_revoke_failed_carries_through(self) -> None:
+        store = _make_store_mock()
+        lease = _make_sample_lease()
+
+        await sandbox_lifecycle_credentials_projection_failed(
+            store,
+            lease=lease,
+            logical_name="db_main",
+            reason="sandbox_credential_projection_field_set_mismatch",
+            expected_fields=("password", "username"),
+            actual_fields=("username",),
+            extras=(),
+            missing=("password",),
+            revoke_outcome="revoke_failed",
+            trace_id="trace-1",
+            session_id="sess-1",
+        )
+        built = await _drive_emit_and_capture(store)
+        assert built.payload["revoke_outcome"] == "revoke_failed"
+
+    async def test_lists_serialised_as_list_not_tuple(self) -> None:
+        store = _make_store_mock()
+        lease = _make_sample_lease()
+
+        await sandbox_lifecycle_credentials_projection_failed(
+            store,
+            lease=lease,
+            logical_name="db_main",
+            reason="sandbox_credential_projection_field_set_mismatch",
+            expected_fields=("a", "b"),
+            actual_fields=("b",),
+            extras=(),
+            missing=("a",),
+            revoke_outcome="revoked",
+            trace_id="trace-1",
+            session_id="sess-1",
+        )
+        built = await _drive_emit_and_capture(store)
+        for key in ("expected_fields", "actual_fields", "extras", "missing"):
+            assert isinstance(built.payload[key], list), (
+                f"{key} must be list-shaped (not tuple) per canonical_bytes contract"
+            )
+
+    async def test_token_contents_never_appear_on_chain_row(self) -> None:
+        store = _make_store_mock()
+        lease = _make_sample_lease()
+
+        await sandbox_lifecycle_credentials_projection_failed(
+            store,
+            lease=lease,
+            logical_name="db_main",
+            reason="sandbox_credential_projection_field_set_mismatch",
+            expected_fields=("a",),
+            actual_fields=("b",),
+            extras=("b",),
+            missing=("a",),
+            revoke_outcome="revoked",
+            trace_id="trace-1",
+            session_id="sess-1",
+        )
+        built = await _drive_emit_and_capture(store)
+        for key, value in built.payload.items():
+            assert "vault-token-NEVER-on-chain" not in str(value), (
+                f"token leak via payload key {key!r}: {value!r}"
+            )
+
+    async def test_field_value_non_string_diagnostics_carry_through(self) -> None:
+        """Per spec §5.7 + T18 ``ProjectionRefused`` at projection.py:220 —
+        ``field_value_non_string`` refusal carries ``field_name`` +
+        ``actual_type``. Pin both surface in the payload."""
+        store = _make_store_mock()
+        lease = _make_sample_lease()
+
+        await sandbox_lifecycle_credentials_projection_failed(
+            store,
+            lease=lease,
+            logical_name="db_main",
+            reason="sandbox_credential_projection_field_value_non_string",
+            expected_fields=(),
+            actual_fields=(),
+            extras=(),
+            missing=(),
+            revoke_outcome="revoked",
+            field_name="password",
+            actual_type="int",
+            trace_id="trace-1",
+            session_id="sess-1",
+        )
+        built = await _drive_emit_and_capture(store)
+
+        assert built.payload["field_name"] == "password"
+        assert built.payload["actual_type"] == "int"
+        # Other diagnostics NOT in payload (only-non-None contract).
+        for absent_key in ("actual_length", "actual_size", "cap"):
+            assert absent_key not in built.payload, f"{absent_key} must be omitted when None"
+
+    async def test_field_value_empty_string_diagnostics_carry_through(self) -> None:
+        """``field_value_empty_string`` refusal carries ``field_name`` +
+        ``actual_length`` (discriminator: 0 = exact empty; N>0 = N
+        whitespace bytes per T18 + spec §5.6)."""
+        store = _make_store_mock()
+        lease = _make_sample_lease()
+
+        await sandbox_lifecycle_credentials_projection_failed(
+            store,
+            lease=lease,
+            logical_name="db_main",
+            reason="sandbox_credential_projection_field_value_empty_string",
+            expected_fields=(),
+            actual_fields=(),
+            extras=(),
+            missing=(),
+            revoke_outcome="revoked",
+            field_name="username",
+            actual_length=3,  # 3 whitespace bytes
+            trace_id="trace-1",
+            session_id="sess-1",
+        )
+        built = await _drive_emit_and_capture(store)
+
+        assert built.payload["field_name"] == "username"
+        assert built.payload["actual_length"] == 3
+        for absent_key in ("actual_type", "actual_size", "cap"):
+            assert absent_key not in built.payload
+
+    async def test_field_value_size_exceeded_diagnostics_carry_through(self) -> None:
+        """``field_value_size_exceeded`` refusal carries ``field_name`` +
+        ``actual_size`` + ``cap``."""
+        store = _make_store_mock()
+        lease = _make_sample_lease()
+
+        await sandbox_lifecycle_credentials_projection_failed(
+            store,
+            lease=lease,
+            logical_name="db_main",
+            reason="sandbox_credential_projection_field_value_size_exceeded",
+            expected_fields=(),
+            actual_fields=(),
+            extras=(),
+            missing=(),
+            revoke_outcome="revoked",
+            field_name="api_token",
+            actual_size=131072,  # 128 KiB
+            cap=65536,  # 64 KiB
+            trace_id="trace-1",
+            session_id="sess-1",
+        )
+        built = await _drive_emit_and_capture(store)
+
+        assert built.payload["field_name"] == "api_token"
+        assert built.payload["actual_size"] == 131072
+        assert built.payload["cap"] == 65536
+        for absent_key in ("actual_type", "actual_length"):
+            assert absent_key not in built.payload
+
+    async def test_field_set_mismatch_omits_all_per_reason_diagnostics(self) -> None:
+        """``field_set_mismatch`` refusal uses the 4 list-shaped fields
+        (expected/actual/extras/missing) and NONE of the 5 per-reason
+        diagnostics. Pin that all 5 are omitted from the payload."""
+        store = _make_store_mock()
+        lease = _make_sample_lease()
+
+        await sandbox_lifecycle_credentials_projection_failed(
+            store,
+            lease=lease,
+            logical_name="db_main",
+            reason="sandbox_credential_projection_field_set_mismatch",
+            expected_fields=("password", "username"),
+            actual_fields=("api_key", "username"),
+            extras=("api_key",),
+            missing=("password",),
+            revoke_outcome="revoked",
+            trace_id="trace-1",
+            session_id="sess-1",
+        )
+        built = await _drive_emit_and_capture(store)
+
+        for absent_key in (
+            "field_name",
+            "actual_type",
+            "actual_length",
+            "actual_size",
+            "cap",
+        ):
+            assert absent_key not in built.payload, (
+                f"{absent_key} must be omitted for field_set_mismatch"
+            )
+
+
+_EXPECTED_CREDENTIALS_PROJECTION_CLEANED_UP_PAYLOAD_KEYS: frozenset[str] = frozenset(
+    {
+        "logical_name",
+        "tenant_id",
+        "lease_id",
+        "cleanup_target",
+        "backend_resource_name",
+        # Added by emit_sandbox_event.
+        "session_id",
+    }
+)
+
+
+class TestSandboxLifecycleCredentialsProjectionCleanedUpHelper:
+    """Pin spec §5.7 ``credentials_projection_cleaned_up`` payload contract.
+
+    Emitted per-already-projected credential during LIFO unwind
+    (spec §5.8 step 5) AFTER projection-side cleanup succeeded AND
+    BEFORE the per-credential lease revoke. ``cleanup_target``
+    closed-enum 2-value: ``staging_dir`` (Docker) / ``secret_resource``
+    (K8s).
+    """
+
+    async def test_emits_with_correct_event_type_and_payload_keys_docker(self) -> None:
+        store = _make_store_mock()
+        lease = _make_sample_lease()
+
+        await sandbox_lifecycle_credentials_projection_cleaned_up(
+            store,
+            lease=lease,
+            logical_name="db_main",
+            cleanup_target="staging_dir",
+            backend_resource_name="/dev/shm/cognic/aaa/bbb",
+            trace_id="trace-1",
+            session_id="sess-1",
+        )
+        built = await _drive_emit_and_capture(store)
+
+        assert built.decision_type == ("sandbox.lifecycle.credentials_projection_cleaned_up")
+        assert built.iso_controls == ("ISO42001.A.6.2.5",)
+        assert set(built.payload.keys()) == _EXPECTED_CREDENTIALS_PROJECTION_CLEANED_UP_PAYLOAD_KEYS
+        assert built.payload["logical_name"] == "db_main"
+        assert built.payload["cleanup_target"] == "staging_dir"
+        assert built.payload["backend_resource_name"] == "/dev/shm/cognic/aaa/bbb"
+        assert built.payload["lease_id"] == "vault/leases/db/abc123"
+        assert built.payload["session_id"] == "sess-1"
+
+    async def test_cleanup_target_secret_resource_for_k8s(self) -> None:
+        store = _make_store_mock()
+        lease = _make_sample_lease()
+
+        await sandbox_lifecycle_credentials_projection_cleaned_up(
+            store,
+            lease=lease,
+            logical_name="db_main",
+            cleanup_target="secret_resource",
+            backend_resource_name="cognic-cred-0123456789abcdef",
+            trace_id="trace-1",
+            session_id="sess-1",
+        )
+        built = await _drive_emit_and_capture(store)
+        assert built.payload["cleanup_target"] == "secret_resource"
+        assert built.payload["backend_resource_name"] == "cognic-cred-0123456789abcdef"
+
+    async def test_unknown_cleanup_target_raises_value_error(self) -> None:
+        """Per closed-enum contract: ``cleanup_target`` ∈
+        {``staging_dir``, ``secret_resource``}. Fail-loud at the helper
+        boundary to defend the chain-row vocabulary against a future
+        backend leaking an arbitrary cleanup_target.
+        """
+        store = _make_store_mock()
+        lease = _make_sample_lease()
+
+        with pytest.raises(ValueError, match="cleanup_target"):
+            await sandbox_lifecycle_credentials_projection_cleaned_up(
+                store,
+                lease=lease,
+                logical_name="db_main",
+                cleanup_target="unknown_target",  # type: ignore[arg-type]
+                backend_resource_name="resource",
+                trace_id="trace-1",
+                session_id="sess-1",
+            )
+
+
+_EXPECTED_CREDENTIALS_PROJECTION_CLEANUP_FAILED_PAYLOAD_KEYS: frozenset[str] = frozenset(
+    {
+        "logical_name",
+        "tenant_id",
+        "lease_id",
+        "cleanup_target",
+        "backend_resource_name",
+        "partial_state",
+        "error_class",
+        "error",
+        # Added by emit_sandbox_event.
+        "session_id",
+    }
+)
+
+
+class TestSandboxLifecycleCredentialsProjectionCleanupFailedHelper:
+    """Pin spec §5.7 ``credentials_projection_cleanup_failed`` payload contract.
+
+    Emitted when projection cleanup (rmdir / delete_namespaced_secret)
+    raises during LIFO unwind. Per spec §5.8 the failure is best-effort:
+    cleanup-failed does NOT block the subsequent Vault revoke for the
+    same credential or the unwind of the rest of the stack.
+
+    Extends ``cleaned_up`` payload with 3 conditional keys carrying
+    partial-state + error provenance.
+    """
+
+    async def test_emits_with_correct_event_type_and_payload_keys(self) -> None:
+        store = _make_store_mock()
+        lease = _make_sample_lease()
+
+        await sandbox_lifecycle_credentials_projection_cleanup_failed(
+            store,
+            lease=lease,
+            logical_name="db_main",
+            cleanup_target="staging_dir",
+            backend_resource_name="/dev/shm/cognic/aaa/bbb",
+            partial_state="rmdir partially completed",
+            error_class="PermissionError",
+            error="EACCES on /dev/shm/cognic/aaa/bbb",
+            trace_id="trace-1",
+            session_id="sess-1",
+        )
+        built = await _drive_emit_and_capture(store)
+
+        assert built.decision_type == ("sandbox.lifecycle.credentials_projection_cleanup_failed")
+        assert built.iso_controls == ("ISO42001.A.6.2.5",)
+        assert (
+            set(built.payload.keys())
+            == _EXPECTED_CREDENTIALS_PROJECTION_CLEANUP_FAILED_PAYLOAD_KEYS
+        )
+        assert built.payload["partial_state"] == "rmdir partially completed"
+        assert built.payload["error_class"] == "PermissionError"
+        assert built.payload["error"] == "EACCES on /dev/shm/cognic/aaa/bbb"
+
+    async def test_unknown_cleanup_target_raises_value_error(self) -> None:
+        store = _make_store_mock()
+        lease = _make_sample_lease()
+
+        with pytest.raises(ValueError, match="cleanup_target"):
+            await sandbox_lifecycle_credentials_projection_cleanup_failed(
+                store,
+                lease=lease,
+                logical_name="db_main",
+                cleanup_target="bogus",  # type: ignore[arg-type]
+                backend_resource_name="resource",
+                partial_state="x",
+                error_class="X",
+                error="x",
+                trace_id="trace-1",
+                session_id="sess-1",
             )

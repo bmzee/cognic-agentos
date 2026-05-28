@@ -34,8 +34,9 @@ from __future__ import annotations
 
 import typing
 import uuid
+from collections.abc import Sequence
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, Final, Literal
 
 from sqlalchemy.ext.asyncio import AsyncConnection
 
@@ -606,6 +607,291 @@ async def sandbox_lifecycle_lease_revoke_failed(
     return await emit_sandbox_event(
         decision_history_store,
         event="sandbox.lifecycle.lease_revoke_failed",
+        tenant_id=lease.request.tenant_id,
+        actor_id=lease.request.actor_ref.actor_subject,
+        trace_id=trace_id,
+        session_id=session_id,
+        payload=payload,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Sprint 10.6 T21 — credential-projection lifecycle event helpers per
+# spec §5.7. Mirrors the Sprint-10 lease_* helper pattern: each helper
+# wraps ``emit_sandbox_event`` with the canonical payload shape +
+# derives chain-metadata (tenant_id + actor_id + lease_id + vault_path)
+# from the ``CredentialLease`` so the chain row carries one
+# self-consistent evidence snapshot.
+#
+# Why derive: a caller passing both ``lease`` and a separate
+# ``vault_path=`` kwarg could ship a row where the two disagreed (a
+# silent-lie bug class). Derive closes the class by construction.
+#
+# The 4 events landed Literal-only at T17; T21 adds the emit helpers +
+# call sites in ``docker_sibling.py`` / ``kubernetes_pod.py``
+# lifecycle integration.
+# ---------------------------------------------------------------------------
+
+
+#: Closed-enum 2-value ``cleanup_target`` vocabulary per spec §5.7.
+#: ``staging_dir`` = Docker bind-mount source dir under
+#: /dev/shm/cognic/...; ``secret_resource`` = K8s Secret object.
+#: Mirrors the existing ``PurgeReason`` Literal pattern at line 57.
+CleanupTarget = Literal["staging_dir", "secret_resource"]
+_VALID_CLEANUP_TARGETS: Final[frozenset[str]] = frozenset(typing.get_args(CleanupTarget))
+
+#: Closed-enum 2-value ``revoke_outcome`` per spec §5.7
+#: ``credentials_projection_failed`` row.
+RevokeOutcome = Literal["revoked", "revoke_failed"]
+_VALID_REVOKE_OUTCOMES: Final[frozenset[str]] = frozenset(typing.get_args(RevokeOutcome))
+
+
+def _project_credentials_projected_payload_base(
+    *,
+    lease: CredentialLease,
+    logical_name: str,
+) -> dict[str, Any]:
+    """Shared 4-key base for the credentials_projected /
+    credentials_projection_failed / cleaned_up / cleanup_failed
+    helpers — the fields derived from ``CredentialLease`` + the
+    manifest decl's ``logical_name``.
+
+    DELIBERATELY does NOT project ``lease.token`` (defence-in-depth
+    against accidental leak via ``str(lease)`` or
+    ``dataclasses.asdict``; same posture as
+    :func:`_project_lease_evidence_payload`).
+    """
+    return {
+        "logical_name": logical_name,
+        "vault_path": lease.request.secret_path,
+        "tenant_id": lease.request.tenant_id,
+        "lease_id": lease.lease_id,
+    }
+
+
+async def sandbox_lifecycle_credentials_projected(
+    decision_history_store: DecisionHistoryStore,
+    *,
+    lease: CredentialLease,
+    logical_name: str,
+    projected_field_count: int,
+    purpose_category: str,
+    purpose_description: str,
+    backend_resource_name: str,
+    trace_id: str,
+    session_id: str,
+) -> tuple[uuid.UUID, bytes]:
+    """Emit ``sandbox.lifecycle.credentials_projected`` per spec §5.7.
+
+    Called per-credential in ``SandboxBackend.create()``'s
+    mint-then-project loop, IMMEDIATELY after the per-backend executor
+    succeeds (Docker: bind-mount source dir written; K8s: Secret
+    created in the API). NOT batched — examiners trace per-credential.
+
+    Payload: 9 fields (8 base + ``session_id`` via emit_sandbox_event).
+    ``backend_resource_name`` is the Docker opaque-path host_staging_dir
+    OR the K8s Secret name.
+    """
+    payload = _project_credentials_projected_payload_base(lease=lease, logical_name=logical_name)
+    payload["projected_field_count"] = projected_field_count
+    payload["purpose_category"] = purpose_category
+    payload["purpose_description"] = purpose_description
+    payload["backend_resource_name"] = backend_resource_name
+    return await emit_sandbox_event(
+        decision_history_store,
+        event="sandbox.lifecycle.credentials_projected",
+        tenant_id=lease.request.tenant_id,
+        actor_id=lease.request.actor_ref.actor_subject,
+        trace_id=trace_id,
+        session_id=session_id,
+        payload=payload,
+    )
+
+
+async def sandbox_lifecycle_credentials_projection_failed(
+    decision_history_store: DecisionHistoryStore,
+    *,
+    lease: CredentialLease,
+    logical_name: str,
+    reason: str,
+    expected_fields: Sequence[str],
+    actual_fields: Sequence[str],
+    extras: Sequence[str],
+    missing: Sequence[str],
+    revoke_outcome: RevokeOutcome,
+    field_name: str | None = None,
+    actual_type: str | None = None,
+    actual_length: int | None = None,
+    actual_size: int | None = None,
+    cap: int | None = None,
+    trace_id: str,
+    session_id: str,
+) -> tuple[uuid.UUID, bytes]:
+    """Emit ``sandbox.lifecycle.credentials_projection_failed`` per spec §5.7.
+
+    Called per-credential when the T18 planner returns
+    ``ProjectionRefused`` OR a downstream executor I/O raises. Per
+    spec §5.8 step 3d: AFTER the failed credential's lease is
+    best-effort-revoked; ``revoke_outcome`` carries the revoke result.
+
+    ``expected_fields`` / ``actual_fields`` / ``extras`` / ``missing``
+    are caller-supplied per spec §5.7 (alphabetized lists). Tuples
+    accepted at the type-system level but materialised as lists in
+    the payload per the Sprint-2 ``canonical_bytes`` contract (chain
+    payloads use list shape; canonical_bytes rejects tuples).
+
+    ``revoke_outcome`` is a closed-enum 2-value string
+    (``revoked`` / ``revoke_failed``) — fail-loud on unknown values
+    to defend the chain-row vocabulary.
+
+    **Per-reason optional diagnostics** (spec §5.7 "optional
+    diagnostic fields per reason" + T18 ``ProjectionRefused`` at
+    ``sandbox/projection.py:220-254``). Populated per the planner's
+    refusal kind:
+
+      * ``field_value_non_string`` → ``field_name`` + ``actual_type``
+      * ``field_value_empty_string`` → ``field_name`` + ``actual_length``
+        (discriminator: 0 = exact empty; N>0 = N whitespace bytes)
+      * ``field_value_size_exceeded`` → ``field_name`` + ``actual_size``
+        + ``cap``
+      * ``field_set_mismatch`` → uses the 4 list-shaped fields above;
+        these 5 stay ``None``.
+
+    Only non-None diagnostic fields are included in the payload —
+    chain rows stay minimal when a refusal has no per-reason
+    diagnostics, and a future refusal kind that adds new diagnostic
+    fields surfaces as kwarg additions here without churning the
+    rows that don't need them.
+    """
+    if revoke_outcome not in _VALID_REVOKE_OUTCOMES:
+        raise ValueError(
+            f"revoke_outcome must be one of {sorted(_VALID_REVOKE_OUTCOMES)}; "
+            f"got {revoke_outcome!r}"
+        )
+    payload = _project_credentials_projected_payload_base(lease=lease, logical_name=logical_name)
+    payload["reason"] = reason
+    # Materialise as list per canonical_bytes contract; tuple input
+    # for caller ergonomics.
+    payload["expected_fields"] = list(expected_fields)
+    payload["actual_fields"] = list(actual_fields)
+    payload["extras"] = list(extras)
+    payload["missing"] = list(missing)
+    payload["revoke_outcome"] = revoke_outcome
+    # Optional per-reason diagnostics — only included when non-None
+    # per spec §5.7 "optional diagnostic fields per reason".
+    if field_name is not None:
+        payload["field_name"] = field_name
+    if actual_type is not None:
+        payload["actual_type"] = actual_type
+    if actual_length is not None:
+        payload["actual_length"] = actual_length
+    if actual_size is not None:
+        payload["actual_size"] = actual_size
+    if cap is not None:
+        payload["cap"] = cap
+    return await emit_sandbox_event(
+        decision_history_store,
+        event="sandbox.lifecycle.credentials_projection_failed",
+        tenant_id=lease.request.tenant_id,
+        actor_id=lease.request.actor_ref.actor_subject,
+        trace_id=trace_id,
+        session_id=session_id,
+        payload=payload,
+    )
+
+
+async def sandbox_lifecycle_credentials_projection_cleaned_up(
+    decision_history_store: DecisionHistoryStore,
+    *,
+    lease: CredentialLease,
+    logical_name: str,
+    cleanup_target: CleanupTarget,
+    backend_resource_name: str,
+    trace_id: str,
+    session_id: str,
+) -> tuple[uuid.UUID, bytes]:
+    """Emit ``sandbox.lifecycle.credentials_projection_cleaned_up`` per spec §5.7.
+
+    Called per-already-projected credential during LIFO unwind
+    (spec §5.8 step 5) AFTER projection-side cleanup succeeded AND
+    BEFORE the per-credential lease revoke. NOT emitted for the
+    "current failed credential" on the Path-2 unwind — that credential
+    never projected so no projection-side artifact exists to clean up.
+
+    ``cleanup_target`` closed-enum 2-value:
+      * ``staging_dir`` — Docker bind-mount source dir
+      * ``secret_resource`` — K8s Secret object
+    """
+    if cleanup_target not in _VALID_CLEANUP_TARGETS:
+        raise ValueError(
+            f"cleanup_target must be one of {sorted(_VALID_CLEANUP_TARGETS)}; "
+            f"got {cleanup_target!r}"
+        )
+    payload = _project_credentials_projected_payload_base(lease=lease, logical_name=logical_name)
+    # vault_path / projected_field_count / purpose_* are NOT carried on
+    # the cleaned_up row per spec §5.7's narrower 5-key shape — examiners
+    # correlate to the earlier credentials_projected row via lease_id +
+    # logical_name. The narrower shape keeps the cleanup-row payload
+    # focused on the cleanup-specific evidence (target + resource name).
+    del payload["vault_path"]
+    payload["cleanup_target"] = cleanup_target
+    payload["backend_resource_name"] = backend_resource_name
+    return await emit_sandbox_event(
+        decision_history_store,
+        event="sandbox.lifecycle.credentials_projection_cleaned_up",
+        tenant_id=lease.request.tenant_id,
+        actor_id=lease.request.actor_ref.actor_subject,
+        trace_id=trace_id,
+        session_id=session_id,
+        payload=payload,
+    )
+
+
+async def sandbox_lifecycle_credentials_projection_cleanup_failed(
+    decision_history_store: DecisionHistoryStore,
+    *,
+    lease: CredentialLease,
+    logical_name: str,
+    cleanup_target: CleanupTarget,
+    backend_resource_name: str,
+    partial_state: str,
+    error_class: str,
+    error: str,
+    trace_id: str,
+    session_id: str,
+) -> tuple[uuid.UUID, bytes]:
+    """Emit ``sandbox.lifecycle.credentials_projection_cleanup_failed`` per spec §5.7.
+
+    Called when projection cleanup (``cleanup_projection_dir`` /
+    ``delete_namespaced_secret``) raises during LIFO unwind. Per
+    spec §5.8 the failure is best-effort: cleanup-failed does NOT
+    block the subsequent Vault revoke for the same credential or the
+    unwind of the rest of the stack.
+
+    Extends ``cleaned_up`` payload with 3 conditional keys:
+      * ``partial_state`` — operator-supplied description of what was
+        cleaned up so far.
+      * ``error_class`` — Python exception class name.
+      * ``error`` — sanitized exception message (caller-supplied; the
+        helper does not introspect, defending against accidental
+        token leak via ``str(exc)`` when an exception class includes
+        lease bytes in its repr).
+    """
+    if cleanup_target not in _VALID_CLEANUP_TARGETS:
+        raise ValueError(
+            f"cleanup_target must be one of {sorted(_VALID_CLEANUP_TARGETS)}; "
+            f"got {cleanup_target!r}"
+        )
+    payload = _project_credentials_projected_payload_base(lease=lease, logical_name=logical_name)
+    del payload["vault_path"]  # narrower shape per spec §5.7
+    payload["cleanup_target"] = cleanup_target
+    payload["backend_resource_name"] = backend_resource_name
+    payload["partial_state"] = partial_state
+    payload["error_class"] = error_class
+    payload["error"] = error
+    return await emit_sandbox_event(
+        decision_history_store,
+        event="sandbox.lifecycle.credentials_projection_cleanup_failed",
         tenant_id=lease.request.tenant_id,
         actor_id=lease.request.actor_ref.actor_subject,
         trace_id=trace_id,

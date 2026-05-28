@@ -110,6 +110,30 @@ def _make_lease_request(
     )
 
 
+def _make_credential_decl_for_request(
+    req: VaultLeaseRequest,
+    *,
+    logical_name: str = "app_role",
+) -> Any:
+    """Sprint 10.6 T21 — paired ``CredentialDecl`` derived from a
+    ``VaultLeaseRequest`` so the T21 pair-invariant guard passes by
+    construction. Multi-credential tests pass distinct
+    ``logical_name`` so the per-credential audit rows stay
+    disambiguated.
+    """
+    from cognic_agentos.sandbox.projection import CredentialDecl
+
+    return CredentialDecl(
+        logical_name=logical_name,
+        vault_path=req.secret_path,
+        expected_fields=["password", "username"],
+        ttl_s=req.ttl_s,
+        purpose_category="application_database_read",
+        purpose_description="K8s-backend conformance test.",
+        tenant_id=req.tenant_id,
+    )
+
+
 def _make_minted_lease(
     *,
     request: VaultLeaseRequest | None = None,
@@ -221,6 +245,21 @@ def _make_backend(
     backend._create_pod = AsyncMock(return_value=None)  # type: ignore[method-assign]
     backend._wait_for_pod_ready = AsyncMock(return_value=None)  # type: ignore[method-assign]
     backend._teardown_session_state = AsyncMock(return_value=None)  # type: ignore[method-assign]
+    # Sprint 10.6 T21 slice 5+6 — pre-mock K8s preflight + Secret
+    # create/delete seams so the existing mint-mechanics test suite
+    # doesn't need a real K8s cluster.
+    from cognic_agentos.sandbox._preflight import PreflightResult
+
+    backend._collect_preflight_result = AsyncMock(  # type: ignore[method-assign]
+        return_value=PreflightResult(
+            resolved_gid=1000,
+            file_mode=0o440,
+            dir_mode=0o750,
+            dev_escape_downgrade_reason=None,
+        )
+    )
+    backend._k8s_create_namespaced_secret = AsyncMock(return_value=None)  # type: ignore[method-assign]
+    backend._k8s_delete_namespaced_secret = AsyncMock(return_value=None)  # type: ignore[method-assign]
     return backend
 
 
@@ -333,6 +372,7 @@ class TestKubernetesWarmPoolShortCircuit:
                 pack_context=_PACK_CTX,
                 use_warm_pool=True,
                 requires_credentials=(_make_lease_request(),),
+                credential_decls=(_make_credential_decl_for_request(_make_lease_request()),),
             )
 
         warm_pool.checkout.assert_not_called()
@@ -388,6 +428,10 @@ class TestKubernetesMintLoopPostAdmission:
                 pack_context=_PACK_CTX,
                 use_warm_pool=False,
                 requires_credentials=(req_a, req_b),
+                credential_decls=(
+                    _make_credential_decl_for_request(req_a, logical_name="cred_a"),
+                    _make_credential_decl_for_request(req_b, logical_name="cred_b"),
+                ),
             )
 
         assert [r.secret_path for r in adapter.mint_calls] == [
@@ -418,6 +462,7 @@ class TestKubernetesMintLoopPostAdmission:
                 pack_context=_PACK_CTX,
                 use_warm_pool=False,
                 requires_credentials=(req,),
+                credential_decls=(_make_credential_decl_for_request(req),),
             )
 
         admit_mock.assert_awaited_once()
@@ -448,6 +493,7 @@ class TestKubernetesMintLoopPostAdmission:
                 pack_context=_PACK_CTX,
                 use_warm_pool=False,
                 requires_credentials=(_make_lease_request(),),
+                credential_decls=(_make_credential_decl_for_request(_make_lease_request()),),
             )
 
         emitted_types = [
@@ -516,6 +562,7 @@ class TestKubernetesGrantExceedsRequestClosedEnumMapping:
                 pack_context=_PACK_CTX,
                 use_warm_pool=False,
                 requires_credentials=(req,),
+                credential_decls=(_make_credential_decl_for_request(req),),
             )
 
         assert exc_info.value.reason == ("sandbox_credential_lease_ttl_grant_exceeds_request")
@@ -562,6 +609,16 @@ class TestKubernetesMintFailureBestEffortCleanup:
                     _make_lease_request(secret_path="database/creds/a", scope_label="a"),
                     _make_lease_request(secret_path="database/creds/b", scope_label="b"),
                 ),
+                credential_decls=(
+                    _make_credential_decl_for_request(
+                        _make_lease_request(secret_path="database/creds/a", scope_label="a"),
+                        logical_name="cred_a",
+                    ),
+                    _make_credential_decl_for_request(
+                        _make_lease_request(secret_path="database/creds/b", scope_label="b"),
+                        logical_name="cred_b",
+                    ),
+                ),
             )
 
         assert exc_info.value.reason == "sandbox_credential_mint_failed_vault_unavailable"
@@ -595,6 +652,16 @@ class TestKubernetesMintFailureBestEffortCleanup:
                 requires_credentials=(
                     _make_lease_request(secret_path="database/creds/a", scope_label="a"),
                     _make_lease_request(secret_path="database/creds/b", scope_label="b"),
+                ),
+                credential_decls=(
+                    _make_credential_decl_for_request(
+                        _make_lease_request(secret_path="database/creds/a", scope_label="a"),
+                        logical_name="cred_a",
+                    ),
+                    _make_credential_decl_for_request(
+                        _make_lease_request(secret_path="database/creds/b", scope_label="b"),
+                        logical_name="cred_b",
+                    ),
                 ),
             )
 
@@ -768,6 +835,7 @@ class TestKubernetesPreflightProxyRefusalDoesNotMint:
                 pack_context=_PACK_CTX,
                 use_warm_pool=False,
                 requires_credentials=(_make_lease_request(),),
+                credential_decls=(_make_credential_decl_for_request(_make_lease_request()),),
             )
 
         assert exc_info.value.reason == "sandbox_image_digest_not_in_canonical_catalog"
@@ -824,6 +892,7 @@ class TestKubernetesPostMintCleanupOnNonVaultFailure:
                 pack_context=_PACK_CTX,
                 use_warm_pool=False,
                 requires_credentials=(_make_lease_request(),),
+                credential_decls=(_make_credential_decl_for_request(_make_lease_request()),),
             )
 
         assert "lease-emit-fail" in adapter.revoke_calls
@@ -852,6 +921,7 @@ class TestKubernetesPostMintCleanupOnNonVaultFailure:
                 pack_context=_PACK_CTX,
                 use_warm_pool=False,
                 requires_credentials=(_make_lease_request(),),
+                credential_decls=(_make_credential_decl_for_request(_make_lease_request()),),
             )
 
         assert "lease-topology-fail" in adapter.revoke_calls
@@ -883,6 +953,7 @@ class TestKubernetesPostMintCleanupOnNonVaultFailure:
                 pack_context=_PACK_CTX,
                 use_warm_pool=False,
                 requires_credentials=(_make_lease_request(),),
+                credential_decls=(_make_credential_decl_for_request(_make_lease_request()),),
             )
 
         assert "lease-lifecycle-emit-fail" in adapter.revoke_calls
@@ -917,6 +988,7 @@ class TestKubernetesPostMintCleanupOnNonVaultFailure:
                 pack_context=_PACK_CTX,
                 use_warm_pool=False,
                 requires_credentials=(_make_lease_request(),),
+                credential_decls=(_make_credential_decl_for_request(_make_lease_request()),),
             )
 
         assert "lease-cancelled-post-mint" in adapter.revoke_calls
