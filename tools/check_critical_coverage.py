@@ -1876,8 +1876,10 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     # §25 amendment; closes Sprint 10.1 deferred Finding #1). Gate
     # 89 → 90.
     # ------------------------------------------------------------------
-    # ``sandbox/`` is a stop-rule isolation boundary (AGENTS.md L48), so
-    # the projection planner rides the same durable per-file coverage
+    # ``sandbox/`` is a stop-rule isolation boundary (AGENTS.md "Stop
+    # rules" — the "Sandbox or sub-agent enforcement boundaries" rule;
+    # section-relative ref avoids line-number drift), so the projection
+    # planner rides the same durable per-file coverage
     # gate as the other promoted sandbox modules. Promoted at Sprint-10.6
     # Z1c per the spec §5.4 planner/executor split. The gate runs against
     # a FRESH full-suite ``--cov-branch coverage.json`` IN THE SAME
