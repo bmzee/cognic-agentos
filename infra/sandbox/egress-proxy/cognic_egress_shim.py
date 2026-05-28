@@ -120,3 +120,44 @@ def resolve_policy_id(env: dict[str, str]) -> str:
             "to start rather than emit audit records with no session correlation."
         )
     return session_id
+
+
+def render_tinyproxy_conf(*, filter_path: str, log_path: str, port: int = 3128) -> str:
+    """Render the tinyproxy config for the canonical egress proxy.
+
+    Emits exactly the security-relevant directives (operational/hardening
+    directives like User/Timeout/Listen/Allow are added when the conf is wired
+    into the running image, a later task):
+
+    - ``Port <port>`` — the proxy listen port (default 3128, the backend's
+      _PROXY_PORT).
+    - ``FilterDefaultDeny Yes`` — whitelist mode: only hosts in the Filter file
+      are allowed; an empty Filter ⇒ deny-all.
+    - ``Filter "<filter_path>"`` — the anchored-host whitelist (rendered by
+      :func:`render_filter_file`).
+    - ``ConnectPort 443`` — HTTPS tunnels (CONNECT) restricted to port 443.
+    - ``LogFile "<log_path>"`` — where tinyproxy writes its access log.
+    - ``LogLevel Info`` — MANDATORY. At ``LogLevel Connect`` tinyproxy does NOT
+      log the ConnectPort denial, so the audit layer could not derive the
+      ``non_http_connect_target`` outcome. Do NOT lower this to Connect.
+
+    NEVER emits ``FilterURLs`` — URL-mode filtering is HTTPS-blind (HTTPS
+    encrypts the URL); the proxy relies on default domain-mode filtering, which
+    gates the plaintext CONNECT host. Do NOT add FilterURLs.
+
+    ``filter_path`` / ``log_path`` are AgentOS-internal constants set by the
+    entrypoint (not workload-controlled), so no path escaping is performed here.
+    """
+    return (
+        "\n".join(
+            [
+                f"Port {port}",
+                "FilterDefaultDeny Yes",
+                f'Filter "{filter_path}"',
+                "ConnectPort 443",
+                f'LogFile "{log_path}"',
+                "LogLevel Info",
+            ]
+        )
+        + "\n"
+    )
