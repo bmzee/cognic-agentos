@@ -187,6 +187,7 @@ from cognic_agentos.sandbox.protocol import (
     SandboxPolicyViolated,
     SandboxSession,
 )
+from cognic_agentos.sandbox.proxy import render_proxy_config
 
 _LOG = logging.getLogger(__name__)
 
@@ -284,6 +285,17 @@ _PROXY_LOG_PATH: str = "/var/log/cognic-proxy/access.jsonl"
 #: parent directory of ``_PROXY_LOG_PATH`` so a future log-path
 #: move cannot silently desync the mount target.
 _PROXY_LOG_DIR: str = "/var/log/cognic-proxy"
+
+#: Config dir the canonical egress-proxy entrypoint renders + writes
+#: ``tinyproxy.filter`` + ``tinyproxy.conf`` into at startup. MUST equal
+#: the egress-proxy image entrypoint's ``_DEFAULT_CONFIG_DIR``
+#: (``/etc/cognic-proxy``). Under ``readOnlyRootFilesystem=True`` this dir
+#: (part of the image root) is read-only; the T30/T14.1 sidecar-only
+#: emptyDir mount makes EXACTLY this path writable so the proxy can render
+#: its config at boot. Without it the proxy fails with
+#: ``PermissionError: read-only file system`` and is gone when the backend
+#: reads its access log → ``egress_audit_unreadable``.
+_PROXY_CONFIG_DIR: str = "/etc/cognic-proxy"
 
 #: Writable workspace path inside the sandbox container. Wire-public
 #: across the workspace-tar checkpoint mechanism (spec §7.2): ``tar
@@ -459,6 +471,47 @@ def _build_security_context() -> dict[str, Any]:
     }
 
 
+def _proxy_sidecar_env(
+    *,
+    policy: SandboxPolicy,
+    session_id: str,
+) -> dict[str, str]:
+    """Env vars set on the egress-proxy sidecar container.
+
+    Composes T7's ``render_proxy_config(...).to_env()`` which returns
+    ``{"ALLOW_LIST": json.dumps(list[host]), "SESSION_ID": session_id}``.
+    The canonical ``cognic/sandbox-egress-proxy`` entrypoint (T6/T7)
+    reads ALLOW_LIST at boot to build its in-memory allow-list set and
+    REFUSES startup when SESSION_ID is absent; SESSION_ID is stamped on
+    every ``access.jsonl`` proxy_log entry so AgentOS can correlate
+    records with the admitting session.
+
+    Mirrors ``docker_sibling._proxy_sidecar_env`` — both backends derive
+    the sidecar env from the SAME ``render_proxy_config`` source of truth
+    so the two cannot drift (pinned by the test-only cross-backend drift
+    detector at
+    ``tests/unit/sandbox/backends/test_proxy_sidecar_env_cross_backend_drift.py``).
+    Before this helper existed the K8s pod spec launched the sidecar with
+    NO env, so the canonical proxy refused startup and was gone when the
+    exec() green path read the access log — surfacing as
+    ``SandboxPolicyViolated(egress_audit_unreadable)`` (the Z4 live audit
+    failure).
+
+    ``render_proxy_config`` ALSO re-runs T7's defence-in-depth Stage-1
+    per-entry validation, so a code path that bypassed admission could
+    not smuggle a non-HTTP host through to the sidecar.
+
+    Returns the raw two-key dict; the caller (:func:`_build_pod_spec`)
+    converts it to the K8s ``[{"name": k, "value": v}]`` container-env
+    shape — NOT Docker's ``["K=V"]`` string list.
+    """
+    config = render_proxy_config(
+        egress_allow_list=policy.egress_allow_list,
+        session_id=session_id,
+    )
+    return config.to_env()
+
+
 def _build_pod_spec(
     *,
     policy: SandboxPolicy,
@@ -503,6 +556,17 @@ def _build_pod_spec(
         # INTENTIONALLY NO NO_PROXY entry — see
         # test_pod_spec_does_not_set_no_proxy. A NO_PROXY env would
         # create a bypass class the per-host allow-list does not cover.
+    ]
+    # T30/T14.1 — egress-proxy sidecar env. The canonical proxy entrypoint
+    # (T6/T7) REFUSES startup if SESSION_ID is absent + reads ALLOW_LIST at
+    # boot. Without this the sidecar dies immediately and is gone when the
+    # exec() green path reads the access log → egress_audit_unreadable (the
+    # Z4 live audit failure). Docker wires the same env via
+    # _build_proxy_sidecar_container_config; this is the K8s parity fix. K8s
+    # container env is list[{"name","value"}], NOT Docker's ["K=V"] strings.
+    proxy_sidecar_env = [
+        {"name": k, "value": v}
+        for k, v in _proxy_sidecar_env(policy=policy, session_id=session_id).items()
     ]
     # cpu_cores → millicores (K8s canonical form). cpu_cores=0.5 →
     # "500m". Round to nearest integer milli; minimum 1m to avoid
@@ -572,6 +636,25 @@ def _build_pod_spec(
         "mountPath": _PROXY_LOG_DIR,
     }
 
+    # T30/T14.1 — writable proxy CONFIG dir. The canonical egress-proxy
+    # entrypoint renders tinyproxy.filter + tinyproxy.conf into
+    # _PROXY_CONFIG_DIR (/etc/cognic-proxy) at startup; under
+    # readOnlyRootFilesystem=True that dir is read-only without a mount,
+    # so the proxy fails at boot and the backend's access-log read
+    # fail-closes with egress_audit_unreadable. A sidecar-only emptyDir
+    # (made group-writable by the pod fsGroup / OpenShift SCC, exactly
+    # like the proxy-log emptyDir) provides the writable surface. SIDECAR
+    # ONLY — the workload container MUST NOT mount it.
+    _PROXY_CONFIG_VOLUME_NAME = "proxy-config"
+    proxy_config_volume = {
+        "name": _PROXY_CONFIG_VOLUME_NAME,
+        "emptyDir": {},
+    }
+    proxy_config_mount = {
+        "name": _PROXY_CONFIG_VOLUME_NAME,
+        "mountPath": _PROXY_CONFIG_DIR,
+    }
+
     # Sprint 10.6 T20 — credential-projection extension. When
     # ``credential_secrets`` is non-empty, build one (volume, mount)
     # pair per credential and add them to the pod-level ``volumes``
@@ -603,7 +686,7 @@ def _build_pod_spec(
     # namespace range.
     pod_spec_body: dict[str, Any] = {
         "restartPolicy": "Never",
-        "volumes": [workspace_volume, proxy_log_volume, *credential_volumes],
+        "volumes": [workspace_volume, proxy_log_volume, proxy_config_volume, *credential_volumes],
         "containers": [
             {
                 "name": _SANDBOX_CONTAINER_NAME,
@@ -629,8 +712,9 @@ def _build_pod_spec(
             {
                 "name": _PROXY_SIDECAR_CONTAINER_NAME,
                 "image": egress_proxy_image,
+                "env": proxy_sidecar_env,
                 "securityContext": security_context,
-                "volumeMounts": [proxy_log_mount],
+                "volumeMounts": [proxy_log_mount, proxy_config_mount],
                 # No resource caps on the sidecar — the cluster-
                 # wide LimitRange installed by the deployment kit
                 # (Sprint 14) sets sensible defaults; sandbox-

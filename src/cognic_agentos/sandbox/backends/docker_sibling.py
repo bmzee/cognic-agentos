@@ -176,6 +176,17 @@ _PROXY_PORT: int = 3128
 #: chain.
 _PROXY_LOG_PATH: str = "/var/log/cognic-proxy/access.jsonl"
 
+#: Config dir the canonical egress-proxy entrypoint renders + writes
+#: ``tinyproxy.filter`` + ``tinyproxy.conf`` into at startup (MUST equal
+#: the image entrypoint's ``_DEFAULT_CONFIG_DIR`` = ``/etc/cognic-proxy``).
+#: The image chowns it to the proxy's 10002 user, but it is NOT a Docker
+#: ``VOLUME`` — so under ``ReadonlyRootfs=True`` it is read-only. T30/T14.1
+#: mounts a writable tmpfs here (owned by 10002) so the proxy can render
+#: its config at boot; without it the proxy fails with
+#: ``read-only file system`` and is gone when ``_read_proxy_log_from_sidecar``
+#: reads its access log → ``egress_audit_unreadable``.
+_PROXY_CONFIG_DIR: str = "/etc/cognic-proxy"
+
 #: Canonical egress-proxy image. Sprint 8A T6's catalog gate publishes
 #: the cosign-signed digest; per
 #: ``feedback_canonical_artifact_not_oss_substitute`` this is the real
@@ -193,15 +204,30 @@ _CANONICAL_EGRESS_PROXY_IMAGE: str = (
     "eb4ea75b427d0bc42039c68039eec51d6b0d0789400ba5bfdbf470ebec9139aa"
 )
 
-#: Non-root user:group spec-locked for both sandbox + proxy sidecar
-#: containers per spec §7 + ADR-004 amendment ("never run as root
-#: inside the sandbox"). 65534:65534 is the conventional nobody:nogroup
-#: UID/GID on Debian / Alpine / distroless base images. Without
-#: ``User`` set, Docker uses the image default user — commonly root
-#: on stock images — which weakens the sandbox boundary even with
-#: ``CapDrop:[ALL]`` + ``ReadonlyRootfs`` + ``no-new-privileges`` set.
-#: Pinned by ``test_sandbox_and_sidecar_container_configs_run_as_nobody``.
+#: Non-root user:group for the SANDBOX (workload) container per spec §7
+#: + ADR-004 amendment ("never run as root inside the sandbox").
+#: 65534:65534 is the conventional nobody:nogroup UID/GID on Debian /
+#: Alpine / distroless base images. The workload is the untrusted
+#: surface, so it is squashed to nobody. Without ``User`` set, Docker
+#: uses the image default user — commonly root on stock images — which
+#: weakens the sandbox boundary even with ``CapDrop:[ALL]`` +
+#: ``ReadonlyRootfs`` + ``no-new-privileges`` set.
+#: Pinned by ``TestContainerConfigsRunAsNonRoot``.
 _NON_ROOT_USER: str = "65534:65534"
+
+#: Non-root user:group for the PROXY SIDECAR container (T30/T14.1). The
+#: canonical ``cognic/sandbox-egress-proxy`` image builds a dedicated
+#: ``cognicproxy`` account as 10002:10002 and chowns
+#: ``/etc/cognic-proxy`` + ``/var/log/cognic-proxy`` to it. The sidecar
+#: is AgentOS-owned infrastructure, so it runs as its baked identity
+#: (which OWNS those dirs) — NOT the workload's 65534. Forcing it to
+#: 65534 (the pre-T14.1 behaviour) left it unable to write its config /
+#: log dirs under ``ReadonlyRootfs=True`` (10002-owned, mode 0755),
+#: which surfaced as the Z4 ``egress_audit_unreadable`` live-audit
+#: failure. Pinned EXPLICITLY (not read from image metadata) so an
+#: image USER-directive drift cannot silently change the sidecar
+#: identity. Pinned by ``TestContainerConfigsRunAsNonRoot``.
+_PROXY_NON_ROOT_USER: str = "10002:10002"
 
 #: Default cpu_period for the CpuQuota/CpuPeriod cgroup-cap pair
 #: (T10b). 100ms is the kernel-recommended balance between
@@ -682,13 +708,24 @@ def _build_proxy_sidecar_container_config(
     return {
         "Image": proxy_image,
         "Env": env_list,
-        # Non-root per spec §7 + R1 P1.3 reviewer fix (same rationale
-        # as sandbox container).
-        "User": _NON_ROOT_USER,
+        # T30/T14.1 — run as the canonical proxy image's purpose-built
+        # cognicproxy identity (10002:10002), which OWNS /etc/cognic-proxy
+        # + /var/log/cognic-proxy. NOT the workload's 65534 — that user
+        # cannot write those 10002-owned dirs under ReadonlyRootfs=True
+        # (the Z4 egress_audit_unreadable failure class).
+        "User": _PROXY_NON_ROOT_USER,
         "HostConfig": {
             "NetworkMode": internal_net_name,
             "AutoRemove": False,
             "ReadonlyRootfs": True,
+            # T30/T14.1 — writable scratch for the config dir the entrypoint
+            # renders tinyproxy.filter + tinyproxy.conf into at boot. /etc/
+            # cognic-proxy is part of the read-only image root + (unlike
+            # /var/log/cognic-proxy) is NOT a Docker VOLUME, so it needs an
+            # explicit writable mount. tmpfs owned by 10002 lets the proxy
+            # write its config without leaking a named/anon volume (the
+            # sidecar has AutoRemove=False, so an anon volume would leak).
+            "Tmpfs": {_PROXY_CONFIG_DIR: "uid=10002,gid=10002,mode=0755"},
             "CapDrop": ["ALL"],
             "SecurityOpt": ["no-new-privileges:true"],
         },
@@ -2926,7 +2963,10 @@ class DockerSiblingSandboxBackend:
                 cmd=["cat", _PROXY_LOG_PATH],
                 stdout=True,
                 stderr=True,
-                user=_NON_ROOT_USER,
+                # T30/T14.1 — read the proxy's access log as the proxy's own
+                # 10002 identity (it owns the log under /var/log/cognic-proxy),
+                # not the workload's 65534.
+                user=_PROXY_NON_ROOT_USER,
             )
             chunks: list[bytes] = []
             async with sidecar_exec.start(detach=False) as stream:
@@ -3465,8 +3505,10 @@ __all__ = [
     "_CPU_BUDGET_POLL_INTERVAL_S",
     "_CPU_PERIOD_US",
     "_NON_ROOT_USER",
+    "_PROXY_CONFIG_DIR",
     "_PROXY_DNS_NAME",
     "_PROXY_LOG_PATH",
+    "_PROXY_NON_ROOT_USER",
     "_PROXY_PORT",
     "DockerSiblingSandboxBackend",
     "DockerSiblingSession",

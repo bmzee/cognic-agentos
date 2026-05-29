@@ -28,6 +28,7 @@ an OpenShift-incompatible spec.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -41,6 +42,7 @@ pytest.importorskip("kubernetes_asyncio")
 from cognic_agentos.sandbox import PackAdmissionContext, SandboxPolicy
 from cognic_agentos.sandbox.backends.kubernetes_pod import (
     _CANONICAL_EGRESS_PROXY_IMAGE,
+    _PROXY_CONFIG_DIR,
     _PROXY_LOG_DIR,
     _PROXY_LOG_PATH,
     _PROXY_PORT,
@@ -120,6 +122,67 @@ def test_build_pod_spec_injected_proxy_image() -> None:
         egress_proxy_image=ref,
     )
     assert _proxy_container(spec)["image"] == ref
+
+
+class TestPodSpecProxySidecarEnv:
+    """T30/T14.1 — the egress-proxy sidecar container MUST carry the
+    SESSION_ID + ALLOW_LIST env the canonical proxy entrypoint (T6/T7)
+    reads at boot.
+
+    The canonical ``cognic/sandbox-egress-proxy`` entrypoint REFUSES
+    startup when SESSION_ID is absent. Before this fix the K8s pod spec
+    launched the sidecar with no env, so it died at boot and was gone
+    when ``exec()``'s green path read the proxy access log — surfacing
+    as ``SandboxPolicyViolated(egress_audit_unreadable)`` (the Z4 live
+    audit failure). Docker wires this env via
+    ``_build_proxy_sidecar_container_config``; these pins are the K8s
+    parity contract.
+    """
+
+    def test_proxy_sidecar_carries_session_id_and_allow_list_env(self) -> None:
+        spec = _build_default_pod_spec(policy=_POLICY, session_id="s-1", tenant_id="t-1")
+        env = {e["name"]: e["value"] for e in _proxy_container(spec)["env"]}
+        assert env["SESSION_ID"] == "s-1"
+        assert json.loads(env["ALLOW_LIST"]) == ["httpbin.org", "api.example.com"]
+
+    def test_proxy_sidecar_env_uses_k8s_name_value_shape(self) -> None:
+        # K8s container env is list[{"name","value"}], NOT Docker's ["K=V"].
+        spec = _build_default_pod_spec(policy=_POLICY, session_id="s-1", tenant_id="t-1")
+        env = _proxy_container(spec)["env"]
+        assert isinstance(env, list)
+        for entry in env:
+            assert set(entry.keys()) == {"name", "value"}, entry
+
+    def test_proxy_sidecar_session_id_flows_through(self) -> None:
+        spec = _build_default_pod_spec(policy=_POLICY, session_id="s-distinct-99", tenant_id="t-1")
+        env = {e["name"]: e["value"] for e in _proxy_container(spec)["env"]}
+        assert env["SESSION_ID"] == "s-distinct-99"
+
+    def test_proxy_sidecar_empty_allow_list_renders_empty_json_array(self) -> None:
+        policy = SandboxPolicy(
+            cpu_cores=0.5,
+            cpu_time_budget_s=None,
+            memory_mb=256,
+            walltime_s=30.0,
+            runtime_image="cognic/sandbox-runtime-python:v1@sha256:" + "a" * 64,
+            egress_allow_list=(),
+            vault_path=None,
+        )
+        spec = _build_default_pod_spec(policy=policy, session_id="s-1", tenant_id="t-1")
+        env = {e["name"]: e["value"] for e in _proxy_container(spec)["env"]}
+        assert json.loads(env["ALLOW_LIST"]) == []
+
+    def test_proxy_env_not_leaked_onto_sandbox_container(self) -> None:
+        # The fix adds env to the SIDECAR only — the sandbox (workload)
+        # container's env stays HTTP_PROXY/HTTPS_PROXY only; SESSION_ID +
+        # ALLOW_LIST must NOT leak onto the workload container.
+        spec = _build_default_pod_spec(policy=_POLICY, session_id="s-1", tenant_id="t-1")
+        containers = spec["spec"]["containers"]
+        sandbox = next(c for c in containers if c["name"] == _SANDBOX_CONTAINER_NAME)
+        sandbox_env = {e["name"]: e["value"] for e in sandbox["env"]}
+        assert "HTTP_PROXY" in sandbox_env
+        assert "SESSION_ID" not in sandbox_env
+        assert "ALLOW_LIST" not in sandbox_env
 
 
 # ---------------------------------------------------------------------------
@@ -603,6 +666,79 @@ class TestPodSpecProxyLogWritableMount:
         assert _PROXY_LOG_PATH == "/var/log/cognic-proxy/access.jsonl"
 
 
+class TestPodSpecProxyConfigWritableMount:
+    """**T30/T14.1 — writable ``/etc/cognic-proxy`` for the proxy sidecar.**
+
+    The canonical egress-proxy entrypoint renders + writes
+    ``tinyproxy.filter`` + ``tinyproxy.conf`` into ``/etc/cognic-proxy``
+    at startup. Under ``readOnlyRootFilesystem=True`` that dir (part of
+    the image root) is read-only — only ``/var/log/cognic-proxy`` had a
+    writable mount. Without a writable ``/etc/cognic-proxy`` the proxy
+    hits ``PermissionError: read-only file system`` at boot (after the
+    SESSION_ID env fix moves it past the refuse-startup gate) and is gone
+    when the backend reads its access log → ``egress_audit_unreadable``
+    (the Z4 live-audit failure class).
+
+    On OpenShift the emptyDir is made writable by the proxy via the
+    restricted SCC's (or the explicit credential-projection) ``fsGroup``,
+    exactly as the existing ``/var/log`` emptyDir is.
+
+    Same defence-in-depth isolation invariant as the proxy-log mount: the
+    workload-side sandbox container MUST NOT mount the proxy config volume.
+    """
+
+    def _spec(self) -> dict[str, Any]:
+        return _build_default_pod_spec(policy=_POLICY, session_id="s-1", tenant_id="t-1")
+
+    def test_pod_spec_declares_emptydir_volume_for_proxy_config(self) -> None:
+        spec = self._spec()
+        volumes = spec["spec"].get("volumes", [])
+        matches = [v for v in volumes if v.get("name") == "proxy-config"]
+        assert len(matches) == 1, (
+            f"expected exactly one volume named 'proxy-config'; got: {volumes!r}. "
+            "Without this volume the canonical egress-proxy sidecar cannot render "
+            "its tinyproxy config under readOnlyRootFilesystem=True; the proxy "
+            "fails at boot and every green session.exec() fail-closes with "
+            "egress_audit_unreadable."
+        )
+        assert "emptyDir" in matches[0]
+
+    def test_pod_spec_mounts_proxy_config_on_sidecar(self) -> None:
+        spec = self._spec()
+        containers = spec["spec"]["containers"]
+        proxy = next(c for c in containers if c["name"] == _PROXY_SIDECAR_CONTAINER_NAME)
+        mounts = proxy.get("volumeMounts", [])
+        matches = [m for m in mounts if m.get("name") == "proxy-config"]
+        assert len(matches) == 1, (
+            f"proxy sidecar MUST have exactly one volumeMount named 'proxy-config'; got: {mounts!r}"
+        )
+        assert matches[0]["mountPath"] == _PROXY_CONFIG_DIR, (
+            f"proxy-config mountPath MUST equal _PROXY_CONFIG_DIR ({_PROXY_CONFIG_DIR!r}); "
+            f"got: {matches[0]['mountPath']!r}. The entrypoint writes tinyproxy.filter "
+            "+ tinyproxy.conf under this dir; drift leaves it read-only + breaks boot."
+        )
+
+    def test_pod_spec_does_not_leak_proxy_config_onto_sandbox(self) -> None:
+        """**LOAD-BEARING isolation pin.** The sandbox (workload) container
+        MUST NOT mount the proxy config volume — it is AgentOS-owned proxy
+        scratch, not workload surface."""
+        spec = self._spec()
+        containers = spec["spec"]["containers"]
+        sandbox = next(c for c in containers if c["name"] == _SANDBOX_CONTAINER_NAME)
+        leaked = [m for m in sandbox.get("volumeMounts", []) if m.get("name") == "proxy-config"]
+        assert leaked == [], (
+            f"sandbox container MUST NOT mount the proxy-config volume; got: {leaked!r}"
+        )
+
+    def test_proxy_config_dir_constant_matches_entrypoint_default(self) -> None:
+        """Cross-artifact contract — ``_PROXY_CONFIG_DIR`` MUST equal the
+        egress-proxy entrypoint's ``_DEFAULT_CONFIG_DIR`` (/etc/cognic-proxy),
+        the dir the proxy renders its tinyproxy config into. Drift would mount
+        a writable volume at the wrong path + leave the real config dir
+        read-only."""
+        assert _PROXY_CONFIG_DIR == "/etc/cognic-proxy"
+
+
 # ---------------------------------------------------------------------------
 # NetworkPolicy spec — per-session deny-all egress lockdown
 # ---------------------------------------------------------------------------
@@ -758,14 +894,16 @@ class TestBuildPodSpecCredentialMountsBackwardCompat:
         )
 
     def test_default_no_credentials_no_extra_volumes(self) -> None:
-        # No credential mounts → no extra volumes beyond workspace + proxy-log.
+        # No credential mounts → only the base sidecar-infra volumes:
+        # workspace + proxy-log + proxy-config (T30/T14.1 added proxy-config
+        # so the proxy can render its tinyproxy config under read-only root).
         spec = _build_default_pod_spec(
             policy=_POLICY,
             session_id="s-1",
             tenant_id="t-1",
         )
         volume_names = {v["name"] for v in spec["spec"]["volumes"]}
-        assert volume_names == {"workspace", "proxy-log"}
+        assert volume_names == {"workspace", "proxy-log", "proxy-config"}
 
     def test_default_no_credentials_no_extra_volume_mounts(self) -> None:
         # No credential mounts → sandbox container has only workspace mount.
