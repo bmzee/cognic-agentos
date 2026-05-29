@@ -388,13 +388,22 @@ class CanonicalImageCatalog:
         # + bounded timeout via wait_for + SIGKILL + reap on
         # timeout. Mirrors trust_gate.py:574-607 doctrine.
         try:
+            # KEY-BASED verify only. cosign v3 (the pinned platform version,
+            # v3.0.6) treats ``--key`` and the keyless certificate-identity
+            # flags (``--certificate-identity`` / ``--certificate-identity-regexp``)
+            # as MUTUALLY EXCLUSIVE — passing both fails with "exactly one of:
+            # key reference (--key) or certificate identity … must be provided",
+            # which would refuse EVERY signed image at admission step 7. AgentOS
+            # uses key-based cosign trust roots (the per-tenant/canonical public
+            # key), so the correct argv is ``cosign verify --key <pub> <ref>``
+            # with NO keyless flags. Pinned by the argv-shape regression in
+            # test_image_catalog.py + the opt-in real-cosign image-verify proof.
+            # Do NOT re-add --certificate-identity* here.
             proc = await asyncio.create_subprocess_exec(
                 "cosign",
                 "verify",
                 "--key",
                 str(trust_root),
-                "--certificate-identity-regexp",
-                ".*",
                 full_ref,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
