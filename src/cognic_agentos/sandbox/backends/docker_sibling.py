@@ -183,7 +183,15 @@ _PROXY_LOG_PATH: str = "/var/log/cognic-proxy/access.jsonl"
 #: #477 §5 — the default for the ``egress_proxy_image`` constructor
 #: seam: production callers omit the kwarg and get this byte-identical
 #: value.
-_CANONICAL_EGRESS_PROXY_IMAGE: str = "cognic/sandbox-egress-proxy:v1@sha256:" + "d" * 64
+#: T12 — REAL signed canonical egress-proxy ref (replaced the pre-T12 ``"d"*64``
+#: placeholder digest). MUST equal ``Settings.sandbox_canonical_egress_proxy_image``
+#: (launch-selector == catalog-member; a mismatch makes the launched sidecar's
+#: digest a non-canonical member that admission's ``is_canonical`` rejects).
+#: Pinned by ``tests/unit/sandbox/backends/test_canonical_egress_proxy_consistency.py``.
+_CANONICAL_EGRESS_PROXY_IMAGE: str = (
+    "ghcr.io/bmzee/cognic-agentos/sandbox-egress-proxy@sha256:"
+    "eb4ea75b427d0bc42039c68039eec51d6b0d0789400ba5bfdbf470ebec9139aa"
+)
 
 #: Non-root user:group spec-locked for both sandbox + proxy sidecar
 #: containers per spec §7 + ADR-004 amendment ("never run as root

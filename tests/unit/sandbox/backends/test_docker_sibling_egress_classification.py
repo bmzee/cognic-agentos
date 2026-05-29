@@ -43,6 +43,7 @@ from cognic_agentos.sandbox import (
     SandboxPolicyViolated,
 )
 from cognic_agentos.sandbox.backends.docker_sibling import (
+    _CANONICAL_EGRESS_PROXY_IMAGE,
     _PROXY_PORT,
     DockerSiblingSandboxBackend,
     DockerSiblingSession,
@@ -669,7 +670,10 @@ class TestProxyImageGoesThroughCatalogVerification:
         # FULL OCI refs; internal digest-map is built lazily by
         # CanonicalImageCatalog.
         runtime_image = "cognic/sandbox-runtime-python:v1@sha256:" + "a" * 64
-        proxy_image = "cognic/sandbox-egress-proxy:v1@sha256:" + "d" * 64
+        # T12 — the proxy must be the backend's REAL canonical default
+        # (_CANONICAL_EGRESS_PROXY_IMAGE), so create()'s is_canonical gate on the
+        # launched sidecar digest passes (was the "d"*64 placeholder pre-T12).
+        proxy_image = _CANONICAL_EGRESS_PROXY_IMAGE
         trust_root = tmp_path / "cognic-cosign.pub"
         trust_root.write_text("# fixture trust root")
         catalog = CanonicalImageCatalog(

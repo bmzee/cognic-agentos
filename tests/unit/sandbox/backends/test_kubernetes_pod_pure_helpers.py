@@ -320,7 +320,10 @@ class TestBuildPodSpec:
         proxy = next(
             c for c in spec["spec"]["containers"] if c["name"] == _PROXY_SIDECAR_CONTAINER_NAME
         )
-        assert proxy["image"].startswith("cognic/sandbox-egress-proxy:")
+        # T12 — the sidecar image MUST be the canonical egress-proxy ref
+        # (digest-pinned; tracks _CANONICAL_EGRESS_PROXY_IMAGE through the T12
+        # swap rather than a hardcoded registry-path prefix).
+        assert proxy["image"] == _CANONICAL_EGRESS_PROXY_IMAGE
         assert "@sha256:" in proxy["image"]
 
     def test_pod_spec_sandbox_container_sets_http_proxy_to_localhost(self) -> None:
