@@ -1385,3 +1385,74 @@ class TestCatalogProtocolStructuralConformance:
                 f"CanonicalImageCatalog missing CatalogProtocol method {name!r}; "
                 f"admit_policy will fail at first call"
             )
+
+
+# ---------------------------------------------------------------------------
+# Canonical trust root (T10b — Option 1, spec §7.1.1)
+# ---------------------------------------------------------------------------
+
+
+class TestCanonicalTrustRoot:
+    """T10b — canonical AgentOS-signed images verify against a single
+    ``canonical_trust_root`` (the per-tenant ``TrustRootResolver`` stays out of
+    scope, N5). The canonical root MUST NOT leak into the tenant-allow-listed
+    (per-pack) image verification path."""
+
+    @staticmethod
+    def _canonical_root(tmp_path: Path) -> Path:
+        p = tmp_path / "cognic-canonical-cosign.pub"
+        p.write_text("# canonical cosign pubkey (mocked subprocess does not read)\n")
+        return p
+
+    async def test_canonical_image_uses_canonical_trust_root_not_tenant(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """(a) A canonical digest verifies against ``canonical_trust_root`` even
+        for a tenant with NO ``tenant_trust_roots`` entry — it does NOT hit the
+        "no trust root configured" failure, and the argv carries the canonical
+        root (key-based, T8.6 shape)."""
+        canonical_root = self._canonical_root(tmp_path)
+        catalog = CanonicalImageCatalog(
+            canonical_refs=frozenset({_CANONICAL_PYTHON}),
+            tenant_trust_roots={},
+            tenant_allow_lists={},
+            canonical_trust_root=canonical_root,
+        )
+        fake = _make_fake_subprocess(returncode=0)
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake)
+        result = await catalog._run_cosign_verify(_DIGEST_PYTHON, tenant_id="t-anything")
+        assert result.passed is True
+        assert "no trust root configured" not in result.detail
+        argv = list(fake.call_args.args)
+        assert argv == ["cosign", "verify", "--key", str(canonical_root), _CANONICAL_PYTHON]
+
+    async def test_canonical_root_does_not_leak_into_tenant_image_path(
+        self, tmp_path: Path
+    ) -> None:
+        """(b) A tenant-allow-listed NON-canonical image with
+        ``canonical_trust_root`` set but no ``tenant_trust_roots`` entry STILL
+        fails "no trust root configured" — the canonical root must not back
+        tenant images."""
+        canonical_root = self._canonical_root(tmp_path)
+        catalog = CanonicalImageCatalog(
+            canonical_refs=frozenset({_CANONICAL_PYTHON}),
+            tenant_trust_roots={},
+            tenant_allow_lists={"t-pack": frozenset({_TENANT_PACK_IMAGE})},
+            canonical_trust_root=canonical_root,
+        )
+        result = await catalog._run_cosign_verify(_DIGEST_PACK, tenant_id="t-pack")
+        assert result.passed is False
+        assert "no trust root configured" in result.detail
+
+    async def test_omitting_canonical_root_preserves_legacy_no_trust_root(self) -> None:
+        """(c) Backward-compat: default ``canonical_trust_root=None`` → a
+        canonical digest with no canonical root + no tenant root fails exactly as
+        before (today's behaviour, unchanged)."""
+        catalog = CanonicalImageCatalog(
+            canonical_refs=frozenset({_CANONICAL_PYTHON}),
+            tenant_trust_roots={},
+            tenant_allow_lists={},
+        )
+        result = await catalog._run_cosign_verify(_DIGEST_PYTHON, tenant_id="t-anything")
+        assert result.passed is False
+        assert "no trust root configured" in result.detail
