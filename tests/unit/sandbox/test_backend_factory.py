@@ -35,29 +35,38 @@ from cognic_agentos.sandbox.backends.docker_sibling import (
 from cognic_agentos.sandbox.backends.kubernetes_pod import (
     KubernetesPodSandboxBackend,
 )
+from cognic_agentos.sandbox.catalog import CanonicalImageCatalog
 
 
 def _settings(sandbox_backend: str) -> MagicMock:
-    """Minimal Settings mock — only the sandbox_backend field is
-    consumed by the factory; backend construction kwargs are
-    threaded through ``**kwargs``."""
+    """Settings mock — ``sandbox_backend`` drives routing; the three
+    ``sandbox_canonical_*`` fields drive the T11 factory-built
+    CanonicalImageCatalog. Valid digest-pinned refs so the catalog
+    constructs cleanly and the ``@sha256:`` tails make ``is_canonical``
+    assertions deterministic."""
     s = MagicMock()
     s.sandbox_backend = sandbox_backend
+    s.sandbox_canonical_runtime_python_image = (
+        "ghcr.io/cognic/sandbox-runtime-python@sha256:" + "a" * 64
+    )
+    s.sandbox_canonical_egress_proxy_image = (
+        "ghcr.io/cognic/sandbox-egress-proxy@sha256:" + "b" * 64
+    )
+    s.sandbox_canonical_image_trust_root_path = None
     return s
 
 
 def _docker_kwargs() -> dict[str, object]:
     """Minimal kwargs to construct a DockerSiblingSandboxBackend.
 
-    NOTE: ``settings`` is INTENTIONALLY omitted — the factory is
-    AUTHORITATIVE for the backend's ``settings`` kwarg and injects it
-    from its own positional ``settings`` parameter (per docstring).
-    Including ``settings`` here would have papered over the original
-    T8B-c P1 (factory documented injection but did not deliver).
+    NOTE: ``settings`` AND ``image_catalog`` are INTENTIONALLY omitted —
+    the factory is AUTHORITATIVE for both and injects them itself
+    (``settings`` from its positional param; ``image_catalog`` built from
+    the ``sandbox_canonical_*`` Settings at T11). Including either here
+    would paper over the injection contract (cf. the original T8B-c P1).
     """
     return {
         "docker_client": MagicMock(),
-        "image_catalog": MagicMock(),
         "credential_adapter": MagicMock(),
         "rego_engine": MagicMock(),
         "audit_store": MagicMock(),
@@ -69,12 +78,12 @@ def _docker_kwargs() -> dict[str, object]:
 def _k8s_kwargs() -> dict[str, object]:
     """Minimal kwargs to construct a KubernetesPodSandboxBackend.
 
-    Same ``settings``-omitted contract as :func:`_docker_kwargs`.
+    Same ``settings``- AND ``image_catalog``-omitted contract as
+    :func:`_docker_kwargs` (both factory-authoritative).
     """
     return {
         "kube_api_client": MagicMock(),
         "namespace": "test-ns",
-        "image_catalog": MagicMock(),
         "credential_adapter": MagicMock(),
         "rego_engine": MagicMock(),
         "audit_store": MagicMock(),
@@ -107,6 +116,8 @@ class TestBackendFactoryRoutesByLiteral:
         backend = get_backend(routing_settings, **_k8s_kwargs())
         assert isinstance(backend, KubernetesPodSandboxBackend)
         assert backend._settings is routing_settings
+        # T11 — the K8s arm also receives the factory-built canonical catalog.
+        assert isinstance(backend._catalog, CanonicalImageCatalog)
 
     def test_factory_override_wins_over_kwargs_settings(self) -> None:
         """Pin the OVERRIDE semantic per the factory docstring.
@@ -127,6 +138,55 @@ class TestBackendFactoryRoutesByLiteral:
         assert isinstance(backend, DockerSiblingSandboxBackend)
         assert backend._settings is routing_settings
         assert backend._settings is not bogus_kwargs_settings
+
+
+class TestBackendFactoryBuildsCanonicalCatalog:
+    """T11 — the factory builds a real ``CanonicalImageCatalog`` from the T10
+    ``sandbox_canonical_*`` Settings and injects it AUTHORITATIVELY as the
+    backend's ``image_catalog`` (``_catalog``), exactly like ``settings``. This
+    is what wires the canonical refs + the canonical trust root into the runtime
+    trust gate; a caller cannot bypass it via ``**kwargs``."""
+
+    def test_factory_builds_canonical_catalog_from_settings(self) -> None:
+        routing_settings = _settings("docker_sibling")
+        backend = get_backend(routing_settings, **_docker_kwargs())
+        assert isinstance(backend, DockerSiblingSandboxBackend)
+        catalog = backend._catalog
+        assert isinstance(catalog, CanonicalImageCatalog)
+        # Both canonical refs are members (membership keyed by the @sha256: tail).
+        assert catalog.is_canonical("sha256:" + "a" * 64)
+        assert catalog.is_canonical("sha256:" + "b" * 64)
+        # Canonical trust root threaded straight from Settings (None here →
+        # canonical cosign verification fail-closes until the operator sets it).
+        expected_root = routing_settings.sandbox_canonical_image_trust_root_path
+        assert catalog._canonical_trust_root is expected_root
+
+    def test_factory_overwrites_caller_supplied_image_catalog_docker(self) -> None:
+        """A caller threading a DIFFERENT ``image_catalog`` through ``**kwargs``
+        MUST receive the factory-built one — else a caller could bypass
+        canonical-image membership + cosign/SBOM verification (the trust gate).
+        Mirrors the ``settings`` override semantic (docker_sibling arm)."""
+        routing_settings = _settings("docker_sibling")
+        sentinel = MagicMock(name="caller_supplied_catalog")
+        kwargs = _docker_kwargs() | {"image_catalog": sentinel}
+        backend = get_backend(routing_settings, **kwargs)
+        # Literal-class isinstance narrows for mypy so ``_catalog`` (a private
+        # attr the SandboxBackend Protocol does not expose) is type-visible.
+        assert isinstance(backend, DockerSiblingSandboxBackend)
+        assert backend._catalog is not sentinel
+        assert isinstance(backend._catalog, CanonicalImageCatalog)
+
+    def test_factory_overwrites_caller_supplied_image_catalog_k8s(self) -> None:
+        """K8s counterpart — the bypass-close matters equally for
+        kubernetes_pod (the factory accepts ``image_catalog`` for both arms), so
+        the override is pinned on the K8s arm too."""
+        routing_settings = _settings("kubernetes_pod")
+        sentinel = MagicMock(name="caller_supplied_catalog")
+        kwargs = _k8s_kwargs() | {"image_catalog": sentinel}
+        backend = get_backend(routing_settings, **kwargs)
+        assert isinstance(backend, KubernetesPodSandboxBackend)
+        assert backend._catalog is not sentinel
+        assert isinstance(backend._catalog, CanonicalImageCatalog)
 
 
 class TestBackendFactoryRefusesUnknownValue:

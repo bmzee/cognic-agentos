@@ -33,6 +33,10 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+# Always-importable (stdlib + sandbox.protocol only; no backend optional extra),
+# so a module-top import is safe and lets tests patch the construction seam.
+from cognic_agentos.sandbox.catalog import CanonicalImageCatalog
+
 if TYPE_CHECKING:
     from cognic_agentos.core.config import Settings
     from cognic_agentos.sandbox.protocol import SandboxBackend
@@ -79,6 +83,31 @@ def get_backend(settings: Settings, /, **kwargs: Any) -> SandboxBackend:
     # Pinned by ``test_factory_override_wins_over_kwargs_settings`` +
     # ``test_routed_backend_carries_factory_settings_for_*_arm``.
     kwargs["settings"] = settings
+
+    # T11 — build + AUTHORITATIVELY inject the production canonical image
+    # catalog from the T10 ``sandbox_canonical_*`` Settings (Option 1 /
+    # spec §7.1.1). Override is intentional, exactly like ``settings`` above:
+    # the factory is AUTHORITATIVE for the backend's ``image_catalog`` — the
+    # runtime trust gate (canonical-image membership + cosign + SBOM
+    # verification + the canonical trust root). A caller threading a different
+    # catalog through ``**kwargs`` would otherwise bypass that gate; the
+    # override closes the bypass. Pinned by
+    # ``test_factory_builds_canonical_catalog_from_settings`` +
+    # ``test_factory_overwrites_caller_supplied_image_catalog``. T30 scope: only
+    # the two kernel-canonical images; ``tenant_trust_roots`` /
+    # ``tenant_allow_lists`` are empty (per-tenant allow-listed images land via
+    # bank overlays in a later sprint, NOT here).
+    kwargs["image_catalog"] = CanonicalImageCatalog(
+        canonical_refs=frozenset(
+            {
+                settings.sandbox_canonical_runtime_python_image,
+                settings.sandbox_canonical_egress_proxy_image,
+            }
+        ),
+        tenant_trust_roots={},
+        tenant_allow_lists={},
+        canonical_trust_root=settings.sandbox_canonical_image_trust_root_path,
+    )
 
     if settings.sandbox_backend == "docker_sibling":
         try:
