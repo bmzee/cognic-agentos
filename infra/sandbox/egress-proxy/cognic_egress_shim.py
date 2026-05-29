@@ -233,15 +233,21 @@ def _extract_host_port(method: str, target: str) -> tuple[str | None, int | None
     return host, None
 
 
-def parse_tinyproxy_log(log_text: str, *, policy_id: str, year: int | None = None) -> list[dict]:
-    """Map tinyproxy ``LogLevel Info`` output to ProxyAccessRecord-shaped dicts.
+class _LogParser:
+    """Stateful tinyproxy ``LogLevel Info`` → ProxyAccessRecord-dict parser.
 
-    Returns one dict per resolved request, in log order, each with keys
-    host / method / timestamp (tz-aware ISO 8601 str) / policy_id / outcome /
-    refusal_reason.
+    Retains pending-Request state ACROSS :meth:`feed` calls so a ``Request`` line
+    and its outcome line that land in DIFFERENT poll reads still pair correctly.
+    This is the load-bearing reason the parser is a class and not a free
+    function: the T6 incremental tailer feeds only the newly-appended complete
+    lines on each poll, and a straddling request (Request in poll N, Established
+    in poll N+1) must NOT be orphaned. Re-parsing the whole growing log each poll
+    is forbidden (O(n²) + duplicate records); :meth:`feed` is the only public seam
+    and it is purely additive over the persistent ``self._pending`` state.
 
-    Correlation model (stateful, single pass; tinyproxy has no per-request id):
-      * Track pending Requests (FIFO) parsed from ``Request (...)`` lines.
+    Correlation model (single pass per feed; tinyproxy has no per-request id):
+      * Track pending Requests parsed from ``Request (...)`` lines in
+        ``self._pending``.
       * ``Established connection to host "<h>"`` -> ALLOWED. The host is in the
         line; pair to the most-recent pending Request whose host == <h> (for the
         method + request timestamp); remove it.
@@ -259,23 +265,28 @@ def parse_tinyproxy_log(log_text: str, *, policy_id: str, year: int | None = Non
         Request's timestamp for paired records; the refusal line's timestamp for
         an unpaired (sentinel) port-refusal.
     """
-    resolved_year = year if year is not None else datetime.now(UTC).year
 
-    # Pending Requests not yet paired to an outcome line. Each entry carries the
-    # parsed host / method / port / request-timestamp so a later outcome line can
-    # adopt the Request's timestamp (the connection attempt's own clock).
-    pending: list[dict] = []
-    records: list[dict] = []
+    def __init__(self, *, policy_id: str, year: int | None = None) -> None:
+        self._policy_id = policy_id
+        # tinyproxy omits the year from its timestamp; resolve ONCE at
+        # construction so every feed in this parser's lifetime stamps the same
+        # year (matches the free-function semantics of a single resolved year).
+        self._year = year if year is not None else datetime.now(UTC).year
+        # Pending Requests not yet paired to an outcome line, PERSISTED across
+        # feeds. Each entry carries the parsed host / method / port /
+        # request-timestamp so a later outcome line (even in a future feed) can
+        # adopt the Request's timestamp (the connection attempt's own clock).
+        self._pending: list[dict] = []
 
-    def _pop_pending_by_host(host: str) -> dict | None:
+    def _pop_pending_by_host(self, host: str) -> dict | None:
         """Remove + return the MOST-RECENT pending Request whose host == host
         (LIFO over the host match), else None."""
-        for i in range(len(pending) - 1, -1, -1):
-            if pending[i]["host"] == host:
-                return pending.pop(i)
+        for i in range(len(self._pending) - 1, -1, -1):
+            if self._pending[i]["host"] == host:
+                return self._pending.pop(i)
         return None
 
-    def _resolve_pending_connect_by_port(port: int) -> dict | None:
+    def _resolve_pending_connect_by_port(self, port: int) -> dict | None:
         """Resolve a host-less ``Refused CONNECT method on port`` line.
 
         If EXACTLY ONE pending CONNECT has port == port, remove + return it
@@ -284,112 +295,142 @@ def parse_tinyproxy_log(log_text: str, *, policy_id: str, year: int | None = Non
 
         Flushing is load-bearing (P1): a pending CONNECT to a ConnectPort-denied
         port can ONLY ever produce more port-refusals, never an Established /
-        allowed line. Leaving ambiguous entries in ``pending`` would both leak in
-        a long-running tailer AND let a later host-bearing outcome mis-pair
-        against the stale CONNECT. Fail-closed: never guess among multiple."""
+        allowed line. Leaving ambiguous entries in ``self._pending`` would both
+        leak in a long-running tailer AND let a later host-bearing outcome
+        mis-pair against the stale CONNECT. Fail-closed: never guess among
+        multiple."""
         matches = [
-            i for i, p in enumerate(pending) if p["method"] == "CONNECT" and p["port"] == port
+            i for i, p in enumerate(self._pending) if p["method"] == "CONNECT" and p["port"] == port
         ]
         if len(matches) == 1:
-            return pending.pop(matches[0])
+            return self._pending.pop(matches[0])
         # 0 or >1 -> sentinel; flush all same-port matches (reverse index order
         # so earlier pops don't shift later indices) — tainted entries removed.
         for i in reversed(matches):
-            pending.pop(i)
+            self._pending.pop(i)
         return None
 
-    for raw_line in log_text.splitlines():
-        line_match = _LINE_RE.match(raw_line)
-        if line_match is None:
-            continue  # not a tinyproxy Info line -> noise
-        ts_segment = line_match.group("ts")
-        message = line_match.group("msg")
+    def feed(self, text: str) -> list[dict]:
+        """Process the complete lines in ``text``, updating persistent pending
+        state, and return the records resolved by THIS feed (in order).
 
-        req_match = _REQUEST_RE.match(message)
-        if req_match is not None:
-            method = req_match.group("method")
-            host, port = _extract_host_port(method, req_match.group("target"))
-            if host is None:
-                continue  # unparseable target -> drop the Request, do not pend
-            pending.append(
-                {
-                    "host": host,
-                    "method": method,
-                    "port": port,
-                    "timestamp": _parse_ts(ts_segment, year=resolved_year),
-                }
-            )
-            continue
+        Returns one dict per request resolved by this feed, each with keys
+        host / method / timestamp (tz-aware ISO 8601 str) / policy_id / outcome /
+        refusal_reason. A Request line with no outcome yet stays in
+        ``self._pending`` and contributes ZERO records to this feed's return
+        (it will resolve in a later feed when its outcome line arrives)."""
+        resolved_year = self._year
+        records: list[dict] = []
 
-        est_match = _ESTABLISHED_RE.match(message)
-        if est_match is not None:
-            host = est_match.group("host")
-            paired = _pop_pending_by_host(host)
-            method = paired["method"] if paired is not None else UNKNOWN_METHOD_SENTINEL
-            timestamp = (
-                paired["timestamp"]
-                if paired is not None
-                else _parse_ts(ts_segment, year=resolved_year)
-            )
-            records.append(
-                {
-                    "host": host,
-                    "method": method,
-                    "timestamp": timestamp,
-                    "policy_id": policy_id,
-                    "outcome": "allowed",
-                    "refusal_reason": None,
-                }
-            )
-            continue
+        for raw_line in text.splitlines():
+            line_match = _LINE_RE.match(raw_line)
+            if line_match is None:
+                continue  # not a tinyproxy Info line -> noise
+            ts_segment = line_match.group("ts")
+            message = line_match.group("msg")
 
-        filt_match = _FILTERED_RE.match(message)
-        if filt_match is not None:
-            host = filt_match.group("host")
-            paired = _pop_pending_by_host(host)
-            method = paired["method"] if paired is not None else UNKNOWN_METHOD_SENTINEL
-            timestamp = (
-                paired["timestamp"]
-                if paired is not None
-                else _parse_ts(ts_segment, year=resolved_year)
-            )
-            records.append(
-                {
-                    "host": host,
-                    "method": method,
-                    "timestamp": timestamp,
-                    "policy_id": policy_id,
-                    "outcome": "refused",
-                    "refusal_reason": "not_in_allow_list",
-                }
-            )
-            continue
+            req_match = _REQUEST_RE.match(message)
+            if req_match is not None:
+                method = req_match.group("method")
+                host, port = _extract_host_port(method, req_match.group("target"))
+                if host is None:
+                    continue  # unparseable target -> drop the Request, do not pend
+                self._pending.append(
+                    {
+                        "host": host,
+                        "method": method,
+                        "port": port,
+                        "timestamp": _parse_ts(ts_segment, year=resolved_year),
+                    }
+                )
+                continue
 
-        port_match = _BAD_PORT_RE.match(message)
-        if port_match is not None:
-            port = int(port_match.group("port"))
-            paired = _resolve_pending_connect_by_port(port)
-            if paired is not None:
-                host = paired["host"]
-                timestamp = paired["timestamp"]
-            else:
-                # Zero OR >1 pending same-port CONNECT -> fail-closed sentinel;
-                # the refusal line carries no host, so use its own timestamp.
-                host = AMBIGUOUS_HOST_SENTINEL
-                timestamp = _parse_ts(ts_segment, year=resolved_year)
-            records.append(
-                {
-                    "host": host,
-                    "method": "CONNECT",
-                    "timestamp": timestamp,
-                    "policy_id": policy_id,
-                    "outcome": "refused",
-                    "refusal_reason": "non_http_connect_target",
-                }
-            )
-            continue
+            est_match = _ESTABLISHED_RE.match(message)
+            if est_match is not None:
+                host = est_match.group("host")
+                paired = self._pop_pending_by_host(host)
+                method = paired["method"] if paired is not None else UNKNOWN_METHOD_SENTINEL
+                timestamp = (
+                    paired["timestamp"]
+                    if paired is not None
+                    else _parse_ts(ts_segment, year=resolved_year)
+                )
+                records.append(
+                    {
+                        "host": host,
+                        "method": method,
+                        "timestamp": timestamp,
+                        "policy_id": self._policy_id,
+                        "outcome": "allowed",
+                        "refusal_reason": None,
+                    }
+                )
+                continue
 
-        # Matched the Info-line prefix but none of the four relevant messages
-        # (e.g. "No upstream proxy for ...") -> noise.
+            filt_match = _FILTERED_RE.match(message)
+            if filt_match is not None:
+                host = filt_match.group("host")
+                paired = self._pop_pending_by_host(host)
+                method = paired["method"] if paired is not None else UNKNOWN_METHOD_SENTINEL
+                timestamp = (
+                    paired["timestamp"]
+                    if paired is not None
+                    else _parse_ts(ts_segment, year=resolved_year)
+                )
+                records.append(
+                    {
+                        "host": host,
+                        "method": method,
+                        "timestamp": timestamp,
+                        "policy_id": self._policy_id,
+                        "outcome": "refused",
+                        "refusal_reason": "not_in_allow_list",
+                    }
+                )
+                continue
 
-    return records
+            port_match = _BAD_PORT_RE.match(message)
+            if port_match is not None:
+                port = int(port_match.group("port"))
+                paired = self._resolve_pending_connect_by_port(port)
+                if paired is not None:
+                    host = paired["host"]
+                    timestamp = paired["timestamp"]
+                else:
+                    # Zero OR >1 pending same-port CONNECT -> fail-closed sentinel;
+                    # the refusal line carries no host, so use its own timestamp.
+                    host = AMBIGUOUS_HOST_SENTINEL
+                    timestamp = _parse_ts(ts_segment, year=resolved_year)
+                records.append(
+                    {
+                        "host": host,
+                        "method": "CONNECT",
+                        "timestamp": timestamp,
+                        "policy_id": self._policy_id,
+                        "outcome": "refused",
+                        "refusal_reason": "non_http_connect_target",
+                    }
+                )
+                continue
+
+            # Matched the Info-line prefix but none of the four relevant messages
+            # (e.g. "No upstream proxy for ...") -> noise.
+
+        return records
+
+
+def parse_tinyproxy_log(log_text: str, *, policy_id: str, year: int | None = None) -> list[dict]:
+    """Map tinyproxy ``LogLevel Info`` output to ProxyAccessRecord-shaped dicts.
+
+    Stateless one-shot wrapper over :class:`_LogParser`: constructs a fresh
+    parser and feeds the whole ``log_text`` in a single call, so a Request and
+    its outcome must both be present in ``log_text`` to pair. The stateful
+    cross-feed pairing the T6 tailer relies on lives in :class:`_LogParser`;
+    this function's signature + behaviour are PRESERVED exactly for the existing
+    callers (the T5a record-emit tests + the backend wire oracle).
+
+    Returns one dict per resolved request, in log order, each with keys
+    host / method / timestamp (tz-aware ISO 8601 str) / policy_id / outcome /
+    refusal_reason.
+    """
+    return _LogParser(policy_id=policy_id, year=year).feed(log_text)
