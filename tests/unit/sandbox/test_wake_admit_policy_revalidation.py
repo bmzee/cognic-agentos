@@ -424,11 +424,16 @@ class TestAdmitPolicyRefusalsRewrapAtWakeTime:
 
     @pytest.mark.asyncio
     async def test_sbom_check_failed_rewraps(self, store: CheckpointStore) -> None:
-        """admit_policy step 8 — SBOM refuse from catalog."""
+        """admit_policy step 8 — SBOM refuse from catalog.
+
+        T8.5: step 8 (SBOM license gate) runs for tenant-allow-listed images
+        only — canonical platform images are carved out (ADR-016). Drive the
+        wake-time re-validation refusal on the tenant path, the only path where
+        step 8 executes."""
         await _persist_checkpoint_with_policy(store, session_id="sess-sbom")
         catalog = MagicMock()
-        catalog.is_canonical.return_value = True
-        catalog.is_tenant_allow_listed.return_value = False
+        catalog.is_canonical.return_value = False
+        catalog.is_tenant_allow_listed.return_value = True
         catalog.verify_cosign_or_refuse = AsyncMock(return_value=None)
         catalog.verify_sbom_policy_or_refuse = AsyncMock(
             side_effect=SandboxLifecycleRefused(
