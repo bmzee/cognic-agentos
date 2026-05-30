@@ -49,9 +49,12 @@ _GATE_TOOL_PATH = _REPO_ROOT / "tools" / "check_critical_coverage.py"
 #: + 1 Sprint-10.5b Z1b SchedulerPolicy Rego eval glue module
 #: (core/scheduler/policy per ADR-022 + spec §4.8) = 89;
 #: + 1 Sprint-10.6 Z1c workload credential projection planner
-#: (sandbox/projection per ADR-004 §25 amendment + spec §5.4) = 90).
+#: (sandbox/projection per ADR-004 §25 amendment + spec §5.4) = 90;
+#: + 4 Sprint-11 Z1a sub-agent primitive 11a modules
+#: (subagent/_types + subagent/policy + subagent/audit +
+#: subagent/audit_verifier per ADR-005) = 94).
 #: Bump this in lockstep with any deliberate ``_CRITICAL_FILES`` change.
-_EXPECTED_ENTRY_COUNT = 90
+_EXPECTED_ENTRY_COUNT = 94
 
 #: The 5 modules Sprint 7B.3 promoted to the durable gate, each by its
 #: own landing commit (T3-T6 panels + T7 composer). All ride the
@@ -486,3 +489,25 @@ def test_sprint_10_off_gate_modules_absent(gate_tool: ModuleType, off_gate_modul
     promotion)."""
     paths = {path for path, _line, _branch in gate_tool._CRITICAL_FILES}
     assert off_gate_module not in paths
+
+
+_SPRINT_11_GATE_MODULES = (
+    "src/cognic_agentos/subagent/_types.py",
+    "src/cognic_agentos/subagent/policy.py",
+    "src/cognic_agentos/subagent/audit.py",
+    "src/cognic_agentos/subagent/audit_verifier.py",
+)
+
+
+def test_sprint_11_modules_present_with_standard_floors(
+    gate_tool: ModuleType,
+) -> None:
+    """The 4 Sprint 11 Z1a sub-agent primitive 11a promotions are on the
+    gate at the 95/90 floor (``subagent/__init__.py`` stays off-gate as a
+    re-export marker per Doctrine F)."""
+    by_path = {path: (line, branch) for path, line, branch in gate_tool._CRITICAL_FILES}
+    for module in _SPRINT_11_GATE_MODULES:
+        assert module in by_path, f"Sprint 11 module missing from gate: {module}"
+        assert by_path[module] == (0.95, 0.90), (
+            f"{module} must ride the standard 95%-line / 90%-branch floor"
+        )
