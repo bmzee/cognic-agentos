@@ -3,6 +3,7 @@ boundary (privilege de-escalation). The SubAgent facade lands in 11b."""
 
 from __future__ import annotations
 
+from cognic_agentos.subagent._facade import SubAgent
 from cognic_agentos.subagent._types import (
     SUBAGENT_ISO_CONTROLS,
     ChildResult,
@@ -23,6 +24,7 @@ __all__ = [
     "ChildResult",
     "ChildRunContext",
     "ChildRunner",
+    "SubAgent",
     "SubAgentAuditEvent",
     "SubAgentBudgetExhausted",
     "SubAgentChildQuotaZero",
