@@ -1870,6 +1870,49 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     #     finite timeout) lockstep-pinned with `core/policy/engine.py`
     #     OPAEngine via a test-only drift detector.
     ("src/cognic_agentos/core/scheduler/policy.py", 0.95, 0.90),
+    #
+    # ------------------------------------------------------------------
+    # Sprint 10.6 Z1c — workload credential projection planner (ADR-004
+    # §25 amendment; closes Sprint 10.1 deferred Finding #1). Gate
+    # 89 → 90.
+    # ------------------------------------------------------------------
+    # ``sandbox/`` is a stop-rule isolation boundary (AGENTS.md "Stop
+    # rules" — the "Sandbox or sub-agent enforcement boundaries" rule;
+    # section-relative ref avoids line-number drift), so the projection
+    # planner rides the same durable per-file coverage
+    # gate as the other promoted sandbox modules. Promoted at Sprint-10.6
+    # Z1c per the spec §5.4 planner/executor split. The gate runs against
+    # a FRESH full-suite ``--cov-branch coverage.json`` IN THE SAME
+    # COMMIT as this ``_CRITICAL_FILES`` extension — NOT just the
+    # count-guard ``_EXPECTED_ENTRY_COUNT`` bump — per
+    # ``feedback_verify_promotion_meets_floor_at_promotion_time``. The
+    # 2026-05-28 promotion run found the module at 100% line / 100%
+    # branch on fresh data (``tests/unit/sandbox/test_projection.py``,
+    # 39 tests), so no same-commit negative-path repair was required.
+    #
+    # Module rationale:
+    #   * ``sandbox/projection.py`` — the per-credential pure-functional
+    #     planner ``compute_projection_plan(*, lease, manifest_decl)``
+    #     per spec §5.4 (NO ``resolved_workload_gid`` input — the backend
+    #     executors own chgrp (Docker) / fsGroup (K8s)). Owns the
+    #     ``CredentialDecl`` manifest-declaration dataclass + the
+    #     ``ProjectionPlan`` / ``ProjectionRefused`` result types + the
+    #     field-set-mismatch + field-value (non-string / empty / size)
+    #     refusal axes whose closed-enum reasons are the wire-equal
+    #     subset of ``SandboxRefusalReason`` carried on the
+    #     ``credentials_projection_failed`` chain row per spec §5.7. A
+    #     bug here lets malformed credential material reach the backend
+    #     executor (Docker bind-mount / K8s Secret) — the substantive
+    #     credential-projection gate, not thin wiring.
+    #
+    # NOTE on the live proofs: this Z1c commit is a COVERAGE-GATE
+    # promotion only. The Z3 (Docker) + Z4 (K8s) live integration proofs
+    # at ``tests/integration/sandbox/test_z{3,4}_*_credential_projection.py``
+    # are env-gated + remain DEFERRED to the operator's pre-merge audit
+    # (no live Vault / Docker / K8s in CI). The "sprint cannot close
+    # until Z3 + Z4 pass" gate is a closeout / PR-merge concern, NOT a
+    # claim made by this coverage promotion.
+    ("src/cognic_agentos/sandbox/projection.py", 0.95, 0.90),
 )
 
 

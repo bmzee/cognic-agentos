@@ -47,9 +47,11 @@ _GATE_TOOL_PATH = _REPO_ROOT / "tools" / "check_critical_coverage.py"
 #: (core/scheduler/engine + core/scheduler/queue + core/scheduler/storage
 #: per ADR-022 + spec §6.1) = 88;
 #: + 1 Sprint-10.5b Z1b SchedulerPolicy Rego eval glue module
-#: (core/scheduler/policy per ADR-022 + spec §4.8) = 89).
+#: (core/scheduler/policy per ADR-022 + spec §4.8) = 89;
+#: + 1 Sprint-10.6 Z1c workload credential projection planner
+#: (sandbox/projection per ADR-004 §25 amendment + spec §5.4) = 90).
 #: Bump this in lockstep with any deliberate ``_CRITICAL_FILES`` change.
-_EXPECTED_ENTRY_COUNT = 89
+_EXPECTED_ENTRY_COUNT = 90
 
 #: The 5 modules Sprint 7B.3 promoted to the durable gate, each by its
 #: own landing commit (T3-T6 panels + T7 composer). All ride the

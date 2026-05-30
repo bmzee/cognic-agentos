@@ -8,8 +8,15 @@ thin wiring.
 Per spec §9 (catalog table) + ADR-016 amendment ("AgentOS-published
 runtime artifacts" subsection) + Sprint-4 trust-gate cosign pattern
 at ``protocol/trust_gate.py``. The cosign subprocess invocation
-mirrors the Sprint-4 trust-gate doctrine (per-tenant trust root +
-``cosign verify --key`` + fail-closed on any non-zero exit).
+mirrors the Sprint-4 trust-gate doctrine (``cosign verify --key`` +
+fail-closed on any non-zero exit). Trust-root resolution is SPLIT by
+image class (T10b, Option 1, spec §7.1.1): a **canonical** AgentOS-
+signed image verifies against the single ``canonical_trust_root``;
+a **tenant-allow-listed** (per-pack) image verifies against its
+``tenant_trust_roots[tenant_id]`` entry. The canonical root never
+backs a tenant image (and vice-versa). The verify argv is key-based
+ONLY — no keyless ``--certificate-identity*`` flags, which cosign v3
+rejects alongside ``--key`` (T8.6).
 
 The 4-image canonical catalog is the AgentOS-published runtime
 artifact set; bank deployments may EXTEND with per-tenant pack
@@ -232,6 +239,7 @@ class CanonicalImageCatalog:
         canonical_refs: frozenset[str],
         tenant_trust_roots: dict[str, Path],
         tenant_allow_lists: dict[str, frozenset[str]],
+        canonical_trust_root: Path | None = None,
         tenant_license_policies: dict[str, dict[str, frozenset[str]]] | None = None,
         cosign_verify_timeout_s: float = 60.0,
         syft_inspect_timeout_s: float = 120.0,
@@ -251,6 +259,11 @@ class CanonicalImageCatalog:
             ref.rsplit("@", 1)[1] for ref in canonical_refs if "@" in ref
         )
         self._tenant_trust_roots = tenant_trust_roots
+        # T10b (Option 1, spec §7.1.1): the single canonical cosign trust root
+        # for AgentOS-signed canonical platform images. ``None`` preserves the
+        # legacy per-tenant-only behaviour. The per-tenant ``TrustRootResolver``
+        # stays out of scope (N5).
+        self._canonical_trust_root = canonical_trust_root
         self._tenant_allow_lists = tenant_allow_lists
         # Derived per-tenant digest sets — same fast-lookup pattern.
         self._tenant_allow_listed_digests: dict[str, frozenset[str]] = {
@@ -365,7 +378,16 @@ class CanonicalImageCatalog:
             subprocess non-zero exit (stderr in detail).
         """
 
-        trust_root = self._tenant_trust_roots.get(tenant_id)
+        # T10b (Option 1, spec §7.1.1): canonical AgentOS-signed images verify
+        # against the single canonical trust root; only NON-canonical
+        # (tenant-allow-listed) images fall through to the per-tenant trust root.
+        # The canonical root MUST NOT back tenant images — pinned by
+        # test_canonical_root_does_not_leak_into_tenant_image_path.
+        trust_root: Path | None
+        if self._canonical_trust_root is not None and image_digest in self._canonical_digests:
+            trust_root = self._canonical_trust_root
+        else:
+            trust_root = self._tenant_trust_roots.get(tenant_id)
         if trust_root is None:
             return CosignVerifyResult(
                 passed=False,
@@ -388,13 +410,22 @@ class CanonicalImageCatalog:
         # + bounded timeout via wait_for + SIGKILL + reap on
         # timeout. Mirrors trust_gate.py:574-607 doctrine.
         try:
+            # KEY-BASED verify only. cosign v3 (the pinned platform version,
+            # v3.0.6) treats ``--key`` and the keyless certificate-identity
+            # flags (``--certificate-identity`` / ``--certificate-identity-regexp``)
+            # as MUTUALLY EXCLUSIVE — passing both fails with "exactly one of:
+            # key reference (--key) or certificate identity … must be provided",
+            # which would refuse EVERY signed image at admission step 7. AgentOS
+            # uses key-based cosign trust roots (the per-tenant/canonical public
+            # key), so the correct argv is ``cosign verify --key <pub> <ref>``
+            # with NO keyless flags. Pinned by the argv-shape regression in
+            # test_image_catalog.py + the opt-in real-cosign image-verify proof.
+            # Do NOT re-add --certificate-identity* here.
             proc = await asyncio.create_subprocess_exec(
                 "cosign",
                 "verify",
                 "--key",
                 str(trust_root),
-                "--certificate-identity-regexp",
-                ".*",
                 full_ref,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,

@@ -144,6 +144,9 @@ async def test_injected_proxy_image_digest_goes_through_k8s_catalog_gate(
     monkeypatch.setattr(backend, "_create_network_policy", AsyncMock())
     monkeypatch.setattr(backend, "_create_pod", AsyncMock())
     monkeypatch.setattr(backend, "_wait_for_pod_ready", AsyncMock())
+    # T30/T14.2 — create() now also gates on the proxy-log readiness probe;
+    # stub it so this seam test doesn't poll-then-timeout on the mock backend.
+    monkeypatch.setattr(backend, "_wait_for_proxy_audit_log_ready", AsyncMock())
     monkeypatch.setattr(backend, "_emit_lifecycle_created", AsyncMock())
 
     actor = MagicMock(subject="op-1")

@@ -587,6 +587,189 @@ async def _trigger_sandbox_credential_lease_ttl_grant_exceeds_request(
     yield
 
 
+# Sprint 10.6 T16 — 9 credential-projection trigger envelopes per
+# spec §5.1.
+#
+# **All 9 are honest no-op registration envelopes.** The conformance
+# registry at ``TRIGGERS_BY_REASON`` below pins SET MEMBERSHIP between
+# the wire-public ``SandboxRefusalReason`` Literal and the registry's
+# keyset (see the doctrine at
+# ``tests/conformance/sandbox/test_refusal_taxonomy.py:55-62``); it is
+# NOT a behaviour-fan-out harness. Per-value runtime coverage lives in:
+#
+#   - The T18 ``sandbox/projection.py`` planner unit suite (when T18
+#     lands later in Sprint 10.6) — for the 4 planner-emitted values
+#     (``..._field_set_mismatch`` + ``..._field_value_non_string`` +
+#     ``..._field_value_empty_string`` + ``..._field_value_size_exceeded``).
+#   - The T21 lifecycle integration cross-backend conformance suite
+#     (when T21 lands) — for the 5 lifecycle-emitted values
+#     (``..._staging_path_not_tmpfs`` + ``..._workload_gid_unknown`` +
+#     ``..._image_gid_manifest_mismatch`` +
+#     ``..._image_user_directive_non_numeric`` +
+#     ``..._root_workload_refused``).
+#
+# T16 wires Literal + registry only — no behaviour, no runtime claim.
+
+
+@asynccontextmanager
+async def _trigger_sandbox_credential_projection_field_set_mismatch(
+    backend: Any,
+    ctx: Any,
+) -> AsyncIterator[None]:
+    """Trigger envelope for the projection-time field-set-mismatch
+    refusal — raised by Sprint 10.6 T18
+    ``sandbox/projection.py::compute_projection_plan(...)`` when the
+    Vault lease response's ``actual_fields`` tuple differs from the
+    manifest's declared ``expected_fields`` (alphabetised; ``extras``
+    + ``missing`` reported in the projection-failed payload per
+    spec §4.4).
+
+    No-op registration envelope (same pattern as the Sprint 8.5
+    wake-time triggers + the Sprint 10 mint-failure triggers above).
+    Behaviour coverage will live at the T18 planner unit suite when
+    that task lands.
+    """
+    yield
+
+
+@asynccontextmanager
+async def _trigger_sandbox_credential_staging_path_not_tmpfs(
+    backend: Any,
+    ctx: Any,
+) -> AsyncIterator[None]:
+    """Trigger envelope for the substrate-preflight tmpfs-check
+    refusal — raised by Sprint 10.6 T21 lifecycle integration when
+    the per-backend executor detects that the credential staging
+    path (``/dev/shm/...`` on Docker; the projected-secret mount
+    on K8s) is NOT backed by tmpfs per spec §5.8 step 2.
+
+    No-op registration envelope. Behaviour coverage at the T21
+    cross-backend conformance suite when that task lands.
+    """
+    yield
+
+
+@asynccontextmanager
+async def _trigger_sandbox_credential_projection_workload_gid_unknown(
+    backend: Any,
+    ctx: Any,
+) -> AsyncIterator[None]:
+    """Trigger envelope for the workload-GID resolution refusal —
+    raised by Sprint 10.6 T21 lifecycle integration when the runtime
+    image's USER directive cannot be resolved to a numeric GID
+    per spec §5.8 step 2 (preflight) + spec §5.1 (manifest contract).
+
+    No-op registration envelope. Behaviour coverage at the T21
+    cross-backend conformance suite when that task lands.
+    """
+    yield
+
+
+@asynccontextmanager
+async def _trigger_sandbox_credential_projection_image_gid_manifest_mismatch(
+    backend: Any,
+    ctx: Any,
+) -> AsyncIterator[None]:
+    """Trigger envelope for the image-vs-manifest GID-mismatch
+    refusal — raised by Sprint 10.6 T21 lifecycle integration when
+    the runtime image's resolved USER GID differs from the manifest's
+    declared ``[runtime].expected_workload_gid`` per spec §5.8 step 2.
+
+    No-op registration envelope. Behaviour coverage at the T21
+    cross-backend conformance suite when that task lands.
+    """
+    yield
+
+
+@asynccontextmanager
+async def _trigger_sandbox_credential_projection_image_user_directive_non_numeric(
+    backend: Any,
+    ctx: Any,
+) -> AsyncIterator[None]:
+    """Trigger envelope for the image-USER-directive-non-numeric
+    refusal — raised by Sprint 10.6 T21 lifecycle integration when
+    the runtime image's USER directive is non-numeric (e.g.,
+    ``USER root`` or ``USER appuser``) per spec §5.8 step 2 (the
+    projection layer requires numeric GIDs for chgrp / fsGroup
+    pinning).
+
+    No-op registration envelope. Behaviour coverage at the T21
+    cross-backend conformance suite when that task lands.
+    """
+    yield
+
+
+@asynccontextmanager
+async def _trigger_sandbox_credential_projection_root_workload_refused(
+    backend: Any,
+    ctx: Any,
+) -> AsyncIterator[None]:
+    """Trigger envelope for the root-workload refusal — raised by
+    Sprint 10.6 T21 lifecycle integration when the resolved workload
+    GID is 0 (root) per spec §5.8 step 2 (the projection layer
+    refuses root workloads because chgrp to 0 + fsGroup 0 would
+    grant credential read to any process in the sandbox).
+
+    No-op registration envelope. Behaviour coverage at the T21
+    cross-backend conformance suite when that task lands.
+    """
+    yield
+
+
+@asynccontextmanager
+async def _trigger_sandbox_credential_projection_field_value_non_string(
+    backend: Any,
+    ctx: Any,
+) -> AsyncIterator[None]:
+    """Trigger envelope for the field-value-non-string refusal —
+    raised by Sprint 10.6 T18
+    ``sandbox/projection.py::compute_projection_plan(...)`` when
+    a Vault field value is not a string per spec §5.1 (credential
+    values must be strings on the wire; non-string types would
+    break the projection contract).
+
+    No-op registration envelope. Behaviour coverage at the T18
+    planner unit suite when that task lands.
+    """
+    yield
+
+
+@asynccontextmanager
+async def _trigger_sandbox_credential_projection_field_value_empty_string(
+    backend: Any,
+    ctx: Any,
+) -> AsyncIterator[None]:
+    """Trigger envelope for the field-value-empty-string refusal —
+    raised by Sprint 10.6 T18
+    ``sandbox/projection.py::compute_projection_plan(...)`` when a
+    Vault field value is an empty string per spec §5.1 (zero-byte
+    credential values are refused; if a credential is genuinely
+    empty, the pack must omit the field from ``expected_fields``).
+
+    No-op registration envelope. Behaviour coverage at the T18
+    planner unit suite when that task lands.
+    """
+    yield
+
+
+@asynccontextmanager
+async def _trigger_sandbox_credential_projection_field_value_size_exceeded(
+    backend: Any,
+    ctx: Any,
+) -> AsyncIterator[None]:
+    """Trigger envelope for the field-value-size-exceeded refusal —
+    raised by Sprint 10.6 T18
+    ``sandbox/projection.py::compute_projection_plan(...)`` when a
+    Vault field value exceeds the per-value size cap per spec §5.1
+    (oversized values are refused at the projection planner
+    boundary; the cap protects the tmpfs staging area).
+
+    No-op registration envelope. Behaviour coverage at the T18
+    planner unit suite when that task lands.
+    """
+    yield
+
+
 #: Public registry — maps every wire-public ``SandboxRefusalReason``
 #: value to a trigger factory. The membership pin at
 #: ``test_refusal_taxonomy.py`` asserts this dict's keyset equals
@@ -594,9 +777,9 @@ async def _trigger_sandbox_credential_lease_ttl_grant_exceeds_request(
 #: direction fails CI with a structured diagnostic.
 #:
 #: When adding a new ``SandboxRefusalReason`` value at
-#: ``src/cognic_agentos/sandbox/protocol.py:34-50``, add the
-#: corresponding trigger factory above + register it here. The
-#: ``test_refusal_reason_count_locked_at_twenty_seven`` regression
+#: ``src/cognic_agentos/sandbox/protocol.py``, add the corresponding
+#: trigger factory above + register it here. The
+#: ``test_refusal_reason_count_locked_at_thirty_six`` regression
 #: also needs its hard-coded count updated.
 TRIGGERS_BY_REASON: dict[str, TriggerFactory] = {
     # Sprint 8A — 15 admission-arm triggers
@@ -663,5 +846,38 @@ TRIGGERS_BY_REASON: dict[str, TriggerFactory] = {
     # Finding B of the 2026-05-24 plan-review round 1.
     "sandbox_credential_lease_ttl_grant_exceeds_request": (
         _trigger_sandbox_credential_lease_ttl_grant_exceeds_request
+    ),
+    # Sprint 10.6 T16 — 9 credential-projection registration entries.
+    # All envelopes are honest no-op `yield` stubs; the registry
+    # entries here keep the membership-coverage pin green. The 4
+    # planner-emitted values get their Stage-2 raise sites at T18
+    # ``sandbox/projection.py``; the 5 lifecycle-emitted values get
+    # theirs at T21 ``SandboxBackend.create()`` integration.
+    "sandbox_credential_projection_field_set_mismatch": (
+        _trigger_sandbox_credential_projection_field_set_mismatch
+    ),
+    "sandbox_credential_staging_path_not_tmpfs": (
+        _trigger_sandbox_credential_staging_path_not_tmpfs
+    ),
+    "sandbox_credential_projection_workload_gid_unknown": (
+        _trigger_sandbox_credential_projection_workload_gid_unknown
+    ),
+    "sandbox_credential_projection_image_gid_manifest_mismatch": (
+        _trigger_sandbox_credential_projection_image_gid_manifest_mismatch
+    ),
+    "sandbox_credential_projection_image_user_directive_non_numeric": (
+        _trigger_sandbox_credential_projection_image_user_directive_non_numeric
+    ),
+    "sandbox_credential_projection_root_workload_refused": (
+        _trigger_sandbox_credential_projection_root_workload_refused
+    ),
+    "sandbox_credential_projection_field_value_non_string": (
+        _trigger_sandbox_credential_projection_field_value_non_string
+    ),
+    "sandbox_credential_projection_field_value_empty_string": (
+        _trigger_sandbox_credential_projection_field_value_empty_string
+    ),
+    "sandbox_credential_projection_field_value_size_exceeded": (
+        _trigger_sandbox_credential_projection_field_value_size_exceeded
     ),
 }

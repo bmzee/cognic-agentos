@@ -1,0 +1,91 @@
+name: Z3 canonical Docker audit
+
+on:
+  # workflow_dispatch ONLY. The feature-branch push: trigger was removed at the
+  # Sprint 10.6 pre-merge cleanup so merging into main does not ship a
+  # branch-specific auto-trigger. Re-run this canonical Z3 Docker audit manually
+  # from the Actions tab ("Run workflow") on any ref.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  z3:
+    runs-on: ubuntu-24.04
+
+    env:
+      RUNTIME_PYTHON_REF: ghcr.io/bmzee/cognic-agentos/sandbox-runtime-python@sha256:b9ed3440ebf8535ba779f574b3c12a45095720ce78c292d8cc5cd338990e8eac
+      EGRESS_PROXY_REF: ghcr.io/bmzee/cognic-agentos/sandbox-egress-proxy@sha256:eb4ea75b427d0bc42039c68039eec51d6b0d0789400ba5bfdbf470ebec9139aa
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Install deps
+        run: uv sync --locked --dev --extra adapters --extra sandbox-docker
+
+      - name: Docker login to GHCR
+        run: echo "${{ secrets.GHCR_READ_TOKEN }}" | docker login ghcr.io -u bmzee --password-stdin
+
+      - name: Pull canonical images
+        run: |
+          docker pull "$RUNTIME_PYTHON_REF"
+          docker pull "$EGRESS_PROXY_REF"
+
+      - name: Start Postgres and Vault
+        run: |
+          docker network create z3-net
+          docker run -d --name z3-postgres --network z3-net \
+            -e POSTGRES_USER=postgres \
+            -e POSTGRES_PASSWORD=postgres \
+            postgres:16
+          docker run -d --name z3-vault --network z3-net -p 8200:8200 \
+            -e VAULT_DEV_ROOT_TOKEN_ID=root \
+            -e VAULT_DEV_LISTEN_ADDRESS=0.0.0.0:8200 \
+            hashicorp/vault:1.17.6 server -dev
+
+          until docker exec z3-postgres pg_isready -U postgres; do sleep 1; done
+          until curl -fsS http://127.0.0.1:8200/v1/sys/health >/dev/null; do sleep 1; done
+
+      - name: Configure Vault database dynamic creds
+        run: |
+          docker exec -e VAULT_ADDR=http://127.0.0.1:8200 -e VAULT_TOKEN=root z3-vault \
+            vault secrets enable database
+
+          docker exec -e VAULT_ADDR=http://127.0.0.1:8200 -e VAULT_TOKEN=root z3-vault \
+            vault write database/config/postgres \
+              plugin_name=postgresql-database-plugin \
+              allowed_roles=test-role \
+              connection_url='postgresql://{{username}}:{{password}}@z3-postgres:5432/postgres?sslmode=disable' \
+              username=postgres \
+              password=postgres
+
+          docker exec -e VAULT_ADDR=http://127.0.0.1:8200 -e VAULT_TOKEN=root z3-vault \
+            vault write database/roles/test-role \
+              db_name=postgres \
+              creation_statements='CREATE ROLE "{{name}}" WITH LOGIN PASSWORD '"'"'{{password}}'"'"' VALID UNTIL '"'"'{{expiration}}'"'"'; GRANT SELECT ON ALL TABLES IN SCHEMA public TO "{{name}}";' \
+              default_ttl=10m \
+              max_ttl=1h
+
+      - name: Run Z3 canonical targets
+        env:
+          COGNIC_RUN_DOCKER_CREDENTIAL_PROJECTION_INTEGRATION: "1"
+          COGNIC_VAULT_TEST_ADDR: http://127.0.0.1:8200
+          COGNIC_VAULT_TEST_TOKEN: root
+          COGNIC_VAULT_TEST_SECRET_PATH: database/creds/test-role
+          COGNIC_Z3_RUNTIME_IMAGE: ${{ env.RUNTIME_PYTHON_REF }}
+          COGNIC_Z3_EXPECTED_WORKLOAD_GID: "65534"
+        run: |
+          unset COGNIC_Z3_ALLOW_FIXTURE_IMAGES
+          unset COGNIC_Z3_FIXTURE_EGRESS_PROXY_IMAGE
+          UV_BIN="$(command -v uv)"
+          sudo -E "$UV_BIN" run pytest -q \
+            tests/integration/sandbox/test_z3_docker_credential_projection.py::test_z3_happy_path_real_vault_real_docker_one_credential \
+            tests/integration/sandbox/test_z3_docker_credential_projection.py::test_z3_negative_path_field_set_mismatch_refuses_before_container_create

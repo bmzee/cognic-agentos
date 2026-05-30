@@ -161,6 +161,41 @@ ValidatorReason = Literal[
     "hook_pack_kind_constraint_violated",
     "hook_entry_point_mismatch",
     "hook_unresolved_reference",
+    # Credentials manifest validation (Sprint 10.6 T14 —
+    # cli/validators/credentials.py per ADR-004 §25 + ADR-017).
+    # 18 [credentials.<name>] block refusals covering logical-name
+    # grammar + vault_path shape + expected_fields shape + ttl_s +
+    # purpose_category + purpose_description + per-block + pack-level +
+    # risk-tier gating pre-Sprint-13.5 + unknown-field rejection.
+    # Sub-cases for compound reasons (e.g. credentials_vault_path_*)
+    # may carry ``payload.failure_mode`` discriminators when T14 needs
+    # to differentiate within-reason sub-cases.
+    "credentials_logical_name_invalid_grammar",
+    "credentials_logical_name_duplicate",
+    "credentials_vault_path_empty",
+    "credentials_vault_path_invalid_chars",
+    "credentials_vault_path_invalid_shape",
+    "credentials_vault_path_exceeds_length",
+    "credentials_vault_path_duplicate_across_blocks",
+    "credentials_expected_fields_empty",
+    "credentials_expected_fields_count_exceeds_maximum",
+    "credentials_expected_fields_contains_duplicates",
+    "credentials_expected_fields_field_name_invalid_grammar",
+    "credentials_expected_fields_reserved_underscore_prefix",
+    "credentials_ttl_s_invalid",
+    "credentials_purpose_category_invalid_value",
+    "credentials_purpose_description_invalid_shape",
+    "credentials_count_exceeds_maximum",
+    "credentials_risk_tier_not_permitted_pre_13_5",
+    "credentials_unknown_field",
+    # Runtime block cross-validation tied to credentials presence
+    # (Sprint 10.6 T14 — owned by cli/validators/credentials.py since
+    # these refusals gate on whether [credentials.*] blocks exist +
+    # whether [runtime].expected_workload_gid is shaped to support the
+    # credential projection mechanics per ADR-004 §25 amendment).
+    "runtime_expected_workload_gid_required_for_credential_pack",
+    "runtime_expected_workload_gid_invalid_range",
+    "runtime_expected_workload_gid_without_credentials",
 ]
 
 
@@ -253,6 +288,38 @@ _VALIDATOR_REASON_OWNERSHIP: Final[dict[ValidatorReason, str]] = {
     "hook_entry_point_mismatch": "validators/hooks.py",
     "hook_unresolved_reference": "validators/hooks.py",
     "verify_entry_point_load_failed": "verify.py",
+    # Credentials (Sprint 10.6 T14 — cli/validators/credentials.py
+    # per ADR-004 §25 + ADR-017). Naming convention is bare
+    # ``validators/credentials.py`` (no ``cli/`` prefix) per the
+    # existing entries in this map; the Sprint 10.6 plan-of-record §117
+    # text shows ``cli/validators/credentials.py`` but the codebase
+    # convention is the path relative to ``cli/`` — the plan was
+    # patched in the same T13 commit to align with this map.
+    # The 3 ``runtime_expected_workload_gid_*`` reasons also route to
+    # ``validators/credentials.py`` because they gate on the presence
+    # of ``[credentials.*]`` blocks; the credentials validator owns
+    # the cross-validation per ADR-004 §25.
+    "credentials_logical_name_invalid_grammar": "validators/credentials.py",
+    "credentials_logical_name_duplicate": "validators/credentials.py",
+    "credentials_vault_path_empty": "validators/credentials.py",
+    "credentials_vault_path_invalid_chars": "validators/credentials.py",
+    "credentials_vault_path_invalid_shape": "validators/credentials.py",
+    "credentials_vault_path_exceeds_length": "validators/credentials.py",
+    "credentials_vault_path_duplicate_across_blocks": "validators/credentials.py",
+    "credentials_expected_fields_empty": "validators/credentials.py",
+    "credentials_expected_fields_count_exceeds_maximum": "validators/credentials.py",
+    "credentials_expected_fields_contains_duplicates": "validators/credentials.py",
+    "credentials_expected_fields_field_name_invalid_grammar": "validators/credentials.py",
+    "credentials_expected_fields_reserved_underscore_prefix": "validators/credentials.py",
+    "credentials_ttl_s_invalid": "validators/credentials.py",
+    "credentials_purpose_category_invalid_value": "validators/credentials.py",
+    "credentials_purpose_description_invalid_shape": "validators/credentials.py",
+    "credentials_count_exceeds_maximum": "validators/credentials.py",
+    "credentials_risk_tier_not_permitted_pre_13_5": "validators/credentials.py",
+    "credentials_unknown_field": "validators/credentials.py",
+    "runtime_expected_workload_gid_required_for_credential_pack": "validators/credentials.py",
+    "runtime_expected_workload_gid_invalid_range": "validators/credentials.py",
+    "runtime_expected_workload_gid_without_credentials": "validators/credentials.py",
 }
 
 

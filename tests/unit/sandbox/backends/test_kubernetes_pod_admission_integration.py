@@ -341,6 +341,8 @@ class TestProxyImageGoesThroughCatalogVerification:
         backend._create_network_policy = AsyncMock(return_value=None)  # type: ignore[method-assign]
         backend._create_pod = AsyncMock(return_value=None)  # type: ignore[method-assign]
         backend._wait_for_pod_ready = AsyncMock(return_value=None)  # type: ignore[method-assign]
+        # T30/T14.2 — create() now also gates on the proxy-log readiness probe.
+        backend._wait_for_proxy_audit_log_ready = AsyncMock(return_value=None)  # type: ignore[method-assign]
         backend._emit_lifecycle_created = AsyncMock(return_value=None)  # type: ignore[method-assign]
 
         await backend.create(
@@ -381,9 +383,16 @@ class TestGreenPathCallsK8sApiInOrder:
             assert pod_name.startswith("sb-")
             call_order.append("wait_ready")
 
+        # T30/T14.2 — the proxy-log readiness gate runs AFTER pod-ready and
+        # before the session is exposed; pin it in the ordering.
+        async def _record_proxy_ready(*, pod_name: str) -> None:
+            assert pod_name.startswith("sb-")
+            call_order.append("proxy_log_ready")
+
         backend._create_network_policy = _record_netpol  # type: ignore[method-assign]
         backend._create_pod = _record_pod  # type: ignore[method-assign]
         backend._wait_for_pod_ready = _record_ready  # type: ignore[method-assign]
+        backend._wait_for_proxy_audit_log_ready = _record_proxy_ready  # type: ignore[method-assign]
         backend._emit_lifecycle_created = AsyncMock(return_value=None)  # type: ignore[method-assign]
 
         await backend.create(
@@ -393,7 +402,7 @@ class TestGreenPathCallsK8sApiInOrder:
             pack_context=_valid_pack_context(),
             use_warm_pool=False,
         )
-        assert call_order == ["network_policy", "pod", "wait_ready"]
+        assert call_order == ["network_policy", "pod", "wait_ready", "proxy_log_ready"]
 
     async def test_create_returns_kubernetespod_session_with_required_fields(
         self,
@@ -402,6 +411,8 @@ class TestGreenPathCallsK8sApiInOrder:
         backend._create_network_policy = AsyncMock(return_value=None)  # type: ignore[method-assign]
         backend._create_pod = AsyncMock(return_value=None)  # type: ignore[method-assign]
         backend._wait_for_pod_ready = AsyncMock(return_value=None)  # type: ignore[method-assign]
+        # T30/T14.2 — create() now also gates on the proxy-log readiness probe.
+        backend._wait_for_proxy_audit_log_ready = AsyncMock(return_value=None)  # type: ignore[method-assign]
         backend._emit_lifecycle_created = AsyncMock(return_value=None)  # type: ignore[method-assign]
         actor = _actor()
         pack_ctx = _valid_pack_context()
@@ -493,6 +504,8 @@ class TestCreateRollsBackOnK8sApiFailure:
         backend._create_network_policy = AsyncMock(return_value=None)  # type: ignore[method-assign]
         backend._create_pod = AsyncMock(return_value=None)  # type: ignore[method-assign]
         backend._wait_for_pod_ready = AsyncMock(return_value=None)  # type: ignore[method-assign]
+        # T30/T14.2 — create() now also gates on the proxy-log readiness probe.
+        backend._wait_for_proxy_audit_log_ready = AsyncMock(return_value=None)  # type: ignore[method-assign]
         backend._delete_network_policy_if_exists = _delete_netpol  # type: ignore[method-assign]
         backend._delete_pod_if_exists = _delete_pod  # type: ignore[method-assign]
 
@@ -534,6 +547,8 @@ class TestDestroyEmitsLifecycleEventOnceAndIsIdempotent:
         backend._create_network_policy = AsyncMock(return_value=None)  # type: ignore[method-assign]
         backend._create_pod = AsyncMock(return_value=None)  # type: ignore[method-assign]
         backend._wait_for_pod_ready = AsyncMock(return_value=None)  # type: ignore[method-assign]
+        # T30/T14.2 — create() now also gates on the proxy-log readiness probe.
+        backend._wait_for_proxy_audit_log_ready = AsyncMock(return_value=None)  # type: ignore[method-assign]
         backend._emit_lifecycle_created = AsyncMock(return_value=None)  # type: ignore[method-assign]
         session = await backend.create(
             _valid_policy(),
@@ -559,6 +574,8 @@ class TestDestroyEmitsLifecycleEventOnceAndIsIdempotent:
         backend._create_network_policy = AsyncMock(return_value=None)  # type: ignore[method-assign]
         backend._create_pod = AsyncMock(return_value=None)  # type: ignore[method-assign]
         backend._wait_for_pod_ready = AsyncMock(return_value=None)  # type: ignore[method-assign]
+        # T30/T14.2 — create() now also gates on the proxy-log readiness probe.
+        backend._wait_for_proxy_audit_log_ready = AsyncMock(return_value=None)  # type: ignore[method-assign]
         backend._emit_lifecycle_created = AsyncMock(return_value=None)  # type: ignore[method-assign]
         session = await backend.create(
             _valid_policy(),

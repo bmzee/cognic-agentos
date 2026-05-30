@@ -604,9 +604,12 @@ class TestExecRunsAsNonRoot:
             "(commonly root) even though the container started non-root. "
             "R1 P1.2 reviewer fix."
         )
-        # Sidecar exec also runs as non-root (defence-in-depth)
+        # Sidecar proxy-log read runs as the PROXY's own non-root identity
+        # (10002:10002) — T30/T14.1: the proxy owns its access log under
+        # /var/log/cognic-proxy, so the cat reads as the proxy user, NOT the
+        # workload's 65534.
         sidecar_call = container.exec.await_args_list[1]
-        assert sidecar_call.kwargs["user"] == "65534:65534"
+        assert sidecar_call.kwargs["user"] == "10002:10002"
 
 
 # ---------------------------------------------------------------------------

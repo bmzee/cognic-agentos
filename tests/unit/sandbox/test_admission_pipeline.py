@@ -329,7 +329,14 @@ class TestAdmissionRefusalArms:
         assert exc.value.reason == "sandbox_image_cosign_verification_failed"
 
     async def test_sbom_check_fail(self) -> None:
+        # T8.5 (ADR-016 amendment): the SBOM license-deny gate applies to
+        # TENANT-allow-listed images only — canonical platform images are carved
+        # out (see TestT8_5CanonicalSbomLicenseCarveOut). Pin the refusal on the
+        # tenant path so this stays a live gate test rather than silently
+        # skipping under the canonical carve-out.
         catalog = _passing_catalog()
+        catalog.is_canonical.return_value = False
+        catalog.is_tenant_allow_listed.return_value = True
         catalog.verify_sbom_policy_or_refuse = AsyncMock(
             side_effect=SandboxLifecycleRefused(
                 "sandbox_image_sbom_check_failed",
@@ -511,6 +518,100 @@ class TestAdmissionHappyPath:
         rego_input = rego.evaluate.call_args.kwargs["input"]
         assert rego_input["runtime_image_in_canonical_set"] is False
         assert rego_input["runtime_image_in_tenant_allow_list"] is True
+
+
+class TestT8_5CanonicalSbomLicenseCarveOut:
+    """T8.5 (ADR-016 amendment) — canonical AgentOS platform images are EXEMPT
+    from the tenant/default license-deny SBOM gate (step 8) at sandbox-create
+    time, but keep cosign verification (step 7). Tenant-allow-listed images keep
+    BOTH gates. Rationale: the license-deny policy is a tenant-content legal
+    control; AgentOS's own platform base images (glibc=LGPL, the GPL-2.0 egress
+    proxy) are attested under the canonical trust root + SBOM-retained per
+    ADR-016, and would otherwise be unadmittable. The tenant-path SBOM-refusal
+    pin lives at ``TestAdmissionRefusalArms.test_sbom_check_fail``."""
+
+    async def test_canonical_image_still_runs_cosign_verification(self) -> None:
+        catalog = _passing_catalog()
+        catalog.is_canonical.return_value = True
+        catalog.is_tenant_allow_listed.return_value = False
+        await admit_policy(
+            _valid_policy(),
+            tenant_id="t-1",
+            actor=MagicMock(),
+            pack_context=_valid_pack_context(),
+            catalog=catalog,
+            credential_adapter=AsyncMock(spec=CredentialAdapter),
+            rego_engine=_passing_rego(),
+            settings=_passing_settings(),
+        )
+        catalog.verify_cosign_or_refuse.assert_awaited_once()
+
+    async def test_canonical_image_skips_sbom_even_when_it_would_refuse(self) -> None:
+        # Load-bearing carve-out pin (threat-model revert): a SBOM gate that
+        # WOULD refuse — canonical platform bases are GPL/LGPL-bearing — must
+        # never run for a canonical image. Reverting the admission guard makes
+        # this image refuse with sandbox_image_sbom_check_failed, so this test
+        # fails without the carve-out.
+        catalog = _passing_catalog()
+        catalog.is_canonical.return_value = True
+        catalog.is_tenant_allow_listed.return_value = False
+        catalog.verify_sbom_policy_or_refuse = AsyncMock(
+            side_effect=SandboxLifecycleRefused(
+                "sandbox_image_sbom_check_failed",
+                detail="GPL-2.0 (tinyproxy) detected",
+            )
+        )
+        # No exception — the canonical image is admitted; the refusing SBOM gate
+        # is never invoked.
+        await admit_policy(
+            _valid_policy(),
+            tenant_id="t-1",
+            actor=MagicMock(),
+            pack_context=_valid_pack_context(),
+            catalog=catalog,
+            credential_adapter=AsyncMock(spec=CredentialAdapter),
+            rego_engine=_passing_rego(),
+            settings=_passing_settings(),
+        )
+        catalog.verify_sbom_policy_or_refuse.assert_not_called()
+
+    async def test_canonical_green_path_reaches_rego_with_canonical_bool(self) -> None:
+        catalog = _passing_catalog()
+        catalog.is_canonical.return_value = True
+        catalog.is_tenant_allow_listed.return_value = False
+        rego = _passing_rego()
+        await admit_policy(
+            _valid_policy(),
+            tenant_id="t-1",
+            actor=MagicMock(),
+            pack_context=_valid_pack_context(),
+            catalog=catalog,
+            credential_adapter=AsyncMock(spec=CredentialAdapter),
+            rego_engine=rego,
+            settings=_passing_settings(),
+        )
+        rego.evaluate.assert_awaited_once()
+        rego_input = rego.evaluate.call_args.kwargs["input"]
+        # The canonical carve-out skips SBOM but MUST still thread the canonical
+        # bool to the Rego bundle's rule-4 input (no short-circuit drop).
+        assert rego_input["runtime_image_in_canonical_set"] is True
+
+    async def test_tenant_image_runs_both_cosign_and_sbom(self) -> None:
+        catalog = _passing_catalog()
+        catalog.is_canonical.return_value = False
+        catalog.is_tenant_allow_listed.return_value = True
+        await admit_policy(
+            _valid_policy(),
+            tenant_id="t-1",
+            actor=MagicMock(),
+            pack_context=_valid_pack_context(),
+            catalog=catalog,
+            credential_adapter=AsyncMock(spec=CredentialAdapter),
+            rego_engine=_passing_rego(),
+            settings=_passing_settings(),
+        )
+        catalog.verify_cosign_or_refuse.assert_awaited_once()
+        catalog.verify_sbom_policy_or_refuse.assert_awaited_once()
 
 
 class TestSprint10T7RequiresCredentialsBackwardCompat:
@@ -741,9 +842,15 @@ class TestAdmissionPipelineOrderingInvariants:
 
     async def test_sbom_runs_before_rego(self) -> None:
         """Step 8 (SBOM) BEFORE step 9 (Rego). An SBOM failure MUST
-        short-circuit before the Rego engine is called."""
+        short-circuit before the Rego engine is called.
+
+        T8.5: the SBOM gate only runs for tenant-allow-listed images (canonical
+        is carved out, ADR-016), so the ordering invariant is pinned on the
+        tenant path — the only path where step 8 actually executes."""
 
         catalog = _passing_catalog()
+        catalog.is_canonical.return_value = False
+        catalog.is_tenant_allow_listed.return_value = True
         catalog.verify_sbom_policy_or_refuse = AsyncMock(
             side_effect=SandboxLifecycleRefused("sandbox_image_sbom_check_failed", detail="bad")
         )

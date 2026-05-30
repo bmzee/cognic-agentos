@@ -1572,6 +1572,39 @@ class TestSprint7AClosedEnumVocabulary:
                 "hook_pack_kind_constraint_violated",
                 "hook_entry_point_mismatch",
                 "hook_unresolved_reference",
+                # Credentials (Sprint 10.6 T14 — cli/validators/credentials.py
+                # per ADR-004 §25 + ADR-017). 18 [credentials.<name>] block
+                # refusals covering logical-name grammar + vault_path shape
+                # + expected_fields shape + ttl_s + purpose_category +
+                # purpose_description + per-block + pack-level + risk-tier
+                # gating + unknown-field rejection, plus 3 runtime block
+                # cross-validation refusals (expected_workload_gid required-
+                # for-credential-pack + invalid-range + without-credentials)
+                # owned by the same validator since they gate on credential
+                # block presence. T13 vocabulary scaffold per the plan-of-
+                # record at docs/superpowers/plans/2026-05-26-sprint-10.6-
+                # workload-credential-projection.md §83-122.
+                "credentials_logical_name_invalid_grammar",
+                "credentials_logical_name_duplicate",
+                "credentials_vault_path_empty",
+                "credentials_vault_path_invalid_chars",
+                "credentials_vault_path_invalid_shape",
+                "credentials_vault_path_exceeds_length",
+                "credentials_vault_path_duplicate_across_blocks",
+                "credentials_expected_fields_empty",
+                "credentials_expected_fields_count_exceeds_maximum",
+                "credentials_expected_fields_contains_duplicates",
+                "credentials_expected_fields_field_name_invalid_grammar",
+                "credentials_expected_fields_reserved_underscore_prefix",
+                "credentials_ttl_s_invalid",
+                "credentials_purpose_category_invalid_value",
+                "credentials_purpose_description_invalid_shape",
+                "credentials_count_exceeds_maximum",
+                "credentials_risk_tier_not_permitted_pre_13_5",
+                "credentials_unknown_field",
+                "runtime_expected_workload_gid_required_for_credential_pack",
+                "runtime_expected_workload_gid_invalid_range",
+                "runtime_expected_workload_gid_without_credentials",
             }
         )
 
@@ -2265,3 +2298,88 @@ class TestSprint105SchedulerSettings:
         assert s.scheduler_queue_depth_interactive == 64
         assert s.scheduler_per_tenant_background == 128
         assert s.scheduler_queue_ttl_s == 600
+
+
+class TestCanonicalImageSettings:
+    """T30 / T10 — canonical sandbox image refs + canonical trust-root path.
+
+    Real digest-pinned defaults (the AgentOS-signed canonical images produced by
+    the T9 runbook; Option B — no placeholder defaults), env-overridable via the
+    ``COGNIC_SANDBOX_CANONICAL_*`` prefix, with a digest-shape validator that
+    refuses tag-only / malformed refs (canonical images MUST be immutable).
+    """
+
+    _RP_REF = (
+        "ghcr.io/bmzee/cognic-agentos/sandbox-runtime-python@sha256:"
+        "b9ed3440ebf8535ba779f574b3c12a45095720ce78c292d8cc5cd338990e8eac"
+    )
+    _EP_REF = (
+        "ghcr.io/bmzee/cognic-agentos/sandbox-egress-proxy@sha256:"
+        "eb4ea75b427d0bc42039c68039eec51d6b0d0789400ba5bfdbf470ebec9139aa"
+    )
+
+    @staticmethod
+    def _clear_env(monkeypatch: pytest.MonkeyPatch) -> None:
+        for var in (
+            "COGNIC_SANDBOX_CANONICAL_RUNTIME_PYTHON_IMAGE",
+            "COGNIC_SANDBOX_CANONICAL_EGRESS_PROXY_IMAGE",
+            "COGNIC_SANDBOX_CANONICAL_IMAGE_TRUST_ROOT_PATH",
+        ):
+            monkeypatch.delenv(var, raising=False)
+
+    def test_real_digest_pinned_defaults(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._clear_env(monkeypatch)
+        s = build_settings_without_env_file()
+        assert s.sandbox_canonical_runtime_python_image == self._RP_REF
+        assert s.sandbox_canonical_egress_proxy_image == self._EP_REF
+        assert "@sha256:" in s.sandbox_canonical_runtime_python_image
+        assert "@sha256:" in s.sandbox_canonical_egress_proxy_image
+        # Trust-root path defaults to None — the operator points it at the
+        # canonical cosign public key via env; no dev/operator path is baked
+        # into the kernel default (mirrors signing_trust_root_path).
+        assert s.sandbox_canonical_image_trust_root_path is None
+
+    def test_env_overrides(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        rp = "registry.example.com/cognic/sandbox-runtime-python@sha256:" + "a" * 64
+        ep = "registry.example.com/cognic/sandbox-egress-proxy@sha256:" + "b" * 64
+        monkeypatch.setenv("COGNIC_SANDBOX_CANONICAL_RUNTIME_PYTHON_IMAGE", rp)
+        monkeypatch.setenv("COGNIC_SANDBOX_CANONICAL_EGRESS_PROXY_IMAGE", ep)
+        monkeypatch.setenv(
+            "COGNIC_SANDBOX_CANONICAL_IMAGE_TRUST_ROOT_PATH", "/etc/cognic/canonical-cosign.pub"
+        )
+        s = Settings()
+        assert s.sandbox_canonical_runtime_python_image == rp
+        assert s.sandbox_canonical_egress_proxy_image == ep
+        assert s.sandbox_canonical_image_trust_root_path == Path("/etc/cognic/canonical-cosign.pub")
+
+    def test_rejects_tag_only_ref_no_digest(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._clear_env(monkeypatch)
+        with pytest.raises(ValidationError, match="digest-pinned"):
+            Settings(sandbox_canonical_runtime_python_image="ghcr.io/x/sandbox-runtime-python:v1")
+
+    def test_rejects_malformed_digest(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._clear_env(monkeypatch)
+        # @sha256: present but the digest is not 64 lowercase-hex chars.
+        with pytest.raises(ValidationError, match="digest-pinned"):
+            Settings(sandbox_canonical_egress_proxy_image="ghcr.io/x/proxy@sha256:deadbeef")
+
+    def test_rejects_missing_ref_before_digest(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # P2: a valid digest tail with an EMPTY ref prefix must be refused —
+        # "@sha256:<64-hex>" is not a usable image reference, despite the digest
+        # being well-formed.
+        self._clear_env(monkeypatch)
+        with pytest.raises(ValidationError, match="non-empty"):
+            Settings(sandbox_canonical_runtime_python_image="@sha256:" + "a" * 64)
+
+    def test_rejects_whitespace_in_ref(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The ref prefix must be whitespace-free (a real OCI ref never contains
+        # whitespace); a space-bearing prefix is refused.
+        self._clear_env(monkeypatch)
+        with pytest.raises(ValidationError, match="whitespace-free"):
+            Settings(sandbox_canonical_egress_proxy_image="ghcr.io/x y@sha256:" + "a" * 64)
+
+    def test_accepts_valid_digest_pinned_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._clear_env(monkeypatch)
+        ref = "registry.example.com/img@sha256:" + "c" * 64
+        s = Settings(sandbox_canonical_runtime_python_image=ref)
+        assert s.sandbox_canonical_runtime_python_image == ref

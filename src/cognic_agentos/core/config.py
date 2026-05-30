@@ -1289,6 +1289,80 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- Sandbox canonical image catalog (T30 per ADR-004 + ADR-016) ---
+    # The two AgentOS-signed canonical platform images every sandbox launches
+    # from. Real digest-pinned defaults (the signed refs produced by the T9
+    # build/sign/push runbook — Option B, no placeholder defaults);
+    # env-overridable via the COGNIC_SANDBOX_CANONICAL_* prefix. Consumed by the
+    # backend factory (T11) to build the production CanonicalImageCatalog.
+    sandbox_canonical_runtime_python_image: str = Field(
+        default=(
+            "ghcr.io/bmzee/cognic-agentos/sandbox-runtime-python@sha256:"
+            "b9ed3440ebf8535ba779f574b3c12a45095720ce78c292d8cc5cd338990e8eac"
+        ),
+        description=(
+            "T30 — full digest-pinned OCI ref of the canonical sandbox-runtime-"
+            "python workload image. Env override: "
+            "COGNIC_SANDBOX_CANONICAL_RUNTIME_PYTHON_IMAGE. Bank deployments "
+            "re-home to their own registry + re-sign under their canonical "
+            "trust root. Must be digest-pinned (validator below)."
+        ),
+    )
+    sandbox_canonical_egress_proxy_image: str = Field(
+        default=(
+            "ghcr.io/bmzee/cognic-agentos/sandbox-egress-proxy@sha256:"
+            "eb4ea75b427d0bc42039c68039eec51d6b0d0789400ba5bfdbf470ebec9139aa"
+        ),
+        description=(
+            "T30 — full digest-pinned OCI ref of the canonical sandbox-egress-"
+            "proxy sidecar image. Env override: "
+            "COGNIC_SANDBOX_CANONICAL_EGRESS_PROXY_IMAGE. Replaces the former "
+            "placeholder _CANONICAL_EGRESS_PROXY_IMAGE constant (swapped in the "
+            "backends at T12). Must be digest-pinned (validator below)."
+        ),
+    )
+    sandbox_canonical_image_trust_root_path: Path | None = Field(
+        default=None,
+        description=(
+            "T30 — filesystem path to the canonical AgentOS cosign PUBLIC key "
+            "used to verify canonical-image signatures at sandbox admission "
+            "(catalog.canonical_trust_root, Option 1 / spec §7.1.1). Default "
+            "None mirrors signing_trust_root_path: no dev/operator path is "
+            "baked into the kernel — the operator points this at the published "
+            "canonical public key via "
+            "COGNIC_SANDBOX_CANONICAL_IMAGE_TRUST_ROOT_PATH. When None, "
+            "canonical images have no canonical trust root and cosign "
+            "verification fail-closes for them (no silent trust)."
+        ),
+    )
+
+    @field_validator(
+        "sandbox_canonical_runtime_python_image",
+        "sandbox_canonical_egress_proxy_image",
+    )
+    @classmethod
+    def _require_digest_pinned_canonical_image(cls, value: str) -> str:
+        # Canonical images MUST be immutable: a full ``<ref>@sha256:<64-hex>``
+        # digest pin, never a mutable tag. The ref PREFIX must be present and
+        # whitespace-free (a real OCI ref never contains whitespace) and the
+        # digest must be exactly 64 lowercase-hex chars — so a canonical image
+        # can never silently drift under a moving tag, and "@sha256:<hex>" with
+        # no ref (or a whitespace-bearing ref) is refused.
+        ref, sep, digest = value.partition("@sha256:")
+        if (
+            not ref
+            or any(c.isspace() for c in ref)
+            or not sep
+            or len(digest) != 64
+            or any(c not in "0123456789abcdef" for c in digest)
+        ):
+            raise ValueError(
+                f"canonical image ref must be digest-pinned as "
+                f"<ref>@sha256:<64-lowercase-hex> with a non-empty, "
+                f"whitespace-free <ref>; got {value!r}"
+            )
+        return value
+
     # --- Sandbox checkpoint / resumable-session (Sprint 8.5 per ADR-004) ---
     # Consumed by ``sandbox/checkpoint_store.py`` + ``sandbox/reaper.py``
     # via the structural ``_CheckpointSettings`` Protocol — the real

@@ -40,9 +40,10 @@ from typing import TYPE_CHECKING, Literal, NewType, Protocol, runtime_checkable
 # Closed-enum vocabularies — wire-protocol-public per spec §4
 # ---------------------------------------------------------------------------
 
-#: 27-value closed-enum for sandbox lifecycle refusals (Sprint 8A spec
+#: 36-value closed-enum for sandbox lifecycle refusals (Sprint 8A spec
 #: §4.1 + Sprint 8.5 spec §3.3 extension + Sprint 10 spec §4.1 T7 +
-#: Sprint 10 spec §6.1 T9). Covers:
+#: Sprint 10 spec §6.1 T9 + Sprint 10.1 ADR-004 §25 amendment +
+#: Sprint 10.6 spec §5.1 T16). Covers:
 #:
 #: * 15 admission/create refusals (Sprint 8A) — `admit_policy` + Stage-1
 #:   shape validation + backend availability + warm-pool drain.
@@ -111,6 +112,33 @@ from typing import TYPE_CHECKING, Literal, NewType, Protocol, runtime_checkable
 #:   the caller asked too high (caught by Rego) or the Vault role
 #:   default_ttl is too loose (caught here) per the
 #:   ``[[feedback_recompute_derived_facts_not_just_wrapper]]`` doctrine.
+#: * 9 credential-projection refusals (Sprint 10.6 T16 Literal ONLY;
+#:   **NO Stage-2 raise sites at T16** — wire-public closed-enum
+#:   extension only). The 4 planner-emitted values
+#:   (``sandbox_credential_projection_field_set_mismatch`` +
+#:   ``sandbox_credential_projection_field_value_non_string`` +
+#:   ``sandbox_credential_projection_field_value_empty_string`` +
+#:   ``sandbox_credential_projection_field_value_size_exceeded``)
+#:   gain Stage-2 raise sites at the T18
+#:   ``sandbox/projection.py::compute_projection_plan(...)`` planner
+#:   when that task lands later in Sprint 10.6. The 5 lifecycle-
+#:   emitted values (``sandbox_credential_staging_path_not_tmpfs`` +
+#:   ``sandbox_credential_projection_workload_gid_unknown`` +
+#:   ``sandbox_credential_projection_image_gid_manifest_mismatch`` +
+#:   ``sandbox_credential_projection_image_user_directive_non_numeric``
+#:   + ``sandbox_credential_projection_root_workload_refused``) gain
+#:   Stage-2 raise sites at the T21 lifecycle integration — per-
+#:   backend executor extensions in ``SandboxBackend.create()``
+#:   doing pre-mint substrate preflight (tmpfs check) + workload-
+#:   GID resolution + image-USER-directive parsing. The 9 trigger
+#:   envelopes registered at T16 in
+#:   ``tests/conformance/sandbox/refusal_dispatch.py`` are honest
+#:   no-op registration stubs per the existing registration-
+#:   coverage doctrine (membership pin between the Literal and
+#:   ``TRIGGERS_BY_REASON``'s keyset; NOT behavior fan-out — see
+#:   ``tests/conformance/sandbox/test_refusal_taxonomy.py:55-86``).
+#:   Behavior coverage will live at the T18 planner unit suite + the
+#:   T21 cross-backend conformance suite when those tasks land.
 #:
 #: Drift between this Literal and consumer error-handling is caught at
 #: module load by the partition-invariant test at
@@ -193,6 +221,43 @@ SandboxRefusalReason = Literal[
     # 2026-05-24 plan-review round 1 (no intermediate state where the
     # new exception escapes backends uncaught).
     "sandbox_credential_lease_ttl_grant_exceeds_request",
+    # Sprint 10.6 T16 — 9 credential-projection refusals per spec §5.1.
+    #
+    # Wire-public closed-enum surface for bank-overlay consumers + SIEM
+    # tooling. **Literal-only at T16** — Stage-2 raise sites do NOT
+    # land here. They are owned by:
+    #
+    #   - T18 ``sandbox/projection.py::compute_projection_plan(...)`` —
+    #     pure-functional planner; field-set diff (expected_fields vs
+    #     Vault lease response's actual_fields) + per-field value-shape
+    #     gating (non-string / empty / oversized). Owns the 4 values
+    #     ``..._field_set_mismatch`` + ``..._field_value_non_string``
+    #     + ``..._field_value_empty_string`` + ``..._field_value_size_exceeded``.
+    #   - T21 ``SandboxBackend.create()`` lifecycle integration — pre-
+    #     mint substrate preflight (tmpfs check + workload-GID resolve)
+    #     + image-USER-directive parsing. Owns the 5 values
+    #     ``..._staging_path_not_tmpfs`` + ``..._workload_gid_unknown``
+    #     + ``..._image_gid_manifest_mismatch`` +
+    #     ``..._image_user_directive_non_numeric`` + ``..._root_workload_refused``.
+    #
+    # The 9 trigger envelopes registered in
+    # ``tests/conformance/sandbox/refusal_dispatch.py`` at T16 are
+    # honest no-op registration stubs per the existing registration-
+    # coverage doctrine (the conformance registry pins SET MEMBERSHIP
+    # between the Literal and ``TRIGGERS_BY_REASON``'s keyset; it is
+    # NOT a behavior-fan-out harness — see the docstring at
+    # ``tests/conformance/sandbox/test_refusal_taxonomy.py:55-62``).
+    # Behavior coverage will live at the T18 planner unit suite +
+    # the T21 cross-backend conformance suite when those tasks land.
+    "sandbox_credential_projection_field_set_mismatch",
+    "sandbox_credential_staging_path_not_tmpfs",
+    "sandbox_credential_projection_workload_gid_unknown",
+    "sandbox_credential_projection_image_gid_manifest_mismatch",
+    "sandbox_credential_projection_image_user_directive_non_numeric",
+    "sandbox_credential_projection_root_workload_refused",
+    "sandbox_credential_projection_field_value_non_string",
+    "sandbox_credential_projection_field_value_empty_string",
+    "sandbox_credential_projection_field_value_size_exceeded",
 ]
 
 #: 6-value closed-enum for runtime policy violations during ``exec``
@@ -224,8 +289,9 @@ SandboxPolicyViolationReason = Literal[
     "egress_audit_unreadable",
 ]
 
-#: 15-value closed-enum for audit chain-row decision_type discriminator
-#: (Sprint 8A spec §4.3 + Sprint 8.5 spec §3.3 + Sprint 10 spec §6.2).
+#: 19-value closed-enum for audit chain-row decision_type discriminator
+#: (Sprint 8A spec §4.3 + Sprint 8.5 spec §3.3 + Sprint 10 spec §6.2 +
+#: Sprint 10.6 spec §5.1 T17).
 #: Covers:
 #:
 #: * 8 Sprint-8A lifecycle events (created / exec_completed / destroyed
@@ -238,6 +304,19 @@ SandboxPolicyViolationReason = Literal[
 #:   post-admission + ``destroy()`` per Sprint-10 spec §4.2 + §4.3 +
 #:   §6.2. Typed helpers live at ``sandbox/audit.py`` per the Sprint
 #:   8.5 T2 typed-helper pattern; backend call sites land at T10.
+#: * 4 Sprint-10.6 T17 credential-projection lifecycle events
+#:   (credentials_projected / credentials_projection_failed /
+#:   credentials_projection_cleaned_up /
+#:   credentials_projection_cleanup_failed) — **Literal-only at T17**;
+#:   emit call sites land at the T21 ``SandboxBackend.create()``
+#:   lifecycle integration when that task lands later in Sprint 10.6.
+#:   T17 does NOT add typed audit helpers (mirroring the Sprint-10
+#:   ``emit_lease_*`` pattern); those will land at T21 alongside the
+#:   per-event payload-shape contracts. The generic ``emit_sandbox_event``
+#:   path at ``sandbox/audit.py`` accepts the 4 new event strings via
+#:   the count-neutral ``_VALID_EVENTS = frozenset(typing.get_args(
+#:   SandboxLifecycleEvent))`` membership check so any future caller
+#:   can emit them without raising at the audit-boundary gate.
 #:
 #: Tombstoning is a STORAGE artifact NOT a lifecycle event — destroy()
 #: reuses 8A's ``sandbox.lifecycle.destroyed`` with 2 new conditional
@@ -277,6 +356,30 @@ SandboxLifecycleEvent = Literal[
     "sandbox.lifecycle.lease_minted",
     "sandbox.lifecycle.lease_revoked",
     "sandbox.lifecycle.lease_revoke_failed",
+    # Sprint 10.6 T17 — 4 credential-projection lifecycle events per
+    # spec §5.1.
+    #
+    # **Literal-only at T17** — emit call sites land at the T21
+    # ``SandboxBackend.create()`` lifecycle integration when that
+    # task lands. Per-event payload-shape contracts (and the typed
+    # audit helpers that enforce them, mirroring the Sprint-10
+    # ``emit_lease_minted`` / ``emit_lease_revoked`` /
+    # ``emit_lease_revoke_failed`` pattern) will land at T21
+    # alongside the actual emit sites.
+    #
+    # The 4 events form a 2-pair lifecycle around the credential
+    # projection step:
+    #   * ``credentials_projected`` / ``credentials_projection_failed``
+    #     — emitted at the project-time step (T21 post-mint
+    #     mint-then-project loop).
+    #   * ``credentials_projection_cleaned_up`` /
+    #     ``credentials_projection_cleanup_failed`` — emitted at
+    #     the LIFO unwind step (T21 destroy() + on-failure cleanup
+    #     during the §5.8-step-5 cleanup ordering).
+    "sandbox.lifecycle.credentials_projected",
+    "sandbox.lifecycle.credentials_projection_failed",
+    "sandbox.lifecycle.credentials_projection_cleaned_up",
+    "sandbox.lifecycle.credentials_projection_cleanup_failed",
 ]
 
 

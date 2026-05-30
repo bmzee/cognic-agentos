@@ -54,6 +54,7 @@ from cognic_agentos.sandbox.backends._shared_exec import (
     _ProxyLogReadFailure,
 )
 from cognic_agentos.sandbox.backends.kubernetes_pod import (
+    _PROXY_LOG_PATH,
     _PROXY_SIDECAR_CONTAINER_NAME,
     _SANDBOX_CONTAINER_NAME,
     KubernetesPodSandboxBackend,
@@ -1779,6 +1780,9 @@ class TestWakeGreenPathStepsSixToEight:
         import uuid as _uuid
 
         suspend_event_id = _uuid.uuid4()
+        # T30/T14.2 — record call order to pin the wake readiness/restore
+        # sequence: pod-ready -> proxy-log-ready -> restore exec.
+        wake_order: list[str] = []
         with (
             patch(
                 "cognic_agentos.sandbox.backends.kubernetes_pod.admit_policy",
@@ -1789,8 +1793,23 @@ class TestWakeGreenPathStepsSixToEight:
             ),
             patch.object(backend, "_create_network_policy", AsyncMock()) as create_np,
             patch.object(backend, "_create_pod", AsyncMock()) as create_pod,
-            patch.object(backend, "_wait_for_pod_ready", AsyncMock()) as wait_ready,
-            patch.object(backend, "_restore_workspace_tar", AsyncMock()) as restore,
+            patch.object(
+                backend,
+                "_wait_for_pod_ready",
+                AsyncMock(side_effect=lambda **_: wake_order.append("wait_ready")),
+            ) as wait_ready,
+            # T30/T14.2 — wake() gates on the proxy-log readiness probe AFTER
+            # pod-ready and BEFORE the restore exec; pin that ordering.
+            patch.object(
+                backend,
+                "_wait_for_proxy_audit_log_ready",
+                AsyncMock(side_effect=lambda **_: wake_order.append("proxy_log_ready")),
+            ) as proxy_ready,
+            patch.object(
+                backend,
+                "_restore_workspace_tar",
+                AsyncMock(side_effect=lambda **_: wake_order.append("restore")),
+            ) as restore,
             patch(
                 "cognic_agentos.sandbox.backends.kubernetes_pod.sandbox_lifecycle_woken",
                 AsyncMock(),
@@ -1801,7 +1820,11 @@ class TestWakeGreenPathStepsSixToEight:
         create_np.assert_awaited_once()
         create_pod.assert_awaited_once()
         wait_ready.assert_awaited_once()
+        proxy_ready.assert_awaited_once()
         restore.assert_awaited_once()
+        # T30/T14.2 — the proxy-log readiness gate runs AFTER pod-ready and
+        # BEFORE the restore exec, so a recreated pod can't race the entrypoint.
+        assert wake_order == ["wait_ready", "proxy_log_ready", "restore"]
         # Step 7 — session preserves the ORIGINAL session_id; cold start.
         assert isinstance(session, KubernetesPodSession)
         assert session.session_id == "orig-sess"
@@ -2199,6 +2222,81 @@ class TestWaitForPodReady:
         ):
             with pytest.raises(RuntimeError, match=r"did not become ready within"):
                 await backend._wait_for_pod_ready(pod_name="p")
+
+
+class TestWaitForProxyAuditLogReady:
+    """T30/T14.2 — ``_wait_for_proxy_audit_log_ready`` polls the egress-proxy
+    sidecar until ``cat _PROXY_LOG_PATH`` exits 0, bounded by
+    ``_POD_READY_TIMEOUT_S``.
+
+    Closes the Z4 readiness RACE: ``_wait_for_pod_ready`` only waits on the
+    SANDBOX container's ``ready``, not the proxy sidecar's ``access.jsonl``
+    contract. Without this gate the first ``session.exec()`` can cat the log
+    before the proxy entrypoint has created it → cat exit 1 →
+    ``_read_proxy_log_from_sidecar_k8s`` fail-closes with
+    ``egress_audit_unreadable`` (a startup-race flake, not a real egress
+    violation). The probe execs the EXACT operation the real read performs,
+    so a passing probe deterministically predicts the first real read.
+    """
+
+    @pytest.mark.asyncio
+    async def test_returns_when_cat_exits_zero_and_probes_proxy_log(self) -> None:
+        backend = _make_backend()
+        with patch.object(
+            backend, "_exec_short_lived", AsyncMock(return_value=(b"", 0))
+        ) as exec_mock:
+            await backend._wait_for_proxy_audit_log_ready(pod_name="p")  # no raise
+        exec_mock.assert_awaited_once()
+        assert exec_mock.await_args is not None
+        kwargs = exec_mock.await_args.kwargs
+        assert kwargs["container_name"] == _PROXY_SIDECAR_CONTAINER_NAME, (
+            "readiness probe MUST exec in the egress-proxy sidecar (the container "
+            "that owns + writes access.jsonl), not the workload sandbox"
+        )
+        assert kwargs["command"] == ["cat", _PROXY_LOG_PATH], (
+            "probe MUST cat the EXACT path _read_proxy_log_from_sidecar_k8s reads, "
+            "so a passing probe predicts the real read"
+        )
+
+    @pytest.mark.asyncio
+    async def test_retries_past_transport_none_and_nonzero_then_succeeds(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # None = exec transport not ready (proxy container still creating);
+        # (b"", 1) = cat failed (entrypoint hasn't created access.jsonl yet);
+        # (b"", 0) = ready. Poll past the first two, return on the third.
+        monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+        backend = _make_backend()
+        with patch.object(
+            backend,
+            "_exec_short_lived",
+            AsyncMock(side_effect=[None, (b"", 1), (b"", 0)]),
+        ) as exec_mock:
+            await backend._wait_for_proxy_audit_log_ready(pod_name="p")
+        assert exec_mock.await_count == 3
+
+    @pytest.mark.asyncio
+    async def test_raises_runtime_error_on_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Never-ready proxy log → RuntimeError after the deadline. The
+        create()/wake() outer try/except translates this to teardown +
+        re-raise (the SAME path as _wait_for_pod_ready's timeout — no new
+        closed-enum reason needed)."""
+        monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+        loop = asyncio.get_event_loop()
+        real_time = loop.time
+        times = iter([0.0, 1e9])  # start time, then way past the deadline
+
+        def _fake_time() -> float:
+            try:
+                return next(times)
+            except StopIteration:
+                return real_time()
+
+        monkeypatch.setattr(loop, "time", _fake_time)
+        backend = _make_backend()
+        with patch.object(backend, "_exec_short_lived", AsyncMock(return_value=(b"", 1))):
+            with pytest.raises(RuntimeError, match=r"audit log .* not ready within"):
+                await backend._wait_for_proxy_audit_log_ready(pod_name="p")
 
 
 class TestReadSuspendEventId:

@@ -308,8 +308,11 @@ async def admit_policy(
       4. high-risk-tier transitional refusal (6 ADR-014 tiers)
       5. tenant-max check (cpu_cores / memory_mb / walltime_s)
       6. image-catalog membership (canonical OR per-tenant allow-list)
-      7. cosign signature verification (delegates to catalog)
-      8. SBOM policy check (delegates to catalog)
+      7. cosign signature verification (delegates to catalog; runs for
+         canonical AND tenant-allow-listed images)
+      8. tenant-image SBOM/license-policy check (delegates to catalog);
+         SKIPPED for canonical platform images per the ADR-016 2026-05-29
+         carve-out (see the step-8 guard below)
       9. Rego admission against ``data.cognic.sandbox.admit.allow``
 
     The Rego decision-point is invoked via the real
@@ -515,8 +518,29 @@ async def admit_policy(
     # out against the real OCI ref, not ``docker.io/sha256:...``).
     await catalog.verify_cosign_or_refuse(image_digest, tenant_id=tenant_id)
 
-    # Step 8 — SBOM policy check (same full-ref-resolution pattern)
-    await catalog.verify_sbom_policy_or_refuse(image_digest, tenant_id=tenant_id)
+    # Step 8 — SBOM license-policy check (same full-ref-resolution pattern).
+    #
+    # T8.5 CARVE-OUT (ADR-016 amendment): canonical AgentOS platform images are
+    # EXEMPT from the tenant/default license-deny policy. They are AgentOS's own
+    # supply-chain artifacts — cosign-verified under the canonical trust root at
+    # step 7 above and SBOM-generated + retained per ADR-016 — and are
+    # necessarily GPL/LGPL-bearing (glibc=LGPL, coreutils/bash=GPL, the GPL-2.0
+    # egress proxy). The default-deny license policy
+    # (``catalog._DEFAULT_LICENSE_POLICY``, permissive-allow-only, non-loosenable
+    # via ``_compose_policy``) is a TENANT-CONTENT legal-review control; applying
+    # it to AgentOS's own platform base images would make every canonical image
+    # unadmittable. Canonical platform-image acceptance is an AgentOS
+    # release/signing decision under the canonical trust root; banks audit the
+    # retained SBOM/license inventory operationally rather than re-applying
+    # tenant pack policy at sandbox-create time. Tenant-allow-listed images keep
+    # the full license gate. Pinned by
+    # ``TestT8_5CanonicalSbomLicenseCarveOut`` (canonical skips even a refusing
+    # SBOM) + ``TestAdmissionRefusalArms.test_sbom_check_fail`` (tenant path
+    # still blocks). The ``is_canonical`` short-circuit is deliberate: an image
+    # that is both canonical AND tenant-allow-listed is governed by its canonical
+    # attestation.
+    if not runtime_image_in_canonical_set:
+        await catalog.verify_sbom_policy_or_refuse(image_digest, tenant_id=tenant_id)
 
     # Step 9 — Rego admission via the canonical ``OPAEngine.evaluate``
     # signature at ``core/policy/engine.py:269``: kw-only decision_point

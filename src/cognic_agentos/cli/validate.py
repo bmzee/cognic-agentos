@@ -56,6 +56,7 @@ from typing import Final
 from cognic_agentos.cli import ValidatorFinding
 from cognic_agentos.cli.validators import (
     a2a,
+    credentials,
     data_governance,
     hooks,
     identity,
@@ -420,6 +421,20 @@ def run_validators(pack_path: Path) -> list[ValidatorFinding]:
     findings.extend(mcp.validate(data, pack_path))
     findings.extend(data_governance.validate(data, pack_path))
     findings.extend(risk_tier.validate(data, pack_path))
+    # Sprint 10.6 T15 — credentials validator (per ADR-004 §25 +
+    # ADR-017). Placed AFTER risk_tier because the credentials
+    # validator cross-validates on ``[risk_tier].tier`` for the
+    # pre-Sprint-13.5 high-risk-tier refusal; placed BEFORE
+    # supply_chain because supply_chain operates on attestation
+    # paths (independent concern). The validator is silent on
+    # manifests without a ``[credentials.*]`` block, so adding it
+    # to the dispatch chain does NOT regress any pack without
+    # credentials. Per ``[[feedback_dual_path_doctrine]]``, the
+    # one-validator-owns-each-refusal invariant is preserved: the
+    # 21 closed-enum reasons owned by validators/credentials.py
+    # (per ``cli/__init__.py:_VALIDATOR_REASON_OWNERSHIP``) are
+    # emitted only here; sibling validators do NOT collateral-emit.
+    findings.extend(credentials.validate(data, pack_path))
     findings.extend(supply_chain.validate(data, pack_path))
     # Sprint-7A2 T5 — hook-block validator. Fires for every pack
     # (Wave-1 narrow: hook packs MUST declare [hooks]; non-hook

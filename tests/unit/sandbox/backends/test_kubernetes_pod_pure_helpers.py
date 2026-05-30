@@ -28,6 +28,7 @@ an OpenShift-incompatible spec.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import pytest
@@ -41,6 +42,7 @@ pytest.importorskip("kubernetes_asyncio")
 from cognic_agentos.sandbox import PackAdmissionContext, SandboxPolicy
 from cognic_agentos.sandbox.backends.kubernetes_pod import (
     _CANONICAL_EGRESS_PROXY_IMAGE,
+    _PROXY_CONFIG_DIR,
     _PROXY_LOG_DIR,
     _PROXY_LOG_PATH,
     _PROXY_PORT,
@@ -120,6 +122,67 @@ def test_build_pod_spec_injected_proxy_image() -> None:
         egress_proxy_image=ref,
     )
     assert _proxy_container(spec)["image"] == ref
+
+
+class TestPodSpecProxySidecarEnv:
+    """T30/T14.1 — the egress-proxy sidecar container MUST carry the
+    SESSION_ID + ALLOW_LIST env the canonical proxy entrypoint (T6/T7)
+    reads at boot.
+
+    The canonical ``cognic/sandbox-egress-proxy`` entrypoint REFUSES
+    startup when SESSION_ID is absent. Before this fix the K8s pod spec
+    launched the sidecar with no env, so it died at boot and was gone
+    when ``exec()``'s green path read the proxy access log — surfacing
+    as ``SandboxPolicyViolated(egress_audit_unreadable)`` (the Z4 live
+    audit failure). Docker wires this env via
+    ``_build_proxy_sidecar_container_config``; these pins are the K8s
+    parity contract.
+    """
+
+    def test_proxy_sidecar_carries_session_id_and_allow_list_env(self) -> None:
+        spec = _build_default_pod_spec(policy=_POLICY, session_id="s-1", tenant_id="t-1")
+        env = {e["name"]: e["value"] for e in _proxy_container(spec)["env"]}
+        assert env["SESSION_ID"] == "s-1"
+        assert json.loads(env["ALLOW_LIST"]) == ["httpbin.org", "api.example.com"]
+
+    def test_proxy_sidecar_env_uses_k8s_name_value_shape(self) -> None:
+        # K8s container env is list[{"name","value"}], NOT Docker's ["K=V"].
+        spec = _build_default_pod_spec(policy=_POLICY, session_id="s-1", tenant_id="t-1")
+        env = _proxy_container(spec)["env"]
+        assert isinstance(env, list)
+        for entry in env:
+            assert set(entry.keys()) == {"name", "value"}, entry
+
+    def test_proxy_sidecar_session_id_flows_through(self) -> None:
+        spec = _build_default_pod_spec(policy=_POLICY, session_id="s-distinct-99", tenant_id="t-1")
+        env = {e["name"]: e["value"] for e in _proxy_container(spec)["env"]}
+        assert env["SESSION_ID"] == "s-distinct-99"
+
+    def test_proxy_sidecar_empty_allow_list_renders_empty_json_array(self) -> None:
+        policy = SandboxPolicy(
+            cpu_cores=0.5,
+            cpu_time_budget_s=None,
+            memory_mb=256,
+            walltime_s=30.0,
+            runtime_image="cognic/sandbox-runtime-python:v1@sha256:" + "a" * 64,
+            egress_allow_list=(),
+            vault_path=None,
+        )
+        spec = _build_default_pod_spec(policy=policy, session_id="s-1", tenant_id="t-1")
+        env = {e["name"]: e["value"] for e in _proxy_container(spec)["env"]}
+        assert json.loads(env["ALLOW_LIST"]) == []
+
+    def test_proxy_env_not_leaked_onto_sandbox_container(self) -> None:
+        # The fix adds env to the SIDECAR only — the sandbox (workload)
+        # container's env stays HTTP_PROXY/HTTPS_PROXY only; SESSION_ID +
+        # ALLOW_LIST must NOT leak onto the workload container.
+        spec = _build_default_pod_spec(policy=_POLICY, session_id="s-1", tenant_id="t-1")
+        containers = spec["spec"]["containers"]
+        sandbox = next(c for c in containers if c["name"] == _SANDBOX_CONTAINER_NAME)
+        sandbox_env = {e["name"]: e["value"] for e in sandbox["env"]}
+        assert "HTTP_PROXY" in sandbox_env
+        assert "SESSION_ID" not in sandbox_env
+        assert "ALLOW_LIST" not in sandbox_env
 
 
 # ---------------------------------------------------------------------------
@@ -320,7 +383,10 @@ class TestBuildPodSpec:
         proxy = next(
             c for c in spec["spec"]["containers"] if c["name"] == _PROXY_SIDECAR_CONTAINER_NAME
         )
-        assert proxy["image"].startswith("cognic/sandbox-egress-proxy:")
+        # T12 — the sidecar image MUST be the canonical egress-proxy ref
+        # (digest-pinned; tracks _CANONICAL_EGRESS_PROXY_IMAGE through the T12
+        # swap rather than a hardcoded registry-path prefix).
+        assert proxy["image"] == _CANONICAL_EGRESS_PROXY_IMAGE
         assert "@sha256:" in proxy["image"]
 
     def test_pod_spec_sandbox_container_sets_http_proxy_to_localhost(self) -> None:
@@ -600,6 +666,79 @@ class TestPodSpecProxyLogWritableMount:
         assert _PROXY_LOG_PATH == "/var/log/cognic-proxy/access.jsonl"
 
 
+class TestPodSpecProxyConfigWritableMount:
+    """**T30/T14.1 — writable ``/etc/cognic-proxy`` for the proxy sidecar.**
+
+    The canonical egress-proxy entrypoint renders + writes
+    ``tinyproxy.filter`` + ``tinyproxy.conf`` into ``/etc/cognic-proxy``
+    at startup. Under ``readOnlyRootFilesystem=True`` that dir (part of
+    the image root) is read-only — only ``/var/log/cognic-proxy`` had a
+    writable mount. Without a writable ``/etc/cognic-proxy`` the proxy
+    hits ``PermissionError: read-only file system`` at boot (after the
+    SESSION_ID env fix moves it past the refuse-startup gate) and is gone
+    when the backend reads its access log → ``egress_audit_unreadable``
+    (the Z4 live-audit failure class).
+
+    On OpenShift the emptyDir is made writable by the proxy via the
+    restricted SCC's (or the explicit credential-projection) ``fsGroup``,
+    exactly as the existing ``/var/log`` emptyDir is.
+
+    Same defence-in-depth isolation invariant as the proxy-log mount: the
+    workload-side sandbox container MUST NOT mount the proxy config volume.
+    """
+
+    def _spec(self) -> dict[str, Any]:
+        return _build_default_pod_spec(policy=_POLICY, session_id="s-1", tenant_id="t-1")
+
+    def test_pod_spec_declares_emptydir_volume_for_proxy_config(self) -> None:
+        spec = self._spec()
+        volumes = spec["spec"].get("volumes", [])
+        matches = [v for v in volumes if v.get("name") == "proxy-config"]
+        assert len(matches) == 1, (
+            f"expected exactly one volume named 'proxy-config'; got: {volumes!r}. "
+            "Without this volume the canonical egress-proxy sidecar cannot render "
+            "its tinyproxy config under readOnlyRootFilesystem=True; the proxy "
+            "fails at boot and every green session.exec() fail-closes with "
+            "egress_audit_unreadable."
+        )
+        assert "emptyDir" in matches[0]
+
+    def test_pod_spec_mounts_proxy_config_on_sidecar(self) -> None:
+        spec = self._spec()
+        containers = spec["spec"]["containers"]
+        proxy = next(c for c in containers if c["name"] == _PROXY_SIDECAR_CONTAINER_NAME)
+        mounts = proxy.get("volumeMounts", [])
+        matches = [m for m in mounts if m.get("name") == "proxy-config"]
+        assert len(matches) == 1, (
+            f"proxy sidecar MUST have exactly one volumeMount named 'proxy-config'; got: {mounts!r}"
+        )
+        assert matches[0]["mountPath"] == _PROXY_CONFIG_DIR, (
+            f"proxy-config mountPath MUST equal _PROXY_CONFIG_DIR ({_PROXY_CONFIG_DIR!r}); "
+            f"got: {matches[0]['mountPath']!r}. The entrypoint writes tinyproxy.filter "
+            "+ tinyproxy.conf under this dir; drift leaves it read-only + breaks boot."
+        )
+
+    def test_pod_spec_does_not_leak_proxy_config_onto_sandbox(self) -> None:
+        """**LOAD-BEARING isolation pin.** The sandbox (workload) container
+        MUST NOT mount the proxy config volume — it is AgentOS-owned proxy
+        scratch, not workload surface."""
+        spec = self._spec()
+        containers = spec["spec"]["containers"]
+        sandbox = next(c for c in containers if c["name"] == _SANDBOX_CONTAINER_NAME)
+        leaked = [m for m in sandbox.get("volumeMounts", []) if m.get("name") == "proxy-config"]
+        assert leaked == [], (
+            f"sandbox container MUST NOT mount the proxy-config volume; got: {leaked!r}"
+        )
+
+    def test_proxy_config_dir_constant_matches_entrypoint_default(self) -> None:
+        """Cross-artifact contract — ``_PROXY_CONFIG_DIR`` MUST equal the
+        egress-proxy entrypoint's ``_DEFAULT_CONFIG_DIR`` (/etc/cognic-proxy),
+        the dir the proxy renders its tinyproxy config into. Drift would mount
+        a writable volume at the wrong path + leave the real config dir
+        read-only."""
+        assert _PROXY_CONFIG_DIR == "/etc/cognic-proxy"
+
+
 # ---------------------------------------------------------------------------
 # NetworkPolicy spec — per-session deny-all egress lockdown
 # ---------------------------------------------------------------------------
@@ -721,6 +860,256 @@ class TestModuleIsCriticalControls:
 
         # Re-export same object (catches duplicate-declaration class).
         assert KubernetesPodSandboxBackend is DirectImport
+
+
+# ---------------------------------------------------------------------------
+# Sprint 10.6 T20 — pod-spec extension for credential Secret mounts
+# ---------------------------------------------------------------------------
+
+
+class TestBuildPodSpecCredentialMountsBackwardCompat:
+    """T20 extends ``_build_pod_spec`` with two new optional kwargs:
+    ``credential_secrets: Sequence[CredentialSecretMount] = ()`` and
+    ``workload_fs_group: int | None = None``. Default invocation
+    (omitting both kwargs) MUST produce a byte-identical pod spec to
+    today — no churn in the existing 13+ ``TestBuildPodSpec`` /
+    ``TestPodSpecWritableMountContract`` regressions when T20 lands.
+    """
+
+    def test_default_no_credentials_no_fsgroup_no_pod_security_context(self) -> None:
+        # When no credential mounts + no fsGroup are passed, the pod
+        # spec MUST NOT carry a pod-level securityContext at all.
+        # (Pod-level securityContext is what carries fsGroup; we don't
+        # set any other pod-level fields, so absence is the contract.)
+        spec = _build_default_pod_spec(
+            policy=_POLICY,
+            session_id="s-1",
+            tenant_id="t-1",
+        )
+        assert "securityContext" not in spec["spec"], (
+            "default pod spec MUST NOT carry pod-level securityContext "
+            "(load-bearing: T19+T20 doctrine — fsGroup is OPT-IN per "
+            "spec §5.4 K8s row; absent means OpenShift MustRunAsRange "
+            "allocates from namespace range)"
+        )
+
+    def test_default_no_credentials_no_extra_volumes(self) -> None:
+        # No credential mounts → only the base sidecar-infra volumes:
+        # workspace + proxy-log + proxy-config (T30/T14.1 added proxy-config
+        # so the proxy can render its tinyproxy config under read-only root).
+        spec = _build_default_pod_spec(
+            policy=_POLICY,
+            session_id="s-1",
+            tenant_id="t-1",
+        )
+        volume_names = {v["name"] for v in spec["spec"]["volumes"]}
+        assert volume_names == {"workspace", "proxy-log", "proxy-config"}
+
+    def test_default_no_credentials_no_extra_volume_mounts(self) -> None:
+        # No credential mounts → sandbox container has only workspace mount.
+        spec = _build_default_pod_spec(
+            policy=_POLICY,
+            session_id="s-1",
+            tenant_id="t-1",
+        )
+        sandbox_container = next(c for c in spec["spec"]["containers"] if c["name"] == "sandbox")
+        mount_names = {m["name"] for m in sandbox_container["volumeMounts"]}
+        assert mount_names == {"workspace"}
+
+
+class TestBuildPodSpecWithCredentialMounts:
+    """T20 credential-mount extension: when ``credential_secrets`` is
+    non-empty, ``_build_pod_spec`` MUST add one volume + one
+    volumeMount per credential. The volumes go in ``spec.volumes``;
+    the mounts go on the SANDBOX container only (proxy sidecar MUST
+    NOT see credential bytes — same threat model as proxy-log).
+    """
+
+    def _credential_mount(
+        self, *, logical_name: str = "db_main", secret_name: str | None = None
+    ) -> Any:
+        from cognic_agentos.sandbox.backends._k8s_executor import CredentialSecretMount
+
+        if secret_name is None:
+            secret_name = "cognic-cred-0123456789abcdef"
+        return CredentialSecretMount(logical_name=logical_name, secret_name=secret_name)
+
+    def test_single_credential_adds_one_volume_with_secret_source(self) -> None:
+        spec = _build_default_pod_spec(
+            policy=_POLICY,
+            session_id="s-1",
+            tenant_id="t-1",
+            credential_secrets=[self._credential_mount()],
+        )
+        # Volume named after the OPAQUE Secret name (DNS-1123 safe).
+        volume = next(
+            v for v in spec["spec"]["volumes"] if v["name"] == "cognic-cred-0123456789abcdef"
+        )
+        assert volume["secret"]["secretName"] == "cognic-cred-0123456789abcdef"
+        assert volume["secret"]["defaultMode"] == 0o440
+
+    def test_single_credential_adds_mount_only_on_sandbox_container(self) -> None:
+        spec = _build_default_pod_spec(
+            policy=_POLICY,
+            session_id="s-1",
+            tenant_id="t-1",
+            credential_secrets=[self._credential_mount(logical_name="db_main")],
+        )
+        sandbox_container = next(c for c in spec["spec"]["containers"] if c["name"] == "sandbox")
+        proxy_container = next(
+            c for c in spec["spec"]["containers"] if c["name"] == _PROXY_SIDECAR_CONTAINER_NAME
+        )
+        # Sandbox: workspace + 1 credential mount.
+        sandbox_mount_paths = {m["mountPath"] for m in sandbox_container["volumeMounts"]}
+        assert "/run/credentials/db_main" in sandbox_mount_paths
+        # Proxy: proxy-log only — NO credential mount leakage.
+        proxy_mount_names = {m["name"] for m in proxy_container["volumeMounts"]}
+        assert "cognic-cred-0123456789abcdef" not in proxy_mount_names
+
+    def test_multiple_credentials_add_one_volume_each(self) -> None:
+        mounts = [
+            self._credential_mount(
+                logical_name="db_main", secret_name="cognic-cred-aaaaaaaaaaaaaaaa"
+            ),
+            self._credential_mount(
+                logical_name="aws_credentials",
+                secret_name="cognic-cred-bbbbbbbbbbbbbbbb",
+            ),
+        ]
+        spec = _build_default_pod_spec(
+            policy=_POLICY,
+            session_id="s-1",
+            tenant_id="t-1",
+            credential_secrets=mounts,
+        )
+        volume_names = {v["name"] for v in spec["spec"]["volumes"]}
+        assert "cognic-cred-aaaaaaaaaaaaaaaa" in volume_names
+        assert "cognic-cred-bbbbbbbbbbbbbbbb" in volume_names
+
+    def test_multiple_credentials_distinct_mount_paths_per_logical_name(self) -> None:
+        mounts = [
+            self._credential_mount(
+                logical_name="db_main", secret_name="cognic-cred-aaaaaaaaaaaaaaaa"
+            ),
+            self._credential_mount(
+                logical_name="aws_credentials",
+                secret_name="cognic-cred-bbbbbbbbbbbbbbbb",
+            ),
+        ]
+        spec = _build_default_pod_spec(
+            policy=_POLICY,
+            session_id="s-1",
+            tenant_id="t-1",
+            credential_secrets=mounts,
+        )
+        sandbox_container = next(c for c in spec["spec"]["containers"] if c["name"] == "sandbox")
+        mount_paths = {m["mountPath"] for m in sandbox_container["volumeMounts"]}
+        assert "/run/credentials/db_main" in mount_paths
+        assert "/run/credentials/aws_credentials" in mount_paths
+
+    def test_credential_volume_name_never_contains_logical_name(self) -> None:
+        # Wire-public-artifact regression: the DNS-1123 volume name
+        # MUST be the opaque Secret name, not raw logical_name. A
+        # logical_name with underscore (e.g. ``db_main``) would
+        # violate DNS-1123 if used as a volume name.
+        spec = _build_default_pod_spec(
+            policy=_POLICY,
+            session_id="s-1",
+            tenant_id="t-1",
+            credential_secrets=[
+                self._credential_mount(
+                    logical_name="db_main",
+                    secret_name="cognic-cred-0123456789abcdef",
+                )
+            ],
+        )
+        volume_names = {v["name"] for v in spec["spec"]["volumes"]}
+        assert "db_main" not in volume_names
+        assert "cognic-cred-db_main" not in volume_names
+
+    def test_credential_mounts_are_read_only(self) -> None:
+        spec = _build_default_pod_spec(
+            policy=_POLICY,
+            session_id="s-1",
+            tenant_id="t-1",
+            credential_secrets=[self._credential_mount(logical_name="db_main")],
+        )
+        sandbox_container = next(c for c in spec["spec"]["containers"] if c["name"] == "sandbox")
+        credential_mount = next(
+            m
+            for m in sandbox_container["volumeMounts"]
+            if m["mountPath"] == "/run/credentials/db_main"
+        )
+        assert credential_mount["readOnly"] is True
+
+
+class TestBuildPodSpecWithFsGroup:
+    """T20 fsGroup extension: when ``workload_fs_group`` is passed,
+    pod spec carries ``spec.securityContext = {"fsGroup": <int>}``.
+    Per spec §5.4 K8s row + §5.5: the kubelet uses this to recursively
+    chgrp the projected Secret files at mount time, granting the
+    workload's GID group-read access without per-file chmod.
+    """
+
+    def test_fsgroup_sets_pod_level_security_context(self) -> None:
+        spec = _build_default_pod_spec(
+            policy=_POLICY,
+            session_id="s-1",
+            tenant_id="t-1",
+            workload_fs_group=1000,
+        )
+        assert spec["spec"]["securityContext"] == {"fsGroup": 1000}
+
+    def test_fsgroup_does_not_modify_container_security_contexts(self) -> None:
+        # The pod-level securityContext is SEPARATE from the
+        # per-container securityContext (which already exists from
+        # ``_build_security_context``). fsGroup MUST NOT leak into
+        # container-level securityContext.
+        spec = _build_default_pod_spec(
+            policy=_POLICY,
+            session_id="s-1",
+            tenant_id="t-1",
+            workload_fs_group=1000,
+        )
+        for container in spec["spec"]["containers"]:
+            container_sc = container.get("securityContext", {})
+            assert "fsGroup" not in container_sc, (
+                f"container {container['name']!r}'s securityContext "
+                f"MUST NOT carry fsGroup (pod-level only)"
+            )
+
+    def test_fsgroup_with_high_value_works(self) -> None:
+        # OpenShift MustRunAsRange allocates GIDs in 1000000000+
+        # range — ensure no implicit cap.
+        spec = _build_default_pod_spec(
+            policy=_POLICY,
+            session_id="s-1",
+            tenant_id="t-1",
+            workload_fs_group=1000680000,
+        )
+        assert spec["spec"]["securityContext"]["fsGroup"] == 1000680000
+
+    def test_fsgroup_and_credential_mounts_together(self) -> None:
+        # The integration shape: T21 will pass both kwargs together.
+        from cognic_agentos.sandbox.backends._k8s_executor import CredentialSecretMount
+
+        spec = _build_default_pod_spec(
+            policy=_POLICY,
+            session_id="s-1",
+            tenant_id="t-1",
+            workload_fs_group=1000,
+            credential_secrets=[
+                CredentialSecretMount(
+                    logical_name="db_main",
+                    secret_name="cognic-cred-0123456789abcdef",
+                )
+            ],
+        )
+        # fsGroup set at pod level
+        assert spec["spec"]["securityContext"]["fsGroup"] == 1000
+        # Credential volume present
+        volume_names = {v["name"] for v in spec["spec"]["volumes"]}
+        assert "cognic-cred-0123456789abcdef" in volume_names
 
 
 if __name__ == "__main__":

@@ -24,6 +24,8 @@ clearly-named placeholders that never reach a Docker daemon.
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 # R1 P2.2 reviewer fix — these pure-helper tests import the backend
@@ -37,6 +39,8 @@ pytest.importorskip("aiodocker")
 from cognic_agentos.sandbox import PackAdmissionContext, SandboxPolicy
 from cognic_agentos.sandbox.backends.docker_sibling import (
     _NON_ROOT_USER,
+    _PROXY_CONFIG_DIR,
+    _PROXY_NON_ROOT_USER,
     _build_proxy_sidecar_container_config,
     _build_sandbox_container_config,
     _internal_network_name,
@@ -246,12 +250,23 @@ class TestModuleIsCriticalControls:
 
 
 class TestContainerConfigsRunAsNonRoot:
-    """R1 P1.3 reviewer fix — both sandbox + sidecar configs MUST
-    set ``User: "65534:65534"`` (nobody:nogroup) per spec §7 +
-    ADR-004 amendment ("never run as root inside the sandbox").
-    Without this, Docker uses the image default user (commonly root),
-    weakening the sandbox boundary even with CapDrop:[ALL] +
-    ReadonlyRootfs + no-new-privileges set."""
+    """Both sandbox + sidecar configs MUST run as a NON-ROOT user, but
+    they use DISTINCT identities per the T30/T14.1 decision:
+
+    * **Sandbox (workload)** — squashed to ``65534:65534``
+      (nobody:nogroup). The workload is the untrusted surface; nobody
+      is the safe generic identity.
+    * **Proxy sidecar** — runs as ``10002:10002``, the canonical
+      egress-proxy image's purpose-built ``cognicproxy`` user (it
+      OWNS ``/etc/cognic-proxy`` + ``/var/log/cognic-proxy``, chowned
+      at image build). The proxy is AgentOS-owned infrastructure; it
+      runs as its baked identity, NOT the workload identity. Forcing
+      it to 65534 (the pre-T14.1 behaviour) left it unable to write
+      its config/log dirs under ``ReadonlyRootfs=True`` (those dirs
+      are 10002-owned) — the Z4 live-audit failure class.
+
+    Both are explicit, non-root, and pinned so an image-metadata drift
+    cannot silently change container identity."""
 
     def test_sandbox_container_config_runs_as_nobody(self) -> None:
         config = _build_sandbox_container_config(
@@ -266,14 +281,22 @@ class TestContainerConfigsRunAsNonRoot:
             "root), weakening the sandbox boundary."
         )
 
-    def test_proxy_sidecar_container_config_runs_as_nobody(self) -> None:
+    def test_proxy_sidecar_container_config_runs_as_image_proxy_user(self) -> None:
         config = _build_proxy_sidecar_container_config(
             policy=_POLICY,
             session_id="abcd" * 8,
             internal_net_name="cognic-sb-internal-abcd1234-abcdef01",
             proxy_image="cognic/sandbox-egress-proxy:v1@sha256:" + "d" * 64,
         )
-        assert config["User"] == "65534:65534"
+        assert config["User"] == "10002:10002", (
+            "Proxy sidecar MUST run as the canonical image's purpose-built "
+            "cognicproxy user (10002:10002) which owns /etc/cognic-proxy + "
+            "/var/log/cognic-proxy — NOT the workload's 65534 (which cannot "
+            "write those 10002-owned dirs under ReadonlyRootfs=True)."
+        )
+        # Non-root: neither uid nor gid is 0.
+        uid, _, gid = config["User"].partition(":")
+        assert uid != "0" and gid != "0"
 
     def test_non_root_user_constant_is_nobody_nogroup(self) -> None:
         """Pin the spec-locked UID/GID — 65534:65534 is the
@@ -282,6 +305,83 @@ class TestContainerConfigsRunAsNonRoot:
         constant as wire-protocol-adjacent (changing it means a
         container-runtime-behaviour change at next deploy)."""
         assert _NON_ROOT_USER == "65534:65534"
+
+    def test_proxy_non_root_user_constant_is_image_proxy_identity(self) -> None:
+        """Pin the proxy sidecar's identity to the canonical egress-proxy
+        image's baked ``cognicproxy`` user (10002:10002 per the image
+        Dockerfile's ``groupadd -g 10002`` / ``useradd -u 10002``). The
+        backend pins it EXPLICITLY rather than relying on the image's USER
+        directive so image-metadata drift cannot silently change it."""
+        assert _PROXY_NON_ROOT_USER == "10002:10002"
+
+    def test_proxy_and_sandbox_use_distinct_non_root_identities(self) -> None:
+        """Coherence: the trusted infra sidecar (10002) and the untrusted
+        workload (65534) MUST be distinct identities — neither root."""
+        assert _PROXY_NON_ROOT_USER != _NON_ROOT_USER
+        for user in (_PROXY_NON_ROOT_USER, _NON_ROOT_USER):
+            uid, _, gid = user.partition(":")
+            assert uid not in ("", "0") and gid not in ("", "0")
+
+
+class TestProxySidecarWritableConfigMount:
+    """T30/T14.1 — the proxy sidecar needs a WRITABLE ``/etc/cognic-proxy``
+    under ``ReadonlyRootfs=True``.
+
+    The canonical proxy entrypoint renders + writes ``tinyproxy.filter`` +
+    ``tinyproxy.conf`` into ``/etc/cognic-proxy`` at startup. That dir is
+    part of the (read-only) image root, and only ``/var/log/cognic-proxy``
+    is a Docker ``VOLUME`` — so without an explicit writable mount the proxy
+    hits ``PermissionError: read-only file system`` at boot and is gone when
+    the backend reads its access log (``egress_audit_unreadable``). A tmpfs
+    mount (owned by the proxy's 10002 identity) provides the writable
+    scratch surface without changing the signed image.
+
+    Sidecar-only: the writable config tmpfs MUST NOT appear on the workload
+    container's HostConfig.
+    """
+
+    def _proxy_config(self) -> dict[str, Any]:
+        return _build_proxy_sidecar_container_config(
+            policy=_POLICY,
+            session_id="abcd" * 8,
+            internal_net_name="cognic-sb-internal-abcd1234-abcdef01",
+            proxy_image="cognic/sandbox-egress-proxy:v1@sha256:" + "d" * 64,
+        )
+
+    def test_proxy_config_dir_constant_is_etc_cognic_proxy(self) -> None:
+        # Cross-artifact contract: MUST equal the egress-proxy entrypoint's
+        # _DEFAULT_CONFIG_DIR (/etc/cognic-proxy) — the dir the proxy writes
+        # its rendered tinyproxy config into.
+        assert _PROXY_CONFIG_DIR == "/etc/cognic-proxy"
+
+    def test_proxy_sidecar_has_writable_config_tmpfs(self) -> None:
+        tmpfs = self._proxy_config()["HostConfig"].get("Tmpfs", {})
+        assert _PROXY_CONFIG_DIR in tmpfs, (
+            f"proxy sidecar HostConfig MUST declare a writable Tmpfs at "
+            f"{_PROXY_CONFIG_DIR!r} so the entrypoint can render tinyproxy "
+            f"config under ReadonlyRootfs=True; got Tmpfs={tmpfs!r}"
+        )
+
+    def test_proxy_config_tmpfs_owned_by_proxy_user(self) -> None:
+        # The tmpfs must be writable by the proxy's 10002 identity — pin the
+        # uid/gid options so a default-root-owned tmpfs (unwritable by 10002)
+        # cannot regress.
+        opts = self._proxy_config()["HostConfig"]["Tmpfs"][_PROXY_CONFIG_DIR]
+        assert "uid=10002" in opts and "gid=10002" in opts, (
+            f"config tmpfs MUST be owned by the proxy's 10002 identity; got {opts!r}"
+        )
+
+    def test_proxy_config_tmpfs_not_on_sandbox_container(self) -> None:
+        sandbox_config = _build_sandbox_container_config(
+            policy=_POLICY,
+            session_id="abcd" * 8,
+            internal_net_name="cognic-sb-internal-abcd1234-abcdef01",
+        )
+        sandbox_tmpfs = sandbox_config["HostConfig"].get("Tmpfs", {})
+        assert _PROXY_CONFIG_DIR not in sandbox_tmpfs, (
+            f"the proxy config tmpfs is sidecar-only; it MUST NOT appear on "
+            f"the workload container HostConfig; got Tmpfs={sandbox_tmpfs!r}"
+        )
 
 
 class TestContainerConfigsCarrySecurityDefaults:

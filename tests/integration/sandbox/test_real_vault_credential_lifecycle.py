@@ -193,11 +193,16 @@ from cognic_agentos.core.vault import (  # noqa: E402
 )
 from cognic_agentos.portal.rbac.actor import Actor  # noqa: E402
 from cognic_agentos.sandbox import PackAdmissionContext, SandboxPolicy  # noqa: E402
+from cognic_agentos.sandbox._preflight import PreflightResult  # noqa: E402
+from cognic_agentos.sandbox.backends._docker_executor import (  # noqa: E402
+    ProjectionExecutorResult,
+)
 from cognic_agentos.sandbox.backends.docker_sibling import (  # noqa: E402
     DockerSiblingSandboxBackend,
     DockerSiblingSession,
 )
 from cognic_agentos.sandbox.credentials import VaultCredentialAdapter  # noqa: E402
+from cognic_agentos.sandbox.projection import CredentialDecl  # noqa: E402
 from cognic_agentos.sandbox.protocol import SandboxLifecycleRefused  # noqa: E402
 
 # Module-level env-gate. Default pytest invocations skip; opting in
@@ -542,7 +547,7 @@ def _make_layer2_backend(
     catalog.verify_sbom_policy_or_refuse = AsyncMock(return_value=None)
     rego = MagicMock()
     rego.evaluate = AsyncMock(return_value=MagicMock(allow=True, reasoning=""))
-    return DockerSiblingSandboxBackend(
+    backend = DockerSiblingSandboxBackend(
         docker_client=docker,
         image_catalog=catalog,
         credential_adapter=adapter,
@@ -552,6 +557,24 @@ def _make_layer2_backend(
         settings=settings,
         warm_pool=None,
     )
+    # Sprint 10.6 T27 — Z2 Layer 2 proves REAL Vault mint/revoke threaded
+    # through the backend, NOT real Docker substrate projection. Mock the
+    # substrate-preflight + projection-cleanup seams (mirrors the T21 unit
+    # helper at test_docker_sibling_credential_lifecycle.py) so the credential
+    # pair contract (T21 ``verify_credentials_pair_invariants`` — NOT loosened)
+    # is satisfied while the test stays focused on the real-Vault path. Each
+    # test stubs ``_execute_projection_plan_docker`` itself (the happy path
+    # returns a result; the TTL-refusal path asserts it is never awaited).
+    backend._collect_preflight_result = AsyncMock(  # type: ignore[method-assign]
+        return_value=PreflightResult(
+            resolved_gid=1000,
+            file_mode=0o440,
+            dir_mode=0o750,
+            dev_escape_downgrade_reason=None,
+        )
+    )
+    backend._cleanup_projection_dir = AsyncMock(return_value=None)  # type: ignore[method-assign]
+    return backend
 
 
 @pytest.mark.asyncio
@@ -610,8 +633,59 @@ async def test_layer2_docker_create_destroy_threads_real_vault_lease_id_end_to_e
         vault_path=None,
     )
     request = _make_lease_request(secret_path)
+    # T27 — paired credential_decl per the Sprint 10.6 T21 mint+project pair
+    # contract (verify_credentials_pair_invariants requires credential_decls
+    # alongside requires_credentials). vault_path + tenant_id derive from the
+    # request so the per-index pair invariants hold; expected_fields
+    # ("password","username") match the real database/postgresql role response.
+    decl = CredentialDecl(
+        logical_name="db_main",
+        vault_path=secret_path,
+        expected_fields=["password", "username"],
+        ttl_s=request.ttl_s,
+        purpose_category="application_database_read",
+        purpose_description="Z2 Layer-2 real-Vault lease threading proof.",
+        tenant_id="t-z2-real",
+    )
 
-    # CREATE — mints a real Vault lease and threads it onto the session.
+    # T27 — stub the Docker projection executor so the test stays focused on
+    # REAL Vault mint/revoke, NOT real Docker substrate projection. The result
+    # is DERIVED FROM THE ACTUAL plan (which carries the REAL minted lease_id),
+    # NOT a fixed placeholder. This is load-bearing: destroy() pairs projections
+    # back to leases by ``executor_result.lease_id`` (docker_sibling.py), so a
+    # mismatched/placeholder lease_id would create an impossible session shape
+    # (active_leases[0].lease_id real, active_projections[0].lease_id fake) that
+    # silently routes destroy through the bare-revoke FALLBACK instead of the
+    # T21 PROJECTED-destroy path (cleanup-then-revoke) this repaired shape must
+    # prove compatible.
+    def _fake_docker_projection_executor(
+        *,
+        plan: Any,
+        preflight: Any,
+        session_opaque: str,
+        credential_opaque: str,
+    ) -> ProjectionExecutorResult:
+        return ProjectionExecutorResult(
+            logical_name=plan.logical_name,
+            vault_path=plan.vault_path,
+            tenant_id=plan.tenant_id,
+            lease_id=plan.lease_id,
+            projected_field_count=plan.projected_field_count,
+            purpose_category=plan.purpose_category,
+            purpose_description=plan.purpose_description,
+            host_staging_dir=f"/dev/shm/cognic/{session_opaque}/{credential_opaque}",
+            container_mount_target=f"/run/credentials/{plan.logical_name}",
+            session_opaque=session_opaque,
+            credential_opaque=credential_opaque,
+            dev_escape_downgrade_reason=None,
+        )
+
+    backend._execute_projection_plan_docker = AsyncMock(  # type: ignore[method-assign]
+        side_effect=_fake_docker_projection_executor
+    )
+
+    # CREATE — mints a real Vault lease + projects it (stubbed executor) and
+    # threads the real lease onto the session.
     with patch(
         "cognic_agentos.sandbox.backends.docker_sibling.admit_policy",
         new=AsyncMock(return_value=None),
@@ -623,6 +697,8 @@ async def test_layer2_docker_create_destroy_threads_real_vault_lease_id_end_to_e
             pack_context=pack_ctx,
             use_warm_pool=False,
             requires_credentials=(request,),
+            credential_decls=(decl,),
+            expected_workload_gid=1000,
         )
 
     assert isinstance(session, DockerSiblingSession)
@@ -664,6 +740,36 @@ async def test_layer2_docker_create_destroy_threads_real_vault_lease_id_end_to_e
         f"does not match the real Vault-issued lease_id {real_lease.lease_id!r}"
     )
 
+    # T27 — projection ran: the stale mint-ONLY shape (requires_credentials
+    # without credential_decls) is gone. The mint+project pair contract means
+    # the executor was awaited exactly once, the projection landed on the
+    # session, and a credentials_projected chain event carries the REAL lease.
+    backend._execute_projection_plan_docker.assert_awaited_once()
+    assert len(session.active_projections) == 1, (
+        f"Expected exactly 1 active projection under the mint+project pair "
+        f"contract; got {len(session.active_projections)}"
+    )
+    # T27 — the projection carries the REAL minted lease_id (not a placeholder),
+    # so destroy() can pair it back to the lease. A mismatch here would let
+    # destroy silently fall through to the bare-revoke fallback, leaving the
+    # T21 projected-destroy path unproven (the P2 false-positive this guards).
+    assert session.active_projections[0].lease_id == real_lease.lease_id, (
+        f"active_projections[0].lease_id "
+        f"{session.active_projections[0].lease_id!r} must equal the real minted "
+        f"lease_id {real_lease.lease_id!r} — destroy() pairs projection→lease by "
+        f"this id."
+    )
+    projected_records = [
+        r for r in emitted_records if r.decision_type == "sandbox.lifecycle.credentials_projected"
+    ]
+    assert len(projected_records) == 1, (
+        f"Expected exactly 1 credentials_projected emit; got {len(projected_records)}"
+    )
+    assert projected_records[0].payload["lease_id"] == real_lease.lease_id, (
+        f"credentials_projected emit lease_id {projected_records[0].payload['lease_id']!r} "
+        f"does not match the real Vault-issued lease_id {real_lease.lease_id!r}"
+    )
+
     # DESTROY — revokes via real Vault + emits lease_revoked carrying
     # the same real lease_id.
     dh_store.append_with_precondition.reset_mock()
@@ -687,6 +793,26 @@ async def test_layer2_docker_create_destroy_threads_real_vault_lease_id_end_to_e
         f"Expected exactly 1 lease_revoked emit; got {len(revoked_records)}"
     )
     assert revoked_records[0].payload["lease_id"] == real_lease.lease_id
+
+    # T27 — destroy ran the T21 PROJECTED-destroy path (cleanup-then-revoke),
+    # NOT the bare-revoke fallback. Only the projected path fires the staging-
+    # dir cleanup + emits credentials_projection_cleaned_up; the fallback emits
+    # ONLY lease_revoked. This is what the matching projection↔lease lease_id
+    # linkage (asserted after create above) buys us — it closes the P2
+    # false-positive where a placeholder lease_id skipped this path entirely.
+    backend._cleanup_projection_dir.assert_awaited_once()  # type: ignore[attr-defined]
+    cleaned_up_records = [
+        r
+        for r in emitted_records
+        if r.decision_type == "sandbox.lifecycle.credentials_projection_cleaned_up"
+    ]
+    assert len(cleaned_up_records) == 1, (
+        f"Expected exactly 1 credentials_projection_cleaned_up emit on destroy "
+        f"(T21 projected-destroy path); got {len(cleaned_up_records)}. Zero means "
+        f"destroy fell through to the bare-revoke fallback — the projection→lease "
+        f"pairing by lease_id failed."
+    )
+    assert cleaned_up_records[0].payload["lease_id"] == real_lease.lease_id
 
 
 @pytest.mark.asyncio
@@ -741,6 +867,22 @@ async def test_layer2_docker_refuses_when_role_default_ttl_exceeds_request(
     # Request 300s; bootstrap role default_ttl=600s → grant > request
     # → expect backend create() to refuse with the new closed-enum.
     request = _make_lease_request(secret_path, ttl_s=300)
+    # T27 — paired decl satisfies the T21 pair contract; its fields are NEVER
+    # projected because the mint refuses (grant 600 > request 300 →
+    # VaultLeaseGrantExceedsRequest) BEFORE the planner/projection step.
+    decl = CredentialDecl(
+        logical_name="db_main",
+        vault_path=secret_path,
+        expected_fields=["password", "username"],
+        ttl_s=request.ttl_s,
+        purpose_category="application_database_read",
+        purpose_description="Z2 Layer-2 TTL-refusal proof.",
+        tenant_id="t-z2-real",
+    )
+    # T27 — stub the executor purely to prove it is NEVER awaited: the mint
+    # refuses before any planning/projection happens (mint is first in the
+    # per-credential loop).
+    backend._execute_projection_plan_docker = AsyncMock()  # type: ignore[method-assign]
 
     with (
         patch(
@@ -756,7 +898,12 @@ async def test_layer2_docker_refuses_when_role_default_ttl_exceeds_request(
             pack_context=pack_ctx,
             use_warm_pool=False,
             requires_credentials=(request,),
+            credential_decls=(decl,),
+            expected_workload_gid=1000,
         )
+
+    # T27 — mint refused before the planner/projection step ran.
+    backend._execute_projection_plan_docker.assert_not_awaited()
 
     assert exc_info.value.reason == ("sandbox_credential_lease_ttl_grant_exceeds_request"), (
         f"Expected sandbox_credential_lease_ttl_grant_exceeds_request "

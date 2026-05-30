@@ -85,7 +85,7 @@ class TestRefusalTaxonomyRegistrationCoverage:
             f"values to the production Literal at protocol.py:34-50."
         )
 
-    def test_refusal_reason_count_locked_at_twenty_seven(self) -> None:
+    def test_refusal_reason_count_locked_at_thirty_six(self) -> None:
         """Crisp value-count guard — separate from the membership
         assertion so drift in size shows a clean diagnostic.
 
@@ -100,9 +100,18 @@ class TestRefusalTaxonomyRegistrationCoverage:
         TTL refusal ``sandbox_credential_lease_ttl_grant_exceeds_request``
         for the new ``VaultLeaseGrantExceedsRequest`` exception at
         ``core/vault.lease_credential`` per ADR-004 §25 amendment).
-        If this fails because the count is no longer 27, update the
+        Sprint 10.6 T16 extended 27 → 36 (9 credential-projection
+        refusal values per spec §5.1; Literal-only at T16 — Stage-2
+        raise sites land at T18 ``sandbox/projection.py`` planner +
+        T21 lifecycle integration. The 9 T16 trigger envelopes
+        registered in ``refusal_dispatch.py`` are honest no-op
+        registration stubs per the registration-coverage doctrine
+        documented in this module's docstring; behaviour coverage
+        will live at the T18 planner unit suite + T21 cross-backend
+        conformance suite when those tasks land later in the sprint).
+        If this fails because the count is no longer 36, update the
         constant here AND ensure ``TRIGGERS_BY_REASON`` has a matching
         entry for the new value. NEVER update this guard without also
         updating the dispatch.
         """
-        assert len(get_args(SandboxRefusalReason)) == 27
+        assert len(get_args(SandboxRefusalReason)) == 36
