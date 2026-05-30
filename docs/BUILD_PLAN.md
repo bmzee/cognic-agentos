@@ -969,9 +969,9 @@ Block C tests:
 
 **Deliverables:**
 - `subagent/__init__.py` — `SubAgent` primitive
-- `subagent/spawn.py` — A2A-backed `invoke(prompt)` flow that constructs a `SubmitInput(..., parent_task_id=<parent task id>)` and calls `SchedulerEngine.submit(submit_input, request_id=...)` before child dispatch (per `core/scheduler/engine.py::SchedulerEngine.submit` + `core/scheduler/_types.py::SubmitInput`)
+- `subagent/spawn.py` — scheduler-mediated `invoke(prompt)` flow (Wave-1 **in-process**; A2A trace/audit semantics, A2A transport deferred to Wave 2 per ADR-005 §"Sprint 11 amendment") that constructs a `SubmitInput(..., parent_task_id=<parent task id>)` and calls `SchedulerEngine.submit(submit_input, request_id=...)` before child dispatch (per `core/scheduler/engine.py::SchedulerEngine.submit` + `core/scheduler/_types.py::SubmitInput`)
 - `subagent/policy.py` — depth and tool-allow-list narrowing; budget arithmetic delegates to scheduler parent-budget snapshots instead of reimplementing queue policy
-- `core/decision_history.py` extension — child record links to parent's chain hash
+- Parent↔child audit linkage is **payload-only** (`payload["parent_record_id"]` on child rows, verified by a cross-row verifier modelled on `core/chain_verifier.verify_suspend_wake_linkage`) — **no** `core/decision_history.py` schema change, **no** `core/canonical.py`, **no** `schema_version` bump (per ADR-005 §"Sprint 11 amendment")
 - Harness extension — `spawn_subagent(...)` exposed to agent packs
 
 **Tests:**
@@ -980,7 +980,7 @@ Block C tests:
 - `test_subagent_depth.py` — depth-4 spawn beyond `max_depth=3` → escalation triggered
 - `test_subagent_budget.py` — exceeding token budget → scheduler preempts child + parent informed
 - `test_subagent_scheduler_inheritance.py` — child cannot exceed parent remaining budget or bypass scheduler policy by spawning recursively
-- `test_subagent_audit_chain.py` — Merkle proof over parent + child events verifies
+- `test_subagent_audit_chain.py` — cross-row payload-linkage verification over parent + child events (modelled on `verify_suspend_wake_linkage`; not a literal Merkle tree)
 
 **Exit criteria:**
 - Cross-agent audit chain verifiable
@@ -1286,6 +1286,7 @@ Nine sprints in the current plan are sized **optimistically** at the work-units 
 | **Sprint 7B — Bank pack lifecycle + UI event-stream endpoints** (3.5 wu) | 11 lifecycle states × ~30 portal endpoints × RBAC scopes × OWASP conformance integration × **four reviewer evidence panels (data governance, risk tier, supply chain, conformance)** × **UI event-stream SSE endpoints + frontend-action POST + portable JSON schema** × audit chain linkage × five-gate approval composition. State-machine surface area is the largest single sprint in the plan. **Realistic range: 3.5-5.5 wu.** Mitigation: split into 7B-state-machine-and-storage + 7B-portal-API + 7B-evidence-panels + 7B-ui-events if it overruns Day 3. |
 | **Sprint 9.5 — Model Registry** (2 wu) | New entity type + ~7 portal endpoints + 7 RBAC scopes + ISO 42001 control tagging + decision_history schema extension + provider-honesty endpoint extension + cosign verification + eval/adversarial gate integration. **Realistic range: 2-3 wu.** Mitigation: split into 9.5a-storage-and-API + 9.5b-gate-integration if it overruns Day 2. |
 | **Sprint 10.5 — Runtime scheduler / work queue** (3 wu) | New OS primitive: priority queues, per-tenant / per-pack / per-actor concurrency caps, queue-full backpressure, policy/OPA admission, quota refusal at submit time, cancellation/preemption, persistence, and audit linkage before Sprint 11 sub-agents depend on it. **Realistic range: 3-4.5 wu.** Mitigation: split into 10.5a-engine-queue-storage + 10.5b-policy-integration-entrypoints if it overruns Day 3. |
+| **Sprint 11 — Sub-agent primitive** (3 wu) | New kernel primitive: privilege de-escalation (tool-allow-list subset) + recursion-depth cap + budget narrowing + 4-event cross-agent audit chain (payload-only parent↔child linkage) + scheduler-mediated **in-process** dispatch. **Realistic range: 3-5.5 wu.** Mitigation: split into 11a-core-primitive (types + policy + audit + verifier) + 11b-integration (scheduler / harness / UI) at a valve checkpoint. |
 | **Sprint 11.5 — Agent memory governance** (2 wu) | New platform primitive: 7 MemoryAPI operations × 3 tiers × per-write enforcement (data-class + purpose + consent) × forget/redact/export pathways × episodic recall over decision_history × learning-surface validation × kill-switch integration × Postgres + Redis adapters + vector-store integration. 15 new tests including regulator-erasure chain-of-custody. **Realistic range: 2-3.5 wu.** Mitigation: split into 11.5a-api-and-storage + 11.5b-enforcement-and-erasure if it overruns Day 2. |
 | **Sprint 13.5 — Approval + Policy + Kill switches** (3 wu) | Three new platform primitives in one sprint: runtime tool approval state machine + OPA/Rego integration + Redis-backed kill-switch + quotas + scheduler-admission quota integration + 6 portal API surfaces + 11 new tests including fail-closed paths. **Realistic range: 3-5 wu.** Mitigation: split into 13.5a-approval + 13.5b-policy + 13.5c-emergency if it overruns Day 3. |
 
