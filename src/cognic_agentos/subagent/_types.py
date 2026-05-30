@@ -3,8 +3,9 @@ ADR-005. Pure (no I/O). Critical-controls (subagent/ stop-rule)."""
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
-from typing import Final, Literal
+from typing import Final, Literal, Protocol, runtime_checkable
 
 # Spawn-time refusal vocabulary (wire-public; pinned by the drift detector).
 SubAgentRefusalReason = Literal[
@@ -81,3 +82,45 @@ class SubAgentSpawnRequest:
     requested_estimated_tokens: int
     tenant_id: str
     parent_task_id: str | None = None
+
+
+@dataclass(frozen=True)
+class ChildResult:
+    summary: str
+    tokens_used: int
+    wall_time_used_s: float
+    ok: bool = True
+
+
+@dataclass(frozen=True)
+class ChildRunContext:
+    """The already-narrowed execution context spawn.py hands to the runner.
+    Frozen + stable so threading new fields (trace IDs, memory scope, harness
+    metadata) never churns the ChildRunner signature (Sprint 11b)."""
+
+    prompt: str
+    granted_tools: frozenset[str]
+    budget: int
+    tenant_id: str
+    current_depth: int
+    child_trace_id: str
+    request_id: str
+    parent_record_id: uuid.UUID
+    memory_scope: str | None = None  # 11.5-ready inert hook; NO durable writes in 11b
+
+
+@runtime_checkable
+class ChildRunner(Protocol):
+    """Injected child-execution seam (Sprint 11b D1: no agent runtime in 11b).
+    spawn.py owns policy narrowing + scheduler submit + audit emit + budget
+    accounting; the runner ONLY executes the child with the already-granted
+    context. Production supplies a real runner; tests inject a fake."""
+
+    async def run(self, context: ChildRunContext) -> ChildResult: ...
+
+
+@dataclass(frozen=True)
+class SubAgentResult:
+    spawn_record_id: uuid.UUID
+    child_result: ChildResult
+    preempted: bool = False

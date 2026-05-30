@@ -5,22 +5,30 @@ from __future__ import annotations
 
 from cognic_agentos.subagent._types import (
     SUBAGENT_ISO_CONTROLS,
+    ChildResult,
+    ChildRunContext,
+    ChildRunner,
     SubAgentAuditEvent,
     SubAgentBudgetExhausted,
     SubAgentChildQuotaZero,
     SubAgentDepthExceeded,
     SubAgentPrivilegeEscalation,
     SubAgentRefusalReason,
+    SubAgentResult,
     SubAgentSpawnRequest,
 )
 
 __all__ = [
     "SUBAGENT_ISO_CONTROLS",
+    "ChildResult",
+    "ChildRunContext",
+    "ChildRunner",
     "SubAgentAuditEvent",
     "SubAgentBudgetExhausted",
     "SubAgentChildQuotaZero",
     "SubAgentDepthExceeded",
     "SubAgentPrivilegeEscalation",
     "SubAgentRefusalReason",
+    "SubAgentResult",
     "SubAgentSpawnRequest",
 ]
