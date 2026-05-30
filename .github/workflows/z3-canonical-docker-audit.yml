@@ -1,10 +1,11 @@
 name: Z3 canonical Docker audit
 
 on:
+  # workflow_dispatch ONLY. The feature-branch push: trigger was removed at the
+  # Sprint 10.6 pre-merge cleanup so merging into main does not ship a
+  # branch-specific auto-trigger. Re-run this canonical Z3 Docker audit manually
+  # from the Actions tab ("Run workflow") on any ref.
   workflow_dispatch:
-  push:
-    branches:
-      - feat/sprint-10.6-workload-credential-projection
 
 permissions:
   contents: read
