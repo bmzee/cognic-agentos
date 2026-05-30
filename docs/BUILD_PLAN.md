@@ -965,6 +965,8 @@ Block C tests:
 
 ### Sprint 11 — Sub-agent primitive *(3 work-units)*
 
+**Status (2026-05-30): 11a CODE-COMPLETE + MERGED** — PR #43, squash commit `6a6bd5c` (8 branch commits on `feat/sprint-11-subagent-primitive`, retained as the audit ref). Ships the pure 11a core (T0 doc reconciliation + `subagent/_types` + `policy` + `audit` emitter + `audit_verifier`); CC gate 90→94; PR CI green (lint+test + live Oracle/Postgres). **11b — scheduler-mediated `spawn.py` + real `ParentBudgetResolver` conformer + `SubAgent` facade + harness `spawn_subagent` + `ui_events` emit — is DEFERRED to a follow-up sprint with its own spec gate** (two open decisions per spec §16: scheduler conformer choice + harness-exposure shape; the 10.5c→10.6 split precedent). **Sprint 11 is NOT fully CLOSED until 11b lands.**
+
 **Goal:** dynamic delegation per ADR-005; orchestrator-worker spawning with isolated context + privilege de-escalation, submitted through the Sprint 10.5 scheduler so child tasks inherit narrowed budgets and queue-time policy decisions.
 
 **Deliverables:**
