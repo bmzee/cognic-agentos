@@ -100,6 +100,19 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- Sub-agent primitive (Sprint 11, ADR-005) --------------------
+    subagent_max_recursion_depth: int = Field(
+        default=3,
+        ge=1,
+        description=(
+            "Wave-1 global recursion-depth cap for sub-agent spawning "
+            "(ADR-005 §Recursion-depth). A spawn whose child would sit at "
+            "depth greater than this value is refused (SubAgentDepthExceeded) "
+            "and escalated. Per-tenant / per-agent overrides are deferred to "
+            "the policy/approval layer (Sprint 13.5)."
+        ),
+    )
+
     # --- Observability (Sprint 1B) -----------------------------------
     otel_exporter_endpoint: str | None = Field(
         default=None,
