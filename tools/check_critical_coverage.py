@@ -1913,6 +1913,47 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     # until Z3 + Z4 pass" gate is a closeout / PR-merge concern, NOT a
     # claim made by this coverage promotion.
     ("src/cognic_agentos/sandbox/projection.py", 0.95, 0.90),
+    #
+    # ------------------------------------------------------------------
+    # Sprint 11 Z1a — sub-agent primitive (ADR-005) 11a. Gate 90 → 94.
+    # ------------------------------------------------------------------
+    # ``subagent/`` is a stop-rule isolation boundary (AGENTS.md "Stop
+    # rules" — the "Sandbox or sub-agent enforcement boundaries" rule;
+    # section-relative ref avoids line-number drift), so the four
+    # substantive 11a modules ride the same durable per-file coverage
+    # gate. Promoted at Sprint-11 Z1a per the plan. The gate runs against
+    # a FRESH full-suite ``--cov-branch coverage.json`` IN THE SAME
+    # COMMIT as this ``_CRITICAL_FILES`` extension — NOT just the
+    # count-guard ``_EXPECTED_ENTRY_COUNT`` bump — per
+    # ``feedback_verify_promotion_meets_floor_at_promotion_time``. The
+    # 2026-05-30 promotion run found all four at/above floor on fresh
+    # data (``_types`` / ``policy`` / ``audit`` 100% line / 100% branch;
+    # ``audit_verifier`` 96.67% line / 100% branch), so no same-commit
+    # negative-path repair was required.
+    #
+    # Module rationale:
+    #   * ``subagent/_types.py`` — wire-public closed-enum vocabulary
+    #     (``SubAgentRefusalReason`` / ``SubAgentAuditEvent``) + typed
+    #     refusal exceptions + ``SUBAGENT_ISO_CONTROLS``; drift is a
+    #     wire-protocol regression.
+    #   * ``subagent/policy.py`` — pure privilege-de-escalation (tool
+    #     allow-list subset) + recursion-depth cap + budget narrowing per
+    #     ADR-005; a bug here lets a child escalate beyond the parent or
+    #     exceed the depth/budget cap.
+    #   * ``subagent/audit.py`` — the four ADR-005 ``subagent.*`` chain
+    #     emitters + payload-only parent-record linkage; a bug here
+    #     breaks the cross-agent audit chain.
+    #   * ``subagent/audit_verifier.py`` — cross-row linkage verifier
+    #     (event-type filter + tenant-column parity + causal ordering,
+    #     first-break semantics); a bug here lets a forged parent-child
+    #     link verify clean.
+    #
+    # ``subagent/__init__.py`` stays OFF the gate per Doctrine F
+    # (re-export marker; no decision logic).
+    ("src/cognic_agentos/subagent/_types.py", 0.95, 0.90),
+    ("src/cognic_agentos/subagent/policy.py", 0.95, 0.90),
+    ("src/cognic_agentos/subagent/audit.py", 0.95, 0.90),
+    ("src/cognic_agentos/subagent/audit_verifier.py", 0.95, 0.90),
 )
 
 

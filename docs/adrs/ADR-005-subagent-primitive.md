@@ -90,6 +90,16 @@ Per ADR-022 §"Sub-agent budget inheritance — the Sprint 11 hook", sub-agent "
 
 **No semantic change to ADR-005's existing decisions** — Sprint 10.5 is additive: the scheduler is the runtime substrate that Sprint 11's sub-agent primitive will dispatch through. The §"Decision" section's "max tokens, wall-time, recursion depth" budget contract remains the cross-cutting policy declaration; how it's enforced at the runtime is now scheduler-mediated.
 
+## Sprint 11 amendment (2026-05-30) — Wave-1 in-process dispatch + global recursion cap
+
+Sprint 11 implements the sub-agent primitive. Two Wave-1 narrowings of this ADR's existing decisions are recorded here **before implementation** so the code never diverges from an approved ADR. Both are additive — they scope the Wave-1 enforcement; they do not reverse the §"Decision" contracts.
+
+**1. Wave-1 dispatch is in-process, scheduler-mediated.** §"Decision" ("Sub-agents spawn via the A2A endpoint") and §"Implementation phases / Phase 4.1" ("A2A-backed `SubAgent.invoke()`") describe the cross-pod A2A-transport dispatch. **Wave-1 ships in-process, scheduler-mediated dispatch** that preserves A2A trace/audit/identity *semantics* — parent_trace → child_trace propagation and identity metadata carried in the audit payload — but performs **no AgentCard/JWS verification at the in-process spawn boundary**. The A2A *endpoint transport* (the cross-pod network hop) is deferred to **Wave 2**. This is consistent with §"Consequences / Neutral", which already names in-process as a mode ("~50-200ms for in-process; more for cross-pod"). The §"Decision" "spawn via the A2A endpoint" wording remains the Wave-2 cross-pod contract.
+
+**2. Wave-1 recursion cap is global.** §"Recursion depth" ("Per-tenant configurable; default `max_depth = 3`") is narrowed for Wave-1 to a **global** `Settings.subagent_max_recursion_depth = 3`. Per-tenant / per-agent overrides are deferred to the policy/approval layer (Sprint 13.5). This resolves the BUILD_PLAN human-decision ("Sub-agent recursion depth default — global, per-tenant, or per-agent") as **global**.
+
+**Audit-chain linkage is payload-only.** The child↔parent linkage the §"Audit" section records is implemented as a `payload["parent_record_id"]` key on the child decision-history rows, verified by a cross-row linkage verifier modelled on `core/chain_verifier.verify_suspend_wake_linkage`. There is **no** `DecisionRecord` schema change, **no** `core/canonical.py` change, **no** new top-level `decision_history` column, and **no** `schema_version` bump.
+
 ## References
 - [Anthropic — Sub-agents in Claude Code](https://docs.anthropic.com/en/docs/claude-code/sub-agents)
 - [The Architecture of Scale: Anthropic's Sub-Agents — Medium](https://medium.com/@jiten.p.oswal/the-architecture-of-scale-a-deep-dive-into-anthropics-sub-agents-6c4faae1abda)
