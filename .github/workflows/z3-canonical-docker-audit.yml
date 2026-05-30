@@ -84,6 +84,7 @@ jobs:
         run: |
           unset COGNIC_Z3_ALLOW_FIXTURE_IMAGES
           unset COGNIC_Z3_FIXTURE_EGRESS_PROXY_IMAGE
-          uv run pytest -q \
+          UV_BIN="$(command -v uv)"
+          sudo -E "$UV_BIN" run pytest -q \
             tests/integration/sandbox/test_z3_docker_credential_projection.py::test_z3_happy_path_real_vault_real_docker_one_credential \
             tests/integration/sandbox/test_z3_docker_credential_projection.py::test_z3_negative_path_field_set_mismatch_refuses_before_container_create
