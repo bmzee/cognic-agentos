@@ -329,6 +329,8 @@ def _make_k8s_backend(
     backend._create_network_policy = AsyncMock(return_value=None)  # type: ignore[method-assign]
     backend._create_pod = AsyncMock(return_value=None)  # type: ignore[method-assign]
     backend._wait_for_pod_ready = AsyncMock(return_value=None)  # type: ignore[method-assign]
+    # T30/T14.2 — create() now also gates on the proxy-log readiness probe.
+    backend._wait_for_proxy_audit_log_ready = AsyncMock(return_value=None)  # type: ignore[method-assign]
     backend._teardown_session_state = AsyncMock(return_value=None)  # type: ignore[method-assign]
     # Sprint 10.6 T21 slice 5+6 — pre-mock the K8s preflight + the
     # K8s Secret-create + Secret-delete seams so cross-backend

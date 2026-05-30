@@ -237,6 +237,8 @@ def _patch_k8s_restore_path(
         "_create_network_policy",
         "_create_pod",
         "_wait_for_pod_ready",
+        # T30/T14.2 — wake() now also gates on the proxy-log readiness probe.
+        "_wait_for_proxy_audit_log_ready",
         "_restore_workspace_tar",
         "_teardown_session_state",
     ):

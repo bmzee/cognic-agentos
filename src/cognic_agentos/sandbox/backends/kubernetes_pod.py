@@ -1307,6 +1307,10 @@ class KubernetesPodSandboxBackend:
             await self._create_network_policy(netpol_spec)
             await self._create_pod(pod_spec)
             await self._wait_for_pod_ready(pod_name=pod_name)
+            # T30/T14.2 — also wait for the proxy sidecar's access.jsonl
+            # contract before exposing the session, else the caller's first
+            # exec() can race the entrypoint + fail-close egress_audit_unreadable.
+            await self._wait_for_proxy_audit_log_ready(pod_name=pod_name)
 
             # 6d. Session construct + lifecycle.created emit per spec
             # §4.3.
@@ -2474,6 +2478,11 @@ class KubernetesPodSandboxBackend:
             # pods/exec websocket can race the kubelet's pod-start
             # and fail with "pod not found" or "container not running".
             await self._wait_for_pod_ready(pod_name=pod_name)
+            # T30/T14.2 — gate on the proxy sidecar's access.jsonl contract
+            # before any exec (the restore exec below + the caller's first
+            # post-wake session.exec()), so a recreated pod can't race the
+            # entrypoint into egress_audit_unreadable.
+            await self._wait_for_proxy_audit_log_ready(pod_name=pod_name)
             # Restore the workspace tar into /workspace via pods/exec.
             await self._restore_workspace_tar(
                 session_id=session_id,
@@ -3736,6 +3745,65 @@ class KubernetesPodSandboxBackend:
                     f"pod {pod_name!r} did not become ready within "
                     f"{_POD_READY_TIMEOUT_S}s; last observed status="
                     f"{last_status_repr}"
+                )
+            await asyncio.sleep(_POD_READY_POLL_INTERVAL_S)
+
+    async def _wait_for_proxy_audit_log_ready(self, *, pod_name: str) -> None:
+        """Poll the egress-proxy sidecar until its audit log is readable,
+        bounded by ``_POD_READY_TIMEOUT_S``.
+
+        T30/T14.2 — closes the Z4 readiness RACE. :meth:`_wait_for_pod_ready`
+        only waits on the SANDBOX container's ``ready``; it does NOT wait on
+        the proxy sidecar's ``access.jsonl`` contract. The canonical
+        egress-proxy entrypoint creates ``_PROXY_LOG_PATH`` during startup
+        (after rendering its config, before the proxy is fully serving), so a
+        caller that ``exec()``s immediately after pod-ready can race the
+        entrypoint: :meth:`_read_proxy_log_from_sidecar_k8s` cats the file,
+        finds it missing, and fail-closes with ``egress_audit_unreadable`` — a
+        startup flake, NOT a real egress violation.
+
+        This gate execs the EXACT operation the real read performs (``cat
+        _PROXY_LOG_PATH`` in the proxy sidecar) and returns only once it exits
+        0, so a passing gate deterministically predicts the first real read.
+        Called after :meth:`_wait_for_pod_ready` in both create() and wake()
+        before the session is exposed / restore-exec runs.
+
+        Retry contract (mirrors :meth:`_wait_for_pod_ready`):
+          * ``_exec_short_lived`` returns ``None`` — exec transport not ready
+            (proxy container still ``ContainerCreating``): keep polling.
+          * ``(stdout, exit_code)`` with ``exit_code != 0`` — cat failed
+            (entrypoint has not created access.jsonl yet): keep polling.
+          * ``exit_code == 0`` — log exists + is readable by the proxy
+            identity: ready, return.
+
+        Timeout → ``RuntimeError`` — the outer try/except in create() / wake()
+        translates this to teardown + re-raise (the SAME path as
+        _wait_for_pod_ready's timeout; no separate closed-enum reason).
+        """
+        deadline = asyncio.get_event_loop().time() + _POD_READY_TIMEOUT_S
+        last = "no-exec-yet"
+        while True:
+            result = await self._exec_short_lived(
+                pod_name=pod_name,
+                container_name=_PROXY_SIDECAR_CONTAINER_NAME,
+                command=["cat", _PROXY_LOG_PATH],
+            )
+            if result is not None:
+                _stdout, exit_code = result
+                if exit_code == 0:
+                    return
+                last = f"cat_exit={exit_code}"
+            else:
+                last = "exec_transport_unavailable"
+
+            if asyncio.get_event_loop().time() >= deadline:
+                raise RuntimeError(
+                    f"proxy sidecar audit log {_PROXY_LOG_PATH!r} not ready "
+                    f"within {_POD_READY_TIMEOUT_S}s (last={last}). The "
+                    f"canonical egress-proxy entrypoint creates access.jsonl "
+                    f"during startup; a persistent failure means the proxy "
+                    f"never reached its log-sink step (check the sidecar's "
+                    f"startup logs)."
                 )
             await asyncio.sleep(_POD_READY_POLL_INTERVAL_S)
 
