@@ -89,3 +89,54 @@ class SubAgent:
             pack_risk_tier=pack_risk_tier,
             parent_trace_id=parent_trace_id,
         )
+
+
+async def spawn_subagent(
+    *,
+    request: SubAgentSpawnRequest,
+    pack_id: str,
+    actor: TaskActor,
+    class_: SchedulerPriorityClass,
+    pack_kind: str,
+    pack_risk_tier: str,
+    parent_trace_id: str,
+    scheduler: SchedulerEngine,
+    audit: SubAgentAuditEmitter,
+    child_runner: ChildRunner,
+    escalation: EscalationStore,
+    parent_budget: ParentBudgetResolver,
+    settings: Settings,
+) -> SubAgentResult:
+    """Thin module-level convenience seam (decision memo D2): construct a
+    :class:`SubAgent` over the injected deps + ``settings``, then delegate to
+    :meth:`SubAgent.invoke`, destructuring the explicit ``request`` into
+    invoke's loose args + the routing args. No ``harness/`` package, no
+    ``base_agent.py``, and no behavior of its own — depth / privilege / budget
+    refusals propagate from the facade unchanged.
+
+    The ``request`` carries the seven "what to run" fields; ``pack_id`` /
+    ``actor`` / ``class_`` / ``pack_kind`` / ``pack_risk_tier`` /
+    ``parent_trace_id`` are the scheduler-routing args ``spawn`` requires; the
+    remaining six are the SubAgent constructor deps."""
+    return await SubAgent(
+        scheduler=scheduler,
+        audit=audit,
+        child_runner=child_runner,
+        escalation=escalation,
+        parent_budget=parent_budget,
+        settings=settings,
+    ).invoke(
+        request.prompt,
+        parent_tool_allow_list=request.parent_tool_allow_list,
+        requested_tool_allow_list=request.requested_tool_allow_list,
+        current_depth=request.current_depth,
+        requested_estimated_tokens=request.requested_estimated_tokens,
+        tenant_id=request.tenant_id,
+        parent_task_id=request.parent_task_id,
+        pack_id=pack_id,
+        actor=actor,
+        class_=class_,
+        pack_kind=pack_kind,
+        pack_risk_tier=pack_risk_tier,
+        parent_trace_id=parent_trace_id,
+    )

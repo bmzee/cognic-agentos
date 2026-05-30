@@ -3,7 +3,7 @@ boundary (privilege de-escalation). The SubAgent facade lands in 11b."""
 
 from __future__ import annotations
 
-from cognic_agentos.subagent._facade import SubAgent
+from cognic_agentos.subagent._facade import SubAgent, spawn_subagent
 from cognic_agentos.subagent._types import (
     SUBAGENT_ISO_CONTROLS,
     ChildResult,
@@ -33,4 +33,5 @@ __all__ = [
     "SubAgentRefusalReason",
     "SubAgentResult",
     "SubAgentSpawnRequest",
+    "spawn_subagent",
 ]
