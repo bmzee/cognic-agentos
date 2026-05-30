@@ -7,6 +7,7 @@ from __future__ import annotations
 from cognic_agentos.core.scheduler._seams import compute_child_budget
 from cognic_agentos.subagent._types import (
     SubAgentBudgetExhausted,
+    SubAgentChildQuotaZero,
     SubAgentDepthExceeded,
     SubAgentPrivilegeEscalation,
 )
@@ -34,8 +35,12 @@ def check_depth(*, current_depth: int, max_depth: int) -> None:
 def compute_spawn_budget(*, parent_remaining_budget: int, child_pack_quota: int) -> int:
     """Narrow the child's token budget to ``min(child_pack_quota,
     parent_remaining_budget)`` via the scheduler's pure ``compute_child_budget``
-    helper. Raise :class:`SubAgentBudgetExhausted` when the narrowed budget is
-    zero — the parent has nothing left to delegate."""
+    helper. Sprint 11b D3 — distinct wire-public refusals: raise
+    :class:`SubAgentChildQuotaZero` when the child pack quota is zero, or
+    :class:`SubAgentBudgetExhausted` when the parent has nothing left to
+    delegate (a zero child quota must never surface as 'parent exhausted')."""
+    if child_pack_quota == 0:
+        raise SubAgentChildQuotaZero(child_pack_quota=child_pack_quota)
     granted = compute_child_budget(
         parent_remaining_budget=parent_remaining_budget,
         child_pack_quota=child_pack_quota,

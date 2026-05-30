@@ -11,6 +11,7 @@ SubAgentRefusalReason = Literal[
     "subagent_depth_exceeded",
     "subagent_privilege_escalation",
     "subagent_parent_budget_exhausted",
+    "subagent_child_quota_zero",
 ]
 
 # Audit decision_types on the decision_history chain (ADR-005 §Audit).
@@ -53,6 +54,18 @@ class SubAgentBudgetExhausted(Exception):
         super().__init__("subagent_parent_budget_exhausted")
         self.reason: SubAgentRefusalReason = "subagent_parent_budget_exhausted"
         self.parent_remaining_budget = parent_remaining_budget
+
+
+class SubAgentChildQuotaZero(Exception):
+    """Spawn refused: the child pack quota is zero (the parent has budget).
+
+    Sprint 11b D3 — distinct from SubAgentBudgetExhausted so a zero child
+    quota never surfaces as 'parent exhausted' once spawn is exposed."""
+
+    def __init__(self, *, child_pack_quota: int) -> None:
+        super().__init__("subagent_child_quota_zero")
+        self.reason: SubAgentRefusalReason = "subagent_child_quota_zero"
+        self.child_pack_quota = child_pack_quota
 
 
 @dataclass(frozen=True)

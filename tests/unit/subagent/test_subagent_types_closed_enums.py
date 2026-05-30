@@ -12,14 +12,15 @@ from cognic_agentos.subagent._types import (
 
 
 class TestSubAgentRefusalReasonVocabulary:
-    def test_exactly_three_values(self):
-        assert len(get_args(SubAgentRefusalReason)) == 3
+    def test_exactly_four_values(self):
+        assert len(get_args(SubAgentRefusalReason)) == 4
 
     def test_value_set(self):
         assert set(get_args(SubAgentRefusalReason)) == {
             "subagent_depth_exceeded",
             "subagent_privilege_escalation",
             "subagent_parent_budget_exhausted",
+            "subagent_child_quota_zero",
         }
 
 
