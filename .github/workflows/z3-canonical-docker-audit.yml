@@ -2,6 +2,9 @@ name: Z3 canonical Docker audit
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - feat/sprint-10.6-workload-credential-projection
 
 permissions:
   contents: read
