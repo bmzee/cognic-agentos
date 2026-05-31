@@ -1517,6 +1517,21 @@ class Settings(BaseSettings):
             "tuning warrants it."
         ),
     )
+    memory_block_max_bytes: int = Field(
+        default=4096,
+        gt=0,
+        description="Sprint 11.5 — max serialized bytes for a single memory block.",
+    )
+    memory_scratch_ttl_s: int = Field(
+        default=3600,
+        gt=0,
+        description="Sprint 11.5 — Redis TTL for scratch-tier memory.",
+    )
+    memory_tombstone_window_s: int = Field(
+        default=2_592_000,
+        gt=0,
+        description="Sprint 11.5 — tombstone window before reaper purge (default 30d).",
+    )
 
     # --- Build metadata ----------------------------------------------
     # Wired by the Dockerfile / CI at image-build time; defaults make
