@@ -84,15 +84,20 @@ class MemoryAdapter(Protocol):
         self,
         *,
         tenant_id: str,
+        agent_id: str,
         subject: SubjectRef,
         tier: MemoryTier,
         key: str | None = None,
         block_kind: BlockKind | None = None,
     ) -> MemoryHit | None: ...
 
-    async def list_for_subject(self, *, tenant_id: str, subject: SubjectRef) -> list[MemoryHit]: ...
+    async def list_for_subject(
+        self, *, tenant_id: str, agent_id: str, subject: SubjectRef
+    ) -> list[MemoryHit]: ...
 
-    async def list_blocks(self, *, tenant_id: str, subject: SubjectRef) -> list[BlockRef]: ...
+    async def list_blocks(
+        self, *, tenant_id: str, agent_id: str, subject: SubjectRef
+    ) -> list[BlockRef]: ...
 
     async def upsert_block(self, record: MemoryWriteRecord) -> MemoryRecordId: ...
 
@@ -161,10 +166,12 @@ class PostgresMemoryAdapter:
     ``core/scheduler/storage.py`` precondition shape exactly.
 
     Structurally conforms to :class:`MemoryAdapter`. Public methods are
-    async + raise on every failure path (production-grade rule); the recall
-    surfaces (:meth:`list_for_subject` / :meth:`list_blocks`) are honest
-    ``NotImplementedError`` deferrals to Sprint 11.5a T10 (MemoryAPI), NOT
-    silent no-ops."""
+    async + raise on every failure path (production-grade rule). The recall
+    surfaces (:meth:`get` / :meth:`list_for_subject` / :meth:`list_blocks`)
+    are implemented (Sprint 11.5a T10) and **agent-scoped** — each takes a
+    required ``agent_id`` and filters on it, since a record belongs to the
+    agent that wrote it (the block singleton identity is
+    ``(tenant, subject, agent, kind)``)."""
 
     def __init__(self, *, engine: AsyncEngine, dh_store: DecisionHistoryStore) -> None:
         self._engine = engine
@@ -317,20 +324,25 @@ class PostgresMemoryAdapter:
         self,
         *,
         tenant_id: str,
+        agent_id: str,
         subject: SubjectRef,
         tier: MemoryTier,
         key: str | None = None,
         block_kind: BlockKind | None = None,
     ) -> MemoryHit | None:
         """Read the single active (non-tombstoned) record matching
-        ``(tenant_id, subject, tier)`` + the optional ``key`` / ``block_kind``
-        narrowers. ``tenant_id`` is REQUIRED — it is the cross-tenant isolation
-        boundary; a query without it would leak memory across tenants that share
-        a ``subject_ref`` + key/block. Returns ``None`` when no active row
-        matches."""
+        ``(tenant_id, agent_id, subject, tier)`` + the optional ``key`` /
+        ``block_kind`` narrowers. ``tenant_id`` AND ``agent_id`` are BOTH
+        REQUIRED isolation boundaries — a record belongs to the agent that wrote
+        it (the block singleton identity is ``(tenant, subject, agent, kind)``),
+        so two agents in one tenant can each hold an active block for the same
+        ``subject`` + ``block_kind``; a query without the ``agent_id`` filter
+        would return another agent's row arbitrarily. Returns ``None`` when no
+        active row matches."""
 
         stmt = sa.select(_memory_records).where(
             _memory_records.c.tenant_id == tenant_id,
+            _memory_records.c.agent_id == agent_id,
             _memory_records.c.subject_ref == subject.canonical,
             _memory_records.c.tier == tier,
             _memory_records.c.tombstone.is_(None),
@@ -354,17 +366,92 @@ class PostgresMemoryAdapter:
             block_kind=row.block_kind,
         )
 
-    async def list_for_subject(self, *, tenant_id: str, subject: SubjectRef) -> list[MemoryHit]:
-        raise NotImplementedError(
-            "PostgresMemoryAdapter.list_for_subject lands in Sprint 11.5a T10 "
-            "(MemoryAPI recall/list surface)"
-        )
+    async def list_for_subject(
+        self, *, tenant_id: str, agent_id: str, subject: SubjectRef
+    ) -> list[MemoryHit]:
+        """Return every active (non-tombstoned) record the CALLING agent wrote
+        for ``(tenant_id, subject)`` ordered by ``created_at``. ``tenant_id`` AND
+        ``agent_id`` are both isolation boundaries (same WHERE shape as
+        :meth:`get`); rows of other tenants / agents / subjects and tombstoned
+        rows are excluded. Maps each row to a :class:`MemoryHit` exactly as
+        :meth:`get` does."""
 
-    async def list_blocks(self, *, tenant_id: str, subject: SubjectRef) -> list[BlockRef]:
-        raise NotImplementedError(
-            "PostgresMemoryAdapter.list_blocks lands in Sprint 11.5a T10 "
-            "(MemoryAPI recall/list surface)"
+        stmt = (
+            sa.select(_memory_records)
+            .where(
+                _memory_records.c.tenant_id == tenant_id,
+                _memory_records.c.agent_id == agent_id,
+                _memory_records.c.subject_ref == subject.canonical,
+                _memory_records.c.tombstone.is_(None),
+            )
+            .order_by(_memory_records.c.created_at)
         )
+        async with self._engine.connect() as conn:
+            rows = (await conn.execute(stmt)).all()
+        return [
+            MemoryHit(
+                record_id=row.record_id,
+                value=row.value,
+                tier=row.tier,
+                data_classes=tuple(row.data_classes),
+                purpose=row.purpose,
+                created_at=row.created_at,
+                block_kind=row.block_kind,
+            )
+            for row in rows
+        ]
+
+    async def list_blocks(
+        self, *, tenant_id: str, agent_id: str, subject: SubjectRef
+    ) -> list[BlockRef]:
+        """Return one :class:`BlockRef` per ACTIVE block the CALLING agent owns
+        for ``(tenant_id, subject)``. ``version`` is the supersede generation —
+        the count of rows (active + tombstoned) sharing the active row's
+        ``(tenant_id, subject_ref, agent_id, block_kind)`` quad — so a block
+        upserted N times reports ``version == N``. Keyed (non-block) rows,
+        tombstoned blocks, and OTHER agents' blocks are excluded; ``tenant_id``
+        AND ``agent_id`` are both isolation boundaries (the block singleton
+        identity is ``(tenant, subject, agent, kind)``)."""
+
+        active_stmt = sa.select(_memory_records).where(
+            _memory_records.c.tenant_id == tenant_id,
+            _memory_records.c.agent_id == agent_id,
+            _memory_records.c.subject_ref == subject.canonical,
+            _memory_records.c.block_kind.isnot(None),
+            _memory_records.c.tombstone.is_(None),
+        )
+        # Supersede-generation counts keyed by (agent_id, block_kind): every row
+        # (active + tombstoned) for this (tenant, agent, subject) block. One
+        # grouped query → no per-row N+1.
+        gen_stmt = (
+            sa.select(
+                _memory_records.c.agent_id,
+                _memory_records.c.block_kind,
+                sa.func.count().label("gen"),
+            )
+            .where(
+                _memory_records.c.tenant_id == tenant_id,
+                _memory_records.c.agent_id == agent_id,
+                _memory_records.c.subject_ref == subject.canonical,
+                _memory_records.c.block_kind.isnot(None),
+            )
+            .group_by(_memory_records.c.agent_id, _memory_records.c.block_kind)
+        )
+        async with self._engine.connect() as conn:
+            active_rows = (await conn.execute(active_stmt)).all()
+            gen_rows = (await conn.execute(gen_stmt)).all()
+        generations: dict[tuple[str, str], int] = {
+            (g.agent_id, g.block_kind): int(g.gen) for g in gen_rows
+        }
+        return [
+            BlockRef(
+                record_id=row.record_id,
+                kind=row.block_kind,
+                subject=subject,
+                version=generations[(row.agent_id, row.block_kind)],
+            )
+            for row in active_rows
+        ]
 
 
 def _is_redis_unavailable(exc: BaseException) -> bool:
@@ -407,7 +494,8 @@ class RedisMemoryAdapter:
     Structurally conforms to :class:`MemoryAdapter`. ``upsert_block`` /
     ``list_blocks`` are never valid for scratch (blocks are long_term →
     :class:`PostgresMemoryAdapter`); ``get`` / ``list_for_subject`` are
-    scratch-recall surfaces deferred to T10. All four raise
+    scratch-recall surfaces deferred BEYOND T10 — the Redis-backed scratch read
+    path is wired with the harness/app routing in 11.5b. All four raise
     ``NotImplementedError`` (honest deferral, NOT silent no-op)."""
 
     def __init__(self, *, redis_client: _AsyncRedisLike, scratch_ttl_s: int) -> None:
@@ -449,24 +537,33 @@ class RedisMemoryAdapter:
         self,
         *,
         tenant_id: str,
+        agent_id: str,
         subject: SubjectRef,
         tier: MemoryTier,
         key: str | None = None,
         block_kind: BlockKind | None = None,
     ) -> MemoryHit | None:
         raise NotImplementedError(
-            "RedisMemoryAdapter.get lands in Sprint 11.5a T10 (scratch recall)"
+            "RedisMemoryAdapter scratch recall is deferred beyond T10 — the "
+            "Redis-backed scratch read path is wired with the harness/app routing "
+            "in 11.5b (the T10 MemoryAPI is DI-tested against the Postgres adapter "
+            "for task/long_term)."
         )
 
-    async def list_for_subject(self, *, tenant_id: str, subject: SubjectRef) -> list[MemoryHit]:
+    async def list_for_subject(
+        self, *, tenant_id: str, agent_id: str, subject: SubjectRef
+    ) -> list[MemoryHit]:
         raise NotImplementedError(
-            "RedisMemoryAdapter.list_for_subject lands in Sprint 11.5a T10 (scratch recall)"
+            "RedisMemoryAdapter scratch recall is deferred beyond T10 — see "
+            "RedisMemoryAdapter.get (Redis-backed scratch reads land in 11.5b)."
         )
 
     async def upsert_block(self, record: MemoryWriteRecord) -> MemoryRecordId:
         raise NotImplementedError("blocks are long_term-only; use PostgresMemoryAdapter")
 
-    async def list_blocks(self, *, tenant_id: str, subject: SubjectRef) -> list[BlockRef]:
+    async def list_blocks(
+        self, *, tenant_id: str, agent_id: str, subject: SubjectRef
+    ) -> list[BlockRef]:
         raise NotImplementedError("blocks are long_term-only; use PostgresMemoryAdapter")
 
 

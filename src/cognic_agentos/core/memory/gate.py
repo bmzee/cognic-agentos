@@ -300,23 +300,50 @@ class MemoryGate:
         write_purpose: str | None = None,
         subject: SubjectRef | None = None,
     ) -> None:
-        """Run the §7.2 ordered recall-gate chain.
+        """Composed §7.2 recall gate (steps 1-4) — equivalent to
+        :meth:`check_recall_preread` followed by :meth:`check_recall_purpose`.
 
         First applicable failure raises ``MemoryOperationRefused(reason)``; on
         success returns ``None`` (the API emits ``memory.read`` — not here).
+
+        **This composed form is for a caller that ALREADY knows the stored
+        write purpose.** ``MemoryAPI.recall`` / ``read_block`` do NOT use it —
+        they cannot know the stored write purpose until AFTER the read, so they
+        run :meth:`check_recall_preread` (pre-read authz), read the record, then
+        run :meth:`check_recall_purpose` against ``hit.purpose``. Passing
+        ``write_purpose=None`` here against the real default-deny
+        ``memory_purpose_matrix.rego`` refuses an otherwise-compatible recall —
+        the stored purpose MUST be threaded. Retained for callers holding the
+        write purpose + the gate test-suite.
 
         Args:
             tier: Target :data:`MemoryTier` being recalled.
             recall_purpose: The purpose the recall is performed under (compared
                 to ``write_purpose`` via the purpose-matrix Rego at step 4).
-            write_purpose: The purpose the target memory was written under.
-                ``None`` means the caller did not supply a write purpose (the
-                purpose-matrix check still runs and the Rego bundle decides).
+            write_purpose: The purpose the target memory was written under
+                (``None`` → the matrix decides on a ``None`` pair, which the
+                default-deny bundle refuses; pass the STORED ``hit.purpose``).
             subject: Explicit subject for a block / explicit-subject read;
                 compared to ``context.served_subject`` at step 3. ``None`` means
                 an implicit (``recall``) read scoped to the served subject —
                 step 3 is N/A.
         """
+        await self.check_recall_preread(tier=tier, subject=subject)
+        await self.check_recall_purpose(recall_purpose=recall_purpose, write_purpose=write_purpose)
+        return None
+
+    async def check_recall_preread(
+        self, *, tier: MemoryTier, subject: SubjectRef | None = None
+    ) -> None:
+        """Pre-read recall authz (§7.2 steps 1-3): sub-agent durable guard, read
+        capability, subject scope. Runs BEFORE the adapter read so an
+        unauthorized caller never triggers a stored-record read — a cross-subject
+        ``read_block`` is refused before subject B's row is fetched. Does NOT run
+        the purpose matrix (step 4): the stored write purpose is only known after
+        the read; the caller runs :meth:`check_recall_purpose` against
+        ``hit.purpose``. First applicable failure raises
+        ``MemoryOperationRefused(reason)``; identity is read from the bound
+        context, never the arguments."""
         ctx = self._context
 
         # Step 1 — sub-agent durable-access guard (§7.3 I2).
@@ -331,13 +358,58 @@ class MemoryGate:
         if subject is not None and subject.canonical != ctx.served_subject.canonical:
             await self._require_cross_subject_allowed()
 
-        # Step 4 — purpose-compatibility matrix.
+    async def check_recall_purpose(self, *, recall_purpose: str, write_purpose: str | None) -> None:
+        """Purpose-compatibility matrix (§7.2 step 4). Refuse with
+        ``memory_purpose_mismatch`` when ``recall_purpose`` is incompatible with
+        the stored ``write_purpose`` per ``memory_purpose_matrix.rego`` (an OPA
+        error fails closed to the same refusal). Run AFTER the read with
+        ``write_purpose=hit.purpose`` — passing ``None`` against the default-deny
+        bundle refuses every recall."""
         if not await self._purpose_matrix_allows(
             recall_purpose=recall_purpose, write_purpose=write_purpose
         ):
             raise MemoryOperationRefused("memory_purpose_mismatch")
 
-        # Step 5 — success: the API emits memory.read.
+    # -- Enumerate gate (§7.2 minus the keyed-record steps) ----------------
+
+    async def check_enumerate(
+        self, subject: SubjectRef, *, tiers: tuple[MemoryTier, ...] = ("task", "long_term")
+    ) -> None:
+        """Enumerate-family recall gate (§7.2 minus the keyed-record steps) for
+        list_for_subject / list_blocks. Ordered precedence; first failure raises.
+
+        Unlike :meth:`check_recall` there is no purpose-matrix step (an
+        enumerate returns record IDs / block refs, not a keyed value under a
+        recall purpose). Enumeration is NOT a capability bypass — the read
+        capability is required for EVERY enumerated tier. On success returns
+        ``None``; the caller decides the audit — ``list_for_subject`` emits one
+        ``memory.read`` (enumerate shape), while ``list_blocks`` emits none (a
+        structural block listing, governed at the later ``read_block``).
+
+        Args:
+            subject: The subject whose records are being enumerated; compared to
+                ``context.served_subject`` at step 3 (cross-subject leak guard).
+            tiers: The tiers spanned by the enumeration (default the two durable
+                tiers ``("task", "long_term")``); each must be readable.
+        """
+        ctx = self._context
+
+        # Step 1 — sub-agent durable-access guard (§7.3 I2).
+        if ctx.is_subagent and any(t in _SUBAGENT_REFUSED_TIERS for t in tiers):
+            raise MemoryOperationRefused("memory_subagent_durable_access_refused")
+
+        # Step 2 — read capability for EVERY enumerated tier (enumeration is not
+        # a capability bypass).
+        for t in tiers:
+            if f"memory_read.{t}" not in ctx.memory_read_capabilities:
+                raise MemoryOperationRefused("memory_recall_capability_missing")
+
+        # Step 3 — subject scope (cross-subject leak guard; reuses the T9 helper).
+        if subject.canonical != ctx.served_subject.canonical:
+            await self._require_cross_subject_allowed()
+
+        # Step 4 — success. Per-caller audit: list_for_subject emits one
+        # memory.read (enumerate shape); list_blocks emits none.
         return None
 
     # -- Per-decision-point Rego helpers (fail-closed each, step-specific) --

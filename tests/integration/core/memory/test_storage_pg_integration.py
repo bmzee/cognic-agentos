@@ -90,7 +90,9 @@ async def test_postgres_put_then_get_round_trips_value_and_emits_chain_row() -> 
         assert isinstance(rid, uuid.UUID)
 
         # get() round-trips the raw value out of memory_records.value.
-        hit = await store.get(tenant_id="t1", subject=SUBJECT, tier="task", key="greeting")
+        hit = await store.get(
+            tenant_id="t1", agent_id="kyc", subject=SUBJECT, tier="task", key="greeting"
+        )
         assert hit is not None
         assert hit.value == "hello-pg"
         assert hit.record_id == rid

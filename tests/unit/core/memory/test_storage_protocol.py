@@ -1,3 +1,5 @@
+import inspect
+
 from cognic_agentos.core.memory.storage import (
     MemoryAdapter,
     MemoryBackendUnavailable,
@@ -8,14 +10,28 @@ from cognic_agentos.core.memory.tiers import MemoryOperationRefused
 
 class _Conformer:
     async def put(self, record): ...
-    async def get(self, *, tenant_id, subject, tier, key=None, block_kind=None): ...
-    async def list_for_subject(self, *, tenant_id, subject): ...
-    async def list_blocks(self, *, tenant_id, subject): ...
+    async def get(self, *, tenant_id, agent_id, subject, tier, key=None, block_kind=None): ...
+    async def list_for_subject(self, *, tenant_id, agent_id, subject): ...
+    async def list_blocks(self, *, tenant_id, agent_id, subject): ...
     async def upsert_block(self, record): ...
 
 
 def test_conformer_structurally_satisfies_protocol():
     assert isinstance(_Conformer(), MemoryAdapter)
+
+
+def test_protocol_reads_require_tenant_and_agent_id_scoping():
+    # @runtime_checkable Protocol checks method PRESENCE only — NOT signature —
+    # so the isinstance conformance above stays green even if a read drops the
+    # agent_id scope. Pin the two isolation boundaries explicitly: tenant_id AND
+    # agent_id must be REQUIRED keyword-only params on every read method, so a
+    # regression that removes (or defaults) either fails here.
+    for method_name in ("get", "list_for_subject", "list_blocks"):
+        params = inspect.signature(getattr(MemoryAdapter, method_name)).parameters
+        for boundary in ("tenant_id", "agent_id"):
+            assert boundary in params, f"MemoryAdapter.{method_name} must scope by {boundary}"
+            assert params[boundary].kind is inspect.Parameter.KEYWORD_ONLY
+            assert params[boundary].default is inspect.Parameter.empty
 
 
 def test_backend_unavailable_is_infra_exception_not_governance_refusal():
