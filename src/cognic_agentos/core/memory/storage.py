@@ -19,17 +19,29 @@ memory substrate:
     not a governance refusal and must not be confused with the wire-public
     closed-enum ``MemoryRefusalReason`` taxonomy.
 
-No concrete adapter implementations live here — no driver imports
-(``asyncpg`` / ``redis`` / ``qdrant_client`` / ``hvac``). SQLAlchemy core
-is used for the Table + portable column types only.
+**Driver-import discipline (kernel-clean invariant).** The two concrete
+adapters below take their backend handle by INJECTION — a SQLAlchemy
+``AsyncEngine`` (Postgres; SQLAlchemy resolves the ``asyncpg`` driver
+from the URL) or a duck-typed redis client (has async ``set``). Neither
+``asyncpg`` nor ``redis`` is imported at module level: ``redis`` lives in
+the ``[adapters]`` extra (NOT base deps), so ``import
+cognic_agentos.core.memory.storage`` MUST succeed without the adapters
+extra installed. ``RedisMemoryAdapter`` resolves redis exception types
+LAZILY inside the write path so construction never needs the package.
 """
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+import hashlib
+import uuid
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import sqlalchemy as sa
+from sqlalchemy.ext.asyncio import AsyncEngine
 
+from cognic_agentos.core.canonical import canonical_bytes
+from cognic_agentos.core.decision_history import DecisionHistoryStore, DecisionRecord
 from cognic_agentos.core.memory._context import (
     BlockRef,
     MemoryHit,
@@ -42,6 +54,16 @@ from cognic_agentos.core.memory.tiers import (
     SubjectRef,
 )
 from cognic_agentos.db.types import GovernanceJSON
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncConnection
+
+#: ISO 42001 control tuple stamped on every ``memory.write`` chain row.
+#: A.7.4 (impact assessment) / A.8.2 (data quality) / A.8.5 (data
+#: provenance) / A.10.2 (recorded information) per ADR-019 + ADR-006.
+#: Tuple at the boundary; ``DecisionHistoryStore`` converts to a list
+#: before ``canonical_bytes`` (which rejects tuples).
+_MEMORY_WRITE_ISO_CONTROLS: tuple[str, ...] = ("A.7.4", "A.8.2", "A.8.5", "A.10.2")
 
 #: Pin: ``sa.TIMESTAMP(timezone=True)`` — NOT ``sa.DateTime(timezone=True)``.
 #: ``sa.DateTime`` compiles to ``DATE`` on Oracle, silently dropping the
@@ -61,15 +83,16 @@ class MemoryAdapter(Protocol):
     async def get(
         self,
         *,
+        tenant_id: str,
         subject: SubjectRef,
         tier: MemoryTier,
         key: str | None = None,
         block_kind: BlockKind | None = None,
     ) -> MemoryHit | None: ...
 
-    async def list_for_subject(self, subject: SubjectRef) -> list[MemoryHit]: ...
+    async def list_for_subject(self, *, tenant_id: str, subject: SubjectRef) -> list[MemoryHit]: ...
 
-    async def list_blocks(self, subject: SubjectRef) -> list[BlockRef]: ...
+    async def list_blocks(self, *, tenant_id: str, subject: SubjectRef) -> list[BlockRef]: ...
 
     async def upsert_block(self, record: MemoryWriteRecord) -> MemoryRecordId: ...
 
@@ -114,7 +137,342 @@ _memory_records = sa.Table(
 )
 
 
+def _value_digest(value: object) -> str:
+    """SHA-256 of the canonical JSON bytes of ``value``.
+
+    This is the ONLY representation of a memory value that may enter the
+    hash chain — the raw value lives solely in the ``memory_records.value``
+    column (default-deny long-term, regulator-erasure pathway per ADR-019).
+    Uses ``core/canonical.canonical_bytes`` so the digest is stable across
+    Python versions + platforms."""
+
+    return hashlib.sha256(canonical_bytes(value)).hexdigest()
+
+
+class PostgresMemoryAdapter:
+    """Relational governed-memory backend for the ``task`` + ``long_term``
+    tiers (and the long_term singleton blocks).
+
+    A ``DecisionHistoryStore.append_with_precondition`` consumer: every
+    ``put`` / ``upsert_block`` inserts the ``memory_records`` row INSIDE the
+    chain-head ``FOR UPDATE`` locked transaction (the precondition), then
+    appends one ``memory.write`` chain row carrying the value DIGEST (never
+    the raw value) atomically with the row. Mirrors the
+    ``core/scheduler/storage.py`` precondition shape exactly.
+
+    Structurally conforms to :class:`MemoryAdapter`. Public methods are
+    async + raise on every failure path (production-grade rule); the recall
+    surfaces (:meth:`list_for_subject` / :meth:`list_blocks`) are honest
+    ``NotImplementedError`` deferrals to Sprint 11.5a T10 (MemoryAPI), NOT
+    silent no-ops."""
+
+    def __init__(self, *, engine: AsyncEngine, dh_store: DecisionHistoryStore) -> None:
+        self._engine = engine
+        self._dh = dh_store
+
+    def _build_write_record(self, record: MemoryWriteRecord, rid: uuid.UUID) -> DecisionRecord:
+        """Build the ``memory.write`` ``DecisionRecord``. The payload carries
+        ``redacted_value_digest`` — NEVER the raw ``record.value``. The
+        per-write GATE audit (consent / DLP / purpose) lands in later tasks;
+        T6 emits only the storage-level ``memory.write`` event."""
+
+        return DecisionRecord(
+            decision_type="memory.write",
+            request_id=record.request_id,
+            payload={
+                "tier": record.tier,
+                "data_classes": list(record.data_classes),
+                "purpose": record.purpose,
+                "retention_until": (
+                    record.retention_until.isoformat() if record.retention_until else None
+                ),
+                "record_id": str(rid),
+                "subject_ref": record.subject.canonical,
+                "block_kind": record.block_kind,
+                "redacted_value_digest": _value_digest(record.value),
+            },
+            actor_id=record.actor_id,
+            tenant_id=record.tenant_id,
+            iso_controls=_MEMORY_WRITE_ISO_CONTROLS,
+        )
+
+    async def put(self, record: MemoryWriteRecord) -> MemoryRecordId:
+        """Insert a keyed ``memory_records`` row + append one ``memory.write``
+        chain row atomically. Returns the generated record id.
+
+        ``append_with_precondition`` returns ``(event_id, new_hash)`` — NOT
+        the record id — so the id is generated up front + captured by the
+        closures."""
+
+        if record.tier not in ("task", "long_term"):
+            raise ValueError(
+                "PostgresMemoryAdapter persists task/long_term only; got "
+                f"tier={record.tier!r} — scratch must route to RedisMemoryAdapter"
+            )
+
+        rid = uuid.uuid4()
+        now = datetime.now(UTC)
+
+        async def _precondition(
+            conn: AsyncConnection, _prev_seq: int, _prev_hash: bytes
+        ) -> uuid.UUID:
+            # INSERT under the chain-head FOR UPDATE lock. If the INSERT
+            # raises, the outer engine.begin() rolls back — no chain row.
+            await conn.execute(
+                _memory_records.insert().values(
+                    record_id=rid,
+                    tenant_id=record.tenant_id,
+                    subject_ref=record.subject.canonical,
+                    agent_id=record.agent_id,
+                    tier=record.tier,
+                    block_kind=None,
+                    key=record.key,
+                    value=record.value,
+                    data_classes=list(record.data_classes),
+                    purpose=record.purpose,
+                    retention_until=record.retention_until,
+                    tombstone=None,
+                    redaction_version=0,
+                    sealed_prior_version_ref=None,
+                    vector_ref=None,
+                    created_at=now,
+                )
+            )
+            return rid
+
+        def _build_record(captured_rid: uuid.UUID) -> DecisionRecord:
+            return self._build_write_record(record, captured_rid)
+
+        await self._dh.append_with_precondition(
+            record_builder=_build_record,
+            precondition=_precondition,
+        )
+        return rid
+
+    async def upsert_block(self, record: MemoryWriteRecord) -> MemoryRecordId:
+        """Singleton block upsert: tombstone the prior active block for the
+        ``(tenant, subject, agent, block_kind)`` quad, then insert the new
+        version — both INSIDE the precondition so they commit atomically with
+        the ``memory.write`` chain row. Returns the new version's record id.
+
+        Blocks are keyless (``key=None``, ``block_kind`` set) per the
+        ``ck_memory_records_key_xor_block_kind`` XOR constraint."""
+
+        if record.tier != "long_term":
+            raise ValueError(f"blocks are long_term-only; got tier={record.tier!r}")
+
+        rid = uuid.uuid4()
+        now = datetime.now(UTC)
+
+        async def _precondition(
+            conn: AsyncConnection, _prev_seq: int, _prev_hash: bytes
+        ) -> uuid.UUID:
+            # Tombstone the prior active block (idempotent if none active),
+            # then insert the new version. Both run under the chain-head
+            # FOR UPDATE lock so the singleton invariant + the chain row
+            # commit atomically.
+            await conn.execute(
+                sa.update(_memory_records)
+                .where(
+                    _memory_records.c.tenant_id == record.tenant_id,
+                    _memory_records.c.subject_ref == record.subject.canonical,
+                    _memory_records.c.agent_id == record.agent_id,
+                    _memory_records.c.block_kind == record.block_kind,
+                    _memory_records.c.tombstone.is_(None),
+                )
+                .values(tombstone=sa.func.now())
+            )
+            await conn.execute(
+                _memory_records.insert().values(
+                    record_id=rid,
+                    tenant_id=record.tenant_id,
+                    subject_ref=record.subject.canonical,
+                    agent_id=record.agent_id,
+                    tier=record.tier,
+                    block_kind=record.block_kind,
+                    key=None,
+                    value=record.value,
+                    data_classes=list(record.data_classes),
+                    purpose=record.purpose,
+                    retention_until=record.retention_until,
+                    tombstone=None,
+                    redaction_version=0,
+                    sealed_prior_version_ref=None,
+                    vector_ref=None,
+                    created_at=now,
+                )
+            )
+            return rid
+
+        def _build_record(captured_rid: uuid.UUID) -> DecisionRecord:
+            return self._build_write_record(record, captured_rid)
+
+        await self._dh.append_with_precondition(
+            record_builder=_build_record,
+            precondition=_precondition,
+        )
+        return rid
+
+    async def get(
+        self,
+        *,
+        tenant_id: str,
+        subject: SubjectRef,
+        tier: MemoryTier,
+        key: str | None = None,
+        block_kind: BlockKind | None = None,
+    ) -> MemoryHit | None:
+        """Read the single active (non-tombstoned) record matching
+        ``(tenant_id, subject, tier)`` + the optional ``key`` / ``block_kind``
+        narrowers. ``tenant_id`` is REQUIRED — it is the cross-tenant isolation
+        boundary; a query without it would leak memory across tenants that share
+        a ``subject_ref`` + key/block. Returns ``None`` when no active row
+        matches."""
+
+        stmt = sa.select(_memory_records).where(
+            _memory_records.c.tenant_id == tenant_id,
+            _memory_records.c.subject_ref == subject.canonical,
+            _memory_records.c.tier == tier,
+            _memory_records.c.tombstone.is_(None),
+        )
+        if block_kind is not None:
+            stmt = stmt.where(_memory_records.c.block_kind == block_kind)
+        if key is not None:
+            stmt = stmt.where(_memory_records.c.key == key)
+
+        async with self._engine.connect() as conn:
+            row = (await conn.execute(stmt)).first()
+        if row is None:
+            return None
+        return MemoryHit(
+            record_id=row.record_id,
+            value=row.value,
+            tier=row.tier,
+            data_classes=tuple(row.data_classes),
+            purpose=row.purpose,
+            created_at=row.created_at,
+            block_kind=row.block_kind,
+        )
+
+    async def list_for_subject(self, *, tenant_id: str, subject: SubjectRef) -> list[MemoryHit]:
+        raise NotImplementedError(
+            "PostgresMemoryAdapter.list_for_subject lands in Sprint 11.5a T10 "
+            "(MemoryAPI recall/list surface)"
+        )
+
+    async def list_blocks(self, *, tenant_id: str, subject: SubjectRef) -> list[BlockRef]:
+        raise NotImplementedError(
+            "PostgresMemoryAdapter.list_blocks lands in Sprint 11.5a T10 "
+            "(MemoryAPI recall/list surface)"
+        )
+
+
+def _is_redis_unavailable(exc: BaseException) -> bool:
+    """True when ``exc`` signals an unreachable redis backend.
+
+    Catches the builtin connection-error family always, plus — resolved
+    LAZILY so the module imports without the ``[adapters]`` extra — any
+    ``redis.exceptions.RedisError``. A missing ``redis`` package simply
+    means the redis branch is skipped (the builtin branch still applies)."""
+
+    if isinstance(exc, ConnectionError | OSError | TimeoutError):
+        return True
+    try:
+        from redis.exceptions import RedisError
+    except ImportError:
+        return False
+    return isinstance(exc, RedisError)
+
+
+@runtime_checkable
+class _AsyncRedisLike(Protocol):
+    """Minimal duck-typed contract for the injected redis client — only the
+    async ``set`` used by the scratch write path. Keeps ``RedisMemoryAdapter``
+    constructible without importing ``redis`` at module level."""
+
+    async def set(self, *args: Any, **kwargs: Any) -> Any: ...
+
+
+class RedisMemoryAdapter:
+    """Ephemeral governed-memory backend for the ``scratch`` tier ONLY.
+
+    **Fail-closed (Cut-A rule).** :meth:`put` raises
+    :class:`MemoryBackendUnavailable` on ANY redis backend error — there is
+    NO fallback to Postgres and NO silent success. Persisting scratch
+    un-erasably (e.g. into the relational store) in 11.5a would violate the
+    Cut-A rule: ``forget`` / the reaper land in 11.5b, so a scratch write
+    that cannot reach its TTL'd redis home MUST be refused rather than
+    quietly durably persisted.
+
+    Structurally conforms to :class:`MemoryAdapter`. ``upsert_block`` /
+    ``list_blocks`` are never valid for scratch (blocks are long_term →
+    :class:`PostgresMemoryAdapter`); ``get`` / ``list_for_subject`` are
+    scratch-recall surfaces deferred to T10. All four raise
+    ``NotImplementedError`` (honest deferral, NOT silent no-op)."""
+
+    def __init__(self, *, redis_client: _AsyncRedisLike, scratch_ttl_s: int) -> None:
+        self._redis = redis_client
+        self._scratch_ttl_s = scratch_ttl_s
+
+    async def put(self, record: MemoryWriteRecord) -> MemoryRecordId:
+        """Write the scratch value to redis under a TTL'd key. Fail-closed:
+        any backend error raises :class:`MemoryBackendUnavailable` — no
+        Postgres fallback, no silent allow.
+
+        The value never enters the hash chain here (scratch writes are not
+        chain-linked); the raw value is stored only transiently in redis."""
+
+        rid = uuid.uuid4()
+        key = f"memory:scratch:{record.tenant_id}:{record.subject.canonical}:{record.key}:{rid}"
+        payload = canonical_bytes(record.value)
+        try:
+            await self._redis.set(key, payload, ex=self._scratch_ttl_s)
+        except Exception as exc:
+            # Blind catch is INTENTIONAL (fail-closed governance default):
+            # ANY backend error on a scratch WRITE => the write did not land
+            # => refuse. Silently allowing (or durably persisting) would
+            # violate the Cut-A rule. We do not re-raise other exception
+            # classes as themselves because a caller that sees anything other
+            # than MemoryBackendUnavailable might assume the write succeeded.
+            # No blind-except suppression directive is needed: flake8-blind-
+            # except (BLE) is not enabled in this repo's ruff config, so a
+            # suppression directive here would be flagged RUF100-unused.
+            detail = (
+                "scratch backend (redis) unreachable"
+                if _is_redis_unavailable(exc)
+                else f"scratch backend (redis) write failed: {type(exc).__name__}"
+            )
+            raise MemoryBackendUnavailable(detail) from exc
+        return rid
+
+    async def get(
+        self,
+        *,
+        tenant_id: str,
+        subject: SubjectRef,
+        tier: MemoryTier,
+        key: str | None = None,
+        block_kind: BlockKind | None = None,
+    ) -> MemoryHit | None:
+        raise NotImplementedError(
+            "RedisMemoryAdapter.get lands in Sprint 11.5a T10 (scratch recall)"
+        )
+
+    async def list_for_subject(self, *, tenant_id: str, subject: SubjectRef) -> list[MemoryHit]:
+        raise NotImplementedError(
+            "RedisMemoryAdapter.list_for_subject lands in Sprint 11.5a T10 (scratch recall)"
+        )
+
+    async def upsert_block(self, record: MemoryWriteRecord) -> MemoryRecordId:
+        raise NotImplementedError("blocks are long_term-only; use PostgresMemoryAdapter")
+
+    async def list_blocks(self, *, tenant_id: str, subject: SubjectRef) -> list[BlockRef]:
+        raise NotImplementedError("blocks are long_term-only; use PostgresMemoryAdapter")
+
+
 __all__: tuple[str, ...] = (
     "MemoryAdapter",
     "MemoryBackendUnavailable",
+    "PostgresMemoryAdapter",
+    "RedisMemoryAdapter",
 )
