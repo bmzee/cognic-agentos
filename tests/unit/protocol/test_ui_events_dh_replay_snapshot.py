@@ -79,6 +79,14 @@ _WALKED_PROJECTORS: frozenset[str] = frozenset(
         "_project_frontend_action_rejected",
         "_project_policy_decision_evaluated",
         "_project_policy_rbac_denied",
+        # Sprint 11b T9 — subagent projectors + the depth-cap scoping helper.
+        # recursion_capped is NOT a registry key (it routes via the escalation
+        # conditional), so the parametrized replay test does not reach it; the
+        # AST walk here is what pins its snapshot-field access to the replay set.
+        "_project_subagent_spawned",
+        "_project_subagent_return",
+        "_is_subagent_depth_cap",
+        "_project_subagent_recursion_capped",
         "_build_decision_audit_for_dh_snapshot",
     }
 )

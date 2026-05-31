@@ -1954,6 +1954,45 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     ("src/cognic_agentos/subagent/policy.py", 0.95, 0.90),
     ("src/cognic_agentos/subagent/audit.py", 0.95, 0.90),
     ("src/cognic_agentos/subagent/audit_verifier.py", 0.95, 0.90),
+    #
+    # ------------------------------------------------------------------
+    # Sprint 11b Z1b — sub-agent integration (ADR-005) 11b. Gate 94 → 97.
+    # ------------------------------------------------------------------
+    # ``subagent/`` is a stop-rule isolation boundary (AGENTS.md "Stop
+    # rules" — the "Sandbox or sub-agent enforcement boundaries" rule), so
+    # the three substantive 11b modules ride the same durable per-file
+    # coverage gate. Promoted at Sprint-11b Z1b per the plan. The gate runs
+    # against a FRESH full-suite ``--cov-branch coverage.json`` IN THE SAME
+    # COMMIT as this ``_CRITICAL_FILES`` extension — NOT just the count-guard
+    # ``_EXPECTED_ENTRY_COUNT`` bump — per
+    # ``feedback_verify_promotion_meets_floor_at_promotion_time``.
+    #
+    # Module rationale:
+    #   * ``subagent/spawn.py`` — the T6 scheduler-mediated spawn
+    #     orchestrator; threads every spawn through the real SchedulerEngine
+    #     (submit → mark_running → complete/preempt/fail) with no leaked
+    #     rows/reservations on any admission outcome (refused / queued-cancel
+    #     / over-budget-preempt / not-ok-fail / ok-complete). The substantive
+    #     enforcement surface; a bug here breaks privilege de-escalation,
+    #     budget narrowing, or the scheduler task lifecycle.
+    #   * ``subagent/conformers.py`` — the T5 real DI conformers
+    #     (``LocalParentBudgetResolver`` fail-loud on an unknown parent;
+    #     ``PackStoreStateInterrogator`` matching the LOGICAL ``pack_id`` via
+    #     paginated ``list_for_tenant(state="installed")`` — NOT
+    #     ``store.load`` which keys by row id); a bug here mis-resolves
+    #     pack-installed state or parent budget.
+    #   * ``subagent/_facade.py`` — the T7 ``SubAgent`` facade + the T8
+    #     module-level ``spawn_subagent`` seam; the privilege-de-escalation
+    #     public boundary that constructs the spawner from ``settings`` +
+    #     delegates. Thin, but on the floor because it is the public seam.
+    #
+    # ``subagent/__init__.py`` stays OFF the gate per Doctrine F (re-export
+    # marker). ``subagent/_types.py`` + ``subagent/policy.py`` are already on
+    # the gate from 11a Z1a (extended by 11b T4.5/T5, NOT re-added);
+    # ``subagent/audit.py``/``audit_verifier.py`` likewise unchanged by 11b.
+    ("src/cognic_agentos/subagent/spawn.py", 0.95, 0.90),
+    ("src/cognic_agentos/subagent/conformers.py", 0.95, 0.90),
+    ("src/cognic_agentos/subagent/_facade.py", 0.95, 0.90),
 )
 
 

@@ -52,9 +52,11 @@ _GATE_TOOL_PATH = _REPO_ROOT / "tools" / "check_critical_coverage.py"
 #: (sandbox/projection per ADR-004 §25 amendment + spec §5.4) = 90;
 #: + 4 Sprint-11 Z1a sub-agent primitive 11a modules
 #: (subagent/_types + subagent/policy + subagent/audit +
-#: subagent/audit_verifier per ADR-005) = 94).
+#: subagent/audit_verifier per ADR-005) = 94;
+#: + 3 Sprint-11b Z1b sub-agent integration modules
+#: (subagent/spawn + subagent/conformers + subagent/_facade per ADR-005) = 97).
 #: Bump this in lockstep with any deliberate ``_CRITICAL_FILES`` change.
-_EXPECTED_ENTRY_COUNT = 94
+_EXPECTED_ENTRY_COUNT = 97
 
 #: The 5 modules Sprint 7B.3 promoted to the durable gate, each by its
 #: own landing commit (T3-T6 panels + T7 composer). All ride the
@@ -508,6 +510,28 @@ def test_sprint_11_modules_present_with_standard_floors(
     by_path = {path: (line, branch) for path, line, branch in gate_tool._CRITICAL_FILES}
     for module in _SPRINT_11_GATE_MODULES:
         assert module in by_path, f"Sprint 11 module missing from gate: {module}"
+        assert by_path[module] == (0.95, 0.90), (
+            f"{module} must ride the standard 95%-line / 90%-branch floor"
+        )
+
+
+_SPRINT_11B_GATE_MODULES = (
+    "src/cognic_agentos/subagent/spawn.py",
+    "src/cognic_agentos/subagent/conformers.py",
+    "src/cognic_agentos/subagent/_facade.py",
+)
+
+
+def test_sprint_11b_modules_present_with_standard_floors(
+    gate_tool: ModuleType,
+) -> None:
+    """The 3 Sprint 11b Z1b sub-agent integration promotions are on the gate
+    at the 95/90 floor (``subagent/spawn`` T6, ``subagent/conformers`` T5,
+    ``subagent/_facade`` T7+T8). ``subagent/_types`` + ``subagent/policy``
+    stay on the gate from 11a Z1a (extended by 11b, NOT re-added)."""
+    by_path = {path: (line, branch) for path, line, branch in gate_tool._CRITICAL_FILES}
+    for module in _SPRINT_11B_GATE_MODULES:
+        assert module in by_path, f"Sprint 11b module missing from gate: {module}"
         assert by_path[module] == (0.95, 0.90), (
             f"{module} must ride the standard 95%-line / 90%-branch floor"
         )
