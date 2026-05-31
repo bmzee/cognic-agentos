@@ -538,7 +538,7 @@ class ToolCallFailed(_BaseEvent):
     type: Literal["failed"] = "failed"
 
 
-# ---- subagent.* (schema only — Sprint-8 wires) -------------------------------
+# ---- subagent.* (emit hooks wired in Sprint 11b T9 — ADR-005 + ADR-020) ------
 
 
 class SubagentSpawned(_BaseEvent):
@@ -945,11 +945,105 @@ def _project_policy_rbac_denied(snapshot: AppendedDecisionSnapshot) -> PolicyRBA
     )
 
 
+def _project_subagent_spawned(snapshot: AppendedDecisionSnapshot) -> SubagentSpawned:
+    """Sprint 11b T9 — subagent.spawn → subagent.spawned (ADR-005 §Audit)."""
+    return SubagentSpawned(
+        event_id=_chain_derived_event_id(
+            chain_id="decision_history",
+            sequence=snapshot.sequence,
+            ordinal=0,
+            family="subagent",
+            type_="spawned",
+        ),
+        ts=snapshot.created_at,
+        tenant=snapshot.tenant_id,
+        trace_id=snapshot.trace_id,
+        audit_chain_hash=_format_chain_hash(snapshot.new_hash),
+        data=snapshot.payload,
+    )
+
+
+def _project_subagent_return(
+    snapshot: AppendedDecisionSnapshot,
+) -> SubagentCompleted | SubagentFailed:
+    """Sprint 11b T9 — subagent.return → completed/failed by payload['outcome']
+    (`{"completed","failed"}` per subagent/audit.py). Anything that is not
+    `"completed"` (incl. a missing/unknown outcome) projects to
+    `subagent.failed` — the conservative UI signal. ALWAYS returns a typed
+    event (never None) so the replay-snapshot drift test's not-None invariant
+    holds for this registry entry."""
+    family: Literal["subagent"] = "subagent"
+    if snapshot.payload.get("outcome") == "completed":
+        return SubagentCompleted(
+            event_id=_chain_derived_event_id(
+                chain_id="decision_history",
+                sequence=snapshot.sequence,
+                ordinal=0,
+                family=family,
+                type_="completed",
+            ),
+            ts=snapshot.created_at,
+            tenant=snapshot.tenant_id,
+            trace_id=snapshot.trace_id,
+            audit_chain_hash=_format_chain_hash(snapshot.new_hash),
+            data=snapshot.payload,
+        )
+    return SubagentFailed(
+        event_id=_chain_derived_event_id(
+            chain_id="decision_history",
+            sequence=snapshot.sequence,
+            ordinal=0,
+            family=family,
+            type_="failed",
+        ),
+        ts=snapshot.created_at,
+        tenant=snapshot.tenant_id,
+        trace_id=snapshot.trace_id,
+        audit_chain_hash=_format_chain_hash(snapshot.new_hash),
+        data=snapshot.payload,
+    )
+
+
+def _is_subagent_depth_cap(snapshot: AppendedDecisionSnapshot) -> bool:
+    """Sprint 11b T9 — scope an escalation.opened row to a subagent recursion
+    cap. The T6 spawn path refuses a depth-exceeding spawn BEFORE it emits
+    subagent.spawn, opening an escalation with `level="depth_exceeded"` carrying
+    the `subagent-spawn-*` request_id. Both signals MUST match so a generic
+    escalation (different level) or a depth cap from another subsystem
+    (different request_id prefix) does NOT project subagent.recursion_capped."""
+    return snapshot.payload.get("level") == "depth_exceeded" and snapshot.request_id.startswith(
+        "subagent-spawn-"
+    )
+
+
+def _project_subagent_recursion_capped(
+    snapshot: AppendedDecisionSnapshot,
+) -> SubagentRecursionCapped:
+    """Sprint 11b T9 — a scoped depth-cap escalation.opened row →
+    subagent.recursion_capped. Reached via the dispatcher's escalation branch
+    AFTER :func:`_is_subagent_depth_cap` confirms the scoping (A-projector)."""
+    return SubagentRecursionCapped(
+        event_id=_chain_derived_event_id(
+            chain_id="decision_history",
+            sequence=snapshot.sequence,
+            ordinal=0,
+            family="subagent",
+            type_="recursion_capped",
+        ),
+        ts=snapshot.created_at,
+        tenant=snapshot.tenant_id,
+        trace_id=snapshot.trace_id,
+        audit_chain_hash=_format_chain_hash(snapshot.new_hash),
+        data=snapshot.payload,
+    )
+
+
 #: Exact-match dispatch table from DH `decision_type` → typed projector.
 #: Prefix-matched `rbac.*` falls out of this map and into the dispatcher's
-#: prefix check below. Drift: adding a new typed projector requires (a) a new
-#: projector function, (b) entry here OR prefix support, (c) the class added
-#: to `_TYPED_PROJECTION_CLASSES` (so the ContextVar capture fires).
+#: prefix check below; `escalation.opened` falls out into the scoped subagent
+#: depth-cap branch. Drift: adding a new typed projector requires (a) a new
+#: projector function, (b) entry here OR prefix/conditional support, (c) the
+#: class added to `_TYPED_PROJECTION_CLASSES` (so the ContextVar capture fires).
 _DECISION_HISTORY_TYPED_PROJECTORS: Final[
     dict[str, Callable[[AppendedDecisionSnapshot], _BaseEvent]]
 ] = {
@@ -957,6 +1051,8 @@ _DECISION_HISTORY_TYPED_PROJECTORS: Final[
     "frontend_action.accepted": _project_frontend_action_accepted,
     "frontend_action.rejected": _project_frontend_action_rejected,
     "policy.decision_evaluated": _project_policy_decision_evaluated,
+    "subagent.spawn": _project_subagent_spawned,
+    "subagent.return": _project_subagent_return,
 }
 
 
@@ -983,6 +1079,11 @@ def _project_typed_decision_history(snapshot: AppendedDecisionSnapshot) -> _Base
         if suffix in _RBAC_DENIAL_TYPE_VALUES:
             return _project_policy_rbac_denied(snapshot)
         # Unknown rbac.<suffix> falls through — mirror-only emission.
+    # Subagent recursion cap (Sprint 11b T9): the T6 depth-refusal path refuses
+    # BEFORE it emits subagent.spawn, so its only evidence is a scoped
+    # escalation.opened row. A generic escalation.opened falls through to None.
+    if dt == "escalation.opened" and _is_subagent_depth_cap(snapshot):
+        return _project_subagent_recursion_capped(snapshot)
     return None
 
 
@@ -1101,6 +1202,10 @@ _TYPED_PROJECTION_CLASSES: Final[frozenset[type]] = frozenset(
         FrontendActionRejected,
         PolicyDecisionEvaluated,
         PolicyRBACDenied,
+        SubagentSpawned,
+        SubagentCompleted,
+        SubagentFailed,
+        SubagentRecursionCapped,
     }
 )
 

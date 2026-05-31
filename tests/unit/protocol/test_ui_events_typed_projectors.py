@@ -116,15 +116,21 @@ class TestDecisionHistoryTypedRoutingCoversAll5DecisionTypes:
             assert evt.type == "rbac_denied"
 
     def test_table_keyset_pinned(self) -> None:
-        """Drift detector — the 4 exact-match keys are the only allowed
-        Wave-1 vocabulary on the typed-dispatch table. Adding a 5th
-        entry requires a deliberate plan-of-record amendment + the
-        corresponding class added to `_TYPED_PROJECTION_CLASSES`."""
+        """Drift detector — the 6 exact-match keys are the only allowed
+        Wave-1 vocabulary on the typed-dispatch table (4 frontend_action +
+        policy.decision_evaluated + the 2 subagent entries wired in Sprint
+        11b T9). Adding a further entry requires a deliberate plan-of-record
+        amendment + the corresponding class added to
+        `_TYPED_PROJECTION_CLASSES`. Note: `rbac.*` (prefix) and the subagent
+        depth-cap (scoped `escalation.opened`) route via CONDITIONAL branches,
+        NOT this exact-match table."""
         assert set(_DECISION_HISTORY_TYPED_PROJECTORS.keys()) == {
             "frontend_action.submitted",
             "frontend_action.accepted",
             "frontend_action.rejected",
             "policy.decision_evaluated",
+            "subagent.spawn",
+            "subagent.return",
         }
 
 

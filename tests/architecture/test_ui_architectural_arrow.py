@@ -131,14 +131,19 @@ def _derived_per_type_projector_names() -> frozenset[str]:
         projector — routed by ``_project_typed_decision_history``'s
         prefix-match branch, NOT by the dict; would be invisible to
         a dict-only walk)
+      - ``_project_subagent_recursion_capped.__name__`` (Sprint 11b T9 —
+        the depth-cap projector routed by the scoped ``escalation.opened``
+        conditional branch, NOT the dict; same shape as the rbac add)
     """
     from cognic_agentos.protocol.ui_events import (
         _DECISION_HISTORY_TYPED_PROJECTORS,
         _project_policy_rbac_denied,
+        _project_subagent_recursion_capped,
     )
 
     names = {fn.__name__ for fn in _DECISION_HISTORY_TYPED_PROJECTORS.values()}
     names.add(_project_policy_rbac_denied.__name__)
+    names.add(_project_subagent_recursion_capped.__name__)
     return frozenset(names)
 
 
