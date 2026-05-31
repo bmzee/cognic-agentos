@@ -28,9 +28,11 @@ import future.keywords.if
 
 # ADR-015 default-deny baseline. The kernel NEVER permits by default — a
 # permissive default would silently authorise long-term / cross-subject /
-# restricted-class writes the moment 11.5a ships. The ONLY Wave-1 true
-# path is an explicit tenant_override (a local Rego layer the tenant
-# ships); a missing tenant_override key falls through to default-deny.
+# durable (task/long_term) restricted-class writes the moment 11.5a ships
+# (the §7.1 gate exempts scratch from the restricted-class point — DLP-only).
+# The ONLY Wave-1 true path is an explicit tenant_override (a local Rego
+# layer the tenant ships); a missing tenant_override key falls through to
+# default-deny.
 default long_term := {"allow": false}
 
 default cross_subject := {"allow": false}

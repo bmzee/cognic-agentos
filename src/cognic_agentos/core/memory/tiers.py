@@ -44,6 +44,7 @@ MemoryRefusalReason = Literal[
     "memory_subagent_durable_access_refused",
     "memory_long_term_write_denied",
     "memory_dlp_undeclared_restricted_class",
+    "memory_restricted_class_write_denied",
     "memory_purpose_not_declared",
     "memory_consent_required",
     "memory_consent_invalid",
