@@ -80,7 +80,7 @@ Six operations; no other access path. Direct database queries against the memory
 Every `remember()` call goes through this gate:
 
 1. **Tier check** — `long_term` requires pack manifest `[tool.cognic.memory] long_term_writes_allowed = true` AND tenant Rego policy `memory.long_term.allow` returns true
-2. **Data-class check** — value scanned by the **Sprint 11.5 DLP seed (`core/dlp/scanner.py`, expanded in Sprint 13.5)** per ADR-017; detected `customer_pii` / `payment_action` / `regulator_communication` triggers consent-token requirement. The seed ships with memory governance so write-time classification exists from the moment `remember()` is callable; Sprint 13.5 extends the same scanner with post-call DLP on tool outputs and custom recogniser plugins
+2. **Data-class check** — value scanned by the **Sprint 11.5 DLP seed (`core/dlp/scanner.py`, expanded in Sprint 13.5)** per ADR-017; detected restricted classes (`customer_pii` / `payment_data` / `credentials` / `regulator_communication` — the build-time vocabulary, see amendment) trigger the consent-token requirement. The seed ships with memory governance so write-time classification exists from the moment `remember()` is callable; Sprint 13.5 extends the same scanner with post-call DLP on tool outputs and custom recogniser plugins
 3. **Purpose check** — declared purpose must match a purpose declared in the pack's `[tool.cognic.data_governance].purpose` list
 4. **Consent check** — for restricted data classes, `consent_token` must be present AND not expired AND matching the subject; consent ledger event chain-linked
 5. **Retention enforcement** — `retention_window` capped at the smaller of (declared, tenant max for the data class)
@@ -111,7 +111,7 @@ Examiners and tenant admins (RBAC `memory.export.read`) can export a subject's a
 
 `MemoryAdapter` protocol with reference impls:
 - `PostgresMemoryAdapter` — relational; per-tenant schema; tier columns + JSONB value
-- `RedisMemoryAdapter` — for `scratch` tier only (sub-second TTL); falls back to Postgres if Redis unreachable
+- `RedisMemoryAdapter` — for `scratch` tier only (sub-second TTL). **Wave-1/11.5a: fail-closed on Redis-unreachable** (raises an infrastructure error, not a governance refusal); the Postgres fallback is deferred to 11.5b once the reaper provides Postgres-scratch TTL cleanup (see the Sprint-11.5 amendment + Cut-A rule)
 
 Vector embeddings of memory values flow through the existing `VectorStoreAdapter` (Qdrant default per ADR-009) so semantic recall reuses the search infrastructure; data-class metadata is co-stored so vector-recall results can be filtered by purpose at query time.
 
@@ -137,10 +137,10 @@ A new kill-switch class `memory.write_freeze` (operator can freeze all `long_ter
 - **Aligns with industry patterns** — LangGraph and Pydantic AI memory abstractions land here naturally; AgentOS exposes the policy layer they assume
 
 ### Negative
-- **Layer C API surface grows** — agent authors must learn six operations + tier semantics; mitigated by SDK helpers (Sprint 7A)
+- **Layer C API surface grows** — agent authors must learn ten operations (7 core + 3 block; see amendment) + tier semantics; mitigated by SDK helpers (Sprint 7A)
 - **Latency** — per-write data-class scanning + Rego policy adds ~10-30ms to `long_term` writes; `scratch` tier unchanged; banks accept the cost given the compliance value
 - **Storage cost** — tombstone + redaction history adds ~2× storage for `long_term` tier; mitigated by reaper + tenant-configured tombstone windows
-- **Wave 1 scope** — sub-agent memory inheritance (parent agent's `task` memory visible to child sub-agent) is deferred to Wave 1.5 per ADR-005; default Wave 1 is "child sub-agent gets fresh task memory"
+- **Wave 1 scope** — sub-agent durable memory inheritance is deferred to Wave 1.5 per ADR-005; Wave 1 is **strict scratch-only for sub-agents** (durable `task`/`long_term` access refused; durable memory is parent-mediated — see amendment)
 
 ### Neutral
 - Memory is a platform primitive (peer of audit/decision_history/guardrails), not a plugin pack; same logic as runtime approval — every bank deployment needs it
@@ -153,8 +153,9 @@ A new kill-switch class `memory.write_freeze` (operator can freeze all `long_ter
 | **Sprint 7B** (extended) | Reviewer evidence panel shows declared memory tiers + cross-subject access + a diff against tenant memory policy |
 | **Sprint 9** (extended) | ISO 42001 control tags added to `memory.write` / `memory.read` / `memory.forget` / `memory.redact` events |
 | **Sprint 10** (extended) | Per-tenant Vault-backed memory-adapter credentials |
-| **New: Sprint 11.5** | `core/memory/` primitive — `MemoryAPI`, `MemoryAdapter` protocol, Postgres + Redis reference impls, harness injection. ~2 work-units. |
-| **Sprint 13.5** (extended) | `long_term` memory writes for high-risk-tier packs route through the approval engine; `memory.write_freeze` kill switch added; `policies/_default/memory.rego` published |
+| **New: Sprint 11.5a** | `core/memory/` substrate — `MemoryAPI` (10 ops; 7-op 11.5a surface), `MemoryAdapter` protocol, Postgres + Redis(scratch) impls, DLP seed, default-deny `memory.rego` + `memory_purpose_matrix.rego`, kill-switch **seam**. **DI-tested, NOT harness-injected** (harness wiring deferred — see amendment). ~2 work-units (Cut-A split). |
+| **Sprint 11.5b** | lifecycle (`forget`/`redact`/`regulator_erasure` + reaper), `export`, **real Redis `memory.write_freeze`** (replaces the 11.5a seam), `learning_surface` validator, portal/UI/RBAC depth |
+| **Sprint 13.5** (extended) | high-risk-tier `long_term` writes route through the approval engine (lifting the 11.5a transitional refusal); broader emergency-control set (other kill-switch classes + quotas); `memory.rego` bundle expanded (granularity) — defaults unchanged |
 
 Sprint 11.5 inserts between Sprint 11 (sub-agent primitive) and Sprint 12 (eval harness) so eval can exercise memory-aware agents.
 
@@ -174,3 +175,23 @@ Phase 4 grows from 14 → 16 work-units (Sprint 11.5 = 2 wu). Phases 1-4 total: 
 - [Pydantic AI memory primitives](https://ai.pydantic.dev/)
 - [Anthropic Managed Agents — durable session](https://www.anthropic.com/engineering/managed-agents)
 - [OpenAI Agents SDK — memory](https://openai.github.io/openai-agents-python/)
+
+## Amendment — Sprint 11.5 (2026-05-31)
+
+Sprint 11.5 grounded the design against the codebase; this amendment records the resulting clarifications. None change the governance posture — they refine shapes + scope.
+
+**Memory blocks (new governed shape).** A *memory block* is a bounded, labeled, **singleton** projection over a tier — NOT a fourth tier. Three OS-neutral kinds: `persona`, `user_profile`, `agent_notes` (an agent pack later maps these to a Hermes-style `SOUL.md` / `USER.md` / `MEMORY.md` experience; that experience is Layer-C, not OS). Identity is `(tenant_id, subject_ref, agent_id, block_kind)` with exactly one *active* block per tuple (superseded versions tombstoned). In Wave-1 blocks are **`long_term`-only** and go through the full default-deny write gate — a block write IS a `long_term` write, not a default-deny bypass. The API gains 3 block ops (`upsert_block` / `read_block` / `list_blocks`); `forget` / `redact` / `export` / `list_for_subject` apply to blocks because a block is a governed record. **Operative API = 7 ADR-019 core ops + 3 block ops = 10** (the §"Governed memory API" code block lists 6, omitting `recall_episodes` + the block ops; this amendment is the source of truth).
+
+**`SubjectRef` (new subject vocabulary).** The subject is a typed `SubjectRef` = `kind ∈ {human, agent}` + `id`, canonical `human:<id>` / `agent:<id>`. Empty/unscoped subjects are refused — no tenant-wide memory can exist. `human:` subjects are data subjects (regulator-erasure applies); `agent:` subjects (an agent's own persona) carry no human data subject. The served subject is **bound at `MemoryAPI` construction**, never caller-supplied; explicit-subject ops compare their requested subject to it (mismatch → cross-subject, refused unless declared + tenant Rego).
+
+**§143 child-inheritance clarified (strict Wave-1 rule).** Sub-agents are **`scratch`-only**: the gate refuses all durable (`task`/`long_term`) `remember`/`upsert_block`/`recall`/`read_block`/`recall_episodes` from a sub-agent context (`memory_subagent_durable_access_refused`). Durable memory is **parent-mediated only** — a child may receive an inert, parent-curated, read-only snapshot as input (the parent's reads are governed + audited at the parent boundary). The MemoryAPI snapshot-injection seam is **Wave-1.5** (rides with prompt-injection). This refines §143's "fresh task memory" default to "scratch-only; durable parent-mediated."
+
+**Prompt-assembly + self-edit loops deferred.** Sprint 11.5 ships the governed memory *substrate* only. Loading blocks into a system prompt (context injection / prefix-cache assembly) and any agent self-edit tool-loop are **harness / Wave-1.5** concerns, out of scope here; blocks are *injection-ready*, not injected by the OS.
+
+**DLP seed scope (§"Per-write enforcement").** The Sprint-11.5 `core/dlp/scanner.py` seed is a **real, deterministic checksum/regex/gazetteer** recogniser (PAN/Luhn, IBAN/mod-97, SWIFT/BIC with a context cue, email, phone, regulator gazetteer) over the **build-time** data-class vocabulary (`customer_pii`, `payment_data`, `credentials`, `regulator_communication` per `cli/_governance_vocab.RESTRICTED_DATA_CLASSES` — distinct from the `protocol/mcp_capabilities` runtime set's `payment_action`). **Free-text person names, addresses, and checksummable national IDs are deferred to Sprint 13.5** (Presidio + per-locale recogniser plugins) — most national IDs are format-only (high false-positive) and the few Luhn-checksummed ones collide with PAN. The seed is defense-in-depth: classification is primary-by-declaration (the `remember(data_classes=…)` argument); DLP refuses under-declaration of restricted classes.
+
+**Scratch fail-closed (Wave-1 deviation from §"Storage").** In Wave-1/11.5a, `scratch` writes are **fail-closed** when Redis is unreachable (raise an infrastructure error — NOT a governance refusal); the Postgres fallback is deferred to 11.5b once the reaper gives Postgres-scratch TTL cleanup, since Postgres-persisted scratch without erasure would be un-erasable under the Cut-A a/b split.
+
+**Memory events ride `decision_history`.** `memory.write` / `memory.read` (+ 11.5b `memory.forget` / `memory.redact` / `memory.regulator_erasure`) are `DecisionRecord`s appended via `DecisionHistoryStore.append_with_precondition`, carrying ISO 42001 tags on `iso_controls` and a **redacted-value-digest** (never the value) in the payload — **no `core/audit.py` schema change**, no `core/canonical.py` / `decision_history.py` schema bump (memory linkage is payload-only).
+
+**Cut-A a/b split.** Ships as **11.5a** (governed substrate: 7-op surface, tiers/blocks, both enforcement gates, DLP seed, storage, default-deny Rego, erasure-ready schema, kill-switch *seam*) + **11.5b** (lifecycle `forget`/`redact`/`regulator_erasure` + reaper, `export`, real Redis `memory.write_freeze`, `learning_surface` validator, portal/UI, RBAC depth). The substrate is DI-tested, not harness-injected — same "primitive done, production wiring deferred" posture as the Sprint-11 sub-agent primitive.
