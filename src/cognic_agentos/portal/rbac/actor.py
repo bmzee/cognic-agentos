@@ -36,6 +36,7 @@ from fastapi import Request
 
 from cognic_agentos.portal.rbac.scopes import (  # noqa: F401  (ScopeSet kept for legacy bank-overlay re-export)
     ComplianceRBACScope,
+    MemoryRBACScope,
     ModelRBACScope,
     PackRBACScope,
     ScopeSet,
@@ -91,7 +92,14 @@ class Actor(pydantic.BaseModel):
     #: other scope family. Additive — pre-9.5 actors still construct
     #: cleanly. Pinned by
     #: ``tests/unit/portal/rbac/test_model_scopes.py::TestActorAcceptsModelScopes``.
-    scopes: frozenset[PackRBACScope | UIRBACScope | ComplianceRBACScope | ModelRBACScope]
+    #: Sprint 11.5a T12 — further widened with ``MemoryRBACScope`` so a
+    #: memory-capable actor can carry memory.read / memory.write.{scratch,
+    #: task,long_term} (ADR-019) alongside any other family. Additive —
+    #: pre-11.5a actors still construct cleanly. Pinned by
+    #: ``tests/unit/portal/rbac/test_memory_scopes.py::TestActorAcceptsMemoryScopes``.
+    scopes: frozenset[
+        PackRBACScope | UIRBACScope | ComplianceRBACScope | ModelRBACScope | MemoryRBACScope
+    ]
     actor_type: ActorType
 
 
