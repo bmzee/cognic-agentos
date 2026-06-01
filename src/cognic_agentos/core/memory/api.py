@@ -10,10 +10,10 @@ direct adapter access from anywhere but here is forbidden (pinned by
 **11.5a op surface — 7 ops.** ``remember`` / ``recall`` / ``upsert_block`` /
 ``read_block`` / ``list_for_subject`` / ``list_blocks`` / ``recall_episodes``
 (the 7th op landed in T11 — the ``long_term`` + purpose episodic view, joined
-to ``decision_history``; vector-ranked recall is deferred to 11.5b). The
+to ``decision_history``; vector-ranked recall is deferred to 11.5c). The
 lifecycle ops (``forget`` / ``redact`` / ``export``) are ABSENT: memory writes
-are not production-wired until erasure/redaction/export lands in 11.5b —
-MemoryAPI is DI-tested, not harness-injected, in 11.5a.
+are not production-wired until erasure/redaction lands in 11.5b and ``export``
+in 11.5c — MemoryAPI is DI-tested, not harness-injected, in 11.5a.
 
 **Identity is read from the bound** :class:`MemoryCallerContext` **only.** Every
 op runs through the gate, which reads ``tenant_id`` / ``agent_id`` / ``actor_id``
@@ -275,7 +275,7 @@ class MemoryAPI:
 
         Pin-2: a ``similarity_threshold > 0.0`` call passes the gate then
         propagates :func:`episodes.recall_episodes`'s ``NotImplementedError``
-        (vector-ranked recall is 11.5b) — no ``memory.read`` is emitted on that
+        (vector-ranked recall is 11.5c) — no ``memory.read`` is emitted on that
         path."""
 
         ctx = self._context
