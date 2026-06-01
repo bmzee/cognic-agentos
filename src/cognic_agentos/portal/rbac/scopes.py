@@ -174,6 +174,25 @@ MODEL_LIFECYCLE_SCOPES: frozenset[ModelRBACScope] = frozenset(
 )
 
 
+#: Sprint 11.5a — memory RBAC scopes per ADR-019. Four read/write values;
+#: 11.5b extends with memory.forget / memory.redact / memory.export.read /
+#: memory.regulator_erasure. Value-disjoint from every other family by the
+#: memory.* namespace (pinned by tests/unit/portal/rbac/test_memory_scopes.py).
+MemoryRBACScope = Literal[
+    "memory.read",
+    "memory.write.scratch",
+    "memory.write.task",
+    "memory.write.long_term",
+]
+
+
+#: All 4 memory scopes as a frozenset (1:1 with MemoryRBACScope) for bank-overlay
+#: binders. Pinned by tests/unit/portal/rbac/test_memory_scopes.py.
+MEMORY_SCOPES: frozenset[MemoryRBACScope] = frozenset(
+    {"memory.read", "memory.write.scratch", "memory.write.task", "memory.write.long_term"}
+)
+
+
 #: Examiner-role compliance grant. Bank-overlay examiner binders grant
 #: EXAMINER_SCOPES | EXAMINER_COMPLIANCE_SCOPES.
 EXAMINER_COMPLIANCE_SCOPES: frozenset[ComplianceRBACScope] = frozenset(
