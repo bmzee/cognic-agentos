@@ -7,12 +7,13 @@ backend into the public memory operations. It is THE seam a Layer C agent uses;
 direct adapter access from anywhere but here is forbidden (pinned by
 ``tests/unit/architecture/test_memory_layer_c_no_direct_storage.py``).
 
-**11.5a op surface — 6 ops.** ``remember`` / ``recall`` / ``upsert_block`` /
-``read_block`` / ``list_for_subject`` / ``list_blocks``. The 7th op
-(``recall_episodes``) lands in T11. The lifecycle ops (``forget`` / ``redact`` /
-``export``) are ABSENT: memory writes are not production-wired until
-erasure/redaction/export lands in 11.5b — MemoryAPI is DI-tested, not
-harness-injected, in 11.5a.
+**11.5a op surface — 7 ops.** ``remember`` / ``recall`` / ``upsert_block`` /
+``read_block`` / ``list_for_subject`` / ``list_blocks`` / ``recall_episodes``
+(the 7th op landed in T11 — the ``long_term`` + purpose episodic view, joined
+to ``decision_history``; vector-ranked recall is deferred to 11.5b). The
+lifecycle ops (``forget`` / ``redact`` / ``export``) are ABSENT: memory writes
+are not production-wired until erasure/redaction/export lands in 11.5b —
+MemoryAPI is DI-tested, not harness-injected, in 11.5a.
 
 **Identity is read from the bound** :class:`MemoryCallerContext` **only.** Every
 op runs through the gate, which reads ``tenant_id`` / ``agent_id`` / ``actor_id``
@@ -22,14 +23,15 @@ identity through the op arguments. Refusals surface as the typed
 gate; MemoryAPI does not catch or translate them.
 
 **``memory.read`` audit (ADR-019 §recall + ADR-006).** The keyed reads
-(``recall`` / ``read_block``) and the ``list_for_subject`` enumerate each emit
-exactly one ``memory.read`` :class:`DecisionRecord` (plain append; no
+(``recall`` / ``read_block``), ``list_for_subject``, and ``recall_episodes``
+each emit exactly one ``memory.read`` :class:`DecisionRecord` (plain append; no
 precondition) stamped with ISO controls ``("A.7.4", "A.8.2")``. The keyed-read
-payload carries ``{tier, purpose, subject_ref, hit, record_id}``; the enumerate
-payload carries ``{op, tiers, subject_ref, hit, count}`` (no per-record id).
-``list_blocks`` deliberately emits NO ``memory.read`` (block refs are not a
-value read — they are a structural listing whose contents are governed at the
-later ``read_block``).
+payload carries ``{tier, purpose, subject_ref, hit, record_id}``;
+``list_for_subject`` carries ``{op, tiers, subject_ref, hit, count}``;
+``recall_episodes`` carries ``{op, subject_ref, purpose, hit, count}``. None
+carry a value or value-digest. ``list_blocks`` deliberately emits NO
+``memory.read`` (block refs are not a value read — they are a structural listing
+whose contents are governed at the later ``read_block``).
 """
 
 from __future__ import annotations
@@ -38,6 +40,7 @@ import uuid
 from typing import TYPE_CHECKING
 
 from cognic_agentos.core.decision_history import DecisionHistoryStore, DecisionRecord
+from cognic_agentos.core.memory import episodes as _episodes
 from cognic_agentos.core.memory._context import (
     BlockRef,
     MemoryHit,
@@ -53,7 +56,7 @@ from cognic_agentos.core.memory.tiers import BlockKind, MemoryTier, SubjectRef
 if TYPE_CHECKING:
     from cognic_agentos.core.config import Settings
     from cognic_agentos.core.dlp.scanner import DLPScanner
-    from cognic_agentos.core.memory._context import MemoryCallerContext
+    from cognic_agentos.core.memory._context import Episode, MemoryCallerContext
     from cognic_agentos.core.memory.consent import ConsentToken, ConsentValidator
 
     # The adapter is INJECTED — there is NO runtime import of
@@ -258,6 +261,51 @@ class MemoryAPI:
         return await self._adapter.list_blocks(
             tenant_id=ctx.tenant_id, agent_id=ctx.agent_id, subject=subject
         )
+
+    # -- Episodic recall (7th op) ------------------------------------------
+
+    async def recall_episodes(
+        self, subject: SubjectRef, *, similarity_threshold: float, purpose: str
+    ) -> list[Episode]:
+        """Episodic recall (7th 11.5a op) — a view over the served-context agent's
+        long_term records for ``subject``, purpose-filtered, joined to
+        decision_history. Runs the enumerate gate (long_term tier), delegates to
+        :func:`episodes.recall_episodes`, emits one enumerate-shape
+        ``memory.read``.
+
+        Pin-2: a ``similarity_threshold > 0.0`` call passes the gate then
+        propagates :func:`episodes.recall_episodes`'s ``NotImplementedError``
+        (vector-ranked recall is 11.5b) — no ``memory.read`` is emitted on that
+        path."""
+
+        ctx = self._context
+        await self._gate.check_enumerate(subject, tiers=("long_term",))
+        eps = await _episodes.recall_episodes(
+            subject,
+            similarity_threshold=similarity_threshold,
+            purpose=purpose,
+            adapter=self._adapter,
+            dh_store=self._audit,
+            tenant_id=ctx.tenant_id,
+            agent_id=ctx.agent_id,
+        )
+        await self._audit.append(
+            DecisionRecord(
+                decision_type="memory.read",
+                request_id=f"memory-read-{uuid.uuid4().hex}",
+                payload={
+                    "op": "recall_episodes",
+                    "subject_ref": subject.canonical,
+                    "purpose": purpose,
+                    "hit": bool(eps),
+                    "count": len(eps),
+                },
+                actor_id=ctx.actor_id,
+                tenant_id=ctx.tenant_id,
+                iso_controls=_MEMORY_READ_ISO_CONTROLS,
+            )
+        )
+        return eps
 
     # -- memory.read emit (keyed reads) ------------------------------------
 
