@@ -54,9 +54,12 @@ _GATE_TOOL_PATH = _REPO_ROOT / "tools" / "check_critical_coverage.py"
 #: (subagent/_types + subagent/policy + subagent/audit +
 #: subagent/audit_verifier per ADR-005) = 94;
 #: + 3 Sprint-11b Z1b sub-agent integration modules
-#: (subagent/spawn + subagent/conformers + subagent/_facade per ADR-005) = 97).
+#: (subagent/spawn + subagent/conformers + subagent/_facade per ADR-005) = 97;
+#: + 6 Sprint-11.5a Z1a governed-memory modules
+#: (core/memory/{tiers,gate,api,storage,consent} + core/dlp/scanner per
+#: ADR-019) = 103).
 #: Bump this in lockstep with any deliberate ``_CRITICAL_FILES`` change.
-_EXPECTED_ENTRY_COUNT = 97
+_EXPECTED_ENTRY_COUNT = 103
 
 #: The 5 modules Sprint 7B.3 promoted to the durable gate, each by its
 #: own landing commit (T3-T6 panels + T7 composer). All ride the
@@ -532,6 +535,33 @@ def test_sprint_11b_modules_present_with_standard_floors(
     by_path = {path: (line, branch) for path, line, branch in gate_tool._CRITICAL_FILES}
     for module in _SPRINT_11B_GATE_MODULES:
         assert module in by_path, f"Sprint 11b module missing from gate: {module}"
+        assert by_path[module] == (0.95, 0.90), (
+            f"{module} must ride the standard 95%-line / 90%-branch floor"
+        )
+
+
+_SPRINT_11_5A_GATE_MODULES = (
+    "src/cognic_agentos/core/memory/tiers.py",
+    "src/cognic_agentos/core/memory/gate.py",
+    "src/cognic_agentos/core/memory/api.py",
+    "src/cognic_agentos/core/memory/storage.py",
+    "src/cognic_agentos/core/memory/consent.py",
+    "src/cognic_agentos/core/dlp/scanner.py",
+)
+
+
+def test_sprint_11_5a_modules_present_with_standard_floors(
+    gate_tool: ModuleType,
+) -> None:
+    """The 6 Sprint 11.5a Z1a governed-memory-substrate promotions are on the
+    gate at the 95/90 floor (ADR-019). The recall-feature / DTO / seam modules
+    (``vector.py`` / ``episodes.py`` / ``_context.py`` / ``_seams.py`` /
+    ``__init__.py``) stay off-gate per Doctrine F; ``portal/rbac/scopes.py`` +
+    ``actor.py`` + ``enforcement.py`` are already on the gate (T12 widened
+    their scope unions, NOT re-added)."""
+    by_path = {path: (line, branch) for path, line, branch in gate_tool._CRITICAL_FILES}
+    for module in _SPRINT_11_5A_GATE_MODULES:
+        assert module in by_path, f"Sprint 11.5a module missing from gate: {module}"
         assert by_path[module] == (0.95, 0.90), (
             f"{module} must ride the standard 95%-line / 90%-branch floor"
         )

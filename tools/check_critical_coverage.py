@@ -1993,6 +1993,30 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     ("src/cognic_agentos/subagent/spawn.py", 0.95, 0.90),
     ("src/cognic_agentos/subagent/conformers.py", 0.95, 0.90),
     ("src/cognic_agentos/subagent/_facade.py", 0.95, 0.90),
+    # ──────────────────────────────────────────────────────────────────
+    # Sprint 11.5a Z1a — governed memory substrate (ADR-019). 6 modules
+    # promoted at the standard 95/90 floor:
+    #   * ``core/memory/tiers.py`` — wire-public ``MemoryRefusalReason`` +
+    #     the ``SubjectRef`` unscoped-refusal invariant.
+    #   * ``core/memory/gate.py`` — the per-write / per-recall / per-enumerate
+    #     enforcement boundary (ordered refusal precedence IS the contract).
+    #   * ``core/memory/api.py`` — the single Layer-C governed access path.
+    #   * ``core/memory/storage.py`` — ``MemoryAdapter`` contract + Postgres +
+    #     Redis(scratch) impls; tenant- AND agent-scoped reads.
+    #   * ``core/memory/consent.py`` — restricted-class consent gate.
+    #   * ``core/dlp/scanner.py`` — the checksum/regex/gazetteer DLP seed.
+    # OFF-gate per Doctrine F: ``core/memory/__init__.py`` (re-export),
+    # ``_context.py`` / ``_seams.py`` (pure DTOs / consumer-owned seam),
+    # ``vector.py`` / ``episodes.py`` (recall-feature modules — enforcement
+    # lives in the on-gate gate/api/storage). ``portal/rbac/scopes.py`` +
+    # ``actor.py`` + ``enforcement.py`` are ALREADY on the gate (T12 only
+    # widened their scope unions; NOT re-added here).
+    ("src/cognic_agentos/core/memory/tiers.py", 0.95, 0.90),
+    ("src/cognic_agentos/core/memory/gate.py", 0.95, 0.90),
+    ("src/cognic_agentos/core/memory/api.py", 0.95, 0.90),
+    ("src/cognic_agentos/core/memory/storage.py", 0.95, 0.90),
+    ("src/cognic_agentos/core/memory/consent.py", 0.95, 0.90),
+    ("src/cognic_agentos/core/dlp/scanner.py", 0.95, 0.90),
 )
 
 
