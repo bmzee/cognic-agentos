@@ -32,6 +32,7 @@ LAZILY inside the write path so construction never needs the package.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import uuid
 from datetime import UTC, datetime
@@ -47,10 +48,16 @@ from cognic_agentos.core.memory._context import (
     MemoryHit,
     MemoryRecordId,
     MemoryWriteRecord,
+    RedactionReceipt,
+    RedactionSpan,
+    RegulatorErasureCommand,
 )
 from cognic_agentos.core.memory.tiers import (
     BlockKind,
+    ForgetReason,
+    MemoryOperationRefused,
     MemoryTier,
+    RedactionReason,
     SubjectRef,
 )
 from cognic_agentos.db.types import GovernanceJSON
@@ -100,6 +107,39 @@ class MemoryAdapter(Protocol):
     ) -> list[BlockRef]: ...
 
     async def upsert_block(self, record: MemoryWriteRecord) -> MemoryRecordId: ...
+
+    async def tombstone_record(
+        self,
+        *,
+        tenant_id: str,
+        agent_id: str,
+        record_id: MemoryRecordId,
+        reason: ForgetReason,
+        actor_id: str,
+    ) -> None: ...
+
+    async def purge_record(
+        self,
+        *,
+        tenant_id: str,
+        agent_id: str,
+        record_id: MemoryRecordId,
+        erasure_command: RegulatorErasureCommand,
+        actor_id: str,
+    ) -> None: ...
+
+    async def purge_expired(self, *, tombstone_window_s: int) -> int: ...
+
+    async def redact_record(
+        self,
+        *,
+        tenant_id: str,
+        agent_id: str,
+        record_id: MemoryRecordId,
+        span: RedactionSpan,
+        reason: RedactionReason,
+        actor_id: str,
+    ) -> RedactionReceipt: ...
 
 
 class MemoryBackendUnavailable(Exception):
@@ -152,6 +192,30 @@ def _value_digest(value: object) -> str:
     Python versions + platforms."""
 
     return hashlib.sha256(canonical_bytes(value)).hexdigest()
+
+
+def _apply_redaction(value: object, path: tuple[str, ...], replacement: object) -> object:
+    """Deep-copy ``value`` and replace the leaf at ``path`` with ``replacement``.
+
+    Raises ``ValueError`` on an empty path, a missing key, or a non-mapping
+    midpoint — the caller maps the error to ``memory_redaction_path_invalid``
+    (locked: field-path only, NOT byte-span or regex).
+
+    The original ``value`` is NEVER mutated (deep copy is the contract)."""
+
+    if not path:
+        raise ValueError("redaction path must be non-empty")
+    out = copy.deepcopy(value)
+    cursor = out
+    for seg in path[:-1]:
+        if not isinstance(cursor, dict) or seg not in cursor:
+            raise ValueError(f"redaction path segment {seg!r} not a mapping key")
+        cursor = cursor[seg]
+    leaf = path[-1]
+    if not isinstance(cursor, dict) or leaf not in cursor:
+        raise ValueError(f"redaction leaf {leaf!r} absent")
+    cursor[leaf] = replacement
+    return out
 
 
 class PostgresMemoryAdapter:
@@ -320,6 +384,317 @@ class PostgresMemoryAdapter:
         )
         return rid
 
+    async def tombstone_record(
+        self,
+        *,
+        tenant_id: str,
+        agent_id: str,
+        record_id: MemoryRecordId,
+        reason: ForgetReason,
+        actor_id: str,
+    ) -> None:
+        """Soft-delete a memory record by setting its tombstone timestamp.
+
+        Runs inside a ``append_with_precondition`` transaction so the
+        ``memory.forget`` chain row is emitted atomically with the tombstone
+        UPDATE — or rolled back entirely if the precondition raises.
+
+        Raises :class:`~cognic_agentos.core.memory.tiers.MemoryOperationRefused`
+        with ``memory_record_not_found`` if no active (non-tombstoned) row
+        exists, or ``memory_record_already_tombstoned`` if the row has already
+        been tombstoned. The refusal is raised INSIDE the precondition so no
+        chain row is written on the refused path."""
+
+        now = datetime.now(UTC)
+
+        async def _precondition(conn: AsyncConnection, _prev_seq: int, _prev_hash: bytes) -> None:
+            row = (
+                await conn.execute(
+                    sa.select(_memory_records)
+                    .where(
+                        _memory_records.c.record_id == record_id,
+                        _memory_records.c.tenant_id == tenant_id,
+                        _memory_records.c.agent_id == agent_id,
+                    )
+                    .with_for_update()
+                )
+            ).first()
+            if row is None:
+                raise MemoryOperationRefused("memory_record_not_found")
+            if row.tombstone is not None:
+                raise MemoryOperationRefused("memory_record_already_tombstoned")
+            await conn.execute(
+                sa.update(_memory_records)
+                .where(
+                    _memory_records.c.record_id == record_id,
+                    _memory_records.c.tenant_id == tenant_id,
+                    _memory_records.c.agent_id == agent_id,
+                )
+                .values(tombstone=now)
+            )
+
+        def _build_record(_captured: None) -> DecisionRecord:
+            return DecisionRecord(
+                decision_type="memory.forget",
+                request_id=f"memory-forget-{record_id}",
+                payload={
+                    "record_id": str(record_id),
+                    "reason": reason,
+                    "tenant_id": tenant_id,
+                    "agent_id": agent_id,
+                },
+                actor_id=actor_id,
+                tenant_id=tenant_id,
+                iso_controls=_MEMORY_WRITE_ISO_CONTROLS,
+            )
+
+        await self._dh.append_with_precondition(
+            record_builder=_build_record,
+            precondition=_precondition,
+        )
+
+    async def purge_record(
+        self,
+        *,
+        tenant_id: str,
+        agent_id: str,
+        record_id: MemoryRecordId,
+        erasure_command: RegulatorErasureCommand,
+        actor_id: str,
+    ) -> None:
+        """Physically DELETE a memory record and emit a ``memory.regulator_erasure``
+        chain row with chain-of-custody metadata (NO value, NO digest).
+
+        The precondition verifies that the row's ``subject_ref`` matches
+        ``human:{erasure_command.subject_id}``. A mismatch raises
+        ``memory_regulator_erasure_metadata_required`` inside the precondition so
+        the engine rolls back — nothing is deleted and no chain row is written.
+
+        Value-never-in-chain invariant: the ``memory.regulator_erasure`` payload
+        carries ONLY custody metadata (``regulator_order_id``, ``requester_scope``,
+        ``subject_id``, ``record_id``, ``actor_id``). No ``value`` or
+        ``redacted_value_digest``."""
+
+        expected_subject_ref = f"human:{erasure_command.subject_id}"
+
+        async def _precondition(conn: AsyncConnection, _prev_seq: int, _prev_hash: bytes) -> None:
+            row = (
+                await conn.execute(
+                    sa.select(_memory_records)
+                    .where(
+                        _memory_records.c.record_id == record_id,
+                        _memory_records.c.tenant_id == tenant_id,
+                        _memory_records.c.agent_id == agent_id,
+                    )
+                    .with_for_update()
+                )
+            ).first()
+            if row is None:
+                raise MemoryOperationRefused("memory_record_not_found")
+            # Subject-mismatch guard: the purge command's subject_id must match
+            # the stored subject_ref. Refuses inside the precondition so nothing
+            # is deleted and no chain row is written.
+            if row.subject_ref != expected_subject_ref:
+                raise MemoryOperationRefused("memory_regulator_erasure_metadata_required")
+            await conn.execute(
+                sa.delete(_memory_records).where(
+                    _memory_records.c.record_id == record_id,
+                    _memory_records.c.tenant_id == tenant_id,
+                    _memory_records.c.agent_id == agent_id,
+                )
+            )
+
+        def _build_record(_captured: None) -> DecisionRecord:
+            return DecisionRecord(
+                decision_type="memory.regulator_erasure",
+                request_id=f"memory-regulator-erasure-{record_id}",
+                payload={
+                    "record_id": str(record_id),
+                    "regulator_order_id": erasure_command.regulator_order_id,
+                    "requester_scope": erasure_command.requester_scope,
+                    "subject_id": erasure_command.subject_id,
+                    "actor_id": actor_id,
+                    "tenant_id": tenant_id,
+                    "agent_id": agent_id,
+                    # NOTE: NO "value" or "redacted_value_digest" — value-never-in-chain
+                },
+                actor_id=actor_id,
+                tenant_id=tenant_id,
+                iso_controls=_MEMORY_WRITE_ISO_CONTROLS,
+            )
+
+        await self._dh.append_with_precondition(
+            record_builder=_build_record,
+            precondition=_precondition,
+        )
+
+    async def purge_expired(self, *, tombstone_window_s: int) -> int:
+        """Physically DELETE rows that are past their retention or tombstone window.
+
+        Deletes rows where:
+
+        - ``tombstone IS NOT NULL AND tombstone < now - tombstone_window_s``
+          (soft-deleted and aged out of the grace window)
+        - ``retention_until IS NOT NULL AND retention_until < now``
+          (retention-expired)
+
+        Returns the number of rows deleted. Emits NO chain row — the
+        ``memory.forget`` row written at tombstone time is the audit; physical
+        purge is housekeeping (Doctrine F: off-gate ``MemoryTombstoneReaper``
+        drives this method on a schedule)."""
+
+        now = datetime.now(UTC)
+        cut = now.replace(tzinfo=UTC) if now.tzinfo is None else now
+        from datetime import timedelta
+
+        tombstone_cut = cut - timedelta(seconds=tombstone_window_s)
+
+        async with self._engine.begin() as conn:
+            result = await conn.execute(
+                sa.delete(_memory_records).where(
+                    sa.or_(
+                        sa.and_(
+                            _memory_records.c.tombstone.isnot(None),
+                            _memory_records.c.tombstone < tombstone_cut,
+                        ),
+                        sa.and_(
+                            _memory_records.c.retention_until.isnot(None),
+                            _memory_records.c.retention_until < sa.func.now(),
+                        ),
+                    )
+                )
+            )
+        return result.rowcount
+
+    async def redact_record(
+        self,
+        *,
+        tenant_id: str,
+        agent_id: str,
+        record_id: MemoryRecordId,
+        span: RedactionSpan,
+        reason: RedactionReason,
+        actor_id: str,
+    ) -> RedactionReceipt:
+        """Create a new sealed version of a memory record with the redacted value.
+
+        Steps (all inside ``append_with_precondition``):
+        1. SELECT ... FOR UPDATE the active row.
+        2. Apply ``_apply_redaction(old.value, span.path, span.replacement)`` —
+           ``ValueError`` maps to ``memory_redaction_path_invalid``.
+        3. SEAL the old row FIRST: ``SET tombstone = now``. For a BLOCK this frees
+           the ``uq_memory_block_singleton`` slot BEFORE the new active version is
+           inserted (the partial unique index rejects two active blocks for one
+           identity). Same transaction — an insert failure rolls back, leaving the
+           old row active.
+        4. INSERT the new active row carrying the redacted value,
+           ``redaction_version = old + 1`` and ``sealed_prior_version_ref = old.record_id``.
+        5. Emit a ``memory.redact`` chain row with ``redacted_value_digest`` of the
+           NEW value (NOT the old value), the new version id, and the reason.
+           No raw value in the chain."""
+
+        new_rid = uuid.uuid4()
+        now = datetime.now(UTC)
+        # Capture for _build_record closure
+        _captured_info: dict[str, object] = {}
+
+        async def _precondition(conn: AsyncConnection, _prev_seq: int, _prev_hash: bytes) -> None:
+            row = (
+                await conn.execute(
+                    sa.select(_memory_records)
+                    .where(
+                        _memory_records.c.record_id == record_id,
+                        _memory_records.c.tenant_id == tenant_id,
+                        _memory_records.c.agent_id == agent_id,
+                        _memory_records.c.tombstone.is_(None),
+                    )
+                    .with_for_update()
+                )
+            ).first()
+            if row is None:
+                raise MemoryOperationRefused("memory_record_not_found")
+            # Apply the redaction — ValueError maps to memory_redaction_path_invalid.
+            try:
+                new_value = _apply_redaction(row.value, span.path, span.replacement)
+            except ValueError as exc:
+                raise MemoryOperationRefused("memory_redaction_path_invalid") from exc
+
+            new_redaction_version = row.redaction_version + 1
+            _captured_info["new_value"] = new_value
+            _captured_info["new_redaction_version"] = new_redaction_version
+            _captured_info["old_data_classes"] = list(row.data_classes)
+            _captured_info["old_purpose"] = row.purpose
+            _captured_info["old_tier"] = row.tier
+            _captured_info["old_retention_until"] = row.retention_until
+
+            # Seal (tombstone) the OLD row FIRST, then insert the new version.
+            # For a BLOCK this frees the uq_memory_block_singleton slot before the
+            # new ACTIVE version is inserted — the migration's partial unique index
+            # rejects two active blocks for one (tenant, subject, agent, block_kind)
+            # identity. Matches upsert_block's tombstone-then-insert order. Same
+            # transaction: an insert failure rolls back, leaving the old row active.
+            await conn.execute(
+                sa.update(_memory_records)
+                .where(
+                    _memory_records.c.record_id == record_id,
+                    _memory_records.c.tenant_id == tenant_id,
+                    _memory_records.c.agent_id == agent_id,
+                )
+                .values(tombstone=now)
+            )
+            await conn.execute(
+                _memory_records.insert().values(
+                    record_id=new_rid,
+                    tenant_id=tenant_id,
+                    subject_ref=row.subject_ref,
+                    agent_id=agent_id,
+                    tier=row.tier,
+                    block_kind=row.block_kind,
+                    key=row.key,
+                    value=new_value,
+                    data_classes=list(row.data_classes),
+                    purpose=row.purpose,
+                    retention_until=row.retention_until,
+                    tombstone=None,
+                    redaction_version=new_redaction_version,
+                    sealed_prior_version_ref=record_id,
+                    vector_ref=None,
+                    created_at=now,
+                )
+            )
+
+        def _build_record(_captured: None) -> DecisionRecord:
+            new_value = _captured_info["new_value"]
+            new_redaction_version = _captured_info["new_redaction_version"]
+            return DecisionRecord(
+                decision_type="memory.redact",
+                request_id=f"memory-redact-{record_id}",
+                payload={
+                    "record_id": str(record_id),
+                    "new_version_id": str(new_rid),
+                    "redaction_version": new_redaction_version,
+                    "reason": reason,
+                    "tenant_id": tenant_id,
+                    "agent_id": agent_id,
+                    # redacted_value_digest of the NEW value — NEVER the old value
+                    "redacted_value_digest": _value_digest(new_value),
+                    # NOTE: NO raw value in chain
+                },
+                actor_id=actor_id,
+                tenant_id=tenant_id,
+                iso_controls=_MEMORY_WRITE_ISO_CONTROLS,
+            )
+
+        await self._dh.append_with_precondition(
+            record_builder=_build_record,
+            precondition=_precondition,
+        )
+        return RedactionReceipt(
+            record_id=record_id,
+            new_version_id=new_rid,
+            redaction_version=int(_captured_info["new_redaction_version"]),  # type: ignore[call-overload]
+        )
+
     async def get(
         self,
         *,
@@ -346,6 +721,10 @@ class PostgresMemoryAdapter:
             _memory_records.c.subject_ref == subject.canonical,
             _memory_records.c.tier == tier,
             _memory_records.c.tombstone.is_(None),
+            sa.or_(
+                _memory_records.c.retention_until.is_(None),
+                _memory_records.c.retention_until > sa.func.now(),
+            ),
         )
         if block_kind is not None:
             stmt = stmt.where(_memory_records.c.block_kind == block_kind)
@@ -383,6 +762,10 @@ class PostgresMemoryAdapter:
                 _memory_records.c.agent_id == agent_id,
                 _memory_records.c.subject_ref == subject.canonical,
                 _memory_records.c.tombstone.is_(None),
+                sa.or_(
+                    _memory_records.c.retention_until.is_(None),
+                    _memory_records.c.retention_until > sa.func.now(),
+                ),
             )
             .order_by(_memory_records.c.created_at)
         )
@@ -419,6 +802,10 @@ class PostgresMemoryAdapter:
             _memory_records.c.subject_ref == subject.canonical,
             _memory_records.c.block_kind.isnot(None),
             _memory_records.c.tombstone.is_(None),
+            sa.or_(
+                _memory_records.c.retention_until.is_(None),
+                _memory_records.c.retention_until > sa.func.now(),
+            ),
         )
         # Supersede-generation counts keyed by (agent_id, block_kind): every row
         # (active + tombstoned) for this (tenant, agent, subject) block. One
@@ -566,10 +953,60 @@ class RedisMemoryAdapter:
     ) -> list[BlockRef]:
         raise NotImplementedError("blocks are long_term-only; use PostgresMemoryAdapter")
 
+    async def tombstone_record(
+        self,
+        *,
+        tenant_id: str,
+        agent_id: str,
+        record_id: MemoryRecordId,
+        reason: ForgetReason,
+        actor_id: str,
+    ) -> None:
+        raise NotImplementedError(
+            "RedisMemoryAdapter does not support tombstone_record — scratch records "
+            "self-expire via Redis TTL. Use PostgresMemoryAdapter for durable erasure."
+        )
+
+    async def purge_record(
+        self,
+        *,
+        tenant_id: str,
+        agent_id: str,
+        record_id: MemoryRecordId,
+        erasure_command: RegulatorErasureCommand,
+        actor_id: str,
+    ) -> None:
+        raise NotImplementedError(
+            "RedisMemoryAdapter does not support purge_record — scratch records "
+            "self-expire via Redis TTL. Use PostgresMemoryAdapter for durable erasure."
+        )
+
+    async def purge_expired(self, *, tombstone_window_s: int) -> int:
+        raise NotImplementedError(
+            "RedisMemoryAdapter does not support purge_expired — scratch records "
+            "self-expire via Redis TTL. Use PostgresMemoryAdapter for durable erasure."
+        )
+
+    async def redact_record(
+        self,
+        *,
+        tenant_id: str,
+        agent_id: str,
+        record_id: MemoryRecordId,
+        span: RedactionSpan,
+        reason: RedactionReason,
+        actor_id: str,
+    ) -> RedactionReceipt:
+        raise NotImplementedError(
+            "RedisMemoryAdapter does not support redact_record — scratch records "
+            "self-expire via Redis TTL. Use PostgresMemoryAdapter for durable redaction."
+        )
+
 
 __all__: tuple[str, ...] = (
     "MemoryAdapter",
     "MemoryBackendUnavailable",
     "PostgresMemoryAdapter",
     "RedisMemoryAdapter",
+    "_apply_redaction",
 )
