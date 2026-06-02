@@ -59,7 +59,7 @@ _GATE_TOOL_PATH = _REPO_ROOT / "tools" / "check_critical_coverage.py"
 #: (core/memory/{tiers,gate,api,storage,consent} + core/dlp/scanner per
 #: ADR-019) = 103).
 #: Bump this in lockstep with any deliberate ``_CRITICAL_FILES`` change.
-_EXPECTED_ENTRY_COUNT = 103
+_EXPECTED_ENTRY_COUNT = 107
 
 #: The 5 modules Sprint 7B.3 promoted to the durable gate, each by its
 #: own landing commit (T3-T6 panels + T7 composer). All ride the
@@ -565,3 +565,33 @@ def test_sprint_11_5a_modules_present_with_standard_floors(
         assert by_path[module] == (0.95, 0.90), (
             f"{module} must ride the standard 95%-line / 90%-branch floor"
         )
+
+
+_SPRINT_11_5B_GATE_MODULES = (
+    "src/cognic_agentos/core/emergency/kill_switches.py",
+    "src/cognic_agentos/core/memory/forget.py",
+    "src/cognic_agentos/core/memory/redact.py",
+    "src/cognic_agentos/core/memory/_routing.py",
+)
+
+
+def test_sprint_11_5b_modules_present_with_standard_floors(
+    gate_tool: ModuleType,
+) -> None:
+    """The 4 Sprint 11.5b Z1b memory-regulator-core promotions are on the gate
+    at the 95/90 floor (ADR-019): the real Redis ``memory.write_freeze``
+    kill-switch + the ``forget`` / ``redact`` erasure ops + the scratch→Postgres
+    routing composite. ``core/memory/reaper.py`` stays OFF-gate per Doctrine F
+    (thin asyncio loop; the substantive retention-floor enforcement is the
+    on-gate ``adapter.purge_expired`` it delegates to)."""
+    by_path = {path: (line, branch) for path, line, branch in gate_tool._CRITICAL_FILES}
+    for module in _SPRINT_11_5B_GATE_MODULES:
+        assert module in by_path, f"Sprint 11.5b module missing from gate: {module}"
+        assert by_path[module] == (0.95, 0.90), (
+            f"{module} must ride the standard 95%-line / 90%-branch floor"
+        )
+    # reaper.py is deliberately OFF-gate (Doctrine F) — pin that it is NOT added.
+    assert "src/cognic_agentos/core/memory/reaper.py" not in by_path, (
+        "reaper.py must stay off-gate per Doctrine F (thin loop; enforcement is "
+        "the on-gate adapter.purge_expired)"
+    )

@@ -11,9 +11,17 @@ branch (``_is_redis_unavailable`` import-probe fallthrough + the
 tests land in the SAME commit as the gate promotion.
 """
 
+import sys
+import uuid
+
 import pytest
 
-from cognic_agentos.core.memory.storage import MemoryBackendUnavailable, RedisMemoryAdapter
+from cognic_agentos.core.memory._context import RedactionSpan, RegulatorErasureCommand
+from cognic_agentos.core.memory.storage import (
+    MemoryBackendUnavailable,
+    RedisMemoryAdapter,
+    _is_redis_unavailable,
+)
 from tests.unit.core.memory._builders import SUBJECT, _scratch_record
 
 
@@ -86,3 +94,48 @@ async def test_redis_block_surfaces_are_deferred_notimplemented():
         await adapter.upsert_block(_scratch_record(value="x"))
     with pytest.raises(NotImplementedError):
         await adapter.list_blocks(tenant_id="t1", agent_id="kyc", subject=SUBJECT)
+
+
+async def test_redis_erasure_surfaces_are_deferred_notimplemented():
+    # The 4 lifecycle/erasure methods are unsupported on Redis (scratch records
+    # self-expire via TTL; durable erasure is PostgresMemoryAdapter): each of
+    # tombstone_record / purge_record / purge_expired / redact_record raises
+    # NotImplementedError at entry (Sprint 11.5b grew the Protocol to 9 methods).
+    adapter = RedisMemoryAdapter(redis_client=_OkRedis(), scratch_ttl_s=3600)
+    rid = uuid.uuid4()
+    with pytest.raises(NotImplementedError):
+        await adapter.tombstone_record(
+            tenant_id="t1", agent_id="kyc", record_id=rid, reason="user_request", actor_id="svc"
+        )
+    with pytest.raises(NotImplementedError):
+        await adapter.purge_record(
+            tenant_id="t1",
+            agent_id="kyc",
+            record_id=rid,
+            erasure_command=RegulatorErasureCommand(
+                regulator_order_id="O",
+                requester_scope="memory.regulator_erasure",
+                subject_id="c1",
+            ),
+            actor_id="svc",
+        )
+    with pytest.raises(NotImplementedError):
+        await adapter.purge_expired(tombstone_window_s=30)
+    with pytest.raises(NotImplementedError):
+        await adapter.redact_record(
+            tenant_id="t1",
+            agent_id="kyc",
+            record_id=rid,
+            span=RedactionSpan(path=("account", "number")),
+            reason="pii_minimization",
+            actor_id="svc",
+        )
+
+
+def test_is_redis_unavailable_returns_false_when_redis_exceptions_unimportable(monkeypatch):
+    # When ``from redis.exceptions import RedisError`` raises ImportError (the
+    # redis package is not installed — the [adapters] extra is absent), the
+    # import-probe ImportError branch returns False for a non-builtin-connection
+    # error. Setting sys.modules["redis.exceptions"] = None forces the ImportError.
+    monkeypatch.setitem(sys.modules, "redis.exceptions", None)
+    assert _is_redis_unavailable(RuntimeError("not a connection error")) is False

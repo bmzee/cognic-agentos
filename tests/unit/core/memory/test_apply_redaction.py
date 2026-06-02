@@ -33,3 +33,11 @@ def test_non_container_midpath_raises_value_error():
 def test_empty_path_raises_value_error():
     with pytest.raises(ValueError):
         _apply_redaction({"a": 1}, (), "x")
+
+
+def test_intermediate_segment_not_mapping_raises_value_error():
+    # A 3-segment path whose INTERMEDIATE segment ("a") traverses a non-mapping
+    # ("scalar") must raise at the intermediate hop — distinct from the
+    # leaf-absent raise (the loop body, not the post-loop leaf check).
+    with pytest.raises(ValueError):
+        _apply_redaction({"a": "scalar"}, ("a", "b", "c"), "x")

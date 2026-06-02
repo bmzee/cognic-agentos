@@ -12,7 +12,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 import sqlalchemy as sa
 
-from cognic_agentos.core.memory._context import MemoryHit
+from cognic_agentos.core.memory._context import MemoryHit, RedactionSpan, RegulatorErasureCommand
 from cognic_agentos.core.memory._routing import RoutingMemoryAdapter
 from cognic_agentos.core.memory.storage import MemoryBackendUnavailable, _memory_records
 from tests.unit.core.memory._builders import SUBJECT, _scratch_record, _task_record
@@ -527,10 +527,11 @@ async def test_pg_fallback_cross_agent_isolation(pg_adapter):
 @pytest.mark.parametrize(
     "record",
     [
+        dataclasses.replace(_scratch_record(value="v"), tier="task"),
         dataclasses.replace(_scratch_record(value="v"), block_kind="persona"),
         dataclasses.replace(_scratch_record(value="v"), key=None),
     ],
-    ids=["block_shaped_scratch", "key_none_scratch"],
+    ids=["non_scratch_tier", "block_shaped_scratch", "key_none_scratch"],
 )
 @pytest.mark.asyncio
 async def test_put_scratch_fallback_refuses_wrong_shape_no_row_no_chain(
@@ -547,3 +548,82 @@ async def test_put_scratch_fallback_refuses_wrong_shape_no_row_no_chain(
         rows = (await c.execute(sa.select(_memory_records))).all()
     assert rows == []  # no row inserted
     assert await decision_history_rows() == []  # no chain event emitted
+
+
+@pytest.mark.asyncio
+async def test_routing_delegates_passthrough_methods_to_pg():
+    """The 7 non-put/get MemoryAdapter methods delegate verbatim to pg_adapter
+    (durable + scratch-fallback rows live in PG; Redis self-expires via TTL).
+    A spy pg records the call order; each delegator forwards its kwargs."""
+
+    class _SpyPg:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def list_for_subject(self, **kw):
+            self.calls.append("list_for_subject")
+            return []
+
+        async def list_blocks(self, **kw):
+            self.calls.append("list_blocks")
+            return []
+
+        async def upsert_block(self, record):
+            self.calls.append("upsert_block")
+            return uuid.uuid4()
+
+        async def tombstone_record(self, **kw):
+            self.calls.append("tombstone_record")
+
+        async def purge_record(self, **kw):
+            self.calls.append("purge_record")
+
+        async def purge_expired(self, *, tombstone_window_s):
+            self.calls.append("purge_expired")
+            return 3
+
+        async def redact_record(self, **kw):
+            self.calls.append("redact_record")
+            return "receipt"
+
+    spy = _SpyPg()
+    routing = RoutingMemoryAdapter(
+        redis_adapter=_RedisStub(),
+        pg_adapter=spy,  # type: ignore[arg-type]  # duck-typed PG spy for the delegation pins
+        scratch_ttl_s=3600,
+    )
+    rid = uuid.uuid4()
+    await routing.list_for_subject(tenant_id="t1", agent_id="kyc", subject=SUBJECT)
+    await routing.list_blocks(tenant_id="t1", agent_id="kyc", subject=SUBJECT)
+    await routing.upsert_block(_scratch_record(value="x"))
+    await routing.tombstone_record(
+        tenant_id="t1", agent_id="kyc", record_id=rid, reason="user_request", actor_id="svc"
+    )
+    await routing.purge_record(
+        tenant_id="t1",
+        agent_id="kyc",
+        record_id=rid,
+        erasure_command=RegulatorErasureCommand(
+            regulator_order_id="O", requester_scope="memory.regulator_erasure", subject_id="c1"
+        ),
+        actor_id="svc",
+    )
+    n = await routing.purge_expired(tombstone_window_s=30)
+    await routing.redact_record(
+        tenant_id="t1",
+        agent_id="kyc",
+        record_id=rid,
+        span=RedactionSpan(path=("account", "number")),
+        reason="pii_minimization",
+        actor_id="svc",
+    )
+    assert spy.calls == [
+        "list_for_subject",
+        "list_blocks",
+        "upsert_block",
+        "tombstone_record",
+        "purge_record",
+        "purge_expired",
+        "redact_record",
+    ]
+    assert n == 3

@@ -195,8 +195,16 @@ def _scratch_envelope(**overrides: object) -> bytes:
         {"data_classes": "public"},  # a string, not a list-of-strings
         {"purpose": 123},  # non-string purpose
         {"block_kind": "persona"},  # non-None block_kind on a keyed scratch record
+        {"record_id": 123},  # non-string record_id
+        {"created_at": 123},  # non-string created_at
     ],
-    ids=["data_classes_as_string", "non_string_purpose", "non_null_block_kind"],
+    ids=[
+        "data_classes_as_string",
+        "non_string_purpose",
+        "non_null_block_kind",
+        "non_string_record_id",
+        "non_string_created_at",
+    ],
 )
 @pytest.mark.asyncio
 async def test_redis_scratch_get_invalid_field_shape_fails_closed(
@@ -218,6 +226,45 @@ async def test_redis_scratch_get_invalid_field_shape_fails_closed(
             key="k",
         )
     assert excinfo.value.unreachable is False  # shape bug, NOT an outage
+
+
+@pytest.mark.asyncio
+async def test_redis_scratch_get_non_dict_envelope_fails_closed() -> None:
+    """A well-formed JSON value that is NOT an object (e.g. a list) fails closed
+    as a read bug (unreachable=False) — it is not a valid scratch envelope."""
+    adapter = RedisMemoryAdapter(redis_client=_PlantedRedis(b"[1, 2, 3]"), scratch_ttl_s=3600)
+    with pytest.raises(MemoryBackendUnavailable) as excinfo:
+        await adapter.get(
+            tenant_id="t1",
+            agent_id="kyc",
+            subject=SubjectRef(kind="human", id="cust-7"),
+            tier="scratch",
+            key="k",
+        )
+    assert excinfo.value.unreachable is False
+
+
+@pytest.mark.asyncio
+async def test_redis_scratch_get_str_raw_value_reconstructs_hit() -> None:
+    """A redis client returning a str (not bytes) envelope is parsed via the str
+    branch (no ``.decode()``) and reconstructs a valid MemoryHit."""
+
+    class _StrRedis:
+        async def set(self, key: str, value: object, **kw: object) -> bool:  # pragma: no cover
+            return True
+
+        async def get(self, key: str) -> object:
+            return _scratch_envelope().decode()  # a str, not bytes
+
+    adapter = RedisMemoryAdapter(redis_client=_StrRedis(), scratch_ttl_s=3600)
+    hit = await adapter.get(
+        tenant_id="t1",
+        agent_id="kyc",
+        subject=SubjectRef(kind="human", id="cust-7"),
+        tier="scratch",
+        key="k",
+    )
+    assert hit is not None and hit.tier == "scratch"
 
 
 class _SetTracingRedis:
