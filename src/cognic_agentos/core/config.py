@@ -1532,6 +1532,19 @@ class Settings(BaseSettings):
         gt=0,
         description="Sprint 11.5 — tombstone window before reaper purge (default 30d).",
     )
+    memory_reaper_interval_s: int = Field(
+        default=300,
+        gt=0,
+        description="Sprint 11.5b — tombstone-reaper sweep interval "
+        "(mirrors sandbox_reaper_interval_s).",
+    )
+    memory_kill_switch_cache_ttl_s: int = Field(
+        default=60,
+        gt=0,
+        le=60,
+        description="Sprint 11.5b — last-known-good kill-switch cache grace; >this with Redis "
+        "unreachable fails closed (frozen). Capped at 60 (ADR-018 <=60s propagation).",
+    )
 
     # --- Build metadata ----------------------------------------------
     # Wired by the Dockerfile / CI at image-build time; defaults make
