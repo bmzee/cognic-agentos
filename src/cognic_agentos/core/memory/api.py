@@ -7,13 +7,18 @@ backend into the public memory operations. It is THE seam a Layer C agent uses;
 direct adapter access from anywhere but here is forbidden (pinned by
 ``tests/unit/architecture/test_memory_layer_c_no_direct_storage.py``).
 
-**11.5a op surface — 7 ops.** ``remember`` / ``recall`` / ``upsert_block`` /
-``read_block`` / ``list_for_subject`` / ``list_blocks`` / ``recall_episodes``
-(the 7th op landed in T11 — the ``long_term`` + purpose episodic view, joined
-to ``decision_history``; vector-ranked recall is deferred to 11.5c). The
-lifecycle ops (``forget`` / ``redact`` / ``export``) are ABSENT: memory writes
-are not production-wired until erasure/redaction lands in 11.5b and ``export``
-in 11.5c — MemoryAPI is DI-tested, not harness-injected, in 11.5a.
+**11.5b op surface — 9 ops.** The 7 read/write ops from 11.5a — ``remember`` /
+``recall`` / ``upsert_block`` / ``read_block`` / ``list_for_subject`` /
+``list_blocks`` / ``recall_episodes`` (the 7th landed in 11.5a T11 — the
+``long_term`` + purpose episodic view joined to ``decision_history``;
+vector-ranked recall is deferred to 11.5c) — PLUS the two lifecycle ops
+``forget`` (8th) and ``redact`` (9th), which land in 11.5b T9 as THIN
+delegators to the :func:`forget.forget` / :func:`redact.redact` storage
+primitives (those primitives own the ``memory.forget`` /
+``memory.regulator_erasure`` / ``memory.redact`` chain events, so the lifecycle
+ops add NO extra audit emission — unlike ``recall``'s ``memory.read``). The
+10th op (``export``) remains ABSENT, deferred to 11.5c. MemoryAPI is DI-tested,
+not harness-injected, in 11.5b.
 
 **Identity is read from the bound** :class:`MemoryCallerContext` **only.** Every
 op runs through the gate, which reads ``tenant_id`` / ``agent_id`` / ``actor_id``
@@ -50,19 +55,29 @@ from cognic_agentos.core.memory._seams import (
     MemoryKillSwitchInterrogator,
     _NullMemoryKillSwitchInterrogator,
 )
+from cognic_agentos.core.memory.forget import forget as forget_op
 from cognic_agentos.core.memory.gate import MemoryGate
+from cognic_agentos.core.memory.redact import redact as redact_op
 from cognic_agentos.core.memory.tiers import BlockKind, MemoryTier, SubjectRef
 
 if TYPE_CHECKING:
     from cognic_agentos.core.config import Settings
     from cognic_agentos.core.dlp.scanner import DLPScanner
-    from cognic_agentos.core.memory._context import Episode, MemoryCallerContext
+    from cognic_agentos.core.memory._context import (
+        Episode,
+        ForgetReceipt,
+        MemoryCallerContext,
+        RedactionReceipt,
+        RedactionSpan,
+        RegulatorErasureCommand,
+    )
     from cognic_agentos.core.memory.consent import ConsentToken, ConsentValidator
 
     # The adapter is INJECTED — there is NO runtime import of
     # cognic_agentos.core.memory.storage from this module (the governed access
     # path is MemoryAPI; storage stays behind the gate). TYPE_CHECKING-only.
     from cognic_agentos.core.memory.storage import MemoryAdapter
+    from cognic_agentos.core.memory.tiers import ForgetReason, RedactionReason
     from cognic_agentos.core.policy.engine import OPAEngine
 
 #: ISO 42001 control tuple stamped on every ``memory.read`` chain row.
@@ -169,6 +184,52 @@ class MemoryAPI:
             consent_token=consent_token,
         )
         return await self._adapter.upsert_block(record)
+
+    # -- Lifecycle ops (8th + 9th ops; export is 10th, 11.5c) --------------
+
+    async def forget(
+        self,
+        record_id: MemoryRecordId,
+        *,
+        reason: ForgetReason,
+        erasure_command: RegulatorErasureCommand | None = None,
+    ) -> ForgetReceipt:
+        """Soft-delete (tombstone) or physically purge (regulator-erasure) a
+        memory record. THIN delegator to :func:`forget.forget` — the storage
+        primitive owns the ``memory.forget`` / ``memory.regulator_erasure`` chain
+        events, so (unlike ``recall``) this op emits NO extra audit. The bound
+        gate enforces the §7.3 sub-agent durable guard FIRST; identity is read
+        from the bound context, never the arguments. ``regulator_erasure``
+        requires a valid ``erasure_command`` (custody metadata)."""
+
+        return await forget_op(
+            record_id,
+            reason=reason,
+            gate=self._gate,
+            adapter=self._adapter,
+            erasure_command=erasure_command,
+        )
+
+    async def redact(
+        self,
+        record_id: MemoryRecordId,
+        *,
+        span: RedactionSpan,
+        reason: RedactionReason,
+    ) -> RedactionReceipt:
+        """Create a new sealed version of a memory record with a redacted field.
+        THIN delegator to :func:`redact.redact` — the storage primitive owns the
+        ``memory.redact`` chain event (so this op emits NO extra audit). The bound
+        gate enforces the §7.3 sub-agent durable guard FIRST; identity is read
+        from the bound context, never the arguments."""
+
+        return await redact_op(
+            record_id,
+            span=span,
+            reason=reason,
+            gate=self._gate,
+            adapter=self._adapter,
+        )
 
     # -- Keyed reads -------------------------------------------------------
 
