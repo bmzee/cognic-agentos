@@ -82,6 +82,12 @@ if TYPE_CHECKING:
     # core module's blast radius into the portal layer for callers
     # that don't wire OPA. TYPE_CHECKING keeps the kwarg typed without
     # pulling the engine module into the import graph.
+    # Sprint 11.5b T7: type-only ref for the create_app ``memory_reaper``
+    # kwarg. There is NO runtime ``MemoryTombstoneReaper`` import in app.py —
+    # the reaper is supplied PRE-CONSTRUCTED by the caller. The portal import
+    # graph stays free of the memory package by default; this TYPE_CHECKING-only
+    # ref types the kwarg without pulling the module into the import graph.
+    from cognic_agentos.core.memory.reaper import MemoryTombstoneReaper
     from cognic_agentos.core.policy.engine import OPAEngine
 
     # Sprint 8.5 T10: type-only ref for the create_app ``checkpoint_store``
@@ -283,6 +289,14 @@ def create_app(
     # created and startup is unaffected. Same opt-in None-default
     # pattern as every other dependency on this factory.
     checkpoint_store: CheckpointStore | None = None,
+    # Sprint 11.5b T7: optional memory tombstone-reaper wiring seam. When
+    # a MemoryTombstoneReaper is provided, the FastAPI lifespan starts a
+    # single-instance background task (tombstone retention-floor enforcement
+    # per ADR-019) and cancels it on shutdown. When None — the dev / test
+    # / pack-only default — NO memory-reaper task is created and startup
+    # is SILENT (pack-only deployments without long-term memory are legit).
+    # Mirrors the checkpoint_store opt-in pattern exactly.
+    memory_reaper: MemoryTombstoneReaper | None = None,
 ) -> FastAPI:
     """Build and return the FastAPI application.
 
@@ -355,13 +369,14 @@ def create_app(
         # checkpoint reaper_task belong in lifespan because they need an
         # asyncio event loop + clean cancellation on shutdown.
         #
-        # #489: reap_task + reaper_task are declared AND the outer
-        # try/finally cleanup envelope is opened BEFORE any background
-        # task is created or any fail-loud check runs — so a startup
-        # failure (e.g. the setting-driven fail-loud raise) can never leak
-        # a created task.
+        # #489: reap_task + reaper_task + memory_reaper_task are declared AND
+        # the outer try/finally cleanup envelope is opened BEFORE any
+        # background task is created or any fail-loud check runs — so a
+        # startup failure (e.g. the setting-driven fail-loud raise) can never
+        # leak a created task.
         reap_task: asyncio.Task[None] | None = None
         reaper_task: asyncio.Task[None] | None = None
+        memory_reaper_task: asyncio.Task[None] | None = None
 
         async def _shutdown_checkpoint_reaper() -> None:
             # cancel() then await so CancelledError propagates cleanly to
@@ -381,6 +396,17 @@ def create_app(
 
             reaper = CheckpointReaper(checkpoint_store=store, settings=settings)
             return asyncio.create_task(reaper.run_forever())
+
+        async def _shutdown_memory_reaper() -> None:
+            # cancel() then await so CancelledError propagates cleanly to
+            # the task boundary — the reaper re-raises it out of
+            # run_forever (it NEVER swallows cancellation). Idempotent via
+            # the done() guard so the inner + outer finally can both call
+            # it safely. Mirrors _shutdown_checkpoint_reaper exactly.
+            if memory_reaper_task is not None and not memory_reaper_task.done():
+                memory_reaper_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await memory_reaper_task
 
         try:
             # Sprint-7B.4 T6: SSE-subscriber reap task.
@@ -402,6 +428,29 @@ def create_app(
                             logger.exception("ui.broker.reap_idle_failed")
 
                 reap_task = asyncio.create_task(_reap_loop())
+
+            # --- Memory tombstone reaper (Sprint 11.5b T7) ------------------
+            # Opt-in only: when create_app(memory_reaper=...) is supplied the
+            # lifespan starts a single-instance background task that drives
+            # MemoryAdapter.purge_expired() on a configurable interval
+            # (settings.memory_reaper_interval_s). When None — the dev / test
+            # / pack-only default — NO task is created and startup is SILENT
+            # (pack-only deployments are legitimate). Cancelled BEFORE the
+            # adapter/relational shutdown in the finally so the reaper never
+            # runs a sweep against a closing DB connection.
+            if memory_reaper is not None:
+                # The reaper is passed in PRE-CONSTRUCTED (with its adapter +
+                # settings); there is NO runtime import of the memory package
+                # here. The portal import graph stays memory-free via the
+                # TYPE_CHECKING-only create_app annotation ref. (The checkpoint
+                # reaper differs: it local-imports + constructs its reaper from
+                # the store inside _start_checkpoint_reaper.)
+                memory_reaper_task = asyncio.create_task(memory_reaper.run_forever())
+                app.state.memory_reaper_task = memory_reaper_task
+                logger.info(
+                    "memory.reaper.started",
+                    extra={"source": "explicit_injection"},
+                )
 
             # --- Checkpoint reaper (Sprint 8.5 T10 + #489) -----------------
             # Precedence: an explicit create_app(checkpoint_store=...)
@@ -493,9 +542,11 @@ def create_app(
 
                 yield
             finally:
-                # #489 — cancel the reaper BEFORE close_all() so the
-                # shared adapter-owned engine is never disposed under an
-                # in-flight sweep.
+                # Cancel reapers BEFORE close_all() so the shared
+                # adapter-owned engine is never disposed under an
+                # in-flight sweep. Memory reaper first (Sprint 11.5b T7),
+                # then checkpoint reaper (#489 ordering preserved).
+                await _shutdown_memory_reaper()
                 await _shutdown_checkpoint_reaper()
                 await adapters.close_all()
                 app.state.adapters = None
@@ -503,12 +554,14 @@ def create_app(
             # All background tasks created above are cancelled here. This
             # envelope opened BEFORE any task creation, so a startup
             # failure (e.g. the setting-driven fail-loud raise) can never
-            # leak the SSE reap task or the checkpoint reaper.
+            # leak the SSE reap task, the checkpoint reaper, or the memory
+            # reaper.
             if reap_task is not None:
                 reap_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await reap_task
             await _shutdown_checkpoint_reaper()
+            await _shutdown_memory_reaper()
 
     app = FastAPI(
         title="Cognic AgentOS",
@@ -593,6 +646,12 @@ def create_app(
     # startup creates the task.
     app.state.checkpoint_store = checkpoint_store
     app.state.reaper_task = None
+    # Sprint 11.5b T7: memory tombstone-reaper wiring seam. ``memory_reaper``
+    # is stored for lifespan introspection; ``memory_reaper_task`` is
+    # pre-seeded to None so pre-startup introspection sees a defined
+    # attribute (mirrors the reaper_task pattern above).
+    app.state.memory_reaper = memory_reaper
+    app.state.memory_reaper_task = None
 
     # Middleware add order is OUTER-LAST in Starlette: the call chain
     # walks the most-recently-added middleware first. We want the
