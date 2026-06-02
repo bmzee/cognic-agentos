@@ -174,23 +174,50 @@ MODEL_LIFECYCLE_SCOPES: frozenset[ModelRBACScope] = frozenset(
 )
 
 
-#: Sprint 11.5a — memory RBAC scopes per ADR-019. Four read/write values;
-#: 11.5b extends with memory.forget / memory.redact / memory.export.read /
-#: memory.regulator_erasure. Value-disjoint from every other family by the
-#: memory.* namespace (pinned by tests/unit/portal/rbac/test_memory_scopes.py).
+#: Sprint 11.5a — memory RBAC scopes per ADR-019. Grew from 4 (11.5a) to 7
+#: (11.5b: + memory.forget / memory.redact / memory.regulator_erasure).
+#: memory.export.read is 11.5c (NOT here). Value-disjoint from every other
+#: family by the memory.* namespace (pinned by
+#: tests/unit/portal/rbac/test_memory_scopes.py + test_emergency_scopes.py).
 MemoryRBACScope = Literal[
     "memory.read",
     "memory.write.scratch",
     "memory.write.task",
     "memory.write.long_term",
+    # Sprint 11.5b T1 — erasure / lifecycle ops
+    "memory.forget",
+    "memory.redact",
+    "memory.regulator_erasure",
 ]
 
 
-#: All 4 memory scopes as a frozenset (1:1 with MemoryRBACScope) for bank-overlay
-#: binders. Pinned by tests/unit/portal/rbac/test_memory_scopes.py.
+#: All 7 memory scopes as a frozenset (1:1 with MemoryRBACScope) for bank-overlay
+#: binders. Pinned by tests/unit/portal/rbac/test_memory_scopes.py +
+#: tests/unit/portal/rbac/test_emergency_scopes.py.
 MEMORY_SCOPES: frozenset[MemoryRBACScope] = frozenset(
-    {"memory.read", "memory.write.scratch", "memory.write.task", "memory.write.long_term"}
+    {
+        "memory.read",
+        "memory.write.scratch",
+        "memory.write.task",
+        "memory.write.long_term",
+        "memory.forget",
+        "memory.redact",
+        "memory.regulator_erasure",
+    }
 )
+
+
+#: Sprint 11.5b T1 — emergency-control RBAC family per ADR-018. One value in
+#: 11.5b; Sprint 13.5 grows it with the full kill-switch matrix + quotas. Its
+#: own family (NOT folded into MemoryRBACScope) — emergency != memory-data scope.
+#: Wire-protocol-public: every 403 ``scope_not_held`` denial on the kill-switch
+#: surface carries one of these values. Namespace-disjoint from all other
+#: families by the ``emergency.*`` prefix (pinned by
+#: ``test_emergency_scopes.py::test_emergency_scope_disjoint_from_every_other_family``).
+EmergencyRBACScope = Literal["emergency.kill.memory_write_freeze"]
+
+#: All 1 emergency scopes as a frozenset (1:1 with EmergencyRBACScope).
+EMERGENCY_SCOPES: frozenset[EmergencyRBACScope] = frozenset({"emergency.kill.memory_write_freeze"})
 
 
 #: Examiner-role compliance grant. Bank-overlay examiner binders grant

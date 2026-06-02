@@ -39,6 +39,7 @@ from cognic_agentos.portal.rbac.actor import (
 )
 from cognic_agentos.portal.rbac.scopes import (
     ComplianceRBACScope,
+    EmergencyRBACScope,
     MemoryRBACScope,
     ModelRBACScope,
     PackRBACScope,
@@ -240,7 +241,12 @@ async def _bind_actor(request: Request) -> Actor:
 
 
 def RequireScope(
-    scope: PackRBACScope | UIRBACScope | ComplianceRBACScope | ModelRBACScope | MemoryRBACScope,
+    scope: PackRBACScope
+    | UIRBACScope
+    | ComplianceRBACScope
+    | ModelRBACScope
+    | MemoryRBACScope
+    | EmergencyRBACScope,
 ) -> Callable[..., Awaitable[Actor]]:
     """FastAPI dependency factory — admit the request iff the bound
     :class:`Actor` holds ``scope``.
@@ -266,6 +272,11 @@ def RequireScope(
     Sprint-11.5a T12 further widened it with :data:`MemoryRBACScope` so the
     ADR-019 memory endpoints can call ``RequireScope("memory.read")`` /
     ``RequireScope("memory.write.long_term")`` etc.
+
+    Sprint-11.5b T1 further widened it with :data:`EmergencyRBACScope` so
+    the ADR-018 kill-switch endpoints can call
+    ``RequireScope("emergency.kill.memory_write_freeze")``. Additive —
+    pre-11.5b call sites still compile cleanly.
 
     Sprint-7B.4 T6 converted the inner dependency to async so the
     denial path can ``await broker.emit_rbac_denial`` via the shared

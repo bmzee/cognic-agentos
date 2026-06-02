@@ -36,6 +36,7 @@ from fastapi import Request
 
 from cognic_agentos.portal.rbac.scopes import (  # noqa: F401  (ScopeSet kept for legacy bank-overlay re-export)
     ComplianceRBACScope,
+    EmergencyRBACScope,
     MemoryRBACScope,
     ModelRBACScope,
     PackRBACScope,
@@ -97,8 +98,19 @@ class Actor(pydantic.BaseModel):
     #: task,long_term} (ADR-019) alongside any other family. Additive —
     #: pre-11.5a actors still construct cleanly. Pinned by
     #: ``tests/unit/portal/rbac/test_memory_scopes.py::TestActorAcceptsMemoryScopes``.
+    #: Sprint 11.5b T1 — further widened with ``EmergencyRBACScope`` so an
+    #: emergency-control operator can carry emergency.kill.memory_write_freeze
+    #: (ADR-018) alongside any other family. Additive — pre-11.5b actors
+    #: still construct cleanly. Pinned by
+    #: ``tests/unit/portal/rbac/test_emergency_scopes.py`` +
+    #: ``test_memory_scopes.py::test_actor_accepts_new_lifecycle_and_emergency_scopes``.
     scopes: frozenset[
-        PackRBACScope | UIRBACScope | ComplianceRBACScope | ModelRBACScope | MemoryRBACScope
+        PackRBACScope
+        | UIRBACScope
+        | ComplianceRBACScope
+        | ModelRBACScope
+        | MemoryRBACScope
+        | EmergencyRBACScope
     ]
     actor_type: ActorType
 

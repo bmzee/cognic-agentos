@@ -52,7 +52,20 @@ MemoryRefusalReason = Literal[
     "memory_recall_capability_missing",
     "memory_cross_subject_access_refused",
     "memory_purpose_mismatch",
+    # Sprint 11.5b T1 — lifecycle refusal reasons (erasure/forget/redact ops)
+    "memory_record_not_found",
+    "memory_record_already_tombstoned",
+    "memory_redaction_path_invalid",
+    "memory_regulator_erasure_metadata_required",
 ]
+
+#: Reasons a forget() call may be initiated — carried on the memory.forget chain event.
+#: Wire-protocol-public per ADR-019 §"Forget + redact".
+ForgetReason = Literal["user_request", "retention_expired", "regulator_erasure", "correction"]
+
+#: Reasons a redact() call may be initiated — carried on the memory.redact chain event.
+#: Wire-protocol-public per ADR-019 §"Forget + redact".
+RedactionReason = Literal["pii_minimization", "regulator_order", "correction"]
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
