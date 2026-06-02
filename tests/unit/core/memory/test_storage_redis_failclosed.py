@@ -8,6 +8,9 @@ class _DeadRedis:
     async def set(self, *a, **k):
         raise ConnectionError("redis down")
 
+    async def get(self, key):  # pragma: no cover
+        raise ConnectionError("redis down")
+
 
 async def test_scratch_write_fails_closed_when_redis_unreachable():
     adapter = RedisMemoryAdapter(redis_client=_DeadRedis(), scratch_ttl_s=3600)
