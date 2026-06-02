@@ -32,18 +32,24 @@ from cognic_agentos.portal.rbac.scopes import (
     UIRBACScope,
 )
 
-#: The exact 4 values 11.5a ships. Drift here is a wire-protocol break.
+#: Sprint 11.5a shipped 4 values; Sprint 11.5b T1 extends to 7.
+#: Drift here is a wire-protocol break.
 _EXPECTED_MEMORY_SCOPES = {
+    # 11.5a original 4
     "memory.read",
     "memory.write.scratch",
     "memory.write.task",
     "memory.write.long_term",
+    # 11.5b T1 additions (forget / redact / regulator_erasure)
+    "memory.forget",
+    "memory.redact",
+    "memory.regulator_erasure",
 }
 
 
-def test_memory_scopes_exactly_the_4_11_5a_values() -> None:
-    """``MemoryRBACScope`` carries exactly the 4 11.5a values, and
-    ``MEMORY_SCOPES`` stays 1:1 with the Literal."""
+def test_memory_scopes_exactly_the_7_11_5b_values() -> None:
+    """``MemoryRBACScope`` carries exactly the 7 11.5b values (4 from 11.5a +
+    3 from 11.5b T1), and ``MEMORY_SCOPES`` stays 1:1 with the Literal."""
     assert set(typing.get_args(MemoryRBACScope)) == _EXPECTED_MEMORY_SCOPES
     assert frozenset(_EXPECTED_MEMORY_SCOPES) == MEMORY_SCOPES
 
@@ -149,3 +155,24 @@ class TestRequireScopeAcceptsMemoryScopes:
     def test_require_scope_constructs_for_every_memory_scope(self, scope: MemoryRBACScope) -> None:
         dep = RequireScope(scope)
         assert callable(dep)
+
+
+# --- Sprint 11.5b T1 additions ---
+
+
+def test_actor_accepts_new_lifecycle_and_emergency_scopes() -> None:
+    """Without widening Actor.scopes + RequireScope, these raise pydantic ValidationError."""
+    Actor(
+        subject="s",
+        tenant_id="t",
+        scopes=frozenset({"memory.forget", "memory.regulator_erasure"}),
+        actor_type="human",
+    )
+    Actor(
+        subject="s",
+        tenant_id="t",
+        scopes=frozenset({"emergency.kill.memory_write_freeze"}),
+        actor_type="service",
+    )
+    RequireScope(scope="memory.redact")
+    RequireScope(scope="emergency.kill.memory_write_freeze")

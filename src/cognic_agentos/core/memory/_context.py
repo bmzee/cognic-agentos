@@ -68,3 +68,53 @@ class MemoryWriteRecord:
     key: str | None = None
     block_kind: BlockKind | None = None
     retention_until: datetime | None = None
+
+
+# --- Sprint 11.5b T1 — erasure / lifecycle DTOs ---
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class RedactionSpan:
+    """JSON field-path selector for redact() (locked: field-path, NOT byte-span).
+
+    ``path`` walks nested mappings (e.g. ``("account", "number")``); the leaf
+    value is replaced by ``replacement``. A missing or non-container path
+    refuses with ``memory_redaction_path_invalid``.
+    """
+
+    path: tuple[str, ...]
+    replacement: object = "[REDACTED]"
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class RegulatorErasureCommand:
+    """Chain-of-custody metadata REQUIRED for ``forget(reason='regulator_erasure')``.
+
+    Core records all three fields on the ``memory.regulator_erasure`` chain
+    event. RBAC enforcement of ``requester_scope`` is the 11.5c portal's job —
+    core has no Actor/scope set; it validates ``requester_scope`` equals
+    ``"memory.regulator_erasure"`` and refuses with
+    ``memory_regulator_erasure_metadata_required`` on mismatch or absence.
+    """
+
+    regulator_order_id: str
+    requester_scope: str  # must == "memory.regulator_erasure" (validated in forget.py)
+    subject_id: str
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class ForgetReceipt:
+    """Receipt returned by a successful ``forget()`` call."""
+
+    record_id: MemoryRecordId
+    tombstoned: bool
+    purged: bool  # True only on the regulator_erasure immediate-purge path
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class RedactionReceipt:
+    """Receipt returned by a successful ``redact()`` call."""
+
+    record_id: MemoryRecordId  # the ORIGINAL record id (now sealed)
+    new_version_id: MemoryRecordId
+    redaction_version: int

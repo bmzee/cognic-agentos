@@ -11,6 +11,7 @@ def _task_record(
     tenant_id: str = "t1",
     purpose: str = "customer_support",
     data_classes: tuple[str, ...] = ("public",),
+    key: str = "greeting",
 ) -> MemoryWriteRecord:
     return MemoryWriteRecord(
         tenant_id=tenant_id,
@@ -22,14 +23,20 @@ def _task_record(
         data_classes=tuple(data_classes),
         value=value,
         request_id="memory-write-test",
-        key="greeting",
+        key=key,
     )
 
 
-def _scratch_record(*, value: object = "ephemeral", tenant_id: str = "t1") -> MemoryWriteRecord:
+def _scratch_record(
+    *,
+    value: object = "ephemeral",
+    tenant_id: str = "t1",
+    key: str = "tmp",
+    agent_id: str = "kyc",
+) -> MemoryWriteRecord:
     return MemoryWriteRecord(
         tenant_id=tenant_id,
-        agent_id="kyc",
+        agent_id=agent_id,
         actor_id="svc",
         subject=SUBJECT,
         tier="scratch",
@@ -37,7 +44,7 @@ def _scratch_record(*, value: object = "ephemeral", tenant_id: str = "t1") -> Me
         data_classes=(),
         value=value,
         request_id="memory-write-test",
-        key="tmp",
+        key=key,
     )
 
 

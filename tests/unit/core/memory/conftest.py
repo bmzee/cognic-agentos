@@ -46,6 +46,18 @@ def memory_adapter(_mem_engine, dh_store):
     return PostgresMemoryAdapter(engine=_mem_engine, dh_store=dh_store)
 
 
+# Sprint 11.5b T8 — routing tests use pg_adapter / engine fixture names
+# (mirrors plan naming; aliases point to the same objects as memory_adapter / _mem_engine).
+@pytest.fixture
+def pg_adapter(_mem_engine, dh_store):
+    return PostgresMemoryAdapter(engine=_mem_engine, dh_store=dh_store)
+
+
+@pytest.fixture
+def engine(_mem_engine):
+    return _mem_engine
+
+
 @pytest.fixture
 def decision_history_rows(_mem_engine):
     # Zero-arg async reader of all decision_history rows ordered by sequence.

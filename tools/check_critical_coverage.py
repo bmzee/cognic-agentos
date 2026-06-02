@@ -2017,6 +2017,26 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     ("src/cognic_agentos/core/memory/storage.py", 0.95, 0.90),
     ("src/cognic_agentos/core/memory/consent.py", 0.95, 0.90),
     ("src/cognic_agentos/core/dlp/scanner.py", 0.95, 0.90),
+    # ──────────────────────────────────────────────────────────────────
+    # Sprint 11.5b Z1b — memory regulator-core (ADR-019). 4 modules
+    # promoted at the standard 95/90 floor:
+    #   * ``core/emergency/kill_switches.py`` — the real Redis
+    #     ``memory.write_freeze`` kill-switch; fail-closed parse (non-bool
+    #     ``frozen`` / missing custody / malformed → frozen + cache-poisoned).
+    #   * ``core/memory/forget.py`` — the erasure entry point (tombstone /
+    #     regulator-erasure custody validation); value-never-in-chain.
+    #   * ``core/memory/redact.py`` — the tombstone-then-insert redaction op.
+    #   * ``core/memory/_routing.py`` — the scratch→Postgres fallback composite
+    #     (unavailable-only fallback; collision-free hashed scratch key;
+    #     fail-closed envelope parse).
+    # OFF-gate per Doctrine F: ``core/memory/reaper.py`` (thin asyncio loop;
+    # the substantive retention-floor enforcement is the on-gate
+    # ``adapter.purge_expired`` it delegates to — Sprint 8.5 ``sandbox/
+    # reaper.py`` precedent).
+    ("src/cognic_agentos/core/emergency/kill_switches.py", 0.95, 0.90),
+    ("src/cognic_agentos/core/memory/forget.py", 0.95, 0.90),
+    ("src/cognic_agentos/core/memory/redact.py", 0.95, 0.90),
+    ("src/cognic_agentos/core/memory/_routing.py", 0.95, 0.90),
 )
 
 

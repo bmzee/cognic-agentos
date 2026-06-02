@@ -370,6 +370,16 @@ class MemoryGate:
         ):
             raise MemoryOperationRefused("memory_purpose_mismatch")
 
+    # -- Lifecycle gate (§7.3 I2 — forget/redact authz) -------------------
+
+    async def check_lifecycle(self) -> None:
+        """Forget/redact authz (§7.3 I2): a sub-agent may not mutate durable
+        memory — children are scratch-only. Identity is read from the bound
+        context; there is no per-call argument (the op layer passes the gate,
+        not a separate identity)."""
+        if self._context.is_subagent:
+            raise MemoryOperationRefused("memory_subagent_durable_access_refused")
+
     # -- Enumerate gate (§7.2 minus the keyed-record steps) ----------------
 
     async def check_enumerate(
