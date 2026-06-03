@@ -49,6 +49,7 @@ whose contents are governed at the later ``read_block``).
 
 from __future__ import annotations
 
+import logging
 import uuid
 from collections.abc import Callable
 from typing import TYPE_CHECKING
@@ -71,6 +72,7 @@ from cognic_agentos.core.memory.forget import forget as forget_op
 from cognic_agentos.core.memory.gate import MemoryGate
 from cognic_agentos.core.memory.redact import redact as redact_op
 from cognic_agentos.core.memory.tiers import BlockKind, MemoryTier, SubjectRef
+from cognic_agentos.core.memory.vector import _is_indexable
 
 if TYPE_CHECKING:
     from cognic_agentos.core.config import Settings
@@ -90,8 +92,11 @@ if TYPE_CHECKING:
     # path is MemoryAPI; storage stays behind the gate). TYPE_CHECKING-only.
     from cognic_agentos.core.memory.storage import MemoryAdapter
     from cognic_agentos.core.memory.tiers import ForgetReason, RedactionReason
+    from cognic_agentos.core.memory.vector import MemoryVectorIndex
     from cognic_agentos.core.policy.engine import OPAEngine
     from cognic_agentos.db.adapters.protocols import ObjectStoreAdapter
+
+_LOG = logging.getLogger("cognic_agentos.core.memory.api")
 
 #: ISO 42001 control tuple stamped on every ``memory.read`` chain row.
 #: A.7.4 (impact assessment) / A.8.2 (data quality) per ADR-019 + ADR-006.
@@ -125,6 +130,7 @@ class MemoryAPI:
         audit: DecisionHistoryStore,
         settings: Settings,
         object_store: ObjectStoreAdapter | None = None,
+        vector_index: MemoryVectorIndex | None = None,
     ) -> None:
         # Fail-loud default: bind the _NullMemoryKillSwitchInterrogator sentinel
         # when no kill-switch is wired (raises NotImplementedError on the first
@@ -149,6 +155,10 @@ class MemoryAPI:
         # (fail-loud sentinel; NOT a governance refusal — a misconfigured
         # deployment fails at construction/first-call, never silently).
         self._object_store: ObjectStoreAdapter | None = object_store
+        # Sprint 11.5c T7 — vector index for episodic recall + index-on-write.
+        # None = vector path unavailable (recall refuses with
+        # memory_vector_recall_unavailable; index-on-write is skipped silently).
+        self._vector_index: MemoryVectorIndex | None = vector_index
 
     # -- Write ops ---------------------------------------------------------
 
@@ -176,7 +186,32 @@ class MemoryAPI:
             consent_token=consent_token,
             retention_window_s=retention_window_s,
         )
-        return await self._adapter.put(record)
+        rid = await self._adapter.put(record)
+        if (
+            self._vector_index is not None
+            and tier == "long_term"
+            and key is not None
+            and _is_indexable(data_classes)
+        ):
+            # Best-effort derived index: the record is already durably written +
+            # chain-linked above; a failed embed must NOT fail remember (the vector
+            # index is a recall accelerator, NOT the system of record). Log
+            # record_id + purpose + exc class ONLY — never the value/text.
+            try:
+                await self._vector_index.index(
+                    record_id=str(rid),
+                    text=str(value),
+                    purpose=purpose,
+                    data_classes=list(data_classes),
+                )
+            except Exception as exc:
+                _LOG.warning(
+                    "memory.vector_index_failed record_id=%s purpose=%s class=%s",
+                    rid,
+                    purpose,
+                    type(exc).__name__,
+                )
+        return rid
 
     async def upsert_block(
         self,
@@ -439,18 +474,25 @@ class MemoryAPI:
     # -- Episodic recall (7th op) ------------------------------------------
 
     async def recall_episodes(
-        self, subject: SubjectRef, *, similarity_threshold: float, purpose: str
+        self,
+        subject: SubjectRef,
+        *,
+        similarity_threshold: float,
+        purpose: str,
+        query: str | None = None,
     ) -> list[Episode]:
-        """Episodic recall (7th 11.5a op) — a view over the served-context agent's
-        long_term records for ``subject``, purpose-filtered, joined to
-        decision_history. Runs the enumerate gate (long_term tier), delegates to
-        :func:`episodes.recall_episodes`, emits one enumerate-shape
-        ``memory.read``.
+        """Episodic recall (7th op, vector path wired in 11.5c) — a view over
+        the served-context agent's long_term records for ``subject``,
+        purpose-filtered, joined to decision_history. Runs the enumerate gate
+        (long_term tier), delegates to :func:`episodes.recall_episodes`, emits
+        one enumerate-shape ``memory.read``.
 
-        Pin-2: a ``similarity_threshold > 0.0`` call passes the gate then
-        propagates :func:`episodes.recall_episodes`'s ``NotImplementedError``
-        (vector-ranked recall is 11.5c) — no ``memory.read`` is emitted on that
-        path."""
+        When ``similarity_threshold > 0.0``: threads ``query`` + the wired
+        ``self._vector_index`` to the vector path. A missing ``query`` OR an
+        unwired ``vector_index`` raises
+        ``MemoryOperationRefused("memory_vector_recall_unavailable")`` — no
+        ``memory.read`` is emitted on the refusal path (the refusal propagates
+        before the emit)."""
 
         ctx = self._context
         await self._gate.check_enumerate(subject, tiers=("long_term",))
@@ -462,6 +504,8 @@ class MemoryAPI:
             dh_store=self._audit,
             tenant_id=ctx.tenant_id,
             agent_id=ctx.agent_id,
+            query=query,
+            vector_index=self._vector_index,
         )
         await self._audit.append(
             DecisionRecord(

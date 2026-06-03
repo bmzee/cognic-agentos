@@ -1583,6 +1583,13 @@ class Settings(BaseSettings):
         "(220752000s); a deployment may configure a LONGER window (e.g. a 10-year "
         "mandate) but a below-floor value is rejected at Settings construction.",
     )
+    memory_vector_collection: str = Field(
+        default="cognic-memory-episodes",
+        min_length=1,
+        description="Sprint 11.5c — qdrant collection for memory episodic vector recall. "
+        "Operators may target a deployment-specific collection without a code change; "
+        "an empty string is rejected at Settings construction.",
+    )
 
     # --- Build metadata ----------------------------------------------
     # Wired by the Dockerfile / CI at image-build time; defaults make

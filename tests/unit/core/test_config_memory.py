@@ -98,3 +98,26 @@ def test_memory_export_bucket_invalid_shapes_rejected_at_settings(bad_bucket):
     the first export put() against the local_fs adapter."""
     with pytest.raises(ValidationError):
         Settings(memory_export_bucket=bad_bucket)
+
+
+# --------------------------------------------------------------------------- #
+# Sprint 11.5c T7 — memory_vector_collection setting
+# --------------------------------------------------------------------------- #
+
+
+def test_memory_vector_collection_default():
+    """``memory_vector_collection`` defaults to ``cognic-memory-episodes``."""
+    s = Settings()
+    assert s.memory_vector_collection == "cognic-memory-episodes"
+
+
+def test_memory_vector_collection_override_accepted():
+    """A custom collection name is accepted."""
+    s = Settings(memory_vector_collection="bank-memory-episodes")
+    assert s.memory_vector_collection == "bank-memory-episodes"
+
+
+def test_memory_vector_collection_empty_rejected():
+    """An empty string is rejected at Settings construction (min_length=1)."""
+    with pytest.raises(ValidationError):
+        Settings(memory_vector_collection="")
