@@ -60,6 +60,7 @@ from cognic_agentos.cli.validators import (
     data_governance,
     hooks,
     identity,
+    learning_surface,
     mcp,
     risk_tier,
     supply_chain,
@@ -443,6 +444,10 @@ def run_validators(pack_path: Path) -> list[ValidatorFinding]:
     # earlier validators (identity / data_governance / etc.) appear
     # first when CI parsers walk the findings list.
     findings.extend(hooks.validate(data, pack_path))
+    # Sprint 11.5c T2 — learning-surface validator (per ADR-019 §52).
+    # Placed after hooks (independent concern; optional block). Silent
+    # on packs that omit the [learning_surface] block entirely.
+    findings.extend(learning_surface.validate(data, pack_path))
     return findings
 
 

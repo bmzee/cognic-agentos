@@ -169,10 +169,10 @@ def test_run_validators_dispatches_to_every_validator(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Every per-concern validator (identity / a2a / mcp /
-    data_governance / risk_tier / credentials / supply_chain) is
-    called exactly once with ``(parsed_dict, pack_path)``. Pinning
-    here catches a future refactor that drops one of the seven
-    dispatch sites.
+    data_governance / risk_tier / credentials / supply_chain /
+    learning_surface) is called exactly once with
+    ``(parsed_dict, pack_path)``. Pinning here catches a future refactor
+    that drops one of the dispatch sites.
 
     Sprint 10.6 T15 extended this dispatch list with the credentials
     validator (per ADR-004 §25 + ADR-017). Placement is AFTER
@@ -181,6 +181,10 @@ def test_run_validators_dispatches_to_every_validator(
     and BEFORE supply_chain (logical concern separation; supply_chain
     runs against the attestation paths which are independent of
     credentials).
+
+    Sprint 11.5c T2 extended this dispatch list with the learning_surface
+    validator (per ADR-019 §52). Placement is AFTER hooks (independent
+    concern; [learning_surface] is an optional block).
     """
     from cognic_agentos.cli import validators
     from cognic_agentos.cli.validate import run_validators
@@ -204,6 +208,8 @@ def test_run_validators_dispatches_to_every_validator(
         "risk_tier",
         "credentials",
         "supply_chain",
+        "hooks",
+        "learning_surface",
     ):
         monkeypatch.setattr(getattr(validators, name), "validate", _make_recorder(name))
 
@@ -217,6 +223,8 @@ def test_run_validators_dispatches_to_every_validator(
         "risk_tier",
         "credentials",
         "supply_chain",
+        "hooks",
+        "learning_surface",
     ]
 
 
@@ -1286,4 +1294,73 @@ def test_orchestrator_hook_pack_without_forbidden_blocks_passes_kind_check(
     hook_refusals = [f for f in findings if f.reason == "hook_pack_kind_constraint_violated"]
     assert hook_refusals == [], (
         f"clean hook pack should not trigger hook-kind refusal; got {[f.reason for f in findings]}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Sprint 11.5c T2 — orchestrator integration: learning_surface validator
+# ---------------------------------------------------------------------------
+
+
+def test_run_validators_surfaces_learning_surface_restricted_class(
+    tmp_path: Path,
+) -> None:
+    """Sprint 11.5c T2 integration test: a manifest declaring
+    ``[tool.cognic.learning_surface]`` with a restricted learnable data
+    class surfaces a ``learning_surface_violation`` finding with
+    ``payload["failure_mode"] == "data_class_restricted_forbidden"``
+    in the aggregated ``run_validators`` output.
+
+    This is the bank-safety rule (ADR-019 §52): a pack cannot self-grant
+    ``customer_pii`` / ``payment_data`` / ``credentials`` /
+    ``regulator_communication`` as a learning surface.
+    """
+    from cognic_agentos.cli.validate import run_validators
+
+    body = (
+        "[pack]\n"
+        'pack_id = "cognic-tool-test"\n'
+        'kind = "tool"\n'
+        "\n"
+        "[identity]\n"
+        'agent_id = "did:web:example.com:tools:test"\n'
+        'display_name = "Test Tool"\n'
+        'provider_organization = "Example Org"\n'
+        'provider_url = "https://example.com"\n'
+        'oasf_capability_set = ["test.v1"]\n'
+        "\n"
+        "[data_governance]\n"
+        'data_classes = ["public", "internal"]\n'
+        'purpose = "operational_telemetry"\n'
+        'retention_policy = "none"\n'
+        "\n"
+        "[risk_tier]\n"
+        'tier = "read_only"\n'
+        "\n"
+        "[supply_chain]\n"
+        'attestation_paths = ["attestations/cosign.sig"]\n'
+        "\n"
+        # Declare a restricted data class as a learning surface — must refuse.
+        "[tool.cognic.learning_surface]\n"
+        'mode = "profile_only"\n'
+        'learnable_data_classes = ["customer_pii"]\n'
+    )
+    _write_manifest(tmp_path, body)
+    # Materialise the attestation file so the supply_chain validator does
+    # not collateral-refuse on the missing file.
+    attestation = tmp_path / "attestations" / "cosign.sig"
+    attestation.parent.mkdir(parents=True, exist_ok=True)
+    attestation.write_bytes(b".")
+
+    findings = run_validators(tmp_path)
+    ls_refusals = [
+        f
+        for f in findings
+        if f.reason == "learning_surface_violation"
+        and f.payload.get("failure_mode") == "data_class_restricted_forbidden"
+    ]
+    assert ls_refusals, (
+        "expected at least one learning_surface_violation/"
+        "data_class_restricted_forbidden finding; "
+        f"got reasons={[f.reason for f in findings]!r}"
     )
