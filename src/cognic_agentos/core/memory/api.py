@@ -50,6 +50,7 @@ whose contents are governed at the later ``read_block``).
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from cognic_agentos.core.decision_history import DecisionHistoryStore, DecisionRecord
@@ -508,4 +509,16 @@ class MemoryAPI:
         )
 
 
-__all__ = ("MemoryAPI",)
+#: Sprint 11.5c T5 — the portal /memory surface builds a per-request MemoryAPI
+#: via this factory (built by create_app from the wired deps); the route passes
+#: a per-request operator MemoryCallerContext. Single source of truth for the
+#: type shared by the portal routes + create_app.
+#:
+#: ``MemoryCallerContext`` is under TYPE_CHECKING in this module, so the factory
+#: signature uses a forward-reference string. At runtime the Callable type is real
+#: (imported from collections.abc above) so isinstance / signature introspection
+#: on MemoryApiFactory itself works; only the argument annotation is a string.
+MemoryApiFactory = Callable[["MemoryCallerContext"], "MemoryAPI"]
+
+
+__all__ = ("MemoryAPI", "MemoryApiFactory")
