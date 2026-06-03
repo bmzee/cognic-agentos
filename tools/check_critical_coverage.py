@@ -2006,9 +2006,10 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     #   * ``core/memory/consent.py`` — restricted-class consent gate.
     #   * ``core/dlp/scanner.py`` — the checksum/regex/gazetteer DLP seed.
     # OFF-gate per Doctrine F: ``core/memory/__init__.py`` (re-export),
-    # ``_context.py`` / ``_seams.py`` (pure DTOs / consumer-owned seam),
-    # ``vector.py`` / ``episodes.py`` (recall-feature modules — enforcement
-    # lives in the on-gate gate/api/storage). ``portal/rbac/scopes.py`` +
+    # ``_context.py`` / ``_seams.py`` (pure DTOs / consumer-owned seam).
+    # ``vector.py`` / ``episodes.py`` were recall-feature modules off-gate at
+    # 11.5a but are PROMOTED at 11.5c Z1c (see the 11.5c block below — T7 wired
+    # substantive recall enforcement into them). ``portal/rbac/scopes.py`` +
     # ``actor.py`` + ``enforcement.py`` are ALREADY on the gate (T12 only
     # widened their scope unions; NOT re-added here).
     ("src/cognic_agentos/core/memory/tiers.py", 0.95, 0.90),
@@ -2037,6 +2038,39 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     ("src/cognic_agentos/core/memory/forget.py", 0.95, 0.90),
     ("src/cognic_agentos/core/memory/redact.py", 0.95, 0.90),
     ("src/cognic_agentos/core/memory/_routing.py", 0.95, 0.90),
+    # ──────────────────────────────────────────────────────────────────
+    # Sprint 11.5c Z1c — agent-memory governance SURFACES (ADR-019). 5
+    # modules promoted at the standard 95/90 floor:
+    #   * ``core/memory/export.py`` — NEW; serialize + fail-closed persist
+    #     (``MemoryExportPersistenceFailed``) + metadata-only ``memory.export``
+    #     emit; value-never-in-chain; durable-tier filter; caller-supplied
+    #     bucket + retention.
+    #   * ``core/memory/episodes.py`` — the threshold>0.0 vector path: refusal
+    #     on missing/blank query, authz-INTERSECTION with the governed long_term
+    #     set (an ungoverned vector hit is dropped), score filter.
+    #   * ``core/memory/vector.py`` — ``ensure_collection`` + the
+    #     ``_is_indexable`` restricted-class exclusion rule (single source).
+    #   * ``cli/validators/learning_surface.py`` — NEW; the
+    #     ``[learning_surface]`` manifest-block validator (non-trivial
+    #     allow/deny logic; on-gate per the Sprint-7A validator precedent).
+    #   * ``portal/api/memory/routes.py`` — NEW; the ``/api/v1/memory`` surface
+    #     — owns the Human-only-decisions boundary (``RequireHumanActor`` on
+    #     regulator_erasure + export) + required-selector validation.
+    # NOTE: ``vector.py`` + ``episodes.py`` were DELIBERATELY off-gate at 11.5a
+    # (recall-feature modules with no enforcement); Sprint 11.5c T7 wired
+    # substantive governance into them (the vector-path authz-intersection, the
+    # ``memory_vector_recall_unavailable`` refusal, the index-on-write
+    # restricted-class policy), so they are PROMOTED here.
+    # OFF-gate per Doctrine F: ``portal/api/memory/__init__.py`` (re-export) +
+    # ``portal/api/memory/dto.py`` (pure Pydantic DTOs — parse + static types
+    # catch drift; same precedent as ``portal/api/packs/dto.py`` +
+    # ``portal/api/ui/dto.py``). ``core/memory/_context.py`` (DTOs) +
+    # ``core/config.py`` (settings) remain off-gate, unchanged.
+    ("src/cognic_agentos/core/memory/export.py", 0.95, 0.90),
+    ("src/cognic_agentos/core/memory/episodes.py", 0.95, 0.90),
+    ("src/cognic_agentos/core/memory/vector.py", 0.95, 0.90),
+    ("src/cognic_agentos/cli/validators/learning_surface.py", 0.95, 0.90),
+    ("src/cognic_agentos/portal/api/memory/routes.py", 0.95, 0.90),
 )
 
 

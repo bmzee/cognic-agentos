@@ -57,6 +57,9 @@ MemoryRefusalReason = Literal[
     "memory_record_already_tombstoned",
     "memory_redaction_path_invalid",
     "memory_regulator_erasure_metadata_required",
+    # Sprint 11.5c T1 — vector-ranked recall requested but unavailable
+    # (no query supplied OR no MemoryVectorIndex wired). Wire-public.
+    "memory_vector_recall_unavailable",
 ]
 
 #: Reasons a forget() call may be initiated — carried on the memory.forget chain event.

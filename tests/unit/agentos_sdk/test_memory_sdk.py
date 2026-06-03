@@ -78,6 +78,33 @@ class _RecordingUpsertBlockAPI:
         return "record-id-upsert"
 
 
+class _RecordingRecallEpisodesAPI:
+    """A double whose ``recall_episodes`` mirrors the REAL MemoryAPI signature
+    INCLUDING the 11.5c ``query`` kwarg — NO ``**kwargs``. A forwarder that drops
+    ``query`` loses the value (None recorded); one that misnames it TypeErrors."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def recall_episodes(
+        self,
+        subject: SubjectRef,
+        *,
+        similarity_threshold: float,
+        purpose: str,
+        query: str | None = None,
+    ) -> list[Any]:
+        self.calls.append(
+            {
+                "subject": subject,
+                "similarity_threshold": similarity_threshold,
+                "purpose": purpose,
+                "query": query,
+            }
+        )
+        return []
+
+
 class _SequenceRecordingAPI:
     """Records the method NAME for each of the 7 ops via ``__getattr__`` — only
     the call SEQUENCE matters here, so an attribute-synthesising recorder is
@@ -135,6 +162,24 @@ async def test_sdk_upsert_block_forwards_without_retention() -> None:
     assert call["subject"] is _SUBJ
     assert call["consent_token"] is None
     assert "retention_window_s" not in call
+
+
+async def test_sdk_recall_episodes_forwards_query() -> None:
+    """``recall_episodes`` forwards the 11.5c ``query`` kwarg by name, so a typed
+    ``MemorySDK`` pack author CAN reach the vector path (P2, T7 review). The
+    real-signature double has no ``**kwargs``: a forwarder that omits ``query``
+    from its signature TypeErrors here, and one that accepts but does not forward
+    it records ``None`` instead of the passed value."""
+    api = _RecordingRecallEpisodesAPI()
+    result = await MemorySDK(api).recall_episodes(  # type: ignore[arg-type]
+        _SUBJ, similarity_threshold=0.5, purpose="fraud_detection", query="fraud case"
+    )
+    assert result == []
+    assert len(api.calls) == 1
+    call = api.calls[0]
+    assert call["query"] == "fraud case"
+    assert call["similarity_threshold"] == 0.5
+    assert call["purpose"] == "fraud_detection"
 
 
 async def test_sdk_forwards_all_seven_ops() -> None:

@@ -196,6 +196,13 @@ ValidatorReason = Literal[
     "runtime_expected_workload_gid_required_for_credential_pack",
     "runtime_expected_workload_gid_invalid_range",
     "runtime_expected_workload_gid_without_credentials",
+    # Learning surface manifest validation (Sprint 11.5c T1 —
+    # cli/validators/learning_surface.py per ADR-019 §52). A SINGLE
+    # closed-enum reason for the [learning_surface] block; sub-cases
+    # (mode_unknown / mode_mismatch_with_data_class / etc.) ride
+    # payload.failure_mode at runtime. T1 seeds vocab only; the real
+    # validator body lands at T2.
+    "learning_surface_violation",
 ]
 
 
@@ -320,6 +327,8 @@ _VALIDATOR_REASON_OWNERSHIP: Final[dict[ValidatorReason, str]] = {
     "runtime_expected_workload_gid_required_for_credential_pack": "validators/credentials.py",
     "runtime_expected_workload_gid_invalid_range": "validators/credentials.py",
     "runtime_expected_workload_gid_without_credentials": "validators/credentials.py",
+    # Learning surface (Sprint 11.5c T1 — T2 lands the real validator body).
+    "learning_surface_violation": "validators/learning_surface.py",
 }
 
 

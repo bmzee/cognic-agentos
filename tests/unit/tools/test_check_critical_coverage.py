@@ -57,9 +57,15 @@ _GATE_TOOL_PATH = _REPO_ROOT / "tools" / "check_critical_coverage.py"
 #: (subagent/spawn + subagent/conformers + subagent/_facade per ADR-005) = 97;
 #: + 6 Sprint-11.5a Z1a governed-memory modules
 #: (core/memory/{tiers,gate,api,storage,consent} + core/dlp/scanner per
-#: ADR-019) = 103).
+#: ADR-019) = 103;
+#: + 4 Sprint-11.5b Z1b memory-regulator-core modules
+#: (core/emergency/kill_switches + core/memory/{forget,redact,_routing}
+#: per ADR-019) = 107;
+#: + 5 Sprint-11.5c Z1c memory-surface modules
+#: (core/memory/{export,episodes,vector} + cli/validators/learning_surface
+#: + portal/api/memory/routes per ADR-019) = 112).
 #: Bump this in lockstep with any deliberate ``_CRITICAL_FILES`` change.
-_EXPECTED_ENTRY_COUNT = 107
+_EXPECTED_ENTRY_COUNT = 112
 
 #: The 5 modules Sprint 7B.3 promoted to the durable gate, each by its
 #: own landing commit (T3-T6 panels + T7 composer). All ride the
@@ -554,11 +560,13 @@ def test_sprint_11_5a_modules_present_with_standard_floors(
     gate_tool: ModuleType,
 ) -> None:
     """The 6 Sprint 11.5a Z1a governed-memory-substrate promotions are on the
-    gate at the 95/90 floor (ADR-019). The recall-feature / DTO / seam modules
-    (``vector.py`` / ``episodes.py`` / ``_context.py`` / ``_seams.py`` /
-    ``__init__.py``) stay off-gate per Doctrine F; ``portal/rbac/scopes.py`` +
-    ``actor.py`` + ``enforcement.py`` are already on the gate (T12 widened
-    their scope unions, NOT re-added)."""
+    gate at the 95/90 floor (ADR-019). The DTO / seam modules (``_context.py`` /
+    ``_seams.py`` / ``__init__.py``) stay off-gate per Doctrine F; ``vector.py`` /
+    ``episodes.py`` were recall-feature modules off-gate at 11.5a but are PROMOTED
+    at 11.5c (T7 wired recall enforcement — see
+    ``test_sprint_11_5c_modules_present_with_standard_floors``);
+    ``portal/rbac/scopes.py`` + ``actor.py`` + ``enforcement.py`` are already on
+    the gate (T12 widened their scope unions, NOT re-added)."""
     by_path = {path: (line, branch) for path, line, branch in gate_tool._CRITICAL_FILES}
     for module in _SPRINT_11_5A_GATE_MODULES:
         assert module in by_path, f"Sprint 11.5a module missing from gate: {module}"
@@ -595,3 +603,52 @@ def test_sprint_11_5b_modules_present_with_standard_floors(
         "reaper.py must stay off-gate per Doctrine F (thin loop; enforcement is "
         "the on-gate adapter.purge_expired)"
     )
+
+
+_SPRINT_11_5C_GATE_MODULES = (
+    "src/cognic_agentos/core/memory/export.py",
+    "src/cognic_agentos/core/memory/episodes.py",
+    "src/cognic_agentos/core/memory/vector.py",
+    "src/cognic_agentos/cli/validators/learning_surface.py",
+    "src/cognic_agentos/portal/api/memory/routes.py",
+)
+
+#: The NEW portal-memory files Sprint 11.5c deliberately keeps OFF the durable
+#: gate per Doctrine F: ``__init__.py`` (re-export) + ``dto.py`` (pure Pydantic
+#: DTOs — parse + static types catch drift; same precedent as
+#: ``portal/api/packs/dto.py`` + ``portal/api/ui/dto.py``). Only ``routes.py``
+#: (the Human-only-decisions enforcement boundary) is promoted.
+_SPRINT_11_5C_OFF_GATE_MODULES = (
+    "src/cognic_agentos/portal/api/memory/__init__.py",
+    "src/cognic_agentos/portal/api/memory/dto.py",
+)
+
+
+def test_sprint_11_5c_modules_present_with_standard_floors(
+    gate_tool: ModuleType,
+) -> None:
+    """The 5 Sprint 11.5c Z1c memory-SURFACE promotions are on the gate at the
+    95/90 floor (ADR-019): the ``export`` op + the threshold>0.0 vector recall
+    path (``episodes.py``) + the vector index (``vector.py``) + the
+    ``[learning_surface]`` manifest validator + the ``/api/v1/memory`` portal
+    surface (which owns the Human-only-decisions boundary). ``vector.py`` +
+    ``episodes.py`` were off-gate at 11.5a (recall-feature, no enforcement) and
+    are promoted here because T7 wired the authz-intersection + the
+    ``memory_vector_recall_unavailable`` refusal + the index-on-write
+    restricted-class policy into them."""
+    by_path = {path: (line, branch) for path, line, branch in gate_tool._CRITICAL_FILES}
+    for module in _SPRINT_11_5C_GATE_MODULES:
+        assert module in by_path, f"Sprint 11.5c module missing from gate: {module}"
+        assert by_path[module] == (0.95, 0.90), (
+            f"{module} must ride the standard 95%-line / 90%-branch floor"
+        )
+
+
+@pytest.mark.parametrize("off_gate_module", _SPRINT_11_5C_OFF_GATE_MODULES)
+def test_sprint_11_5c_off_gate_modules_absent(gate_tool: ModuleType, off_gate_module: str) -> None:
+    """The NEW portal-memory ``__init__.py`` (re-export) + ``dto.py`` (pure
+    DTOs) stay OFF the durable gate per Doctrine F — only ``routes.py`` (the
+    Human-only-decisions enforcement boundary) is promoted. A future edit that
+    promotes either without revisiting the doctrine fails here."""
+    paths = {path for path, _line, _branch in gate_tool._CRITICAL_FILES}
+    assert off_gate_module not in paths

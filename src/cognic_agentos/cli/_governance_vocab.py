@@ -305,6 +305,12 @@ HOOK_ORDERING_CLASS_PHASE: Final[dict[HookOrderingClass, HookPhase]] = {
 }
 
 
+#: Sprint 11.5c T1 — the learning-surface declaration mode (what a pack may persist
+#: into long_term memory as a learning surface). Closed-enum, wire-public for pack
+#: authors. ``disabled`` is the bank-safe default.
+LearningSurfaceMode = Literal["disabled", "profile_only", "notes_and_profile"]
+
+
 __all__ = [
     "DATA_CLASS_TO_MIN_RISK_TIER",
     "HOOK_ORDERING_CLASS_PHASE",
@@ -316,6 +322,7 @@ __all__ = [
     "HookFailPolicy",
     "HookOrderingClass",
     "HookPhase",
+    "LearningSurfaceMode",
     "Purpose",
     "PurposeCategory",
     "RetentionPolicy",

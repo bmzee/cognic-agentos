@@ -1,4 +1,4 @@
-"""Sprint 7B.2 T2 — RBAC scope literal stability + ADR-012 transition-table cross-check.
+"""Sprint 7B.2 T2 + Sprint 11.5c T1 — RBAC scope stability + ADR-012 transition cross-check.
 
 Pins:
 
@@ -15,6 +15,7 @@ Pins:
   specific assertions live in ``test_scopes_override_extension.py``.
 """
 
+import typing
 from typing import get_args
 
 import pytest
@@ -22,10 +23,12 @@ import pytest
 from cognic_agentos.portal.rbac.scopes import (
     AUTHOR_SCOPES,
     EXAMINER_SCOPES,
+    MEMORY_SCOPES,
     OPERATOR_SCOPES,
     OVERRIDE_SCOPES,
     PACK_LIFECYCLE_SCOPES,
     REVIEWER_SCOPES,
+    MemoryRBACScope,
     PackRBACScope,
 )
 
@@ -168,3 +171,17 @@ def test_role_groups_partition_pack_lifecycle_scopes_exactly() -> None:
     for i, g1 in enumerate(groups):
         for g2 in groups[i + 1 :]:
             assert g1.isdisjoint(g2), f"Group overlap detected: {g1 & g2}"
+
+
+# ---------------------------------------------------------------------------
+# Sprint 11.5c T1 — memory.export.read scope addition
+# ---------------------------------------------------------------------------
+
+
+def test_memory_scope_has_eight_values_after_11_5c() -> None:
+    assert len(typing.get_args(MemoryRBACScope)) == 8
+    assert "memory.export.read" in typing.get_args(MemoryRBACScope)
+
+
+def test_memory_scopes_frozenset_is_1to1_with_literal() -> None:
+    assert frozenset(typing.get_args(MemoryRBACScope)) == MEMORY_SCOPES

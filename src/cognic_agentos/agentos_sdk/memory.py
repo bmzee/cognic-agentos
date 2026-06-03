@@ -110,11 +110,23 @@ class MemorySDK:
     # -- Episodic recall ---------------------------------------------------
 
     async def recall_episodes(
-        self, subject: SubjectRef, *, similarity_threshold: float, purpose: str
+        self,
+        subject: SubjectRef,
+        *,
+        similarity_threshold: float,
+        purpose: str,
+        query: str | None = None,
     ) -> list[Episode]:
-        """Episodic recall (forwards to :meth:`MemoryAPI.recall_episodes`)."""
+        """Episodic recall (forwards to :meth:`MemoryAPI.recall_episodes`).
+
+        ``query`` reaches the 11.5c vector-ranked path when
+        ``similarity_threshold > 0.0`` (requires a non-blank ``query`` AND a
+        wired vector index on the underlying ``MemoryAPI``)."""
         return await self._api.recall_episodes(
-            subject, similarity_threshold=similarity_threshold, purpose=purpose
+            subject,
+            similarity_threshold=similarity_threshold,
+            purpose=purpose,
+            query=query,
         )
 
 

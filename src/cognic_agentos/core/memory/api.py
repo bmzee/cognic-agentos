@@ -7,7 +7,7 @@ backend into the public memory operations. It is THE seam a Layer C agent uses;
 direct adapter access from anywhere but here is forbidden (pinned by
 ``tests/unit/architecture/test_memory_layer_c_no_direct_storage.py``).
 
-**11.5b op surface — 9 ops.** The 7 read/write ops from 11.5a — ``remember`` /
+**11.5c op surface — 11 ops.** The 7 read/write ops from 11.5a — ``remember`` /
 ``recall`` / ``upsert_block`` / ``read_block`` / ``list_for_subject`` /
 ``list_blocks`` / ``recall_episodes`` (the 7th landed in 11.5a T11 — the
 ``long_term`` + purpose episodic view joined to ``decision_history``;
@@ -16,9 +16,16 @@ vector-ranked recall is deferred to 11.5c) — PLUS the two lifecycle ops
 delegators to the :func:`forget.forget` / :func:`redact.redact` storage
 primitives (those primitives own the ``memory.forget`` /
 ``memory.regulator_erasure`` / ``memory.redact`` chain events, so the lifecycle
-ops add NO extra audit emission — unlike ``recall``'s ``memory.read``). The
-10th op (``export``) remains ABSENT, deferred to 11.5c. MemoryAPI is DI-tested,
-not harness-injected, in 11.5b.
+ops add NO extra audit emission — unlike ``recall``'s ``memory.read``). The 10th
+op (``export``) lands in 11.5c T3: gate (sub-agent + enumerate authz) → read via
+adapter → delegate to :func:`export.export_memory` (serialize + fail-closed
+persist via :class:`ObjectStoreAdapter` + ``memory.export`` chain emit). Requires
+``object_store`` wired at construction; deployment without it fails loud. The 11th
+op (``list_records``) lands in 11.5c T4: value-free governed enumerate for the
+portal records surface — gate (enumerate authz) → read via adapter → filter to
+durable tiers (authz consistency) → map to :class:`MemoryRecordMetadata` (NO
+values) → emit one ``memory.read`` with ``op=list_records``. MemoryAPI is
+DI-tested, not harness-injected, in 11.5b/11.5c.
 
 **Identity is read from the bound** :class:`MemoryCallerContext` **only.** Every
 op runs through the gate, which reads ``tenant_id`` / ``agent_id`` / ``actor_id``
@@ -28,11 +35,12 @@ identity through the op arguments. Refusals surface as the typed
 gate; MemoryAPI does not catch or translate them.
 
 **``memory.read`` audit (ADR-019 §recall + ADR-006).** The keyed reads
-(``recall`` / ``read_block``), ``list_for_subject``, and ``recall_episodes``
-each emit exactly one ``memory.read`` :class:`DecisionRecord` (plain append; no
-precondition) stamped with ISO controls ``("A.7.4", "A.8.2")``. The keyed-read
-payload carries ``{tier, purpose, subject_ref, hit, record_id}``;
-``list_for_subject`` carries ``{op, tiers, subject_ref, hit, count}``;
+(``recall`` / ``read_block``), the enumerates ``list_for_subject`` and
+``list_records``, and ``recall_episodes`` each emit exactly one ``memory.read``
+:class:`DecisionRecord` (plain append; no precondition) stamped with ISO controls
+``("A.7.4", "A.8.2")``. The keyed-read payload carries
+``{tier, purpose, subject_ref, hit, record_id}``; ``list_for_subject`` and
+``list_records`` each carry ``{op, tiers, subject_ref, hit, count}``;
 ``recall_episodes`` carries ``{op, subject_ref, purpose, hit, count}``. None
 carry a value or value-digest. ``list_blocks`` deliberately emits NO
 ``memory.read`` (block refs are not a value read — they are a structural listing
@@ -41,15 +49,20 @@ whose contents are governed at the later ``read_block``).
 
 from __future__ import annotations
 
+import logging
 import uuid
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from cognic_agentos.core.decision_history import DecisionHistoryStore, DecisionRecord
 from cognic_agentos.core.memory import episodes as _episodes
+from cognic_agentos.core.memory import export as _export
 from cognic_agentos.core.memory._context import (
     BlockRef,
+    ExportReceipt,
     MemoryHit,
     MemoryRecordId,
+    MemoryRecordMetadata,
 )
 from cognic_agentos.core.memory._seams import (
     MemoryKillSwitchInterrogator,
@@ -59,6 +72,7 @@ from cognic_agentos.core.memory.forget import forget as forget_op
 from cognic_agentos.core.memory.gate import MemoryGate
 from cognic_agentos.core.memory.redact import redact as redact_op
 from cognic_agentos.core.memory.tiers import BlockKind, MemoryTier, SubjectRef
+from cognic_agentos.core.memory.vector import _is_indexable
 
 if TYPE_CHECKING:
     from cognic_agentos.core.config import Settings
@@ -78,7 +92,11 @@ if TYPE_CHECKING:
     # path is MemoryAPI; storage stays behind the gate). TYPE_CHECKING-only.
     from cognic_agentos.core.memory.storage import MemoryAdapter
     from cognic_agentos.core.memory.tiers import ForgetReason, RedactionReason
+    from cognic_agentos.core.memory.vector import MemoryVectorIndex
     from cognic_agentos.core.policy.engine import OPAEngine
+    from cognic_agentos.db.adapters.protocols import ObjectStoreAdapter
+
+_LOG = logging.getLogger("cognic_agentos.core.memory.api")
 
 #: ISO 42001 control tuple stamped on every ``memory.read`` chain row.
 #: A.7.4 (impact assessment) / A.8.2 (data quality) per ADR-019 + ADR-006.
@@ -111,6 +129,8 @@ class MemoryAPI:
         kill_switch: MemoryKillSwitchInterrogator | None = None,
         audit: DecisionHistoryStore,
         settings: Settings,
+        object_store: ObjectStoreAdapter | None = None,
+        vector_index: MemoryVectorIndex | None = None,
     ) -> None:
         # Fail-loud default: bind the _NullMemoryKillSwitchInterrogator sentinel
         # when no kill-switch is wired (raises NotImplementedError on the first
@@ -131,6 +151,14 @@ class MemoryAPI:
         self._audit = audit
         self._context = context
         self._settings = settings
+        # Sprint 11.5c T3 — export op. None = export() raises NotImplementedError
+        # (fail-loud sentinel; NOT a governance refusal — a misconfigured
+        # deployment fails at construction/first-call, never silently).
+        self._object_store: ObjectStoreAdapter | None = object_store
+        # Sprint 11.5c T7 — vector index for episodic recall + index-on-write.
+        # None = vector path unavailable (recall refuses with
+        # memory_vector_recall_unavailable; index-on-write is skipped silently).
+        self._vector_index: MemoryVectorIndex | None = vector_index
 
     # -- Write ops ---------------------------------------------------------
 
@@ -158,7 +186,32 @@ class MemoryAPI:
             consent_token=consent_token,
             retention_window_s=retention_window_s,
         )
-        return await self._adapter.put(record)
+        rid = await self._adapter.put(record)
+        if (
+            self._vector_index is not None
+            and tier == "long_term"
+            and key is not None
+            and _is_indexable(data_classes)
+        ):
+            # Best-effort derived index: the record is already durably written +
+            # chain-linked above; a failed embed must NOT fail remember (the vector
+            # index is a recall accelerator, NOT the system of record). Log
+            # record_id + purpose + exc class ONLY — never the value/text.
+            try:
+                await self._vector_index.index(
+                    record_id=str(rid),
+                    text=str(value),
+                    purpose=purpose,
+                    data_classes=list(data_classes),
+                )
+            except Exception as exc:
+                _LOG.warning(
+                    "memory.vector_index_failed record_id=%s purpose=%s class=%s",
+                    rid,
+                    purpose,
+                    type(exc).__name__,
+                )
+        return rid
 
     async def upsert_block(
         self,
@@ -185,7 +238,7 @@ class MemoryAPI:
         )
         return await self._adapter.upsert_block(record)
 
-    # -- Lifecycle ops (8th + 9th ops; export is 10th, 11.5c) --------------
+    # -- Lifecycle ops (8th + 9th ops) + export op (10th, 11.5c) ----------
 
     async def forget(
         self,
@@ -229,6 +282,45 @@ class MemoryAPI:
             reason=reason,
             gate=self._gate,
             adapter=self._adapter,
+        )
+
+    async def export(self, subject: SubjectRef) -> ExportReceipt:
+        """Export the (agent, subject) records to a retention-disciplined archive
+        (10th op). Gate (sub-agent + enumerate authz) -> fail-loud wiring check ->
+        read via adapter -> delegate to export.export_memory (serialize +
+        fail-closed persist + memory.export emit). Governance precedence: the gate
+        runs FIRST, so a sub-agent (or enumerate-denied caller) is refused even on
+        a deployment without an object_store -- a missing object_store fails loud
+        (NotImplementedError, a config error -- NOT a governance refusal) only
+        AFTER the gate has passed, so a wiring gap can never mask a governance
+        refusal."""
+        ctx = self._context
+        await self._gate.check_lifecycle()
+        await self._gate.check_enumerate(subject, tiers=_ENUMERATE_TIERS)
+        if self._object_store is None:
+            raise NotImplementedError(
+                "MemoryAPI.export requires an object_store wired at construction "
+                "(ADR-019 export / Sprint 11.5c) -- none was provided"
+            )
+        hits = await self._adapter.list_for_subject(
+            tenant_id=ctx.tenant_id, agent_id=ctx.agent_id, subject=subject
+        )
+        # Export EXACTLY the durable tier set the enumerate gate authorized.
+        # list_for_subject is general-purpose and (post-11.5b T8) can return a
+        # scratch fallback row (put_scratch_fallback during a Redis outage) while
+        # it is still within its TTL window. Scratch is ephemeral and MUST NOT
+        # enter a 7-year retention archive — filter to _ENUMERATE_TIERS so the
+        # archive contents (and the memory.export audit record_count) match the
+        # enumerate authz surface exactly.
+        durable_hits = [h for h in hits if h.tier in _ENUMERATE_TIERS]
+        return await _export.export_memory(
+            hits=durable_hits,
+            subject=subject,
+            context=ctx,
+            object_store=self._object_store,
+            audit=self._audit,
+            bucket=self._settings.memory_export_bucket,
+            retention_seconds=self._settings.memory_export_retention_seconds,
         )
 
     # -- Keyed reads -------------------------------------------------------
@@ -292,7 +384,14 @@ class MemoryAPI:
         hits = await self._adapter.list_for_subject(
             tenant_id=ctx.tenant_id, agent_id=ctx.agent_id, subject=subject
         )
-        results = [h.record_id for h in hits]
+        # Return EXACTLY the durable tier set the enumerate gate authorized +
+        # capability-checked. The adapter can return a scratch fallback row
+        # (put_scratch_fallback, post-11.5b T8) that check_enumerate never
+        # capability-checked here; including its id would exceed the authorized
+        # scope and make the memory.read count dishonest. (Authz consistency —
+        # NOT a retention concern. Mirrors list_records; T4.1 repair.)
+        durable_hits = [h for h in hits if h.tier in _ENUMERATE_TIERS]
+        results = [h.record_id for h in durable_hits]
         await self._audit.append(
             DecisionRecord(
                 decision_type="memory.read",
@@ -311,6 +410,55 @@ class MemoryAPI:
         )
         return results
 
+    async def list_records(self, subject: SubjectRef) -> list[MemoryRecordMetadata]:
+        """Value-free governed enumerate for the portal records surface (11th op,
+        11.5c T4). Runs the enumerate gate (which refuses a sub-agent BEFORE any
+        read), reads via the adapter, filters to the gate-authorized durable tiers
+        (authz consistency — scratch fallback rows were never capability-checked
+        here), maps to MemoryRecordMetadata (NO values), and emits one
+        enumerate-shape memory.read (op=list_records)."""
+        ctx = self._context
+        await self._gate.check_enumerate(subject, tiers=_ENUMERATE_TIERS)
+        hits = await self._adapter.list_for_subject(
+            tenant_id=ctx.tenant_id, agent_id=ctx.agent_id, subject=subject
+        )
+        # Return EXACTLY the tier set the enumerate gate authorized + capability-
+        # checked. list_for_subject is general-purpose and (post-11.5b T8) can
+        # return a scratch fallback row (put_scratch_fallback during a Redis
+        # outage); scratch was NOT authorized/capability-checked by check_enumerate,
+        # so including it would exceed the authorized scope and make the count
+        # dishonest. (Authz consistency — NOT a retention concern.)
+        durable_hits = [h for h in hits if h.tier in _ENUMERATE_TIERS]
+        meta = [
+            MemoryRecordMetadata(
+                record_id=h.record_id,
+                agent_id=ctx.agent_id,
+                tier=h.tier,
+                data_classes=h.data_classes,
+                purpose=h.purpose,
+                created_at=h.created_at,
+                block_kind=h.block_kind,
+            )
+            for h in durable_hits
+        ]
+        await self._audit.append(
+            DecisionRecord(
+                decision_type="memory.read",
+                request_id=f"memory-read-{uuid.uuid4().hex}",
+                payload={
+                    "op": "list_records",
+                    "tiers": list(_ENUMERATE_TIERS),
+                    "subject_ref": subject.canonical,
+                    "hit": bool(meta),
+                    "count": len(meta),
+                },
+                actor_id=ctx.actor_id,
+                tenant_id=ctx.tenant_id,
+                iso_controls=_MEMORY_READ_ISO_CONTROLS,
+            )
+        )
+        return meta
+
     async def list_blocks(self, subject: SubjectRef) -> list[BlockRef]:
         """Enumerate the active block refs for ``subject`` (``long_term`` only).
         Runs the enumerate gate scoped to the ``long_term`` tier and returns the
@@ -326,18 +474,25 @@ class MemoryAPI:
     # -- Episodic recall (7th op) ------------------------------------------
 
     async def recall_episodes(
-        self, subject: SubjectRef, *, similarity_threshold: float, purpose: str
+        self,
+        subject: SubjectRef,
+        *,
+        similarity_threshold: float,
+        purpose: str,
+        query: str | None = None,
     ) -> list[Episode]:
-        """Episodic recall (7th 11.5a op) — a view over the served-context agent's
-        long_term records for ``subject``, purpose-filtered, joined to
-        decision_history. Runs the enumerate gate (long_term tier), delegates to
-        :func:`episodes.recall_episodes`, emits one enumerate-shape
-        ``memory.read``.
+        """Episodic recall (7th op, vector path wired in 11.5c) — a view over
+        the served-context agent's long_term records for ``subject``,
+        purpose-filtered, joined to decision_history. Runs the enumerate gate
+        (long_term tier), delegates to :func:`episodes.recall_episodes`, emits
+        one enumerate-shape ``memory.read``.
 
-        Pin-2: a ``similarity_threshold > 0.0`` call passes the gate then
-        propagates :func:`episodes.recall_episodes`'s ``NotImplementedError``
-        (vector-ranked recall is 11.5c) — no ``memory.read`` is emitted on that
-        path."""
+        When ``similarity_threshold > 0.0``: threads ``query`` + the wired
+        ``self._vector_index`` to the vector path. A missing ``query`` OR an
+        unwired ``vector_index`` raises
+        ``MemoryOperationRefused("memory_vector_recall_unavailable")`` — no
+        ``memory.read`` is emitted on the refusal path (the refusal propagates
+        before the emit)."""
 
         ctx = self._context
         await self._gate.check_enumerate(subject, tiers=("long_term",))
@@ -349,6 +504,8 @@ class MemoryAPI:
             dh_store=self._audit,
             tenant_id=ctx.tenant_id,
             agent_id=ctx.agent_id,
+            query=query,
+            vector_index=self._vector_index,
         )
         await self._audit.append(
             DecisionRecord(
@@ -396,4 +553,16 @@ class MemoryAPI:
         )
 
 
-__all__ = ("MemoryAPI",)
+#: Sprint 11.5c T5 — the portal /memory surface builds a per-request MemoryAPI
+#: via this factory (built by create_app from the wired deps); the route passes
+#: a per-request operator MemoryCallerContext. Single source of truth for the
+#: type shared by the portal routes + create_app.
+#:
+#: ``MemoryCallerContext`` is under TYPE_CHECKING in this module, so the factory
+#: signature uses a forward-reference string. At runtime the Callable type is real
+#: (imported from collections.abc above) so isinstance / signature introspection
+#: on MemoryApiFactory itself works; only the argument annotation is a string.
+MemoryApiFactory = Callable[["MemoryCallerContext"], "MemoryAPI"]
+
+
+__all__ = ("MemoryAPI", "MemoryApiFactory")

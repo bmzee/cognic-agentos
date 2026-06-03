@@ -1,7 +1,8 @@
-"""Sprint 11.5a + 11.5b T1 — MemoryRefusalReason count-pin.
+"""Sprint 11.5a + 11.5b T1 + 11.5c T1 — MemoryRefusalReason count-pin.
 
 11.5a shipped 12 values. Sprint 11.5b T1 extended to 16 (+4 lifecycle
-erasure/forget/redact reasons). ANY addition, rename, or removal is a
+erasure/forget/redact reasons). Sprint 11.5c T1 extends to 17 (+1
+vector-recall reason). ANY addition, rename, or removal is a
 wire-protocol break visible in this test's diff.
 """
 
@@ -28,12 +29,22 @@ _EXPECTED = {
     "memory_record_already_tombstoned",
     "memory_redaction_path_invalid",
     "memory_regulator_erasure_metadata_required",
+    # 11.5c T1 additions (+1 vector-recall reason)
+    "memory_vector_recall_unavailable",
 }
 
 
-def test_refusal_vocab_is_exactly_the_16_wire_public_reasons():
+def test_refusal_vocab_is_exactly_the_17_wire_public_reasons():
     assert set(typing.get_args(MemoryRefusalReason)) == _EXPECTED
 
 
 def test_refusal_vocab_count_pinned():
-    assert len(typing.get_args(MemoryRefusalReason)) == 16
+    assert len(typing.get_args(MemoryRefusalReason)) == 17
+
+
+def test_refusal_taxonomy_has_seventeen_values_after_11_5c() -> None:
+    assert len(typing.get_args(MemoryRefusalReason)) == 17
+
+
+def test_vector_recall_unavailable_is_a_memory_refusal_reason() -> None:
+    assert "memory_vector_recall_unavailable" in typing.get_args(MemoryRefusalReason)

@@ -87,6 +87,13 @@ if TYPE_CHECKING:
     # the reaper is supplied PRE-CONSTRUCTED by the caller. The portal import
     # graph stays free of the memory package by default; this TYPE_CHECKING-only
     # ref types the kwarg without pulling the module into the import graph.
+    # Sprint 11.5c T5: type-only ref for the ``memory_api_factory`` kwarg.
+    # There is NO runtime import of the memory package in app.py — the factory
+    # is supplied PRE-CONSTRUCTED by the caller (or None for pack-only
+    # deployments). The lazy import of ``build_memory_routes`` inside the
+    # conditional mount block keeps the portal import graph free of the memory
+    # routes package when no factory is wired.
+    from cognic_agentos.core.memory.api import MemoryApiFactory
     from cognic_agentos.core.memory.reaper import MemoryTombstoneReaper
     from cognic_agentos.core.policy.engine import OPAEngine
 
@@ -297,6 +304,16 @@ def create_app(
     # is SILENT (pack-only deployments without long-term memory are legit).
     # Mirrors the checkpoint_store opt-in pattern exactly.
     memory_reaper: MemoryTombstoneReaper | None = None,
+    # Sprint 11.5c T5: optional /memory router wiring seam. When a
+    # MemoryApiFactory is provided, the portal mounts the 4-endpoint
+    # /api/v1/memory router (list_records / forget / redact / export).
+    # When None — the dev / test / pack-only default — NO memory routes
+    # are mounted and startup is SILENT (pack-only deployments without a
+    # memory backend are legit). Same opt-in None-default pattern as
+    # every other optional dependency on this factory. The lazy import of
+    # build_memory_routes inside the conditional block keeps the portal
+    # import graph free of the memory package when no factory is wired.
+    memory_api_factory: MemoryApiFactory | None = None,
 ) -> FastAPI:
     """Build and return the FastAPI application.
 
@@ -653,6 +670,10 @@ def create_app(
     app.state.memory_reaper = memory_reaper
     app.state.memory_reaper_task = None
 
+    # Sprint 11.5c T5: memory API factory wiring seam. Cache on app.state
+    # for introspection; the factory itself is captured by the route closures.
+    app.state.memory_api_factory = memory_api_factory
+
     # Middleware add order is OUTER-LAST in Starlette: the call chain
     # walks the most-recently-added middleware first. We want the
     # access-log middleware to run INSIDE the OTel span (so trace_id is
@@ -883,6 +904,24 @@ def create_app(
         from cognic_agentos.portal.api.compliance.router import build_compliance_routes
 
         app.include_router(build_compliance_routes(settings=settings))
+
+    # Sprint 11.5c T5: memory router mount (ADR-019).
+    #
+    # Gated on ``memory_api_factory is not None`` — pack-only deployments
+    # that don't wire a memory backend get NO /api/v1/memory routes and
+    # startup is SILENT (pack-only is a legitimate configuration). The lazy
+    # import of ``build_memory_routes`` inside this block keeps the portal
+    # import graph free of the memory package when no factory is wired.
+    app.state.memory_router_mounted = False
+    if memory_api_factory is not None:
+        from cognic_agentos.portal.api.memory import build_memory_routes
+
+        app.include_router(
+            build_memory_routes(memory_api_factory=memory_api_factory),
+            prefix="/api/v1/memory",
+            tags=["memory"],
+        )
+        app.state.memory_router_mounted = True
 
     # Sprint-7B.4 T12: UI router mount + .well-known registration.
     # Gated on ``portal_broker is not None`` — pack-only deployments

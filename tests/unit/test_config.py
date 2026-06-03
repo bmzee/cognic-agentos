@@ -1605,6 +1605,9 @@ class TestSprint7AClosedEnumVocabulary:
                 "runtime_expected_workload_gid_required_for_credential_pack",
                 "runtime_expected_workload_gid_invalid_range",
                 "runtime_expected_workload_gid_without_credentials",
+                # Learning surface (Sprint 11.5c T1 — vocab seed;
+                # validator body lands at T2 per ADR-019 §52).
+                "learning_surface_violation",
             }
         )
 
