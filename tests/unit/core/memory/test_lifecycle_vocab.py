@@ -16,9 +16,9 @@ _NEW_LIFECYCLE_REASONS = {
 }
 
 
-def test_memory_refusal_reason_is_16_values_closed_enum():
+def test_memory_refusal_reason_is_17_values_closed_enum():
     vals = set(typing.get_args(MemoryRefusalReason))
-    assert len(vals) == 16
+    assert len(vals) == 17
     assert vals >= _NEW_LIFECYCLE_REASONS
     assert "memory_write_frozen" in vals and "memory_purpose_mismatch" in vals
 

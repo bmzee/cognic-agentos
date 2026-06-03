@@ -31,8 +31,8 @@ def test_emergency_scope_disjoint_from_every_other_family():
     assert set(typing.get_args(EmergencyRBACScope)).isdisjoint(others)
 
 
-def test_memory_scope_now_has_the_3_lifecycle_values():
+def test_memory_scope_now_has_the_4_lifecycle_and_export_values():
     vals = set(typing.get_args(MemoryRBACScope))
     assert {"memory.forget", "memory.redact", "memory.regulator_erasure"} <= vals
-    assert "memory.export.read" not in vals  # export RBAC is 11.5c, NOT here
-    assert len(vals) == 7
+    assert "memory.export.read" in vals  # export RBAC landed in 11.5c T1
+    assert len(vals) == 8

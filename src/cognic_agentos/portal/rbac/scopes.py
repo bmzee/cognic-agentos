@@ -175,9 +175,9 @@ MODEL_LIFECYCLE_SCOPES: frozenset[ModelRBACScope] = frozenset(
 
 
 #: Sprint 11.5a — memory RBAC scopes per ADR-019. Grew from 4 (11.5a) to 7
-#: (11.5b: + memory.forget / memory.redact / memory.regulator_erasure).
-#: memory.export.read is 11.5c (NOT here). Value-disjoint from every other
-#: family by the memory.* namespace (pinned by
+#: (11.5b: + memory.forget / memory.redact / memory.regulator_erasure) to 8
+#: (11.5c T1: + memory.export.read — examiner export surface per ADR-019 §52).
+#: Value-disjoint from every other family by the memory.* namespace (pinned by
 #: tests/unit/portal/rbac/test_memory_scopes.py + test_emergency_scopes.py).
 MemoryRBACScope = Literal[
     "memory.read",
@@ -188,12 +188,14 @@ MemoryRBACScope = Literal[
     "memory.forget",
     "memory.redact",
     "memory.regulator_erasure",
+    # Sprint 11.5c T1 — examiner export surface per ADR-019 §52
+    "memory.export.read",
 ]
 
 
-#: All 7 memory scopes as a frozenset (1:1 with MemoryRBACScope) for bank-overlay
+#: All 8 memory scopes as a frozenset (1:1 with MemoryRBACScope) for bank-overlay
 #: binders. Pinned by tests/unit/portal/rbac/test_memory_scopes.py +
-#: tests/unit/portal/rbac/test_emergency_scopes.py.
+#: tests/unit/portal/rbac/test_emergency_scopes.py + test_scopes.py.
 MEMORY_SCOPES: frozenset[MemoryRBACScope] = frozenset(
     {
         "memory.read",
@@ -203,6 +205,8 @@ MEMORY_SCOPES: frozenset[MemoryRBACScope] = frozenset(
         "memory.forget",
         "memory.redact",
         "memory.regulator_erasure",
+        # Sprint 11.5c T1
+        "memory.export.read",
     }
 )
 

@@ -1,20 +1,16 @@
-"""Sprint 11.5a T12 — memory RBAC scope literal stability + namespace disjointness.
+"""Sprint 11.5a T12 + 11.5b T1 + 11.5c T1 — memory RBAC scope stability + disjointness.
 
-Pins the 4 additive 11.5a memory scopes per ADR-019:
+Pins the additive memory scopes per ADR-019:
 
-- ``MemoryRBACScope`` closed-enum literal carries exactly the 4 read/write
-  values (``memory.read`` + the three tier-scoped writes). Any addition,
-  rename, or removal is a wire-protocol break visible in this test's diff.
+- ``MemoryRBACScope`` closed-enum literal carries all 8 values (4 from 11.5a +
+  3 from 11.5b + 1 from 11.5c). Any addition, rename, or removal is a
+  wire-protocol break visible in this test's diff.
 - ``MEMORY_SCOPES`` frozenset stays 1:1 with the Literal.
 - ``MemoryRBACScope`` is value-disjoint from every other scope family
   (``PackRBACScope`` / ``UIRBACScope`` / ``ModelRBACScope`` /
   ``ComplianceRBACScope``) by the ``memory.*`` namespace — overlap would
   create a wire-protocol ambiguity where a single 403 ``scope_not_held``
   denial reason could match multiple families.
-
-11.5b extends ``MemoryRBACScope`` with ``memory.forget`` / ``memory.redact``
-/ ``memory.export.read`` / ``memory.regulator_erasure``; the 11.5a pin is
-locked at the 4 values here.
 """
 
 import typing
@@ -32,7 +28,7 @@ from cognic_agentos.portal.rbac.scopes import (
     UIRBACScope,
 )
 
-#: Sprint 11.5a shipped 4 values; Sprint 11.5b T1 extends to 7.
+#: Sprint 11.5a shipped 4 values; Sprint 11.5b T1 extends to 7; Sprint 11.5c T1 extends to 8.
 #: Drift here is a wire-protocol break.
 _EXPECTED_MEMORY_SCOPES = {
     # 11.5a original 4
@@ -44,12 +40,14 @@ _EXPECTED_MEMORY_SCOPES = {
     "memory.forget",
     "memory.redact",
     "memory.regulator_erasure",
+    # 11.5c T1 addition (examiner export surface)
+    "memory.export.read",
 }
 
 
-def test_memory_scopes_exactly_the_7_11_5b_values() -> None:
-    """``MemoryRBACScope`` carries exactly the 7 11.5b values (4 from 11.5a +
-    3 from 11.5b T1), and ``MEMORY_SCOPES`` stays 1:1 with the Literal."""
+def test_memory_scopes_exactly_the_8_11_5c_values() -> None:
+    """``MemoryRBACScope`` carries exactly the 8 11.5c values (4 from 11.5a +
+    3 from 11.5b T1 + 1 from 11.5c T1), and ``MEMORY_SCOPES`` stays 1:1 with the Literal."""
     assert set(typing.get_args(MemoryRBACScope)) == _EXPECTED_MEMORY_SCOPES
     assert frozenset(_EXPECTED_MEMORY_SCOPES) == MEMORY_SCOPES
 
