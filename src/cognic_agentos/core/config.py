@@ -36,6 +36,27 @@ RuntimeProfile = Literal["dev", "stage", "prod"]
 # time as "ignore the class-level ``env_file`` setting".
 _PROD_PROFILE_ENV_VAR = "COGNIC_RUNTIME_PROFILE"
 
+#: 7-year retention floor (seconds) for memory exports. INLINE mirror of
+#: ``protocol.supply_chain.SIGSTORE_BUNDLE_RETENTION_SECONDS`` — core/ MUST NOT
+#: runtime-import protocol/* (the architectural arrow runs protocol -> core).
+#: This is the FLOOR (and default) for ``Settings.memory_export_retention_seconds``;
+#: a deployment may configure a LONGER window (e.g. a 10-year bank mandate) but
+#: never a shorter one. Lockstep with the canonical constant is pinned test-only
+#: by ``tests/unit/core/test_config_memory.py`` per
+#: ``feedback_drift_detector_test_only_no_runtime_import``.
+_MEMORY_EXPORT_RETENTION_FLOOR_SECONDS: int = 7 * 365 * 24 * 3600
+
+#: Bucket-name shape for memory exports. INLINE mirror of
+#: ``db.adapters.local_object_store_adapter._BUCKET_RE`` — core/ MUST NOT
+#: runtime-import db.adapters/* (config is consumed BY the adapters, not the
+#: reverse). Pinning the Settings field to the shipped ``local_fs`` bucket
+#: contract rejects an invalid bucket (``UPPER`` / ``a/b`` / ``../x`` / spaces)
+#: at Settings construction rather than letting it pass startup and fail on the
+#: first export ``put``. Lockstep is pinned test-only by
+#: ``tests/unit/core/test_config_memory.py`` per
+#: ``feedback_drift_detector_test_only_no_runtime_import``.
+_MEMORY_EXPORT_BUCKET_PATTERN: str = r"^[a-z0-9][a-z0-9._-]{0,127}$"
+
 _LOG = logging.getLogger("cognic_agentos.core.config")
 
 
@@ -1544,6 +1565,23 @@ class Settings(BaseSettings):
         le=60,
         description="Sprint 11.5b — last-known-good kill-switch cache grace; >this with Redis "
         "unreachable fails closed (frozen). Capped at 60 (ADR-018 <=60s propagation).",
+    )
+    memory_export_bucket: str = Field(
+        default="cognic-memory-exports",
+        pattern=_MEMORY_EXPORT_BUCKET_PATTERN,
+        description="Sprint 11.5c — object-store bucket for memory-export archives. "
+        "Configurable so a bank may target a deployment-specific bucket without a "
+        "code change; shape-validated to the shipped local_fs bucket contract "
+        "(lower-snake-case single segment) so a bad value is rejected at startup, "
+        "not on the first export.",
+    )
+    memory_export_retention_seconds: int = Field(
+        default=_MEMORY_EXPORT_RETENTION_FLOOR_SECONDS,
+        ge=_MEMORY_EXPORT_RETENTION_FLOOR_SECONDS,
+        description="Sprint 11.5c — retention applied to memory-export archives. "
+        "Default + floor is the 7-year ADR-016 sigstore-bundle retention "
+        "(220752000s); a deployment may configure a LONGER window (e.g. a 10-year "
+        "mandate) but a below-floor value is rejected at Settings construction.",
     )
 
     # --- Build metadata ----------------------------------------------

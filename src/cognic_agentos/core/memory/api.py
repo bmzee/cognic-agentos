@@ -7,7 +7,7 @@ backend into the public memory operations. It is THE seam a Layer C agent uses;
 direct adapter access from anywhere but here is forbidden (pinned by
 ``tests/unit/architecture/test_memory_layer_c_no_direct_storage.py``).
 
-**11.5b op surface — 9 ops.** The 7 read/write ops from 11.5a — ``remember`` /
+**11.5c op surface — 10 ops.** The 7 read/write ops from 11.5a — ``remember`` /
 ``recall`` / ``upsert_block`` / ``read_block`` / ``list_for_subject`` /
 ``list_blocks`` / ``recall_episodes`` (the 7th landed in 11.5a T11 — the
 ``long_term`` + purpose episodic view joined to ``decision_history``;
@@ -16,9 +16,12 @@ vector-ranked recall is deferred to 11.5c) — PLUS the two lifecycle ops
 delegators to the :func:`forget.forget` / :func:`redact.redact` storage
 primitives (those primitives own the ``memory.forget`` /
 ``memory.regulator_erasure`` / ``memory.redact`` chain events, so the lifecycle
-ops add NO extra audit emission — unlike ``recall``'s ``memory.read``). The
-10th op (``export``) remains ABSENT, deferred to 11.5c. MemoryAPI is DI-tested,
-not harness-injected, in 11.5b.
+ops add NO extra audit emission — unlike ``recall``'s ``memory.read``). The 10th
+op (``export``) lands in 11.5c T3: gate (sub-agent + enumerate authz) → read via
+adapter → delegate to :func:`export.export_memory` (serialize + fail-closed
+persist via :class:`ObjectStoreAdapter` + ``memory.export`` chain emit). Requires
+``object_store`` wired at construction; deployment without it fails loud. MemoryAPI
+is DI-tested, not harness-injected, in 11.5b/11.5c.
 
 **Identity is read from the bound** :class:`MemoryCallerContext` **only.** Every
 op runs through the gate, which reads ``tenant_id`` / ``agent_id`` / ``actor_id``
@@ -46,8 +49,10 @@ from typing import TYPE_CHECKING
 
 from cognic_agentos.core.decision_history import DecisionHistoryStore, DecisionRecord
 from cognic_agentos.core.memory import episodes as _episodes
+from cognic_agentos.core.memory import export as _export
 from cognic_agentos.core.memory._context import (
     BlockRef,
+    ExportReceipt,
     MemoryHit,
     MemoryRecordId,
 )
@@ -79,6 +84,7 @@ if TYPE_CHECKING:
     from cognic_agentos.core.memory.storage import MemoryAdapter
     from cognic_agentos.core.memory.tiers import ForgetReason, RedactionReason
     from cognic_agentos.core.policy.engine import OPAEngine
+    from cognic_agentos.db.adapters.protocols import ObjectStoreAdapter
 
 #: ISO 42001 control tuple stamped on every ``memory.read`` chain row.
 #: A.7.4 (impact assessment) / A.8.2 (data quality) per ADR-019 + ADR-006.
@@ -111,6 +117,7 @@ class MemoryAPI:
         kill_switch: MemoryKillSwitchInterrogator | None = None,
         audit: DecisionHistoryStore,
         settings: Settings,
+        object_store: ObjectStoreAdapter | None = None,
     ) -> None:
         # Fail-loud default: bind the _NullMemoryKillSwitchInterrogator sentinel
         # when no kill-switch is wired (raises NotImplementedError on the first
@@ -131,6 +138,10 @@ class MemoryAPI:
         self._audit = audit
         self._context = context
         self._settings = settings
+        # Sprint 11.5c T3 — export op. None = export() raises NotImplementedError
+        # (fail-loud sentinel; NOT a governance refusal — a misconfigured
+        # deployment fails at construction/first-call, never silently).
+        self._object_store: ObjectStoreAdapter | None = object_store
 
     # -- Write ops ---------------------------------------------------------
 
@@ -185,7 +196,7 @@ class MemoryAPI:
         )
         return await self._adapter.upsert_block(record)
 
-    # -- Lifecycle ops (8th + 9th ops; export is 10th, 11.5c) --------------
+    # -- Lifecycle ops (8th + 9th ops) + export op (10th, 11.5c) ----------
 
     async def forget(
         self,
@@ -229,6 +240,45 @@ class MemoryAPI:
             reason=reason,
             gate=self._gate,
             adapter=self._adapter,
+        )
+
+    async def export(self, subject: SubjectRef) -> ExportReceipt:
+        """Export the (agent, subject) records to a retention-disciplined archive
+        (10th op). Gate (sub-agent + enumerate authz) -> fail-loud wiring check ->
+        read via adapter -> delegate to export.export_memory (serialize +
+        fail-closed persist + memory.export emit). Governance precedence: the gate
+        runs FIRST, so a sub-agent (or enumerate-denied caller) is refused even on
+        a deployment without an object_store -- a missing object_store fails loud
+        (NotImplementedError, a config error -- NOT a governance refusal) only
+        AFTER the gate has passed, so a wiring gap can never mask a governance
+        refusal."""
+        ctx = self._context
+        await self._gate.check_lifecycle()
+        await self._gate.check_enumerate(subject, tiers=_ENUMERATE_TIERS)
+        if self._object_store is None:
+            raise NotImplementedError(
+                "MemoryAPI.export requires an object_store wired at construction "
+                "(ADR-019 export / Sprint 11.5c) -- none was provided"
+            )
+        hits = await self._adapter.list_for_subject(
+            tenant_id=ctx.tenant_id, agent_id=ctx.agent_id, subject=subject
+        )
+        # Export EXACTLY the durable tier set the enumerate gate authorized.
+        # list_for_subject is general-purpose and (post-11.5b T8) can return a
+        # scratch fallback row (put_scratch_fallback during a Redis outage) while
+        # it is still within its TTL window. Scratch is ephemeral and MUST NOT
+        # enter a 7-year retention archive — filter to _ENUMERATE_TIERS so the
+        # archive contents (and the memory.export audit record_count) match the
+        # enumerate authz surface exactly.
+        durable_hits = [h for h in hits if h.tier in _ENUMERATE_TIERS]
+        return await _export.export_memory(
+            hits=durable_hits,
+            subject=subject,
+            context=ctx,
+            object_store=self._object_store,
+            audit=self._audit,
+            bucket=self._settings.memory_export_bucket,
+            retention_seconds=self._settings.memory_export_retention_seconds,
         )
 
     # -- Keyed reads -------------------------------------------------------

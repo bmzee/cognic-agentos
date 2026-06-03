@@ -118,3 +118,19 @@ class RedactionReceipt:
     record_id: MemoryRecordId  # the ORIGINAL record id (now sealed)
     new_version_id: MemoryRecordId
     redaction_version: int
+
+
+# --- Sprint 11.5c T3 — export receipt ---
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class ExportReceipt:
+    """Receipt returned by a successful ``export()`` call.
+
+    Carries the object-store key where the archive was persisted, the sha256
+    commitment over the archive bytes, and the count of exported records.
+    """
+
+    object_key: str
+    archive_sha256: str
+    record_count: int
