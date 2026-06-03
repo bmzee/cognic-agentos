@@ -7,7 +7,7 @@ backend into the public memory operations. It is THE seam a Layer C agent uses;
 direct adapter access from anywhere but here is forbidden (pinned by
 ``tests/unit/architecture/test_memory_layer_c_no_direct_storage.py``).
 
-**11.5c op surface — 10 ops.** The 7 read/write ops from 11.5a — ``remember`` /
+**11.5c op surface — 11 ops.** The 7 read/write ops from 11.5a — ``remember`` /
 ``recall`` / ``upsert_block`` / ``read_block`` / ``list_for_subject`` /
 ``list_blocks`` / ``recall_episodes`` (the 7th landed in 11.5a T11 — the
 ``long_term`` + purpose episodic view joined to ``decision_history``;
@@ -20,8 +20,12 @@ ops add NO extra audit emission — unlike ``recall``'s ``memory.read``). The 10
 op (``export``) lands in 11.5c T3: gate (sub-agent + enumerate authz) → read via
 adapter → delegate to :func:`export.export_memory` (serialize + fail-closed
 persist via :class:`ObjectStoreAdapter` + ``memory.export`` chain emit). Requires
-``object_store`` wired at construction; deployment without it fails loud. MemoryAPI
-is DI-tested, not harness-injected, in 11.5b/11.5c.
+``object_store`` wired at construction; deployment without it fails loud. The 11th
+op (``list_records``) lands in 11.5c T4: value-free governed enumerate for the
+portal records surface — gate (enumerate authz) → read via adapter → filter to
+durable tiers (authz consistency) → map to :class:`MemoryRecordMetadata` (NO
+values) → emit one ``memory.read`` with ``op=list_records``. MemoryAPI is
+DI-tested, not harness-injected, in 11.5b/11.5c.
 
 **Identity is read from the bound** :class:`MemoryCallerContext` **only.** Every
 op runs through the gate, which reads ``tenant_id`` / ``agent_id`` / ``actor_id``
@@ -31,11 +35,12 @@ identity through the op arguments. Refusals surface as the typed
 gate; MemoryAPI does not catch or translate them.
 
 **``memory.read`` audit (ADR-019 §recall + ADR-006).** The keyed reads
-(``recall`` / ``read_block``), ``list_for_subject``, and ``recall_episodes``
-each emit exactly one ``memory.read`` :class:`DecisionRecord` (plain append; no
-precondition) stamped with ISO controls ``("A.7.4", "A.8.2")``. The keyed-read
-payload carries ``{tier, purpose, subject_ref, hit, record_id}``;
-``list_for_subject`` carries ``{op, tiers, subject_ref, hit, count}``;
+(``recall`` / ``read_block``), the enumerates ``list_for_subject`` and
+``list_records``, and ``recall_episodes`` each emit exactly one ``memory.read``
+:class:`DecisionRecord` (plain append; no precondition) stamped with ISO controls
+``("A.7.4", "A.8.2")``. The keyed-read payload carries
+``{tier, purpose, subject_ref, hit, record_id}``; ``list_for_subject`` and
+``list_records`` each carry ``{op, tiers, subject_ref, hit, count}``;
 ``recall_episodes`` carries ``{op, subject_ref, purpose, hit, count}``. None
 carry a value or value-digest. ``list_blocks`` deliberately emits NO
 ``memory.read`` (block refs are not a value read — they are a structural listing
@@ -55,6 +60,7 @@ from cognic_agentos.core.memory._context import (
     ExportReceipt,
     MemoryHit,
     MemoryRecordId,
+    MemoryRecordMetadata,
 )
 from cognic_agentos.core.memory._seams import (
     MemoryKillSwitchInterrogator,
@@ -342,7 +348,14 @@ class MemoryAPI:
         hits = await self._adapter.list_for_subject(
             tenant_id=ctx.tenant_id, agent_id=ctx.agent_id, subject=subject
         )
-        results = [h.record_id for h in hits]
+        # Return EXACTLY the durable tier set the enumerate gate authorized +
+        # capability-checked. The adapter can return a scratch fallback row
+        # (put_scratch_fallback, post-11.5b T8) that check_enumerate never
+        # capability-checked here; including its id would exceed the authorized
+        # scope and make the memory.read count dishonest. (Authz consistency —
+        # NOT a retention concern. Mirrors list_records; T4.1 repair.)
+        durable_hits = [h for h in hits if h.tier in _ENUMERATE_TIERS]
+        results = [h.record_id for h in durable_hits]
         await self._audit.append(
             DecisionRecord(
                 decision_type="memory.read",
@@ -360,6 +373,55 @@ class MemoryAPI:
             )
         )
         return results
+
+    async def list_records(self, subject: SubjectRef) -> list[MemoryRecordMetadata]:
+        """Value-free governed enumerate for the portal records surface (11th op,
+        11.5c T4). Runs the enumerate gate (which refuses a sub-agent BEFORE any
+        read), reads via the adapter, filters to the gate-authorized durable tiers
+        (authz consistency — scratch fallback rows were never capability-checked
+        here), maps to MemoryRecordMetadata (NO values), and emits one
+        enumerate-shape memory.read (op=list_records)."""
+        ctx = self._context
+        await self._gate.check_enumerate(subject, tiers=_ENUMERATE_TIERS)
+        hits = await self._adapter.list_for_subject(
+            tenant_id=ctx.tenant_id, agent_id=ctx.agent_id, subject=subject
+        )
+        # Return EXACTLY the tier set the enumerate gate authorized + capability-
+        # checked. list_for_subject is general-purpose and (post-11.5b T8) can
+        # return a scratch fallback row (put_scratch_fallback during a Redis
+        # outage); scratch was NOT authorized/capability-checked by check_enumerate,
+        # so including it would exceed the authorized scope and make the count
+        # dishonest. (Authz consistency — NOT a retention concern.)
+        durable_hits = [h for h in hits if h.tier in _ENUMERATE_TIERS]
+        meta = [
+            MemoryRecordMetadata(
+                record_id=h.record_id,
+                agent_id=ctx.agent_id,
+                tier=h.tier,
+                data_classes=h.data_classes,
+                purpose=h.purpose,
+                created_at=h.created_at,
+                block_kind=h.block_kind,
+            )
+            for h in durable_hits
+        ]
+        await self._audit.append(
+            DecisionRecord(
+                decision_type="memory.read",
+                request_id=f"memory-read-{uuid.uuid4().hex}",
+                payload={
+                    "op": "list_records",
+                    "tiers": list(_ENUMERATE_TIERS),
+                    "subject_ref": subject.canonical,
+                    "hit": bool(meta),
+                    "count": len(meta),
+                },
+                actor_id=ctx.actor_id,
+                tenant_id=ctx.tenant_id,
+                iso_controls=_MEMORY_READ_ISO_CONTROLS,
+            )
+        )
+        return meta
 
     async def list_blocks(self, subject: SubjectRef) -> list[BlockRef]:
         """Enumerate the active block refs for ``subject`` (``long_term`` only).

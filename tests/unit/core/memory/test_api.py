@@ -12,11 +12,18 @@ emits NONE). Refusal precedence is covered by the gate suites
 from __future__ import annotations
 
 import dataclasses
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from cognic_agentos.core.memory.tiers import MemoryOperationRefused
-from tests.unit.core.memory._builders import AGENT_SUBJECT, SUBJECT, _block_record
+from tests.unit.core.memory._builders import (
+    AGENT_SUBJECT,
+    SUBJECT,
+    _block_record,
+    _long_term_record,
+    _scratch_record,
+)
 
 # --------------------------------------------------------------------------- #
 # Keyed roundtrip (remember -> recall).
@@ -128,6 +135,35 @@ async def test_list_for_subject_enumerate_read_records_miss_when_empty(api, deci
     assert reads[0].payload["op"] == "list_for_subject"
     assert reads[0].payload["hit"] is False
     assert reads[0].payload["count"] == 0
+
+
+async def test_list_for_subject_excludes_scratch_fallback_rows(
+    api, memory_adapter, decision_history_rows
+):
+    """T4.1 repair: list_for_subject returns ONLY the gate-authorized durable
+    tiers. A scratch fallback row (put_scratch_fallback, post-11.5b T8) that
+    check_enumerate never capability-checked here is excluded from BOTH the
+    returned ids and the honest memory.read count — the same authz/audit honesty
+    the list_records op enforces (authz consistency, NOT retention).
+
+    TM-revert verified load-bearing: without the _ENUMERATE_TIERS filter the
+    scratch id leaks into the result and payload count == 2 — this test FAILS."""
+    # api fixture is agent_id="kyc"; memory_adapter is the SAME backing store.
+    durable_id = await memory_adapter.put(_long_term_record(value="DURABLE"))
+    await memory_adapter.put_scratch_fallback(
+        _scratch_record(value="SCRATCH", key="tmp", agent_id="kyc"),
+        retention_until=datetime.now(UTC) + timedelta(hours=1),
+    )
+
+    result = await api.list_for_subject(SUBJECT)
+
+    # Only the durable record id is returned — the scratch id is excluded.
+    assert result == [durable_id]
+
+    reads = [r for r in await decision_history_rows() if r.event_type == "memory.read"]
+    assert len(reads) == 1
+    assert reads[0].payload["op"] == "list_for_subject"
+    assert reads[0].payload["count"] == 1
 
 
 async def test_list_blocks_emits_no_memory_read(agent_api, decision_history_rows):

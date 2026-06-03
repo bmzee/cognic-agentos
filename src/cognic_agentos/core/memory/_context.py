@@ -120,6 +120,25 @@ class RedactionReceipt:
     redaction_version: int
 
 
+# --- Sprint 11.5c T4 — value-free enumerate metadata ---
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class MemoryRecordMetadata:
+    """Value-free projection of a MemoryHit for the governed list_records
+    enumerate (portal records surface, Sprint 11.5c T4). Deliberately carries
+    NO ``value`` — value reads go through the recall purpose-matrix or the
+    authorized export path."""
+
+    record_id: MemoryRecordId
+    agent_id: str
+    tier: MemoryTier
+    data_classes: tuple[str, ...]
+    purpose: str
+    created_at: datetime
+    block_kind: BlockKind | None = None
+
+
 # --- Sprint 11.5c T3 — export receipt ---
 
 
