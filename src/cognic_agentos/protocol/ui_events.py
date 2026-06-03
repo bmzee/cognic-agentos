@@ -1004,6 +1004,118 @@ def _project_subagent_return(
     )
 
 
+# ---------------------------------------------------------------------------
+# Sprint 11.5c T6 — memory.* typed projectors
+# ---------------------------------------------------------------------------
+# Four chain decision_types wire to three model classes:
+#   memory.read              → MemoryRecallCompleted  (data = snapshot.payload)
+#   memory.forget            → MemoryForget           (data = {**payload, "purged": False})
+#   memory.regulator_erasure → MemoryForget           (data = {**payload, "purged": True})
+#   memory.redact            → MemoryRedact           (data = snapshot.payload)
+#
+# The `purged` bool injection is the ONE deliberate deviation from the
+# pure-payload pass-through: both `memory.forget` (tombstone) and
+# `memory.regulator_erasure` (physical purge) collapse onto MemoryForget
+# (type="forget"), so the projected data MUST carry `purged` so the UI can
+# distinguish the two without inspecting the (now-erased) decision_type.
+#
+# MemoryRecallStarted stays a schema-only stub — there is no chain row
+# emitted at recall-START (only at recall-COMPLETE), so no projector is
+# registered for it.
+
+
+def _project_memory_recall_completed(
+    snapshot: AppendedDecisionSnapshot,
+) -> MemoryRecallCompleted:
+    """Sprint 11.5c T6 — memory.read → memory.recall_completed."""
+    return MemoryRecallCompleted(
+        event_id=_chain_derived_event_id(
+            chain_id="decision_history",
+            sequence=snapshot.sequence,
+            ordinal=0,
+            family="memory",
+            type_="recall_completed",
+        ),
+        ts=snapshot.created_at,
+        tenant=snapshot.tenant_id,
+        trace_id=snapshot.trace_id,
+        audit_chain_hash=_format_chain_hash(snapshot.new_hash),
+        data=snapshot.payload,
+    )
+
+
+def _project_memory_forget(
+    snapshot: AppendedDecisionSnapshot,
+) -> MemoryForget:
+    """Sprint 11.5c T6 — memory.forget → memory.forget (purged=False).
+
+    Tombstone path: the record is soft-deleted. `purged=False` distinguishes
+    this from `memory.regulator_erasure` (purged=True) in the UI event stream
+    without requiring the consumer to read the (now-erased) decision_type.
+    """
+    return MemoryForget(
+        event_id=_chain_derived_event_id(
+            chain_id="decision_history",
+            sequence=snapshot.sequence,
+            ordinal=0,
+            family="memory",
+            type_="forget",
+        ),
+        ts=snapshot.created_at,
+        tenant=snapshot.tenant_id,
+        trace_id=snapshot.trace_id,
+        audit_chain_hash=_format_chain_hash(snapshot.new_hash),
+        # Inject `purged=False` — tombstone, NOT physical erasure.
+        data={**snapshot.payload, "purged": False},
+    )
+
+
+def _project_memory_regulator_erasure(
+    snapshot: AppendedDecisionSnapshot,
+) -> MemoryForget:
+    """Sprint 11.5c T6 — memory.regulator_erasure → memory.forget (purged=True).
+
+    Physical erasure path (regulator order). `purged=True` distinguishes this
+    from `memory.forget` (purged=False) in the UI event stream without
+    requiring the consumer to read the (now-erased) decision_type.
+    """
+    return MemoryForget(
+        event_id=_chain_derived_event_id(
+            chain_id="decision_history",
+            sequence=snapshot.sequence,
+            ordinal=0,
+            family="memory",
+            type_="forget",
+        ),
+        ts=snapshot.created_at,
+        tenant=snapshot.tenant_id,
+        trace_id=snapshot.trace_id,
+        audit_chain_hash=_format_chain_hash(snapshot.new_hash),
+        # Inject `purged=True` — physical erasure, NOT a tombstone.
+        data={**snapshot.payload, "purged": True},
+    )
+
+
+def _project_memory_redact(
+    snapshot: AppendedDecisionSnapshot,
+) -> MemoryRedact:
+    """Sprint 11.5c T6 — memory.redact → memory.redact."""
+    return MemoryRedact(
+        event_id=_chain_derived_event_id(
+            chain_id="decision_history",
+            sequence=snapshot.sequence,
+            ordinal=0,
+            family="memory",
+            type_="redact",
+        ),
+        ts=snapshot.created_at,
+        tenant=snapshot.tenant_id,
+        trace_id=snapshot.trace_id,
+        audit_chain_hash=_format_chain_hash(snapshot.new_hash),
+        data=snapshot.payload,
+    )
+
+
 def _is_subagent_depth_cap(snapshot: AppendedDecisionSnapshot) -> bool:
     """Sprint 11b T9 — scope an escalation.opened row to a subagent recursion
     cap. The T6 spawn path refuses a depth-exceeding spawn BEFORE it emits
@@ -1053,6 +1165,15 @@ _DECISION_HISTORY_TYPED_PROJECTORS: Final[
     "policy.decision_evaluated": _project_policy_decision_evaluated,
     "subagent.spawn": _project_subagent_spawned,
     "subagent.return": _project_subagent_return,
+    # Sprint 11.5c T6 — memory.* chain event projectors.
+    # `memory.forget` and `memory.regulator_erasure` both map to MemoryForget
+    # but inject distinct `purged` bool values (False/True) so the UI can
+    # distinguish a tombstone from a physical erasure without inspecting the
+    # (now-erased) decision_type.
+    "memory.read": _project_memory_recall_completed,
+    "memory.forget": _project_memory_forget,
+    "memory.regulator_erasure": _project_memory_regulator_erasure,
+    "memory.redact": _project_memory_redact,
 }
 
 
@@ -1206,6 +1327,12 @@ _TYPED_PROJECTION_CLASSES: Final[frozenset[type]] = frozenset(
         SubagentCompleted,
         SubagentFailed,
         SubagentRecursionCapped,
+        # Sprint 11.5c T6 — memory.* wired classes.
+        # MemoryRecallStarted is intentionally EXCLUDED — it is a schema-only
+        # stub with no chain row at recall-START (only recall-COMPLETE fires).
+        MemoryRecallCompleted,
+        MemoryForget,
+        MemoryRedact,
     }
 )
 

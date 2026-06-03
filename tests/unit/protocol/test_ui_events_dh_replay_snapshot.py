@@ -87,6 +87,11 @@ _WALKED_PROJECTORS: frozenset[str] = frozenset(
         "_project_subagent_return",
         "_is_subagent_depth_cap",
         "_project_subagent_recursion_capped",
+        # Sprint 11.5c T6 — memory.* projectors wired to typed dispatch table.
+        "_project_memory_recall_completed",
+        "_project_memory_forget",
+        "_project_memory_regulator_erasure",
+        "_project_memory_redact",
         "_build_decision_audit_for_dh_snapshot",
     }
 )
