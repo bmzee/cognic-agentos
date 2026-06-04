@@ -132,3 +132,23 @@ No security floor was made loosenable; the Wave-1 work only **adds** floors or
 All 8 tasks complete; full suite + full-tree lint/type + critical-coverage gate
 all green. The branch (spec + plan + T1–T8) is ready to push + open as one
 Wave-1 PR on the human's tokens.
+
+## Post-T8 — CI boot-smoke fix (`dfcb180`)
+
+After the branch was opened as PR #49, CI surfaced the deploy-safety guards at
+the **production-image boot level** the unit suite doesn't exercise. The kernel
+boot-smoke (`.github/workflows/python.yml`, "Boot smoke — kernel image")
+`docker run`s the prod-shaped kernel image with **no** config, so the app's
+startup `get_settings()` built a `prod` Settings from the shipped dev defaults
+and **G5** (dev `embedding_model`) correctly failed it loud.
+
+Fix (`dfcb180`): the boot-smoke `docker run` now passes prod-compliant env for
+the guards that fire — `COGNIC_EMBEDDING_MODEL` (a non-dev placeholder) +
+`COGNIC_SANDBOX_CANONICAL_RUNTIME_PYTHON_IMAGE` / `…_EGRESS_PROXY_IMAGE`
+(non-`bmzee`, digest-pinned placeholder refs, smoke-only). The smoke stays on
+**`prod`** (NOT switched to `dev`) so it proves the prod image boots **with
+operator-supplied deploy-safe config** — the realistic bank deployment; healthz
+never pulls a sandbox image. PR #49 CI green on `dfcb180`.
+
+This reinforces the deploy-safety thesis: **the prod kernel image now requires
+operator-supplied config to boot — there is no dev-default fallback in prod.**
