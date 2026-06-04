@@ -223,3 +223,40 @@ class TestBackendFactoryEnumerateCoverage:
         annotation = field_info.annotation
         arms = set(typing.get_args(annotation))
         assert arms == {"docker_sibling", "kubernetes_pod"}
+
+
+class TestBackendFactoryThreadsEgressProxyImage:
+    """T5 (Wave-1 CFG-sandbox-launch fix) — the factory threads
+    ``sandbox_canonical_egress_proxy_image`` into the backend CONSTRUCTOR so the
+    launched egress-proxy SIDECAR matches the catalog's canonical egress ref.
+
+    Without the thread the backend falls back to the hardcoded
+    ``_CANONICAL_EGRESS_PROXY_IMAGE`` (``ghcr.io/bmzee/...``): an operator
+    override of the Settings field would re-home the catalog while the sidecar
+    still launched the shipped default — a catalog/launch mismatch. ``_settings``
+    supplies a NON-``bmzee`` egress ref (``ghcr.io/cognic/...@sha256:b*64``), so
+    each assertion below is RED without the T5 thread.
+
+    Scope-lock: there is NO runtime-python equivalent — that image is
+    admission/catalog-driven (no backend constructor arg), so only the
+    egress-proxy sidecar needs threading.
+    """
+
+    def test_docker_backend_launches_settings_egress_image(self) -> None:
+        routing_settings = _settings("docker_sibling")
+        backend = get_backend(routing_settings, **_docker_kwargs())
+        assert isinstance(backend, DockerSiblingSandboxBackend)
+        # The launched proxy image IS the operator-configured Settings value...
+        assert backend._egress_proxy_image == routing_settings.sandbox_canonical_egress_proxy_image
+        # ...NOT the hardcoded ghcr.io/bmzee shipped default...
+        assert "ghcr.io/bmzee" not in backend._egress_proxy_image
+        # ...and it matches the catalog's canonical egress ref (no mismatch).
+        assert backend._catalog.is_canonical("sha256:" + "b" * 64)
+
+    def test_kubernetes_backend_launches_settings_egress_image(self) -> None:
+        routing_settings = _settings("kubernetes_pod")
+        backend = get_backend(routing_settings, **_k8s_kwargs())
+        assert isinstance(backend, KubernetesPodSandboxBackend)
+        assert backend._egress_proxy_image == routing_settings.sandbox_canonical_egress_proxy_image
+        assert "ghcr.io/bmzee" not in backend._egress_proxy_image
+        assert backend._catalog.is_canonical("sha256:" + "b" * 64)
