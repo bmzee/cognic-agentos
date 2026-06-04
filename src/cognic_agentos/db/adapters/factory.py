@@ -15,6 +15,18 @@ from typing import Any
 from cognic_agentos.core.config import Settings
 from cognic_agentos.db.adapters import protocols as P
 from cognic_agentos.db.adapters.registry import AdapterRegistry, bundled_registry
+from cognic_agentos.db.adapters.secret_resolution import resolve_secret_field
+
+# The three service secrets the factory itself consumes (NOT
+# ``litellm_master_key`` — that is the gateway's, resolved separately).
+# ``build_adapters_async`` resolves any ``vault://`` URI among these once
+# before constructing the adapters; the sync ``build_adapters`` refuses if
+# any is still a ``vault://`` URI (it cannot perform the async resolution).
+_ADAPTER_SECRET_FIELDS: tuple[str, ...] = (
+    "embedding_api_key",
+    "langfuse_secret_key",
+    "dynatrace_api_token",
+)
 
 
 @dataclass(slots=True)
@@ -83,7 +95,20 @@ def build_adapters(
     """Read driver names from ``settings``, instantiate each adapter, return ``Adapters``.
 
     Raises :exc:`AdapterNotInstalled` when a configured driver isn't registered.
+
+    Wave-1 deploy-safety T2: this sync builder cannot resolve ``vault://``
+    service secrets (resolution is async). If any of the three adapter
+    service secrets is still a ``vault://`` URI, refuse fail-loud and point
+    the caller at :func:`build_adapters_async`.
     """
+
+    for _name in _ADAPTER_SECRET_FIELDS:
+        _v = getattr(settings, _name)
+        if isinstance(_v, str) and _v.startswith("vault://"):
+            raise RuntimeError(
+                f"build_adapters_sync_unresolved_vault_secret: {_name} is a vault:// URI; "
+                "call build_adapters_async (sync build_adapters cannot resolve secrets)"
+            )
 
     reg = registry or bundled_registry
 
@@ -115,6 +140,50 @@ def build_adapters(
         observability=observability_cls(*_observability_args(settings)),
         object_store=object_store_instance,
     )
+
+
+async def build_adapters_async(
+    settings: Settings,
+    *,
+    registry: AdapterRegistry | None = None,
+    secret_adapter: P.SecretAdapter | None = None,
+) -> Adapters:
+    """Async wrapper over :func:`build_adapters` that resolves any ``vault://``
+    service secret (``embedding_api_key`` / ``langfuse_secret_key`` /
+    ``dynatrace_api_token``) ONCE before constructing the adapters.
+
+    No ``vault://`` secret set → delegates straight to the sync
+    :func:`build_adapters` (no resolution, no extra Vault round-trip). Otherwise
+    builds (or uses the injected ``secret_adapter``) a :class:`SecretAdapter`,
+    resolves the 3 fields via :func:`resolve_secret_field`, applies them via
+    ``settings.model_copy`` (which does NOT re-run validators, so the resolved
+    PLAIN values do not re-trip T1's strict-profile secret guard), then delegates
+    to the sync :func:`build_adapters` (whose preflight now passes — no ``vault://``
+    remains). ``secret_adapter`` is a test/harness injection seam; production
+    leaves it ``None`` so the resolver uses the configured secret driver.
+    """
+
+    needs_resolution = any(
+        isinstance(getattr(settings, _name), str)
+        and getattr(settings, _name).startswith("vault://")
+        for _name in _ADAPTER_SECRET_FIELDS
+    )
+    if not needs_resolution:
+        return build_adapters(settings, registry=registry)
+
+    reg = registry or bundled_registry
+    adapter = secret_adapter
+    if adapter is None:
+        secret_cls = reg.resolve("secret", settings.secret_driver)
+        adapter = secret_cls(*_secret_args(settings))
+
+    resolved: dict[str, Any] = {}
+    for _name in _ADAPTER_SECRET_FIELDS:
+        resolved[_name] = await resolve_secret_field(
+            getattr(settings, _name), secret_adapter=adapter, field_name=_name
+        )
+    resolved_settings = settings.model_copy(update=resolved)
+    return build_adapters(resolved_settings, registry=registry)
 
 
 # --- per-driver constructor argument helpers --------------------------------

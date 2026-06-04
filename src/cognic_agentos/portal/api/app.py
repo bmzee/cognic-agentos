@@ -46,7 +46,7 @@ from cognic_agentos.core.decision_history import DecisionHistoryStore
 from cognic_agentos.db.adapters import (
     AdapterRegistry,
     Adapters,
-    build_adapters,
+    build_adapters_async,
     bundled_registry,
     load_bundled_adapters,
 )
@@ -520,7 +520,7 @@ def create_app(
             if adapter_registry is bundled_registry:
                 load_bundled_adapters()
 
-            adapters = build_adapters(settings, registry=adapter_registry)
+            adapters = await build_adapters_async(settings, registry=adapter_registry)
             await adapters.open_all()
             app.state.adapters = adapters
             try:
