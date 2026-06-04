@@ -109,6 +109,21 @@ def get_backend(settings: Settings, /, **kwargs: Any) -> SandboxBackend:
         canonical_trust_root=settings.sandbox_canonical_image_trust_root_path,
     )
 
+    # T5 (Wave-1 CFG-sandbox-launch fix) — AUTHORITATIVELY thread the egress-proxy
+    # image into the backend CONSTRUCTOR too. The catalog above carries the
+    # canonical refs for the admission trust gate, but each backend launches the
+    # egress-proxy SIDECAR directly from its own ``egress_proxy_image`` arg, which
+    # otherwise falls back to the hardcoded ``_CANONICAL_EGRESS_PROXY_IMAGE``
+    # constant (``ghcr.io/bmzee/...``). Without this thread, an operator override
+    # of ``sandbox_canonical_egress_proxy_image`` re-homes the catalog while the
+    # sidecar still launches the shipped default — a catalog/launch mismatch.
+    # Override-wins (like ``settings`` + ``image_catalog`` above): the launched
+    # proxy ref MUST equal the catalog's canonical egress-proxy ref. Runtime-python
+    # needs no equivalent thread — it is admission/catalog-driven (no backend
+    # constructor arg; verified at the T5 scope-lock). Pinned by
+    # ``TestBackendFactoryThreadsEgressProxyImage``.
+    kwargs["egress_proxy_image"] = settings.sandbox_canonical_egress_proxy_image
+
     if settings.sandbox_backend == "docker_sibling":
         try:
             from cognic_agentos.sandbox.backends.docker_sibling import (

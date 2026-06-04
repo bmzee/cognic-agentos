@@ -203,8 +203,19 @@ jobs:
         # plumbing regressions in one cheap step.
         run: |
           set -euo pipefail
+          # CI boot-smoke deploy-safe placeholders (Wave-1): the prod-shaped
+          # kernel image now fails loud at startup unless deploy-safe config is
+          # supplied (G5 — embedding_model must not be the dev default; G7 —
+          # sandbox images must not be the personal ghcr.io/bmzee registry).
+          # These env vars prove the prod image boots WITH operator-supplied
+          # config (the realistic bank deployment). /api/v1/healthz never pulls a
+          # sandbox image, so the image refs are placeholders — digest-pinned
+          # only to satisfy the canonical-image field validator.
           docker run -d --name cognic-kernel-smoke \
             -p 8000:8000 \
+            -e COGNIC_EMBEDDING_MODEL=cognic-ci-prod-embedding \
+            -e COGNIC_SANDBOX_CANONICAL_RUNTIME_PYTHON_IMAGE=ghcr.io/cognic-ci/sandbox-runtime-python@sha256:0000000000000000000000000000000000000000000000000000000000000000 \
+            -e COGNIC_SANDBOX_CANONICAL_EGRESS_PROXY_IMAGE=ghcr.io/cognic-ci/sandbox-egress-proxy@sha256:0000000000000000000000000000000000000000000000000000000000000000 \
             cognic-agentos:kernel-ci
           # Poll up to 30s for the server to bind.
           ok=0

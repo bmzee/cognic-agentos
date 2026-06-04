@@ -16,6 +16,17 @@ from cognic_agentos.core.config import (
     get_settings,
 )
 
+# Wave-1 (T1) deploy-safety guards reject the dev ``embedding_model`` (G5) and
+# the personal-registry ``ghcr.io/bmzee`` sandbox images (G7) in strict
+# profiles. Tests below that build a ``prod`` Settings to exercise an UNRELATED
+# field supply these deploy-safe values inline so construction succeeds. Kept as
+# explicit constants (NOT routed through ``tests.support.prod_settings``, which
+# also sets tier aliases) so each construction stays visible and the
+# config-default / guard assertions in this file are never masked.
+_PROD_EMBED_MODEL = "prod-embedding-model"
+_PROD_RUNTIME_IMAGE = "ghcr.io/cognic-test/sandbox-runtime-python@sha256:" + "0" * 64
+_PROD_PROXY_IMAGE = "ghcr.io/cognic-test/sandbox-egress-proxy@sha256:" + "0" * 64
+
 
 @pytest.fixture(autouse=True)
 def _clear_settings_cache() -> Iterator[None]:
@@ -50,6 +61,12 @@ def test_prod_profile_ignores_dotenv(tmp_path: Path, monkeypatch: pytest.MonkeyP
     _write_env(tmp_path, "COGNIC_PORT=9001\nCOGNIC_LOG_LEVEL=DEBUG\n")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("COGNIC_RUNTIME_PROFILE", "prod")
+    # Wave-1 strict-profile guards (G5/G7) require these in prod; supplied via env
+    # (which IS read in prod) — consistent with this test's "env wins, .env
+    # ignored" model. The .env values below are what must be ignored.
+    monkeypatch.setenv("COGNIC_EMBEDDING_MODEL", _PROD_EMBED_MODEL)
+    monkeypatch.setenv("COGNIC_SANDBOX_CANONICAL_RUNTIME_PYTHON_IMAGE", _PROD_RUNTIME_IMAGE)
+    monkeypatch.setenv("COGNIC_SANDBOX_CANONICAL_EGRESS_PROXY_IMAGE", _PROD_PROXY_IMAGE)
     monkeypatch.delenv("COGNIC_PORT", raising=False)
     monkeypatch.delenv("COGNIC_LOG_LEVEL", raising=False)
 
@@ -213,6 +230,9 @@ class TestAdapterSettings:
         # Strip any user .env so we measure class defaults
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("COGNIC_RUNTIME_PROFILE", "prod")  # forces .env=None
+        monkeypatch.setenv("COGNIC_EMBEDDING_MODEL", _PROD_EMBED_MODEL)
+        monkeypatch.setenv("COGNIC_SANDBOX_CANONICAL_RUNTIME_PYTHON_IMAGE", _PROD_RUNTIME_IMAGE)
+        monkeypatch.setenv("COGNIC_SANDBOX_CANONICAL_EGRESS_PROXY_IMAGE", _PROD_PROXY_IMAGE)
         s = build_settings_without_env_file()
 
         assert s.db_driver == "postgres"
@@ -242,7 +262,10 @@ class TestAdapterSettings:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         monkeypatch.chdir(tmp_path)
-        monkeypatch.setenv("COGNIC_RUNTIME_PROFILE", "prod")
+        # Dev profile: this exercises env-loading of driver paths + secrets
+        # (incl. a plaintext COGNIC_LANGFUSE_SECRET_KEY), which Wave-1 G1 forbids
+        # in strict profiles. The env-loading mechanism is profile-agnostic.
+        monkeypatch.setenv("COGNIC_RUNTIME_PROFILE", "dev")
         monkeypatch.setenv("COGNIC_DATABASE_URL", "postgresql+asyncpg://u:p@h/db")
         monkeypatch.setenv("COGNIC_QDRANT_URL", "http://qdrant:6333")
         monkeypatch.setenv("COGNIC_QDRANT_COLLECTION", "demo_col")
@@ -281,6 +304,9 @@ class TestAdapterSettings:
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("COGNIC_RUNTIME_PROFILE", "prod")
         monkeypatch.setenv("COGNIC_DB_DRIVER", "mssql")
+        monkeypatch.setenv("COGNIC_EMBEDDING_MODEL", _PROD_EMBED_MODEL)
+        monkeypatch.setenv("COGNIC_SANDBOX_CANONICAL_RUNTIME_PYTHON_IMAGE", _PROD_RUNTIME_IMAGE)
+        monkeypatch.setenv("COGNIC_SANDBOX_CANONICAL_EGRESS_PROXY_IMAGE", _PROD_PROXY_IMAGE)
 
         s = build_settings_without_env_file()
         assert s.db_driver == "mssql"
@@ -292,7 +318,12 @@ class TestAdapterSettings:
         operator-specific URLs / tokens / model names are required."""
 
         monkeypatch.chdir(tmp_path)
-        monkeypatch.setenv("COGNIC_RUNTIME_PROFILE", "prod")
+        # Dev profile: this asserts the dev-default ``embedding_model``
+        # (``qwen3-embedding:8b``), which Wave-1 G5 forbids in strict profiles.
+        # Field defaults are profile-agnostic; dev is the correct profile to
+        # pin them. (``build_settings_without_env_file`` strips ``.env`` in any
+        # profile, so the prod override here was only ever incidental.)
+        monkeypatch.setenv("COGNIC_RUNTIME_PROFILE", "dev")
         s = build_settings_without_env_file()
 
         assert s.qdrant_collection == "cognic_default"
@@ -338,6 +369,9 @@ class TestEnterpriseAdapterSettings:
     ) -> None:
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("COGNIC_RUNTIME_PROFILE", "prod")
+        monkeypatch.setenv("COGNIC_EMBEDDING_MODEL", _PROD_EMBED_MODEL)
+        monkeypatch.setenv("COGNIC_SANDBOX_CANONICAL_RUNTIME_PYTHON_IMAGE", _PROD_RUNTIME_IMAGE)
+        monkeypatch.setenv("COGNIC_SANDBOX_CANONICAL_EGRESS_PROXY_IMAGE", _PROD_PROXY_IMAGE)
         s = build_settings_without_env_file()
 
         assert s.dynatrace_tenant_url is None
@@ -348,7 +382,11 @@ class TestEnterpriseAdapterSettings:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         monkeypatch.chdir(tmp_path)
-        monkeypatch.setenv("COGNIC_RUNTIME_PROFILE", "prod")
+        # Dev profile: this sets a plaintext COGNIC_DYNATRACE_API_TOKEN (G1) AND
+        # the deprecated COGNIC_DYNATRACE_API_TOKEN_VAULT_PATH (G2), both forbidden
+        # in strict profiles. The env-loading mechanism under test is
+        # profile-agnostic.
+        monkeypatch.setenv("COGNIC_RUNTIME_PROFILE", "dev")
         monkeypatch.setenv("COGNIC_DYNATRACE_TENANT_URL", "https://abc12345.live.dynatrace.com")
         monkeypatch.setenv("COGNIC_DYNATRACE_API_TOKEN", "dt0c01.test-token")
         monkeypatch.setenv("COGNIC_DYNATRACE_API_TOKEN_VAULT_PATH", "secret/dynatrace/cognic")
@@ -369,6 +407,9 @@ class TestEnterpriseAdapterSettings:
 
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("COGNIC_RUNTIME_PROFILE", "prod")
+        monkeypatch.setenv("COGNIC_EMBEDDING_MODEL", _PROD_EMBED_MODEL)
+        monkeypatch.setenv("COGNIC_SANDBOX_CANONICAL_RUNTIME_PYTHON_IMAGE", _PROD_RUNTIME_IMAGE)
+        monkeypatch.setenv("COGNIC_SANDBOX_CANONICAL_EGRESS_PROXY_IMAGE", _PROD_PROXY_IMAGE)
         s = build_settings_without_env_file()
 
         assert s.embed_provider_label == "openai_compat"
@@ -386,6 +427,9 @@ class TestEnterpriseAdapterSettings:
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("COGNIC_RUNTIME_PROFILE", "prod")
         monkeypatch.setenv("COGNIC_EMBED_PROVIDER_LABEL", label)
+        monkeypatch.setenv("COGNIC_EMBEDDING_MODEL", _PROD_EMBED_MODEL)
+        monkeypatch.setenv("COGNIC_SANDBOX_CANONICAL_RUNTIME_PYTHON_IMAGE", _PROD_RUNTIME_IMAGE)
+        monkeypatch.setenv("COGNIC_SANDBOX_CANONICAL_EGRESS_PROXY_IMAGE", _PROD_PROXY_IMAGE)
 
         s = build_settings_without_env_file()
         assert s.embed_provider_label == label
@@ -400,6 +444,9 @@ class TestEnterpriseAdapterSettings:
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("COGNIC_RUNTIME_PROFILE", "prod")
         monkeypatch.setenv("COGNIC_EMBED_PROVIDER_LABEL", "future_provider")
+        monkeypatch.setenv("COGNIC_EMBEDDING_MODEL", _PROD_EMBED_MODEL)
+        monkeypatch.setenv("COGNIC_SANDBOX_CANONICAL_RUNTIME_PYTHON_IMAGE", _PROD_RUNTIME_IMAGE)
+        monkeypatch.setenv("COGNIC_SANDBOX_CANONICAL_EGRESS_PROXY_IMAGE", _PROD_PROXY_IMAGE)
 
         s = build_settings_without_env_file()
         assert s.embed_provider_label == "future_provider"
@@ -412,6 +459,9 @@ class TestEnterpriseAdapterSettings:
 
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("COGNIC_RUNTIME_PROFILE", "prod")
+        monkeypatch.setenv("COGNIC_EMBEDDING_MODEL", _PROD_EMBED_MODEL)
+        monkeypatch.setenv("COGNIC_SANDBOX_CANONICAL_RUNTIME_PYTHON_IMAGE", _PROD_RUNTIME_IMAGE)
+        monkeypatch.setenv("COGNIC_SANDBOX_CANONICAL_EGRESS_PROXY_IMAGE", _PROD_PROXY_IMAGE)
         s = build_settings_without_env_file()
 
         assert s.embedding_api_key is None
@@ -423,7 +473,9 @@ class TestEnterpriseAdapterSettings:
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         monkeypatch.chdir(tmp_path)
-        monkeypatch.setenv("COGNIC_RUNTIME_PROFILE", "prod")
+        # Dev profile: sets a plaintext COGNIC_EMBEDDING_API_KEY (G1-forbidden in
+        # strict profiles). Env-loading of the auth surface is profile-agnostic.
+        monkeypatch.setenv("COGNIC_RUNTIME_PROFILE", "dev")
         monkeypatch.setenv("COGNIC_EMBEDDING_API_KEY", "sk-test-openai-key")
         monkeypatch.setenv("COGNIC_EMBEDDING_API_KEY_HEADER", "Authorization")
         monkeypatch.setenv("COGNIC_EMBEDDING_API_KEY_VAULT_PATH", "secret/openai/embedding")
@@ -446,7 +498,9 @@ class TestEnterpriseAdapterSettings:
         that shape without needing an Azure-specific adapter."""
 
         monkeypatch.chdir(tmp_path)
-        monkeypatch.setenv("COGNIC_RUNTIME_PROFILE", "prod")
+        # Dev profile: sets a plaintext COGNIC_EMBEDDING_API_KEY (G1-forbidden in
+        # strict profiles). The Azure header-shape behaviour is profile-agnostic.
+        monkeypatch.setenv("COGNIC_RUNTIME_PROFILE", "dev")
         monkeypatch.setenv("COGNIC_EMBEDDING_API_KEY", "azure-key-value")
         monkeypatch.setenv("COGNIC_EMBEDDING_API_KEY_HEADER", "api-key")
 
@@ -610,7 +664,13 @@ class TestSprint4PluginPolicySettings:
     """
 
     def test_sprint_4_defaults_match_secure_posture(self) -> None:
-        s = Settings(_env_file=None, runtime_profile="prod")  # type: ignore[call-arg]
+        s = Settings(  # type: ignore[call-arg]
+            _env_file=None,
+            runtime_profile="prod",
+            embedding_model=_PROD_EMBED_MODEL,
+            sandbox_canonical_runtime_python_image=_PROD_RUNTIME_IMAGE,
+            sandbox_canonical_egress_proxy_image=_PROD_PROXY_IMAGE,
+        )
         # Cosign required by default — fail-closed posture per AGENTS.md
         # critical-controls discipline (trust gate).
         assert s.require_cosign is True
@@ -662,7 +722,13 @@ class TestSprint4PluginPolicySettings:
     def test_local_object_store_root_prod_default(self) -> None:
         """Prod profile uses the /var/lib path. Pinned regardless of
         $TMPDIR — the post-init validator picks per profile, not per env."""
-        s = Settings(_env_file=None, runtime_profile="prod")  # type: ignore[call-arg]
+        s = Settings(  # type: ignore[call-arg]
+            _env_file=None,
+            runtime_profile="prod",
+            embedding_model=_PROD_EMBED_MODEL,
+            sandbox_canonical_runtime_python_image=_PROD_RUNTIME_IMAGE,
+            sandbox_canonical_egress_proxy_image=_PROD_PROXY_IMAGE,
+        )
         assert s.local_object_store_root == Path("/var/lib/cognic-agentos/object-store")
 
     def test_local_object_store_root_dev_derives_from_tmpdir(
@@ -818,7 +884,13 @@ class TestMcpSettings:
             "COGNIC_MCP_OAUTH_CREDENTIALS_PATH",
             "secret/data/{tenant}/oauth/{as_host}/creds",
         )
-        s = Settings(_env_file=None, runtime_profile="prod")  # type: ignore[call-arg]
+        s = Settings(  # type: ignore[call-arg]
+            _env_file=None,
+            runtime_profile="prod",
+            embedding_model=_PROD_EMBED_MODEL,
+            sandbox_canonical_runtime_python_image=_PROD_RUNTIME_IMAGE,
+            sandbox_canonical_egress_proxy_image=_PROD_PROXY_IMAGE,
+        )
         assert s.mcp_oauth_credentials_path == "secret/data/{tenant}/oauth/{as_host}/creds"
 
 
@@ -948,7 +1020,13 @@ class TestSprint6A2ASettings:
         """Operators bump the pinned version via env var; the strict
         pattern still validates."""
         monkeypatch.setenv("COGNIC_A2A_PINNED_SPEC_VERSION", "1.1")
-        s = Settings(_env_file=None, runtime_profile="prod")  # type: ignore[call-arg]
+        s = Settings(  # type: ignore[call-arg]
+            _env_file=None,
+            runtime_profile="prod",
+            embedding_model=_PROD_EMBED_MODEL,
+            sandbox_canonical_runtime_python_image=_PROD_RUNTIME_IMAGE,
+            sandbox_canonical_egress_proxy_image=_PROD_PROXY_IMAGE,
+        )
         assert s.a2a_pinned_spec_version == "1.1"
 
     def test_a2a_schema_drift_check_enabled_env_override(
@@ -958,7 +1036,13 @@ class TestSprint6A2ASettings:
         env var flips the setting via the standard pydantic-settings
         env-prefix binding."""
         monkeypatch.setenv("COGNIC_A2A_SCHEMA_DRIFT_CHECK_ENABLED", "true")
-        s = Settings(_env_file=None, runtime_profile="prod")  # type: ignore[call-arg]
+        s = Settings(  # type: ignore[call-arg]
+            _env_file=None,
+            runtime_profile="prod",
+            embedding_model=_PROD_EMBED_MODEL,
+            sandbox_canonical_runtime_python_image=_PROD_RUNTIME_IMAGE,
+            sandbox_canonical_egress_proxy_image=_PROD_PROXY_IMAGE,
+        )
         assert s.a2a_schema_drift_check_enabled is True
 
     def test_a2a_schema_drift_check_enabled_via_run_a2a_upstream_alias(
@@ -977,7 +1061,13 @@ class TestSprint6A2ASettings:
         # Explicitly clear the fully-qualified var so the test only
         # exercises the alias path.
         monkeypatch.delenv("COGNIC_A2A_SCHEMA_DRIFT_CHECK_ENABLED", raising=False)
-        s = Settings(_env_file=None, runtime_profile="prod")  # type: ignore[call-arg]
+        s = Settings(  # type: ignore[call-arg]
+            _env_file=None,
+            runtime_profile="prod",
+            embedding_model=_PROD_EMBED_MODEL,
+            sandbox_canonical_runtime_python_image=_PROD_RUNTIME_IMAGE,
+            sandbox_canonical_egress_proxy_image=_PROD_PROXY_IMAGE,
+        )
         assert s.a2a_schema_drift_check_enabled is True
 
     def test_a2a_schema_drift_run_a2a_upstream_false_value(
@@ -989,7 +1079,13 @@ class TestSprint6A2ASettings:
         True."""
         monkeypatch.setenv("COGNIC_RUN_A2A_UPSTREAM", "0")
         monkeypatch.delenv("COGNIC_A2A_SCHEMA_DRIFT_CHECK_ENABLED", raising=False)
-        s = Settings(_env_file=None, runtime_profile="prod")  # type: ignore[call-arg]
+        s = Settings(  # type: ignore[call-arg]
+            _env_file=None,
+            runtime_profile="prod",
+            embedding_model=_PROD_EMBED_MODEL,
+            sandbox_canonical_runtime_python_image=_PROD_RUNTIME_IMAGE,
+            sandbox_canonical_egress_proxy_image=_PROD_PROXY_IMAGE,
+        )
         assert s.a2a_schema_drift_check_enabled is False
 
     def test_a2a_schema_drift_check_enabled_constructor_override(
@@ -1251,6 +1347,9 @@ class TestSprint7ASettings:
         s = Settings(
             runtime_profile="prod",
             signing_key_path="/etc/cognic/signing-keys/prod.pem",
+            embedding_model=_PROD_EMBED_MODEL,
+            sandbox_canonical_runtime_python_image=_PROD_RUNTIME_IMAGE,
+            sandbox_canonical_egress_proxy_image=_PROD_PROXY_IMAGE,
         )
         assert s.signing_key_path == "/etc/cognic/signing-keys/prod.pem"
 
@@ -1310,6 +1409,9 @@ class TestSprint7ASettings:
         s = Settings(
             runtime_profile="prod",
             signing_key_path="vault://secret/cognic/signing-keys/prod",
+            embedding_model=_PROD_EMBED_MODEL,
+            sandbox_canonical_runtime_python_image=_PROD_RUNTIME_IMAGE,
+            sandbox_canonical_egress_proxy_image=_PROD_PROXY_IMAGE,
         )
         assert s.signing_key_path == "vault://secret/cognic/signing-keys/prod"
 
@@ -1323,6 +1425,9 @@ class TestSprint7ASettings:
         s = Settings(
             runtime_profile="prod",
             signing_key_path="kms://aws/key/abc123",
+            embedding_model=_PROD_EMBED_MODEL,
+            sandbox_canonical_runtime_python_image=_PROD_RUNTIME_IMAGE,
+            sandbox_canonical_egress_proxy_image=_PROD_PROXY_IMAGE,
         )
         assert s.signing_key_path == "kms://aws/key/abc123"
 
@@ -1870,7 +1975,13 @@ class TestSprint85CheckpointSettings:
     def test_checkpoint_settings_defaults(self) -> None:
         """Defaults match spec §6: 24h retention floor / 10-per-session
         cap / 5-minute reaper sweep cadence."""
-        s = Settings(_env_file=None, runtime_profile="prod")  # type: ignore[call-arg]
+        s = Settings(  # type: ignore[call-arg]
+            _env_file=None,
+            runtime_profile="prod",
+            embedding_model=_PROD_EMBED_MODEL,
+            sandbox_canonical_runtime_python_image=_PROD_RUNTIME_IMAGE,
+            sandbox_canonical_egress_proxy_image=_PROD_PROXY_IMAGE,
+        )
         assert s.sandbox_checkpoint_retention_s == 86_400
         assert s.sandbox_max_checkpoints_per_session == 10
         assert s.sandbox_reaper_interval_s == 300
@@ -1927,7 +2038,13 @@ class TestSprint85CheckpointSettings:
         monkeypatch.setenv("COGNIC_SANDBOX_CHECKPOINT_RETENTION_S", "3600")
         monkeypatch.setenv("COGNIC_SANDBOX_MAX_CHECKPOINTS_PER_SESSION", "5")
         monkeypatch.setenv("COGNIC_SANDBOX_REAPER_INTERVAL_S", "30")
-        s = Settings(_env_file=None, runtime_profile="prod")  # type: ignore[call-arg]
+        s = Settings(  # type: ignore[call-arg]
+            _env_file=None,
+            runtime_profile="prod",
+            embedding_model=_PROD_EMBED_MODEL,
+            sandbox_canonical_runtime_python_image=_PROD_RUNTIME_IMAGE,
+            sandbox_canonical_egress_proxy_image=_PROD_PROXY_IMAGE,
+        )
         assert s.sandbox_checkpoint_retention_s == 3600
         assert s.sandbox_max_checkpoints_per_session == 5
         assert s.sandbox_reaper_interval_s == 30
@@ -1947,7 +2064,13 @@ class TestSprint85CheckpointSettings:
         AgentOS production runs multiple Kubernetes replicas and the
         Sprint 8.5 reaper is single-instance by design; an operator must
         explicitly enable it on exactly one instance."""
-        s = Settings(_env_file=None, runtime_profile="prod")  # type: ignore[call-arg]
+        s = Settings(  # type: ignore[call-arg]
+            _env_file=None,
+            runtime_profile="prod",
+            embedding_model=_PROD_EMBED_MODEL,
+            sandbox_canonical_runtime_python_image=_PROD_RUNTIME_IMAGE,
+            sandbox_canonical_egress_proxy_image=_PROD_PROXY_IMAGE,
+        )
         assert s.sandbox_reaper_enabled is False
 
 

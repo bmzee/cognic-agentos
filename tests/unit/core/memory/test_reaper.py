@@ -280,10 +280,10 @@ class TestAppLifespanOptIn:
     """
 
     def _build_reaper(self) -> tuple[MemoryTombstoneReaper, _StubMemoryAdapter]:
-        from cognic_agentos.core.config import Settings
+        from tests.support.settings_fixtures import prod_settings
 
         adapter = _StubMemoryAdapter()
-        settings = Settings(_env_file=None, runtime_profile="prod")  # type: ignore[call-arg]
+        settings = prod_settings()
         reaper = MemoryTombstoneReaper(
             adapter=cast("object", adapter),  # type: ignore[arg-type]
             settings=settings,
@@ -293,11 +293,11 @@ class TestAppLifespanOptIn:
     async def test_lifespan_starts_reaper_when_provided(self) -> None:
         """When memory_reaper kwarg is supplied, startup creates EXACTLY
         ONE memory-reaper background task and the reaper begins sweeping."""
-        from cognic_agentos.core.config import Settings
         from cognic_agentos.portal.api.app import create_app
+        from tests.support.settings_fixtures import prod_settings
 
         reaper, adapter = self._build_reaper()
-        settings = Settings(_env_file=None, runtime_profile="prod")  # type: ignore[call-arg]
+        settings = prod_settings()
         app = create_app(settings, memory_reaper=reaper)
 
         async with app.router.lifespan_context(app):
@@ -312,11 +312,11 @@ class TestAppLifespanOptIn:
         """Shutdown cancels + awaits the reaper task. A cancelled task
         proves CancelledError propagated to the task boundary cleanly —
         no zombie task lingers past the lifespan."""
-        from cognic_agentos.core.config import Settings
         from cognic_agentos.portal.api.app import create_app
+        from tests.support.settings_fixtures import prod_settings
 
         reaper, _ = self._build_reaper()
-        settings = Settings(_env_file=None, runtime_profile="prod")  # type: ignore[call-arg]
+        settings = prod_settings()
         app = create_app(settings, memory_reaper=reaper)
 
         async with app.router.lifespan_context(app):
@@ -330,10 +330,10 @@ class TestAppLifespanOptIn:
         """The dev / test / pack-only path — create_app without memory_reaper.
         Startup MUST NOT fail, MUST NOT create a memory-reaper task, and
         MUST be SILENT (no warning log)."""
-        from cognic_agentos.core.config import Settings
         from cognic_agentos.portal.api.app import create_app
+        from tests.support.settings_fixtures import prod_settings
 
-        settings = Settings(_env_file=None, runtime_profile="prod")  # type: ignore[call-arg]
+        settings = prod_settings()
         app = create_app(settings)
 
         with caplog.at_level(logging.WARNING, logger="cognic_agentos.portal.api.app"):
@@ -352,11 +352,11 @@ class TestAppLifespanOptIn:
         """The reaper task is created INSIDE the one-shot lifespan —
         never at app-construction time. Pre-startup app.state.memory_reaper_task
         is None even when a reaper IS wired."""
-        from cognic_agentos.core.config import Settings
         from cognic_agentos.portal.api.app import create_app
+        from tests.support.settings_fixtures import prod_settings
 
         reaper, _ = self._build_reaper()
-        settings = Settings(_env_file=None, runtime_profile="prod")  # type: ignore[call-arg]
+        settings = prod_settings()
         app = create_app(settings, memory_reaper=reaper)
 
         # No lifespan entered yet

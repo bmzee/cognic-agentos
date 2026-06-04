@@ -22,7 +22,7 @@ import sys
 from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Final, Literal
 
 from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -58,6 +58,28 @@ _MEMORY_EXPORT_RETENTION_FLOOR_SECONDS: int = 7 * 365 * 24 * 3600
 _MEMORY_EXPORT_BUCKET_PATTERN: str = r"^[a-z0-9][a-z0-9._-]{0,127}$"
 
 _LOG = logging.getLogger("cognic_agentos.core.config")
+
+# --- Wave-1 deploy-safety guard constants (T1) -----------------------------
+# Consumed by ``Settings._validate_wave1_deploy_safety_guards`` to fail-loud at
+# config-load when a dev-shaped default / plaintext secret / unset bootstrap
+# would silently ship into a hardened (stage/prod) deployment. Pure string-shape
+# + profile checks — NO db.adapters / network / filesystem dependency (pinned by
+# the AST import-purity test in tests/unit/core/test_config_wave1_guards.py).
+_STRICT_PROFILES: Final[frozenset[str]] = frozenset({"stage", "prod"})
+_DEV_DEFAULT_EMBEDDING_MODEL: Final[str] = "qwen3-embedding:8b"
+_DEV_DEFAULT_TIER1_ALIAS: Final[str] = "cognic-tier1-dev"
+_DEV_DEFAULT_TIER2_ALIAS: Final[str] = "cognic-tier2-dev"
+# personal-registry MARKER rule (substring test, NOT exact-default comparison):
+# any sandbox image ref CONTAINING this personal namespace fails in strict
+# profiles — so a bank's own registry passes and any ghcr.io/bmzee image fails
+# however it was spelled.
+_PERSONAL_REGISTRY_MARKER: Final[str] = "ghcr.io/bmzee/"
+_SECRET_VAULT_FIELDS: Final[tuple[str, ...]] = (
+    "litellm_master_key",
+    "langfuse_secret_key",
+    "embedding_api_key",
+    "dynatrace_api_token",
+)
 
 
 class SandboxNotAvailableError(RuntimeError):
@@ -614,6 +636,23 @@ class Settings(BaseSettings):
             "dev without cosign installed can iterate."
         ),
     )
+    adversarial_pass_rate_floor: float = Field(
+        default=0.99,
+        ge=0.99,
+        le=1.0,
+        description=(
+            "ADR-011 / ADR-012 §41 gate-3 (adversarial) corpus pass-rate floor "
+            "consumed by ``portal/api/packs/review_routes.py``'s pack-approval "
+            "gate: a pack whose adversarial corpus pass-rate is below this floor "
+            "is refused (gate-3 red). **Tighten-only**: ``ge=0.99`` is the kernel "
+            "floor — bank overlays MAY raise the bar (e.g. 0.995) but can NEVER "
+            "drop it below 0.99 (a critical-controls weakening). Default equals "
+            "the kernel floor ``review_routes._ADVERSARIAL_PASS_RATE_THRESHOLD`` "
+            "(a drift test pins the two in lockstep). Threaded create_app → "
+            "build_packs_router → build_review_routes → the approve handler "
+            "(captured ``settings``, never ``get_settings()``)."
+        ),
+    )
     cosign_path: str | None = Field(
         default=None,
         description=(
@@ -624,8 +663,8 @@ class Settings(BaseSettings):
         ),
     )
     # ----- Sprint-9.5 B4 Model Registry settings (per ADR-013) ---------
-    model_artifact_root: str = Field(
-        default="/var/lib/cognic/model-artifacts",
+    model_artifact_root: str | None = Field(
+        default=None,
         description=(
             "Filesystem root under which model-artefact refs "
             "(``signed_artifact_ref`` / ``sigstore_bundle_ref``) resolve, "
@@ -637,7 +676,13 @@ class Settings(BaseSettings):
             "(rejects absolute paths / URI schemes / ``..`` segments / "
             "symlinks escaping the tenant root / wrong-tenant crossings / "
             "missing or non-file targets). Wave-1 — object-store-backed "
-            "fetch is a Wave-2 seam (ADR-009)."
+            "fetch is a Wave-2 seam (ADR-009). Unset (``None``) is resolved "
+            "per ``runtime_profile`` by ``_resolve_model_artifact_root`` (prod "
+            "→ ``/var/lib/cognic/model-artifacts``; dev / stage → ``$TMPDIR``-"
+            "derived) so dev / test runs don't write into a production-shared "
+            "/var/lib path. Operator override (``COGNIC_MODEL_ARTIFACT_ROOT`` "
+            "or init kwarg) always wins (leaves the field non-None at validator "
+            "entry)."
         ),
     )
     # ----- Sprint-7A T1 settings (per the Sprint-7A plan-of-record) -----
@@ -1195,6 +1240,166 @@ class Settings(BaseSettings):
                 self.local_object_store_root = _default_object_store_root()
         return self
 
+    @model_validator(mode="after")
+    def _resolve_model_artifact_root(self) -> Settings:
+        """Resolve ``model_artifact_root`` per ``runtime_profile`` if unset.
+
+        Mirrors ``_resolve_local_object_store_root``. Prod profile →
+        ``/var/lib/cognic/model-artifacts``. Dev / staging → ``$TMPDIR``-derived
+        path (so test runs + shared developer workstations don't write model
+        artefacts into a production-shared /var/lib path). The sole consumer
+        (``portal/api/models/lifecycle_routes.py``'s
+        ``Path(settings.model_artifact_root)``) always sees a non-None ``str``
+        after this validator runs.
+
+        Operator override via env var (``COGNIC_MODEL_ARTIFACT_ROOT``) or init
+        kwarg always wins — those leave the field non-None at validator entry.
+        """
+
+        if self.model_artifact_root is None:
+            if self.runtime_profile == "prod":
+                self.model_artifact_root = "/var/lib/cognic/model-artifacts"
+            else:
+                self.model_artifact_root = _default_model_artifact_root()
+        return self
+
+    @model_validator(mode="after")
+    def _validate_wave1_deploy_safety_guards(self) -> Settings:
+        """Wave-1 deploy-safety fixes (T1) — fail-loud at config-load when a
+        dev-shaped default, a plaintext secret, or an unset Vault bootstrap
+        would silently ship into a hardened (``stage`` / ``prod``) deployment.
+
+        Eight independent guards (G1-G8). Each raises ``ValueError`` with a
+        closed-reason-prefix (which Pydantic wraps as ``ValidationError``) so
+        operators see the misconfiguration at startup rather than on first use:
+
+        * **G1** — a plaintext secret on any of ``_SECRET_VAULT_FIELDS`` in a
+          strict profile (must be a ``vault://`` URI or ``None``).
+        * **G2** — a deprecated ``*_vault_path`` field set; refused in a strict
+          profile, warned (no raise) in ``dev``.
+        * **G3** — a ``vault://`` secret set without ``vault_addr`` /
+          ``vault_token`` (fires in EVERY profile — the resolver cannot reach
+          Vault without bootstrap).
+        * **G4** — ``require_cosign=False`` in a strict profile (a
+          critical-controls violation).
+        * **G5** — ``embedding_model`` left at the dev default in a strict
+          profile.
+        * **G6** — ``tier1_alias`` / ``tier2_alias`` left at the dev default
+          while external-LLM / non-``self_hosted`` policy is configured (inert
+          under the ``self_hosted`` default → no false positive on a
+          self-hosted bank).
+        * **G7** — a personal-registry (``ghcr.io/bmzee``) sandbox image set in
+          a strict profile (substring marker, so it fires however the ref was
+          spelled).
+        * **G8** — ``vault_token`` set to a ``vault://`` URI (the bootstrap
+          credential can never itself be a Vault reference; fires in EVERY
+          profile, per spec §3.5).
+
+        This validator is INTENTIONALLY separate from
+        ``_validate_signing_key_path_prod_profile_guard`` (prod-only) — G4 is a
+        STRICT-profile guard (stage + prod), not prod-only, so it cannot fold
+        into the prod-only signing-key validator. The guard set is pure
+        string-shape + profile checks: NO db.adapters / network / filesystem
+        dependency (pinned by the AST import-purity test).
+        """
+        strict = self.runtime_profile in _STRICT_PROFILES
+
+        # G1 — plaintext secret forbidden in strict profiles.
+        if strict:
+            for _name in _SECRET_VAULT_FIELDS:
+                _value = getattr(self, _name)
+                if _value is not None and not _value.startswith("vault://"):
+                    raise ValueError(
+                        "secret_plain_value_forbidden_in_strict_profile: "
+                        f"{_name} must be a vault:// URI or None in stage/prod; "
+                        "got a plaintext value"
+                    )
+
+        # G2 — deprecated ``*_vault_path`` fields: refuse in strict, warn in dev.
+        for _vp_name in ("embedding_api_key_vault_path", "dynatrace_api_token_vault_path"):
+            if getattr(self, _vp_name) is not None:
+                if strict:
+                    raise ValueError(
+                        "vault_path_field_deprecated_use_vault_uri: "
+                        f"{_vp_name} is deprecated; set the secret to a vault:// "
+                        "URI on the matching secret field instead"
+                    )
+                if self.runtime_profile == "dev":
+                    _LOG.warning(
+                        "%s is deprecated; set the secret to a vault:// URI on "
+                        "the matching secret field instead (this field will be "
+                        "removed in a future release).",
+                        _vp_name,
+                    )
+
+        # G8 — vault_token is the BOOTSTRAP credential used to authenticate TO
+        # Vault (static-token auth); it can NEVER itself be a ``vault://``
+        # reference (chicken-and-egg, per spec §3.5). Forbidden in EVERY profile,
+        # independent of whether any service secret uses vault://. Placed before
+        # G3 so a vault://-shaped token surfaces this specific reason rather than
+        # the generic bootstrap-unset one.
+        if self.vault_token is not None and self.vault_token.startswith("vault://"):
+            raise ValueError(
+                "vault_token_vault_uri_forbidden: vault_token is the bootstrap "
+                "credential used to authenticate to Vault and cannot itself be a "
+                "vault:// URI; provide the real token (platform-injected secret), "
+                "not a Vault reference"
+            )
+
+        # G3 — vault:// secret set but bootstrap unset (fires in EVERY profile).
+        if any(
+            (getattr(self, _name) or "").startswith("vault://") for _name in _SECRET_VAULT_FIELDS
+        ) and (self.vault_addr is None or self.vault_token is None):
+            raise ValueError(
+                "vault_bootstrap_unset_for_secret_resolution: a vault:// secret "
+                "was set but vault_addr/vault_token are unset; the resolver "
+                "cannot reach Vault"
+            )
+
+        # G4 — require_cosign must not be disabled in strict profiles.
+        if strict and self.require_cosign is False:
+            raise ValueError(
+                "require_cosign_false_forbidden_in_strict_profile: "
+                "require_cosign=False is a critical-controls violation in "
+                "stage/prod"
+            )
+
+        # G5 — embedding_model must not be the dev default in strict profiles.
+        if strict and self.embedding_model == _DEV_DEFAULT_EMBEDDING_MODEL:
+            raise ValueError(
+                "embedding_model_dev_default_in_strict_profile: embedding_model "
+                "is the dev default in stage/prod; set a production model"
+            )
+
+        # G6 — tier aliases must not be dev defaults while external LLM /
+        # non-self_hosted policy is configured (inert under the self_hosted
+        # default).
+        if (
+            strict
+            and (self.allow_external_llm is True or self.policy_mode != "self_hosted")
+            and (
+                self.tier1_alias == _DEV_DEFAULT_TIER1_ALIAS
+                or self.tier2_alias == _DEV_DEFAULT_TIER2_ALIAS
+            )
+        ):
+            raise ValueError(
+                "tier_alias_dev_default_with_external_llm: tier aliases are dev "
+                "defaults while external LLM/non-self_hosted is configured"
+            )
+
+        # G7 — personal-registry sandbox images forbidden in strict profiles.
+        if strict and (
+            _PERSONAL_REGISTRY_MARKER in self.sandbox_canonical_runtime_python_image
+            or _PERSONAL_REGISTRY_MARKER in self.sandbox_canonical_egress_proxy_image
+        ):
+            raise ValueError(
+                "sandbox_canonical_image_personal_default_in_strict_profile: a "
+                "personal-registry (ghcr.io/bmzee) sandbox image is set in "
+                "stage/prod; re-home to your registry"
+            )
+
+        return self
+
     # --- UI event-stream knobs (Sprint 7B.4 per ADR-020) -----------------
     # P1 #6 ownership note: these 5 fields are wired in Settings (NOT in
     # protocol/ui_events.py) so operators can override them via the standard
@@ -1693,6 +1898,21 @@ def _default_object_store_root() -> Path:
     if (tmp := os.environ.get("TMPDIR")) is not None:
         return Path(tmp) / "cognic-agentos-object-store"
     return Path("/var/lib/cognic-agentos/object-store")
+
+
+def _default_model_artifact_root() -> str:
+    """Profile-aware default for ``model_artifact_root`` (dev / staging).
+
+    Mirrors ``_default_object_store_root`` but returns a ``str`` — the field is
+    ``str``-typed (its sole consumer wraps it in ``Path(...)``). Dev / staging
+    derive from ``$TMPDIR`` so test runs + shared developer workstations don't
+    write model artefacts into a production-shared /var/lib path; the absent-
+    ``$TMPDIR`` fallback is the same /var/lib path the prod branch uses.
+    """
+
+    if (tmp := os.environ.get("TMPDIR")) is not None:
+        return str(Path(tmp) / "cognic-model-artifacts")
+    return "/var/lib/cognic/model-artifacts"
 
 
 def build_settings_without_env_file() -> Settings:

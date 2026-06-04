@@ -275,7 +275,13 @@ async def _verify_record_signature(
         or record.signature_digest is None
     ):
         return False
-    root = Path(settings.model_artifact_root)
+    # Wave-1 T4: ``model_artifact_root`` is ``str | None`` (default None,
+    # resolved per-profile by ``Settings._resolve_model_artifact_root`` at
+    # construction, so it is always a non-None str here). Narrow before
+    # ``Path(...)`` — a defensive type/invariant guard, not a behavior change.
+    artifact_root = settings.model_artifact_root
+    assert artifact_root is not None
+    root = Path(artifact_root)
     try:
         artefact = _resolve_under_tenant_root(
             relative_ref=record.signed_artifact_ref,

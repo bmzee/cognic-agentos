@@ -46,7 +46,7 @@ from cognic_agentos.core.decision_history import DecisionHistoryStore
 from cognic_agentos.db.adapters import (
     AdapterRegistry,
     Adapters,
-    build_adapters,
+    build_adapters_async,
     bundled_registry,
     load_bundled_adapters,
 )
@@ -520,7 +520,7 @@ def create_app(
             if adapter_registry is bundled_registry:
                 load_bundled_adapters()
 
-            adapters = build_adapters(settings, registry=adapter_registry)
+            adapters = await build_adapters_async(settings, registry=adapter_registry)
             await adapters.open_all()
             app.state.adapters = adapters
             try:
@@ -759,6 +759,10 @@ def create_app(
                 store=pack_record_store,
                 trust_gate=trust_gate,
                 trust_root_resolver=trust_root_resolver,
+                # Wave-1 T6 — thread the operator-configured adversarial
+                # pass-rate floor from the captured ``settings`` (NOT
+                # ``get_settings()``) through to the approve handler's gate-3.
+                adversarial_pass_rate_floor=settings.adversarial_pass_rate_floor,
             )
         )
         app.state.pack_router_mounted = True

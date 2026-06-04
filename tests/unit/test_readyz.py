@@ -9,12 +9,12 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
-from cognic_agentos.core.config import Settings
 from cognic_agentos.portal.api.app import create_app
+from tests.support.settings_fixtures import prod_settings
 
 
 def _client() -> TestClient:
-    return TestClient(create_app(Settings(runtime_profile="prod")))
+    return TestClient(create_app(prod_settings()))
 
 
 def test_readyz_returns_200_when_all_components_ok() -> None:

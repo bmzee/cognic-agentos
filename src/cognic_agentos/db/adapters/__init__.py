@@ -22,7 +22,7 @@ import importlib
 import logging
 
 from cognic_agentos.db.adapters import protocols
-from cognic_agentos.db.adapters.factory import Adapters, build_adapters
+from cognic_agentos.db.adapters.factory import Adapters, build_adapters, build_adapters_async
 from cognic_agentos.db.adapters.registry import (
     AdapterNotInstalled,
     AdapterRegistry,
@@ -108,6 +108,7 @@ __all__ = [
     "AdapterRegistry",
     "Adapters",
     "build_adapters",
+    "build_adapters_async",
     "bundled_registry",
     "load_bundled_adapters",
     "protocols",
