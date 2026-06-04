@@ -646,8 +646,8 @@ class Settings(BaseSettings):
         ),
     )
     # ----- Sprint-9.5 B4 Model Registry settings (per ADR-013) ---------
-    model_artifact_root: str = Field(
-        default="/var/lib/cognic/model-artifacts",
+    model_artifact_root: str | None = Field(
+        default=None,
         description=(
             "Filesystem root under which model-artefact refs "
             "(``signed_artifact_ref`` / ``sigstore_bundle_ref``) resolve, "
@@ -659,7 +659,13 @@ class Settings(BaseSettings):
             "(rejects absolute paths / URI schemes / ``..`` segments / "
             "symlinks escaping the tenant root / wrong-tenant crossings / "
             "missing or non-file targets). Wave-1 — object-store-backed "
-            "fetch is a Wave-2 seam (ADR-009)."
+            "fetch is a Wave-2 seam (ADR-009). Unset (``None``) is resolved "
+            "per ``runtime_profile`` by ``_resolve_model_artifact_root`` (prod "
+            "→ ``/var/lib/cognic/model-artifacts``; dev / stage → ``$TMPDIR``-"
+            "derived) so dev / test runs don't write into a production-shared "
+            "/var/lib path. Operator override (``COGNIC_MODEL_ARTIFACT_ROOT`` "
+            "or init kwarg) always wins (leaves the field non-None at validator "
+            "entry)."
         ),
     )
     # ----- Sprint-7A T1 settings (per the Sprint-7A plan-of-record) -----
@@ -1215,6 +1221,29 @@ class Settings(BaseSettings):
                 self.local_object_store_root = Path("/var/lib/cognic-agentos/object-store")
             else:
                 self.local_object_store_root = _default_object_store_root()
+        return self
+
+    @model_validator(mode="after")
+    def _resolve_model_artifact_root(self) -> Settings:
+        """Resolve ``model_artifact_root`` per ``runtime_profile`` if unset.
+
+        Mirrors ``_resolve_local_object_store_root``. Prod profile →
+        ``/var/lib/cognic/model-artifacts``. Dev / staging → ``$TMPDIR``-derived
+        path (so test runs + shared developer workstations don't write model
+        artefacts into a production-shared /var/lib path). The sole consumer
+        (``portal/api/models/lifecycle_routes.py``'s
+        ``Path(settings.model_artifact_root)``) always sees a non-None ``str``
+        after this validator runs.
+
+        Operator override via env var (``COGNIC_MODEL_ARTIFACT_ROOT``) or init
+        kwarg always wins — those leave the field non-None at validator entry.
+        """
+
+        if self.model_artifact_root is None:
+            if self.runtime_profile == "prod":
+                self.model_artifact_root = "/var/lib/cognic/model-artifacts"
+            else:
+                self.model_artifact_root = _default_model_artifact_root()
         return self
 
     @model_validator(mode="after")
@@ -1852,6 +1881,21 @@ def _default_object_store_root() -> Path:
     if (tmp := os.environ.get("TMPDIR")) is not None:
         return Path(tmp) / "cognic-agentos-object-store"
     return Path("/var/lib/cognic-agentos/object-store")
+
+
+def _default_model_artifact_root() -> str:
+    """Profile-aware default for ``model_artifact_root`` (dev / staging).
+
+    Mirrors ``_default_object_store_root`` but returns a ``str`` — the field is
+    ``str``-typed (its sole consumer wraps it in ``Path(...)``). Dev / staging
+    derive from ``$TMPDIR`` so test runs + shared developer workstations don't
+    write model artefacts into a production-shared /var/lib path; the absent-
+    ``$TMPDIR`` fallback is the same /var/lib path the prod branch uses.
+    """
+
+    if (tmp := os.environ.get("TMPDIR")) is not None:
+        return str(Path(tmp) / "cognic-model-artifacts")
+    return "/var/lib/cognic/model-artifacts"
 
 
 def build_settings_without_env_file() -> Settings:

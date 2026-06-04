@@ -318,6 +318,7 @@ async def resolve_secret_field(value, *, secret_adapter, field_name):
 
 **Files:**
 - Modify: `src/cognic_agentos/core/config.py` (field type → `str | None`, default `None`; `_default_model_artifact_root()` helper; `model_validator`)
+- Modify: `src/cognic_agentos/portal/api/models/lifecycle_routes.py` — **RECONCILED 2026-06-04 (decision A):** the field becoming `str | None` makes the consumer's `Path(settings.model_artifact_root)` a mypy error (`Path` rejects `None`), so the sole consumer IS touched with a 1-line type-narrow (`assert artifact_root is not None`). The "unaffected" claim in Step 3 below was wrong. CC module → reviewed explicitly + ran the models slice (167 passed).
 - Test: `tests/unit/core/test_config_model_artifact_root.py` (new)
 
 - [ ] **Step 1: Write failing tests (RED).**
@@ -344,7 +345,7 @@ def test_explicit_override_wins():
     assert s.model_artifact_root == "/srv/models"
 ```
 - [ ] **Step 2: RED.** `uv run pytest tests/unit/core/test_config_model_artifact_root.py -q`.
-- [ ] **Step 3: Implement.** Change the field to `model_artifact_root: str | None = Field(default=None, ...)`; add `_default_model_artifact_root()` (mirror `_default_object_store_root()`, config.py:1682 — `$TMPDIR`-derived str, else `/var/lib/cognic/model-artifacts`); add a `model_validator(mode="after")` (mirror `_resolve_local_object_store_root`, config.py:1177): if `None` → prod `"/var/lib/cognic/model-artifacts"`, dev/stage → `_default_model_artifact_root()`. Resolver fills a **str**. The sole consumer `lifecycle_routes.py:278` (`Path(settings.model_artifact_root)`) is unaffected.
+- [ ] **Step 3: Implement.** Change the field to `model_artifact_root: str | None = Field(default=None, ...)`; add `_default_model_artifact_root()` (mirror `_default_object_store_root()`, config.py:1682 — `$TMPDIR`-derived str, else `/var/lib/cognic/model-artifacts`); add a `model_validator(mode="after")` (mirror `_resolve_local_object_store_root`, config.py:1177): if `None` → prod `"/var/lib/cognic/model-artifacts"`, dev/stage → `_default_model_artifact_root()`. Resolver fills a **str**. **RECONCILED (decision A, 2026-06-04):** the sole consumer `lifecycle_routes.py` (`Path(settings.model_artifact_root)`) IS affected — `str | None` makes `Path(None)` a mypy error — so add a 1-line narrow (`artifact_root = settings.model_artifact_root; assert artifact_root is not None; root = Path(artifact_root)`) immediately before the `Path(...)`. (config.py line anchors drifted post-T1: field ~`:649`, `_resolve_local_object_store_root` ~`:1200`, `_default_object_store_root` ~`:1841`.) The test's prod/stage cases must ALSO supply T1-G5/G7-compliant `embedding_model` + non-`bmzee` digest-pinned sandbox images (the RED test above predates T1 and would otherwise trip those guards).
 - [ ] **Step 4: GREEN; Step 5: HALT.**
 
 ---
@@ -420,7 +421,7 @@ For `review_routes`: a test that `_build_adversarial_gate_input(raw, pass_rate_f
 - Every guard has a strict-profile (stage+prod) negative test + a dev-pass test + TM-revert (pin 5).
 - Resolver locked to `"key"` (pin 2); no per-call Vault read (pins 4, T3 step 2).
 - `core/config.py` import-purity test (pin 1, T1).
-- `model_artifact_root` typed `str | None`, consumer unaffected (T4).
+- `model_artifact_root` typed `str | None`; the sole consumer (`lifecycle_routes.py`) is explicitly narrowed (`assert artifact_root is not None` before `Path(...)`) — a CC-reviewed defensive type guard, not a behavior change (decision A, T4).
 - Reason-prefixes are `ValueError` substrings pinned by tests, not a Literal enum (pin 6).
 - Task order is dependency-safe: T2's resolver is imported by T3; T1/T4/T6 touch config.py independently; T5 is isolated; T8 gates everything.
 
