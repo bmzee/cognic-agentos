@@ -23,6 +23,7 @@ from fastapi.testclient import TestClient
 
 from cognic_agentos.core.config import Settings
 from cognic_agentos.portal.api.app import create_app
+from tests.support.settings_fixtures import prod_settings
 
 
 def _client(settings: Settings) -> TestClient:
@@ -33,7 +34,7 @@ class TestSystemPolicyEndpoint:
     def test_self_hosted_defaults_returned(self) -> None:
         """Default Settings → secure self-hosted-first posture per
         ADR-007."""
-        client = _client(Settings(runtime_profile="prod"))
+        client = _client(prod_settings())
         resp = client.get("/api/v1/system/policy")
         assert resp.status_code == 200
         body = resp.json()
@@ -46,8 +47,7 @@ class TestSystemPolicyEndpoint:
         """Operator-declared cloud posture: flag on, mode cloud_mixed,
         allow-list populated."""
         client = _client(
-            Settings(
-                runtime_profile="prod",
+            prod_settings(
                 allow_external_llm=True,
                 policy_mode="cloud_mixed",
                 allowed_providers=["openai", "anthropic"],
@@ -64,7 +64,7 @@ class TestSystemPolicyEndpoint:
         """Operator-facing field is ``mode``, not the internal
         ``policy_mode``. Pinning the rename so a casual rename in
         Settings doesn't silently break portal consumers."""
-        body = _client(Settings(runtime_profile="prod")).get("/api/v1/system/policy").json()
+        body = _client(prod_settings()).get("/api/v1/system/policy").json()
         assert "mode" in body
         assert "policy_mode" not in body
 
@@ -72,8 +72,7 @@ class TestSystemPolicyEndpoint:
         """Tier alias contract + ledger window are part of the intent
         surface so operators can verify them without reading config."""
         client = _client(
-            Settings(
-                runtime_profile="prod",
+            prod_settings(
                 tier1_alias="cognic-tier1-cloud-openai",
                 tier2_alias="cognic-tier2-dev",
                 provider_honesty_ledger_window_minutes=120,
@@ -87,7 +86,7 @@ class TestSystemPolicyEndpoint:
     def test_response_keys_are_stable_set(self) -> None:
         """Lock the public key set so future additions are intentional
         + reviewed (portal contract)."""
-        body = _client(Settings(runtime_profile="prod")).get("/api/v1/system/policy").json()
+        body = _client(prod_settings()).get("/api/v1/system/policy").json()
         assert set(body.keys()) == {
             "allow_external_llm",
             "mode",

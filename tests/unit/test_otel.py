@@ -14,6 +14,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
 
 from cognic_agentos.core.config import Settings
 from cognic_agentos.observability.otel import configure_tracing
+from tests.support.settings_fixtures import prod_settings
 
 
 def _processors(provider: TracerProvider) -> list[object]:
@@ -47,7 +48,7 @@ def test_dev_profile_without_endpoint_uses_synchronous_console_exporter() -> Non
 def test_prod_profile_without_endpoint_installs_no_exporter() -> None:
     """Prod must NOT print spans to stdout — that would corrupt JSON logs."""
 
-    provider = configure_tracing(Settings(runtime_profile="prod"))
+    provider = configure_tracing(prod_settings())
     assert _processors(provider) == []
 
 
@@ -57,8 +58,7 @@ def test_endpoint_set_installs_otlp_exporter() -> None:
     )
 
     provider = configure_tracing(
-        Settings(
-            runtime_profile="prod",
+        prod_settings(
             otel_exporter_endpoint="otel-collector:4317",
             otel_exporter_insecure=True,  # opt-in for the localhost test stub
         )
@@ -80,9 +80,7 @@ def test_otlp_exporter_defaults_to_secure_when_endpoint_set() -> None:
         OTLPSpanExporter,
     )
 
-    provider = configure_tracing(
-        Settings(runtime_profile="prod", otel_exporter_endpoint="otel-collector:4317")
-    )
+    provider = configure_tracing(prod_settings(otel_exporter_endpoint="otel-collector:4317"))
     try:
         proc = _processors(provider)[0]
         assert isinstance(proc, BatchSpanProcessor)
@@ -106,8 +104,8 @@ def test_configure_tracing_returns_new_provider_each_call() -> None:
     the small set of integration tests that own the process state.
     """
 
-    p1 = configure_tracing(Settings(runtime_profile="prod"))
-    p2 = configure_tracing(Settings(runtime_profile="prod"))
+    p1 = configure_tracing(prod_settings())
+    p2 = configure_tracing(prod_settings())
     assert p1 is not p2
     assert isinstance(p1, TracerProvider)
     assert isinstance(p2, TracerProvider)

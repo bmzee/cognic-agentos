@@ -37,13 +37,13 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from cognic_agentos.core.audit import AuditStore, _audit_event, _chain_heads
 from cognic_agentos.core.canonical import ZERO_HASH
-from cognic_agentos.core.config import Settings
 from cognic_agentos.portal.api.app import create_app
 from cognic_agentos.protocol.plugin_registry import (
     DiscoveredPack,
     PluginRecord,
     PluginRegistry,
 )
+from tests.support.settings_fixtures import prod_settings
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -142,7 +142,7 @@ def _make_client(plugin_registry: PluginRegistry | None = None) -> TestClient:
     ``TestClient(app)`` construction does NOT run the lifespan; only
     the context-manager protocol does.
     """
-    settings = Settings(runtime_profile="prod")
+    settings = prod_settings()
     app = create_app(settings, plugin_registry=plugin_registry)
     return TestClient(app)
 

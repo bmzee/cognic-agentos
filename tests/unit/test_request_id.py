@@ -20,9 +20,9 @@ import re
 
 from fastapi.testclient import TestClient
 
-from cognic_agentos.core.config import Settings
 from cognic_agentos.observability.middleware import REQUEST_ID_HEADER
 from cognic_agentos.portal.api.app import create_app
+from tests.support.settings_fixtures import prod_settings
 
 _HEX32 = re.compile(r"^[0-9a-f]{32}$")
 
@@ -41,7 +41,7 @@ _NON_PORTAL_PATH = "/livez"
 
 
 def _client() -> TestClient:
-    return TestClient(create_app(Settings(runtime_profile="prod")))
+    return TestClient(create_app(prod_settings()))
 
 
 def test_request_id_generated_when_absent() -> None:

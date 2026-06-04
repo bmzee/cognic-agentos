@@ -46,6 +46,7 @@ from tests.support.adapter_fixtures import (
     InMemorySecretAdapter,
     InMemoryVectorAdapter,
 )
+from tests.support.settings_fixtures import prod_settings
 
 
 @pytest.fixture
@@ -110,8 +111,7 @@ class TestEffectiveRoutingHappy:
         await empty_ledger.write_row(_row(upstream_model="ollama/qwen3:8b", external=False))
         await empty_ledger.write_row(_row(upstream_model="openai/gpt-5.4", external=True))
         client = _client(
-            Settings(
-                runtime_profile="prod",
+            prod_settings(
                 allow_external_llm=True,
                 policy_mode="cloud_mixed",
                 allowed_providers=["openai"],
@@ -129,8 +129,7 @@ class TestEffectiveRoutingHappy:
 
     async def test_window_minutes_reflects_settings(self, empty_ledger: GatewayCallLedger) -> None:
         client = _client(
-            Settings(
-                runtime_profile="prod",
+            prod_settings(
                 provider_honesty_ledger_window_minutes=120,
             ),
             ledger=empty_ledger,
@@ -154,7 +153,7 @@ class TestEffectiveRoutingHappy:
             )
         )
         client = _client(
-            Settings(runtime_profile="prod", allow_external_llm=True),
+            prod_settings(allow_external_llm=True),
             ledger=empty_ledger,
         )
         with client:
@@ -178,7 +177,7 @@ class TestProfileChipDrift:
         await empty_ledger.write_row(
             _row(upstream_model="openai/gpt-5.4", external=True, provenance="resolved")
         )
-        client = _client(Settings(runtime_profile="prod"), ledger=empty_ledger)
+        client = _client(prod_settings(), ledger=empty_ledger)
         with client:
             body = client.get("/api/v1/system/effective-routing").json()
         assert body["profile"]["intent"] == "self-hosted"
@@ -201,7 +200,7 @@ class TestProfileChipDrift:
                 outcome="upstream_error",
             )
         )
-        client = _client(Settings(runtime_profile="prod"), ledger=empty_ledger)
+        client = _client(prod_settings(), ledger=empty_ledger)
         with client:
             body = client.get("/api/v1/system/effective-routing").json()
         assert body["profile"]["drift_count"] == 1
@@ -220,7 +219,7 @@ class TestProfileChipDrift:
                 outcome="denied",
             )
         )
-        client = _client(Settings(runtime_profile="prod"), ledger=empty_ledger)
+        client = _client(prod_settings(), ledger=empty_ledger)
         with client:
             body = client.get("/api/v1/system/effective-routing").json()
         assert body["profile"]["drift_count"] == 1
@@ -241,7 +240,7 @@ class TestProfileChipDrift:
                 outcome="denied",
             )
         )
-        client = _client(Settings(runtime_profile="prod"), ledger=empty_ledger)
+        client = _client(prod_settings(), ledger=empty_ledger)
         with client:
             body = client.get("/api/v1/system/effective-routing").json()
         assert body["profile"]["drift_count"] == 0
@@ -252,7 +251,7 @@ class TestProfileChipDrift:
         """Self-hosted intent + ledger has only self-hosted rows →
         clean chip."""
         await empty_ledger.write_row(_row(upstream_model="ollama/qwen3:8b", external=False))
-        client = _client(Settings(runtime_profile="prod"), ledger=empty_ledger)
+        client = _client(prod_settings(), ledger=empty_ledger)
         with client:
             body = client.get("/api/v1/system/effective-routing").json()
         assert body["profile"]["chip"] == "self-hosted"
@@ -317,7 +316,7 @@ class TestLangfuseAvailability:
         """No adapter_registry attached → no Langfuse probe possible →
         ``langfuse_available: false``. Endpoint still 200 per ADR-007
         (honesty NEVER fails closed on enrichment outage)."""
-        client = _client(Settings(runtime_profile="prod"), ledger=None)
+        client = _client(prod_settings(), ledger=None)
         with client:
             resp = client.get("/api/v1/system/effective-routing")
         assert resp.status_code == 200
@@ -331,7 +330,7 @@ class TestLangfuseAvailability:
         stub = _StubObservabilityAdapter(
             health_response=AdapterHealth(status="ok", driver="stub-langfuse", latency_ms=1.2)
         )
-        app = create_app(Settings(runtime_profile="prod"))
+        app = create_app(prod_settings())
         with TestClient(app) as client:
             # Lifespan ran with adapter_registry=None and set
             # adapters=None; inject the stub directly so we exercise
@@ -354,7 +353,7 @@ class TestLangfuseAvailability:
                 detail="connection refused",
             )
         )
-        app = create_app(Settings(runtime_profile="prod"))
+        app = create_app(prod_settings())
         with TestClient(app) as client:
             app.state.adapters = _adapters_with_observability(stub)
             resp = client.get("/api/v1/system/effective-routing")
@@ -371,7 +370,7 @@ class TestLangfuseAvailability:
         regression that removed the ``except Exception`` arm or
         re-raised would leak a 500 here."""
         stub = _StubObservabilityAdapter(health_response=RuntimeError)
-        app = create_app(Settings(runtime_profile="prod"))
+        app = create_app(prod_settings())
         with TestClient(app) as client:
             app.state.adapters = _adapters_with_observability(stub)
             resp = client.get("/api/v1/system/effective-routing")
@@ -385,7 +384,7 @@ class TestEmptyLedger:
         """Per ADR-007 §"two layers" the honesty surface NEVER fails
         closed on missing ledger. Operators see an honest empty
         picture, not a 5xx."""
-        client = _client(Settings(runtime_profile="prod"), ledger=None)
+        client = _client(prod_settings(), ledger=None)
         with client:
             resp = client.get("/api/v1/system/effective-routing")
         assert resp.status_code == 200
@@ -399,7 +398,7 @@ class TestEmptyLedger:
     async def test_empty_ledger_returns_empty_aggregates(
         self, empty_ledger: GatewayCallLedger
     ) -> None:
-        client = _client(Settings(runtime_profile="prod"), ledger=empty_ledger)
+        client = _client(prod_settings(), ledger=empty_ledger)
         with client:
             body = client.get("/api/v1/system/effective-routing").json()
         assert body["recent_calls"] == {}
@@ -410,7 +409,7 @@ class TestStableShape:
     def test_response_has_stable_top_level_keys(self) -> None:
         """Lock the public top-level key set so portal consumers see
         a stable contract."""
-        client = _client(Settings(runtime_profile="prod"), ledger=None)
+        client = _client(prod_settings(), ledger=None)
         with client:
             body = client.get("/api/v1/system/effective-routing").json()
         assert set(body.keys()) == {
@@ -466,7 +465,7 @@ class TestRecentCallDetailsModelId:
                 request_id="req-c3-mapped",
             )
         )
-        client = _client(Settings(runtime_profile="prod"), ledger=empty_ledger)
+        client = _client(prod_settings(), ledger=empty_ledger)
         with client:
             body = client.get("/api/v1/system/effective-routing").json()
         details = body["recent_call_details"]
@@ -493,7 +492,7 @@ class TestRecentCallDetailsModelId:
                 request_id="req-c3-unmapped",
             )
         )
-        client = _client(Settings(runtime_profile="prod"), ledger=empty_ledger)
+        client = _client(prod_settings(), ledger=empty_ledger)
         with client:
             body = client.get("/api/v1/system/effective-routing").json()
         details = body["recent_call_details"]
@@ -521,7 +520,7 @@ class TestRecentCallDetailsModelId:
                 model_id="m-a",
             )
         )
-        client = _client(Settings(runtime_profile="prod"), ledger=empty_ledger)
+        client = _client(prod_settings(), ledger=empty_ledger)
         with client:
             body = client.get("/api/v1/system/effective-routing").json()
         details = body["recent_call_details"]
@@ -558,7 +557,7 @@ class TestRecentCallDetailsModelId:
                 model_id="m-a",
             )
         )
-        client = _client(Settings(runtime_profile="prod"), ledger=empty_ledger)
+        client = _client(prod_settings(), ledger=empty_ledger)
         with client:
             body = client.get("/api/v1/system/effective-routing").json()
         # The count-map key MUST be the upstream_model string, NOT the model_id.

@@ -14,6 +14,7 @@ from cognic_agentos.observability.logging import (
     bind_request_id,
     configure_logging,
 )
+from tests.support.settings_fixtures import prod_settings
 
 
 @contextmanager
@@ -124,7 +125,7 @@ def test_actual_request_emits_json_access_line_with_request_id_and_trace_id() ->
 
     buffer, handler = _capture_access_logs()
     try:
-        app = create_app(Settings(runtime_profile="prod", log_format="json"))
+        app = create_app(prod_settings(log_format="json"))
         client = TestClient(app)
         response = client.get("/api/v1/healthz")
         assert response.status_code == 200
@@ -172,7 +173,7 @@ def test_access_log_never_records_query_string_values_or_names() -> None:
 
     buffer, handler = _capture_access_logs()
     try:
-        app = create_app(Settings(runtime_profile="prod", log_format="json"))
+        app = create_app(prod_settings(log_format="json"))
         client = TestClient(app)
         response = client.get(
             "/api/v1/healthz?token=BEARER-TOPSECRET-9999&account=PK36ABL0000123456789&ssn=000-00-1234"
@@ -220,7 +221,7 @@ def test_uvicorn_access_logger_silenced_after_create_app() -> None:
 
     from cognic_agentos.portal.api.app import create_app
 
-    create_app(Settings(runtime_profile="prod"))
+    create_app(prod_settings())
     uvicorn_access = logging.getLogger("uvicorn.access")
     assert uvicorn_access.disabled is True
     assert uvicorn_access.propagate is False

@@ -31,6 +31,7 @@ import httpx
 
 from cognic_agentos.core.config import Settings
 from cognic_agentos.portal.api.app import create_app
+from tests.support.settings_fixtures import prod_settings
 
 if TYPE_CHECKING:
     from cognic_agentos.sandbox.checkpoint_store import CheckpointStore
@@ -54,7 +55,7 @@ class _StubCheckpointStore:
 
 
 def _settings() -> Settings:
-    return Settings(_env_file=None, runtime_profile="prod")  # type: ignore[call-arg]
+    return prod_settings()
 
 
 async def test_lifespan_starts_reaper_when_checkpoint_store_wired() -> None:
