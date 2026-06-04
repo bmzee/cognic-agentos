@@ -636,6 +636,23 @@ class Settings(BaseSettings):
             "dev without cosign installed can iterate."
         ),
     )
+    adversarial_pass_rate_floor: float = Field(
+        default=0.99,
+        ge=0.99,
+        le=1.0,
+        description=(
+            "ADR-011 / ADR-012 §41 gate-3 (adversarial) corpus pass-rate floor "
+            "consumed by ``portal/api/packs/review_routes.py``'s pack-approval "
+            "gate: a pack whose adversarial corpus pass-rate is below this floor "
+            "is refused (gate-3 red). **Tighten-only**: ``ge=0.99`` is the kernel "
+            "floor — bank overlays MAY raise the bar (e.g. 0.995) but can NEVER "
+            "drop it below 0.99 (a critical-controls weakening). Default equals "
+            "the kernel floor ``review_routes._ADVERSARIAL_PASS_RATE_THRESHOLD`` "
+            "(a drift test pins the two in lockstep). Threaded create_app → "
+            "build_packs_router → build_review_routes → the approve handler "
+            "(captured ``settings``, never ``get_settings()``)."
+        ),
+    )
     cosign_path: str | None = Field(
         default=None,
         description=(

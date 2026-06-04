@@ -51,7 +51,10 @@ from cognic_agentos.portal.api.packs.inspection_routes import (
     register_inspection_list,
 )
 from cognic_agentos.portal.api.packs.operator_routes import build_operator_routes
-from cognic_agentos.portal.api.packs.review_routes import build_review_routes
+from cognic_agentos.portal.api.packs.review_routes import (
+    _ADVERSARIAL_PASS_RATE_THRESHOLD,
+    build_review_routes,
+)
 from cognic_agentos.protocol.trust_gate import TrustGate
 from cognic_agentos.protocol.trust_root_resolver import TrustRootResolver
 
@@ -66,6 +69,7 @@ def build_packs_router(
     store: PackRecordStore,
     trust_gate: TrustGate | None = None,
     trust_root_resolver: TrustRootResolver | None = None,
+    adversarial_pass_rate_floor: float = _ADVERSARIAL_PASS_RATE_THRESHOLD,
 ) -> APIRouter:
     """Build the pack-router sub-tree.
 
@@ -115,6 +119,7 @@ def build_packs_router(
             store=store,
             trust_gate=trust_gate,
             trust_root_resolver=trust_root_resolver,
+            adversarial_pass_rate_floor=adversarial_pass_rate_floor,
         )
     )
     # T6 — operator surface endpoints under ``/api/v1/packs``

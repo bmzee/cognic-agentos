@@ -365,9 +365,12 @@ def test_explicit_override_wins():
 
 ## Task 6: `adversarial_pass_rate_floor` Settings field + `review_routes` parameterization
 
-**Files:**
-- Modify: `src/cognic_agentos/core/config.py` (new field); `src/cognic_agentos/portal/api/packs/review_routes.py` (parameterize the helper + update the caller)
-- Test: `tests/unit/core/test_config_adversarial_floor.py` + `tests/unit/portal/api/packs/test_review_routes_floor.py`
+**Files:** — **RECONCILED 2026-06-04 (4 files, not 2):** Step 3 below assumed `settings` was captured by `build_review_routes` — it is NOT; `settings` reaches neither `build_review_routes` nor `build_packs_router`. The floor is threaded as an optional param `create_app → build_packs_router → build_review_routes → the approve-handler closure` (mirrors the existing `trust_gate` thread), so T6 touches FOUR source files.
+- Modify: `src/cognic_agentos/core/config.py` (new tighten-only field)
+- Modify: `src/cognic_agentos/portal/api/packs/review_routes.py` (parameterize `_build_adversarial_gate_input` + a `build_review_routes` optional param + the handler caller; KEEP `_ADVERSARIAL_PASS_RATE_THRESHOLD` as the named kernel floor the defaults reference)
+- Modify: `src/cognic_agentos/portal/api/packs/router.py` (`build_packs_router` optional param, forwarded) — CC/shared surface
+- Modify: `src/cognic_agentos/portal/api/app.py` (`create_app` threads `settings.adversarial_pass_rate_floor` — captured `settings`, NOT `get_settings()`) — CC/shared surface
+- Test: `tests/unit/core/test_config_adversarial_floor.py` (tighten-only + drift) + `tests/unit/portal/api/packs/test_review_routes_adversarial_floor.py` (parameterization + caller threading)
 
 - [ ] **Step 1: Write failing tests (RED).**
 ```python
@@ -386,7 +389,7 @@ def test_floor_rejects_below_kernel_floor():
 ```
 For `review_routes`: a test that `_build_adversarial_gate_input(raw, pass_rate_floor=0.999)` builds the gate input using the passed floor (a pass_rate of 0.995 fails against 0.999 but passes against 0.99) — proving the threshold is parameterized, not the module constant.
 - [ ] **Step 2: RED.**
-- [ ] **Step 3: Implement.** Add `adversarial_pass_rate_floor: float = Field(default=0.99, ge=0.99, le=1.0, description=...)` to `core/config.py`. In `review_routes.py`: change `_build_adversarial_gate_input(raw: Any)` (:221) → `_build_adversarial_gate_input(raw: Any, *, pass_rate_floor: float)`; replace the `_ADVERSARIAL_PASS_RATE_THRESHOLD` comparison (:263) with `pass_rate_floor`; remove or keep `_ADVERSARIAL_PASS_RATE_THRESHOLD` as the documented kernel-floor constant only. Update the caller at `:826` to pass `pass_rate_floor=settings.adversarial_pass_rate_floor` (`settings` is captured by `build_review_routes` :478). **Not** `get_settings()`.
+- [ ] **Step 3: Implement.** Add `adversarial_pass_rate_floor: float = Field(default=0.99, ge=0.99, le=1.0, description=...)` to `core/config.py`. In `review_routes.py`: change `_build_adversarial_gate_input(raw: Any)` → `_build_adversarial_gate_input(raw: Any, *, pass_rate_floor: float = _ADVERSARIAL_PASS_RATE_THRESHOLD)` (**RECONCILED: optional default = the named kernel floor** so the existing direct callers in `test_review_approve_5_gate.py` stay stable); replace the `_ADVERSARIAL_PASS_RATE_THRESHOLD` comparison with `pass_rate_floor`; **KEEP** `_ADVERSARIAL_PASS_RATE_THRESHOLD` as the named kernel floor the route + helper defaults reference (drift test pins `Settings().adversarial_pass_rate_floor == _ADVERSARIAL_PASS_RATE_THRESHOLD`). The approve handler passes `pass_rate_floor=adversarial_pass_rate_floor` (the closure-captured param). **RECONCILED THREADING — the "settings captured by build_review_routes" claim was WRONG:** `build_review_routes` + `build_packs_router` each gain an optional `adversarial_pass_rate_floor: float = _ADVERSARIAL_PASS_RATE_THRESHOLD` (optional → the 17 + 65 existing direct test callers stay stable; `router.py` imports the constant from `review_routes`); `create_app` threads `settings.adversarial_pass_rate_floor` (captured `settings`, **NOT** `get_settings()`) into `build_packs_router`. Decision A-equivalent (4-file thread, keep the constant) user-approved 2026-06-04.
 - [ ] **Step 4: GREEN; Step 5: HALT.**
 
 ---

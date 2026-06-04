@@ -218,13 +218,17 @@ def _build_evaluation_gate_input(raw: Any) -> EvaluationGateInput:
     )
 
 
-def _build_adversarial_gate_input(raw: Any) -> AdversarialGateInput:
+def _build_adversarial_gate_input(
+    raw: Any, *, pass_rate_floor: float = _ADVERSARIAL_PASS_RATE_THRESHOLD
+) -> AdversarialGateInput:
     """Build the gate-3 (adversarial) input from ``payload["adversarial"]``.
 
     Per plan §513: same evidence-not-attached default as evaluation. A
     present payload (``{pass_rate, high_severity_failures}``) reads:
-    any high-severity failure → ``red``; else ``pass_rate`` below the
-    ADR-011 floor → ``red``; else ``green``.
+    any high-severity failure → ``red``; else ``pass_rate`` below
+    ``pass_rate_floor`` (the operator-configured ADR-011 floor; defaults to the
+    kernel floor ``_ADVERSARIAL_PASS_RATE_THRESHOLD``; Wave-1 T6) → ``red``;
+    else ``green``.
 
     **Fail-closed (reviewer P2):** ``pass_rate`` must be a finite real
     number in ``[0.0, 1.0]`` (see :func:`_is_valid_rate`) and
@@ -260,7 +264,7 @@ def _build_adversarial_gate_input(raw: Any) -> AdversarialGateInput:
             pass_rate=float(pass_rate),
             high_severity_failures=high_severity_failures,
         )
-    if pass_rate < _ADVERSARIAL_PASS_RATE_THRESHOLD:
+    if pass_rate < pass_rate_floor:
         return AdversarialGateInput(
             outcome="red",
             red_reason="adversarial_corpus_pass_rate_below_threshold",
@@ -480,6 +484,7 @@ def build_review_routes(
     store: PackRecordStore,
     trust_gate: TrustGate | None = None,
     trust_root_resolver: TrustRootResolver | None = None,
+    adversarial_pass_rate_floor: float = _ADVERSARIAL_PASS_RATE_THRESHOLD,
 ) -> APIRouter:
     """Build the review-surface sub-router.
 
@@ -823,7 +828,10 @@ def build_review_routes(
             request_id=request_id,
         )
         evaluation_input = _build_evaluation_gate_input(submit_row.payload.get("evaluation"))
-        adversarial_input = _build_adversarial_gate_input(submit_row.payload.get("adversarial"))
+        adversarial_input = _build_adversarial_gate_input(
+            submit_row.payload.get("adversarial"),
+            pass_rate_floor=adversarial_pass_rate_floor,
+        )
         owasp_input = _build_owasp_gate_input(submit_row.payload.get("conformance"))
 
         # --- Step 8: compose ---
