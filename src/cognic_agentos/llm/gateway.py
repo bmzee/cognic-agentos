@@ -208,7 +208,11 @@ class LLMGateway:
     Constructor takes the substrate (settings, ledger, audit_store,
     rate_limiter, preflight, sla_policy) plus optional input + output
     guardrail pipelines. ``http_client`` is injectable for testing
-    via ``respx``.
+    via ``respx``. ``litellm_master_key`` is the pre-resolved seam for
+    the deferred harness wiring (Wave-1 T3): a future harness resolves
+    a ``vault://`` URI and passes the result here; the key is read once
+    at construction, and a ``vault://`` URI with no resolved value fails
+    loud so ``Bearer vault://...`` can never reach the wire.
     """
 
     def __init__(
@@ -223,6 +227,7 @@ class LLMGateway:
         input_pipeline: GuardrailPipeline | None = None,
         output_pipeline: GuardrailPipeline | None = None,
         http_client: _httpx.AsyncClient | None = None,
+        litellm_master_key: str | None = None,
     ) -> None:
         self._settings = settings
         self._ledger = ledger
@@ -233,6 +238,24 @@ class LLMGateway:
         self._input_pipeline = input_pipeline
         self._output_pipeline = output_pipeline
         self._http = http_client or _httpx.AsyncClient(timeout=settings.llm_timeout_s)
+        # Wave-1 T3: resolve the LiteLLM master key ONCE at construction. A
+        # future harness resolves a vault:// URI via
+        # ``db.adapters.secret_resolution.resolve_secret_field`` and passes the
+        # result as ``litellm_master_key=``. If no pre-resolved value is passed
+        # AND ``settings.litellm_master_key`` is a vault:// URI, fail loud — the
+        # gateway must NEVER put "Bearer vault://..." on the wire.
+        if litellm_master_key is None and (
+            settings.litellm_master_key is not None
+            and settings.litellm_master_key.startswith("vault://")
+        ):
+            raise RuntimeError(
+                "litellm_master_key_unresolved_vault_uri: settings.litellm_master_key "
+                "is a vault:// URI but no resolved value was passed; the harness must "
+                "resolve it and pass litellm_master_key="
+            )
+        self._litellm_master_key: str | None = (
+            litellm_master_key if litellm_master_key is not None else settings.litellm_master_key
+        )
 
     async def completion(
         self,
@@ -330,7 +353,7 @@ class LLMGateway:
                     resp = await self._http.post(
                         f"{self._settings.litellm_base_url}/chat/completions",
                         json={"model": litellm_alias, "messages": messages},
-                        headers={"Authorization": (f"Bearer {self._settings.litellm_master_key}")},
+                        headers={"Authorization": (f"Bearer {self._litellm_master_key}")},
                     )
                 except (
                     _httpx.ConnectError,
