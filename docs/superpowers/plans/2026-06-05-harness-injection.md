@@ -1630,7 +1630,11 @@ Expected: clean. The **only** `# type: ignore[arg-type]` introduced is the `Memo
 - [ ] **Step 3: Critical-controls coverage gate (verify NO regression)**
 
 Run: `uv run python tools/check_critical_coverage.py` (against a fresh `--cov-branch coverage.json` if the tool requires it).
-Expected: PASS, `_EXPECTED_ENTRY_COUNT` **unchanged**. The harness is OFF the per-file gate (Doctrine F — enforcement lives in the wired CC modules: `llm/gateway.py`, the memory gate, `OPAEngine`). **No on-gate module was modified** (config/app/routes/factory are off-gate; `gateway.py`/`kill_switches.py` were constructed-not-edited). If the tool reports a delta, STOP and surface — it means an on-gate module changed unexpectedly.
+Expected: PASS, count (`len(_CRITICAL_FILES)` = **112**) **unchanged** — the harness is OFF the per-file gate (Doctrine F — enforcement lives in the wired CC modules: the memory gate / api / storage / consent, `core/dlp/scanner.py`, `core/emergency/kill_switches.py`, `OPAEngine`).
+
+> **CORRECTION (as-built 2026-06-05):** this step originally claimed "routes off-gate" — that is **WRONG**. `portal/api/memory/routes.py` IS on the gate (`0.95`/`0.90`, `_CRITICAL_FILES` entry), and **T7 modified it** (the request-time resolver + `503` path + 4 handler dep injections). So the gate is NOT a formality here — it must confirm routes.py still meets floor. The Z-gate confirmed **line 100.00% / branch 100.00%** (T7's new code is fully covered). `config` / `app` / `factory` ARE off-gate. Lesson: a task touching a `_CRITICAL_FILES` module should run this gate AT that commit, not defer to the Z-gate.
+
+If the tool reports a delta on any of the 112, STOP and surface.
 
 - [ ] **Step 4: Write the closeout**
 
@@ -1639,7 +1643,8 @@ Expected: PASS, `_EXPECTED_ENTRY_COUNT` **unchanged**. The harness is OFF the pe
 - [ ] **Step 5: HALT-before-commit (READY FOR GATE), then commit**
 
 ```bash
-git add docs/closeouts/2026-06-05-harness-injection.md
+git add docs/closeouts/2026-06-05-harness-injection.md \
+        docs/superpowers/plans/2026-06-05-harness-injection.md
 git commit -m "docs(harness): Workstream #2 closeout — harness injection (gateway + governed memory wired)"
 ```
 
