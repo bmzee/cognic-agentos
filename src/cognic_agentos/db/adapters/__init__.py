@@ -56,6 +56,9 @@ _BUNDLED_ADAPTER_OPTIONAL_DEPS: dict[str, frozenset[str]] = {
     # ADR-016 retention requirement). Pure-stdlib (Path / os / json /
     # asyncio); no optional deps so kernel images carry it too.
     "cognic_agentos.db.adapters.local_object_store_adapter": frozenset(),
+    # Harness Injection — optional ``adapters``-extra cache driver. ``redis`` is
+    # absent from the kernel image; a miss here is legitimate (skipped).
+    "cognic_agentos.db.adapters.redis_adapter": frozenset({"redis"}),
 }
 
 

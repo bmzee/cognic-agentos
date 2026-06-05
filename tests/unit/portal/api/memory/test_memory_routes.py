@@ -803,3 +803,46 @@ class TestSelectorValidation:
         )
         assert resp.status_code == 422
         assert factory.last_context is None
+
+
+# ---------------------------------------------------------------------------
+# 8. Request-time factory resolution (T7 — closure -> app.state + 503 fail-closed)
+# ---------------------------------------------------------------------------
+
+
+class TestRequestTimeFactoryResolution:
+    """The 4 handlers resolve the MemoryAPI factory from
+    ``request.app.state.memory_api_factory`` at REQUEST time (not a closure
+    captured at build time). A mounted route whose factory is absent fails
+    closed ``503 memory_unavailable`` — never 500, never RBAC-masked.
+
+    Regression for the closure->app.state migration: with the pre-T7 closure
+    code, nulling ``app.state.memory_api_factory`` has NO effect (the handler
+    used the captured kwarg), so the request would return 200 and this test
+    would FAIL. It passes only when the handler reads app.state per request."""
+
+    def test_mounted_but_unwired_factory_returns_503(self) -> None:
+        # Mount the router the T7 way: a factory IS supplied at construction
+        # (so the unchanged ``if memory_api_factory is not None`` gate mounts
+        # it), then null app.state to simulate the prod lifespan not yet having
+        # populated the factory (T8's construction-time mount + late
+        # build_runtime population). RBAC MUST pass (the default actor holds
+        # memory.read) so the FACTORY dependency is what fires — the
+        # load-bearing assertion is the exact 503 memory_unavailable.
+        actor = _make_memory_actor()  # holds memory.read among others
+        factory = _CapturingFactory(_FakeMemoryAPI())
+        app = _build_app(actor=actor, factory=factory)
+        assert getattr(app.state, "memory_router_mounted", False) is True
+        app.state.memory_api_factory = None  # mounted, but unwired
+        client = TestClient(app)
+
+        resp = client.get(
+            "/api/v1/memory/records",
+            params={"subject_kind": "human", "subject_id": "user-1", "agent_id": "agent-1"},
+        )
+
+        assert resp.status_code == 503
+        assert resp.json()["detail"]["reason"] == "memory_unavailable"
+        # The construction-supplied factory was NEVER invoked — the dep fired
+        # the 503 before the handler body built a context.
+        assert factory.last_context is None

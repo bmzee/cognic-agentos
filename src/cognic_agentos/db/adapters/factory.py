@@ -48,6 +48,7 @@ class Adapters:
     secret: P.SecretAdapter
     embedding: P.EmbeddingAdapter
     observability: P.ObservabilityAdapter
+    cache: P.CacheAdapter | None = None
     object_store: P.ObjectStoreAdapter | None = None
     _all: list[Any] = field(default_factory=list, init=False, repr=False)
 
@@ -59,6 +60,8 @@ class Adapters:
             self.embedding,
             self.observability,
         ]
+        if self.cache is not None:
+            self._all.append(self.cache)
         if self.object_store is not None:
             self._all.append(self.object_store)
 
@@ -118,6 +121,14 @@ def build_adapters(
     embedding_cls = reg.resolve("embedding", settings.embed_driver)
     observability_cls = reg.resolve("observability", settings.obs_driver)
 
+    # Cache adapter — the ONLY optional-with-opt-out adapter. ``none`` means the
+    # operator runs no cache (pack-only deploys without governed memory). Any
+    # other driver resolves through the registry (fail-loud if unregistered).
+    cache_instance: P.CacheAdapter | None = None
+    if settings.cache_driver != "none":
+        cache_cls = reg.resolve("cache", settings.cache_driver)
+        cache_instance = cache_cls(*_cache_args(settings))
+
     # Sprint 4 — object_store wiring. Resolve UNCONDITIONALLY so a
     # missing driver surfaces as ``AdapterNotInstalled`` per ADR-009's
     # no-silent-fallback rule. R1 reviewer-P2: the previous shape
@@ -138,6 +149,7 @@ def build_adapters(
         secret=secret_cls(*_secret_args(settings)),
         embedding=embedding_cls(*_embedding_args(settings)),
         observability=observability_cls(*_observability_args(settings)),
+        cache=cache_instance,
         object_store=object_store_instance,
     )
 
@@ -254,4 +266,12 @@ def _object_store_args(s: Settings) -> tuple[Any, ...]:
         # ``local_object_store_root`` is non-None by the time the
         # factory reads it (profile-aware default applied).
         return (s.local_object_store_root,)
+    return ()
+
+
+def _cache_args(s: Settings) -> tuple[Any, ...]:
+    if s.cache_driver == "memory":
+        return ()
+    if s.cache_driver == "redis":
+        return (s.redis_url,)
     return ()

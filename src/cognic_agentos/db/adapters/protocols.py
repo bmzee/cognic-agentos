@@ -133,6 +133,42 @@ class VectorAdapter(Protocol):
 
 
 @runtime_checkable
+class _AsyncKVClient(Protocol):
+    """Minimal async key-value client the cache adapter exposes via ``.client``.
+
+    Deliberately permissive (``set(*args, **kwargs)``) so the value is assignable
+    at BOTH memory consumers without friction —
+    ``core/memory/storage._AsyncRedisLike`` (scratch tier) and
+    ``core/emergency/kill_switches._AsyncRedisKVLike`` (write-freeze). The real
+    ``redis.asyncio.Redis`` and the in-memory test client both satisfy it.
+    """
+
+    async def get(self, key: str) -> Any: ...
+    async def set(self, *args: Any, **kwargs: Any) -> Any: ...
+
+
+@runtime_checkable
+class CacheAdapter(Protocol):
+    """Cache / ephemeral async-KV adapter — the harness ships ``redis``.
+
+    ``.client`` is the live async KV client the memory subsystem injects into
+    ``RedisMemoryAdapter`` (scratch) + ``RedisMemoryWriteFreezeKillSwitch``
+    (ADR-018). It mirrors ``RelationalAdapter.engine``: owned + lifecycle-managed
+    by the adapter (created by ``connect()``, closed by ``close()``); consumers
+    use it but MUST NOT close it. Accessed before ``connect()`` it raises
+    ``RuntimeError`` — fail loud rather than yield a half-live handle.
+    """
+
+    async def connect(self) -> None: ...
+
+    @property
+    def client(self) -> _AsyncKVClient: ...
+
+    async def close(self) -> None: ...
+    async def health_check(self) -> AdapterHealth: ...
+
+
+@runtime_checkable
 class SecretAdapter(Protocol):
     """Secrets manager — Sprint 1C ships vault."""
 

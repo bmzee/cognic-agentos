@@ -17,6 +17,17 @@ constructor annotation — that import never executes at runtime, so it does not
 open a bypass. The collector below skips any import nested inside an
 ``if TYPE_CHECKING:`` block.
 
+Composition-root exemption (Harness-Injection T6 reconciliation):
+``harness/runtime.py`` is the ONE OS module allowed to runtime-import
+``core.memory.storage``. It is the dependency-injection composition root — its
+job is to NAME the concrete ``PostgresMemoryAdapter`` / ``RedisMemoryAdapter``
+and inject them INTO ``MemoryAPI`` (which then runs every op through
+``MemoryGate``). It constructs adapters; it MUST NOT call ``put`` / ``get`` /
+``list_*`` on them directly. The exemption is path-pinned to that one file
+(analogous to ``storage.py``'s own self-exemption), and
+``test_composition_root_is_the_only_runtime_importer`` asserts no OTHER module
+ever joins the allowlist.
+
 AST-walk idiom mirrors ``tests/unit/architecture/test_no_pack_imports.py`` (the
 ``SRC_ROOT.rglob`` source-tree walk + ``__pycache__`` / ``cli/templates`` skips)
 extended with a ``TYPE_CHECKING``-aware import collector.
@@ -35,6 +46,15 @@ SRC_ROOT = Path(__file__).resolve().parents[3] / "src" / "cognic_agentos"
 #: — it IS that module. Compared by resolved path so a rename surfaces here.
 _STORAGE_MODULE: Path = SRC_ROOT / "core" / "memory" / "storage.py"
 
+#: The composition root — the ONE OS module allowed to RUNTIME-import
+#: ``core.memory.storage``. As the dependency-injection composition root,
+#: ``build_runtime`` NAMES the concrete Postgres / Redis adapters and injects
+#: them into ``MemoryAPI`` (which enforces ``MemoryGate`` on every op); it MUST
+#: NOT call storage operations (``put`` / ``get`` / ``list_*``) directly. The
+#: exemption is path-pinned (a rename surfaces here) and its NARROWNESS is
+#: enforced by ``test_composition_root_is_the_only_runtime_importer``.
+_COMPOSITION_ROOT_EXEMPT: Path = SRC_ROOT / "harness" / "runtime.py"
+
 #: Jinja2 scaffold templates carry ``{{ ... }}`` placeholders and are not valid
 #: Python until rendered — same carve-out as ``test_no_pack_imports.py``.
 _CLI_TEMPLATES_ROOT: Path = SRC_ROOT / "cli" / "templates"
@@ -51,6 +71,7 @@ def _iter_py_files() -> list[Path]:
         if "__pycache__" not in p.parts
         and not p.is_relative_to(_CLI_TEMPLATES_ROOT)
         and p.resolve() != _STORAGE_MODULE.resolve()
+        and p.resolve() != _COMPOSITION_ROOT_EXEMPT.resolve()
     )
 
 
@@ -175,3 +196,34 @@ def test_collector_detects_a_runtime_import(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     assert FORBIDDEN_MODULE not in _runtime_import_modules(guarded)
+
+
+def test_composition_root_is_the_only_runtime_importer() -> None:
+    """The allowlist is NARROW and the exemption is LOAD-BEARING. Scanning the
+    WHOLE source tree (every file the parametrized guard sees PLUS the two
+    exempted ones), the ONLY module that runtime-imports ``core.memory.storage``
+    is the composition root. ``storage.py`` defines the symbols (it does not
+    import itself) and ``api.py``'s import is ``TYPE_CHECKING``-guarded, so
+    neither appears here.
+
+    This is the guard against the per-file exemption silently widening the
+    bypass surface: a NEW offender anywhere makes the set grow and trips this
+    test (the parametrized guard would also catch it — belt and suspenders), and
+    if the composition root ever STOPS importing storage the set shrinks,
+    flagging a now-stale exemption that should be removed."""
+    importers = {
+        p.resolve()
+        for p in SRC_ROOT.rglob("*.py")
+        if "__pycache__" not in p.parts
+        and not p.is_relative_to(_CLI_TEMPLATES_ROOT)
+        and any(
+            m == FORBIDDEN_MODULE or m.startswith(FORBIDDEN_MODULE + ".")
+            for m in _runtime_import_modules(p)
+        )
+    }
+    assert importers == {_COMPOSITION_ROOT_EXEMPT.resolve()}, (
+        f"Expected ONLY the composition root ({_COMPOSITION_ROOT_EXEMPT.name}) to "
+        f"runtime-import {FORBIDDEN_MODULE}; got "
+        f"{sorted(str(p.relative_to(SRC_ROOT)) for p in importers)}. A new entry is a "
+        f"gate-bypass regression; a missing composition root means the exemption is stale."
+    )

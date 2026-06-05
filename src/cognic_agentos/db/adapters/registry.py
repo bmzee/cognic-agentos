@@ -20,7 +20,7 @@ from cognic_agentos.db.adapters import protocols as P
 # Sprint 11.5 adds "memory" (per ADR-019) without modifying this module
 # (the AdapterKind alias is convenience typing for Sprint 1C consumers).
 AdapterKind = Literal[
-    "relational", "vector", "secret", "embedding", "object_store", "observability"
+    "relational", "vector", "secret", "embedding", "object_store", "observability", "cache"
 ]
 
 # The PEP-544 protocol classes exposed alongside each kind — used by tests
@@ -34,6 +34,7 @@ PROTOCOL_FOR_KIND: dict[str, type] = {
     "embedding": P.EmbeddingAdapter,
     "object_store": P.ObjectStoreAdapter,
     "observability": P.ObservabilityAdapter,
+    "cache": P.CacheAdapter,
 }
 
 

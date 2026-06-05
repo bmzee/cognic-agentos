@@ -9,21 +9,41 @@ STRICT = ("stage", "prod")
 _PIN = "@sha256:" + "a" * 64  # valid digest-pin (satisfies the digest-pin field-validator)
 
 
-def _base(**kw: Any) -> dict[str, Any]:
-    # Sets EVERY other strict-profile guard to a PASSING value so only the field
-    # under test (via **kw) trips its guard. Bootstrap present (G3), prod embedding
-    # model (G5), non-personal digest-pinned sandbox images (G7); tier aliases stay
-    # inert under the self_hosted default (G6). Each test overrides the one field it targets.
-    # The dict is typed ``dict[str, Any]`` (mirroring tests/unit/core/test_vault_transport.py
-    # ``_settings``) so ``Settings(**base)`` matches every field overload — a str-valued
-    # dict would not satisfy bool / int / Path fields under strict mypy.
+def prod_compliant_settings_kwargs(**kw: Any) -> dict[str, Any]:
+    """Strict-profile (``prod``) Settings kwargs that PASS every G1-G8 guard.
+
+    Sets EVERY strict-profile guard to a passing value so only the field a caller
+    overrides (via ``**kw``) can trip a guard: bootstrap present (G3), prod
+    embedding model (G5), non-personal digest-pinned sandbox images (G7); tier
+    aliases stay inert under the ``self_hosted`` default (G6); ``runtime_profile``
+    is ``prod`` so STRICT guards are active. The dict is typed ``dict[str, Any]``
+    (mirroring tests/unit/core/test_vault_transport.py ``_settings``) so
+    ``Settings(**kwargs)`` matches every field overload — a str-valued dict would
+    not satisfy bool / int / Path fields under strict mypy.
+
+    Reused by tests/unit/core/test_config_cache_guards.py (Harness Injection T4)
+    to exercise the cache guards (G9/G10) against a baseline that clears G1-G8.
+    """
     base: dict[str, Any] = {
+        "runtime_profile": "prod",
         "vault_addr": "http://vault:8200",
         "vault_token": "boot",
         "embedding_model": "prod-embed-model",
         "sandbox_canonical_runtime_python_image": "ghcr.io/acme/runtime" + _PIN,
         "sandbox_canonical_egress_proxy_image": "ghcr.io/acme/proxy" + _PIN,
     }
+    base.update(kw)
+    return base
+
+
+def _base(**kw: Any) -> dict[str, Any]:
+    # Strict-profile-compliant kwargs MINUS ``runtime_profile`` — the existing
+    # G1-G8 tests pass ``runtime_profile=profile`` separately (parametrized over
+    # ("stage", "prod")), so this helper must not pin the profile itself. Single
+    # source of truth: derive from ``prod_compliant_settings_kwargs`` and drop the
+    # profile key, then apply the per-test override.
+    base = prod_compliant_settings_kwargs()
+    base.pop("runtime_profile")
     base.update(kw)
     return base
 

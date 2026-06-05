@@ -97,6 +97,12 @@ if TYPE_CHECKING:
     from cognic_agentos.core.memory.reaper import MemoryTombstoneReaper
     from cognic_agentos.core.policy.engine import OPAEngine
 
+    # Harness Injection T8: type-only ref for the create_app ``llm_gateway``
+    # kwarg (built by build_runtime in the lifespan, or injected on the
+    # test/injection path); types the kwarg without pulling the gateway
+    # module into the portal import graph.
+    from cognic_agentos.llm.gateway import LLMGateway
+
     # Sprint 8.5 T10: type-only ref for the create_app ``checkpoint_store``
     # kwarg. The runtime ``CheckpointReaper`` import is local to the
     # lifespan (only pulled in when a store is actually wired) so the
@@ -314,6 +320,11 @@ def create_app(
     # build_memory_routes inside the conditional block keeps the portal
     # import graph free of the memory package when no factory is wired.
     memory_api_factory: MemoryApiFactory | None = None,
+    # Harness Injection T8: the constructed kernel runtime's LLMGateway. On the
+    # adapter path the lifespan's build_runtime overwrites app.state.llm_gateway
+    # with the real gateway; this kwarg is the test / injection seam (None = the
+    # default, pack-only / dev path).
+    llm_gateway: LLMGateway | None = None,
 ) -> FastAPI:
     """Build and return the FastAPI application.
 
@@ -524,6 +535,20 @@ def create_app(
             await adapters.open_all()
             app.state.adapters = adapters
             try:
+                # Harness Injection T8: build the kernel runtime from the live
+                # adapter pool (LLMGateway + governed-memory factory). Lazy
+                # import keeps the harness out of the portal import graph until
+                # the adapter path actually runs. INSIDE this inner try so a
+                # build_runtime failure flows through the finally's close_all
+                # (the runtime owns an http client that must not leak). Fail-loud
+                # — a misconfigured gateway/memory aborts startup, never degrades.
+                from cognic_agentos.harness import build_runtime
+
+                runtime = await build_runtime(settings, adapters)
+                app.state.runtime = runtime
+                app.state.llm_gateway = runtime.llm_gateway
+                app.state.memory_api_factory = runtime.memory_api_factory
+
                 # #489 — setting-driven reaper: build the CheckpointStore
                 # from the live adapter pool AFTER open_all() so the
                 # relational adapter's engine is connected. This build is
@@ -565,6 +590,18 @@ def create_app(
                 # then checkpoint reaper (#489 ordering preserved).
                 await _shutdown_memory_reaper()
                 await _shutdown_checkpoint_reaper()
+                # Harness Injection T8: close the runtime BEFORE the adapter pool
+                # (user-locked runtime-first ordering). Today the runtime owns
+                # only the gateway's HTTP client, but its memory_api_factory
+                # closes over adapter-backed clients (engine, cache) — close it
+                # first in case a future runtime resource depends on them.
+                # getattr-guarded so a build_runtime failure (runtime never set)
+                # does not AttributeError here; T6's leak-fix guarantees no http
+                # client was allocated if build_runtime raised before Runtime
+                # existed.
+                _runtime = getattr(app.state, "runtime", None)
+                if _runtime is not None:
+                    await _runtime.aclose()
                 await adapters.close_all()
                 app.state.adapters = None
         finally:
@@ -670,9 +707,19 @@ def create_app(
     app.state.memory_reaper = memory_reaper
     app.state.memory_reaper_task = None
 
-    # Sprint 11.5c T5: memory API factory wiring seam. Cache on app.state
-    # for introspection; the factory itself is captured by the route closures.
+    # Sprint 11.5c T5 + Harness-Injection T7: memory API factory wiring seam.
+    # Stored on app.state because the route handlers resolve it from
+    # app.state.memory_api_factory at REQUEST time (T7 — no longer closure-
+    # captured), so the lifespan's build_runtime can populate it late.
     app.state.memory_api_factory = memory_api_factory
+
+    # Harness Injection T8: gateway + runtime state seams. ``llm_gateway`` holds
+    # the kwarg value at construction (None in prod; the lifespan's build_runtime
+    # overwrites it with the real gateway on the adapter path). ``runtime`` is
+    # pre-seeded None so pre-startup introspection AND the lifespan finally's
+    # getattr guard see a defined attribute (mirrors ``reaper_task = None``).
+    app.state.llm_gateway = llm_gateway
+    app.state.runtime = None
 
     # Middleware add order is OUTER-LAST in Starlette: the call chain
     # walks the most-recently-added middleware first. We want the
@@ -909,19 +956,21 @@ def create_app(
 
         app.include_router(build_compliance_routes(settings=settings))
 
-    # Sprint 11.5c T5: memory router mount (ADR-019).
+    # Sprint 11.5c T5 + Harness-Injection T8: memory router mount (ADR-019).
     #
-    # Gated on ``memory_api_factory is not None`` — pack-only deployments
-    # that don't wire a memory backend get NO /api/v1/memory routes and
-    # startup is SILENT (pack-only is a legitimate configuration). The lazy
-    # import of ``build_memory_routes`` inside this block keeps the portal
-    # import graph free of the memory package when no factory is wired.
+    # Mounted at CONSTRUCTION time when EITHER a factory is injected (test
+    # path) OR cache_driver != "none" (prod — the lifespan's build_runtime
+    # populates app.state.memory_api_factory after open_all; a request before
+    # then fails closed 503 per T7). cache_driver="none" with no injected
+    # factory mounts NOTHING — pack-only deployments stay silent. The lazy
+    # import of ``build_memory_routes`` keeps the portal import graph free of
+    # the memory package when the router is not mounted.
     app.state.memory_router_mounted = False
-    if memory_api_factory is not None:
+    if memory_api_factory is not None or settings.cache_driver != "none":
         from cognic_agentos.portal.api.memory import build_memory_routes
 
         app.include_router(
-            build_memory_routes(memory_api_factory=memory_api_factory),
+            build_memory_routes(),
             prefix="/api/v1/memory",
             tags=["memory"],
         )
