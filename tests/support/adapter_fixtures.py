@@ -204,3 +204,47 @@ class InMemoryObservabilityAdapter:
 
     async def health_check(self) -> AdapterHealth:
         return AdapterHealth(status="ok", driver=self.driver, latency_ms=0.0)
+
+
+class _InMemoryKVClient:
+    """Dict-backed async KV satisfying ``_AsyncKVClient`` (get/set).
+
+    TTL (``ex=`` kwarg) is accepted-and-ignored: scratch reads in tests are
+    immediate; real TTL eviction is the redis driver's concern. Mirrors the
+    other in-memory adapters' "defer the hard part, keep the contract" shape.
+    """
+
+    def __init__(self) -> None:
+        self._store: dict[str, object] = {}
+
+    async def get(self, key: str) -> object | None:
+        return self._store.get(key)
+
+    async def set(self, *args: object, **kwargs: object) -> bool:
+        key, value = args[0], args[1]
+        self._store[str(key)] = value
+        return True
+
+
+class InMemoryCacheAdapter:
+    """Test-only in-memory cache adapter (``driver="memory"``), mirroring the
+    sibling in-memory adapters. Hand-rolled dict-backed async KV — NOT fakeredis
+    (not a project dep)."""
+
+    driver = "memory"
+
+    def __init__(self) -> None:
+        self._client = _InMemoryKVClient()
+
+    async def connect(self) -> None:
+        return None
+
+    @property
+    def client(self) -> _InMemoryKVClient:
+        return self._client
+
+    async def close(self) -> None:
+        return None
+
+    async def health_check(self) -> AdapterHealth:
+        return AdapterHealth(status="ok", driver=self.driver, latency_ms=0.0)

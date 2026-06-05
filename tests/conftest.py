@@ -24,6 +24,7 @@ from cognic_agentos.core.config import Settings, build_settings_without_env_file
 from cognic_agentos.db.adapters import AdapterRegistry
 from cognic_agentos.db.adapters.local_object_store_adapter import LocalObjectStoreAdapter
 from tests.support.adapter_fixtures import (
+    InMemoryCacheAdapter,
     InMemoryEmbeddingAdapter,
     InMemoryObservabilityAdapter,
     InMemoryRelationalAdapter,
@@ -45,6 +46,7 @@ def memory_registry() -> AdapterRegistry:
     # The real LocalObjectStoreAdapter is fine here — it points at the
     # per-test tmp_path supplied by ``memory_settings``.
     r.register("object_store", "local_fs", LocalObjectStoreAdapter)
+    r.register("cache", "memory", InMemoryCacheAdapter)
     return r
 
 
