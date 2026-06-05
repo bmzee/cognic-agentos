@@ -82,6 +82,14 @@ async def build_runtime(settings: Settings, adapters: Adapters) -> Runtime:
     if adapters.cache is not None:
         # Function-local imports: only loaded when memory is actually wired, so
         # the gateway-only path (cache_driver="none") stays import-light.
+        #
+        # Composition-root exemption: this block runtime-imports
+        # ``core.memory.storage`` (PostgresMemoryAdapter / RedisMemoryAdapter) —
+        # the ONE allowed exception to the test_memory_layer_c_no_direct_storage
+        # fence. As the DI composition root, build_runtime NAMES the concrete
+        # adapters and injects them into MemoryAPI (which enforces MemoryGate on
+        # every op); it MUST NOT call put/get/list_* on them directly. The fence
+        # path-pins this exemption to harness/runtime.py.
         from cognic_agentos.core.dlp.scanner import ChecksumRegexGazetteerScanner
         from cognic_agentos.core.emergency.kill_switches import RedisMemoryWriteFreezeKillSwitch
         from cognic_agentos.core.memory._context import MemoryCallerContext
