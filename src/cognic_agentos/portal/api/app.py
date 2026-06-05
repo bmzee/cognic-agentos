@@ -921,7 +921,7 @@ def create_app(
         from cognic_agentos.portal.api.memory import build_memory_routes
 
         app.include_router(
-            build_memory_routes(memory_api_factory=memory_api_factory),
+            build_memory_routes(),
             prefix="/api/v1/memory",
             tags=["memory"],
         )

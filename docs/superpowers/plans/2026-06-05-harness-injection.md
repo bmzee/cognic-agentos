@@ -1230,47 +1230,51 @@ git commit -m "feat(harness): two-bundle MemoryPolicyRouter + build_runtime memo
 
 **Files:**
 - Modify: `src/cognic_agentos/portal/api/memory/routes.py` (`build_memory_routes` `:99` + the 4 handlers)
-- Test: `tests/unit/portal/api/memory/test_routes_app_state.py`
+- Modify: `src/cognic_agentos/portal/api/app.py` (the ONE caller line in the memory-mount block — `build_memory_routes(memory_api_factory=...)` → `build_memory_routes()`; the `if memory_api_factory is not None:` gate STAYS unchanged — T8 reworks it to `cache_driver != "none"`)
+- Test: `tests/unit/portal/api/memory/test_memory_routes.py` (append the mounted-but-unwired 503 class, reusing the existing `_build_app` / `_make_memory_actor` / `_CapturingFactory` harness)
 
-**HALT-before-commit** (governance-adjacent surface). `routes.py` intentionally omits `from __future__ import annotations` (PEP-563/closure-local-`Depends` rule) — the new dependency is **module-level**, so this is unaffected. **Do not** add the future-import.
+**Option B (locked 2026-06-05):** a signature change moves with its direct caller, so T7 includes the one-line `app.py` caller update. Option A (keep the closure param as a dead-but-accepted kwarg for one task) was rejected as compatibility-surface cruft. The construction-time mount-gate rework, the lifespan `build_runtime`, and the `llm_gateway` kwarg all stay in **T8**.
+
+**HALT-before-commit** (governance-adjacent surface + composition root). `routes.py` intentionally omits `from __future__ import annotations` (PEP-563/closure-local-`Depends` rule) — the new dependency is **module-level**, so this is unaffected. **Do not** add the future-import. **Full suite at the commit gate** (T7 touches the portal route surface + `app.py` — broader than the harness-only commits).
 
 - [ ] **Step 1: Write the failing test**
 
 ```python
-# tests/unit/portal/api/memory/test_routes_app_state.py
-from __future__ import annotations
-
-import pytest
-from httpx import ASGITransport, AsyncClient
-
-from cognic_agentos.core.config import build_settings_without_env_file
-from cognic_agentos.portal.api.app import create_app
+# Append to tests/unit/portal/api/memory/test_memory_routes.py — reuse the
+# file's existing harness (_build_app / _make_memory_actor / _CapturingFactory
+# / _FakeMemoryAPI; _StubBinder returns the actor directly, no auth headers).
 
 
-async def test_503_when_factory_absent_with_valid_actor() -> None:
-    """A MOUNTED /memory route whose factory is absent fails closed
-    503 memory_unavailable — NOT 500, and NOT masked by a 403. RBAC MUST PASS
-    (valid actor holding 'memory.read') so the FACTORY dependency is the thing
-    that fires. Mirror the auth setup of the existing memory-route tests."""
-    # cache_driver='redis' + redis_url makes the construction-time gate mount
-    # /memory; with no adapter_registry the lifespan never runs, so app.state's
-    # factory stays None — exactly the "mounted but unwired" case.
-    s = build_settings_without_env_file().model_copy(
-        update={"cache_driver": "redis", "redis_url": "redis://x:6379/0"}
-    )
-    app = create_app(s, actor_binder=_actor_binder_with_scopes({"memory.read"}))
-    assert app.state.memory_api_factory is None  # mounted, but unwired
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://t") as client:
-        resp = await client.get(
-            "/api/v1/memory/records?subject_id=s&agent_id=a",
-            headers=_auth_headers(),
+class TestRequestTimeFactoryResolution:
+    """Mounted-but-unwired /memory route fails closed 503 memory_unavailable.
+
+    Regression for the closure->app.state migration: with the pre-T7 closure
+    code, nulling app.state.memory_api_factory has NO effect (the handler used
+    the captured kwarg) -> 200 -> this test FAILS. It passes only when the
+    handler reads app.state per request."""
+
+    def test_mounted_but_unwired_factory_returns_503(self) -> None:
+        # Mount via a supplied factory (satisfies the UNCHANGED
+        # `if memory_api_factory is not None` gate), then null app.state to
+        # simulate the prod lifespan not yet populating the factory. RBAC MUST
+        # pass (default actor holds memory.read) so the FACTORY dep is what
+        # fires — the load-bearing assertion is the exact 503 memory_unavailable.
+        actor = _make_memory_actor()
+        factory = _CapturingFactory(_FakeMemoryAPI())
+        app = _build_app(actor=actor, factory=factory)
+        assert getattr(app.state, "memory_router_mounted", False) is True
+        app.state.memory_api_factory = None  # mounted, but unwired
+        client = TestClient(app)
+        resp = client.get(
+            "/api/v1/memory/records",
+            params={"subject_kind": "human", "subject_id": "user-1", "agent_id": "agent-1"},
         )
-    assert resp.status_code == 503
-    assert resp.json()["detail"]["reason"] == "memory_unavailable"
+        assert resp.status_code == 503
+        assert resp.json()["detail"]["reason"] == "memory_unavailable"
+        assert factory.last_context is None  # dep fired before the handler body
 ```
 
-> **Implementer note:** `_actor_binder_with_scopes` / `_auth_headers` mirror the existing memory-route tests' auth setup (the actor binder + token yielding an actor holding `memory.read`). RBAC MUST pass so the **factory** dependency is what fires — the load-bearing assertion is the **exact** `503 memory_unavailable` (never 403-masked, never 500). The valid actor guarantees a non-503 can't be RBAC's doing.
+> **Why this shape (not a `cache_driver=redis` construction-mount):** under Option B the T7 mount gate is STILL `if memory_api_factory is not None:`, so redis-without-a-factory would NOT mount (→ 404, not 503). The construction-time `cache_driver != "none"` mount is a **T8** change. Mounting via a supplied factory + nulling `app.state.memory_api_factory` is the Option-B way to reach "mounted but unwired" — and is a STRONGER regression: it passes only once the handler reads `app.state` per request (the old closure ignores the null → 200). RBAC MUST pass (the default `_make_memory_actor()` holds `memory.read`) so the **factory** dep is what fires — the load-bearing assertion is the **exact** `503 memory_unavailable` (never 403-masked, never 500).
 
 - [ ] **Step 2: Run to verify it fails**
 
@@ -1304,17 +1308,22 @@ In each of the 4 handlers (`list_records` / `forget` / `redact` / `export`), add
 
 and replace each `api: MemoryAPI = memory_api_factory(ctx)` with `api: MemoryAPI = factory(ctx)`.
 
+Then update the ONE caller in `app.py`'s memory-mount block (Option B — the signature change moves with its caller): `build_memory_routes(memory_api_factory=memory_api_factory)` → `build_memory_routes()`. Leave the `if memory_api_factory is not None:` gate AND the `app.state.memory_api_factory = memory_api_factory` seed (`app.py:675`) UNCHANGED.
+
 - [ ] **Step 4: Run to verify it passes + the existing memory-route suite**
 
-Run: `uv run pytest tests/unit/portal/api/memory/ -v`
-Expected: PASS. The existing endpoint tests reach the factory via `app.state.memory_api_factory` (already seeded at `app.py:675` on the `create_app(memory_api_factory=...)` path). If any existing test calls `build_memory_routes(memory_api_factory=...)` directly, update it to set `app.state.memory_api_factory` + call `build_memory_routes()`.
+Run: `uv run pytest tests/unit/portal/api/memory/ tests/unit/portal/test_app_factory_actor_binder_wiring.py -v`
+Expected: PASS. The existing endpoint tests reach the factory via `app.state.memory_api_factory` (already seeded at `app.py:675` on the `create_app(memory_api_factory=...)` path) — NO existing test edits needed (none call `build_memory_routes` directly; the only call sites are the `app.py` caller + the `memory/__init__.py` re-export).
 
 - [ ] **Step 5: HALT-before-commit, then commit**
 
-Full-tree mypy/ruff + halt summary (the closure→`app.state` resolution; the 503 fail-closed; the future-import-omission invariant preserved). Wait for `commit`.
+Full-tree mypy/ruff + **full suite** + halt summary (the closure→`app.state` resolution; the one-line `app.py` caller; the 503 fail-closed; the future-import-omission invariant preserved). Wait for `commit`.
 
 ```bash
-git add src/cognic_agentos/portal/api/memory/routes.py tests/unit/portal/api/memory/test_routes_app_state.py
+git add src/cognic_agentos/portal/api/memory/routes.py \
+        src/cognic_agentos/portal/api/app.py \
+        tests/unit/portal/api/memory/test_memory_routes.py \
+        docs/superpowers/plans/2026-06-05-harness-injection.md
 git commit -m "feat(harness): /memory handlers resolve factory from app.state + 503 fail-closed"
 ```
 

@@ -42,7 +42,7 @@ import logging
 import uuid
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 
 from cognic_agentos.core.memory._context import (
     MemoryCallerContext,
@@ -68,6 +68,23 @@ _LOG = logging.getLogger(__name__)
 
 # Wire-public closed-enum reason values mirrored from MemoryRefusalReason.
 _MEMORY_RECORD_NOT_FOUND: str = "memory_record_not_found"
+
+# Wire-public closed-enum reason for a mounted-but-unwired /memory surface.
+_MEMORY_UNAVAILABLE: str = "memory_unavailable"
+
+
+def _require_memory_api_factory(request: Request) -> MemoryApiFactory:
+    """Resolve the MemoryAPI factory from ``app.state`` at REQUEST time.
+
+    The factory is seeded at app construction (the ``create_app(
+    memory_api_factory=...)`` path sets ``app.state.memory_api_factory``) or by
+    ``build_runtime`` in the lifespan (prod path, T8). A mounted route whose
+    factory is still absent fails closed ``503 memory_unavailable`` — never a
+    500 from calling ``None``."""
+    factory: MemoryApiFactory | None = getattr(request.app.state, "memory_api_factory", None)
+    if factory is None:
+        raise HTTPException(status_code=503, detail={"reason": _MEMORY_UNAVAILABLE})
+    return factory
 
 
 def _operator_context(
@@ -96,12 +113,18 @@ def _operator_context(
     )
 
 
-def build_memory_routes(*, memory_api_factory: MemoryApiFactory) -> APIRouter:
+def build_memory_routes() -> APIRouter:
     """Build the /memory sub-router.
 
-    ``memory_api_factory`` is captured in closure so each endpoint builds a
+    Each endpoint resolves the per-request :class:`MemoryAPI` factory from
+    ``app.state.memory_api_factory`` via the module-level
+    :func:`_require_memory_api_factory` dependency (seeded at construction on
+    the test path via ``create_app(memory_api_factory=...)``, by
+    ``build_runtime`` in the lifespan on the prod path), then builds a
     per-request :class:`MemoryAPI` from the operator context it derives from
-    the resolved Actor + request body.
+    the resolved Actor + request body. A mounted route whose factory is absent
+    fails closed ``503 memory_unavailable`` rather than 500-ing on a ``None``
+    call.
 
     The returned router does NOT carry a prefix — ``create_app`` mounts it
     under ``/api/v1/memory`` so each endpoint's full path is
@@ -125,6 +148,7 @@ def build_memory_routes(*, memory_api_factory: MemoryApiFactory) -> APIRouter:
     )
     async def list_records(
         actor: Annotated[Actor, Depends(_require_memory_read)],
+        factory: Annotated[MemoryApiFactory, Depends(_require_memory_api_factory)],
         # subject_id + agent_id are REQUIRED, non-empty selectors: an empty
         # subject_id means "tenant-wide/unscoped memory" (refused by
         # SubjectRef.__post_init__) and an empty agent_id would silently call
@@ -146,7 +170,7 @@ def build_memory_routes(*, memory_api_factory: MemoryApiFactory) -> APIRouter:
         """
         subject = SubjectRef(kind=subject_kind, id=subject_id)
         ctx = _operator_context(actor, agent_id=agent_id, subject=subject)
-        api: MemoryAPI = memory_api_factory(ctx)
+        api: MemoryAPI = factory(ctx)
         try:
             records = await api.list_records(subject)
         except MemoryOperationRefused as exc:
@@ -174,6 +198,7 @@ def build_memory_routes(*, memory_api_factory: MemoryApiFactory) -> APIRouter:
     async def forget(
         record_id: uuid.UUID,
         actor: Annotated[Actor, Depends(_require_memory_forget)],
+        factory: Annotated[MemoryApiFactory, Depends(_require_memory_api_factory)],
         body: Annotated[ForgetRequest, Body()],
     ) -> ForgetReceiptResponse:
         """Forget a memory record.
@@ -209,7 +234,7 @@ def build_memory_routes(*, memory_api_factory: MemoryApiFactory) -> APIRouter:
 
         subject = SubjectRef(kind=body.subject_kind, id=body.subject_id)
         ctx = _operator_context(actor, agent_id=body.agent_id, subject=subject)
-        api: MemoryAPI = memory_api_factory(ctx)
+        api: MemoryAPI = factory(ctx)
 
         erasure_command = None
         if body.erasure_command is not None:
@@ -245,6 +270,7 @@ def build_memory_routes(*, memory_api_factory: MemoryApiFactory) -> APIRouter:
     async def redact(
         record_id: uuid.UUID,
         actor: Annotated[Actor, Depends(_require_memory_redact)],
+        factory: Annotated[MemoryApiFactory, Depends(_require_memory_api_factory)],
         body: Annotated[RedactRequest, Body()],
     ) -> RedactionReceiptResponse:
         """Redact a field within a memory record (creates a new sealed version).
@@ -257,7 +283,7 @@ def build_memory_routes(*, memory_api_factory: MemoryApiFactory) -> APIRouter:
         """
         subject = SubjectRef(kind=body.subject_kind, id=body.subject_id)
         ctx = _operator_context(actor, agent_id=body.agent_id, subject=subject)
-        api: MemoryAPI = memory_api_factory(ctx)
+        api: MemoryAPI = factory(ctx)
 
         span = RedactionSpan(
             path=tuple(body.span_path),
@@ -285,6 +311,7 @@ def build_memory_routes(*, memory_api_factory: MemoryApiFactory) -> APIRouter:
     )
     async def export(
         actor: Annotated[Actor, Depends(_require_memory_export)],
+        factory: Annotated[MemoryApiFactory, Depends(_require_memory_api_factory)],
         _human: Annotated[Actor, Depends(_require_human_actor)],
         body: Annotated[ExportRequest, Body()],
     ) -> ExportReceiptResponse:
@@ -300,7 +327,7 @@ def build_memory_routes(*, memory_api_factory: MemoryApiFactory) -> APIRouter:
         """
         subject = SubjectRef(kind=body.subject_kind, id=body.subject_id)
         ctx = _operator_context(actor, agent_id=body.agent_id, subject=subject)
-        api: MemoryAPI = memory_api_factory(ctx)
+        api: MemoryAPI = factory(ctx)
 
         try:
             receipt = await api.export(subject)
