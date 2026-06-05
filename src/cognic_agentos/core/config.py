@@ -398,6 +398,21 @@ class Settings(BaseSettings):
             "Bundled (Sprint 1D): dynatrace. Plugin packs: splunk, datadog, newrelic."
         ),
     )
+    cache_driver: Literal["none", "redis", "memory"] = Field(
+        default="none",
+        description=(
+            "Cache/Redis adapter driver. 'none' (default) = no cache, governed "
+            "memory disabled (pack-only deploys need no Redis). 'redis' = the real "
+            "adapter (requires redis_url). 'memory' = TEST-ONLY in-memory fixture "
+            "(forbidden in strict profiles)."
+        ),
+    )
+    redis_url: str | None = Field(
+        default=None,
+        description=(
+            "Redis URL (e.g. redis://localhost:6379/0). Required when cache_driver='redis'."
+        ),
+    )
     langfuse_host: str | None = Field(
         default=None,
         description="Langfuse host (e.g. http://langfuse:3000).",
@@ -556,6 +571,26 @@ class Settings(BaseSettings):
         description=(
             "``queued`` blocks on a free slot. ``fail_fast`` raises "
             "``LLMConcurrencyExceeded`` immediately when saturated."
+        ),
+    )
+    litellm_config_path: Path = Field(
+        default=Path("infra/litellm/config.yaml"),
+        description=(
+            "Path to the LiteLLM model_list YAML consumed by PreflightResolver at "
+            "gateway construction. Must exist when the harness builds the gateway "
+            "(deploy artifact, like the rego bundles)."
+        ),
+    )
+    llm_sla_total_budget_s: float = Field(
+        default=30.0, gt=0.0, description="Gateway SLAPolicy total budget (seconds)."
+    )
+    llm_sla_warning_threshold_s: float = Field(
+        default=20.0,
+        ge=0.0,
+        description=(
+            "Gateway SLAPolicy soft-warning threshold (seconds). MUST be < "
+            "llm_sla_total_budget_s — SLAPolicy enforces this at construction "
+            "(build_runtime), so a bad pair fails loud at startup."
         ),
     )
     provider_honesty_ledger_window_minutes: int = Field(
@@ -1294,6 +1329,10 @@ class Settings(BaseSettings):
         * **G8** — ``vault_token`` set to a ``vault://`` URI (the bootstrap
           credential can never itself be a Vault reference; fires in EVERY
           profile, per spec §3.5).
+        * **G9** — ``cache_driver="memory"`` (the test-only in-memory driver)
+          in a strict profile (stage/prod must use ``redis`` or ``none``).
+        * **G10** — ``cache_driver="redis"`` with ``redis_url`` unset (fires in
+          EVERY profile — the RedisAdapter cannot construct without a URL).
 
         This validator is INTENTIONALLY separate from
         ``_validate_signing_key_path_prod_profile_guard`` (prod-only) — G4 is a
@@ -1396,6 +1435,26 @@ class Settings(BaseSettings):
                 "sandbox_canonical_image_personal_default_in_strict_profile: a "
                 "personal-registry (ghcr.io/bmzee) sandbox image is set in "
                 "stage/prod; re-home to your registry"
+            )
+
+        # G9 — cache_driver="memory" forbidden in strict profiles. An in-memory
+        # write-freeze kill switch cannot propagate the ADR-018 <=30s freeze
+        # across instances; a strict /memory must be Redis-backed. (The driver is
+        # also unregistered in src/ runtime, so it would fail at resolve anyway —
+        # this is the legible deploy-safety refusal.)
+        if strict and self.cache_driver == "memory":
+            raise ValueError(
+                "cache_driver_memory_forbidden_in_strict_profile: cache_driver='memory' "
+                "is the test-only in-memory driver; stage/prod must use 'redis' (governed "
+                "memory enabled) or 'none' (disabled)"
+            )
+
+        # G10 — redis_url required when cache_driver='redis' (EVERY profile: the
+        # RedisAdapter cannot construct without a URL).
+        if self.cache_driver == "redis" and self.redis_url is None:
+            raise ValueError(
+                "redis_url_unset_for_redis_cache_driver: cache_driver='redis' requires "
+                "redis_url to be set"
             )
 
         return self
@@ -1770,6 +1829,31 @@ class Settings(BaseSettings):
         le=60,
         description="Sprint 11.5b — last-known-good kill-switch cache grace; >this with Redis "
         "unreachable fails closed (frozen). Capped at 60 (ADR-018 <=60s propagation).",
+    )
+    memory_policy_bundle: Path = Field(
+        default=Path("policies/_default/memory.rego"),
+        description=(
+            "Rego bundle for the memory governance OPAEngine (long_term / "
+            "cross_subject / restricted_class_write). Single FILE (OPAEngine is a "
+            "single-file loader)."
+        ),
+    )
+    memory_purpose_matrix_policy_bundle: Path = Field(
+        default=Path("policies/_default/memory_purpose_matrix.rego"),
+        description=(
+            "Rego bundle for the purpose-compatibility OPAEngine "
+            "(recall.purpose_compatible). Separate file — the harness "
+            "MemoryPolicyRouter routes between the two."
+        ),
+    )
+    memory_vector_recall_enabled: bool = Field(
+        default=False,
+        description=(
+            "Opt-in (default OFF): when true AND cache_driver != 'none', the harness "
+            "wires MemoryVectorIndex (episodic recall) + calls ensure_collection() at "
+            "startup — coupling /memory startup to the vector backend (qdrant). Default "
+            "false keeps /memory decoupled; the 4 portal endpoints don't use vector recall."
+        ),
     )
     memory_export_bucket: str = Field(
         default="cognic-memory-exports",
