@@ -1373,6 +1373,16 @@ def test_memory_router_absent_when_cache_none() -> None:
     assert app.state.memory_router_mounted is False
 ```
 
+> **Added during execution (2026-06-05):** a 4th async test
+> `test_lifespan_build_runtime_populates_state` reuses the root-conftest
+> `memory_registry` / `memory_settings` fixtures + enters the lifespan
+> (`async with app.router.lifespan_context(app)`) to assert build_runtime
+> populates `app.state.{runtime, llm_gateway, memory_api_factory}` on the adapter
+> path. `cache_driver="none"` → gateway-only (memory_api_factory stays None); the
+> pre-startup `app.state.runtime is None` pre-seed confirms the LIFESPAN (not
+> construction) does the population — directly pinning the deliverable the 3
+> construction-time tests only exercise indirectly.
+
 - [ ] **Step 2: Run to verify it fails**
 
 Run: `uv run pytest tests/unit/portal/api/test_app_harness_wiring.py -v`
@@ -1434,14 +1444,24 @@ Inside the lifespan, right after `app.state.adapters = adapters` and inside the 
                 # ... existing checkpoint-reaper block stays here ...
 ```
 
-In the `finally:` block, close the runtime alongside the adapters:
+In the inner `finally:`, close the runtime **before** `adapters.close_all()`
+(user-locked runtime-first ordering, 2026-06-05 — the runtime's
+`memory_api_factory` closes over adapter-backed clients, so close it first in
+case a future runtime resource depends on them; today it owns only the gateway
+HTTP client, so either order is correct but runtime-first is future-safe):
 
 ```python
             finally:
-                # ... existing reaper-cancel + close_all ...
+                await _shutdown_memory_reaper()
+                await _shutdown_checkpoint_reaper()
+                # T8: runtime-first close (getattr-guarded — a build_runtime
+                # failure never set app.state.runtime, and T6's leak-fix means no
+                # http client was allocated if it raised before Runtime existed).
                 _runtime = getattr(app.state, "runtime", None)
                 if _runtime is not None:
                     await _runtime.aclose()
+                await adapters.close_all()
+                app.state.adapters = None
 ```
 
 > **Deploy artifact (confirmed present):** `build_runtime` reads `settings.litellm_config_path` (default `infra/litellm/config.yaml`) at construction. That file **exists in-repo** (the LiteLLM `model_list`), so the default is valid for the adapter-registry startup path — no creation needed. Integration tests that pass an `adapter_registry` rely on that file (or override `litellm_config_path` to a tmp YAML, as the harness unit tests do).
