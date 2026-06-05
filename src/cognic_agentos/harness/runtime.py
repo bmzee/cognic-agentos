@@ -27,13 +27,7 @@ if TYPE_CHECKING:
     from cognic_agentos.core.config import Settings
     from cognic_agentos.core.memory.api import MemoryApiFactory
     from cognic_agentos.db.adapters.factory import Adapters
-
-    # T6 lands ``harness/memory_policy.py``; this TYPE_CHECKING-only forward ref
-    # lets the ``memory_policy`` field be typed now. Until T6 the module is
-    # absent, so mypy reports it import-untyped — suppress that single line.
-    from cognic_agentos.harness.memory_policy import (  # type: ignore[import-untyped]
-        MemoryPolicyRouter,
-    )
+    from cognic_agentos.harness.memory_policy import MemoryPolicyRouter
 
 #: SLA policy audit-label (an audit label, not a budget; no name Setting per the locked decision).
 _SLA_POLICY_NAME = "llm-gateway"
@@ -63,7 +57,7 @@ async def build_runtime(settings: Settings, adapters: Adapters) -> Runtime:
     audit_store = AuditStore(engine)
     decision_history_store = DecisionHistoryStore(engine)
 
-    # --- Gateway ----------------------------------------------------------
+    # --- Gateway sub-deps (the gateway + http_client are built LAST — see below) ---
     ledger = GatewayCallLedger(engine)
     rate_limiter = ProfileRateLimiter(
         per_profile=settings.llm_concurrency_per_profile,
@@ -80,9 +74,94 @@ async def build_runtime(settings: Settings, adapters: Adapters) -> Runtime:
         litellm_key = await resolve_secret_field(
             litellm_key, secret_adapter=adapters.secret, field_name="litellm_master_key"
         )
-    # Create the HTTP client AFTER the fallible vault-resolve above: the resolve can
-    # fail loud, and this client is the one resource that would leak — so it must be
-    # created last among the fallible steps. Runtime.aclose closes it on the success path.
+    # --- Memory factory (built BEFORE the gateway + http_client so ALL fallible
+    # construction — the vault-resolve above + the memory branch's OPAEngine.create /
+    # ensure_collection below — runs before the leak-prone http_client is allocated) ---
+    memory_api_factory: MemoryApiFactory | None = None
+    memory_policy: MemoryPolicyRouter | None = None
+    if adapters.cache is not None:
+        # Function-local imports: only loaded when memory is actually wired, so
+        # the gateway-only path (cache_driver="none") stays import-light.
+        from cognic_agentos.core.dlp.scanner import ChecksumRegexGazetteerScanner
+        from cognic_agentos.core.emergency.kill_switches import RedisMemoryWriteFreezeKillSwitch
+        from cognic_agentos.core.memory._context import MemoryCallerContext
+        from cognic_agentos.core.memory._routing import RoutingMemoryAdapter
+        from cognic_agentos.core.memory.api import MemoryAPI
+        from cognic_agentos.core.memory.consent import ConsentValidator
+        from cognic_agentos.core.memory.storage import PostgresMemoryAdapter, RedisMemoryAdapter
+        from cognic_agentos.core.memory.vector import MemoryVectorIndex
+        from cognic_agentos.core.policy.engine import OPAEngine
+        from cognic_agentos.harness.memory_policy import MemoryPolicyRouter as _Router
+
+        memory_engine = await OPAEngine.create(
+            bundle_path=settings.memory_policy_bundle,
+            audit_store=audit_store,
+            decision_history_store=decision_history_store,
+            opa_path=settings.opa_path,
+            eval_timeout_s=settings.opa_eval_timeout_s,
+        )
+        purpose_matrix_engine = await OPAEngine.create(
+            bundle_path=settings.memory_purpose_matrix_policy_bundle,
+            audit_store=audit_store,
+            decision_history_store=decision_history_store,
+            opa_path=settings.opa_path,
+            eval_timeout_s=settings.opa_eval_timeout_s,
+        )
+        memory_policy = _Router(
+            memory_engine=memory_engine, purpose_matrix_engine=purpose_matrix_engine
+        )
+
+        cache_client = adapters.cache.client
+        routing_adapter = RoutingMemoryAdapter(
+            redis_adapter=RedisMemoryAdapter(
+                redis_client=cache_client, scratch_ttl_s=settings.memory_scratch_ttl_s
+            ),
+            pg_adapter=PostgresMemoryAdapter(engine=engine, dh_store=decision_history_store),
+            scratch_ttl_s=settings.memory_scratch_ttl_s,
+        )
+        dlp = ChecksumRegexGazetteerScanner()
+        consent = ConsentValidator(audit=decision_history_store)
+        kill_switch = RedisMemoryWriteFreezeKillSwitch(
+            redis_client=cache_client, cache_ttl_s=settings.memory_kill_switch_cache_ttl_s
+        )
+
+        # vector_index — opt-in episodic recall (default OFF). Gated on
+        # memory_vector_recall_enabled so /memory startup is NOT coupled to the
+        # vector backend (qdrant) reachability by default; the portal endpoints
+        # don't use vector recall. When enabled, ensure_collection() runs once.
+        vector_index = None
+        if settings.memory_vector_recall_enabled:
+            vector_index = MemoryVectorIndex(
+                embedder=adapters.embedding,
+                client=adapters.vector,
+                collection=settings.memory_vector_collection,
+            )
+            await vector_index.ensure_collection()
+        object_store = adapters.object_store
+
+        def _factory(ctx: MemoryCallerContext) -> MemoryAPI:
+            return MemoryAPI(
+                context=ctx,
+                adapter=routing_adapter,
+                dlp=dlp,
+                consent=consent,
+                policy=memory_policy,  # type: ignore[arg-type]  # router conforms structurally (mirrors _build_api)
+                kill_switch=kill_switch,
+                audit=decision_history_store,
+                settings=settings,
+                object_store=object_store,
+                vector_index=vector_index,
+            )
+
+        memory_api_factory = _factory
+
+    # --- Gateway + HTTP client (allocated LAST) ---------------------------
+    # The http_client is created AFTER every fallible construction step above (preflight
+    # YAML read, SLAPolicy validation, vault-resolve, and the memory branch's
+    # OPAEngine.create / ensure_collection). It is the one resource that would LEAK if a
+    # later step raised before Runtime exists (Runtime.aclose is the only path that closes
+    # it). Nothing fallible runs after this point — LLMGateway() + Runtime() are pure
+    # field assignments.
     http_client = _httpx.AsyncClient(timeout=settings.llm_timeout_s)
     gateway = LLMGateway(
         settings=settings,
@@ -94,11 +173,6 @@ async def build_runtime(settings: Settings, adapters: Adapters) -> Runtime:
         http_client=http_client,
         litellm_master_key=litellm_key,
     )
-
-    # --- Memory factory (T6 fills this branch) ----------------------------
-    memory_api_factory: MemoryApiFactory | None = None
-    memory_policy: MemoryPolicyRouter | None = None
-    # if adapters.cache is not None: ... (T6)
 
     return Runtime(
         llm_gateway=gateway,
