@@ -217,11 +217,11 @@ loader (`engine.py:204` — `bundle_path.is_file()` + `read_bytes()`), but `Memo
 - `dlp = ChecksumRegexGazetteerScanner()`; `consent = ConsentValidator(audit=decision_history_store)`
 - `kill_switch = RedisMemoryWriteFreezeKillSwitch(redis_client=adapters.cache.client, cache_ttl_s=settings.memory_kill_switch_cache_ttl_s)`
 - `object_store = adapters.object_store` (optional)
-- `vector_index` — **optional**: built only when **both** `adapters.vector` and
-  `adapters.embedding` are present AND memory is enabled — `MemoryVectorIndex(embedder=adapters.embedding, client=adapters.vector, collection=settings.memory_vector_collection)`,
-  with `await vector_index.ensure_collection()` called **once** in `build_runtime`. The 4 portal
-  endpoints don't use it; genuinely optional. `collection` uses the existing
-  `memory_vector_collection` Setting (default `"cognic-memory-episodes"`).
+- `vector_index` — **opt-in, default OFF**: built only when `memory_vector_recall_enabled` is
+  `True` (a **new Setting**, default `False`) AND memory is enabled — `MemoryVectorIndex(embedder=adapters.embedding, client=adapters.vector, collection=settings.memory_vector_collection)`,
+  with `await vector_index.ensure_collection()` called **once**. Default `False` keeps `/memory`
+  startup **decoupled** from the vector backend (qdrant) reachability — the 4 portal endpoints
+  don't use vector recall. `collection` uses the existing `memory_vector_collection` Setting.
 
 The closure mints `MemoryAPI(context=ctx, adapter=routing_adapter, dlp=…, consent=…,
 policy=router, kill_switch=…, audit=decision_history_store, settings=settings, object_store=…,
@@ -314,7 +314,9 @@ Mirrors every existing adapter convention:
     image must NOT ship), so the `RedisAdapter` loads via the **optional-adapter path**: it
     self-registers on import (`bundled_registry.register("cache","redis",RedisAdapter)`) and
     is pulled in by `load_bundled_adapters()` only when the `adapters` extra is installed —
-    exactly like `QdrantAdapter`. Imports `redis.asyncio` lazily.
+    exactly like `QdrantAdapter`. Imports `redis.asyncio` **at module top level** (mirroring
+    `QdrantAdapter` — kernel-image resilience lives in `load_bundled_adapters`'s allowlist +
+    `try/except ImportError`, NOT a lazy import).
   - `memory` — a **test-only** in-memory dict-backed KV fixture registered by the test
     harness (`tests/conftest.py`: `r.register("cache","memory",…)`), mirroring the sibling
     in-memory adapters (`InMemory*Adapter` live in `tests/support/adapter_fixtures.py` and
@@ -462,8 +464,8 @@ proofs per `feedback_security_regression_hardening`).
   the strict-profile cache guard + the `redis_url`-required check; **plus the gateway/memory
   construction Settings the plan-time graph verification surfaced**: `litellm_config_path`,
   `llm_sla_total_budget_s`, `llm_sla_warning_threshold_s`, `memory_policy_bundle`,
-  `memory_purpose_matrix_policy_bundle` (the SLA policy *name* is a harness constant, not a
-  Setting) *(halt-before-commit)*
+  `memory_purpose_matrix_policy_bundle`, `memory_vector_recall_enabled` (the SLA policy *name*
+  is a harness constant, not a Setting) *(halt-before-commit)*
 - `portal/api/app.py` — lifespan calls `build_runtime` on the adapter path; stores
   `app.state.llm_gateway`; **populates `app.state.memory_api_factory` from the runtime**;
   the `/memory` mount gate becomes construction-time (`cache_driver != "none"` OR a
