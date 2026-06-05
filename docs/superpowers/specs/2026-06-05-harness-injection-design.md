@@ -125,15 +125,18 @@ A frozen dataclass mirroring `Adapters`:
 class Runtime:
     # Public Bucket-2 members (B1):
     llm_gateway: LLMGateway
-    memory_api_factory: MemoryApiFactory | None   # None when cache/memory not wired
+    memory_api_factory: MemoryApiFactory | None   # None when cache_driver == "none"
 
     # Internal spine — build_runtime uses these to construct the gateway + memory
     # factory, and surfaces them on the container so a later workstream can reuse
     # them (broker / packs / UI) without rebuilding. This workstream wires NO new
-    # external consumer to the spine.
+    # external consumer to the spine. audit_store + decision_history_store are
+    # ALWAYS built (cheap, no binary). The memory policy router is built ONLY when
+    # memory is enabled (cache_driver != "none") — it owns the TWO OPAEngines that
+    # need the rego bundles (and the opa binary at eval time); see §3.3.
     audit_store: AuditStore
     decision_history_store: DecisionHistoryStore
-    opa_engine: OPAEngine
+    memory_policy: MemoryPolicyRouter | None   # None when cache_driver == "none"
 
     async def aclose(self) -> None: ...   # closes the gateway http_client
 ```
@@ -154,25 +157,75 @@ risk.
 
 `build_runtime` constructs, in order:
 
-1. **Spine** (from the engine + settings):
-   - `engine = adapters.relational.engine`
+1. **Minimal spine** (always — cheap, no binary):
+   - `engine = adapters.relational.engine` (the relational adapter's live `AsyncEngine`; never disposed here)
    - `audit_store = AuditStore(engine)`
    - `decision_history_store = DecisionHistoryStore(engine)`
-   - `opa_engine = await OPAEngine.create(bundle_path=<settings>, audit_store=…, decision_history_store=…, opa_path=<settings>, eval_timeout_s=<settings>)`
-2. **Gateway sub-deps** (settings-derived, trivial):
+2. **Gateway sub-deps.** The plan-time graph verification found two of these are **not
+   settings-sourced today** — this workstream adds the Settings (see §3.5 / §7):
    - `GatewayCallLedger(engine)`
-   - `ProfileRateLimiter(per_profile=settings…, mode=settings…)`
-   - `PreflightResolver.from_yaml(<settings litellm config path>)`
-   - `SLAPolicy(name=…, total_budget=…, warning_threshold=…)` (settings-derived)
+   - `ProfileRateLimiter(per_profile=settings.llm_concurrency_per_profile, mode=settings.llm_concurrency_mode)` (existing settings)
+   - `PreflightResolver.from_yaml(settings.litellm_config_path)` — **new Setting**
+     `litellm_config_path: Path = Path("infra/litellm/config.yaml")`. `from_yaml` reads the
+     file at construction, so an absent path fails loud — acceptable (the LiteLLM config is a
+     deploy artifact, like the rego bundles).
+   - `SLAPolicy(name=_SLA_POLICY_NAME, total_budget=timedelta(seconds=settings.llm_sla_total_budget_s), warning_threshold=timedelta(seconds=settings.llm_sla_warning_threshold_s))`
+     — **new Settings** `llm_sla_total_budget_s: float = 30.0` + `llm_sla_warning_threshold_s: float = 20.0`.
+     The policy **name is a harness constant** `_SLA_POLICY_NAME = "llm-gateway"` (an audit
+     label, not operator-tunable — no name Setting, per the locked decision).
    - `litellm_master_key`: resolved **once at construction** — if `settings.litellm_master_key`
-     is a `vault://` URI, resolve via the existing secret-resolution helper
-     (`db/adapters/secret_resolution.resolve_secret_field`) and pass the plain value;
-     a `vault://` value reaching the gateway constructor unresolved is fail-loud
+     is a `vault://` URI, resolve via `db/adapters/secret_resolution.resolve_secret_field` and
+     pass the plain value; an unresolved `vault://` reaching the gateway constructor is fail-loud
      (`litellm_master_key_unresolved_vault_uri`, already enforced in `gateway.py`).
-   - Guardrail input/output pipelines remain `None` in this workstream (optional;
-     real pipelines are a later concern — out of scope, documented).
-3. **`LLMGateway(...)`** from settings + the spine + sub-deps.
-4. **Memory factory** (only if a usable cache is present — see §3.5/§3.6).
+   - Guardrail input/output pipelines stay `None` (optional; out of scope).
+3. **`LLMGateway(...)`** from settings + spine + sub-deps. **No OPA on the gateway path** —
+   the gateway takes no policy engine, so the gateway path is `opa`-binary-free.
+4. **Memory path** — **only when `adapters.cache is not None`** (`cache_driver != "none"`).
+   Builds the two-bundle policy router (below), the memory adapter cluster, and the
+   `memory_api_factory` closure. When `adapters.cache is None`: `memory_policy = None` and
+   `memory_api_factory = None`.
+
+**The memory policy router (two-bundle fix) — LOCKED.** `OPAEngine` is a single-**file**
+loader (`engine.py:204` — `bundle_path.is_file()` + `read_bytes()`), but `MemoryGate` queries
+**four** decision points spanning **two** rego files (`gate.py:90-93`). So memory needs **two**
+`OPAEngine`s and a tiny harness-owned router:
+
+- `memory_engine = await OPAEngine.create(bundle_path=settings.memory_policy_bundle, audit_store=…, decision_history_store=…, opa_path=settings.opa_path, eval_timeout_s=settings.opa_eval_timeout_s)`
+  — **new Setting** `memory_policy_bundle: Path = Path("policies/_default/memory.rego")`.
+- `purpose_matrix_engine = await OPAEngine.create(bundle_path=settings.memory_purpose_matrix_policy_bundle, …)`
+  — **new Setting** `memory_purpose_matrix_policy_bundle: Path = Path("policies/_default/memory_purpose_matrix.rego")`.
+- `MemoryPolicyRouter` (in **`harness/memory_policy.py`**) presents the exact
+  `OPAEngine.evaluate(*, decision_point: str, input: dict[str, Any]) -> Decision` interface and
+  dispatches: `data.cognic.memory.recall.purpose_compatible.allow` → `purpose_matrix_engine`;
+  the other three (`long_term` / `cross_subject` / `restricted_class_write`) → `memory_engine`.
+  It only delegates — the per-point `(OpaNotInstalledError, RegoEvaluationError)` fail-closed
+  stays in `MemoryGate`.
+- **No core change.** `MemoryGate`/`MemoryAPI` type `policy: OPAEngine` (concrete), so
+  `build_runtime` passes `policy=router  # type: ignore[arg-type]` — mirroring the existing
+  `tests/unit/core/memory/conftest.py::_build_api` precedent
+  (`policy=… _AllowAllPolicy()  # type: ignore[arg-type]`). `core/memory/` stays untouched.
+  *(If a reviewer later prefers a clean `MemoryPolicyEvaluator` Protocol over the type-ignore,
+  that widens `gate.py`/`api.py` — a core stop-rule change — and is **halt-and-surface**, not
+  done by default here.)*
+- Both engines **construct even without the `opa` binary** (warn + defer; `evaluate()`
+  fail-closes), so factory **construction** is binary-free; only the rego **files** must exist
+  (they do: `policies/_default/memory.rego` + `…/memory_purpose_matrix.rego`). End-to-end
+  *allow* tests need the binary (env-gated, like the existing OPA tests).
+
+**The memory adapter cluster** the `memory_api_factory` closure captures:
+- routing adapter: `RoutingMemoryAdapter(redis_adapter=RedisMemoryAdapter(redis_client=adapters.cache.client, scratch_ttl_s=settings.memory_scratch_ttl_s), pg_adapter=PostgresMemoryAdapter(engine=engine, dh_store=decision_history_store), scratch_ttl_s=settings.memory_scratch_ttl_s)`
+- `dlp = ChecksumRegexGazetteerScanner()`; `consent = ConsentValidator(audit=decision_history_store)`
+- `kill_switch = RedisMemoryWriteFreezeKillSwitch(redis_client=adapters.cache.client, cache_ttl_s=settings.memory_kill_switch_cache_ttl_s)`
+- `object_store = adapters.object_store` (optional)
+- `vector_index` — **optional**: built only when **both** `adapters.vector` and
+  `adapters.embedding` are present AND memory is enabled — `MemoryVectorIndex(embedder=adapters.embedding, client=adapters.vector, collection=settings.memory_vector_collection)`,
+  with `await vector_index.ensure_collection()` called **once** in `build_runtime`. The 4 portal
+  endpoints don't use it; genuinely optional. `collection` uses the existing
+  `memory_vector_collection` Setting (default `"cognic-memory-episodes"`).
+
+The closure mints `MemoryAPI(context=ctx, adapter=routing_adapter, dlp=…, consent=…,
+policy=router, kill_switch=…, audit=decision_history_store, settings=settings, object_store=…,
+vector_index=…)` per `MemoryCallerContext` (subject binding is per-request).
 
 ### 3.4 Lifespan placement + `create_app` / `create_prod_app` split
 
@@ -388,6 +441,8 @@ proofs per `feedback_security_regression_hardening`).
 **New:**
 - `src/cognic_agentos/harness/__init__.py`
 - `src/cognic_agentos/harness/runtime.py` — `Runtime` + `build_runtime`
+- `src/cognic_agentos/harness/memory_policy.py` — `MemoryPolicyRouter` (two-bundle evaluator;
+  conforms to `OPAEngine.evaluate(...)`; harness-owned, no `core/memory/` change)
 - `src/cognic_agentos/db/adapters/redis_adapter.py` — `RedisAdapter` (bundled/optional)
 - in-memory cache adapter for the **test-only** `memory` driver — an `InMemoryCacheAdapter`
   in `tests/support/adapter_fixtures.py` + registration in `tests/conftest.py`
@@ -404,7 +459,11 @@ proofs per `feedback_security_regression_hardening`).
   `cache` is a genuine `Adapters` member, so it joins both — consistent with the other six kinds.
 - `db/adapters/__init__.py` — bundled redis registration on the optional path
 - `core/config.py` — `cache_driver` (`Literal["none","redis","memory"]`) + `redis_url` +
-  the strict-profile cache guard + the `redis_url`-required check *(halt-before-commit)*
+  the strict-profile cache guard + the `redis_url`-required check; **plus the gateway/memory
+  construction Settings the plan-time graph verification surfaced**: `litellm_config_path`,
+  `llm_sla_total_budget_s`, `llm_sla_warning_threshold_s`, `memory_policy_bundle`,
+  `memory_purpose_matrix_policy_bundle` (the SLA policy *name* is a harness constant, not a
+  Setting) *(halt-before-commit)*
 - `portal/api/app.py` — lifespan calls `build_runtime` on the adapter path; stores
   `app.state.llm_gateway`; **populates `app.state.memory_api_factory` from the runtime**;
   the `/memory` mount gate becomes construction-time (`cache_driver != "none"` OR a
@@ -425,9 +484,11 @@ not edited), `core/emergency/kill_switches.py` (constructed, not edited), `core/
 
 - Exact reason-prefix wording for the strict-profile cache guard + the
   `redis_url`-required check (confirm against the existing G1–G8 naming).
-- `PreflightResolver.from_yaml` requires the LiteLLM config YAML to exist as a deploy
-  artifact; confirm the settings path field + the strict-profile behavior when it is
-  absent (likely fail-loud, consistent with the deploy-safety posture).
+- The memory policy seam uses a `# type: ignore[arg-type]` at the `MemoryAPI(policy=router)`
+  call (mirroring the `_build_api` precedent) to keep the router harness-owned. If a reviewer
+  prefers a clean `MemoryPolicyEvaluator` Protocol, widening `gate.py`/`api.py` is a core
+  stop-rule change — **halt-and-surface**, deferred by default. (The `PreflightResolver` YAML
+  path is now resolved: `litellm_config_path` Setting; absent → fail-loud per §3.3.)
 - `redis_url` may want a dev-convenience default (e.g. `redis://localhost:6379/0`) for the
   `redis` driver — plan-time ergonomics only. (The `cache_driver` default itself is
   **locked to `"none"`** in §3.5 — it is load-bearing for the §3.4 mount strategy, so it is
