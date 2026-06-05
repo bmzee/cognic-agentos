@@ -1491,6 +1491,18 @@ git commit -m "feat(harness): wire build_runtime into create_prod_app lifespan +
 
 - [ ] **Step 1: Write the fence tests**
 
+> **As-built (2026-06-05):** `_HARNESS_DIR` uses absolute `parents[3]` (NOT the
+> CWD-relative path shown below — matches `test_memory_layer_c_no_direct_storage.py`),
+> and a non-vacuous `test_harness_dir_has_expected_sources` guard pins the exact
+> `{__init__, memory_policy, runtime}.py` set so a vanished glob cannot make the
+> fences pass trivially. The kill-switch behavioural pin was FOLDED into the
+> existing `test_build_runtime_wires_memory_when_cache_present` (the `migrated_*`
+> fixtures + `_a_memory_caller_context()` in the snippet below DO NOT exist; the
+> existing test already builds the migrated tables + mints the api) as a single
+> `assert isinstance(api._gate._kill_switch, RedisMemoryWriteFreezeKillSwitch)`,
+> TM-revert-proven (kill_switch=None → gate binds `_NullMemoryKillSwitchInterrogator`
+> → the isinstance FAILS).
+
 ```python
 # tests/unit/architecture/test_harness_fences.py
 from __future__ import annotations
@@ -1591,7 +1603,9 @@ Expected: PASS (fences green against the real `harness/` tree).
 Halt summary mapping each of the 5 fences → its test + the kill-switch TM-revert result. Wait for `commit`.
 
 ```bash
-git add tests/unit/architecture/test_harness_fences.py tests/unit/harness/test_runtime.py
+git add tests/unit/architecture/test_harness_fences.py \
+        tests/unit/harness/test_runtime.py \
+        docs/superpowers/plans/2026-06-05-harness-injection.md
 git commit -m "test(harness): architecture fences (no Layer-C / no local Redis / no 2nd engine / no Bucket-1 default / real kill switch)"
 ```
 

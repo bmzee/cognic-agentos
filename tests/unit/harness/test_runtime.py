@@ -86,6 +86,7 @@ async def test_build_runtime_wires_memory_when_cache_present(
     from cognic_agentos.core.decision_history import (  # noqa: F401  (ensures table in _metadata)
         _decision_history,
     )
+    from cognic_agentos.core.emergency.kill_switches import RedisMemoryWriteFreezeKillSwitch
     from cognic_agentos.core.memory._context import MemoryCallerContext
     from cognic_agentos.core.memory.api import MemoryAPI
     from cognic_agentos.core.memory.storage import _memory_records
@@ -136,6 +137,11 @@ async def test_build_runtime_wires_memory_when_cache_present(
         # (MemoryGate types policy: OPAEngine; at runtime the gate's policy IS the
         # harness MemoryPolicyRouter, passed via the build_runtime arg-type cast).
         assert id(api._gate._policy) == id(runtime.memory_policy)
+        # T9 fence (behavioural): the wired kill switch is the REAL Redis impl,
+        # NEVER the _Null fail-loud sentinel. TM-revert-proven load-bearing —
+        # build_runtime passing kill_switch=None makes the gate bind _Null and
+        # this isinstance FAILS.
+        assert isinstance(api._gate._kill_switch, RedisMemoryWriteFreezeKillSwitch)
         await runtime.aclose()
     finally:
         await adapters.close_all()
