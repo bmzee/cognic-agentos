@@ -180,6 +180,7 @@ async def build_runtime(settings: Settings, adapters: Adapters) -> Runtime:
         sla_policy=sla_policy,
         http_client=http_client,
         litellm_master_key=litellm_key,
+        observability=adapters.observability,
     )
 
     return Runtime(

@@ -27,9 +27,12 @@ import json as _json
 import logging as _logging
 import time as _time
 import uuid as _uuid
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import httpx as _httpx
+
+if TYPE_CHECKING:
+    from cognic_agentos.db.adapters.protocols import ObservabilityAdapter
 
 from cognic_agentos.core.audit import AuditEvent, AuditStore
 from cognic_agentos.core.config import Settings
@@ -49,11 +52,36 @@ from cognic_agentos.llm.policy import (
 from cognic_agentos.llm.preflight import (
     PreflightResolver,
     ResolvedUpstream,
+    UnknownAliasError,
 )
 
 #: Tier vocabulary. Sprint 3 ships two tiers; Sprint 9.5
 #: (ADR-013 model registry) may extend.
 Tier = Literal["tier1", "tier2"]
+
+
+#: Closed-enum trace-outcome vocabulary for the observability span
+#: (ADR-009 + the gateway-observability workstream). DISTINCT from the
+#: ledger's ``outcome`` column vocabulary: the span says ``policy_denied``
+#: where the ledger says ``denied``, and the span carries ``invalid_tier``
+#: / ``preflight_failure`` / ``strict_ledger_failure`` which have NO ledger
+#: equivalent. ``errored_pre_resolution`` is the pre-tier-resolution
+#: default — emitted only if no exit path set a value (a bug guard, not a
+#: normal outcome). Pinned by
+#: ``test_gateway_observability.py::TestTraceOutcomeVocabularyClosed``.
+GatewayTraceOutcome = Literal[
+    "errored_pre_resolution",
+    "invalid_tier",
+    "preflight_failure",
+    "guardrail_input",
+    "policy_denied",
+    "concurrency_exhausted",
+    "upstream_error",
+    "guardrail_output",
+    "strict_ledger_failure",
+    "ok",
+    "drift",
+]
 
 
 class UnknownTierError(ValueError):
@@ -177,6 +205,29 @@ class GatewayResponse:
     latency_ms: int
 
 
+@_dataclasses.dataclass(slots=True)
+class _CompletionTrace:
+    """Mutable per-call trace state for the observability span.
+
+    Initialized BEFORE tier resolution so the ``completion`` wrapper's
+    ``finally`` emit always has a well-defined ``outcome`` — even on the
+    pre-resolution failure paths where the ledger ``outcome`` var does not
+    yet exist. The span reads THIS object, never the ledger ``outcome``
+    var; the two vocabularies are distinct (see :data:`GatewayTraceOutcome`).
+    """
+
+    request_id: str
+    tenant_id: str | None
+    tier: str
+    flow_start: float
+    agent_workforce_id: str | None
+    outcome: GatewayTraceOutcome = "errored_pre_resolution"
+    litellm_alias: str | None = None
+    preflight: ResolvedUpstream | None = None
+    actual: ResolvedUpstream | None = None
+    usage: dict[str, object] | None = None
+
+
 class LLMGateway:
     """Single LLM-call chokepoint for ADR-007 provider-honesty.
 
@@ -228,6 +279,7 @@ class LLMGateway:
         output_pipeline: GuardrailPipeline | None = None,
         http_client: _httpx.AsyncClient | None = None,
         litellm_master_key: str | None = None,
+        observability: ObservabilityAdapter | None = None,
     ) -> None:
         self._settings = settings
         self._ledger = ledger
@@ -256,6 +308,7 @@ class LLMGateway:
         self._litellm_master_key: str | None = (
             litellm_master_key if litellm_master_key is not None else settings.litellm_master_key
         )
+        self._observability: ObservabilityAdapter | None = observability
 
     async def completion(
         self,
@@ -264,11 +317,58 @@ class LLMGateway:
         messages: list[dict[str, str]],
         request_id: str,
         tenant_id: str | None = None,
+        agent_workforce_id: str | None = None,
     ) -> GatewayResponse:
-        """The full Plan Decision-Locking §3 flow."""
-        flow_start = _time.monotonic()
-        litellm_alias = resolve_tier_alias(tier, self._settings)
-        preflight_resolved = self._preflight.resolve(litellm_alias)
+        """The full Plan Decision-Locking §3 flow, wrapped in a best-effort
+        observability span (gateway-observability workstream). The span is
+        emitted on EVERY exit via the ``finally`` + the dedicated
+        :class:`_CompletionTrace`. A strict-ledger failure overrides the
+        per-path outcome to ``strict_ledger_failure`` (the call ultimately
+        failed on the provenance write)."""
+        trace = _CompletionTrace(
+            request_id=request_id,
+            tenant_id=tenant_id,
+            tier=tier,
+            flow_start=_time.monotonic(),
+            agent_workforce_id=agent_workforce_id,
+        )
+        try:
+            return await self._run_completion(trace=trace, messages=messages)
+        except LedgerWriteFailed:
+            trace.outcome = "strict_ledger_failure"
+            raise
+        finally:
+            await self._emit_completion_trace_best_effort(trace)
+
+    async def _run_completion(
+        self,
+        *,
+        trace: _CompletionTrace,
+        messages: list[dict[str, str]],
+    ) -> GatewayResponse:
+        """The Plan Decision-Locking §3 flow body. Reads the stable per-call
+        values from ``trace`` and sets ``trace.outcome`` / ``.preflight`` /
+        ``.actual`` / ``.usage`` at each exit so the wrapper's ``finally``
+        emits a well-defined span. The ledger ``outcome`` var below is
+        UNCHANGED — its vocabulary is the ledger's, not the span's."""
+        tier = trace.tier
+        request_id = trace.request_id
+        tenant_id = trace.tenant_id
+        flow_start = trace.flow_start
+
+        try:
+            litellm_alias = resolve_tier_alias(tier, self._settings)
+        except UnknownTierError:
+            trace.outcome = "invalid_tier"
+            raise
+        trace.litellm_alias = litellm_alias
+        try:
+            preflight_resolved = self._preflight.resolve(litellm_alias)
+        except (UnknownAliasError, ValueError):
+            trace.outcome = "preflight_failure"
+            raise
+        trace.preflight = preflight_resolved
+
         actual_resolved: ResolvedUpstream | None = None  # set after LiteLLM responds
         outcome: str = "ok"
         scope: str = self._settings.llm_guardrail_scope
@@ -293,6 +393,7 @@ class LLMGateway:
             input_trips = [r for r in ip_result.results if not r.passed]
             if input_trips:
                 outcome = "guardrail_input"
+                trace.outcome = "guardrail_input"
                 trip_summary = ",".join(r.guardrail_name for r in input_trips)
                 err = GuardrailViolationError("input", trip_summary)
                 await self._best_effort_ledger_write(
@@ -314,6 +415,7 @@ class LLMGateway:
         )
         if not decision.allowed:
             outcome = "denied"
+            trace.outcome = "policy_denied"
             await self._audit.append(
                 AuditEvent(
                     event_type="gateway.cloud_policy_denied",
@@ -365,6 +467,7 @@ class LLMGateway:
                     # established or local request malformed before
                     # going on the wire.
                     outcome = "upstream_error"
+                    trace.outcome = "upstream_error"
                     await self._best_effort_ledger_write(
                         request_id=request_id,
                         tenant_id=tenant_id,
@@ -381,6 +484,7 @@ class LLMGateway:
                     # in full); LiteLLM may already have contacted
                     # upstream. Strict regime with preflight identity.
                     outcome = "upstream_error"
+                    trace.outcome = "upstream_error"
                     await self._strict_ledger_write_or_raise(
                         request_id=request_id,
                         tenant_id=tenant_id,
@@ -413,6 +517,7 @@ class LLMGateway:
                         # call/one-ledger-row contract for
                         # /effective-routing counts).
                         outcome = "upstream_error"
+                        trace.outcome = "upstream_error"
                         await self._strict_ledger_write_or_raise(
                             request_id=request_id,
                             tenant_id=tenant_id,
@@ -446,6 +551,7 @@ class LLMGateway:
                     # Round-8 reviewer-P1: actual_resolved is bound
                     # BEFORE the audit emit. If append raises, the
                     # outer catch-all has the correct provenance state.
+                    trace.actual = actual_resolved
                     if pending_audit is not None:
                         await self._audit.append(pending_audit)
 
@@ -506,6 +612,7 @@ class LLMGateway:
                     )
                     if not actual_decision.allowed:
                         outcome = "denied"
+                        trace.outcome = "policy_denied"
                         await self._audit.append(
                             AuditEvent(
                                 event_type="gateway.cloud_policy_denied",
@@ -556,6 +663,7 @@ class LLMGateway:
                         output_trips = [r for r in op_result.results if not r.passed]
                         if output_trips:
                             outcome = "guardrail_output"
+                            trace.outcome = "guardrail_output"
                             trip_summary = ",".join(r.guardrail_name for r in output_trips)
                             err_g = GuardrailViolationError("output", trip_summary)
                             await self._strict_ledger_write_or_raise(
@@ -572,6 +680,12 @@ class LLMGateway:
 
                     # --- 9. Strict ledger write THEN return ---------------
                     outcome = "drift" if drift else "ok"
+                    # Span provenance: capture usage counts + the per-path
+                    # outcome BEFORE the strict ledger write so a subsequent
+                    # LedgerWriteFailed (→ wrapper override) still carries the
+                    # usage it had. ``body`` is in scope from ``resp.json()``.
+                    trace.usage = body.get("usage") if isinstance(body.get("usage"), dict) else None
+                    trace.outcome = "drift" if drift else "ok"
                     latency_ms = int((_time.monotonic() - flow_start) * 1000)
                     await self._strict_ledger_write_or_raise(
                         request_id=request_id,
@@ -608,6 +722,7 @@ class LLMGateway:
                     # outcome="upstream_error" rows for one call.
                     raise
                 except Exception as exc:
+                    trace.outcome = "upstream_error"
                     # Round-7 reviewer-P1: AuditStore failures +
                     # malformed-content path land here. Strict-ledger
                     # with actual_resolved if bound, else preflight.
@@ -628,6 +743,7 @@ class LLMGateway:
             # then propagate. The ``async with`` __aenter__ raised;
             # __aexit__ was not called.
             outcome = "concurrency_exhausted"
+            trace.outcome = "concurrency_exhausted"
             await self._best_effort_ledger_write(
                 request_id=request_id,
                 tenant_id=tenant_id,
@@ -837,9 +953,56 @@ class LLMGateway:
         except Exception:
             _LOG.exception("best-effort ledger write failed; pre-dispatch path — not chaining")
 
+    async def _emit_completion_trace_best_effort(self, trace: _CompletionTrace) -> None:
+        """Best-effort, value-free observability span — one per completion,
+        on EVERY exit path. Mirrors ``_best_effort_ledger_write``'s fail-open
+        discipline: any failure (adapter raise, serialization error) is
+        caught + logged + swallowed so a trace failure NEVER fails the LLM
+        call. Observability is not a governance gate — the hash-chained
+        ``audit_event`` + the ledger remain the records of truth.
+
+        Value-free by construction: only metadata + token COUNTS enter the
+        attribute set — never message / prompt / response content. A reviewer
+        can confirm value-freeness by reading the keys below.
+        """
+        observability = self._observability
+        if observability is None:
+            return
+        try:
+            latency_ms = int((_time.monotonic() - trace.flow_start) * 1000)
+            attributes: dict[str, object] = {
+                "llm.gateway.outcome": trace.outcome,
+                "llm.gateway.request_id": trace.request_id,
+                "llm.gateway.tier": trace.tier,
+                "llm.gateway.latency_ms": latency_ms,
+            }
+            if trace.tenant_id is not None:
+                attributes["llm.gateway.tenant_id"] = trace.tenant_id
+            if trace.litellm_alias is not None:
+                attributes["llm.gateway.litellm_alias"] = trace.litellm_alias
+            if trace.preflight is not None:
+                attributes["gen_ai.request.model"] = trace.preflight.model_string
+                attributes["llm.gateway.external"] = trace.preflight.external
+            if trace.actual is not None:
+                attributes["gen_ai.response.model"] = trace.actual.model_string
+                attributes["llm.gateway.provenance"] = trace.actual.provenance
+            if trace.usage is not None:
+                input_tokens = trace.usage.get("prompt_tokens")
+                output_tokens = trace.usage.get("completion_tokens")
+                if isinstance(input_tokens, int):
+                    attributes["gen_ai.usage.input_tokens"] = input_tokens
+                if isinstance(output_tokens, int):
+                    attributes["gen_ai.usage.output_tokens"] = output_tokens
+            if trace.agent_workforce_id is not None:
+                attributes["llm.gateway.agent_workforce_id"] = trace.agent_workforce_id
+            await observability.emit_trace("llm.gateway.completion", attributes)
+        except Exception:
+            _LOG.exception("llm.gateway.trace_emit_failed")
+
 
 __all__ = (
     "GatewayResponse",
+    "GatewayTraceOutcome",
     "LLMGateway",
     "LedgerWriteFailed",
     "Tier",

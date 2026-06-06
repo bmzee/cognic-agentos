@@ -189,3 +189,22 @@ async def test_http_client_not_constructed_when_memory_construction_fails(
         assert constructed == []
     finally:
         await adapters.close_all()
+
+
+async def test_build_runtime_threads_observability_into_gateway(
+    memory_registry, memory_settings, tmp_path
+):
+    """build_runtime threads adapters.observability into the gateway (the
+    gateway-observability seam). White-box on the private attr — mirrors the
+    _litellm_master_key assertion: proves the wiring, not just 'no raise'."""
+    s = memory_settings.model_copy(
+        update={"litellm_config_path": _litellm_yaml(tmp_path), "cache_driver": "none"}
+    )
+    adapters = build_adapters(s, registry=memory_registry)
+    await adapters.open_all()
+    try:
+        runtime = await build_runtime(s, adapters)
+        assert runtime.llm_gateway._observability is adapters.observability
+        await runtime.aclose()
+    finally:
+        await adapters.close_all()
