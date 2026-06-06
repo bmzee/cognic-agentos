@@ -976,6 +976,17 @@ def create_app(
         )
         app.state.memory_router_mounted = True
 
+    # Eval judge surface (ADR-010 — first gateway consumer). Unconditional:
+    # the gateway is always built by build_runtime; the route's DI fails closed
+    # 503 until app.state.llm_gateway is populated. Lazy import.
+    from cognic_agentos.portal.api.evaluation.routes import build_eval_routes
+
+    app.include_router(
+        build_eval_routes(eval_judge_tier=settings.eval_judge_tier),
+        prefix="/api/v1/eval",
+        tags=["eval"],
+    )
+
     # Sprint-7B.4 T12: UI router mount + .well-known registration.
     # Gated on ``portal_broker is not None`` — pack-only deployments
     # that don't wire the T6 deps OR the ``broker=`` kwarg get NO UI
