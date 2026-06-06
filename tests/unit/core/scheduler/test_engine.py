@@ -1382,8 +1382,8 @@ async def test_t9_invalid_second_terminal_attempt_does_not_release_twice(
     # Snapshot post-first-complete state
     releases_before = list(quota.releases)
     tenant_count_before = engine._tenant_class_counts.get(("tenant-a", "interactive"), 0)
-    pack_count_before = engine._pack_counts.get("pack-x", 0)
-    actor_count_before = engine._actor_counts.get("svc-a", 0)
+    pack_count_before = engine._pack_counts.get(("tenant-a", "pack-x"), 0)
+    actor_count_before = engine._actor_counts.get(("tenant-a", "svc-a"), 0)
     running_attr_before = dict(engine._running_attribution)
     # Second complete — round-1 P2 fix: tighten the assertion from
     # `pytest.raises(Exception)` to the specific typed exception +
@@ -1398,9 +1398,77 @@ async def test_t9_invalid_second_terminal_attempt_does_not_release_twice(
     # No second release; no further bookkeeping mutation
     assert list(quota.releases) == releases_before
     assert engine._tenant_class_counts.get(("tenant-a", "interactive"), 0) == tenant_count_before
-    assert engine._pack_counts.get("pack-x", 0) == pack_count_before
-    assert engine._actor_counts.get("svc-a", 0) == actor_count_before
+    assert engine._pack_counts.get(("tenant-a", "pack-x"), 0) == pack_count_before
+    assert engine._actor_counts.get(("tenant-a", "svc-a"), 0) == actor_count_before
     assert engine._running_attribution == running_attr_before
+
+
+# ---------------------------------------------------------------------------
+# Review §4.2 — per-pack / per-actor concurrency caps are scoped per tenant.
+# One tenant's running tasks must NOT cap another tenant submitting the same
+# pack (or sharing an actor subject string). Counters are keyed by
+# (tenant_id, pack_id) / (tenant_id, actor_subject), so each tenant gets its
+# own full independent cap.
+# ---------------------------------------------------------------------------
+
+
+async def test_per_pack_cap_is_scoped_per_tenant(
+    engine_db: AsyncEngine, class_settings: dict[str, tuple[int, float]]
+) -> None:
+    caps = ConcurrencyCaps(
+        per_tenant_interactive=10, per_tenant_background=10, per_pack=2, per_actor=10
+    )
+    engine = _make_engine(
+        db=engine_db,
+        caps=caps,
+        class_settings=class_settings,
+        quota=_StubQuotaInterrogator(allow=True),
+    )
+    # tenant-a fills its (tenant-a, pack-x) per-pack cap (2).
+    for i in range(2):
+        d = await engine.submit(
+            submit_input=_make_submit_input(tenant_id="tenant-a", pack_id="pack-x"),
+            request_id=f"r-a-{i}",
+        )
+        assert d.outcome == "accepted_immediate"
+    # tenant-b submitting the SAME pack still gets a full independent cap
+    # (before the §4.2 fix this saw tenant-a's count=2 and was capped/queued).
+    d = await engine.submit(
+        submit_input=_make_submit_input(tenant_id="tenant-b", pack_id="pack-x"),
+        request_id="r-b-0",
+    )
+    assert d.outcome == "accepted_immediate"
+    assert engine._pack_counts.get(("tenant-a", "pack-x")) == 2
+    assert engine._pack_counts.get(("tenant-b", "pack-x")) == 1
+
+
+async def test_per_actor_cap_is_scoped_per_tenant(
+    engine_db: AsyncEngine, class_settings: dict[str, tuple[int, float]]
+) -> None:
+    caps = ConcurrencyCaps(
+        per_tenant_interactive=10, per_tenant_background=10, per_pack=10, per_actor=2
+    )
+    engine = _make_engine(
+        db=engine_db,
+        caps=caps,
+        class_settings=class_settings,
+        quota=_StubQuotaInterrogator(allow=True),
+    )
+    # tenant-a fills its (tenant-a, svc-shared) per-actor cap (2).
+    for i in range(2):
+        d = await engine.submit(
+            submit_input=_make_submit_input(tenant_id="tenant-a", actor_subject="svc-shared"),
+            request_id=f"r-a-{i}",
+        )
+        assert d.outcome == "accepted_immediate"
+    # tenant-b sharing the SAME actor subject still gets a full independent cap.
+    d = await engine.submit(
+        submit_input=_make_submit_input(tenant_id="tenant-b", actor_subject="svc-shared"),
+        request_id="r-b-0",
+    )
+    assert d.outcome == "accepted_immediate"
+    assert engine._actor_counts.get(("tenant-a", "svc-shared")) == 2
+    assert engine._actor_counts.get(("tenant-b", "svc-shared")) == 1
 
 
 # --- T10 ParentBudgetResolver narrowing integration --------------------

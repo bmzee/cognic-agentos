@@ -1158,6 +1158,16 @@ class TestHttpManifestShapeGate:
         assert result.payload["field"] == "server_url"
         assert result.payload["declared_type"] == "int"
 
+    async def test_non_http_scheme_server_url_refused(self) -> None:
+        """Remediation §4.1 — a non-http(s) ``server_url`` (e.g. ``file://``) is
+        refused at admission, not deferred to the discovery fetch (SSRF pre-filter)."""
+        manifest = _base_manifest(mcp={"server_url": "file:///etc/passwd"})
+        result = await validate_mcp_manifest(manifest, context=_ctx())
+        assert result.ok is False
+        assert result.reason == "mcp_http_manifest_shape_invalid"
+        assert result.payload["field"] == "server_url"
+        assert result.payload["reason_detail"] == "server_url scheme must be http or https"
+
     async def test_string_scopes_refused(self) -> None:
         """``scopes = "mcp:tools"`` (single string) is the most likely
         author mistake; it would otherwise become a 9-char tuple."""

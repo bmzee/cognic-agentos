@@ -48,6 +48,11 @@ class ErasureCommandBody(pydantic.BaseModel):
     regulator_order_id: str
     requester_scope: str
     subject_id: str
+    # Review §4.3 — the erased subject's kind. Derives
+    # expected_subject_ref = f"{subject_kind}:{subject_id}" so agent-kind
+    # records can be erased (was hardcoded "human:"). Defaults "human" for
+    # backward-compat with existing human-subject erasure clients.
+    subject_kind: Literal["human", "agent"] = "human"
 
 
 class ForgetRequest(pydantic.BaseModel):

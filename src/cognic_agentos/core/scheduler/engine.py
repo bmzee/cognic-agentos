@@ -245,8 +245,13 @@ class SchedulerEngine:
         # In-memory concurrency counters (Wave-1; multi-instance =
         # Wave-2 distributed counter substrate per ADR-022).
         self._tenant_class_counts: dict[tuple[str, SchedulerPriorityClass], int] = {}
-        self._pack_counts: dict[str, int] = {}
-        self._actor_counts: dict[str, int] = {}
+        # Review §4.2 fix: keyed by (tenant_id, pack_id) / (tenant_id, actor_subject)
+        # — NOT raw pack_id / subject — so one tenant's running tasks cannot cap
+        # another tenant's admission (ADR-022: per-pack / per-actor caps are
+        # enforced "within a tenant"). Tenant-blind keys let two tenants sharing a
+        # pack name (or actor subject string) mutually halve each other's caps.
+        self._pack_counts: dict[tuple[str, str], int] = {}
+        self._actor_counts: dict[tuple[str, str], int] = {}
         # Round-5 reviewer P1 #2 + #3 fixes: per-task attribution maps
         # so terminal-state transitions can decrement the right
         # counters (running) OR remove the task from its queue
@@ -485,8 +490,10 @@ class SchedulerEngine:
         admissions."""
         tenant_class_key = (submit_input.tenant_id, submit_input.class_)
         tenant_count = self._tenant_class_counts.get(tenant_class_key, 0)
-        pack_count = self._pack_counts.get(submit_input.pack_id, 0)
-        actor_count = self._actor_counts.get(submit_input.actor.subject, 0)
+        pack_count = self._pack_counts.get((submit_input.tenant_id, submit_input.pack_id), 0)
+        actor_count = self._actor_counts.get(
+            (submit_input.tenant_id, submit_input.actor.subject), 0
+        )
         attribution = _TaskAttribution(
             tenant_id=submit_input.tenant_id,
             class_=submit_input.class_,
@@ -511,8 +518,10 @@ class SchedulerEngine:
                 request_id=request_id,
             )
             self._tenant_class_counts[tenant_class_key] = tenant_count + 1
-            self._pack_counts[submit_input.pack_id] = pack_count + 1
-            self._actor_counts[submit_input.actor.subject] = actor_count + 1
+            self._pack_counts[(submit_input.tenant_id, submit_input.pack_id)] = pack_count + 1
+            self._actor_counts[(submit_input.tenant_id, submit_input.actor.subject)] = (
+                actor_count + 1
+            )
             self._running_attribution[task_id] = attribution
             return AdmissionDecision(outcome="accepted_immediate", task_id=str(task_id))
 
@@ -648,8 +657,10 @@ class SchedulerEngine:
                 raise SchedulerPromotionRefused(task_id, reason="not_at_queue_head")
             # Step 2: cap re-check
             tenant_count = self._tenant_class_counts.get(tenant_class_key, 0)
-            pack_count = self._pack_counts.get(queued_attr.pack_id, 0)
-            actor_count = self._actor_counts.get(queued_attr.actor_subject, 0)
+            pack_count = self._pack_counts.get((queued_attr.tenant_id, queued_attr.pack_id), 0)
+            actor_count = self._actor_counts.get(
+                (queued_attr.tenant_id, queued_attr.actor_subject), 0
+            )
             if not self._caps.has_headroom_for(
                 class_=queued_attr.class_,
                 tenant_count=tenant_count,
@@ -691,8 +702,8 @@ class SchedulerEngine:
                 raise
             # Step 5: only on success, commit bookkeeping
             self._tenant_class_counts[tenant_class_key] = tenant_count + 1
-            self._pack_counts[queued_attr.pack_id] = pack_count + 1
-            self._actor_counts[queued_attr.actor_subject] = actor_count + 1
+            self._pack_counts[(queued_attr.tenant_id, queued_attr.pack_id)] = pack_count + 1
+            self._actor_counts[(queued_attr.tenant_id, queued_attr.actor_subject)] = actor_count + 1
             self._running_attribution[task_id] = queued_attr
             del self._queued_attribution[task_id]
             queue.remove(task_id)
@@ -997,12 +1008,10 @@ class SchedulerEngine:
         self._tenant_class_counts[tenant_class_key] = max(
             0, self._tenant_class_counts.get(tenant_class_key, 0) - 1
         )
-        self._pack_counts[attribution.pack_id] = max(
-            0, self._pack_counts.get(attribution.pack_id, 0) - 1
-        )
-        self._actor_counts[attribution.actor_subject] = max(
-            0, self._actor_counts.get(attribution.actor_subject, 0) - 1
-        )
+        pack_key = (attribution.tenant_id, attribution.pack_id)
+        self._pack_counts[pack_key] = max(0, self._pack_counts.get(pack_key, 0) - 1)
+        actor_key = (attribution.tenant_id, attribution.actor_subject)
+        self._actor_counts[actor_key] = max(0, self._actor_counts.get(actor_key, 0) - 1)
 
     async def _read_state(self, task_id: uuid.UUID) -> SchedulerTaskState:
         """Probe storage for the current state. Used by fail() + cancel()

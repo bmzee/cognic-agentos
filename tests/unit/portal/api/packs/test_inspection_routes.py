@@ -72,7 +72,7 @@ import logging
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 from fastapi import APIRouter, FastAPI, Request
@@ -746,10 +746,12 @@ class TestSprint7B2InspectionDetailEndpoint:
 
 class TestSprint7B2InspectionAuditEndpoint:
     """``GET /api/v1/packs/{pack_id}/audit`` — hash-chained audit
-    events per plan §999. Reads via :meth:`PackRecordStore.load_lifecycle_history`
-    (filtered to ``payload['pack_id'] == str(pack_id)`` per the
-    ``packs/storage.py:981-1033`` walker — already in the storage CC
-    surface and dialect-portable across PG / Oracle / SQLite).
+    events per plan §999. Reads via :meth:`PackRecordStore.load_pack_audit_events`
+    (lifecycle + ``pack.approval_override`` union per review §4.4 C-narrow;
+    filtered to ``payload['pack_id'] == str(pack_id)`` at the storage seam —
+    in the storage CC surface and dialect-portable across PG / Oracle / SQLite).
+    Override-visibility + evidence-read-deferral pins live in
+    :class:`TestReviewS44AuditOverrideVisibility` below.
 
     Dependency chain identical to detail endpoint above:
     ``pack.audit.read`` + ``RequireTenantOwnership``.
@@ -1015,3 +1017,100 @@ class TestSprint7B2InspectionInvocationsEndpoint:
 
         assert response.status_code == 404
         assert response.json()["detail"]["reason"] == "tenant_id_mismatch"
+
+
+# ---------------------------------------------------------------------------
+# Review §4.4 (C-narrow) — force-approve authorisations visible at /audit
+# ---------------------------------------------------------------------------
+
+
+class TestReviewS44AuditOverrideVisibility:
+    """Review §4.4 (C-narrow): the examiner-facing ``GET /{pack_id}/audit``
+    endpoint MUST surface ``pack.approval_override`` force-approve
+    authorisations (ADR-012 §107), while ``GET /{pack_id}`` detail stays
+    lifecycle-only. ``pack.evidence_read.*`` is deliberately deferred."""
+
+    _SNAPSHOT: ClassVar[dict[str, Any]] = {"pack_kind": "tool", "all_green": False, "gates": []}
+
+    async def _seed_with_override(
+        self, store: PackRecordStore, *, tenant_id: str = "t1"
+    ) -> PackRecord:
+        record = await _seed_pack(store, tenant_id=tenant_id, state_after_seed="submitted")
+        await store.append_override_event(
+            pack_id=record.id,
+            override_actor_subject="alice@bank.example",
+            override_reason="security_exception",
+            gate_composition_snapshot=self._SNAPSHOT,
+            request_id=f"override-seed-{record.id.hex[:8]}",
+        )
+        return record
+
+    async def test_audit_includes_pack_approval_override(self, store: PackRecordStore) -> None:
+        # pin #3
+        record = await self._seed_with_override(store)
+        actor = _make_actor(tenant_id="t1", scopes=frozenset({"pack.audit.read"}))
+        app = _build_app(actor=actor, store=store)
+
+        with TestClient(app) as client:
+            response = client.get(f"/api/v1/packs/{record.id}/audit")
+
+        assert response.status_code == 200, response.text
+        decision_types = {event["decision_type"] for event in response.json()}
+        assert "pack.lifecycle.submitted" in decision_types
+        assert "pack.approval_override" in decision_types
+
+    async def test_detail_still_excludes_pack_approval_override(
+        self, store: PackRecordStore
+    ) -> None:
+        # pin #4
+        record = await self._seed_with_override(store)
+        actor = _make_actor(tenant_id="t1", scopes=frozenset({"pack.audit.read"}))
+        app = _build_app(actor=actor, store=store)
+
+        with TestClient(app) as client:
+            response = client.get(f"/api/v1/packs/{record.id}")
+
+        assert response.status_code == 200, response.text
+        decision_types = {event["decision_type"] for event in response.json()["history"]}
+        assert "pack.lifecycle.submitted" in decision_types
+        assert "pack.approval_override" not in decision_types
+
+    async def test_audit_excludes_evidence_read_events(self, store: PackRecordStore) -> None:
+        # pin #6 (route level) — evidence_read deferred (§4.4 C-narrow).
+        record = await self._seed_with_override(store)
+        await store.append_evidence_read_event(
+            pack_id=record.id,
+            actor_subject="reviewer-alice",
+            panel_name="data_governance",
+            tenant_id="t1",
+            request_id=f"evread-seed-{record.id.hex[:8]}",
+        )
+        actor = _make_actor(tenant_id="t1", scopes=frozenset({"pack.audit.read"}))
+        app = _build_app(actor=actor, store=store)
+
+        with TestClient(app) as client:
+            response = client.get(f"/api/v1/packs/{record.id}/audit")
+
+        assert response.status_code == 200, response.text
+        decision_types = {event["decision_type"] for event in response.json()}
+        assert "pack.approval_override" in decision_types
+        assert not any(dt.startswith("pack.evidence_read") for dt in decision_types)
+
+    async def test_audit_cross_tenant_override_not_leaked(self, store: PackRecordStore) -> None:
+        # pin #5 (route level) — pack B's override never appears in pack A's
+        # audit, even when both share a tenant.
+        record_a = await self._seed_with_override(store, tenant_id="t1")
+        record_b = await self._seed_with_override(store, tenant_id="t1")
+        actor = _make_actor(tenant_id="t1", scopes=frozenset({"pack.audit.read"}))
+        app = _build_app(actor=actor, store=store)
+
+        with TestClient(app) as client:
+            response = client.get(f"/api/v1/packs/{record_a.id}/audit")
+
+        assert response.status_code == 200, response.text
+        pack_ids = {event["payload"]["pack_id"] for event in response.json()}
+        assert pack_ids == {str(record_a.id)}, (
+            f"pack_a audit leaked rows from other packs: {pack_ids}"
+        )
+        # record_b's override (same tenant) MUST NOT appear in pack_a's audit.
+        assert str(record_b.id) not in pack_ids

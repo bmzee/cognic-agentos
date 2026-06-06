@@ -1455,6 +1455,8 @@ class TestRefusalReasonClosedEnum:
             "mcp_oauth_token_endpoint_error",
             "mcp_oauth_token_response_invalid",
             "mcp_prm_invalid",
+            # Remediation §4.1 — SSRF discovery/PRM URL guard.
+            "mcp_discovery_url_refused",
         }
     )
 

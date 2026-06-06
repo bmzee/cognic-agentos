@@ -569,7 +569,9 @@ class PostgresMemoryAdapter:
         chain row with chain-of-custody metadata (NO value, NO digest).
 
         The precondition verifies that the row's ``subject_ref`` matches
-        ``human:{erasure_command.subject_id}``. A mismatch raises
+        ``{erasure_command.subject_kind}:{erasure_command.subject_id}``
+        (review §4.3 — was hardcoded ``human:`` which silently failed every
+        agent-kind erasure). A mismatch raises
         ``memory_regulator_erasure_metadata_required`` inside the precondition so
         the engine rolls back — nothing is deleted and no chain row is written.
 
@@ -578,7 +580,7 @@ class PostgresMemoryAdapter:
         ``subject_id``, ``record_id``, ``actor_id``). No ``value`` or
         ``redacted_value_digest``."""
 
-        expected_subject_ref = f"human:{erasure_command.subject_id}"
+        expected_subject_ref = f"{erasure_command.subject_kind}:{erasure_command.subject_id}"
 
         async def _precondition(conn: AsyncConnection, _prev_seq: int, _prev_hash: bytes) -> None:
             row = (

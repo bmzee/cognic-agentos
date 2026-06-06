@@ -114,6 +114,10 @@ Closed-enum error vocabulary (matches the registry-side
 - ``mcp_prm_invalid`` — PRM document malformed (the
   ``/.well-known/oauth-protected-resource`` document on the MCP
   server side, NOT the AS).
+- ``mcp_discovery_url_refused`` — remediation §4.1 SSRF guard: a
+  discovery / PRM fetch target was refused (non-http(s) scheme, no
+  host, or — in stage/prod — a host resolving to a private / loopback
+  / link-local / reserved address). Rejection never echoes the raw URL.
 
 Forward-mapping note: T6's ``plugin_registry.RefusalReason`` literal
 will need entries for the six Sprint-5-T5 additions
@@ -128,6 +132,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import dataclasses
+import ipaddress
 import json
 import logging
 import math
@@ -138,7 +143,7 @@ from urllib.parse import quote_plus, urlparse
 import httpx
 
 from cognic_agentos.core.audit import AuditEvent, AuditStore
-from cognic_agentos.core.config import Settings
+from cognic_agentos.core.config import _STRICT_PROFILES, Settings
 from cognic_agentos.core.decision_history import DecisionHistoryStore, DecisionRecord
 from cognic_agentos.db.adapters.protocols import SecretAdapter
 
@@ -176,6 +181,10 @@ AuthzReason = Literal[
     "mcp_oauth_token_endpoint_error",
     "mcp_oauth_token_response_invalid",
     "mcp_prm_invalid",
+    # Remediation §4.1 (SSRF): a discovery/PRM fetch target was refused by the
+    # URL guard — non-http(s) scheme, no host, or (in stage/prod) a host
+    # resolving to a private/loopback/link-local/reserved address.
+    "mcp_discovery_url_refused",
 ]
 
 
@@ -331,6 +340,22 @@ def _decode_jwt_payload(token: str) -> dict[str, Any]:
         return {}
 
 
+async def _resolve_host_addresses(host: str) -> list[str]:
+    """Resolve a host to its IP-address strings for the SSRF guard. An IP
+    literal resolves to itself (no DNS); a hostname is resolved via the event
+    loop's ``getaddrinfo``. Module-level so the resolver is a monkeypatchable
+    seam in tests. Raises ``OSError`` (e.g. ``socket.gaierror``) on resolution
+    failure — the caller treats that as non-blocking (the subsequent fetch
+    fails at the transport layer)."""
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        loop = asyncio.get_running_loop()
+        infos = await loop.getaddrinfo(host, None)
+        return [str(info[4][0]) for info in infos]
+    return [host]
+
+
 class MCPAuthzClient:
     """OAuth + Protected Resource Metadata client per ADR-002.
 
@@ -405,6 +430,7 @@ class MCPAuthzClient:
         if every path fails entirely (no auth surface advertised);
         ``mcp_oauth_request_timeout`` on timeout.
         """
+        await self._refuse_non_public_discovery_url(server_url)
         timeout = self._settings.mcp_oauth_request_timeout_s
 
         # Path 1: probe the MCP server itself, look for
@@ -942,6 +968,69 @@ class MCPAuthzClient:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    async def _refuse_non_public_discovery_url(self, url: str) -> None:
+        """SSRF guard (remediation §4.1) for OAuth/PRM discovery fetches.
+
+        Always rejects non-http(s) schemes and host-less URLs. In the strict
+        (stage/prod) profile additionally resolves the host and rejects
+        private / loopback / link-local / reserved / multicast / unspecified
+        addresses (cloud-metadata 169.254/16, RFC1918, 127/8, ::1, fc00::/7).
+        Rejection payloads identify the refused component CLASS only and NEVER
+        echo the raw URL (it can carry credential-like material) — mirrors the
+        ``a2a_agent_cards`` origin guard.
+
+        Residual: resolve-then-fetch leaves a DNS-rebinding TOCTOU window
+        (attacker flips DNS between this resolution and httpx's). The standard
+        mitigation per the review; full connect-time IP-pinning is a tracked
+        follow-up, not claimed here.
+        """
+        if not isinstance(url, str):
+            raise MCPAuthzError(
+                "mcp_discovery_url_refused",
+                "discovery URL is not a string",
+                refused_component="not_string",
+            )
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"}:
+            raise MCPAuthzError(
+                "mcp_discovery_url_refused",
+                "discovery URL scheme is not http/https",
+                refused_component="scheme",
+            )
+        host = parsed.hostname
+        if not host:
+            raise MCPAuthzError(
+                "mcp_discovery_url_refused",
+                "discovery URL has no host",
+                refused_component="host",
+            )
+        if self._settings.runtime_profile not in _STRICT_PROFILES:
+            return
+        try:
+            addresses = await _resolve_host_addresses(host)
+        except OSError:
+            # Unresolvable host is not an SSRF vector; the subsequent fetch
+            # fails at the transport layer with a closed-enum reason.
+            return
+        for addr in addresses:
+            try:
+                ip = ipaddress.ip_address(addr)
+            except ValueError:
+                continue
+            if (
+                ip.is_private
+                or ip.is_loopback
+                or ip.is_link_local
+                or ip.is_reserved
+                or ip.is_multicast
+                or ip.is_unspecified
+            ):
+                raise MCPAuthzError(
+                    "mcp_discovery_url_refused",
+                    "discovery URL host resolves to a non-public address",
+                    refused_component="host_address",
+                )
+
     async def _fetch_prm(
         self,
         url: str,
@@ -956,6 +1045,7 @@ class MCPAuthzClient:
         on timeout; raises ``mcp_prm_invalid`` on malformed JSON or
         missing required fields.
         """
+        await self._refuse_non_public_discovery_url(url)
         try:
             resp = await self._http.get(url, timeout=timeout)
         except httpx.TimeoutException as exc:

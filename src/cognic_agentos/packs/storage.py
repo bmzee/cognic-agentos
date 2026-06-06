@@ -108,6 +108,7 @@ from sqlalchemy import (
     Table,
     Text,
     insert,
+    or_,
     select,
     update,
 )
@@ -1311,6 +1312,80 @@ class PackRecordStore:
                         _decision_history.c.sequence,
                     )
                     .where(_decision_history.c.event_type.like("pack.lifecycle.%"))
+                    .order_by(_decision_history.c.sequence)
+                )
+            ).all()
+
+        history: list[DecisionRecord] = []
+        for row in rows:
+            payload: dict[str, Any] = row.payload or {}
+            if payload.get("pack_id") != target_id:
+                continue
+            iso_controls_raw = row.iso_controls or []
+            history.append(
+                DecisionRecord(
+                    decision_type=row.event_type,
+                    request_id=row.request_id,
+                    payload=payload,
+                    actor_id=None,
+                    tenant_id=row.tenant_id,
+                    trace_id=row.trace_id,
+                    span_id=row.span_id,
+                    langfuse_trace_id=row.langfuse_trace_id,
+                    provider_label=row.provider_label,
+                    iso_controls=tuple(iso_controls_raw),
+                )
+            )
+        return history
+
+    async def load_pack_audit_events(self, pack_id: uuid.UUID) -> list[DecisionRecord]:
+        """Walk the examiner-facing audit slice for a pack — BOTH the
+        ``decision_history.event_type LIKE 'pack.lifecycle.%'`` slice AND
+        the ``pack.approval_override`` force-approve authorisation event —
+        filtered to ``payload['pack_id'] == str(pack_id)``, sorted by
+        ``sequence`` ascending.
+
+        Review §4.4 (C-narrow). This is the read seam behind
+        ``GET /{pack_id}/audit``: ADR-012 §107 designates the
+        ``pack.approval_override`` row the examiner's force-approve
+        authorisation fact, and it had ZERO read surface before this.
+
+        Deliberately a NEAR-COPY of :meth:`load_lifecycle_history` rather
+        than a shared-helper refactor: ``load_lifecycle_history`` is a
+        critical-controls method feeding the detail view + the four
+        evidence projectors, and AGENTS.md forbids casual refactors of
+        critical-controls code. Keeping it byte-identical guarantees those
+        consumers (and their lifecycle-only contract tests) stay
+        untouched. The ONLY difference is the ``WHERE`` union below.
+
+        ``pack.evidence_read.*`` rows are DELIBERATELY excluded (deferred
+        per the §4.4 C-narrow decision); they ARE audit events
+        (ISO A.5.31) but surfacing them is out of scope for the
+        override-visibility fix. A future sprint may widen the union.
+        """
+
+        target_id = str(pack_id)
+        async with self._engine.connect() as conn:
+            rows = (
+                await conn.execute(
+                    select(
+                        _decision_history.c.event_type,
+                        _decision_history.c.request_id,
+                        _decision_history.c.tenant_id,
+                        _decision_history.c.trace_id,
+                        _decision_history.c.span_id,
+                        _decision_history.c.langfuse_trace_id,
+                        _decision_history.c.provider_label,
+                        _decision_history.c.iso_controls,
+                        _decision_history.c.payload,
+                        _decision_history.c.sequence,
+                    )
+                    .where(
+                        or_(
+                            _decision_history.c.event_type.like("pack.lifecycle.%"),
+                            _decision_history.c.event_type == _OVERRIDE_EVENT_DECISION_TYPE,
+                        )
+                    )
                     .order_by(_decision_history.c.sequence)
                 )
             ).all()

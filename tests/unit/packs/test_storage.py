@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, ClassVar
 
 import pydantic
 import pytest
@@ -889,6 +889,154 @@ class TestSprint7B1PackRecordStoreLoadLifecycleHistory:
         await store.save_draft(rec)
         history = await store.load_lifecycle_history(rec.id)
         assert history == []
+
+
+# ===========================================================================
+# PackRecordStore.load_pack_audit_events (review §4.4 — C-narrow)
+# ===========================================================================
+
+
+class TestPackRecordStoreLoadPackAuditEvents:
+    """``load_pack_audit_events(pack_id)`` is the examiner-facing audit
+    reader (review §4.4, C-narrow). It surfaces BOTH lifecycle
+    transitions (``pack.lifecycle.%``) AND force-approve authorisations
+    (``pack.approval_override``) for a pack, filtered to
+    ``payload['pack_id'] == str(pack_id)`` and sorted by ``sequence``.
+
+    Distinct from :meth:`load_lifecycle_history`, which stays
+    lifecycle-only (it feeds the detail view + evidence projectors whose
+    contract MUST NOT change). ``pack.evidence_read.*`` rows are
+    DELIBERATELY excluded at this stage (deferred per the §4.4 C-narrow
+    decision) — see ``test_excludes_evidence_read_events``.
+    """
+
+    _SNAPSHOT: ClassVar[dict[str, Any]] = {"pack_kind": "tool", "all_green": False, "gates": []}
+
+    async def test_returns_lifecycle_and_override_rows_in_sequence_order(
+        self, store: PackRecordStore
+    ) -> None:
+        # pin #1 — both row families surfaced, in chain (sequence) order.
+        rec = _make_record()
+        await store.save_draft(rec)
+        for trans in ("submit", "claim"):
+            await store.transition(
+                pack_id=rec.id,
+                transition=trans,
+                actor_id="canary",
+                tenant_id=None,
+                evidence_pointer=None,
+                request_id=f"req-{trans}",
+            )
+        await store.append_override_event(
+            pack_id=rec.id,
+            override_actor_subject="alice@bank.example",
+            override_reason="security_exception",
+            gate_composition_snapshot=self._SNAPSHOT,
+            request_id="req-override",
+        )
+        events = await store.load_pack_audit_events(rec.id)
+        # submit + claim happen first; the override authorisation last.
+        assert [e.decision_type for e in events] == [
+            "pack.lifecycle.submitted",
+            "pack.lifecycle.under_review",
+            "pack.approval_override",
+        ]
+
+    async def test_load_lifecycle_history_still_excludes_override(
+        self, store: PackRecordStore
+    ) -> None:
+        # pin #2 GUARD — broadening the audit reader MUST NOT leak the
+        # override row into load_lifecycle_history (which feeds the detail
+        # view + projectors). Characterises the preserved lifecycle-only
+        # contract.
+        rec = _make_record()
+        await store.save_draft(rec)
+        await store.transition(
+            pack_id=rec.id,
+            transition="submit",
+            actor_id="canary",
+            tenant_id=None,
+            evidence_pointer=None,
+            request_id="req-submit",
+        )
+        await store.append_override_event(
+            pack_id=rec.id,
+            override_actor_subject="alice@bank.example",
+            override_reason="security_exception",
+            gate_composition_snapshot=self._SNAPSHOT,
+            request_id="req-override",
+        )
+        lifecycle = await store.load_lifecycle_history(rec.id)
+        assert [e.decision_type for e in lifecycle] == ["pack.lifecycle.submitted"]
+        assert "pack.approval_override" not in {e.decision_type for e in lifecycle}
+
+    async def test_filters_to_pack_id_no_cross_pack_override_leak(
+        self, store: PackRecordStore
+    ) -> None:
+        # pin #5 — pack B's override MUST NOT appear in pack A's audit.
+        rec_a = _make_record(pack_id="pack-a")
+        rec_b = _make_record(pack_id="pack-b")
+        for r in (rec_a, rec_b):
+            await store.save_draft(r)
+            await store.transition(
+                pack_id=r.id,
+                transition="submit",
+                actor_id="canary",
+                tenant_id=None,
+                evidence_pointer=None,
+                request_id=f"req-submit-{r.pack_id}",
+            )
+            await store.append_override_event(
+                pack_id=r.id,
+                override_actor_subject="alice@bank.example",
+                override_reason="security_exception",
+                gate_composition_snapshot=self._SNAPSHOT,
+                request_id=f"req-override-{r.pack_id}",
+            )
+        events_a = await store.load_pack_audit_events(rec_a.id)
+        assert {e.payload["pack_id"] for e in events_a} == {str(rec_a.id)}
+        assert "pack.approval_override" in {e.decision_type for e in events_a}
+        assert all(e.payload["pack_id"] != str(rec_b.id) for e in events_a)
+
+    async def test_excludes_evidence_read_events(self, store: PackRecordStore) -> None:
+        # pin #6 (DELIBERATE deferral, not forgotten) — ``pack.evidence_read.*``
+        # rows are NOT surfaced under the §4.4 C-narrow decision. A future
+        # sprint may widen the union; until then this guard makes the
+        # exclusion explicit.
+        rec = _make_record()
+        await store.save_draft(rec)
+        await store.transition(
+            pack_id=rec.id,
+            transition="submit",
+            actor_id="canary",
+            tenant_id=None,
+            evidence_pointer=None,
+            request_id="req-submit",
+        )
+        await store.append_override_event(
+            pack_id=rec.id,
+            override_actor_subject="alice@bank.example",
+            override_reason="security_exception",
+            gate_composition_snapshot=self._SNAPSHOT,
+            request_id="req-override",
+        )
+        await store.append_evidence_read_event(
+            pack_id=rec.id,
+            actor_subject="reviewer-alice",
+            panel_name="data_governance",
+            tenant_id=rec.tenant_id or "t1",
+            request_id="req-evidence-read",
+        )
+        decision_types = {e.decision_type for e in await store.load_pack_audit_events(rec.id)}
+        assert "pack.lifecycle.submitted" in decision_types
+        assert "pack.approval_override" in decision_types
+        assert not any(dt.startswith("pack.evidence_read") for dt in decision_types)
+
+    async def test_returns_empty_when_no_events(self, store: PackRecordStore) -> None:
+        rec = _make_record()
+        await store.save_draft(rec)
+        events = await store.load_pack_audit_events(rec.id)
+        assert events == []
 
 
 # ===========================================================================

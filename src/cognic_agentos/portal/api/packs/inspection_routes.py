@@ -245,14 +245,20 @@ def build_inspection_routes(*, store: PackRecordStore) -> APIRouter:
     ) -> list[PackLifecycleEventResponse]:
         """Return the hash-chained audit events for this pack.
 
-        Plan §999 — reads via
-        :meth:`PackRecordStore.load_lifecycle_history` which walks the
-        ``decision_history.event_type LIKE 'pack.lifecycle.%'`` slice
-        filtered to ``payload['pack_id'] == str(pack_id)`` (the
-        client-side JSON-key filter pattern at
-        ``packs/storage.py:981-1033``, dialect-portable across PG /
-        Oracle / SQLite). Filtering is done at the storage seam — no
-        cross-pack rows reach this handler.
+        Reads via :meth:`PackRecordStore.load_pack_audit_events`, which
+        walks BOTH the ``decision_history.event_type LIKE
+        'pack.lifecycle.%'`` slice AND the ``pack.approval_override``
+        force-approve authorisation event (review §4.4, C-narrow —
+        ADR-012 §107 designates the override row the examiner's
+        force-approve authorisation fact, and this endpoint is its read
+        surface). Both are filtered to ``payload['pack_id'] ==
+        str(pack_id)`` at the storage seam — no cross-pack rows reach
+        this handler.
+
+        ``pack.evidence_read.*`` rows are deliberately NOT surfaced here
+        yet (deferred per the §4.4 C-narrow decision). The detail
+        endpoint ``GET /{pack_id}`` stays lifecycle-only via
+        :meth:`load_lifecycle_history`.
 
         Dependency chain:
 
@@ -268,7 +274,7 @@ def build_inspection_routes(*, store: PackRecordStore) -> APIRouter:
         the binding so the dependency executes.
         """
         del actor  # bound for scope-dep side-effect; not consumed here.
-        history = await store.load_lifecycle_history(record.id)
+        history = await store.load_pack_audit_events(record.id)
         return [PackLifecycleEventResponse.model_validate(event) for event in history]
 
     @router.get(
