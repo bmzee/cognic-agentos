@@ -99,6 +99,7 @@ import asyncio
 import dataclasses
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
+from urllib.parse import urlparse
 
 if TYPE_CHECKING:
     from cognic_agentos.core.policy.engine import OPAEngine
@@ -457,6 +458,19 @@ async def validate_mcp_manifest(
                     "field": "server_url",
                     "declared_type": type(server_url).__name__,
                     "reason_detail": "server_url must be a non-empty string",
+                },
+            )
+        # Remediation §4.1 — admission-time SSRF pre-filter: server_url MUST be
+        # http/https so a non-fetchable scheme (file://, gopher://, ...) is
+        # refused at the manifest boundary, not at the discovery fetch.
+        if urlparse(server_url).scheme not in {"http", "https"}:
+            return ManifestValidation(
+                ok=False,
+                reason="mcp_http_manifest_shape_invalid",
+                payload={
+                    "field": "server_url",
+                    "declared_type": type(server_url).__name__,
+                    "reason_detail": "server_url scheme must be http or https",
                 },
             )
         scopes = mcp.get("scopes")

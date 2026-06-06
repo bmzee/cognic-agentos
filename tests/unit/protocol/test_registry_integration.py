@@ -1095,6 +1095,8 @@ class TestEnumCompleteness:
             "mcp_api_key_fallback_unresolved",
             # T6.3 registry configuration (1)
             "mcp_admission_deps_required",  # R1 P1 #1
+            # Remediation §4.1 (2026-06-06) — SSRF discovery-URL guard
+            "mcp_discovery_url_refused",
         }
         covered = covered_sprint_4 | covered_sprint_5
         assert covered == _VALID_REFUSAL_REASONS, (

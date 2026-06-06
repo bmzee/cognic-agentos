@@ -44,7 +44,8 @@ from cognic_agentos.protocol.plugin_registry import RefusalReason
 #:     than silently bypassing the form/TTL restricted-data refusals)
 #:   - 11 registration auth-probe failures (T6.3)
 #:   - 1 registry configuration failure (T6.3; mcp_admission_deps_required R1)
-#:   = 26 total
+#:   - 1 remediation §4.1 (2026-06-06): ``mcp_discovery_url_refused`` (SSRF guard)
+#:   = 27 total
 #:
 #: ``mcp_step_up_unauthorised`` is **runtime-only** (emitted by
 #: ``MCPHost.call_tool``'s step-up flow at T9, NEVER from
@@ -85,6 +86,8 @@ SPRINT_5_REFUSAL_REASONS: frozenset[str] = frozenset(
         "mcp_api_key_fallback_unresolved",
         # T6.3 registry configuration (1 — R1 P1 #1 added admission-deps-required)
         "mcp_admission_deps_required",
+        # Remediation §4.1 (2026-06-06) — SSRF discovery-URL guard (post-Sprint-5 mcp_ addition)
+        "mcp_discovery_url_refused",
     }
 )
 
@@ -104,21 +107,21 @@ class TestRefusalReasonCompleteness:
        ``test_mcp_manifest.py`` that asserts the reason's outcome.
     """
 
-    def test_total_count_is_26(self) -> None:
-        """Pin the total at 26 so future arithmetic drift is loud
+    def test_total_count_is_27(self) -> None:
+        """Pin the total at 27 so future arithmetic drift is loud
         (the count has been wrong in the plan three times — R2 said
         14 vs 16; R14 corrected 14 → 16 in the T6.3 catalogue summary;
         T6 R1 grew the count 22 → 24 with ``mcp_transport_unsupported``
         (R1 P1 #2) and ``mcp_admission_deps_required`` (R1 P1 #1);
         T15 R1 P2 #6 grew it 24 → 25 with
         ``mcp_http_manifest_shape_invalid``; T15 R2 P2 grew it 25 → 26
-        with ``mcp_tool_data_classes_shape_invalid`` so malformed tool
-        ``data_classes`` fail closed via the closed-enum envelope
-        rather than silently bypassing the form/TTL restricted-data
-        refusals). The literal list above is the source of truth."""
-        assert len(SPRINT_5_REFUSAL_REASONS) == 26, (
-            f"Expected 26 Sprint-5 refusal reasons; got {len(SPRINT_5_REFUSAL_REASONS)}. "
-            f"Update the count or the set."
+        with ``mcp_tool_data_classes_shape_invalid``; remediation §4.1
+        (2026-06-06) grew it 26 → 27 with ``mcp_discovery_url_refused``
+        for the SSRF discovery-URL guard). The literal list above is the
+        source of truth."""
+        assert len(SPRINT_5_REFUSAL_REASONS) == 27, (
+            f"Expected 27 mcp refusal reasons (26 Sprint-5 + 1 remediation §4.1); "
+            f"got {len(SPRINT_5_REFUSAL_REASONS)}. Update the count or the set."
         )
 
     def test_every_sprint_5_reason_in_literal(self) -> None:
@@ -372,4 +375,4 @@ class TestSprint5DriftDetectorSelfTest:
         assert inspect.getsourcefile(self.test_set_inspection_works) is not None
 
     def test_canonical_count_matches_set_size(self) -> None:
-        assert len(SPRINT_5_REFUSAL_REASONS) == 26
+        assert len(SPRINT_5_REFUSAL_REASONS) == 27

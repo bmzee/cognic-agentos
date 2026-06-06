@@ -119,6 +119,7 @@ RefusalReason = Literal[
     "mcp_oauth_token_endpoint_error",  # AS token endpoint non-200 (R11)
     "mcp_oauth_token_response_invalid",  # token response shape malformed (R11)
     "mcp_prm_invalid",  # PRM document malformed (MCP server side)
+    "mcp_discovery_url_refused",  # SSRF guard refused a discovery/PRM fetch URL (remediation §4.1)
     "mcp_api_key_fallback_unresolved",  # api-key fallback Vault path / secret invalid
     # Sprint 5 — registry-configuration failures (T6.3; 1 value)
     "mcp_admission_deps_required",  # MCP block declared but mcp_admission=None (R1 P1 #1)
@@ -167,6 +168,7 @@ _VALID_REFUSAL_REASONS: frozenset[str] = frozenset(
         "mcp_oauth_token_endpoint_error",
         "mcp_oauth_token_response_invalid",
         "mcp_prm_invalid",
+        "mcp_discovery_url_refused",  # remediation §4.1
         "mcp_api_key_fallback_unresolved",
         # Sprint 5 — registry configuration (1)
         "mcp_admission_deps_required",
@@ -197,6 +199,7 @@ _AUTHZ_REASON_TO_REFUSAL: dict[str, RefusalReason] = {
     "mcp_oauth_token_endpoint_error": "mcp_oauth_token_endpoint_error",
     "mcp_oauth_token_response_invalid": "mcp_oauth_token_response_invalid",
     "mcp_prm_invalid": "mcp_prm_invalid",
+    "mcp_discovery_url_refused": "mcp_discovery_url_refused",
 }
 
 

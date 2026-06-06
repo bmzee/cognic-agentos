@@ -806,3 +806,22 @@ class TestConcurrency:
         outcomes = registry.known_packs()
         assert len(outcomes) == 1
         assert outcomes[0].pack_id == "cognic-tool-search"
+
+
+# ---------------------------------------------------------------------------
+# Remediation §4.1 — SSRF discovery-URL refusal maps 1:1 to RefusalReason
+# ---------------------------------------------------------------------------
+
+
+def test_discovery_url_refused_maps_one_to_one() -> None:
+    """``mcp_discovery_url_refused`` is a registration-boundary AuthzReason; it
+    maps identity-style to the same RefusalReason and is in both closed sets."""
+    from cognic_agentos.protocol.plugin_registry import (
+        _AUTHZ_REASON_TO_REFUSAL,
+        _VALID_REFUSAL_REASONS,
+        _authz_reason_to_refusal,
+    )
+
+    assert _authz_reason_to_refusal("mcp_discovery_url_refused") == "mcp_discovery_url_refused"
+    assert "mcp_discovery_url_refused" in _AUTHZ_REASON_TO_REFUSAL
+    assert "mcp_discovery_url_refused" in _VALID_REFUSAL_REASONS
