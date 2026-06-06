@@ -27,9 +27,12 @@ import json as _json
 import logging as _logging
 import time as _time
 import uuid as _uuid
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 import httpx as _httpx
+
+if TYPE_CHECKING:
+    from cognic_agentos.db.adapters.protocols import ObservabilityAdapter
 
 from cognic_agentos.core.audit import AuditEvent, AuditStore
 from cognic_agentos.core.config import Settings
@@ -54,6 +57,30 @@ from cognic_agentos.llm.preflight import (
 #: Tier vocabulary. Sprint 3 ships two tiers; Sprint 9.5
 #: (ADR-013 model registry) may extend.
 Tier = Literal["tier1", "tier2"]
+
+
+#: Closed-enum trace-outcome vocabulary for the observability span
+#: (ADR-009 + the gateway-observability workstream). DISTINCT from the
+#: ledger's ``outcome`` column vocabulary: the span says ``policy_denied``
+#: where the ledger says ``denied``, and the span carries ``invalid_tier``
+#: / ``preflight_failure`` / ``strict_ledger_failure`` which have NO ledger
+#: equivalent. ``errored_pre_resolution`` is the pre-tier-resolution
+#: default — emitted only if no exit path set a value (a bug guard, not a
+#: normal outcome). Pinned by
+#: ``test_gateway_observability.py::TestTraceOutcomeVocabularyClosed``.
+GatewayTraceOutcome = Literal[
+    "errored_pre_resolution",
+    "invalid_tier",
+    "preflight_failure",
+    "guardrail_input",
+    "policy_denied",
+    "concurrency_exhausted",
+    "upstream_error",
+    "guardrail_output",
+    "strict_ledger_failure",
+    "ok",
+    "drift",
+]
 
 
 class UnknownTierError(ValueError):
@@ -177,6 +204,29 @@ class GatewayResponse:
     latency_ms: int
 
 
+@_dataclasses.dataclass(slots=True)
+class _CompletionTrace:
+    """Mutable per-call trace state for the observability span.
+
+    Initialized BEFORE tier resolution so the ``completion`` wrapper's
+    ``finally`` emit always has a well-defined ``outcome`` — even on the
+    pre-resolution failure paths where the ledger ``outcome`` var does not
+    yet exist. The span reads THIS object, never the ledger ``outcome``
+    var; the two vocabularies are distinct (see :data:`GatewayTraceOutcome`).
+    """
+
+    request_id: str
+    tenant_id: str | None
+    tier: str
+    flow_start: float
+    agent_workforce_id: str | None
+    outcome: GatewayTraceOutcome = "errored_pre_resolution"
+    litellm_alias: str | None = None
+    preflight: ResolvedUpstream | None = None
+    actual: ResolvedUpstream | None = None
+    usage: dict[str, object] | None = None
+
+
 class LLMGateway:
     """Single LLM-call chokepoint for ADR-007 provider-honesty.
 
@@ -228,6 +278,7 @@ class LLMGateway:
         output_pipeline: GuardrailPipeline | None = None,
         http_client: _httpx.AsyncClient | None = None,
         litellm_master_key: str | None = None,
+        observability: ObservabilityAdapter | None = None,
     ) -> None:
         self._settings = settings
         self._ledger = ledger
@@ -256,6 +307,7 @@ class LLMGateway:
         self._litellm_master_key: str | None = (
             litellm_master_key if litellm_master_key is not None else settings.litellm_master_key
         )
+        self._observability: ObservabilityAdapter | None = observability
 
     async def completion(
         self,
@@ -837,9 +889,56 @@ class LLMGateway:
         except Exception:
             _LOG.exception("best-effort ledger write failed; pre-dispatch path — not chaining")
 
+    async def _emit_completion_trace_best_effort(self, trace: _CompletionTrace) -> None:
+        """Best-effort, value-free observability span — one per completion,
+        on EVERY exit path. Mirrors ``_best_effort_ledger_write``'s fail-open
+        discipline: any failure (adapter raise, serialization error) is
+        caught + logged + swallowed so a trace failure NEVER fails the LLM
+        call. Observability is not a governance gate — the hash-chained
+        ``audit_event`` + the ledger remain the records of truth.
+
+        Value-free by construction: only metadata + token COUNTS enter the
+        attribute set — never message / prompt / response content. A reviewer
+        can confirm value-freeness by reading the keys below.
+        """
+        observability = self._observability
+        if observability is None:
+            return
+        try:
+            latency_ms = int((_time.monotonic() - trace.flow_start) * 1000)
+            attributes: dict[str, object] = {
+                "llm.gateway.outcome": trace.outcome,
+                "llm.gateway.request_id": trace.request_id,
+                "llm.gateway.tier": trace.tier,
+                "llm.gateway.latency_ms": latency_ms,
+            }
+            if trace.tenant_id is not None:
+                attributes["llm.gateway.tenant_id"] = trace.tenant_id
+            if trace.litellm_alias is not None:
+                attributes["llm.gateway.litellm_alias"] = trace.litellm_alias
+            if trace.preflight is not None:
+                attributes["gen_ai.request.model"] = trace.preflight.model_string
+                attributes["llm.gateway.external"] = trace.preflight.external
+            if trace.actual is not None:
+                attributes["gen_ai.response.model"] = trace.actual.model_string
+                attributes["llm.gateway.provenance"] = trace.actual.provenance
+            if trace.usage is not None:
+                input_tokens = trace.usage.get("prompt_tokens")
+                output_tokens = trace.usage.get("completion_tokens")
+                if isinstance(input_tokens, int):
+                    attributes["gen_ai.usage.input_tokens"] = input_tokens
+                if isinstance(output_tokens, int):
+                    attributes["gen_ai.usage.output_tokens"] = output_tokens
+            if trace.agent_workforce_id is not None:
+                attributes["llm.gateway.agent_workforce_id"] = trace.agent_workforce_id
+            await observability.emit_trace("llm.gateway.completion", attributes)
+        except Exception:
+            _LOG.exception("llm.gateway.trace_emit_failed")
+
 
 __all__ = (
     "GatewayResponse",
+    "GatewayTraceOutcome",
     "LLMGateway",
     "LedgerWriteFailed",
     "Tier",
