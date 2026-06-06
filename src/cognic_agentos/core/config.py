@@ -523,6 +523,14 @@ class Settings(BaseSettings):
         default="cognic-tier2-dev",
         description="LiteLLM alias resolved when caller asks for tier=tier2.",
     )
+    eval_judge_tier: Literal["tier1", "tier2"] = Field(
+        default="tier1",
+        description=(
+            "Logical tier the eval LLM-as-judge dispatches against (resolved to "
+            "tier{1,2}_alias by the gateway). Operator-configured; callers cannot "
+            "choose the tier (cost/abuse guard). Per ADR-010."
+        ),
+    )
     litellm_base_url: str | None = Field(
         default=None,
         description="LiteLLM router base URL (e.g. http://litellm:4000).",

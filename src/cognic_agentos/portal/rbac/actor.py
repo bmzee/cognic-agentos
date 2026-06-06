@@ -37,6 +37,7 @@ from fastapi import Request
 from cognic_agentos.portal.rbac.scopes import (  # noqa: F401  (ScopeSet kept for legacy bank-overlay re-export)
     ComplianceRBACScope,
     EmergencyRBACScope,
+    EvalRBACScope,
     MemoryRBACScope,
     ModelRBACScope,
     PackRBACScope,
@@ -104,6 +105,10 @@ class Actor(pydantic.BaseModel):
     #: still construct cleanly. Pinned by
     #: ``tests/unit/portal/rbac/test_emergency_scopes.py`` +
     #: ``test_memory_scopes.py::test_actor_accepts_new_lifecycle_and_emergency_scopes``.
+    #: ADR-010 eval slice — further widened with ``EvalRBACScope`` so an
+    #: eval-judge-capable actor can carry eval.judge.run alongside any other
+    #: family. Additive — pre-eval-slice actors still construct cleanly.
+    #: Pinned by ``tests/unit/portal/rbac/test_eval_scopes.py``.
     scopes: frozenset[
         PackRBACScope
         | UIRBACScope
@@ -111,6 +116,7 @@ class Actor(pydantic.BaseModel):
         | ModelRBACScope
         | MemoryRBACScope
         | EmergencyRBACScope
+        | EvalRBACScope
     ]
     actor_type: ActorType
 

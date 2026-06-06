@@ -224,6 +224,14 @@ EmergencyRBACScope = Literal["emergency.kill.memory_write_freeze"]
 EMERGENCY_SCOPES: frozenset[EmergencyRBACScope] = frozenset({"emergency.kill.memory_write_freeze"})
 
 
+#: Eval surface scope family (ADR-010 judge slice). Single value; service or
+#: human actors may run judges (not a Human-only decision).
+EvalRBACScope = Literal["eval.judge.run"]
+
+#: All eval scopes as a frozenset (1:1 with EvalRBACScope) for bank-overlay binders.
+EVAL_SCOPES: frozenset[EvalRBACScope] = frozenset({"eval.judge.run"})
+
+
 #: Examiner-role compliance grant. Bank-overlay examiner binders grant
 #: EXAMINER_SCOPES | EXAMINER_COMPLIANCE_SCOPES.
 EXAMINER_COMPLIANCE_SCOPES: frozenset[ComplianceRBACScope] = frozenset(

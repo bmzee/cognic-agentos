@@ -40,6 +40,7 @@ from cognic_agentos.portal.rbac.actor import (
 from cognic_agentos.portal.rbac.scopes import (
     ComplianceRBACScope,
     EmergencyRBACScope,
+    EvalRBACScope,
     MemoryRBACScope,
     ModelRBACScope,
     PackRBACScope,
@@ -246,7 +247,8 @@ def RequireScope(
     | ComplianceRBACScope
     | ModelRBACScope
     | MemoryRBACScope
-    | EmergencyRBACScope,
+    | EmergencyRBACScope
+    | EvalRBACScope,
 ) -> Callable[..., Awaitable[Actor]]:
     """FastAPI dependency factory — admit the request iff the bound
     :class:`Actor` holds ``scope``.
@@ -277,6 +279,11 @@ def RequireScope(
     the ADR-018 kill-switch endpoints can call
     ``RequireScope("emergency.kill.memory_write_freeze")``. Additive —
     pre-11.5b call sites still compile cleanly.
+
+    The ADR-010 eval slice further widened it with :data:`EvalRBACScope`
+    so the upcoming ``POST /api/v1/eval/judge`` route can call
+    ``RequireScope("eval.judge.run")``. Additive — pre-eval-slice call
+    sites still compile cleanly.
 
     Sprint-7B.4 T6 converted the inner dependency to async so the
     denial path can ``await broker.emit_rbac_denial`` via the shared

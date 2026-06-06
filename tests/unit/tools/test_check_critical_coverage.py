@@ -63,9 +63,11 @@ _GATE_TOOL_PATH = _REPO_ROOT / "tools" / "check_critical_coverage.py"
 #: per ADR-019) = 107;
 #: + 5 Sprint-11.5c Z1c memory-surface modules
 #: (core/memory/{export,episodes,vector} + cli/validators/learning_surface
-#: + portal/api/memory/routes per ADR-019) = 112).
+#: + portal/api/memory/routes per ADR-019) = 112;
+#: + 1 eval-judge-slice module (evaluation/judge.py — the ADR-010 LLM-as-judge
+#: governed-call primitive) = 113).
 #: Bump this in lockstep with any deliberate ``_CRITICAL_FILES`` change.
-_EXPECTED_ENTRY_COUNT = 112
+_EXPECTED_ENTRY_COUNT = 113
 
 #: The 5 modules Sprint 7B.3 promoted to the durable gate, each by its
 #: own landing commit (T3-T6 panels + T7 composer). All ride the
