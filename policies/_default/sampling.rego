@@ -35,11 +35,11 @@
 
 package cognic.sampling
 
-default allow = false
+default allow := false
 
-allow {
-    input.pack.sampling_supported == true
-    input.tenant.sampling_permitted == true
-    input.cloud_policy.tier_consistent == true
-    input.cloud_policy.allow_external_llm_consistent == true
+allow if {
+	input.pack.sampling_supported == true
+	input.tenant.sampling_permitted == true
+	input.cloud_policy.tier_consistent == true
+	input.cloud_policy.allow_external_llm_consistent == true
 }
