@@ -120,6 +120,9 @@ class _FakeMemoryAPI:
         self._raise_on_forget = raise_on_forget
         self._raise_on_redact = raise_on_redact
         self._raise_on_export = raise_on_export
+        # Capture the erasure_command the route threads into forget(), so route
+        # tests can assert the portal→core subject_kind thread (review §4.3).
+        self.last_forget_erasure_command: Any = None
 
     async def list_records(self, subject: SubjectRef) -> list[MemoryRecordMetadata]:
         if self._raise_on_list:
@@ -144,6 +147,7 @@ class _FakeMemoryAPI:
         reason: Any,
         erasure_command: Any = None,
     ) -> ForgetReceipt:
+        self.last_forget_erasure_command = erasure_command
         if self._raise_on_forget:
             raise MemoryOperationRefused(self._raise_on_forget)  # type: ignore[arg-type]
         return ForgetReceipt(
@@ -399,6 +403,41 @@ class TestForget:
         body = resp.json()
         assert body["tombstoned"] is True
         assert body["purged"] is True  # regulator_erasure path
+
+    def test_regulator_erasure_threads_agent_subject_kind_into_core(self) -> None:
+        """Portal→core thread: the route MUST pass
+        ``body.erasure_command.subject_kind`` into the core
+        :class:`RegulatorErasureCommand`. A one-line pass-through bug — dropping
+        the kwarg so core defaults ``subject_kind="human"`` — would let an
+        agent-subject erasure silently target ``human:<id>`` and survive every
+        existing route test (none assert the threaded value). Pin the actual
+        value the fake MemoryAPI received (review §4.3, high)."""
+        actor = _make_memory_actor(actor_type="human")
+        fake = _FakeMemoryAPI()
+        client = self._client(actor=actor, factory=_CapturingFactory(fake))
+
+        resp = client.post(
+            f"/api/v1/memory/records/{self._RECORD_ID}/forget",
+            json={
+                "reason": "regulator_erasure",
+                "agent_id": "agent-1",
+                "subject_kind": "agent",
+                "subject_id": "agent-9",
+                "erasure_command": {
+                    "regulator_order_id": "ORDER-002",
+                    "requester_scope": "memory.regulator_erasure",
+                    "subject_id": "agent-9",
+                    "subject_kind": "agent",
+                },
+            },
+        )
+
+        assert resp.status_code == 200
+        # Load-bearing: the route threaded the agent kind through to the core
+        # command (NOT the "human" default).
+        assert fake.last_forget_erasure_command is not None
+        assert fake.last_forget_erasure_command.subject_kind == "agent"
+        assert fake.last_forget_erasure_command.subject_id == "agent-9"
 
     def test_record_not_found_returns_404(self) -> None:
         actor = _make_memory_actor()

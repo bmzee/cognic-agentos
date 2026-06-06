@@ -16,9 +16,13 @@ import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from cognic_agentos.core.decision_history import _decision_history
-from cognic_agentos.core.memory._context import RedactionSpan, RegulatorErasureCommand
+from cognic_agentos.core.memory._context import (
+    MemoryWriteRecord,
+    RedactionSpan,
+    RegulatorErasureCommand,
+)
 from cognic_agentos.core.memory.storage import _memory_records
-from cognic_agentos.core.memory.tiers import MemoryOperationRefused
+from cognic_agentos.core.memory.tiers import MemoryOperationRefused, SubjectRef
 from tests.unit.core.memory._builders import _task_record
 
 
@@ -156,6 +160,80 @@ async def test_purge_record_subject_mismatch_refuses_deletes_nothing(memory_adap
         ).first()
     assert still is not None  # nothing deleted (rolled back)
     assert await _events(_mem_engine, "memory.regulator_erasure") == []  # no custody event
+
+
+# --------------------------------------------------------------------------- #
+# Review §4.3 — agent-kind regulator erasure (was silently broken: purge_record
+# hardcoded "human:" so every agent-subject erasure failed the subject guard).
+# --------------------------------------------------------------------------- #
+
+
+def _agent_task_record(*, subject_id: str = "agent-9") -> MemoryWriteRecord:
+    """A keyed task record owned by an AGENT-kind subject (subject_ref
+    ``agent:<id>``). ``_task_record`` only builds the human SUBJECT."""
+    return MemoryWriteRecord(
+        tenant_id="t1",
+        agent_id="kyc",
+        actor_id="svc",
+        subject=SubjectRef(kind="agent", id=subject_id),
+        tier="task",
+        purpose="customer_support",
+        data_classes=("public",),
+        value="agent-secret",
+        request_id="memory-write-test",
+        key="agent-greeting",
+    )
+
+
+@pytest.mark.asyncio
+async def test_purge_record_agent_kind_deletes_and_emits_custody(memory_adapter, _mem_engine):
+    rid = await memory_adapter.put(_agent_task_record(subject_id="agent-9"))
+    cmd = RegulatorErasureCommand(
+        regulator_order_id="ORD-A",
+        requester_scope="memory.regulator_erasure",
+        subject_id="agent-9",
+        subject_kind="agent",  # matches the stored subject_ref "agent:agent-9"
+    )
+    await memory_adapter.purge_record(
+        tenant_id="t1", agent_id="kyc", record_id=rid, erasure_command=cmd, actor_id="a1"
+    )
+    async with _mem_engine.connect() as c:
+        gone = (
+            await c.execute(sa.select(_memory_records).where(_memory_records.c.record_id == rid))
+        ).first()
+    assert gone is None  # agent record physically deleted (the §4.3 fix)
+    rows = await _events(_mem_engine, "memory.regulator_erasure")
+    assert len(rows) == 1
+    assert rows[0].payload["subject_id"] == "agent-9"
+
+
+@pytest.mark.asyncio
+async def test_purge_record_cross_kind_mismatch_refuses(memory_adapter, _mem_engine):
+    # Record is agent:agent-9; a command with the same id but the DEFAULT
+    # subject_kind ("human") must be refused — kind is part of the subject guard,
+    # so a human-kind erasure can never touch an agent record (and vice versa).
+    rid = await memory_adapter.put(_agent_task_record(subject_id="agent-9"))
+    wrong_kind = RegulatorErasureCommand(
+        regulator_order_id="ORD-A",
+        requester_scope="memory.regulator_erasure",
+        subject_id="agent-9",
+        # subject_kind omitted -> defaults "human" -> mismatch with agent:agent-9
+    )
+    with pytest.raises(MemoryOperationRefused) as ei:
+        await memory_adapter.purge_record(
+            tenant_id="t1",
+            agent_id="kyc",
+            record_id=rid,
+            erasure_command=wrong_kind,
+            actor_id="a1",
+        )
+    assert ei.value.reason == "memory_regulator_erasure_metadata_required"
+    async with _mem_engine.connect() as c:
+        still = (
+            await c.execute(sa.select(_memory_records).where(_memory_records.c.record_id == rid))
+        ).first()
+    assert still is not None  # nothing deleted (rolled back)
+    assert await _events(_mem_engine, "memory.regulator_erasure") == []
 
 
 # --------------------------------------------------------------------------- #

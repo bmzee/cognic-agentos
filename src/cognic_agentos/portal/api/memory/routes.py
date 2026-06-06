@@ -242,6 +242,7 @@ def build_memory_routes() -> APIRouter:
                 regulator_order_id=body.erasure_command.regulator_order_id,
                 requester_scope=body.erasure_command.requester_scope,
                 subject_id=body.erasure_command.subject_id,
+                subject_kind=body.erasure_command.subject_kind,
             )
 
         try:

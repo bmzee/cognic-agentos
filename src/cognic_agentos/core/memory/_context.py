@@ -3,6 +3,7 @@ from __future__ import annotations
 import dataclasses
 import uuid
 from datetime import datetime
+from typing import Literal
 
 from cognic_agentos.core.memory.tiers import BlockKind, MemoryTier, SubjectRef
 
@@ -100,6 +101,11 @@ class RegulatorErasureCommand:
     regulator_order_id: str
     requester_scope: str  # must == "memory.regulator_erasure" (validated in forget.py)
     subject_id: str
+    # Review §4.3 — the erased subject's kind. ``purge_record`` derives
+    # expected_subject_ref = f"{subject_kind}:{subject_id}" so agent-kind records
+    # can be erased (was hardcoded "human:"). Defaults "human" for backward-compat
+    # with existing human-subject constructors.
+    subject_kind: Literal["human", "agent"] = "human"
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
