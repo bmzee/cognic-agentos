@@ -2071,6 +2071,12 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     ("src/cognic_agentos/core/memory/vector.py", 0.95, 0.90),
     ("src/cognic_agentos/cli/validators/learning_surface.py", 0.95, 0.90),
     ("src/cognic_agentos/portal/api/memory/routes.py", 0.95, 0.90),
+    # Eval slice (ADR-010 LLM-as-judge), eval-judge T6. The judge primitive IS the
+    # single governed LLM-judge decision surface (parse fail-closed; it never
+    # fabricates a verdict), so it rides the per-file floor. The route + DTOs stay
+    # off-gate (R32 precedent — route enforcement covered by its own tests);
+    # ``llm/gateway.py`` (already on-gate) was NOT modified by the slice.
+    ("src/cognic_agentos/evaluation/judge.py", 0.95, 0.90),
 )
 
 
