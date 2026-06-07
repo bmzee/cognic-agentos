@@ -232,6 +232,47 @@ EvalRBACScope = Literal["eval.judge.run"]
 EVAL_SCOPES: frozenset[EvalRBACScope] = frozenset({"eval.judge.run"})
 
 
+#: ADR-023 (Wave-2) — per-tenant config-overlay RBAC family. Two values in the
+#: ``config.tenant_overlay.*`` namespace, consumed by the operator-administered
+#: overlay endpoints (`portal/api/config_overlay/routes.py`):
+#:
+#:   - ``config.tenant_overlay.write`` ← PUT/DELETE (set / clear an overlay).
+#:     The mutation surface; ALSO gated by :class:`RequireHumanActor` per the
+#:     AGENTS.md "Per-tenant allow-list changes" human-only-decisions rule —
+#:     a service-token actor holding the scope is still refused at the dep
+#:     chain (overlays are a per-tenant control surface).
+#:   - ``config.tenant_overlay.read`` ← GET (list a tenant's overlays). Service
+#:     actors permitted — read-only inspection is not a Human-only decision.
+#:
+#: **Value-disjoint from every other family** by namespace separation (every
+#: config-overlay scope is ``config.tenant_overlay.*``; no other family is
+#: ``config.*``). Overlap would create a wire-protocol ambiguity where a single
+#: 403 ``scope_not_held`` denial reason could match multiple scope families.
+#: Pinned by the disjointness test in
+#: :file:`tests/unit/portal/rbac/test_config_overlay_scopes.py`.
+#:
+#: Wire-protocol contract — every 403 ``scope_not_held`` denial body on the
+#: config-overlay surface carries one of these as ``required_scope``. ANY drift
+#: here is a wire-protocol break.
+#:
+#: Style note: plain ``= Literal[...]`` (no ``TypeAlias`` annotation) to match
+#: the repo convention at ``packs/lifecycle.py:111`` + the families above.
+ConfigOverlayRBACScope = Literal[
+    "config.tenant_overlay.read",
+    "config.tenant_overlay.write",
+]
+
+#: All 2 config-overlay scopes as a frozenset (1:1 with ConfigOverlayRBACScope)
+#: for bank-overlay binders. Pinned by
+#: :file:`tests/unit/portal/rbac/test_config_overlay_scopes.py`.
+CONFIG_OVERLAY_SCOPES: frozenset[ConfigOverlayRBACScope] = frozenset(
+    {
+        "config.tenant_overlay.read",
+        "config.tenant_overlay.write",
+    }
+)
+
+
 #: Examiner-role compliance grant. Bank-overlay examiner binders grant
 #: EXAMINER_SCOPES | EXAMINER_COMPLIANCE_SCOPES.
 EXAMINER_COMPLIANCE_SCOPES: frozenset[ComplianceRBACScope] = frozenset(
