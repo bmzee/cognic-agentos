@@ -42,6 +42,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
+from cognic_agentos.core.config_overlay.resolver import TenantConfigOverlayInvalid
 from cognic_agentos.sandbox.policy import (
     PackAdmissionContext,
     SandboxPolicy,
@@ -51,6 +52,7 @@ from cognic_agentos.sandbox.protocol import SandboxLifecycleRefused
 
 if TYPE_CHECKING:
     from cognic_agentos.core.config import Settings
+    from cognic_agentos.core.config_overlay.resolver import TenantConfigResolver
     from cognic_agentos.core.policy.engine import OPAEngine
     from cognic_agentos.core.vault import CredentialLease, VaultLeaseRequest
     from cognic_agentos.portal.rbac.actor import Actor
@@ -270,6 +272,7 @@ async def admit_policy(
     credential_adapter: CredentialAdapter,
     rego_engine: OPAEngine,
     settings: Settings,
+    resolver: TenantConfigResolver | None = None,
     requires_credentials: Sequence[VaultLeaseRequest] = (),
 ) -> None:
     """Admission pipeline per spec §6.1 — the single seam every
@@ -341,7 +344,21 @@ async def admit_policy(
             ``KernelDefaultCredentialAdapter`` sentinel)
         rego_engine: the OPA evaluator (Sprint 4 ``OPAEngine``)
         settings: the Settings container; admit_policy reads
-            ``sandbox_per_tenant_max_*`` fields (extended in T5)
+            ``sandbox_per_tenant_max_*`` fields (the base caps, used at
+            Step 5 + Step 9 when ``resolver`` is None) +
+            ``sandbox_kernel_default_max_credential_ttl_s``
+        resolver: ADR-023 (Wave-2) OPTIONAL per-tenant config-overlay
+            resolver. When provided, admit_policy resolves the three
+            sandbox caps via ``resolver.effective_many(...)`` ONCE at
+            Step 5 and uses the effective (possibly tenant-tightened)
+            values in BOTH the Step-5 Python tenant-max check AND the
+            Step-9 Rego ``tenant_max`` input. A corrupt / loosening
+            stored overlay (``TenantConfigOverlayInvalid``) FAILS CLOSED
+            with ``sandbox_tenant_config_overlay_invalid``. Default
+            ``None`` is the Wave-2 seam-only behaviour — there is no
+            production Runtime->sandbox overlay path yet, so the backends
+            do not pass a resolver and admission uses the base settings
+            caps (byte-equivalent to pre-ADR-023).
         requires_credentials: Sprint 10 T7 — sequence of
             VaultLeaseRequest the admitting pack declares it will
             need. Default ``()`` is a complete byte-shape no-op for
@@ -459,28 +476,54 @@ async def admit_policy(
         )
 
     # Step 5 — tenant-max check (cpu_cores / memory_mb / walltime_s)
-    if policy.cpu_cores > settings.sandbox_per_tenant_max_cpu:
+    #
+    # ADR-023 (Wave-2) — per-tenant config-overlay cap resolution. When a
+    # ``TenantConfigResolver`` is wired, resolve the three caps ONCE here and
+    # feed the SAME effective values into BOTH this Python check AND the
+    # Step-9 Rego ``tenant_max`` input (single source — the two layers can
+    # never disagree on the cap). When no resolver is wired — the Wave-2
+    # seam-only default; there is no production Runtime->sandbox overlay path
+    # yet — fall back to the base ``settings.sandbox_per_tenant_max_*`` caps,
+    # which is byte-equivalent to pre-ADR-023 behaviour. A corrupt / loosening
+    # stored overlay surfaced by the resolver (``TenantConfigOverlayInvalid``)
+    # FAILS CLOSED: admission is refused rather than silently using the base
+    # cap. Overlays are tighten-only, so an effective cap is always <= base.
+    if resolver is None:
+        eff_cpu: int | float = settings.sandbox_per_tenant_max_cpu
+        eff_mem: int | float = settings.sandbox_per_tenant_max_memory
+        eff_wall: int | float = settings.sandbox_per_tenant_max_walltime
+    else:
+        try:
+            caps = await resolver.effective_many(
+                (
+                    "sandbox_per_tenant_max_cpu",
+                    "sandbox_per_tenant_max_memory",
+                    "sandbox_per_tenant_max_walltime",
+                ),
+                tenant_id,
+            )
+        except TenantConfigOverlayInvalid as exc:
+            raise SandboxLifecycleRefused(
+                "sandbox_tenant_config_overlay_invalid", detail=str(exc)
+            ) from exc
+        eff_cpu = caps["sandbox_per_tenant_max_cpu"]
+        eff_mem = caps["sandbox_per_tenant_max_memory"]
+        eff_wall = caps["sandbox_per_tenant_max_walltime"]
+
+    if policy.cpu_cores > eff_cpu:
         raise SandboxLifecycleRefused(
             "sandbox_policy_exceeds_tenant_max_cpu",
-            detail=(
-                f"cpu_cores={policy.cpu_cores} > tenant max {settings.sandbox_per_tenant_max_cpu}"
-            ),
+            detail=f"cpu_cores={policy.cpu_cores} > tenant max {eff_cpu}",
         )
-    if policy.memory_mb > settings.sandbox_per_tenant_max_memory:
+    if policy.memory_mb > eff_mem:
         raise SandboxLifecycleRefused(
             "sandbox_policy_exceeds_tenant_max_memory",
-            detail=(
-                f"memory_mb={policy.memory_mb} > tenant max "
-                f"{settings.sandbox_per_tenant_max_memory}"
-            ),
+            detail=f"memory_mb={policy.memory_mb} > tenant max {eff_mem}",
         )
-    if policy.walltime_s > settings.sandbox_per_tenant_max_walltime:
+    if policy.walltime_s > eff_wall:
         raise SandboxLifecycleRefused(
             "sandbox_policy_exceeds_tenant_max_walltime",
-            detail=(
-                f"walltime_s={policy.walltime_s} > tenant max "
-                f"{settings.sandbox_per_tenant_max_walltime}"
-            ),
+            detail=f"walltime_s={policy.walltime_s} > tenant max {eff_wall}",
         )
 
     # Step 6 — image-catalog membership (canonical OR per-tenant allow-list)
@@ -572,10 +615,14 @@ async def admit_policy(
                 "declares_dynamic_install": pack_context.declares_dynamic_install,
                 "profile": pack_context.profile,
             },
+            # ADR-023 — the SAME effective caps resolved at Step 5 (per-tenant
+            # overlay when a resolver is wired, else base settings caps). The
+            # Python check + the Rego bundle therefore evaluate against one
+            # identical tenant_max and can never disagree.
             "tenant_max": {
-                "cpu_cores": settings.sandbox_per_tenant_max_cpu,
-                "memory_mb": settings.sandbox_per_tenant_max_memory,
-                "walltime_s": settings.sandbox_per_tenant_max_walltime,
+                "cpu_cores": eff_cpu,
+                "memory_mb": eff_mem,
+                "walltime_s": eff_wall,
             },
             "credential_adapter_wired": not isinstance(
                 credential_adapter, KernelDefaultCredentialAdapter

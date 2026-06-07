@@ -51,10 +51,11 @@ class TestClosedEnumPartitionInvariants:
         # raise sites live at the T18 `sandbox/projection.py` planner +
         # the T21 lifecycle integration that lands later in the sprint).
         values = typing.get_args(SandboxRefusalReason)
-        assert len(values) == 36, (
-            f"SandboxRefusalReason must have 36 values per spec §4.1 + "
+        assert len(values) == 37, (
+            f"SandboxRefusalReason must have 37 values per spec §4.1 + "
             f"8.5 §3.3 + 10 §4.1 + 10 §6.1 + 10.1 ADR-004 §25 amendment + "
-            f"10.6 §5.1 (9 credential-projection values); "
+            f"10.6 §5.1 (9 credential-projection values) + ADR-023 "
+            f"(sandbox_tenant_config_overlay_invalid); "
             f"found {len(values)}: {values}"
         )
 
@@ -190,6 +191,11 @@ class TestClosedEnumPartitionInvariants:
             "sandbox_credential_projection_field_value_non_string",
             "sandbox_credential_projection_field_value_empty_string",
             "sandbox_credential_projection_field_value_size_exceeded",
+            # ADR-023 (Wave-2) — per-tenant config-overlay cap-resolution
+            # failure. Raised by admit_policy at Step 5 when a wired
+            # TenantConfigResolver surfaces a corrupt / loosening stored
+            # overlay (TenantConfigOverlayInvalid); fail-closed.
+            "sandbox_tenant_config_overlay_invalid",
         }
         assert values == expected, f"drift: {values ^ expected}"
 
@@ -282,12 +288,13 @@ class TestSprint106CredentialProjectionRefusalReasons:
     unit suite + T21 cross-backend conformance suite.
     """
 
-    def test_count_is_thirty_six(self) -> None:
+    def test_count_is_thirty_seven(self) -> None:
         # Crisp count guard — separate from the membership assertion
         # so drift in size shows a clean diagnostic. Mirrors the
         # ``test_refusal_reason_count_locked_at_*`` pattern from the
-        # conformance suite.
-        assert len(typing.get_args(SandboxRefusalReason)) == 36
+        # conformance suite. 36 at Sprint-10.6; 37 after ADR-023 added
+        # ``sandbox_tenant_config_overlay_invalid``.
+        assert len(typing.get_args(SandboxRefusalReason)) == 37
 
     def test_all_nine_credential_projection_values_present(self) -> None:
         values = set(typing.get_args(SandboxRefusalReason))

@@ -85,7 +85,7 @@ class TestRefusalTaxonomyRegistrationCoverage:
             f"values to the production Literal at protocol.py:34-50."
         )
 
-    def test_refusal_reason_count_locked_at_thirty_six(self) -> None:
+    def test_refusal_reason_count_locked_at_thirty_seven(self) -> None:
         """Crisp value-count guard — separate from the membership
         assertion so drift in size shows a clean diagnostic.
 
@@ -109,9 +109,13 @@ class TestRefusalTaxonomyRegistrationCoverage:
         documented in this module's docstring; behaviour coverage
         will live at the T18 planner unit suite + T21 cross-backend
         conformance suite when those tasks land later in the sprint).
-        If this fails because the count is no longer 36, update the
+        ADR-023 (Wave-2) extended 36 → 37 (1 per-tenant config-overlay
+        cap-resolution failure ``sandbox_tenant_config_overlay_invalid``
+        raised by ``admit_policy`` at Step 5; real refusal, seam-unit-
+        proven at ``tests/unit/sandbox/test_admission_overlay.py``).
+        If this fails because the count is no longer 37, update the
         constant here AND ensure ``TRIGGERS_BY_REASON`` has a matching
         entry for the new value. NEVER update this guard without also
         updating the dispatch.
         """
-        assert len(get_args(SandboxRefusalReason)) == 36
+        assert len(get_args(SandboxRefusalReason)) == 37

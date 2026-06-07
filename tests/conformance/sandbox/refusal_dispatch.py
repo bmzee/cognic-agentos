@@ -770,6 +770,27 @@ async def _trigger_sandbox_credential_projection_field_value_size_exceeded(
     yield
 
 
+@asynccontextmanager
+async def _trigger_sandbox_tenant_config_overlay_invalid(
+    backend: Any,
+    ctx: Any,
+) -> AsyncIterator[None]:
+    """ADR-023 (Wave-2) — trigger envelope for the per-tenant
+    config-overlay cap-resolution failure raised by ``admit_policy`` at
+    Step 5 when a wired ``TenantConfigResolver`` surfaces a corrupt /
+    loosening stored overlay (``TenantConfigOverlayInvalid``);
+    fail-closed.
+
+    No-op registration envelope. Unlike the Sprint-10.6 projection
+    stubs, this refusal is REAL + already wired (admit_policy raises
+    it) — but it is unit-proven at the admit_policy SEAM, not via a
+    backend ``create()`` path, because Wave-2 is seam-only (no
+    production Runtime->sandbox overlay path). Behaviour coverage lives
+    at ``tests/unit/sandbox/test_admission_overlay.py``.
+    """
+    yield
+
+
 #: Public registry — maps every wire-public ``SandboxRefusalReason``
 #: value to a trigger factory. The membership pin at
 #: ``test_refusal_taxonomy.py`` asserts this dict's keyset equals
@@ -779,7 +800,7 @@ async def _trigger_sandbox_credential_projection_field_value_size_exceeded(
 #: When adding a new ``SandboxRefusalReason`` value at
 #: ``src/cognic_agentos/sandbox/protocol.py``, add the corresponding
 #: trigger factory above + register it here. The
-#: ``test_refusal_reason_count_locked_at_thirty_six`` regression
+#: ``test_refusal_reason_count_locked_at_thirty_seven`` regression
 #: also needs its hard-coded count updated.
 TRIGGERS_BY_REASON: dict[str, TriggerFactory] = {
     # Sprint 8A — 15 admission-arm triggers
@@ -880,4 +901,7 @@ TRIGGERS_BY_REASON: dict[str, TriggerFactory] = {
     "sandbox_credential_projection_field_value_size_exceeded": (
         _trigger_sandbox_credential_projection_field_value_size_exceeded
     ),
+    # ADR-023 (Wave-2) — per-tenant config-overlay cap-resolution failure
+    # (admit_policy Step 5; fail-closed). Real refusal, seam-unit-proven.
+    "sandbox_tenant_config_overlay_invalid": (_trigger_sandbox_tenant_config_overlay_invalid),
 }

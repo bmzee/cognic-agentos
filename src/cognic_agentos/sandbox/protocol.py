@@ -258,6 +258,17 @@ SandboxRefusalReason = Literal[
     "sandbox_credential_projection_field_value_non_string",
     "sandbox_credential_projection_field_value_empty_string",
     "sandbox_credential_projection_field_value_size_exceeded",
+    # ADR-023 (Wave-2) — per-tenant config-overlay cap-resolution failure.
+    # Raised by ``admit_policy`` at Step 5 when a wired
+    # ``TenantConfigResolver`` surfaces a corrupt / loosening stored overlay
+    # (``TenantConfigOverlayInvalid``) while resolving the three per-tenant
+    # sandbox caps. Fail-closed: a stored overlay that cannot be honoured
+    # refuses admission rather than silently falling back to the base cap.
+    # The resolver is an OPTIONAL seam (Wave-2 seam-only — no production
+    # Runtime->sandbox overlay path yet); when no resolver is wired,
+    # admission uses the base ``settings.sandbox_per_tenant_max_*`` caps and
+    # this value never fires.
+    "sandbox_tenant_config_overlay_invalid",
 ]
 
 #: 6-value closed-enum for runtime policy violations during ``exec``
