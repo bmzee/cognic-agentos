@@ -1546,6 +1546,17 @@ class Settings(BaseSettings):
             "sandbox_policy_exceeds_tenant_max_walltime on exceed."
         ),
     )
+    config_overlay_invalid_at_read_throttle_s: int = Field(
+        default=300,
+        gt=0,
+        description=(
+            "ADR-023 — minimum seconds between repeated "
+            "config.tenant_overlay.invalid_at_read AUDIT incident rows for the "
+            "same (tenant_id, field_key, reason). The runtime refusal itself is "
+            "NEVER throttled; only the audit-chain row is rate-limited. Consumed "
+            "by TenantConfigResolver."
+        ),
+    )
 
     # Sprint 10 T8 — per-tenant max credential lease TTL cap per
     # ADR-004 §25/§68/§102 + spec §5.1/§5.2. The kernel default
