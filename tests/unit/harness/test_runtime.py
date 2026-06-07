@@ -36,6 +36,11 @@ async def test_build_runtime_yields_usable_gateway(memory_registry, memory_setti
         assert isinstance(runtime.llm_gateway, LLMGateway)
         assert runtime.memory_api_factory is None  # cache_driver="none" → memory not wired (T6)
         assert runtime.memory_policy is None
+        # ADR-023 T10 — the config-overlay store + resolver are built
+        # UNCONDITIONALLY (the overlay surface is independent of memory/cache),
+        # so they are present even on the gateway-only path.
+        assert runtime.config_overlay_store is not None
+        assert runtime.config_overlay_resolver is not None
         await runtime.aclose()  # must not raise
     finally:
         await adapters.close_all()
@@ -132,6 +137,11 @@ async def test_build_runtime_wires_memory_when_cache_present(
         )
         api = runtime.memory_api_factory(ctx)
         assert isinstance(api, MemoryAPI)
+        # ADR-023 T10 — build_runtime threads its OWN config-overlay resolver
+        # into the MemoryAPI factory (memory IS production-wired). Identity pin:
+        # the minted API's resolver IS the resolver exposed on Runtime.
+        assert api._resolver is runtime.config_overlay_resolver
+        assert runtime.config_overlay_resolver is not None
         # The minted API's gate enforces with the SAME router exposed on
         # Runtime.memory_policy. id() identity sidesteps the nominal-type mismatch
         # (MemoryGate types policy: OPAEngine; at runtime the gate's policy IS the

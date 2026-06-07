@@ -54,6 +54,7 @@ import uuid
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
+from cognic_agentos.core.config_overlay.resolver import TenantConfigOverlayInvalid
 from cognic_agentos.core.decision_history import DecisionHistoryStore, DecisionRecord
 from cognic_agentos.core.memory import episodes as _episodes
 from cognic_agentos.core.memory import export as _export
@@ -71,11 +72,17 @@ from cognic_agentos.core.memory._seams import (
 from cognic_agentos.core.memory.forget import forget as forget_op
 from cognic_agentos.core.memory.gate import MemoryGate
 from cognic_agentos.core.memory.redact import redact as redact_op
-from cognic_agentos.core.memory.tiers import BlockKind, MemoryTier, SubjectRef
+from cognic_agentos.core.memory.tiers import (
+    BlockKind,
+    MemoryOperationRefused,
+    MemoryTier,
+    SubjectRef,
+)
 from cognic_agentos.core.memory.vector import _is_indexable
 
 if TYPE_CHECKING:
     from cognic_agentos.core.config import Settings
+    from cognic_agentos.core.config_overlay.resolver import TenantConfigResolver
     from cognic_agentos.core.dlp.scanner import DLPScanner
     from cognic_agentos.core.memory._context import (
         Episode,
@@ -131,6 +138,7 @@ class MemoryAPI:
         settings: Settings,
         object_store: ObjectStoreAdapter | None = None,
         vector_index: MemoryVectorIndex | None = None,
+        resolver: TenantConfigResolver | None = None,
     ) -> None:
         # Fail-loud default: bind the _NullMemoryKillSwitchInterrogator sentinel
         # when no kill-switch is wired (raises NotImplementedError on the first
@@ -159,6 +167,12 @@ class MemoryAPI:
         # None = vector path unavailable (recall refuses with
         # memory_vector_recall_unavailable; index-on-write is skipped silently).
         self._vector_index: MemoryVectorIndex | None = vector_index
+        # ADR-023 (Wave-2) — OPTIONAL per-tenant config-overlay resolver. None =
+        # export() uses settings.memory_export_retention_seconds (byte-equivalent
+        # to pre-ADR-023); a real resolver is wired by the Task-10 runtime
+        # MemoryAPI factory (memory IS production-wired, unlike the seam-only
+        # sandbox path).
+        self._resolver: TenantConfigResolver | None = resolver
 
     # -- Write ops ---------------------------------------------------------
 
@@ -313,6 +327,31 @@ class MemoryAPI:
         # archive contents (and the memory.export audit record_count) match the
         # enumerate authz surface exactly.
         durable_hits = [h for h in hits if h.tier in _ENUMERATE_TIERS]
+        # ADR-023 (Wave-2) — resolve the export-retention floor. When a
+        # per-tenant config-overlay resolver is wired, a tenant may RAISE the
+        # retention above the base setting (tighten-only floor); a corrupt /
+        # floor-violating stored overlay fails CLOSED. When no resolver is wired
+        # (the default until the Task-10 runtime factory), use the base setting
+        # exactly as before.
+        retention_seconds: int
+        if self._resolver is None:
+            retention_seconds = self._settings.memory_export_retention_seconds
+        else:
+            try:
+                resolved = await self._resolver.effective(
+                    "memory_export_retention_seconds", ctx.tenant_id
+                )
+            except TenantConfigOverlayInvalid as exc:
+                raise MemoryOperationRefused("memory_export_tenant_config_overlay_invalid") from exc
+            # Governance boundary — NEVER silently coerce. The registry promises
+            # an int for this field, but a corrupt resolver/store value must fail
+            # CLOSED, not truncate: int(220752000.5) -> 220752000 would
+            # reintroduce the Task-1 "no silent fractional int coercion" class.
+            # bool is an int subclass — reject it as defence-in-depth even though
+            # the registry rejects bool upstream.
+            if not isinstance(resolved, int) or isinstance(resolved, bool):
+                raise MemoryOperationRefused("memory_export_tenant_config_overlay_invalid")
+            retention_seconds = resolved
         return await _export.export_memory(
             hits=durable_hits,
             subject=subject,
@@ -320,7 +359,7 @@ class MemoryAPI:
             object_store=self._object_store,
             audit=self._audit,
             bucket=self._settings.memory_export_bucket,
-            retention_seconds=self._settings.memory_export_retention_seconds,
+            retention_seconds=retention_seconds,
         )
 
     # -- Keyed reads -------------------------------------------------------

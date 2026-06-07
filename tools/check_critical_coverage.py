@@ -2077,6 +2077,24 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     # off-gate (R32 precedent — route enforcement covered by its own tests);
     # ``llm/gateway.py`` (already on-gate) was NOT modified by the slice.
     ("src/cognic_agentos/evaluation/judge.py", 0.95, 0.90),
+    # ADR-023 (Wave-2) per-tenant config-overlay — the 4 substantive CC modules
+    # (T1/T3/T4/T6 each landed under its own halt-before-commit critical-controls
+    # review). All ride the standard 95% line / 90% branch floor:
+    #   * registry.py — strict tighten-only validator + closed OverlayRefusalReason
+    #     (the default-deny gate; a bug here silently widens a tenant cap/floor).
+    #   * storage.py — in-closure atomic upsert/delete via append_with_precondition
+    #     (config.tenant_overlay.{set,cleared} chain rows; the audit-write seam).
+    #   * resolver.py — fail-closed request-time resolution + invalid_at_read audit
+    #     (the consumer-facing decision point; corrupt overlay must fail closed).
+    #   * portal/api/config_overlay/routes.py — operator-administered, human-only
+    #     mutation endpoint; owns the AGENTS.md Human-only-decisions enforcement
+    #     boundary (RequireHumanActor on PUT/DELETE), the same criterion that put
+    #     packs/operator_routes.py on the gate. ``core/config.py`` (global Settings)
+    #     stays OFF-gate.
+    ("src/cognic_agentos/core/config_overlay/registry.py", 0.95, 0.90),
+    ("src/cognic_agentos/core/config_overlay/storage.py", 0.95, 0.90),
+    ("src/cognic_agentos/core/config_overlay/resolver.py", 0.95, 0.90),
+    ("src/cognic_agentos/portal/api/config_overlay/routes.py", 0.95, 0.90),
 )
 
 

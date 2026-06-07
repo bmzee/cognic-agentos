@@ -49,3 +49,5 @@ Plan-of-record: `docs/superpowers/plans/2026-06-06-gateway-observability.md` (`a
 ## Honest markers for the NEXT workstream
 
 The span lands in the in-process adapter, proven via the recording double + (env-gated) a real LLM. The remaining honest gap is **real Langfuse ingestion** — confirming the span reaches a live Langfuse instance — which is an **operational** check (deploy a Langfuse endpoint, run the env-gated proof against it, inspect the trace), not a code gap. Option B (first-class Langfuse generation records with a content-capture policy) is the deferred richer-capture follow-on, gated on a content-capture decision.
+
+> **Correction (2026-06-06, post-merge):** real Langfuse ingestion is *not* pure ops today — the exporter path lacks Langfuse-compatible OTLP/HTTP headers. `observability/otel.py` ships the gRPC OTLP exporter with no header plumbing, while Langfuse OTLP needs HTTP + Basic-auth + `x-langfuse-ingestion-version` (self-hosted ≥ v3.22). It requires a small exporter code change first, so it is ops **plus** a small code change, not pure ops. Tracked as the "Langfuse OTLP enablement" follow-up.

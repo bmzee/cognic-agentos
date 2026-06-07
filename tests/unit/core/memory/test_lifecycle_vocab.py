@@ -16,9 +16,9 @@ _NEW_LIFECYCLE_REASONS = {
 }
 
 
-def test_memory_refusal_reason_is_17_values_closed_enum():
+def test_memory_refusal_reason_is_18_values_closed_enum():
     vals = set(typing.get_args(MemoryRefusalReason))
-    assert len(vals) == 17
+    assert len(vals) == 18  # 17 at Sprint-11.5c; +1 ADR-023 export-overlay reason
     assert vals >= _NEW_LIFECYCLE_REASONS
     assert "memory_write_frozen" in vals and "memory_purpose_mismatch" in vals
 

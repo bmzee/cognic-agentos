@@ -80,7 +80,18 @@ ISO42001_CONTROLS: tuple[ControlEntry, ...] = (
         "ISO42001.A.6.2.5",
         "A.6.2.5",
         "Operational responsibilities",
-        ("escalation.transition", "rbac.check_scope", "sandbox.lifecycle.*"),
+        # ADR-023 (Wave-2) — config.tenant_overlay.{set,cleared} chain rows
+        # (operator changing a per-tenant config ceiling/floor IS an
+        # operational-responsibility event; emitted by core/config_overlay/
+        # storage.py tagged A.6.2.5). The resolver's invalid_at_read incident
+        # is tagged A.9.2 + flows through the existing audit.append hook there.
+        (
+            "escalation.transition",
+            "rbac.check_scope",
+            "sandbox.lifecycle.*",
+            "config.tenant_overlay.set",
+            "config.tenant_overlay.cleared",
+        ),
         "implemented",
     ),
     ControlEntry(

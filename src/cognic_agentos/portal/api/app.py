@@ -64,6 +64,7 @@ from cognic_agentos.observability import (
     silence_uvicorn_access_log,
 )
 from cognic_agentos.packs.storage import PackRecordStore
+from cognic_agentos.portal.api.config_overlay.routes import build_config_overlay_routes
 from cognic_agentos.portal.api.models import build_models_router
 from cognic_agentos.portal.api.packs import build_packs_router
 from cognic_agentos.portal.api.system_routes import build_system_router
@@ -93,6 +94,12 @@ if TYPE_CHECKING:
     # deployments). The lazy import of ``build_memory_routes`` inside the
     # conditional mount block keeps the portal import graph free of the memory
     # routes package when no factory is wired.
+    # ADR-023 (Wave-2): type-only refs for the create_app config-overlay
+    # kwargs. The route factory ``build_config_overlay_routes`` is imported at
+    # runtime below (it pulls only already-imported core/rbac deps); the store +
+    # resolver types are annotation-only here.
+    from cognic_agentos.core.config_overlay.resolver import TenantConfigResolver
+    from cognic_agentos.core.config_overlay.storage import TenantConfigOverlayStore
     from cognic_agentos.core.memory.api import MemoryApiFactory
     from cognic_agentos.core.memory.reaper import MemoryTombstoneReaper
     from cognic_agentos.core.policy.engine import OPAEngine
@@ -260,6 +267,13 @@ def create_app(
     plugin_registry: PluginRegistry | None = None,
     actor_binder: ActorBinder | None = None,
     pack_record_store: PackRecordStore | None = None,
+    # ADR-023 (Wave-2): optional per-tenant config-overlay router deps. When
+    # BOTH are wired, create_app mounts the operator-administered overlay router
+    # under /api/v1 + sets app.state.config_overlay_router_mounted. Same opt-in
+    # None-default pattern as pack_record_store. The composition root
+    # (build_runtime) constructs them; a bank-overlay caller threads them here.
+    config_overlay_store: TenantConfigOverlayStore | None = None,
+    config_overlay_resolver: TenantConfigResolver | None = None,
     trust_gate: TrustGate | None = None,
     trust_root_resolver: TrustRootResolver | None = None,
     model_registry_store: ModelRecordStore | None = None,
@@ -854,6 +868,47 @@ def create_app(
                     "route would surface a confusing 500 at request "
                     "time. The wiring boundary refuses earlier so "
                     "misconfig is caught at startup."
+                ),
+            },
+        )
+
+    # ──────────────────────────────────────────────────────────────────
+    # ADR-023 (Wave-2) — per-tenant config-overlay router mount.
+    #
+    # 3-state mount mirroring the packs router: BOTH store + resolver
+    # supplied -> mount the operator-administered overlay router under
+    # ``/api/v1`` + set the introspection flag; partial config (exactly
+    # one supplied) -> a single structured fail-loud warning so operators
+    # see the misconfig at startup; neither -> no mount (silent — the
+    # overlay is an opt-in surface). There is deliberately NO actor_binder
+    # gate at the mount boundary: the routes read the binder from
+    # ``app.state`` at REQUEST time and the KernelDefaultActorBinder fails
+    # loud there, so a binder-less mount surfaces a clear 500 rather than a
+    # confusing 404.
+    # ──────────────────────────────────────────────────────────────────
+    app.state.config_overlay_router_mounted = False
+    if config_overlay_store is not None and config_overlay_resolver is not None:
+        app.include_router(
+            build_config_overlay_routes(
+                store=config_overlay_store,
+                resolver=config_overlay_resolver,
+                settings=settings,
+            ),
+            prefix="/api/v1",
+        )
+        app.state.config_overlay_router_mounted = True
+    elif config_overlay_store is not None or config_overlay_resolver is not None:
+        logger.warning(
+            "portal.config_overlay_router_unmounted_partial_config",
+            extra={
+                "reason": "config_overlay_store_and_resolver_both_required",
+                "remediation": (
+                    "create_app(config_overlay_store=<store>, "
+                    "config_overlay_resolver=<resolver>) wires the "
+                    "config-overlay router; BOTH are required. The "
+                    "composition root build_runtime constructs them as a "
+                    "pair, so a partial config indicates a hand-wired caller "
+                    "missing one half."
                 ),
             },
         )
