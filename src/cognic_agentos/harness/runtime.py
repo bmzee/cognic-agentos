@@ -15,6 +15,8 @@ from typing import TYPE_CHECKING
 import httpx as _httpx
 
 from cognic_agentos.core.audit import AuditStore
+from cognic_agentos.core.config_overlay.resolver import TenantConfigResolver
+from cognic_agentos.core.config_overlay.storage import TenantConfigOverlayStore
 from cognic_agentos.core.decision_history import DecisionHistoryStore
 from cognic_agentos.core.sla import SLAPolicy
 from cognic_agentos.db.adapters.secret_resolution import resolve_secret_field
@@ -43,6 +45,11 @@ class Runtime:
     audit_store: AuditStore
     decision_history_store: DecisionHistoryStore
     memory_policy: MemoryPolicyRouter | None
+    # ADR-023 (Wave-2) — built unconditionally; memory IS production-wired
+    # (config_overlay_resolver is threaded into the MemoryAPI factory above),
+    # while the portal config-overlay router consumes the same store + resolver.
+    config_overlay_store: TenantConfigOverlayStore
+    config_overlay_resolver: TenantConfigResolver
     _http_client: _httpx.AsyncClient
 
     async def aclose(self) -> None:
@@ -56,6 +63,24 @@ async def build_runtime(settings: Settings, adapters: Adapters) -> Runtime:
     engine = adapters.relational.engine
     audit_store = AuditStore(engine)
     decision_history_store = DecisionHistoryStore(engine)
+
+    # --- ADR-023 (Wave-2) per-tenant config-overlay store + resolver ---
+    # Built unconditionally (the overlay surface is independent of memory/cache)
+    # and BEFORE the leak-prone http_client: both are pure constructors (no I/O),
+    # so they add nothing to the "all fallible construction before http_client"
+    # invariant. The resolver is threaded into the MemoryAPI factory below
+    # (memory IS production-wired) AND exposed on Runtime for the portal
+    # config-overlay router mount. There is NO Runtime-owned sandbox backend, so
+    # the resolver is deliberately NOT threaded into any sandbox create path
+    # (sandbox stays seam-only — admit_policy accepts a resolver but no
+    # Runtime-owned caller passes one).
+    overlay_store = TenantConfigOverlayStore(engine)
+    overlay_resolver = TenantConfigResolver(
+        store=overlay_store,
+        base=settings,
+        audit=audit_store,
+        throttle_s=settings.config_overlay_invalid_at_read_throttle_s,
+    )
 
     # --- Gateway sub-deps (the gateway + http_client are built LAST — see below) ---
     ledger = GatewayCallLedger(engine)
@@ -159,6 +184,7 @@ async def build_runtime(settings: Settings, adapters: Adapters) -> Runtime:
                 settings=settings,
                 object_store=object_store,
                 vector_index=vector_index,
+                resolver=overlay_resolver,  # ADR-023 — memory production-wired
             )
 
         memory_api_factory = _factory
@@ -189,5 +215,7 @@ async def build_runtime(settings: Settings, adapters: Adapters) -> Runtime:
         audit_store=audit_store,
         decision_history_store=decision_history_store,
         memory_policy=memory_policy,
+        config_overlay_store=overlay_store,
+        config_overlay_resolver=overlay_resolver,
         _http_client=http_client,
     )
