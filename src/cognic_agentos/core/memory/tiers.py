@@ -60,6 +60,13 @@ MemoryRefusalReason = Literal[
     # Sprint 11.5c T1 — vector-ranked recall requested but unavailable
     # (no query supplied OR no MemoryVectorIndex wired). Wire-public.
     "memory_vector_recall_unavailable",
+    # ADR-023 (Wave-2) — export-retention config-overlay resolution failure.
+    # Raised by MemoryAPI.export() when a wired TenantConfigResolver surfaces a
+    # corrupt / floor-violating stored overlay (TenantConfigOverlayInvalid)
+    # while resolving memory_export_retention_seconds; fail-closed. When no
+    # resolver is wired (the default until the Task-10 composition root), export
+    # uses settings.memory_export_retention_seconds and this value never fires.
+    "memory_export_tenant_config_overlay_invalid",
 ]
 
 #: Reasons a forget() call may be initiated — carried on the memory.forget chain event.
