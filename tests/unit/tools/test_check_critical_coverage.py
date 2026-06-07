@@ -65,9 +65,14 @@ _GATE_TOOL_PATH = _REPO_ROOT / "tools" / "check_critical_coverage.py"
 #: (core/memory/{export,episodes,vector} + cli/validators/learning_surface
 #: + portal/api/memory/routes per ADR-019) = 112;
 #: + 1 eval-judge-slice module (evaluation/judge.py — the ADR-010 LLM-as-judge
-#: governed-call primitive) = 113).
+#: governed-call primitive) = 113;
+#: + 4 ADR-023 Wave-2 per-tenant config-overlay modules
+#: (core/config_overlay/{registry,storage,resolver} + the operator-administered
+#: portal/api/config_overlay/routes — the latter owns the Human-only-decisions
+#: enforcement boundary, same criterion that put packs/operator_routes on the
+#: gate) = 117).
 #: Bump this in lockstep with any deliberate ``_CRITICAL_FILES`` change.
-_EXPECTED_ENTRY_COUNT = 113
+_EXPECTED_ENTRY_COUNT = 117
 
 #: The 5 modules Sprint 7B.3 promoted to the durable gate, each by its
 #: own landing commit (T3-T6 panels + T7 composer). All ride the
@@ -654,3 +659,33 @@ def test_sprint_11_5c_off_gate_modules_absent(gate_tool: ModuleType, off_gate_mo
     promotes either without revisiting the doctrine fails here."""
     paths = {path for path, _line, _branch in gate_tool._CRITICAL_FILES}
     assert off_gate_module not in paths
+
+
+#: The 4 ADR-023 (Wave-2) per-tenant config-overlay modules promoted to the
+#: durable gate at T11 (count 113 -> 117). All ride the standard 95%-line /
+#: 90%-branch floor. ``core/config.py`` (global Settings) deliberately stays
+#: OFF-gate — it is not overlay-specific.
+_ADR_023_GATE_MODULES = (
+    "src/cognic_agentos/core/config_overlay/registry.py",
+    "src/cognic_agentos/core/config_overlay/storage.py",
+    "src/cognic_agentos/core/config_overlay/resolver.py",
+    "src/cognic_agentos/portal/api/config_overlay/routes.py",
+)
+
+
+def test_adr_023_modules_present_with_standard_floors(
+    gate_tool: ModuleType,
+) -> None:
+    """The 4 ADR-023 (Wave-2) config-overlay promotions are on the gate at the
+    95/90 floor: the tighten-only ``registry`` validator + the in-closure atomic
+    ``storage`` + the fail-closed ``resolver`` + the operator-administered,
+    human-only ``routes`` endpoint. This pins the EXACT module set — a future
+    edit that drops one (e.g. ``resolver.py``) while keeping the count at 117 by
+    swapping in an unrelated existing path fails HERE, where the count / no-dupe /
+    path-exists guards would not."""
+    by_path = {path: (line, branch) for path, line, branch in gate_tool._CRITICAL_FILES}
+    for module in _ADR_023_GATE_MODULES:
+        assert module in by_path, f"ADR-023 module missing from gate: {module}"
+        assert by_path[module] == (0.95, 0.90), (
+            f"{module} must ride the standard 95%-line / 90%-branch floor"
+        )

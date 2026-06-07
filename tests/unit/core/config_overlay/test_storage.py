@@ -165,3 +165,54 @@ async def test_get_many_is_tenant_scoped(store: TenantConfigOverlayStore) -> Non
         request_id="cfg-overlay-set-t1",
     )
     assert await store.get_many("t2", ("sandbox_per_tenant_max_cpu",)) == {}
+
+
+async def test_get_many_empty_field_keys_returns_empty(store: TenantConfigOverlayStore) -> None:
+    # Empty field-key tuple short-circuits to {} WITHOUT opening a connection.
+    assert await store.get_many("t1", ()) == {}
+
+
+async def test_set_overlay_update_path_overwrites_existing(
+    store: TenantConfigOverlayStore, engine: AsyncEngine
+) -> None:
+    # Setting an overlay TWICE for the same (tenant, field) hits the UPDATE
+    # branch (not INSERT): one row remains, carrying the latest value +
+    # request_id, and the second chain row records the prior value as
+    # previous_overlay_value. Both writes tighten the ceiling (<= base 4.0).
+    await store.set_overlay(
+        tenant_id="t1",
+        field_key="sandbox_per_tenant_max_cpu",
+        base_value=4.0,
+        proposed="2.0",
+        actor_subject="op",
+        actor_type="human",
+        request_id="cfg-overlay-set-first",
+    )
+    await store.set_overlay(
+        tenant_id="t1",
+        field_key="sandbox_per_tenant_max_cpu",
+        base_value=4.0,
+        proposed="1.5",
+        actor_subject="op2",
+        actor_type="human",
+        request_id="cfg-overlay-set-second",
+    )
+    async with engine.connect() as conn:
+        rows = list((await conn.execute(select(_tenant_config_overlay))).fetchall())
+        chain = list(
+            (
+                await conn.execute(
+                    select(_decision_history).where(
+                        _decision_history.c.event_type == "config.tenant_overlay.set"
+                    )
+                )
+            ).fetchall()
+        )
+    assert len(rows) == 1  # UPDATE, not a second INSERT
+    assert rows[0].value == 1.5
+    assert rows[0].set_by_actor == "op2"
+    assert rows[0].last_request_id == "cfg-overlay-set-second"
+    assert len(chain) == 2
+    second = max(chain, key=lambda r: r.sequence)  # higher sequence = second write
+    assert second.payload["overlay_value"] == 1.5
+    assert second.payload["previous_overlay_value"] == 2.0

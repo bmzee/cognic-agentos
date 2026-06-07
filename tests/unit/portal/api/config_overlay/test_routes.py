@@ -230,6 +230,18 @@ async def test_unknown_field_key_refused_422(engine: AsyncEngine) -> None:
         assert list((await conn.execute(select(_decision_history))).fetchall()) == []
 
 
+# Symmetric registry-gate on DELETE — clear_overlay() also refuses an
+# unknown / non-overridable field_key with 422 + zero chain rows.
+async def test_delete_unknown_field_key_refused_422(engine: AsyncEngine) -> None:
+    app, _ = _app(engine, _actor(scopes={"config.tenant_overlay.write"}))
+    async with await _client(app) as c:
+        resp = await c.delete("/api/v1/tenants/t1/config-overlay/require_cosign")
+    assert resp.status_code == 422
+    assert resp.json()["detail"]["reason"] == "tenant_overlay_field_not_overridable"
+    async with engine.connect() as conn:
+        assert list((await conn.execute(select(_decision_history))).fetchall()) == []
+
+
 # P1 (reviewer) — JSON-number-only wire contract. A lax ``float | int`` DTO
 # would coerce JSON true -> 1.0 before the registry bool-guard runs, bypassing
 # the Task-1 "bool is never accepted as numeric config" invariant. The strict
