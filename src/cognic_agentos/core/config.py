@@ -531,6 +531,34 @@ class Settings(BaseSettings):
             "choose the tier (cost/abuse guard). Per ADR-010."
         ),
     )
+    eval_bulk_target_tier: Literal["tier1", "tier2"] = Field(
+        default="tier1",
+        description=(
+            "Logical tier the Sprint-12 bulk-eval GatewayTarget (the model UNDER "
+            "TEST) dispatches against. Distinct from eval_judge_tier (the "
+            "evaluator). Operator-configured; callers cannot choose. Per ADR-010 "
+            "amendment."
+        ),
+    )
+    eval_bulk_max_cases: int = Field(
+        default=50,
+        gt=0,
+        description=(
+            "Max cases a single synchronous POST /api/v1/eval/bulk-run may carry. "
+            "Over-cap corpora are refused 413 eval_corpus_too_large. Kept low "
+            "because a synchronous run with judge scoring can otherwise run long; "
+            "background large-corpus runs are deferred. Per ADR-010 amendment."
+        ),
+    )
+    eval_bulk_max_raw_output_chars: int = Field(
+        default=50_000,
+        gt=0,
+        description=(
+            "Truncation bound for per-case candidate_output_text persisted when "
+            "persist_raw_output=true. Matches the judge candidate bound. Per "
+            "ADR-010 amendment."
+        ),
+    )
     litellm_base_url: str | None = Field(
         default=None,
         description="LiteLLM router base URL (e.g. http://litellm:4000).",
