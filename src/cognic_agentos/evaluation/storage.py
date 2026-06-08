@@ -33,6 +33,7 @@ from cognic_agentos.core.decision_history import DecisionHistoryStore, DecisionR
 from cognic_agentos.db.types import GovernanceJSON
 
 if TYPE_CHECKING:
+    from cognic_agentos.evaluation.replay import ReplayDiff
     from cognic_agentos.evaluation.types import EvalRunResult
 
 _EVAL_TS_TYPE = TIMESTAMP(timezone=True)
@@ -91,7 +92,16 @@ def mint_eval_request_id() -> str:
     return f"{_EVAL_RUN_REQUEST_ID_PREFIX}{uuid.uuid4().hex}"
 
 
+_EVAL_REPLAY_REQUEST_ID_PREFIX: Final[str] = "eval-replay-"  # 12 chars + 32 hex = 44 <= 64
+
+
+def mint_eval_replay_request_id() -> str:
+    """Bounded request_id for an eval replay event (prefix + uuid4().hex)."""
+    return f"{_EVAL_REPLAY_REQUEST_ID_PREFIX}{uuid.uuid4().hex}"
+
+
 assert len(_EVAL_RUN_REQUEST_ID_PREFIX) + 32 <= 64
+assert len(_EVAL_REPLAY_REQUEST_ID_PREFIX) + 32 <= 64
 
 
 class EvalRunStore:
@@ -170,6 +180,60 @@ class EvalRunStore:
                     "cases": [
                         {"case_id": c.case_id, "passed": c.passed, "output_digest": c.output_digest}
                         for c in result.cases
+                    ],
+                },
+            )
+
+        return await self._history.append_with_precondition(
+            record_builder=_build_record, precondition=_precondition
+        )
+
+    async def append_replay_event(
+        self,
+        *,
+        diff: ReplayDiff,
+        actor_subject: str,
+        tenant_id: str,
+        request_id: str,
+    ) -> tuple[uuid.UUID, bytes]:
+        """Emit the value-free ``eval.replay`` chain row (NO relational insert).
+
+        Mirrors persist_run's record_builder but with a no-op precondition (the
+        candidate run + its rows are already persisted via persist_run). Payload
+        is minimal per spec §5: IDs / digests / counts / per-case drift only —
+        NO model, NO tier, NO raw text.
+        """
+
+        async def _precondition(conn: AsyncConnection, _seq: int, _hash: bytes) -> None:
+            return None
+
+        def _build_record(_: None) -> DecisionRecord:
+            return DecisionRecord(
+                decision_type="eval.replay",
+                request_id=request_id,
+                actor_id=actor_subject,
+                tenant_id=tenant_id,
+                iso_controls=_EVAL_ISO_CONTROLS,
+                payload={
+                    "baseline_run_id": str(diff.baseline_run_id),
+                    "candidate_run_id": str(diff.candidate_run_id),
+                    "corpus_id": diff.corpus_id,
+                    "corpus_digest": diff.corpus_digest,
+                    "total": diff.total,
+                    "regressions": diff.regressions,
+                    "improvements": diff.improvements,
+                    "unchanged": diff.unchanged,
+                    "output_changed": diff.output_changed,
+                    "errored": diff.errored,
+                    "cases": [
+                        {
+                            "case_id": c.case_id,
+                            "drift_kind": c.drift_kind,
+                            "baseline_passed": c.baseline_passed,
+                            "candidate_passed": c.candidate_passed,
+                            "output_digest_changed": c.output_digest_changed,
+                        }
+                        for c in diff.cases
                     ],
                 },
             )

@@ -122,6 +122,8 @@ class ReplayDiff:
              "output_digest_changed": bool}]
 }
 ```
+Plus `actor_id` (the replay actor's subject) — **not** a model/tier/raw value but governance identity, merged into the payload by the standard `DecisionRecord` actor_id→payload merge exactly as `eval.bulk_run` carries it, so the evidence row answers *"who triggered this replay"* without a join. The explicit dict above sets the 11 listed keys; the store adds the 12th (`actor_id`).
+
 ISO controls: **A.7.6 + A.9.2** (a replay is an AI-system evaluation + operational-logging event; both controls already `implemented` — `eval.replay` is added to their `intended_hooks` for accuracy). The model/tier delta is **not** in the chain row (consistent with `eval.bulk_run`, which carries `tier` but not `model`; replay's row carries neither per the locked minimal set) — it is computed live for the API response from the two persisted runs.
 
 ## §6 Surface

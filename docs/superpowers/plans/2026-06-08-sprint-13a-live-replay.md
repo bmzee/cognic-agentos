@@ -519,11 +519,18 @@ async def test_append_replay_event_writes_value_free_chain_row(tmp_path: Any) ->
         assert row.event_type == "eval.replay" and row.request_id == "eval-replay-abc"
         assert "ISO42001.A.7.6" in row.iso_controls and "ISO42001.A.9.2" in row.iso_controls
         payload = json.loads(row.payload) if isinstance(row.payload, str) else dict(row.payload)
-        # EXACT top-level key set — the locked minimal shape (spec §5).
+        # EXACT top-level key set — the locked minimal shape (spec §5) PLUS the
+        # store-merged ``actor_id`` (governance identity, NOT model/tier/raw) so the
+        # row answers "who triggered this replay" — consistent with eval.bulk_run.
+        # The DecisionRecord(actor_id=actor_subject) field is merged into the payload
+        # by the store (decision_history.py actor_id→payload merge), exactly as
+        # persist_run's eval.bulk_run row carries it.
         assert set(payload.keys()) == {
             "baseline_run_id", "candidate_run_id", "corpus_id", "corpus_digest",
             "total", "regressions", "improvements", "unchanged", "output_changed", "errored", "cases",
+            "actor_id",
         }
+        assert payload["actor_id"] == "svc"
         # EXACT per-case key set — no model/tier/raw/output text.
         assert set(payload["cases"][0].keys()) == {
             "case_id", "drift_kind", "baseline_passed", "candidate_passed", "output_digest_changed",
