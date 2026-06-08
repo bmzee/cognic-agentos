@@ -1,7 +1,7 @@
-"""Sprint 9.5 A6 — ISO 42001 control-tagging coverage: 7 implemented + 1 deferred.
+"""Sprint 12 (ADR-010) — ISO 42001 control-tagging coverage: 8 implemented + 0 deferred.
 
 Sprint 9 shipped the registry with 3 implemented + 5 deferred. Sprint 9.5
-A6 promotes 4 deferred controls to ``implemented`` because the model
+A6 promoted 4 deferred controls to ``implemented`` because the model
 registry primitive (per ADR-013) creates a real ``model.lifecycle.*``
 chain emission surface tagging them:
 
@@ -14,11 +14,12 @@ chain emission surface tagging them:
 9 (gateway / guardrails / policy / trust-gate / plugin-registry sites);
 the model registry also tags it but no flip is needed.
 
-``A.7.6`` (AI system risk evaluation) stays ``deferred`` — Sprint 9.5
-stores reviewer-attested risk evidence (``adversarial_pass_rate`` on the
-``tenant_approved`` chain row) but machine-verified ADR-011 risk
-evaluation is still deferred to Sprint 13. The reason text is rewritten
-to be honest about both halves.
+``A.7.6`` (AI system risk evaluation) was the SOLE remaining deferred
+control at Sprint 9.5. Sprint 12 (ADR-010) flips it to ``implemented``
+because the bulk evaluation harness lands the real ``eval.bulk_run``
+emission surface tagging it (the harness IS an AI-system risk-evaluation
+surface). The same hook also tags ``A.9.2`` (system and operational
+logging). The deferred set is now empty.
 """
 
 from __future__ import annotations
@@ -72,6 +73,17 @@ _RECONCILED_SITES = (
 _MODEL_EMISSION_SITES = ("models/registry.py",)
 _MODEL_CONSTANT_RE = re.compile(r"MODEL_LIFECYCLE_ISO_CONTROLS:[^=]*=\s*\(([^)]*)\)")
 
+#: Sprint 12 (ADR-010) — the bulk eval harness emits 2 canonical ISO
+#: controls (A.7.6 + A.9.2) on every ``eval.bulk_run`` chain row via the
+#: ``_EVAL_ISO_CONTROLS`` constant in ``evaluation/storage.py``. This is
+#: the real emission surface that makes the Sprint-12 A.7.6 flip from
+#: ``deferred`` to ``implemented`` honest. Scanned constant-anchored,
+#: identically to the model-registry constant above (extract the tuple
+#: body via :data:`_EVAL_CONSTANT_RE`, then apply
+#: :data:`_CANONICAL_LITERAL_RE` to the body only — never the whole file).
+_EVAL_EMISSION_SITES = ("evaluation/storage.py",)
+_EVAL_CONSTANT_RE = re.compile(r"_EVAL_ISO_CONTROLS:[^=]*=\s*\(([^)]*)\)")
+
 #: A canonical ID inside an ``iso_controls=(...)`` tuple literal
 #: (Sprint-9 emission-site convention).
 _CANONICAL_RE = re.compile(r'iso_controls\s*=\s*\(\s*"(ISO42001\.A\.[0-9.]+)"')
@@ -86,11 +98,24 @@ _IMPLEMENTED = {
     "ISO42001.A.6.2.5",
     "ISO42001.A.6.2.6",
     "ISO42001.A.7.4",
+    "ISO42001.A.7.6",
     "ISO42001.A.8.2",
     "ISO42001.A.8.5",
     "ISO42001.A.9.2",
     "ISO42001.A.10.2",
 }
+
+
+def _scan_constant_for_canonical_ids(rel: str, constant_re: re.Pattern[str]) -> set[str]:
+    """Extract canonical ISO IDs from the tuple body matched by
+    ``constant_re`` in ``rel`` — NOT from the whole file. Returns the set
+    of canonical IDs declared inside the constant's parentheses.
+    """
+    text = (_SRC / rel).read_text(encoding="utf-8")
+    match = constant_re.search(text)
+    if match is None:
+        return set()
+    return set(_CANONICAL_LITERAL_RE.findall(match.group(1)))
 
 
 def _scan_model_constant_for_canonical_ids(rel: str) -> set[str]:
@@ -99,11 +124,7 @@ def _scan_model_constant_for_canonical_ids(rel: str) -> set[str]:
     the whole file. Returns the set of canonical IDs declared inside
     the constant's parentheses.
     """
-    text = (_SRC / rel).read_text(encoding="utf-8")
-    match = _MODEL_CONSTANT_RE.search(text)
-    if match is None:
-        return set()
-    return set(_CANONICAL_LITERAL_RE.findall(match.group(1)))
+    return _scan_constant_for_canonical_ids(rel, _MODEL_CONSTANT_RE)
 
 
 def _observed_canonical_ids() -> set[str]:
@@ -113,6 +134,8 @@ def _observed_canonical_ids() -> set[str]:
         observed |= set(_CANONICAL_RE.findall(text))
     for rel in _MODEL_EMISSION_SITES:
         observed |= _scan_model_constant_for_canonical_ids(rel)
+    for rel in _EVAL_EMISSION_SITES:
+        observed |= _scan_constant_for_canonical_ids(rel, _EVAL_CONSTANT_RE)
     return observed
 
 
@@ -132,13 +155,13 @@ def test_deferred_controls_recorded_with_reasons() -> None:
             assert record.deferred_reason != "", record.control_id
 
 
-def test_registry_holds_all_eight_with_seven_implemented() -> None:
+def test_registry_holds_all_eight_all_implemented() -> None:
     assert len(ISO42001_CONTROLS) == 8
     assert len(control_ids()) == 8
     implemented = {e.control_id for e in ISO42001_CONTROLS if e.hook_status == "implemented"}
     deferred = {e.control_id for e in ISO42001_CONTROLS if e.hook_status == "deferred"}
     assert implemented == _IMPLEMENTED
-    assert deferred == {"ISO42001.A.7.6"}
+    assert deferred == set()
     assert implemented | deferred == control_ids()
 
 
@@ -169,18 +192,30 @@ def test_model_emission_scan_matches_runtime_constant() -> None:
     assert scanned == set(MODEL_LIFECYCLE_ISO_CONTROLS)
 
 
-def test_a76_deferred_reason_acknowledges_reviewer_attested_storage() -> None:
-    """A.7.6 stays ``deferred`` but the reason is rewritten to
-    acknowledge that Sprint 9.5 DOES store reviewer-attested risk
-    evidence (``adversarial_pass_rate`` on the ``tenant_approved``
-    chain row) — only machine-verified ADR-011 risk evaluation is
-    still deferred (to Sprint 13).
+def test_eval_emission_scan_matches_runtime_constant() -> None:
+    """Source-scan of ``evaluation/storage.py`` returns EXACTLY the
+    values in the runtime ``_EVAL_ISO_CONTROLS`` constant — the real
+    ``eval.bulk_run`` emission surface that makes the Sprint-12 (ADR-010)
+    A.7.6 flip to ``implemented`` honest. No extras (false-positive
+    guard against future docstring / comment IDs), no missing (regex
+    sanity check that we actually find + parse the constant block).
+    """
+    from cognic_agentos.evaluation.storage import _EVAL_ISO_CONTROLS
 
-    Pins the user-locked Sprint-9.5 A6 invariant: A.7.6 stays deferred
-    with the sharper reviewer-attested / not-machine-verified reason.
+    scanned: set[str] = set()
+    for rel in _EVAL_EMISSION_SITES:
+        scanned |= _scan_constant_for_canonical_ids(rel, _EVAL_CONSTANT_RE)
+    assert scanned == set(_EVAL_ISO_CONTROLS)
+
+
+def test_a76_flipped_to_implemented_with_empty_reason() -> None:
+    """A.7.6 (AI system risk evaluation) flips from ``deferred`` to
+    ``implemented`` at Sprint 12 (ADR-010): the bulk evaluation harness
+    lands the real ``eval.bulk_run`` emission surface tagging it, so the
+    last remaining deferred control is now implemented and — per the
+    registry invariant that every implemented control carries an empty
+    ``deferred_reason`` — its reason is cleared.
     """
     a76 = next(e for e in ISO42001_CONTROLS if e.control_id == "ISO42001.A.7.6")
-    assert a76.hook_status == "deferred"
-    assert "reviewer-attested" in a76.deferred_reason
-    assert "machine-verified" in a76.deferred_reason
-    assert "Sprint 13" in a76.deferred_reason
+    assert a76.hook_status == "implemented"
+    assert a76.deferred_reason == ""
