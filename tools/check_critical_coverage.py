@@ -2095,6 +2095,18 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     ("src/cognic_agentos/core/config_overlay/storage.py", 0.95, 0.90),
     ("src/cognic_agentos/core/config_overlay/resolver.py", 0.95, 0.90),
     ("src/cognic_agentos/portal/api/config_overlay/routes.py", 0.95, 0.90),
+    # Sprint 12 (ADR-010 amendment) evaluation harness — 4 CC modules, each
+    # landed under its own halt-before-commit critical-controls review:
+    #   * corpus.py   — strict fail-closed corpus contract + loader (a bug here
+    #     lets malformed corpora through into execution).
+    #   * scorers.py  — evaluator/pass-fail logic (the gradable-quality boundary).
+    #   * runner.py   — run orchestration + per-case error isolation.
+    #   * storage.py  — atomic eval evidence + tenant boundary + value-free chain.
+    # target.py / types.py + the portal route/DTO stay OFF-gate (R32 precedent).
+    ("src/cognic_agentos/evaluation/corpus.py", 0.95, 0.90),
+    ("src/cognic_agentos/evaluation/scorers.py", 0.95, 0.90),
+    ("src/cognic_agentos/evaluation/runner.py", 0.95, 0.90),
+    ("src/cognic_agentos/evaluation/storage.py", 0.95, 0.90),
 )
 
 

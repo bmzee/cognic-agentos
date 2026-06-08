@@ -113,3 +113,57 @@ def test_validate_corpus_payload_shares_the_model(tmp_path: Path) -> None:
     corpus = validate_corpus_payload(payload)
     assert corpus.cases[0].judge is not None
     assert corpus.cases[0].judge.criteria[0].description == "says hello"
+
+
+def test_assertions_block_with_no_clauses_fails_closed() -> None:
+    # Covers AssertionsBlock._at_least_one_clause raise (corpus.py:57) +
+    # branch [56,57]. The single value_error has no "messages"/"case_kind" in
+    # loc and its msg does not contain "neither assertions nor judge", so the
+    # loop in _reason_for_validation_error falls through to the L111 fallback
+    # (branches [109,99] back-edge + [99,111] loop-exhausted exit).
+    payload = {
+        "schema_version": 1,
+        "corpus_id": "smoke",
+        "cases": [
+            {
+                "id": "c1",
+                "case_kind": "completion",
+                "messages": [{"role": "user", "content": "hi"}],
+                "assertions": {"contains": []},
+            }
+        ],
+    }
+    with pytest.raises(CorpusLoadError) as e:
+        validate_corpus_payload(payload)
+    # Maps through the fallback (corpus.py:111).
+    assert e.value.reason == "corpus_case_messages_invalid"
+
+
+def test_empty_messages_list_fails_closed() -> None:
+    # Covers the "messages" in loc branch (corpus.py:107) + branch [106,107].
+    # An empty messages list trips _Message list min_length=1; the resulting
+    # "too_short" error carries "messages" in its loc.
+    payload = {
+        "schema_version": 1,
+        "corpus_id": "smoke",
+        "cases": [
+            {
+                "id": "c1",
+                "case_kind": "completion",
+                "messages": [],
+                "assertions": {"contains": ["x"]},
+            }
+        ],
+    }
+    with pytest.raises(CorpusLoadError) as e:
+        validate_corpus_payload(payload)
+    assert e.value.reason == "corpus_case_messages_invalid"
+
+
+def test_yaml_top_level_list_fails_closed(tmp_path: Path) -> None:
+    # Covers the non-mapping raise (corpus.py:146) + branch [145,146]:
+    # yaml.safe_load returns a list, so the doc is not a dict.
+    d = _write(tmp_path, "a.yaml", "- not\n- a\n- mapping\n")
+    with pytest.raises(CorpusLoadError) as e:
+        load_corpus(d)
+    assert e.value.reason == "corpus_unparseable_yaml"
