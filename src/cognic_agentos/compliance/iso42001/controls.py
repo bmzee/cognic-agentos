@@ -1,4 +1,4 @@
-"""ISO/IEC 42001 control registry — Sprint 9 (ADR-006), 9.5 A6 update.
+"""ISO/IEC 42001 control registry — Sprint 9 (ADR-006); 9.5 A6 + Sprint 12 (ADR-010) updates.
 
 Single source of truth mapping the 8 ADR-006 Wave-1 Annex-A controls to
 their intended Cognic governance hooks. The canonical control ID — the
