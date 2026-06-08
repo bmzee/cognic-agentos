@@ -1058,13 +1058,13 @@ This is the platform home for governed self-improvement: Hermes-style improvemen
 
 **Goal:** First-class evaluation infrastructure per ADR-010. Banks can bulk-test agent packs against their case corpus before promoting to production.
 
-**Deliverables:**
-- `eval/__init__.py` + `eval/runner.py` — bulk test executor; runs an agent pack against a corpus; reports per-case pass/fail + aggregate accuracy + latency P50/P95
-- `eval/scenarios.py` — declarative YAML scenario loader (multi-turn conversations with `expects` clauses for tool calls, sub-agent spawns, citations, escalations)
-- `eval/storage.py` — `eval_runs` + `eval_case_results` Postgres tables; uses RelationalAdapter (per ADR-009)
-- `eval/cli.py` — `agentos eval bulk --pack ... --corpus ...` extension to the `agentos-cli` from Sprint 7
-- `portal/api/app.py` extension — `POST /api/v1/eval/bulk-run` + `GET /api/v1/eval/runs/{run_id}` endpoints
-- `eval/corpora/example/` — reference corpus (PolicyQA scenarios) demonstrating the YAML format
+**Deliverables:** *(module paths corrected at the Sprint-12 close per the actual implementation — the harness ships under `evaluation/…` not `eval/…`; the CLI lives at `cli/eval.py`; the YAML loader is `corpus.py` not `scenarios.py`; see the ADR-010 Sprint-12 amendment for the full scope reconciliation)*
+- `evaluation/__init__.py` + `evaluation/runner.py` — bulk test executor (target- and scorer-agnostic); runs a corpus against a target; reports per-case pass/fail + aggregate accuracy + latency P50/P95
+- `evaluation/corpus.py` — strict fail-closed YAML corpus loader (`extra="forbid"`; single-shot message-list `completion` cases; multi-turn `expects` clauses for tool calls, sub-agent spawns, citations, escalations deferred to Sprint 13)
+- `evaluation/storage.py` — `eval_runs` + `eval_case_results` Postgres tables (Alembic migration `0008`); uses RelationalAdapter (per ADR-009)
+- `cli/eval.py` — `agentos eval-bulk --corpus ...` extension to the `agentos-cli` from Sprint 7 (thin portal client + local `--dry-run`)
+- `portal/api/app.py` extension (routes in `portal/api/evaluation/bulk_routes.py`) — `POST /api/v1/eval/bulk-run` + `GET /api/v1/eval/runs/{run_id}` endpoints
+- `evaluation/corpora/example/` — neutral reference corpus (`generic-completion-smoke.yaml`) demonstrating the YAML format
 
 **Tests:**
 - `test_eval_bulk_runner.py` — runs corpus against a stub agent; reports correct aggregate
@@ -1082,23 +1082,23 @@ This is the platform home for governed self-improvement: Hermes-style improvemen
 
 **Goal:** Complete the evaluation harness with explainable LLM verdicts + production-case replay (per ADR-010), and ship the adversarial test generator + promotion gate (per ADR-011).
 
-**Deliverables:**
+**Deliverables:** *(module paths corrected at the Sprint-12 close — the harness ships under `evaluation/…` not `eval/…`; the CLI extension lives at `cli/eval.py`, consistent with the Sprint-12 `cli/eval.py` module)*
 
 *Eval harness completion (per ADR-010):*
-- `eval/judge.py` — LLM-as-judge runs through governed gateway with rubric-driven scoring; emits per-dimension score + explanation paragraph; hash-chained `eval.judge_verdict` events
-- `eval/replay.py` — pull a `decision_history` row by id; re-run against a candidate pack version; diff outcome (answer, citations, compliance score, tool-call sequence)
-- `eval/cli.py` extension — `agentos eval replay --case-id ... --pack ... --baseline ...`
+- `evaluation/judge.py` — LLM-as-judge runs through governed gateway with rubric-driven scoring; emits per-dimension score + explanation paragraph; hash-chained `eval.judge_verdict` events
+- `evaluation/replay.py` — pull a `decision_history` row by id; re-run against a candidate pack version; diff outcome (answer, citations, compliance score, tool-call sequence)
+- `cli/eval.py` extension — `agentos eval replay --case-id ... --pack ... --baseline ...`
 - `portal/api/app.py` extension — `POST /api/v1/eval/replay` + `POST /api/v1/eval/judge`
 
 *Adversarial testing (per ADR-011):*
-- `eval/adversarial/__init__.py` — adversarial corpus loader
-- `eval/adversarial/templates.py` — curated attack templates across 10 categories (prompt injection, jailbreak, PII extraction, tool hijacking, sub-agent escalation, etc.)
-- `eval/adversarial/mutator.py` — paraphrase / unicode-confusion / encoding mutation engine
-- `eval/adversarial/runner.py` — runs adversarial corpus through the same eval runner (Sprint 12); checks **refusal correctness + guardrail trip events**
-- `eval/corpora/adversarial/` — bundled Cognic-published adversarial corpus (initial ~50 cases across categories)
+- `evaluation/adversarial/__init__.py` — adversarial corpus loader
+- `evaluation/adversarial/templates.py` — curated attack templates across 10 categories (prompt injection, jailbreak, PII extraction, tool hijacking, sub-agent escalation, etc.)
+- `evaluation/adversarial/mutator.py` — paraphrase / unicode-confusion / encoding mutation engine
+- `evaluation/adversarial/runner.py` — runs adversarial corpus through the same eval runner (Sprint 12); checks **refusal correctness + guardrail trip events**
+- `evaluation/corpora/adversarial/` — bundled Cognic-published adversarial corpus (initial ~50 cases across categories)
 
 *Promotion gate integration (per both ADRs):*
-- `eval/promotion_gate.py` — packs cannot promote dev → stage → prod unless: bulk-test pass-rate ≥ tenant threshold, judge aggregate ≥ tenant threshold, adversarial pass-rate ≥ 0.99 (configurable), zero new attacks succeed vs baseline
+- `evaluation/promotion_gate.py` — packs cannot promote dev → stage → prod unless: bulk-test pass-rate ≥ tenant threshold, judge aggregate ≥ tenant threshold, adversarial pass-rate ≥ 0.99 (configurable), zero new attacks succeed vs baseline
 - RBAC scope `override.adversarial_gate` for explicit operator override (audit-logged)
 
 **Tests:**
