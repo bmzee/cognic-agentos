@@ -34,7 +34,17 @@ def test_eval_dir_has_expected_sources() -> None:
     """Non-vacuous guard — pin the exact source set so a vanished glob cannot make
     the fences pass trivially."""
     names = {p.name for p in _eval_sources()}
-    assert names == {"__init__.py", "judge.py"}, names
+    # The expected set grows as Sprint-12 modules land (types/corpus/target/scorers/runner/storage).
+    assert names == {
+        "__init__.py",
+        "judge.py",
+        "types.py",
+        "corpus.py",
+        "target.py",
+        "scorers.py",
+        "runner.py",
+        "storage.py",
+    }, names
 
 
 def test_eval_imports_no_layer_c() -> None:

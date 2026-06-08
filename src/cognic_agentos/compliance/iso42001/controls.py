@@ -1,4 +1,4 @@
-"""ISO/IEC 42001 control registry — Sprint 9 (ADR-006), 9.5 A6 update.
+"""ISO/IEC 42001 control registry — Sprint 9 (ADR-006); 9.5 A6 + Sprint 12 (ADR-010) updates.
 
 Single source of truth mapping the 8 ADR-006 Wave-1 Annex-A controls to
 their intended Cognic governance hooks. The canonical control ID — the
@@ -16,11 +16,16 @@ Sprint 9.5 A6 promoted 4 controls from ``deferred`` to ``implemented``
 once the model registry primitive (ADR-013) landed real
 ``model.lifecycle.*`` chain emission tagging them: ``A.6.2.6`` (roles +
 responsibilities), ``A.8.2`` (data quality), ``A.8.5`` (AI system
-development), ``A.10.2`` (stakeholder transparency). The count moved
-from 3 implemented / 5 deferred → 7 implemented / 1 deferred; only
-``A.7.6`` (AI system risk evaluation) stays deferred — Sprint 9.5
-stores reviewer-attested risk evidence but machine-verified ADR-011
-risk evaluation is deferred to Sprint 13.
+development), ``A.10.2`` (stakeholder transparency). That moved the
+count from 3 implemented / 5 deferred → 7 implemented / 1 deferred,
+leaving only ``A.7.6`` (AI system risk evaluation) deferred.
+
+Sprint 12 (ADR-010) flipped ``A.7.6`` from ``deferred`` to
+``implemented`` once the bulk evaluation harness landed the real
+``eval.bulk_run`` emission surface tagging it (the harness IS an
+AI-system risk-evaluation surface); the same hook also tags ``A.9.2``
+(system and operational logging). The count is now 8 implemented /
+0 deferred.
 
 Dependency arrow: ``compliance/`` -> ``core/``, never the reverse. This
 module is imported by the evidence-pack exporter and by tests; it is
@@ -115,18 +120,12 @@ ISO42001_CONTROLS: tuple[ControlEntry, ...] = (
         "ISO42001.A.7.6",
         "A.7.6",
         "AI system risk evaluation",
-        ("auto_degradation.evaluate", "compliance_checker.score"),
-        "deferred",
-        # Sprint 9.5 A6 reason rewrite: model lifecycle stores
-        # reviewer-attested risk evidence (``adversarial_pass_rate``
-        # on the ``tenant_approved`` chain row, shape-validated for
-        # ratio + presence per spec §9), but machine-verified ADR-011
-        # risk evaluation (resolving the eval-run ref, loading the
-        # adversarial corpus, enforcing the ≥0.99 threshold) is
-        # deferred to Sprint 13.
-        "model lifecycle stores reviewer-attested risk evidence in "
-        "Sprint 9.5; machine-verified ADR-011 risk evaluation deferred "
-        "to Sprint 13",
+        (
+            "auto_degradation.evaluate",
+            "compliance_checker.score",
+            "eval.bulk_run",  # Sprint 12 (ADR-010) — bulk eval IS a risk-evaluation surface.
+        ),
+        "implemented",
     ),
     ControlEntry(
         "ISO42001.A.8.2",
@@ -153,7 +152,7 @@ ISO42001_CONTROLS: tuple[ControlEntry, ...] = (
         "ISO42001.A.9.2",
         "A.9.2",
         "System and operational logging",
-        ("audit.append", "chain_verifier.walk"),
+        ("audit.append", "chain_verifier.walk", "eval.bulk_run"),
         "implemented",
     ),
     ControlEntry(
@@ -170,8 +169,8 @@ ISO42001_CONTROLS: tuple[ControlEntry, ...] = (
 
 
 def control_ids() -> frozenset[str]:
-    """The 8 canonical control-ID strings (7 implemented + 1 deferred
-    post-Sprint-9.5 A6; was 3 + 5 at Sprint 9 close)."""
+    """The 8 canonical control-ID strings (8 implemented + 0 deferred
+    post-Sprint-12; was 7 + 1 at Sprint 9.5 A6, 3 + 5 at Sprint 9 close)."""
     return frozenset(entry.control_id for entry in ISO42001_CONTROLS)
 
 

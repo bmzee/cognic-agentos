@@ -70,9 +70,12 @@ _GATE_TOOL_PATH = _REPO_ROOT / "tools" / "check_critical_coverage.py"
 #: (core/config_overlay/{registry,storage,resolver} + the operator-administered
 #: portal/api/config_overlay/routes — the latter owns the Human-only-decisions
 #: enforcement boundary, same criterion that put packs/operator_routes on the
-#: gate) = 117).
+#: gate) = 117;
+#: + 4 Sprint-12 eval-harness modules (evaluation/{corpus,scorers,runner,storage}
+#: per ADR-010 amendment — corpus contract / evaluator pass-fail / run
+#: orchestration / atomic evidence storage) = 121).
 #: Bump this in lockstep with any deliberate ``_CRITICAL_FILES`` change.
-_EXPECTED_ENTRY_COUNT = 117
+_EXPECTED_ENTRY_COUNT = 121
 
 #: The 5 modules Sprint 7B.3 promoted to the durable gate, each by its
 #: own landing commit (T3-T6 panels + T7 composer). All ride the
@@ -686,6 +689,37 @@ def test_adr_023_modules_present_with_standard_floors(
     by_path = {path: (line, branch) for path, line, branch in gate_tool._CRITICAL_FILES}
     for module in _ADR_023_GATE_MODULES:
         assert module in by_path, f"ADR-023 module missing from gate: {module}"
+        assert by_path[module] == (0.95, 0.90), (
+            f"{module} must ride the standard 95%-line / 90%-branch floor"
+        )
+
+
+#: The 4 Sprint-12 (ADR-010 amendment) evaluation-harness modules promoted to
+#: the durable gate at T15 (count 117 -> 121). All ride the standard 95%-line /
+#: 90%-branch floor. ``evaluation/target.py`` / ``types.py`` + the portal
+#: route/DTO deliberately stay OFF-gate (R32 precedent).
+_SPRINT_12_GATE_MODULES = (
+    "src/cognic_agentos/evaluation/corpus.py",
+    "src/cognic_agentos/evaluation/scorers.py",
+    "src/cognic_agentos/evaluation/runner.py",
+    "src/cognic_agentos/evaluation/storage.py",
+)
+
+
+def test_sprint_12_modules_present_with_standard_floors(
+    gate_tool: ModuleType,
+) -> None:
+    """The 4 Sprint-12 (ADR-010 amendment) eval-harness promotions are on the
+    gate at the 95/90 floor: the strict corpus contract + loader (``corpus``) +
+    the evaluator pass-fail logic (``scorers``) + the run orchestration with
+    per-case isolation (``runner``) + the atomic evidence storage with tenant
+    boundary + value-free chain (``storage``). This pins the EXACT module set — a
+    future edit that drops one while keeping the count at 121 by swapping in an
+    unrelated existing path fails HERE, where the count / no-dupe / path-exists
+    guards would not."""
+    by_path = {path: (line, branch) for path, line, branch in gate_tool._CRITICAL_FILES}
+    for module in _SPRINT_12_GATE_MODULES:
+        assert module in by_path, f"Sprint 12 module missing from gate: {module}"
         assert by_path[module] == (0.95, 0.90), (
             f"{module} must ride the standard 95%-line / 90%-branch floor"
         )

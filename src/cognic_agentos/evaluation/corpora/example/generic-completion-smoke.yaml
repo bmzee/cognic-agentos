@@ -1,0 +1,44 @@
+# src/cognic_agentos/evaluation/corpora/example/generic-completion-smoke.yaml
+schema_version: 1
+corpus_id: generic-completion-smoke
+description: >
+  Neutral format-demonstration corpus for the Sprint-12 bulk eval harness.
+  Shows the single-shot message-list case shape with deterministic assertions
+  and a judge rubric. NOT a persona/bank-specific agent corpus.
+
+cases:
+  - id: arithmetic-deterministic
+    case_kind: completion
+    messages:
+      - role: system
+        content: "Answer with only the number."
+      - role: user
+        content: "What is 2 + 2?"
+    assertions:
+      contains: ["4"]
+      not_contains: ["error"]
+
+  - id: greeting-judged
+    case_kind: completion
+    messages:
+      - role: user
+        content: "Greet the user politely."
+    judge:
+      rubric: "The response is a polite greeting."
+      criteria:
+        - name: politeness
+          description: "The response greets the user in a polite, courteous tone."
+          weight: 1.0
+
+  - id: combined-assertion-and-judge
+    case_kind: completion
+    messages:
+      - role: user
+        content: "Name a primary color and explain why it is primary."
+    assertions:
+      regex: ["(?i)\\b(red|blue|yellow)\\b"]
+    judge:
+      rubric: "The answer names a primary color and gives a coherent reason."
+      criteria:
+        - name: correctness
+          description: "Names red, blue, or yellow and explains primacy coherently."

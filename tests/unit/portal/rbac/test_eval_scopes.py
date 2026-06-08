@@ -6,9 +6,10 @@ from cognic_agentos.portal.rbac.actor import Actor
 from cognic_agentos.portal.rbac.scopes import EVAL_SCOPES, EvalRBACScope
 
 
-def test_eval_scope_family_has_exactly_one_value() -> None:
-    assert set(typing.get_args(EvalRBACScope)) == {"eval.judge.run"}
-    assert frozenset({"eval.judge.run"}) == EVAL_SCOPES
+def test_eval_scope_family_has_exactly_three_values() -> None:
+    expected = {"eval.judge.run", "eval.bulk.run", "eval.runs.read"}
+    assert set(typing.get_args(EvalRBACScope)) == expected
+    assert frozenset(expected) == EVAL_SCOPES
 
 
 def test_actor_accepts_eval_scope() -> None:
