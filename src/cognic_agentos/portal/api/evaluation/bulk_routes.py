@@ -12,7 +12,6 @@ closure-local ``Depends(...)`` instances and FastAPI must resolve the
 silently demote the body to query params → 422 at request time).
 """
 
-import dataclasses
 import uuid
 from typing import Annotated, Any, Literal
 
@@ -20,11 +19,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from cognic_agentos.core.decision_history import DecisionHistoryStore
 from cognic_agentos.evaluation.corpus import CorpusLoadError, validate_corpus_payload
-from cognic_agentos.evaluation.runner import EvalRunner
+from cognic_agentos.evaluation.runner import EvalRunner, apply_raw_output
 from cognic_agentos.evaluation.scorers import AssertionScorer, CaseScorer, JudgeScorer
 from cognic_agentos.evaluation.storage import EvalRunStore, mint_eval_request_id
 from cognic_agentos.evaluation.target import GatewayTarget
-from cognic_agentos.evaluation.types import CaseResult, EvalRunResult
+from cognic_agentos.evaluation.types import EvalRunResult
 from cognic_agentos.llm.gateway import LLMGateway
 from cognic_agentos.portal.api.evaluation.dto import (
     BulkCaseResultResponse,
@@ -102,7 +101,9 @@ def build_eval_bulk_routes(
             tenant_id=actor.tenant_id,
             capture_raw_output=body.persist_raw_output,
         )
-        result = _apply_raw_output(result, body.persist_raw_output, max_raw_output_chars)
+        result = apply_raw_output(
+            result, persist=body.persist_raw_output, max_chars=max_raw_output_chars
+        )
         store = EvalRunStore(dh_store)
         await store.persist_run(
             result=result, actor_subject=actor.subject, tenant_id=actor.tenant_id
@@ -123,34 +124,6 @@ def build_eval_bulk_routes(
         return {"run": dict(row["run"]), "cases": [dict(c) for c in row["cases"]]}
 
     return router
-
-
-def _apply_raw_output(result: EvalRunResult, persist: bool, max_chars: int) -> EvalRunResult:
-    """Correction (B): real raw-output threading (NOT a no-op).
-
-    When ``persist`` is False the result is returned unchanged (the runner already
-    set ``candidate_output_text=None`` on every case). When True, each case with a
-    non-None candidate text is truncated to ``max_chars`` and flagged
-    (``raw_output_persisted=True``; ``output_truncated`` iff the original exceeded
-    the cap). Errored cases carry no candidate text and pass through untouched.
-    """
-    if not persist:
-        return result
-    new_cases: list[CaseResult] = []
-    for c in result.cases:
-        if c.candidate_output_text is None:
-            new_cases.append(c)
-            continue
-        raw = c.candidate_output_text
-        new_cases.append(
-            dataclasses.replace(
-                c,
-                candidate_output_text=raw[:max_chars],
-                raw_output_persisted=True,
-                output_truncated=len(raw) > max_chars,
-            )
-        )
-    return dataclasses.replace(result, cases=tuple(new_cases))
 
 
 def _to_response(result: EvalRunResult) -> BulkRunResponse:

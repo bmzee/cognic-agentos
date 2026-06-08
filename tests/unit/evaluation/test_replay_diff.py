@@ -166,3 +166,23 @@ def test_baseline_only_case_emitted_as_errored_after_candidate_cases() -> None:
     assert gone.drift_kind == "errored" and gone.candidate_outcome == "errored"
     assert gone.candidate_model == "" and gone.baseline_model == "m1"
     assert diff.errored == 1
+
+
+def test_classify_baseline_none_when_candidate_case_absent_from_baseline() -> None:
+    # Exercises the defensive ``if baseline is None: return "errored"`` branch in
+    # ``_classify`` — reachable when a candidate case_id has no matching baseline row
+    # (should not happen under a matching corpus_digest, but must be covered).
+    baseline_id = uuid.uuid4()
+    candidate = _candidate([_case("new_case", passed=True)])
+    diff = compute_replay_diff(
+        baseline_run_id=baseline_id,
+        candidate=candidate,
+        baseline_cases=[],  # no baseline → baseline lookup returns None
+        baseline_tier="tier1",
+    )
+    assert len(diff.cases) == 1
+    cd = diff.cases[0]
+    assert cd.drift_kind == "errored"
+    assert cd.baseline_passed is False
+    assert cd.baseline_outcome == "errored"
+    assert cd.baseline_model == ""

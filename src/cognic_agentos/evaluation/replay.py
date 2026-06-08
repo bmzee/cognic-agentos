@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
+    from cognic_agentos.evaluation.scorers import CaseScorer
     from cognic_agentos.evaluation.types import EvalRunResult
 
 DriftKind = Literal["regression", "improvement", "unchanged", "output_changed", "errored"]
@@ -133,3 +134,67 @@ def compute_replay_diff(
         has_regressions=regressions > 0,
         cases=tuple(diffs),
     )
+
+
+async def run_replay(
+    *,
+    corpus: Any,
+    baseline_run_id: uuid.UUID,
+    baseline_cases: list[dict[str, Any]],
+    baseline_tier: str,
+    gateway: Any,
+    store: Any,
+    target_tier: str,
+    judge_tier: str,
+    max_raw_output_chars: int,
+    tenant_id: str,
+    actor_subject: str,
+    persist_raw_output: bool,
+) -> ReplayDiff:
+    """Run the candidate, persist it, diff vs baseline, emit eval.replay.
+
+    Two sequential chain appends (spec §3): persist_run (eval.bulk_run) then
+    append_replay_event (eval.replay). If the second raises after the first
+    succeeds, the candidate is a valid standalone run; this function propagates
+    the exception (route → 5xx). NON-idempotent (a retry mints a fresh candidate).
+    """
+    from cognic_agentos.evaluation.runner import EvalRunner, apply_raw_output
+    from cognic_agentos.evaluation.scorers import AssertionScorer, JudgeScorer
+    from cognic_agentos.evaluation.storage import mint_eval_replay_request_id, mint_eval_request_id
+    from cognic_agentos.evaluation.target import GatewayTarget
+
+    target = GatewayTarget(gateway=gateway, tier=target_tier)
+    scorers: list[CaseScorer] = [AssertionScorer(), JudgeScorer(gateway=gateway, tier=judge_tier)]
+    candidate = await EvalRunner().run(
+        corpus,
+        target=target,
+        scorers=scorers,
+        run_id=uuid.uuid4(),
+        chain_request_id=mint_eval_request_id(),
+        tenant_id=tenant_id,
+        capture_raw_output=persist_raw_output,
+    )
+    # Apply the Sprint-12 raw-output safety contract BEFORE persisting (truncate to
+    # max_raw_output_chars + set raw_output_persisted/output_truncated). output_digest
+    # is the digest of the ORIGINAL text (set in the runner), so truncation does not
+    # affect the diff — the diff compares output_digest, not the stored text.
+    candidate = apply_raw_output(
+        candidate, persist=persist_raw_output, max_chars=max_raw_output_chars
+    )
+    # Step 6: persist candidate (eval.bulk_run) — reuses Sprint-12 persist_run.
+    await store.persist_run(result=candidate, actor_subject=actor_subject, tenant_id=tenant_id)
+    # Step 7: pure diff.
+    diff = compute_replay_diff(
+        baseline_run_id=baseline_run_id,
+        candidate=candidate,
+        baseline_cases=baseline_cases,
+        baseline_tier=baseline_tier,
+    )
+    # Step 8: emit eval.replay (value-free). May raise → candidate stays a valid run.
+    await store.append_replay_event(
+        diff=diff,
+        actor_subject=actor_subject,
+        tenant_id=tenant_id,
+        request_id=mint_eval_replay_request_id(),
+    )
+    return diff

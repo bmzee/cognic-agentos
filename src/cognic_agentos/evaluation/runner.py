@@ -9,6 +9,7 @@ chain_request_id) is passed in by the caller; persistence is the store's job.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import uuid
 from typing import TYPE_CHECKING
@@ -48,6 +49,30 @@ def _errored_case(case_id: str, *, input_digest: str, output: CandidateOutput | 
         raw_output_persisted=False,
         output_truncated=False,
     )
+
+
+def apply_raw_output(result: EvalRunResult, *, persist: bool, max_chars: int) -> EvalRunResult:
+    """Truncate per-case candidate text to ``max_chars`` + set
+    ``raw_output_persisted`` / ``output_truncated`` when ``persist`` is True;
+    pass-through when False (cases already carry ``candidate_output_text=None``).
+    Shared by the bulk-run + replay routes (one safety contract, no drift)."""
+    if not persist:
+        return result
+    new_cases: list[CaseResult] = []
+    for c in result.cases:
+        if c.candidate_output_text is None:
+            new_cases.append(c)
+            continue
+        raw = c.candidate_output_text
+        new_cases.append(
+            dataclasses.replace(
+                c,
+                candidate_output_text=raw[:max_chars],
+                raw_output_persisted=True,
+                output_truncated=len(raw) > max_chars,
+            )
+        )
+    return dataclasses.replace(result, cases=tuple(new_cases))
 
 
 class EvalRunner:

@@ -8,9 +8,9 @@ from typing import Any
 import pytest
 
 from cognic_agentos.evaluation.corpus import validate_corpus_payload
-from cognic_agentos.evaluation.runner import EvalRunner, _percentile
+from cognic_agentos.evaluation.runner import EvalRunner, _percentile, apply_raw_output
 from cognic_agentos.evaluation.scorers import AssertionScorer, JudgeScorer
-from cognic_agentos.evaluation.types import CandidateOutput, ScorerResult
+from cognic_agentos.evaluation.types import CandidateOutput, CaseResult, EvalRunResult, ScorerResult
 from cognic_agentos.llm.gateway import GatewayResponse
 
 
@@ -278,3 +278,61 @@ async def test_declared_assertions_without_assertion_scorer_fails_closed() -> No
 
 def test_percentile_empty_list_returns_zero() -> None:
     assert _percentile([], 50) == 0
+
+
+def _case_result(case_id: str, *, text: str | None) -> CaseResult:
+    return CaseResult(
+        case_id=case_id,
+        passed=text is not None,
+        outcome="succeeded" if text is not None else "errored",
+        scorer_results=(),
+        latency_ms=1,
+        model="m",
+        input_digest="i",
+        output_digest="o",
+        candidate_output_text=text,
+        raw_output_persisted=False,
+        output_truncated=False,
+    )
+
+
+def _run_result(cases: list[CaseResult]) -> EvalRunResult:
+    return EvalRunResult(
+        run_id=uuid.uuid4(),
+        chain_request_id="r",
+        corpus_id="cp",
+        corpus_digest="d",
+        target_kind="gateway",
+        tier="tier1",
+        total=len(cases),
+        passed=0,
+        failed=0,
+        errored=0,
+        latency_p50_ms=1,
+        latency_p95_ms=1,
+        cases=tuple(cases),
+    )
+
+
+def test_apply_raw_output_persist_true_passes_through_none_text_case() -> None:
+    # The shared raw-output safety contract: when persist=True, a case whose
+    # candidate_output_text is None (e.g. an errored case) MUST pass through
+    # untouched — the ``is None`` guard prevents ``None[:max_chars]`` crashing.
+    # A sibling case WITH text is truncated + flagged in the same call.
+    result = _run_result(
+        [_case_result("errored_no_text", text=None), _case_result("has_text", text="ok" + "x" * 50)]
+    )
+    out = apply_raw_output(result, persist=True, max_chars=5)
+    none_case = next(c for c in out.cases if c.case_id == "errored_no_text")
+    text_case = next(c for c in out.cases if c.case_id == "has_text")
+    # None-text case: unchanged (no crash, no flags flipped).
+    assert none_case.candidate_output_text is None
+    assert none_case.raw_output_persisted is False and none_case.output_truncated is False
+    # Text case: truncated to the cap + flagged.
+    assert text_case.candidate_output_text == ("ok" + "x" * 50)[:5]
+    assert text_case.raw_output_persisted is True and text_case.output_truncated is True
+
+
+def test_apply_raw_output_persist_false_is_passthrough() -> None:
+    result = _run_result([_case_result("c", text="anything")])
+    assert apply_raw_output(result, persist=False, max_chars=5) is result
