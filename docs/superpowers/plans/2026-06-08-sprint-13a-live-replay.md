@@ -671,11 +671,16 @@ EVAL_SCOPES: frozenset[EvalRBACScope] = frozenset(
 
 - [ ] **Step 4: Run — expect PASS.** Run: `uv run pytest tests/unit/portal/rbac/test_eval_replay_scope.py -q`
 
+- [ ] **Step 4b: Advance the two Sprint-12 eval-scope drift pins** (REQUIRED — adding `eval.replay.run` legitimately trips them; this advance IS the reviewed act they guard): `tests/unit/portal/rbac/test_eval_scopes.py::test_eval_scope_family_has_exactly_three_values` (rename → `…_four_values`, expected set → 4) and `tests/unit/portal/rbac/test_eval_bulk_scopes.py::test_eval_scopes_include_bulk_and_runs_read` (exact-set assertion → 4). Run: `uv run pytest tests/unit/portal/rbac/ -q` → expect all PASS.
+
 - [ ] **Step 5: HALT-BEFORE-COMMIT [STOP-RULE]** (RBAC). Full gate ladder; halt summary; token.
 
 ```bash
 uv run pytest -q && uv run ruff check . && uv run ruff format --check . && uv run mypy src tests
-git add src/cognic_agentos/portal/rbac/scopes.py tests/unit/portal/rbac/test_eval_replay_scope.py
+git add src/cognic_agentos/portal/rbac/scopes.py \
+        tests/unit/portal/rbac/test_eval_replay_scope.py \
+        tests/unit/portal/rbac/test_eval_scopes.py \
+        tests/unit/portal/rbac/test_eval_bulk_scopes.py
 git commit -m "$(printf 'feat(eval): RBAC scope eval.replay.run (ADR-010)\n\nCo-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>')"
 ```
 
