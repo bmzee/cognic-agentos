@@ -13,6 +13,7 @@ import hashlib
 import uuid
 from typing import TYPE_CHECKING
 
+from cognic_agentos.evaluation.corpus import corpus_digest as compute_corpus_digest
 from cognic_agentos.evaluation.types import CandidateOutput, CaseResult, EvalRunResult, ScorerResult
 
 if TYPE_CHECKING:
@@ -80,7 +81,7 @@ class EvalRunner:
             run_id=run_id,
             chain_request_id=chain_request_id,
             corpus_id=corpus.corpus_id,
-            corpus_digest=_digest(corpus.model_dump_json()),
+            corpus_digest=compute_corpus_digest(corpus),
             target_kind=getattr(target, "target_kind", "gateway"),
             tier=getattr(target, "tier", ""),
             total=len(cases),
