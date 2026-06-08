@@ -42,6 +42,7 @@ def test_eval_dir_has_expected_sources() -> None:
         "corpus.py",
         "target.py",
         "scorers.py",
+        "runner.py",
     }, names
 
 
