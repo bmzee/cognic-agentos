@@ -124,6 +124,7 @@ ISO42001_CONTROLS: tuple[ControlEntry, ...] = (
             "auto_degradation.evaluate",
             "compliance_checker.score",
             "eval.bulk_run",  # Sprint 12 (ADR-010) — bulk eval IS a risk-evaluation surface.
+            "eval.replay",  # Sprint 13a — replay IS a risk-evaluation surface (ADR-010).
         ),
         "implemented",
     ),
@@ -152,7 +153,7 @@ ISO42001_CONTROLS: tuple[ControlEntry, ...] = (
         "ISO42001.A.9.2",
         "A.9.2",
         "System and operational logging",
-        ("audit.append", "chain_verifier.walk", "eval.bulk_run"),
+        ("audit.append", "chain_verifier.walk", "eval.bulk_run", "eval.replay"),
         "implemented",
     ),
     ControlEntry(
