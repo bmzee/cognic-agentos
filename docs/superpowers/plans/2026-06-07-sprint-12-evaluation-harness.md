@@ -21,6 +21,21 @@
 - **Gate ladder:** at a [CC]/[STOP-RULE] commit, run the full suite (`uv run pytest -q`) plus `uv run ruff check .` + `uv run ruff format --check .` + `uv run mypy src tests`. For [normal] tasks, run the touched-scope tests + ruff/format/mypy. The single coverage-gate task (T15) additionally runs full `--cov --cov-branch` + `tools/check_critical_coverage.py`.
 - **Spec file-placement refinements** baked into this plan (deliberate, noted where they occur): the strict `EvalCase`/`Corpus` Pydantic models live in **`corpus.py`** (the CC module that owns the corpus contract), not `types.py`; `EvalRunStore` takes a `DecisionHistoryStore` (not a raw engine); `run_id`/`chain_request_id` are passed into `EvalRunner.run(...)` by the route (the runner does not mint identity). These refine the spec's §1/§2 listings for a cleaner CC boundary and are recorded in the ADR-010 amendment (T16).
 
+### Architecture-fence maintenance (cross-task — added at T2 fix-forward)
+
+There is an inventory fence `tests/unit/architecture/test_eval_fences.py::test_eval_dir_has_expected_sources` that pins the **exact** `evaluation/*.py` source set. It is the **non-vacuous guard** for the two OS/pack import fences (`test_eval_imports_no_layer_c` + `test_eval_imports_no_agent_sdk`): without it, a vanished glob would let those import fences pass trivially over an empty source set.
+
+Because the set is exact, **every task that ADDS a new `evaluation/*.py` file MUST update that expected set AND stage `tests/unit/architecture/test_eval_fences.py` in the SAME task commit**, so the full suite stays green per-commit. (The two import fences need no edit — they already iterate the whole glob and therefore guard each new module automatically.)
+
+Per-task ledger of the expected source set:
+
+- **T1 `types.py`** — landed in `f0ba561`; the matching fence update was folded forward into **T2** (transient-red T1 is acceptable here because the branch squash-merges, so no per-commit-green guarantee is owed mid-branch for T1).
+- **T2 `corpus.py`** — set becomes `{__init__.py, judge.py, types.py, corpus.py}` (**this commit** — covers the deferred T1 `types.py` entry as well).
+- **T3 `target.py`** — add `target.py` to the set.
+- **T4 `scorers.py`** — add `scorers.py` to the set.
+- **T5 `runner.py`** — add `runner.py` to the set.
+- **T7 `storage.py`** — add `storage.py` to the set (the file is created in T7 Step 3a). (T8 adds no new `evaluation/*.py` file, so it makes no set change.)
+
 ---
 
 ## File structure
