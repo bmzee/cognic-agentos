@@ -433,11 +433,13 @@ def compute_replay_diff(
 
 - [ ] **Step 4: Run — expect PASS.** Run: `uv run pytest tests/unit/evaluation/test_replay_diff.py -q`
 
+- [ ] **Step 4b: Update the eval-dir inventory fence** (REQUIRED — adding `replay.py` to `evaluation/` breaks `tests/unit/architecture/test_eval_fences.py::test_eval_dir_has_expected_sources`, which pins the exact source set). Add `"replay.py"` to the expected set in that test (and extend its comment to note Sprint-13a). This MUST land in the T2 commit or the full suite stays red. Run: `uv run pytest tests/unit/architecture/test_eval_fences.py -q` → expect PASS.
+
 - [ ] **Step 5: HALT-BEFORE-COMMIT [CC].** Full gate ladder; report focused `--cov-branch` of `replay.py` (`uv run pytest tests/unit/evaluation/test_replay_diff.py --cov=cognic_agentos.evaluation.replay --cov-branch --cov-report=term-missing -q` — the diff half should be ~100%; `run_replay` lands in T6 and is covered there); halt summary; token.
 
 ```bash
 uv run pytest -q && uv run ruff check . && uv run ruff format --check . && uv run mypy src tests
-git add src/cognic_agentos/evaluation/replay.py tests/unit/evaluation/test_replay_diff.py
+git add src/cognic_agentos/evaluation/replay.py tests/unit/evaluation/test_replay_diff.py tests/unit/architecture/test_eval_fences.py
 git commit -m "$(printf 'feat(eval): replay diff types + compute_replay_diff (ADR-010)\n\nCo-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>')"
 ```
 
