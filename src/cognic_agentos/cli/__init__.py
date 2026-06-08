@@ -955,6 +955,49 @@ def verify(
         raise typer.Exit(code=1)
 
 
+@app.command(name="eval-bulk")
+def eval_bulk(
+    corpus: Path = typer.Option(  # noqa: B008
+        ..., "--corpus", help="Directory of corpus YAML docs (*.yaml / *.yml)."
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Load + strict-validate the corpus and print the plan; no model/portal call.",
+    ),
+    url: str | None = typer.Option(None, "--url", help="Portal base URL for a persisted run."),
+    token: str | None = typer.Option(None, "--token", help="Bearer token for the portal."),
+    json_output: bool = typer.Option(False, "--json", help="Emit JSON."),
+) -> None:
+    """Run a corpus against the portal eval bulk-run endpoint (or validate locally with --dry-run).
+
+    Exits 0 on success / dry-run valid; 1 on corpus invalid; 2 on missing URL/token or portal error.
+    """
+    from cognic_agentos.cli.eval import load_and_summarise, post_bulk_run, render
+    from cognic_agentos.evaluation.corpus import CorpusLoadError
+
+    if dry_run:
+        try:
+            summary = load_and_summarise(corpus)
+        except CorpusLoadError as exc:
+            typer.echo(f"eval-bulk: corpus invalid: {exc.reason}", err=True)
+            raise typer.Exit(code=1) from None
+        typer.echo(render(summary, json_output=json_output))
+        return
+    if not url or not token:
+        typer.echo("eval-bulk: --url and --token are required without --dry-run", err=True)
+        raise typer.Exit(code=2)
+    try:
+        body = post_bulk_run(corpus, url=url, token=token)
+    except CorpusLoadError as exc:
+        typer.echo(f"eval-bulk: corpus invalid: {exc.reason}", err=True)
+        raise typer.Exit(code=1) from None
+    except Exception as exc:  # network / portal error
+        typer.echo(f"eval-bulk: portal call failed: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+    typer.echo(render(body, json_output=json_output))
+
+
 __all__ = [
     "_VALIDATOR_REASON_OWNERSHIP",
     "_WARNING_REASONS",
