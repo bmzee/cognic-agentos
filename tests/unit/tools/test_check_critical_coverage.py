@@ -73,9 +73,11 @@ _GATE_TOOL_PATH = _REPO_ROOT / "tools" / "check_critical_coverage.py"
 #: gate) = 117;
 #: + 4 Sprint-12 eval-harness modules (evaluation/{corpus,scorers,runner,storage}
 #: per ADR-010 amendment — corpus contract / evaluator pass-fail / run
-#: orchestration / atomic evidence storage) = 121).
+#: orchestration / atomic evidence storage) = 121
+#: + 1 Sprint-13a replay module (evaluation/replay.py per ADR-010 — eval-run
+#: replay orchestration + pass/fail-drift classification) = 122).
 #: Bump this in lockstep with any deliberate ``_CRITICAL_FILES`` change.
-_EXPECTED_ENTRY_COUNT = 121
+_EXPECTED_ENTRY_COUNT = 122
 
 #: The 5 modules Sprint 7B.3 promoted to the durable gate, each by its
 #: own landing commit (T3-T6 panels + T7 composer). All ride the
@@ -720,6 +722,26 @@ def test_sprint_12_modules_present_with_standard_floors(
     by_path = {path: (line, branch) for path, line, branch in gate_tool._CRITICAL_FILES}
     for module in _SPRINT_12_GATE_MODULES:
         assert module in by_path, f"Sprint 12 module missing from gate: {module}"
+        assert by_path[module] == (0.95, 0.90), (
+            f"{module} must ride the standard 95%-line / 90%-branch floor"
+        )
+
+
+_SPRINT_13A_GATE_MODULES = ("src/cognic_agentos/evaluation/replay.py",)
+
+
+def test_sprint_13a_modules_present_with_standard_floors(
+    gate_tool: ModuleType,
+) -> None:
+    """The 1 Sprint-13a (ADR-010) live-replay promotion is on the gate at the
+    95/90 floor: ``evaluation/replay.py`` — the pure pass/fail-drift classifier
+    (``compute_replay_diff``) + the run/persist/diff/eval.replay-chain orchestrator
+    (``run_replay``). The route + DTO stay OFF-gate (R32). This pins the EXACT
+    module set so a future edit that drops it while holding the count at 122 by
+    swapping in an unrelated path fails HERE."""
+    by_path = {path: (line, branch) for path, line, branch in gate_tool._CRITICAL_FILES}
+    for module in _SPRINT_13A_GATE_MODULES:
+        assert module in by_path, f"Sprint 13a module missing from gate: {module}"
         assert by_path[module] == (0.95, 0.90), (
             f"{module} must ride the standard 95%-line / 90%-branch floor"
         )
