@@ -49,6 +49,41 @@ def post_bulk_run(corpus_path: Path, *, url: str, token: str) -> dict[str, Any]:
     return resp.json()  # type: ignore[no-any-return]
 
 
+def replay_dry_run_summary(corpus_path: Path, baseline: str) -> dict[str, Any]:
+    """Validate corpus + baseline-UUID SHAPE only (no network).
+
+    Raises CorpusLoadError / ValueError.
+    """
+    import uuid as _uuid
+
+    from cognic_agentos.evaluation.corpus import load_corpus
+
+    _uuid.UUID(baseline)  # ValueError on malformed
+    corpus = load_corpus(corpus_path)
+    return {"corpus_id": corpus.corpus_id, "case_count": len(corpus.cases), "baseline": baseline}
+
+
+def post_replay(corpus_path: Path, *, baseline: str, url: str, token: str) -> dict[str, Any]:
+    """POST the loaded corpus to the portal replay endpoint; return the JSON body."""
+    import httpx
+
+    from cognic_agentos.evaluation.corpus import load_corpus
+
+    corpus = load_corpus(corpus_path)
+    resp = httpx.post(
+        f"{url.rstrip('/')}/api/v1/eval/replay",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "corpus": corpus.model_dump(),
+            "baseline_run_id": baseline,
+            "persist_raw_output": False,
+        },
+        timeout=120.0,
+    )
+    resp.raise_for_status()
+    return resp.json()  # type: ignore[no-any-return]
+
+
 def render(summary: dict[str, Any], *, json_output: bool) -> str:
     if json_output:
         return json.dumps(summary, indent=2, sort_keys=True)
