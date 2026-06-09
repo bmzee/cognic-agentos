@@ -998,6 +998,60 @@ def eval_bulk(
     typer.echo(render(body, json_output=json_output))
 
 
+@app.command(name="eval-replay")
+def eval_replay(
+    corpus: Path = typer.Option(  # noqa: B008
+        ..., "--corpus", help="Directory of corpus YAML docs."
+    ),
+    baseline: str = typer.Option(..., "--baseline", help="Baseline eval-run id (UUID)."),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Validate corpus + baseline UUID shape only; no portal/model call.",
+    ),
+    url: str | None = typer.Option(None, "--url", help="Portal base URL."),
+    token: str | None = typer.Option(None, "--token", help="Bearer token."),
+    json_output: bool = typer.Option(False, "--json", help="Emit JSON."),
+) -> None:
+    """Replay a corpus against the current target config and diff vs a baseline run.
+
+    Exits 0 on success / dry-run valid; 1 on bad baseline UUID or corpus invalid;
+    2 on missing URL/token or portal error.
+    """
+    import json as _json
+
+    from cognic_agentos.cli.eval import post_replay, render, replay_dry_run_summary
+    from cognic_agentos.evaluation.corpus import CorpusLoadError
+
+    if dry_run:
+        try:
+            summary = replay_dry_run_summary(corpus, baseline)
+        except ValueError:
+            typer.echo(f"eval-replay: --baseline is not a valid UUID: {baseline!r}", err=True)
+            raise typer.Exit(code=1) from None
+        except CorpusLoadError as exc:
+            typer.echo(f"eval-replay: corpus invalid: {exc.reason}", err=True)
+            raise typer.Exit(code=1) from None
+        typer.echo(render(summary, json_output=json_output))
+        return
+    if not url or not token:
+        typer.echo("eval-replay: --url and --token are required without --dry-run", err=True)
+        raise typer.Exit(code=2)
+    try:
+        body = post_replay(corpus, baseline=baseline, url=url, token=token)
+    except CorpusLoadError as exc:
+        typer.echo(f"eval-replay: corpus invalid: {exc.reason}", err=True)
+        raise typer.Exit(code=1) from None
+    except Exception as exc:  # network / portal error
+        typer.echo(f"eval-replay: portal call failed: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+    typer.echo(
+        _json.dumps(body, indent=2, sort_keys=True)
+        if json_output
+        else f"replay: {body.get('candidate_run_id')} regressions={body.get('regressions')}"
+    )
+
+
 __all__ = [
     "_VALIDATOR_REASON_OWNERSHIP",
     "_WARNING_REASONS",

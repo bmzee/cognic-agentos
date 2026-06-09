@@ -1,3 +1,4 @@
+# tests/unit/portal/rbac/test_eval_replay_scope.py
 from __future__ import annotations
 
 import typing
@@ -5,9 +6,7 @@ import typing
 from cognic_agentos.portal.rbac.scopes import EVAL_SCOPES, EvalRBACScope
 
 
-def test_eval_scopes_include_bulk_and_runs_read() -> None:
-    # Sprint 13a added eval.replay.run (3 → 4); the exact-set pin advances with it.
+def test_eval_scopes_include_replay_run() -> None:
     expected = {"eval.judge.run", "eval.bulk.run", "eval.runs.read", "eval.replay.run"}
-    values = set(typing.get_args(EvalRBACScope))
-    assert values == expected
+    assert set(typing.get_args(EvalRBACScope)) == expected
     assert frozenset(expected) == EVAL_SCOPES

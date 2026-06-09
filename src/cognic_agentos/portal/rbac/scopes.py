@@ -224,17 +224,20 @@ EmergencyRBACScope = Literal["emergency.kill.memory_write_freeze"]
 EMERGENCY_SCOPES: frozenset[EmergencyRBACScope] = frozenset({"emergency.kill.memory_write_freeze"})
 
 
-#: Eval surface scope family (ADR-010 judge slice + Sprint-12 bulk runner).
-#: Service or human actors may run evals (NOT a Human-only decision).
+#: Eval surface scope family (ADR-010 judge slice + Sprint-12 bulk runner +
+#: Sprint-13a replay). Service or human actors may run evals and replays (NOT
+#: a Human-only decision).
 EvalRBACScope = Literal[
     "eval.judge.run",
     "eval.bulk.run",
     "eval.runs.read",
+    # Sprint 13a T4 — live-replay endpoint scope.
+    "eval.replay.run",
 ]
 
 #: All eval scopes as a frozenset (1:1 with EvalRBACScope) for bank-overlay binders.
 EVAL_SCOPES: frozenset[EvalRBACScope] = frozenset(
-    {"eval.judge.run", "eval.bulk.run", "eval.runs.read"}
+    {"eval.judge.run", "eval.bulk.run", "eval.runs.read", "eval.replay.run"}
 )
 
 

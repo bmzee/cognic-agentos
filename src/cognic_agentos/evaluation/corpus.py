@@ -9,6 +9,7 @@ one is valid for the other — no second validator to drift.
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from typing import Any, Literal
 
@@ -109,6 +110,18 @@ def _reason_for_validation_error(exc: ValidationError) -> CorpusLoadReason:
         if "neither assertions nor judge" in msg:
             return "corpus_case_no_scorer"
     return "corpus_case_messages_invalid"
+
+
+def corpus_digest(corpus: Corpus) -> str:
+    """Canonical digest of a corpus — sha256 of its Pydantic JSON serialization.
+
+    BYTE-IDENTICAL to the Sprint-12 inline runner formula
+    ``sha256(corpus.model_dump_json().encode("utf-8")).hexdigest()`` — the
+    replay pre-run guard compares this against the stored baseline's
+    ``eval_runs.corpus_digest``, so any drift would falsely reject every
+    existing baseline. Pinned by tests/unit/evaluation/test_corpus_digest.py.
+    """
+    return hashlib.sha256(corpus.model_dump_json().encode("utf-8")).hexdigest()
 
 
 def validate_corpus_payload(payload: dict[str, Any]) -> Corpus:

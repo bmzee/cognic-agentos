@@ -6,8 +6,10 @@ from cognic_agentos.portal.rbac.actor import Actor
 from cognic_agentos.portal.rbac.scopes import EVAL_SCOPES, EvalRBACScope
 
 
-def test_eval_scope_family_has_exactly_three_values() -> None:
-    expected = {"eval.judge.run", "eval.bulk.run", "eval.runs.read"}
+def test_eval_scope_family_has_exactly_four_values() -> None:
+    # Sprint 13a added eval.replay.run (3 → 4); advancing this drift pin is the
+    # reviewed act it guards.
+    expected = {"eval.judge.run", "eval.bulk.run", "eval.runs.read", "eval.replay.run"}
     assert set(typing.get_args(EvalRBACScope)) == expected
     assert frozenset(expected) == EVAL_SCOPES
 

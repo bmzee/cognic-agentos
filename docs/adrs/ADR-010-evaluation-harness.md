@@ -242,3 +242,52 @@ Per the Sprint-12 spec §8 and Anthropic's "Building harnesses for long-running 
 - **Deliberate simplicity** — portal-only execution, synchronous + capped, no CLI-side gateway, no async queue.
 
 Each deferred piece above is recorded, not built — the simplicity is a deliberate Sprint-12 choice, with the extension seams (`EvaluationTarget` / `CaseScorer`) already in place for Sprint 13.
+
+---
+
+## Sprint 13a amendment — live replay (2026-06-09)
+
+This amendment records the decisions taken when Sprint 13a built **eval-run live replay** on top of the Sprint-12 bulk substrate. It supersedes nothing; it narrows replay's §3 "Live case replay" scope to what an OS-only repo (no Layer-C agent packs, value-free chain) can ship, and records every piece deliberately deferred to later sub-projects.
+
+### Scope
+
+New module `evaluation/replay.py` (the pure diff + the orchestrator). Extensions: `evaluation/corpus.py` (`corpus_digest`), `evaluation/runner.py` (shared `apply_raw_output`), `evaluation/storage.py` (`append_replay_event` + `mint_eval_replay_request_id`), `portal/api/evaluation/{dto.py (3 replay DTOs), replay_routes.py}`, `portal/api/app.py` (mount), `portal/rbac/scopes.py` (the `eval.replay.run` scope), `compliance/iso42001/controls.py` (the `eval.replay` hook tags), `cli/eval.py` + the `agentos eval-replay` command. **No Alembic migration, no new Settings** — replay reuses the `eval_runs` / `eval_case_results` tables and the Sprint-12 `eval_bulk_*` Settings.
+
+### What replay is in an OS-only repo
+
+Eval-run replay answers the bank-useful question *"we changed the serving model/config — what regressed on our pinned eval corpus?"*. It re-runs a fixed corpus against the **current** operator-configured target and diffs the per-case results against a stored baseline eval-run.
+
+- The candidate is **always the current `GatewayTarget`** at the operator-configured `eval_bulk_target_tier` + `eval_judge_tier` — there is **no caller-selectable tier knob**. The "config under test" is whatever the deployment is currently wired to; replay measures drift relative to a baseline, it does not let a caller pick a model.
+- The baseline corpus is **re-supplied** in the request and its `corpus_digest(corpus)` (a byte-identical sha256 of the Pydantic JSON, shared with the runner via `evaluation/corpus.py`) is verified against the persisted baseline's `eval_runs.corpus_digest`; a mismatch is refused `409 replay_corpus_digest_mismatch` (you cannot diff two different corpora).
+
+### Persistence + evidence
+
+- The candidate run is persisted as a **first-class eval-run** via the existing `EvalRunStore.persist_run` (its own `eval_runs` / `eval_case_results` rows + its own value-free `eval.bulk_run` chain row) — it is a valid standalone run, queryable via `EvalRunStore.get_run`.
+- A **separate, VALUE-FREE** `eval.replay` `decision_history` chain row links baseline → candidate, emitted by `EvalRunStore.append_replay_event` (a no-op-precondition `append_with_precondition` consumer — no relational insert). The payload is minimal: `baseline_run_id` / `candidate_run_id` / `corpus_id` / `corpus_digest` / the six counts / a per-case projection `{case_id, drift_kind, baseline_passed, candidate_passed, output_digest_changed}` — **no model, no tier, no raw text**. The replay actor's subject is recorded as the store-merged `payload["actor_id"]` (governance identity, exactly as `eval.bulk_run` carries it) so an examiner reading the row alone can see *who triggered the replay*.
+- `mint_eval_replay_request_id()` mints the back-link request id (bounded prefix `eval-replay-`, 44 ≤ 64); the `eval.replay` row's `request_id` is the only identity available at row-build time (same ADR-023 atomicity class as `eval.bulk_run`).
+
+### `drift_kind` taxonomy (pure diff)
+
+`compute_replay_diff(*, baseline_run_id, candidate, baseline_cases, baseline_tier) -> ReplayDiff` is pure. Cases are keyed by `case_id` and emitted in **candidate/corpus order** (not baseline DB-row order). The 5-value `DriftKind` (`evaluation/replay.py`): `errored` (baseline OR candidate errored) → `regression` (baseline passed, candidate did not) → `improvement` (baseline failed, candidate passed) → `output_changed` (same pass state, different `output_digest`) → `unchanged`. A baseline case with no candidate (cannot happen under a matching `corpus_digest`) is defensively appended as `errored` after the candidate-order cases (never dropped). The model/tier delta is computed live for the API response, not stored on the chain row.
+
+### Partial-failure + non-idempotency (locked)
+
+`run_replay` issues **two sequential chain appends** (`persist_run` → `append_replay_event`). If the second raises after the first succeeds, the candidate is a **valid standalone eval-run** (no data-integrity loss); `run_replay` propagates the exception and the route returns `5xx`. **Replay is NOT idempotent** — a retry mints a fresh `run_id` and creates a *second* candidate run. This is accepted for Sprint 13a; an idempotency key / single-transaction two-row primitive is deferred. The route does NOT wrap `run_replay` in a swallowing try/except.
+
+### Surface + RBAC + ISO
+
+- **`POST /api/v1/eval/replay`** (`build_eval_replay_routes`, `replay_routes.py`) — fail-closed DI (gateway + decision-history store before any work); body `{corpus, baseline_run_id: UUID, persist_raw_output: StrictBool = false}`. Statuses: `403` (RBAC) · `503` (DI) · `400` (`eval_corpus_empty` raw-body check before validate / `CorpusLoadReason`) · `413` (`eval_corpus_too_large`) · `404` (`baseline_run_not_found` — cross-tenant + unknown collapse byte-identically) · `409` (`replay_corpus_digest_mismatch`) · `422` (body validation) · `200` · `5xx` (partial-failure). The route-specific refusal vocabulary is the closed-enum `EvalReplayRefusalReason = Literal["baseline_run_not_found", "replay_corpus_digest_mismatch"]`; the corpus refusals are reused from bulk's `EvalBulkRefusalReason`. The module deliberately omits `from __future__ import annotations` (closure-local `Depends`).
+- **CLI `agentos eval-replay`** — a flat Typer command (matching `eval-bulk`); a thin portal client + a local `--dry-run` (validates corpus + baseline-UUID shape only, no network). Never constructs the runtime or gateway.
+- **RBAC:** new `eval.replay.run` scope (`EvalRBACScope` 3 → 4; not Human-only — CI/service may replay).
+- **ISO:** `eval.replay` added to the **already-`implemented`** A.7.6 + A.9.2 `intended_hooks` (additive; no status flip, no deferred-count change) — the emission already exists via the shared `_EVAL_ISO_CONTROLS`.
+- **Critical-controls gate:** `evaluation/replay.py` promoted (count **121 → 122**, 95% line / 90% branch). The route + DTO modules stay off-gate per the R32 precedent.
+
+### Deferred to later sub-projects / sprints
+
+- Caller-selectable candidate tier (replay deliberately measures drift against the *current* config; a "compare arbitrary tier A vs B" mode is a separate design);
+- per-scorer drift in the diff (Sprint 13a diffs pass/fail + output-digest, not per-criterion);
+- production **agent-run** replay (citation / compliance-score / tool-call-sequence drift) — needs a replayable agent-run/pack target that does not exist OS-only;
+- replay **idempotency** (idempotency key / single-transaction two-chain-row primitive);
+- a `GET /api/v1/eval/replays/{id}` read endpoint (the candidate is already queryable via the existing `GET /api/v1/eval/runs/{run_id}`; a dedicated replay-diff read surface is deferred).
+
+Each deferred piece is recorded, not built — Sprint 13a ships the honest OS-only slice of §3 live replay, reusing the Sprint-12 seams without runner rework.
