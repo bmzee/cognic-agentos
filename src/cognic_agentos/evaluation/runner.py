@@ -171,6 +171,8 @@ class EvalRunner:
                 continue
             if name == "JudgeScorer" and case.judge is None:
                 continue
+            if name == "RefusalScorer" and case.adversarial is None:
+                continue
             out.append(s)
         return out
 
@@ -181,6 +183,8 @@ class EvalRunner:
         names = {type(s).__name__ for s in applicable}
         if case.assertions is not None and "AssertionScorer" not in names:
             return False
-        if case.judge is not None and "JudgeScorer" not in names:  # noqa: SIM103
+        if case.judge is not None and "JudgeScorer" not in names:
+            return False
+        if case.adversarial is not None and "RefusalScorer" not in names:  # noqa: SIM103
             return False
         return True
