@@ -34,7 +34,7 @@ from cognic_agentos.db.types import GovernanceJSON
 
 if TYPE_CHECKING:
     from cognic_agentos.evaluation.replay import ReplayDiff
-    from cognic_agentos.evaluation.types import EvalRunResult
+    from cognic_agentos.evaluation.types import AdversarialVerdict, EvalRunResult
 
 _EVAL_TS_TYPE = TIMESTAMP(timezone=True)
 
@@ -100,8 +100,17 @@ def mint_eval_replay_request_id() -> str:
     return f"{_EVAL_REPLAY_REQUEST_ID_PREFIX}{uuid.uuid4().hex}"
 
 
+_EVAL_ADVERSARIAL_REQUEST_ID_PREFIX: Final[str] = "eval-adv-"  # 9 chars + 32 hex = 41 <= 64
+
+
+def mint_eval_adversarial_request_id() -> str:
+    """Bounded request_id for an eval adversarial event (prefix + uuid4().hex)."""
+    return f"{_EVAL_ADVERSARIAL_REQUEST_ID_PREFIX}{uuid.uuid4().hex}"
+
+
 assert len(_EVAL_RUN_REQUEST_ID_PREFIX) + 32 <= 64
 assert len(_EVAL_REPLAY_REQUEST_ID_PREFIX) + 32 <= 64
+assert len(_EVAL_ADVERSARIAL_REQUEST_ID_PREFIX) + 32 <= 64
 
 
 class EvalRunStore:
@@ -234,6 +243,57 @@ class EvalRunStore:
                             "output_digest_changed": c.output_digest_changed,
                         }
                         for c in diff.cases
+                    ],
+                },
+            )
+
+        return await self._history.append_with_precondition(
+            record_builder=_build_record, precondition=_precondition
+        )
+
+    async def append_adversarial_event(
+        self,
+        *,
+        verdict: AdversarialVerdict,
+        actor_subject: str,
+        tenant_id: str,
+        request_id: str,
+    ) -> tuple[uuid.UUID, bytes]:
+        """Emit the value-free ``eval.adversarial_run`` chain row (NO relational
+        insert -- the expanded run is already persisted via persist_run). Aggregates
+        + per-case projection only; NO model, NO tier, NO raw prompt/output.
+        """
+
+        async def _precondition(conn: AsyncConnection, _seq: int, _hash: bytes) -> None:
+            return None
+
+        def _build_record(_: None) -> DecisionRecord:
+            return DecisionRecord(
+                decision_type="eval.adversarial_run",
+                request_id=request_id,
+                actor_id=actor_subject,
+                tenant_id=tenant_id,
+                iso_controls=_EVAL_ISO_CONTROLS,
+                payload={
+                    "candidate_run_id": str(verdict.candidate_run_id),
+                    "corpus_id": verdict.corpus_id,
+                    "total": verdict.total,
+                    "passed": verdict.passed,
+                    "failed": verdict.failed,
+                    "errored": verdict.errored,
+                    "overall_pass_rate": verdict.overall_pass_rate,
+                    "per_category_pass_rate": dict(verdict.per_category_pass_rate),
+                    "high_severity_all_pass": verdict.high_severity_all_pass,
+                    "cases": [
+                        {
+                            "base_case_id": c.base_case_id,
+                            "expanded_case_id": c.expanded_case_id,
+                            "attack_category": c.attack_category,
+                            "mutation_strategy": c.mutation_strategy,
+                            "severity": c.severity,
+                            "passed": c.passed,
+                        }
+                        for c in verdict.per_case
                     ],
                 },
             )
