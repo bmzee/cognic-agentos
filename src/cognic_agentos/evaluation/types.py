@@ -14,7 +14,7 @@ from typing import Literal
 
 CandidateOutputOutcome = Literal["succeeded", "errored"]
 CaseOutcome = Literal["succeeded", "errored"]
-ScorerName = Literal["assertions", "judge"]
+ScorerName = Literal["assertions", "judge", "refusal"]
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
