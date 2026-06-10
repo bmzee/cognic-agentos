@@ -107,6 +107,12 @@ Banks running OPA-based ecosystems (Argo, Istio, K8s admission webhooks) already
 
 Sprint 4 absorbs ~0.5 wu for the seed evaluator. Sprint 13.5 work-units total: ~2.5 (combining ADR-014 + ADR-015 + ADR-018 work; all three touch the same decision-point integration).
 
+## Sprint 13.5a amendment (2026-06-10) — `tools.rego` tier→flow decision point landed
+
+Sprint 13.5a lands the first of the "Sprint 13.5 (full)" bundles ahead of the hot-reload + decision-trail work: **`policies/_default/tools.rego`**, the ADR-014 risk-tier→approval-flow classifier. It exposes one **string-returning** decision point, `data.cognic.tools.approval.flow` (`tools.rego:24` `package cognic.tools.approval`), whose closed 3-value enum is `auto_run` / `require_single_approval` / `require_4_eyes` (`tools.rego:46-50`). The 8 ADR-014 risk tiers map to those flows via three disjoint tier sets; the **default is fail-closed `require_4_eyes`** (`tools.rego:44`).
+
+It is consumed by `core/approval/policy.py::ApprovalPolicy.classify` (`policy.py:51`) through the existing **Sprint-4 `OPAEngine`** — but because the seed `OPAEngine` only evaluates boolean decision points, `classify` fetches the string result via a direct subprocess string-fetch that **mirrors `core/scheduler/policy.py::SchedulerPolicy._fetch_refusal_reason`**, including the drift-pinned `_MINIMAL_SUBPROCESS_ENV` parity (`policy.py:32`). Any OPA error OR an out-of-enum value fails closed to `require_4_eyes` (`policy.py:38`). Per the AGENTS.md stop-rule policy-bundle convention, the tier→flow map is **bank-overlay-tightenable**; loosening the kernel defaults requires a coordinated kernel + ADR amendment (same precedent as `sampling.rego` / `supply_chain.rego` / `elicitation.rego` / `sandbox.rego` / `scheduler.rego`). The remaining 13.5 bundles + the hot-reload + decision-trail API remain as scheduled.
+
 ## References
 - ADR-002 (trust gate becomes a Rego query)
 - ADR-004 (sandbox egress becomes a Rego query)
