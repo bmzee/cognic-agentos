@@ -1068,6 +1068,21 @@ def create_app(
         tags=["eval"],
     )
 
+    from cognic_agentos.portal.api.evaluation.adversarial_routes import (
+        build_eval_adversarial_routes,
+    )
+
+    app.include_router(
+        build_eval_adversarial_routes(
+            max_cases=settings.eval_bulk_max_cases,
+            max_raw_output_chars=settings.eval_bulk_max_raw_output_chars,
+            target_tier=settings.eval_bulk_target_tier,
+            judge_tier=settings.eval_judge_tier,
+        ),
+        prefix="/api/v1/eval",
+        tags=["eval"],
+    )
+
     # Sprint-7B.4 T12: UI router mount + .well-known registration.
     # Gated on ``portal_broker is not None`` — pack-only deployments
     # that don't wire the T6 deps OR the ``broker=`` kwarg get NO UI
