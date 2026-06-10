@@ -59,9 +59,16 @@ from datetime import UTC, datetime
 from typing import Annotated, Any, Final, Literal
 
 import pydantic
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from cognic_agentos.core.canonical import canonical_bytes
+from cognic_agentos.core.decision_history import DecisionHistoryStore
+from cognic_agentos.evaluation.adversarial.evidence import (
+    AdversarialEvidenceError,
+    AdversarialEvidenceRefusalReason,
+    build_adversarial_evidence,
+)
+from cognic_agentos.evaluation.storage import EvalRunStore
 from cognic_agentos.packs.conformance.runner import (
     run_owasp_conformance_for_chain_payload,
 )
@@ -87,6 +94,32 @@ from cognic_agentos.portal.rbac.tenant_isolation import (
 )
 
 _LOG = logging.getLogger(__name__)
+
+#: Sprint 13c (ADR-011) — route-owned closed-enum → HTTP status map for the
+#: submit-time adversarial-evidence producer refusals.
+_ADVERSARIAL_EVIDENCE_STATUS: dict[AdversarialEvidenceRefusalReason, int] = {
+    "adversarial_run_not_found": 404,
+    "adversarial_run_not_adversarial": 400,
+    "adversarial_baseline_run_not_found": 404,
+    "adversarial_baseline_run_not_adversarial": 400,
+    "adversarial_baseline_corpus_digest_mismatch": 400,
+}
+
+
+def _resolve_eval_run_store(request: Request) -> EvalRunStore:
+    """Request-time resolution of the eval-run store from ``app.state`` — mirrors
+    the eval-route ``_require_decision_history_store`` precedent (runtime-first,
+    then the bare ``decision_history_store``). Fail-closed 503 when absent so a
+    referenced adversarial run can never be silently skipped (Sprint 13c)."""
+    runtime = getattr(request.app.state, "runtime", None)
+    dh = (
+        runtime.decision_history_store
+        if runtime is not None
+        else getattr(request.app.state, "decision_history_store", None)
+    )
+    if dh is None or not isinstance(dh, DecisionHistoryStore):
+        raise HTTPException(status_code=503, detail={"reason": "decision_history_unavailable"})
+    return EvalRunStore(dh)
 
 
 #: SHA-256 digest width in bytes. Both ``manifest_digest`` and
@@ -613,6 +646,7 @@ def build_author_routes(*, store: PackRecordStore) -> APIRouter:
         summary="Submit a draft for review",
     )
     async def submit_draft(
+        request: Request,
         body: SubmitDraftRequest,
         actor: Annotated[Actor, Depends(_require_pack_submit)],
         record: Annotated[PackRecord, Depends(_require_tenant_ownership)],
@@ -687,6 +721,34 @@ def build_author_routes(*, store: PackRecordStore) -> APIRouter:
         # per BUILD_PLAN §627.
         conformance_payload = run_owasp_conformance_for_chain_payload(body.manifest)
 
+        # Sprint 13c (ADR-011) — reference-based adversarial evidence. Resolve
+        # the eval store from app.state ONLY when a run id is supplied; map the
+        # producer's closed-enum refusal → (status, body); thread the snapshot.
+        payload_adversarial = None
+        if body.adversarial_run_id is not None:
+            eval_run_store = _resolve_eval_run_store(request)
+            try:
+                payload_adversarial = await build_adversarial_evidence(
+                    eval_run_store,
+                    tenant_id=actor.tenant_id,
+                    adversarial_run_id=body.adversarial_run_id,
+                    baseline_adversarial_run_id=body.baseline_adversarial_run_id,
+                )
+            except AdversarialEvidenceError as exc:
+                _LOG.warning(
+                    "portal.packs.submit_refused",
+                    extra={
+                        "reason": exc.reason,
+                        "actor_subject": actor.subject,
+                        "pack_id": str(record.id),
+                        "from_state": record.state,
+                    },
+                )
+                raise HTTPException(
+                    status_code=_ADVERSARIAL_EVIDENCE_STATUS[exc.reason],
+                    detail={"reason": exc.reason},
+                ) from None
+
         # T9 step 3 — thread evidence + race-protection kwargs into
         # ``transition()``.  The locked precondition's manifest-digest
         # cross-check uses ``expected_manifest_digest`` to close the
@@ -707,6 +769,7 @@ def build_author_routes(*, store: PackRecordStore) -> APIRouter:
                 evidence_pointer=None,
                 request_id=_mint_request_id(_PACK_SUBMIT_REQUEST_ID_PREFIX),
                 payload_conformance=conformance_payload,
+                payload_adversarial=payload_adversarial,
                 expected_manifest_digest=record.manifest_digest,
                 payload_manifest=body.manifest,
                 signed_artefact_root=body.signed_artefact_root,
