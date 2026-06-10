@@ -125,6 +125,8 @@ ISO42001_CONTROLS: tuple[ControlEntry, ...] = (
             "compliance_checker.score",
             "eval.bulk_run",  # Sprint 12 (ADR-010) — bulk eval IS a risk-evaluation surface.
             "eval.replay",  # Sprint 13a — replay IS a risk-evaluation surface (ADR-010).
+            # Sprint 13b — adversarial red-team IS a risk-evaluation surface (ADR-011).
+            "eval.adversarial_run",
         ),
         "implemented",
     ),
@@ -153,7 +155,14 @@ ISO42001_CONTROLS: tuple[ControlEntry, ...] = (
         "ISO42001.A.9.2",
         "A.9.2",
         "System and operational logging",
-        ("audit.append", "chain_verifier.walk", "eval.bulk_run", "eval.replay"),
+        (
+            "audit.append",
+            "chain_verifier.walk",
+            "eval.bulk_run",
+            "eval.replay",
+            # Sprint 13b — the eval.adversarial_run chain row IS operational logging (ADR-011).
+            "eval.adversarial_run",
+        ),
         "implemented",
     ),
     ControlEntry(
