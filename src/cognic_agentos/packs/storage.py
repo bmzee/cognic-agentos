@@ -724,6 +724,7 @@ class PackRecordStore:
         request_id: str,
         actor_type: str | None = None,
         payload_conformance: dict[str, Any] | None = None,
+        payload_adversarial: dict[str, Any] | None = None,
         expected_manifest_digest: bytes | None = None,
         evidence_attachments: dict[str, Any] | None = None,
         reviewer_acknowledgement: dict[str, Any] | None = None,
@@ -958,6 +959,12 @@ class PackRecordStore:
             # omitted kwargs MUST NOT add empty keys.
             if payload_conformance is not None:
                 payload["conformance"] = payload_conformance
+            # Sprint 13c (ADR-011) — the adversarial gate-3 snapshot, threaded by
+            # the author submit handler. Same omitted-kwarg-adds-no-key invariant;
+            # storage stays a thin dict passthrough (no shape validation — the
+            # route + its tests own the closed-set snapshot shape).
+            if payload_adversarial is not None:
+                payload["adversarial"] = payload_adversarial
             if evidence_attachments is not None:
                 payload["evidence_attachments"] = evidence_attachments
             # Sprint 7B.3 T2 Slice C — 4 new optional payload keys.
