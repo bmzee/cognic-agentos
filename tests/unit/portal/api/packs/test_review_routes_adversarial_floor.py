@@ -42,7 +42,14 @@ class _StubStore:
 
 def test_pass_rate_floor_parameter_drives_outcome() -> None:
     # pass_rate 0.995: BELOW a 0.999 floor → red; AT/ABOVE the 0.99 kernel floor → green.
-    raw = {"pass_rate": 0.995, "high_severity_failures": 0}
+    raw = {
+        "pass_rate": 0.995,
+        "high_severity_failures": 0,
+        "regressions": 0,
+        "regression_evaluated": False,
+        "candidate_run_id": "run-13c",
+        "baseline_run_id": None,
+    }
 
     strict = _build_adversarial_gate_input(raw, pass_rate_floor=0.999)
     assert strict.outcome == "red"
@@ -99,7 +106,14 @@ async def test_approve_handler_threads_configured_floor_to_gate3(store: PackReco
     thread. A regression dropping the handler's ``pass_rate_floor=`` arg would
     make BOTH green (the helper's default), failing the strict half.
     """
-    pass_rate_995 = {"pass_rate": 0.995, "high_severity_failures": 0}
+    pass_rate_995 = {
+        "pass_rate": 0.995,
+        "high_severity_failures": 0,
+        "regressions": 0,
+        "regression_evaluated": False,
+        "candidate_run_id": "run-13c",
+        "baseline_run_id": None,
+    }
     record_strict = await seed_under_review_pack(store, adversarial=pass_rate_995)
     record_default = await seed_under_review_pack(store, adversarial=pass_rate_995)
 

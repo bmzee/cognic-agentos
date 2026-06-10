@@ -254,6 +254,13 @@ class SubmitDraftRequest(PackBaseModel):
 
     manifest: dict[str, Any]
     signed_artefact_root: str
+    # Sprint 13c (ADR-011) — optional reference to a 13b adversarial eval-run
+    # (and an optional baseline) for the submit-time adversarial-evidence
+    # producer. Omitted → no ``payload["adversarial"]`` → gate-3 reports
+    # ``adversarial_evidence_not_attached``. Inherits ``extra="forbid"``; both
+    # optional so existing callers are unaffected.
+    adversarial_run_id: str | None = None
+    baseline_adversarial_run_id: str | None = None
 
     @pydantic.field_validator("signed_artefact_root")
     @classmethod

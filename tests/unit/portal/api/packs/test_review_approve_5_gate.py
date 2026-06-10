@@ -368,7 +368,14 @@ class TestSprint7B3T9ApproveTerminalAxes:
             signed_artefact_root=str(bundle),
             conformance=_GREEN_CONFORMANCE,
             evaluation={"pass_rate": 1.0, "threshold": 0.9},
-            adversarial={"pass_rate": 1.0, "high_severity_failures": 0},
+            adversarial={
+                "pass_rate": 1.0,
+                "high_severity_failures": 0,
+                "regressions": 0,
+                "regression_evaluated": False,
+                "candidate_run_id": "run-13c",
+                "baseline_run_id": None,
+            },
         )
 
     async def test_evidence_not_attached_gates_block_with_412(
@@ -573,7 +580,14 @@ class TestSprint7B3T9ApproveTransitionRefused:
             signed_artefact_root=str(bundle),
             conformance=_GREEN_CONFORMANCE,
             evaluation={"pass_rate": 1.0, "threshold": 0.9},
-            adversarial={"pass_rate": 1.0, "high_severity_failures": 0},
+            adversarial={
+                "pass_rate": 1.0,
+                "high_severity_failures": 0,
+                "regressions": 0,
+                "regression_evaluated": False,
+                "candidate_run_id": "run-13c",
+                "baseline_run_id": None,
+            },
         )
         app = build_app(
             actor=make_actor(),
@@ -644,17 +658,44 @@ class TestSprint7B3T9GateInputBuilders:
         assert result.red_reason == "adversarial_evidence_not_attached"
 
     def test_adversarial_high_severity_failure_is_red(self) -> None:
-        result = _build_adversarial_gate_input({"pass_rate": 1.0, "high_severity_failures": 2})
+        result = _build_adversarial_gate_input(
+            {
+                "pass_rate": 1.0,
+                "high_severity_failures": 2,
+                "regressions": 0,
+                "regression_evaluated": False,
+                "candidate_run_id": "run-13c",
+                "baseline_run_id": None,
+            }
+        )
         assert result.outcome == "red"
         assert result.red_reason == "adversarial_high_severity_failure"
 
     def test_adversarial_low_pass_rate_is_red(self) -> None:
-        result = _build_adversarial_gate_input({"pass_rate": 0.5, "high_severity_failures": 0})
+        result = _build_adversarial_gate_input(
+            {
+                "pass_rate": 0.5,
+                "high_severity_failures": 0,
+                "regressions": 0,
+                "regression_evaluated": False,
+                "candidate_run_id": "run-13c",
+                "baseline_run_id": None,
+            }
+        )
         assert result.outcome == "red"
         assert result.red_reason == "adversarial_corpus_pass_rate_below_threshold"
 
     def test_adversarial_clean_corpus_is_green(self) -> None:
-        result = _build_adversarial_gate_input({"pass_rate": 1.0, "high_severity_failures": 0})
+        result = _build_adversarial_gate_input(
+            {
+                "pass_rate": 1.0,
+                "high_severity_failures": 0,
+                "regressions": 0,
+                "regression_evaluated": False,
+                "candidate_run_id": "run-13c",
+                "baseline_run_id": None,
+            }
+        )
         assert result.outcome == "green"
 
     def test_owasp_missing_payload_is_evidence_not_attached(self) -> None:

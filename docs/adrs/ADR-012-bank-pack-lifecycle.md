@@ -175,3 +175,7 @@ Sprint 7B work-units: ~3.
 - ADR-011 (adversarial testing — gates approval transition)
 - [OWASP Top 10 for Agentic Applications 2026](https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/)
 - [OWASP Agentic Skills Top 10](https://owasp.org/www-project-agentic-skills-top-10/)
+
+## Sprint 13c reconciliation — §41 gate-3 now live (2026-06-10)
+
+The §41 approval gate (3) — "ADR-011 adversarial corpus pass-rate ≥ 0.99 with 100% on high-severity categories" — is **now live-populated** at submit. Per ADR-011's Sprint-13c amendment, the gate is the existing 5-gate composer `packs/approval_gates.compose_approval_gates` (gate-3 = adversarial); there is **no** standalone `evaluation/promotion_gate.py` (BUILD_PLAN §1101 superseded). Sprint 13c adds a submit-time, reference-based producer that resolves a 13b adversarial eval-run and freezes the `payload["adversarial"]` snapshot on the `pack.lifecycle.submitted` chain row, plus a **zero-new-vs-baseline regression** sub-term (reusing Sprint-13a's `compute_replay_diff`). The pass-rate floor stays the operator-configured `Settings.adversarial_pass_rate_floor` (Human-only threshold change). The reviewer override remains **`pack.override.approval_gate`** (§110) — adversarial is an overridable gate; the BUILD_PLAN §1102 `override.adversarial_gate` shorthand is superseded and **no gate-specific override scope** exists. No new RBAC scope, no Alembic migration, no new Settings.

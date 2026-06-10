@@ -78,9 +78,11 @@ _GATE_TOOL_PATH = _REPO_ROOT / "tools" / "check_critical_coverage.py"
 #: replay orchestration + pass/fail-drift classification) = 122
 #: + 2 Sprint-13b adversarial modules (evaluation/adversarial/{mutator,runner}.py
 #: per ADR-011 — pure deterministic mutation engine + expand/run/verdict/persist/
-#: evidence orchestrator) = 124).
+#: evidence orchestrator) = 124
+#: + 1 Sprint-13c adversarial-evidence producer (evaluation/adversarial/evidence.py
+#: per ADR-011 — submit-time resolve/verify/regression/map) = 125).
 #: Bump this in lockstep with any deliberate ``_CRITICAL_FILES`` change.
-_EXPECTED_ENTRY_COUNT = 124
+_EXPECTED_ENTRY_COUNT = 125
 
 #: The 5 modules Sprint 7B.3 promoted to the durable gate, each by its
 #: own landing commit (T3-T6 panels + T7 composer). All ride the
@@ -769,6 +771,28 @@ def test_sprint_13b_modules_present_with_standard_floors(
     by_path = {path: (line, branch) for path, line, branch in gate_tool._CRITICAL_FILES}
     for module in _SPRINT_13B_GATE_MODULES:
         assert module in by_path, f"Sprint 13b module missing from gate: {module}"
+        assert by_path[module] == (0.95, 0.90), (
+            f"{module} must ride the standard 95%-line / 90%-branch floor"
+        )
+
+
+_SPRINT_13C_GATE_MODULES = ("src/cognic_agentos/evaluation/adversarial/evidence.py",)
+
+
+def test_sprint_13c_modules_present_with_standard_floors(
+    gate_tool: ModuleType,
+) -> None:
+    """The 1 Sprint-13c (ADR-011) promotion is on the gate at the 95/90 floor:
+    ``evaluation/adversarial/evidence.py`` — the submit-time adversarial-evidence
+    producer (resolve candidate/baseline → verify → baseline regression via 13a's
+    ``compute_replay_diff`` → freeze the ``payload["adversarial"]`` snapshot). The
+    storage/approval_gates/review_routes extensions ride their existing gate
+    entries; the route/DTO stay OFF-gate (R32). This pins the EXACT module set so a
+    future edit that drops it while holding the count at 125 by swapping in an
+    unrelated path fails HERE."""
+    by_path = {path: (line, branch) for path, line, branch in gate_tool._CRITICAL_FILES}
+    for module in _SPRINT_13C_GATE_MODULES:
+        assert module in by_path, f"Sprint 13c module missing from gate: {module}"
         assert by_path[module] == (0.95, 0.90), (
             f"{module} must ride the standard 95%-line / 90%-branch floor"
         )

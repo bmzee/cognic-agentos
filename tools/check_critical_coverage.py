@@ -2115,6 +2115,12 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     # extensions ride their existing gate entries; types/route/DTO/CLI off-gate (R32).
     ("src/cognic_agentos/evaluation/adversarial/mutator.py", 0.95, 0.90),
     ("src/cognic_agentos/evaluation/adversarial/runner.py", 0.95, 0.90),
+    # Sprint 13c (ADR-011) adversarial promotion gate — the submit-time evidence
+    # producer (resolve candidate/baseline → verify → baseline regression via 13a's
+    # compute_replay_diff → map the payload["adversarial"] snapshot). storage/
+    # approval_gates/review_routes extensions ride their existing gate entries;
+    # route/DTO off-gate (R32).
+    ("src/cognic_agentos/evaluation/adversarial/evidence.py", 0.95, 0.90),
 )
 
 

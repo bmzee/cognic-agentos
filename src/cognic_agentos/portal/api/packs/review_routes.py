@@ -62,6 +62,7 @@ from cognic_agentos.packs._lifecycle_helpers import find_latest_submit_row
 from cognic_agentos.packs._signature_path_resolver import resolve_signature_paths
 from cognic_agentos.packs.approval_gates import (
     AdversarialGateInput,
+    AdversarialRedReason,
     EvaluationGateInput,
     OwaspGateInput,
     SignatureGateInput,
@@ -223,18 +224,20 @@ def _build_adversarial_gate_input(
 ) -> AdversarialGateInput:
     """Build the gate-3 (adversarial) input from ``payload["adversarial"]``.
 
-    Per plan §513: same evidence-not-attached default as evaluation. A
-    present payload (``{pass_rate, high_severity_failures}``) reads:
-    any high-severity failure → ``red``; else ``pass_rate`` below
-    ``pass_rate_floor`` (the operator-configured ADR-011 floor; defaults to the
-    kernel floor ``_ADVERSARIAL_PASS_RATE_THRESHOLD``; Wave-1 T6) → ``red``;
-    else ``green``.
+    Fail-closed: a non-dict / shape-invalid / SELF-INCONSISTENT snapshot →
+    ``evidence_not_attached`` (malformed evidence never greenlights a gate).
+    Precedence (Sprint 13c, locked): ``high_severity_failures > 0`` →
+    ``regression_evaluated and regressions > 0`` → ``pass_rate < floor`` → green.
+    ``candidate_run_id`` is threaded regardless of outcome (gate evidence_pointer).
 
-    **Fail-closed (reviewer P2):** ``pass_rate`` must be a finite real
-    number in ``[0.0, 1.0]`` (see :func:`_is_valid_rate`) and
-    ``high_severity_failures`` must be a NON-NEGATIVE ``int`` — ``nan``
-    / ``inf`` / out-of-range pass rates and negative counts route to
-    ``evidence_not_attached``, NEVER ``green``.
+    **Consistency gate (reviewer P1):** the regression sub-fields MUST agree —
+    ``regression_evaluated=True`` requires a string ``baseline_run_id``;
+    ``regression_evaluated=False`` requires ``regressions == 0`` AND a null
+    ``baseline_run_id``. A present-but-contradictory snapshot (e.g.
+    ``regression_evaluated=False`` with ``regressions=5``) is malformed → fail
+    closed, NOT green. ``candidate_run_id`` must itself be a string when the
+    snapshot is a dict — a missing / non-string pointer fails closed (it IS the
+    gate evidence pointer; the producer always emits ``str(cand_uuid)``).
     """
     if not isinstance(raw, dict):
         return AdversarialGateInput(
@@ -242,40 +245,85 @@ def _build_adversarial_gate_input(
             red_reason="adversarial_evidence_not_attached",
             pass_rate=None,
             high_severity_failures=0,
+            regressions=0,
+            regression_evaluated=False,
+            candidate_run_id=None,
         )
     pass_rate = raw.get("pass_rate")
     high_severity_failures = raw.get("high_severity_failures")
+    regressions = raw.get("regressions")
+    regression_evaluated = raw.get("regression_evaluated")
+    candidate_run_id_raw = raw.get("candidate_run_id")
+    baseline_run_id_raw = raw.get("baseline_run_id")
+    candidate_run_id = candidate_run_id_raw if isinstance(candidate_run_id_raw, str) else None
+
+    # Shape gate — inlined as a single ``if (...): return`` so mypy NARROWS the
+    # typed locals on fall-through (pass_rate→float via the _is_valid_rate
+    # TypeGuard; high_severity_failures/regressions→int; regression_evaluated→
+    # bool; candidate_run_id→str). A bool ``shape_ok`` variable would NOT narrow,
+    # forcing ``Any | None`` casts at the constructors.
     if (
         not _is_valid_rate(pass_rate)
         or not isinstance(high_severity_failures, int)
         or isinstance(high_severity_failures, bool)
         or high_severity_failures < 0
+        or not isinstance(regressions, int)
+        or isinstance(regressions, bool)
+        or regressions < 0
+        or not isinstance(regression_evaluated, bool)
+        or not isinstance(candidate_run_id, str)
     ):
         return AdversarialGateInput(
             outcome="evidence_not_attached",
             red_reason="adversarial_evidence_not_attached",
             pass_rate=None,
             high_severity_failures=0,
+            regressions=0,
+            regression_evaluated=False,
+            candidate_run_id=candidate_run_id,
         )
+    # Cross-field consistency (over the now-narrowed types) — mirrors exactly
+    # what the producer emits (no baseline → False/0/None; baseline → True/str).
+    # A present-but-contradictory snapshot is malformed evidence → fail closed.
+    consistent = (regression_evaluated and isinstance(baseline_run_id_raw, str)) or (
+        not regression_evaluated and regressions == 0 and baseline_run_id_raw is None
+    )
+    if not consistent:
+        return AdversarialGateInput(
+            outcome="evidence_not_attached",
+            red_reason="adversarial_evidence_not_attached",
+            pass_rate=None,
+            high_severity_failures=0,
+            regressions=0,
+            regression_evaluated=False,
+            candidate_run_id=candidate_run_id,
+        )
+
+    # Locked precedence: high-severity → regression → pass-rate → green.
     if high_severity_failures > 0:
+        red_reason: AdversarialRedReason = "adversarial_high_severity_failure"
+    elif regression_evaluated and regressions > 0:
+        red_reason = "adversarial_baseline_regression"
+    elif pass_rate < pass_rate_floor:
+        red_reason = "adversarial_corpus_pass_rate_below_threshold"
+    else:
         return AdversarialGateInput(
-            outcome="red",
-            red_reason="adversarial_high_severity_failure",
+            outcome="green",
+            red_reason=None,
             pass_rate=float(pass_rate),
             high_severity_failures=high_severity_failures,
-        )
-    if pass_rate < pass_rate_floor:
-        return AdversarialGateInput(
-            outcome="red",
-            red_reason="adversarial_corpus_pass_rate_below_threshold",
-            pass_rate=float(pass_rate),
-            high_severity_failures=high_severity_failures,
+            regressions=regressions,
+            regression_evaluated=regression_evaluated,
+            candidate_run_id=candidate_run_id,
         )
     return AdversarialGateInput(
-        outcome="green",
-        red_reason=None,
+        outcome="red",
+        red_reason=red_reason,
         pass_rate=float(pass_rate),
         high_severity_failures=high_severity_failures,
+        regressions=regressions,
+        regression_evaluated=regression_evaluated,
+        candidate_run_id=candidate_run_id,
     )
 
 
