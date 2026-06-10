@@ -249,6 +249,37 @@ EVAL_SCOPES: frozenset[EvalRBACScope] = frozenset(
 )
 
 
+#: ADR-014 Sprint-13.5a — runtime tool-approval RBAC family. The 6 grant scopes
+#: map 1:1 to the high-risk tiers (the approval engine enforces scope-per-tier);
+#: ``tool.approve.observe`` is read-only approval-queue access (examiner) and
+#: grants nothing. Value-disjoint from every other family by the
+#: ``tool.approve.*`` namespace. Grant actions are ALSO Human-only — enforced at
+#: the CORE approval engine AND the 13.5b portal seam (a service-token actor is
+#: refused even holding the scope).
+ToolApprovalRBACScope = Literal[
+    "tool.approve.customer_data",
+    "tool.approve.customer_data_write",
+    "tool.approve.payment",
+    "tool.approve.regulator",
+    "tool.approve.cross_tenant",
+    "tool.approve.high_risk_custom",
+    "tool.approve.observe",
+]
+
+#: All 7 tool-approval scopes as a frozenset (1:1 with ToolApprovalRBACScope).
+TOOL_APPROVAL_SCOPES: frozenset[ToolApprovalRBACScope] = frozenset(
+    {
+        "tool.approve.customer_data",
+        "tool.approve.customer_data_write",
+        "tool.approve.payment",
+        "tool.approve.regulator",
+        "tool.approve.cross_tenant",
+        "tool.approve.high_risk_custom",
+        "tool.approve.observe",
+    }
+)
+
+
 #: ADR-023 (Wave-2) — per-tenant config-overlay RBAC family. Two values in the
 #: ``config.tenant_overlay.*`` namespace, consumed by the operator-administered
 #: overlay endpoints (`portal/api/config_overlay/routes.py`):
