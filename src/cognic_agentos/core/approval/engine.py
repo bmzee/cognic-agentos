@@ -21,14 +21,17 @@ from typing import Any, Final, cast
 
 from cognic_agentos.core.approval._types import (
     _DIGEST_LEN,
+    _REASON_MANDATING_TIERS,
     _RISK_TIERS,
     APPROVAL_REDACTED_CONTEXT_MAX_LEN,
+    ApprovalActor,
     ApprovalCheckResult,
     ApprovalEnvelope,
     ApprovalEnvelopeInvalid,
     ApprovalFlow,
     ApprovalRequest,
     ApprovalRequestNotFound,
+    ApprovalState,
     ApprovalTransitionRefused,
 )
 from cognic_agentos.core.approval.storage import ApprovalRequestStore
@@ -57,6 +60,17 @@ _DATA_CLASSES: Final[frozenset[str]] = frozenset(
 _FLOW_TO_TTL_SETTING: Final[dict[str, str]] = {
     "require_single_approval": "approval_single_ttl_s",
     "require_4_eyes": "approval_four_eyes_ttl_s",
+}
+
+#: Tier -> the single RBAC scope that may grant it (spec §6). ``tool.approve.observe``
+#: is read-only (examiner) and grants nothing — it appears in no value here.
+_TIER_GRANT_SCOPE: Final[dict[str, str]] = {
+    "customer_data_read": "tool.approve.customer_data",
+    "customer_data_write": "tool.approve.customer_data_write",
+    "payment_action": "tool.approve.payment",
+    "regulator_communication": "tool.approve.regulator",
+    "cross_tenant": "tool.approve.cross_tenant",
+    "high_risk_custom": "tool.approve.high_risk_custom",
 }
 
 _APPROVAL_REQUEST_ID_PREFIX: Final[str] = "appr-"  # 5 + 32 hex = 37 <= 64
@@ -153,7 +167,114 @@ class ApprovalEngine:
             raise ApprovalTransitionRefused("approval_binding_mismatch")
         return res
 
+    async def grant(
+        self,
+        *,
+        request_id: uuid.UUID,
+        tenant_id: str,
+        approver: ApprovalActor,
+        reason: str | None = None,
+    ) -> ApprovalState:
+        """First grant. ``require_single_approval`` -> granted; ``require_4_eyes``
+        -> awaiting_second (NOT executable until ``grant_second``)."""
+        return await self._do_decision(
+            request_id=request_id,
+            tenant_id=tenant_id,
+            approver=approver,
+            action="grant_first",
+            reason=reason,
+        )
+
+    async def grant_second(
+        self,
+        *,
+        request_id: uuid.UUID,
+        tenant_id: str,
+        approver: ApprovalActor,
+        reason: str | None = None,
+    ) -> ApprovalState:
+        """Second 4-eyes grant -> granted. Requires ``awaiting_second`` + a
+        distinct approver (!= first approver, != originator)."""
+        return await self._do_decision(
+            request_id=request_id,
+            tenant_id=tenant_id,
+            approver=approver,
+            action="grant_second",
+            reason=reason,
+        )
+
+    async def deny(
+        self,
+        *,
+        request_id: uuid.UUID,
+        tenant_id: str,
+        approver: ApprovalActor,
+        reason: str,
+    ) -> ApprovalState:
+        """Refuse the request -> denied."""
+        return await self._do_decision(
+            request_id=request_id,
+            tenant_id=tenant_id,
+            approver=approver,
+            action="deny",
+            reason=reason,
+        )
+
     # ---- helpers ------------------------------------------------------------
+
+    async def _do_decision(
+        self,
+        *,
+        request_id: uuid.UUID,
+        tenant_id: str,
+        approver: ApprovalActor,
+        action: str,
+        reason: str | None,
+    ) -> ApprovalState:
+        # 0. Human-only guard FIRST (AGENTS.md core-boundary; T-4). Enforced in the
+        #    engine, NOT only the 13.5b portal RequireHumanActor (defense-in-depth).
+        if approver.actor_type != "human":
+            raise ApprovalTransitionRefused("approver_not_human")
+        # 0b. Tenant binding (P1): the approver MUST belong to the target tenant —
+        #     a cross-tenant approver holds NO grant authority here, even with the
+        #     tier scope. Enforced in the CORE engine, not only the 13.5b portal
+        #     seam. Fires BEFORE any DB work (no lazy-expire on another tenant's
+        #     request). Reuses approver_scope_not_held (no new wire reason): the
+        #     actor does not hold that grant authority in this tenant.
+        if approver.tenant_id != tenant_id:
+            raise ApprovalTransitionRefused("approver_scope_not_held")
+        # 1. Lazy-expire (a post-TTL decision refuses, never resurrects).
+        res = await self._lazy_expire_and_project(request_id=request_id, tenant_id=tenant_id)
+        if res.state == "expired":
+            raise ApprovalTransitionRefused("approval_expired")
+        # 2. RBAC scope-per-tier (grant / grant_second / deny all require the tier
+        #    scope; observe never grants — it appears in no _TIER_GRANT_SCOPE value).
+        required_scope = _TIER_GRANT_SCOPE.get(res.risk_tier)
+        if required_scope is not None and required_scope not in approver.scopes:
+            raise ApprovalTransitionRefused("approver_scope_not_held")
+        # 3. Reason policy (grant/grant_second on a reason-mandating tier need a
+        #    reason; deny's reason is required at the signature).
+        if (
+            action in ("grant_first", "grant_second")
+            and res.risk_tier in _REASON_MANDATING_TIERS
+            and not reason
+        ):
+            raise ApprovalTransitionRefused("grant_reason_required")
+        # 4. 4-eyes distinctness (grant_second only): second != first != originator.
+        if action == "grant_second":
+            first = await self._store.first_approver(request_id=request_id, tenant_id=tenant_id)
+            if approver.subject in (first, res.originator_subject):
+                raise ApprovalTransitionRefused("four_eyes_approver_not_distinct")
+        # 5. Atomic transition (validate_transition against the row-locked flow; no
+        #    caller-supplied flow per the T4 P1 fix).
+        return await self._store.transition(
+            request_id=request_id,
+            tenant_id=tenant_id,
+            action=action,
+            actor_subject=approver.subject,
+            reason=reason,
+            request_request_id=_mint_request_id(),
+        )
 
     def _validate_envelope(self, e: ApprovalEnvelope) -> None:
         if e.risk_tier not in _RISK_TIERS:
