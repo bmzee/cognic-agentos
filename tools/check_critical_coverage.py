@@ -2121,6 +2121,19 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     # approval_gates/review_routes extensions ride their existing gate entries;
     # route/DTO off-gate (R32).
     ("src/cognic_agentos/evaluation/adversarial/evidence.py", 0.95, 0.90),
+    # Sprint 13.5a (ADR-014/015) runtime approval engine core — the non-blocking
+    # human-checkpoint primitive. engine.py: classify / create_request / check /
+    # verify_grant_for_action (replay-binding gate) / grant / grant_second / deny;
+    # engine-boundary human-only guard + RBAC scope-per-tier + 4-eyes distinctness
+    # + lazy authoritative expiry. storage.py: decision-history-backed
+    # approval_requests + the 5 value-free approval.* chain events via
+    # append_with_precondition (Doctrine Lock D). policy.py: tools.rego tier->flow
+    # classifier over the existing OPAEngine (fail-closed require_4_eyes). _types.py
+    # stays OFF-gate (pure closed-enum + frozen-dataclass + validate_transition;
+    # drift pinned by tests/unit/core/approval/test_types.py count guards).
+    ("src/cognic_agentos/core/approval/engine.py", 0.95, 0.90),
+    ("src/cognic_agentos/core/approval/storage.py", 0.95, 0.90),
+    ("src/cognic_agentos/core/approval/policy.py", 0.95, 0.90),
 )
 
 
