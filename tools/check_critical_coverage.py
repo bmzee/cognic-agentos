@@ -2110,6 +2110,11 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     # Sprint 13a (ADR-010) live replay — eval-run replay orchestration + diff;
     # the pass/fail-drift classification + the persist/diff/chain flow. route/DTO off-gate (R32).
     ("src/cognic_agentos/evaluation/replay.py", 0.95, 0.90),
+    # Sprint 13b (ADR-011) adversarial testing — pure deterministic mutation engine +
+    # the expand/run/verdict/persist/evidence orchestrator. corpus/scorers/runner/storage
+    # extensions ride their existing gate entries; types/route/DTO/CLI off-gate (R32).
+    ("src/cognic_agentos/evaluation/adversarial/mutator.py", 0.95, 0.90),
+    ("src/cognic_agentos/evaluation/adversarial/runner.py", 0.95, 0.90),
 )
 
 

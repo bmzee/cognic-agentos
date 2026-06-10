@@ -1,4 +1,4 @@
-# tests/unit/portal/rbac/test_eval_replay_scope.py
+# tests/unit/portal/rbac/test_eval_adversarial_scope.py
 from __future__ import annotations
 
 import typing
@@ -6,8 +6,7 @@ import typing
 from cognic_agentos.portal.rbac.scopes import EVAL_SCOPES, EvalRBACScope
 
 
-def test_eval_scopes_include_replay_run() -> None:
-    # Sprint 13b added eval.adversarial.run (4 → 5); the exact-set pin advances with it.
+def test_eval_scopes_include_adversarial_run() -> None:
     expected = {
         "eval.judge.run",
         "eval.bulk.run",

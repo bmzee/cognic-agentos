@@ -1052,6 +1052,60 @@ def eval_replay(
     )
 
 
+@app.command(name="eval-adversarial")
+def eval_adversarial(
+    corpus: Path = typer.Option(  # noqa: B008
+        ..., "--corpus", help="Directory of adversarial corpus YAML docs."
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Validate corpus shape only; no portal/model call."
+    ),
+    url: str | None = typer.Option(None, "--url", help="Portal base URL."),
+    token: str | None = typer.Option(None, "--token", help="Bearer token."),
+    json_output: bool = typer.Option(False, "--json", help="Emit JSON."),
+) -> None:
+    """Run an adversarial corpus against the current target config; refusal verdict.
+
+    Exits 0 on success / dry-run valid; 1 on corpus invalid; 2 on missing URL/token
+    or portal error.
+    """
+    import json as _json
+
+    from cognic_agentos.cli.eval import adversarial_dry_run_summary, post_adversarial, render
+    from cognic_agentos.evaluation.corpus import CorpusLoadError
+
+    if dry_run:
+        try:
+            summary = adversarial_dry_run_summary(corpus)
+        except CorpusLoadError as exc:
+            typer.echo(f"eval-adversarial: corpus invalid: {exc.reason}", err=True)
+            raise typer.Exit(code=1) from None
+        except ValueError as exc:  # non-adversarial case present (mirrors route preflight)
+            typer.echo(f"eval-adversarial: corpus invalid: {exc}", err=True)
+            raise typer.Exit(code=1) from None
+        typer.echo(render(summary, json_output=json_output))
+        return
+    if not url or not token:
+        typer.echo("eval-adversarial: --url and --token are required without --dry-run", err=True)
+        raise typer.Exit(code=2)
+    try:
+        body = post_adversarial(corpus, url=url, token=token)
+    except CorpusLoadError as exc:
+        typer.echo(f"eval-adversarial: corpus invalid: {exc.reason}", err=True)
+        raise typer.Exit(code=1) from None
+    except Exception as exc:  # network / portal error
+        typer.echo(f"eval-adversarial: portal call failed: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+    typer.echo(
+        _json.dumps(body, indent=2, sort_keys=True)
+        if json_output
+        else (
+            f"adversarial: pass_rate={body.get('overall_pass_rate')} "
+            f"high_severity_all_pass={body.get('high_severity_all_pass')}"
+        )
+    )
+
+
 __all__ = [
     "_VALIDATOR_REASON_OWNERSHIP",
     "_WARNING_REASONS",

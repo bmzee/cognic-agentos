@@ -27,6 +27,10 @@ CorpusLoadReason = Literal[
     "corpus_case_no_scorer",
     "corpus_case_kind_unsupported",
     "corpus_case_messages_invalid",
+    "corpus_adversarial_block_missing",
+    "corpus_adversarial_block_forbidden",
+    "corpus_adversarial_category_not_runnable",
+    "corpus_adversarial_forbidden_markers_empty",
 ]
 
 
@@ -72,18 +76,74 @@ class JudgeBlock(BaseModel):
     criteria: list[JudgeCriterionSpec] = Field(min_length=1, max_length=20)
 
 
+# --- ADR-011 Sprint-13b adversarial vocabulary -------------------------------
+
+AttackCategory = Literal[
+    "direct_prompt_injection",
+    "jailbreak_persona_shift",
+    "authority_misrepresentation",
+    "indirect_prompt_injection",
+    "multi_turn_social_engineering",
+    "pii_extraction",
+    "citation_poisoning",
+    "tool_call_hijacking",
+    "subagent_privilege_escalation",
+    "cost_dos",
+]
+
+MutationStrategy = Literal["none", "unicode_confusables", "encoding", "paraphrase"]
+
+#: The 3 categories runnable against a single-shot governed completion (the only
+#: OS-only SUT). The other 7 are deferred with explicit reasons — examiner-visible
+#: but never loadable into a corpus (they cannot reach the runner).
+_RUNNABLE_CATEGORIES: frozenset[AttackCategory] = frozenset(
+    {"direct_prompt_injection", "jailbreak_persona_shift", "authority_misrepresentation"}
+)
+
+_DEFERRED_CATEGORIES: dict[AttackCategory, str] = {
+    "indirect_prompt_injection": "no_retrieval_target",
+    "multi_turn_social_engineering": "no_multi_turn_target",
+    "pii_extraction": "no_memory_context_target",
+    "citation_poisoning": "no_citation_target",
+    "tool_call_hijacking": "no_mcp_tool_target",
+    "subagent_privilege_escalation": "no_subagent_target",
+    "cost_dos": "cost_semantics_deferred",
+}
+
+
+class AdversarialBlock(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    attack_category: AttackCategory
+    forbidden_markers: list[str] = Field(min_length=1)
+    severity: Literal["standard", "high"]
+    mutation_strategies: list[MutationStrategy] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _category_runnable(self) -> AdversarialBlock:
+        if self.attack_category not in _RUNNABLE_CATEGORIES:
+            raise ValueError(f"attack_category {self.attack_category} is deferred / not runnable")
+        return self
+
+
 class EvalCase(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     id: str = Field(min_length=1, max_length=200)
-    case_kind: Literal["completion"]
+    case_kind: Literal["completion", "adversarial"]
     messages: list[_Message] = Field(min_length=1)
     assertions: AssertionsBlock | None = None
     judge: JudgeBlock | None = None
+    adversarial: AdversarialBlock | None = None
 
     @model_validator(mode="after")
-    def _declares_a_scorer(self) -> EvalCase:
-        if self.assertions is None and self.judge is None:
-            raise ValueError("case declares neither assertions nor judge")
+    def _case_kind_block_consistency(self) -> EvalCase:
+        if self.case_kind == "adversarial":
+            if self.adversarial is None:
+                raise ValueError("adversarial case declares no adversarial block")
+        else:  # completion
+            if self.adversarial is not None:
+                raise ValueError("completion case must not declare an adversarial block")
+            if self.assertions is None and self.judge is None:
+                raise ValueError("case declares neither assertions nor judge")
         return self
 
 
@@ -104,9 +164,17 @@ def _reason_for_validation_error(exc: ValidationError) -> CorpusLoadReason:
             return "corpus_unknown_key"
         if "case_kind" in loc:
             return "corpus_case_kind_unsupported"
+        if "forbidden_markers" in loc:
+            return "corpus_adversarial_forbidden_markers_empty"
         if "messages" in loc:
             return "corpus_case_messages_invalid"
         msg = str(err.get("msg", ""))
+        if "no adversarial block" in msg:
+            return "corpus_adversarial_block_missing"
+        if "must not declare an adversarial block" in msg:
+            return "corpus_adversarial_block_forbidden"
+        if "deferred / not runnable" in msg:
+            return "corpus_adversarial_category_not_runnable"
         if "neither assertions nor judge" in msg:
             return "corpus_case_no_scorer"
     return "corpus_case_messages_invalid"

@@ -75,9 +75,12 @@ _GATE_TOOL_PATH = _REPO_ROOT / "tools" / "check_critical_coverage.py"
 #: per ADR-010 amendment — corpus contract / evaluator pass-fail / run
 #: orchestration / atomic evidence storage) = 121
 #: + 1 Sprint-13a replay module (evaluation/replay.py per ADR-010 — eval-run
-#: replay orchestration + pass/fail-drift classification) = 122).
+#: replay orchestration + pass/fail-drift classification) = 122
+#: + 2 Sprint-13b adversarial modules (evaluation/adversarial/{mutator,runner}.py
+#: per ADR-011 — pure deterministic mutation engine + expand/run/verdict/persist/
+#: evidence orchestrator) = 124).
 #: Bump this in lockstep with any deliberate ``_CRITICAL_FILES`` change.
-_EXPECTED_ENTRY_COUNT = 122
+_EXPECTED_ENTRY_COUNT = 124
 
 #: The 5 modules Sprint 7B.3 promoted to the durable gate, each by its
 #: own landing commit (T3-T6 panels + T7 composer). All ride the
@@ -742,6 +745,30 @@ def test_sprint_13a_modules_present_with_standard_floors(
     by_path = {path: (line, branch) for path, line, branch in gate_tool._CRITICAL_FILES}
     for module in _SPRINT_13A_GATE_MODULES:
         assert module in by_path, f"Sprint 13a module missing from gate: {module}"
+        assert by_path[module] == (0.95, 0.90), (
+            f"{module} must ride the standard 95%-line / 90%-branch floor"
+        )
+
+
+_SPRINT_13B_GATE_MODULES = (
+    "src/cognic_agentos/evaluation/adversarial/mutator.py",
+    "src/cognic_agentos/evaluation/adversarial/runner.py",
+)
+
+
+def test_sprint_13b_modules_present_with_standard_floors(
+    gate_tool: ModuleType,
+) -> None:
+    """The 2 Sprint-13b (ADR-011) adversarial-testing promotions are on the gate at
+    the 95/90 floor: ``evaluation/adversarial/mutator.py`` (pure deterministic
+    mutation engine + run-time expansion) and ``evaluation/adversarial/runner.py``
+    (expand/run/verdict/persist/evidence orchestrator). corpus/scorers/runner/storage
+    extensions ride their existing gate entries; types/route/DTO/CLI stay OFF-gate
+    (R32). This pins the EXACT module set so a future edit that drops one while
+    holding the count at 124 by swapping in an unrelated path fails HERE."""
+    by_path = {path: (line, branch) for path, line, branch in gate_tool._CRITICAL_FILES}
+    for module in _SPRINT_13B_GATE_MODULES:
+        assert module in by_path, f"Sprint 13b module missing from gate: {module}"
         assert by_path[module] == (0.95, 0.90), (
             f"{module} must ride the standard 95%-line / 90%-branch floor"
         )

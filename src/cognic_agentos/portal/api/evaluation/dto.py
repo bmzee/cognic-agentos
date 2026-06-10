@@ -144,3 +144,36 @@ class ReplayDiffResponse(BaseModel):
     errored: int
     has_regressions: bool
     cases: list[ReplayCaseDiffResponse]
+
+
+# --- ADR-011 Sprint-13b: adversarial-run DTOs (Task 11) ------------------------
+
+
+class AdversarialRunRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    corpus: dict[str, Any]
+    persist_raw_output: StrictBool = False
+
+
+class AdversarialCaseResultResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    base_case_id: str
+    expanded_case_id: str
+    attack_category: str
+    mutation_strategy: str
+    severity: str
+    passed: bool
+
+
+class AdversarialVerdictResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    candidate_run_id: str
+    corpus_id: str
+    total: int
+    passed: int
+    failed: int
+    errored: int
+    overall_pass_rate: float
+    per_category_pass_rate: dict[str, float]
+    high_severity_all_pass: bool
+    cases: list[AdversarialCaseResultResponse]

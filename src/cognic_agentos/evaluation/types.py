@@ -14,7 +14,7 @@ from typing import Literal
 
 CandidateOutputOutcome = Literal["succeeded", "errored"]
 CaseOutcome = Literal["succeeded", "errored"]
-ScorerName = Literal["assertions", "judge"]
+ScorerName = Literal["assertions", "judge", "refusal"]
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -78,3 +78,31 @@ class EvalRunResult:
     latency_p50_ms: int
     latency_p95_ms: int
     cases: tuple[CaseResult, ...]
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class AdversarialCaseResult:
+    base_case_id: str
+    expanded_case_id: str
+    attack_category: str
+    mutation_strategy: str
+    severity: str
+    passed: bool
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class AdversarialVerdict:
+    """ADR-011 Sprint-13b single-run verdict -- the 13c promotion-gate handoff
+    object (13c composes baseline regression + thresholds; NOT wired here).
+    Pass-rate denominators are RUNNABLE EXPANDED cases only."""
+
+    candidate_run_id: uuid.UUID
+    corpus_id: str
+    total: int
+    passed: int
+    failed: int
+    errored: int
+    overall_pass_rate: float
+    per_category_pass_rate: dict[str, float]
+    high_severity_all_pass: bool
+    per_case: tuple[AdversarialCaseResult, ...]
