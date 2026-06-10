@@ -389,7 +389,10 @@ class ApprovalRequestStore:
             first_approver=row.first_approver,
             second_approver=row.second_approver,
             denier=row.denier,
-            expires_at=row.expires_at,
+            # tz-normalise: SQLite returns naive datetimes for TIMESTAMP(tz)
+            # (PG/Oracle return aware); expires_at was written UTC-aware, so a
+            # naive read is re-stamped UTC. Branchless so both arms are covered.
+            expires_at=row.expires_at.replace(tzinfo=row.expires_at.tzinfo or UTC),
         )
 
     async def first_approver(self, *, request_id: uuid.UUID, tenant_id: str) -> str | None:

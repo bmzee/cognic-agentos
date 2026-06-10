@@ -35,7 +35,7 @@ def test_approval_flow_closed_set() -> None:
 
 
 def test_envelope_invalid_reason_count() -> None:
-    assert len(typing.get_args(ApprovalEnvelopeInvalidReason)) == 7
+    assert len(typing.get_args(ApprovalEnvelopeInvalidReason)) == 8
 
 
 def test_transition_refused_reason_count() -> None:

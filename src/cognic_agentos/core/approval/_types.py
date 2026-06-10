@@ -25,6 +25,7 @@ ApprovalEnvelopeInvalidReason = Literal[
     "data_class_unknown",
     "tool_identity_missing",
     "originator_subject_missing",
+    "tenant_id_missing",
     "regulator_audit_ref_missing",
     "redacted_context_too_large",
     "args_digest_malformed",
