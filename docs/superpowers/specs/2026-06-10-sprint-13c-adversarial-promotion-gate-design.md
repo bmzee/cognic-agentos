@@ -149,7 +149,7 @@ Fail-closed validation extends: `regressions` must be a non-negative `int` (not 
   - `evaluation/storage.py` — new `load_adversarial_verdict(run_id, *, tenant_id)` read of the `eval.adversarial_run` row.
   - `packs/storage.py` — new optional keyword-only `payload_adversarial` kwarg on `transition()` (mirrors `payload_conformance`; additive — omitted adds no key).
   - `packs/approval_gates.py` — `AdversarialGateInput` 3 new fields + 4th `AdversarialRedReason` + the `evidence_pointer` line.
-- **Off-gate:** `portal/api/packs/author_routes.py` (`SubmitDraftRequest` two optional fields + the submit-handler producer call + the 4 route refusals), `portal/api/packs/review_routes.py` (`_build_adversarial_gate_input` regression branch + validation).
+- **Off-gate:** `portal/api/packs/author_routes.py` (`SubmitDraftRequest` two optional fields + the submit-handler producer call + the 5 route refusals), `portal/api/packs/review_routes.py` (`_build_adversarial_gate_input` regression branch + validation).
 - **RBAC:** none new (BC-2).
 - **No Alembic migration, no new Settings** (reuses `adversarial_pass_rate_floor`; the snapshot is additive payload).
 - **ADR work:** an ADR-011 + ADR-012 reconciliation amendment recording: the 5-gate composer IS the promotion gate (no `evaluation/promotion_gate.py`); `override.adversarial_gate` superseded by `pack.override.approval_gate`; model-promotion gate out of scope; the new `payload["adversarial"]` snapshot shape + the regression term.
