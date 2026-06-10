@@ -192,8 +192,11 @@ AdversarialRedReason = Literal[
     "adversarial_corpus_pass_rate_below_threshold",
     "adversarial_high_severity_failure",
     "adversarial_evidence_not_attached",
+    # Sprint 13c (ADR-011) — a baseline-refused attack now succeeds.
+    "adversarial_baseline_regression",
 ]
-"""Closed-enum 3-value gate-3 (adversarial) red-reason vocabulary."""
+"""Closed-enum 4-value gate-3 (adversarial) red-reason vocabulary
+(Sprint 13c added ``adversarial_baseline_regression``)."""
 
 
 OwaspRedReason = Literal[
@@ -310,13 +313,23 @@ class EvaluationGateInput:
 @dataclasses.dataclass(frozen=True)
 class AdversarialGateInput:
     """Pre-computed gate-3 (adversarial) input. The route handler sets
-    ``outcome="red"`` when ``pass_rate < 0.99`` OR
-    ``high_severity_failures > 0``."""
+    ``outcome="red"`` when ``high_severity_failures > 0`` OR (Sprint 13c)
+    ``regression_evaluated and regressions > 0`` OR ``pass_rate < floor``.
+    ``candidate_run_id`` is threaded to the gate ``evidence_pointer``.
+
+    The three Sprint-13c fields carry defaults so every pre-13c construction
+    (the override-event / DTO-refusal tests + the pre-T6 reader) stays valid;
+    the default ``candidate_run_id=None`` reproduces the pre-13c
+    ``evidence_pointer=None`` behaviour exactly. The T6 reader passes all three
+    explicitly (pinned by its tests)."""
 
     outcome: ApprovalGateOutcome
     red_reason: AdversarialRedReason | None
     pass_rate: float | None
     high_severity_failures: int
+    regressions: int = 0  # Sprint 13c — baseline-regression count
+    regression_evaluated: bool = False  # Sprint 13c — False when no baseline supplied
+    candidate_run_id: str | None = None  # Sprint 13c — the gate evidence_pointer
 
 
 @dataclasses.dataclass(frozen=True)
@@ -460,7 +473,9 @@ def compose_approval_gates(
         gate="adversarial",
         outcome=adversarial_input.outcome,
         red_reason=adversarial_input.red_reason,
-        evidence_pointer=None,
+        # Sprint 13c (ADR-011) — the referenced candidate adversarial run id is
+        # the gate-3 evidence pointer (mirrors signature_digest on gate-1).
+        evidence_pointer=adversarial_input.candidate_run_id,
     )
     owasp_result = ApprovalGateResult(
         gate="owasp_conformance",

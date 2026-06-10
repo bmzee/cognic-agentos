@@ -239,11 +239,12 @@ class TestSprint7B3T7SliceAVocabDrift:
                 "adversarial_corpus_pass_rate_below_threshold",
                 "adversarial_high_severity_failure",
                 "adversarial_evidence_not_attached",
+                "adversarial_baseline_regression",
             }
         )
 
     def test_adversarial_red_reason_count(self) -> None:
-        assert len(typing.get_args(AdversarialRedReason)) == 3
+        assert len(typing.get_args(AdversarialRedReason)) == 4
 
     def test_owasp_red_reason_exact_set(self) -> None:
         assert frozenset(typing.get_args(OwaspRedReason)) == frozenset(
@@ -265,14 +266,15 @@ class TestSprint7B3T7SliceAVocabDrift:
     def test_reviewer_ack_red_reason_count(self) -> None:
         assert len(typing.get_args(ReviewerAckRedReason)) == 1
 
-    def test_approval_gate_red_reason_union_is_22_values(self) -> None:
+    def test_approval_gate_red_reason_union_is_23_values(self) -> None:
         """The consolidated union IS the wire-protocol-public refusal
-        vocabulary — 13 sig + 2 eval + 3 adv + 3 owasp + 1 ack = 22."""
-        assert len(_flatten_literal_union(ApprovalGateRedReason)) == 22
+        vocabulary — 13 sig + 2 eval + 4 adv + 3 owasp + 1 ack = 23
+        (Sprint 13c added ``adversarial_baseline_regression``)."""
+        assert len(_flatten_literal_union(ApprovalGateRedReason)) == 23
 
     def test_approval_gate_red_reason_union_is_disjoint(self) -> None:
         """No red-reason value appears in two per-gate Literals — the
-        union has no collisions, so a 22-value flat set proves it."""
+        union has no collisions, so a 23-value flat set proves it."""
         per_gate_total = (
             len(typing.get_args(SignatureRedReason))
             + len(typing.get_args(EvaluationRedReason))
@@ -280,7 +282,7 @@ class TestSprint7B3T7SliceAVocabDrift:
             + len(typing.get_args(OwaspRedReason))
             + len(typing.get_args(ReviewerAckRedReason))
         )
-        assert per_gate_total == 22
+        assert per_gate_total == 23
         assert len(_flatten_literal_union(ApprovalGateRedReason)) == per_gate_total
 
 
@@ -315,6 +317,9 @@ class TestSprint7B3T7SliceBDataclassShapes:
             "red_reason",
             "pass_rate",
             "high_severity_failures",
+            "regressions",
+            "regression_evaluated",
+            "candidate_run_id",
         }
 
     def test_owasp_gate_input_field_set(self) -> None:
