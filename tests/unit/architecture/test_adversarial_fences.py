@@ -41,7 +41,7 @@ def _imported_modules(path: pathlib.Path) -> set[str]:
 def test_adversarial_dir_has_expected_sources() -> None:
     """Non-vacuous guard — pin the exact source set so a vanished glob cannot make
     the fences pass trivially."""
-    expected = {"__init__.py", "mutator.py", "runner.py", "templates.py"}
+    expected = {"__init__.py", "mutator.py", "runner.py", "templates.py", "evidence.py"}
     assert {p.name for p in _sources()} == expected
 
 
