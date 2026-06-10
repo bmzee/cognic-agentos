@@ -325,6 +325,70 @@ class EvalRunStore:
             ).all()
         return {"run": run._mapping, "cases": [c._mapping for c in cases]}
 
+    async def load_adversarial_verdict(
+        self, *, run_id: uuid.UUID, tenant_id: str
+    ) -> AdversarialVerdict | None:
+        """Tenant-scoped lookup of the value-free ``eval.adversarial_run`` chain
+        row whose ``payload["candidate_run_id"] == run_id``; reconstruct the
+        :class:`AdversarialVerdict`. Returns ``None`` for unknown / cross-tenant.
+
+        The row carries ``candidate_run_id`` only inside the JSON ``payload``, and
+        ``GovernanceJSON`` is CLOB-on-Oracle (no cross-dialect JSON-path query), so
+        we tenant-filter the ``eval.adversarial_run`` rows then match in Python.
+        Submit-time only (Sprint 13c), not a hot path; the per-tenant scan is
+        bounded by the tenant's adversarial-run count.
+        """
+        from cognic_agentos.core.decision_history import _decision_history
+
+        async with self._history._engine.begin() as conn:
+            rows = (
+                await conn.execute(
+                    select(_decision_history.c.payload)
+                    .where(
+                        _decision_history.c.event_type == "eval.adversarial_run",
+                        _decision_history.c.tenant_id == tenant_id,
+                    )
+                    .order_by(_decision_history.c.sequence.desc())
+                )
+            ).all()
+        target = str(run_id)
+        for (payload,) in rows:
+            if isinstance(payload, dict) and payload.get("candidate_run_id") == target:
+                return _adversarial_verdict_from_payload(payload)
+        return None
+
+
+def _adversarial_verdict_from_payload(payload: dict[str, Any]) -> AdversarialVerdict:
+    """Reconstruct an :class:`AdversarialVerdict` from a persisted
+    ``eval.adversarial_run`` chain payload (the exact shape written by
+    :meth:`EvalRunStore.append_adversarial_event`)."""
+    from cognic_agentos.evaluation.types import AdversarialCaseResult, AdversarialVerdict
+
+    return AdversarialVerdict(
+        candidate_run_id=uuid.UUID(str(payload["candidate_run_id"])),
+        corpus_id=str(payload["corpus_id"]),
+        total=int(payload["total"]),
+        passed=int(payload["passed"]),
+        failed=int(payload["failed"]),
+        errored=int(payload["errored"]),
+        overall_pass_rate=float(payload["overall_pass_rate"]),
+        per_category_pass_rate={
+            str(k): float(v) for k, v in payload["per_category_pass_rate"].items()
+        },
+        high_severity_all_pass=bool(payload["high_severity_all_pass"]),
+        per_case=tuple(
+            AdversarialCaseResult(
+                base_case_id=str(c["base_case_id"]),
+                expanded_case_id=str(c["expanded_case_id"]),
+                attack_category=str(c["attack_category"]),
+                mutation_strategy=str(c["mutation_strategy"]),
+                severity=str(c["severity"]),
+                passed=bool(c["passed"]),
+            )
+            for c in payload["cases"]
+        ),
+    )
+
 
 def _scorer_to_json(s: Any) -> dict[str, Any]:
     return {
