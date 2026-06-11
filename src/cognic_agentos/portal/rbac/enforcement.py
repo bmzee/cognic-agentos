@@ -45,6 +45,7 @@ from cognic_agentos.portal.rbac.scopes import (
     MemoryRBACScope,
     ModelRBACScope,
     PackRBACScope,
+    ToolApprovalRBACScope,
     UIRBACScope,
 )
 
@@ -250,7 +251,8 @@ def RequireScope(
     | MemoryRBACScope
     | EmergencyRBACScope
     | EvalRBACScope
-    | ConfigOverlayRBACScope,
+    | ConfigOverlayRBACScope
+    | ToolApprovalRBACScope,
 ) -> Callable[..., Awaitable[Actor]]:
     """FastAPI dependency factory — admit the request iff the bound
     :class:`Actor` holds ``scope``.
@@ -292,6 +294,11 @@ def RequireScope(
     ``RequireScope("config.tenant_overlay.write")`` /
     ``RequireScope("config.tenant_overlay.read")``. Additive — pre-ADR-023
     call sites still compile cleanly.
+
+    Sprint-13.5b1 (ADR-014) further widened it with
+    :data:`ToolApprovalRBACScope` so the portal approval API can call
+    ``RequireScope("tool.approve.observe")``. Additive — pre-13.5b1 call
+    sites still compile cleanly.
 
     Sprint-7B.4 T6 converted the inner dependency to async so the
     denial path can ``await broker.emit_rbac_denial`` via the shared
