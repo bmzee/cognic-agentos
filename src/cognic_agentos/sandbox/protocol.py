@@ -269,6 +269,15 @@ SandboxRefusalReason = Literal[
     # admission uses the base ``settings.sandbox_per_tenant_max_*`` caps and
     # this value never fires.
     "sandbox_tenant_config_overlay_invalid",
+    # Sprint 13.5c1 (ADR-014) — approval-seam outcomes. Raised by the
+    # engine-wired ``admit_policy`` Step-4 consult (13.5b2 template);
+    # ``sandbox_high_risk_tier_refused_pre_13_5`` above is KEPT as the
+    # engine-absent fallback and is never emitted on the wired path.
+    "sandbox_approval_pending",
+    "sandbox_approval_denied",
+    "sandbox_approval_expired",
+    "sandbox_approval_binding_mismatch",
+    "sandbox_approval_request_not_found",
 ]
 
 #: 6-value closed-enum for runtime policy violations during ``exec``
@@ -425,9 +434,19 @@ class SandboxLifecycleRefused(Exception):
     closed-enum reason so callers can dispatch on the wire-protocol-
     public ``SandboxRefusalReason`` Literal."""
 
-    def __init__(self, reason: SandboxRefusalReason, *, detail: str = "") -> None:
+    def __init__(
+        self,
+        reason: SandboxRefusalReason,
+        *,
+        detail: str = "",
+        approval_request_id: str | None = None,
+    ) -> None:
         self.reason: SandboxRefusalReason = reason
         self.detail = detail
+        #: Sprint 13.5c1 (ADR-014): the approval-request correlator — set by
+        #: the five sandbox_approval_* refusals (the exception has no payload
+        #: dict; this additive attr is the programmatic channel).
+        self.approval_request_id = approval_request_id
         super().__init__(f"{reason}: {detail}" if detail else reason)
 
 

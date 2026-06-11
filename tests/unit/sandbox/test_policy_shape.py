@@ -29,7 +29,7 @@ from cognic_agentos.sandbox import (
 class TestClosedEnumPartitionInvariants:
     """Pin the wire-protocol-public closed-enum values + counts."""
 
-    def test_sandbox_refusal_reason_has_exactly_36_values(self) -> None:
+    def test_sandbox_refusal_reason_has_exactly_42_values(self) -> None:
         # Sprint 8.5 T1 extended 15 → 21 (6 new wake-time arms per spec §3.3).
         # Sprint 10 T7 extended 21 → 22 (1 kernel-boundary cross-tenant guard
         # per Sprint-10 spec §4.1 — `sandbox_credential_request_tenant_mismatch`).
@@ -50,12 +50,17 @@ class TestClosedEnumPartitionInvariants:
         # refusal values per spec §5.1; Literal-only at T16 — the Stage-2
         # raise sites live at the T18 `sandbox/projection.py` planner +
         # the T21 lifecycle integration that lands later in the sprint).
+        # ADR-023 extended 36 → 37 (sandbox_tenant_config_overlay_invalid).
+        # Sprint 13.5c1 extended 37 → 42 (5 approval-seam outcomes per
+        # ADR-014 + the 13.5c1 spec §4; the pre-13.5 fallback value is
+        # KEPT — engine-absent path only).
         values = typing.get_args(SandboxRefusalReason)
-        assert len(values) == 37, (
-            f"SandboxRefusalReason must have 37 values per spec §4.1 + "
+        assert len(values) == 42, (
+            f"SandboxRefusalReason must have 42 values per spec §4.1 + "
             f"8.5 §3.3 + 10 §4.1 + 10 §6.1 + 10.1 ADR-004 §25 amendment + "
             f"10.6 §5.1 (9 credential-projection values) + ADR-023 "
-            f"(sandbox_tenant_config_overlay_invalid); "
+            f"(sandbox_tenant_config_overlay_invalid) + 13.5c1 spec §4 "
+            f"(5 sandbox_approval_* values); "
             f"found {len(values)}: {values}"
         )
 
@@ -196,6 +201,15 @@ class TestClosedEnumPartitionInvariants:
             # TenantConfigResolver surfaces a corrupt / loosening stored
             # overlay (TenantConfigOverlayInvalid); fail-closed.
             "sandbox_tenant_config_overlay_invalid",
+            # Sprint 13.5c1 (ADR-014) — 5 approval-seam outcomes raised by
+            # the engine-wired admit_policy Step-4 consult (13.5b2
+            # template). The pre-13.5 fallback value above is KEPT and is
+            # never emitted on the wired path.
+            "sandbox_approval_pending",
+            "sandbox_approval_denied",
+            "sandbox_approval_expired",
+            "sandbox_approval_binding_mismatch",
+            "sandbox_approval_request_not_found",
         }
         assert values == expected, f"drift: {values ^ expected}"
 
@@ -288,13 +302,15 @@ class TestSprint106CredentialProjectionRefusalReasons:
     unit suite + T21 cross-backend conformance suite.
     """
 
-    def test_count_is_thirty_seven(self) -> None:
+    def test_count_is_forty_two(self) -> None:
         # Crisp count guard — separate from the membership assertion
         # so drift in size shows a clean diagnostic. Mirrors the
         # ``test_refusal_reason_count_locked_at_*`` pattern from the
         # conformance suite. 36 at Sprint-10.6; 37 after ADR-023 added
-        # ``sandbox_tenant_config_overlay_invalid``.
-        assert len(typing.get_args(SandboxRefusalReason)) == 37
+        # ``sandbox_tenant_config_overlay_invalid``; 42 after Sprint
+        # 13.5c1 added the 5 ``sandbox_approval_*`` seam outcomes
+        # (ADR-014).
+        assert len(typing.get_args(SandboxRefusalReason)) == 42
 
     def test_all_nine_credential_projection_values_present(self) -> None:
         values = set(typing.get_args(SandboxRefusalReason))
