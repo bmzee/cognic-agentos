@@ -1798,6 +1798,25 @@ class Settings(BaseSettings):
             "need lower retry-after latency."
         ),
     )
+    approval_single_ttl_s: int = Field(
+        default=300,
+        gt=0,
+        description=(
+            "Sprint 13.5a (ADR-014) — just-in-time single-approval expiry "
+            "(seconds). ApprovalEngine sets expires_at = created_at + this for "
+            "require_single_approval requests; a check/grant/deny after it lazily "
+            "transitions the request to expired. ADR-014 §32 default."
+        ),
+    )
+    approval_four_eyes_ttl_s: int = Field(
+        default=60,
+        gt=0,
+        description=(
+            "Sprint 13.5a (ADR-014) — 4-eyes approval expiry (seconds). Tighter "
+            "than single-approval because 4-eyes gates time-sensitive actions "
+            "(payments) per ADR-014 §34. Applies to require_4_eyes requests."
+        ),
+    )
     scheduler_per_tenant_interactive: int = Field(
         default=32,
         gt=0,

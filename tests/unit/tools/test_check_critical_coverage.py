@@ -80,9 +80,12 @@ _GATE_TOOL_PATH = _REPO_ROOT / "tools" / "check_critical_coverage.py"
 #: per ADR-011 — pure deterministic mutation engine + expand/run/verdict/persist/
 #: evidence orchestrator) = 124
 #: + 1 Sprint-13c adversarial-evidence producer (evaluation/adversarial/evidence.py
-#: per ADR-011 — submit-time resolve/verify/regression/map) = 125).
+#: per ADR-011 — submit-time resolve/verify/regression/map) = 125
+#: + 3 Sprint-13.5a approval-engine-core modules (core/approval/{engine,storage,
+#: policy}.py per ADR-014/015 — non-blocking runtime approval state machine +
+#: decision-history-backed store + tools.rego tier->flow classifier) = 128).
 #: Bump this in lockstep with any deliberate ``_CRITICAL_FILES`` change.
-_EXPECTED_ENTRY_COUNT = 125
+_EXPECTED_ENTRY_COUNT = 128
 
 #: The 5 modules Sprint 7B.3 promoted to the durable gate, each by its
 #: own landing commit (T3-T6 panels + T7 composer). All ride the
@@ -793,6 +796,37 @@ def test_sprint_13c_modules_present_with_standard_floors(
     by_path = {path: (line, branch) for path, line, branch in gate_tool._CRITICAL_FILES}
     for module in _SPRINT_13C_GATE_MODULES:
         assert module in by_path, f"Sprint 13c module missing from gate: {module}"
+        assert by_path[module] == (0.95, 0.90), (
+            f"{module} must ride the standard 95%-line / 90%-branch floor"
+        )
+
+
+_SPRINT_13_5A_GATE_MODULES = (
+    "src/cognic_agentos/core/approval/engine.py",
+    "src/cognic_agentos/core/approval/storage.py",
+    "src/cognic_agentos/core/approval/policy.py",
+)
+
+
+def test_sprint_13_5a_modules_present_with_standard_floors(
+    gate_tool: ModuleType,
+) -> None:
+    """The 3 Sprint-13.5a (ADR-014/015) promotions are on the gate at the 95/90 floor:
+    ``core/approval/engine.py`` (non-blocking approval decision state machine:
+    classify / create_request / check / verify_grant_for_action / grant / grant_second
+    / deny; engine-boundary human-only guard + RBAC scope-per-tier + 4-eyes distinctness
+    + lazy authoritative expiry + replay-binding gate), ``core/approval/storage.py``
+    (decision-history-backed ``approval_requests`` store + the 5 value-free
+    ``approval.*`` chain events via ``append_with_precondition``, Doctrine Lock D),
+    and ``core/approval/policy.py`` (``tools.rego`` tier->flow classifier over the
+    existing OPAEngine, fail-closed ``require_4_eyes``). ``_types.py`` stays OFF-gate
+    (pure closed-enum + frozen-dataclass + ``validate_transition`` module; its
+    vocabulary drift is pinned by ``tests/unit/core/approval/test_types.py`` count
+    guards). Pins the EXACT module set so a future edit that drops one while holding
+    the count at 128 by swapping in an unrelated path fails HERE."""
+    by_path = {path: (line, branch) for path, line, branch in gate_tool._CRITICAL_FILES}
+    for module in _SPRINT_13_5A_GATE_MODULES:
+        assert module in by_path, f"Sprint 13.5a module missing from gate: {module}"
         assert by_path[module] == (0.95, 0.90), (
             f"{module} must ride the standard 95%-line / 90%-branch floor"
         )

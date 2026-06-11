@@ -96,6 +96,11 @@ ISO42001_CONTROLS: tuple[ControlEntry, ...] = (
             "sandbox.lifecycle.*",
             "config.tenant_overlay.set",
             "config.tenant_overlay.cleared",
+            # Sprint 13.5a (ADR-014) — the 5 value-free approval.* chain rows
+            # (requested / granted_first / granted_second / denied / expired)
+            # are operational-responsibility events: a human approver clearing a
+            # high-risk tool action IS an operational-responsibility decision.
+            "approval.*",
         ),
         "implemented",
     ),
@@ -113,7 +118,10 @@ ISO42001_CONTROLS: tuple[ControlEntry, ...] = (
         "ISO42001.A.7.4",
         "A.7.4",
         "AI system impact assessment",
-        ("decision_history.append",),
+        # Sprint 13.5a (ADR-014) — every approval.* chain row carries the
+        # value-free envelope_digest + risk_tier; an approval decision IS an
+        # impact-assessment record for the gated tool action.
+        ("decision_history.append", "approval.*"),
         "implemented",
     ),
     ControlEntry(
@@ -172,7 +180,9 @@ ISO42001_CONTROLS: tuple[ControlEntry, ...] = (
         # Sprint 9.5 A6 flip — every ``model.lifecycle.*`` chain row
         # tags A.10.2 (lifecycle transitions are stakeholder-visible
         # facts about which models are in service for a tenant).
-        ("model.lifecycle.*",),
+        # Sprint 13.5a (ADR-014) — approval.* chain rows are stakeholder-visible
+        # facts about which high-risk tool actions a human approved for a tenant.
+        ("model.lifecycle.*", "approval.*"),
         "implemented",
     ),
 )
