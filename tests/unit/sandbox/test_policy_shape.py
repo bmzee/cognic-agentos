@@ -707,10 +707,13 @@ class TestStage1ShapeValidationArms:
 
 
 class TestPackAdmissionContextShape:
-    def test_pack_admission_context_has_6_constructor_fields(self) -> None:
+    def test_pack_admission_context_has_7_constructor_fields(self) -> None:
         """Round-3 third-follow-on amendment: PackAdmissionContext has
         6 fields (pack_id + pack_version + pack_artifact_digest +
-        risk_tier + declares_dynamic_install + profile)."""
+        risk_tier + declares_dynamic_install + profile). Sprint 13.5c1
+        (ADR-014) extended 6 → 7 with the defaulted ``data_classes``
+        (manifest [data_governance].data_classes carried at admission
+        time; feeds the value-free ApprovalEnvelope)."""
         fields = {f.name for f in dataclasses.fields(PackAdmissionContext)}
         expected = {
             "pack_id",
@@ -719,6 +722,7 @@ class TestPackAdmissionContextShape:
             "risk_tier",
             "declares_dynamic_install",
             "profile",
+            "data_classes",
         }
         assert fields == expected, f"PackAdmissionContext drift: {fields ^ expected}"
 

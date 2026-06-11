@@ -102,15 +102,24 @@ class PackAdmissionContext:
     it needs to make decisions that aren't on per-call
     ``SandboxPolicy``.
 
-    6 fields per spec §6.1 (round-3-third-follow-on amendment):
-    ``pack_id`` + ``pack_version`` + ``pack_artifact_digest`` +
-    ``risk_tier`` + ``declares_dynamic_install`` + ``profile``.
+    7 fields: the original 6 per spec §6.1 (round-3-third-follow-on
+    amendment) — ``pack_id`` + ``pack_version`` + ``pack_artifact_digest``
+    + ``risk_tier`` + ``declares_dynamic_install`` + ``profile`` — plus
+    the defaulted ``data_classes`` added at Sprint 13.5c1 (ADR-014).
+    The warm-pool key derivation still reads ONLY the original
+    admission fields (the immutable identity set); the defaulted 7th
+    field does not perturb pool keys.
 
     ``pack_artifact_digest`` is the cosign-verified pack artifact
     sha256 per ADR-016 trust-gate pinning — the immutable identity.
     Pool key uses it (not ``pack_version`` which is human-mutable in
     some workflows); ``pack_version`` stays in audit logs + UI for
     human readability but is NOT load-bearing for admission integrity.
+
+    ``data_classes`` — manifest ``[data_governance].data_classes``
+    carried at admission time (Sprint 13.5c1, ADR-014); feeds the
+    value-free ApprovalEnvelope on the engine-wired approval path.
+    Empty default keeps pre-13.5c1 constructors green.
     """
 
     pack_id: str
@@ -119,6 +128,7 @@ class PackAdmissionContext:
     risk_tier: RiskTier
     declares_dynamic_install: bool
     profile: Literal["production", "development"]
+    data_classes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

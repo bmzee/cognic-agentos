@@ -30,3 +30,22 @@ def test_lifecycle_refused_carries_optional_approval_request_id() -> None:
         "sandbox_approval_pending", detail="d", approval_request_id="abc"
     )
     assert rich.approval_request_id == "abc"
+
+
+def test_pack_admission_context_carries_data_classes_with_empty_default() -> None:
+    # Spec §3.4: the MCPServerEntry.data_classes pattern — harness populates
+    # from the manifest [data_governance].data_classes; default keeps every
+    # existing constructor green.
+    from cognic_agentos.sandbox.policy import PackAdmissionContext
+
+    base: dict[str, object] = dict(
+        pack_id="cognic.test_pack",
+        pack_version="v1.0.0",
+        pack_artifact_digest="sha256:" + "a" * 64,
+        risk_tier="internal_write",
+        declares_dynamic_install=False,
+        profile="production",
+    )
+    assert PackAdmissionContext(**base).data_classes == ()  # type: ignore[arg-type]
+    ctx = PackAdmissionContext(**base, data_classes=("customer_pii",))  # type: ignore[arg-type]
+    assert ctx.data_classes == ("customer_pii",)
