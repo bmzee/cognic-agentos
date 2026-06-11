@@ -128,3 +128,88 @@ def test_binding_projection_distinguishes_runtime_image_and_root_flag() -> None:
         SandboxPolicy(**{**base, "read_only_root": False})  # type: ignore[arg-type]
     )
     assert a != b and a != c
+
+
+# ---------------------------------------------------------------------------
+# T4+ admission fixtures (mirror test_admission_pipeline.py:85-176)
+# ---------------------------------------------------------------------------
+
+_VALID_IMAGE_REF = "ghcr.io/cognic/sandbox-runtime-python@sha256:" + "c" * 64
+
+
+def _valid_policy(**overrides: object) -> object:
+    from cognic_agentos.sandbox.policy import SandboxPolicy
+
+    base: dict[str, object] = {
+        "cpu_cores": 1.0,
+        "cpu_time_budget_s": None,
+        "memory_mb": 256,
+        "walltime_s": 30.0,
+        "runtime_image": _VALID_IMAGE_REF,
+        "egress_allow_list": ("api.example.com",),
+        "vault_path": None,
+    }
+    base.update(overrides)
+    return SandboxPolicy(**base)  # type: ignore[arg-type]
+
+
+def _valid_pack_context(**overrides: object) -> object:
+    from cognic_agentos.sandbox.policy import PackAdmissionContext
+
+    base: dict[str, object] = {
+        "pack_id": "cognic.test_pack",
+        "pack_version": "v1.0.0",
+        "pack_artifact_digest": "sha256:" + "a" * 64,
+        "risk_tier": "internal_write",
+        "declares_dynamic_install": False,
+        "profile": "production",
+    }
+    base.update(overrides)
+    return PackAdmissionContext(**base)  # type: ignore[arg-type]
+
+
+def _passing_settings() -> object:
+    from unittest.mock import MagicMock
+
+    return MagicMock(
+        sandbox_per_tenant_max_cpu=4.0,
+        sandbox_per_tenant_max_memory=1024,
+        sandbox_per_tenant_max_walltime=300.0,
+        sandbox_kernel_default_max_credential_ttl_s=900,
+    )
+
+
+async def test_step9_input_always_carries_approval_verified_false_unwired() -> None:
+    # Input-contract completeness (precomputed-bool precedent): the key is
+    # ALWAYS threaded; engine-absent admissions send False.
+    from unittest.mock import AsyncMock, MagicMock
+
+    from cognic_agentos.core.policy.engine import Decision
+    from cognic_agentos.sandbox.admission import KernelDefaultCredentialAdapter, admit_policy
+
+    rego = MagicMock()
+    rego.evaluate = AsyncMock(
+        return_value=Decision(
+            allow=True,
+            rule_matched="data.cognic.sandbox.admit.allow",
+            reasoning="ok",
+            decision_data=None,
+        )
+    )
+    catalog = MagicMock()
+    catalog.is_canonical.return_value = True
+    catalog.is_tenant_allow_listed.return_value = True
+    catalog.verify_cosign_or_refuse = AsyncMock(return_value=None)
+    catalog.verify_sbom_policy_or_refuse = AsyncMock(return_value=None)
+    await admit_policy(
+        _valid_policy(),  # type: ignore[arg-type]
+        tenant_id="t-1",
+        actor=MagicMock(),
+        pack_context=_valid_pack_context(),  # type: ignore[arg-type]
+        catalog=catalog,
+        credential_adapter=KernelDefaultCredentialAdapter(),
+        rego_engine=rego,
+        settings=_passing_settings(),  # type: ignore[arg-type]
+    )
+    sent = rego.evaluate.await_args.kwargs["input"]
+    assert sent["approval_verified"] is False

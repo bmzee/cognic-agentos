@@ -22,8 +22,10 @@ recording the rule-4 patch):
 * default-deny baseline (no input → deny)
 * allow on ``{read_only, internal_write}`` tier + within tenant max
   + credential precondition + runtime_image authorised
-* refuse on all 6 high-risk tiers unconditionally (pre-Sprint-13.5;
-  no escalation-token bypass per spec round-1 P2)
+* refuse on all 6 high-risk tiers WITHOUT the Sprint-13.5c1
+  ``approval_verified`` attestation (ADR-014 CONVERT; no
+  escalation-token bypass per spec round-1 P2 — the only admission
+  path is a verified grant, pinned by TestSandboxRegoApprovalConvert)
 * refuse on ``policy.vault_path`` set + credential adapter NOT wired
 * refuse on policy exceeding tenant max (cpu / memory / walltime)
 * refuse on runtime_image not in canonical catalog AND not in
@@ -104,10 +106,15 @@ def _safe_allow_input(
     runtime_image_in_tenant_allow_list: bool = False,
     egress_allow_list: list[str] | None = None,
     tenant_max: dict[str, float | int] | None = None,
+    approval_verified: bool = False,
 ) -> dict[str, object]:
     """Construct a happy-path admission input dict; each test arm
     overrides one field to exercise its refusal path. Default tenant
-    max is generous enough to accommodate the default policy values."""
+    max is generous enough to accommodate the default policy values.
+
+    ``approval_verified`` (Sprint 13.5c1, ADR-014) mirrors the production
+    input contract: admit_policy ALWAYS threads the key (False except the
+    verified-grant path), so the builder emits it unconditionally too."""
     if tenant_max is None:
         tenant_max = {"cpu_cores": 4.0, "memory_mb": 1024, "walltime_s": 300}
     if egress_allow_list is None:
@@ -129,6 +136,7 @@ def _safe_allow_input(
         "credential_adapter_wired": credential_adapter_wired,
         "runtime_image_in_canonical_set": runtime_image_in_canonical_set,
         "runtime_image_in_tenant_allow_list": runtime_image_in_tenant_allow_list,
+        "approval_verified": approval_verified,
     }
 
 
@@ -181,13 +189,16 @@ class TestSandboxRegoDecisionMatrix:
         ],
     )
     @pytest.mark.asyncio
-    async def test_high_risk_tier_refused_unconditionally_pre_13_5(
+    async def test_high_risk_tier_refused_without_attestation(
         self, engine: OPAEngine, tier: str
     ) -> None:
-        """Per spec §13 rule 2 — all 6 high-risk tiers refuse
-        fail-closed pre-13.5; NO escalation-token bypass (spec
-        round-1 P2 fix). Even with otherwise-passing policy +
-        credential + runtime_image conditions, the rule refuses.
+        """Per spec §13 rule 2 as CONVERTED at Sprint 13.5c1 (ADR-014):
+        all 6 high-risk tiers refuse fail-closed UNLESS the Python seam
+        attests a verified grant (``approval_verified == true``). The
+        builder default is False — even with otherwise-passing policy +
+        credential + runtime_image conditions, the rule refuses. NO
+        escalation-token bypass (spec round-1 P2 fix); the verified-grant
+        path is pinned by TestSandboxRegoApprovalConvert below.
         """
         d = await engine.evaluate(
             decision_point=SANDBOX_DECISION_POINT,
@@ -450,5 +461,56 @@ class TestSandboxRegoDecisionMatrix:
         d = await engine.evaluate(
             decision_point=SANDBOX_DECISION_POINT,
             input=bad,
+        )
+        assert d.allow is False
+
+
+@opa_required
+class TestSandboxRegoApprovalConvert:
+    """Sprint 13.5c1 (ADR-014) — the _tier_admissible CONVERT: a high-risk
+    tier is admissible ONLY under the Python-attested approval_verified
+    bool (strict == true; falsy-by-absence). The bundle stays pure +
+    fail-closed; THIS is the coordinated kernel+ADR loosening amendment."""
+
+    @pytest.mark.asyncio
+    async def test_high_tier_with_verified_grant_allows(self, engine: OPAEngine) -> None:
+        d = await engine.evaluate(
+            decision_point=SANDBOX_DECISION_POINT,
+            input=_safe_allow_input(risk_tier="payment_action", approval_verified=True),
+        )
+        assert d.allow is True
+
+    @pytest.mark.asyncio
+    async def test_high_tier_without_attestation_denies_false_and_absent(
+        self, engine: OPAEngine
+    ) -> None:
+        # False AND absent must BOTH deny (strict-bool, falsy-by-absence —
+        # a bypassed-Python caller that omits the key cannot admit).
+        false_input = _safe_allow_input(risk_tier="payment_action", approval_verified=False)
+        d = await engine.evaluate(decision_point=SANDBOX_DECISION_POINT, input=false_input)
+        assert d.allow is False
+
+        absent_input = _safe_allow_input(risk_tier="payment_action")
+        absent_input.pop("approval_verified")
+        d = await engine.evaluate(decision_point=SANDBOX_DECISION_POINT, input=absent_input)
+        assert d.allow is False
+
+    @pytest.mark.asyncio
+    async def test_safe_tier_unaffected_by_attestation_key(self, engine: OPAEngine) -> None:
+        d = await engine.evaluate(
+            decision_point=SANDBOX_DECISION_POINT,
+            input=_safe_allow_input(risk_tier="read_only", approval_verified=False),
+        )
+        assert d.allow is True
+
+    @pytest.mark.asyncio
+    async def test_verified_grant_does_not_bypass_other_conditions(self, engine: OPAEngine) -> None:
+        # Approval is NOT a bypass: high tier + verified BUT a cap violation
+        # still denies (spec §3.2 "continue Steps 5-9" contract, bundle side).
+        d = await engine.evaluate(
+            decision_point=SANDBOX_DECISION_POINT,
+            input=_safe_allow_input(
+                risk_tier="payment_action", approval_verified=True, cpu_cores=8.0
+            ),
         )
         assert d.allow is False

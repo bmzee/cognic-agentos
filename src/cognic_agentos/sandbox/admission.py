@@ -531,6 +531,13 @@ async def admit_policy(
                 ),
             )
 
+    # Sprint 13.5c1 (ADR-014): the Python-attested approval state for the
+    # Step-9 Rego input. ALWAYS threaded (input-contract completeness —
+    # absence is falsy and the bundle's _tier_admissible second arm
+    # fail-closes). False until the verified-grant consult path sets it
+    # (T5/T6 land the engine-wired Step-4 consult).
+    approval_verified = False
+
     # Step 4 — high-risk-tier transitional refusal (pre-Sprint-13.5)
     if pack_context.risk_tier in _HIGH_RISK_TIERS_PRE_13_5:
         raise SandboxLifecycleRefused(
@@ -690,6 +697,12 @@ async def admit_policy(
             "credential_adapter_wired": not isinstance(
                 credential_adapter, KernelDefaultCredentialAdapter
             ),
+            # Sprint 13.5c1 (ADR-014): Python-attested approval state. ALWAYS
+            # threaded (input-contract completeness — absence is falsy and the
+            # bundle fail-closes). False until the engine-wired verified-grant
+            # path sets it; the bundle's _tier_admissible second arm requires
+            # == true.
+            "approval_verified": approval_verified,
             # T11 — bundle rule 4 (defence-in-depth catalog membership
             # check; see ``policies/_default/sandbox.rego`` +
             # ``_runtime_image_authorised``). These two precomputed

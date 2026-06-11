@@ -51,14 +51,19 @@
 #         AND credential precondition satisfied
 #         AND runtime_image authorised (canonical OR tenant allow-list)
 #
-#   2. REFUSE unconditionally if risk_tier ∈ {customer_data_read,
+#   2. REFUSE high-risk tiers unless the Python seam attests a
+#      verified grant: risk_tier ∈ {customer_data_read,
 #      customer_data_write, payment_action, regulator_communication,
 #      cross_tenant, high_risk_custom}. These 6 high-risk tiers
-#      require core/approval engine gating per ADR-014; until
-#      Sprint 13.5 ships the approval engine all sandbox executions
-#      at these tiers fail-closed with
-#      sandbox_high_risk_tier_refused_pre_13_5. NO escalation-token
-#      bypass exists pre-13.5 (spec round-1 P2 fix).
+#      require core/approval engine gating per ADR-014. Sprint 13.5c1
+#      CONVERTED this rule: a high-risk tier is admissible ONLY when
+#      the Python seam attests a verified grant via the strict
+#      ``input.approval_verified == true`` bool (the _tier_admissible
+#      second arm below); absent/false fail-closed. The engine-absent
+#      Python fallback still refuses these tiers with
+#      sandbox_high_risk_tier_refused_pre_13_5 BEFORE this bundle is
+#      reached. NO escalation-token bypass exists (spec round-1 P2
+#      fix) — the ONLY admission path is a verified ADR-014 grant.
 #
 #   3. REFUSE if policy.vault_path is set AND credential_adapter_wired
 #      is false (defence-in-depth with §6.1 step 3 admission check —
@@ -81,11 +86,19 @@
 #      The Wave-1 spec §2.1 doctrinal lock restricts sandbox
 #      egress to HTTP/HTTPS only.
 #
-# Cutover at Sprint 13.5 module-load: when core/approval/engine.py
-# is wired into Stage-2 admission, the high-risk-tier refusal lifts;
-# those tiers route through approval per ADR-014. The cutover itself
-# is an audit event (sandbox_approval.engine_enabled) so banks can
-# prove the moment high-risk sandbox execution became gated.
+# Sprint 13.5c1 cutover (LANDED — supersedes the pre-13.5 prose that
+# promised a one-shot ``sandbox_approval.engine_enabled`` audit event;
+# that shape is not implementable in a stateless seam-only sprint and
+# is EXPLICITLY superseded per the ADR-014 c1 amendment). Cutover
+# evidence is per-decision instead: the engine's own value-free
+# ``approval.*`` chain rows (sandbox-originated requests carry the
+# ``sandbox:``-prefixed tool_identity + the ``sandbox-admit-*``
+# correlation id), the ``sandbox_approval_*`` refusals carrying
+# ``approval_request_id``, and the TestSandboxRegoApprovalConvert
+# suite proving ``approval_verified`` is REQUIRED for high tiers. The
+# per-decision ``approval_gated_admission`` lifecycle event lands with
+# the future backend/composition wiring sprint that gives it an
+# emission seam.
 
 package cognic.sandbox.admit
 
@@ -110,13 +123,28 @@ high_risk_tiers := {
 safe_tiers := {"read_only", "internal_write"}
 
 allow if {
-	input.pack_context.risk_tier in safe_tiers
-	not input.pack_context.risk_tier in high_risk_tiers
+	_tier_admissible
 	_within_tenant_max
 	_credential_precondition_satisfied
 	_runtime_image_authorised
 	_egress_http_only
 	_credential_ttl_within_tenant_max
+}
+
+# Safe tiers admissible as before (disjointness guard preserved).
+_tier_admissible if {
+	input.pack_context.risk_tier in safe_tiers
+	not input.pack_context.risk_tier in high_risk_tiers
+}
+
+# Sprint 13.5c1 CONVERT (ADR-014 c1 amendment — the coordinated
+# kernel+ADR loosening): a high-risk tier is admissible ONLY when the
+# Python seam attests a verified grant. Strict bool — absence is falsy,
+# fail-closed (mirrors the precomputed-bool precedent), so a caller
+# that bypasses the Python consult can never admit a high tier.
+_tier_admissible if {
+	input.pack_context.risk_tier in high_risk_tiers
+	input.approval_verified == true
 }
 
 # When no tenant_max is provided the caller is the kernel default
