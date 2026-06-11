@@ -6,7 +6,7 @@ import asyncio
 import time
 import typing
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -488,3 +488,289 @@ class TestWiredFirstCall:
             )
         assert exc_info.value.reason == "tool_approval_engine_not_available"
         assert exc_info.value.payload["sprint_13_5_followup"] is True
+
+
+# ---------------------------------------------------------------------------
+# T5 — wired re-call verify path
+# ---------------------------------------------------------------------------
+
+
+def _approver(subject: str = "rev@bank.example") -> Any:
+    from cognic_agentos.core.approval._types import ApprovalActor
+
+    return ApprovalActor(
+        subject=subject,
+        tenant_id="t-1",
+        scopes=frozenset({"tool.approve.customer_data"}),
+        actor_type="human",
+    )
+
+
+class TestWiredReCall:
+    async def _pending(self, host_module: Any, host: Any, entry: Any) -> uuid.UUID:
+        with pytest.raises(host_module.MCPToolInvocationRefused) as exc_info:
+            await host.call_tool(
+                server_id=entry.server_id,
+                tool_name="lookup",
+                arguments={"q": "x"},
+                request_id="r10",
+                tenant_id="t-1",
+                originator_subject="agent-1",
+            )
+        return uuid.UUID(exc_info.value.payload["approval_request_id"])
+
+    async def test_granted_recall_dispatches_and_no_double_emission(
+        self,
+        host_module: Any,
+        http_transport: MagicMock,
+        authz: MagicMock,
+        audit_store: MagicMock,
+        decision_history_store: MagicMock,
+        settings: Any,
+        tmp_path: Any,
+    ) -> None:
+        store = await _mk_approval_store(tmp_path)
+        engine = _mk_approval_engine(store, flow="require_single_approval")
+        entry = _entry(host_module)
+        host = _wired_host(
+            host_module,
+            entry,
+            engine,
+            http_transport=http_transport,
+            authz=authz,
+            audit_store=audit_store,
+            decision_history_store=decision_history_store,
+            settings=settings,
+        )
+        rid = await self._pending(host_module, host, entry)
+        await engine.grant(request_id=rid, tenant_id="t-1", approver=_approver())
+        result = await host.call_tool(
+            server_id=entry.server_id,
+            tool_name="lookup",
+            arguments={"q": "x"},
+            request_id="r11",
+            tenant_id="t-1",
+            originator_subject="agent-1",
+            approval_request_id=rid,
+        )
+        # Same-function identity pin (behavioural): create + verify both used
+        # _canonical_tool_identity — a divergent recompute would have refused
+        # tool_approval_binding_mismatch here instead of dispatching.
+        assert result.payload == {"content": "ok"}
+        # No-double-emission pin (spec §3.6 guard arm): the FIRST call emitted
+        # exactly one refused row + zero errored rows for its request_id.
+        # NOTE: request_id is an AuditEvent ATTRIBUTE (mcp_host.py:1712), not a
+        # payload key.
+        rows = [c.args[0] for c in audit_store.append.await_args_list]
+        r10_rows = [e for e in rows if e.request_id == "r10"]
+        assert [e.event_type for e in r10_rows] == ["audit.tool_invocation_refused"]
+
+    async def test_changed_args_recall_refuses_binding_mismatch_without_flow(
+        self,
+        host_module: Any,
+        http_transport: MagicMock,
+        authz: MagicMock,
+        audit_store: MagicMock,
+        decision_history_store: MagicMock,
+        settings: Any,
+        tmp_path: Any,
+    ) -> None:
+        store = await _mk_approval_store(tmp_path)
+        engine = _mk_approval_engine(store, flow="require_single_approval")
+        entry = _entry(host_module)
+        host = _wired_host(
+            host_module,
+            entry,
+            engine,
+            http_transport=http_transport,
+            authz=authz,
+            audit_store=audit_store,
+            decision_history_store=decision_history_store,
+            settings=settings,
+        )
+        rid = await self._pending(host_module, host, entry)
+        await engine.grant(request_id=rid, tenant_id="t-1", approver=_approver())
+        with pytest.raises(host_module.MCPToolInvocationRefused) as exc_info:
+            await host.call_tool(
+                server_id=entry.server_id,
+                tool_name="lookup",
+                arguments={"q": "TAMPERED"},  # changed args -> binding mismatch
+                request_id="r12",
+                tenant_id="t-1",
+                originator_subject="agent-1",
+                approval_request_id=rid,
+            )
+        assert exc_info.value.reason == "tool_approval_binding_mismatch"
+        refused = [
+            c.args[0]
+            for c in audit_store.append.await_args_list
+            if c.args[0].event_type == "audit.tool_invocation_refused"
+            and c.args[0].request_id == "r12"  # attribute, not payload key
+        ]
+        assert len(refused) == 1
+        assert "flow" not in refused[0].payload  # spec §4: omitted, no extra read
+
+    async def test_not_yet_granted_recall_still_pending(
+        self,
+        host_module: Any,
+        http_transport: MagicMock,
+        authz: MagicMock,
+        audit_store: MagicMock,
+        decision_history_store: MagicMock,
+        settings: Any,
+        tmp_path: Any,
+    ) -> None:
+        store = await _mk_approval_store(tmp_path)
+        engine = _mk_approval_engine(store, flow="require_single_approval")
+        entry = _entry(host_module)
+        host = _wired_host(
+            host_module,
+            entry,
+            engine,
+            http_transport=http_transport,
+            authz=authz,
+            audit_store=audit_store,
+            decision_history_store=decision_history_store,
+            settings=settings,
+        )
+        rid = await self._pending(host_module, host, entry)
+        with pytest.raises(host_module.MCPToolInvocationRefused) as exc_info:
+            await host.call_tool(
+                server_id=entry.server_id,
+                tool_name="lookup",
+                arguments={"q": "x"},
+                request_id="r13",
+                tenant_id="t-1",
+                originator_subject="agent-1",
+                approval_request_id=rid,
+            )
+        assert exc_info.value.reason == "tool_approval_pending"
+        assert exc_info.value.payload["flow"] == "require_single_approval"
+
+    async def test_denied_recall_refuses_denied(
+        self,
+        host_module: Any,
+        http_transport: MagicMock,
+        authz: MagicMock,
+        audit_store: MagicMock,
+        decision_history_store: MagicMock,
+        settings: Any,
+        tmp_path: Any,
+    ) -> None:
+        store = await _mk_approval_store(tmp_path)
+        engine = _mk_approval_engine(store, flow="require_single_approval")
+        entry = _entry(host_module)
+        host = _wired_host(
+            host_module,
+            entry,
+            engine,
+            http_transport=http_transport,
+            authz=authz,
+            audit_store=audit_store,
+            decision_history_store=decision_history_store,
+            settings=settings,
+        )
+        rid = await self._pending(host_module, host, entry)
+        await engine.deny(request_id=rid, tenant_id="t-1", approver=_approver(), reason="no")
+        with pytest.raises(host_module.MCPToolInvocationRefused) as exc_info:
+            await host.call_tool(
+                server_id=entry.server_id,
+                tool_name="lookup",
+                arguments={"q": "x"},
+                request_id="r14",
+                tenant_id="t-1",
+                originator_subject="agent-1",
+                approval_request_id=rid,
+            )
+        assert exc_info.value.reason == "tool_approval_denied"
+
+    async def test_expired_recall_refuses_expired_with_flow(
+        self,
+        host_module: Any,
+        http_transport: MagicMock,
+        authz: MagicMock,
+        audit_store: MagicMock,
+        decision_history_store: MagicMock,
+        settings: Any,
+        tmp_path: Any,
+    ) -> None:
+        # Spec §3.2/§8: lazy expiry surfaces through the re-call mapping as
+        # tool_approval_expired. flow IS included — verify_grant_for_action
+        # RETURNS an ApprovalCheckResult for the expired state (spec §4).
+        store = await _mk_approval_store(tmp_path)
+        clock = _MutableClock()
+        engine = _mk_approval_engine(store, flow="require_single_approval", clock=clock)
+        entry = _entry(host_module)
+        host = _wired_host(
+            host_module,
+            entry,
+            engine,
+            http_transport=http_transport,
+            authz=authz,
+            audit_store=audit_store,
+            decision_history_store=decision_history_store,
+            settings=settings,
+        )
+        rid = await self._pending(host_module, host, entry)
+        clock.now += timedelta(hours=1)  # past the 300s single-approval TTL
+        with pytest.raises(host_module.MCPToolInvocationRefused) as exc_info:
+            await host.call_tool(
+                server_id=entry.server_id,
+                tool_name="lookup",
+                arguments={"q": "x"},
+                request_id="r16",
+                tenant_id="t-1",
+                originator_subject="agent-1",
+                approval_request_id=rid,
+            )
+        assert exc_info.value.reason == "tool_approval_expired"
+        assert exc_info.value.payload["flow"] == "require_single_approval"
+        refused = [
+            c.args[0]
+            for c in audit_store.append.await_args_list
+            if c.args[0].event_type == "audit.tool_invocation_refused"
+            and c.args[0].request_id == "r16"  # attribute, not payload key
+        ]
+        assert len(refused) == 1
+        assert refused[0].payload["refusal_reason"] == "tool_approval_expired"
+        assert refused[0].payload["flow"] == "require_single_approval"
+
+    async def test_unknown_and_cross_tenant_recall_refuse_request_not_found(
+        self,
+        host_module: Any,
+        http_transport: MagicMock,
+        authz: MagicMock,
+        audit_store: MagicMock,
+        decision_history_store: MagicMock,
+        settings: Any,
+        tmp_path: Any,
+    ) -> None:
+        # Cross-tenant indistinguishable from unknown by construction (the
+        # engine load is tenant-scoped) — same reason, same shape.
+        store = await _mk_approval_store(tmp_path)
+        engine = _mk_approval_engine(store, flow="require_single_approval")
+        entry = _entry(host_module)
+        host = _wired_host(
+            host_module,
+            entry,
+            engine,
+            http_transport=http_transport,
+            authz=authz,
+            audit_store=audit_store,
+            decision_history_store=decision_history_store,
+            settings=settings,
+        )
+        rid_other_tenant = await self._pending(host_module, host, entry)  # t-1 request
+        for recall_id in (uuid.uuid4(), rid_other_tenant):
+            with pytest.raises(host_module.MCPToolInvocationRefused) as exc_info:
+                await host.call_tool(
+                    server_id=entry.server_id,
+                    tool_name="lookup",
+                    arguments={"q": "x"},
+                    request_id="r15",
+                    tenant_id="t-2" if recall_id == rid_other_tenant else "t-1",
+                    originator_subject="agent-1",
+                    approval_request_id=recall_id,
+                )
+            assert exc_info.value.reason == "tool_approval_request_not_found"
+            assert "flow" not in exc_info.value.payload  # spec §4: no flow exists

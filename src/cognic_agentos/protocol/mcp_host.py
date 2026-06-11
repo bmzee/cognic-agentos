@@ -117,6 +117,7 @@ import httpx
 from cognic_agentos.core.approval._types import (
     APPROVAL_REDACTED_CONTEXT_MAX_LEN,
     ApprovalEnvelope,
+    ApprovalRequestNotFound,
     ApprovalTransitionRefused,
 )
 from cognic_agentos.core.approval.engine import ApprovalEngine
@@ -1060,8 +1061,85 @@ class MCPHost:
         args_digest = hashlib.sha256(canonical_bytes(dict(arguments))).digest()
         tool_identity = _canonical_tool_identity(server_id=entry.server_id, tool_name=tool_name)
         if approval_request_id is not None:
-            raise NotImplementedError(
-                "re-call verify path lands at Sprint-13.5b2 T5 (ADR-014 §3.2)"
+            try:
+                res = await engine.verify_grant_for_action(
+                    request_id=approval_request_id,
+                    tenant_id=tenant_id,
+                    expected_args_digest=args_digest,
+                    expected_tool_identity=tool_identity,
+                )
+            except ApprovalRequestNotFound:
+                # Unknown OR cross-tenant — indistinguishable by construction
+                # (the engine load is tenant-scoped). No flow exists (spec §4).
+                await self._emit_approval_refused(
+                    reason="tool_approval_request_not_found",
+                    entry=entry,
+                    tool_name=tool_name,
+                    request_id=request_id,
+                    tenant_id=tenant_id,
+                    declared_risk_tier=declared_risk_tier,
+                    approval_request_id=str(approval_request_id),
+                )
+                raise MCPToolInvocationRefused(
+                    "tool_approval_request_not_found",
+                    f"approval request {approval_request_id} not found for this tenant.",
+                    server_id=entry.server_id,
+                    tool_name=tool_name,
+                    declared_risk_tier=declared_risk_tier,
+                    approval_request_id=str(approval_request_id),
+                ) from None
+            except ApprovalTransitionRefused as exc:
+                if exc.reason != "approval_binding_mismatch":
+                    raise  # defensive: unexpected verify-side refusal -> errored arm
+                # flow OMITTED: verify raised without returning the result and
+                # the seam does NOT issue an extra store read (spec §4).
+                await self._emit_approval_refused(
+                    reason="tool_approval_binding_mismatch",
+                    entry=entry,
+                    tool_name=tool_name,
+                    request_id=request_id,
+                    tenant_id=tenant_id,
+                    declared_risk_tier=declared_risk_tier,
+                    approval_request_id=str(approval_request_id),
+                )
+                raise MCPToolInvocationRefused(
+                    "tool_approval_binding_mismatch",
+                    f"approval request {approval_request_id} was granted for a "
+                    f"DIFFERENT invocation shape (args or tool identity changed); "
+                    f"a grant authorises exactly one action.",
+                    server_id=entry.server_id,
+                    tool_name=tool_name,
+                    declared_risk_tier=declared_risk_tier,
+                    approval_request_id=str(approval_request_id),
+                ) from None
+            if res.state == "granted":
+                return  # verified grant -> dispatch
+            state_to_reason: dict[str, ToolInvocationRefusalReason] = {
+                "pending": "tool_approval_pending",
+                "awaiting_second": "tool_approval_pending",
+                "denied": "tool_approval_denied",
+                "expired": "tool_approval_expired",
+            }
+            recall_reason = state_to_reason[res.state]
+            await self._emit_approval_refused(
+                reason=recall_reason,
+                entry=entry,
+                tool_name=tool_name,
+                request_id=request_id,
+                tenant_id=tenant_id,
+                declared_risk_tier=declared_risk_tier,
+                approval_request_id=str(approval_request_id),
+                flow=res.flow,
+            )
+            raise MCPToolInvocationRefused(
+                recall_reason,
+                f"approval request {approval_request_id} is in state "
+                f"{res.state!r}; not dispatchable.",
+                server_id=entry.server_id,
+                tool_name=tool_name,
+                declared_risk_tier=declared_risk_tier,
+                approval_request_id=str(approval_request_id),
+                flow=res.flow,
             )
         required_refs: dict[str, str] = {}
         if declared_risk_tier == "regulator_communication":
