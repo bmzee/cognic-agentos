@@ -545,11 +545,21 @@ def _normalize_risk_tier_for_gate(value: Any) -> str:
     return repr(value)[:_RISK_TIER_REPR_MAX_LEN]
 
 
-#: Closed-enum vocabulary for runtime tool-invocation refusals. Sprint
-#: 5 ships exactly one value (the ADR-014 transitional rule); Sprint
-#: 13.5 will extend with the approval-engine outcomes
-#: (``tool_approval_pending``, ``tool_approval_denied``, etc.).
-ToolInvocationRefusalReason = Literal["tool_approval_engine_not_available"]
+#: Closed-enum vocabulary for runtime tool-invocation refusals.
+#: Wire-protocol-public (AGENTS.md MCP-host stop rule). Sprint 5 shipped
+#: exactly one value (the ADR-014 transitional rule, kept as the
+#: engine-absent fallback); Sprint 13.5b2 extended it with the five
+#: approval-engine outcomes per ADR-014 + the 13.5b2 spec §4. Drift-pinned
+#: by ``test_mcp_approval_seam.py::
+#: test_tool_invocation_refusal_reason_has_exactly_six_values``.
+ToolInvocationRefusalReason = Literal[
+    "tool_approval_engine_not_available",
+    "tool_approval_pending",
+    "tool_approval_denied",
+    "tool_approval_expired",
+    "tool_approval_binding_mismatch",
+    "tool_approval_request_not_found",
+]
 
 
 class MCPToolInvocationRefused(Exception):
