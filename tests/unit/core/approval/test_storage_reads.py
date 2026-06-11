@@ -9,6 +9,7 @@ import pytest
 from sqlalchemy.dialects import sqlite
 
 from cognic_agentos.core.approval.storage import (
+    ApprovalRequestDetail,
     ApprovalRequestStore,
     ApprovalRequestSummary,
     _build_list_pending_stmt,
@@ -100,3 +101,41 @@ async def test_list_pending_returns_only_actionable_tenant_rows(tmp_path: Any) -
 async def test_list_pending_empty_for_unknown_tenant(tmp_path: Any) -> None:
     store = await _store(tmp_path)
     assert await store.list_pending("nobody", limit=50, cursor=None) == []
+
+
+@pytest.mark.asyncio
+async def test_load_detail_returns_full_projection(tmp_path: Any) -> None:
+    store = await _store(tmp_path)
+    now = datetime(2026, 6, 11, 12, 0, tzinfo=UTC)
+    rid = uuid.uuid4()
+    await _seed_request(store, request_id=rid, now=now)
+    detail = await store.load_detail(request_id=rid, tenant_id="t1")
+    assert detail is not None
+    assert isinstance(detail, ApprovalRequestDetail)
+    assert detail.request_id == rid
+    assert detail.data_classes == ("customer_pii",)
+    assert detail.redacted_context == "ctx"
+    assert detail.created_at.tzinfo is not None
+
+
+@pytest.mark.asyncio
+async def test_load_detail_cross_tenant_is_none(tmp_path: Any) -> None:
+    store = await _store(tmp_path)
+    now = datetime(2026, 6, 11, 12, 0, tzinfo=UTC)
+    rid = uuid.uuid4()
+    await _seed_request(
+        store,
+        request_id=rid,
+        tenant="t2",
+        risk_tier="payment_action",
+        flow="require_4_eyes",
+        now=now,
+    )
+    # tenant t1 cannot see t2's request — None (route maps to 404)
+    assert await store.load_detail(request_id=rid, tenant_id="t1") is None
+
+
+@pytest.mark.asyncio
+async def test_load_detail_unknown_is_none(tmp_path: Any) -> None:
+    store = await _store(tmp_path)
+    assert await store.load_detail(request_id=uuid.uuid4(), tenant_id="t1") is None

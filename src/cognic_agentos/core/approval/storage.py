@@ -145,6 +145,32 @@ class ApprovalRequestSummary:
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
+class ApprovalRequestDetail:
+    """Full reviewer detail projection returned by
+    :meth:`ApprovalRequestStore.load_detail` — every ``ApprovalRequestRow`` field
+    PLUS ``data_classes`` + ``redacted_context`` + ``created_at`` for the reviewer
+    panel. Digests stay ``bytes`` here; the DTO renders them hex."""
+
+    request_id: uuid.UUID
+    tenant_id: str
+    state: ApprovalState
+    flow: str
+    risk_tier: str
+    tool_identity: str
+    originator_subject: str
+    envelope_digest: bytes
+    args_digest: bytes
+    data_classes: tuple[str, ...]
+    redacted_context: str
+    required_refs: dict[str, str]
+    first_approver: str | None
+    second_approver: str | None
+    denier: str | None
+    created_at: datetime
+    expires_at: datetime
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
 class _LockedSnapshot:
     """Row-locked projection threaded ``_precondition`` -> ``_build_record`` so the
     chain payload is the canonical evidence snapshot (post-UPDATE state +
@@ -480,3 +506,40 @@ class ApprovalRequestStore:
             )
             for r in rows
         ]
+
+    async def load_detail(
+        self, *, request_id: uuid.UUID, tenant_id: str
+    ) -> ApprovalRequestDetail | None:
+        """Tenant-scoped reviewer detail read; cross-tenant / unknown -> ``None``
+        (the route maps None -> 404 per the cross-tenant-invisibility doctrine).
+        Richer than the engine-facing :meth:`load`."""
+        async with self._engine.begin() as conn:
+            row = (
+                await conn.execute(
+                    select(_approval_requests).where(
+                        _approval_requests.c.request_id == request_id,
+                        _approval_requests.c.tenant_id == tenant_id,
+                    )
+                )
+            ).first()
+        if row is None:
+            return None
+        return ApprovalRequestDetail(
+            request_id=row.request_id,
+            tenant_id=row.tenant_id,
+            state=row.state,
+            flow=row.flow,
+            risk_tier=row.risk_tier,
+            tool_identity=row.tool_identity,
+            originator_subject=row.originator_subject,
+            envelope_digest=row.envelope_digest,
+            args_digest=row.args_digest,
+            data_classes=tuple(row.data_classes),
+            redacted_context=row.redacted_context,
+            required_refs=dict(row.required_refs),
+            first_approver=row.first_approver,
+            second_approver=row.second_approver,
+            denier=row.denier,
+            created_at=row.created_at.replace(tzinfo=row.created_at.tzinfo or UTC),
+            expires_at=row.expires_at.replace(tzinfo=row.expires_at.tzinfo or UTC),
+        )
