@@ -30,9 +30,13 @@ compose time per ``feedback_verify_code_citations_at_doc_write``):
   fields land prefixed ``sandbox_per_tenant_max_*``. admit_policy
   reads the prefixed names.
 
-The 6-value ``_HIGH_RISK_TIERS_PRE_13_5`` set is the transitional
-fail-closed admission gate per ADR-014 §29 (Sprint 13.5 lifts this by
-wiring the per-tenant runtime-approval engine + the 4-eyes flow).
+Sprint 13.5c1 (ADR-014) converted Step 4 into the approval gate: when an
+``approval_engine`` is wired, admission is engine-authoritative
+(``_consult_approval_engine`` — create / verify with the pending
+correlator; ``approval_verified`` attested into the Step-9 Rego input).
+The 6-value ``_HIGH_RISK_TIERS_PRE_13_5`` set is now the ENGINE-ABSENT
+FALLBACK ONLY (``approval_engine is None`` — byte-for-byte the Sprint-8A
+transitional refusal); the wired path never consults the static set.
 Drift detector at ``tests/unit/sandbox/test_admission_pipeline.py``
 pins lockstep with the ADR-014 canonical 8-value ``RiskTier`` Literal.
 """
@@ -40,10 +44,16 @@ pins lockstep with the ADR-014 canonical 8-value ``RiskTier`` Literal.
 from __future__ import annotations
 
 import hashlib
+import uuid
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-from cognic_agentos.core.approval._types import APPROVAL_REDACTED_CONTEXT_MAX_LEN
+from cognic_agentos.core.approval._types import (
+    APPROVAL_REDACTED_CONTEXT_MAX_LEN,
+    ApprovalEnvelope,
+    ApprovalTransitionRefused,
+)
+from cognic_agentos.core.approval.engine import ApprovalEngine
 from cognic_agentos.core.canonical import canonical_bytes
 from cognic_agentos.core.config_overlay.resolver import TenantConfigOverlayInvalid
 from cognic_agentos.sandbox.policy import (
@@ -235,13 +245,16 @@ class KernelDefaultCredentialAdapter:
 
 
 # ---------------------------------------------------------------------------
-# Transitional high-risk-tier gate (pre-Sprint-13.5)
+# ADR-014 approval gate (engine-wired) + engine-absent fallback tier set
 # ---------------------------------------------------------------------------
 
 
-#: ADR-014 §29 transitional refusal — the 6 risk tiers that admit_policy
-#: refuses pre-Sprint-13.5 (which will land the runtime tool-approval
-#: engine + 4-eyes flow). Lockstep with the ADR-014 canonical 8-value
+#: ADR-014 §29 — the 6 high-risk tiers. Since Sprint 13.5c1 this set is the
+#: ENGINE-ABSENT FALLBACK ONLY: admit_policy refuses these tiers with
+#: ``sandbox_high_risk_tier_refused_pre_13_5`` when ``approval_engine is
+#: None`` (byte-for-byte the Sprint-8A transitional behaviour); the
+#: engine-wired path never consults this set — classification is
+#: engine-authoritative via tools.rego. Lockstep with the ADR-014 canonical 8-value
 #: ``RiskTier`` Literal at ``cli/_governance_vocab.py`` is pinned by the
 #: drift-detector test at ``tests/unit/sandbox/test_admission_pipeline.py
 #: ::TestHighRiskTierDriftDetectorTestOnly`` (test-only cross-module
@@ -320,6 +333,82 @@ def _admission_redacted_context(
     return text[:APPROVAL_REDACTED_CONTEXT_MAX_LEN]
 
 
+async def _consult_approval_engine(
+    *,
+    engine: ApprovalEngine,
+    policy: SandboxPolicy,
+    pack_context: PackAdmissionContext,
+    tenant_id: str,
+    actor: Actor,
+    approval_request_id: uuid.UUID | None,
+) -> bool:
+    """ADR-014 engine-authoritative consult (13.5c1 spec §3). Returns the
+    ``approval_verified`` attestation for the Step-9 Rego input: False on an
+    auto_run classification, True ONLY on a verified grant; raises
+    SandboxLifecycleRefused otherwise. ApprovalEnvelopeInvalid propagates RAW
+    (spec §3.6 — system misconfig, fail-loud; admission has no evidence
+    envelope of its own)."""
+    args_digest = hashlib.sha256(
+        canonical_bytes(
+            {
+                "policy": _policy_binding_projection(policy),
+                "pack_context": {
+                    "pack_id": pack_context.pack_id,
+                    "pack_version": pack_context.pack_version,
+                    "pack_artifact_digest": pack_context.pack_artifact_digest,
+                    "risk_tier": pack_context.risk_tier,
+                    "declares_dynamic_install": pack_context.declares_dynamic_install,
+                    "profile": pack_context.profile,
+                },
+                # NOTE: the new data_classes field is deliberately NOT in the
+                # digest (spec §3.3) — it rides the envelope's first-class
+                # field and is immutable-by-identity (same artifact digest
+                # => same manifest => same data classes).
+            }
+        )
+    ).digest()
+    tool_identity = _canonical_sandbox_identity(
+        pack_id=pack_context.pack_id,
+        pack_artifact_digest=pack_context.pack_artifact_digest,
+    )
+    if approval_request_id is not None:
+        raise NotImplementedError(
+            "re-admission verify path lands at Sprint-13.5c1 T6 (ADR-014 §3.2)"
+        )
+    admission_correlation_id = f"sandbox-admit-{uuid.uuid4().hex}"
+    required_refs: dict[str, str] = {}
+    if pack_context.risk_tier == "regulator_communication":
+        # Spec F3/§3.5: the seam-minted admission correlation id IS the
+        # audit correlator (admit_policy runs before any session_id exists).
+        required_refs = {"audit_record_ref": admission_correlation_id}
+    envelope = ApprovalEnvelope(
+        risk_tier=pack_context.risk_tier,
+        tool_identity=tool_identity,
+        originator_subject=actor.subject,
+        tenant_id=tenant_id,
+        data_classes=tuple(pack_context.data_classes),
+        args_digest=args_digest,
+        redacted_context=_admission_redacted_context(pack_context=pack_context, policy=policy),
+        required_refs=required_refs,
+    )
+    try:
+        request = await engine.create_request(envelope=envelope)
+    except ApprovalTransitionRefused as exc:
+        if exc.reason == "auto_tier_no_approval_required":
+            return False  # tools.rego classified auto_run -> proceed unverified
+        raise  # defensive: unexpected create-side refusal -> fail loud
+    raise SandboxLifecycleRefused(
+        "sandbox_approval_pending",
+        detail=(
+            f"admission requires approval (flow={request.flow}); request "
+            f"{request.request_id} is pending (admission_correlation_id="
+            f"{admission_correlation_id}). Grant via the portal approval API, "
+            f"then re-admit with approval_request_id."
+        ),
+        approval_request_id=str(request.request_id),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Single admission seam
 # ---------------------------------------------------------------------------
@@ -337,6 +426,8 @@ async def admit_policy(
     settings: Settings,
     resolver: TenantConfigResolver | None = None,
     requires_credentials: Sequence[VaultLeaseRequest] = (),
+    approval_engine: ApprovalEngine | None = None,
+    approval_request_id: uuid.UUID | None = None,
 ) -> None:
     """Admission pipeline per spec §6.1 — the single seam every
     backend MUST call.
@@ -371,7 +462,11 @@ async def admit_policy(
          Internal ordering pinned by ``tests/unit/sandbox/
          test_admit_credentials.py::TestAdmitPolicyRefusesCrossTenantRequest::
          test_cross_tenant_check_wins_over_sentinel_adapter_check``.
-      4. high-risk-tier transitional refusal (6 ADR-014 tiers)
+      4. ADR-014 approval gate (Sprint 13.5c1): engine-wired ->
+         engine-authoritative consult (auto -> proceed; pending /
+         denied / expired / binding-mismatch / not-found refusals;
+         verified grant -> ``approval_verified`` attested to Step 9);
+         engine-absent -> fallback refusal of the 6 high-risk tiers
       5. tenant-max check (cpu_cores / memory_mb / walltime_s)
       6. image-catalog membership (canonical OR per-tenant allow-list)
       7. cosign signature verification (delegates to catalog; runs for
@@ -531,18 +626,34 @@ async def admit_policy(
                 ),
             )
 
-    # Sprint 13.5c1 (ADR-014): the Python-attested approval state for the
-    # Step-9 Rego input. ALWAYS threaded (input-contract completeness —
-    # absence is falsy and the bundle's _tier_admissible second arm
-    # fail-closes). False until the verified-grant consult path sets it
-    # (T5/T6 land the engine-wired Step-4 consult).
+    # Step 4 — ADR-014 approval gate (Sprint 13.5c1 cutover).
+    # Engine-absent: the Sprint-8A transitional refusal byte-for-byte (the
+    # supplied approval_request_id is INERT on this path — pinned plan-review
+    # choice; a dangling correlator must not create a new fail-loud branch).
+    # Engine-wired: engine-authoritative consult (13.5b2 template) — the
+    # static set is NEVER consulted; tools.rego classification decides, so
+    # bank-overlay tightening is honoured. Runs BEFORE caps/catalog/cosign/
+    # Rego — a refused admission does no further I/O. ``approval_verified``
+    # is the Python-attested state for the Step-9 Rego input: ALWAYS
+    # threaded (absence is falsy and the bundle's _tier_admissible second
+    # arm fail-closes); True ONLY on a verified grant.
     approval_verified = False
-
-    # Step 4 — high-risk-tier transitional refusal (pre-Sprint-13.5)
-    if pack_context.risk_tier in _HIGH_RISK_TIERS_PRE_13_5:
-        raise SandboxLifecycleRefused(
-            "sandbox_high_risk_tier_refused_pre_13_5",
-            detail=(f"tier={pack_context.risk_tier!r} requires core/approval engine (Sprint 13.5)"),
+    if approval_engine is None:
+        if pack_context.risk_tier in _HIGH_RISK_TIERS_PRE_13_5:
+            raise SandboxLifecycleRefused(
+                "sandbox_high_risk_tier_refused_pre_13_5",
+                detail=(
+                    f"tier={pack_context.risk_tier!r} requires core/approval engine (Sprint 13.5)"
+                ),
+            )
+    else:
+        approval_verified = await _consult_approval_engine(
+            engine=approval_engine,
+            policy=policy,
+            pack_context=pack_context,
+            tenant_id=tenant_id,
+            actor=actor,
+            approval_request_id=approval_request_id,
         )
 
     # Step 5 — tenant-max check (cpu_cores / memory_mb / walltime_s)

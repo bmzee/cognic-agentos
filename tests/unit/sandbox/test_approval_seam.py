@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import typing
 
+import pytest
+
 
 def test_refusal_vocabulary_carries_the_five_approval_values() -> None:
     # Wire-protocol-public (spec §4). The +5 join the Literal; the engine-absent
@@ -213,3 +215,222 @@ async def test_step9_input_always_carries_approval_verified_false_unwired() -> N
     )
     sent = rego.evaluate.await_args.kwargs["input"]
     assert sent["approval_verified"] is False
+
+
+# ---------------------------------------------------------------------------
+# T5+ engine fixtures (mirror 13.5b2's test_mcp_approval_seam.py shapes)
+# ---------------------------------------------------------------------------
+
+
+class _MutableClock:
+    """Advanceable engine clock (the expired-readmission test moves time past
+    the flow TTL; everything else uses the fixed default)."""
+
+    def __init__(self) -> None:
+        from datetime import UTC, datetime
+
+        self.now = datetime(2026, 6, 11, 12, 0, tzinfo=UTC)
+
+    def __call__(self) -> object:
+        return self.now
+
+
+class _StubApprovalPolicy:
+    """Fixed-flow classifier (OPA-free; mirrors test_routes.py::_StubPolicy)."""
+
+    def __init__(self, flow: str = "require_single_approval") -> None:
+        self._flow = flow
+
+    async def classify(self, *, risk_tier: str) -> str:
+        return self._flow
+
+
+async def _mk_approval_store(tmp_path: object) -> object:
+    import asyncio as _asyncio
+
+    from alembic import command
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from cognic_agentos.core.approval.storage import ApprovalRequestStore
+    from cognic_agentos.core.decision_history import DecisionHistoryStore
+    from cognic_agentos.db.migrations.alembic_config import make_alembic_config
+
+    url = f"sqlite+aiosqlite:///{tmp_path}/sandbox-seam.db"
+    cfg = make_alembic_config(url)
+    await _asyncio.to_thread(command.upgrade, cfg, "head")
+    return ApprovalRequestStore(DecisionHistoryStore(create_async_engine(url)))
+
+
+def _mk_approval_engine(store: object, *, flow: str, clock: object = None) -> object:
+    from datetime import UTC, datetime
+
+    from cognic_agentos.core.approval.engine import ApprovalEngine
+    from cognic_agentos.core.config import build_settings_without_env_file
+
+    return ApprovalEngine(
+        policy=_StubApprovalPolicy(flow),
+        store=store,  # type: ignore[arg-type]
+        settings=build_settings_without_env_file(),
+        clock=clock or (lambda: datetime(2026, 6, 11, 12, 0, tzinfo=UTC)),  # type: ignore[arg-type]
+    )
+
+
+def _admit_kwargs(**overrides: object) -> dict[str, object]:
+    """All-green admit_policy kwargs (mirrors test_admission_pipeline fixtures);
+    actor carries a REAL str subject — the envelope digests it."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from cognic_agentos.core.policy.engine import Decision
+    from cognic_agentos.sandbox.admission import KernelDefaultCredentialAdapter
+
+    rego = MagicMock()
+    rego.evaluate = AsyncMock(
+        return_value=Decision(
+            allow=True,
+            rule_matched="data.cognic.sandbox.admit.allow",
+            reasoning="ok",
+            decision_data=None,
+        )
+    )
+    catalog = MagicMock()
+    catalog.is_canonical.return_value = True
+    catalog.is_tenant_allow_listed.return_value = True
+    catalog.verify_cosign_or_refuse = AsyncMock(return_value=None)
+    catalog.verify_sbom_policy_or_refuse = AsyncMock(return_value=None)
+    base: dict[str, object] = dict(
+        tenant_id="t-1",
+        actor=MagicMock(subject="agent-1"),
+        pack_context=_valid_pack_context(
+            risk_tier="payment_action", data_classes=("payment_data",)
+        ),
+        catalog=catalog,
+        credential_adapter=KernelDefaultCredentialAdapter(),
+        rego_engine=rego,
+        settings=_passing_settings(),
+    )
+    base.update(overrides)
+    return base
+
+
+# ---------------------------------------------------------------------------
+# T5 — wired first-admission path
+# ---------------------------------------------------------------------------
+
+
+class TestWiredFirstAdmission:
+    async def test_high_tier_first_admission_refuses_pending_with_correlator(
+        self, tmp_path: object
+    ) -> None:
+        import uuid as _uuid
+
+        from cognic_agentos.sandbox.admission import admit_policy
+        from cognic_agentos.sandbox.protocol import SandboxLifecycleRefused
+
+        store = await _mk_approval_store(tmp_path)
+        engine = _mk_approval_engine(store, flow="require_4_eyes")
+        with pytest.raises(SandboxLifecycleRefused) as exc:
+            await admit_policy(
+                _valid_policy(),  # type: ignore[arg-type]
+                **_admit_kwargs(),  # type: ignore[arg-type]
+                approval_engine=engine,  # type: ignore[arg-type]
+            )
+        assert exc.value.reason == "sandbox_approval_pending"
+        assert exc.value.approval_request_id is not None
+        rid = _uuid.UUID(exc.value.approval_request_id)  # parseable correlator attr
+        detail = await store.load_detail(request_id=rid, tenant_id="t-1")  # type: ignore[attr-defined]
+        assert detail is not None and detail.state == "pending"
+        # Envelope-sourcing pins (spec §3.3/§3.4):
+        assert detail.tool_identity.startswith("sandbox:")
+        assert detail.redacted_context.startswith("sandbox_admission pack_id=")
+        assert "cognic.test_pack" in detail.redacted_context
+        assert detail.data_classes == ("payment_data",)
+
+    async def test_auto_flow_proceeds_without_approval_row(self, tmp_path: object) -> None:
+        # F2=B direction 1: engine classified auto_run -> admission proceeds
+        # (high DECLARED tier; static set bypassed on the wired path).
+        from cognic_agentos.sandbox.admission import admit_policy
+
+        store = await _mk_approval_store(tmp_path)
+        engine = _mk_approval_engine(store, flow="auto_run")
+        kwargs = _admit_kwargs()
+        await admit_policy(
+            _valid_policy(),  # type: ignore[arg-type]
+            **kwargs,  # type: ignore[arg-type]
+            approval_engine=engine,  # type: ignore[arg-type]
+        )
+        assert await store.list_pending("t-1") == []  # type: ignore[attr-defined]
+        # ...and approval_verified stays False on the auto path:
+        sent = kwargs["rego_engine"].evaluate.await_args.kwargs["input"]  # type: ignore[attr-defined]
+        assert sent["approval_verified"] is False
+
+    async def test_tightened_safe_tier_requires_approval(self, tmp_path: object) -> None:
+        # F2=B direction 2: overlay-tightened tools.rego on a safe tier.
+        from cognic_agentos.sandbox.admission import admit_policy
+        from cognic_agentos.sandbox.protocol import SandboxLifecycleRefused
+
+        store = await _mk_approval_store(tmp_path)
+        engine = _mk_approval_engine(store, flow="require_single_approval")
+        with pytest.raises(SandboxLifecycleRefused) as exc:
+            await admit_policy(
+                _valid_policy(),  # type: ignore[arg-type]
+                **_admit_kwargs(pack_context=_valid_pack_context(risk_tier="internal_write")),  # type: ignore[arg-type]
+                approval_engine=engine,  # type: ignore[arg-type]
+            )
+        assert exc.value.reason == "sandbox_approval_pending"
+
+    async def test_regulator_tier_required_refs_carries_admission_correlator(
+        self, tmp_path: object
+    ) -> None:
+        import uuid as _uuid
+
+        from cognic_agentos.sandbox.admission import admit_policy
+        from cognic_agentos.sandbox.protocol import SandboxLifecycleRefused
+
+        store = await _mk_approval_store(tmp_path)
+        engine = _mk_approval_engine(store, flow="require_4_eyes")
+        with pytest.raises(SandboxLifecycleRefused) as exc:
+            await admit_policy(
+                _valid_policy(),  # type: ignore[arg-type]
+                **_admit_kwargs(
+                    pack_context=_valid_pack_context(risk_tier="regulator_communication")
+                ),  # type: ignore[arg-type]
+                approval_engine=engine,  # type: ignore[arg-type]
+            )
+        assert exc.value.approval_request_id is not None
+        rid = _uuid.UUID(exc.value.approval_request_id)
+        detail = await store.load_detail(request_id=rid, tenant_id="t-1")  # type: ignore[attr-defined]
+        assert detail is not None
+        ref = detail.required_refs["audit_record_ref"]
+        assert ref.startswith("sandbox-admit-")  # §3.5 seam-minted correlator
+        assert ref in exc.value.detail  # examiner-followable from the refusal
+
+    async def test_engine_absent_fallback_byte_compat(self) -> None:
+        from cognic_agentos.sandbox.admission import admit_policy
+        from cognic_agentos.sandbox.protocol import SandboxLifecycleRefused
+
+        with pytest.raises(SandboxLifecycleRefused) as exc:
+            await admit_policy(
+                _valid_policy(),  # type: ignore[arg-type]
+                **_admit_kwargs(),  # type: ignore[arg-type]
+            )
+        assert exc.value.reason == "sandbox_high_risk_tier_refused_pre_13_5"
+        assert exc.value.approval_request_id is None
+
+    async def test_engine_absent_ignores_supplied_approval_request_id_fallback(self) -> None:
+        # PINNED CHOICE (plan review): engine-absent is byte-for-byte (§2) —
+        # a dangling correlator on the unwired path is INERT, never a new
+        # fail-loud branch. The fallback refusal fires identically and the
+        # exception carries NO correlator (the param was never read).
+        import uuid as _uuid
+
+        from cognic_agentos.sandbox.admission import admit_policy
+        from cognic_agentos.sandbox.protocol import SandboxLifecycleRefused
+
+        with pytest.raises(SandboxLifecycleRefused) as exc:
+            await admit_policy(
+                _valid_policy(),  # type: ignore[arg-type]
+                **_admit_kwargs(),  # type: ignore[arg-type]
+                approval_request_id=_uuid.uuid4(),
+            )
+        assert exc.value.reason == "sandbox_high_risk_tier_refused_pre_13_5"
+        assert exc.value.approval_request_id is None
