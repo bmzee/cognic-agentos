@@ -545,14 +545,25 @@ class TestRiskTierAllowListPinned:
         )
 
     def test_refusal_reason_closed_enum_pinned(self, host_module: Any) -> None:
-        """The Sprint-5 transitional rule has exactly one refusal
-        reason. Sprint 13.5 will extend this enum with the
-        approval-engine outcomes; until then, anything else is
-        drift."""
+        """Sprint 13.5b2 extended the Sprint-5 single-value enum with the
+        five approval-engine outcomes (ADR-014). The transitional
+        ``tool_approval_engine_not_available`` value is KEPT as the
+        engine-absent fallback this suite pins; anything outside the
+        6-value set is drift (mirror pin lives in
+        test_mcp_approval_seam.py)."""
         from typing import get_args
 
         actual = frozenset(get_args(host_module.ToolInvocationRefusalReason))
-        assert actual == frozenset({"tool_approval_engine_not_available"})
+        assert actual == frozenset(
+            {
+                "tool_approval_engine_not_available",
+                "tool_approval_pending",
+                "tool_approval_denied",
+                "tool_approval_expired",
+                "tool_approval_binding_mismatch",
+                "tool_approval_request_not_found",
+            }
+        )
 
     def test_refusal_exception_inherits_from_runtime_error(self, host_module: Any) -> None:
         """``MCPToolInvocationRefused`` is a runtime-side closed-enum
