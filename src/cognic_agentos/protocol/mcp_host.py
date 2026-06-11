@@ -246,6 +246,10 @@ class MCPServerEntry:
       - ``pack_signature_digest`` — cosign signature digest, carried
         into T11's audit rows for the ``pack_id`` ↔ signature
         correlation chain.
+      - ``data_classes`` — manifest ``[data_governance].data_classes``
+        carried at registration time (Sprint 13.5b2); feeds the
+        value-free ApprovalEnvelope on the wired approval path. Empty
+        default keeps pre-13.5b2 constructors green.
     """
 
     server_id: str
@@ -254,6 +258,7 @@ class MCPServerEntry:
     manifest_scopes: tuple[str, ...]
     risk_tier: str
     pack_signature_digest: str
+    data_classes: tuple[str, ...] = ()
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
