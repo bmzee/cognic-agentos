@@ -1912,6 +1912,14 @@ class Settings(BaseSettings):
             "MemoryPolicyRouter routes between the two."
         ),
     )
+    tools_policy_bundle: Path = Field(
+        default=Path("policies/_default/tools.rego"),
+        description=(
+            "Rego bundle for the tool-approval tier->flow OPAEngine "
+            "(data.cognic.tools.approval.flow). Single FILE (OPAEngine is a "
+            "single-file loader)."
+        ),
+    )
     memory_vector_recall_enabled: bool = Field(
         default=False,
         description=(

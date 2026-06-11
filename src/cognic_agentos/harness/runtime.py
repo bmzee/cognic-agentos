@@ -9,15 +9,19 @@ governed-memory API factory (T6). Runs async inside the FastAPI lifespan after
 from __future__ import annotations
 
 import dataclasses
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import httpx as _httpx
 
+from cognic_agentos.core.approval.engine import ApprovalEngine
+from cognic_agentos.core.approval.policy import ApprovalPolicy
+from cognic_agentos.core.approval.storage import ApprovalRequestStore
 from cognic_agentos.core.audit import AuditStore
 from cognic_agentos.core.config_overlay.resolver import TenantConfigResolver
 from cognic_agentos.core.config_overlay.storage import TenantConfigOverlayStore
 from cognic_agentos.core.decision_history import DecisionHistoryStore
+from cognic_agentos.core.policy.engine import OPAEngine
 from cognic_agentos.core.sla import SLAPolicy
 from cognic_agentos.db.adapters.secret_resolution import resolve_secret_field
 from cognic_agentos.llm.concurrency import ProfileRateLimiter
@@ -50,6 +54,11 @@ class Runtime:
     # while the portal config-overlay router consumes the same store + resolver.
     config_overlay_store: TenantConfigOverlayStore
     config_overlay_resolver: TenantConfigResolver
+    # ADR-014 (Sprint 13.5b1) — built unconditionally (mirrors the config-overlay
+    # posture; approval needs only the relational engine). The portal approval
+    # router consumes both; 13.5b2's MCP-host seam reuses the SAME engine instance.
+    approval_store: ApprovalRequestStore
+    approval_engine: ApprovalEngine
     _http_client: _httpx.AsyncClient
 
     async def aclose(self) -> None:
@@ -80,6 +89,28 @@ async def build_runtime(settings: Settings, adapters: Adapters) -> Runtime:
         base=settings,
         audit=audit_store,
         throttle_s=settings.config_overlay_invalid_at_read_throttle_s,
+    )
+
+    # --- ADR-014 (Sprint 13.5b1) approval store + policy + engine ---
+    # Built unconditionally (mirrors the config-overlay posture — approval needs
+    # only the relational engine) and BEFORE the leak-prone http_client: the
+    # OPAEngine.create call is fallible (bundle read + policy.bundle_loaded
+    # decision-history emit), so it belongs in the "all fallible construction
+    # before http_client" zone. The SINGLE engine instance is shared: the portal
+    # approval router (create_app kwargs) + 13.5b2's MCP-host seam both reuse it.
+    approval_store = ApprovalRequestStore(decision_history_store)
+    approval_opa = await OPAEngine.create(
+        bundle_path=settings.tools_policy_bundle,
+        audit_store=audit_store,
+        decision_history_store=decision_history_store,
+        opa_path=settings.opa_path,
+        eval_timeout_s=settings.opa_eval_timeout_s,
+    )
+    approval_engine = ApprovalEngine(
+        policy=ApprovalPolicy(opa_engine=approval_opa),
+        store=approval_store,
+        settings=settings,
+        clock=lambda: datetime.now(UTC),
     )
 
     # --- Gateway sub-deps (the gateway + http_client are built LAST — see below) ---
@@ -123,8 +154,11 @@ async def build_runtime(settings: Settings, adapters: Adapters) -> Runtime:
         from cognic_agentos.core.memory.consent import ConsentValidator
         from cognic_agentos.core.memory.storage import PostgresMemoryAdapter, RedisMemoryAdapter
         from cognic_agentos.core.memory.vector import MemoryVectorIndex
-        from cognic_agentos.core.policy.engine import OPAEngine
         from cognic_agentos.harness.memory_policy import MemoryPolicyRouter as _Router
+
+        # NOTE: OPAEngine is imported at module top since Sprint 13.5b1 (the
+        # approval trio above constructs one unconditionally) — the memory
+        # branch reuses that import.
 
         memory_engine = await OPAEngine.create(
             bundle_path=settings.memory_policy_bundle,
@@ -217,5 +251,7 @@ async def build_runtime(settings: Settings, adapters: Adapters) -> Runtime:
         memory_policy=memory_policy,
         config_overlay_store=overlay_store,
         config_overlay_resolver=overlay_resolver,
+        approval_store=approval_store,
+        approval_engine=approval_engine,
         _http_client=http_client,
     )

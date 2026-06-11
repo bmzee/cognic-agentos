@@ -31,15 +31,17 @@ from cognic_agentos.portal.rbac.scopes import (
     UIRBACScope,
 )
 
-_EXPECTED = {
-    "tool.approve.customer_data",
-    "tool.approve.customer_data_write",
-    "tool.approve.payment",
-    "tool.approve.regulator",
-    "tool.approve.cross_tenant",
-    "tool.approve.high_risk_custom",
-    "tool.approve.observe",
-}
+_EXPECTED: frozenset[ToolApprovalRBACScope] = frozenset(
+    {
+        "tool.approve.customer_data",
+        "tool.approve.customer_data_write",
+        "tool.approve.payment",
+        "tool.approve.regulator",
+        "tool.approve.cross_tenant",
+        "tool.approve.high_risk_custom",
+        "tool.approve.observe",
+    }
+)
 
 
 def test_tool_approval_scope_family_has_exactly_seven_values() -> None:

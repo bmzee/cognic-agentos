@@ -24,14 +24,11 @@ Optional:
 from __future__ import annotations
 
 import os
-from datetime import UTC, datetime
 
 import httpx
 import pytest
 from sqlalchemy import select
 
-from cognic_agentos.core.audit import _chain_heads, _metadata
-from cognic_agentos.core.canonical import ZERO_HASH
 from cognic_agentos.core.decision_history import _decision_history
 from cognic_agentos.db.adapters.protocols import AdapterHealth
 from cognic_agentos.portal.rbac.actor import Actor
@@ -122,22 +119,10 @@ async def test_live_eval_judge_emits_gateway_span_and_chain_row(
     await adapters.open_all()
     runtime = None
     try:
-        # Seed the chain tables + heads on the pool engine — build_runtime constructs
-        # DecisionHistoryStore but does NOT migrate/seed; open_all() only connects.
-        # Mirrors test_runtime.py::test_build_runtime_wires_memory_when_cache_present.
+        # Chain tables + chain heads come from InMemoryRelationalAdapter.connect()
+        # (Sprint 13.5b1 — build_runtime's unconditional approval OPAEngine.create
+        # needs them on EVERY path), so no test-local seeding here.
         eng = adapters.relational.engine
-        async with eng.begin() as conn:
-            await conn.run_sync(_metadata.create_all)
-            for chain_id in ("audit_event", "decision_history"):
-                await conn.execute(
-                    _chain_heads.insert().values(
-                        chain_id=chain_id,
-                        latest_sequence=0,
-                        latest_hash=ZERO_HASH,
-                        updated_at=datetime.now(UTC),
-                    )
-                )
-
         runtime = await build_runtime(settings, adapters)
         assert runtime.llm_gateway._observability is recording  # the seam under test
 
