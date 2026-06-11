@@ -108,11 +108,18 @@ import hashlib
 import logging
 import re
 import time
+import uuid
 from collections.abc import Mapping
 from typing import Any, Literal
 
 import httpx
 
+from cognic_agentos.core.approval._types import (
+    APPROVAL_REDACTED_CONTEXT_MAX_LEN,
+    ApprovalEnvelope,
+    ApprovalTransitionRefused,
+)
+from cognic_agentos.core.approval.engine import ApprovalEngine
 from cognic_agentos.core.audit import AuditEvent, AuditStore
 from cognic_agentos.core.canonical import canonical_bytes
 from cognic_agentos.core.config import Settings
@@ -568,6 +575,17 @@ def _canonical_tool_identity(*, server_id: str, tool_name: str) -> str:
     return f"mcp:{digest}"
 
 
+def _approval_redacted_context(*, server_id: str, tool_name: str) -> str:
+    """Bounded, sanitized, human-readable pair for the value-free envelope
+    (13.5b2 spec §3.3) — reviewers see WHICH tool in the 13.5b1 portal detail
+    panel while tool_identity stays the collision-proof digest."""
+    text = (
+        f"mcp_tool server_id={_sanitize_string_for_operator_surface(server_id)} "
+        f"tool_name={_sanitize_string_for_operator_surface(tool_name)}"
+    )
+    return text[:APPROVAL_REDACTED_CONTEXT_MAX_LEN]
+
+
 #: Closed-enum vocabulary for runtime tool-invocation refusals.
 #: Wire-protocol-public (AGENTS.md MCP-host stop rule). Sprint 5 shipped
 #: exactly one value (the ADR-014 transitional rule, kept as the
@@ -645,7 +663,14 @@ class MCPHost:
         audit_store: AuditStore,
         decision_history_store: DecisionHistoryStore,
         settings: Settings,
+        approval_engine: ApprovalEngine | None = None,
     ) -> None:
+        # ``approval_engine`` (Sprint 13.5b2, ADR-014): None (default) keeps
+        # the Sprint-5 transitional gate byte-for-byte (engine-absent
+        # fallback); wired, call_tool consults the engine-authoritative
+        # approval path for EVERY call. The production composition root
+        # threads ``runtime.approval_engine`` in a later sprint — 13.5b2 is
+        # seam-cutover only (no production host construction path exists).
         require_mcp()
 
         # R2 P2 #1: reject unknown transport-mapping keys at startup
@@ -730,6 +755,7 @@ class MCPHost:
         self._audit_store = audit_store
         self._decision_history_store = decision_history_store
         self._settings = settings
+        self._approval_engine = approval_engine
         # R1 P2 #2: cache key includes tenant_id + scopes (NOT just
         # server_id). Cross-tenant cache leak would let tenant B
         # receive tenant A's already-cleared tool catalogue without
@@ -1008,6 +1034,121 @@ class MCPHost:
 
     # --- call_tool ----------------------------------------------------------
 
+    async def _approval_gate(
+        self,
+        *,
+        entry: MCPServerEntry,
+        tool_name: str,
+        arguments: Mapping[str, Any],
+        request_id: str,
+        tenant_id: str,
+        originator_subject: str,
+        approval_request_id: uuid.UUID | None,
+        declared_risk_tier: str,
+    ) -> None:
+        """ADR-014 engine-authoritative approval consult (13.5b2 spec §3).
+
+        Returns None to proceed to dispatch (auto_run classification or a
+        verified grant); raises MCPToolInvocationRefused (after emitting the
+        refused evidence row) otherwise. ApprovalEnvelopeInvalid deliberately
+        propagates to the outer generic-Exception arm (spec §3.5 — system
+        error, not a policy refusal). Runs INSIDE the evidence-emitting try
+        (spec §3.6) and BEFORE token-acquire/session-open (T10 sequencing).
+        """
+        engine = self._approval_engine
+        assert engine is not None  # call site is gated on wiredness
+        args_digest = hashlib.sha256(canonical_bytes(dict(arguments))).digest()
+        tool_identity = _canonical_tool_identity(server_id=entry.server_id, tool_name=tool_name)
+        if approval_request_id is not None:
+            raise NotImplementedError(
+                "re-call verify path lands at Sprint-13.5b2 T5 (ADR-014 §3.2)"
+            )
+        required_refs: dict[str, str] = {}
+        if declared_risk_tier == "regulator_communication":
+            # Spec F3: the invocation request_id IS the audit correlator
+            # every call_tool evidence row is keyed by.
+            required_refs = {"audit_record_ref": request_id}
+        envelope = ApprovalEnvelope(
+            risk_tier=declared_risk_tier,
+            tool_identity=tool_identity,
+            originator_subject=originator_subject,
+            tenant_id=tenant_id,
+            data_classes=tuple(entry.data_classes),
+            args_digest=args_digest,
+            redacted_context=_approval_redacted_context(
+                server_id=entry.server_id, tool_name=tool_name
+            ),
+            required_refs=required_refs,
+        )
+        try:
+            request = await engine.create_request(envelope=envelope)
+        except ApprovalTransitionRefused as exc:
+            if exc.reason == "auto_tier_no_approval_required":
+                return  # tools.rego classified auto_run -> dispatch
+            raise  # defensive: unexpected create-side refusal -> errored arm
+        await self._emit_approval_refused(
+            reason="tool_approval_pending",
+            entry=entry,
+            tool_name=tool_name,
+            request_id=request_id,
+            tenant_id=tenant_id,
+            declared_risk_tier=declared_risk_tier,
+            approval_request_id=str(request.request_id),
+            flow=request.flow,
+        )
+        safe_tool_name = _sanitize_string_for_operator_surface(tool_name)
+        safe_server_id = _sanitize_string_for_operator_surface(entry.server_id)
+        raise MCPToolInvocationRefused(
+            "tool_approval_pending",
+            f"tool {safe_tool_name!r} on server {safe_server_id!r} requires "
+            f"approval (flow={request.flow}); request "
+            f"{request.request_id} is pending. Grant via the portal approval "
+            f"API, then re-call with approval_request_id.",
+            server_id=entry.server_id,
+            tool_name=tool_name,
+            declared_risk_tier=declared_risk_tier,
+            approval_request_id=str(request.request_id),
+            flow=request.flow,
+        )
+
+    async def _emit_approval_refused(
+        self,
+        *,
+        reason: ToolInvocationRefusalReason,
+        entry: MCPServerEntry,
+        tool_name: str,
+        request_id: str,
+        tenant_id: str,
+        declared_risk_tier: str,
+        approval_request_id: str,
+        flow: str | None = None,
+    ) -> None:
+        """Refused evidence for the approval outcomes (13.5b2 spec §4/§6):
+        one audit row + one decision row through the SAME _emit_call_evidence
+        helper; mcp_session_id=None + token=None (truthfully pre-acquire);
+        flow included only WHEN KNOWN."""
+        extra: dict[str, Any] = {
+            "refusal_reason": reason,
+            "declared_risk_tier": declared_risk_tier,
+            "approval_request_id": approval_request_id,
+        }
+        if flow is not None:
+            extra["flow"] = flow
+        await self._emit_call_evidence(
+            event_type="audit.tool_invocation_refused",
+            decision="refused",
+            decision_reason=reason,
+            entry=entry,
+            tool_name=tool_name,
+            request_id=request_id,
+            tenant_id=tenant_id,
+            declared_risk_tier=declared_risk_tier,
+            mcp_session_id=None,
+            token=None,
+            extra_audit_payload=extra,
+            extra_decision_payload=dict(extra),
+        )
+
     async def call_tool(
         self,
         *,
@@ -1016,6 +1157,8 @@ class MCPHost:
         arguments: Mapping[str, Any],
         request_id: str,
         tenant_id: str,
+        originator_subject: str = "",
+        approval_request_id: uuid.UUID | None = None,
     ) -> CallResult:
         """Dispatch a tool call with auth-retry semantics.
 
@@ -1059,8 +1202,13 @@ class MCPHost:
 
         # T10 — ADR-014 §"Sprint 5 (transitional rule)": fail-closed
         # for every risk_tier above ``internal_write``. Mechanical,
-        # not configurable. Sprint 13.5 lands the approval engine and
-        # removes this gate. The gate fires BEFORE token-acquire and
+        # not configurable. Sprint 13.5b2 kept this gate as the
+        # ENGINE-ABSENT fallback, byte-for-byte: when
+        # ``approval_engine`` is wired, classification is
+        # engine-authoritative (the _approval_gate consult inside the
+        # evidence-emitting try below) and this static set is NEVER
+        # consulted — a bank overlay that tightens tools.rego is
+        # honoured. The gate fires BEFORE token-acquire and
         # BEFORE session-open — a refused call MUST NOT touch the AS
         # or the MCP server, both for security (don't burn tokens on
         # refusals) and for audit cleanliness (a refusal row is the
@@ -1075,7 +1223,7 @@ class MCPHost:
         # coerces to a bounded-length string that's never in the
         # allow-list.
         declared_risk_tier = _normalize_risk_tier_for_gate(entry.risk_tier)
-        if declared_risk_tier not in _ADR_014_LOW_RISK_TIERS:
+        if self._approval_engine is None and declared_risk_tier not in _ADR_014_LOW_RISK_TIERS:
             await self._emit_call_evidence(
                 event_type="audit.tool_invocation_refused",
                 decision="refused",
@@ -1135,6 +1283,22 @@ class MCPHost:
         #     reached the server once.
         ctx = _DispatchContext()
         try:
+            if self._approval_engine is not None:
+                # Sprint 13.5b2 (ADR-014): the engine-authoritative approval
+                # consult. Runs INSIDE the evidence-emitting try (spec §3.6)
+                # so ApprovalEnvelopeInvalid reaches the generic-Exception
+                # arm below (ERRORED row), and BEFORE _call_tool_inner so a
+                # refused call never touches the AS or the MCP server.
+                await self._approval_gate(
+                    entry=entry,
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    request_id=request_id,
+                    tenant_id=tenant_id,
+                    originator_subject=originator_subject,
+                    approval_request_id=approval_request_id,
+                    declared_risk_tier=declared_risk_tier,
+                )
             payload, session, used_token = await self._call_tool_inner(
                 entry=entry,
                 tool_name=tool_name,
@@ -1143,6 +1307,13 @@ class MCPHost:
                 tenant_id=tenant_id,
                 dispatch_context=ctx,
             )
+        except MCPToolInvocationRefused:
+            # Spec §3.6 guard: refusal evidence was already emitted at the
+            # refusal site (_approval_gate). MCPToolInvocationRefused
+            # inherits RuntimeError (test-pinned), so without this bare
+            # re-raise the generic-Exception arm below would DOUBLE-EMIT an
+            # errored row on top of the refused row.
+            raise
         except MCPAuthzError as exc:
             # Classification rules:
             #   1. ``mcp_authorisation_lost`` (post-dispatch
