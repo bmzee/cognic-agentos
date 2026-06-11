@@ -64,6 +64,7 @@ from cognic_agentos.observability import (
     silence_uvicorn_access_log,
 )
 from cognic_agentos.packs.storage import PackRecordStore
+from cognic_agentos.portal.api.approvals.routes import build_approval_routes
 from cognic_agentos.portal.api.config_overlay.routes import build_config_overlay_routes
 from cognic_agentos.portal.api.models import build_models_router
 from cognic_agentos.portal.api.packs import build_packs_router
@@ -94,6 +95,13 @@ if TYPE_CHECKING:
     # deployments). The lazy import of ``build_memory_routes`` inside the
     # conditional mount block keeps the portal import graph free of the memory
     # routes package when no factory is wired.
+    # Sprint 13.5b1 (ADR-014): type-only refs for the create_app approval
+    # kwargs (mirrors the config-overlay pattern below — the route factory
+    # ``build_approval_routes`` is imported at runtime; the store + engine are
+    # supplied PRE-CONSTRUCTED by build_runtime / the deploy entrypoint).
+    from cognic_agentos.core.approval.engine import ApprovalEngine
+    from cognic_agentos.core.approval.storage import ApprovalRequestStore
+
     # ADR-023 (Wave-2): type-only refs for the create_app config-overlay
     # kwargs. The route factory ``build_config_overlay_routes`` is imported at
     # runtime below (it pulls only already-imported core/rbac deps); the store +
@@ -274,6 +282,14 @@ def create_app(
     # (build_runtime) constructs them; a bank-overlay caller threads them here.
     config_overlay_store: TenantConfigOverlayStore | None = None,
     config_overlay_resolver: TenantConfigResolver | None = None,
+    # ADR-014 (Sprint 13.5b1): optional approval-router deps. When BOTH are
+    # wired, create_app mounts the approval router (queue/detail/grant/
+    # grant-second/deny) + sets app.state.approval_router_mounted. Same opt-in
+    # None-default pattern as config_overlay_store/_resolver — build_runtime
+    # constructs the pair; the deploy entrypoint threads them here. The SAME
+    # engine instance is reused by 13.5b2's MCP-host seam.
+    approval_store: ApprovalRequestStore | None = None,
+    approval_engine: ApprovalEngine | None = None,
     trust_gate: TrustGate | None = None,
     trust_root_resolver: TrustRootResolver | None = None,
     model_registry_store: ModelRecordStore | None = None,
@@ -906,6 +922,37 @@ def create_app(
                     "create_app(config_overlay_store=<store>, "
                     "config_overlay_resolver=<resolver>) wires the "
                     "config-overlay router; BOTH are required. The "
+                    "composition root build_runtime constructs them as a "
+                    "pair, so a partial config indicates a hand-wired caller "
+                    "missing one half."
+                ),
+            },
+        )
+
+    # ──────────────────────────────────────────────────────────────────
+    # Sprint 13.5b1 — approval router mount (ADR-014).
+    #
+    # Mirrors the config-overlay 3-state mount above: BOTH deps -> mount
+    # under /api/v1/approvals (the router carries its own prefix) + set
+    # the introspection flag; partial config -> a single structured
+    # fail-loud warning; neither -> no mount (opt-in surface). No
+    # actor_binder gate at the mount boundary for the same reason as the
+    # overlay block: the routes read the binder from app.state at
+    # REQUEST time and fail loud there. The ENGINE stays authoritative
+    # for every approval decision (spec §5) — this block only wires it.
+    # ──────────────────────────────────────────────────────────────────
+    app.state.approval_router_mounted = False
+    if approval_store is not None and approval_engine is not None:
+        app.include_router(build_approval_routes(store=approval_store, engine=approval_engine))
+        app.state.approval_router_mounted = True
+    elif approval_store is not None or approval_engine is not None:
+        logger.warning(
+            "portal.approval_router_unmounted_partial_config",
+            extra={
+                "reason": "approval_store_and_engine_both_required",
+                "remediation": (
+                    "create_app(approval_store=<store>, approval_engine=<engine>) "
+                    "wires the approval router; BOTH are required. The "
                     "composition root build_runtime constructs them as a "
                     "pair, so a partial config indicates a hand-wired caller "
                     "missing one half."

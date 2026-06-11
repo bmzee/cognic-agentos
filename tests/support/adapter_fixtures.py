@@ -48,6 +48,44 @@ class InMemoryRelationalAdapter:
         )
         self._session_factory = async_sessionmaker(self._engine, expire_on_commit=False)
         self._closed = False
+        await self._create_chain_schema(self._engine)
+
+    @staticmethod
+    async def _create_chain_schema(engine: AsyncEngine) -> None:
+        """Create the Sprint-1 chain tables + seed the two chain heads.
+
+        Sprint 13.5b1: ``build_runtime`` constructs the approval trio
+        UNCONDITIONALLY, and ``OPAEngine.create`` emits ``policy.bundle_loaded``
+        into decision history at startup — so every test that drives
+        ``build_runtime`` (directly or via the app lifespan) needs the chain
+        schema present BEFORE the lifespan runs. The adapter is the only hook
+        that runs early enough for lifespan-driven tests. Idempotent: create_all
+        is checkfirst, and the head seed skips chain_ids that already exist
+        (tests that seed heads themselves stay green).
+        """
+        from datetime import UTC, datetime
+
+        from sqlalchemy import select
+
+        from cognic_agentos.core.audit import _chain_heads, _metadata
+        from cognic_agentos.core.canonical import ZERO_HASH
+        from cognic_agentos.core.decision_history import (  # noqa: F401  (registers table in _metadata)
+            _decision_history,
+        )
+
+        async with engine.begin() as conn:
+            await conn.run_sync(_metadata.create_all)
+            existing = set((await conn.execute(select(_chain_heads.c.chain_id))).scalars().all())
+            for chain_id in ("audit_event", "decision_history"):
+                if chain_id not in existing:
+                    await conn.execute(
+                        _chain_heads.insert().values(
+                            chain_id=chain_id,
+                            latest_sequence=0,
+                            latest_hash=ZERO_HASH,
+                            updated_at=datetime.now(UTC),
+                        )
+                    )
 
     def session(self) -> Any:
         if self._session_factory is None:

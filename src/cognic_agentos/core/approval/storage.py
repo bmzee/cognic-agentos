@@ -24,6 +24,7 @@ from sqlalchemy import (
     Column,
     Index,
     LargeBinary,
+    Select,
     String,
     Table,
     Text,
@@ -126,6 +127,50 @@ class ApprovalRequestRow:
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
+class ApprovalRequestSummary:
+    """Lighter list-item projection returned by
+    :meth:`ApprovalRequestStore.list_pending` (no ``redacted_context`` body —
+    that is the detail view)."""
+
+    request_id: uuid.UUID
+    tenant_id: str
+    flow: str
+    risk_tier: str
+    tool_identity: str
+    originator_subject: str
+    state: ApprovalState
+    first_approver: str | None
+    created_at: datetime
+    expires_at: datetime
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class ApprovalRequestDetail:
+    """Full reviewer detail projection returned by
+    :meth:`ApprovalRequestStore.load_detail` — every ``ApprovalRequestRow`` field
+    PLUS ``data_classes`` + ``redacted_context`` + ``created_at`` for the reviewer
+    panel. Digests stay ``bytes`` here; the DTO renders them hex."""
+
+    request_id: uuid.UUID
+    tenant_id: str
+    state: ApprovalState
+    flow: str
+    risk_tier: str
+    tool_identity: str
+    originator_subject: str
+    envelope_digest: bytes
+    args_digest: bytes
+    data_classes: tuple[str, ...]
+    redacted_context: str
+    required_refs: dict[str, str]
+    first_approver: str | None
+    second_approver: str | None
+    denier: str | None
+    created_at: datetime
+    expires_at: datetime
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
 class _LockedSnapshot:
     """Row-locked projection threaded ``_precondition`` -> ``_build_record`` so the
     chain payload is the canonical evidence snapshot (post-UPDATE state +
@@ -169,6 +214,34 @@ def _value_free_payload(
         "second_approver": snap.second_approver,
         "denier": snap.denier,
     }
+
+
+#: The actionable states a reviewer can act on (the queue). Terminal states
+#: (granted / denied / expired) are excluded from ``list_pending``.
+_ACTIONABLE_STATES: Final[tuple[str, ...]] = ("pending", "awaiting_second")
+
+
+def _build_list_pending_stmt(
+    tenant_id: str, *, limit: int, cursor: uuid.UUID | None
+) -> Select[Any]:
+    """SOLE query-construction path for :meth:`ApprovalRequestStore.list_pending`.
+    The SQL-shape regression imports this SAME builder (no vacuous duplicate
+    select). WHERE: ``tenant_id == :tenant_id`` (ALWAYS — the server-side tenant
+    boundary) AND ``state IN ('pending','awaiting_second')`` (ALWAYS) AND
+    ``request_id > :cursor`` (when cursor non-None). Ordered by ``request_id``;
+    the ``ix_approval_requests_tenant_state`` composite index backs the lead
+    columns."""
+    stmt = (
+        select(_approval_requests)
+        .where(
+            _approval_requests.c.tenant_id == tenant_id,
+            _approval_requests.c.state.in_(_ACTIONABLE_STATES),
+        )
+        .order_by(_approval_requests.c.request_id)
+    )
+    if cursor is not None:
+        stmt = stmt.where(_approval_requests.c.request_id > cursor)
+    return stmt.limit(limit)
 
 
 class ApprovalRequestStore:
@@ -407,3 +480,66 @@ class ApprovalRequestStore:
                 )
             ).first()
         return row[0] if row is not None else None
+
+    async def list_pending(
+        self, tenant_id: str, *, limit: int = 50, cursor: uuid.UUID | None = None
+    ) -> list[ApprovalRequestSummary]:
+        """The reviewer queue: actionable (``pending`` + ``awaiting_second``)
+        requests for ``tenant_id``, keyset-paginated by ``request_id``. Tenant
+        scoping is the WHERE clause (no in-handler filter can leak cross-tenant
+        rows)."""
+        stmt = _build_list_pending_stmt(tenant_id, limit=limit, cursor=cursor)
+        async with self._engine.connect() as conn:
+            rows = (await conn.execute(stmt)).all()
+        return [
+            ApprovalRequestSummary(
+                request_id=r.request_id,
+                tenant_id=r.tenant_id,
+                flow=r.flow,
+                risk_tier=r.risk_tier,
+                tool_identity=r.tool_identity,
+                originator_subject=r.originator_subject,
+                state=r.state,
+                first_approver=r.first_approver,
+                created_at=r.created_at.replace(tzinfo=r.created_at.tzinfo or UTC),
+                expires_at=r.expires_at.replace(tzinfo=r.expires_at.tzinfo or UTC),
+            )
+            for r in rows
+        ]
+
+    async def load_detail(
+        self, *, request_id: uuid.UUID, tenant_id: str
+    ) -> ApprovalRequestDetail | None:
+        """Tenant-scoped reviewer detail read; cross-tenant / unknown -> ``None``
+        (the route maps None -> 404 per the cross-tenant-invisibility doctrine).
+        Richer than the engine-facing :meth:`load`."""
+        async with self._engine.begin() as conn:
+            row = (
+                await conn.execute(
+                    select(_approval_requests).where(
+                        _approval_requests.c.request_id == request_id,
+                        _approval_requests.c.tenant_id == tenant_id,
+                    )
+                )
+            ).first()
+        if row is None:
+            return None
+        return ApprovalRequestDetail(
+            request_id=row.request_id,
+            tenant_id=row.tenant_id,
+            state=row.state,
+            flow=row.flow,
+            risk_tier=row.risk_tier,
+            tool_identity=row.tool_identity,
+            originator_subject=row.originator_subject,
+            envelope_digest=row.envelope_digest,
+            args_digest=row.args_digest,
+            data_classes=tuple(row.data_classes),
+            redacted_context=row.redacted_context,
+            required_refs=dict(row.required_refs),
+            first_approver=row.first_approver,
+            second_approver=row.second_approver,
+            denier=row.denier,
+            created_at=row.created_at.replace(tzinfo=row.created_at.tzinfo or UTC),
+            expires_at=row.expires_at.replace(tzinfo=row.expires_at.tzinfo or UTC),
+        )

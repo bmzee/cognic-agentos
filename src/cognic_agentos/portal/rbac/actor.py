@@ -43,6 +43,7 @@ from cognic_agentos.portal.rbac.scopes import (  # noqa: F401  (ScopeSet kept fo
     ModelRBACScope,
     PackRBACScope,
     ScopeSet,
+    ToolApprovalRBACScope,
     UIRBACScope,
 )
 
@@ -115,6 +116,12 @@ class Actor(pydantic.BaseModel):
     #: other family. Additive — pre-ADR-023 actors still construct cleanly.
     #: Pinned by
     #: ``tests/unit/portal/rbac/test_config_overlay_scopes.py``.
+    #: Sprint 13.5b1 (ADR-014) — further widened with ``ToolApprovalRBACScope``
+    #: so a reviewer/examiner actor can carry tool.approve.{observe,customer_data,
+    #: …} for the portal approval API. The 13.5a vocabulary lived only in
+    #: ``scopes.py``; the portal-boundary wiring is 13.5b1 work. Additive —
+    #: pre-13.5b1 actors still construct cleanly. Pinned by
+    #: ``tests/unit/portal/rbac/test_tool_approval_scopes.py``.
     scopes: frozenset[
         PackRBACScope
         | UIRBACScope
@@ -124,6 +131,7 @@ class Actor(pydantic.BaseModel):
         | EmergencyRBACScope
         | EvalRBACScope
         | ConfigOverlayRBACScope
+        | ToolApprovalRBACScope
     ]
     actor_type: ActorType
 

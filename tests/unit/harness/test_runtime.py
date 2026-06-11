@@ -84,13 +84,6 @@ async def test_build_runtime_wires_memory_when_cache_present(
     """cache_driver='memory' -> build_runtime wires the factory + the two-bundle router.
     Construction is opa-binary-free (engines warn+defer without the binary); the rego
     FILES must exist (they do). End-to-end memory ALLOW is env-gated, out of T6."""
-    from datetime import UTC, datetime
-
-    from cognic_agentos.core.audit import _chain_heads, _metadata
-    from cognic_agentos.core.canonical import ZERO_HASH
-    from cognic_agentos.core.decision_history import (  # noqa: F401  (ensures table in _metadata)
-        _decision_history,
-    )
     from cognic_agentos.core.emergency.kill_switches import RedisMemoryWriteFreezeKillSwitch
     from cognic_agentos.core.memory._context import MemoryCallerContext
     from cognic_agentos.core.memory.api import MemoryAPI
@@ -102,22 +95,12 @@ async def test_build_runtime_wires_memory_when_cache_present(
     )
     adapters = build_adapters(s, registry=memory_registry)
     await adapters.open_all()
-    # Create the chain + memory tables on the pool's relational engine + seed chain heads
-    # (mirrors tests/unit/core/memory/conftest.py::_mem_engine), so OPAEngine.create's
-    # policy.bundle_loaded emit works.
+    # Chain tables + chain heads come from InMemoryRelationalAdapter.connect()
+    # (Sprint 13.5b1 — build_runtime's unconditional approval OPAEngine.create
+    # needs them on EVERY path). Only the memory_records table is test-local.
     eng = adapters.relational.engine
     async with eng.begin() as conn:
-        await conn.run_sync(_metadata.create_all)
         await conn.run_sync(_memory_records.metadata.create_all)
-        for chain_id in ("audit_event", "decision_history"):
-            await conn.execute(
-                _chain_heads.insert().values(
-                    chain_id=chain_id,
-                    latest_sequence=0,
-                    latest_hash=ZERO_HASH,
-                    updated_at=datetime.now(UTC),
-                )
-            )
     try:
         runtime = await build_runtime(s, adapters)
         assert runtime.memory_api_factory is not None
