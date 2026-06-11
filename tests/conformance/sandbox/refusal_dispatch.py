@@ -791,6 +791,60 @@ async def _trigger_sandbox_tenant_config_overlay_invalid(
     yield
 
 
+@asynccontextmanager
+async def _trigger_sandbox_approval_pending(backend: Any, ctx: Any) -> AsyncIterator[None]:
+    """Sprint 13.5c1 (ADR-014) — engine-wired ``admit_policy`` Step-4
+    consult: a non-auto flow creates the approval request and refuses
+    pending (first admission), or a re-admission finds the request
+    still ``pending`` / ``awaiting_second``.
+
+    No-op registration envelope per the ADR-023 precedent: the refusal
+    is seam-unit-proven (13.5c1 is seam-only — no production
+    Runtime->sandbox engine wiring). Behaviour coverage lives at
+    ``tests/unit/sandbox/test_approval_seam.py``.
+    """
+    yield
+
+
+@asynccontextmanager
+async def _trigger_sandbox_approval_denied(backend: Any, ctx: Any) -> AsyncIterator[None]:
+    """Sprint 13.5c1 (ADR-014) — re-admission against a ``denied``
+    approval request. Seam-unit-proven per the ADR-023 precedent;
+    behaviour coverage at ``tests/unit/sandbox/test_approval_seam.py``."""
+    yield
+
+
+@asynccontextmanager
+async def _trigger_sandbox_approval_expired(backend: Any, ctx: Any) -> AsyncIterator[None]:
+    """Sprint 13.5c1 (ADR-014) — re-admission against an ``expired``
+    (incl. lazily-expired) approval request. Seam-unit-proven per the
+    ADR-023 precedent; behaviour coverage at
+    ``tests/unit/sandbox/test_approval_seam.py``."""
+    yield
+
+
+@asynccontextmanager
+async def _trigger_sandbox_approval_binding_mismatch(backend: Any, ctx: Any) -> AsyncIterator[None]:
+    """Sprint 13.5c1 (ADR-014) — re-admission whose policy / pack
+    identity diverges from the granted binding (e.g. a runtime_image
+    swap or a read_only_root flip). Seam-unit-proven per the ADR-023
+    precedent; behaviour coverage at
+    ``tests/unit/sandbox/test_approval_seam.py``."""
+    yield
+
+
+@asynccontextmanager
+async def _trigger_sandbox_approval_request_not_found(
+    backend: Any, ctx: Any
+) -> AsyncIterator[None]:
+    """Sprint 13.5c1 (ADR-014) — re-admission with an unknown OR
+    cross-tenant ``approval_request_id`` (indistinguishable by
+    construction — the engine load is tenant-scoped). Seam-unit-proven
+    per the ADR-023 precedent; behaviour coverage at
+    ``tests/unit/sandbox/test_approval_seam.py``."""
+    yield
+
+
 #: Public registry — maps every wire-public ``SandboxRefusalReason``
 #: value to a trigger factory. The membership pin at
 #: ``test_refusal_taxonomy.py`` asserts this dict's keyset equals
@@ -800,8 +854,10 @@ async def _trigger_sandbox_tenant_config_overlay_invalid(
 #: When adding a new ``SandboxRefusalReason`` value at
 #: ``src/cognic_agentos/sandbox/protocol.py``, add the corresponding
 #: trigger factory above + register it here. The
-#: ``test_refusal_reason_count_locked_at_thirty_seven`` regression
-#: also needs its hard-coded count updated.
+#: ``test_refusal_reason_count_locked_at_forty_two`` regression
+#: also needs its hard-coded count updated (the test is renamed each
+#: time the count moves — grep for ``count_locked_at`` if this
+#: pointer drifts).
 TRIGGERS_BY_REASON: dict[str, TriggerFactory] = {
     # Sprint 8A — 15 admission-arm triggers
     "sandbox_credential_adapter_not_configured": (
@@ -904,4 +960,11 @@ TRIGGERS_BY_REASON: dict[str, TriggerFactory] = {
     # ADR-023 (Wave-2) — per-tenant config-overlay cap-resolution failure
     # (admit_policy Step 5; fail-closed). Real refusal, seam-unit-proven.
     "sandbox_tenant_config_overlay_invalid": (_trigger_sandbox_tenant_config_overlay_invalid),
+    # Sprint 13.5c1 (ADR-014) — 5 approval-seam outcomes (admit_policy
+    # Step-4 consult; seam-unit-proven per the ADR-023 precedent).
+    "sandbox_approval_pending": _trigger_sandbox_approval_pending,
+    "sandbox_approval_denied": _trigger_sandbox_approval_denied,
+    "sandbox_approval_expired": _trigger_sandbox_approval_expired,
+    "sandbox_approval_binding_mismatch": _trigger_sandbox_approval_binding_mismatch,
+    "sandbox_approval_request_not_found": _trigger_sandbox_approval_request_not_found,
 }

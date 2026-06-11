@@ -30,25 +30,39 @@ compose time per ``feedback_verify_code_citations_at_doc_write``):
   fields land prefixed ``sandbox_per_tenant_max_*``. admit_policy
   reads the prefixed names.
 
-The 6-value ``_HIGH_RISK_TIERS_PRE_13_5`` set is the transitional
-fail-closed admission gate per ADR-014 §29 (Sprint 13.5 lifts this by
-wiring the per-tenant runtime-approval engine + the 4-eyes flow).
+Sprint 13.5c1 (ADR-014) converted Step 4 into the approval gate: when an
+``approval_engine`` is wired, admission is engine-authoritative
+(``_consult_approval_engine`` — create / verify with the pending
+correlator; ``approval_verified`` attested into the Step-9 Rego input).
+The 6-value ``_HIGH_RISK_TIERS_PRE_13_5`` set is now the ENGINE-ABSENT
+FALLBACK ONLY (``approval_engine is None`` — byte-for-byte the Sprint-8A
+transitional refusal); the wired path never consults the static set.
 Drift detector at ``tests/unit/sandbox/test_admission_pipeline.py``
 pins lockstep with the ADR-014 canonical 8-value ``RiskTier`` Literal.
 """
 
 from __future__ import annotations
 
+import hashlib
+import uuid
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
+from cognic_agentos.core.approval._types import (
+    APPROVAL_REDACTED_CONTEXT_MAX_LEN,
+    ApprovalEnvelope,
+    ApprovalRequestNotFound,
+    ApprovalTransitionRefused,
+)
+from cognic_agentos.core.approval.engine import ApprovalEngine
+from cognic_agentos.core.canonical import canonical_bytes
 from cognic_agentos.core.config_overlay.resolver import TenantConfigOverlayInvalid
 from cognic_agentos.sandbox.policy import (
     PackAdmissionContext,
     SandboxPolicy,
     validate_policy_shape,
 )
-from cognic_agentos.sandbox.protocol import SandboxLifecycleRefused
+from cognic_agentos.sandbox.protocol import SandboxLifecycleRefused, SandboxRefusalReason
 
 if TYPE_CHECKING:
     from cognic_agentos.core.config import Settings
@@ -232,13 +246,16 @@ class KernelDefaultCredentialAdapter:
 
 
 # ---------------------------------------------------------------------------
-# Transitional high-risk-tier gate (pre-Sprint-13.5)
+# ADR-014 approval gate (engine-wired) + engine-absent fallback tier set
 # ---------------------------------------------------------------------------
 
 
-#: ADR-014 §29 transitional refusal — the 6 risk tiers that admit_policy
-#: refuses pre-Sprint-13.5 (which will land the runtime tool-approval
-#: engine + 4-eyes flow). Lockstep with the ADR-014 canonical 8-value
+#: ADR-014 §29 — the 6 high-risk tiers. Since Sprint 13.5c1 this set is the
+#: ENGINE-ABSENT FALLBACK ONLY: admit_policy refuses these tiers with
+#: ``sandbox_high_risk_tier_refused_pre_13_5`` when ``approval_engine is
+#: None`` (byte-for-byte the Sprint-8A transitional behaviour); the
+#: engine-wired path never consults this set — classification is
+#: engine-authoritative via tools.rego. Lockstep with the ADR-014 canonical 8-value
 #: ``RiskTier`` Literal at ``cli/_governance_vocab.py`` is pinned by the
 #: drift-detector test at ``tests/unit/sandbox/test_admission_pipeline.py
 #: ::TestHighRiskTierDriftDetectorTestOnly`` (test-only cross-module
@@ -255,6 +272,182 @@ _HIGH_RISK_TIERS_PRE_13_5: frozenset[str] = frozenset(
         "high_risk_custom",
     }
 )
+
+
+def _canonical_sandbox_identity(*, pack_id: str, pack_artifact_digest: str) -> str:
+    """Collision-proof canonical sandbox-admission identity (ADR-014 /
+    13.5c1 spec §3.3). Binds the IMMUTABLE pack identity — pack_artifact_digest
+    is the cosign-verified sha256; pack_version is human-mutable and excluded.
+    72 chars fits approval_requests.tool_identity String(256). SAME function
+    serves create_request AND verify_grant_for_action."""
+    digest = hashlib.sha256(
+        canonical_bytes({"pack_id": pack_id, "pack_artifact_digest": pack_artifact_digest})
+    ).hexdigest()
+    return f"sandbox:{digest}"
+
+
+def _policy_binding_projection(policy: SandboxPolicy) -> dict[str, Any]:
+    """The GRANT-binding projection of SandboxPolicy (13.5c1 spec §3.3).
+
+    Covers EVERY security-load-bearing field — deliberately a SUPERSET of the
+    Step-9 Rego ``policy`` projection (which omits runtime_image /
+    read_only_root / writable_mounts because the bundle gates those via other
+    inputs). The grant must bind them: an image swap, a root-fs writability
+    flip, or a mount change between grant and re-admit MUST
+    approval_binding_mismatch. ``warm_pool_key`` is the ONLY exclusion (an
+    internal pooling hint, not approved behaviour) — pinned by the
+    dataclasses.fields drift test at tests/unit/sandbox/test_approval_seam.py.
+    Tuples project to lists (canonical-form no-tuples doctrine)."""
+    return {
+        "cpu_cores": policy.cpu_cores,
+        "cpu_time_budget_s": policy.cpu_time_budget_s,
+        "memory_mb": policy.memory_mb,
+        "walltime_s": policy.walltime_s,
+        "runtime_image": policy.runtime_image,
+        "egress_allow_list": list(policy.egress_allow_list),
+        "vault_path": policy.vault_path,
+        "read_only_root": policy.read_only_root,
+        "writable_mounts": [
+            {
+                "host_path": m.host_path,
+                "container_path": m.container_path,
+                "read_only": m.read_only,
+            }
+            for m in policy.writable_mounts
+        ],
+    }
+
+
+def _admission_redacted_context(
+    *, pack_context: PackAdmissionContext, policy: SandboxPolicy
+) -> str:
+    """Bounded human-readable descriptor for the value-free envelope
+    (13.5c1 spec §3.4) — reviewers see WHICH pack/image in the 13.5b1 portal
+    panel while tool_identity stays the collision-proof digest. Values are
+    manifest/operator content already surfaced in audit rows; truncation to
+    the engine cap is the bound."""
+    text = (
+        f"sandbox_admission pack_id={pack_context.pack_id} "
+        f"pack_version={pack_context.pack_version} "
+        f"runtime_image={policy.runtime_image}"
+    )
+    return text[:APPROVAL_REDACTED_CONTEXT_MAX_LEN]
+
+
+async def _consult_approval_engine(
+    *,
+    engine: ApprovalEngine,
+    policy: SandboxPolicy,
+    pack_context: PackAdmissionContext,
+    tenant_id: str,
+    actor: Actor,
+    approval_request_id: uuid.UUID | None,
+) -> bool:
+    """ADR-014 engine-authoritative consult (13.5c1 spec §3). Returns the
+    ``approval_verified`` attestation for the Step-9 Rego input: False on an
+    auto_run classification, True ONLY on a verified grant; raises
+    SandboxLifecycleRefused otherwise. ApprovalEnvelopeInvalid propagates RAW
+    (spec §3.6 — system misconfig, fail-loud; admission has no evidence
+    envelope of its own)."""
+    args_digest = hashlib.sha256(
+        canonical_bytes(
+            {
+                "policy": _policy_binding_projection(policy),
+                "pack_context": {
+                    "pack_id": pack_context.pack_id,
+                    "pack_version": pack_context.pack_version,
+                    "pack_artifact_digest": pack_context.pack_artifact_digest,
+                    "risk_tier": pack_context.risk_tier,
+                    "declares_dynamic_install": pack_context.declares_dynamic_install,
+                    "profile": pack_context.profile,
+                },
+                # NOTE: the new data_classes field is deliberately NOT in the
+                # digest (spec §3.3) — it rides the envelope's first-class
+                # field and is immutable-by-identity (same artifact digest
+                # => same manifest => same data classes).
+            }
+        )
+    ).digest()
+    tool_identity = _canonical_sandbox_identity(
+        pack_id=pack_context.pack_id,
+        pack_artifact_digest=pack_context.pack_artifact_digest,
+    )
+    if approval_request_id is not None:
+        try:
+            res = await engine.verify_grant_for_action(
+                request_id=approval_request_id,
+                tenant_id=tenant_id,
+                expected_args_digest=args_digest,
+                expected_tool_identity=tool_identity,
+            )
+        except ApprovalRequestNotFound:
+            # Unknown OR cross-tenant — indistinguishable by construction
+            # (the engine load is tenant-scoped).
+            raise SandboxLifecycleRefused(
+                "sandbox_approval_request_not_found",
+                detail=f"approval request {approval_request_id} not found for this tenant",
+                approval_request_id=str(approval_request_id),
+            ) from None
+        except ApprovalTransitionRefused as exc:
+            if exc.reason != "approval_binding_mismatch":
+                raise  # defensive: unexpected verify-side refusal -> fail loud
+            raise SandboxLifecycleRefused(
+                "sandbox_approval_binding_mismatch",
+                detail=(
+                    f"approval request {approval_request_id} was granted for a "
+                    f"DIFFERENT admission shape (policy or pack identity "
+                    f"changed); a grant authorises exactly one admission shape"
+                ),
+                approval_request_id=str(approval_request_id),
+            ) from None
+        if res.state == "granted":
+            return True  # verified grant -> Steps 5-9 run with attestation
+        state_to_reason: dict[str, SandboxRefusalReason] = {
+            "pending": "sandbox_approval_pending",
+            "awaiting_second": "sandbox_approval_pending",
+            "denied": "sandbox_approval_denied",
+            "expired": "sandbox_approval_expired",
+        }
+        raise SandboxLifecycleRefused(
+            state_to_reason[res.state],
+            detail=(
+                f"approval request {approval_request_id} is in state "
+                f"{res.state!r} (flow={res.flow}); not admissible"
+            ),
+            approval_request_id=str(approval_request_id),
+        )
+    admission_correlation_id = f"sandbox-admit-{uuid.uuid4().hex}"
+    required_refs: dict[str, str] = {}
+    if pack_context.risk_tier == "regulator_communication":
+        # Spec F3/§3.5: the seam-minted admission correlation id IS the
+        # audit correlator (admit_policy runs before any session_id exists).
+        required_refs = {"audit_record_ref": admission_correlation_id}
+    envelope = ApprovalEnvelope(
+        risk_tier=pack_context.risk_tier,
+        tool_identity=tool_identity,
+        originator_subject=actor.subject,
+        tenant_id=tenant_id,
+        data_classes=tuple(pack_context.data_classes),
+        args_digest=args_digest,
+        redacted_context=_admission_redacted_context(pack_context=pack_context, policy=policy),
+        required_refs=required_refs,
+    )
+    try:
+        request = await engine.create_request(envelope=envelope)
+    except ApprovalTransitionRefused as exc:
+        if exc.reason == "auto_tier_no_approval_required":
+            return False  # tools.rego classified auto_run -> proceed unverified
+        raise  # defensive: unexpected create-side refusal -> fail loud
+    raise SandboxLifecycleRefused(
+        "sandbox_approval_pending",
+        detail=(
+            f"admission requires approval (flow={request.flow}); request "
+            f"{request.request_id} is pending (admission_correlation_id="
+            f"{admission_correlation_id}). Grant via the portal approval API, "
+            f"then re-admit with approval_request_id."
+        ),
+        approval_request_id=str(request.request_id),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -274,6 +467,8 @@ async def admit_policy(
     settings: Settings,
     resolver: TenantConfigResolver | None = None,
     requires_credentials: Sequence[VaultLeaseRequest] = (),
+    approval_engine: ApprovalEngine | None = None,
+    approval_request_id: uuid.UUID | None = None,
 ) -> None:
     """Admission pipeline per spec §6.1 — the single seam every
     backend MUST call.
@@ -308,7 +503,11 @@ async def admit_policy(
          Internal ordering pinned by ``tests/unit/sandbox/
          test_admit_credentials.py::TestAdmitPolicyRefusesCrossTenantRequest::
          test_cross_tenant_check_wins_over_sentinel_adapter_check``.
-      4. high-risk-tier transitional refusal (6 ADR-014 tiers)
+      4. ADR-014 approval gate (Sprint 13.5c1): engine-wired ->
+         engine-authoritative consult (auto -> proceed; pending /
+         denied / expired / binding-mismatch / not-found refusals;
+         verified grant -> ``approval_verified`` attested to Step 9);
+         engine-absent -> fallback refusal of the 6 high-risk tiers
       5. tenant-max check (cpu_cores / memory_mb / walltime_s)
       6. image-catalog membership (canonical OR per-tenant allow-list)
       7. cosign signature verification (delegates to catalog; runs for
@@ -468,11 +667,34 @@ async def admit_policy(
                 ),
             )
 
-    # Step 4 — high-risk-tier transitional refusal (pre-Sprint-13.5)
-    if pack_context.risk_tier in _HIGH_RISK_TIERS_PRE_13_5:
-        raise SandboxLifecycleRefused(
-            "sandbox_high_risk_tier_refused_pre_13_5",
-            detail=(f"tier={pack_context.risk_tier!r} requires core/approval engine (Sprint 13.5)"),
+    # Step 4 — ADR-014 approval gate (Sprint 13.5c1 cutover).
+    # Engine-absent: the Sprint-8A transitional refusal byte-for-byte (the
+    # supplied approval_request_id is INERT on this path — pinned plan-review
+    # choice; a dangling correlator must not create a new fail-loud branch).
+    # Engine-wired: engine-authoritative consult (13.5b2 template) — the
+    # static set is NEVER consulted; tools.rego classification decides, so
+    # bank-overlay tightening is honoured. Runs BEFORE caps/catalog/cosign/
+    # Rego — a refused admission does no further I/O. ``approval_verified``
+    # is the Python-attested state for the Step-9 Rego input: ALWAYS
+    # threaded (absence is falsy and the bundle's _tier_admissible second
+    # arm fail-closes); True ONLY on a verified grant.
+    approval_verified = False
+    if approval_engine is None:
+        if pack_context.risk_tier in _HIGH_RISK_TIERS_PRE_13_5:
+            raise SandboxLifecycleRefused(
+                "sandbox_high_risk_tier_refused_pre_13_5",
+                detail=(
+                    f"tier={pack_context.risk_tier!r} requires core/approval engine (Sprint 13.5)"
+                ),
+            )
+    else:
+        approval_verified = await _consult_approval_engine(
+            engine=approval_engine,
+            policy=policy,
+            pack_context=pack_context,
+            tenant_id=tenant_id,
+            actor=actor,
+            approval_request_id=approval_request_id,
         )
 
     # Step 5 — tenant-max check (cpu_cores / memory_mb / walltime_s)
@@ -627,6 +849,12 @@ async def admit_policy(
             "credential_adapter_wired": not isinstance(
                 credential_adapter, KernelDefaultCredentialAdapter
             ),
+            # Sprint 13.5c1 (ADR-014): Python-attested approval state. ALWAYS
+            # threaded (input-contract completeness — absence is falsy and the
+            # bundle fail-closes). False until the engine-wired verified-grant
+            # path sets it; the bundle's _tier_admissible second arm requires
+            # == true.
+            "approval_verified": approval_verified,
             # T11 — bundle rule 4 (defence-in-depth catalog membership
             # check; see ``policies/_default/sandbox.rego`` +
             # ``_runtime_image_authorised``). These two precomputed
