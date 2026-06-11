@@ -73,6 +73,19 @@ _TIER_GRANT_SCOPE: Final[dict[str, str]] = {
     "high_risk_custom": "tool.approve.high_risk_custom",
 }
 
+
+def grant_scope_for_risk_tier(risk_tier: str) -> str | None:
+    """Return the single ``tool.approve.*`` RBAC scope that may grant
+    ``risk_tier``, or ``None`` for tiers needing no grant scope (``read_only`` /
+    ``internal_write`` — auto-run) and for unknown tiers.
+
+    READ-ONLY projection of the engine's :data:`_TIER_GRANT_SCOPE` single source
+    of truth. NOT a policy decision: it makes NO approval decision, performs NO
+    I/O, and is NOT a second approval engine — it is a pure lookup the portal
+    route uses for body-aware defence-in-depth (Sprint 13.5b1)."""
+    return _TIER_GRANT_SCOPE.get(risk_tier)
+
+
 _APPROVAL_REQUEST_ID_PREFIX: Final[str] = "appr-"  # 5 + 32 hex = 37 <= 64
 
 
