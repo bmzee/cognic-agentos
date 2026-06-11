@@ -39,9 +39,12 @@ pins lockstep with the ADR-014 canonical 8-value ``RiskTier`` Literal.
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
+from cognic_agentos.core.approval._types import APPROVAL_REDACTED_CONTEXT_MAX_LEN
+from cognic_agentos.core.canonical import canonical_bytes
 from cognic_agentos.core.config_overlay.resolver import TenantConfigOverlayInvalid
 from cognic_agentos.sandbox.policy import (
     PackAdmissionContext,
@@ -255,6 +258,66 @@ _HIGH_RISK_TIERS_PRE_13_5: frozenset[str] = frozenset(
         "high_risk_custom",
     }
 )
+
+
+def _canonical_sandbox_identity(*, pack_id: str, pack_artifact_digest: str) -> str:
+    """Collision-proof canonical sandbox-admission identity (ADR-014 /
+    13.5c1 spec §3.3). Binds the IMMUTABLE pack identity — pack_artifact_digest
+    is the cosign-verified sha256; pack_version is human-mutable and excluded.
+    72 chars fits approval_requests.tool_identity String(256). SAME function
+    serves create_request AND verify_grant_for_action."""
+    digest = hashlib.sha256(
+        canonical_bytes({"pack_id": pack_id, "pack_artifact_digest": pack_artifact_digest})
+    ).hexdigest()
+    return f"sandbox:{digest}"
+
+
+def _policy_binding_projection(policy: SandboxPolicy) -> dict[str, Any]:
+    """The GRANT-binding projection of SandboxPolicy (13.5c1 spec §3.3).
+
+    Covers EVERY security-load-bearing field — deliberately a SUPERSET of the
+    Step-9 Rego ``policy`` projection (which omits runtime_image /
+    read_only_root / writable_mounts because the bundle gates those via other
+    inputs). The grant must bind them: an image swap, a root-fs writability
+    flip, or a mount change between grant and re-admit MUST
+    approval_binding_mismatch. ``warm_pool_key`` is the ONLY exclusion (an
+    internal pooling hint, not approved behaviour) — pinned by the
+    dataclasses.fields drift test at tests/unit/sandbox/test_approval_seam.py.
+    Tuples project to lists (canonical-form no-tuples doctrine)."""
+    return {
+        "cpu_cores": policy.cpu_cores,
+        "cpu_time_budget_s": policy.cpu_time_budget_s,
+        "memory_mb": policy.memory_mb,
+        "walltime_s": policy.walltime_s,
+        "runtime_image": policy.runtime_image,
+        "egress_allow_list": list(policy.egress_allow_list),
+        "vault_path": policy.vault_path,
+        "read_only_root": policy.read_only_root,
+        "writable_mounts": [
+            {
+                "host_path": m.host_path,
+                "container_path": m.container_path,
+                "read_only": m.read_only,
+            }
+            for m in policy.writable_mounts
+        ],
+    }
+
+
+def _admission_redacted_context(
+    *, pack_context: PackAdmissionContext, policy: SandboxPolicy
+) -> str:
+    """Bounded human-readable descriptor for the value-free envelope
+    (13.5c1 spec §3.4) — reviewers see WHICH pack/image in the 13.5b1 portal
+    panel while tool_identity stays the collision-proof digest. Values are
+    manifest/operator content already surfaced in audit rows; truncation to
+    the engine cap is the bound."""
+    text = (
+        f"sandbox_admission pack_id={pack_context.pack_id} "
+        f"pack_version={pack_context.pack_version} "
+        f"runtime_image={policy.runtime_image}"
+    )
+    return text[:APPROVAL_REDACTED_CONTEXT_MAX_LEN]
 
 
 # ---------------------------------------------------------------------------
