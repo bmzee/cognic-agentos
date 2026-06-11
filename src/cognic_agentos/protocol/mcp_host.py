@@ -114,6 +114,7 @@ from typing import Any, Literal
 import httpx
 
 from cognic_agentos.core.audit import AuditEvent, AuditStore
+from cognic_agentos.core.canonical import canonical_bytes
 from cognic_agentos.core.config import Settings
 from cognic_agentos.core.decision_history import DecisionHistoryStore, DecisionRecord
 from cognic_agentos.protocol import require_mcp
@@ -548,6 +549,23 @@ def _normalize_risk_tier_for_gate(value: Any) -> str:
         escaped = value.encode("unicode_escape").decode("ascii")
         return escaped[:_RISK_TIER_REPR_MAX_LEN]
     return repr(value)[:_RISK_TIER_REPR_MAX_LEN]
+
+
+def _canonical_tool_identity(*, server_id: str, tool_name: str) -> str:
+    """Collision-proof canonical tool identity (ADR-014 / 13.5b2 spec F4).
+
+    The replay-binding comparand persisted on approval_requests.tool_identity
+    (String(256); this form is 68 chars). Derived from a canonical OBJECT so
+    separator characters in either field cannot collide (raw
+    f"{server_id}:{tool_name}" rejected at the 13.5b2 reconciliation). The
+    human-readable pair lives in the envelope's redacted_context instead.
+    SAME function serves create_request AND verify_grant_for_action — drift
+    between the two would make every grant unverifiable.
+    """
+    digest = hashlib.sha256(
+        canonical_bytes({"server_id": server_id, "tool_name": tool_name})
+    ).hexdigest()
+    return f"mcp:{digest}"
 
 
 #: Closed-enum vocabulary for runtime tool-invocation refusals.

@@ -37,3 +37,24 @@ def test_server_entry_carries_data_classes_with_empty_default() -> None:
     assert MCPServerEntry(**base).data_classes == ()
     entry = MCPServerEntry(**base, data_classes=("customer_pii",))
     assert entry.data_classes == ("customer_pii",)
+
+
+def test_canonical_tool_identity_shape_and_determinism() -> None:
+    from cognic_agentos.protocol.mcp_host import _canonical_tool_identity
+
+    ident = _canonical_tool_identity(server_id="pack.a", tool_name="lookup")
+    assert ident.startswith("mcp:")
+    assert len(ident) == 4 + 64  # "mcp:" + sha256 hexdigest — fits String(256)
+    assert ident == _canonical_tool_identity(server_id="pack.a", tool_name="lookup")
+    assert ident != _canonical_tool_identity(server_id="pack.b", tool_name="lookup")
+
+
+def test_canonical_tool_identity_is_collision_proof_across_separators() -> None:
+    # The reason raw f"{server_id}:{tool_name}" was rejected: these two pairs
+    # would collide under naive concatenation. The canonical-object digest
+    # MUST distinguish them.
+    from cognic_agentos.protocol.mcp_host import _canonical_tool_identity
+
+    a = _canonical_tool_identity(server_id="a:b", tool_name="c")
+    b = _canonical_tool_identity(server_id="a", tool_name="b:c")
+    assert a != b
