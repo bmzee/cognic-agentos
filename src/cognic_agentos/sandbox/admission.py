@@ -51,6 +51,7 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from cognic_agentos.core.approval._types import (
     APPROVAL_REDACTED_CONTEXT_MAX_LEN,
     ApprovalEnvelope,
+    ApprovalRequestNotFound,
     ApprovalTransitionRefused,
 )
 from cognic_agentos.core.approval.engine import ApprovalEngine
@@ -61,7 +62,7 @@ from cognic_agentos.sandbox.policy import (
     SandboxPolicy,
     validate_policy_shape,
 )
-from cognic_agentos.sandbox.protocol import SandboxLifecycleRefused
+from cognic_agentos.sandbox.protocol import SandboxLifecycleRefused, SandboxRefusalReason
 
 if TYPE_CHECKING:
     from cognic_agentos.core.config import Settings
@@ -372,8 +373,48 @@ async def _consult_approval_engine(
         pack_artifact_digest=pack_context.pack_artifact_digest,
     )
     if approval_request_id is not None:
-        raise NotImplementedError(
-            "re-admission verify path lands at Sprint-13.5c1 T6 (ADR-014 §3.2)"
+        try:
+            res = await engine.verify_grant_for_action(
+                request_id=approval_request_id,
+                tenant_id=tenant_id,
+                expected_args_digest=args_digest,
+                expected_tool_identity=tool_identity,
+            )
+        except ApprovalRequestNotFound:
+            # Unknown OR cross-tenant — indistinguishable by construction
+            # (the engine load is tenant-scoped).
+            raise SandboxLifecycleRefused(
+                "sandbox_approval_request_not_found",
+                detail=f"approval request {approval_request_id} not found for this tenant",
+                approval_request_id=str(approval_request_id),
+            ) from None
+        except ApprovalTransitionRefused as exc:
+            if exc.reason != "approval_binding_mismatch":
+                raise  # defensive: unexpected verify-side refusal -> fail loud
+            raise SandboxLifecycleRefused(
+                "sandbox_approval_binding_mismatch",
+                detail=(
+                    f"approval request {approval_request_id} was granted for a "
+                    f"DIFFERENT admission shape (policy or pack identity "
+                    f"changed); a grant authorises exactly one admission shape"
+                ),
+                approval_request_id=str(approval_request_id),
+            ) from None
+        if res.state == "granted":
+            return True  # verified grant -> Steps 5-9 run with attestation
+        state_to_reason: dict[str, SandboxRefusalReason] = {
+            "pending": "sandbox_approval_pending",
+            "awaiting_second": "sandbox_approval_pending",
+            "denied": "sandbox_approval_denied",
+            "expired": "sandbox_approval_expired",
+        }
+        raise SandboxLifecycleRefused(
+            state_to_reason[res.state],
+            detail=(
+                f"approval request {approval_request_id} is in state "
+                f"{res.state!r} (flow={res.flow}); not admissible"
+            ),
+            approval_request_id=str(approval_request_id),
         )
     admission_correlation_id = f"sandbox-admit-{uuid.uuid4().hex}"
     required_refs: dict[str, str] = {}

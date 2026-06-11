@@ -434,3 +434,196 @@ class TestWiredFirstAdmission:
             )
         assert exc.value.reason == "sandbox_high_risk_tier_refused_pre_13_5"
         assert exc.value.approval_request_id is None
+
+
+# ---------------------------------------------------------------------------
+# T6 — wired re-admission verify path
+# ---------------------------------------------------------------------------
+
+_OTHER_VALID_IMAGE_REF = "ghcr.io/cognic/sandbox-runtime-node@sha256:" + "d" * 64
+
+
+def _approver(subject: str = "rev@bank.example") -> object:
+    from cognic_agentos.core.approval._types import ApprovalActor
+
+    return ApprovalActor(
+        subject=subject,
+        tenant_id="t-1",
+        scopes=frozenset({"tool.approve.payment"}),
+        actor_type="human",
+    )
+
+
+class TestWiredReAdmission:
+    async def _pending(self, store: object, engine: object, kwargs: dict[str, object]) -> object:
+        import uuid as _uuid
+
+        from cognic_agentos.sandbox.admission import admit_policy
+        from cognic_agentos.sandbox.protocol import SandboxLifecycleRefused
+
+        with pytest.raises(SandboxLifecycleRefused) as exc:
+            await admit_policy(
+                _valid_policy(),  # type: ignore[arg-type]
+                **kwargs,  # type: ignore[arg-type]
+                approval_engine=engine,  # type: ignore[arg-type]
+            )
+        assert exc.value.approval_request_id is not None
+        return _uuid.UUID(exc.value.approval_request_id)
+
+    async def test_granted_readmission_admits_and_attests_verified(self, tmp_path: object) -> None:
+        from cognic_agentos.sandbox.admission import admit_policy
+
+        store = await _mk_approval_store(tmp_path)
+        engine = _mk_approval_engine(store, flow="require_single_approval")
+        kwargs = _admit_kwargs()
+        rid = await self._pending(store, engine, kwargs)
+        await engine.grant(request_id=rid, tenant_id="t-1", approver=_approver())  # type: ignore[attr-defined]
+        await admit_policy(
+            _valid_policy(),  # type: ignore[arg-type]
+            **kwargs,  # type: ignore[arg-type]
+            approval_engine=engine,  # type: ignore[arg-type]
+            approval_request_id=rid,  # type: ignore[arg-type]
+        )
+        # Same-function binding pin: a divergent recompute would have refused
+        # binding_mismatch instead of admitting. The attestation reached Rego:
+        sent = kwargs["rego_engine"].evaluate.await_args.kwargs["input"]  # type: ignore[attr-defined]
+        assert sent["approval_verified"] is True
+
+    async def test_image_swap_readmission_refuses_binding_mismatch(self, tmp_path: object) -> None:
+        # THE canonical §3.3 case: runtime_image is NOT in the Step-9 Rego
+        # projection but MUST be in the grant binding.
+        from cognic_agentos.sandbox.admission import admit_policy
+        from cognic_agentos.sandbox.protocol import SandboxLifecycleRefused
+
+        store = await _mk_approval_store(tmp_path)
+        engine = _mk_approval_engine(store, flow="require_single_approval")
+        kwargs = _admit_kwargs()
+        rid = await self._pending(store, engine, kwargs)
+        await engine.grant(request_id=rid, tenant_id="t-1", approver=_approver())  # type: ignore[attr-defined]
+        with pytest.raises(SandboxLifecycleRefused) as exc:
+            await admit_policy(
+                _valid_policy(runtime_image=_OTHER_VALID_IMAGE_REF),  # type: ignore[arg-type]
+                **kwargs,  # type: ignore[arg-type]
+                approval_engine=engine,  # type: ignore[arg-type]
+                approval_request_id=rid,  # type: ignore[arg-type]
+            )
+        assert exc.value.reason == "sandbox_approval_binding_mismatch"
+
+    async def test_root_flag_flip_readmission_refuses_binding_mismatch(
+        self, tmp_path: object
+    ) -> None:
+        from cognic_agentos.sandbox.admission import admit_policy
+        from cognic_agentos.sandbox.protocol import SandboxLifecycleRefused
+
+        store = await _mk_approval_store(tmp_path)
+        engine = _mk_approval_engine(store, flow="require_single_approval")
+        kwargs = _admit_kwargs()
+        rid = await self._pending(store, engine, kwargs)
+        await engine.grant(request_id=rid, tenant_id="t-1", approver=_approver())  # type: ignore[attr-defined]
+        with pytest.raises(SandboxLifecycleRefused) as exc:
+            await admit_policy(
+                _valid_policy(read_only_root=False),  # type: ignore[arg-type]
+                **kwargs,  # type: ignore[arg-type]
+                approval_engine=engine,  # type: ignore[arg-type]
+                approval_request_id=rid,  # type: ignore[arg-type]
+            )
+        assert exc.value.reason == "sandbox_approval_binding_mismatch"
+
+    async def test_not_yet_granted_readmission_still_pending(self, tmp_path: object) -> None:
+        from cognic_agentos.sandbox.admission import admit_policy
+        from cognic_agentos.sandbox.protocol import SandboxLifecycleRefused
+
+        store = await _mk_approval_store(tmp_path)
+        engine = _mk_approval_engine(store, flow="require_single_approval")
+        kwargs = _admit_kwargs()
+        rid = await self._pending(store, engine, kwargs)
+        with pytest.raises(SandboxLifecycleRefused) as exc:
+            await admit_policy(
+                _valid_policy(),  # type: ignore[arg-type]
+                **kwargs,  # type: ignore[arg-type]
+                approval_engine=engine,  # type: ignore[arg-type]
+                approval_request_id=rid,  # type: ignore[arg-type]
+            )
+        assert exc.value.reason == "sandbox_approval_pending"
+        assert exc.value.approval_request_id == str(rid)
+
+    async def test_denied_readmission_refuses_denied(self, tmp_path: object) -> None:
+        from cognic_agentos.sandbox.admission import admit_policy
+        from cognic_agentos.sandbox.protocol import SandboxLifecycleRefused
+
+        store = await _mk_approval_store(tmp_path)
+        engine = _mk_approval_engine(store, flow="require_single_approval")
+        kwargs = _admit_kwargs()
+        rid = await self._pending(store, engine, kwargs)
+        await engine.deny(  # type: ignore[attr-defined]
+            request_id=rid, tenant_id="t-1", approver=_approver(), reason="no"
+        )
+        with pytest.raises(SandboxLifecycleRefused) as exc:
+            await admit_policy(
+                _valid_policy(),  # type: ignore[arg-type]
+                **kwargs,  # type: ignore[arg-type]
+                approval_engine=engine,  # type: ignore[arg-type]
+                approval_request_id=rid,  # type: ignore[arg-type]
+            )
+        assert exc.value.reason == "sandbox_approval_denied"
+
+    async def test_expired_readmission_refuses_expired(self, tmp_path: object) -> None:
+        from datetime import timedelta
+
+        from cognic_agentos.sandbox.admission import admit_policy
+        from cognic_agentos.sandbox.protocol import SandboxLifecycleRefused
+
+        store = await _mk_approval_store(tmp_path)
+        clock = _MutableClock()
+        engine = _mk_approval_engine(store, flow="require_single_approval", clock=clock)
+        kwargs = _admit_kwargs()
+        rid = await self._pending(store, engine, kwargs)
+        clock.now += timedelta(hours=1)  # past the 300s single-approval TTL
+        with pytest.raises(SandboxLifecycleRefused) as exc:
+            await admit_policy(
+                _valid_policy(),  # type: ignore[arg-type]
+                **kwargs,  # type: ignore[arg-type]
+                approval_engine=engine,  # type: ignore[arg-type]
+                approval_request_id=rid,  # type: ignore[arg-type]
+            )
+        assert exc.value.reason == "sandbox_approval_expired"
+
+    async def test_unknown_and_cross_tenant_refuse_request_not_found(
+        self, tmp_path: object
+    ) -> None:
+        import uuid as _uuid
+
+        from cognic_agentos.sandbox.admission import admit_policy
+        from cognic_agentos.sandbox.protocol import SandboxLifecycleRefused
+
+        store = await _mk_approval_store(tmp_path)
+        engine = _mk_approval_engine(store, flow="require_single_approval")
+        kwargs = _admit_kwargs()
+        rid = await self._pending(store, engine, kwargs)  # t-1 request
+        for recall_id, tenant in ((_uuid.uuid4(), "t-1"), (rid, "t-2")):
+            with pytest.raises(SandboxLifecycleRefused) as exc:
+                await admit_policy(
+                    _valid_policy(),  # type: ignore[arg-type]
+                    **{**_admit_kwargs(), "tenant_id": tenant},  # type: ignore[arg-type]
+                    approval_engine=engine,  # type: ignore[arg-type]
+                    approval_request_id=recall_id,  # type: ignore[arg-type]
+                )
+            assert exc.value.reason == "sandbox_approval_request_not_found"
+
+    async def test_envelope_invalid_propagates_raw(self, tmp_path: object) -> None:
+        # Spec §3.6: empty actor.subject -> the engine's
+        # ApprovalEnvelopeInvalid escapes RAW (fail-loud; no closed-enum
+        # laundering, no evidence envelope at this seam).
+        from unittest.mock import MagicMock
+
+        from cognic_agentos.core.approval._types import ApprovalEnvelopeInvalid
+        from cognic_agentos.sandbox.admission import admit_policy
+
+        store = await _mk_approval_store(tmp_path)
+        engine = _mk_approval_engine(store, flow="require_single_approval")
+        with pytest.raises(ApprovalEnvelopeInvalid):
+            await admit_policy(
+                _valid_policy(),  # type: ignore[arg-type]
+                **_admit_kwargs(actor=MagicMock(subject="")),  # type: ignore[arg-type]
+                approval_engine=engine,  # type: ignore[arg-type]
+            )
