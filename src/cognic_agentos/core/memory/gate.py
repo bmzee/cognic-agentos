@@ -60,11 +60,18 @@ storage-layer guard.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
+from cognic_agentos.core.approval._types import (
+    APPROVAL_REDACTED_CONTEXT_MAX_LEN,
+    ApprovalEnvelope,
+    ApprovalTransitionRefused,
+)
+from cognic_agentos.core.approval.engine import ApprovalEngine
 from cognic_agentos.core.canonical import canonical_bytes
 from cognic_agentos.core.dlp.scanner import DLP_RESTRICTED_CLASSES
 from cognic_agentos.core.memory._context import MemoryCallerContext, MemoryWriteRecord
@@ -96,7 +103,9 @@ _RESTRICTED_CLASS_WRITE_DECISION_POINT = "data.cognic.memory.restricted_class_wr
 _PURPOSE_COMPATIBLE_DECISION_POINT = "data.cognic.memory.recall.purpose_compatible.allow"
 
 #: The five ADR-014 high-risk tiers that gate a ``long_term`` write behind the
-#: (pre-13.5 unavailable) approval engine at §7.1 step 7. A DELIBERATE inline
+#: approval engine at §7.1 step 7 (Sprint 13.5c3: wired engines consult the
+#: pending -> portal-grant -> re-write contract; unwired keeps the 11.5a
+#: transitional refusal byte-for-byte). A DELIBERATE inline
 #: mirror of the canonical 8-value ``RiskTier`` vocabulary (the 3 low tiers —
 #: ``read_only`` / ``internal_write`` / ``customer_data_read`` — are excluded).
 #: ``core/`` MUST NOT import ``cli/*`` (architectural arrow runs ``cli -> core``)
@@ -163,13 +172,28 @@ def _memory_args_digest(
     ).digest()
 
 
+@dataclasses.dataclass(frozen=True, slots=True)
+class _ApprovalConsult:
+    """Step-7 consult outcome (c3 spec §3). ``verified`` is the engine-owned
+    attestation; the two ``granted_*`` fields are set ONLY when a verified
+    grant admitted the write (the granted ref read back from
+    ``ApprovalCheckResult.required_refs`` per the §3.2 forward edge)."""
+
+    verified: bool
+    granted_request_id: str | None = None
+    granted_audit_record_ref: str | None = None
+
+
 class MemoryGate:
     """Per-write / per-recall enforcement gate for the memory substrate.
 
     Construction binds the caller :class:`MemoryCallerContext` and the four
-    governance seams (kill-switch, DLP scanner, consent validator, OPA engine).
-    A single ``MemoryGate`` instance is bound to one Layer C caller context by
-    the harness — identity is never taken from the per-call arguments.
+    governance seams (kill-switch, DLP scanner, consent validator, OPA engine)
+    plus, since Sprint 13.5c3, the OPTIONAL ADR-014 approval engine (the
+    Step-7 consult; ``None`` keeps the engine-absent transitional refusal
+    byte-for-byte). A single ``MemoryGate`` instance is bound to one Layer C
+    caller context by the harness — identity is never taken from the per-call
+    arguments.
     """
 
     def __init__(
@@ -180,8 +204,10 @@ class MemoryGate:
         consent: ConsentValidator,
         policy: OPAEngine,
         kill_switch: MemoryKillSwitchInterrogator | None = None,
+        approval_engine: ApprovalEngine | None = None,
     ) -> None:
         self._context = context
+        self._approval_engine = approval_engine
         self._dlp = dlp
         self._consent = consent
         self._policy = policy
@@ -209,6 +235,7 @@ class MemoryGate:
         consent_token: ConsentToken | None = None,
         retention_window_s: int | None = None,
         tenant_retention_max_s: int | None = None,
+        approval_request_id: str | None = None,
     ) -> MemoryWriteRecord:
         """Run the §7.1 ordered write-gate chain and return the resolved record.
 
@@ -249,6 +276,15 @@ class MemoryGate:
         # BEFORE any governance step or descriptor build (matches storage.py).
         if is_block_write and tier != "long_term":
             raise ValueError(f"blocks are long_term-only; got tier={tier!r}")
+
+        # Sprint 13.5c3 (ADR-014) — parse UNCONDITIONALLY (spec §3.6 LOCK):
+        # malformed is a caller-contract bug (the blocks-precondition class
+        # above), NOT a governance refusal — the MemoryRefusalReason vocabulary
+        # is reserved for governance outcomes. A VALID id is INERT unless the
+        # Step-7 consult fires (engine wired + long_term + the 5-tier set).
+        approval_request_uuid: uuid.UUID | None = None
+        if approval_request_id is not None:
+            approval_request_uuid = uuid.UUID(approval_request_id)  # ValueError on malformed
 
         # Step 0 — kill-switch (fail-loud sentinel propagates NotImplementedError).
         if await self._kill_switch.is_write_frozen(tenant_id=ctx.tenant_id) is True:
@@ -318,9 +354,37 @@ class MemoryGate:
                 tenant_retention_max_s=tenant_retention_max_s,
             )
 
-        # Step 7 — approval-transitional refusal (skipped for scratch).
+        # Step 6b — request-id hoist (c3 spec §3.2 / F3): minted BEFORE Step 7
+        # so the same id serves as the regulator-tier audit_record_ref AND the
+        # success record's request_id. Per-attempt; nothing seam-minted.
+        request_id = f"memory-write-{uuid.uuid4().hex}"
+
+        # Step 7 — ADR-014 approval gate (long_term x the 5-tier set ONLY —
+        # the ADR-019 §120 asymmetry, customer_data_read excluded; the SAME
+        # predicate on BOTH arms per the c3 F2 LOCK). Engine-absent keeps the
+        # 11.5a transitional refusal byte-for-byte; wired consults the engine
+        # (pending -> portal-grant -> re-write per the c3 contract). Steps 0-6
+        # above ALWAYS run first — approval never bypasses them.
+        approval_verified = False
+        granted_request_id: str | None = None
+        granted_audit_record_ref: str | None = None
         if tier == "long_term" and ctx.risk_tier in _APPROVAL_REQUIRED_RISK_TIERS:
-            raise MemoryOperationRefused("memory_approval_engine_not_available")
+            if self._approval_engine is None:
+                raise MemoryOperationRefused("memory_approval_engine_not_available")
+            consult = await self._consult_approval(
+                tier=tier,
+                purpose=purpose,
+                data_classes=data_classes,
+                key=key,
+                block_kind=block_kind,
+                resolved_subject=resolved_subject,
+                value=value,
+                request_id=request_id,
+                approval_request_uuid=approval_request_uuid,
+            )
+            approval_verified = consult.verified
+            granted_request_id = consult.granted_request_id
+            granted_audit_record_ref = consult.granted_audit_record_ref
 
         # Step 8 — success: resolve the descriptor. Identity from context only;
         # T10 (MemoryAPI) calls adapter.put + emits memory.write — not here.
@@ -333,10 +397,74 @@ class MemoryGate:
             purpose=purpose,
             data_classes=tuple(data_classes),
             value=value,
-            request_id=f"memory-write-{uuid.uuid4().hex}",
+            request_id=request_id,
             key=key,
             block_kind=block_kind,
             retention_until=retention_until,
+            approval_verified=approval_verified,
+            approval_request_id=granted_request_id,
+            approval_audit_record_ref=granted_audit_record_ref,
+        )
+
+    async def _consult_approval(
+        self,
+        *,
+        tier: MemoryTier,
+        purpose: str,
+        data_classes: tuple[str, ...],
+        key: str | None,
+        block_kind: BlockKind | None,
+        resolved_subject: SubjectRef,
+        value: object,
+        request_id: str,
+        approval_request_uuid: uuid.UUID | None,
+    ) -> _ApprovalConsult:
+        """ADR-014 Step-7 consult (c3 spec §3.5/§3.6). The binding digests the
+        approved write SHAPE incl. content via ``_value_digest`` — the engine
+        never sees the raw value. ``ApprovalEnvelopeInvalid`` propagates RAW
+        (a seam-construction bug, not a governance refusal)."""
+        assert self._approval_engine is not None  # guarded by the call site
+        ctx = self._context
+        tool_identity = _memory_tool_identity(agent_id=ctx.agent_id)
+        args_digest = _memory_args_digest(
+            tier=tier,
+            purpose=purpose,
+            data_classes=data_classes,
+            key=key,
+            block_kind=block_kind,
+            subject_canonical=resolved_subject.canonical,
+            actor_id=ctx.actor_id,
+            risk_tier=ctx.risk_tier,
+            value=value,
+        )
+        if approval_request_uuid is not None:
+            raise NotImplementedError("re-write verify path lands at 13.5c3 T5 (ADR-014)")
+        required_refs: dict[str, str] = {}
+        if ctx.risk_tier == "regulator_communication":
+            # c3 spec §3.2 (F3): the hoisted memory-write-* id — the same id
+            # the granted write's chain row will carry; nothing seam-minted.
+            required_refs = {"audit_record_ref": request_id}
+        envelope = ApprovalEnvelope(
+            risk_tier=ctx.risk_tier,
+            tool_identity=tool_identity,
+            originator_subject=ctx.actor_id,
+            tenant_id=ctx.tenant_id,
+            data_classes=tuple(data_classes),
+            args_digest=args_digest,
+            redacted_context=(
+                f"memory_write agent_id={ctx.agent_id} tier={tier} "
+                f"risk_tier={ctx.risk_tier} target={block_kind or key}"
+            )[:APPROVAL_REDACTED_CONTEXT_MAX_LEN],
+            required_refs=required_refs,
+        )
+        try:
+            request = await self._approval_engine.create_request(envelope=envelope)
+        except ApprovalTransitionRefused as exc:
+            if exc.reason == "auto_tier_no_approval_required":
+                return _ApprovalConsult(verified=False)
+            raise
+        raise MemoryOperationRefused(
+            "memory_approval_pending", approval_request_id=str(request.request_id)
         )
 
     # -- Recall gate (§7.2) ------------------------------------------------
