@@ -345,4 +345,5 @@ class ApprovalEngine:
             args_digest=row.args_digest,
             envelope_digest=row.envelope_digest,
             originator_subject=row.originator_subject,
+            required_refs=row.required_refs,
         )
