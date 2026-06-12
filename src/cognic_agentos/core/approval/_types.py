@@ -159,6 +159,10 @@ class ApprovalCheckResult:
     args_digest: bytes
     envelope_digest: bytes
     originator_subject: str
+    # Sprint 13.5c3 (ADR-014) — verify-time evidence echo (spec §3.2): the
+    # persisted required_refs, projected so seams can persist forward edges
+    # (e.g. memory's approval_audit_record_ref) WITHOUT trusting caller input.
+    required_refs: dict[str, str] = dataclasses.field(default_factory=dict)
 
 
 def validate_transition(*, from_state: str, action: str, flow: str) -> ApprovalState:

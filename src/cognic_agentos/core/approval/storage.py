@@ -124,6 +124,9 @@ class ApprovalRequestRow:
     second_approver: str | None
     denier: str | None
     expires_at: datetime
+    # Sprint 13.5c3 (ADR-014) — projected for the verify-time evidence echo
+    # (spec §3.2); defaulted so existing construction sites stay green.
+    required_refs: dict[str, str] = dataclasses.field(default_factory=dict)
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -466,6 +469,9 @@ class ApprovalRequestStore:
             # (PG/Oracle return aware); expires_at was written UTC-aware, so a
             # naive read is re-stamped UTC. Branchless so both arms are covered.
             expires_at=row.expires_at.replace(tzinfo=row.expires_at.tzinfo or UTC),
+            # Sprint 13.5c3 (ADR-014): None-guard for pre-13.5a rows / NULL
+            # JSON reads; the column is written as a dict at create_request_row.
+            required_refs=dict(row.required_refs or {}),
         )
 
     async def first_approver(self, *, request_id: uuid.UUID, tenant_id: str) -> str | None:

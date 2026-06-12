@@ -67,6 +67,14 @@ MemoryRefusalReason = Literal[
     # resolver is wired (the default until the Task-10 composition root), export
     # uses settings.memory_export_retention_seconds and this value never fires.
     "memory_export_tenant_config_overlay_invalid",
+    # Sprint 13.5c3 (ADR-014) — approval-seam refusals for high-tier long_term
+    # writes; the engine-absent fallback value
+    # memory_approval_engine_not_available is KEPT above.
+    "memory_approval_pending",
+    "memory_approval_denied",
+    "memory_approval_expired",
+    "memory_approval_binding_mismatch",
+    "memory_approval_request_not_found",
 ]
 
 #: Reasons a forget() call may be initiated — carried on the memory.forget chain event.
@@ -93,8 +101,13 @@ class SubjectRef:
 
 
 class MemoryOperationRefused(Exception):
-    """Typed refusal carrying ONLY the wire-public closed-enum reason."""
+    """Typed refusal carrying ONLY the wire-public closed-enum reason (plus,
+    for ``memory_approval_pending`` only, the Sprint-13.5c3 additive
+    ``approval_request_id`` re-write correlator per ADR-014)."""
 
-    def __init__(self, reason: MemoryRefusalReason) -> None:
+    def __init__(
+        self, reason: MemoryRefusalReason, *, approval_request_id: str | None = None
+    ) -> None:
         super().__init__(reason)
         self.reason: MemoryRefusalReason = reason
+        self.approval_request_id = approval_request_id
