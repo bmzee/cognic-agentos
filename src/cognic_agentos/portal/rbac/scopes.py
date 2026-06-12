@@ -212,7 +212,8 @@ MEMORY_SCOPES: frozenset[MemoryRBACScope] = frozenset(
 
 
 #: Sprint 11.5b T1 — emergency-control RBAC family per ADR-018. One value in
-#: 11.5b; Sprint 13.5 grows it with the full kill-switch matrix + quotas. Its
+#: 11.5b; Sprint 13.6 grows it with the full kill-switch matrix + quotas
+#: (emergency carved from 13.5 to 13.6 at the 2026-06-12 reconciliation). Its
 #: own family (NOT folded into MemoryRBACScope) — emergency != memory-data scope.
 #: Wire-protocol-public: every 403 ``scope_not_held`` denial on the kill-switch
 #: surface carries one of these values. Namespace-disjoint from all other

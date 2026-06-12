@@ -1,13 +1,15 @@
 """Sprint 10.5b T9 — architectural-arrow guard: scheduler modules MUST
 NOT import ``cognic_agentos.core.emergency.*``.
 
-Per plan §1193 + ADR-018: ``core/emergency/quotas.py`` and
-``core/emergency/kill_switches.py`` do NOT exist in this workspace
-(Sprint 13.5 territory). Sprint 10.5 MUST NOT create them — that's
-scope creep into Sprint 13.5. T5 declared the ``QuotaInterrogator``
+Per plan §1193 + ADR-018: ``core/emergency/quotas.py`` does NOT exist
+in this workspace and the full kill-switch matrix is Sprint 13.6
+territory (emergency controls carved from 13.5 to 13.6 at the
+2026-06-12 reconciliation; 11.5b seeded ``kill_switches.py`` with the
+memory write-freeze only). Sprint 10.5 MUST NOT create them — that's
+scope creep. T5 declared the ``QuotaInterrogator``
 + ``KillSwitchInterrogator`` Protocols + fail-loud sentinels in
 ``core/scheduler/_seams.py`` per
-[[feedback_consumer_owned_protocol_for_unlanded_dep]]; Sprint 13.5
+[[feedback_consumer_owned_protocol_for_unlanded_dep]]; Sprint 13.6
 will eventually ship the real conformers in ``core/emergency/*`` and
 they will be wired by the AgentOS app's DI setup — but the scheduler
 modules themselves must NEVER directly import from that namespace.
@@ -146,7 +148,8 @@ def test_scheduler_module_does_not_import_core_emergency(module_path: str) -> No
     ``cognic_agentos.core.emergency.*`` import. The seam Protocols
     in ``core/scheduler/_seams.py`` are the architectural-arrow
     boundary; the real conformers will live in ``core/emergency/``
-    at Sprint 13.5 and will be wired through DI, NOT through direct
+    at Sprint 13.6 (emergency carved from 13.5 at the 2026-06-12
+    reconciliation) and will be wired through DI, NOT through direct
     imports from scheduler code.
 
     Round-1 P2 reviewer fix: catches all 4 import forms (plain,
@@ -157,7 +160,7 @@ def test_scheduler_module_does_not_import_core_emergency(module_path: str) -> No
     for imp in imports:
         assert not imp.startswith(FORBIDDEN_MODULE_PREFIX), (
             f"{module_path}: forbidden import resolves to {imp!r}. "
-            f"core/emergency/* lives at Sprint 13.5 and must be "
+            f"core/emergency/* lives at Sprint 13.6 and must be "
             f"consumed via the QuotaInterrogator + KillSwitchInterrogator "
             f"Protocols declared in core/scheduler/_seams.py (consumer-"
             f"owned-Protocol architecture per "

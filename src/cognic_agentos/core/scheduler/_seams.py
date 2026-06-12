@@ -6,9 +6,10 @@ future sprint structurally conforms (NOT re-imports) when its module
 lands.
 
 Four Protocols ship in T5:
-  * QuotaInterrogator → Sprint 13.5 will conform at
-    core/emergency/quotas.QuotaEngine
-  * KillSwitchInterrogator → Sprint 13.5 will conform at
+  * QuotaInterrogator → Sprint 13.6 will conform at
+    core/emergency/quotas.QuotaEngine (emergency controls carved from
+    13.5 to 13.6 at the 2026-06-12 reconciliation)
+  * KillSwitchInterrogator → Sprint 13.6 will conform at
     core/emergency/kill_switches.KillSwitchEngine
   * ParentBudgetResolver → Sprint 11 sub-agent primitive will conform
     at subagent/budget_resolver (or wherever subagent settles)
@@ -37,11 +38,13 @@ from typing import Protocol, runtime_checkable
 
 @runtime_checkable
 class QuotaInterrogator(Protocol):
-    """Sprint 13.5 will implement at core/emergency/quotas.QuotaEngine.
+    """Sprint 13.6 will implement at core/emergency/quotas.QuotaEngine
+    (emergency controls carved from 13.5 to 13.6 at the 2026-06-12
+    reconciliation).
 
     Sprint 10.5 SchedulerEngine constructs with a QuotaInterrogator
     instance via DI; production wiring uses _NullQuotaInterrogator
-    until Sprint 13.5 ships the real implementation.
+    until Sprint 13.6 ships the real implementation.
 
     Two-method API (the storage/quota reservation needs a handle so
     terminal-state release can refer back to the reservation):
@@ -70,8 +73,9 @@ class QuotaInterrogator(Protocol):
 
 @runtime_checkable
 class KillSwitchInterrogator(Protocol):
-    """Sprint 13.5 will implement at
-    core/emergency/kill_switches.KillSwitchEngine."""
+    """Sprint 13.6 will implement at
+    core/emergency/kill_switches.KillSwitchEngine (emergency carved
+    from 13.5 to 13.6 at the 2026-06-12 reconciliation)."""
 
     async def is_active(
         self,
@@ -117,7 +121,7 @@ class ParentBudgetResolver(Protocol):
 
 
 class _NullQuotaInterrogator:
-    """Fail-loud sentinel raising NotImplementedError pointing at Sprint 13.5.
+    """Fail-loud sentinel raising NotImplementedError pointing at Sprint 13.6.
 
     Production deployments wire a real QuotaInterrogator from
     core/emergency/quotas at app-startup; the sentinel is the production-
@@ -133,25 +137,25 @@ class _NullQuotaInterrogator:
         estimated_tokens: int,
     ) -> bool:
         raise NotImplementedError(
-            "QuotaInterrogator not wired. Sprint 13.5 (core/emergency/quotas.py) "
-            "supplies the real implementation; pre-13.5 deployments must inject "
+            "QuotaInterrogator not wired. Sprint 13.6 (core/emergency/quotas.py) "
+            "supplies the real implementation; pre-13.6 deployments must inject "
             "a structural conformer at SchedulerEngine construction."
         )
 
     async def release_reservation(self, task_id: uuid.UUID) -> None:
         raise NotImplementedError(
-            "QuotaInterrogator not wired. See Sprint 13.5 (core/emergency/quotas.py)."
+            "QuotaInterrogator not wired. See Sprint 13.6 (core/emergency/quotas.py)."
         )
 
 
 class _NullKillSwitchInterrogator:
-    """Fail-loud sentinel raising NotImplementedError pointing at Sprint 13.5."""
+    """Fail-loud sentinel raising NotImplementedError pointing at Sprint 13.6."""
 
     async def is_active(self, *, tenant_id: str, pack_id: str) -> bool:
         raise NotImplementedError(
-            "KillSwitchInterrogator not wired. Sprint 13.5 "
+            "KillSwitchInterrogator not wired. Sprint 13.6 "
             "(core/emergency/kill_switches.py) supplies the real implementation; "
-            "pre-13.5 deployments must inject a structural conformer at "
+            "pre-13.6 deployments must inject a structural conformer at "
             "SchedulerEngine construction."
         )
 

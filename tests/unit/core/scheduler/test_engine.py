@@ -333,7 +333,7 @@ async def test_submit_propagates_NotImplementedError_from_NullQuotaInterrogator(
         class_settings=class_settings,
         quota=_NullQuotaInterrogator(),
     )
-    with pytest.raises(NotImplementedError, match=r"Sprint 13\.5"):
+    with pytest.raises(NotImplementedError, match=r"Sprint 13\.6"):
         await engine.submit(submit_input=_make_submit_input(), request_id="req-1")
 
 

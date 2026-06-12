@@ -1,8 +1,8 @@
 # Cognic AgentOS Sprint Working Summary
 
-Source: `docs/BUILD_PLAN.md`
+Source: `docs/BUILD_PLAN.md` · Status source: [`docs/AS_BUILT_CAPABILITY_MAP.md`](AS_BUILT_CAPABILITY_MAP.md)
 
-This is the compact view of what each sprint is responsible for. Phases 1-4 deliver the bank-deployable AgentOS platform. Phase 5, AgentOS Studio, is deferred until after Phase 4 stabilizes and bank demand is confirmed.
+This is the compact RESPONSIBILITY index — what each sprint owns, not what is done. For execution status, read the per-sprint status/reconciliation blocks in `docs/BUILD_PLAN.md` and the as-built capability map. Phases 1-4 deliver the bank-deployable AgentOS platform; Phase 5 (Studio) stays deferred pending bank demand.
 
 ## Phase 1 - Foundation
 
@@ -36,9 +36,10 @@ This is the compact view of what each sprint is responsible for. Phases 1-4 deli
 - **Sprint 11.5 - Memory governance:** governed memory API for remember, recall, forget, redact, export, and subject listing, with consent and data-class enforcement.
 - **Sprint 12 - Evaluation harness:** bulk testing against bank corpora, simulated scenarios, persistent eval results, and CLI workflows.
 - **Sprint 13 - LLM judge and adversarial testing:** explainable judge verdicts, live-case replay, adversarial corpus generation, and promotion gates.
-- **Sprint 13.5 - Approval, policy, and emergency controls:** runtime tool approval, expanded Rego policy engine, kill switches, quotas, and fail-closed controls.
+- **Sprint 13.5 - Runtime approval + policy conversion:** approval engine, portal approval API, MCP/sandbox/scheduler/memory approval seams, and Rego CONVERT work; emergency controls carved to Sprint 13.6.
+- **Sprint 13.6 - Emergency controls:** full ADR-018 kill-switch class set, quotas, fail-closed propagation, scheduler/gateway integration, portal/RBAC surfaces.
 - **Sprint 14 - Deployment kit:** per-tenant Helm and docker-compose deployment assets, bank overlay template, and operator runbook.
-- **Sprint 15 - End-to-end POC:** extract real packs, install them on AgentOS, run real queries, and prove the full governed audit chain.
+- **Sprint 15 - End-to-end production-readiness validation:** extract real packs, install them on AgentOS, run real queries, and prove the full governed audit chain. *(Re-sequenced into the capability map's forward items 4-8; the validation is production-readiness, not a POC.)*
 
 ## Phase 5 - AgentOS Studio (Deferred)
 
@@ -49,7 +50,6 @@ This is the compact view of what each sprint is responsible for. Phases 1-4 deli
 - **Sprint 20 - Agent authoring:** prompt, allowed tools, sub-agent permissions, and ISO 42001 declarations for authored agents.
 - **Sprint 21 - Promotion workflow:** Studio-authored pack promotion from dev to stage to prod using 4-eyes RBAC approval.
 
-## Completion Count
+## Status (2026-06-12 reconciliation)
 
-- **Core AgentOS completion:** 18 remaining sprints from Sprint 3 through Sprint 15.
-- **Including deferred Studio:** 24 remaining sprints from Sprint 3 through Sprint 21.
+Sprints 1A through 13.5c3 are MERGED (incl. the inserted sub-sprints: 2.5, 7A2, 8.5, 9.5, 10.1, 10.5, 10.6, 11.5a-c, 12, 13a-c, and the 13.5 approval arc a/b1/b2/c1-c3). Remaining before the forward sequence takes over: 13.5c4 + 13.6. The reconciled forward sequence (composition-root wiring, managed runtime, workflow orchestration, ADK, deployment substrate Z1, runbooks/checklist) lives in [`docs/AS_BUILT_CAPABILITY_MAP.md`](AS_BUILT_CAPABILITY_MAP.md) — do not maintain sprint counts here.
