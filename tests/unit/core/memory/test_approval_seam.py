@@ -570,3 +570,147 @@ class TestWiredReWrite:
                 **_WRITE_KWARGS, approval_request_id="11111111-1111-1111-1111-111111111111"
             )
         assert exc.value.reason == "approval_already_finalized"
+
+
+# ---------------------------------------------------------------------------
+# T6 — API carriers + memory.write evidence (spec §6)
+# ---------------------------------------------------------------------------
+
+
+def _mk_memory_api(db: object, *, approval_engine: object, context: object | None = None) -> object:
+    from cognic_agentos.core.config import build_settings_without_env_file
+    from cognic_agentos.core.decision_history import DecisionHistoryStore
+    from cognic_agentos.core.memory.api import MemoryAPI
+    from cognic_agentos.core.memory.storage import PostgresMemoryAdapter
+
+    return MemoryAPI(
+        context=context or _ctx(),  # type: ignore[arg-type]
+        adapter=PostgresMemoryAdapter(engine=db, dh_store=DecisionHistoryStore(db)),  # type: ignore[arg-type]
+        dlp=_FakeDLP(),  # type: ignore[arg-type]
+        consent=_FakeConsent(),  # type: ignore[arg-type]
+        policy=_FakeOPA(),  # type: ignore[arg-type]
+        kill_switch=_Frozen(False),
+        audit=DecisionHistoryStore(db),  # type: ignore[arg-type]
+        settings=build_settings_without_env_file(),
+        approval_engine=approval_engine,  # type: ignore[arg-type]
+    )
+
+
+async def _load_memory_write_rows(db: object) -> list[dict[str, object]]:
+    """memory.write payloads (the DB column is event_type — c2 discovery)."""
+    import json
+
+    from sqlalchemy import text
+
+    async with db.connect() as conn:  # type: ignore[attr-defined]
+        rows = await conn.execute(
+            text(
+                "SELECT payload FROM decision_history "
+                "WHERE event_type = 'memory.write' ORDER BY sequence"
+            )
+        )
+        return [json.loads(r[0]) for r in rows]
+
+
+class TestEvidenceAndCarriers:
+    async def test_granted_rewrite_row_carries_join_keys(self, tmp_path: object) -> None:
+        import uuid as _uuid
+
+        from cognic_agentos.core.memory.tiers import MemoryOperationRefused
+
+        db = await _mk_migrated_db(tmp_path)
+        engine = _mk_approval_engine(db, flow="require_single_approval")
+        api = _mk_memory_api(db, approval_engine=engine)
+        with pytest.raises(MemoryOperationRefused) as exc:
+            await api.remember(  # type: ignore[attr-defined]
+                "k1",
+                {"x": 1},
+                tier="long_term",
+                data_classes=("internal",),
+                purpose="customer_support",
+            )
+        rid = _uuid.UUID(exc.value.approval_request_id)
+        await engine.grant(request_id=rid, tenant_id="t1", approver=_approver())  # type: ignore[attr-defined]
+        record_id = await api.remember(  # type: ignore[attr-defined]
+            "k1",
+            {"x": 1},
+            tier="long_term",
+            data_classes=("internal",),
+            purpose="customer_support",
+            approval_request_id=str(rid),
+        )
+        assert record_id is not None
+        rows = await _load_memory_write_rows(db)
+        assert rows[-1]["approval_verified"] is True
+        assert rows[-1]["approval_request_id"] == str(rid)
+        assert "approval_audit_record_ref" not in rows[-1]  # non-regulator
+
+    async def test_unconsulted_write_row_false_and_no_correlators(self, tmp_path: object) -> None:
+        db = await _mk_migrated_db(tmp_path)
+        api = _mk_memory_api(
+            db,
+            approval_engine=_mk_approval_engine(db, flow="require_single_approval"),
+            context=_ctx(risk_tier="internal_write"),
+        )
+        await api.remember(  # type: ignore[attr-defined]
+            "k1",
+            {"x": 1},
+            tier="long_term",
+            data_classes=("internal",),
+            purpose="customer_support",
+        )
+        payload = (await _load_memory_write_rows(db))[-1]
+        assert payload["approval_verified"] is False
+        assert "approval_request_id" not in payload
+        assert "approval_audit_record_ref" not in payload
+        # Pre-c3 keyset byte-compat (+ the DH-merged actor_id — c2 discovery):
+        assert set(payload.keys()) == {
+            "tier",
+            "data_classes",
+            "purpose",
+            "retention_until",
+            "record_id",
+            "subject_ref",
+            "block_kind",
+            "redacted_value_digest",
+            "approval_verified",
+            "actor_id",
+        }
+
+    async def test_granted_regulator_row_carries_three_keys(self, tmp_path: object) -> None:
+        # Spec §6 three-key bidirectional pin: verified + approval join +
+        # the §3.2 forward edge (the ORIGINAL attempt's hoisted id).
+        import uuid as _uuid
+
+        from cognic_agentos.core.memory.tiers import MemoryOperationRefused
+
+        db = await _mk_migrated_db(tmp_path)
+        engine = _mk_approval_engine(db, flow="require_single_approval")
+        api = _mk_memory_api(
+            db, approval_engine=engine, context=_ctx(risk_tier="regulator_communication")
+        )
+        with pytest.raises(MemoryOperationRefused) as exc:
+            await api.remember(  # type: ignore[attr-defined]
+                "k1",
+                {"x": 1},
+                tier="long_term",
+                data_classes=("internal",),
+                purpose="customer_support",
+            )
+        rid = _uuid.UUID(exc.value.approval_request_id)
+        await engine.grant(  # type: ignore[attr-defined]
+            request_id=rid, tenant_id="t1", approver=_approver(), reason="approved for filing"
+        )
+        await api.remember(  # type: ignore[attr-defined]
+            "k1",
+            {"x": 1},
+            tier="long_term",
+            data_classes=("internal",),
+            purpose="customer_support",
+            approval_request_id=str(rid),
+        )
+        payload = (await _load_memory_write_rows(db))[-1]
+        assert payload["approval_verified"] is True
+        assert payload["approval_request_id"] == str(rid)
+        ref = payload["approval_audit_record_ref"]
+        assert isinstance(ref, str) and ref.startswith("memory-write-")

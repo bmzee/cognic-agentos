@@ -219,6 +219,10 @@ async def build_runtime(settings: Settings, adapters: Adapters) -> Runtime:
                 object_store=object_store,
                 vector_index=vector_index,
                 resolver=overlay_resolver,  # ADR-023 — memory production-wired
+                # Sprint 13.5c3 (ADR-014) — the FIRST production-wired approval
+                # consult: high-tier long_term writes get pending->grant->re-write
+                # instead of the hard engine-absent refusal.
+                approval_engine=approval_engine,
             )
 
         memory_api_factory = _factory

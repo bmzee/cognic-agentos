@@ -265,7 +265,22 @@ class PostgresMemoryAdapter:
                 "subject_ref": record.subject.canonical,
                 "block_kind": record.block_kind,
                 "redacted_value_digest": _value_digest(record.value),
-            },
+                # Sprint 13.5c3 (ADR-014): always-present attestation; the two
+                # correlators are conditional (only verified grants carry them)
+                # so unconsulted writes carry only the always-present
+                # attestation; no approval correlator keys are added (spec §6).
+                "approval_verified": record.approval_verified,
+            }
+            | (
+                {"approval_request_id": record.approval_request_id}
+                if record.approval_verified and record.approval_request_id is not None
+                else {}
+            )
+            | (
+                {"approval_audit_record_ref": record.approval_audit_record_ref}
+                if record.approval_audit_record_ref is not None
+                else {}
+            ),
             actor_id=record.actor_id,
             tenant_id=record.tenant_id,
             iso_controls=_MEMORY_WRITE_ISO_CONTROLS,

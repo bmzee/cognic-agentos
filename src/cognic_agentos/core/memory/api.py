@@ -54,6 +54,7 @@ import uuid
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
+from cognic_agentos.core.approval.engine import ApprovalEngine
 from cognic_agentos.core.config_overlay.resolver import TenantConfigOverlayInvalid
 from cognic_agentos.core.decision_history import DecisionHistoryStore, DecisionRecord
 from cognic_agentos.core.memory import episodes as _episodes
@@ -139,6 +140,7 @@ class MemoryAPI:
         object_store: ObjectStoreAdapter | None = None,
         vector_index: MemoryVectorIndex | None = None,
         resolver: TenantConfigResolver | None = None,
+        approval_engine: ApprovalEngine | None = None,
     ) -> None:
         # Fail-loud default: bind the _NullMemoryKillSwitchInterrogator sentinel
         # when no kill-switch is wired (raises NotImplementedError on the first
@@ -154,6 +156,9 @@ class MemoryAPI:
             consent=consent,
             policy=policy,
             kill_switch=bound_kill_switch,
+            # Sprint 13.5c3 (ADR-014) — the Step-7 approval consult; None keeps
+            # the engine-absent transitional refusal byte-for-byte.
+            approval_engine=approval_engine,
         )
         self._adapter = adapter
         self._audit = audit
@@ -186,10 +191,12 @@ class MemoryAPI:
         purpose: str,
         consent_token: ConsentToken | None = None,
         retention_window_s: int | None = None,
+        approval_request_id: str | None = None,
     ) -> MemoryRecordId:
         """Write a keyed memory under the served subject. Runs the §7.1 write
         gate (which builds the resolved descriptor) then persists via the
-        adapter; returns the generated record id."""
+        adapter; returns the generated record id. ``approval_request_id`` is
+        the Sprint-13.5c3 re-write carrier (ADR-014)."""
 
         record = await self._gate.check_write(
             value=value,
@@ -199,6 +206,7 @@ class MemoryAPI:
             key=key,
             consent_token=consent_token,
             retention_window_s=retention_window_s,
+            approval_request_id=approval_request_id,
         )
         rid = await self._adapter.put(record)
         if (
@@ -236,10 +244,12 @@ class MemoryAPI:
         data_classes: tuple[str, ...] | list[str],
         purpose: str,
         consent_token: ConsentToken | None = None,
+        approval_request_id: str | None = None,
     ) -> MemoryRecordId:
         """Singleton block upsert (always ``long_term``). Runs the §7.1 write
         gate (block-mode: subject-scope check at step 1b) then upserts via the
-        adapter; returns the new version's record id."""
+        adapter; returns the new version's record id. ``approval_request_id``
+        is the Sprint-13.5c3 re-write carrier (ADR-014)."""
 
         record = await self._gate.check_write(
             value=value,
@@ -249,6 +259,7 @@ class MemoryAPI:
             block_kind=kind,
             subject=subject,
             consent_token=consent_token,
+            approval_request_id=approval_request_id,
         )
         return await self._adapter.upsert_block(record)
 

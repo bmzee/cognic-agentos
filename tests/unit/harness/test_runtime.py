@@ -125,6 +125,11 @@ async def test_build_runtime_wires_memory_when_cache_present(
         # the minted API's resolver IS the resolver exposed on Runtime.
         assert api._resolver is runtime.config_overlay_resolver
         assert runtime.config_overlay_resolver is not None
+        # Sprint 13.5c3 (ADR-014, F1 LIVE pin) — the factory threads the
+        # runtime's unconditionally-built approval engine into the minted
+        # API's gate: the FIRST production-wired approval consult.
+        assert api._gate._approval_engine is runtime.approval_engine
+        assert runtime.approval_engine is not None
         # The minted API's gate enforces with the SAME router exposed on
         # Runtime.memory_policy. id() identity sidesteps the nominal-type mismatch
         # (MemoryGate types policy: OPAEngine; at runtime the gate's policy IS the
