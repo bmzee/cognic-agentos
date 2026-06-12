@@ -5,7 +5,7 @@ Consumer-owned Protocols per
 [[feedback_consumer_owned_protocol_for_unlanded_dep]]: declares 3
 Protocols (QuotaInterrogator, KillSwitchInterrogator,
 ParentBudgetResolver) that point at modules NOT yet in the workspace
-(Sprint 13.5 + Sprint 11). Each Protocol has a fail-loud `_Null*`
+(Sprint 13.6 emergency + Sprint 11 sub-agent). Each Protocol has a fail-loud `_Null*`
 sentinel that raises NotImplementedError pointing at the owning
 future sprint.
 
@@ -70,7 +70,7 @@ class TestNullQuotaInterrogatorFailsLoud:
                 estimated_tokens=100,
             )
         msg = str(exc_info.value)
-        assert "Sprint 13.5" in msg
+        assert "Sprint 13.6" in msg  # emergency carved 13.5 -> 13.6 (2026-06-12)
         assert "core/emergency/quotas" in msg
 
     async def test_release_reservation_raises_not_implemented(self):
@@ -85,7 +85,7 @@ class TestNullKillSwitchInterrogatorFailsLoud:
         with pytest.raises(NotImplementedError) as exc_info:
             await sentinel.is_active(tenant_id="t", pack_id="p")
         msg = str(exc_info.value)
-        assert "Sprint 13.5" in msg
+        assert "Sprint 13.6" in msg  # emergency carved 13.5 -> 13.6 (2026-06-12)
         assert "core/emergency/kill_switches" in msg
 
 
