@@ -410,3 +410,163 @@ class TestWiredFirstWrite:
         gate = _mk_gate(approval_engine=None)
         with pytest.raises(ValueError):
             await gate.check_write(**_WRITE_KWARGS, approval_request_id="not-a-uuid")  # type: ignore[attr-defined]
+
+
+# ---------------------------------------------------------------------------
+# T5 — re-write verify path (spec §3.3/§3.6)
+# ---------------------------------------------------------------------------
+
+
+def _approver(subject: str = "rev@bank.example") -> object:
+    from cognic_agentos.core.approval._types import ApprovalActor
+
+    return ApprovalActor(
+        subject=subject,
+        tenant_id="t1",
+        actor_type="human",
+        scopes=frozenset({"tool.approve.payment", "tool.approve.regulator"}),
+    )
+
+
+class TestWiredReWrite:
+    async def _pending_rid(self, gate: object) -> object:
+        import uuid as _uuid
+
+        from cognic_agentos.core.memory.tiers import MemoryOperationRefused
+
+        with pytest.raises(MemoryOperationRefused) as exc:
+            await gate.check_write(**_WRITE_KWARGS)  # type: ignore[attr-defined]
+        assert exc.value.reason == "memory_approval_pending"
+        return _uuid.UUID(exc.value.approval_request_id)
+
+    async def test_granted_rewrite_returns_verified_record_with_refs(
+        self, tmp_path: object
+    ) -> None:
+        db = await _mk_migrated_db(tmp_path)
+        engine = _mk_approval_engine(db, flow="require_single_approval")
+        gate = _mk_gate(approval_engine=engine)
+        rid = await self._pending_rid(gate)
+        await engine.grant(request_id=rid, tenant_id="t1", approver=_approver())  # type: ignore[attr-defined]
+        record = await gate.check_write(**_WRITE_KWARGS, approval_request_id=str(rid))  # type: ignore[attr-defined]
+        assert record.approval_verified is True
+        assert record.approval_request_id == str(rid)
+        assert record.approval_audit_record_ref is None  # non-regulator: no ref bound
+
+    async def test_granted_regulator_rewrite_carries_forward_edge(self, tmp_path: object) -> None:
+        # Spec §3.2 forward edge: the granted record carries the ORIGINAL
+        # attempt's hoisted memory-write-* id, read back from
+        # ApprovalCheckResult.required_refs (the T2 extension).
+        db = await _mk_migrated_db(tmp_path)
+        engine = _mk_approval_engine(db, flow="require_single_approval")
+        gate = _mk_gate(context=_ctx(risk_tier="regulator_communication"), approval_engine=engine)
+        rid = await self._pending_rid(gate)
+        await engine.grant(  # type: ignore[attr-defined]
+            request_id=rid, tenant_id="t1", approver=_approver(), reason="approved for filing"
+        )
+        record = await gate.check_write(**_WRITE_KWARGS, approval_request_id=str(rid))  # type: ignore[attr-defined]
+        assert record.approval_verified is True
+        assert record.approval_request_id == str(rid)
+        assert record.approval_audit_record_ref is not None
+        assert record.approval_audit_record_ref.startswith("memory-write-")
+        assert record.approval_audit_record_ref != record.request_id  # first attempt id
+
+    async def test_value_change_binding_mismatch(self, tmp_path: object) -> None:
+        # F4 content binding: the grant covers value={"x": 1} ONLY.
+        from cognic_agentos.core.memory.tiers import MemoryOperationRefused
+
+        db = await _mk_migrated_db(tmp_path)
+        engine = _mk_approval_engine(db, flow="require_single_approval")
+        gate = _mk_gate(approval_engine=engine)
+        rid = await self._pending_rid(gate)
+        await engine.grant(request_id=rid, tenant_id="t1", approver=_approver())  # type: ignore[attr-defined]
+        with pytest.raises(MemoryOperationRefused) as exc:
+            await gate.check_write(  # type: ignore[attr-defined]
+                **{**_WRITE_KWARGS, "value": {"x": 2}}, approval_request_id=str(rid)
+            )
+        assert exc.value.reason == "memory_approval_binding_mismatch"
+        assert exc.value.approval_request_id is None  # pending-only carrier
+
+    async def test_actor_swap_binding_mismatch(self, tmp_path: object) -> None:
+        # c2 refinement carried forward: actor_id is IN the binding digest.
+        from cognic_agentos.core.memory.tiers import MemoryOperationRefused
+
+        db = await _mk_migrated_db(tmp_path)
+        engine = _mk_approval_engine(db, flow="require_single_approval")
+        gate = _mk_gate(approval_engine=engine)
+        rid = await self._pending_rid(gate)
+        await engine.grant(request_id=rid, tenant_id="t1", approver=_approver())  # type: ignore[attr-defined]
+        swapped = _mk_gate(context=_ctx(actor_id="svc-2"), approval_engine=engine)
+        with pytest.raises(MemoryOperationRefused) as exc:
+            await swapped.check_write(**_WRITE_KWARGS, approval_request_id=str(rid))  # type: ignore[attr-defined]
+        assert exc.value.reason == "memory_approval_binding_mismatch"
+
+    async def test_consent_revalidated_not_bound(self, tmp_path: object) -> None:
+        # Spec §3.1: Steps 0-6 RE-RUN on every attempt — consent is deliberately
+        # NOT in the binding; a consent regression at re-write surfaces as the
+        # consent reason, and no NEW approval request is created.
+        from cognic_agentos.core.memory.tiers import MemoryOperationRefused
+
+        db = await _mk_migrated_db(tmp_path)
+        engine = _mk_approval_engine(db, flow="require_single_approval")
+        gate = _mk_gate(approval_engine=engine)
+        rid = await self._pending_rid(gate)
+        await engine.grant(request_id=rid, tenant_id="t1", approver=_approver())  # type: ignore[attr-defined]
+        broken_consent = _mk_gate(
+            approval_engine=engine,
+            consent=_FakeConsent(MemoryOperationRefused("memory_consent_required")),
+        )
+        with pytest.raises(MemoryOperationRefused) as exc:
+            await broken_consent.check_write(**_WRITE_KWARGS, approval_request_id=str(rid))  # type: ignore[attr-defined]
+        assert exc.value.reason == "memory_consent_required"
+        assert await _pending(db) == []  # the granted request; no new pending row
+
+    async def test_still_pending_denied_expired_not_found(self, tmp_path: object) -> None:
+        import uuid as _uuid
+        from datetime import timedelta
+
+        from cognic_agentos.core.memory.tiers import MemoryOperationRefused
+
+        db = await _mk_migrated_db(tmp_path)
+        clock = _MutableClock()
+        engine = _mk_approval_engine(db, flow="require_single_approval", clock=clock)
+        gate = _mk_gate(approval_engine=engine)
+        # still pending (keeps the carrier):
+        rid = await self._pending_rid(gate)
+        with pytest.raises(MemoryOperationRefused) as exc:
+            await gate.check_write(**_WRITE_KWARGS, approval_request_id=str(rid))  # type: ignore[attr-defined]
+        assert exc.value.reason == "memory_approval_pending"
+        assert exc.value.approval_request_id == str(rid)
+        # denied:
+        await engine.deny(  # type: ignore[attr-defined]
+            request_id=rid, tenant_id="t1", approver=_approver(), reason="not appropriate"
+        )
+        with pytest.raises(MemoryOperationRefused) as exc:
+            await gate.check_write(**_WRITE_KWARGS, approval_request_id=str(rid))  # type: ignore[attr-defined]
+        assert exc.value.reason == "memory_approval_denied"
+        # expired (fresh request; clock past the 300s single TTL):
+        rid2 = await self._pending_rid(gate)
+        clock.now += timedelta(hours=1)
+        with pytest.raises(MemoryOperationRefused) as exc:
+            await gate.check_write(**_WRITE_KWARGS, approval_request_id=str(rid2))  # type: ignore[attr-defined]
+        assert exc.value.reason == "memory_approval_expired"
+        # unknown == not found (cross-tenant is the same shape BY CONSTRUCTION):
+        with pytest.raises(MemoryOperationRefused) as exc:
+            await gate.check_write(  # type: ignore[attr-defined]
+                **_WRITE_KWARGS, approval_request_id=str(_uuid.uuid4())
+            )
+        assert exc.value.reason == "memory_approval_request_not_found"
+
+    async def test_non_mismatch_transition_refusal_propagates_raw(self, tmp_path: object) -> None:
+        # The verify re-raise arm: nothing else reachable -> fail-loud.
+        from cognic_agentos.core.approval._types import ApprovalTransitionRefused
+
+        class _RaisingVerifyEngine:
+            async def verify_grant_for_action(self, **kwargs: object) -> object:
+                raise ApprovalTransitionRefused("approval_already_finalized")
+
+        gate = _mk_gate(approval_engine=_RaisingVerifyEngine())
+        with pytest.raises(ApprovalTransitionRefused) as exc:
+            await gate.check_write(  # type: ignore[attr-defined]
+                **_WRITE_KWARGS, approval_request_id="11111111-1111-1111-1111-111111111111"
+            )
+        assert exc.value.reason == "approval_already_finalized"

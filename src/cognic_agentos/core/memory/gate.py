@@ -69,6 +69,7 @@ from typing import TYPE_CHECKING
 from cognic_agentos.core.approval._types import (
     APPROVAL_REDACTED_CONTEXT_MAX_LEN,
     ApprovalEnvelope,
+    ApprovalRequestNotFound,
     ApprovalTransitionRefused,
 )
 from cognic_agentos.core.approval.engine import ApprovalEngine
@@ -83,6 +84,7 @@ from cognic_agentos.core.memory._seams import (
 from cognic_agentos.core.memory.tiers import (
     BlockKind,
     MemoryOperationRefused,
+    MemoryRefusalReason,
     MemoryTier,
     SubjectRef,
 )
@@ -438,7 +440,43 @@ class MemoryGate:
             value=value,
         )
         if approval_request_uuid is not None:
-            raise NotImplementedError("re-write verify path lands at 13.5c3 T5 (ADR-014)")
+            try:
+                res = await self._approval_engine.verify_grant_for_action(
+                    request_id=approval_request_uuid,
+                    tenant_id=ctx.tenant_id,
+                    expected_args_digest=args_digest,
+                    expected_tool_identity=tool_identity,
+                )
+            except ApprovalRequestNotFound:
+                # Cross-tenant == unknown BY CONSTRUCTION (tenant-scoped load).
+                raise MemoryOperationRefused("memory_approval_request_not_found") from None
+            except ApprovalTransitionRefused as exc:
+                if exc.reason != "approval_binding_mismatch":
+                    raise  # fail-loud; nothing else reachable from verify
+                # A grant authorises exactly one write shape (incl. content).
+                raise MemoryOperationRefused("memory_approval_binding_mismatch") from None
+            if res.state == "granted":
+                return _ApprovalConsult(
+                    verified=True,
+                    granted_request_id=str(approval_request_uuid),
+                    # The §3.2 forward edge — the ORIGINAL attempt's hoisted id,
+                    # read back from the engine's persisted row (never caller
+                    # input); None -> the memory.write key stays absent.
+                    granted_audit_record_ref=res.required_refs.get("audit_record_ref"),
+                )
+            state_to_reason: dict[str, MemoryRefusalReason] = {
+                "pending": "memory_approval_pending",
+                "awaiting_second": "memory_approval_pending",
+                "denied": "memory_approval_denied",
+                "expired": "memory_approval_expired",
+            }
+            reason = state_to_reason[res.state]
+            raise MemoryOperationRefused(
+                reason,
+                approval_request_id=(
+                    str(approval_request_uuid) if reason == "memory_approval_pending" else None
+                ),
+            )
         required_refs: dict[str, str] = {}
         if ctx.risk_tier == "regulator_communication":
             # c3 spec §3.2 (F3): the hoisted memory-write-* id — the same id
