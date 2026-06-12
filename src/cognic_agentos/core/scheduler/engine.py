@@ -126,17 +126,21 @@ SchedulerPromotionRefusedReason = Literal["caps_saturated", "not_at_queue_head"]
 
 
 #: Closed-enum field-name vocabulary for ``SchedulerSubmitInputInvalid``.
-#: Wave-1 has exactly 1 value (``parent_task_id``); future field-shape
-#: validations grow this Literal additively. Drift detector at
-#: ``test_t10_invalid_field_literal_in_lockstep_with_constant`` pins
-#: the Literal arms against the frozenset constant below.
-SchedulerSubmitInputInvalidField = Literal["parent_task_id"]
+#: 2 values: ``parent_task_id`` (Wave-1 / Sprint 10.5) +
+#: ``approval_request_id`` (Sprint 13.5c2 per ADR-014 — parsed
+#: UNCONDITIONALLY at the engine boundary, the parent_task_id mirror);
+#: future field-shape validations grow this Literal additively. Drift
+#: detector at ``test_t10_invalid_field_literal_in_lockstep_with_constant``
+#: pins the Literal arms against the frozenset constant below.
+SchedulerSubmitInputInvalidField = Literal["parent_task_id", "approval_request_id"]
 
 #: Build-time invariant: vocabulary frozenset for AST-comparable drift
 #: detection (test imports both this set + the Literal + asserts
 #: equality, mirroring the ``SchedulerPromotionRefusedReason`` pattern
 #: at the top of this module).
-_VALID_SUBMIT_INPUT_INVALID_FIELDS: Final[frozenset[str]] = frozenset({"parent_task_id"})
+_VALID_SUBMIT_INPUT_INVALID_FIELDS: Final[frozenset[str]] = frozenset(
+    {"parent_task_id", "approval_request_id"}
+)
 
 
 class SchedulerSubmitInputInvalid(Exception):
@@ -155,13 +159,16 @@ class SchedulerSubmitInputInvalid(Exception):
     for examiner correlation.
 
     Round-1 P3 reviewer fix: ``field`` is typed as the closed-enum
-    :data:`SchedulerSubmitInputInvalidField` Literal (1-value Wave-1
-    vocabulary: ``parent_task_id``) rather than free-form ``str``.
-    Mirrors the :class:`SchedulerPromotionRefused` ``reason`` pattern.
+    :data:`SchedulerSubmitInputInvalidField` Literal (2-value vocabulary:
+    ``parent_task_id`` + ``approval_request_id``) rather than free-form
+    ``str``. Mirrors the :class:`SchedulerPromotionRefused` ``reason``
+    pattern.
 
-    Wave-1 coverage: ``parent_task_id`` malformed-UUID only. Future
-    field-shape validations grow the Literal additively + extend the
-    vocabulary frozenset in lockstep.
+    Coverage: ``parent_task_id`` malformed-UUID (Sprint 10.5 Wave-1) +
+    ``approval_request_id`` malformed-UUID (Sprint 13.5c2 per ADR-014 —
+    parsed UNCONDITIONALLY at the engine boundary regardless of approval-
+    engine wiring). Future field-shape validations grow the Literal
+    additively + extend the vocabulary frozenset in lockstep.
     """
 
     def __init__(self, *, field: SchedulerSubmitInputInvalidField, reason: str) -> None:

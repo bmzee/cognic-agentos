@@ -22,12 +22,18 @@ SchedulerAdmissionOutcome = Literal[
     # accepted (2)
     "accepted_immediate",
     "accepted_queued",
-    # refused (5; wire-equal to SchedulerRefusalReason)
+    # refused (10; wire-equal to SchedulerRefusalReason)
     "refused_queue_full",
     "refused_quota_exhausted",
     "refused_policy_denied",
     "refused_kill_switch_active",
     "refused_pack_not_installed",
+    # Sprint 13.5c2 (ADR-014) — approval-seam refusals
+    "refused_approval_pending",
+    "refused_approval_denied",
+    "refused_approval_expired",
+    "refused_approval_binding_mismatch",
+    "refused_approval_request_not_found",
 ]
 
 SchedulerRefusalReason = Literal[
@@ -36,6 +42,12 @@ SchedulerRefusalReason = Literal[
     "refused_policy_denied",
     "refused_kill_switch_active",
     "refused_pack_not_installed",
+    # Sprint 13.5c2 (ADR-014) — approval-seam refusals
+    "refused_approval_pending",
+    "refused_approval_denied",
+    "refused_approval_expired",
+    "refused_approval_binding_mismatch",
+    "refused_approval_request_not_found",
 ]
 
 SchedulerTaskState = Literal[
@@ -81,7 +93,11 @@ class TaskActor:
 @dataclass(frozen=True)
 class SubmitInput:
     """Inputs to SchedulerEngine.submit(...). All fields signed-manifest-derived
-    or actor-bound; no free-form policy strings.
+    or actor-bound; no free-form policy strings. Two Sprint-13.5c2 exceptions
+    (ADR-014): ``approval_request_id`` is a caller-supplied correlator
+    (UUID-string, engine-boundary-validated), and ``approval_verified`` is
+    ENGINE-OWNED — the engine unconditionally overwrites whatever the caller
+    set, so it is never caller-trusted input.
     """
 
     tenant_id: str
@@ -92,6 +108,10 @@ class SubmitInput:
     pack_risk_tier: str
     requested_estimated_tokens: int
     parent_task_id: str | None = None  # Sprint 11 hook; spec §4.10
+    # Sprint 13.5c2 (ADR-014) — approval-seam fields (c2 spec §2):
+    approval_request_id: str | None = None  # caller-supplied re-submit carrier
+    approval_verified: bool = False  # ENGINE-OWNED attestation; engine ALWAYS overwrites
+    data_classes: tuple[str, ...] = ()  # manifest [data_governance].data_classes
 
 
 @dataclass(frozen=True)
@@ -102,6 +122,7 @@ class AdmissionDecision:
     task_id: str | None  # None on refused outcomes
     retry_after_s: int | None = None  # Set only for refused_queue_full
     policy_reason: str | None = None  # Set when outcome=refused_policy_denied; opaque to scheduler
+    approval_request_id: str | None = None  # Set only for refused_approval_pending
 
 
 @dataclass(frozen=True)
