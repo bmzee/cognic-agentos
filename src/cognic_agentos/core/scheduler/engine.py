@@ -46,7 +46,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Final, Literal
 
-from cognic_agentos.core.approval._types import APPROVAL_REDACTED_CONTEXT_MAX_LEN
+from cognic_agentos.core.approval._types import (
+    APPROVAL_REDACTED_CONTEXT_MAX_LEN,
+    ApprovalEnvelope,
+    ApprovalTransitionRefused,
+)
+from cognic_agentos.core.approval.engine import ApprovalEngine
 from cognic_agentos.core.canonical import canonical_bytes
 from cognic_agentos.core.scheduler._seams import (
     KillSwitchInterrogator,
@@ -114,6 +119,19 @@ class _TaskAttribution:
     pack_id: str
     actor_subject: str
     enqueued_at: datetime
+
+
+@dataclass(frozen=True)
+class _ApprovalConsultResult:
+    """Step-3.5 consult outcome (c2 spec §3). ``refusal_reason`` is None on
+    the proceed paths (verified grant OR auto-tier); when set it is one of
+    the 5 ``refused_approval_*`` values and the evidence fields ride along
+    (``approval_flow`` only when a flow is known per the b2 doctrine)."""
+
+    verified: bool
+    refusal_reason: SchedulerRefusalReason | None = None
+    approval_request_id: str | None = None
+    approval_flow: str | None = None
 
 
 #: Round-7 reviewer P1 fix — closed-enum reason vocabulary for the
@@ -257,9 +275,12 @@ def _submit_redacted_context(submit_input: SubmitInput) -> str:
 
 class SchedulerEngine:
     """ADR-022 runtime scheduler primitive. Orchestrates storage +
-    queue + concurrency caps + 3 consumer-owned seams + policy
-    callable. NOT thread-safe; single asyncio event loop per
-    instance."""
+    queue + concurrency caps + 4 consumer-owned seams (quota /
+    kill-switch / parent-budget / pack-state) + policy callable + an
+    optional ApprovalEngine (Sprint 13.5c2 per ADR-014 — a direct
+    core.approval dependency, NOT a consumer-owned Protocol: the
+    engine landed at 13.5a). NOT thread-safe; single asyncio event
+    loop per instance."""
 
     def __init__(
         self,
@@ -272,8 +293,10 @@ class SchedulerEngine:
         kill_switch_interrogator: KillSwitchInterrogator | None = None,
         parent_budget_resolver: ParentBudgetResolver | None = None,
         pack_state_interrogator: PackStateInterrogator | None = None,
+        approval_engine: ApprovalEngine | None = None,
     ) -> None:
         self._storage = storage
+        self._approval_engine = approval_engine
         self._caps = caps
         self._class_settings = class_settings
         self._policy = policy_evaluator
@@ -327,23 +350,32 @@ class SchedulerEngine:
         """Spec §4.2/§4.3: mint task_id; consult kill-switch + policy +
         quota seams; reserve concurrency-cap slot OR enqueue OR refuse.
 
-        Wave-1 ordering (matches spec §4.3 + round-4 P1
-        reservation-leak-guard contract):
+        Ordering (matches the inline step comments + spec §4.3 + the
+        round-4 P1 reservation-leak-guard contract; Step 3.5 added at
+        Sprint 13.5c2 per ADR-014):
 
           1. Resolve parent budget if SubmitInput.parent_task_id present
-             (via ParentBudgetResolver seam; fail-loud sentinel
-             default).
-          2. kill_switch.is_active(tenant, pack) → refused_kill_switch_active
-          3. policy_evaluator(submit_input) → refused_policy_denied
-          4. quota.would_admit(task_id, tenant, pack, effective_tokens)
+             (via ParentBudgetResolver seam; fail-loud sentinel default).
+             approval_request_id parses UNCONDITIONALLY here too (typed
+             SchedulerSubmitInputInvalid on malformed; wiring-independent).
+          2. pack_state.is_installed(tenant, pack)
+             → refused_pack_not_installed
+          3. kill_switch.is_active(tenant, pack) → refused_kill_switch_active
+          3.5. approval consult when approval_engine is wired (ADR-014):
+             refused_approval_* OR the engine-owned approval_verified
+             attestation, ALWAYS re-written onto the effective input
+             (caller-supplied True is overwritten on every path).
+          4. policy_evaluator(submit_input) → refused_policy_denied
+             (the Rego input carries approval_verified).
+          5. quota.would_admit(task_id, tenant, pack, effective_tokens)
              → if False, refused_quota_exhausted (NO reservation made).
              On True, reservation is held; subsequent failures MUST
              release via the round-4 try/except envelope.
-          5. caps.has_headroom_for(...) → if True, accepted_immediate;
+          6. caps.has_headroom_for(...) → if True, accepted_immediate;
              storage.submit(); increment counts.
-          6. Else queue has capacity → accepted_queued;
+          7. Else queue has capacity → accepted_queued;
              storage.submit(); enqueue.
-          7. Else refused_queue_full with retry_after_s.
+          8. Else refused_queue_full with retry_after_s.
         """
         task_id = uuid.uuid4()
 
@@ -396,6 +428,20 @@ class SchedulerEngine:
             else dataclasses.replace(submit_input, requested_estimated_tokens=effective_tokens)
         )
 
+        # Sprint 13.5c2 (ADR-014) — approval_request_id parses UNCONDITIONALLY
+        # at the engine boundary (the parent_task_id mirror): malformed input
+        # is malformed regardless of wiring. A VALID id while the approval
+        # engine is unwired is INERT (parsed, never consulted) — pinned.
+        approval_request_uuid: uuid.UUID | None = None
+        if submit_input.approval_request_id is not None:
+            try:
+                approval_request_uuid = uuid.UUID(submit_input.approval_request_id)
+            except ValueError as exc:
+                raise SchedulerSubmitInputInvalid(
+                    field="approval_request_id",
+                    reason=(f"not a valid UUID string: {submit_input.approval_request_id!r}"),
+                ) from exc
+
         # Step 2: pack installed?
         if not await self._pack_state.is_installed(
             tenant_id=effective_submit_input.tenant_id,
@@ -427,6 +473,42 @@ class SchedulerEngine:
                 outcome="refused_kill_switch_active",
                 task_id=None,
             )
+
+        # Step 3.5: approval consult (ADR-014; Sprint 13.5c2). Pack-state +
+        # kill-switch BEAT approval (a killed/uninstalled pack never reaches
+        # create_request); approval BEATS policy + quota (the Rego input
+        # needs the attestation; no reservation for unapproved work).
+        approval_verified = False
+        if self._approval_engine is not None:
+            consult = await self._consult_approval(
+                original_submit_input=submit_input,
+                approval_request_uuid=approval_request_uuid,
+                request_id=request_id,
+            )
+            if consult.refusal_reason is not None:
+                await self._emit_admission_refused(
+                    refused_task_id=task_id,
+                    submit_input=effective_submit_input,
+                    reason=consult.refusal_reason,
+                    request_id=request_id,
+                    approval_request_id=consult.approval_request_id,
+                    approval_flow=consult.approval_flow,
+                )
+                return AdmissionDecision(
+                    outcome=consult.refusal_reason,
+                    task_id=None,
+                    approval_request_id=(
+                        consult.approval_request_id
+                        if consult.refusal_reason == "refused_approval_pending"
+                        else None
+                    ),
+                )
+            approval_verified = consult.verified
+        # F1 LOCK: ENGINE-OWNED attestation — ALWAYS overwrite (a caller-
+        # supplied True is replaced on every path, including engine-absent).
+        effective_submit_input = dataclasses.replace(
+            effective_submit_input, approval_verified=approval_verified
+        )
 
         # Step 4: policy
         if self._policy is not None:
@@ -513,18 +595,71 @@ class SchedulerEngine:
         reason: SchedulerRefusalReason,
         request_id: str,
         policy_reason: str | None = None,
+        approval_request_id: str | None = None,
+        approval_flow: str | None = None,
     ) -> None:
         """Emit a scheduler.admission_refused chain row for the given
         refusal reason. Round-5 reviewer P1 #5 fix — closes the
         audit-pack gap where refusals previously returned only an
         AdmissionDecision to the caller without persisting any
-        evidence."""
+        evidence. Sprint 13.5c2: the two approval evidence kwargs ride
+        the payload CONDITIONALLY (only-when-known per spec §6)."""
         await self._storage.record_admission_refused(
             refused_task_id=refused_task_id,
             submit_input=submit_input,
             reason=reason,
             request_id=request_id,
             policy_reason=policy_reason,
+            approval_request_id=approval_request_id,
+            approval_flow=approval_flow,
+        )
+
+    async def _consult_approval(
+        self,
+        *,
+        original_submit_input: SubmitInput,
+        approval_request_uuid: uuid.UUID | None,
+        request_id: str,
+    ) -> _ApprovalConsultResult:
+        """ADR-014 Step-3.5 consult (c2 spec §3.2/§3.6). Binding digests +
+        envelope are computed from the ORIGINAL SubmitInput (pre-parent-
+        narrowing) per spec §3.3 — quota/storage see the narrowed value;
+        the binding binds the caller's declared intent, so a parent-budget
+        shift between grant and re-submit cannot spuriously mismatch."""
+        assert self._approval_engine is not None  # guarded by the call site
+        tool_identity = _canonical_scheduler_identity(
+            pack_id=original_submit_input.pack_id,
+            pack_kind=original_submit_input.pack_kind,
+        )
+        args_digest = _submit_args_digest(original_submit_input)
+        if approval_request_uuid is not None:
+            raise NotImplementedError("re-submission verify path lands at 13.5c2 T5 (ADR-014)")
+        required_refs: dict[str, str] = {}
+        if original_submit_input.pack_risk_tier == "regulator_communication":
+            # Spec §3.5: the submit request_id keys every admission chain
+            # row — the natural correlator (b2 pattern; nothing minted).
+            required_refs = {"audit_record_ref": request_id}
+        envelope = ApprovalEnvelope(
+            risk_tier=original_submit_input.pack_risk_tier,
+            tool_identity=tool_identity,
+            originator_subject=original_submit_input.actor.subject,
+            tenant_id=original_submit_input.tenant_id,
+            data_classes=tuple(original_submit_input.data_classes),
+            args_digest=args_digest,
+            redacted_context=_submit_redacted_context(original_submit_input),
+            required_refs=required_refs,
+        )
+        try:
+            request = await self._approval_engine.create_request(envelope=envelope)
+        except ApprovalTransitionRefused as exc:
+            if exc.reason == "auto_tier_no_approval_required":
+                return _ApprovalConsultResult(verified=False)
+            raise
+        return _ApprovalConsultResult(
+            verified=False,
+            refusal_reason="refused_approval_pending",
+            approval_request_id=str(request.request_id),
+            approval_flow=request.flow,
         )
 
     async def _do_admission_work(

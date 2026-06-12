@@ -5,6 +5,8 @@ from __future__ import annotations
 import dataclasses
 import typing
 
+import pytest
+
 
 def test_admission_outcome_carries_five_approval_values() -> None:
     # Wire-protocol-public (spec §4): +5 on BOTH Literals; wire-equal subset
@@ -188,3 +190,284 @@ def test_submit_redacted_context_shape_and_cap() -> None:
     assert "class=interactive" in text and "risk_tier=payment_action" in text
     long = _submit_redacted_context(_seam_submit_input(pack_id="p" * 5000))  # type: ignore[arg-type]
     assert len(long) == APPROVAL_REDACTED_CONTEXT_MAX_LEN
+
+
+# ---------------------------------------------------------------------------
+# T4+ wired-engine fixtures (one alembic-migrated DB serves BOTH stores —
+# scheduler_tasks lands in migration 0005; approval fixtures mirror
+# tests/unit/sandbox/test_approval_seam.py)
+# ---------------------------------------------------------------------------
+
+
+class _MutableClock:
+    """Advanceable approval-engine clock (the expired-re-submission test
+    moves time past the flow TTL; everything else uses the fixed default)."""
+
+    def __init__(self) -> None:
+        from datetime import UTC, datetime
+
+        self.now = datetime(2026, 6, 12, 12, 0, tzinfo=UTC)
+
+    def __call__(self) -> object:
+        return self.now
+
+
+class _StubApprovalPolicy:
+    """Fixed-flow classifier (OPA-free; mirrors the c1 seam stub)."""
+
+    def __init__(self, flow: str = "require_single_approval") -> None:
+        self._flow = flow
+
+    async def classify(self, *, risk_tier: str) -> str:
+        return self._flow
+
+
+async def _mk_migrated_db(tmp_path: object) -> object:
+    import asyncio as _asyncio
+
+    from alembic import command
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from cognic_agentos.db.migrations.alembic_config import make_alembic_config
+
+    url = f"sqlite+aiosqlite:///{tmp_path}/scheduler-seam.db"
+    cfg = make_alembic_config(url)
+    await _asyncio.to_thread(command.upgrade, cfg, "head")
+    return create_async_engine(url)
+
+
+def _mk_approval_engine(db: object, *, flow: str, clock: object = None) -> object:
+    from datetime import UTC, datetime
+
+    from cognic_agentos.core.approval.engine import ApprovalEngine
+    from cognic_agentos.core.approval.storage import ApprovalRequestStore
+    from cognic_agentos.core.config import build_settings_without_env_file
+    from cognic_agentos.core.decision_history import DecisionHistoryStore
+
+    return ApprovalEngine(
+        policy=_StubApprovalPolicy(flow),
+        store=ApprovalRequestStore(DecisionHistoryStore(db)),  # type: ignore[arg-type]
+        settings=build_settings_without_env_file(),
+        clock=clock or (lambda: datetime(2026, 6, 12, 12, 0, tzinfo=UTC)),  # type: ignore[arg-type]
+    )
+
+
+class _CapturingPolicy:
+    """Policy-evaluator stub capturing the SubmitInput the engine hands it —
+    the engine-level attestation pin (the Rego-level pin lives at T3)."""
+
+    def __init__(self, allow: bool = True) -> None:
+        self.allow = allow
+        self.seen: list[object] = []
+
+    async def __call__(self, submit_input: object) -> object:
+        from cognic_agentos.core.scheduler.policy import PolicyDecision
+
+        self.seen.append(submit_input)
+        return PolicyDecision(allow=self.allow, policy_reason=None if self.allow else "x")
+
+
+class _AllowAllQuota:
+    async def would_admit(
+        self, *, task_id: object, tenant_id: str, pack_id: str, estimated_tokens: int
+    ) -> bool:
+        return True
+
+    async def release_reservation(self, task_id: object) -> None:
+        return None
+
+
+class _InactiveKillSwitch:
+    async def is_active(self, *, tenant_id: str, pack_id: str) -> bool:
+        return False
+
+
+class _ActiveKillSwitch:
+    async def is_active(self, *, tenant_id: str, pack_id: str) -> bool:
+        return True
+
+
+class _InstalledPackState:
+    async def is_installed(self, *, tenant_id: str, pack_id: str) -> bool:
+        return True
+
+
+def _mk_scheduler_engine(
+    db: object,
+    *,
+    approval_engine: object = None,
+    policy: object = None,
+    kill_switch: object = None,
+) -> object:
+    """Engine over the migrated DB with permissive operational seams (the
+    null sentinels are fail-loud per the production-grade rule, so tests
+    supply installed/inactive/allow-all stubs; T5's ordering pin overrides
+    ``kill_switch``)."""
+    from cognic_agentos.core.scheduler.engine import SchedulerEngine
+    from cognic_agentos.core.scheduler.queue import ConcurrencyCaps
+    from cognic_agentos.core.scheduler.storage import SchedulerStorage
+
+    return SchedulerEngine(
+        storage=SchedulerStorage(db),  # type: ignore[arg-type]
+        caps=ConcurrencyCaps(
+            per_tenant_interactive=2, per_tenant_background=4, per_pack=4, per_actor=4
+        ),
+        class_settings={"interactive": (2, 0.200), "background": (4, 5.0)},
+        policy_evaluator=policy,  # type: ignore[arg-type]
+        quota_interrogator=_AllowAllQuota(),
+        kill_switch_interrogator=kill_switch or _InactiveKillSwitch(),  # type: ignore[arg-type]
+        pack_state_interrogator=_InstalledPackState(),
+        approval_engine=approval_engine,  # type: ignore[arg-type]
+    )
+
+
+async def _load_admission_rows(db: object) -> list[tuple[str, dict[str, object]]]:
+    """(event_type, payload) for every scheduler.admission_* chain row.
+
+    NOTE: the DB column is ``event_type`` (decision_history.py:196) even
+    though the ``DecisionRecord`` dataclass field is ``decision_type``.
+    Raw ``text()`` bypasses the GovernanceJSON type decoder, so ``payload``
+    comes back as a JSON string -> ``json.loads``."""
+    import json
+
+    from sqlalchemy import text
+
+    async with db.connect() as conn:  # type: ignore[attr-defined]
+        rows = await conn.execute(
+            text(
+                "SELECT event_type, payload FROM decision_history "
+                "WHERE event_type LIKE 'scheduler.admission%' ORDER BY sequence"
+            )
+        )
+        return [(r[0], json.loads(r[1])) for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# T4 — wired first-admission path (spec §3.1/§3.2/§3.4/§3.5)
+# ---------------------------------------------------------------------------
+
+
+class TestWiredFirstAdmission:
+    async def test_high_tier_first_submit_refuses_pending_with_correlator(
+        self, tmp_path: object
+    ) -> None:
+        import uuid as _uuid
+
+        db = await _mk_migrated_db(tmp_path)
+        engine = _mk_scheduler_engine(
+            db, approval_engine=_mk_approval_engine(db, flow="require_4_eyes")
+        )
+        decision = await engine.submit(submit_input=_seam_submit_input(), request_id="req-1")  # type: ignore[attr-defined]
+        assert decision.outcome == "refused_approval_pending"
+        assert decision.task_id is None
+        rid = _uuid.UUID(decision.approval_request_id)
+        # Refused chain row carries BOTH conditional evidence keys (spec §6):
+        rows = await _load_admission_rows(db)
+        assert rows[-1][0] == "scheduler.admission_refused"
+        payload = rows[-1][1]
+        assert payload["reason"] == "refused_approval_pending"
+        assert payload["approval_request_id"] == str(rid)
+        assert payload["approval_flow"] == "require_4_eyes"
+        # Envelope-sourcing pins (spec §3.3/§3.4) via the approval store:
+        from cognic_agentos.core.approval.storage import ApprovalRequestStore
+        from cognic_agentos.core.decision_history import DecisionHistoryStore
+
+        detail = await ApprovalRequestStore(DecisionHistoryStore(db)).load_detail(  # type: ignore[arg-type]
+            request_id=rid, tenant_id="t-1"
+        )
+        assert detail is not None and detail.state == "pending"
+        assert detail.tool_identity.startswith("scheduler:")
+        assert detail.redacted_context.startswith("scheduler_submit pack_id=")
+        assert detail.data_classes == ("payment_data",)
+
+    async def test_auto_flow_proceeds_with_false_attestation_and_no_rows(
+        self, tmp_path: object
+    ) -> None:
+        db = await _mk_migrated_db(tmp_path)
+        policy = _CapturingPolicy(allow=True)
+        engine = _mk_scheduler_engine(
+            db, approval_engine=_mk_approval_engine(db, flow="auto_run"), policy=policy
+        )
+        decision = await engine.submit(submit_input=_seam_submit_input(), request_id="req-1")  # type: ignore[attr-defined]
+        assert decision.outcome == "accepted_immediate"
+        assert policy.seen[0].approval_verified is False  # type: ignore[attr-defined]
+        from cognic_agentos.core.approval.storage import ApprovalRequestStore
+        from cognic_agentos.core.decision_history import DecisionHistoryStore
+
+        assert await ApprovalRequestStore(DecisionHistoryStore(db)).list_pending("t-1") == []  # type: ignore[arg-type]
+
+    async def test_tightened_safe_tier_requires_approval(self, tmp_path: object) -> None:
+        db = await _mk_migrated_db(tmp_path)
+        engine = _mk_scheduler_engine(
+            db, approval_engine=_mk_approval_engine(db, flow="require_single_approval")
+        )
+        decision = await engine.submit(  # type: ignore[attr-defined]
+            submit_input=_seam_submit_input(pack_risk_tier="internal_write", data_classes=()),
+            request_id="req-1",
+        )
+        assert decision.outcome == "refused_approval_pending"
+
+    async def test_regulator_tier_required_refs_carry_request_id(self, tmp_path: object) -> None:
+        # Spec §3.5: required_refs["audit_record_ref"] = the submit request_id
+        # (the b2 pattern; NO minted correlator).
+        import uuid as _uuid
+
+        db = await _mk_migrated_db(tmp_path)
+        engine = _mk_scheduler_engine(
+            db, approval_engine=_mk_approval_engine(db, flow="require_4_eyes")
+        )
+        decision = await engine.submit(  # type: ignore[attr-defined]
+            submit_input=_seam_submit_input(pack_risk_tier="regulator_communication"),
+            request_id="req-reg-7",
+        )
+        assert decision.outcome == "refused_approval_pending"
+        from cognic_agentos.core.approval.storage import ApprovalRequestStore
+        from cognic_agentos.core.decision_history import DecisionHistoryStore
+
+        detail = await ApprovalRequestStore(DecisionHistoryStore(db)).load_detail(  # type: ignore[arg-type]
+            request_id=_uuid.UUID(decision.approval_request_id), tenant_id="t-1"
+        )
+        assert detail is not None
+        assert detail.required_refs == {"audit_record_ref": "req-reg-7"}
+
+    async def test_anti_forgery_caller_true_is_overwritten(self, tmp_path: object) -> None:
+        # F1 LOCK: caller-supplied approval_verified=True is ALWAYS replaced.
+        # Unwired engine + high tier + capturing policy -> policy sees False.
+        db = await _mk_migrated_db(tmp_path)
+        policy = _CapturingPolicy(allow=False)
+        engine = _mk_scheduler_engine(db, approval_engine=None, policy=policy)
+        decision = await engine.submit(  # type: ignore[attr-defined]
+            submit_input=_seam_submit_input(approval_verified=True), request_id="req-1"
+        )
+        assert decision.outcome == "refused_policy_denied"
+        assert policy.seen[0].approval_verified is False  # type: ignore[attr-defined]
+
+    async def test_engine_absent_valid_dangling_id_is_inert(self, tmp_path: object) -> None:
+        # c1-mirror pin: unwired + VALID approval_request_id -> parsed but
+        # never consulted; safe tier admits normally.
+        db = await _mk_migrated_db(tmp_path)
+        engine = _mk_scheduler_engine(db, approval_engine=None, policy=_CapturingPolicy())
+        decision = await engine.submit(  # type: ignore[attr-defined]
+            submit_input=_seam_submit_input(
+                pack_risk_tier="internal_write",
+                data_classes=(),
+                approval_request_id="11111111-1111-1111-1111-111111111111",
+            ),
+            request_id="req-1",
+        )
+        assert decision.outcome == "accepted_immediate"
+
+    async def test_malformed_approval_request_id_typed_fail_loud_even_unwired(
+        self, tmp_path: object
+    ) -> None:
+        # F3 LOCK: parse is UNCONDITIONAL (the parent_task_id mirror).
+        from cognic_agentos.core.scheduler.engine import SchedulerSubmitInputInvalid
+
+        db = await _mk_migrated_db(tmp_path)
+        engine = _mk_scheduler_engine(db, approval_engine=None, policy=_CapturingPolicy())
+        with pytest.raises(SchedulerSubmitInputInvalid) as exc:
+            await engine.submit(  # type: ignore[attr-defined]
+                submit_input=_seam_submit_input(approval_request_id="not-a-uuid"),
+                request_id="req-1",
+            )
+        assert exc.value.field == "approval_request_id"

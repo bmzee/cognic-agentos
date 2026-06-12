@@ -288,6 +288,8 @@ class SchedulerStorage:
         reason: SchedulerRefusalReason,
         request_id: str,
         policy_reason: str | None = None,
+        approval_request_id: str | None = None,
+        approval_flow: str | None = None,
     ) -> tuple[uuid.UUID, bytes]:
         """Emit a ``scheduler.admission_refused`` chain row for an
         admission outcome that was refused. NO row inserted into
@@ -346,6 +348,13 @@ class SchedulerStorage:
                 "reason": reason,
                 "policy_reason": policy_reason,
             }
+            # Sprint 13.5c2 (ADR-014): conditional evidence keys — included
+            # ONLY when known so every non-approval refusal row stays
+            # byte-identical to its pre-c2 shape (additive-only schema).
+            if approval_request_id is not None:
+                payload["approval_request_id"] = approval_request_id
+            if approval_flow is not None:
+                payload["approval_flow"] = approval_flow
             return DecisionRecord(
                 decision_type="scheduler.admission_refused",
                 request_id=request_id,
