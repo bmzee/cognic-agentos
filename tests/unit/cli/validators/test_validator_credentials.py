@@ -559,20 +559,13 @@ class TestRequiredFields:
 
 
 # ---------------------------------------------------------------------------
-# Risk-tier cross-validation (per spec §5.1 + Sprint 10.5 ADR-014 amendment)
+# Risk-tier lift (Sprint 13.5c4 — ADR-014 approval arc closed)
 # ---------------------------------------------------------------------------
 
 
-class TestRiskTierCrossValidator:
-    """Per spec §5.1: pre-Sprint-13.5, credential-bearing packs may
-    not declare any of the 6 high-risk tiers.
-
-    Refusal is the credentials-validator-owned counterpart to the
-    Rego-bundle refusal at ``scheduler.rego`` /
-    ``sandbox.rego``::``*_high_risk_tier_refused_pre_13_5`` per ADR-014
-    Sprint 10.5 amendment. Build-time refusal catches the same
-    contract violation BEFORE the pack ships.
-    """
+class TestRiskTierLift:
+    """Sprint 13.5c4 (ADR-014 arc close): inverse pin replacing the
+    pre-13.5 build-time refusal — guards against re-introduction."""
 
     @pytest.mark.parametrize(
         "tier",
@@ -585,27 +578,15 @@ class TestRiskTierCrossValidator:
             "high_risk_custom",
         ],
     )
-    def test_high_risk_tier_with_credentials_refuses_pre_13_5(self, tier: str) -> None:
-        _assert_refuses_with(
-            "credentials_risk_tier_not_permitted_pre_13_5",
-            {"risk_tier": {"tier": tier}},
-        )
-
-    def test_missing_risk_tier_suppresses_credentials_risk_check(self) -> None:
-        # Per user guidance: when the upstream risk-tier validator's
-        # missing-risk-tier finding fires, the credentials validator
-        # MUST suppress its own risk-tier check (which would otherwise
-        # produce a misleading false positive against the absent tier).
-        manifest = _deep_merge(_BASELINE, {})
-        del manifest["risk_tier"]
+    def test_high_risk_tier_with_credentials_validates_cleanly(self, tier: str) -> None:
+        # Sprint 13.5c4 (ADR-014): the pre-13.5 build-time refusal is REMOVED.
+        # High-tier enforcement belongs to the RUNTIME approval seams (sandbox
+        # admission / scheduler bundle / MCP host / memory gate per the
+        # ADR-014 13.5b2-c3 amendments) — the validator cannot know deployment
+        # wiring and must not double-block buildable, approvable packs.
+        manifest = _deep_merge(_BASELINE, {"risk_tier": {"tier": tier}})
         findings = validate(manifest, Path("."))
-        credentials_risk_reasons = {
-            f.reason for f in findings if f.reason == "credentials_risk_tier_not_permitted_pre_13_5"
-        }
-        assert credentials_risk_reasons == set(), (
-            "credentials validator must suppress its risk-tier check when "
-            "the upstream [risk_tier] block is absent"
-        )
+        assert [f for f in findings if "risk_tier_not_permitted" in f.reason] == []
 
 
 # ---------------------------------------------------------------------------

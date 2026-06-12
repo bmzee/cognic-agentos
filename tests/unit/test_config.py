@@ -1678,17 +1678,20 @@ class TestSprint7AClosedEnumVocabulary:
                 "hook_entry_point_mismatch",
                 "hook_unresolved_reference",
                 # Credentials (Sprint 10.6 T14 — cli/validators/credentials.py
-                # per ADR-004 §25 + ADR-017). 18 [credentials.<name>] block
+                # per ADR-004 §25 + ADR-017). 17 [credentials.<name>] block
                 # refusals covering logical-name grammar + vault_path shape
                 # + expected_fields shape + ttl_s + purpose_category +
-                # purpose_description + per-block + pack-level + risk-tier
-                # gating + unknown-field rejection, plus 3 runtime block
-                # cross-validation refusals (expected_workload_gid required-
-                # for-credential-pack + invalid-range + without-credentials)
-                # owned by the same validator since they gate on credential
-                # block presence. T13 vocabulary scaffold per the plan-of-
-                # record at docs/superpowers/plans/2026-05-26-sprint-10.6-
-                # workload-credential-projection.md §83-122.
+                # purpose_description + per-block + pack-level + unknown-
+                # field rejection, plus 3 runtime block cross-validation
+                # refusals (expected_workload_gid required-for-credential-
+                # pack + invalid-range + without-credentials) owned by the
+                # same validator since they gate on credential block
+                # presence. T13 vocabulary scaffold per the plan-of-record
+                # at docs/superpowers/plans/2026-05-26-sprint-10.6-
+                # workload-credential-projection.md §83-122. Sprint 13.5c4
+                # REMOVED credentials_risk_tier_not_permitted_pre_13_5
+                # (ADR-014 arc close — high-tier enforcement lives at the
+                # runtime approval seams; build-time de-blocking only).
                 "credentials_logical_name_invalid_grammar",
                 "credentials_logical_name_duplicate",
                 "credentials_vault_path_empty",
@@ -1705,7 +1708,6 @@ class TestSprint7AClosedEnumVocabulary:
                 "credentials_purpose_category_invalid_value",
                 "credentials_purpose_description_invalid_shape",
                 "credentials_count_exceeds_maximum",
-                "credentials_risk_tier_not_permitted_pre_13_5",
                 "credentials_unknown_field",
                 "runtime_expected_workload_gid_required_for_credential_pack",
                 "runtime_expected_workload_gid_invalid_range",
