@@ -69,6 +69,11 @@ class MemoryWriteRecord:
     key: str | None = None
     block_kind: BlockKind | None = None
     retention_until: datetime | None = None
+    # Sprint 13.5c3 (ADR-014) — gate-set approval evidence (spec §6); the
+    # record is gate-built, so there is no caller forgery surface:
+    approval_verified: bool = False
+    approval_request_id: str | None = None  # set ONLY on a verified grant
+    approval_audit_record_ref: str | None = None  # regulator forward edge (§3.2)
 
 
 # --- Sprint 11.5b T1 — erasure / lifecycle DTOs ---
