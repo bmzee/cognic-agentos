@@ -22,11 +22,13 @@ Decision matrix covered (per spec §4.8):
 * allow on the 2-value Wave-1 safe-tier set
   (``{read_only, internal_write}``) x the 2-value class vocabulary
   (``{interactive, background}``)
-* refuse on all 6 high-risk tiers unconditionally
-  (``scheduler_high_risk_tier_refused_pre_13_5``; mirrors the
-  Sprint 8A ``sandbox.rego`` ``sandbox_high_risk_tier_refused_pre_13_5``
-  pre-Sprint-13.5 contract — when ``core/approval/engine.py`` wires
-  up at 13.5, the high-risk-tier refusal lifts)
+* refuse on all 6 high-risk tiers UNLESS the Python seam attests a
+  verified approval grant (``scheduler_high_risk_tier_refused_pre_13_5``;
+  Sprint 13.5c2 CONVERTed the original unconditional refusal — mirrors
+  the Sprint-13.5c1 ``sandbox.rego`` CONVERT; the value name is KEPT as
+  the engine-absent/unverified refusal; strict
+  ``input.approval_verified == true`` admits, falsy-by-absence refuses
+  — see ``TestSchedulerRegoApprovalConvert``)
 * refuse on unknown class (``scheduler_class_unknown``)
 * **deterministic precedence**: when BOTH class is unknown AND
   pack_risk_tier is high-risk, refusal_reason MUST be
@@ -82,7 +84,8 @@ _VALID_REFUSAL_REASONS: frozenset[str] = frozenset(
 )
 
 #: 6-value high-risk tier set per ADR-014 + sandbox.rego mirror. Refused
-#: pre-Sprint-13.5 when ``core/approval/engine.py`` is unwired.
+#: unless the Python seam attests a verified approval grant (Sprint
+#: 13.5c2 CONVERT); unwired deployments keep the refusal.
 _HIGH_RISK_TIERS = (
     "customer_data_read",
     "customer_data_write",
@@ -165,12 +168,14 @@ def _safe_allow_input(
     pack_kind: str = "tool",
     requested_estimated_tokens: int = 500,
     current_tenant_concurrent_count: int = 0,
+    approval_verified: bool = False,
 ) -> dict[str, Any]:
-    """Construct a happy-path admission input dict per spec §4.8 field
-    set. Each test arm overrides one field to exercise its refusal
-    path. Field names mirror what T8 ``SchedulerPolicy`` will thread
-    from ``SubmitInput`` — the bundle reads them directly off
-    ``input.<field>``."""
+    """Construct a happy-path admission input dict per the spec §4.8 field
+    set (+ the Sprint-13.5c2 9th key ``approval_verified`` — the Python
+    seam ALWAYS threads it; ``False`` on unwired/auto paths). Each test arm
+    overrides one field to exercise its refusal path. Field names mirror
+    what ``SchedulerPolicy`` threads from ``SubmitInput`` — the bundle
+    reads them directly off ``input.<field>``."""
     return {
         "tenant_id": tenant_id,
         "pack_id": pack_id,
@@ -180,6 +185,7 @@ def _safe_allow_input(
         "pack_risk_tier": pack_risk_tier,
         "current_tenant_concurrent_count": current_tenant_concurrent_count,
         "requested_estimated_tokens": requested_estimated_tokens,
+        "approval_verified": approval_verified,
     }
 
 
@@ -238,11 +244,12 @@ class TestSchedulerRegoAllowMatrix:
         tier: str,
         class_: str,
     ) -> None:
-        """Pre-Sprint-13.5: 6 high-risk tiers x 2 classes = 12 deny
-        cases. Mirrors ``sandbox.rego``'s pre-13.5 contract. When
-        ``core/approval/engine.py`` wires up at 13.5, this refusal
-        lifts; until then, high-risk admission is unconditionally
-        denied at the scheduler layer."""
+        """6 high-risk tiers x 2 classes = 12 deny cases WITHOUT an
+        attested grant (``_safe_allow_input`` defaults
+        ``approval_verified=False``). Post-Sprint-13.5c2 this is the
+        engine-absent/unverified arm of the CONVERT — a verified grant
+        admits via allow arm 2 (see ``TestSchedulerRegoApprovalConvert``);
+        unwired deployments keep these denials byte-for-byte."""
         d = await engine.evaluate(
             decision_point=SCHEDULER_DECISION_POINT_ALLOW,
             input=_safe_allow_input(pack_risk_tier=tier, class_=class_),
@@ -380,4 +387,62 @@ class TestSchedulerRegoVocabularyClosed:
         assert observed.issubset(_VALID_REFUSAL_REASONS), (
             f"observed refusal_reason values {observed!r} not subset of "
             f"closed vocabulary {_VALID_REFUSAL_REASONS!r}"
+        )
+
+
+@opa_required
+class TestSchedulerRegoApprovalConvert:
+    """Sprint 13.5c2 CONVERT (ADR-014): high tiers admit ONLY on the
+    seam-attested strict bool; the 3-value refusal vocabulary is UNCHANGED."""
+
+    @pytest.mark.asyncio
+    async def test_verified_grant_admits_high_tier(self, engine: OPAEngine) -> None:
+        d = await engine.evaluate(
+            decision_point=SCHEDULER_DECISION_POINT_ALLOW,
+            input=_safe_allow_input(pack_risk_tier="payment_action", approval_verified=True),
+        )
+        assert d.allow is True
+
+    @pytest.mark.asyncio
+    async def test_unverified_false_and_absent_both_refuse(self, engine: OPAEngine) -> None:
+        explicit = await engine.evaluate(
+            decision_point=SCHEDULER_DECISION_POINT_ALLOW,
+            input=_safe_allow_input(pack_risk_tier="payment_action", approval_verified=False),
+        )
+        absent_input = _safe_allow_input(pack_risk_tier="payment_action")
+        del absent_input["approval_verified"]  # falsy-by-absence fail-closed
+        absent = await engine.evaluate(
+            decision_point=SCHEDULER_DECISION_POINT_ALLOW, input=absent_input
+        )
+        assert explicit.allow is False and absent.allow is False
+        # The kept reason fires on BOTH (no wire rename — F7 lock):
+        for inp in (
+            _safe_allow_input(pack_risk_tier="payment_action", approval_verified=False),
+            absent_input,
+        ):
+            reason = _opa_eval_string_value(inp, SCHEDULER_DECISION_POINT_REASON)
+            assert reason == "scheduler_high_risk_tier_refused_pre_13_5"
+
+    @pytest.mark.asyncio
+    async def test_safe_tiers_unaffected_by_attestation(self, engine: OPAEngine) -> None:
+        for verified in (True, False):
+            d = await engine.evaluate(
+                decision_point=SCHEDULER_DECISION_POINT_ALLOW,
+                input=_safe_allow_input(
+                    pack_risk_tier="internal_write", approval_verified=verified
+                ),
+            )
+            assert d.allow is True
+
+    @pytest.mark.asyncio
+    async def test_class_unknown_beats_verified_grant(self, engine: OPAEngine) -> None:
+        # A verified grant does NOT bypass the class gate (precedence pinned).
+        inp = _safe_allow_input(
+            pack_risk_tier="payment_action", class_="batch", approval_verified=True
+        )
+        d = await engine.evaluate(decision_point=SCHEDULER_DECISION_POINT_ALLOW, input=inp)
+        assert d.allow is False
+        assert (
+            _opa_eval_string_value(inp, SCHEDULER_DECISION_POINT_REASON)
+            == "scheduler_class_unknown"
         )

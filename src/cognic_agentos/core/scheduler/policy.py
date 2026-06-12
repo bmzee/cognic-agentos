@@ -9,12 +9,14 @@ bundle landed at T7 to the Python scheduler runtime. It is the single
 Python boundary that:
 
   1. Projects a ``SubmitInput`` into the Rego input dict shape per
-     spec §4.8 (8 keys: ``tenant_id`` / ``pack_id`` / ``actor_subject``
+     spec §4.8 (9 keys: ``tenant_id`` / ``pack_id`` / ``actor_subject``
      / ``class`` / ``pack_kind`` / ``pack_risk_tier`` /
-     ``current_tenant_concurrent_count`` / ``requested_estimated_tokens``).
-     Drift between this projection and the bundle's ``input.<key>``
-     reads = silent policy regression — pinned by
-     ``test_build_rego_input_includes_all_spec_keys``.
+     ``current_tenant_concurrent_count`` / ``requested_estimated_tokens``
+     / ``approval_verified`` — the 9th key added at Sprint 13.5c2 per
+     ADR-014: the ENGINE-OWNED attestation the bundle's high-risk allow
+     arm requires strictly true). Drift between this projection and the
+     bundle's ``input.<key>`` reads = silent policy regression — pinned
+     by ``test_build_rego_input_includes_all_spec_keys``.
 
   2. Evaluates the ``data.cognic.scheduler.admit.allow`` decision
      point via the existing :class:`~cognic_agentos.core.policy.engine.OPAEngine`
@@ -166,7 +168,8 @@ class SchedulerPolicy:
         """Evaluate the Wave-1 scheduler admission policy.
 
         Pipeline per plan §1185 + the module docstring above:
-          1. Project SubmitInput → Rego input dict (8 spec §4.8 keys).
+          1. Project SubmitInput → Rego input dict (9 keys: the spec §4.8
+             8-key set + ``approval_verified`` per Sprint 13.5c2/ADR-014).
           2. ``opa_engine.evaluate(...allow)`` → bool allow + audit emit.
           3. If allow=True: return ``PolicyDecision(allow=True,
              policy_reason=None)`` (suppress raw bundle refusal_reason
@@ -205,10 +208,12 @@ class SchedulerPolicy:
     def _build_rego_input(submit_input: SubmitInput) -> dict[str, Any]:
         """Project a SubmitInput into the spec §4.8 Rego input shape.
 
-        8-key contract pinned by ``test_build_rego_input_includes_all_spec_keys``:
+        9-key contract pinned by ``test_build_rego_input_includes_all_spec_keys``:
         ``tenant_id`` / ``pack_id`` / ``actor_subject`` / ``class`` /
         ``pack_kind`` / ``pack_risk_tier`` /
-        ``current_tenant_concurrent_count`` / ``requested_estimated_tokens``.
+        ``current_tenant_concurrent_count`` / ``requested_estimated_tokens``
+        / ``approval_verified`` (Sprint 13.5c2 per ADR-014 — ALWAYS
+        threaded; the engine overwrites the field before the policy call).
 
         Key translations:
           * ``SubmitInput.class_`` → ``"class"`` (trailing underscore
@@ -238,6 +243,10 @@ class SchedulerPolicy:
             # the post-T9 wiring contract.
             "current_tenant_concurrent_count": 0,
             "requested_estimated_tokens": submit_input.requested_estimated_tokens,
+            # Sprint 13.5c2 (ADR-014): ENGINE-OWNED attestation — the engine
+            # overwrites this field before the policy call; the bundle's
+            # high-risk allow arm requires it strictly true.
+            "approval_verified": submit_input.approval_verified,
         }
 
     def _fetch_refusal_reason(self, rego_input: dict[str, Any]) -> str:

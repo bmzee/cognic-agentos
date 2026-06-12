@@ -21,8 +21,9 @@ from cognic_agentos.core.scheduler import (
 
 
 class TestSchedulerAdmissionOutcomeVocabulary:
-    def test_exactly_seven_values(self):
-        assert len(get_args(SchedulerAdmissionOutcome)) == 7
+    def test_exactly_twelve_values(self):
+        # 7 at Sprint 10.5; 12 at Sprint 13.5c2 (+5 refused_approval_* per ADR-014).
+        assert len(get_args(SchedulerAdmissionOutcome)) == 12
 
     def test_accepted_values(self):
         accepted = {v for v in get_args(SchedulerAdmissionOutcome) if v.startswith("accepted_")}
@@ -36,13 +37,19 @@ class TestSchedulerAdmissionOutcomeVocabulary:
             "refused_policy_denied",
             "refused_kill_switch_active",
             "refused_pack_not_installed",
+            # Sprint 13.5c2 (ADR-014) — approval-seam refusals
+            "refused_approval_pending",
+            "refused_approval_denied",
+            "refused_approval_expired",
+            "refused_approval_binding_mismatch",
+            "refused_approval_request_not_found",
         }
 
 
 class TestSchedulerRefusalReasonIsAdmissionSubset:
-    """SchedulerRefusalReason is wire-equal to the 5-value refused subset
-    of SchedulerAdmissionOutcome. Drift between the two = wire-protocol
-    regression."""
+    """SchedulerRefusalReason is wire-equal to the refused subset of
+    SchedulerAdmissionOutcome (5-value at Sprint 10.5; 10-value at Sprint
+    13.5c2). Drift between the two = wire-protocol regression."""
 
     def test_refusal_reason_equals_refused_admission_subset(self):
         admission_refused = {

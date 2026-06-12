@@ -27,13 +27,18 @@
 #       that would otherwise fire if two ':=' rules both matched on
 #       the same input).
 #   * "scheduler_high_risk_tier_refused_pre_13_5"
-#       Pack risk tier is in the 6-value high-risk set per ADR-014.
-#       Pre-Sprint-13.5 contract (mirrors the Sprint 8A
-#       sandbox.rego sandbox_high_risk_tier_refused_pre_13_5
-#       contract): when core/approval/engine.py wires up at 13.5, the
-#       high-risk-tier refusal lifts and these tiers route through
-#       approval. The cutover itself is an audit event so banks can
-#       prove the moment high-risk scheduler admission became gated.
+#       Pack risk tier is in the 6-value high-risk set per ADR-014 AND
+#       the Python seam has not attested a verified approval grant.
+#       Sprint 13.5c2 CONVERTed the original unconditional pre-13.5
+#       refusal (mirrors the Sprint-13.5c1 sandbox.rego CONVERT): with
+#       core/approval/engine.py wired, high tiers route through the
+#       pending -> portal-grant -> re-submit contract and admit on
+#       input.approval_verified == true; unwired deployments keep this
+#       refusal byte-for-byte (the seam threads approval_verified=false).
+#       The original one-shot "cutover audit event" promise is SUPERSEDED
+#       (ADR-014 c2 amendment) — cutover evidence is per-decision: every
+#       admission outcome already lands on the scheduler.admission_accepted
+#       / scheduler.admission_refused chain rows with approval correlators.
 #   * "scheduler_default_deny"
 #       Default-deny fall-through. Fires when neither the class-
 #       unknown nor the high-risk-tier arm matches AND the allow
@@ -66,7 +71,8 @@ _known_classes := {"interactive", "background"}
 _safe_tiers := {"read_only", "internal_write"}
 
 # 6-value high-risk tier set per ADR-014 + sandbox.rego mirror.
-# Refused pre-Sprint-13.5 when core/approval/engine.py is unwired.
+# Refused unless the Python seam attests a verified approval grant
+# (Sprint 13.5c2 CONVERT); unwired deployments keep the refusal.
 # Same set referenced by sandbox.rego's high_risk_tiers + by
 # sandbox/admission.py Stage-2 step 4.
 _high_risk_tiers := {
@@ -83,22 +89,37 @@ _high_risk_tiers := {
 # both match (e.g. unknown-class AND high-risk-tier in the same
 # input). Plan §1090 pins the class-unknown FIRST ordering — admission
 # cannot evaluate tier semantics until class is in vocabulary, so the
-# class-unknown check takes precedence over the tier check. Bare-else
-# terminator returns the default fall-through.
+# class-unknown check takes precedence over the tier check. Sprint
+# 13.5c2 CONVERT: the high-risk arm fires ONLY when the Python seam has
+# NOT attested a verified grant (the value name is KEPT — wire-public +
+# drift-pinned; it remains the engine-absent/unverified refusal).
+# Bare-else terminator returns the default fall-through.
 refusal_reason := "scheduler_class_unknown" if {
 	not input.class in _known_classes
 } else := "scheduler_high_risk_tier_refused_pre_13_5" if {
 	input.pack_risk_tier in _high_risk_tiers
+	not input.approval_verified == true
 } else := "scheduler_default_deny"
 
-# Allow when class is known AND tier is in the Wave-1 safe set. The
-# explicit ``not <high_risk>`` guard is defence-in-depth — _safe_tiers
-# and _high_risk_tiers are disjoint by construction, so this never
-# fires in practice, but the guard prevents future bundle drift from
-# silently merging the sets and allowing through what was previously
-# refused.
+# Allow arm 1 — Wave-1 safe tiers. The explicit ``not <high_risk>``
+# guard is defence-in-depth — _safe_tiers and _high_risk_tiers are
+# disjoint by construction, so this never fires in practice, but the
+# guard prevents future bundle drift from silently merging the sets
+# and allowing through what was previously refused.
 allow if {
 	input.class in _known_classes
 	input.pack_risk_tier in _safe_tiers
 	not input.pack_risk_tier in _high_risk_tiers
+}
+
+# Allow arm 2 — Sprint 13.5c2 CONVERT (ADR-014 c2 amendment — the
+# coordinated kernel+ADR loosening, the scheduler half of the c-series
+# CONVERT): a high-risk tier admits ONLY when the Python seam attests a
+# verified grant. STRICT comparison — absent, null, "true", or any
+# non-true value fails closed (mirrors sandbox.rego's _tier_admissible
+# arm 2); the seam ALWAYS threads the key (false on unwired/auto paths).
+allow if {
+	input.class in _known_classes
+	input.pack_risk_tier in _high_risk_tiers
+	input.approval_verified == true
 }

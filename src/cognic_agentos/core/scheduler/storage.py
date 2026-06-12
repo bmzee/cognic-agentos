@@ -265,7 +265,14 @@ class SchedulerStorage:
                 "requested_estimated_tokens": (submit_input.requested_estimated_tokens),
                 "parent_task_id": submit_input.parent_task_id,
                 "submitted_at": now.isoformat(),
+                # Sprint 13.5c2 (ADR-014): the attestation is ALWAYS present
+                # post-c2 (False on safe/auto admissions); the correlator is
+                # conditional — ONLY a granted re-submit carries it, so the
+                # examiner can join accepted -> approval.* rows (spec §6).
+                "approval_verified": submit_input.approval_verified,
             }
+            if submit_input.approval_verified and submit_input.approval_request_id is not None:
+                payload["approval_request_id"] = submit_input.approval_request_id
             return DecisionRecord(
                 decision_type="scheduler.admission_accepted",
                 request_id=request_id,
@@ -288,6 +295,8 @@ class SchedulerStorage:
         reason: SchedulerRefusalReason,
         request_id: str,
         policy_reason: str | None = None,
+        approval_request_id: str | None = None,
+        approval_flow: str | None = None,
     ) -> tuple[uuid.UUID, bytes]:
         """Emit a ``scheduler.admission_refused`` chain row for an
         admission outcome that was refused. NO row inserted into
@@ -346,6 +355,13 @@ class SchedulerStorage:
                 "reason": reason,
                 "policy_reason": policy_reason,
             }
+            # Sprint 13.5c2 (ADR-014): conditional evidence keys — included
+            # ONLY when known so every non-approval refusal row stays
+            # byte-identical to its pre-c2 shape (additive-only schema).
+            if approval_request_id is not None:
+                payload["approval_request_id"] = approval_request_id
+            if approval_flow is not None:
+                payload["approval_flow"] = approval_flow
             return DecisionRecord(
                 decision_type="scheduler.admission_refused",
                 request_id=request_id,
