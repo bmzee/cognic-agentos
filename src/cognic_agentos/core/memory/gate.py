@@ -60,16 +60,19 @@ storage-layer guard.
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
+from cognic_agentos.core.canonical import canonical_bytes
 from cognic_agentos.core.dlp.scanner import DLP_RESTRICTED_CLASSES
 from cognic_agentos.core.memory._context import MemoryCallerContext, MemoryWriteRecord
 from cognic_agentos.core.memory._seams import (
     MemoryKillSwitchInterrogator,
     _NullMemoryKillSwitchInterrogator,
 )
+from cognic_agentos.core.memory.storage import _value_digest
 from cognic_agentos.core.memory.tiers import (
     BlockKind,
     MemoryOperationRefused,
@@ -112,6 +115,52 @@ _APPROVAL_REQUIRED_RISK_TIERS: frozenset[str] = frozenset(
 
 #: Durable tiers a sub-agent may NOT touch (§7.3 I2 — children get scratch only).
 _SUBAGENT_REFUSED_TIERS: frozenset[str] = frozenset({"task", "long_term"})
+
+
+def _memory_tool_identity(*, agent_id: str) -> str:
+    """Collision-proof canonical tool identity for the approval seam (c3 spec
+    §3.3). The agent is the acting identity for governed memory writes."""
+    return (
+        "memory:"
+        + hashlib.sha256(
+            canonical_bytes({"agent_id": agent_id, "operation": "memory_write"})
+        ).hexdigest()
+    )
+
+
+def _memory_args_digest(
+    *,
+    tier: str,
+    purpose: str,
+    data_classes: tuple[str, ...],
+    key: str | None,
+    block_kind: str | None,
+    subject_canonical: str,
+    actor_id: str,
+    risk_tier: str,
+    value: object,
+) -> bytes:
+    """Approval binding digest over the approved WRITE SHAPE incl. content
+    (c3 spec §3.3 / F4). The engine NEVER sees the raw value — only
+    ``_value_digest(value)`` (the same helper the memory.write chain row
+    uses; single digest definition, no drift). ``tenant_id`` is
+    envelope-first-class; consent/retention are RE-VALIDATED by Steps 0-6
+    on every attempt and therefore deliberately unbound."""
+    return hashlib.sha256(
+        canonical_bytes(
+            {
+                "tier": tier,
+                "purpose": purpose,
+                "data_classes": sorted(data_classes),
+                "key": key,
+                "block_kind": block_kind,
+                "subject": subject_canonical,
+                "actor_id": actor_id,
+                "risk_tier": risk_tier,
+                "value_digest": _value_digest(value),
+            }
+        )
+    ).digest()
 
 
 class MemoryGate:
