@@ -154,12 +154,14 @@ class TestSchedulerPolicyAllowDenyMatrix:
     async def test_high_risk_tier_returns_deny_with_internal_reason(
         self, opa_engine: OPAEngine
     ) -> None:
-        """Pre-Sprint-13.5: high-risk tier surfaces as
-        PolicyDecision(allow=False,
-        policy_reason="scheduler_high_risk_tier_refused_pre_13_5").
-        The reason string is INTERNAL diagnostic (audit-only); the
-        engine's submit() maps this → public refused_policy_denied
-        outcome per plan §1167."""
+        """High-risk tier WITHOUT an attested grant
+        (``_make_submit_input`` defaults ``approval_verified=False``)
+        surfaces as PolicyDecision(allow=False,
+        policy_reason="scheduler_high_risk_tier_refused_pre_13_5") —
+        post-Sprint-13.5c2 this is the unverified arm of the CONVERT;
+        a verified grant admits via allow arm 2. The reason string is
+        INTERNAL diagnostic (audit-only); the engine's submit() maps
+        this → public refused_policy_denied outcome per plan §1167."""
         policy = SchedulerPolicy(opa_engine=opa_engine)
         decision = await policy.evaluate(
             _make_submit_input(pack_risk_tier="payment_action", class_="interactive")
@@ -270,9 +272,9 @@ class TestSchedulerPolicyInputThreading:
     class (per spec §6.1 watchpoint) untested most of the time."""
 
     def test_build_rego_input_includes_all_spec_keys(self) -> None:
-        """8-key spec §4.8 contract: tenant_id, pack_id, actor_subject,
-        class, pack_kind, pack_risk_tier, current_tenant_concurrent_count,
-        requested_estimated_tokens."""
+        """9-key contract: the spec §4.8 8-key set + the Sprint-13.5c2
+        ``approval_verified`` attestation key (ADR-014 — ALWAYS threaded;
+        the bundle's high-risk allow arm requires it strictly true)."""
         rego_input = SchedulerPolicy._build_rego_input(_make_submit_input())
         assert set(rego_input.keys()) == {
             "tenant_id",
@@ -283,7 +285,19 @@ class TestSchedulerPolicyInputThreading:
             "pack_risk_tier",
             "current_tenant_concurrent_count",
             "requested_estimated_tokens",
+            "approval_verified",
         }
+
+    def test_build_rego_input_threads_engine_owned_attestation(self) -> None:
+        """Sprint 13.5c2 (ADR-014): the ENGINE-OWNED ``approval_verified``
+        bool is threaded verbatim — True on a verified grant, False
+        otherwise; the key is ALWAYS present (falsy-by-absence is the
+        bundle's defence, not the projection's contract)."""
+        import dataclasses
+
+        verified = dataclasses.replace(_make_submit_input(), approval_verified=True)
+        assert SchedulerPolicy._build_rego_input(verified)["approval_verified"] is True
+        assert SchedulerPolicy._build_rego_input(_make_submit_input())["approval_verified"] is False
 
     def test_build_rego_input_threads_class_under_correct_key(self) -> None:
         """SubmitInput.class_ has a trailing underscore (Python keyword
