@@ -398,7 +398,7 @@ Sprint 1 is split into four focused sub-sprints for a clean bootstrap. Each ship
 - `core/config.py` extension — `mcp_stdio_enabled` (default `false` in `prod` profile, `true` in `dev`); `mcp_stdio_command_allowlist_path`; `mcp_as_allowlist_path`; `mcp_oauth_token_cache_ttl_s`
 - **Sandbox dependency hard-block**: STDIO transport refuses to register any pack until Sprint 8's sandbox primitive is available. Sprint 5 ships with `mcp_stdio_enabled` defaulting to `false` in **all** profiles. Sprint 8 flips the default for `dev` only after the sandbox is operational. **Production profile remains hard-disabled until both (a) sandbox primitive is operational AND (b) operator explicitly sets `mcp_stdio_enabled=true` plus the four-gate manifest.** This is enforced at config-load time: a `prod` profile with `mcp_stdio_enabled=true` AND no sandbox available → fail-fast at startup, not at first invocation.
 - `core/audit.py` integration — every `call_tool` emits `audit.tool_invocation` with pack identity + tool name + `Mcp-Session-Id` + AS issuer + scopes + duration + outcome (chained per `MCP-CONFORMANCE.md` observability requirements)
-- **Risk-tier transitional gate** (per ADR-014 Sprint 5 transitional rule + `MCP-CONFORMANCE.md`): `protocol/mcp_host.call_tool` reads the pack manifest's declared `risk_tier`. If the tier is anything other than `read_only` or `internal_write` AND the approval engine has not loaded (`core.approval` module not yet present in Sprint 5–13), the call is **refused** with error `tool_approval_engine_not_available` and an audit event is emitted. The high-risk pack still registers — only invocation is blocked. This rule is mechanical (not configurable) and is removed by Sprint 13.5 once `core/approval` ships.
+- **Risk-tier transitional gate** (per ADR-014 Sprint 5 transitional rule + `MCP-CONFORMANCE.md`): `protocol/mcp_host.call_tool` reads the pack manifest's declared `risk_tier`. If the tier is anything other than `read_only` or `internal_write` AND the approval engine has not loaded (`core.approval` module not yet present in Sprint 5–13), the call is **refused** with error `tool_approval_engine_not_available` and an audit event is emitted. The high-risk pack still registers — only invocation is blocked. This rule is mechanical (not configurable). *(2026-06-12 supersession: 13.5b2 CONVERTed rather than removed it — the wired path is engine-authoritative via `tools.rego`, and the static fallback is KEPT byte-for-byte for engine-absent deployments; see the ADR-014 13.5b2 amendment.)*
 - `tests/fixtures/cognic_test_tool_pack/` — fake MCP server (HTTP transport) publishing PRM + OAuth-protected
 - Add `mcp` SDK to dependencies (pin to current released version)
 
@@ -1025,7 +1025,7 @@ This is the platform home for governed self-improvement: Hermes-style improvemen
 - RBAC scopes: `memory.read`, `memory.write.scratch`, `memory.write.task`, `memory.write.long_term`, `memory.forget`, `memory.redact`, `memory.export.read`, `memory.regulator_erasure`
 - SDK helper (`agentos_sdk.memory`) — typed wrappers so pack authors don't roll their own
 - **UI event-stream `memory` family wired (per ADR-020)** — emit `recall_started`, `recall_completed`, `forget`, `redact` events on the stream so memory-aware UIs can render redaction badges + recall provenance
-- **Approval-engine transitional rule (mirrors Sprint 5 MCP rule per ADR-014)**: between Sprint 11.5 ship and Sprint 13.5 (when `core/approval` lands), `long_term` writes from packs with `risk_tier >= customer_data_write` are **refused** with error `memory_approval_engine_not_available`. The write attempt is audit-logged with declared tier so banks can plan rollout. `scratch` and `task` tier writes work normally; `long_term` writes from `read_only` / `internal_write` packs work normally. Sprint 13.5 lifts the refusal by routing high-risk `long_term` writes through `core/approval` (same flow as MCP tool calls). Removal of the transitional rule is itself an audit event (`memory_approval.engine_enabled`) so the cutover is provable.
+- **Approval-engine transitional rule (mirrors Sprint 5 MCP rule per ADR-014)**: between Sprint 11.5 ship and Sprint 13.5 (when `core/approval` lands), `long_term` writes from packs with `risk_tier >= customer_data_write` are **refused** with error `memory_approval_engine_not_available`. The write attempt is audit-logged with declared tier so banks can plan rollout. `scratch` and `task` tier writes work normally; `long_term` writes from `read_only` / `internal_write` packs work normally. *(2026-06-12 supersession: 13.5c3 CONVERTed rather than lifted it — wired engines get the pending → portal-grant → re-write flow LIVE through the harness factory, the engine-absent refusal is KEPT byte-for-byte, and the one-shot `memory_approval.engine_enabled` event was superseded by per-decision evidence on the `memory.write` rows; see the ADR-019 13.5c3 amendment.)*
 
 **Tests:**
 - `test_memory_api_seven_operations.py` — every operation works for the happy path
@@ -1056,6 +1056,8 @@ This is the platform home for governed self-improvement: Hermes-style improvemen
 
 ### Sprint 12 — Evaluation harness *(2 work-units)*
 
+**Status (2026-06-12 reconciliation): Sprint 12 CLOSED** — merged via PR #55 (squash `eefd0a7`, 2026-06-08). Target/scorer-agnostic `EvalRunner` + strict corpus loader + `EvalRunStore` (migration 0008) + value-free `eval.bulk_run` chain rows + `POST /eval/bulk-run` + `eval-bulk` CLI; CC gate 117→121. Detail: ADR-010 + `docs/superpowers/` Sprint-12 spec/plan.
+
 **Goal:** First-class evaluation infrastructure per ADR-010. Banks can bulk-test agent packs against their case corpus before promoting to production.
 
 **Deliverables:** *(module paths corrected at the Sprint-12 close per the actual implementation — the harness ships under `evaluation/…` not `eval/…`; the CLI lives at `cli/eval.py`; the YAML loader is `corpus.py` not `scenarios.py`; see the ADR-010 Sprint-12 amendment for the full scope reconciliation)*
@@ -1079,6 +1081,8 @@ This is the platform home for governed self-improvement: Hermes-style improvemen
 - Eval-run hash-chained into `decision_history`
 
 ### Sprint 13 — LLM-judge + live replay + adversarial testing *(2 work-units)*
+
+**Status (2026-06-12 reconciliation): Sprint 13 arc CLOSED (13a + 13b + 13c)** — 13a live replay (PR #56, `1f611cf`; `evaluation/replay.py`, 5-value `DriftKind`); 13b adversarial gate (PR #57, `3cd19b8`; `AdversarialVerdict` + value-free `eval.adversarial_run`); 13c promotion gate (PR #58, `4f53d82`; 13b verdict wired into the EXISTING 5-gate composer gate-3 — no new `promotion_gate.py`; 4th red reason `adversarial_baseline_regression`). The LLM-judge slice itself landed earlier (PR #51, `8083d73` — first in-repo `app.state.llm_gateway` consumer). CC gate ended at 125.
 
 **Goal:** Complete the evaluation harness with explainable LLM verdicts + production-case replay (per ADR-010), and ship the adversarial test generator + promotion gate (per ADR-011).
 
@@ -1117,6 +1121,18 @@ This is the platform home for governed self-improvement: Hermes-style improvemen
 - Promotion gate refuses a pack failing either quality or adversarial threshold; allows when both pass; logs explicit override
 
 ### Sprint 13.5 — Runtime tool approval + Policy-as-code + Emergency controls *(3 work-units)*
+
+**Status (2026-06-12 reconciliation): the approval arc is SHIPPED as the 13.5a → 13.5c3 decomposition; emergency controls were CARVED OUT to Sprint 13.6 (none of the emergency deliverables below shipped in 13.5).** As-built record — see `docs/AS_BUILT_CAPABILITY_MAP.md` pillar 6 + the ADR-014 amendment chain (13.5a / 13.5b2 / 13.5c1 / 13.5c2 / 13.5c3):
+
+- **13.5a** (PR #59, `cf91887`) — `core/approval/` engine core: **non-blocking** state machine (`create_request / check / verify_grant_for_action / grant / grant_second / deny`); value-free envelope; `tools.rego` tier→flow classification; DH-backed store + 5 `approval.*` chain events; **lazy authoritative expiry** (no background sweeper); **7** RBAC scopes (`tool.approve.*`, incl. `high_risk_custom`); CC 125→128.
+- **13.5b1** (PR #60, `db33202`) — portal approval API: list/detail/grant/grant-second/deny. **No public `POST /api/v1/approvals` create endpoint shipped, by design** — requests are seam-minted.
+- **13.5b2** (PR #61, `a40f4cd`) — MCP-host seam cutover (seam-only; no production host construction).
+- **13.5c1** (PR #62, `a501b16`) — sandbox admission seam + `sandbox.rego` CONVERT (seam-only).
+- **13.5c2** (PR #63, `100a6e2`) — scheduler submit seam + `scheduler.rego` CONVERT (seam-only). Both Sprint-10.5 `*_pre_13_5` bundles are now CONVERTed.
+- **13.5c3** (PR #64, `1af0e62`) — memory write-gate seam, **the FIRST production-wired consult** (`harness/runtime.py` threads `runtime.approval_engine` into the MemoryAPI factory); + the additive `ApprovalCheckResult.required_refs` read surface.
+- **Open:** 13.5c4 (credentials-validator REMOVE lift + final ADR reconciliation) and Sprint 13.6 (the ADR-018 emergency-control set below). Composition-root wiring for the three seam-only consumers is a separate sprint.
+
+**SUPERSEDED specifics in the original text below** (kept verbatim as history; the as-built contracts win): the "create / **wait** / grant" API shape (the engine is non-blocking — no wait loop exists; callers poll `check()` and re-submit); the `POST /api/v1/approvals` endpoint (never shipped, by design); "expiry via background sweeper" (lazy authoritative expiry shipped); "**Removes** the Sprint 5 transitional refusal" (the doctrine is CONVERT — every seam keeps a byte-for-byte engine-absent fallback); the module-load `tool_approval.engine_enabled` one-shot audit event (superseded three times over — per-decision evidence on the seams' own chain rows replaced it; see the ADR-014 c1–c3 amendments); the 5-scope RBAC list (7 shipped); the policy-as-code hot-reload + decision-trail API (not shipped — the bundle set itself largely shipped in EARLIER sprints, with `tools.rego` landing at 13.5a); single-use grant consumption (deliberately deferred to Sprint 14+, never approximated at the seams).
 
 **Goal:** ship the three Phase-4 governance layers (per ADR-014, ADR-015, ADR-018) that turn pack approval from a one-time event into an ongoing operational control.
 
@@ -1174,6 +1190,8 @@ This is the platform home for governed self-improvement: Hermes-style improvemen
 
 ### Sprint 14 — Per-tenant deployment kit *(2 work-units)*
 
+**Re-sequenced (2026-06-12):** this content folds into **Deployment Substrate Z1** (OpenShift-compatible Kubernetes packaging + AKS first-environment smoke) — forward item 7 in `docs/AS_BUILT_CAPABILITY_MAP.md`. The deliverables below remain the seed inventory.
+
 **Goal:** banks can deploy AgentOS into their own environment with one command.
 
 **Deliverables:**
@@ -1191,7 +1209,9 @@ This is the platform home for governed self-improvement: Hermes-style improvemen
 - Helm chart installs cleanly in kind
 - `helm install ... && kubectl exec ... -- curl localhost:8000/api/v1/healthz` returns 200
 
-### Sprint 15 — End-to-end POC *(2 work-units)*
+### Sprint 15 — End-to-end production-readiness validation *(2 work-units)*
+
+**Re-sequenced (2026-06-12):** the validation intent here is **production-readiness / bank-deployable validation**, not a proof of concept — AgentOS v1 is production-hardened (see `docs/AS_BUILT_CAPABILITY_MAP.md`). The pack-extraction exercise below re-enters the plan through forward items 4–8 (managed runtime, workflow, ADK, deployment substrate, runbooks/checklist).
 
 **Goal:** prove the full pattern works — extract one real tool from parent cognic, ship as MCP pack, install on AgentOS, run a real query through the full audit chain.
 
@@ -1212,7 +1232,7 @@ This is the platform home for governed self-improvement: Hermes-style improvemen
   - Evidence pack exportable
   - Eval bulk-run report generated
   - Adversarial corpus pass-rate reported
-- `docs/POC-RESULTS.md` — what worked, what didn't, what changes if we want to onboard a real bank
+- `docs/VALIDATION-RESULTS.md` — what worked, what didn't, what changes if we want to onboard a real bank *(renamed from POC-RESULTS at the 2026-06-12 reconciliation)*
 
 **Exit criteria:**
 - End-to-end query succeeds against a real bank-style knowledge base
@@ -1342,10 +1362,10 @@ Before each phase starts, decide:
 | **Before Sprint 1** | ✅ resolved — repo at `/Users/bmz/development/cognic-agentos/`, distribution `cognic-agentos`, push to private `bmzee/cognic-agentos` after first commit |
 | **Before Sprint 4** | Cosign trust-root provisioning model — Vault path layout |
 | **Before Sprint 7** | SDK CLI distribution — bundle in main image vs separate `cognic-agentos-cli` PyPI package |
-| **Before Sprint 8** | ✅ resolved — Wave 1 ships TWO backends: `DockerSiblingSandboxBackend` for dev/CI (Sprint 8A, closed) + `KubernetesPodSandboxBackend` for bank production (Sprint 8B, planned) per ADR-004 substantive amendment + `project_openshift_deployment_target`. gVisor + Firecracker deferred to Wave-2. |
+| **Before Sprint 8** | ✅ resolved — Wave 1 ships TWO backends: `DockerSiblingSandboxBackend` for dev/CI (Sprint 8A, closed) + `KubernetesPodSandboxBackend` for bank production (Sprint 8B, closed; see the 8B status block) per ADR-004 substantive amendment + `project_openshift_deployment_target`. gVisor + Firecracker deferred to Wave-2. |
 | **Before Sprint 10.5** | Scheduler Wave-1 admission defaults — queue depths, retry-after clamps, and aggressive default-deny `scheduler.rego` overlay posture |
 | **Before Sprint 11** | Sub-agent recursion depth default — global, per-tenant, or per-agent; budget inheritance is through the Sprint 10.5 scheduler |
-| **Before Sprint 12** | Target bank for the first POC deployment (drives bank-overlay template content) |
+| **Before Sprint 12** | Target bank for the first production-readiness deployment (drives bank-overlay template content) |
 | **Before Phase 5** | Confirm Studio demand — only proceed if a bank explicitly asks for no-code authoring |
 
 ---
