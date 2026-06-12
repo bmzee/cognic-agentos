@@ -1,7 +1,7 @@
 # Cognic AgentOS — Project Plan
 
-**Status:** Active baseline  
-**Date:** 2026-04-26  
+**Status:** Active baseline (doctrine). For as-built execution status see [`docs/AS_BUILT_CAPABILITY_MAP.md`](AS_BUILT_CAPABILITY_MAP.md) + the status blocks in [`docs/BUILD_PLAN.md`](BUILD_PLAN.md).\
+**Date:** 2026-04-26 (capability-map pointer added 2026-06-12)\
 **Purpose:** This is the working execution plan for this repo. We are building a production-grade, bank-deployable AgentOS that banks install once and extend with signed tool, skill, and agent packs, including packs they create themselves.
 
 ## 1. Repo Scope and Guardrails
@@ -346,7 +346,7 @@ This is the sequence to follow from the current pre-code state:
 6. Harden the governance kernel and evidence-tagging hooks before broad feature expansion.
 7. Implement the bank pack SDK/CLI, pack manifest validator, local governance test harness, and portal API lifecycle endpoints.
 8. Implement pack trust verification, tenant allow-list controls, and OWASP agentic supply-chain checks.
-9. Prove the boundary with separate bank-authored-style tool-pack, skill-pack, and agent-pack POCs.
+9. Prove the boundary with separate bank-authored-style tool-pack, skill-pack, and agent-pack validation builds (production-readiness validation, not POCs).
 10. Add sandbox execution and policy enforcement.
 11. Add A2A-backed sub-agent spawning with privilege controls.
 12. Package the bank deployment kit, runbooks, and production-readiness verification.
