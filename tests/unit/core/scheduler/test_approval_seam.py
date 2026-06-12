@@ -670,3 +670,100 @@ class TestWiredReSubmission:
         decision = await engine.submit(submit_input=_seam_submit_input(), request_id="req-1")  # type: ignore[attr-defined]
         assert decision.outcome == "refused_kill_switch_active"
         assert await ApprovalRequestStore(DecisionHistoryStore(db)).list_pending("t-1") == []  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# T6 — accepted-row evidence + byte-identical pins (spec §6)
+# ---------------------------------------------------------------------------
+
+
+class TestAcceptedRowEvidence:
+    async def test_granted_resubmit_accepted_row_carries_join_keys(self, tmp_path: object) -> None:
+        # Spec §6 (user-locked P1): the accepted row needs the correlator or
+        # the examiner join accepted -> approval.* is impossible for
+        # non-regulator tiers (audit_record_ref exists ONLY for
+        # regulator_communication).
+        import uuid as _uuid
+
+        db = await _mk_migrated_db(tmp_path)
+        approval = _mk_approval_engine(db, flow="require_single_approval")
+        engine = _mk_scheduler_engine(db, approval_engine=approval, policy=_CapturingPolicy())
+        first = await engine.submit(submit_input=_seam_submit_input(), request_id="req-1")  # type: ignore[attr-defined]
+        rid = _uuid.UUID(first.approval_request_id)
+        await approval.grant(request_id=rid, tenant_id="t-1", approver=_approver())  # type: ignore[attr-defined]
+        await engine.submit(  # type: ignore[attr-defined]
+            submit_input=_seam_submit_input(approval_request_id=str(rid)), request_id="req-2"
+        )
+        rows = await _load_admission_rows(db)
+        accepted = [p for t, p in rows if t == "scheduler.admission_accepted"]
+        assert accepted[-1]["approval_verified"] is True
+        assert accepted[-1]["approval_request_id"] == str(rid)
+
+    async def test_non_approval_accepted_row_has_false_and_no_correlator(
+        self, tmp_path: object
+    ) -> None:
+        db = await _mk_migrated_db(tmp_path)
+        engine = _mk_scheduler_engine(
+            db,
+            approval_engine=_mk_approval_engine(db, flow="auto_run"),
+            policy=_CapturingPolicy(),
+        )
+        await engine.submit(submit_input=_seam_submit_input(), request_id="req-1")  # type: ignore[attr-defined]
+        rows = await _load_admission_rows(db)
+        assert rows[-1][0] == "scheduler.admission_accepted"
+        payload = rows[-1][1]
+        assert payload["approval_verified"] is False
+        assert "approval_request_id" not in payload
+
+    async def test_non_approval_refused_row_keyset_byte_identical(self, tmp_path: object) -> None:
+        # Spec §6: the 5 pre-c2 refusal reasons' payload shape is UNCHANGED
+        # (conditional keys; additive-only schema).
+        db = await _mk_migrated_db(tmp_path)
+        engine = _mk_scheduler_engine(
+            db,
+            approval_engine=_mk_approval_engine(db, flow="require_single_approval"),
+            kill_switch=_ActiveKillSwitch(),
+        )
+        await engine.submit(submit_input=_seam_submit_input(), request_id="req-1")  # type: ignore[attr-defined]
+        rows = await _load_admission_rows(db)
+        assert rows[-1][0] == "scheduler.admission_refused"
+        # 13 storage-built keys + "actor_id" merged by DecisionHistoryStore
+        # at append time (from DecisionRecord.actor_id) — the REAL on-disk
+        # pre-c2 shape, found empirically at T6 watched-fail.
+        assert set(rows[-1][1].keys()) == {
+            "task_id",
+            "tenant_id",
+            "pack_id",
+            "actor_subject",
+            "actor_type",
+            "class_",
+            "pack_kind",
+            "pack_risk_tier",
+            "requested_estimated_tokens",
+            "parent_task_id",
+            "submitted_at",
+            "reason",
+            "policy_reason",
+            "actor_id",
+        }
+
+    async def test_storage_guard_accepts_each_new_reason(self, tmp_path: object) -> None:
+        import uuid as _uuid
+
+        from cognic_agentos.core.scheduler.storage import SchedulerStorage
+
+        db = await _mk_migrated_db(tmp_path)
+        store = SchedulerStorage(db)  # type: ignore[arg-type]
+        for reason in (
+            "refused_approval_pending",
+            "refused_approval_denied",
+            "refused_approval_expired",
+            "refused_approval_binding_mismatch",
+            "refused_approval_request_not_found",
+        ):
+            await store.record_admission_refused(
+                refused_task_id=_uuid.uuid4(),
+                submit_input=_seam_submit_input(),  # type: ignore[arg-type]
+                reason=reason,
+                request_id=f"req-{reason}",
+            )

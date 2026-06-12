@@ -265,7 +265,14 @@ class SchedulerStorage:
                 "requested_estimated_tokens": (submit_input.requested_estimated_tokens),
                 "parent_task_id": submit_input.parent_task_id,
                 "submitted_at": now.isoformat(),
+                # Sprint 13.5c2 (ADR-014): the attestation is ALWAYS present
+                # post-c2 (False on safe/auto admissions); the correlator is
+                # conditional — ONLY a granted re-submit carries it, so the
+                # examiner can join accepted -> approval.* rows (spec §6).
+                "approval_verified": submit_input.approval_verified,
             }
+            if submit_input.approval_verified and submit_input.approval_request_id is not None:
+                payload["approval_request_id"] = submit_input.approval_request_id
             return DecisionRecord(
                 decision_type="scheduler.admission_accepted",
                 request_id=request_id,
