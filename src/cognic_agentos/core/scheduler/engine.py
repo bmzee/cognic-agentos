@@ -49,6 +49,7 @@ from typing import Any, Final, Literal
 from cognic_agentos.core.approval._types import (
     APPROVAL_REDACTED_CONTEXT_MAX_LEN,
     ApprovalEnvelope,
+    ApprovalRequestNotFound,
     ApprovalTransitionRefused,
 )
 from cognic_agentos.core.approval.engine import ApprovalEngine
@@ -633,7 +634,43 @@ class SchedulerEngine:
         )
         args_digest = _submit_args_digest(original_submit_input)
         if approval_request_uuid is not None:
-            raise NotImplementedError("re-submission verify path lands at 13.5c2 T5 (ADR-014)")
+            try:
+                res = await self._approval_engine.verify_grant_for_action(
+                    request_id=approval_request_uuid,
+                    tenant_id=original_submit_input.tenant_id,
+                    expected_args_digest=args_digest,
+                    expected_tool_identity=tool_identity,
+                )
+            except ApprovalRequestNotFound:
+                # Cross-tenant == unknown BY CONSTRUCTION (tenant-scoped load).
+                return _ApprovalConsultResult(
+                    verified=False,
+                    refusal_reason="refused_approval_request_not_found",
+                    approval_request_id=str(approval_request_uuid),
+                )
+            except ApprovalTransitionRefused as exc:
+                if exc.reason != "approval_binding_mismatch":
+                    raise  # nothing else is reachable from verify; fail-loud
+                # A grant authorises exactly one submission shape.
+                return _ApprovalConsultResult(
+                    verified=False,
+                    refusal_reason="refused_approval_binding_mismatch",
+                    approval_request_id=str(approval_request_uuid),
+                )
+            if res.state == "granted":
+                return _ApprovalConsultResult(verified=True)
+            state_to_reason: dict[str, SchedulerRefusalReason] = {
+                "pending": "refused_approval_pending",
+                "awaiting_second": "refused_approval_pending",
+                "denied": "refused_approval_denied",
+                "expired": "refused_approval_expired",
+            }
+            return _ApprovalConsultResult(
+                verified=False,
+                refusal_reason=state_to_reason[res.state],
+                approval_request_id=str(approval_request_uuid),
+                approval_flow=res.flow,
+            )
         required_refs: dict[str, str] = {}
         if original_submit_input.pack_risk_tier == "regulator_communication":
             # Spec §3.5: the submit request_id keys every admission chain

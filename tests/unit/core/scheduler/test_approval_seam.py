@@ -471,3 +471,202 @@ class TestWiredFirstAdmission:
                 request_id="req-1",
             )
         assert exc.value.field == "approval_request_id"
+
+
+# ---------------------------------------------------------------------------
+# T5 — re-submission verify path (spec §3.3/§3.6)
+# ---------------------------------------------------------------------------
+
+
+def _approver(subject: str = "rev@bank.example") -> object:
+    from cognic_agentos.core.approval._types import ApprovalActor
+
+    return ApprovalActor(
+        subject=subject,
+        tenant_id="t-1",
+        actor_type="human",
+        scopes=frozenset({"tool.approve.payment"}),
+    )
+
+
+class TestWiredReSubmission:
+    async def _pending_request(self, engine: object) -> object:
+        import uuid as _uuid
+
+        decision = await engine.submit(submit_input=_seam_submit_input(), request_id="req-1")  # type: ignore[attr-defined]
+        assert decision.outcome == "refused_approval_pending"
+        return _uuid.UUID(decision.approval_request_id)
+
+    async def test_granted_resubmit_admits_and_attests(self, tmp_path: object) -> None:
+        db = await _mk_migrated_db(tmp_path)
+        approval = _mk_approval_engine(db, flow="require_single_approval")
+        policy = _CapturingPolicy(allow=True)
+        engine = _mk_scheduler_engine(db, approval_engine=approval, policy=policy)
+        rid = await self._pending_request(engine)
+        await approval.grant(request_id=rid, tenant_id="t-1", approver=_approver())  # type: ignore[attr-defined]
+        decision = await engine.submit(  # type: ignore[attr-defined]
+            submit_input=_seam_submit_input(approval_request_id=str(rid)), request_id="req-2"
+        )
+        assert decision.outcome == "accepted_immediate"
+        assert policy.seen[-1].approval_verified is True  # type: ignore[attr-defined]
+
+    async def test_actor_swap_binding_mismatch(self, tmp_path: object) -> None:
+        # The c2 refinement pin: a DIFFERENT same-tenant actor cannot ride a
+        # granted approval (actor identity is IN the binding digest).
+        from cognic_agentos.core.scheduler._types import TaskActor
+
+        db = await _mk_migrated_db(tmp_path)
+        approval = _mk_approval_engine(db, flow="require_single_approval")
+        engine = _mk_scheduler_engine(db, approval_engine=approval, policy=_CapturingPolicy())
+        rid = await self._pending_request(engine)
+        await approval.grant(request_id=rid, tenant_id="t-1", approver=_approver())  # type: ignore[attr-defined]
+        decision = await engine.submit(  # type: ignore[attr-defined]
+            submit_input=_seam_submit_input(
+                actor=TaskActor(subject="agent-2", tenant_id="t-1", actor_type="service"),
+                approval_request_id=str(rid),
+            ),
+            request_id="req-2",
+        )
+        assert decision.outcome == "refused_approval_binding_mismatch"
+        assert decision.approval_request_id is None  # pending-only carrier
+
+    async def test_token_change_binding_mismatch(self, tmp_path: object) -> None:
+        db = await _mk_migrated_db(tmp_path)
+        approval = _mk_approval_engine(db, flow="require_single_approval")
+        engine = _mk_scheduler_engine(db, approval_engine=approval, policy=_CapturingPolicy())
+        rid = await self._pending_request(engine)
+        await approval.grant(request_id=rid, tenant_id="t-1", approver=_approver())  # type: ignore[attr-defined]
+        decision = await engine.submit(  # type: ignore[attr-defined]
+            submit_input=_seam_submit_input(
+                requested_estimated_tokens=501, approval_request_id=str(rid)
+            ),
+            request_id="req-2",
+        )
+        assert decision.outcome == "refused_approval_binding_mismatch"
+
+    async def test_parent_narrowed_resubmit_still_verifies(self, tmp_path: object) -> None:
+        # Spec §3.3 ORIGINAL-tokens rule: parent-budget narrowing between
+        # grant and re-submit must NOT spuriously mismatch — the digest reads
+        # the ORIGINAL SubmitInput, never the narrowed effective copy.
+        import uuid as _uuid
+
+        class _ShrinkingBudget:
+            def __init__(self) -> None:
+                self.budgets = [400, 100]  # narrower on the re-submit
+
+            async def remaining_budget_for(self, parent_task_id: object) -> int:
+                return self.budgets.pop(0)
+
+        from cognic_agentos.core.scheduler.engine import SchedulerEngine
+        from cognic_agentos.core.scheduler.queue import ConcurrencyCaps
+        from cognic_agentos.core.scheduler.storage import SchedulerStorage
+
+        db = await _mk_migrated_db(tmp_path)
+        approval = _mk_approval_engine(db, flow="require_single_approval")
+        policy = _CapturingPolicy(allow=True)
+        engine = SchedulerEngine(
+            storage=SchedulerStorage(db),  # type: ignore[arg-type]
+            caps=ConcurrencyCaps(
+                per_tenant_interactive=2, per_tenant_background=4, per_pack=4, per_actor=4
+            ),
+            class_settings={"interactive": (2, 0.200), "background": (4, 5.0)},
+            policy_evaluator=policy,  # type: ignore[arg-type]
+            quota_interrogator=_AllowAllQuota(),
+            kill_switch_interrogator=_InactiveKillSwitch(),
+            pack_state_interrogator=_InstalledPackState(),
+            parent_budget_resolver=_ShrinkingBudget(),
+            approval_engine=approval,  # type: ignore[arg-type]
+        )
+        parent = str(_uuid.uuid4())
+        first = await engine.submit(
+            submit_input=_seam_submit_input(parent_task_id=parent),  # type: ignore[arg-type]
+            request_id="req-1",
+        )
+        assert first.outcome == "refused_approval_pending"
+        rid = _uuid.UUID(first.approval_request_id)
+        await approval.grant(request_id=rid, tenant_id="t-1", approver=_approver())  # type: ignore[attr-defined]
+        decision = await engine.submit(
+            submit_input=_seam_submit_input(  # type: ignore[arg-type]
+                parent_task_id=parent, approval_request_id=str(rid)
+            ),
+            request_id="req-2",
+        )
+        assert decision.outcome == "accepted_immediate"
+
+    async def test_still_pending_denied_expired_and_not_found(self, tmp_path: object) -> None:
+        import uuid as _uuid
+        from datetime import timedelta
+
+        db = await _mk_migrated_db(tmp_path)
+        clock = _MutableClock()
+        approval = _mk_approval_engine(db, flow="require_single_approval", clock=clock)
+        engine = _mk_scheduler_engine(db, approval_engine=approval, policy=_CapturingPolicy())
+        # still pending:
+        rid = await self._pending_request(engine)
+        d = await engine.submit(  # type: ignore[attr-defined]
+            submit_input=_seam_submit_input(approval_request_id=str(rid)), request_id="r2"
+        )
+        assert d.outcome == "refused_approval_pending"
+        assert d.approval_request_id == str(rid)  # pending keeps the carrier
+        # denied:
+        await approval.deny(  # type: ignore[attr-defined]
+            request_id=rid, tenant_id="t-1", approver=_approver(), reason="not appropriate"
+        )
+        d = await engine.submit(  # type: ignore[attr-defined]
+            submit_input=_seam_submit_input(approval_request_id=str(rid)), request_id="r3"
+        )
+        assert d.outcome == "refused_approval_denied"
+        # expired (fresh request; clock past the 300s single TTL):
+        rid2 = await self._pending_request(engine)
+        clock.now += timedelta(hours=1)
+        d = await engine.submit(  # type: ignore[attr-defined]
+            submit_input=_seam_submit_input(approval_request_id=str(rid2)), request_id="r4"
+        )
+        assert d.outcome == "refused_approval_expired"
+        # unknown == not found (cross-tenant is the same shape BY
+        # CONSTRUCTION — the engine load is tenant-scoped):
+        d = await engine.submit(  # type: ignore[attr-defined]
+            submit_input=_seam_submit_input(approval_request_id=str(_uuid.uuid4())),
+            request_id="r5",
+        )
+        assert d.outcome == "refused_approval_request_not_found"
+
+    async def test_non_mismatch_transition_refusal_propagates_raw(self, tmp_path: object) -> None:
+        # The verify re-raise arm (spec §3.6): any non-binding-mismatch
+        # ApprovalTransitionRefused propagates RAW (fail-loud) — no silent
+        # mapping for reasons the verify path should never produce, and no
+        # admission_refused evidence row for a propagated exception.
+        from cognic_agentos.core.approval._types import ApprovalTransitionRefused
+
+        class _RaisingVerifyEngine:
+            async def verify_grant_for_action(self, **kwargs: object) -> object:
+                raise ApprovalTransitionRefused("approval_already_finalized")
+
+        db = await _mk_migrated_db(tmp_path)
+        engine = _mk_scheduler_engine(
+            db, approval_engine=_RaisingVerifyEngine(), policy=_CapturingPolicy()
+        )
+        with pytest.raises(ApprovalTransitionRefused) as exc:
+            await engine.submit(  # type: ignore[attr-defined]
+                submit_input=_seam_submit_input(
+                    approval_request_id="11111111-1111-1111-1111-111111111111"
+                ),
+                request_id="req-1",
+            )
+        assert exc.value.reason == "approval_already_finalized"
+        assert await _load_admission_rows(db) == []
+
+    async def test_kill_switch_beats_approval_zero_approval_rows(self, tmp_path: object) -> None:
+        # Ordering pin (spec §3.1): a killed pack never reaches create_request.
+        from cognic_agentos.core.approval.storage import ApprovalRequestStore
+        from cognic_agentos.core.decision_history import DecisionHistoryStore
+
+        db = await _mk_migrated_db(tmp_path)
+        engine = _mk_scheduler_engine(
+            db,
+            approval_engine=_mk_approval_engine(db, flow="require_single_approval"),
+            kill_switch=_ActiveKillSwitch(),
+        )
+        decision = await engine.submit(submit_input=_seam_submit_input(), request_id="req-1")  # type: ignore[attr-defined]
+        assert decision.outcome == "refused_kill_switch_active"
+        assert await ApprovalRequestStore(DecisionHistoryStore(db)).list_pending("t-1") == []  # type: ignore[arg-type]
