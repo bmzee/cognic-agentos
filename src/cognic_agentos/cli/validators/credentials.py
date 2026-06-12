@@ -1,9 +1,9 @@
 """Sprint 10.6 T14 — credentials manifest validator per ADR-004 §25 + ADR-017.
 
 Per-concern build-time validator for ``[credentials.<logical_name>]``
-pack-manifest blocks. Emits the 21 closed-enum ``ValidatorReason``
+pack-manifest blocks. Emits the 20 closed-enum ``ValidatorReason``
 values owned by this module per ``cli/__init__.py:_VALIDATOR_REASON_OWNERSHIP``
-(18 ``credentials_*`` + 3 ``runtime_expected_workload_gid_*``).
+(17 ``credentials_*`` + 3 ``runtime_expected_workload_gid_*``).
 
 Doctrine note on ``credentials_logical_name_duplicate`` —
 *UNREACHABLE from a single dict input by language invariant.* The
@@ -45,15 +45,10 @@ Precedence rules (locked by user guidance):
     overlay-merge surface) should pre-filter for grammar themselves
     if they want grammar-clean dedup only — the helper's contract
     is exact-string compare, period.
-  - When the ``[risk_tier]`` block is absent, the credentials
-    validator suppresses its own
-    ``credentials_risk_tier_not_permitted_pre_13_5`` check — the
-    upstream risk-tier validator's missing-block finding is the
-    appropriate signal; double-emission would mislead authors.
 
 Scope isolation (locked by user guidance):
 
-  - This validator emits ONLY the 21 closed-enum reasons it owns
+  - This validator emits ONLY the 20 closed-enum reasons it owns
     per the ownership map. It does NOT emit orchestrator-owned
     ``manifest_*`` reasons or T11-owned
     ``risk_tier_inconsistent_with_data_classes``.
@@ -127,24 +122,6 @@ _GID_MAX: Final[int] = 4_294_967_295
 #: module lockstep with the Literal without a duplicate inline
 #: declaration.
 _VALID_PURPOSE_CATEGORIES: Final[frozenset[str]] = frozenset(typing.get_args(PurposeCategory))
-
-#: The 6 high-risk tiers refused pre-Sprint-13.5 for credential-
-#: bearing packs. Mirrors the ``scheduler.rego`` /
-#: ``sandbox.rego``::``*_high_risk_tier_refused_pre_13_5`` Rego-side
-#: refusal contracts per ADR-014 Sprint 10.5 amendment; build-time
-#: refusal here catches the same contract violation BEFORE the
-#: pack ships. The 2 low-authority tiers (``read_only`` /
-#: ``internal_write``) are permitted for credential packs in Wave-1.
-_HIGH_RISK_TIERS_REFUSED_PRE_13_5: Final[frozenset[str]] = frozenset(
-    {
-        "customer_data_read",
-        "customer_data_write",
-        "payment_action",
-        "regulator_communication",
-        "cross_tenant",
-        "high_risk_custom",
-    }
-)
 
 #: Per-block allowed top-level field set. Any key in a
 #: ``[credentials.<name>]`` block outside this set fires
@@ -634,39 +611,6 @@ def _detect_duplicate_vault_paths(
     return findings
 
 
-def _cross_check_risk_tier(
-    data: dict[str, Any], credentials_present: bool
-) -> list[ValidatorFinding]:
-    """Refuse credentials packs declaring one of the 6 high-risk tiers
-    pre-Sprint-13.5. Suppressed when ``[risk_tier]`` block is absent
-    (upstream risk-tier validator's missing-block finding is the
-    appropriate signal; double-emission would mislead authors)."""
-    if not credentials_present:
-        return []
-    risk_tier_block = data.get("risk_tier")
-    if not isinstance(risk_tier_block, dict):
-        return []
-    tier = risk_tier_block.get("tier")
-    if not isinstance(tier, str):
-        return []
-    if tier in _HIGH_RISK_TIERS_REFUSED_PRE_13_5:
-        return [
-            _refusal(
-                reason="credentials_risk_tier_not_permitted_pre_13_5",
-                message=(
-                    f"[risk_tier].tier={tier!r} is a high-risk tier; "
-                    "credential-bearing packs cannot declare any of "
-                    f"{sorted(_HIGH_RISK_TIERS_REFUSED_PRE_13_5)!r} until "
-                    "Sprint 13.5's approval engine lands and the ADR-014 "
-                    "coordinated amendment lifts this restriction."
-                ),
-                tier=tier,
-                refused_tiers=sorted(_HIGH_RISK_TIERS_REFUSED_PRE_13_5),
-            )
-        ]
-    return []
-
-
 def _cross_check_workload_gid(
     data: dict[str, Any], credentials_present: bool
 ) -> list[ValidatorFinding]:
@@ -796,8 +740,7 @@ def validate(data: dict[str, Any], pack_path: Path) -> list[ValidatorFinding]:
                 continue
             findings.extend(_validate_credential_block(name, decl))
 
-    # Cross-validators (gated on credentials_present)
-    findings.extend(_cross_check_risk_tier(data, credentials_present))
+    # Cross-validator (gated on credentials_present)
     findings.extend(_cross_check_workload_gid(data, credentials_present))
 
     return findings

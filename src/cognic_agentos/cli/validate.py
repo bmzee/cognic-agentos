@@ -423,18 +423,20 @@ def run_validators(pack_path: Path) -> list[ValidatorFinding]:
     findings.extend(data_governance.validate(data, pack_path))
     findings.extend(risk_tier.validate(data, pack_path))
     # Sprint 10.6 T15 — credentials validator (per ADR-004 §25 +
-    # ADR-017). Placed AFTER risk_tier because the credentials
-    # validator cross-validates on ``[risk_tier].tier`` for the
-    # pre-Sprint-13.5 high-risk-tier refusal; placed BEFORE
-    # supply_chain because supply_chain operates on attestation
-    # paths (independent concern). The validator is silent on
-    # manifests without a ``[credentials.*]`` block, so adding it
-    # to the dispatch chain does NOT regress any pack without
-    # credentials. Per ``[[feedback_dual_path_doctrine]]``, the
-    # one-validator-owns-each-refusal invariant is preserved: the
-    # 21 closed-enum reasons owned by validators/credentials.py
-    # (per ``cli/__init__.py:_VALIDATOR_REASON_OWNERSHIP``) are
-    # emitted only here; sibling validators do NOT collateral-emit.
+    # ADR-017). Dispatch position (after risk_tier, before
+    # supply_chain) is part of the positional-output contract above
+    # and retained as-is; the original after-risk_tier rationale
+    # (the pre-Sprint-13.5 high-risk-tier cross-validation) was
+    # REMOVED at Sprint 13.5c4 (ADR-014 arc close — high-tier
+    # enforcement lives at the runtime approval seams). The
+    # validator is silent on manifests without a ``[credentials.*]``
+    # block, so adding it to the dispatch chain does NOT regress any
+    # pack without credentials. Per
+    # ``[[feedback_dual_path_doctrine]]``, the one-validator-owns-
+    # each-refusal invariant is preserved: the 20 closed-enum
+    # reasons owned by validators/credentials.py (per
+    # ``cli/__init__.py:_VALIDATOR_REASON_OWNERSHIP``) are emitted
+    # only here; sibling validators do NOT collateral-emit.
     findings.extend(credentials.validate(data, pack_path))
     findings.extend(supply_chain.validate(data, pack_path))
     # Sprint-7A2 T5 — hook-block validator. Fires for every pack

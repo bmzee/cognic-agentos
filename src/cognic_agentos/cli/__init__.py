@@ -163,10 +163,11 @@ ValidatorReason = Literal[
     "hook_unresolved_reference",
     # Credentials manifest validation (Sprint 10.6 T14 —
     # cli/validators/credentials.py per ADR-004 §25 + ADR-017).
-    # 18 [credentials.<name>] block refusals covering logical-name
+    # 17 [credentials.<name>] block refusals covering logical-name
     # grammar + vault_path shape + expected_fields shape + ttl_s +
     # purpose_category + purpose_description + per-block + pack-level +
-    # risk-tier gating pre-Sprint-13.5 + unknown-field rejection.
+    # unknown-field rejection. (Sprint 13.5c4 REMOVED the pre-13.5
+    # risk-tier gating refusal — ADR-014 arc close.)
     # Sub-cases for compound reasons (e.g. credentials_vault_path_*)
     # may carry ``payload.failure_mode`` discriminators when T14 needs
     # to differentiate within-reason sub-cases.
@@ -186,7 +187,6 @@ ValidatorReason = Literal[
     "credentials_purpose_category_invalid_value",
     "credentials_purpose_description_invalid_shape",
     "credentials_count_exceeds_maximum",
-    "credentials_risk_tier_not_permitted_pre_13_5",
     "credentials_unknown_field",
     # Runtime block cross-validation tied to credentials presence
     # (Sprint 10.6 T14 — owned by cli/validators/credentials.py since
@@ -322,7 +322,6 @@ _VALIDATOR_REASON_OWNERSHIP: Final[dict[ValidatorReason, str]] = {
     "credentials_purpose_category_invalid_value": "validators/credentials.py",
     "credentials_purpose_description_invalid_shape": "validators/credentials.py",
     "credentials_count_exceeds_maximum": "validators/credentials.py",
-    "credentials_risk_tier_not_permitted_pre_13_5": "validators/credentials.py",
     "credentials_unknown_field": "validators/credentials.py",
     "runtime_expected_workload_gid_required_for_credential_pack": "validators/credentials.py",
     "runtime_expected_workload_gid_invalid_range": "validators/credentials.py",
