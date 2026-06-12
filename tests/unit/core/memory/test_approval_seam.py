@@ -115,11 +115,12 @@ def test_args_digest_binds_shape_content_and_actor() -> None:
 
 
 def test_value_digest_single_source(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The binding reuses storage._value_digest (the memory.write row's
-    # redacted_value_digest) — one digest definition, no drift. PROOF by
-    # monkeypatch: patching the gate-module binding changes the args digest,
-    # and under a constant patched helper two DIFFERENT values digest equal
-    # (the value reaches the binding ONLY through the patched helper).
+    # The binding reuses _digest._value_digest — the SAME definition behind
+    # the memory.write row's redacted_value_digest (storage re-exports it;
+    # canonical home is core/memory/_digest.py per the Layer-C architecture
+    # fence). PROOF by monkeypatch: patching the gate-module binding changes
+    # the args digest, and under a constant patched helper two DIFFERENT
+    # values digest equal (the value reaches the binding ONLY through it).
     from cognic_agentos.core.memory import gate as gate_module
 
     base = gate_module._memory_args_digest(**_digest_kwargs())  # type: ignore[arg-type]

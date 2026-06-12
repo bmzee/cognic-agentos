@@ -68,11 +68,11 @@ from typing import TYPE_CHECKING
 from cognic_agentos.core.canonical import canonical_bytes
 from cognic_agentos.core.dlp.scanner import DLP_RESTRICTED_CLASSES
 from cognic_agentos.core.memory._context import MemoryCallerContext, MemoryWriteRecord
+from cognic_agentos.core.memory._digest import _value_digest
 from cognic_agentos.core.memory._seams import (
     MemoryKillSwitchInterrogator,
     _NullMemoryKillSwitchInterrogator,
 )
-from cognic_agentos.core.memory.storage import _value_digest
 from cognic_agentos.core.memory.tiers import (
     BlockKind,
     MemoryOperationRefused,

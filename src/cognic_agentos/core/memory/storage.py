@@ -58,6 +58,7 @@ from cognic_agentos.core.memory._context import (
     RedactionSpan,
     RegulatorErasureCommand,
 )
+from cognic_agentos.core.memory._digest import _value_digest
 from cognic_agentos.core.memory._errors import MemoryBackendUnavailable
 from cognic_agentos.core.memory.tiers import (
     BlockKind,
@@ -190,16 +191,11 @@ _memory_records = sa.Table(
 )
 
 
-def _value_digest(value: object) -> str:
-    """SHA-256 of the canonical JSON bytes of ``value``.
-
-    This is the ONLY representation of a memory value that may enter the
-    hash chain — the raw value lives solely in the ``memory_records.value``
-    column (default-deny long-term, regulator-erasure pathway per ADR-019).
-    Uses ``core/canonical.canonical_bytes`` so the digest is stable across
-    Python versions + platforms."""
-
-    return hashlib.sha256(canonical_bytes(value)).hexdigest()
+# _value_digest moved to core/memory/_digest.py at Sprint 13.5c3 (one digest
+# definition shared with the write gate's approval binding WITHOUT the gate
+# importing this module — the Layer-C architecture fence pins storage imports
+# to the composition root). Re-exported here so existing call/import sites
+# keep working.
 
 
 def _apply_redaction(value: object, path: tuple[str, ...], replacement: object) -> object:
