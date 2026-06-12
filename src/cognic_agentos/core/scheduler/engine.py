@@ -39,12 +39,15 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import hashlib
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Final, Literal
 
+from cognic_agentos.core.approval._types import APPROVAL_REDACTED_CONTEXT_MAX_LEN
+from cognic_agentos.core.canonical import canonical_bytes
 from cognic_agentos.core.scheduler._seams import (
     KillSwitchInterrogator,
     PackStateInterrogator,
@@ -204,6 +207,52 @@ class SchedulerPromotionRefused(Exception):
 _VALID_PROMOTION_REFUSED_REASONS: Final[frozenset[str]] = frozenset(
     {"caps_saturated", "not_at_queue_head"}
 )
+
+
+def _canonical_scheduler_identity(*, pack_id: str, pack_kind: str) -> str:
+    """Collision-proof canonical tool identity for the approval seam (c2 spec
+    §3.3). Name-based — ``SubmitInput`` carries no artifact digest (the
+    scheduler never sees the wheel); the artifact-bound identity fires
+    downstream at the SANDBOX seam (13.5c1) when the admitted task starts."""
+    return (
+        "scheduler:"
+        + hashlib.sha256(canonical_bytes({"pack_id": pack_id, "pack_kind": pack_kind})).hexdigest()
+    )
+
+
+def _submit_args_digest(submit_input: SubmitInput) -> bytes:
+    """Approval binding digest over the submission shape (c2 spec §3.3).
+
+    MUST be fed the ORIGINAL (pre-parent-narrowing) ``SubmitInput`` — the
+    digest binds the caller's declared intent; quota/storage see the narrowed
+    effective value. Binds actor identity so a granted approval cannot be
+    re-submitted by a different same-tenant actor. ``tenant_id`` +
+    ``data_classes`` are envelope-first-class; ``pack_id``/``pack_kind`` live
+    in the identity; ``approval_request_id``/``approval_verified`` are
+    carrier/attestation — see the disposition-map drift pin."""
+    return hashlib.sha256(
+        canonical_bytes(
+            {
+                "class": submit_input.class_,
+                "pack_risk_tier": submit_input.pack_risk_tier,
+                "requested_estimated_tokens": submit_input.requested_estimated_tokens,
+                "parent_task_id": submit_input.parent_task_id,
+                "actor_subject": submit_input.actor.subject,
+                "actor_type": submit_input.actor.actor_type,
+            }
+        )
+    ).digest()
+
+
+def _submit_redacted_context(submit_input: SubmitInput) -> str:
+    """Reviewer-facing value-free context line (c2 spec §3.4). Manifest-derived
+    identifiers only; no caller free-form values; capped."""
+    text = (
+        f"scheduler_submit pack_id={submit_input.pack_id} "
+        f"class={submit_input.class_} "
+        f"risk_tier={submit_input.pack_risk_tier}"
+    )
+    return text[:APPROVAL_REDACTED_CONTEXT_MAX_LEN]
 
 
 class SchedulerEngine:
