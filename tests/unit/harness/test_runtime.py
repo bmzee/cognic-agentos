@@ -50,6 +50,10 @@ async def test_build_runtime_yields_usable_gateway(memory_registry, memory_setti
         # and the gateway's quota gate stays inert (None) → byte-compat.
         assert runtime.quota_engine is None
         assert runtime.llm_gateway._quota_engine is None
+        # Sprint 13.7 (ADR-022) — no cache → no Redis-backed quota/kill-switch →
+        # NO scheduler (never a silent _Null-quota engine that fails on first
+        # submit). The gateway-only path keeps Runtime.scheduler None.
+        assert runtime.scheduler is None
         await runtime.aclose()  # must not raise
     finally:
         await adapters.close_all()
@@ -172,6 +176,20 @@ async def test_build_runtime_wires_memory_when_cache_present(
         assert isinstance(runtime.quota_engine, QuotaEngine)
         assert runtime.llm_gateway._quota_engine is runtime.quota_engine
         assert runtime.quota_engine._resolver is runtime.config_overlay_resolver
+        # Sprint 13.7 (ADR-022) — the SchedulerEngine is production-constructed
+        # inside the cache block (its quota + kill-switch conformers need the
+        # Redis-backed engines). Identity pins: the seam slots hold the runtime's
+        # real conformers; parent-budget stays the _Null sentinel (Fork E; 14A).
+        from cognic_agentos.core.emergency.kill_switches import SchedulerKillSwitchConformer
+        from cognic_agentos.core.scheduler.engine import SchedulerEngine
+        from cognic_agentos.subagent.conformers import PackStoreStateInterrogator
+
+        assert isinstance(runtime.scheduler, SchedulerEngine)
+        assert runtime.scheduler._quota is runtime.quota_engine
+        assert isinstance(runtime.scheduler._kill_switch, SchedulerKillSwitchConformer)
+        assert runtime.scheduler._kill_switch._engine is runtime.kill_switch_engine
+        assert runtime.scheduler._approval_engine is runtime.approval_engine
+        assert isinstance(runtime.scheduler._pack_state, PackStoreStateInterrogator)
         await runtime.aclose()
     finally:
         await adapters.close_all()

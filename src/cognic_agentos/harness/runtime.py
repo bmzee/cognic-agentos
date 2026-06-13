@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from cognic_agentos.core.emergency.kill_switches import KillSwitchEngine
     from cognic_agentos.core.emergency.quotas import QuotaEngine
     from cognic_agentos.core.memory.api import MemoryApiFactory
+    from cognic_agentos.core.scheduler.engine import SchedulerEngine
     from cognic_agentos.db.adapters.factory import Adapters
     from cognic_agentos.harness.memory_policy import MemoryPolicyRouter
 
@@ -73,6 +74,14 @@ class Runtime:
     # gateway-only path. Threaded into the gateway's quota gate (production-
     # wired) + exposed for the scheduler DI binding + the portal quota surface.
     quota_engine: QuotaEngine | None
+    # ADR-022 (Sprint 13.7) — the runtime scheduler, production-constructed at
+    # the composition root with all seam slots bound to real conformers (quota /
+    # kill-switch / pack-state / policy / approval / storage); parent-budget
+    # stays the _Null fail-loud sentinel until 14A. Built ONLY when a cache
+    # adapter is present (its quota + kill-switch conformers need the Redis
+    # control plane); None on the gateway-only path. Exposed on app.state for
+    # the 14A managed-runtime path; NO production caller in 13.7 (Fork D).
+    scheduler: SchedulerEngine | None
     _http_client: _httpx.AsyncClient
 
     async def aclose(self) -> None:
@@ -153,6 +162,10 @@ async def build_runtime(settings: Settings, adapters: Adapters) -> Runtime:
     # block below (need Redis), None on the gateway-only path.
     kill_switch_engine: KillSwitchEngine | None = None
     quota_engine: QuotaEngine | None = None
+    # ADR-022 (Sprint 13.7) — the scheduler; built inside the cache block below
+    # (its quota + kill-switch conformers need the Redis control plane), None on
+    # the gateway-only path.
+    scheduler: SchedulerEngine | None = None
     if adapters.cache is not None:
         # Function-local imports: only loaded when memory is actually wired, so
         # the gateway-only path (cache_driver="none") stays import-light.
@@ -249,6 +262,57 @@ async def build_runtime(settings: Settings, adapters: Adapters) -> Runtime:
             resolver=overlay_resolver,
         )
 
+        # ADR-022 (Sprint 13.7) — production-construct the SchedulerEngine with
+        # every seam slot bound to a real conformer: quota + kill-switch are the
+        # engines built above (the SAME instances exposed on Runtime); pack-state
+        # queries the real PackRecordStore; policy evaluates the scheduler.rego
+        # bundle via a dedicated OPAEngine; approval reuses the unconditionally-
+        # built engine; storage is the SchedulerStorage over the relational
+        # engine. parent_budget is OMITTED, so the engine binds its own
+        # _NullParentBudgetResolver fail-loud sentinel (Fork E) — a top-level
+        # submit never consults it; a sub-agent submit fails loud until 14A wires
+        # the real LocalParentBudgetResolver + a run→budget snapshot.
+        from cognic_agentos.core.emergency.kill_switches import SchedulerKillSwitchConformer
+        from cognic_agentos.core.scheduler.engine import SchedulerEngine as _SchedulerEngine
+        from cognic_agentos.core.scheduler.policy import SchedulerPolicy
+        from cognic_agentos.core.scheduler.queue import ConcurrencyCaps
+        from cognic_agentos.core.scheduler.storage import SchedulerStorage
+        from cognic_agentos.packs.storage import PackRecordStore
+        from cognic_agentos.subagent.conformers import PackStoreStateInterrogator
+
+        scheduler_opa = await OPAEngine.create(
+            bundle_path=settings.scheduler_policy_bundle,
+            audit_store=audit_store,
+            decision_history_store=decision_history_store,
+            opa_path=settings.opa_path,
+            eval_timeout_s=settings.opa_eval_timeout_s,
+        )
+        scheduler = _SchedulerEngine(
+            storage=SchedulerStorage(engine),
+            caps=ConcurrencyCaps(
+                per_tenant_interactive=settings.scheduler_per_tenant_interactive,
+                per_tenant_background=settings.scheduler_per_tenant_background,
+                per_pack=settings.scheduler_per_pack,
+                per_actor=settings.scheduler_per_actor,
+            ),
+            class_settings={
+                "interactive": (
+                    settings.scheduler_queue_depth_interactive,
+                    settings.scheduler_class_sla_interactive_s,
+                ),
+                "background": (
+                    settings.scheduler_queue_depth_background,
+                    settings.scheduler_class_sla_background_s,
+                ),
+            },
+            policy_evaluator=SchedulerPolicy(opa_engine=scheduler_opa).evaluate,
+            quota_interrogator=quota_engine,
+            kill_switch_interrogator=SchedulerKillSwitchConformer(engine=kill_switch_engine),
+            pack_state_interrogator=PackStoreStateInterrogator(store=PackRecordStore(engine)),
+            approval_engine=approval_engine,
+            # parent_budget_resolver OMITTED → _NullParentBudgetResolver (Fork E; 14A).
+        )
+
         # vector_index — opt-in episodic recall (default OFF). Gated on
         # memory_vector_recall_enabled so /memory startup is NOT coupled to the
         # vector backend (qdrant) reachability by default; the portal endpoints
@@ -321,5 +385,6 @@ async def build_runtime(settings: Settings, adapters: Adapters) -> Runtime:
         approval_engine=approval_engine,
         kill_switch_engine=kill_switch_engine,
         quota_engine=quota_engine,
+        scheduler=scheduler,
         _http_client=http_client,
     )
