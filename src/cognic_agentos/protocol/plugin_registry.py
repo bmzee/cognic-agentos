@@ -47,7 +47,7 @@ if TYPE_CHECKING:
     # these import-only for type-checking lets PluginRegistry stay a
     # safe import target for tests / lifespan code that don't touch
     # the T10 code path.
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterator
 
     from cognic_agentos.core.config import Settings
     from cognic_agentos.core.policy.engine import OPAEngine
@@ -387,6 +387,19 @@ class RegistrationOutcome:
     refusal_reason: RefusalReason | None
     signature_digest: str | None
     registered_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class RegisteredPackCandidate:
+    """Identity of a registered pack the MCP-host builder consumes (Sprint 13.8,
+    ADR-002). Read-only projection — carries NO ``[tool.cognic.mcp]`` block (the
+    mapper re-extracts the manifest). ``package_name`` is derived from the stored
+    ``record.entry_point_value`` string WITHOUT loading pack code (the deferred-load
+    invariant)."""
+
+    distribution_name: str
+    package_name: str
+    signature_digest: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -742,6 +755,24 @@ class PluginRegistry:
         ``/api/v1/system/plugins`` response under repeat reads.
         """
         return [entry.outcome for entry in self._records.values()]
+
+    def iter_registered_pack_candidates(self) -> Iterator[RegisteredPackCandidate]:
+        """Yield REGISTERED packs (skips ``refused_at_registration``) as identity
+        candidates for the Sprint-13.8 MCP-host builder. Does NOT filter MCP intent
+        (the mapper decides that) and does NOT call ``EntryPoint.load()`` — derives
+        ``package_name`` from ``record.entry_point_value`` only."""
+        for entry in self._records.values():
+            if entry.outcome.status != "registered":
+                continue
+            # Mirror the established _mcp_admit derivation (the ``_mcp_admit`` path
+            # below) — read the record's string field, never the EntryPoint object
+            # (works with a load-free fake EntryPoint too).
+            package_name = entry.record.entry_point_value.split(":", 1)[0].split(".", 1)[0]
+            yield RegisteredPackCandidate(
+                distribution_name=entry.record.distribution_name,
+                package_name=package_name,
+                signature_digest=entry.outcome.signature_digest,
+            )
 
     def load(self, kind: PluginKind, name: str) -> Any:
         """Sync wrapper over the stdlib ``EntryPoint.load()``.
@@ -1473,6 +1504,7 @@ __all__ = (
     "PluginRecord",
     "PluginRegistry",
     "RefusalReason",
+    "RegisteredPackCandidate",
     "RegistrationOutcome",
     "RegistrationRefused",
     "_authz_reason_to_refusal",

@@ -41,10 +41,12 @@ def _imported_modules(path: pathlib.Path) -> set[str]:
 
 def test_harness_dir_has_expected_sources() -> None:
     """Non-vacuous guard: if the glob returns nothing (rename / move) every
-    fence below would pass trivially. Pins the exact B1 file set so a NEW
-    harness module forces a deliberate fence review."""
+    fence below would pass trivially. Pins the exact file set so a NEW harness
+    module forces a deliberate fence review. Sprint 13.8 added ``mcp_host.py``
+    (the MCP-host builder — reviewed: imports only protocol/core + httpx, no
+    Layer-C, no redis client, so the fences below hold)."""
     names = {p.name for p in _harness_sources()}
-    assert names == {"__init__.py", "memory_policy.py", "runtime.py"}, names
+    assert names == {"__init__.py", "mcp_host.py", "memory_policy.py", "runtime.py"}, names
 
 
 def test_harness_imports_no_layer_c() -> None:
