@@ -279,3 +279,85 @@ class TestEnforcementStatusMap:
         import typing
 
         assert set(ENFORCEMENT_STATUS_BY_CLASS) == set(typing.get_args(KillSwitchClass))
+
+
+class _ScanRedis(_FakeRedis):
+    """Scan-capable fake; yields raw BYTES keys + bytes values like the real
+    redis.asyncio client defaults (decode_responses=False)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.vanished: set[str] = set()  # keys that scan yields but get misses
+
+    def scan_iter(self, match: str) -> Any:
+        prefix = match.rstrip("*")
+
+        async def _gen() -> Any:
+            for key in list(self.store) + sorted(self.vanished):
+                if key.startswith(prefix):
+                    yield key.encode()  # bytes, like the real client
+
+        return _gen()
+
+    async def get(self, key: str) -> Any:
+        if key in self.vanished:
+            return None
+        value = self.store.get(key)
+        return value.encode() if isinstance(value, str) else value
+
+
+class TestListActive:
+    async def test_scan_incapable_client_fails_loud(self) -> None:
+        eng = KillSwitchEngine(redis_client=_FakeRedis(), cache_ttl_s=60)
+        with pytest.raises(RuntimeError, match="scan_capable"):
+            await eng.list_active()
+
+    async def test_lists_active_skips_inactive_and_sorts(self) -> None:
+        redis = _ScanRedis()
+        redis.store[_switch_key("tool", "tool-x")] = _active_doc()
+        redis.store[_switch_key("model", "tier1")] = _active_doc()
+        redis.store[_switch_key("pack", "pk-1")] = _active_doc().replace("true", "false")
+        eng = KillSwitchEngine(redis_client=redis, cache_ttl_s=60)
+        entries = await eng.list_active()
+        assert [(e["class"], e["scope_key"]) for e in entries] == [
+            ("model", "tier1"),
+            ("tool", "tool-x"),
+        ]
+        assert entries[0]["actor_id"] == "ops-1"
+        assert entries[0]["enforcement_status"] == "live"
+        assert entries[1]["enforcement_status"] == "armed_no_live_consumer"
+
+    async def test_foreign_and_malshaped_keys_ignored(self) -> None:
+        redis = _ScanRedis()
+        redis.store["cognic:killswitch:bogus_class:x"] = _active_doc()
+        redis.store["cognic:killswitch:short"] = _active_doc()
+        eng = KillSwitchEngine(redis_client=redis, cache_ttl_s=60)
+        assert await eng.list_active() == []
+
+    async def test_key_vanished_between_scan_and_get_skipped(self) -> None:
+        redis = _ScanRedis()
+        redis.vanished.add(_switch_key("model", "tier1"))
+        eng = KillSwitchEngine(redis_client=redis, cache_ttl_s=60)
+        assert await eng.list_active() == []
+
+    async def test_malformed_doc_renders_fail_closed_active_with_markers(self) -> None:
+        redis = _ScanRedis()
+        redis.store[_switch_key("model", "tier1")] = "not json"
+        eng = KillSwitchEngine(redis_client=redis, cache_ttl_s=60)
+        (entry,) = await eng.list_active()
+        assert entry["active"] is True  # fail-closed posture, operator-visible
+        assert entry["actor_id"] is None
+        assert entry["updated_at"] is None
+        assert "malformed" in entry["reason"]
+
+    async def test_seed_class_doc_parses_via_frozen_field(self) -> None:
+        redis = _ScanRedis()
+        seed = RedisMemoryWriteFreezeKillSwitch(redis_client=redis, cache_ttl_s=60)
+        await seed.set_write_freeze(
+            tenant_id="t-1", frozen=True, actor_id="ops-1", reason="incident"
+        )
+        eng = KillSwitchEngine(redis_client=redis, cache_ttl_s=60)
+        (entry,) = await eng.list_active()
+        assert entry["class"] == "memory_write_freeze"
+        assert entry["scope_key"] == "t-1"
+        assert entry["active"] is True

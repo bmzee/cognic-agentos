@@ -15,10 +15,11 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import typing
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
-from typing import Any, Final, Literal, Protocol, runtime_checkable
+from typing import Any, Final, Literal, Protocol, cast, runtime_checkable
 
 from cognic_agentos.core.decision_history import DecisionRecord
 
@@ -186,6 +187,7 @@ _EMERGENCY_ISO_CONTROLS: Final[tuple[str, ...]] = ("ISO42001.A.6.2.5", "ISO42001
 _TENANT_SCOPED_CLASSES: Final[frozenset[str]] = frozenset(
     {"memory_write_freeze", "tenant_packs", "tenant_full"}
 )
+_ALL_CLASSES: Final[frozenset[str]] = frozenset(typing.get_args(KillSwitchClass))
 
 
 @runtime_checkable
@@ -261,6 +263,66 @@ class KillSwitchEngine:
             return True
         self._cache[key] = (active, self._clock())
         return active
+
+    async def list_active(self) -> list[dict[str, Any]]:
+        """Portal list surface (Sprint 13.6 T6) — SCAN the switch keyspace and
+        return the ACTIVE entries with their custody fields +
+        ``enforcement_status``. Requires a scan-capable client (the production
+        ``redis.asyncio`` client provides ``scan_iter``); fail-loud otherwise.
+        A malformed document renders as ACTIVE with marker fields (the
+        fail-closed read posture must be operator-visible, not hidden).
+        O(keyspace) SCAN — acceptable for an operator-frequency list surface,
+        NOT for hot-path reads (those use :meth:`is_class_active`)."""
+        scan = getattr(self._redis, "scan_iter", None)
+        if scan is None:
+            raise RuntimeError(
+                "kill_switch_list_requires_scan_capable_redis_client: the production "
+                "redis.asyncio client provides scan_iter"
+            )
+        entries: list[dict[str, Any]] = []
+        async for raw_key in scan(match="cognic:killswitch:*"):
+            key = raw_key if isinstance(raw_key, str) else raw_key.decode()
+            parts = key.split(":", 3)
+            if len(parts) != 4 or parts[2] not in _ALL_CLASSES:
+                continue  # not a switch key this engine owns
+            class_ = cast("KillSwitchClass", parts[2])
+            scope_key = parts[3]
+            raw = await self._redis.get(key)
+            if raw is None:
+                continue
+            try:
+                doc = json.loads(raw if isinstance(raw, str) else raw.decode())
+                active = doc[_state_field(class_)]
+                custody = (doc["updated_at"], doc["actor_id"], doc["reason"])
+                if not isinstance(active, bool):
+                    raise ValueError(f"{_state_field(class_)} must be a JSON bool")
+            except (ValueError, TypeError, KeyError, AttributeError):
+                entries.append(
+                    {
+                        "class": class_,
+                        "scope_key": scope_key,
+                        "active": True,  # fail-closed posture, operator-visible
+                        "updated_at": None,
+                        "actor_id": None,
+                        "reason": "<malformed redis document - fail-closed active>",
+                        "enforcement_status": ENFORCEMENT_STATUS_BY_CLASS[class_],
+                    }
+                )
+                continue
+            if active:
+                entries.append(
+                    {
+                        "class": class_,
+                        "scope_key": scope_key,
+                        "active": True,
+                        "updated_at": custody[0],
+                        "actor_id": custody[1],
+                        "reason": custody[2],
+                        "enforcement_status": ENFORCEMENT_STATUS_BY_CLASS[class_],
+                    }
+                )
+        entries.sort(key=lambda e: (e["class"], e["scope_key"]))
+        return entries
 
     async def flip(
         self,
