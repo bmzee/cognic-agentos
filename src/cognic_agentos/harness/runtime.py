@@ -31,6 +31,7 @@ from cognic_agentos.llm.preflight import PreflightResolver
 
 if TYPE_CHECKING:
     from cognic_agentos.core.config import Settings
+    from cognic_agentos.core.emergency.kill_switches import KillSwitchEngine
     from cognic_agentos.core.memory.api import MemoryApiFactory
     from cognic_agentos.db.adapters.factory import Adapters
     from cognic_agentos.harness.memory_policy import MemoryPolicyRouter
@@ -59,6 +60,13 @@ class Runtime:
     # router consumes both; 13.5b2's MCP-host seam reuses the SAME engine instance.
     approval_store: ApprovalRequestStore
     approval_engine: ApprovalEngine
+    # ADR-018 (Sprint 13.6) — the full kill-switch matrix engine. Built ONLY
+    # when a cache adapter is present (needs the Redis control plane); None on
+    # the gateway-only path. Threaded into the gateway's F4 gate + the memory
+    # gate's MemoryFreezeConformer (enforcement production-wired). The portal
+    # operator surface mounts from the create_app kwarg (approval 13.5b1 seam
+    # posture); the lifespan exposes this instance on app.state for parity.
+    kill_switch_engine: KillSwitchEngine | None
     _http_client: _httpx.AsyncClient
 
     async def aclose(self) -> None:
@@ -135,6 +143,9 @@ async def build_runtime(settings: Settings, adapters: Adapters) -> Runtime:
     # ensure_collection below — runs before the leak-prone http_client is allocated) ---
     memory_api_factory: MemoryApiFactory | None = None
     memory_policy: MemoryPolicyRouter | None = None
+    # ADR-018 (Sprint 13.6) — the kill-switch matrix engine; built inside the
+    # cache block below (needs Redis), None on the gateway-only path.
+    kill_switch_engine: KillSwitchEngine | None = None
     if adapters.cache is not None:
         # Function-local imports: only loaded when memory is actually wired, so
         # the gateway-only path (cache_driver="none") stays import-light.
@@ -147,7 +158,13 @@ async def build_runtime(settings: Settings, adapters: Adapters) -> Runtime:
         # every op); it MUST NOT call put/get/list_* on them directly. The fence
         # path-pins this exemption to harness/runtime.py.
         from cognic_agentos.core.dlp.scanner import ChecksumRegexGazetteerScanner
-        from cognic_agentos.core.emergency.kill_switches import RedisMemoryWriteFreezeKillSwitch
+        from cognic_agentos.core.emergency.kill_switches import (
+            KillSwitchEngine as _KillSwitchEngine,
+        )
+        from cognic_agentos.core.emergency.kill_switches import (
+            MemoryFreezeConformer,
+            RedisMemoryWriteFreezeKillSwitch,
+        )
         from cognic_agentos.core.memory._context import MemoryCallerContext
         from cognic_agentos.core.memory._routing import RoutingMemoryAdapter
         from cognic_agentos.core.memory.api import MemoryAPI
@@ -188,9 +205,22 @@ async def build_runtime(settings: Settings, adapters: Adapters) -> Runtime:
         )
         dlp = ChecksumRegexGazetteerScanner()
         consent = ConsentValidator(audit=decision_history_store)
-        kill_switch = RedisMemoryWriteFreezeKillSwitch(
+        # 11.5b seed (UNTOUCHED — its key schema + frozen semantics). The
+        # memory gate now consumes a MemoryFreezeConformer wrapping this seed
+        # OR the 13.6 tenant_full class (review patch 5).
+        memory_seed_kill_switch = RedisMemoryWriteFreezeKillSwitch(
             redis_client=cache_client, cache_ttl_s=settings.memory_kill_switch_cache_ttl_s
         )
+        # ADR-018 (Sprint 13.6) — the full 8-class matrix engine over the same
+        # Redis control plane. decision_history wired so portal flip/revert
+        # appends the emergency.* chain rows. Threaded into the gateway's F4
+        # gate (below) + the memory conformer (here) — ONE instance.
+        kill_switch_engine = _KillSwitchEngine(
+            redis_client=cache_client,
+            cache_ttl_s=settings.emergency_kill_switch_cache_ttl_s,
+            decision_history=decision_history_store,
+        )
+        kill_switch = MemoryFreezeConformer(seed=memory_seed_kill_switch, engine=kill_switch_engine)
 
         # vector_index — opt-in episodic recall (default OFF). Gated on
         # memory_vector_recall_enabled so /memory startup is NOT coupled to the
@@ -245,6 +275,10 @@ async def build_runtime(settings: Settings, adapters: Adapters) -> Runtime:
         http_client=http_client,
         litellm_master_key=litellm_key,
         observability=adapters.observability,
+        # ADR-018 (Sprint 13.6) — the F4 kill-switch gate. None on the
+        # gateway-only path (no cache → no engine) keeps the pipeline
+        # byte-for-byte pre-13.6.
+        kill_switch_engine=kill_switch_engine,
     )
 
     return Runtime(
@@ -257,5 +291,6 @@ async def build_runtime(settings: Settings, adapters: Adapters) -> Runtime:
         config_overlay_resolver=overlay_resolver,
         approval_store=approval_store,
         approval_engine=approval_engine,
+        kill_switch_engine=kill_switch_engine,
         _http_client=http_client,
     )
