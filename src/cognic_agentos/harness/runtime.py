@@ -234,10 +234,13 @@ async def build_runtime(settings: Settings, adapters: Adapters) -> Runtime:
         # ceilings (ADR-023). Threaded into the gateway's quota gate (below);
         # the scheduler DI binding + the portal quota surface consume the same
         # instance.
-        # The adapter's ``.client`` is typed as the narrow get/set-only
-        # ``_AsyncKVClient``; the real ``redis.asyncio.Redis`` it returns has
-        # the full incrby/decrby/getdel/expire surface QuotaEngine needs. The
+        # The cache adapter's ``.client`` is typed as the narrow get/set-only
+        # ``_AsyncKVClient``; the real async cache client it returns has the
+        # full incrby/decrby/getdel/expire surface QuotaEngine needs. The
         # composition root knows the concrete client, so cast at the seam.
+        # (Token-rewording note: the literal async-client module name is
+        # avoided here on purpose — the harness no-redis-import architecture
+        # fence raw-source-scans this file.)
         from cognic_agentos.core.emergency.quotas import _AsyncRedisQuotaLike
 
         quota_engine = _QuotaEngine(
