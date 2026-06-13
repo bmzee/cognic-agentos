@@ -116,6 +116,7 @@ if TYPE_CHECKING:
     # entrypoint). TYPE_CHECKING keeps the core/emergency module out of the
     # portal import graph for callers that don't wire emergency controls.
     from cognic_agentos.core.emergency.kill_switches import KillSwitchEngine
+    from cognic_agentos.core.emergency.quotas import QuotaEngine
     from cognic_agentos.core.memory.api import MemoryApiFactory
     from cognic_agentos.core.memory.reaper import MemoryTombstoneReaper
     from cognic_agentos.core.policy.engine import OPAEngine
@@ -298,7 +299,7 @@ def create_app(
     # engine instance is reused by 13.5b2's MCP-host seam.
     approval_store: ApprovalRequestStore | None = None,
     approval_engine: ApprovalEngine | None = None,
-    # ADR-018 (Sprint 13.6): optional emergency kill-switch engine. When wired
+    # ADR-018 (Sprint 13.6a): optional emergency kill-switch engine. When wired
     # ALONGSIDE decision_history_store, create_app mounts the emergency router
     # (kill-switches list/flip/revert + audit) + sets
     # app.state.emergency_router_mounted. Same opt-in injection-seam posture as
@@ -306,6 +307,12 @@ def create_app(
     # (its gateway + memory enforcement are production-wired); the deploy
     # entrypoint threads this instance here for the operator surface.
     emergency_engine: KillSwitchEngine | None = None,
+    # ADR-018 (Sprint 13.6b): optional quota engine. When wired, create_app
+    # mounts the read-only quota router (GET /api/v1/emergency/quotas) + sets
+    # app.state.quota_router_mounted. Same opt-in injection-seam posture as
+    # emergency_engine — build_runtime constructs it (its gateway enforcement
+    # is production-wired); the deploy entrypoint threads this instance here.
+    quota_engine: QuotaEngine | None = None,
     trust_gate: TrustGate | None = None,
     trust_root_resolver: TrustRootResolver | None = None,
     model_registry_store: ModelRecordStore | None = None,
@@ -600,6 +607,11 @@ def create_app(
                 # constructed). The portal operator router mounts from the
                 # create_app kwarg (approval 13.5b1 injection-seam posture).
                 app.state.kill_switch_engine = runtime.kill_switch_engine
+                # Sprint 13.6b (ADR-018) — expose the quota engine for parity +
+                # introspection (the gateway quota gate is already production-
+                # wired). The portal quota router mounts from the create_app
+                # kwarg (the same injection-seam posture).
+                app.state.quota_engine = runtime.quota_engine
 
                 # #489 — setting-driven reaper: build the CheckpointStore
                 # from the live adapter pool AFTER open_all() so the
@@ -777,6 +789,7 @@ def create_app(
     # build_runtime populates it on the adapter path (None on the gateway-only
     # path — no cache → no engine).
     app.state.kill_switch_engine = None
+    app.state.quota_engine = None  # Sprint 13.6b — same introspection seam.
 
     # Middleware add order is OUTER-LAST in Starlette: the call chain
     # walks the most-recently-added middleware first. We want the
@@ -988,7 +1001,7 @@ def create_app(
         )
 
     # ──────────────────────────────────────────────────────────────────
-    # Sprint 13.6 — emergency kill-switch router mount (ADR-018).
+    # Sprint 13.6a — emergency kill-switch router mount (ADR-018).
     #
     # Mirrors the approval 3-state mount above: emergency_engine +
     # decision_history_store both present -> mount under /api/v1/emergency
@@ -1026,6 +1039,26 @@ def create_app(
                 ),
             },
         )
+
+    # ──────────────────────────────────────────────────────────────────
+    # Sprint 13.6b — read-only quota router mount (ADR-018).
+    #
+    # Single-dep mount (the read surface needs only the QuotaEngine + the
+    # global Settings, which is always resolved): wired → mount under
+    # /api/v1/emergency (the router carries its own prefix) + set the
+    # introspection flag; unwired → no mount (opt-in operator surface,
+    # the emergency injection-seam posture). The QuotaEngine's gateway
+    # enforcement is production-wired via build_runtime; this is the
+    # read-only operator surface.
+    # ──────────────────────────────────────────────────────────────────
+    app.state.quota_router_mounted = False
+    if quota_engine is not None:
+        from cognic_agentos.portal.api.emergency.quota_routes import build_quota_routes
+
+        # ``settings`` is the create_app-local resolved Settings (line 435:
+        # ``settings or get_settings()``) — always non-None here.
+        app.include_router(build_quota_routes(quota_engine=quota_engine, settings=settings))
+        app.state.quota_router_mounted = True
 
     # ──────────────────────────────────────────────────────────────────
     # Sprint 9.5 B5 — Model Registry router mount (ADR-013).

@@ -54,6 +54,16 @@ REGISTRY: dict[str, OverridableField] = {
         int,
         kernel_floor=_MEMORY_EXPORT_RETENTION_FLOOR_SECONDS,
     ),
+    # Sprint 13.6b (ADR-018) — token quota ceilings; tighten-only (a tenant may
+    # LOWER its own daily budget, never raise it). The QuotaEngine resolves the
+    # effective ceiling via TenantConfigResolver, falling back to the kernel
+    # Settings default.
+    "quota_tokens_per_tenant_per_day": OverridableField(
+        "quota_tokens_per_tenant_per_day", "ceiling", int, None
+    ),
+    "quota_tokens_per_pack_per_day": OverridableField(
+        "quota_tokens_per_pack_per_day", "ceiling", int, None
+    ),
 }
 
 

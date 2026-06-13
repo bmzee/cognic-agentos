@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import httpx as _httpx
 
@@ -32,6 +32,7 @@ from cognic_agentos.llm.preflight import PreflightResolver
 if TYPE_CHECKING:
     from cognic_agentos.core.config import Settings
     from cognic_agentos.core.emergency.kill_switches import KillSwitchEngine
+    from cognic_agentos.core.emergency.quotas import QuotaEngine
     from cognic_agentos.core.memory.api import MemoryApiFactory
     from cognic_agentos.db.adapters.factory import Adapters
     from cognic_agentos.harness.memory_policy import MemoryPolicyRouter
@@ -67,6 +68,11 @@ class Runtime:
     # operator surface mounts from the create_app kwarg (approval 13.5b1 seam
     # posture); the lifespan exposes this instance on app.state for parity.
     kill_switch_engine: KillSwitchEngine | None
+    # ADR-018 (Sprint 13.6b) — the token quota meter. Built ONLY when a cache
+    # adapter is present (needs the Redis control plane); None on the
+    # gateway-only path. Threaded into the gateway's quota gate (production-
+    # wired) + exposed for the scheduler DI binding + the portal quota surface.
+    quota_engine: QuotaEngine | None
     _http_client: _httpx.AsyncClient
 
     async def aclose(self) -> None:
@@ -143,9 +149,10 @@ async def build_runtime(settings: Settings, adapters: Adapters) -> Runtime:
     # ensure_collection below — runs before the leak-prone http_client is allocated) ---
     memory_api_factory: MemoryApiFactory | None = None
     memory_policy: MemoryPolicyRouter | None = None
-    # ADR-018 (Sprint 13.6) — the kill-switch matrix engine; built inside the
-    # cache block below (needs Redis), None on the gateway-only path.
+    # ADR-018 (Sprint 13.6) — the emergency engines; built inside the cache
+    # block below (need Redis), None on the gateway-only path.
     kill_switch_engine: KillSwitchEngine | None = None
+    quota_engine: QuotaEngine | None = None
     if adapters.cache is not None:
         # Function-local imports: only loaded when memory is actually wired, so
         # the gateway-only path (cache_driver="none") stays import-light.
@@ -165,6 +172,7 @@ async def build_runtime(settings: Settings, adapters: Adapters) -> Runtime:
             MemoryFreezeConformer,
             RedisMemoryWriteFreezeKillSwitch,
         )
+        from cognic_agentos.core.emergency.quotas import QuotaEngine as _QuotaEngine
         from cognic_agentos.core.memory._context import MemoryCallerContext
         from cognic_agentos.core.memory._routing import RoutingMemoryAdapter
         from cognic_agentos.core.memory.api import MemoryAPI
@@ -221,6 +229,25 @@ async def build_runtime(settings: Settings, adapters: Adapters) -> Runtime:
             decision_history=decision_history_store,
         )
         kill_switch = MemoryFreezeConformer(seed=memory_seed_kill_switch, engine=kill_switch_engine)
+        # ADR-018 (Sprint 13.6b) — the token quota meter over the same Redis
+        # control plane; the overlay resolver supplies tighten-only per-tenant
+        # ceilings (ADR-023). Threaded into the gateway's quota gate (below);
+        # the scheduler DI binding + the portal quota surface consume the same
+        # instance.
+        # The cache adapter's ``.client`` is typed as the narrow get/set-only
+        # ``_AsyncKVClient``; the real async cache client it returns has the
+        # full incrby/decrby/getdel/expire surface QuotaEngine needs. The
+        # composition root knows the concrete client, so cast at the seam.
+        # (Token-rewording note: the literal async-client module name is
+        # avoided here on purpose — the harness no-redis-import architecture
+        # fence raw-source-scans this file.)
+        from cognic_agentos.core.emergency.quotas import _AsyncRedisQuotaLike
+
+        quota_engine = _QuotaEngine(
+            redis_client=cast("_AsyncRedisQuotaLike", cache_client),
+            settings=settings,
+            resolver=overlay_resolver,
+        )
 
         # vector_index — opt-in episodic recall (default OFF). Gated on
         # memory_vector_recall_enabled so /memory startup is NOT coupled to the
@@ -275,10 +302,11 @@ async def build_runtime(settings: Settings, adapters: Adapters) -> Runtime:
         http_client=http_client,
         litellm_master_key=litellm_key,
         observability=adapters.observability,
-        # ADR-018 (Sprint 13.6) — the F4 kill-switch gate. None on the
+        # ADR-018 (Sprint 13.6) — the F4 emergency gates. None on the
         # gateway-only path (no cache → no engine) keeps the pipeline
         # byte-for-byte pre-13.6.
         kill_switch_engine=kill_switch_engine,
+        quota_engine=quota_engine,
     )
 
     return Runtime(
@@ -292,5 +320,6 @@ async def build_runtime(settings: Settings, adapters: Adapters) -> Runtime:
         approval_store=approval_store,
         approval_engine=approval_engine,
         kill_switch_engine=kill_switch_engine,
+        quota_engine=quota_engine,
         _http_client=http_client,
     )

@@ -83,9 +83,11 @@ _GATE_TOOL_PATH = _REPO_ROOT / "tools" / "check_critical_coverage.py"
 #: per ADR-011 — submit-time resolve/verify/regression/map) = 125
 #: + 3 Sprint-13.5a approval-engine-core modules (core/approval/{engine,storage,
 #: policy}.py per ADR-014/015 — non-blocking runtime approval state machine +
-#: decision-history-backed store + tools.rego tier->flow classifier) = 128).
+#: decision-history-backed store + tools.rego tier->flow classifier) = 128
+#: + 1 Sprint-13.6b quota module (core/emergency/quotas.py per ADR-018 —
+#: decomposed atomic-counter token meter + scheduler/gateway quota seam) = 129.
 #: Bump this in lockstep with any deliberate ``_CRITICAL_FILES`` change.
-_EXPECTED_ENTRY_COUNT = 128
+_EXPECTED_ENTRY_COUNT = 129
 
 #: The 5 modules Sprint 7B.3 promoted to the durable gate, each by its
 #: own landing commit (T3-T6 panels + T7 composer). All ride the

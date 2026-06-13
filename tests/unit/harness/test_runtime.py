@@ -46,6 +46,10 @@ async def test_build_runtime_yields_usable_gateway(memory_registry, memory_setti
         # kill-switch gate stays inert (None) → pre-13.6 pipeline byte-compat.
         assert runtime.kill_switch_engine is None
         assert runtime.llm_gateway._kill_switch_engine is None
+        # Sprint 13.6b (ADR-018) — the QuotaEngine needs Redis; no cache → None,
+        # and the gateway's quota gate stays inert (None) → byte-compat.
+        assert runtime.quota_engine is None
+        assert runtime.llm_gateway._quota_engine is None
         await runtime.aclose()  # must not raise
     finally:
         await adapters.close_all()
@@ -158,6 +162,16 @@ async def test_build_runtime_wires_memory_when_cache_present(
         # Enforcement production-wired: the SAME engine instance is threaded
         # into the gateway's F4 kill-switch gate.
         assert runtime.llm_gateway._kill_switch_engine is runtime.kill_switch_engine
+        # Sprint 13.6b (ADR-018) — the QuotaEngine is built over the cache +
+        # the overlay resolver, and threaded into the gateway's quota gate
+        # (enforcement production-wired). Identity pins: the engine on Runtime
+        # IS the one in the gateway; its resolver IS the runtime's overlay
+        # resolver.
+        from cognic_agentos.core.emergency.quotas import QuotaEngine
+
+        assert isinstance(runtime.quota_engine, QuotaEngine)
+        assert runtime.llm_gateway._quota_engine is runtime.quota_engine
+        assert runtime.quota_engine._resolver is runtime.config_overlay_resolver
         await runtime.aclose()
     finally:
         await adapters.close_all()

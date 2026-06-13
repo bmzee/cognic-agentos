@@ -250,6 +250,19 @@ EMERGENCY_SCOPES: frozenset[EmergencyRBACScope] = frozenset(
 )
 
 
+#: Quota RBAC family per ADR-018 (Sprint 13.6b). Its OWN family — NOT folded
+#: into ``EmergencyRBACScope`` (the 13.6a review-patch-4 split: kill switches
+#: and quotas are distinct operator surfaces). Wave-1 = ``quota.read`` (the
+#: read-only usage surface) ONLY; the operator override scope
+#: (``quota.override.tokens``) lands with the deferred limit-write/override
+#: surface. Wire-protocol-public; namespace-disjoint by the ``quota.*`` prefix
+#: (pinned by ``test_quota_scopes.py``).
+QuotaRBACScope = Literal["quota.read"]
+
+#: All 1 quota scope as a frozenset (1:1 with QuotaRBACScope).
+QUOTA_SCOPES: frozenset[QuotaRBACScope] = frozenset({"quota.read"})
+
+
 #: Eval surface scope family (ADR-010 judge slice + Sprint-12 bulk runner +
 #: Sprint-13a replay + Sprint-13b adversarial). Service or human actors may
 #: run evals, replays, and adversarial runs (NOT a Human-only decision).

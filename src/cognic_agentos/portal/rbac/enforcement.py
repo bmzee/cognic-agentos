@@ -45,6 +45,7 @@ from cognic_agentos.portal.rbac.scopes import (
     MemoryRBACScope,
     ModelRBACScope,
     PackRBACScope,
+    QuotaRBACScope,
     ToolApprovalRBACScope,
     UIRBACScope,
 )
@@ -250,6 +251,7 @@ def RequireScope(
     | ModelRBACScope
     | MemoryRBACScope
     | EmergencyRBACScope
+    | QuotaRBACScope
     | EvalRBACScope
     | ConfigOverlayRBACScope
     | ToolApprovalRBACScope,

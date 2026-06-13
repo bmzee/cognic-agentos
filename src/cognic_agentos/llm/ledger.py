@@ -70,7 +70,8 @@ _ALLOWED_OUTCOMES: frozenset[str] = frozenset(
         "guardrail_output",
         "concurrency_exhausted",
         "upstream_error",
-        "kill_switch_active",  # Sprint 13.6 — ADR-018 emergency gate refusal
+        "kill_switch_active",  # Sprint 13.6a — ADR-018 kill-switch gate refusal
+        "quota_exhausted",  # Sprint 13.6b — ADR-018 quota gate refusal
     }
 )
 
@@ -113,6 +114,13 @@ class GatewayCallRow:
     latency_ms: int
     outcome: str
     model_id: str | None  # reserved — Sprint 9.5 (ADR-013)
+    # Sprint 13.6b (ADR-018 F6) — token/cost evidence. Nullable + None-default
+    # so every pre-13.6b call site is unchanged; the gateway populates
+    # prompt_tokens/completion_tokens from ``trace.usage`` on the strict write,
+    # estimated_cost_usd stays NULL until a pricing source exists.
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    estimated_cost_usd: float | None = None
 
     def __post_init__(self) -> None:
         # Sprint 2 R3 canonical-form contract: a tzinfo whose
@@ -153,6 +161,10 @@ _ledger_table = sa.Table(
     sa.Column("latency_ms", sa.Integer(), nullable=False),
     sa.Column("outcome", sa.String(length=32), nullable=False),
     sa.Column("model_id", sa.String(length=128), nullable=True),
+    # Sprint 13.6b (ADR-018 F6) — token/cost evidence (migration 0010).
+    sa.Column("prompt_tokens", sa.Integer(), nullable=True),
+    sa.Column("completion_tokens", sa.Integer(), nullable=True),
+    sa.Column("estimated_cost_usd", sa.Float(), nullable=True),
 )
 
 
