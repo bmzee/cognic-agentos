@@ -70,6 +70,7 @@ _ALLOWED_OUTCOMES: frozenset[str] = frozenset(
         "guardrail_output",
         "concurrency_exhausted",
         "upstream_error",
+        "kill_switch_active",  # Sprint 13.6 — ADR-018 emergency gate refusal
     }
 )
 

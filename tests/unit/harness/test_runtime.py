@@ -41,6 +41,11 @@ async def test_build_runtime_yields_usable_gateway(memory_registry, memory_setti
         # so they are present even on the gateway-only path.
         assert runtime.config_overlay_store is not None
         assert runtime.config_overlay_resolver is not None
+        # Sprint 13.6 T7 (ADR-018) — the KillSwitchEngine needs the Redis
+        # control plane; cache_driver="none" → no engine, and the gateway's
+        # kill-switch gate stays inert (None) → pre-13.6 pipeline byte-compat.
+        assert runtime.kill_switch_engine is None
+        assert runtime.llm_gateway._kill_switch_engine is None
         await runtime.aclose()  # must not raise
     finally:
         await adapters.close_all()
@@ -84,7 +89,11 @@ async def test_build_runtime_wires_memory_when_cache_present(
     """cache_driver='memory' -> build_runtime wires the factory + the two-bundle router.
     Construction is opa-binary-free (engines warn+defer without the binary); the rego
     FILES must exist (they do). End-to-end memory ALLOW is env-gated, out of T6."""
-    from cognic_agentos.core.emergency.kill_switches import RedisMemoryWriteFreezeKillSwitch
+    from cognic_agentos.core.emergency.kill_switches import (
+        KillSwitchEngine,
+        MemoryFreezeConformer,
+        RedisMemoryWriteFreezeKillSwitch,
+    )
     from cognic_agentos.core.memory._context import MemoryCallerContext
     from cognic_agentos.core.memory.api import MemoryAPI
     from cognic_agentos.core.memory.storage import _memory_records
@@ -135,11 +144,20 @@ async def test_build_runtime_wires_memory_when_cache_present(
         # (MemoryGate types policy: OPAEngine; at runtime the gate's policy IS the
         # harness MemoryPolicyRouter, passed via the build_runtime arg-type cast).
         assert id(api._gate._policy) == id(runtime.memory_policy)
-        # T9 fence (behavioural): the wired kill switch is the REAL Redis impl,
-        # NEVER the _Null fail-loud sentinel. TM-revert-proven load-bearing —
-        # build_runtime passing kill_switch=None makes the gate bind _Null and
-        # this isinstance FAILS.
-        assert isinstance(api._gate._kill_switch, RedisMemoryWriteFreezeKillSwitch)
+        # Sprint 13.6 T7 (ADR-018, review patch 5) — the memory gate's kill
+        # switch is now the MemoryFreezeConformer (seed OR tenant_full), NOT
+        # the bare seed. The conformer still wraps the REAL Redis seed
+        # (NEVER the _Null fail-loud sentinel), so the 11.5b fence holds
+        # through the wrapper. Identity pin: the conformer's engine IS the
+        # one runtime exposes; its seed IS the real Redis impl.
+        conformer = api._gate._kill_switch
+        assert isinstance(conformer, MemoryFreezeConformer)
+        assert isinstance(conformer._seed, RedisMemoryWriteFreezeKillSwitch)
+        assert isinstance(runtime.kill_switch_engine, KillSwitchEngine)
+        assert conformer._engine is runtime.kill_switch_engine
+        # Enforcement production-wired: the SAME engine instance is threaded
+        # into the gateway's F4 kill-switch gate.
+        assert runtime.llm_gateway._kill_switch_engine is runtime.kill_switch_engine
         await runtime.aclose()
     finally:
         await adapters.close_all()

@@ -108,6 +108,14 @@ if TYPE_CHECKING:
     # resolver types are annotation-only here.
     from cognic_agentos.core.config_overlay.resolver import TenantConfigResolver
     from cognic_agentos.core.config_overlay.storage import TenantConfigOverlayStore
+
+    # Sprint 13.6 (ADR-018): type-only ref for the create_app ``emergency_engine``
+    # kwarg (mirrors the approval pattern — the route factory
+    # ``build_emergency_routes`` is imported at runtime inside the mount block;
+    # the engine is supplied PRE-CONSTRUCTED by build_runtime / the deploy
+    # entrypoint). TYPE_CHECKING keeps the core/emergency module out of the
+    # portal import graph for callers that don't wire emergency controls.
+    from cognic_agentos.core.emergency.kill_switches import KillSwitchEngine
     from cognic_agentos.core.memory.api import MemoryApiFactory
     from cognic_agentos.core.memory.reaper import MemoryTombstoneReaper
     from cognic_agentos.core.policy.engine import OPAEngine
@@ -290,6 +298,14 @@ def create_app(
     # engine instance is reused by 13.5b2's MCP-host seam.
     approval_store: ApprovalRequestStore | None = None,
     approval_engine: ApprovalEngine | None = None,
+    # ADR-018 (Sprint 13.6): optional emergency kill-switch engine. When wired
+    # ALONGSIDE decision_history_store, create_app mounts the emergency router
+    # (kill-switches list/flip/revert + audit) + sets
+    # app.state.emergency_router_mounted. Same opt-in injection-seam posture as
+    # approval_store/_engine (13.5b1) — build_runtime constructs the engine
+    # (its gateway + memory enforcement are production-wired); the deploy
+    # entrypoint threads this instance here for the operator surface.
+    emergency_engine: KillSwitchEngine | None = None,
     trust_gate: TrustGate | None = None,
     trust_root_resolver: TrustRootResolver | None = None,
     model_registry_store: ModelRecordStore | None = None,
@@ -578,6 +594,12 @@ def create_app(
                 app.state.runtime = runtime
                 app.state.llm_gateway = runtime.llm_gateway
                 app.state.memory_api_factory = runtime.memory_api_factory
+                # Sprint 13.6 (ADR-018) — expose the kill-switch engine for
+                # parity + introspection (enforcement is already production-
+                # wired into the gateway + memory conformer build_runtime
+                # constructed). The portal operator router mounts from the
+                # create_app kwarg (approval 13.5b1 injection-seam posture).
+                app.state.kill_switch_engine = runtime.kill_switch_engine
 
                 # #489 — setting-driven reaper: build the CheckpointStore
                 # from the live adapter pool AFTER open_all() so the
@@ -750,6 +772,11 @@ def create_app(
     # getattr guard see a defined attribute (mirrors ``reaper_task = None``).
     app.state.llm_gateway = llm_gateway
     app.state.runtime = None
+    # Sprint 13.6 (ADR-018): kill-switch engine introspection seam. Pre-seeded
+    # None so pre-startup introspection sees a defined attribute; the lifespan's
+    # build_runtime populates it on the adapter path (None on the gateway-only
+    # path — no cache → no engine).
+    app.state.kill_switch_engine = None
 
     # Middleware add order is OUTER-LAST in Starlette: the call chain
     # walks the most-recently-added middleware first. We want the
@@ -956,6 +983,46 @@ def create_app(
                     "composition root build_runtime constructs them as a "
                     "pair, so a partial config indicates a hand-wired caller "
                     "missing one half."
+                ),
+            },
+        )
+
+    # ──────────────────────────────────────────────────────────────────
+    # Sprint 13.6 — emergency kill-switch router mount (ADR-018).
+    #
+    # Mirrors the approval 3-state mount above: emergency_engine +
+    # decision_history_store both present -> mount under /api/v1/emergency
+    # (the router carries its own prefix) + set the introspection flag;
+    # emergency_engine present but decision_history_store absent -> a single
+    # structured fail-loud warning (the GET /audit endpoint reads the DH
+    # store, so BOTH are required); neither -> no mount (opt-in operator
+    # surface). No actor_binder gate at the mount boundary for the same
+    # reason as the approval block: the routes read the binder from app.state
+    # at REQUEST time and fail loud there. The ENGINE owns the brake + the
+    # chain evidence; this block only wires the operator surface.
+    # ──────────────────────────────────────────────────────────────────
+    app.state.emergency_router_mounted = False
+    if emergency_engine is not None and decision_history_store is not None:
+        from cognic_agentos.portal.api.emergency.routes import build_emergency_routes
+
+        app.include_router(
+            build_emergency_routes(
+                engine=emergency_engine,
+                decision_history_store=decision_history_store,
+            )
+        )
+        app.state.emergency_router_mounted = True
+    elif emergency_engine is not None and decision_history_store is None:
+        logger.warning(
+            "portal.emergency_router_unmounted_partial_config",
+            extra={
+                "reason": "emergency_engine_and_decision_history_store_both_required",
+                "remediation": (
+                    "create_app(emergency_engine=<engine>, "
+                    "decision_history_store=<store>) wires the emergency router; "
+                    "the GET /audit endpoint reads the decision_history store, so "
+                    "BOTH are required. The composition root build_runtime "
+                    "constructs the engine over the relational engine's DH store."
                 ),
             },
         )

@@ -561,7 +561,8 @@ class SubagentRecursionCapped(_BaseEvent):
     type: Literal["recursion_capped"] = "recursion_capped"
 
 
-# ---- approval.* (schema only — Sprint-13.5 wires) ----------------------------
+# ---- approval.* (schema only — the 13.5 arc landed the approval engine +
+# portal WITHOUT UI emit hooks; wiring is a named follow-up, unscheduled) ------
 
 
 class ApprovalPending(_BaseEvent):
@@ -607,7 +608,8 @@ class ArtifactCompleted(_BaseEvent):
     type: Literal["completed"] = "completed"
 
 
-# ---- interrupt.* (schema only — Sprint-13.5 wires) ---------------------------
+# ---- interrupt.* (schema only — unwired; no run primitive exists yet, so the
+# emit hooks ride the managed-runtime work, unscheduled) -----------------------
 
 
 class InterruptRequestedByAgent(_BaseEvent):
@@ -674,7 +676,8 @@ class DecisionAuditEventAppended(_BaseEvent):
     type: Literal["event_appended"] = "event_appended"
 
 
-# ---- policy.* (schema only — Sprint-13.5 wires) ------------------------------
+# ---- policy.* (decision_evaluated + rbac_denied WIRED via the typed-projector
+# registry below; bundle_loaded remains schema-only) ---------------------------
 
 
 class PolicyDecisionEvaluated(_BaseEvent):
@@ -706,7 +709,7 @@ class PolicyRBACDenied(_BaseEvent):
     type: Literal["rbac_denied"] = "rbac_denied"
 
 
-# ---- kill_switch.* (schema only — Sprint-13.5 wires) -------------------------
+# ---- kill_switch.* (wired Sprint 13.6 — emergency.kill_switch_* projectors) --
 
 
 class KillSwitchFlipped(_BaseEvent):
@@ -1150,6 +1153,45 @@ def _project_subagent_recursion_capped(
     )
 
 
+def _project_kill_switch_flipped(snapshot: AppendedDecisionSnapshot) -> KillSwitchFlipped:
+    """Sprint 13.6 T3 — emergency.kill_switch_flipped → kill_switch.flipped
+    (ADR-018 + ADR-020). The flip payload (class / scope_key / category /
+    reason / active / enforcement_status + the DH-merged actor_id) rides
+    ``data`` per the policy-family precedent — no model field changes."""
+    return KillSwitchFlipped(
+        event_id=_chain_derived_event_id(
+            chain_id="decision_history",
+            sequence=snapshot.sequence,
+            ordinal=0,
+            family="kill_switch",
+            type_="flipped",
+        ),
+        ts=snapshot.created_at,
+        tenant=snapshot.tenant_id,
+        trace_id=snapshot.trace_id,
+        audit_chain_hash=_format_chain_hash(snapshot.new_hash),
+        data=snapshot.payload,
+    )
+
+
+def _project_kill_switch_reverted(snapshot: AppendedDecisionSnapshot) -> KillSwitchReverted:
+    """Sprint 13.6 T3 — emergency.kill_switch_reverted → kill_switch.reverted."""
+    return KillSwitchReverted(
+        event_id=_chain_derived_event_id(
+            chain_id="decision_history",
+            sequence=snapshot.sequence,
+            ordinal=0,
+            family="kill_switch",
+            type_="reverted",
+        ),
+        ts=snapshot.created_at,
+        tenant=snapshot.tenant_id,
+        trace_id=snapshot.trace_id,
+        audit_chain_hash=_format_chain_hash(snapshot.new_hash),
+        data=snapshot.payload,
+    )
+
+
 #: Exact-match dispatch table from DH `decision_type` → typed projector.
 #: Prefix-matched `rbac.*` falls out of this map and into the dispatcher's
 #: prefix check below; `escalation.opened` falls out into the scoped subagent
@@ -1174,6 +1216,11 @@ _DECISION_HISTORY_TYPED_PROJECTORS: Final[
     "memory.forget": _project_memory_forget,
     "memory.regulator_erasure": _project_memory_regulator_erasure,
     "memory.redact": _project_memory_redact,
+    # Sprint 13.6 T3 — emergency kill-switch flip/revert evidence rows
+    # (ADR-018; the kill_switch family's owning sprint per the ADR-020
+    # phase table).
+    "emergency.kill_switch_flipped": _project_kill_switch_flipped,
+    "emergency.kill_switch_reverted": _project_kill_switch_reverted,
 }
 
 
@@ -1333,6 +1380,9 @@ _TYPED_PROJECTION_CLASSES: Final[frozenset[type]] = frozenset(
         MemoryRecallCompleted,
         MemoryForget,
         MemoryRedact,
+        # Sprint 13.6 T3 — kill_switch family wired (ADR-018).
+        KillSwitchFlipped,
+        KillSwitchReverted,
     }
 )
 

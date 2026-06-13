@@ -121,16 +121,27 @@ Operators see a real-time emergency dashboard (separate from the rest of the por
 
 | Sprint | Work |
 |---|---|
-| **Sprint 11.5 (seed)** | Minimal `core/emergency/kill_switches.py` shipping the single `memory.write_freeze` class with full fail-closed Redis semantics. Same Redis schema as Sprint 13.5 (no migration). Memory writes check this before every operation per ADR-019. |
-| **Sprint 13.5 (extended)** | Extends the seed with the full class set (`pack`, `tool`, `model`, `tenant_packs`, `tenant_full`, `cloud`, `feature`); adds portal API + RBAC scopes for new classes; quotas + accumulation from gateway-call ledger; harness checks at every invocation point + LLM call boundary; audit chain linkage |
+| **Sprint 11.5 (seed)** | Minimal `core/emergency/kill_switches.py` shipping the single `memory.write_freeze` class with full fail-closed Redis semantics. Same Redis schema as the full matrix (no migration). Memory writes check this before every operation per ADR-019. |
+| **Sprint 13.6a (kill switches) — LANDED** | Extends the seed with the full class set (`pack`, `tool`, `model`, `tenant_packs`, `tenant_full`, `cloud`, `feature`); portal API + RBAC scopes for the new classes; gateway + memory enforcement wiring; UI event family; audit chain linkage. See the Sprint-13.6a amendment below. |
+| **Sprint 13.6b (quotas) — SPLIT, next sprint** | Quotas + accumulation from the gateway-call ledger (Redis meter + nullable ledger evidence columns per F1); gateway quota gate + actual-usage metering; quota portal reads + audited override + `QuotaRBACScope`. Deliberately split from 13.6a at the half-1 VALVE checkpoint (the quota half carries a DB migration + a new CC-gated Lua-metering module + spans gateway/portal/RBAC again — its own design checkpoint before code). |
 | **Sprint 14 (deployment kit)** | Rego policy templates + dashboard scaffold + per-tenant tunings |
 | **Wave 2** | Quota-prediction (forecast when a tenant will hit the daily cap based on current burn rate) + cross-tenant cost reconciliation dashboard |
 
-Sprint 11.5 absorbs ~0.25 wu for the seed (single class, no portal API). Sprint 13.5 absorbs ~1.25 wu for the extension (now ~3 wu total combined with ADR-014, ADR-015, ADR-018). Sprint 14 grows from 2 → 2.5 wu.
+Sprint 11.5 absorbed ~0.25 wu for the seed (single class, no portal API). Sprint 13.6a absorbed the kill-switch extension; Sprint 13.6b owns quotas. Sprint 14 grows from 2 → 2.5 wu.
 
 ## Sprint 10.5 amendment (2026-05-27) — `QuotaInterrogator` + `KillSwitchInterrogator` consumer-owned seams (no implementations yet)
 
-Sprint 10.5 (merged via PR #40, squash `6791eec`) landed the **scheduler-side seams** for quota + kill-switch consultation but **NOT the substantive implementations**. Sprint 13.5 still owns the full `core/emergency/quotas.py` + `core/emergency/kill_switches.py` modules per this ADR's §"Implementation phases" (Sprint 11.5 seed + Sprint 13.5 extended).
+Sprint 10.5 (merged via PR #40, squash `6791eec`) landed the **scheduler-side seams** for quota + kill-switch consultation but **NOT the substantive implementations**. The full kill-switch matrix landed at **Sprint 13.6a** (`core/emergency/kill_switches.py`, the amendment below); `core/emergency/quotas.py` is owned by **Sprint 13.6b** per this ADR's §"Implementation phases" (the 13.5→13.6 renumbering reflects the 2026-06-12 reconciliation carve of emergency controls out of the 13.5 approval arc).
+
+> **Supersession pointer (Sprint 13.6a).** The forward-looking "Sprint 13.5"
+> references in the rest of this amendment are superseded by the
+> Sprint-13.6a amendment below + the phases table, and they split by surface
+> (NOT a blanket rename): the `KillSwitchInterrogator` real conformer
+> (`SchedulerKillSwitchConformer`) is **built at Sprint 13.6a** and its DI
+> binding into `SchedulerEngine` rides the composition-root sprint; the
+> `QuotaInterrogator` conformer (`core/emergency/quotas.QuotaEngine`) lands at
+> **Sprint 13.6b**. The Wave-1 closed-enum admission outcomes
+> (`refused_kill_switch_active` / `refused_quota_exhausted`) are unchanged.
 
 ### Option A doctrine LOCKED — SchedulerPolicy owns Rego ONLY (per ADR-022 §"Sprint 10.5 implementation closeout / 2. Option A doctrine LOCKED")
 
@@ -182,6 +193,21 @@ Per ADR-022 §"Quota integration — at submit, not post-hoc", quotas become a f
 5. Wire the kill-switch parallel: `KillSwitchEngine.is_active(*, tenant_id, pack_id)` over the Redis-as-control-plane substrate per this ADR's §"Propagation guarantees".
 
 **No ADR-018 schedule change** — Sprint 13.5 still ships the full kill-switch + quota engine per the existing implementation phases table. Sprint 10.5's amendment is purely about the cross-sprint seam contract.
+
+## Sprint 13.6a amendment (2026-06-13) — the kill-switch matrix landed; quotas SPLIT to 13.6b
+
+Sprint 13.6a builds the **full ADR-018 kill-switch matrix** (the `memory.write_freeze` seed + the 7 ADR-table classes) with portal, RBAC, UI, gateway, and memory enforcement. **Quotas are deliberately SPLIT to Sprint 13.6b** — at the half-1 VALVE checkpoint the quota half (a `gateway_call_ledger` migration + a new CC-gated Lua-metering `core/emergency/quotas.py` + gateway/portal/RBAC re-touch) was carved into its own sprint with a fresh design checkpoint, rather than blurring 13.6 into a 12-task PR. **The ADR-018 quota arc is NOT done.**
+
+**What landed (kill switches):**
+
+- **`core/emergency/kill_switches.py` (on the CC durable gate)** — the `KillSwitchEngine` 8-class matrix alongside the UNTOUCHED 11.5b seed (spec lock F2). Closed enums: `KillSwitchClass` (8), `KillSwitchCategory` (5, the ADR §95 categorised reason), `EnforcementStatus` (2). Generalized key scheme `cognic:killswitch:<class>:<scope_key>` (the seed key conforms — no class-name duplication). Seed-identical fail-closed cache (Redis-error past TTL → ACTIVE; malformed poisons fail-closed). `check_gateway` precedence `tenant_full → model → cloud_routing` (the `model` switch is **LiteLLM-alias-keyed** — alias-only doctrine, no hardcoded checkpoint names; registry-`model_id` keys are a follow-up). `SchedulerKillSwitchConformer` (the `KillSwitchInterrogator` real conformer — pack OR tenant_packs OR tenant_full; `feature` not consulted Wave-1) + `MemoryFreezeConformer` (seed OR tenant_full).
+- **Brake-before-evidence doctrine** — `flip`/`revert` write Redis FIRST (the brake takes effect even if evidence fails), THEN append the value-free chain rows `emergency.kill_switch_flipped` / `emergency.kill_switch_reverted` (ISO A.6.2.5 + A.9.2). An evidence-append failure leaves the switch LIVE and surfaces the closed-enum `kill_switch_live_evidence_degraded` (the portal returns 502 `{switch_live: true}`; the idempotent re-flip converges the chain on retry). This SUPERSEDES the ADR's `PackKilled`/`OperationAborted` cross-surface exception names — each surface owns its own closed-enum taxonomy.
+- **Enforcement (production-wired via `build_runtime`)** — the gateway's F4 kill-switch gate (`GatewayKillSwitchActive`, `GatewayTraceOutcome` +`kill_switch_active`) sits after preflight + cloud-policy and BEFORE the rate-slot acquire (a killed call never consumes concurrency); the memory write gate freezes on `memory_write_freeze OR tenant_full` via the conformer. Both receive the SAME engine instance `build_runtime` constructs over the Redis control plane.
+- **Operator surface (injection-seam posture, mirroring approval 13.5b1)** — `portal/api/emergency/routes.py` (off the CC gate): `GET /api/v1/emergency/kill-switches` (list active + `enforcement_status`) + `POST` (flip, body-aware per-class scope + human-only + categorised reason) + `DELETE /{switch_class}/{scope_key}` (revert) + `GET /audit` (the `emergency.*` chain trail). `EmergencyRBACScope` grew 1 → 9 (the 7 classes + the seed + `emergency.read`). Mounted from the `create_app(emergency_engine=...)` kwarg; the deploy entrypoint threads `runtime.kill_switch_engine`.
+- **UI event family** — `kill_switch.flipped` / `.reverted` wired through the `protocol/ui_events.py` typed-projector registry (ADR-020 owning sprint).
+- **Enforcement-status honesty (the `armed_no_live_consumer` contract)** — every flip carries `enforcement_status` on the chain payload + the portal list response. **LIVE in 13.6a:** `memory_write_freeze`, `model`, `cloud_routing`, `tenant_full` (gateway + memory). **`armed_no_live_consumer`:** `pack` / `tenant_packs` (scheduler conformer is built + DI-ready; flips to LIVE when the scheduler is wired at the composition-root sprint), `tool` + `feature` (consumers wire at the MCP / sandbox / subagent integration). An operator cannot mistake an armed switch for an enforced one.
+
+**Explicitly NOT in 13.6a (Sprint 13.6b owns these):** the `QuotaEngine` (Redis meter + the two-method `QuotaInterrogator` conformer); the `gateway_call_ledger` token/cost evidence columns + migration (F1); the gateway quota gate + actual-usage metering; the quota portal reads + audited override + `QuotaRBACScope`. Also still deferred: spend-class enforcement (no pricing source — F1 flag 1); `PUT /api/v1/quotas` (Settings + ADR-023 overlay instead); the portal-wide `tenant_full` middleware (13.6a enforces `tenant_full` at the gateway + memory surfaces only); the Sprint-14 dashboard + Rego templates.
 
 ## References
 - ADR-005 (sub-agent depth caps — emergency-controls layer enforces these as quotas)

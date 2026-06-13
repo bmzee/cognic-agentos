@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Literal
 import httpx as _httpx
 
 if TYPE_CHECKING:
+    from cognic_agentos.core.emergency.kill_switches import KillSwitchEngine
     from cognic_agentos.db.adapters.protocols import ObservabilityAdapter
 
 from cognic_agentos.core.audit import AuditEvent, AuditStore
@@ -75,6 +76,7 @@ GatewayTraceOutcome = Literal[
     "preflight_failure",
     "guardrail_input",
     "policy_denied",
+    "kill_switch_active",
     "concurrency_exhausted",
     "upstream_error",
     "guardrail_output",
@@ -87,6 +89,17 @@ GatewayTraceOutcome = Literal[
 class UnknownTierError(ValueError):
     """Raised when :func:`resolve_tier_alias` sees a tier outside
     the :data:`Tier` literal."""
+
+
+class GatewayKillSwitchActive(RuntimeError):
+    """ADR-018 F4 gate refusal (Sprint 13.6) — an emergency switch covering
+    this call is active (``tenant_full`` / ``model`` / ``cloud_routing``, in
+    that precedence). Raised BEFORE the rate-slot acquire so a killed call
+    never consumes concurrency capacity."""
+
+    def __init__(self, *, tripped_class: str) -> None:
+        super().__init__(f"kill_switch_active: {tripped_class}")
+        self.tripped_class = tripped_class
 
 
 def resolve_tier_alias(tier: str, settings: Settings) -> str:
@@ -280,6 +293,7 @@ class LLMGateway:
         http_client: _httpx.AsyncClient | None = None,
         litellm_master_key: str | None = None,
         observability: ObservabilityAdapter | None = None,
+        kill_switch_engine: KillSwitchEngine | None = None,
     ) -> None:
         self._settings = settings
         self._ledger = ledger
@@ -309,6 +323,9 @@ class LLMGateway:
             litellm_master_key if litellm_master_key is not None else settings.litellm_master_key
         )
         self._observability: ObservabilityAdapter | None = observability
+        # Sprint 13.6 (ADR-018) — None (the default) preserves the pre-13.6
+        # pipeline byte-for-byte; the composition root threads the engine.
+        self._kill_switch_engine: KillSwitchEngine | None = kill_switch_engine
 
     async def completion(
         self,
@@ -435,6 +452,45 @@ class LLMGateway:
                 outcome=outcome,
             )
             raise CloudPolicyViolationError.from_decision(decision)
+
+        # --- 2b. ADR-018 emergency kill-switch gate (Sprint 13.6, F4 slot:
+        # routing facts known, BEFORE the rate slot — a killed call must not
+        # consume concurrency capacity). Engine-absent (None, the default)
+        # preserves the pre-13.6 pipeline byte-for-byte. Precedence inside
+        # check_gateway: tenant_full -> model (LiteLLM-alias-keyed) ->
+        # cloud_routing (external calls only).
+        if self._kill_switch_engine is not None:
+            tripped = await self._kill_switch_engine.check_gateway(
+                tenant_id=tenant_id,
+                model_alias=litellm_alias,
+                external=preflight_resolved.external,
+            )
+            if tripped is not None:
+                outcome = "kill_switch_active"
+                trace.outcome = "kill_switch_active"
+                await self._audit.append(
+                    AuditEvent(
+                        event_type="gateway.kill_switch_refused",
+                        request_id=request_id,
+                        payload={
+                            "tripped_class": tripped,
+                            "litellm_alias": litellm_alias,
+                            "external": preflight_resolved.external,
+                        },
+                        tenant_id=tenant_id,
+                        iso_controls=("ISO42001.A.6.2.5", "ISO42001.A.9.2"),
+                    )
+                )
+                await self._best_effort_ledger_write(
+                    request_id=request_id,
+                    tenant_id=tenant_id,
+                    tier=tier,
+                    litellm_alias=litellm_alias,
+                    preflight=preflight_resolved,
+                    flow_start=flow_start,
+                    outcome=outcome,
+                )
+                raise GatewayKillSwitchActive(tripped_class=tripped)
 
         # --- 3-9. Concurrency slot + dispatch + post-dispatch -----------------
         # Round-3 reviewer-P2: natural ``async with`` shape. When

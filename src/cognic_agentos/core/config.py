@@ -1896,6 +1896,14 @@ class Settings(BaseSettings):
         description="Sprint 11.5b — last-known-good kill-switch cache grace; >this with Redis "
         "unreachable fails closed (frozen). Capped at 60 (ADR-018 <=60s propagation).",
     )
+    emergency_kill_switch_cache_ttl_s: int = Field(
+        default=60,
+        gt=0,
+        le=60,
+        description="Sprint 13.6 — last-known-good cache grace for the full ADR-018 "
+        "KillSwitchEngine matrix; >this with Redis unreachable fails closed (ACTIVE). "
+        "Capped at 60 (ADR-018 <=60s propagation; mirrors memory_kill_switch_cache_ttl_s).",
+    )
     memory_policy_bundle: Path = Field(
         default=Path("policies/_default/memory.rego"),
         description=(

@@ -211,18 +211,43 @@ MEMORY_SCOPES: frozenset[MemoryRBACScope] = frozenset(
 )
 
 
-#: Sprint 11.5b T1 — emergency-control RBAC family per ADR-018. One value in
-#: 11.5b; Sprint 13.6 grows it with the full kill-switch matrix + quotas
-#: (emergency carved from 13.5 to 13.6 at the 2026-06-12 reconciliation). Its
-#: own family (NOT folded into MemoryRBACScope) — emergency != memory-data scope.
-#: Wire-protocol-public: every 403 ``scope_not_held`` denial on the kill-switch
-#: surface carries one of these values. Namespace-disjoint from all other
-#: families by the ``emergency.*`` prefix (pinned by
+#: Emergency-control RBAC family per ADR-018. Sprint 11.5b T1 seeded the
+#: single ``emergency.kill.memory_write_freeze`` value; Sprint 13.6 T5 grew
+#: the family to 9 — the 7 ADR-018 kill-switch classes (the ADR table's scope
+#: column, §34-42) + the seed + ``emergency.read`` for the GET surfaces
+#: (list/audit). Quota scopes live in their OWN ``QuotaRBACScope`` family
+#: (13.6 half 2, spec review patch 4) — NOT here. Its own family (NOT folded
+#: into MemoryRBACScope) — emergency != memory-data scope. Wire-protocol-
+#: public: every 403 ``scope_not_held`` denial on the kill-switch surface
+#: carries one of these values. Namespace-disjoint from all other families by
+#: the ``emergency.*`` prefix (pinned by
 #: ``test_emergency_scopes.py::test_emergency_scope_disjoint_from_every_other_family``).
-EmergencyRBACScope = Literal["emergency.kill.memory_write_freeze"]
+EmergencyRBACScope = Literal[
+    "emergency.kill.pack",
+    "emergency.kill.tool",
+    "emergency.kill.model",
+    "emergency.kill.tenant_packs",
+    "emergency.kill.tenant_full",
+    "emergency.kill.cloud",
+    "emergency.kill.feature",
+    "emergency.kill.memory_write_freeze",
+    "emergency.read",
+]
 
-#: All 1 emergency scopes as a frozenset (1:1 with EmergencyRBACScope).
-EMERGENCY_SCOPES: frozenset[EmergencyRBACScope] = frozenset({"emergency.kill.memory_write_freeze"})
+#: All 9 emergency scopes as a frozenset (1:1 with EmergencyRBACScope).
+EMERGENCY_SCOPES: frozenset[EmergencyRBACScope] = frozenset(
+    {
+        "emergency.kill.pack",
+        "emergency.kill.tool",
+        "emergency.kill.model",
+        "emergency.kill.tenant_packs",
+        "emergency.kill.tenant_full",
+        "emergency.kill.cloud",
+        "emergency.kill.feature",
+        "emergency.kill.memory_write_freeze",
+        "emergency.read",
+    }
+)
 
 
 #: Eval surface scope family (ADR-010 judge slice + Sprint-12 bulk runner +
