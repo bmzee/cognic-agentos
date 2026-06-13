@@ -42,6 +42,7 @@ from cognic_agentos.portal.rbac.scopes import (  # noqa: F401  (ScopeSet kept fo
     MemoryRBACScope,
     ModelRBACScope,
     PackRBACScope,
+    QuotaRBACScope,
     ScopeSet,
     ToolApprovalRBACScope,
     UIRBACScope,
@@ -129,6 +130,7 @@ class Actor(pydantic.BaseModel):
         | ModelRBACScope
         | MemoryRBACScope
         | EmergencyRBACScope
+        | QuotaRBACScope
         | EvalRBACScope
         | ConfigOverlayRBACScope
         | ToolApprovalRBACScope
