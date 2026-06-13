@@ -35,6 +35,7 @@ from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+import httpx
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import JSONResponse
 from prometheus_fastapi_instrumentator import Instrumentator
@@ -458,6 +459,10 @@ def create_app(
         reap_task: asyncio.Task[None] | None = None
         reaper_task: asyncio.Task[None] | None = None
         memory_reaper_task: asyncio.Task[None] | None = None
+        # Sprint 13.8 (ADR-002): predeclare BEFORE the inner try whose finally
+        # closes it — a build_runtime failure before assignment must not leave
+        # this name unbound when the finally runs.
+        mcp_http_client: httpx.AsyncClient | None = None
 
         async def _shutdown_checkpoint_reaper() -> None:
             # cancel() then await so CancelledError propagates cleanly to
@@ -618,6 +623,38 @@ def create_app(
                 # create_app kwarg in 13.7 (Fork D — construct + expose only).
                 app.state.scheduler = runtime.scheduler
 
+                # Sprint 13.8 (ADR-002) — MCP host production construction,
+                # SDK-gated (the mcp SDK is an optional `adapters` extra; the
+                # kernel image lacks it). Constructed HERE in the lifespan (NOT
+                # build_runtime, which stays SDK-free) because the host needs
+                # runtime.audit_store / decision_history_store / approval_engine.
+                # Dormant until a caller invokes call_tool (Fork D). Fail-soft:
+                # a construction failure leaves app.state.mcp_host None + ERROR
+                # log + the app still boots. mcp_http_client is predeclared above.
+                if is_mcp_available():
+                    from cognic_agentos.harness.mcp_host import build_mcp_host
+                    from cognic_agentos.protocol.plugin_registry import PluginRegistry
+
+                    mcp_registry = plugin_registry or PluginRegistry(
+                        audit_store=runtime.audit_store
+                    )
+                    mcp_http_client = httpx.AsyncClient()
+                    try:
+                        app.state.mcp_host = build_mcp_host(
+                            registry=mcp_registry,
+                            runtime=runtime,
+                            settings=settings,
+                            http_client=mcp_http_client,
+                            vault_client=adapters.secret,
+                        )
+                    except Exception:
+                        logger.error("mcp.host_construction_failed", exc_info=True)
+                        await mcp_http_client.aclose()
+                        mcp_http_client = None
+                        app.state.mcp_host = None
+                else:
+                    logger.warning("mcp.host_unavailable_in_image", extra={"missing_module": "mcp"})
+
                 # #489 — setting-driven reaper: build the CheckpointStore
                 # from the live adapter pool AFTER open_all() so the
                 # relational adapter's engine is connected. This build is
@@ -673,6 +710,12 @@ def create_app(
                     await _runtime.aclose()
                 await adapters.close_all()
                 app.state.adapters = None
+                # Sprint 13.8 (ADR-002): close the lifespan-owned MCP authz
+                # httpx client. Bound (predeclared) even if build_runtime raised,
+                # so this never UnboundLocalErrors; None unless the host was
+                # constructed on the SDK-present path.
+                if mcp_http_client is not None:
+                    await mcp_http_client.aclose()
         finally:
             # All background tasks created above are cancelled here. This
             # envelope opened BEFORE any task creation, so a startup
@@ -796,6 +839,7 @@ def create_app(
     app.state.kill_switch_engine = None
     app.state.quota_engine = None  # Sprint 13.6b — same introspection seam.
     app.state.scheduler = None  # Sprint 13.7 (ADR-022) — same introspection seam.
+    app.state.mcp_host = None  # Sprint 13.8 (ADR-002) — SDK-gated; lifespan populates.
 
     # Middleware add order is OUTER-LAST in Starlette: the call chain
     # walks the most-recently-added middleware first. We want the
@@ -1312,16 +1356,22 @@ def create_prod_app() -> FastAPI:
     ``remediation`` field see both constraints called out so misconfig
     diagnosis stays unambiguous.
 
-    The actual ``MCPHost`` wiring lands at Sprint-5 T9 (when the
-    class itself exists). T2 establishes the availability-check
-    contract + the structured-warning shape so T9 just extends the
-    available-branch to construct + attach ``app.state.mcp_host``.
+    The actual ``MCPHost`` wiring landed in Sprint 13.8 (the long-deferred
+    "Sprint-5 T9") — but in the ``create_app`` LIFESPAN (after ``build_runtime``,
+    where ``runtime.audit_store`` / ``approval_engine`` exist), NOT here.
+    ``create_prod_app`` remains availability-LOG-only: it logs SDK presence /
+    absence but does not construct the host. ``create_app`` pre-seeds
+    ``app.state.mcp_host = None`` at construction; the lifespan replaces it with
+    the real host on the SDK-present path.
     """
 
     app = create_app(adapter_registry=bundled_registry)
     if is_mcp_available():
-        # Sprint-5 T2: log SDK presence. T9 extends this branch to
-        # construct + attach app.state.mcp_host = MCPHost(...).
+        # Sprint-5 T2: log SDK presence. SUPERSEDED by Sprint 13.8 — the actual
+        # MCPHost construction lands in the create_app LIFESPAN (after
+        # build_runtime, where runtime.audit_store/approval_engine exist), NOT
+        # here in create_prod_app (pre-lifespan). This branch stays a
+        # startup-presence log only.
         logger.info("mcp.sdk_present_at_startup", extra={"image": "default-adapters"})
     else:
         # Kernel image (or any venv missing `mcp`). Admission-side

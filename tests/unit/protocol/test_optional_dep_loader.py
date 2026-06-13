@@ -582,11 +582,15 @@ class TestProtocolOptionalDepsMapShape:
 
 
 class TestCreateProdAppMcpAvailabilityBranch:
-    """Pin the T2 contract scaffolding in ``portal/api/app.py:create_prod_app``:
+    """Pin the ``create_prod_app`` SDK-availability LOG branch:
     the factory checks :func:`is_mcp_available` once and either logs SDK
-    presence or logs a structured ``mcp.host_unavailable_in_image``
-    warning. ``app.state.mcp_host`` is NOT set in T2 (that's T9 when
-    MCPHost lands).
+    presence or logs a structured ``mcp.host_unavailable_in_image`` warning.
+
+    ``create_prod_app`` itself does NOT construct the host (Sprint 13.8 — the
+    long-deferred "Sprint-5 T9" — lands the real ``MCPHost`` construction in the
+    ``create_app`` LIFESPAN, after ``build_runtime``). ``create_app`` PRE-SEEDS
+    ``app.state.mcp_host = None`` at construction, so after ``create_prod_app()``
+    (no lifespan run) the attribute is ``None`` (pre-seed), not unset.
 
     Without these tests the suite would still pass if the entire
     ``if is_mcp_available()`` block was deleted from ``create_prod_app``.
@@ -601,8 +605,8 @@ class TestCreateProdAppMcpAvailabilityBranch:
         caplog: pytest.LogCaptureFixture,
     ) -> None:
         """SDK-available branch: logs ``mcp.sdk_present_at_startup``
-        with image=default-adapters; ``app.state.mcp_host`` not set
-        in T2 (T9 will set it via the ``MCPHost`` constructor)."""
+        with image=default-adapters; ``app.state.mcp_host`` is the pre-seed
+        ``None`` (the lifespan, not create_prod_app, constructs the host)."""
         from cognic_agentos.portal.api import app as app_module
 
         monkeypatch.setattr(app_module, "is_mcp_available", lambda: True)
@@ -631,8 +635,9 @@ class TestCreateProdAppMcpAvailabilityBranch:
         ]
         assert not unavailable_records
 
-        # T2 invariant: app.state.mcp_host is NOT set yet (T9 sets it)
-        assert not hasattr(app.state, "mcp_host")
+        # Sprint 13.8: app.state.mcp_host is the pre-seed None (create_app pre-
+        # seeds it; the lifespan — not create_prod_app — constructs the host).
+        assert app.state.mcp_host is None
 
     def test_create_prod_app_logs_unavailable_when_missing(
         self,
@@ -641,7 +646,7 @@ class TestCreateProdAppMcpAvailabilityBranch:
     ) -> None:
         """SDK-missing branch: logs structured
         ``mcp.host_unavailable_in_image`` warning with remediation;
-        ``app.state.mcp_host`` not set."""
+        ``app.state.mcp_host`` is the pre-seed ``None``."""
         from cognic_agentos.portal.api import app as app_module
 
         monkeypatch.setattr(app_module, "is_mcp_available", lambda: False)
@@ -677,28 +682,30 @@ class TestCreateProdAppMcpAvailabilityBranch:
         ]
         assert not sdk_present_records
 
-        # T2 invariant: app.state.mcp_host is NOT set yet
-        assert not hasattr(app.state, "mcp_host")
+        # Sprint 13.8: app.state.mcp_host is the pre-seed None.
+        assert app.state.mcp_host is None
 
-    def test_create_prod_app_t2_invariant_mcp_host_unset_either_branch(
+    def test_create_prod_app_preseeds_mcp_host_none_either_branch(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """The T2 contract is "scaffolding only — no MCPHost wiring".
-        T9 will extend the SDK-available branch to construct + attach
-        MCPHost. Until then, ``app.state.mcp_host`` MUST remain unset
-        regardless of which branch fires. This test pins the
-        invariant explicitly so a premature T9-style edit (adding
-        ``app.state.mcp_host = ...`` before MCPHost exists) trips
-        immediately."""
+        """Sprint 13.8 (the long-deferred "Sprint-5 T9"): ``create_prod_app``
+        itself still does NOT construct ``MCPHost`` — that lands in the
+        ``create_app`` LIFESPAN (after ``build_runtime``). ``create_app``
+        pre-seeds ``app.state.mcp_host = None`` at construction, so after
+        ``create_prod_app()`` (no lifespan run) it MUST be ``None`` (the
+        pre-seed) regardless of which SDK branch fires. This pins that
+        ``create_prod_app`` stays a startup-log only — it never constructs a
+        real host (that would bypass the lifespan's audit/approval wiring)."""
         from cognic_agentos.portal.api import app as app_module
 
         for available in (True, False):
             monkeypatch.setattr(app_module, "is_mcp_available", lambda v=available: v)
             app = app_module.create_prod_app()
-            assert not hasattr(app.state, "mcp_host"), (
-                f"app.state.mcp_host should not be set in T2 "
-                f"(is_mcp_available={available}); MCPHost wiring is T9"
+            assert app.state.mcp_host is None, (
+                f"app.state.mcp_host should be the pre-seed None after "
+                f"create_prod_app (is_mcp_available={available}); construction is "
+                f"the lifespan's job"
             )
 
 
