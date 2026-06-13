@@ -289,7 +289,8 @@ class TestVocabulary:
     def test_trace_outcome_has_kill_switch_active(self) -> None:
         values = typing.get_args(GatewayTraceOutcome)
         assert "kill_switch_active" in values
-        assert len(values) == 12  # 11 pre-13.6 + kill_switch_active
+        # 11 pre-13.6 + kill_switch_active (13.6a) + quota_exhausted (13.6b).
+        assert len(values) == 13
 
     def test_ledger_accepts_kill_switch_active_outcome(self) -> None:
         import datetime as _dt

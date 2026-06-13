@@ -27,12 +27,13 @@ import json as _json
 import logging as _logging
 import time as _time
 import uuid as _uuid
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import httpx as _httpx
 
 if TYPE_CHECKING:
     from cognic_agentos.core.emergency.kill_switches import KillSwitchEngine
+    from cognic_agentos.core.emergency.quotas import QuotaEngine
     from cognic_agentos.db.adapters.protocols import ObservabilityAdapter
 
 from cognic_agentos.core.audit import AuditEvent, AuditStore
@@ -77,6 +78,7 @@ GatewayTraceOutcome = Literal[
     "guardrail_input",
     "policy_denied",
     "kill_switch_active",
+    "quota_exhausted",
     "concurrency_exhausted",
     "upstream_error",
     "guardrail_output",
@@ -92,7 +94,7 @@ class UnknownTierError(ValueError):
 
 
 class GatewayKillSwitchActive(RuntimeError):
-    """ADR-018 F4 gate refusal (Sprint 13.6) — an emergency switch covering
+    """ADR-018 F4 gate refusal (Sprint 13.6a) — an emergency switch covering
     this call is active (``tenant_full`` / ``model`` / ``cloud_routing``, in
     that precedence). Raised BEFORE the rate-slot acquire so a killed call
     never consumes concurrency capacity."""
@@ -100,6 +102,28 @@ class GatewayKillSwitchActive(RuntimeError):
     def __init__(self, *, tripped_class: str) -> None:
         super().__init__(f"kill_switch_active: {tripped_class}")
         self.tripped_class = tripped_class
+
+
+class GatewayQuotaExhausted(RuntimeError):
+    """ADR-018 quota gate refusal (Sprint 13.6b) — the tenant is already at or
+    over its daily token budget (actuals + outstanding reservations). A coarse
+    tenant-aggregate gate (precision lock 2: the gateway has no pre-dispatch
+    token count); raised AFTER the kill-switch gate + BEFORE the rate-slot
+    acquire."""
+
+    def __init__(self, *, tenant_id: str) -> None:
+        super().__init__(f"quota_exhausted: tenant={tenant_id}")
+        self.tenant_id = tenant_id
+
+
+def _extract_usage_tokens(usage: dict[str, Any] | None) -> tuple[int | None, int | None]:
+    """Pull ``prompt_tokens`` / ``completion_tokens`` from a provider usage
+    dict, int-guarded (a non-int / absent value → None). Sprint 13.6b F6."""
+    if not isinstance(usage, dict):
+        return (None, None)
+    pt = usage.get("prompt_tokens")
+    ct = usage.get("completion_tokens")
+    return (pt if isinstance(pt, int) else None, ct if isinstance(ct, int) else None)
 
 
 def resolve_tier_alias(tier: str, settings: Settings) -> str:
@@ -294,6 +318,7 @@ class LLMGateway:
         litellm_master_key: str | None = None,
         observability: ObservabilityAdapter | None = None,
         kill_switch_engine: KillSwitchEngine | None = None,
+        quota_engine: QuotaEngine | None = None,
     ) -> None:
         self._settings = settings
         self._ledger = ledger
@@ -324,8 +349,9 @@ class LLMGateway:
         )
         self._observability: ObservabilityAdapter | None = observability
         # Sprint 13.6 (ADR-018) — None (the default) preserves the pre-13.6
-        # pipeline byte-for-byte; the composition root threads the engine.
+        # pipeline byte-for-byte; the composition root threads the engines.
         self._kill_switch_engine: KillSwitchEngine | None = kill_switch_engine
+        self._quota_engine: QuotaEngine | None = quota_engine
 
     async def completion(
         self,
@@ -453,7 +479,7 @@ class LLMGateway:
             )
             raise CloudPolicyViolationError.from_decision(decision)
 
-        # --- 2b. ADR-018 emergency kill-switch gate (Sprint 13.6, F4 slot:
+        # --- 2b. ADR-018 emergency kill-switch gate (Sprint 13.6a, F4 slot:
         # routing facts known, BEFORE the rate slot — a killed call must not
         # consume concurrency capacity). Engine-absent (None, the default)
         # preserves the pre-13.6 pipeline byte-for-byte. Precedence inside
@@ -491,6 +517,39 @@ class LLMGateway:
                     outcome=outcome,
                 )
                 raise GatewayKillSwitchActive(tripped_class=tripped)
+
+        # --- 2c. ADR-018 quota gate (Sprint 13.6b, F4 slot: AFTER the
+        # kill-switch gate so a killed+over-quota tenant surfaces
+        # kill_switch_active; BEFORE the rate slot so an exhausted call never
+        # consumes concurrency). Tenant-aggregate, actuals-based (precision
+        # lock 2): the gateway has no pre-dispatch token count, so this is a
+        # coarse "is this tenant already exhausted?" check, NOT a per-call
+        # reservation. tenant_id=None → skipped (quotas are tenant-scoped).
+        # Engine-absent (None, the default) preserves the pre-13.6b pipeline.
+        if self._quota_engine is not None and tenant_id is not None:
+            admit = await self._quota_engine.check_gateway_admit(tenant_id=tenant_id)
+            if not admit:
+                outcome = "quota_exhausted"
+                trace.outcome = "quota_exhausted"
+                await self._audit.append(
+                    AuditEvent(
+                        event_type="gateway.quota_refused",
+                        request_id=request_id,
+                        payload={"litellm_alias": litellm_alias},
+                        tenant_id=tenant_id,
+                        iso_controls=("ISO42001.A.6.2.5", "ISO42001.A.9.2"),
+                    )
+                )
+                await self._best_effort_ledger_write(
+                    request_id=request_id,
+                    tenant_id=tenant_id,
+                    tier=tier,
+                    litellm_alias=litellm_alias,
+                    preflight=preflight_resolved,
+                    flow_start=flow_start,
+                    outcome=outcome,
+                )
+                raise GatewayQuotaExhausted(tenant_id=tenant_id)
 
         # --- 3-9. Concurrency slot + dispatch + post-dispatch -----------------
         # Round-3 reviewer-P2: natural ``async with`` shape. When
@@ -752,6 +811,13 @@ class LLMGateway:
                         flow_start=flow_start,
                         outcome=outcome,
                         original_exc=None,
+                        usage=trace.usage,
+                    )
+                    # Sprint 13.6b (ADR-018) — post-completion actuals metering.
+                    # Best-effort: a metering failure must NOT fail a delivered
+                    # completion (the strict ledger row above already landed).
+                    await self._record_quota_actuals_best_effort(
+                        tenant_id=tenant_id, usage=trace.usage
                     )
                     return GatewayResponse(
                         content=content,
@@ -931,14 +997,18 @@ class LLMGateway:
         flow_start: float,
         outcome: str,
         original_exc: Exception | None,
+        usage: dict[str, Any] | None = None,
     ) -> None:
         """Strict-regime ledger write per Round-1 reviewer-P1#1 +
         Round-6 reviewer-P1.
 
         Persists the full provenance state (api_base + provenance) so
         ``/system/effective-routing`` can authoritatively classify
-        historical rows without re-resolving the current YAML.
+        historical rows without re-resolving the current YAML. Sprint 13.6b
+        (ADR-018 F6): populates the token-evidence columns from ``usage`` when
+        the provider returned it (int-guarded; absent → NULL).
         """
+        prompt_tokens, completion_tokens = _extract_usage_tokens(usage)
         try:
             await self._ledger.write_row(
                 GatewayCallRow(
@@ -955,6 +1025,9 @@ class LLMGateway:
                     latency_ms=int((_time.monotonic() - flow_start) * 1000),
                     outcome=outcome,
                     model_id=self._settings.llm_model_id_map.get(litellm_alias),
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    estimated_cost_usd=None,  # no pricing source (evidence-ready)
                 )
             )
         except Exception as ledger_exc:
@@ -965,6 +1038,32 @@ class LLMGateway:
                 f"ledger write failed for request_id={request_id} "
                 f"upstream={resolved.model_string}: {ledger_exc}"
             ) from (original_exc or ledger_exc)
+
+    async def _record_quota_actuals_best_effort(
+        self, *, tenant_id: str | None, usage: dict[str, Any] | None
+    ) -> None:
+        """Sprint 13.6b (ADR-018) — increment the tenant actuals counter by the
+        real token usage AFTER a delivered completion. Best-effort: metering
+        must never fail a completion that already succeeded (the strict ledger
+        row already landed). Skipped when the engine is unwired, the call has no
+        tenant, or the provider returned no usage."""
+        if self._quota_engine is None or tenant_id is None:
+            return
+        prompt_tokens, completion_tokens = _extract_usage_tokens(usage)
+        total = (prompt_tokens or 0) + (completion_tokens or 0)
+        if total <= 0:
+            _LOG.info(
+                "gateway.quota_actuals_skipped_no_usage",
+                extra={"tenant_id": tenant_id},
+            )
+            return
+        try:
+            await self._quota_engine.record_actuals(tenant_id=tenant_id, tokens=total)
+        except Exception:
+            _LOG.warning(
+                "gateway.quota_actuals_metering_failed",
+                extra={"tenant_id": tenant_id, "tokens": total},
+            )
 
     async def _best_effort_ledger_write(
         self,

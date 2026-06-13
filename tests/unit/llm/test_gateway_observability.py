@@ -100,10 +100,11 @@ def _preflight_upstream() -> ResolvedUpstream:
 
 
 class TestTraceOutcomeVocabularyClosed:
-    def test_trace_outcome_has_exactly_twelve_values(self) -> None:
+    def test_trace_outcome_has_exactly_thirteen_values(self) -> None:
         # 11 from the gateway-observability workstream + kill_switch_active
-        # (Sprint 13.6 T4, ADR-018 F4 gate).
-        assert len(typing.get_args(GatewayTraceOutcome)) == 12
+        # (Sprint 13.6a, ADR-018 F4 kill-switch gate) + quota_exhausted
+        # (Sprint 13.6b, ADR-018 quota gate).
+        assert len(typing.get_args(GatewayTraceOutcome)) == 13
 
     def test_trace_outcome_value_set_is_pinned(self) -> None:
         assert set(typing.get_args(GatewayTraceOutcome)) == {
@@ -112,7 +113,8 @@ class TestTraceOutcomeVocabularyClosed:
             "preflight_failure",
             "guardrail_input",
             "policy_denied",
-            "kill_switch_active",  # Sprint 13.6 T4 — ADR-018 emergency gate
+            "kill_switch_active",  # Sprint 13.6a — ADR-018 kill-switch gate
+            "quota_exhausted",  # Sprint 13.6b — ADR-018 quota gate
             "concurrency_exhausted",
             "upstream_error",
             "guardrail_output",
