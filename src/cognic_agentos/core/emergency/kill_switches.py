@@ -12,10 +12,17 @@ no migration, no behavioral break for memory writes.
 
 from __future__ import annotations
 
+import dataclasses
 import json
+import logging
+import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any, Final, Literal, Protocol, runtime_checkable
+
+from cognic_agentos.core.decision_history import DecisionRecord
+
+logger = logging.getLogger(__name__)
 
 _KEY_PREFIX = "cognic:killswitch:memory_write_freeze:"
 
@@ -156,6 +163,51 @@ def _switch_key(class_: KillSwitchClass, scope_key: str) -> str:
     return f"cognic:killswitch:{class_}:{scope_key}"
 
 
+def _state_field(class_: KillSwitchClass) -> str:
+    """The seed class persists ``frozen`` (its FROZEN 11.5b schema, F2); every
+    other class persists ``active``. Engine reads + writes are class-aware so
+    the seed reader and the engine agree on the same Redis document."""
+    return "frozen" if class_ == "memory_write_freeze" else "active"
+
+
+def _tenant_for(class_: KillSwitchClass, scope_key: str) -> str | None:
+    """Chain-row tenant attribution: tenant-scoped classes carry the tenant in
+    the scope_key; a per-tenant feature key (``<tenant_id>:<name>``) carries it
+    as the first segment; global classes attribute to no tenant."""
+    if class_ in _TENANT_SCOPED_CLASSES:
+        return scope_key
+    if class_ == "feature" and ":" in scope_key:
+        return scope_key.split(":", 1)[0]
+    return None
+
+
+_FLIP_REQUEST_ID_PREFIX: Final[str] = "emrg-flip-"
+_EMERGENCY_ISO_CONTROLS: Final[tuple[str, ...]] = ("ISO42001.A.6.2.5", "ISO42001.A.9.2")
+_TENANT_SCOPED_CLASSES: Final[frozenset[str]] = frozenset(
+    {"memory_write_freeze", "tenant_packs", "tenant_full"}
+)
+
+
+@runtime_checkable
+class _DecisionAppendLike(Protocol):
+    """Narrow consumer-owned append seam — ``DecisionHistoryStore`` conforms
+    structurally; tests pass recording fakes without nominal-type friction."""
+
+    async def append(self, record: DecisionRecord) -> tuple[uuid.UUID, bytes]: ...
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class FlipResult:
+    """Outcome of a flip/revert. ``evidence_degraded=True`` means the brake IS
+    in effect (Redis written / already in state) but the chain row failed —
+    the portal surfaces ``kill_switch_live_evidence_degraded`` and the
+    operator retries (idempotent re-flip appends the missing row)."""
+
+    active: bool
+    evidence_degraded: bool
+    chain_record_id: uuid.UUID | None
+
+
 class KillSwitchEngine:
     """8-class matrix over the seed's Redis + fail-closed-cache semantics.
 
@@ -173,14 +225,17 @@ class KillSwitchEngine:
         redis_client: _AsyncRedisKVLike,
         cache_ttl_s: int,
         clock: Callable[[], datetime] = _utcnow,
+        decision_history: _DecisionAppendLike | None = None,
     ) -> None:
         self._redis = redis_client
         self._cache_ttl_s = cache_ttl_s
         self._clock = clock
+        self._decision_history = decision_history
         self._cache: dict[str, tuple[bool, datetime]] = {}  # full key -> (active, observed_at)
 
     async def is_class_active(self, *, class_: KillSwitchClass, scope_key: str) -> bool:
         key = _switch_key(class_, scope_key)
+        field = _state_field(class_)
         try:
             raw = await self._redis.get(key)
         except Exception:
@@ -195,17 +250,138 @@ class KillSwitchEngine:
             return False
         try:
             doc = json.loads(raw if isinstance(raw, str) else raw.decode())
-            active = doc["active"]
+            active = doc[field]
             _custody = (doc["updated_at"], doc["actor_id"], doc["reason"])  # ALL required
             if not isinstance(active, bool):
-                # non-bool `active` is malformed; do NOT bool()-coerce (0 => fail-open)
-                raise ValueError("active must be a JSON bool")
+                # non-bool state is malformed; do NOT bool()-coerce (0 => fail-open)
+                raise ValueError(f"{field} must be a JSON bool")
         except (ValueError, TypeError, KeyError, AttributeError):
             # Malformed/partial state POISONS the cache fail-closed (seed doctrine).
             self._cache[key] = (True, self._clock())
             return True
         self._cache[key] = (active, self._clock())
         return active
+
+    async def flip(
+        self,
+        *,
+        class_: KillSwitchClass,
+        scope_key: str,
+        actor_id: str,
+        reason: str,
+        category: KillSwitchCategory,
+    ) -> FlipResult:
+        """Activate a switch — review patch 3 brake-before-evidence (see
+        :meth:`_mutate`)."""
+        return await self._mutate(
+            class_=class_,
+            scope_key=scope_key,
+            actor_id=actor_id,
+            reason=reason,
+            category=category,
+            active=True,
+            decision_type="emergency.kill_switch_flipped",
+        )
+
+    async def revert(
+        self,
+        *,
+        class_: KillSwitchClass,
+        scope_key: str,
+        actor_id: str,
+        reason: str,
+        category: KillSwitchCategory,
+    ) -> FlipResult:
+        """Deactivate a switch — same doctrine, ``emergency.kill_switch_reverted``."""
+        return await self._mutate(
+            class_=class_,
+            scope_key=scope_key,
+            actor_id=actor_id,
+            reason=reason,
+            category=category,
+            active=False,
+            decision_type="emergency.kill_switch_reverted",
+        )
+
+    async def _mutate(
+        self,
+        *,
+        class_: KillSwitchClass,
+        scope_key: str,
+        actor_id: str,
+        reason: str,
+        category: KillSwitchCategory,
+        active: bool,
+        decision_type: str,
+    ) -> FlipResult:
+        """Review patch 3 — the brake-before-evidence doctrine. Redis write
+        FIRST (the brake takes effect even if evidence fails), THEN the chain
+        row. Evidence failure after a successful Redis write leaves the switch
+        LIVE (it must never resurrect a killed path), logs loud, and reports
+        ``evidence_degraded=True`` so the portal returns the closed-enum
+        ``kill_switch_live_evidence_degraded`` error. Re-flipping an
+        already-in-state switch performs NO Redis state change but appends the
+        evidence row — the chain converges on retry."""
+        if self._decision_history is None:
+            raise RuntimeError(
+                "kill_switch_engine_requires_decision_history_for_writes: construct "
+                "KillSwitchEngine(decision_history=...) for flip/revert"
+            )
+        if class_ == "feature":
+            name = scope_key.rsplit(":", 1)[-1]
+            if name not in _FEATURE_NAMES:
+                raise ValueError(
+                    f"unknown feature name {name!r}; closed Wave-1 feature vocabulary: "
+                    f"{sorted(_FEATURE_NAMES)}"
+                )
+        key = _switch_key(class_, scope_key)
+        current = await self.is_class_active(class_=class_, scope_key=scope_key)
+        if current != active:
+            doc = json.dumps(
+                {
+                    _state_field(class_): active,
+                    "updated_at": self._clock().isoformat(),
+                    "actor_id": actor_id,
+                    "reason": reason,
+                }
+            )
+            await self._redis.set(key, doc)  # THE BRAKE — unconditional, before evidence
+            self._cache[key] = (active, self._clock())
+        evidence_degraded = False
+        chain_record_id: uuid.UUID | None = None
+        try:
+            record_id, _new_hash = await self._decision_history.append(
+                DecisionRecord(
+                    decision_type=decision_type,
+                    request_id=f"{_FLIP_REQUEST_ID_PREFIX}{uuid.uuid4().hex}",
+                    payload={
+                        "class": class_,
+                        "scope_key": scope_key,
+                        "category": category,
+                        "reason": reason,
+                        "active": active,
+                        "enforcement_status": ENFORCEMENT_STATUS_BY_CLASS[class_],
+                    },
+                    actor_id=actor_id,
+                    tenant_id=_tenant_for(class_, scope_key),
+                    iso_controls=_EMERGENCY_ISO_CONTROLS,
+                )
+            )
+            chain_record_id = record_id
+        except Exception:
+            logger.exception(
+                "emergency.kill_switch_evidence_degraded class=%s scope_key=%s active=%s "
+                "actor_id=%s — the switch state IS in effect; retry the flip to converge "
+                "the evidence chain",
+                class_,
+                scope_key,
+                active,
+                actor_id,
+            )
+            evidence_degraded = True
+        return FlipResult(
+            active=active, evidence_degraded=evidence_degraded, chain_record_id=chain_record_id
+        )
 
     async def check_gateway(
         self, *, tenant_id: str | None, model_alias: str, external: bool
@@ -268,6 +444,7 @@ class MemoryFreezeConformer:
 __all__ = (
     "ENFORCEMENT_STATUS_BY_CLASS",
     "EnforcementStatus",
+    "FlipResult",
     "KillSwitchCategory",
     "KillSwitchClass",
     "KillSwitchEngine",
@@ -277,3 +454,7 @@ __all__ = (
     "_switch_key",
     "_write_freeze_key",
 )
+
+# Build-time pin: emrg-flip- (10) + uuid4 hex (32) = 42 <= the 64-char
+# decision_history.request_id column cap (established module-foot pattern).
+assert len(_FLIP_REQUEST_ID_PREFIX) + 32 <= 64

@@ -6,6 +6,7 @@ kill-switch seeded the family; Sprint 13.6 grows the full 8-class
 from cognic_agentos.core.emergency.kill_switches import (
     ENFORCEMENT_STATUS_BY_CLASS,
     EnforcementStatus,
+    FlipResult,
     KillSwitchCategory,
     KillSwitchClass,
     KillSwitchEngine,
@@ -17,6 +18,7 @@ from cognic_agentos.core.emergency.kill_switches import (
 __all__ = (
     "ENFORCEMENT_STATUS_BY_CLASS",
     "EnforcementStatus",
+    "FlipResult",
     "KillSwitchCategory",
     "KillSwitchClass",
     "KillSwitchEngine",
