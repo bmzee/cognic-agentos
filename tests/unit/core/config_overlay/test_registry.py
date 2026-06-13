@@ -13,12 +13,15 @@ from cognic_agentos.core.config_overlay.registry import (
 )
 
 
-def test_registry_has_exactly_four_keys():
+def test_registry_has_exactly_six_keys():
     assert set(REGISTRY) == {
         "sandbox_per_tenant_max_cpu",
         "sandbox_per_tenant_max_memory",
         "sandbox_per_tenant_max_walltime",
         "memory_export_retention_seconds",
+        # Sprint 13.6b (ADR-018) — token quota ceilings.
+        "quota_tokens_per_tenant_per_day",
+        "quota_tokens_per_pack_per_day",
     }
 
 

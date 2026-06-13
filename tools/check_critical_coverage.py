@@ -2035,6 +2035,11 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     # ``adapter.purge_expired`` it delegates to — Sprint 8.5 ``sandbox/
     # reaper.py`` precedent).
     ("src/cognic_agentos/core/emergency/kill_switches.py", 0.95, 0.90),
+    # Sprint 13.6b (ADR-018) — the QuotaEngine token meter (decomposed atomic
+    # Redis counters; would_admit / release_reservation / record_actuals /
+    # check_gateway_admit). The substantive admission-control enforcement
+    # boundary; a bug here lets runaway-spend through or wedges the queue.
+    ("src/cognic_agentos/core/emergency/quotas.py", 0.95, 0.90),
     ("src/cognic_agentos/core/memory/forget.py", 0.95, 0.90),
     ("src/cognic_agentos/core/memory/redact.py", 0.95, 0.90),
     ("src/cognic_agentos/core/memory/_routing.py", 0.95, 0.90),

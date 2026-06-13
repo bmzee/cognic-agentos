@@ -1904,6 +1904,20 @@ class Settings(BaseSettings):
         "KillSwitchEngine matrix; >this with Redis unreachable fails closed (ACTIVE). "
         "Capped at 60 (ADR-018 <=60s propagation; mirrors memory_kill_switch_cache_ttl_s).",
     )
+    quota_tokens_per_tenant_per_day: int = Field(
+        default=100_000_000,
+        gt=0,
+        description="Sprint 13.6b — ADR-018 per-tenant daily token budget (kernel "
+        "default; tenants may LOWER via the ADR-023 tighten-only overlay ceiling). "
+        "The QuotaEngine refuses admission when actuals + reservations would exceed it.",
+    )
+    quota_tokens_per_pack_per_day: int = Field(
+        default=10_000_000,
+        gt=0,
+        description="Sprint 13.6b — ADR-018 per-pack (per tenant) daily token budget; "
+        "scheduler reservation-only (the gateway has no pack identity). Tighten-only "
+        "overlay ceiling per ADR-023.",
+    )
     memory_policy_bundle: Path = Field(
         default=Path("policies/_default/memory.rego"),
         description=(
