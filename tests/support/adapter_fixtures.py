@@ -245,11 +245,17 @@ class InMemoryObservabilityAdapter:
 
 
 class _InMemoryKVClient:
-    """Dict-backed async KV satisfying ``_AsyncKVClient`` (get/set).
+    """Dict-backed async KV satisfying ``_AsyncKVClient`` (get/set) AND, since
+    Sprint 13.7 (ADR-022), the ``core.emergency.quotas._AsyncRedisQuotaLike``
+    quota seam (incrby/decrby/getdel/expire). The quota ops let a
+    ``cache_driver="memory"`` runtime drive the REAL QuotaEngine plane the
+    SchedulerEngine depends on, without a real Redis (mirrors
+    ``tests/integration/emergency/test_quota_e2e.py::_FakeRedis``).
 
-    TTL (``ex=`` kwarg) is accepted-and-ignored: scratch reads in tests are
-    immediate; real TTL eviction is the redis driver's concern. Mirrors the
-    other in-memory adapters' "defer the hard part, keep the contract" shape.
+    TTL (``ex=`` kwarg on set / ``expire``) is accepted-and-ignored: scratch
+    reads in tests are immediate; real TTL eviction is the redis driver's
+    concern. Mirrors the other in-memory adapters' "defer the hard part, keep
+    the contract" shape.
     """
 
     def __init__(self) -> None:
@@ -262,6 +268,22 @@ class _InMemoryKVClient:
         key, value = args[0], args[1]
         self._store[str(key)] = value
         return True
+
+    async def incrby(self, key: str, amount: int) -> int:
+        new = int(str(self._store.get(key, "0"))) + amount
+        self._store[key] = str(new)
+        return new
+
+    async def decrby(self, key: str, amount: int) -> int:
+        new = int(str(self._store.get(key, "0"))) - amount
+        self._store[key] = str(new)
+        return new
+
+    async def getdel(self, key: str) -> object | None:
+        return self._store.pop(key, None)
+
+    async def expire(self, key: str, seconds: int) -> None:
+        return None
 
 
 class InMemoryCacheAdapter:
