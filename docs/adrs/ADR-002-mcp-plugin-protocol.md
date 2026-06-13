@@ -153,6 +153,60 @@ Per-tenant **allow-list** is loaded from a Vault path (`secret/cognic/<tenant>/p
 5. **Phase 2.5**: extract remaining tool categories (`tools/documents`, `tools/document_intel`, `tools/bank_readiness`, `tools/urdu_*`)
 6. **Phase 2.6**: CI test that confirms zero `from cognic_agentos.tools.X` imports remain in OS-tier code (replaces parent's ADR-009 import-discipline test)
 
+## Sprint 13.8 amendment (2026-06-13) — MCP host production-constructed at the composition root
+
+Sprint 13.8 lands the long-deferred **"Sprint-5 T9"**: `MCPHost` is now
+production-constructed so a deployed AgentOS reaches a real, approval-wired host on
+`app.state.mcp_host`. All protocol primitives already existed (Phase 2.2's
+`MCPHost`, `MCPAuthzClient`, `StreamableHTTPTransport`, the signed-manifest
+extractor); 13.8 builds only the construction wiring + the
+manifest→`MCPServerEntry` mapper + one read-only registry accessor.
+
+1. **Construction site — the `create_app` LIFESPAN, NOT `build_runtime`.** The host
+   needs `runtime.audit_store` / `decision_history_store` / `approval_engine`
+   (post-`build_runtime`), and its transport ctor calls `require_mcp()`, so it is
+   constructed in the FastAPI lifespan, **SDK-gated on `is_mcp_available()`** (the
+   `mcp` SDK is an optional `adapters` extra; the kernel image lacks it).
+   `build_runtime` stays SDK-free. `create_prod_app` is superseded to an
+   availability-LOG-only path (it does not construct the host).
+2. **Read-only registry accessor.** `PluginRegistry.iter_registered_pack_candidates()`
+   yields the **trusted/registered** set (excludes `refused_at_registration`) as
+   `RegisteredPackCandidate(distribution_name, package_name, signature_digest)`,
+   deriving `package_name` from `record.entry_point_value` (the `_mcp_admit`
+   doctrine at `plugin_registry.py:852`) **without** `EntryPoint.load()` — the
+   deferred-load invariant holds. It does NOT filter MCP intent (the mapper does).
+   Trust stays upstream: 13.8 consumes the registered set; it does not run
+   discovery/trust registration at startup.
+3. **The mapper (`harness/mcp_host.py`, off-gate).** Per candidate it re-extracts
+   the manifest and mirrors the admission contract: `PackManifestNotFoundError` /
+   absent `[tool.cognic.mcp]` block → **silent skip** (no MCP intent);
+   `PackManifestMalformedError` / present-but-malformed block → **skip + structured
+   warning**; the existing `mcp_capabilities._mcp_block` accessor collapses absent +
+   malformed, so the mapper does its OWN tri-state walk. Field reads mirror
+   `validate_mcp_manifest`: `server_url` must be a non-empty `http`/`https` URL (the
+   SSRF pre-filter), `transport` must be in the Wave-1 HTTP family
+   (`_MCP_HTTP_SERVED_TRANSPORTS`, drift-pinned vs `_HTTP_TRANSPORT_VALUES`; `stdio`
+   not served), `scopes` is required, and `data_classes` is fail-closed on malformed
+   (it flows into the value-free approval envelope). `pack_signature_digest` is
+   carried from the registration outcome.
+4. **Approval seam WIRED but DORMANT (the 13.7 honesty pattern).** `build_mcp_host`
+   threads `approval_engine=runtime.approval_engine`, so the 13.5b2 MCP approval seam
+   is now bound into the constructed host (any `call_tool` consults the engine instead
+   of the `tool_approval_engine_not_available` fallback). But **no portal route
+   consumes `app.state.mcp_host` today**, so the seam stays dormant until a future
+   MCP-invocation surface (or the 14A managed-runtime caller) exercises `call_tool`.
+5. **Lifecycle + fail-soft.** A dedicated lifespan-owned `httpx.AsyncClient` backs
+   the authz client, closed on shutdown AND on a fail-soft construction failure
+   (`app.state.mcp_host` stays `None` + ERROR log; the app still boots). The client
+   is predeclared so a `build_runtime` failure before assignment cannot
+   `UnboundLocalError` in cleanup. `app.state.mcp_host` is pre-seeded `None`.
+6. **CC / scope.** `protocol/plugin_registry.py` (the read-only accessor) is the one
+   CC stop-rule modification — additive, deferred-load-preserving, ≥ 95/90 verified
+   in-commit. `harness/mcp_host.py` + `portal/api/app.py` are off-gate (composition
+   wiring consuming the trusted accessor; trust is upstream). No CC promotion (count
+   stays 129). OUT of 13.8: any MCP-invocation/list route, the 14A managed-runtime
+   caller, startup discovery/trust registration.
+
 ## References
 - [Model Context Protocol — 2026 roadmap](https://blog.modelcontextprotocol.io/posts/2026-mcp-roadmap/)
 - [MCP — Wikipedia](https://en.wikipedia.org/wiki/Model_Context_Protocol)
