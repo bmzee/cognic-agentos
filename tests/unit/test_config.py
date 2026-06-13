@@ -2342,9 +2342,11 @@ class TestSprint105SchedulerSettings:
     inputs.
     """
 
-    def test_all_seven_scheduler_settings_have_positive_defaults(self) -> None:
-        """All 7 fields must satisfy the bounded invariant — defaults
-        can change per operator tuning; positive-integer bound cannot."""
+    def test_all_ten_scheduler_settings_have_positive_defaults(self) -> None:
+        """All 10 fields must satisfy the bounded invariant — defaults
+        can change per operator tuning; the positive bound cannot. Sprint 13.7
+        (ADR-022) added the 3 composition-root settings (policy bundle + the two
+        class SLAs)."""
         from cognic_agentos.core.config import Settings
 
         s = Settings(_env_file=None)  # type: ignore[call-arg]
@@ -2355,6 +2357,10 @@ class TestSprint105SchedulerSettings:
         assert s.scheduler_per_pack >= 1
         assert s.scheduler_per_actor >= 1
         assert s.scheduler_queue_ttl_s >= 1
+        # Sprint 13.7 (ADR-022) — composition-root settings.
+        assert s.scheduler_class_sla_interactive_s > 0
+        assert s.scheduler_class_sla_background_s > 0
+        assert str(s.scheduler_policy_bundle).endswith("scheduler.rego")
 
     def test_queue_depth_interactive_rejects_zero(self) -> None:
         from cognic_agentos.core.config import Settings

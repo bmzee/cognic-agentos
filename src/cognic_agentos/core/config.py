@@ -1868,6 +1868,30 @@ class Settings(BaseSettings):
             "tuning warrants it."
         ),
     )
+    scheduler_policy_bundle: Path = Field(
+        default=Path("policies/_default/scheduler.rego"),
+        description=(
+            "Sprint 13.7 (ADR-022 + ADR-015) — Rego bundle path for the "
+            "scheduler admission decision point consumed by SchedulerPolicy "
+            "at the composition root (build_runtime)."
+        ),
+    )
+    scheduler_class_sla_interactive_s: float = Field(
+        default=0.2,
+        gt=0,
+        description=(
+            "Sprint 13.7 (ADR-022) — interactive-class queue SLA (seconds); "
+            "the per-class deadline BoundedQueue uses for retry-after aging."
+        ),
+    )
+    scheduler_class_sla_background_s: float = Field(
+        default=5.0,
+        gt=0,
+        description=(
+            "Sprint 13.7 (ADR-022) — background-class queue SLA (seconds); "
+            "the per-class deadline BoundedQueue uses for retry-after aging."
+        ),
+    )
     memory_block_max_bytes: int = Field(
         default=4096,
         gt=0,

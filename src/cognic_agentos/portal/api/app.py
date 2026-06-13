@@ -612,6 +612,11 @@ def create_app(
                 # wired). The portal quota router mounts from the create_app
                 # kwarg (the same injection-seam posture).
                 app.state.quota_engine = runtime.quota_engine
+                # Sprint 13.7 (ADR-022) — expose the scheduler for the 14A
+                # managed-runtime path + introspection. None on the gateway-only
+                # path (cache-conditional construction). NO router mount + NO
+                # create_app kwarg in 13.7 (Fork D — construct + expose only).
+                app.state.scheduler = runtime.scheduler
 
                 # #489 — setting-driven reaper: build the CheckpointStore
                 # from the live adapter pool AFTER open_all() so the
@@ -790,6 +795,7 @@ def create_app(
     # path — no cache → no engine).
     app.state.kill_switch_engine = None
     app.state.quota_engine = None  # Sprint 13.6b — same introspection seam.
+    app.state.scheduler = None  # Sprint 13.7 (ADR-022) — same introspection seam.
 
     # Middleware add order is OUTER-LAST in Starlette: the call chain
     # walks the most-recently-added middleware first. We want the
