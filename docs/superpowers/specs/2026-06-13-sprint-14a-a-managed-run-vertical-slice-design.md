@@ -28,9 +28,11 @@ First production-grade **exercised** managed-run path: a `submit → scheduler a
 ```
 Caller (e2e in 14A-A; POST /runs in 14A-A2)
   └─ ManagedRunExecutor.run(RunRequest)            [core/run/executor.py — CC, SDK-free]
+       0. pack_loader.load_for_run(pack_uuid) -> LoadedPackRecord; 4 checks (exist/tenant/pack_id/installed)
+          (any check fails -> RunResult(refused) + run.refused evidence; no submit, no sandbox)
        1. submit(SubmitInput)            -> scheduler admit + scheduler.admission_accepted
           (refused -> RunResult(refused) + run.refused evidence; no sandbox)
-       2. mark_running(task_id)          -> scheduler.task_started   (NO sandbox_adapter — Fork A)
+       2. mark_running(uuid.UUID(task_id)) -> scheduler.task_started   (NO sandbox_adapter — Fork A)
        3. backend.create(policy, actor=request.actor, tenant_id=request.tenant_id,
              pack_context=ctx, requires_credentials=())  -> SandboxSession   [injected DockerSibling]
        4. session.exec(argv, timeout_s)  -> SandboxExecResult(stdout, stderr, exit_code)
@@ -45,27 +47,42 @@ Caller (e2e in 14A-A; POST /runs in 14A-A2)
               FUNCTION-LOCAL aiodocker + backend imports keep the module SDK-free; the factory
               get_backend() OWNS the canonical catalog + egress image from settings]
            app.state.sandbox_backend = backend
+           pack_loader = PackRecordStoreLoader(store=PackRecordStore(adapters.relational.engine))  [harness/sandbox.py]
            app.state.managed_run_executor = ManagedRunExecutor(scheduler=runtime.scheduler,
-              sandbox_backend=backend, decision_history_store=runtime.decision_history_store, settings=...)
+              sandbox_backend=backend, pack_loader=pack_loader,
+              decision_history_store=runtime.decision_history_store, settings=...)
            (lifespan retains docker_client; closes it on shutdown + on fail-soft)
        else: app.state.sandbox_backend = None; app.state.managed_run_executor = None  (+ warning)
 ```
 
 Three units, clear boundaries:
 - **`core/run/executor.py` (NEW, CC):** the `ManagedRunExecutor` — the run authority. SDK-free (interfaces only). Takes an injected `SandboxBackend` + the `SchedulerEngine` + a `DecisionHistoryStore`.
-- **`harness/sandbox.py` (NEW, off-gate composition):** `is_sandbox_available()` + `build_sandbox_backend()`. The *module* is SDK-free-import; the concrete backend + `aiodocker` are imported FUNCTION-LOCALLY inside `build_sandbox_backend` (only reached on the SDK-present path). Mirrors `harness/mcp_host.py`. Returns `(backend, docker_client)` so the lifespan can close the owned client.
+- **`harness/sandbox.py` (NEW, off-gate composition):** `is_sandbox_available()` + `build_sandbox_backend()` + the `PackRecordStoreLoader` conformer (the `PackRecordLoader` seam impl — wraps `PackRecordStore`, projects `PackRecord → LoadedPackRecord`; lives here because `core/run` cannot import `packs`). The *module* is SDK-free-import; the concrete backend + `aiodocker` are imported FUNCTION-LOCALLY inside `build_sandbox_backend` (only reached on the SDK-present path); `PackRecordStore` is a normal module-level import (not the SDK). Mirrors `harness/mcp_host.py`. `build_sandbox_backend` returns `(backend, docker_client)` so the lifespan can close the owned client.
 - **`portal/api/app.py` (off-gate, MODIFIED):** the SDK-gated lifespan branch + `app.state.sandbox_backend` + `app.state.managed_run_executor` + closing the owned `docker_client` on shutdown.
 
 ## 4. The executor (`core/run/executor.py`, CC)
 
 `ManagedRunExecutor(*, scheduler: SchedulerEngine, sandbox_backend: SandboxBackend,
-decision_history_store: DecisionHistoryStore, settings: Settings)` with one public async method
-`run(request: RunRequest) -> RunResult`.
+pack_loader: PackRecordLoader, decision_history_store: DecisionHistoryStore, settings: Settings)` with one
+public async method `run(request: RunRequest) -> RunResult`.
 
-- **`RunRequest`** (frozen): `tenant_id: str`, `pack_id: str`, `argv: tuple[str, ...]` (NOT a shell
-  string — passed verbatim to `session.exec`), `actor: Actor`. Risk tier + resource policy are a
-  minimal default for 14A-A (read-only-tier, canonical image, modest cpu/mem/walltime) — manifest-driven
-  is 14A-B.
+- **`PackRecordLoader` seam + `LoadedPackRecord` projection (layering — `core → packs` is forbidden).** There
+  are **zero** `core → packs` imports in the repo today; the scheduler reads pack state via the
+  `PackStateInterrogator` Protocol seam (conformer in `subagent/conformers.py`) precisely to hold that
+  invariant. `core/run` does the same: it owns a `PackRecordLoader` Protocol — `async def load_for_run(self, *,
+  pack_uuid: uuid.UUID) -> LoadedPackRecord | None` — and a core-owned frozen `LoadedPackRecord` projection
+  (`tenant_id: str | None`, `pack_id: str`, `kind: str`, `signed_artefact_digest: bytes`, `state: str`). The
+  **conformer lives OUTSIDE `core`** (in `harness/sandbox.py`) and does the **direct** `store.load(pack_uuid)`
+  (UUID-keyed, no tenant scan) + projects `PackRecord → LoadedPackRecord`. So `core/run` imports NO `packs`
+  type at all (not even TYPE_CHECKING — the projection is core-owned). The executor calls the seam, then runs
+  the four checks (§6) on the projection.
+
+- **`RunRequest`** (frozen): `tenant_id: str`, `pack_id: str`, `pack_uuid: uuid.UUID`, `pack_version: str`,
+  `argv: tuple[str, ...]` (NOT a shell string — passed verbatim to `session.exec`), `actor: Actor`. Risk tier +
+  resource policy are a minimal default for 14A-A (read-only-tier, canonical image, modest cpu/mem/walltime) —
+  manifest-driven is 14A-B. `pack_uuid` is the `PackRecord.id` for the direct trusted-record load (the str
+  `pack_id` is the scheduler/admission identity); `pack_version` is caller-supplied display/runtime context
+  (NOT the trust anchor — see the pack-record load in §6).
   - **`actor` is `portal.rbac.actor.Actor`** (the authenticated request actor, carrying scopes), because
     `SandboxBackend.create(*, actor: Actor, ...)` requires exactly that type (protocol.py:654). `core/run`
     references it via a **`TYPE_CHECKING`-only import** (mirrors `sandbox.protocol`'s own TYPE_CHECKING
@@ -79,7 +96,9 @@ decision_history_store: DecisionHistoryStore, settings: Settings)` with one publ
 - **`RunResult`** (frozen): `task_id: str | None`, `terminal_state: Literal["completed","failed","refused"]`,
   `exit_code: int | None`, `stdout: bytes`, `stderr: bytes`, `refusal_reason: str | None`. Raw output here is
   for the caller ONLY — never the chain.
-- **Lifecycle (F3):** `submit` → on refusal, emit `run.refused` (value-free) + return; on accept,
+- **Lifecycle (F3):** **load+validate the trusted `PackRecord` (pre-submit — see §6)** → on any validation
+  failure, emit `run.refused` (value-free, closed reason) + return (NO scheduler submit, NO sandbox); then
+  `submit` → on refusal, emit `run.refused` (value-free) + return; on accept,
   `mark_running` → `await backend.create(policy, actor=request.actor, tenant_id=request.tenant_id,
   pack_context=ctx, requires_credentials=())` (the full grounded signature — `actor` + `tenant_id` are
   required keyword args, protocol.py:654-655) → `session.exec(list(argv), timeout_s=...)` → capture →
@@ -100,12 +119,14 @@ decision_history_store: DecisionHistoryStore, settings: Settings)` with one publ
   `decision_audit` mirror surfaces these automatically (NO new UI family). The scheduler
   (`admission_accepted`/`task_started`/`task_completed`) + sandbox-lifecycle
   (`created`/`exec_completed[exit_code]`/`destroyed`) rows complete the evidence trail.
-- **No SDK imports + arrow:** `core/run` imports the SDK-free `sandbox.protocol` + `sandbox.policy`
+- **No SDK imports + arrows:** `core/run` imports the SDK-free `sandbox.protocol` + `sandbox.policy`
   interfaces + `core.scheduler` + `core.decision_history`. AST fence at
   `tests/unit/architecture/test_run_no_sdk_import.py` pins: (a) **no `aiodocker` / `kubernetes_asyncio`**
   import in `core/run/`; (b) **no RUNTIME `cognic_agentos.portal` import** (the `portal.rbac.Actor` reference
   is TYPE_CHECKING-only — the fence allows it under an `if TYPE_CHECKING:` block, forbids it elsewhere, exactly
-  as `sandbox.protocol` is structured). So the `core → portal` arrow holds at runtime.
+  as `sandbox.protocol` is structured); (c) **no `cognic_agentos.packs` import at all** (not even
+  TYPE_CHECKING — pack access is via the `PackRecordLoader` seam returning the core-owned `LoadedPackRecord`;
+  the conformer lives in `harness/sandbox.py`). So the `core → portal` and `core → packs` arrows both hold.
 
 ## 5. The backend construction (F2 — off-gate, SDK-gated, fail-soft)
 
@@ -171,22 +192,38 @@ decision_history_store: DecisionHistoryStore, settings: Settings)` with one publ
 
 ## 6. The run request → scheduler + sandbox inputs (F4)
 
+- **Pack-record load + validation (pre-submit, the first executor step).** The executor loads the trusted
+  record via `record = await pack_loader.load_for_run(pack_uuid=request.pack_uuid)` → a `LoadedPackRecord`
+  projection (the conformer in `harness/sandbox.py` does the direct UUID-keyed `store.load(request.pack_uuid)`
+  — NOT a tenant-wide scan — and projects it; see §4), then runs four fail-closed safety checks, each emitting
+  `run.refused` with a **closed reason** (no scheduler submit, no sandbox) on failure:
+  1. `record is None` → `pack_record_not_found`.
+  2. `record.tenant_id != request.tenant_id` → `pack_record_tenant_mismatch`.
+  3. `record.pack_id != request.pack_id` → `pack_record_pack_id_mismatch`.
+  4. `record.state != "installed"` → `pack_record_not_installed` (executor-side **defense in depth** — it
+     intentionally duplicates the scheduler's `pack_state_interrogator` gate, BEFORE sandbox-context
+     construction). These four are a closed `RunRefusalReason` Literal owned by `core/run`.
+  The trusted derivations: `pack_kind = record.kind`; **`pack_artifact_digest = record.signed_artefact_digest.hex()`**
+  (the trust anchor — from the loaded record, never the caller); `pack_version = request.pack_version`
+  (caller-supplied display/runtime context — `PackRecord` has NO version field, and the sandbox treats it as
+  display-only). The e2e seeds one `installed` pack (the 13.7 seed pattern).
 - **`SubmitInput`** (`core/scheduler/_types`): `tenant_id` / `pack_id` (from the request) / `actor` (the
   `TaskActor` the executor **projects** from `request.actor` — `subject` / `tenant_id` / `actor_type`) /
-  `class_="interactive"` / `pack_kind` (from the installed pack record) / `pack_risk_tier="read_only"`
+  `class_="interactive"` / `pack_kind` (`= record.kind`) / `pack_risk_tier="read_only"`
   (minimal default for 14A-A) / `requested_estimated_tokens` (a small fixed default).
-- **`PackAdmissionContext`** (`sandbox/policy`): `pack_id` / `pack_version` / `pack_artifact_digest` (from
-  the installed pack record) / `risk_tier="read_only"` / `declares_dynamic_install=False` /
-  **`profile="production"`** (required `Literal["production","development"]` field, policy.py:130 — no
-  default; the production profile is what a real bank deploy runs) / `data_classes=()`.
+- **`PackAdmissionContext`** (`sandbox/policy`): `pack_id` (`= request.pack_id`) / `pack_version`
+  (`= request.pack_version`) / `pack_artifact_digest` (`= record.signed_artefact_digest.hex()`) /
+  `risk_tier="read_only"` / `declares_dynamic_install=False` / **`profile="production"`** (required
+  `Literal["production","development"]` field, policy.py:130 — no default; the production profile is what a
+  real bank deploy runs) / `data_classes=()`.
 - **`SandboxPolicy`** (`sandbox/policy`): a minimal valid default — `runtime_image=
   settings.sandbox_canonical_runtime_python_image` (the digest-pinned canonical image, config.py:1643 — NOT a
   hardcoded literal), `read_only_root=True`, modest `cpu_cores`/`memory_mb`/`walltime_s`,
   `egress_allow_list=()`, `vault_path=None`, `warm_pool_key=None`.
-- **Installed-pack precondition:** the scheduler's `pack_state_interrogator` already refuses
-  `refused_pack_not_installed`; the executor surfaces that as `RunResult(terminal_state="refused")`. The
-  executor loads the installed pack record (`PackRecordStore`) to fill `pack_kind` / `pack_version` /
-  `pack_artifact_digest`. The e2e seeds one installed pack (the 13.7 seed pattern).
+- **Scheduler installed-gate (defense in depth):** the scheduler's `pack_state_interrogator` ALSO refuses
+  `refused_pack_not_installed` at `submit` (a TOCTOU race after the executor's check 4); the executor surfaces
+  that as `RunResult(terminal_state="refused", refusal_reason="refused_pack_not_installed")` (the scheduler's
+  closed outcome). Both layers cover the not-installed case.
 - **argv safety:** `request.argv` is a `tuple[str, ...]` passed verbatim as `list(argv)` to
   `session.exec(command: list[str], ...)` — NO `sh -c`/string concatenation in the executor (the command
   is the workload's argv; a pack that wants a shell declares it in its own argv).
@@ -231,20 +268,29 @@ decision_history_store: DecisionHistoryStore, settings: Settings)` with one publ
 
 ## 10. Task sketch (for the plan)
 
-- **T1** — `core/run/executor.py`: `RunRequest` (incl. `actor: Actor` via TYPE_CHECKING) / `RunResult` +
-  `ManagedRunExecutor.run` (the full lifecycle incl. the `TaskActor` projection + the `actor`/`tenant_id`
-  create args + failure semantics + value-free evidence) + the stub-backend always-run orchestration tests
-  (refuse / complete / non-zero-exit-still-completes / infra-fail / teardown-finally / actor-projection /
-  tenant-mismatch-assert). CC task — own halt + verify-at-promotion + AST fence (no SDK + no runtime portal;
-  TYPE_CHECKING `Actor` allowed) + CC-count 129→130 (gate file + self-test).
-- **T2** — `harness/sandbox.py`: `is_sandbox_available()` + `build_sandbox_backend()` (function-local SDK
-  imports; mints the `VaultTransport` + wraps it in `VaultCredentialAdapter`; passes `checkpoint_store=None`;
-  returns `(backend, docker_client)`) + the `settings.sandbox_runtime_enabled` flag (default `False`) in
-  `core/config.py` + the SDK-gated lifespan construction of BOTH `app.state.sandbox_backend` AND
-  `app.state.managed_run_executor` (NO `Runtime` slot) + closing the owned `docker_client` on shutdown.
-  Tests: SDK-absent (both slots `None`, no client leak); `sandbox_runtime_enabled=False` (no construction);
-  missing-`vault_addr` fail-soft (both slots `None` + warning); construction-fail-soft (both `None` + client
-  closed); both slots pre-seeded `None`.
+- **T1** — `core/run/executor.py` (+ the `PackRecordLoader` seam + `LoadedPackRecord` projection — same module
+  or a `core/run/_seams.py`): `RunRequest` (incl. `pack_uuid: uuid.UUID`, `pack_version: str`, `actor: Actor`
+  via TYPE_CHECKING) / `RunResult` / the closed `RunRefusalReason` Literal (`pack_record_not_found` /
+  `pack_record_tenant_mismatch` / `pack_record_pack_id_mismatch` / `pack_record_not_installed`) +
+  `ManagedRunExecutor.run` (the full lifecycle incl. the pre-submit pack-load + 4 checks, the `TaskActor`
+  projection, the `uuid.UUID(decision.task_id)` conversion, the `actor`/`tenant_id` create args, failure
+  semantics, value-free evidence) + the stub-backend + stub-loader always-run orchestration tests (the 4
+  pack-validation refusals / scheduler-refuse / complete / non-zero-exit-still-completes / infra-fail /
+  teardown-finally / actor-projection / tenant-mismatch-assert). CC task — own halt + verify-at-promotion +
+  AST fence (no SDK + no runtime portal + no `packs` import; TYPE_CHECKING `Actor` allowed) + CC-count
+  129→130 (gate file + self-test).
+- **T2** — `harness/sandbox.py`: `is_sandbox_available()` (DockerSibling-only) + `build_sandbox_backend()`
+  (function-local SDK imports; mints the `VaultTransport` + wraps it in `VaultCredentialAdapter`; passes
+  `checkpoint_store=None`; returns `(backend, docker_client)`) + the `PackRecordStoreLoader` conformer
+  (`PackRecordLoader` impl over `PackRecordStore`) + the `settings.sandbox_runtime_enabled` (default `False`)
+  AND `settings.sandbox_policy_bundle` (default `Path("policies/_default/sandbox.rego")`) flags in
+  `core/config.py` + the SDK-gated lifespan construction of `app.state.sandbox_backend` AND
+  `app.state.managed_run_executor` (threading `pack_loader=PackRecordStoreLoader(...)`; NO `Runtime` slot) +
+  closing the owned `docker_client` on shutdown. Tests: SDK-absent (both slots `None`, no client leak);
+  `sandbox_runtime_enabled=False` (no construction); `kubernetes_pod` deferred (`is_sandbox_available` False +
+  warning); missing-`vault_addr` fail-soft (both slots `None` + warning); construction-fail-soft (both `None` +
+  client closed); both slots pre-seeded `None`; `PackRecordStoreLoader` projects a `PackRecord` correctly +
+  returns `None` on a missing row.
 - **T3** — the env-gated real-docker e2e (`COGNIC_RUN_DOCKER_SANDBOX=1`): real backend + executor + the
   canonical-image deterministic argv; assert exit_code + stdout + the chain rows. **Valve checkpoint here**:
   if T1+T2 already crossed reviewable size, T3 is the natural 14A-A close and the route/checkpoint→wake stay
@@ -255,8 +301,16 @@ decision_history_store: DecisionHistoryStore, settings: Settings)` with one publ
 
 ## 11. Resolved decisions
 
-- Executor in `core/run/executor.py` (CC, SDK-free interfaces only, AST-fenced: no SDK + no runtime portal);
-  count 129→130.
+- Executor in `core/run/executor.py` (CC, SDK-free interfaces only, AST-fenced: no SDK + no runtime portal +
+  no `packs` import); count 129→130.
+- Pack-record access via the `core/run`-owned `PackRecordLoader` seam + `LoadedPackRecord` projection (the
+  `core → packs` arrow is forbidden — zero such imports today; the conformer `PackRecordStoreLoader` lives in
+  `harness/sandbox.py` and does the direct UUID-keyed `store.load(pack_uuid)`). `RunRequest` carries
+  `pack_uuid` (load key) + `pack_version` (display/runtime context). The executor runs four pre-submit
+  fail-closed checks on the `LoadedPackRecord` — exist / tenant-match / pack_id-match / `state=="installed"`
+  (executor-side defense in depth duplicating the scheduler seam) — each a closed `RunRefusalReason`. Trust
+  anchor = `record.signed_artefact_digest.hex()` (never the caller); `pack_kind=record.kind`;
+  `PackAdmissionContext.pack_version=request.pack_version`.
 - 14A-A is **DockerSibling-only** — `is_sandbox_available` returns `True` only for
   `sandbox_backend == "docker_sibling"` + `aiodocker` importable; `kubernetes_pod` fail-softs (deferred
   warning, both `app.state` slots `None`). Multi-backend (real K8s construction) stays out of 14A-A.
