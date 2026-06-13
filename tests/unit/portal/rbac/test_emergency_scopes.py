@@ -1,9 +1,11 @@
-"""Sprint 11.5b T1 — EmergencyRBACScope closed-enum + namespace disjointness.
+"""EmergencyRBACScope closed-enum + namespace disjointness.
 
-Pins the single 11.5b emergency scope value and asserts disjointness from
-every existing scope family (wire-protocol-public: overlap creates ambiguity
-in 403 scope_not_held denial bodies). Also pins the 4→7 MemoryRBACScope
-extension that lands in the same T1 commit.
+Sprint 11.5b T1 seeded the single ``emergency.kill.memory_write_freeze``
+value; Sprint 13.6 T5 grows the family to 9 (the 7 ADR-018 kill-switch
+classes + the seed + ``emergency.read`` for the GET surfaces). Disjointness
+from every existing scope family stays pinned (wire-protocol-public: overlap
+creates ambiguity in 403 scope_not_held denial bodies). Also pins the 4→7
+MemoryRBACScope extension that landed in the same 11.5b T1 commit.
 """
 
 import typing
@@ -18,10 +20,34 @@ from cognic_agentos.portal.rbac.scopes import (
     UIRBACScope,
 )
 
+_EXPECTED_13_6_EMERGENCY_SCOPES = {
+    # The 7 ADR-018 kill-switch classes (the ADR's scope column, §34-42).
+    "emergency.kill.pack",
+    "emergency.kill.tool",
+    "emergency.kill.model",
+    "emergency.kill.tenant_packs",
+    "emergency.kill.tenant_full",
+    "emergency.kill.cloud",
+    "emergency.kill.feature",
+    # The 11.5b seed class.
+    "emergency.kill.memory_write_freeze",
+    # Sprint 13.6 — the read scope for GET /kill-switches + GET /audit.
+    "emergency.read",
+}
 
-def test_emergency_scope_is_exactly_the_one_11_5b_value():
-    assert set(typing.get_args(EmergencyRBACScope)) == {"emergency.kill.memory_write_freeze"}
-    assert frozenset({"emergency.kill.memory_write_freeze"}) == EMERGENCY_SCOPES
+
+def test_emergency_scope_is_exactly_the_nine_13_6_values():
+    assert set(typing.get_args(EmergencyRBACScope)) == _EXPECTED_13_6_EMERGENCY_SCOPES
+    assert frozenset(_EXPECTED_13_6_EMERGENCY_SCOPES) == EMERGENCY_SCOPES
+
+
+def test_require_scope_constructs_for_new_emergency_values():
+    # The Actor/RequireScope unions already carry EmergencyRBACScope —
+    # growth is purely additive; this pins that no widening edit is needed.
+    from cognic_agentos.portal.rbac.enforcement import RequireScope
+
+    dep = RequireScope("emergency.kill.model")
+    assert callable(dep)
 
 
 def test_emergency_scope_disjoint_from_every_other_family():
