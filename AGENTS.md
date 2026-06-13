@@ -52,7 +52,7 @@ Stop for human review when touching:
 - Evidence-pack format (changes how examiners audit)
 - Model registry lifecycle transitions (`models/` + `models/trust.py` + `portal/api/models/lifecycle_routes.py` — register/promote/retire route module added at Sprint 9.5 B4 owns the cosign path-containment helper `_resolve_under_tenant_root` per the resolve-then-validate doctrine, the cosign-OUTSIDE-transaction `_verify_record_signature` with the B4 R2 P1 bundle-digest recompute-before-cosign evidence-integrity gate, the body-aware promote-scope resolution + HumanActor gate when `target_state="serving"`, the state-aware HumanActor gate at `/retire` when current state is `serving`, and the wire-body-collapse cross-tenant invisibility contract (`portal/rbac/model_tenant_isolation.py` — model module ships the stronger wire-collapse than the pack equivalent: cross-tenant + unknown both render as 404 `model_not_found` so a probe cannot distinguish; internal log retains `tenant_id_mismatch` for ops + SIEM correlation))
 - Pack data-governance contracts (`packs/evidence/data_governance.py`, runtime DLP enforcement)
-- Kill-switch / quota enforcement (`core/emergency/kill_switches.py`, `core/emergency/quotas.py`)
+- Kill-switch / quota enforcement (`core/emergency/kill_switches.py` — the full 8-class matrix landed Sprint 13.6a; `core/emergency/quotas.py` — Sprint 13.6b, not yet created)
 - Policy-as-code engine (`core/policy/engine.py` + Rego bundles in `policies/_default/`)
 - Memory governance enforcement (`core/memory/` per ADR-019)
 - UI event-stream contract (`protocol/ui_events.py` per ADR-020 — public event schema, must remain backward-compatible across versions)
@@ -77,10 +77,11 @@ The following modules are **critical controls**. They get extra scrutiny — 95%
 - `core/citation.py`
 - `retrieval/citation_verifier.py`
 
-*Runtime authority + emergency (Sprint 13.5):*
+*Runtime authority + emergency (Sprint 13.5 approval; Sprint 13.6a kill switches):*
 - `core/approval/engine.py` (per ADR-014 — runtime tool approval; 4-eyes; risk-tier enforcement)
 - `core/policy/engine.py` (per ADR-015 — Rego decision engine for admission, routing, approval, egress, sub-agent spawn, lifecycle)
-- `core/emergency/kill_switches.py` + `core/emergency/quotas.py` (per ADR-018 — fail-closed kill switches with ≤30s P99 propagation)
+- `core/emergency/kill_switches.py` (per ADR-018 — fail-closed kill switches with ≤30s P99 propagation. Sprint 13.6a landed the full `KillSwitchEngine` 8-class matrix (`memory_write_freeze` seed + `pack`/`tool`/`model`/`tenant_packs`/`tenant_full`/`cloud_routing`/`feature`) alongside the UNTOUCHED 11.5b seed: generalized `cognic:killswitch:<class>:<scope_key>` scheme, seed-identical fail-closed cache, brake-before-evidence `flip`/`revert` emitting value-free `emergency.kill_switch_flipped`/`_reverted` chain rows (ISO A.6.2.5 + A.9.2; `kill_switch_live_evidence_degraded` on evidence failure with the switch LIVE), `check_gateway` precedence `tenant_full→model[alias-keyed]→cloud_routing`, `SchedulerKillSwitchConformer` (the `KillSwitchInterrogator` real conformer; DI-bound at the composition-root sprint) + `MemoryFreezeConformer` (seed OR tenant_full). Gateway F4 gate + memory freeze are production-wired via `build_runtime`; the operator portal surface (`portal/api/emergency/routes.py`, off-gate) mounts from the `create_app(emergency_engine=...)` kwarg (approval-13.5b1 injection-seam posture). `enforcement_status` honesty: `memory_write_freeze`/`model`/`cloud_routing`/`tenant_full` LIVE; `pack`/`tenant_packs`/`tool`/`feature` `armed_no_live_consumer` until their consumers wire.)
+- `core/emergency/quotas.py` (per ADR-018 — the `QuotaEngine` Redis token meter + the two-method `QuotaInterrogator` conformer. **Sprint 13.6b — NOT yet created**; deliberately split from 13.6a at the half-1 VALVE so the quota arc (a `gateway_call_ledger` migration + Lua atomic check-and-reserve + gateway/portal/RBAC re-touch) gets its own design checkpoint. Promotion to the CC durable gate happens at its landing commit.)
 
 *Plugin trust + supply chain:*
 - `protocol/plugin_registry.py` (entry-point discovery)
