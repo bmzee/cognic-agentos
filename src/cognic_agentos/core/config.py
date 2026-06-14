@@ -1680,6 +1680,25 @@ class Settings(BaseSettings):
             "verification fail-closes for them (no silent trust)."
         ),
     )
+    sandbox_runtime_enabled: bool = Field(
+        default=False,
+        description=(
+            "Sprint 14A-A (ADR-004/022): enable eager construction of the "
+            "managed-run sandbox backend + executor in the FastAPI lifespan. "
+            "Conservative default False so a kernel deploy does not open a docker "
+            "client unbidden; gated additionally on is_sandbox_available() "
+            "(DockerSibling-only in 14A-A). Env override: "
+            "COGNIC_SANDBOX_RUNTIME_ENABLED."
+        ),
+    )
+    sandbox_policy_bundle: Path = Field(
+        default=Path("policies/_default/sandbox.rego"),
+        description=(
+            "Sprint 14A-A: the OPA Rego bundle the managed-run sandbox backend's "
+            "admission engine (OPAEngine) evaluates per ADR-015 + ADR-004. "
+            "Env override: COGNIC_SANDBOX_POLICY_BUNDLE."
+        ),
+    )
 
     @field_validator(
         "sandbox_canonical_runtime_python_image",

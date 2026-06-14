@@ -2139,6 +2139,19 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     ("src/cognic_agentos/core/approval/engine.py", 0.95, 0.90),
     ("src/cognic_agentos/core/approval/storage.py", 0.95, 0.90),
     ("src/cognic_agentos/core/approval/policy.py", 0.95, 0.90),
+    # Sprint 14A-A (ADR-022 + ADR-004) — the managed-run executor: the first
+    # EXERCISED managed-run authority. Loads + validates the trusted pack record
+    # (four fail-closed pre-submit checks), admits through the scheduler, owns
+    # the sandbox session directly (create/exec/destroy, Fork A), routes the
+    # failure semantics (non-zero exit -> complete; create/exec exception ->
+    # scheduler.fail + finally-guarded teardown), and emits value-free run.*
+    # evidence (separate stdout/stderr sha256 + byte counts; never raw output).
+    # CC because a bug here lets an unvalidated pack reach sandbox-context
+    # construction or mis-routes the create/exec failure semantics. SDK-free +
+    # portal-runtime-free + packs-free (AST-fenced at
+    # tests/unit/architecture/test_run_no_sdk_import.py). Pack access via the
+    # PackRecordLoader seam (conformer in harness/sandbox.py).
+    ("src/cognic_agentos/core/run/executor.py", 0.95, 0.90),
 )
 
 
