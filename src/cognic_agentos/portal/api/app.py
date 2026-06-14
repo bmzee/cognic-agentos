@@ -51,6 +51,7 @@ from cognic_agentos.db.adapters import (
     bundled_registry,
     load_bundled_adapters,
 )
+from cognic_agentos.harness.sandbox import is_sandbox_available
 from cognic_agentos.llm.ledger import GatewayCallLedger
 from cognic_agentos.models.storage import ModelRecordStore
 from cognic_agentos.models.trust import ModelTrustGate
@@ -463,6 +464,9 @@ def create_app(
         # closes it — a build_runtime failure before assignment must not leave
         # this name unbound when the finally runs.
         mcp_http_client: httpx.AsyncClient | None = None
+        # Sprint 14A-A (ADR-004): the lifespan owns the sandbox docker client;
+        # predeclare so the finally can close it even if construction failed early.
+        sandbox_docker_client: Any | None = None
 
         async def _shutdown_checkpoint_reaper() -> None:
             # cancel() then await so CancelledError propagates cleanly to
@@ -655,6 +659,53 @@ def create_app(
                 else:
                     logger.warning("mcp.host_unavailable_in_image", extra={"missing_module": "mcp"})
 
+                # Sprint 14A-A (ADR-004/022): SDK-gated managed-run sandbox
+                # backend + executor construction. DockerSibling-only; fail-soft.
+                # build_runtime stays SDK-free; this is the lifespan's job (the
+                # backend needs aiodocker + Vault + OPA + a real scheduler).
+                # sandbox_docker_client is predeclared above so the finally can
+                # close it even if construction raised early.
+                if (
+                    is_sandbox_available(settings)
+                    and settings.sandbox_runtime_enabled
+                    and runtime.scheduler is not None
+                ):
+                    from cognic_agentos.core.run.executor import ManagedRunExecutor
+                    from cognic_agentos.harness.sandbox import (
+                        PackRecordStoreLoader,
+                        build_sandbox_backend,
+                    )
+
+                    try:
+                        backend, sandbox_docker_client = await build_sandbox_backend(
+                            settings=settings, runtime=runtime
+                        )
+                        app.state.sandbox_backend = backend
+                        app.state.managed_run_executor = ManagedRunExecutor(
+                            scheduler=runtime.scheduler,
+                            sandbox_backend=backend,
+                            pack_loader=PackRecordStoreLoader(
+                                store=PackRecordStore(adapters.relational.engine)
+                            ),
+                            decision_history_store=runtime.decision_history_store,
+                            settings=settings,
+                        )
+                    except Exception:
+                        logger.error("sandbox.runtime_construction_failed", exc_info=True)
+                        if sandbox_docker_client is not None:
+                            await sandbox_docker_client.close()
+                        sandbox_docker_client = None
+                        app.state.sandbox_backend = None
+                        app.state.managed_run_executor = None
+                elif settings.sandbox_runtime_enabled:
+                    logger.warning(
+                        "sandbox.runtime_unavailable_or_disabled",
+                        extra={
+                            "sandbox_backend": settings.sandbox_backend,
+                            "scheduler_present": runtime.scheduler is not None,
+                        },
+                    )
+
                 # #489 — setting-driven reaper: build the CheckpointStore
                 # from the live adapter pool AFTER open_all() so the
                 # relational adapter's engine is connected. This build is
@@ -716,6 +767,11 @@ def create_app(
                 # constructed on the SDK-present path.
                 if mcp_http_client is not None:
                     await mcp_http_client.aclose()
+                # Sprint 14A-A (ADR-004): close the lifespan-owned sandbox docker
+                # client. Predeclared above, so this never UnboundLocalErrors;
+                # None unless the backend was constructed on the SDK-present path.
+                if sandbox_docker_client is not None:
+                    await sandbox_docker_client.close()
         finally:
             # All background tasks created above are cancelled here. This
             # envelope opened BEFORE any task creation, so a startup
@@ -840,6 +896,8 @@ def create_app(
     app.state.quota_engine = None  # Sprint 13.6b — same introspection seam.
     app.state.scheduler = None  # Sprint 13.7 (ADR-022) — same introspection seam.
     app.state.mcp_host = None  # Sprint 13.8 (ADR-002) — SDK-gated; lifespan populates.
+    app.state.sandbox_backend = None  # Sprint 14A-A (ADR-004) — SDK-gated; lifespan populates.
+    app.state.managed_run_executor = None  # Sprint 14A-A (ADR-022) — lifespan populates.
 
     # Middleware add order is OUTER-LAST in Starlette: the call chain
     # walks the most-recently-added middleware first. We want the
