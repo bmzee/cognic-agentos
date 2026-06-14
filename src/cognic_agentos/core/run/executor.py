@@ -23,13 +23,23 @@ from typing import TYPE_CHECKING, Literal, Protocol
 
 from cognic_agentos.core.decision_history import DecisionHistoryStore, DecisionRecord
 from cognic_agentos.core.scheduler._types import SubmitInput, TaskActor, TaskFailedPayload
-from cognic_agentos.sandbox.policy import PackAdmissionContext, SandboxPolicy
-from cognic_agentos.sandbox.protocol import SandboxBackend, SandboxExecResult
 
 if TYPE_CHECKING:
     from cognic_agentos.core.config import Settings
     from cognic_agentos.core.scheduler.engine import SchedulerEngine
     from cognic_agentos.portal.rbac.actor import Actor
+
+    # sandbox.policy / sandbox.protocol are imported under TYPE_CHECKING (for the
+    # annotations) + FUNCTION-LOCALLY where constructed (_build_policy /
+    # _build_pack_context). They are NOT module-level imports because
+    # ``sandbox.policy -> sandbox.audit -> core.vault -> hvac`` pulls the Vault
+    # SDK, which the kernel image (no ``adapters`` extra) lacks — a module-level
+    # import would break the kernel boot when ``app.py`` imports this module.
+    # The runtime construction only fires when the executor RUNS, which only
+    # happens in the adapters image (where hvac exists). Pinned by
+    # tests/unit/architecture/test_run_no_sdk_import.py::test_core_run_imports_without_hvac.
+    from cognic_agentos.sandbox.policy import PackAdmissionContext, SandboxPolicy
+    from cognic_agentos.sandbox.protocol import SandboxBackend, SandboxExecResult
 
 logger = logging.getLogger(__name__)
 
@@ -285,6 +295,12 @@ class ManagedRunExecutor:
                     )
 
     def _build_policy(self) -> SandboxPolicy:
+        # Function-local import: sandbox.policy pulls hvac transitively (via
+        # sandbox.audit -> core.vault). This only fires when the executor RUNS,
+        # which only happens in the adapters image (where hvac exists) — keeping
+        # the module import kernel-boot-clean.
+        from cognic_agentos.sandbox.policy import SandboxPolicy
+
         return SandboxPolicy(
             cpu_cores=1.0,
             cpu_time_budget_s=None,
@@ -298,6 +314,9 @@ class ManagedRunExecutor:
     def _build_pack_context(
         self, record: LoadedPackRecord, request: RunRequest
     ) -> PackAdmissionContext:
+        # Function-local import (kernel-boot-clean — see _build_policy).
+        from cognic_agentos.sandbox.policy import PackAdmissionContext
+
         return PackAdmissionContext(
             pack_id=request.pack_id,
             pack_version=request.pack_version,
