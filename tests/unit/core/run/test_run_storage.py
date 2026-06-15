@@ -125,6 +125,9 @@ async def test_pending_to_refused_pre_running(db: AsyncEngine) -> None:
 
 
 async def test_reserved_pair_transition_refuses(db: AsyncEngine) -> None:
+    # A3b legalised running->suspended, so this storage-preflight reserved-vocab
+    # pin moved to a still-reserved target: ``cancelled`` has no
+    # _STATE_TO_DECISION_TYPE entry and no legal pair, so the preflight refuses.
     store = RunRecordStore(db)
     args = _mk(store)
     await store.create_run(**args)  # type: ignore[arg-type]
@@ -141,7 +144,7 @@ async def test_reserved_pair_transition_refuses(db: AsyncEngine) -> None:
             run_id=args["run_id"],  # type: ignore[arg-type]
             tenant_id="tenant-a",
             from_state="running",
-            to_state="suspended",
+            to_state="cancelled",
             actor_id="svc",
             request_id="r",
         )
@@ -317,3 +320,125 @@ async def test_reserved_payload_key_overlap_raises(db: AsyncEngine) -> None:
             request_id="r",
             payload_extras={"run_id": "forged"},
         )
+
+
+# --- Sprint 14A-A3b: suspend/wake transition targets ---------------------------
+
+
+async def test_running_to_suspended_persists_session_and_checkpoint(db: AsyncEngine) -> None:
+    store = RunRecordStore(db)
+    run_id = uuid.uuid4()
+    await store.create_run(
+        run_id=run_id,
+        tenant_id="t1",
+        pack_id="p",
+        pack_uuid=uuid.uuid4(),
+        pack_version="1",
+        request_id="rq",
+    )
+    await store.transition(
+        run_id=run_id,
+        tenant_id="t1",
+        from_state="pending",
+        to_state="running",
+        actor_id="alice",
+        request_id="rq",
+        task_id=uuid.uuid4(),
+    )
+    cid = uuid.uuid4().hex  # CheckpointId hex (32 chars)
+    await store.transition(
+        run_id=run_id,
+        tenant_id="t1",
+        from_state="running",
+        to_state="suspended",
+        actor_id="alice",
+        request_id="rq",
+        session_id="sess-1",
+        checkpoint_id=cid,
+    )
+    rec = await store.load(run_id, tenant_id="t1")
+    assert rec is not None and rec.state == "suspended"
+    assert rec.session_id == "sess-1" and rec.checkpoint_id == cid
+
+
+async def test_suspended_to_woken_to_completed(db: AsyncEngine) -> None:
+    store = RunRecordStore(db)
+    run_id = uuid.uuid4()
+    await store.create_run(
+        run_id=run_id,
+        tenant_id="t1",
+        pack_id="p",
+        pack_uuid=uuid.uuid4(),
+        pack_version="1",
+        request_id="rq",
+    )
+    await store.transition(
+        run_id=run_id,
+        tenant_id="t1",
+        from_state="pending",
+        to_state="running",
+        actor_id="alice",
+        request_id="rq",
+        task_id=uuid.uuid4(),
+    )
+    await store.transition(
+        run_id=run_id,
+        tenant_id="t1",
+        from_state="running",
+        to_state="suspended",
+        actor_id="alice",
+        request_id="rq",
+        session_id="s",
+        checkpoint_id=uuid.uuid4().hex,
+    )
+    await store.transition(
+        run_id=run_id,
+        tenant_id="t1",
+        from_state="suspended",
+        to_state="woken",
+        actor_id="alice",
+        request_id="rq",
+    )
+    await store.transition(
+        run_id=run_id,
+        tenant_id="t1",
+        from_state="woken",
+        to_state="completed",
+        actor_id="alice",
+        request_id="rq",
+    )
+    rec = await store.load(run_id, tenant_id="t1")
+    assert rec is not None and rec.state == "completed"
+
+
+async def test_suspended_decision_type_is_run_lifecycle_suspended() -> None:
+    from cognic_agentos.core.run.storage import _STATE_TO_DECISION_TYPE
+
+    assert _STATE_TO_DECISION_TYPE["suspended"] == "run.lifecycle.suspended"
+    assert _STATE_TO_DECISION_TYPE["woken"] == "run.lifecycle.woken"
+
+
+async def test_stale_read_on_suspend_pair_refuses(db: AsyncEngine) -> None:
+    store = RunRecordStore(db)
+    run_id = uuid.uuid4()
+    await store.create_run(
+        run_id=run_id,
+        tenant_id="t1",
+        pack_id="p",
+        pack_uuid=uuid.uuid4(),
+        pack_version="1",
+        request_id="rq",
+    )
+    # row is 'pending'; claim from_state='running' -> stale -> refused
+    with pytest.raises(RunTransitionRefused) as exc:
+        await store.transition(
+            run_id=run_id,
+            tenant_id="t1",
+            from_state="running",
+            to_state="suspended",
+            actor_id="a",
+            request_id="rq",
+            session_id="s",
+            checkpoint_id=uuid.uuid4().hex,
+        )
+    assert exc.value.reason == "run_transition_invalid_state_pair"

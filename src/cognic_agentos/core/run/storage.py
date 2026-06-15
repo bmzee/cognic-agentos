@@ -80,16 +80,20 @@ _RESERVED_TRANSITION_PAYLOAD_KEYS: Final[frozenset[str]] = frozenset(
     }
 )
 
-#: Transition-target state → chain decision_type. The A3a subset (5 reachable
-#: transition targets; genesis ``pending`` uses run.lifecycle.pending in
-#: create_run). A3b EXPANDS this map (suspended/woken/cancelled) alongside
-#: _A3A_VALID_TRANSITIONS — NEVER the RunState vocabulary (the doctrine pin).
+#: Transition-target state → chain decision_type. A3b EXPANDED the A3a subset
+#: (running/completed/failed/refused/pending_approval) with suspended/woken
+#: alongside ``_A3B_VALID_TRANSITIONS`` (the suspend/wake matrix in _types.py).
+#: ``cancelled`` stays reserved (no map entry, no legal pair). Genesis
+#: ``pending`` uses run.lifecycle.pending in create_run. This map EXPANDS over
+#: the slices — NEVER the RunState vocabulary (the doctrine pin).
 _STATE_TO_DECISION_TYPE: Final[dict[RunState, str]] = {
     "running": "run.lifecycle.running",
     "completed": "run.lifecycle.completed",
     "failed": "run.lifecycle.failed",
     "refused": "run.lifecycle.refused",
     "pending_approval": "run.lifecycle.pending_approval",
+    "suspended": "run.lifecycle.suspended",  # A3b
+    "woken": "run.lifecycle.woken",  # A3b
 }
 
 _GENESIS_DECISION_TYPE: Final[str] = "run.lifecycle.pending"
