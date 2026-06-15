@@ -6,11 +6,13 @@ pure-functional validator; the closed-enum + state-machine drift detectors at
 tests/unit/core/run/test_run_types.py cover the surface). No I/O; no DB access.
 
 DOCTRINE (Sprint 14A-A3a, locked): the RunState VOCABULARY is fixed here at 9
-values. Future slices (A3b suspend/wake, A3c) may only EXPAND
-``_A3A_VALID_TRANSITIONS`` (add legal pairs over the existing states) — NEVER
-add a state value (that would be a stored-column-vocabulary migration). The
-``test_reserved_pairs_refuse_until_expanded`` pin proves the reserved pairs
-refuse today.
+values. Future slices (A3b suspend/wake, A3c) may only EXPAND the legal-
+transition matrix (add legal pairs over the existing states) — NEVER add a
+state value (that would be a stored-column-vocabulary migration). Sprint
+14A-A3b expanded the matrix via ``_A3B_VALID_TRANSITIONS`` (the suspend/wake
+pairs) over the same fixed 9-value vocab; ``validate_transition`` consults the
+``_VALID_TRANSITIONS`` union. The ``test_reserved_pairs_refuse_after_a3b`` pin
+proves the still-reserved pairs refuse today.
 """
 
 from __future__ import annotations
@@ -49,6 +51,26 @@ _A3A_VALID_TRANSITIONS: Final[frozenset[tuple[RunState, RunState]]] = frozenset(
     }
 )
 
+#: Sprint 14A-A3b — EXPAND ONLY (vocab unchanged): the suspend/wake pairs the
+#: A3b runtime can actually produce. No woken->refused (no post-wake refusal
+#: source); no woken->running / woken->suspended (no re-loop / re-suspend); no
+#: cancelled pairs (still reserved).
+_A3B_VALID_TRANSITIONS: Final[frozenset[tuple[RunState, RunState]]] = frozenset(
+    {
+        ("running", "suspended"),
+        ("suspended", "woken"),
+        ("suspended", "refused"),
+        ("suspended", "failed"),
+        ("woken", "completed"),
+        ("woken", "failed"),
+    }
+)
+
+#: The full legal matrix consumed by validate_transition (12 pairs).
+_VALID_TRANSITIONS: Final[frozenset[tuple[RunState, RunState]]] = (
+    _A3A_VALID_TRANSITIONS | _A3B_VALID_TRANSITIONS
+)
+
 
 class RunTransitionRefused(Exception):
     """Raised by validate_transition on an illegal (from_state, to_state) pair.
@@ -64,7 +86,7 @@ def validate_transition(*, from_state: RunState, to_state: RunState) -> None:
     """Pure-functional run-state-machine validator. No I/O. Keyword-only args
     eliminate the positional-misuse bug class. Raises RunTransitionRefused on an
     illegal pair; returns None on a legal pair."""
-    if (from_state, to_state) not in _A3A_VALID_TRANSITIONS:
+    if (from_state, to_state) not in _VALID_TRANSITIONS:
         raise RunTransitionRefused("run_transition_invalid_state_pair")
 
 
