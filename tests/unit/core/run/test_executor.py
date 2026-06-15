@@ -140,6 +140,7 @@ class _StubBackend:
         self._create_error = create_error
         self._destroy_error = destroy_error
         self.created: list[_StubSession] = []
+        self.last_approval_request_id: uuid.UUID | None = None
 
     async def create(
         self,
@@ -152,6 +153,7 @@ class _StubBackend:
         requires_credentials=(),
         approval_request_id=None,
     ):
+        self.last_approval_request_id = approval_request_id
         if self._create_error is not None:
             raise self._create_error
         session = _StubSession(
@@ -198,6 +200,7 @@ def _request(
     pack_version: str = "1.0.0",
     argv: tuple[str, ...] = ("printf", "ok"),
     actor: Actor | None = None,
+    approval_request_id: uuid.UUID | None = None,
 ) -> RunRequest:
     return RunRequest(
         tenant_id=tenant_id,
@@ -208,6 +211,7 @@ def _request(
         actor=actor
         if actor is not None
         else Actor(subject="svc-a", tenant_id="tenant-a", scopes=frozenset(), actor_type="service"),
+        approval_request_id=approval_request_id,
     )
 
 
@@ -339,6 +343,17 @@ async def test_happy_path_completes_with_value_free_evidence(
     assert payload["stdout_sha256"] == hashlib.sha256(b"ok\n").hexdigest()
     assert payload["stdout_bytes"] == 3
     assert "stdout" not in payload and "stderr" not in payload  # no raw output in chain
+
+
+# --- Sprint 14A-A2b: executor threads request.approval_request_id into create -
+async def test_run_threads_approval_request_id_into_backend_create(
+    db: AsyncEngine, settings: Settings
+) -> None:
+    backend = _StubBackend(exec_result=SandboxExecResult(stdout=b"", stderr=b"", exit_code=0))
+    arid = uuid.uuid4()
+    ex = _executor(db, backend=backend, loader=_StubLoader(_record()), settings=settings)
+    await ex.run(_request(approval_request_id=arid))
+    assert backend.last_approval_request_id == arid
 
 
 # --- non-zero exit is a COMPLETED run, not a scheduler failure ---------------

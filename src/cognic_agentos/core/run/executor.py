@@ -269,6 +269,7 @@ class ManagedRunExecutor:
                     tenant_id=request.tenant_id,
                     pack_context=ctx,
                     requires_credentials=(),
+                    approval_request_id=request.approval_request_id,
                 )
             except SandboxLifecycleRefused as exc:
                 if exc.reason == _SANDBOX_APPROVAL_PENDING_REASON:
