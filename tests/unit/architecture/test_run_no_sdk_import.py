@@ -77,7 +77,12 @@ def _module_level_imports(path: pathlib.Path) -> set[str]:
 
 def test_run_dir_has_expected_sources() -> None:
     # Non-vacuous guard: a NEW core/run module forces a deliberate fence review.
-    assert {p.name for p in _run_sources()} == {"__init__.py", "executor.py"}
+    assert {p.name for p in _run_sources()} == {
+        "__init__.py",
+        "executor.py",
+        "_types.py",
+        "storage.py",
+    }
 
 
 def test_core_run_no_sdk_import() -> None:
@@ -137,6 +142,7 @@ def test_core_run_imports_without_hvac() -> None:
         "        return None\n"
         "sys.meta_path.insert(0, _B())\n"
         "import cognic_agentos.core.run.executor\n"
+        "import cognic_agentos.core.run.storage\n"
         "import cognic_agentos.harness.sandbox\n"
     )
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)

@@ -2152,6 +2152,18 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     # tests/unit/architecture/test_run_no_sdk_import.py). Pack access via the
     # PackRecordLoader seam (conformer in harness/sandbox.py).
     ("src/cognic_agentos/core/run/executor.py", 0.95, 0.90),
+    # Sprint 14A-A3a (ADR-022 + ADR-004) — the durable run-record store: the
+    # run-lifecycle tenant-isolation + chain-atomicity boundary (mirrors
+    # core/scheduler/storage.py + packs/storage.py). RunRecordStore drives every
+    # run-state transition through DecisionHistoryStore.append_with_precondition
+    # (atomic chain row + state-cache UPDATE under one transaction, Doctrine Lock
+    # D). CC because the SELECT ... FOR UPDATE tenant-scoped row lock + the
+    # reserved-payload-key guard + the closed-enum transition gate are the
+    # run-substrate's correctness boundary that A3b resume builds on. Store-only /
+    # dormant in A3a (no production caller). core/run/_types.py (RunState +
+    # validate_transition) stays OFF-gate (pure types, drift-pinned) per the
+    # core/scheduler/_types.py precedent.
+    ("src/cognic_agentos/core/run/storage.py", 0.95, 0.90),
 )
 
 

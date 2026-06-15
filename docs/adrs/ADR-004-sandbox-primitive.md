@@ -180,6 +180,10 @@ Sprint 14A-A2 closes the 14A-A item-3 "the sandbox-approval seam stays UNWIRED" 
 
 **Deferred:** the **wake-path** approval correlator — the wake-revalidation `admit_policy` calls (`docker_sibling.py` ~`:2559`, `kubernetes_pod.py` ~`:2429`) are deliberately UNCHANGED. Checkpoint→wake is a separate slice; threading only `approval_engine` without an approval correlator onto a dormant surface would half-wire approval. Backend-level checkpoint→wake for managed runs, MCP `call_tool`, and manifest-driven policy remain forward items.
 
+## Amendment — 2026-06-15 (Sprint 14A-A3a — run-persistence substrate; `checkpoint_id` String(32) seam)
+
+Sprint 14A-A3a ships the durable run-record substrate (`core/run/storage.py` `RunRecordStore` + `runs` table, ADR-022) that the future checkpoint→wake / resume arc depends on. The sandbox-relevant surface owned here: the `runs.checkpoint_id` column is **`String(32)`** — the sandbox `CheckpointId = NewType("CheckpointId", str)` (a 32-char `uuid4().hex` per `sandbox/checkpoint_store.py`), NOT a UUID. A3b's run→session resolver will populate `runs.session_id` + `runs.checkpoint_id` so a resume request can map a `run_id` → the suspended `session_id` → `backend.wake(session_id)`. **Store-only / dormant in A3a** — no executor/route/sandbox wiring yet (A3b/A3c). The `CheckpointMetadata` approval-correlator extension + the wake-path `admit_policy` threading that the 14A-A2 amendment above left deferred remain A3c. Full detail in the ADR-022 Sprint-14A-A3a amendment.
+
 ## References
 - [Anthropic — Managed Agents: Decoupling brain from hands](https://www.anthropic.com/engineering/managed-agents)
 - [Local-First Agent Runtime](https://www.huuphan.com/2026/04/local-first-agent-runtime-guide.html)
