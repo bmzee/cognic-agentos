@@ -46,6 +46,7 @@ from cognic_agentos.portal.rbac.scopes import (
     ModelRBACScope,
     PackRBACScope,
     QuotaRBACScope,
+    RunRBACScope,
     ToolApprovalRBACScope,
     UIRBACScope,
 )
@@ -254,7 +255,8 @@ def RequireScope(
     | QuotaRBACScope
     | EvalRBACScope
     | ConfigOverlayRBACScope
-    | ToolApprovalRBACScope,
+    | ToolApprovalRBACScope
+    | RunRBACScope,
 ) -> Callable[..., Awaitable[Actor]]:
     """FastAPI dependency factory — admit the request iff the bound
     :class:`Actor` holds ``scope``.
