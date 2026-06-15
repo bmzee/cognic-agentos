@@ -333,6 +333,18 @@ Sprint 14A-A lands the first production-grade EXERCISED managed-run path, closin
 
 **Deferred (14A-A2+):** the `POST /api/v1/runs` portal route, backend-level checkpoint→wake, scheduler-driven suspend/resume, sub-agent dispatch, the real parent-budget resolver, multi-backend (K8s), and broad approval/quota/kill-switch exercise. 14A-A proves the executor through its API + the env-gated real-docker e2e (`tests/integration/run/test_managed_run_e2e.py`), not portal reachability.
 
+## Sprint 14A-A2 amendment (2026-06-14) — `POST /api/v1/runs` production caller + executor pending-approval contract
+
+Sprint 14A-A2 lands the `POST /api/v1/runs` portal route — the production caller that LIVE-exercises `ManagedRunExecutor` and, through `scheduler.submit`, the scheduler approval seam (13.5c2). It closes the 14A-A "WIRED-DORMANT" gap for the synchronous-run lane. **No new gate module** (the route + DTO are off-gate; `core/run/executor.py` stays on the gate at 100%/100%); CC count stays **130**.
+
+1. **The route (off-gate).** `portal/api/runs/routes.py::build_run_routes()` is mounted UNCONDITIONALLY at construction (eval-router pattern) under `/api/v1/runs`; the request-time `_require_managed_run_executor` dep returns **503 `sandbox_runtime_unavailable`** when the lifespan did not populate `app.state.managed_run_executor` (SDK absent / `sandbox_runtime_enabled=False` / construction fail-soft). `RequireScope("run.submit")` (the new `RunRBACScope`, on-gate in `portal/rbac/scopes.py` + `actor.py` + `enforcement.py`); NO `RequireHumanActor` (the sandbox approval seam owns the per-tier human checkpoint). `RunSubmitRequest` (frozen, `extra="forbid"`) carries `{pack_id, pack_uuid, pack_version, argv, approval_request_id?}`; `tenant_id` + actor come ONLY from the bound `Actor` (no body fields); `argv` non-empty + bounded. `RunResponse` returns raw stdout/stderr **base64-encoded + byte counts** (bytes are not an accidental wire ambiguity).
+
+2. **Executor pending-approval contract + the F3 status map.** `RunResult.terminal_state` gains `pending_approval` (`RunTerminalState` 3 → 4) + an `approval_request_id: str | None` field. At `backend.create`, the executor catches `SandboxLifecycleRefused` (FUNCTION-LOCAL import — kernel-boot-clean, no module-level sandbox import; pinned by `test_core_run_no_module_level_sandbox_import` + the hvac subprocess probe) and maps per the F3 contract: `sandbox_approval_pending` → cancel the running task + emit value-free `run.pending_approval` + return `pending_approval`/**202**; any OTHER `SandboxLifecycleRefused` (governance/admission refusal) → cancel + `run.refused` + **409**; a generic `create()` exception OR any `exec()` exception → `scheduler.fail` + `run.failed` + **502**. `completed` (incl. non-zero exit) → **200**. Policy/admission refusal is a governance conflict (409), not infrastructure failure (502).
+
+3. **`approval_request_id` threading — see the ADR-004 + ADR-014 Sprint-14A-A2 amendments.** The route threads `body.approval_request_id` → `RunRequest` → `backend.create` → `admit_policy`; this WIRES the 13.5c1 sandbox approval seam for **cold-create only** (the wake path stays deferred).
+
+**Still deferred (14A-A2+):** backend-level checkpoint→wake (+ its approval correlator), scheduler-driven suspend/resume, sub-agent dispatch + the real `LocalParentBudgetResolver` + a top-level run→budget snapshot, multi-backend (K8s production), MCP `call_tool` exercise (a run route alone does not invoke MCP unless the workload calls a tool).
+
 ## References
 
 - AGENTS.md "Critical-controls rule" + "Stop rules" — scheduler module-set added at Sprint 10.5 (gate 85 → 89); `policies/_default/scheduler.rego` added to stop-rule policy bundle list
