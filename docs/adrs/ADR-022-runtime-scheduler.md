@@ -345,6 +345,22 @@ Sprint 14A-A2 lands the `POST /api/v1/runs` portal route — the production call
 
 **Still deferred (14A-A2+):** backend-level checkpoint→wake (+ its approval correlator), scheduler-driven suspend/resume, sub-agent dispatch + the real `LocalParentBudgetResolver` + a top-level run→budget snapshot, multi-backend (K8s production), MCP `call_tool` exercise (a run route alone does not invoke MCP unless the workload calls a tool).
 
+## Sprint 14A-A3a amendment (2026-06-15) — durable run-record substrate (`core/run/storage.py` + `runs` table)
+
+Sprint 14A-A3a is the first slice of the deferred checkpoint→wake / run-persistence arc (split A3a foundation → A3b resolver/resume → A3c wake approval correlator). A3a ships the **durable run-record substrate** a future resume path depends on; success is "a correct substrate proven by tests," NOT "resume works." **Store-only / dormant — it is NOT wired into the executor or the route** (A3b wires it); proven by 14 unit tests + the migration drift suite + an env-gated PG/Oracle row-lock canary.
+
+1. **`RunState` vocabulary (fixed) + transition subset (expand-only doctrine).** The full **9-value** `RunState` Literal is fixed at A3a: `pending` / `running` / `completed` / `failed` / `refused` / `pending_approval` (active) + `suspended` / `woken` / `cancelled` (reserved). `validate_transition` permits only the **6 synchronous pairs** the current run path can prove (`pending→running`, `pending→refused`, `running→{completed,failed,refused,pending_approval}`); the reserved suspend/wake/cancel pairs REFUSE today. **Locked doctrine:** A3b/A3c may only EXPAND the legal-transition matrix — NEVER the stored vocabulary (growing the enum would be a column-vocabulary migration). Pinned by `test_reserved_pairs_refuse_until_expanded`. Stale-read + illegal-pair share one closed-enum reason `run_transition_invalid_state_pair` (mirrors scheduler storage).
+
+2. **Atomic store (Doctrine Lock D).** `RunRecordStore.create_run` (genesis: INSERT `pending` + append `run.lifecycle.pending`) + `.transition` (SELECT … FOR UPDATE tenant-scoped row → `validate_transition` → UPDATE state + optional nullable columns → append `run.lifecycle.<to_state>`) drive `DecisionHistoryStore.append_with_precondition` — chain row + state-cache UPDATE in one transaction; refusal rolls back (no orphan row). Tenant isolation: `load`/`list_for_tenant`/the transition SELECT are tenant-scoped — a cross-tenant `run_id` reads as absent (`None` / `RunNotFound`). `list_for_tenant` paginates by `run_id` keyset cursor (dialect-portable).
+
+3. **`run.lifecycle.<state>` is DISTINCT from the executor's `run.<terminal>` evidence.** The store emits its own `run.lifecycle.*` lifecycle events (value-free run-record snapshot per the chain-payload-is-evidence-snapshot doctrine); the executor's existing direct `run.completed`/`run.failed`/`run.refused`/`run.pending_approval` output-evidence rows are UNTOUCHED. Whether A3b reconciles the two surfaces (fold output evidence into the store, or keep dual lifecycle-vs-output surfaces) is a deliberate A3b decision.
+
+4. **`runs` schema + `checkpoint_id`.** `run_id` UUID PK; `tenant_id` (NOT NULL boundary); pack identity (`pack_id`/`pack_uuid`/`pack_version`); nullable `task_id` (Uuid), `session_id` (String), `checkpoint_id` (**`String(32)`** — the sandbox `CheckpointId = uuid4().hex`, NOT a Uuid column, per ADR-004 §"Resumable-session API"), `approval_request_id` (Uuid — the approval-engine request id); `state`; timestamps. Migration `0011`; drift pinned by `tests/unit/db/test_migration_20260615_0011.py`.
+
+**CC:** `core/run/storage.py` is the ONLY newly on-gate module — count **130 → 131** (the run-lifecycle tenant-isolation + chain-atomicity boundary; 100/100 at promotion). `core/run/_types.py` + the migration stay off-gate (pure types / run-once DDL), mirroring `core/scheduler/`.
+
+**Deferred (A3b/A3c):** the executor wiring (genesis + terminal `runs` rows; `run_id` on `RunResponse`), the run→session resolver, the `POST /api/v1/runs/{run_id}/resume` route, `backend.wake()` dispatch, the suspend/wake transition pairs (A3b), and the `CheckpointMetadata` approval-correlator + wake-path `admit_policy` threading (A3c).
+
 ## References
 
 - AGENTS.md "Critical-controls rule" + "Stop rules" — scheduler module-set added at Sprint 10.5 (gate 85 → 89); `policies/_default/scheduler.rego` added to stop-rule policy bundle list
