@@ -118,6 +118,9 @@ async def build_sandbox_backend(
             decision_history_store=runtime.decision_history_store,
             checkpoint_store=checkpoint_store,
             warm_pool=None,
+            # Sprint 14A-A2b — thread the runtime approval engine so the
+            # backend consults the 13.5c1 sandbox approval seam on cold-create.
+            approval_engine=runtime.approval_engine,
         )
     except Exception:
         await docker_client.close()

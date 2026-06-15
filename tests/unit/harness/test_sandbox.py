@@ -93,6 +93,7 @@ async def test_pack_record_store_loader_returns_none_on_missing() -> None:
 class _Runtime:
     audit_store = object()
     decision_history_store = object()
+    approval_engine = object()  # Sprint 14A-A2b — threaded into get_backend
 
 
 async def test_build_sandbox_backend_fail_softs_without_vault_addr() -> None:
@@ -124,3 +125,34 @@ async def test_build_sandbox_backend_closes_client_on_internal_failure(
     with pytest.raises(RuntimeError, match="opa down"):
         await build_sandbox_backend(settings=s, runtime=_Runtime())  # type: ignore[arg-type]
     assert closed["v"] is True  # client closed before the re-raise
+
+
+async def test_build_sandbox_backend_threads_approval_engine(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Sprint 14A-A2b: build_sandbox_backend threads runtime.approval_engine into
+    # get_backend (which forwards it to the backend __init__). get_backend is
+    # imported FUNCTION-LOCALLY from backend_factory, so patch the SOURCE module.
+    from unittest.mock import AsyncMock
+
+    captured: dict[str, Any] = {}
+
+    class _FakeClient:
+        async def close(self) -> None:
+            pass
+
+    monkeypatch.setattr("aiodocker.Docker", lambda *a, **k: _FakeClient())
+    monkeypatch.setattr(
+        "cognic_agentos.core.policy.engine.OPAEngine.create", AsyncMock(return_value=object())
+    )
+
+    def _fake_get_backend(settings: Any, /, **kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr("cognic_agentos.sandbox.backend_factory.get_backend", _fake_get_backend)
+
+    runtime = _Runtime()
+    s = Settings(sandbox_backend="docker_sibling", vault_addr="http://vault:8200")
+    _backend, _client = await build_sandbox_backend(settings=s, runtime=runtime)  # type: ignore[arg-type]
+    assert captured["approval_engine"] is runtime.approval_engine

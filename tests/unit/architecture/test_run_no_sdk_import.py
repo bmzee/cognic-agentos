@@ -61,6 +61,20 @@ def _all_imports(path: pathlib.Path) -> set[str]:
     return mods
 
 
+def _module_level_imports(path: pathlib.Path) -> set[str]:
+    # Top-level body statements ONLY — excludes function-body imports AND the
+    # ``if TYPE_CHECKING:`` block (an ``ast.If`` in ``tree.body``, not an Import
+    # node). The right granularity for "must not be a module-level import".
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    mods: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            mods.update(a.name for a in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            mods.add(node.module)
+    return mods
+
+
 def test_run_dir_has_expected_sources() -> None:
     # Non-vacuous guard: a NEW core/run module forces a deliberate fence review.
     assert {p.name for p in _run_sources()} == {"__init__.py", "executor.py"}
@@ -86,6 +100,22 @@ def test_core_run_no_packs_import_at_all() -> None:
     for path in _run_sources():
         for mod in _all_imports(path):
             assert not mod.startswith("cognic_agentos.packs"), f"{path.name}: packs import {mod}"
+
+
+def test_core_run_no_module_level_sandbox_import() -> None:
+    # Sprint 14A-A2a: the pending-approval handler catches SandboxLifecycleRefused
+    # via a FUNCTION-LOCAL import (inside run()); _build_policy /
+    # _build_pack_context likewise import sandbox.policy function-locally. A
+    # MODULE-LEVEL sandbox import would pull hvac (sandbox.policy -> sandbox.audit
+    # -> core.vault -> hvac) and break kernel boot. sandbox.* may appear ONLY
+    # under TYPE_CHECKING (annotations) or inside function bodies — never at
+    # module level. Complements test_core_run_imports_without_hvac (the runtime
+    # proof) with a static module-level guard.
+    for path in _run_sources():
+        for mod in _module_level_imports(path):
+            assert not mod.startswith("cognic_agentos.sandbox"), (
+                f"{path.name}: module-level sandbox import {mod} (must be function-local)"
+            )
 
 
 def test_core_run_imports_without_hvac() -> None:

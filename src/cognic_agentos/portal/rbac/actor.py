@@ -43,6 +43,7 @@ from cognic_agentos.portal.rbac.scopes import (  # noqa: F401  (ScopeSet kept fo
     ModelRBACScope,
     PackRBACScope,
     QuotaRBACScope,
+    RunRBACScope,
     ScopeSet,
     ToolApprovalRBACScope,
     UIRBACScope,
@@ -123,6 +124,11 @@ class Actor(pydantic.BaseModel):
     #: ``scopes.py``; the portal-boundary wiring is 13.5b1 work. Additive —
     #: pre-13.5b1 actors still construct cleanly. Pinned by
     #: ``tests/unit/portal/rbac/test_tool_approval_scopes.py``.
+    #:
+    #: Sprint 14A-A2a (ADR-022) — further widened with ``RunRBACScope`` so a
+    #: run-capable actor carries ``run.submit`` for ``POST /api/v1/runs``.
+    #: Additive — pre-14A-A2a actors still construct cleanly. Pinned by
+    #: ``tests/unit/portal/rbac/test_run_scopes.py``.
     scopes: frozenset[
         PackRBACScope
         | UIRBACScope
@@ -134,6 +140,7 @@ class Actor(pydantic.BaseModel):
         | EvalRBACScope
         | ConfigOverlayRBACScope
         | ToolApprovalRBACScope
+        | RunRBACScope
     ]
     actor_type: ActorType
 

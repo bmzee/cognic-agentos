@@ -100,6 +100,7 @@ from kubernetes_asyncio.stream.ws_client import (
     STDOUT_CHANNEL,
 )
 
+from cognic_agentos.core.approval.engine import ApprovalEngine
 from cognic_agentos.core.canonical import canonical_bytes
 from cognic_agentos.core.vault import (
     CredentialLease,
@@ -975,6 +976,7 @@ class KubernetesPodSandboxBackend:
         warm_pool: SandboxWarmPool | None = None,
         checkpoint_store: CheckpointStore | None = None,
         egress_proxy_image: str | None = None,
+        approval_engine: ApprovalEngine | None = None,
     ) -> None:
         self._kube = kube_api_client
         self._namespace = namespace
@@ -985,6 +987,11 @@ class KubernetesPodSandboxBackend:
         self._dh = decision_history_store
         self._settings = settings
         self._warm_pool = warm_pool
+        # Sprint 14A-A2b (ADR-014) — optional approval engine. When non-None, it
+        # is threaded into the COLD-CREATE admit_policy so the 13.5c1 sandbox
+        # approval seam is consulted; None preserves the pre-13.5 Rego fallback.
+        # The wake path is NOT threaded in this slice (checkpoint->wake deferred).
+        self._approval_engine = approval_engine
         # Sprint 8.5 T7 — optional wiring for the CheckpointStore +
         # tombstone seam. checkpoint() / suspend() / wake() / destroy()'s
         # tombstone branch ALL require it. None is the Sprint-8B default
@@ -1026,6 +1033,7 @@ class KubernetesPodSandboxBackend:
         requires_credentials: Sequence[VaultLeaseRequest] = (),
         credential_decls: Sequence[CredentialDecl] = (),
         expected_workload_gid: int | None = None,
+        approval_request_id: _uuid.UUID | None = None,
     ) -> SandboxSession:
         """Admit + create a sandbox session per spec §6.1 + ADR-004
         amendment + Sprint-10.6 §5.8 (T21 mint-then-project lifecycle).
@@ -1136,7 +1144,9 @@ class KubernetesPodSandboxBackend:
                     raise
                 return warm
 
-        # 2. Cold-create — admission FIRST. Backend-agnostic.
+        # 2. Cold-create — admission FIRST. Backend-agnostic. Sprint 14A-A2b:
+        #    thread the approval engine + correlator (cold-create ONLY; the wake
+        #    path is deferred) — lockstep with docker_sibling.
         await admit_policy(
             policy,
             tenant_id=tenant_id,
@@ -1147,6 +1157,8 @@ class KubernetesPodSandboxBackend:
             rego_engine=self._rego,
             settings=self._settings,
             requires_credentials=requires_credentials,
+            approval_engine=self._approval_engine,
+            approval_request_id=approval_request_id,
         )
 
         # 3. Mint session_id + derive deterministic names

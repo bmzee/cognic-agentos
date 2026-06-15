@@ -140,10 +140,20 @@ class _StubBackend:
         self._create_error = create_error
         self._destroy_error = destroy_error
         self.created: list[_StubSession] = []
+        self.last_approval_request_id: uuid.UUID | None = None
 
     async def create(
-        self, policy, *, actor, tenant_id, pack_context, use_warm_pool=True, requires_credentials=()
+        self,
+        policy,
+        *,
+        actor,
+        tenant_id,
+        pack_context,
+        use_warm_pool=True,
+        requires_credentials=(),
+        approval_request_id=None,
     ):
+        self.last_approval_request_id = approval_request_id
         if self._create_error is not None:
             raise self._create_error
         session = _StubSession(
@@ -190,6 +200,7 @@ def _request(
     pack_version: str = "1.0.0",
     argv: tuple[str, ...] = ("printf", "ok"),
     actor: Actor | None = None,
+    approval_request_id: uuid.UUID | None = None,
 ) -> RunRequest:
     return RunRequest(
         tenant_id=tenant_id,
@@ -200,6 +211,7 @@ def _request(
         actor=actor
         if actor is not None
         else Actor(subject="svc-a", tenant_id="tenant-a", scopes=frozenset(), actor_type="service"),
+        approval_request_id=approval_request_id,
     )
 
 
@@ -333,6 +345,17 @@ async def test_happy_path_completes_with_value_free_evidence(
     assert "stdout" not in payload and "stderr" not in payload  # no raw output in chain
 
 
+# --- Sprint 14A-A2b: executor threads request.approval_request_id into create -
+async def test_run_threads_approval_request_id_into_backend_create(
+    db: AsyncEngine, settings: Settings
+) -> None:
+    backend = _StubBackend(exec_result=SandboxExecResult(stdout=b"", stderr=b"", exit_code=0))
+    arid = uuid.uuid4()
+    ex = _executor(db, backend=backend, loader=_StubLoader(_record()), settings=settings)
+    await ex.run(_request(approval_request_id=arid))
+    assert backend.last_approval_request_id == arid
+
+
 # --- non-zero exit is a COMPLETED run, not a scheduler failure ---------------
 async def test_non_zero_exit_still_completes(db: AsyncEngine, settings: Settings) -> None:
     backend = _StubBackend(exec_result=SandboxExecResult(stdout=b"", stderr=b"boom", exit_code=3))
@@ -357,6 +380,53 @@ async def test_create_raises_marks_failed(db: AsyncEngine, settings: Settings) -
     assert result.refusal_reason is None
     types = await _decision_types(db)
     assert "scheduler.task_started" in types and "run.failed" in types
+
+
+# --- sandbox approval-pending -> cancel + run.pending_approval + 202 (F3) -----
+async def test_run_pending_approval_returns_pending_approval(
+    db: AsyncEngine, settings: Settings
+) -> None:
+    from cognic_agentos.sandbox.protocol import SandboxLifecycleRefused
+
+    backend = _StubBackend(
+        create_error=SandboxLifecycleRefused(
+            "sandbox_approval_pending", detail="pending", approval_request_id="arid-123"
+        )
+    )
+    ex = _executor(db, backend=backend, loader=_StubLoader(_record()), settings=settings)
+    result = await ex.run(_request())
+    assert result.terminal_state == "pending_approval"
+    assert result.approval_request_id == "arid-123"
+    assert result.exit_code is None
+    assert result.refusal_reason is None
+    types = await _decision_types(db)
+    assert "run.pending_approval" in types
+    assert "run.completed" not in types and "run.failed" not in types
+    # running -> cancelled (pending cleanup releases quota + counters)
+    assert "scheduler.task_cancelled" in types
+
+
+# --- other SandboxLifecycleRefused is a governance refusal -> refused/409 (F3)-
+async def test_run_sandbox_governance_refusal_returns_refused(
+    db: AsyncEngine, settings: Settings
+) -> None:
+    from cognic_agentos.sandbox.protocol import SandboxLifecycleRefused
+
+    backend = _StubBackend(
+        create_error=SandboxLifecycleRefused(
+            "sandbox_high_risk_tier_refused_pre_13_5", detail="governance refusal"
+        )
+    )
+    ex = _executor(db, backend=backend, loader=_StubLoader(_record()), settings=settings)
+    result = await ex.run(_request())
+    assert result.terminal_state == "refused"
+    assert result.refusal_reason == "sandbox_high_risk_tier_refused_pre_13_5"
+    assert result.exit_code is None
+    types = await _decision_types(db)
+    assert "run.refused" in types
+    assert "run.failed" not in types and "run.completed" not in types
+    # governance refusal CANCELS the running task (NOT scheduler.fail)
+    assert "scheduler.task_cancelled" in types and "scheduler.task_failed" not in types
 
 
 # --- infra failure on exec -> scheduler.fail + finally-guarded destroy -------

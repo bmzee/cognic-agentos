@@ -31,6 +31,7 @@ per the round-4 single-seam contract.
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -656,6 +657,7 @@ class SandboxBackend(Protocol):
         pack_context: PackAdmissionContext,
         use_warm_pool: bool = True,
         requires_credentials: Sequence[VaultLeaseRequest] = (),
+        approval_request_id: uuid.UUID | None = None,
     ) -> SandboxSession:
         """Admit + create a sandbox session.
 

@@ -319,6 +319,23 @@ TOOL_APPROVAL_SCOPES: frozenset[ToolApprovalRBACScope] = frozenset(
 )
 
 
+#: Sprint 14A-A2a (ADR-022) — managed-run submission RBAC family. Single value
+#: ``run.submit`` consumed by ``POST /api/v1/runs``; NOT a Human-only decision
+#: (the sandbox approval seam owns the per-tier human checkpoint, so the run
+#: route does NOT also gate on :class:`RequireHumanActor`). Value-disjoint from
+#: every other family by the ``run.*`` namespace. Wire-protocol-public — the 403
+#: ``scope_not_held`` body carries it. Pinned by
+#: ``tests/unit/portal/rbac/test_run_scopes.py``.
+#:
+#: Style note: plain ``= Literal[...]`` (no ``TypeAlias`` annotation) per the
+#: repo convention at ``packs/lifecycle.py:111`` + the families above.
+RunRBACScope = Literal["run.submit"]
+
+#: All 1 run scope as a frozenset (1:1 with :data:`RunRBACScope`) for
+#: bank-overlay binders. Pinned by ``tests/unit/portal/rbac/test_run_scopes.py``.
+RUN_SCOPES: frozenset[RunRBACScope] = frozenset({"run.submit"})
+
+
 #: ADR-023 (Wave-2) — per-tenant config-overlay RBAC family. Two values in the
 #: ``config.tenant_overlay.*`` namespace, consumed by the operator-administered
 #: overlay endpoints (`portal/api/config_overlay/routes.py`):
