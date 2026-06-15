@@ -61,10 +61,17 @@ RunRefusalReason = Literal[
     "pack_record_not_installed",
 ]
 
-RunTerminalState = Literal["completed", "failed", "refused"]
+RunTerminalState = Literal["completed", "failed", "refused", "pending_approval"]
 
 #: Closed run.failed reason vocabulary (maps 1:1 to the two infra failure modes).
 RunFailedReason = Literal["sandbox_create_refused", "workload_runtime_error"]
+
+#: Sprint 14A-A2a (ADR-014) — the single sandbox approval reason that means
+#: "pending — go approve" (-> pending_approval/202). Every OTHER
+#: SandboxLifecycleRefused (governance/admission refusal) is terminal ->
+#: refused/409 (cancel + run.refused), per the F3 status map; only a generic
+#: create() exception or an exec() exception is an infra failure -> failed/502.
+_SANDBOX_APPROVAL_PENDING_REASON = "sandbox_approval_pending"
 
 
 @dataclass(frozen=True)
@@ -104,6 +111,10 @@ class RunRequest:
     pack_version: str
     argv: tuple[str, ...]
     actor: Actor
+    #: Sprint 14A-A2a (ADR-014): re-POST correlator for a previously-pending
+    #: sandbox approval. Threaded to backend.create -> admit_policy grant
+    #: verification in 14A-A2b. None on a fresh run.
+    approval_request_id: uuid.UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -117,6 +128,10 @@ class RunResult:
     stdout: bytes
     stderr: bytes
     refusal_reason: str | None
+    #: Set ONLY when terminal_state == "pending_approval"; the sandbox approval
+    #: correlator the caller re-POSTs after granting. str (OUTPUT side —
+    #: SandboxLifecycleRefused carries it as str).
+    approval_request_id: str | None = None
 
 
 def _validate_pack_record(
@@ -238,6 +253,13 @@ class ManagedRunExecutor:
         # Steps 3-7 — create -> exec -> destroy(finally) -> complete/fail -> evidence.
         policy = self._build_policy()
         ctx = self._build_pack_context(record, request)
+        # Function-local import: the except clause needs SandboxLifecycleRefused at
+        # runtime, but a module-level sandbox import would pull hvac (via
+        # sandbox.audit -> core.vault) and break kernel boot. Only fires when the
+        # executor RUNS (adapters image, where hvac exists). Pinned by
+        # tests/unit/architecture/test_run_no_sdk_import.py.
+        from cognic_agentos.sandbox.protocol import SandboxLifecycleRefused
+
         session = None
         try:
             try:
@@ -248,6 +270,35 @@ class ManagedRunExecutor:
                     pack_context=ctx,
                     requires_credentials=(),
                 )
+            except SandboxLifecycleRefused as exc:
+                if exc.reason == _SANDBOX_APPROVAL_PENDING_REASON:
+                    # pending sandbox approval is NOT a failure: cancel the running
+                    # task (running -> cancelled releases quota + counters), emit
+                    # value-free pending evidence, return the 202-shaped result.
+                    await self._scheduler.cancel(
+                        task_id, actor=task_actor, reason="actor_cancelled", request_id=request_id
+                    )
+                    await self._emit_pending(
+                        request, request_id, task_id, approval_request_id=exc.approval_request_id
+                    )
+                    return RunResult(
+                        decision.task_id,
+                        "pending_approval",
+                        None,
+                        b"",
+                        b"",
+                        None,
+                        exc.approval_request_id,
+                    )
+                # any OTHER SandboxLifecycleRefused is a governance/admission
+                # REFUSAL (high_risk_tier_refused, approval_denied/expired,
+                # catalog/egress) -> refused/409, NOT an infra failure (F3 status
+                # map). Cancel the running task + emit run.refused with the reason.
+                await self._scheduler.cancel(
+                    task_id, actor=task_actor, reason="actor_cancelled", request_id=request_id
+                )
+                await self._emit_refused(request, request_id, str(exc.reason))
+                return RunResult(decision.task_id, "refused", None, b"", b"", str(exc.reason))
             except Exception as exc:
                 await self._scheduler.fail(
                     task_id,
@@ -355,6 +406,29 @@ class ManagedRunExecutor:
                 decision_type="run.failed",
                 request_id=request_id,
                 payload={"task_id": str(task_id), "reason": reason},
+                actor_id=request.actor.subject,
+                tenant_id=request.tenant_id,
+                iso_controls=_RUN_EVIDENCE_ISO_CONTROLS,
+            )
+        )
+
+    async def _emit_pending(
+        self,
+        request: RunRequest,
+        request_id: str,
+        task_id: uuid.UUID,
+        *,
+        approval_request_id: str | None,
+    ) -> None:
+        await self._dh.append(
+            DecisionRecord(
+                decision_type="run.pending_approval",
+                request_id=request_id,
+                payload={
+                    "task_id": str(task_id),
+                    "approval_reason": _SANDBOX_APPROVAL_PENDING_REASON,
+                    "approval_request_id": approval_request_id,
+                },
                 actor_id=request.actor.subject,
                 tenant_id=request.tenant_id,
                 iso_controls=_RUN_EVIDENCE_ISO_CONTROLS,

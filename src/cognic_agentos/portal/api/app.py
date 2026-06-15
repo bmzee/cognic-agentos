@@ -1297,6 +1297,18 @@ def create_app(
         tags=["eval"],
     )
 
+    # Managed-run surface (ADR-022 — POST /api/v1/runs). Unconditional mount: the
+    # executor is populated by the lifespan only when sandbox_runtime_enabled +
+    # is_sandbox_available; the route's request-time dep returns 503
+    # sandbox_runtime_unavailable until then. Lazy import.
+    from cognic_agentos.portal.api.runs.routes import build_run_routes
+
+    app.include_router(
+        build_run_routes(),
+        prefix="/api/v1/runs",
+        tags=["runs"],
+    )
+
     from cognic_agentos.portal.api.evaluation.bulk_routes import build_eval_bulk_routes
 
     app.include_router(
