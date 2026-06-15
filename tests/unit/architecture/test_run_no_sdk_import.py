@@ -77,7 +77,7 @@ def _module_level_imports(path: pathlib.Path) -> set[str]:
 
 def test_run_dir_has_expected_sources() -> None:
     # Non-vacuous guard: a NEW core/run module forces a deliberate fence review.
-    assert {p.name for p in _run_sources()} == {"__init__.py", "executor.py"}
+    assert {p.name for p in _run_sources()} == {"__init__.py", "executor.py", "_types.py"}
 
 
 def test_core_run_no_sdk_import() -> None:
