@@ -88,8 +88,11 @@ _GATE_TOOL_PATH = _REPO_ROOT / "tools" / "check_critical_coverage.py"
 #: decomposed atomic-counter token meter + scheduler/gateway quota seam) = 129.
 #: + 1 Sprint-14A-A managed-run executor (core/run/executor.py per ADR-022 +
 #: ADR-004 — the first exercised managed-run authority) = 130.
+#: + 1 Sprint-14A-A3a run-record store (core/run/storage.py per ADR-022 +
+#: ADR-004 — the durable run-lifecycle tenant-isolation + chain-atomicity
+#: boundary; core/run/_types.py stays off-gate per the scheduler precedent) = 131.
 #: Bump this in lockstep with any deliberate ``_CRITICAL_FILES`` change.
-_EXPECTED_ENTRY_COUNT = 130
+_EXPECTED_ENTRY_COUNT = 131
 
 #: The 5 modules Sprint 7B.3 promoted to the durable gate, each by its
 #: own landing commit (T3-T6 panels + T7 composer). All ride the
