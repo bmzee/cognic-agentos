@@ -1691,10 +1691,12 @@ def test_t10_invalid_field_literal_in_lockstep_with_constant() -> None:
         frozenset(t_.get_args(SchedulerSubmitInputInvalidField))
         == _VALID_SUBMIT_INPUT_INVALID_FIELDS
     )
-    # Exactly 2 field values: parent_task_id (Sprint 10.5 Wave-1) +
-    # approval_request_id (Sprint 13.5c2 per ADR-014).
+    # Exactly 3 field values: parent_task_id (Sprint 10.5 Wave-1) +
+    # approval_request_id (Sprint 13.5c2 per ADR-014) +
+    # approval_delegated_to (Sprint 14A-A4a per ADR-022 + ADR-014).
     assert (
-        frozenset({"parent_task_id", "approval_request_id"}) == _VALID_SUBMIT_INPUT_INVALID_FIELDS
+        frozenset({"parent_task_id", "approval_request_id", "approval_delegated_to"})
+        == _VALID_SUBMIT_INPUT_INVALID_FIELDS
     )
 
 

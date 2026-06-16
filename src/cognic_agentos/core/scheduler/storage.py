@@ -273,6 +273,11 @@ class SchedulerStorage:
             }
             if submit_input.approval_verified and submit_input.approval_request_id is not None:
                 payload["approval_request_id"] = submit_input.approval_request_id
+            # Sprint 14A-A4a (ADR-022 + ADR-014): honest delegation evidence —
+            # present ONLY when non-None, alongside approval_verified=False and NO
+            # scheduler approval_request_id (the sandbox owns the checkpoint).
+            if submit_input.approval_delegated_to is not None:
+                payload["approval_delegated_to"] = submit_input.approval_delegated_to
             return DecisionRecord(
                 decision_type="scheduler.admission_accepted",
                 request_id=request_id,

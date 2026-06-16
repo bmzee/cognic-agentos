@@ -269,6 +269,16 @@ Sprint 14A-A3c wires the approval engine into the sandbox **wake-revalidation** 
 
 Test surface: `tests/unit/sandbox/backends/test_approval_threading.py` (the cross-backend wake-threading lockstep + the approval-family wrapper exemption), the `core/run/executor.py` resume suites (the no-re-mint guard: missing-id, mismatched-id, first-pending-stores-id, still-pending-no-self-loop), and the env-gated stub-engine e2e `tests/integration/run/test_managed_run_resume_approval_e2e.py`.
 
+## Sprint 14A-A4a amendment (2026-06-16) — the "approval-delegated-downstream" routing mode at the scheduler seam
+
+Sprint 14A-A4a introduces a new approval-routing mode at the 13.5c2 scheduler seam: **approval delegated to sandbox admission**. The scheduler admits a high-risk task WITHOUT minting or verifying a grant of its own, because the downstream sandbox admission gate (the 13.5c1 `admit_policy` seam) owns the human checkpoint. The scheduler-primitive detail (the field, the engine skip-consult, the `scheduler.rego` arm 3, the chain-row evidence) is owned by the ADR-022 Sprint-14A-A4a amendment; this section records the ADR-014 approval-routing surface. **Dormant + additive; CC count stays 131.**
+
+1. **A third admission path for high-risk — neither minted nor verified at the scheduler.** Before A4a a high-risk tier could clear `scheduler.rego` only via arm 2 (`approval_verified == true`, i.e. the scheduler's own 13.5c2 Arm-B verified grant). A4a adds a path where the scheduler consults the approval engine **not at all**: when `approval_delegated_to="sandbox_admission"`, Step-3.5 skips `_consult_approval` (no `create_request`, no `verify_grant_for_action`), `approval_verified` stays False, and the rego admits via the delegated arm. The approval decision is **relocated, not removed** — it fires downstream at the sandbox `admit_policy` seam (cold-create per 14A-A2, wake per 14A-A3c), which owns the pending → grant → re-POST human checkpoint.
+
+2. **Why this stays honest evidence.** The delegate signal is a routing directive, not an approval correlator — it is excluded from the scheduler approval binding digest, and the `scheduler.admission_accepted` chain row records `approval_delegated_to="sandbox_admission"` + `approval_verified=False` + no `approval_request_id`. An examiner reads "admitted because the downstream sandbox gate owns the checkpoint," distinguishable from both an auto-tier admission and a scheduler-verified grant. No fake grant is representable (the correlator key is gated on `approval_verified=True`).
+
+3. **The setter obligation guards against a high-risk bypass.** Delegation ASSERTS that a downstream sandbox approval gate exists for the same work; the scheduler cannot verify that, so it is a documented contract on the setter (the A4b managed-run executor only, in Wave-1) rather than a runtime guard. Setting the signal without a real downstream gate would turn the affordance into a scheduler high-risk bypass — the contract is pinned in the `scheduler.rego` arm-3 header, the A4a spec §3.8, and audited per-admission on the chain row.
+
 ## References
 - ADR-002 (MCP plugin protocol — pack manifests)
 - ADR-005 (sub-agent — sub-agent calls also flow through approval)

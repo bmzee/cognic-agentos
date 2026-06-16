@@ -152,6 +152,35 @@ async def test_submit_duplicate_task_id_refused_and_rolled_back(
     assert await _count_chain_rows(engine) == 1
 
 
+async def test_submit_records_approval_delegated_to_when_set(
+    store: SchedulerStorage, engine: AsyncEngine
+) -> None:
+    import dataclasses
+
+    task_id = uuid.uuid4()
+    submit = dataclasses.replace(
+        _make_submit_input(),
+        pack_risk_tier="payment_action",
+        approval_delegated_to="sandbox_admission",
+    )
+    await store.submit(task_id=task_id, submit_input=submit, request_id="req-a4a-1")
+    payload = (await _read_latest_chain_row(engine))["payload"]
+    assert isinstance(payload, dict)
+    assert payload["approval_delegated_to"] == "sandbox_admission"
+    assert payload["approval_verified"] is False  # honest: no fake grant
+    assert "approval_request_id" not in payload  # no scheduler correlator
+
+
+async def test_submit_omits_approval_delegated_to_when_none(
+    store: SchedulerStorage, engine: AsyncEngine
+) -> None:
+    task_id = uuid.uuid4()
+    await store.submit(task_id=task_id, submit_input=_make_submit_input(), request_id="req-a4a-2")
+    payload = (await _read_latest_chain_row(engine))["payload"]
+    assert isinstance(payload, dict)
+    assert "approval_delegated_to" not in payload
+
+
 # --- transition() (state-machine path) ------------------------------------
 
 

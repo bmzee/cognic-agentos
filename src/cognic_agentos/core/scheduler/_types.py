@@ -78,6 +78,13 @@ SchedulerTaskFailedReason = Literal[
 
 ActorType = Literal["human", "service"]
 
+#: Sprint 14A-A4a (ADR-022 + ADR-014) — named delegate authority. When set on a
+#: SubmitInput, the scheduler admits a high-risk task because the named downstream
+#: gate owns the human checkpoint; the scheduler mints/verifies no grant of its own.
+#: Wave-1: the only authority is the sandbox admission gate. See the A4a spec §3.8
+#: setter obligation — only the A4b managed-run executor sets it in production.
+SchedulerApprovalDelegate = Literal["sandbox_admission"]
+
 # --- Frozen public dataclasses --------------------------------------------
 
 
@@ -93,11 +100,14 @@ class TaskActor:
 @dataclass(frozen=True)
 class SubmitInput:
     """Inputs to SchedulerEngine.submit(...). All fields signed-manifest-derived
-    or actor-bound; no free-form policy strings. Two Sprint-13.5c2 exceptions
-    (ADR-014): ``approval_request_id`` is a caller-supplied correlator
-    (UUID-string, engine-boundary-validated), and ``approval_verified`` is
-    ENGINE-OWNED — the engine unconditionally overwrites whatever the caller
-    set, so it is never caller-trusted input.
+    or actor-bound; no free-form policy strings. Three non-standard fields:
+    the two Sprint-13.5c2 approval-carrier fields (ADR-014) —
+    ``approval_request_id`` is a caller-supplied correlator (UUID-string,
+    engine-boundary-validated), and ``approval_verified`` is ENGINE-OWNED (the
+    engine unconditionally overwrites whatever the caller set, so it is never
+    caller-trusted input) — plus the Sprint-14A-A4a ``approval_delegated_to``
+    routing/evidence signal (ADR-022 + ADR-014): the engine reads it to decide
+    delegated admission but NEVER binds it into the approval binding digest.
     """
 
     tenant_id: str
@@ -112,6 +122,9 @@ class SubmitInput:
     approval_request_id: str | None = None  # caller-supplied re-submit carrier
     approval_verified: bool = False  # ENGINE-OWNED attestation; engine ALWAYS overwrites
     data_classes: tuple[str, ...] = ()  # manifest [data_governance].data_classes
+    # Sprint 14A-A4a (ADR-022 + ADR-014) — routing/evidence signal (NOT a grant
+    # carrier, NOT in the approval binding digest). Default None = no delegation.
+    approval_delegated_to: SchedulerApprovalDelegate | None = None
 
 
 @dataclass(frozen=True)
