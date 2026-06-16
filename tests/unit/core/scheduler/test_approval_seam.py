@@ -878,3 +878,32 @@ class TestA4aDelegationValidation:
             request_id="req-1",
         )
         assert decision.outcome == "accepted_immediate"
+
+
+class TestA4aDelegationSkipsConsult:
+    async def test_delegated_high_tier_skips_consult_and_admits(self, tmp_path: object) -> None:
+        # approval engine WIRED + a high-risk tier that would normally pend; with
+        # delegation the engine mints NO request, leaves approval_verified False,
+        # threads approval_delegated_to to the policy, and (capturing policy
+        # allow=True) admits immediately.
+        from cognic_agentos.core.approval.storage import ApprovalRequestStore
+        from cognic_agentos.core.decision_history import DecisionHistoryStore
+
+        db = await _mk_migrated_db(tmp_path)
+        policy = _CapturingPolicy(allow=True)
+        engine = _mk_scheduler_engine(
+            db,
+            approval_engine=_mk_approval_engine(db, flow="require_4_eyes"),
+            policy=policy,
+        )
+        decision = await engine.submit(  # type: ignore[attr-defined]
+            submit_input=_seam_submit_input(approval_delegated_to="sandbox_admission"),
+            request_id="req-1",
+        )
+        assert decision.outcome == "accepted_immediate"
+        # NO scheduler approval request minted (the consult was skipped):
+        assert await ApprovalRequestStore(DecisionHistoryStore(db)).list_pending("t-1") == []  # type: ignore[arg-type]
+        # The policy saw approval_verified False AND the delegate signal:
+        seen = policy.seen[0]
+        assert seen.approval_verified is False  # type: ignore[attr-defined]
+        assert seen.approval_delegated_to == "sandbox_admission"  # type: ignore[attr-defined]

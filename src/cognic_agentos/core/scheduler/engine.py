@@ -507,7 +507,14 @@ class SchedulerEngine:
         # create_request); approval BEATS policy + quota (the Rego input
         # needs the attestation; no reservation for unapproved work).
         approval_verified = False
-        if self._approval_engine is not None:
+        if submit_input.approval_delegated_to is not None:
+            # Sprint 14A-A4a (ADR-022 + ADR-014) — delegation: the downstream
+            # sandbox admission gate owns the human checkpoint, so the scheduler
+            # mints/verifies NO grant of its own. approval_verified stays False
+            # (honest — the scheduler verified nothing); the rego admits the
+            # high-risk tier via its delegated allow arm. No consult.
+            pass
+        elif self._approval_engine is not None:
             consult = await self._consult_approval(
                 original_submit_input=submit_input,
                 approval_request_uuid=approval_request_uuid,
