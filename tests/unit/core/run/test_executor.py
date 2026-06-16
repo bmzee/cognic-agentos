@@ -173,6 +173,9 @@ class _StubBackend:
         self.last_wake_session_id: str | None = None
         self.created: list[_StubSession] = []
         self.last_approval_request_id: uuid.UUID | None = None
+        # A3c: the approval correlator the executor threads into wake() on a
+        # re-resume of a pending_approval run (admission Arm B verify).
+        self.last_wake_approval_request_id: uuid.UUID | None = None
 
     async def create(
         self,
@@ -198,12 +201,22 @@ class _StubBackend:
         self.created.append(session)
         return session
 
-    async def wake(self, session_id: str, *, actor: Any, tenant_id: str) -> _StubSession:
+    async def wake(
+        self,
+        session_id: str,
+        *,
+        actor: Any,
+        tenant_id: str,
+        approval_request_id: uuid.UUID | None = None,
+    ) -> _StubSession:
         # A3b resume seam. The conflict test REPLACES this attribute with a custom
         # coroutine (instance-attr shadow), so the executor's
         # ``self._sandbox_backend.wake(...)`` dispatches to the substitute.
+        # A3c widened the signature with ``approval_request_id`` (the wake approval
+        # correlator the executor threads on a pending_approval re-resume).
         self.wake_calls += 1
         self.last_wake_session_id = session_id
+        self.last_wake_approval_request_id = approval_request_id
         if self.wake_raises is not None:
             raise self.wake_raises
         if self.wake_returns is not None:
@@ -1030,9 +1043,14 @@ async def test_resume_concurrent_conflict_returns_conflict_without_destroy(
     loser_session = _StubSession(SandboxExecResult(stdout=b"", stderr=b"", exit_code=0))
 
     async def _wake_then_winner_claims(
-        session_id: str, *, actor: Any, tenant_id: str
+        session_id: str,
+        *,
+        actor: Any,
+        tenant_id: str,
+        approval_request_id: uuid.UUID | None = None,
     ) -> _StubSession:
         # the WINNER commits suspended->woken before this request's claim runs.
+        # (signature accepts approval_request_id — A3c widened the wake() seam.)
         await run_store.transition(
             run_id=uuid.UUID(run_id),
             tenant_id="tenant-a",
@@ -1127,3 +1145,179 @@ async def test_resume_owned_session_destroy_failure_is_swallowed(
     # the run record reached completed (suspended->woken->completed held).
     rec = await RunRecordStore(db).load(uuid.UUID(run_id), tenant_id="tenant-a")
     assert rec is not None and rec.state == "completed"
+
+
+# === Sprint 14A-A3c (Task 3): resume() — wake-pending arm + no-re-mint guard ==
+#
+# resume() now consumes a wake-pending. First resume from `suspended` that hits a
+# wake-pending -> pending_approval (store the minted approval_request_id on the
+# run row, NEVER claim/destroy). A re-resume of a pending_approval run MUST echo
+# its stored approval_request_id (admission Arm B verify) and NEVER re-enter Arm
+# A (mint) -- the F2 no-re-mint pin, asserted by the requires-id + mismatch tests
+# proving wake() is NOT called. A re-resume with the matching id walks
+# pending_approval -> woken -> completed (granted) / -> refused (denied) / still
+# pending_approval (no transition, still awaiting).
+
+
+async def _drive_to_pending_approval(
+    db: AsyncEngine,
+    settings: Settings,
+    *,
+    backend: _StubBackend,
+    arid_str: str,
+    run_record_store: RunRecordStore | None = None,
+) -> tuple[ManagedRunExecutor, str]:
+    """First resume: run -> suspended -> wake-pending. Returns (executor, run_id).
+    The same executor (same backend + run store) is reused for the re-resume."""
+    from cognic_agentos.sandbox.protocol import SandboxLifecycleRefused
+
+    ex, run_id = await _suspend_a_run(
+        db, settings, backend=backend, run_record_store=run_record_store
+    )
+    backend.wake_raises = SandboxLifecycleRefused(
+        "sandbox_approval_pending", approval_request_id=arid_str
+    )
+    res = await ex.resume(run_id=uuid.UUID(run_id), actor=_actor(), argv=("x",))
+    assert res.terminal_state == "pending_approval"
+    return ex, run_id
+
+
+async def test_resume_first_pending_transitions_suspended_to_pending_approval(
+    db: AsyncEngine, settings: Settings
+) -> None:
+    from cognic_agentos.sandbox.protocol import SandboxLifecycleRefused
+
+    arid = uuid.uuid4()
+    backend = _StubBackend(exec_result=SandboxExecResult(stdout=b"", stderr=b"", exit_code=0))
+    ex, run_id = await _suspend_a_run(db, settings, backend=backend)  # run row: suspended
+    backend.wake_raises = SandboxLifecycleRefused(
+        "sandbox_approval_pending", approval_request_id=str(arid)
+    )
+    res = await ex.resume(run_id=uuid.UUID(run_id), actor=_actor(), argv=("x",))
+    assert res.terminal_state == "pending_approval"
+    assert res.approval_request_id == str(arid)  # str on the OUTPUT side
+    assert res.task_id is None
+    rec = await RunRecordStore(db).load(uuid.UUID(run_id), tenant_id="tenant-a")
+    assert rec is not None and rec.state == "pending_approval"
+    assert rec.approval_request_id == arid  # stored as a UUID on the run row
+    # the pending arm never claims suspended->woken -> the woken session that the
+    # wake() seam would have returned is never destroyed (the refusal is raised
+    # BEFORE the claim, so nothing is owned + nothing torn down).
+    assert backend.created[0].destroy_calls == 0
+    # store-side lifecycle row + value-free run.pending_approval evidence.
+    assert await _count_lifecycle(db, run_id, "run.lifecycle.pending_approval") == 1
+    payload = await _latest_payload(db, "run.pending_approval")
+    assert payload["run_id"] == run_id
+    assert payload["task_id"] is None
+    assert payload["approval_request_id"] == str(arid)
+
+
+async def test_resume_reresume_requires_approval_id(db: AsyncEngine, settings: Settings) -> None:
+    from cognic_agentos.core.run.executor import RunResumePendingApprovalRequired
+
+    arid = uuid.uuid4()
+    backend = _StubBackend(exec_result=SandboxExecResult(stdout=b"", stderr=b"", exit_code=0))
+    ex, run_id = await _drive_to_pending_approval(db, settings, backend=backend, arid_str=str(arid))
+    wake_before = backend.wake_calls
+    with pytest.raises(RunResumePendingApprovalRequired) as exc:
+        await ex.resume(run_id=uuid.UUID(run_id), actor=_actor(), argv=("x",))  # no approval id
+    assert exc.value.run_id == uuid.UUID(run_id)
+    # F2 no-re-mint pin: wake() NOT called again -> admission Arm A (mint) unreached.
+    assert backend.wake_calls == wake_before
+    # the run row is UNCHANGED (still pending_approval, still the stored id).
+    rec = await RunRecordStore(db).load(uuid.UUID(run_id), tenant_id="tenant-a")
+    assert rec is not None and rec.state == "pending_approval"
+    assert rec.approval_request_id == arid
+
+
+async def test_resume_reresume_mismatched_id_refuses(db: AsyncEngine, settings: Settings) -> None:
+    from cognic_agentos.core.run.executor import RunResumeApprovalMismatch
+
+    arid = uuid.uuid4()
+    backend = _StubBackend(exec_result=SandboxExecResult(stdout=b"", stderr=b"", exit_code=0))
+    ex, run_id = await _drive_to_pending_approval(db, settings, backend=backend, arid_str=str(arid))
+    wake_before = backend.wake_calls
+    with pytest.raises(RunResumeApprovalMismatch) as exc:
+        await ex.resume(
+            run_id=uuid.UUID(run_id), actor=_actor(), argv=("x",), approval_request_id=uuid.uuid4()
+        )
+    assert exc.value.run_id == uuid.UUID(run_id)
+    # F2 no-re-mint pin: a mismatched id refuses BEFORE wake() -> Arm A unreached.
+    assert backend.wake_calls == wake_before
+    rec = await RunRecordStore(db).load(uuid.UUID(run_id), tenant_id="tenant-a")
+    assert rec is not None and rec.state == "pending_approval"
+
+
+async def test_resume_reresume_still_pending_no_transition(
+    db: AsyncEngine, settings: Settings
+) -> None:
+    from cognic_agentos.sandbox.protocol import SandboxLifecycleRefused
+
+    arid = uuid.uuid4()
+    backend = _StubBackend(exec_result=SandboxExecResult(stdout=b"", stderr=b"", exit_code=0))
+    ex, run_id = await _drive_to_pending_approval(db, settings, backend=backend, arid_str=str(arid))
+    # re-resume with the matching id, but wake STILL pending (awaiting second
+    # approval) -> NO self-loop transition (pending_approval -> pending_approval is
+    # not a legal pair); the run stays pending_approval.
+    backend.wake_raises = SandboxLifecycleRefused(
+        "sandbox_approval_pending", approval_request_id=str(arid)
+    )
+    wake_before = backend.wake_calls
+    res = await ex.resume(
+        run_id=uuid.UUID(run_id), actor=_actor(), argv=("x",), approval_request_id=arid
+    )
+    assert res.terminal_state == "pending_approval"
+    assert res.approval_request_id == str(arid)
+    # a re-resume with the matching id DID dispatch wake() (Arm B verify), unlike
+    # the requires-id / mismatch guards which short-circuit before wake().
+    assert backend.wake_calls == wake_before + 1
+    assert backend.last_wake_approval_request_id == arid  # echoed the stored id
+    rec = await RunRecordStore(db).load(uuid.UUID(run_id), tenant_id="tenant-a")
+    assert rec is not None and rec.state == "pending_approval"
+    # still-pending re-resume emits NO new lifecycle transition row (only the ONE
+    # from the first resume's suspended->pending_approval).
+    assert await _count_lifecycle(db, run_id, "run.lifecycle.pending_approval") == 1
+
+
+async def test_resume_reresume_granted_completes(db: AsyncEngine, settings: Settings) -> None:
+    arid = uuid.uuid4()
+    backend = _StubBackend(exec_result=SandboxExecResult(stdout=b"", stderr=b"", exit_code=0))
+    ex, run_id = await _drive_to_pending_approval(db, settings, backend=backend, arid_str=str(arid))
+    # grant verified in admission -> wake returns a live session.
+    backend.wake_raises = None
+    woken_session = _StubSession(SandboxExecResult(stdout=b"done\n", stderr=b"", exit_code=0))
+    backend.wake_returns = woken_session
+    res = await ex.resume(
+        run_id=uuid.UUID(run_id), actor=_actor(), argv=("echo", "go"), approval_request_id=arid
+    )
+    assert res.terminal_state == "completed"
+    assert res.exit_code == 0
+    assert res.stdout == b"done\n"
+    assert backend.last_wake_approval_request_id == arid  # Arm B verify correlator
+    assert woken_session.destroy_calls == 1  # claimed pending_approval->woken -> owned -> destroyed
+    rec = await RunRecordStore(db).load(uuid.UUID(run_id), tenant_id="tenant-a")
+    assert rec is not None and rec.state == "completed"  # pending_approval->woken->completed
+    assert await _count_lifecycle(db, run_id, "run.lifecycle.woken") == 1
+    assert await _count_lifecycle(db, run_id, "run.lifecycle.completed") == 1
+
+
+async def test_resume_reresume_denied_refuses(db: AsyncEngine, settings: Settings) -> None:
+    from cognic_agentos.sandbox.protocol import SandboxLifecycleRefused
+
+    arid = uuid.uuid4()
+    backend = _StubBackend(exec_result=SandboxExecResult(stdout=b"", stderr=b"", exit_code=0))
+    ex, run_id = await _drive_to_pending_approval(db, settings, backend=backend, arid_str=str(arid))
+    backend.wake_raises = SandboxLifecycleRefused(
+        "sandbox_approval_denied", approval_request_id=str(arid)
+    )
+    res = await ex.resume(
+        run_id=uuid.UUID(run_id), actor=_actor(), argv=("x",), approval_request_id=arid
+    )
+    assert res.terminal_state == "refused"
+    assert res.refusal_reason == "sandbox_approval_denied"
+    assert res.task_id is None
+    rec = await RunRecordStore(db).load(uuid.UUID(run_id), tenant_id="tenant-a")
+    assert rec is not None and rec.state == "refused"  # pending_approval->refused
+    payload = await _latest_payload(db, "run.refused")
+    assert payload["run_id"] == run_id
+    assert payload["reason"] == "sandbox_approval_denied"

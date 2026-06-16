@@ -210,6 +210,25 @@ class RunResumeConflict(Exception):
         super().__init__(f"run_resume_conflict: {run_id}")
 
 
+class RunResumePendingApprovalRequired(Exception):
+    """resume() of a run already in 'pending_approval' WITHOUT an approval_request_id.
+    The route maps it to 409 run_resume_approval_id_required. Raised BEFORE wake() so
+    admission Arm A (mint) is never reached — no silent new-pending loop."""
+
+    def __init__(self, run_id: uuid.UUID) -> None:
+        self.run_id = run_id
+        super().__init__(f"run_resume_approval_id_required: {run_id}")
+
+
+class RunResumeApprovalMismatch(Exception):
+    """resume() of a 'pending_approval' run with an approval_request_id that does not
+    match the run row's stored one. Route -> 409 run_resume_approval_id_mismatch."""
+
+    def __init__(self, run_id: uuid.UUID) -> None:
+        self.run_id = run_id
+        super().__init__(f"run_resume_approval_id_mismatch: {run_id}")
+
+
 def _resume_req(actor: Actor, record: RunRecord) -> RunRequest:
     """Minimal :class:`RunRequest` shim built from a loaded run record purely so
     the value-free ``_emit_*`` emitters can read ``actor.subject`` /
@@ -653,10 +672,38 @@ class ManagedRunExecutor:
                         },
                     )
 
-    async def resume(self, *, run_id: uuid.UUID, actor: Actor, argv: tuple[str, ...]) -> RunResult:
-        """Sprint 14A-A3b — resolve a suspended run to its sandbox session, wake
-        it, run a continuation ``argv``, and walk the run record
-        ``suspended -> woken -> completed`` (or ``-> refused`` / ``-> failed``).
+    async def resume(
+        self,
+        *,
+        run_id: uuid.UUID,
+        actor: Actor,
+        argv: tuple[str, ...],
+        approval_request_id: uuid.UUID | None = None,
+    ) -> RunResult:
+        """Sprint 14A-A3b/A3c — resolve a suspended (or re-resumed
+        pending_approval) run to its sandbox session, wake it, run a continuation
+        ``argv``, and walk the run record ``from_state -> woken -> completed`` (or
+        ``-> refused`` / ``-> failed``), where ``from_state`` is ``suspended`` on a
+        first resume and ``pending_approval`` on a granted re-resume.
+
+        Sprint 14A-A3c wake approval seam: when ``wake()`` re-runs admission and the
+        grant is still pending it raises ``SandboxLifecycleRefused(
+        "sandbox_approval_pending", approval_request_id=<str>)`` (the wake-approval
+        passthrough). A FIRST resume (from ``suspended``) transitions the run record
+        ``suspended -> pending_approval`` + stores the minted ``approval_request_id``
+        on the run row + returns terminal_state="pending_approval". The caller
+        re-POSTs after granting, supplying that ``approval_request_id``; the
+        re-resume threads it into ``wake()`` (admission Arm B — verify, NOT mint).
+
+        No-re-mint guard (F2 pin): a run already in ``pending_approval`` MUST supply
+        its stored ``approval_request_id`` — a missing id raises
+        ``RunResumePendingApprovalRequired`` and a mismatched id raises
+        ``RunResumeApprovalMismatch``, BOTH before ``wake()`` is ever dispatched, so
+        a re-resume can never re-enter admission Arm A (mint) and spin up a fresh
+        pending. A re-resume whose grant is STILL pending (wake re-raises
+        ``sandbox_approval_pending``) is a no-op: ``pending_approval ->
+        pending_approval`` is not a legal pair, so NO transition is emitted (no
+        self-loop evidence).
 
         NO scheduler calls: the scheduler slot was freed at suspend (the run()
         suspend branch calls ``scheduler.complete``). ``task_id`` is therefore
@@ -664,14 +711,15 @@ class ManagedRunExecutor:
         resume is a forward item.
 
         Claim-gated teardown (the resume-side session-tombstone race fix): wake()
-        is dispatched FIRST, then an atomic ``suspended -> woken`` claim acts as a
+        is dispatched FIRST, then an atomic ``from_state -> woken`` claim acts as a
         mutex — exactly one concurrent resume commits it. A loser sees the row
         already moved -> stale -> ``RunTransitionRefused`` -> ``RunResumeConflict``
         (409). The ``finally`` destroys ONLY a session this request OWNS (claimed
-        ``suspended -> woken``); if wake() succeeded but the claim failed (a
+        ``from_state -> woken``); if wake() succeeded but the claim failed (a
         concurrent loser, or a non-stale DB error), ``claimed_woken`` stays False
         so the session is NOT destroyed — destroying it would tombstone a session
-        the winner is executing / a run that is still suspended+resumable.
+        the winner is executing / a run that is still resumable. The pending/refused
+        arms return BEFORE the claim, so they own nothing + never destroy.
 
         TRADE-OFF: a claim-failure/loser therefore LEAVES a live woken
         container/pod orphaned. The CheckpointReaper purges only object-store
@@ -682,13 +730,30 @@ class ManagedRunExecutor:
         record = await self._runs.load(run_id, tenant_id=actor.tenant_id)
         if record is None:
             raise RunNotFound(run_id)  # -> route 404 (cross-tenant reads as absent)
-        if record.state != "suspended":
+        if record.state not in ("suspended", "pending_approval"):  # A3c — widen
             raise RunNotResumable(record.state)  # -> route 409 run_not_suspended
         if record.session_id is None:
             # Invariant: a suspended run ALWAYS has a session_id (run() persists it
             # in the suspend branch). A null here is a corrupt row, not a caller
             # error -> fail loud (never wake(None)).
             raise RuntimeError(f"run_suspended_without_session_id: {run_id}")
+        # A3c — suspended (first resume) OR pending_approval (re-resume). The
+        # post-wake transitions are keyed off from_state, NOT a hardcoded
+        # "suspended", so the claim becomes from_state->woken (both legal per T1).
+        from_state = record.state
+
+        # A3c no-re-mint guard (F2 pin): a pending_approval run MUST supply its
+        # stored approval_request_id (admission Arm B verify) and never re-enters
+        # admission Arm A (mint). Both arms raise BEFORE wake() so Arm A is
+        # unreachable on a re-resume — no silent new-pending loop.
+        if record.state == "pending_approval":
+            if approval_request_id is None:
+                raise RunResumePendingApprovalRequired(run_id)
+            if (
+                record.approval_request_id is None
+                or approval_request_id != record.approval_request_id
+            ):
+                raise RunResumeApprovalMismatch(run_id)
         rid = str(run_id)
         # Function-local import: the except clause needs SandboxLifecycleRefused at
         # runtime; a module-level sandbox import would pull hvac (sandbox.protocol
@@ -701,15 +766,58 @@ class ManagedRunExecutor:
         try:
             try:
                 session = await self._sandbox_backend.wake(
-                    record.session_id, actor=actor, tenant_id=actor.tenant_id
+                    record.session_id,
+                    actor=actor,
+                    tenant_id=actor.tenant_id,
+                    approval_request_id=approval_request_id,  # A3c — Arm B verify correlator
                 )
             except SandboxLifecycleRefused as exc:
-                # wake refusal (e.g. sandbox_wake_checkpoint_corrupt) is a
-                # governance/restore REFUSAL -> suspended -> refused + run.refused.
+                if exc.reason == _SANDBOX_APPROVAL_PENDING_REASON:
+                    # A3c wake-pending. First resume (from suspended): transition to
+                    # pending_approval + store the minted approval_request_id on the
+                    # run row. Re-resume already in pending_approval (still awaiting):
+                    # NO transition (pending_approval -> pending_approval is not a
+                    # legal pair; a self-loop would be misleading evidence). Either
+                    # way the pending arm NEVER claims suspended/pending_approval ->
+                    # woken, so it owns nothing + the finally never destroys.
+                    if from_state != "pending_approval":
+                        await self._runs.transition(
+                            run_id=run_id,
+                            tenant_id=actor.tenant_id,
+                            from_state=from_state,
+                            to_state="pending_approval",
+                            actor_id=actor.subject,
+                            request_id=request_id,
+                            approval_request_id=(
+                                uuid.UUID(exc.approval_request_id)
+                                if exc.approval_request_id
+                                else None
+                            ),
+                        )
+                    await self._emit_pending(
+                        _resume_req(actor, record),
+                        request_id,
+                        run_id=rid,
+                        task_id=None,
+                        approval_request_id=exc.approval_request_id,
+                    )
+                    return RunResult(
+                        run_id=rid,
+                        task_id=None,
+                        terminal_state="pending_approval",
+                        exit_code=None,
+                        stdout=b"",
+                        stderr=b"",
+                        refusal_reason=None,
+                        approval_request_id=exc.approval_request_id,
+                    )
+                # any OTHER SandboxLifecycleRefused (sandbox_approval_denied/expired/
+                # not_found/binding_mismatch OR sandbox_wake_*) is a governance/
+                # restore REFUSAL -> from_state -> refused + run.refused.
                 await self._runs.transition(
                     run_id=run_id,
                     tenant_id=actor.tenant_id,
-                    from_state="suspended",
+                    from_state=from_state,
                     to_state="refused",
                     actor_id=actor.subject,
                     request_id=request_id,
@@ -731,12 +839,12 @@ class ManagedRunExecutor:
                     refusal_reason=str(exc.reason),
                 )
             except Exception:
-                # any OTHER wake() exception is an infra failure -> suspended ->
+                # any OTHER wake() exception is an infra failure -> from_state ->
                 # failed + run.failed. No session was returned -> nothing to destroy.
                 await self._runs.transition(
                     run_id=run_id,
                     tenant_id=actor.tenant_id,
-                    from_state="suspended",
+                    from_state=from_state,
                     to_state="failed",
                     actor_id=actor.subject,
                     request_id=request_id,
@@ -759,16 +867,18 @@ class ManagedRunExecutor:
                 )
 
             # Atomic claim + mutex: exactly one concurrent resume commits
-            # suspended -> woken. A loser sees the row already moved -> stale ->
-            # RunTransitionRefused -> RunResumeConflict (409); claimed_woken stays
-            # False so the finally does NOT destroy. A non-RunTransitionRefused
-            # (DB) error here ALSO propagates with claimed_woken=False -> no destroy
-            # -> the rolled-back run stays suspended/resumable (no tombstone).
+            # from_state -> woken (suspended->woken on a first resume, or
+            # pending_approval->woken on a granted re-resume — both legal per T1).
+            # A loser sees the row already moved -> stale -> RunTransitionRefused ->
+            # RunResumeConflict (409); claimed_woken stays False so the finally does
+            # NOT destroy. A non-RunTransitionRefused (DB) error here ALSO propagates
+            # with claimed_woken=False -> no destroy -> the rolled-back run stays
+            # resumable (no tombstone).
             try:
                 await self._runs.transition(
                     run_id=run_id,
                     tenant_id=actor.tenant_id,
-                    from_state="suspended",
+                    from_state=from_state,
                     to_state="woken",
                     actor_id=actor.subject,
                     request_id=request_id,
