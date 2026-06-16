@@ -281,6 +281,23 @@ SandboxRefusalReason = Literal[
     "sandbox_approval_request_not_found",
 ]
 
+#: Sprint 14A-A3c — the wake refusal-collapse wrapper must let the approval
+#: family pass through un-rewrapped so the executor sees sandbox_approval_pending
+#: (and the approval_request_id). Single source of truth (no per-backend drift);
+#: both backends import this exact frozenset from protocol.py. It is a subset of
+#: the ``SandboxRefusalReason`` closed vocabulary above — drift between the two
+#: is caught by the cross-backend lockstep test at
+#: ``tests/unit/sandbox/backends/test_approval_threading.py``.
+_APPROVAL_WAKE_PASSTHROUGH_REASONS: frozenset[str] = frozenset(
+    {
+        "sandbox_approval_pending",
+        "sandbox_approval_denied",
+        "sandbox_approval_expired",
+        "sandbox_approval_request_not_found",
+        "sandbox_approval_binding_mismatch",
+    }
+)
+
 #: 6-value closed-enum for runtime policy violations during ``exec``
 #: (spec §4.2 + T10c R1 P1.2 amendment).
 #:
@@ -733,6 +750,7 @@ class SandboxBackend(Protocol):
         *,
         actor: Actor,
         tenant_id: str,
+        approval_request_id: uuid.UUID | None = None,
     ) -> SandboxSession:
         """Restore a suspended session from its latest checkpoint.
 
@@ -760,9 +778,15 @@ class SandboxBackend(Protocol):
            ``now - metadata.created_at``. Expired →
            ``sandbox_wake_checkpoint_retention_expired``.
         4. Re-run ``admit_policy`` against LIVE tenant policy / catalog
-           / Rego / settings. Refusal →
-           ``sandbox_wake_policy_revalidation_failed`` (with the
-           original 8A reason in ``detail`` per spec §2.3).
+           / Rego / settings, threading ``approval_engine`` +
+           ``approval_request_id`` (Sprint 14A-A3c — wake approval seam,
+           lockstep with cold-create). A NON-approval refusal collapses
+           to ``sandbox_wake_policy_revalidation_failed`` (with the
+           original 8A reason in ``detail`` per spec §2.3); an
+           approval-family refusal (any value in
+           :data:`_APPROVAL_WAKE_PASSTHROUGH_REASONS`) passes through
+           un-rewrapped so the executor sees ``sandbox_approval_pending``
+           + the ``approval_request_id`` correlator.
         5. Create fresh backend resource; restore workspace-tar
            snapshot into ``/workspace``. No vault-lease re-issue per
            spec §2.4 amended.
@@ -778,4 +802,12 @@ class SandboxBackend(Protocol):
         per ADR-022. Extra design lock: ``session_id`` alone is NEVER
         authorization — the tenant_id cross-check at step 2 is the
         defence-in-depth identity boundary.
+
+        ``approval_request_id`` (Sprint 14A-A3c) keyword-only, default
+        ``None`` — the request-time approval correlator threaded into
+        Step-4 ``admit_policy`` (mirror of ``create()``'s param). When
+        ``None`` (the existing resume() call's default) a wake-pending
+        still surfaces as ``sandbox_approval_pending`` un-rewrapped; the
+        read_only Wave-1 run shape never pends so production behaviour is
+        unchanged.
         """

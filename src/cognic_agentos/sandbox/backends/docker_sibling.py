@@ -121,6 +121,7 @@ from cognic_agentos.sandbox.projection import (
     compute_projection_plan,
 )
 from cognic_agentos.sandbox.protocol import (
+    _APPROVAL_WAKE_PASSTHROUGH_REASONS,
     CheckpointId,
     ProxyAccessRecord,
     SandboxBackendHealth,
@@ -2385,6 +2386,7 @@ class DockerSiblingSandboxBackend:
         *,
         actor: Actor,
         tenant_id: str,
+        approval_request_id: _uuid.UUID | None = None,
     ) -> SandboxSession:
         """Restore a suspended session per spec §3.2 + §7.1.
 
@@ -2565,8 +2567,15 @@ class DockerSiblingSandboxBackend:
                 credential_adapter=self._credential_adapter,
                 rego_engine=self._rego,
                 settings=self._settings,
+                approval_engine=self._approval_engine,  # A3c — wake approval seam
+                approval_request_id=approval_request_id,  # A3c — request-time correlator
             )
         except SandboxLifecycleRefused as original:
+            # A3c — let the approval family pass through un-rewrapped so the
+            # executor sees sandbox_approval_pending + the approval_request_id;
+            # only genuine revalidation refusals collapse.
+            if original.reason in _APPROVAL_WAKE_PASSTHROUGH_REASONS:
+                raise
             raise SandboxLifecycleRefused(
                 "sandbox_wake_policy_revalidation_failed",
                 detail=f"original={original.reason}: {original.detail}",
