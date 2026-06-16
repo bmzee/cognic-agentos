@@ -20,7 +20,9 @@ from cognic_agentos.core.run.executor import (
     RunNotResumable,
     RunRequest,
     RunResult,
+    RunResumeApprovalMismatch,
     RunResumeConflict,
+    RunResumePendingApprovalRequired,
 )
 from cognic_agentos.core.run.storage import RunNotFound
 from cognic_agentos.portal.api.runs.dto import RunResponse, RunResumeRequest, RunSubmitRequest
@@ -108,13 +110,26 @@ def build_run_routes() -> APIRouter:
         # cross-tenant run_id reads as absent -> RunNotFound -> 404), so a probe
         # cannot distinguish a foreign run from an unknown one.
         try:
-            result = await executor.resume(run_id=run_id, actor=actor, argv=tuple(body.argv))
+            result = await executor.resume(
+                run_id=run_id,
+                actor=actor,
+                argv=tuple(body.argv),
+                approval_request_id=body.approval_request_id,  # A3c — re-resume after grant
+            )
         except RunNotFound:
             raise HTTPException(status_code=404, detail={"reason": "run_not_found"}) from None
         except RunNotResumable as exc:
             raise HTTPException(
                 status_code=409,
                 detail={"reason": "run_not_suspended", "current_state": exc.current_state},
+            ) from None
+        except RunResumePendingApprovalRequired:
+            raise HTTPException(
+                status_code=409, detail={"reason": "run_resume_approval_id_required"}
+            ) from None
+        except RunResumeApprovalMismatch:
+            raise HTTPException(
+                status_code=409, detail={"reason": "run_resume_approval_id_mismatch"}
             ) from None
         except RunResumeConflict:
             raise HTTPException(status_code=409, detail={"reason": "run_resume_conflict"}) from None

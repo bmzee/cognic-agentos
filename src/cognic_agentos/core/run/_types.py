@@ -6,12 +6,14 @@ pure-functional validator; the closed-enum + state-machine drift detectors at
 tests/unit/core/run/test_run_types.py cover the surface). No I/O; no DB access.
 
 DOCTRINE (Sprint 14A-A3a, locked): the RunState VOCABULARY is fixed here at 9
-values. Future slices (A3b suspend/wake, A3c) may only EXPAND the legal-
-transition matrix (add legal pairs over the existing states) — NEVER add a
+values. Future slices (A3b suspend/wake, A3c wake-approval) may only EXPAND the
+legal-transition matrix (add legal pairs over the existing states) — NEVER add a
 state value (that would be a stored-column-vocabulary migration). Sprint
 14A-A3b expanded the matrix via ``_A3B_VALID_TRANSITIONS`` (the suspend/wake
-pairs) over the same fixed 9-value vocab; ``validate_transition`` consults the
-``_VALID_TRANSITIONS`` union. The ``test_reserved_pairs_refuse_after_a3b`` pin
+pairs); Sprint 14A-A3c expanded it again via ``_A3C_VALID_TRANSITIONS`` (the
+wake-approval pairs: ``suspended -> pending_approval -> woken/refused/failed``)
+over the same fixed 9-value vocab. ``validate_transition`` consults the
+``_VALID_TRANSITIONS`` union. The ``test_reserved_pairs_refuse_after_a3c`` pin
 proves the still-reserved pairs refuse today.
 """
 
@@ -66,9 +68,25 @@ _A3B_VALID_TRANSITIONS: Final[frozenset[tuple[RunState, RunState]]] = frozenset(
     }
 )
 
-#: The full legal matrix consumed by validate_transition (12 pairs).
+#: Sprint 14A-A3c — EXPAND ONLY (vocab unchanged): the wake-approval pairs.
+#: First resume from `suspended` that hits a wake-pending -> pending_approval;
+#: the granted re-resume claims pending_approval -> woken; a denied/expired grant
+#: or a non-approval wake-revalidation refusal -> pending_approval -> refused; a
+#: wake/exec infra-fail on re-resume -> pending_approval -> failed. No
+#: pending_approval -> pending_approval self-loop (a still-pending re-resume is a
+#: no-op, no transition).
+_A3C_VALID_TRANSITIONS: Final[frozenset[tuple[RunState, RunState]]] = frozenset(
+    {
+        ("suspended", "pending_approval"),
+        ("pending_approval", "woken"),
+        ("pending_approval", "refused"),
+        ("pending_approval", "failed"),
+    }
+)
+
+#: The full legal matrix consumed by validate_transition (16 pairs).
 _VALID_TRANSITIONS: Final[frozenset[tuple[RunState, RunState]]] = (
-    _A3A_VALID_TRANSITIONS | _A3B_VALID_TRANSITIONS
+    _A3A_VALID_TRANSITIONS | _A3B_VALID_TRANSITIONS | _A3C_VALID_TRANSITIONS
 )
 
 

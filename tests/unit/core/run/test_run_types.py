@@ -75,32 +75,52 @@ _A3B_LEGAL_PAIRS = {
     ("woken", "failed"),
 }
 
-# Reserved AFTER A3b — pairs the A3b runtime cannot produce (no re-loop, no
-# re-suspend, no direct suspended->completed, no post-wake refusal/pending,
-# cancelled still deferred). The doctrine pin: these refuse today.
-_RESERVED_PAIRS_A3B = {
-    ("woken", "running"),
-    ("woken", "suspended"),
-    ("suspended", "completed"),
-    ("suspended", "pending_approval"),
-    ("running", "cancelled"),
-    ("pending", "cancelled"),
-    ("suspended", "cancelled"),
-}
-
 
 @pytest.mark.parametrize("pair", sorted(_A3B_LEGAL_PAIRS))
 def test_a3b_suspend_wake_pairs_are_legal(pair: tuple[str, str]) -> None:
     validate_transition(from_state=pair[0], to_state=pair[1])  # type: ignore[arg-type]  # no raise
 
 
-@pytest.mark.parametrize("pair", sorted(_RESERVED_PAIRS_A3B))
-def test_reserved_pairs_refuse_after_a3b(pair: tuple[str, str]) -> None:
+def test_run_state_vocabulary_still_exactly_nine_after_a3b() -> None:
+    # A3b EXPANDS the matrix, never the vocabulary.
+    assert len(get_args(RunState)) == 9
+
+
+_A3C_LEGAL_PAIRS = {
+    ("suspended", "pending_approval"),
+    ("pending_approval", "woken"),
+    ("pending_approval", "refused"),
+    ("pending_approval", "failed"),
+}
+
+# Reserved AFTER A3c — pairs no runtime path produces (pending_approval only
+# leaves to woken/refused/failed; cancelled still deferred; no re-loop/re-suspend).
+_RESERVED_PAIRS_A3C = {
+    ("woken", "running"),
+    ("woken", "suspended"),
+    ("woken", "pending_approval"),
+    ("suspended", "completed"),
+    ("pending_approval", "running"),
+    ("pending_approval", "suspended"),
+    ("pending_approval", "completed"),
+    ("running", "cancelled"),
+    ("pending", "cancelled"),
+    ("suspended", "cancelled"),
+    ("pending_approval", "cancelled"),
+}
+
+
+@pytest.mark.parametrize("pair", sorted(_A3C_LEGAL_PAIRS))
+def test_a3c_pending_approval_pairs_are_legal(pair: tuple[str, str]) -> None:
+    validate_transition(from_state=pair[0], to_state=pair[1])  # type: ignore[arg-type]  # no raise
+
+
+@pytest.mark.parametrize("pair", sorted(_RESERVED_PAIRS_A3C))
+def test_reserved_pairs_refuse_after_a3c(pair: tuple[str, str]) -> None:
     with pytest.raises(RunTransitionRefused) as exc:
         validate_transition(from_state=pair[0], to_state=pair[1])  # type: ignore[arg-type]
     assert exc.value.reason == "run_transition_invalid_state_pair"
 
 
-def test_run_state_vocabulary_still_exactly_nine_after_a3b() -> None:
-    # A3b EXPANDS the matrix, never the vocabulary.
+def test_run_state_vocabulary_still_exactly_nine_after_a3c() -> None:
     assert len(get_args(RunState)) == 9

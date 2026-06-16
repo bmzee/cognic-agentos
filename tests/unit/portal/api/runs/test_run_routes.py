@@ -14,7 +14,9 @@ from fastapi.testclient import TestClient
 from cognic_agentos.core.run.executor import (
     RunNotResumable,
     RunResult,
+    RunResumeApprovalMismatch,
     RunResumeConflict,
+    RunResumePendingApprovalRequired,
 )
 from cognic_agentos.core.run.storage import RunNotFound
 from cognic_agentos.portal.api.app import create_app
@@ -49,8 +51,17 @@ class _ResumeStubExecutor:
         self._raises = raises
         self.calls: list[dict[str, Any]] = []
 
-    async def resume(self, *, run_id: Any, actor: Any, argv: Any) -> RunResult:
-        self.calls.append({"run_id": run_id, "actor": actor, "argv": argv})
+    async def resume(
+        self, *, run_id: Any, actor: Any, argv: Any, approval_request_id: Any = None
+    ) -> RunResult:
+        self.calls.append(
+            {
+                "run_id": run_id,
+                "actor": actor,
+                "argv": argv,
+                "approval_request_id": approval_request_id,
+            }
+        )
         if self._raises is not None:
             raise self._raises
         assert self._result is not None
@@ -391,3 +402,102 @@ def test_resume_422_on_extra_field(
         body={"argv": ["go"], "tenant_id": "attacker"},
     )
     assert resp.status_code == 422
+
+
+# --- Sprint 14A-A3c — wake-approval correlator + no-re-mint refusal mappings ---
+
+
+def test_resume_202_and_echoes_approval_request_id_when_pending(
+    memory_settings: Any, memory_registry: Any, tmp_path: Any
+) -> None:
+    # resume() yields pending_approval (cold-create approval checkpoint at wake);
+    # the route returns 202 + the minted approval_request_id for the operator to grant.
+    resp = _post_resume(
+        memory_settings,
+        memory_registry,
+        tmp_path,
+        executor=_ResumeStubExecutor(
+            result=RunResult(_RUN_ID, None, "pending_approval", None, b"", b"", None, "arid-7")
+        ),
+    )
+    assert resp.status_code == 202
+    payload = resp.json()
+    assert payload["terminal_state"] == "pending_approval"
+    assert payload["approval_request_id"] == "arid-7"
+    assert payload["run_id"] == _RUN_ID
+
+
+def test_resume_200_when_completed(
+    memory_settings: Any, memory_registry: Any, tmp_path: Any
+) -> None:
+    resp = _post_resume(
+        memory_settings,
+        memory_registry,
+        tmp_path,
+        executor=_ResumeStubExecutor(
+            result=RunResult(_RUN_ID, None, "completed", 0, b"done", b"", None, None)
+        ),
+    )
+    assert resp.status_code == 200
+    assert resp.json()["terminal_state"] == "completed"
+
+
+def test_resume_409_when_approval_id_required(
+    memory_settings: Any, memory_registry: Any, tmp_path: Any
+) -> None:
+    # re-resume of a wake-pending run WITHOUT the correlator -> 409 (no re-mint).
+    resp = _post_resume(
+        memory_settings,
+        memory_registry,
+        tmp_path,
+        executor=_ResumeStubExecutor(raises=RunResumePendingApprovalRequired(uuid.UUID(_RUN_ID))),
+    )
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["reason"] == "run_resume_approval_id_required"
+
+
+def test_resume_409_when_approval_id_mismatch(
+    memory_settings: Any, memory_registry: Any, tmp_path: Any
+) -> None:
+    # re-resume with a correlator that does NOT match the pending request -> 409.
+    resp = _post_resume(
+        memory_settings,
+        memory_registry,
+        tmp_path,
+        executor=_ResumeStubExecutor(raises=RunResumeApprovalMismatch(uuid.UUID(_RUN_ID))),
+    )
+    assert resp.status_code == 409
+    assert resp.json()["detail"]["reason"] == "run_resume_approval_id_mismatch"
+
+
+def test_resume_threads_approval_request_id_to_executor(
+    memory_settings: Any, memory_registry: Any, tmp_path: Any
+) -> None:
+    # the optional body correlator threads through to executor.resume(...).
+    executor = _ResumeStubExecutor(
+        result=RunResult(_RUN_ID, None, "completed", 0, b"", b"", None, None)
+    )
+    arid = "44444444-4444-4444-4444-444444444444"
+    resp = _post_resume(
+        memory_settings,
+        memory_registry,
+        tmp_path,
+        executor=executor,
+        body={"argv": ["cont"], "approval_request_id": arid},
+    )
+    assert resp.status_code == 200
+    assert len(executor.calls) == 1
+    assert executor.calls[0]["approval_request_id"] == uuid.UUID(arid)
+
+
+def test_resume_approval_request_id_optional_defaults_none(
+    memory_settings: Any, memory_registry: Any, tmp_path: Any
+) -> None:
+    # omitting the correlator threads None (the first-resume shape).
+    executor = _ResumeStubExecutor(
+        result=RunResult(_RUN_ID, None, "completed", 0, b"", b"", None, None)
+    )
+    resp = _post_resume(memory_settings, memory_registry, tmp_path, executor=executor)
+    assert resp.status_code == 200
+    assert len(executor.calls) == 1
+    assert executor.calls[0]["approval_request_id"] is None

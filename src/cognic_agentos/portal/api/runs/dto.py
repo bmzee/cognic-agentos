@@ -55,6 +55,10 @@ class RunResumeRequest(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     argv: list[str]
+    #: Sprint 14A-A3c — the correlator handed back by a wake-pending 202. Re-POST
+    #: the SAME id after the operator grants to clear the cold-create approval
+    #: checkpoint; the executor refuses a missing/mismatched id (no re-mint).
+    approval_request_id: uuid.UUID | None = None
 
     @field_validator("argv")
     @classmethod
