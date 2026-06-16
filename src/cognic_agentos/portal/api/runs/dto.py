@@ -45,7 +45,13 @@ class RunResponse(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     task_id: str | None
-    terminal_state: Literal["completed", "failed", "refused", "pending_approval"]
+    # Sprint 14A-A3b widened the executor's public RunTerminalState with
+    # "suspended". The synchronous POST /api/v1/runs caller never sets
+    # suspend_after_exec (RunSubmitRequest has no such field), so a route-driven
+    # run cannot currently return "suspended" — but the response Literal mirrors
+    # the executor's public type so the mapping stays type-exact (the dedicated
+    # resume route in a later slice exercises the suspended path).
+    terminal_state: Literal["completed", "failed", "refused", "pending_approval", "suspended"]
     exit_code: int | None
     stdout_b64: str
     stderr_b64: str

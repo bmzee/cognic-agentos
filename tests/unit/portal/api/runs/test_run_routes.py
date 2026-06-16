@@ -82,15 +82,22 @@ def _post(
 @pytest.mark.parametrize(
     "result,expected_status",
     [
-        (RunResult("tid", "completed", 0, b"out", b"", None, None), 200),
-        (RunResult("tid", "pending_approval", None, b"", b"", None, "arid-9"), 202),
+        (RunResult("rid", "tid", "completed", 0, b"out", b"", None, None), 200),
+        (RunResult("rid", "tid", "pending_approval", None, b"", b"", None, "arid-9"), 202),
         (
             RunResult(
-                "tid", "refused", None, b"", b"", "sandbox_high_risk_tier_refused_pre_13_5", None
+                "rid",
+                "tid",
+                "refused",
+                None,
+                b"",
+                b"",
+                "sandbox_high_risk_tier_refused_pre_13_5",
+                None,
             ),
             409,
         ),
-        (RunResult("tid", "failed", None, b"", b"", None, None), 502),
+        (RunResult("rid", "tid", "failed", None, b"", b"", None, None), 502),
     ],
 )
 def test_terminal_state_maps_to_status(
@@ -114,7 +121,9 @@ def test_completed_run_base64_encodes_raw_output(
         memory_settings,
         memory_registry,
         tmp_path,
-        executor=_StubExecutor(RunResult("tid", "completed", 0, b"hello\x00", b"err", None, None)),
+        executor=_StubExecutor(
+            RunResult("rid", "tid", "completed", 0, b"hello\x00", b"err", None, None)
+        ),
     )
     assert resp.status_code == 200
     body = resp.json()
@@ -127,7 +136,7 @@ def test_completed_run_base64_encodes_raw_output(
 def test_body_approval_request_id_and_actor_reach_executor(
     memory_settings: Any, memory_registry: Any, tmp_path: Any
 ) -> None:
-    executor = _StubExecutor(RunResult("tid", "completed", 0, b"", b"", None, None))
+    executor = _StubExecutor(RunResult("rid", "tid", "completed", 0, b"", b"", None, None))
     arid = "22222222-2222-2222-2222-222222222222"
     body = _body()
     body["approval_request_id"] = arid
@@ -157,7 +166,7 @@ def test_422_on_empty_argv(memory_settings: Any, memory_registry: Any, tmp_path:
         memory_settings,
         memory_registry,
         tmp_path,
-        executor=_StubExecutor(RunResult("tid", "completed", 0, b"", b"", None, None)),
+        executor=_StubExecutor(RunResult("rid", "tid", "completed", 0, b"", b"", None, None)),
         body=body,
     )
     assert resp.status_code == 422
@@ -172,7 +181,7 @@ def test_422_on_extra_tenant_field(
         memory_settings,
         memory_registry,
         tmp_path,
-        executor=_StubExecutor(RunResult("tid", "completed", 0, b"", b"", None, None)),
+        executor=_StubExecutor(RunResult("rid", "tid", "completed", 0, b"", b"", None, None)),
         body=body,
     )
     assert resp.status_code == 422

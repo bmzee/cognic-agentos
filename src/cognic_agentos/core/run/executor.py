@@ -22,12 +22,21 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, Protocol
 
 from cognic_agentos.core.decision_history import DecisionHistoryStore, DecisionRecord
+from cognic_agentos.core.run.storage import RunRecordStore  # core->core, SDK-free
 from cognic_agentos.core.scheduler._types import SubmitInput, TaskActor, TaskFailedPayload
 
 if TYPE_CHECKING:
     from cognic_agentos.core.config import Settings
     from cognic_agentos.core.scheduler.engine import SchedulerEngine
     from cognic_agentos.portal.rbac.actor import Actor
+
+    # Sprint 14A-A3b: the executor's run-suspend branch reads the latest
+    # checkpoint metadata via the CheckpointStore seam. TYPE_CHECKING-only —
+    # sandbox.checkpoint_store -> sandbox.audit -> core.vault pulls hvac, which
+    # the kernel image lacks; the import dance keeps the module kernel-boot-clean
+    # (the dep is constructed by the lifespan + injected; the executor only calls
+    # .load_latest at RUN time). Pinned by test_run_no_sdk_import.py.
+    from cognic_agentos.sandbox.checkpoint_store import CheckpointStore
 
     # sandbox.policy / sandbox.protocol are imported under TYPE_CHECKING (for the
     # annotations) + FUNCTION-LOCALLY where constructed (_build_policy /
@@ -61,7 +70,9 @@ RunRefusalReason = Literal[
     "pack_record_not_installed",
 ]
 
-RunTerminalState = Literal["completed", "failed", "refused", "pending_approval"]
+RunTerminalState = Literal[
+    "completed", "failed", "refused", "pending_approval", "suspended"
+]  # +suspended (A3b)
 
 #: Closed run.failed reason vocabulary (maps 1:1 to the two infra failure modes).
 RunFailedReason = Literal["sandbox_create_refused", "workload_runtime_error"]
@@ -115,6 +126,12 @@ class RunRequest:
     #: sandbox approval. Threaded to backend.create -> admit_policy grant
     #: verification in 14A-A2b. None on a fresh run.
     approval_request_id: uuid.UUID | None = None
+    #: Sprint 14A-A3b (F2): when True the executor suspends the session AFTER a
+    #: clean exec (final checkpoint + container release) instead of destroying it,
+    #: transitions the run-record to ``suspended``, and returns
+    #: terminal_state="suspended" with the session_id + checkpoint_id persisted on
+    #: the run row (the resume substrate). False = the legacy complete+destroy path.
+    suspend_after_exec: bool = False
 
 
 @dataclass(frozen=True)
@@ -122,6 +139,10 @@ class RunResult:
     """Returned to the caller. Raw ``stdout``/``stderr`` are for the caller
     ONLY — never the chain (the chain carries digests + counts)."""
 
+    #: Sprint 14A-A3b (F1): the minted run_id (str), populated on EVERY path —
+    #: refusal, failure, pending-approval, completion, suspension. The durable
+    #: run-record key + the resume correlator.
+    run_id: str
     task_id: str | None
     terminal_state: RunTerminalState
     exit_code: int | None
@@ -173,30 +194,64 @@ class ManagedRunExecutor:
         pack_loader: PackRecordLoader,
         decision_history_store: DecisionHistoryStore,
         settings: Settings,
+        run_record_store: RunRecordStore,
+        checkpoint_store: CheckpointStore,
     ) -> None:
         self._scheduler = scheduler
         self._sandbox_backend = sandbox_backend
         self._pack_loader = pack_loader
         self._dh = decision_history_store
         self._settings = settings
+        self._runs = run_record_store
+        self._checkpoints = checkpoint_store
 
     async def run(self, request: RunRequest) -> RunResult:
         request_id = f"run-{uuid.uuid4().hex}"
 
         # confused-deputy guard — a RunRequest whose tenant disagrees with the
         # authenticated actor is a caller-contract violation, not a governance
-        # refusal.
+        # refusal. Runs BEFORE genesis so a malformed request never mints a row.
         if request.tenant_id != request.actor.tenant_id:
             raise ValueError(
                 "run_request_tenant_actor_mismatch: request.tenant_id != request.actor.tenant_id"
             )
 
+        # Sprint 14A-A3b — mint the run_id + genesis run-record (run.lifecycle.
+        # pending) BEFORE pack load/submit, so EVERY terminal path below carries
+        # a durable run-record + the run_id is populated on the RunResult.
+        run_id = uuid.uuid4()
+        await self._runs.create_run(
+            run_id=run_id,
+            tenant_id=request.tenant_id,
+            pack_id=request.pack_id,
+            pack_uuid=request.pack_uuid,
+            pack_version=request.pack_version,
+            request_id=request_id,
+        )
+        rid = str(run_id)
+
         # Step 0 — load + validate the trusted pack record (pre-submit).
         record = await self._pack_loader.load_for_run(pack_uuid=request.pack_uuid)
         refusal = _validate_pack_record(record, request)
         if refusal is not None:
-            await self._emit_refused(request, request_id, refusal)
-            return RunResult(None, "refused", None, b"", b"", refusal)
+            await self._runs.transition(
+                run_id=run_id,
+                tenant_id=request.tenant_id,
+                from_state="pending",
+                to_state="refused",
+                actor_id=request.actor.subject,
+                request_id=request_id,
+            )
+            await self._emit_refused(request, request_id, run_id=rid, task_id=None, reason=refusal)
+            return RunResult(
+                run_id=rid,
+                task_id=None,
+                terminal_state="refused",
+                exit_code=None,
+                stdout=b"",
+                stderr=b"",
+                refusal_reason=refusal,
+            )
         assert record is not None  # narrowed by _validate_pack_record
 
         # Step 1 — submit. Project the core-owned TaskActor once; it is reused
@@ -236,21 +291,85 @@ class ManagedRunExecutor:
                 reason="actor_cancelled",
                 request_id=request_id,
             )
-            await self._emit_refused(request, request_id, _RUN_QUEUED_UNSUPPORTED)
-            return RunResult(decision.task_id, "refused", None, b"", b"", _RUN_QUEUED_UNSUPPORTED)
+            # task_id is the scheduler task id here (accepted_queued always carries
+            # one); thread it onto the run row + the run.refused join key.
+            await self._runs.transition(
+                run_id=run_id,
+                tenant_id=request.tenant_id,
+                from_state="pending",
+                to_state="refused",
+                actor_id=request.actor.subject,
+                request_id=request_id,
+                task_id=uuid.UUID(decision.task_id),
+            )
+            await self._emit_refused(
+                request,
+                request_id,
+                run_id=rid,
+                task_id=decision.task_id,
+                reason=_RUN_QUEUED_UNSUPPORTED,
+            )
+            return RunResult(
+                run_id=rid,
+                task_id=decision.task_id,
+                terminal_state="refused",
+                exit_code=None,
+                stdout=b"",
+                stderr=b"",
+                refusal_reason=_RUN_QUEUED_UNSUPPORTED,
+            )
         if decision.outcome != "accepted_immediate":
-            await self._emit_refused(request, request_id, decision.outcome)
-            return RunResult(decision.task_id, "refused", None, b"", b"", decision.outcome)
+            # A refused scheduler outcome has NO task_id (AdmissionDecision.task_id
+            # is None on refused outcomes) — the run row stays task_id-less, the
+            # run.refused join key is None.
+            await self._runs.transition(
+                run_id=run_id,
+                tenant_id=request.tenant_id,
+                from_state="pending",
+                to_state="refused",
+                actor_id=request.actor.subject,
+                request_id=request_id,
+            )
+            await self._emit_refused(
+                request,
+                request_id,
+                run_id=rid,
+                task_id=decision.task_id,
+                reason=decision.outcome,
+            )
+            return RunResult(
+                run_id=rid,
+                task_id=decision.task_id,
+                terminal_state="refused",
+                exit_code=None,
+                stdout=b"",
+                stderr=b"",
+                refusal_reason=decision.outcome,
+            )
         assert decision.task_id is not None
         task_id = uuid.UUID(decision.task_id)
 
         # Step 2 — mark_running (NO sandbox_adapter — Fork A). accepted_immediate
         # uses _attribution (not _queued_attribution), so mark_running skips the
         # FIFO/cap re-check that raises SchedulerPromotionRefused on the queued
-        # path — promotion of an immediately-admitted task is safe.
+        # path — promotion of an immediately-admitted task is safe. Mirror the
+        # run-record pending -> running transition (durable-first not required:
+        # the run-record is auxiliary evidence, mark_running is the scheduler
+        # authority that gates the slot).
         await self._scheduler.mark_running(task_id, request_id=request_id)
+        await self._runs.transition(
+            run_id=run_id,
+            tenant_id=request.tenant_id,
+            from_state="pending",
+            to_state="running",
+            actor_id=request.actor.subject,
+            request_id=request_id,
+            task_id=task_id,
+        )
 
-        # Steps 3-7 — create -> exec -> destroy(finally) -> complete/fail -> evidence.
+        # Steps 3-7 — create -> exec -> (suspend | complete) -> destroy(finally)
+        # -> evidence. ``skip_destroy`` flips True the instant suspend() returns
+        # (the container is released; destroying it would error / double-free).
         policy = self._build_policy()
         ctx = self._build_pack_context(record, request)
         # Function-local import: the except clause needs SandboxLifecycleRefused at
@@ -261,6 +380,7 @@ class ManagedRunExecutor:
         from cognic_agentos.sandbox.protocol import SandboxLifecycleRefused
 
         session = None
+        skip_destroy = False
         try:
             try:
                 session = await self._sandbox_backend.create(
@@ -274,32 +394,73 @@ class ManagedRunExecutor:
             except SandboxLifecycleRefused as exc:
                 if exc.reason == _SANDBOX_APPROVAL_PENDING_REASON:
                     # pending sandbox approval is NOT a failure: cancel the running
-                    # task (running -> cancelled releases quota + counters), emit
-                    # value-free pending evidence, return the 202-shaped result.
+                    # task (running -> cancelled releases quota + counters),
+                    # transition the run-record running -> pending_approval (threads
+                    # the approval correlator onto the run row), emit value-free
+                    # pending evidence, return the 202-shaped result.
                     await self._scheduler.cancel(
                         task_id, actor=task_actor, reason="actor_cancelled", request_id=request_id
                     )
+                    await self._runs.transition(
+                        run_id=run_id,
+                        tenant_id=request.tenant_id,
+                        from_state="running",
+                        to_state="pending_approval",
+                        actor_id=request.actor.subject,
+                        request_id=request_id,
+                        approval_request_id=(
+                            uuid.UUID(exc.approval_request_id) if exc.approval_request_id else None
+                        ),
+                    )
                     await self._emit_pending(
-                        request, request_id, task_id, approval_request_id=exc.approval_request_id
+                        request,
+                        request_id,
+                        run_id=rid,
+                        task_id=decision.task_id,
+                        approval_request_id=exc.approval_request_id,
                     )
                     return RunResult(
-                        decision.task_id,
-                        "pending_approval",
-                        None,
-                        b"",
-                        b"",
-                        None,
-                        exc.approval_request_id,
+                        run_id=rid,
+                        task_id=decision.task_id,
+                        terminal_state="pending_approval",
+                        exit_code=None,
+                        stdout=b"",
+                        stderr=b"",
+                        refusal_reason=None,
+                        approval_request_id=exc.approval_request_id,
                     )
                 # any OTHER SandboxLifecycleRefused is a governance/admission
                 # REFUSAL (high_risk_tier_refused, approval_denied/expired,
                 # catalog/egress) -> refused/409, NOT an infra failure (F3 status
-                # map). Cancel the running task + emit run.refused with the reason.
+                # map). Cancel the running task + run-record running -> refused +
+                # emit run.refused with the reason.
                 await self._scheduler.cancel(
                     task_id, actor=task_actor, reason="actor_cancelled", request_id=request_id
                 )
-                await self._emit_refused(request, request_id, str(exc.reason))
-                return RunResult(decision.task_id, "refused", None, b"", b"", str(exc.reason))
+                await self._runs.transition(
+                    run_id=run_id,
+                    tenant_id=request.tenant_id,
+                    from_state="running",
+                    to_state="refused",
+                    actor_id=request.actor.subject,
+                    request_id=request_id,
+                )
+                await self._emit_refused(
+                    request,
+                    request_id,
+                    run_id=rid,
+                    task_id=decision.task_id,
+                    reason=str(exc.reason),
+                )
+                return RunResult(
+                    run_id=rid,
+                    task_id=decision.task_id,
+                    terminal_state="refused",
+                    exit_code=None,
+                    stdout=b"",
+                    stderr=b"",
+                    refusal_reason=str(exc.reason),
+                )
             except Exception as exc:
                 await self._scheduler.fail(
                     task_id,
@@ -309,8 +470,30 @@ class ManagedRunExecutor:
                     ),
                     request_id=request_id,
                 )
-                await self._emit_failed(request, request_id, task_id, "sandbox_create_refused")
-                return RunResult(decision.task_id, "failed", None, b"", b"", None)
+                await self._runs.transition(
+                    run_id=run_id,
+                    tenant_id=request.tenant_id,
+                    from_state="running",
+                    to_state="failed",
+                    actor_id=request.actor.subject,
+                    request_id=request_id,
+                )
+                await self._emit_failed(
+                    request,
+                    request_id,
+                    run_id=rid,
+                    task_id=decision.task_id,
+                    reason="sandbox_create_refused",
+                )
+                return RunResult(
+                    run_id=rid,
+                    task_id=decision.task_id,
+                    terminal_state="failed",
+                    exit_code=None,
+                    stdout=b"",
+                    stderr=b"",
+                    refusal_reason=None,
+                )
 
             try:
                 exec_result = await session.exec(list(request.argv), timeout_s=policy.walltime_s)
@@ -322,28 +505,107 @@ class ManagedRunExecutor:
                     ),
                     request_id=request_id,
                 )
-                await self._emit_failed(request, request_id, task_id, "workload_runtime_error")
-                return RunResult(decision.task_id, "failed", None, b"", b"", None)
+                await self._runs.transition(
+                    run_id=run_id,
+                    tenant_id=request.tenant_id,
+                    from_state="running",
+                    to_state="failed",
+                    actor_id=request.actor.subject,
+                    request_id=request_id,
+                )
+                await self._emit_failed(
+                    request,
+                    request_id,
+                    run_id=rid,
+                    task_id=decision.task_id,
+                    reason="workload_runtime_error",
+                )
+                return RunResult(
+                    run_id=rid,
+                    task_id=decision.task_id,
+                    terminal_state="failed",
+                    exit_code=None,
+                    stdout=b"",
+                    stderr=b"",
+                    refusal_reason=None,
+                )
+
+            # exec returned cleanly. Branch on the caller's suspend request.
+            if request.suspend_after_exec:
+                # Sprint 14A-A3b — suspend instead of destroy. suspend() takes a
+                # final checkpoint + releases the container; the instant it
+                # returns the session is gone, so skip_destroy flips True
+                # IMMEDIATELY — a failure in any post-suspend step propagates
+                # WITHOUT a (doomed) destroy attempt in the finally.
+                await session.suspend()
+                skip_destroy = True
+                meta, _ = await self._checkpoints.load_latest(
+                    session_id=session.session_id, tenant_id=request.tenant_id
+                )
+                await self._runs.transition(
+                    run_id=run_id,
+                    tenant_id=request.tenant_id,
+                    from_state="running",
+                    to_state="suspended",
+                    actor_id=request.actor.subject,
+                    request_id=request_id,
+                    session_id=session.session_id,
+                    checkpoint_id=meta.checkpoint_id,
+                )
+                await self._scheduler.complete(task_id, request_id=request_id)
+                await self._emit_suspended(
+                    request,
+                    request_id,
+                    run_id=rid,
+                    task_id=decision.task_id,
+                    result=exec_result,
+                    session_id=session.session_id,
+                    checkpoint_id=meta.checkpoint_id,
+                )
+                return RunResult(
+                    run_id=rid,
+                    task_id=decision.task_id,
+                    terminal_state="suspended",
+                    exit_code=exec_result.exit_code,
+                    stdout=exec_result.stdout,
+                    stderr=exec_result.stderr,
+                    refusal_reason=None,
+                )
 
             # exec returned (ANY exit_code, incl. non-zero) -> completed run.
             await self._scheduler.complete(task_id, request_id=request_id)
-            await self._emit_completed(request, request_id, task_id, exec_result)
+            await self._runs.transition(
+                run_id=run_id,
+                tenant_id=request.tenant_id,
+                from_state="running",
+                to_state="completed",
+                actor_id=request.actor.subject,
+                request_id=request_id,
+            )
+            await self._emit_completed(
+                request, request_id, run_id=rid, task_id=decision.task_id, result=exec_result
+            )
             return RunResult(
-                decision.task_id,
-                "completed",
-                exec_result.exit_code,
-                exec_result.stdout,
-                exec_result.stderr,
-                None,
+                run_id=rid,
+                task_id=decision.task_id,
+                terminal_state="completed",
+                exit_code=exec_result.exit_code,
+                stdout=exec_result.stdout,
+                stderr=exec_result.stderr,
+                refusal_reason=None,
             )
         finally:
-            if session is not None:
+            if session is not None and not skip_destroy:
                 try:
                     await session.destroy()
                 except Exception:  # best-effort teardown — never flips the outcome.
                     logger.warning(
                         "run.session_destroy_failed",
-                        extra={"request_id": request_id, "session_id": session.session_id},
+                        extra={
+                            "request_id": request_id,
+                            "run_id": rid,
+                            "session_id": session.session_id,
+                        },
                     )
 
     def _build_policy(self) -> SandboxPolicy:
@@ -378,15 +640,28 @@ class ManagedRunExecutor:
             profile="production",
         )
 
+    # Sprint 14A-A3b (P1b emitter contract): every direct run.* evidence row
+    # carries the minted ``run_id`` (always) + the scheduler ``task_id`` (nullable
+    # — None for pre-submit / refused-outcome paths). These rows are DISTINCT from
+    # the store's run.lifecycle.<state> rows (the store-side lifecycle audit);
+    # together they give an examiner both the lifecycle trail + the per-terminal
+    # output evidence keyed on the same run_id.
     async def _emit_completed(
-        self, request: RunRequest, request_id: str, task_id: uuid.UUID, result: SandboxExecResult
+        self,
+        request: RunRequest,
+        request_id: str,
+        *,
+        run_id: str,
+        task_id: str | None,
+        result: SandboxExecResult,
     ) -> None:
         await self._dh.append(
             DecisionRecord(
                 decision_type="run.completed",
                 request_id=request_id,
                 payload={
-                    "task_id": str(task_id),
+                    "run_id": run_id,
+                    "task_id": task_id,
                     "exit_code": result.exit_code,
                     "stdout_sha256": hashlib.sha256(result.stdout).hexdigest(),
                     "stderr_sha256": hashlib.sha256(result.stderr).hexdigest(),
@@ -400,13 +675,19 @@ class ManagedRunExecutor:
         )
 
     async def _emit_failed(
-        self, request: RunRequest, request_id: str, task_id: uuid.UUID, reason: RunFailedReason
+        self,
+        request: RunRequest,
+        request_id: str,
+        *,
+        run_id: str,
+        task_id: str | None,
+        reason: RunFailedReason,
     ) -> None:
         await self._dh.append(
             DecisionRecord(
                 decision_type="run.failed",
                 request_id=request_id,
-                payload={"task_id": str(task_id), "reason": reason},
+                payload={"run_id": run_id, "task_id": task_id, "reason": reason},
                 actor_id=request.actor.subject,
                 tenant_id=request.tenant_id,
                 iso_controls=_RUN_EVIDENCE_ISO_CONTROLS,
@@ -417,8 +698,9 @@ class ManagedRunExecutor:
         self,
         request: RunRequest,
         request_id: str,
-        task_id: uuid.UUID,
         *,
+        run_id: str,
+        task_id: str | None,
         approval_request_id: str | None,
     ) -> None:
         await self._dh.append(
@@ -426,7 +708,8 @@ class ManagedRunExecutor:
                 decision_type="run.pending_approval",
                 request_id=request_id,
                 payload={
-                    "task_id": str(task_id),
+                    "run_id": run_id,
+                    "task_id": task_id,
                     "approval_reason": _SANDBOX_APPROVAL_PENDING_REASON,
                     "approval_request_id": approval_request_id,
                 },
@@ -436,12 +719,62 @@ class ManagedRunExecutor:
             )
         )
 
-    async def _emit_refused(self, request: RunRequest, request_id: str, reason: str) -> None:
+    async def _emit_refused(
+        self,
+        request: RunRequest,
+        request_id: str,
+        *,
+        run_id: str,
+        task_id: str | None,
+        reason: str,
+    ) -> None:
+        # P1b: run.refused ALSO carries run_id + nullable task_id (join key).
+        # task_id is None for pack/preflight refusals, the scheduler task id
+        # otherwise (the accepted_queued-cancel path).
         await self._dh.append(
             DecisionRecord(
                 decision_type="run.refused",
                 request_id=request_id,
-                payload={"reason": reason, "pack_id": request.pack_id},
+                payload={
+                    "run_id": run_id,
+                    "task_id": task_id,
+                    "reason": reason,
+                    "pack_id": request.pack_id,
+                },
+                actor_id=request.actor.subject,
+                tenant_id=request.tenant_id,
+                iso_controls=_RUN_EVIDENCE_ISO_CONTROLS,
+            )
+        )
+
+    async def _emit_suspended(
+        self,
+        request: RunRequest,
+        request_id: str,
+        *,
+        run_id: str,
+        task_id: str | None,
+        result: SandboxExecResult,
+        session_id: str,
+        checkpoint_id: str,
+    ) -> None:
+        # Sprint 14A-A3b — value-free suspend evidence: the exec output digests +
+        # counts PLUS the session_id + checkpoint_id resume correlators.
+        await self._dh.append(
+            DecisionRecord(
+                decision_type="run.suspended",
+                request_id=request_id,
+                payload={
+                    "run_id": run_id,
+                    "task_id": task_id,
+                    "exit_code": result.exit_code,
+                    "stdout_sha256": hashlib.sha256(result.stdout).hexdigest(),
+                    "stderr_sha256": hashlib.sha256(result.stderr).hexdigest(),
+                    "stdout_bytes": len(result.stdout),
+                    "stderr_bytes": len(result.stderr),
+                    "session_id": session_id,
+                    "checkpoint_id": checkpoint_id,
+                },
                 actor_id=request.actor.subject,
                 tenant_id=request.tenant_id,
                 iso_controls=_RUN_EVIDENCE_ISO_CONTROLS,

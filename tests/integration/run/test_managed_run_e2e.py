@@ -52,6 +52,7 @@ from cognic_agentos.core.decision_history import (
     _decision_history,
 )
 from cognic_agentos.core.run.executor import ManagedRunExecutor, RunRequest
+from cognic_agentos.core.run.storage import RunRecordStore
 from cognic_agentos.core.scheduler._types import SubmitInput
 from cognic_agentos.core.scheduler.engine import PolicyDecision, SchedulerEngine
 from cognic_agentos.core.scheduler.queue import ConcurrencyCaps
@@ -192,6 +193,11 @@ async def test_managed_run_executes_deterministic_argv_in_real_container(tmp_pat
             settings=settings.model_copy(
                 update={"sandbox_canonical_runtime_python_image": runtime_image}
             ),
+            # A3b — real run-record store (the e2e also proves run.lifecycle.*
+            # persistence). The non-suspend run never calls load_latest, so the
+            # checkpoint store is a never-invoked mock here.
+            run_record_store=RunRecordStore(engine),
+            checkpoint_store=MagicMock(),
         )
 
         marker = "cognic-14a-a-ok"

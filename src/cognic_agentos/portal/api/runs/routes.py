@@ -21,11 +21,16 @@ from cognic_agentos.portal.rbac.enforcement import RequireScope
 
 #: terminal_state -> HTTP status. completed (incl. non-zero exit) is a run
 #: result (200); pending_approval is 202; refused is 409; infra-failed is 502.
+#: Sprint 14A-A3b — "suspended" maps to 202 (accepted, awaiting resume), mirroring
+#: pending_approval per the locked F5 design; the synchronous run route cannot
+#: currently produce it (no suspend_after_exec field on RunSubmitRequest), so this
+#: arm is unreachable until the dedicated resume route lands.
 _STATUS_BY_TERMINAL: dict[str, int] = {
     "completed": 200,
     "pending_approval": 202,
     "refused": 409,
     "failed": 502,
+    "suspended": 202,
 }
 
 

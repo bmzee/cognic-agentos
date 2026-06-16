@@ -11,6 +11,7 @@ import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 from sqlalchemy import select
@@ -28,6 +29,7 @@ from cognic_agentos.core.run.executor import (
     ManagedRunExecutor,
     RunRequest,
 )
+from cognic_agentos.core.run.storage import RunRecordStore
 from cognic_agentos.core.scheduler._types import SubmitInput, TaskActor
 from cognic_agentos.core.scheduler.engine import PolicyDecision, SchedulerEngine
 from cognic_agentos.core.scheduler.queue import ConcurrencyCaps
@@ -108,12 +110,19 @@ def _make_scheduler(db: AsyncEngine, *, installed: bool = True) -> SchedulerEngi
 # --- stub sandbox backend + session -----------------------------------------
 class _StubSession:
     def __init__(
-        self, result: SandboxExecResult | Exception, *, destroy_error: Exception | None = None
+        self,
+        result: SandboxExecResult | Exception,
+        *,
+        destroy_error: Exception | None = None,
+        suspend_error: Exception | None = None,
     ) -> None:
         self.session_id = uuid.uuid4().hex
         self._result = result
         self._destroy_error = destroy_error
+        self._suspend_error = suspend_error
         self.destroyed = False
+        self.destroy_calls = 0
+        self.suspend_calls = 0
 
     async def exec(
         self, command: list[str], *, timeout_s: float | None = None
@@ -122,8 +131,14 @@ class _StubSession:
             raise self._result
         return self._result
 
+    async def suspend(self) -> None:
+        self.suspend_calls += 1
+        if self._suspend_error is not None:
+            raise self._suspend_error
+
     async def destroy(self) -> None:
         self.destroyed = True
+        self.destroy_calls += 1
         if self._destroy_error is not None:
             raise self._destroy_error
 
@@ -135,10 +150,12 @@ class _StubBackend:
         exec_result: SandboxExecResult | Exception | None = None,
         create_error: Exception | None = None,
         destroy_error: Exception | None = None,
+        suspend_error: Exception | None = None,
     ) -> None:
         self._exec_result = exec_result
         self._create_error = create_error
         self._destroy_error = destroy_error
+        self._suspend_error = suspend_error
         self.created: list[_StubSession] = []
         self.last_approval_request_id: uuid.UUID | None = None
 
@@ -161,9 +178,30 @@ class _StubBackend:
             if self._exec_result is not None
             else SandboxExecResult(stdout=b"", stderr=b"", exit_code=0),
             destroy_error=self._destroy_error,
+            suspend_error=self._suspend_error,
         )
         self.created.append(session)
         return session
+
+
+# --- stub checkpoint store ---------------------------------------------------
+class _StubMeta:
+    """CheckpointMetadata-shaped stub — the executor reads only .checkpoint_id."""
+
+    def __init__(self, checkpoint_id: str) -> None:
+        self.checkpoint_id = checkpoint_id
+
+
+class _StubCheckpointStore:
+    """Stub CheckpointStore — load_latest returns (meta, snapshot_bytes)."""
+
+    def __init__(self, checkpoint_id: str = "deadbeef" * 4) -> None:
+        self._checkpoint_id = checkpoint_id
+        self.load_latest_calls: list[tuple[str, str]] = []
+
+    async def load_latest(self, *, session_id: str, tenant_id: str) -> tuple[_StubMeta, bytes]:
+        self.load_latest_calls.append((session_id, tenant_id))
+        return _StubMeta(self._checkpoint_id), b"snapshot-bytes"
 
 
 # --- stub pack loader --------------------------------------------------------
@@ -249,6 +287,7 @@ def _executor(
     loader: _StubLoader,
     installed: bool = True,
     settings: Settings,
+    checkpoint_store: _StubCheckpointStore | None = None,
 ) -> ManagedRunExecutor:
     return ManagedRunExecutor(
         scheduler=_make_scheduler(db, installed=installed),
@@ -256,7 +295,36 @@ def _executor(
         pack_loader=loader,
         decision_history_store=DecisionHistoryStore(db),
         settings=settings,
+        run_record_store=RunRecordStore(db),
+        checkpoint_store=checkpoint_store or _StubCheckpointStore(),  # type: ignore[arg-type]
     )
+
+
+async def _count_lifecycle(db: AsyncEngine, run_id: str, decision_type: str) -> int:
+    """Count run.lifecycle.* chain rows for a given run_id + decision_type."""
+    async with db.connect() as conn:
+        rows = (
+            await conn.execute(
+                select(_decision_history.c.payload).where(
+                    _decision_history.c.event_type == decision_type
+                )
+            )
+        ).all()
+    return sum(1 for r in rows if r[0].get("run_id") == run_id)
+
+
+async def _latest_payload(db: AsyncEngine, decision_type: str) -> dict[str, Any]:
+    """Return the newest chain payload of the given decision_type."""
+    async with db.connect() as conn:
+        row = (
+            await conn.execute(
+                select(_decision_history.c.payload)
+                .where(_decision_history.c.event_type == decision_type)
+                .order_by(_decision_history.c.sequence.desc())
+            )
+        ).first()
+    assert row is not None, f"no chain row of type {decision_type}"
+    return dict(row[0])
 
 
 @pytest.fixture
@@ -275,7 +343,12 @@ async def test_refuses_pack_record_not_found(db: AsyncEngine, settings: Settings
     assert result.refusal_reason == "pack_record_not_found"
     assert result.task_id is None
     assert backend.created == []
-    assert await _decision_types(db) == ["run.refused"]
+    # A3b — genesis + lifecycle-refused around the direct run.refused evidence.
+    assert await _decision_types(db) == [
+        "run.lifecycle.pending",
+        "run.lifecycle.refused",
+        "run.refused",
+    ]
 
 
 async def test_refuses_pack_record_tenant_mismatch(db: AsyncEngine, settings: Settings) -> None:
@@ -306,8 +379,13 @@ async def test_refuses_pack_record_not_installed(db: AsyncEngine, settings: Sett
     )
     result = await ex.run(_request())
     assert result.refusal_reason == "pack_record_not_installed"
-    # executor-side check fires BEFORE submit — no admission row
-    assert await _decision_types(db) == ["run.refused"]
+    # executor-side check fires BEFORE submit — no scheduler admission row, only
+    # the genesis + lifecycle-refused + direct run.refused evidence.
+    assert await _decision_types(db) == [
+        "run.lifecycle.pending",
+        "run.lifecycle.refused",
+        "run.refused",
+    ]
 
 
 # --- happy path: submit -> create -> exec(0) -> complete -> run.completed ----
@@ -388,15 +466,18 @@ async def test_run_pending_approval_returns_pending_approval(
 ) -> None:
     from cognic_agentos.sandbox.protocol import SandboxLifecycleRefused
 
+    # A3b: the executor persists the approval correlator onto the run row, so it
+    # must be a real UUID string (the production seam carries str(uuid)).
+    arid = uuid.uuid4()
     backend = _StubBackend(
         create_error=SandboxLifecycleRefused(
-            "sandbox_approval_pending", detail="pending", approval_request_id="arid-123"
+            "sandbox_approval_pending", detail="pending", approval_request_id=str(arid)
         )
     )
     ex = _executor(db, backend=backend, loader=_StubLoader(_record()), settings=settings)
     result = await ex.run(_request())
     assert result.terminal_state == "pending_approval"
-    assert result.approval_request_id == "arid-123"
+    assert result.approval_request_id == str(arid)
     assert result.exit_code is None
     assert result.refusal_reason is None
     types = await _decision_types(db)
@@ -521,6 +602,8 @@ async def test_accepted_queued_is_cancelled_and_refused(
         pack_loader=_StubLoader(_record()),
         decision_history_store=DecisionHistoryStore(db),
         settings=settings,
+        run_record_store=RunRecordStore(db),
+        checkpoint_store=_StubCheckpointStore(),  # type: ignore[arg-type]
     )
     result = await ex.run(_request())
     assert result.terminal_state == "refused"
@@ -529,3 +612,186 @@ async def test_accepted_queued_is_cancelled_and_refused(
     types = await _decision_types(db)
     assert "run.refused" in types
     assert "scheduler.task_cancelled" in types  # the queued task was cancelled cleanly
+
+
+# === Sprint 14A-A3b: run-record wiring + run_id on every path + suspend ======
+
+
+async def test_run_mints_run_id_and_genesis_on_every_path(
+    db: AsyncEngine, settings: Settings
+) -> None:
+    # A refused run (pack not installed) STILL mints a run_id + a genesis row.
+    ex = _executor(
+        db, backend=_StubBackend(), loader=_StubLoader(_record(state="draft")), settings=settings
+    )
+    result = await ex.run(_request())
+    assert result.terminal_state == "refused"
+    assert result.run_id  # non-empty on the refusal path
+    # a run.lifecycle.pending genesis row exists for this exact run_id
+    assert await _count_lifecycle(db, result.run_id, "run.lifecycle.pending") == 1
+    # and a run.lifecycle.refused terminal row
+    assert await _count_lifecycle(db, result.run_id, "run.lifecycle.refused") == 1
+
+
+async def test_suspend_after_exec_suspends_and_skips_destroy(
+    db: AsyncEngine, settings: Settings
+) -> None:
+    backend = _StubBackend(exec_result=SandboxExecResult(stdout=b"ok\n", stderr=b"", exit_code=0))
+    ckpt = _StubCheckpointStore(checkpoint_id="abcd1234" * 4)
+    ex = _executor(
+        db, backend=backend, loader=_StubLoader(_record()), settings=settings, checkpoint_store=ckpt
+    )
+    from dataclasses import replace
+
+    result = await ex.run(replace(_request(), suspend_after_exec=True))
+    assert result.terminal_state == "suspended"
+    assert result.exit_code == 0
+    stub_session = backend.created[0]
+    assert stub_session.suspend_calls == 1
+    assert stub_session.destroy_calls == 0  # conditional teardown skipped
+    # the checkpoint store was consulted with the session's id + the tenant
+    assert ckpt.load_latest_calls == [(stub_session.session_id, "tenant-a")]
+    # run-record is suspended with session_id + checkpoint_id persisted
+    rec = await RunRecordStore(db).load(uuid.UUID(result.run_id), tenant_id="tenant-a")
+    assert rec is not None
+    assert rec.state == "suspended"
+    assert rec.session_id == stub_session.session_id
+    assert rec.checkpoint_id == "abcd1234" * 4
+    # direct run.suspended evidence carries run_id + session_id + checkpoint_id
+    payload = await _latest_payload(db, "run.suspended")
+    assert payload["run_id"] == result.run_id
+    assert payload["session_id"] == stub_session.session_id
+    assert payload["checkpoint_id"] == "abcd1234" * 4
+    assert payload["task_id"] is not None
+    # value-free: digests + counts, never raw bytes
+    assert payload["stdout_sha256"] and "stdout" not in payload
+    # run.lifecycle.suspended chain row also exists
+    assert await _count_lifecycle(db, result.run_id, "run.lifecycle.suspended") == 1
+    # the scheduler task completed (the run did its work)
+    types = await _decision_types(db)
+    assert "scheduler.task_completed" in types
+
+
+async def test_run_without_suspend_completes_and_destroys(
+    db: AsyncEngine, settings: Settings
+) -> None:
+    backend = _StubBackend(exec_result=SandboxExecResult(stdout=b"ok\n", stderr=b"", exit_code=0))
+    ex = _executor(db, backend=backend, loader=_StubLoader(_record()), settings=settings)
+    result = await ex.run(_request())
+    assert result.terminal_state == "completed"
+    stub_session = backend.created[0]
+    assert stub_session.destroy_calls == 1
+    assert stub_session.suspend_calls == 0
+    # run-record reaches completed + a run.lifecycle.completed row
+    rec = await RunRecordStore(db).load(uuid.UUID(result.run_id), tenant_id="tenant-a")
+    assert rec is not None and rec.state == "completed"
+    assert await _count_lifecycle(db, result.run_id, "run.lifecycle.completed") == 1
+
+
+async def test_direct_run_events_carry_run_id(db: AsyncEngine, settings: Settings) -> None:
+    backend = _StubBackend(exec_result=SandboxExecResult(stdout=b"ok\n", stderr=b"", exit_code=0))
+    ex = _executor(db, backend=backend, loader=_StubLoader(_record()), settings=settings)
+    result = await ex.run(_request())
+    payload = await _latest_payload(db, "run.completed")
+    assert payload["run_id"] == result.run_id
+    assert payload["task_id"] is not None
+
+
+async def test_suspend_skips_destroy_even_if_post_suspend_step_raises(
+    db: AsyncEngine, settings: Settings
+) -> None:
+    # skip_destroy is set the instant suspend() returns: a failure in
+    # load_latest/transition/complete/_emit propagates WITHOUT ever destroying
+    # the session (post-suspend the container is already released).
+    class _RaisingCheckpoint:
+        async def load_latest(self, *, session_id: str, tenant_id: str) -> tuple[Any, bytes]:
+            raise RuntimeError("checkpoint lookup blew up")
+
+    backend = _StubBackend(exec_result=SandboxExecResult(stdout=b"ok\n", stderr=b"", exit_code=0))
+    ex = _executor(
+        db,
+        backend=backend,
+        loader=_StubLoader(_record()),
+        settings=settings,
+        checkpoint_store=_RaisingCheckpoint(),  # type: ignore[arg-type]
+    )
+    from dataclasses import replace
+
+    with pytest.raises(RuntimeError, match="checkpoint lookup blew up"):
+        await ex.run(replace(_request(), suspend_after_exec=True))
+    stub_session = backend.created[0]
+    assert stub_session.suspend_calls == 1
+    assert stub_session.destroy_calls == 0  # NOT destroyed after suspend()
+
+
+async def test_run_refused_event_carries_run_id_and_nullable_task_id(
+    db: AsyncEngine, settings: Settings
+) -> None:
+    # pack-refusal path: run.refused payload carries run_id + task_id=None.
+    ex = _executor(
+        db, backend=_StubBackend(), loader=_StubLoader(_record(state="draft")), settings=settings
+    )
+    result = await ex.run(_request())
+    payload = await _latest_payload(db, "run.refused")
+    assert payload["run_id"] == result.run_id
+    assert payload["task_id"] is None  # pre-submit refusal — no scheduler task id
+
+
+async def test_scheduler_refusal_path_transitions_run_record_to_refused(
+    db: AsyncEngine, settings: Settings
+) -> None:
+    # the non-immediate scheduler-refusal path (pack not installed at the seam)
+    # ALSO mints run_id + transitions pending->refused + carries the scheduler
+    # task id on the run.refused payload.
+    ex = _executor(
+        db,
+        backend=_StubBackend(),
+        loader=_StubLoader(_record()),
+        installed=False,
+        settings=settings,
+    )
+    result = await ex.run(_request())
+    assert result.terminal_state == "refused"
+    assert result.refusal_reason == "refused_pack_not_installed"
+    assert result.run_id
+    rec = await RunRecordStore(db).load(uuid.UUID(result.run_id), tenant_id="tenant-a")
+    assert rec is not None and rec.state == "refused"
+    payload = await _latest_payload(db, "run.refused")
+    assert payload["run_id"] == result.run_id
+
+
+async def test_create_failure_transitions_run_record_to_failed(
+    db: AsyncEngine, settings: Settings
+) -> None:
+    class _Boom(Exception):
+        reason = "sandbox_runtime_image_not_authorised"
+
+    backend = _StubBackend(create_error=_Boom())
+    ex = _executor(db, backend=backend, loader=_StubLoader(_record()), settings=settings)
+    result = await ex.run(_request())
+    assert result.terminal_state == "failed"
+    assert result.run_id
+    rec = await RunRecordStore(db).load(uuid.UUID(result.run_id), tenant_id="tenant-a")
+    assert rec is not None and rec.state == "failed"
+    assert await _count_lifecycle(db, result.run_id, "run.lifecycle.failed") == 1
+
+
+async def test_pending_approval_transitions_run_record(db: AsyncEngine, settings: Settings) -> None:
+    from cognic_agentos.sandbox.protocol import SandboxLifecycleRefused
+
+    arid = uuid.uuid4()
+    backend = _StubBackend(
+        create_error=SandboxLifecycleRefused(
+            "sandbox_approval_pending", detail="pending", approval_request_id=str(arid)
+        )
+    )
+    ex = _executor(db, backend=backend, loader=_StubLoader(_record()), settings=settings)
+    result = await ex.run(_request())
+    assert result.terminal_state == "pending_approval"
+    assert result.approval_request_id == str(arid)
+    rec = await RunRecordStore(db).load(uuid.UUID(result.run_id), tenant_id="tenant-a")
+    assert rec is not None
+    assert rec.state == "pending_approval"
+    assert rec.approval_request_id == arid  # threaded onto the run row
+    payload = await _latest_payload(db, "run.pending_approval")
+    assert payload["run_id"] == result.run_id
