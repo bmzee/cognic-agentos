@@ -24,6 +24,7 @@ from cognic_agentos.core.decision_history import (
     DecisionHistoryStore,
     _decision_history,  # registered in the shared _metadata
 )
+from cognic_agentos.core.run._types import RunRecord
 from cognic_agentos.core.run.executor import (
     LoadedPackRecord,
     ManagedRunExecutor,
@@ -115,11 +116,15 @@ class _StubSession:
         *,
         destroy_error: Exception | None = None,
         suspend_error: Exception | None = None,
+        exec_raises: Exception | None = None,
     ) -> None:
         self.session_id = uuid.uuid4().hex
         self._result = result
         self._destroy_error = destroy_error
         self._suspend_error = suspend_error
+        # A3b resume: when set, exec() raises this regardless of ``result`` (lets a
+        # resume test inject an exec-time infra failure on a freshly-woken session).
+        self.exec_raises = exec_raises
         self.destroyed = False
         self.destroy_calls = 0
         self.suspend_calls = 0
@@ -127,6 +132,8 @@ class _StubSession:
     async def exec(
         self, command: list[str], *, timeout_s: float | None = None
     ) -> SandboxExecResult:
+        if self.exec_raises is not None:
+            raise self.exec_raises
         if isinstance(self._result, Exception):
             raise self._result
         return self._result
@@ -151,11 +158,19 @@ class _StubBackend:
         create_error: Exception | None = None,
         destroy_error: Exception | None = None,
         suspend_error: Exception | None = None,
+        wake_returns: _StubSession | None = None,
+        wake_raises: Exception | None = None,
     ) -> None:
         self._exec_result = exec_result
         self._create_error = create_error
         self._destroy_error = destroy_error
         self._suspend_error = suspend_error
+        # A3b resume: wake() returns ``wake_returns`` (a pre-built session whose
+        # destroy_calls the test asserts) or raises ``wake_raises``.
+        self.wake_returns = wake_returns
+        self.wake_raises = wake_raises
+        self.wake_calls = 0
+        self.last_wake_session_id: str | None = None
         self.created: list[_StubSession] = []
         self.last_approval_request_id: uuid.UUID | None = None
 
@@ -182,6 +197,18 @@ class _StubBackend:
         )
         self.created.append(session)
         return session
+
+    async def wake(self, session_id: str, *, actor: Any, tenant_id: str) -> _StubSession:
+        # A3b resume seam. The conflict test REPLACES this attribute with a custom
+        # coroutine (instance-attr shadow), so the executor's
+        # ``self._sandbox_backend.wake(...)`` dispatches to the substitute.
+        self.wake_calls += 1
+        self.last_wake_session_id = session_id
+        if self.wake_raises is not None:
+            raise self.wake_raises
+        if self.wake_returns is not None:
+            return self.wake_returns
+        return _StubSession(SandboxExecResult(stdout=b"", stderr=b"", exit_code=0))
 
 
 # --- stub checkpoint store ---------------------------------------------------
@@ -288,6 +315,7 @@ def _executor(
     installed: bool = True,
     settings: Settings,
     checkpoint_store: _StubCheckpointStore | None = None,
+    run_record_store: RunRecordStore | None = None,
 ) -> ManagedRunExecutor:
     return ManagedRunExecutor(
         scheduler=_make_scheduler(db, installed=installed),
@@ -295,7 +323,7 @@ def _executor(
         pack_loader=loader,
         decision_history_store=DecisionHistoryStore(db),
         settings=settings,
-        run_record_store=RunRecordStore(db),
+        run_record_store=run_record_store or RunRecordStore(db),
         checkpoint_store=checkpoint_store or _StubCheckpointStore(),  # type: ignore[arg-type]
     )
 
@@ -795,3 +823,307 @@ async def test_pending_approval_transitions_run_record(db: AsyncEngine, settings
     assert rec.approval_request_id == arid  # threaded onto the run row
     payload = await _latest_payload(db, "run.pending_approval")
     assert payload["run_id"] == result.run_id
+
+
+# === Sprint 14A-A3b (Task 4): resume() — run->session resolver + wake dispatch =
+#
+# resume() loads the tenant-scoped run record, wakes the suspended sandbox
+# session, runs a continuation argv, and walks the run record
+# suspended -> woken -> completed (or -> refused / -> failed). NO scheduler calls
+# (the slot was freed at suspend); task_id is always None on resume results.
+# The two tombstone-edge tests pin the claim-gated teardown: destroy ONLY a
+# session we own (claimed suspended->woken).
+
+
+async def _suspend_a_run(
+    db: AsyncEngine,
+    settings: Settings,
+    *,
+    backend: _StubBackend,
+    run_record_store: RunRecordStore | None = None,
+) -> tuple[ManagedRunExecutor, str]:
+    """Drive a fresh run to ``suspended`` via run(suspend_after_exec=True) and
+    return (executor, run_id). The SAME executor (same scheduler + run store +
+    backend) is then used to resume()."""
+    from dataclasses import replace
+
+    ex = _executor(
+        db,
+        backend=backend,
+        loader=_StubLoader(_record()),
+        settings=settings,
+        run_record_store=run_record_store,
+    )
+    suspended = await ex.run(replace(_request(), suspend_after_exec=True))
+    assert suspended.terminal_state == "suspended"
+    return ex, suspended.run_id
+
+
+def _actor() -> Actor:
+    return Actor(subject="svc-a", tenant_id="tenant-a", scopes=frozenset(), actor_type="service")
+
+
+async def test_resume_happy_path_wakes_execs_completes(db: AsyncEngine, settings: Settings) -> None:
+    backend = _StubBackend(exec_result=SandboxExecResult(stdout=b"ok\n", stderr=b"", exit_code=0))
+    # the woken session the wake() seam returns — its destroy_calls is the
+    # claim-gated-teardown assertion.
+    woken_session = _StubSession(SandboxExecResult(stdout=b"go\n", stderr=b"", exit_code=0))
+    backend.wake_returns = woken_session
+    ex, run_id = await _suspend_a_run(db, settings, backend=backend)
+
+    res = await ex.resume(run_id=uuid.UUID(run_id), actor=_actor(), argv=("echo", "go"))
+    assert res.terminal_state == "completed"
+    assert res.run_id == run_id
+    assert res.task_id is None  # resume makes no scheduler task
+    assert res.exit_code == 0
+    assert res.stdout == b"go\n"
+    assert backend.wake_calls == 1
+    assert backend.last_wake_session_id == backend.created[0].session_id  # resolved from the record
+    assert woken_session.destroy_calls == 1  # owned -> destroyed
+    rec = await RunRecordStore(db).load(uuid.UUID(run_id), tenant_id="tenant-a")
+    assert rec is not None and rec.state == "completed"  # suspended->woken->completed
+    # run.lifecycle.woken + run.lifecycle.completed both exist for this run_id
+    assert await _count_lifecycle(db, run_id, "run.lifecycle.woken") == 1
+    assert await _count_lifecycle(db, run_id, "run.lifecycle.completed") == 1
+    # direct run.completed evidence carries the run_id + task_id=None
+    payload = await _latest_payload(db, "run.completed")
+    assert payload["run_id"] == run_id
+    assert payload["task_id"] is None
+
+
+async def test_resume_wake_refused_transitions_suspended_to_refused(
+    db: AsyncEngine, settings: Settings
+) -> None:
+    from cognic_agentos.sandbox.protocol import SandboxLifecycleRefused
+
+    backend = _StubBackend(exec_result=SandboxExecResult(stdout=b"", stderr=b"", exit_code=0))
+    ex, run_id = await _suspend_a_run(db, settings, backend=backend)
+    backend.wake_raises = SandboxLifecycleRefused("sandbox_wake_checkpoint_corrupt")
+
+    res = await ex.resume(run_id=uuid.UUID(run_id), actor=_actor(), argv=("x",))
+    assert res.terminal_state == "refused"
+    assert res.refusal_reason == "sandbox_wake_checkpoint_corrupt"
+    assert res.task_id is None
+    rec = await RunRecordStore(db).load(uuid.UUID(run_id), tenant_id="tenant-a")
+    assert rec is not None and rec.state == "refused"
+    # value-free run.refused evidence carries run_id + the wake reason
+    payload = await _latest_payload(db, "run.refused")
+    assert payload["run_id"] == run_id
+    assert payload["reason"] == "sandbox_wake_checkpoint_corrupt"
+
+
+async def test_resume_wake_infra_transitions_suspended_to_failed(
+    db: AsyncEngine, settings: Settings
+) -> None:
+    backend = _StubBackend(exec_result=SandboxExecResult(stdout=b"", stderr=b"", exit_code=0))
+    ex, run_id = await _suspend_a_run(db, settings, backend=backend)
+    backend.wake_raises = RuntimeError("boom")
+
+    res = await ex.resume(run_id=uuid.UUID(run_id), actor=_actor(), argv=("x",))
+    assert res.terminal_state == "failed"
+    assert res.refusal_reason is None
+    assert res.task_id is None
+    rec = await RunRecordStore(db).load(uuid.UUID(run_id), tenant_id="tenant-a")
+    assert rec is not None and rec.state == "failed"
+    payload = await _latest_payload(db, "run.failed")
+    assert payload["run_id"] == run_id
+    assert payload["reason"] == "workload_runtime_error"
+
+
+async def test_resume_resumed_exec_infra_transitions_woken_to_failed(
+    db: AsyncEngine, settings: Settings
+) -> None:
+    backend = _StubBackend(exec_result=SandboxExecResult(stdout=b"", stderr=b"", exit_code=0))
+    woken_session = _StubSession(
+        SandboxExecResult(stdout=b"", stderr=b"", exit_code=0), exec_raises=RuntimeError("boom")
+    )
+    backend.wake_returns = woken_session
+    ex, run_id = await _suspend_a_run(db, settings, backend=backend)
+
+    res = await ex.resume(run_id=uuid.UUID(run_id), actor=_actor(), argv=("x",))
+    assert res.terminal_state == "failed"
+    assert res.task_id is None
+    rec = await RunRecordStore(db).load(uuid.UUID(run_id), tenant_id="tenant-a")
+    assert rec is not None and rec.state == "failed"  # woken->failed
+    # we OWNED the session (claim succeeded) -> the finally destroyed it
+    assert woken_session.destroy_calls == 1
+    assert await _count_lifecycle(db, run_id, "run.lifecycle.woken") == 1
+    assert await _count_lifecycle(db, run_id, "run.lifecycle.failed") == 1
+
+
+async def test_resume_unknown_run_raises_run_not_found(db: AsyncEngine, settings: Settings) -> None:
+    from cognic_agentos.core.run.storage import RunNotFound
+
+    ex = _executor(db, backend=_StubBackend(), loader=_StubLoader(_record()), settings=settings)
+    with pytest.raises(RunNotFound):
+        await ex.resume(run_id=uuid.uuid4(), actor=_actor(), argv=("x",))
+
+
+async def test_resume_non_suspended_raises_run_not_resumable(
+    db: AsyncEngine, settings: Settings
+) -> None:
+    from cognic_agentos.core.run.executor import RunNotResumable
+
+    backend = _StubBackend(exec_result=SandboxExecResult(stdout=b"ok\n", stderr=b"", exit_code=0))
+    ex = _executor(db, backend=backend, loader=_StubLoader(_record()), settings=settings)
+    done = await ex.run(_request())  # completed, NOT suspended
+    assert done.terminal_state == "completed"
+    with pytest.raises(RunNotResumable) as exc:
+        await ex.resume(run_id=uuid.UUID(done.run_id), actor=_actor(), argv=("x",))
+    assert exc.value.current_state == "completed"
+
+
+# --- the wake/tombstone edge (resume-side teardown posture) ------------------
+
+
+class _ClaimFailingStore(RunRecordStore):
+    """Wraps RunRecordStore to raise a NON-RunTransitionRefused error ONCE on the
+    suspended->woken claim. Proves claimed_woken stays False -> finally does NOT
+    destroy -> the rolled-back run record is still 'suspended' (resumable)."""
+
+    def __init__(self, engine: AsyncEngine) -> None:
+        super().__init__(engine)
+        self.fail_woken_transition = False
+        self._fired = False
+
+    async def transition(self, *, to_state: Any, **kwargs: Any) -> tuple[uuid.UUID, bytes]:
+        if self.fail_woken_transition and to_state == "woken" and not self._fired:
+            self._fired = True
+            raise RuntimeError("db error on suspended->woken claim")
+        return await super().transition(to_state=to_state, **kwargs)
+
+
+async def test_resume_claim_failure_does_not_destroy_and_run_stays_suspended(
+    db: AsyncEngine, settings: Settings
+) -> None:
+    # wake() ok, but the suspended->woken claim raises a NON-stale DB error:
+    # claimed_woken stays False -> finally must NOT destroy -> no tombstone ->
+    # the rolled-back run record is still 'suspended' (resumable).
+    failing_runs = _ClaimFailingStore(db)
+    backend = _StubBackend(exec_result=SandboxExecResult(stdout=b"ok\n", stderr=b"", exit_code=0))
+    ex, run_id = await _suspend_a_run(db, settings, backend=backend, run_record_store=failing_runs)
+    woken_session = _StubSession(SandboxExecResult(stdout=b"", stderr=b"", exit_code=0))
+    backend.wake_returns = woken_session
+    failing_runs.fail_woken_transition = True  # raise on the suspended->woken claim
+
+    with pytest.raises(RuntimeError, match="db error on suspended->woken claim"):
+        await ex.resume(run_id=uuid.UUID(run_id), actor=_actor(), argv=("x",))
+    assert backend.wake_calls == 1  # wake DID run
+    assert woken_session.destroy_calls == 0  # NOT owned -> NOT destroyed
+    rec = await RunRecordStore(db).load(uuid.UUID(run_id), tenant_id="tenant-a")
+    assert rec is not None and rec.state == "suspended"  # still resumable, NOT tombstoned
+
+
+async def test_resume_concurrent_conflict_returns_conflict_without_destroy(
+    db: AsyncEngine, settings: Settings
+) -> None:
+    # Two resumes both load 'suspended' and both wake. The stub wake commits the
+    # WINNING request's suspended->woken claim as a side-effect (via the REAL
+    # store), so THIS request's claim stale-refuses -> RunResumeConflict, and its
+    # woken session is NOT destroyed (the winner owns the session_id; destroying
+    # would tombstone it).
+    from cognic_agentos.core.run.executor import RunResumeConflict
+
+    run_store = RunRecordStore(db)
+    backend = _StubBackend(exec_result=SandboxExecResult(stdout=b"ok\n", stderr=b"", exit_code=0))
+    ex, run_id = await _suspend_a_run(db, settings, backend=backend, run_record_store=run_store)
+    loser_session = _StubSession(SandboxExecResult(stdout=b"", stderr=b"", exit_code=0))
+
+    async def _wake_then_winner_claims(
+        session_id: str, *, actor: Any, tenant_id: str
+    ) -> _StubSession:
+        # the WINNER commits suspended->woken before this request's claim runs.
+        await run_store.transition(
+            run_id=uuid.UUID(run_id),
+            tenant_id="tenant-a",
+            from_state="suspended",
+            to_state="woken",
+            actor_id="winner",
+            request_id="w",
+        )
+        return loser_session
+
+    backend.wake = _wake_then_winner_claims  # type: ignore[method-assign]
+    with pytest.raises(RunResumeConflict):
+        await ex.resume(run_id=uuid.UUID(run_id), actor=_actor(), argv=("x",))
+    assert loser_session.destroy_calls == 0  # loser does NOT own the session
+
+
+# --- resume() defensive-branch coverage (sharp-edge CC method -> ~100/100) ----
+
+
+class _NullSessionRunStore(RunRecordStore):
+    """Wraps RunRecordStore so load() returns a corrupt 'suspended' run record
+    whose session_id is None — the invariant a suspended run ALWAYS carries a
+    session_id is violated. Proves resume() fails loud BEFORE wake() rather than
+    dispatching wake(None)."""
+
+    def __init__(self, engine: AsyncEngine, *, run_id: uuid.UUID) -> None:
+        super().__init__(engine)
+        self._run_id = run_id
+
+    async def load(self, run_id: uuid.UUID, *, tenant_id: str) -> RunRecord | None:
+        now = datetime.now(UTC)
+        return RunRecord(
+            run_id=self._run_id,
+            tenant_id="tenant-a",
+            pack_id="cognic-tool-foo",
+            pack_uuid=uuid.uuid4(),
+            pack_version="1.0.0",
+            task_id=None,
+            session_id=None,  # the corrupt-row invariant violation
+            checkpoint_id=None,
+            approval_request_id=None,
+            state="suspended",  # resumable state, but no session to resolve
+            created_at=now,
+            updated_at=now,
+        )
+
+
+async def test_resume_suspended_without_session_id_fails_loud(
+    db: AsyncEngine, settings: Settings
+) -> None:
+    # A suspended run with session_id=None is a corrupt row (run() always
+    # persists the session_id in the suspend branch). resume() must fail loud
+    # with RuntimeError BEFORE ever calling wake() — never wake(None).
+    run_id = uuid.uuid4()
+    backend = _StubBackend(exec_result=SandboxExecResult(stdout=b"", stderr=b"", exit_code=0))
+    ex = _executor(
+        db,
+        backend=backend,
+        loader=_StubLoader(_record()),
+        settings=settings,
+        run_record_store=_NullSessionRunStore(db, run_id=run_id),
+    )
+    with pytest.raises(RuntimeError, match="run_suspended_without_session_id"):
+        await ex.resume(run_id=run_id, actor=_actor(), argv=("x",))
+    # the guard fires BEFORE wake — we never dispatched wake(None).
+    assert backend.wake_calls == 0
+
+
+async def test_resume_owned_session_destroy_failure_is_swallowed(
+    db: AsyncEngine, settings: Settings
+) -> None:
+    # resume() happy path (suspended->woken->completed) where the OWNED woken
+    # session's destroy() RAISES during the finally teardown. The exception is
+    # logged + swallowed — best-effort teardown NEVER flips the terminal state.
+    backend = _StubBackend(exec_result=SandboxExecResult(stdout=b"ok\n", stderr=b"", exit_code=0))
+    # the woken session the wake() seam returns: its destroy() raises (reuses the
+    # existing _StubSession destroy_error mechanism — destroy_calls increments
+    # BEFORE the raise, so the attempt stays observable).
+    woken_session = _StubSession(
+        SandboxExecResult(stdout=b"go\n", stderr=b"", exit_code=0),
+        destroy_error=RuntimeError("destroy boom on woken session"),
+    )
+    backend.wake_returns = woken_session
+    ex, run_id = await _suspend_a_run(db, settings, backend=backend)
+
+    res = await ex.resume(run_id=uuid.UUID(run_id), actor=_actor(), argv=("echo", "go"))
+    # the destroy-failure was swallowed — the outcome is NOT flipped.
+    assert res.terminal_state == "completed"
+    assert res.exit_code == 0
+    # the owned session WAS torn down (the attempt is observable despite raising).
+    assert woken_session.destroy_calls == 1
+    # the run record reached completed (suspended->woken->completed held).
+    rec = await RunRecordStore(db).load(uuid.UUID(run_id), tenant_id="tenant-a")
+    assert rec is not None and rec.state == "completed"

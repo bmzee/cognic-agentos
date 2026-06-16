@@ -22,7 +22,14 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, Protocol
 
 from cognic_agentos.core.decision_history import DecisionHistoryStore, DecisionRecord
-from cognic_agentos.core.run.storage import RunRecordStore  # core->core, SDK-free
+from cognic_agentos.core.run._types import (  # core->core, SDK-free
+    RunRecord,
+    RunTransitionRefused,
+)
+from cognic_agentos.core.run.storage import (  # core->core, SDK-free
+    RunNotFound,
+    RunRecordStore,
+)
 from cognic_agentos.core.scheduler._types import SubmitInput, TaskActor, TaskFailedPayload
 
 if TYPE_CHECKING:
@@ -179,6 +186,44 @@ def _refusal_detail(exc: BaseException) -> str | None:
     correlator. Never raises."""
     reason = getattr(exc, "reason", None)
     return str(reason) if reason is not None else None
+
+
+class RunNotResumable(Exception):
+    """Raised by :meth:`ManagedRunExecutor.resume` when the run record exists but
+    is not in ``suspended``. The route maps it to 409 ``run_not_suspended``."""
+
+    def __init__(self, current_state: str) -> None:
+        self.current_state = current_state
+        super().__init__(f"run_not_suspended: state={current_state}")
+
+
+class RunResumeConflict(Exception):
+    """Raised by :meth:`ManagedRunExecutor.resume` when ``wake()`` succeeded but
+    the atomic ``suspended -> woken`` claim lost the race to a concurrent resume
+    (the row already moved out of ``suspended``). The route maps it to 409
+    ``run_resume_conflict``; resume() leaves ``claimed_woken=False`` so the woken
+    session is NOT destroyed (the winning request owns it — destroying would
+    tombstone the session it is executing)."""
+
+    def __init__(self, run_id: uuid.UUID) -> None:
+        self.run_id = run_id
+        super().__init__(f"run_resume_conflict: {run_id}")
+
+
+def _resume_req(actor: Actor, record: RunRecord) -> RunRequest:
+    """Minimal :class:`RunRequest` shim built from a loaded run record purely so
+    the value-free ``_emit_*`` emitters can read ``actor.subject`` /
+    ``tenant_id`` / ``pack_id``. resume() has no real RunRequest (no pack-
+    admission context); ``argv`` is intentionally empty (the emitters never read
+    it). NOT a managed-run submit — only an emitter-payload carrier."""
+    return RunRequest(
+        tenant_id=record.tenant_id,
+        pack_id=record.pack_id,
+        pack_uuid=record.pack_uuid,
+        pack_version=record.pack_version,
+        argv=(),
+        actor=actor,
+    )
 
 
 class ManagedRunExecutor:
@@ -596,6 +641,202 @@ class ManagedRunExecutor:
             )
         finally:
             if session is not None and not skip_destroy:
+                try:
+                    await session.destroy()
+                except Exception:  # best-effort teardown — never flips the outcome.
+                    logger.warning(
+                        "run.session_destroy_failed",
+                        extra={
+                            "request_id": request_id,
+                            "run_id": rid,
+                            "session_id": session.session_id,
+                        },
+                    )
+
+    async def resume(self, *, run_id: uuid.UUID, actor: Actor, argv: tuple[str, ...]) -> RunResult:
+        """Sprint 14A-A3b — resolve a suspended run to its sandbox session, wake
+        it, run a continuation ``argv``, and walk the run record
+        ``suspended -> woken -> completed`` (or ``-> refused`` / ``-> failed``).
+
+        NO scheduler calls: the scheduler slot was freed at suspend (the run()
+        suspend branch calls ``scheduler.complete``). ``task_id`` is therefore
+        ALWAYS None on resume results + events (no scheduler task). Quota-on-
+        resume is a forward item.
+
+        Claim-gated teardown (the resume-side session-tombstone race fix): wake()
+        is dispatched FIRST, then an atomic ``suspended -> woken`` claim acts as a
+        mutex — exactly one concurrent resume commits it. A loser sees the row
+        already moved -> stale -> ``RunTransitionRefused`` -> ``RunResumeConflict``
+        (409). The ``finally`` destroys ONLY a session this request OWNS (claimed
+        ``suspended -> woken``); if wake() succeeded but the claim failed (a
+        concurrent loser, or a non-stale DB error), ``claimed_woken`` stays False
+        so the session is NOT destroyed — destroying it would tombstone a session
+        the winner is executing / a run that is still suspended+resumable.
+
+        TRADE-OFF: a claim-failure/loser therefore LEAVES a live woken
+        container/pod orphaned. The CheckpointReaper purges only object-store
+        checkpoints, NOT backend resources, so this is NOT auto-reclaimed today;
+        leaked-backend-resource cleanup is a forward item (resource leak, not
+        data-loss)."""
+        request_id = f"run-resume-{uuid.uuid4().hex}"
+        record = await self._runs.load(run_id, tenant_id=actor.tenant_id)
+        if record is None:
+            raise RunNotFound(run_id)  # -> route 404 (cross-tenant reads as absent)
+        if record.state != "suspended":
+            raise RunNotResumable(record.state)  # -> route 409 run_not_suspended
+        if record.session_id is None:
+            # Invariant: a suspended run ALWAYS has a session_id (run() persists it
+            # in the suspend branch). A null here is a corrupt row, not a caller
+            # error -> fail loud (never wake(None)).
+            raise RuntimeError(f"run_suspended_without_session_id: {run_id}")
+        rid = str(run_id)
+        # Function-local import: the except clause needs SandboxLifecycleRefused at
+        # runtime; a module-level sandbox import would pull hvac (sandbox.protocol
+        # -> sandbox.audit -> core.vault) and break kernel boot. Only fires when
+        # the executor RESUMES (adapters image). Pinned by test_run_no_sdk_import.
+        from cognic_agentos.sandbox.protocol import SandboxLifecycleRefused
+
+        session = None
+        claimed_woken = False
+        try:
+            try:
+                session = await self._sandbox_backend.wake(
+                    record.session_id, actor=actor, tenant_id=actor.tenant_id
+                )
+            except SandboxLifecycleRefused as exc:
+                # wake refusal (e.g. sandbox_wake_checkpoint_corrupt) is a
+                # governance/restore REFUSAL -> suspended -> refused + run.refused.
+                await self._runs.transition(
+                    run_id=run_id,
+                    tenant_id=actor.tenant_id,
+                    from_state="suspended",
+                    to_state="refused",
+                    actor_id=actor.subject,
+                    request_id=request_id,
+                )
+                await self._emit_refused(
+                    _resume_req(actor, record),
+                    request_id,
+                    run_id=rid,
+                    task_id=None,
+                    reason=str(exc.reason),
+                )
+                return RunResult(
+                    run_id=rid,
+                    task_id=None,
+                    terminal_state="refused",
+                    exit_code=None,
+                    stdout=b"",
+                    stderr=b"",
+                    refusal_reason=str(exc.reason),
+                )
+            except Exception:
+                # any OTHER wake() exception is an infra failure -> suspended ->
+                # failed + run.failed. No session was returned -> nothing to destroy.
+                await self._runs.transition(
+                    run_id=run_id,
+                    tenant_id=actor.tenant_id,
+                    from_state="suspended",
+                    to_state="failed",
+                    actor_id=actor.subject,
+                    request_id=request_id,
+                )
+                await self._emit_failed(
+                    _resume_req(actor, record),
+                    request_id,
+                    run_id=rid,
+                    task_id=None,
+                    reason="workload_runtime_error",
+                )
+                return RunResult(
+                    run_id=rid,
+                    task_id=None,
+                    terminal_state="failed",
+                    exit_code=None,
+                    stdout=b"",
+                    stderr=b"",
+                    refusal_reason=None,
+                )
+
+            # Atomic claim + mutex: exactly one concurrent resume commits
+            # suspended -> woken. A loser sees the row already moved -> stale ->
+            # RunTransitionRefused -> RunResumeConflict (409); claimed_woken stays
+            # False so the finally does NOT destroy. A non-RunTransitionRefused
+            # (DB) error here ALSO propagates with claimed_woken=False -> no destroy
+            # -> the rolled-back run stays suspended/resumable (no tombstone).
+            try:
+                await self._runs.transition(
+                    run_id=run_id,
+                    tenant_id=actor.tenant_id,
+                    from_state="suspended",
+                    to_state="woken",
+                    actor_id=actor.subject,
+                    request_id=request_id,
+                )
+            except RunTransitionRefused as exc:
+                raise RunResumeConflict(run_id) from exc
+            claimed_woken = True
+
+            try:
+                exec_result = await session.exec(
+                    list(argv), timeout_s=self._build_policy().walltime_s
+                )
+            except Exception:
+                await self._runs.transition(
+                    run_id=run_id,
+                    tenant_id=actor.tenant_id,
+                    from_state="woken",
+                    to_state="failed",
+                    actor_id=actor.subject,
+                    request_id=request_id,
+                )
+                await self._emit_failed(
+                    _resume_req(actor, record),
+                    request_id,
+                    run_id=rid,
+                    task_id=None,
+                    reason="workload_runtime_error",
+                )
+                return RunResult(
+                    run_id=rid,
+                    task_id=None,
+                    terminal_state="failed",
+                    exit_code=None,
+                    stdout=b"",
+                    stderr=b"",
+                    refusal_reason=None,
+                )
+
+            await self._runs.transition(
+                run_id=run_id,
+                tenant_id=actor.tenant_id,
+                from_state="woken",
+                to_state="completed",
+                actor_id=actor.subject,
+                request_id=request_id,
+            )
+            await self._emit_completed(
+                _resume_req(actor, record),
+                request_id,
+                run_id=rid,
+                task_id=None,
+                result=exec_result,
+            )
+            return RunResult(
+                run_id=rid,
+                task_id=None,
+                terminal_state="completed",
+                exit_code=exec_result.exit_code,
+                stdout=exec_result.stdout,
+                stderr=exec_result.stderr,
+                refusal_reason=None,
+            )
+        finally:
+            # Destroy ONLY a session we OWN (claimed suspended -> woken). If wake()
+            # succeeded but the claim failed (concurrent loser, or a DB error),
+            # destroying would tombstone a session the winner is executing / a run
+            # still suspended+resumable -> sandbox_wake_session_tombstoned.
+            if session is not None and claimed_woken:
                 try:
                     await session.destroy()
                 except Exception:  # best-effort teardown — never flips the outcome.
