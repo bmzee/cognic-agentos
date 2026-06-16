@@ -99,9 +99,8 @@ def test_scheduler_approval_delegate_is_one_value_enum() -> None:
     assert set(typing.get_args(SchedulerApprovalDelegate)) == {"sandbox_admission"}
 
 
-def test_submit_input_invalid_field_vocabulary_two_values() -> None:
-    # Spec §4: 1 → 2 (+ approval_request_id); Literal + frozenset lockstep
-    # is pinned by test_engine.py::test_t10_invalid_field_literal_in_lockstep_with_constant.
+def test_submit_input_invalid_field_vocabulary_three_values() -> None:
+    # Sprint 14A-A4a: 2 → 3 (+ approval_delegated_to); Literal + frozenset lockstep.
     from cognic_agentos.core.scheduler.engine import (
         _VALID_SUBMIT_INPUT_INVALID_FIELDS,
         SchedulerSubmitInputInvalidField,
@@ -110,9 +109,11 @@ def test_submit_input_invalid_field_vocabulary_two_values() -> None:
     assert set(typing.get_args(SchedulerSubmitInputInvalidField)) == {
         "parent_task_id",
         "approval_request_id",
+        "approval_delegated_to",
     }
     assert (
-        frozenset({"parent_task_id", "approval_request_id"}) == _VALID_SUBMIT_INPUT_INVALID_FIELDS
+        frozenset({"parent_task_id", "approval_request_id", "approval_delegated_to"})
+        == _VALID_SUBMIT_INPUT_INVALID_FIELDS
     )
 
 
@@ -806,3 +807,74 @@ class TestAcceptedRowEvidence:
                 reason=reason,
                 request_id=f"req-{reason}",
             )
+
+
+# ---------------------------------------------------------------------------
+# Sprint 14A-A4a — approval_delegated_to engine-boundary validation
+# ---------------------------------------------------------------------------
+
+
+class TestA4aDelegationValidation:
+    async def test_unknown_delegate_value_is_invalid(self, tmp_path: object) -> None:
+        from cognic_agentos.core.scheduler.engine import SchedulerSubmitInputInvalid
+
+        db = await _mk_migrated_db(tmp_path)
+        engine = _mk_scheduler_engine(db)
+        with pytest.raises(SchedulerSubmitInputInvalid) as exc:
+            await engine.submit(  # type: ignore[attr-defined]
+                submit_input=_seam_submit_input(approval_delegated_to="kitchen"),
+                request_id="req-1",
+            )
+        assert exc.value.field == "approval_delegated_to"
+
+    async def test_delegated_plus_valid_request_id_is_mutually_exclusive(
+        self, tmp_path: object
+    ) -> None:
+        from cognic_agentos.core.scheduler.engine import SchedulerSubmitInputInvalid
+
+        db = await _mk_migrated_db(tmp_path)
+        engine = _mk_scheduler_engine(db)
+        with pytest.raises(SchedulerSubmitInputInvalid) as exc:
+            await engine.submit(  # type: ignore[attr-defined]
+                submit_input=_seam_submit_input(
+                    approval_delegated_to="sandbox_admission",
+                    approval_request_id="11111111-1111-1111-1111-111111111111",
+                ),
+                request_id="req-1",
+            )
+        assert exc.value.field == "approval_delegated_to"
+
+    async def test_malformed_request_id_wins_over_mutual_exclusion(self, tmp_path: object) -> None:
+        # Precedence: the unconditional UUID parse fires FIRST, so a malformed id
+        # surfaces field="approval_request_id" even when delegated.
+        from cognic_agentos.core.scheduler.engine import SchedulerSubmitInputInvalid
+
+        db = await _mk_migrated_db(tmp_path)
+        engine = _mk_scheduler_engine(db)
+        with pytest.raises(SchedulerSubmitInputInvalid) as exc:
+            await engine.submit(  # type: ignore[attr-defined]
+                submit_input=_seam_submit_input(
+                    approval_delegated_to="sandbox_admission",
+                    approval_request_id="not-a-uuid",
+                ),
+                request_id="req-1",
+            )
+        assert exc.value.field == "approval_request_id"
+
+    async def test_delegated_valid_without_request_id_passes_validation(
+        self, tmp_path: object
+    ) -> None:
+        # Sprint 14A-A4a — the validation HAPPY PATH (covers the 467->474
+        # fall-through arc): a valid delegate target with NO conflicting
+        # approval_request_id passes the boundary check and proceeds to admission.
+        # At T2 the engine does not yet skip the consult (T3) and no rego arm 3
+        # exists (T5); with the default stubs (approval_engine=None, policy=None)
+        # the submit is admitted — proving the validation gate did NOT wrongly
+        # refuse a well-formed delegated input.
+        db = await _mk_migrated_db(tmp_path)
+        engine = _mk_scheduler_engine(db)
+        decision = await engine.submit(  # type: ignore[attr-defined]
+            submit_input=_seam_submit_input(approval_delegated_to="sandbox_admission"),
+            request_id="req-1",
+        )
+        assert decision.outcome == "accepted_immediate"

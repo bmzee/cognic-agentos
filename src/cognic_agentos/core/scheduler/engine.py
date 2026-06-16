@@ -148,20 +148,25 @@ SchedulerPromotionRefusedReason = Literal["caps_saturated", "not_at_queue_head"]
 
 
 #: Closed-enum field-name vocabulary for ``SchedulerSubmitInputInvalid``.
-#: 2 values: ``parent_task_id`` (Wave-1 / Sprint 10.5) +
+#: 3 values: ``parent_task_id`` (Wave-1 / Sprint 10.5) +
 #: ``approval_request_id`` (Sprint 13.5c2 per ADR-014 — parsed
-#: UNCONDITIONALLY at the engine boundary, the parent_task_id mirror);
-#: future field-shape validations grow this Literal additively. Drift
-#: detector at ``test_t10_invalid_field_literal_in_lockstep_with_constant``
-#: pins the Literal arms against the frozenset constant below.
-SchedulerSubmitInputInvalidField = Literal["parent_task_id", "approval_request_id"]
+#: UNCONDITIONALLY at the engine boundary, the parent_task_id mirror) +
+#: ``approval_delegated_to`` (Sprint 14A-A4a per ADR-022 + ADR-014 —
+#: covers unknown delegate value + mutual-exclusion with a valid
+#: ``approval_request_id``); future field-shape validations grow this
+#: Literal additively. Drift detector at
+#: ``test_t10_invalid_field_literal_in_lockstep_with_constant`` pins the
+#: Literal arms against the frozenset constant below.
+SchedulerSubmitInputInvalidField = Literal[
+    "parent_task_id", "approval_request_id", "approval_delegated_to"
+]
 
 #: Build-time invariant: vocabulary frozenset for AST-comparable drift
 #: detection (test imports both this set + the Literal + asserts
 #: equality, mirroring the ``SchedulerPromotionRefusedReason`` pattern
 #: at the top of this module).
 _VALID_SUBMIT_INPUT_INVALID_FIELDS: Final[frozenset[str]] = frozenset(
-    {"parent_task_id", "approval_request_id"}
+    {"parent_task_id", "approval_request_id", "approval_delegated_to"}
 )
 
 
@@ -181,16 +186,21 @@ class SchedulerSubmitInputInvalid(Exception):
     for examiner correlation.
 
     Round-1 P3 reviewer fix: ``field`` is typed as the closed-enum
-    :data:`SchedulerSubmitInputInvalidField` Literal (2-value vocabulary:
-    ``parent_task_id`` + ``approval_request_id``) rather than free-form
-    ``str``. Mirrors the :class:`SchedulerPromotionRefused` ``reason``
-    pattern.
+    :data:`SchedulerSubmitInputInvalidField` Literal (3-value vocabulary:
+    ``parent_task_id`` + ``approval_request_id`` +
+    ``approval_delegated_to``) rather than free-form ``str``. Mirrors the
+    :class:`SchedulerPromotionRefused` ``reason`` pattern.
 
     Coverage: ``parent_task_id`` malformed-UUID (Sprint 10.5 Wave-1) +
     ``approval_request_id`` malformed-UUID (Sprint 13.5c2 per ADR-014 —
     parsed UNCONDITIONALLY at the engine boundary regardless of approval-
-    engine wiring). Future field-shape validations grow the Literal
-    additively + extend the vocabulary frozenset in lockstep.
+    engine wiring) + ``approval_delegated_to`` (Sprint 14A-A4a per
+    ADR-022 + ADR-014 — an unknown delegate value, OR mutual-exclusion
+    with an ``approval_request_id`` that parsed to a VALID UUID; the
+    unconditional ``approval_request_id`` parse owns the malformed-id
+    outcome by precedence, so a malformed id never reaches this branch).
+    Future field-shape validations grow the Literal additively + extend
+    the vocabulary frozenset in lockstep.
     """
 
     def __init__(self, *, field: SchedulerSubmitInputInvalidField, reason: str) -> None:
@@ -442,6 +452,23 @@ class SchedulerEngine:
                     field="approval_request_id",
                     reason=(f"not a valid UUID string: {submit_input.approval_request_id!r}"),
                 ) from exc
+
+        # Sprint 14A-A4a (ADR-022 + ADR-014) — approval_delegated_to validated at
+        # the engine boundary (the approval_request_id mirror). Unknown value fails
+        # closed; mutual-exclusion fires only on a VALID parsed UUID — the parse
+        # above already owns the malformed-id outcome (precedence), so a malformed
+        # id surfaces field="approval_request_id", not this branch.
+        if submit_input.approval_delegated_to is not None:
+            if submit_input.approval_delegated_to != "sandbox_admission":
+                raise SchedulerSubmitInputInvalid(
+                    field="approval_delegated_to",
+                    reason=f"unknown delegate target: {submit_input.approval_delegated_to!r}",
+                )
+            if approval_request_uuid is not None:
+                raise SchedulerSubmitInputInvalid(
+                    field="approval_delegated_to",
+                    reason="mutually exclusive with approval_request_id",
+                )
 
         # Step 2: pack installed?
         if not await self._pack_state.is_installed(
