@@ -169,13 +169,19 @@ def _safe_allow_input(
     requested_estimated_tokens: int = 500,
     current_tenant_concurrent_count: int = 0,
     approval_verified: bool = False,
+    approval_delegated_to: str | None = None,
 ) -> dict[str, Any]:
     """Construct a happy-path admission input dict per the spec §4.8 field
-    set (+ the Sprint-13.5c2 9th key ``approval_verified`` — the Python
-    seam ALWAYS threads it; ``False`` on unwired/auto paths). Each test arm
-    overrides one field to exercise its refusal path. Field names mirror
-    what ``SchedulerPolicy`` threads from ``SubmitInput`` — the bundle
-    reads them directly off ``input.<field>``."""
+    set (+ the Sprint-13.5c2 9th key ``approval_verified`` + the
+    Sprint-14A-A4a 10th key ``approval_delegated_to`` — the Python seam
+    ALWAYS threads both; ``approval_verified=False`` /
+    ``approval_delegated_to=None`` on unwired/auto/non-delegated paths).
+    Each test arm overrides one field to exercise its refusal path. Field
+    names mirror what ``SchedulerPolicy`` threads from ``SubmitInput`` — the
+    bundle reads them directly off ``input.<field>``. Adding the
+    null-default ``approval_delegated_to`` key leaves every existing test's
+    outcome unchanged (``null != "sandbox_admission"`` → high-risk still
+    denies and allow arms 1/2 are untouched)."""
     return {
         "tenant_id": tenant_id,
         "pack_id": pack_id,
@@ -186,6 +192,7 @@ def _safe_allow_input(
         "current_tenant_concurrent_count": current_tenant_concurrent_count,
         "requested_estimated_tokens": requested_estimated_tokens,
         "approval_verified": approval_verified,
+        "approval_delegated_to": approval_delegated_to,
     }
 
 
@@ -446,3 +453,61 @@ class TestSchedulerRegoApprovalConvert:
             _opa_eval_string_value(inp, SCHEDULER_DECISION_POINT_REASON)
             == "scheduler_class_unknown"
         )
+
+
+@opa_required
+class TestSchedulerRegoA4aDelegation:
+    """Sprint 14A-A4a (ADR-022 + ADR-014): high-risk admits when approval is
+    delegated to sandbox admission (allow arm 3); strict + fail-closed; the
+    refusal reason stays honest (default_deny, not high-risk-refused)."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("tier", _HIGH_RISK_TIERS)
+    @pytest.mark.parametrize("class_", ["interactive", "background"])
+    async def test_delegated_high_risk_admits(
+        self, engine: OPAEngine, tier: str, class_: str
+    ) -> None:
+        d = await engine.evaluate(
+            decision_point=SCHEDULER_DECISION_POINT_ALLOW,
+            input=_safe_allow_input(
+                pack_risk_tier=tier, class_=class_, approval_delegated_to="sandbox_admission"
+            ),
+        )
+        assert d.allow is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("bad", [None, "", "sandbox", "SANDBOX_ADMISSION", "scheduler"])
+    async def test_delegated_strict_fail_closed(self, engine: OPAEngine, bad: str | None) -> None:
+        d = await engine.evaluate(
+            decision_point=SCHEDULER_DECISION_POINT_ALLOW,
+            input=_safe_allow_input(pack_risk_tier="payment_action", approval_delegated_to=bad),
+        )
+        assert d.allow is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("class_", ["interactive", "background"])
+    async def test_delegated_high_risk_absent_key_fails_closed(
+        self, engine: OPAEngine, class_: str
+    ) -> None:
+        # "Absent fails closed" stop-rule contract: a high-risk input with NO
+        # approval_delegated_to key AT ALL (not merely null) must still deny —
+        # arm 3 reads it strictly, so a missing key never admits.
+        inp = _safe_allow_input(pack_risk_tier="payment_action", class_=class_)
+        inp.pop("approval_delegated_to")
+        d = await engine.evaluate(decision_point=SCHEDULER_DECISION_POINT_ALLOW, input=inp)
+        assert d.allow is False
+
+    @pytest.mark.asyncio
+    async def test_delegated_refusal_reason_is_default_deny(self) -> None:
+        # The refusal arm is unread on an allow path, but must stay honest: for a
+        # class-KNOWN delegated high-risk input the guard SUPPRESSES arm 2, so the
+        # deterministic fall-through is EXACTLY scheduler_default_deny. Pinning the
+        # exact value proves the guard fired — without it, arm 2 would label this
+        # scheduler_high_risk_tier_refused_pre_13_5.
+        reason = _opa_eval_string_value(
+            _safe_allow_input(
+                pack_risk_tier="payment_action", approval_delegated_to="sandbox_admission"
+            ),
+            SCHEDULER_DECISION_POINT_REASON,
+        )
+        assert reason == "scheduler_default_deny"

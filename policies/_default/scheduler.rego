@@ -99,6 +99,7 @@ refusal_reason := "scheduler_class_unknown" if {
 } else := "scheduler_high_risk_tier_refused_pre_13_5" if {
 	input.pack_risk_tier in _high_risk_tiers
 	not input.approval_verified == true
+	not input.approval_delegated_to == "sandbox_admission"
 } else := "scheduler_default_deny"
 
 # Allow arm 1 — Wave-1 safe tiers. The explicit ``not <high_risk>``
@@ -122,4 +123,18 @@ allow if {
 	input.class in _known_classes
 	input.pack_risk_tier in _high_risk_tiers
 	input.approval_verified == true
+}
+
+# Allow arm 3 — Sprint 14A-A4a (ADR-022 + ADR-014 amendment): a high-risk tier
+# admits when the Python seam attests approval is DELEGATED to the downstream
+# sandbox admission gate, which owns the human checkpoint. The scheduler mints no
+# grant of its own; approval_verified stays false (honest). STRICT string match —
+# absent / null / any other value fails closed (mirrors arm 2's strict ==).
+# NORMATIVE setter obligation (A4a spec §3.8): any caller setting this MUST route
+# the same work through sandbox admission with the real manifest tier. A4b (the
+# managed-run executor) is the only authorized production setter.
+allow if {
+	input.class in _known_classes
+	input.pack_risk_tier in _high_risk_tiers
+	input.approval_delegated_to == "sandbox_admission"
 }
