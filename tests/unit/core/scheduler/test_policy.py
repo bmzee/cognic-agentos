@@ -272,9 +272,9 @@ class TestSchedulerPolicyInputThreading:
     class (per spec §6.1 watchpoint) untested most of the time."""
 
     def test_build_rego_input_includes_all_spec_keys(self) -> None:
-        """9-key contract: the spec §4.8 8-key set + the Sprint-13.5c2
-        ``approval_verified`` attestation key (ADR-014 — ALWAYS threaded;
-        the bundle's high-risk allow arm requires it strictly true)."""
+        """10-key contract: the spec §4.8 8-key set + approval_verified (13.5c2)
+        + approval_delegated_to (Sprint 14A-A4a, ADR-022/014 — ALWAYS threaded,
+        nullable)."""
         rego_input = SchedulerPolicy._build_rego_input(_make_submit_input())
         assert set(rego_input.keys()) == {
             "tenant_id",
@@ -286,6 +286,7 @@ class TestSchedulerPolicyInputThreading:
             "current_tenant_concurrent_count",
             "requested_estimated_tokens",
             "approval_verified",
+            "approval_delegated_to",
         }
 
     def test_build_rego_input_threads_engine_owned_attestation(self) -> None:
@@ -298,6 +299,22 @@ class TestSchedulerPolicyInputThreading:
         verified = dataclasses.replace(_make_submit_input(), approval_verified=True)
         assert SchedulerPolicy._build_rego_input(verified)["approval_verified"] is True
         assert SchedulerPolicy._build_rego_input(_make_submit_input())["approval_verified"] is False
+
+    def test_build_rego_input_threads_approval_delegated_to(self) -> None:
+        """Sprint 14A-A4a: ``approval_delegated_to`` threaded verbatim — ``None``
+        by default, ``"sandbox_admission"`` when set; ALWAYS present, nullable."""
+        import dataclasses
+
+        assert (
+            SchedulerPolicy._build_rego_input(_make_submit_input())["approval_delegated_to"] is None
+        )
+        delegated = dataclasses.replace(
+            _make_submit_input(), approval_delegated_to="sandbox_admission"
+        )
+        assert (
+            SchedulerPolicy._build_rego_input(delegated)["approval_delegated_to"]
+            == "sandbox_admission"
+        )
 
     def test_build_rego_input_threads_class_under_correct_key(self) -> None:
         """SubmitInput.class_ has a trailing underscore (Python keyword
