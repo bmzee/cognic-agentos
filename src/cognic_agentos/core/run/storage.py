@@ -80,16 +80,20 @@ _RESERVED_TRANSITION_PAYLOAD_KEYS: Final[frozenset[str]] = frozenset(
     }
 )
 
-#: Transition-target state → chain decision_type. The A3a subset (5 reachable
-#: transition targets; genesis ``pending`` uses run.lifecycle.pending in
-#: create_run). A3b EXPANDS this map (suspended/woken/cancelled) alongside
-#: _A3A_VALID_TRANSITIONS — NEVER the RunState vocabulary (the doctrine pin).
+#: Transition-target state → chain decision_type. A3b EXPANDED the A3a subset
+#: (running/completed/failed/refused/pending_approval) with suspended/woken
+#: alongside ``_A3B_VALID_TRANSITIONS`` (the suspend/wake matrix in _types.py).
+#: ``cancelled`` stays reserved (no map entry, no legal pair). Genesis
+#: ``pending`` uses run.lifecycle.pending in create_run. This map EXPANDS over
+#: the slices — NEVER the RunState vocabulary (the doctrine pin).
 _STATE_TO_DECISION_TYPE: Final[dict[RunState, str]] = {
     "running": "run.lifecycle.running",
     "completed": "run.lifecycle.completed",
     "failed": "run.lifecycle.failed",
     "refused": "run.lifecycle.refused",
     "pending_approval": "run.lifecycle.pending_approval",
+    "suspended": "run.lifecycle.suspended",  # A3b
+    "woken": "run.lifecycle.woken",  # A3b
 }
 
 _GENESIS_DECISION_TYPE: Final[str] = "run.lifecycle.pending"
@@ -253,18 +257,19 @@ class RunRecordStore:
         payload_extras: dict[str, Any] | None = None,
     ) -> tuple[uuid.UUID, bytes]:
         """State-machine transition (tenant-scoped, atomic). Preflight: to_state
-        must be a known A3a transition target; payload_extras must not overlap
-        the reserved evidence keys. In-precondition: SELECT ... FOR UPDATE the
+        must be a known transition target; payload_extras must not overlap the
+        reserved evidence keys. In-precondition: SELECT ... FOR UPDATE the
         tenant-scoped row (absent → RunNotFound) → from_state cross-check (stale
         → RunTransitionRefused) → validate_transition → UPDATE state + updated_at
         + any provided nullable columns → append run.lifecycle.<to_state>.
 
         The nullable column kwargs (session_id/task_id/checkpoint_id/
         approval_request_id) are additive A3b/A3c seams: set ONLY when non-None
-        (None = leave column unchanged). A3a tests exercise them; no production
-        caller."""
+        (None = leave column unchanged). The A3b ManagedRunExecutor is the
+        production caller (the managed-run path threads the running/completed/
+        failed/refused/pending_approval/suspended transitions)."""
         extras = payload_extras or {}
-        # Preflight #1 — known A3a transition target (mirrors scheduler preflight).
+        # Preflight #1 — known transition target (mirrors scheduler preflight).
         if to_state not in _STATE_TO_DECISION_TYPE:
             raise RunTransitionRefused("run_transition_invalid_state_pair")
         # Preflight #2 — reserved evidence-key overlap guard.

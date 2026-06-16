@@ -147,5 +147,50 @@ async def test_construction_success_wires_executor_and_closes_client(
         assert executor is not None
         # the executor is wired to the SAME backend object (introspectable)
         assert executor._sandbox_backend is backend
+        # Sprint 14A-A3b — the executor got the two new deps + the SAME
+        # CheckpointStore is resolved onto app.state (shared with the reaper).
+        from cognic_agentos.core.run.storage import RunRecordStore
+        from cognic_agentos.sandbox.checkpoint_store import CheckpointStore
+
+        assert isinstance(executor._runs, RunRecordStore)
+        assert isinstance(executor._checkpoints, CheckpointStore)
+        assert app.state.checkpoint_store is executor._checkpoints
         assert fake_client.closed is False  # not yet — closed on shutdown
     assert fake_client.closed is True  # the owned docker client is closed on shutdown
+
+
+async def test_construction_shares_checkpoint_store_with_executor_and_backend(
+    memory_settings: Any, memory_registry: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The lifespan resolves ONE CheckpointStore + threads it into BOTH
+    # build_sandbox_backend(checkpoint_store=...) AND the executor's
+    # checkpoint_store kwarg (so suspend() persists + load_latest reads the same
+    # store). Capture the kwarg the builder received + assert it IS the executor's.
+    monkeypatch.setattr("cognic_agentos.portal.api.app.is_sandbox_available", lambda _s: True)
+
+    class _FakeClient:
+        async def close(self) -> None:
+            return None
+
+    captured: dict[str, Any] = {}
+    backend = object()
+
+    import cognic_agentos.harness.sandbox as hs
+
+    async def _build(**kw: Any) -> Any:
+        captured["checkpoint_store"] = kw.get("checkpoint_store")
+        return backend, _FakeClient()
+
+    monkeypatch.setattr(hs, "build_sandbox_backend", _build)
+    app = create_app(
+        _settings(
+            memory_settings, tmp_path, sandbox_runtime_enabled=True, vault_addr="http://vault:8200"
+        ),
+        adapter_registry=memory_registry,
+    )
+    async with app.router.lifespan_context(app):
+        executor = app.state.managed_run_executor
+        assert executor is not None
+        # the builder's checkpoint_store kwarg IS the executor's IS app.state's
+        assert captured["checkpoint_store"] is executor._checkpoints
+        assert app.state.checkpoint_store is executor._checkpoints

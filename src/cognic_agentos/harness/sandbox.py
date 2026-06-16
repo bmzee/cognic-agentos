@@ -74,8 +74,10 @@ async def build_sandbox_backend(
     ``adapters.secret`` — that is a ``SecretAdapter``, lacking the
     ``lease``/``revoke`` surface). The factory ``get_backend()`` OWNS
     ``image_catalog`` + ``egress_proxy_image`` (built from the ``sandbox_canonical_*``
-    settings), so the builder passes neither. ``checkpoint_store=None`` in 14A-A
-    (14A-A2 wires it). On ANY internal failure the just-created ``docker_client``
+    settings), so the builder passes neither. ``checkpoint_store=None`` in 14A-A;
+    **wired in A3b** (14A-A2 wired the route + approval, not the checkpoint store) —
+    the lifespan now resolves the store + threads it here so ``suspend()``'s final
+    checkpoint persists. On ANY internal failure the just-created ``docker_client``
     is closed before the re-raise (no leak); the lifespan closes it on the success
     path's shutdown.
     """

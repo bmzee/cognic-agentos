@@ -23,8 +23,9 @@ from cognic_agentos.portal.rbac.scopes import (
 )
 
 
-def test_run_rbac_scope_has_exactly_one_value() -> None:
-    assert set(get_args(RunRBACScope)) == {"run.submit"}
+def test_run_scopes_has_exactly_two_values() -> None:
+    assert set(get_args(RunRBACScope)) == {"run.submit", "run.resume"}
+    assert frozenset({"run.submit", "run.resume"}) == RUN_SCOPES
 
 
 def test_run_scopes_frozenset_matches_literal() -> None:

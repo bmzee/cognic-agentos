@@ -671,14 +671,33 @@ def create_app(
                     and runtime.scheduler is not None
                 ):
                     from cognic_agentos.core.run.executor import ManagedRunExecutor
+                    from cognic_agentos.core.run.storage import RunRecordStore
                     from cognic_agentos.harness.sandbox import (
                         PackRecordStoreLoader,
                         build_sandbox_backend,
                     )
 
                     try:
+                        # Sprint 14A-A3b — resolve the CheckpointStore INSIDE the
+                        # try + thread it into BOTH the backend (so suspend()'s
+                        # final checkpoint persists) AND the executor (so the
+                        # suspend branch can load_latest the checkpoint metadata).
+                        # An explicit create_app(checkpoint_store=...) injection
+                        # wins; else build from the live adapter pool. Share the
+                        # resolved store onto app.state so the setting-driven reaper
+                        # block below reuses the SAME instance (one CheckpointStore
+                        # across the sandbox runtime + the retention reaper — the
+                        # early injected_store capture at construction predates this
+                        # block).
+                        checkpoint_store = (
+                            app.state.checkpoint_store
+                            or _build_checkpoint_store_from_adapters(adapters, settings)
+                        )
+                        app.state.checkpoint_store = checkpoint_store
                         backend, sandbox_docker_client = await build_sandbox_backend(
-                            settings=settings, runtime=runtime
+                            settings=settings,
+                            runtime=runtime,
+                            checkpoint_store=checkpoint_store,
                         )
                         app.state.sandbox_backend = backend
                         app.state.managed_run_executor = ManagedRunExecutor(
@@ -689,6 +708,8 @@ def create_app(
                             ),
                             decision_history_store=runtime.decision_history_store,
                             settings=settings,
+                            run_record_store=RunRecordStore(adapters.relational.engine),
+                            checkpoint_store=checkpoint_store,
                         )
                     except Exception:
                         logger.error("sandbox.runtime_construction_failed", exc_info=True)
@@ -712,7 +733,14 @@ def create_app(
                 # INSIDE the inner try so a builder fail-loud still runs
                 # close_all() + clears app.state.adapters.
                 if setting_driven_reaper:
-                    store = _build_checkpoint_store_from_adapters(adapters, settings)
+                    # Sprint 14A-A3b — reuse the CheckpointStore the sandbox block
+                    # above resolved onto app.state (one store across the sandbox
+                    # runtime + the reaper); else build our own (sandbox disabled /
+                    # unavailable path). Still fail-louds per #489 §4.3.2 if the
+                    # build raises.
+                    store = app.state.checkpoint_store or _build_checkpoint_store_from_adapters(
+                        adapters, settings
+                    )
                     reaper_task = _start_checkpoint_reaper(store)
                     app.state.reaper_task = reaper_task
                     logger.info(
