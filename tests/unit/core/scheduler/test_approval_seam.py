@@ -74,6 +74,31 @@ def test_submit_input_carries_three_new_defaulted_fields() -> None:
     assert rich.approval_verified is True
 
 
+def test_submit_input_approval_delegated_to_defaults_none() -> None:
+    # Sprint 14A-A4a — additive, defaulted so every existing constructor stays green.
+    from cognic_agentos.core.scheduler._types import SubmitInput, TaskActor
+
+    base = SubmitInput(
+        tenant_id="t-1",
+        pack_id="pack-x",
+        actor=TaskActor(subject="svc-a", tenant_id="t-1", actor_type="service"),
+        class_="interactive",
+        pack_kind="tool",
+        pack_risk_tier="internal_write",
+        requested_estimated_tokens=500,
+    )
+    assert base.approval_delegated_to is None
+    rich = dataclasses.replace(base, approval_delegated_to="sandbox_admission")
+    assert rich.approval_delegated_to == "sandbox_admission"
+
+
+def test_scheduler_approval_delegate_is_one_value_enum() -> None:
+    # Sprint 14A-A4a — closed enum; drift detector.
+    from cognic_agentos.core.scheduler._types import SchedulerApprovalDelegate
+
+    assert set(typing.get_args(SchedulerApprovalDelegate)) == {"sandbox_admission"}
+
+
 def test_submit_input_invalid_field_vocabulary_two_values() -> None:
     # Spec §4: 1 → 2 (+ approval_request_id); Literal + frozenset lockstep
     # is pinned by test_engine.py::test_t10_invalid_field_literal_in_lockstep_with_constant.
@@ -137,8 +162,14 @@ def test_args_digest_disposition_map_covers_every_submit_input_field() -> None:
     identity = {"pack_id", "pack_kind"}
     envelope_first_class = {"tenant_id", "data_classes"}
     carrier_or_attestation = {"approval_request_id", "approval_verified"}
+    routing_or_evidence = {"approval_delegated_to"}  # Sprint 14A-A4a — excluded from the digest
     assert {f.name for f in dataclasses.fields(SubmitInput)} == (
-        digested | digested_via_actor | identity | envelope_first_class | carrier_or_attestation
+        digested
+        | digested_via_actor
+        | identity
+        | envelope_first_class
+        | carrier_or_attestation
+        | routing_or_evidence
     )
 
 
@@ -179,6 +210,14 @@ def test_args_digest_binds_actor_tokens_and_parent() -> None:
         == base
     )
     assert _submit_args_digest(_seam_submit_input(approval_verified=True)) == base  # type: ignore[arg-type]
+    # Sprint 14A-A4a — routing/evidence signal, NOT grant-binding: setting it
+    # MUST NOT change the digest (the helper cannot silently start binding it).
+    assert (
+        _submit_args_digest(
+            _seam_submit_input(approval_delegated_to="sandbox_admission")  # type: ignore[arg-type]
+        )
+        == base
+    )
 
 
 def test_submit_redacted_context_shape_and_cap() -> None:
