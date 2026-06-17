@@ -1321,3 +1321,23 @@ async def test_resume_reresume_denied_refuses(db: AsyncEngine, settings: Setting
     payload = await _latest_payload(db, "run.refused")
     assert payload["run_id"] == run_id
     assert payload["reason"] == "sandbox_approval_denied"
+
+
+async def test_run_refusal_reason_has_the_two_a4b_values() -> None:
+    import typing
+
+    from cognic_agentos.core.run.executor import RunRefusalReason
+
+    vals = set(typing.get_args(RunRefusalReason))
+    assert "pack_record_risk_tier_unresolved" in vals
+    assert "pack_record_data_classes_malformed" in vals
+    assert len(vals) == 6
+
+
+async def test_run_risk_tier_drift_pinned_to_cli_canonical() -> None:
+    import typing
+
+    from cognic_agentos.cli._governance_vocab import RiskTier as CliRiskTier
+    from cognic_agentos.core.run.executor import RiskTier as RunRiskTier
+
+    assert set(typing.get_args(RunRiskTier)) == set(typing.get_args(CliRiskTier))

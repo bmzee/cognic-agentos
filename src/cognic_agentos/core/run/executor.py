@@ -19,7 +19,7 @@ import hashlib
 import logging
 import uuid
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, Protocol
+from typing import TYPE_CHECKING, Final, Literal, Protocol, get_args
 
 from cognic_agentos.core.decision_history import DecisionHistoryStore, DecisionRecord
 from cognic_agentos.core.run._types import (  # core->core, SDK-free
@@ -75,7 +75,26 @@ RunRefusalReason = Literal[
     "pack_record_tenant_mismatch",
     "pack_record_pack_id_mismatch",
     "pack_record_not_installed",
+    # Sprint 14A-A4b (ADR-022/004/014) — fail-closed manifest-tier gate:
+    "pack_record_risk_tier_unresolved",
+    "pack_record_data_classes_malformed",
 ]
+
+#: Sprint 14A-A4b — local copy of the ADR-014 canonical 8-value risk-tier set
+#: (the core/run -> cli architectural arrow forbids importing it; the
+#: sandbox/policy.py + packs/conformance/owasp_agentic.py precedent).
+#: Drift-pinned test-only against cli._governance_vocab.RiskTier.
+RiskTier = Literal[
+    "read_only",
+    "internal_write",
+    "customer_data_read",
+    "customer_data_write",
+    "payment_action",
+    "regulator_communication",
+    "cross_tenant",
+    "high_risk_custom",
+]
+_CANONICAL_RISK_TIERS: Final[frozenset[str]] = frozenset(get_args(RiskTier))
 
 RunTerminalState = Literal[
     "completed", "failed", "refused", "pending_approval", "suspended"
