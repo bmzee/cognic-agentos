@@ -19,7 +19,7 @@ import hashlib
 import logging
 import uuid
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final, Literal, Protocol, get_args
+from typing import TYPE_CHECKING, Final, Literal, Protocol, cast, get_args
 
 from cognic_agentos.core.decision_history import DecisionHistoryStore, DecisionRecord
 from cognic_agentos.core.run._types import (  # core->core, SDK-free
@@ -353,6 +353,9 @@ class ManagedRunExecutor:
                 refusal_reason=refusal,
             )
         assert record is not None  # narrowed by _validate_pack_record
+        # Sprint 14A-A4b — T3 (_validate_pack_record) guarantees a canonical tier
+        # by here; assert narrows str | None -> str for SubmitInput.pack_risk_tier.
+        assert record.risk_tier is not None
 
         # Step 1 — submit. Project the core-owned TaskActor once; it is reused
         # by the queued-cancellation cleanup path below.
@@ -367,8 +370,10 @@ class ManagedRunExecutor:
             actor=task_actor,
             class_="interactive",
             pack_kind=record.kind,
-            pack_risk_tier="read_only",
+            pack_risk_tier=record.risk_tier,  # T3-validated canonical (was hardcoded read_only)
             requested_estimated_tokens=_DEFAULT_ESTIMATED_TOKENS,
+            data_classes=record.data_classes or (),  # T3-validated non-None
+            approval_delegated_to="sandbox_admission",  # activates the A4a scheduler arm
         )
         decision = await self._scheduler.submit(submit_input=submit_input, request_id=request_id)
 
@@ -1016,15 +1021,17 @@ class ManagedRunExecutor:
         self, record: LoadedPackRecord, request: RunRequest
     ) -> PackAdmissionContext:
         # Function-local import (kernel-boot-clean — see _build_policy).
-        from cognic_agentos.sandbox.policy import PackAdmissionContext
+        from cognic_agentos.sandbox.policy import PackAdmissionContext, RiskTier
 
         return PackAdmissionContext(
             pack_id=request.pack_id,
             pack_version=request.pack_version,
             pack_artifact_digest=record.signed_artefact_digest.hex(),
-            risk_tier="read_only",
+            # T3-validated canonical (was hardcoded read_only)
+            risk_tier=cast(RiskTier, record.risk_tier),
             declares_dynamic_install=False,
             profile="production",
+            data_classes=record.data_classes or (),  # T3-validated non-None
         )
 
     # Sprint 14A-A3b (P1b emitter contract): every direct run.* evidence row

@@ -7,6 +7,7 @@ paths, the value-free run.* evidence, and the Actor -> TaskActor projection.
 
 from __future__ import annotations
 
+import shutil
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime
@@ -17,13 +18,14 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
-from cognic_agentos.core.audit import _chain_heads, _metadata
+from cognic_agentos.core.audit import AuditStore, _chain_heads, _metadata
 from cognic_agentos.core.canonical import ZERO_HASH
 from cognic_agentos.core.config import Settings
 from cognic_agentos.core.decision_history import (
     DecisionHistoryStore,
     _decision_history,  # registered in the shared _metadata
 )
+from cognic_agentos.core.policy.engine import OPAEngine
 from cognic_agentos.core.run._types import RunRecord
 from cognic_agentos.core.run.executor import (
     LoadedPackRecord,
@@ -33,12 +35,15 @@ from cognic_agentos.core.run.executor import (
 from cognic_agentos.core.run.storage import RunRecordStore
 from cognic_agentos.core.scheduler._types import SubmitInput, TaskActor
 from cognic_agentos.core.scheduler.engine import PolicyDecision, SchedulerEngine
+from cognic_agentos.core.scheduler.policy import SchedulerPolicy
 from cognic_agentos.core.scheduler.queue import ConcurrencyCaps
 from cognic_agentos.core.scheduler.storage import SchedulerStorage
 from cognic_agentos.portal.rbac.actor import Actor
 from cognic_agentos.sandbox.protocol import SandboxExecResult
 
 pytestmark = pytest.mark.asyncio
+
+opa_required = pytest.mark.skipif(shutil.which("opa") is None, reason="opa binary not installed")
 
 
 # --- in-memory DB (mirror tests/unit/core/scheduler/test_engine.py) ----------
@@ -172,6 +177,8 @@ class _StubBackend:
         self.wake_calls = 0
         self.last_wake_session_id: str | None = None
         self.created: list[_StubSession] = []
+        # A4b — the PackAdmissionContext each create() received (direct assert).
+        self.created_contexts: list[Any] = []
         self.last_approval_request_id: uuid.UUID | None = None
         # A3c: the approval correlator the executor threads into wake() on a
         # re-resume of a pending_approval run (admission Arm B verify).
@@ -188,6 +195,7 @@ class _StubBackend:
         requires_credentials=(),
         approval_request_id=None,
     ):
+        self.created_contexts.append(pack_context)
         self.last_approval_request_id = approval_request_id
         if self._create_error is not None:
             raise self._create_error
@@ -333,9 +341,11 @@ def _executor(
     settings: Settings,
     checkpoint_store: _StubCheckpointStore | None = None,
     run_record_store: RunRecordStore | None = None,
+    # A4b — OPA-integration test injects a real-rego scheduler
+    scheduler: SchedulerEngine | None = None,
 ) -> ManagedRunExecutor:
     return ManagedRunExecutor(
-        scheduler=_make_scheduler(db, installed=installed),
+        scheduler=scheduler if scheduler is not None else _make_scheduler(db, installed=installed),
         sandbox_backend=backend,  # type: ignore[arg-type]
         pack_loader=loader,
         decision_history_store=DecisionHistoryStore(db),
@@ -1407,3 +1417,64 @@ async def test_a4b_tier_check_precedes_data_classes(db: AsyncEngine, settings: S
     )
     result = await ex.run(_request())
     assert result.refusal_reason == "pack_record_risk_tier_unresolved"  # tier is the primary gate
+
+
+# === Sprint 14A-A4b (Task 4): THE FLIP — thread real tier + data_classes + ====
+# the sandbox_admission delegation into both the scheduler SubmitInput AND the
+# sandbox PackAdmissionContext. The first test asserts the threading directly
+# (stub backend + stub allow-policy); the second proves the delegated high-risk
+# SubmitInput the executor builds is admitted by the REAL scheduler.rego arm 3
+# (catches executor -> SchedulerPolicy projection drift).
+
+
+async def test_a4b_threads_real_tier_data_classes_and_delegation(
+    db: AsyncEngine, settings: Settings
+) -> None:
+    rec = _record(risk_tier="customer_data_read", data_classes=("customer_pii",))
+    backend = _StubBackend()
+    ex = _executor(db, backend=backend, loader=_StubLoader(rec), settings=settings)
+    await ex.run(_request())
+    # Sandbox side — the PackAdmissionContext the backend received (direct object assert):
+    ctx = backend.created_contexts[0]
+    assert ctx.risk_tier == "customer_data_read"
+    assert ctx.data_classes == ("customer_pii",)
+    # Scheduler side — the honest admission_accepted chain row (A4a evidence; I2):
+    accepted = await _latest_payload(db, "scheduler.admission_accepted")
+    assert accepted["pack_risk_tier"] == "customer_data_read"
+    assert accepted["approval_delegated_to"] == "sandbox_admission"
+
+
+@opa_required
+async def test_a4b_delegated_high_risk_admitted_by_real_rego_arm3(
+    db: AsyncEngine, settings: Settings
+) -> None:
+    # Prove the executor's delegated-high-risk SubmitInput is admitted by the REAL
+    # scheduler.rego arm 3 (catches executor -> SchedulerPolicy projection drift).
+    opa_engine = await OPAEngine.create(
+        bundle_path=Path("policies/_default/scheduler.rego"),
+        audit_store=AuditStore(db),
+        decision_history_store=DecisionHistoryStore(db),
+    )
+    policy = SchedulerPolicy(opa_engine=opa_engine)
+    scheduler = SchedulerEngine(
+        storage=SchedulerStorage(db),
+        caps=ConcurrencyCaps(
+            per_tenant_interactive=4, per_tenant_background=4, per_pack=4, per_actor=4
+        ),
+        class_settings={"interactive": (4, 5.0), "background": (4, 5.0)},
+        quota_interrogator=_StubQuota(),
+        kill_switch_interrogator=_StubKill(),
+        pack_state_interrogator=_StubPackState(installed=True),
+        policy_evaluator=policy.evaluate,
+    )
+    backend = _StubBackend()
+    ex = _executor(
+        db,
+        backend=backend,
+        loader=_StubLoader(_record(risk_tier="customer_data_read")),
+        settings=settings,
+        scheduler=scheduler,
+    )
+    await ex.run(_request())
+    # real rego arm 3 admitted the delegated high-risk submit -> the backend was reached:
+    assert len(backend.created) == 1
