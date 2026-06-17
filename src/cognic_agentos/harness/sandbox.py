@@ -49,15 +49,44 @@ class PackRecordStoreLoader:
         self._store = store
 
     async def load_for_run(self, *, pack_uuid: uuid.UUID) -> LoadedPackRecord | None:
+        """Project ``PackRecord -> LoadedPackRecord``, reading the trusted
+        manifest risk tier + ``[data_governance].data_classes`` off the pack's
+        LATEST submit chain row (``payload["manifest"]`` via
+        ``find_latest_submit_row``) — ``core/run`` cannot import ``packs`` so the
+        manifest extraction lives here (Sprint 14A-A4b T2). ``risk_tier=None``
+        when no submit manifest / non-string tier; ``data_classes=()`` when
+        absent/empty, ``None`` when present-but-malformed."""
+        from cognic_agentos.packs._lifecycle_helpers import find_latest_submit_row
+
         record = await self._store.load(pack_uuid)
         if record is None:
             return None
+        history = await self._store.load_lifecycle_history(pack_uuid)
+        submit_row = find_latest_submit_row(history)
+        raw_manifest = submit_row.payload.get("manifest") if submit_row is not None else None
+        manifest = raw_manifest if isinstance(raw_manifest, dict) else {}
+        rt_block = manifest.get("risk_tier")
+        rt_block = rt_block if isinstance(rt_block, dict) else {}
+        raw_tier = rt_block.get("tier")
+        risk_tier: str | None = raw_tier if isinstance(raw_tier, str) else None
+        dg_block = manifest.get("data_governance")
+        dg_block = dg_block if isinstance(dg_block, dict) else {}
+        raw_dc = dg_block.get("data_classes")
+        data_classes: tuple[str, ...] | None
+        if raw_dc is None:
+            data_classes = ()
+        elif isinstance(raw_dc, (list, tuple)) and all(isinstance(x, str) for x in raw_dc):
+            data_classes = tuple(raw_dc)
+        else:
+            data_classes = None
         return LoadedPackRecord(
             tenant_id=record.tenant_id,
             pack_id=record.pack_id,
             kind=record.kind,
             signed_artefact_digest=record.signed_artefact_digest,
             state=record.state,
+            risk_tier=risk_tier,
+            data_classes=data_classes,
         )
 
 

@@ -52,14 +52,35 @@ class _StubPackRecord:
         self.__dict__.update(kw)
 
 
+class _StubSubmitRow:
+    # find_latest_submit_row reads .decision_type + .payload (pure-functional, no isinstance).
+    def __init__(self, manifest: object | None) -> None:
+        self.decision_type = "pack.lifecycle.submitted"
+        self.payload = {} if manifest is None else {"manifest": manifest}
+
+
 class _StubStore:
-    def __init__(self, record: Any) -> None:
+    def __init__(self, record: Any, *, history: list[Any] | None = None) -> None:
         self._record = record
+        self._history = history if history is not None else []
         self.loaded: list[uuid.UUID] = []
 
     async def load(self, pack_id: uuid.UUID) -> Any:
         self.loaded.append(pack_id)
         return self._record
+
+    async def load_lifecycle_history(self, pack_id: uuid.UUID) -> list[Any]:
+        return self._history
+
+
+def _installed_pack_record() -> _StubPackRecord:
+    return _StubPackRecord(
+        tenant_id="tenant-a",
+        pack_id="cognic-tool-foo",
+        kind="tool",
+        signed_artefact_digest=b"\xab" * 32,
+        state="installed",
+    )
 
 
 async def test_pack_record_store_loader_projects_record() -> None:
@@ -80,6 +101,8 @@ async def test_pack_record_store_loader_projects_record() -> None:
         kind="tool",
         signed_artefact_digest=b"\xab" * 32,
         state="installed",
+        risk_tier=None,
+        data_classes=(),
     )
     assert store.loaded == [pk]  # direct uuid load, no tenant scan
 
@@ -88,6 +111,48 @@ async def test_pack_record_store_loader_returns_none_on_missing() -> None:
     store = _StubStore(None)
     loader = PackRecordStoreLoader(store=store)  # type: ignore[arg-type]
     assert await loader.load_for_run(pack_uuid=uuid.uuid4()) is None
+
+
+async def test_loader_extracts_high_risk_tier_and_data_classes() -> None:
+    manifest = {
+        "risk_tier": {"tier": "customer_data_read"},
+        "data_governance": {"data_classes": ["customer_pii", "payment_action"]},
+    }
+    store = _StubStore(_installed_pack_record(), history=[_StubSubmitRow(manifest)])
+    rec = await PackRecordStoreLoader(store=store).load_for_run(pack_uuid=uuid.uuid4())  # type: ignore[arg-type]
+    assert rec is not None
+    assert rec.risk_tier == "customer_data_read"
+    assert rec.data_classes == ("customer_pii", "payment_action")
+
+
+async def test_loader_absent_data_classes_is_empty_tuple() -> None:
+    manifest = {"risk_tier": {"tier": "internal_write"}}  # no data_governance block
+    store = _StubStore(_installed_pack_record(), history=[_StubSubmitRow(manifest)])
+    rec = await PackRecordStoreLoader(store=store).load_for_run(pack_uuid=uuid.uuid4())  # type: ignore[arg-type]
+    assert rec is not None
+    assert rec.risk_tier == "internal_write"
+    assert rec.data_classes == ()  # absent -> () (NOT the None malformed sentinel)
+
+
+async def test_loader_malformed_data_classes_is_none_sentinel() -> None:
+    manifest = {
+        "risk_tier": {"tier": "internal_write"},
+        "data_governance": {"data_classes": "customer_pii"},
+    }  # str, not a list
+    store = _StubStore(_installed_pack_record(), history=[_StubSubmitRow(manifest)])
+    rec = await PackRecordStoreLoader(store=store).load_for_run(pack_uuid=uuid.uuid4())  # type: ignore[arg-type]
+    assert rec is not None
+    assert rec.data_classes is None  # malformed sentinel
+
+
+async def test_loader_no_submit_manifest_yields_none_tier() -> None:
+    store = _StubStore(
+        _installed_pack_record(), history=[_StubSubmitRow(None)]
+    )  # submit row, no manifest
+    rec = await PackRecordStoreLoader(store=store).load_for_run(pack_uuid=uuid.uuid4())  # type: ignore[arg-type]
+    assert rec is not None
+    assert rec.risk_tier is None  # unresolved -> the executor refuses (T3)
+    assert rec.data_classes == ()
 
 
 class _Runtime:

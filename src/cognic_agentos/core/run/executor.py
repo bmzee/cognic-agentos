@@ -19,7 +19,7 @@ import hashlib
 import logging
 import uuid
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, Protocol
+from typing import TYPE_CHECKING, Final, Literal, Protocol, cast, get_args
 
 from cognic_agentos.core.decision_history import DecisionHistoryStore, DecisionRecord
 from cognic_agentos.core.run._types import (  # core->core, SDK-free
@@ -75,7 +75,26 @@ RunRefusalReason = Literal[
     "pack_record_tenant_mismatch",
     "pack_record_pack_id_mismatch",
     "pack_record_not_installed",
+    # Sprint 14A-A4b (ADR-022/004/014) — fail-closed manifest-tier gate:
+    "pack_record_risk_tier_unresolved",
+    "pack_record_data_classes_malformed",
 ]
+
+#: Sprint 14A-A4b — local copy of the ADR-014 canonical 8-value risk-tier set
+#: (the core/run -> cli architectural arrow forbids importing it; the
+#: sandbox/policy.py + packs/conformance/owasp_agentic.py precedent).
+#: Drift-pinned test-only against cli._governance_vocab.RiskTier.
+RiskTier = Literal[
+    "read_only",
+    "internal_write",
+    "customer_data_read",
+    "customer_data_write",
+    "payment_action",
+    "regulator_communication",
+    "cross_tenant",
+    "high_risk_custom",
+]
+_CANONICAL_RISK_TIERS: Final[frozenset[str]] = frozenset(get_args(RiskTier))
 
 RunTerminalState = Literal[
     "completed", "failed", "refused", "pending_approval", "suspended"
@@ -102,6 +121,14 @@ class LoadedPackRecord:
     kind: str
     signed_artefact_digest: bytes
     state: str
+    # Sprint 14A-A4b — the trusted manifest risk tier (str = raw extracted value;
+    # None = unresolved/absent/non-string — the executor refuses). The executor
+    # validates membership in _CANONICAL_RISK_TIERS (the fail-closed gate, T3).
+    risk_tier: str | None
+    # Sprint 14A-A4b — manifest [data_governance].data_classes, shape-resolved by
+    # the loader: () = absent/empty; (str, ...) = valid; None = present-but-malformed
+    # (the executor refuses on None).
+    data_classes: tuple[str, ...] | None
 
 
 class PackRecordLoader(Protocol):
@@ -165,10 +192,11 @@ class RunResult:
 def _validate_pack_record(
     record: LoadedPackRecord | None, request: RunRequest
 ) -> RunRefusalReason | None:
-    """Four fail-closed pre-submit checks. Returns the closed refusal reason or
+    """Six fail-closed pre-submit checks. Returns the closed refusal reason or
     None when the record is valid. Check 4 (installed) is executor-side defense
     in depth — it intentionally duplicates the scheduler's
-    ``pack_state_interrogator`` gate before sandbox-context construction."""
+    ``pack_state_interrogator`` gate before sandbox-context construction. Checks
+    5-6 are the Sprint 14A-A4b manifest tier + data_classes shape gate."""
     if record is None:
         return "pack_record_not_found"
     if record.tenant_id != request.tenant_id:
@@ -177,6 +205,14 @@ def _validate_pack_record(
         return "pack_record_pack_id_mismatch"
     if record.state != "installed":
         return "pack_record_not_installed"
+    # Sprint 14A-A4b (I1) — fail-closed manifest tier: None (unresolved) or a
+    # non-canonical value refuses; NEVER a silent downgrade to read_only.
+    if record.risk_tier not in _CANONICAL_RISK_TIERS:
+        return "pack_record_risk_tier_unresolved"
+    # Sprint 14A-A4b (F2) — data_classes shape: the loader's None sentinel means
+    # present-but-malformed; () (absent/empty) is legitimate and proceeds.
+    if record.data_classes is None:
+        return "pack_record_data_classes_malformed"
     return None
 
 
@@ -317,6 +353,9 @@ class ManagedRunExecutor:
                 refusal_reason=refusal,
             )
         assert record is not None  # narrowed by _validate_pack_record
+        # Sprint 14A-A4b — T3 (_validate_pack_record) guarantees a canonical tier
+        # by here; assert narrows str | None -> str for SubmitInput.pack_risk_tier.
+        assert record.risk_tier is not None
 
         # Step 1 — submit. Project the core-owned TaskActor once; it is reused
         # by the queued-cancellation cleanup path below.
@@ -331,8 +370,10 @@ class ManagedRunExecutor:
             actor=task_actor,
             class_="interactive",
             pack_kind=record.kind,
-            pack_risk_tier="read_only",
+            pack_risk_tier=record.risk_tier,  # T3-validated canonical (was hardcoded read_only)
             requested_estimated_tokens=_DEFAULT_ESTIMATED_TOKENS,
+            data_classes=record.data_classes or (),  # T3-validated non-None
+            approval_delegated_to="sandbox_admission",  # activates the A4a scheduler arm
         )
         decision = await self._scheduler.submit(submit_input=submit_input, request_id=request_id)
 
@@ -980,15 +1021,17 @@ class ManagedRunExecutor:
         self, record: LoadedPackRecord, request: RunRequest
     ) -> PackAdmissionContext:
         # Function-local import (kernel-boot-clean — see _build_policy).
-        from cognic_agentos.sandbox.policy import PackAdmissionContext
+        from cognic_agentos.sandbox.policy import PackAdmissionContext, RiskTier
 
         return PackAdmissionContext(
             pack_id=request.pack_id,
             pack_version=request.pack_version,
             pack_artifact_digest=record.signed_artefact_digest.hex(),
-            risk_tier="read_only",
+            # T3-validated canonical (was hardcoded read_only)
+            risk_tier=cast(RiskTier, record.risk_tier),
             declares_dynamic_install=False,
             profile="production",
+            data_classes=record.data_classes or (),  # T3-validated non-None
         )
 
     # Sprint 14A-A3b (P1b emitter contract): every direct run.* evidence row

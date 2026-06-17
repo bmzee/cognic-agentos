@@ -1,10 +1,15 @@
-"""Sprint 14A-A — core/run must stay SDK-free + portal-runtime-free + packs-free.
+"""Sprint 14A-A — core/run must stay SDK-free + portal-runtime-free + packs-free
++ cli-free.
 
 The managed-run executor is the sandbox-ORCHESTRATION primitive: it depends on
 the SDK-free ``sandbox.protocol``/``sandbox.policy`` interfaces, ``core.scheduler``,
 and ``core.decision_history``. It MUST NOT import the docker/k8s SDK, MUST NOT
 import ``cognic_agentos.portal`` at runtime (the ``Actor`` reference is
-``TYPE_CHECKING``-only), and MUST NOT import ``cognic_agentos.packs`` at all.
+``TYPE_CHECKING``-only), MUST NOT import ``cognic_agentos.packs`` at all, and
+(Sprint 14A-A4b) MUST NOT import ``cognic_agentos.cli`` at all — core/run owns a
+LOCAL copy of the ADR-014 RiskTier vocab (``executor.py``) precisely to avoid the
+``core/run -> cli`` dependency; the value-drift test in test_executor.py keeps the
+copy in lockstep, and the fence below keeps it a copy.
 Mirrors tests/unit/core/scheduler/test_architecture_no_sandbox_import.py.
 """
 
@@ -105,6 +110,21 @@ def test_core_run_no_packs_import_at_all() -> None:
     for path in _run_sources():
         for mod in _all_imports(path):
             assert not mod.startswith("cognic_agentos.packs"), f"{path.name}: packs import {mod}"
+
+
+def test_core_run_no_cli_import_at_all() -> None:
+    # Sprint 14A-A4b: core/run owns a LOCAL copy of the ADR-014 RiskTier vocab
+    # (executor.py:RiskTier) precisely so it never depends on cli._governance_vocab.
+    # The value-drift pin (test_executor.py::test_run_risk_tier_drift_pinned_to_cli_
+    # canonical) keeps the copy in lockstep; THIS fence keeps it a COPY — cli access
+    # is forbidden ENTIRELY (not even TYPE_CHECKING; the other half of the local-copy
+    # contract). Without it, a future direct ``from cli._governance_vocab import
+    # RiskTier`` would still pass the value-drift test (same values) while silently
+    # re-introducing the core/run -> cli runtime dependency. Mirrors
+    # test_core_run_no_packs_import_at_all (the _all_imports strictness).
+    for path in _run_sources():
+        for mod in _all_imports(path):
+            assert not mod.startswith("cognic_agentos.cli"), f"{path.name}: cli import {mod}"
 
 
 def test_core_run_no_module_level_sandbox_import() -> None:
