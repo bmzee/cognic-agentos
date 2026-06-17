@@ -192,10 +192,11 @@ class RunResult:
 def _validate_pack_record(
     record: LoadedPackRecord | None, request: RunRequest
 ) -> RunRefusalReason | None:
-    """Four fail-closed pre-submit checks. Returns the closed refusal reason or
+    """Six fail-closed pre-submit checks. Returns the closed refusal reason or
     None when the record is valid. Check 4 (installed) is executor-side defense
     in depth — it intentionally duplicates the scheduler's
-    ``pack_state_interrogator`` gate before sandbox-context construction."""
+    ``pack_state_interrogator`` gate before sandbox-context construction. Checks
+    5-6 are the Sprint 14A-A4b manifest tier + data_classes shape gate."""
     if record is None:
         return "pack_record_not_found"
     if record.tenant_id != request.tenant_id:
@@ -204,6 +205,14 @@ def _validate_pack_record(
         return "pack_record_pack_id_mismatch"
     if record.state != "installed":
         return "pack_record_not_installed"
+    # Sprint 14A-A4b (I1) — fail-closed manifest tier: None (unresolved) or a
+    # non-canonical value refuses; NEVER a silent downgrade to read_only.
+    if record.risk_tier not in _CANONICAL_RISK_TIERS:
+        return "pack_record_risk_tier_unresolved"
+    # Sprint 14A-A4b (F2) — data_classes shape: the loader's None sentinel means
+    # present-but-malformed; () (absent/empty) is legitimate and proceeds.
+    if record.data_classes is None:
+        return "pack_record_data_classes_malformed"
     return None
 
 

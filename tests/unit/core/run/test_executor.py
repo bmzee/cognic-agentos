@@ -1345,3 +1345,65 @@ async def test_run_risk_tier_drift_pinned_to_cli_canonical() -> None:
     from cognic_agentos.core.run.executor import RiskTier as RunRiskTier
 
     assert set(typing.get_args(RunRiskTier)) == set(typing.get_args(CliRiskTier))
+
+
+async def test_a4b_unresolved_tier_refuses_never_read_only(
+    db: AsyncEngine, settings: Settings
+) -> None:
+    ex = _executor(
+        db, backend=_StubBackend(), loader=_StubLoader(_record(risk_tier=None)), settings=settings
+    )
+    result = await ex.run(_request())
+    assert result.terminal_state == "refused"
+    assert result.refusal_reason == "pack_record_risk_tier_unresolved"
+
+
+async def test_a4b_unknown_tier_refuses(db: AsyncEngine, settings: Settings) -> None:
+    ex = _executor(
+        db,
+        backend=_StubBackend(),
+        loader=_StubLoader(_record(risk_tier="legacy_unknown")),
+        settings=settings,
+    )
+    result = await ex.run(_request())
+    assert result.refusal_reason == "pack_record_risk_tier_unresolved"
+
+
+async def test_a4b_malformed_data_classes_refuses_sibling(
+    db: AsyncEngine, settings: Settings
+) -> None:
+    ex = _executor(
+        db,
+        backend=_StubBackend(),
+        loader=_StubLoader(_record(risk_tier="read_only", data_classes=None)),
+        settings=settings,
+    )
+    result = await ex.run(_request())
+    assert result.refusal_reason == "pack_record_data_classes_malformed"
+
+
+async def test_a4b_absent_data_classes_is_not_a_refusal(
+    db: AsyncEngine, settings: Settings
+) -> None:
+    ex = _executor(
+        db,
+        backend=_StubBackend(),
+        loader=_StubLoader(_record(risk_tier="read_only", data_classes=())),
+        settings=settings,
+    )
+    result = await ex.run(_request())
+    assert result.refusal_reason not in (
+        "pack_record_risk_tier_unresolved",
+        "pack_record_data_classes_malformed",
+    )
+
+
+async def test_a4b_tier_check_precedes_data_classes(db: AsyncEngine, settings: Settings) -> None:
+    ex = _executor(
+        db,
+        backend=_StubBackend(),
+        loader=_StubLoader(_record(risk_tier=None, data_classes=None)),
+        settings=settings,
+    )
+    result = await ex.run(_request())
+    assert result.refusal_reason == "pack_record_risk_tier_unresolved"  # tier is the primary gate
