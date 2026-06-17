@@ -279,6 +279,16 @@ Sprint 14A-A4a introduces a new approval-routing mode at the 13.5c2 scheduler se
 
 3. **The setter obligation guards against a high-risk bypass.** Delegation ASSERTS that a downstream sandbox approval gate exists for the same work; the scheduler cannot verify that, so it is a documented contract on the setter (the A4b managed-run executor only, in Wave-1) rather than a runtime guard. Setting the signal without a real downstream gate would turn the affordance into a scheduler high-risk bypass — the contract is pinned in the `scheduler.rego` arm-3 header, the A4a spec §3.8, and audited per-admission on the chain row.
 
+## Sprint 14A-A4b amendment (2026-06-17) — A4a goes live: the managed run exercises both tier-keyed approval consult points with the real tier
+
+Sprint 14A-A4b activates the A4a delegation mode above: the managed-run executor (`core/run/executor.py`, ADR-022) is the authorized production setter of `approval_delegated_to="sandbox_admission"`. The ADR-014 approval-routing consequence: a high-risk managed run now exercises BOTH tier-keyed approval consult points it always had, honestly — (a) the scheduler submit Step-3.5 (13.5c2) SKIPS the consult (delegated, recording `approval_verified=False`), and (b) the sandbox cold-create `admit_policy` (13.5c1, 14A-A2) OWNS the human checkpoint and genuinely PENDS on the real high-risk tier. **Dormant → live-exercised; CC count stays 131; no migration.**
+
+1. **The double-approval-point design, now live.** The managed-run lane consults approval twice, both keyed off the manifest risk tier. A4a made the scheduler delegate (consult-point a skipped, honest `approval_verified=False`); A4b makes the sandbox cold-create (consult-point b) fire on the real tier — `create_request` mints a pending request for `customer_data_read` (→ `require_single_approval`), and a single real `grant()` by a human holding `tool.approve.customer_data` clears it on the re-POST (Arm B `verify_grant_for_action`). The human checkpoint lives at exactly one place (the sandbox gate), as Architecture-Z intends.
+
+2. **The setter obligation is discharged by construction.** A4a's normative §3.8 contract — "any caller setting the delegate signal MUST route the same work through sandbox admission with the real tier" — is satisfied by the only authorized setter: the executor threads the SAME validated tier into both the scheduler `SubmitInput` and the sandbox `PackAdmissionContext`. No path lets a high-risk run delegate at the scheduler but escape the sandbox checkpoint.
+
+3. **Live-proof; the wake-path F4 remains forward.** The env-gated real-docker e2e `tests/integration/run/test_managed_run_high_risk_e2e.py` drives the genuine pend → real-`ApprovalEngine.grant` → re-POST → complete cycle; the `@opa_required` unit test proves the real `scheduler.rego` arm 3 admits the executor's delegated-high-risk submit. A4b closes the A3c "F4" deferral for the COLD-CREATE path; the high-risk suspend→resume/WAKE live exercise remains an independent forward track.
+
 ## References
 - ADR-002 (MCP plugin protocol — pack manifests)
 - ADR-005 (sub-agent — sub-agent calls also flow through approval)
