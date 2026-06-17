@@ -289,6 +289,13 @@ Sprint 14A-A4b activates the A4a delegation mode above: the managed-run executor
 
 3. **Live-proof; the wake-path F4 remains forward.** The env-gated real-docker e2e `tests/integration/run/test_managed_run_high_risk_e2e.py` drives the genuine pend → real-`ApprovalEngine.grant` → re-POST → complete cycle; the `@opa_required` unit test proves the real `scheduler.rego` arm 3 admits the executor's delegated-high-risk submit. A4b closes the A3c "F4" deferral for the COLD-CREATE path; the high-risk suspend→resume/WAKE live exercise remains an independent forward track.
 
+## Sprint 14A-A4c amendment (2026-06-17) — the high-risk WAKE path live-exercised; F4 fully closed
+
+Sprint 14A-A4c closes the A4a/A3c "F4" deferral entirely on the approval surface: the high-risk **WAKE** path now live-exercises the 5th `admit_policy` approval consumer (the sandbox wake-revalidation seam, A3c) under a REAL `ApprovalEngine`. **e2e-only — no production code; CC 131; no migration.**
+
+1. **The wake is the 5th consumer, now live for high-risk.** A3c wired the wake `admit_policy` approval consult; A4b live-exercised cold-create. A4c live-exercises the wake: a high-risk run that suspends re-pends at wake (Arm A, against the persisted high-risk checkpoint) → grant (a distinct human holding the tier's `tool.approve.customer_data` scope) → re-resume → wake Arm-B verify → complete. Each cycle's grant is single-approval (`customer_data_read` → `require_single_approval`). Over its full lifecycle a high-risk managed run now exercises every tier-keyed approval consult honestly — the scheduler submit (skipped/delegated, A4a), the sandbox cold-create (pends, A4b), and the sandbox wake (pends, A4c).
+2. **Live-proof.** The env-gated real-docker e2e `tests/integration/run/test_managed_run_high_risk_wake_e2e.py` walks the genuine two-cycle pend → grant → re-resume → complete under a real engine. This supersedes the A4b amendment's "the high-risk suspend→resume/WAKE live exercise remains an independent forward track" — high-risk cold-create AND wake are now both live-exercised; F4 is fully closed.
+
 ## References
 - ADR-002 (MCP plugin protocol — pack manifests)
 - ADR-005 (sub-agent — sub-agent calls also flow through approval)
