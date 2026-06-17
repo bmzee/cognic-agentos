@@ -260,6 +260,8 @@ def _record(
     kind: str = "tool",
     signed_artefact_digest: bytes = b"\xab" * 32,
     state: str = "installed",
+    risk_tier: str | None = "read_only",
+    data_classes: tuple[str, ...] | None = (),
 ) -> LoadedPackRecord:
     return LoadedPackRecord(
         tenant_id=tenant_id,
@@ -267,6 +269,8 @@ def _record(
         kind=kind,
         signed_artefact_digest=signed_artefact_digest,
         state=state,
+        risk_tier=risk_tier,
+        data_classes=data_classes,
     )
 
 

@@ -121,6 +121,14 @@ class LoadedPackRecord:
     kind: str
     signed_artefact_digest: bytes
     state: str
+    # Sprint 14A-A4b — the trusted manifest risk tier (str = raw extracted value;
+    # None = unresolved/absent/non-string — the executor refuses). The executor
+    # validates membership in _CANONICAL_RISK_TIERS (the fail-closed gate, T3).
+    risk_tier: str | None
+    # Sprint 14A-A4b — manifest [data_governance].data_classes, shape-resolved by
+    # the loader: () = absent/empty; (str, ...) = valid; None = present-but-malformed
+    # (the executor refuses on None).
+    data_classes: tuple[str, ...] | None
 
 
 class PackRecordLoader(Protocol):
