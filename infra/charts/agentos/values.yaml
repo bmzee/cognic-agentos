@@ -83,3 +83,33 @@ objectStore:
 modelArtifacts:
   sizeLimit: 5Gi                                 # emptyDir for /var/lib/cognic/model-artifacts (prod-resolved model_artifact_root; readOnlyRootFilesystem=true)
 tmpSizeLimit: 256Mi                              # emptyDir for /tmp
+
+# --- Sprint 14B-Z1b-a: external access + scrape (all conditional, default OFF) ---
+ingress:
+  enabled: false
+  className: ""                 # operator: nginx / azure-application-gateway / ...
+  annotations: {}               # cert-manager.io/cluster-issuer, nginx.*, etc.
+  hosts:
+    - host: agentos.example.com
+      paths:
+        - { path: /, pathType: Prefix }
+  tls: []                        # [{ secretName: agentos-tls, hosts: [agentos.example.com] }] — existing-secret model
+
+route:
+  enabled: false
+  host: agentos.example.com
+  annotations: {}
+  tls:
+    enabled: true
+    termination: edge            # edge | passthrough | reencrypt
+    insecureEdgeTerminationPolicy: Redirect
+    certificate: ""              # optional inline PEM (operators who need explicit cert material)
+    key: ""                      # optional inline PEM
+    caCertificate: ""            # optional inline PEM
+
+serviceMonitor:
+  enabled: false
+  path: /metrics                 # joined with apiPrefix → /api/v1/metrics
+  interval: 30s
+  scrapeTimeout: 10s
+  labels: {}                     # e.g. { release: kube-prometheus-stack } for Prometheus discovery
