@@ -113,3 +113,21 @@ serviceMonitor:
   interval: 30s
   scrapeTimeout: 10s
   labels: {}                     # e.g. { release: kube-prometheus-stack } for Prometheus discovery
+
+# --- Sprint 14B-Z1b-b: external secrets (ESO ExternalSecret, conditional, default OFF) ---
+externalSecrets:
+  enabled: false
+  targetSecretName: ""           # default <fullname>-secrets (turnkey; override only if you need a fixed name)
+  refreshInterval: 1h
+  secretStoreRef:
+    name: ""                     # REQUIRED when enabled — an operator-owned SecretStore/ClusterSecretStore (the chart never creates it)
+    kind: SecretStore            # SecretStore | ClusterSecretStore
+  data:
+    databaseUrl:
+      remoteRef:
+        key: ""                  # REQUIRED when enabled — remote key holding COGNIC_DATABASE_URL
+        property: ""             # optional — property within the remote secret
+    vaultToken:
+      remoteRef:
+        key: ""                  # REQUIRED when enabled — remote key holding COGNIC_VAULT_TOKEN
+        property: ""             # optional
