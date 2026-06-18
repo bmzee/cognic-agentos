@@ -196,6 +196,27 @@ class Settings(BaseSettings):
             "collector. Set together with otel_exporter_client_cert_path."
         ),
     )
+    otel_exporter_protocol: Literal["grpc", "http"] = Field(
+        default="grpc",
+        description=(
+            "OTLP exporter transport. 'grpc' (default, back-compat) uses the "
+            "gRPC exporter with the otel_exporter_* TLS settings; 'http' uses "
+            "the OTLP/HTTP exporter (for backends like Langfuse that require "
+            "HTTP + auth headers). HTTP transport security is the endpoint URL "
+            "scheme (https://); otel_exporter_insecure is gRPC-only."
+        ),
+    )
+    otel_exporter_headers: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "OTLP exporter headers, threaded into both grpc + http exporters. "
+            "Env-var form is JSON-encoded (e.g. "
+            '\'{"Authorization": "Basic <base64(public:secret)>"}\'); invalid '
+            "JSON / non-string keys or values fail at settings-load time via "
+            "the dict[str, str] annotation. For Langfuse OTLP/HTTP, supply the "
+            "Authorization Basic-auth header here via a Secret-sourced env."
+        ),
+    )
     prometheus_metrics_path: str = Field(
         default="/metrics",
         description="Path the Prometheus instrumentator exposes the scrape endpoint at "

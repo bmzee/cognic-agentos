@@ -15,6 +15,7 @@ from cognic_agentos.core.config import (
     build_settings_without_env_file,
     get_settings,
 )
+from tests.support.settings_fixtures import prod_settings
 
 # Wave-1 (T1) deploy-safety guards reject the dev ``embedding_model`` (G5) and
 # the personal-registry ``ghcr.io/bmzee`` sandbox images (G7) in strict
@@ -2517,3 +2518,20 @@ class TestCanonicalImageSettings:
         ref = "registry.example.com/img@sha256:" + "c" * 64
         s = Settings(sandbox_canonical_runtime_python_image=ref)
         assert s.sandbox_canonical_runtime_python_image == ref
+
+
+def test_otel_exporter_protocol_defaults_to_grpc() -> None:
+    s = prod_settings()
+    assert s.otel_exporter_protocol == "grpc"
+    assert s.otel_exporter_headers == {}
+
+
+def test_otel_exporter_headers_parse_from_json_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("COGNIC_OTEL_EXPORTER_HEADERS", '{"Authorization": "Basic abc123"}')
+    s = prod_settings()  # headers not in prod_settings' overrides → read from env
+    assert s.otel_exporter_headers == {"Authorization": "Basic abc123"}
+
+
+def test_otel_exporter_protocol_rejects_invalid_value() -> None:
+    with pytest.raises(ValidationError):
+        prod_settings(otel_exporter_protocol="thrift")

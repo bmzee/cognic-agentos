@@ -274,7 +274,6 @@ def test_span_ingests_into_langfuse_via_http_otlp() -> None:
     token = base64.b64encode(f"{public}:{secret}".encode()).decode()
 
     from langfuse import Langfuse
-    from opentelemetry import trace
 
     from cognic_agentos.observability.otel import configure_tracing
     from tests.support.settings_fixtures import prod_settings
@@ -294,7 +293,11 @@ def test_span_ingests_into_langfuse_via_http_otlp() -> None:
     )
     provider = configure_tracing(settings)
     try:
-        tracer = trace.get_tracer("cognic_agentos.test")
+        # Use the provider we just built (NOT trace.get_tracer, which returns a
+        # tracer bound to the set-once process-global provider — if an earlier
+        # test/app claimed the global slot, the span would emit through the OLD
+        # provider while we force_flush this new Langfuse one).
+        tracer = provider.get_tracer("cognic_agentos.test")
         with tracer.start_as_current_span("z1bc-otlp-proof") as span:
             trace_id = format(span.get_span_context().trace_id, "032x")
             span.set_attribute("test.marker", "z1bc")
