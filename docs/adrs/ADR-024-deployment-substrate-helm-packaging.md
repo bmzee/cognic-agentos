@@ -195,3 +195,37 @@ The default + ingress-on scenarios use core kinds only and need no CRD schemas.
 ### Posture (Z1b-a)
 
 Pure chart work: **CC count stays 131 / no kernel change / no migration / no new on-gate module.** The live cloud / live-ingress exercise is **Z1b-d** (AKS bring-up) — Z1b-a's templates are proven by render / lint / kubeconform / byte-snapshot only, **not** by a live cluster. Out-of-scope-for-Z1b-a (the remaining Z1b sub-slices): external-secrets depth (Z1b-b), the Langfuse-OTLP OTel gRPC→HTTP exporter swap (Z1b-c, a kernel slice), and AKS / cloud-identity bring-up (Z1b-d).
+
+## Sprint 14B-Z1b-b amendment (2026-06-18)
+
+Sprint 14B-Z1b-b adds **external-secrets depth (ESO-first)**: a conditional, default-off External Secrets Operator (ESO) `ExternalSecret` template that populates the existing 2-key bootstrap Secret from an external store, behind a **three-mode mutually-exclusive secret source**. It is the second of the four Z1b sub-slices (Z1b-a external access / Z1b-b external secrets / Z1b-c Langfuse-OTLP exporter swap / Z1b-d AKS bring-up). Like Z1a/Z1b-a it is **pure additive chart work — no kernel code, CC count stays 131, no migration, no new on-gate module**; the only Python touched is the snapshot-test parametrization (subject to ruff/mypy).
+
+### The conditional `ExternalSecret` template (default OFF)
+
+- **`templates/externalsecret.yaml`** — an ESO `ExternalSecret` (`external-secrets.io/v1`), rendered only when `externalSecrets.enabled=true` (default `false`). It produces the `agentos.secretName` Secret with `target.name` = `agentos.secretName`, `creationPolicy: Owner`, and `refreshInterval` defaulting to `1h`.
+- **The two `data[]` entries are FIXED** to exactly the two bootstrap keys `COGNIC_DATABASE_URL` + `COGNIC_VAULT_TOKEN` — there is no arbitrary-extra-target-key surface. For each, `remoteRef.key` is **required** (a `required` template guard fails the render when `externalSecrets.enabled=true` and a key is empty) and `remoteRef.property` is **optional**.
+- **`secretStoreRef` is operator-owned.** `secretStoreRef.name` is **required** when enabled and `secretStoreRef.kind` defaults to `SecretStore` (`SecretStore` | `ClusterSecretStore`). **The chart NEVER creates the store** — the operator provisions the `SecretStore`/`ClusterSecretStore` (and ESO itself, the `external-secrets.io` CRDs) in the cluster.
+- **`targetSecretName`** defaults to `<fullname>-secrets` (override only for a fixed name).
+
+The template reuses the Z1a/Z1b-a `_helpers.tpl` conventions (`agentos.fullname` / `agentos.labels` / `agentos.secretName`). Default-off means it does not appear in the default rendered snapshot — the default render is byte-unchanged.
+
+### The three-mode mutually-exclusive secret source
+
+Z1a/Z1b-a had two secret sources (chart-created `secrets.create` vs an existing `secrets.existingSecret`); Z1b-b adds the ESO source as a third, mutually exclusive with the other two: **exactly one of `secrets.create` | `secrets.existingSecret` | `externalSecrets.enabled`** may be set. This is enforced in **two layers** (defense-in-depth):
+
+1. **Helm `fail` guard.** A new `agentos.validateSecretSource` helper counts the configured sources and `fail`s the render when more than one is set. It is invoked as the **FIRST action of `agentos.secretName`**, so the mutual-exclusion guard fires at every secret-wiring site (`deployment.yaml`, `migration-job.yaml`, and the new `externalsecret.yaml`). At-least-one is still enforced by the terminal `fail` in `agentos.secretName`.
+2. **`values.schema.json` (relocated to a root-level `allOf`).** The in-`secrets` subschema `else` clause from Z1a (`create=false ⇒ existingSecret required`) was **DROPPED**, and the 3-mode logic was **relocated to a root-level `allOf`**. The `allOf` encodes the mutual exclusion (`not` clauses), the relocated "`create=false` ∧ not-ESO ⇒ `existingSecret` required", and the ESO enabled-mode required fields (`secretStoreRef.name` + both `remoteRef.key` non-empty).
+
+**Rationale for dropping the in-`secrets` `else`:** ESO mode is legitimately `create=false` + empty `existingSecret` (the Secret is materialised by ESO, not by the chart and not by the operator pre-creating it), which the old `else` would have rejected. Equally important, the in-`secrets` subschema **cannot see the sibling `externalSecrets.*`** to make the decision; only a root-level `allOf` has both the `secrets.*` and `externalSecrets.*` props in scope. Both layers (the Helm `fail` and the schema `allOf`) coexist as defense-in-depth.
+
+### The fifth snapshot scenario + CRD-schema outcome
+
+The Z1b-a four byte-snapshots (`default` / `ingress` / `route` / `servicemonitor`) become **five** — a fifth `externalsecret` scenario is added (its overlay disables `secrets.create` because the base `ci/snapshot-values.yaml` sets `secrets.create=true` and ESO is mutually exclusive with it). The scenario is rendered Helm-4.2.2-pinned, byte-diffed against its committed `tests/unit/infra/helm/agentos_rendered_externalsecret.yaml`, and `kubeconform`-validated. The Helm-3 compatibility lane renders it too.
+
+**CRD-schema outcome — ExternalSecret is schema-VALIDATED.** The ExternalSecret CRD schema **IS in the `datreeio/CRDs-catalog`** (stored lowercase as `external-secrets.io/externalsecret_v1.json`) and **kubeconform validates it** — the `externalsecret` scenario reports `Valid: 7, Skipped: 0`. So `ExternalSecret` is schema-validated exactly like `ServiceMonitor`. The CI keeps the **narrow `-skip Route`** introduced in Z1b-a: `Route` remains genuinely absent from the catalog (`route.openshift.io/route_v1.json` → 404; kubeconform errors without the skip), so only `Route`'s schema validation is scoped-skipped — `ExternalSecret`, `ServiceMonitor`, and all core kinds stay schema-validated.
+
+**A lesson on the catalog probe.** A raw-URL PascalCase probe (`ExternalSecret_v1.json`) is a **false-negative** for kubeconform's actual behaviour: kubeconform lowercases the kind before resolving the schema, so the authoritative signal is kubeconform itself, not a raw-URL HEAD with the PascalCase filename. The Z1b-b finding therefore corrects any earlier hedge — `ExternalSecret` is validated, not scoped-skipped.
+
+### Posture (Z1b-b)
+
+Pure chart work: **CC count stays 131 / no kernel change / no migration / no new on-gate module.** The only new Python is the snapshot-test parametrization. The live cluster / live-ESO exercise is **Z1b-d** (AKS bring-up) — Z1b-b's `ExternalSecret` template is proven by render / lint / kubeconform (schema-validated) / byte-snapshot only, **not** by a live cluster against a real store. Out-of-scope-for-Z1b-b (the remaining Z1b sub-slices): the Langfuse-OTLP OTel gRPC→HTTP exporter swap (Z1b-c, a kernel slice) and AKS / cloud-identity bring-up (Z1b-d).
