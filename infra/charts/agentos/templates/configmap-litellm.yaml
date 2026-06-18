@@ -1,0 +1,11 @@
+{{- if not .Values.litellm.existingConfigMap }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "agentos.fullname" . }}-litellm
+  labels:
+    {{- include "agentos.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    {{- .Values.litellm.config | nindent 4 }}
+{{- end }}

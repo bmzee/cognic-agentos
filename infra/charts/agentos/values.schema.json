@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["image", "runtimeProfile", "apiPrefix", "qdrant", "vault", "embedding", "langfuse", "litellm", "sandbox", "migrations", "secrets", "service"],
+  "properties": {
+    "image": {
+      "type": "object",
+      "required": ["repository", "pullPolicy"],
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "tag": { "type": "string" },
+        "pullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] },
+        "pullSecrets": { "type": "array" }
+      }
+    },
+    "replicaCount": { "type": "integer", "minimum": 1 },
+    "runtimeProfile": { "type": "string", "enum": ["dev", "stage", "prod"] },
+    "apiPrefix": { "type": "string", "pattern": "^/" },
+    "qdrant": { "type": "object", "required": ["url"], "properties": { "url": { "type": "string" } } },
+    "vault": { "type": "object", "required": ["addr"], "properties": { "addr": { "type": "string", "minLength": 1 } } },
+    "embedding": {
+      "type": "object",
+      "required": ["driver", "baseUrl", "model"],
+      "properties": {
+        "driver": { "type": "string" },
+        "baseUrl": { "type": "string" },
+        "model": { "type": "string", "not": { "const": "qwen3-embedding:8b" } },
+        "dimensions": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "langfuse": { "type": "object", "required": ["host"], "properties": { "host": { "type": "string" } } },
+    "litellm": { "type": "object", "required": ["baseUrl"], "properties": { "baseUrl": { "type": "string" }, "config": { "type": "string" }, "existingConfigMap": { "type": "string" } } },
+    "cache": { "type": "object", "properties": { "enabled": { "type": "boolean" }, "url": { "type": "string" } } },
+    "sandbox": {
+      "type": "object",
+      "required": ["runtimeEnabled", "canonicalRuntimeImage", "canonicalEgressProxyImage"],
+      "properties": {
+        "runtimeEnabled": { "type": "boolean" },
+        "canonicalRuntimeImage": { "type": "string", "pattern": "@sha256:[0-9a-f]{64}$", "not": { "pattern": "ghcr.io/bmzee" } },
+        "canonicalEgressProxyImage": { "type": "string", "pattern": "@sha256:[0-9a-f]{64}$", "not": { "pattern": "ghcr.io/bmzee" } }
+      }
+    },
+    "migrations": { "type": "object", "required": ["enabled"], "properties": { "enabled": { "type": "boolean" } } },
+    "secrets": {
+      "type": "object",
+      "required": ["create"],
+      "properties": {
+        "create": { "type": "boolean" },
+        "existingSecret": { "type": "string" },
+        "databaseUrl": { "type": "string" },
+        "vaultToken": { "type": "string" }
+      },
+      "if": { "properties": { "create": { "const": true } } },
+      "then": { "required": ["databaseUrl", "vaultToken"], "properties": { "databaseUrl": { "minLength": 1 }, "vaultToken": { "minLength": 1 } } },
+      "else": { "required": ["existingSecret"], "properties": { "existingSecret": { "minLength": 1 } } }
+    },
+    "service": { "type": "object", "required": ["type", "port"], "properties": { "type": { "type": "string" }, "port": { "type": "integer" } } },
+    "podSecurityContext": { "type": "object" }
+  }
+}

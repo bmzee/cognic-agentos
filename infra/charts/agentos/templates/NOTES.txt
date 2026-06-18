@@ -1,0 +1,13 @@
+Cognic AgentOS ({{ .Chart.AppVersion }}) installed as release "{{ .Release.Name }}".
+
+Service (ClusterIP): {{ include "agentos.fullname" . }}:{{ .Values.service.port }}
+Probes: liveness {{ .Values.apiPrefix }}/healthz · readiness {{ .Values.apiPrefix }}/readyz
+
+Verify readiness:
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "agentos.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }} &
+  curl -fsS http://127.0.0.1:{{ .Values.service.port }}{{ .Values.apiPrefix }}/readyz
+
+{{ if .Values.secrets.create }}WARNING: secrets.create=true renders a chart-managed Secret — smoke/dev ONLY.
+For production set secrets.create=false and secrets.existingSecret=<operator/ESO-managed Secret>.{{ end }}
+{{ if not .Values.migrations.enabled }}migrations.enabled=false: no migration Job ran. Run `alembic upgrade head` against COGNIC_DATABASE_URL before serving traffic.{{ end }}
+Readiness requires all five adapters healthy: Postgres, Qdrant, Vault, the embedding endpoint, and Langfuse.
