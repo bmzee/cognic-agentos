@@ -589,24 +589,29 @@ jobs:
           tar -xzf kubeconform.tgz
           sudo install -m 0755 kubeconform /usr/local/bin/kubeconform
           kubeconform -v
-      # --- primary gate (Helm 4): lint + 4-scenario template/snapshot/kubeconform ---
+      # --- primary gate (Helm 4): lint + 5-scenario template/snapshot/kubeconform ---
       - name: helm lint (primary, Helm 4)
         run: helm lint infra/charts/agentos -f infra/charts/agentos/ci/snapshot-values.yaml
-      - name: helm template + snapshot-drift + kubeconform (4 scenarios)
+      - name: helm template + snapshot-drift + kubeconform (5 scenarios)
         run: |
           set -euo pipefail
           BASE="infra/charts/agentos/ci/snapshot-values.yaml"
-          # ServiceMonitor's CRD schema IS in the datreeio CRDs-catalog (PascalCase
-          # ServiceMonitor_v1.json); Route's is NOT (confirmed 2026-06-18, a genuine
-          # catalog absence, not a network issue). So `-skip Route` is the scoped
-          # fallback per the plan: ServiceMonitor stays schema-validated, only Route
-          # validation is skipped (Route renders + lints; its schema just isn't published).
+          # ServiceMonitor's CRD schema IS in the datreeio CRDs-catalog and ExternalSecret's
+          # IS too (the catalog stores them lowercase — servicemonitor_v1.json /
+          # externalsecret_v1.json — and kubeconform lowercases {{.ResourceKind}} when it
+          # resolves the URL, so both validate; confirmed 2026-06-18 by running kubeconform:
+          # the externalsecret scenario reports "Valid: 7, Skipped: 0"). Route's schema is NOT
+          # in the catalog (genuine absence, not a network issue) — the route scenario reports
+          # "Skipped: 1". So `-skip Route` stays the NARROW scoped fallback: ServiceMonitor and
+          # ExternalSecret stay schema-validated; only Route validation is skipped (Route
+          # renders + lints + is byte-snapshotted; its schema just isn't published).
           CRD='https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
           # "scenario-suffix|overlay-flag" ; default has no suffix + no overlay
           for s in "|" \
                    "_ingress|-f infra/charts/agentos/ci/snapshot-values-ingress.yaml" \
                    "_route|-f infra/charts/agentos/ci/snapshot-values-route.yaml" \
-                   "_servicemonitor|-f infra/charts/agentos/ci/snapshot-values-servicemonitor.yaml"; do
+                   "_servicemonitor|-f infra/charts/agentos/ci/snapshot-values-servicemonitor.yaml" \
+                   "_externalsecret|-f infra/charts/agentos/ci/snapshot-values-externalsecret.yaml"; do
             suffix="${s%%|*}"; overlay="${s#*|}"
             snap="tests/unit/infra/helm/agentos_rendered${suffix}.yaml"
             echo "::group::scenario ${suffix:-default}"
@@ -617,8 +622,11 @@ jobs:
               -schema-location default -schema-location "$CRD" -skip Route /tmp/rendered.yaml
             echo "::endgroup::"
           done
-      # --- Helm 3 compatibility gate: render + schema ONLY (no byte-diff), 4 scenarios ---
-      - name: helm3 lint + template + kubeconform (4 scenarios)
+      # --- Helm 3 compatibility gate: render + schema ONLY (no byte-diff), 5 scenarios ---
+      # Same NARROW `-skip Route` scope as the primary lane: ServiceMonitor + ExternalSecret
+      # schemas resolve from the catalog (lowercase filenames; kubeconform lowercases the
+      # kind), only Route's schema is absent (confirmed 2026-06-18).
+      - name: helm3 lint + template + kubeconform (5 scenarios)
         run: |
           set -euo pipefail
           BASE="infra/charts/agentos/ci/snapshot-values.yaml"
@@ -627,7 +635,8 @@ jobs:
           for overlay in "" \
                          "-f infra/charts/agentos/ci/snapshot-values-ingress.yaml" \
                          "-f infra/charts/agentos/ci/snapshot-values-route.yaml" \
-                         "-f infra/charts/agentos/ci/snapshot-values-servicemonitor.yaml"; do
+                         "-f infra/charts/agentos/ci/snapshot-values-servicemonitor.yaml" \
+                         "-f infra/charts/agentos/ci/snapshot-values-externalsecret.yaml"; do
             helm3 template rel infra/charts/agentos --namespace cognic -f "$BASE" $overlay > /tmp/rendered-helm3.yaml
             kubeconform -strict -summary -kubernetes-version 1.27.0 \
               -schema-location default -schema-location "$CRD" -skip Route /tmp/rendered-helm3.yaml
