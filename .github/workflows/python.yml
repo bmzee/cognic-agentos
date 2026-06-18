@@ -589,30 +589,49 @@ jobs:
           tar -xzf kubeconform.tgz
           sudo install -m 0755 kubeconform /usr/local/bin/kubeconform
           kubeconform -v
-      # --- primary gate (Helm 4): lint + deterministic template + snapshot diff + schema ---
+      # --- primary gate (Helm 4): lint + 4-scenario template/snapshot/kubeconform ---
       - name: helm lint (primary, Helm 4)
         run: helm lint infra/charts/agentos -f infra/charts/agentos/ci/snapshot-values.yaml
-      - name: helm template (primary, deterministic + EOF-normalized)
+      - name: helm template + snapshot-drift + kubeconform (4 scenarios)
         run: |
-          helm template rel infra/charts/agentos --namespace cognic \
-            -f infra/charts/agentos/ci/snapshot-values.yaml > /tmp/rendered-raw.yaml
-          # Normalize helm's trailing blank line to a single final newline, matching
-          # tests/unit/infra/test_helm_chart.py::_render (raw.rstrip("\n") + "\n"),
-          # so the committed (normalized) snapshot compares byte-clean.
-          printf '%s\n' "$(cat /tmp/rendered-raw.yaml)" > /tmp/rendered.yaml
-      - name: snapshot drift gate (Helm 4 output)
-        run: diff -u tests/unit/infra/helm/agentos_rendered.yaml /tmp/rendered.yaml
-      - name: kubeconform schema validation (Helm 4 output)
-        run: kubeconform -strict -summary -kubernetes-version 1.27.0 /tmp/rendered.yaml
-      # --- Helm 3 compatibility gate: render + schema ONLY, NO snapshot diff ---
-      - name: helm3 lint (compatibility)
-        run: helm3 lint infra/charts/agentos -f infra/charts/agentos/ci/snapshot-values.yaml
-      - name: helm3 template (compatibility)
+          set -euo pipefail
+          BASE="infra/charts/agentos/ci/snapshot-values.yaml"
+          # ServiceMonitor's CRD schema IS in the datreeio CRDs-catalog (PascalCase
+          # ServiceMonitor_v1.json); Route's is NOT (confirmed 2026-06-18, a genuine
+          # catalog absence, not a network issue). So `-skip Route` is the scoped
+          # fallback per the plan: ServiceMonitor stays schema-validated, only Route
+          # validation is skipped (Route renders + lints; its schema just isn't published).
+          CRD='https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
+          # "scenario-suffix|overlay-flag" ; default has no suffix + no overlay
+          for s in "|" \
+                   "_ingress|-f infra/charts/agentos/ci/snapshot-values-ingress.yaml" \
+                   "_route|-f infra/charts/agentos/ci/snapshot-values-route.yaml" \
+                   "_servicemonitor|-f infra/charts/agentos/ci/snapshot-values-servicemonitor.yaml"; do
+            suffix="${s%%|*}"; overlay="${s#*|}"
+            snap="tests/unit/infra/helm/agentos_rendered${suffix}.yaml"
+            echo "::group::scenario ${suffix:-default}"
+            helm template rel infra/charts/agentos --namespace cognic -f "$BASE" $overlay > /tmp/raw.yaml
+            printf '%s\n' "$(cat /tmp/raw.yaml)" > /tmp/rendered.yaml
+            diff -u "$snap" /tmp/rendered.yaml
+            kubeconform -strict -summary -kubernetes-version 1.27.0 \
+              -schema-location default -schema-location "$CRD" -skip Route /tmp/rendered.yaml
+            echo "::endgroup::"
+          done
+      # --- Helm 3 compatibility gate: render + schema ONLY (no byte-diff), 4 scenarios ---
+      - name: helm3 lint + template + kubeconform (4 scenarios)
         run: |
-          helm3 template rel infra/charts/agentos --namespace cognic \
-            -f infra/charts/agentos/ci/snapshot-values.yaml > /tmp/rendered-helm3.yaml
-      - name: kubeconform schema validation (Helm 3 output)
-        run: kubeconform -strict -summary -kubernetes-version 1.27.0 /tmp/rendered-helm3.yaml
+          set -euo pipefail
+          BASE="infra/charts/agentos/ci/snapshot-values.yaml"
+          CRD='https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
+          helm3 lint infra/charts/agentos -f "$BASE"
+          for overlay in "" \
+                         "-f infra/charts/agentos/ci/snapshot-values-ingress.yaml" \
+                         "-f infra/charts/agentos/ci/snapshot-values-route.yaml" \
+                         "-f infra/charts/agentos/ci/snapshot-values-servicemonitor.yaml"; do
+            helm3 template rel infra/charts/agentos --namespace cognic -f "$BASE" $overlay > /tmp/rendered-helm3.yaml
+            kubeconform -strict -summary -kubernetes-version 1.27.0 \
+              -schema-location default -schema-location "$CRD" -skip Route /tmp/rendered-helm3.yaml
+          done
 
   kind-smoke:
     name: kind Ready-smoke (env-gated)
