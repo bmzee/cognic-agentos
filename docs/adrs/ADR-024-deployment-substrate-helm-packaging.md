@@ -263,3 +263,37 @@ A live proof at `tests/integration/observability/test_langfuse_otlp_ingestion.py
 ### Posture (Z1b-c)
 
 **CC count stays 131 / no migration / no new on-gate module / no new dependency.** `observability/otel.py` and `core/config.py` are **off the per-file coverage gate**, but **`core/config.py` is under the AGENTS.md `core/` stop-rule** — the kernel edit carried halt-before-commit human scrutiny. Z1b-c is the kernel slice of the parked Langfuse-OTLP follow-up; the **live cloud / live cluster** exercise remains **Z1b-d** (AKS bring-up) — Z1b-c's chart wiring + http exporter are proven by render / lint / kubeconform / byte-snapshot + unit tests + the env-gated live proof only, **not** by an always-on production Langfuse. Out-of-scope-for-Z1b-c (the remaining Z1b sub-slice): AKS / cloud-identity bring-up + the live ServiceMonitor → Prometheus scrape wiring (Z1b-d).
+
+## Sprint 14B-Z1b-d-1 amendment (2026-06-18)
+
+Sprint 14B-Z1b-d-1 makes the chart's ServiceAccount **cloud-workload-identity-ready** by exposing two **generic, cloud-agnostic** Helm hooks — `serviceAccount.annotations` + `podLabels` — so the SA can federate to any cloud IAM identity (Azure workload identity / GKE workload identity / AWS IRSA) with the cloud-specifics living only in the runbook examples. It is the **first half of the Z1b-d split** (see "The Z1b-d split" below). Like Z1a/Z1b-a/Z1b-b it is **pure additive chart work — no kernel code, CC count stays 131, no migration, no new on-gate module**; the only Python touched is the snapshot-test parametrization (subject to ruff/mypy).
+
+### The two generic hooks (default empty → render nothing)
+
+- **`serviceAccount.annotations`** — a map projected verbatim onto the ServiceAccount's `metadata.annotations` via a `{{- with }}`-gated block in `templates/serviceaccount.yaml`. This carries the cloud's workload-identity SA annotation (e.g. `azure.workload.identity/client-id`, `iam.gke.io/gcp-service-account`, `eks.amazonaws.com/role-arn`).
+- **`podLabels`** — a map merged into the Deployment's pod **template** labels (`.spec.template.metadata.labels`) via a `{{- with }}`-gated `toYaml` block in `templates/deployment.yaml`. This carries the cloud's workload-identity pod label where one is required (e.g. Azure's `azure.workload.identity/use: "true"`).
+
+Both default to **empty maps** in `values.yaml` and are `{{- with }}`-gated, so with the defaults they render nothing — **the default render and the six existing Z1a/Z1b-a/Z1b-b/Z1b-c snapshots are byte-UNCHANGED**.
+
+### The selector-stability invariant (the correctness gate)
+
+`podLabels` merge into the pod **template** labels **ONLY** — they are **NEVER** added to `.spec.selector.matchLabels` (which stays the Z1a stable `agentos.selectorLabels`). A Deployment's selector is **immutable**: mutating it would break `helm upgrade` (the API server rejects a changed selector on an existing Deployment). The 7th snapshot scenario actively pins this — the workload-identity pod label appears in the Deployment's `.spec.template.metadata.labels` but is **absent** from `.spec.selector.matchLabels`. This mirrors the Z1b-a ServiceMonitor-selector-stability discipline (the selector must not pin a per-upgrade-mutating value).
+
+### The chart stays cloud-agnostic (clouds only in examples)
+
+`values.yaml` and `values.schema.json` carry **plain `type: object` maps** for `serviceAccount.annotations` + `podLabels` — there are **no `azure.*`/GKE/AWS first-class values and no enum** in the chart. The clouds (Azure / GKE / AWS) appear **only** in the operator runbook's worked examples and in the one test snapshot fixture (`ci/snapshot-values-workload-identity.yaml`, which uses Azure WI as its example overlay). The chart never creates the cloud IAM identity — the operator provisions the cloud-side identity + the federation out-of-band and passes the annotation/label through these two generic hooks.
+
+### The 7th `workload-identity` scenario (no CRD change)
+
+The Z1b-c six byte-snapshots (`default` / `ingress` / `route` / `servicemonitor` / `externalsecret` / `otel-http`) become **seven** — a 7th `workload-identity` scenario is added, layering the Azure-WI example overlay over the base `ci/snapshot-values.yaml`. The scenario is rendered Helm-4.2.2-pinned, byte-diffed against its committed `tests/unit/infra/helm/agentos_rendered_workload-identity.yaml`, and `kubeconform`-validated. **No kubeconform CRD change** — the workload-identity render is **core kinds only** (ServiceAccount + Deployment); no CRD is introduced, so the CI keeps the unchanged narrow **`-skip Route`** (Route alone stays catalog-absent per Z1b-a/Z1b-b); `workload-identity` reports all-Valid.
+
+### The Z1b-d split (d-1 here; d-2 the live AKS proof)
+
+Z1b-d is split into two slices:
+
+- **Z1b-d-1 (this slice)** — **generic chart workload-identity readiness**: pure chart/docs work, fully in-session-verifiable by render / lint / kubeconform / byte-snapshot (the two generic hooks + the selector-stability invariant + the 7th scenario + this docs set).
+- **Z1b-d-2 (separate, forward)** — **AKS bring-up + env-gated live cloud smoke**: the live cluster proof that exercises the chart path in-cluster — incl. the ServiceMonitor → real Prometheus scrape and live Langfuse OTLP ingestion — against a real cloud environment with cloud-identity federation wired end-to-end. The live AKS deploy is **NOT** part of d-1.
+
+### Posture (Z1b-d-1)
+
+Pure chart work: **CC count stays 131 / no kernel change / no migration / no new on-gate module.** The two generic hooks are proven by render / lint / kubeconform / byte-snapshot (the 7th scenario) only — **not** by a live cluster. The live cluster exercise (an actual AKS deploy with cloud-identity federation) is **Z1b-d-2**, not this slice.
