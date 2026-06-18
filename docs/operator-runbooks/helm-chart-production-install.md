@@ -228,6 +228,117 @@ helm upgrade agentos infra/charts/agentos \
    kubectl -n cognic logs deploy/agentos-agentos
    ```
 
+## External access (Ingress / OpenShift Route) + TLS + ServiceMonitor
+
+> Added in **Sprint 14B-Z1b-a** (ADR-024). The Z1a chart was Service-only (reach
+> it via `kubectl port-forward`). Z1b-a adds three **conditional, default-off**
+> templates so you can expose the Service externally and let a cluster Prometheus
+> scrape `/metrics`. All three are **opt-in** — they render nothing unless you
+> enable them, so the default install is byte-unchanged. For the Route and the
+> ServiceMonitor the cluster MUST have the corresponding CRD installed (the
+> OpenShift `route.openshift.io` API, and the Prometheus-Operator
+> `monitoring.coreos.com` API) or the manifest has nothing to apply against.
+> Z1b-a is pure chart work — **no kernel change, no migration**. (The live
+> cloud/ingress bring-up is Z1b-d; these templates are CI-validated by
+> render/lint/kubeconform/byte-snapshot only.)
+
+### Ingress (vanilla Kubernetes)
+
+Enable an `Ingress` (`networking.k8s.io/v1`), set the ingress class, attach the
+cert-manager (or other) annotations, and reference an **existing** TLS Secret you
+(or cert-manager) provision — the chart references the Secret by name and creates
+no certificate material of its own:
+
+```yaml
+ingress:
+  enabled: true
+  className: nginx                              # or azure-application-gateway, etc.
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+  hosts:
+    - host: agentos.example.com
+      paths:
+        - { path: /, pathType: Prefix }
+  tls:
+    - secretName: agentos-tls                   # the TLS Secret you/cert-manager provision
+      hosts: [agentos.example.com]
+```
+
+### OpenShift Route
+
+Enable a `Route` (`route.openshift.io/v1`). TLS is **`a+b`**: the default (a)
+terminates `edge` with the OpenShift router's **default/wildcard certificate** and
+redirects HTTP→HTTPS — zero secret handling, no OCP-version dependency — or (b)
+you supply inline PEM material:
+
+```yaml
+# (a) default — edge TLS, router default cert, HTTP→HTTPS redirect:
+route:
+  enabled: true
+  host: agentos.example.com
+  annotations:
+    haproxy.router.openshift.io/timeout: 60s
+  tls:
+    enabled: true
+    termination: edge                           # edge | passthrough | reencrypt
+    insecureEdgeTerminationPolicy: Redirect
+```
+
+```yaml
+# (b) optional — serve an explicit certificate (inline PEM):
+route:
+  enabled: true
+  host: agentos.example.com
+  tls:
+    enabled: true
+    termination: edge
+    certificate: |
+      -----BEGIN CERTIFICATE-----
+      ...
+    key: |
+      -----BEGIN PRIVATE KEY-----
+      ...
+    caCertificate: |                            # optional
+      -----BEGIN CERTIFICATE-----
+      ...
+```
+
+The `tls.externalCertificate` Secret-reference form (OCP ≥ 4.16, feature-gated +
+router RBAC) is a documented **later option** and is **not** wired in Z1b-a.
+
+> **CI note — Route CRD schema.** The Route still **renders + lints** and is
+> byte-snapshotted in CI, but its CRD schema is absent from the public
+> `datreeio/CRDs-catalog`, so the CI `kubeconform` step uses a scoped
+> **`-skip Route`** (only Route's schema validation is skipped — the
+> ServiceMonitor and all core kinds stay schema-validated). Validate the Route
+> against your cluster's real `route.openshift.io` CRD with a `--dry-run=server`
+> apply if you want a schema check before rollout.
+
+### ServiceMonitor (Prometheus Operator)
+
+Enable a `ServiceMonitor` (`monitoring.coreos.com/v1`) so a cluster Prometheus
+discovers + scrapes the existing `/metrics` surface. The scrape path is
+`{apiPrefix}{serviceMonitor.path}` → **`/api/v1/metrics`**. The crucial value is
+the discovery **`release` label** — it MUST match the label your cluster
+Prometheus selects ServiceMonitors by (for the kube-prometheus-stack the default
+is its release name):
+
+```yaml
+serviceMonitor:
+  enabled: true
+  path: /metrics                                # joined with apiPrefix → /api/v1/metrics
+  interval: 30s
+  scrapeTimeout: 10s
+  labels:
+    release: kube-prometheus-stack              # MUST match your Prometheus's serviceMonitorSelector
+```
+
+The ServiceMonitor's selector targets the chart Service via the **stable**
+name+instance labels (it does not pin the chart version), so it keeps matching
+across chart upgrades. If Prometheus is not discovering the target, the usual
+cause is a `serviceMonitor.labels.release` value that does not match the
+cluster Prometheus's `serviceMonitorSelector`.
+
 ## Trust-root note (pack registration)
 
 Reaching **Ready does not require a signing trust root** — `/readyz` does not
