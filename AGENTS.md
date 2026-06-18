@@ -314,6 +314,8 @@ Rules:
 
 Plugin stubs (e.g. `protocol/mcp_host.MCPHost.call_tool`) that raise `NotImplementedError` referencing an ADR are explicit scaffolding, not mocks — they fail loudly when called, document the contract, and protect against silent fallback.
 
+**Deployment substrate (Sprint 14B-Z1a, ADR-024).** The kernel ships an OpenShift-compatible **Helm chart** at `infra/charts/agentos/` that packages the existing `default-adapters` prod image (`create_prod_app`) — validated by an always-on Helm-4 lint/template/kubeconform/byte-snapshot-drift CI gate + a pinned Helm-3 compatibility lane, plus an env-gated `kind` Ready-smoke against six real credential-free backends. **Helm is the only in-repo manifest source** — banks needing Kustomize render `helm template` and overlay in their own repos (the OS / bank-overlay boundary above). Z1a is pure additive infra-as-code: **CC count stays 131, no kernel change, no migration** (the only Python added is the rendered-YAML snapshot test); AKS/cloud bring-up, external-secrets depth, Ingress/Route + TLS, and observability wiring are deferred to Z1b.
+
 ## Code layers
 
 The three-pool rule (tools / skills / agents) governs **agent internals** outside this repo. Inside this repo:
