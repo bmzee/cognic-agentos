@@ -613,3 +613,18 @@ jobs:
             -f infra/charts/agentos/ci/snapshot-values.yaml > /tmp/rendered-helm3.yaml
       - name: kubeconform schema validation (Helm 3 output)
         run: kubeconform -strict -summary -kubernetes-version 1.27.0 /tmp/rendered-helm3.yaml
+
+  kind-smoke:
+    name: kind Ready-smoke (env-gated)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    if: ${{ vars.COGNIC_RUN_KIND_SMOKE == '1' || github.event_name == 'workflow_dispatch' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Install kind + helm
+        uses: helm/kind-action@v1
+        with:
+          install_only: true
+      - name: Run the kind Ready-smoke
+        run: bash infra/charts/agentos/ci/smoke/run-smoke.sh
