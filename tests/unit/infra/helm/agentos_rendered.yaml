@@ -1,0 +1,276 @@
+---
+# Source: agentos/templates/serviceaccount.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: rel-agentos
+  labels:
+    app.kubernetes.io/name: agentos
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: cognic-agentos
+    helm.sh/chart: agentos-0.1.0
+automountServiceAccountToken: false
+
+---
+# Source: agentos/templates/secret.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: rel-agentos-secrets
+  labels:
+    app.kubernetes.io/name: agentos
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: cognic-agentos
+    helm.sh/chart: agentos-0.1.0
+type: Opaque
+stringData:
+  COGNIC_DATABASE_URL: "postgresql+asyncpg://cognic:cognic@postgres:5432/cognic"
+  COGNIC_VAULT_TOKEN: "snapshot-token"
+
+---
+# Source: agentos/templates/configmap-litellm.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rel-agentos-litellm
+  labels:
+    app.kubernetes.io/name: agentos
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: cognic-agentos
+    helm.sh/chart: agentos-0.1.0
+data:
+  config.yaml: |
+    model_list:
+      - model_name: cognic-tier1-dev
+        litellm_params:
+          model: ollama/qwen3:8b
+          api_base: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      - model_name: cognic-tier2-dev
+        litellm_params:
+          model: ollama/qwen3:32b
+          api_base: ${OLLAMA_BASE_URL:-http://ollama:11434}
+    litellm_settings:
+      drop_params: true
+    general_settings:
+      master_key: ${LITELLM_MASTER_KEY}
+
+---
+# Source: agentos/templates/configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rel-agentos-config
+  labels:
+    app.kubernetes.io/name: agentos
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: cognic-agentos
+    helm.sh/chart: agentos-0.1.0
+data:
+  COGNIC_RUNTIME_PROFILE: "prod"
+  COGNIC_API_PREFIX: "/api/v1"
+  COGNIC_QDRANT_URL: "http://qdrant:6333"
+  COGNIC_VAULT_ADDR: "http://vault:8200"
+  COGNIC_EMBED_DRIVER: "ollama"
+  COGNIC_EMBEDDING_BASE_URL: "http://ollama:11434"
+  COGNIC_EMBEDDING_MODEL: "nomic-embed-text"
+  COGNIC_EMBEDDING_DIMENSIONS: "768"
+  COGNIC_LANGFUSE_HOST: "http://langfuse:3000"
+  COGNIC_LITELLM_BASE_URL: "http://litellm:4000"
+  COGNIC_SANDBOX_RUNTIME_ENABLED: "false"
+  COGNIC_SANDBOX_CANONICAL_RUNTIME_PYTHON_IMAGE: "registry.example.com/cognic-agentos/sandbox-runtime-python@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  COGNIC_SANDBOX_CANONICAL_EGRESS_PROXY_IMAGE: "registry.example.com/cognic-agentos/sandbox-egress-proxy@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  COGNIC_CACHE_DRIVER: "none"
+
+---
+# Source: agentos/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: rel-agentos
+  labels:
+    app.kubernetes.io/name: agentos
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: cognic-agentos
+    helm.sh/chart: agentos-0.1.0
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: agentos
+    app.kubernetes.io/instance: rel
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+
+---
+# Source: agentos/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rel-agentos
+  labels:
+    app.kubernetes.io/name: agentos
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: cognic-agentos
+    helm.sh/chart: agentos-0.1.0
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentos
+      app.kubernetes.io/instance: rel
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agentos
+        app.kubernetes.io/instance: rel
+    spec:
+      serviceAccountName: rel-agentos
+      securityContext:
+        runAsNonRoot: true
+      containers:
+        - name: agentos
+          image: "registry.example.com/cognic-agentos:0.1.0-snapshot"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: rel-agentos-config
+          env:
+            - name: COGNIC_PORT
+              value: "8000"
+            - name: COGNIC_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: rel-agentos-secrets
+                  key: COGNIC_DATABASE_URL
+            - name: COGNIC_VAULT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: rel-agentos-secrets
+                  key: COGNIC_VAULT_TOKEN
+          startupProbe:
+            httpGet:
+              path: /api/v1/healthz
+              port: http
+            failureThreshold: 30
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /api/v1/healthz
+              port: http
+            periodSeconds: 15
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /api/v1/readyz
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+          resources:
+            limits:
+              cpu: "2"
+              memory: 2Gi
+            requests:
+              cpu: 250m
+              memory: 512Mi
+          volumeMounts:
+            - name: litellm-config
+              mountPath: /app/infra/litellm
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+            - name: object-store
+              mountPath: /var/lib/cognic-agentos/object-store
+            - name: model-artifacts
+              mountPath: /var/lib/cognic/model-artifacts
+      volumes:
+        - name: litellm-config
+          configMap:
+            name: rel-agentos-litellm
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
+        - name: object-store
+          emptyDir:
+            sizeLimit: 5Gi
+        - name: model-artifacts
+          emptyDir:
+            sizeLimit: 5Gi
+---
+# Source: agentos/templates/migration-job.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: rel-agentos-migrate
+  labels:
+    app.kubernetes.io/name: agentos
+    app.kubernetes.io/instance: rel
+    app.kubernetes.io/managed-by: Helm
+    app.kubernetes.io/part-of: cognic-agentos
+    helm.sh/chart: agentos-0.1.0
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agentos
+        app.kubernetes.io/instance: rel
+    spec:
+      restartPolicy: Never
+      serviceAccountName: rel-agentos
+      securityContext:
+        runAsNonRoot: true
+      containers:
+        - name: migrate
+          image: "registry.example.com/cognic-agentos:0.1.0-snapshot"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -eu
+              if [ -z "${COGNIC_DATABASE_URL:-}" ]; then
+                echo "FATAL: COGNIC_DATABASE_URL is unset — refusing to run migrations" >&2
+                exit 1
+              fi
+              exec alembic upgrade head
+          env:
+            - name: COGNIC_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: rel-agentos-secrets
+                  key: COGNIC_DATABASE_URL
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi

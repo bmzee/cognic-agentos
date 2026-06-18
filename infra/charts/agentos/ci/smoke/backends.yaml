@@ -1,0 +1,199 @@
+# infra/charts/agentos/ci/smoke/backends.yaml — Sprint 14B-Z1a kind-smoke backends.
+# Credential-free, CPU-only. Service names match the chart's adapter URLs.
+# Image tags: dev-stack-inherited (proven) where a compose precedent exists; ollama is a chosen pin.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: postgres-init }
+data:
+  init.sql: |
+    CREATE DATABASE langfuse;
+---
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: litellm-smoke-config }
+data:
+  config.yaml: |
+    model_list:
+      - model_name: cognic-tier1-dev
+        litellm_params:
+          model: ollama/qwen3:8b
+          api_base: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      - model_name: cognic-tier2-dev
+        litellm_params:
+          model: ollama/qwen3:32b
+          api_base: ${OLLAMA_BASE_URL:-http://ollama:11434}
+    litellm_settings:
+      drop_params: true
+    general_settings:
+      master_key: ${LITELLM_MASTER_KEY}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: postgres, labels: { app: postgres } }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: postgres } }
+  template:
+    metadata: { labels: { app: postgres } }
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:16-alpine            # inherited dev-stack tag (mutable; digest-pin at execution)
+          env:
+            - { name: POSTGRES_USER, value: cognic }
+            - { name: POSTGRES_PASSWORD, value: cognic }
+            - { name: POSTGRES_DB, value: cognic }
+          ports: [{ containerPort: 5432 }]
+          volumeMounts:
+            - { name: init, mountPath: /docker-entrypoint-initdb.d }
+            - { name: data, mountPath: /var/lib/postgresql/data }
+          readinessProbe:
+            exec: { command: ["pg_isready", "-U", "cognic"] }
+            periodSeconds: 5
+      volumes:
+        - { name: init, configMap: { name: postgres-init } }
+        - { name: data, emptyDir: {} }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: postgres }
+spec: { selector: { app: postgres }, ports: [{ port: 5432, targetPort: 5432 }] }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: qdrant, labels: { app: qdrant } }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: qdrant } }
+  template:
+    metadata: { labels: { app: qdrant } }
+    spec:
+      containers:
+        - name: qdrant
+          image: qdrant/qdrant:v1.17.1         # fully pinned (dev-stack)
+          ports: [{ containerPort: 6333 }]
+          readinessProbe:
+            httpGet: { path: /readyz, port: 6333 }
+            periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata: { name: qdrant }
+spec: { selector: { app: qdrant }, ports: [{ port: 6333, targetPort: 6333 }] }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: vault, labels: { app: vault } }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: vault } }
+  template:
+    metadata: { labels: { app: vault } }
+    spec:
+      containers:
+        - name: vault
+          image: hashicorp/vault:1.18          # inherited dev-stack tag (mutable; digest-pin at execution)
+          args: ["server", "-dev"]
+          env:
+            - { name: VAULT_DEV_ROOT_TOKEN_ID, value: smoke-root-token }
+            - { name: VAULT_DEV_LISTEN_ADDRESS, value: "0.0.0.0:8200" }
+          securityContext:
+            capabilities: { add: ["IPC_LOCK"] }   # vault dev-mode mlock; kind has no SCC restriction
+          ports: [{ containerPort: 8200 }]
+          readinessProbe:
+            httpGet: { path: /v1/sys/health, port: 8200 }
+            periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata: { name: vault }
+spec: { selector: { app: vault }, ports: [{ port: 8200, targetPort: 8200 }] }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: ollama, labels: { app: ollama } }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: ollama } }
+  template:
+    metadata: { labels: { app: ollama } }
+    spec:
+      containers:
+        - name: ollama
+          image: ollama/ollama:0.5.4           # chosen pin (no dev-stack precedent); confirm/bump at T6
+          ports: [{ containerPort: 11434 }]
+          lifecycle:
+            postStart:
+              exec:
+                command: ["/bin/sh", "-c", "until ollama list >/dev/null 2>&1; do sleep 1; done; ollama pull nomic-embed-text"]
+          readinessProbe:
+            httpGet: { path: /api/tags, port: 11434 }
+            periodSeconds: 5
+            failureThreshold: 30
+---
+apiVersion: v1
+kind: Service
+metadata: { name: ollama }
+spec: { selector: { app: ollama }, ports: [{ port: 11434, targetPort: 11434 }] }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: langfuse, labels: { app: langfuse } }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: langfuse } }
+  template:
+    metadata: { labels: { app: langfuse } }
+    spec:
+      containers:
+        - name: langfuse
+          image: langfuse/langfuse:2           # inherited dev-stack tag (mutable; digest-pin at execution)
+          env:
+            - { name: DATABASE_URL, value: "postgresql://cognic:cognic@postgres:5432/langfuse" }
+            - { name: NEXTAUTH_URL, value: "http://langfuse:3000" }
+            - { name: NEXTAUTH_SECRET, value: "smoke-nextauth-secret" }
+            - { name: SALT, value: "smoke-salt" }
+            - { name: ENCRYPTION_KEY, value: "0000000000000000000000000000000000000000000000000000000000000000" }
+            - { name: TELEMETRY_ENABLED, value: "false" }
+          ports: [{ containerPort: 3000 }]
+          readinessProbe:
+            httpGet: { path: /api/public/health, port: 3000 }
+            periodSeconds: 10
+            failureThreshold: 30
+---
+apiVersion: v1
+kind: Service
+metadata: { name: langfuse }
+spec: { selector: { app: langfuse }, ports: [{ port: 3000, targetPort: 3000 }] }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: litellm, labels: { app: litellm } }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: litellm } }
+  template:
+    metadata: { labels: { app: litellm } }
+    spec:
+      containers:
+        - name: litellm
+          image: ghcr.io/berriai/litellm:main-stable   # inherited dev-stack tag (rolling; digest-pin at execution)
+          args: ["--config", "/etc/litellm/config.yaml", "--port", "4000"]
+          env:
+            - { name: LITELLM_MASTER_KEY, value: dev-only-litellm }
+            - { name: OLLAMA_BASE_URL, value: "http://ollama:11434" }
+          ports: [{ containerPort: 4000 }]
+          volumeMounts:
+            - { name: cfg, mountPath: /etc/litellm }
+          readinessProbe:
+            httpGet: { path: /health/liveliness, port: 4000 }
+            periodSeconds: 10
+            failureThreshold: 30
+      volumes:
+        - { name: cfg, configMap: { name: litellm-smoke-config } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: litellm }
+spec: { selector: { app: litellm }, ports: [{ port: 4000, targetPort: 4000 }] }

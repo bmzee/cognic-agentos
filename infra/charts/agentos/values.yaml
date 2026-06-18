@@ -1,0 +1,85 @@
+# Cognic AgentOS — Helm values (Sprint 14B-Z1a packaging core).
+# Defaults are prod-safe (strict-profile boot). The smoke overlays ci/smoke-values.yaml.
+
+image:
+  repository: ghcr.io/bmzee/cognic-agentos      # the default-adapters image; bank operators re-home
+  tag: ""                                        # empty → defaults to .Chart.AppVersion
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+replicaCount: 1
+runtimeProfile: prod                             # COGNIC_RUNTIME_PROFILE; strict deploy-safety guards apply
+apiPrefix: /api/v1                               # COGNIC_API_PREFIX; probe paths derive from this
+
+qdrant:
+  url: http://qdrant:6333                        # COGNIC_QDRANT_URL
+
+vault:
+  # Vault is REQUIRED in Z1a. secret_driver defaults to "vault" with NO "none" mode, and
+  # VaultAdapter refuses a missing addr — so there is no real "Vault off" path. A true
+  # secret_driver=none is Option-C / Z1b. COGNIC_VAULT_ADDR is always rendered; the token
+  # is a secret (see `secrets`).
+  addr: http://vault:8200                        # COGNIC_VAULT_ADDR
+
+embedding:
+  driver: ollama                                 # COGNIC_EMBED_DRIVER
+  baseUrl: http://ollama:11434                   # COGNIC_EMBEDDING_BASE_URL
+  model: nomic-embed-text                        # COGNIC_EMBEDDING_MODEL — MUST NOT be the dev default qwen3-embedding:8b (G5)
+  dimensions: 768                                # COGNIC_EMBEDDING_DIMENSIONS — coherent with nomic-embed-text (768-dim)
+
+langfuse:
+  host: http://langfuse:3000                     # COGNIC_LANGFUSE_HOST — host is the only Langfuse setting required for readiness
+
+litellm:
+  baseUrl: http://litellm:4000                   # COGNIC_LITELLM_BASE_URL
+  existingConfigMap: ""                          # if set, mount this instead of rendering `config`
+  config: |                                      # boot-required router config (NOT in the image), mounted at /app/infra/litellm/config.yaml
+    model_list:
+      - model_name: cognic-tier1-dev
+        litellm_params:
+          model: ollama/qwen3:8b
+          api_base: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      - model_name: cognic-tier2-dev
+        litellm_params:
+          model: ollama/qwen3:32b
+          api_base: ${OLLAMA_BASE_URL:-http://ollama:11434}
+    litellm_settings:
+      drop_params: true
+    general_settings:
+      master_key: ${LITELLM_MASTER_KEY}
+
+cache:
+  enabled: false                                 # Redis off → COGNIC_CACHE_DRIVER=none; scheduler/quotas/memory/kill-switch dormant
+  url: ""                                         # COGNIC_REDIS_URL (required only when cache.enabled=true)
+
+sandbox:
+  runtimeEnabled: false                          # COGNIC_SANDBOX_RUNTIME_ENABLED
+  # G7 fires in strict profile INDEPENDENT of runtimeEnabled; both MUST be non-personal, digest-pinned
+  # <ref>@sha256:<64-lowercase-hex>. Operators re-home + re-sign under their canonical trust root.
+  canonicalRuntimeImage: "registry.example.com/cognic-agentos/sandbox-runtime-python@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  canonicalEgressProxyImage: "registry.example.com/cognic-agentos/sandbox-egress-proxy@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+
+migrations:
+  enabled: true                                  # pre-install/pre-upgrade hook Job runs `alembic upgrade head`
+
+secrets:
+  create: false                                  # true ONLY for smoke/dev — DO NOT use in production
+  existingSecret: ""                             # production: name of an operator/ESO-managed Secret carrying COGNIC_DATABASE_URL (+ COGNIC_VAULT_TOKEN)
+  databaseUrl: ""                                # used only when create=true
+  vaultToken: ""                                 # used only when create=true
+
+service:
+  type: ClusterIP
+  port: 8000
+
+resources:
+  requests: { cpu: 250m, memory: 512Mi }
+  limits: { cpu: "2", memory: 2Gi }
+
+podSecurityContext: {}                           # OpenShift assigns fsGroup via SCC; non-OpenShift clusters set fsGroup: 10001 (the image GID)
+
+objectStore:
+  sizeLimit: 5Gi                                 # emptyDir for /var/lib/cognic-agentos/object-store (readOnlyRootFilesystem=true)
+modelArtifacts:
+  sizeLimit: 5Gi                                 # emptyDir for /var/lib/cognic/model-artifacts (prod-resolved model_artifact_root; readOnlyRootFilesystem=true)
+tmpSizeLimit: 256Mi                              # emptyDir for /tmp

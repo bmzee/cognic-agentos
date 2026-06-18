@@ -1,0 +1,19 @@
+# kind-smoke overlay: real in-cluster backends, prod profile, chart-created Secret.
+image:
+  repository: cognic-agentos        # loaded into kind via `kind load docker-image`
+  tag: "smoke"
+  pullPolicy: IfNotPresent
+runtimeProfile: prod
+qdrant: { url: http://qdrant:6333 }
+vault: { addr: http://vault:8200 }
+embedding: { driver: ollama, baseUrl: http://ollama:11434, model: nomic-embed-text, dimensions: 768 }
+langfuse: { host: http://langfuse:3000 }
+litellm: { baseUrl: http://litellm:4000 }
+cache: { enabled: false }
+migrations: { enabled: true }
+secrets:
+  create: true
+  databaseUrl: "postgresql+asyncpg://cognic:cognic@postgres:5432/cognic"
+  vaultToken: "smoke-root-token"
+podSecurityContext:
+  fsGroup: 10001                    # vanilla kind has no SCC to assign fsGroup; the image GID makes emptyDirs writable

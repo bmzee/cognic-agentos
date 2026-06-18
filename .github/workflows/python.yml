@@ -550,3 +550,81 @@ jobs:
         if: always()
         run: |
           docker compose -f infra/dev/docker-compose.yml down -v
+
+  helm-chart:
+    name: helm4 lint/template/kubeconform/snapshot + helm3 compatibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      HELM_VERSION: "v4.2.2"        # primary renderer + snapshot generator (matches the local Homebrew Helm 4)
+      HELM3_VERSION: "v3.16.3"      # compatibility-lane pin — the chart is apiVersion v2, so it stays Helm-3-deployable
+      KUBECONFORM_VERSION: "v0.8.0"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Install primary Helm 4 (as `helm`, checksum-verified)
+        run: |
+          set -euo pipefail
+          curl -fsSLo helm4.tgz "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          curl -fsSLo helm4.sha256 "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz.sha256sum"
+          echo "$(cut -d' ' -f1 helm4.sha256)  helm4.tgz" | sha256sum -c -
+          mkdir -p helm4 && tar -xzf helm4.tgz -C helm4
+          sudo install -m 0755 helm4/linux-amd64/helm /usr/local/bin/helm
+          helm version --short
+      - name: Install compatibility Helm 3 (as `helm3`, checksum-verified)
+        run: |
+          set -euo pipefail
+          curl -fsSLo helm3.tgz "https://get.helm.sh/helm-${HELM3_VERSION}-linux-amd64.tar.gz"
+          curl -fsSLo helm3.sha256 "https://get.helm.sh/helm-${HELM3_VERSION}-linux-amd64.tar.gz.sha256sum"
+          echo "$(cut -d' ' -f1 helm3.sha256)  helm3.tgz" | sha256sum -c -
+          mkdir -p helm3 && tar -xzf helm3.tgz -C helm3
+          sudo install -m 0755 helm3/linux-amd64/helm /usr/local/bin/helm3
+          helm3 version --short
+      - name: Install kubeconform (checksum-verified)
+        run: |
+          set -euo pipefail
+          curl -fsSLo kubeconform.tgz "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          curl -fsSLo CHECKSUMS "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/CHECKSUMS"
+          echo "$(grep 'kubeconform-linux-amd64.tar.gz' CHECKSUMS | cut -d' ' -f1)  kubeconform.tgz" | sha256sum -c -
+          tar -xzf kubeconform.tgz
+          sudo install -m 0755 kubeconform /usr/local/bin/kubeconform
+          kubeconform -v
+      # --- primary gate (Helm 4): lint + deterministic template + snapshot diff + schema ---
+      - name: helm lint (primary, Helm 4)
+        run: helm lint infra/charts/agentos -f infra/charts/agentos/ci/snapshot-values.yaml
+      - name: helm template (primary, deterministic + EOF-normalized)
+        run: |
+          helm template rel infra/charts/agentos --namespace cognic \
+            -f infra/charts/agentos/ci/snapshot-values.yaml > /tmp/rendered-raw.yaml
+          # Normalize helm's trailing blank line to a single final newline, matching
+          # tests/unit/infra/test_helm_chart.py::_render (raw.rstrip("\n") + "\n"),
+          # so the committed (normalized) snapshot compares byte-clean.
+          printf '%s\n' "$(cat /tmp/rendered-raw.yaml)" > /tmp/rendered.yaml
+      - name: snapshot drift gate (Helm 4 output)
+        run: diff -u tests/unit/infra/helm/agentos_rendered.yaml /tmp/rendered.yaml
+      - name: kubeconform schema validation (Helm 4 output)
+        run: kubeconform -strict -summary -kubernetes-version 1.27.0 /tmp/rendered.yaml
+      # --- Helm 3 compatibility gate: render + schema ONLY, NO snapshot diff ---
+      - name: helm3 lint (compatibility)
+        run: helm3 lint infra/charts/agentos -f infra/charts/agentos/ci/snapshot-values.yaml
+      - name: helm3 template (compatibility)
+        run: |
+          helm3 template rel infra/charts/agentos --namespace cognic \
+            -f infra/charts/agentos/ci/snapshot-values.yaml > /tmp/rendered-helm3.yaml
+      - name: kubeconform schema validation (Helm 3 output)
+        run: kubeconform -strict -summary -kubernetes-version 1.27.0 /tmp/rendered-helm3.yaml
+
+  kind-smoke:
+    name: kind Ready-smoke (env-gated)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    if: ${{ vars.COGNIC_RUN_KIND_SMOKE == '1' || github.event_name == 'workflow_dispatch' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Install kind + helm
+        uses: helm/kind-action@v1
+        with:
+          install_only: true
+      - name: Run the kind Ready-smoke
+        run: bash infra/charts/agentos/ci/smoke/run-smoke.sh
