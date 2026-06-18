@@ -1,0 +1,13 @@
+# OTLP-http-on scenario overlay (layered over ci/snapshot-values.yaml).
+# headersSecretKey points at an extra key in an operator-owned Secret, so this
+# overlay uses existingSecret mode (NOT the base secrets.create:true, whose
+# 2-key chart Secret would lack COGNIC_OTEL_EXPORTER_HEADERS).
+secrets:
+  create: false
+  existingSecret: agentos-secrets
+otel:
+  exporter:
+    endpoint: https://langfuse.example.com/api/public/otel/v1/traces
+    protocol: http
+    insecure: false
+    headersSecretKey: COGNIC_OTEL_EXPORTER_HEADERS

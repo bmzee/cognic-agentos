@@ -115,6 +115,20 @@
           }
         }
       }
+    },
+    "otel": {
+      "type": "object",
+      "properties": {
+        "exporter": {
+          "type": "object",
+          "properties": {
+            "endpoint": { "type": "string" },
+            "protocol": { "type": "string", "enum": ["grpc", "http"] },
+            "insecure": { "type": "boolean" },
+            "headersSecretKey": { "type": "string" }
+          }
+        }
+      }
     }
   },
   "allOf": [

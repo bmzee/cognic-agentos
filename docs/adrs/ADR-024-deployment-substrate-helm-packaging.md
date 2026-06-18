@@ -229,3 +229,37 @@ The Z1b-a four byte-snapshots (`default` / `ingress` / `route` / `servicemonitor
 ### Posture (Z1b-b)
 
 Pure chart work: **CC count stays 131 / no kernel change / no migration / no new on-gate module.** The only new Python is the snapshot-test parametrization. The live cluster / live-ESO exercise is **Z1b-d** (AKS bring-up) — Z1b-b's `ExternalSecret` template is proven by render / lint / kubeconform (schema-validated) / byte-snapshot only, **not** by a live cluster against a real store. Out-of-scope-for-Z1b-b (the remaining Z1b sub-slices): the Langfuse-OTLP OTel gRPC→HTTP exporter swap (Z1b-c, a kernel slice) and AKS / cloud-identity bring-up (Z1b-d).
+
+## Sprint 14B-Z1b-c amendment (2026-06-18)
+
+Sprint 14B-Z1b-c adds a **generic OTLP transport primitive** to the kernel so a self-hosted Langfuse (or any OTLP/HTTP endpoint) becomes operator-turnkey for span ingestion. It is the third of the four Z1b sub-slices (Z1b-a external access / Z1b-b external secrets / **Z1b-c Langfuse-OTLP exporter swap** / Z1b-d AKS bring-up) and the **first Z1b slice that touches kernel code** — `core/config.py` (a `core/` stop-rule edit) + `observability/otel.py`. Unlike Z1a/Z1b-a/Z1b-b it is NOT pure chart work, but the posture floor holds: **CC count stays 131, no migration, no new on-gate module, and no new dependency** (see Posture below).
+
+### The generic protocol + headers primitive (kernel)
+
+- **Two new `core/config.py` Settings** drive the transport: `otel_exporter_protocol: Literal["grpc", "http"] = "grpc"` and `otel_exporter_headers: dict[str, str]` (`default_factory=dict`, native JSON-env decode mirroring `llm_model_id_map`). The default is unchanged — **`grpc`** with no headers — so existing deployments behave exactly as before.
+- **`_build_otlp_exporter` branches on the protocol** and now returns the widened `SpanExporter` type:
+  - **`grpc` (default)** — the existing path (endpoint / `insecure` / mTLS-credentials), now **also threading `headers`**.
+  - **`http`** — the OTLP/HTTP exporter with `headers`, and the **mTLS triple reused as the http exporter's file-path kwargs** (`certificate_file` / `client_certificate_file` / `client_key_file`).
+- **`headers` thread into BOTH exporters.** **`insecure` is gRPC-only** — on the http path security is the endpoint URL scheme (`https://…`), not an `insecure` flag.
+- **No new dependency.** The OTLP/HTTP exporter already ships inside the `opentelemetry-exporter-otlp` umbrella the kernel depends on; the http path is a function-local import, not a new requirement.
+- **The kernel stays Langfuse-AGNOSTIC.** It knows only `grpc`/`http` + headers + endpoint; the Langfuse URL convention (`{host}/api/public/otel/v1/traces`) and the Basic-auth header live in the chart values / the operator-owned Secret / the runbook — never in kernel code.
+
+### The chart wiring (endpoint-gated; default render UNCHANGED)
+
+- **`values.otel.exporter.{endpoint, protocol, insecure, headersSecretKey}`.** The ConfigMap otel keys (`COGNIC_OTEL_EXPORTER_ENDPOINT` / `_PROTOCOL` / `_INSECURE`) are **gated on `otel.exporter.endpoint`** being set, so with the default (empty) endpoint the otel block does not render — **the default render and all 5 existing Z1a/Z1b-a/Z1b-b snapshots are byte-UNCHANGED**.
+- **The sensitive Basic-auth header rides an optional `secretKeyRef` passthrough**, NOT the ConfigMap. When `otel.exporter.headersSecretKey` is set, `deployment.yaml` projects `COGNIC_OTEL_EXPORTER_HEADERS` from that key in the operator-owned `agentos.secretName` Secret (the same Secret that carries the 2 bootstrap keys). The header JSON never appears in the ConfigMap.
+- **`secrets.create=true` is NOT compatible with `headersSecretKey`.** A chart-created Secret carries only the 2 bootstrap keys (`COGNIC_DATABASE_URL` + `COGNIC_VAULT_TOKEN`); a `headersSecretKey` `secretKeyRef` against it would dangle. The header is valid only with `secrets.existingSecret` (or a separate ESO `ExternalSecret`) — a Secret the operator populates with the extra header key.
+
+### The sixth snapshot scenario + CRD-schema outcome
+
+The Z1b-b five byte-snapshots (`default` / `ingress` / `route` / `servicemonitor` / `externalsecret`) become **six** — a sixth `otel-http` scenario is added. Its overlay uses `secrets.create:false` + `secrets.existingSecret` (the mutually-exclusive interaction above: `headersSecretKey` is valid only against an operator-populated Secret, never a chart-created 2-key one). The scenario is rendered Helm-4.2.2-pinned, byte-diffed against its committed `tests/unit/infra/helm/agentos_rendered_otel-http.yaml`, and `kubeconform`-validated.
+
+**No kubeconform CRD change.** The otel render is **core kinds only** (ConfigMap + Deployment env) — no new CRD is introduced, so the CI keeps the unchanged narrow **`-skip Route`** (Route alone stays catalog-absent per Z1b-a/Z1b-b); `otel-http` reports all-Valid.
+
+### The env-gated live ingestion proof
+
+A live proof at `tests/integration/observability/test_langfuse_otlp_ingestion.py` is **env-gated** on `COGNIC_RUN_LANGFUSE_OTEL=1` (+ `COGNIC_LANGFUSE_HOST` + the keys; it skips by default and is operator-run, never always-on CI). It exports a span over OTLP/HTTP to `{host}/api/public/otel/v1/traces` carrying the `x-langfuse-ingestion-version: "4"` header (the Langfuse OTel-docs real-time-ingestion recommendation) and reads it back via the Langfuse SDK `client.api.observations.get_many(trace_id=...)`. This is a capability proof, not a claim that a production Langfuse is running.
+
+### Posture (Z1b-c)
+
+**CC count stays 131 / no migration / no new on-gate module / no new dependency.** `observability/otel.py` and `core/config.py` are **off the per-file coverage gate**, but **`core/config.py` is under the AGENTS.md `core/` stop-rule** — the kernel edit carried halt-before-commit human scrutiny. Z1b-c is the kernel slice of the parked Langfuse-OTLP follow-up; the **live cloud / live cluster** exercise remains **Z1b-d** (AKS bring-up) — Z1b-c's chart wiring + http exporter are proven by render / lint / kubeconform / byte-snapshot + unit tests + the env-gated live proof only, **not** by an always-on production Langfuse. Out-of-scope-for-Z1b-c (the remaining Z1b sub-slice): AKS / cloud-identity bring-up + the live ServiceMonitor → Prometheus scrape wiring (Z1b-d).

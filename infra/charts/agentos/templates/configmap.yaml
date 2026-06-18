@@ -24,3 +24,8 @@ data:
   {{- else }}
   COGNIC_CACHE_DRIVER: "none"
   {{- end }}
+  {{- if .Values.otel.exporter.endpoint }}
+  COGNIC_OTEL_EXPORTER_ENDPOINT: {{ .Values.otel.exporter.endpoint | quote }}
+  COGNIC_OTEL_EXPORTER_PROTOCOL: {{ .Values.otel.exporter.protocol | quote }}
+  COGNIC_OTEL_EXPORTER_INSECURE: {{ .Values.otel.exporter.insecure | quote }}
+  {{- end }}

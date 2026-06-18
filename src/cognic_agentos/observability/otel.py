@@ -40,6 +40,7 @@ from opentelemetry.sdk.trace.export import (
     BatchSpanProcessor,
     ConsoleSpanExporter,
     SimpleSpanProcessor,
+    SpanExporter,
 )
 
 from cognic_agentos import __version__
@@ -61,21 +62,45 @@ def _shutdown_all() -> None:
 atexit.register(_shutdown_all)
 
 
-def _build_otlp_exporter(settings: Settings) -> OTLPSpanExporter:
-    """Construct an OTLP exporter respecting the configured TLS posture.
+def _build_otlp_exporter(settings: Settings) -> SpanExporter:
+    """Construct an OTLP exporter for the configured protocol + TLS posture.
 
-    Defaults to **secure** (TLS); operators must explicitly opt into
-    insecure for local-collector dev work via
-    ``COGNIC_OTEL_EXPORTER_INSECURE=true``.
+    grpc (default): the gRPC exporter with endpoint / insecure / mTLS-credentials.
+    http: the OTLP/HTTP exporter with endpoint + file-based TLS (for backends
+    like Langfuse that need HTTP + auth headers). Headers thread into both.
+    Defaults to **secure** (TLS) on grpc; http security is the endpoint URL scheme.
     """
 
+    headers = dict(settings.otel_exporter_headers) or None
+
+    if settings.otel_exporter_protocol == "http":
+        # Lazy import — same opentelemetry-exporter-otlp umbrella as the gRPC
+        # exporter; kept off the module's hot import path.
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
+            OTLPSpanExporter as HTTPSpanExporter,
+        )
+
+        http_kwargs: dict[str, object] = {"endpoint": settings.otel_exporter_endpoint}
+        if headers is not None:
+            http_kwargs["headers"] = headers
+        # The mTLS triple maps to the http exporter's file-path kwargs; insecure
+        # is gRPC-only (http security is the endpoint URL scheme).
+        if settings.otel_exporter_ca_cert_path:
+            http_kwargs["certificate_file"] = str(settings.otel_exporter_ca_cert_path)
+        if settings.otel_exporter_client_cert_path:
+            http_kwargs["client_certificate_file"] = str(settings.otel_exporter_client_cert_path)
+        if settings.otel_exporter_client_key_path:
+            http_kwargs["client_key_file"] = str(settings.otel_exporter_client_key_path)
+        return HTTPSpanExporter(**http_kwargs)  # type: ignore[arg-type]
+
+    # grpc (default) — the existing path, now also threading headers.
     kwargs: dict[str, object] = {
         "endpoint": settings.otel_exporter_endpoint,
         "insecure": settings.otel_exporter_insecure,
     }
-    # mTLS / custom CA — paths come from Vault-mounted secrets in prod.
+    if headers is not None:
+        kwargs["headers"] = headers
     if settings.otel_exporter_ca_cert_path:
-        kwargs["credentials"] = None  # filled below; see grpc.ssl_channel_credentials
         ca_bytes = settings.otel_exporter_ca_cert_path.read_bytes()
         client_cert = (
             settings.otel_exporter_client_cert_path.read_bytes()
@@ -87,9 +112,6 @@ def _build_otlp_exporter(settings: Settings) -> OTLPSpanExporter:
             if settings.otel_exporter_client_key_path
             else None
         )
-        # Lazy import — grpc only needed when TLS is configured. The
-        # stubs package (`types-grpcio`) carries hundreds of MB of MyPy
-        # data; not worth a permanent dev dep for a single call site.
         import grpc  # type: ignore[import-untyped]
 
         kwargs["credentials"] = grpc.ssl_channel_credentials(

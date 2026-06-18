@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+from typing import Any
+
+import pytest
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import (
     BatchSpanProcessor,
@@ -117,6 +121,74 @@ def test_resource_metadata_carries_service_identity() -> None:
     assert attrs["service.name"] == "cognic-agentos"
     assert attrs["deployment.environment"] == "dev"
     assert "service.version" in attrs
+
+
+def test_http_protocol_installs_http_otlp_exporter() -> None:
+    from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
+        OTLPSpanExporter as HTTPSpanExporter,
+    )
+
+    settings = prod_settings(
+        otel_exporter_endpoint="https://lf.example.com/api/public/otel/v1/traces",
+        otel_exporter_protocol="http",
+        otel_exporter_headers={"Authorization": "Basic eHk6eg=="},
+    )
+    provider = configure_tracing(settings)
+    procs = _processors(provider)
+    proc = next(p for p in procs if isinstance(p, BatchSpanProcessor))
+    assert isinstance(proc.span_exporter, HTTPSpanExporter)
+
+
+def test_http_build_threads_headers_and_file_tls_no_insecure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from cognic_agentos.observability import otel as otel_mod
+
+    captured: dict[str, Any] = {}
+
+    class _FakeHTTP:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    # The http exporter is lazily imported inside _build_otlp_exporter, so the
+    # patch on its source module is picked up at call time.
+    monkeypatch.setattr(
+        "opentelemetry.exporter.otlp.proto.http.trace_exporter.OTLPSpanExporter",
+        _FakeHTTP,
+    )
+    ca = tmp_path / "ca.pem"
+    ca.write_text("x")
+    settings = prod_settings(
+        otel_exporter_endpoint="https://lf/api/public/otel/v1/traces",
+        otel_exporter_protocol="http",
+        otel_exporter_headers={"Authorization": "Basic abc"},
+        otel_exporter_ca_cert_path=ca,
+    )
+    otel_mod._build_otlp_exporter(settings)
+    assert captured["endpoint"].endswith("/v1/traces")
+    assert captured["headers"] == {"Authorization": "Basic abc"}
+    assert captured["certificate_file"] == str(ca)
+    assert "insecure" not in captured  # http: insecure is gRPC-only
+
+
+def test_grpc_path_still_threads_headers(monkeypatch: pytest.MonkeyPatch) -> None:
+    from cognic_agentos.observability import otel as otel_mod
+
+    captured: dict[str, Any] = {}
+
+    class _FakeGRPC:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(otel_mod, "OTLPSpanExporter", _FakeGRPC)
+    settings = prod_settings(
+        otel_exporter_endpoint="collector:4317",
+        otel_exporter_insecure=True,
+        otel_exporter_headers={"x-tenant": "acme"},
+    )
+    otel_mod._build_otlp_exporter(settings)
+    assert captured["insecure"] is True
+    assert captured["headers"] == {"x-tenant": "acme"}
 
 
 # Keep import linter happy — InMemorySpanExporter is currently only used as
