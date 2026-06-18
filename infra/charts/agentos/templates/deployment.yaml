@@ -13,6 +13,9 @@ spec:
     metadata:
       labels:
         {{- include "agentos.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
     spec:
       serviceAccountName: {{ include "agentos.fullname" . }}
       {{- with .Values.image.pullSecrets }}
