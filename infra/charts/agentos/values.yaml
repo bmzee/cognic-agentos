@@ -131,3 +131,11 @@ externalSecrets:
       remoteRef:
         key: ""                  # REQUIRED when enabled — remote key holding COGNIC_VAULT_TOKEN
         property: ""             # optional
+
+# --- Sprint 14B-Z1b-c: OTLP trace exporter (gated on endpoint; default no-op) ---
+otel:
+  exporter:
+    endpoint: ""                 # COGNIC_OTEL_EXPORTER_ENDPOINT; when set, traces export (else no-op/console)
+    protocol: grpc               # grpc | http
+    insecure: false              # gRPC-only; HTTP security is the endpoint URL scheme
+    headersSecretKey: ""         # optional: a key in the operator-owned Secret holding COGNIC_OTEL_EXPORTER_HEADERS (e.g. the Langfuse Basic-auth JSON)

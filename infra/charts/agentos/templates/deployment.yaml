@@ -54,6 +54,13 @@ spec:
                 secretKeyRef:
                   name: {{ include "agentos.secretName" . }}
                   key: COGNIC_VAULT_TOKEN
+            {{- if .Values.otel.exporter.headersSecretKey }}
+            - name: COGNIC_OTEL_EXPORTER_HEADERS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "agentos.secretName" . }}
+                  key: {{ .Values.otel.exporter.headersSecretKey }}
+            {{- end }}
           startupProbe:
             httpGet:
               path: {{ .Values.apiPrefix }}/healthz
