@@ -422,7 +422,7 @@ spec:
       authType: WorkloadIdentity
       vaultUrl: https://agentos-kv.vault.azure.net
       serviceAccountRef:
-        name: agentos-agentos                 # the chart SA, annotated for workload identity
+        name: agentos-agentos                 # the chart SA, wired for workload identity via chart values (see "Cloud workload identity" below)
 ```
 
 ```yaml
@@ -441,8 +441,11 @@ externalSecrets:
       remoteRef: { key: cognic-vault-token }
 ```
 
-The chart SA (`<release>-agentos`) is annotated for AKS workload identity
-out-of-band so ESO can federate; the chart itself grants no cluster RBAC.
+The chart SA (`<release>-agentos`) is wired for AKS workload identity **through
+chart values** — set `serviceAccount.annotations` (+ the Azure `podLabels`) per the
+"Cloud workload identity" section below, so `helm upgrade` keeps the annotation
+(NOT a `kubectl annotate` out-of-band, which `helm upgrade` would clobber). The
+chart itself grants no cluster RBAC.
 
 ### Secondary notes — AWS Secrets Manager / HashiCorp Vault
 
@@ -533,6 +536,79 @@ exercises exactly this `secrets.create:false` + `existingSecret` mode.
 > capability proof, operator-run, never always-on CI, no production Langfuse
 > claimed running). The **live cloud/cluster exercise** (AKS + the chart path
 > in-cluster, including ServiceMonitor → Prometheus) is **Z1b-d**.
+
+## Cloud workload identity
+
+> Added in **Sprint 14B-Z1b-d-1** (ADR-024). The chart's ServiceAccount can
+> federate to any cloud's IAM identity so the pod gets cloud credentials with **no
+> static secret in the cluster**. The chart exposes **two generic, cloud-agnostic
+> hooks** — it knows nothing about Azure/GKE/AWS; you pass the cloud's annotation
+> (and, where required, pod label) through these maps. The **chart never creates
+> the cloud IAM identity** — you provision the cloud-side identity + the federation
+> (the trust between the cluster's OIDC issuer and the cloud identity) out-of-band,
+> then wire the SA through these hooks. Z1b-d-1 is pure chart work — **no kernel
+> change, no migration**. (The live cluster exercise — an actual AKS deploy with
+> cloud-identity federation wired end-to-end — is **Z1b-d-2**, not this slice.)
+
+### The two generic hooks
+
+- `serviceAccount.annotations` — a map projected onto the chart ServiceAccount's
+  `metadata.annotations`. This carries the cloud's workload-identity SA annotation.
+- `podLabels` — a map merged into the Deployment's pod **template** labels only
+  (`.spec.template.metadata.labels`), **never** the Deployment selector (the
+  selector is immutable; mutating it would break `helm upgrade`). This carries the
+  cloud's workload-identity pod label where one is required.
+
+Both default to empty maps and render nothing when unset, so leaving them out
+keeps the default install byte-unchanged.
+
+### Azure workload identity (AKS)
+
+Azure workload identity needs **both** a SA annotation (the client ID) **and** a
+pod label (`azure.workload.identity/use: "true"`):
+
+```yaml
+serviceAccount:
+  annotations:
+    azure.workload.identity/client-id: <azure-managed-identity-client-id>
+podLabels:
+  azure.workload.identity/use: "true"
+```
+
+Provision the Azure side out-of-band: a user-assigned managed identity, a
+federated-identity credential trusting the AKS cluster's OIDC issuer for the chart
+SA (`<release>-agentos` in the install namespace), and the Azure RBAC the workload
+needs (e.g. Key Vault access for ESO — see the External secrets section above).
+
+### GKE workload identity
+
+GKE workload identity needs **only** a SA annotation (the Google service-account
+email); **no pod label**:
+
+```yaml
+serviceAccount:
+  annotations:
+    iam.gke.io/gcp-service-account: <gsa-name>@<project>.iam.gserviceaccount.com
+```
+
+Provision the GCP side out-of-band: the Google service account, the IAM
+`workloadIdentityUser` binding tying the chart's Kubernetes SA
+(`<release>-agentos`) to that GSA, and the GCP roles the workload needs.
+
+### AWS IRSA (EKS)
+
+AWS IAM Roles for Service Accounts (IRSA) needs **only** a SA annotation (the IAM
+role ARN); **no pod label**:
+
+```yaml
+serviceAccount:
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::<account-id>:role/<role-name>
+```
+
+Provision the AWS side out-of-band: the IAM role with a trust policy for the EKS
+cluster's OIDC provider scoped to the chart SA (`<release>-agentos`), and the IAM
+policies the workload needs.
 
 ## Trust-root note (pack registration)
 

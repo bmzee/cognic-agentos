@@ -139,3 +139,8 @@ otel:
     protocol: grpc               # grpc | http
     insecure: false              # gRPC-only; HTTP security is the endpoint URL scheme
     headersSecretKey: ""         # optional: a key in the operator-owned Secret holding COGNIC_OTEL_EXPORTER_HEADERS (e.g. the Langfuse Basic-auth JSON)
+
+# --- Sprint 14B-Z1b-d-1: generic cloud workload-identity hooks (default empty → render nothing) ---
+serviceAccount:
+  annotations: {}     # cloud workload-identity SA annotation (e.g. azure.workload.identity/client-id) — see the runbook
+podLabels: {}         # extra pod-template labels (e.g. azure.workload.identity/use: "true") — merged into the pod labels, NOT the selector

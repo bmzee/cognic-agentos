@@ -129,7 +129,14 @@
           }
         }
       }
-    }
+    },
+    "serviceAccount": {
+      "type": "object",
+      "properties": {
+        "annotations": { "type": "object" }
+      }
+    },
+    "podLabels": { "type": "object" }
   },
   "allOf": [
     { "not": { "required": ["secrets"], "properties": { "secrets": { "required": ["create", "existingSecret"], "properties": { "create": { "const": true }, "existingSecret": { "minLength": 1 } } } } } },

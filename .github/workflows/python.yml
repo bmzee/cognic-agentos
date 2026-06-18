@@ -589,10 +589,10 @@ jobs:
           tar -xzf kubeconform.tgz
           sudo install -m 0755 kubeconform /usr/local/bin/kubeconform
           kubeconform -v
-      # --- primary gate (Helm 4): lint + 6-scenario template/snapshot/kubeconform ---
+      # --- primary gate (Helm 4): lint + 7-scenario template/snapshot/kubeconform ---
       - name: helm lint (primary, Helm 4)
         run: helm lint infra/charts/agentos -f infra/charts/agentos/ci/snapshot-values.yaml
-      - name: helm template + snapshot-drift + kubeconform (6 scenarios)
+      - name: helm template + snapshot-drift + kubeconform (7 scenarios)
         run: |
           set -euo pipefail
           BASE="infra/charts/agentos/ci/snapshot-values.yaml"
@@ -612,7 +612,8 @@ jobs:
                    "_route|-f infra/charts/agentos/ci/snapshot-values-route.yaml" \
                    "_servicemonitor|-f infra/charts/agentos/ci/snapshot-values-servicemonitor.yaml" \
                    "_externalsecret|-f infra/charts/agentos/ci/snapshot-values-externalsecret.yaml" \
-                   "_otel-http|-f infra/charts/agentos/ci/snapshot-values-otel-http.yaml"; do
+                   "_otel-http|-f infra/charts/agentos/ci/snapshot-values-otel-http.yaml" \
+                   "_workload-identity|-f infra/charts/agentos/ci/snapshot-values-workload-identity.yaml"; do
             suffix="${s%%|*}"; overlay="${s#*|}"
             snap="tests/unit/infra/helm/agentos_rendered${suffix}.yaml"
             echo "::group::scenario ${suffix:-default}"
@@ -623,11 +624,11 @@ jobs:
               -schema-location default -schema-location "$CRD" -skip Route /tmp/rendered.yaml
             echo "::endgroup::"
           done
-      # --- Helm 3 compatibility gate: render + schema ONLY (no byte-diff), 6 scenarios ---
+      # --- Helm 3 compatibility gate: render + schema ONLY (no byte-diff), 7 scenarios ---
       # Same NARROW `-skip Route` scope as the primary lane: ServiceMonitor + ExternalSecret
       # schemas resolve from the catalog (lowercase filenames; kubeconform lowercases the
       # kind), only Route's schema is absent (confirmed 2026-06-18).
-      - name: helm3 lint + template + kubeconform (6 scenarios)
+      - name: helm3 lint + template + kubeconform (7 scenarios)
         run: |
           set -euo pipefail
           BASE="infra/charts/agentos/ci/snapshot-values.yaml"
@@ -638,7 +639,8 @@ jobs:
                          "-f infra/charts/agentos/ci/snapshot-values-route.yaml" \
                          "-f infra/charts/agentos/ci/snapshot-values-servicemonitor.yaml" \
                          "-f infra/charts/agentos/ci/snapshot-values-externalsecret.yaml" \
-                         "-f infra/charts/agentos/ci/snapshot-values-otel-http.yaml"; do
+                         "-f infra/charts/agentos/ci/snapshot-values-otel-http.yaml" \
+                         "-f infra/charts/agentos/ci/snapshot-values-workload-identity.yaml"; do
             helm3 template rel infra/charts/agentos --namespace cognic -f "$BASE" $overlay > /tmp/rendered-helm3.yaml
             kubeconform -strict -summary -kubernetes-version 1.27.0 \
               -schema-location default -schema-location "$CRD" -skip Route /tmp/rendered-helm3.yaml

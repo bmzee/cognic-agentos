@@ -1,0 +1,8 @@
+# Workload-identity-on scenario overlay (layered over ci/snapshot-values.yaml).
+# Azure WI is the EXAMPLE fixture; the chart values (serviceAccount.annotations / podLabels)
+# are cloud-agnostic maps — only this fixture + the runbook name a cloud.
+serviceAccount:
+  annotations:
+    azure.workload.identity/client-id: 00000000-0000-0000-0000-000000000000
+podLabels:
+  azure.workload.identity/use: "true"
