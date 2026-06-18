@@ -1,0 +1,7 @@
+# ServiceMonitor-on scenario overlay (layered over ci/snapshot-values.yaml).
+serviceMonitor:
+  enabled: true
+  interval: 30s
+  scrapeTimeout: 10s
+  labels:
+    release: kube-prometheus-stack
