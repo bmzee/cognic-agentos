@@ -339,6 +339,124 @@ across chart upgrades. If Prometheus is not discovering the target, the usual
 cause is a `serviceMonitor.labels.release` value that does not match the
 cluster Prometheus's `serviceMonitorSelector`.
 
+## External secrets (ESO)
+
+> Added in **Sprint 14B-Z1b-b** (ADR-024). Instead of pre-creating the bootstrap
+> Secret yourself (`secrets.existingSecret`), you can have the
+> [External Secrets Operator (ESO)](https://external-secrets.io) materialise it
+> from an external store (Azure Key Vault, AWS Secrets Manager, HashiCorp Vault,
+> …). The chart renders a conditional, default-off `ExternalSecret`
+> (`external-secrets.io/v1`) that populates the **same** 2-key bootstrap Secret
+> the kernel reads. Like the rest of Z1b this is pure chart work — **no kernel
+> change, no migration**. (The live cluster/ESO exercise is Z1b-d; the template is
+> CI-validated by render/lint/kubeconform/byte-snapshot only.)
+
+**Prerequisite — ESO must be installed in the cluster.** The `ExternalSecret` is
+a custom resource of the `external-secrets.io` API. Install ESO (the
+`external-secrets.io` CRDs + controller) **before** enabling this, or the manifest
+has nothing to reconcile against.
+
+**The chart never creates the store.** You provision the `SecretStore` (namespaced)
+or `ClusterSecretStore` (cluster-wide) yourself — it carries the store address +
+the auth that lets ESO read from your external secret manager. `externalSecrets`
+references it by name only.
+
+### The three-mode secret source (mutually exclusive)
+
+The chart now has **three** ways to wire the bootstrap Secret, and you must
+configure **exactly one** — the render `fail`s (and `helm lint` rejects the values
+against the schema) if more than one is set:
+
+- `secrets.create: true` — chart-managed Secret (**smoke/dev only**).
+- `secrets.existingSecret: <name>` — an operator/ESO-managed Secret you provision.
+- `externalSecrets.enabled: true` — the ESO `ExternalSecret` materialises the Secret.
+
+When `externalSecrets.enabled=true`, set `secrets.create=false` and leave
+`secrets.existingSecret` empty (ESO mode is legitimately `create=false` + empty
+`existingSecret` — the Secret is materialised by ESO).
+
+### The two remote refs (fixed keys)
+
+The `ExternalSecret` writes exactly the two bootstrap keys the kernel reads —
+`COGNIC_DATABASE_URL` and `COGNIC_VAULT_TOKEN` — mapping each from a remote key in
+your store (`remoteRef.key`; `property` optional). There is no arbitrary-extra-key
+surface; only these two are populated.
+
+```yaml
+secrets:
+  create: false                               # exactly one source — ESO here
+externalSecrets:
+  enabled: true
+  targetSecretName: ""                        # default <fullname>-secrets
+  refreshInterval: 1h
+  secretStoreRef:
+    name: agentos-secret-store                # the SecretStore/ClusterSecretStore YOU created (REQUIRED)
+    kind: SecretStore                         # SecretStore | ClusterSecretStore
+  data:
+    databaseUrl:
+      remoteRef:
+        key: agentos/database-url             # remote key holding COGNIC_DATABASE_URL (REQUIRED)
+        property: ""                          # optional — property within the remote secret
+    vaultToken:
+      remoteRef:
+        key: agentos/vault-token              # remote key holding COGNIC_VAULT_TOKEN (REQUIRED)
+        property: ""                          # optional
+```
+
+### Primary worked example — Azure Key Vault + AKS workload identity
+
+This aligns with the Z1b-d AKS bring-up. ESO authenticates to Azure Key Vault via
+the AKS workload-identity federation (no static credential in the cluster). Create
+the store once, then point the chart at it:
+
+```yaml
+# SecretStore (provision yourself — the chart never creates it):
+apiVersion: external-secrets.io/v1
+kind: SecretStore
+metadata:
+  name: agentos-secret-store
+  namespace: cognic
+spec:
+  provider:
+    azurekv:
+      authType: WorkloadIdentity
+      vaultUrl: https://agentos-kv.vault.azure.net
+      serviceAccountRef:
+        name: agentos-agentos                 # the chart SA, annotated for workload identity
+```
+
+```yaml
+# chart values (your-prod-values.yaml):
+secrets:
+  create: false
+externalSecrets:
+  enabled: true
+  secretStoreRef:
+    name: agentos-secret-store
+    kind: SecretStore
+  data:
+    databaseUrl:
+      remoteRef: { key: cognic-database-url }   # the Key Vault secret names
+    vaultToken:
+      remoteRef: { key: cognic-vault-token }
+```
+
+The chart SA (`<release>-agentos`) is annotated for AKS workload identity
+out-of-band so ESO can federate; the chart itself grants no cluster RBAC.
+
+### Secondary notes — AWS Secrets Manager / HashiCorp Vault
+
+The same `ExternalSecret` shape works against any ESO provider — only the
+operator-owned `SecretStore` changes:
+
+- **AWS Secrets Manager** — a `SecretStore` with `provider.aws` (`service:
+  SecretsManager`, region, IRSA via the SA). The two `remoteRef.key`s are the
+  Secrets Manager secret names; use `property` to pick a JSON field if the secret
+  is a JSON blob.
+- **HashiCorp Vault** — a `SecretStore` with `provider.vault` (server address,
+  KV mount path, auth — e.g. Kubernetes auth). The two `remoteRef.key`s are the
+  KV paths; `property` selects the field within the KV secret.
+
 ## Trust-root note (pack registration)
 
 Reaching **Ready does not require a signing trust root** — `/readyz` does not

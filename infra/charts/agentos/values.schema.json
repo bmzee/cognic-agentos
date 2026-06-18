@@ -51,8 +51,7 @@
         "vaultToken": { "type": "string" }
       },
       "if": { "properties": { "create": { "const": true } } },
-      "then": { "required": ["databaseUrl", "vaultToken"], "properties": { "databaseUrl": { "minLength": 1 }, "vaultToken": { "minLength": 1 } } },
-      "else": { "required": ["existingSecret"], "properties": { "existingSecret": { "minLength": 1 } } }
+      "then": { "required": ["databaseUrl", "vaultToken"], "properties": { "databaseUrl": { "minLength": 1 }, "vaultToken": { "minLength": 1 } } }
     },
     "service": { "type": "object", "required": ["type", "port"], "properties": { "type": { "type": "string" }, "port": { "type": "integer" } } },
     "podSecurityContext": { "type": "object" },
@@ -94,6 +93,59 @@
         "scrapeTimeout": { "type": "string" },
         "labels": { "type": "object" }
       }
+    },
+    "externalSecrets": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "targetSecretName": { "type": "string" },
+        "refreshInterval": { "type": "string" },
+        "secretStoreRef": {
+          "type": "object",
+          "properties": {
+            "name": { "type": "string" },
+            "kind": { "type": "string", "enum": ["SecretStore", "ClusterSecretStore"] }
+          }
+        },
+        "data": {
+          "type": "object",
+          "properties": {
+            "databaseUrl": { "type": "object", "properties": { "remoteRef": { "type": "object", "properties": { "key": { "type": "string" }, "property": { "type": "string" } } } } },
+            "vaultToken": { "type": "object", "properties": { "remoteRef": { "type": "object", "properties": { "key": { "type": "string" }, "property": { "type": "string" } } } } }
+          }
+        }
+      }
     }
-  }
+  },
+  "allOf": [
+    { "not": { "required": ["secrets"], "properties": { "secrets": { "required": ["create", "existingSecret"], "properties": { "create": { "const": true }, "existingSecret": { "minLength": 1 } } } } } },
+    { "not": { "allOf": [
+      { "required": ["externalSecrets"], "properties": { "externalSecrets": { "required": ["enabled"], "properties": { "enabled": { "const": true } } } } },
+      { "required": ["secrets"], "properties": { "secrets": { "required": ["create"], "properties": { "create": { "const": true } } } } }
+    ] } },
+    { "not": { "allOf": [
+      { "required": ["externalSecrets"], "properties": { "externalSecrets": { "required": ["enabled"], "properties": { "enabled": { "const": true } } } } },
+      { "required": ["secrets"], "properties": { "secrets": { "required": ["existingSecret"], "properties": { "existingSecret": { "minLength": 1 } } } } }
+    ] } },
+    {
+      "if": { "allOf": [
+        { "required": ["secrets"], "properties": { "secrets": { "required": ["create"], "properties": { "create": { "const": false } } } } },
+        { "not": { "required": ["externalSecrets"], "properties": { "externalSecrets": { "required": ["enabled"], "properties": { "enabled": { "const": true } } } } } }
+      ] },
+      "then": { "properties": { "secrets": { "required": ["existingSecret"], "properties": { "existingSecret": { "minLength": 1 } } } } }
+    },
+    {
+      "if": { "required": ["externalSecrets"], "properties": { "externalSecrets": { "required": ["enabled"], "properties": { "enabled": { "const": true } } } } },
+      "then": { "properties": { "externalSecrets": {
+        "required": ["secretStoreRef", "data"],
+        "properties": {
+          "secretStoreRef": { "required": ["name"], "properties": { "name": { "minLength": 1 } } },
+          "data": { "required": ["databaseUrl", "vaultToken"], "properties": {
+            "databaseUrl": { "required": ["remoteRef"], "properties": { "remoteRef": { "required": ["key"], "properties": { "key": { "minLength": 1 } } } } },
+            "vaultToken": { "required": ["remoteRef"], "properties": { "remoteRef": { "required": ["key"], "properties": { "key": { "minLength": 1 } } } } }
+          } }
+        }
+      } } }
+    }
+  ]
 }
