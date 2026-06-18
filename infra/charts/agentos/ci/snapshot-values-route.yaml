@@ -1,0 +1,10 @@
+# Route-on scenario overlay (layered over ci/snapshot-values.yaml).
+route:
+  enabled: true
+  host: agentos.example.com
+  annotations:
+    haproxy.router.openshift.io/timeout: 60s
+  tls:
+    enabled: true
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

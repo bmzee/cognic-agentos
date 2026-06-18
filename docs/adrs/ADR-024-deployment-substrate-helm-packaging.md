@@ -154,3 +154,44 @@ Sprint 14B-Z1a ships the packaging core this ADR specifies. As-built notes:
 3. **Snapshot test** is the only Python added (`tests/unit/infra/test_helm_chart.py` + the committed `tests/unit/infra/helm/agentos_rendered.yaml`); byte-equality, deterministic render, regenerate-on-delete.
 4. **Posture confirmed** — no kernel edit; no migration; no new on-gate module; CC count stays **131**.
 5. **Docs** — the two operator runbooks (`docs/operator-runbooks/kind-smoke-deployment.md`, `docs/operator-runbooks/helm-chart-production-install.md`) + this ADR + the AS_BUILT Pillar-5 / forward-item-7 + the AGENTS.md Z1a note.
+
+## Sprint 14B-Z1b-a amendment (2026-06-18)
+
+Sprint 14B-Z1b-a gives a deployed AgentOS first-class **external access** + **scrape**, all as **conditional, default-off** chart templates on the merged Z1a chart. It is the first of the four Z1b sub-slices (Z1b-a external access / Z1b-b external secrets / Z1b-c Langfuse-OTLP exporter swap / Z1b-d AKS bring-up). Like Z1a it is **pure additive chart work — no kernel code, CC count stays 131, no migration, no new on-gate module**; the only Python touched is the snapshot-test parametrization (subject to ruff/mypy).
+
+### The three conditional templates (default OFF)
+
+The chart was Service-only by default in Z1a (the Service is reached via `kubectl port-forward` unless external access is configured); Z1b-a adds three templates that render **nothing** unless explicitly enabled:
+
+- **`templates/ingress.yaml`** — a Kubernetes `Ingress` (`networking.k8s.io/v1`), rendered when `ingress.enabled=true`. Carries `ingressClassName`, operator `annotations` (e.g. a cert-manager cluster-issuer), `rules[]` host/path → the chart Service `port: http`, and a `tls:` block.
+- **`templates/route.yaml`** — an OpenShift `Route` (`route.openshift.io/v1`, a CRD), rendered when `route.enabled=true`. Carries `host`, `to: { kind: Service, name: <chart Service>, weight: 100 }`, `port.targetPort: http`, operator `annotations`, and a `tls:` block (see below).
+- **`templates/servicemonitor.yaml`** — a Prometheus-Operator `ServiceMonitor` (`monitoring.coreos.com/v1`, a CRD), rendered when `serviceMonitor.enabled=true`. See "ServiceMonitor scrape contract" below.
+
+All three reuse the Z1a `_helpers.tpl` conventions (`agentos.fullname` / `agentos.labels` / `agentos.selectorLabels`) and the Z1a Service's named `http` port. Default-off means none of them appear in the default rendered snapshot — the default render is byte-unchanged from Z1a.
+
+### TLS posture
+
+- **Ingress TLS — existing-secret-first.** `ingress.tls` is the standard Kubernetes `[{ secretName, hosts }]` list, passed through verbatim. The operator provisions the TLS Secret (typically via cert-manager + the issuer annotation); the chart references it by name and creates no certificate material of its own.
+- **Route TLS — `a+b` (Routes have no Ingress-style `secretName` parity, so a distinct shape):**
+  - **(a) default:** `route.tls.enabled=true` ⇒ `termination: edge` with **no** cert/key — the **OpenShift router's default/wildcard certificate** serves it — plus `insecureEdgeTerminationPolicy: Redirect` (HTTP→HTTPS). Portable, zero secret handling, no OCP-version dependency. `route.tls.termination` is configurable (`edge` | `passthrough` | `reencrypt`); default `edge`.
+  - **(b) optional inline:** `route.tls.certificate` / `route.tls.key` / `route.tls.caCertificate` accept inline PEM material for operators who must serve an explicit certificate.
+  - **(deferred):** `tls.externalCertificate` (a Secret reference, OCP ≥ 4.16, feature-gated + router RBAC) is documented as a **later, OCP-version-gated option — NOT Z1b-a**.
+
+### ServiceMonitor scrape contract
+
+The `/metrics` Prometheus surface already exists (`prometheus_fastapi_instrumentator` at `{api_prefix}{prometheus_metrics_path}` → `/api/v1/metrics`). The ServiceMonitor's single `endpoints[]` entry scrapes `port: http`, `path: {{ .Values.apiPrefix }}{{ .Values.serviceMonitor.path }}` (the default `serviceMonitor.path: /metrics` joined with the chart's `apiPrefix` → `/api/v1/metrics`), `interval`, and `scrapeTimeout`. The `selector.matchLabels` is set to the chart Service's **stable `agentos.selectorLabels`** (`app.kubernetes.io/name` + `app.kubernetes.io/instance`) — deliberately **NOT** the full `agentos.labels` set, whose `helm.sh/chart` value changes per chart version and would break the selector on every chart upgrade. `metadata.labels` merges operator-supplied `serviceMonitor.labels` (e.g. `release: kube-prometheus-stack`) so the cluster Prometheus discovers it.
+
+### The four-scenario CI gate + CRD-schema outcome
+
+The Z1a single byte-snapshot becomes **four orthogonal byte-snapshots** — `default`, `ingress`, `route`, `servicemonitor` — each rendered from the base `ci/snapshot-values.yaml` layered with its scenario overlay, diffed byte-for-byte against its committed `tests/unit/infra/helm/agentos_rendered{,_ingress,_route,_servicemonitor}.yaml`, and `kubeconform`-validated. The byte-snapshot generator stays **Helm-4.2.2-pinned** (the Z1a pinned-generator fix); the pytest byte-snapshot is version-gated and the always-on `helm-chart` CI job is the authoritative drift gate. The Helm-3 compatibility lane renders all four too (lint + template + kubeconform; no byte-diff — the snapshot is the primary lane's).
+
+`Route` and `ServiceMonitor` are CRDs the default kubeconform schema set does not know, so the CI adds `-schema-location default -schema-location <CRDs-catalog template URL>` (the `datreeio/CRDs-catalog` mirror). The as-built CRD-schema outcome:
+
+- **ServiceMonitor's CRD schema resolves** via the catalog (`ServiceMonitor_v1.json`) and stays **schema-validated**.
+- **Route's CRD schema is absent from that catalog** (confirmed 2026-06-18 — a genuine catalog absence, not a network issue). The CI therefore uses the scoped **`-skip Route`** fallback: the Route still **renders + lints** and is byte-snapshotted; only its kubeconform **schema** validation is skipped. The skip is scoped to `Route` alone — ServiceMonitor and all core kinds stay schema-validated. (This is narrower than the spec §5 broad fallback option, which named `-skip Route,ServiceMonitor`; the as-built scoped it to `Route` only because ServiceMonitor's schema does resolve.)
+
+The default + ingress-on scenarios use core kinds only and need no CRD schemas.
+
+### Posture (Z1b-a)
+
+Pure chart work: **CC count stays 131 / no kernel change / no migration / no new on-gate module.** The live cloud / live-ingress exercise is **Z1b-d** (AKS bring-up) — Z1b-a's templates are proven by render / lint / kubeconform / byte-snapshot only, **not** by a live cluster. Out-of-scope-for-Z1b-a (the remaining Z1b sub-slices): external-secrets depth (Z1b-b), the Langfuse-OTLP OTel gRPC→HTTP exporter swap (Z1b-c, a kernel slice), and AKS / cloud-identity bring-up (Z1b-d).

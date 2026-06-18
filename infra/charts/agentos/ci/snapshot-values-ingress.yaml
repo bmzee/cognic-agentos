@@ -1,0 +1,13 @@
+# Ingress-on scenario overlay (layered over ci/snapshot-values.yaml).
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+  hosts:
+    - host: agentos.example.com
+      paths:
+        - { path: /, pathType: Prefix }
+  tls:
+    - secretName: agentos-tls
+      hosts: [agentos.example.com]
