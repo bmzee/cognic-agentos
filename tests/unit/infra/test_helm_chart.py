@@ -20,7 +20,7 @@ _SNAPSHOT = Path(__file__).resolve().parent / "helm" / "agentos_rendered.yaml"
 
 
 def _render() -> str:
-    return subprocess.run(
+    raw = subprocess.run(
         [
             "helm",
             "template",
@@ -35,6 +35,9 @@ def _render() -> str:
         text=True,
         check=True,
     ).stdout
+    # `helm template` ends its combined output with a trailing blank line; normalize
+    # to exactly one final newline so the committed snapshot is git-clean.
+    return raw.rstrip("\n") + "\n"
 
 
 @pytest.mark.skipif(shutil.which("helm") is None, reason="helm not on PATH")

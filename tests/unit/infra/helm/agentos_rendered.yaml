@@ -56,7 +56,6 @@ data:
       drop_params: true
     general_settings:
       master_key: ${LITELLM_MASTER_KEY}
-    
 
 ---
 # Source: agentos/templates/configmap.yaml
@@ -275,4 +274,3 @@ spec:
         - name: tmp
           emptyDir:
             sizeLimit: 256Mi
-

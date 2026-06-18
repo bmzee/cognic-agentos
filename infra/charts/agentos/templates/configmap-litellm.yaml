@@ -7,5 +7,5 @@ metadata:
     {{- include "agentos.labels" . | nindent 4 }}
 data:
   config.yaml: |
-    {{- .Values.litellm.config | nindent 4 }}
+    {{- .Values.litellm.config | trim | nindent 4 }}
 {{- end }}
