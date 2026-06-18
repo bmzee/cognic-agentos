@@ -802,10 +802,14 @@ Add this job under the top-level `jobs:` map (sibling of the existing `lint`/`po
       # --- primary gate (Helm 4): lint + deterministic template + snapshot diff + schema ---
       - name: helm lint (primary, Helm 4)
         run: helm lint infra/charts/agentos -f infra/charts/agentos/ci/snapshot-values.yaml
-      - name: helm template (primary, deterministic)
+      - name: helm template (primary, deterministic + EOF-normalized)
         run: |
           helm template rel infra/charts/agentos --namespace cognic \
-            -f infra/charts/agentos/ci/snapshot-values.yaml > /tmp/rendered.yaml
+            -f infra/charts/agentos/ci/snapshot-values.yaml > /tmp/rendered-raw.yaml
+          # Normalize helm's trailing blank line to a single final newline, matching
+          # tests/unit/infra/test_helm_chart.py::_render (raw.rstrip("\n") + "\n"),
+          # so the committed (normalized) snapshot compares byte-clean.
+          printf '%s\n' "$(cat /tmp/rendered-raw.yaml)" > /tmp/rendered.yaml
       - name: snapshot drift gate (Helm 4 output)
         run: diff -u tests/unit/infra/helm/agentos_rendered.yaml /tmp/rendered.yaml
       - name: kubeconform schema validation (Helm 4 output)
@@ -828,7 +832,8 @@ Note: the `sha256sum -c` above verifies each tarball against the project's OWN p
 Run:
 ```bash
 python -c "import yaml,sys; yaml.safe_load(open('.github/workflows/python.yml')); print('workflow yaml ok')"
-helm template rel infra/charts/agentos --namespace cognic -f infra/charts/agentos/ci/snapshot-values.yaml > /tmp/rendered.yaml
+helm template rel infra/charts/agentos --namespace cognic -f infra/charts/agentos/ci/snapshot-values.yaml > /tmp/rendered-raw.yaml
+printf '%s\n' "$(cat /tmp/rendered-raw.yaml)" > /tmp/rendered.yaml   # EOF-normalize to match the committed snapshot (see test _render)
 diff -u tests/unit/infra/helm/agentos_rendered.yaml /tmp/rendered.yaml && echo "snapshot matches"
 kubeconform -strict -summary -kubernetes-version 1.27.0 /tmp/rendered.yaml
 ```
@@ -1238,7 +1243,8 @@ Run:
 echo "primary: $(helm version --short) | $(kubeconform -v)"
 # primary gate (Helm 4):
 helm lint infra/charts/agentos -f infra/charts/agentos/ci/snapshot-values.yaml
-helm template rel infra/charts/agentos --namespace cognic -f infra/charts/agentos/ci/snapshot-values.yaml > /tmp/rendered.yaml
+helm template rel infra/charts/agentos --namespace cognic -f infra/charts/agentos/ci/snapshot-values.yaml > /tmp/rendered-raw.yaml
+printf '%s\n' "$(cat /tmp/rendered-raw.yaml)" > /tmp/rendered.yaml   # EOF-normalize to match the committed snapshot (see test _render)
 diff -u tests/unit/infra/helm/agentos_rendered.yaml /tmp/rendered.yaml
 kubeconform -strict -summary -kubernetes-version 1.27.0 /tmp/rendered.yaml
 # Helm 3 compatibility (local if `helm3` present; otherwise verified in CI):
