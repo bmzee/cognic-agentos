@@ -457,6 +457,83 @@ operator-owned `SecretStore` changes:
   KV mount path, auth — e.g. Kubernetes auth). The two `remoteRef.key`s are the
   KV paths; `property` selects the field within the KV secret.
 
+## OTLP exporter (gRPC/HTTP) + Langfuse OTLP ingestion
+
+> Added in **Sprint 14B-Z1b-c** (ADR-024). The kernel emits a value-free
+> `llm.gateway.completion` OTel span on every completion. By default the exporter
+> ships over **gRPC**; Z1b-c adds an **OTLP/HTTP + headers** transport so a
+> self-hosted Langfuse (or any OTLP/HTTP collector) can ingest spans turnkey. The
+> kernel stays **Langfuse-agnostic** — it knows only `grpc`/`http` + endpoint +
+> headers; the Langfuse URL convention and the Basic-auth header live here in the
+> chart values + your operator-owned Secret.
+
+### The generic knobs
+
+Spans only export when an endpoint is set (the otel ConfigMap keys are
+**endpoint-gated**, so leaving `otel.exporter.endpoint` empty leaves the default
+install byte-unchanged — there is no console/no-op span shipping).
+
+- `otel.exporter.endpoint` — the OTLP collector endpoint (`COGNIC_OTEL_EXPORTER_ENDPOINT`). Empty ⇒ no export.
+- `otel.exporter.protocol` — `grpc` (default) or `http`.
+- `otel.exporter.insecure` — **gRPC-only** (skip TLS on the gRPC channel). On the `http` path security is the **endpoint URL scheme** (`https://…`); `insecure` is ignored for http.
+- `otel.exporter.headersSecretKey` — optional; a **key in your operator-owned Secret** holding `COGNIC_OTEL_EXPORTER_HEADERS` (see the secret-safe boundary below).
+
+The mTLS file-path settings (CA / client cert / client key) are reused on the
+`http` path as the exporter's `certificate_file` / `client_certificate_file` /
+`client_key_file`; headers thread into **both** the gRPC and the HTTP exporter.
+
+### Langfuse turnkey (OTLP/HTTP) — worked example
+
+Point the kernel at Langfuse's OTLP endpoint over HTTP and supply the Langfuse
+Basic-auth header via the Secret (NOT the ConfigMap — see below):
+
+```yaml
+otel:
+  exporter:
+    endpoint: https://langfuse.example.com/api/public/otel/v1/traces  # {langfuse_host}/api/public/otel/v1/traces
+    protocol: http
+    headersSecretKey: COGNIC_OTEL_EXPORTER_HEADERS                     # a key in your existing Secret
+secrets:
+  create: false                                                       # header is NOT valid with create=true
+  existingSecret: agentos-secrets                                     # the Secret YOU populate (or ESO)
+```
+
+Then put the header JSON into that operator-owned Secret under the
+`COGNIC_OTEL_EXPORTER_HEADERS` key — the value is the Langfuse Basic-auth pair
+plus the recommended ingestion-version header:
+
+```json
+{"Authorization":"Basic <base64(public_key:secret_key)>","x-langfuse-ingestion-version":"4"}
+```
+
+`x-langfuse-ingestion-version: "4"` is **Langfuse's recommended real-time
+ingestion header** (per the Langfuse OTel docs). Base64-encode the
+`public_key:secret_key` pair from your Langfuse project for the `Authorization`
+value.
+
+### The secret-safe boundary (critical)
+
+The Basic-auth header is **sensitive** — it MUST go in the **Secret**, never the
+ConfigMap. The chart projects it from your Secret via a `secretKeyRef`
+(`COGNIC_OTEL_EXPORTER_HEADERS` ← the key named by `headersSecretKey`), into the
+**same** Secret the bootstrap keys live in (`agentos.secretName`). The non-secret
+endpoint/protocol/insecure values DO ride the ConfigMap.
+
+**`secrets.create=true` is NOT compatible with `headersSecretKey`.** A
+chart-created Secret carries only the two bootstrap keys (`COGNIC_DATABASE_URL` +
+`COGNIC_VAULT_TOKEN`) — it has no header key for the `secretKeyRef` to resolve, so
+the pod would fail to start. Use **`secrets.existingSecret`** (populate the extra
+`COGNIC_OTEL_EXPORTER_HEADERS` key yourself) or an **ESO `ExternalSecret`**
+(materialise that key from your store). The `otel-http` CI snapshot scenario
+exercises exactly this `secrets.create:false` + `existingSecret` mode.
+
+> **Two distinct proofs.** Z1b-c ships the exporter primitive + this chart wiring
+> + a **standalone env-gated Langfuse ingestion proof** (`COGNIC_RUN_LANGFUSE_OTEL=1`;
+> it exports a span over OTLP/HTTP and reads it back via the Langfuse SDK — a
+> capability proof, operator-run, never always-on CI, no production Langfuse
+> claimed running). The **live cloud/cluster exercise** (AKS + the chart path
+> in-cluster, including ServiceMonitor → Prometheus) is **Z1b-d**.
+
 ## Trust-root note (pack registration)
 
 Reaching **Ready does not require a signing trust root** — `/readyz` does not
