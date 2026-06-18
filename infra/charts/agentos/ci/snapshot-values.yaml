@@ -1,0 +1,8 @@
+# Deterministic inputs for the rendered-YAML snapshot drift gate.
+image:
+  repository: registry.example.com/cognic-agentos
+  tag: "0.1.0-snapshot"
+secrets:
+  create: true
+  databaseUrl: "postgresql+asyncpg://cognic:cognic@postgres:5432/cognic"
+  vaultToken: "snapshot-token"
