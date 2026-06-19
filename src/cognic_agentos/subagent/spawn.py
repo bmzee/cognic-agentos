@@ -64,18 +64,24 @@ class SubAgentSpawner:
         self._parent_budget = parent_budget
         self._max_depth = max_recursion_depth
 
-    async def _resolve_budget(self, *, parent_task_id: str | None, requested: int) -> int:
+    async def _resolve_budget(
+        self, *, parent_task_id: str | None, requested: int, tenant_id: str
+    ) -> int:
         """Budget accounting (memo: spawn.py owns it). A top-level spawn
         (parent_task_id is None) grants the child its pack quota; a child
         spawn narrows against the parent's remaining budget via the injected
         ParentBudgetResolver. Both gate a zero child quota / parent-exhausted
         via the T4.5 split refusals (SubAgentChildQuotaZero /
-        SubAgentBudgetExhausted)."""
+        SubAgentBudgetExhausted). ``tenant_id`` is threaded into the resolver
+        for Protocol-compat (the dict-snapshot conformer ignores it; the
+        scheduler-backed resolver tenant-scopes)."""
         if parent_task_id is None:
             if requested == 0:
                 raise SubAgentChildQuotaZero(child_pack_quota=requested)
             return requested
-        parent_remaining = await self._parent_budget.remaining_budget_for(uuid.UUID(parent_task_id))
+        parent_remaining = await self._parent_budget.remaining_budget_for(
+            uuid.UUID(parent_task_id), tenant_id=tenant_id
+        )
         return compute_spawn_budget(
             parent_remaining_budget=parent_remaining, child_pack_quota=requested
         )
@@ -120,6 +126,7 @@ class SubAgentSpawner:
         budget = await self._resolve_budget(
             parent_task_id=request.parent_task_id,
             requested=request.requested_estimated_tokens,
+            tenant_id=tenant_id,
         )
 
         # 2. emit_spawn -> R_spawn (the parent-chain root every child row links to).

@@ -143,7 +143,7 @@ class _StubParentBudgetResolver:
         self.budget = budget
         self.calls: list[uuid.UUID] = []
 
-    async def remaining_budget_for(self, parent_task_id: uuid.UUID) -> int:
+    async def remaining_budget_for(self, parent_task_id: uuid.UUID, *, tenant_id: str) -> int:
         self.calls.append(parent_task_id)
         return self.budget
 
