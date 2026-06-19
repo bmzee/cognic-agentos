@@ -341,6 +341,29 @@ RunRBACScope = Literal["run.submit", "run.resume"]  # A3b — +run.resume
 RUN_SCOPES: frozenset[RunRBACScope] = frozenset({"run.submit", "run.resume"})
 
 
+#: ADR-002 ("Fork D") — MCP tool-invocation RBAC family. 2 scopes in the
+#: ``mcp.*`` namespace:
+#:
+#:   - ``mcp.tool.list`` ← ``GET /api/v1/mcp/servers/{server_id}/tools``.
+#:   - ``mcp.tool.invoke`` ← ``POST /api/v1/mcp/servers/{server_id}/tools/call``.
+#:
+#: Read-only discovery (``list``) is a lower privilege than invocation
+#: (``invoke``); a caller may hold ``list`` without ``invoke``. The sandbox/MCP
+#: approval seam owns the per-tier human checkpoint, so the MCP routes do NOT
+#: also gate on :class:`RequireHumanActor`. Value-disjoint from every other
+#: family by the ``mcp.*`` namespace. Wire-protocol-public — the 403
+#: ``scope_not_held`` body carries it. Pinned by
+#: ``tests/unit/portal/rbac/test_mcp_scopes.py``.
+#:
+#: Style note: plain ``= Literal[...]`` (no ``TypeAlias``) per the repo
+#: convention at ``packs/lifecycle.py:111`` + the families above.
+MCPRBACScope = Literal["mcp.tool.list", "mcp.tool.invoke"]
+
+#: All 2 MCP scopes as a frozenset (1:1 with :data:`MCPRBACScope`) for
+#: bank-overlay binders. Pinned by ``tests/unit/portal/rbac/test_mcp_scopes.py``.
+MCP_SCOPES: frozenset[MCPRBACScope] = frozenset({"mcp.tool.list", "mcp.tool.invoke"})
+
+
 #: ADR-023 (Wave-2) — per-tenant config-overlay RBAC family. Two values in the
 #: ``config.tenant_overlay.*`` namespace, consumed by the operator-administered
 #: overlay endpoints (`portal/api/config_overlay/routes.py`):
