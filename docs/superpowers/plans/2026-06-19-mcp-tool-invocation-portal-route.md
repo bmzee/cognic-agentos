@@ -236,7 +236,9 @@ def test_call_request_defaults_empty_arguments() -> None:
 
 def test_call_request_parses_approval_request_id_to_uuid() -> None:
     rid = uuid.uuid4()
-    req = CallToolRequest(tool_name="lookup", approval_request_id=str(rid))
+    # model_validate (runtime parsing) — the wire sends approval_request_id as a
+    # str; Pydantic parses it to UUID. (A typed constructor call would fail mypy.)
+    req = CallToolRequest.model_validate({"tool_name": "lookup", "approval_request_id": str(rid)})
     assert req.approval_request_id == rid
 
 
@@ -246,8 +248,10 @@ def test_call_request_rejects_empty_tool_name() -> None:
 
 
 def test_call_request_forbids_extra_fields() -> None:
+    # model_validate so mypy doesn't reject the deliberate unknown kwarg; the
+    # extra='forbid' rejection is a RUNTIME ValidationError.
     with pytest.raises(ValidationError):
-        CallToolRequest(tool_name="lookup", tenant_id="t")
+        CallToolRequest.model_validate({"tool_name": "lookup", "tenant_id": "t"})
 
 
 def test_call_request_preserves_raw_tool_name() -> None:
@@ -318,7 +322,7 @@ class ListToolsResponse(BaseModel):
 
 - [ ] **Step 4: Run → passes; lint + types**
 
-Run: `uv run pytest tests/unit/portal/api/mcp/test_mcp_dto.py -x && uv run ruff check src/cognic_agentos/portal/api/mcp/ tests/unit/portal/api/mcp/ && uv run mypy src/cognic_agentos/portal/api/mcp/dto.py`
+Run: `uv run pytest tests/unit/portal/api/mcp/test_mcp_dto.py -x && uv run ruff check src/cognic_agentos/portal/api/mcp/ tests/unit/portal/api/mcp/ && uv run ruff format --check src/cognic_agentos/portal/api/mcp/ tests/unit/portal/api/mcp/ && uv run mypy src/cognic_agentos/portal/api/mcp/ tests/unit/portal/api/mcp/`
 Expected: PASS + clean.
 
 - [ ] **Step 5: Commit** — `feat(portal): MCP route DTOs (ADR-002)`
