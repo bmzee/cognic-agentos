@@ -370,8 +370,8 @@ from cognic_agentos.protocol.mcp_host import (
     CallResult,
     MCPHost,
     MCPToolInvocationRefused,
-    MCPTransportError,
 )
+from cognic_agentos.protocol.mcp_transports import MCPTransportError
 
 #: ``MCPToolInvocationRefused.reason`` -> HTTP status. The 6-value enum is
 #: wire-public + drift-pinned at its definition; this map consumes it.
@@ -490,7 +490,7 @@ def build_mcp_routes() -> APIRouter:
                 status_code=_transport_status(exc.reason), detail={"reason": exc.reason}
             ) from None
         except Exception:
-            # LAST arm — MCPToolInvocationRefused inherits RuntimeError, so the
+            # LAST arm — MCPToolInvocationRefused is an Exception subclass, so the
             # specific arms above MUST precede this. call_tool re-raises generic
             # errors after auditing them; map to a DELIBERATE 502, never a leaked
             # 500 (the spec's mcp_orchestrator_error row). Repo has no ruff BLE001.
@@ -605,8 +605,8 @@ from cognic_agentos.protocol.mcp_authz import MCPAuthzError
 from cognic_agentos.protocol.mcp_host import (
     CallResult,
     MCPToolInvocationRefused,
-    MCPTransportError,
 )
+from cognic_agentos.protocol.mcp_transports import MCPTransportError
 
 _SERVER = "pack.demo"
 
