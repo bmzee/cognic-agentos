@@ -671,7 +671,15 @@ def _make_app(memory_settings: Any, memory_registry: Any, tmp_path: Any) -> Any:
     )
 
 
-def _call(memory_settings, memory_registry, tmp_path, *, host, actor=None, json=None):
+def _call(
+    memory_settings: Any,
+    memory_registry: Any,
+    tmp_path: Any,
+    *,
+    host: Any,
+    actor: Actor | None = None,
+    json: dict[str, Any] | None = None,
+) -> Any:
     """POST .../tools/call. The stubs are set AFTER lifespan startup (so they
     survive any pre-seed) and the request is made INSIDE the with-block so the
     lifespan shutdown runs cleanly on exit (the test_run_routes.py pattern)."""
@@ -684,7 +692,14 @@ def _call(memory_settings, memory_registry, tmp_path, *, host, actor=None, json=
         )
 
 
-def _list(memory_settings, memory_registry, tmp_path, *, host, actor=None):
+def _list(
+    memory_settings: Any,
+    memory_registry: Any,
+    tmp_path: Any,
+    *,
+    host: Any,
+    actor: Actor | None = None,
+) -> Any:
     """GET .../tools — same harness as _call (with-block, clean shutdown)."""
     app = _make_app(memory_settings, memory_registry, tmp_path)
     with TestClient(app) as client:
@@ -693,14 +708,14 @@ def _list(memory_settings, memory_registry, tmp_path, *, host, actor=None):
         return client.get(f"/api/v1/mcp/servers/{_SERVER}/tools")
 
 
-def test_list_success(memory_settings, memory_registry, tmp_path) -> None:
+def test_list_success(memory_settings: Any, memory_registry: Any, tmp_path: Any) -> None:
     host = _StubHost(list_return=[{"name": "lookup"}])
     r = _list(memory_settings, memory_registry, tmp_path, host=host)
     assert r.status_code == 200
     assert r.json() == {"tools": [{"name": "lookup"}]}
 
 
-def test_call_success(memory_settings, memory_registry, tmp_path) -> None:
+def test_call_success(memory_settings: Any, memory_registry: Any, tmp_path: Any) -> None:
     host = _StubHost(call_return=_call_result())
     r = _call(memory_settings, memory_registry, tmp_path, host=host)
     assert r.status_code == 200
@@ -710,7 +725,7 @@ def test_call_success(memory_settings, memory_registry, tmp_path) -> None:
 
 
 def test_call_pending_returns_202_with_approval_request_id(
-    memory_settings, memory_registry, tmp_path
+    memory_settings: Any, memory_registry: Any, tmp_path: Any
 ) -> None:
     rid = str(uuid.uuid4())
     host = _StubHost(
@@ -723,7 +738,7 @@ def test_call_pending_returns_202_with_approval_request_id(
 
 
 def test_call_recall_threads_approval_request_id(
-    memory_settings, memory_registry, tmp_path
+    memory_settings: Any, memory_registry: Any, tmp_path: Any
 ) -> None:
     host = _StubHost(call_return=_call_result())
     rid = str(uuid.uuid4())
@@ -759,15 +774,21 @@ def test_call_recall_threads_approval_request_id(
         (LookupError("unknown server"), 404),
     ],
 )
-def test_call_status_mapping(memory_settings, memory_registry, tmp_path, exc, status) -> None:
+def test_call_status_mapping(
+    memory_settings: Any, memory_registry: Any, tmp_path: Any, exc: Exception, status: int
+) -> None:
     r = _call(memory_settings, memory_registry, tmp_path, host=_StubHost(raises=exc))
     assert r.status_code == status
 
 
-def test_call_generic_exception_maps_502(memory_settings, memory_registry, tmp_path) -> None:
+def test_call_generic_exception_maps_502(
+    memory_settings: Any, memory_registry: Any, tmp_path: Any
+) -> None:
     # The catch-all: any non-typed error (here a bare RuntimeError, as call_tool
     # re-raises its generic-Exception path) maps to 502 mcp_orchestrator_error.
-    r = _call(memory_settings, memory_registry, tmp_path, host=_StubHost(raises=RuntimeError("boom")))
+    r = _call(
+        memory_settings, memory_registry, tmp_path, host=_StubHost(raises=RuntimeError("boom"))
+    )
     assert r.status_code == 502
     assert r.json()["detail"]["reason"] == "mcp_orchestrator_error"
 
@@ -782,7 +803,9 @@ def test_call_generic_exception_maps_502(memory_settings, memory_registry, tmp_p
         (RuntimeError("boom"), 502),
     ],
 )
-def test_list_status_mapping(memory_settings, memory_registry, tmp_path, exc, status) -> None:
+def test_list_status_mapping(
+    memory_settings: Any, memory_registry: Any, tmp_path: Any, exc: Exception, status: int
+) -> None:
     # The GET list route maps the same exception classes (no approval path).
     r = _list(memory_settings, memory_registry, tmp_path, host=_StubHost(raises=exc))
     assert r.status_code == status
@@ -790,7 +813,9 @@ def test_list_status_mapping(memory_settings, memory_registry, tmp_path, exc, st
         assert r.json()["detail"]["reason"] == "mcp_orchestrator_error"
 
 
-def test_list_scope_miss_returns_403(memory_settings, memory_registry, tmp_path) -> None:
+def test_list_scope_miss_returns_403(
+    memory_settings: Any, memory_registry: Any, tmp_path: Any
+) -> None:
     # An actor without mcp.tool.list -> RequireScope refuses 403 on the GET route.
     r = _list(
         memory_settings, memory_registry, tmp_path, host=_StubHost(), actor=_actor(frozenset())
@@ -798,13 +823,13 @@ def test_list_scope_miss_returns_403(memory_settings, memory_registry, tmp_path)
     assert r.status_code == 403
 
 
-def test_no_host_returns_503(memory_settings, memory_registry, tmp_path) -> None:
+def test_no_host_returns_503(memory_settings: Any, memory_registry: Any, tmp_path: Any) -> None:
     r = _call(memory_settings, memory_registry, tmp_path, host=None)
     assert r.status_code == 503
     assert r.json()["detail"]["reason"] == "mcp_host_unavailable"
 
 
-def test_scope_miss_returns_403(memory_settings, memory_registry, tmp_path) -> None:
+def test_scope_miss_returns_403(memory_settings: Any, memory_registry: Any, tmp_path: Any) -> None:
     # An actor without mcp.tool.invoke -> RequireScope refuses 403 on the POST route.
     r = _call(
         memory_settings,
@@ -816,7 +841,9 @@ def test_scope_miss_returns_403(memory_settings, memory_registry, tmp_path) -> N
     assert r.status_code == 403
 
 
-def test_request_id_minted_and_bounded(memory_settings, memory_registry, tmp_path) -> None:
+def test_request_id_minted_and_bounded(
+    memory_settings: Any, memory_registry: Any, tmp_path: Any
+) -> None:
     host = _StubHost(call_return=_call_result())
     _call(memory_settings, memory_registry, tmp_path, host=host)
     rid = host.calls[0]["request_id"]
@@ -824,7 +851,7 @@ def test_request_id_minted_and_bounded(memory_settings, memory_registry, tmp_pat
     assert len(rid) <= 64
 
 
-def test_tool_name_raw_preserved(memory_settings, memory_registry, tmp_path) -> None:
+def test_tool_name_raw_preserved(memory_settings: Any, memory_registry: Any, tmp_path: Any) -> None:
     host = _StubHost(call_return=_call_result())
     raw = "look\tup\n; rm -rf"
     _call(memory_settings, memory_registry, tmp_path, host=host, json={"tool_name": raw})
@@ -849,15 +876,15 @@ def test_timeout_reasons_are_subset_of_live_enums() -> None:
     from cognic_agentos.protocol.mcp_transports import MCPTransportReason
 
     live = set(get_args(MCPTransportReason)) | set(get_args(AuthzReason))
-    assert _TIMEOUT_REASONS <= live  # a renamed/removed timeout reason fails here
+    assert _TIMEOUT_REASONS.issubset(live)  # a renamed/removed timeout reason fails here
 ```
 
 Run: `uv run pytest tests/unit/portal/api/mcp/test_mcp_routes.py -x` → all PASS.
 
 - [ ] **Step 4: Lint + types**
 
-Run: `uv run ruff check tests/unit/portal/api/mcp/ && uv run ruff format --check tests/unit/portal/api/mcp/ && uv run mypy tests/unit/portal/api/mcp/`
-Expected: clean.
+Run: `uv run ruff check tests/unit/portal/api/mcp/ && uv run ruff format --check tests/unit/portal/api/mcp/ && uv run mypy src tests`
+Expected: clean. **mypy MUST be the whole-project `src tests` (the CI command)** — a single-file/dir `mypy tests/...` treats `cognic_agentos.*` as an installed package and emits false `import-untyped` errors; only `src tests` analyzes it first-party. Every test/helper parameter is annotated `: Any` (and `_call`/`_list` return `-> Any`) per the repo convention (`test_run_routes.py`) + the strict-mypy `disallow_incomplete_defs` rule — an untyped param under a typed `-> None` return fails the gate.
 
 - [ ] **Step 5: Commit** — `test(portal): MCP route behavioral + status-map drift tests (ADR-002)`
 
