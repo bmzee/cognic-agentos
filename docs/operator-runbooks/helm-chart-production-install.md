@@ -610,6 +610,43 @@ Provision the AWS side out-of-band: the IAM role with a trust policy for the EKS
 cluster's OIDC provider scoped to the chart SA (`<release>-agentos`), and the IAM
 policies the workload needs.
 
+## AKS live-cloud smoke (env-gated, operator-run)
+
+A reference end-to-end exercise of the chart on a real AKS cluster — workload identity + ESO-from-Key-Vault + Ready. Assets live under `infra/azure/aks-smoke/`. This is **operator-run** (it needs Azure credentials + `az`/`bicep`); it is not part of CI. Production hardening (private cluster, custom VNet, Log Analytics, Azure Policy) is your overlay's concern — this Bicep is a minimal reference.
+
+### 1. Provision the cloud surfaces (Bicep)
+
+```bash
+az bicep build --file infra/azure/aks-smoke/main.bicep      # validate
+az group create -n <rg> -l <region>
+# set smokeRunnerObjectId to YOUR object id: az ad signed-in-user show --query id -o tsv
+az deployment group create -g <rg> -n aks-smoke \
+  -f infra/azure/aks-smoke/main.bicep -p infra/azure/aks-smoke/main.bicepparam
+```
+
+The Bicep provisions AKS (OIDC + workload identity), a UAMI, an **empty** Key Vault, the federated credential (chart SA → UAMI), and the KV read (UAMI) / write (you) roles. **`agentosNamespace` MUST equal the smoke's `AGENTOS_NAMESPACE`** — the federated subject is `system:serviceaccount:<namespace>:rel-agentos`.
+
+### 2. Run the smoke
+
+```bash
+export AZ_RESOURCE_GROUP=<rg>
+export AGENTOS_NAMESPACE=cognic-smoke          # MUST match the Bicep agentosNamespace
+export COGNIC_IMAGE_REPOSITORY=<registry your AKS can pull, e.g. myregistry.azurecr.io/cognic-agentos>
+export COGNIC_IMAGE_TAG=<image tag>
+export OTEL_HEADERS_JSON='{"Authorization":"Basic <base64 user:pass>"}'   # only with OTLP on (ENABLE_OTLP=1, the default)
+# export ENABLE_OTLP=0    # uncomment to skip the OTLP leg entirely (2-key gate; WI + ESO + Ready only)
+bash infra/azure/aks-smoke/run-aks-smoke.sh
+```
+
+The smoke installs ESO, brings up the in-cluster backends, seeds Key Vault (2 bootstrap secrets — plus the OTLP header when `ENABLE_OTLP=1`; **no slashes** in the KV names), applies the Azure WI `SecretStore` (referencing the chart SA), installs the chart with the operator's image (`COGNIC_IMAGE_REPOSITORY`/`_TAG`) and **migrations off**, waits for the fail-loud **2- or 3-key Secret gate**, runs a smoke-owned **non-hook** migration Job, rolls the Deployment, and asserts `/readyz=200`.
+
+### Notes + caveats
+
+- **ESO version (operator-validated).** The Azure `SecretStore` uses `authType: WorkloadIdentity` + `serviceAccountRef`; validate against the ESO version you run.
+- **Owner/Merge coexistence.** The chart's `ExternalSecret` is `creationPolicy: Owner`; the OTLP header rides a smoke-only auxiliary `ExternalSecret` with `creationPolicy: Merge` over the same Secret. Coexistence is ESO-version-dependent — the 3-key gate catches a strip. If your ESO version conflicts, set **`ENABLE_OTLP=0`** (the smoke then **deletes any prior** auxiliary `ExternalSecret`, skips the header secret, blanks the chart's OTLP endpoint/header key, and gates on 2 keys); WI + ESO + Ready is the primary proof.
+- **Migration ordering.** Migrations run as a post-gate non-hook Job (the chart's pre-install migration hook would deadlock on the ESO-managed Secret).
+- **Teardown.** The smoke does not delete the cluster (it is rerunnable). Remove everything with `az group delete -n <rg> --yes`.
+
 ## Trust-root note (pack registration)
 
 Reaching **Ready does not require a signing trust root** — `/readyz` does not

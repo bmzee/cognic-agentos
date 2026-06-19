@@ -1,0 +1,48 @@
+# infra/azure/aks-smoke/migrate-job.yaml — Sprint 14B-Z1b-d-2 SMOKE-OWNED, NON-HOOK migration Job.
+# Applied by run-aks-smoke.sh AFTER the 3-key Secret gate. Mirrors the chart hook Job
+# (templates/migration-job.yaml) MINUS the Helm hook annotations — the chart hook can't be used in ESO
+# mode (pre-install hook references the ExternalSecret-managed Secret before ESO creates it -> deadlock).
+# run-aks-smoke.sh substitutes __AGENTOS_IMAGE__ with the image it passed to `helm install`.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: agentos-migrate
+spec:
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 600
+  template:
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+      containers:
+        - name: migrate
+          image: __AGENTOS_IMAGE__
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -eu
+              if [ -z "${COGNIC_DATABASE_URL:-}" ]; then
+                echo "FATAL: COGNIC_DATABASE_URL is unset — refusing to run migrations" >&2
+                exit 1
+              fi
+              exec alembic upgrade head
+          env:
+            - name: COGNIC_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: rel-agentos-secrets
+                  key: COGNIC_DATABASE_URL
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

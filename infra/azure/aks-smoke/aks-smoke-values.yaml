@@ -1,0 +1,29 @@
+# infra/azure/aks-smoke/aks-smoke-values.yaml — AKS-specific overrides, layered over ci/smoke-values.yaml.
+# Switches the secret source from chart-created (smoke-values) to ESO-from-Key-Vault, turns migrations OFF
+# (post-gate non-hook Job — see run-aks-smoke.sh), and turns on workload identity + OTLP/HTTP export.
+# The dynamic serviceAccount.annotations."azure.workload.identity/client-id" is --set-string at install
+# (it comes from the Bicep uamiClientId output).
+secrets:
+  create: false                      # override smoke-values' create:true -> ESO mode (3-mode XOR satisfied)
+migrations:
+  enabled: false                     # post-gate non-hook Job (avoids the pre-install-hook vs ESO-secret deadlock)
+externalSecrets:
+  enabled: true
+  secretStoreRef:
+    name: agentos-secret-store
+    kind: SecretStore
+  data:
+    databaseUrl:
+      remoteRef:
+        key: agentos-database-url    # Azure Key Vault secret name — NO slash (KV forbids '/')
+    vaultToken:
+      remoteRef:
+        key: agentos-vault-token
+podLabels:
+  azure.workload.identity/use: "true"
+otel:
+  exporter:
+    endpoint: http://langfuse:3000/api/public/otel/v1/traces
+    protocol: http
+    insecure: false
+    headersSecretKey: COGNIC_OTEL_EXPORTER_HEADERS

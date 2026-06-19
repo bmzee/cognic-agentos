@@ -1,0 +1,58 @@
+# All-surfaces composition overlay (layered over ci/snapshot-values.yaml).
+# DEDICATED, not a stack of the per-surface overlays: the `externalsecret` overlay (ESO mode)
+# and the `otel-http` overlay (existingSecret mode) carry MUTUALLY-EXCLUSIVE secret sources and
+# cannot co-layer. This overlay resolves to ONE coherent secret source — ESO mode — then adds
+# headersSecretKey on top (the schema allows ESO + headersSecretKey; it forbids ESO+create and
+# ESO+existingSecret). The base sets secrets.create=true, so create:false is an explicit override.
+# The 3rd Secret key is the live smoke's auxiliary-Merge concern; `helm template` emits the
+# secretKeyRef without checking the key exists, so this render proves COMPOSITION only.
+# migrations is intentionally NOT set here — it inherits values.yaml's default (enabled=true), so
+# the render includes the migration Job (the runtime hook-ordering constraint is a smoke concern).
+secrets:
+  create: false
+externalSecrets:
+  enabled: true
+  refreshInterval: 1h
+  secretStoreRef:
+    name: agentos-secret-store
+    kind: SecretStore
+  data:
+    databaseUrl:
+      remoteRef:
+        key: agentos/database-url
+    vaultToken:
+      remoteRef:
+        key: agentos/vault-token
+otel:
+  exporter:
+    endpoint: https://langfuse.example.com/api/public/otel/v1/traces
+    protocol: http
+    insecure: false
+    headersSecretKey: COGNIC_OTEL_EXPORTER_HEADERS
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+  hosts:
+    - host: agentos.example.com
+      paths:
+        - { path: /, pathType: Prefix }
+  tls:
+    - { secretName: agentos-tls, hosts: [agentos.example.com] }
+route:
+  enabled: true
+  host: agentos.example.com
+  tls:
+    enabled: true
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+serviceMonitor:
+  enabled: true
+  labels:
+    release: kube-prometheus-stack
+serviceAccount:
+  annotations:
+    azure.workload.identity/client-id: 00000000-0000-0000-0000-000000000000
+podLabels:
+  azure.workload.identity/use: "true"
