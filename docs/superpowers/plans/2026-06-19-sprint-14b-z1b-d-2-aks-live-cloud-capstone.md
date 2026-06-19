@@ -468,7 +468,9 @@ def test_migrate_job_is_plain_non_hook() -> None:
     doc = _load_yaml("migrate-job.yaml")
     assert doc["kind"] == "Job"
     annotations = doc["metadata"].get("annotations") or {}
-    assert not any(k.startswith("helm.sh/hook") for k in annotations), "migrate Job must NOT be a Helm hook"
+    assert not any(k.startswith("helm.sh/hook") for k in annotations), (
+        "migrate Job must NOT be a Helm hook"
+    )
     container = doc["spec"]["template"]["spec"]["containers"][0]
     assert "alembic upgrade head" in " ".join(container["args"])
     env = {e["name"]: e for e in container["env"]}
@@ -511,6 +513,14 @@ def test_smoke_script_pins_namespace_image_migrations_and_otlp_toggle() -> None:
     assert "COGNIC_IMAGE_TAG" in src
     # OTLP is a first-class toggle (ENABLE_OTLP) with a 2-key fallback gate.
     assert "ENABLE_OTLP" in src
+    # the Helm args use an always-non-empty array (NOT the shell-fragile empty-array `+` idiom).
+    assert 'helm "${helm_args[@]}"' in src
+    assert "otlp_overrides" not in src
+    # the migration Job is deleted before re-apply so the smoke is rerunnable (Jobs are immutable).
+    assert "delete job/agentos-migrate" in src
+    # ENABLE_OTLP=0 deletes a prior aux ExternalSecret (not just skips re-apply), so a retry
+    # escapes an Owner/Merge conflict instead of leaving the old reconciler active.
+    assert "delete externalsecret/agentos-otel-headers" in src
     # the cluster is NOT deleted by the smoke (the Bicep owns it).
     assert "az group delete" not in src
     assert "kind delete cluster" not in src
@@ -674,7 +684,7 @@ Create `infra/azure/aks-smoke/run-aks-smoke.sh`:
 # Sprint 14B-Z1b-d-2 env-gated AKS live-cloud smoke. Operator-run (requires: az, kubectl, helm; `az login` done).
 # Exercises Z1b-b (ESO-from-Key-Vault) + Z1b-d-1 (workload identity) + Z1a (Ready) end-to-end on real AKS.
 # PREREQ: deploy infra/azure/aks-smoke/main.bicep first (this reads its outputs). The smoke does NOT create
-# or delete the AKS cluster — the Bicep owns it; it is rerunnable. Azure teardown is `az group delete` (runbook).
+# or delete the AKS cluster — the Bicep owns it; it is rerunnable. Azure teardown is documented in the runbook.
 # NOT runnable in the kernel authoring env (no Azure creds; az/bicep/shellcheck absent there).
 set -euo pipefail
 
@@ -729,26 +739,29 @@ if [[ "$ENABLE_OTLP" == "1" ]]; then
     --value "$OTEL_HEADERS_JSON" >/dev/null
   kubectl apply -n "$AGENTOS_NAMESPACE" -f infra/azure/aks-smoke/externalsecret-otel-headers.yaml
 else
-  echo "==> OTLP off (ENABLE_OTLP=0): skipping the header secret + the auxiliary Merge ExternalSecret"
+  echo "==> OTLP off (ENABLE_OTLP=0): delete any prior auxiliary Merge ExternalSecret (escape an Owner/Merge conflict on rerun)"
+  kubectl -n "$AGENTOS_NAMESPACE" delete externalsecret/agentos-otel-headers --ignore-not-found=true --wait=true
 fi
 
 echo "==> helm install AgentOS (ESO + WI on; migrations OFF -> post-gate Job; OTLP per ENABLE_OTLP)"
 # smoke-values.yaml hardcodes the kind-loaded image (cognic-agentos:smoke); override it with the
 # operator's REGISTRY image so the AKS Deployment pulls a real image (NOT just the migration Job).
-otlp_overrides=()
+# Build the Helm args as an always-non-empty array so the expansion never emits a stray empty arg
+# (the `${arr[@]+...}` empty-array idiom is shell-fragile — safe under bash, but not under zsh).
+helm_args=(upgrade --install "$RELEASE" "$CHART" -n "$AGENTOS_NAMESPACE"
+  -f "$CHART/ci/smoke-values.yaml"
+  -f infra/azure/aks-smoke/aks-smoke-values.yaml
+  --set-string image.repository="$COGNIC_IMAGE_REPOSITORY"
+  --set-string image.tag="$COGNIC_IMAGE_TAG"
+  --set-string image.pullPolicy=Always
+  --set-string serviceAccount.annotations."azure\.workload\.identity/client-id"="$UAMI_CLIENT_ID"
+)
 if [[ "$ENABLE_OTLP" != "1" ]]; then
   # blank the endpoint (export becomes a no-op) + the header key (no OTLP-header env) so the 3rd
   # Secret key is not required and the gate below drops to 2 keys.
-  otlp_overrides+=(--set otel.exporter.endpoint= --set otel.exporter.headersSecretKey=)
+  helm_args+=(--set otel.exporter.endpoint= --set otel.exporter.headersSecretKey=)
 fi
-helm upgrade --install "$RELEASE" "$CHART" -n "$AGENTOS_NAMESPACE" \
-  -f "$CHART/ci/smoke-values.yaml" \
-  -f infra/azure/aks-smoke/aks-smoke-values.yaml \
-  --set-string image.repository="$COGNIC_IMAGE_REPOSITORY" \
-  --set-string image.tag="$COGNIC_IMAGE_TAG" \
-  --set-string image.pullPolicy=Always \
-  --set-string serviceAccount.annotations."azure\.workload\.identity/client-id"="$UAMI_CLIENT_ID" \
-  ${otlp_overrides[@]+"${otlp_overrides[@]}"}
+helm "${helm_args[@]}"
 
 KEY_COUNT=$([[ "$ENABLE_OTLP" == "1" ]] && echo 3 || echo 2)
 echo "==> fail-loud ${KEY_COUNT}-key gate: ESO (+ the Merge aux when OTLP on) must populate $SECRET"
@@ -773,6 +786,9 @@ done
 echo "    all ${KEY_COUNT} keys present"
 
 echo "==> run the smoke-owned (non-hook) migration Job"
+# delete any prior Job first — a completed Job will not re-run, and a Job pod template is immutable
+# (an apply with a changed image/template would be rejected); this keeps the smoke rerunnable.
+kubectl -n "$AGENTOS_NAMESPACE" delete job/agentos-migrate --ignore-not-found=true --wait=true
 sed "s|__AGENTOS_IMAGE__|$IMAGE|" infra/azure/aks-smoke/migrate-job.yaml \
   | kubectl apply -n "$AGENTOS_NAMESPACE" -f -
 kubectl -n "$AGENTOS_NAMESPACE" wait --for=condition=complete job/agentos-migrate --timeout=300s
@@ -841,7 +857,7 @@ A minimal **reference Bicep** (`main.bicep`) provisions only the cloud-managed s
 - **Migration ordering.** The chart migration Job is a Helm `pre-install` hook, but in ESO mode the chart `ExternalSecret` is a normal resource — Helm runs the hook before normal resources, so the hook would reference the Secret before ESO creates it (deadlock). The smoke installs with `migrations.enabled=false` and runs migrations as a smoke-owned **non-hook** Job after the 3-key Secret gate, then rolls the Deployment.
 
 ### The OTLP header — auxiliary `Merge`, fixed 2-key contract preserved
-The chart `ExternalSecret` stays **fixed 2-key**. The OTLP Basic-auth header is carried by a smoke-only **auxiliary `ExternalSecret` (`creationPolicy: Merge`)** targeting the same Secret. Owner/Merge coexistence is **ESO-version-dependent** (server-side-apply field managers); the smoke's **fail-loud 3-key wait gate** catches a strip (timeout → loud failure), and the OTLP leg is the one **degradable** surface: `ENABLE_OTLP=0` is a first-class fallback that skips the auxiliary `ExternalSecret`, blanks the chart's OTLP endpoint/header key, and gates on 2 keys (WI + ESO-from-Key-Vault + Ready is the primary live proof; OTLP composition is already proven by the 8th render).
+The chart `ExternalSecret` stays **fixed 2-key**. The OTLP Basic-auth header is carried by a smoke-only **auxiliary `ExternalSecret` (`creationPolicy: Merge`)** targeting the same Secret. Owner/Merge coexistence is **ESO-version-dependent** (server-side-apply field managers); the smoke's **fail-loud 3-key wait gate** catches a strip (timeout → loud failure), and the OTLP leg is the one **degradable** surface: `ENABLE_OTLP=0` is a first-class fallback that **deletes any prior** auxiliary `ExternalSecret` (so a retry escapes the conflict, not merely skips re-applying it), blanks the chart's OTLP endpoint/header key, and gates on 2 keys (WI + ESO-from-Key-Vault + Ready is the primary live proof; OTLP composition is already proven by the 8th render).
 
 ### Honesty / posture
 - **No AKS CI job** — GitHub→Azure auth + Key Vault write are bank/operator territory, a deliberate security posture, not an omission. The 8th render is the only always-on CI addition; the Bicep + smoke are operator-run (`az`/`bicep`/`shellcheck` absent in the kernel env). In-session regressions: the byte-snapshot, a structural Bicep test, `yaml.safe_load` parse + key checks on the static manifests, and `bash -n` on the smoke script.
@@ -910,7 +926,7 @@ The smoke installs ESO, brings up the in-cluster backends, seeds Key Vault (2 bo
 ### Notes + caveats
 
 - **ESO version (operator-validated).** The Azure `SecretStore` uses `authType: WorkloadIdentity` + `serviceAccountRef`; validate against the ESO version you run.
-- **Owner/Merge coexistence.** The chart's `ExternalSecret` is `creationPolicy: Owner`; the OTLP header rides a smoke-only auxiliary `ExternalSecret` with `creationPolicy: Merge` over the same Secret. Coexistence is ESO-version-dependent — the 3-key gate catches a strip. If your ESO version conflicts, set **`ENABLE_OTLP=0`** (the smoke then skips the header secret + the auxiliary `ExternalSecret`, blanks the chart's OTLP endpoint/header key, and gates on 2 keys); WI + ESO + Ready is the primary proof.
+- **Owner/Merge coexistence.** The chart's `ExternalSecret` is `creationPolicy: Owner`; the OTLP header rides a smoke-only auxiliary `ExternalSecret` with `creationPolicy: Merge` over the same Secret. Coexistence is ESO-version-dependent — the 3-key gate catches a strip. If your ESO version conflicts, set **`ENABLE_OTLP=0`** (the smoke then **deletes any prior** auxiliary `ExternalSecret`, skips the header secret, blanks the chart's OTLP endpoint/header key, and gates on 2 keys); WI + ESO + Ready is the primary proof.
 - **Migration ordering.** Migrations run as a post-gate non-hook Job (the chart's pre-install migration hook would deadlock on the ESO-managed Secret).
 - **Teardown.** The smoke does not delete the cluster (it is rerunnable). Remove everything with `az group delete -n <rg> --yes`.
 ````
