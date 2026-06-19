@@ -871,6 +871,7 @@ In `docs/AS_BUILT_CAPABILITY_MAP.md` line 17 (the Pillar 5 row), make these phra
 - Evidence cell: after the `**14B-Z1b-d-1 (ADR-024)** adds the two generic … the narrow -skip Route is unchanged)` sentence, append: `**14B-Z1b-d-2 (ADR-024)** is the live-cloud capstone — an 8th **all-surfaces** composition byte-snapshot/kubeconform scenario (every Z1b conditional surface in one render; dedicated ESO-mode overlay; `-skip Route` unchanged) + operator-run reference Bicep IaC (`infra/azure/aks-smoke/main.bicep` — AKS OIDC+WI, UAMI, empty Key Vault, federated credential, KV roles) + a self-contained env-gated AKS smoke (`run-aks-smoke.sh` — ESO-from-Key-Vault + workload identity + Ready; namespace-pinned; migrations-off + post-gate non-hook Job; auxiliary `Merge` ExternalSecret for the OTLP header with a fail-loud 3-key gate + a first-class `ENABLE_OTLP=0` 2-key fallback); **no AKS CI job** (a deliberate security posture); CC stays 131 / no kernel change / no migration.`
 - Gap cell: replace the four `… is Z1b-d-2)` deferrals (`live cloud-ingress exercise (… is Z1b-d-2)`, `live ESO exercise (… is Z1b-d-2)`, `the live cloud-identity-federation exercise is Z1b-d-2)`, `only the live in-cluster proof is Z1b-d-2)`) by marking them DONE: change each trailing `… is Z1b-d-2)` to `… DONE in Z1b-d-2 (operator-run AKS smoke))`. Leave `Option C …`, `complete operator runbook set`, and `release/evidence checklist` as remaining gaps.
 - Owner cell: `**Sprint 14B-Z1b-d-2 — AKS/live-cloud forward**` → `**Sprint 14B-Z1b-d-2 — AKS live-cloud capstone DONE**`.
+- Parent Z1b forward bullet (line ~57, the roll-up summary): `Z1b-d-2 (AKS bring-up + env-gated live cloud smoke, forward)` → `Z1b-d-2 (AKS bring-up + env-gated live cloud smoke, DONE) — 14B Deployment Substrate COMPLETE.` (a coupled current-state summary that must not lag the per-slice bullet). The dated d-1 forward bullet's now-satisfied `…exercise is Z1b-d-2` pointer, the ADR-024 d-1-amendment `Z1b-d-2 (separate, forward)` line, and the AGENTS running-narrative clauses are **append-only chronology resolved by the d-2 entries — left as-is**.
 
 - [ ] **Step 3: Update AS_BUILT — the Z1b-d-2 forward bullet (line 62)**
 
@@ -938,7 +939,7 @@ Run:
 grep -n "Sprint 14B-Z1b-d-2 amendment" docs/adrs/ADR-024-deployment-substrate-helm-packaging.md
 grep -n "AKS live-cloud capstone DONE 14B-Z1b-d-2" docs/AS_BUILT_CAPABILITY_MAP.md          # Pillar-5 row
 grep -n "14B-Z1b-d-2 — AKS live-cloud capstone: DONE" docs/AS_BUILT_CAPABILITY_MAP.md         # forward bullet
-grep -n "Sprint 14B-Z1b-d-2 then shipped the live-cloud capstone" AGENTS.md
+grep -n "then shipped the live-cloud capstone" AGENTS.md   # the sentence opens with bold **Sprint 14B-Z1b-d-2**
 grep -n "## AKS live-cloud smoke" docs/operator-runbooks/helm-chart-production-install.md
 ```
 Expected: each grep returns a line (both AS_BUILT surfaces present). Confirm no stale "forward in Z1b-d-2" / "is Z1b-d-2)" deferrals remain on the Pillar-5 row (`grep -n "forward in Z1b-d-2\|exercise is Z1b-d-2\|proof is Z1b-d-2" docs/AS_BUILT_CAPABILITY_MAP.md` → only acceptable matches are the now-"DONE in Z1b-d-2" rewrites).
