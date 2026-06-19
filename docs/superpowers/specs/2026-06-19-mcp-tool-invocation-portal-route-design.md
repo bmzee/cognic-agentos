@@ -100,9 +100,9 @@ Both live under `/api/v1/mcp`, served by a single `build_mcp_routes() -> APIRout
 
 ### 8. Testing (in-session, fully verifiable)
 
-FastAPI `TestClient` + `create_app` with a **registered fixture MCP pack** (so the host has an `MCPServerEntry`), a **mock transport** (the SDK `ClientSession.call_tool` / `list_tools` as `AsyncMock`), and a **real `ApprovalEngine`** for the approval proof:
+FastAPI `TestClient` + `create_app`, with the actor binder + the MCP host stubbed on `app.state` after lifespan startup (the run-route test harness). The route is a thin mapper, so its unit tests use a **stub host** — the route's concern is the exception→status mapping + the approval-id threading. The host's **real `ApprovalEngine` seam is already covered by `tests/unit/protocol/test_mcp_approval_seam.py`**, so the route does NOT reconstruct it — mirroring the run-route precedent (a stub executor for the route unit tests; the real-engine proof is a separate env-gated e2e):
 - `list` → `200` flat catalogue; `call` success → `200` `CallResult` projection.
-- **The approval proof** — a high-risk-tier tool: first `POST …/call` → `202` + `approval_request_id`; `grant()` (real engine, distinct human + `tool.approve.*` scope); re-`POST` with `approval_request_id` → `200`.
+- **The approval threading (the route's half of the seam)** — a stub host raises `MCPToolInvocationRefused("tool_approval_pending", approval_request_id=…)` → the route returns `202` + that id; a re-`POST` with `approval_request_id` → the route threads it (and the actor's tenant + subject, never the body) into `call_tool`. The real engine mint/verify is host-tested.
 - The status mappings, **exercising the map-by-class split** — `404` (unknown server_id); `504` (mock raises `MCPTransportError("mcp_session_open_timeout")` — a timeout reason beyond `mcp_call_tool_timeout`); `502` (mock raises `MCPTransportError("mcp_transport_send_failed")` **and** a non-listed `MCPAuthzError("mcp_as_not_allowlisted")` — proving the pre-dispatch authz class maps deliberately, not a leaked `500`); `503` (`app.state.mcp_host = None`); `403` (scope miss); `409` (approval-state — expired/mismatch/not-found). A drift test pins `_TIMEOUT_REASONS` against the live `MCPTransportReason` + `AuthzReason` enums (a new non-timeout reason must NOT silently become `504`).
 - The `request_id` bounded-invariant (≤64) + the **`tool_name`-raw-preservation** test (a control-character `tool_name` reaches `call_tool` verbatim and is never path-encoded/sanitized by the route).
 
@@ -112,7 +112,7 @@ FastAPI `TestClient` + `create_app` with a **registered fixture MCP pack** (so t
 - **T2** — `portal/api/mcp/dto.py`: `CallToolRequest` / `CallToolResponse` / `ListToolsResponse` + the refusal envelope.
 - **T3** — `portal/api/mcp/routes.py`: `build_mcp_routes()` + the two handlers + `_require_mcp_host` (503) + the actor-binding + the server-minted `request_id` + the full exception→status mapping (`from __future__` omitted; the request-id bounded-invariant assert).
 - **T4** — `app.py`: unconditional mount under `/api/v1/mcp`.
-- **T5** — tests: the list/call success paths, the 202→grant→re-call approval proof, every status mapping, the `request_id` + `tool_name`-raw invariants.
+- **T5** — tests: the list/call success paths, the 202 approval-id threading + re-call `approval_request_id` forwarding (stub host; the real engine seam is host-tested), every status mapping, the `request_id` + `tool_name`-raw invariants.
 - **T6** — docs: ADR-002 amendment (the Fork-D production surface), AS_BUILT (the dormant→live transition for the MCP host), AGENTS (the new route + scopes), MCP-CONFORMANCE if the public invocation surface needs a note.
 - **T7** — closeout gate (ruff/format/mypy + full suite + the critical-controls gate on fresh `--cov-branch`; confirm the route module is off-gate + the RBAC modules keep coverage + CC count unchanged).
 
