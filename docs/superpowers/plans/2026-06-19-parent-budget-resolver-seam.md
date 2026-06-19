@@ -2,9 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Land a production `LocalParentBudgetResolver` (granted-budget snapshot, tenant-scoped, fail-loud typed), replacing the `_NullParentBudgetResolver` sentinel so a `parent_task_id`-bearing scheduler submit computes the inherited child budget instead of raising `NotImplementedError`.
+**Goal:** Land a production `SchedulerTaskParentBudgetResolver` (granted-budget snapshot, tenant-scoped, fail-loud typed), replacing the `_NullParentBudgetResolver` sentinel so a `parent_task_id`-bearing scheduler submit computes the inherited child budget instead of raising `NotImplementedError`.
 
 **Architecture:** A read primitive over the existing `scheduler_tasks.requested_estimated_tokens` snapshot. The storage read owns the data fetch + tenant boundary; the resolver owns the policy interpretation (absence → `parent_not_found`, terminal → `parent_terminal`, else the inherited ceiling). The engine already consults the seam + applies `compute_child_budget`; this slice makes the seam real + wires it.
+
+> **Post-recon revision (2026-06-19).** Recon during T1 found a **dormant Sprint-11b** `subagent/conformers.py::LocalParentBudgetResolver` (a dict-snapshot conformer, NOT `scheduler_tasks`-backed) consumed by the un-wired `subagent/spawn.py::SubAgentSpawner`. So: **(1)** this slice's resolver is named **`SchedulerTaskParentBudgetResolver`** (avoids the name collision); **(2)** the `*, tenant_id` Protocol extension breaks those dormant consumers → the boundary widens from *no `subagent/` touch* to a **minimal `subagent/` compatibility touch** (signature-only, `core-controls-engineer` discipline, NO dispatch-semantics change). See the spec's Revision note. T1 now also sig-updates `conformers.py` + `spawn.py` + subagent test stubs.
 
 **Tech Stack:** Python 3.12, uv, FastAPI-adjacent (no HTTP here), SQLAlchemy async, pytest. Spec: `docs/superpowers/specs/2026-06-19-parent-budget-resolver-seam-design.md`.
 
@@ -17,12 +19,12 @@
 - **Subagents on Opus 4.8** (`model: opus`). The on-gate scheduler modules (`storage.py`, `budget_resolver.py`, `engine.py`) are **critical controls** — task instructions carry the 95% line / 90% branch floor + mandatory negative-path tests + no casual refactors.
 - **Protected untracked docs — NEVER stage:** `docs/reviews/` and `docs/superpowers/specs/2026-05-26-agentos-local-managed-agents-gap-analysis.md`.
 - **Commit footer:** `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`.
-- **Posture invariant (verify at T7):** CC **131 → 132** (`budget_resolver.py` newly on-gate; the other edits land in already-on/off-gate modules); no migration; no `SchedulerRefusalReason`/`scheduler.rego` change; no `subagent/` touch; mypy via the whole-project `mypy src tests` (the MCP-slice lesson — single-file mypy emits false `import-untyped`).
+- **Posture invariant (verify at T7):** CC **131 → 132** (`budget_resolver.py` newly on-gate; the other edits land in already-on/off-gate modules; `subagent/` `conformers.py`/`spawn.py` are already stop-rule, not per-file-coverage-gated); no migration; no `SchedulerRefusalReason`/`scheduler.rego` change; **a MINIMAL signature-only `subagent/` compatibility touch** (stop-rule — `core-controls-engineer` discipline; NO dispatch-semantics change); mypy via the whole-project `mypy src tests` (the MCP-slice lesson — single-file mypy emits false `import-untyped`).
 
 ## File Structure
 
 **Created:**
-- `src/cognic_agentos/core/scheduler/budget_resolver.py` — `LocalParentBudgetResolver` + the narrow `BudgetSnapshotReader` Protocol (on-gate).
+- `src/cognic_agentos/core/scheduler/budget_resolver.py` — `SchedulerTaskParentBudgetResolver` + the narrow `BudgetSnapshotReader` Protocol (on-gate).
 - `tests/unit/core/scheduler/test_budget_resolver_exception.py` — the exception + `Literal` drift + sentinel-still-fail-loud (T1; direct imports, no fixtures).
 - `tests/unit/core/scheduler/test_budget_resolver.py` — resolver unit tests (T3; stub reader, no fixtures).
 
@@ -30,10 +32,12 @@
 - `src/cognic_agentos/core/scheduler/_seams.py` — the `ParentTaskBudgetUnavailable` exception + 2-value `Literal`; `*, tenant_id` on the Protocol + the `_NullParentBudgetResolver` sentinel (off-gate).
 - `src/cognic_agentos/core/scheduler/storage.py` — the `_BudgetSnapshot` + `get_budget_snapshot` pure-read + `_build_budget_snapshot_stmt` (on-gate).
 - `src/cognic_agentos/core/scheduler/engine.py` — the one call-site `tenant_id=` pass (on-gate).
-- `src/cognic_agentos/harness/runtime.py` — construct + inject the real resolver (off-gate).
+- `src/cognic_agentos/subagent/conformers.py` + `src/cognic_agentos/subagent/spawn.py` — **`subagent/` stop-rule, signature-only** compat for the Protocol extension (T1; `core-controls-engineer`; the conformer IGNORES `tenant_id`, `spawn._resolve_budget` threads `request.tenant_id`; NO dispatch-semantics change).
+- `src/cognic_agentos/harness/runtime.py` — construct + inject the real `SchedulerTaskParentBudgetResolver` (off-gate).
 - `tests/unit/core/scheduler/test_engine.py` — the T1 `_StubParentBudgetResolver` sig update + the T4 engine↔resolver integration tests (reuses `engine_db`/`caps`/`class_settings`/`_make_engine`/`_make_submit_input`; these fixtures live in this file, so the tests are added HERE).
 - `tests/unit/core/scheduler/test_storage.py` — the T2 `get_budget_snapshot` tests + a local `_seed_task` (reuses the `store`/`engine` fixtures defined in this file).
 - `tests/integration/scheduler/test_scheduler_composition_e2e.py` — T5 updates `test_composition_subagent_submit_fails_loud` (sentinel → real resolver).
+- `tests/unit/subagent/` — T1 sig-stubs: any local `remaining_budget_for` stub gains `*, tenant_id` (signature only; conformer-based tests need no edit once `conformers.py` is fixed).
 - Docs (T6): `docs/adrs/ADR-005-*.md`, `docs/adrs/ADR-022-*.md`, `docs/AS_BUILT_CAPABILITY_MAP.md`, `AGENTS.md`.
 
 ---
@@ -45,7 +49,9 @@ The Protocol signature change, the sentinel, the engine call-site, and the new e
 **Files:**
 - Modify: `src/cognic_agentos/core/scheduler/_seams.py`
 - Modify: `src/cognic_agentos/core/scheduler/engine.py:426`
-- Test: `tests/unit/core/scheduler/test_budget_resolver_exception.py` (new) + reuse existing seam tests
+- Modify (`subagent/` stop-rule compat — signature only): `src/cognic_agentos/subagent/conformers.py`, `src/cognic_agentos/subagent/spawn.py`
+- Modify: `tests/unit/core/scheduler/test_engine.py:141` (the `_StubParentBudgetResolver` sig) + any subagent-test local sig-stubs
+- Test: `tests/unit/core/scheduler/test_budget_resolver_exception.py` (new)
 
 - [ ] **Step 1: Write the failing test** — `tests/unit/core/scheduler/test_budget_resolver_exception.py`:
 
@@ -146,11 +152,58 @@ Extend the `_NullParentBudgetResolver.remaining_budget_for` signature identicall
         return self.budget
 ```
 
-- [ ] **Step 5: Run → passes; whole-project types + lint.**
-Run: `uv run pytest tests/unit/core/scheduler/test_budget_resolver_exception.py tests/unit/core/scheduler/ -x -q && uv run ruff check src/cognic_agentos/core/scheduler/ && uv run mypy src tests`
-Expected: PASS + clean. (The existing engine `parent_task_id` tests still hit the sentinel → `NotImplementedError`, unchanged. `mypy src tests` confirms the call-site conforms to the new Protocol.)
+- [ ] **Step 4c: Update the dormant `subagent/` consumers (SIGNATURE ONLY — `subagent/` is a stop-rule isolation boundary; `core-controls-engineer` discipline; NO behavior change).** The `*, tenant_id` Protocol extension breaks the Sprint-11b consumers (this is the post-recon scope widening — see the plan header + spec Revision note).
 
-- [ ] **Step 6: Commit (controller, token-gated)** — `feat(scheduler): parent-budget seam tenant_id + ParentTaskBudgetUnavailable (ADR-005)`
+  **`subagent/conformers.py::LocalParentBudgetResolver.remaining_budget_for`** — accept + IGNORE `tenant_id` (keep the dict-snapshot lookup + `KeyError` UNCHANGED):
+
+```python
+    async def remaining_budget_for(self, parent_task_id: uuid.UUID, *, tenant_id: str) -> int:
+        # tenant_id accepted for Protocol-compat; this Sprint-11b dict-snapshot
+        # resolver does NOT tenant-scope (the scheduler-backed resolver does).
+        if parent_task_id not in self._snapshot:
+            raise KeyError(
+                f"no parent-budget snapshot for parent_task_id={parent_task_id}; "
+                "register the parent budget before spawning a child"
+            )
+        return self._snapshot[parent_task_id]
+```
+
+  **`subagent/spawn.py::_resolve_budget`** — add a keyword-only `tenant_id` param + thread it into the `remaining_budget_for` call (the body + the `compute_spawn_budget` flow + the refusals UNCHANGED):
+
+```python
+    async def _resolve_budget(
+        self, *, parent_task_id: str | None, requested: int, tenant_id: str
+    ) -> int:
+        # ... docstring unchanged ...
+        if parent_task_id is None:
+            if requested == 0:
+                raise SubAgentChildQuotaZero(child_pack_quota=requested)
+            return requested
+        parent_remaining = await self._parent_budget.remaining_budget_for(
+            uuid.UUID(parent_task_id), tenant_id=tenant_id
+        )
+        return compute_spawn_budget(
+            parent_remaining_budget=parent_remaining, child_pack_quota=requested
+        )
+```
+
+  At the `_resolve_budget` CALL-site inside `spawn()` (~line 120), pass the existing `tenant_id` local (already `tenant_id = request.tenant_id` at ~line 98 — NO new derivation):
+
+```python
+        budget = await self._resolve_budget(
+            parent_task_id=...,  # unchanged
+            requested=request.requested_estimated_tokens,
+            tenant_id=tenant_id,
+        )
+```
+
+- [ ] **Step 4d: Update subagent-test signature stubs.** Any LOCAL `remaining_budget_for` stub in the subagent suites (`tests/unit/subagent/` — `test_subagent_spawn.py` / `test_subagent_facade.py` / `test_spawn_subagent_seam.py`) gains the `*, tenant_id: str` param (signature only, no behavior). The conformer-based tests (constructing `conformers.LocalParentBudgetResolver`) need NO edit once Step 4c lands. Confirm green: `uv run pytest tests/unit/subagent/ -x -q`.
+
+- [ ] **Step 5: Run → passes; whole-project types + lint.**
+Run: `uv run pytest tests/unit/core/scheduler/ tests/unit/subagent/ -x -q && uv run ruff check src/cognic_agentos/core/scheduler/ src/cognic_agentos/subagent/ && uv run mypy src tests`
+Expected: PASS + clean. The new 3 tests pass; the ENTIRE scheduler AND subagent suites stay green (the existing engine `parent_task_id` tests + the subagent spawn tests now hit the sentinel/conformer/stubs with the tenant kwarg, behavior unchanged). **`mypy src tests` Success** — the engine call-site, the engine-test stub, AND the `subagent/` consumers (`conformers.py` + `spawn.py`) conform to the new Protocol, resolving the 7 `subagent/` mypy errors the recon surfaced.
+
+- [ ] **Step 6: Commit (controller, token-gated)** — `feat(scheduler): parent-budget seam tenant_id + ParentTaskBudgetUnavailable + subagent sig-compat (ADR-005)`
 
 ---
 
@@ -287,7 +340,7 @@ Run: `uv run pytest tests/unit/core/scheduler/test_storage.py -x -q && uv run ru
 
 ---
 
-## Task 3: `LocalParentBudgetResolver` (NEW on-gate module)
+## Task 3: `SchedulerTaskParentBudgetResolver` (NEW on-gate module)
 
 **Files:**
 - Create: `src/cognic_agentos/core/scheduler/budget_resolver.py`
@@ -296,7 +349,7 @@ Run: `uv run pytest tests/unit/core/scheduler/test_storage.py -x -q && uv run ru
 - [ ] **Step 1: Write the failing test** — `tests/unit/core/scheduler/test_budget_resolver.py`:
 
 ```python
-"""LocalParentBudgetResolver — granted-snapshot ceiling primitive (ADR-005)."""
+"""SchedulerTaskParentBudgetResolver — granted-snapshot ceiling primitive (ADR-005)."""
 
 from __future__ import annotations
 
@@ -308,7 +361,7 @@ import pytest
 from cognic_agentos.core.scheduler._seams import ParentTaskBudgetUnavailable
 from cognic_agentos.core.scheduler._types import SchedulerTaskState
 from cognic_agentos.core.scheduler.budget_resolver import (
-    LocalParentBudgetResolver,
+    SchedulerTaskParentBudgetResolver,
     _TERMINAL_STATES,
 )
 from cognic_agentos.core.scheduler.storage import _BudgetSnapshot
@@ -328,18 +381,18 @@ class _StubReader:
 
 async def test_returns_granted_tokens_for_running_parent() -> None:
     reader = _StubReader(_BudgetSnapshot(granted_tokens=750, state="running"))
-    r = LocalParentBudgetResolver(reader)
+    r = SchedulerTaskParentBudgetResolver(reader)
     assert await r.remaining_budget_for(_PID, tenant_id="t") == 750
     assert reader.seen == (_PID, "t")  # tenant threaded to the read
 
 
 async def test_returns_granted_tokens_for_pending_parent() -> None:
     reader = _StubReader(_BudgetSnapshot(granted_tokens=10, state="pending"))
-    assert await LocalParentBudgetResolver(reader).remaining_budget_for(_PID, tenant_id="t") == 10
+    assert await SchedulerTaskParentBudgetResolver(reader).remaining_budget_for(_PID, tenant_id="t") == 10
 
 
 async def test_absent_raises_parent_not_found() -> None:
-    r = LocalParentBudgetResolver(_StubReader(None))
+    r = SchedulerTaskParentBudgetResolver(_StubReader(None))
     with pytest.raises(ParentTaskBudgetUnavailable) as ei:
         await r.remaining_budget_for(_PID, tenant_id="t")
     assert ei.value.reason == "parent_not_found"
@@ -349,7 +402,7 @@ async def test_absent_raises_parent_not_found() -> None:
 async def test_terminal_raises_parent_terminal(state: SchedulerTaskState) -> None:
     reader = _StubReader(_BudgetSnapshot(granted_tokens=500, state=state))
     with pytest.raises(ParentTaskBudgetUnavailable) as ei:
-        await LocalParentBudgetResolver(reader).remaining_budget_for(_PID, tenant_id="t")
+        await SchedulerTaskParentBudgetResolver(reader).remaining_budget_for(_PID, tenant_id="t")
     assert ei.value.reason == "parent_terminal"
 
 
@@ -397,7 +450,7 @@ class BudgetSnapshotReader(Protocol):
     ) -> _BudgetSnapshot | None: ...
 
 
-class LocalParentBudgetResolver:
+class SchedulerTaskParentBudgetResolver:
     """Resolves a parent task's GRANTED token budget (a snapshot, not a live
     balance). Ceiling-inheritance read primitive; sibling/shared-pool depletion
     is the later sub-agent-dispatch slice."""
@@ -418,7 +471,7 @@ class LocalParentBudgetResolver:
 - [ ] **Step 4: Run → passes; on-gate floor; lint + types.**
 Run: `uv run pytest tests/unit/core/scheduler/test_budget_resolver.py -x -q && uv run ruff check src/cognic_agentos/core/scheduler/budget_resolver.py && uv run mypy src tests`
 
-- [ ] **Step 5: Commit** — `feat(scheduler): LocalParentBudgetResolver granted-snapshot primitive (ADR-005)`
+- [ ] **Step 5: Commit** — `feat(scheduler): SchedulerTaskParentBudgetResolver granted-snapshot primitive (ADR-005)`
 
 ---
 
@@ -427,10 +480,10 @@ Run: `uv run pytest tests/unit/core/scheduler/test_budget_resolver.py -x -q && u
 **Files:**
 - Modify: `tests/unit/core/scheduler/test_engine.py` (add the tests HERE — `engine_db`/`caps`/`class_settings`/`_make_engine`/`_make_submit_input` live in this file)
 
-- [ ] **Step 1: Write the tests** — append to `tests/unit/core/scheduler/test_engine.py`. Add imports: `LocalParentBudgetResolver` (from `core.scheduler.budget_resolver`), `ParentTaskBudgetUnavailable` (from `core.scheduler._seams`), and `from sqlalchemy import func` if not already imported (`select` + `SchedulerStorage` already are). `_make_submit_input` already has `parent_task_id` + `requested_tokens` params; its default `tenant_id="tenant-a"` is what the resolver receives, so seed the parent in the SAME tenant.
+- [ ] **Step 1: Write the tests** — append to `tests/unit/core/scheduler/test_engine.py`. Add imports: `SchedulerTaskParentBudgetResolver` (from `core.scheduler.budget_resolver`), `ParentTaskBudgetUnavailable` (from `core.scheduler._seams`), and `from sqlalchemy import func` if not already imported (`select` + `SchedulerStorage` already are). `_make_submit_input` already has `parent_task_id` + `requested_tokens` params; its default `tenant_id="tenant-a"` is what the resolver receives, so seed the parent in the SAME tenant.
 
 ```python
-# --- T4: engine ↔ LocalParentBudgetResolver integration -------------------
+# --- T4: engine ↔ SchedulerTaskParentBudgetResolver integration -------------------
 
 
 class _RecordingQuotaInterrogator:
@@ -496,8 +549,8 @@ async def _count_admission_refused(eng_db: AsyncEngine) -> int:
         )
 
 
-def _resolver(eng_db: AsyncEngine) -> LocalParentBudgetResolver:
-    return LocalParentBudgetResolver(reader=SchedulerStorage(eng_db))
+def _resolver(eng_db: AsyncEngine) -> SchedulerTaskParentBudgetResolver:
+    return SchedulerTaskParentBudgetResolver(reader=SchedulerStorage(eng_db))
 
 
 async def test_child_budget_narrowed_to_parent_grant_when_parent_smaller(
@@ -598,7 +651,7 @@ Run: `uv run ruff check tests/unit/core/scheduler/ && uv run mypy src tests`
 - [ ] **Step 1: Wire the real resolver.** Add the import (top of `runtime.py`, with the other scheduler imports):
 
 ```python
-from cognic_agentos.core.scheduler.budget_resolver import LocalParentBudgetResolver
+from cognic_agentos.core.scheduler.budget_resolver import SchedulerTaskParentBudgetResolver
 ```
 
 Extract a single `SchedulerStorage` instance (reused for `storage=` + the resolver) and inject the resolver — replacing the OMITTED comment at line 313. The block becomes:
@@ -628,7 +681,7 @@ Extract a single `SchedulerStorage` instance (reused for `storage=` + the resolv
             kill_switch_interrogator=SchedulerKillSwitchConformer(engine=kill_switch_engine),
             pack_state_interrogator=PackStoreStateInterrogator(store=PackRecordStore(engine)),
             approval_engine=approval_engine,
-            parent_budget_resolver=LocalParentBudgetResolver(reader=scheduler_storage),
+            parent_budget_resolver=SchedulerTaskParentBudgetResolver(reader=scheduler_storage),
         )
 ```
 
@@ -641,21 +694,21 @@ Extract a single `SchedulerStorage` instance (reused for `storage=` + the resolv
         assert ei.value.reason == "parent_not_found"
 ```
 
-Update the test docstring (drop the sentinel/Fork-E/"14A wires" prose → the real `LocalParentBudgetResolver` resolves a random parent id to `parent_not_found`). This IS the composition behavioral proof: `build_runtime` now wires the real resolver, so a sub-agent submit with a random `parent_task_id` reads as absent → `ParentTaskBudgetUnavailable("parent_not_found")` (no longer `NotImplementedError`). Consider renaming the test (e.g. `…_resolves_unknown_parent_not_found`) — optional; if renamed, grep for any xref.
+Update the test docstring (drop the sentinel/Fork-E/"14A wires" prose → the real `SchedulerTaskParentBudgetResolver` resolves a random parent id to `parent_not_found`). This IS the composition behavioral proof: `build_runtime` now wires the real resolver, so a sub-agent submit with a random `parent_task_id` reads as absent → `ParentTaskBudgetUnavailable("parent_not_found")` (no longer `NotImplementedError`). Consider renaming the test (e.g. `…_resolves_unknown_parent_not_found`) — optional; if renamed, grep for any xref.
 
 Run: `uv run pytest tests/integration/scheduler/test_scheduler_composition_e2e.py -x -q && uv run ruff check src/cognic_agentos/harness/runtime.py && uv run mypy src tests`
 
-- [ ] **Step 3: Commit** — `feat(scheduler): wire LocalParentBudgetResolver at the composition root (ADR-005)`
+- [ ] **Step 3: Commit** — `feat(scheduler): wire SchedulerTaskParentBudgetResolver at the composition root (ADR-005)`
 
 ---
 
 ## Task 6: Docs
 
 **Files:**
-- Modify: `docs/adrs/ADR-005-*.md` (sub-agent primitive) — amendment: the parent-budget resolver seam landed (granted-snapshot, fail-loud typed; the dispatch caller + sibling ledger remain the next slice).
+- Modify: `docs/adrs/ADR-005-*.md` (sub-agent primitive) — amendment: the parent-budget resolver seam landed (the scheduler-backed `SchedulerTaskParentBudgetResolver`, granted-snapshot, fail-loud typed). **State the post-recon reality plainly**: the Sprint-11b dict-snapshot `subagent/conformers.py::LocalParentBudgetResolver` + the un-wired `SubAgentSpawner` got a signature-only `*, tenant_id` compat touch (NO dispatch change, stop-rule scrutiny); the live dispatch caller + the two-budget-design reconciliation (`compute_child_budget` vs `compute_spawn_budget`; whether spawn should consult the scheduler-backed resolver) + the sibling ledger remain the next slice.
 - Modify: `docs/adrs/ADR-022-*.md` (scheduler) — the Fork-E "`parent_budget_resolver` OMITTED → sentinel" note resolves; the real resolver + the `get_budget_snapshot` read land; CC 131→132.
 - Modify: `docs/AS_BUILT_CAPABILITY_MAP.md` — the scheduler/parent-budget current-state (the sentinel → live resolver); a milestone entry; CC 131→132. Sweep BOTH the scheduler pillar row and any "`_NullParentBudgetResolver` / sub-agent submit fails loud / Fork E / Sprint 11" current-state phrasing → updated; leave dated chronology.
-- Modify: `AGENTS.md` — add `core/scheduler/budget_resolver.py` to the critical-controls list (the new on-gate module + its 2-value exception + the granted-snapshot contract); note `get_budget_snapshot` on `storage.py`; CC count 131→132. Update the 13.7 composition-root note's "`parent_budget_resolver` is OMITTED → `_NullParentBudgetResolver`… until Sprint 14A wires the real `LocalParentBudgetResolver`" to reflect that this slice wired it (resolver seam; sub-agent dispatch caller still forward).
+- Modify: `AGENTS.md` — add `core/scheduler/budget_resolver.py` to the critical-controls list (the new on-gate module + its 2-value exception + the granted-snapshot contract); note `get_budget_snapshot` on `storage.py`; CC count 131→132. Update the 13.7 composition-root note's "`parent_budget_resolver` is OMITTED → `_NullParentBudgetResolver`… until Sprint 14A wires the real `SchedulerTaskParentBudgetResolver`" to reflect that this slice wired it (resolver seam; sub-agent dispatch caller still forward).
 
 - [ ] **Step 1-4:** write each amendment; coupled-surface sweep (update current-state summaries; leave dated chronology); grep each anchor; confirm no stale "fails loud until Sprint 11/14A wires it" current-state phrasing remains.
 - [ ] **Step 5: Commit** — `docs(scheduler): parent budget resolver seam — Fork-E resolution (ADR-005/ADR-022)`
@@ -667,7 +720,7 @@ Run: `uv run pytest tests/integration/scheduler/test_scheduler_composition_e2e.p
 - [ ] **Step 1** — `uv run ruff check . && uv run ruff format --check . && uv run mypy src tests`
 - [ ] **Step 2** — full suite on fresh coverage: `uv run pytest -q --cov=cognic_agentos --cov-branch --cov-report=json:coverage.json`
 - [ ] **Step 3** — `uv run python tools/check_critical_coverage.py` → **132/132** (the new `budget_resolver.py` + the edited `storage.py`/`engine.py` all ≥ floor). Confirm `budget_resolver.py` is registered in the gate list (`tools/check_critical_coverage.py`) — **add it** if the gate uses an explicit module list.
-- [ ] **Step 4** — `git diff --stat main...HEAD`: only the scheduler seam/storage/resolver/engine + harness + tests + docs; exactly **one** new on-gate module (`budget_resolver.py`); `git status --porcelain` shows only the 2 protected untracked docs.
+- [ ] **Step 4** — `git diff --stat main...HEAD`: the scheduler seam/storage/resolver/engine + harness + the **minimal `subagent/` sig-compat** (`conformers.py` + `spawn.py` + subagent test stubs) + tests + docs; exactly **one** new on-gate module (`budget_resolver.py`); the `subagent/` diff is **signature-only** — eyeball it to confirm NO new dispatch logic; `git status --porcelain` shows only the 2 protected untracked docs.
 - [ ] **Step 5** — finish-the-branch (push + PR, controller-owned + token-gated; `--squash --delete-branch`).
 
 > NOTE on the gate registration: if `tools/check_critical_coverage.py` enumerates on-gate modules explicitly, T3 (or T7 Step 3) must add `core/scheduler/budget_resolver.py` to that list — that registration IS the CC 131→132 promotion. Verify the count asserts 132.
@@ -676,7 +729,7 @@ Run: `uv run pytest tests/integration/scheduler/test_scheduler_composition_e2e.p
 
 ## Self-Review (controller, after writing — fix inline)
 
-- **Spec coverage:** §3 contract → T1 (exception + sig) + T3 (resolver semantics); the tenant-scoped source → T2; `compute_child_budget` ceiling → T4 (the "exhaustion/narrowing" proof); fail-loud propagation + zero refusal rows → T4; composition → T5; CC 131→132 → T3/T7; docs/posture → T6/T7; out-of-scope boundary → unchanged (no subagent/, no ledger, no Rego).
-- **Type consistency:** `ParentTaskBudgetUnavailable` + `ParentTaskBudgetUnavailableReason` (T1) used by T3 + tests; `_BudgetSnapshot` + `get_budget_snapshot` + `_build_budget_snapshot_stmt` (T2) used by T3 (reader) + tests; `BudgetSnapshotReader` + `_TERMINAL_STATES` + `LocalParentBudgetResolver` (T3) used by T4 + T5; the call-site `tenant_id=` (T1) matches the Protocol.
+- **Spec coverage:** §3 contract → T1 (exception + sig) + T3 (resolver semantics); the tenant-scoped source → T2; `compute_child_budget` ceiling → T4 (the "exhaustion/narrowing" proof); fail-loud propagation + zero refusal rows → T4; composition → T5; CC 131→132 → T3/T7; docs/posture → T6/T7; out-of-scope boundary → revised correctly (minimal `subagent/` signature-compat INCLUDED per the post-recon revision; no live dispatch, no `SubAgentSpawner` wiring, no ledger, no Rego).
+- **Type consistency:** `ParentTaskBudgetUnavailable` + `ParentTaskBudgetUnavailableReason` (T1) used by T3 + tests; `_BudgetSnapshot` + `get_budget_snapshot` + `_build_budget_snapshot_stmt` (T2) used by T3 (reader) + tests; `BudgetSnapshotReader` + `_TERMINAL_STATES` + `SchedulerTaskParentBudgetResolver` (T3) used by T4 + T5; the call-site `tenant_id=` (T1) matches the Protocol.
 - **Placeholders:** none. T2/T4 fixtures are pinned to the REAL existing helpers — `store`/`engine`/`SubmitInput`/`TaskActor` in `test_storage.py`; `engine_db`/`caps`/`class_settings`/`_make_engine`/`_make_submit_input` (which already has `parent_task_id` + `requested_tokens`) + the existing `_StubParentBudgetResolver` (T1 sig-updated) in `test_engine.py`; `_submit_input`/`_build_composed_runtime` in the composition e2e. The new in-file helpers (`_seed_task`/`_seed_parent`/`_RecordingQuotaInterrogator`/`_count_admission_refused`/`_resolver`) carry complete code. The remaining `> NOTE` blocks are clarifying invariants (consult-precedes-chain-write; `engine_db` chain-head provisioning), not deferrals.
 - **Critical-controls:** the on-gate tasks (T1 engine, T2 storage, T3 resolver) carry the 95/90 floor + negative-path tests; T7 verifies 132/132 on fresh coverage + the gate-list registration.
