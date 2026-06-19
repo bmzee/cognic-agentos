@@ -207,6 +207,52 @@ manifest→`MCPServerEntry` mapper + one read-only registry accessor.
    stays 129). OUT of 13.8: any MCP-invocation/list route, the 14A managed-runtime
    caller, startup discovery/trust registration.
 
+## MCP tool-invocation portal route amendment (2026-06-19) — the Fork-D production surface (dormant → LIVE)
+
+Sprint 13.8 production-constructed `app.state.mcp_host` but left it **dormant** ("no
+portal route consumes `app.state.mcp_host` today"). This amendment lands that route —
+the FIRST production consumer of the host — closing the Fork-D gap for the
+MCP-invocation lane (the `portal/api/runs/` equivalent for MCP).
+
+1. **The surface.** A new off-gate module `portal/api/mcp/` mirrors the
+   `portal/api/runs/` caller pattern. Two routes, mounted UNCONDITIONALLY under
+   `/api/v1/mcp` (a request-time dep returns `503 mcp_host_unavailable` until the
+   SDK-gated lifespan populates the host):
+   - `GET /api/v1/mcp/servers/{server_id}/tools` (scope `mcp.tool.list`) →
+     `MCPHost.list_tools`; `200 {tools: [...]}`.
+   - `POST /api/v1/mcp/servers/{server_id}/tools/call` (scope `mcp.tool.invoke`) →
+     `MCPHost.call_tool`; `200` the `CallResult` projection. `tool_name` rides the
+     BODY (raw caller-supplied identity — the host owns audit-canonical raw tool
+     identity; NEVER copied to a URL path segment); `arguments` + an optional
+     `approval_request_id` complete the body. tenant + originator come ONLY from the
+     bound `Actor`.
+2. **The approval seam goes LIVE.** The 13.5b2 MCP approval seam — WIRED but DORMANT
+   since 13.8 (`approval_engine=runtime.approval_engine`) — is now exercised by
+   `call_tool`. A first invocation of an approval-gated tool returns `202` carrying a
+   minted `approval_request_id`; the operator grants via the EXISTING
+   `portal/api/approvals/` surface (`ToolApprovalRBACScope`, e.g.
+   `tool.approve.customer_data`); a re-`POST` with that `approval_request_id` clears
+   the gate → `200`.
+3. **Status map (map-by-class — no 500 leaks).** `MCPToolInvocationRefused.reason` →
+   `202` (`tool_approval_pending`, body adds `approval_request_id`) / `403`
+   (`tool_approval_denied`, `…_engine_not_available`) / `409` (`…_expired`,
+   `…_binding_mismatch`, `…_request_not_found`). `LookupError` (unknown `server_id`)
+   → `404`. `MCPTransportError`/`MCPAuthzError` → `504` if the reason is in the closed
+   `_TIMEOUT_REASONS` set (`mcp_call_tool_timeout` / `mcp_session_open_timeout` /
+   `mcp_oauth_request_timeout`), else a DELIBERATE `502` (drift-pinned ⊆ the live
+   `MCPTransportReason`+`AuthzReason` enums). Any other exception → `502`
+   `mcp_orchestrator_error` (the generic catch-all — `call_tool` re-raises its
+   generic-Exception path after auditing it). No path leaks a `500`.
+4. **CC / scope.** CC stays **131** — the route module + DTOs are off-gate (mirroring
+   `portal/api/runs/`; trust is upstream in the on-gate host + admission). The three
+   `portal/rbac/` edits (`scopes.py` `MCPRBACScope` + the `actor.py` / `enforcement.py`
+   union widenings) are additive to already-on-gate modules. `protocol/mcp_host.py` is
+   CONSUMED, not modified. No migration. Tests use a stub host (route mapping +
+   approval-id threading); the host's real `ApprovalEngine` seam stays covered by
+   `tests/unit/protocol/test_mcp_approval_seam.py`. Spec + plan:
+   `docs/superpowers/specs/2026-06-19-mcp-tool-invocation-portal-route-design.md` +
+   `docs/superpowers/plans/2026-06-19-mcp-tool-invocation-portal-route.md`.
+
 ## References
 - [Model Context Protocol — 2026 roadmap](https://blog.modelcontextprotocol.io/posts/2026-mcp-roadmap/)
 - [MCP — Wikipedia](https://en.wikipedia.org/wiki/Model_Context_Protocol)

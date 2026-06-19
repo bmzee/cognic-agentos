@@ -39,6 +39,7 @@ from cognic_agentos.portal.rbac.scopes import (  # noqa: F401  (ScopeSet kept fo
     ConfigOverlayRBACScope,
     EmergencyRBACScope,
     EvalRBACScope,
+    MCPRBACScope,
     MemoryRBACScope,
     ModelRBACScope,
     PackRBACScope,
@@ -129,6 +130,11 @@ class Actor(pydantic.BaseModel):
     #: run-capable actor carries ``run.submit`` for ``POST /api/v1/runs``.
     #: Additive — pre-14A-A2a actors still construct cleanly. Pinned by
     #: ``tests/unit/portal/rbac/test_run_scopes.py``.
+    #:
+    #: MCP slice (ADR-002, "Fork D") — further widened with ``MCPRBACScope`` so a
+    #: tool-invocation-capable actor carries ``mcp.tool.{list,invoke}`` for the
+    #: ``/api/v1/mcp`` routes. Additive — pre-MCP-slice actors still construct
+    #: cleanly. Pinned by ``tests/unit/portal/rbac/test_mcp_scopes.py``.
     scopes: frozenset[
         PackRBACScope
         | UIRBACScope
@@ -141,6 +147,7 @@ class Actor(pydantic.BaseModel):
         | ConfigOverlayRBACScope
         | ToolApprovalRBACScope
         | RunRBACScope
+        | MCPRBACScope
     ]
     actor_type: ActorType
 

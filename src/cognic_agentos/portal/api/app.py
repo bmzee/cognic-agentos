@@ -1337,6 +1337,18 @@ def create_app(
         tags=["runs"],
     )
 
+    # MCP tool-invocation surface (ADR-002 "Fork D"). Unconditional mount: the
+    # host is populated by the lifespan only when is_mcp_available(); the route's
+    # request-time dep returns 503 mcp_host_unavailable until then. Lazy import
+    # (the module is SDK-free, so this is safe in the kernel image).
+    from cognic_agentos.portal.api.mcp.routes import build_mcp_routes
+
+    app.include_router(
+        build_mcp_routes(),
+        prefix="/api/v1/mcp",
+        tags=["mcp"],
+    )
+
     from cognic_agentos.portal.api.evaluation.bulk_routes import build_eval_bulk_routes
 
     app.include_router(
