@@ -43,6 +43,7 @@ from cognic_agentos.portal.rbac.actor import Actor
 from cognic_agentos.protocol.ui_events import (
     SubagentCompleted,
     SubagentFailed,
+    SubagentPending,
     SubagentRecursionCapped,
     SubagentSpawned,
     UIEventEmitter,
@@ -166,6 +167,36 @@ def test_subagent_return_without_outcome_defaults_failed() -> None:
     None) — default to failed (the conservative UI signal)."""
     evt = _project_typed_decision_history(_snap(decision_type="subagent.return", payload={}))
     assert isinstance(evt, SubagentFailed)
+
+
+def test_subagent_return_pending_projects_to_pending() -> None:
+    """subagent.return with outcome=pending_approval projects to the new
+    SubagentPending arm (NOT the conservative SubagentFailed default)."""
+    evt = _project_typed_decision_history(
+        _snap(
+            decision_type="subagent.return",
+            payload={"outcome": "pending_approval", "approval_request_id": "a", "run_id": "r"},
+        )
+    )
+    assert isinstance(evt, SubagentPending)
+    assert evt.family == "subagent"
+    assert evt.type == "pending"  # NOT "failed"
+    assert evt.data["approval_request_id"] == "a"
+
+
+def test_subagent_return_completed_and_unknown_unchanged() -> None:
+    """The pre-existing completed + unknown→failed projections are
+    byte-for-byte unchanged by the additive pending arm."""
+    completed = _project_typed_decision_history(
+        _snap(decision_type="subagent.return", payload={"outcome": "completed"})
+    )
+    assert isinstance(completed, SubagentCompleted)
+    assert completed.type == "completed"
+    unknown = _project_typed_decision_history(
+        _snap(decision_type="subagent.return", payload={"outcome": "weird"})
+    )
+    assert isinstance(unknown, SubagentFailed)
+    assert unknown.type == "failed"
 
 
 def test_escalation_depth_cap_projects_recursion_capped() -> None:

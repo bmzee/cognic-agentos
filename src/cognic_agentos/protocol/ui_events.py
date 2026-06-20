@@ -556,6 +556,11 @@ class SubagentFailed(_BaseEvent):
     type: Literal["failed"] = "failed"
 
 
+class SubagentPending(_BaseEvent):
+    family: Literal["subagent"] = "subagent"
+    type: Literal["pending"] = "pending"
+
+
 class SubagentRecursionCapped(_BaseEvent):
     family: Literal["subagent"] = "subagent"
     type: Literal["recursion_capped"] = "recursion_capped"
@@ -781,7 +786,11 @@ _ToolCallEvent = Annotated[
 ]
 
 _SubagentEvent = Annotated[
-    SubagentSpawned | SubagentCompleted | SubagentFailed | SubagentRecursionCapped,
+    SubagentSpawned
+    | SubagentCompleted
+    | SubagentFailed
+    | SubagentPending
+    | SubagentRecursionCapped,
     pydantic.Field(discriminator="type"),
 ]
 
@@ -968,7 +977,7 @@ def _project_subagent_spawned(snapshot: AppendedDecisionSnapshot) -> SubagentSpa
 
 def _project_subagent_return(
     snapshot: AppendedDecisionSnapshot,
-) -> SubagentCompleted | SubagentFailed:
+) -> SubagentCompleted | SubagentFailed | SubagentPending:
     """Sprint 11b T9 — subagent.return → completed/failed by payload['outcome']
     (`{"completed","failed"}` per subagent/audit.py). Anything that is not
     `"completed"` (incl. a missing/unknown outcome) projects to
@@ -984,6 +993,21 @@ def _project_subagent_return(
                 ordinal=0,
                 family=family,
                 type_="completed",
+            ),
+            ts=snapshot.created_at,
+            tenant=snapshot.tenant_id,
+            trace_id=snapshot.trace_id,
+            audit_chain_hash=_format_chain_hash(snapshot.new_hash),
+            data=snapshot.payload,
+        )
+    if snapshot.payload.get("outcome") == "pending_approval":
+        return SubagentPending(
+            event_id=_chain_derived_event_id(
+                chain_id="decision_history",
+                sequence=snapshot.sequence,
+                ordinal=0,
+                family=family,
+                type_="pending",
             ),
             ts=snapshot.created_at,
             tenant=snapshot.tenant_id,
@@ -1373,6 +1397,7 @@ _TYPED_PROJECTION_CLASSES: Final[frozenset[type]] = frozenset(
         SubagentSpawned,
         SubagentCompleted,
         SubagentFailed,
+        SubagentPending,
         SubagentRecursionCapped,
         # Sprint 11.5c T6 — memory.* wired classes.
         # MemoryRecallStarted is intentionally EXCLUDED — it is a schema-only
@@ -2059,6 +2084,7 @@ __all__ = (
     "PolicyRBACDenied",
     "SubagentCompleted",
     "SubagentFailed",
+    "SubagentPending",
     "SubagentRecursionCapped",
     # subagent
     "SubagentSpawned",

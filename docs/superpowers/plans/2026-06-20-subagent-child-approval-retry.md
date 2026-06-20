@@ -380,7 +380,7 @@ class SubagentPending(_BaseEvent):
     family: Literal["subagent"] = "subagent"
     type: Literal["pending"] = "pending"
 ```
-Add it to the `_SubagentEvent` union (`:783`) as an additive arm. Update `_project_subagent_return`'s signature to `-> SubagentCompleted | SubagentFailed | SubagentPending` and insert the arm BEFORE the conservative `SubagentFailed` fallback:
+Add it to the `_SubagentEvent` union (`:783`) as an additive arm. **Also register `SubagentPending` in BOTH `_TYPED_PROJECTION_CLASSES` and `__all__`** — the codebase's inline drift-invariant (`ui_events.py:1198-1200`) requires a new typed-projected class in `_TYPED_PROJECTION_CLASSES` (so the ContextVar capture fires); `SubagentFailed`/`SubagentCompleted` are in both lists, so mirror them. (These are internal-runtime + public-API registrations — they do NOT change the wire/JSON schema; the `.well-known` snapshot diff stays purely the 3 additive `subagent.pending` entries.) Update `_project_subagent_return`'s signature to `-> SubagentCompleted | SubagentFailed | SubagentPending` and insert the arm BEFORE the conservative `SubagentFailed` fallback:
 ```python
     if snapshot.payload.get("outcome") == "completed":
         return SubagentCompleted( ... )  # unchanged
