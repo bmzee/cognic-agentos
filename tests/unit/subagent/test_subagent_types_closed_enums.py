@@ -9,6 +9,7 @@ from cognic_agentos.subagent._types import (
     SubAgentAuditEvent,
     SubAgentRefusalReason,
 )
+from cognic_agentos.subagent.audit import ReturnOutcome
 
 
 class TestSubAgentRefusalReasonVocabulary:
@@ -37,3 +38,8 @@ class TestSubAgentAuditEventVocabulary:
 class TestSubAgentIsoControls:
     def test_a_6_2_5(self):
         assert SUBAGENT_ISO_CONTROLS == ("A.6.2.5",)
+
+
+class TestReturnOutcomeVocabulary:
+    def test_exactly_three_values_incl_pending_approval(self):
+        assert set(get_args(ReturnOutcome)) == {"completed", "failed", "pending_approval"}

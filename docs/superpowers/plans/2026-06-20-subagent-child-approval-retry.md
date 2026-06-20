@@ -237,10 +237,10 @@ The summary rename `"pending_approval_child_unsupported"` → `"pending_approval
 
 ## Task 3: audit honesty — `ReturnOutcome += "pending_approval"` + spawn.py skip-budget
 
-**Files:** Modify `src/cognic_agentos/subagent/audit.py` + `src/cognic_agentos/subagent/spawn.py`; Test `tests/unit/subagent/test_subagent_audit.py` + `tests/unit/subagent/test_subagent_spawn.py` (extend).
+**Files:** Modify `src/cognic_agentos/subagent/audit.py` + `src/cognic_agentos/subagent/spawn.py`; Test `tests/unit/subagent/test_subagent_types_closed_enums.py` (the `ReturnOutcome` drift — `test_subagent_audit.py` does NOT exist; the closed-enum test is the sanctioned drift surface) + `tests/unit/subagent/test_subagent_spawn.py` (the spawn-honesty tests; extend).
 
 - [ ] **Step 1: Write the failing tests.**
-Audit-vocabulary drift (extend `test_subagent_audit.py` or the closed-enum test):
+Audit-vocabulary drift (extend the closed-enum drift surface `test_subagent_types_closed_enums.py`):
 ```python
 import typing
 
@@ -252,16 +252,17 @@ def test_return_outcome_has_pending_approval() -> None:
 ```
 spawn.py honesty (extend `test_subagent_spawn.py`, over a real in-memory `DecisionHistoryStore` like the existing spawn tests): a pending child (the `_FakeChildRunner` returns `ChildResult(ok=False, terminal_state="pending_approval", run_id="r", approval_request_id="a", …)`) →
 ```python
-    # exactly one subagent.return with outcome="pending_approval" carrying the ids; NO subagent.budget
-    rows = await _load_chain_rows(store)  # existing helper
-    returns = [r for r in rows if r.decision_type == "subagent.return"]
+    # exactly one subagent.return with outcome="pending_approval" carrying the ids; NO subagent.budget.
+    # Use the REAL fixture + column — `decision_store_rows` + `r.event_type` (the pattern in
+    # test_subagent_audit_emit.py); `_load_chain_rows`/`r.decision_type` do NOT exist.
+    returns = [r for r in decision_store_rows if r.event_type == "subagent.return"]
     assert len(returns) == 1
     assert returns[0].payload["outcome"] == "pending_approval"
     assert returns[0].payload["approval_request_id"] == "a"
     assert returns[0].payload["run_id"] == "r"
-    assert not [r for r in rows if r.decision_type == "subagent.budget"]
+    assert not [r for r in decision_store_rows if r.event_type == "subagent.budget"]
 ```
-And a regression: a completed child still emits `subagent.return(completed)` + `subagent.budget` (byte-shape unchanged — no `approval_request_id`/`run_id` keys in a non-pending return payload).
+And a regression: a completed child still emits `subagent.return(completed)` + `subagent.budget`; the completed return payload keyset stays `{parent_record_id, result_summary, outcome, actor_id}` (`DecisionHistoryStore.append` merges `actor_id` into the persisted payload) with **no** `approval_request_id`/`run_id` keys.
 
 - [ ] **Step 2: Run — verify fail.**
 

@@ -134,3 +134,77 @@ async def test_spawn_depth_exceeded_escalates_before_runner(spawn_harness: Any) 
             parent_trace_id="t",
         )
     assert h.child_runner.seen_context is None
+
+
+@pytest.mark.asyncio
+async def test_spawn_pending_child_emits_pending_return_and_skips_budget(
+    engine: Any, decision_store: Any, decision_store_rows: Any
+) -> None:
+    # A pending child (cold-create pended before the workload ran) -> exactly one
+    # subagent.return(outcome="pending_approval") carrying the ids; NO subagent.budget
+    # (zero work ran, so emitting a budget row would be dishonest).
+    runner = _FakeChildRunner(
+        ChildResult(
+            summary="awaiting approval",
+            tokens_used=0,
+            wall_time_used_s=0.0,
+            ok=False,
+            terminal_state="pending_approval",
+            run_id="r",
+            approval_request_id="a",
+        )
+    )
+    actor = Actor(
+        subject="orchestrator", tenant_id="bank-a", scopes=frozenset(), actor_type="service"
+    )
+    spawner = SubAgentSpawner(
+        audit=SubAgentAuditEmitter(decision_store),
+        child_runner=runner,
+        escalation=EscalationStore(engine),
+        max_recursion_depth=3,
+    )
+    await spawner.spawn(
+        request=_make_request(),
+        managed_run=_MANAGED_RUN,
+        actor=actor,
+        parent_trace_id="trace-pending",
+    )
+    rows = await decision_store_rows()
+    returns = [r for r in rows if r.event_type == "subagent.return"]
+    assert len(returns) == 1
+    assert returns[0].payload["outcome"] == "pending_approval"
+    assert returns[0].payload["approval_request_id"] == "a"
+    assert returns[0].payload["run_id"] == "r"
+    assert not [r for r in rows if r.event_type == "subagent.budget"]
+
+
+@pytest.mark.asyncio
+async def test_spawn_completed_child_return_byte_shape_unchanged(
+    spawn_harness: Any, decision_store_rows: Any
+) -> None:
+    # Regression: a completed child still emits subagent.return(completed) +
+    # subagent.budget, and the non-pending return payload byte-shape is unchanged
+    # (no approval_request_id / run_id keys leak into a completed return row).
+    h = spawn_harness
+    await h.spawner.spawn(
+        request=_make_request(),
+        managed_run=_MANAGED_RUN,
+        actor=h.actor,
+        parent_trace_id="trace-completed",
+    )
+    rows = await decision_store_rows()
+    returns = [r for r in rows if r.event_type == "subagent.return"]
+    budgets = [r for r in rows if r.event_type == "subagent.budget"]
+    assert len(returns) == 1
+    assert len(budgets) == 1
+    assert returns[0].payload["outcome"] == "completed"
+    # byte-shape unchanged: no approval_request_id / run_id keys on a non-pending
+    # return (actor_id is merged into the persisted payload by DecisionHistoryStore).
+    assert "approval_request_id" not in returns[0].payload
+    assert "run_id" not in returns[0].payload
+    assert set(returns[0].payload.keys()) == {
+        "parent_record_id",
+        "result_summary",
+        "outcome",
+        "actor_id",
+    }
