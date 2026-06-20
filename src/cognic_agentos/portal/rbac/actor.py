@@ -46,6 +46,7 @@ from cognic_agentos.portal.rbac.scopes import (  # noqa: F401  (ScopeSet kept fo
     QuotaRBACScope,
     RunRBACScope,
     ScopeSet,
+    SubAgentRBACScope,
     ToolApprovalRBACScope,
     UIRBACScope,
 )
@@ -135,6 +136,9 @@ class Actor(pydantic.BaseModel):
     #: tool-invocation-capable actor carries ``mcp.tool.{list,invoke}`` for the
     #: ``/api/v1/mcp`` routes. Additive — pre-MCP-slice actors still construct
     #: cleanly. Pinned by ``tests/unit/portal/rbac/test_mcp_scopes.py``.
+    #:
+    #: 2026-06-20 (ADR-005, Fork B) — further widened with ``SubAgentRBACScope``
+    #: so a single Actor can carry a sub-agent-spawn grant.
     scopes: frozenset[
         PackRBACScope
         | UIRBACScope
@@ -148,6 +152,7 @@ class Actor(pydantic.BaseModel):
         | ToolApprovalRBACScope
         | RunRBACScope
         | MCPRBACScope
+        | SubAgentRBACScope
     ]
     actor_type: ActorType
 

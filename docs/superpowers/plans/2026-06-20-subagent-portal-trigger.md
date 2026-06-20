@@ -61,7 +61,8 @@ def test_subagent_scope_has_exactly_one_value() -> None:
 
 
 def test_subagent_scopes_frozenset_matches_literal() -> None:
-    assert SUBAGENT_SCOPES == frozenset(typing.get_args(SubAgentRBACScope))
+    # non-Yoda operand order (ruff SIM300); mirrors test_scopes.py:187.
+    assert frozenset(typing.get_args(SubAgentRBACScope)) == SUBAGENT_SCOPES
     assert isinstance(SUBAGENT_SCOPES, frozenset)
 
 

@@ -364,6 +364,15 @@ MCPRBACScope = Literal["mcp.tool.list", "mcp.tool.invoke"]
 MCP_SCOPES: frozenset[MCPRBACScope] = frozenset({"mcp.tool.list", "mcp.tool.invoke"})
 
 
+#: Sub-agent portal-trigger scope (ADR-005, "Fork B" portal seam). Spawning is
+#: operational orchestration, not a Human-only decision; a high-risk child still
+#: pends for a human downstream at sandbox cold-create admission.
+SubAgentRBACScope = Literal["subagent.spawn"]
+
+#: The 1 sub-agent scope as a frozenset (1:1 with :data:`SubAgentRBACScope`).
+SUBAGENT_SCOPES: frozenset[SubAgentRBACScope] = frozenset({"subagent.spawn"})
+
+
 #: ADR-023 (Wave-2) — per-tenant config-overlay RBAC family. Two values in the
 #: ``config.tenant_overlay.*`` namespace, consumed by the operator-administered
 #: overlay endpoints (`portal/api/config_overlay/routes.py`):
