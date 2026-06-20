@@ -163,9 +163,10 @@ async def test_submit_refuses_parent_narrowed_to_zero_before_quota(
     )
     assert decision.outcome == "refused_quota_exhausted"  # min(200, 0) == 0
     assert decision.task_id is None
-    # admission_refused row written (the refusal evidence), NO scheduler_tasks row.
+    # admission_refused row written (the refusal evidence); NO *child* scheduler_tasks row —
+    # `_seed_parent` inserted the parent row, so the count is 1 (the parent only), not 0.
     assert await _count_admission_refused(engine_db) >= 1
-    assert await _count_task_rows(engine_db) == 0
+    assert await _count_task_rows(engine_db) == 1
 ```
 
 - [ ] **Step 2: Run to verify failure** — `uv run pytest tests/unit/core/scheduler/test_engine.py -k 'zero' -x -q`. Expected: FAIL (the `_RaisingQuotaInterrogator` AssertionErrors today — a zero task currently reaches the quota gate).
