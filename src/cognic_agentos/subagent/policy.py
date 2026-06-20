@@ -1,13 +1,16 @@
 """Sprint 11 — pure-functional sub-agent policy per ADR-005: privilege
-de-escalation (tool allow-list subset) + recursion-depth cap + budget
-narrowing. No I/O. Critical-controls (subagent/ stop-rule)."""
+de-escalation (tool allow-list subset) + recursion-depth cap. No I/O.
+
+Token-budget narrowing no longer lives here: the spawn-side
+``compute_spawn_budget`` helper was retired with the 2026-06-20 live-path
+refactor — the managed-run executor + core/scheduler now own the
+effective-budget computation (``compute_child_budget`` + the scheduler's
+zero-effective-budget admission guard). Critical-controls (subagent/
+stop-rule)."""
 
 from __future__ import annotations
 
-from cognic_agentos.core.scheduler._seams import compute_child_budget
 from cognic_agentos.subagent._types import (
-    SubAgentBudgetExhausted,
-    SubAgentChildQuotaZero,
     SubAgentDepthExceeded,
     SubAgentPrivilegeEscalation,
 )
@@ -30,21 +33,3 @@ def check_depth(*, current_depth: int, max_depth: int) -> None:
     depth 0; the child sits at ``current_depth + 1``."""
     if current_depth + 1 > max_depth:
         raise SubAgentDepthExceeded(current_depth=current_depth, max_depth=max_depth)
-
-
-def compute_spawn_budget(*, parent_remaining_budget: int, child_pack_quota: int) -> int:
-    """Narrow the child's token budget to ``min(child_pack_quota,
-    parent_remaining_budget)`` via the scheduler's pure ``compute_child_budget``
-    helper. Sprint 11b D3 — distinct wire-public refusals: raise
-    :class:`SubAgentChildQuotaZero` when the child pack quota is zero, or
-    :class:`SubAgentBudgetExhausted` when the parent has nothing left to
-    delegate (a zero child quota must never surface as 'parent exhausted')."""
-    if child_pack_quota == 0:
-        raise SubAgentChildQuotaZero(child_pack_quota=child_pack_quota)
-    granted = compute_child_budget(
-        parent_remaining_budget=parent_remaining_budget,
-        child_pack_quota=child_pack_quota,
-    )
-    if granted == 0:
-        raise SubAgentBudgetExhausted(parent_remaining_budget=parent_remaining_budget)
-    return granted

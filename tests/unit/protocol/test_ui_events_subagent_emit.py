@@ -39,7 +39,7 @@ from cognic_agentos.core.decision_history import (
     _decision_history,
 )
 from cognic_agentos.core.escalation import EscalationStore
-from cognic_agentos.core.scheduler._types import TaskActor
+from cognic_agentos.portal.rbac.actor import Actor
 from cognic_agentos.protocol.ui_events import (
     SubagentCompleted,
     SubagentFailed,
@@ -48,7 +48,11 @@ from cognic_agentos.protocol.ui_events import (
     UIEventEmitter,
     _project_typed_decision_history,
 )
-from cognic_agentos.subagent._types import SubAgentDepthExceeded, SubAgentSpawnRequest
+from cognic_agentos.subagent._types import (
+    ManagedRunChildSpec,
+    SubAgentDepthExceeded,
+    SubAgentSpawnRequest,
+)
 from cognic_agentos.subagent.spawn import SubAgentSpawner
 
 
@@ -307,17 +311,15 @@ async def test_generic_escalation_emits_no_subagent_event_on_append(
 async def test_real_depth_refusal_writes_recursion_capped_keying_row(
     engine: AsyncEngine,
 ) -> None:
-    """The real T6 depth path writes the escalation.opened row the projector
+    """The real depth path writes the escalation.opened row the projector
     keys on: level=depth_exceeded + request_id startswith subagent-spawn-.
-    The unused deps (scheduler/audit/runner/parent_budget) are dummies — the
-    depth check raises before any of them is touched; only EscalationStore is
-    real. Closes the chain: real-path row shape -> projector -> recursion_capped."""
+    The unused deps (audit/runner) are dummies — the depth check raises before
+    either is touched; only EscalationStore is real. Closes the chain: real-path
+    row shape -> projector -> recursion_capped."""
     spawner = SubAgentSpawner(
-        scheduler=cast(Any, object()),
         audit=cast(Any, object()),
         child_runner=cast(Any, object()),
         escalation=EscalationStore(engine),
-        parent_budget=cast(Any, object()),
         max_recursion_depth=3,
     )
     with pytest.raises(SubAgentDepthExceeded):
@@ -331,11 +333,12 @@ async def test_real_depth_refusal_writes_recursion_capped_keying_row(
                 tenant_id="bank-a",
                 parent_task_id=None,
             ),
-            pack_id="cognic-tool-aml",
-            actor=TaskActor(subject="orch", tenant_id="bank-a", actor_type="service"),
-            class_="interactive",
-            pack_kind="tool",
-            pack_risk_tier="internal_write",
+            managed_run=ManagedRunChildSpec(
+                pack_id="cognic-tool-aml", pack_version="1.0.0", argv=("--run",)
+            ),
+            actor=Actor(
+                subject="orch", tenant_id="bank-a", scopes=frozenset(), actor_type="service"
+            ),
             parent_trace_id="ptrace",
         )
 
