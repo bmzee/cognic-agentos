@@ -486,28 +486,35 @@ Run: `uv run pytest tests/unit/core/scheduler/test_budget_resolver.py -x -q && u
 **Files:**
 - Modify: `tests/unit/core/scheduler/test_engine.py` (add the tests HERE — `engine_db`/`caps`/`class_settings`/`_make_engine`/`_make_submit_input` live in this file)
 
-- [ ] **Step 1: Write the tests** — append to `tests/unit/core/scheduler/test_engine.py`. Add imports: `SchedulerTaskParentBudgetResolver` (from `core.scheduler.budget_resolver`), `ParentTaskBudgetUnavailable` (from `core.scheduler._seams`), and `from sqlalchemy import func` if not already imported (`select` + `SchedulerStorage` already are). `_make_submit_input` already has `parent_task_id` + `requested_tokens` params; its default `tenant_id="tenant-a"` is what the resolver receives, so seed the parent in the SAME tenant.
+- [ ] **Step 1: Write the tests** — append to `tests/unit/core/scheduler/test_engine.py`. Add imports: `SchedulerTaskParentBudgetResolver` (from `core.scheduler.budget_resolver`), `ParentTaskBudgetUnavailable` (from `core.scheduler._seams`), `SchedulerTaskState` (from `core.scheduler._types` — for `_seed_parent`'s `state` param), and **`from sqlalchemy import func, select` at MODULE level** (BOTH — in this file `select`/`func` are imported FUNCTION-locally in several existing tests, NOT at module level; `SchedulerStorage` already is). `_make_submit_input` already has `parent_task_id` + `requested_tokens` params; its default `tenant_id="tenant-a"` is what the resolver receives, so seed the parent in the SAME tenant.
 
 ```python
 # --- T4: engine ↔ SchedulerTaskParentBudgetResolver integration -------------------
 
 
-class _RecordingQuotaInterrogator:
+class _BudgetRecordingQuotaInterrogator:
     """Captures the estimated_tokens the engine asks the quota gate to admit —
-    i.e. the narrowed effective_tokens after parent-budget inheritance."""
+    i.e. the narrowed effective_tokens after parent-budget inheritance. Named
+    distinctly from the pre-existing LOCAL `_RecordingQuotaInterrogator` (a
+    list-recorder scoped inside the older stub-resolver narrowing test) to avoid
+    a same-name collision; this one is module-level + records a single seen
+    value. Params are FULLY typed (mirroring the existing `_StubQuotaInterrogator`)
+    — strict mypy flags a typed-return-only `would_admit` (`no-untyped-def`)."""
 
     def __init__(self) -> None:
         self.seen_estimated_tokens: int | None = None
 
-    async def would_admit(self, *, task_id, tenant_id, pack_id, estimated_tokens) -> bool:
+    async def would_admit(
+        self, *, task_id: uuid.UUID, tenant_id: str, pack_id: str, estimated_tokens: int
+    ) -> bool:
         self.seen_estimated_tokens = estimated_tokens
         return True
 
-    async def release_reservation(self, task_id) -> None:  # pragma: no cover
+    async def release_reservation(self, task_id: uuid.UUID) -> None:  # pragma: no cover
         return None
 
 
-async def _seed_parent(eng_db: AsyncEngine, *, tokens: int, state: str) -> uuid.UUID:
+async def _seed_parent(eng_db: AsyncEngine, *, tokens: int, state: SchedulerTaskState) -> uuid.UUID:
     """Seed a parent task in the SHARED engine_db via the real submit→transition
     path so the resolver (reading the same db) resolves it. Default tenant-a.
     Terminal states follow _VALID_TRANSITIONS; `expired` goes directly from
@@ -555,6 +562,13 @@ async def _count_admission_refused(eng_db: AsyncEngine) -> int:
         )
 
 
+async def _count_task_rows(eng_db: AsyncEngine) -> int:
+    async with eng_db.connect() as conn:
+        return int(
+            (await conn.execute(select(func.count(_scheduler_tasks.c.task_id)))).scalar_one()
+        )
+
+
 def _resolver(eng_db: AsyncEngine) -> SchedulerTaskParentBudgetResolver:
     return SchedulerTaskParentBudgetResolver(reader=SchedulerStorage(eng_db))
 
@@ -563,7 +577,7 @@ async def test_child_budget_narrowed_to_parent_grant_when_parent_smaller(
     engine_db: AsyncEngine, caps: ConcurrencyCaps, class_settings: dict[str, tuple[int, float]]
 ) -> None:
     parent_id = await _seed_parent(engine_db, tokens=50, state="running")
-    quota = _RecordingQuotaInterrogator()
+    quota = _BudgetRecordingQuotaInterrogator()
     eng = _make_engine(
         db=engine_db, caps=caps, class_settings=class_settings,
         quota=quota, parent_budget=_resolver(engine_db),
@@ -579,7 +593,7 @@ async def test_child_budget_keeps_own_quota_when_parent_larger(
     engine_db: AsyncEngine, caps: ConcurrencyCaps, class_settings: dict[str, tuple[int, float]]
 ) -> None:
     parent_id = await _seed_parent(engine_db, tokens=1000, state="running")
-    quota = _RecordingQuotaInterrogator()
+    quota = _BudgetRecordingQuotaInterrogator()
     eng = _make_engine(
         db=engine_db, caps=caps, class_settings=class_settings,
         quota=quota, parent_budget=_resolver(engine_db),
@@ -594,7 +608,7 @@ async def test_child_budget_keeps_own_quota_when_parent_larger(
 async def test_parentless_submit_budget_unchanged(
     engine_db: AsyncEngine, caps: ConcurrencyCaps, class_settings: dict[str, tuple[int, float]]
 ) -> None:
-    quota = _RecordingQuotaInterrogator()
+    quota = _BudgetRecordingQuotaInterrogator()
     eng = _make_engine(
         db=engine_db, caps=caps, class_settings=class_settings,
         quota=quota, parent_budget=_resolver(engine_db),
@@ -610,15 +624,22 @@ async def test_not_found_parent_propagates_fail_loud_zero_refusal_rows(
     engine_db: AsyncEngine, caps: ConcurrencyCaps, class_settings: dict[str, tuple[int, float]]
 ) -> None:
     eng = _make_engine(
-        db=engine_db, caps=caps, class_settings=class_settings, parent_budget=_resolver(engine_db),
+        db=engine_db, caps=caps, class_settings=class_settings,
+        quota=_RaisingQuotaInterrogator(),  # AssertionError if quota is EVER consulted
+        parent_budget=_resolver(engine_db),
     )
+    pre_task_rows = await _count_task_rows(engine_db)  # 0 — no parent seeded
     with pytest.raises(ParentTaskBudgetUnavailable) as ei:
         await eng.submit(
             submit_input=_make_submit_input(parent_task_id=str(uuid.uuid4()), requested_tokens=200),
             request_id="child-nf",
         )
     assert ei.value.reason == "parent_not_found"
-    assert await _count_admission_refused(engine_db) == 0  # propagated, NOT a refusal row
+    # Spec contract: the resolver raise propagates with NO quota reservation
+    # (the _RaisingQuotaInterrogator proves quota was never reached), NO
+    # scheduler.admission_refused row, and NO child task row inserted.
+    assert await _count_admission_refused(engine_db) == 0
+    assert await _count_task_rows(engine_db) == pre_task_rows
 
 
 async def test_terminal_parent_propagates_parent_terminal(
@@ -626,17 +647,23 @@ async def test_terminal_parent_propagates_parent_terminal(
 ) -> None:
     parent_id = await _seed_parent(engine_db, tokens=50, state="completed")
     eng = _make_engine(
-        db=engine_db, caps=caps, class_settings=class_settings, parent_budget=_resolver(engine_db),
+        db=engine_db, caps=caps, class_settings=class_settings,
+        quota=_RaisingQuotaInterrogator(),  # AssertionError if quota is EVER consulted
+        parent_budget=_resolver(engine_db),
     )
+    pre_task_rows = await _count_task_rows(engine_db)  # 1 — the seeded (terminal) parent
     with pytest.raises(ParentTaskBudgetUnavailable) as ei:
         await eng.submit(
             submit_input=_make_submit_input(parent_task_id=str(parent_id), requested_tokens=200),
             request_id="child-term",
         )
     assert ei.value.reason == "parent_terminal"
+    # Spec contract: NO quota reservation, NO admission_refused row, NO child task row.
+    assert await _count_admission_refused(engine_db) == 0
+    assert await _count_task_rows(engine_db) == pre_task_rows
 ```
 
-> NOTE: the parent-budget consult precedes pack_state/OPA/the admission gates (per the composition-test docstring), so a resolver raise occurs BEFORE any chain write — hence `_count_admission_refused == 0` (no accepted row either). `engine_db` already provisions the `decision_history` chain head (the existing engine tests submit + write chain rows), so `_seed_parent`'s `store.submit` works.
+> NOTE: the parent-budget consult precedes pack_state/OPA/the admission gates (per the composition-test docstring), so a resolver raise occurs BEFORE any quota reservation, any chain write, AND any task-row insert. The fail-loud tests pin all THREE legs of the spec contract (§3 / spec §7): the EXISTING `_RaisingQuotaInterrogator` (passed as `quota=`) AssertionErrors if `would_admit` is ever reached → proves NO quota reservation; `_count_task_rows` proves NO child `scheduler_tasks` row; `_count_admission_refused == 0` proves NO `scheduler.admission_refused` row. `engine_db` already provisions the `decision_history` chain head (the existing engine tests submit + write chain rows), so `_seed_parent`'s `store.submit` works.
 
 - [ ] **Step 2: Run → all pass.**
 Run: `uv run pytest tests/unit/core/scheduler/test_engine.py -x -q`
@@ -737,5 +764,5 @@ Run: `uv run pytest tests/integration/scheduler/test_scheduler_composition_e2e.p
 
 - **Spec coverage:** §3 contract → T1 (exception + sig) + T3 (resolver semantics); the tenant-scoped source → T2; `compute_child_budget` ceiling → T4 (the "exhaustion/narrowing" proof); fail-loud propagation + zero refusal rows → T4; composition → T5; CC 131→132 → T3/T7; docs/posture → T6/T7; out-of-scope boundary → revised correctly (minimal `subagent/` signature-compat INCLUDED per the post-recon revision; no live dispatch, no `SubAgentSpawner` wiring, no ledger, no Rego).
 - **Type consistency:** `ParentTaskBudgetUnavailable` + `ParentTaskBudgetUnavailableReason` (T1) used by T3 + tests; `_BudgetSnapshot` + `get_budget_snapshot` + `_build_budget_snapshot_stmt` (T2) used by T3 (reader) + tests; `BudgetSnapshotReader` + `_TERMINAL_STATES` + `SchedulerTaskParentBudgetResolver` (T3) used by T4 + T5; the call-site `tenant_id=` (T1) matches the Protocol.
-- **Placeholders:** none. T2/T4 fixtures are pinned to the REAL existing helpers — `store`/`engine`/`SubmitInput`/`TaskActor` in `test_storage.py`; `engine_db`/`caps`/`class_settings`/`_make_engine`/`_make_submit_input` (which already has `parent_task_id` + `requested_tokens`) + the existing `_StubParentBudgetResolver` (T1 sig-updated) in `test_engine.py`; `_submit_input`/`_build_composed_runtime` in the composition e2e. The new in-file helpers (`_seed_task`/`_seed_parent`/`_RecordingQuotaInterrogator`/`_count_admission_refused`/`_resolver`) carry complete code. The remaining `> NOTE` blocks are clarifying invariants (consult-precedes-chain-write; `engine_db` chain-head provisioning), not deferrals.
+- **Placeholders:** none. T2/T4 fixtures are pinned to the REAL existing helpers — `store`/`engine`/`SubmitInput`/`TaskActor` in `test_storage.py`; `engine_db`/`caps`/`class_settings`/`_make_engine`/`_make_submit_input` (which already has `parent_task_id` + `requested_tokens`) + the existing `_StubParentBudgetResolver` (T1 sig-updated) in `test_engine.py`; `_submit_input`/`_build_composed_runtime` in the composition e2e. The new in-file helpers (`_seed_task`/`_seed_parent`/`_BudgetRecordingQuotaInterrogator`/`_count_admission_refused`/`_resolver`) carry complete code. The remaining `> NOTE` blocks are clarifying invariants (consult-precedes-chain-write; `engine_db` chain-head provisioning), not deferrals.
 - **Critical-controls:** the on-gate tasks (T1 engine, T2 storage, T3 resolver) carry the 95/90 floor + negative-path tests; T7 verifies 132/132 on fresh coverage + the gate-list registration.
