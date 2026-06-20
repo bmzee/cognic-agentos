@@ -364,8 +364,8 @@ import pytest
 from cognic_agentos.core.scheduler._seams import ParentTaskBudgetUnavailable
 from cognic_agentos.core.scheduler._types import SchedulerTaskState
 from cognic_agentos.core.scheduler.budget_resolver import (
-    SchedulerTaskParentBudgetResolver,
     _TERMINAL_STATES,
+    SchedulerTaskParentBudgetResolver,
 )
 from cognic_agentos.core.scheduler.storage import _BudgetSnapshot
 
@@ -391,7 +391,10 @@ async def test_returns_granted_tokens_for_running_parent() -> None:
 
 async def test_returns_granted_tokens_for_pending_parent() -> None:
     reader = _StubReader(_BudgetSnapshot(granted_tokens=10, state="pending"))
-    assert await SchedulerTaskParentBudgetResolver(reader).remaining_budget_for(_PID, tenant_id="t") == 10
+    assert (
+        await SchedulerTaskParentBudgetResolver(reader).remaining_budget_for(_PID, tenant_id="t")
+        == 10
+    )
 
 
 async def test_absent_raises_parent_not_found() -> None:
@@ -410,7 +413,7 @@ async def test_terminal_raises_parent_terminal(state: SchedulerTaskState) -> Non
 
 
 def test_terminal_set_partitions_scheduler_task_state() -> None:
-    # Drift guard: terminal ∪ {pending, running} == all states; a new state fails this.
+    # Drift guard: terminal | {pending, running} == all states; a new state fails this.
     assert _TERMINAL_STATES | {"pending", "running"} == set(get_args(SchedulerTaskState))
 ```
 
