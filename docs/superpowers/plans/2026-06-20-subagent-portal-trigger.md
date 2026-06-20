@@ -596,7 +596,7 @@ def _client(
     return TestClient(app)
 
 
-def _body(**over: Any) -> dict:
+def _body(**over: Any) -> dict[str, Any]:
     base = {
         "parent_run_id": str(uuid.uuid4()),
         "managed_run": {"pack_id": "p", "pack_version": "1.0.0", "argv": ["--run"]},
@@ -615,6 +615,7 @@ def test_spawn_200_returns_record_id_and_child_result() -> None:
     resp = client.post("/api/v1/subagents", json=_body())
     assert resp.status_code == 200
     payload = resp.json()
+    assert spawner._result is not None  # narrows Optional for mypy (set by construction)
     assert payload["spawn_record_id"] == str(spawner._result.spawn_record_id)
     assert payload["child_result"] == {
         "ok": True,
@@ -634,6 +635,7 @@ def test_spawn_threads_route_derived_fields() -> None:
     assert resp.status_code == 200
     # route-derived: current_depth=0, parent_task_id=str(task_id), tenant from actor,
     # parent_trace_id=run:<parent_run_id>; tool lists -> frozenset.
+    assert spawner.seen is not None  # narrows Optional for mypy (set by the spawn call)
     req = spawner.seen["request"]
     assert req.current_depth == 0
     assert req.parent_task_id == str(task_id)
@@ -735,8 +737,9 @@ from cognic_agentos.portal.api.subagents.dto import (
 )
 from cognic_agentos.portal.rbac.actor import Actor
 from cognic_agentos.portal.rbac.enforcement import RequireScope
-from cognic_agentos.subagent import SubAgentPrivilegeEscalation, SubAgentSpawner
+from cognic_agentos.subagent import SubAgentPrivilegeEscalation
 from cognic_agentos.subagent._types import ManagedRunChildSpec, SubAgentSpawnRequest
+from cognic_agentos.subagent.spawn import SubAgentSpawner  # NOT re-exported from the package root
 
 
 def _require_subagent_runtime(request: Request) -> tuple[SubAgentSpawner, RunRecordStore]:
