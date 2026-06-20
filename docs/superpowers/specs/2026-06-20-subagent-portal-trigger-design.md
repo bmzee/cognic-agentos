@@ -1,6 +1,6 @@
 # Sub-Agent Portal Trigger — Design Spec
 
-> **Status:** DRAFT — pending user review before writing-plans.
+> **Status:** LANDED (2026-06-20) — implemented on `feat/subagent-portal-trigger` (T1-T5); CC stays 133, no migration.
 > **Date:** 2026-06-20
 > **ADRs:** ADR-005 (sub-agent primitive), ADR-022 (scheduler), ADR-014 (runtime tool approval), ADR-012 §40 (portal RBAC).
 
