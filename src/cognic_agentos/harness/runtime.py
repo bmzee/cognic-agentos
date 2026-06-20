@@ -268,11 +268,13 @@ async def build_runtime(settings: Settings, adapters: Adapters) -> Runtime:
         # queries the real PackRecordStore; policy evaluates the scheduler.rego
         # bundle via a dedicated OPAEngine; approval reuses the unconditionally-
         # built engine; storage is the SchedulerStorage over the relational
-        # engine. parent_budget is OMITTED, so the engine binds its own
-        # _NullParentBudgetResolver fail-loud sentinel (Fork E) — a top-level
-        # submit never consults it; a sub-agent submit fails loud until 14A wires
-        # the real LocalParentBudgetResolver + a run→budget snapshot.
+        # engine. parent_budget is the real SchedulerTaskParentBudgetResolver
+        # over the SAME SchedulerStorage instance — a top-level submit never
+        # consults it; a sub-agent submit resolves the parent task's remaining
+        # budget snapshot (an unknown parent reads as absent →
+        # ParentTaskBudgetUnavailable("parent_not_found")).
         from cognic_agentos.core.emergency.kill_switches import SchedulerKillSwitchConformer
+        from cognic_agentos.core.scheduler.budget_resolver import SchedulerTaskParentBudgetResolver
         from cognic_agentos.core.scheduler.engine import SchedulerEngine as _SchedulerEngine
         from cognic_agentos.core.scheduler.policy import SchedulerPolicy
         from cognic_agentos.core.scheduler.queue import ConcurrencyCaps
@@ -287,8 +289,9 @@ async def build_runtime(settings: Settings, adapters: Adapters) -> Runtime:
             opa_path=settings.opa_path,
             eval_timeout_s=settings.opa_eval_timeout_s,
         )
+        scheduler_storage = SchedulerStorage(engine)
         scheduler = _SchedulerEngine(
-            storage=SchedulerStorage(engine),
+            storage=scheduler_storage,
             caps=ConcurrencyCaps(
                 per_tenant_interactive=settings.scheduler_per_tenant_interactive,
                 per_tenant_background=settings.scheduler_per_tenant_background,
@@ -310,7 +313,7 @@ async def build_runtime(settings: Settings, adapters: Adapters) -> Runtime:
             kill_switch_interrogator=SchedulerKillSwitchConformer(engine=kill_switch_engine),
             pack_state_interrogator=PackStoreStateInterrogator(store=PackRecordStore(engine)),
             approval_engine=approval_engine,
-            # parent_budget_resolver OMITTED → _NullParentBudgetResolver (Fork E; 14A).
+            parent_budget_resolver=SchedulerTaskParentBudgetResolver(reader=scheduler_storage),
         )
 
         # vector_index — opt-in episodic recall (default OFF). Gated on
