@@ -566,6 +566,7 @@ async def test_happy_path_builds_run_request_and_maps_completed() -> None:
     child = await runner.run(_ctx(_spec(pack_id="p", pack_version="1.2"),
                                   tokens=77, parent="11111111-1111-1111-1111-111111111111"))
     assert child.ok is True
+    assert ex.seen is not None  # narrows RunRequest | None for the reads below (mypy union-attr)
     assert ex.seen.pack_id == "p" and ex.seen.pack_uuid == row_id
     assert ex.seen.pack_version == "1.2"  # from the SPEC, not the record (PackRecord has no version)
     assert ex.seen.actor.subject == "svc-a"  # the full Actor threaded to RunRequest
@@ -585,6 +586,20 @@ async def test_maps_every_run_terminal_state(state: str, ok: bool) -> None:
     runner = ManagedRunChildRunner(executor=ex, pack_store=_StubPackStore([_Rec("p", uuid.uuid4())]))
     child = await runner.run(_ctx(_spec()))
     assert child.ok is ok
+
+
+@pytest.mark.parametrize("state,expected_summary", [
+    ("suspended", "suspended_child_unsupported"),
+    ("pending_approval", "pending_approval_child_unsupported"),
+])
+async def test_special_case_summaries(state: str, expected_summary: str) -> None:
+    # suspended + pending_approval get EXPLICIT summaries (spec §4), not the generic
+    # `run=... state=... exit=...` fall-through.
+    ex = _StubExecutor(_result(terminal_state=state, exit_code=1))
+    runner = ManagedRunChildRunner(executor=ex, pack_store=_StubPackStore([_Rec("p", uuid.uuid4())]))
+    child = await runner.run(_ctx(_spec()))
+    assert child.ok is False
+    assert child.summary == expected_summary
 
 
 async def test_completed_nonzero_exit_is_not_ok() -> None:
@@ -609,7 +624,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from typing import Protocol
+from typing import Any, Literal, Protocol
 
 from cognic_agentos.core.run.executor import RunRequest, RunResult
 from cognic_agentos.subagent._types import ChildResult, ChildRunContext
@@ -621,8 +636,16 @@ class _ManagedRunExecutorSeam(Protocol):
 
 class _PackStoreSeam(Protocol):
     async def list_for_tenant(
-        self, tenant_id: str, *, limit: int, cursor: uuid.UUID | None = ..., state: str | None = ...
-    ) -> list: ...
+        self,
+        tenant_id: str,
+        *,
+        limit: int,
+        cursor: uuid.UUID | None = ...,
+        # Narrow Literal (NOT `str | None`): the concrete PackRecordStore takes
+        # `PackState | None`, which structurally conforms to this (a supertype of the
+        # seam's param) but NOT to a broad `str | None`. Decoupled (no PackState import).
+        state: Literal["installed"] | None = ...,
+    ) -> list[Any]: ...
 
 
 # Page size for the exact tenant-scoped pack lookup; mirrors the
@@ -671,6 +694,10 @@ class ManagedRunChildRunner:
         summary = f"run={result.run_id} state={result.terminal_state} exit={result.exit_code}"
         if result.terminal_state == "suspended":
             summary = "suspended_child_unsupported"
+        elif result.terminal_state == "pending_approval":
+            # High-risk child pended at sandbox admission; the async child-approval
+            # resume loop is a non-goal this slice (spec §4).
+            summary = "pending_approval_child_unsupported"
         return ChildResult(summary=summary, tokens_used=0, wall_time_used_s=elapsed, ok=ok)
 
     async def _resolve_pack_uuid(self, tenant_id: str, pack_id: str) -> uuid.UUID | None:
@@ -680,7 +707,7 @@ class ManagedRunChildRunner:
         resolved (PackRecord has no version column); the caller supplies it via
         ManagedRunChildSpec.pack_version. Paginates so a target past the first
         page is still found."""
-        matches: list = []
+        matches: list[Any] = []
         cursor: uuid.UUID | None = None
         while True:
             page = await self._pack_store.list_for_tenant(
@@ -694,7 +721,8 @@ class ManagedRunChildRunner:
             cursor = page[-1].id
         if len(matches) != 1:
             return None
-        return matches[0].id
+        resolved: uuid.UUID = matches[0].id  # typed local (matches is list[Any]) for warn_return_any
+        return resolved
 ```
 
 > NOTE: `RunRequest.actor` is required (`executor.py:158`); the runner supplies it from the `actor` local that the `spec is None or actor is None` guard above narrowed to non-`Actor` (`ChildRunContext.actor` is optional). `pack_uuid` is the resolved `uuid.UUID` row id; `pack_version` comes from the spec (not the record). The pack record's `.id` attribute is its UUID row id (`PackRecord.id`); the matcher reads `.pack_id` — both confirmed in `packs/storage.py` `PackRecord`.
