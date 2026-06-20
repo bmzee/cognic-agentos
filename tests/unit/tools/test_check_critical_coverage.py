@@ -91,8 +91,12 @@ _GATE_TOOL_PATH = _REPO_ROOT / "tools" / "check_critical_coverage.py"
 #: + 1 Sprint-14A-A3a run-record store (core/run/storage.py per ADR-022 +
 #: ADR-004 — the durable run-lifecycle tenant-isolation + chain-atomicity
 #: boundary; core/run/_types.py stays off-gate per the scheduler precedent) = 131.
+#: + 1 parent budget resolver seam (core/scheduler/budget_resolver.py per
+#: ADR-005 + ADR-022 — the scheduler-backed parent-budget-inheritance authority;
+#: the Sprint-13.7 Fork-E ``_NullParentBudgetResolver`` resolution;
+#: core/scheduler/_seams.py stays off-gate per the scheduler precedent) = 132.
 #: Bump this in lockstep with any deliberate ``_CRITICAL_FILES`` change.
-_EXPECTED_ENTRY_COUNT = 131
+_EXPECTED_ENTRY_COUNT = 132
 
 #: The 5 modules Sprint 7B.3 promoted to the durable gate, each by its
 #: own landing commit (T3-T6 panels + T7 composer). All ride the

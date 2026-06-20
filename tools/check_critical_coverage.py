@@ -2164,6 +2164,24 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     # validate_transition) stays OFF-gate (pure types, drift-pinned) per the
     # core/scheduler/_types.py precedent.
     ("src/cognic_agentos/core/run/storage.py", 0.95, 0.90),
+    # Parent budget resolver seam (2026-06-19; ADR-005 + ADR-022) — the
+    # scheduler-backed parent-budget-inheritance authority that resolves the
+    # Sprint-13.7 Fork-E `_NullParentBudgetResolver` deferral. Wired into
+    # build_runtime, so a parent_task_id-bearing scheduler submit narrows the
+    # child budget (min(child_quota, parent_granted)) instead of raising
+    # NotImplementedError. CC because the tenant-scoped snapshot read + the
+    # terminal-state refusal + the fail-loud ParentTaskBudgetUnavailable
+    # propagation (NO quota reservation / NO admission_refused row / NO
+    # task-row insert) are the budget-inheritance policy boundary. Gate
+    # 131 -> 132. The gate runs against a FRESH full-suite --cov-branch
+    # coverage.json IN THE SAME COMMIT as this _CRITICAL_FILES extension
+    # (NOT just the _EXPECTED_ENTRY_COUNT bump) per
+    # feedback_verify_promotion_meets_floor_at_promotion_time; the promotion
+    # run found the module at 100% line / 100% branch on fresh data
+    # (tests/unit/core/scheduler/test_budget_resolver.py). The off-gate
+    # _seams.py (Protocol + ParentTaskBudgetUnavailable) stays OFF per the
+    # core/scheduler/_seams.py precedent.
+    ("src/cognic_agentos/core/scheduler/budget_resolver.py", 0.95, 0.90),
 )
 
 
