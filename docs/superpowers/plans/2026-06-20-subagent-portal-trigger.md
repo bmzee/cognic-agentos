@@ -879,10 +879,14 @@ Find where `build_run_routes()` is mounted in `app.py` (the unconditional `creat
 ```python
     from cognic_agentos.portal.api.subagents import build_subagent_routes
 
-    app.include_router(build_subagent_routes(), prefix="/api/v1/subagents")
+    app.include_router(
+        build_subagent_routes(),
+        prefix="/api/v1/subagents",
+        tags=["subagents"],
+    )
 ```
 
-(Mount it next to the existing `app.include_router(build_run_routes(), prefix="/api/v1/runs")` call — same unconditional posture. If the run router is mounted via a different helper, mirror that exact mechanism.)
+(Mount it next to the existing `build_run_routes()` mount — the REAL mounts use the multi-line `app.include_router(..., prefix=..., tags=[...])` form, so include `tags=["subagents"]` to match runs/mcp/eval. Same unconditional posture; plain `app.include_router(...)`, no helper.)
 
 - [ ] **Step 4: Run the mount test + the broad portal-api suite + mypy**
 

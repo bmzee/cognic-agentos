@@ -1359,6 +1359,14 @@ def create_app(
         tags=["runs"],
     )
 
+    from cognic_agentos.portal.api.subagents import build_subagent_routes
+
+    app.include_router(
+        build_subagent_routes(),
+        prefix="/api/v1/subagents",
+        tags=["subagents"],
+    )
+
     # MCP tool-invocation surface (ADR-002 "Fork D"). Unconditional mount: the
     # host is populated by the lifespan only when is_mcp_available(); the route's
     # request-time dep returns 503 mcp_host_unavailable until then. Lazy import
