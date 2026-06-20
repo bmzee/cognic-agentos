@@ -31,6 +31,7 @@ SCHEDULER_MODULES = (
     "src/cognic_agentos/core/scheduler/__init__.py",
     "src/cognic_agentos/core/scheduler/_seams.py",
     "src/cognic_agentos/core/scheduler/_types.py",
+    "src/cognic_agentos/core/scheduler/budget_resolver.py",
     "src/cognic_agentos/core/scheduler/engine.py",
     "src/cognic_agentos/core/scheduler/policy.py",
     "src/cognic_agentos/core/scheduler/queue.py",

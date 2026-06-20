@@ -477,6 +477,8 @@ class SchedulerTaskParentBudgetResolver:
 - [ ] **Step 4: Run → passes; on-gate floor; lint + types.**
 Run: `uv run pytest tests/unit/core/scheduler/test_budget_resolver.py -x -q && uv run ruff check src/cognic_agentos/core/scheduler/budget_resolver.py && uv run mypy src tests`
 
+- [ ] **Step 4b: Register the new module in the architecture-guard exhaustiveness lists.** A NEW `core/scheduler/*.py` module trips the exhaustiveness drift detectors (`test_t9/t11_architectural_arrow_module_set_is_exhaustive`). Add `"src/cognic_agentos/core/scheduler/budget_resolver.py"` to the `SCHEDULER_MODULES` tuple in BOTH `tests/unit/core/scheduler/test_architecture_no_emergency_import.py` AND `test_architecture_no_sandbox_import.py` (sorted: after `_types.py`, before `engine.py`). This also runs the per-module no-emergency / no-sandbox import guard on `budget_resolver.py` — it passes (arrow-clean: imports only `core.scheduler.{_seams,_types,storage}`). **Run the FULL scheduler suite to catch this — `uv run pytest tests/unit/core/scheduler/ -q` — NOT just the focused `test_budget_resolver.py` (the focused run misses the package-level exhaustiveness drift; this was a real T3 gap surfaced at T5).**
+
 - [ ] **Step 5: Commit** — `feat(scheduler): SchedulerTaskParentBudgetResolver granted-snapshot primitive (ADR-005)`
 
 ---
