@@ -8,7 +8,7 @@ resolve the closure-local ``Depends(...)`` annotations eagerly.
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 
 from cognic_agentos.core.run.storage import RunRecordStore
 from cognic_agentos.portal.api.subagents.dto import (
@@ -40,6 +40,7 @@ def build_subagent_routes() -> APIRouter:
     @router.post("", response_model=SubAgentSpawnResponse)
     async def spawn_subagent_route(
         body: SubAgentSpawnRequestBody,
+        response: Response,
         actor: Annotated[Actor, Depends(_require_spawn)],
         runtime: Annotated[
             tuple[SubAgentSpawner, RunRecordStore], Depends(_require_subagent_runtime)
@@ -62,6 +63,7 @@ def build_subagent_routes() -> APIRouter:
             requested_estimated_tokens=body.requested_estimated_tokens,
             tenant_id=actor.tenant_id,
             parent_task_id=str(record.task_id),
+            approval_request_id=str(body.approval_request_id) if body.approval_request_id else None,
         )
         managed_run = ManagedRunChildSpec(
             pack_id=body.managed_run.pack_id,
@@ -84,7 +86,13 @@ def build_subagent_routes() -> APIRouter:
                     "extra_tools": sorted(exc.extra_tools),
                 },
             ) from None
-        # 4. Coarse 200 (a pending/failed child rides child_result.ok=false; §6).
+        # 4. 202 for a pending child (+ top-level approval_request_id the caller
+        #    re-POSTs to retry); else 200 (a failed/refused child rides ok=false; §6).
+        is_pending = (
+            result.child_result.terminal_state == "pending_approval"
+            and result.child_result.approval_request_id is not None
+        )
+        response.status_code = 202 if is_pending else 200
         return SubAgentSpawnResponse(
             spawn_record_id=str(result.spawn_record_id),
             child_result=ChildResultBody(
@@ -92,7 +100,9 @@ def build_subagent_routes() -> APIRouter:
                 summary=result.child_result.summary,
                 tokens_used=result.child_result.tokens_used,
                 wall_time_used_s=result.child_result.wall_time_used_s,
+                terminal_state=result.child_result.terminal_state,
             ),
+            approval_request_id=result.child_result.approval_request_id,
         )
 
     return router

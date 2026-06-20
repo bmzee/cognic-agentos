@@ -47,6 +47,25 @@ def test_malformed_parent_run_id_is_422() -> None:
         SubAgentSpawnRequestBody.model_validate(bad)
 
 
+def test_approval_request_id_absent_defaults_none() -> None:
+    body = SubAgentSpawnRequestBody.model_validate(_valid_body())
+    assert body.approval_request_id is None
+
+
+def test_approval_request_id_parses_uuid() -> None:
+    grant = uuid.uuid4()
+    body = SubAgentSpawnRequestBody.model_validate(
+        _valid_body() | {"approval_request_id": str(grant)}
+    )
+    assert body.approval_request_id == grant
+
+
+def test_malformed_approval_request_id_is_422() -> None:
+    bad = _valid_body() | {"approval_request_id": "not-a-uuid"}
+    with pytest.raises(ValidationError):
+        SubAgentSpawnRequestBody.model_validate(bad)
+
+
 def test_managed_run_argv_must_be_non_empty() -> None:
     bad = _valid_body()
     bad["managed_run"] = {"pack_id": "p", "pack_version": "1.0.0", "argv": []}
