@@ -33,7 +33,7 @@ from cognic_agentos.core.run.executor import (
     RunRequest,
 )
 from cognic_agentos.core.run.storage import RunRecordStore
-from cognic_agentos.core.scheduler._types import SubmitInput, TaskActor
+from cognic_agentos.core.scheduler._types import AdmissionDecision, SubmitInput, TaskActor
 from cognic_agentos.core.scheduler.engine import PolicyDecision, SchedulerEngine
 from cognic_agentos.core.scheduler.policy import SchedulerPolicy
 from cognic_agentos.core.scheduler.queue import ConcurrencyCaps
@@ -291,6 +291,8 @@ def _request(
     argv: tuple[str, ...] = ("printf", "ok"),
     actor: Actor | None = None,
     approval_request_id: uuid.UUID | None = None,
+    parent_task_id: str | None = None,
+    requested_estimated_tokens: int | None = None,
 ) -> RunRequest:
     return RunRequest(
         tenant_id=tenant_id,
@@ -302,6 +304,8 @@ def _request(
         if actor is not None
         else Actor(subject="svc-a", tenant_id="tenant-a", scopes=frozenset(), actor_type="service"),
         approval_request_id=approval_request_id,
+        parent_task_id=parent_task_id,
+        requested_estimated_tokens=requested_estimated_tokens,
     )
 
 
@@ -1478,3 +1482,54 @@ async def test_a4b_delegated_high_risk_admitted_by_real_rego_arm3(
     await ex.run(_request())
     # real rego arm 3 admitted the delegated high-risk submit -> the backend was reached:
     assert len(backend.created) == 1
+
+
+async def test_run_request_defaults_parent_task_id_and_tokens_to_none() -> None:
+    # Pure dataclass default check — additive fields default None so top-level
+    # runs are byte-identical. `_request` is the existing helper at :285.
+    req = _request()
+    assert req.parent_task_id is None
+    assert req.requested_estimated_tokens is None
+
+
+class _RecordingScheduler:
+    """Captures the SubmitInput the executor builds, then admits immediately.
+    Proves the executor THREADS parent_task_id + requested_estimated_tokens into
+    the scheduler submit; the scheduler's narrowing is T2's concern."""
+
+    def __init__(self) -> None:
+        self.seen: SubmitInput | None = None
+
+    async def submit(self, *, submit_input: SubmitInput, request_id: str) -> AdmissionDecision:
+        self.seen = submit_input
+        return AdmissionDecision(outcome="accepted_immediate", task_id=str(uuid.uuid4()))
+
+    async def mark_running(self, task_id: str, *, request_id: str) -> None: ...
+
+    async def complete(self, task_id: str, *, request_id: str) -> None: ...
+
+
+async def test_run_threads_parent_task_id_and_tokens_into_scheduler_submit(
+    db: AsyncEngine, settings: Settings
+) -> None:
+    backend = _StubBackend(exec_result=SandboxExecResult(stdout=b"ok\n", stderr=b"", exit_code=0))
+    sched = _RecordingScheduler()
+    # duck-typed; the executor only calls submit/mark_running/complete
+    ex = _executor(
+        db,
+        backend=backend,
+        loader=_StubLoader(_record()),
+        settings=settings,
+        scheduler=sched,  # type: ignore[arg-type]
+    )
+    await ex.run(
+        _request(
+            parent_task_id="11111111-1111-1111-1111-111111111111",
+            requested_estimated_tokens=200,
+        )
+    )
+    assert sched.seen is not None
+    # threaded UNCHANGED (str)
+    assert sched.seen.parent_task_id == "11111111-1111-1111-1111-111111111111"
+    # the override (NOT _DEFAULT_ESTIMATED_TOKENS=1000)
+    assert sched.seen.requested_estimated_tokens == 200
