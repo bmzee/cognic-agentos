@@ -295,10 +295,13 @@ class _BudgetSnapshot:
     state: SchedulerTaskState
 
 
-def _build_budget_snapshot_stmt(*, task_id: uuid.UUID, tenant_id: str):
+def _build_budget_snapshot_stmt(*, task_id: uuid.UUID, tenant_id: str) -> Select[Any]:
     """SOLE query-construction path for get_budget_snapshot. The WHERE on BOTH
     task_id AND tenant_id IS the cross-tenant boundary (absent OR cross-tenant
-    → no row). Shared with the SQL-shape regression (no vacuous duplicate)."""
+    → no row). Shared with the SQL-shape regression (no vacuous duplicate).
+    The `-> Select[Any]` return annotation is REQUIRED (strict mypy
+    `disallow_untyped_defs`); add `Select` to the `from sqlalchemy import (...)`
+    block (`select(...).where(...)` reveals `Select[Any]`)."""
     return (
         select(
             _scheduler_tasks.c.requested_estimated_tokens,
@@ -331,7 +334,7 @@ Method on `SchedulerStorage` (pure-read, no transaction — `connect()`, not `be
         )
 ```
 
-(Confirm `self._engine` is the stored async engine — the existing reads use it; `dataclass` + `select` are already imported.)
+(Confirm `self._engine` is the stored async engine — the existing reads use it; `dataclass` + `select` are already imported; **add `Select` to the `from sqlalchemy import (...)` block** for the builder's `-> Select[Any]` return annotation — strict mypy requires it.)
 
 - [ ] **Step 4: Run → passes; on-gate floor; lint + types.**
 Run: `uv run pytest tests/unit/core/scheduler/test_storage.py -x -q && uv run ruff check src/cognic_agentos/core/scheduler/storage.py tests/unit/core/scheduler/test_storage.py && uv run mypy src tests`
