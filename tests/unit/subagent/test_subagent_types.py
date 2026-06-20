@@ -1,6 +1,11 @@
 import uuid
 
-from cognic_agentos.subagent._types import ChildRunContext, ManagedRunChildSpec
+from cognic_agentos.subagent._types import (
+    ChildRunContext,
+    ManagedRunChildSpec,
+    SubAgentBudgetExhausted,
+    SubAgentChildQuotaZero,
+)
 
 
 def test_managed_run_child_spec_shape() -> None:
@@ -24,3 +29,18 @@ def test_child_run_context_new_optional_fields_default_to_none() -> None:
     assert ctx.parent_task_id is None
     assert ctx.managed_run is None
     assert ctx.requested_estimated_tokens == 10  # renamed from `budget`
+
+
+def test_subagent_budget_exhausted_carries_wire_reason() -> None:
+    # Kept for wire-public compat (spec §6 LOCKED) though the live path no longer
+    # raises it (compute_spawn_budget retired at T4); construction covers the
+    # __init__ vocabulary binding (the CC-floor regression from the deleted helper test).
+    exc = SubAgentBudgetExhausted(parent_remaining_budget=0)
+    assert exc.reason == "subagent_parent_budget_exhausted"
+    assert exc.parent_remaining_budget == 0
+
+
+def test_subagent_child_quota_zero_carries_wire_reason() -> None:
+    exc = SubAgentChildQuotaZero(child_pack_quota=0)
+    assert exc.reason == "subagent_child_quota_zero"
+    assert exc.child_pack_quota == 0

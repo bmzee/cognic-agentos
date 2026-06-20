@@ -2182,6 +2182,17 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     # _seams.py (Protocol + ParentTaskBudgetUnavailable) stays OFF per the
     # core/scheduler/_seams.py precedent.
     ("src/cognic_agentos/core/scheduler/budget_resolver.py", 0.95, 0.90),
+    # Live sub-agent dispatch (2026-06-20; ADR-005 + ADR-022) — the default
+    # ChildRunner: a child sub-agent runs as a governed managed run. CC because
+    # fail-closed (missing managed_run / actor), the exact tenant-scoped pack
+    # identity resolution (zero/multiple installed matches both fail closed), and
+    # the RunResult -> ChildResult mapping (incl. the suspended /
+    # pending_approval special-case summaries) are the live-dispatch enforcement
+    # surface. Gate 132 -> 133. The gate runs against a FRESH full-suite
+    # --cov-branch coverage.json IN THE SAME COMMIT as this _CRITICAL_FILES
+    # extension (NOT just the _EXPECTED_ENTRY_COUNT bump) per
+    # feedback_verify_promotion_meets_floor_at_promotion_time.
+    ("src/cognic_agentos/subagent/managed_run_runner.py", 0.95, 0.90),
 )
 
 
