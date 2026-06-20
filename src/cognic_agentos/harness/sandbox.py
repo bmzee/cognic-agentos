@@ -15,15 +15,18 @@ conformer — because ``core/run`` cannot import ``packs/storage`` (the
 from __future__ import annotations
 
 import uuid
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from cognic_agentos.core.run.executor import LoadedPackRecord
 from cognic_agentos.packs.storage import PackRecordStore
 
 if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncEngine
+
     from cognic_agentos.core.config import Settings
     from cognic_agentos.harness.runtime import Runtime
     from cognic_agentos.sandbox.protocol import SandboxBackend
+    from cognic_agentos.subagent.spawn import SubAgentSpawner
 
 
 def is_sandbox_available(settings: Settings) -> bool:
@@ -157,3 +160,30 @@ async def build_sandbox_backend(
         await docker_client.close()
         raise
     return backend, docker_client
+
+
+def build_subagent_spawner(
+    *,
+    runtime: Runtime,
+    managed_run_executor: object,  # the ManagedRunExecutor (duck-typed run())
+    engine: AsyncEngine,
+    settings: Settings,
+) -> SubAgentSpawner:
+    """Compose the live SubAgentSpawner (child-is-a-managed-run). SDK-free —
+    constructs the audit emitter (from runtime.decision_history_store) and the
+    pack store + escalation (from the shared AsyncEngine). Off-gate composition
+    glue (the enforcement is on-gate in managed_run_runner.py + spawn.py)."""
+    from cognic_agentos.core.escalation import EscalationStore
+    from cognic_agentos.subagent.audit import SubAgentAuditEmitter
+    from cognic_agentos.subagent.managed_run_runner import ManagedRunChildRunner
+    from cognic_agentos.subagent.spawn import SubAgentSpawner
+
+    return SubAgentSpawner(
+        audit=SubAgentAuditEmitter(history=runtime.decision_history_store),
+        child_runner=ManagedRunChildRunner(
+            executor=cast(Any, managed_run_executor),
+            pack_store=PackRecordStore(engine),
+        ),
+        escalation=EscalationStore(engine=engine),
+        max_recursion_depth=settings.subagent_max_recursion_depth,
+    )

@@ -773,15 +773,15 @@ def build_subagent_spawner(
     pack store + escalation (from the shared AsyncEngine). Off-gate composition
     glue (the enforcement is on-gate in managed_run_runner.py + spawn.py)."""
     from cognic_agentos.core.escalation import EscalationStore
-    from cognic_agentos.packs.storage import PackRecordStore
     from cognic_agentos.subagent.audit import SubAgentAuditEmitter
     from cognic_agentos.subagent.managed_run_runner import ManagedRunChildRunner
     from cognic_agentos.subagent.spawn import SubAgentSpawner
 
+    # PackRecordStore is module-level imported (~:21); cast/Any at module level.
     return SubAgentSpawner(
         audit=SubAgentAuditEmitter(history=runtime.decision_history_store),
         child_runner=ManagedRunChildRunner(
-            executor=managed_run_executor,
+            executor=cast(Any, managed_run_executor),  # object → _ManagedRunExecutorSeam (strict mypy)
             pack_store=PackRecordStore(engine),
         ),
         escalation=EscalationStore(engine=engine),
@@ -789,7 +789,7 @@ def build_subagent_spawner(
     )
 ```
 
-> NOTE: `AsyncEngine` is imported in `harness/sandbox.py` already (it builds the backend); confirm the top-level import. The builder owns BOTH the pack store and escalation construction from the single `engine` — no private-attribute access, no caller fork.
+> NOTE: `AsyncEngine` is **NOT** already imported in `harness/sandbox.py` — add it (+ `SubAgentSpawner` for the return annotation) under `TYPE_CHECKING` (the module has `from __future__ import annotations`, so type-only resolution is correct; mirrors the existing `SandboxBackend` type-only import). `PackRecordStore` IS module-level imported (~line 21) — do NOT re-import it function-locally. `executor=` is typed `object` (so the test's duck-typed stub is accepted), but `ManagedRunChildRunner.executor` is the `_ManagedRunExecutorSeam` Protocol, so strict mypy needs `cast(Any, managed_run_executor)` at that arg (`from typing import Any, cast`). The builder owns BOTH the pack store and escalation construction from the single `engine` — no private-attribute access, no caller fork.
 
 - [ ] **Step 4: Wire it in the lifespan** (`app.py` ~`:713`, immediately after `app.state.managed_run_executor = ManagedRunExecutor(...)`, INSIDE the same `try`):
 
