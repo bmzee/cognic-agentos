@@ -44,3 +44,59 @@ def test_subagent_child_quota_zero_carries_wire_reason() -> None:
     exc = SubAgentChildQuotaZero(child_pack_quota=0)
     assert exc.reason == "subagent_child_quota_zero"
     assert exc.child_pack_quota == 0
+
+
+def test_child_result_new_fields_default_to_none() -> None:
+    from cognic_agentos.subagent._types import ChildResult
+
+    cr = ChildResult(summary="s", tokens_used=0, wall_time_used_s=0.0, ok=False)
+    assert cr.run_id is None
+    assert cr.terminal_state is None
+    assert cr.approval_request_id is None
+
+
+def test_child_result_carries_pending_fields() -> None:
+    from cognic_agentos.subagent._types import ChildResult
+
+    cr = ChildResult(
+        summary="pending_approval_child",
+        tokens_used=0,
+        wall_time_used_s=0.1,
+        ok=False,
+        run_id="r1",
+        terminal_state="pending_approval",
+        approval_request_id="a1",
+    )
+    assert (cr.run_id, cr.terminal_state, cr.approval_request_id) == (
+        "r1",
+        "pending_approval",
+        "a1",
+    )
+
+
+def test_spawn_request_and_context_accept_approval_request_id() -> None:
+    import uuid
+
+    from cognic_agentos.subagent._types import ChildRunContext, SubAgentSpawnRequest
+
+    req = SubAgentSpawnRequest(
+        prompt="p",
+        parent_tool_allow_list=frozenset(),
+        requested_tool_allow_list=frozenset(),
+        current_depth=0,
+        requested_estimated_tokens=10,
+        tenant_id="t",
+        approval_request_id="a1",
+    )
+    assert req.approval_request_id == "a1"
+    ctx = ChildRunContext(
+        prompt="p",
+        granted_tools=frozenset(),
+        requested_estimated_tokens=10,
+        tenant_id="t",
+        current_depth=0,
+        child_trace_id="c",
+        request_id="r",
+        parent_record_id=uuid.uuid4(),
+    )
+    assert ctx.approval_request_id is None  # additive optional default
