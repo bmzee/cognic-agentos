@@ -30,8 +30,9 @@ this dispatch path consumes. This slice composes + proves the live dispatch path
   never silently drops them.
 - **(B + thin-C) adapter DTO + identity resolution.** A new runner-specific `ManagedRunChildSpec`
   carries the managed-run execution shape; the public `SubAgentSpawnRequest` stays runner-agnostic.
-  The runner resolves `pack_uuid`/`pack_version` from `pack_id` via the pack store rather than
-  making callers hand-thread UUIDs.
+  The runner resolves **only `pack_uuid`** (the row id) from `pack_id` via the pack store; `pack_version`
+  is **caller-provided** on the spec (`PackRecord` has no version column — consistent with the run routes,
+  whose `RunRequest.pack_version` is likewise caller-supplied), so callers never hand-thread the UUID.
 
 ### Source anchors (verified)
 - `ManagedRunExecutor` derives `pack_kind=record.kind` + `pack_risk_tier=record.risk_tier` +
@@ -75,11 +76,23 @@ Both default-`None`, so top-level runs render byte-identical:
 inputs are added — the executor keeps deriving them from `LoadedPackRecord`.
 
 ### `subagent/_types.py` (subagent/ stop-rule)
-- **NEW** `ManagedRunChildSpec` frozen dataclass: `{pack_id: str, argv: tuple[str, ...]}`. Minimal;
-  **no** `pack_kind`/`pack_risk_tier` (the executor derives them authoritatively from the validated
-  record).
-- `ChildRunContext` gains two fields (the designed growth point — "threading new fields never churns
-  the ChildRunner signature"):
+- **NEW** `ManagedRunChildSpec` frozen dataclass: `{pack_id: str, pack_version: str, argv: tuple[str, ...]}`.
+  **no** `pack_kind`/`pack_risk_tier` (the executor derives them authoritatively from the validated record).
+  **`pack_version` IS caller-provided** (P1): `PackRecord` (`packs/storage.py`) has **no version column**, and
+  the run routes already source `pack_version` from the caller body — so the runner resolves **only**
+  `pack_uuid` (the row id) from `pack_id` via the pack store, and takes `pack_version` from the spec.
+- `ChildRunContext` gains fields (the designed growth point — "threading new fields never churns the
+  ChildRunner signature"), all **optional with defaults** so each addition is additive — no constructor
+  churn, no intermediate red tree:
+  - `actor: Actor | None = None` — the portal `Actor`, threaded from `spawn()`'s `actor`. **Optional** so the
+    type addition is additive: when this field lands (the `_types` task), `spawn.py` still holds a `TaskActor`
+    (it gains the full `Actor` only in the spawn-refactor task), so a *required* `Actor` would type-error the
+    in-flight refactor and break that task's green-tree gate. The **managed-run runner fail-closes on
+    `actor is None`** (mirroring `managed_run is None`) — every real spawn sets it, and a pack-provided runner
+    that doesn't need one is unaffected. The full `Actor` is threaded, **NOT `TaskActor`** (P1): `TaskActor`
+    cannot carry `Actor.scopes`. `Actor` is a `TYPE_CHECKING` import in `subagent/_types.py` (the module has
+    `from __future__ import annotations`), mirroring the executor's `core/run → portal` arrow — no runtime
+    `subagent → portal` import.
   - `parent_task_id: str | None = None` — the budget-inheritance key, threaded from
     `request.parent_task_id` (`str | None`, mirrors the request).
   - `managed_run: ManagedRunChildSpec | None = None` — the runner-specific shape; `None` for
@@ -91,8 +104,13 @@ inputs are added — the executor keeps deriving them from `LoadedPackRecord`.
 - `SubAgentSpawnRequest` — **unchanged** (runner-agnostic; A avoided).
 
 ### `subagent/spawn.py` (subagent/ stop-rule) — `spawn()` signature
-- **Gains** `child_argv: tuple[str, ...]` (the managed-run execution input, kept out of the public
-  request DTO).
+- **New shape:** `spawn(*, request: SubAgentSpawnRequest, managed_run: ManagedRunChildSpec, actor: Actor,
+  parent_trace_id: str)`. The managed-run execution shape (`pack_id` + `pack_version` + `argv`) is **bundled
+  into the caller-built `ManagedRunChildSpec`** (kept out of the public `SubAgentSpawnRequest`), so the
+  separate `pack_id`/`child_argv` params are gone.
+- **`actor` is now the full portal `Actor`** (P1; was `TaskActor`): the audit uses `actor.subject`, and the
+  full `Actor` threads to `ChildRunContext.actor → RunRequest.actor` (the executor requires `Actor` and
+  `TaskActor` cannot carry scopes). The facade `spawn_subagent` mirrors this signature.
 - **Drops** `pack_kind`, `pack_risk_tier`, **and `class_`** (revision #3). All three only fed the now-removed
   in-`spawn` `SubmitInput`; the executor derives kind/risk_tier from the record and hardcodes
   `class_="interactive"`, so carrying them on `spawn()` would be a lie. `narrow_tool_allow_list` /
@@ -117,8 +135,9 @@ The live `spawn()` path becomes:
 2. `check_depth(...)` + `escalation.open(...)` on exceed (unchanged).
 3. `emit_spawn(...)` → `R_spawn` (unchanged; `policy_snapshot` now reflects the *requested* tokens —
    the effective/narrowed value lives in the scheduler chain row, not the spawn audit).
-4. Build `ChildRunContext(..., requested_estimated_tokens=request.requested_estimated_tokens,
-   parent_task_id=request.parent_task_id, managed_run=ManagedRunChildSpec(pack_id, child_argv))`.
+4. Build `ChildRunContext(..., actor=actor, requested_estimated_tokens=request.requested_estimated_tokens,
+   parent_task_id=request.parent_task_id, managed_run=managed_run)` — the caller-built `managed_run` spec
+   and the full `actor` threaded straight through.
 5. `child = await child_runner.run(ctx)`.
 6. `emit_return(...)` + `emit_budget(...)` from the `ChildResult`.
 
@@ -135,15 +154,20 @@ types from `core/run` and consumes the executor via a **narrow consumer-owned Pr
 (mirroring the existing `subagent/conformers.py` → `packs` dependency). `ManagedRunChildRunner(executor, pack_store)`:
 
 `async def run(self, ctx: ChildRunContext) -> ChildResult`:
-1. `ctx.managed_run is None` → **fail-closed refusal** (revision: the locked nuance). A prompt/tools-only
-   child with no argv mapping is refused, never silently dropped.
-2. **thin-C identity resolution (revision #4):** scan installed packs for `tenant_id == ctx.tenant_id`
-   AND `pack_id == ctx.managed_run.pack_id` via the pack store (mirrors `PackStoreStateInterrogator`'s
-   `list_for_tenant(state="installed")` match). **Exactly one** match required: **zero matches AND
-   multiple matches both fail closed** (no caller UUID-threading, no ambiguity).
-3. Build `RunRequest{tenant_id=ctx.tenant_id, pack_id, pack_uuid, pack_version,
-   argv=ctx.managed_run.argv, parent_task_id=ctx.parent_task_id,
-   requested_estimated_tokens=ctx.requested_estimated_tokens}` → `await executor.run(...)`.
+1. `ctx.managed_run is None` **OR `ctx.actor is None`** → **fail-closed refusal** (the locked nuance + the
+   optional-`actor` fail-close). A prompt/tools-only child with no argv mapping — or a child with no portal
+   `Actor` to build the `RunRequest` — is refused, never silently dropped. After this guard, mypy narrows
+   `ctx.actor` to `Actor` for the `RunRequest{actor=ctx.actor}` build below.
+2. **thin-C identity resolution (revision #4):** resolve **only `pack_uuid` (the row id)** — scan installed
+   packs for `tenant_id == ctx.tenant_id` AND `pack_id == ctx.managed_run.pack_id` via the pack store
+   (mirrors `PackStoreStateInterrogator`'s `list_for_tenant(state="installed")` match). **Exactly one** match
+   required: **zero matches AND multiple matches both fail closed** (no caller UUID-threading, no ambiguity).
+   `pack_version` is **not** resolved (P1: `PackRecord` has no version column) — it comes from
+   `ctx.managed_run.pack_version`.
+3. Build `RunRequest{tenant_id=ctx.tenant_id, pack_id=ctx.managed_run.pack_id, pack_uuid=<resolved row id>,
+   pack_version=ctx.managed_run.pack_version, argv=ctx.managed_run.argv, actor=ctx.actor,
+   parent_task_id=ctx.parent_task_id, requested_estimated_tokens=ctx.requested_estimated_tokens}` →
+   `await executor.run(...)`. **`actor` is required at `executor.py:158`** — threaded from `ctx.actor`.
 4. Map `RunResult → ChildResult`:
    - `ok = (terminal_state == "completed" and exit_code == 0)`.
    - `terminal_state ∈ {refused, failed}` → `ok=False`.
