@@ -34,9 +34,12 @@ from cognic_agentos.core.scheduler import (
     SubmitInput,
     TaskActor,
 )
+from cognic_agentos.core.scheduler._types import SchedulerTaskState
 from cognic_agentos.core.scheduler.storage import (
     SchedulerStorage,
     SchedulerTaskNotFound,
+    _BudgetSnapshot,
+    _build_budget_snapshot_stmt,
     _scheduler_tasks,
 )
 
@@ -664,3 +667,80 @@ async def test_round6_record_admission_refused_rejects_unknown_reason(
     # No chain row written
     post = await _count_chain_rows(engine)
     assert post == pre
+
+
+# --- get_budget_snapshot (parent-budget resolver read seam) ---------------
+
+
+async def _seed_task(
+    store: SchedulerStorage, *, tenant_id: str, tokens: int, state: SchedulerTaskState
+) -> uuid.UUID:
+    """Seed a scheduler task in `state` via the real submit→transition path
+    (NO raw INSERT). Terminal states follow _VALID_TRANSITIONS; `expired` goes
+    directly from pending (running→expired is illegal), the others via running."""
+    task_id = uuid.uuid4()
+    submit = SubmitInput(
+        tenant_id=tenant_id,
+        pack_id="cognic-tool-loan-eligibility",
+        actor=TaskActor(subject="svc", tenant_id=tenant_id, actor_type="service"),
+        class_="interactive",
+        pack_kind="tool",
+        pack_risk_tier="internal_write",
+        requested_estimated_tokens=tokens,
+    )
+    await store.submit(task_id=task_id, submit_input=submit, request_id=f"seed-{task_id}")
+    if state == "pending":
+        return task_id
+    if state == "expired":
+        # expired goes DIRECTLY from pending (running→expired is NOT in _VALID_TRANSITIONS).
+        await store.transition(
+            task_id=task_id,
+            from_state="pending",
+            to_state="expired",
+            actor_id="seed",
+            request_id=f"seed-expire-{task_id}",
+            payload_extras={},
+        )
+        return task_id
+    await store.transition(
+        task_id=task_id,
+        from_state="pending",
+        to_state="running",
+        actor_id="seed",
+        request_id=f"seed-run-{task_id}",
+        payload_extras={},
+    )
+    if state != "running":
+        await store.transition(
+            task_id=task_id,
+            from_state="running",
+            to_state=state,
+            actor_id="seed",
+            request_id=f"seed-term-{task_id}",
+            payload_extras={},
+        )
+    return task_id
+
+
+def test_budget_snapshot_stmt_where_carries_task_id_and_tenant_id() -> None:
+    # SQL-shape regression: the PRODUCTION builder is used; both predicates present.
+    compiled = str(_build_budget_snapshot_stmt(task_id=uuid.uuid4(), tenant_id="t"))
+    assert "scheduler_tasks.task_id = " in compiled
+    assert "scheduler_tasks.tenant_id = " in compiled
+
+
+async def test_budget_snapshot_absent_returns_none(store: SchedulerStorage) -> None:
+    assert await store.get_budget_snapshot(uuid.uuid4(), tenant_id="tenant-acme") is None
+
+
+async def test_budget_snapshot_present_returns_tokens_and_state(store: SchedulerStorage) -> None:
+    task_id = await _seed_task(store, tenant_id="tenant-acme", tokens=500, state="running")
+    assert await store.get_budget_snapshot(task_id, tenant_id="tenant-acme") == _BudgetSnapshot(
+        granted_tokens=500, state="running"
+    )
+
+
+async def test_budget_snapshot_cross_tenant_returns_none(store: SchedulerStorage) -> None:
+    task_id = await _seed_task(store, tenant_id="tenant-b", tokens=500, state="running")
+    # Same UUID, different tenant → invisible (the cross-tenant boundary).
+    assert await store.get_budget_snapshot(task_id, tenant_id="tenant-a") is None

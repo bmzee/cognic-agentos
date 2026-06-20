@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from cognic_agentos.core.audit import _chain_heads, _metadata
@@ -34,8 +35,13 @@ from cognic_agentos.core.scheduler import (
     TaskFailedPayload,
 )
 from cognic_agentos.core.scheduler._seams import (
+    ParentTaskBudgetUnavailable,
     _NullParentBudgetResolver,
     _NullQuotaInterrogator,
+)
+from cognic_agentos.core.scheduler._types import SchedulerTaskState
+from cognic_agentos.core.scheduler.budget_resolver import (
+    SchedulerTaskParentBudgetResolver,
 )
 from cognic_agentos.core.scheduler.engine import (
     PolicyDecision,
@@ -143,7 +149,7 @@ class _StubParentBudgetResolver:
         self.budget = budget
         self.calls: list[uuid.UUID] = []
 
-    async def remaining_budget_for(self, parent_task_id: uuid.UUID) -> int:
+    async def remaining_budget_for(self, parent_task_id: uuid.UUID, *, tenant_id: str) -> int:
         self.calls.append(parent_task_id)
         return self.budget
 
@@ -2016,3 +2022,200 @@ async def test_t11_destroy_exception_does_not_shadow_storage_exception(
         engine._storage.transition = original_transition  # type: ignore[method-assign]
     # Destroy was called even though it raised — pin the call happened
     assert adapter.destroy_calls == [task_id]
+
+
+# --- T4: engine ↔ SchedulerTaskParentBudgetResolver integration -------------------
+
+
+class _BudgetRecordingQuotaInterrogator:
+    """Captures the estimated_tokens the engine asks the quota gate to admit —
+    i.e. the narrowed effective_tokens after parent-budget inheritance. Named
+    distinctly from the local `_RecordingQuotaInterrogator` (a list-recorder
+    scoped inside the older stub-resolver narrowing test) to avoid a same-name
+    collision; this one is module-level + records a single seen value."""
+
+    def __init__(self) -> None:
+        self.seen_estimated_tokens: int | None = None
+
+    async def would_admit(
+        self, *, task_id: uuid.UUID, tenant_id: str, pack_id: str, estimated_tokens: int
+    ) -> bool:
+        self.seen_estimated_tokens = estimated_tokens
+        return True
+
+    async def release_reservation(self, task_id: uuid.UUID) -> None:  # pragma: no cover
+        return None
+
+
+async def _seed_parent(eng_db: AsyncEngine, *, tokens: int, state: SchedulerTaskState) -> uuid.UUID:
+    """Seed a parent task in the SHARED engine_db via the real submit→transition
+    path so the resolver (reading the same db) resolves it. Default tenant-a.
+    Terminal states follow _VALID_TRANSITIONS; `expired` goes directly from
+    pending (running→expired is illegal), the others via running."""
+    store = SchedulerStorage(eng_db)
+    task_id = uuid.uuid4()
+    await store.submit(
+        task_id=task_id,
+        submit_input=_make_submit_input(requested_tokens=tokens),
+        request_id=f"seed-{task_id}",
+    )
+    if state == "pending":
+        return task_id
+    if state == "expired":
+        # expired goes DIRECTLY from pending (running→expired is NOT in _VALID_TRANSITIONS).
+        await store.transition(
+            task_id=task_id,
+            from_state="pending",
+            to_state="expired",
+            actor_id="seed",
+            request_id=f"seed-expire-{task_id}",
+            payload_extras={},
+        )
+        return task_id
+    await store.transition(
+        task_id=task_id,
+        from_state="pending",
+        to_state="running",
+        actor_id="seed",
+        request_id=f"seed-run-{task_id}",
+        payload_extras={},
+    )
+    if state != "running":
+        await store.transition(
+            task_id=task_id,
+            from_state="running",
+            to_state=state,
+            actor_id="seed",
+            request_id=f"seed-term-{task_id}",
+            payload_extras={},
+        )
+    return task_id
+
+
+async def _count_admission_refused(eng_db: AsyncEngine) -> int:
+    from cognic_agentos.core.decision_history import _decision_history
+
+    async with eng_db.connect() as conn:
+        return int(
+            (
+                await conn.execute(
+                    select(func.count(_decision_history.c.sequence)).where(
+                        _decision_history.c.event_type == "scheduler.admission_refused"
+                    )
+                )
+            ).scalar_one()
+        )
+
+
+async def _count_task_rows(eng_db: AsyncEngine) -> int:
+    async with eng_db.connect() as conn:
+        return int(
+            (await conn.execute(select(func.count(_scheduler_tasks.c.task_id)))).scalar_one()
+        )
+
+
+def _resolver(eng_db: AsyncEngine) -> SchedulerTaskParentBudgetResolver:
+    return SchedulerTaskParentBudgetResolver(reader=SchedulerStorage(eng_db))
+
+
+async def test_child_budget_narrowed_to_parent_grant_when_parent_smaller(
+    engine_db: AsyncEngine, caps: ConcurrencyCaps, class_settings: dict[str, tuple[int, float]]
+) -> None:
+    parent_id = await _seed_parent(engine_db, tokens=50, state="running")
+    quota = _BudgetRecordingQuotaInterrogator()
+    eng = _make_engine(
+        db=engine_db,
+        caps=caps,
+        class_settings=class_settings,
+        quota=quota,
+        parent_budget=_resolver(engine_db),
+    )
+    await eng.submit(
+        submit_input=_make_submit_input(parent_task_id=str(parent_id), requested_tokens=200),
+        request_id="child-1",
+    )
+    assert quota.seen_estimated_tokens == 50  # min(200, 50) — the ceiling bit
+
+
+async def test_child_budget_keeps_own_quota_when_parent_larger(
+    engine_db: AsyncEngine, caps: ConcurrencyCaps, class_settings: dict[str, tuple[int, float]]
+) -> None:
+    parent_id = await _seed_parent(engine_db, tokens=1000, state="running")
+    quota = _BudgetRecordingQuotaInterrogator()
+    eng = _make_engine(
+        db=engine_db,
+        caps=caps,
+        class_settings=class_settings,
+        quota=quota,
+        parent_budget=_resolver(engine_db),
+    )
+    await eng.submit(
+        submit_input=_make_submit_input(parent_task_id=str(parent_id), requested_tokens=200),
+        request_id="child-2",
+    )
+    assert quota.seen_estimated_tokens == 200
+
+
+async def test_parentless_submit_budget_unchanged(
+    engine_db: AsyncEngine, caps: ConcurrencyCaps, class_settings: dict[str, tuple[int, float]]
+) -> None:
+    quota = _BudgetRecordingQuotaInterrogator()
+    eng = _make_engine(
+        db=engine_db,
+        caps=caps,
+        class_settings=class_settings,
+        quota=quota,
+        parent_budget=_resolver(engine_db),
+    )
+    await eng.submit(
+        submit_input=_make_submit_input(parent_task_id=None, requested_tokens=200),
+        request_id="top-1",
+    )
+    assert quota.seen_estimated_tokens == 200  # resolver never consulted
+
+
+async def test_not_found_parent_propagates_fail_loud_zero_refusal_rows(
+    engine_db: AsyncEngine, caps: ConcurrencyCaps, class_settings: dict[str, tuple[int, float]]
+) -> None:
+    eng = _make_engine(
+        db=engine_db,
+        caps=caps,
+        class_settings=class_settings,
+        quota=_RaisingQuotaInterrogator(),  # AssertionError if quota is EVER consulted
+        parent_budget=_resolver(engine_db),
+    )
+    pre_task_rows = await _count_task_rows(engine_db)  # 0 — no parent seeded
+    with pytest.raises(ParentTaskBudgetUnavailable) as ei:
+        await eng.submit(
+            submit_input=_make_submit_input(parent_task_id=str(uuid.uuid4()), requested_tokens=200),
+            request_id="child-nf",
+        )
+    assert ei.value.reason == "parent_not_found"
+    # Spec contract: the resolver raise propagates with NO quota reservation
+    # (the _RaisingQuotaInterrogator proves quota was never reached), NO
+    # scheduler.admission_refused row, and NO child task row inserted.
+    assert await _count_admission_refused(engine_db) == 0
+    assert await _count_task_rows(engine_db) == pre_task_rows
+
+
+async def test_terminal_parent_propagates_parent_terminal(
+    engine_db: AsyncEngine, caps: ConcurrencyCaps, class_settings: dict[str, tuple[int, float]]
+) -> None:
+    parent_id = await _seed_parent(engine_db, tokens=50, state="completed")
+    eng = _make_engine(
+        db=engine_db,
+        caps=caps,
+        class_settings=class_settings,
+        quota=_RaisingQuotaInterrogator(),  # AssertionError if quota is EVER consulted
+        parent_budget=_resolver(engine_db),
+    )
+    pre_task_rows = await _count_task_rows(engine_db)  # 1 — the seeded (terminal) parent
+    with pytest.raises(ParentTaskBudgetUnavailable) as ei:
+        await eng.submit(
+            submit_input=_make_submit_input(parent_task_id=str(parent_id), requested_tokens=200),
+            request_id="child-term",
+        )
+    assert ei.value.reason == "parent_terminal"
+    # Spec contract: NO quota reservation, NO admission_refused row, NO child task row.
+    assert await _count_admission_refused(engine_db) == 0
+    assert await _count_task_rows(engine_db) == pre_task_rows

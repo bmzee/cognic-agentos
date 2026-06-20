@@ -47,13 +47,17 @@ def test_resolver_conforms_to_parent_budget_resolver_protocol() -> None:
 
 async def test_local_resolver_returns_snapshot_value() -> None:
     pid = uuid.uuid4()
-    assert await LocalParentBudgetResolver({pid: 1200}).remaining_budget_for(pid) == 1200
+    # tenant_id is Protocol-compat only — the dict-snapshot resolver ignores it.
+    assert (
+        await LocalParentBudgetResolver({pid: 1200}).remaining_budget_for(pid, tenant_id="t")
+        == 1200
+    )
 
 
 async def test_local_resolver_fails_loud_on_unknown_parent() -> None:
     # Missing parent budget is a programming error — fail loud, NOT silent zero.
     with pytest.raises(KeyError):
-        await LocalParentBudgetResolver({}).remaining_budget_for(uuid.uuid4())
+        await LocalParentBudgetResolver({}).remaining_budget_for(uuid.uuid4(), tenant_id="t")
 
 
 # ===========================================================================

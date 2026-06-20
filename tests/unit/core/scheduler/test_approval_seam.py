@@ -594,7 +594,7 @@ class TestWiredReSubmission:
             def __init__(self) -> None:
                 self.budgets = [400, 100]  # narrower on the re-submit
 
-            async def remaining_budget_for(self, parent_task_id: object) -> int:
+            async def remaining_budget_for(self, parent_task_id: object, *, tenant_id: str) -> int:
                 return self.budgets.pop(0)
 
         from cognic_agentos.core.scheduler.engine import SchedulerEngine

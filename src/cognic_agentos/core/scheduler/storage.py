@@ -41,6 +41,7 @@ from sqlalchemy import (
     Column,
     Index,
     Integer,
+    Select,
     String,
     Table,
     Uuid,
@@ -199,6 +200,29 @@ class SchedulerTaskNotFound(Exception):
         self.task_id = task_id
 
 
+@dataclass(frozen=True)
+class _BudgetSnapshot:
+    """Pure-read projection for the parent-budget resolver: the granted token
+    budget + the lifecycle state of a tenant-scoped scheduler task."""
+
+    granted_tokens: int
+    state: SchedulerTaskState
+
+
+def _build_budget_snapshot_stmt(*, task_id: uuid.UUID, tenant_id: str) -> Select[Any]:
+    """SOLE query-construction path for get_budget_snapshot. The WHERE on BOTH
+    task_id AND tenant_id IS the cross-tenant boundary (absent OR cross-tenant
+    → no row). Shared with the SQL-shape regression (no vacuous duplicate)."""
+    return (
+        select(
+            _scheduler_tasks.c.requested_estimated_tokens,
+            _scheduler_tasks.c.state,
+        )
+        .where(_scheduler_tasks.c.task_id == task_id)
+        .where(_scheduler_tasks.c.tenant_id == tenant_id)
+    )
+
+
 class SchedulerStorage:
     """Postgres-backed task lifecycle store. Public methods are async
     + raise on every refusal/failure path; no silent-skip fallbacks
@@ -207,6 +231,22 @@ class SchedulerStorage:
     def __init__(self, engine: AsyncEngine) -> None:
         self._engine = engine
         self._history = DecisionHistoryStore(engine)
+
+    async def get_budget_snapshot(
+        self, task_id: uuid.UUID, *, tenant_id: str
+    ) -> _BudgetSnapshot | None:
+        """Tenant-scoped granted-budget snapshot for the parent-budget resolver.
+        Returns None when the task is absent OR belongs to another tenant (the
+        cross-tenant-invisibility boundary). Pure read — no lock, no mutation."""
+        async with self._engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    _build_budget_snapshot_stmt(task_id=task_id, tenant_id=tenant_id)
+                )
+            ).first()
+        if row is None:
+            return None
+        return _BudgetSnapshot(granted_tokens=row.requested_estimated_tokens, state=row.state)
 
     async def submit(
         self,

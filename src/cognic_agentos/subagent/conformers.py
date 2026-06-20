@@ -18,7 +18,9 @@ class LocalParentBudgetResolver:
     def __init__(self, snapshot: dict[uuid.UUID, int]) -> None:
         self._snapshot = dict(snapshot)
 
-    async def remaining_budget_for(self, parent_task_id: uuid.UUID) -> int:
+    async def remaining_budget_for(self, parent_task_id: uuid.UUID, *, tenant_id: str) -> int:
+        # tenant_id accepted for Protocol-compat; this Sprint-11b dict-snapshot
+        # resolver does NOT tenant-scope (the scheduler-backed resolver does).
         if parent_task_id not in self._snapshot:
             raise KeyError(
                 f"no parent-budget snapshot for parent_task_id={parent_task_id}; "

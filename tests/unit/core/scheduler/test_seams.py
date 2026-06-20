@@ -103,7 +103,7 @@ class TestNullParentBudgetResolverFailsLoud:
     async def test_remaining_budget_for_raises_not_implemented(self):
         sentinel = _NullParentBudgetResolver()
         with pytest.raises(NotImplementedError) as exc_info:
-            await sentinel.remaining_budget_for(uuid.uuid4())
+            await sentinel.remaining_budget_for(uuid.uuid4(), tenant_id="t")
         msg = str(exc_info.value)
         assert "Sprint 11" in msg
         # Per locked round-4 sentinel docstring fix: fail-loud is the

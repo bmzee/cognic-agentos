@@ -31,6 +31,7 @@ import pytest
 
 from cognic_agentos.core.audit import _metadata
 from cognic_agentos.core.emergency.quotas import _reserved_tenant_key
+from cognic_agentos.core.scheduler._seams import ParentTaskBudgetUnavailable
 from cognic_agentos.core.scheduler._types import SubmitInput, TaskActor
 from cognic_agentos.db.adapters.factory import build_adapters
 from cognic_agentos.harness import build_runtime
@@ -178,10 +179,11 @@ async def test_composition_non_installed_pack_refused(memory_registry, memory_se
 
 
 async def test_composition_subagent_submit_fails_loud(memory_registry, memory_settings, tmp_path):
-    """Sub-agent submit (parent_task_id set) -> NotImplementedError from the
-    _NullParentBudgetResolver sentinel (Fork E). The parent-budget consult
-    precedes pack_state/OPA, so this runs unconditionally; 14A wires the real
-    LocalParentBudgetResolver + a run->budget snapshot."""
+    """Sub-agent submit (parent_task_id set) -> ParentTaskBudgetUnavailable
+    ("parent_not_found") from the real SchedulerTaskParentBudgetResolver wired
+    at the composition root: a random parent_task_id has no persisted budget
+    snapshot, so it reads as absent. The parent-budget consult precedes
+    pack_state/OPA, so this runs unconditionally."""
     runtime, adapters, _eng = await _build_composed_runtime(
         memory_registry, memory_settings, tmp_path
     )
@@ -189,8 +191,9 @@ async def test_composition_subagent_submit_fails_loud(memory_registry, memory_se
         scheduler = runtime.scheduler
         assert scheduler is not None
         sub = _submit_input(parent_task_id=str(uuid.uuid4()))
-        with pytest.raises(NotImplementedError):
+        with pytest.raises(ParentTaskBudgetUnavailable) as ei:
             await scheduler.submit(submit_input=sub, request_id="req-3")
+        assert ei.value.reason == "parent_not_found"
     finally:
         await runtime.aclose()
         await adapters.close_all()

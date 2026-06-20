@@ -33,7 +33,7 @@ Every edit is halt-before-commit per
 from __future__ import annotations
 
 import uuid
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
 
 @runtime_checkable
@@ -117,7 +117,24 @@ class ParentBudgetResolver(Protocol):
     task's budget (that's the parent task's own quota-engine
     reservation)."""
 
-    async def remaining_budget_for(self, parent_task_id: uuid.UUID) -> int: ...
+    async def remaining_budget_for(self, parent_task_id: uuid.UUID, *, tenant_id: str) -> int: ...
+
+
+ParentTaskBudgetUnavailableReason = Literal["parent_not_found", "parent_terminal"]
+
+
+class ParentTaskBudgetUnavailable(Exception):
+    """Raised by a ParentBudgetResolver when a valid-UUID parent reference
+    cannot confer budget: absent / cross-tenant (collapsed to
+    ``parent_not_found`` per the cross-tenant-invisibility doctrine) or
+    terminal (``parent_terminal``). The engine does NOT catch this — it
+    propagates fail-loud (the _NullParentBudgetResolver doctrine; NOT a
+    closed-enum scheduler refusal). A malformed parent_task_id string stays
+    the existing SchedulerSubmitInputInvalid input-validation refusal."""
+
+    def __init__(self, reason: ParentTaskBudgetUnavailableReason) -> None:
+        self.reason: ParentTaskBudgetUnavailableReason = reason
+        super().__init__(reason)
 
 
 class _NullQuotaInterrogator:
@@ -185,7 +202,7 @@ class _NullParentBudgetResolver:
     default that ensures a wiring miss surfaces immediately rather
     than silently allowing unbounded sub-agent submissions."""
 
-    async def remaining_budget_for(self, parent_task_id: uuid.UUID) -> int:
+    async def remaining_budget_for(self, parent_task_id: uuid.UUID, *, tenant_id: str) -> int:
         raise NotImplementedError(
             "ParentBudgetResolver not wired. Sprint 11 (sub-agent primitive) "
             "supplies the real implementation; pre-Sprint-11 deployments must "

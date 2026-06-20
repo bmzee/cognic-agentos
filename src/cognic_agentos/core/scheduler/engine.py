@@ -423,7 +423,9 @@ class SchedulerEngine:
                     field="parent_task_id",
                     reason=(f"not a valid UUID string: {submit_input.parent_task_id!r}"),
                 ) from exc
-            parent_remaining = await self._parent_budget.remaining_budget_for(parent_uuid)
+            parent_remaining = await self._parent_budget.remaining_budget_for(
+                parent_uuid, tenant_id=submit_input.tenant_id
+            )
             effective_tokens = compute_child_budget(
                 parent_remaining_budget=parent_remaining,
                 child_pack_quota=submit_input.requested_estimated_tokens,
