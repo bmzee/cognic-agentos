@@ -564,6 +564,25 @@ class SchedulerEngine:
                     policy_reason=policy_decision.policy_reason,
                 )
 
+        # Step 4.5: zero-effective-budget guard (2026-06-20 sub-agent dispatch).
+        # The spawn-side compute_spawn_budget retirement moves the zero/exhausted
+        # refusal here: a zero effective budget (top-level requested 0, OR a parent
+        # narrowed to zero by compute_child_budget) is refused with the EXISTING
+        # refused_quota_exhausted outcome BEFORE any quota reservation — no
+        # reservation made. Placed after pack_state/kill_switch/approval/policy so
+        # those more-specific refusals keep precedence.
+        if effective_tokens <= 0:
+            await self._emit_admission_refused(
+                refused_task_id=task_id,
+                submit_input=effective_submit_input,
+                reason="refused_quota_exhausted",
+                request_id=request_id,
+            )
+            return AdmissionDecision(
+                outcome="refused_quota_exhausted",
+                task_id=None,
+            )
+
         # Step 5: quota reservation (TRUE = reserves; FALSE = no
         # reservation made). T10 — quota sees the narrowed effective
         # value, matching what storage will record per the round-6

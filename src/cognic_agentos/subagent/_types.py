@@ -5,7 +5,10 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
-from typing import Final, Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Final, Literal, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from cognic_agentos.portal.rbac.actor import Actor
 
 # Spawn-time refusal vocabulary (wire-public; pinned by the drift detector).
 SubAgentRefusalReason = Literal[
@@ -93,6 +96,18 @@ class ChildResult:
 
 
 @dataclass(frozen=True)
+class ManagedRunChildSpec:
+    """Runner-specific managed-run execution shape (B + thin-C). Kept OUT of the
+    runner-agnostic SubAgentSpawnRequest so a pack-provided runner is unaffected.
+    No pack_kind/risk_tier — the executor derives them from the validated record.
+    pack_version IS caller-provided (PackRecord has no version column)."""
+
+    pack_id: str
+    pack_version: str
+    argv: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class ChildRunContext:
     """The already-narrowed execution context spawn.py hands to the runner.
     Frozen + stable so threading new fields (trace IDs, memory scope, harness
@@ -100,12 +115,17 @@ class ChildRunContext:
 
     prompt: str
     granted_tools: frozenset[str]
-    budget: int
+    requested_estimated_tokens: int  # was `budget`; the REQUESTED (pre-narrowing)
     tenant_id: str
     current_depth: int
     child_trace_id: str
     request_id: str
     parent_record_id: uuid.UUID
+    parent_task_id: str | None = None  # budget-inheritance key (from request.parent_task_id)
+    # None → pack-provided runner; managed-run runner fail-closes
+    managed_run: ManagedRunChildSpec | None = None
+    # OPTIONAL/additive — the full portal Actor; managed-run runner fail-closes on None
+    actor: Actor | None = None
     memory_scope: str | None = None  # 11.5-ready inert hook; NO durable writes in 11b
 
 

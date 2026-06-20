@@ -166,6 +166,13 @@ class RunRequest:
     #: terminal_state="suspended" with the session_id + checkpoint_id persisted on
     #: the run row (the resume substrate). False = the legacy complete+destroy path.
     suspend_after_exec: bool = False
+    #: Sprint 2026-06-20 (sub-agent dispatch) — when set, the parent scheduler
+    #: task id for budget inheritance; threaded UNCHANGED to SubmitInput (the
+    #: scheduler owns the str→UUID parse + SchedulerSubmitInputInvalid).
+    parent_task_id: str | None = None
+    #: When set, overrides the executor's _DEFAULT_ESTIMATED_TOKENS in the
+    #: SubmitInput (the child's requested quota); None preserves top-level behavior.
+    requested_estimated_tokens: int | None = None
 
 
 @dataclass(frozen=True)
@@ -371,9 +378,14 @@ class ManagedRunExecutor:
             class_="interactive",
             pack_kind=record.kind,
             pack_risk_tier=record.risk_tier,  # T3-validated canonical (was hardcoded read_only)
-            requested_estimated_tokens=_DEFAULT_ESTIMATED_TOKENS,
+            requested_estimated_tokens=(
+                request.requested_estimated_tokens
+                if request.requested_estimated_tokens is not None
+                else _DEFAULT_ESTIMATED_TOKENS
+            ),
             data_classes=record.data_classes or (),  # T3-validated non-None
             approval_delegated_to="sandbox_admission",  # activates the A4a scheduler arm
+            parent_task_id=request.parent_task_id,
         )
         decision = await self._scheduler.submit(submit_input=submit_input, request_id=request_id)
 

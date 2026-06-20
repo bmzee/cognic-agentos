@@ -2219,3 +2219,44 @@ async def test_terminal_parent_propagates_parent_terminal(
     # Spec contract: NO quota reservation, NO admission_refused row, NO child task row.
     assert await _count_admission_refused(engine_db) == 0
     assert await _count_task_rows(engine_db) == pre_task_rows
+
+
+async def test_submit_refuses_top_level_zero_tokens_before_quota(
+    engine_db: AsyncEngine, caps: ConcurrencyCaps, class_settings: dict[str, tuple[int, float]]
+) -> None:
+    eng = _make_engine(
+        db=engine_db,
+        caps=caps,
+        class_settings=class_settings,
+        quota=_RaisingQuotaInterrogator(),  # AssertionError if quota is reached
+    )
+    decision = await eng.submit(
+        submit_input=_make_submit_input(parent_task_id=None, requested_tokens=0),
+        request_id="zero-top",
+    )
+    assert decision.outcome == "refused_quota_exhausted"
+    assert decision.task_id is None
+    assert await _count_task_rows(engine_db) == 0  # no row inserted
+
+
+async def test_submit_refuses_parent_narrowed_to_zero_before_quota(
+    engine_db: AsyncEngine, caps: ConcurrencyCaps, class_settings: dict[str, tuple[int, float]]
+) -> None:
+    parent_id = await _seed_parent(engine_db, tokens=0, state="running")  # parent granted 0
+    eng = _make_engine(
+        db=engine_db,
+        caps=caps,
+        class_settings=class_settings,
+        quota=_RaisingQuotaInterrogator(),
+        parent_budget=_resolver(engine_db),  # the real SchedulerTaskParentBudgetResolver
+    )
+    decision = await eng.submit(
+        submit_input=_make_submit_input(parent_task_id=str(parent_id), requested_tokens=200),
+        request_id="zero-narrowed",
+    )
+    assert decision.outcome == "refused_quota_exhausted"  # min(200, 0) == 0
+    assert decision.task_id is None
+    # admission_refused row written (the refusal evidence); only the seeded
+    # parent row exists — NO child scheduler_tasks row inserted.
+    assert await _count_admission_refused(engine_db) >= 1
+    assert await _count_task_rows(engine_db) == 1

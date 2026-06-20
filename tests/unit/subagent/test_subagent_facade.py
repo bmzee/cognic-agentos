@@ -1,18 +1,19 @@
-"""Sprint 11b T7 — SubAgent facade (thin public delegation over T6's
-SubAgentSpawner). These tests prove the facade is FAITHFUL delegation:
+"""Sprint 11b T7 (refactored 2026-06-20) — SubAgent facade (thin public
+delegation over the live SubAgentSpawner). These tests prove the facade is
+FAITHFUL delegation:
 
-- end-to-end it preserves the full T6 contract (one spawn over a REAL
-  SchedulerEngine on the conftest engine emits the four parent-chain rows,
-  hands the runner the narrowed ChildRunContext, and verifies clean);
+- end-to-end it preserves the spawner contract (one spawn emits the four
+  parent-chain rows, hands the runner the narrowed ChildRunContext, and
+  verifies clean);
 - depth + privilege refusals propagate unchanged (delegated, not re-raised);
 - it reads ``Settings.subagent_max_recursion_depth`` rather than hardcoding 3;
 - it maps every invoke field onto the SubAgentSpawnRequest + routing kwargs
-  with no drop / rename / reinterpretation.
+  (managed_run + actor) with no drop / rename / reinterpretation.
 
 The facade adds NO lifecycle / policy / budget logic of its own — that all
-lives in spawn.py / policy.py (memo D1: test/DI-proven, not a production
-dispatch path). The stub conformers below are re-declared INLINE (NOT imported
-from test_subagent_spawn.py) to keep this file self-contained."""
+lives in spawn.py / policy.py; the scheduler task lifecycle + budget narrowing
+live in the managed-run executor + core/scheduler. There is no scheduler in the
+spawn path any more."""
 
 from __future__ import annotations
 
@@ -23,14 +24,12 @@ import pytest
 
 from cognic_agentos.core.config import Settings
 from cognic_agentos.core.escalation import EscalationStore
-from cognic_agentos.core.scheduler._types import SubmitInput, TaskActor
-from cognic_agentos.core.scheduler.engine import PolicyDecision, SchedulerEngine
-from cognic_agentos.core.scheduler.queue import ConcurrencyCaps
-from cognic_agentos.core.scheduler.storage import SchedulerStorage
+from cognic_agentos.portal.rbac.actor import Actor
 from cognic_agentos.subagent import SubAgent
 from cognic_agentos.subagent._types import (
     ChildResult,
     ChildRunContext,
+    ManagedRunChildSpec,
     SubAgentDepthExceeded,
     SubAgentPrivilegeEscalation,
     SubAgentResult,
@@ -38,32 +37,8 @@ from cognic_agentos.subagent._types import (
 )
 from cognic_agentos.subagent.audit import SubAgentAuditEmitter
 from cognic_agentos.subagent.audit_verifier import verify_subagent_linkage
-from cognic_agentos.subagent.conformers import LocalParentBudgetResolver
 
-
-# --- minimal allow-all scheduler stub conformers (11b test/DI) -------------
-class _AllowQuota:
-    async def would_admit(
-        self, *, task_id: uuid.UUID, tenant_id: str, pack_id: str, estimated_tokens: int
-    ) -> bool:
-        return True
-
-    async def release_reservation(self, task_id: uuid.UUID) -> None:
-        return None
-
-
-class _InactiveKillSwitch:
-    async def is_active(self, *, tenant_id: str, pack_id: str) -> bool:
-        return False
-
-
-class _InstalledPackState:
-    async def is_installed(self, *, tenant_id: str, pack_id: str) -> bool:
-        return True
-
-
-async def _policy_allow(_: SubmitInput) -> PolicyDecision:
-    return PolicyDecision(allow=True, policy_reason=None)
+_MANAGED_RUN = ManagedRunChildSpec(pack_id="cognic-tool-aml", pack_version="1.0.0", argv=("--run",))
 
 
 class _FakeChildRunner:
@@ -78,26 +53,9 @@ class _FakeChildRunner:
         return self.result
 
 
-def _actor() -> TaskActor:
-    return TaskActor(subject="orchestrator", tenant_id="bank-a", actor_type="service")
-
-
-def _scheduler(engine: Any, *, per_tenant_interactive: int = 4) -> SchedulerEngine:
-    """A REAL SchedulerEngine on the conftest engine + allow-all conformers."""
-    return SchedulerEngine(
-        storage=SchedulerStorage(engine),
-        caps=ConcurrencyCaps(
-            per_tenant_interactive=per_tenant_interactive,
-            per_tenant_background=4,
-            per_pack=4,
-            per_actor=4,
-        ),
-        class_settings={"interactive": (4, 0.5), "background": (4, 5.0)},
-        quota_interrogator=_AllowQuota(),
-        kill_switch_interrogator=_InactiveKillSwitch(),
-        parent_budget_resolver=LocalParentBudgetResolver({}),
-        pack_state_interrogator=_InstalledPackState(),
-        policy_evaluator=_policy_allow,
+def _actor() -> Actor:
+    return Actor(
+        subject="orchestrator", tenant_id="bank-a", scopes=frozenset(), actor_type="service"
     )
 
 
@@ -107,15 +65,13 @@ def _subagent(
     *,
     runner: _FakeChildRunner,
     settings: Settings,
-    parent_budget_snapshot: dict[uuid.UUID, int] | None = None,
 ) -> SubAgent:
-    """Build a SubAgent facade over a REAL SchedulerEngine + a fake runner."""
+    """Build a SubAgent facade over a real audit emitter + escalation store +
+    a fake runner (no scheduler in the live spawn path)."""
     return SubAgent(
-        scheduler=_scheduler(engine),
         audit=SubAgentAuditEmitter(decision_store),
         child_runner=runner,
         escalation=EscalationStore(engine),
-        parent_budget=LocalParentBudgetResolver(parent_budget_snapshot or {}),
         settings=settings,
     )
 
@@ -128,11 +84,8 @@ async def _invoke(sub: SubAgent, **overrides: Any) -> Any:
         "current_depth": 0,
         "requested_estimated_tokens": 300,
         "tenant_id": "bank-a",
-        "pack_id": "cognic-tool-aml",
+        "managed_run": _MANAGED_RUN,
         "actor": _actor(),
-        "class_": "interactive",
-        "pack_kind": "tool",
-        "pack_risk_tier": "internal_write",
         "parent_trace_id": "ptrace",
         "parent_task_id": None,
     }
@@ -145,7 +98,7 @@ async def _invoke(sub: SubAgent, **overrides: Any) -> Any:
 async def test_invoke_delegates_and_returns_child_result(
     engine: Any, decision_store: Any, decision_store_rows: Any
 ) -> None:
-    """The facade preserves the full T6 contract end-to-end: it returns the
+    """The facade preserves the spawner contract end-to-end: it returns the
     child result, hands the runner exactly one narrowed ChildRunContext, emits
     the four parent-chain rows in order, and verifies clean."""
     runner = _FakeChildRunner(ChildResult(summary="ok", tokens_used=120, wall_time_used_s=0.3))
@@ -160,8 +113,9 @@ async def test_invoke_delegates_and_returns_child_result(
     assert len(runner.contexts) == 1
     ctx = runner.contexts[0]
     assert ctx.granted_tools == frozenset({"aml_check"})
-    assert ctx.budget == 300
+    assert ctx.requested_estimated_tokens == 300
     assert ctx.current_depth == 1  # parent depth 0 -> child depth 1
+    assert ctx.managed_run == _MANAGED_RUN
 
     rows = await decision_store_rows()
     subagent_rows = [r for r in rows if r.event_type.startswith("subagent.")]
@@ -236,7 +190,8 @@ async def test_invoke_maps_request_and_routing_args_exactly(
     """Pins that the facade maps every invoke field onto the spawner with no
     drop / rename / reinterpretation: a recording fake SubAgentSpawner captures
     its construction kwargs + spawn kwargs; the facade must read the settings
-    depth (7) and thread the five deps + every request + routing field."""
+    depth (7) and thread the three deps + every request + routing field
+    (managed_run + actor)."""
     sentinel = SubAgentResult(
         spawn_record_id=uuid.uuid4(),
         child_result=ChildResult(summary="sentinel", tokens_used=1, wall_time_used_s=0.0),
@@ -257,27 +212,23 @@ async def test_invoke_maps_request_and_routing_args_exactly(
     audit = object()
     runner = object()
     escalation = object()
-    parent_budget = object()
     actor = _actor()
+    managed_run = ManagedRunChildSpec(pack_id="cognic-tool-z", pack_version="2.0.0", argv=("--go",))
 
     sub = SubAgent(
-        scheduler="sched-sentinel",  # type: ignore[arg-type]
         audit=audit,  # type: ignore[arg-type]
         child_runner=runner,  # type: ignore[arg-type]
         escalation=escalation,  # type: ignore[arg-type]
-        parent_budget=parent_budget,  # type: ignore[arg-type]
         settings=Settings(subagent_max_recursion_depth=7),
     )
 
     spawner = sub._spawner
     assert isinstance(spawner, _RecordingSpawner)
-    # construction: settings depth read + the five deps threaded straight through.
+    # construction: settings depth read + the three deps threaded straight through.
     assert spawner.init_kwargs == {
-        "scheduler": "sched-sentinel",
         "audit": audit,
         "child_runner": runner,
         "escalation": escalation,
-        "parent_budget": parent_budget,
         "max_recursion_depth": 7,
     }
 
@@ -289,11 +240,8 @@ async def test_invoke_maps_request_and_routing_args_exactly(
         current_depth=1,
         requested_estimated_tokens=4321,
         tenant_id="tenant-z",
-        pack_id="cognic-tool-z",
+        managed_run=managed_run,
         actor=actor,
-        class_="background",
-        pack_kind="skill",
-        pack_risk_tier="customer_data_read",
         parent_trace_id="trace-z",
         parent_task_id=parent_task_id,
     )
@@ -302,11 +250,8 @@ async def test_invoke_maps_request_and_routing_args_exactly(
 
     sk = spawner.spawn_kwargs
     # routing kwargs pass through verbatim.
-    assert sk["pack_id"] == "cognic-tool-z"
+    assert sk["managed_run"] is managed_run
     assert sk["actor"] is actor
-    assert sk["class_"] == "background"
-    assert sk["pack_kind"] == "skill"
-    assert sk["pack_risk_tier"] == "customer_data_read"
     assert sk["parent_trace_id"] == "trace-z"
     # the request object carries EXACTLY the seven invoke-supplied fields.
     req = sk["request"]
@@ -319,13 +264,5 @@ async def test_invoke_maps_request_and_routing_args_exactly(
         tenant_id="tenant-z",
         parent_task_id=parent_task_id,
     )
-    # the facade passes ONLY request + the six routing kwargs — nothing else.
-    assert set(sk.keys()) == {
-        "request",
-        "pack_id",
-        "actor",
-        "class_",
-        "pack_kind",
-        "pack_risk_tier",
-        "parent_trace_id",
-    }
+    # the facade passes ONLY request + the three routing kwargs — nothing else.
+    assert set(sk.keys()) == {"request", "managed_run", "actor", "parent_trace_id"}

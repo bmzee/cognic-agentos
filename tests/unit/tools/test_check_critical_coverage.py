@@ -95,8 +95,13 @@ _GATE_TOOL_PATH = _REPO_ROOT / "tools" / "check_critical_coverage.py"
 #: ADR-005 + ADR-022 — the scheduler-backed parent-budget-inheritance authority;
 #: the Sprint-13.7 Fork-E ``_NullParentBudgetResolver`` resolution;
 #: core/scheduler/_seams.py stays off-gate per the scheduler precedent) = 132.
+#: + 1 live sub-agent dispatch runner (subagent/managed_run_runner.py per
+#: ADR-005 + ADR-022 — the default ChildRunner: a child sub-agent runs as a
+#: governed managed run; fail-closed + exact tenant-scoped pack identity
+#: resolution + RunResult->ChildResult mapping are the live-dispatch enforcement
+#: surface) = 133.
 #: Bump this in lockstep with any deliberate ``_CRITICAL_FILES`` change.
-_EXPECTED_ENTRY_COUNT = 132
+_EXPECTED_ENTRY_COUNT = 133
 
 #: The 5 modules Sprint 7B.3 promoted to the durable gate, each by its
 #: own landing commit (T3-T6 panels + T7 composer). All ride the

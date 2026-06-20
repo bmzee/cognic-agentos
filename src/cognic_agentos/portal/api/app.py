@@ -711,6 +711,18 @@ def create_app(
                             run_record_store=RunRecordStore(adapters.relational.engine),
                             checkpoint_store=checkpoint_store,
                         )
+                        # 2026-06-20 (ADR-005) — compose the live SubAgentSpawner
+                        # off the SAME runtime + engine. WIRED-but-DORMANT: no
+                        # route/caller consumes app.state.subagent_spawner yet
+                        # (mirrors the 13.7 scheduler / 13.8 MCP-host posture).
+                        from cognic_agentos.harness.sandbox import build_subagent_spawner
+
+                        app.state.subagent_spawner = build_subagent_spawner(
+                            runtime=runtime,
+                            managed_run_executor=app.state.managed_run_executor,
+                            engine=adapters.relational.engine,
+                            settings=settings,
+                        )
                     except Exception:
                         logger.error("sandbox.runtime_construction_failed", exc_info=True)
                         if sandbox_docker_client is not None:
@@ -718,6 +730,7 @@ def create_app(
                         sandbox_docker_client = None
                         app.state.sandbox_backend = None
                         app.state.managed_run_executor = None
+                        app.state.subagent_spawner = None
                 elif settings.sandbox_runtime_enabled:
                     logger.warning(
                         "sandbox.runtime_unavailable_or_disabled",
@@ -926,6 +939,7 @@ def create_app(
     app.state.mcp_host = None  # Sprint 13.8 (ADR-002) — SDK-gated; lifespan populates.
     app.state.sandbox_backend = None  # Sprint 14A-A (ADR-004) — SDK-gated; lifespan populates.
     app.state.managed_run_executor = None  # Sprint 14A-A (ADR-022) — lifespan populates.
+    app.state.subagent_spawner = None  # 2026-06-20 sub-agent dispatch — lifespan populates.
 
     # Middleware add order is OUTER-LAST in Starlette: the call chain
     # walks the most-recently-added middleware first. We want the
