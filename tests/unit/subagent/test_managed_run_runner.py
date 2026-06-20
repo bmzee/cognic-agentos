@@ -56,6 +56,7 @@ def _ctx(
     tenant: str = "t",
     tokens: int = 100,
     parent: str | None = None,
+    approval_request_id: str | None = None,
 ) -> ChildRunContext:
     return ChildRunContext(
         prompt="p",
@@ -69,6 +70,7 @@ def _ctx(
         actor=_actor(tenant),
         parent_task_id=parent,
         managed_run=managed_run,
+        approval_request_id=approval_request_id,
     )
 
 
@@ -83,6 +85,11 @@ def _result(**kw: Any) -> RunResult:
         refusal_reason=None,
     )
     base.update(kw)
+    # mirror the executor: approval_request_id is set ONLY on the pending path
+    base.setdefault(
+        "approval_request_id",
+        "appr-1" if base["terminal_state"] == "pending_approval" else None,
+    )
     return RunResult(**base)
 
 
@@ -179,7 +186,7 @@ async def test_maps_every_run_terminal_state(state: str, ok: bool) -> None:
     "state,expected_summary",
     [
         ("suspended", "suspended_child_unsupported"),
-        ("pending_approval", "pending_approval_child_unsupported"),
+        ("pending_approval", "pending_approval_child"),
     ],
 )
 async def test_special_case_summaries(state: str, expected_summary: str) -> None:
@@ -201,3 +208,40 @@ async def test_completed_nonzero_exit_is_not_ok() -> None:
     )
     child = await runner.run(_ctx(_spec()))
     assert child.ok is False
+
+
+async def test_pending_approval_result_is_honest() -> None:
+    ex = _StubExecutor(_result(terminal_state="pending_approval", exit_code=None))
+    runner = ManagedRunChildRunner(
+        executor=ex, pack_store=_StubPackStore([_Rec("p", uuid.uuid4())])
+    )
+    child = await runner.run(_ctx(_spec()))
+    assert child.ok is False
+    assert child.terminal_state == "pending_approval"
+    assert child.run_id is not None
+    assert child.approval_request_id is not None
+    assert child.summary == "pending_approval_child"
+
+
+async def test_terminal_result_carries_run_id_and_state() -> None:
+    ex = _StubExecutor(_result(terminal_state="completed", exit_code=0))
+    runner = ManagedRunChildRunner(
+        executor=ex, pack_store=_StubPackStore([_Rec("p", uuid.uuid4())])
+    )
+    child = await runner.run(_ctx(_spec()))
+    assert child.ok is True
+    assert child.terminal_state == "completed"
+    assert child.run_id is not None
+    assert child.approval_request_id is None
+
+
+async def test_runner_threads_approval_request_id_into_run_request() -> None:
+    ex = _StubExecutor(_result(terminal_state="completed", exit_code=0))
+    runner = ManagedRunChildRunner(
+        executor=ex, pack_store=_StubPackStore([_Rec("p", uuid.uuid4())])
+    )
+    grant_id = uuid.uuid4()
+    await runner.run(_ctx(_spec(), approval_request_id=str(grant_id)))
+    assert ex.seen is not None
+    # the context carries str; the runner parses it to RunRequest.approval_request_id: uuid.UUID
+    assert ex.seen.approval_request_id == grant_id

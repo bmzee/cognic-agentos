@@ -227,6 +227,8 @@ Extend `_ctx(...)` to accept `approval_request_id` and pass it onto the built `C
 ```
 (The early fail-closed returns — `managed_run`/`actor` None, pack unresolved — keep `run_id=None`/`terminal_state=None`; they never reached the executor.)
 
+The summary rename `"pending_approval_child_unsupported"` → `"pending_approval_child"` (pending is now supported/actionable) also **updates the existing parametrized `test_special_case_summaries` in `test_managed_run_runner.py`** — change its `pending_approval` expected value to `"pending_approval_child"` (a contract change, not a redefinition).
+
 - [ ] **Step 4: Run + the broader subagent suite + ruff + mypy.** `uv run pytest tests/unit/subagent/ -q` (PASS) ; ruff/format clean ; `uv run mypy src tests` (Success).
 
 - [ ] **Step 5: Commit** — `feat(subagent): un-flatten runner — surface pending run_id/state/approval_request_id (ADR-005)`.
