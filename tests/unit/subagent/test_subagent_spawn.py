@@ -194,7 +194,7 @@ async def test_happy_path_spawn_completes_and_chain_verifies(
     assert len(runner.contexts) == 1
     ctx = runner.contexts[0]
     assert ctx.granted_tools == frozenset({"aml_check"})
-    assert ctx.budget == 300
+    assert ctx.requested_estimated_tokens == 300
     assert ctx.current_depth == 1
     assert ctx.parent_record_id == result.spawn_record_id
 
@@ -284,7 +284,7 @@ async def test_scheduler_inheritance_narrows_budget(spawn_harness: Any) -> None:
     )
     await _spawn(spawner, requested_estimated_tokens=300, parent_task_id=str(parent_uuid))
     # spawn.py narrowed the child budget to min(200, 300) = 200 for the ChildRunContext
-    assert runner.contexts[0].budget == 200
+    assert runner.contexts[0].requested_estimated_tokens == 200
     # the scheduler ALSO narrowed: quota saw 200, not the raw requested 300
     assert quota.seen_tokens == [200]
 

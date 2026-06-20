@@ -225,7 +225,7 @@ class SubAgentSpawner:
         context = ChildRunContext(
             prompt=request.prompt,
             granted_tools=granted,
-            budget=budget,
+            requested_estimated_tokens=budget,
             tenant_id=tenant_id,
             current_depth=request.current_depth + 1,
             child_trace_id=child_trace_id,

@@ -150,7 +150,7 @@ async def test_seam_delegates_and_returns_child_result(
     assert len(runner.contexts) == 1
     ctx = runner.contexts[0]
     assert ctx.granted_tools == frozenset({"aml_check"})
-    assert ctx.budget == 300
+    assert ctx.requested_estimated_tokens == 300
     assert ctx.current_depth == 1
 
     rows = await decision_store_rows()
