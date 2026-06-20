@@ -282,6 +282,7 @@ Create `tests/unit/portal/api/subagents/__init__.py` (empty) and `tests/unit/por
 """POST /api/v1/subagents DTOs (ADR-005)."""
 
 import uuid
+from typing import Any
 
 import pytest
 from pydantic import ValidationError
@@ -292,7 +293,7 @@ from cognic_agentos.portal.api.subagents.dto import (
 )
 
 
-def _valid_body() -> dict:
+def _valid_body() -> dict[str, Any]:
     return {
         "parent_run_id": str(uuid.uuid4()),
         "managed_run": {"pack_id": "cognic-tool-x", "pack_version": "1.0.0", "argv": ["--run"]},
