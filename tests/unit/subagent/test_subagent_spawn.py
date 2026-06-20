@@ -111,6 +111,24 @@ async def test_spawn_live_path_narrows_audits_and_delegates_to_runner(
 
 
 @pytest.mark.asyncio
+async def test_spawn_threads_approval_request_id_onto_child_context(spawn_harness: Any) -> None:
+    # request.approval_request_id MUST reach the ChildRunContext the runner sees — the full
+    # SubAgentSpawnRequest -> ChildRunContext link spawn.py owns (the runner then threads it into
+    # RunRequest.approval_request_id). T2 set the context directly; this pins spawn.py's context
+    # build (the gap the approval-retry e2e surfaced).
+    h = spawn_harness
+    await h.spawner.spawn(
+        request=_make_request(approval_request_id="appr-99"),
+        managed_run=_MANAGED_RUN,
+        actor=h.actor,
+        parent_trace_id="trace-1",
+    )
+    ctx = h.child_runner.seen_context
+    assert ctx is not None
+    assert ctx.approval_request_id == "appr-99"
+
+
+@pytest.mark.asyncio
 async def test_spawn_privilege_escalation_blocks_before_runner(spawn_harness: Any) -> None:
     h = spawn_harness
     with pytest.raises(SubAgentPrivilegeEscalation):

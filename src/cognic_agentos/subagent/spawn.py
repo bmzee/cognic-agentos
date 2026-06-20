@@ -130,6 +130,7 @@ class SubAgentSpawner:
             parent_task_id=request.parent_task_id,
             managed_run=managed_run,
             memory_scope=None,
+            approval_request_id=request.approval_request_id,
         )
         child = await self._runner.run(context)
 
