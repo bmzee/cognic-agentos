@@ -28,7 +28,7 @@ Add a **UI event-stream contract** as a first-class AgentOS protocol, peer to MC
 |---|---|---|
 | `agent_run` | `started`, `progress`, `completed`, `failed`, `cancelled`, `paused`, `resumed` | Run-level state machine |
 | `tool_call` | `requested`, `approved`, `denied`, `started`, `progress`, `completed`, `failed` | MCP tool invocation lifecycle |
-| `subagent` | `spawned`, `completed`, `failed`, `recursion_capped` | Sub-agent lifecycle (per ADR-005) |
+| `subagent` | `spawned`, `completed`, `failed`, `pending`, `recursion_capped` | Sub-agent lifecycle (per ADR-005; `pending` added 2026-06-20 for child approval-retry) |
 | `approval` | `pending`, `granted`, `granted_second`, `denied`, `expired` | Runtime tool approval (per ADR-014) |
 | `artifact` | `started`, `chunk`, `completed` | Streamed artifact (per A2A artifacts; per ADR-003) |
 | `interrupt` | `requested_by_agent`, `requested_by_operator`, `acknowledged` | Mid-run pause for human input |
@@ -160,6 +160,13 @@ Per this ADR's §"Decision / Reconnect-safe" + Sprint 7B.4's `_DHReplaySnapshot`
 A future ADR-020 amendment (post-Phase-4 telemetry or bank demand) will introduce the typed `scheduler.*` family with the 8 per-event-type Pydantic models. Open question for that amendment: whether `scheduler.admission_refused` should split into 5 typed sub-events keyed by `payload.reason` (one per refusal closed-enum value) or stay as one event with the discriminated-payload union. Deferred until then.
 
 **No semantic change to ADR-020's existing decisions** — Sprint 10.5 is a confirmation of the original cross-ADR amendment contract, not a renegotiation.
+
+## Sub-agent child approval-retry amendment (2026-06-20) — additive `subagent.pending` event
+
+A new backward-compatible `SubagentPending` event (`type="pending"`) is added to the **subagent** family (per ADR-005's child approval-retry amendment). `_project_subagent_return` routes a `subagent.return` chain row whose `payload['outcome'] == "pending_approval"` to it, carrying the `approval_request_id` + child `run_id` so a UI can render "awaiting approval" + a deep link; the conservative `completed`/`failed`/unknown-→-`failed` projections are byte-for-byte unchanged.
+
+- **Wave-1 family count stays at 11** — `pending` is a new event TYPE within the existing `subagent` family, NOT a 12th family. The `_WAVE_1_FAMILIES` Final is untouched.
+- **Backward-compatible-additive** per the stop-rule: a new `$defs.SubagentPending` + a new `discriminator.mapping.pending` + an appended `oneOf` arm in `.well-known/cognic-ui-events.json` (the snapshot diff is purely these 3 additive entries); existing entries unchanged. The replay-snapshot drift test stays green (the projector always returns a typed event). `SubagentPending` is registered in `_TYPED_PROJECTION_CLASSES` + `__all__` (mirroring its siblings).
 
 ## References
 - ADR-001 (UI is external — this contract is the interface)
