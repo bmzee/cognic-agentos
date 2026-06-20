@@ -700,6 +700,7 @@ def create_app(
                             checkpoint_store=checkpoint_store,
                         )
                         app.state.sandbox_backend = backend
+                        run_record_store = RunRecordStore(adapters.relational.engine)
                         app.state.managed_run_executor = ManagedRunExecutor(
                             scheduler=runtime.scheduler,
                             sandbox_backend=backend,
@@ -708,9 +709,14 @@ def create_app(
                             ),
                             decision_history_store=runtime.decision_history_store,
                             settings=settings,
-                            run_record_store=RunRecordStore(adapters.relational.engine),
+                            run_record_store=run_record_store,
                             checkpoint_store=checkpoint_store,
                         )
+                        # 2026-06-20 (ADR-005, Fork B) — publish the SAME run-record
+                        # store the executor uses so POST /api/v1/subagents can
+                        # resolve parent_run_id -> task_id (tenant-scoped). Co-populated
+                        # with the spawner; the route's combined 503 dep covers either.
+                        app.state.run_record_store = run_record_store
                         # 2026-06-20 (ADR-005) — compose the live SubAgentSpawner
                         # off the SAME runtime + engine. WIRED-but-DORMANT: no
                         # route/caller consumes app.state.subagent_spawner yet
@@ -731,6 +737,7 @@ def create_app(
                         app.state.sandbox_backend = None
                         app.state.managed_run_executor = None
                         app.state.subagent_spawner = None
+                        app.state.run_record_store = None
                 elif settings.sandbox_runtime_enabled:
                     logger.warning(
                         "sandbox.runtime_unavailable_or_disabled",
@@ -940,6 +947,7 @@ def create_app(
     app.state.sandbox_backend = None  # Sprint 14A-A (ADR-004) — SDK-gated; lifespan populates.
     app.state.managed_run_executor = None  # Sprint 14A-A (ADR-022) — lifespan populates.
     app.state.subagent_spawner = None  # 2026-06-20 sub-agent dispatch — lifespan populates.
+    app.state.run_record_store = None  # 2026-06-20 (ADR-005) — lifespan publishes; route resolves.
 
     # Middleware add order is OUTER-LAST in Starlette: the call chain
     # walks the most-recently-added middleware first. We want the
