@@ -881,16 +881,13 @@ class TestA2ANotAvailableErrorIsDistinctFromMcp:
 
 
 class TestCreateProdAppA2AWiringT2:
-    """T2 contract: ``create_prod_app`` logs SDK presence on either
-    branch (info on present, warning on missing) but does NOT mount
-    any A2A routes. T9 will extend the SDK-available branch to mount
-    the receiver; T11 will mount capabilities/cancellation/artifacts.
-
-    R0 P2 reviewer correction (carried forward from the plan): the
-    factory MUST NOT promise wiring it doesn't actually do (Sprint-5
-    T15 R1 P2 #1 caught the same overclaim with MCPHost). T2's
-    contract is the availability log + the ``is_a2a_available()``
-    predicate, nothing else.
+    """``create_prod_app`` logs A2A SDK presence on either branch (info on
+    present, warning on missing). As of the A2A inbound-reachability slice
+    (2026-06-21) the receiver route IS mounted + ``app.state.a2a_endpoint``
+    is predeclared ``None`` (in create_app's body); the real ``A2AEndpoint``
+    is constructed in the lifespan — so a factory-only call (these tests,
+    no lifespan entered) leaves the endpoint ``None``. The presence-log
+    here is the dual-location pattern MCPHost already uses.
     """
 
     def test_create_prod_app_logs_a2a_present_when_available(
@@ -927,8 +924,10 @@ class TestCreateProdAppA2AWiringT2:
         ]
         assert not unavailable_records
 
-        # T2 invariant: app.state.a2a_endpoint is NOT set yet (T9 sets it)
-        assert not hasattr(app.state, "a2a_endpoint")
+        # The A2A reachability slice predeclares app.state.a2a_endpoint None
+        # (in create_app's body); the lifespan constructs it when entered, so
+        # a factory-only call leaves it None.
+        assert app.state.a2a_endpoint is None
 
     def test_create_prod_app_logs_a2a_unavailable_when_missing(
         self,
@@ -973,21 +972,19 @@ class TestCreateProdAppA2AWiringT2:
         ]
         assert not sdk_present_records
 
-        # T2 invariant: app.state.a2a_endpoint is NOT set yet
-        assert not hasattr(app.state, "a2a_endpoint")
+        # Predeclared None (in create_app's body); constructed only in the
+        # lifespan — a factory-only call leaves it None.
+        assert app.state.a2a_endpoint is None
 
     def test_create_prod_app_t2_invariant_a2a_endpoint_unset_either_branch(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """T2 contract: scaffolding only — no A2AEndpoint wiring.
-        T9 extends the SDK-available branch to construct + attach
-        the endpoint. Until then, ``app.state.a2a_endpoint`` MUST
-        remain unset regardless of which branch fires.
-
-        R0 P2 reviewer correction pinned this — same shape as the
-        Sprint-5 T15 R1 P2 #1 lesson (don't claim wiring you don't
-        actually do)."""
+        """The A2A reachability slice (2026-06-21) predeclares
+        ``app.state.a2a_endpoint`` ``None`` in create_app's body and
+        constructs the real ``A2AEndpoint`` in the lifespan. A
+        factory-only call (no lifespan) therefore leaves it ``None``
+        regardless of which SDK-presence branch fires."""
         from cognic_agentos.portal.api import app as app_module
 
         # Hold MCP presence steady so its branch isn't a confounder.
@@ -996,7 +993,7 @@ class TestCreateProdAppA2AWiringT2:
         for available in (True, False):
             monkeypatch.setattr(app_module, "is_a2a_available", lambda v=available: v)
             app = app_module.create_prod_app()
-            assert not hasattr(app.state, "a2a_endpoint"), (
-                f"app.state.a2a_endpoint should not be set in T2 "
-                f"(is_a2a_available={available}); A2AEndpoint wiring is T9"
+            assert app.state.a2a_endpoint is None, (
+                f"app.state.a2a_endpoint should be predeclared None without the "
+                f"lifespan (is_a2a_available={available}); construction is in the lifespan"
             )

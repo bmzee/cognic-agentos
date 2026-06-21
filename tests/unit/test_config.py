@@ -1168,15 +1168,16 @@ class TestSprint6ClosedEnumVocabulary:
 
         assert len(get_args(A2AErrorCode)) == 14
 
-    def test_a2a_policy_refusal_reason_has_11_values(self) -> None:
-        """11 AgentOS-specific refusal reasons surfaced via
+    def test_a2a_policy_refusal_reason_has_13_values(self) -> None:
+        """13 AgentOS-specific refusal reasons surfaced via
         ``data.policy_reason`` detail field on top of a spec-conformant
-        ``error.code``. R2 P2 #1 split."""
+        ``error.code``. R2 P2 #1 split; +2 at the A2A inbound-reachability
+        slice (``method_not_supported_wave1`` + ``tenant_header_missing``)."""
         from typing import get_args
 
         from cognic_agentos.protocol import A2APolicyRefusalReason
 
-        assert len(get_args(A2APolicyRefusalReason)) == 11
+        assert len(get_args(A2APolicyRefusalReason)) == 13
 
     def test_agent_card_validation_reason_has_11_values(self) -> None:
         """11 values: 1 upstream-schema gate + 7 AgentOS-profile gates +

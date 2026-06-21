@@ -54,9 +54,17 @@ truth.
 from __future__ import annotations
 
 import dataclasses
-from typing import Final
+import typing
+from typing import TYPE_CHECKING, Any, Final
 
 from cognic_agentos.protocol import A2AErrorCode, A2APolicyRefusalReason
+
+if TYPE_CHECKING:
+    # Runtime import would be a cycle: a2a_endpoint imports from this
+    # package (and admission-side siblings). ``from_endpoint_error``
+    # below is duck-typed on ``exc.code`` / ``exc.payload`` and never
+    # references this name at runtime.
+    from cognic_agentos.protocol.a2a_endpoint import A2AEndpointError
 
 # ---------------------------------------------------------------------------
 # AgentOS policy reason → A2A 1.0 spec wire code mapping
@@ -112,6 +120,59 @@ _POLICY_REASON_TO_SPEC_CODE: Final[dict[A2APolicyRefusalReason, A2AErrorCode]] =
     # ``feature_subtag`` distinguishing which Wave-2 surface
     # (push-notification, multimodal, task-resumption, ...).
     "wave2_feature_refused": "unsupported_operation",
+    # Wave-1 inbound-receiver gate refusals (Sprint-1): the method
+    # gate refuses any method but ``message/send`` as
+    # ``unsupported_operation``; the dumb route refuses a
+    # missing/empty tenant header as ``invalid_request`` (the
+    # JSON-RPC envelope is well-formed but the request can't be
+    # honoured without a tenant to authorise the token against).
+    "method_not_supported_wave1": "unsupported_operation",
+    "tenant_header_missing": "invalid_request",
+}
+
+
+# ---------------------------------------------------------------------------
+# Wire-integration maps (deferred JSON-RPC route serialization)
+# ---------------------------------------------------------------------------
+
+
+#: Spec wire code → JSON-RPC 2.0 integer ``error.code``. The 5
+#: JSON-RPC-2.0-reserved codes are fixed by the base spec; the 9
+#: A2A-specific codes are the authoritative integers published by the
+#: pinned ``a2a-sdk`` (``a2a.utils.errors.JSON_RPC_ERROR_CODE_MAP`` —
+#: drift-pinned in ``tests/unit/protocol/test_a2a_errors.py`` under
+#: ``COGNIC_RUN_A2A_UPSTREAM=1``). ``error.code`` is an INTEGER per
+#: JSON-RPC 2.0, so the string :data:`A2AErrorCode` must be projected
+#: onto its wire integer here. Every value of :data:`A2AErrorCode`
+#: MUST appear (the completeness test pins this).
+_SPEC_CODE_TO_JSONRPC_INT: Final[dict[A2AErrorCode, int]] = {
+    # JSON-RPC 2.0 reserved (fixed by the base spec):
+    "parse_error": -32700,
+    "invalid_request": -32600,
+    "method_not_found": -32601,
+    "invalid_params": -32602,
+    "internal_error": -32603,
+    # A2A-specific (a2a-sdk a2a.utils.errors.JSON_RPC_ERROR_CODE_MAP):
+    "task_not_found": -32001,
+    "task_not_cancelable": -32002,
+    "push_notification_not_supported": -32003,
+    "unsupported_operation": -32004,
+    "content_type_not_supported": -32005,
+    "invalid_agent_response": -32006,
+    "extended_agent_card_not_configured": -32007,
+    "extension_support_required": -32008,
+    "version_not_supported": -32009,
+}
+
+
+#: HTTP status the route stamps per spec code. Mirrors the per-factory
+#: choices (default 400; ``internal_error`` 500; ``task_not_found``
+#: 404). Single source for the route's ``from_endpoint_error`` path.
+#: Built over :data:`A2AErrorCode` so every code is mapped (the
+#: completeness test pins this).
+_SPEC_CODE_TO_HTTP_STATUS: Final[dict[A2AErrorCode, int]] = {
+    code: (500 if code == "internal_error" else 404 if code == "task_not_found" else 400)
+    for code in typing.get_args(A2AErrorCode)
 }
 
 
@@ -156,6 +217,29 @@ class A2AErrorResponse:
     payload: dict[str, str] | None = None
     http_status: int = 400
 
+    def to_jsonrpc(self, *, jsonrpc_id: str | int | None = None) -> dict[str, Any]:
+        """Serialise to the JSON-RPC 2.0 error envelope. ``error.code``
+        is the integer spec code (via :data:`_SPEC_CODE_TO_JSONRPC_INT`);
+        ``policy_reason`` / ``feature_subtag`` / ``payload`` ride in
+        ``error.data``. ``jsonrpc_id`` is ``None`` for Wave-1 (echoing
+        the request's JSON-RPC id would need body parsing the dumb route
+        deliberately avoids).
+        """
+        data: dict[str, Any] = {}
+        if self.policy_reason is not None:
+            data["policy_reason"] = self.policy_reason
+        if self.feature_subtag is not None:
+            data["feature_subtag"] = self.feature_subtag
+        if self.payload:
+            data.update(self.payload)
+        error_obj: dict[str, Any] = {
+            "code": _SPEC_CODE_TO_JSONRPC_INT[self.code],
+            "message": self.message,
+        }
+        if data:
+            error_obj["data"] = data
+        return {"jsonrpc": "2.0", "id": jsonrpc_id, "error": error_obj}
+
 
 # ---------------------------------------------------------------------------
 # Factories
@@ -188,6 +272,30 @@ def from_policy_reason(
         policy_reason=reason,
         feature_subtag=feature_subtag,
         payload=payload,
+    )
+
+
+def from_endpoint_error(exc: A2AEndpointError) -> A2AErrorResponse:
+    """Build the wire response from an :class:`A2AEndpoint` refusal.
+
+    The endpoint raises ``A2AEndpointError(code, message, **payload)``;
+    ``policy_reason`` (when present) rides in ``payload``. The
+    ``http_status`` comes from :data:`_SPEC_CODE_TO_HTTP_STATUS`.
+
+    Duck-typed on ``exc.code`` / ``exc.payload`` (no ``isinstance``) so
+    this module never imports ``a2a_endpoint`` at runtime — that would
+    be an import cycle (``a2a_endpoint`` imports from this package and
+    its admission-side siblings).
+    """
+    policy_reason = exc.payload.get("policy_reason")
+    extra = {k: str(v) for k, v in exc.payload.items() if k != "policy_reason"}
+    return A2AErrorResponse(
+        code=exc.code,
+        message=str(exc),
+        spec_section="A2A-1.0 §error-codes",
+        policy_reason=policy_reason,
+        payload=extra or None,
+        http_status=_SPEC_CODE_TO_HTTP_STATUS[exc.code],
     )
 
 
@@ -331,6 +439,7 @@ __all__ = (
     "content_type_not_supported",
     "extended_agent_card_not_configured",
     "extension_support_required",
+    "from_endpoint_error",
     "from_policy_reason",
     "internal_error",
     "invalid_agent_response",

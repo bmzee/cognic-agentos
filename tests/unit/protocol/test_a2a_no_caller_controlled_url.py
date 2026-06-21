@@ -547,4 +547,6 @@ class TestThreatModelInvariants:
             "artifact_too_large",
             "artifact_retention_exceeded",
             "wave2_feature_refused",
+            "method_not_supported_wave1",
+            "tenant_header_missing",
         }
