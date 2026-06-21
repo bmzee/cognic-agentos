@@ -48,12 +48,18 @@ def test_harness_dir_has_expected_sources() -> None:
     ``sandbox.py`` (the managed-run backend builder + PackRecordStoreLoader
     conformer — reviewed: imports core/run + packs.storage at module level
     (aiodocker + backend imports are function-local), no Layer-C, no redis
-    client, no second engine, no Bucket-1 default, so the fences below hold)."""
+    client, no second engine, no Bucket-1 default, so the fences below hold).
+    The MCP/A2A startup-discovery slice (2026-06-21) added ``registry_boot.py``
+    (the plugin-registry boot-builder — reviewed: module-level imports are only
+    ``protocol/*`` (pack_attestation_resolver / plugin_registry / trust_gate),
+    with core/db/protocol deps under TYPE_CHECKING; no Layer-C, no redis client,
+    no second engine, no Bucket-1 default, so the fences below hold)."""
     names = {p.name for p in _harness_sources()}
     assert names == {
         "__init__.py",
         "mcp_host.py",
         "memory_policy.py",
+        "registry_boot.py",
         "runtime.py",
         "sandbox.py",
     }, names

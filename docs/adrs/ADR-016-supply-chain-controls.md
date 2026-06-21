@@ -149,6 +149,10 @@ Pack manifests declare a `reproducible: true` flag if the publisher commits to b
 
 Sprint 4 grows from ~3 wu to ~3.5 wu. Sprint 7A grows from 2 wu to ~2.5 wu.
 
+## MCP/A2A startup discovery cross-ref (2026-06-21) — first runtime caller of the full attestation pipeline
+
+The startup plugin-registry boot-builder (`harness/registry_boot.build_and_populate_registry`, per the ADR-002 "MCP/A2A startup discovery + trust-registration amendment (2026-06-21)") is the **first production runtime caller** of the full `register_with_full_attestation_check` supply-chain attestation pipeline (cosign verify-blob over the signed wheel → SBOM digest match → SLSA + in-toto shape → Sigstore-bundle persistence → policy) — previously only the offline CLI (`agentos verify`) + a unit test exercised it. At boot the runtime resolves each installed pack's signed wheel + attestations from a deployment `Settings.pack_attestation_root_path` (via the on-gate trust-input resolver `protocol/pack_attestation_resolver.py`, CC 134) and runs the full pipeline per pack under `_default`. The supply-chain controls themselves are unchanged; this is a new *consumer* of them.
+
 ## References
 - ADR-002 (cosign signing — extended here)
 - ADR-009 (ObjectStoreAdapter — bundle retention)
