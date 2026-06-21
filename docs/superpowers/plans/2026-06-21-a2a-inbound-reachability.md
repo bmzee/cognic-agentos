@@ -465,7 +465,7 @@ Run: `uv run pytest tests/unit/portal/api/test_app_a2a_wiring.py -q` → FAIL (r
     )
 ```
 
-- [ ] **Step 3: SDK-gated endpoint construction in the lifespan.** Replace the T2 SDK-presence-only A2A block (`app.py:1540-1567`, the `if is_a2a_available(): logger.info(...)` log-only stub) with real construction, fail-soft, mirroring the MCP-host block (`:638-660`):
+- [ ] **Step 3: SDK-gated endpoint construction in the lifespan.** **CORRECTION (grounded at execution):** the `app.py:1540` block is inside `create_prod_app` (no `runtime`/`adapters`/`settings` in scope) — it is the SDK-presence *log*, the exact analog of the MCP presence-log, which is **KEPT** (not replaced). The real construction goes in the **lifespan, right after the MCP-host block (~`:677`)**, mirroring `:638-660`. **Real ctors (verified):** `A2AAgentCardVerifier` needs `trust_gate: TrustGate` **and** `http_client: httpx.AsyncClient` (so build `a2a_trust_gate = trust_gate or TrustGate(settings=, audit_store=runtime.audit_store, secret_adapter=adapters.secret)` + a dedicated `a2a_http_client` predeclared/closed exactly like `mcp_http_client` — A2A *does* have an httpx client to close). The skeleton below is the shape; the landed code is in `app.py`:
 ```python
         if is_a2a_available():
             from cognic_agentos.protocol.a2a_authz import A2AAuthzClient
@@ -481,7 +481,13 @@ Run: `uv run pytest tests/unit/portal/api/test_app_a2a_wiring.py -q` → FAIL (r
                     audit_store=runtime.audit_store,
                     decision_history_store=runtime.decision_history_store,
                 )
-                a2a_cards = A2AAgentCardVerifier(...)  # HARNESS-VERIFY ctor at a2a_agent_cards.py:203
+                a2a_cards = A2AAgentCardVerifier(
+                    settings=settings,
+                    trust_gate=a2a_trust_gate,
+                    audit_store=runtime.audit_store,
+                    decision_history_store=runtime.decision_history_store,
+                    http_client=a2a_http_client,
+                )
                 app.state.a2a_endpoint = A2AEndpoint(
                     settings=settings,
                     plugin_registry=a2a_registry,

@@ -464,6 +464,10 @@ def create_app(
         # closes it — a build_runtime failure before assignment must not leave
         # this name unbound when the finally runs.
         mcp_http_client: httpx.AsyncClient | None = None
+        # Sprint 4 (ADR-003): the lifespan owns the A2A AgentCard-verifier httpx
+        # client; predeclare BEFORE the inner try whose finally closes it (mirrors
+        # mcp_http_client) so an early build_runtime failure never leaves it unbound.
+        a2a_http_client: httpx.AsyncClient | None = None
         # Sprint 14A-A (ADR-004): the lifespan owns the sandbox docker client;
         # predeclare so the finally can close it even if construction failed early.
         sandbox_docker_client: Any | None = None
@@ -659,6 +663,71 @@ def create_app(
                 else:
                     logger.warning("mcp.host_unavailable_in_image", extra={"missing_module": "mcp"})
 
+                # Sprint 4 (ADR-003) — A2A inbound endpoint production
+                # construction, SDK-gated (the a2a SDK is an optional `adapters`
+                # extra; the kernel image lacks it). Constructed HERE in the
+                # lifespan (NOT build_runtime, which stays SDK-free) because the
+                # endpoint needs runtime.audit_store / decision_history_store + the
+                # live SecretAdapter (adapters.secret). Mirrors the MCP-host block
+                # above: function-local imports, fail-soft (a construction failure
+                # leaves app.state.a2a_endpoint None + ERROR log + the app still
+                # boots), a2a_http_client predeclared above so the finally can close
+                # it. The unconditionally-mounted /api/v1/a2a route 503s until this
+                # populates app.state.a2a_endpoint.
+                if is_a2a_available():
+                    from cognic_agentos.protocol.a2a_agent_cards import A2AAgentCardVerifier
+                    from cognic_agentos.protocol.a2a_authz import A2AAuthzClient
+                    from cognic_agentos.protocol.a2a_endpoint import A2AEndpoint
+                    from cognic_agentos.protocol.plugin_registry import PluginRegistry
+                    from cognic_agentos.protocol.trust_gate import TrustGate
+
+                    # Reuse an injected registry / trust gate when supplied (the
+                    # 13.8 `plugin_registry or PluginRegistry(...)` precedent); else
+                    # build a default over the live audit store + SecretAdapter (the
+                    # A2A card verifier's TrustGate verifies AgentCard JWS against
+                    # the per-tenant trust root read through adapters.secret).
+                    a2a_registry = plugin_registry or PluginRegistry(
+                        audit_store=runtime.audit_store
+                    )
+                    a2a_trust_gate = trust_gate or TrustGate(
+                        settings=settings,
+                        audit_store=runtime.audit_store,
+                        secret_adapter=adapters.secret,
+                    )
+                    a2a_http_client = httpx.AsyncClient()
+                    try:
+                        a2a_authz = A2AAuthzClient(
+                            settings=settings,
+                            vault_client=adapters.secret,
+                            audit_store=runtime.audit_store,
+                            decision_history_store=runtime.decision_history_store,
+                        )
+                        a2a_cards = A2AAgentCardVerifier(
+                            settings=settings,
+                            trust_gate=a2a_trust_gate,
+                            audit_store=runtime.audit_store,
+                            decision_history_store=runtime.decision_history_store,
+                            http_client=a2a_http_client,
+                        )
+                        app.state.a2a_endpoint = A2AEndpoint(
+                            settings=settings,
+                            plugin_registry=a2a_registry,
+                            authz_client=a2a_authz,
+                            agent_card_verifier=a2a_cards,
+                            audit_store=runtime.audit_store,
+                            decision_history_store=runtime.decision_history_store,
+                        )
+                    except Exception:
+                        logger.error("a2a.endpoint_construction_failed", exc_info=True)
+                        await a2a_http_client.aclose()
+                        a2a_http_client = None
+                        app.state.a2a_endpoint = None
+                else:
+                    logger.warning(
+                        "a2a.endpoint_unavailable_in_image",
+                        extra={"missing_module": "a2a"},
+                    )
+
                 # Sprint 14A-A (ADR-004/022): SDK-gated managed-run sandbox
                 # backend + executor construction. DockerSibling-only; fail-soft.
                 # build_runtime stays SDK-free; this is the lifespan's job (the
@@ -815,6 +884,12 @@ def create_app(
                 # constructed on the SDK-present path.
                 if mcp_http_client is not None:
                     await mcp_http_client.aclose()
+                # Sprint 4 (ADR-003): close the lifespan-owned A2A AgentCard-verifier
+                # httpx client. Bound (predeclared) even if build_runtime raised, so
+                # this never UnboundLocalErrors; None unless the endpoint was
+                # constructed on the SDK-present path.
+                if a2a_http_client is not None:
+                    await a2a_http_client.aclose()
                 # Sprint 14A-A (ADR-004): close the lifespan-owned sandbox docker
                 # client. Predeclared above, so this never UnboundLocalErrors;
                 # None unless the backend was constructed on the SDK-present path.
@@ -944,6 +1019,7 @@ def create_app(
     app.state.quota_engine = None  # Sprint 13.6b — same introspection seam.
     app.state.scheduler = None  # Sprint 13.7 (ADR-022) — same introspection seam.
     app.state.mcp_host = None  # Sprint 13.8 (ADR-002) — SDK-gated; lifespan populates.
+    app.state.a2a_endpoint = None  # Sprint 4 (ADR-003) — SDK-gated; lifespan populates.
     app.state.sandbox_backend = None  # Sprint 14A-A (ADR-004) — SDK-gated; lifespan populates.
     app.state.managed_run_executor = None  # Sprint 14A-A (ADR-022) — lifespan populates.
     app.state.subagent_spawner = None  # 2026-06-20 sub-agent dispatch — lifespan populates.
@@ -1367,6 +1443,19 @@ def create_app(
         tags=["subagents"],
     )
 
+    # A2A inbound receiver surface (ADR-003 — POST /api/v1/a2a/{target_agent}).
+    # Unconditional mount: the endpoint is populated by the lifespan only when
+    # is_a2a_available() (the a2a SDK is an optional `adapters` extra); the route's
+    # request-time dep returns 503 a2a_endpoint_unavailable until then. Lazy import
+    # (the route module is SDK-free, so this is safe in the kernel image).
+    from cognic_agentos.portal.api.a2a import build_a2a_routes
+
+    app.include_router(
+        build_a2a_routes(),
+        prefix="/api/v1/a2a",
+        tags=["a2a"],
+    )
+
     # MCP tool-invocation surface (ADR-002 "Fork D"). Unconditional mount: the
     # host is populated by the lifespan only when is_mcp_available(); the route's
     # request-time dep returns 503 mcp_host_unavailable until then. Lazy import
@@ -1537,19 +1626,16 @@ def create_prod_app() -> FastAPI:
             },
         )
 
-    # Sprint-6 T2: A2A SDK presence check. Mirrors the MCP branch
-    # above — same R3 P1 doctrine: kernel image stays SDK-free;
-    # default-adapters image carries the SDK. T2 ONLY logs SDK
-    # presence here. Route mounting is deferred per the plan's
-    # R0 P2 reviewer correction (the factory MUST NOT promise wiring
-    # it doesn't actually do — same overclaim trap Sprint-5 T15 R1
-    # P2 #1 caught with MCPHost):
-    #   - T9 will mount `routes.a2a` (POST /api/v1/a2a receiver)
-    #   - T11 will mount `routes.a2a_capabilities` /
-    #     `routes.a2a_cancellation` / `routes.a2a_artifacts`
-    #   - T12 will wire UI-event emit hooks at the harness boundary
-    #     (NO HTTP route — Sprint 7B owns the SSE endpoint per
-    #     ADR-020 phase table)
+    # A2A SDK presence check — create_prod_app() LOG ONLY. Mirrors the MCP
+    # branch above (same R3 P1 doctrine: kernel image stays SDK-free;
+    # default-adapters image carries the SDK). As of the ADR-003 A2A
+    # inbound-reachability slice (2026-06-21) the receiver ROUTE is mounted
+    # UNCONDITIONALLY and the `A2AEndpoint` is constructed in create_app()'s
+    # lifespan — this factory only LOGS presence (the dual-location pattern
+    # MCPHost already uses: the presence-log lives here; the real wiring
+    # lives in create_app). Still deferred to their own follow-on slices:
+    #   - the auxiliary A2A surfaces — capabilities / cancellation / artifacts
+    #   - the T12 UI-event emit hooks (NO HTTP route; ADR-020 SSE)
     if is_a2a_available():
         logger.info("a2a.sdk_present_at_startup", extra={"image": "default-adapters"})
     else:
@@ -1557,8 +1643,8 @@ def create_prod_app() -> FastAPI:
         # A2A modules (a2a_authz, a2a_agent_cards, a2a_schema,
         # a2a_version) import + construct without the SDK installed
         # (per Sprint-5 R3 P1 + Sprint-6 same doctrine — SDK-free);
-        # runtime serving (A2AEndpoint.handle, streaming, artifacts)
-        # is unavailable here.
+        # the receiver route still 503s (create_app's lifespan leaves
+        # app.state.a2a_endpoint None without the SDK).
         logger.warning(
             "a2a.endpoint_unavailable_in_image",
             extra={
