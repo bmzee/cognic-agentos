@@ -384,6 +384,30 @@ def test_to_jsonrpc_is_spec_shaped_with_int_code_and_data() -> None:
     assert env["error"]["data"]["policy_reason"] == "tenant_header_missing"
 
 
+def test_to_jsonrpc_includes_feature_subtag_and_payload_in_data() -> None:
+    # exercises the feature_subtag + payload branches + a non-None jsonrpc_id.
+    resp = a2a_errors.A2AErrorResponse(
+        code="unsupported_operation",
+        message="m",
+        spec_section="s",
+        feature_subtag="streaming",
+        payload={"method": "message/stream"},
+    )
+    env = resp.to_jsonrpc(jsonrpc_id=7)
+    assert env["id"] == 7
+    assert env["error"]["data"]["feature_subtag"] == "streaming"
+    assert env["error"]["data"]["method"] == "message/stream"
+
+
+def test_to_jsonrpc_omits_data_when_no_detail() -> None:
+    # exercises the no-policy_reason / no-feature_subtag / no-payload branch:
+    # the error object carries NO "data" key.
+    resp = a2a_errors.A2AErrorResponse(code="internal_error", message="m", spec_section="s")
+    env = resp.to_jsonrpc(jsonrpc_id=None)
+    assert "data" not in env["error"]
+    assert env["error"]["code"] == -32603  # internal_error
+
+
 @pytest.mark.skipif(
     os.environ.get("COGNIC_RUN_A2A_UPSTREAM") != "1",
     reason=(

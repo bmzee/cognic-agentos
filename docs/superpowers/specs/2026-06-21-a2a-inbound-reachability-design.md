@@ -1,10 +1,10 @@
 # A2A Inbound Reachability (receiver-only, Wave-1) — Design Spec
 
-> **Status:** DRAFT — pending user review before writing-plans.
+> **Status:** LANDED (2026-06-21) — implemented on `feat/a2a-inbound-reachability` (Sprints 1-5). The deferred JSON-RPC route-integration serializer (see the §3 plan-grounding note) is built; `tenant_header_missing` was renamed from `a2a_tenant_header_missing` to honour the no-`a2a_`-prefix invariant. CC count stays 133; no migration. Conformance: `tests/conformance/a2a/test_receiver_wave1_posture.py`.
 
 ## Problem
 
-The entire A2A inbound stack is production-grade *logic* but **unreachable**: no HTTP route is mounted, and `portal/api/app.py:1540-1552` explicitly defers the mounts ("T9 will mount `routes.a2a`…"). A bank deploying AgentOS today cannot receive a single A2A request — every Wave-1 A2A capability is present in code and absent from the wire.
+**Before this slice,** the entire A2A inbound stack was production-grade *logic* but **unreachable**: no HTTP route was mounted (`portal/api/app.py` deferred the mounts), so a bank deploying AgentOS could not receive a single A2A request — every Wave-1 A2A capability was present in code and absent from the wire. **This slice closed that gap** — the receiver route + the SDK-gated lifespan-constructed endpoint are now live (see the Status note above + §1-§5).
 
 This slice makes the **receiver core** reachable: a route around the ready `A2AEndpoint.handle()` for the `message/send` method, plus the one endpoint safety-gate that a correct receiver requires. It is the first cut of the "Protocol Reachability" epic; **MCP startup discovery is the immediately-following slice**, and the A2A auxiliary surfaces are a **follow-on**.
 
