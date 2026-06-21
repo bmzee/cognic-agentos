@@ -1,76 +1,98 @@
 # MCP/A2A Startup Discovery + Trust-Registration (single-tenant `_default`) — Design Spec
 
-> **Status:** DRAFT — pending user review before writing-plans.
+> **Status:** DRAFT (rev. 4, 2026-06-21 — signed-wheel blob + dual-`TrustGate` root reconciliation) — pending **plan approval before execution**.
+>
+> **Scope corrections from plan-grounding:** (1) the full `register_with_full_attestation_check` path needs a `PackAttestations` + `SupplyChainPipeline` + `ObjectStore` (a runtime resolver — on-gate trust primitive). (2) Installed packs **don't carry their attestations** (`cli/sign.py` writes them next to the wheel), so there's no `locate_file` sourcing — this slice defines a deployment `Settings.pack_attestation_root_path` (`core/config.py` stop-rule touch). (3) `TrustGate.verify_pack_signature` cosign-verifies the **signed wheel** as the blob, canonicalizing `signature_path`+`blob_path` under `signature_root_path` and `trust_root` under `trust_root_prefix` — so the wheel is a 5th required artefact and the boot needs its **own** `registration_trust_gate` whose `signature_root_path` is the attestation root.
 
 ## Problem
 
-Both the MCP host (`build_mcp_host`) and the A2A receiver (`A2AEndpoint`) resolve packs against a `PluginRegistry` that is **empty at default startup** — `discover()` is never called, and the two surfaces each build their **own** `PluginRegistry(...)` (`app.py:646` for MCP, `:689` for A2A). So in a default deploy MCP `list_tools`/`call_tool` return 404 (empty catalog) and A2A `message/send` to any agent → `unknown_target` (no agents registered), **even when trusted pack wheels are installed**.
-
-This slice (the second cut of the "Protocol Reachability" epic, sequenced right after A2A inbound reachability) populates **one shared registry at boot** — running the real trust gate (signature + `_default` allow-list, per pack) — and feeds **both** surfaces from it.
+The MCP host (`build_mcp_host`) and A2A receiver (`A2AEndpoint`) resolve packs against a `PluginRegistry` **empty at default startup** — `discover()` is never called, and each surface builds its **own** `PluginRegistry(...)` (`app.py:646` MCP, `:689` A2A). So MCP 404s and A2A → `unknown_target`, **even when trusted pack wheels are installed**. This slice (the second "Protocol Reachability" cut) populates **one shared registry at boot** via the full `register_with_full_attestation_check` pipeline per pack, feeding both surfaces.
 
 ## Scope
 
-**IN:**
-1. A boot discovery + trust-registration builder (off-gate `harness/registry_boot.py`).
-2. The shared-registry unification — one registry → both `build_mcp_host` and `A2AEndpoint`.
-3. `app.state.plugin_registry` exposure (preseed `None`; lifespan assigns).
-4. The `_default` allow-list load (explicit, **fail-closed**).
+**IN:** (1) `Settings.pack_attestation_root_path` (`core/config.py`); (2) a runtime **`PackAttestations` resolver** (on-gate trust primitive) resolving from `<root>/<distribution_name>/<version>/`; (3) an off-gate boot-builder running the **full** registration path with a **registration-specific `TrustGate`**; (4) the shared-registry unification on `app.state.plugin_registry`; (5) the `_default` allow-list (fail-closed).
 
-**OUT (deferred, documented non-goals):**
-- **Multi-tenant per-tenant pack trust/visibility** — the registry `_records` is global `(PluginKind, name)`-keyed and the consumers don't re-filter per calling tenant, so true per-tenant trust needs the registry re-keyed `(kind, name, tenant)` **or** call-time allow-list filtering — a registry/consumer **redesign**, its own slice.
-- Outbound A2A; the auxiliary A2A surfaces (capabilities/cancellation/artifacts).
+**OUT (deferred):** multi-tenant per-tenant trust/visibility (registry re-key or call-time filter); bundling attestations inside wheels (a `cli/sign.py` change); outbound A2A; auxiliary A2A surfaces.
 
 ## Design
 
-### 1. The boot-builder `harness/registry_boot.py` (off-gate)
+### 1. The setting `Settings.pack_attestation_root_path: str | None` (`core/config.py` — stop-rule touch)
 
-`build_and_populate_registry(*, settings, audit_store, decision_history_store, trust_gate) -> PluginRegistry` — mirrors the existing `harness/mcp_host.py` / `harness/sandbox.py` builder pattern. It:
-- **loads the `_default` allow-list** from `policies/_default/plugin_allowlist.json` → the `_default` `frozenset[str]` (the path resolution is a harness-verify — `Settings` value vs the hard `policies/_default/` path),
-- constructs a fresh `PluginRegistry(audit_store=…)`,
-- `discover()` → for each `DiscoveredPack`, `await registry.register_with_full_attestation_check(pack, trust_gate=…, tenant_id="_default", tenant_allowlist=<_default frozenset>, …)` — **always the explicit frozenset, never `None`** (no accidental allow-all boot),
-- returns the populated registry. The registry's own `plugin.registration_succeeded` / `plugin.registration_refused` chain events ARE the boot evidence (no extra audit surface).
+Default `None`. The operator places each installed pack's signed artefacts at `<pack_attestation_root_path>/<distribution_name>/<version>/`. Additive nullable field; focused settings tests pin default + env override.
 
-### 2. The shared-registry unification (lifespan, off-gate `app.py`)
+### 2. The `PackAttestations` resolver — `protocol/pack_attestation_resolver.py` (NEW, **on-gate**, critical control)
 
-Build one shared `trust_gate` (the slice already builds an `a2a_trust_gate`/`TrustGate` in the A2A block — promote it to a single shared instance), then resolve the registry ONCE:
-- `plugin_registry` injected (non-`None`) → **caller owns pre-population; no discovery** (the bank-overlay seam),
-- `plugin_registry is None` → `build_and_populate_registry(...)` (boot discovers + full-attestation-registers under `_default`).
+**Exact signature:** `resolve_pack_attestations(pack: DiscoveredPack, *, pack_attestation_root: Path, cosign_trust_root: Path) -> PackAttestations`. Pure (reads no settings; the boot-builder passes both roots). Trust-input primitive → on-gate (95/90, negative-path). For `base = pack_attestation_root / record.distribution_name / record.distribution_version`:
+- resolve the **5 required** artefacts + 3 optional under `base`, each real-path **canonical-contained under `pack_attestation_root`** (`distribution_name`/`version` are pack-controlled entry-point metadata; a crafted `../` is rejected),
+- the **signed wheel** is the cosign blob: glob `<base>/*.whl` — exactly one → `cosign_blob_path`; **zero → `attestation_required_artefact_missing`; multiple → `attestation_wheel_ambiguous`**,
+- read the **required** `sbom_signed_digest` from `slsa-provenance.intoto.json` → `predicate.buildDefinition.externalParameters.sbom_digest_sha256`; absent/malformed → `sbom_digest_unsourced`,
+- `cosign_trust_root` passes through to `PackAttestations.cosign_trust_root`,
+- closed-enum `PackAttestationResolutionError.reason` (**6 values**): `attestation_distribution_unidentified`, `attestation_path_escapes_root`, `attestation_required_artefact_missing`, `attestation_required_artefact_empty`, `attestation_wheel_ambiguous`, `sbom_digest_unsourced`. NEVER `EntryPoint.load()`.
 
-Thread that **single** `registry` into **both** `build_mcp_host(registry=…)` and `A2AEndpoint(plugin_registry=…)`, replacing the two `or PluginRegistry(...)` fallbacks. Expose it on **`app.state.plugin_registry`** (preseeded `None` in the body, like `mcp_host`/`a2a_endpoint`) so it's inspectable + testable at app state.
+**The contract (required / deployment / optional):**
 
-### 3. The `_default` allow-list (fail-closed)
+| Item | Kind | Source | Fail-closed (typed) |
+|---|---|---|---|
+| `cosign.sig` | required pack artefact | `<base>/cosign.sig` | `…_missing` / `…_empty` |
+| **signed wheel `*.whl`** (= `cosign_blob_path`) | **required pack artefact (the cosign blob)** | `<base>/*.whl` — **exactly one** | 0 → `…_missing` ; **>1 → `attestation_wheel_ambiguous`** ; empty → `…_empty` |
+| `bundle.sigstore` | required pack artefact | `<base>/bundle.sigstore` | `…_missing` / `…_empty` |
+| `sbom.cdx.json` | required pack artefact | `<base>/sbom.cdx.json` | `…_missing` / `…_empty` |
+| `slsa-provenance.intoto.json` | required pack artefact | `<base>/slsa-provenance.intoto.json` | `…_missing` / `…_empty` |
+| `sbom_signed_digest` | required derived | SLSA `…externalParameters.sbom_digest_sha256` | `sbom_digest_unsourced` |
+| `pack_attestation_root` | deployment input | `Settings.pack_attestation_root_path` | unset → empty registry (§5) |
+| `cosign_trust_root` | deployment input | **`Path(Settings.trust_root_prefix) / "_default" / "cosign.pub"`** (boot-builder; LOCKED convention) | missing / non-file / empty → boot raises (§5 → 503) |
+| path-containment | invariant | resolved real-path under the root | `attestation_path_escapes_root` |
+| distribution identity | invariant | `record.distribution_name` ≠ `"<unknown>"` | `attestation_distribution_unidentified` |
+| `intoto-layout.json` / `vuln-scan.json` / `license-audit.json` | optional grace-period | `<base>/<name>` | absent → `None` |
 
-The allow-list is loaded explicitly and passed as a frozenset. **Missing file / missing `_default` key / malformed JSON → the builder raises a clear typed error** (fail-closed for registration — no allow-all). The plan VERIFIES the `register_with_full_attestation_check` `tenant_allowlist=None` semantics, but the landed code never relies on `None`.
+(`slsa-provenance.intoto.json` is required at the resolver because it carries the required digest, even though the registration *grade* treats SLSA as optional. HARNESS-VERIFY no existing supply-chain policy promotes an "optional" file to mandatory.)
 
-### 4. Failure-state + observability (the locked choices)
+### 3. The boot-builder `harness/registry_boot.py` (off-gate) — owns the `registration_trust_gate`
 
-| Failure | Behaviour |
+`build_and_populate_registry(*, settings, audit_store, decision_history_store, supply_chain, object_store) -> PluginRegistry`. **It constructs its own `registration_trust_gate`** (NOT a passed-in shared one — see §4 trapdoor):
+```python
+registration_settings = settings.model_copy(
+    update={"signature_root_path": Path(settings.pack_attestation_root_path)})
+registration_trust_gate = TrustGate(settings=registration_settings, ...)
+```
+so `verify_pack_signature` canonicalizes the resolver's `cosign.sig`+wheel under the *same* root the resolver used. It resolves `cosign_trust_root = Path(settings.trust_root_prefix) / "_default" / "cosign.pub"` (the LOCKED deployment convention this slice defines — no production helper exists; it formalizes the test-only file-layout precedent; **NOT `signing_trust_root_path`**) and **fail-closes if it is missing / not a file / empty** (raise → §5 503); it is under `trust_root_prefix` by construction. It loads the `_default` allow-list (fail-closed); fresh `PluginRegistry(audit_store=…)`; `discover()` → per pack: `resolve_pack_attestations(pack, pack_attestation_root=…, cosign_trust_root=…)` → `await registry.register_with_full_attestation_check(pack, attestations, trust_gate=registration_trust_gate, supply_chain=…, object_store=…, tenant_id="_default", tenant_allowlist=<frozenset>)`. **Per-pack fail-soft.** Returns the registry. `plugin.registration_*` chain rows are the boot evidence.
+
+### 4. The shared-registry unification (lifespan, off-gate `app.py`) — two named `TrustGate`s
+
+`registry = plugin_registry or build_and_populate_registry(...)`; thread the **single** `registry` into **both** `build_mcp_host(registry=…)` and `A2AEndpoint(plugin_registry=…)`; expose on **`app.state.plugin_registry`** (preseed `None`).
+
+**TRAPDOOR (locked):** the boot's `registration_trust_gate` (`signature_root_path` = `pack_attestation_root_path`) and the endpoint's `a2a_trust_gate` (normal settings, for agent-card JWS under `trust_root_prefix`) are **named separately and never silently shared**. The boot-builder constructs its own; the injected/A2A `trust_gate` MUST NOT be reused for boot registration. (Agent-card JWS verification uses `trust_root_prefix`, not `signature_root_path`, so the two roles are genuinely distinct — HARNESS-VERIFY the A2A card path does not read `signature_root_path`.)
+
+### 5. Failure-state (locked)
+
+| Condition | Behaviour |
 |---|---|
-| Per-pack registration **refusal** (bad signature / `not_in_tenant_allowlist`) | Stored as a refusal in the registry + logged. Fail-soft — the pack is simply absent from the catalog; boot continues. |
-| Per-pack registration **exception** (e.g. cosign binary unavailable) | Caught per-pack, the pack skipped + logged. Boot continues → a **partially** populated registry on `app.state.plugin_registry`. |
-| **Allow-list load failure** (missing/malformed) | The builder raises → the lifespan's fail-soft catch logs ERROR + leaves `app.state.plugin_registry = None`, and the MCP host + A2A endpoint stay `None` → **both surfaces 503** (fail-closed, *distinguishable* from an empty-but-healthy catalog). The app still boots. |
+| `pack_attestation_root_path` **unset** | Boot builds a **shared but EMPTY** registry → both surfaces **reachable, resolve no packs**; log `pack_attestation_root_unconfigured` (WARN; **not 503**). |
+| Per-pack **resolution failure** (`PackAttestationResolutionError`) or **registration exception** | Caught per-pack, skipped + logged → **partially** populated registry. |
+| Per-pack **registration refusal** (allow-list / cosign / SBOM / SLSA / policy) | Stored as a refusal + logged; absent from the catalog. |
+| **`_default` allow-list load failure** (missing/malformed) | Builder raises → `app.state.plugin_registry = None` + host/endpoint `None` → **both surfaces 503** + ERROR (broken config, distinct from benign unset-root). |
+| **`_default` trust root** (`<trust_root_prefix>/_default/cosign.pub`) **missing / not-a-file / empty** | Builder raises → `app.state.plugin_registry = None` → **both surfaces 503** + ERROR (broken config; distinct from the benign unset-attestation-root). |
+| **No SDK** | `app.state.plugin_registry` stays `None` → 503 on the SDK gate (unchanged). |
 
-### 5. Honest scope (drives the closeout language)
+### 6. Honest scope (closeout language)
 
-This registers **whatever packs are installed** (entry-point-discovered). A bare kernel/default-adapters image with **no pack wheels installed** → `discover()` returns `[]` → **empty catalog, correctly** (not a failure). The slice's value: *when* trusted packs are installed, they're discovered + trust-verified + registered at boot, instead of the catalog being empty regardless. The closeout updates BOTH surfaces' language from "registry empty by default" → **"registry is populated when trusted pack wheels are installed; empty remains correct when none are installed."**
+Registers **installed signed packs whose signed wheel + attestations the operator placed under `pack_attestation_root_path`**. A bare image, no installed packs, or no `pack_attestation_root_path` → empty catalog, **correctly**. Closeout updates both surfaces → **"populated when trusted signed pack wheels + attestations are present under `pack_attestation_root_path`; empty remains correct otherwise."**
 
 ## Testing
 
-- **Boot loop populates** — with a stub/installed discoverable pack (allow-listed + trust-passing), `build_and_populate_registry` yields a registry whose registered set the MCP `list_tools` + the A2A routing both resolve against (the unification — one registry feeds both).
-- **Per-pack fail-soft** — a bad-signature / non-allow-listed pack → a refusal stored, the other packs still registered; a per-pack exception → that pack skipped, others registered (partial registry).
-- **Allow-list fail-closed** — missing file / missing `_default` key / malformed → the builder raises; the lifespan leaves `app.state.plugin_registry = None` → both surfaces 503 (NOT an empty allow-all catalog).
-- **Injection seam** — an injected `plugin_registry` → no `discover()` call (caller owns pre-population); pinned by spying `discover`.
-- **Bare-no-packs** — `discover()` `[]` → empty registry, both surfaces healthy-but-empty (correct).
-- **`app.state.plugin_registry`** is the injected-or-boot-populated instance (and is the SAME object `build_mcp_host` + `A2AEndpoint` received).
+- **Resolver (on-gate, concrete negatives):** happy path (5 required incl. exactly-one wheel + optionals → `PackAttestations`, 64-hex digest, `cosign_blob_path` == the wheel) + each typed case: required missing, required empty, **zero wheels → `attestation_required_artefact_missing`**, **two wheels → `attestation_wheel_ambiguous`**, `../`-escape, `sbom_digest_unsourced`, `<unknown>`-distribution.
+- **Settings:** `pack_attestation_root_path` default `None` + env override.
+- **Boot-builder:** constructs `registration_trust_gate` with `signature_root_path == pack_attestation_root_path` (pinned); discover→resolve→full-register spied (`trust_gate is registration_trust_gate`, tenant_id `_default`, explicit frozenset); unset-root → empty + `pack_attestation_root_unconfigured`; per-pack failure → skip+partial; allow-list missing/malformed → raises.
+- **Unification:** `app.state.plugin_registry` predeclared `None`; one registry = SAME object both surfaces receive; injected registry → no `discover()`; allow-list failure → `None` → both 503; unset-root → empty → both reachable. **The A2A `trust_gate` is NOT the boot `registration_trust_gate` (distinct objects — pinned).**
 
 ## CC / ADR / migration posture
 
-- **Off-gate** — the boot-builder (`harness/registry_boot.py`) + the lifespan wiring mirror the 13.8/14A off-gate builders. `protocol/plugin_registry.py` (on-gate) is **consumed, not modified** — `discover()` + `register_with_full_attestation_check()` already exist. **No new gate module → CC stays 133.** No migration.
-- **ADR-002 amendment** (MCP startup discovery/trust-registration) + the cross-reference in the ADR-003 A2A amendment (the registry that now feeds the receiver) + AS_BUILT milestone + the closeout-language update for both surfaces.
+- **CC 133 → 134** — `protocol/pack_attestation_resolver.py` on the gate (`_CRITICAL_FILES` + `_EXPECTED_ENTRY_COUNT` bump). `core/config.py` stop-rule (one nullable field; off the per-file gate, halt-before-commit scrutiny + settings tests). Boot-builder + lifespan off-gate; `plugin_registry.py` consumed, not modified. No migration.
+- **ADR-002 amendment** (startup discovery/trust-registration + `pack_attestation_root_path` + the dual-`TrustGate` root split) + **ADR-016 cross-ref** (first production caller of the full attestation pipeline) + ADR-003 cross-ref + AS_BUILT milestone + closeout-language update.
 
 ## Harness-verify points (for the plan — don't guess)
 
-- The exact `register_with_full_attestation_check(...)` parameters beyond `tenant_id`/`tenant_allowlist` (`signature_digest`, `license_allowlist`, `attestation_grade` — and how a "full attestation" run sources them from the discovered pack); and the `tenant_allowlist=None` semantics (VERIFY only — the landed code passes the explicit frozenset).
-- The allow-list path: a `Settings` value vs the hard `policies/_default/plugin_allowlist.json` — and whether a loader already exists elsewhere to reuse.
-- The exact `build_mcp_host` / `A2AEndpoint` registry kwargs to thread the shared instance into (confirm against the `app.py:646`/`:689` blocks).
-- The `TrustGate` construction already in the A2A block (`a2a_trust_gate`) — promote to one shared instance the registration + the A2A endpoint both use.
+- **LOCKED (not harness-verify):** `cosign_trust_root = Path(Settings.trust_root_prefix) / "_default" / "cosign.pub"` — this slice defines the convention (no production helper exists; it formalizes the test-only file-layout precedent); the boot fail-closes if it is missing / not-a-file / empty.
+- `Settings.model_copy(update={"signature_root_path": …})` is the right override mechanism (pydantic v2; no re-validation surprise on the `Path` field).
+- The A2A agent-card verification path does **not** read `signature_root_path` (confirms the dual-`TrustGate` roles are independent).
+- The exact `PackAttestations` fields (`plugin_registry.py:462`) + full `register_with_full_attestation_check` deps (`require_full_grade`, `license_allowlist`, `vuln_thresholds`, `mcp_admission`) + `tenant_allowlist=None` semantics (VERIFY only); `protocol/mcp_manifest.py` path-containment helper (`:176-203`) to reuse; `SupplyChainPipeline(settings=…)` + the `object_store` adapter; the `build_mcp_host`/`A2AEndpoint` registry kwargs; the `DiscoveredPack`/`PluginRecord` constructor for the resolver fixture.
