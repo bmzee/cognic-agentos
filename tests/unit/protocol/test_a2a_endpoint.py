@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import json
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -139,7 +140,12 @@ def endpoint(
 def _good_call_kwargs(**overrides: Any) -> dict[str, Any]:
     base: dict[str, Any] = {
         "target_agent": "agent_alpha",
-        "payload": b'{"message":"hello"}',
+        # The Wave-1 receiver serves only ``message/send`` (Gate 3.5,
+        # below). A valid happy-path call therefore carries that
+        # method; the default payload reflects real Wave-1 traffic so
+        # every proceed-past-the-gate test exercises a method-gate-clean
+        # request. Refusal-path tests override ``payload`` explicitly.
+        "payload": b'{"method":"message/send","message":"hello"}',
         "authorization_header": "Bearer active-token",
         "a2a_version_header": "1.0",
         "parent_trace_id": "parent-trace-1",
@@ -148,6 +154,13 @@ def _good_call_kwargs(**overrides: Any) -> dict[str, Any]:
     }
     base.update(overrides)
     return base
+
+
+def _payload(method: str) -> bytes:
+    """A minimal JSON-RPC envelope carrying ``method`` with empty
+    params — no ``parts``, so Gate 3 (Wave-2) lets it through and the
+    method allow-list (Gate 3.5) is the deciding gate."""
+    return json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": {}}).encode()
 
 
 # =============================================================================
@@ -405,6 +418,101 @@ class TestGate3Wave2:
         assert exc.value.code == "unsupported_operation"
         assert exc.value.payload["policy_reason"] == "wave2_feature_refused"
         assert exc.value.payload["wave2_feature"] == "task_resumption"
+
+
+# =============================================================================
+# Gate 3.5 — Wave-1 method allow-list
+# =============================================================================
+
+
+class TestGate35MethodAllowList:
+    """The Wave-1 receiver serves only ``message/send``. Every other
+    JSON-RPC method — real A2A methods this Wave-1 receiver does not
+    yet serve (``tasks/cancel`` / ``tasks/get`` / ``message/stream``)
+    plus bogus ones — refuses with spec ``unsupported_operation`` +
+    policy-reason ``method_not_supported_wave1`` BEFORE any task is
+    minted, the registry is consulted, or the agent handler runs.
+
+    The gate sits between Gate 3 (Wave-2) and Gate 4 (routing): a
+    non-``message/send`` method that is NOT a Wave-2 method (so it
+    clears Gate 3) must still be refused here rather than dispatched.
+    """
+
+    @pytest.mark.parametrize(
+        "method", ["tasks/cancel", "tasks/get", "message/stream", "bogus/method"]
+    )
+    async def test_non_send_methods_refused_before_dispatch(
+        self,
+        endpoint: A2AEndpoint,
+        plugin_registry: MagicMock,
+        method: str,
+    ) -> None:
+        """Refuse with the spec code + policy reason, and prove the
+        side-effect contract: NO task minted, NO routing (``load``
+        never called), NO agent dispatch (``handle`` never called)."""
+        with pytest.raises(A2AEndpointError) as exc:
+            await endpoint.handle(**_good_call_kwargs(payload=_payload(method)))
+        assert exc.value.code == "unsupported_operation"
+        assert exc.value.payload["policy_reason"] == "method_not_supported_wave1"
+        # Side-effect contract — the gate fires before Gate 4 / Gate 5:
+        assert endpoint._tasks == {}  # no TaskRecord minted
+        plugin_registry.load.assert_not_called()  # routing never reached
+        plugin_registry._agent_stub.handle.assert_not_called()  # no dispatch
+
+    async def test_method_gate_emits_exactly_one_refusal_row(
+        self,
+        endpoint: A2AEndpoint,
+        audit_store: MagicMock,
+        decision_history_store: MagicMock,
+    ) -> None:
+        """Exactly one chained refusal-evidence row (audit + decision)
+        — same shape as the other gates' ``_emit_refusal_evidence``
+        path, carrying ``gate='method'`` + the refused ``method``."""
+        with pytest.raises(A2AEndpointError):
+            await endpoint.handle(
+                **_good_call_kwargs(
+                    payload=_payload("tasks/cancel"),
+                    parent_trace_id="parent-M1",
+                )
+            )
+        assert audit_store.append.await_count == 1
+        assert decision_history_store.append.await_count == 1
+        event: AuditEvent = audit_store.append.call_args.args[0]
+        assert event.event_type == "a2a.task_refused"
+        assert event.payload["error_code"] == "unsupported_operation"
+        assert event.payload["policy_reason"] == "method_not_supported_wave1"
+        assert event.payload["gate"] == "method"
+        assert event.payload["method"] == "tasks/cancel"
+        assert event.payload["parent_trace_id"] == "parent-M1"
+        assert event.payload["child_trace_id"]
+        assert event.payload["payload_digest"]
+
+    async def test_method_gate_fires_after_wave2_gate(
+        self,
+        endpoint: A2AEndpoint,
+        plugin_registry: MagicMock,
+    ) -> None:
+        """A Wave-2 method (``tasks/resubscribe``) still refuses at
+        Gate 3 with ``wave2_feature_refused`` — the method gate does
+        NOT shadow the Wave-2 gate's more-specific refusal (proves
+        Gate 3.5 sits AFTER Gate 3, not before)."""
+        with pytest.raises(A2AEndpointError) as exc:
+            await endpoint.handle(**_good_call_kwargs(payload=_payload("tasks/resubscribe")))
+        assert exc.value.payload["policy_reason"] == "wave2_feature_refused"
+        plugin_registry.load.assert_not_called()
+
+    async def test_message_send_passes_the_method_gate(
+        self,
+        endpoint: A2AEndpoint,
+        plugin_registry: MagicMock,
+    ) -> None:
+        """``message/send`` clears the gate and proceeds to routing +
+        dispatch (the happy-path fixture returns the agent's dict)."""
+        result = await endpoint.handle(**_good_call_kwargs(payload=_payload("message/send")))
+        assert isinstance(result, dict)
+        assert result["result"] == "ok"
+        plugin_registry.load.assert_called_once_with("agents", "agent_alpha")
+        plugin_registry._agent_stub.handle.assert_called_once()
 
 
 # =============================================================================

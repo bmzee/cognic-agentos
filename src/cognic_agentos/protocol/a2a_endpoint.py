@@ -517,6 +517,35 @@ class A2AEndpoint:
                 wave2_feature=wave2_feature,
             )
 
+        # Gate 3.5 — Wave-1 method allow-list. Refuse any method but
+        # message/send BEFORE routing/task-creation/dispatch. tasks/get,
+        # tasks/cancel, message/stream, ... are real A2A methods this
+        # Wave-1 receiver does not yet serve; the auxiliary slice lifts
+        # this gate. Runs AFTER Gate 3 so a Wave-2 method keeps its more-
+        # specific ``wave2_feature_refused`` refusal; the Wave-2 gate has
+        # already refused unscannable payloads, so the decode here is on
+        # a payload we could parse.
+        method = self._decode_method(payload)
+        if method != "message/send":
+            await self._emit_refusal_evidence(
+                event_type="a2a.task_refused",
+                request_id=request_id,
+                tenant_id=tenant_id,
+                target_agent=target_agent,
+                parent_trace_id=effective_parent_trace_id,
+                child_trace_id=child_trace_id,
+                payload_digest=payload_digest,
+                error_code="unsupported_operation",
+                policy_reason="method_not_supported_wave1",
+                gate="method",
+                extra={"method": str(method)},
+            )
+            raise A2AEndpointError(
+                "unsupported_operation",
+                f"Wave-1 receiver serves only message/send; refused method: {method!r}",
+                policy_reason="method_not_supported_wave1",
+            )
+
         # Gate 4 — routing.
         try:
             agent = self._registry.load("agents", target_agent)
@@ -924,6 +953,24 @@ class A2AEndpoint:
             )
 
     # --- helpers --------------------------------------------------------
+
+    @staticmethod
+    def _decode_method(payload: bytes) -> str | None:
+        """Decode the JSON-RPC ``method`` for the Gate-3.5 Wave-1 allow-
+        list. Returns the method string, or ``None`` if the payload is
+        unparseable / not a JSON object / carries no string ``method``
+        — every such case is treated as non-``message/send`` and
+        refused by the gate. Gate 3 has already refused unscannable /
+        Wave-2 payloads upstream, so a ``None`` here just means 'not
+        the one method this Wave-1 receiver serves'."""
+        try:
+            decoded = json.loads(payload)
+        except (ValueError, TypeError):
+            return None
+        if isinstance(decoded, dict):
+            method = decoded.get("method")
+            return method if isinstance(method, str) else None
+        return None
 
     @staticmethod
     def _classify_wave2_feature(payload: bytes) -> str | None:
