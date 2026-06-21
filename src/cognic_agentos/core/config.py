@@ -956,6 +956,16 @@ class Settings(BaseSettings):
             "refused at the trust-gate boundary."
         ),
     )
+    pack_attestation_root_path: str | None = Field(
+        default=None,
+        description=(
+            "Deployment root under which the operator places installed packs' "
+            "signed attestations + signed wheel at "
+            "<root>/<distribution_name>/<version>/<basename>. None disables boot "
+            "registration (empty shared registry); the runtime never fabricates "
+            "attestations."
+        ),
+    )
 
     # --- Sprint 5 — MCP host (Streamable HTTP first; STDIO restricted) -
     # Per ADRs 002 (MCP plugin protocol — OAuth/PRM authorization +

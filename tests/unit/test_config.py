@@ -2536,3 +2536,21 @@ def test_otel_exporter_headers_parse_from_json_env(monkeypatch: pytest.MonkeyPat
 def test_otel_exporter_protocol_rejects_invalid_value() -> None:
     with pytest.raises(ValidationError):
         prod_settings(otel_exporter_protocol="thrift")
+
+
+# ---------------------------------------------------------------------------
+# Sprint 1 — startup discovery / trust registration: pack attestation root
+# ---------------------------------------------------------------------------
+
+
+def test_pack_attestation_root_path_defaults_none() -> None:
+    from cognic_agentos.core.config import Settings
+
+    assert Settings().pack_attestation_root_path is None
+
+
+def test_pack_attestation_root_path_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    from cognic_agentos.core.config import Settings
+
+    monkeypatch.setenv("COGNIC_PACK_ATTESTATION_ROOT_PATH", "/srv/attestations")
+    assert Settings().pack_attestation_root_path == "/srv/attestations"
