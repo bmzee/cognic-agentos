@@ -586,6 +586,14 @@ def create_app(
 
             if adapter_registry is None:
                 app.state.adapters = None
+                # Sprint 4 (ADR-002/003/016): no adapter pool → no boot
+                # discovery. Expose the injected registry (if any) so the
+                # /api/v1/system/plugins honesty surface + non-adapter callers
+                # still read it. The unification moved the eager body attach into
+                # the lifespan; the shared-registry build (adapter path below)
+                # needs the adapter pool, so the non-adapter path threads the
+                # create_app kwarg as-is (None when not injected).
+                app.state.plugin_registry = plugin_registry
                 yield
                 return
 
@@ -631,6 +639,88 @@ def create_app(
                 # create_app kwarg in 13.7 (Fork D — construct + expose only).
                 app.state.scheduler = runtime.scheduler
 
+                # Sprint 4 (ADR-002/003/016) — ONE shared PluginRegistry feeds
+                # BOTH the MCP host and the A2A endpoint (replacing the two
+                # separate empty PluginRegistry(...) each surface built before).
+                # The injected create_app kwarg wins (the caller owns
+                # pre-population; NO discovery). Otherwise the off-gate
+                # boot-builder discovers + trust-registers every installed pack
+                # and returns ONE populated registry; it builds its OWN
+                # registration_trust_gate (the §4 trapdoor — we pass NO
+                # trust_gate). The boot is SDK-FREE (it runs whenever the adapter
+                # pool is up). A RegistryBootError (broken
+                # <trust_root_prefix>/_default/cosign.pub or a malformed
+                # allow-list) is fail-closed: registry → None → BOTH surfaces
+                # skip construction → their routes 503. The benign unset-root
+                # path returns a real EMPTY registry (never None) → both surfaces
+                # reachable-but-empty.
+                registry: PluginRegistry | None = plugin_registry
+                if registry is None:
+                    from cognic_agentos.harness.registry_boot import (
+                        RegistryBootError,
+                        build_and_populate_registry,
+                    )
+                    from cognic_agentos.protocol.supply_chain import SupplyChainPipeline
+
+                    object_store = adapters.object_store
+                    if object_store is None:
+                        # No object-store sink for the Sigstore-bundle evidence
+                        # the trust pipeline persists → cannot trust-register.
+                        # Treat like the unset-root posture (reachable-but-empty),
+                        # NOT fail-closed-None: a missing optional adapter is not a
+                        # misconfiguration the boot must refuse.
+                        logger.warning("registry.boot_skipped_no_object_store")
+                        registry = PluginRegistry(audit_store=runtime.audit_store)
+                    else:
+                        # mcp_admission is SDK-FREE to assemble (MCPAuthzClient +
+                        # MCPAdmissionDeps carry no require_mcp()), so an MCP pack
+                        # is ADMITTABLE on the kernel image; only RUNTIME serving
+                        # (the MCPHost below) is SDK-gated. opa_engine=None keeps
+                        # the boot off the OPA-binary path: a sampling-requiring
+                        # MCP pack default-denies (mcp_sampling_default_denied) per
+                        # the Sprint-4 default-deny doctrine; non-sampling MCP
+                        # packs (the common case) admit. The probe-factory's
+                        # MCPAuthzClient instances share a boot-owned httpx client
+                        # closed in this block's finally (token-cache isolation is
+                        # per-instance; the HTTP transport may be shared).
+                        from cognic_agentos.protocol.mcp_authz import MCPAuthzClient
+                        from cognic_agentos.protocol.plugin_registry import MCPAdmissionDeps
+
+                        boot_http_client = httpx.AsyncClient()
+                        try:
+                            mcp_admission = MCPAdmissionDeps(
+                                settings=settings,
+                                vault_client=adapters.secret,
+                                opa_engine=None,
+                                make_authz_client_for_probe=lambda: MCPAuthzClient(
+                                    settings=settings,
+                                    vault_client=adapters.secret,
+                                    http_client=boot_http_client,
+                                    audit_store=runtime.audit_store,
+                                    decision_history_store=runtime.decision_history_store,
+                                ),
+                            )
+                            registry = await build_and_populate_registry(
+                                settings=settings,
+                                audit_store=runtime.audit_store,
+                                supply_chain=SupplyChainPipeline(settings=settings),
+                                object_store=object_store,
+                                mcp_admission=mcp_admission,
+                            )
+                        except RegistryBootError as exc:
+                            logger.error(
+                                "registry.boot_failed_fail_closed",
+                                extra={"reason": exc.reason},
+                            )
+                            registry = None
+                        finally:
+                            await boot_http_client.aclose()
+                app.state.plugin_registry = registry
+                if registry is None:
+                    # Fail-closed (RegistryBootError): both protocol surfaces
+                    # stay None below → their routes 503.
+                    logger.error("protocol.registry_boot_failed_surfaces_unavailable")
+
                 # Sprint 13.8 (ADR-002) — MCP host production construction,
                 # SDK-gated (the mcp SDK is an optional `adapters` extra; the
                 # kernel image lacks it). Constructed HERE in the lifespan (NOT
@@ -639,17 +729,16 @@ def create_app(
                 # Dormant until a caller invokes call_tool (Fork D). Fail-soft:
                 # a construction failure leaves app.state.mcp_host None + ERROR
                 # log + the app still boots. mcp_http_client is predeclared above.
-                if is_mcp_available():
+                if registry is not None and is_mcp_available():
                     from cognic_agentos.harness.mcp_host import build_mcp_host
-                    from cognic_agentos.protocol.plugin_registry import PluginRegistry
 
-                    mcp_registry = plugin_registry or PluginRegistry(
-                        audit_store=runtime.audit_store
-                    )
                     mcp_http_client = httpx.AsyncClient()
                     try:
+                        # Sprint 4: thread the SHARED registry (the same object
+                        # the A2A endpoint receives below) — no per-surface empty
+                        # PluginRegistry() fallback.
                         app.state.mcp_host = build_mcp_host(
-                            registry=mcp_registry,
+                            registry=registry,
                             runtime=runtime,
                             settings=settings,
                             http_client=mcp_http_client,
@@ -660,7 +749,7 @@ def create_app(
                         await mcp_http_client.aclose()
                         mcp_http_client = None
                         app.state.mcp_host = None
-                else:
+                elif registry is not None:
                     logger.warning("mcp.host_unavailable_in_image", extra={"missing_module": "mcp"})
 
                 # Sprint 4 (ADR-003) — A2A inbound endpoint production
@@ -674,21 +763,20 @@ def create_app(
                 # boots), a2a_http_client predeclared above so the finally can close
                 # it. The unconditionally-mounted /api/v1/a2a route 503s until this
                 # populates app.state.a2a_endpoint.
-                if is_a2a_available():
+                if registry is not None and is_a2a_available():
                     from cognic_agentos.protocol.a2a_agent_cards import A2AAgentCardVerifier
                     from cognic_agentos.protocol.a2a_authz import A2AAuthzClient
                     from cognic_agentos.protocol.a2a_endpoint import A2AEndpoint
-                    from cognic_agentos.protocol.plugin_registry import PluginRegistry
                     from cognic_agentos.protocol.trust_gate import TrustGate
 
-                    # Reuse an injected registry / trust gate when supplied (the
-                    # 13.8 `plugin_registry or PluginRegistry(...)` precedent); else
-                    # build a default over the live audit store + SecretAdapter (the
-                    # A2A card verifier's TrustGate verifies AgentCard JWS against
-                    # the per-tenant trust root read through adapters.secret).
-                    a2a_registry = plugin_registry or PluginRegistry(
-                        audit_store=runtime.audit_store
-                    )
+                    # Sprint 4: the SHARED `registry` (the same object the MCP host
+                    # received above) feeds plugin_registry below. The endpoint
+                    # keeps its OWN `a2a_trust_gate` — DISTINCT from the boot's
+                    # registration_trust_gate (the §4 trapdoor). The card verifier's
+                    # TrustGate verifies AgentCard JWS against the per-tenant trust
+                    # root read through adapters.secret; it does NOT read
+                    # signature_root_path (which the boot's gate overrides), so the
+                    # two gates correctly stay distinct objects.
                     a2a_trust_gate = trust_gate or TrustGate(
                         settings=settings,
                         audit_store=runtime.audit_store,
@@ -711,7 +799,7 @@ def create_app(
                         )
                         app.state.a2a_endpoint = A2AEndpoint(
                             settings=settings,
-                            plugin_registry=a2a_registry,
+                            plugin_registry=registry,
                             authz_client=a2a_authz,
                             agent_card_verifier=a2a_cards,
                             audit_store=runtime.audit_store,
@@ -722,7 +810,7 @@ def create_app(
                         await a2a_http_client.aclose()
                         a2a_http_client = None
                         app.state.a2a_endpoint = None
-                else:
+                elif registry is not None:
                     logger.warning(
                         "a2a.endpoint_unavailable_in_image",
                         extra={"missing_module": "a2a"},
@@ -942,7 +1030,6 @@ def create_app(
     # path requires async test bodies) → the lifespan-attach pattern
     # is no longer adequate.
     app.state.gateway_ledger = gateway_ledger
-    app.state.plugin_registry = plugin_registry
     app.state.actor_binder = actor_binder
     app.state.pack_record_store = pack_record_store
     app.state.trust_gate = trust_gate
@@ -1018,6 +1105,10 @@ def create_app(
     app.state.kill_switch_engine = None
     app.state.quota_engine = None  # Sprint 13.6b — same introspection seam.
     app.state.scheduler = None  # Sprint 13.7 (ADR-022) — same introspection seam.
+    # Sprint 4 (ADR-002/003/016) — ONE shared PluginRegistry feeds both the MCP
+    # host + the A2A endpoint. Predeclared None (alongside mcp_host/a2a_endpoint);
+    # the lifespan populates it with the injected-or-discovered registry.
+    app.state.plugin_registry = None
     app.state.mcp_host = None  # Sprint 13.8 (ADR-002) — SDK-gated; lifespan populates.
     app.state.a2a_endpoint = None  # Sprint 4 (ADR-003) — SDK-gated; lifespan populates.
     app.state.sandbox_backend = None  # Sprint 14A-A (ADR-004) — SDK-gated; lifespan populates.
