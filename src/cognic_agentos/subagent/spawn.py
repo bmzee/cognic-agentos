@@ -130,12 +130,18 @@ class SubAgentSpawner:
             parent_task_id=request.parent_task_id,
             managed_run=managed_run,
             memory_scope=None,
+            approval_request_id=request.approval_request_id,
         )
         child = await self._runner.run(context)
 
-        # 4. emit return + budget; the child's run lifecycle/evidence is the
-        # executor's (run-record + run.* rows), not re-emitted here.
-        outcome: ReturnOutcome = "completed" if child.ok else "failed"
+        # 4. emit return; the child's run lifecycle/evidence is the executor's
+        # (run-record + run.* rows), not re-emitted here. A pending-approval child
+        # cold-create-pended BEFORE the workload ran, so it carries the ids on the
+        # return row and skips the budget row entirely (zero work to account for).
+        pending = child.terminal_state == "pending_approval"
+        outcome: ReturnOutcome = (
+            "pending_approval" if pending else ("completed" if child.ok else "failed")
+        )
         await self._audit.emit_return(
             actor_id=actor.subject,
             tenant_id=tenant_id,
@@ -143,13 +149,16 @@ class SubAgentSpawner:
             parent_record_id=spawn_id,
             result_summary=child.summary,
             outcome=outcome,
+            approval_request_id=child.approval_request_id if pending else None,
+            run_id=child.run_id if pending else None,
         )
-        await self._audit.emit_budget(
-            actor_id=actor.subject,
-            tenant_id=tenant_id,
-            request_id=request_id,
-            parent_record_id=spawn_id,
-            tokens_used=child.tokens_used,
-            wall_time_used_s=child.wall_time_used_s,
-        )
+        if not pending:
+            await self._audit.emit_budget(
+                actor_id=actor.subject,
+                tenant_id=tenant_id,
+                request_id=request_id,
+                parent_record_id=spawn_id,
+                tokens_used=child.tokens_used,
+                wall_time_used_s=child.wall_time_used_s,
+            )
         return SubAgentResult(spawn_record_id=spawn_id, child_result=child)

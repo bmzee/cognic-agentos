@@ -79,6 +79,13 @@ class ManagedRunChildRunner:
             actor=actor,  # P1: required at executor.py:158; narrowed to Actor by the guard above
             parent_task_id=context.parent_task_id,
             requested_estimated_tokens=context.requested_estimated_tokens,
+            # the context carries a str (granted id on an approval retry); RunRequest
+            # takes uuid.UUID | None — parse here. A malformed id is a caller error.
+            approval_request_id=(
+                uuid.UUID(context.approval_request_id)
+                if context.approval_request_id is not None
+                else None
+            ),
         )
         started = time.monotonic()
         result = await self._executor.run(request)
@@ -88,10 +95,19 @@ class ManagedRunChildRunner:
         if result.terminal_state == "suspended":
             summary = "suspended_child_unsupported"
         elif result.terminal_state == "pending_approval":
-            # High-risk child pended at sandbox admission; the async child-approval
-            # resume loop is a non-goal this slice (spec §4).
-            summary = "pending_approval_child_unsupported"
-        return ChildResult(summary=summary, tokens_used=0, wall_time_used_s=elapsed, ok=ok)
+            # High-risk child pended at sandbox admission; honest + actionable —
+            # the run_id/terminal_state/approval_request_id below survive (no longer
+            # flattened) so the re-POST approval retry is possible (spec §3-§4).
+            summary = "pending_approval_child"
+        return ChildResult(
+            summary=summary,
+            tokens_used=0,
+            wall_time_used_s=elapsed,
+            ok=ok,
+            run_id=result.run_id,
+            terminal_state=result.terminal_state,
+            approval_request_id=result.approval_request_id,
+        )
 
     async def _resolve_pack_uuid(self, tenant_id: str, pack_id: str) -> uuid.UUID | None:
         """Exact tenant-scoped lookup over installed packs — resolves ONLY the

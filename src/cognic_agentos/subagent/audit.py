@@ -12,7 +12,7 @@ from typing import Any, Literal
 from cognic_agentos.core.decision_history import DecisionHistoryStore, DecisionRecord
 from cognic_agentos.subagent._types import SUBAGENT_ISO_CONTROLS
 
-ReturnOutcome = Literal["completed", "failed"]
+ReturnOutcome = Literal["completed", "failed", "pending_approval"]
 
 
 class SubAgentAuditEmitter:
@@ -85,8 +85,21 @@ class SubAgentAuditEmitter:
         parent_record_id: uuid.UUID,
         result_summary: str,
         outcome: ReturnOutcome,
+        approval_request_id: str | None = None,
+        run_id: str | None = None,
     ) -> uuid.UUID:
-        """Emit subagent.return on the parent chain."""
+        """Emit subagent.return on the parent chain. The approval/run ids are
+        added to the payload ONLY when non-None (the pending-approval path), so
+        every existing non-pending return row stays byte-identical."""
+        payload: dict[str, Any] = {
+            "parent_record_id": str(parent_record_id),
+            "result_summary": result_summary,
+            "outcome": outcome,
+        }
+        if approval_request_id is not None:
+            payload["approval_request_id"] = approval_request_id
+        if run_id is not None:
+            payload["run_id"] = run_id
         record_id, _ = await self._history.append(
             DecisionRecord(
                 decision_type="subagent.return",
@@ -94,11 +107,7 @@ class SubAgentAuditEmitter:
                 actor_id=actor_id,
                 tenant_id=tenant_id,
                 iso_controls=SUBAGENT_ISO_CONTROLS,
-                payload={
-                    "parent_record_id": str(parent_record_id),
-                    "result_summary": result_summary,
-                    "outcome": outcome,
-                },
+                payload=payload,
             )
         )
         return record_id

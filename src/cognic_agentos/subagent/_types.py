@@ -85,6 +85,7 @@ class SubAgentSpawnRequest:
     requested_estimated_tokens: int
     tenant_id: str
     parent_task_id: str | None = None
+    approval_request_id: str | None = None  # the granted id on an approval retry (else None)
 
 
 @dataclass(frozen=True)
@@ -93,6 +94,11 @@ class ChildResult:
     tokens_used: int
     wall_time_used_s: float
     ok: bool = True
+    #: 2026-06-20 (child approval-retry) — surfaced from the child RunResult on every
+    #: branch (no longer flattened). approval_request_id is set ONLY on the pending path.
+    run_id: str | None = None
+    terminal_state: str | None = None  # mirrors core/run RunTerminalState; str avoids a core import
+    approval_request_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -127,6 +133,8 @@ class ChildRunContext:
     # OPTIONAL/additive — the full portal Actor; managed-run runner fail-closes on None
     actor: Actor | None = None
     memory_scope: str | None = None  # 11.5-ready inert hook; NO durable writes in 11b
+    # threaded into RunRequest.approval_request_id by the runner
+    approval_request_id: str | None = None
 
 
 @runtime_checkable

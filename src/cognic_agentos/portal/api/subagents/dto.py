@@ -63,6 +63,9 @@ class SubAgentSpawnRequestBody(BaseModel):
     parent_tool_allow_list: list[str]
     requested_tool_allow_list: list[str]
     requested_estimated_tokens: int
+    #: the granted approval id on a pending-child retry (else None); parsed as
+    #: uuid.UUID (malformed -> 422), str()'d back into the spawn request at the route.
+    approval_request_id: uuid.UUID | None = None
 
     @field_validator("parent_tool_allow_list", "requested_tool_allow_list")
     @classmethod
@@ -79,14 +82,21 @@ class ChildResultBody(BaseModel):
     summary: str
     tokens_used: int
     wall_time_used_s: float
+    #: mirrors core/run RunTerminalState (str avoids a core import) so the pending
+    #: state is visible in the body alongside the top-level approval_request_id.
+    terminal_state: str | None = None
 
 
 class SubAgentSpawnResponse(BaseModel):
-    """200 body. spawn_record_id is str(result.spawn_record_id) — the
-    audit-correlatable subagent.spawn chain-event id. A pending/failed/refused
-    child is represented inside the 200 as child_result.ok=false + summary."""
+    """200/202 body. spawn_record_id is str(result.spawn_record_id) — the
+    audit-correlatable subagent.spawn chain-event id. A pending child surfaces as
+    202 + top-level approval_request_id; a failed/refused child rides
+    child_result.ok=false + summary inside the 200."""
 
     model_config = ConfigDict(frozen=True)
 
     spawn_record_id: str
     child_result: ChildResultBody
+    #: set ONLY on the pending-approval path (the granted-id correlator the caller
+    #: re-POSTs to retry); None otherwise.
+    approval_request_id: str | None = None

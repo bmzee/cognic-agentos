@@ -134,6 +134,7 @@ def test_spawn_200_returns_record_id_and_child_result() -> None:
         "summary": "done",
         "tokens_used": 10,
         "wall_time_used_s": 0.5,
+        "terminal_state": None,
     }
 
 
@@ -162,6 +163,44 @@ def test_child_not_ok_still_200() -> None:
     resp = client.post("/api/v1/subagents", json=_body())
     assert resp.status_code == 200
     assert resp.json()["child_result"]["ok"] is False
+
+
+def test_pending_child_returns_202_and_approval_id() -> None:
+    spawner = _StubSpawner(
+        result=SubAgentResult(
+            spawn_record_id=uuid.uuid4(),
+            child_result=ChildResult(
+                summary="pending_approval_child",
+                tokens_used=0,
+                wall_time_used_s=0.1,
+                ok=False,
+                run_id="r1",
+                terminal_state="pending_approval",
+                approval_request_id="appr-1",
+            ),
+        )
+    )
+    resp = _client(spawner=spawner).post("/api/v1/subagents", json=_body())
+    assert resp.status_code == 202
+    payload = resp.json()
+    assert payload["approval_request_id"] == "appr-1"
+    assert payload["child_result"]["terminal_state"] == "pending_approval"
+
+
+def test_retry_threads_approval_request_id_to_spawn() -> None:
+    grant_id = uuid.uuid4()
+    spawner = _StubSpawner(result=_result())  # completed
+    _client(spawner=spawner).post(
+        "/api/v1/subagents", json=_body(approval_request_id=str(grant_id))
+    )
+    # DTO parses str -> uuid.UUID; the route str()s it back into SubAgentSpawnRequest (a str field)
+    assert spawner.seen is not None
+    assert spawner.seen["request"].approval_request_id == str(grant_id)
+
+
+def test_completed_child_still_200() -> None:
+    resp = _client(spawner=_StubSpawner(result=_result())).post("/api/v1/subagents", json=_body())
+    assert resp.status_code == 200
 
 
 def test_parent_run_not_found_404() -> None:
