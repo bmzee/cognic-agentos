@@ -28,11 +28,14 @@ record R3 P2 #2 — wire-protocol drift = wire-protocol break.
 from __future__ import annotations
 
 import dataclasses
+import os
+import typing
 from typing import get_args
 
 import pytest
 
-from cognic_agentos.protocol import A2AErrorCode, A2APolicyRefusalReason
+from cognic_agentos.protocol import A2AErrorCode, A2APolicyRefusalReason, a2a_errors
+from cognic_agentos.protocol.a2a_endpoint import A2AEndpointError
 from cognic_agentos.protocol.a2a_errors import (
     _POLICY_REASON_TO_SPEC_CODE,
     A2AErrorResponse,
@@ -94,10 +97,11 @@ class TestMappingCompleteness:
                 f"is NOT in A2AErrorCode — wire contract violated"
             )
 
-    def test_map_has_exactly_eleven_entries(self) -> None:
-        """11 = current cardinality of A2APolicyRefusalReason. Pinned
+    def test_map_has_exactly_thirteen_entries(self) -> None:
+        """13 = current cardinality of A2APolicyRefusalReason (11 from
+        Sprint-6 + 2 from Sprint-1 a2a-inbound-reachability). Pinned
         so a literal addition without map update trips early."""
-        assert len(_POLICY_REASON_TO_SPEC_CODE) == 11
+        assert len(_POLICY_REASON_TO_SPEC_CODE) == 13
 
 
 # =============================================================================
@@ -326,7 +330,99 @@ class TestErrorCodeLiteralSet:
         a future addition without explicit review trips immediately."""
         assert len(get_args(A2AErrorCode)) == 14
 
-    def test_a2a_policy_refusal_reason_has_eleven_values(self) -> None:
-        """11 AgentOS-specific refusal reasons surfaced in
-        ``data.policy_reason``."""
-        assert len(get_args(A2APolicyRefusalReason)) == 11
+    def test_a2a_policy_refusal_reason_has_thirteen_values(self) -> None:
+        """13 AgentOS-specific refusal reasons surfaced in
+        ``data.policy_reason`` (11 from Sprint-6 + 2 from Sprint-1
+        a2a-inbound-reachability)."""
+        assert len(get_args(A2APolicyRefusalReason)) == 13
+
+
+# =============================================================================
+# Sprint-1 a2a-inbound-reachability — the 2 new reasons + wire-integration layer
+# =============================================================================
+
+
+def test_new_policy_reasons_present_and_mapped() -> None:
+    reasons = set(typing.get_args(A2APolicyRefusalReason))
+    assert {"method_not_supported_wave1", "tenant_header_missing"} <= reasons
+    assert (
+        a2a_errors._POLICY_REASON_TO_SPEC_CODE["method_not_supported_wave1"]
+        == "unsupported_operation"
+    )
+    assert a2a_errors._POLICY_REASON_TO_SPEC_CODE["tenant_header_missing"] == "invalid_request"
+
+
+def test_http_status_and_jsonrpc_int_maps_are_complete() -> None:
+    codes = set(typing.get_args(A2AErrorCode))
+    assert set(a2a_errors._SPEC_CODE_TO_HTTP_STATUS) == codes  # every code mapped
+    assert set(a2a_errors._SPEC_CODE_TO_JSONRPC_INT) == codes
+    # JSON-RPC 2.0 inherited codes are fixed by the base spec:
+    assert a2a_errors._SPEC_CODE_TO_JSONRPC_INT["parse_error"] == -32700
+    assert a2a_errors._SPEC_CODE_TO_JSONRPC_INT["invalid_request"] == -32600
+    assert a2a_errors._SPEC_CODE_TO_JSONRPC_INT["method_not_found"] == -32601
+    assert a2a_errors._SPEC_CODE_TO_JSONRPC_INT["invalid_params"] == -32602
+    assert a2a_errors._SPEC_CODE_TO_JSONRPC_INT["internal_error"] == -32603
+
+
+def test_from_endpoint_error_carries_code_reason_and_status() -> None:
+    exc = A2AEndpointError(
+        "unsupported_operation", "refused", policy_reason="method_not_supported_wave1"
+    )
+    resp = a2a_errors.from_endpoint_error(exc)
+    assert resp.code == "unsupported_operation"
+    assert resp.policy_reason == "method_not_supported_wave1"
+    assert resp.http_status == a2a_errors._SPEC_CODE_TO_HTTP_STATUS["unsupported_operation"]
+
+
+def test_to_jsonrpc_is_spec_shaped_with_int_code_and_data() -> None:
+    resp = a2a_errors.from_policy_reason("tenant_header_missing", message="missing X-Cognic-Tenant")
+    env = resp.to_jsonrpc(jsonrpc_id=None)
+    assert env["jsonrpc"] == "2.0"
+    assert env["id"] is None
+    assert env["error"]["code"] == -32600  # invalid_request
+    assert isinstance(env["error"]["message"], str)
+    assert env["error"]["data"]["policy_reason"] == "tenant_header_missing"
+
+
+@pytest.mark.skipif(
+    os.environ.get("COGNIC_RUN_A2A_UPSTREAM") != "1",
+    reason=(
+        "live a2a-sdk integer-code drift check; opt in via "
+        "COGNIC_RUN_A2A_UPSTREAM=1 (mirrors the test_a2a_schema_drift "
+        "skip pattern — CI sets it on the a2a-spec-drift lane; local "
+        "dev skips to avoid coupling to the optional SDK on every run)"
+    ),
+)
+def test_jsonrpc_int_codes_match_a2a_sdk_drift() -> None:
+    """Every A2A-specific integer in ``_SPEC_CODE_TO_JSONRPC_INT`` MUST
+    equal the pinned ``a2a-sdk``'s authoritative integer for that code
+    (``a2a.utils.errors.JSON_RPC_ERROR_CODE_MAP``). ``parse_error`` is
+    the JSON-RPC 2.0 base reserved code (no A2A server-side error class —
+    absent from the SDK map); fixed by the base spec at -32700."""
+    from a2a.utils.errors import JSON_RPC_ERROR_CODE_MAP
+
+    sdk_class_to_spec_code: dict[str, A2AErrorCode] = {
+        "TaskNotFoundError": "task_not_found",
+        "TaskNotCancelableError": "task_not_cancelable",
+        "PushNotificationNotSupportedError": "push_notification_not_supported",
+        "UnsupportedOperationError": "unsupported_operation",
+        "ContentTypeNotSupportedError": "content_type_not_supported",
+        "InvalidAgentResponseError": "invalid_agent_response",
+        "ExtendedAgentCardNotConfiguredError": "extended_agent_card_not_configured",
+        "ExtensionSupportRequiredError": "extension_support_required",
+        "VersionNotSupportedError": "version_not_supported",
+        "InvalidParamsError": "invalid_params",
+        "InvalidRequestError": "invalid_request",
+        "MethodNotFoundError": "method_not_found",
+        "InternalError": "internal_error",
+    }
+    # Every error class the SDK publishes must be one we know + map to
+    # the same integer (catches an SDK adding a new error class too).
+    for sdk_cls, sdk_int in JSON_RPC_ERROR_CODE_MAP.items():
+        spec_code = sdk_class_to_spec_code[sdk_cls.__name__]
+        ours = a2a_errors._SPEC_CODE_TO_JSONRPC_INT[spec_code]
+        assert ours == sdk_int, (
+            f"JSON-RPC integer drift for {spec_code!r}: ours={ours} "
+            f"a2a-sdk={sdk_int} ({sdk_cls.__name__})"
+        )
+    assert a2a_errors._SPEC_CODE_TO_JSONRPC_INT["parse_error"] == -32700

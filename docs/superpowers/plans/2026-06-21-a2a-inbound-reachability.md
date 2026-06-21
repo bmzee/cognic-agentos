@@ -35,12 +35,12 @@
 - Modify: `src/cognic_agentos/protocol/a2a_errors.py` (the `_POLICY_REASON_TO_SPEC_CODE` map `:80` + new module-level maps + `from_endpoint_error` + `A2AErrorResponse.to_jsonrpc`)
 - Test: `tests/unit/protocol/test_a2a_errors.py` (extend) + the drift test (see Step 6)
 
-- [ ] **Step 1: Add the two literal values.** In `protocol/__init__.py`, inside `A2APolicyRefusalReason = Literal[...]` (`:463`), add `"method_not_supported_wave1",` and `"a2a_tenant_header_missing",` (preserve existing values; additive only).
+- [ ] **Step 1: Add the two literal values.** In `protocol/__init__.py`, inside `A2APolicyRefusalReason = Literal[...]` (`:463`), add `"method_not_supported_wave1",` and `"tenant_header_missing",` (preserve existing values; additive only).
 
 - [ ] **Step 2: Add the two mapping entries.** In `a2a_errors.py`, inside `_POLICY_REASON_TO_SPEC_CODE` (`:80`):
 ```python
     "method_not_supported_wave1": "unsupported_operation",
-    "a2a_tenant_header_missing": "invalid_request",
+    "tenant_header_missing": "invalid_request",
 ```
 
 - [ ] **Step 3: Write the failing tests for the maps + serializer.** In `tests/unit/protocol/test_a2a_errors.py`:
@@ -54,9 +54,9 @@ from cognic_agentos.protocol import a2a_errors
 
 def test_new_policy_reasons_present_and_mapped() -> None:
     reasons = set(typing.get_args(A2APolicyRefusalReason))
-    assert {"method_not_supported_wave1", "a2a_tenant_header_missing"} <= reasons
+    assert {"method_not_supported_wave1", "tenant_header_missing"} <= reasons
     assert a2a_errors._POLICY_REASON_TO_SPEC_CODE["method_not_supported_wave1"] == "unsupported_operation"
-    assert a2a_errors._POLICY_REASON_TO_SPEC_CODE["a2a_tenant_header_missing"] == "invalid_request"
+    assert a2a_errors._POLICY_REASON_TO_SPEC_CODE["tenant_header_missing"] == "invalid_request"
 
 
 def test_http_status_and_jsonrpc_int_maps_are_complete() -> None:
@@ -83,14 +83,14 @@ def test_from_endpoint_error_carries_code_reason_and_status() -> None:
 
 def test_to_jsonrpc_is_spec_shaped_with_int_code_and_data() -> None:
     resp = a2a_errors.from_policy_reason(
-        "a2a_tenant_header_missing", message="missing X-Cognic-Tenant"
+        "tenant_header_missing", message="missing X-Cognic-Tenant"
     )
     env = resp.to_jsonrpc(jsonrpc_id=None)
     assert env["jsonrpc"] == "2.0"
     assert env["id"] is None
     assert env["error"]["code"] == -32600  # invalid_request
     assert isinstance(env["error"]["message"], str)
-    assert env["error"]["data"]["policy_reason"] == "a2a_tenant_header_missing"
+    assert env["error"]["data"]["policy_reason"] == "tenant_header_missing"
 ```
 Run: `uv run pytest tests/unit/protocol/test_a2a_errors.py -q` → FAIL (`_SPEC_CODE_TO_HTTP_STATUS` / `_SPEC_CODE_TO_JSONRPC_INT` / `from_endpoint_error` / `to_jsonrpc` undefined).
 
@@ -329,7 +329,7 @@ def test_missing_tenant_header_is_a2a_invalid_request_not_500() -> None:
     assert r.status_code == 400
     body = r.json()
     assert body["jsonrpc"] == "2.0" and body["error"]["code"] == -32600
-    assert body["error"]["data"]["policy_reason"] == "a2a_tenant_header_missing"
+    assert body["error"]["data"]["policy_reason"] == "tenant_header_missing"
 
 
 def test_endpoint_error_maps_to_taxonomy_status_and_envelope() -> None:
@@ -390,7 +390,7 @@ def build_a2a_routes() -> APIRouter:
         tenant_id = resolve_a2a_tenant(request)
         if tenant_id is None:
             err = a2a_errors.from_policy_reason(
-                "a2a_tenant_header_missing",
+                "tenant_header_missing",
                 message="missing or empty X-Cognic-Tenant header",
             )
             response.status_code = err.http_status

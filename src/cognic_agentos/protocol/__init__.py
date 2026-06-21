@@ -477,6 +477,11 @@ A2APolicyRefusalReason = Literal[
     "artifact_retention_exceeded",
     # Wave-2 features (spec-valid but Wave-1 refused; sub-tag identifies feature)
     "wave2_feature_refused",
+    # Wave-1 inbound-receiver gate refusals (Sprint-1 a2a-inbound-reachability):
+    # the method gate refuses any non-``message/send`` method before dispatch;
+    # the dumb route refuses a missing/empty ``X-Cognic-Tenant`` header.
+    "method_not_supported_wave1",
+    "tenant_header_missing",
 ]
 
 #: AgentCard validation outcomes. Three passes per A2A-CONFORMANCE.md

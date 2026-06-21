@@ -29,7 +29,7 @@ Three files mirroring `portal/api/runs/` + `portal/api/subagents/`: `__init__.py
 
 - `build_a2a_routes() -> APIRouter` registers `POST /api/v1/a2a/{target_agent}`, mounted **UNCONDITIONALLY** by `create_app` (eval/runs/subagents pattern). **No portal `RequireScope`** — the A2A pinned token is the auth axis, validated inside `handle()` (Gate 2).
 - **Dumb raw-body adapter.** The handler: reads the raw body (`await request.body()` → `bytes`), the `Authorization` and `A2A-Version` headers, mints/propagates `request_id` + `parent_trace_id` (standard correlation), resolves the claimed tenant via the seam (below), then calls `endpoint.handle(target_agent=<path param>, payload=<raw bytes>, authorization_header=…, a2a_version_header=…, parent_trace_id=…, tenant_id=<claimed>, request_id=…)`. **The route never parses the JSON-RPC body** (the `X-Cognic-Tenant` header is the only thing it reads beyond the raw passthrough).
-- **Tenant-source seam** `resolve_a2a_tenant(request) -> str`, route-local. Wave-1 implementation reads the `X-Cognic-Tenant` header. Missing/empty → the route raises an A2A-shaped refusal carrying the new closed reason `a2a_tenant_header_missing` (→ `invalid_request`), serialized through the `a2a_errors` envelope builder — **never a raw 500**. Later host-based tenancy swaps ONLY this function; `handle()` and the route contract are untouched. (Security note: the claimed tenant is *not trusted* — `A2AAuthzClient` validates the token against it and rejects forged claims, so the seam is conveyance, not a trust boundary.)
+- **Tenant-source seam** `resolve_a2a_tenant(request) -> str`, route-local. Wave-1 implementation reads the `X-Cognic-Tenant` header. Missing/empty → the route raises an A2A-shaped refusal carrying the new closed reason `tenant_header_missing` (→ `invalid_request`), serialized through the `a2a_errors` envelope builder — **never a raw 500**. Later host-based tenancy swaps ONLY this function; `handle()` and the route contract are untouched. (Security note: the claimed tenant is *not trusted* — `A2AAuthzClient` validates the token against it and rejects forged claims, so the seam is conveyance, not a trust boundary.)
 - **`_require_a2a_endpoint(request)` dep** returns the `A2AEndpoint` off `app.state.a2a_endpoint`, or raises `503` `a2a_endpoint_unavailable` when the SDK-gated lifespan did not populate it (mirrors `_require_managed_run_executor` / `_require_mcp_host`).
 - **Request DTO** (`dto.py`): the route body is raw bytes (no Pydantic model for the JSON-RPC payload — `handle()` owns decoding). A small response-shaping helper serializes `handle()`'s `dict` + the chosen HTTP status.
 
@@ -46,7 +46,7 @@ Add a Wave-1 method-allow-list gate inside `handle()`:
 
 Two additive closed-enum reasons on `A2APolicyRefusalReason`, each added to the `_POLICY_REASON_TO_SPEC_CODE` mapping (codomain into `A2AErrorCode`):
 - `method_not_supported_wave1` → `unsupported_operation` (the wave-honest code, consistent with the existing `streaming_not_supported`/`wave2_feature_refused → unsupported_operation`; means a future auxiliary slice merely *lifts the gate*, never flips a "not found" into a "found").
-- `a2a_tenant_header_missing` → `invalid_request` (a *request-shape* failure, deliberately distinct from the *auth* failures `tenant_token_invalid`/`anonymous_refused` so audits can tell "no claimed tenant header" apart from "token rejected").
+- `tenant_header_missing` → `invalid_request` (a *request-shape* failure, deliberately distinct from the *auth* failures `tenant_token_invalid`/`anonymous_refused` so audits can tell "no claimed tenant header" apart from "token rejected").
 
 The closed-enum-completeness + codomain drift detectors in `tests/unit/protocol/test_a2a_errors*.py` extend to both new values.
 
@@ -70,14 +70,14 @@ SDK-gated (the `a2a-sdk` is an optional `adapters` extra; `is_a2a_available()` a
 |---|---|---|
 | `message/send` success | `200` | `handle()`'s JSON-RPC response dict |
 | Any `A2AEndpointError` (version / authz / Wave-2 / method gate / routing / dispatch) | `error.http_status` from the `a2a_errors` taxonomy (e.g. `invalid_request`→400, `method_not_found`→404, `internal_error`→500) | the JSON-RPC error envelope |
-| Missing/empty `X-Cognic-Tenant` (route, pre-`handle()`) | `400` (`invalid_request`) | A2A envelope, reason `a2a_tenant_header_missing` |
+| Missing/empty `X-Cognic-Tenant` (route, pre-`handle()`) | `400` (`invalid_request`) | A2A envelope, reason `tenant_header_missing` |
 | `app.state.a2a_endpoint` unset (SDK-gated) | `503` | `{"reason": "a2a_endpoint_unavailable"}` |
 
 The route owns **no bespoke code→status map** — it reads `http_status` off the taxonomy.
 
 ## Testing
 
-- **Route (off-gate, thorough):** unconditional mount; `503` when the endpoint is unwired; `200` + envelope passthrough on success; `A2AEndpointError` → the taxonomy `http_status` (parametrized across version/authz/method-gate/routing codes); tenant resolver — header present → claimed tenant threaded into `handle()`; missing/empty → A2A-shaped `invalid_request` (`a2a_tenant_header_missing`), **not 500**; raw-body passthrough (route does not parse JSON-RPC).
+- **Route (off-gate, thorough):** unconditional mount; `503` when the endpoint is unwired; `200` + envelope passthrough on success; `A2AEndpointError` → the taxonomy `http_status` (parametrized across version/authz/method-gate/routing codes); tenant resolver — header present → claimed tenant threaded into `handle()`; missing/empty → A2A-shaped `invalid_request` (`tenant_header_missing`), **not 500**; raw-body passthrough (route does not parse JSON-RPC).
 - **Endpoint method gate (on-gate, CC discipline, negative-path):** `message/send` proceeds to dispatch; `tasks/cancel` / `tasks/get` / `message/stream` / a garbage method → refused with `method_not_supported_wave1` **before** task creation/dispatch — assert **no task minted, no transition, no `agent.handle()` call**, exactly **one** refusal-evidence chain row.
 - **`a2a_errors` (on-gate):** both new reasons in the closed enum + the codomain mapping; drift detectors updated.
 - **Conformance:** one A2A-conformance test pinning the Wave-1 receiver posture (accepts `message/send`, refuses the other methods `unsupported_operation`).
@@ -93,4 +93,4 @@ The route owns **no bespoke code→status map** — it reads `http_status` off t
 - The exact `A2AEndpoint` + `A2AAuthzClient` constructor dependencies (mirror the MCP-host lifespan build; confirm against `a2a_endpoint.py:378` + `app.py` MCP block).
 - The precise insertion point + decode reuse for the method gate inside `handle()` (confirm the Wave-2 scan's decoded `method` is reachable there).
 - Whether `request_id` / `parent_trace_id` have standard route-level sources elsewhere in `portal/api/` to mirror.
-- The existing `a2a_errors` envelope-builder signature the route reuses for the route-level `a2a_tenant_header_missing` refusal.
+- The existing `a2a_errors` envelope-builder signature the route reuses for the route-level `tenant_header_missing` refusal.
