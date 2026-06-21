@@ -2193,6 +2193,25 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     # extension (NOT just the _EXPECTED_ENTRY_COUNT bump) per
     # feedback_verify_promotion_meets_floor_at_promotion_time.
     ("src/cognic_agentos/subagent/managed_run_runner.py", 0.95, 0.90),
+    # Startup discovery/trust-registration — Sprint 2 (ADR-002 + ADR-016) — the
+    # pack-attestation resolver: a TRUST-INPUT PRIMITIVE that locates an installed
+    # pack's signed attestation artefacts (cosign sig / sigstore bundle / SBOM /
+    # SLSA provenance / single signed wheel + 3 grace-period optionals) from a
+    # deployment-configured root and returns a PackAttestations for the runtime
+    # trust gate (protocol/trust_gate.py + protocol/supply_chain.py) to verify.
+    # CC because a wrong path or a wrong sourced SBOM digest is a wrong trust
+    # decision: every resolved artefact path is canonicalised (realpath +
+    # relative_to, replicating trust_gate._canonicalise_under_root) and asserted
+    # under pack_attestation_root so a crafted ../ in the pack-controlled
+    # distribution metadata cannot escape; required artefacts must exist + be
+    # non-empty; the single-wheel rule fails closed on zero/multiple/empty; the
+    # SBOM digest is sourced fail-closed from the SLSA provenance JSON. NEVER calls
+    # EntryPoint.load() (no pack code executes in the resolver). Gate 133 -> 134.
+    # The gate runs against a FRESH full-suite --cov-branch coverage.json IN THE
+    # SAME COMMIT as this _CRITICAL_FILES extension (NOT just the
+    # _EXPECTED_ENTRY_COUNT bump) per
+    # feedback_verify_promotion_meets_floor_at_promotion_time.
+    ("src/cognic_agentos/protocol/pack_attestation_resolver.py", 0.95, 0.90),
 )
 
 

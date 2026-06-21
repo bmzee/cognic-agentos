@@ -100,8 +100,14 @@ _GATE_TOOL_PATH = _REPO_ROOT / "tools" / "check_critical_coverage.py"
 #: governed managed run; fail-closed + exact tenant-scoped pack identity
 #: resolution + RunResult->ChildResult mapping are the live-dispatch enforcement
 #: surface) = 133.
+#: + 1 startup discovery/trust-registration resolver
+#: (protocol/pack_attestation_resolver.py per ADR-002 + ADR-016 — the
+#: TRUST-INPUT PRIMITIVE that locates an installed pack's signed attestation
+#: artefacts from a deployment-configured root and returns a PackAttestations;
+#: canonical path-containment + required-artefact + single-wheel + sourced-SBOM-
+#: digest fail-closed gates; never calls EntryPoint.load()) = 134.
 #: Bump this in lockstep with any deliberate ``_CRITICAL_FILES`` change.
-_EXPECTED_ENTRY_COUNT = 133
+_EXPECTED_ENTRY_COUNT = 134
 
 #: The 5 modules Sprint 7B.3 promoted to the durable gate, each by its
 #: own landing commit (T3-T6 panels + T7 composer). All ride the
