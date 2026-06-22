@@ -90,6 +90,10 @@ class ModelTrustGate:
             str(tenant_trust_root),
             "--bundle",
             str(sigstore_bundle_path),
+            # cosign 3.x offline verify (ADR-013/ADR-016 §6): an offline-signed
+            # model has no Rekor tlog entry; ignore the tlog. Bundle-only stays —
+            # NO --signature, NO --new-bundle-format=false.
+            "--insecure-ignore-tlog",
             str(signed_artifact_path),
         ]
         try:

@@ -90,9 +90,13 @@ async def test_argv_excludes_signature_flag_and_pins_bundle_only_shape(
         str(tmp_path / "trust.pub"),
         "--bundle",
         str(tmp_path / "bundle.sigstore"),
+        "--insecure-ignore-tlog",
         str(tmp_path / "model.bin"),
     ]
+    # Narrow §6 fix: model path stays bundle-only — NO detached sig, and
+    # NO legacy-bundle flag (the pack-contract concern, not the model path).
     assert "--signature" not in recorded
+    assert "--new-bundle-format=false" not in recorded
 
 
 async def test_verify_raises_on_timeout(tmp_path: Path) -> None:
