@@ -222,6 +222,47 @@ def test_sign_blob_happy_path_invokes_cosign_with_correct_argv(
     assert (wheel.parent / "bundle.sigstore").is_file()
 
 
+def test_sign_blob_argv_carries_cosign3_legacy_compat_flags(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """cosign 3.x deprecated ``--output-signature`` and uploads to the
+    public Rekor by default — both break the kernel's air-gapped signing
+    path. The ``sign-blob`` argv MUST carry the three legacy-compat flags
+    (``--tlog-upload=false`` / ``--use-signing-config=false`` /
+    ``--new-bundle-format=false``) so the pack-author path keeps emitting
+    the detached ``cosign.sig`` + an OFFLINE bundle on cosign 3.x, with no
+    Rekor upload (ADR-016). Drift-pin: the flags ride the block between
+    ``--yes`` and ``--key``."""
+    shim = _make_cosign_shim(tmp_path)
+    _set_cosign_settings(monkeypatch, cosign_path=shim, signing_key_path=_TEST_PRIVATE_PEM)
+    wheel = tmp_path / "example-0.1.0-py3-none-any.whl"
+    wheel.write_bytes(b"placeholder-wheel-bytes")
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["sign-blob", str(wheel)])
+    assert result.exit_code == 0, (
+        f"sign-blob exited {result.exit_code}; stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+
+    argv = _read_shim_recording(shim)["argv"]
+    assert "--tlog-upload=false" in argv
+    assert "--use-signing-config=false" in argv
+    assert "--new-bundle-format=false" in argv
+    # The three compat flags ride the block between "--yes" and "--key".
+    yes_idx, key_idx = argv.index("--yes"), argv.index("--key")
+    for flag in (
+        "--tlog-upload=false",
+        "--use-signing-config=false",
+        "--new-bundle-format=false",
+    ):
+        assert yes_idx < argv.index(flag) < key_idx
+    # Unchanged contract: the wheel is still signed + both outputs land.
+    assert str(wheel) in argv
+    assert (wheel.parent / "cosign.sig").is_file()
+    assert (wheel.parent / "bundle.sigstore").is_file()
+
+
 def test_sign_blob_happy_path_emits_pass_summary_to_stdout(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
