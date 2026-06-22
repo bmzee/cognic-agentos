@@ -123,11 +123,13 @@ async def cosign_sign_blob(manifest: bytes, identity: SigningIdentity) -> Cosign
     absent, times out, exits non-zero, or fails to produce both outputs.
 
     argv follows cli/sign.py's list-form subprocess shape, with
+    --tlog-upload=false (offline, no public-Rekor upload) +
     --use-signing-config=false + --new-bundle-format=false so cosign v3
     still writes the separate --output-signature artifact and a bundle
     that `verify-blob --signature --bundle` accepts (the Sprint 9
     evidence-pack wire shape):
-      cosign sign-blob --yes --use-signing-config=false --new-bundle-format=false
+      cosign sign-blob --yes --tlog-upload=false --use-signing-config=false
+        --new-bundle-format=false
         --key <key> --output-signature <sig> --bundle <bundle> <blob>
     """
     cosign = shutil.which("cosign")
@@ -149,6 +151,9 @@ async def cosign_sign_blob(manifest: bytes, identity: SigningIdentity) -> Cosign
             cosign,
             "sign-blob",
             "--yes",
+            # cosign 3.x offline sign (ADR-016 §4.6): --tlog-upload=false stops
+            # the public-Rekor upload so air-gapped evidence-pack signing works.
+            "--tlog-upload=false",
             "--use-signing-config=false",
             "--new-bundle-format=false",
             "--key",
