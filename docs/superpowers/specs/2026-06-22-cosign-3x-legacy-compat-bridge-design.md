@@ -21,7 +21,7 @@ The kernel's pack/CLI signing path is hard-wired to **cosign 2.x's detached-sign
 
 ## 2. Decision: Fork A (legacy-compat bridge), not Fork B (bundle-only modernization)
 
-**Fork A** — make the pack/CLI path keep emitting + verifying the legacy `cosign.sig` + `bundle.sigstore` pair on cosign 3.x via the proven compat flags. **No attestation-contract change.** Smallest blast radius, lowest wire-protocol risk, air-gapped-correct, converges the CLI/pack path onto the repo's own working `signing.py` precedent.
+**Fork A** — make the pack/CLI path keep emitting + verifying the legacy `cosign.sig` + `bundle.sigstore` pair on cosign 3.x via the proven compat flags. **No attestation-contract change.** Smallest blast radius, lowest wire-protocol risk, air-gapped-correct, converges the CLI/pack path onto the repo's own (partial) `signing.py` precedent — adding the one flag (`--tlog-upload=false`) that `signing.py` itself is missing.
 
 **Fork B** (deferred) — true bundle-only: drop `cosign.sig`, verify against `--bundle` only, converge on `models/trust.py`. Future-proof but touches ~14 wire-public sites (the `SignatureRedReason` ADR-012 §110 gate vocab, `PackAttestations`, the resolver required-set, ADR-016 filenames, all 5 manifest templates) **and** must separately solve the air-gapped-sign story. Out of scope here; tracked as the long-term cleanup for when cosign removes the deprecated flags entirely.
 
@@ -51,9 +51,9 @@ cosign verify-blob --key <pub> \
 - `--new-bundle-format=false` is explicit legacy-bundle posture on both sign + verify (optional in the local probe, included for explicitness + to pin the legacy format).
 - `--tlog-upload` and `--output-signature` are **deprecated-but-functional** on 3.0.6 (both emit deprecation warnings). This is the bridge's known debt — see §8.
 
-## 4. Module changes (pack + model + evidence-pack signing — 5 argv sites + 1 caller)
+## 4. Module changes (pack + model + evidence-pack signing — 5 argv sites + 2 callers + 1 bundle-path resolver)
 
-All touched modules are critical-controls / supply-chain — `cli/sign.py`, `cli/verify.py`, `protocol/trust_gate.py`, `protocol/plugin_registry.py`, `models/trust.py`, `compliance/iso42001/signing.py` → `core-controls-engineer` + `/critical-module-mode`, 95% line / 90% branch, negative-path tests required.
+All touched modules are critical-controls / supply-chain — `cli/sign.py`, `cli/verify.py`, `protocol/trust_gate.py`, `protocol/plugin_registry.py`, `portal/api/packs/review_routes.py`, `packs/_signature_path_resolver.py`, `models/trust.py`, `compliance/iso42001/signing.py` → `core-controls-engineer` + `/critical-module-mode`, 95% line / 90% branch, negative-path tests required.
 
 **4.1 `cli/sign.py`** — `_exec_cosign_sign_blob` (`:583-597`): add `--tlog-upload=false --use-signing-config=false --new-bundle-format=false` to the sign-blob argv. The post-exec checks (`cosign_sig_output_missing/_empty`, `cosign_bundle_output_missing/_empty`) are UNCHANGED and now pass (both files produced). The `{**os.environ, "COSIGN_PASSWORD": ""}` env is unchanged.
 
@@ -65,7 +65,11 @@ All touched modules are critical-controls / supply-chain — `cli/sign.py`, `cli
 - The `signature_digest = _hash_file(sig_canonical)` (`:636`) is UNCHANGED — it stays the SHA-256 of `cosign.sig` (the wire-public audit identity is preserved). The bundle is verified-against but the digest contract does not move.
 - The `require_cosign=False` synthetic-skip path (`:519-532`, `"cosign-skipped:require_cosign=false"`) is UNCHANGED (version-agnostic).
 
-**4.4 `protocol/plugin_registry.py`** — the single `verify_pack_signature(...)` caller (`:1141-1142`): pass `bundle_path=artefacts.sigstore_bundle_path` (already resolved on `PackAttestations`). No other registry change.
+**4.4 The TWO `verify_pack_signature(...)` callers + the bundle-path resolver** (corrected — there are two production callers, not one; both pass the `--signature`-only shape and both need the new required `bundle_path`, so both land in the SAME atomic commit as §4.3 or production gets a `TypeError`):
+
+- **`protocol/plugin_registry.py`** (pack-admission, `:1138-1146`): pass `bundle_path=artefacts.sigstore_bundle_path` (already resolved on `PackAttestations`). No other registry change.
+- **`portal/api/packs/review_routes.py`** (the Sprint-7B.3 5-gate approval signature gate, `:461`; ADR-012 §110 wire-public): pass a manifest-resolved `bundle_path`. It has no `PackAttestations`; it resolves paths via `packs/_signature_path_resolver.py`.
+- **`packs/_signature_path_resolver.py`** — extend `resolve_signature_paths(...)` to ALSO project a `bundle_path`, mirroring the existing `_resolve_signature_relative` (`:124-159`): match `bundle.sigstore` by **POSIX basename** against `[supply_chain].attestation_paths` — **NOT** a `cosign.sig` sibling. `attestation_paths` is the source of truth and supports custom dirs (e.g. `custom/dir/bundle.sigstore`), consistent with the supply-chain evidence projector (`packs/evidence/supply_chain.py`, which matches `bundle.sigstore` → `sigstore_bundle` by basename); a sibling-only derivation would silently reject that recognised manifest shape. Map ALL bundle-path failure modes (absent / multiple-ambiguous / absolute / traversal) to the **existing** `signature_bundle_path_unreachable` `SignatureRedReason` (already defined + used at `_signature_path_resolver.py:30` + `review_routes.py:455`) — **no new wire-vocab value** (per §5). Add `bundle_path: Path | None` to `SignaturePathResolution`; `review_routes.py` passes the resolved `bundle_path` into `verify_pack_signature`.
 
 **4.5 `models/trust.py`** (the narrow model-path fold-in, per §6) — `verify_model_signature` (`:86-94`): add **ONLY** `--insecure-ignore-tlog` to the existing bundle-only argv. Do NOT add `--signature` (the model path has no detached sig and stays bundle-only). Do NOT add `--new-bundle-format=false` unless a real test proves model bundles need it. This closes the model-path offline gap without changing its bundle-only posture.
 
@@ -78,7 +82,7 @@ Explicitly preserved — zero wire-protocol / contract churn:
 - `protocol/pack_attestation_resolver.py` required-set (`cosign.sig` stays required+non-empty).
 - `protocol/plugin_registry.py` `PackAttestations.cosign_signature_path` field (non-Optional, unchanged).
 - `trust_gate.py` `CosignVerificationResult.signature_digest` semantics (SHA-256 of `cosign.sig`).
-- The wire-public `SignatureRedReason` 5-gate vocabulary (`packs/approval_gates.py`, ADR-012 §110) + `packs/_signature_path_resolver.py`.
+- The wire-public `SignatureRedReason` 5-gate vocabulary (`packs/approval_gates.py`, ADR-012 §110). `packs/_signature_path_resolver.py` GAINS a `bundle_path` projection (per §4.4) but adds **NO new reason value** — every bundle-path failure maps to the EXISTING `signature_bundle_path_unreachable`, so the closed enum is unchanged.
 - The `AttestationKind` evidence-panel vocab (`packs/evidence/supply_chain.py`).
 - All 5 pack-manifest templates' `attestation_paths` (`attestations/cosign.sig`, …).
 - The evidence-pack signature *contract* (`compliance/iso42001/signing.py` still emits `cosign.sig` + bundle into the exported tarball) — only the offline `--tlog-upload=false` flag is added per §4.6; no output/contract change. (This module is NOT "left as-is" — it gains one flag.)
@@ -97,6 +101,7 @@ Rationale: the pack path preserves the legacy `cosign.sig + bundle.sigstore` ADR
 
 - **Env-gated real-cosign proof for the CLI/pack path** (new), mirroring `tests/integration/models/test_real_cosign_proof.py`, gated on the existing `COGNIC_RUN_COSIGN_INTEGRATION=1`: real `agentos sign` → real `agentos verify` → the runtime `trust_gate.verify_pack_signature` round-trip, all green on cosign 3.x, **and an offline assertion** (the produced bundle carries no `tlogEntries`). This is also what unblocks Proof 1a Task 6.
 - **Negative-path unit tests** (no cosign needed) per critical-controls: the pack-path argv builders emit the exact flag set (drift-pin the flags); `trust_gate` fails closed when `bundle_path` is missing/empty; the `require_cosign=False` skip path unchanged.
+- **Approval-gate bundle-path resolver unit tests** (no cosign needed): the extended `resolve_signature_paths(...)` resolves `bundle.sigstore` by **basename** from `[supply_chain].attestation_paths` — INCLUDING a **non-sibling `custom/dir/bundle.sigstore`** case (so the slice cannot regress into a `cosign.sig`-sibling assumption); absent / multiple-ambiguous / absolute / traversal bundle paths all map to the EXISTING `signature_bundle_path_unreachable` (assert NO new `SignatureRedReason` value is introduced); `review_routes.py` threads the resolved `bundle_path` into `verify_pack_signature` (its `AsyncMock`-based gate test asserts the kwarg is passed).
 - **Model-path argv unit test** (no cosign needed): assert `verify_model_signature` passes `--insecure-ignore-tlog`, AND assert it stays **bundle-only** — `--signature` is NOT in the argv, and `--new-bundle-format=false` is NOT present (the narrow §6 fix). Only claim a real offline-model proof if this slice actually creates one; if the env-gated proof does not add an offline model round-trip, do not claim it.
 - **Evidence-pack signing argv unit test** (no cosign needed): assert `signing.py`'s sign-blob argv now includes `--tlog-upload=false` (drift-pin); the `cosign.sig` + bundle outputs + the `EvidencePackSigningError` fail-loud behaviour are unchanged. (No offline evidence-pack round-trip is claimed unless the slice creates one.)
 - **Keep `test_real_cosign_proof.py` green** — the model path gains only `--insecure-ignore-tlog`; confirm the test stays green (the bundle still verifies; the tlog is now ignored rather than required). Add an offline model assertion only if the slice creates a genuinely offline-signed model fixture.
