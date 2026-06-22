@@ -24,3 +24,10 @@ packages = ["src/cognic_tool_search"]
 # build before the discovery test runs. The corpus (src/cognic_tool_search/corpus/
 # *.json) is INSIDE the package tree, so hatchling auto-includes it via the
 # `packages` setting above - no force-include needed for it.
+
+# LOCK 2: ship the SAME manifest the CLI reads (the root file) as package data
+# inside the wheel, so the runtime extract_pack_manifest(Distribution.locate_file)
+# finds it at cognic_tool_search/cognic-pack-manifest.toml. (The corpus is inside
+# the package tree, so hatchling auto-includes it — no force-include needed.)
+[tool.hatch.build.targets.wheel.force-include]
+"cognic-pack-manifest.toml" = "cognic_tool_search/cognic-pack-manifest.toml"

@@ -433,9 +433,7 @@ whether `agentos validate` tolerates a [tool.cognic.mcp] block on a tool-kind
 manifest. A refusal here is a real finding to record in VALIDATION-RESULTS.md
 and resolve (e.g. relocate the runtime block), NOT a test bug.
 """
-import shutil
-import subprocess
-import sys
+import importlib.util
 from pathlib import Path
 
 import pytest
@@ -459,6 +457,26 @@ def test_manifest_exists_with_both_block_families() -> None:
     assert "attestation_paths" in data["supply_chain"]
     # runtime nested block
     mcp = data["tool"]["cognic"]["mcp"]
+    assert mcp["transport"] == "streamable-http"
+    assert mcp["auth"] == "oauth-prm"
+    assert mcp["server_url"] == "http://127.0.0.1:8765/mcp"
+    assert mcp["scopes"] == ["mcp:tools"]
+
+
+# LOCK-2 GUARD: the shape test above only parses the ROOT manifest. This second
+# test pins the RUNTIME extraction (force-include → package data → extract_pack_manifest),
+# so the force-include cannot silently regress while the shape test still passes.
+@pytest.mark.skipif(
+    importlib.util.find_spec("cognic_tool_search") is None,
+    reason="cognic-tool-search not installed; run `uv pip install -e examples/cognic-tool-search`",
+)
+def test_runtime_extracts_mcp_block_from_installed_package() -> None:
+    from cognic_agentos.protocol.mcp_manifest import extract_pack_manifest
+
+    manifest = extract_pack_manifest(
+        distribution_name="cognic-tool-search", package_name="cognic_tool_search"
+    )
+    mcp = manifest["tool"]["cognic"]["mcp"]
     assert mcp["transport"] == "streamable-http"
     assert mcp["auth"] == "oauth-prm"
     assert mcp["server_url"] == "http://127.0.0.1:8765/mcp"
@@ -529,7 +547,7 @@ Expected: PASS (1 passed).
 - [ ] **Step 5: RUN `agentos validate` and record the result (LOCK 2 / finding)**
 
 Run: `uv run agentos validate examples/cognic-tool-search`
-Expected (the bet): exits 0 / "validation passed". **If it REFUSES** with a `[tool.cognic.mcp]`-block-related reason on a tool pack: STOP — this is the real finding. Record the exact refusal reason in `VALIDATION-RESULTS.md` (Task 9), then resolve per the validator's contract (the most likely resolution is that the runtime block is tolerated and the refusal is about something else — re-read `cli/validate.py` + the per-concern validator that fired, and adjust the manifest minimally). Do not weaken the runtime block shape (the runtime needs it verbatim).
+Expected (LANDED 2026-06-22): pre-sign, validate exits **1** — but ONLY on the missing-attestation-file arm (`supply_chain_attestation_path_unresolvable` for `attestations/cosign.sig` + `sbom.cdx.json`, which `agentos sign` produces in Task 6) + a non-gating `identity_oasf_capability_set_missing` warning. The `[tool.cognic.mcp]` block itself is **TOLERATED** (no block-related refusal): `cli/validators/mcp.py` only refuses on restricted-data-class inconsistencies (caching / elicitation_form on `customer_pii`/`payment_action`/etc.), so for this `data_classes=["public"]` pack the block is structurally tolerated and the runtime is the real consumer. Confirm by temporarily creating non-empty placeholder attestation files → validate then exits **0** / `validate: PASS` → delete them. Full validate PASS is deferred to Task 6's real signing. **If validate REFUSES with a `[tool.cognic.mcp]`-block-related reason** on a tool pack: STOP — that would be the real finding. Record the exact refusal reason in `VALIDATION-RESULTS.md` (Task 9) and resolve per the validator's contract — re-read `cli/validate.py` + the per-concern validator that fired, adjust the offending top-level value minimally, and **never weaken the runtime `[tool.cognic.mcp]` block** (the runtime needs it verbatim).
 
 Note: a *pre-sign* `agentos validate` will refuse on missing `supply_chain.attestation_paths` files — that is expected (the files are produced by `sign` in Task 6) and is NOT the finding. Run this readiness check knowing the attestation-file-existence arm will flag until Task 6; the block-shape acceptance is what Step 5 is checking. To isolate block-shape from attestation-existence, the implementer may temporarily create empty `attestations/cosign.sig` + `attestations/sbom.cdx.json` placeholders for this readiness check, then delete them before Task 6 signs for real.
 
