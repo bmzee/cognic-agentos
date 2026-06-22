@@ -19,6 +19,13 @@ doctrines):
 - ``blob_path`` — the explicit ``[supply_chain].blob_path`` manifest
   field (the signed wheel). Manifest-RELATIVE; absolute → refused;
   ``..`` traversal → refused.
+- ``bundle_path`` — the unique ``[supply_chain].attestation_paths``
+  entry whose basename is exactly ``bundle.sigstore`` (matched by POSIX
+  basename, custom-dir-safe — consistent with the supply-chain evidence
+  projector). Manifest-RELATIVE; absent / ambiguous / absolute / ``..``
+  traversal → ``signature_bundle_path_unreachable`` (the EXISTING
+  reason — NO new ``SignatureRedReason`` value). cosign 3.x legacy-
+  compat (ADR-016): the runtime trust gate passes it via ``--bundle``.
 - ``signed_artefact_root`` — the absolute bundle directory on the
   approve-time host, submit-declared at the author surface (R8 P2 #4),
   persisted on the submit chain row's ``payload["signed_artefact_root"]``,
@@ -30,12 +37,16 @@ the produced paths; the T9 handler does the ``.exists()`` probe
 separately and maps a missing file to ``signature_bundle_path_unreachable``.
 
 **Check precedence** (documented + pinned by the Slice-B precedence
-tests): signature-path resolution → blob-path resolution → bundle-root
-presence → concatenation. A manifest-declaration failure (the author's
-fault) is surfaced ahead of the submit-time bundle-root failure.
+tests): signature-path resolution → blob-path resolution →
+bundle.sigstore resolution → bundle-root presence → concatenation. A
+manifest-declaration failure (the author's fault) is surfaced ahead of
+the submit-time bundle-root failure.
 
-**R7 P2 #1.** The 8 failure red-reasons are a SUBSET of the unified
-13-value :data:`~cognic_agentos.packs.approval_gates.SignatureRedReason`
+**R7 P2 #1.** The 9 resolver-emitted red-reasons (R7 seeded 8; the
+cosign-3.x bridge added the reused ``signature_bundle_path_unreachable``
+as the 9th — every bundle-path failure maps to it) are a SUBSET of the
+unified 13-value
+:data:`~cognic_agentos.packs.approval_gates.SignatureRedReason`
 Literal — there is NO standalone ``SignaturePathRedReason`` Literal
 (it was introduced at R6 and DELETED at R7; implementers MUST NOT
 recreate it). :class:`SignaturePathResolution` types ``red_reason`` as
@@ -64,21 +75,29 @@ __all__ = ["SignaturePathResolution", "resolve_signature_paths"]
 _COSIGN_SIG_FILENAME: str = "cosign.sig"
 
 
+#: The literal Sigstore-bundle filename produced by ``agentos sign``
+#: (``cli/sign.py``). Matched on the path basename, mirroring
+#: ``_COSIGN_SIG_FILENAME`` — a custom-dir entry such as
+#: ``custom/dir/bundle.sigstore`` still matches.
+_BUNDLE_SIGSTORE_FILENAME: str = "bundle.sigstore"
+
+
 @dataclasses.dataclass(frozen=True)
 class SignaturePathResolution:
     """Frozen result of :func:`resolve_signature_paths`.
 
-    - ``outcome`` — ``"resolved"`` on the green path; one of the four
+    - ``outcome`` — ``"resolved"`` on the green path; one of the five
       failure-class values otherwise. The failure class names WHICH
       part of the contract was unmet; the precise ``red_reason``
       carries the specific cause.
-    - ``signature_path`` / ``blob_path`` — the ABSOLUTE concatenated
-      paths on the green path; BOTH ``None`` on every failure path
-      (the resolver invents no path — pinned by the Slice-B contract
-      test).
-    - ``red_reason`` — one of the 8 resolver-side
-      :data:`SignatureRedReason` values on a failure path; ``None`` on
-      the green path.
+    - ``signature_path`` / ``blob_path`` / ``bundle_path`` — the
+      ABSOLUTE concatenated paths on the green path; ALL ``None`` on
+      every failure path (the resolver invents no path — pinned by the
+      Slice-B contract test).
+    - ``red_reason`` — the resolver-side :data:`SignatureRedReason`
+      value on a failure path (every bundle-path failure maps to the
+      EXISTING ``signature_bundle_path_unreachable`` — no new value);
+      ``None`` on the green path.
     """
 
     outcome: Literal[
@@ -86,10 +105,12 @@ class SignaturePathResolution:
         "ambiguous",
         "signature_missing",
         "blob_missing",
+        "bundle_missing",
         "root_missing",
     ]
     signature_path: Path | None
     blob_path: Path | None
+    bundle_path: Path | None
     red_reason: SignatureRedReason | None
 
 
@@ -109,7 +130,11 @@ def _signature_failed(
     red_reason: SignatureRedReason,
 ) -> SignaturePathResolution:
     return SignaturePathResolution(
-        outcome=outcome, signature_path=None, blob_path=None, red_reason=red_reason
+        outcome=outcome,
+        signature_path=None,
+        blob_path=None,
+        bundle_path=None,
+        red_reason=red_reason,
     )
 
 
@@ -118,7 +143,22 @@ def _blob_failed(red_reason: SignatureRedReason) -> SignaturePathResolution:
         outcome="blob_missing",
         signature_path=None,
         blob_path=None,
+        bundle_path=None,
         red_reason=red_reason,
+    )
+
+
+def _bundle_failed() -> SignaturePathResolution:
+    """Every bundle-path failure mode (absent / multiple-ambiguous /
+    absolute / ``..``-traversal) maps to the EXISTING
+    ``signature_bundle_path_unreachable`` — the resolver introduces NO
+    new ``SignatureRedReason`` value (the closed enum stays frozen)."""
+    return SignaturePathResolution(
+        outcome="bundle_missing",
+        signature_path=None,
+        blob_path=None,
+        bundle_path=None,
+        red_reason="signature_bundle_path_unreachable",
     )
 
 
@@ -174,6 +214,41 @@ def _resolve_blob_relative(
     return blob_path
 
 
+def _resolve_bundle_relative(
+    manifest: dict[str, Any],
+) -> str | SignaturePathResolution:
+    """Project the manifest-relative ``bundle.sigstore`` path.
+
+    Mirrors :func:`_resolve_signature_relative`: matches the unique
+    ``[supply_chain].attestation_paths`` entry whose POSIX basename is
+    exactly ``bundle.sigstore`` (custom-dir-safe — a
+    ``custom/dir/bundle.sigstore`` entry still matches, consistent with
+    the supply-chain evidence projector). Returns the relative-path
+    ``str`` on success, or a fully-formed failure
+    :class:`SignaturePathResolution` (every failure mode →
+    ``signature_bundle_path_unreachable``).
+    """
+    supply_chain = manifest.get("supply_chain")
+    attestation_paths = (
+        supply_chain.get("attestation_paths") if isinstance(supply_chain, dict) else None
+    )
+    entries = attestation_paths if isinstance(attestation_paths, list) else []
+    matches = [
+        entry
+        for entry in entries
+        if isinstance(entry, str) and Path(entry).name == _BUNDLE_SIGSTORE_FILENAME
+    ]
+    # 0 matches (absent) OR >1 (ambiguous) → unreachable.
+    if len(matches) != 1:
+        return _bundle_failed()
+    candidate = matches[0]
+    if candidate.startswith("/"):
+        return _bundle_failed()
+    if _has_traversal(candidate):
+        return _bundle_failed()
+    return candidate
+
+
 def resolve_signature_paths(
     manifest: dict[str, Any],
     *,
@@ -192,10 +267,14 @@ def resolve_signature_paths(
        / ``..``-traversal.
     2. ``[supply_chain].blob_path`` field — absent / non-string /
        absolute / ``..``-traversal.
-    3. ``signed_artefact_root`` — ``None``.
-    4. concatenate ``signed_artefact_root / <relative>`` → ``resolved``.
+    3. ``bundle.sigstore`` attestation entry (matched by POSIX basename
+       from ``[supply_chain].attestation_paths``, custom-dir-safe) —
+       absent / ambiguous / absolute / ``..``-traversal, every failure
+       → ``signature_bundle_path_unreachable``.
+    4. ``signed_artefact_root`` — ``None``.
+    5. concatenate ``signed_artefact_root / <relative>`` → ``resolved``.
 
-    A failure at any step short-circuits with BOTH paths ``None`` and
+    A failure at any step short-circuits with ALL paths ``None`` and
     the specific :data:`SignatureRedReason`; the T9 handler threads
     that ``red_reason`` straight onto ``SignatureGateInput`` (R7 P2 #1
     — no translation table).
@@ -208,19 +287,25 @@ def resolve_signature_paths(
     if isinstance(blob_relative, SignaturePathResolution):
         return blob_relative
 
+    bundle_relative = _resolve_bundle_relative(manifest)
+    if isinstance(bundle_relative, SignaturePathResolution):
+        return bundle_relative
+
     if signed_artefact_root is None:
         return SignaturePathResolution(
             outcome="root_missing",
             signature_path=None,
             blob_path=None,
+            bundle_path=None,
             red_reason="signature_signed_artefact_root_not_declared_at_submit",
         )
 
-    # Both helpers returned ``str`` relatives — the isinstance guards
-    # above are the only way out of the failure paths.
+    # All three helpers returned ``str`` relatives — the isinstance
+    # guards above are the only way out of the failure paths.
     return SignaturePathResolution(
         outcome="resolved",
         signature_path=signed_artefact_root / signature_relative,
         blob_path=signed_artefact_root / blob_relative,
+        bundle_path=signed_artefact_root / bundle_relative,
         red_reason=None,
     )

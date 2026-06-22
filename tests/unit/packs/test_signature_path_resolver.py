@@ -16,7 +16,9 @@ ABSOLUTE paths for ``TrustGate.verify_pack_signature``. Path-traversal
 safe. Pure-functional — no filesystem I/O (the T9 handler does the
 existence check separately).
 
-**R7 P2 #1.** The 8 resolver failure modes are a SUBSET of the unified
+**R7 P2 #1.** The 9 resolver-emitted red-reasons (R7 seeded 8; the
+cosign-3.x bridge added the reused ``signature_bundle_path_unreachable``
+as the 9th) are all members of the unified
 13-value :data:`SignatureRedReason` Literal in ``packs/approval_gates``
 — the resolver returns ``SignatureRedReason | None`` directly so the
 handler threads ``resolution.red_reason`` into
@@ -40,8 +42,10 @@ from cognic_agentos.packs.approval_gates import SignatureRedReason
 
 _ROOT = Path("/var/cognic/bundles/pack-x")
 
-#: The 8 resolver-side red-reasons folded into the unified composer
-#: ``SignatureRedReason`` Literal at R7 P2 #1.
+#: The 9 resolver-EMITTED red-reasons, all members of the unified composer
+#: ``SignatureRedReason`` Literal (R7 P2 #1 seeded 8; the cosign-3.x bridge
+#: added the REUSED ``signature_bundle_path_unreachable`` as the 9th — every
+#: bundle-path failure maps to it, introducing NO new wire value).
 _RESOLVER_RED_REASONS = (
     "signature_cosign_sig_not_in_attestation_paths",
     "signature_multiple_cosign_sig_entries_ambiguous",
@@ -51,6 +55,7 @@ _RESOLVER_RED_REASONS = (
     "signature_signed_artefact_root_not_declared_at_submit",
     "signature_path_traversal_rejected",
     "signature_blob_path_traversal_rejected",
+    "signature_bundle_path_unreachable",
 )
 
 
@@ -189,7 +194,7 @@ class TestSprint7B3T9SliceBRootFailureMode:
 
 
 class TestSprint7B3T9SliceBPrecedence:
-    """The resolver's documented check precedence: signature → blob → root."""
+    """The resolver's documented check precedence: signature → blob → bundle → root."""
 
     def test_signature_failure_takes_precedence_over_blob_failure(self) -> None:
         # Both the cosign.sig entry AND the blob_path field are absent.
@@ -203,6 +208,15 @@ class TestSprint7B3T9SliceBPrecedence:
         resolution = resolve_signature_paths(manifest, signed_artefact_root=None)
         assert resolution.red_reason == "signature_blob_path_not_declared_in_manifest"
 
+    def test_bundle_failure_takes_precedence_over_root_failure(self) -> None:
+        # cosign.sig + blob_path declared, but bundle.sigstore is absent from
+        # attestation_paths AND signed_artefact_root is None — the cosign-3.x
+        # bundle check (precedence signature → blob → bundle → root) fires
+        # BEFORE the root-missing check, so the reason is bundle-unreachable.
+        manifest = _manifest(attestation_paths=("cosign.sig",))
+        resolution = resolve_signature_paths(manifest, signed_artefact_root=None)
+        assert resolution.red_reason == "signature_bundle_path_unreachable"
+
 
 class TestSprint7B3T9SliceBContract:
     """Structural + vocabulary contract."""
@@ -212,7 +226,7 @@ class TestSprint7B3T9SliceBContract:
         with pytest.raises(dataclasses.FrozenInstanceError):
             resolution.outcome = "ambiguous"  # type: ignore[misc]
 
-    def test_all_eight_resolver_red_reasons_are_members_of_signature_red_reason(
+    def test_all_nine_resolver_red_reasons_are_members_of_signature_red_reason(
         self,
     ) -> None:
         composer_reasons = set(typing.get_args(SignatureRedReason))
@@ -220,6 +234,11 @@ class TestSprint7B3T9SliceBContract:
             assert reason in composer_reasons, (
                 f"{reason!r} drifted out of the composer SignatureRedReason Literal"
             )
+        # The cosign-3.x bridge added signature_bundle_path_unreachable as the
+        # 9th resolver-emitted reason — it must already be in the closed enum
+        # (reused, NOT a new wire value).
+        assert "signature_bundle_path_unreachable" in _RESOLVER_RED_REASONS
+        assert "signature_bundle_path_unreachable" in composer_reasons
 
     def test_resolver_red_reason_field_is_typed_against_signature_red_reason(
         self,
@@ -246,3 +265,60 @@ class TestSprint7B3T9SliceBContract:
         assert resolution.outcome != "resolved"
         assert resolution.signature_path is None
         assert resolution.blob_path is None
+
+
+class TestSprint7B3T9BundlePathResolution:
+    """cosign 3.x bundle-path projection — basename match from
+    [supply_chain].attestation_paths (NOT a cosign.sig sibling). Every
+    failure maps to the EXISTING signature_bundle_path_unreachable."""
+
+    def test_resolves_bundle_by_basename(self) -> None:
+        # _manifest()'s default attestation_paths already carries
+        # "bundle.sigstore".
+        resolution = resolve_signature_paths(_manifest(), signed_artefact_root=_ROOT)
+        assert resolution.outcome == "resolved"
+        assert resolution.bundle_path == _ROOT / "bundle.sigstore"
+
+    def test_resolves_bundle_in_custom_dir_by_basename(self) -> None:
+        # The NON-SIBLING case: the bundle lives in custom/dir/, not next
+        # to cosign.sig. The basename match still resolves it — a
+        # sibling-only derivation would wrongly reject this recognised
+        # manifest shape (the supply-chain evidence projector accepts it).
+        manifest = _manifest(attestation_paths=("cosign.sig", "custom/dir/bundle.sigstore"))
+        resolution = resolve_signature_paths(manifest, signed_artefact_root=_ROOT)
+        assert resolution.outcome == "resolved"
+        assert resolution.bundle_path == _ROOT / "custom/dir/bundle.sigstore"
+
+    def test_bundle_absent_maps_to_unreachable(self) -> None:
+        manifest = _manifest(attestation_paths=("cosign.sig",))
+        resolution = resolve_signature_paths(manifest, signed_artefact_root=_ROOT)
+        assert resolution.outcome == "bundle_missing"
+        assert resolution.red_reason == "signature_bundle_path_unreachable"
+        assert resolution.bundle_path is None
+
+    def test_multiple_bundle_entries_ambiguous_maps_to_unreachable(self) -> None:
+        manifest = _manifest(
+            attestation_paths=("cosign.sig", "bundle.sigstore", "x/bundle.sigstore")
+        )
+        resolution = resolve_signature_paths(manifest, signed_artefact_root=_ROOT)
+        assert resolution.outcome == "bundle_missing"
+        assert resolution.red_reason == "signature_bundle_path_unreachable"
+        assert resolution.bundle_path is None
+
+    def test_absolute_bundle_path_maps_to_unreachable(self) -> None:
+        manifest = _manifest(attestation_paths=("cosign.sig", "/abs/bundle.sigstore"))
+        resolution = resolve_signature_paths(manifest, signed_artefact_root=_ROOT)
+        assert resolution.red_reason == "signature_bundle_path_unreachable"
+        assert resolution.bundle_path is None
+
+    def test_bundle_path_traversal_maps_to_unreachable(self) -> None:
+        manifest = _manifest(attestation_paths=("cosign.sig", "../escape/bundle.sigstore"))
+        resolution = resolve_signature_paths(manifest, signed_artefact_root=_ROOT)
+        assert resolution.red_reason == "signature_bundle_path_unreachable"
+        assert resolution.bundle_path is None
+
+    def test_bundle_reason_introduces_no_new_signature_red_reason_value(self) -> None:
+        # signature_bundle_path_unreachable is one of the 5 ORIGINAL
+        # gate-1 reasons — already in the Literal; the resolver adds NO
+        # new value (the closed SignatureRedReason enum stays frozen).
+        assert "signature_bundle_path_unreachable" in set(typing.get_args(SignatureRedReason))
