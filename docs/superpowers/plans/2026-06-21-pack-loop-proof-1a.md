@@ -49,6 +49,7 @@ from collections.abc import Iterator
 
 import pytest
 import uvicorn
+from starlette.types import ASGIApp
 
 _AS_ISSUER = "http://127.0.0.1:9000"
 
@@ -64,7 +65,7 @@ def _wait_port(host: str, port: int, timeout: float = 10.0) -> None:
     raise TimeoutError(f"never came up on {host}:{port}")
 
 
-def _serve(app: object, host: str, port: int) -> tuple[uvicorn.Server, threading.Thread]:
+def _serve(app: ASGIApp, host: str, port: int) -> tuple[uvicorn.Server, threading.Thread]:
     server = uvicorn.Server(uvicorn.Config(app, host=host, port=port, log_level="warning"))
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
@@ -74,7 +75,13 @@ def _serve(app: object, host: str, port: int) -> tuple[uvicorn.Server, threading
 
 @pytest.fixture(scope="session")
 def local_as() -> Iterator[str]:
-    from tests.integration.pack_loop._local_as import build_app
+    # _local_as.py lands in Task 5; resolve it dynamically so this Task-4 conftest
+    # type-checks under strict mypy (a static import errors import-not-found while
+    # the module is absent; a `# type: ignore` would become an unused-ignore error
+    # under warn_unused_ignores once Task 5 creates the file).
+    import importlib
+
+    build_app = importlib.import_module("tests.integration.pack_loop._local_as").build_app
 
     server, thread = _serve(build_app(), "127.0.0.1", 9000)
     try:
@@ -612,7 +619,12 @@ def test_server_publishes_prm_with_authorization_server(pack_server: str) -> Non
     resp = httpx.get("http://127.0.0.1:8765/.well-known/oauth-protected-resource/mcp", timeout=5)
     assert resp.status_code == 200
     body = resp.json()
-    assert body["authorization_servers"] == ["http://127.0.0.1:9000"]
+    # The SDK builds PRM `authorization_servers` from AuthSettings.issuer_url, an
+    # `AnyHttpUrl`. pydantic normalizes a host-only URL to canonical RFC-3986 form
+    # WITH a trailing slash, so the real served value is "http://127.0.0.1:9000/".
+    # (Carry-forward: Task 5's AS allow-list secret must seed the SLASH form to
+    # match this exact-string membership check.)
+    assert body["authorization_servers"] == ["http://127.0.0.1:9000/"]
 
     # The /mcp endpoint requires auth (401 with no bearer) — the runtime PRM probe relies on this.
     unauth = httpx.get("http://127.0.0.1:8765/mcp", timeout=5)
