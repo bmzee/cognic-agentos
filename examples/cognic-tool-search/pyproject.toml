@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cognic-tool-search"
+version = "0.1.0"
+description = "Proof 1a - minimal real MCP tool pack: deterministic policy-doc search over a bundled corpus."
+requires-python = ">=3.12"
+dependencies = ["mcp==1.27.0", "uvicorn[standard]>=0.35"]
+
+# PluginRegistry.discover() walks this entry-point group. The runtime MCP path
+# never EntryPoint.load()s this object (the tool runs behind HTTP); it exists so
+# discover() sees the distribution and `agentos verify`'s load-probe resolves.
+[project.entry-points."cognic.tools"]
+search_policy_docs = "cognic_tool_search:SERVER_DESCRIPTOR"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cognic_tool_search"]
+
+# NOTE: the LOCK-2 force-include of the root cognic-pack-manifest.toml is added in
+# Task 3 (once that manifest exists) - adding it here would make this Task-1
+# editable install reference a file that does not exist yet and can break the
+# build before the discovery test runs. The corpus (src/cognic_tool_search/corpus/
+# *.json) is INSIDE the package tree, so hatchling auto-includes it via the
+# `packages` setting above - no force-include needed for it.
