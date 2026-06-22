@@ -517,6 +517,15 @@ def test_verify_invokes_cosign_with_verify_blob_argv_shape(
     assert "--bundle" in argv
     bundle_idx = argv.index("--bundle")
     assert argv[bundle_idx + 1].endswith("bundle.sigstore")
+    assert "--insecure-ignore-tlog" in argv
+    assert "--new-bundle-format=false" in argv
+    # Both offline flags ride the block between --bundle <bundle> and the
+    # positional wheel (so verification of an offline-signed artifact does
+    # not search the public transparency log).
+    bundle_val_idx = argv.index("--bundle") + 1
+    wheel_idx = max(i for i, a in enumerate(argv) if a.endswith(".whl"))
+    for flag in ("--insecure-ignore-tlog", "--new-bundle-format=false"):
+        assert bundle_val_idx < argv.index(flag) < wheel_idx
     # Wheel is the positional terminal arg.
     assert any("dist" in a and a.endswith(".whl") for a in argv)
 
