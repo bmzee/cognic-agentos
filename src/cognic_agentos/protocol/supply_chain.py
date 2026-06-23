@@ -54,7 +54,7 @@ import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Final, Literal
 
 from cognic_agentos.core.config import Settings
 from cognic_agentos.db.adapters.protocols import ObjectStoreAdapter
@@ -76,6 +76,16 @@ SLSA_PROVENANCE_PREDICATE_TYPE_PREFIX = "https://slsa.dev/provenance/"
 #: ``https://in-toto.io/Statement/v1`` (the envelope, not a Layout
 #: predicate) are rejected. The Sprint-4 contract is Layout-specific.
 INTOTO_PREDICATE_TYPE_PREFIX = "https://in-toto.io/Layout/"
+
+#: ADR-016 Wave-1 simplified AgentOS in-toto layout type. The signer
+#: (cli/sign.py:_build_intoto_layout_dict) declares this _type; the
+#: runtime verifies the simplified contract (no full step-graph in
+#: Wave-1). Single source of truth — cli/sign.py + cli/verify.py import it.
+AGENTOS_INTOTO_LAYOUT_TYPE: Final[str] = "in-toto-layout/v1-wave1-simplified"
+#: Canonical pack kinds for the Wave-1 layout's pack_kind structural
+#: check. Drift-pinned == PackKind in test_intoto_wave1_contract.py
+#: (no runtime import of packs.lifecycle — keep the layering arrow).
+_INTOTO_PACK_KINDS: Final[tuple[str, ...]] = ("tool", "skill", "agent", "hook")
 
 #: Sentinel for distinguishing "predicateType absent" (bare-form OK)
 #: from "predicateType present but invalid" (tampered). Without this,
@@ -647,6 +657,15 @@ class SupplyChainPipeline:
             )
         if not isinstance(layout, dict):
             raise IntotoTampered(f"in-toto layout at {layout_path!s} predicate not a JSON object")
+        # ADR-016 Wave-1 simplified AgentOS layout: the signer declares
+        # _type=AGENTOS_INTOTO_LAYOUT_TYPE and intentionally omits the
+        # full step-graph + expiration (Wave-2). Verify the simplified
+        # contract's security fields — same present-structural
+        # hard-refusal class — instead of demanding steps/expires the
+        # signer never emits.
+        if layout.get("_type") == AGENTOS_INTOTO_LAYOUT_TYPE:
+            SupplyChainPipeline._verify_intoto_wave1_simplified(layout, layout_path)
+            return
         # R7 reviewer-P2 fix: ``steps`` must be a non-empty list AND
         # EVERY step must be a dict with a non-empty stripped ``name``.
         # in-toto is a present-structural attestation in the
@@ -674,6 +693,41 @@ class SupplyChainPipeline:
         expires = layout.get("expires")
         if not isinstance(expires, str) or not expires.strip():
             raise IntotoTampered(f"in-toto layout at {layout_path!s} missing 'expires'")
+
+    @staticmethod
+    def _verify_intoto_wave1_simplified(layout: dict[str, Any], layout_path: Path) -> None:
+        """Structurally validate the ADR-016 Wave-1 simplified in-toto
+        layout. Required: pack_id / pack_version / signing_identity
+        (non-blank strings); pack_kind (non-blank, a member of
+        _INTOTO_PACK_KINDS); artifact_paths (non-empty list of non-blank
+        strings). Any missing / blank / wrong-type → IntotoTampered
+        (present-structural hard-refusal, same class as the full-layout
+        branch). pack_kind is validated structurally only — cross-layer
+        manifest kind-flip comparison is out of scope (matches the
+        structural-only posture of _verify_slsa)."""
+        for field in ("pack_id", "pack_version", "signing_identity"):
+            value = layout.get(field)
+            if not isinstance(value, str) or not value.strip():
+                raise IntotoTampered(
+                    f"in-toto Wave-1 layout at {layout_path!s} missing or blank {field!r}"
+                )
+        pack_kind = layout.get("pack_kind")
+        if not isinstance(pack_kind, str) or pack_kind.strip() not in _INTOTO_PACK_KINDS:
+            raise IntotoTampered(
+                f"in-toto Wave-1 layout at {layout_path!s} has missing or unknown "
+                f"pack_kind={pack_kind!r} (expected one of {_INTOTO_PACK_KINDS})"
+            )
+        artifact_paths = layout.get("artifact_paths")
+        if not isinstance(artifact_paths, list) or len(artifact_paths) == 0:
+            raise IntotoTampered(
+                f"in-toto Wave-1 layout at {layout_path!s} missing or empty 'artifact_paths'"
+            )
+        for index, entry in enumerate(artifact_paths):
+            if not isinstance(entry, str) or not entry.strip():
+                raise IntotoTampered(
+                    f"in-toto Wave-1 layout at {layout_path!s} artifact_paths[{index}] "
+                    f"is not a non-blank string"
+                )
 
     @staticmethod
     def _verify_vuln_scan(vuln_path: Path) -> VulnResult:
@@ -1052,6 +1106,7 @@ def _reject_non_finite_json_constant(value: str) -> Any:
 
 
 __all__ = (
+    "AGENTOS_INTOTO_LAYOUT_TYPE",
     "INTOTO_PREDICATE_TYPE_PREFIX",
     "SIGSTORE_BUNDLE_BUCKET",
     "SIGSTORE_BUNDLE_RETENTION_SECONDS",
