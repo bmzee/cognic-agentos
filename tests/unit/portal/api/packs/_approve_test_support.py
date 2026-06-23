@@ -150,6 +150,7 @@ class StubTrustGate:
         pack_id: str,
         version: str,
         signature_path: Path,
+        bundle_path: Path,
         blob_path: Path,
         trust_root: Path,
         tenant_id: str | None = None,
@@ -160,6 +161,7 @@ class StubTrustGate:
                 "pack_id": pack_id,
                 "version": version,
                 "signature_path": signature_path,
+                "bundle_path": bundle_path,
                 "blob_path": blob_path,
                 "trust_root": trust_root,
                 "tenant_id": tenant_id,
@@ -257,12 +259,17 @@ def make_bundle(
     blob_filename: str = "pack_x-1.0.0-py3-none-any.whl",
     write_sig: bool = True,
     write_blob: bool = True,
+    write_bundle: bool = True,
 ) -> Path:
     """Create a signed-bundle directory under ``tmp_path`` with a
-    ``cosign.sig`` + the signed wheel; return the absolute bundle root.
+    ``cosign.sig`` + ``bundle.sigstore`` + the signed wheel; return the
+    absolute bundle root.
 
-    ``write_sig`` / ``write_blob`` can be False to leave one file
-    missing on disk (exercises ``signature_bundle_path_unreachable``).
+    ``write_sig`` / ``write_blob`` / ``write_bundle`` can be False to leave
+    one file missing on disk (exercises ``signature_bundle_path_unreachable``).
+    The default writes all three: the cosign 3.x runtime trust gate now
+    requires the Sigstore bundle, which the resolver projects by POSIX
+    basename from ``[supply_chain].attestation_paths`` (``bundle.sigstore``).
     """
     bundle = tmp_path / "bundle"
     bundle.mkdir(parents=True, exist_ok=True)
@@ -270,6 +277,8 @@ def make_bundle(
         (bundle / "cosign.sig").write_bytes(b"-----BEGIN SIGNATURE-----\n")
     if write_blob:
         (bundle / blob_filename).write_bytes(b"PK\x03\x04 fake wheel bytes")
+    if write_bundle:
+        (bundle / "bundle.sigstore").write_bytes(b'{"mediaType": "fake-sigstore-bundle"}')
     return bundle
 
 

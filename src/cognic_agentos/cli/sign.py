@@ -584,6 +584,15 @@ async def _exec_cosign_sign_blob(
         cosign_bin,
         "sign-blob",
         "--yes",  # skip "are you sure" prompt; required for non-interactive
+        # cosign 3.x legacy-compat bridge (ADR-016): keep emitting the
+        # detached cosign.sig + offline bundle. --tlog-upload=false is what
+        # disables the public-Rekor upload (air-gapped-correct);
+        # --use-signing-config=false removes its conflict with the
+        # --use-signing-config=true default; --new-bundle-format=false pins
+        # the legacy bundle format the runtime trust gate verifies.
+        "--tlog-upload=false",
+        "--use-signing-config=false",
+        "--new-bundle-format=false",
         "--key",
         signing_key_path,
         "--output-signature",

@@ -80,3 +80,38 @@ def test_validate_cosign_artifacts_rejects_empty_bundle() -> None:
 
     with pytest.raises(EvidencePackSigningError, match="empty Sigstore bundle"):
         validate_cosign_artifacts(CosignArtifacts(signature=b"sig-bytes", bundle=b""))
+
+
+async def test_sign_blob_argv_includes_tlog_upload_false(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Evidence-pack sign-blob is offline on cosign 3.x: --tlog-upload=false
+    is present alongside the existing legacy-output compat flags."""
+    log_file = tmp_path / "argv.log"
+    shim = tmp_path / "cosign"
+    shim.write_text(
+        "#!/bin/sh\n"
+        f'printf "%s\\n" "$@" > "{log_file}"\n'
+        # Honour --output-signature / --bundle so cosign_sign_blob's
+        # both-outputs-produced guard passes.
+        'while [ "$#" -gt 0 ]; do\n'
+        '  case "$1" in\n'
+        '    --output-signature) printf sig > "$2"; shift 2 ;;\n'
+        '    --bundle) printf bundle > "$2"; shift 2 ;;\n'
+        "    *) shift ;;\n"
+        "  esac\n"
+        "done\n"
+        "exit 0\n"
+    )
+    shim.chmod(0o755)
+    monkeypatch.setattr(
+        "cognic_agentos.compliance.iso42001.signing.shutil.which",
+        lambda _: str(shim),
+    )
+    await cosign_sign_blob(b"{}", SigningIdentity(identity="x", pem=b"-----BEGIN KEY-----\n"))
+    recorded = log_file.read_text().strip().splitlines()
+    assert "--tlog-upload=false" in recorded
+    # Existing compat flags unchanged.
+    assert "--use-signing-config=false" in recorded
+    assert "--new-bundle-format=false" in recorded

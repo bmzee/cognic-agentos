@@ -153,6 +153,54 @@ Sprint 4 grows from ~3 wu to ~3.5 wu. Sprint 7A grows from 2 wu to ~2.5 wu.
 
 The startup plugin-registry boot-builder (`harness/registry_boot.build_and_populate_registry`, per the ADR-002 "MCP/A2A startup discovery + trust-registration amendment (2026-06-21)") is the **first production runtime caller** of the full `register_with_full_attestation_check` supply-chain attestation pipeline (cosign verify-blob over the signed wheel → SBOM digest match → SLSA + in-toto shape → Sigstore-bundle persistence → policy) — previously only the offline CLI (`agentos verify`) + a unit test exercised it. At boot the runtime resolves each installed pack's signed wheel + attestations from a deployment `Settings.pack_attestation_root_path` (via the on-gate trust-input resolver `protocol/pack_attestation_resolver.py`, CC 134) and runs the full pipeline per pack under `_default`. The supply-chain controls themselves are unchanged; this is a new *consumer* of them.
 
+## Amendment (2026-06-22) — cosign 3.x legacy-compat bridge (Fork A)
+
+cosign 3.x changed the `sign-blob` defaults: it defaults to
+`--new-bundle-format=true`, deprecates + ignores `--output-signature`, and
+uploads to public Rekor by default. The kernel's pack/CLI signing path was
+hard-wired to cosign 2.x's detached-signature contract and broke (the
+`cosign.sig` artifact was never produced). This amendment adopts **Fork A —
+a legacy-compat bridge** that keeps the existing `cosign.sig` + `bundle.sigstore`
+attestation contract (filenames, `PackAttestations`, the resolver required-set,
+the `SignatureRedReason` 5-gate vocab, and all manifest templates UNCHANGED) by
+adding the verified compat flags. Verified on cosign 3.0.6.
+
+**Sign argv** (`cli/sign.py`, `compliance/iso42001/signing.py`): add
+`--tlog-upload=false --use-signing-config=false --new-bundle-format=false`.
+`--tlog-upload=false` is what disables the public-Rekor upload (air-gapped-
+correct); the evidence-pack signing path (`compliance/iso42001/signing.py`) adds
+only `--tlog-upload=false` (it already carried the other two).
+
+**Verify argv** (`cli/verify.py`, `protocol/trust_gate.py`): add
+`--insecure-ignore-tlog --new-bundle-format=false` (the offline-signed artifact
+has no Rekor entry, so verify must not search the public log). `trust_gate.
+verify_pack_signature` additionally gains a required `bundle_path: Path`
+parameter + passes `--bundle`; `signature_digest` stays the SHA-256 of
+`cosign.sig`. The model path (`models/trust.py`) is bundle-only and adds only
+`--insecure-ignore-tlog` (no `--signature`, no `--new-bundle-format=false`).
+
+**Posture:** signing is now offline / no public Rekor upload by default. On
+cosign 3.0.6 the produced legacy bundle is `base64Signature`-only — it carries
+neither a `tlogEntries` (new format) nor a `rekorBundle` (legacy format) key,
+confirming nothing was uploaded.
+
+**Known debt + long-term cleanup (Fork B):** this bridge deliberately rides
+cosign's **deprecated-but-functional** `--tlog-upload` + `--output-signature`
+flags (both emit deprecation warnings on 3.0.6 and are on cosign's removal path).
+When cosign removes them, **Fork B — true bundle-only verification (drop
+`cosign.sig`, verify against `--bundle` only, converge on the `models/trust.py`
+shape)** becomes mandatory for the pack path; it is tracked as the long-term
+cleanup (it touches the wire-public attestation vocab + must separately solve
+air-gapped signing, so it is out of scope for this bridge). The narrow model-path
+`--insecure-ignore-tlog` is a current, non-deprecated flag and does not carry
+this debt.
+
+The end-to-end offline round-trip (real `agentos sign-blob` → offline bundle →
+both `cli/verify.py` and runtime `trust_gate` verify) is pinned by the env-gated
+proof `tests/integration/cli/test_real_cosign_sign_verify_proof.py`
+(`COGNIC_RUN_COSIGN_INTEGRATION=1`; skip-by-default, fail-loud when opted in
+without cosign).
+
 ## References
 - ADR-002 (cosign signing — extended here)
 - ADR-009 (ObjectStoreAdapter — bundle retention)

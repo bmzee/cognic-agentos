@@ -1184,6 +1184,16 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     # ``portal/api/packs/review_routes.py`` (T9) owns the wiring +
     # pre-computes gates 1-4.
     ("src/cognic_agentos/packs/approval_gates.py", 0.95, 0.90),
+    # cosign 3.x legacy-compat bridge (Task 3) — ``_signature_path_resolver``
+    # gains the approval-gate ``bundle.sigstore`` projection (basename match
+    # from ``[supply_chain].attestation_paths``, custom-dir-safe) feeding the
+    # 5-gate signature gate's new required ``--bundle`` argument. The
+    # resolver is a supply-chain trust-input projector: a bug here lets a
+    # missing/unresolved bundle reach the runtime trust gate. Every
+    # bundle-path failure maps to the EXISTING ``signature_bundle_path_
+    # unreachable`` — no new ``SignatureRedReason`` value. Promoted to the
+    # durable gate here per the tightening-edit-B discipline.
+    ("src/cognic_agentos/packs/_signature_path_resolver.py", 0.95, 0.90),
     # ------------------------------------------------------------------
     # Sprint 7B.4 T13 — UI event-stream durable critical-controls
     # modules (gate 60 → 63).

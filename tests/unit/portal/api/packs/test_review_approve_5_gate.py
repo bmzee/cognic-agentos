@@ -235,6 +235,33 @@ class TestSprint7B3T9ApproveSignatureGate:
         gate = _signature_gate(response.json()["detail"])
         assert gate["red_reason"] == "signature_bundle_path_unreachable"
 
+    async def test_bundle_path_unreachable_when_bundle_sigstore_file_absent(
+        self, store: PackRecordStore, tmp_path: object
+    ) -> None:
+        # cosign 3.x: signed_artefact_root + manifest declarations exist +
+        # cosign.sig + the wheel are on disk, but bundle.sigstore is NOT
+        # written. The runtime trust gate now requires the Sigstore bundle,
+        # so the gate is red on the new bundle .exists() probe BEFORE the
+        # trust gate is consulted (reuses signature_bundle_path_unreachable).
+        bundle = make_bundle(tmp_path, write_bundle=False)  # type: ignore[arg-type]
+        record = await seed_under_review_pack(
+            store,
+            manifest=default_manifest(),
+            signed_artefact_root=str(bundle),
+            conformance=_GREEN_CONFORMANCE,
+        )
+        app = build_app(
+            actor=make_actor(),
+            store=store,
+            trust_gate=StubTrustGate(),
+            trust_root_resolver=StubTrustRootResolver(),
+        )
+        with TestClient(app) as client:
+            response = client.post(f"/api/v1/packs/{record.id}/approve", json=approve_body())
+        assert response.status_code == 412
+        gate = _signature_gate(response.json()["detail"])
+        assert gate["red_reason"] == "signature_bundle_path_unreachable"
+
     async def test_cosign_verification_failed_resolves_cosign_verify_failed(
         self, store: PackRecordStore, tmp_path: object
     ) -> None:

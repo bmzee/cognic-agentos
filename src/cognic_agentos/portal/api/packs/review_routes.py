@@ -444,13 +444,22 @@ async def _resolve_signature_gate_input(
 
     signature_path = resolution.signature_path
     blob_path = resolution.blob_path
-    if signature_path is None or blob_path is None:  # pragma: no cover - resolved ⇒ non-None
+    # cosign 3.x verify (ADR-016): the runtime trust gate now requires the
+    # Sigstore bundle. The resolver derives it by POSIX basename from
+    # [supply_chain].attestation_paths (the manifest source of truth —
+    # custom-dir-safe), NOT as a cosign.sig sibling. A missing/unresolved
+    # bundle is the same author-preload failure class as a missing sig
+    # (reuse the existing signature_bundle_path_unreachable reason).
+    bundle_path = resolution.bundle_path
+    if (
+        signature_path is None or blob_path is None or bundle_path is None
+    ):  # pragma: no cover - resolved ⇒ non-None
         return SignatureGateInput(
             outcome="red",
             red_reason="signature_bundle_path_unreachable",
             signature_digest=None,
         )
-    if not signature_path.exists() or not blob_path.exists():
+    if not signature_path.exists() or not blob_path.exists() or not bundle_path.exists():
         return SignatureGateInput(
             outcome="red",
             red_reason="signature_bundle_path_unreachable",
@@ -462,6 +471,7 @@ async def _resolve_signature_gate_input(
             pack_id=record.pack_id,
             version=version,
             signature_path=signature_path,
+            bundle_path=bundle_path,
             blob_path=blob_path,
             trust_root=trust_root,
             tenant_id=tenant_id,

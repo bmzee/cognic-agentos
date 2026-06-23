@@ -789,6 +789,12 @@ async def _exec_cosign_verify_blob(
         str(sig_path),
         "--bundle",
         str(bundle_path),
+        # cosign 3.x offline verify (ADR-016): the sign side no longer
+        # uploads a Rekor tlog entry (--tlog-upload=false), so verify MUST
+        # ignore the tlog instead of failing to find one; --new-bundle-format
+        # =false pins the legacy bundle posture.
+        "--insecure-ignore-tlog",
+        "--new-bundle-format=false",
         str(wheel_path),
     ]
     try:

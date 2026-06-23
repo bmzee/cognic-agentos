@@ -214,16 +214,27 @@ def _make_attestation_files(
     *,
     sig_bytes: bytes = b"fake-signature-bytes",
     blob_bytes: bytes = b"fake-blob-bytes",
+    bundle_bytes: bytes = b"fake-bundle-bytes",
 ) -> tuple[Path, Path]:
     """Lay out attestation files at the conventional path. Returns
-    (sig_path, blob_path)."""
+    (sig_path, blob_path). Also writes the sibling bundle.sigstore that
+    verify_pack_signature now canonicalises + passes via --bundle; use
+    _bundle_for(sig_path) to obtain it."""
     pack_dir = attestation_root / pack_id / version
     pack_dir.mkdir(parents=True)
     sig_path = pack_dir / "cosign.sig"
     blob_path = pack_dir / f"{pack_id}-{version}.whl"
+    bundle_path = pack_dir / "bundle.sigstore"
     sig_path.write_bytes(sig_bytes)
     blob_path.write_bytes(blob_bytes)
+    bundle_path.write_bytes(bundle_bytes)
     return sig_path, blob_path
+
+
+def _bundle_for(attestation_sibling: Path) -> Path:
+    """The bundle.sigstore written next to the sig + blob in the same
+    pack_dir. Accepts either the sig_path or the blob_path."""
+    return attestation_sibling.parent / "bundle.sigstore"
 
 
 def _make_trust_root(trust_root_prefix: Path, name: str = "_default") -> Path:
@@ -394,6 +405,7 @@ class TestSubprocessShape:
             pack_id="demo_pack",
             version="1.0.0",
             signature_path=sig,
+            bundle_path=_bundle_for(sig),
             blob_path=blob,
             trust_root=trust_root,
         )
@@ -413,6 +425,12 @@ class TestSubprocessShape:
         # Trust root + signature path are passed via explicit flags.
         assert "--key" in argv
         assert "--signature" in argv
+        # cosign 3.x legacy-compat (ADR-016): --bundle <bundle.sigstore>
+        # + the two offline-verify flags ride the verify-blob argv.
+        assert "--bundle" in argv
+        assert argv[argv.index("--bundle") + 1].endswith("bundle.sigstore")
+        assert "--insecure-ignore-tlog" in argv
+        assert "--new-bundle-format=false" in argv
         # The blob path is the trailing positional arg.
         assert argv[-1].endswith(".whl")
 
@@ -440,6 +458,7 @@ class TestSubprocessShape:
             pack_id="envcheck",
             version="1.0.0",
             signature_path=sig,
+            bundle_path=_bundle_for(sig),
             blob_path=blob,
             trust_root=trust_root,
         )
@@ -481,6 +500,7 @@ class TestSubprocessShape:
             pack_id="happy_pack",
             version="1.0.0",
             signature_path=sig,
+            bundle_path=_bundle_for(sig),
             blob_path=blob,
             trust_root=trust_root,
         )
@@ -490,6 +510,63 @@ class TestSubprocessShape:
         assert result.version == "1.0.0"
         # signature_digest is the SHA-256 of the .sig file content.
         assert result.signature_digest == hashlib.sha256(sig_bytes).hexdigest()
+
+    async def test_bundle_path_required_keyword(self) -> None:
+        """bundle_path is a required keyword-only parameter (Fork-A)."""
+        params = inspect.signature(TrustGate.verify_pack_signature).parameters
+        assert "bundle_path" in params
+        assert params["bundle_path"].kind is inspect.Parameter.KEYWORD_ONLY
+        assert params["bundle_path"].default is inspect.Parameter.empty
+
+    async def test_bundle_path_traversal_rejected(
+        self,
+        tmp_path: Path,
+        settings_factory: Any,
+        audit_store: AuditStore,
+        attestation_root: Path,
+        trust_root_prefix: Path,
+    ) -> None:
+        """A bundle_path escaping signature_root_path fails closed."""
+        shim = _make_cosign_shim(tmp_path)
+        settings = settings_factory(cosign_path=str(shim))
+        gate = TrustGate(settings=settings, audit_store=audit_store)
+        sig, blob = _make_attestation_files(attestation_root, "esc_pack", "1.0.0")
+        trust_root = _make_trust_root(trust_root_prefix)
+        with pytest.raises(PathTraversalError):
+            await gate.verify_pack_signature(
+                pack_id="esc_pack",
+                version="1.0.0",
+                signature_path=sig,
+                bundle_path=attestation_root / ".." / "escape.sigstore",
+                blob_path=blob,
+                trust_root=trust_root,
+            )
+
+    async def test_signature_digest_is_sha256_of_cosign_sig_unchanged(
+        self,
+        tmp_path: Path,
+        settings_factory: Any,
+        audit_store: AuditStore,
+        attestation_root: Path,
+        trust_root_prefix: Path,
+    ) -> None:
+        """signature_digest stays the SHA-256 of cosign.sig (not the bundle)."""
+        shim = _make_cosign_shim(tmp_path)
+        settings = settings_factory(cosign_path=str(shim))
+        gate = TrustGate(settings=settings, audit_store=audit_store)
+        sig, blob = _make_attestation_files(
+            attestation_root, "dig_pack", "1.0.0", sig_bytes=b"known-sig-bytes"
+        )
+        trust_root = _make_trust_root(trust_root_prefix)
+        result = await gate.verify_pack_signature(
+            pack_id="dig_pack",
+            version="1.0.0",
+            signature_path=sig,
+            bundle_path=_bundle_for(sig),
+            blob_path=blob,
+            trust_root=trust_root,
+        )
+        assert result.signature_digest == hashlib.sha256(b"known-sig-bytes").hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -519,6 +596,7 @@ class TestSubprocessFailureClasses:
                 pack_id="fail_pack",
                 version="1.0.0",
                 signature_path=sig,
+                bundle_path=_bundle_for(sig),
                 blob_path=blob,
                 trust_root=trust_root,
             )
@@ -555,6 +633,7 @@ class TestSubprocessFailureClasses:
                 pack_id="leak_pack",
                 version="1.0.0",
                 signature_path=sig,
+                bundle_path=_bundle_for(sig),
                 blob_path=blob,
                 trust_root=trust_root,
             )
@@ -615,6 +694,7 @@ class TestSubprocessFailureClasses:
                 pack_id="exec_pack",
                 version="1.0.0",
                 signature_path=sig,
+                bundle_path=_bundle_for(sig),
                 blob_path=blob,
                 trust_root=trust_root,
             )
@@ -655,6 +735,7 @@ class TestSubprocessFailureClasses:
                 pack_id="rmsig_pack",
                 version="1.0.0",
                 signature_path=sig,
+                bundle_path=_bundle_for(sig),
                 blob_path=blob,
                 trust_root=trust_root,
             )
@@ -686,6 +767,7 @@ class TestTimeout:
                 pack_id="slow_pack",
                 version="1.0.0",
                 signature_path=sig,
+                bundle_path=_bundle_for(sig),
                 blob_path=blob,
                 trust_root=trust_root,
                 request_id="req-timeout-1",
@@ -737,6 +819,7 @@ class TestCosignNotInstalled:
                 pack_id="noinstall",
                 version="1.0.0",
                 signature_path=sig,
+                bundle_path=_bundle_for(sig),
                 blob_path=blob,
                 trust_root=trust_root,
             )
@@ -770,6 +853,7 @@ class TestRequireCosignFalse:
             pack_id="dev_pack",
             version="0.0.1",
             signature_path=sig,
+            bundle_path=_bundle_for(sig),
             blob_path=blob,
             trust_root=trust_root,
         )
@@ -803,6 +887,7 @@ class TestPathTraversalAtVerifyBoundary:
                 pack_id="boundary",
                 version="1.0.0",
                 signature_path=outside_sig,
+                bundle_path=_bundle_for(blob),
                 blob_path=blob,
                 trust_root=trust_root,
             )
@@ -826,6 +911,7 @@ class TestPathTraversalAtVerifyBoundary:
                 pack_id="tr_pack",
                 version="1.0.0",
                 signature_path=sig,
+                bundle_path=_bundle_for(sig),
                 blob_path=blob,
                 trust_root=outside_root,
             )
@@ -848,6 +934,7 @@ class TestPathTraversalAtVerifyBoundary:
                 pack_id="evil; rm -rf /",
                 version="1.0.0",
                 signature_path=sig,
+                bundle_path=_bundle_for(sig),
                 blob_path=blob,
                 trust_root=trust_root,
             )

@@ -1139,6 +1139,7 @@ class PluginRegistry:
                 pack_id=record.distribution_name,
                 version=record.distribution_version,
                 signature_path=artefacts.cosign_signature_path,
+                bundle_path=artefacts.sigstore_bundle_path,
                 blob_path=artefacts.cosign_blob_path,
                 trust_root=artefacts.cosign_trust_root,
                 tenant_id=tenant_id,

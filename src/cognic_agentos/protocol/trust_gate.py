@@ -475,6 +475,7 @@ class TrustGate:
         pack_id: str,
         version: str,
         signature_path: Path,
+        bundle_path: Path,
         blob_path: Path,
         trust_root: Path,
         tenant_id: str | None = None,
@@ -508,6 +509,9 @@ class TrustGate:
         _validate_version(version)
         sig_canonical = _canonicalise_under_root(signature_path, self._settings.signature_root_path)
         blob_canonical = _canonicalise_under_root(blob_path, self._settings.signature_root_path)
+        # cosign 3.x verify (ADR-016): the bundle is canonicalised under the
+        # same signature_root_path as the sig + blob (path-traversal invariant).
+        bundle_canonical = _canonicalise_under_root(bundle_path, self._settings.signature_root_path)
         # §2 invariant 4: trust root canonicalised under its own prefix.
         trust_canonical = _canonicalise_under_root(trust_root, self._settings.trust_root_prefix)
 
@@ -562,6 +566,14 @@ class TrustGate:
             str(trust_canonical),
             "--signature",
             str(sig_canonical),
+            "--bundle",
+            str(bundle_canonical),
+            # cosign 3.x offline verify (ADR-016): the sign side uses
+            # --tlog-upload=false (no public-Rekor entry), so verify MUST
+            # --insecure-ignore-tlog instead of failing to find a tlog entry;
+            # --new-bundle-format=false pins the legacy bundle posture.
+            "--insecure-ignore-tlog",
+            "--new-bundle-format=false",
             str(blob_canonical),
         ]
 

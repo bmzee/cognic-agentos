@@ -106,8 +106,13 @@ _GATE_TOOL_PATH = _REPO_ROOT / "tools" / "check_critical_coverage.py"
 #: artefacts from a deployment-configured root and returns a PackAttestations;
 #: canonical path-containment + required-artefact + single-wheel + sourced-SBOM-
 #: digest fail-closed gates; never calls EntryPoint.load()) = 134.
+#: + 1 cosign 3.x legacy-compat bridge approval bundle projector
+#: (packs/_signature_path_resolver.py per ADR-016 — gains the approval-gate
+#: ``bundle.sigstore`` POSIX-basename projection feeding the 5-gate signature
+#: gate's new required ``--bundle`` argument; every bundle-path failure maps to
+#: the EXISTING ``signature_bundle_path_unreachable`` — no new red-reason) = 135.
 #: Bump this in lockstep with any deliberate ``_CRITICAL_FILES`` change.
-_EXPECTED_ENTRY_COUNT = 134
+_EXPECTED_ENTRY_COUNT = 135
 
 #: The 5 modules Sprint 7B.3 promoted to the durable gate, each by its
 #: own landing commit (T3-T6 panels + T7 composer). All ride the
