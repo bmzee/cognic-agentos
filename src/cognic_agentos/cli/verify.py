@@ -100,12 +100,12 @@ from typing import TYPE_CHECKING, Any, Final, Literal
 
 from cognic_agentos.cli import ValidatorReason
 from cognic_agentos.cli.sign import (
-    _AGENTOS_INTOTO_LAYOUT_TYPE,
     _INTOTO_STATEMENT_TYPE,
     _SLSA_PROVENANCE_PREDICATE_TYPE,
     _VALID_PACK_KINDS,
 )
 from cognic_agentos.core.config import Settings
+from cognic_agentos.protocol.supply_chain import AGENTOS_INTOTO_LAYOUT_TYPE
 
 if TYPE_CHECKING:
     from cognic_agentos.db.adapters.protocols import SecretAdapter
@@ -1929,19 +1929,19 @@ def _check_intoto_layout_validity(
                 "failure_mode": "intoto_not_object",
             },
         )
-    if intoto_data.get("_type") != _AGENTOS_INTOTO_LAYOUT_TYPE:
+    if intoto_data.get("_type") != AGENTOS_INTOTO_LAYOUT_TYPE:
         return VerifyFinding(
             severity="refusal",
             reason="verify_intoto_layout_invalid",
             message=(
                 f"verify: in-toto layout at {intoto_path} has _type="
                 f"{intoto_data.get('_type')!r}, expected "
-                f"{_AGENTOS_INTOTO_LAYOUT_TYPE!r}."
+                f"{AGENTOS_INTOTO_LAYOUT_TYPE!r}."
             ),
             payload={
                 "intoto_path": str(intoto_path),
                 "actual_type": intoto_data.get("_type"),
-                "expected_type": _AGENTOS_INTOTO_LAYOUT_TYPE,
+                "expected_type": AGENTOS_INTOTO_LAYOUT_TYPE,
                 "failure_mode": "intoto_wrong_type",
             },
         )

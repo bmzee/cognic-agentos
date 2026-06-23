@@ -138,6 +138,7 @@ import tomli_w
 
 from cognic_agentos.cli import ValidatorReason
 from cognic_agentos.core.config import Settings
+from cognic_agentos.protocol.supply_chain import AGENTOS_INTOTO_LAYOUT_TYPE
 
 if TYPE_CHECKING:
     from cognic_agentos.db.adapters.protocols import SecretAdapter
@@ -175,11 +176,6 @@ _SLSA_PROVENANCE_PREDICATE_TYPE: Final[str] = "https://slsa.dev/provenance/v1"
 #: out-of-scope notes). Fixed string, not a URL — pack admission
 #: doesn't dereference this; it's an opaque label.
 _AGENTOS_SIGN_BUNDLE_BUILD_TYPE: Final[str] = "agentos-sprint-7a-sign-bundle/wave-1-simplified"
-
-#: AgentOS-internal in-toto-layout template type identifier (Wave-1
-#: simplified — does NOT match the full in-toto layout v1 spec since
-#: the Wave-1 simplification omits step + inspection graphs).
-_AGENTOS_INTOTO_LAYOUT_TYPE: Final[str] = "in-toto-layout/v1-wave1-simplified"
 
 
 #: Closed-enum frozenset of valid pack kinds. Per R4 P2 #3 doctrine:
@@ -1680,7 +1676,7 @@ def _build_intoto_layout_dict(
     """
     now = datetime.now(UTC).isoformat()
     return {
-        "_type": _AGENTOS_INTOTO_LAYOUT_TYPE,
+        "_type": AGENTOS_INTOTO_LAYOUT_TYPE,
         "pack_id": pack_id,
         "pack_version": pack_version,
         # T14.C R4 P2 #1: bind manifest [pack].kind into in-toto

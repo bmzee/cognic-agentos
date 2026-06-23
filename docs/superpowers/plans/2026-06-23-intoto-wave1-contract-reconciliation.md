@@ -19,6 +19,7 @@ The one atomic, multi-file commit: the constant moves `cli/sign.py → protocol/
 **Files:**
 - Modify: `src/cognic_agentos/protocol/supply_chain.py` — add the public `AGENTOS_INTOTO_LAYOUT_TYPE` constant + `_INTOTO_PACK_KINDS` tuple + the `_verify_intoto` `_type` branch + the `_verify_intoto_wave1_simplified` helper; extend `__all__`.
 - Modify: `src/cognic_agentos/cli/sign.py` — delete the private `_AGENTOS_INTOTO_LAYOUT_TYPE` (`:182`), import the public constant from `protocol.supply_chain`, update the `_type` reference (`:1683`).
+- Modify: `src/cognic_agentos/cli/verify.py` — **(plan-sync, found at implementation: a THIRD consumer the original plan missed)** `cli/verify.py` imports `_AGENTOS_INTOTO_LAYOUT_TYPE` from `cli/sign.py` for its `agentos verify` in-toto-layout check (`_check_intoto_layout_validity`). Deleting the private constant forces this: drop it from the `cli.sign` import, add `from cognic_agentos.protocol.supply_chain import AGENTOS_INTOTO_LAYOUT_TYPE`, and update its usages (3 references in `_check_intoto_layout_validity`). Part of the atomic single-source move (`cli/verify.py` is also a CC module).
 - Test: `tests/unit/protocol/test_intoto_wave1_contract.py` (NEW) — the cross-contract round-trip + tamper negatives + the drift / single-source pins.
 - Verify-only (no edit; confirm still green — they use the preserved full-layout branch): `tests/unit/protocol/test_supply_chain.py`, `tests/unit/cli/test_cli_sign.py`, and the hand-built-attestation admission tests (`test_fixture_pack_admission.py`, `test_registry_integration.py`, `test_mcp_fixture_pack_admission.py`).
 
@@ -197,10 +198,10 @@ The one atomic, multi-file commit: the constant moves `cli/sign.py → protocol/
   Expected: full suite green; `check_critical_coverage` reports `cli/sign.py` + `protocol/supply_chain.py` at/above the 95/90 floor on the FRESH `coverage.json`; ruff/format/mypy clean.
 - [ ] **Step 8 (controller commits on the human's per-task token):**
   ```
-  git add src/cognic_agentos/protocol/supply_chain.py src/cognic_agentos/cli/sign.py tests/unit/protocol/test_intoto_wave1_contract.py
+  git add src/cognic_agentos/protocol/supply_chain.py src/cognic_agentos/cli/sign.py src/cognic_agentos/cli/verify.py tests/unit/protocol/test_intoto_wave1_contract.py docs/superpowers/plans/2026-06-23-intoto-wave1-contract-reconciliation.md
   git commit
   ```
-  (Plus `tests/unit/cli/test_cli_sign.py` ONLY if Step 5 had to update a constant-name reference there.) Message:
+  (`cli/verify.py` = the third-consumer plan-sync; the plan file = the file-list correction, folded into this commit per the cosign discipline. Plus `tests/unit/cli/test_cli_sign.py` ONLY if Step 5 had to update a constant-name reference there.) Message:
   ```
   fix(supply-chain): runtime verifies the Wave-1 simplified in-toto contract (ADR-016)
 
