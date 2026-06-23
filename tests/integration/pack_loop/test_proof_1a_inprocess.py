@@ -20,8 +20,12 @@ SEQUENTIAL PORTS: the ``pack_server`` (127.0.0.1:8765) + ``local_as``
 ``-n``/parallel).
 """
 
+import io
 import os
 import shutil
+import subprocess
+import tarfile
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +35,7 @@ from fastapi import FastAPI, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from cognic_agentos.compliance.iso42001.evidence_pack import export_evidence_pack
 from cognic_agentos.core.chain_verifier import ChainVerifier
 from cognic_agentos.core.config import Settings, build_settings_without_env_file
 from cognic_agentos.core.decision_history import _decision_history
@@ -272,8 +277,36 @@ async def _assert_invocation_audited_and_chain_valid(
     assert report.is_clean, f"decision-history chain failed verification: {report}"
 
 
+def _generate_evidence_signing_key(dest: Path) -> None:
+    """Generate a REAL cosign keypair (empty passphrase — mirrors
+    ``_authoring.build_sign_verify``) and place the PRIVATE key at ``dest`` (the
+    ``settings.evidence_pack_signing_key_path`` the default ``cosign_sign_blob``
+    signer consumes via ``--key``). ``cosign generate-key-pair`` writes
+    ``cosign.key`` / ``cosign.pub`` into its CWD; copy the private key to the
+    settings path. The caller must also expose ``COSIGN_PASSWORD=""`` in the
+    process env (``cosign sign-blob`` inherits ``os.environ`` and otherwise
+    prompts for the passphrase + fails)."""
+    keydir = dest.parent / "evidence-keys"
+    keydir.mkdir(parents=True, exist_ok=True)
+    result = subprocess.run(
+        ["cosign", "generate-key-pair"],
+        cwd=keydir,
+        env={**os.environ, "COSIGN_PASSWORD": ""},
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise AssertionError(
+            f"cosign generate-key-pair (evidence-signing key) failed "
+            f"({result.returncode}):\n{result.stdout}\n{result.stderr}"
+        )
+    shutil.copy2(keydir / "cosign.key", dest)
+
+
 @pytest.mark.asyncio
-async def test_proof_1a_full_loop(pack_server: str, local_as: str, tmp_path: Path) -> None:
+async def test_proof_1a_full_loop(
+    pack_server: str, local_as: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     # The session-scoped `pack_server` (127.0.0.1:8765) + `local_as`
     # (127.0.0.1:9000) fixtures (conftest.py) start both servers once with managed
     # teardown — no per-test thread launch (no port/lifecycle flake).
@@ -350,6 +383,41 @@ async def test_proof_1a_full_loop(pack_server: str, local_as: str, tmp_path: Pat
             await _assert_invocation_audited_and_chain_valid(
                 adapters.relational.engine, tenant_id=_TENANT
             )
+
+            # ASSERTION 6 (PASS criterion 6): an evidence pack exports + its signed
+            # `.tar.gz` is the wire-public 5-member tamper-evident shape. The signer
+            # is the DEFAULT real `cosign sign-blob` (NO `signer=` override) — a
+            # genuine cosign signature over the manifest. There is no
+            # `verify_evidence_pack()`; re-verification IS tarball inspection (the
+            # hash-chained `decision_history.jsonl` was already verified clean at
+            # assertion 5). The window (now +/- 1h, tz-aware UTC) brackets the
+            # invocation just audited (`created_at == datetime.now(UTC)`).
+            signing_key_path = settings.evidence_pack_signing_key_path
+            assert signing_key_path is not None  # _build_proof_settings always sets it
+            _generate_evidence_signing_key(Path(signing_key_path))
+            # `cosign sign-blob` (signing.py) inherits `os.environ`; the empty-
+            # passphrase cosign key needs `COSIGN_PASSWORD` set (else cosign prompts
+            # for the passphrase + fails). monkeypatch auto-restores at teardown.
+            monkeypatch.setenv("COSIGN_PASSWORD", "")
+            now = datetime.now(UTC)
+            tar_bytes = await export_evidence_pack(
+                engine=adapters.relational.engine,
+                secret_adapter=adapters.secret,
+                tenant_id=_TENANT,
+                period_start=now - timedelta(hours=1),
+                period_end=now + timedelta(hours=1),
+                signing_key_path=signing_key_path,
+            )
+            assert tar_bytes, "evidence pack export returned no bytes"
+            with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:gz") as tar:
+                members = set(tar.getnames())
+            assert members == {
+                "manifest.json",
+                "manifest.json.sig",
+                "manifest.json.bundle.sigstore",
+                "audit_event.jsonl",
+                "decision_history.jsonl",
+            }, f"unexpected evidence-pack members: {members}"
         finally:
             await runtime.aclose()
     finally:
