@@ -1,0 +1,17 @@
+[
+  {
+    "doc_id": "policy-001",
+    "title": "Data retention policy",
+    "body": "Customer transaction records are retained for seven years to satisfy the regulator retention floor. Scratch working data is purged at session end."
+  },
+  {
+    "doc_id": "policy-002",
+    "title": "Access control policy",
+    "body": "Privileged actions require four-eyes approval. Read-only access to public policy documents is granted to all authenticated staff."
+  },
+  {
+    "doc_id": "policy-003",
+    "title": "Incident response policy",
+    "body": "Severity-one incidents are escalated within fifteen minutes. Kill switches fail closed and propagate within thirty seconds."
+  }
+]

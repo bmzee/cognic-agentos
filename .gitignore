@@ -99,6 +99,12 @@ secrets/
 !examples/cognic-agent-example-minimal/attestations/test-signing/test_signing_key.private.pem
 !examples/cognic-agent-example-minimal/attestations/test-signing/test_signing_key.public.pem
 
+# Proof 1a: the in-process harness + authoring helper run real `agentos sign`
+# against examples/cognic-tool-search/, which writes generated attestations
+# here (like its `dist/` sibling, caught by the generic `dist/` rule above).
+# Never commit them.
+examples/cognic-tool-search/attestations/
+
 # Build artefacts (Sprint 4+ supply chain bundles, ignored from CI checkouts)
 attestations/local/
 

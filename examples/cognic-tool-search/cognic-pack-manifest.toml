@@ -1,0 +1,45 @@
+# Proof 1a — ONE manifest, BOTH consumers (LOCK 2):
+#  - the CLI (validate/sign/verify) reads the top-level blocks below;
+#  - the runtime (registry + MCP host) reads [tool.cognic.mcp] as package data.
+# pyproject.toml force-includes this file into the wheel at
+# cognic_tool_search/cognic-pack-manifest.toml.
+
+[pack]
+pack_id = "cognic-tool-search"
+schema_version = 1
+kind = "tool"
+
+[identity]
+# Universally mandatory Wave-1 fields (cli/validators/identity.py). The
+# agent-card fields are agent-pack-only and intentionally omitted for a tool pack.
+agent_id = "did:web:cognic.example:tools:cognic-tool-search"
+display_name = "Cognic Policy-Doc Search"
+provider_organization = "Cognic Proof Harness"
+provider_url = "https://cognic.example"
+
+[data_governance]
+data_classes = ["public"]
+purpose = "operational_telemetry"
+retention_policy = "none"
+egress_allow_list = []
+
+[risk_tier]
+tier = "read_only"
+
+[supply_chain]
+attestation_paths = [
+    "attestations/cosign.sig",
+    "attestations/sbom.cdx.json",
+]
+
+[tool.cognic.mcp]
+# Runtime-consumed block (harness/mcp_host.py + protocol/mcp_capabilities.py).
+# The key is `scopes`, NOT `required_scopes`.
+transport = "streamable-http"
+auth = "oauth-prm"
+server_url = "http://127.0.0.1:8765/mcp"
+scopes = ["mcp:tools"]
+resources_supported = false
+prompts_supported = false
+sampling_supported = false
+conformance_version = "1.0"
