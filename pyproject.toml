@@ -355,6 +355,20 @@ ignore_missing_imports = true
 module = ["google.protobuf.*"]
 ignore_missing_imports = true
 
+# Proof 1a — the cognic-tool-search example pack (examples/cognic-tool-search/)
+# is an EXTERNAL pack installed editable only locally (`uv pip install -e
+# examples/cognic-tool-search`); CI does not install it, so the pack_loop
+# integration tests' lazy `from cognic_tool_search... import ...` lines (inside
+# functions/fixtures, all gated by `skipif(find_spec("cognic_tool_search") is
+# None)` / the COGNIC_RUN_PACK_LOOP_PROOF env gate at runtime) resolve to a
+# missing module under mypy in CI. The tests SKIP cleanly there; mypy
+# static-checks the imports regardless, so tolerate the missing module — same
+# pattern as hvac.* / google.protobuf.* above. Locally the pack is installed +
+# ships py.typed, so mypy type-checks it normally.
+[[tool.mypy.overrides]]
+module = ["cognic_tool_search.*"]
+ignore_missing_imports = true
+
 [tool.coverage.run]
 source = ["src/cognic_agentos"]
 branch = true
