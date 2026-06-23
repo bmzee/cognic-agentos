@@ -52,6 +52,23 @@ What exists today instead (still true for the *deployed* loop; the *in-process* 
 
 ---
 
+## Status vs the 6 Agent OS primitives (capability matrix)
+
+A cross-check against the conceptual "Agent OS" model (the kernel = the six runtime primitives below; agents + infra live outside it). This axis exists because the BUILD_PLAN/phase view can make a built primitive read as implied-pending — most acutely the **scheduler/orchestrator**, which is fully built and on the critical-controls gate but easy to miss in the phase ledger. Every primitive below **has a built kernel implementation**; the still-forward work is real **packs** + the **deployed** proof (Proof 1b), not the primitives.
+
+| Primitive | Kernel status | Implemented by (merged modules) | Anchored in | Still forward |
+|---|---|---|---|---|
+| **Scheduler / orchestrator** | ✅ Built | `core/scheduler/` (`engine.py` submit/mark_running/complete/fail/cancel/preempt/reap · `queue.py` bounded-FIFO + concurrency caps · `storage.py` · `policy.py` Rego gate · `budget_resolver.py` parent-budget inheritance); live caller `core/run/executor.py` (managed-run submit→sandbox→complete) | ADR-022 · Sprint 10.5 + 14A | Wave-2 multi-instance distributed counters |
+| **Memory** | ✅ Built | `core/memory/` governed API (`api.py` remember/recall/forget/redact/export · `tiers.py` scratch/task/long_term · `consent.py` · `gate.py` default-deny · `reaper.py` retention · `export.py` regulator-erasure) | ADR-019 · Sprint 11.5 | — |
+| **Tools** | ✅ Built (in-process proven) | plugin registry + trust gate (`protocol/plugin_registry.py`, `trust_gate.py`, `supply_chain.py`) · MCP host + invocation route (`protocol/mcp_host.py`, `portal/api/mcp/`) · SDK/CLI validation (`cli/validate.py`) · hooks/DLP (`packs/hooks/`) · runtime approval (`core/approval/`) · sandbox (`sandbox/`) | ADR-002/004/005/014/016 | Real tool **packs** as separate repos (Proof 2); **deployed** loop (Proof 1b) |
+| **Identity** | ✅ Built | RBAC actor + tenant isolation (`portal/rbac/`) · MCP OAuth/PRM (`protocol/mcp_authz.py`) · A2A auth + agent cards (`protocol/a2a_authz.py`, `a2a_agent_cards.py`) · pack identity validators (`cli/validators/identity.py`) · Vault credential leasing (`core/vault.py`) | ADR-002/003/004 | A2A **outbound** dispatch; Wave-2/3 mTLS + verifiable credentials |
+| **Observability** | ✅ Built | hash-chained audit + decision history + verifier (`core/audit.py`, `decision_history.py`, `chain_verifier.py`) · UI event stream (`protocol/ui_events.py`) · OTel (`observability/otel.py`) · gateway tracing (`llm/gateway.py`) · ISO-42001 evidence export (`compliance/iso42001/`) | ADR-006/009/020 · Sprint 1B/2.5/7B.4 | Live Langfuse OTLP **ingestion** (seam done; enablement parked) |
+| **Guardrails** | ✅ Built | `core/guardrails.py` · cloud-policy gateway (`llm/gateway.py`) · policy-as-code OPA/Rego (`core/policy/engine.py` + `policies/_default/`) · DLP hooks (`packs/hooks/dlp_integration.py`) · runtime approval (`core/approval/engine.py`) · kill switches + quotas (`core/emergency/kill_switches.py`, `quotas.py`) | ADR-014/015/017/018 | — |
+
+**Read with the blunt-reality box above:** every primitive has a built kernel implementation; the unproven claim is "a bank installs a real signed pack and an agent completes one governed task **on a deployed instance**." Proof 1a proved that loop **in-process** with a real tool pack (exercising Tools + Identity + Observability + Guardrails together); Proof 1b (deploy) + Proof 2 (separate pack repo) remain forward.
+
+---
+
 ## Status vs the original BUILD_PLAN (primary axis)
 
 One row per Phase → Sprint. PRs are the immutable "developed" anchor.
