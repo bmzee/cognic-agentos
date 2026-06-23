@@ -201,6 +201,24 @@ proof `tests/integration/cli/test_real_cosign_sign_verify_proof.py`
 (`COGNIC_RUN_COSIGN_INTEGRATION=1`; skip-by-default, fail-loud when opted in
 without cosign).
 
+## Amendment (2026-06-23) — in-toto Wave-1 simplified layout contract
+
+`agentos sign` emits a **Wave-1 simplified** in-toto layout declaring
+`_type = "in-toto-layout/v1-wave1-simplified"` that intentionally omits the full
+in-toto step-graph + expiration (deferred to Wave-2). The runtime trust gate
+(`protocol/supply_chain.py:_verify_intoto`) verifies this declared contract by
+branching on `_type`: a simplified layout is validated on its security fields —
+`pack_id`, `pack_version`, `pack_kind` (∈ `{tool, skill, agent, hook}`),
+`signing_identity`, `artifact_paths` (non-empty list of non-blank strings) — all
+present-structural hard-refusals (`IntotoTampered`). A layout without that `_type`
+(including the Statement-wrapped full layout) still goes through the full
+`steps`+`expires` branch (unchanged). The contract type is single-sourced as
+`AGENTOS_INTOTO_LAYOUT_TYPE` in `protocol/supply_chain.py` and imported by
+`cli/sign.py` + `cli/verify.py`. `pack_kind` is validated structurally only; the
+full in-toto layout (steps / inspections / key-thresholds) and a cross-layer
+manifest pack_kind-flip comparison remain Wave-2. Surfaced + proven by Proof 1a
+Task 7 (the first real `agentos sign` → runtime registration exercise).
+
 ## References
 - ADR-002 (cosign signing — extended here)
 - ADR-009 (ObjectStoreAdapter — bundle retention)
