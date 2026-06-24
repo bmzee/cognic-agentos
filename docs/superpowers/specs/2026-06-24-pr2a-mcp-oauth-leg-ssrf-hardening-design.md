@@ -120,8 +120,12 @@ under the wrong key.
   leg-4/leg-5 refusal raised from `_request_token` propagates up and is recorded as `refused` there
   unchanged. ✔
 - **`step_up_token`** — `MCPHost` invokes it with `entry.server_id` in scope, so PR 2a records
-  `discovery_status = refused` at that **`MCPHost` call site** on a token-leg SSRF refusal (PR-1 did
-  not wrap step-up; PR 2a adds it).
+  `discovery_status` at that **`MCPHost` call site** via the shared
+  `discovery_status_for_authz_reason(exc.reason)` mapper (refused/unreachable) for any
+  **endpoint/OAuth reachability failure** reached through `step_up_token`'s `_request_token` call
+  (SSRF refusal, timeout, transport, AS-discovery / token errors). The one **excluded** reason is
+  `mcp_step_up_unauthorised` — an **authorization denial** (the original token is fine, only the
+  wider scope was denied), NOT endpoint reachability. (PR-1 did not wrap step-up; PR 2a adds it.)
 - **`refresh_token`** — its token-leg fetches **are guarded** (the SSRF refusal fires, and the
   existing fail-closed / decision-history behavior is preserved), **but it does NOT record
   `discovery_status`**: it carries no `server_id`/pack key (only `tenant_id` +
@@ -130,9 +134,11 @@ under the wrong key.
   wrong key. A **drift pin** asserts `MCPHost` has no `refresh_token` call path; if a future host
   path adds one, the pin fails and forces the recording decision to be revisited.
 
-**Requirement (revised):** no **host-invoked** reachability path may refuse silently — `acquire`, the
-retry reacquire, and `step_up` each record `refused` on a token-leg SSRF refusal. `refresh_token` is
-**guarded but unrecorded by deliberate design** (no host call site, no key), pinned by the drift test.
+**Requirement (revised):** no **host-invoked** reachability path may fail silently — `acquire`, the
+retry reacquire, and `step_up` each record `discovery_status` via the mapper (refused/unreachable) on
+an endpoint/OAuth reachability failure; `mcp_step_up_unauthorised` is the one excluded reason (an
+authorization denial, not reachability). `refresh_token` is **guarded but unrecorded by deliberate
+design** (no host call site, no key), pinned by the drift test.
 
 ### 3.4 AST-level drift detector (not a text grep)
 A test that **parses `mcp_authz.py` with `ast`** and asserts the guarded-fetch invariant: **every**
@@ -166,8 +172,10 @@ the **strict** profile; a dev-profile test pins that 2a did **not** silently sta
 ## 4. Testing
 - **Per-leg coverage:** each of the five legs refuses an internal URL under strict (parametrized).
 - **Credential-exfil (§3.5):** the headline negative tests for leg 5 + leg 4 — no POST, no secret.
-- **Host-invoked-path recording (§3.3):** `acquire` / the retry-reacquire / `step_up` each record
-  `discovery_status = refused` on a token-leg SSRF refusal; `refresh_token` is **guarded but
+- **Host-invoked-path recording (§3.3):** `step_up` records `discovery_status` via the mapper for
+  reachability reasons (tested: `mcp_discovery_url_refused`→`refused`,
+  `mcp_oauth_request_timeout`→`unreachable`) and does NOT record `mcp_step_up_unauthorised` (auth
+  denial); `acquire` / the retry-reacquire already record via PR-1. `refresh_token` is **guarded but
   unrecorded** (no host call site / no `server_id` key), pinned by a **drift test that `MCPHost` has
   no `refresh_token` invoke path** today.
 - **AST drift detector (§3.4):** a synthetic added-unguarded-`_http`-fetch fails it; the real tree
