@@ -111,8 +111,10 @@ _GATE_TOOL_PATH = _REPO_ROOT / "tools" / "check_critical_coverage.py"
 #: ``bundle.sigstore`` POSIX-basename projection feeding the 5-gate signature
 #: gate's new required ``--bundle`` argument; every bundle-path failure maps to
 #: the EXISTING ``signature_bundle_path_unreachable`` — no new red-reason) = 135.
+#: +1 at PR-1 Slice 2 (ADR-002) — ``protocol/discovery_status.py`` (wire-visible
+#: DiscoveryStatus enum + AuthzReason→discovery_status mapper) promoted to the gate = 136.
 #: Bump this in lockstep with any deliberate ``_CRITICAL_FILES`` change.
-_EXPECTED_ENTRY_COUNT = 135
+_EXPECTED_ENTRY_COUNT = 136
 
 #: The 5 modules Sprint 7B.3 promoted to the durable gate, each by its
 #: own landing commit (T3-T6 panels + T7 composer). All ride the

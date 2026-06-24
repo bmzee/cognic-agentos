@@ -21,15 +21,16 @@ refusals, restricted-data-class refusals, STDIO-disabled refusals)
 succeed without OPA — the OPA dependency is reachable only when the
 manifest declares ``sampling_supported = true``.
 
-Closed-enum reason vocabulary (10 values after T6 R1 P1 #2 added
-``mcp_transport_unsupported``; 2 manifest-extraction reasons live
-in :mod:`cognic_agentos.protocol.mcp_manifest` and are exception-
+Closed-enum reason vocabulary (12 values — 10 after T6 R1 P1 #2 added
+``mcp_transport_unsupported``, +2 at T15: ``mcp_http_manifest_shape_invalid``
++ ``mcp_tool_data_classes_shape_invalid``; 2 manifest-extraction reasons
+live in :mod:`cognic_agentos.protocol.mcp_manifest` and are exception-
 typed there, not in this Literal):
 
 - ``mcp_transport_unsupported`` — ``[tool.cognic.mcp].transport``
   is missing OR not one of ``http`` / ``streamable-http`` / ``stdio``
   (gate 0 added in T6 R1 P1 #2; previously a missing or unknown
-  transport silently skipped the auth probe).
+  transport silently skipped the HTTP-family code path).
 - ``mcp_anonymous_refused`` — neither ``oauth-prm`` nor ``api-key``
   declared in the ``[tool.cognic.mcp]`` block.
 - ``mcp_resources_declared_but_no_list`` — ``resources_supported =
@@ -65,8 +66,8 @@ typed there, not in this Literal):
 Order of evaluation (first failure wins; tests rely on this order):
 
   0. Transport closed-enum check (R1 P1 #2 — gate 0 added so a
-     correctly-spec'd ``streamable-http`` pack actually invokes the
-     auth probe; previously only ``"http"`` matched).
+     correctly-spec'd ``streamable-http`` pack actually reaches the
+     HTTP-family code path; previously only ``"http"`` matched).
   1. Anonymous-MCP refusal (auth surface — applies to both transports).
   2. Resources gate (HTTP-relevant).
   3. Sampling 4-condition gate (HTTP-relevant; OPA call site).
@@ -124,14 +125,16 @@ ValidationReason = Literal[
     "mcp_stdio_disabled_in_sprint_5",
     "mcp_transport_unsupported",
     # T15 R1 P2 #6: HTTP-family manifest shape gate. Catches malformed
-    # ``server_url`` / ``scopes`` BEFORE the registration auth probe
-    # invokes ``MCPAuthzClient.acquire_token`` with the values. Without
-    # this gate, ``scopes = "mcp:tools"`` (string instead of list)
-    # becomes ``tuple("mcp:tools")`` — a 9-character tuple whose
-    # ``" ".join(...)`` produces the wrong scope-grant string and could
-    # under-/over-grant tokens; ``[42]`` crashes at the same join site;
-    # blank ``server_url`` reaches httpx with an empty / malformed URL
-    # rather than a closed-enum manifest refusal.
+    # ``server_url`` / ``scopes`` at offline manifest validation, before
+    # the values reach ``MCPAuthzClient.acquire_token`` at the invoke-time
+    # discovery/OAuth probe (the registration-time probe was removed —
+    # ADR-002 trust-register-then-defer, PR-1 Slice 1). Without this gate,
+    # ``scopes = "mcp:tools"`` (string instead of list) becomes
+    # ``tuple("mcp:tools")`` — a 9-character tuple whose ``" ".join(...)``
+    # produces the wrong scope-grant string and could under-/over-grant
+    # tokens; ``[42]`` crashes at the same join site; blank ``server_url``
+    # reaches httpx with an empty / malformed URL rather than a closed-enum
+    # manifest refusal.
     "mcp_http_manifest_shape_invalid",
     # T15 R2 P2: tool ``data_classes`` shape gate. The R1 fail-open
     # helper coerced any non-``list[str]`` shape into an empty set,
@@ -153,12 +156,14 @@ ValidationReason = Literal[
 #: (Decision Lock: hard-disabled in Sprint 5 via the umbrella refusal).
 #: Any other transport value fails closed at this gate (R1 P1 #2 —
 #: was previously silently accepted, which let a correctly-spec'd
-#: ``streamable-http`` pack skip the registration auth probe).
+#: ``streamable-http`` pack skip the HTTP-family code path).
 _KNOWN_TRANSPORTS: frozenset[str] = frozenset({"http", "streamable-http", "stdio"})
 
 
-#: Transport values that map to the HTTP code path (auth-probe at
-#: T6.3, runtime via StreamableHTTPTransport at T7).
+#: Transport values that map to the HTTP code path (the admission-time
+#: api-key check at T6.3 + the runtime StreamableHTTPTransport at T7; the
+#: OAuth-PRM probe that used to run at T6.3 moved to invoke per ADR-002
+#: trust-register-then-defer, PR-1 Slice 1).
 _HTTP_TRANSPORT_VALUES: frozenset[str] = frozenset({"http", "streamable-http"})
 
 
@@ -404,10 +409,11 @@ async def validate_mcp_manifest(
     """
     mcp = _mcp_block(manifest)
 
-    # Gate 0: transport closed-enum check (R1 P1 #2). The auth-probe
-    # in T6.3 only fires for HTTP-family transports; any unsupported
-    # transport value would otherwise silently fall through and skip
-    # the OAuth/PRM probe entirely — exactly what the user's R1 P1
+    # Gate 0: transport closed-enum check (R1 P1 #2). The HTTP-family
+    # code path (the api-key check at admission + the invoke-time
+    # discovery/OAuth probe) only applies to HTTP-family transports; any
+    # unsupported transport value would otherwise silently fall through
+    # and skip that handling entirely — exactly what the user's R1 P1
     # caught. Reject anything outside ``_KNOWN_TRANSPORTS`` here,
     # before any later gate has a chance to mis-route the pack.
     # The ``isinstance(str)`` guard avoids ``TypeError: unhashable``
@@ -446,8 +452,8 @@ async def validate_mcp_manifest(
     # in ``_request_token``. Blank or non-URL ``server_url`` reaches
     # httpx as an unrouteable address rather than producing a closed-
     # enum manifest refusal. Catching all three at admission keeps the
-    # auth probe + runtime invocation paths free of pack-controlled
-    # type confusion.
+    # invoke-time discovery/OAuth + runtime invocation paths free of
+    # pack-controlled type confusion.
     if transport in _HTTP_TRANSPORT_VALUES:
         server_url = mcp.get("server_url")
         if not isinstance(server_url, str) or not server_url.strip():

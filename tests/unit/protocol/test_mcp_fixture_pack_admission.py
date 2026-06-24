@@ -7,8 +7,10 @@ real on-disk fixture pack:
      through the full Sprint-4 admission pipeline
      (:meth:`PluginRegistry.register_with_full_attestation_check`)
      PLUS the Sprint-5 ``MCPAdmissionDeps`` (T6.1 manifest
-     extraction → T6.2 capability validation → T6.3 auth probe)
-     with cosign / OPA / Vault / authz mocked at the boundary.
+     extraction → T6.2 capability validation → T6.3 offline api-key
+     credential check; the OAuth-PRM registration probe was removed per
+     ADR-002 trust-register-then-defer, PR-1 Slice 1) with cosign / OPA /
+     Vault / authz mocked at the boundary.
   2. The validated MCP block resolves into an
      :class:`MCPServerEntry` shape the orchestrator can dispatch
      against.
@@ -236,9 +238,10 @@ def _mock_trust_gate() -> MagicMock:
 
 
 def _make_authz_factory_for_probe() -> tuple[Any, MagicMock]:
-    """T6.3 registration auth probe — successful path. The factory
-    pattern keeps the probe's token cache isolated from the runtime
-    client per ADR-002 §"MCP Authorization" step 8."""
+    """Legacy authz factory — the registration-time OAuth-PRM probe it fed
+    was removed per ADR-002 trust-register-then-defer (PR-1 Slice 1). Retained
+    to wire the now-dormant ``make_authz_client_for_probe`` field on
+    ``MCPAdmissionDeps``; registration no longer invokes it."""
     client = MagicMock()
     client.acquire_token = AsyncMock(
         return_value=Token(
@@ -258,10 +261,11 @@ def _make_authz_factory_for_probe() -> tuple[Any, MagicMock]:
 def _make_admission_deps(
     monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[MCPAdmissionDeps, MagicMock]:
-    """Build MCPAdmissionDeps wired with mocked Vault + a successful
-    authz probe. Monkeypatches ``extract_pack_manifest`` to read the
-    real on-disk fixture manifest — no need to install the fixture
-    pack in the test venv."""
+    """Build MCPAdmissionDeps wired with mocked Vault + the legacy authz
+    factory (the registration probe it fed was removed per ADR-002 Slice 1;
+    it now only wires the dormant ``make_authz_client_for_probe`` field).
+    Monkeypatches ``extract_pack_manifest`` to read the real on-disk fixture
+    manifest — no need to install the fixture pack in the test venv."""
     from cognic_agentos.protocol import mcp_manifest as _mm
 
     real_manifest = tomllib.loads(_MANIFEST_PATH.read_text(encoding="utf-8"))
@@ -304,8 +308,9 @@ class TestFixturePackAdmission:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """The MCP fixture pack's complete attestation set + valid
-        manifest + successful auth probe MUST clear the full
-        admission pipeline at grade=full."""
+        manifest MUST clear the full admission pipeline at grade=full
+        (registration is trust + offline manifest/capability only; the
+        OAuth-PRM probe moved to invoke per ADR-002 Slice 1)."""
         admission_deps, _authz_client = _make_admission_deps(monkeypatch)
         outcome = await registry.register_with_full_attestation_check(
             _fixture_pack(),
@@ -324,29 +329,9 @@ class TestFixturePackAdmission:
         assert outcome.pack_id == "cognic-test-mcp-pack"
         assert outcome.name == "cognic_test_mcp_pack"
 
-    async def test_t6_3_auth_probe_called_with_manifest_scopes(
-        self,
-        registry: PluginRegistry,
-        supply_chain: SupplyChainPipeline,
-        object_store: LocalObjectStoreAdapter,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """T6.3 contract: the auth probe ``acquire_token`` MUST be
-        called with the manifest's declared scopes + server_url."""
-        admission_deps, authz_client = _make_admission_deps(monkeypatch)
-        await registry.register_with_full_attestation_check(
-            _fixture_pack(),
-            _fixture_artefacts(),
-            trust_gate=_mock_trust_gate(),
-            supply_chain=supply_chain,
-            object_store=object_store,
-            license_allowlist=("MIT",),
-            mcp_admission=admission_deps,
-        )
-        authz_client.acquire_token.assert_awaited_once()
-        call = authz_client.acquire_token.await_args
-        assert call.kwargs["server_url"] == "https://server.example/mcp"
-        assert call.kwargs["manifest_scopes"] == ("mcp:tools",)
+    # (T6.3 "auth probe called at registration" test migrated out — ADR-002
+    # trust-register-then-defer removed the registration-time OAuth-PRM probe;
+    # the invoke-time probe assertion belongs on the PR-1 Slice 2 discovery axis.)
 
     async def test_admission_does_not_load_fixture_module(
         self,

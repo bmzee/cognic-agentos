@@ -38,6 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from cognic_agentos.core.audit import AuditStore, _audit_event, _chain_heads
 from cognic_agentos.core.canonical import ZERO_HASH
 from cognic_agentos.portal.api.app import create_app
+from cognic_agentos.protocol.discovery_status import InMemoryDiscoveryStatusRecorder
 from cognic_agentos.protocol.plugin_registry import (
     DiscoveredPack,
     PluginRecord,
@@ -169,6 +170,12 @@ class TestEmptyRegistry:
             "registered": 0,
             "refused_at_registration": 0,
             "by_grade": {"full": 0, "partial": 0},
+            "by_discovery_status": {
+                "unprobed": 0,
+                "auth_ready": 0,
+                "refused": 0,
+                "unreachable": 0,
+            },
         }
 
     def test_empty_plugin_registry_returns_empty_list(self, registry: PluginRegistry) -> None:
@@ -218,6 +225,13 @@ class TestPopulatedRegistry:
             "registered": 1,
             "refused_at_registration": 0,
             "by_grade": {"full": 1, "partial": 0},
+            # No tenant_id query → the row's invoke-axis status defaults to unprobed.
+            "by_discovery_status": {
+                "unprobed": 1,
+                "auth_ready": 0,
+                "refused": 0,
+                "unreachable": 0,
+            },
         }
 
     async def test_refused_pack_renders_with_nulls(self, registry: PluginRegistry) -> None:
@@ -262,6 +276,14 @@ class TestPopulatedRegistry:
             "registered": 2,
             "refused_at_registration": 1,
             "by_grade": {"full": 1, "partial": 1},
+            # All 3 rows (incl. the refused-at-registration one — invoke axis is independent
+            # of the trust axis) default to unprobed without a tenant_id query.
+            "by_discovery_status": {
+                "unprobed": 3,
+                "auth_ready": 0,
+                "refused": 0,
+                "unreachable": 0,
+            },
         }
 
     async def test_status_uses_operator_vocabulary(self, registry: PluginRegistry) -> None:
@@ -372,6 +394,7 @@ class TestResponseShapeStability:
         "signature_digest",
         "refusal_reason",
         "registered_at",
+        "discovery_status",  # PR-1 Slice 2 (invoke-time axis)
     }
 
     REQUIRED_SUMMARY_FIELDS: ClassVar[set[str]] = {
@@ -379,6 +402,7 @@ class TestResponseShapeStability:
         "registered",
         "refused_at_registration",
         "by_grade",
+        "by_discovery_status",  # PR-1 Slice 2 rollup
     }
 
     async def test_every_plugin_entry_has_all_required_fields(
@@ -454,3 +478,89 @@ class TestResponseShapeStability:
         # ISO-8601 representation.
         parsed = _dt.datetime.fromisoformat(plugin["registered_at"])
         assert parsed.tzinfo is not None
+
+
+# ---------------------------------------------------------------------------
+# PR-1 Slice 2 — /system/plugins discovery_status surface (ADR-002).
+#
+# Each row gains a per-(tenant, pack) `discovery_status` (default `unprobed`) and
+# the summary gains a `by_discovery_status` rollup. The optional `?tenant_id=`
+# query param is an operator OBSERVATION selector (NOT an auth boundary): with it,
+# rows reflect the recorded status for (tenant_id, pack_id); without it (or for a
+# different tenant) rows read `unprobed` — no cross-tenant leak.
+# ---------------------------------------------------------------------------
+
+
+class TestDiscoveryStatusSurface:
+    async def _register_ok_pack(self, registry: PluginRegistry, *, distribution_name: str) -> None:
+        pack, _ = _make_pack(name="search", distribution_name=distribution_name)
+        await registry.register(
+            pack, attestation_grade="full", signature_digest="sha256:" + "a" * 64
+        )
+
+    async def test_discovery_status_defaults_unprobed_without_tenant(
+        self, registry: PluginRegistry
+    ) -> None:
+        await self._register_ok_pack(registry, distribution_name="cognic-tool-search")
+        client = _make_client(plugin_registry=registry)
+        client.__enter__()
+        plugin = client.get("/api/v1/system/plugins").json()["plugins"][0]
+        assert plugin.get("discovery_status") == "unprobed"
+
+    async def test_tenant_query_surfaces_recorded_status(self, registry: PluginRegistry) -> None:
+        await self._register_ok_pack(registry, distribution_name="cognic-tool-search")
+        recorder = InMemoryDiscoveryStatusRecorder()
+        recorder.record(tenant_id="bank-a", pack_id="cognic-tool-search", status="auth_ready")
+        app = create_app(prod_settings(), plugin_registry=registry)
+        client = TestClient(app)
+        client.__enter__()
+        app.state.discovery_status_recorder = recorder  # GREEN wires this in the lifespan
+        plugin = client.get("/api/v1/system/plugins?tenant_id=bank-a").json()["plugins"][0]
+        assert plugin.get("discovery_status") == "auth_ready"
+
+    async def test_no_query_and_other_tenant_default_unprobed_no_leak(
+        self, registry: PluginRegistry
+    ) -> None:
+        """No-leak: a status recorded for bank-a is INVISIBLE to a no-tenant query and to a
+        different tenant — discovery_status stays ``unprobed``."""
+        await self._register_ok_pack(registry, distribution_name="cognic-tool-search")
+        recorder = InMemoryDiscoveryStatusRecorder()
+        recorder.record(tenant_id="bank-a", pack_id="cognic-tool-search", status="auth_ready")
+        app = create_app(prod_settings(), plugin_registry=registry)
+        client = TestClient(app)
+        client.__enter__()
+        app.state.discovery_status_recorder = recorder
+        no_tenant = client.get("/api/v1/system/plugins").json()["plugins"][0]
+        assert no_tenant.get("discovery_status") == "unprobed"
+        other = client.get("/api/v1/system/plugins?tenant_id=bank-b").json()["plugins"][0]
+        assert other.get("discovery_status") == "unprobed"
+
+    async def test_summary_includes_by_discovery_status(self, registry: PluginRegistry) -> None:
+        await self._register_ok_pack(registry, distribution_name="cognic-tool-search")
+        client = _make_client(plugin_registry=registry)
+        client.__enter__()
+        summary = client.get("/api/v1/system/plugins").json()["summary"]
+        assert "by_discovery_status" in summary
+        assert summary["by_discovery_status"].get("unprobed") == 1
+
+    async def test_tenant_query_summary_rolls_up_recorded_status(
+        self, registry: PluginRegistry
+    ) -> None:
+        """The tenant-scoped summary rollup reflects the RECORDED status, not just the row: a
+        bank-a ``auth_ready`` pack under ``?tenant_id=bank-a`` rolls up to ``auth_ready=1``
+        (not ``unprobed``). Without this, GREEN could update rows correctly + leave the
+        summary stale."""
+        await self._register_ok_pack(registry, distribution_name="cognic-tool-search")
+        recorder = InMemoryDiscoveryStatusRecorder()
+        recorder.record(tenant_id="bank-a", pack_id="cognic-tool-search", status="auth_ready")
+        app = create_app(prod_settings(), plugin_registry=registry)
+        client = TestClient(app)
+        client.__enter__()
+        app.state.discovery_status_recorder = recorder
+        summary = client.get("/api/v1/system/plugins?tenant_id=bank-a").json()["summary"]
+        assert summary.get("by_discovery_status") == {
+            "unprobed": 0,
+            "auth_ready": 1,
+            "refused": 0,
+            "unreachable": 0,
+        }

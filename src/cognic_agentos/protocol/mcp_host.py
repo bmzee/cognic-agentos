@@ -126,6 +126,11 @@ from cognic_agentos.core.canonical import canonical_bytes
 from cognic_agentos.core.config import Settings
 from cognic_agentos.core.decision_history import DecisionHistoryStore, DecisionRecord
 from cognic_agentos.protocol import require_mcp
+from cognic_agentos.protocol.discovery_status import (
+    DiscoveryStatus,
+    DiscoveryStatusRecorder,
+    discovery_status_for_authz_reason,
+)
 from cognic_agentos.protocol.mcp_authz import MCPAuthzClient, MCPAuthzError, Token
 from cognic_agentos.protocol.mcp_transports import (
     MCPSession,
@@ -665,6 +670,7 @@ class MCPHost:
         decision_history_store: DecisionHistoryStore,
         settings: Settings,
         approval_engine: ApprovalEngine | None = None,
+        discovery_status_recorder: DiscoveryStatusRecorder | None = None,
     ) -> None:
         # ``approval_engine`` (Sprint 13.5b2, ADR-014): None (default) keeps
         # the Sprint-5 transitional gate byte-for-byte (engine-absent
@@ -757,6 +763,13 @@ class MCPHost:
         self._decision_history_store = decision_history_store
         self._settings = settings
         self._approval_engine = approval_engine
+        # PR-1 Slice 2 (ADR-002): OBSERVATIONAL per-(tenant, pack) discovery-status
+        # recorder. None (default) keeps the invoke path byte-for-byte (no-op
+        # recording); wired, list_tools / call_tool record the OAuth-probe outcome
+        # WITHOUT changing the fail-closed raise behaviour. The production
+        # composition root threads the same instance attached to app.state for the
+        # /system/plugins read surface.
+        self._discovery_status_recorder = discovery_status_recorder
         # R1 P2 #2: cache key includes tenant_id + scopes (NOT just
         # server_id). Cross-tenant cache leak would let tenant B
         # receive tenant A's already-cleared tool catalogue without
@@ -771,6 +784,21 @@ class MCPHost:
     def _resolve_transport(self, entry: MCPServerEntry) -> MCPTransport:
         canonical = _canonicalize_transport_kind(entry.transport_kind)
         return self._transports_by_canonical[canonical]
+
+    def _record_discovery_status(
+        self, *, tenant_id: str, server_id: str, status: DiscoveryStatus
+    ) -> None:
+        """Record the per-(tenant, pack) outcome of an OAuth probe (``acquire_token``)
+        when a recorder is injected; no-op otherwise.
+
+        PR-1 Slice 2 (ADR-002): OBSERVATIONAL only — the invoke path stays fail-closed
+        (callers still raise on a probe failure). The store key's ``pack_id`` is the
+        registry ``distribution_name`` == :attr:`MCPServerEntry.server_id`.
+        """
+        if self._discovery_status_recorder is not None:
+            self._discovery_status_recorder.record(
+                tenant_id=tenant_id, pack_id=server_id, status=status
+            )
 
     # --- discovery ---------------------------------------------------------
 
@@ -837,11 +865,26 @@ class MCPHost:
                     return copy.deepcopy(cached.tools)
 
         transport = self._resolve_transport(entry)
-        token = await self._authz.acquire_token(
-            server_url=entry.server_url,
-            manifest_scopes=entry.manifest_scopes,
-            request_id=request_id,
-            tenant_id=tenant_id,
+        # PR-1 Slice 2 — record the OAuth-probe outcome on the per-(tenant, pack)
+        # discovery-status axis. SUCCESS → auth_ready; an MCPAuthzError maps to
+        # refused / unreachable and STILL re-raises (the axis is observational;
+        # list_tools stays fail-closed).
+        try:
+            token = await self._authz.acquire_token(
+                server_url=entry.server_url,
+                manifest_scopes=entry.manifest_scopes,
+                request_id=request_id,
+                tenant_id=tenant_id,
+            )
+        except MCPAuthzError as exc:
+            self._record_discovery_status(
+                tenant_id=tenant_id,
+                server_id=entry.server_id,
+                status=discovery_status_for_authz_reason(exc.reason),
+            )
+            raise
+        self._record_discovery_status(
+            tenant_id=tenant_id, server_id=entry.server_id, status="auth_ready"
         )
         session = await transport.open_session(server_url=entry.server_url, token=token)
         try:
@@ -1670,11 +1713,25 @@ class MCPHost:
                     operation="call_tool",
                 )
 
-        token = await self._authz.acquire_token(
-            server_url=entry.server_url,
-            manifest_scopes=entry.manifest_scopes,
-            request_id=request_id,
-            tenant_id=tenant_id,
+        # PR-1 Slice 2 — record the OAuth-probe outcome on the per-(tenant, pack)
+        # discovery-status axis. SUCCESS → auth_ready; an MCPAuthzError maps to
+        # refused / unreachable and STILL re-raises (call_tool stays fail-closed).
+        try:
+            token = await self._authz.acquire_token(
+                server_url=entry.server_url,
+                manifest_scopes=entry.manifest_scopes,
+                request_id=request_id,
+                tenant_id=tenant_id,
+            )
+        except MCPAuthzError as exc:
+            self._record_discovery_status(
+                tenant_id=tenant_id,
+                server_id=entry.server_id,
+                status=discovery_status_for_authz_reason(exc.reason),
+            )
+            raise
+        self._record_discovery_status(
+            tenant_id=tenant_id, server_id=entry.server_id, status="auth_ready"
         )
         # First-acquire success — record token even before dispatch
         # so a step_up_unauthorised on the FIRST send carries the
@@ -1703,11 +1760,26 @@ class MCPHost:
                 # reacquire failure as ERRORED (with the first
                 # send's session context).
                 await self._authz.invalidate_cached_token(server_url=entry.server_url)
-                fresh_token = await self._authz.acquire_token(
-                    server_url=entry.server_url,
-                    manifest_scopes=entry.manifest_scopes,
-                    request_id=request_id,
-                    tenant_id=tenant_id,
+                # PR-1 Slice 2 — the REACQUIRE is the third OAuth-probe site; record
+                # its outcome too. SUCCESS → auth_ready; a reacquire MCPAuthzError
+                # (e.g. mcp_oauth_request_timeout) maps to refused / unreachable and
+                # STILL re-raises (overwriting the initial auth_ready).
+                try:
+                    fresh_token = await self._authz.acquire_token(
+                        server_url=entry.server_url,
+                        manifest_scopes=entry.manifest_scopes,
+                        request_id=request_id,
+                        tenant_id=tenant_id,
+                    )
+                except MCPAuthzError as exc:
+                    self._record_discovery_status(
+                        tenant_id=tenant_id,
+                        server_id=entry.server_id,
+                        status=discovery_status_for_authz_reason(exc.reason),
+                    )
+                    raise
+                self._record_discovery_status(
+                    tenant_id=tenant_id, server_id=entry.server_id, status="auth_ready"
                 )
                 dispatch_context.last_acquired_token = fresh_token
                 try:

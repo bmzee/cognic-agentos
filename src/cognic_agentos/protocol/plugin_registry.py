@@ -108,7 +108,9 @@ RefusalReason = Literal[
     "mcp_transport_unsupported",  # transport != known set (R1 P1 #2 — was silent skip)
     "mcp_http_manifest_shape_invalid",  # HTTP server_url/scopes shape (T15 R1 P2 #6)
     "mcp_tool_data_classes_shape_invalid",  # tool data_classes shape (T15 R2 P2)
-    # Sprint 5 — registration auth-probe failures (T6.3; 11 values)
+    # Sprint 5 — MCP discovery/OAuth failures (T6.3; 11 values). Invoke-side per
+    # ADR-002 trust-register-then-defer (PR-1 Slice 1); kept in the enum for
+    # backward-compat + historical chain rows.
     "mcp_as_not_allowlisted",  # PRM advertises non-allowlisted AS
     "mcp_token_audience_mismatch",  # token aud != resource indicator
     "mcp_token_scope_overgrant",  # AS granted scopes not in manifest set (R6)
@@ -157,7 +159,7 @@ _VALID_REFUSAL_REASONS: frozenset[str] = frozenset(
         "mcp_transport_unsupported",
         "mcp_http_manifest_shape_invalid",  # T15 R1 P2 #6
         "mcp_tool_data_classes_shape_invalid",  # T15 R2 P2
-        # Sprint 5 — auth-probe (11)
+        # Sprint 5 — MCP discovery/OAuth (11; invoke-side per ADR-002 Slice 1)
         "mcp_as_not_allowlisted",
         "mcp_token_audience_mismatch",
         "mcp_token_scope_overgrant",
@@ -178,15 +180,21 @@ _VALID_REFUSAL_REASONS: frozenset[str] = frozenset(
 
 #: 1:1 mapping from MCPAuthzClient's :data:`AuthzReason` vocabulary
 #: to :data:`RefusalReason`. Both literals share the same underlying
-#: strings for the eleven registration-boundary reasons; the mapper
-#: exists as a single typed change site so a future divergence
-#: between the two vocabularies (if it ever happens) lives here, not
-#: scattered across the registry's exception-handling code.
+#: strings for the eleven discovery/OAuth reasons; the mapper exists
+#: as a single typed change site so a future divergence between the
+#: two vocabularies (if it ever happens) lives here.
+#:
+#: **DORMANT after ADR-002 trust-register-then-defer (PR-1 Slice 1)** —
+#: this mapper fed the registration-time OAuth-PRM probe, now removed,
+#: so it has no caller today. KEPT: the :data:`RefusalReason` values it
+#: maps stay in the closed enum (backward-compat + historical chain
+#: rows), the drift test pins it, and Slice 2's invoke-side
+#: discovery_status axis maps these same reasons.
 #:
 #: ``mcp_step_up_unauthorised`` is **runtime-only** — emitted by
-#: :meth:`MCPHost.call_tool`'s step-up flow at T9, NEVER from a
-#: registration-time auth probe. Passing it to this mapper is a
-#: programming error and raises :class:`ValueError`.
+#: :meth:`MCPHost.call_tool`'s step-up flow at T9, never a discovery
+#: reason. Passing it to this mapper is a programming error and raises
+#: :class:`ValueError`.
 _AUTHZ_REASON_TO_REFUSAL: dict[str, RefusalReason] = {
     "mcp_anonymous_refused": "mcp_anonymous_refused",
     "mcp_as_not_allowlisted": "mcp_as_not_allowlisted",
@@ -221,10 +229,13 @@ def _authz_reason_to_refusal(authz_reason: str) -> RefusalReason:
     """Map an :class:`MCPAuthzError.reason` string to the
     corresponding :data:`RefusalReason`.
 
-    Eleven reasons map identity-style (the two literals share strings
-    for the registration-boundary set). The two runtime-only reasons
-    (``mcp_step_up_unauthorised``, ``mcp_authorisation_lost``) raise
-    here — they must never reach the registration-side mapper.
+    DORMANT after ADR-002 trust-register-then-defer (PR-1 Slice 1) — no
+    caller today; kept for the closed-enum compatibility + the drift test
+    + the Slice-2 discovery_status axis (see the module-level note).
+    Eleven reasons map identity-style (the two literals share strings for
+    the discovery/OAuth set). The two runtime-only reasons
+    (``mcp_step_up_unauthorised``, ``mcp_authorisation_lost``) raise here
+    — they must never reach this mapper.
 
     :param authz_reason: A value of :data:`AuthzReason` from
         :class:`cognic_agentos.protocol.mcp_authz.MCPAuthzError`.
@@ -239,9 +250,8 @@ def _authz_reason_to_refusal(authz_reason: str) -> RefusalReason:
     if authz_reason in _RUNTIME_ONLY_AUTHZ_REASONS:
         raise ValueError(
             f"{authz_reason!r} is runtime-only (emitted from MCPHost "
-            f"or MCPAuthzClient runtime flows, not from the registration "
-            f"pipeline); it MUST NOT reach the registration-boundary "
-            f"refusal mapper. Runtime-only reasons: "
+            f"or MCPAuthzClient runtime flows); it MUST NOT reach this "
+            f"AuthzReason->RefusalReason mapper. Runtime-only reasons: "
             f"{sorted(_RUNTIME_ONLY_AUTHZ_REASONS)}."
         )
     try:
@@ -283,16 +293,15 @@ class MCPAdmissionDeps:
          :func:`cognic_agentos.protocol.mcp_capabilities.validate_mcp_manifest`.
          Closed-enum failures map 1:1 to the matching
          ``mcp_*`` :data:`RefusalReason`.
-      C. Registration-time auth probe (T6.3) — for HTTP transport
-         only; STDIO is umbrella-refused upstream by the validator.
-         For ``auth = "oauth-prm"``: construct a fresh
-         :class:`MCPAuthzClient` (via
-         :attr:`make_authz_client_for_probe`), call
-         :meth:`MCPAuthzClient.acquire_token`, discard the returned
-         token. Failures map via :func:`_authz_reason_to_refusal`.
-         For ``auth = "api-key"``: validate Vault path resolves AND
-         secret is non-empty AND manifest acknowledges deprecation;
-         any failure → ``mcp_api_key_fallback_unresolved``.
+      C. API-key credential check (T6.3; OAuth-PRM probe removed) —
+         per ADR-002 "trust-register-then-defer" (PR-1 Slice 1) the
+         registration-time OAuth-PRM discovery/OAuth network probe is
+         removed: it runs at invoke, and its refusals defer to the
+         discovery-status axis (Slice 2). For ``auth = "api-key"`` (HTTP
+         transport only): validate the Vault path resolves AND the secret
+         is non-empty AND the manifest acknowledges deprecation; any
+         failure → ``mcp_api_key_fallback_unresolved``. ``oauth-prm``
+         packs now clear Step C with no network call.
 
     When ``mcp_admission`` is ``None`` (kernel-image deployment
     without ``MCPHost`` wired), manifest extraction STILL RUNS
@@ -327,19 +336,23 @@ class MCPAdmissionDeps:
         true`` (the validator fail-closes with
         ``mcp_sampling_default_denied`` when sampling is required
         but the engine is missing — Sprint-4 default-deny doctrine).
-      - ``make_authz_client_for_probe`` — factory returning a fresh
-        :class:`MCPAuthzClient` per probe. The factory pattern keeps
-        the probe's token cache isolated from the runtime client's
-        cache, satisfying the "token-acquired-but-not-stored" probe
-        contract per ADR-002 §"MCP Authorization" step 8 (R10's
-        exact-match cache invariant means a leaked probe token
-        would otherwise be reused by the runtime client's first
-        call).
+      - ``make_authz_client_for_probe`` — **DORMANT/LEGACY after ADR-002
+        trust-register-then-defer (PR-1 Slice 1).** This factory fed the
+        registration-time OAuth-PRM probe, which is now removed; nothing
+        reads it at registration today. The field is retained (still wired
+        by the composition root) pending the Slice-2 decision on whether
+        the invoke-side discovery path reuses it or it is dropped — do NOT
+        remove it in Slice 1. (Legacy contract: returned a fresh
+        :class:`MCPAuthzClient` per probe so the probe's token cache stayed
+        isolated from the runtime client — "token-acquired-but-not-stored"
+        per ADR-002 §"MCP Authorization" step 8.)
     """
 
     settings: Settings
     vault_client: SecretAdapter
     opa_engine: OPAEngine | None
+    # DORMANT after ADR-002 trust-register-then-defer (PR-1 Slice 1) — see the
+    # field doc above; retained/wired pending the Slice-2 discovery decision.
     make_authz_client_for_probe: Callable[[], MCPAuthzClient]
 
 
@@ -841,28 +854,28 @@ class PluginRegistry:
              validator + OPA-backed sampling 4-condition gate.
              ``mcp_transport_unsupported`` (R1 P1 #2) fires here for
              unknown transport values.
-          C. **Registration auth probe (T6.3)** — HTTP-OAuth path
-             constructs a fresh :class:`MCPAuthzClient` (via the
-             admission-deps factory) and calls ``acquire_token``;
-             token discarded after probe (factory pattern keeps
-             probe cache isolated from runtime cache —
-             "token-acquired-but-not-stored" per ADR-002 §"MCP
-             Authorization" step 8). API-key path validates Vault
-             secret + deprecation acknowledgement.
+          C. **API-key credential check (T6.3; OAuth-PRM probe removed)**
+             — per ADR-002 "trust-register-then-defer" (2026-06-24) the
+             OAuth-PRM discovery/OAuth NETWORK probe is removed from
+             registration (it runs at invoke; its refusals defer to the
+             discovery-status axis, PR-1 Slice 2). The api-key path still
+             validates the Vault secret + deprecation acknowledgement here
+             (a credential-config check, NOT an MCP-server network probe).
 
         **R1 P1 #1 fail-closed admission rule:** if the manifest
         contains a ``[tool.cognic.mcp]`` block AND ``mcp_admission``
         was not provided, the helper returns
         ``mcp_admission_deps_required``. This prevents a caller that
         forgot to wire MCPHost from silently admitting an MCP pack
-        without the manifest / capability / auth-probe gates running.
+        without the manifest / capability gates running (the OAuth-PRM
+        probe that used to gate here at registration moved to invoke per
+        ADR-002 trust-register-then-defer, PR-1 Slice 1).
         Sprint-4 packs without an ``[tool.cognic.mcp]`` block are
         unaffected (they pass through with ``None``).
         """
         # Local imports — keep the module-import-time graph minimal
         # so kernel-image deployments without MCP wired don't pay
         # for these imports.
-        from cognic_agentos.protocol.mcp_authz import MCPAuthzError
         from cognic_agentos.protocol.mcp_capabilities import (
             ValidationContext,
             validate_mcp_manifest,
@@ -990,16 +1003,12 @@ class PluginRegistry:
             # drift test). The return is type-safe by construction.
             return validation.reason
 
-        # Step C: auth probe. Only fires for HTTP-family transports;
-        # STDIO is umbrella-refused above (the validator catches it
-        # before we get here, so we never reach the probe with STDIO).
-        # Both ``"http"`` (legacy) and ``"streamable-http"`` (canonical
-        # per MCP-CONFORMANCE.md) map to the same OAuth/PRM probe (R1
-        # P1 #2 — previously only ``"http"`` matched, which let a
-        # correctly-spec'd ``streamable-http`` pack skip the probe).
-        # The validator's transport closed-enum check (gate 0) means
-        # any value reaching here is necessarily one of the known
-        # transports.
+        # Step C: HTTP-family transport gate, then the offline api-key Vault check.
+        # (The OAuth-PRM discovery/OAuth network probe that used to run here is removed —
+        # ADR-002 trust-register-then-defer; see the note below.) STDIO is umbrella-refused
+        # above by the validator, so this gate is a safety-net for any future non-HTTP
+        # transport; both ``"http"`` (legacy) and ``"streamable-http"`` (canonical per
+        # MCP-CONFORMANCE.md) are HTTP-family.
         from cognic_agentos.protocol.mcp_capabilities import (
             _HTTP_TRANSPORT_VALUES,
         )
@@ -1008,32 +1017,13 @@ class PluginRegistry:
         if mcp_block.get("transport") not in _HTTP_TRANSPORT_VALUES:
             return None  # STDIO already refused; safety-net for any future transports
 
-        auth_kind = mcp_block.get("auth")
-        if auth_kind == "oauth-prm":
-            try:
-                # Construct a FRESH client per probe (factory pattern)
-                # so the probe's token cache is isolated from any
-                # long-lived runtime client — "token-acquired-but-
-                # not-stored" per ADR-002 step 8.
-                authz_client = mcp_admission.make_authz_client_for_probe()
-                server_url = mcp_block.get("server_url", "")
-                manifest_scopes = tuple(mcp_block.get("scopes", []) or [])
-                _ = await authz_client.acquire_token(
-                    server_url=server_url,
-                    manifest_scopes=manifest_scopes,
-                    request_id=request_id,
-                    tenant_id=tenant_id,
-                )
-                # Token discarded — registration only validates "could
-                # acquire", not "use".
-            except MCPAuthzError as exc:
-                _LOG.info(
-                    "T6: pack %s OAuth probe refused with reason=%s",
-                    record.distribution_name,
-                    exc.reason,
-                )
-                return _authz_reason_to_refusal(exc.reason)
-        elif auth_kind == "api-key":
+        # ADR-002 "trust-register-then-defer" (2026-06-24): registration is trust-only.
+        # The OAuth-PRM discovery/OAuth NETWORK probe is REMOVED from registration — it
+        # runs at invoke (mcp_host.list_tools/call_tool already performs it), and its
+        # refusals (SSRF / AS-allow-list / unreachable) defer to the discovery-status
+        # axis (PR-1 Slice 2). The api-key path stays here: validating the Vault secret is
+        # a credential-config check, NOT an MCP-server network probe.
+        if mcp_block.get("auth") == "api-key":
             api_key_refusal = await _validate_api_key_fallback(
                 mcp_block=mcp_block,
                 tenant_id=tenant_id,
@@ -1246,16 +1236,18 @@ class PluginRegistry:
 
         # Step 5 (Sprint 5 — T6): MCP-specific admission steps.
         # Three sub-steps (A: extract manifest, B: validate
-        # capabilities, C: probe auth at registration time) per the
-        # plan-of-record §T6. Per R1 P1 #1 (fail-closed for MCP
-        # packs): the helper ALWAYS attempts manifest extraction
-        # regardless of whether ``mcp_admission`` was provided. If
-        # the pack ships a ``[tool.cognic.mcp]`` block AND
-        # ``mcp_admission`` is None, the helper returns
+        # capabilities, C: offline api-key credential check — the
+        # OAuth-PRM probe that used to run here at registration time
+        # moved to invoke per ADR-002 trust-register-then-defer, PR-1
+        # Slice 1) per the plan-of-record §T6. Per R1 P1 #1
+        # (fail-closed for MCP packs): the helper ALWAYS attempts
+        # manifest extraction regardless of whether ``mcp_admission``
+        # was provided. If the pack ships a ``[tool.cognic.mcp]`` block
+        # AND ``mcp_admission`` is None, the helper returns
         # ``mcp_admission_deps_required`` — preventing a Sprint-4
         # caller that forgot to wire MCPHost from silently admitting
-        # an MCP pack without the manifest / capability / auth-probe
-        # gates running. Sprint-4-style packs without an
+        # an MCP pack without the manifest / capability gates
+        # running. Sprint-4-style packs without an
         # ``[tool.cognic.mcp]`` block remain unaffected (helper
         # returns None and the policy step proceeds).
         mcp_refusal = await self._mcp_admit(

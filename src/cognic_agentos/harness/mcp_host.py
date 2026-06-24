@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from cognic_agentos.core.config import Settings
     from cognic_agentos.db.adapters.protocols import SecretAdapter
     from cognic_agentos.harness.runtime import Runtime
+    from cognic_agentos.protocol.discovery_status import DiscoveryStatusRecorder
     from cognic_agentos.protocol.plugin_registry import RegisteredPackCandidate
 
 logger = logging.getLogger(__name__)
@@ -178,11 +179,18 @@ def build_mcp_host(
     settings: Settings,
     http_client: httpx.AsyncClient,
     vault_client: SecretAdapter,
+    discovery_status_recorder: DiscoveryStatusRecorder | None = None,
 ) -> MCPHost:
     """Assemble the production MCP host. ``require_mcp()`` fires inside the
     transport ctor — call ONLY on the SDK-present path (``is_mcp_available()``).
     Threads ``runtime.approval_engine`` so the 13.5b2 approval seam is WIRED
-    (dormant until a caller invokes ``call_tool``)."""
+    (dormant until a caller invokes ``call_tool``).
+
+    ``discovery_status_recorder`` (PR-1 Slice 2, ADR-002) is the OBSERVATIONAL
+    per-(tenant, pack) invoke-time recorder the host writes to; the lifespan
+    threads the SAME instance it attaches to ``app.state`` for the
+    ``/api/v1/system/plugins`` read surface. ``None`` keeps the host's recording
+    a no-op."""
     from cognic_agentos.protocol.mcp_authz import MCPAuthzClient
     from cognic_agentos.protocol.mcp_transports import StreamableHTTPTransport
 
@@ -202,4 +210,5 @@ def build_mcp_host(
         decision_history_store=runtime.decision_history_store,
         settings=settings,
         approval_engine=runtime.approval_engine,
+        discovery_status_recorder=discovery_status_recorder,
     )
