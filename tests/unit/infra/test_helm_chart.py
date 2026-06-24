@@ -12,6 +12,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _CHART_DIR = _REPO_ROOT / "infra" / "charts" / "agentos"
@@ -122,3 +123,27 @@ def test_chart_lints_clean() -> None:
         text=True,
     )
     assert result.returncode == 0, f"helm lint failed:\n{result.stdout}\n{result.stderr}"
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm not on PATH")
+def test_migration_job_inherits_configmap_env() -> None:
+    """Gap 6 (Proof 1b-1): the migration Job must ``envFrom`` the chart ConfigMap so deployed
+    migrations see the same non-secret ``COGNIC_*`` config as the Deployment. Otherwise prod-only
+    settings fall back to dev defaults and the strict-profile guard refuses ``get_settings()``
+    before ``alembic upgrade head`` runs. Version-independent (envFrom shape is stable), so this
+    runs on any helm — unlike the v4.2.2-pinned byte-snapshot gate above."""
+    rendered = _render([_SNAPSHOT_VALUES])
+    docs = [d for d in yaml.safe_load_all(rendered) if d]
+    jobs = [
+        d
+        for d in docs
+        if d.get("kind") == "Job" and str(d["metadata"]["name"]).endswith("-migrate")
+    ]
+    assert len(jobs) == 1, f"expected exactly one migration Job, got {len(jobs)}"
+    container = jobs[0]["spec"]["template"]["spec"]["containers"][0]
+    env_from = container.get("envFrom", [])
+    names = [e.get("configMapRef", {}).get("name") for e in env_from]
+    # release "rel" + chart "agentos" → fullname "rel-agentos" → ConfigMap "rel-agentos-config".
+    assert "rel-agentos-config" in names, (
+        f"migration Job must envFrom the chart ConfigMap; got envFrom={env_from!r}"
+    )

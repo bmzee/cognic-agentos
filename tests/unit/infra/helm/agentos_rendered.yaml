@@ -261,6 +261,11 @@ spec:
                 exit 1
               fi
               exec alembic upgrade head
+          # Gap 6 (Proof 1b-1): inherit the chart ConfigMap so migrations see the same non-secret
+          # COGNIC_* config as the Deployment (else strict-profile guards refuse get_settings()).
+          envFrom:
+            - configMapRef:
+                name: rel-agentos-config
           env:
             - name: COGNIC_DATABASE_URL
               valueFrom:
