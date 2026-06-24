@@ -1,44 +1,35 @@
-"""Sprint-5 T6.3 — registration-time MCP auth probe contract tests.
+"""MCP registration admission — offline-trust contract tests (post ADR-002 decoupling).
 
-Critical-controls module per AGENTS.md (Plugin trust + supply chain
-— the registration-time auth probe is what makes ADR-002 §"MCP
-Authorization" step 8 fail-closed: "Failed auth at registration →
-pack stays in `proposed` state per ADR-002 (does NOT load until
-resolved)". This file pins the closed-enum mapping from
-``MCPAuthzError.reason`` (**13-value** AuthzReason; 11 of which reach
-registration — the two runtime-only values are ``mcp_step_up_unauthorised``
-emitted from ``MCPAuthzClient.step_up_token`` (T5) and ``mcp_authorisation_lost``
-emitted from ``MCPHost.call_tool`` second-401-retry exhaustion (T9 R1 P2 #3))
-to ``plugin_registry.RefusalReason`` via the ``_authz_reason_to_refusal()``
-1:1 mapper.
+Critical-controls module per AGENTS.md (Plugin trust + supply chain). Since ADR-002
+"trust-register-then-defer" (2026-06-24, PR-1 Slice 1) registration is **trust-only**: the
+OAuth-PRM discovery/OAuth **network** probe is removed from registration (it runs at invoke;
+its refusals defer to the discovery_status axis, PR-1 Slice 2). This file pins the OFFLINE
+admission contract that stays at registration:
 
-Test classes (per Sprint-5 plan §T6.3 — 16 classes covering all 11
-registration-boundary AuthzReason failures plus the 4 trailing
-invariants):
+  Offline manifest / capability gates (Steps A/B):
+    TestAuthProbeOauthPrmHappyPath         — a trust-valid oauth-prm pack registers
+    TestAuthProbeAnonymousRefused          — no-auth refused by the capability validator
+    TestAuthProbeManifestMissingProceeds   — no manifest → proceeds (Sprint-4 pack)
+    TestAuthProbeMcpBlockMalformedShape    — present-but-non-dict mcp block → refused
+    TestAuthProbeManifestMalformed         — TOML-decode failure → refused
+    TestAuthProbeSkippedForStdio           — STDIO refused at the capability gate
+    TestMcpAdmissionDepsRequiredFailClosed — [tool.cognic.mcp] + no deps → fail-closed
 
-  Original failure arms (R1-era):
-    TestAuthProbeOauthPrmHappyPath
-    TestAuthProbeAnonymousRefused
-    TestAuthProbeAsNotAllowlisted
-    TestAuthProbeAudienceMismatch
-    TestAuthProbeTimeout
-    TestAuthProbePrmInvalid
-
-  R6 production-grade auth surface arms:
-    TestAuthProbeOauthCredentialsMissing
-    TestAuthProbeOauthTransportFailure
-    TestAuthProbeOauthScopeOvergrant
-
-  R11 split-error arms:
-    TestAuthProbeOauthAsDiscoveryInvalid
-    TestAuthProbeOauthTokenEndpointError
-    TestAuthProbeOauthTokenResponseInvalid
-
-  Trailing invariants:
+  API-key Vault credential check (stays — a credential-config check, NOT a network probe):
     TestAuthProbeApiKeyFallbackHappyPath
     TestAuthProbeApiKeyFallbackUnresolved
-    TestAuthProbeSkippedForStdio
-    TestAuthProbeTokenNotPersisted
+
+  Closed-enum mapper drift coverage (kept — RefusalReason values unchanged):
+    TestAuthzReasonToRefusalMapper         — MCPAuthzError.reason → RefusalReason 1:1
+
+  ADR-002 trust-register-then-defer (PR-1 Slice 1) — the NEW contract:
+    TestTrustRegisterThenDefersDiscoveryProbe
+
+The registration-time OAuth-PRM probe-refusal behaviour (AS-not-allow-listed, audience
+mismatch, timeout, PRM-invalid, credentials-missing, transport-failure, scope-overgrant,
+token-endpoint-error, token-response-invalid, token-not-persisted, transport-invokes-probe)
+was **migrated out of registration coverage** — that behavioural protection must reappear in
+PR-1 Slice 2 on the invoke / discovery_status axis.
 """
 
 from __future__ import annotations
@@ -359,7 +350,8 @@ async def _call_register(
 
 
 # ---------------------------------------------------------------------------
-# Original five auth-probe failure arms (R1-era, still required)
+# Offline admission contract (manifest/capability gates + api-key) that STAYS at
+# registration. The OAuth-PRM probe-refusal arms migrated to PR-1 Slice 2 (module docstring).
 # ---------------------------------------------------------------------------
 
 
@@ -394,8 +386,8 @@ class TestAuthProbeAnonymousRefused:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Validator (T6.2) catches no-auth before the auth probe;
-        registry maps to mcp_anonymous_refused."""
+        """Validator (T6.2) refuses no-auth offline (Step B); registry
+        maps to mcp_anonymous_refused."""
         manifest = _canonical_manifest()
         del manifest["tool"]["cognic"]["mcp"]["auth"]
         deps = _make_admission_deps(monkeypatch=monkeypatch, manifest=manifest)
@@ -407,272 +399,6 @@ class TestAuthProbeAnonymousRefused:
             mcp_admission=deps,
         )
         assert outcome.refusal_reason == "mcp_anonymous_refused"
-
-
-class TestAuthProbeAsNotAllowlisted:
-    async def test_authz_raises_as_not_allowlisted_maps(
-        self,
-        registry: PluginRegistry,
-        object_store: LocalObjectStoreAdapter,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """MCPAuthzError(mcp_as_not_allowlisted) → mapped 1:1 to
-        RefusalReason mcp_as_not_allowlisted."""
-        manifest = _canonical_manifest()
-        factory, _ = _make_authz_factory_raising("mcp_as_not_allowlisted")
-        deps = _make_admission_deps(
-            monkeypatch=monkeypatch, manifest=manifest, authz_factory=factory
-        )
-        outcome = await _call_register(
-            registry,
-            pack=_make_pack(),
-            artefacts=_make_artefacts(tmp_path),
-            object_store=object_store,
-            mcp_admission=deps,
-        )
-        assert outcome.refusal_reason == "mcp_as_not_allowlisted"
-
-
-class TestAuthProbeAudienceMismatch:
-    async def test_authz_raises_audience_mismatch_maps(
-        self,
-        registry: PluginRegistry,
-        object_store: LocalObjectStoreAdapter,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        manifest = _canonical_manifest()
-        factory, _ = _make_authz_factory_raising("mcp_token_audience_mismatch")
-        deps = _make_admission_deps(
-            monkeypatch=monkeypatch, manifest=manifest, authz_factory=factory
-        )
-        outcome = await _call_register(
-            registry,
-            pack=_make_pack(),
-            artefacts=_make_artefacts(tmp_path),
-            object_store=object_store,
-            mcp_admission=deps,
-        )
-        assert outcome.refusal_reason == "mcp_token_audience_mismatch"
-
-
-class TestAuthProbeTimeout:
-    async def test_authz_raises_request_timeout_maps(
-        self,
-        registry: PluginRegistry,
-        object_store: LocalObjectStoreAdapter,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        manifest = _canonical_manifest()
-        factory, _ = _make_authz_factory_raising("mcp_oauth_request_timeout")
-        deps = _make_admission_deps(
-            monkeypatch=monkeypatch, manifest=manifest, authz_factory=factory
-        )
-        outcome = await _call_register(
-            registry,
-            pack=_make_pack(),
-            artefacts=_make_artefacts(tmp_path),
-            object_store=object_store,
-            mcp_admission=deps,
-        )
-        assert outcome.refusal_reason == "mcp_oauth_request_timeout"
-
-
-class TestAuthProbePrmInvalid:
-    async def test_authz_raises_prm_invalid_maps(
-        self,
-        registry: PluginRegistry,
-        object_store: LocalObjectStoreAdapter,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        manifest = _canonical_manifest()
-        factory, _ = _make_authz_factory_raising("mcp_prm_invalid")
-        deps = _make_admission_deps(
-            monkeypatch=monkeypatch, manifest=manifest, authz_factory=factory
-        )
-        outcome = await _call_register(
-            registry,
-            pack=_make_pack(),
-            artefacts=_make_artefacts(tmp_path),
-            object_store=object_store,
-            mcp_admission=deps,
-        )
-        assert outcome.refusal_reason == "mcp_prm_invalid"
-
-
-# ---------------------------------------------------------------------------
-# R6 production-grade auth surface arms
-# ---------------------------------------------------------------------------
-
-
-class TestAuthProbeOauthCredentialsMissing:
-    async def test_authz_raises_credentials_missing_maps(
-        self,
-        registry: PluginRegistry,
-        object_store: LocalObjectStoreAdapter,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Vault has no per-(tenant, AS-issuer) OAuth client credentials
-        → mcp_oauth_credentials_missing."""
-        manifest = _canonical_manifest()
-        factory, _ = _make_authz_factory_raising("mcp_oauth_credentials_missing")
-        deps = _make_admission_deps(
-            monkeypatch=monkeypatch, manifest=manifest, authz_factory=factory
-        )
-        outcome = await _call_register(
-            registry,
-            pack=_make_pack(),
-            artefacts=_make_artefacts(tmp_path),
-            object_store=object_store,
-            mcp_admission=deps,
-        )
-        assert outcome.refusal_reason == "mcp_oauth_credentials_missing"
-
-
-class TestAuthProbeOauthTransportFailure:
-    async def test_authz_raises_transport_failure_maps(
-        self,
-        registry: PluginRegistry,
-        object_store: LocalObjectStoreAdapter,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        manifest = _canonical_manifest()
-        factory, _ = _make_authz_factory_raising("mcp_oauth_transport_failure")
-        deps = _make_admission_deps(
-            monkeypatch=monkeypatch, manifest=manifest, authz_factory=factory
-        )
-        outcome = await _call_register(
-            registry,
-            pack=_make_pack(),
-            artefacts=_make_artefacts(tmp_path),
-            object_store=object_store,
-            mcp_admission=deps,
-        )
-        assert outcome.refusal_reason == "mcp_oauth_transport_failure"
-
-
-class TestAuthProbeOauthScopeOvergrant:
-    async def test_authz_raises_scope_overgrant_maps(
-        self,
-        registry: PluginRegistry,
-        object_store: LocalObjectStoreAdapter,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """No-silent-privilege-widening doctrine: AS granted scopes
-        ⊋ manifest set → mcp_token_scope_overgrant."""
-        manifest = _canonical_manifest()
-        factory, _ = _make_authz_factory_raising("mcp_token_scope_overgrant")
-        deps = _make_admission_deps(
-            monkeypatch=monkeypatch, manifest=manifest, authz_factory=factory
-        )
-        outcome = await _call_register(
-            registry,
-            pack=_make_pack(),
-            artefacts=_make_artefacts(tmp_path),
-            object_store=object_store,
-            mcp_admission=deps,
-        )
-        assert outcome.refusal_reason == "mcp_token_scope_overgrant"
-
-
-# ---------------------------------------------------------------------------
-# R11 split-error arms
-# ---------------------------------------------------------------------------
-
-
-class TestAuthProbeOauthAsDiscoveryInvalid:
-    async def test_authz_raises_as_discovery_invalid_maps(
-        self,
-        registry: PluginRegistry,
-        object_store: LocalObjectStoreAdapter,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """AS .well-known/oauth-authorization-server malformed →
-        mcp_oauth_as_discovery_invalid (R11 P2 split this off
-        mcp_prm_invalid: operators debug AS-issuer config differently
-        from MCP-server-side PRM problems)."""
-        manifest = _canonical_manifest()
-        factory, _ = _make_authz_factory_raising(
-            "mcp_oauth_as_discovery_invalid", as_issuer="https://as.example", status_code=503
-        )
-        deps = _make_admission_deps(
-            monkeypatch=monkeypatch, manifest=manifest, authz_factory=factory
-        )
-        outcome = await _call_register(
-            registry,
-            pack=_make_pack(),
-            artefacts=_make_artefacts(tmp_path),
-            object_store=object_store,
-            mcp_admission=deps,
-        )
-        assert outcome.refusal_reason == "mcp_oauth_as_discovery_invalid"
-
-
-class TestAuthProbeOauthTokenEndpointError:
-    async def test_authz_raises_token_endpoint_error_with_status_code(
-        self,
-        registry: PluginRegistry,
-        object_store: LocalObjectStoreAdapter,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Token endpoint non-200 (401 = rejected creds, 400 = grant
-        error, 503 = AS down) → mcp_oauth_token_endpoint_error."""
-        manifest = _canonical_manifest()
-        factory, _ = _make_authz_factory_raising(
-            "mcp_oauth_token_endpoint_error",
-            status_code=401,
-            as_issuer="https://as.example",
-            token_endpoint="https://as.example/token",
-        )
-        deps = _make_admission_deps(
-            monkeypatch=monkeypatch, manifest=manifest, authz_factory=factory
-        )
-        outcome = await _call_register(
-            registry,
-            pack=_make_pack(),
-            artefacts=_make_artefacts(tmp_path),
-            object_store=object_store,
-            mcp_admission=deps,
-        )
-        assert outcome.refusal_reason == "mcp_oauth_token_endpoint_error"
-
-
-class TestAuthProbeOauthTokenResponseInvalid:
-    async def test_authz_raises_token_response_invalid_maps(
-        self,
-        registry: PluginRegistry,
-        object_store: LocalObjectStoreAdapter,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Token response shape malformed (missing access_token, bad
-        expires_in, non-string scope) → mcp_oauth_token_response_invalid."""
-        manifest = _canonical_manifest()
-        factory, _ = _make_authz_factory_raising("mcp_oauth_token_response_invalid")
-        deps = _make_admission_deps(
-            monkeypatch=monkeypatch, manifest=manifest, authz_factory=factory
-        )
-        outcome = await _call_register(
-            registry,
-            pack=_make_pack(),
-            artefacts=_make_artefacts(tmp_path),
-            object_store=object_store,
-            mcp_admission=deps,
-        )
-        assert outcome.refusal_reason == "mcp_oauth_token_response_invalid"
-
-
-# ---------------------------------------------------------------------------
-# Manifest extraction failures (proxied from T6.1)
-# ---------------------------------------------------------------------------
 
 
 class TestAuthProbeManifestMissingProceeds:
@@ -929,8 +655,8 @@ class TestAuthProbeApiKeyFallbackHappyPath:
         """``auth = "api-key"`` + Vault path resolves to non-empty
         secret + manifest acknowledges deprecation → registration
         succeeds (validator already lets api-key past the anonymous
-        check; T6.3 confirms registry doesn't fall through into the
-        OAuth probe path)."""
+        check; T6.3 confirms the registry takes the api-key credential
+        check, not the removed oauth-prm path)."""
         manifest = _canonical_manifest(
             auth="api-key",
             api_key_vault_path="secret/cognic/bank_a/mcp-api-key",
@@ -1014,8 +740,9 @@ class TestAuthProbeSkippedForStdio:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """STDIO pack with otherwise-valid manifest → validator's
-        Sprint-5 umbrella refusal fires; auth probe NEVER runs.
-        Outcome is the validator's reason, not anything from authz."""
+        Sprint-5 umbrella refusal fires offline; no registration probe
+        runs (removed per ADR-002 Slice 1). Outcome is the validator's
+        reason, not anything from authz."""
         manifest = _canonical_manifest(
             transport="stdio",
             command="/usr/bin/python3",
@@ -1023,7 +750,7 @@ class TestAuthProbeSkippedForStdio:
             env_allowlist=["PATH"],
         )
         # Even with an authz factory that would raise, the validator
-        # should catch STDIO before the auth probe runs.
+        # refuses STDIO offline (and there is no registration probe to reach).
         factory, client = _make_authz_factory_raising("mcp_oauth_request_timeout")
         deps = _make_admission_deps(
             monkeypatch=monkeypatch,
@@ -1039,83 +766,18 @@ class TestAuthProbeSkippedForStdio:
             mcp_admission=deps,
         )
         assert outcome.refusal_reason == "mcp_stdio_disabled_in_sprint_5"
-        # Auth probe was NOT invoked
+        # No registration probe is invoked (removed per ADR-002 Slice 1)
         client.acquire_token.assert_not_awaited()
-
-
-class TestAuthProbeTokenNotPersisted:
-    async def test_successful_probe_does_not_leak_token_to_runtime_cache(
-        self,
-        registry: PluginRegistry,
-        object_store: LocalObjectStoreAdapter,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """The probe MUST construct a fresh MCPAuthzClient (factory
-        pattern) so the runtime client's cache stays empty. With R10's
-        exact-match cache invariant in place, a leaked probe token
-        would be reused for the runtime call — which violates the
-        plan's "token-acquired-but-not-stored" probe contract."""
-        manifest = _canonical_manifest()
-
-        # The factory constructs a NEW client per call. Test asserts
-        # exactly one client was constructed for the probe AND its
-        # token cache is empty after the registration completes.
-        constructed_clients: list[MagicMock] = []
-
-        def _factory() -> MagicMock:
-            client = MagicMock()
-            import time
-
-            from cognic_agentos.protocol.mcp_authz import Token
-
-            client.acquire_token = AsyncMock(
-                return_value=Token(
-                    value="probe-token",
-                    expires_at=time.time() + 3600,
-                    as_issuer="https://as.example",
-                    scopes=("mcp:tools",),
-                    resource_indicator="https://server.example/mcp",
-                    client_id="cognic-mcp-bank_a",
-                )
-            )
-            client._token_cache = {}
-            client._inflight_acquires = {}
-            constructed_clients.append(client)
-            return client
-
-        deps = _make_admission_deps(
-            monkeypatch=monkeypatch,
-            manifest=manifest,
-            authz_factory=_factory,
-        )
-        outcome = await _call_register(
-            registry,
-            pack=_make_pack(),
-            artefacts=_make_artefacts(tmp_path),
-            object_store=object_store,
-            mcp_admission=deps,
-        )
-        assert outcome.status == "registered"
-
-        # Per-probe factory pattern: exactly one client constructed
-        # for this single probe; in production, each subsequent
-        # admission call gets its own throwaway client.
-        assert len(constructed_clients) == 1
-
-
-# ---------------------------------------------------------------------------
-# _authz_reason_to_refusal mapper — direct unit tests
-# ---------------------------------------------------------------------------
 
 
 class TestAuthzReasonToRefusalMapper:
     """The 1:1 mapper from MCPAuthzClient's AuthzReason vocabulary to
-    plugin_registry's RefusalReason. Eleven registration-boundary
-    reasons map; ``mcp_step_up_unauthorised`` is runtime-only and is
-    NOT a valid input to this mapper (it only fires from
-    MCPHost.call_tool's step-up flow at T9, never from a registration
-    auth probe)."""
+    plugin_registry's RefusalReason. Eleven discovery/OAuth reasons map;
+    ``mcp_step_up_unauthorised`` is runtime-only and is NOT a valid input
+    to this mapper (it only fires from MCPHost.call_tool's step-up flow at
+    T9). The mapper is dormant after ADR-002 trust-register-then-defer
+    (PR-1 Slice 1) — kept for the closed-enum compatibility + this drift
+    test + the Slice-2 discovery_status axis."""
 
     @pytest.mark.parametrize(
         "authz_reason",
@@ -1133,107 +795,31 @@ class TestAuthzReasonToRefusalMapper:
             "mcp_prm_invalid",
         ],
     )
-    def test_each_registration_boundary_reason_maps_identically(self, authz_reason: str) -> None:
+    def test_each_discovery_oauth_reason_maps_identically(self, authz_reason: str) -> None:
         """1:1 identity mapping: AuthzReason and RefusalReason share
-        the literal strings for the eleven registration-boundary
-        reasons. The mapper exists so a future divergence (if the two
-        vocabularies ever stop matching) is a single typed change
-        site, but today the mapping is identity."""
+        the literal strings for the eleven discovery/OAuth reasons. The
+        mapper exists so a future divergence (if the two vocabularies ever
+        stop matching) is a single typed change site, but today the
+        mapping is identity."""
         result = _authz_reason_to_refusal(authz_reason)
         assert result == authz_reason
 
     def test_step_up_unauthorised_raises_at_mapper_boundary(self) -> None:
         """``mcp_step_up_unauthorised`` is runtime-only — emitted by
-        MCPHost.call_tool at T9, never from a registration auth probe.
-        Passing it to the registration-boundary mapper is a
-        programming error and MUST raise."""
+        MCPHost.call_tool at T9, never a discovery reason. Passing it to
+        this mapper is a programming error and MUST raise."""
         with pytest.raises(ValueError, match="step_up"):
             _authz_reason_to_refusal("mcp_step_up_unauthorised")
-
-
-# ---------------------------------------------------------------------------
-# Sprint-5 T6 R1 #2 — streamable-http transport ALSO triggers auth probe
-# ---------------------------------------------------------------------------
-
-
-class TestStreamableHttpTransportInvokesAuthProbe:
-    """R1 P1 #2 regression: a pack declaring the spec-canonical
-    ``transport = "streamable-http"`` MUST be subjected to the same
-    OAuth/PRM auth probe as the legacy ``"http"`` value. Previously
-    the registry only matched ``"http"``, so a correctly-spec'd
-    streamable-http pack would silently skip the probe."""
-
-    async def test_streamable_http_pack_invokes_authz_acquire_token(
-        self,
-        registry: PluginRegistry,
-        object_store: LocalObjectStoreAdapter,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Streamable-HTTP manifest + raising authz factory → the
-        factory's ``acquire_token`` is awaited, the resulting
-        MCPAuthzError maps to RefusalReason. Proves the probe code
-        path actually fires for the canonical transport name."""
-        manifest = _canonical_manifest(transport="streamable-http")
-        factory, client = _make_authz_factory_raising("mcp_oauth_request_timeout")
-        deps = _make_admission_deps(
-            monkeypatch=monkeypatch, manifest=manifest, authz_factory=factory
-        )
-        outcome = await _call_register(
-            registry,
-            pack=_make_pack(),
-            artefacts=_make_artefacts(tmp_path),
-            object_store=object_store,
-            mcp_admission=deps,
-        )
-        # If the probe had been skipped (the bug R1 P1 #2 caught),
-        # the outcome would be "registered" (no MCP refusal). With
-        # the fix, the probe fires and the timeout reason maps.
-        assert outcome.refusal_reason == "mcp_oauth_request_timeout"
-        client.acquire_token.assert_awaited_once()
-
-    async def test_unknown_transport_refused_at_validator_layer(
-        self,
-        registry: PluginRegistry,
-        object_store: LocalObjectStoreAdapter,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """Unknown transport (e.g., ``"websocket"``) is caught by the
-        validator's gate-0 transport closed-enum check; the registry
-        outcome carries the validator's ``mcp_transport_unsupported``
-        reason. Without the closed-enum check, the registry would
-        have silently admitted (no MCP step matched)."""
-        manifest = _canonical_manifest(transport="websocket")
-        factory, client = _make_authz_factory_returning_token()
-        deps = _make_admission_deps(
-            monkeypatch=monkeypatch, manifest=manifest, authz_factory=factory
-        )
-        outcome = await _call_register(
-            registry,
-            pack=_make_pack(),
-            artefacts=_make_artefacts(tmp_path),
-            object_store=object_store,
-            mcp_admission=deps,
-        )
-        assert outcome.refusal_reason == "mcp_transport_unsupported"
-        # The auth probe MUST NOT have been invoked — refusal at
-        # gate 0 (transport) precedes the auth probe at gate C.
-        client.acquire_token.assert_not_awaited()
-
-
-# ---------------------------------------------------------------------------
-# Sprint-5 T6 R1 #1 — fail-closed when MCP pack registers without admission deps
-# ---------------------------------------------------------------------------
 
 
 class TestMcpAdmissionDepsRequiredFailClosed:
     """R1 P1 #1 regression: a tools/MCP pack MUST NOT register if the
     caller forgot to wire ``mcp_admission`` into
     ``register_with_full_attestation_check``. Previously, the registry
-    silently skipped manifest extraction + capability validation +
-    auth probe when ``mcp_admission=None``, allowing an MCP pack to
-    bypass every Sprint-5 gate.
+    silently skipped manifest extraction + capability validation when
+    ``mcp_admission=None`` (the OAuth-PRM probe that also ran here moved
+    to invoke per ADR-002 Slice 1), allowing an MCP pack to bypass every
+    Sprint-5 gate.
 
     The fail-closed rule:
       - Pack ships ``[tool.cognic.mcp]`` block AND ``mcp_admission is
@@ -1343,8 +929,8 @@ class TestMcpAdmissionDepsRequiredFailClosed:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Even WITH ``mcp_admission`` provided, a manifest that lacks
-        the MCP block bypasses the validator + auth-probe and
-        proceeds to the policy step."""
+        the MCP block bypasses the validator (there is no registration
+        probe) and proceeds to the policy step."""
         from cognic_agentos.protocol import mcp_manifest as _mm
 
         manifest = {
@@ -1357,7 +943,7 @@ class TestMcpAdmissionDepsRequiredFailClosed:
         monkeypatch.setattr(_mm, "extract_pack_manifest", lambda **_kw: manifest)
 
         # Even the auth client's acquire_token MUST NOT be invoked
-        # (no MCP block → no probe).
+        # (registration performs no discovery probe — removed per ADR-002 Slice 1).
         factory, client = _make_authz_factory_returning_token()
         deps = _make_admission_deps(
             monkeypatch=monkeypatch, manifest=manifest, authz_factory=factory
@@ -1371,3 +957,85 @@ class TestMcpAdmissionDepsRequiredFailClosed:
         )
         assert outcome.status == "registered"
         client.acquire_token.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# PR-1 Slice 1 (ADR-002 "trust-register-then-defer", 2026-06-24) — NEW CONTRACT.
+#
+# The OAuth-PRM discovery/OAuth *network* probe (Step C, `_mcp_admit:1011-1035`) is
+# removed from registration: a trust-valid pack whose probe WOULD raise (a loopback
+# `server_url` under the prod SSRF guard, AS-not-allow-listed, timeout, ...) now
+# trust-REGISTERS. Registration reflects *trust*, not endpoint reachability; the probe
+# + its refusals move to invoke time (the `discovery_status` axis, Slice 2). The OFFLINE
+# gates are unchanged: manifest-malformed (Step A, `TestAuthProbeMcpBlockMalformedShape`)
+# and capability validation incl. no-auth (Step B, `TestAuthProbeAnonymousRefused`) still
+# refuse at registration.
+#
+# These tests express the new contract and are **RED until Step C is removed** — today
+# the probe still fires and refuses. The legacy OAuth-probe-refusal classes above
+# (`TestAuthProbeAsNotAllowlisted` / `AudienceMismatch` / `Timeout` / `PrmInvalid` /
+# `Oauth*`) assert refusal AT REGISTRATION; under Model 2 they are historical at the
+# registration boundary and migrate to the `discovery_status` / invoke axis in Slice 2.
+# ---------------------------------------------------------------------------
+
+
+class TestTrustRegisterThenDefersDiscoveryProbe:
+    async def test_oauth_prm_registers_despite_discovery_url_refusal(
+        self,
+        registry: PluginRegistry,
+        object_store: LocalObjectStoreAdapter,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The Proof-1b-1 case: an oauth-prm pack whose discovery probe would raise
+        ``mcp_discovery_url_refused`` (a loopback ``server_url`` correctly rejected by the
+        prod SSRF guard) now REGISTERS — the discovery refusal is deferred to invoke, not
+        a registration refusal. Trust (signature + attestations + manifest shape) is
+        valid, so the pack is admitted with no ``refusal_reason``."""
+        manifest = _canonical_manifest(server_url="http://127.0.0.1:8765/mcp")
+        authz_factory, authz_client = _make_authz_factory_raising("mcp_discovery_url_refused")
+        deps = _make_admission_deps(
+            monkeypatch=monkeypatch,
+            manifest=manifest,
+            authz_factory=authz_factory,
+        )
+        outcome = await _call_register(
+            registry,
+            pack=_make_pack(),
+            artefacts=_make_artefacts(tmp_path),
+            object_store=object_store,
+            mcp_admission=deps,
+        )
+        assert outcome.status == "registered"
+        assert outcome.refusal_reason is None
+        # Load-bearing: registration must NOT perform the discovery/OAuth network probe
+        # at all (not merely swallow its error) — Step C is removed, not ignored.
+        authz_client.acquire_token.assert_not_awaited()
+
+    async def test_oauth_prm_registers_despite_any_probe_refusal(
+        self,
+        registry: PluginRegistry,
+        object_store: LocalObjectStoreAdapter,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Generalises beyond the loopback case: ANY discovery/OAuth probe refusal
+        (``mcp_as_not_allowlisted`` here) no longer blocks registration — these are
+        runtime-endpoint concerns deferred to invoke (Slice 2), not trust failures."""
+        authz_factory, authz_client = _make_authz_factory_raising("mcp_as_not_allowlisted")
+        deps = _make_admission_deps(
+            monkeypatch=monkeypatch,
+            manifest=_canonical_manifest(),
+            authz_factory=authz_factory,
+        )
+        outcome = await _call_register(
+            registry,
+            pack=_make_pack(),
+            artefacts=_make_artefacts(tmp_path),
+            object_store=object_store,
+            mcp_admission=deps,
+        )
+        assert outcome.status == "registered"
+        assert outcome.refusal_reason is None
+        # Load-bearing: the discovery/OAuth network probe is not performed at registration.
+        authz_client.acquire_token.assert_not_awaited()
