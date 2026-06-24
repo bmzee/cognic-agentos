@@ -37,6 +37,7 @@ import pytest
 import respx
 
 from cognic_agentos.core.config import Settings, build_settings_without_env_file
+from cognic_agentos.protocol import mcp_authz
 from cognic_agentos.protocol.mcp_authz import (
     MCPAuthzClient,
     MCPAuthzError,
@@ -146,6 +147,28 @@ async def authz(
 ) -> MCPAuthzClient:
     return MCPAuthzClient(
         settings=settings,
+        vault_client=vault_client,
+        http_client=http_client,
+        audit_store=audit_store,
+        decision_history_store=decision_history_store,
+    )
+
+
+@pytest.fixture
+def settings_strict(settings: Settings) -> Settings:
+    return settings.model_copy(update={"runtime_profile": "prod"})
+
+
+@pytest.fixture
+async def authz_strict(
+    settings_strict: Settings,
+    vault_client: MagicMock,
+    http_client: httpx.AsyncClient,
+    audit_store: MagicMock,
+    decision_history_store: MagicMock,
+) -> MCPAuthzClient:
+    return MCPAuthzClient(
+        settings=settings_strict,
         vault_client=vault_client,
         http_client=http_client,
         audit_store=audit_store,
@@ -4127,3 +4150,49 @@ class TestAuthzErrorMessageScrubbing:
         assert exc.value.payload.get("vault_error_class") == "RuntimeError"
         assert "hvs.LEAK_BYTES" not in str(exc.value)
         assert "vault detail:" not in str(exc.value)
+
+
+class TestOAuthLegSsrfGuard:
+    @respx.mock
+    async def test_leg4_as_metadata_internal_refused_before_get(
+        self,
+        authz_strict: MCPAuthzClient,
+        vault_client: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        as_issuer = "https://as.internal.example"  # allow-listed but internal
+        server = "https://server.example/mcp"
+        vault_client.read.side_effect = _vault_dispatch(allowlist=[as_issuer])
+
+        async def _resolve(host: str) -> list[str]:
+            return ["10.0.0.5"] if host == "as.internal.example" else ["93.184.216.34"]
+
+        monkeypatch.setattr(mcp_authz, "_resolve_host_addresses", _resolve)
+        respx.get(server).mock(
+            return_value=httpx.Response(
+                401,
+                headers={
+                    "WWW-Authenticate": "Bearer resource_metadata="
+                    '"https://server.example/.well-known/oauth-protected-resource/mcp"'
+                },
+            )
+        )
+        respx.get("https://server.example/.well-known/oauth-protected-resource/mcp").mock(
+            return_value=httpx.Response(
+                200, json={"authorization_servers": [as_issuer], "scopes_supported": ["mcp:tools"]}
+            )
+        )
+        as_meta = respx.get(f"{as_issuer}/.well-known/oauth-authorization-server").mock(
+            return_value=httpx.Response(200, json={"token_endpoint": f"{as_issuer}/token"})
+        )
+
+        with pytest.raises(MCPAuthzError) as exc:
+            await authz_strict.acquire_token(
+                server_url=server,
+                manifest_scopes=("mcp:tools",),
+                request_id="r",
+                tenant_id="bank_a",
+            )
+        assert exc.value.reason == "mcp_discovery_url_refused"
+        assert exc.value.payload.get("leg") == "as_metadata"
+        assert not as_meta.called  # the AS-metadata GET never fired

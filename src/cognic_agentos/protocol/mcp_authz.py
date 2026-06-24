@@ -1347,11 +1347,11 @@ class MCPAuthzClient:
 
         # Step 1: AS-discovery via its issuer well-known.
         timeout = self._settings.mcp_oauth_request_timeout_s
+        as_metadata_url = f"{as_issuer.rstrip('/')}/.well-known/oauth-authorization-server"
+        # Leg 4 (PR-2a): SSRF-guard the AS-metadata discovery URL before the GET.
+        await self._refuse_non_public_discovery_url(as_metadata_url, leg="as_metadata")
         try:
-            discovery_resp = await self._http.get(
-                f"{as_issuer.rstrip('/')}/.well-known/oauth-authorization-server",
-                timeout=timeout,
-            )
+            discovery_resp = await self._http.get(as_metadata_url, timeout=timeout)
         except httpx.TimeoutException as exc:
             raise MCPAuthzError(
                 "mcp_oauth_request_timeout",
