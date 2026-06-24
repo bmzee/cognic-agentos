@@ -829,6 +829,10 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     ("src/cognic_agentos/protocol/mcp_manifest.py", 0.95, 0.90),
     ("src/cognic_agentos/protocol/mcp_transports.py", 0.95, 0.90),
     ("src/cognic_agentos/protocol/mcp_host.py", 0.95, 0.90),
+    # PR-1 Slice 2 (ADR-002 trust-register-then-defer) — the discovery_status axis owns the
+    # wire-visible ``DiscoveryStatus`` enum (surfaced on /system/plugins) + the AuthzReason ->
+    # discovery_status mapper; critical-control-adjacent (small, pure, heavily tested).
+    ("src/cognic_agentos/protocol/discovery_status.py", 0.95, 0.90),
     # Sprint 6 T15 — A2A endpoint septet (R2 P2 #4 reviewer correction
     # expanded the original quintet with ``a2a_version.py`` — version
     # negotiation IS wire-protocol surface per AGENTS.md

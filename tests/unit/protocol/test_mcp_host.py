@@ -80,6 +80,7 @@ from cognic_agentos.core.audit import AuditStore
 from cognic_agentos.core.config import build_settings_without_env_file
 from cognic_agentos.core.decision_history import DecisionHistoryStore
 from cognic_agentos.protocol import MCPNotAvailableError
+from cognic_agentos.protocol.discovery_status import InMemoryDiscoveryStatusRecorder
 from cognic_agentos.protocol.mcp_authz import MCPAuthzClient, MCPAuthzError, Token
 
 # ---------------------------------------------------------------------------
@@ -2345,3 +2346,236 @@ class TestListToolsSDKErrorTaxonomy:
             )
         assert exc.value.reason == "mcp_session_closed"
         assert exc.value.payload.get("preserved_marker") == "kept"
+
+
+# ---------------------------------------------------------------------------
+# PR-1 Slice 2 — invoke-time discovery_status recording (ADR-002).
+#
+# MCPHost records the per-(tenant, pack) discovery_status at the OAuth probe
+# (acquire_token): `auth_ready` on success; `refused`/`unreachable` on
+# MCPAuthzError (the error is STILL re-raised — the axis is observational, the
+# invoke path stays fail-closed). Key = (tenant_id, pack_id) where pack_id is
+# the registry distribution_name == MCPServerEntry.server_id (drift-pinned in
+# tests/unit/harness/test_mcp_host_builder.py).
+# ---------------------------------------------------------------------------
+
+
+def _host_with_recorder(
+    host_module: Any,
+    *,
+    server_entry: Any,
+    http_transport: MagicMock,
+    authz: MagicMock,
+    audit_store: MagicMock,
+    decision_history_store: MagicMock,
+    settings: Any,
+    recorder: InMemoryDiscoveryStatusRecorder,
+) -> Any:
+    return host_module.MCPHost(
+        servers={server_entry.server_id: server_entry},
+        transports={"http": http_transport},
+        authz=authz,
+        audit_store=audit_store,
+        decision_history_store=decision_history_store,
+        settings=settings,
+        discovery_status_recorder=recorder,
+    )
+
+
+class TestDiscoveryStatusRecording:
+    async def test_list_tools_records_auth_ready_on_probe_success(
+        self,
+        host_module: Any,
+        server_entry: Any,
+        http_transport: MagicMock,
+        authz: MagicMock,
+        audit_store: MagicMock,
+        decision_history_store: MagicMock,
+        settings: Any,
+    ) -> None:
+        recorder = InMemoryDiscoveryStatusRecorder()
+        host = _host_with_recorder(
+            host_module,
+            server_entry=server_entry,
+            http_transport=http_transport,
+            authz=authz,
+            audit_store=audit_store,
+            decision_history_store=decision_history_store,
+            settings=settings,
+            recorder=recorder,
+        )
+        await host.list_tools(server_id=server_entry.server_id, request_id="r-1", tenant_id="t-1")
+        assert recorder.get(tenant_id="t-1", pack_id=server_entry.server_id) == "auth_ready"
+
+    async def test_list_tools_records_refused_on_ssrf_and_still_raises(
+        self,
+        host_module: Any,
+        server_entry: Any,
+        http_transport: MagicMock,
+        authz: MagicMock,
+        audit_store: MagicMock,
+        decision_history_store: MagicMock,
+        settings: Any,
+    ) -> None:
+        authz.acquire_token = AsyncMock(
+            side_effect=MCPAuthzError("mcp_discovery_url_refused", "loopback server_url")
+        )
+        recorder = InMemoryDiscoveryStatusRecorder()
+        host = _host_with_recorder(
+            host_module,
+            server_entry=server_entry,
+            http_transport=http_transport,
+            authz=authz,
+            audit_store=audit_store,
+            decision_history_store=decision_history_store,
+            settings=settings,
+            recorder=recorder,
+        )
+        with pytest.raises(MCPAuthzError):  # fail-closed preserved
+            await host.list_tools(
+                server_id=server_entry.server_id, request_id="r-1", tenant_id="t-1"
+            )
+        assert recorder.get(tenant_id="t-1", pack_id=server_entry.server_id) == "refused"
+
+    async def test_list_tools_records_unreachable_on_timeout(
+        self,
+        host_module: Any,
+        server_entry: Any,
+        http_transport: MagicMock,
+        authz: MagicMock,
+        audit_store: MagicMock,
+        decision_history_store: MagicMock,
+        settings: Any,
+    ) -> None:
+        authz.acquire_token = AsyncMock(
+            side_effect=MCPAuthzError("mcp_oauth_request_timeout", "PRM timed out")
+        )
+        recorder = InMemoryDiscoveryStatusRecorder()
+        host = _host_with_recorder(
+            host_module,
+            server_entry=server_entry,
+            http_transport=http_transport,
+            authz=authz,
+            audit_store=audit_store,
+            decision_history_store=decision_history_store,
+            settings=settings,
+            recorder=recorder,
+        )
+        with pytest.raises(MCPAuthzError):
+            await host.list_tools(
+                server_id=server_entry.server_id, request_id="r-1", tenant_id="t-1"
+            )
+        assert recorder.get(tenant_id="t-1", pack_id=server_entry.server_id) == "unreachable"
+
+    async def test_call_tool_records_auth_ready_on_probe_success(
+        self,
+        host_module: Any,
+        server_entry: Any,
+        http_transport: MagicMock,
+        authz: MagicMock,
+        audit_store: MagicMock,
+        decision_history_store: MagicMock,
+        settings: Any,
+    ) -> None:
+        recorder = InMemoryDiscoveryStatusRecorder()
+        host = _host_with_recorder(
+            host_module,
+            server_entry=server_entry,
+            http_transport=http_transport,
+            authz=authz,
+            audit_store=audit_store,
+            decision_history_store=decision_history_store,
+            settings=settings,
+            recorder=recorder,
+        )
+        await host.call_tool(
+            server_id=server_entry.server_id,
+            tool_name="lookup",
+            arguments={},
+            request_id="r-1",
+            tenant_id="t-1",
+        )
+        assert recorder.get(tenant_id="t-1", pack_id=server_entry.server_id) == "auth_ready"
+
+    async def test_call_tool_records_refused_on_ssrf_and_still_raises(
+        self,
+        host_module: Any,
+        server_entry: Any,
+        http_transport: MagicMock,
+        authz: MagicMock,
+        audit_store: MagicMock,
+        decision_history_store: MagicMock,
+        settings: Any,
+    ) -> None:
+        authz.acquire_token = AsyncMock(
+            side_effect=MCPAuthzError("mcp_discovery_url_refused", "loopback server_url")
+        )
+        recorder = InMemoryDiscoveryStatusRecorder()
+        host = _host_with_recorder(
+            host_module,
+            server_entry=server_entry,
+            http_transport=http_transport,
+            authz=authz,
+            audit_store=audit_store,
+            decision_history_store=decision_history_store,
+            settings=settings,
+            recorder=recorder,
+        )
+        with pytest.raises(MCPAuthzError):  # fail-closed preserved
+            await host.call_tool(
+                server_id=server_entry.server_id,
+                tool_name="lookup",
+                arguments={},
+                request_id="r-1",
+                tenant_id="t-1",
+            )
+        assert recorder.get(tenant_id="t-1", pack_id=server_entry.server_id) == "refused"
+
+    async def test_call_tool_records_unreachable_on_retry_reacquire_timeout(
+        self,
+        host_module: Any,
+        server_entry: Any,
+        http_transport: MagicMock,
+        authz: MagicMock,
+        audit_store: MagicMock,
+        decision_history_store: MagicMock,
+        settings: Any,
+    ) -> None:
+        """The post-dispatch REACQUIRE site (call_tool 401-retry path, mcp_host.py:1706): the
+        first send → 401 (auth-lost) → the retry acquire_token raises mcp_oauth_request_timeout
+        → host STILL raises AND the recorder's final status is `unreachable` (the reacquire
+        outcome overwrites the initial auth_ready, proving the THIRD probe site records)."""
+        from cognic_agentos.protocol.mcp_transports import MCPTransportError
+
+        # Initial acquire succeeds; the reacquire (after the 401) times out.
+        authz.acquire_token = AsyncMock(
+            side_effect=[
+                _token(),
+                MCPAuthzError("mcp_oauth_request_timeout", "PRM timed out on reacquire"),
+            ]
+        )
+        first_send_error = MCPTransportError(
+            "mcp_transport_send_failed", "401", server_url=server_entry.server_url
+        )
+        first_send_error.__cause__ = _httpx_status_error(401)
+        http_transport.send.side_effect = [first_send_error]
+        recorder = InMemoryDiscoveryStatusRecorder()
+        host = _host_with_recorder(
+            host_module,
+            server_entry=server_entry,
+            http_transport=http_transport,
+            authz=authz,
+            audit_store=audit_store,
+            decision_history_store=decision_history_store,
+            settings=settings,
+            recorder=recorder,
+        )
+        with pytest.raises(MCPAuthzError):  # fail-closed preserved
+            await host.call_tool(
+                server_id=server_entry.server_id,
+                tool_name="lookup",
+                arguments={},
+                request_id="r-1",
+                tenant_id="t-1",
+            )
+        assert recorder.get(tenant_id="t-1", pack_id=server_entry.server_id) == "unreachable"

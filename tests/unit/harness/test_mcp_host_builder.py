@@ -71,6 +71,28 @@ def test_valid_pack_maps_to_server_entry(monkeypatch):
     assert e.data_classes == ("customer_pii",)
 
 
+def test_server_id_is_distribution_name_the_discovery_status_join_key(monkeypatch):
+    """PR-1 Slice 2 discovery_status JOIN-KEY drift pin. MCPHost writes discovery_status under
+    (tenant_id, MCPServerEntry.server_id); the /system/plugins route reads it under
+    (tenant_id, RegistrationOutcome.pack_id). Both keys MUST be the registry distribution_name:
+
+      - server_id == distribution_name — pinned HERE (the mapper, harness/mcp_host.py).
+      - pack_id == distribution_name — pinned by RegistrationOutcome construction in
+        plugin_registry.py (pack_id=record.distribution_name) + the register tests.
+
+    A future display/server alias on server_id would silently break the per-(tenant, pack) join.
+    """
+    monkeypatch.setattr(
+        "cognic_agentos.harness.mcp_host.extract_pack_manifest", lambda **kw: _GOOD_MANIFEST
+    )
+    dist = "cognic-tool-search"
+    servers = _map_registered_packs_to_servers(
+        _StubRegistry([_cand(dist=dist, pkg="cognic_tool_search")])
+    )
+    assert dist in servers  # keyed by distribution_name
+    assert servers[dist].server_id == dist  # == outcome.pack_id (both distribution_name)
+
+
 def test_manifest_not_found_silent_skip(monkeypatch, caplog):
     from cognic_agentos.protocol.mcp_manifest import PackManifestNotFoundError
 

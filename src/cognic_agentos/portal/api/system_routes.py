@@ -42,13 +42,17 @@ from __future__ import annotations
 
 import logging
 from collections import Counter
-from typing import Any
+from typing import Any, get_args
 
 from fastapi import APIRouter, Request
 
 from cognic_agentos.core.config import Settings
 from cognic_agentos.db.adapters import Adapters
 from cognic_agentos.llm.ledger import GatewayCallLedger, GatewayCallRow
+from cognic_agentos.protocol.discovery_status import (
+    DiscoveryStatus,
+    DiscoveryStatusRecorder,
+)
 from cognic_agentos.protocol.plugin_registry import (
     PluginRegistry,
     RegistrationOutcome,
@@ -135,7 +139,12 @@ def _row_dict(row: GatewayCallRow) -> dict[str, Any]:
     }
 
 
-def _plugin_record_dict(outcome: RegistrationOutcome) -> dict[str, Any]:
+def _plugin_record_dict(
+    outcome: RegistrationOutcome,
+    *,
+    tenant_id: str | None,
+    recorder: DiscoveryStatusRecorder | None,
+) -> dict[str, Any]:
     """Stable per-plugin JSON shape for the T11 endpoint.
 
     Field naming mirrors ``RegistrationOutcome`` so portal UIs and
@@ -147,7 +156,19 @@ def _plugin_record_dict(outcome: RegistrationOutcome) -> dict[str, Any]:
     several entry points renders correctly. ``signature_digest``
     + ``refusal_reason`` + ``registered_at`` are always present —
     null on the refusal / not-yet-registered paths.
+
+    PR-1 Slice 2 (ADR-002): ``discovery_status`` is the per-(tenant, pack)
+    invoke-time axis. It is the recorded status for ``(tenant_id, pack_id)``
+    only when BOTH an operator-supplied ``tenant_id`` selector AND a recorder
+    are present; otherwise it defaults to ``unprobed`` (no cross-tenant leak —
+    a status recorded for one tenant is invisible to a no-tenant or
+    different-tenant read).
     """
+    discovery_status: DiscoveryStatus = (
+        recorder.get(tenant_id=tenant_id, pack_id=outcome.pack_id)
+        if (tenant_id and recorder is not None)
+        else "unprobed"
+    )
     return {
         "kind": outcome.kind,
         "name": outcome.name,
@@ -160,6 +181,7 @@ def _plugin_record_dict(outcome: RegistrationOutcome) -> dict[str, Any]:
         "registered_at": (
             outcome.registered_at.isoformat() if outcome.registered_at is not None else None
         ),
+        "discovery_status": discovery_status,
     }
 
 
@@ -266,7 +288,7 @@ def build_system_router(settings: Settings) -> APIRouter:
         "/plugins",
         summary="Pack registration outcomes (read-only)",
     )
-    async def plugins(request: Request) -> dict[str, Any]:
+    async def plugins(request: Request, tenant_id: str | None = None) -> dict[str, Any]:
         """Return the operator-visible plugin registration outcomes.
 
         Read-only endpoint per the user's T11 guardrails: NO
@@ -283,13 +305,15 @@ def build_system_router(settings: Settings) -> APIRouter:
               "plugins": [
                   {"kind", "name", "pack_id", "version", "status",
                    "attestation_grade", "signature_digest",
-                   "refusal_reason", "registered_at"},
+                   "refusal_reason", "registered_at", "discovery_status"},
                   ...
               ],
               "summary": {
                   "total_discovered", "registered",
                   "refused_at_registration",
-                  "by_grade": {"full", "partial"}
+                  "by_grade": {"full", "partial"},
+                  "by_discovery_status": {"unprobed", "auth_ready",
+                                          "refused", "unreachable"}
               }
           }``
 
@@ -298,6 +322,14 @@ def build_system_router(settings: Settings) -> APIRouter:
         ADR-012 lifecycle (submitted / approved / installed / etc.)
         is Sprint 7B and will extend this surface without breaking
         the Sprint-4 fields.
+
+        ``discovery_status`` (PR-1 Slice 2, ADR-002) is the per-(tenant,
+        pack) invoke-time axis. The optional ``?tenant_id=`` query param
+        is an operator OBSERVATION selector (NOT an auth boundary): with
+        it, rows reflect the recorded status for ``(tenant_id, pack_id)``;
+        without it (or for a different tenant) rows read ``unprobed`` — no
+        cross-tenant leak. ``summary.by_discovery_status`` rolls the rows
+        up across all 4 axis values.
 
         Returns 200 in every reachable case — when no
         ``plugin_registry`` is attached (Sprint-1A/1B test mode),
@@ -309,11 +341,25 @@ def build_system_router(settings: Settings) -> APIRouter:
         outcomes: list[RegistrationOutcome] = (
             list(registry.known_packs()) if registry is not None else []
         )
-        plugins_list = [_plugin_record_dict(o) for o in outcomes]
+        # PR-1 Slice 2 (ADR-002): ``tenant_id`` is an operator OBSERVATION selector
+        # (NOT an auth boundary — never inferred from an actor). The recorder is the
+        # same instance the lifespan attaches + the MCP host writes to.
+        recorder: DiscoveryStatusRecorder | None = getattr(
+            request.app.state, "discovery_status_recorder", None
+        )
+        plugins_list = [
+            _plugin_record_dict(o, tenant_id=tenant_id, recorder=recorder) for o in outcomes
+        ]
         registered_count = sum(1 for o in outcomes if o.status == "registered")
         refused_count = sum(1 for o in outcomes if o.status == "refused_at_registration")
         full_count = sum(1 for o in outcomes if o.attestation_grade == "full")
         partial_count = sum(1 for o in outcomes if o.attestation_grade == "partial")
+        # ``by_discovery_status`` mirrors ``by_grade``'s always-present-keys contract:
+        # all 4 axis values present, counting rows by their resolved discovery_status
+        # (the value ``_plugin_record_dict`` already computed per row).
+        by_discovery_status: dict[str, int] = {s: 0 for s in get_args(DiscoveryStatus)}
+        for plugin in plugins_list:
+            by_discovery_status[plugin["discovery_status"]] += 1
         return {
             "plugins": plugins_list,
             "summary": {
@@ -321,6 +367,7 @@ def build_system_router(settings: Settings) -> APIRouter:
                 "registered": registered_count,
                 "refused_at_registration": refused_count,
                 "by_grade": {"full": full_count, "partial": partial_count},
+                "by_discovery_status": by_discovery_status,
             },
         }
 

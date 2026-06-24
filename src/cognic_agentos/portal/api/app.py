@@ -73,6 +73,7 @@ from cognic_agentos.portal.api.packs import build_packs_router
 from cognic_agentos.portal.api.system_routes import build_system_router
 from cognic_agentos.portal.rbac.actor import ActorBinder
 from cognic_agentos.protocol import is_a2a_available, is_mcp_available
+from cognic_agentos.protocol.discovery_status import InMemoryDiscoveryStatusRecorder
 from cognic_agentos.protocol.elicitation_adapter import ElicitationAdapter
 from cognic_agentos.protocol.plugin_registry import PluginRegistry
 from cognic_agentos.protocol.trust_gate import TrustGate
@@ -584,6 +585,15 @@ def create_app(
                     extra={"source": "explicit_injection"},
                 )
 
+            # PR-1 Slice 2 (ADR-002): build the OBSERVATIONAL discovery-status
+            # recorder UNCONDITIONALLY — the /api/v1/system/plugins read surface
+            # needs it even when the MCP SDK / host is absent (kernel image,
+            # gateway-only, adapter-less). The SAME instance is threaded into
+            # build_mcp_host below (the writer) on the SDK-present path, so the
+            # invoke-time recording + the operator read share one store.
+            discovery_status_recorder = InMemoryDiscoveryStatusRecorder()
+            app.state.discovery_status_recorder = discovery_status_recorder
+
             if adapter_registry is None:
                 app.state.adapters = None
                 # Sprint 4 (ADR-002/003/016): no adapter pool → no boot
@@ -743,6 +753,7 @@ def create_app(
                             settings=settings,
                             http_client=mcp_http_client,
                             vault_client=adapters.secret,
+                            discovery_status_recorder=discovery_status_recorder,
                         )
                     except Exception:
                         logger.error("mcp.host_construction_failed", exc_info=True)
@@ -1110,6 +1121,10 @@ def create_app(
     # the lifespan populates it with the injected-or-discovered registry.
     app.state.plugin_registry = None
     app.state.mcp_host = None  # Sprint 13.8 (ADR-002) — SDK-gated; lifespan populates.
+    # PR-1 Slice 2 (ADR-002) — OBSERVATIONAL discovery-status recorder. Pre-seeded
+    # None so pre-startup / lifespan-skipping introspection sees a defined attribute;
+    # the lifespan builds the real InMemoryDiscoveryStatusRecorder unconditionally.
+    app.state.discovery_status_recorder = None
     app.state.a2a_endpoint = None  # Sprint 4 (ADR-003) — SDK-gated; lifespan populates.
     app.state.sandbox_backend = None  # Sprint 14A-A (ADR-004) — SDK-gated; lifespan populates.
     app.state.managed_run_executor = None  # Sprint 14A-A (ADR-022) — lifespan populates.
