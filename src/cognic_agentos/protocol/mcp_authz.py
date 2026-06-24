@@ -1388,6 +1388,10 @@ class MCPAuthzClient:
                 f"AS {as_issuer} discovery has no token_endpoint",
                 as_issuer=as_issuer,
             )
+        # Leg 5 (PR-2a): SSRF-guard the token_endpoint BEFORE any credential
+        # material (body / headers / Basic-auth) is built — the secret is never
+        # assembled into a request for an internal URL.
+        await self._refuse_non_public_discovery_url(token_endpoint, leg="token_endpoint")
 
         # Step 2: token request — credentials in body OR Basic header
         # depending on auth_method. RFC 8707 resource indicator on

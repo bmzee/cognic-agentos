@@ -486,6 +486,15 @@ def test_leg5_guard_precedes_all_credential_construction() -> None:
             for t in node.targets:
                 if isinstance(t, ast.Name) and t.id in cred_names:
                     cred_lines.setdefault(t.id, node.lineno)
+        elif isinstance(node, ast.AnnAssign):
+            # `body: dict[str, str] = {...}` and `headers: dict[str, str] = {}`
+            # are ANNOTATED assignments (single `.target`, not `.targets`) — the
+            # two most security-sensitive credential-material names (the form body
+            # carries `client_secret` for `client_secret_post`), so the pin MUST
+            # cover them too, not just the plain-`ast.Assign` encoded_*/basic ones.
+            t = node.target
+            if isinstance(t, ast.Name) and t.id in cred_names:
+                cred_lines.setdefault(t.id, node.lineno)
     assert guard_line is not None, "leg-5 token_endpoint guard not found in _request_token"
     assert cred_names <= set(cred_lines), (
         f"missing credential-material assignments: {cred_names - set(cred_lines)}"
