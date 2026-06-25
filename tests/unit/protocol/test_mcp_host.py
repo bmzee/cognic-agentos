@@ -69,8 +69,10 @@ challenge cleanly):
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import time
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -79,7 +81,7 @@ import pytest
 from cognic_agentos.core.audit import AuditStore
 from cognic_agentos.core.config import build_settings_without_env_file
 from cognic_agentos.core.decision_history import DecisionHistoryStore
-from cognic_agentos.protocol import MCPNotAvailableError
+from cognic_agentos.protocol import MCPNotAvailableError, mcp_host
 from cognic_agentos.protocol.discovery_status import InMemoryDiscoveryStatusRecorder
 from cognic_agentos.protocol.mcp_authz import AuthzReason, MCPAuthzClient, MCPAuthzError, Token
 
@@ -2739,3 +2741,23 @@ class TestStepUpDiscoveryStatusRecording:
         with pytest.raises(MCPAuthzError):
             await _drive_call_tool_into_step_up(host, entry, tenant_id)
         assert recorder.get(tenant_id=tenant_id, pack_id=entry.server_id) == "auth_ready"
+
+
+def test_mcp_host_has_no_refresh_token_call_path() -> None:
+    """PR-2a §3.3 drift pin: refresh_token is guarded-but-unrecorded by design —
+    it carries no server_id/pack key and MCPHost never invokes it, so there is no
+    production call site that could record discovery_status. If a future MCPHost
+    path calls refresh_token, this pin fails and forces the recording decision to
+    be revisited (the OAuth-leg guard still applies in _request_token regardless)."""
+    src = Path(mcp_host.__file__).read_text()
+    tree = ast.parse(src)
+    refresh_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "refresh_token"
+    ]
+    assert refresh_calls == [], (
+        "MCPHost now calls refresh_token — revisit PR-2a §3.3 discovery_status recording"
+    )
