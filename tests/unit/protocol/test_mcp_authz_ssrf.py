@@ -184,6 +184,8 @@ async def test_fetch_prm_leg_mapping(
             discovery_path,
             "https://server.example/mcp",
             5.0,
+            tenant_id="t1",
+            request_id="r1",
         )
     assert e.value.reason == "mcp_discovery_url_refused"
     assert e.value.payload.get("leg") == expected_leg
@@ -199,8 +201,14 @@ async def test_oauth_legs_inert_in_dev_profile(monkeypatch: pytest.MonkeyPatch) 
     client = _client(_StubHttp(), profile="dev")
     # No raise for either OAuth leg in dev (the guard early-returns).
     await client._refuse_non_public_discovery_url(
-        "https://as.internal.example/.well-known/oauth-authorization-server", leg="as_metadata"
+        "https://as.internal.example/.well-known/oauth-authorization-server",
+        leg="as_metadata",
+        tenant_id="t1",
+        request_id="r1",
     )
     await client._refuse_non_public_discovery_url(
-        "https://token.internal.example/token", leg="token_endpoint"
+        "https://token.internal.example/token",
+        leg="token_endpoint",
+        tenant_id="t1",
+        request_id="r1",
     )
