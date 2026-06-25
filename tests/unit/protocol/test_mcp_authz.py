@@ -44,6 +44,7 @@ from cognic_agentos.protocol.mcp_authz import (
     MCPAuthzClient,
     MCPAuthzError,
     Token,
+    _canonical_origin,
     _decode_jwt_payload,
     _endpoint_specific_well_known_url,
     _is_token_near_expiry,
@@ -208,6 +209,67 @@ class TestUrlBuilders:
     def test_root_well_known(self) -> None:
         url = _root_well_known_url("https://server.example/some/path")
         assert url == "https://server.example/.well-known/oauth-protected-resource"
+
+
+class TestCanonicalOrigin:
+    def test_default_port_https_equivalence(self) -> None:
+        assert _canonical_origin("https://issuer.example") == _canonical_origin(
+            "https://issuer.example:443"
+        )
+
+    def test_default_port_http_equivalence(self) -> None:
+        assert _canonical_origin("http://issuer.example") == _canonical_origin(
+            "http://issuer.example:80"
+        )
+
+    def test_host_case_insensitive(self) -> None:
+        assert _canonical_origin("https://Issuer.EXAMPLE/token") == _canonical_origin(
+            "https://issuer.example/path"
+        )
+
+    def test_trailing_dot_stripped(self) -> None:
+        assert _canonical_origin("https://issuer.example./token") == _canonical_origin(
+            "https://issuer.example/token"
+        )
+
+    def test_path_query_ignored(self) -> None:
+        assert _canonical_origin("https://issuer.example/a?b=c") == _canonical_origin(
+            "https://issuer.example/d"
+        )
+
+    def test_distinct_origins_differ(self) -> None:
+        assert _canonical_origin("https://issuer.example") != _canonical_origin(
+            "https://evil.example"
+        )
+        assert _canonical_origin("https://issuer.example") != _canonical_origin(
+            "http://issuer.example"
+        )
+        assert _canonical_origin("https://issuer.example:8443") != _canonical_origin(
+            "https://issuer.example"
+        )
+
+    def test_ip_literal_canonicalized(self) -> None:
+        assert _canonical_origin("https://93.184.216.34/token") == ("https", "93.184.216.34", 443)
+
+    def test_non_http_scheme_is_none(self) -> None:
+        assert _canonical_origin("ftp://issuer.example") is None
+        assert _canonical_origin("file:///etc/passwd") is None
+
+    def test_no_host_is_none(self) -> None:
+        assert _canonical_origin("https:///token") is None
+        assert _canonical_origin("not-a-url") is None
+
+    def test_malformed_port_is_none(self) -> None:
+        assert _canonical_origin("https://issuer.example:99999/token") is None
+
+    def test_userinfo_rejected(self) -> None:
+        # Credential-destination control: a userinfo URL parses to the host AFTER the
+        # `@` (the attacker host), which reads as the issuer in logs. Reject outright.
+        assert _canonical_origin("https://issuer.example@evil.example/token") is None
+        assert _canonical_origin("https://user:pass@evil.example/token") is None
+
+    def test_empty_host_after_trailing_dot_rejected(self) -> None:
+        assert _canonical_origin("https://./token") is None
 
 
 class TestParseResourceMetadataUrl:

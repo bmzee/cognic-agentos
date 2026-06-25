@@ -340,6 +340,52 @@ def _root_well_known_url(server_url: str) -> str:
     return f"{parsed.scheme}://{parsed.netloc}/.well-known/oauth-protected-resource"
 
 
+def _canonical_origin(url: str) -> tuple[str, str, int] | None:
+    """Canonical ``(scheme, host, port)`` origin of an http(s) URL, or ``None`` if the
+    URL is not http(s) / carries userinfo / has no host / has a malformed host or port.
+
+    Normalization is identical on both sides of an origin comparison:
+    - a URL carrying **userinfo** (``user@`` / ``user:pass@``) is REJECTED outright —
+      for a credential destination, ``https://issuer.example@evil.example`` (host
+      ``evil.example``) must never read as the issuer;
+    - scheme lowercased (``urlparse`` already lowercases it);
+    - host lowercased (``urlparse.hostname`` already lowercases) + trailing dot stripped;
+      IP literals normalized to their canonical string; DNS names IDNA/punycode-normalized
+      to their A-label (a malformed IDN fails closed);
+    - port default-normalized (``https``->443, ``http``->80), so ``https://h`` ==
+      ``https://h:443``;
+    - origin is scheme + host + port ONLY (path / query ignored).
+    """
+    parsed = urlparse(url)
+    if parsed.username is not None or parsed.password is not None:
+        return None
+    scheme = parsed.scheme.lower()
+    if scheme not in {"http", "https"}:
+        return None
+    host = parsed.hostname  # urlparse lowercases the host
+    if not host:
+        return None
+    host = host.rstrip(".")
+    if not host:
+        return None
+    try:
+        # IP literals (v4/v6) are not IDN — normalize to the canonical IP string.
+        host = str(ipaddress.ip_address(host))
+    except ValueError:
+        try:
+            host = host.encode("idna").decode("ascii")
+        except (UnicodeError, ValueError):
+            return None
+    try:
+        port = parsed.port
+    except ValueError:
+        # Out-of-range port (urlparse raises lazily on .port access).
+        return None
+    if port is None:
+        port = 443 if scheme == "https" else 80
+    return (scheme, host, port)
+
+
 def _decode_jwt_payload(token: str) -> dict[str, Any]:
     """Decode the payload of a JWT-format token without verifying its
     signature.
