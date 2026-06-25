@@ -7,6 +7,10 @@ from pathlib import Path
 import httpx
 import pytest
 
+from cognic_agentos.core.mcp_config.storage import (
+    MCPInternalHostAllowlistStore,
+    MCPServerUrlOverrideStore,
+)
 from cognic_agentos.db.adapters.factory import build_adapters
 from cognic_agentos.harness import build_runtime
 from cognic_agentos.harness.mcp_host import (
@@ -245,6 +249,51 @@ async def test_build_mcp_host_wires_approval_engine(
         )
         assert host._approval_engine is runtime.approval_engine  # 13.5b2 seam wired
         assert "cognic-tool-foo" in host._servers
+    finally:
+        await client.aclose()
+        await runtime.aclose()
+        await adapters.close_all()
+
+
+async def test_build_mcp_host_wires_mcp_override_and_allowlist_stores(
+    memory_registry, memory_settings, tmp_path, monkeypatch
+):
+    """PR-2b-1 (ADR-002) — the composition root constructs BOTH MCP-config stores
+    on ``Runtime`` and ``build_mcp_host`` threads the SAME instances end-to-end:
+    the override store into the ``MCPHost`` (resolve-per-use server_url) and the
+    internal-host allow-list store into the host's ``MCPAuthzClient`` (the
+    SSRF-guard carve-out). Asserting IDENTITY (``is``), not just non-None, proves
+    the real instances flow through — and the explicit ``isinstance`` guards
+    defeat the ``None is None`` false-positive (a host that threaded nothing AND a
+    runtime that constructed nothing would both read None)."""
+    monkeypatch.setattr(
+        "cognic_agentos.harness.mcp_host.extract_pack_manifest", lambda **kw: _GOOD_MANIFEST
+    )
+    s = memory_settings.model_copy(
+        update={"litellm_config_path": _litellm_yaml(tmp_path), "cache_driver": "memory"}
+    )
+    adapters = build_adapters(s, registry=memory_registry)
+    await adapters.open_all()
+    runtime = await build_runtime(s, adapters)
+    # build_runtime constructs BOTH stores as real instances (not None) — guards
+    # the None-is-None false positive on the identity assertions below.
+    assert isinstance(runtime.mcp_override_store, MCPServerUrlOverrideStore)
+    assert isinstance(runtime.mcp_internal_host_allowlist_store, MCPInternalHostAllowlistStore)
+    client = httpx.AsyncClient()
+    try:
+        host = build_mcp_host(
+            registry=_StubRegistry([_cand()]),
+            runtime=runtime,
+            settings=s,
+            http_client=client,
+            vault_client=adapters.secret,
+        )
+        # The override store flows into the MCPHost itself ...
+        assert host._override_store is runtime.mcp_override_store
+        # ... and the allow-list store flows into the host's MCPAuthzClient.
+        assert (
+            host._authz._internal_host_allowlist_store is runtime.mcp_internal_host_allowlist_store
+        )
     finally:
         await client.aclose()
         await runtime.aclose()

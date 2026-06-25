@@ -200,6 +200,11 @@ def build_mcp_host(
         http_client=http_client,
         audit_store=runtime.audit_store,
         decision_history_store=runtime.decision_history_store,
+        # PR-2b-1 (ADR-002 amendment) — the per-tenant exact-IP internal-host
+        # allow-list the SSRF guard's three-resource-leg carve-out consults
+        # (default-deny; the guard reuses the SAME constructed store the portal
+        # operator allow-list router writes to).
+        internal_host_allowlist_store=runtime.mcp_internal_host_allowlist_store,
     )
     transport = StreamableHTTPTransport(authz=authz, settings=settings)
     return MCPHost(
@@ -211,4 +216,9 @@ def build_mcp_host(
         settings=settings,
         approval_engine=runtime.approval_engine,
         discovery_status_recorder=discovery_status_recorder,
+        # PR-2b-1 (ADR-002 amendment) — the operator server_url-override store the
+        # host resolves per-use at the server_url read sites (incl. the list_tools
+        # cache key); the SAME constructed store the portal operator override
+        # router writes to.
+        override_store=runtime.mcp_override_store,
     )

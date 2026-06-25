@@ -299,7 +299,7 @@ uv run mypy src tests && uv run ruff check . && uv run ruff format --check .
 
 - **Spec coverage:** override store + `http://`-IP-literal grammar (§6/§8, T1) · exact-IP allow-list store + AS-4 grammar (§7, T1) · guard carve-out 3-resource-legs + HTTP-only + full-resolved-set + **guard-time hard-block floor** + `audit.mcp_allowlist_permitted` (§7/§7a/§9, T2 per DD-2) · `prm_metadata` resolve-and-pin + rebinding test (§8 line 136 / §11 line 174, T3) · resolve-per-use + stale-cache fix (§6/OD-12, T4) · RBAC family + HumanActor + `actor_type=human` audit (§9 line 145, T1/T5/T6) · fail-closed (§10, T2/T4) · AS-9 residual + hard-block (T1 + ADR). Proof 1b-2 **out of scope (PR-2b-2)**.
 - **Placeholder scan:** none — each task has the new code or an exact "mirror file:line + these specifics."
-- **Type/name consistency:** `internal_host_allowlist_store` / `override_store` seam names consistent across `mcp_authz`/`mcp_host`/`harness`; guard return `str | None` consumed by `_fetch_prm` (T3); `MCPConfigRefusalReason` (8 values) reused by the routes; `actor_type` threaded store→route; `MCPInternalAccessRBACScope` 4 values consistent across scopes/actor/enforcement/tests; one event spelling `audit.mcp_allowlist_permitted` (plan + spec + ADR + tests).
+- **Type/name consistency:** `internal_host_allowlist_store` / `override_store` seam names consistent across `mcp_authz`/`mcp_host`/`harness`; guard return `str | None` consumed by `_fetch_prm` (T3); `MCPConfigRefusalReason` (9 values: 5 override + 4 allow-list) reused by the routes; `actor_type` threaded store→route; `MCPInternalAccessRBACScope` 4 values consistent across scopes/actor/enforcement/tests; one event spelling `audit.mcp_allowlist_permitted` (plan + spec + ADR + tests).
 
 ## Execution handoff
 

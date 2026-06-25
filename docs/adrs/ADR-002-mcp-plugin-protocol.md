@@ -337,6 +337,112 @@ Residual: the stdlib `idna` codec is IDNA2003; an `idna`-package IDNA2008 upgrad
 is a tracked follow-up. The override store, the per-tenant internal-host
 allow-list, and the deployed Proof 1b-2 are PR-2b proper, not this slice.
 
+## per-tenant internal-host allow-list + operator server_url override (PR-2b-1, 2026-06-25)
+
+**Scope honesty.** PR-2b-1 is the **code / security-control surface**: the operator
+`server_url` override + the per-tenant exact-IP internal-host allow-list that let an
+operator point a `(tenant, pack)` at a real in-cluster MCP Service — a private host the
+strict-profile SSRF guard (PR-2a/PR-2b-0) refuses today — **without weakening the guard**.
+The **deployed Proof 1b-2** — a real in-cluster MCP `Service` reached over this surface,
+verified end-to-end (a `discovery_status=auth_ready` probe + a live `list_tools`/`call_tool`
+against the override-pinned ClusterIP) — is a **separate, deferred workstream: PR-2b-2**.
+PR-2b-1 lands and proves the surface by unit/integration tests only; it makes **no
+deployed-reachability claim**. The override store, the allow-list, the guard carve-out, the
+`prm_metadata` pin, the resolve-per-use host read, the RBAC family, and the audit event are
+all here; the in-cluster exercise is Proof 1b-2 (PR-2b-2).
+
+**Two decision-history-audited stores** (`core/mcp_config/storage.py`, CC; Postgres/Oracle;
+`append_with_precondition`-atomic, chain-payload-is-evidence-snapshot, mirroring
+`config_overlay`; migration `0012`):
+
+- `MCPServerUrlOverrideStore` — a per-`(tenant, pack)` `server_url` override. The override
+  grammar is an **`http://`-IP-literal** (`validate_override_url`): scheme must be `http`
+  (an internal `https://<ClusterIP>` is refused — internal legs are HTTP-only), the host
+  must be an **IP literal** (a hostname is refused so **no DNS is reintroduced** on the
+  MCP-SDK leg, closing the rebinding surface), and the IP must pass the internal floor
+  (`ip_passes_internal_floor` — a public host IP like `8.8.8.8` is refused: PR-2b-1 is
+  internal-only; public-server repointing is a deferred follow-up). **The signed manifest
+  object is never mutated** — the override is read at server_url *use*.
+- `MCPInternalHostAllowlistStore` — a per-tenant **default-deny** set of **exact** internal
+  IPs (ClusterIPs). The allow-list grammar (`validate_allowlist_ip`) rejects CIDR/range/prefix
+  forms (`allowlist_ip_not_exact`), FQDN/garbage (`allowlist_ip_malformed`), and the
+  hard-block floor (metadata/loopback/link-local/multicast/unspecified/reserved + the
+  canonical IMDS IPs → `allowlist_ip_hard_blocked` — never listable).
+
+Both validators raise the closed-enum `MCPConfigRejected(reason)` (a **9-value**
+`MCPConfigRefusalReason` Literal: 5 override + 4 allow-list) **from inside** the audited
+`append_with_precondition` closure, so a refusal rolls back the chain row + state row
+atomically. The shared `ip_passes_internal_floor(ip)` predicate (True **only** for a private
+internal IP, requiring `ip.is_private`) is consumed at **set-time** (the validators) **and**
+**read-time** (the guard, defense-in-depth against a corrupted allow-list).
+
+**The guard carve-out (`protocol/mcp_authz.py`, CC).** `_refuse_non_public_discovery_url` is
+widened to `-> str | None` and consulted on the **three MCP-resource legs only**
+(`_RESOURCE_LEGS = {server_url, prm_metadata, well_known_prm}`) — **never** the OAuth legs
+(`as_metadata`, `token_endpoint`, which stay hard-public-only per PR-2b-0). For an internal
+host it resolves once and permits the leg **iff** every conjunct holds: the leg ∈
+`_RESOURCE_LEGS`, the scheme is `http`, an injected `internal_host_allowlist_store` is wired,
+and **every** resolved IP is an allow-listed exact IP that **also** re-passes
+`ip_passes_internal_floor` (the read-time floor catches a metadata/loopback entry that
+bypassed set-time validation). On a permit it returns the **pinned validated IP** (the
+fetch connects there) and emits the audit event; **any** miss / scheme violation / floor
+failure / store-unreachable is the **default-deny** `mcp_discovery_url_refused`
+(`refused_component="host_address"`). A public host returns `None` (no allow-list consult,
+no permit event) and proceeds. A drift-pin AST test gates the carve-out on
+`leg in _RESOURCE_LEGS` AND `scheme == "http"`.
+
+**The `prm_metadata` resolve-and-pin (Option-A url-rebind).** `server_url`/`well_known_prm`
+are IP-literal (override grammar / IP-derived) so their resolve-to-self pin is trivial; the
+`prm_metadata` URL comes from the pack's `WWW-Authenticate` header and may be a **hostname** —
+the one kernel-owned hostname leg. `_fetch_prm` captures the guard's returned pinned IP and
+**rebinds `url`** to `http://<pinned-ip>[:port]/...` (IPv6 bracketed) with the **original
+authority preserved as the `Host` header**, closing the TOCTOU rebinding window. The fetch's
+first positional arg stays `url` (the security AST detector that requires every `_http` fetch
+to be guarded is untouched — Option A); `timeout` is preserved; HTTP-only ⇒ no SNI/cert
+concern.
+
+**Resolve-per-use override on `MCPHost` (`protocol/mcp_host.py`, CC).** An injected
+`override_store` is consulted at the `server_url` read sites via async
+`_effective_server_url(*, tenant_id, server_id, manifest_url)` — a **post-construction**
+override change is observed on the next call, and a store-unreachable read **fails safe to
+the signed manifest value**. The **`list_tools` cache key includes the effective URL**
+(`(tenant_id, server_id, manifest_scopes, effective_url)`) so a changed override is a cache
+**miss** → re-fetch (the P1 stale-cache fix — a prior override-A-computed tool list never
+leaks for an override-B caller).
+
+**The audit event (DD-2).** When the guard permits a host **because of an allow-list hit**,
+it emits a **dedicated** `audit.mcp_allowlist_permitted` `AuditEvent` carrying `tenant_id` +
+`request_id` (top-level fields) and a payload of `{leg, host, resolved_ips}` — **no
+`pack_id`** is threaded through the authz stack (the pack is correlated via the MCPHost call
+path + request evidence; pack-identity threading is a deferred follow-up). `discovery_status`
+stays a pure **reachability** signal; the permit is **not** a new `discovery_status` value.
+The spec §9 evidence-requirements section is synced to this one spelling (no `pack`).
+
+**RBAC + Human-only write boundary.** A new family `MCPInternalAccessRBACScope`
+(`mcp.override.{read,write}` + `mcp.allowlist.{read,write}`) is value-disjoint from
+`mcp.tool.*` and `mcp.`-prefixed (pinned). The operator endpoints (`portal/api/mcp_config/`,
+CC) — PUT/DELETE/GET `…/mcp-overrides/{pack_id}` + PUT/DELETE/GET `…/mcp-allowlist[/{ip}]`
+under `/api/v1` — gate **both write surfaces** behind `RequireHumanActor` per the AGENTS.md
+"Per-tenant allow-list changes" / "Per-tenant … changes" human-only-decisions rule (a service
+token holding the write scope is refused at the dep chain, `actor_type=human` threaded onto
+the chain row); the GET reads permit service actors. Grammar is enforced in the store; the
+route maps `MCPConfigRejected.reason` → 422 and never validates or touches the DB itself.
+
+**Wiring + fail-closed posture.** `build_runtime` constructs both stores next to the overlay
+store (pure engine constructors) and holds them on `Runtime`; `build_mcp_host` threads
+`override_store` into the `MCPHost` and `internal_host_allowlist_store` into its
+`MCPAuthzClient` (the SAME instances; identity pinned by a wiring/integration test);
+`create_app` mounts the override + allow-list operator routers via a 3-state block
+(both stores → mount + flags True; partial → one fail-loud warning; neither → silent
+pack-only default). Fail-closed throughout: allow-list store unreachable → empty allow-list →
+default-deny; override store unreachable → the signed manifest `server_url`. Residual: an
+operator who allow-lists a **cross-tenant** ClusterIP is the audited **AS-9** residual
+(detectable/attributable via the set-time chain rows, not prevented); the attacker-driven
+cross-tenant case (AS-5) **is** closed by exact-IP matching + the pin. **No deployed-cluster
+claim — Proof 1b-2 is PR-2b-2.** Threat model: the merged spec
+`docs/superpowers/specs/2026-06-25-pr2b-mcp-internal-host-override-allowlist-design.md`; plan:
+`docs/superpowers/plans/2026-06-25-pr2b-1-mcp-override-allowlist.md`.
+
 ## References
 - [Model Context Protocol — 2026 roadmap](https://blog.modelcontextprotocol.io/posts/2026-mcp-roadmap/)
 - [MCP — Wikipedia](https://en.wikipedia.org/wiki/Model_Context_Protocol)
