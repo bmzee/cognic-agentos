@@ -91,7 +91,7 @@ Let an operator point a specific `(tenant, pack)` at a real **in-cluster MCP Ser
 ## 6. The override design (per-`(tenant,pack)` `server_url`)
 
 - **A new store** (config-overlay does not fit — §2). Per-`(tenant, pack)` row: `tenant_id`, `pack_id` (OD-6), `server_url_override` (string), `set_by_actor`, `set_at`, `last_request_id`. Decision-history-audited via `append_with_precondition`, mirroring `config_overlay/storage.py`.
-- **Internal target ⇒ `http://` IP literal.** A `server_url_override` whose host is non-public must be an **IP literal (the ClusterIP)** with scheme **`http`**; a hostname override targeting an internal host, or an internal `https://<ClusterIP>`, is **rejected at set-time** (closed-enum). This removes the `server_url`/`well_known_prm`-leg DNS entirely (the SDK connects to the IP — no rebinding) and the internal-TLS/SNI surface (a non-goal). A public-host override may be a hostname over HTTPS (it never touches the allow-list).
+- **Internal target ⇒ `http://` IP literal.** A `server_url_override` whose host is non-public must be an **IP literal (the ClusterIP)** with scheme **`http`**; a hostname override targeting an internal host, or an internal `https://<ClusterIP>`, is **rejected at set-time** (closed-enum). This removes the `server_url`/`well_known_prm`-leg DNS entirely (the SDK connects to the IP — no rebinding) and the internal-TLS/SNI surface (a non-goal). **PR-2b-1 scope (narrowed):** the override validator accepts **only** the `http://`-IP-literal form. A public-host override (a hostname over HTTPS, which would repoint a pack to a different *public* server and never touches the allow-list) is a **separate capability deferred to a follow-up**, out of PR-2b-1's internal-reachability scope — every non-`http://`-IP-literal override is rejected at set-time.
 - **Resolution point:** at server_url *use*, not registration. The `MCPServerEntry` read path consults the override store for `(tenant, pack)`; if present the resolved `server_url` is the override, else the manifest value. **The manifest object is never mutated** (A5).
 - **Override lifecycle / observation (OD-12).** The boot-built `MCPServerEntry` set is constructed once at lifespan start; PR-2b resolves the override at **server_url use** (each `list_tools`/`call_tool`, or a short-TTL per-(tenant,pack) cache) so a post-boot change is observed **without a restart** — required for Proof 1b-2.
 - **The override is subject to the same guard + allow-list** as any other `server_url` (AS-7).
@@ -143,7 +143,7 @@ With exact-IP entries + `http://`-IP-literal internal overrides, the rebinding s
 ## 9. Audit / evidence requirements
 
 - **Set-time (governance):** every override-set/clear and allow-list add/remove emits a hash-chained decision-history row via `append_with_precondition` — `tenant_id`, the pack/IP, before/after value, `actor_id` + `actor_type=human`, `request_id`, constant-derived ISO controls (proposal `A.5.31` + `A.6.2.4`). Chain-payload-is-evidence-snapshot. (This audit trail is what makes the AS-9 ownership residual *detectable/attributable*.)
-- **Run-time (carve-out provenance):** keep `discovery_status=auth_ready` as a pure **reachability** signal. When the guard permits a host **because of an allow-list hit**, emit a **dedicated** `mcp.allowlist.permitted` audit/decision-history event carrying `tenant_id`, `pack`, **leg**, **resolved/pinned IP**, `request_id`. (OD-8, resolved — not a new `discovery_status` value.)
+- **Run-time (carve-out provenance):** keep `discovery_status=auth_ready` as a pure **reachability** signal. When the guard permits a host **because of an allow-list hit**, emit a **dedicated** `audit.mcp_allowlist_permitted` audit event carrying `tenant_id`, **leg**, **resolved/pinned IP**, `request_id`, and the **host** — **no `pack_id`** (DD-2: threading pack identity through the authz stack is deferred to a targeted follow-up; the pack is correlated via the MCPHost call path + request evidence). (OD-8, resolved — not a new `discovery_status` value.)
 - **Mutually-exclusive log contract** (mirror `operator_routes.py:214-226`): one accepted log on green; one refused log on refusal; zero override/allow-list logs on a sibling-gate (RBAC/human-actor) refusal.
 
 ---
@@ -187,7 +187,7 @@ With exact-IP entries + `http://`-IP-literal internal overrides, the rebinding s
 - **OD-4 — host-match basis → RESOLVED:** match on the resolved IP against exact-IP entries; no FQDN entries.
 - **OD-5 — rebinding/pin → RESOLVED (§8):** `http://`-IP-literal internal overrides remove DNS on the SDK legs; the kernel-owned `prm_metadata` leg uses a named kernel-httpx resolve-and-pin (HTTP-only internal). No unscoped residual.
 - **OD-7 — `token_endpoint` in allow-list → RESOLVED:** never; hard-public-only (§7a(i)).
-- **OD-8 — runtime evidence → RESOLVED:** dedicated `mcp.allowlist.permitted` audit event (§9).
+- **OD-8 — runtime evidence → RESOLVED:** dedicated `audit.mcp_allowlist_permitted` audit event (§9, no `pack_id` per DD-2).
 - **OD-10 — in-cluster AS → RESOLVED:** public AS only (§7a). `as_metadata` is also public (convention-derived) → the carve-out is **three** resource legs, not four.
 - **OD-11 — issuer-origin binding → RESOLVED to MANDATORY** (§7a(ii)). *Open part is only sequencing* (below).
 

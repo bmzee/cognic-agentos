@@ -142,13 +142,17 @@ import logging
 import math
 import time
 from typing import Any, Literal, cast
-from urllib.parse import quote_plus, urlparse
+from urllib.parse import quote_plus, urlparse, urlunparse
 
 import httpx
 
 from cognic_agentos.core.audit import AuditEvent, AuditStore
 from cognic_agentos.core.config import _STRICT_PROFILES, Settings
 from cognic_agentos.core.decision_history import DecisionHistoryStore, DecisionRecord
+from cognic_agentos.core.mcp_config.storage import (
+    MCPInternalHostAllowlistStore,
+    ip_passes_internal_floor,
+)
 from cognic_agentos.db.adapters.protocols import SecretAdapter
 
 _LOG = logging.getLogger("cognic_agentos.protocol.mcp_authz")
@@ -212,6 +216,17 @@ _PRM_DISCOVERY_PATH_TO_LEG: dict[str, DiscoveryLeg] = {
     "endpoint-well-known": "well_known_prm",
     "root-well-known": "well_known_prm",
 }
+
+# PR-2b-1 (ADR-002): the per-tenant internal-host allow-list carve-out applies to
+# the THREE MCP-resource legs ONLY — the connection target is the (signed manifest
+# or operator-override) server_url and its PRM-discovery family. The two OAuth legs
+# (`as_metadata`, `token_endpoint`) are DELIBERATELY excluded: a compromised MCP
+# server must never be able to steer the OAuth/credential flow at an internal host
+# even when that IP is allow-listed. Drift in this set is a security regression
+# (an OAuth leg slipping into the carve-out) — pinned by the Task-2 structural test.
+_RESOURCE_LEGS: frozenset[DiscoveryLeg] = frozenset(
+    {"server_url", "prm_metadata", "well_known_prm"}
+)
 
 
 class MCPAuthzError(Exception):
@@ -412,6 +427,16 @@ def _decode_jwt_payload(token: str) -> dict[str, Any]:
         return {}
 
 
+def _maybe_ip(addr: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """Parse a resolved-address string into an :mod:`ipaddress` object, or
+    ``None`` when it is not a valid IP literal (so the caller skips it instead
+    of letting a malformed resolver entry crash the SSRF guard)."""
+    try:
+        return ipaddress.ip_address(addr)
+    except ValueError:
+        return None
+
+
 async def _resolve_host_addresses(host: str) -> list[str]:
     """Resolve a host to its IP-address strings for the SSRF guard. An IP
     literal resolves to itself (no DNS); a hostname is resolved via the event
@@ -454,6 +479,7 @@ class MCPAuthzClient:
         http_client: httpx.AsyncClient,
         audit_store: AuditStore,
         decision_history_store: DecisionHistoryStore,
+        internal_host_allowlist_store: MCPInternalHostAllowlistStore | None = None,
     ) -> None:
         # NO require_mcp() — admission-side per R3 P1 doctrine.
         # PRM discovery + token acquisition use httpx + OAuth/PRM URL
@@ -463,6 +489,10 @@ class MCPAuthzClient:
         self._http = http_client
         self._audit = audit_store
         self._dh = decision_history_store
+        # PR-2b-1: per-tenant exact-IP internal-host allow-list (DD-1 — the new DB
+        # store, NOT Vault). Optional: when unset (or unreachable), the SSRF guard
+        # default-denies every internal resource-leg host (fail-closed).
+        self._internal_host_allowlist_store = internal_host_allowlist_store
 
         # Token cache keyed by (server_url, granted-scopes-frozenset,
         # resource_indicator). The asyncio.Lock guards reads + writes
@@ -502,7 +532,9 @@ class MCPAuthzClient:
         if every path fails entirely (no auth surface advertised);
         ``mcp_oauth_request_timeout`` on timeout.
         """
-        await self._refuse_non_public_discovery_url(server_url, leg="server_url")
+        await self._refuse_non_public_discovery_url(
+            server_url, leg="server_url", tenant_id=tenant_id, request_id=request_id
+        )
         timeout = self._settings.mcp_oauth_request_timeout_s
 
         # Path 1: probe the MCP server itself, look for
@@ -540,19 +572,40 @@ class MCPAuthzClient:
             www_auth = probe.headers.get("WWW-Authenticate", "")
             prm_url = _parse_resource_metadata_url(www_auth)
             if prm_url is not None:
-                doc = await self._fetch_prm(prm_url, "www-authenticate", server_url, timeout)
+                doc = await self._fetch_prm(
+                    prm_url,
+                    "www-authenticate",
+                    server_url,
+                    timeout,
+                    tenant_id=tenant_id,
+                    request_id=request_id,
+                )
                 if doc is not None:
                     return doc
 
         # Path 2: endpoint-specific well-known fallback.
         endpoint_specific = _endpoint_specific_well_known_url(server_url)
-        doc = await self._fetch_prm(endpoint_specific, "endpoint-well-known", server_url, timeout)
+        doc = await self._fetch_prm(
+            endpoint_specific,
+            "endpoint-well-known",
+            server_url,
+            timeout,
+            tenant_id=tenant_id,
+            request_id=request_id,
+        )
         if doc is not None:
             return doc
 
         # Path 3: root well-known fallback.
         root = _root_well_known_url(server_url)
-        doc = await self._fetch_prm(root, "root-well-known", server_url, timeout)
+        doc = await self._fetch_prm(
+            root,
+            "root-well-known",
+            server_url,
+            timeout,
+            tenant_id=tenant_id,
+            request_id=request_id,
+        )
         if doc is not None:
             return doc
 
@@ -1040,19 +1093,36 @@ class MCPAuthzClient:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    async def _refuse_non_public_discovery_url(self, url: str, *, leg: DiscoveryLeg) -> None:
+    async def _refuse_non_public_discovery_url(
+        self, url: str, *, leg: DiscoveryLeg, tenant_id: str, request_id: str
+    ) -> str | None:
         """SSRF guard (remediation §4.1) for every MCP auth/discovery fetch leg.
 
         Reused by all five legs (server_url, prm_metadata, well_known_prm,
         as_metadata, token_endpoint — PR-2a). Always rejects non-http(s)
         schemes and host-less URLs. In the strict (stage/prod) profile
         additionally resolves the host and rejects private / loopback /
-        link-local / reserved / multicast / unspecified addresses. Rejection
-        payloads identify the refused component CLASS + the `leg`, and NEVER
-        echo the raw URL.
+        link-local / reserved / multicast / unspecified addresses.
 
-        Residual: resolve-then-fetch leaves a DNS-rebinding TOCTOU window;
-        full connect-time IP-pinning is a tracked follow-up, not claimed here.
+        PR-2b-1 carve-out: when a strict-profile refusal would otherwise fire
+        for a non-public host, consult the invoking tenant's exact-IP
+        internal-host allow-list — but ONLY on a resource leg
+        (``leg in _RESOURCE_LEGS``) over ``http`` with a store wired. The
+        carve-out permits IFF the allow-list is non-empty AND **every** resolved
+        IP is both in the allow-list AND passes :func:`ip_passes_internal_floor`
+        at guard time (defence-in-depth against a corrupted allow-list entry).
+        A permit emits exactly one ``audit.mcp_allowlist_permitted`` event and
+        returns the **pinned validated IP** (``str(resolved[0])``) for the
+        caller (Task 3 connects to it). OAuth legs + ``https`` are never carved
+        out. A public host returns ``None`` (no consult, no pin); every other
+        path raises ``mcp_discovery_url_refused``.
+
+        Returns ``str`` (pinned IP) on an allow-listed carve-out, ``None`` for a
+        public / non-strict host, and raises :class:`MCPAuthzError` on a refusal.
+
+        Residual: resolve-then-fetch leaves a DNS-rebinding TOCTOU window on the
+        non-pinned legs; the resource-leg pin closes it for the carve-out path
+        (Task 3 consumes the returned IP).
         """
         if not isinstance(url, str):
             raise MCPAuthzError(
@@ -1078,18 +1148,17 @@ class MCPAuthzClient:
                 leg=leg,
             )
         if self._settings.runtime_profile not in _STRICT_PROFILES:
-            return
+            return None
         try:
             addresses = await _resolve_host_addresses(host)
         except OSError:
             # Unresolvable host is not an SSRF vector; the subsequent fetch
             # fails at the transport layer with a closed-enum reason.
-            return
-        for addr in addresses:
-            try:
-                ip = ipaddress.ip_address(addr)
-            except ValueError:
-                continue
+            return None
+        resolved = [ip for addr in addresses if (ip := _maybe_ip(addr)) is not None]
+        non_public = [
+            ip
+            for ip in resolved
             if (
                 ip.is_private
                 or ip.is_loopback
@@ -1097,13 +1166,82 @@ class MCPAuthzClient:
                 or ip.is_reserved
                 or ip.is_multicast
                 or ip.is_unspecified
+            )
+        ]
+        if not non_public:
+            # All-public host: no carve-out, no pin — proceed to the fetch.
+            return None
+        # PR-2b-1 carve-out — resource legs only, http only, store wired.
+        if (
+            leg in _RESOURCE_LEGS
+            and parsed.scheme == "http"
+            and self._internal_host_allowlist_store is not None
+        ):
+            allowlist = await self._load_internal_host_allowlist(tenant_id)
+            # Permit IFF the allow-list is non-empty AND every resolved IP is
+            # allow-listed AND passes the internal floor at guard time (the
+            # re-check catches a corrupted entry that bypassed set-time grammar).
+            if allowlist and all(
+                str(ip) in allowlist and ip_passes_internal_floor(ip) for ip in resolved
             ):
-                raise MCPAuthzError(
-                    "mcp_discovery_url_refused",
-                    "discovery URL host resolves to a non-public address",
-                    refused_component="host_address",
+                resolved_ips = [str(ip) for ip in resolved]
+                await self._emit_allowlist_permitted(
+                    tenant_id=tenant_id,
                     leg=leg,
+                    request_id=request_id,
+                    host=host,
+                    resolved_ips=resolved_ips,
                 )
+                # Pinned validated IP — Task 3's _fetch_prm connects here.
+                return str(resolved[0])
+        raise MCPAuthzError(
+            "mcp_discovery_url_refused",
+            "discovery URL host resolves to a non-public address",
+            refused_component="host_address",
+            leg=leg,
+        )
+
+    async def _load_internal_host_allowlist(self, tenant_id: str) -> frozenset[str]:
+        """Resolve the per-tenant exact-IP internal-host allow-list from the
+        Task-1 DB store (DD-1 — the store, NOT Vault). Fail-closed: an unset
+        store OR any store failure (DB unreachable, schema drift, etc.) yields
+        the EMPTY set, so the guard default-denies. ``CancelledError`` propagates
+        (task cancellation is not a deny signal)."""
+        store = self._internal_host_allowlist_store
+        if store is None:
+            return frozenset()
+        try:
+            return await store.get_allowlist(tenant_id=tenant_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return frozenset()
+
+    async def _emit_allowlist_permitted(
+        self,
+        *,
+        tenant_id: str,
+        leg: DiscoveryLeg,
+        request_id: str,
+        host: str,
+        resolved_ips: list[str],
+    ) -> None:
+        """Emit the ``audit.mcp_allowlist_permitted`` evidence event (DD-2) for an
+        allow-listed internal carve-out. Carries the leg, the original host, and
+        the resolved/pinned IPs — NEVER a ``pack_id`` (pack is correlated via the
+        MCPHost call path + request evidence) and NEVER any secret-bearing data."""
+        await self._audit.append(
+            AuditEvent(
+                event_type="audit.mcp_allowlist_permitted",
+                request_id=request_id,
+                tenant_id=tenant_id,
+                payload={
+                    "leg": leg,
+                    "host": host,
+                    "resolved_ips": resolved_ips,
+                },
+            )
+        )
 
     def _refuse_token_endpoint_origin_mismatch(
         self, token_endpoint: str, *, as_issuer: str
@@ -1136,6 +1274,9 @@ class MCPAuthzClient:
         discovery_path: str,
         server_url: str,
         timeout: float,
+        *,
+        tenant_id: str,
+        request_id: str,
     ) -> ResourceMetadata | None:
         """Fetch + parse a PRM document from a single URL.
 
@@ -1143,12 +1284,38 @@ class MCPAuthzClient:
         the next discovery path); raises ``mcp_oauth_request_timeout``
         on timeout; raises ``mcp_prm_invalid`` on malformed JSON or
         missing required fields.
+
+        PR-2b-1: ``tenant_id`` / ``request_id`` are threaded into the SSRF guard
+        so a ``prm_metadata`` / ``well_known_prm`` resource leg can hit the
+        per-tenant internal-host allow-list carve-out. The guard's returned
+        pinned IP is intentionally ignored at Task 2 — Task 3 consumes it.
         """
-        await self._refuse_non_public_discovery_url(
-            url, leg=_PRM_DISCOVERY_PATH_TO_LEG[discovery_path]
+        pinned_ip = await self._refuse_non_public_discovery_url(
+            url,
+            leg=_PRM_DISCOVERY_PATH_TO_LEG[discovery_path],
+            tenant_id=tenant_id,
+            request_id=request_id,
         )
         try:
-            resp = await self._http.get(url, timeout=timeout)
+            if pinned_ip is not None:
+                # PR-2b-1 (Task 3) resolve-and-pin: the guard validated `url`'s host
+                # and returned the allow-listed internal IP. Connect to THAT IP — not
+                # a fresh re-resolution — closing the DNS-rebinding TOCTOU on the
+                # hostname `prm_metadata` leg (spec §8). HTTP-only (the carve-out never
+                # fires on https), so no SNI/cert concern. `url` is REBOUND (NOT a
+                # separate `pinned_url`) so the GET's first positional arg stays `url`
+                # — keeping the `test_mcp_authz_guarded_fetch.py` AST drift detector
+                # (fetch-arg must be ast.dump-identical to the guard's) green + untouched.
+                parsed = urlparse(url)
+                port = parsed.port or 80
+                netloc_ip = f"[{pinned_ip}]" if ":" in pinned_ip else pinned_ip  # bracket IPv6
+                url = urlunparse(parsed._replace(netloc=f"{netloc_ip}:{port}"))
+                host_header = parsed.hostname or ""  # original authority, userinfo stripped
+                if parsed.port is not None:
+                    host_header = f"{host_header}:{parsed.port}"
+                resp = await self._http.get(url, headers={"Host": host_header}, timeout=timeout)
+            else:
+                resp = await self._http.get(url, timeout=timeout)
         except httpx.TimeoutException as exc:
             raise MCPAuthzError(
                 "mcp_oauth_request_timeout",
@@ -1420,7 +1587,11 @@ class MCPAuthzClient:
         timeout = self._settings.mcp_oauth_request_timeout_s
         as_metadata_url = f"{as_issuer.rstrip('/')}/.well-known/oauth-authorization-server"
         # Leg 4 (PR-2a): SSRF-guard the AS-metadata discovery URL before the GET.
-        await self._refuse_non_public_discovery_url(as_metadata_url, leg="as_metadata")
+        # PR-2b-1: an OAuth leg is NEVER eligible for the internal-host carve-out
+        # (leg ∉ _RESOURCE_LEGS) — an internal AS-metadata host still refuses.
+        await self._refuse_non_public_discovery_url(
+            as_metadata_url, leg="as_metadata", tenant_id=tenant_id, request_id=request_id
+        )
         try:
             discovery_resp = await self._http.get(as_metadata_url, timeout=timeout)
         except httpx.TimeoutException as exc:
@@ -1461,8 +1632,11 @@ class MCPAuthzClient:
             )
         # Leg 5 (PR-2a): SSRF-guard the token_endpoint BEFORE any credential
         # material (body / headers / Basic-auth) is built — the secret is never
-        # assembled into a request for an internal URL.
-        await self._refuse_non_public_discovery_url(token_endpoint, leg="token_endpoint")
+        # assembled into a request for an internal URL. PR-2b-1: an OAuth leg is
+        # NEVER eligible for the internal-host carve-out (leg ∉ _RESOURCE_LEGS).
+        await self._refuse_non_public_discovery_url(
+            token_endpoint, leg="token_endpoint", tenant_id=tenant_id, request_id=request_id
+        )
 
         # PR-2b-0: bind the token_endpoint to the selected AS issuer's origin — a
         # compromised-but-allow-listed AS must not redirect the client_secret to an

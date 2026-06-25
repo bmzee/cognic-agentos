@@ -68,6 +68,10 @@ from cognic_agentos.observability import (
 from cognic_agentos.packs.storage import PackRecordStore
 from cognic_agentos.portal.api.approvals.routes import build_approval_routes
 from cognic_agentos.portal.api.config_overlay.routes import build_config_overlay_routes
+from cognic_agentos.portal.api.mcp_config.routes import (
+    build_mcp_allowlist_routes,
+    build_mcp_override_routes,
+)
 from cognic_agentos.portal.api.models import build_models_router
 from cognic_agentos.portal.api.packs import build_packs_router
 from cognic_agentos.portal.api.system_routes import build_system_router
@@ -120,6 +124,16 @@ if TYPE_CHECKING:
     # portal import graph for callers that don't wire emergency controls.
     from cognic_agentos.core.emergency.kill_switches import KillSwitchEngine
     from cognic_agentos.core.emergency.quotas import QuotaEngine
+
+    # PR-2b-1 (ADR-002 amendment): type-only refs for the create_app MCP-config
+    # kwargs. The route factories ``build_mcp_override_routes`` /
+    # ``build_mcp_allowlist_routes`` are imported at runtime above (they pull only
+    # already-imported core/rbac deps); the two store types are annotation-only
+    # here, mirroring the config-overlay pattern.
+    from cognic_agentos.core.mcp_config.storage import (
+        MCPInternalHostAllowlistStore,
+        MCPServerUrlOverrideStore,
+    )
     from cognic_agentos.core.memory.api import MemoryApiFactory
     from cognic_agentos.core.memory.reaper import MemoryTombstoneReaper
     from cognic_agentos.core.policy.engine import OPAEngine
@@ -294,6 +308,15 @@ def create_app(
     # (build_runtime) constructs them; a bank-overlay caller threads them here.
     config_overlay_store: TenantConfigOverlayStore | None = None,
     config_overlay_resolver: TenantConfigResolver | None = None,
+    # PR-2b-1 (ADR-002 amendment): optional MCP operator override + internal-host
+    # allow-list router deps. When BOTH are wired, create_app mounts the override
+    # + allow-list operator routers under /api/v1 + sets
+    # app.state.mcp_override_router_mounted / app.state.mcp_allowlist_router_mounted.
+    # Same opt-in None-default injection-seam pattern as config_overlay_store/
+    # _resolver — build_runtime constructs them as a pair (next to the overlay
+    # store); a bank-overlay caller threads them here.
+    mcp_override_store: MCPServerUrlOverrideStore | None = None,
+    mcp_internal_host_allowlist_store: MCPInternalHostAllowlistStore | None = None,
     # ADR-014 (Sprint 13.5b1): optional approval-router deps. When BOTH are
     # wired, create_app mounts the approval router (queue/detail/grant/
     # grant-second/deny) + sets app.state.approval_router_mounted. Same opt-in
@@ -1305,6 +1328,53 @@ def create_app(
                     "composition root build_runtime constructs them as a "
                     "pair, so a partial config indicates a hand-wired caller "
                     "missing one half."
+                ),
+            },
+        )
+
+    # ──────────────────────────────────────────────────────────────────
+    # PR-2b-1 (ADR-002 amendment) — MCP operator server_url override +
+    # per-tenant internal-host allow-list router mount.
+    #
+    # 3-state mount mirroring the config-overlay block above, gated on the
+    # PAIR of stores (build_runtime constructs them together, next to the
+    # overlay store): BOTH supplied -> mount the override + allow-list
+    # operator routers under ``/api/v1`` + set BOTH introspection flags;
+    # partial config (exactly one) -> a single structured fail-loud warning
+    # so operators see the misconfig at startup + both flags stay False;
+    # neither -> no mount, both flags False, SILENT (pack-only deployments
+    # without an internal MCP Service are legitimate — no warning). The
+    # routes read the actor binder from ``app.state`` at REQUEST time (the
+    # KernelDefaultActorBinder fails loud there), so a binder-less mount
+    # surfaces a clear 500, not a confusing 404 — same posture as the
+    # overlay block. Both write surfaces are additionally human-only via the
+    # routers' own RequireHumanActor sub-dependency.
+    # ──────────────────────────────────────────────────────────────────
+    app.state.mcp_override_router_mounted = False
+    app.state.mcp_allowlist_router_mounted = False
+    if mcp_override_store is not None and mcp_internal_host_allowlist_store is not None:
+        app.include_router(
+            build_mcp_override_routes(store=mcp_override_store),
+            prefix="/api/v1",
+        )
+        app.include_router(
+            build_mcp_allowlist_routes(store=mcp_internal_host_allowlist_store),
+            prefix="/api/v1",
+        )
+        app.state.mcp_override_router_mounted = True
+        app.state.mcp_allowlist_router_mounted = True
+    elif mcp_override_store is not None or mcp_internal_host_allowlist_store is not None:
+        logger.warning(
+            "portal.mcp_config_router_unmounted_partial_config",
+            extra={
+                "reason": "mcp_override_store_and_allowlist_store_both_required",
+                "remediation": (
+                    "create_app(mcp_override_store=<store>, "
+                    "mcp_internal_host_allowlist_store=<store>) wires the MCP "
+                    "operator override + internal-host allow-list routers; BOTH "
+                    "are required. The composition root build_runtime constructs "
+                    "them as a pair, so a partial config indicates a hand-wired "
+                    "caller missing one half."
                 ),
             },
         )

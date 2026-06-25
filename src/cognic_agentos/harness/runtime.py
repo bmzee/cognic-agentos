@@ -21,6 +21,10 @@ from cognic_agentos.core.audit import AuditStore
 from cognic_agentos.core.config_overlay.resolver import TenantConfigResolver
 from cognic_agentos.core.config_overlay.storage import TenantConfigOverlayStore
 from cognic_agentos.core.decision_history import DecisionHistoryStore
+from cognic_agentos.core.mcp_config.storage import (
+    MCPInternalHostAllowlistStore,
+    MCPServerUrlOverrideStore,
+)
 from cognic_agentos.core.policy.engine import OPAEngine
 from cognic_agentos.core.sla import SLAPolicy
 from cognic_agentos.db.adapters.secret_resolution import resolve_secret_field
@@ -57,6 +61,15 @@ class Runtime:
     # while the portal config-overlay router consumes the same store + resolver.
     config_overlay_store: TenantConfigOverlayStore
     config_overlay_resolver: TenantConfigResolver
+    # PR-2b-1 (ADR-002 amendment) — the operator MCP server_url-override store +
+    # the per-tenant exact-IP internal-host allow-list store. Built
+    # unconditionally next to the config-overlay store (both are pure relational-
+    # engine constructors, no I/O). The override store is threaded into the MCP
+    # host (resolve-per-use server_url) and the allow-list store into the
+    # MCPAuthzClient (the SSRF-guard internal-host carve-out) by build_mcp_host;
+    # the portal operator routers consume the SAME instances via create_app.
+    mcp_override_store: MCPServerUrlOverrideStore
+    mcp_internal_host_allowlist_store: MCPInternalHostAllowlistStore
     # ADR-014 (Sprint 13.5b1) — built unconditionally (mirrors the config-overlay
     # posture; approval needs only the relational engine). The portal approval
     # router consumes both; 13.5b2's MCP-host seam reuses the SAME engine instance.
@@ -113,6 +126,15 @@ async def build_runtime(settings: Settings, adapters: Adapters) -> Runtime:
         audit=audit_store,
         throttle_s=settings.config_overlay_invalid_at_read_throttle_s,
     )
+
+    # --- PR-2b-1 (ADR-002 amendment) MCP override + internal-host allow-list ---
+    # Pure relational-engine constructors (no I/O), built next to the overlay
+    # store and BEFORE the leak-prone http_client. The SAME instances are
+    # threaded into the MCP host (override_store) + the MCPAuthzClient
+    # (internal_host_allowlist_store) by build_mcp_host, and consumed by the
+    # portal operator routers via create_app.
+    mcp_override_store = MCPServerUrlOverrideStore(engine)
+    mcp_internal_host_allowlist_store = MCPInternalHostAllowlistStore(engine)
 
     # --- ADR-014 (Sprint 13.5b1) approval store + policy + engine ---
     # Built unconditionally (mirrors the config-overlay posture — approval needs
@@ -384,6 +406,8 @@ async def build_runtime(settings: Settings, adapters: Adapters) -> Runtime:
         memory_policy=memory_policy,
         config_overlay_store=overlay_store,
         config_overlay_resolver=overlay_resolver,
+        mcp_override_store=mcp_override_store,
+        mcp_internal_host_allowlist_store=mcp_internal_host_allowlist_store,
         approval_store=approval_store,
         approval_engine=approval_engine,
         kill_switch_engine=kill_switch_engine,

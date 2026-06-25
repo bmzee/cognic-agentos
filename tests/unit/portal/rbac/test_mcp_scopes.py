@@ -13,6 +13,7 @@ from cognic_agentos.portal.rbac.scopes import (
     ConfigOverlayRBACScope,
     EmergencyRBACScope,
     EvalRBACScope,
+    MCPInternalAccessRBACScope,
     MCPRBACScope,
     MemoryRBACScope,
     ModelRBACScope,
@@ -48,6 +49,12 @@ def test_mcp_scope_namespace_disjoint_from_every_other_family() -> None:
         ConfigOverlayRBACScope,
         ToolApprovalRBACScope,
         RunRBACScope,
+        # PR-2b-1 Task 5 — the new MCP operator-config family. SHARES the
+        # ``mcp.`` prefix with this ``mcp.tool.*`` family but is VALUE-disjoint
+        # (DD-3). Included here so the mcp.tool.* disjointness stays covered
+        # against it; the assertion below is value-based so the shared prefix is
+        # fine.
+        MCPInternalAccessRBACScope,
     ):
         others |= set(get_args(fam))
     assert mcp.isdisjoint(others)

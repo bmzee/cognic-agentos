@@ -125,6 +125,7 @@ from cognic_agentos.core.audit import AuditEvent, AuditStore
 from cognic_agentos.core.canonical import canonical_bytes
 from cognic_agentos.core.config import Settings
 from cognic_agentos.core.decision_history import DecisionHistoryStore, DecisionRecord
+from cognic_agentos.core.mcp_config.storage import MCPServerUrlOverrideStore
 from cognic_agentos.protocol import require_mcp
 from cognic_agentos.protocol.discovery_status import (
     DiscoveryStatus,
@@ -671,6 +672,7 @@ class MCPHost:
         settings: Settings,
         approval_engine: ApprovalEngine | None = None,
         discovery_status_recorder: DiscoveryStatusRecorder | None = None,
+        override_store: MCPServerUrlOverrideStore | None = None,
     ) -> None:
         # ``approval_engine`` (Sprint 13.5b2, ADR-014): None (default) keeps
         # the Sprint-5 transitional gate byte-for-byte (engine-absent
@@ -770,11 +772,23 @@ class MCPHost:
         # composition root threads the same instance attached to app.state for the
         # /system/plugins read surface.
         self._discovery_status_recorder = discovery_status_recorder
+        # PR-2b-1 (ADR-002, spec §6 / OD-12): resolve-per-use operator
+        # ``server_url`` override. None (default) keeps the runtime path
+        # byte-for-byte (manifest ``server_url`` only — no store consult);
+        # wired, :meth:`_effective_server_url` resolves the per-(tenant, pack)
+        # override at EACH ``server_url`` use (every list_tools / call_tool) so a
+        # post-boot operator change is observed WITHOUT a host restart. A store
+        # error fails SAFE to the signed manifest URL. The override is runtime
+        # config ONLY — :class:`MCPServerEntry` / the manifest is NEVER mutated.
+        self._override_store = override_store
         # R1 P2 #2: cache key includes tenant_id + scopes (NOT just
         # server_id). Cross-tenant cache leak would let tenant B
         # receive tenant A's already-cleared tool catalogue without
-        # tenant B's per-tenant AS allow-list ever firing.
-        self._list_tools_cache: dict[tuple[str, str, tuple[str, ...]], _CachedToolList] = {}
+        # tenant B's per-tenant AS allow-list ever firing. PR-2b-1 adds the
+        # effective ``server_url`` as the 4th key component so a changed
+        # operator override is a cache MISS (re-fetch) rather than a stale
+        # tool list cached against the prior URL.
+        self._list_tools_cache: dict[tuple[str, str, tuple[str, ...], str], _CachedToolList] = {}
         self._list_tools_cache_lock = asyncio.Lock()
 
     @property
@@ -799,6 +813,36 @@ class MCPHost:
             self._discovery_status_recorder.record(
                 tenant_id=tenant_id, pack_id=server_id, status=status
             )
+
+    async def _effective_server_url(
+        self, *, tenant_id: str, server_id: str, manifest_url: str
+    ) -> str:
+        """Resolve the effective MCP ``server_url`` for THIS invocation.
+
+        PR-2b-1 (ADR-002, spec §6 / OD-12): an operator may point a
+        ``(tenant, pack)`` at a real in-cluster MCP Service via an audited
+        per-``(tenant, pack)`` ``server_url`` override. Resolved per USE (each
+        ``list_tools`` / ``call_tool``) — NOT cached at construction — so a
+        post-boot override change is observed without a host restart.
+
+        Fail-SAFE: if no override store is wired (default) OR the store read
+        raises, fall back to the SIGNED manifest URL (``manifest_url``), never
+        to a cached / arbitrary host. The override is runtime config only; the
+        signed :class:`MCPServerEntry` / manifest is NEVER mutated by this read.
+
+        ``server_id`` is the registry ``distribution_name`` ==
+        :attr:`MCPServerEntry.server_id` == the override store's ``pack_id``.
+        """
+        if self._override_store is None:
+            return manifest_url
+        try:
+            override = await self._override_store.get(tenant_id=tenant_id, pack_id=server_id)
+        except Exception:
+            # Fail-safe to the signed manifest value (spec §10 — override store
+            # unreachable → manifest ``server_url``). ``asyncio.CancelledError``
+            # is a ``BaseException``, so task teardown still propagates.
+            return manifest_url
+        return override or manifest_url
 
     # --- discovery ---------------------------------------------------------
 
@@ -845,7 +889,16 @@ class MCPHost:
         the result.
         """
         entry = self._lookup_server(server_id)
-        cache_key = (tenant_id, server_id, entry.manifest_scopes)
+        # PR-2b-1: resolve the effective server_url (operator override or signed
+        # manifest) BEFORE the cache lookup so (a) a changed override is observed
+        # on the next call (resolve-per-use) and (b) it is part of the cache key
+        # — otherwise a changed override would return the STALE tool list cached
+        # against the prior URL (the P1 fix). Used at every server_url read site
+        # in this method (acquire / open / pagination-error evidence).
+        effective_url = await self._effective_server_url(
+            tenant_id=tenant_id, server_id=server_id, manifest_url=entry.server_url
+        )
+        cache_key = (tenant_id, server_id, entry.manifest_scopes, effective_url)
 
         async with self._list_tools_cache_lock:
             cached = self._list_tools_cache.get(cache_key)
@@ -871,7 +924,7 @@ class MCPHost:
         # list_tools stays fail-closed).
         try:
             token = await self._authz.acquire_token(
-                server_url=entry.server_url,
+                server_url=effective_url,
                 manifest_scopes=entry.manifest_scopes,
                 request_id=request_id,
                 tenant_id=tenant_id,
@@ -886,7 +939,7 @@ class MCPHost:
         self._record_discovery_status(
             tenant_id=tenant_id, server_id=entry.server_id, status="auth_ready"
         )
-        session = await transport.open_session(server_url=entry.server_url, token=token)
+        session = await transport.open_session(server_url=effective_url, token=token)
         try:
             # R3 P1: SDK ``ClientSession.list_tools`` returns
             # :class:`mcp.types.ListToolsResult` (Pydantic), NOT a
@@ -931,7 +984,7 @@ class MCPHost:
                             "list_tools pagination cycle detected — "
                             "server returned a cursor it had already "
                             "returned",
-                            server_url=entry.server_url,
+                            server_url=effective_url,
                             pagination_failure="cycle_detected",
                             cursor_repeated_fingerprint=_fingerprint_cursor(cursor),
                             cursor_repeated_length=len(cursor),
@@ -956,7 +1009,7 @@ class MCPHost:
                     f"list_tools pagination exceeded the "
                     f"{_MAX_LIST_TOOLS_PAGES}-page cap without the "
                     f"server signalling exhaustion",
-                    server_url=entry.server_url,
+                    server_url=effective_url,
                     pagination_failure="cap_exceeded",
                     pages_walked=_MAX_LIST_TOOLS_PAGES,
                 )
@@ -1665,6 +1718,17 @@ class MCPHost:
             token never reached the server.
         """
         transport = self._resolve_transport(entry)
+        # PR-2b-1: resolve the effective server_url ONCE per invocation (operator
+        # override or signed manifest) and use it at EVERY server_url read site
+        # below — acquire, open, invalidate, reacquire, the authorisation-lost
+        # evidence payload, and step-up — so a single call never splits traffic
+        # between the override and the manifest URL. Resolve-per-use: a post-boot
+        # override change is observed on the next call_tool. Fail-safe to the
+        # signed manifest URL on a store error. The ``_attempt`` closure below
+        # captures this binding.
+        effective_url = await self._effective_server_url(
+            tenant_id=tenant_id, server_id=entry.server_id, manifest_url=entry.server_url
+        )
 
         async def _attempt(token: Token) -> tuple[Any, MCPSession, Token]:
             """Open session, send, close (best-effort). Returns the
@@ -1681,7 +1745,7 @@ class MCPHost:
             the dispatched pair at None+None (also truthful: no
             dispatch happened).
             """
-            session = await transport.open_session(server_url=entry.server_url, token=token)
+            session = await transport.open_session(server_url=effective_url, token=token)
             try:
                 # R2 P2 — update DISPATCHED state immediately before
                 # send. Open succeeded but the bytes haven't actually
@@ -1718,7 +1782,7 @@ class MCPHost:
         # refused / unreachable and STILL re-raises (call_tool stays fail-closed).
         try:
             token = await self._authz.acquire_token(
-                server_url=entry.server_url,
+                server_url=effective_url,
                 manifest_scopes=entry.manifest_scopes,
                 request_id=request_id,
                 tenant_id=tenant_id,
@@ -1759,14 +1823,14 @@ class MCPHost:
                 # first send, so the outer handler classifies the
                 # reacquire failure as ERRORED (with the first
                 # send's session context).
-                await self._authz.invalidate_cached_token(server_url=entry.server_url)
+                await self._authz.invalidate_cached_token(server_url=effective_url)
                 # PR-1 Slice 2 — the REACQUIRE is the third OAuth-probe site; record
                 # its outcome too. SUCCESS → auth_ready; a reacquire MCPAuthzError
                 # (e.g. mcp_oauth_request_timeout) maps to refused / unreachable and
                 # STILL re-raises (overwriting the initial auth_ready).
                 try:
                     fresh_token = await self._authz.acquire_token(
-                        server_url=entry.server_url,
+                        server_url=effective_url,
                         manifest_scopes=entry.manifest_scopes,
                         request_id=request_id,
                         tenant_id=tenant_id,
@@ -1792,7 +1856,7 @@ class MCPHost:
                             "MCP server rejected both the cached and "
                             "freshly-acquired tokens with 401/403; "
                             "cannot recover without operator action",
-                            server_url=entry.server_url,
+                            server_url=effective_url,
                             request_id=request_id,
                             tenant_id=tenant_id,
                         ) from second_error
@@ -1809,7 +1873,7 @@ class MCPHost:
                 # the authz client).
                 try:
                     stepped_up = await self._authz.step_up_token(
-                        server_url=entry.server_url,
+                        server_url=effective_url,
                         current_token=token,
                         requested_scope=signal_payload["requested_scope"],
                         manifest_scopes=entry.manifest_scopes,

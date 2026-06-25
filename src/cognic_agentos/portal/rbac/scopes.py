@@ -364,6 +364,60 @@ MCPRBACScope = Literal["mcp.tool.list", "mcp.tool.invoke"]
 MCP_SCOPES: frozenset[MCPRBACScope] = frozenset({"mcp.tool.list", "mcp.tool.invoke"})
 
 
+#: PR-2b-1 Task 5 (ADR-002 + DD-3) — MCP **operator-config** RBAC family. A
+#: SEPARATE family from :data:`MCPRBACScope` (``mcp.tool.*``) — NOT mixed into
+#: it: operator-config scopes (override + internal-host allow-list) are a
+#: distinct privilege surface from tool-invoke scopes. 4 values in the ``mcp.*``
+#: namespace, consumed by the operator override + allow-list write/read
+#: endpoints (`portal/api/mcp_config/routes.py`, Task 6):
+#:
+#:   - ``mcp.override.read``   ← GET the per-(tenant,pack) ``server_url``
+#:     override. Service actors permitted (read-only inspection).
+#:   - ``mcp.override.write``  ← PUT/DELETE the override. The mutation surface;
+#:     ALSO gated by :class:`RequireHumanActor` per the AGENTS.md
+#:     "Per-tenant allow-list changes" human-only-decisions rule.
+#:   - ``mcp.allowlist.read``  ← GET the per-tenant internal-host allow-list.
+#:     Service actors permitted.
+#:   - ``mcp.allowlist.write`` ← PUT(add)/DELETE(remove) an allow-list IP. The
+#:     mutation surface; ALSO gated by :class:`RequireHumanActor`.
+#:
+#: **Value-disjoint from every other family** including the sibling
+#: :data:`MCPRBACScope`. **Critical subtlety (DD-3):** this family SHARES the
+#: ``mcp.`` prefix with ``mcp.tool.*``, so the two ``mcp.*`` families are
+#: **value-disjoint, NOT prefix-disjoint** — a prefix-based disjointness check
+#: would be wrong. Overlap would create a wire-protocol ambiguity where a single
+#: 403 ``scope_not_held`` denial reason could match multiple scope families.
+#: Pinned by the value-disjointness tests in
+#: :file:`tests/unit/portal/rbac/test_mcp_internal_access_scopes.py` (+ the
+#: extended ``others`` loop in
+#: :file:`tests/unit/portal/rbac/test_mcp_scopes.py`).
+#:
+#: Wire-protocol contract — every 403 ``scope_not_held`` denial body on the MCP
+#: operator-config surface carries one of these as ``required_scope``. ANY drift
+#: here is a wire-protocol break.
+#:
+#: Style note: plain ``= Literal[...]`` (no ``TypeAlias`` annotation) to match
+#: the repo convention at ``packs/lifecycle.py:111`` + the families above.
+MCPInternalAccessRBACScope = Literal[
+    "mcp.override.read",
+    "mcp.override.write",
+    "mcp.allowlist.read",
+    "mcp.allowlist.write",
+]
+
+#: All 4 MCP operator-config scopes as a frozenset (1:1 with
+#: :data:`MCPInternalAccessRBACScope`) for bank-overlay binders. Pinned by
+#: :file:`tests/unit/portal/rbac/test_mcp_internal_access_scopes.py`.
+MCP_INTERNAL_ACCESS_SCOPES: frozenset[MCPInternalAccessRBACScope] = frozenset(
+    {
+        "mcp.override.read",
+        "mcp.override.write",
+        "mcp.allowlist.read",
+        "mcp.allowlist.write",
+    }
+)
+
+
 #: Sub-agent portal-trigger scope (ADR-005, "Fork B" portal seam). Spawning is
 #: operational orchestration, not a Human-only decision; a high-risk child still
 #: pends for a human downstream at sandbox cold-create admission.

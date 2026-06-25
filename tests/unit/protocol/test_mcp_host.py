@@ -81,6 +81,7 @@ import pytest
 from cognic_agentos.core.audit import AuditStore
 from cognic_agentos.core.config import build_settings_without_env_file
 from cognic_agentos.core.decision_history import DecisionHistoryStore
+from cognic_agentos.core.mcp_config.storage import MCPServerUrlOverrideStore
 from cognic_agentos.protocol import MCPNotAvailableError, mcp_host
 from cognic_agentos.protocol.discovery_status import InMemoryDiscoveryStatusRecorder
 from cognic_agentos.protocol.mcp_authz import AuthzReason, MCPAuthzClient, MCPAuthzError, Token
@@ -2761,3 +2762,357 @@ def test_mcp_host_has_no_refresh_token_call_path() -> None:
     assert refresh_calls == [], (
         "MCPHost now calls refresh_token — revisit PR-2a §3.3 discovery_status recording"
     )
+
+
+# ---------------------------------------------------------------------------
+# PR-2b-1 (ADR-002, spec §6 / OD-12) — resolve-per-use operator server_url
+# override on MCPHost.
+#
+# The MCPServerEntry set is frozen at boot (harness/mcp_host.py), so without
+# this seam a post-boot per-(tenant, pack) server_url override would never be
+# observed. _effective_server_url resolves the override at EACH server_url use
+# (every list_tools / call_tool) — NOT at construction — so a post-boot change
+# is observed without a host restart. A store error fails SAFE to the signed
+# manifest URL (never a cached / arbitrary host). The list_tools cache key folds
+# in the effective URL so a changed override is a cache MISS (the P1 stale-tool-
+# list fix). The registry / manifest is NEVER mutated — the override is runtime
+# config only.
+# ---------------------------------------------------------------------------
+
+_OVERRIDE_URL_A = "http://10.42.0.7:8080/mcp"
+_OVERRIDE_URL_B = "http://10.42.0.9:8080/mcp"
+
+
+def _override_store_returning(*values: Any) -> MagicMock:
+    """An ``MCPServerUrlOverrideStore`` stub whose async ``get`` returns the
+    given value(s). A single value is returned on every call; multiple values
+    are a per-call ``side_effect`` sequence (resolve-per-use / stale-cache)."""
+    store = MagicMock(spec=MCPServerUrlOverrideStore)
+    if len(values) == 1:
+        store.get = AsyncMock(return_value=values[0])
+    else:
+        store.get = AsyncMock(side_effect=list(values))
+    return store
+
+
+def _host_with_override(
+    host_module: Any,
+    server_entry: Any,
+    http_transport: MagicMock,
+    authz: MagicMock,
+    audit_store: MagicMock,
+    decision_history_store: MagicMock,
+    settings: Any,
+    override_store: MagicMock | None,
+) -> Any:
+    return host_module.MCPHost(
+        servers={server_entry.server_id: server_entry},
+        transports={"http": http_transport},
+        authz=authz,
+        audit_store=audit_store,
+        decision_history_store=decision_history_store,
+        settings=settings,
+        override_store=override_store,
+    )
+
+
+class TestEffectiveServerUrlOverride:
+    """resolve-per-use server_url override at every read site (hard-bar)."""
+
+    async def test_none_override_store_returns_manifest_url(
+        self, host: Any, server_entry: Any
+    ) -> None:
+        """The default host (no override_store wired) resolves the SIGNED
+        manifest URL — back-compat byte-for-byte, no store consult path."""
+        result = await host._effective_server_url(
+            tenant_id="t-1",
+            server_id=server_entry.server_id,
+            manifest_url=server_entry.server_url,
+        )
+        assert result == server_entry.server_url
+
+    async def test_list_tools_uses_override_url(
+        self,
+        host_module: Any,
+        server_entry: Any,
+        http_transport: MagicMock,
+        authz: MagicMock,
+        audit_store: MagicMock,
+        decision_history_store: MagicMock,
+        settings: Any,
+    ) -> None:
+        """An override present for (tenant, pack) → list_tools acquires the
+        token + opens the session against the OVERRIDE URL, not the manifest."""
+        override_store = _override_store_returning(_OVERRIDE_URL_A)
+        host = _host_with_override(
+            host_module,
+            server_entry,
+            http_transport,
+            authz,
+            audit_store,
+            decision_history_store,
+            settings,
+            override_store,
+        )
+        await host.list_tools(server_id=server_entry.server_id, request_id="r1", tenant_id="t-1")
+        # resolve-per-use: the store was consulted with (tenant, pack)
+        override_store.get.assert_awaited_once_with(tenant_id="t-1", pack_id=server_entry.server_id)
+        assert authz.acquire_token.await_args.kwargs["server_url"] == _OVERRIDE_URL_A
+        assert http_transport.open_session.await_args.kwargs["server_url"] == _OVERRIDE_URL_A
+
+    async def test_call_tool_uses_override_url(
+        self,
+        host_module: Any,
+        server_entry: Any,
+        http_transport: MagicMock,
+        authz: MagicMock,
+        audit_store: MagicMock,
+        decision_history_store: MagicMock,
+        settings: Any,
+    ) -> None:
+        """An override present → call_tool acquires the token + opens the
+        session against the OVERRIDE URL at every read site."""
+        override_store = _override_store_returning(_OVERRIDE_URL_A)
+        host = _host_with_override(
+            host_module,
+            server_entry,
+            http_transport,
+            authz,
+            audit_store,
+            decision_history_store,
+            settings,
+            override_store,
+        )
+        await host.call_tool(
+            server_id=server_entry.server_id,
+            tool_name="lookup",
+            arguments={},
+            request_id="r1",
+            tenant_id="t-1",
+        )
+        override_store.get.assert_awaited_once_with(tenant_id="t-1", pack_id=server_entry.server_id)
+        assert authz.acquire_token.await_args.kwargs["server_url"] == _OVERRIDE_URL_A
+        assert http_transport.open_session.await_args.kwargs["server_url"] == _OVERRIDE_URL_A
+
+    async def test_override_none_falls_through_to_manifest_url(
+        self,
+        host_module: Any,
+        server_entry: Any,
+        http_transport: MagicMock,
+        authz: MagicMock,
+        audit_store: MagicMock,
+        decision_history_store: MagicMock,
+        settings: Any,
+    ) -> None:
+        """Store wired but returns ``None`` for (tenant, pack) → the signed
+        manifest ``entry.server_url`` is used."""
+        override_store = _override_store_returning(None)
+        host = _host_with_override(
+            host_module,
+            server_entry,
+            http_transport,
+            authz,
+            audit_store,
+            decision_history_store,
+            settings,
+            override_store,
+        )
+        await host.list_tools(server_id=server_entry.server_id, request_id="r1", tenant_id="t-1")
+        assert authz.acquire_token.await_args.kwargs["server_url"] == server_entry.server_url
+        assert (
+            http_transport.open_session.await_args.kwargs["server_url"] == server_entry.server_url
+        )
+
+    async def test_post_construction_override_change_observed_next_call(
+        self,
+        host_module: Any,
+        server_entry: Any,
+        http_transport: MagicMock,
+        authz: MagicMock,
+        audit_store: MagicMock,
+        decision_history_store: MagicMock,
+        settings: Any,
+    ) -> None:
+        """resolve-per-use: a post-boot override change is observed on the NEXT
+        call_tool (no host restart). The stub returns A then B; the second
+        invocation opens against B."""
+        override_store = _override_store_returning(_OVERRIDE_URL_A, _OVERRIDE_URL_B)
+        host = _host_with_override(
+            host_module,
+            server_entry,
+            http_transport,
+            authz,
+            audit_store,
+            decision_history_store,
+            settings,
+            override_store,
+        )
+        await host.call_tool(
+            server_id=server_entry.server_id,
+            tool_name="lookup",
+            arguments={},
+            request_id="r1",
+            tenant_id="t-1",
+        )
+        assert http_transport.open_session.await_args.kwargs["server_url"] == _OVERRIDE_URL_A
+        await host.call_tool(
+            server_id=server_entry.server_id,
+            tool_name="lookup",
+            arguments={},
+            request_id="r2",
+            tenant_id="t-1",
+        )
+        assert http_transport.open_session.await_args.kwargs["server_url"] == _OVERRIDE_URL_B
+        # resolved per use — once per call_tool
+        assert override_store.get.await_count == 2
+
+    async def test_store_error_falls_back_to_manifest_url(
+        self,
+        host_module: Any,
+        server_entry: Any,
+        http_transport: MagicMock,
+        authz: MagicMock,
+        audit_store: MagicMock,
+        decision_history_store: MagicMock,
+        settings: Any,
+    ) -> None:
+        """Fail-safe: the override store raising → the SIGNED manifest URL is
+        used (NOT a cached / arbitrary host); the invocation does NOT raise."""
+        override_store = MagicMock(spec=MCPServerUrlOverrideStore)
+        override_store.get = AsyncMock(side_effect=RuntimeError("override DB down"))
+        host = _host_with_override(
+            host_module,
+            server_entry,
+            http_transport,
+            authz,
+            audit_store,
+            decision_history_store,
+            settings,
+            override_store,
+        )
+        # MUST NOT raise — the store failure is swallowed in favour of the
+        # signed manifest URL.
+        await host.list_tools(server_id=server_entry.server_id, request_id="r1", tenant_id="t-1")
+        assert authz.acquire_token.await_args.kwargs["server_url"] == server_entry.server_url
+        assert (
+            http_transport.open_session.await_args.kwargs["server_url"] == server_entry.server_url
+        )
+
+    async def test_list_tools_changed_override_is_cache_miss_refetch(
+        self,
+        host_module: Any,
+        server_entry: Any,
+        http_transport: MagicMock,
+        authz: MagicMock,
+        audit_store: MagicMock,
+        decision_history_store: MagicMock,
+        settings: Any,
+    ) -> None:
+        """P1 stale-cache fix: prime the cache against override-A, change the
+        stub to override-B → the next list_tools is a cache MISS that re-fetches
+        against B (it does NOT return the A-computed cached tool list). Without
+        the effective-URL-in-cache-key fix this second call would hit the cache
+        keyed (tenant, server_id, scopes) and never re-open against B."""
+        override_store = _override_store_returning(_OVERRIDE_URL_A, _OVERRIDE_URL_B)
+        host = _host_with_override(
+            host_module,
+            server_entry,
+            http_transport,
+            authz,
+            audit_store,
+            decision_history_store,
+            settings,
+            override_store,
+        )
+        await host.list_tools(server_id=server_entry.server_id, request_id="r1", tenant_id="t-1")
+        assert http_transport.open_session.await_count == 1
+        assert http_transport.open_session.await_args.kwargs["server_url"] == _OVERRIDE_URL_A
+        # override flips to B → MUST re-open (cache miss), targeting B
+        await host.list_tools(server_id=server_entry.server_id, request_id="r2", tenant_id="t-1")
+        assert http_transport.open_session.await_count == 2
+        assert http_transport.open_session.await_args.kwargs["server_url"] == _OVERRIDE_URL_B
+
+    async def test_list_tools_same_override_still_caches(
+        self,
+        host_module: Any,
+        server_entry: Any,
+        http_transport: MagicMock,
+        authz: MagicMock,
+        audit_store: MagicMock,
+        decision_history_store: MagicMock,
+        settings: Any,
+    ) -> None:
+        """Control for the stale-cache fix: an UNCHANGED override still hits the
+        cache on the second call (the fix must not disable caching wholesale —
+        the effective URL is part of the key, identical across both calls)."""
+        override_store = _override_store_returning(_OVERRIDE_URL_A)  # always A
+        host = _host_with_override(
+            host_module,
+            server_entry,
+            http_transport,
+            authz,
+            audit_store,
+            decision_history_store,
+            settings,
+            override_store,
+        )
+        await host.list_tools(server_id=server_entry.server_id, request_id="r1", tenant_id="t-1")
+        authz.acquire_token.reset_mock()
+        http_transport.open_session.reset_mock()
+        await host.list_tools(server_id=server_entry.server_id, request_id="r2", tenant_id="t-1")
+        authz.acquire_token.assert_not_called()
+        http_transport.open_session.assert_not_called()
+
+    async def test_call_tool_retry_path_targets_override_url(
+        self,
+        host_module: Any,
+        server_entry: Any,
+        http_transport: MagicMock,
+        authz: MagicMock,
+        audit_store: MagicMock,
+        decision_history_store: MagicMock,
+        settings: Any,
+    ) -> None:
+        """Every server_url read site in _call_tool_inner uses the effective URL
+        computed once at the top — the 401 retry path (invalidate + reacquire)
+        AND the authorisation-lost evidence payload carry the OVERRIDE URL we
+        actually talked to, not the manifest URL. The override is resolved once
+        per call_tool (not re-read on the retry)."""
+        from cognic_agentos.protocol.mcp_transports import MCPTransportError
+
+        override_store = _override_store_returning(_OVERRIDE_URL_A)
+        host = _host_with_override(
+            host_module,
+            server_entry,
+            http_transport,
+            authz,
+            audit_store,
+            decision_history_store,
+            settings,
+            override_store,
+        )
+        e1 = MCPTransportError(
+            "mcp_transport_send_failed", "401a", server_url=server_entry.server_url
+        )
+        e1.__cause__ = _httpx_status_error(401)
+        e2 = MCPTransportError(
+            "mcp_transport_send_failed", "401b", server_url=server_entry.server_url
+        )
+        e2.__cause__ = _httpx_status_error(401)
+        http_transport.send.side_effect = [e1, e2]
+        with pytest.raises(MCPAuthzError) as exc:
+            await host.call_tool(
+                server_id=server_entry.server_id,
+                tool_name="lookup",
+                arguments={},
+                request_id="r1",
+                tenant_id="t-1",
+            )
+        assert exc.value.reason == "mcp_authorisation_lost"
+        # the authorisation-lost evidence payload carries the OVERRIDE url
+        assert exc.value.payload["server_url"] == _OVERRIDE_URL_A
+        # the retry sites (invalidate + reacquire) targeted the OVERRIDE url
+        assert authz.invalidate_cached_token.await_args.kwargs["server_url"] == _OVERRIDE_URL_A
+        assert authz.acquire_token.await_args.kwargs["server_url"] == _OVERRIDE_URL_A
+        # resolved once per call_tool — not re-read on the retry
+        assert override_store.get.await_count == 1
