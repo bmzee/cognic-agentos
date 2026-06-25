@@ -31,7 +31,7 @@ import json
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
@@ -39,6 +39,7 @@ import pytest
 import respx
 
 from cognic_agentos.core.config import Settings, build_settings_without_env_file
+from cognic_agentos.core.mcp_config.storage import MCPInternalHostAllowlistStore
 from cognic_agentos.protocol import mcp_authz
 from cognic_agentos.protocol.mcp_authz import (
     MCPAuthzClient,
@@ -4701,3 +4702,340 @@ class TestTokenPostNoRedirect:
                     assert secret not in (call.request.content or b"").decode("utf-8", "ignore")
                     assert secret not in str(dict(call.request.headers))
                 assert call.request.url.host != "evil.public.example"
+
+
+# ===========================================================================
+# PR-2b-1 Task 3 — `_fetch_prm` resolve-and-pin (CC)
+#
+# The strict-profile carve-out guard (Task 2) returns the *pinned validated IP*
+# for an allow-listed internal resource leg. Task 3 makes `_fetch_prm` CONNECT
+# to that pinned IP (HTTP-only, original Host preserved) instead of re-using the
+# hostname URL — closing the DNS-rebinding TOCTOU on the `prm_metadata` leg
+# (spec §8). Option A: the rebind reassigns `url` (NOT a separate `pinned_url`),
+# so the security AST drift detector in `test_mcp_authz_guarded_fetch.py` stays
+# green + untouched.
+# ===========================================================================
+
+
+class _StubAllowlistStoreT3:
+    """Minimal ``MCPInternalHostAllowlistStore`` stand-in: ``get_allowlist``
+    returns a fixed frozenset + records the tenant_ids it was consulted for."""
+
+    def __init__(self, *, allowlist: frozenset[str]) -> None:
+        self._allowlist = allowlist
+        self.calls: list[str] = []
+
+    async def get_allowlist(self, *, tenant_id: str) -> frozenset[str]:
+        self.calls.append(tenant_id)
+        return self._allowlist
+
+
+class _RecordingHttp:
+    """Records every ``.get(url, **kwargs)`` then returns a fixed 200 PRM doc.
+
+    Lets a test assert the EXACT url string + headers + timeout the rebind passes
+    to httpx — respx normalizes the URL (drops the explicit ``:80``, strips the
+    IPv6 brackets), hiding precisely the literals Task 3's bars require proving.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def get(self, url: str, **kwargs: Any) -> httpx.Response:
+        self.calls.append((url, kwargs))
+        return httpx.Response(200, json={"authorization_servers": ["https://as.example"]})
+
+
+def _pinning_authz(
+    *, http_client: Any, allowlist: set[str]
+) -> tuple[MCPAuthzClient, _StubAllowlistStoreT3, MagicMock]:
+    """Strict-profile client wired with an exact-IP internal-host allow-list stub."""
+    settings = build_settings_without_env_file().model_copy(
+        update={"runtime_profile": "prod", "mcp_oauth_request_timeout_s": 5}
+    )
+    store = _StubAllowlistStoreT3(allowlist=frozenset(allowlist))
+    audit = MagicMock()
+    audit.append = AsyncMock()
+    client = MCPAuthzClient(
+        settings=settings,
+        vault_client=MagicMock(),
+        http_client=cast(httpx.AsyncClient, http_client),
+        audit_store=audit,
+        decision_history_store=MagicMock(),
+        internal_host_allowlist_store=cast(MCPInternalHostAllowlistStore | None, store),
+    )
+    return client, store, audit
+
+
+_PRM_PATH = "/.well-known/oauth-protected-resource/mcp"
+
+
+class TestPrmFetchResolveAndPin:
+    """Task 3 — `_fetch_prm` connects to the guard-validated pinned IP."""
+
+    @respx.mock
+    async def test_fetch_prm_pins_to_guard_validated_ip_resolve_once(
+        self, http_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """THE rebinding proof. The guard's resolution returns the allow-listed
+        A=10.42.0.7; ANY later resolution returns a DIFFERENT non-listed
+        B=10.42.0.99. The PRM fetch MUST connect to A (the pin) — if it re-resolved
+        (→ B) or used the hostname (internal.svc), neither has a respx route and the
+        host assertion fails. Also pins resolve-ONCE."""
+        resolver_calls = {"n": 0}
+
+        async def _resolve(host: str) -> list[str]:
+            resolver_calls["n"] += 1
+            return ["10.42.0.7"] if resolver_calls["n"] == 1 else ["10.42.0.99"]
+
+        monkeypatch.setattr(mcp_authz, "_resolve_host_addresses", _resolve)
+        client, store, audit = _pinning_authz(http_client=http_client, allowlist={"10.42.0.7"})
+
+        route = respx.route(method="GET", host="10.42.0.7").mock(
+            return_value=httpx.Response(200, json={"authorization_servers": ["https://as.example"]})
+        )
+
+        doc = await client._fetch_prm(
+            f"http://internal.svc{_PRM_PATH}",
+            "www-authenticate",
+            "http://internal.svc/mcp",
+            5.0,
+            tenant_id="bank_a",
+            request_id="r1",
+        )
+
+        assert doc is not None
+        assert doc.authorization_servers == ("https://as.example",)
+        assert route.called
+        req = route.calls.last.request
+        assert req.url.host == "10.42.0.7"  # pinned IP — NOT internal.svc, NOT 10.42.0.99
+        assert req.headers["Host"] == "internal.svc"  # original authority preserved
+        assert resolver_calls["n"] == 1  # resolve-once: only the guard resolved
+        assert store.calls == ["bank_a"]
+        assert audit.append.await_count == 1  # the allow-list permit event
+
+    async def test_fetch_prm_pin_rewrites_url_string_and_passes_timeout(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Exact rebind shape: default port → explicit ``:80`` in the rebound netloc,
+        original host as ``Host``, original ``timeout`` carried through."""
+
+        async def _resolve(host: str) -> list[str]:
+            return ["10.42.0.7"]
+
+        monkeypatch.setattr(mcp_authz, "_resolve_host_addresses", _resolve)
+        http = _RecordingHttp()
+        client, _store, _audit = _pinning_authz(http_client=http, allowlist={"10.42.0.7"})
+
+        await client._fetch_prm(
+            f"http://internal.svc{_PRM_PATH}",
+            "www-authenticate",
+            "http://internal.svc/mcp",
+            9.0,
+            tenant_id="bank_a",
+            request_id="r1",
+        )
+
+        assert len(http.calls) == 1
+        url, kwargs = http.calls[0]
+        assert url == f"http://10.42.0.7:80{_PRM_PATH}"
+        assert kwargs["headers"] == {"Host": "internal.svc"}
+        assert kwargs["timeout"] == 9.0  # original timeout unchanged
+
+    @respx.mock
+    async def test_fetch_prm_pin_preserves_non_default_port(
+        self, http_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A non-default port rides through to the pinned target + the Host header."""
+
+        async def _resolve(host: str) -> list[str]:
+            return ["10.42.0.7"]
+
+        monkeypatch.setattr(mcp_authz, "_resolve_host_addresses", _resolve)
+        client, _store, _audit = _pinning_authz(http_client=http_client, allowlist={"10.42.0.7"})
+
+        route = respx.route(method="GET", host="10.42.0.7").mock(
+            return_value=httpx.Response(200, json={"authorization_servers": ["https://as.example"]})
+        )
+
+        doc = await client._fetch_prm(
+            f"http://svc:8443{_PRM_PATH}",
+            "www-authenticate",
+            "http://svc:8443/mcp",
+            5.0,
+            tenant_id="bank_a",
+            request_id="r1",
+        )
+
+        assert doc is not None
+        req = route.calls.last.request
+        assert req.url.host == "10.42.0.7"
+        assert req.url.port == 8443  # non-default port preserved on the pinned target
+        assert req.headers["Host"] == "svc:8443"  # original authority incl. port
+
+    async def test_fetch_prm_pin_brackets_ipv6_literal(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A pinned IPv6 literal MUST be bracketed in the netloc:
+        ``http://[fd00::7]:80/...`` (recording stub proves the literal pre-normalize)."""
+
+        async def _resolve(host: str) -> list[str]:
+            return ["fd00::7"]
+
+        monkeypatch.setattr(mcp_authz, "_resolve_host_addresses", _resolve)
+        http = _RecordingHttp()
+        client, _store, _audit = _pinning_authz(http_client=http, allowlist={"fd00::7"})
+
+        await client._fetch_prm(
+            f"http://internal6.svc{_PRM_PATH}",
+            "www-authenticate",
+            "http://internal6.svc/mcp",
+            5.0,
+            tenant_id="bank_a",
+            request_id="r1",
+        )
+
+        assert len(http.calls) == 1
+        url, kwargs = http.calls[0]
+        assert url == f"http://[fd00::7]:80{_PRM_PATH}"
+        assert kwargs["headers"] == {"Host": "internal6.svc"}
+
+    @respx.mock
+    async def test_fetch_prm_pin_ipv6_real_httpx_routes_to_pinned(
+        self, http_client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Belt-and-suspenders: real httpx accepts the bracketed netloc + routes to
+        the pinned fd00::7 (not the hostname)."""
+
+        async def _resolve(host: str) -> list[str]:
+            return ["fd00::7"]
+
+        monkeypatch.setattr(mcp_authz, "_resolve_host_addresses", _resolve)
+        client, _store, _audit = _pinning_authz(http_client=http_client, allowlist={"fd00::7"})
+
+        route = respx.route(method="GET", host="fd00::7").mock(
+            return_value=httpx.Response(200, json={"authorization_servers": ["https://as.example"]})
+        )
+
+        doc = await client._fetch_prm(
+            f"http://internal6.svc{_PRM_PATH}",
+            "www-authenticate",
+            "http://internal6.svc/mcp",
+            5.0,
+            tenant_id="bank_a",
+            request_id="r1",
+        )
+
+        assert doc is not None
+        assert route.called
+        assert route.calls.last.request.url.host == "fd00::7"
+
+    async def test_fetch_prm_refused_host_does_not_fetch(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A private host whose IP is NOT allow-listed → the guard refuses BEFORE any
+        GET (no fetch leaks past the refusal)."""
+
+        async def _resolve(host: str) -> list[str]:
+            return ["10.42.0.7"]
+
+        monkeypatch.setattr(mcp_authz, "_resolve_host_addresses", _resolve)
+        http = _RecordingHttp()
+        client, _store, _audit = _pinning_authz(http_client=http, allowlist={"10.42.0.9"})
+
+        with pytest.raises(MCPAuthzError) as exc:
+            await client._fetch_prm(
+                f"http://internal.svc{_PRM_PATH}",
+                "www-authenticate",
+                "http://internal.svc/mcp",
+                5.0,
+                tenant_id="bank_a",
+                request_id="r1",
+            )
+        assert exc.value.reason == "mcp_discovery_url_refused"
+        assert http.calls == []  # guard raised before any fetch
+
+    async def test_fetch_prm_public_host_fetches_original_url_no_rewrite(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A public PRM host (guard returns None) → fetched at the ORIGINAL url with
+        NO Host override + NO rewrite + NO allow-list consult (Task 3 leaves the
+        public path exactly as it was)."""
+
+        async def _resolve(host: str) -> list[str]:
+            return ["93.184.216.34"]  # public
+
+        monkeypatch.setattr(mcp_authz, "_resolve_host_addresses", _resolve)
+        http = _RecordingHttp()
+        client, store, audit = _pinning_authz(http_client=http, allowlist={"10.42.0.7"})
+
+        await client._fetch_prm(
+            f"http://public.example{_PRM_PATH}",
+            "www-authenticate",
+            "http://public.example/mcp",
+            5.0,
+            tenant_id="bank_a",
+            request_id="r1",
+        )
+
+        assert len(http.calls) == 1
+        url, kwargs = http.calls[0]
+        assert url == f"http://public.example{_PRM_PATH}"  # untouched
+        assert "headers" not in kwargs  # no Host override on the public path
+        assert kwargs["timeout"] == 5.0
+        assert store.calls == []  # public host: no allow-list consult
+        assert audit.append.await_count == 0  # no permit event
+
+    def test_fetch_prm_pins_to_guard_return_not_reresolution_structural(self) -> None:
+        """Step-4 drift pin: `_fetch_prm` must (1) CAPTURE the guard's return into
+        `pinned_ip`, (2) gate the rewrite on `pinned_ip is not None`, (3) rebind
+        `url` from `pinned_ip` inside that branch, and (4) NEVER call
+        `_resolve_host_addresses` itself — the GET targets the guard-returned pinned
+        IP, never a fresh re-resolution (which would re-open the rebinding window)."""
+        src = Path(mcp_authz.__file__).read_text()
+        tree = ast.parse(src)
+        fn = next(
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, ast.AsyncFunctionDef) and n.name == "_fetch_prm"
+        )
+
+        # (1) guard return captured into `pinned_ip`
+        assert any(
+            isinstance(a, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == "pinned_ip" for t in a.targets)
+            and "_refuse_non_public_discovery_url" in ast.dump(a.value)
+            for a in ast.walk(fn)
+        ), "_fetch_prm must capture the guard's return into `pinned_ip`"
+
+        # (2) the `if pinned_ip is not None:` branch
+        pin_ifs = [
+            node
+            for node in ast.walk(fn)
+            if isinstance(node, ast.If)
+            and isinstance(node.test, ast.Compare)
+            and isinstance(node.test.left, ast.Name)
+            and node.test.left.id == "pinned_ip"
+            and any(isinstance(op, ast.IsNot) for op in node.test.ops)
+        ]
+        assert pin_ifs, "_fetch_prm must gate the rewrite on `if pinned_ip is not None`"
+        body_nodes = [n for stmt in pin_ifs[0].body for n in ast.walk(stmt)]
+
+        # (3) inside that branch: `url` is reassigned AND derives from `pinned_ip`
+        assert any(
+            isinstance(a, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == "url" for t in a.targets)
+            for a in body_nodes
+        ), "the pinned branch must rebind `url` (Option A — not a separate `pinned_url`)"
+        assert any(
+            isinstance(n, ast.Name) and n.id == "pinned_ip" and isinstance(n.ctx, ast.Load)
+            for n in body_nodes
+        ), "the rebind must derive from the guard-returned `pinned_ip`"
+
+        # (4) `_fetch_prm` never re-resolves — the only resolution is inside the guard
+        assert not any(
+            isinstance(c, ast.Call)
+            and isinstance(c.func, ast.Name)
+            and c.func.id == "_resolve_host_addresses"
+            for c in ast.walk(fn)
+        ), "_fetch_prm must NOT re-resolve the host (pin to the guard's IP, not a fresh lookup)"

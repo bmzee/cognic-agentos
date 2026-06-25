@@ -142,7 +142,7 @@ import logging
 import math
 import time
 from typing import Any, Literal, cast
-from urllib.parse import quote_plus, urlparse
+from urllib.parse import quote_plus, urlparse, urlunparse
 
 import httpx
 
@@ -1290,14 +1290,32 @@ class MCPAuthzClient:
         per-tenant internal-host allow-list carve-out. The guard's returned
         pinned IP is intentionally ignored at Task 2 — Task 3 consumes it.
         """
-        await self._refuse_non_public_discovery_url(
+        pinned_ip = await self._refuse_non_public_discovery_url(
             url,
             leg=_PRM_DISCOVERY_PATH_TO_LEG[discovery_path],
             tenant_id=tenant_id,
             request_id=request_id,
         )
         try:
-            resp = await self._http.get(url, timeout=timeout)
+            if pinned_ip is not None:
+                # PR-2b-1 (Task 3) resolve-and-pin: the guard validated `url`'s host
+                # and returned the allow-listed internal IP. Connect to THAT IP — not
+                # a fresh re-resolution — closing the DNS-rebinding TOCTOU on the
+                # hostname `prm_metadata` leg (spec §8). HTTP-only (the carve-out never
+                # fires on https), so no SNI/cert concern. `url` is REBOUND (NOT a
+                # separate `pinned_url`) so the GET's first positional arg stays `url`
+                # — keeping the `test_mcp_authz_guarded_fetch.py` AST drift detector
+                # (fetch-arg must be ast.dump-identical to the guard's) green + untouched.
+                parsed = urlparse(url)
+                port = parsed.port or 80
+                netloc_ip = f"[{pinned_ip}]" if ":" in pinned_ip else pinned_ip  # bracket IPv6
+                url = urlunparse(parsed._replace(netloc=f"{netloc_ip}:{port}"))
+                host_header = parsed.hostname or ""  # original authority, userinfo stripped
+                if parsed.port is not None:
+                    host_header = f"{host_header}:{parsed.port}"
+                resp = await self._http.get(url, headers={"Host": host_header}, timeout=timeout)
+            else:
+                resp = await self._http.get(url, timeout=timeout)
         except httpx.TimeoutException as exc:
             raise MCPAuthzError(
                 "mcp_oauth_request_timeout",

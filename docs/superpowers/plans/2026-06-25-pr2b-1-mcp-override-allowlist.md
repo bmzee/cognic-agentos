@@ -188,11 +188,15 @@ Run → PASS.
             parsed = urlparse(url)
             port = parsed.port or 80
             netloc_ip = f"[{pinned_ip}]" if ":" in pinned_ip else pinned_ip  # bracket IPv6
-            pinned_url = urlunparse(parsed._replace(netloc=f"{netloc_ip}:{port}"))
+            # Rebind `url` (NOT a separate `pinned_url`) so the GET's first positional
+            # arg stays `url` — the security AST detector
+            # test_real_mcp_authz_has_no_unguarded_fetches requires the fetch's first
+            # arg to be ast.dump-identical to the `url` guard's. (Option A — detector untouched.)
+            url = urlunparse(parsed._replace(netloc=f"{netloc_ip}:{port}"))
             host_header = parsed.hostname or ""           # original authority, userinfo stripped
             if parsed.port is not None:
                 host_header = f"{host_header}:{parsed.port}"
-            resp = await self._http.get(pinned_url, headers={"Host": host_header}, timeout=timeout)
+            resp = await self._http.get(url, headers={"Host": host_header}, timeout=timeout)
         else:
             resp = await self._http.get(url, timeout=timeout)
 ```
