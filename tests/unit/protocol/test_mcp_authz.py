@@ -44,6 +44,7 @@ from cognic_agentos.protocol.mcp_authz import (
     MCPAuthzClient,
     MCPAuthzError,
     Token,
+    _canonical_origin,
     _decode_jwt_payload,
     _endpoint_specific_well_known_url,
     _is_token_near_expiry,
@@ -208,6 +209,76 @@ class TestUrlBuilders:
     def test_root_well_known(self) -> None:
         url = _root_well_known_url("https://server.example/some/path")
         assert url == "https://server.example/.well-known/oauth-protected-resource"
+
+
+class TestCanonicalOrigin:
+    def test_default_port_https_equivalence(self) -> None:
+        assert _canonical_origin("https://issuer.example") == _canonical_origin(
+            "https://issuer.example:443"
+        )
+
+    def test_default_port_http_equivalence(self) -> None:
+        assert _canonical_origin("http://issuer.example") == _canonical_origin(
+            "http://issuer.example:80"
+        )
+
+    def test_host_case_insensitive(self) -> None:
+        assert _canonical_origin("https://Issuer.EXAMPLE/token") == _canonical_origin(
+            "https://issuer.example/path"
+        )
+
+    def test_trailing_dot_stripped(self) -> None:
+        assert _canonical_origin("https://issuer.example./token") == _canonical_origin(
+            "https://issuer.example/token"
+        )
+
+    def test_path_query_ignored(self) -> None:
+        assert _canonical_origin("https://issuer.example/a?b=c") == _canonical_origin(
+            "https://issuer.example/d"
+        )
+
+    def test_distinct_origins_differ(self) -> None:
+        assert _canonical_origin("https://issuer.example") != _canonical_origin(
+            "https://evil.example"
+        )
+        assert _canonical_origin("https://issuer.example") != _canonical_origin(
+            "http://issuer.example"
+        )
+        assert _canonical_origin("https://issuer.example:8443") != _canonical_origin(
+            "https://issuer.example"
+        )
+
+    def test_ip_literal_canonicalized(self) -> None:
+        assert _canonical_origin("https://93.184.216.34/token") == ("https", "93.184.216.34", 443)
+
+    def test_non_http_scheme_is_none(self) -> None:
+        assert _canonical_origin("ftp://issuer.example") is None
+        assert _canonical_origin("file:///etc/passwd") is None
+
+    def test_no_host_is_none(self) -> None:
+        assert _canonical_origin("https:///token") is None
+        assert _canonical_origin("not-a-url") is None
+
+    def test_malformed_port_is_none(self) -> None:
+        assert _canonical_origin("https://issuer.example:99999/token") is None
+
+    def test_userinfo_rejected(self) -> None:
+        # Credential-destination control: a userinfo URL parses to the host AFTER the
+        # `@` (the attacker host), which reads as the issuer in logs. Reject outright.
+        assert _canonical_origin("https://issuer.example@evil.example/token") is None
+        assert _canonical_origin("https://user:pass@evil.example/token") is None
+
+    def test_empty_host_after_trailing_dot_rejected(self) -> None:
+        assert _canonical_origin("https://./token") is None
+
+    def test_malformed_idn_host_rejected(self) -> None:
+        # Fail-closed IDNA branch (the `except (UnicodeError, ValueError): return None`
+        # arm): a non-IP host that cannot be IDNA-encoded to an A-label — a >63-char
+        # label ("label too long") or an empty interior label — is never a usable
+        # origin, so a compromised token_endpoint at such a host can never match the
+        # issuer.
+        assert _canonical_origin("https://" + "a" * 64 + ".example/token") is None
+        assert _canonical_origin("https://a..b/token") is None
 
 
 class TestParseResourceMetadataUrl:
@@ -4320,3 +4391,313 @@ def test_leg5_guard_precedes_all_credential_construction() -> None:
         f"leg-5 guard (line {guard_line}) must precede ALL credential request-material "
         f"construction (earliest credential assign at line {earliest})"
     )
+
+
+def test_token_endpoint_origin_binding_precedes_credential_construction() -> None:
+    """Structural pin (PR-2b-0): in _request_token the order is SSRF guard FIRST,
+    issuer-origin binding SECOND, and EVERY credential request-material assignment
+    (`body`, `headers`, `encoded_id`, `encoded_secret`, `basic_credentials`) only
+    AFTER both — so a compromised-AS token_endpoint (internal OR public-non-issuer)
+    is refused before any client_secret is assembled, even if a future refactor
+    reorders statements."""
+    src = Path(mcp_authz.__file__).read_text()
+    tree = ast.parse(src)
+    fn = next(
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.AsyncFunctionDef) and n.name == "_request_token"
+    )
+    cred_names = {"body", "headers", "encoded_id", "encoded_secret", "basic_credentials"}
+    ssrf_guard_line: int | None = None
+    origin_binding_line: int | None = None
+    cred_lines: dict[str, int] = {}
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            if node.func.attr == "_refuse_non_public_discovery_url" and any(
+                kw.arg == "leg"
+                and isinstance(kw.value, ast.Constant)
+                and kw.value.value == "token_endpoint"
+                for kw in node.keywords
+            ):
+                ssrf_guard_line = node.lineno
+            elif node.func.attr == "_refuse_token_endpoint_origin_mismatch":
+                origin_binding_line = node.lineno
+        if isinstance(node, ast.Assign):
+            for t in node.targets:
+                if isinstance(t, ast.Name) and t.id in cred_names:
+                    cred_lines.setdefault(t.id, node.lineno)
+        elif isinstance(node, ast.AnnAssign):
+            t = node.target
+            if isinstance(t, ast.Name) and t.id in cred_names:
+                cred_lines.setdefault(t.id, node.lineno)
+    assert ssrf_guard_line is not None, "leg-5 token_endpoint SSRF guard not found"
+    assert origin_binding_line is not None, "token_endpoint origin binding not found"
+    assert cred_names <= set(cred_lines), (
+        f"missing credential-material assignments: {cred_names - set(cred_lines)}"
+    )
+    earliest_cred = min(cred_lines.values())
+    assert ssrf_guard_line < origin_binding_line < earliest_cred, (
+        f"order must be SSRF guard ({ssrf_guard_line}) < origin binding "
+        f"({origin_binding_line}) < earliest credential assign ({earliest_cred})"
+    )
+
+
+class TestTokenEndpointIssuerOriginBinding:
+    @respx.mock
+    @pytest.mark.parametrize("auth_method", ["client_secret_post", "client_secret_basic"])
+    async def test_public_non_issuer_token_endpoint_refused_no_secret_sent(
+        self,
+        authz_strict: MCPAuthzClient,
+        vault_client: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+        auth_method: str,
+    ) -> None:
+        """AS-3b: a public, allow-listed AS returns a token_endpoint at a different
+        PUBLIC origin. The SSRF guard passes (public host); the issuer-origin binding
+        refuses BEFORE any credential material is built — no POST, no secret sent."""
+        as_issuer = "https://as.public.example"  # public, allow-listed
+        server = "https://server.example/mcp"
+        evil_token_endpoint = (
+            "https://evil.public.example/token"  # public BUT not the issuer origin
+        )
+        secret = "VAULT-CLIENT-SECRET-DO-NOT-LEAK"
+        vault_client.read.side_effect = _vault_dispatch(
+            allowlist=[as_issuer],
+            creds={"client_id": "cid", "client_secret": secret, "auth_method": auth_method},
+        )
+
+        async def _resolve(host: str) -> list[str]:
+            return ["93.184.216.34"]  # ALL hosts public -> SSRF guard passes everywhere
+
+        monkeypatch.setattr(mcp_authz, "_resolve_host_addresses", _resolve)
+        respx.get(server).mock(
+            return_value=httpx.Response(
+                401,
+                headers={
+                    "WWW-Authenticate": "Bearer resource_metadata="
+                    '"https://server.example/.well-known/oauth-protected-resource/mcp"'
+                },
+            )
+        )
+        respx.get("https://server.example/.well-known/oauth-protected-resource/mcp").mock(
+            return_value=httpx.Response(
+                200, json={"authorization_servers": [as_issuer], "scopes_supported": ["mcp:tools"]}
+            )
+        )
+        respx.get(f"{as_issuer}/.well-known/oauth-authorization-server").mock(
+            return_value=httpx.Response(200, json={"token_endpoint": evil_token_endpoint})
+        )
+        token_route = respx.post(evil_token_endpoint).mock(
+            return_value=httpx.Response(200, json={"access_token": "x", "expires_in": 3600})
+        )
+
+        with pytest.raises(MCPAuthzError) as exc:
+            await authz_strict.acquire_token(
+                server_url=server,
+                manifest_scopes=("mcp:tools",),
+                request_id="r",
+                tenant_id="bank_a",
+            )
+        assert exc.value.reason == "mcp_oauth_as_discovery_invalid"
+        assert (
+            exc.value.payload.get("validation_failure") == "token_endpoint_issuer_origin_mismatch"
+        )
+        assert not token_route.called  # NO POST -> no secret sent
+        for call in respx.calls:
+            assert call.request.url.host != "evil.public.example"
+            body = (call.request.content or b"").decode("utf-8", "ignore")
+            assert secret not in body
+            assert secret not in str(dict(call.request.headers))
+
+    @respx.mock
+    async def test_same_origin_token_endpoint_proceeds(
+        self,
+        authz_strict: MCPAuthzClient,
+        vault_client: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Happy path: token_endpoint on the issuer's own origin -> the POST fires."""
+        as_issuer = "https://as.public.example"
+        server = "https://server.example/mcp"
+        token_endpoint = f"{as_issuer}/oauth/token"  # SAME origin as the issuer
+        vault_client.read.side_effect = _vault_dispatch(
+            allowlist=[as_issuer],
+            creds={"client_id": "cid", "client_secret": "s", "auth_method": "client_secret_post"},
+        )
+
+        async def _resolve(host: str) -> list[str]:
+            return ["93.184.216.34"]
+
+        monkeypatch.setattr(mcp_authz, "_resolve_host_addresses", _resolve)
+        respx.get(server).mock(
+            return_value=httpx.Response(
+                401,
+                headers={
+                    "WWW-Authenticate": "Bearer resource_metadata="
+                    '"https://server.example/.well-known/oauth-protected-resource/mcp"'
+                },
+            )
+        )
+        respx.get("https://server.example/.well-known/oauth-protected-resource/mcp").mock(
+            return_value=httpx.Response(
+                200, json={"authorization_servers": [as_issuer], "scopes_supported": ["mcp:tools"]}
+            )
+        )
+        respx.get(f"{as_issuer}/.well-known/oauth-authorization-server").mock(
+            return_value=httpx.Response(200, json={"token_endpoint": token_endpoint})
+        )
+        token_route = respx.post(token_endpoint).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "access_token": _make_jwt({"aud": server}),
+                    "expires_in": 3600,
+                    "scope": "mcp:tools",
+                },
+            )
+        )
+
+        await authz_strict.acquire_token(
+            server_url=server, manifest_scopes=("mcp:tools",), request_id="r", tenant_id="bank_a"
+        )
+        assert token_route.called  # same-origin -> the token POST DID fire
+
+    @respx.mock
+    async def test_default_port_token_endpoint_proceeds(
+        self, authz_strict: MCPAuthzClient, vault_client: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """issuer `https://h` vs token_endpoint `https://h:443/...` -> same origin -> proceeds."""
+        as_issuer = "https://as.public.example"
+        server = "https://server.example/mcp"
+        token_endpoint = (
+            f"{as_issuer}:443/oauth/token"  # explicit :443 == the issuer's default port
+        )
+        vault_client.read.side_effect = _vault_dispatch(
+            allowlist=[as_issuer],
+            creds={"client_id": "cid", "client_secret": "s", "auth_method": "client_secret_post"},
+        )
+
+        async def _resolve(host: str) -> list[str]:
+            return ["93.184.216.34"]
+
+        monkeypatch.setattr(mcp_authz, "_resolve_host_addresses", _resolve)
+        respx.get(server).mock(
+            return_value=httpx.Response(
+                401,
+                headers={
+                    "WWW-Authenticate": "Bearer resource_metadata="
+                    '"https://server.example/.well-known/oauth-protected-resource/mcp"'
+                },
+            )
+        )
+        respx.get("https://server.example/.well-known/oauth-protected-resource/mcp").mock(
+            return_value=httpx.Response(
+                200, json={"authorization_servers": [as_issuer], "scopes_supported": ["mcp:tools"]}
+            )
+        )
+        respx.get(f"{as_issuer}/.well-known/oauth-authorization-server").mock(
+            return_value=httpx.Response(200, json={"token_endpoint": token_endpoint})
+        )
+        token_route = respx.post(token_endpoint).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "access_token": _make_jwt({"aud": server}),
+                    "expires_in": 3600,
+                    "scope": "mcp:tools",
+                },
+            )
+        )
+
+        await authz_strict.acquire_token(
+            server_url=server, manifest_scopes=("mcp:tools",), request_id="r", tenant_id="bank_a"
+        )
+        assert token_route.called  # default-port-equivalent origin -> the token POST DID fire
+
+
+class TestTokenPostNoRedirect:
+    @respx.mock
+    async def test_token_post_does_not_follow_redirect_even_with_follow_client(
+        self,
+        settings_strict: Settings,
+        vault_client: MagicMock,
+        audit_store: MagicMock,
+        decision_history_store: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        as_issuer = "https://as.public.example"
+        server = "https://server.example/mcp"
+        token_endpoint = f"{as_issuer}/token"  # same origin -> passes the origin binding
+        secret = "VAULT-CLIENT-SECRET-DO-NOT-LEAK"
+        # A client whose default IS to follow redirects — the per-call follow_redirects=False
+        # must override it, so this test FAILS if the kwarg is removed.
+        async with httpx.AsyncClient(follow_redirects=True) as http_client:
+            authz = MCPAuthzClient(
+                settings=settings_strict,
+                vault_client=vault_client,
+                http_client=http_client,
+                audit_store=audit_store,
+                decision_history_store=decision_history_store,
+            )
+            vault_client.read.side_effect = _vault_dispatch(
+                allowlist=[as_issuer],
+                creds={
+                    "client_id": "cid",
+                    "client_secret": secret,
+                    "auth_method": "client_secret_post",
+                },
+            )
+
+            async def _resolve(host: str) -> list[str]:
+                return ["93.184.216.34"]
+
+            monkeypatch.setattr(mcp_authz, "_resolve_host_addresses", _resolve)
+            respx.get(server).mock(
+                return_value=httpx.Response(
+                    401,
+                    headers={
+                        "WWW-Authenticate": "Bearer resource_metadata="
+                        '"https://server.example/.well-known/oauth-protected-resource/mcp"'
+                    },
+                )
+            )
+            respx.get("https://server.example/.well-known/oauth-protected-resource/mcp").mock(
+                return_value=httpx.Response(
+                    200,
+                    json={"authorization_servers": [as_issuer], "scopes_supported": ["mcp:tools"]},
+                )
+            )
+            respx.get(f"{as_issuer}/.well-known/oauth-authorization-server").mock(
+                return_value=httpx.Response(200, json={"token_endpoint": token_endpoint})
+            )
+            evil = "https://evil.public.example/steal"
+            # 307 PRESERVES POST method+body on a follow, so a followed redirect would
+            # re-send the secret (making the secret-leak assertion meaningful). The evil
+            # route is METHOD-AGNOSTIC (`respx.route(host=...)`) so a 302-as-GET follow is
+            # caught too — a method-specific `respx.post(evil)` would miss it.
+            token_route = respx.post(token_endpoint).mock(
+                return_value=httpx.Response(307, headers={"Location": evil})
+            )
+            evil_route = respx.route(host="evil.public.example").mock(
+                return_value=httpx.Response(200, json={"access_token": "x"})
+            )
+
+            with pytest.raises(MCPAuthzError):  # 307 -> non-200 -> refused
+                await authz.acquire_token(
+                    server_url=server,
+                    manifest_scopes=("mcp:tools",),
+                    request_id="r",
+                    tenant_id="bank_a",
+                )
+            assert token_route.called
+            assert not evil_route.called  # method-agnostic: evil was NEVER contacted (any verb)
+            for call in respx.calls:
+                # The client_secret rides ONLY the legitimate same-origin token POST body
+                # (client_secret_post), so the secret-substring checks are scoped to the evil
+                # host: it must NEVER ride a call to evil. Vacuous here (evil uncalled) but
+                # load-bearing — dropping follow_redirects=False re-POSTs the secret-bearing
+                # body to evil (307 preserves method+body), which these guarded checks catch.
+                if call.request.url.host == "evil.public.example":
+                    assert secret not in (call.request.content or b"").decode("utf-8", "ignore")
+                    assert secret not in str(dict(call.request.headers))
+                assert call.request.url.host != "evil.public.example"

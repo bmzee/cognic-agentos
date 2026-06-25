@@ -340,6 +340,52 @@ def _root_well_known_url(server_url: str) -> str:
     return f"{parsed.scheme}://{parsed.netloc}/.well-known/oauth-protected-resource"
 
 
+def _canonical_origin(url: str) -> tuple[str, str, int] | None:
+    """Canonical ``(scheme, host, port)`` origin of an http(s) URL, or ``None`` if the
+    URL is not http(s) / carries userinfo / has no host / has a malformed host or port.
+
+    Normalization is identical on both sides of an origin comparison:
+    - a URL carrying **userinfo** (``user@`` / ``user:pass@``) is REJECTED outright —
+      for a credential destination, ``https://issuer.example@evil.example`` (host
+      ``evil.example``) must never read as the issuer;
+    - scheme lowercased (``urlparse`` already lowercases it);
+    - host lowercased (``urlparse.hostname`` already lowercases) + trailing dot stripped;
+      IP literals normalized to their canonical string; DNS names IDNA/punycode-normalized
+      to their A-label (a malformed IDN fails closed);
+    - port default-normalized (``https``->443, ``http``->80), so ``https://h`` ==
+      ``https://h:443``;
+    - origin is scheme + host + port ONLY (path / query ignored).
+    """
+    parsed = urlparse(url)
+    if parsed.username is not None or parsed.password is not None:
+        return None
+    scheme = parsed.scheme.lower()
+    if scheme not in {"http", "https"}:
+        return None
+    host = parsed.hostname  # urlparse lowercases the host
+    if not host:
+        return None
+    host = host.rstrip(".")
+    if not host:
+        return None
+    try:
+        # IP literals (v4/v6) are not IDN — normalize to the canonical IP string.
+        host = str(ipaddress.ip_address(host))
+    except ValueError:
+        try:
+            host = host.encode("idna").decode("ascii")
+        except (UnicodeError, ValueError):
+            return None
+    try:
+        port = parsed.port
+    except ValueError:
+        # Out-of-range port (urlparse raises lazily on .port access).
+        return None
+    if port is None:
+        port = 443 if scheme == "https" else 80
+    return (scheme, host, port)
+
+
 def _decode_jwt_payload(token: str) -> dict[str, Any]:
     """Decode the payload of a JWT-format token without verifying its
     signature.
@@ -1059,6 +1105,31 @@ class MCPAuthzClient:
                     leg=leg,
                 )
 
+    def _refuse_token_endpoint_origin_mismatch(
+        self, token_endpoint: str, *, as_issuer: str
+    ) -> None:
+        """Bind the token_endpoint to the selected AS issuer's origin (threat-model AS-3b).
+
+        Passing the SSRF/public-host guard is necessary but NOT sufficient: a
+        compromised-but-allow-listed AS can return a ``token_endpoint`` at an arbitrary
+        PUBLIC host, exfiltrating the operator ``client_secret``. This refuses unless the
+        token_endpoint's canonical origin equals the AS issuer's canonical origin.
+
+        Reuses ``mcp_oauth_as_discovery_invalid`` + a ``validation_failure`` payload tag
+        (no new public refusal enum). Raised AFTER the SSRF guard and BEFORE any
+        credential material is assembled (PR-2a pre-credential invariant). Never echoes
+        the raw token_endpoint or the secret.
+        """
+        te_origin = _canonical_origin(token_endpoint)
+        issuer_origin = _canonical_origin(as_issuer)
+        if te_origin is None or issuer_origin is None or te_origin != issuer_origin:
+            raise MCPAuthzError(
+                "mcp_oauth_as_discovery_invalid",
+                "token_endpoint origin does not match the AS issuer origin",
+                as_issuer=as_issuer,
+                validation_failure="token_endpoint_issuer_origin_mismatch",
+            )
+
     async def _fetch_prm(
         self,
         url: str,
@@ -1393,6 +1464,11 @@ class MCPAuthzClient:
         # assembled into a request for an internal URL.
         await self._refuse_non_public_discovery_url(token_endpoint, leg="token_endpoint")
 
+        # PR-2b-0: bind the token_endpoint to the selected AS issuer's origin — a
+        # compromised-but-allow-listed AS must not redirect the client_secret to an
+        # arbitrary PUBLIC host (threat-model AS-3b). Also pre-credential.
+        self._refuse_token_endpoint_origin_mismatch(token_endpoint, as_issuer=as_issuer)
+
         # Step 2: token request — credentials in body OR Basic header
         # depending on auth_method. RFC 8707 resource indicator on
         # every request.
@@ -1434,6 +1510,7 @@ class MCPAuthzClient:
                 data=body,
                 headers=headers,
                 timeout=timeout,
+                follow_redirects=False,
             )
         except httpx.TimeoutException as exc:
             raise MCPAuthzError(
