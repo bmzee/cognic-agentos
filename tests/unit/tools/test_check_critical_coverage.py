@@ -117,8 +117,13 @@ _GATE_TOOL_PATH = _REPO_ROOT / "tools" / "check_critical_coverage.py"
 #: MCP server_url override store + the per-tenant exact-IP internal-host allow-list
 #: store + the http://-IP-literal / exact-IP grammar validators + the shared
 #: ip_passes_internal_floor floor) promoted to the gate = 137.
+#: +1 at PR-2b-1 Task 6 (ADR-002 amendment) — ``portal/api/mcp_config/routes.py``
+#: (the operator MCP override + per-tenant internal-host allow-list write/read
+#: endpoints; owns the RequireHumanActor write boundary + the MCPConfigRejected
+#: -> 422 closed-enum mapping, exactly the boundary that put
+#: ``packs/operator_routes.py`` on the gate) promoted to the gate = 138.
 #: Bump this in lockstep with any deliberate ``_CRITICAL_FILES`` change.
-_EXPECTED_ENTRY_COUNT = 137
+_EXPECTED_ENTRY_COUNT = 138
 
 #: The 5 modules Sprint 7B.3 promoted to the durable gate, each by its
 #: own landing commit (T3-T6 panels + T7 composer). All ride the

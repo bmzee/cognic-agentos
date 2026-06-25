@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- **CC modules** (durable 95% line / 90% branch gate, negative-path tests mandatory, **halt-before-commit on every commit**, `core-controls-engineer` discipline): NEW `core/mcp_config/storage.py` (promote at closeout), `protocol/mcp_authz.py`, `protocol/mcp_host.py`, `portal/rbac/scopes.py` (+ `portal/rbac/actor.py` + `portal/rbac/enforcement.py`). Off-gate: `core/mcp_config/__init__.py`, the migration, `portal/api/mcp_config/routes.py`, `harness/runtime.py`, `harness/mcp_host.py`, `portal/api/app.py`.
+- **CC modules** (durable 95% line / 90% branch gate, negative-path tests mandatory, **halt-before-commit on every commit**, `core-controls-engineer` discipline): NEW `core/mcp_config/storage.py` (promote at closeout), `protocol/mcp_authz.py`, `protocol/mcp_host.py`, `portal/rbac/scopes.py` (+ `portal/rbac/actor.py` + `portal/rbac/enforcement.py`), NEW `portal/api/mcp_config/routes.py` (promoted at Task 6 per the user's on-gate-by-default guardrail — it OWNS the `RequireHumanActor` write boundary + the closed-enum `MCPConfigRejected`→422 mapping, the `packs/operator_routes.py` precedent; 100/100 at promotion). Off-gate: `core/mcp_config/__init__.py`, the migration, `harness/runtime.py`, `harness/mcp_host.py`, `portal/api/app.py`.
 - **`core/` stop-rule:** the new `core/mcp_config/*` + the migration are `core/`-class changes (governance/persistence).
 - **Ratified design decisions (do not re-litigate):**
   - **DD-1** — the guard loads the per-tenant allow-list from the **new DB store** (NOT Vault); inject the store into `MCPAuthzClient`.

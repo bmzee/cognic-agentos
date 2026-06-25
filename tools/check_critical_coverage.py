@@ -2241,6 +2241,23 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     # extension (NOT just the _EXPECTED_ENTRY_COUNT bump) per
     # feedback_verify_promotion_meets_floor_at_promotion_time.
     ("src/cognic_agentos/core/mcp_config/storage.py", 0.95, 0.90),
+    # PR-2b-1 Task 6 (ADR-002 amendment) — the operator MCP override + per-tenant
+    # internal-host allow-list write/read endpoints. CC because this route module
+    # OWNS the AGENTS.md "Human-only decisions / Per-tenant ... changes"
+    # enforcement boundary: every write (override PUT/DELETE, allow-list
+    # add/remove) wires RequireHumanActor as a sub-dependency so a service-token
+    # actor holding the write scope is refused 403 at the dep chain BEFORE the
+    # handler body — exactly the boundary that put packs/operator_routes.py on the
+    # gate. It also owns the closed-enum MCPConfigRejected -> 422 mapping (every
+    # refusal surface needs a negative-path test) + the actor_type chain-payload
+    # provenance threading + the mutually-exclusive accepted/refused/sibling-gate
+    # log contract. The route NEVER writes the DB directly — every mutation goes
+    # through the audited store mutators (set_override / clear_override / add_ip /
+    # remove_ip). Gate 137 -> 138. The gate runs against a FRESH full-suite
+    # --cov-branch coverage.json IN THE SAME COMMIT as this _CRITICAL_FILES
+    # extension (NOT just the _EXPECTED_ENTRY_COUNT bump) per
+    # feedback_verify_promotion_meets_floor_at_promotion_time.
+    ("src/cognic_agentos/portal/api/mcp_config/routes.py", 0.95, 0.90),
 )
 
 
