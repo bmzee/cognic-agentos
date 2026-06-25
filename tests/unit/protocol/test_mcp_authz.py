@@ -4384,6 +4384,55 @@ def test_leg5_guard_precedes_all_credential_construction() -> None:
     )
 
 
+def test_token_endpoint_origin_binding_precedes_credential_construction() -> None:
+    """Structural pin (PR-2b-0): in _request_token the order is SSRF guard FIRST,
+    issuer-origin binding SECOND, and EVERY credential request-material assignment
+    (`body`, `headers`, `encoded_id`, `encoded_secret`, `basic_credentials`) only
+    AFTER both — so a compromised-AS token_endpoint (internal OR public-non-issuer)
+    is refused before any client_secret is assembled, even if a future refactor
+    reorders statements."""
+    src = Path(mcp_authz.__file__).read_text()
+    tree = ast.parse(src)
+    fn = next(
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.AsyncFunctionDef) and n.name == "_request_token"
+    )
+    cred_names = {"body", "headers", "encoded_id", "encoded_secret", "basic_credentials"}
+    ssrf_guard_line: int | None = None
+    origin_binding_line: int | None = None
+    cred_lines: dict[str, int] = {}
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            if node.func.attr == "_refuse_non_public_discovery_url" and any(
+                kw.arg == "leg"
+                and isinstance(kw.value, ast.Constant)
+                and kw.value.value == "token_endpoint"
+                for kw in node.keywords
+            ):
+                ssrf_guard_line = node.lineno
+            elif node.func.attr == "_refuse_token_endpoint_origin_mismatch":
+                origin_binding_line = node.lineno
+        if isinstance(node, ast.Assign):
+            for t in node.targets:
+                if isinstance(t, ast.Name) and t.id in cred_names:
+                    cred_lines.setdefault(t.id, node.lineno)
+        elif isinstance(node, ast.AnnAssign):
+            t = node.target
+            if isinstance(t, ast.Name) and t.id in cred_names:
+                cred_lines.setdefault(t.id, node.lineno)
+    assert ssrf_guard_line is not None, "leg-5 token_endpoint SSRF guard not found"
+    assert origin_binding_line is not None, "token_endpoint origin binding not found"
+    assert cred_names <= set(cred_lines), (
+        f"missing credential-material assignments: {cred_names - set(cred_lines)}"
+    )
+    earliest_cred = min(cred_lines.values())
+    assert ssrf_guard_line < origin_binding_line < earliest_cred, (
+        f"order must be SSRF guard ({ssrf_guard_line}) < origin binding "
+        f"({origin_binding_line}) < earliest credential assign ({earliest_cred})"
+    )
+
+
 class TestTokenEndpointIssuerOriginBinding:
     @respx.mock
     @pytest.mark.parametrize("auth_method", ["client_secret_post", "client_secret_basic"])

@@ -304,6 +304,39 @@ unresolvable-host pass-through, and the dev-profile skip remain (tracked).
 PR-2b adds the per-tenant internal-host allow-list + the operator server_url
 override + the deployed Proof 1b-2, and never merges without 2a.
 
+## token_endpoint issuer-origin binding (PR-2b-0, 2026-06-25)
+
+PR-2a guards every discovery/OAuth leg against non-public (SSRF) targets, but the
+SSRF guard is necessary, not sufficient, for the credential-bearing
+`token_endpoint`: a compromised-but-allow-listed AS can return a `token_endpoint`
+at an arbitrary PUBLIC host the guard happily passes, exfiltrating the operator
+OAuth `client_secret` (threat-model AS-3b). PR-2b-0 is the tight first slice of
+PR-2b — the override store, the internal-host allow-list, and Proof 1b-2 remain
+PR-2b proper.
+
+`_request_token` now binds the resolved `token_endpoint` to the selected AS
+issuer's origin: AFTER the Leg-5 SSRF guard and BEFORE any credential material is
+assembled, `_refuse_token_endpoint_origin_mismatch` refuses unless the
+token_endpoint's canonical origin equals the issuer's. Origin canonicalization
+(`_canonical_origin`) is identical on both sides — scheme + host + port only;
+host lowercased + IDNA A-label + trailing-dot stripped; default ports normalized
+(`https`->443, `http`->80); IP literals canonicalized; **userinfo-bearing URLs
+rejected outright** (`https://issuer@evil` must never read as the issuer); and
+non-http(s) / no-host / malformed-port fail closed. The token POST also sets
+`follow_redirects=False`, so a 3xx redirect response cannot replay the credential
+to another origin (a 3xx falls through to the existing non-200 refusal).
+
+The refusal REUSES `mcp_oauth_as_discovery_invalid` with a
+`validation_failure="token_endpoint_issuer_origin_mismatch"` payload tag — no new
+public refusal enum, no `plugin_registry` ripple — and maps to
+`discovery_status=refused`. The payload carries only `as_issuer` (allow-listed,
+non-secret); it never echoes the raw `token_endpoint` or the secret. A structural
+AST pin enforces the order SSRF guard < origin binding < credential assembly.
+
+Residual: the stdlib `idna` codec is IDNA2003; an `idna`-package IDNA2008 upgrade
+is a tracked follow-up. The override store, the per-tenant internal-host
+allow-list, and the deployed Proof 1b-2 are PR-2b proper, not this slice.
+
 ## References
 - [Model Context Protocol — 2026 roadmap](https://blog.modelcontextprotocol.io/posts/2026-mcp-roadmap/)
 - [MCP — Wikipedia](https://en.wikipedia.org/wiki/Model_Context_Protocol)
