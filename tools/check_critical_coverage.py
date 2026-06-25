@@ -2226,6 +2226,21 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     # _EXPECTED_ENTRY_COUNT bump) per
     # feedback_verify_promotion_meets_floor_at_promotion_time.
     ("src/cognic_agentos/protocol/pack_attestation_resolver.py", 0.95, 0.90),
+    # PR-2b-1 (ADR-002 amendment) — the operator MCP server_url override + the
+    # per-tenant exact-IP internal-host allow-list, both decision-history-audited
+    # (mirrors core/config_overlay/storage.py). CC because a bug here lets a
+    # malformed override URL or a metadata/loopback IP into the trust path the
+    # Task-2 guard carve-out reads: validate_override_url enforces the http://-IP-
+    # literal grammar (no DNS-reintroduction on the SDK leg), validate_allowlist_ip
+    # + the shared ip_passes_internal_floor floor enforce exact-IP-only / no-
+    # metadata at set-time AND feed the read-time guard, and each mutator threads
+    # actor_type onto the chain-payload evidence snapshot. Grammar is enforced
+    # INSIDE the precondition so a refusal rolls back the chain + state row
+    # atomically. Gate 136 -> 137. The gate runs against a FRESH full-suite
+    # --cov-branch coverage.json IN THE SAME COMMIT as this _CRITICAL_FILES
+    # extension (NOT just the _EXPECTED_ENTRY_COUNT bump) per
+    # feedback_verify_promotion_meets_floor_at_promotion_time.
+    ("src/cognic_agentos/core/mcp_config/storage.py", 0.95, 0.90),
 )
 
 
