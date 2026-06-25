@@ -1105,6 +1105,31 @@ class MCPAuthzClient:
                     leg=leg,
                 )
 
+    def _refuse_token_endpoint_origin_mismatch(
+        self, token_endpoint: str, *, as_issuer: str
+    ) -> None:
+        """Bind the token_endpoint to the selected AS issuer's origin (threat-model AS-3b).
+
+        Passing the SSRF/public-host guard is necessary but NOT sufficient: a
+        compromised-but-allow-listed AS can return a ``token_endpoint`` at an arbitrary
+        PUBLIC host, exfiltrating the operator ``client_secret``. This refuses unless the
+        token_endpoint's canonical origin equals the AS issuer's canonical origin.
+
+        Reuses ``mcp_oauth_as_discovery_invalid`` + a ``validation_failure`` payload tag
+        (no new public refusal enum). Raised AFTER the SSRF guard and BEFORE any
+        credential material is assembled (PR-2a pre-credential invariant). Never echoes
+        the raw token_endpoint or the secret.
+        """
+        te_origin = _canonical_origin(token_endpoint)
+        issuer_origin = _canonical_origin(as_issuer)
+        if te_origin is None or issuer_origin is None or te_origin != issuer_origin:
+            raise MCPAuthzError(
+                "mcp_oauth_as_discovery_invalid",
+                "token_endpoint origin does not match the AS issuer origin",
+                as_issuer=as_issuer,
+                validation_failure="token_endpoint_issuer_origin_mismatch",
+            )
+
     async def _fetch_prm(
         self,
         url: str,
@@ -1438,6 +1463,11 @@ class MCPAuthzClient:
         # material (body / headers / Basic-auth) is built — the secret is never
         # assembled into a request for an internal URL.
         await self._refuse_non_public_discovery_url(token_endpoint, leg="token_endpoint")
+
+        # PR-2b-0: bind the token_endpoint to the selected AS issuer's origin — a
+        # compromised-but-allow-listed AS must not redirect the client_secret to an
+        # arbitrary PUBLIC host (threat-model AS-3b). Also pre-credential.
+        self._refuse_token_endpoint_origin_mismatch(token_endpoint, as_issuer=as_issuer)
 
         # Step 2: token request — credentials in body OR Basic header
         # depending on auth_method. RFC 8707 resource indicator on

@@ -4382,3 +4382,176 @@ def test_leg5_guard_precedes_all_credential_construction() -> None:
         f"leg-5 guard (line {guard_line}) must precede ALL credential request-material "
         f"construction (earliest credential assign at line {earliest})"
     )
+
+
+class TestTokenEndpointIssuerOriginBinding:
+    @respx.mock
+    @pytest.mark.parametrize("auth_method", ["client_secret_post", "client_secret_basic"])
+    async def test_public_non_issuer_token_endpoint_refused_no_secret_sent(
+        self,
+        authz_strict: MCPAuthzClient,
+        vault_client: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+        auth_method: str,
+    ) -> None:
+        """AS-3b: a public, allow-listed AS returns a token_endpoint at a different
+        PUBLIC origin. The SSRF guard passes (public host); the issuer-origin binding
+        refuses BEFORE any credential material is built — no POST, no secret sent."""
+        as_issuer = "https://as.public.example"  # public, allow-listed
+        server = "https://server.example/mcp"
+        evil_token_endpoint = (
+            "https://evil.public.example/token"  # public BUT not the issuer origin
+        )
+        secret = "VAULT-CLIENT-SECRET-DO-NOT-LEAK"
+        vault_client.read.side_effect = _vault_dispatch(
+            allowlist=[as_issuer],
+            creds={"client_id": "cid", "client_secret": secret, "auth_method": auth_method},
+        )
+
+        async def _resolve(host: str) -> list[str]:
+            return ["93.184.216.34"]  # ALL hosts public -> SSRF guard passes everywhere
+
+        monkeypatch.setattr(mcp_authz, "_resolve_host_addresses", _resolve)
+        respx.get(server).mock(
+            return_value=httpx.Response(
+                401,
+                headers={
+                    "WWW-Authenticate": "Bearer resource_metadata="
+                    '"https://server.example/.well-known/oauth-protected-resource/mcp"'
+                },
+            )
+        )
+        respx.get("https://server.example/.well-known/oauth-protected-resource/mcp").mock(
+            return_value=httpx.Response(
+                200, json={"authorization_servers": [as_issuer], "scopes_supported": ["mcp:tools"]}
+            )
+        )
+        respx.get(f"{as_issuer}/.well-known/oauth-authorization-server").mock(
+            return_value=httpx.Response(200, json={"token_endpoint": evil_token_endpoint})
+        )
+        token_route = respx.post(evil_token_endpoint).mock(
+            return_value=httpx.Response(200, json={"access_token": "x", "expires_in": 3600})
+        )
+
+        with pytest.raises(MCPAuthzError) as exc:
+            await authz_strict.acquire_token(
+                server_url=server,
+                manifest_scopes=("mcp:tools",),
+                request_id="r",
+                tenant_id="bank_a",
+            )
+        assert exc.value.reason == "mcp_oauth_as_discovery_invalid"
+        assert (
+            exc.value.payload.get("validation_failure") == "token_endpoint_issuer_origin_mismatch"
+        )
+        assert not token_route.called  # NO POST -> no secret sent
+        for call in respx.calls:
+            assert call.request.url.host != "evil.public.example"
+            body = (call.request.content or b"").decode("utf-8", "ignore")
+            assert secret not in body
+            assert secret not in str(dict(call.request.headers))
+
+    @respx.mock
+    async def test_same_origin_token_endpoint_proceeds(
+        self,
+        authz_strict: MCPAuthzClient,
+        vault_client: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Happy path: token_endpoint on the issuer's own origin -> the POST fires."""
+        as_issuer = "https://as.public.example"
+        server = "https://server.example/mcp"
+        token_endpoint = f"{as_issuer}/oauth/token"  # SAME origin as the issuer
+        vault_client.read.side_effect = _vault_dispatch(
+            allowlist=[as_issuer],
+            creds={"client_id": "cid", "client_secret": "s", "auth_method": "client_secret_post"},
+        )
+
+        async def _resolve(host: str) -> list[str]:
+            return ["93.184.216.34"]
+
+        monkeypatch.setattr(mcp_authz, "_resolve_host_addresses", _resolve)
+        respx.get(server).mock(
+            return_value=httpx.Response(
+                401,
+                headers={
+                    "WWW-Authenticate": "Bearer resource_metadata="
+                    '"https://server.example/.well-known/oauth-protected-resource/mcp"'
+                },
+            )
+        )
+        respx.get("https://server.example/.well-known/oauth-protected-resource/mcp").mock(
+            return_value=httpx.Response(
+                200, json={"authorization_servers": [as_issuer], "scopes_supported": ["mcp:tools"]}
+            )
+        )
+        respx.get(f"{as_issuer}/.well-known/oauth-authorization-server").mock(
+            return_value=httpx.Response(200, json={"token_endpoint": token_endpoint})
+        )
+        token_route = respx.post(token_endpoint).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "access_token": _make_jwt({"aud": server}),
+                    "expires_in": 3600,
+                    "scope": "mcp:tools",
+                },
+            )
+        )
+
+        await authz_strict.acquire_token(
+            server_url=server, manifest_scopes=("mcp:tools",), request_id="r", tenant_id="bank_a"
+        )
+        assert token_route.called  # same-origin -> the token POST DID fire
+
+    @respx.mock
+    async def test_default_port_token_endpoint_proceeds(
+        self, authz_strict: MCPAuthzClient, vault_client: MagicMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """issuer `https://h` vs token_endpoint `https://h:443/...` -> same origin -> proceeds."""
+        as_issuer = "https://as.public.example"
+        server = "https://server.example/mcp"
+        token_endpoint = (
+            f"{as_issuer}:443/oauth/token"  # explicit :443 == the issuer's default port
+        )
+        vault_client.read.side_effect = _vault_dispatch(
+            allowlist=[as_issuer],
+            creds={"client_id": "cid", "client_secret": "s", "auth_method": "client_secret_post"},
+        )
+
+        async def _resolve(host: str) -> list[str]:
+            return ["93.184.216.34"]
+
+        monkeypatch.setattr(mcp_authz, "_resolve_host_addresses", _resolve)
+        respx.get(server).mock(
+            return_value=httpx.Response(
+                401,
+                headers={
+                    "WWW-Authenticate": "Bearer resource_metadata="
+                    '"https://server.example/.well-known/oauth-protected-resource/mcp"'
+                },
+            )
+        )
+        respx.get("https://server.example/.well-known/oauth-protected-resource/mcp").mock(
+            return_value=httpx.Response(
+                200, json={"authorization_servers": [as_issuer], "scopes_supported": ["mcp:tools"]}
+            )
+        )
+        respx.get(f"{as_issuer}/.well-known/oauth-authorization-server").mock(
+            return_value=httpx.Response(200, json={"token_endpoint": token_endpoint})
+        )
+        token_route = respx.post(token_endpoint).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "access_token": _make_jwt({"aud": server}),
+                    "expires_in": 3600,
+                    "scope": "mcp:tools",
+                },
+            )
+        )
+
+        await authz_strict.acquire_token(
+            server_url=server, manifest_scopes=("mcp:tools",), request_id="r", tenant_id="bank_a"
+        )
+        assert token_route.called  # default-port-equivalent origin -> the token POST DID fire
