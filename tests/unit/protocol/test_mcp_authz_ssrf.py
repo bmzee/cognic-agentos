@@ -188,3 +188,19 @@ async def test_fetch_prm_leg_mapping(
     assert e.value.reason == "mcp_discovery_url_refused"
     assert e.value.payload.get("leg") == expected_leg
     assert http.gets == []
+
+
+@pytest.mark.asyncio
+async def test_oauth_legs_inert_in_dev_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    """2a preserves the strict/dev distinction: in dev the guard skips the
+    DNS/IP check, so an internal OAuth-leg URL is NOT refused (no behavior change
+    in dev). Pins that 2a did not silently start refusing in dev."""
+    monkeypatch.setattr(mcp_authz, "_resolve_host_addresses", _resolve_internal)
+    client = _client(_StubHttp(), profile="dev")
+    # No raise for either OAuth leg in dev (the guard early-returns).
+    await client._refuse_non_public_discovery_url(
+        "https://as.internal.example/.well-known/oauth-authorization-server", leg="as_metadata"
+    )
+    await client._refuse_non_public_discovery_url(
+        "https://token.internal.example/token", leg="token_endpoint"
+    )

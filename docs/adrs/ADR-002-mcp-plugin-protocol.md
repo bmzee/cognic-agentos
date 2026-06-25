@@ -278,6 +278,32 @@ The MCP host (`build_mcp_host`) and the A2A receiver (`A2AEndpoint`) resolved pa
 
 **Rollout:** PR 1 = registration decoupling + the `discovery_status` axis; PR 2 = the operator URL override + internal-host allow-list (separate workstream). Plan: `docs/superpowers/plans/2026-06-24-adr-002-registration-discovery-decoupling.md`.
 
+## OAuth/discovery-leg SSRF hardening (PR-2a, 2026-06-25)
+
+PR-1 moved the OAuth/PRM discovery probe to invoke. The prefetch SSRF guard
+(`_refuse_non_public_discovery_url`) covered the three discovery fetches
+(server_url, WWW-Authenticate PRM, well-known PRM) but NOT the two OAuth fetches
+in `_request_token` — the AS-metadata discovery GET and the credential-bearing
+`token_endpoint` POST. The token endpoint is the sharp gap: its URL comes from
+the AS discovery document, so an allow-listed-but-compromised AS could steer the
+OAuth client credentials to an internal address (SSRF + credential exfiltration).
+
+PR-2a extends the SAME DNS-resolve-and-check guard to all five legs,
+default-deny, with the token_endpoint validated BEFORE any credential material
+is built. The refusal reuses `mcp_discovery_url_refused` (semantically widened
+to "MCP auth-or-discovery URL refused") and gains a closed-enum `leg`
+discriminator (`server_url`/`prm_metadata`/`well_known_prm`/`as_metadata`/
+`token_endpoint`) alongside the kept `refused_component` failure-type axis. A
+refusal surfaces as `discovery_status=refused` at the MCPHost call sites
+(acquire / retry-reacquire / step-up); `refresh_token` is guarded but
+unrecorded (no host call site / no key), pinned by a drift test. An AST drift
+detector keeps every `_http` fetch guarded.
+
+This is NOT complete SSRF prevention: the DNS-rebinding TOCTOU, the
+unresolvable-host pass-through, and the dev-profile skip remain (tracked).
+PR-2b adds the per-tenant internal-host allow-list + the operator server_url
+override + the deployed Proof 1b-2, and never merges without 2a.
+
 ## References
 - [Model Context Protocol — 2026 roadmap](https://blog.modelcontextprotocol.io/posts/2026-mcp-roadmap/)
 - [MCP — Wikipedia](https://en.wikipedia.org/wiki/Model_Context_Protocol)
