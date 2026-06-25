@@ -692,6 +692,7 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
+from typing import TypeGuard
 
 from cognic_agentos.protocol import mcp_authz
 
@@ -701,7 +702,7 @@ from cognic_agentos.protocol import mcp_authz
 _GUARD_EXEMPT_FUNCTIONS: frozenset[str] = frozenset()
 
 
-def _is_guard_call(node: ast.AST) -> bool:
+def _is_guard_call(node: ast.AST) -> TypeGuard[ast.Call]:
     return (
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
@@ -709,7 +710,7 @@ def _is_guard_call(node: ast.AST) -> bool:
     )
 
 
-def _is_http_fetch(node: ast.AST) -> bool:
+def _is_http_fetch(node: ast.AST) -> TypeGuard[ast.Call]:
     return (
         isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
