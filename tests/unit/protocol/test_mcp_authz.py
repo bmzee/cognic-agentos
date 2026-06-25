@@ -4555,3 +4555,91 @@ class TestTokenEndpointIssuerOriginBinding:
             server_url=server, manifest_scopes=("mcp:tools",), request_id="r", tenant_id="bank_a"
         )
         assert token_route.called  # default-port-equivalent origin -> the token POST DID fire
+
+
+class TestTokenPostNoRedirect:
+    @respx.mock
+    async def test_token_post_does_not_follow_redirect_even_with_follow_client(
+        self,
+        settings_strict: Settings,
+        vault_client: MagicMock,
+        audit_store: MagicMock,
+        decision_history_store: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        as_issuer = "https://as.public.example"
+        server = "https://server.example/mcp"
+        token_endpoint = f"{as_issuer}/token"  # same origin -> passes the origin binding
+        secret = "VAULT-CLIENT-SECRET-DO-NOT-LEAK"
+        # A client whose default IS to follow redirects — the per-call follow_redirects=False
+        # must override it, so this test FAILS if the kwarg is removed.
+        async with httpx.AsyncClient(follow_redirects=True) as http_client:
+            authz = MCPAuthzClient(
+                settings=settings_strict,
+                vault_client=vault_client,
+                http_client=http_client,
+                audit_store=audit_store,
+                decision_history_store=decision_history_store,
+            )
+            vault_client.read.side_effect = _vault_dispatch(
+                allowlist=[as_issuer],
+                creds={
+                    "client_id": "cid",
+                    "client_secret": secret,
+                    "auth_method": "client_secret_post",
+                },
+            )
+
+            async def _resolve(host: str) -> list[str]:
+                return ["93.184.216.34"]
+
+            monkeypatch.setattr(mcp_authz, "_resolve_host_addresses", _resolve)
+            respx.get(server).mock(
+                return_value=httpx.Response(
+                    401,
+                    headers={
+                        "WWW-Authenticate": "Bearer resource_metadata="
+                        '"https://server.example/.well-known/oauth-protected-resource/mcp"'
+                    },
+                )
+            )
+            respx.get("https://server.example/.well-known/oauth-protected-resource/mcp").mock(
+                return_value=httpx.Response(
+                    200,
+                    json={"authorization_servers": [as_issuer], "scopes_supported": ["mcp:tools"]},
+                )
+            )
+            respx.get(f"{as_issuer}/.well-known/oauth-authorization-server").mock(
+                return_value=httpx.Response(200, json={"token_endpoint": token_endpoint})
+            )
+            evil = "https://evil.public.example/steal"
+            # 307 PRESERVES POST method+body on a follow, so a followed redirect would
+            # re-send the secret (making the secret-leak assertion meaningful). The evil
+            # route is METHOD-AGNOSTIC (`respx.route(host=...)`) so a 302-as-GET follow is
+            # caught too — a method-specific `respx.post(evil)` would miss it.
+            token_route = respx.post(token_endpoint).mock(
+                return_value=httpx.Response(307, headers={"Location": evil})
+            )
+            evil_route = respx.route(host="evil.public.example").mock(
+                return_value=httpx.Response(200, json={"access_token": "x"})
+            )
+
+            with pytest.raises(MCPAuthzError):  # 307 -> non-200 -> refused
+                await authz.acquire_token(
+                    server_url=server,
+                    manifest_scopes=("mcp:tools",),
+                    request_id="r",
+                    tenant_id="bank_a",
+                )
+            assert token_route.called
+            assert not evil_route.called  # method-agnostic: evil was NEVER contacted (any verb)
+            for call in respx.calls:
+                # The client_secret rides ONLY the legitimate same-origin token POST body
+                # (client_secret_post), so the secret-substring checks are scoped to the evil
+                # host: it must NEVER ride a call to evil. Vacuous here (evil uncalled) but
+                # load-bearing — dropping follow_redirects=False re-POSTs the secret-bearing
+                # body to evil (307 preserves method+body), which these guarded checks catch.
+                if call.request.url.host == "evil.public.example":
+                    assert secret not in (call.request.content or b"").decode("utf-8", "ignore")
+                    assert secret not in str(dict(call.request.headers))
+                assert call.request.url.host != "evil.public.example"

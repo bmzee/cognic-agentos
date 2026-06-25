@@ -1510,6 +1510,7 @@ class MCPAuthzClient:
                 data=body,
                 headers=headers,
                 timeout=timeout,
+                follow_redirects=False,
             )
         except httpx.TimeoutException as exc:
             raise MCPAuthzError(
