@@ -146,3 +146,61 @@ async def test_public_ip_literal_passes_guard() -> None:
         await _discover(_client(http, profile="prod"), "https://8.8.8.8/")
     assert e.value.reason == "mcp_anonymous_refused"
     assert http.gets  # fetched (guard allowed the public host)
+
+
+async def _resolve_internal(host: str) -> list[str]:
+    return ["10.0.0.5"]
+
+
+@pytest.mark.asyncio
+async def test_server_url_leg_carries_leg_discriminator(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(mcp_authz, "_resolve_host_addresses", _resolve_internal)
+    http = _StubHttp(fail_if_called=True)
+    with pytest.raises(MCPAuthzError) as e:
+        await _discover(_client(http, profile="prod"), "https://internal.example/mcp")
+    assert e.value.reason == "mcp_discovery_url_refused"
+    assert e.value.payload.get("leg") == "server_url"
+    assert e.value.payload.get("refused_component") == "host_address"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "discovery_path,expected_leg",
+    [
+        ("www-authenticate", "prm_metadata"),
+        ("endpoint-well-known", "well_known_prm"),
+        ("root-well-known", "well_known_prm"),
+    ],
+)
+async def test_fetch_prm_leg_mapping(
+    discovery_path: str, expected_leg: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(mcp_authz, "_resolve_host_addresses", _resolve_internal)
+    http = _StubHttp(fail_if_called=True)
+    client = _client(http, profile="prod")
+    with pytest.raises(MCPAuthzError) as e:
+        await client._fetch_prm(
+            "https://internal.example/.well-known/oauth-protected-resource",
+            discovery_path,
+            "https://server.example/mcp",
+            5.0,
+        )
+    assert e.value.reason == "mcp_discovery_url_refused"
+    assert e.value.payload.get("leg") == expected_leg
+    assert http.gets == []
+
+
+@pytest.mark.asyncio
+async def test_oauth_legs_inert_in_dev_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    """2a preserves the strict/dev distinction: in dev the guard skips the
+    DNS/IP check, so an internal OAuth-leg URL is NOT refused (no behavior change
+    in dev). Pins that 2a did not silently start refusing in dev."""
+    monkeypatch.setattr(mcp_authz, "_resolve_host_addresses", _resolve_internal)
+    client = _client(_StubHttp(), profile="dev")
+    # No raise for either OAuth leg in dev (the guard early-returns).
+    await client._refuse_non_public_discovery_url(
+        "https://as.internal.example/.well-known/oauth-authorization-server", leg="as_metadata"
+    )
+    await client._refuse_non_public_discovery_url(
+        "https://token.internal.example/token", leg="token_endpoint"
+    )

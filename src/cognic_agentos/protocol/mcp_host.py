@@ -1807,14 +1807,30 @@ class MCPHost:
                 # mcp_step_up_unauthorised which propagates unchanged
                 # (T5's audit machinery emits the row from inside
                 # the authz client).
-                stepped_up = await self._authz.step_up_token(
-                    server_url=entry.server_url,
-                    current_token=token,
-                    requested_scope=signal_payload["requested_scope"],
-                    manifest_scopes=entry.manifest_scopes,
-                    request_id=request_id,
-                    tenant_id=tenant_id,
-                )
+                try:
+                    stepped_up = await self._authz.step_up_token(
+                        server_url=entry.server_url,
+                        current_token=token,
+                        requested_scope=signal_payload["requested_scope"],
+                        manifest_scopes=entry.manifest_scopes,
+                        request_id=request_id,
+                        tenant_id=tenant_id,
+                    )
+                except MCPAuthzError as exc:
+                    # PR-2a: a step-up failure that reflects endpoint/OAuth
+                    # reachability (SSRF refusal, timeout, transport, AS-discovery /
+                    # token errors) surfaces on the discovery-status axis via the
+                    # SHARED mapper — so step-up is not a second unobserved invoke
+                    # path. mcp_step_up_unauthorised is an authorization denial (the
+                    # original token is fine, only the wider scope was denied), NOT
+                    # endpoint reachability, so it is the one excluded reason.
+                    if exc.reason != "mcp_step_up_unauthorised":
+                        self._record_discovery_status(
+                            tenant_id=tenant_id,
+                            server_id=entry.server_id,
+                            status=discovery_status_for_authz_reason(exc.reason),
+                        )
+                    raise
                 dispatch_context.last_acquired_token = stepped_up
                 payload, session, used_token = await _attempt(stepped_up)
 

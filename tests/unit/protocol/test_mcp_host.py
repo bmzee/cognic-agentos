@@ -69,19 +69,21 @@ challenge cleanly):
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import time
+from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from cognic_agentos.core.audit import AuditStore
 from cognic_agentos.core.config import build_settings_without_env_file
 from cognic_agentos.core.decision_history import DecisionHistoryStore
-from cognic_agentos.protocol import MCPNotAvailableError
+from cognic_agentos.protocol import MCPNotAvailableError, mcp_host
 from cognic_agentos.protocol.discovery_status import InMemoryDiscoveryStatusRecorder
-from cognic_agentos.protocol.mcp_authz import MCPAuthzClient, MCPAuthzError, Token
+from cognic_agentos.protocol.mcp_authz import AuthzReason, MCPAuthzClient, MCPAuthzError, Token
 
 # ---------------------------------------------------------------------------
 # Fixtures + helpers
@@ -2579,3 +2581,183 @@ class TestDiscoveryStatusRecording:
                 tenant_id="t-1",
             )
         assert recorder.get(tenant_id="t-1", pack_id=server_entry.server_id) == "unreachable"
+
+
+# ---------------------------------------------------------------------------
+# PR-2a Task 4 — discovery_status recording at the step-up call site
+# ---------------------------------------------------------------------------
+
+
+def _host_with_step_up_raising(
+    recorder: InMemoryDiscoveryStatusRecorder,
+    step_up_error: MCPAuthzError,
+    *,
+    server_id: str = "example.mcp",
+    tenant_id: str = "t-1",
+) -> tuple[Any, Any, str]:
+    """Build a real ``MCPHost`` (recorder injected) wired to drive the GENUINE
+    ``call_tool`` → 403-insufficient_scope → ``step_up_token`` production path,
+    with ``step_up_token`` stubbed to raise ``step_up_error``.
+
+    Mirrors two existing patterns verbatim so the recording is exercised at the
+    actual production call site (never a direct ``step_up_token`` call):
+
+      * ``TestCallToolStepUpOn403InsufficientScope`` (test_mcp_host.py:1192-1208):
+        the 403 signal is a real ``MCPTransportError`` whose ``__cause__`` is an
+        httpx 403 carrying ``error="insufficient_scope", scope="<wider>"``, fed
+        through ``http_transport.send.side_effect`` so ``call_tool`` →
+        ``_attempt`` → ``transport.send`` raises it, ``_classify_send_error``
+        returns ``("step_up", ...)`` (mcp_host.py:443-446), and the production
+        ``else: # signal == "step_up"`` branch (mcp_host.py:1803-1810) awaits
+        ``step_up_token``.
+      * ``_host_with_recorder`` (test_mcp_host.py:2363-2382): the
+        ``discovery_status_recorder=`` constructor injection.
+
+    Returns ``(host, entry, tenant_id)``.
+    """
+    from cognic_agentos.protocol import mcp_host
+    from cognic_agentos.protocol.mcp_transports import MCPTransportError
+
+    server_url = "https://server.example/mcp"
+
+    # Real 403-insufficient_scope signal — identical shape to
+    # TestCallToolStepUpOn403InsufficientScope:1192-1208 (a transport error whose
+    # __cause__ is an httpx 403 with WWW-Authenticate insufficient_scope+scope).
+    first_send_error = MCPTransportError(
+        "mcp_transport_send_failed",
+        "403 needs wider scope",
+        server_url=server_url,
+    )
+    first_send_error.__cause__ = _httpx_status_error(
+        403,
+        'Bearer error="insufficient_scope", scope="mcp:tools.write"',
+    )
+
+    http_transport = _http_transport(mcp_host, server_url)
+    # Mirrors test_mcp_host.py:1201 — the first (and only) send raises the 403.
+    http_transport.send.side_effect = [first_send_error]
+
+    authz = MagicMock(spec=MCPAuthzClient)
+    authz.acquire_token = AsyncMock(return_value=_token())
+    authz.invalidate_cached_token = AsyncMock(return_value=None)
+    # The GENUINE production call site (mcp_host.py:1810) — stubbed to raise,
+    # mirroring test_mcp_host.py:1202-1208.
+    authz.step_up_token = AsyncMock(side_effect=step_up_error)
+
+    audit_store = MagicMock(spec=AuditStore)
+    audit_store.append = AsyncMock(return_value=("uuid", b"hash"))
+    decision_history_store = MagicMock(spec=DecisionHistoryStore)
+    decision_history_store.append = AsyncMock(return_value=("uuid", b"hash"))
+
+    settings = build_settings_without_env_file().model_copy(
+        update={"mcp_oauth_request_timeout_s": 7, "mcp_call_tool_timeout_s": 13}
+    )
+
+    entry = mcp_host.MCPServerEntry(
+        server_id=server_id,
+        server_url=server_url,
+        transport_kind="http",
+        manifest_scopes=("mcp:tools",),
+        risk_tier="read_only",
+        pack_signature_digest="sha256:deadbeef",
+    )
+
+    # ``require_mcp`` is a no-op when the SDK is installed; patch defensively so
+    # the helper constructs in a kernel-image-equivalent (no-mcp) venv too,
+    # mirroring the ``host_module`` fixture's monkeypatch (test_mcp_host.py:116).
+    with patch.object(mcp_host, "require_mcp", MagicMock()):
+        host = mcp_host.MCPHost(
+            servers={entry.server_id: entry},
+            transports={"http": http_transport},
+            authz=authz,
+            audit_store=audit_store,
+            decision_history_store=decision_history_store,
+            settings=settings,
+            discovery_status_recorder=recorder,
+        )
+    return host, entry, tenant_id
+
+
+async def _drive_call_tool_into_step_up(host: Any, entry: Any, tenant_id: str) -> Any:
+    """Drive the REAL ``call_tool`` flow into the step-up branch.
+
+    ``call_tool`` → ``acquire_token`` (records ``auth_ready``) → ``_attempt`` →
+    ``transport.send`` raises the 403-insufficient_scope ``MCPTransportError`` →
+    ``_classify_send_error`` returns ``("step_up", ...)`` → the production
+    ``else: # signal == "step_up"`` branch awaits ``self._authz.step_up_token``
+    (mcp_host.py:1810). The stub's ``MCPAuthzError`` raises THERE and propagates
+    up through the Task-4 ``except MCPAuthzError`` wrapper — i.e. the recording is
+    exercised at the genuine production call site, never a direct
+    ``step_up_token`` invocation and never a stubbed-out ``call_tool``.
+
+    Mirrors TestCallToolStepUpOn403InsufficientScope:1161-1167 / 1210-1217.
+    """
+    return await host.call_tool(
+        server_id=entry.server_id,
+        tool_name="lookup",
+        arguments={},
+        request_id="r1",
+        tenant_id=tenant_id,
+    )
+
+
+class TestStepUpDiscoveryStatusRecording:
+    @pytest.mark.parametrize(
+        "reason,expected",
+        [
+            ("mcp_discovery_url_refused", "refused"),  # leg-4/leg-5 SSRF refusal
+            ("mcp_oauth_request_timeout", "unreachable"),  # endpoint unreachable
+        ],
+    )
+    async def test_step_up_reachability_failure_records(
+        self, reason: AuthzReason, expected: str
+    ) -> None:
+        """A step-up failure reflecting endpoint/OAuth reachability surfaces on the
+        discovery-status axis via the shared mapper — the step-up path is not a
+        second unobserved invoke path. (step_up_token reaches _request_token, which
+        can fail with SSRF/timeout/transport/discovery/token errors.)"""
+        recorder = InMemoryDiscoveryStatusRecorder()
+        host, entry, tenant_id = _host_with_step_up_raising(
+            recorder, MCPAuthzError(reason, "step-up reachability failure")
+        )
+        with pytest.raises(MCPAuthzError):
+            await _drive_call_tool_into_step_up(host, entry, tenant_id)
+        assert recorder.get(tenant_id=tenant_id, pack_id=entry.server_id) == expected
+
+    async def test_step_up_authorization_denial_does_not_record(self) -> None:
+        """mcp_step_up_unauthorised is an AUTHORIZATION denial (the original token is
+        fine, only the wider scope was denied), NOT endpoint reachability — it must
+        NOT touch the discovery-status axis (it stays whatever it was). The first
+        acquire records ``auth_ready``; a BROKEN exclusion would overwrite it with
+        ``refused`` via the mapper, so this assertion is load-bearing."""
+        recorder = InMemoryDiscoveryStatusRecorder()
+        recorder.record(tenant_id="bank_a", pack_id="pack-x", status="auth_ready")
+        host, entry, tenant_id = _host_with_step_up_raising(
+            recorder,
+            MCPAuthzError("mcp_step_up_unauthorised", "scope denied"),
+            server_id="pack-x",
+            tenant_id="bank_a",
+        )
+        with pytest.raises(MCPAuthzError):
+            await _drive_call_tool_into_step_up(host, entry, tenant_id)
+        assert recorder.get(tenant_id=tenant_id, pack_id=entry.server_id) == "auth_ready"
+
+
+def test_mcp_host_has_no_refresh_token_call_path() -> None:
+    """PR-2a §3.3 drift pin: refresh_token is guarded-but-unrecorded by design —
+    it carries no server_id/pack key and MCPHost never invokes it, so there is no
+    production call site that could record discovery_status. If a future MCPHost
+    path calls refresh_token, this pin fails and forces the recording decision to
+    be revisited (the OAuth-leg guard still applies in _request_token regardless)."""
+    src = Path(mcp_host.__file__).read_text()
+    tree = ast.parse(src)
+    refresh_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "refresh_token"
+    ]
+    assert refresh_calls == [], (
+        "MCPHost now calls refresh_token — revisit PR-2a §3.3 discovery_status recording"
+    )

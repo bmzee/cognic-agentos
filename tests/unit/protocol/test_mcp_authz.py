@@ -24,11 +24,13 @@ Test classes (per Sprint-5 plan §T5):
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import base64
 import json
 import time
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -37,6 +39,7 @@ import pytest
 import respx
 
 from cognic_agentos.core.config import Settings, build_settings_without_env_file
+from cognic_agentos.protocol import mcp_authz
 from cognic_agentos.protocol.mcp_authz import (
     MCPAuthzClient,
     MCPAuthzError,
@@ -146,6 +149,28 @@ async def authz(
 ) -> MCPAuthzClient:
     return MCPAuthzClient(
         settings=settings,
+        vault_client=vault_client,
+        http_client=http_client,
+        audit_store=audit_store,
+        decision_history_store=decision_history_store,
+    )
+
+
+@pytest.fixture
+def settings_strict(settings: Settings) -> Settings:
+    return settings.model_copy(update={"runtime_profile": "prod"})
+
+
+@pytest.fixture
+async def authz_strict(
+    settings_strict: Settings,
+    vault_client: MagicMock,
+    http_client: httpx.AsyncClient,
+    audit_store: MagicMock,
+    decision_history_store: MagicMock,
+) -> MCPAuthzClient:
+    return MCPAuthzClient(
+        settings=settings_strict,
         vault_client=vault_client,
         http_client=http_client,
         audit_store=audit_store,
@@ -4127,3 +4152,171 @@ class TestAuthzErrorMessageScrubbing:
         assert exc.value.payload.get("vault_error_class") == "RuntimeError"
         assert "hvs.LEAK_BYTES" not in str(exc.value)
         assert "vault detail:" not in str(exc.value)
+
+
+class TestOAuthLegSsrfGuard:
+    @respx.mock
+    async def test_leg4_as_metadata_internal_refused_before_get(
+        self,
+        authz_strict: MCPAuthzClient,
+        vault_client: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        as_issuer = "https://as.internal.example"  # allow-listed but internal
+        server = "https://server.example/mcp"
+        vault_client.read.side_effect = _vault_dispatch(allowlist=[as_issuer])
+
+        async def _resolve(host: str) -> list[str]:
+            return ["10.0.0.5"] if host == "as.internal.example" else ["93.184.216.34"]
+
+        monkeypatch.setattr(mcp_authz, "_resolve_host_addresses", _resolve)
+        respx.get(server).mock(
+            return_value=httpx.Response(
+                401,
+                headers={
+                    "WWW-Authenticate": "Bearer resource_metadata="
+                    '"https://server.example/.well-known/oauth-protected-resource/mcp"'
+                },
+            )
+        )
+        respx.get("https://server.example/.well-known/oauth-protected-resource/mcp").mock(
+            return_value=httpx.Response(
+                200, json={"authorization_servers": [as_issuer], "scopes_supported": ["mcp:tools"]}
+            )
+        )
+        as_meta = respx.get(f"{as_issuer}/.well-known/oauth-authorization-server").mock(
+            return_value=httpx.Response(200, json={"token_endpoint": f"{as_issuer}/token"})
+        )
+
+        with pytest.raises(MCPAuthzError) as exc:
+            await authz_strict.acquire_token(
+                server_url=server,
+                manifest_scopes=("mcp:tools",),
+                request_id="r",
+                tenant_id="bank_a",
+            )
+        assert exc.value.reason == "mcp_discovery_url_refused"
+        assert exc.value.payload.get("leg") == "as_metadata"
+        assert not as_meta.called  # the AS-metadata GET never fired
+
+    @respx.mock
+    @pytest.mark.parametrize("auth_method", ["client_secret_post", "client_secret_basic"])
+    async def test_leg5_credential_exfil_blocked_both_auth_methods(
+        self,
+        authz_strict: MCPAuthzClient,
+        vault_client: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+        auth_method: str,
+    ) -> None:
+        """The headline credential-exfil case, for BOTH transports (the threat model
+        covers form-body AND HTTP Basic credentials): a PUBLIC allow-listed AS returns
+        a discovery doc steering token_endpoint to an INTERNAL host. The guard refuses
+        before any credential material is built — no POST, so neither the form body
+        (`client_secret_post`) nor the Basic `Authorization` header
+        (`client_secret_basic`) is ever sent."""
+        as_issuer = "https://as.public.example"  # public, allow-listed
+        server = "https://server.example/mcp"
+        internal_token_endpoint = "https://token.internal.example/token"
+        secret = "VAULT-CLIENT-SECRET-DO-NOT-LEAK"
+        vault_client.read.side_effect = _vault_dispatch(
+            allowlist=[as_issuer],
+            creds={"client_id": "cid", "client_secret": secret, "auth_method": auth_method},
+        )
+
+        async def _resolve(host: str) -> list[str]:
+            return ["10.0.0.9"] if host == "token.internal.example" else ["93.184.216.34"]
+
+        monkeypatch.setattr(mcp_authz, "_resolve_host_addresses", _resolve)
+        respx.get(server).mock(
+            return_value=httpx.Response(
+                401,
+                headers={
+                    "WWW-Authenticate": "Bearer resource_metadata="
+                    '"https://server.example/.well-known/oauth-protected-resource/mcp"'
+                },
+            )
+        )
+        respx.get("https://server.example/.well-known/oauth-protected-resource/mcp").mock(
+            return_value=httpx.Response(
+                200, json={"authorization_servers": [as_issuer], "scopes_supported": ["mcp:tools"]}
+            )
+        )
+        respx.get(f"{as_issuer}/.well-known/oauth-authorization-server").mock(
+            return_value=httpx.Response(200, json={"token_endpoint": internal_token_endpoint})
+        )
+        token_route = respx.post(internal_token_endpoint).mock(
+            return_value=httpx.Response(
+                200, json={"access_token": "x", "expires_in": 3600, "scope": "mcp:tools"}
+            )
+        )
+
+        with pytest.raises(MCPAuthzError) as exc:
+            await authz_strict.acquire_token(
+                server_url=server,
+                manifest_scopes=("mcp:tools",),
+                request_id="r",
+                tenant_id="bank_a",
+            )
+        assert exc.value.reason == "mcp_discovery_url_refused"
+        assert exc.value.payload.get("leg") == "token_endpoint"
+        assert not token_route.called  # NO POST -> neither form body nor Basic header sent
+        # The internal token endpoint received NO request at all, and the raw secret
+        # (the form-body value for _post) never appears in any sent request.
+        for call in respx.calls:
+            assert call.request.url.host != "token.internal.example"
+            body = (call.request.content or b"").decode("utf-8", "ignore")
+            assert secret not in body
+            assert secret not in str(dict(call.request.headers))
+
+
+def test_leg5_guard_precedes_all_credential_construction() -> None:
+    """Structural pin (strengthened): in _request_token the token_endpoint guard
+    precedes EVERY credential request-material assignment — `body`, `headers`,
+    `encoded_id`, `encoded_secret`, `basic_credentials` — so neither the form body
+    (`client_secret_post`) nor the Basic-auth header (`client_secret_basic`) can be
+    assembled for an internal URL even if a future refactor reorders statements."""
+    src = Path(mcp_authz.__file__).read_text()
+    tree = ast.parse(src)
+    fn = next(
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.AsyncFunctionDef) and n.name == "_request_token"
+    )
+    cred_names = {"body", "headers", "encoded_id", "encoded_secret", "basic_credentials"}
+    guard_line: int | None = None
+    cred_lines: dict[str, int] = {}
+    for node in ast.walk(fn):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "_refuse_non_public_discovery_url"
+            and any(
+                kw.arg == "leg"
+                and isinstance(kw.value, ast.Constant)
+                and kw.value.value == "token_endpoint"
+                for kw in node.keywords
+            )
+        ):
+            guard_line = node.lineno
+        if isinstance(node, ast.Assign):
+            for t in node.targets:
+                if isinstance(t, ast.Name) and t.id in cred_names:
+                    cred_lines.setdefault(t.id, node.lineno)
+        elif isinstance(node, ast.AnnAssign):
+            # `body: dict[str, str] = {...}` and `headers: dict[str, str] = {}`
+            # are ANNOTATED assignments (single `.target`, not `.targets`) — the
+            # two most security-sensitive credential-material names (the form body
+            # carries `client_secret` for `client_secret_post`), so the pin MUST
+            # cover them too, not just the plain-`ast.Assign` encoded_*/basic ones.
+            t = node.target
+            if isinstance(t, ast.Name) and t.id in cred_names:
+                cred_lines.setdefault(t.id, node.lineno)
+    assert guard_line is not None, "leg-5 token_endpoint guard not found in _request_token"
+    assert cred_names <= set(cred_lines), (
+        f"missing credential-material assignments: {cred_names - set(cred_lines)}"
+    )
+    earliest = min(cred_lines.values())
+    assert guard_line < earliest, (
+        f"leg-5 guard (line {guard_line}) must precede ALL credential request-material "
+        f"construction (earliest credential assign at line {earliest})"
+    )
