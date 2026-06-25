@@ -39,6 +39,7 @@ from cognic_agentos.portal.rbac.scopes import (  # noqa: F401  (ScopeSet kept fo
     ConfigOverlayRBACScope,
     EmergencyRBACScope,
     EvalRBACScope,
+    MCPInternalAccessRBACScope,
     MCPRBACScope,
     MemoryRBACScope,
     ModelRBACScope,
@@ -139,6 +140,14 @@ class Actor(pydantic.BaseModel):
     #:
     #: 2026-06-20 (ADR-005, Fork B) — further widened with ``SubAgentRBACScope``
     #: so a single Actor can carry a sub-agent-spawn grant.
+    #:
+    #: PR-2b-1 Task 5 (ADR-002, DD-3) — further widened with
+    #: ``MCPInternalAccessRBACScope`` so an operator actor carries
+    #: ``mcp.override.{read,write}`` / ``mcp.allowlist.{read,write}`` for the MCP
+    #: operator-config endpoints. A SEPARATE family from ``MCPRBACScope`` —
+    #: value-disjoint despite the shared ``mcp.`` prefix. Additive — pre-PR-2b-1
+    #: actors still construct cleanly. Pinned by
+    #: ``tests/unit/portal/rbac/test_mcp_internal_access_scopes.py``.
     scopes: frozenset[
         PackRBACScope
         | UIRBACScope
@@ -152,6 +161,7 @@ class Actor(pydantic.BaseModel):
         | ToolApprovalRBACScope
         | RunRBACScope
         | MCPRBACScope
+        | MCPInternalAccessRBACScope
         | SubAgentRBACScope
     ]
     actor_type: ActorType
