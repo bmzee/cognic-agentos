@@ -271,6 +271,15 @@ class TestCanonicalOrigin:
     def test_empty_host_after_trailing_dot_rejected(self) -> None:
         assert _canonical_origin("https://./token") is None
 
+    def test_malformed_idn_host_rejected(self) -> None:
+        # Fail-closed IDNA branch (the `except (UnicodeError, ValueError): return None`
+        # arm): a non-IP host that cannot be IDNA-encoded to an A-label — a >63-char
+        # label ("label too long") or an empty interior label — is never a usable
+        # origin, so a compromised token_endpoint at such a host can never match the
+        # issuer.
+        assert _canonical_origin("https://" + "a" * 64 + ".example/token") is None
+        assert _canonical_origin("https://a..b/token") is None
+
 
 class TestParseResourceMetadataUrl:
     def test_returns_url_when_present(self) -> None:
