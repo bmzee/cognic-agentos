@@ -20,6 +20,7 @@
 - **Bar 1 is a checkpoint, Bar 2 is completion.** If Bar 2 cannot be stood up, record a design/product finding in `docs/VALIDATION-RESULTS.md` — never redefine the proof downward.
 - **Findings F1 (no guard-allowed documentation range) + F2 (CGNAT `is_private=False`)** are recorded in `docs/VALIDATION-RESULTS.md` regardless of outcome.
 - Run all Python via `uv run`. Branch: `feat/proof-1b-2-deployed-mcp-loop`. Never stage the 3 protected docs or `infra/proof-1b/` staging.
+- **T4–T6 are AUTHOR-ONLY (user-locked decision):** the three image Dockerfiles (T4 MCP server, T5 AS, T6 proof AgentOS) are AUTHORED + pinned by a structural pytest (`tests/unit/proof_1b_2/test_proof_images.py`, extended per image); the actual `docker build` is **DEFERRED to the T9 operator run** (which rebuilds the wheel + builds every image — a broken Dockerfile is caught there). No Docker/kind authority is spent during the T1–T8 authoring slices; only T9 (env-gated `COGNIC_RUN_PROOF_1B2=1`, explicit operator authorization) runs Docker/kind.
 
 ---
 
@@ -209,7 +210,7 @@ def create_proof_app() -> FastAPI:
 
 ### Task 4: MCP tool Service image
 
-**Files:** Create `infra/proof-1b-2/Dockerfile.mcp-server`
+**Files:** Create `infra/proof-1b-2/Dockerfile.mcp-server` + `tests/unit/proof_1b_2/test_proof_images.py` (the author-time structural test)
 
 - [ ] **Step 1: Write the Dockerfile**
 ```dockerfile
@@ -224,9 +225,9 @@ CMD ["python", "-m", "cognic_tool_search.server"]
 ```
 (If `dist/*.whl` is stale vs the Task-1 edits, rebuild first: `cd examples/cognic-tool-search && uv build --wheel`. The Task-1 edits ARE in the wheel only after a rebuild — the runner T9 rebuilds the wheel before this image.)
 
-- [ ] **Step 2: Build smoke** — `docker build -f infra/proof-1b-2/Dockerfile.mcp-server -t cognic-proof-mcp:1b2 .` → exit 0.
+- [ ] **Step 2: Structural verification (AUTHOR-ONLY — `docker build` DEFERRED to T9 per the Global-Constraints T4–T6 author-only decision).** Add `tests/unit/proof_1b_2/test_proof_images.py` reading the Dockerfile as text + asserting the load-bearing invariants: the `examples/cognic-tool-search/dist/` wheel COPY path + the exact `.whl` filename, the exact `CMD ["python", "-m", "cognic_tool_search.server"]`, and the `mcp==1.27.0` + `uvicorn` pip install. `uv run pytest tests/unit/proof_1b_2/test_proof_images.py -v` → passes. (T9's runner runs the real `docker build` — a broken Dockerfile is caught there.)
 
-- [ ] **Step 3: Commit** — `git add infra/proof-1b-2/Dockerfile.mcp-server && git commit -m "feat(proof-1b-2): MCP tool Service image"`
+- [ ] **Step 3: Commit** — `git add infra/proof-1b-2/Dockerfile.mcp-server tests/unit/proof_1b_2/test_proof_images.py && git commit -m "feat(proof-1b-2): T4 — MCP tool Service image Dockerfile (author-only) + structural test"`
 
 ---
 
