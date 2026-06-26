@@ -662,3 +662,95 @@ jobs:
           install_only: true
       - name: Run the kind Ready-smoke
         run: bash infra/charts/agentos/ci/smoke/run-smoke.sh
+
+  proof-1b-2:
+    # Proof 1b-2 — deployed governed MCP invocation loop (Bar 1 carve-out
+    # checkpoint + Bar 2 full list_tools/call_tool loop) in a `kind` cluster.
+    # NEVER default-on: this job runs ONLY when the repo var
+    # COGNIC_RUN_PROOF_1B2 == '1' OR on a manual workflow_dispatch — it rebuilds
+    # the pack wheel, stages the trust inputs, builds FOUR images, spins kind, and
+    # brings up a live Vault + Postgres, far too heavy for every PR. Mirrors the
+    # env-gated `kind-smoke` job above. timeout-minutes is 40 (vs the smoke's 25):
+    # 4 image builds + kind + the Bar 1 / Bar 2 sequence is heavier.
+    name: Proof 1b-2 deployed MCP loop (env-gated)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    if: ${{ vars.COGNIC_RUN_PROOF_1B2 == '1' || github.event_name == 'workflow_dispatch' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Install kind + helm + kubectl
+        uses: helm/kind-action@v1
+        with:
+          install_only: true
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7  # mirrors the `ci` job (python.yml:27-31)
+        with:
+          version: "0.5.29"
+          enable-cache: true
+      - name: Read .python-version
+        id: python-version
+        run: echo "version=$(cat .python-version)" >> "$GITHUB_OUTPUT"
+      - name: Set up Python
+        uses: actions/setup-python@v6  # mirrors the `ci` job (python.yml:37-40)
+        with:
+          python-version: ${{ steps.python-version.outputs.version }}
+      - name: Install pinned cosign v3.0.6 (trust-staging signs the pack wheel)
+        # Mirrors the EXACT cosign pin baked into the default-adapters image
+        # (infra/agentos/Dockerfile:224-245 — COSIGN_VERSION 3.0.6 + the same
+        # COSIGN_SHA256). Same curl + sha256 + install-to-/usr/local/bin shape as
+        # the pinned-OPA step in the `ci` job above (python.yml:55-66). The proof's
+        # trust-staging (tests/integration/proof_1b/stage_trust_inputs.py) cosign-
+        # signs the cognic-tool-search wheel; the runner preflight requires cosign
+        # on PATH (run-proof-1b-2.sh:112).
+        run: |
+          set -euo pipefail
+          COSIGN_VERSION=3.0.6
+          COSIGN_SHA256=c956e5dfcac53d52bcf058360d579472f0c1d2d9b69f55209e256fe7783f4c74
+          curl --fail --location --silent --show-error \
+            -o /tmp/cosign \
+            "https://github.com/sigstore/cosign/releases/download/v${COSIGN_VERSION}/cosign-linux-amd64"
+          echo "${COSIGN_SHA256}  /tmp/cosign" | sha256sum -c -
+          sudo install -m 0755 /tmp/cosign /usr/local/bin/cosign
+          rm /tmp/cosign
+          cosign version
+      - name: Install pinned syft v1.45.1 + grype v0.114.0 (trust-staging SBOM + vuln scan)
+        # syft + grype are required ONLY by the proof's trust-staging step
+        # (tests/integration/proof_1b/stage_trust_inputs.py builds an SBOM via syft +
+        # vuln-scans via grype; the runner preflight at run-proof-1b-2.sh:112 `die`s
+        # without them). Pinned release tarball + sha256 verification — the SAME
+        # curl + `sha256sum -c` + install-to-/usr/local/bin shape as the cosign step
+        # above — NOT a piped remote installer fetched from a mutable branch (it can
+        # change after review; this repo's supply-chain posture forbids that shape). The
+        # SYFT_SHA256 / GRYPE_SHA256 were computed from the downloaded linux_amd64
+        # tarballs AND cross-checked against anchore's published checksums.txt (both
+        # agreed). To bump: re-fetch the version + checksum for the new tag the same
+        # way (download the linux_amd64 tarball, sha256sum it, confirm vs checksums.txt).
+        run: |
+          set -euo pipefail
+          SYFT_VERSION=1.45.1
+          SYFT_SHA256=20c84195e24927f50a3b2269946be51f4c4abc9d2f145fee7388b4199149f716
+          GRYPE_VERSION=0.114.0
+          GRYPE_SHA256=edda0968d8827daab01d32b3cd7de192ae0915005e7bbfcfef9e68e79bc43343
+          curl --fail --location --silent --show-error \
+            -o /tmp/syft.tar.gz \
+            "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/syft_${SYFT_VERSION}_linux_amd64.tar.gz"
+          echo "${SYFT_SHA256}  /tmp/syft.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/syft.tar.gz -C /tmp syft
+          sudo install -m 0755 /tmp/syft /usr/local/bin/syft
+          curl --fail --location --silent --show-error \
+            -o /tmp/grype.tar.gz \
+            "https://github.com/anchore/grype/releases/download/v${GRYPE_VERSION}/grype_${GRYPE_VERSION}_linux_amd64.tar.gz"
+          echo "${GRYPE_SHA256}  /tmp/grype.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/grype.tar.gz -C /tmp grype
+          sudo install -m 0755 /tmp/grype /usr/local/bin/grype
+          rm -f /tmp/syft.tar.gz /tmp/syft /tmp/grype.tar.gz /tmp/grype
+          syft version
+          grype version
+      - name: Run the Proof 1b-2 deployed MCP loop (Bar 1 checkpoint + Bar 2 completion)
+        # TWO gates, BOTH required: the GitHub `vars.COGNIC_RUN_PROOF_1B2` (the job
+        # `if` above) gates the JOB; this ENV COGNIC_RUN_PROOF_1B2=1 enables the
+        # RUNNER (it self-gates on the ENV var and exits 0 cleanly if unset —
+        # run-proof-1b-2.sh:23-26). A bare `bash …` would run the job but the runner
+        # would silently exit 0 (skip the proof).
+        run: COGNIC_RUN_PROOF_1B2=1 bash infra/proof-1b-2/run-proof-1b-2.sh
