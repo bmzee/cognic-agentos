@@ -11,6 +11,8 @@ a subset of {mcp:tools}.
 
 from __future__ import annotations
 
+import os
+
 from mcp.server.auth.provider import AccessToken, TokenVerifier
 from mcp.server.auth.settings import AuthSettings
 from mcp.server.fastmcp import FastMCP
@@ -18,9 +20,9 @@ from pydantic import AnyHttpUrl
 
 from cognic_tool_search.corpus_loader import load_corpus, search
 
-_HOST = "127.0.0.1"
+_HOST = os.environ.get("COGNIC_PROOF_HOST", "127.0.0.1")
 _PORT = 8765
-_SERVER_URL = "http://127.0.0.1:8765/mcp"
+_SERVER_URL = os.environ.get("COGNIC_PROOF_SERVER_URL", "http://127.0.0.1:8765/mcp")
 _REQUIRED_SCOPES = ["mcp:tools"]
 
 

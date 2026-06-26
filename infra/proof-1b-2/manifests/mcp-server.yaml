@@ -1,0 +1,27 @@
+# infra/proof-1b-2/manifests/mcp-server.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: proof-mcp, labels: { app: proof-mcp } }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: proof-mcp } }
+  template:
+    metadata: { labels: { app: proof-mcp } }
+    spec:
+      containers:
+      - name: mcp
+        image: cognic-proof-mcp:1b2
+        imagePullPolicy: IfNotPresent
+        ports: [{ containerPort: 8765 }]
+        env:
+        - { name: COGNIC_PROOF_HOST, value: "0.0.0.0" }
+        - { name: COGNIC_PROOF_SERVER_URL, value: "http://10.96.0.50:8765/mcp" }
+        - { name: COGNIC_PROOF_AS_ISSUER, value: "http://192.88.99.9:9000" }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: proof-mcp }
+spec:
+  clusterIP: 10.96.0.50      # static, private, knowable up front (override + allow-list seed this exact IP)
+  selector: { app: proof-mcp }
+  ports: [{ port: 8765, targetPort: 8765 }]

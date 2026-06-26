@@ -56,15 +56,19 @@ def test_runtime_stages_package_policies_and_alembic_ini() -> None:
         )
 
 
-def test_runtime_stages_make_policies_readable_for_non_root_before_user() -> None:
+def test_runtime_stages_make_policies_alembic_and_src_readable_for_non_root() -> None:
     bodies = _stage_bodies()
     for stage in _RUNTIME_STAGES:
         body = bodies[stage]
-        # a+rX guarantees the non-root `cognic` user can read both regardless of the build-context
+        # a+rX guarantees the non-root `cognic` user can read these regardless of the build-context
         # umask (a+rX = read for all + traverse for dirs; never adds execute to regular files).
-        assert re.search(r"chmod\s+-R\s+a\+rX\s+/app/policies\s+/app/alembic\.ini", body), (
-            f"{stage}: missing `chmod -R a+rX /app/policies /app/alembic.ini`"
-        )
+        # /app/src is included because `alembic upgrade head` reads the migrations from
+        # src/cognic_agentos/db/migrations (alembic script_location) as the non-root user — a 600
+        # migration file from a restrictive build-context umask would otherwise be unreadable and
+        # the migrate Job fails with PermissionError (Proof 1b-2 attempt-3 finding).
+        assert re.search(
+            r"chmod\s+-R\s+a\+rX\s+/app/policies\s+/app/alembic\.ini\s+/app/src\b", body
+        ), f"{stage}: `chmod -R a+rX` must cover /app/policies /app/alembic.ini /app/src"
         # The packaging + chmod must run BEFORE the image drops to USER cognic (chmod needs root).
         user_idx = body.find("USER cognic")
         copy_idx = body.find("policies ./policies")
