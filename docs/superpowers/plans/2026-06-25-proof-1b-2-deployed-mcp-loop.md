@@ -369,7 +369,7 @@ spec:
 
 ### Task 8: Seed scripts — Postgres rows + Vault (KV v1) secrets
 
-**Files:** Create `infra/proof-1b-2/seed-db.sh`, `infra/proof-1b-2/seed-vault.sh`
+**Files:** Create `infra/proof-1b-2/seed-db.sh`, `infra/proof-1b-2/seed-vault.sh` + `tests/unit/proof_1b_2/test_proof_seeds.py` (the author-time structural test)
 
 - [ ] **Step 1: DB seed** (`seed-db.sh`) — runs `psql` inside the Postgres pod (Service `postgres:5432`, `cognic/cognic/cognic`):
 ```bash
@@ -405,9 +405,9 @@ VX kv put "secret/cognic/$T/mcp-oauth/$ASHOST" client_id=proof-client client_sec
 ```
 **Verify at execution:** the @file put + readback assertion above pin the `servers` JSON-list shape that `_load_as_allowlist` (`mcp_authz.py:1439`) requires. The implementer additionally confirms the bundled `SecretAdapter` raw `read("secret/cognic/...")` resolves under KV v1 (the templates carry no `/data/` segment) — either a one-line `kubectl exec` read through the kernel's Vault path, or the readback assertion above standing as the proof.
 
-- [ ] **Step 3: Lint** — `bash -n infra/proof-1b-2/seed-db.sh infra/proof-1b-2/seed-vault.sh`; `shellcheck` if available.
+- [ ] **Step 3: Offline verification (NO kubectl/Vault/Docker/kind — the scripts RUN only at T9).** (a) `bash -n infra/proof-1b-2/seed-db.sh infra/proof-1b-2/seed-vault.sh` (syntax) → exit 0; `shellcheck` if available. (b) Add `tests/unit/proof_1b_2/test_proof_seeds.py` reading both scripts as text + asserting the invariant values: `T="proof-1b-2"`, the override `URL="http://10.96.0.50:8765/mcp"`, the allow-list `IP="10.96.0.50"`, `AS="http://192.88.99.9:9000"`, `ASHOST="192.88.99.9_9000"`; the table names (`mcp_server_url_override`, `mcp_internal_host_allowlist`); the Vault KV-v1 enable (`secrets enable -version=1 -path=secret kv`); and the `servers` JSON-LIST via the `@/tmp/as-allowlist.json` @file form (asserting `servers=` inline is NOT used). `uv run pytest tests/unit/proof_1b_2/test_proof_seeds.py -v` → passes.
 
-- [ ] **Step 4: Commit** — `git add infra/proof-1b-2/seed-db.sh infra/proof-1b-2/seed-vault.sh && git commit -m "feat(proof-1b-2): Postgres + Vault(KV v1) seed scripts"`
+- [ ] **Step 4: Commit** — `git add infra/proof-1b-2/seed-db.sh infra/proof-1b-2/seed-vault.sh tests/unit/proof_1b_2/test_proof_seeds.py && git commit -m "feat(proof-1b-2): T8 — Postgres + Vault(KV v1) seed scripts (author-only) + structural test"`
 
 ---
 
