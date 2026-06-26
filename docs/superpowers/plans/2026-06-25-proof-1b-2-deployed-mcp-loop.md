@@ -241,15 +241,17 @@ CMD ["python", "-m", "cognic_tool_search.server"]
 FROM python:3.12-slim
 RUN pip install --no-cache-dir "uvicorn[standard]>=0.35" "starlette>=0.40" "python-multipart>=0.0.9"
 # python-multipart: the AS /token endpoint reads `await request.form()`; Starlette form parsing requires it
-# (without it Bar 2 fails at the token POST). vendor exactly the one AS fixture file (build context = repo root)
-COPY tests/integration/pack_loop/_local_as.py /app/_local_as.py
+# (without it Bar 2 fails at the token POST). Vendor exactly the one AS fixture file. Build context =
+# infra/proof-1b-2/ (NOT repo root): the runner copies _local_as.py into this context first, because
+# .dockerignore excludes tests/ from every repo-root context. So the COPY source is context-relative.
+COPY _local_as.py /app/_local_as.py
 WORKDIR /app
 EXPOSE 9000
 CMD ["python", "_local_as.py"]
 ```
-(The Task-2 `__main__` makes `python _local_as.py` run the AS, env-driven by `COGNIC_PROOF_AS_ISSUER` / `COGNIC_PROOF_AS_HOST` / `COGNIC_PROOF_AS_PORT`.)
+(The Task-2 `__main__` makes `python _local_as.py` run the AS, env-driven by `COGNIC_PROOF_AS_ISSUER` / `COGNIC_PROOF_AS_HOST` / `COGNIC_PROOF_AS_PORT`.) **Build context = `infra/proof-1b-2/`, NOT repo root** — `.dockerignore` excludes `tests/` from every repo-root build context (prod images ship no test code), so a repo-root `COPY tests/integration/pack_loop/_local_as.py` is filtered out + the build fails. The T9 runner `cp`s `tests/integration/pack_loop/_local_as.py` into `infra/proof-1b-2/` before `docker build`, mirroring how it copies the staging in for `Dockerfile.agentos-proof`. *(This vendor-into-context approach is the fix for the BAR 0 defect the live attempt-1 run caught — see `docs/VALIDATION-RESULTS.md`.)*
 
-- [ ] **Step 2: Structural verification (AUTHOR-ONLY — `docker build` DEFERRED to T9 per the Global-Constraints T4–T6 author-only decision).** Extend `tests/unit/proof_1b_2/test_proof_images.py` with the AS-image invariants: the `COPY tests/integration/pack_loop/_local_as.py` vendor line, the exact `CMD ["python", "_local_as.py"]` (the T2 `__main__` path), and the `uvicorn` + `starlette` + `python-multipart` (form-parse dep) pip install. `uv run pytest tests/unit/proof_1b_2/test_proof_images.py -v` → passes. (T9's runner runs the real `docker build`.)
+- [ ] **Step 2: Structural verification (AUTHOR-ONLY — `docker build` DEFERRED to T9 per the Global-Constraints T4–T6 author-only decision).** Extend `tests/unit/proof_1b_2/test_proof_images.py` with the AS-image invariants: the context-relative `COPY _local_as.py` vendor line (and that it does NOT reference the repo-root `tests/` path — `.dockerignore` excludes it), the exact `CMD ["python", "_local_as.py"]` (the T2 `__main__` path), and the `uvicorn` + `starlette` + `python-multipart` (form-parse dep) pip install. Also add a `.dockerignore`-aware regression guard (`test_no_proof_dockerfile_copies_from_excluded_dir`) that fails if any proof Dockerfile built with the repo-root context COPYs from a `.dockerignore`-excluded directory (the BAR 0 class). `uv run pytest tests/unit/proof_1b_2/test_proof_images.py -v` → passes. (T9's runner runs the real `docker build`.)
 
 - [ ] **Step 3: Commit** — `git add infra/proof-1b-2/Dockerfile.as tests/unit/proof_1b_2/test_proof_images.py && git commit -m "feat(proof-1b-2): T5 — emulated-external AS image Dockerfile (author-only) + structural test"`
 
@@ -423,7 +425,7 @@ VX kv put "secret/cognic/$T/mcp-oauth/$ASHOST" client_id=proof-client client_sec
   1. Preflight tools; `CLUSTER`/`NS=cognic-proof1b2`.
   2. **Rebuild the pack wheel** (`cd examples/cognic-tool-search && uv build --wheel`) so the Task-1 edits are in it.
   3. `uv run python -m tests.integration.proof_1b.stage_trust_inputs infra/proof-1b/proof1b-staging` (trust staging).
-  4. Build: base (`--target default-adapters` → `cognic-agentos:proof1b2-base`); copy `infra/proof-1b/proof1b-staging` + `tests/integration/proof_1b_2` into `infra/proof-1b-2/`; build `Dockerfile.agentos-proof` → `cognic-agentos:proof1b2`; build `Dockerfile.mcp-server` → `cognic-proof-mcp:1b2`; build `Dockerfile.as` → `cognic-proof-as:1b2`.
+  4. Build: base (`--target default-adapters` → `cognic-agentos:proof1b2-base`); copy `infra/proof-1b/proof1b-staging` + `tests/integration/proof_1b_2` into `infra/proof-1b-2/`; build `Dockerfile.agentos-proof` → `cognic-agentos:proof1b2` (context `infra/proof-1b-2`); build `Dockerfile.mcp-server` → `cognic-proof-mcp:1b2` (context repo root — copies from `examples/`, not `.dockerignore`-excluded); copy `tests/integration/pack_loop/_local_as.py` into `infra/proof-1b-2/` + build `Dockerfile.as` → `cognic-proof-as:1b2` (**context `infra/proof-1b-2`, NOT repo root** — `.dockerignore` excludes `tests/` from the repo-root context, so the AS fixture is vendored into the proof context; `cleanup()` removes the transient copy).
   5. `kind create cluster`; `kind load docker-image` all 3 proof images + pre-pulled backends.
   6. `kubectl create ns`; apply `backends.yaml`; wait available.
   7. **Vault init/seed** (`seed-vault.sh`) — must run after Vault is up, before AgentOS reads it.

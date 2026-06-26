@@ -16,16 +16,26 @@ depends on four facts that a broken Dockerfile would silently regress:
 
 Per the Proof 1b-2 plan (Task 5), ``infra/proof-1b-2/Dockerfile.as`` builds the
 emulated-external OAuth Authorization Server by vendoring the single fixture file
-``tests/integration/pack_loop/_local_as.py`` (it has no installable distribution),
-with build context = repo root. The deployed proof depends on three more facts:
+``tests/integration/pack_loop/_local_as.py`` (it has no installable distribution).
+Unlike the MCP-server image, its build context = ``infra/proof-1b-2/`` (the T9 runner
+copies ``_local_as.py`` into it first), so its ``COPY`` source is context-relative, NOT
+repo-root-relative — because ``.dockerignore`` excludes ``tests/`` from every repo-root
+build context (prod images ship no test code), a repo-root ``COPY`` of the fixture is
+filtered out + the build fails. This is the BAR 0 defect the live Proof 1b-2 run caught
+(attempt 1); the fix mirrors the ``Dockerfile.agentos-proof`` vendor-into-context pattern.
+The deployed proof depends on three more facts:
 
-1. the ``COPY`` vendors the repo-root-relative ``tests/integration/pack_loop/_local_as.py``
-   (so the repo-root build context resolves it);
+1. the ``COPY`` vendors the context-relative ``_local_as.py`` (the runner copies the
+   repo-root fixture into the ``infra/proof-1b-2/`` context, so the COPY resolves it);
 2. the ``CMD`` is exec-form ``["python", "_local_as.py"]`` (the Task-2 ``__main__``
    entry path, env-driven by ``COGNIC_PROOF_AS_ISSUER`` / ``_AS_HOST`` / ``_AS_PORT``);
 3. ``pip install`` includes ``uvicorn`` + ``starlette`` and ``python-multipart`` (the
    AS ``/token`` endpoint reads ``await request.form()``; Starlette form parsing requires
    it — without it Bar 2 fails at the token POST).
+
+A repo-root-context regression guard (``test_no_proof_dockerfile_copies_from_excluded_dir``)
+pins the broader invariant: no proof Dockerfile built with the repo-root context may
+``COPY`` from a ``.dockerignore``-excluded directory.
 
 Per the Proof 1b-2 plan (Task 6), ``infra/proof-1b-2/Dockerfile.agentos-proof`` bakes the
 proof-only ``create_proof_app`` factory + the Proof 1b-1 trust staging onto the
@@ -49,6 +59,9 @@ These tests read each Dockerfile as text only — they never invoke ``docker bui
 
 from __future__ import annotations
 
+import json
+import re
+import shlex
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -109,10 +122,18 @@ def test_as_dockerfile_exists() -> None:
 
 def test_as_copy_vendors_the_local_as_file() -> None:
     # The AS fixture has no installable distribution, so the image vendors the single
-    # file. Build context = repo root, so the COPY source path is repo-root-relative.
+    # file. Build context = infra/proof-1b-2/ (the runner copies _local_as.py in first,
+    # because .dockerignore excludes tests/ from the repo-root context), so the COPY
+    # source is CONTEXT-relative — `COPY _local_as.py`, NOT the repo-root tests/ path.
     text = _as_dockerfile_text()
-    assert "COPY tests/integration/pack_loop/_local_as.py" in text, (
-        "COPY must vendor the repo-root-relative fixture tests/integration/pack_loop/_local_as.py"
+    assert "COPY _local_as.py" in text, (
+        "COPY must vendor the context-relative fixture `_local_as.py` (the runner copies "
+        "tests/integration/pack_loop/_local_as.py into the infra/proof-1b-2/ context)"
+    )
+    assert "COPY tests/integration/pack_loop/_local_as.py" not in text, (
+        "COPY must NOT reference the repo-root-relative tests/ path — .dockerignore excludes "
+        "tests/ from the repo-root build context, so that COPY would be filtered out + fail "
+        "the build (the BAR 0 defect)"
     )
 
 
@@ -217,3 +238,142 @@ def test_agentos_proof_sets_pythonpath_so_app_is_importable() -> None:
         "ENV PYTHONPATH=/app must be set so uvicorn can import the vendored "
         "proof_1b_2 module from /app"
     )
+
+
+# --- Regression guard: no repo-root-context COPY from a .dockerignore-excluded dir ---
+#
+# The BAR 0 defect the live Proof 1b-2 run caught (attempt 1): Dockerfile.as built with
+# the repo-root context (`docker build … .`) and `COPY tests/integration/pack_loop/_local_as.py`,
+# but .dockerignore excludes `tests/` from every repo-root build context (prod images ship
+# no test code) — so the COPY source was filtered out + the build died "not found" before
+# any Bar. This guard pins the broader invariant so the whole class can never recur: a proof
+# Dockerfile built with the repo-root context MUST NOT COPY from a .dockerignore-excluded
+# directory. (Dockerfiles built with a vendored context — Dockerfile.as / Dockerfile.agentos-proof
+# build with context = infra/proof-1b-2/ — are exempt: their COPY sources are context-relative,
+# so the repo-root .dockerignore excludes don't apply.)
+
+_DOCKERIGNORE = _REPO_ROOT / ".dockerignore"
+_RUNNER = _REPO_ROOT / "infra" / "proof-1b-2" / "run-proof-1b-2.sh"
+_PROOF_DOCKERFILES = {
+    "Dockerfile.mcp-server": _MCP_SERVER_DOCKERFILE,
+    "Dockerfile.as": _AS_DOCKERFILE,
+    "Dockerfile.agentos-proof": _AGENTOS_PROOF_DOCKERFILE,
+}
+
+
+def _parse_dockerignore_excluded_dirs(dockerignore_text: str) -> list[str]:
+    """The directory-exclusion patterns from a .dockerignore: non-comment, non-negation
+    (`!…`) lines ending in `/` (e.g. ``tests/``, ``infra/dev/``, ``docs/``)."""
+    dirs: list[str] = []
+    for raw in dockerignore_text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or line.startswith("!"):
+            continue
+        if line.endswith("/"):
+            dirs.append(line)
+    return dirs
+
+
+def _copy_sources(dockerfile_text: str) -> list[str]:
+    """The ``<src>`` arg(s) of each ``COPY`` line — BOTH the shell form
+    (``COPY [--flags] <src>... <dst>``) AND the JSON-exec form
+    (``COPY [--flags] ["<src>", ..., "<dst>"]``). Drops ``--from=`` / ``--chown=`` flags +
+    the final ``<dst>``."""
+    srcs: list[str] = []
+    for raw in dockerfile_text.splitlines():
+        line = raw.strip()
+        if not line.upper().startswith("COPY "):
+            continue
+        rest = re.sub(r"^(--\S+\s+)*", "", line[len("COPY ") :].strip())  # drop leading --flags
+        if rest.startswith("["):
+            # JSON-exec form: COPY ["src", ..., "dst"]
+            try:
+                toks = json.loads(rest)
+            except ValueError:
+                continue
+            if isinstance(toks, list) and len(toks) >= 2 and all(isinstance(t, str) for t in toks):
+                srcs.extend(toks[:-1])  # all but the dest
+        else:
+            # shell form
+            shell_toks = [t for t in rest.split() if not t.startswith("--")]
+            if len(shell_toks) >= 2:
+                srcs.extend(shell_toks[:-1])  # all but the dest
+    return srcs
+
+
+def _excluded_copy_sources(dockerfile_text: str, excluded_dirs: list[str]) -> list[str]:
+    """COPY ``<src>`` entries whose path starts with a .dockerignore-excluded directory
+    (glob patterns like ``*.egg-info/`` are not simple prefixes — skipped)."""
+    bad: list[str] = []
+    for src in _copy_sources(dockerfile_text):
+        for d in excluded_dirs:
+            if "*" in d:
+                continue
+            if src.startswith(d):
+                bad.append(src)
+                break
+    return bad
+
+
+def _parse_build_contexts(runner_text: str) -> dict[str, str]:
+    """Map each ``docker build -f <dockerfile> … <context>`` in the runner to its final
+    context arg, resolving ``$PROOF_DIR`` from the runner's own assignment. Returns
+    ``{dockerfile_path: context}`` (``.`` == repo-root context)."""
+    m = re.search(r'^PROOF_DIR="([^"]+)"', runner_text, re.MULTILINE)
+    proof_dir = m.group(1) if m else "infra/proof-1b-2"
+
+    def _sub(tok: str) -> str:
+        return tok.replace("${PROOF_DIR}", proof_dir).replace("$PROOF_DIR", proof_dir)
+
+    contexts: dict[str, str] = {}
+    for raw in runner_text.splitlines():
+        line = raw.strip()
+        if not line.startswith("docker build"):
+            continue
+        toks = shlex.split(line)
+        if "-f" not in toks:
+            continue
+        dockerfile = _sub(toks[toks.index("-f") + 1])
+        context = _sub(toks[-1])
+        contexts[dockerfile] = context
+    return contexts
+
+
+def test_no_proof_dockerfile_copies_from_excluded_dir() -> None:
+    excluded = _parse_dockerignore_excluded_dirs(_DOCKERIGNORE.read_text())
+    assert "tests/" in excluded, (
+        "sanity: .dockerignore must still exclude tests/ (the BAR 0 root cause)"
+    )
+    contexts = _parse_build_contexts(_RUNNER.read_text())
+    for basename, path in _PROOF_DOCKERFILES.items():
+        key = f"infra/proof-1b-2/{basename}"
+        context = contexts.get(key)
+        assert context is not None, (
+            f"runner run-proof-1b-2.sh has no `docker build -f {key} … <context>` line "
+            f"(parsed contexts: {sorted(contexts)})"
+        )
+        if context != ".":
+            # vendored (non-repo-root) context → COPY sources are context-relative,
+            # so the repo-root .dockerignore excludes don't apply.
+            continue
+        bad = _excluded_copy_sources(path.read_text(), excluded)
+        assert not bad, (
+            f"{basename} builds with the repo-root context (.) but COPYs from "
+            f".dockerignore-excluded path(s) {bad}: those sources are filtered out of the "
+            f"build context, so `docker build` fails 'not found' (the BAR 0 defect). Either "
+            f"build it with a vendored context (cp the file into infra/proof-1b-2/ + build "
+            f"with that context, like Dockerfile.as / Dockerfile.agentos-proof) or COPY from "
+            f"a non-excluded path (like Dockerfile.mcp-server's examples/…)."
+        )
+
+
+def test_copy_sources_handles_json_exec_form() -> None:
+    # The guard's COPY parser must handle Docker's JSON-exec form
+    # (`COPY ["src", "dst"]`) as well as the shell form — else a future proof Dockerfile
+    # could smuggle a repo-root-excluded COPY past the guard via the JSON form (the shell
+    # form the BAR 0 defect used is already covered). BOTH forms must flag the excluded src.
+    shell = "COPY tests/integration/pack_loop/_local_as.py /app/_local_as.py"
+    json_form = 'COPY ["tests/integration/pack_loop/_local_as.py", "/app/_local_as.py"]'
+    expected = ["tests/integration/pack_loop/_local_as.py"]
+    assert _excluded_copy_sources(shell, ["tests/"]) == expected
+    assert _excluded_copy_sources(json_form, ["tests/"]) == expected

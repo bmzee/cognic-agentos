@@ -103,7 +103,7 @@ cleanup() {
   pf_stop
   kind delete cluster --name "$CLUSTER" >/dev/null 2>&1 || true
   # remove the transient build-context copies (NOT the sources)
-  rm -rf "$STAGING_DST" "$PROOF_APP_DST" 2>/dev/null || true
+  rm -rf "$STAGING_DST" "$PROOF_APP_DST" "$PROOF_DIR/_local_as.py" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -138,7 +138,12 @@ echo "==> [4/11] build the private-ClusterIP MCP tool Service image"
 docker build -f "$PROOF_DIR/Dockerfile.mcp-server" -t "$MCP_IMAGE" .
 
 echo "==> [4/11] build the emulated-external AS image"
-docker build -f "$PROOF_DIR/Dockerfile.as" -t "$AS_IMAGE" .
+# Vendor the single AS fixture into the proof build context, then build with context
+# = $PROOF_DIR (NOT repo root): .dockerignore excludes tests/ from the repo-root context,
+# so a repo-root COPY of tests/integration/pack_loop/_local_as.py is filtered out + fails.
+# Mirrors the agentos-proof image's copy-into-context pattern above; cleanup() removes the copy.
+cp tests/integration/pack_loop/_local_as.py "$PROOF_DIR/_local_as.py"
+docker build -f "$PROOF_DIR/Dockerfile.as" -t "$AS_IMAGE" "$PROOF_DIR"
 
 # --- 5. kind create + load (3 proof images + pre-pulled backends) ---------------
 echo "==> [5/11] pre-pull the backend images (host docker cache)"
