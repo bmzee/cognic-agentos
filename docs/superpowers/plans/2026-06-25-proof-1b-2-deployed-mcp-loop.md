@@ -178,9 +178,13 @@ from __future__ import annotations
 from typing import Final
 from fastapi import FastAPI, Request
 from cognic_agentos.portal.rbac.actor import Actor
+from cognic_agentos.portal.rbac.scopes import MCPRBACScope
 
 PROOF_TENANT: Final = "proof-1b-2"
-PROOF_SCOPES: Final = frozenset({"mcp.tool.list", "mcp.tool.invoke"})
+# Typed element (NOT a bare `Final`, which infers frozenset[str] and is rejected by
+# strict mypy at the Actor(scopes=...) call site — frozenset is covariant so
+# frozenset[MCPRBACScope] IS assignable to Actor.scopes). Same idiom as MCP_SCOPES.
+PROOF_SCOPES: Final[frozenset[MCPRBACScope]] = frozenset({"mcp.tool.list", "mcp.tool.invoke"})
 
 class ProofActorBinder:
     """Yields a single fixed proof Actor for every request. PROOF-ONLY."""
