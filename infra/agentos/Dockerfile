@@ -139,11 +139,15 @@ COPY --chown=root:cognic pyproject.toml README.md ./
 
 # ADR-024: ship the OPA policy bundles (build_runtime's OPAEngine reads
 # /app/policies/_default/*.rego) + alembic.ini (the migration script_location config) in-image.
-# chmod -R a+rX guarantees the non-root cognic user reads both regardless of the build-context
-# umask (a+rX = read for all + traverse for dirs; never adds execute to a plain file).
+# chmod -R a+rX guarantees the non-root cognic user reads /app/policies, /app/alembic.ini AND
+# /app/src regardless of the build-context umask (a+rX = read for all + traverse for dirs; never
+# adds execute to a plain file). /app/src is included because `alembic upgrade head` reads the
+# migrations from src/cognic_agentos/db/migrations (alembic script_location) as the non-root user
+# — a 600 migration file from a restrictive build-context umask would otherwise be unreadable and
+# the migration Job fails with PermissionError (Proof 1b-2 attempt-3 finding).
 COPY --chown=root:cognic policies ./policies
 COPY --chown=root:cognic alembic.ini ./
-RUN chmod -R a+rX /app/policies /app/alembic.ini
+RUN chmod -R a+rX /app/policies /app/alembic.ini /app/src
 
 USER cognic
 
@@ -295,11 +299,15 @@ COPY --chown=root:cognic pyproject.toml README.md ./
 
 # ADR-024: ship the OPA policy bundles (build_runtime's OPAEngine reads
 # /app/policies/_default/*.rego) + alembic.ini (the migration script_location config) in-image.
-# chmod -R a+rX guarantees the non-root cognic user reads both regardless of the build-context
-# umask (a+rX = read for all + traverse for dirs; never adds execute to a plain file).
+# chmod -R a+rX guarantees the non-root cognic user reads /app/policies, /app/alembic.ini AND
+# /app/src regardless of the build-context umask (a+rX = read for all + traverse for dirs; never
+# adds execute to a plain file). /app/src is included because `alembic upgrade head` reads the
+# migrations from src/cognic_agentos/db/migrations (alembic script_location) as the non-root user
+# — a 600 migration file from a restrictive build-context umask would otherwise be unreadable and
+# the migration Job fails with PermissionError (Proof 1b-2 attempt-3 finding).
 COPY --chown=root:cognic policies ./policies
 COPY --chown=root:cognic alembic.ini ./
-RUN chmod -R a+rX /app/policies /app/alembic.ini
+RUN chmod -R a+rX /app/policies /app/alembic.ini /app/src
 
 USER cognic
 EXPOSE 8000
