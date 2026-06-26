@@ -1213,6 +1213,8 @@ This is the platform home for governed self-improvement: Hermes-style improvemen
 
 **Re-sequenced (2026-06-12):** the validation intent here is **production-readiness / bank-deployable validation**, not a proof of concept — AgentOS v1 is production-hardened (see `docs/AS_BUILT_CAPABILITY_MAP.md`). The pack-extraction exercise below re-enters the plan through forward items 4–8 (managed runtime, workflow, ADK, deployment substrate, runbooks/checklist).
 
+**Progress (2026-06-26):** the tool-pack slice of this sprint is now demonstrated **both in-process (Proof 1a, #96) and deployed (Proof 1b-2, #103)** — governed `list_tools`/`call_tool` through a real pack on a deployed kind/Helm kernel, with audit evidence. Still forward per the deliverables below: the *separate repos* (`cognic-tool-search` is an in-tree `examples/` pack today; `cognic-agent-policyqa` is still plan text), the deployed *agent* loop, and citation/eval/adversarial on the extracted packs. Live status: `docs/PROJECT_STATUS.md` + `docs/AS_BUILT_CAPABILITY_MAP.md`.
+
 **Goal:** prove the full pattern works — extract one real tool from parent cognic, ship as MCP pack, install on AgentOS, run a real query through the full audit chain.
 
 **Deliverables:**
