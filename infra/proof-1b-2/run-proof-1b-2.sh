@@ -209,12 +209,16 @@ pf_start
 echo "==> BAR 1.1 — allow-list seeded: the resource leg is PERMITTED"
 curl -sf http://127.0.0.1:8000/api/v1/mcp/servers/cognic-tool-search/tools >/dev/null \
   || die "Bar 1.1: list_tools did not return 200 with the allow-list seeded"
-LOGS="$(kubectl -n "$NS" logs deploy/rel-agentos)"
-grep -qF "audit.mcp_allowlist_permitted" <<<"$LOGS" \
-  || die "Bar 1.1: audit.mcp_allowlist_permitted did not fire"
-grep -qF "10.96.0.50" <<<"$LOGS" \
-  || die "Bar 1.1: permit event did not carry host 10.96.0.50"
-echo "  Bar 1.1 OK: audit.mcp_allowlist_permitted fired for host 10.96.0.50"
+# Evidence surface: the permit is a DD-2 audit-store event (mcp_authz.py:1233
+# self._audit.append(AuditEvent("audit.mcp_allowlist_permitted", payload={host,...}))),
+# persisted to the audit_event table — NOT a stdout log (AuditStore.append never logs the
+# event). Query the table; payload carries the permitted host. (payload::text + grep avoids
+# a jsonb-operator assumption about the GovernanceJSON column type.)
+PERMIT="$(kubectl -n "$NS" exec deploy/postgres -- psql -U cognic -d cognic -tA \
+  -c "SELECT payload::text FROM audit_event WHERE event_type='audit.mcp_allowlist_permitted';")"
+grep -qF "10.96.0.50" <<<"$PERMIT" \
+  || die "Bar 1.1: no audit.mcp_allowlist_permitted event carrying host 10.96.0.50 in audit_event (got: ${PERMIT:-<none>})"
+echo "  Bar 1.1 OK: audit.mcp_allowlist_permitted persisted for host 10.96.0.50 (audit_event table)"
 
 echo "==> BAR 1.2 — remove the allow-list row, restart COLD: the leg MUST refuse"
 kubectl -n "$NS" exec deploy/postgres -- psql -U cognic -d cognic -v ON_ERROR_STOP=1 \
@@ -225,12 +229,23 @@ REFUSE_CODE="$(curl -s -o /tmp/proof1b2-refuse-body \
   -w '%{http_code}' http://127.0.0.1:8000/api/v1/mcp/servers/cognic-tool-search/tools || true)"
 [ "$REFUSE_CODE" != "200" ] \
   || die "Bar 1.2: expected a refusal with the allow-list removed, got HTTP 200"
-LOGS="$(kubectl -n "$NS" logs deploy/rel-agentos)"
-grep -qF "mcp_discovery_url_refused" <<<"$LOGS" \
-  || die "Bar 1.2: mcp_discovery_url_refused did not fire after allow-list removal"
-grep -qF "host_address" <<<"$LOGS" \
-  || die "Bar 1.2: refusal did not carry refused_component=host_address"
-echo "  Bar 1.2 OK: HTTP $REFUSE_CODE + mcp_discovery_url_refused / host_address (carve-out is load-bearing)"
+# Evidence surface: the refusal is a raised MCPAuthzError → the reason lands in the HTTP
+# response BODY (not stdout, not an audit event); refused_component=host_address is an
+# exception attr NOT surfaced in the body, so assert discovery_status=refused via
+# /system/plugins instead (the same API evidence model Bar 2 uses for auth_ready).
+grep -qF "mcp_discovery_url_refused" /tmp/proof1b2-refuse-body \
+  || die "Bar 1.2: response body did not carry mcp_discovery_url_refused (got: $(cat /tmp/proof1b2-refuse-body))"
+curl -sf "http://127.0.0.1:8000/api/v1/system/plugins?tenant_id=proof-1b-2" >/tmp/proof1b2-refuse-plugins.json \
+  || die "Bar 1.2: /system/plugins read failed"
+python3 - <<'PY' || die "Bar 1.2: discovery_status not refused after allow-list removal"
+import json
+doc = json.load(open("/tmp/proof1b2-refuse-plugins.json"))
+rows = [p for p in doc.get("plugins", []) if p.get("pack_id") == "cognic-tool-search"]
+assert rows, f"FAIL: cognic-tool-search row absent (payload={doc})"
+ds = rows[0].get("discovery_status")
+assert ds == "refused", f"FAIL: discovery_status={ds!r} expected refused (payload={doc})"
+PY
+echo "  Bar 1.2 OK: HTTP $REFUSE_CODE + mcp_discovery_url_refused (body) + discovery_status=refused (carve-out is load-bearing)"
 
 echo "==> BAR 1.3 — re-seed the allow-list, restart COLD: clean state for Bar 2"
 NS="$NS" bash "$PROOF_DIR/seed-db.sh"

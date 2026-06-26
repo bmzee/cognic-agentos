@@ -124,14 +124,32 @@ def test_runner_does_not_inline_the_override_insert() -> None:
 
 def test_runner_contains_the_bar1_negative_test_logic() -> None:
     # Positive guardrail: the Bar 1 allow-list-removed delta IS the runner's own
-    # logic. The DELETE + the 10.96.0.50 audit-log assertion legitimately appear here
-    # (a negative test, NOT seeding) — pin their presence so a refactor can't quietly
+    # logic. The DELETE + the 10.96.0.50 audit_event-table assertion legitimately appear
+    # here (a negative test, NOT seeding) — pin their presence so a refactor can't quietly
     # drop the load-bearing carve-out check.
     text = _runner_text()
     assert "DELETE FROM mcp_internal_host_allowlist" in text, (
         "Bar 1 must DELETE the allow-list row to prove the carve-out is load-bearing"
     )
     assert "10.96.0.50" in text, "Bar 1 must assert the permit/refusal against host 10.96.0.50"
+
+
+def test_bar1_evidence_reads_db_and_api_surfaces_not_stdout() -> None:
+    # The permit (audit.mcp_allowlist_permitted) is a DD-2 audit-store event persisted to the
+    # audit_event table — NOT a stdout log (AuditStore.append never logs the event); the refusal
+    # reason lands in the HTTP response BODY and discovery_status=refused on /system/plugins. The
+    # runner must read THOSE surfaces — the earlier `kubectl logs | grep` could never find the
+    # audit event, which is what failed the live run (Proof 1b-2 attempt-5 finding).
+    text = _runner_text()
+    assert "audit_event" in text, (
+        "Bar 1.1 must query the audit_event table for the permit (the event is not on pod stdout)"
+    )
+    assert "proof1b2-refuse-body" in text, (
+        "Bar 1.2 must assert mcp_discovery_url_refused in the captured HTTP response body"
+    )
+    assert 'ds == "refused"' in text, (
+        "Bar 1.2 must assert discovery_status=refused via /system/plugins (Bar 2's evidence model)"
+    )
 
 
 # --- distinct Bar markers + cleanup trap ----------------------------------------
