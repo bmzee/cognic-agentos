@@ -257,7 +257,7 @@ CMD ["python", "_local_as.py"]
 
 ### Task 6: Proof AgentOS image (bakes `create_proof_app` + trust staging)
 
-**Files:** Create `infra/proof-1b-2/Dockerfile.agentos-proof`. Reuse the 1b-1 staging via `infra/proof-1b/proof1b-staging` (or re-run `stage_trust_inputs.py`).
+**Files:** Create `infra/proof-1b-2/Dockerfile.agentos-proof` + extend `tests/unit/proof_1b_2/test_proof_images.py` (the author-time structural test). Reuse the 1b-1 staging via `infra/proof-1b/proof1b-staging` (or re-run `stage_trust_inputs.py`).
 
 - [ ] **Step 1: Write the Dockerfile** (mirrors `Dockerfile.proof1b`; adds the proof_app module):
 ```dockerfile
@@ -278,13 +278,20 @@ RUN chmod -R a+rX /opt/cognic /app/alembic.ini /app/proof_1b_2
 ENV COGNIC_PACK_ATTESTATION_ROOT_PATH=/opt/cognic/pack-attestations \
     COGNIC_TRUST_ROOT_PREFIX=/opt/cognic/trust-roots \
     COGNIC_PLUGIN_ALLOWLIST_PATH=/opt/cognic/policies/plugin_allowlist.json
+# /app/proof_1b_2 is vendored (COPY, not pip-installed), so /app must be importable.
+# The default-adapters base sets no PYTHONPATH and runs uvicorn as a console script
+# (sys.path[0] = /opt/venv/bin, NOT the /app WORKDIR), so make /app explicit rather
+# than relying on uvicorn's --app-dir cwd default.
+ENV PYTHONPATH=/app
 USER cognic
 # override the default CMD to the PROOF app factory (the only kernel-facing change, and it is image-level)
 CMD ["sh","-c","exec uvicorn proof_1b_2.proof_app:create_proof_app --factory --host 0.0.0.0 --port 8000"]
 ```
-Build context = `infra/proof-1b-2/` after the runner copies `proof1b-staging/` (from `infra/proof-1b/`) and `proof_1b_2/` (from `tests/integration/proof_1b_2/`) into it. **`proof_1b_2.proof_app` import path:** the COPY places it at `/app/proof_1b_2/`, and `/app` is on `sys.path` (the kernel `src` is installed in the venv; `/app` is WORKDIR) — verify `PYTHONPATH`/WORKDIR includes `/app` in T9; if not, set `ENV PYTHONPATH=/app`.
+Build context = `infra/proof-1b-2/` after the runner copies `proof1b-staging/` (from `infra/proof-1b/`) and `proof_1b_2/` (from `tests/integration/proof_1b_2/`) into it. **`proof_1b_2.proof_app` import path (RESOLVED at author time):** the COPY places it at `/app/proof_1b_2/`. The `default-adapters` base (`infra/agentos/Dockerfile`) sets `WORKDIR /app` but **no `PYTHONPATH`**, and `cognic_agentos` is importable only because `uv sync --no-editable` installs it into the venv site-packages (NOT via `/app`). uvicorn runs as a console script, so `sys.path[0] = /opt/venv/bin` (not `/app`); whether `/app` lands on `sys.path` would otherwise rely on uvicorn's `--app-dir` cwd default. Since the base does NOT *clearly* put `/app` on `sys.path`, this Dockerfile sets **`ENV PYTHONPATH=/app`** explicitly (sanctioned addition) so the vendored `proof_1b_2` import is deterministic; the structural test pins it.
 
-- [ ] **Step 2: Commit** — `git add infra/proof-1b-2/Dockerfile.agentos-proof && git commit -m "feat(proof-1b-2): proof AgentOS image baking create_proof_app + trust staging"`
+- [ ] **Step 2: Structural verification (AUTHOR-ONLY — `docker build` DEFERRED to T9 per the Global-Constraints T4–T6 author-only decision).** Extend `tests/unit/proof_1b_2/test_proof_images.py` with the agentos-proof-image invariants: the `ARG BASE_IMAGE=cognic-agentos:proof1b2-base`, the staging COPYs (`proof1b-staging/wheel/`, `pack-attestations/`, `trust-roots/`, `policies/`, `alembic.ini`), the `COPY proof_1b_2/ /app/proof_1b_2/` vendor, the proof-factory `CMD … uvicorn proof_1b_2.proof_app:create_proof_app --factory …`, and (if added per the import-path note below) `ENV PYTHONPATH=/app`. `uv run pytest tests/unit/proof_1b_2/test_proof_images.py -v` → passes. (T9's runner runs the real `docker build` with build context = `infra/proof-1b-2/` after copying the staging + proof_1b_2 in.)
+
+- [ ] **Step 3: Commit** — `git add infra/proof-1b-2/Dockerfile.agentos-proof tests/unit/proof_1b_2/test_proof_images.py && git commit -m "feat(proof-1b-2): T6 — proof AgentOS image (author-only) bakes create_proof_app + trust staging + structural test"`
 
 ---
 
