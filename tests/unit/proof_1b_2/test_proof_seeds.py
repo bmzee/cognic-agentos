@@ -126,6 +126,20 @@ def test_vault_seed_writes_as_allowlist_via_json_list_file_form() -> None:
     )
 
 
+def test_vault_seed_allowlist_entry_carries_the_anyhttpurl_trailing_slash() -> None:
+    # FastMCP wraps the AS issuer in pydantic AnyHttpUrl, which normalises
+    # "http://h:9000" -> "http://h:9000/", so its PRM advertises the issuer WITH a trailing
+    # slash. The kernel compares the PRM-advertised issuer against this allow-list by EXACT
+    # string (RFC 8414 issuer semantics, mcp_authz.py:753 `s in allowed_servers`), so the
+    # seeded entry MUST carry the same trailing slash or the carve-out refuses
+    # mcp_as_not_allowlisted (Proof 1b-2 attempt-4 finding). Pin the slash-suffixed entry.
+    assert "${AS}/" in _vault_text(), (
+        "the AS allow-list must seed the issuer WITH the AnyHttpUrl trailing slash "
+        "(servers entry must be ${AS}/, not the bare ${AS}) — the no-slash form silently "
+        "fails the kernel's exact-string AS allow-list match"
+    )
+
+
 def test_vault_seed_never_uses_the_inline_servers_string_form() -> None:
     # The anti-pattern: `vault kv put ... servers=...` stores servers as a STRING,
     # not a JSON list, which _load_as_allowlist rejects. The @file form above is the
