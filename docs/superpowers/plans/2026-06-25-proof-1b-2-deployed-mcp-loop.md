@@ -233,7 +233,7 @@ CMD ["python", "-m", "cognic_tool_search.server"]
 
 ### Task 5: Emulated-external AS image (vendored `_local_as.py`)
 
-**Files:** Create `infra/proof-1b-2/Dockerfile.as`
+**Files:** Create `infra/proof-1b-2/Dockerfile.as` + extend `tests/unit/proof_1b_2/test_proof_images.py` (the author-time structural test, from T4)
 
 - [ ] **Step 1: Write the Dockerfile** (vendor the single AS file; it has no installable distribution):
 ```dockerfile
@@ -249,9 +249,9 @@ CMD ["python", "_local_as.py"]
 ```
 (The Task-2 `__main__` makes `python _local_as.py` run the AS, env-driven by `COGNIC_PROOF_AS_ISSUER` / `COGNIC_PROOF_AS_HOST` / `COGNIC_PROOF_AS_PORT`.)
 
-- [ ] **Step 2: Build smoke** — `docker build -f infra/proof-1b-2/Dockerfile.as -t cognic-proof-as:1b2 .` → exit 0.
+- [ ] **Step 2: Structural verification (AUTHOR-ONLY — `docker build` DEFERRED to T9 per the Global-Constraints T4–T6 author-only decision).** Extend `tests/unit/proof_1b_2/test_proof_images.py` with the AS-image invariants: the `COPY tests/integration/pack_loop/_local_as.py` vendor line, the exact `CMD ["python", "_local_as.py"]` (the T2 `__main__` path), and the `uvicorn` + `starlette` + `python-multipart` (form-parse dep) pip install. `uv run pytest tests/unit/proof_1b_2/test_proof_images.py -v` → passes. (T9's runner runs the real `docker build`.)
 
-- [ ] **Step 3: Commit** — `git add infra/proof-1b-2/Dockerfile.as && git commit -m "feat(proof-1b-2): emulated-external AS image"`
+- [ ] **Step 3: Commit** — `git add infra/proof-1b-2/Dockerfile.as tests/unit/proof_1b_2/test_proof_images.py && git commit -m "feat(proof-1b-2): T5 — emulated-external AS image Dockerfile (author-only) + structural test"`
 
 ---
 
