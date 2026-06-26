@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 
 import uvicorn
 from starlette.applications import Starlette
@@ -25,7 +26,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-_AS_ISSUER = "http://127.0.0.1:9000"
+_AS_ISSUER = os.environ.get("COGNIC_PROOF_AS_ISSUER", "http://127.0.0.1:9000")
 
 
 def _b64url(data: bytes) -> str:
@@ -63,4 +64,13 @@ def build_app() -> Starlette:
 
 
 def run_local_as(*, port: int = 9000) -> None:
-    uvicorn.run(build_app(), host="127.0.0.1", port=port, log_level="warning")
+    uvicorn.run(
+        build_app(),
+        host=os.environ.get("COGNIC_PROOF_AS_HOST", "127.0.0.1"),
+        port=port,
+        log_level="warning",
+    )
+
+
+if __name__ == "__main__":
+    run_local_as(port=int(os.environ.get("COGNIC_PROOF_AS_PORT", "9000")))
