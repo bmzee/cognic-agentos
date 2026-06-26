@@ -297,7 +297,7 @@ Build context = `infra/proof-1b-2/` after the runner copies `proof1b-staging/` (
 
 ### Task 7: kind manifests — private MCP ClusterIP + public-shaped AS externalIP
 
-**Files:** Create `infra/proof-1b-2/manifests/mcp-server.yaml`, `infra/proof-1b-2/manifests/auth-server.yaml`
+**Files:** Create `infra/proof-1b-2/manifests/mcp-server.yaml`, `infra/proof-1b-2/manifests/auth-server.yaml` + `tests/unit/proof_1b_2/test_proof_manifests.py` (the author-time structural test)
 
 - [ ] **Step 1: MCP server manifest** (static private ClusterIP `10.96.0.50`):
 ```yaml
@@ -361,9 +361,9 @@ spec:
   ports: [{ port: 9000, targetPort: 9000 }]
 ```
 
-- [ ] **Step 3: kubeconform/lint** — `kubeconform -strict infra/proof-1b-2/manifests/*.yaml` (or `kubectl apply --dry-run=client -f`) → valid.
+- [ ] **Step 3: Offline validation (NO Docker/kind/live cluster).** (a) Add `tests/unit/proof_1b_2/test_proof_manifests.py` parsing both manifests via `yaml.safe_load_all` + asserting the load-bearing invariants: the MCP Service `clusterIP == "10.96.0.50"` (static private), the AS Service `externalIPs == ["192.88.99.9"]`, and the single-URL/AS-issuer invariant (`COGNIC_PROOF_SERVER_URL == "http://10.96.0.50:8765/mcp"` on the MCP container; `COGNIC_PROOF_AS_ISSUER == "http://192.88.99.9:9000"` on BOTH the MCP + AS containers). `uv run pytest tests/unit/proof_1b_2/test_proof_manifests.py -v` → passes. (b) If `which kubeconform` finds it, also run `kubeconform -strict infra/proof-1b-2/manifests/*.yaml`; if not, skip + note (the structural pytest is the reliable offline gate). Do NOT use `kubectl --dry-run` if it would contact a cluster.
 
-- [ ] **Step 4: Commit** — `git add infra/proof-1b-2/manifests/ && git commit -m "feat(proof-1b-2): kind manifests (private MCP ClusterIP + public-shaped AS externalIP)"`
+- [ ] **Step 4: Commit** — `git add infra/proof-1b-2/manifests/ tests/unit/proof_1b_2/test_proof_manifests.py && git commit -m "feat(proof-1b-2): T7 — kind manifests (private MCP ClusterIP + public-shaped AS externalIP) + structural test"`
 
 ---
 
