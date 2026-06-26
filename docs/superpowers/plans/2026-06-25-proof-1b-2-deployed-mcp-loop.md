@@ -80,7 +80,7 @@ def test_defaults_unchanged(monkeypatch):
     assert s._HOST == "127.0.0.1"
 ```
 
-- [ ] **Step 2: Run it, verify it fails** — `cd examples/cognic-tool-search && uv run pytest tests/test_server_env.py -v` → FAIL (constants are literals, env ignored).
+- [ ] **Step 2: Run it, verify it fails** — `uv run pytest examples/cognic-tool-search/tests/test_server_env.py -v` (run from the REPO ROOT — `cd examples/cognic-tool-search && uv run …` spins a separate nested `.venv` with the wrong pytest and no `cognic_tool_search` synced; the example pack has no `[tool.pytest.ini_options]`, so the repo-root env applies. NOTE for T4/T9: the `uv build --wheel` commands DO `cd examples/cognic-tool-search` on purpose — that builds the example's own wheel, which is correct.) → FAIL (constants are literals, env ignored).
 
 - [ ] **Step 3: Implement** — `server.py` imports `os` ONLY inside `if __name__ == "__main__"` (L71), so FIRST add a top-level `import os` (with the other top-level imports, after the `from __future__` line), THEN change lines 21 + 23:
 ```python
