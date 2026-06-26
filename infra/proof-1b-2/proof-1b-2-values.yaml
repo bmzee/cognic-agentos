@@ -1,6 +1,6 @@
 # Proof 1b-2 overlay: real in-cluster backends, prod profile, chart-created Secret.
 # Mirrors the 1b-1 overlay; the only deltas are the proof image tag + the Vault
-# dev-root token (proof1b2-*). The proof image's CMD points to create_proof_app (T6).
+# dev-root token (smoke-root-token, == the reused backends.yaml Vault). The proof image's CMD points to create_proof_app (T6).
 image:
   repository: cognic-agentos        # loaded into kind via `kind load docker-image`
   tag: "proof1b2"
@@ -16,7 +16,7 @@ migrations: { enabled: false }     # Gap 3: chart pre-install migration hook dea
 secrets:
   create: true
   databaseUrl: "postgresql+asyncpg://cognic:cognic@postgres:5432/cognic"
-  vaultToken: "proof1b2-root-token"
+  vaultToken: "smoke-root-token"        # == the reused backends.yaml Vault VAULT_DEV_ROOT_TOKEN_ID (pinned by test_proof_seeds.py)
 podSecurityContext:
   runAsUser: 10001                  # Gap 4: vanilla kind has no SCC to assign a numeric UID; the image USER is the NAME "cognic", so kubelet can't verify runAsNonRoot without this
   fsGroup: 10001                    # the image GID makes emptyDirs writable

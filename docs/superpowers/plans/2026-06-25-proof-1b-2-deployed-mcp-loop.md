@@ -393,7 +393,7 @@ ON CONFLICT (tenant_id, ip) DO NOTHING;"
 #!/usr/bin/env bash
 set -euo pipefail
 NS="${NS:-cognic-proof1b2}"; T="proof-1b-2"; ASHOST="192.88.99.9_9000"; AS="http://192.88.99.9:9000"
-VX() { kubectl -n "$NS" exec deploy/vault -- env VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=proof1b2-root-token vault "$@"; }
+VX() { kubectl -n "$NS" exec deploy/vault -- env VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=smoke-root-token vault "$@"; }  # == the reused backends.yaml Vault VAULT_DEV_ROOT_TOKEN_ID
 VX secrets disable secret || true
 VX secrets enable -version=1 -path=secret kv
 # mcp-as-allowlist.servers MUST be a JSON LIST — _load_as_allowlist (mcp_authz.py:1439) expects a list.
@@ -417,7 +417,7 @@ VX kv put "secret/cognic/$T/mcp-oauth/$ASHOST" client_id=proof-client client_sec
 
 **Files:** Create `infra/proof-1b-2/proof-1b-2-values.yaml`, `infra/proof-1b-2/migrate-job.yaml` (copy from 1b-1), `infra/proof-1b-2/run-proof-1b-2.sh`, `infra/proof-1b-2/README.md` + `tests/unit/proof_1b_2/test_proof_runner.py` (the author-time structural test). **Also copy `tests/integration/proof_1b/{__init__.py, stage_trust_inputs.py}` from `feat/pack-loop-proof-1b`** (the runner Step 3 staging dep; its `tests.integration.pack_loop._authoring` dependency is already on this branch — `git show` the 2 files, do NOT checkout the branch). Without it the operator run dies `ModuleNotFoundError` before the image build.
 
-- [ ] **Step 1: Values** — `git show feat/pack-loop-proof-1b:infra/proof-1b/proof-1b-values.yaml > infra/proof-1b-2/proof-1b-2-values.yaml` (the file is branch-only; `infra/proof-1b/` on THIS branch holds only untracked staging — mirror the `git show` Step 2 uses for the migrate job). Then set `image.tag: "proof1b2"`, keep `runtimeProfile: prod`, `migrations.enabled: false`, `secrets.vaultToken: "proof1b2-root-token"`, `podSecurityContext: {runAsUser: 10001, fsGroup: 10001}`. The proof image's CMD already points to `create_proof_app` (T6).
+- [ ] **Step 1: Values** — `git show feat/pack-loop-proof-1b:infra/proof-1b/proof-1b-values.yaml > infra/proof-1b-2/proof-1b-2-values.yaml` (the file is branch-only; `infra/proof-1b/` on THIS branch holds only untracked staging — mirror the `git show` Step 2 uses for the migrate job). Then set `image.tag: "proof1b2"`, keep `runtimeProfile: prod`, `migrations.enabled: false`, `secrets.vaultToken: "smoke-root-token"` (== the reused backends.yaml Vault `VAULT_DEV_ROOT_TOKEN_ID`), `podSecurityContext: {runAsUser: 10001, fsGroup: 10001}`. The proof image's CMD already points to `create_proof_app` (T6).
 
 - [ ] **Step 2: Migrate job** — `git show feat/pack-loop-proof-1b:infra/proof-1b/migrate-job.yaml > infra/proof-1b-2/migrate-job.yaml` (non-hook, `envFrom` the config map, `__AGENTOS_IMAGE__` sed slot).
 

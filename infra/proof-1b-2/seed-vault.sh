@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 NS="${NS:-cognic-proof1b2}"; T="proof-1b-2"; ASHOST="192.88.99.9_9000"; AS="http://192.88.99.9:9000"
-VX() { kubectl -n "$NS" exec deploy/vault -- env VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=proof1b2-root-token vault "$@"; }
+# VAULT_TOKEN = the reused backends.yaml Vault dev root token (VAULT_DEV_ROOT_TOKEN_ID=smoke-root-token);
+# pinned == proof-1b-2-values.yaml vaultToken by tests/unit/proof_1b_2/test_proof_seeds.py (else `vault` 403s).
+VX() { kubectl -n "$NS" exec deploy/vault -- env VAULT_ADDR=http://127.0.0.1:8200 VAULT_TOKEN=smoke-root-token vault "$@"; }
 VX secrets disable secret || true
 VX secrets enable -version=1 -path=secret kv
 # mcp-as-allowlist.servers MUST be a JSON LIST — _load_as_allowlist (mcp_authz.py:1439) expects a list.

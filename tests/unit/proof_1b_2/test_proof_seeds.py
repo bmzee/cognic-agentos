@@ -28,6 +28,7 @@ text only — they never invoke ``kubectl`` / ``psql`` / ``vault`` / a cluster.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -141,3 +142,42 @@ def test_vault_seed_reads_back_and_asserts_the_list_shape() -> None:
     text = _vault_text()
     assert "kv get -format=json" in text, "must read the AS allow-list back as JSON"
     assert "isinstance(s,list)" in text, "must assert servers is a JSON list on readback"
+
+
+# --- Vault root-token alignment guard (the attempt-2 BAR 0 defect) ----------------
+#
+# The proof reuses the chart's SHARED backends.yaml Vault, which boots with a fixed
+# VAULT_DEV_ROOT_TOKEN_ID. seed-vault.sh (WRITES Vault) + proof-1b-2-values.yaml (the
+# kernel's READ token) MUST both use THAT root token — else every `vault` call 403s.
+# Attempt 2 died here: the proof used proof1b2-root-token but the backend boots
+# smoke-root-token. Pin all three equal so a future drift is caught at author time,
+# not at the live run (and so we never mutate the shared backends.yaml to compensate).
+
+_BACKENDS_YAML = _REPO_ROOT / "infra" / "charts" / "agentos" / "ci" / "smoke" / "backends.yaml"
+_VALUES_YAML = _SEED_DIR / "proof-1b-2-values.yaml"
+
+
+def _backend_vault_root_token() -> str:
+    m = re.search(r"VAULT_DEV_ROOT_TOKEN_ID,\s*value:\s*([^\s}]+)", _BACKENDS_YAML.read_text())
+    assert m, "backends.yaml must set VAULT_DEV_ROOT_TOKEN_ID on the vault deployment"
+    return m.group(1).strip().strip('"')
+
+
+def test_vault_token_matches_the_reused_backend_root_token() -> None:
+    backend = _backend_vault_root_token()
+    seed_m = re.search(r"VAULT_TOKEN=(\S+)", _vault_text())
+    assert seed_m, "seed-vault.sh must set VAULT_TOKEN"
+    seed_token = seed_m.group(1)
+    values_m = re.search(r'vaultToken:\s*"?([^"\s]+)"?', _VALUES_YAML.read_text())
+    assert values_m, "proof-1b-2-values.yaml must set vaultToken"
+    values_token = values_m.group(1)
+    assert seed_token == backend, (
+        f"seed-vault.sh VAULT_TOKEN ({seed_token!r}) must equal the reused backends.yaml "
+        f"Vault VAULT_DEV_ROOT_TOKEN_ID ({backend!r}) — else `vault` 403s on every call "
+        f"(the attempt-2 BAR 0 defect)"
+    )
+    assert values_token == backend, (
+        f"proof-1b-2-values.yaml vaultToken ({values_token!r}) must equal the reused "
+        f"backends.yaml Vault VAULT_DEV_ROOT_TOKEN_ID ({backend!r}) — else the kernel can't "
+        f"read Vault"
+    )
