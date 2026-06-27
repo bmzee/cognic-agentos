@@ -324,3 +324,43 @@ def test_scaffold_rejects_invalid_pack_name(bad_name: str, tmp_path: Path) -> No
 
     with pytest.raises(ScaffoldError):
         _scaffold_hook(bad_name, tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# (h) External-pack authoring enablement — kernel dep is git-pinned, not broken
+# ---------------------------------------------------------------------------
+#
+# PR-1: the hook scaffold (like tool/skill/agent) must emit the git-pinned
+# cognic-agentos tag form so a clean external hook-pack repo can obtain the
+# AgentOS authoring/governance CLI (the kernel is unpublished). Positive +
+# negative, mirroring tests/unit/cli/test_cli_init.py section (i).
+
+#: The git-pinned form the hook scaffold must emit. Bump alongside the kernel tag.
+_PINNED_KERNEL_DEP = "cognic-agentos @ git+https://github.com/bmzee/cognic-agentos@v0.0.1"
+
+
+def test_scaffolded_pyproject_git_pins_kernel_dep(tmp_path: Path) -> None:
+    """The hook scaffold's cognic-agentos dep uses the git-pinned @v0.0.1
+    form (positive) and carries no bare unpinned entry (negative)."""
+    pack_root = _scaffold_hook("example", tmp_path)
+    deps = tomllib.loads((pack_root / "pyproject.toml").read_text())["project"]["dependencies"]
+    assert _PINNED_KERNEL_DEP in deps, (
+        f"hook pyproject must git-pin cognic-agentos ({_PINNED_KERNEL_DEP!r}); got {deps!r}"
+    )
+    assert "cognic-agentos" not in deps, (
+        f"hook pyproject must NOT carry a bare unpinned `cognic-agentos` dep; got {deps!r}"
+    )
+
+
+def test_scaffolded_ci_installs_kernel_from_git(tmp_path: Path) -> None:
+    """The hook scaffold's CI installs the AgentOS CLI from the git-pinned
+    tag (positive) and not via the broken bare install (negative)."""
+    pack_root = _scaffold_hook("example", tmp_path)
+    ci_text = (pack_root / ".github" / "workflows" / "sign-and-publish.yml").read_text()
+    assert f'pip install "{_PINNED_KERNEL_DEP}"' in ci_text, (
+        f"hook CI must git-install the kernel; expected "
+        f'pip install "{_PINNED_KERNEL_DEP}" in:\n{ci_text}'
+    )
+    assert "pip install cognic-agentos" not in ci_text, (
+        f"hook CI must NOT carry the broken bare `pip install cognic-agentos`:\n{ci_text}"
+    )

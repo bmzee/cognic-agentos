@@ -10,7 +10,8 @@ authors = [
 ]
 
 dependencies = [
-    "cognic-agentos",
+    # AUTHOR-FILL: bump to the AgentOS tag your pack targets.
+    "cognic-agentos @ git+https://github.com/bmzee/cognic-agentos@v0.0.1",
 ]
 
 [project.optional-dependencies]
