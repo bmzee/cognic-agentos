@@ -142,11 +142,11 @@ Studio/no-code authoring and Cognic Forge remain outside this v1 completion chec
   **Load-bearing proof:** missing secret/pack trust/allow-list/policy denies correctly; rollback path rehearsed.  
   **Evidence required:** AKS operator-run report and validation results.
 
-- [ ] **M16 — Backup/restore/rollback/secret-rotation runbooks rehearsed.**  
-  **Goal:** banks can operate and recover AgentOS, not only deploy it.  
-  **Production proof:** restore from backup, rotate secrets, run migrations/rollback posture, disable/revoke pack, and recover service.  
-  **Load-bearing proof:** restore/rollback failure surfaces fail-loud, not silent data loss.  
-  **Evidence required:** runbook transcripts and updated operator docs.
+- [ ] **M16 — Production ops proof: backup/restore, rollback, secret rotation, kill-switch, incident response.**  
+  **Goal:** banks can operate, recover, and emergency-control AgentOS, not only deploy it.  
+  **Production proof:** restore from backup; rotate secrets; run migrations/rollback posture; disable/revoke a pack; flip a tenant/pack/tool kill switch and prove ≤30s propagation (ADR-018); and recover service.  
+  **Load-bearing proof:** restore/rollback failure surfaces fail-loud (not silent data loss); a flipped kill switch actually blocks the gated path (fail-closed).  
+  **Evidence required:** runbook transcripts (incl. an incident-response transcript) and updated operator docs.
 
 - [ ] **M17 — Examiner-ready evidence export from live deployment.**  
   **Goal:** export ISO 42001 evidence from a live AKS run, not only unit/e2e tests.  
