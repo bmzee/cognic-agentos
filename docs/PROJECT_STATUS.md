@@ -58,7 +58,7 @@ What still exists alongside these proofs (useful context for what remains unprov
 
 ## Status vs the 6 Agent OS primitives (capability matrix)
 
-A cross-check against the conceptual "Agent OS" model (the kernel = the six runtime primitives below; agents + infra live outside it). This axis exists because the BUILD_PLAN/phase view can make a built primitive read as implied-pending — most acutely the **scheduler/orchestrator**, which is fully built and on the critical-controls gate but easy to miss in the phase ledger. Every primitive below **has a built kernel implementation**; the still-forward work is real **packs** + the **deployed** proof (Proof 1b), not the primitives.
+A cross-check against the conceptual "Agent OS" model (the kernel = the six runtime primitives below; agents + infra live outside it). This axis exists because the BUILD_PLAN/phase view can make a built primitive read as implied-pending — most acutely the **scheduler/orchestrator**, which is fully built and on the critical-controls gate but easy to miss in the phase ledger. Every primitive below **has a built kernel implementation**; the still-forward work is real **separate-repo packs** + the **deployed agent loop**, not the primitives.
 
 | Primitive | Kernel status | Implemented by (merged modules) | Anchored in | Still forward |
 |---|---|---|---|---|
@@ -70,6 +70,21 @@ A cross-check against the conceptual "Agent OS" model (the kernel = the six runt
 | **Guardrails** | ✅ Built | `core/guardrails.py` · cloud-policy gateway (`llm/gateway.py`) · policy-as-code OPA/Rego (`core/policy/engine.py` + `policies/_default/`) · DLP hooks (`packs/hooks/dlp_integration.py`) · runtime approval (`core/approval/engine.py`) · kill switches + quotas (`core/emergency/kill_switches.py`, `quotas.py`) | ADR-014/015/017/018 | — |
 
 **Read with the blunt-reality box above:** every primitive has a built kernel implementation. Proof 1a proved the governed pack loop **in-process**, and Proof 1b-2 proved it **deployed** (tool invocation: Tools + Identity + Observability + Guardrails together, on a kind/Helm instance). The remaining unproven claim narrows to "a bank installs a signed pack **from a separate repo** and an **LLM agent** completes one governed task on a deployed instance" — i.e. Proof 2 (separate pack repo) + the deployed agent loop.
+
+---
+
+## Forward vocabulary lock — skills, workflows, agents
+
+This section is a guardrail for future development vocabulary. Do **not** collapse these concepts into each other:
+
+- **Tool pack** — a governed connector/action surface, usually MCP (`cognic-tool-*`): search, database access, case lookup, transaction review, payment action, etc.
+- **Instruction skill** — portable procedural knowledge, preferably the open Agent Skills `SKILL.md` shape: when to use a procedure, steps to follow, tools to call, edge cases, and output templates. This is agent-context knowledge, not a runtime engine.
+- **Executable skill service** — today's `cognic-skill-*` meaning: signed Python pack code that deterministically composes tools through `Skill.execute()` with declared-tool cross-checks and no LLM call in the skill code. It is a fixed composer, not a workflow engine.
+- **Workflow** — a future AgentOS kernel feature (Sprint 15A): declarative DAG/state-machine execution with branching, loops, durable cross-step state, pause/resume, approval gates, retries/compensation, sub-agent steps, and visible execution history. The substrate exists in pieces (scheduler, run executor, sub-agent spawn, A2A task lifecycle, UI events); the generic workflow engine does **not**.
+- **Agent pack** — a human-role worker (`cognic-agent-*`) that reasons and chooses among assigned tools, instruction skills, executable skill services, and eventually workflows under AgentOS governance.
+- **Hook pack** — deterministic governance extension (`cognic-hook-*`), such as DLP pre/post hooks; not a tool, skill, workflow, or agent.
+
+Forward order: **Proof 2** (first external `cognic-tool-*` repo with independent CI/sign/verify/release) → **ADR-025 Agent Skills hosting** (`SKILL.md` adapter + governance wrapper; host/govern, not replace) → first real **instruction skill** from a bank SOP → first deployed **agent** loop using assigned skills + allowed tools. Keep executable skill services and the Sprint 15A workflow engine as separate tracks; build them only when a concrete use case needs them.
 
 ---
 
