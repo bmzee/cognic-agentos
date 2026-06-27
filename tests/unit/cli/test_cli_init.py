@@ -320,3 +320,52 @@ def test_scaffold_rejects_invalid_pack_name(bad_name: str, tmp_path: Path) -> No
         _scaffold("tool", bad_name, tmp_path)
     # No partial scaffold left behind on rejection.
     assert list(tmp_path.iterdir()) == []
+
+
+# ---------------------------------------------------------------------------
+# (i) External-pack authoring enablement — kernel dep is git-pinned, not broken
+# ---------------------------------------------------------------------------
+#
+# PR-1 (external-pack authoring enablement): the kernel ``cognic-agentos`` is
+# unpublished (public repo, no PyPI/index/release artifact), so a bare
+# ``cognic-agentos`` dep / ``pip install cognic-agentos`` fails from a clean
+# external pack repo. The scaffolds must emit the git-pinned tag form so a
+# generated pack can obtain the AgentOS authoring/governance CLI. These tests
+# pin BOTH the positive (git-pinned form present) AND the negatives (the broken
+# bare forms absent), so a future edit cannot silently regress to either.
+
+#: The git-pinned form every scaffold must emit. Bump alongside the kernel tag.
+_PINNED_KERNEL_DEP = "cognic-agentos @ git+https://github.com/bmzee/cognic-agentos@v0.0.1"
+
+
+@pytest.mark.parametrize("kind", _KINDS)
+def test_scaffolded_pyproject_git_pins_kernel_dep(kind: str, tmp_path: Path) -> None:
+    """The scaffold's ``cognic-agentos`` dependency uses the git-pinned
+    ``@v0.0.1`` form. Positive: the pinned spec is a dependency-array
+    element. Negative: a bare unpinned ``cognic-agentos`` element is NOT."""
+    pack_root = _scaffold(kind, "example", tmp_path)
+    deps = tomllib.loads((pack_root / "pyproject.toml").read_text())["project"]["dependencies"]
+    assert _PINNED_KERNEL_DEP in deps, (
+        f"{kind} pyproject must git-pin cognic-agentos ({_PINNED_KERNEL_DEP!r}); got {deps!r}"
+    )
+    # List membership is exact-element, not substring: the pinned spec is a
+    # distinct element from the bare "cognic-agentos" we are forbidding.
+    assert "cognic-agentos" not in deps, (
+        f"{kind} pyproject must NOT carry a bare unpinned `cognic-agentos` dep; got {deps!r}"
+    )
+
+
+@pytest.mark.parametrize("kind", _KINDS)
+def test_scaffolded_ci_installs_kernel_from_git(kind: str, tmp_path: Path) -> None:
+    """The scaffold's sign-and-publish CI installs the AgentOS CLI from the
+    git-pinned tag. Positive: the git-pinned ``pip install`` is present.
+    Negative: the broken bare ``pip install cognic-agentos`` is absent."""
+    pack_root = _scaffold(kind, "example", tmp_path)
+    ci_text = (pack_root / ".github" / "workflows" / "sign-and-publish.yml").read_text()
+    assert f'pip install "{_PINNED_KERNEL_DEP}"' in ci_text, (
+        f"{kind} CI must git-install the kernel; expected "
+        f'pip install "{_PINNED_KERNEL_DEP}" in:\n{ci_text}'
+    )
+    assert "pip install cognic-agentos" not in ci_text, (
+        f"{kind} CI must NOT carry the broken bare `pip install cognic-agentos`:\n{ci_text}"
+    )

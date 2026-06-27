@@ -10,9 +10,8 @@ authors = [
 ]
 
 dependencies = [
-    # AUTHOR-FILL: pin to a specific cognic-agentos version that ships
-    # the SDK shape your subclass depends on.
-    "cognic-agentos",
+    # AUTHOR-FILL: bump to the AgentOS tag your pack targets.
+    "cognic-agentos @ git+https://github.com/bmzee/cognic-agentos@v0.0.1",
 ]
 
 [project.optional-dependencies]

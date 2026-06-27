@@ -19,7 +19,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install cognic-agentos
+      - run: pip install "cognic-agentos @ git+https://github.com/bmzee/cognic-agentos@v0.0.1"
       - run: python -m build --wheel
       - run: agentos sign --bundle .
       - run: agentos validate .
