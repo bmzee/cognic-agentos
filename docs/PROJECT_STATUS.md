@@ -11,10 +11,12 @@ gh pr list --state merged --limit 200 --json number,title,mergedAt \
   --jq 'sort_by(.number) | .[] | "\(.number)\t\(.mergedAt[0:10])\t\(.title)"'
 ```
 
-Only the **Pending** column is hand-kept. Authoritative sources this page is derived from: [`docs/BUILD_PLAN.md`](BUILD_PLAN.md) (the original phased plan), [`docs/PROJECT_PLAN.md`](PROJECT_PLAN.md) (north-star + workstreams), [`docs/AS_BUILT_CAPABILITY_MAP.md`](AS_BUILT_CAPABILITY_MAP.md) (latest dated as-built record), `docs/closeouts/` (per-sprint closeouts), and `docs/adrs/`. Where this page and a source disagree, the source wins — fix this page.
+Only the **Pending** column is hand-kept. Authoritative sources this page is derived from: [`docs/BUILD_PLAN.md`](BUILD_PLAN.md) (the original phased plan), [`docs/PROJECT_PLAN.md`](PROJECT_PLAN.md) (north-star + workstreams), [`docs/AS_BUILT_CAPABILITY_MAP.md`](AS_BUILT_CAPABILITY_MAP.md) (latest dated as-built record), [`docs/PRODUCTION_GRADE_MILESTONE_CHECKLIST.md`](PRODUCTION_GRADE_MILESTONE_CHECKLIST.md) (proof-backed deployment-readiness checklist), `docs/closeouts/` (per-sprint closeouts), and `docs/adrs/`. Where this page and a source disagree, the source wins — fix this page.
 
 **Legend:** ✅ Done (merged PR + closeout/AS-BUILT milestone) · 🟡 Partial / amended-scope · ⬜ Not-started · ⏸ Deferred (explicitly out of current scope).
 **"Done" means:** PR merged + tests green + on the critical-controls coverage gate where applicable. **It does NOT mean deployed-and-proven-with-a-real-pack** — see the next section.
+
+For proof-level status, use [`docs/PRODUCTION_GRADE_MILESTONE_CHECKLIST.md`](PRODUCTION_GRADE_MILESTONE_CHECKLIST.md). Its rule is stricter than this page: every checked milestone must leave `main` deployable, must carry evidence, and final completion means production-grade AKS deployment with the full v1 checklist scope proven.
 
 ---
 
