@@ -336,11 +336,11 @@ def test_scaffold_rejects_invalid_pack_name(bad_name: str, tmp_path: Path) -> No
 # negative, mirroring tests/unit/cli/test_cli_init.py section (i).
 
 #: The git-pinned form the hook scaffold must emit. Bump alongside the kernel tag.
-_PINNED_KERNEL_DEP = "cognic-agentos @ git+https://github.com/bmzee/cognic-agentos@v0.0.1"
+_PINNED_KERNEL_DEP = "cognic-agentos @ git+https://github.com/bmzee/cognic-agentos@v0.0.2"
 
 
 def test_scaffolded_pyproject_git_pins_kernel_dep(tmp_path: Path) -> None:
-    """The hook scaffold's cognic-agentos dep uses the git-pinned @v0.0.1
+    """The hook scaffold's cognic-agentos dep uses the git-pinned @v0.0.2
     form (positive) and carries no bare unpinned entry (negative)."""
     pack_root = _scaffold_hook("example", tmp_path)
     deps = tomllib.loads((pack_root / "pyproject.toml").read_text())["project"]["dependencies"]

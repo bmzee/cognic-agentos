@@ -10,18 +10,20 @@ authors = [
 ]
 
 dependencies = [
-    # AUTHOR-FILL: bump to the AgentOS tag your pack targets.
-    "cognic-agentos @ git+https://github.com/bmzee/cognic-agentos@v0.0.1",
+    "mcp==1.27.0",
+    "uvicorn[standard]>=0.35",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8",
     "pytest-asyncio>=1",
+    # AgentOS authoring/governance CLI — author/CI-time only (validate/sign/verify).
+    "cognic-agentos @ git+https://github.com/bmzee/cognic-agentos@v0.0.2",
 ]
 
 [project.entry-points."{{ entry_point_group }}"]
-{{ pack_name }} = "{{ module_name }}.{{ kind }}:{{ class_name }}"
+{{ pack_name }} = "{{ module_name }}:SERVER_DESCRIPTOR"
 
 [build-system]
 requires = ["hatchling>=1.27"]
@@ -29,6 +31,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/{{ module_name }}"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"cognic-pack-manifest.toml" = "{{ module_name }}/cognic-pack-manifest.toml"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -27,10 +27,16 @@ Test arms:
 
 from __future__ import annotations
 
+import dataclasses
 import inspect
+import logging
 from pathlib import Path
+from typing import Any, ClassVar
+from unittest.mock import _patch, patch
 
 import pytest
+
+from cognic_agentos.sdk.tool import Tool
 
 # ---------------------------------------------------------------------------
 # (a) fixture_settings
@@ -308,3 +314,112 @@ def test_assert_a2a_envelope_well_formed_accepts_populated_task_top_level() -> N
     from cognic_agentos.sdk.testing import assert_a2a_envelope_well_formed
 
     assert_a2a_envelope_well_formed({"id": "t-1", "contextId": "c-1"})
+
+
+# ---------------------------------------------------------------------------
+# (b2) _load_entry_point_tools — three-way classification (M3-E2a)
+# ---------------------------------------------------------------------------
+
+
+class _StubTool(Tool):
+    name: ClassVar[str] = "stub_tool"
+    input_schema: ClassVar[dict[str, Any]] = {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": False,
+    }
+    output_schema: ClassVar[dict[str, Any]] = {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": False,
+    }
+
+    async def _invoke(self, **kwargs):  # type: ignore[no-untyped-def]
+        return {}
+
+
+@dataclasses.dataclass(frozen=True)
+class _StubServerDescriptor:
+    cognic_pack_kind: str = "mcp_server"
+    pack_id: str = "cognic-tool-stub"
+
+
+class _FakeEntry:
+    def __init__(self, name: str, obj: object) -> None:
+        self.name = name
+        self._obj = obj
+
+    def load(self) -> object:
+        return self._obj
+
+
+def _patch_entry_points(entries: list[object]) -> _patch[Any]:
+    return patch("importlib.metadata.entry_points", return_value=entries)
+
+
+def test_load_entry_point_tools_instantiates_tool_subclass() -> None:
+    from cognic_agentos.sdk.testing import _load_entry_point_tools
+
+    with _patch_entry_points([_FakeEntry("stub_tool", _StubTool)]):
+        tools = _load_entry_point_tools()
+    assert "stub_tool" in tools
+    assert isinstance(tools["stub_tool"], _StubTool)
+
+
+def test_load_entry_point_tools_skips_descriptor_with_trace(caplog) -> None:  # type: ignore[no-untyped-def]
+    from cognic_agentos.sdk.testing import _load_entry_point_tools
+
+    with (
+        _patch_entry_points([_FakeEntry("svc", _StubServerDescriptor())]),
+        caplog.at_level(logging.DEBUG, logger="cognic_agentos.sdk.testing"),
+    ):
+        tools = _load_entry_point_tools()
+    assert tools == {}
+    assert any("svc" in rec.message for rec in caplog.records), "skip must emit a testable trace"
+
+
+def test_load_entry_point_tools_raises_on_unknown_object() -> None:
+    from cognic_agentos.sdk.testing import _load_entry_point_tools
+
+    with (
+        _patch_entry_points([_FakeEntry("weird", object())]),
+        pytest.raises(TypeError, match="weird"),
+    ):
+        _load_entry_point_tools()
+
+
+def test_load_entry_point_tools_skips_legacy_descriptor_shape(caplog) -> None:  # type: ignore[no-untyped-def]
+    """The marker-less cognic-tool-search example descriptor (class named
+    _ServerDescriptor with str pack_id + str tool_name) is skipped via the
+    back-compat arm WITHOUT re-signing the example."""
+    from cognic_agentos.sdk.testing import _load_entry_point_tools
+
+    @dataclasses.dataclass(frozen=True)
+    class _ServerDescriptor:
+        pack_id: str = "cognic-tool-search"
+        tool_name: str = "search_policy_docs"
+
+    with (
+        _patch_entry_points([_FakeEntry("legacy", _ServerDescriptor())]),
+        caplog.at_level(logging.DEBUG, logger="cognic_agentos.sdk.testing"),
+    ):
+        tools = _load_entry_point_tools()
+    assert tools == {}
+
+
+def test_load_entry_point_tools_raises_on_unrelated_dataclass() -> None:
+    """An unrelated dataclass instance is NOT a descriptor — it must raise,
+    not be silently skipped (the predicate is exact, not 'any dataclass')."""
+    from cognic_agentos.sdk.testing import _load_entry_point_tools
+
+    @dataclasses.dataclass(frozen=True)
+    class _SomeConfig:
+        value: int = 1
+
+    with (
+        _patch_entry_points([_FakeEntry("cfg", _SomeConfig())]),
+        pytest.raises(TypeError, match="cfg"),
+    ):
+        _load_entry_point_tools()
