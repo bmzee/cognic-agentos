@@ -1,4 +1,4 @@
-"""PR-1 — structural gate for the external-pack-authoring verification script.
+"""M3-E1 — structural gate for the external-pack-authoring verification script.
 
 Pins the operator-run verify script's load-bearing invariants OFFLINE — without
 running it (it is env-gated behind ``COGNIC_RUN_EXTERNAL_PACK_ENABLEMENT=1`` and
@@ -48,20 +48,37 @@ def test_script_git_installs_the_kernel_not_local_editable() -> None:
     # The whole point: prove EXTERNAL consumption via the git form, not a local
     # editable that would mask the unpublished-kernel gap.
     text = _text()
-    assert 'pip install "cognic-agentos @ git+' in text, "must git-install the kernel"
+    assert "cognic-agentos @ git+" in text, "must git-install the kernel"
     assert "pip install -e" not in text, "must NOT install the kernel as a local editable"
+
+
+def test_script_pins_python_312_venv() -> None:
+    # M3-E1 closeout finding: the kernel requires >=3.12,<3.13, so the venv MUST be
+    # 3.12. The original system `python3 -m venv` used a 3.13+ interpreter and broke.
+    text = _text()
+    assert "uv venv --python 3.12" in text, (
+        "the venv must be pinned to Python 3.12 (the kernel caps at <3.13)"
+    )
+    # The negative targets the venv-CREATION command, not the explanatory header
+    # comment (which legitimately names the rejected pattern): scan non-comment lines.
+    code_lines = [ln for ln in text.splitlines() if not ln.lstrip().startswith("#")]
+    assert not any("python3 -m venv" in ln for ln in code_lines), (
+        "must NOT create the venv with the system python3 — it may be 3.13+ which fails the install"
+    )
 
 
 def test_script_runs_validate_then_conditional_sign_verify() -> None:
     text = _text()
-    assert "agentos validate ." in text, "must run agentos validate (the hard proof)"
-    assert "agentos sign --bundle ." in text, "must run agentos sign --bundle (conditionally)"
-    assert "agentos verify ." in text, "must run agentos verify (conditionally)"
+    assert "validate ." in text, "must run agentos validate (the hard proof)"
+    assert "sign --bundle ." in text, "must run agentos sign --bundle (conditionally)"
+    assert "verify ." in text, "must run agentos verify (conditionally)"
 
 
 def test_script_records_tooling_absent_not_silent_skip() -> None:
     text = _text()
-    for bin_name in ("cosign", "syft", "grype"):
+    # All four binaries `agentos sign --bundle` shells out to — pip-licenses
+    # included so the host-tooling gate matches what sign actually needs.
+    for bin_name in ("cosign", "syft", "grype", "pip-licenses"):
         assert bin_name in text, f"must check for {bin_name}"
     assert "TOOLING ABSENT" in text or "tooling_absent" in text, (
         "missing supply-chain binaries must be recorded as 'tooling absent', not silently skipped"
