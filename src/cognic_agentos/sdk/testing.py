@@ -37,10 +37,12 @@ Forward dependency:
 
 from __future__ import annotations
 
+import dataclasses
 import importlib
 import importlib.metadata
 import importlib.util
 import json
+import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -62,6 +64,9 @@ from cognic_agentos.sdk.registry import ToolRegistry
 
 if TYPE_CHECKING:
     from cognic_agentos.sdk.tool import Tool
+
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -125,18 +130,63 @@ class _FixtureToolRegistry:
         return list(self._tools)
 
 
-def _load_entry_point_tools() -> dict[str, Tool]:
-    """Resolve ``cognic.tools`` entry-points → instantiated tool
-    map. Pack authors register entries via their ``pyproject.toml``
-    ``[project.entry-points."cognic.tools"]`` table; this helper is
-    the mirror of how the runtime MCP host (Sprint 5) discovers
-    them, scoped to the pack's own test process.
+def _is_mcp_server_descriptor(obj: object) -> bool:
+    """True for an inert FastMCP MCP-server descriptor (an external MCP
+    server pack's entry-point target). Import-free recognition so the
+    pack never has to import the kernel:
+
+      - new scaffold packs declare ``cognic_pack_kind = "mcp_server"``;
+      - the already-signed ``cognic-tool-search`` example ships a frozen
+        dataclass with NO marker — recognised by its EXACT shape (class
+        named ``_ServerDescriptor`` with ``str`` ``pack_id`` + ``str``
+        ``tool_name``) so it is skipped WITHOUT re-signing it.
+
+    The back-compat arm is deliberately narrow: an UNRELATED dataclass
+    instance does NOT match, so it falls through to the ``raise`` in the
+    caller (unknown objects must be visible, not silently skipped).
     """
+    if getattr(obj, "cognic_pack_kind", None) == "mcp_server":
+        return True
+    return (
+        dataclasses.is_dataclass(obj)
+        and not isinstance(obj, type)
+        and type(obj).__name__ == "_ServerDescriptor"
+        and isinstance(getattr(obj, "pack_id", None), str)
+        and isinstance(getattr(obj, "tool_name", None), str)
+    )
+
+
+def _load_entry_point_tools() -> dict[str, Tool]:
+    """Resolve ``cognic.tools`` entry-points → instantiated tool map.
+
+    Three-way classification (M3-E2a):
+      1. SDK ``Tool`` subclass -> instantiate + register.
+      2. inert MCP-server descriptor -> skip with a DEBUG trace (FastMCP
+         packs run behind HTTP; they contribute nothing in-process).
+      3. anything else -> raise ``TypeError`` (a broken/unexpected entry
+         point must be visible, not silently dropped).
+    """
+    from cognic_agentos.sdk.tool import Tool
+
     tools: dict[str, Tool] = {}
     for entry in importlib.metadata.entry_points(group="cognic.tools"):
-        cls = entry.load()
-        instance = cls()
-        tools[instance.name] = instance
+        obj = entry.load()
+        if isinstance(obj, type) and issubclass(obj, Tool):
+            instance = obj()
+            tools[instance.name] = instance
+        elif _is_mcp_server_descriptor(obj):
+            logger.debug(
+                "skipping cognic.tools entry %r: inert MCP-server descriptor "
+                "(external FastMCP pack, runs behind HTTP)",
+                entry.name,
+            )
+            continue
+        else:
+            raise TypeError(
+                f"cognic.tools entry-point {entry.name!r} resolved to an "
+                f"unrecognised object of type {type(obj).__name__!r}: expected "
+                "an SDK Tool subclass or an inert MCP-server descriptor."
+            )
     return tools
 
 
