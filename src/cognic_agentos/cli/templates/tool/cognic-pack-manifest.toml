@@ -11,15 +11,14 @@ schema_version = 1
 kind = "{{ kind }}"
 
 [identity]
-# AGNTCY/OASF identity matrix. Every field below is mandatory per
-# Sprint-7A T7 (identity validator). The agent_card_jws_path is the
-# pack-relative path the JWS verifier reads at admission time.
+# AGNTCY/OASF identity matrix. Tool packs declare the universally
+# mandatory Wave-1 fields below (cli/validators/identity.py). The
+# agent-card fields (agent_card_url + agent_card_jws_path) are
+# agent-pack-only and are intentionally omitted for a tool pack.
 agent_id = "AUTHOR-FILL: stable identifier (e.g., did:web:example.com:tools:{{ pack_name }})"
 display_name = "AUTHOR-FILL: human-readable name shown in registries"
 provider_organization = "AUTHOR-FILL: your organization"
 provider_url = "AUTHOR-FILL: https://your-org.example.com"
-agent_card_url = "AUTHOR-FILL: https://your-org.example.com/tools/{{ pack_name }}/card.json"
-agent_card_jws_path = "agent_cards/agent-card.jws"  # AUTHOR-FILL if your pack ships JWS-signed cards
 
 # OASF capability set — optional Wave-1 (warning, NOT refusal):
 # capability_set = ["AUTHOR-FILL: e.g., kyc.v1, retrieval.v1"]
@@ -61,3 +60,15 @@ attestation_paths = [
     "attestations/cosign.sig",
     "attestations/sbom.cdx.json",
 ]
+
+[tool.cognic.mcp]
+# Runtime-consumed block (harness/mcp_host.py + protocol/mcp_capabilities.py).
+# The key is `scopes`, NOT `required_scopes`.
+transport = "streamable-http"
+auth = "oauth-prm"
+server_url = "AUTHOR-FILL: e.g., http://127.0.0.1:8765/mcp (the deployed ClusterIP at install)"
+scopes = ["AUTHOR-FILL: e.g., mcp:tools"]
+resources_supported = false
+prompts_supported = false
+sampling_supported = false
+conformance_version = "1.0"

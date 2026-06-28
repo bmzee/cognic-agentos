@@ -45,6 +45,10 @@ if TYPE_CHECKING:
 
 _KINDS: tuple[str, ...] = ("tool", "skill", "agent")
 
+# tool is now a FastMCP MCP-server pack (no SDK Tool subclass); the
+# subclass-shape + runtime-deps-pin assertions apply to skill/agent only.
+_SUBCLASS_KINDS: tuple[str, ...] = ("skill", "agent")
+
 #: Per-kind expected method override on the generated subclass —
 #: pins R5 P2 #2 + Sprint-6 dispatch shape. Tool subclasses override
 #: ``_invoke`` (NOT ``invoke``); Skill subclasses override ``execute``;
@@ -108,12 +112,17 @@ def test_scaffold_creates_canonical_tree(kind: str, tmp_path: Path) -> None:
         pack_root / "cognic-pack-manifest.toml",
         pack_root / "README.md",
         module_dir / "__init__.py",
-        module_dir / f"{kind}.py",
         pack_root / "tests" / f"test_{kind}.py",
         pack_root / "tests" / "conftest.py",
         pack_root / "attestations" / ".gitkeep",
         pack_root / ".github" / "workflows" / "sign-and-publish.yml",
     ]
+    if kind == "tool":
+        # FastMCP MCP-server pack: an inert descriptor + a server.py
+        # FastMCP app (NOT an SDK ``Tool`` subclass at ``tool.py``).
+        expected_files.append(module_dir / "server.py")
+    else:
+        expected_files.append(module_dir / f"{kind}.py")
     if kind == "agent":
         expected_files.append(module_dir / "agent_cards" / ".gitkeep")
 
@@ -230,7 +239,7 @@ def test_scaffolded_pack_carries_author_fill_markers(kind: str, tmp_path: Path) 
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("kind", _KINDS)
+@pytest.mark.parametrize("kind", _SUBCLASS_KINDS)
 def test_scaffolded_subclass_overrides_correct_abstract_method(kind: str, tmp_path: Path) -> None:
     """AST shape pin: the generated subclass file defines the
     expected abstract-method override + does NOT define any
@@ -261,7 +270,7 @@ def test_scaffolded_subclass_overrides_correct_abstract_method(kind: str, tmp_pa
         )
 
 
-@pytest.mark.parametrize("kind", _KINDS)
+@pytest.mark.parametrize("kind", _SUBCLASS_KINDS)
 def test_scaffolded_subclass_imports_and_subclass_check_passes(kind: str, tmp_path: Path) -> None:
     """Dynamic load + class-creation gate. If the generated subclass
     tripped the SDK's ``__init_subclass__`` (e.g., a stale template
@@ -338,11 +347,16 @@ def test_scaffold_rejects_invalid_pack_name(bad_name: str, tmp_path: Path) -> No
 _PINNED_KERNEL_DEP = "cognic-agentos @ git+https://github.com/bmzee/cognic-agentos@v0.0.2"
 
 
-@pytest.mark.parametrize("kind", _KINDS)
+@pytest.mark.parametrize("kind", _SUBCLASS_KINDS)
 def test_scaffolded_pyproject_git_pins_kernel_dep(kind: str, tmp_path: Path) -> None:
     """The scaffold's ``cognic-agentos`` dependency uses the git-pinned
     ``@v0.0.2`` form. Positive: the pinned spec is a dependency-array
-    element. Negative: a bare unpinned ``cognic-agentos`` element is NOT."""
+    element. Negative: a bare unpinned ``cognic-agentos`` element is NOT.
+
+    skill/agent packs carry the kernel as a RUNTIME dependency (they
+    subclass the SDK base classes). The FastMCP tool pack carries no
+    kernel runtime dep — its pin lives in the ``dev`` extras; see
+    :func:`test_tool_scaffold_pins_kernel_in_dev_extras_not_runtime`."""
     pack_root = _scaffold(kind, "example", tmp_path)
     deps = tomllib.loads((pack_root / "pyproject.toml").read_text())["project"]["dependencies"]
     assert _PINNED_KERNEL_DEP in deps, (
@@ -352,6 +366,22 @@ def test_scaffolded_pyproject_git_pins_kernel_dep(kind: str, tmp_path: Path) -> 
     # distinct element from the bare "cognic-agentos" we are forbidding.
     assert "cognic-agentos" not in deps, (
         f"{kind} pyproject must NOT carry a bare unpinned `cognic-agentos` dep; got {deps!r}"
+    )
+
+
+def test_tool_scaffold_pins_kernel_in_dev_extras_not_runtime(tmp_path: Path) -> None:
+    """FastMCP tool packs carry NO kernel runtime dep; the authoring pin lives
+    in [project.optional-dependencies] dev."""
+    pack_root = _scaffold("tool", "example", tmp_path)
+    pyproject = tomllib.loads((pack_root / "pyproject.toml").read_text())
+    runtime = pyproject["project"]["dependencies"]
+    dev = pyproject["project"]["optional-dependencies"]["dev"]
+    assert _PINNED_KERNEL_DEP in dev
+    assert not any("cognic-agentos" in d for d in runtime), (
+        f"tool runtime deps must not carry the kernel; got {runtime!r}"
+    )
+    assert any(d.startswith("mcp") for d in runtime) and any(
+        d.startswith("uvicorn") for d in runtime
     )
 
 
@@ -385,3 +415,130 @@ def test_scaffolded_pyproject_pins_requires_python(kind: str, tmp_path: Path) ->
         f"{kind} pyproject requires-python must match the kernel range "
         f'">=3.12,<3.13"; got {requires_python!r}'
     )
+
+
+# ---------------------------------------------------------------------------
+# (j) FastMCP MCP-server tool shape (M3-E2a Task 3)
+# ---------------------------------------------------------------------------
+#
+# The ``tool`` scaffold is a FastMCP MCP-server pack (proven by
+# examples/cognic-tool-search/): an inert ``SERVER_DESCRIPTOR`` entry
+# point + a ``server.py`` FastMCP app with NO kernel runtime dependency.
+# These tests pin the realigned shape (entry-point target, descriptor
+# marker, FastMCP server, fail-closed auth selection, runtime MCP block)
+# + the validate-clean contract (fresh refuses on AUTHOR-FILL; filled
+# validates clean).
+
+
+def test_tool_scaffold_entry_point_targets_server_descriptor(tmp_path: Path) -> None:
+    pack_root = _scaffold("tool", "example", tmp_path)
+    eps = tomllib.loads((pack_root / "pyproject.toml").read_text())["project"]["entry-points"][
+        "cognic.tools"
+    ]
+    assert eps["example"] == "cognic_tool_example:SERVER_DESCRIPTOR"
+
+
+def test_tool_scaffold_descriptor_carries_marker(tmp_path: Path) -> None:
+    pack_root = _scaffold("tool", "example", tmp_path)
+    init_src = (pack_root / "src" / "cognic_tool_example" / "__init__.py").read_text()
+    assert "SERVER_DESCRIPTOR" in init_src
+    assert "cognic_pack_kind" in init_src and '"mcp_server"' in init_src
+
+
+def test_tool_scaffold_server_builds_fastmcp(tmp_path: Path) -> None:
+    pack_root = _scaffold("tool", "example", tmp_path)
+    server_src = (pack_root / "src" / "cognic_tool_example" / "server.py").read_text()
+    assert "FastMCP" in server_src and "build_server" in server_src
+
+
+def test_tool_scaffold_server_auth_fails_closed_without_dev_optin(tmp_path: Path) -> None:
+    pack_root = _scaffold("tool", "example", tmp_path)
+    server_src = (pack_root / "src" / "cognic_tool_example" / "server.py").read_text()
+    assert "dev_insecure" in server_src
+    assert "COGNIC_ENV" in server_src
+    assert "RuntimeError" in server_src
+
+
+def test_tool_scaffold_manifest_carries_tool_cognic_mcp_runtime_block(tmp_path: Path) -> None:
+    pack_root = _scaffold("tool", "example", tmp_path)
+    parsed = tomllib.loads((pack_root / "cognic-pack-manifest.toml").read_text())
+    block = parsed["tool"]["cognic"]["mcp"]
+    assert block["transport"] == "streamable-http"
+    assert block["auth"] == "oauth-prm"
+    assert "server_url" in block and "scopes" in block
+
+
+# ---------------------------------------------------------------------------
+# (k) Placeholder hygiene — fresh refuses, filled validates clean
+# ---------------------------------------------------------------------------
+
+
+def test_fresh_tool_scaffold_validate_refuses_with_remediation(tmp_path: Path) -> None:
+    from cognic_agentos.cli.validate import run_validators
+
+    pack_root = _scaffold("tool", "example", tmp_path)
+    findings = run_validators(pack_root)
+    assert any(f.affects_exit_code for f in findings), "fresh scaffold must NOT validate clean"
+
+
+def _fill_author_fields(pack_root: Path) -> None:
+    """Make a fresh tool scaffold validate clean.
+
+    Two things must happen for ``run_validators`` to return zero
+    refusals:
+
+    1. Every manifest ``AUTHOR-FILL`` *value* is replaced with a valid
+       governance value. The rewrite is keyed on the assignment LHS
+       (``<key> = ``) so it is robust to the AUTHOR-FILL hint copy;
+       comment lines (the ``capability_set`` / ``retention_max_window``
+       hint comments + the ``egress_allow_list`` trailing comment) are
+       never rewritten — they carry no parsed value, so the validator
+       (which reads the parsed TOML, not the raw text) ignores them.
+    2. The ``[supply_chain].attestation_paths`` files must EXIST as
+       non-empty regular files (the supply-chain validator resolves each
+       declared path + refuses ``path_does_not_exist``). We materialise
+       non-empty dummy content (with NO ``AUTHOR-FILL`` text) at each.
+    """
+    manifest_path = pack_root / "cognic-pack-manifest.toml"
+    # key-prefix → full replacement line for every AUTHOR-FILL value site.
+    replacements: dict[str, str] = {
+        "agent_id = ": 'agent_id = "did:web:example.com:tools:example"',
+        "display_name = ": 'display_name = "Example Tool"',
+        "provider_organization = ": 'provider_organization = "Example Org"',
+        "provider_url = ": 'provider_url = "https://example.com"',
+        "data_classes = ": 'data_classes = ["internal"]',
+        "purpose = ": 'purpose = "operational_telemetry"',
+        "retention_policy = ": 'retention_policy = "none"',
+        "tier = ": 'tier = "read_only"',
+        "server_url = ": 'server_url = "http://127.0.0.1:8765/mcp"',
+        "scopes = ": 'scopes = ["mcp:tools"]',
+    }
+    out_lines: list[str] = []
+    for line in manifest_path.read_text().splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("#"):
+            out_lines.append(line)  # never rewrite a comment line
+            continue
+        for key, repl in replacements.items():
+            if stripped.startswith(key) and "AUTHOR-FILL" in line:
+                out_lines.append(repl)
+                break
+        else:
+            out_lines.append(line)
+    manifest_path.write_text("\n".join(out_lines) + "\n")
+
+    # The supply-chain validator resolves every declared attestation path
+    # to an existing, non-empty regular file inside the pack root.
+    parsed = tomllib.loads(manifest_path.read_text())
+    for rel in parsed["supply_chain"]["attestation_paths"]:
+        attestation = pack_root / rel
+        attestation.parent.mkdir(parents=True, exist_ok=True)
+        attestation.write_text("dummy attestation content for tests\n")
+
+
+def test_filled_tool_scaffold_validates_clean(tmp_path: Path) -> None:
+    from cognic_agentos.sdk.testing import assert_manifest_validates
+
+    pack_root = _scaffold("tool", "example", tmp_path)
+    _fill_author_fields(pack_root)
+    assert_manifest_validates(pack_root)  # raises AssertionError on any refusal
