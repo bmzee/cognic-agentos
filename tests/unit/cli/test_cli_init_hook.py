@@ -364,3 +364,18 @@ def test_scaffolded_ci_installs_kernel_from_git(tmp_path: Path) -> None:
     assert "pip install cognic-agentos" not in ci_text, (
         f"hook CI must NOT carry the broken bare `pip install cognic-agentos`:\n{ci_text}"
     )
+
+
+def test_scaffolded_pyproject_pins_requires_python(tmp_path: Path) -> None:
+    """The hook scaffold's ``requires-python`` matches the kernel's actual range
+    (``>=3.12,<3.13``). M3-E1 closeout finding: the kernel git-dep requires
+    ``<3.13``, so a looser ``>=3.12`` would let an author on Python 3.13 fail to
+    install the kernel."""
+    pack_root = _scaffold_hook("example", tmp_path)
+    requires_python = tomllib.loads((pack_root / "pyproject.toml").read_text())["project"][
+        "requires-python"
+    ]
+    assert requires_python == ">=3.12,<3.13", (
+        f'hook pyproject requires-python must match the kernel range ">=3.12,<3.13"; '
+        f"got {requires_python!r}"
+    )

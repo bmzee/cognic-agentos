@@ -3,7 +3,7 @@ name = "{{ pack_id }}"
 version = "0.1.0"
 description = "AUTHOR-FILL: short description of what this {{ kind }} pack does."
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.13"
 license = { text = "AUTHOR-FILL: e.g., Proprietary or Apache-2.0" }
 authors = [
     { name = "AUTHOR-FILL: your name", email = "AUTHOR-FILL: you@example.com" },

@@ -147,3 +147,29 @@ Proof 1b-1 is the **deployed trust-registration axis** of Proof 1b: a kind/Helm-
 - **Bar 1.3:** re-seed + cold restart → clean state → `BAR 1 PASS`.
 - **Bar 2 (completion):** `list_tools` → 200 with the real tool (`search_policy_docs`), `call_tool` → 200, `discovery_status=auth_ready` → `PROOF 1b-2 (BAR 2) PASS`. The full governed path runs: PRM discovery → AS allow-list permit → AS discovery → OAuth token acquire → authenticated `list_tools` + `call_tool` against the override-pinned private ClusterIP, with the OAuth legs reaching the emulated-external (public-shaped, kube-proxy-intercepted) AS.
 - **Findings cleared (all proof-harness/substrate, no kernel change):** (1) `.dockerignore` build-context for the AS image; (2) Vault root-token alignment (`smoke-root-token`); (3) deploy-substrate `/app/src` readability (the base-image `chmod -R a+rX`); (4) AS allow-list `AnyHttpUrl` trailing-slash; (5) runner evidence-surface (`audit_event` table + `/system/plugins` API vs pod stdout). Each fix shipped with a structural guard so the class cannot recur.
+
+## M3-E1 — external-pack authoring enablement (git-pinned kernel) — PASS (with closeout fix)
+
+**2026-06-27 — M3-E1 proven: a clean external pack repo obtains the unpublished AgentOS authoring/governance CLI via the git-pinned install and runs `agentos validate`. The operator verify exposed a real Python-version fragility, fixed in the same closeout.**
+
+> M3-E1 is the kernel-side enablement before the first external pack repo (`cognic-tool-oracle-schema`, M3-E2): the unpublished kernel (public repo; no PyPI/release artifact) is consumed by a generated pack via `cognic-agentos @ git+https://github.com/bmzee/cognic-agentos@v0.0.1`. PR #106 fixed the four scaffolds (CI + pyproject) to emit the git-pinned form; `v0.0.1` was cut (annotated) from green `main @ d174b74`.
+
+### Run metadata
+- **AgentOS tag:** `v0.0.1` (annotated, on the green merge commit `d174b74`)
+- **Pack shape:** the proven `examples/cognic-tool-search` (a FastMCP server with NO AgentOS runtime dependency), staged as a clean external repo OUTSIDE the kernel tree
+- **Date:** 2026-06-27
+- **Command:** `COGNIC_RUN_EXTERNAL_PACK_ENABLEMENT=1 COGNIC_AGENTOS_GIT_REF=v0.0.1 bash infra/external-pack-authoring/verify.sh` (operator-run, env-gated; sandbox-network override for the git fetch)
+
+### The proof + the finding (honest)
+1. **First raw run exposed a Python-3.13 fragility.** The original `verify.sh` created its venv with `python3 -m venv` — the *system* python, 3.13.1 on the operator box. The git-install of `cognic-agentos @ v0.0.1` then failed: `ERROR: Package 'cognic-agentos' requires a different Python: 3.13.1 not in '<3.13,>=3.12'`. The git-install **mechanism worked** (it cloned the repo + checked out the `v0.0.1` tag + built metadata); only the venv's Python version was wrong.
+2. **A clean Python-3.12 repro PASSED.** With a `uv venv --python 3.12` venv (Python 3.12.3), the same git-install of `cognic-agentos @ v0.0.1` installed cleanly, and `agentos validate` on the staged external pack → **`validate: PASS`** (the only output is the expected Wave-1 `identity_oasf_capability_set_missing` warning). A clean external repo *does* obtain the kernel CLI from the tag and run governance — the M3-E1 claim holds.
+3. **Closeout fix makes the proof repeatable (branch `fix/external-pack-verify-py312`).** Two related Python-version findings, both fixed so the script + scaffolds encode the kernel's real range:
+   - `verify.sh` now creates the venv with **`uv venv --python 3.12`** (not the system `python3`), so it cannot silently use a 3.13+ interpreter the kernel rejects. A structural test (`test_script_pins_python_312_venv`) pins the 3.12 venv + forbids `python3 -m venv`.
+   - The four scaffold `pyproject.toml` templates now declare **`requires-python = ">=3.12,<3.13"`** (was `>=3.12`, which allowed 3.13) — matching the kernel's actual range so an author on 3.13 gets a clear constraint rather than a confusing install failure. (Lower severity in CI — the scaffold CI already pins `setup-python 3.12` — but the same root cause.) `test_scaffolded_pyproject_pins_requires_python` pins the range across all four kinds.
+   - `verify.sh`'s host-tooling gate now checks **all four** binaries `agentos sign` shells out to (`cosign` / `syft` / `grype` / **`pip-licenses`**) — the fixed-script re-run surfaced that the original three-binary check let the script enter the sign branch on a host with cosign/syft/grype but not the license auditor, failing `sign-bundle` ungracefully instead of recording `tooling_absent`. `test_script_records_tooling_absent_not_silent_skip` now pins all four.
+
+**Fixed-script re-run (the repeatable proof — `RUN_EXIT=0`).** `uv venv --python 3.12` → git-install `cognic-agentos @ v0.0.1` → `validate: PASS` → `SIGN_VERIFY=tooling_absent:pip-licenses` (cosign/syft/grype ARE present on this host; only the license auditor is absent → cleanly recorded, the script exits 0). The fixed `verify.sh` is green + repeatable.
+
+### Honesty boundary
+- **`validate: PASS` is proven**; `sign`/`verify` were **not run** in this proof — on this host `pip-licenses` (the 4th tool `agentos sign` shells out to) is absent, recorded as `tooling_absent:pip-licenses` (cosign/syft/grype ARE present). By design `validate` alone proves external CLI consumption; the full supply-chain bundle additionally needs all four binaries + a cosign identity, and Proof 1a already proved the full sign/verify path in-process. M3-E1's claim is **the git-pinned authoring CLI is externally consumable + `validate` runs** — NOT a full signed-pack deploy (that is Proof 1b, already passed) and NOT the external pack repo itself (that is M3-E2).
+- The operator verify is **env-gated** + must run on a real machine (it git-installs + spins a venv); it caught a real environment fragility an always-on CI lane (pinned to 3.12) could not.
