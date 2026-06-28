@@ -335,13 +335,13 @@ def test_scaffold_rejects_invalid_pack_name(bad_name: str, tmp_path: Path) -> No
 # bare forms absent), so a future edit cannot silently regress to either.
 
 #: The git-pinned form every scaffold must emit. Bump alongside the kernel tag.
-_PINNED_KERNEL_DEP = "cognic-agentos @ git+https://github.com/bmzee/cognic-agentos@v0.0.1"
+_PINNED_KERNEL_DEP = "cognic-agentos @ git+https://github.com/bmzee/cognic-agentos@v0.0.2"
 
 
 @pytest.mark.parametrize("kind", _KINDS)
 def test_scaffolded_pyproject_git_pins_kernel_dep(kind: str, tmp_path: Path) -> None:
     """The scaffold's ``cognic-agentos`` dependency uses the git-pinned
-    ``@v0.0.1`` form. Positive: the pinned spec is a dependency-array
+    ``@v0.0.2`` form. Positive: the pinned spec is a dependency-array
     element. Negative: a bare unpinned ``cognic-agentos`` element is NOT."""
     pack_root = _scaffold(kind, "example", tmp_path)
     deps = tomllib.loads((pack_root / "pyproject.toml").read_text())["project"]["dependencies"]

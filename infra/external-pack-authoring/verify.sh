@@ -11,7 +11,7 @@
 #
 # Env-gated — inert unless COGNIC_RUN_EXTERNAL_PACK_ENABLEMENT=1.
 # Kernel ref: defaults to the current pushed HEAD SHA. At closeout, re-run with
-# COGNIC_AGENTOS_GIT_REF=v0.0.1 to confirm the exact tag the scaffolds pin.
+# COGNIC_AGENTOS_GIT_REF=v0.0.2 to confirm the exact tag the scaffolds pin.
 #
 # The venv is pinned to Python 3.12 via `uv venv --python 3.12`: the kernel
 # requires `>=3.12,<3.13`, so a system python3 of 3.13+ FAILS the git-install
