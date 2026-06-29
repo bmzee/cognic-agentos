@@ -74,3 +74,26 @@ def test_runtime_stages_make_policies_alembic_and_src_readable_for_non_root() ->
         copy_idx = body.find("policies ./policies")
         assert user_idx != -1, f"{stage}: no `USER cognic` in stage"
         assert 0 <= copy_idx < user_idx, f"{stage}: policies packaging must precede `USER cognic`"
+
+
+def test_pinned_binary_downloads_retry_on_transient_failure() -> None:
+    """The cosign + OPA binaries are fetched over the network in the builder stage.
+    A bare ``curl --fail`` with no ``--retry`` lets a transient TLS/network eof
+    (``curl`` exit 56) kill the entire image build — surfaced by the Proof 1b-2c
+    attempt-1 base-image build (cosign download: ``OpenSSL SSL_read: unexpected eof``).
+    Pin ``--retry`` / ``--retry-all-errors`` so a flaky download self-heals; the
+    ``sha256sum -c`` verify on the result is unchanged, so retrying cannot weaken
+    integrity. (The ``astral.sh`` ``ADD`` lines are a separate Dockerfile pattern and
+    are intentionally left untouched.)"""
+    text = _DOCKERFILE.read_text()
+    for binary in ("cosign", "opa"):
+        m = re.search(rf"RUN curl(?P<flags>.*?)\s-o /tmp/{binary}\b", text, re.DOTALL)
+        assert m is not None, f"no `RUN curl ... -o /tmp/{binary}` download block in the Dockerfile"
+        flags = m.group("flags")
+        assert "--retry-all-errors" in flags, (
+            f"{binary} download must carry --retry-all-errors so a transient curl(56)/SSL-eof "
+            f"retries instead of failing the build; got flags: {flags!r}"
+        )
+        assert re.search(r"--retry\s+\d", flags), (
+            f"{binary} download must carry --retry <n>; got flags: {flags!r}"
+        )
