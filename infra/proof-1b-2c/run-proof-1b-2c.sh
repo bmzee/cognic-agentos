@@ -118,6 +118,38 @@ bar2_fail() {
   exit 1
 }
 
+# Step-5 XE-readiness failure path: capture the XE pod state + boot logs to
+# docs/VALIDATION-RESULTS.md BEFORE the trap deletes the cluster (mirrors bar2_fail).
+# The qemu-emulated gvenzl XE first boot is slow under kind; if it still exceeds the
+# (bumped) readiness budget this records WHY (describe/events/logs) instead of a bare timeout.
+xe_fail() {
+  local where="$1"
+  echo "FAIL: oracle-xe ($where) — capturing diagnostics to docs/VALIDATION-RESULTS.md" >&2
+  local pods desc logs
+  pods="$(kubectl -n "$NS" get pods 2>&1 || true)"
+  desc="$(kubectl -n "$NS" describe pod -l app=oracle-xe 2>&1 | tail -90 || true)"
+  logs="$(kubectl -n "$NS" logs -l app=oracle-xe --tail=120 2>&1 || true)"
+  {
+    echo ""
+    echo "## Proof 1b-2c — Oracle XE readiness FAILURE ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+    echo ""
+    echo "- Failed step: \`$where\`"
+    echo "- pods:"
+    echo '```'
+    echo "$pods"
+    echo '```'
+    echo "- oracle-xe describe (tail 90):"
+    echo '```'
+    echo "$desc"
+    echo '```'
+    echo "- oracle-xe logs (tail 120):"
+    echo '```'
+    echo "$logs"
+    echo '```'
+  } >> docs/VALIDATION-RESULTS.md
+  exit 1
+}
+
 cleanup() {
   pf_stop
   kind delete cluster --name "$CLUSTER" >/dev/null 2>&1 || true
@@ -190,7 +222,9 @@ done < <(_backend_images; _extra_images)
 # --- 5. namespace + the six real backends + in-cluster Oracle XE -----------------
 # XE first-boot is slow (~3-5 min): apply it EARLY so its boot overlaps the backend
 # wait, then wait for the backends (EXCLUDING oracle-xe so its slow boot doesn't trip
-# the 300s backend wait), then wait XE Ready on a dedicated 600s budget.
+# the 300s backend wait), then wait XE Ready on a dedicated 1200s budget (the
+# qemu-emulated gvenzl XE first boot under kind runs well past the native ~3-5 min;
+# xe_fail captures the pod state if even 1200s is exceeded).
 echo "==> [5/10] bring up the six backends + the seeded Oracle XE"
 kubectl create namespace "$NS"
 kubectl -n "$NS" apply -f "$CHART/ci/smoke/backends.yaml"
@@ -204,7 +238,8 @@ kubectl -n "$NS" apply -f "$PROOF_DIR/manifests/oracle-xe.yaml"
 # has app=oracle-xe, so `app notin (oracle-xe)` selects exactly the six backends and keeps
 # XE's multi-minute first boot out of this 300s gate.
 kubectl -n "$NS" wait --for=condition=available --timeout=300s deploy -l 'app notin (oracle-xe)'
-kubectl -n "$NS" wait --for=condition=ready pod -l app=oracle-xe --timeout=600s
+kubectl -n "$NS" wait --for=condition=ready pod -l app=oracle-xe --timeout=1200s \
+  || xe_fail "oracle-xe pod not Ready within 1200s (qemu-emulated XE first boot under kind)"
 
 # --- 6. Vault init/seed (KV v1 + OAuth + AS-allowlist) --------------------------
 # Must run after Vault is up (backend wait above) and before AgentOS reads it.

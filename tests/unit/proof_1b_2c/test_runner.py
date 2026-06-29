@@ -94,9 +94,15 @@ def test_brings_up_and_waits_for_xe():
             'printf \'%s\\n\' "gvenzl/oracle-xe:21-slim" "busybox:1.36"',
             'apply -f "$PROOF_DIR/manifests/oracle-xe.yaml"',
             "deploy -l 'app notin (oracle-xe)'",
-            "pod -l app=oracle-xe --timeout=600s",
+            "pod -l app=oracle-xe --timeout=1200s",
+            "xe_fail",
+            "Oracle XE readiness FAILURE",
+            "describe pod -l app=oracle-xe",
+            "logs -l app=oracle-xe --tail=120",
+            "docs/VALIDATION-RESULTS.md",
         ),
     )
+    assert "--timeout=600s" not in R
 
 
 def test_seeds_through_scripts_not_inline_override_inserts():
