@@ -150,6 +150,38 @@ xe_fail() {
   exit 1
 }
 
+# Step-5 backends-readiness failure path: capture the backend deploy/pod state to
+# docs/VALIDATION-RESULTS.md BEFORE the trap deletes the cluster (mirrors xe_fail).
+# The six shared backends start BEFORE XE now; if they don't reach Available the
+# describe/get output records WHY (pending/scheduling/resource) instead of a bare timeout.
+backends_fail() {
+  local where="$1"
+  echo "FAIL: backends ($where) — capturing diagnostics to docs/VALIDATION-RESULTS.md" >&2
+  local wide ddeploy dpods
+  wide="$(kubectl -n "$NS" get deploy,pods -o wide 2>&1 || true)"
+  ddeploy="$(kubectl -n "$NS" describe deploy -l 'app notin (oracle-xe)' 2>&1 | tail -120 || true)"
+  dpods="$(kubectl -n "$NS" describe pod -l 'app notin (oracle-xe)' 2>&1 | tail -150 || true)"
+  {
+    echo ""
+    echo "## Proof 1b-2c — backends readiness FAILURE ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+    echo ""
+    echo "- Failed step: \`$where\`"
+    echo "- deploy + pods (-o wide):"
+    echo '```'
+    echo "$wide"
+    echo '```'
+    echo "- backend deploy describe (tail 120):"
+    echo '```'
+    echo "$ddeploy"
+    echo '```'
+    echo "- backend pod describe (tail 150):"
+    echo '```'
+    echo "$dpods"
+    echo '```'
+  } >> docs/VALIDATION-RESULTS.md
+  exit 1
+}
+
 cleanup() {
   pf_stop
   kind delete cluster --name "$CLUSTER" >/dev/null 2>&1 || true
@@ -219,25 +251,29 @@ while IFS= read -r _img; do
   kind load docker-image "$_img" --name "$CLUSTER"
 done < <(_backend_images; _extra_images)
 
-# --- 5. namespace + the six real backends + in-cluster Oracle XE -----------------
-# XE first-boot is slow (~3-5 min): apply it EARLY so its boot overlaps the backend
-# wait, then wait for the backends (EXCLUDING oracle-xe so its slow boot doesn't trip
-# the 300s backend wait), then wait XE Ready on a dedicated 1200s budget (the
-# qemu-emulated gvenzl XE first boot under kind runs well past the native ~3-5 min;
-# xe_fail captures the pod state if even 1200s is exceeded).
-echo "==> [5/10] bring up the six backends + the seeded Oracle XE"
+# --- 5. namespace + the six real backends, THEN the in-cluster Oracle XE ----------
+# Sequenced startup (NOT overlapped): bring the six shared backends up and wait them
+# Available BEFORE applying XE. The qemu-emulated gvenzl XE boot saturates the node CPU;
+# overlapping it with the backend startup starves even lightweight backends
+# (postgres/qdrant/vault) past the 300s wait (M3-E2c attempt-4 finding). Sequenced, the
+# backends come up uncontended, then XE boots while they sit idle on a dedicated 1200s
+# budget (its emulated first boot runs well past the native ~3-5 min). backends_fail /
+# xe_fail capture the pod state if either wait is exceeded.
+echo "==> [5/10] bring up the six backends, then the seeded Oracle XE"
 kubectl create namespace "$NS"
+# (1) the six shared backends FIRST; wait them Available BEFORE XE is applied. The
+# `app notin (oracle-xe)` selector picks exactly the six backends (only XE carries
+# app=oracle-xe). backends_fail captures their state if they miss the 300s gate.
 kubectl -n "$NS" apply -f "$CHART/ci/smoke/backends.yaml"
-# Single source of truth for the seed: build the ConfigMap straight from the SQL file
-# (no embedded copy, no drift). oracle-xe.yaml mounts it at /container-entrypoint-initdb.d.
+kubectl -n "$NS" wait --for=condition=available --timeout=300s deploy -l 'app notin (oracle-xe)' \
+  || backends_fail "six shared backends not Available within 300s before XE start"
+# (2) only AFTER the backends are up: build the seed ConfigMap straight from the SQL file
+# (single source of truth — no embedded copy, no drift; mounted at
+# /container-entrypoint-initdb.d) and apply XE. It boots while the backends sit idle.
 kubectl -n "$NS" create configmap oracle-xe-seed \
   --from-file=seed_schema.sql="$PROOF_DIR/oracle-seed/seed_schema.sql" \
   --dry-run=client -o yaml | kubectl apply -n "$NS" -f -
 kubectl -n "$NS" apply -f "$PROOF_DIR/manifests/oracle-xe.yaml"
-# Backends-only wait: every backend Deployment carries an `app` label, and only oracle-xe
-# has app=oracle-xe, so `app notin (oracle-xe)` selects exactly the six backends and keeps
-# XE's multi-minute first boot out of this 300s gate.
-kubectl -n "$NS" wait --for=condition=available --timeout=300s deploy -l 'app notin (oracle-xe)'
 kubectl -n "$NS" wait --for=condition=ready pod -l app=oracle-xe --timeout=1200s \
   || xe_fail "oracle-xe pod not Ready within 1200s (qemu-emulated XE first boot under kind)"
 

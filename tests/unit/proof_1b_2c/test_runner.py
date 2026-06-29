@@ -105,6 +105,32 @@ def test_brings_up_and_waits_for_xe():
     assert "--timeout=600s" not in R
 
 
+def test_backends_start_and_wait_before_xe_with_diagnostics():
+    # Sequenced startup (attempt-4 finding): the backends-Available wait must come
+    # BEFORE the XE seed ConfigMap + the XE apply — overlap starved the backends.
+    backends_wait = R.index(
+        'kubectl -n "$NS" wait --for=condition=available --timeout=300s '
+        "deploy -l 'app notin (oracle-xe)'"
+    )
+    seed_cm = R.index('kubectl -n "$NS" create configmap oracle-xe-seed')
+    xe_apply = R.index('kubectl -n "$NS" apply -f "$PROOF_DIR/manifests/oracle-xe.yaml"')
+    assert backends_wait < seed_cm, "backends-wait must precede the oracle-xe-seed ConfigMap"
+    assert backends_wait < xe_apply, "backends-wait must precede the oracle-xe.yaml apply"
+    # backends_fail wired to the backend wait + its diagnostic surface (attempt-4 diagnosability).
+    _assert_all(
+        R,
+        (
+            "|| backends_fail",
+            "backends_fail() {",
+            "backends readiness FAILURE",
+            "get deploy,pods -o wide",
+            "describe deploy -l 'app notin (oracle-xe)'",
+            "describe pod -l 'app notin (oracle-xe)'",
+            "docs/VALIDATION-RESULTS.md",
+        ),
+    )
+
+
 def test_seeds_through_scripts_not_inline_override_inserts():
     _assert_all(
         R,
