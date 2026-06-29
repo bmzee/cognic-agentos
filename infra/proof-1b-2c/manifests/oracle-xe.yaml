@@ -1,0 +1,47 @@
+# infra/proof-1b-2c/manifests/oracle-xe.yaml — in-cluster Oracle XE for M3-E2c.
+# The oracle-xe-seed ConfigMap is created by run-proof-1b-2c.sh from
+# oracle-seed/seed_schema.sql (single source of truth — no embedded copy, no drift).
+# gvenzl runs every *.sql in /container-entrypoint-initdb.d once on first boot
+# (admin, in the root container) — the seed ALTERs into XEPDB1 + creates the
+# cognic.* objects so the pack (connecting AS cognic) sees them via ALL_*.
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: oracle-xe, labels: { app: oracle-xe } }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: oracle-xe } }
+  template:
+    metadata: { labels: { app: oracle-xe } }
+    spec:
+      containers:
+      - name: oracle-xe
+        image: gvenzl/oracle-xe:21-slim
+        imagePullPolicy: IfNotPresent
+        ports: [{ containerPort: 1521 }]
+        env:
+        - { name: ORACLE_PASSWORD, value: "proof_admin_only" }
+        # NO ORACLE_DATABASE: XEPDB1 is gvenzl XE's BUILT-IN PDB. Setting ORACLE_DATABASE
+        # tells gvenzl to CREATE a PDB by that name, which collides with the built-in and
+        # crash-loops the container (ORA-01081 / exit 57 — the M3-E2c attempt-3 finding).
+        # The seed ALTERs into the built-in XEPDB1; the DSN is oracle-xe:1521/XEPDB1.
+        # Matches the proven docker-compose env (which never set ORACLE_DATABASE).
+        - { name: APP_USER, value: "cognic" }
+        - { name: APP_USER_PASSWORD, value: "cognic_dev_only" }
+        volumeMounts:
+        - { name: seed, mountPath: /container-entrypoint-initdb.d }
+        readinessProbe:
+          exec: { command: ["/bin/sh", "-c", "healthcheck.sh"] }
+          initialDelaySeconds: 60
+          periodSeconds: 15
+          timeoutSeconds: 10
+          failureThreshold: 40   # XE first-boot ~3-5 min on an amd64 runner
+      volumes:
+      - name: seed
+        configMap: { name: oracle-xe-seed }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: oracle-xe }
+spec:
+  selector: { app: oracle-xe }
+  ports: [{ port: 1521, targetPort: 1521 }]

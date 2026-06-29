@@ -240,7 +240,7 @@ ARG OPA_SHA256=dc00b1c32c52f1557f7f127940bc3f1de6c507fdfbe0446f19d3b19ca5786494
 # binaries therefore land in the runtime image at upstream-shipped size,
 # and the default-adapters image budget (in .github/workflows/python.yml)
 # absorbs the cost. Kernel image budget unaffected.
-RUN curl -sSL --fail \
+RUN curl -sSL --fail --retry 5 --retry-delay 3 --retry-all-errors \
       -o /tmp/cosign \
       "https://github.com/sigstore/cosign/releases/download/v${COSIGN_VERSION}/cosign-linux-amd64" \
  && echo "${COSIGN_SHA256}  /tmp/cosign" | sha256sum -c - \
@@ -248,7 +248,7 @@ RUN curl -sSL --fail \
  && rm /tmp/cosign \
  && /usr/local/bin/cosign version >/dev/null
 
-RUN curl -sSL --fail \
+RUN curl -sSL --fail --retry 5 --retry-delay 3 --retry-all-errors \
       -o /tmp/opa \
       "https://openpolicyagent.org/downloads/v${OPA_VERSION}/opa_linux_amd64_static" \
  && echo "${OPA_SHA256}  /tmp/opa" | sha256sum -c - \

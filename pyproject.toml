@@ -110,6 +110,18 @@ dev = [
     # Sprint 1C — test infra for adapter unit tests
     "aiosqlite>=0.20",
     "respx>=0.22",
+    # M3-E2c — the deployed-proof RS256 AS fixture (tests/integration/pack_loop/
+    # _local_as.py, rs256 mode) signs JWTs + serves JWKS, and its unit test
+    # verifies them. PyJWT is undeclared today (cryptography + joserfc live under
+    # the [adapters] extra); declaring it here makes the test's `import jwt`
+    # explicit, not a transitive accident. The AS *image* installs the same lib.
+    "PyJWT[crypto]>=2.10,<3",
+    # M3-E2c — the proof_1b_2c unit test drives the AS fixture's /token handler,
+    # which calls Starlette `request.form()` and so needs python-multipart. It is
+    # otherwise only transitive via mcp ([adapters]); declaring it here keeps the
+    # unit proof self-contained under the `dev` extra (not coupled to adapters).
+    # The AS image (Dockerfile.as) installs it explicitly too.
+    "python-multipart>=0.0.9",
 ]
 adapters = [
     # Persistence (Sprint 1C, per ADR-009). sqlalchemy + alembic moved

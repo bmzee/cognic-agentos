@@ -1,0 +1,71 @@
+"""stage_released_pack arranges downloaded v0.1.0 assets into the staging tree
+the proof image consumes + fail-closes on a digest mismatch (M3-E2c Task 2)."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from pathlib import Path
+
+import pytest
+
+from tests.integration.proof_1b_2c import stage_released_pack as srp
+
+_EXPECTED_ATTESTATIONS = {
+    "cosign.sig",
+    "bundle.sigstore",
+    "sbom.cdx.json",
+    "slsa-provenance.intoto.json",
+    "intoto-layout.json",
+    "vuln-scan.json",
+    "license-audit.json",
+}
+
+
+def _fake_assets(d: Path, wheel_bytes: bytes, pub_bytes: bytes) -> Path:
+    src = d / "downloaded"
+    src.mkdir()
+    (src / srp.WHEEL).write_bytes(wheel_bytes)
+    (src / "cosign.pub").write_bytes(pub_bytes)
+    for name in srp.ATTESTATIONS:
+        (src / name).write_text("{}")
+    return src
+
+
+def test_arrange_builds_the_exact_image_tree(tmp_path, monkeypatch):
+    wheel, pub = b"WHEEL", b"PUB"
+    monkeypatch.setattr(srp, "EXPECTED_WHEEL_SHA256", hashlib.sha256(wheel).hexdigest())
+    monkeypatch.setattr(srp, "EXPECTED_PUB_SHA256", hashlib.sha256(pub).hexdigest())
+    src = _fake_assets(tmp_path, wheel, pub)
+    dst = tmp_path / "staging"
+    srp.arrange(src, dst)
+    assert (dst / "wheel" / srp.WHEEL).read_bytes() == wheel
+    base = dst / "pack-attestations" / "cognic-tool-oracle-schema" / "0.1.0"
+    assert (base / srp.WHEEL).read_bytes() == wheel
+    assert {p.name for p in base.iterdir()} == _EXPECTED_ATTESTATIONS | {srp.WHEEL}
+    for name in _EXPECTED_ATTESTATIONS:
+        assert (base / name).read_text() == "{}"
+    assert (dst / "trust-roots" / "_default" / "cosign.pub").read_bytes() == pub
+    assert json.loads((dst / "policies" / "plugin_allowlist.json").read_text()) == {
+        "_default": ["cognic-tool-oracle-schema"]
+    }
+    assert (dst / "alembic.ini").exists() and (dst / "alembic.ini").read_bytes()
+
+
+def test_digest_mismatch_fails_closed(tmp_path, monkeypatch):
+    src = _fake_assets(tmp_path, b"WHEEL", b"PUB")
+    monkeypatch.setattr(srp, "EXPECTED_WHEEL_SHA256", "deadbeef")
+    with pytest.raises(srp.StagingDigestMismatch):
+        srp.arrange(src, tmp_path / "staging")
+
+
+def test_pub_digest_mismatch_fails_closed(tmp_path, monkeypatch):
+    src = _fake_assets(tmp_path, b"WHEEL", b"PUB")
+    monkeypatch.setattr(srp, "EXPECTED_WHEEL_SHA256", hashlib.sha256(b"WHEEL").hexdigest())
+    monkeypatch.setattr(srp, "EXPECTED_PUB_SHA256", "deadbeef")
+    with pytest.raises(srp.StagingDigestMismatch):
+        srp.arrange(src, tmp_path / "staging")
+
+
+def test_attestation_list_matches_the_released_bundle_contract():
+    assert set(srp.ATTESTATIONS) == _EXPECTED_ATTESTATIONS
