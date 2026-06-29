@@ -1,0 +1,10 @@
+# infra/proof-1b-2c/Dockerfile.oracle-pack — the released oracle-schema MCP tool
+# Service. Built from the DOWNLOADED v0.1.0 release wheel (criterion #1) staged at
+# proof1b2c-staging/wheel/, with the pack's full runtime deps. Context = infra/proof-1b-2c/.
+FROM python:3.12-slim
+WORKDIR /app
+RUN pip install --no-cache-dir \
+      "mcp==1.27.0" "uvicorn[standard]>=0.35" "oracledb>=2.5" "PyJWT[crypto]>=2.10,<3"
+COPY proof1b2c-staging/wheel/cognic_tool_oracle_schema-0.1.0-py3-none-any.whl /tmp/
+RUN pip install --no-cache-dir --no-deps /tmp/cognic_tool_oracle_schema-0.1.0-py3-none-any.whl
+CMD ["python", "-m", "cognic_tool_oracle_schema.server"]
