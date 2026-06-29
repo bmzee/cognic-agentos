@@ -1,0 +1,58 @@
+# infra/proof-1b-2c/migrate-job.yaml — M3-E2c PROOF-OWNED, NON-HOOK migration Job.
+# Mirrors infra/proof-1b-2/migrate-job.yaml verbatim: the chart's pre-install migration
+# HOOK (templates/migration-job.yaml) deadlocks on a fresh install because it references
+# the ServiceAccount rel-agentos AND the Secret rel-agentos-secrets — both NORMAL (non-hook)
+# resources Helm creates AFTER pre-install hooks (Gap 3). So the proof sets
+# migrations.enabled=false and runs this non-hook Job AFTER `helm install` (when the
+# Secret exists), using the always-present `default` ServiceAccount (no rel-agentos dep).
+# run-proof-1b-2c.sh substitutes __AGENTOS_IMAGE__ with the proof1b2c image.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: agentos-migrate
+spec:
+  backoffLimit: 1
+  ttlSecondsAfterFinished: 600
+  template:
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001  # Gap 4: numeric UID so kubelet can verify non-root on vanilla kind (image USER is the name "cognic")
+      containers:
+        - name: migrate
+          image: __AGENTOS_IMAGE__
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          command: ["sh", "-c"]
+          args:
+            - |
+              set -eu
+              if [ -z "${COGNIC_DATABASE_URL:-}" ]; then
+                echo "FATAL: COGNIC_DATABASE_URL is unset — refusing to run migrations" >&2
+                exit 1
+              fi
+              exec alembic upgrade head
+          # Gap 6: inherit the chart's non-secret config (incl. COGNIC_EMBEDDING_MODEL) so
+          # env.py's get_settings() sees the SAME prod config as the Deployment — otherwise
+          # prod-only settings fall back to dev defaults and the strict-profile guard refuses.
+          envFrom:
+            - configMapRef:
+                name: rel-agentos-config
+          env:
+            - name: COGNIC_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: rel-agentos-secrets
+                  key: COGNIC_DATABASE_URL
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
