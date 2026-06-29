@@ -117,3 +117,10 @@ attestations/local/
 
 # Docker artefacts
 .docker/
+
+# Proof 1b-2c (M3-E2c): transient build-context copies the operator runner
+# (infra/proof-1b-2c/run-proof-1b-2c.sh) materialises then removes on exit (trap).
+# Gitignored defensively so an interrupted run never leaves them stageable.
+infra/proof-1b-2c/proof1b2c-staging/
+infra/proof-1b-2c/proof_1b_2c/
+infra/proof-1b-2c/_local_as.py
