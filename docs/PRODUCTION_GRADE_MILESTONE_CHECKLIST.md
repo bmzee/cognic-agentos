@@ -56,11 +56,10 @@ Studio/no-code authoring and Cognic Forge remain outside this v1 completion chec
 
 ### B. Pack Ecosystem And Product-Pack Proofs
 
-- [ ] **M3 — First separate-repo tool pack, Proof 2.**  
-  **Goal:** extract/build the first real `cognic-tool-*` repo with independent CI, signing, verification, release artifact, and installation into AgentOS without source-copying it into this repo.  
-  **Production proof:** install the released pack into a deployed AgentOS instance and run governed `list_tools` + `call_tool`.  
-  **Load-bearing proof:** trust-gate refusal for tampered/missing attestations or revoked pack.  
-  **Evidence required:** pack repo release, AgentOS install proof, validation results, docs update.
+- [x] **M3 — First separate-repo tool pack, Proof 2.**  
+  **Evidence:** `cognic-tool-oracle-schema@v0.1.0` — a separate **public** repo (`bmzee/cognic-tool-oracle-schema`) with independent CI + a signed GitHub Release (wheel + 7 attestations + `cosign.pub`); installed into a deployed `kind` AgentOS by **boot-time trust registration of the DOWNLOADED released artifact** (sha256-verified, not a local rebuild) and exercised through the governed MCP route — `list_tools` + `call_tool(describe_table owner=COGNIC table=EMPLOYEES)` against an in-cluster seeded Oracle XE, at `discovery_status=auth_ready`. Runner `infra/proof-1b-2c/run-proof-1b-2c.sh` (`RUNNER_EXIT=0`); `docs/VALIDATION-RESULTS.md` "M3-E2c / Proof 2 — PASS" section.  
+  **Load-bearing proof:** the per-tenant exact-IP allow-list carve-out — removing the `mcp_internal_host_allowlist` row on a cold pod flips the resource leg from permitted (`audit.mcp_allowlist_permitted`, host `10.96.0.51`) to refused (HTTP 502 + `mcp_discovery_url_refused` + `discovery_status=refused`).  
+  **Production posture:** proves the first separate-repo tool pack deployed + governed through AgentOS on `kind`, with zero `src/cognic_agentos` kernel changes for the proof loop. NOT the production AKS platform (M15/M24), NOT an LLM-agent loop (M8), and NOT the operator-grade install flow (M4 — the proof still harness-seeds the override/allow-list/OAuth).
 
 - [ ] **M4 — Operator-grade pack install flow.**  
   **Goal:** replace proof-harness seeding with the real bank/operator install path for a signed pack: submit/review/approve/allow-list/install/disable/revoke.  

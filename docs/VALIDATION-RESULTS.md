@@ -173,3 +173,36 @@ Proof 1b-1 is the **deployed trust-registration axis** of Proof 1b: a kind/Helm-
 ### Honesty boundary
 - **`validate: PASS` is proven**; `sign`/`verify` were **not run** in this proof — on this host `pip-licenses` (the 4th tool `agentos sign` shells out to) is absent, recorded as `tooling_absent:pip-licenses` (cosign/syft/grype ARE present). By design `validate` alone proves external CLI consumption; the full supply-chain bundle additionally needs all four binaries + a cosign identity, and Proof 1a already proved the full sign/verify path in-process. M3-E1's claim is **the git-pinned authoring CLI is externally consumable + `validate` runs** — NOT a full signed-pack deploy (that is Proof 1b, already passed) and NOT the external pack repo itself (that is M3-E2).
 - The operator verify is **env-gated** + must run on a real machine (it git-installs + spins a venv); it caught a real environment fragility an always-on CI lane (pinned to 3.12) could not.
+
+## M3-E2c / Proof 2 — deployed external tool pack (released `cognic-tool-oracle-schema@v0.1.0`) — PASS
+
+**2026-06-29 — M3-E2c proven: the first SEPARATE-REPO tool pack, downloaded as its released signed artifact, deployed + governed through a kind/Helm AgentOS instance end-to-end (`discovery_status=auth_ready` + real `list_tools`/`call_tool`), with the per-tenant exact-IP allow-list carve-out load-bearing.**
+
+> M3-E2c closes the M3 deployed leg: M3-E1 proved the git-pinned authoring CLI is externally consumable; M3-E2a/b shipped the FastMCP authoring path + the released `cognic-tool-oracle-schema` repo + signed release; M3-E2c (this) deploys that released pack into AgentOS and runs the governed MCP loop. It mirrors the Proof 1b-2 deployed topology (PR #103) but against a DOWNLOADED released external artifact instead of an in-tree example.
+
+### Run metadata
+- **Date:** 2026-06-29 (operator-run, env-gated)
+- **Command:** `COGNIC_RUN_PROOF_1B2C=1 bash infra/proof-1b-2c/run-proof-1b-2c.sh` → **`RUNNER_EXIT=0`**
+- **Released pack:** `cognic-tool-oracle-schema@v0.1.0` — a separate **public** GitHub repo (`bmzee/cognic-tool-oracle-schema`) with independent CI + a signed GitHub Release (the wheel + 7 attestations + `cosign.pub` as assets). Staged into the proof by **`gh release download v0.1.0` + sha256 verification** of the wheel + `cosign.pub` — NOT a local rebuild (acceptance criterion #1). Verified digests: wheel `cognic_tool_oracle_schema-0.1.0-py3-none-any.whl` sha256 `4ed1a44773696429acf6bd5e88d91fa966ab9c4a0a3dc80925bac179883b1beb`; `cosign.pub` sha256 `43c33fbe7f4b16683d47886b81cb1b9684495cbb9a92989b10f5b8cd72ba2e78`.
+- **Topology:** kind, the default-adapters prod image; the 6 bundled backends + an **in-cluster seeded Oracle XE** (`gvenzl/oracle-xe:21-slim`, the built-in `XEPDB1` PDB, the `cognic.*` demo schema from a single-source seed) backing the pack's read-only schema tools; a private-ClusterIP MCP Service (`10.96.0.51`); an emulated-external **RS256/JWKS** Authorization Server at a genuine-global Service `externalIP` (`192.88.99.9:9000`, kube-proxy-intercepted, no real egress). Tenant `proof-1b-2c`. Boot-time trust registration of the staged released artifact (there is no runtime install API).
+- **Run log:** the operator runner stdout was reviewed for this record; all 10 steps + both bars green, no `*_fail` fired. The durable evidence is recorded inline below (BAR 1 permit/refusal + BAR 2 completion markers).
+
+### Bar 1 (checkpoint — the PR-2b-1 carve-out is load-bearing) — PASS
+- **Bar 1.1 (permit):** with the `mcp_internal_host_allowlist` row seeded, the resource leg reaches the private ClusterIP and the permit persists as an `audit.mcp_allowlist_permitted` event carrying host **`10.96.0.51`** (read from the `audit_event` table).
+- **Bar 1.2 (the must-have negative):** `DELETE` the allow-list row → restart to a **cold** pod (MCPHost caches the token + tool list per tenant) → the fresh probe is **refused**: **HTTP 502 + `mcp_discovery_url_refused`** in the response body + `GET /api/v1/system/plugins?tenant_id=proof-1b-2c` shows the `cognic-tool-oracle-schema` row at **`discovery_status=refused`**.
+- **Bar 1.3:** re-seed the allow-list + cold restart → clean state. → `BAR 1 PASS`.
+
+### Bar 2 (completion — full governed loop) — PASS
+- `list_tools` 200 → `call_tool` `describe_table(owner=COGNIC, table=EMPLOYEES)` 200 returning the seeded `EMPLOYEES` column metadata (the `FULL_NAME` content assertion passed — a bare 200 was not accepted) → `GET /api/v1/system/plugins?tenant_id=proof-1b-2c` shows `cognic-tool-oracle-schema` at **`discovery_status=auth_ready`**. → `PROOF 1b-2c (BAR 2) PASS`.
+
+### Live findings cleared (all harness/deploy-substrate — ZERO `src/cognic_agentos` kernel change)
+The proof attempt surfaced four real gaps, each diagnosed + fixed + pinned by a regression before the green run; the kernel governance logic was unchanged:
+1. **cosign/OPA download retry** (`infra/agentos/Dockerfile`, commit `ea8808f`) — a transient TLS eof (`curl` exit 56) killed the base-image build; added `--retry 5 --retry-delay 3 --retry-all-errors` to the two pinned binary fetches (the `sha256sum -c` verify is unchanged). The single deploy-substrate edit — infra, not a kernel `src/` change.
+2. **XE readiness wait + diagnostics** (`run-proof-1b-2c.sh`, commit `944c1e0`) — the qemu-emulated XE first boot under kind exceeds the original 600s wait; bumped to 1200s + added an `xe_fail` capture (pod describe/logs → this file) so a miss is diagnosable, not a blind timeout.
+3. **`ORACLE_DATABASE=XEPDB1` removal** (`manifests/oracle-xe.yaml`, commit `edbb3f1`) — that env made gvenzl try to `CREATE PLUGGABLE DATABASE XEPDB1`, colliding with the built-in PDB (`ORA-65012`) → `CrashLoopBackOff`. Confirmed by a plain-docker repro; removed (the seed `ALTER`s into the built-in XEPDB1; the DSN stays `oracle-xe:1521/XEPDB1`).
+4. **Backend/XE startup sequencing + diagnostics** (`run-proof-1b-2c.sh`, commit `ac5c22b`) — once XE actually booted, its CPU-saturating emulated boot overlapped with the backend startup and starved the backends past the 300s wait; reordered to bring the backends up Available BEFORE applying XE + added a `backends_fail` capture.
+
+### Honesty boundary
+- "PASS" means the **first separate-repo tool pack** was **deployed + governed through AgentOS on `kind`** end-to-end: released signed artifact → boot-time trust registration → `discovery_status=auth_ready` → real `list_tools` + `call_tool`, with the allow-list carve-out load-bearing (permit ↔ removed-delta refusal).
+- It does **NOT** claim the full production **AKS** platform (M15/M24), an **LLM-agent** loop (M8), or the **operator-grade install flow** (M4) — this proof still seeds the override / allow-list / OAuth creds via the proof harness (direct DB/Vault seed) and uses a proof-only fixed-actor binder. The 6 backends are the real bundled adapters; the Oracle XE is real (amd64-emulated on this arm64 host).
+- **Zero `src/cognic_agentos` kernel changes** were needed for the proof loop. The only kernel-adjacent edit was the `infra/agentos/Dockerfile` cosign/OPA download-retry build hardening (a deploy-substrate robustness fix surfaced by the proof, not a governance change).
