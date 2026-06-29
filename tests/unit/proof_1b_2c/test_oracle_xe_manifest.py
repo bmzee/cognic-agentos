@@ -17,12 +17,15 @@ SEED_SHA256 = "defa5300c015b4600856417ef0a8578a5a5ae847439575eb6f1d89908e12e3f6"
 def test_xe_image_env_and_service():
     assert C["image"] == "gvenzl/oracle-xe:21-slim"
     env = {e["name"]: e.get("value") for e in C["env"]}
+    # NO ORACLE_DATABASE: XEPDB1 is gvenzl XE's BUILT-IN PDB; setting ORACLE_DATABASE makes
+    # gvenzl try to CREATE it -> collision -> CrashLoopBackOff (ORA-01081 / exit 57), the
+    # M3-E2c attempt-3 finding. The seed ALTERs into the built-in XEPDB1.
     assert env == {
         "ORACLE_PASSWORD": "proof_admin_only",
-        "ORACLE_DATABASE": "XEPDB1",
         "APP_USER": "cognic",
         "APP_USER_PASSWORD": "cognic_dev_only",
     }
+    assert "ORACLE_DATABASE" not in env  # must NOT be set — collides with the built-in XEPDB1
     svc = next(d for d in DOCS if d["kind"] == "Service")
     assert svc["metadata"]["name"] == "oracle-xe"
     assert svc["spec"]["selector"] == {"app": "oracle-xe"}

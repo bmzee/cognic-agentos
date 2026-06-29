@@ -20,7 +20,11 @@ spec:
         ports: [{ containerPort: 1521 }]
         env:
         - { name: ORACLE_PASSWORD, value: "proof_admin_only" }
-        - { name: ORACLE_DATABASE, value: "XEPDB1" }
+        # NO ORACLE_DATABASE: XEPDB1 is gvenzl XE's BUILT-IN PDB. Setting ORACLE_DATABASE
+        # tells gvenzl to CREATE a PDB by that name, which collides with the built-in and
+        # crash-loops the container (ORA-01081 / exit 57 — the M3-E2c attempt-3 finding).
+        # The seed ALTERs into the built-in XEPDB1; the DSN is oracle-xe:1521/XEPDB1.
+        # Matches the proven docker-compose env (which never set ORACLE_DATABASE).
         - { name: APP_USER, value: "cognic" }
         - { name: APP_USER_PASSWORD, value: "cognic_dev_only" }
         volumeMounts:
