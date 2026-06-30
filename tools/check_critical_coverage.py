@@ -2258,6 +2258,17 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     # extension (NOT just the _EXPECTED_ENTRY_COUNT bump) per
     # feedback_verify_promotion_meets_floor_at_promotion_time.
     ("src/cognic_agentos/portal/api/mcp_config/routes.py", 0.95, 0.90),
+    # M4 Task 1 — the runtime-config record store (ADR-026). The authoritative
+    # DESIRED runtime-config state per (tenant, pack); a governance-path
+    # append_with_precondition store the materializer (M4 Task 4) projects into the
+    # derived MCP carve-out tables on install + retracts on disable/revoke. Owns the
+    # closed-enum RuntimeConfigRefusalReason (incl. the active + terminal-revoked
+    # reconfigure refusals) + the DB CheckConstraint on activation_status. Joins the
+    # sibling core/mcp_config/storage.py + portal/api/mcp_config/routes.py above.
+    # Gate 138 -> 139. Verified against a FRESH full-suite --cov-branch coverage.json
+    # IN THE SAME COMMIT (NOT just the _EXPECTED_ENTRY_COUNT bump) per
+    # feedback_verify_promotion_meets_floor_at_promotion_time.
+    ("src/cognic_agentos/core/mcp_config/runtime_config.py", 0.95, 0.90),
 )
 
 

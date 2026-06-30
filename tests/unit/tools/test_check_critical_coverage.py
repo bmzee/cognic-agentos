@@ -122,8 +122,13 @@ _GATE_TOOL_PATH = _REPO_ROOT / "tools" / "check_critical_coverage.py"
 #: endpoints; owns the RequireHumanActor write boundary + the MCPConfigRejected
 #: -> 422 closed-enum mapping, exactly the boundary that put
 #: ``packs/operator_routes.py`` on the gate) promoted to the gate = 138.
+#: +1 at M4 Task 1 (ADR-026) — ``core/mcp_config/runtime_config.py`` (the
+#: authoritative DESIRED runtime-config record store; append_with_precondition
+#: mutators + the closed-enum RuntimeConfigRefusalReason incl. the active +
+#: terminal-revoked reconfigure refusals + the DB CheckConstraint on
+#: activation_status) promoted to the gate = 139.
 #: Bump this in lockstep with any deliberate ``_CRITICAL_FILES`` change.
-_EXPECTED_ENTRY_COUNT = 138
+_EXPECTED_ENTRY_COUNT = 139
 
 #: The 5 modules Sprint 7B.3 promoted to the durable gate, each by its
 #: own landing commit (T3-T6 panels + T7 composer). All ride the
