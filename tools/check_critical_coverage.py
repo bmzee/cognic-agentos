@@ -2269,6 +2269,15 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     # IN THE SAME COMMIT (NOT just the _EXPECTED_ENTRY_COUNT bump) per
     # feedback_verify_promotion_meets_floor_at_promotion_time.
     ("src/cognic_agentos/core/mcp_config/runtime_config.py", 0.95, 0.90),
+    # M4 Task 3 (ADR-026 D4) — the configure endpoint. Owns the human-only
+    # `pack.configure` runtime-config WRITE boundary (RequireHumanActor on PUT) +
+    # tenant ownership + the rollback-safe grammar-refusal mapping + the active/
+    # revoked 409-vs-422 status split — the SAME RequireHumanActor-write-boundary
+    # criterion that put operator_routes.py + mcp_config/routes.py on the gate.
+    # Gate 139 -> 140. Verified 100% line / 100% branch on fresh full-suite
+    # --cov-branch coverage.json IN THE SAME COMMIT (NOT just the count bump) per
+    # feedback_verify_promotion_meets_floor_at_promotion_time.
+    ("src/cognic_agentos/portal/api/packs/configure_routes.py", 0.95, 0.90),
 )
 
 
