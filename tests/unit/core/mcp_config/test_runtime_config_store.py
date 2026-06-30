@@ -497,3 +497,113 @@ def test_refusal_reason_enum_is_closed_five_values() -> None:
         "runtime_config_activation_status_unknown",
     }
     assert len(get_args(RuntimeConfigRefusalReason)) == 5
+
+
+# --------------------------------------------------------------------------- #
+# list_for_tenant — tenant-scoped read of every config record (any status)
+# --------------------------------------------------------------------------- #
+
+
+async def test_list_for_tenant_empty_when_none(store: PackRuntimeConfigStore) -> None:
+    assert await store.list_for_tenant(tenant_id="t1") == []
+
+
+async def test_list_for_tenant_returns_all_records_any_status(
+    store: PackRuntimeConfigStore,
+) -> None:
+    # p1 stays configured; p2 is flipped to active; p3 is revoked — list returns
+    # all three regardless of activation_status (the materializer needs the union
+    # of every record, then filters by status itself).
+    await store.set_config(
+        tenant_id="t1",
+        pack_id="p1",
+        server_url_override="http://10.42.0.7",
+        internal_host_allowlist=["10.42.0.7"],
+        oauth_credential_ref="secret/cognic/t1/oauth/p1",
+        as_allowlist_ref="secret/cognic/t1/as",
+        actor_subject="op@bank",
+        actor_type="human",
+        request_id="rc-list-p1",
+    )
+    await store.set_config(
+        tenant_id="t1",
+        pack_id="p2",
+        server_url_override=None,
+        internal_host_allowlist=["10.42.0.8"],
+        oauth_credential_ref=None,
+        as_allowlist_ref=None,
+        actor_subject="op@bank",
+        actor_type="human",
+        request_id="rc-list-p2",
+    )
+    await store.set_activation_status(
+        tenant_id="t1",
+        pack_id="p2",
+        status="active",
+        actor_subject="op@bank",
+        actor_type="human",
+        request_id="rc-list-p2-active",
+    )
+    await store.set_config(
+        tenant_id="t1",
+        pack_id="p3",
+        server_url_override=None,
+        internal_host_allowlist=["10.42.0.9"],
+        oauth_credential_ref=None,
+        as_allowlist_ref=None,
+        actor_subject="op@bank",
+        actor_type="human",
+        request_id="rc-list-p3",
+    )
+    await store.set_activation_status(
+        tenant_id="t1",
+        pack_id="p3",
+        status="revoked",
+        actor_subject="op@bank",
+        actor_type="human",
+        request_id="rc-list-p3-revoke",
+    )
+
+    records = await store.list_for_tenant(tenant_id="t1")
+    assert all(isinstance(r, PackRuntimeConfigRecord) for r in records)
+    by_pack = {r.pack_id: r for r in records}
+    assert set(by_pack) == {"p1", "p2", "p3"}
+    assert by_pack["p1"].activation_status == "configured"
+    assert by_pack["p1"].server_url_override == "http://10.42.0.7"
+    assert by_pack["p1"].internal_host_allowlist == ("10.42.0.7",)
+    assert by_pack["p1"].oauth_credential_ref == "secret/cognic/t1/oauth/p1"
+    assert by_pack["p2"].activation_status == "active"
+    assert by_pack["p2"].internal_host_allowlist == ("10.42.0.8",)
+    assert by_pack["p3"].activation_status == "revoked"
+
+
+async def test_list_for_tenant_cross_tenant_isolation(
+    store: PackRuntimeConfigStore,
+) -> None:
+    # tenant A has p1; tenant B has p2 — listing A returns ONLY p1.
+    await store.set_config(
+        tenant_id="tA",
+        pack_id="p1",
+        server_url_override=None,
+        internal_host_allowlist=["10.42.0.7"],
+        oauth_credential_ref=None,
+        as_allowlist_ref=None,
+        actor_subject="op@bank",
+        actor_type="human",
+        request_id="rc-iso-a",
+    )
+    await store.set_config(
+        tenant_id="tB",
+        pack_id="p2",
+        server_url_override=None,
+        internal_host_allowlist=["10.42.0.8"],
+        oauth_credential_ref=None,
+        as_allowlist_ref=None,
+        actor_subject="op@bank",
+        actor_type="human",
+        request_id="rc-iso-b",
+    )
+    a_records = await store.list_for_tenant(tenant_id="tA")
+    assert {r.pack_id for r in a_records} == {"p1"}
+    b_records = await store.list_for_tenant(tenant_id="tB")
+    assert {r.pack_id for r in b_records} == {"p2"}

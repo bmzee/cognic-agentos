@@ -212,6 +212,37 @@ class PackRuntimeConfigStore:
             last_request_id=row.last_request_id,
         )
 
+    async def list_for_tenant(self, *, tenant_id: str) -> list[PackRuntimeConfigRecord]:
+        """All desired records for one tenant (any ``activation_status``). The
+        ``WHERE tenant_id`` IS the cross-tenant boundary — another tenant's
+        records are NOT returned. Consumed by the Task-4 materializer to compute
+        the union allow-list target across a tenant's currently-active configs;
+        the caller filters by status itself, so this returns every record."""
+        async with self._engine.connect() as conn:
+            rows = (
+                await conn.execute(
+                    select(_pack_runtime_config).where(
+                        _pack_runtime_config.c.tenant_id == tenant_id
+                    )
+                )
+            ).fetchall()
+        return [
+            PackRuntimeConfigRecord(
+                tenant_id=row.tenant_id,
+                pack_id=row.pack_id,
+                server_url_override=row.server_url_override,
+                internal_host_allowlist=tuple(row.internal_host_allowlist),
+                oauth_credential_ref=row.oauth_credential_ref,
+                as_allowlist_ref=row.as_allowlist_ref,
+                activation_status=row.activation_status,
+                generation=int(row.generation),
+                set_by_actor=row.set_by_actor,
+                set_at=row.set_at,
+                last_request_id=row.last_request_id,
+            )
+            for row in rows
+        ]
+
     async def set_config(
         self,
         *,

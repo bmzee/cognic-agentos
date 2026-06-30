@@ -2278,6 +2278,16 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     # --cov-branch coverage.json IN THE SAME COMMIT (NOT just the count bump) per
     # feedback_verify_promotion_meets_floor_at_promotion_time.
     ("src/cognic_agentos/portal/api/packs/configure_routes.py", 0.95, 0.90),
+    # M4 Task 4 (ADR-026 D7) — the runtime-config materializer. The substantive
+    # "what becomes callable" gate: projects the desired record into the DERIVED
+    # MCP carve-out stores on install + retracts on disable/revoke, reconciling the
+    # per-tenant allow-list to the UNION of all active packs' desired IPs (so it
+    # cannot over-remove another active pack's IP) + validate-both-Vault-refs-
+    # before-any-write + check-before-write idempotency. Gate 140 -> 141. Verified
+    # 100% line / 100% branch on fresh full-suite --cov-branch coverage.json IN THE
+    # SAME COMMIT (NOT just the count bump) per
+    # feedback_verify_promotion_meets_floor_at_promotion_time.
+    ("src/cognic_agentos/core/mcp_config/materializer.py", 0.95, 0.90),
 )
 
 
