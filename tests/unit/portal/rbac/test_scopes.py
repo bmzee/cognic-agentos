@@ -2,11 +2,13 @@
 
 Pins:
 
-- The 13 lifecycle scopes: the 12 from BUILD_PLAN.md §622-625 verbatim plus the
+- The 14 lifecycle scopes: the 12 from BUILD_PLAN.md §622-625 verbatim, the
   override scope ``pack.override.approval_gate`` from ADR-012 §107-110 (added at
-  Sprint 7B.3 T8 alongside the 5-gate composer's override path). (The Sprint-7B.1
-  closeout L119 says "14 scopes" but enumerated 12 — known cite-from-memory typo in
-  the closeout per Sprint 7B.2 plan self-review Round 0.5.)
+  Sprint 7B.3 T8 alongside the 5-gate composer's override path), and the M4
+  ``pack.configure`` operator scope from ADR-026 D4 (the runtime-config configure
+  step). (Historical note: the Sprint-7B.1 closeout L119 said "14 scopes" but only
+  enumerated 12 — a cite-from-memory typo per Sprint 7B.2 plan self-review Round
+  0.5; the genuine count reached 13 at 7B.3 T8 and 14 at M4.)
 - Closed-enum literal stability — any addition or rename is a wire-protocol break
   visible in this test's diff. ``PackRBACScope`` is the wire-protocol contract
   carried in every 403 ``scope_not_held`` denial body.
@@ -33,15 +35,17 @@ from cognic_agentos.portal.rbac.scopes import (
 )
 
 
-def test_pack_lifecycle_scopes_frozen_at_13_values() -> None:
-    """ADR-012 §39 + §107-110 — 12 BUILD_PLAN §622-625 lifecycle scopes plus the
-    Sprint-7B.3-T8 override scope = 13."""
-    assert len(PACK_LIFECYCLE_SCOPES) == 13
+def test_pack_lifecycle_scopes_frozen_at_14_values() -> None:
+    """ADR-012 §39 + §107-110 + ADR-026 — 12 BUILD_PLAN §622-625 lifecycle scopes,
+    the Sprint-7B.3-T8 override scope, and the M4 ``pack.configure`` operator scope
+    (ADR-026 D4) = 14."""
+    assert len(PACK_LIFECYCLE_SCOPES) == 14
 
 
 def test_pack_lifecycle_scopes_match_build_plan_verbatim() -> None:
     """Every scope in BUILD_PLAN §622-625 plus the ADR-012 §107-110 override
-    scope must appear in PACK_LIFECYCLE_SCOPES."""
+    scope plus the ADR-026 D4 ``pack.configure`` operator scope must appear in
+    PACK_LIFECYCLE_SCOPES."""
     expected = frozenset(
         {
             # Author surface (BUILD_PLAN §622)
@@ -51,8 +55,11 @@ def test_pack_lifecycle_scopes_match_build_plan_verbatim() -> None:
             "pack.review.claim",
             "pack.review.approve",
             "pack.review.reject",
-            # Operator surface (BUILD_PLAN §624)
+            # Operator surface (BUILD_PLAN §624 + ADR-026 D4 — ``pack.configure``,
+            # the M4 runtime-config configure step, sits between allow_list +
+            # install)
             "pack.allow_list",
+            "pack.configure",
             "pack.install",
             "pack.disable",
             "pack.revoke",
@@ -81,6 +88,7 @@ def test_pack_lifecycle_scopes_match_build_plan_verbatim() -> None:
         "pack.review.approve",
         "pack.review.reject",
         "pack.allow_list",
+        "pack.configure",
         "pack.install",
         "pack.disable",
         "pack.revoke",
@@ -91,7 +99,7 @@ def test_pack_lifecycle_scopes_match_build_plan_verbatim() -> None:
     ],
 )
 def test_pack_rbac_scope_literal_admits_value(value: str) -> None:
-    """Closed-enum membership pin — each of the 13 wire-protocol values must
+    """Closed-enum membership pin — each of the 14 wire-protocol values must
     appear in ``get_args(PackRBACScope)``. Any rename or removal breaks here."""
     assert value in get_args(PackRBACScope)
 
@@ -122,11 +130,13 @@ def test_reviewer_scopes_match_build_plan_reviewer_surface() -> None:
 
 
 def test_operator_scopes_match_build_plan_operator_surface() -> None:
-    """BUILD_PLAN §624 — operator scopes pinned to 5 values."""
+    """BUILD_PLAN §624 + ADR-026 D4 — operator scopes pinned to 6 values (the M4
+    ``pack.configure`` runtime-config configure step joins the operator surface)."""
     assert (
         frozenset(
             {
                 "pack.allow_list",
+                "pack.configure",
                 "pack.install",
                 "pack.disable",
                 "pack.revoke",

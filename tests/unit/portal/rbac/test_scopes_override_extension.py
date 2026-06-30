@@ -6,7 +6,9 @@ Pins the ADR-012 §107-110 override scope ``pack.override.approval_gate``:
   role-group frozensets (author / reviewer / operator / examiner).
 - ``pack.override.approval_gate`` is a member of both
   ``PACK_LIFECYCLE_SCOPES`` and the ``PackRBACScope`` Literal.
-- ``PackRBACScope`` Literal arity grows 12 → 13.
+- ``PackRBACScope`` Literal arity grew 12 → 13 here (the override scope at Sprint
+  7B.3 T8); the arity assertion below now pins 14 after M4's ``pack.configure``
+  (ADR-026 D4).
 
 The override scope is the wire-protocol contract for the
 ``pack.override.approval_gate`` RBAC gate on the approve endpoint's
@@ -44,9 +46,10 @@ def test_override_scope_in_pack_rbac_scope_literal() -> None:
     assert "pack.override.approval_gate" in get_args(PackRBACScope)
 
 
-def test_pack_rbac_scope_literal_arity_is_13() -> None:
-    """ADR-012 §107-110 — the 13th scope lands at 7B.3 T8."""
-    assert len(get_args(PackRBACScope)) == 13
+def test_pack_rbac_scope_literal_arity_is_14() -> None:
+    """``PackRBACScope`` Literal arity. The 13th (``pack.override.approval_gate``)
+    landed at 7B.3 T8; the 14th (``pack.configure``) lands at M4 (ADR-026 D4)."""
+    assert len(get_args(PackRBACScope)) == 14
 
 
 def test_override_scopes_disjoint_from_role_groups() -> None:
