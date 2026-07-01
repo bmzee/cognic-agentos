@@ -68,12 +68,15 @@ from cognic_agentos.observability import (
 from cognic_agentos.packs.storage import PackRecordStore
 from cognic_agentos.portal.api.approvals.routes import build_approval_routes
 from cognic_agentos.portal.api.config_overlay.routes import build_config_overlay_routes
-from cognic_agentos.portal.api.mcp_config.routes import (
-    build_mcp_allowlist_routes,
-    build_mcp_override_routes,
-)
+
+# NOTE: build_mcp_override_routes / build_mcp_allowlist_routes (the standalone
+# MCP write-route factories) are DELIBERATELY no longer imported here — ADR-026
+# D7 (M4 Task 7) supersedes those direct-write operator routes (the materializer
+# is the sole writer). The factories still exist + are unit-tested in
+# portal/api/mcp_config/; they are simply not mounted by create_app.
 from cognic_agentos.portal.api.models import build_models_router
 from cognic_agentos.portal.api.packs import build_packs_router
+from cognic_agentos.portal.api.packs.configure_routes import build_configure_routes
 from cognic_agentos.portal.api.system_routes import build_system_router
 from cognic_agentos.portal.rbac.actor import ActorBinder
 from cognic_agentos.protocol import is_a2a_available, is_mcp_available
@@ -125,11 +128,15 @@ if TYPE_CHECKING:
     from cognic_agentos.core.emergency.kill_switches import KillSwitchEngine
     from cognic_agentos.core.emergency.quotas import QuotaEngine
 
-    # PR-2b-1 (ADR-002 amendment): type-only refs for the create_app MCP-config
-    # kwargs. The route factories ``build_mcp_override_routes`` /
-    # ``build_mcp_allowlist_routes`` are imported at runtime above (they pull only
-    # already-imported core/rbac deps); the two store types are annotation-only
-    # here, mirroring the config-overlay pattern.
+    # PR-2b-1 (ADR-002 amendment) + M4 (ADR-026, Task 7): type-only refs for the
+    # create_app MCP-config + runtime-config kwargs. The PR-2b-1 store types back
+    # the (now routing-inert per D7) ``mcp_override_store`` /
+    # ``mcp_internal_host_allowlist_store`` kwargs; the M4 types back the
+    # ``runtime_config_store`` / ``runtime_config_materializer`` saga kwargs — all
+    # annotation-only here (the runtime constructs the real instances), mirroring
+    # the config-overlay pattern.
+    from cognic_agentos.core.mcp_config.materializer import RuntimeConfigMaterializer
+    from cognic_agentos.core.mcp_config.runtime_config import PackRuntimeConfigStore
     from cognic_agentos.core.mcp_config.storage import (
         MCPInternalHostAllowlistStore,
         MCPServerUrlOverrideStore,
@@ -317,6 +324,16 @@ def create_app(
     # store); a bank-overlay caller threads them here.
     mcp_override_store: MCPServerUrlOverrideStore | None = None,
     mcp_internal_host_allowlist_store: MCPInternalHostAllowlistStore | None = None,
+    # M4 (ADR-026 D1/D6, Task 7): optional runtime-config store + materializer —
+    # the operator install/disable/revoke saga's 2 body-time collaborators.
+    # build_runtime constructs them (exposed on Runtime + app.state); an
+    # eager-injection deploy / bank overlay threads them here so the body-time
+    # packs-router mount runs the M4 saga (all-2-or-none — build_operator_routes
+    # ValueErrors on a partial wiring). The plugin registry (install gate 2) is
+    # read at REQUEST time from app.state, NOT a kwarg. When BOTH are wired
+    # ALONGSIDE pack_record_store + actor_binder the configure router also mounts.
+    runtime_config_store: PackRuntimeConfigStore | None = None,
+    runtime_config_materializer: RuntimeConfigMaterializer | None = None,
     # ADR-014 (Sprint 13.5b1): optional approval-router deps. When BOTH are
     # wired, create_app mounts the approval router (queue/detail/grant/
     # grant-second/deny) + sets app.state.approval_router_mounted. Same opt-in
@@ -655,6 +672,13 @@ def create_app(
                 app.state.runtime = runtime
                 app.state.llm_gateway = runtime.llm_gateway
                 app.state.memory_api_factory = runtime.memory_api_factory
+                # M4 (ADR-026 D1/D6, Task 7) — expose the runtime-built config
+                # store + materializer for parity + introspection (the operator
+                # saga's body-time packs-router mount consumes the create_app
+                # kwargs, injection-seam posture; the packs router is unmounted in
+                # create_prod_app until an eager-injection deploy wires it — Task 8).
+                app.state.runtime_config_store = runtime.runtime_config_store
+                app.state.runtime_config_materializer = runtime.runtime_config_materializer
                 # Sprint 13.6 (ADR-018) — expose the kill-switch engine for
                 # parity + introspection (enforcement is already production-
                 # wired into the gateway + memory conformer build_runtime
@@ -1068,6 +1092,12 @@ def create_app(
     app.state.pack_record_store = pack_record_store
     app.state.trust_gate = trust_gate
     app.state.trust_root_resolver = trust_root_resolver
+    # M4 (ADR-026 D1/D6, Task 7) — eager (body-time) attach of the runtime-config
+    # store + materializer from the injection-seam kwargs (None in create_prod_app;
+    # the lifespan's build_runtime overwrites both with the runtime-built instances
+    # on the adapter path). Introspection parity with pack_record_store.
+    app.state.runtime_config_store = runtime_config_store
+    app.state.runtime_config_materializer = runtime_config_materializer
 
     # Sprint-7B.4 T6: broker construction + eager attach.
     # Sprint-7B.4 T12: extended to accept a pre-built broker via the
@@ -1243,6 +1273,11 @@ def create_app(
                 # pass-rate floor from the captured ``settings`` (NOT
                 # ``get_settings()``) through to the approve handler's gate-3.
                 adversarial_pass_rate_floor=settings.adversarial_pass_rate_floor,
+                # M4 (ADR-026 D1/D6, Task 7) — the 2 body-time saga collaborators.
+                # build_operator_routes enforces all-2-or-none; the plugin registry
+                # (gate 2) is a REQUEST-time app.state read, not threaded here.
+                runtime_config_materializer=runtime_config_materializer,
+                runtime_config_store=runtime_config_store,
             )
         )
         app.state.pack_router_mounted = True
@@ -1292,6 +1327,29 @@ def create_app(
         )
 
     # ──────────────────────────────────────────────────────────────────
+    # M4 (ADR-026 D4, Task 7) — the configure surface (PUT human-only /
+    # GET service-readable) at /api/v1/packs/{pack_id}/runtime-config.
+    #
+    # Mounts when the pack store + actor binder (the endpoint's
+    # RequireTenantOwnership + RequireScope read them from app.state at request
+    # time) AND the runtime-config store (the write/read backing) are ALL
+    # present. app.state.configure_router_mounted is the introspection flag
+    # (mirrors pack_router_mounted). Any missing dep -> no mount, flag False,
+    # quiet (an M4-less deployment is legitimate — no partial-config warning).
+    # ──────────────────────────────────────────────────────────────────
+    app.state.configure_router_mounted = False
+    if (
+        actor_binder is not None
+        and pack_record_store is not None
+        and runtime_config_store is not None
+    ):
+        app.include_router(
+            build_configure_routes(store=runtime_config_store),
+            prefix="/api/v1/packs",
+        )
+        app.state.configure_router_mounted = True
+
+    # ──────────────────────────────────────────────────────────────────
     # ADR-023 (Wave-2) — per-tenant config-overlay router mount.
     #
     # 3-state mount mirroring the packs router: BOTH store + resolver
@@ -1333,51 +1391,26 @@ def create_app(
         )
 
     # ──────────────────────────────────────────────────────────────────
-    # PR-2b-1 (ADR-002 amendment) — MCP operator server_url override +
-    # per-tenant internal-host allow-list router mount.
+    # PR-2b-1 standalone MCP override + allow-list WRITE routes — SUPERSEDED
+    # (ADR-026 D7, M4 Task 7).
     #
-    # 3-state mount mirroring the config-overlay block above, gated on the
-    # PAIR of stores (build_runtime constructs them together, next to the
-    # overlay store): BOTH supplied -> mount the override + allow-list
-    # operator routers under ``/api/v1`` + set BOTH introspection flags;
-    # partial config (exactly one) -> a single structured fail-loud warning
-    # so operators see the misconfig at startup + both flags stay False;
-    # neither -> no mount, both flags False, SILENT (pack-only deployments
-    # without an internal MCP Service are legitimate — no warning). The
-    # routes read the actor binder from ``app.state`` at REQUEST time (the
-    # KernelDefaultActorBinder fails loud there), so a binder-less mount
-    # surfaces a clear 500, not a confusing 404 — same posture as the
-    # overlay block. Both write surfaces are additionally human-only via the
-    # routers' own RequireHumanActor sub-dependency.
+    # Under M4 the RuntimeConfigMaterializer is the SOLE writer of the derived
+    # override / allow-list carve-out rows: it projects the operator-authored
+    # DESIRED runtime-config record into them (driven by the install/disable/
+    # revoke saga). The old direct-write operator routes
+    # (build_mcp_override_routes / build_mcp_allowlist_routes) are therefore NO
+    # LONGER MOUNTED — a second write path would let an operator drift the
+    # derived rows out from under the desired-config record (two sources of
+    # truth). The store INSTANCES themselves stay wired (build_runtime threads
+    # them into the MCP host for callability READS and into the materializer for
+    # WRITES); only the standalone WRITE routes are gone. The
+    # ``mcp_override_store`` / ``mcp_internal_host_allowlist_store`` create_app
+    # kwargs are retained for signature back-compat but no longer mount anything.
+    # The two introspection flags stay permanently False (back-compat for any
+    # honesty-surface reader) + the paths are absent from ``app.routes``.
     # ──────────────────────────────────────────────────────────────────
     app.state.mcp_override_router_mounted = False
     app.state.mcp_allowlist_router_mounted = False
-    if mcp_override_store is not None and mcp_internal_host_allowlist_store is not None:
-        app.include_router(
-            build_mcp_override_routes(store=mcp_override_store),
-            prefix="/api/v1",
-        )
-        app.include_router(
-            build_mcp_allowlist_routes(store=mcp_internal_host_allowlist_store),
-            prefix="/api/v1",
-        )
-        app.state.mcp_override_router_mounted = True
-        app.state.mcp_allowlist_router_mounted = True
-    elif mcp_override_store is not None or mcp_internal_host_allowlist_store is not None:
-        logger.warning(
-            "portal.mcp_config_router_unmounted_partial_config",
-            extra={
-                "reason": "mcp_override_store_and_allowlist_store_both_required",
-                "remediation": (
-                    "create_app(mcp_override_store=<store>, "
-                    "mcp_internal_host_allowlist_store=<store>) wires the MCP "
-                    "operator override + internal-host allow-list routers; BOTH "
-                    "are required. The composition root build_runtime constructs "
-                    "them as a pair, so a partial config indicates a hand-wired "
-                    "caller missing one half."
-                ),
-            },
-        )
 
     # ──────────────────────────────────────────────────────────────────
     # Sprint 13.5b1 — approval router mount (ADR-014).

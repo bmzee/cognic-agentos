@@ -204,19 +204,22 @@ LifecycleRefusalReason = Literal[
 #: name; value is the frozenset of legal ``(from, to)`` pairs.
 #:
 #: Most transitions have a single legal from-state. ``withdraw`` / ``revoke``
-#: / ``uninstall`` each have two legal from-states per ADR-012:
+#: / ``uninstall`` / ``install`` each have two legal from-states (``install``
+#: per the M4 amendment):
 #:
 #: - ``withdraw``: submitted/under_review → withdrawn (line 43)
 #: - ``revoke``: installed/disabled → revoked (line 47)
 #: - ``uninstall``: disabled/revoked → uninstalled (line 48)
+#: - ``install``: allow_listed/disabled → installed (M4 amendment 2026-06-30 —
+#:   the ``disabled → installed`` re-enable; ``revoke`` stays terminal)
 #: - ``cancel_draft``: draft → withdrawn (Sprint 7B.2 T4 per ADR-012 §59;
 #:   distinct from ``withdraw`` which §39 limits to submitted/under_review)
 #:
-#: 14 legal pairs in total across the 11 transitions (7 single-from + 3
+#: 15 legal pairs in total across the 11 transitions (6 single-from + 4
 #: multi-from x 2 from-states each + cancel_draft single-from x 1 =
-#: 7 + 6 + 1 = 14). Pinned by
+#: 6 + 8 + 1 = 15). Pinned by
 #: ``tests/unit/packs/test_lifecycle.py::TestSprint7B1ValidTransitionsTable
-#: ::test_table_has_14_legal_pairs_total``.
+#: ::test_table_has_15_legal_pairs_total``.
 _VALID_TRANSITIONS: Final[Mapping[TransitionName, frozenset[tuple[PackState, PackState]]]] = {
     "submit": frozenset({("draft", "submitted")}),
     "claim": frozenset({("submitted", "under_review")}),
@@ -229,7 +232,14 @@ _VALID_TRANSITIONS: Final[Mapping[TransitionName, frozenset[tuple[PackState, Pac
         }
     ),
     "allow_list": frozenset({("approved", "allow_listed")}),
-    "install": frozenset({("allow_listed", "installed")}),
+    # M4 (ADR-012 amendment, 2026-06-30) — multi-from: ``allow_listed → installed``
+    # (first install) + ``disabled → installed`` (re-enable; revoke stays terminal).
+    "install": frozenset(
+        {
+            ("allow_listed", "installed"),
+            ("disabled", "installed"),
+        }
+    ),
     "disable": frozenset({("installed", "disabled")}),
     "revoke": frozenset(
         {

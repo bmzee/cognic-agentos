@@ -122,8 +122,25 @@ _GATE_TOOL_PATH = _REPO_ROOT / "tools" / "check_critical_coverage.py"
 #: endpoints; owns the RequireHumanActor write boundary + the MCPConfigRejected
 #: -> 422 closed-enum mapping, exactly the boundary that put
 #: ``packs/operator_routes.py`` on the gate) promoted to the gate = 138.
+#: +1 at M4 Task 1 (ADR-026) — ``core/mcp_config/runtime_config.py`` (the
+#: authoritative DESIRED runtime-config record store; append_with_precondition
+#: mutators + the closed-enum RuntimeConfigRefusalReason incl. the active +
+#: terminal-revoked reconfigure refusals + the DB CheckConstraint on
+#: activation_status) promoted to the gate = 139.
+#: +1 at M4 Task 3 (ADR-026 D4) — ``portal/api/packs/configure_routes.py`` (the
+#: configure endpoint; owns the human-only ``pack.configure`` runtime-config WRITE
+#: boundary + tenant ownership + the rollback-safe grammar-refusal mapping + the
+#: active/revoked 409-vs-422 status split — the same RequireHumanActor-write-
+#: boundary criterion that put operator_routes.py + mcp_config/routes.py on the
+#: gate) promoted to the gate = 140.
+#: +1 at M4 Task 4 (ADR-026 D7) — ``core/mcp_config/materializer.py`` (the
+#: runtime-config materializer; projects desired → derived MCP carve-outs on
+#: install + retracts on disable/revoke, reconciling the per-tenant allow-list to
+#: the UNION of all active packs' desired IPs + validate-before-write +
+#: check-before-write idempotency — the substantive callability gate) promoted to
+#: the gate = 141.
 #: Bump this in lockstep with any deliberate ``_CRITICAL_FILES`` change.
-_EXPECTED_ENTRY_COUNT = 138
+_EXPECTED_ENTRY_COUNT = 141
 
 #: The 5 modules Sprint 7B.3 promoted to the durable gate, each by its
 #: own landing commit (T3-T6 panels + T7 composer). All ride the

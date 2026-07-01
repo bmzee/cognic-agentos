@@ -2258,6 +2258,36 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     # extension (NOT just the _EXPECTED_ENTRY_COUNT bump) per
     # feedback_verify_promotion_meets_floor_at_promotion_time.
     ("src/cognic_agentos/portal/api/mcp_config/routes.py", 0.95, 0.90),
+    # M4 Task 1 — the runtime-config record store (ADR-026). The authoritative
+    # DESIRED runtime-config state per (tenant, pack); a governance-path
+    # append_with_precondition store the materializer (M4 Task 4) projects into the
+    # derived MCP carve-out tables on install + retracts on disable/revoke. Owns the
+    # closed-enum RuntimeConfigRefusalReason (incl. the active + terminal-revoked
+    # reconfigure refusals) + the DB CheckConstraint on activation_status. Joins the
+    # sibling core/mcp_config/storage.py + portal/api/mcp_config/routes.py above.
+    # Gate 138 -> 139. Verified against a FRESH full-suite --cov-branch coverage.json
+    # IN THE SAME COMMIT (NOT just the _EXPECTED_ENTRY_COUNT bump) per
+    # feedback_verify_promotion_meets_floor_at_promotion_time.
+    ("src/cognic_agentos/core/mcp_config/runtime_config.py", 0.95, 0.90),
+    # M4 Task 3 (ADR-026 D4) — the configure endpoint. Owns the human-only
+    # `pack.configure` runtime-config WRITE boundary (RequireHumanActor on PUT) +
+    # tenant ownership + the rollback-safe grammar-refusal mapping + the active/
+    # revoked 409-vs-422 status split — the SAME RequireHumanActor-write-boundary
+    # criterion that put operator_routes.py + mcp_config/routes.py on the gate.
+    # Gate 139 -> 140. Verified 100% line / 100% branch on fresh full-suite
+    # --cov-branch coverage.json IN THE SAME COMMIT (NOT just the count bump) per
+    # feedback_verify_promotion_meets_floor_at_promotion_time.
+    ("src/cognic_agentos/portal/api/packs/configure_routes.py", 0.95, 0.90),
+    # M4 Task 4 (ADR-026 D7) — the runtime-config materializer. The substantive
+    # "what becomes callable" gate: projects the desired record into the DERIVED
+    # MCP carve-out stores on install + retracts on disable/revoke, reconciling the
+    # per-tenant allow-list to the UNION of all active packs' desired IPs (so it
+    # cannot over-remove another active pack's IP) + validate-both-Vault-refs-
+    # before-any-write + check-before-write idempotency. Gate 140 -> 141. Verified
+    # 100% line / 100% branch on fresh full-suite --cov-branch coverage.json IN THE
+    # SAME COMMIT (NOT just the count bump) per
+    # feedback_verify_promotion_meets_floor_at_promotion_time.
+    ("src/cognic_agentos/core/mcp_config/materializer.py", 0.95, 0.90),
 )
 
 

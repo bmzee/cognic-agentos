@@ -455,6 +455,73 @@ class TestSprint7B1PackRecordStoreTransitionHappyPath:
         # 8 transitions emitted 8 rows.
         assert await _count_chain_rows(engine) == before + 8
 
+    async def test_m4_reenable_disabled_pack_via_install_transition(
+        self, store: PackRecordStore, engine: AsyncEngine
+    ) -> None:
+        # M4 (ADR-012 amendment) — a disabled pack RE-INSTALLS via the widened
+        # ``install`` transition (disabled → installed) WITHOUT a new
+        # approval/allow-list cycle. Storage needs NO map change: ``install``
+        # already maps to ``installed``; the from-state widening lives in
+        # validate_transition (which storage delegates to). End-to-end proof.
+        rec = _make_record()
+        await store.save_draft(rec)
+        for trans in ("submit", "claim", "approve", "allow_list", "install", "disable"):
+            await store.transition(
+                pack_id=rec.id,
+                transition=trans,
+                actor_id=f"actor-{trans}",
+                tenant_id=None,
+                evidence_pointer=None,
+                request_id=f"req-{trans}",
+            )
+        assert await _read_pack_state(engine, rec.id) == "disabled"
+        # Re-enable: disabled → installed via the SAME ``install`` transition.
+        before = await _count_chain_rows(engine)
+        await store.transition(
+            pack_id=rec.id,
+            transition="install",
+            actor_id="actor-reinstall",
+            tenant_id=None,
+            evidence_pointer=None,
+            request_id="req-reinstall",
+        )
+        assert await _read_pack_state(engine, rec.id) == "installed"
+        # Exactly one new chain row (the pack.lifecycle.installed re-enable event).
+        assert await _count_chain_rows(engine) == before + 1
+
+    async def test_m4_revoked_pack_cannot_be_reinstalled(
+        self, store: PackRecordStore, engine: AsyncEngine
+    ) -> None:
+        # ``revoke`` stays terminal — a revoked pack canNOT be re-installed. The
+        # widened ``install`` accepts ``disabled``, NOT ``revoked`` →
+        # LifecycleTransitionRefused(invalid_state_pair); the row is unchanged.
+        rec = _make_record()
+        await store.save_draft(rec)
+        for trans in ("submit", "claim", "approve", "allow_list", "install", "revoke"):
+            await store.transition(
+                pack_id=rec.id,
+                transition=trans,
+                actor_id=f"actor-{trans}",
+                tenant_id=None,
+                evidence_pointer=None,
+                request_id=f"req-{trans}",
+            )
+        assert await _read_pack_state(engine, rec.id) == "revoked"
+        before = await _count_chain_rows(engine)
+        with pytest.raises(LifecycleTransitionRefused) as exc:
+            await store.transition(
+                pack_id=rec.id,
+                transition="install",
+                actor_id="actor-bad-reinstall",
+                tenant_id=None,
+                evidence_pointer=None,
+                request_id="req-bad-reinstall",
+            )
+        assert exc.value.reason == "lifecycle_transition_invalid_state_pair"
+        # Refusal rolled back — state unchanged, no chain row emitted.
+        assert await _read_pack_state(engine, rec.id) == "revoked"
+        assert await _count_chain_rows(engine) == before
+
     async def test_iso_controls_recorded_in_chain_payload(
         self, store: PackRecordStore, engine: AsyncEngine
     ) -> None:

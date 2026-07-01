@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import httpx as _httpx
 
@@ -21,6 +21,8 @@ from cognic_agentos.core.audit import AuditStore
 from cognic_agentos.core.config_overlay.resolver import TenantConfigResolver
 from cognic_agentos.core.config_overlay.storage import TenantConfigOverlayStore
 from cognic_agentos.core.decision_history import DecisionHistoryStore
+from cognic_agentos.core.mcp_config.materializer import RuntimeConfigMaterializer
+from cognic_agentos.core.mcp_config.runtime_config import PackRuntimeConfigStore
 from cognic_agentos.core.mcp_config.storage import (
     MCPInternalHostAllowlistStore,
     MCPServerUrlOverrideStore,
@@ -34,13 +36,39 @@ from cognic_agentos.llm.ledger import GatewayCallLedger
 from cognic_agentos.llm.preflight import PreflightResolver
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from cognic_agentos.core.config import Settings
     from cognic_agentos.core.emergency.kill_switches import KillSwitchEngine
     from cognic_agentos.core.emergency.quotas import QuotaEngine
     from cognic_agentos.core.memory.api import MemoryApiFactory
     from cognic_agentos.core.scheduler.engine import SchedulerEngine
     from cognic_agentos.db.adapters.factory import Adapters
+    from cognic_agentos.db.adapters.protocols import SecretAdapter
     from cognic_agentos.harness.memory_policy import MemoryPolicyRouter
+
+
+class _KeyErrorToNoneVaultReader:
+    """Adapts the kernel :class:`SecretAdapter` (``read`` returns ``dict`` on a
+    hit, raises ``KeyError`` on a missing path) to the materializer's
+    ``VaultReader`` Protocol (``read`` returns ``Mapping | None``; ``None`` = the
+    ref does not resolve).
+
+    ADR-026 D3 — install validates the OAuth / AS refs RESOLVE by reference, so a
+    missing ref must surface as ``None`` (→ ``MaterializeRejected`` →
+    ``install_runtime_config_vault_ref_unresolved``), NOT a raw ``KeyError`` that
+    would escape the materializer's read-only validate pass. Non-``KeyError``
+    transport failures propagate (fail-loud → ``install_materialize_failed``)."""
+
+    def __init__(self, secret: SecretAdapter) -> None:
+        self._secret = secret
+
+    async def read(self, path: str) -> Mapping[str, Any] | None:
+        try:
+            return await self._secret.read(path)
+        except KeyError:
+            return None
+
 
 #: SLA policy audit-label (an audit label, not a budget; no name Setting per the locked decision).
 _SLA_POLICY_NAME = "llm-gateway"
@@ -70,6 +98,16 @@ class Runtime:
     # the portal operator routers consume the SAME instances via create_app.
     mcp_override_store: MCPServerUrlOverrideStore
     mcp_internal_host_allowlist_store: MCPInternalHostAllowlistStore
+    # M4 (ADR-026 D1/D6, Task 7) — the DESIRED runtime-config record store + the
+    # materializer that projects it into the DERIVED override/allowlist carve-out
+    # stores above (materializer is the SOLE writer per ADR-026 D7). Built
+    # unconditionally next to those stores (pure relational-engine + secret-
+    # adapter constructors, no I/O). Exposed for the operator install/disable/
+    # revoke saga (threaded into build_operator_routes via create_app) +
+    # app.state introspection. The materializer's ``vault_reader`` is the
+    # KeyError->None shim around ``adapters.secret`` (validate-refs-by-reference).
+    runtime_config_store: PackRuntimeConfigStore
+    runtime_config_materializer: RuntimeConfigMaterializer
     # ADR-014 (Sprint 13.5b1) — built unconditionally (mirrors the config-overlay
     # posture; approval needs only the relational engine). The portal approval
     # router consumes both; 13.5b2's MCP-host seam reuses the SAME engine instance.
@@ -135,6 +173,22 @@ async def build_runtime(settings: Settings, adapters: Adapters) -> Runtime:
     # portal operator routers via create_app.
     mcp_override_store = MCPServerUrlOverrideStore(engine)
     mcp_internal_host_allowlist_store = MCPInternalHostAllowlistStore(engine)
+
+    # --- M4 (ADR-026 D1/D6, Task 7) runtime-config store + materializer ---
+    # Pure constructors (relational engine + secret adapter), built next to the
+    # carve-out stores + BEFORE the leak-prone http_client. The materializer is
+    # the SOLE writer of the derived override/allowlist rows (ADR-026 D7); it
+    # projects the DESIRED runtime-config record into them, validating the Vault
+    # OAuth/AS refs BY REFERENCE via the KeyError->None shim around
+    # ``adapters.secret``. The operator install/disable/revoke saga consumes both
+    # (threaded into build_operator_routes via create_app).
+    runtime_config_store = PackRuntimeConfigStore(engine)
+    runtime_config_materializer = RuntimeConfigMaterializer(
+        override_store=mcp_override_store,
+        allowlist_store=mcp_internal_host_allowlist_store,
+        config_store=runtime_config_store,
+        vault_reader=_KeyErrorToNoneVaultReader(adapters.secret),
+    )
 
     # --- ADR-014 (Sprint 13.5b1) approval store + policy + engine ---
     # Built unconditionally (mirrors the config-overlay posture — approval needs
@@ -408,6 +462,8 @@ async def build_runtime(settings: Settings, adapters: Adapters) -> Runtime:
         config_overlay_resolver=overlay_resolver,
         mcp_override_store=mcp_override_store,
         mcp_internal_host_allowlist_store=mcp_internal_host_allowlist_store,
+        runtime_config_store=runtime_config_store,
+        runtime_config_materializer=runtime_config_materializer,
         approval_store=approval_store,
         approval_engine=approval_engine,
         kill_switch_engine=kill_switch_engine,

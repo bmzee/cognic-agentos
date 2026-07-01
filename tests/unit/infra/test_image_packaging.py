@@ -56,7 +56,7 @@ def test_runtime_stages_package_policies_and_alembic_ini() -> None:
         )
 
 
-def test_runtime_stages_make_policies_alembic_and_src_readable_for_non_root() -> None:
+def test_runtime_stages_make_policies_alembic_pyproject_and_src_readable_for_non_root() -> None:
     bodies = _stage_bodies()
     for stage in _RUNTIME_STAGES:
         body = bodies[stage]
@@ -66,9 +66,17 @@ def test_runtime_stages_make_policies_alembic_and_src_readable_for_non_root() ->
         # src/cognic_agentos/db/migrations (alembic script_location) as the non-root user — a 600
         # migration file from a restrictive build-context umask would otherwise be unreadable and
         # the migrate Job fails with PermissionError (Proof 1b-2 attempt-3 finding).
+        # /app/pyproject.toml is included because Alembic 1.18 reads TOML config metadata before
+        # constructing the script directory; a restrictive build-context umask otherwise fails the
+        # proof/Helm migration Job with PermissionError.
         assert re.search(
-            r"chmod\s+-R\s+a\+rX\s+/app/policies\s+/app/alembic\.ini\s+/app/src\b", body
-        ), f"{stage}: `chmod -R a+rX` must cover /app/policies /app/alembic.ini /app/src"
+            r"chmod\s+-R\s+a\+rX\s+/app/policies\s+/app/alembic\.ini\s+"
+            r"/app/pyproject\.toml\s+/app/src\b",
+            body,
+        ), (
+            f"{stage}: `chmod -R a+rX` must cover /app/policies /app/alembic.ini "
+            f"/app/pyproject.toml /app/src"
+        )
         # The packaging + chmod must run BEFORE the image drops to USER cognic (chmod needs root).
         user_idx = body.find("USER cognic")
         copy_idx = body.find("policies ./policies")

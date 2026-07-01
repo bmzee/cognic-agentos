@@ -1,0 +1,35 @@
+ARG BASE_IMAGE=cognic-agentos:proof1b2-base
+FROM ${BASE_IMAGE}
+USER root
+# trust staging (same as proof-1b-2c): wheel install + attestations + trust roots + alembic.ini.
+# The staged attestations + trust root are what the M4 approve 5-gate's SIGNATURE gate
+# cosign-verifies (the proof app's TrustGate + ProofStagedTrustRootResolver resolve the
+# released, signed pack against /opt/cognic/trust-roots/_default).
+COPY proof-m4-staging/wheel/ /tmp/wheel/
+RUN /opt/venv/bin/python -m ensurepip --upgrade \
+ && /opt/venv/bin/python -m pip install --no-deps --no-cache-dir /tmp/wheel/*.whl && rm -rf /tmp/wheel
+COPY proof-m4-staging/pack-attestations/ /opt/cognic/pack-attestations/
+COPY proof-m4-staging/trust-roots/ /opt/cognic/trust-roots/
+COPY proof-m4-staging/policies/ /opt/cognic/policies/
+COPY proof-m4-staging/alembic.ini /app/alembic.ini
+# Proof-only current-source overlay: cached base images may carry an older
+# cognic_agentos package, while the live proof must exercise this branch's
+# operator-install code. The runner copies src/cognic_agentos into this context.
+RUN rm -rf /opt/venv/lib/python3.12/site-packages/cognic_agentos
+COPY cognic_agentos/ /opt/venv/lib/python3.12/site-packages/cognic_agentos/
+# proof-only MULTI-ACTOR app factory (vendored into the image so uvicorn can import it)
+COPY proof_m4/ /app/proof_m4/
+RUN chmod -R a+rX /opt/cognic /app/alembic.ini /app/proof_m4 /opt/venv/lib/python3.12/site-packages/cognic_agentos
+ENV COGNIC_PACK_ATTESTATION_ROOT_PATH=/opt/cognic/pack-attestations \
+    COGNIC_SIGNATURE_ROOT_PATH=/opt/cognic/pack-attestations \
+    COGNIC_TRUST_ROOT_PREFIX=/opt/cognic/trust-roots \
+    COGNIC_PLUGIN_ALLOWLIST_PATH=/opt/cognic/policies/plugin_allowlist.json
+# /app/proof_m4 is vendored (COPY, not pip-installed), so /app must be importable.
+# The default-adapters base sets no PYTHONPATH and runs uvicorn as a console script
+# (sys.path[0] = /opt/venv/bin, NOT the /app WORKDIR), so make /app explicit rather
+# than relying on uvicorn's --app-dir cwd default.
+ENV PYTHONPATH=/app
+USER cognic
+# override the default CMD to the PROOF multi-actor app factory (the only kernel-facing
+# change, and it is image-level).
+CMD ["sh","-c","exec uvicorn proof_m4.proof_app:create_proof_app --factory --host 0.0.0.0 --port 8000"]

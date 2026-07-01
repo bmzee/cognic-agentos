@@ -124,3 +124,11 @@ attestations/local/
 infra/proof-1b-2c/proof1b2c-staging/
 infra/proof-1b-2c/proof_1b_2c/
 infra/proof-1b-2c/_local_as.py
+
+# Proof M4 (operator-install): transient build-context copies the operator runner
+# (infra/proof-m4/run-proof-m4.sh) materialises then removes on exit (trap).
+# Gitignored defensively so an interrupted run never leaves them stageable.
+infra/proof-m4/proof-m4-staging/
+infra/proof-m4/proof_m4/
+infra/proof-m4/cognic_agentos/
+infra/proof-m4/_local_as.py

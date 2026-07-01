@@ -167,10 +167,11 @@ class TestSprint7B1ValidTransitionsTable:
                 )
 
     def test_table_pairs_match_adr_012_state_transitions_table(self) -> None:
-        """Pin the exact 14 legal ``(from, to)`` pairs across the 11 transitions
-        per ADR-012 lines 38-48 + §59 cancel_draft extension (3 transitions
-        are multi-from: withdraw, revoke, uninstall — each contributing 2
-        pairs; 8 are single-from including the Sprint 7B.2 T4 ``cancel_draft``
+        """Pin the exact 15 legal ``(from, to)`` pairs across the 11 transitions
+        per ADR-012 lines 38-48 + §59 cancel_draft extension + the M4 amendment
+        (4 transitions are multi-from: withdraw, revoke, uninstall, and — per the
+        M4 ``disabled → installed`` re-enable — install; each contributing 2
+        pairs; 7 are single-from including the Sprint 7B.2 T4 ``cancel_draft``
         addition)."""
         assert _VALID_TRANSITIONS["submit"] == frozenset({("draft", "submitted")})
         assert _VALID_TRANSITIONS["claim"] == frozenset({("submitted", "under_review")})
@@ -183,7 +184,14 @@ class TestSprint7B1ValidTransitionsTable:
             }
         )
         assert _VALID_TRANSITIONS["allow_list"] == frozenset({("approved", "allow_listed")})
-        assert _VALID_TRANSITIONS["install"] == frozenset({("allow_listed", "installed")})
+        # M4 (ADR-012 amendment) — ``install`` widened to multi-from: the
+        # ``disabled → installed`` re-enable joins the original first-install pair.
+        assert _VALID_TRANSITIONS["install"] == frozenset(
+            {
+                ("allow_listed", "installed"),
+                ("disabled", "installed"),
+            }
+        )
         assert _VALID_TRANSITIONS["disable"] == frozenset({("installed", "disabled")})
         assert _VALID_TRANSITIONS["revoke"] == frozenset(
             {
@@ -205,24 +213,25 @@ class TestSprint7B1ValidTransitionsTable:
         # already under reviewer attention).
         assert _VALID_TRANSITIONS["cancel_draft"] == frozenset({("draft", "withdrawn")})
 
-    def test_table_has_14_legal_pairs_total(self) -> None:
-        """Aggregate cross-check: across all 11 transitions, exactly 14 legal
+    def test_table_has_15_legal_pairs_total(self) -> None:
+        """Aggregate cross-check: across all 11 transitions, exactly 15 legal
         ``(from, to)`` pairs are encoded.
 
         Breakdown per ADR-012 §"State transitions" (lines 38-48) +
-        Sprint 7B.2 T4 ``cancel_draft`` extension per ADR-012 §59:
+        Sprint 7B.2 T4 ``cancel_draft`` extension per ADR-012 §59 + the M4
+        amendment (``disabled → installed`` re-enable widening ``install``):
 
-        - 7 original single-from transitions: submit, claim, approve, reject,
-          allow_list, install, disable → 7 pairs.
-        - 3 multi-from transitions (2 from-states each): withdraw
+        - 6 single-from transitions: submit, claim, approve, reject,
+          allow_list, disable → 6 pairs.
+        - 4 multi-from transitions (2 from-states each): withdraw
           (submitted/under_review), revoke (installed/disabled), uninstall
-          (disabled/revoked) → 6 pairs.
-        - 1 new single-from transition added at Sprint 7B.2 T4:
+          (disabled/revoked), install (allow_listed/disabled — M4) → 8 pairs.
+        - 1 single-from transition added at Sprint 7B.2 T4:
           cancel_draft (draft → withdrawn) → 1 pair.
 
-        Total = 7 + 6 + 1 = 14."""
+        Total = 6 + 8 + 1 = 15."""
         total_pairs = sum(len(pairs) for pairs in _VALID_TRANSITIONS.values())
-        assert total_pairs == 14
+        assert total_pairs == 15
 
 
 class TestSprint7B1ValidTransitionsReturnNone:
@@ -241,6 +250,9 @@ class TestSprint7B1ValidTransitionsReturnNone:
             ("under_review", "withdrawn", "withdraw"),
             ("approved", "allow_listed", "allow_list"),
             ("allow_listed", "installed", "install"),
+            # M4 (ADR-012 amendment) — ``disabled → installed`` re-enable (the
+            # install transition widened to multi-from; revoke stays terminal).
+            ("disabled", "installed", "install"),
             ("installed", "disabled", "disable"),
             ("installed", "revoked", "revoke"),
             ("disabled", "revoked", "revoke"),
@@ -269,6 +281,65 @@ class TestSprint7B1ValidTransitionsReturnNone:
         assert result is None, (
             f"expected None for valid transition ({from_state} -> {to_state}, "
             f"transition={transition}, kind={kind}); got {result!r}"
+        )
+
+
+class TestM4ReenableTransition:
+    """M4 (ADR-012 amendment, 2026-06-30) — the ``disabled → installed`` re-enable
+    widens the existing ``install`` transition to multi-from (mirroring
+    revoke/uninstall). RBAC scope is unchanged (``pack.install``); ``revoke`` stays
+    terminal. These pin the positive re-enable AND that the widening is SURGICAL —
+    no unrelated edge opens."""
+
+    def test_reenable_disabled_to_installed_is_valid(self) -> None:
+        # The M4 positive: a disabled pack re-installs via ``install``.
+        assert (
+            validate_transition(
+                from_state="disabled", to_state="installed", kind="tool", transition="install"
+            )
+            is None
+        )
+
+    def test_revoked_to_installed_still_refused(self) -> None:
+        # ``revoke`` stays terminal — the widening adds ``disabled``, NOT
+        # ``revoked``; revoked → installed remains an invalid pair.
+        assert (
+            validate_transition(
+                from_state="revoked", to_state="installed", kind="tool", transition="install"
+            )
+            == "lifecycle_transition_invalid_state_pair"
+        )
+
+    def test_disabled_to_approved_still_refused(self) -> None:
+        # The widening does NOT open disabled → approved (no transition does).
+        assert (
+            validate_transition(
+                from_state="disabled", to_state="approved", kind="tool", transition="approve"
+            )
+            == "lifecycle_transition_invalid_state_pair"
+        )
+
+    def test_disabled_to_allow_listed_still_refused(self) -> None:
+        # The widening does NOT open disabled → allow_listed; ``allow_list`` still
+        # requires an ``approved`` from-state.
+        assert (
+            validate_transition(
+                from_state="disabled",
+                to_state="allow_listed",
+                kind="tool",
+                transition="allow_list",
+            )
+            == "lifecycle_transition_allow_list_not_approved"
+        )
+
+    def test_double_install_from_installed_unchanged_by_widening(self) -> None:
+        # The widening does NOT affect the installed → installed double-install
+        # guard (a distinct, more-specific reason fires first).
+        assert (
+            validate_transition(
+                from_state="installed", to_state="installed", kind="tool", transition="install"
+            )
+            == "lifecycle_transition_double_install"
         )
 
 

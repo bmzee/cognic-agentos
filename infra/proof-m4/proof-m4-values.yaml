@@ -1,0 +1,24 @@
+# Proof M4 (operator-install) overlay: real in-cluster backends, prod profile,
+# chart-created Secret. Mirrors the proof-1b-2c overlay; the only delta is the proof
+# image tag (proofm4). The Vault dev-root token (smoke-root-token) == the reused
+# backends.yaml Vault. The proof image's CMD points to
+# proof_m4.proof_app:create_proof_app (the MULTI-ACTOR eager-injection factory).
+image:
+  repository: cognic-agentos        # loaded into kind via `kind load docker-image`
+  tag: "proofm4"
+  pullPolicy: IfNotPresent
+runtimeProfile: prod
+qdrant: { url: http://qdrant:6333 }
+vault: { addr: http://vault:8200 }
+embedding: { driver: ollama, baseUrl: http://ollama:11434, model: nomic-embed-text, dimensions: 768 }
+langfuse: { host: http://langfuse:3000 }
+litellm: { baseUrl: http://litellm:4000 }
+cache: { enabled: false }
+migrations: { enabled: false }     # Gap 3: chart pre-install migration hook deadlocks (refs normal-resource SA/Secret); proof runs a non-hook Job post-install
+secrets:
+  create: true
+  databaseUrl: "postgresql+asyncpg://cognic:cognic@postgres:5432/cognic"
+  vaultToken: "smoke-root-token"        # == the reused backends.yaml Vault VAULT_DEV_ROOT_TOKEN_ID; must match seed-vault.sh (pinned by test_values.py)
+podSecurityContext:
+  runAsUser: 10001                  # Gap 4: vanilla kind has no SCC to assign a numeric UID; the image USER is the NAME "cognic", so kubelet can't verify runAsNonRoot without this
+  fsGroup: 10001                    # the image GID makes emptyDirs writable

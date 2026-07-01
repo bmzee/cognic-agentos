@@ -1,13 +1,14 @@
 """Sprint 7B.2 T2 — closed-enum RBAC scope vocabulary for the bank-pack lifecycle.
 
-Per ADR-012 §39 + BUILD_PLAN §622-625 + ADR-012 §107-110 the lifecycle
-portal API ships with **13** scopes, partitioned across five groups:
+Per ADR-012 §39 + BUILD_PLAN §622-625 + ADR-012 §107-110 + ADR-026 D4 the
+lifecycle portal API ships with **14** scopes, partitioned across five groups:
 
 - Author surface (BUILD_PLAN §622): ``pack.submit``, ``pack.withdraw``
 - Reviewer surface (BUILD_PLAN §623): ``pack.review.claim``,
   ``pack.review.approve``, ``pack.review.reject``
-- Operator surface (BUILD_PLAN §624): ``pack.allow_list``, ``pack.install``,
-  ``pack.disable``, ``pack.revoke``, ``pack.uninstall``
+- Operator surface (BUILD_PLAN §624 + ADR-026 D4): ``pack.allow_list``,
+  ``pack.configure`` (the M4 runtime-config configure step, human-actor-gated),
+  ``pack.install``, ``pack.disable``, ``pack.revoke``, ``pack.uninstall``
 - Examiner / inspection surface (BUILD_PLAN §625 + ADR-012 §75):
   ``pack.audit.read``, ``pack.invocation.read``
 - Override surface (ADR-012 §107-110): ``pack.override.approval_gate`` —
@@ -34,7 +35,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-#: Closed-enum literal of the 13 bank-pack lifecycle scopes carried in
+#: Closed-enum literal of the 14 bank-pack lifecycle scopes carried in
 #: the 403 ``scope_not_held`` denial body. ANY change here is a
 #: wire-protocol break — pinned by the parametrised literal-membership
 #: tests in :file:`tests/unit/portal/rbac/test_scopes.py`.
@@ -49,13 +50,17 @@ PackRBACScope = Literal[
     "pack.review.approve",
     "pack.review.reject",
     "pack.allow_list",
+    # M4 (ADR-026 D4) — the runtime-config configure step. An operator scope,
+    # human-actor-gated, required before install; sits between allow_list +
+    # install in the lifecycle.
+    "pack.configure",
     "pack.install",
     "pack.disable",
     "pack.revoke",
     "pack.uninstall",
     "pack.audit.read",
     "pack.invocation.read",
-    # Sprint 7B.3 T8 — ADR-012 §107-110 override scope (the 13th).
+    # Sprint 7B.3 T8 — ADR-012 §107-110 override scope.
     "pack.override.approval_gate",
 ]
 
@@ -494,7 +499,7 @@ EXAMINER_COMPLIANCE_SCOPES: frozenset[ComplianceRBACScope] = frozenset(
 #: union form.
 ScopeSet = frozenset[PackRBACScope]
 
-#: All 13 lifecycle scopes as a frozenset — wire-protocol surface for
+#: All 14 lifecycle scopes as a frozenset — wire-protocol surface for
 #: the validator + the 5-group partition invariant test. Used by
 #: bank-overlay binders to validate the actor's effective scope set
 #: against the kernel's closed-enum vocabulary before minting an
@@ -508,6 +513,7 @@ PACK_LIFECYCLE_SCOPES: frozenset[PackRBACScope] = frozenset(
         "pack.review.approve",
         "pack.review.reject",
         "pack.allow_list",
+        "pack.configure",
         "pack.install",
         "pack.disable",
         "pack.revoke",
@@ -539,12 +545,15 @@ REVIEWER_SCOPES: frozenset[PackRBACScope] = frozenset(
     }
 )
 
-#: BUILD_PLAN §624 — operator-surface scopes. T6 endpoints depend on these.
-#: ``pack.allow_list`` additionally requires :class:`RequireHumanActor`
-#: per ADR-012 §"Per-tenant allow-list change is human-only".
+#: BUILD_PLAN §624 + ADR-026 D4 — operator-surface scopes (6 values). T6 + the
+#: M4 configure endpoint depend on these. ``pack.allow_list`` and the M4
+#: ``pack.configure`` runtime-config step additionally require
+#: :class:`RequireHumanActor` (ADR-012 §"Per-tenant allow-list change is
+#: human-only" + ADR-026 D4 — configure is a human-actor-gated operator step).
 OPERATOR_SCOPES: frozenset[PackRBACScope] = frozenset(
     {
         "pack.allow_list",
+        "pack.configure",
         "pack.install",
         "pack.disable",
         "pack.revoke",
