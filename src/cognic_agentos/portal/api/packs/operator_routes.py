@@ -73,11 +73,14 @@ cap refuses module load at import.
 """
 
 import logging
-from typing import Annotated, Final
+from collections.abc import Iterator
+from typing import Annotated, Final, Literal, Protocol, get_args, runtime_checkable
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from cognic_agentos.packs.lifecycle import LifecycleTransitionRefused
+from cognic_agentos.core.mcp_config.materializer import MaterializeRejected, MaterializeResult
+from cognic_agentos.core.mcp_config.runtime_config import PackRuntimeConfigRecord
+from cognic_agentos.packs.lifecycle import LifecycleTransitionRefused, validate_transition
 from cognic_agentos.packs.storage import PackNotFound, PackRecord, PackRecordStore
 from cognic_agentos.portal.api.packs.author_routes import _mint_request_id
 from cognic_agentos.portal.api.packs.dto import PackResponse
@@ -85,8 +88,125 @@ from cognic_agentos.portal.rbac.actor import Actor
 from cognic_agentos.portal.rbac.enforcement import RequireScope
 from cognic_agentos.portal.rbac.human_actor import RequireHumanActor
 from cognic_agentos.portal.rbac.tenant_isolation import RequireTenantOwnership
+from cognic_agentos.protocol.plugin_registry import RegisteredPackCandidate
 
 _LOG = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# M4 (ADR-026 D1/D6) — consumer-owned dependency Protocols
+# ---------------------------------------------------------------------------
+#
+# The operator install/disable/revoke handlers gain the M4 runtime-config
+# materialization saga. The three collaborators (the materializer, the
+# runtime-config record store, and the plugin registry) are declared here as
+# narrow consumer-owned Protocols per
+# ``[[feedback_consumer_owned_protocol_for_unlanded_dep]]`` so this module
+# ships BEFORE the Task-7 composition root wires the real instances. When any
+# of the three is ``None`` (the pre-Task-7 wiring — e.g. the current
+# ``build_packs_router(store=...)`` call site + the existing test suite) the
+# handlers fall back to the pre-M4 plain ``store.transition`` delegate path;
+# the saga runs ONLY when all three are wired.
+
+
+@runtime_checkable
+class _MaterializerLike(Protocol):
+    """Structural view of
+    :class:`~cognic_agentos.core.mcp_config.materializer.RuntimeConfigMaterializer`
+    (only the two entry-points the saga calls). ``materialize`` validates BOTH
+    required Vault refs read-only BEFORE any derived write (raising
+    :class:`MaterializeRejected` on the first failure — zero rows written), then
+    reconciles the tenant allow-list FIRST and the pack-scoped override LAST.
+    ``retract`` clears the override then reconciles the allow-list to the union
+    EXCLUDING this pack."""
+
+    async def materialize(
+        self,
+        *,
+        record: PackRuntimeConfigRecord,
+        actor_subject: str,
+        actor_type: str,
+        request_id: str,
+    ) -> MaterializeResult: ...
+
+    async def retract(
+        self,
+        *,
+        tenant_id: str,
+        pack_id: str,
+        actor_subject: str,
+        actor_type: str,
+        request_id: str,
+    ) -> None: ...
+
+
+@runtime_checkable
+class _ConfigStoreLike(Protocol):
+    """Structural view of
+    :class:`~cognic_agentos.core.mcp_config.runtime_config.PackRuntimeConfigStore`
+    (the two methods the saga consumes). ``get`` is tenant-scoped (cross-tenant
+    reads as absent); ``set_activation_status`` updates ONLY the activation
+    status (does NOT bump generation)."""
+
+    async def get(self, *, tenant_id: str, pack_id: str) -> PackRuntimeConfigRecord | None: ...
+
+    async def set_activation_status(
+        self,
+        *,
+        tenant_id: str,
+        pack_id: str,
+        status: str,
+        actor_subject: str,
+        actor_type: str,
+        request_id: str,
+    ) -> None: ...
+
+
+@runtime_checkable
+class _RegisteredPackReader(Protocol):
+    """Structural view of the boot-time trust surface
+    (:meth:`~cognic_agentos.protocol.plugin_registry.PluginRegistry.iter_registered_pack_candidates`)
+    — yields REGISTERED (trusted) packs only. Gate 2 matches the pack's
+    ``pack_id`` (distribution-name string) against
+    :attr:`RegisteredPackCandidate.distribution_name`."""
+
+    def iter_registered_pack_candidates(self) -> Iterator[RegisteredPackCandidate]: ...
+
+
+# ---------------------------------------------------------------------------
+# M4 (ADR-026 D1/D6) — route-owned closed-enum refusal vocabulary
+# ---------------------------------------------------------------------------
+
+#: Closed-enum refusal reasons the M4 saga surfaces (distinct from the
+#: pre-existing ``pack_not_found`` + the ``LifecycleRefusalReason`` values that
+#: pass through unchanged). 8 install reasons + 4 disable/revoke analogues.
+#: The count is pinned via ``typing.get_args`` (NOT regex — comment tokens
+#: inside ``Literal[...]`` would over-count per
+#: ``[[feedback_count_enum_values_via_ast_not_regex]]``).
+InstallRefusalReason = Literal[
+    # Gate refusals (read-only pre-checks — refuse BEFORE any write).
+    "install_pack_not_registered",  # gate 2 — not boot-registered/trusted
+    "install_runtime_config_missing",  # gate 3 — no desired runtime-config record
+    "install_runtime_config_incomplete",  # gate 3 — a required Vault ref is None
+    "install_runtime_config_vault_ref_unresolved",  # gate 4 — MaterializeRejected
+    # Saga write failures (post-gate; each drives compensation).
+    "install_materialize_failed",  # A — a store mutator failed mid-materialize
+    "install_activation_failed",  # C — the set-active write failed
+    "install_transition_failed",  # B — a non-lifecycle transition error
+    "install_compensation_failed",  # a compensation step ITSELF raised (fail loud)
+    # disable / revoke analogues.
+    "disable_runtime_config_missing",
+    "disable_transition_failed",  # generic (non-lifecycle) disable transition error
+    "disable_compensation_failed",
+    "disable_status_write_failed",  # phase B — disabled + retracted; status write failed
+    "revoke_runtime_config_missing",
+    "revoke_transition_failed",  # generic (non-lifecycle) revoke transition error
+    "revoke_compensation_failed",
+    "revoke_status_write_failed",  # phase B — revoked + retracted; status write failed
+]
+
+#: Count-guard the test pins via ``typing.get_args`` (metadata, NOT the gate).
+_INSTALL_REFUSAL_REASON_COUNT: Final[int] = len(get_args(InstallRefusalReason))
 
 
 # ---------------------------------------------------------------------------
@@ -111,6 +231,15 @@ _PACK_REVOKE_REQUEST_ID_PREFIX: Final[str] = "pack-revoke--"
 #: Uninstall verb prefix. 13 chars + uuid4().hex (32) = 45 chars.
 _PACK_UNINSTALL_REQUEST_ID_PREFIX: Final[str] = "pack-uninstal"
 
+#: M4 saga sub-write prefixes (materialize / activation-status / retract legs).
+#: Each is 13 chars + uuid4().hex (32) = 45 chars, under the 64-char cap. The
+#: derived carve-out mutators mint their OWN request_ids downstream from the
+#: value the materializer threads; these prefix the config-store activation
+#: write + the materializer/retract call request_id.
+_PACK_MATERIALIZE_REQUEST_ID_PREFIX: Final[str] = "pack-mtrlize-"
+_PACK_ACTIVATION_REQUEST_ID_PREFIX: Final[str] = "pack-activat-"
+_PACK_RETRACT_REQUEST_ID_PREFIX: Final[str] = "pack-retract-"
+
 
 #: Plan Round 18 P2 #4 — request_id bounded-length invariant: every
 #: prefix + uuid4().hex (32) must fit under the 64-char
@@ -127,8 +256,32 @@ _REQUEST_ID_MAX_LEN: Final[int] = 64
 _PACK_NOT_FOUND_REASON: Final[str] = "pack_not_found"
 
 
-def build_operator_routes(*, store: PackRecordStore) -> APIRouter:
+def build_operator_routes(
+    *,
+    store: PackRecordStore,
+    materializer: _MaterializerLike | None = None,
+    config_store: _ConfigStoreLike | None = None,
+    registry: _RegisteredPackReader | None = None,
+) -> APIRouter:
     """Build the operator-surface sub-router.
+
+    **M4 (ADR-026 D1/D6) — the runtime-config materialization saga.** The three
+    keyword-only collaborators (``materializer`` / ``config_store`` /
+    ``registry``) are the M4 install/disable/revoke saga dependencies, wired
+    ALL-or-NONE:
+
+    - **all three wired** (the Task-7 composition root) → the install/disable/
+      revoke handlers run the M4 saga;
+    - **all three absent** (default ``None``) → the handlers fall back to the
+      pre-M4 plain ``store.transition`` delegate, so this factory stays
+      backward-compatible with the pre-Task-7 call site
+      (``build_packs_router(store=...)`` → ``build_operator_routes(store=store)``);
+    - **partial (1 or 2 of 3 present)** → :class:`ValueError` at construction. A
+      partial wiring is a mis-configuration that would SILENTLY bypass the M4
+      install materialization gates on a critical route — so it fails fast at
+      construction rather than soft-downgrading.
+
+    ``allow_list`` + ``uninstall`` are UNCHANGED regardless.
 
     The ``store`` argument is captured in this factory so each endpoint
     closes over a single :class:`PackRecordStore` instance per app
@@ -172,6 +325,562 @@ def build_operator_routes(*, store: PackRecordStore) -> APIRouter:
     _require_pack_uninstall = RequireScope("pack.uninstall")
     _require_tenant_ownership = RequireTenantOwnership(pack_id_param="pack_id")
     _require_human_actor = RequireHumanActor()
+
+    #: M4 saga is active ONLY when all three collaborators are wired (Task-7
+    #: composition root). PARTIAL wiring (1 or 2 of 3) is a mis-configuration —
+    #: FAIL FAST at construction rather than silently downgrading the hardened
+    #: install route to the pre-M4 path (which would bypass the M4 gates). The
+    #: all-absent path keeps the pre-M4 plain delegate the existing suite runs.
+    _m4_deps_present = sum(dep is not None for dep in (materializer, config_store, registry))
+    if _m4_deps_present not in (0, 3):
+        raise ValueError(
+            "build_operator_routes: the M4 saga collaborators (materializer, "
+            "config_store, registry) must be ALL wired or ALL absent; a partial "
+            f"wiring ({_m4_deps_present}/3 present) would silently bypass the M4 "
+            "install materialization gates. Wire all three (Task-7 composition "
+            "root) or none (pre-M4 backward-compat)."
+        )
+    _m4_enabled = _m4_deps_present == 3
+
+    async def _plain_transition(
+        *,
+        actor: Actor,
+        record: PackRecord,
+        transition: str,
+        prefix: str,
+        refused_event: str,
+    ) -> PackResponse:
+        """The pre-M4 delegate-to-storage handler (shared by allow_list +
+        uninstall always, and by install/disable/revoke on the None path):
+        ``store.transition`` → 404 ``PackNotFound`` / 409
+        ``LifecycleTransitionRefused`` + ``<refused_event>`` log; green →
+        re-loaded :class:`PackResponse`."""
+        try:
+            await store.transition(
+                pack_id=record.id,
+                transition=transition,  # type: ignore[arg-type]
+                actor_id=actor.subject,
+                tenant_id=actor.tenant_id,
+                evidence_pointer=None,
+                request_id=_mint_request_id(prefix),
+                actor_type=actor.actor_type,
+            )
+        except PackNotFound:
+            _LOG.warning(
+                refused_event,
+                extra={
+                    "reason": _PACK_NOT_FOUND_REASON,
+                    "actor_subject": actor.subject,
+                    "pack_id": str(record.id),
+                    "from_state": record.state,
+                },
+            )
+            raise HTTPException(
+                status_code=404, detail={"reason": _PACK_NOT_FOUND_REASON}
+            ) from None
+        except LifecycleTransitionRefused as exc:
+            _LOG.warning(
+                refused_event,
+                extra={
+                    "reason": exc.reason,
+                    "actor_subject": actor.subject,
+                    "pack_id": str(record.id),
+                    "from_state": record.state,
+                },
+            )
+            raise HTTPException(status_code=409, detail={"reason": exc.reason}) from None
+
+        updated = await store.load(record.id)
+        if updated is None:  # pragma: no cover - defence in depth
+            raise HTTPException(status_code=404, detail={"reason": _PACK_NOT_FOUND_REASON})
+        return PackResponse.model_validate(updated)
+
+    def _refuse_install(
+        *, actor: Actor, record: PackRecord, reason: str, status: int = 409
+    ) -> HTTPException:
+        """Install refusal — ``status`` (default 409) + ``portal.packs.install_refused``
+        log. The gate refusals (gates 1-3, read-only pre-checks) keep the 409
+        default; the transition-first B step maps its own statuses
+        (404 :class:`PackNotFound` / 409 :class:`LifecycleTransitionRefused` /
+        502 generic ``install_transition_failed``) via the ``status`` argument."""
+        _LOG.warning(
+            "portal.packs.install_refused",
+            extra={
+                "reason": reason,
+                "actor_subject": actor.subject,
+                "pack_id": str(record.id),
+                "from_state": record.state,
+            },
+        )
+        return HTTPException(status_code=status, detail={"reason": reason})
+
+    def _log_compensation_failed(
+        *, event: str, record: PackRecord, primary: BaseException, secondary: BaseException
+    ) -> HTTPException:
+        """A compensation step ITSELF raised — fail loud with a 500 + a
+        ``<event>`` log carrying pack_id + BOTH error strings (the operator
+        must intervene: the derived state may be inconsistent)."""
+        _LOG.error(
+            event,
+            extra={
+                "pack_id": str(record.id),
+                "primary_error": str(primary),
+                "compensation_error": str(secondary),
+            },
+        )
+        reason = (
+            "install_compensation_failed"
+            if event.endswith("install_compensation_failed")
+            else event.rsplit(".", 1)[-1]
+        )
+        return HTTPException(status_code=500, detail={"reason": reason})
+
+    async def _install_compensate_to_disabled(
+        *,
+        actor: Actor,
+        record: PackRecord,
+        cfg_pack_id: str,
+        tenant: str,
+        primary: Exception,
+    ) -> None:
+        """Compensate a POST-transition install failure (A materialize or C
+        set-active) FORWARD to a fail-closed ``disabled`` end state — never
+        revert to ``allow_listed`` (there is no un-install transition; Task 5's
+        ``disabled → installed`` re-enable makes the pack recoverable).
+
+        Three steps, all inside ONE ``try``:
+        1. :meth:`materializer.retract` — un-expose / clean any partial derived
+           rows so ``mcp_authz`` refuses the pack via its carve-out-absent path.
+        2. ``store.transition("disable", ...)`` — record ``installed → disabled``
+           so the lifecycle matches the un-exposed reality (fail-closed).
+        3. ``config_store.set_activation_status(status="disabled", ...)`` — mark
+           the desired record disabled.
+
+        Fresh request-ids are minted from the existing prefixes. If ANY of the
+        three raises, the compensation ITSELF failed — re-raise a fail-loud 500
+        ``install_compensation_failed`` chained from ``primary`` so the operator
+        knows the derived/lifecycle state may be inconsistent."""
+        assert materializer is not None and config_store is not None
+        try:
+            await materializer.retract(
+                tenant_id=tenant,
+                pack_id=cfg_pack_id,
+                actor_subject=actor.subject,
+                actor_type=actor.actor_type,
+                request_id=_mint_request_id(_PACK_RETRACT_REQUEST_ID_PREFIX),
+            )
+            await store.transition(
+                pack_id=record.id,
+                transition="disable",
+                actor_id=actor.subject,
+                tenant_id=tenant,
+                evidence_pointer=None,
+                request_id=_mint_request_id(_PACK_DISABLE_REQUEST_ID_PREFIX),
+                actor_type=actor.actor_type,
+            )
+            await config_store.set_activation_status(
+                tenant_id=tenant,
+                pack_id=cfg_pack_id,
+                status="disabled",
+                actor_subject=actor.subject,
+                actor_type=actor.actor_type,
+                request_id=_mint_request_id(_PACK_ACTIVATION_REQUEST_ID_PREFIX),
+            )
+        except Exception as comp_exc:
+            raise _log_compensation_failed(
+                event="portal.packs.install_compensation_failed",
+                record=record,
+                primary=primary,
+                secondary=comp_exc,
+            ) from primary
+
+    async def _run_install_saga(*, actor: Actor, record: PackRecord) -> PackResponse:
+        """The M4 install saga — TRANSITION-FIRST (record governance BEFORE
+        exposure); order is load-bearing for the fail-CLOSED invariant.
+
+        ``cfg_pack_id = str(record.id)`` (the UUID string — the config-store +
+        materializer key, matching Task-3's ``configure`` write);
+        ``dist_name = record.pack_id`` (the distribution-name string — the
+        registry gate key).
+
+        Gates 1-3 are read-only pre-checks (refuse before any write). Then the
+        write order is **B transition-to-``installed`` FIRST → A materialize
+        (expose) → C set-config-active LAST**. ``materialize`` writes the derived
+        override + allow-list rows that ``mcp_authz`` reads for callability, so
+        exposing BEFORE recording ``installed`` would leave a crash-window where
+        the pack is callable-but-not-installed (fail-OPEN). Transition-first
+        inverts that: the lifecycle records ``installed`` before the pack is
+        exposed, so a crash leaves it ``installed``-but-NOT-callable
+        (fail-CLOSED), never the reverse.
+
+        Compensation: B is first, so a B failure needs NO compensation (nothing
+        was written before it). Any POST-transition failure (A or C) compensates
+        FORWARD to a fail-closed ``disabled`` state via
+        :func:`_install_compensate_to_disabled` — never revert to
+        ``allow_listed`` (there is no un-install transition; Task 5's
+        ``disabled → installed`` re-enable makes it recoverable).
+        """
+        assert materializer is not None and config_store is not None and registry is not None
+        cfg_pack_id = str(record.id)
+        dist_name = record.pack_id
+        tenant = actor.tenant_id
+
+        # -- Gate 1 — lifecycle dry-run (read-only) --------------------------
+        gate1_reason = validate_transition(
+            from_state=record.state,
+            to_state="installed",
+            kind=record.kind,
+            transition="install",
+        )
+        if gate1_reason is not None:
+            raise _refuse_install(actor=actor, record=record, reason=gate1_reason)
+
+        # -- Gate 2 — boot-registered / trusted (read-only) ------------------
+        if not any(
+            c.distribution_name == dist_name for c in registry.iter_registered_pack_candidates()
+        ):
+            raise _refuse_install(actor=actor, record=record, reason="install_pack_not_registered")
+
+        # -- Gate 3 — runtime-config exists + complete (read-only) -----------
+        cfg = await config_store.get(tenant_id=tenant, pack_id=cfg_pack_id)
+        if cfg is None:
+            raise _refuse_install(
+                actor=actor, record=record, reason="install_runtime_config_missing"
+            )
+        if cfg.oauth_credential_ref is None or cfg.as_allowlist_ref is None:
+            raise _refuse_install(
+                actor=actor, record=record, reason="install_runtime_config_incomplete"
+            )
+
+        # -- B — transition to ``installed`` FIRST (record governance) -------
+        # NO writes happened before this, so a B failure needs NO compensation.
+        try:
+            await store.transition(
+                pack_id=record.id,
+                transition="install",
+                actor_id=actor.subject,
+                tenant_id=tenant,
+                evidence_pointer=None,
+                request_id=_mint_request_id(_PACK_INSTALL_REQUEST_ID_PREFIX),
+                actor_type=actor.actor_type,
+            )
+        except PackNotFound:
+            raise _refuse_install(
+                actor=actor, record=record, reason=_PACK_NOT_FOUND_REASON, status=404
+            ) from None
+        except LifecycleTransitionRefused as exc:
+            # The race case — gate 1 passed but the state changed under a
+            # concurrent op.
+            raise _refuse_install(
+                actor=actor, record=record, reason=exc.reason, status=409
+            ) from None
+        except Exception as exc:
+            raise _refuse_install(
+                actor=actor, record=record, reason="install_transition_failed", status=502
+            ) from exc
+
+        # -- A — materialize (EXPOSE; the pack is now ``installed``) ----------
+        # ANY failure here must compensate FORWARD to ``disabled`` (fail-closed).
+        try:
+            await materializer.materialize(
+                record=cfg,
+                actor_subject=actor.subject,
+                actor_type=actor.actor_type,
+                request_id=_mint_request_id(_PACK_MATERIALIZE_REQUEST_ID_PREFIX),
+            )
+        except MaterializeRejected as exc:
+            await _install_compensate_to_disabled(
+                actor=actor,
+                record=record,
+                cfg_pack_id=cfg_pack_id,
+                tenant=tenant,
+                primary=exc,
+            )
+            _LOG.warning(
+                "portal.packs.install_refused",
+                extra={
+                    "reason": "install_runtime_config_vault_ref_unresolved",
+                    "materialize_reason": exc.reason,
+                    "detail": exc.detail,
+                    "actor_subject": actor.subject,
+                    "pack_id": cfg_pack_id,
+                    "from_state": record.state,
+                },
+            )
+            raise HTTPException(
+                status_code=409,
+                detail={"reason": "install_runtime_config_vault_ref_unresolved"},
+            ) from None
+        except Exception as exc:
+            await _install_compensate_to_disabled(
+                actor=actor,
+                record=record,
+                cfg_pack_id=cfg_pack_id,
+                tenant=tenant,
+                primary=exc,
+            )
+            _LOG.warning(
+                "portal.packs.install_refused",
+                extra={
+                    "reason": "install_materialize_failed",
+                    "actor_subject": actor.subject,
+                    "pack_id": cfg_pack_id,
+                    "from_state": record.state,
+                },
+            )
+            raise HTTPException(
+                status_code=502, detail={"reason": "install_materialize_failed"}
+            ) from exc
+
+        # -- C — set config active (LAST, after derived rows exist) ----------
+        try:
+            await config_store.set_activation_status(
+                tenant_id=tenant,
+                pack_id=cfg_pack_id,
+                status="active",
+                actor_subject=actor.subject,
+                actor_type=actor.actor_type,
+                request_id=_mint_request_id(_PACK_ACTIVATION_REQUEST_ID_PREFIX),
+            )
+        except Exception as exc:
+            await _install_compensate_to_disabled(
+                actor=actor,
+                record=record,
+                cfg_pack_id=cfg_pack_id,
+                tenant=tenant,
+                primary=exc,
+            )
+            _LOG.warning(
+                "portal.packs.install_refused",
+                extra={
+                    "reason": "install_activation_failed",
+                    "actor_subject": actor.subject,
+                    "pack_id": cfg_pack_id,
+                    "from_state": record.state,
+                },
+            )
+            raise HTTPException(
+                status_code=502, detail={"reason": "install_activation_failed"}
+            ) from exc
+
+        # -- Green — the chain rows ARE the audit; re-load + return -----------
+        updated = await store.load(record.id)
+        if updated is None:  # pragma: no cover - defence in depth
+            raise HTTPException(status_code=404, detail={"reason": _PACK_NOT_FOUND_REASON})
+        return PackResponse.model_validate(updated)
+
+    async def _run_unexpose_saga(
+        *,
+        actor: Actor,
+        record: PackRecord,
+        transition: str,
+        target_state: str,
+        target_status: str,
+        missing_reason: str,
+        transition_failed_reason: str,
+        compensation_reason: str,
+        status_write_failed_reason: str,
+        refused_event: str,
+    ) -> PackResponse:
+        """The M4 disable/revoke saga (retract-FIRST safety, then govern).
+
+        1. **Gate 1 (lifecycle dry-run, read-only)** — refuse a deterministic
+           illegal transition (e.g. re-revoke on an already-revoked pack, or a
+           disable from a non-installed state) with the lifecycle reason 409
+           BEFORE any retract. This keeps a terminal pack from being re-exposed
+           by the step-4 compensation (which re-materializes on a genuine
+           transient failure); a deterministic refusal must never reach that
+           path.
+        2. ``config_store.get`` — a disabled/revoked pack with no config is a
+           bug; refuse fail-closed 409 ``<verb>_runtime_config_missing``.
+        3. **Retract FIRST** (un-expose) — removes the pack's derived rows so
+           ``mcp_authz`` refuses the pack immediately via its carve-out-absent
+           path. If retract raises → 500 ``<verb>_compensation_failed`` (fail
+           loud; nothing else attempted).
+        4. **Phase A — ``store.transition``** (lifecycle). A transition is
+           atomic: on failure the state has NOT changed, so **re-materialize**
+           (compensation) to restore the pack's callable projection rather than
+           leaving it silently half-disabled. If the re-materialize raises → 500
+           ``<verb>_compensation_failed``. Then re-raise the transition error
+           mapped (404 / 409 / 502).
+        5. **Phase B — ``config_store.set_activation_status``** (the lifecycle
+           has ALREADY changed). A failure here MUST NOT re-materialize — that
+           would re-expose the pack while the lifecycle already says
+           disabled/revoked (fail-OPEN, the same class as the install-ordering
+           bug). Leave the derived rows retracted (fail-CLOSED / not callable)
+           and fail loud 500 ``<verb>_status_write_failed`` so the operator
+           reconciles the now-stale desired-config ``activation_status`` marker.
+        """
+        assert materializer is not None and config_store is not None
+        cfg_pack_id = str(record.id)
+        tenant = actor.tenant_id
+
+        # -- Gate 1 — lifecycle dry-run (read-only; refuse before any write) --
+        gate1_reason = validate_transition(
+            from_state=record.state,
+            to_state=target_state,  # type: ignore[arg-type]
+            kind=record.kind,
+            transition=transition,  # type: ignore[arg-type]
+        )
+        if gate1_reason is not None:
+            _LOG.warning(
+                refused_event,
+                extra={
+                    "reason": gate1_reason,
+                    "actor_subject": actor.subject,
+                    "pack_id": cfg_pack_id,
+                    "from_state": record.state,
+                },
+            )
+            raise HTTPException(status_code=409, detail={"reason": gate1_reason})
+
+        cfg = await config_store.get(tenant_id=tenant, pack_id=cfg_pack_id)
+        if cfg is None:
+            _LOG.warning(
+                refused_event,
+                extra={
+                    "reason": missing_reason,
+                    "actor_subject": actor.subject,
+                    "pack_id": cfg_pack_id,
+                    "from_state": record.state,
+                },
+            )
+            raise HTTPException(status_code=409, detail={"reason": missing_reason})
+
+        # -- Retract FIRST (un-expose) ---------------------------------------
+        try:
+            await materializer.retract(
+                tenant_id=tenant,
+                pack_id=cfg_pack_id,
+                actor_subject=actor.subject,
+                actor_type=actor.actor_type,
+                request_id=_mint_request_id(_PACK_RETRACT_REQUEST_ID_PREFIX),
+            )
+        except Exception as exc:
+            _LOG.error(
+                refused_event.replace("_refused", "_compensation_failed"),
+                extra={
+                    "pack_id": cfg_pack_id,
+                    "primary_error": "retract",
+                    "compensation_error": str(exc),
+                },
+            )
+            raise HTTPException(status_code=500, detail={"reason": compensation_reason}) from exc
+
+        # -- Phase A — lifecycle transition ----------------------------------
+        # A transition is atomic: if it FAILS the state has NOT changed, so
+        # re-materialize to restore the pack's prior callable projection (the
+        # retract un-exposed it, but the disable/revoke did not take effect).
+        try:
+            await store.transition(
+                pack_id=record.id,
+                transition=transition,  # type: ignore[arg-type]
+                actor_id=actor.subject,
+                tenant_id=tenant,
+                evidence_pointer=None,
+                request_id=_mint_request_id(
+                    _PACK_DISABLE_REQUEST_ID_PREFIX
+                    if transition == "disable"
+                    else _PACK_REVOKE_REQUEST_ID_PREFIX
+                ),
+                actor_type=actor.actor_type,
+            )
+        except Exception as exc:
+            # Re-materialize compensation — the state did NOT change, so restore
+            # the callable projection rather than leaving the pack half-disabled.
+            try:
+                await materializer.materialize(
+                    record=cfg,
+                    actor_subject=actor.subject,
+                    actor_type=actor.actor_type,
+                    request_id=_mint_request_id(_PACK_MATERIALIZE_REQUEST_ID_PREFIX),
+                )
+            except Exception as comp_exc:
+                _LOG.error(
+                    refused_event.replace("_refused", "_compensation_failed"),
+                    extra={
+                        "pack_id": cfg_pack_id,
+                        "primary_error": str(exc),
+                        "compensation_error": str(comp_exc),
+                    },
+                )
+                raise HTTPException(
+                    status_code=500, detail={"reason": compensation_reason}
+                ) from exc
+            # Re-raise the transition error mapped by exception class.
+            if isinstance(exc, PackNotFound):
+                _LOG.warning(
+                    refused_event,
+                    extra={
+                        "reason": _PACK_NOT_FOUND_REASON,
+                        "actor_subject": actor.subject,
+                        "pack_id": cfg_pack_id,
+                        "from_state": record.state,
+                    },
+                )
+                raise HTTPException(
+                    status_code=404, detail={"reason": _PACK_NOT_FOUND_REASON}
+                ) from None
+            if isinstance(exc, LifecycleTransitionRefused):
+                _LOG.warning(
+                    refused_event,
+                    extra={
+                        "reason": exc.reason,
+                        "actor_subject": actor.subject,
+                        "pack_id": cfg_pack_id,
+                        "from_state": record.state,
+                    },
+                )
+                raise HTTPException(status_code=409, detail={"reason": exc.reason}) from None
+            _LOG.warning(
+                refused_event,
+                extra={
+                    "reason": transition_failed_reason,
+                    "actor_subject": actor.subject,
+                    "pack_id": cfg_pack_id,
+                    "from_state": record.state,
+                },
+            )
+            raise HTTPException(
+                status_code=502, detail={"reason": transition_failed_reason}
+            ) from exc
+
+        # -- Phase B — set config activation-status (state ALREADY changed) --
+        # The lifecycle transition COMMITTED (state is now the target). A failure
+        # here MUST NOT re-materialize — that would re-expose the pack while the
+        # lifecycle already says disabled/revoked (fail-OPEN, the same class as the
+        # install-ordering bug). Leave the derived rows retracted (fail-CLOSED / not
+        # callable) and fail loud so the operator reconciles the now-stale desired-
+        # config ``activation_status`` marker.
+        try:
+            await config_store.set_activation_status(
+                tenant_id=tenant,
+                pack_id=cfg_pack_id,
+                status=target_status,
+                actor_subject=actor.subject,
+                actor_type=actor.actor_type,
+                request_id=_mint_request_id(_PACK_ACTIVATION_REQUEST_ID_PREFIX),
+            )
+        except Exception as exc:
+            _LOG.error(
+                refused_event.replace("_refused", "_status_write_failed"),
+                extra={
+                    "pack_id": cfg_pack_id,
+                    "note": (
+                        "lifecycle transitioned + derived rows retracted (fail-closed); "
+                        "desired-config activation_status NOT updated — operator must reconcile"
+                    ),
+                    "error": str(exc),
+                },
+            )
+            raise HTTPException(
+                status_code=500, detail={"reason": status_write_failed_reason}
+            ) from exc
+
+        updated = await store.load(record.id)
+        if updated is None:  # pragma: no cover - defence in depth
+            raise HTTPException(status_code=404, detail={"reason": _PACK_NOT_FOUND_REASON})
+        return PackResponse.model_validate(updated)
 
     @router.post(
         "/{pack_id}/allow-list",
@@ -338,53 +1047,26 @@ def build_operator_routes(*, store: PackRecordStore) -> APIRouter:
         emits NO operator-vocab log (the lifecycle chain row IS the
         audit surface for install); refused path emits EXACTLY ONE
         ``portal.packs.install_refused``.
-        """
-        try:
-            await store.transition(
-                pack_id=record.id,
-                transition="install",
-                actor_id=actor.subject,
-                tenant_id=actor.tenant_id,
-                evidence_pointer=None,
-                request_id=_mint_request_id(_PACK_INSTALL_REQUEST_ID_PREFIX),
-                actor_type=actor.actor_type,
-            )
-        except PackNotFound:
-            _LOG.warning(
-                "portal.packs.install_refused",
-                extra={
-                    "reason": _PACK_NOT_FOUND_REASON,
-                    "actor_subject": actor.subject,
-                    "pack_id": str(record.id),
-                    "from_state": record.state,
-                },
-            )
-            raise HTTPException(
-                status_code=404,
-                detail={"reason": _PACK_NOT_FOUND_REASON},
-            ) from None
-        except LifecycleTransitionRefused as exc:
-            _LOG.warning(
-                "portal.packs.install_refused",
-                extra={
-                    "reason": exc.reason,
-                    "actor_subject": actor.subject,
-                    "pack_id": str(record.id),
-                    "from_state": record.state,
-                },
-            )
-            raise HTTPException(
-                status_code=409,
-                detail={"reason": exc.reason},
-            ) from None
 
-        updated = await store.load(record.id)
-        if updated is None:  # pragma: no cover - defence in depth
-            raise HTTPException(
-                status_code=404,
-                detail={"reason": _PACK_NOT_FOUND_REASON},
-            )
-        return PackResponse.model_validate(updated)
+        **M4 (ADR-026 D1/D6) — the materialization saga.** When the
+        materializer + config_store + registry are all wired (Task-7
+        composition root) this handler runs the install saga (gates 1-3
+        read-only pre-checks → transition-to-``installed`` FIRST →
+        materialize (expose) → set-config-active LAST, recording
+        governance BEFORE exposure so a crash is fail-CLOSED; a post-
+        transition failure compensates FORWARD to ``disabled``) via
+        :func:`_run_install_saga`. On the pre-Task-7 None path it falls
+        back to the pre-M4 plain ``store.transition`` delegate.
+        """
+        if _m4_enabled:
+            return await _run_install_saga(actor=actor, record=record)
+        return await _plain_transition(
+            actor=actor,
+            record=record,
+            transition="install",
+            prefix=_PACK_INSTALL_REQUEST_ID_PREFIX,
+            refused_event="portal.packs.install_refused",
+        )
 
     @router.post(
         "/{pack_id}/disable",
@@ -413,53 +1095,39 @@ def build_operator_routes(*, store: PackRecordStore) -> APIRouter:
         R24 carry-forward: threads ``actor_type=actor.actor_type``
         into transition() — disable chain rows record the operator's
         actor_type for examiner parity.
-        """
-        try:
-            await store.transition(
-                pack_id=record.id,
-                transition="disable",
-                actor_id=actor.subject,
-                tenant_id=actor.tenant_id,
-                evidence_pointer=None,
-                request_id=_mint_request_id(_PACK_DISABLE_REQUEST_ID_PREFIX),
-                actor_type=actor.actor_type,
-            )
-        except PackNotFound:
-            _LOG.warning(
-                "portal.packs.disable_refused",
-                extra={
-                    "reason": _PACK_NOT_FOUND_REASON,
-                    "actor_subject": actor.subject,
-                    "pack_id": str(record.id),
-                    "from_state": record.state,
-                },
-            )
-            raise HTTPException(
-                status_code=404,
-                detail={"reason": _PACK_NOT_FOUND_REASON},
-            ) from None
-        except LifecycleTransitionRefused as exc:
-            _LOG.warning(
-                "portal.packs.disable_refused",
-                extra={
-                    "reason": exc.reason,
-                    "actor_subject": actor.subject,
-                    "pack_id": str(record.id),
-                    "from_state": record.state,
-                },
-            )
-            raise HTTPException(
-                status_code=409,
-                detail={"reason": exc.reason},
-            ) from None
 
-        updated = await store.load(record.id)
-        if updated is None:  # pragma: no cover - defence in depth
-            raise HTTPException(
-                status_code=404,
-                detail={"reason": _PACK_NOT_FOUND_REASON},
+        **M4 (ADR-026 D6) — retract-FIRST un-expose saga.** When the M4
+        collaborators are wired this handler retracts the pack's derived
+        rows FIRST (un-expose → immediately refused by ``mcp_authz``),
+        then transitions + marks the config ``disabled``. A post-retract
+        **transition** failure (state unchanged) re-materializes
+        (compensation) so the pack is left callable rather than silently
+        half-disabled; a **status-write** failure AFTER the transition
+        committed does NOT re-materialize — it leaves the pack fail-closed
+        (retracted / not callable, lifecycle ``disabled``) and fails loud
+        (via :func:`_run_unexpose_saga`). On the None path it falls back to
+        the pre-M4 plain delegate.
+        """
+        if _m4_enabled:
+            return await _run_unexpose_saga(
+                actor=actor,
+                record=record,
+                transition="disable",
+                target_state="disabled",
+                target_status="disabled",
+                missing_reason="disable_runtime_config_missing",
+                transition_failed_reason="disable_transition_failed",
+                compensation_reason="disable_compensation_failed",
+                status_write_failed_reason="disable_status_write_failed",
+                refused_event="portal.packs.disable_refused",
             )
-        return PackResponse.model_validate(updated)
+        return await _plain_transition(
+            actor=actor,
+            record=record,
+            transition="disable",
+            prefix=_PACK_DISABLE_REQUEST_ID_PREFIX,
+            refused_event="portal.packs.disable_refused",
+        )
 
     @router.post(
         "/{pack_id}/revoke",
@@ -490,53 +1158,39 @@ def build_operator_routes(*, store: PackRecordStore) -> APIRouter:
         R24 carry-forward: threads ``actor_type=actor.actor_type`` into
         transition() — revoke chain rows record the operator's
         actor_type for examiner parity.
-        """
-        try:
-            await store.transition(
-                pack_id=record.id,
-                transition="revoke",
-                actor_id=actor.subject,
-                tenant_id=actor.tenant_id,
-                evidence_pointer=None,
-                request_id=_mint_request_id(_PACK_REVOKE_REQUEST_ID_PREFIX),
-                actor_type=actor.actor_type,
-            )
-        except PackNotFound:
-            _LOG.warning(
-                "portal.packs.revoke_refused",
-                extra={
-                    "reason": _PACK_NOT_FOUND_REASON,
-                    "actor_subject": actor.subject,
-                    "pack_id": str(record.id),
-                    "from_state": record.state,
-                },
-            )
-            raise HTTPException(
-                status_code=404,
-                detail={"reason": _PACK_NOT_FOUND_REASON},
-            ) from None
-        except LifecycleTransitionRefused as exc:
-            _LOG.warning(
-                "portal.packs.revoke_refused",
-                extra={
-                    "reason": exc.reason,
-                    "actor_subject": actor.subject,
-                    "pack_id": str(record.id),
-                    "from_state": record.state,
-                },
-            )
-            raise HTTPException(
-                status_code=409,
-                detail={"reason": exc.reason},
-            ) from None
 
-        updated = await store.load(record.id)
-        if updated is None:  # pragma: no cover - defence in depth
-            raise HTTPException(
-                status_code=404,
-                detail={"reason": _PACK_NOT_FOUND_REASON},
+        **M4 (ADR-026 D6) — retract-FIRST un-expose saga.** Symmetric
+        with disable (multi-from ``installed | disabled → revoked``): the
+        M4 path retracts the derived rows FIRST, then transitions + marks
+        the config ``revoked``. A post-retract **transition** failure
+        (state unchanged) re-materializes (compensation); a **status-write**
+        failure AFTER the transition committed does NOT re-materialize —
+        it leaves the pack fail-closed (retracted, lifecycle ``revoked``)
+        and fails loud. Idempotency (re-revoke on an already-revoked pack)
+        is caught by the saga's gate-1 dry-run BEFORE any retract, so a
+        terminal pack is NOT re-exposed by the compensation path. On the
+        None path it falls back to the pre-M4 plain delegate.
+        """
+        if _m4_enabled:
+            return await _run_unexpose_saga(
+                actor=actor,
+                record=record,
+                transition="revoke",
+                target_state="revoked",
+                target_status="revoked",
+                missing_reason="revoke_runtime_config_missing",
+                transition_failed_reason="revoke_transition_failed",
+                compensation_reason="revoke_compensation_failed",
+                status_write_failed_reason="revoke_status_write_failed",
+                refused_event="portal.packs.revoke_refused",
             )
-        return PackResponse.model_validate(updated)
+        return await _plain_transition(
+            actor=actor,
+            record=record,
+            transition="revoke",
+            prefix=_PACK_REVOKE_REQUEST_ID_PREFIX,
+            refused_event="portal.packs.revoke_refused",
+        )
 
     @router.delete(
         "/{pack_id}/install",
@@ -634,6 +1288,9 @@ for _prefix in (
     _PACK_DISABLE_REQUEST_ID_PREFIX,
     _PACK_REVOKE_REQUEST_ID_PREFIX,
     _PACK_UNINSTALL_REQUEST_ID_PREFIX,
+    _PACK_MATERIALIZE_REQUEST_ID_PREFIX,
+    _PACK_ACTIVATION_REQUEST_ID_PREFIX,
+    _PACK_RETRACT_REQUEST_ID_PREFIX,
 ):
     assert len(_prefix) + 32 <= _REQUEST_ID_MAX_LEN, (
         f"request_id prefix {_prefix!r} ({len(_prefix)} chars) + uuid4().hex (32 chars) "
