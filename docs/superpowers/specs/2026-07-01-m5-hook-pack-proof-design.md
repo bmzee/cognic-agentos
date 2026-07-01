@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-01
 **Milestone:** M5 (production-grade milestone checklist, `docs/PRODUCTION_GRADE_MILESTONE_CHECKLIST.md`)
-**Status:** design approved in brainstorming; pending spec review → implementation plan
+**Status:** design approved; implementation-plan review accepted the two-hook `v0.2.0` BAR 3 binding
 **Depends on:** M3 (first separate-repo tool pack, deployed) + M4 (operator-grade install flow) — both merged to `main`.
 
 ---
@@ -83,10 +83,10 @@ Add a **validator-clean, honest** `[data_governance]` block (the validator requi
 data_classes    = ["internal"]
 purpose         = "operational_telemetry"
 retention_policy = "none"
-dlp_pre_hooks   = ["refuse_forbidden_schema_arg"]
+dlp_pre_hooks   = ["refuse_forbidden_schema_arg", "explode_schema_guard"]
 ```
 
-Cross-checked against `[risk_tier].tier = "read_only"`. Bump to `0.2.0`, re-sign, new signed release. **`v0.1.0` remains the M3/M4 evidence artifact**; `v0.2.0` is the M5 DLP-governed release. The two coexist.
+Cross-checked against `[risk_tier].tier = "read_only"`. Both hooks are argument-gated in the hook pack: normal args pass both, the forbidden sentinel triggers `refuse_forbidden_schema_arg`, and the explode sentinel passes the first hook then triggers `explode_schema_guard`. Bump to `0.2.0`, re-sign, new signed release. **`v0.1.0` remains the M3/M4 evidence artifact**; `v0.2.0` is the M5 DLP-governed release. The two coexist.
 
 ## 6. The deployed proof (kind)
 
