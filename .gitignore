@@ -130,4 +130,5 @@ infra/proof-1b-2c/_local_as.py
 # Gitignored defensively so an interrupted run never leaves them stageable.
 infra/proof-m4/proof-m4-staging/
 infra/proof-m4/proof_m4/
+infra/proof-m4/cognic_agentos/
 infra/proof-m4/_local_as.py

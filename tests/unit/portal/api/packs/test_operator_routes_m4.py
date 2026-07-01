@@ -150,6 +150,7 @@ class _StubMaterializer:
         self,
         *,
         record: PackRuntimeConfigRecord,
+        derived_pack_id: str,
         actor_subject: str,
         actor_type: str,
         request_id: str,
@@ -157,6 +158,7 @@ class _StubMaterializer:
         self.materialize_calls.append(
             {
                 "pack_id": record.pack_id,
+                "derived_pack_id": derived_pack_id,
                 "tenant_id": record.tenant_id,
                 "actor_subject": actor_subject,
                 "actor_type": actor_type,
@@ -177,7 +179,8 @@ class _StubMaterializer:
         self,
         *,
         tenant_id: str,
-        pack_id: str,
+        config_pack_id: str,
+        derived_pack_id: str,
         actor_subject: str,
         actor_type: str,
         request_id: str,
@@ -185,7 +188,8 @@ class _StubMaterializer:
         self.retract_calls.append(
             {
                 "tenant_id": tenant_id,
-                "pack_id": pack_id,
+                "config_pack_id": config_pack_id,
+                "derived_pack_id": derived_pack_id,
                 "actor_subject": actor_subject,
                 "actor_type": actor_type,
                 "request_id": request_id,
@@ -447,8 +451,14 @@ async def _assert_no_derived_rows(
 ) -> None:
     """The pack's override is absent AND the tenant allow-list carries none of
     the pack's desired IPs (proves the failed install left ZERO derived rows)."""
-    override = await override_store.get(tenant_id=tenant_id, pack_id=str(record.id))
-    assert override is None, f"expected NO derived override for the pack; got {override!r}"
+    derived_override = await override_store.get(tenant_id=tenant_id, pack_id=record.pack_id)
+    assert derived_override is None, (
+        f"expected NO derived override for the registry server_id; got {derived_override!r}"
+    )
+    legacy_override = await override_store.get(tenant_id=tenant_id, pack_id=str(record.id))
+    assert legacy_override is None, (
+        f"expected NO stale UUID-keyed override for the pack; got {legacy_override!r}"
+    )
     allow = await allowlist_store.get_allowlist(tenant_id=tenant_id)
     leaked = allow & frozenset(_DESIRED_IPS)
     assert not leaked, f"expected NO derived allow-list rows for the pack; leaked {leaked!r}"
@@ -581,9 +591,12 @@ class TestInstallSagaHappyPath:
         assert response.status_code == 200, response.text
         assert response.json()["state"] == "installed"
 
-        # Derived rows landed (the exposure).
-        override = await override_store.get(tenant_id=_TENANT, pack_id=str(record.id))
+        # Derived rows landed (the exposure). The override key MUST be the
+        # registry server_id / distribution name that MCPHost reads, not the
+        # lifecycle UUID used by the runtime-config record.
+        override = await override_store.get(tenant_id=_TENANT, pack_id=record.pack_id)
         assert override == _OVERRIDE_URL
+        assert await override_store.get(tenant_id=_TENANT, pack_id=str(record.id)) is None
         allow = await allowlist_store.get_allowlist(tenant_id=_TENANT)
         assert frozenset(_DESIRED_IPS) <= allow
 
@@ -626,7 +639,9 @@ class TestInstallSagaHappyPath:
             request_id=f"disx-{record.id.hex[:8]}",
         )
         # Precondition: no derived rows for the pack yet.
-        assert await override_store.get(tenant_id=_TENANT, pack_id=str(record.id)) is None
+        await _assert_no_derived_rows(
+            override_store=override_store, allowlist_store=allowlist_store, record=record
+        )
 
         actor = _make_operator_actor()
         app = _build_app(
@@ -641,7 +656,8 @@ class TestInstallSagaHappyPath:
 
         assert response.status_code == 200, response.text
         assert response.json()["state"] == "installed"
-        assert await override_store.get(tenant_id=_TENANT, pack_id=str(record.id)) == _OVERRIDE_URL
+        assert await override_store.get(tenant_id=_TENANT, pack_id=record.pack_id) == _OVERRIDE_URL
+        assert await override_store.get(tenant_id=_TENANT, pack_id=str(record.id)) is None
         cfg = await config_store.get(tenant_id=_TENANT, pack_id=str(record.id))
         assert cfg is not None and cfg.activation_status == "active"
 
@@ -997,7 +1013,8 @@ class TestInstallCompensation:
         assert response.json()["detail"]["reason"] == "install_activation_failed"
         # Forward-to-disabled compensation: retract (un-expose) ran exactly once.
         assert len(mat.retract_calls) == 1
-        assert mat.retract_calls[0]["pack_id"] == str(record.id)
+        assert mat.retract_calls[0]["config_pack_id"] == str(record.id)
+        assert mat.retract_calls[0]["derived_pack_id"] == record.pack_id
         # (Stub materialize doesn't write derived rows; assert the real config
         # was left DISABLED + the lifecycle was compensated FORWARD to disabled.)
         await _assert_no_derived_rows(
@@ -1261,7 +1278,7 @@ class TestDisableSaga:
         )
         with TestClient(install_app) as client:
             assert client.post(f"/api/v1/packs/{record.id}/install").status_code == 200
-        assert await override_store.get(tenant_id=_TENANT, pack_id=str(record.id)) == _OVERRIDE_URL
+        assert await override_store.get(tenant_id=_TENANT, pack_id=record.pack_id) == _OVERRIDE_URL
 
         # Now disable.
         with TestClient(install_app) as client:
@@ -1270,6 +1287,7 @@ class TestDisableSaga:
         assert response.status_code == 200, response.text
         assert response.json()["state"] == "disabled"
         # Derived rows gone (un-exposed).
+        assert await override_store.get(tenant_id=_TENANT, pack_id=record.pack_id) is None
         assert await override_store.get(tenant_id=_TENANT, pack_id=str(record.id)) is None
         allow = await allowlist_store.get_allowlist(tenant_id=_TENANT)
         assert not (allow & frozenset(_DESIRED_IPS))
@@ -1457,6 +1475,7 @@ class TestRevokeSaga:
 
         assert response.status_code == 200, response.text
         assert response.json()["state"] == "revoked"
+        assert await override_store.get(tenant_id=_TENANT, pack_id=record.pack_id) is None
         assert await override_store.get(tenant_id=_TENANT, pack_id=str(record.id)) is None
         allow = await allowlist_store.get_allowlist(tenant_id=_TENANT)
         assert not (allow & frozenset(_DESIRED_IPS))
@@ -1899,6 +1918,7 @@ class TestUnexposeSagaBranches:
         # is NOT re-exposed.
         assert mat.retract_calls == []
         assert mat.materialize_calls == []
+        assert await override_store.get(tenant_id=_TENANT, pack_id=record.pack_id) is None
         assert await override_store.get(tenant_id=_TENANT, pack_id=str(record.id)) is None
 
     async def test_disable_status_write_failure_after_transition_stays_fail_closed(
@@ -1937,7 +1957,7 @@ class TestUnexposeSagaBranches:
         )
         with TestClient(install_app) as client:
             assert client.post(f"/api/v1/packs/{record.id}/install").status_code == 200
-        assert await override_store.get(tenant_id=_TENANT, pack_id=str(record.id)) == _OVERRIDE_URL
+        assert await override_store.get(tenant_id=_TENANT, pack_id=record.pack_id) == _OVERRIDE_URL
 
         # Disable via an app whose config store FAILS the phase-B "disabled"
         # write; the phase-A transition (on the real store) SUCCEEDS first.
@@ -2004,7 +2024,7 @@ class TestUnexposeSagaBranches:
         )
         with TestClient(install_app) as client:
             assert client.post(f"/api/v1/packs/{record.id}/install").status_code == 200
-        assert await override_store.get(tenant_id=_TENANT, pack_id=str(record.id)) == _OVERRIDE_URL
+        assert await override_store.get(tenant_id=_TENANT, pack_id=record.pack_id) == _OVERRIDE_URL
 
         failing_cfg = _FailingActivationConfigStore(config_store)
         failing_cfg.fail_on_status = "revoked"

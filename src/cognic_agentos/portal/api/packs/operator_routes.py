@@ -134,6 +134,7 @@ class _MaterializerLike(Protocol):
         self,
         *,
         record: PackRuntimeConfigRecord,
+        derived_pack_id: str,
         actor_subject: str,
         actor_type: str,
         request_id: str,
@@ -143,7 +144,8 @@ class _MaterializerLike(Protocol):
         self,
         *,
         tenant_id: str,
-        pack_id: str,
+        config_pack_id: str,
+        derived_pack_id: str,
         actor_subject: str,
         actor_type: str,
         request_id: str,
@@ -459,6 +461,7 @@ def build_operator_routes(
         actor: Actor,
         record: PackRecord,
         cfg_pack_id: str,
+        derived_pack_id: str,
         tenant: str,
         primary: Exception,
     ) -> None:
@@ -483,7 +486,8 @@ def build_operator_routes(
         try:
             await materializer.retract(
                 tenant_id=tenant,
-                pack_id=cfg_pack_id,
+                config_pack_id=cfg_pack_id,
+                derived_pack_id=derived_pack_id,
                 actor_subject=actor.subject,
                 actor_type=actor.actor_type,
                 request_id=_mint_request_id(_PACK_RETRACT_REQUEST_ID_PREFIX),
@@ -623,6 +627,7 @@ def build_operator_routes(
         try:
             await materializer.materialize(
                 record=cfg,
+                derived_pack_id=dist_name,
                 actor_subject=actor.subject,
                 actor_type=actor.actor_type,
                 request_id=_mint_request_id(_PACK_MATERIALIZE_REQUEST_ID_PREFIX),
@@ -632,6 +637,7 @@ def build_operator_routes(
                 actor=actor,
                 record=record,
                 cfg_pack_id=cfg_pack_id,
+                derived_pack_id=dist_name,
                 tenant=tenant,
                 primary=exc,
             )
@@ -655,6 +661,7 @@ def build_operator_routes(
                 actor=actor,
                 record=record,
                 cfg_pack_id=cfg_pack_id,
+                derived_pack_id=dist_name,
                 tenant=tenant,
                 primary=exc,
             )
@@ -686,6 +693,7 @@ def build_operator_routes(
                 actor=actor,
                 record=record,
                 cfg_pack_id=cfg_pack_id,
+                derived_pack_id=dist_name,
                 tenant=tenant,
                 primary=exc,
             )
@@ -790,7 +798,8 @@ def build_operator_routes(
         try:
             await materializer.retract(
                 tenant_id=tenant,
-                pack_id=cfg_pack_id,
+                config_pack_id=cfg_pack_id,
+                derived_pack_id=record.pack_id,
                 actor_subject=actor.subject,
                 actor_type=actor.actor_type,
                 request_id=_mint_request_id(_PACK_RETRACT_REQUEST_ID_PREFIX),
@@ -830,6 +839,7 @@ def build_operator_routes(
             try:
                 await materializer.materialize(
                     record=cfg,
+                    derived_pack_id=record.pack_id,
                     actor_subject=actor.subject,
                     actor_type=actor.actor_type,
                     request_id=_mint_request_id(_PACK_MATERIALIZE_REQUEST_ID_PREFIX),

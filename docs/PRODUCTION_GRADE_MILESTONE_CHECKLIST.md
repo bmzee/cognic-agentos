@@ -61,11 +61,10 @@ Studio/no-code authoring and Cognic Forge remain outside this v1 completion chec
   **Load-bearing proof:** the per-tenant exact-IP allow-list carve-out — removing the `mcp_internal_host_allowlist` row on a cold pod flips the resource leg from permitted (`audit.mcp_allowlist_permitted`, host `10.96.0.51`) to refused (HTTP 502 + `mcp_discovery_url_refused` + `discovery_status=refused`).  
   **Production posture:** proves the first separate-repo tool pack deployed + governed through AgentOS on `kind`, with zero `src/cognic_agentos` kernel changes for the proof loop. NOT the production AKS platform (M15/M24), NOT an LLM-agent loop (M8), and NOT the operator-grade install flow (M4 — the proof still harness-seeds the override/allow-list/OAuth).
 
-- [ ] **M4 — Operator-grade pack install flow.**  
-  **Goal:** replace proof-harness seeding with the real bank/operator install path for a signed pack: submit/review/approve/allow-list/install/disable/revoke.  
-  **Production proof:** no direct DB seed for pack state, override, allow-list, or OAuth config unless explicitly documented as an operator migration step.  
-  **Load-bearing proof:** rejected install when approval/trust/allow-list is missing; disabled or revoked pack stops invocation.  
-  **Evidence required:** operator-run transcript and rollback/disable evidence.
+- [x] **M4 — Operator-grade pack install flow.**
+  **Evidence:** the released signed `cognic-tool-oracle-schema@v0.1.0` pack was installed through the real operator API path on a deployed `kind` AgentOS: author draft -> submit, distinct reviewer claim/approve, operator-human allow-list, operator configure, install materialization, disable/re-install/revoke. Runner `infra/proof-m4/run-proof-m4.sh` (`RUNNER_EXIT=0`); `docs/VALIDATION-RESULTS.md` "M4 — Operator-grade pack install flow — PASS" section.
+  **Load-bearing proof:** install is refused when not approved/allow-listed, when runtime config is absent, when the referenced OAuth Vault material is absent, and when signature verification is red; disable retracts the derived MCP carve-outs and flips discovery to `refused`; disabled -> installed re-enable restores `auth_ready` + `call_tool`; revoke retracts again and makes install terminally refused.
+  **Production posture:** replaces the M3 direct DB seeding of override/allow-list rows with lifecycle-governed runtime config plus materialization. OAuth remains by-reference and pre-provisioned in Vault for M4, per ADR-026; AKS/operator-pack distribution hardening remains later milestone work.
 
 - [ ] **M5 — Real hook pack proof.**  
   **Goal:** ship a separate `cognic-hook-*` pack and prove it is installed, trusted, ordered, and enforced at runtime.  
@@ -87,8 +86,8 @@ Studio/no-code authoring and Cognic Forge remain outside this v1 completion chec
 
 ### C. Agent Loop And Runtime Capability
 
-- [ ] **M8 — First deployed LLM-agent loop.**  
-  **Goal:** a separate `cognic-agent-*` pack acts as a human-role worker, receives assigned tools/skills, reasons, invokes tools, records memory/audit, and completes one governed task.  
+- [ ] **M8 — First deployed bank LLM-agent loop using tools and skills.**
+  **Goal:** a separate bank-use-case `cognic-agent-*` pack acts as a human-role worker, receives assigned tools and skills, reasons over a realistic banking task, invokes those assigned capabilities, records memory/audit, and completes one governed task.
   **Production proof:** run on deployed AgentOS, not only in-process; first on `kind`, then AKS before final gate.  
   **Load-bearing proof:** agent cannot call unassigned tools/skills; policy/RBAC denial is visible and audited.  
   **Evidence required:** agent pack repo, deployed proof, validation results.
@@ -203,4 +202,3 @@ When a milestone completes:
 3. Move the checkbox only after verification, not at plan/spec time.
 4. Update `docs/PROJECT_STATUS.md` if the completion changes the high-level product status.
 5. Do not change older evidence to sound cleaner. Add a dated note instead.
-

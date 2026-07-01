@@ -50,12 +50,15 @@ PROOF_DIR="infra/proof-m4"
 STAGING_DST="$PROOF_DIR/proof-m4-staging"           # released-pack staging output (build context)
 PROOF_APP_SRC="tests/integration/proof_m4"          # the proof-only multi-actor app factory
 PROOF_APP_DST="$PROOF_DIR/proof_m4"                 # transient build-context copy
+AGENTOS_SRC_SRC="src/cognic_agentos"                # current kernel source overlay
+AGENTOS_SRC_DST="$PROOF_DIR/cognic_agentos"         # transient build-context copy
 BASE_IMAGE="cognic-agentos:proof1b2-base"           # reused — same default-adapters base as proof-1b-2c
 IMAGE="cognic-agentos:proofm4"
 MCP_IMAGE="cognic-proof-oracle-pack:m4"
 AS_IMAGE="cognic-proof-as:m4"
 TENANT="proof-m4"
 PACK_ID="cognic-tool-oracle-schema"
+PACK_WHEEL="cognic_tool_oracle_schema-0.1.0-py3-none-any.whl"
 BASE_URL="http://127.0.0.1:8000"
 PF=""
 
@@ -74,6 +77,51 @@ _extra_images() {
   printf '%s\n' "gvenzl/oracle-xe:21-slim" "busybox:1.36"
 }
 
+docker_pull_with_retry() {
+  local img="$1"
+  local max=5
+  local attempt=1
+  if [[ "${COGNIC_PROOF_M4_REUSE_IMAGES:-0}" == "1" ]] && docker image inspect "$img" >/dev/null 2>&1; then
+    echo "  using cached image $img (COGNIC_PROOF_M4_REUSE_IMAGES=1)"
+    return 0
+  fi
+  while true; do
+    if docker pull "$img" >/dev/null; then
+      return 0
+    fi
+    if [ "$attempt" -ge "$max" ]; then
+      echo "docker pull failed after $attempt attempts: $img" >&2
+      return 1
+    fi
+    echo "docker pull failed for $img (attempt $attempt/$max); retrying in 3s" >&2
+    attempt=$((attempt + 1))
+    sleep 3
+  done
+}
+
+docker_build_with_retry() {
+  local max=3
+  local attempt=1
+  while true; do
+    if docker build "$@"; then
+      return 0
+    fi
+    if [ "$attempt" -ge "$max" ]; then
+      echo "docker build failed after $attempt attempts: $*" >&2
+      return 1
+    fi
+    echo "docker build failed (attempt $attempt/$max); retrying in 3s: $*" >&2
+    attempt=$((attempt + 1))
+    sleep 3
+  done
+}
+
+require_cached_image() {
+  local img="$1"
+  docker image inspect "$img" >/dev/null 2>&1 || die \
+    "COGNIC_PROOF_M4_REUSE_IMAGES=1 requested, but required image is absent: $img"
+}
+
 pf_stop() {
   [ -n "${PF:-}" ] && kill "$PF" 2>/dev/null || true
   PF=""
@@ -83,7 +131,14 @@ pf_start() {
   pf_stop
   kubectl -n "$NS" port-forward svc/rel-agentos 8000:8000 >/dev/null 2>&1 &
   PF=$!
-  sleep 4
+  local _i
+  for _i in $(seq 1 30); do
+    if curl -sf "$BASE_URL/api/v1/healthz" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  bar_fail "port-forward did not expose a healthy AgentOS API"
 }
 
 # Roll to a COLD pod so a fresh boot sees the current DB/Vault state, then wait Ready.
@@ -92,8 +147,10 @@ pf_start() {
 # retracts the carve-out rows) is only observable on a cold pod.
 roll_and_wait() {
   kubectl -n "$NS" rollout restart deploy/rel-agentos
-  kubectl -n "$NS" rollout status deploy/rel-agentos --timeout=300s
-  kubectl -n "$NS" wait --for=condition=ready pod -l app.kubernetes.io/name=agentos --timeout=300s
+  kubectl -n "$NS" rollout status deploy/rel-agentos --timeout=600s \
+    || agentos_fail "rel-agentos rollout did not complete within 600s"
+  kubectl -n "$NS" wait --for=condition=ready pod -l app.kubernetes.io/name=agentos --timeout=600s \
+    || agentos_fail "rel-agentos pod did not become Ready within 600s"
 }
 
 # ---- Multi-actor API helpers (drive the REAL operator API via X-Proof-Role) ---------
@@ -101,6 +158,11 @@ roll_and_wait() {
 # The role header selects the proof Actor (author/reviewer/operator/mcp); tenant +
 # originator come from the bound Actor, never the URL.
 HTTP_CODE=""
+HTTP_CODE_FILE="/tmp/proofm4-code"
+load_http_code() {
+  HTTP_CODE="$(cat "$HTTP_CODE_FILE" 2>/dev/null || true)"
+}
+
 api() {
   local role="$1" method="$2" path="$3" body="${4:-}"
   local out
@@ -113,15 +175,26 @@ api() {
       -H "X-Proof-Role: $role" "$BASE_URL$path")"
   fi
   HTTP_CODE="$out"
+  printf '%s' "$out" > "$HTTP_CODE_FILE"
   cat /tmp/proofm4-resp
 }
 
 # discovery_status of the pack row from GET /system/plugins?tenant_id=proof-m4.
 discovery_status() {
-  curl -sf "$BASE_URL/api/v1/system/plugins?tenant_id=$TENANT" 2>/dev/null | python3 - "$PACK_ID" <<'PY'
+  local body
+  body="$(curl -sf "$BASE_URL/api/v1/system/plugins?tenant_id=$TENANT" 2>/dev/null || true)"
+  if [ -z "$body" ]; then
+    echo "<unreachable>"
+    return 0
+  fi
+  python3 - "$PACK_ID" "$body" <<'PY'
 import json, sys
 pack_id = sys.argv[1]
-doc = json.load(sys.stdin)
+try:
+    doc = json.loads(sys.argv[2])
+except Exception:
+    print("<invalid-json>")
+    raise SystemExit(0)
 rows = [p for p in doc.get("plugins", []) if p.get("pack_id") == pack_id]
 print(rows[0].get("discovery_status") if rows else "<row-absent>")
 PY
@@ -131,11 +204,15 @@ PY
 bar_fail() {
   local where="$1"
   echo "FAIL: $where — capturing diagnostics to docs/VALIDATION-RESULTS.md" >&2
-  local logs ds dh reason
+  local logs ds dh derived audit reason
   logs="$(kubectl -n "$NS" logs deploy/rel-agentos 2>&1 | tail -150 || true)"
   ds="$(curl -s "$BASE_URL/api/v1/system/plugins?tenant_id=$TENANT" 2>/dev/null || true)"
   dh="$(kubectl -n "$NS" exec deploy/postgres -- psql -U cognic -d cognic -tA \
-    -c "SELECT decision_type, payload::text FROM decision_history WHERE decision_type LIKE 'mcp.%' OR decision_type LIKE 'pack.lifecycle.%' ORDER BY sequence DESC LIMIT 20;" 2>/dev/null || true)"
+    -c "SELECT event_type, payload::text FROM decision_history WHERE event_type LIKE 'mcp.%' OR event_type LIKE 'pack.lifecycle.%' ORDER BY sequence DESC LIMIT 20;" 2>/dev/null || true)"
+  derived="$(kubectl -n "$NS" exec deploy/postgres -- psql -U cognic -d cognic -tA \
+    -c "SELECT 'override|' || tenant_id || '|' || pack_id || '|' || server_url_override FROM mcp_server_url_override UNION ALL SELECT 'allowlist|' || tenant_id || '|' || ip || '|' || set_by_actor FROM mcp_internal_host_allowlist ORDER BY 1;" 2>/dev/null || true)"
+  audit="$(kubectl -n "$NS" exec deploy/postgres -- psql -U cognic -d cognic -tA \
+    -c "SELECT event_type, payload::text FROM audit_event WHERE event_type='audit.mcp_allowlist_permitted' ORDER BY sequence DESC LIMIT 5;" 2>/dev/null || true)"
   reason="$(grep -Eo 'install_[a-z_]+|mcp_[a-z_]*refused|discovery_status=[a-z_]+|materialize_[a-z_]+' <<<"$logs" | sort -u || true)"
   {
     echo ""
@@ -158,6 +235,14 @@ bar_fail() {
     echo "- decision_history (mcp.* / pack.lifecycle.* tail 20):"
     echo '```'
     echo "${dh:-<none>}"
+    echo '```'
+    echo "- derived MCP config rows (override + allow-list):"
+    echo '```'
+    echo "${derived:-<none>}"
+    echo '```'
+    echo "- audit.mcp_allowlist_permitted tail:"
+    echo '```'
+    echo "${audit:-<none>}"
     echo '```'
     echo "- AgentOS pod logs (tail 150):"
     echo '```'
@@ -207,11 +292,55 @@ backends_fail() {
   exit 1
 }
 
+migrate_fail() {
+  local where="$1"
+  echo "FAIL: migrate ($where) — capturing diagnostics to docs/VALIDATION-RESULTS.md" >&2
+  local wide desc logs events
+  wide="$(kubectl -n "$NS" get job/agentos-migrate,pod -l job-name=agentos-migrate -o wide 2>&1 || true)"
+  desc="$(kubectl -n "$NS" describe job/agentos-migrate 2>&1 || true)"
+  logs="$(kubectl -n "$NS" logs job/agentos-migrate --all-containers=true --tail=180 2>&1 || true)"
+  events="$(kubectl -n "$NS" get events --sort-by=.lastTimestamp 2>&1 | tail -120 || true)"
+  {
+    echo ""
+    echo "## Proof M4 — migration Job FAILURE ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+    echo ""
+    echo "- Failed step: \`$where\`"
+    echo "- migrate job + pod (-o wide):"; echo '```'; echo "$wide"; echo '```'
+    echo "- migrate job describe:"; echo '```'; echo "$desc"; echo '```'
+    echo "- migrate logs (tail 180):"; echo '```'; echo "$logs"; echo '```'
+    echo "- namespace events (tail 120):"; echo '```'; echo "$events"; echo '```'
+  } >> docs/VALIDATION-RESULTS.md
+  exit 1
+}
+
+agentos_fail() {
+  local where="$1"
+  echo "FAIL: $where — capturing AgentOS rollout diagnostics to docs/VALIDATION-RESULTS.md" >&2
+  local wide desc pods logs events
+  wide="$(kubectl -n "$NS" get deploy/rel-agentos,pod -l app.kubernetes.io/name=agentos -o wide 2>&1 || true)"
+  desc="$(kubectl -n "$NS" describe deploy/rel-agentos 2>&1 || true)"
+  pods="$(kubectl -n "$NS" describe pod -l app.kubernetes.io/name=agentos 2>&1 || true)"
+  logs="$(kubectl -n "$NS" logs -l app.kubernetes.io/name=agentos --all-containers=true --tail=220 --prefix 2>&1 || true)"
+  events="$(kubectl -n "$NS" get events --sort-by=.lastTimestamp 2>&1 | tail -160 || true)"
+  {
+    echo ""
+    echo "## Proof M4 — AgentOS rollout FAILURE ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+    echo ""
+    echo "- Failed step: \`$where\`"
+    echo "- rel-agentos deploy/pods (-o wide):"; echo '```'; echo "$wide"; echo '```'
+    echo "- rel-agentos deployment describe:"; echo '```'; echo "$desc"; echo '```'
+    echo "- rel-agentos pod describe:"; echo '```'; echo "$pods"; echo '```'
+    echo "- rel-agentos logs (tail 220):"; echo '```'; echo "$logs"; echo '```'
+    echo "- namespace events (tail 160):"; echo '```'; echo "$events"; echo '```'
+  } >> docs/VALIDATION-RESULTS.md
+  exit 1
+}
+
 cleanup() {
   pf_stop
   kind delete cluster --name "$CLUSTER" >/dev/null 2>&1 || true
   # remove the transient build-context copies (NOT the sources)
-  rm -rf "$STAGING_DST" "$PROOF_APP_DST" "$PROOF_DIR/_local_as.py" 2>/dev/null || true
+  rm -rf "$STAGING_DST" "$PROOF_APP_DST" "$AGENTOS_SRC_DST" "$PROOF_DIR/_local_as.py" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -227,34 +356,54 @@ rm -rf "$STAGING_DST"
 uv run python -m tests.integration.proof_m4.stage_released_pack "$STAGING_DST"
 
 # --- 3. build the four images ---------------------------------------------------
-echo "==> [3/10] build the default-adapters base image"
-docker build -f infra/agentos/Dockerfile --target default-adapters -t "$BASE_IMAGE" .
+if [[ "${COGNIC_PROOF_M4_REUSE_IMAGES:-0}" == "1" ]]; then
+  echo "==> [3/10] reuse existing proof images (COGNIC_PROOF_M4_REUSE_IMAGES=1)"
+  require_cached_image "$MCP_IMAGE"
+  require_cached_image "$AS_IMAGE"
+  if [[ "${COGNIC_PROOF_M4_REBUILD_AGENTOS:-0}" == "1" ]]; then
+    echo "==> [3/10] rebuild AgentOS proof image from the cached base plus current source"
+    require_cached_image "$BASE_IMAGE"
+    rm -rf "$PROOF_APP_DST"
+    cp -r "$PROOF_APP_SRC" "$PROOF_APP_DST"
+    rm -rf "$AGENTOS_SRC_DST"
+    cp -r "$AGENTOS_SRC_SRC" "$AGENTOS_SRC_DST"
+    docker_build_with_retry -f "$PROOF_DIR/Dockerfile.agentos-proof" --build-arg BASE_IMAGE="$BASE_IMAGE" -t "$IMAGE" "$PROOF_DIR"
+  else
+    require_cached_image "$BASE_IMAGE"
+    require_cached_image "$IMAGE"
+  fi
+else
+  echo "==> [3/10] build the default-adapters base image"
+  docker_build_with_retry -f infra/agentos/Dockerfile --target default-adapters -t "$BASE_IMAGE" .
 
-echo "==> [3/10] copy the proof_m4 app into the proof build context"
-rm -rf "$PROOF_APP_DST"
-cp -r "$PROOF_APP_SRC" "$PROOF_APP_DST"
+  echo "==> [3/10] copy the proof_m4 app into the proof build context"
+  rm -rf "$PROOF_APP_DST"
+  cp -r "$PROOF_APP_SRC" "$PROOF_APP_DST"
+  rm -rf "$AGENTOS_SRC_DST"
+  cp -r "$AGENTOS_SRC_SRC" "$AGENTOS_SRC_DST"
 
-echo "==> [3/10] build the proof AgentOS image (create_proof_app multi-actor + released trust staging baked in)"
-docker build -f "$PROOF_DIR/Dockerfile.agentos-proof" --build-arg BASE_IMAGE="$BASE_IMAGE" -t "$IMAGE" "$PROOF_DIR"
+  echo "==> [3/10] build the proof AgentOS image (create_proof_app multi-actor + released trust staging baked in)"
+  docker_build_with_retry -f "$PROOF_DIR/Dockerfile.agentos-proof" --build-arg BASE_IMAGE="$BASE_IMAGE" -t "$IMAGE" "$PROOF_DIR"
 
-echo "==> [3/10] build the released oracle-pack MCP tool Service image"
-# Context = $PROOF_DIR: Dockerfile.oracle-pack reads the released wheel from
-# proof-m4-staging/wheel/ (staged under $PROOF_DIR in step 2).
-docker build -f "$PROOF_DIR/Dockerfile.oracle-pack" -t "$MCP_IMAGE" "$PROOF_DIR"
+  echo "==> [3/10] build the released oracle-pack MCP tool Service image"
+  # Context = $PROOF_DIR: Dockerfile.oracle-pack reads the released wheel from
+  # proof-m4-staging/wheel/ (staged under $PROOF_DIR in step 2).
+  docker_build_with_retry -f "$PROOF_DIR/Dockerfile.oracle-pack" -t "$MCP_IMAGE" "$PROOF_DIR"
 
-echo "==> [3/10] build the emulated-external AS image (RS256 mode)"
-# Vendor the single AS fixture into the proof build context (.dockerignore excludes tests/
-# from the repo-root context). Mirrors the agentos-proof + oracle-pack copy-into-context
-# pattern; cleanup() removes the copy.
-cp tests/integration/pack_loop/_local_as.py "$PROOF_DIR/_local_as.py"
-docker build -f "$PROOF_DIR/Dockerfile.as" -t "$AS_IMAGE" "$PROOF_DIR"
+  echo "==> [3/10] build the emulated-external AS image (RS256 mode)"
+  # Vendor the single AS fixture into the proof build context (.dockerignore excludes tests/
+  # from the repo-root context). Mirrors the agentos-proof + oracle-pack copy-into-context
+  # pattern; cleanup() removes the copy.
+  cp tests/integration/pack_loop/_local_as.py "$PROOF_DIR/_local_as.py"
+  docker_build_with_retry -f "$PROOF_DIR/Dockerfile.as" -t "$AS_IMAGE" "$PROOF_DIR"
+fi
 
 # --- 4. kind create + load (3 proof images + backends + oracle-xe + busybox) -----
 echo "==> [4/10] pre-pull the backend + extra images (host docker cache)"
 while IFS= read -r _img; do
   [ -n "$_img" ] || continue
   echo "  docker pull $_img"
-  docker pull "$_img" >/dev/null
+  docker_pull_with_retry "$_img"
 done < <(_backend_images; _extra_images)
 
 echo "==> [4/10] create kind cluster + load the 3 proof images"
@@ -300,7 +449,8 @@ helm install rel "$CHART" -n "$NS" -f "$PROOF_DIR/proof-m4-values.yaml"
 echo "==> [8/10] run the proof-owned (non-hook) migration Job"
 kubectl -n "$NS" delete job/agentos-migrate --ignore-not-found=true --wait=true
 sed "s|__AGENTOS_IMAGE__|$IMAGE|" "$PROOF_DIR/migrate-job.yaml" | kubectl apply -n "$NS" -f -
-kubectl -n "$NS" wait --for=condition=complete job/agentos-migrate --timeout=300s
+kubectl -n "$NS" wait --for=condition=complete job/agentos-migrate --timeout=300s \
+  || migrate_fail "agentos-migrate did not complete within 300s"
 
 echo "==> [8/10] apply the oracle-pack MCP tool Service + AS manifests; wait Ready"
 kubectl -n "$NS" apply -f "$PROOF_DIR/manifests/oracle-pack.yaml" -f "$PROOF_DIR/manifests/auth-server.yaml"
@@ -332,9 +482,9 @@ echo "==> BAR 1 — governed operator lifecycle: submit -> claim -> approve -> a
 # Compute the manifest + its canonical digest with the KERNEL's canonical_bytes so the
 # submit cheap-pre-check (sha256(canonical_bytes(manifest)) == manifest_digest) passes —
 # the digest stays byte-coupled to the submitted bytes.
-MANIFEST_JSON="$(uv run python - "$PACK_ID" <<'PY'
+MANIFEST_JSON="$(uv run python - "$PACK_ID" "$PACK_WHEEL" <<'PY'
 import json, sys
-pack_id = sys.argv[1]
+pack_id, wheel = sys.argv[1], sys.argv[2]
 manifest = {
     "pack": {"kind": "tool", "name": pack_id, "version": "0.1.0"},
     "identity": {
@@ -354,7 +504,8 @@ manifest = {
             "intoto-layout.json",
             "vuln-scan.json",
             "license-audit.json",
-        ]
+        ],
+        "blob_path": wheel,
     },
 }
 print(json.dumps(manifest))
@@ -387,6 +538,7 @@ print(json.dumps({
 PY
 )"
 CREATE_RESP="$(api author POST /api/v1/packs/drafts "$CREATE_BODY")"
+load_http_code # after api command substitution
 [ "$HTTP_CODE" = "201" ] || bar_fail "BAR 1.1 create_draft (HTTP $HTTP_CODE)"
 PACK_UUID="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])' <<<"$CREATE_RESP")"
 [ -n "$PACK_UUID" ] || bar_fail "BAR 1.1 create_draft did not return a pack id"
@@ -435,6 +587,7 @@ print(json.dumps({
 PY
 )"
 APPROVE_RESP="$(api reviewer POST "/api/v1/packs/$PACK_UUID/approve" "$APPROVE_BODY")"
+load_http_code # after api command substitution
 # 200 = approved (all-green OR override-granted). A 412 with a NON-signature red gate that
 # was NOT overridden is a proof bug; a 412 with the SIGNATURE gate red means the real
 # cosign verification failed (a genuine finding — capture + fail, never redefine down).
@@ -471,6 +624,7 @@ api operator PUT "/api/v1/packs/$PACK_UUID/runtime-config" "$CONFIGURE_BODY" >/d
 # override + allow-list rows) + set activation_status=active.
 echo "==> BAR 1.7 — install (operator; materializes the derived carve-out rows)"
 INSTALL_RESP="$(api operator POST "/api/v1/packs/$PACK_UUID/install")"
+load_http_code # after api command substitution
 [ "$HTTP_CODE" = "200" ] || bar_fail "BAR 1.7 install (HTTP $HTTP_CODE; body: $INSTALL_RESP)"
 
 # BAR 1.8 — assert the derived rows were MATERIALIZED (via the decision_history events
@@ -479,31 +633,40 @@ INSTALL_RESP="$(api operator POST "/api/v1/packs/$PACK_UUID/install")"
 # them from the configured record — never seeded directly.
 echo "==> BAR 1.8 — assert materialization (decision_history: mcp.override.set + mcp.allowlist.add)"
 MAT="$(kubectl -n "$NS" exec deploy/postgres -- psql -U cognic -d cognic -tA \
-  -c "SELECT decision_type FROM decision_history WHERE decision_type IN ('mcp.override.set','mcp.allowlist.add');")"
+  -c "SELECT event_type FROM decision_history WHERE event_type IN ('mcp.override.set','mcp.allowlist.add');")"
+DERIVED_ROWS="$(kubectl -n "$NS" exec deploy/postgres -- psql -U cognic -d cognic -tA \
+  -c "SELECT 'override|' || tenant_id || '|' || pack_id || '|' || server_url_override FROM mcp_server_url_override UNION ALL SELECT 'allowlist|' || tenant_id || '|' || ip || '|' || set_by_actor FROM mcp_internal_host_allowlist ORDER BY 1;")"
 grep -qF "mcp.override.set" <<<"$MAT" \
   || bar_fail "BAR 1.8 no mcp.override.set materialization event (got: ${MAT:-<none>})"
 grep -qF "mcp.allowlist.add" <<<"$MAT" \
   || bar_fail "BAR 1.8 no mcp.allowlist.add materialization event (got: ${MAT:-<none>})"
+grep -qF "override|$TENANT|$PACK_ID|http://10.96.0.51:8765/mcp" <<<"$DERIVED_ROWS" \
+  || bar_fail "BAR 1.8 no derived override row (got: ${DERIVED_ROWS:-<none>})"
+grep -qF "allowlist|$TENANT|10.96.0.51|proof-m4-operator" <<<"$DERIVED_ROWS" \
+  || bar_fail "BAR 1.8 no derived allow-list row (got: ${DERIVED_ROWS:-<none>})"
 echo "  Bar 1.8 OK: override + allow-list rows materialized by install (not seeded)"
 
-# BAR 1.9 — roll cold so the fresh boot's trust-registration + MCP probe see the
-# materialized carve-out rows, then assert discovery_status=auth_ready.
-echo "==> BAR 1.9 — roll cold; assert discovery_status=auth_ready"
+# BAR 1.9 — roll cold so the next MCP probe sees the materialized carve-out rows.
+# discovery_status is observational: MCPHost records it when list_tools/call_tool runs,
+# not at startup.
+echo "==> BAR 1.9 — roll cold so the next MCP probe sees the materialized carve-outs"
 roll_and_wait
 pf_start
-DS="$(discovery_status)"
-[ "$DS" = "auth_ready" ] || bar_fail "BAR 1.9 discovery_status=$DS (expected auth_ready)"
-echo "  Bar 1.9 OK: discovery_status=auth_ready"
+echo "  Bar 1.9 OK: cold pod ready"
 
-# BAR 1.10 — the governed call: list_tools + call_tool(describe_table) returns FULL_NAME.
-echo "==> BAR 1.10 — governed loop: list_tools + call_tool(describe_table) -> FULL_NAME"
+# BAR 1.10 — the governed call: list_tools + call_tool(describe_table) returns FULL_NAME
+# and records discovery_status=auth_ready.
+echo "==> BAR 1.10 — governed loop: list_tools + call_tool(describe_table) -> FULL_NAME + auth_ready"
 api mcp GET "/api/v1/mcp/servers/$PACK_ID/tools" >/dev/null
 [ "$HTTP_CODE" = "200" ] || bar_fail "BAR 1.10 list_tools (HTTP $HTTP_CODE)"
 CALL_RESP="$(api mcp POST "/api/v1/mcp/servers/$PACK_ID/tools/call" \
   '{"tool_name":"describe_table","arguments":{"owner":"COGNIC","table":"EMPLOYEES"}}')"
+load_http_code # after api command substitution
 [ "$HTTP_CODE" = "200" ] || bar_fail "BAR 1.10 call_tool (HTTP $HTTP_CODE)"
 grep -qF "FULL_NAME" <<<"$CALL_RESP" \
   || bar_fail "BAR 1.10 call_tool_content (no EMPLOYEES column metadata: $CALL_RESP)"
+DS="$(discovery_status)"
+[ "$DS" = "auth_ready" ] || bar_fail "BAR 1.10 discovery_status=$DS (expected auth_ready)"
 echo "PROOF M4 (BAR 1) PASS"
 
 # ================================ BAR 2 (negatives) ============================
@@ -526,6 +689,7 @@ print(json.dumps({"kind":"tool","pack_id":pack_id,
 PY
 )"
   resp="$(api author POST /api/v1/packs/drafts "$body")"
+  load_http_code # after api command substitution
   [ "$HTTP_CODE" = "201" ] || return 1
   uuid="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])' <<<"$resp")"
   local sroot="/opt/cognic/pack-attestations/$PACK_ID/0.1.0"
@@ -545,6 +709,7 @@ _assert_install_refused() {
   local uuid="$1" want_status="$2" want_reason="$3" label="$4"
   local resp got_reason
   resp="$(api operator POST "/api/v1/packs/$uuid/install")"
+  load_http_code # after api command substitution
   [ "$HTTP_CODE" = "$want_status" ] \
     || bar_fail "BAR 2 $label — install status $HTTP_CODE (expected $want_status; body: $resp)"
   got_reason="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("detail",{}).get("reason",""))' <<<"$resp" 2>/dev/null || true)"
@@ -604,6 +769,7 @@ print(json.dumps({"kind":"tool","pack_id":pack_id,
 PY
 )"
 NEG4_RESP="$(api author POST /api/v1/packs/drafts "$NEG4_BODY")"
+load_http_code # after api command substitution
 [ "$HTTP_CODE" = "201" ] || bar_fail "BAR 2.4 create"
 NEG4="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])' <<<"$NEG4_RESP")"
 # signed_artefact_root points at a dir with NO staged attestation files -> cosign fails.
@@ -617,6 +783,7 @@ api author POST "/api/v1/packs/drafts/$NEG4/submit" "$NEG4_SUBMIT" >/dev/null; [
 api reviewer POST "/api/v1/packs/$NEG4/claim" >/dev/null; [ "$HTTP_CODE" = "200" ] || bar_fail "BAR 2.4 claim"
 # Approve WITH override_reason — signature is non-overridable, so a red signature still 412s.
 NEG4_APPROVE="$(api reviewer POST "/api/v1/packs/$NEG4/approve" "$APPROVE_BODY")"
+load_http_code # after api command substitution
 [ "$HTTP_CODE" = "412" ] || bar_fail "BAR 2.4 approve expected 412 on signature-red (HTTP $HTTP_CODE; body: $NEG4_APPROVE)"
 grep -qE "signature" <<<"$NEG4_APPROVE" \
   || bar_fail "BAR 2.4 approve 412 body did not reference the signature gate (body: $NEG4_APPROVE)"
@@ -634,6 +801,10 @@ api operator POST "/api/v1/packs/$PACK_UUID/disable" >/dev/null
 [ "$HTTP_CODE" = "200" ] || bar_fail "BAR 3.1 disable (HTTP $HTTP_CODE)"
 roll_and_wait
 pf_start
+DISABLED_PROBE="$(api mcp GET "/api/v1/mcp/servers/$PACK_ID/tools")"
+load_http_code # after api command substitution
+[ "$HTTP_CODE" != "200" ] \
+  || bar_fail "BAR 3.1 list_tools unexpectedly succeeded after disable (body: $DISABLED_PROBE)"
 DS="$(discovery_status)"
 [ "$DS" = "refused" ] || bar_fail "BAR 3.1 discovery_status=$DS (expected refused after disable)"
 echo "  Bar 3.1 OK: disable retracted the carve-out rows -> discovery_status=refused"
@@ -642,15 +813,17 @@ echo "  Bar 3.1 OK: disable retracted the carve-out rows -> discovery_status=ref
 # Re-materializes -> callable again.
 echo "==> BAR 3.2 — re-install (disabled->installed re-enable) -> auth_ready + call_tool"
 INSTALL2="$(api operator POST "/api/v1/packs/$PACK_UUID/install")"
+load_http_code # after api command substitution
 [ "$HTTP_CODE" = "200" ] || bar_fail "BAR 3.2 re-install (HTTP $HTTP_CODE; body: $INSTALL2)"
 roll_and_wait
 pf_start
-DS="$(discovery_status)"
-[ "$DS" = "auth_ready" ] || bar_fail "BAR 3.2 discovery_status=$DS (expected auth_ready after re-install)"
 CALL2="$(api mcp POST "/api/v1/mcp/servers/$PACK_ID/tools/call" \
   '{"tool_name":"describe_table","arguments":{"owner":"COGNIC","table":"EMPLOYEES"}}')"
+load_http_code # after api command substitution
 [ "$HTTP_CODE" = "200" ] || bar_fail "BAR 3.2 call_tool after re-install (HTTP $HTTP_CODE)"
 grep -qF "FULL_NAME" <<<"$CALL2" || bar_fail "BAR 3.2 call_tool after re-install lacked FULL_NAME (body: $CALL2)"
+DS="$(discovery_status)"
+[ "$DS" = "auth_ready" ] || bar_fail "BAR 3.2 discovery_status=$DS (expected auth_ready after re-install)"
 echo "  Bar 3.2 OK: re-install restored callability (auth_ready + call_tool)"
 
 # BAR 3.3 — revoke (operator). Retracts + terminal; the next cold probe refuses.
@@ -659,10 +832,15 @@ api operator POST "/api/v1/packs/$PACK_UUID/revoke" >/dev/null
 [ "$HTTP_CODE" = "200" ] || bar_fail "BAR 3.3 revoke (HTTP $HTTP_CODE)"
 roll_and_wait
 pf_start
+REVOKED_PROBE="$(api mcp GET "/api/v1/mcp/servers/$PACK_ID/tools")"
+load_http_code # after api command substitution
+[ "$HTTP_CODE" != "200" ] \
+  || bar_fail "BAR 3.3 list_tools unexpectedly succeeded after revoke (body: $REVOKED_PROBE)"
 DS="$(discovery_status)"
 [ "$DS" = "refused" ] || bar_fail "BAR 3.3 discovery_status=$DS (expected refused after revoke)"
 # revoked is terminal — re-install must refuse (no revoked->installed).
 REVOKED_INSTALL="$(api operator POST "/api/v1/packs/$PACK_UUID/install")"
+load_http_code # after api command substitution
 [ "$HTTP_CODE" = "409" ] || bar_fail "BAR 3.3 install-after-revoke expected 409 terminal (HTTP $HTTP_CODE; body: $REVOKED_INSTALL)"
 echo "  Bar 3.3 OK: revoke -> discovery_status=refused + install-after-revoke 409 (terminal)"
 echo "PROOF M4 (BAR 3) PASS"

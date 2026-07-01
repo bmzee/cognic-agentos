@@ -311,6 +311,33 @@ async def test_materialize_both_refs_valid_sets_override_and_adds_ip() -> None:
     assert result.tenant_allowlist_after == frozenset({"10.42.0.7"})
 
 
+async def test_materialize_uses_registry_server_id_for_override_not_config_record_id() -> None:
+    """The runtime-config record is keyed by the lifecycle UUID, but MCPHost
+    resolves ``server_url`` overrides by registry ``server_id`` (distribution
+    name). Materialize must therefore write the derived override under the
+    registry key, not the config-record key."""
+    override = StubOverrideStore()
+    allowlist = StubAllowlistStore()
+    rec = _record(pack_id="lifecycle-uuid-123")
+    config = StubConfigStore([rec])
+    vault = _vault_ok()
+    mat = _materializer(override=override, allowlist=allowlist, config=config, vault=vault)
+
+    await mat.materialize(
+        record=rec,
+        derived_pack_id="cognic-tool-oracle-schema",
+        actor_subject="installer@bank",
+        actor_type="human",
+        request_id="rid-derived",
+    )
+
+    assert (
+        await override.get(tenant_id="t1", pack_id="cognic-tool-oracle-schema")
+        == "http://10.42.0.7:8080/mcp"
+    )
+    assert await override.get(tenant_id="t1", pack_id="lifecycle-uuid-123") is None
+
+
 async def test_materialize_threads_request_id_to_every_mutator() -> None:
     # P desires two IPs; the override is set + both IPs added — all under one rid.
     override = StubOverrideStore()
@@ -778,6 +805,66 @@ async def test_retract_is_idempotent_on_empty_state() -> None:
     )
     assert override.mutations == 0
     assert allowlist.mutations == 0
+
+
+async def test_retract_clears_registry_server_id_override_not_config_record_id() -> None:
+    """Retract has the same split as materialize: the active-config union uses
+    the lifecycle/config key, while the derived override row is keyed by the
+    registry server id."""
+    override = StubOverrideStore()
+    allowlist = StubAllowlistStore()
+    await override.set_override(
+        tenant_id="t1",
+        pack_id="cognic-tool-oracle-schema",
+        server_url="http://10.42.0.7:8080/mcp",
+        actor_subject="seed",
+        actor_type="human",
+        request_id="seed",
+    )
+    await allowlist.add_ip(
+        tenant_id="t1",
+        ip="10.42.0.7",
+        actor_subject="seed",
+        actor_type="human",
+        request_id="seed",
+    )
+    p = _record(
+        pack_id="lifecycle-uuid-123",
+        internal_host_allowlist=("10.42.0.7",),
+        activation_status="disabled",
+    )
+    config = StubConfigStore([p])
+    vault = _vault_ok()
+    mat = _materializer(override=override, allowlist=allowlist, config=config, vault=vault)
+
+    await mat.retract(
+        tenant_id="t1",
+        config_pack_id="lifecycle-uuid-123",
+        derived_pack_id="cognic-tool-oracle-schema",
+        actor_subject="op",
+        actor_type="human",
+        request_id="rid-ret",
+    )
+
+    assert await override.get(tenant_id="t1", pack_id="cognic-tool-oracle-schema") is None
+    assert await allowlist.get_allowlist(tenant_id="t1") == frozenset()
+
+
+async def test_retract_requires_a_pack_key() -> None:
+    mat = _materializer(
+        override=StubOverrideStore(),
+        allowlist=StubAllowlistStore(),
+        config=StubConfigStore(),
+        vault=_vault_ok(),
+    )
+
+    with pytest.raises(TypeError, match="retract requires pack_id"):
+        await mat.retract(
+            tenant_id="t1",
+            actor_subject="op",
+            actor_type="human",
+            request_id="rid-ret",
+        )
 
 
 async def test_retract_threads_request_id() -> None:

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -71,3 +72,27 @@ def test_pub_digest_mismatch_fails_closed(tmp_path: Path, monkeypatch: pytest.Mo
 
 def test_attestation_list_matches_the_released_bundle_contract() -> None:
     assert set(srp.ATTESTATIONS) == _EXPECTED_ATTESTATIONS
+
+
+def test_download_retries_transient_gh_release_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[list[str]] = []
+    sleeps: list[int] = []
+
+    def fake_run(cmd: list[str], *, check: bool) -> subprocess.CompletedProcess[str]:
+        assert check is True
+        calls.append(cmd)
+        if len(calls) < 3:
+            raise subprocess.CalledProcessError(1, cmd)
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr("tests.integration.proof_m4.stage_released_pack.subprocess.run", fake_run)
+    monkeypatch.setattr(
+        "tests.integration.proof_m4.stage_released_pack.time.sleep",
+        lambda seconds: sleeps.append(seconds),
+    )
+
+    assert srp.download(tmp_path) == tmp_path
+    assert len(calls) == 3
+    assert sleeps == [3, 3]

@@ -269,6 +269,7 @@ class RuntimeConfigMaterializer:
         self,
         *,
         record: PackRuntimeConfigRecord,
+        derived_pack_id: str | None = None,
         actor_subject: str,
         actor_type: str,
         request_id: str,
@@ -298,6 +299,13 @@ class RuntimeConfigMaterializer:
         await self._validate_oauth_ref(record.oauth_credential_ref)
         await self._validate_as_ref(record.as_allowlist_ref)
 
+        # ``record.pack_id`` is the runtime-config/lifecycle key. The derived
+        # override row is read by MCPHost using the registry ``server_id``
+        # (distribution name), so callers that own both identities must pass the
+        # explicit derived key. The default preserves direct materializer tests
+        # and legacy single-key callers.
+        override_pack_id = derived_pack_id or record.pack_id
+
         # Step 2 — reconcile the tenant allow-list FIRST (the resource-leg permits
         # must be in place BEFORE the override exposes the pack at the internal
         # host; see the override-last fail-closed rationale in the docstring).
@@ -315,7 +323,7 @@ class RuntimeConfigMaterializer:
         # Step 3 — reconcile the pack-scoped override LAST (the exposure step).
         override_action = await self._reconcile_override(
             tenant_id=record.tenant_id,
-            pack_id=record.pack_id,
+            pack_id=override_pack_id,
             desired=record.server_url_override,
             actor_subject=actor_subject,
             actor_type=actor_type,
@@ -332,7 +340,9 @@ class RuntimeConfigMaterializer:
         self,
         *,
         tenant_id: str,
-        pack_id: str,
+        pack_id: str | None = None,
+        config_pack_id: str | None = None,
+        derived_pack_id: str | None = None,
         actor_subject: str,
         actor_type: str,
         request_id: str,
@@ -344,21 +354,35 @@ class RuntimeConfigMaterializer:
            (explicit P-exclusion — robust whether or not Task 6 has already flipped
            P's ``activation_status`` away from ``active``).
 
+        ``config_pack_id`` is the runtime-config/lifecycle key used for the
+        active-config union exclusion; ``derived_pack_id`` is the registry
+        ``server_id`` / distribution-name key used for the override row that
+        MCPHost reads. ``pack_id`` is retained as a legacy single-key shorthand.
+
         No Vault validation — retract has no Vault dependency.
         """
+        if config_pack_id is None:
+            config_pack_id = pack_id
+        if derived_pack_id is None:
+            derived_pack_id = config_pack_id
+        if config_pack_id is None or derived_pack_id is None:
+            raise TypeError("retract requires pack_id or both config_pack_id and derived_pack_id")
+
         # Step 1 — clear the override iff present.
-        current = await self._override.get(tenant_id=tenant_id, pack_id=pack_id)
+        current = await self._override.get(tenant_id=tenant_id, pack_id=derived_pack_id)
         if current is not None:
             await self._override.clear_override(
                 tenant_id=tenant_id,
-                pack_id=pack_id,
+                pack_id=derived_pack_id,
                 actor_subject=actor_subject,
                 actor_type=actor_type,
                 request_id=request_id,
             )
 
         # Step 2 — reconcile the allow-list to the union of OTHER active packs.
-        target = await self._compute_union_target(tenant_id=tenant_id, exclude_pack_id=pack_id)
+        target = await self._compute_union_target(
+            tenant_id=tenant_id, exclude_pack_id=config_pack_id
+        )
         await self._reconcile_allowlist(
             tenant_id=tenant_id,
             target=target,

@@ -12,10 +12,16 @@ COPY proof-m4-staging/pack-attestations/ /opt/cognic/pack-attestations/
 COPY proof-m4-staging/trust-roots/ /opt/cognic/trust-roots/
 COPY proof-m4-staging/policies/ /opt/cognic/policies/
 COPY proof-m4-staging/alembic.ini /app/alembic.ini
+# Proof-only current-source overlay: cached base images may carry an older
+# cognic_agentos package, while the live proof must exercise this branch's
+# operator-install code. The runner copies src/cognic_agentos into this context.
+RUN rm -rf /opt/venv/lib/python3.12/site-packages/cognic_agentos
+COPY cognic_agentos/ /opt/venv/lib/python3.12/site-packages/cognic_agentos/
 # proof-only MULTI-ACTOR app factory (vendored into the image so uvicorn can import it)
 COPY proof_m4/ /app/proof_m4/
-RUN chmod -R a+rX /opt/cognic /app/alembic.ini /app/proof_m4
+RUN chmod -R a+rX /opt/cognic /app/alembic.ini /app/proof_m4 /opt/venv/lib/python3.12/site-packages/cognic_agentos
 ENV COGNIC_PACK_ATTESTATION_ROOT_PATH=/opt/cognic/pack-attestations \
+    COGNIC_SIGNATURE_ROOT_PATH=/opt/cognic/pack-attestations \
     COGNIC_TRUST_ROOT_PREFIX=/opt/cognic/trust-roots \
     COGNIC_PLUGIN_ALLOWLIST_PATH=/opt/cognic/policies/plugin_allowlist.json
 # /app/proof_m4 is vendored (COPY, not pip-installed), so /app must be importable.

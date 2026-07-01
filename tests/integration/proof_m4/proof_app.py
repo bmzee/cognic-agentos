@@ -327,8 +327,9 @@ def create_proof_app() -> FastAPI:
 
 class ProofStagedTrustRootResolver:
     """PROOF-ONLY :class:`~cognic_agentos.protocol.trust_root_resolver.TrustRootResolver`
-    — resolves EVERY tenant to the single staged ``<trust_root_prefix>/_default``
-    root baked into the proof image (``COPY proof-m4-staging/trust-roots/
+    — resolves EVERY tenant to the single staged
+    ``<trust_root_prefix>/_default/cosign.pub`` trust root baked into the proof
+    image (``COPY proof-m4-staging/trust-roots/
     /opt/cognic/trust-roots/`` + ``COGNIC_TRUST_ROOT_PREFIX=/opt/cognic/trust-roots``).
 
     This is the SAME ``_default`` cosign trust root the kernel's boot
@@ -342,9 +343,9 @@ class ProofStagedTrustRootResolver:
 
     def __init__(self, *, settings: Settings) -> None:
         # ``settings.trust_root_prefix`` is the operator-approved root prefix the
-        # TrustGate canonicalises the trust root under; the staged ``_default``
-        # dir lives directly beneath it.
-        self._default_root: Path = Path(settings.trust_root_prefix) / "_default"
+        # TrustGate canonicalises the trust root under; boot registration uses
+        # the same locked convention: ``_default/cosign.pub``.
+        self._default_root: Path = Path(settings.trust_root_prefix) / "_default" / "cosign.pub"
 
     async def resolve_trust_root(self, *, tenant_id: str) -> Path:
         # Every proof tenant resolves to the single staged _default root.

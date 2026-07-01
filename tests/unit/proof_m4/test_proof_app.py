@@ -8,15 +8,18 @@ routers actually mount), and the Dockerfile that vendors the multi-actor factory
 """
 
 from pathlib import Path
+from typing import cast
 
 import pytest
 from fastapi import FastAPI, Request
 
+from cognic_agentos.core.config import Settings
 from cognic_agentos.portal.rbac.actor import Actor
 from tests.integration.proof_m4.proof_app import (
     PROOF_ROLE_HEADER,
     PROOF_TENANT,
     MultiActorProofBinder,
+    ProofStagedTrustRootResolver,
     UnknownProofRole,
 )
 
@@ -116,6 +119,21 @@ def test_absent_or_unknown_role_fails_loud() -> None:
         _bind("nope")  # unknown role
 
 
+@pytest.mark.asyncio
+async def test_proof_trust_root_resolver_returns_default_cosign_pub(tmp_path: Path) -> None:
+    class _SettingsStub:
+        trust_root_prefix: Path
+
+        def __init__(self, prefix: Path) -> None:
+            self.trust_root_prefix = prefix
+
+    resolver = ProofStagedTrustRootResolver(settings=cast(Settings, _SettingsStub(tmp_path)))
+
+    assert await resolver.resolve_trust_root(tenant_id="proof-m4") == (
+        tmp_path / "_default" / "cosign.pub"
+    )
+
+
 def test_image_uses_expected_base_and_root_then_cognic_ordering() -> None:
     assert "ARG BASE_IMAGE=cognic-agentos:proof1b2-base" in DF
     assert "FROM ${BASE_IMAGE}" in DF
@@ -138,9 +156,14 @@ def test_image_bakes_released_staging_tree() -> None:
 
 
 def test_image_vendors_multi_actor_proof_app_and_sets_trust_env_and_cmd() -> None:
+    assert "COPY cognic_agentos/ /opt/venv/lib/python3.12/site-packages/cognic_agentos/" in DF
     assert "COPY proof_m4/ /app/proof_m4/" in DF
-    assert "RUN chmod -R a+rX /opt/cognic /app/alembic.ini /app/proof_m4" in DF
+    assert (
+        "RUN chmod -R a+rX /opt/cognic /app/alembic.ini /app/proof_m4 "
+        "/opt/venv/lib/python3.12/site-packages/cognic_agentos"
+    ) in DF
     assert "COGNIC_PACK_ATTESTATION_ROOT_PATH=/opt/cognic/pack-attestations" in DF
+    assert "COGNIC_SIGNATURE_ROOT_PATH=/opt/cognic/pack-attestations" in DF
     assert "COGNIC_TRUST_ROOT_PREFIX=/opt/cognic/trust-roots" in DF
     assert "COGNIC_PLUGIN_ALLOWLIST_PATH=/opt/cognic/policies/plugin_allowlist.json" in DF
     assert "ENV PYTHONPATH=/app" in DF

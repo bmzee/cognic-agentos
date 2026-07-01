@@ -13,6 +13,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 # tests/integration/proof_m4/stage_released_pack.py -> parents[3] == repo root
@@ -47,20 +48,30 @@ def _sha256(p: Path) -> str:
 
 def download(dst_dir: Path) -> Path:
     dst_dir.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        [
-            "gh",
-            "release",
-            "download",
-            RELEASE_TAG,
-            "--repo",
-            RELEASE_REPO,
-            "--dir",
-            str(dst_dir),
-            "--clobber",
-        ],
-        check=True,
-    )
+    cmd = [
+        "gh",
+        "release",
+        "download",
+        RELEASE_TAG,
+        "--repo",
+        RELEASE_REPO,
+        "--dir",
+        str(dst_dir),
+        "--clobber",
+    ]
+    max_attempts = 5
+    for attempt in range(1, max_attempts + 1):
+        try:
+            subprocess.run(cmd, check=True)
+            break
+        except subprocess.CalledProcessError:
+            if attempt == max_attempts:
+                raise
+            print(
+                f"gh release download failed (attempt {attempt}/{max_attempts}); retrying in 3s",
+                file=sys.stderr,
+            )
+            time.sleep(3)
     return dst_dir
 
 
