@@ -23,6 +23,16 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6  # Node 24 — checkout@v4 was Node 20 (deprecated)
+        with:
+          # fetch-depth: 0 fetches full history + remote-tracking refs so the
+          # mcp_authz-untouched guard (tests/unit/architecture/
+          # test_mcp_authz_untouched.py, ADR-026 D6) can byte-compare against the
+          # base branch (origin/<base>). Default shallow depth-1 leaves the base
+          # ref unresolvable, degrading the guard to a loud SKIP — which would
+          # weaken the "mcp_authz untouched" proof exactly at the merge gate it
+          # protects. The guard additionally fails loud (never skips) IN CI if no
+          # base ref resolves, so a future depth regression is caught here.
+          fetch-depth: 0
 
       - name: Install uv
         uses: astral-sh/setup-uv@v7  # Node 24 — setup-uv@v5 was Node 20 (deprecated)

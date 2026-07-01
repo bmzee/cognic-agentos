@@ -43,6 +43,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
+from cognic_agentos.core.mcp_config.materializer import RuntimeConfigMaterializer
+from cognic_agentos.core.mcp_config.runtime_config import PackRuntimeConfigStore
 from cognic_agentos.packs.storage import PackRecordStore
 from cognic_agentos.portal.api.packs.author_routes import build_author_routes
 from cognic_agentos.portal.api.packs.evidence_routes import build_evidence_routes
@@ -70,6 +72,8 @@ def build_packs_router(
     trust_gate: TrustGate | None = None,
     trust_root_resolver: TrustRootResolver | None = None,
     adversarial_pass_rate_floor: float = _ADVERSARIAL_PASS_RATE_THRESHOLD,
+    runtime_config_materializer: RuntimeConfigMaterializer | None = None,
+    runtime_config_store: PackRuntimeConfigStore | None = None,
 ) -> APIRouter:
     """Build the pack-router sub-tree.
 
@@ -125,7 +129,17 @@ def build_packs_router(
     # T6 — operator surface endpoints under ``/api/v1/packs``
     # ({pack_id}/allow-list + {pack_id}/install [POST + DELETE] +
     # {pack_id}/disable + {pack_id}/revoke)
-    router.include_router(build_operator_routes(store=store))
+    # M4 (ADR-026 D1/D6, Task 7) — thread the 2 body-time saga collaborators
+    # (materializer + runtime-config store). build_operator_routes enforces
+    # all-2-or-none; the plugin registry is a REQUEST-time gate (read from
+    # app.state.plugin_registry), so it is deliberately NOT threaded here.
+    router.include_router(
+        build_operator_routes(
+            store=store,
+            materializer=runtime_config_materializer,
+            config_store=runtime_config_store,
+        )
+    )
     # T7 inspection surface under ``/api/v1/packs``: list endpoint
     # registered DIRECTLY on the parent (path "" + parent prefix
     # produces exact /api/v1/packs); {pack_id} sub-handlers on

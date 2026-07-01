@@ -76,7 +76,7 @@ import logging
 from collections.abc import Iterator
 from typing import Annotated, Final, Literal, Protocol, get_args, runtime_checkable
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from cognic_agentos.core.mcp_config.materializer import MaterializeRejected, MaterializeResult
 from cognic_agentos.core.mcp_config.runtime_config import PackRuntimeConfigRecord
@@ -98,15 +98,25 @@ _LOG = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 #
 # The operator install/disable/revoke handlers gain the M4 runtime-config
-# materialization saga. The three collaborators (the materializer, the
-# runtime-config record store, and the plugin registry) are declared here as
-# narrow consumer-owned Protocols per
-# ``[[feedback_consumer_owned_protocol_for_unlanded_dep]]`` so this module
-# ships BEFORE the Task-7 composition root wires the real instances. When any
-# of the three is ``None`` (the pre-Task-7 wiring — e.g. the current
+# materialization saga. The TWO body-time collaborators (the materializer + the
+# runtime-config record store) are declared here as narrow consumer-owned
+# Protocols per ``[[feedback_consumer_owned_protocol_for_unlanded_dep]]`` so this
+# module ships BEFORE the Task-7 composition root wires the real instances. When
+# BOTH are ``None`` (the pre-Task-7 wiring — e.g. the current
 # ``build_packs_router(store=...)`` call site + the existing test suite) the
 # handlers fall back to the pre-M4 plain ``store.transition`` delegate path;
-# the saga runs ONLY when all three are wired.
+# the saga runs ONLY when BOTH are wired (all-2-or-none — partial is a
+# ValueError at construction).
+#
+# The plugin registry is DELIBERATELY NOT a body-time collaborator: it is
+# populated in the ``create_app`` LIFESPAN (boot-time trust-registration), while
+# the operator router is mounted at ``create_app`` BODY time — so closing over a
+# body-time registry object would see an empty/None registry. Install gate 2
+# instead reads ``request.app.state.plugin_registry`` at REQUEST time (ADR-026
+# D6, Task-7 option B). A ``None`` registry (boot-registration failed / not yet
+# populated) refuses fail-closed ``install_plugin_registry_unavailable`` (503);
+# a populated registry that does not carry the pack refuses
+# ``install_pack_not_registered`` (409).
 
 
 @runtime_checkable
@@ -185,7 +195,8 @@ class _RegisteredPackReader(Protocol):
 #: ``[[feedback_count_enum_values_via_ast_not_regex]]``).
 InstallRefusalReason = Literal[
     # Gate refusals (read-only pre-checks — refuse BEFORE any write).
-    "install_pack_not_registered",  # gate 2 — not boot-registered/trusted
+    "install_plugin_registry_unavailable",  # gate 2 — app.state.plugin_registry None (503 infra)
+    "install_pack_not_registered",  # gate 2 — registry present, pack not boot-registered/trusted
     "install_runtime_config_missing",  # gate 3 — no desired runtime-config record
     "install_runtime_config_incomplete",  # gate 3 — a required Vault ref is None
     "install_runtime_config_vault_ref_unresolved",  # gate 4 — MaterializeRejected
@@ -261,25 +272,29 @@ def build_operator_routes(
     store: PackRecordStore,
     materializer: _MaterializerLike | None = None,
     config_store: _ConfigStoreLike | None = None,
-    registry: _RegisteredPackReader | None = None,
 ) -> APIRouter:
     """Build the operator-surface sub-router.
 
-    **M4 (ADR-026 D1/D6) — the runtime-config materialization saga.** The three
-    keyword-only collaborators (``materializer`` / ``config_store`` /
-    ``registry``) are the M4 install/disable/revoke saga dependencies, wired
-    ALL-or-NONE:
+    **M4 (ADR-026 D1/D6) — the runtime-config materialization saga.** The TWO
+    body-time keyword-only collaborators (``materializer`` / ``config_store``)
+    are the M4 install/disable/revoke saga dependencies, wired ALL-2-or-NONE:
 
-    - **all three wired** (the Task-7 composition root) → the install/disable/
-      revoke handlers run the M4 saga;
-    - **all three absent** (default ``None``) → the handlers fall back to the
-      pre-M4 plain ``store.transition`` delegate, so this factory stays
+    - **both wired** (the Task-7 composition root) → the install/disable/revoke
+      handlers run the M4 saga;
+    - **both absent** (default ``None``) → the handlers fall back to the pre-M4
+      plain ``store.transition`` delegate, so this factory stays
       backward-compatible with the pre-Task-7 call site
       (``build_packs_router(store=...)`` → ``build_operator_routes(store=store)``);
-    - **partial (1 or 2 of 3 present)** → :class:`ValueError` at construction. A
+    - **partial (exactly one present)** → :class:`ValueError` at construction. A
       partial wiring is a mis-configuration that would SILENTLY bypass the M4
       install materialization gates on a critical route — so it fails fast at
       construction rather than soft-downgrading.
+
+    The **plugin registry is NOT a body-time collaborator** (ADR-026 D6, Task-7
+    option B). It is populated in the ``create_app`` LIFESPAN (boot-time
+    trust-registration) while this router mounts at ``create_app`` BODY time, so
+    install gate 2 reads ``request.app.state.plugin_registry`` at REQUEST time
+    instead of closing over a (would-be empty) body-time object.
 
     ``allow_list`` + ``uninstall`` are UNCHANGED regardless.
 
@@ -326,21 +341,25 @@ def build_operator_routes(
     _require_tenant_ownership = RequireTenantOwnership(pack_id_param="pack_id")
     _require_human_actor = RequireHumanActor()
 
-    #: M4 saga is active ONLY when all three collaborators are wired (Task-7
-    #: composition root). PARTIAL wiring (1 or 2 of 3) is a mis-configuration —
+    #: M4 saga is active ONLY when BOTH body-time collaborators are wired (Task-7
+    #: composition root). PARTIAL wiring (exactly one) is a mis-configuration —
     #: FAIL FAST at construction rather than silently downgrading the hardened
     #: install route to the pre-M4 path (which would bypass the M4 gates). The
     #: all-absent path keeps the pre-M4 plain delegate the existing suite runs.
-    _m4_deps_present = sum(dep is not None for dep in (materializer, config_store, registry))
-    if _m4_deps_present not in (0, 3):
+    #: The plugin registry is a REQUEST-time gate (read from app.state), NOT a
+    #: body-time dep — so it is intentionally excluded from this all-2-or-none.
+    _m4_deps_present = sum(dep is not None for dep in (materializer, config_store))
+    if _m4_deps_present not in (0, 2):
         raise ValueError(
-            "build_operator_routes: the M4 saga collaborators (materializer, "
-            "config_store, registry) must be ALL wired or ALL absent; a partial "
-            f"wiring ({_m4_deps_present}/3 present) would silently bypass the M4 "
-            "install materialization gates. Wire all three (Task-7 composition "
-            "root) or none (pre-M4 backward-compat)."
+            "build_operator_routes: the M4 body-time saga collaborators "
+            "(materializer, config_store) must be BOTH wired or BOTH absent; a "
+            f"partial wiring ({_m4_deps_present}/2 present) would silently bypass "
+            "the M4 install materialization gates. Wire both (Task-7 composition "
+            "root) or neither (pre-M4 backward-compat). The plugin registry is NOT "
+            "a body-time dep — install gate 2 reads it from app.state at request "
+            "time."
         )
-    _m4_enabled = _m4_deps_present == 3
+    _m4_enabled = _m4_deps_present == 2
 
     async def _plain_transition(
         *,
@@ -494,14 +513,21 @@ def build_operator_routes(
                 secondary=comp_exc,
             ) from primary
 
-    async def _run_install_saga(*, actor: Actor, record: PackRecord) -> PackResponse:
+    async def _run_install_saga(
+        *, actor: Actor, record: PackRecord, registry: _RegisteredPackReader | None
+    ) -> PackResponse:
         """The M4 install saga — TRANSITION-FIRST (record governance BEFORE
         exposure); order is load-bearing for the fail-CLOSED invariant.
 
         ``cfg_pack_id = str(record.id)`` (the UUID string — the config-store +
         materializer key, matching Task-3's ``configure`` write);
         ``dist_name = record.pack_id`` (the distribution-name string — the
-        registry gate key).
+        registry gate key). ``registry`` is read by the install HANDLER from
+        ``request.app.state.plugin_registry`` at request time (ADR-026 D6 option
+        B) and threaded here — a ``None`` registry refuses fail-closed 503
+        ``install_plugin_registry_unavailable`` (gate 2, infra); a populated
+        registry that does not carry ``dist_name`` refuses 409
+        ``install_pack_not_registered`` (gate 2, trust).
 
         Gates 1-3 are read-only pre-checks (refuse before any write). Then the
         write order is **B transition-to-``installed`` FIRST → A materialize
@@ -520,7 +546,7 @@ def build_operator_routes(
         ``allow_listed`` (there is no un-install transition; Task 5's
         ``disabled → installed`` re-enable makes it recoverable).
         """
-        assert materializer is not None and config_store is not None and registry is not None
+        assert materializer is not None and config_store is not None
         cfg_pack_id = str(record.id)
         dist_name = record.pack_id
         tenant = actor.tenant_id
@@ -536,6 +562,19 @@ def build_operator_routes(
             raise _refuse_install(actor=actor, record=record, reason=gate1_reason)
 
         # -- Gate 2 — boot-registered / trusted (read-only) ------------------
+        # The registry is read at REQUEST time from ``app.state.plugin_registry``
+        # (populated by the lifespan's boot trust-registration). A ``None``
+        # registry is an infra/config failure (boot-registration failed OR the
+        # SDK-gated boot did not run) — refuse fail-CLOSED 503, DISTINCT from the
+        # 409 "registry present but this pack is not trust-registered" refusal so
+        # operators get a clean infra-vs-trust diagnosis.
+        if registry is None:
+            raise _refuse_install(
+                actor=actor,
+                record=record,
+                reason="install_plugin_registry_unavailable",
+                status=503,
+            )
         if not any(
             c.distribution_name == dist_name for c in registry.iter_registered_pack_candidates()
         ):
@@ -1014,6 +1053,7 @@ def build_operator_routes(
         summary="Install an allow-listed pack (transition: allow_listed → installed)",
     )
     async def install(
+        request: Request,
         actor: Annotated[Actor, Depends(_require_pack_install)],
         record: Annotated[PackRecord, Depends(_require_tenant_ownership)],
     ) -> PackResponse:
@@ -1049,17 +1089,27 @@ def build_operator_routes(
         ``portal.packs.install_refused``.
 
         **M4 (ADR-026 D1/D6) — the materialization saga.** When the
-        materializer + config_store + registry are all wired (Task-7
-        composition root) this handler runs the install saga (gates 1-3
-        read-only pre-checks → transition-to-``installed`` FIRST →
-        materialize (expose) → set-config-active LAST, recording
-        governance BEFORE exposure so a crash is fail-CLOSED; a post-
-        transition failure compensates FORWARD to ``disabled``) via
-        :func:`_run_install_saga`. On the pre-Task-7 None path it falls
-        back to the pre-M4 plain ``store.transition`` delegate.
+        materializer + config_store are both wired (Task-7 composition
+        root) this handler runs the install saga (gates 1-3 read-only
+        pre-checks → transition-to-``installed`` FIRST → materialize
+        (expose) → set-config-active LAST, recording governance BEFORE
+        exposure so a crash is fail-CLOSED; a post-transition failure
+        compensates FORWARD to ``disabled``) via :func:`_run_install_saga`.
+        Gate 2's plugin registry is read HERE from
+        ``request.app.state.plugin_registry`` at request time (ADR-026 D6
+        option B — the lifespan populates it AFTER this router mounts). On
+        the pre-Task-7 both-None path it falls back to the pre-M4 plain
+        ``store.transition`` delegate.
         """
         if _m4_enabled:
-            return await _run_install_saga(actor=actor, record=record)
+            # Gate 2 reads the boot-registered registry at REQUEST time: the
+            # lifespan populates ``app.state.plugin_registry`` AFTER this router
+            # mounts at body time. ``getattr`` (not attribute access) so a
+            # mis-wired app missing the attr refuses fail-closed via the saga's
+            # ``None`` gate (503 ``install_plugin_registry_unavailable``) rather
+            # than raising a bare ``AttributeError``.
+            registry = getattr(request.app.state, "plugin_registry", None)
+            return await _run_install_saga(actor=actor, record=record, registry=registry)
         return await _plain_transition(
             actor=actor,
             record=record,

@@ -1,13 +1,19 @@
-"""PR-2b-1 (ADR-002 amendment) — MCP operator override + internal-host allow-list
-router mount in create_app.
+"""ADR-026 D7 (M4 Task 7) — the PR-2b-1 standalone MCP override + internal-host
+allow-list WRITE routes are SUPERSEDED and are NO LONGER MOUNTED by create_app.
 
-3-state mount mirroring the config-overlay block, gated on the PAIR of stores
-(build_runtime constructs them together): BOTH supplied -> mount the override +
-allow-list operator routers under /api/v1 + set both
-app.state.mcp_*_router_mounted flags True; partial config (exactly one) ->
-no mount + EXACTLY ONE fail-loud warning + both flags False; neither -> no mount,
-both flags False, and STAY QUIET (pack-only deployments without an internal MCP
-Service are legitimate — no warning).
+Under M4 the ``RuntimeConfigMaterializer`` is the SOLE writer of the derived
+override / allow-list carve-out rows (projected from the operator-authored
+DESIRED runtime-config record by the install/disable/revoke saga). A second
+direct-write path would let an operator drift the derived rows out from under the
+desired-config record (two sources of truth), so the standalone write routes are
+gone.
+
+This file pins the supersession: even when BOTH stores are supplied the
+standalone write routes are absent from ``app.routes``, both introspection flags
+stay ``False``, and the old 3-state partial-config warning is never emitted (the
+mount block that carried it is removed). The route FACTORIES themselves still
+exist + are unit-tested in ``tests/unit/portal/api/mcp_config/test_routes.py`` —
+they are simply not wired into the app.
 """
 
 from __future__ import annotations
@@ -27,7 +33,6 @@ from cognic_agentos.portal.api.app import create_app
 _OVERRIDE_PATH = "/api/v1/tenants/{tenant_id}/mcp-overrides/{pack_id}"
 _ALLOWLIST_PATH = "/api/v1/tenants/{tenant_id}/mcp-allowlist"
 _PARTIAL_WARNING = "portal.mcp_config_router_unmounted_partial_config"
-_PARTIAL_REASON = "mcp_override_store_and_allowlist_store_both_required"
 
 
 def _stores() -> tuple[MCPServerUrlOverrideStore, MCPInternalHostAllowlistStore]:
@@ -40,64 +45,53 @@ def _has(app: object, path: str) -> bool:
     return any(getattr(r, "path", "") == path for r in app.routes)  # type: ignore[attr-defined]
 
 
-def _assert_partial_warning(caplog: pytest.LogCaptureFixture) -> None:
-    # The fail-loud startup-misconfig contract: EXACTLY one structured warning
-    # with the closed-enum reason — not just "route absent".
-    warnings = [r for r in caplog.records if r.getMessage() == _PARTIAL_WARNING]
-    assert len(warnings) == 1
-    assert getattr(warnings[0], "reason", None) == _PARTIAL_REASON
+def _assert_superseded(app: object) -> None:
+    """D7 invariant: both flags False + neither standalone write path present."""
+    assert app.state.mcp_override_router_mounted is False  # type: ignore[attr-defined]
+    assert app.state.mcp_allowlist_router_mounted is False  # type: ignore[attr-defined]
+    assert not _has(app, _OVERRIDE_PATH)
+    assert not _has(app, _ALLOWLIST_PATH)
 
 
-def test_mcp_config_routers_mounted_when_both_stores_present() -> None:
+def test_standalone_mcp_write_routes_not_mounted_even_with_both_stores(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """D7 — even when BOTH stores are supplied the standalone override +
+    allow-list WRITE routes are NOT mounted (the materializer is the sole
+    writer), both flags stay False, and the removed 3-state partial warning is
+    never emitted. (Pre-D7 this exact call mounted both routes + set the flags
+    True — the threat-model-revert pin for D7.)"""
     override_store, allowlist_store = _stores()
-    app = create_app(
-        build_settings_without_env_file(),
-        mcp_override_store=override_store,
-        mcp_internal_host_allowlist_store=allowlist_store,
-    )
-    assert app.state.mcp_override_router_mounted is True
-    assert app.state.mcp_allowlist_router_mounted is True
-    assert _has(app, _OVERRIDE_PATH)
-    assert _has(app, _ALLOWLIST_PATH)
-
-
-def test_mcp_config_routers_silent_on_zero(caplog: pytest.LogCaptureFixture) -> None:
-    # ZERO stores -> no mount, both flags False, route table untouched, and STAY
-    # QUIET: a pack-only deploy without an internal MCP Service is legitimate, so
-    # it must emit NO partial-config warning.
-    with caplog.at_level(logging.WARNING, logger="cognic_agentos.portal.api.app"):
-        app = create_app(build_settings_without_env_file())
-    assert app.state.mcp_override_router_mounted is False
-    assert app.state.mcp_allowlist_router_mounted is False
-    assert not _has(app, _OVERRIDE_PATH)
-    assert not _has(app, _ALLOWLIST_PATH)
-    assert not [r for r in caplog.records if r.getMessage() == _PARTIAL_WARNING]
-
-
-def test_mcp_config_routers_partial_override_only_fails_loud(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    override_store, _ = _stores()
-    with caplog.at_level(logging.WARNING, logger="cognic_agentos.portal.api.app"):
-        app = create_app(build_settings_without_env_file(), mcp_override_store=override_store)
-    assert app.state.mcp_override_router_mounted is False
-    assert app.state.mcp_allowlist_router_mounted is False
-    assert not _has(app, _OVERRIDE_PATH)
-    assert not _has(app, _ALLOWLIST_PATH)
-    _assert_partial_warning(caplog)
-
-
-def test_mcp_config_routers_partial_allowlist_only_fails_loud(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    _, allowlist_store = _stores()
     with caplog.at_level(logging.WARNING, logger="cognic_agentos.portal.api.app"):
         app = create_app(
             build_settings_without_env_file(),
+            mcp_override_store=override_store,
             mcp_internal_host_allowlist_store=allowlist_store,
         )
-    assert app.state.mcp_override_router_mounted is False
-    assert app.state.mcp_allowlist_router_mounted is False
-    assert not _has(app, _OVERRIDE_PATH)
-    assert not _has(app, _ALLOWLIST_PATH)
-    _assert_partial_warning(caplog)
+    _assert_superseded(app)
+    assert not [r for r in caplog.records if r.getMessage() == _PARTIAL_WARNING]
+
+
+def test_standalone_mcp_write_routes_absent_with_no_stores(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """No stores → routes absent, flags False, quiet (posture unchanged vs
+    pre-D7 for the zero-store case; only the both-stores case changed)."""
+    with caplog.at_level(logging.WARNING, logger="cognic_agentos.portal.api.app"):
+        app = create_app(build_settings_without_env_file())
+    _assert_superseded(app)
+    assert not [r for r in caplog.records if r.getMessage() == _PARTIAL_WARNING]
+
+
+def test_standalone_mcp_write_route_partial_store_no_longer_warns(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A partial store config (exactly one) is now INERT for routing — D7 removed
+    the 3-state mount, so it neither mounts nor emits the old partial-config
+    warning. Pins that the warning was removed WITH the mount (not left
+    dangling on a now-unreachable branch)."""
+    override_store, _ = _stores()
+    with caplog.at_level(logging.WARNING, logger="cognic_agentos.portal.api.app"):
+        app = create_app(build_settings_without_env_file(), mcp_override_store=override_store)
+    _assert_superseded(app)
+    assert not [r for r in caplog.records if r.getMessage() == _PARTIAL_WARNING]

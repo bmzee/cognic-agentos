@@ -323,17 +323,23 @@ def _build_app(
     has None M4 deps and would shadow ours under FastAPI's first-match routing).
     ``app.state.actor_binder`` is wired by ``create_app``; we set
     ``app.state.pack_record_store`` ourselves (``RequireTenantOwnership`` reads
-    it) then mount the M4 operator router alone."""
+    it) then mount the M4 operator router alone.
+
+    **Registry is REQUEST-TIME (ADR-026 D6 option B).** Install gate 2 reads
+    ``request.app.state.plugin_registry`` — so we pass ``registry`` as the
+    ``create_app(plugin_registry=...)`` kwarg (the adapter-less lifespan sets
+    ``app.state.plugin_registry = plugin_registry`` and returns early, so the
+    request-time read finds it), NOT as a ``build_operator_routes`` factory
+    argument (which now takes only the 2 body-time deps, all-2-or-none)."""
     from cognic_agentos.portal.api.app import create_app
 
-    app = create_app(actor_binder=_StubBinder(actor))
+    app = create_app(actor_binder=_StubBinder(actor), plugin_registry=registry)
     app.state.pack_record_store = store
     app.include_router(
         build_operator_routes(
             store=store,
             materializer=materializer,
             config_store=config_store,
-            registry=registry,
         ),
         prefix="/api/v1/packs",
     )
@@ -475,10 +481,11 @@ def test_install_refusal_reason_closed_enum_count() -> None:
     import typing
 
     values = set(typing.get_args(operator_routes.InstallRefusalReason))
-    # 8 install reasons + 8 disable/revoke analogues = 16.
+    # 9 install reasons + 8 disable/revoke analogues = 17.
     assert len(values) == operator_routes._INSTALL_REFUSAL_REASON_COUNT
-    assert operator_routes._INSTALL_REFUSAL_REASON_COUNT == 16
+    assert operator_routes._INSTALL_REFUSAL_REASON_COUNT == 17
     for reason in (
+        "install_plugin_registry_unavailable",
         "install_pack_not_registered",
         "install_runtime_config_missing",
         "install_runtime_config_incomplete",
@@ -500,9 +507,10 @@ def test_install_refusal_reason_closed_enum_count() -> None:
 
 
 def test_factory_accepts_m4_dependencies() -> None:
-    """The extended factory accepts the 3 optional M4 params AND stays
+    """The extended factory accepts the 2 body-time M4 params AND stays
     backward-compatible (``build_operator_routes(store=...)`` alone works so the
-    pre-Task-7 composition root + the existing suite keep passing)."""
+    pre-Task-7 composition root + the existing suite keep passing). The registry
+    is NOT a factory param (request-time gate) — so it is absent here."""
     from fastapi import APIRouter
 
     class _Stub: ...
@@ -513,30 +521,30 @@ def test_factory_accepts_m4_dependencies() -> None:
             store=_Stub(),  # type: ignore[arg-type]
             materializer=_StubMaterializer(),
             config_store=_Stub(),  # type: ignore[arg-type]
-            registry=_FakeRegistry(()),
         ),
         APIRouter,
     )
 
 
 def test_partial_m4_wiring_raises_value_error() -> None:
-    """P3 — a PARTIAL M4 wiring (1 or 2 of the 3 collaborators present) is a
-    mis-configuration that would SILENTLY bypass the M4 install materialization
-    gates on the hardened install route, so ``build_operator_routes`` FAILS FAST
-    with ValueError. Only all-3 (saga) + all-0 (pre-M4 backward-compat) are valid
-    shapes (both pinned by ``test_factory_accepts_m4_dependencies``)."""
+    """P3 (all-2-or-none) — a PARTIAL M4 body-time wiring (exactly ONE of
+    ``materializer`` / ``config_store`` present) is a mis-configuration that
+    would SILENTLY bypass the M4 install materialization gates on the hardened
+    install route, so ``build_operator_routes`` FAILS FAST with ValueError. Only
+    both (saga) + neither (pre-M4 backward-compat) are valid shapes (both pinned
+    by ``test_factory_accepts_m4_dependencies``). The registry is excluded (it is
+    a request-time gate, not a body-time dep)."""
 
     class _Stub: ...
 
-    # 1 of 3 present → ValueError.
-    with pytest.raises(ValueError, match="ALL wired or ALL absent"):
+    # materializer only (1 of 2) → ValueError.
+    with pytest.raises(ValueError, match="BOTH wired or BOTH absent"):
         build_operator_routes(store=_Stub(), materializer=_StubMaterializer())  # type: ignore[arg-type]
-    # 2 of 3 present → ValueError.
-    with pytest.raises(ValueError, match="ALL wired or ALL absent"):
+    # config_store only (1 of 2) → ValueError.
+    with pytest.raises(ValueError, match="BOTH wired or BOTH absent"):
         build_operator_routes(
             store=_Stub(),  # type: ignore[arg-type]
             config_store=_Stub(),  # type: ignore[arg-type]
-            registry=_FakeRegistry(()),
         )
 
 
@@ -839,6 +847,112 @@ class TestInstallGateNegatives:
         assert response.status_code == 409
         assert response.json()["detail"]["reason"] == "lifecycle_transition_invalid_state_pair"
         assert mat.materialize_calls == [], "materialize MUST NOT run on a gate-1 refusal"
+        await _assert_no_derived_rows(
+            override_store=override_store, allowlist_store=allowlist_store, record=record
+        )
+
+
+# --------------------------------------------------------------------------- #
+# Install — gate 2 registry is a REQUEST-TIME gate (ADR-026 D6 option B): read
+# from app.state.plugin_registry per-request, NOT closed over at factory time.
+# --------------------------------------------------------------------------- #
+
+
+class TestInstallRegistryRequestTimeGate:
+    """M4 gate 2 reads the plugin registry at REQUEST time from
+    ``app.state.plugin_registry`` — the lifespan populates it AFTER the operator
+    router mounts at body time. Pins: (1) the read is request-time (a value set
+    AFTER app build is honoured); (2) a ``None`` registry refuses fail-closed 503
+    ``install_plugin_registry_unavailable`` (infra), DISTINCT from (3) a
+    populated-but-empty registry's 409 ``install_pack_not_registered`` (trust)."""
+
+    async def test_gate2_registry_read_at_request_time_not_factory_time(
+        self,
+        store: PackRecordStore,
+        config_store: PackRuntimeConfigStore,
+        real_materializer: RuntimeConfigMaterializer,
+    ) -> None:
+        """The app is built with ``plugin_registry=None`` (so a factory-time
+        closure would capture None → 503). Setting ``app.state.plugin_registry``
+        to a registry CARRYING the pack AFTER build — right before the request —
+        makes gate 2 PASS (install 200). Proves the registry is read per-request,
+        not closed over at mount time."""
+        record = await _seed_allow_listed(store)
+        await _write_config(config_store, record=record)
+        app = _build_app(
+            actor=_make_operator_actor(),
+            store=store,
+            materializer=real_materializer,
+            config_store=config_store,
+            registry=None,  # app.state.plugin_registry = None after the lifespan
+        )
+        with TestClient(app) as client:
+            # Populate the registry AFTER the lifespan set it None — the
+            # request-time read must observe THIS value (a factory closure would
+            # have captured the None and refused 503).
+            app.state.plugin_registry = _FakeRegistry((record.pack_id,))
+            response = client.post(f"/api/v1/packs/{record.id}/install")
+
+        assert response.status_code == 200, response.text
+        assert response.json()["state"] == "installed"
+
+    async def test_gate2_registry_unavailable_refuses_503_fail_closed(
+        self,
+        store: PackRecordStore,
+        override_store: MCPServerUrlOverrideStore,
+        allowlist_store: MCPInternalHostAllowlistStore,
+        config_store: PackRuntimeConfigStore,
+        real_materializer: RuntimeConfigMaterializer,
+    ) -> None:
+        """``app.state.plugin_registry is None`` (boot trust-registration failed
+        / not populated) → gate 2 refuses fail-CLOSED 503
+        ``install_plugin_registry_unavailable`` (infra), DISTINCT from the 409
+        trust refusal. No writes, no transition."""
+        record = await _seed_allow_listed(store)
+        await _write_config(config_store, record=record)
+        app = _build_app(
+            actor=_make_operator_actor(),
+            store=store,
+            materializer=real_materializer,
+            config_store=config_store,
+            registry=None,  # → app.state.plugin_registry = None
+        )
+        with TestClient(app) as client:
+            response = client.post(f"/api/v1/packs/{record.id}/install")
+
+        assert response.status_code == 503
+        assert response.json()["detail"]["reason"] == "install_plugin_registry_unavailable"
+        await _assert_no_derived_rows(
+            override_store=override_store, allowlist_store=allowlist_store, record=record
+        )
+        reloaded = await store.load(record.id)
+        assert reloaded is not None and reloaded.state == "allow_listed"  # no transition
+
+    async def test_gate2_empty_registry_refuses_pack_not_registered(
+        self,
+        store: PackRecordStore,
+        override_store: MCPServerUrlOverrideStore,
+        allowlist_store: MCPInternalHostAllowlistStore,
+        config_store: PackRuntimeConfigStore,
+        real_materializer: RuntimeConfigMaterializer,
+    ) -> None:
+        """A populated-but-EMPTY registry (present, zero candidates) → gate 2
+        refuses 409 ``install_pack_not_registered`` (trust), NOT the 503 infra
+        reason — the registry IS available, the pack is just not boot-trusted."""
+        record = await _seed_allow_listed(store)
+        await _write_config(config_store, record=record)
+        app = _build_app(
+            actor=_make_operator_actor(),
+            store=store,
+            materializer=real_materializer,
+            config_store=config_store,
+            registry=_FakeRegistry(()),  # present but empty
+        )
+        with TestClient(app) as client:
+            response = client.post(f"/api/v1/packs/{record.id}/install")
+
+        assert response.status_code == 409
+        assert response.json()["detail"]["reason"] == "install_pack_not_registered"
         await _assert_no_derived_rows(
             override_store=override_store, allowlist_store=allowlist_store, record=record
         )
