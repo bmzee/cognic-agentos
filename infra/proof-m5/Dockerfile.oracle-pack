@@ -1,0 +1,14 @@
+# infra/proof-m5/Dockerfile.oracle-pack — the released oracle-schema MCP tool
+# Service, M5: v0.2.0 (the DLP-governed re-release — the delta is manifest-only:
+# [data_governance].dlp_pre_hooks binds the two schema-guard hooks, which the
+# KERNEL enforces pre-invocation; the tool server itself is unchanged from v0.1.0).
+# Built from the DOWNLOADED v0.2.0 release wheel (released assets only) staged at
+# proof-m5-staging/wheel/ by stage-packs.sh (sha256-pinned), with the pack's full
+# runtime deps. Context = infra/proof-m5/.
+FROM python:3.12-slim
+WORKDIR /app
+RUN pip install --no-cache-dir \
+      "mcp==1.27.0" "uvicorn[standard]>=0.35" "oracledb>=2.5" "PyJWT[crypto]>=2.10,<3"
+COPY proof-m5-staging/wheel/cognic_tool_oracle_schema-0.2.0-py3-none-any.whl /tmp/
+RUN pip install --no-cache-dir --no-deps /tmp/cognic_tool_oracle_schema-0.2.0-py3-none-any.whl
+CMD ["python", "-m", "cognic_tool_oracle_schema.server"]
