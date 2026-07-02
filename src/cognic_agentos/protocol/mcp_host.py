@@ -265,6 +265,11 @@ class MCPServerEntry:
         carried at registration time (Sprint 13.5b2); feeds the
         value-free ApprovalEnvelope on the wired approval path. Empty
         default keeps pre-13.5b2 constructors green.
+      - ``dlp_pre_hooks`` — manifest ``[data_governance].dlp_pre_hooks``
+        (M5); declared dlp_pre hook ids the host scans before invocation.
+        Empty ⇒ no-op.
+      - ``manifest_purpose`` — manifest ``[data_governance].purpose``
+        (M5); threaded into the ``HookContext`` at scan time.
     """
 
     server_id: str
@@ -274,6 +279,15 @@ class MCPServerEntry:
     risk_tier: str
     pack_signature_digest: str
     data_classes: tuple[str, ...] = ()
+    dlp_pre_hooks: tuple[str, ...] = ()
+    """Manifest ``[data_governance].dlp_pre_hooks`` (M5, ADR-017): the
+    calling tool pack's declared dlp_pre hook ids the host scans before
+    invocation. Empty ⇒ no DLP scan (byte-identical no-op). Populated at
+    registration time by the off-gate ``harness/mcp_host.py`` mapper."""
+    manifest_purpose: str = ""
+    """Manifest ``[data_governance].purpose`` (M5); threaded verbatim into
+    the ``HookContext.manifest_purpose`` field at scan time. Empty default
+    keeps pre-M5 constructors green."""
 
 
 @dataclasses.dataclass(frozen=True, slots=True)

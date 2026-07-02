@@ -214,6 +214,46 @@ def host(
 
 
 # ---------------------------------------------------------------------------
+# MCPServerEntry — M5 DLP fields (dlp_pre_hooks + manifest_purpose)
+# ---------------------------------------------------------------------------
+
+
+class TestMCPServerEntryDLPFields:
+    """M5 (ADR-017): ``MCPServerEntry`` carries the calling pack's declared
+    dlp_pre hook ids + manifest purpose. Additive with empty defaults so
+    every pre-M5 constructor (incl. the M3/M4 oracle pack) stays green."""
+
+    def test_dlp_fields_default_empty(self, host_module: Any) -> None:
+        entry = host_module.MCPServerEntry(
+            server_id="p",
+            server_url="https://h/mcp",
+            transport_kind="streamable-http",
+            manifest_scopes=("s",),
+            risk_tier="read_only",
+            pack_signature_digest="d",
+        )
+        assert entry.dlp_pre_hooks == ()
+        assert entry.manifest_purpose == ""
+
+    def test_dlp_fields_settable_and_frozen(self, host_module: Any) -> None:
+        entry = host_module.MCPServerEntry(
+            server_id="p",
+            server_url="https://h/mcp",
+            transport_kind="streamable-http",
+            manifest_scopes=("s",),
+            risk_tier="read_only",
+            pack_signature_digest="d",
+            data_classes=("internal",),
+            dlp_pre_hooks=("refuse_forbidden_schema_arg",),
+            manifest_purpose="operational_telemetry",
+        )
+        assert entry.dlp_pre_hooks == ("refuse_forbidden_schema_arg",)
+        assert entry.manifest_purpose == "operational_telemetry"
+        with pytest.raises((AttributeError, TypeError)):
+            entry.dlp_pre_hooks = ()  # frozen + slotted → raises at runtime
+
+
+# ---------------------------------------------------------------------------
 # Constructor — require_mcp gating + dep wiring
 # ---------------------------------------------------------------------------
 
