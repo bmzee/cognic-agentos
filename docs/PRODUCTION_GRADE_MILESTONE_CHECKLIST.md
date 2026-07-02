@@ -66,11 +66,12 @@ Studio/no-code authoring and Cognic Forge remain outside this v1 completion chec
   **Load-bearing proof:** install is refused when not approved/allow-listed, when runtime config is absent, when the referenced OAuth Vault material is absent, and when signature verification is red; disable retracts the derived MCP carve-outs and flips discovery to `refused`; disabled -> installed re-enable restores `auth_ready` + `call_tool`; revoke retracts again and makes install terminally refused.
   **Production posture:** replaces the M3 direct DB seeding of override/allow-list rows with lifecycle-governed runtime config plus materialization. OAuth remains by-reference and pre-provisioned in Vault for M4, per ADR-026; AKS/operator-pack distribution hardening remains later milestone work.
 
-- [ ] **M5 — Real hook pack proof.**  
+- [x] **M5 — Real hook pack proof.**  
   **Goal:** ship a separate `cognic-hook-*` pack and prove it is installed, trusted, ordered, and enforced at runtime.  
   **Production proof:** a live request triggers the hook in deployed AgentOS.  
   **Load-bearing proof:** hook deny/fail-closed or documented fail-open exception behaves exactly as declared.  
-  **Evidence required:** hook pack release + AgentOS validation.
+  **Evidence:** the released signed `cognic-hook-schema-guard@v0.1.0` hook pack was trust-registered + `HookRegistry`-admitted at boot in a deployed `kind` AgentOS (discovered as the `cognic.hooks` pack kind, cosign-verified against its per-pack trust root), and its two arg-gated `dlp_pre` hooks enforced the MCP `call_tool` path against the operator-installed `cognic-tool-oracle-schema@v0.2.0` tool: permitted arg -> tool executes (200 + `FULL_NAME`); `__FORBIDDEN__` -> `403 dlp_pre_refused` (`policy_reason=forbidden_schema_arg`) refused before any tool execution, digest-only evidence; `__EXPLODE__` -> `409 dlp_pre_failed` fail-closed. Runner `infra/proof-m5/run-proof-m5.sh` (`runner_exit=0`, `PROOF M5 (ALL BARS) PASS`); `docs/VALIDATION-RESULTS.md` "M5 — Real hook pack proof — PASS" section.  
+  **Production posture:** unlike M3/M4 (zero-kernel-change proofs), M5 required wiring the dormant Sprint-7A2 hook subsystem onto `MCPHost.call_tool` and making hook packs first-class in the runtime registry (the `cognic.hooks` pack kind + per-pack boot trust root, ADR-002 hooks amendment) — all under the critical-controls gate with `protocol/mcp_authz.py` byte-identical throughout. The hook pack is trust-register + registry-admit only; an operator enable/disable lifecycle for hook packs (M4-style) is a documented follow-up (spec §8), not an M5 requirement.
 
 - [ ] **M6 — Executable skill service proof.**  
   **Goal:** ship a separate `cognic-skill-*` pack implementing deterministic `Skill.execute()` tool composition.  
