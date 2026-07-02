@@ -59,9 +59,14 @@ therefore carries both, under the one `COGNIC_TRUST_ROOT_PREFIX`:
 | `trust-roots/_default/cosign.pub` | oracle `v0.2.0` key | The kernel's **LOCKED** boot convention (`harness/registry_boot.py` verifies discovered packs against `<prefix>/_default/cosign.pub`) AND the approve 5-gate's signature root (`ProofStagedTrustRootResolver`). |
 | `trust-roots/hook-packs/cognic-hook-schema-guard/cosign.pub` | hook pack key | The hook pack's trust registration. `hook-packs/` is **not** a tenant directory — it exists so the hook key canonicalises under the trust-root prefix (`trust_gate.py` path containment) for per-pack verification. |
 
-The proof app + runner (Task 10/11) own the wiring that registers the hook pack
-against its own key; the stock single-key boot loop would cosign-refuse it
-against the `_default` (oracle) key and fail-soft skip it.
+The **stock kernel boot loop** resolves and verifies the hook pack against this
+per-pack key: `harness/registry_boot.py` (M5, per the ADR-002 hooks amendment)
+resolves `hook-packs/<pack_id>/cosign.pub` for a `hooks`-kind pack, falling back
+to the `_default` root when absent and failing **closed** for that pack on a
+present-but-invalid key (commits `e969264` first-class `hooks` pack kind +
+`9c33f31` per-pack boot trust root). The proof app and runner add **no**
+hook-trust wiring of their own — they only stage the key at the layout above;
+the kernel does the rest.
 
 `stage-packs.sh` downloads both releases with `gh release download` and
 **sha256-verifies every pinned asset digest fail-closed** (both wheels + both

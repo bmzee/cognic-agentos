@@ -1,11 +1,12 @@
-"""Structural pins for the ``infra/proof-m5/`` scaffolding (M5 Task 9).
+"""Structural pins for the ``infra/proof-m5/`` scaffolding + runner (M5 Tasks 9-10).
 
 Mirrors the proof-m4 structural tests (``tests/unit/proof_m4/test_values.py`` +
-``test_seeds.py``) for the M5 tree, plus the Task-9 specific pins:
+``test_seeds.py`` + ``test_runner.py``) for the M5 tree, plus the M5-specific
+pins:
 
-* the proof-m5 dir carries the expected file set — and NO ``run-proof-m5.sh``
-  yet (the runner is the Task-10 deliverable; Task 10 updates this pin when it
-  lands);
+* the proof-m5 dir carries the expected file set — INCLUDING the Task-10
+  ``run-proof-m5.sh`` 3-bar DLP runner (executable, env-gated on
+  ``COGNIC_RUN_PROOF_M5=1``, no default-on CI job);
 * the oracle Dockerfile / staging reference the ``v0.2.0`` DLP-governed
   re-release (never the M3/M4 ``0.1.0`` oracle wheel);
 * the kernel-image Dockerfile stages the hook-pack wheel (baked into the kernel
@@ -15,7 +16,17 @@ Mirrors the proof-m4 structural tests (``tests/unit/proof_m4/test_values.py`` +
   are pinned fail-closed at the staging site (``stage-packs.sh``);
 * the two-key trust-root layout: ``_default`` carries the ORACLE key (the LOCKED
   boot convention + the approve signature-gate root); the HOOK key is staged
-  per-pack under the same prefix.
+  per-pack under the same prefix;
+* the runner drives the three DLP bars against the single deployed ``v0.2.0``
+  tool with the ARGUMENT as the only variable (``EMPLOYEES`` permitted /
+  ``__FORBIDDEN__`` policy-refused 403 ``dlp_pre_refused`` /
+  ``__EXPLODE__`` fail-closed 409 ``dlp_pre_failed``), asserts the refusal
+  fired BEFORE the tool (``audit.tool_invocation`` count unchanged), and pins
+  the DIGEST-ONLY evidence invariant (the sentinel literal in NO chain row;
+  ``dlp_policy_input_digest`` is the correlator);
+* the proof app (``tests/integration/proof_m5/proof_app.py``) is the M5 mirror
+  of the M4 multi-actor factory the ``Dockerfile.agentos-proof`` CMD boots
+  (``proof_m5.proof_app:create_proof_app``).
 """
 
 from __future__ import annotations
@@ -27,6 +38,7 @@ import yaml
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _PROOF_DIR = _REPO_ROOT / "infra" / "proof-m5"
+_PROOF_APP_DIR = _REPO_ROOT / "tests" / "integration" / "proof_m5"
 
 DOCKER_AGENTOS = (_PROOF_DIR / "Dockerfile.agentos-proof").read_text()
 DOCKER_ORACLE = (_PROOF_DIR / "Dockerfile.oracle-pack").read_text()
@@ -38,6 +50,14 @@ README = (_PROOF_DIR / "README.md").read_text()
 VALUES = yaml.safe_load((_PROOF_DIR / "proof-m5-values.yaml").read_text())
 MIGRATE_RAW = (_PROOF_DIR / "migrate-job.yaml").read_text()
 MIGRATE = yaml.safe_load(MIGRATE_RAW)
+RUNNER = (_PROOF_DIR / "run-proof-m5.sh").read_text()
+PROOF_APP = (_PROOF_APP_DIR / "proof_app.py").read_text()
+
+
+def _assert_all(text: str, needles: tuple[str, ...]) -> None:
+    for needle in needles:
+        assert needle in text, f"missing: {needle!r}"
+
 
 # The pinned release-asset digests (M5 Task 9). These are the sha256 of the
 # RELEASED artifacts; a mismatch in stage-packs.sh means the staging site no
@@ -66,6 +86,7 @@ def test_proof_dir_carries_the_expected_file_set() -> None:
         "migrate-job.yaml",
         "oracle-seed",
         "proof-m5-values.yaml",
+        "run-proof-m5.sh",
         "seed-db.sh",
         "seed-vault.sh",
         "stage-packs.sh",
@@ -81,10 +102,12 @@ def test_proof_dir_carries_the_expected_file_set() -> None:
     assert (_PROOF_DIR / "oracle-seed" / "seed_schema.sql").read_text().strip()
 
 
-def test_no_runner_yet_and_no_m4_runner_copied() -> None:
-    # Task 10 owns run-proof-m5.sh; run-proof-m4.sh must never be copied here.
-    # (Task 10: replace the first assertion with runner pins when the runner lands.)
-    assert not (_PROOF_DIR / "run-proof-m5.sh").exists()
+def test_runner_exists_executable_and_no_m4_runner_copied() -> None:
+    # Task 10 landed run-proof-m5.sh (flipping the Task-9 "no runner yet" pin);
+    # run-proof-m4.sh must never be copied here.
+    runner = _PROOF_DIR / "run-proof-m5.sh"
+    assert runner.exists()
+    assert runner.stat().st_mode & stat.S_IXUSR, "run-proof-m5.sh not executable"
     assert not (_PROOF_DIR / "run-proof-m4.sh").exists()
 
 
@@ -346,6 +369,295 @@ def test_readme_states_the_trust_register_vs_operator_install_split() -> None:
     # released-assets-only + digest pinning are stated
     assert "released assets only" in README.lower()
     assert "sha256" in README.lower()
-    # the runner is Task 10 (not shipped in this scaffolding)
+    # the runner is documented (Task 10 shipped it; see the runner pins below)
     assert "run-proof-m5.sh" in README
     assert "Task 10" in README
+
+
+# ---------------------------------------------------------------------------
+# runner (Task 10) — env gate, identities, staging, lifecycle, hook preflight
+# ---------------------------------------------------------------------------
+
+
+def test_runner_env_gated_and_skip_clean() -> None:
+    _assert_all(
+        RUNNER,
+        (
+            'if [[ "${COGNIC_RUN_PROOF_M5:-}" != "1" ]]; then',
+            "skipped: set COGNIC_RUN_PROOF_M5=1",
+            "exit 0",
+            'CLUSTER="${KIND_CLUSTER:-cognic-proofm5}"',
+            'NS="cognic-proofm5"',
+            'PROOF_DIR="infra/proof-m5"',
+            'AGENTOS_SRC_SRC="src/cognic_agentos"',
+            'AGENTOS_SRC_DST="$PROOF_DIR/cognic_agentos"',
+            'TENANT="proof-m5"',
+            'PACK_ID="cognic-tool-oracle-schema"',
+            'HOOK_PACK_ID="cognic-hook-schema-guard"',
+            'PACK_WHEEL="cognic_tool_oracle_schema-0.2.0-py3-none-any.whl"',
+        ),
+    )
+    # the M3/M4 oracle wheel must never sneak back in
+    assert "cognic_tool_oracle_schema-0.1.0" not in RUNNER
+
+
+def test_runner_stages_via_stage_packs_sh_not_the_m4_python_stager() -> None:
+    # M5 delta vs proof-m4: the staging contract is the proof-owned shell script
+    # (both released packs, sha256-pinned), never the m4 python module and never
+    # a source build.
+    _assert_all(
+        RUNNER,
+        (
+            'STAGING_DST="$PROOF_DIR/proof-m5-staging"',
+            'bash "$PROOF_DIR/stage-packs.sh" "$STAGING_DST"',
+            "download, not build",
+        ),
+    )
+    assert "stage_released_pack" not in RUNNER  # the m4 python stager
+    assert "uv build" not in RUNNER  # released artifacts only
+
+
+def test_runner_builds_m5_images_and_cleans_the_transient_copies() -> None:
+    _assert_all(
+        RUNNER,
+        (
+            "for tool in docker kind kubectl helm uv cosign syft grype curl python3 gh",
+            'BASE_IMAGE="cognic-agentos:proof1b2-base"',
+            'IMAGE="cognic-agentos:proofm5"',
+            'MCP_IMAGE="cognic-proof-oracle-pack:m5"',
+            'AS_IMAGE="cognic-proof-as:m5"',
+            "docker_build_with_retry -f infra/agentos/Dockerfile --target default-adapters",
+            'PROOF_APP_SRC="tests/integration/proof_m5"',
+            'PROOF_APP_DST="$PROOF_DIR/proof_m5"',
+            'cp -r "$PROOF_APP_SRC" "$PROOF_APP_DST"',
+            'cp -r "$AGENTOS_SRC_SRC" "$AGENTOS_SRC_DST"',
+            'docker_build_with_retry -f "$PROOF_DIR/Dockerfile.agentos-proof"',
+            'docker_build_with_retry -f "$PROOF_DIR/Dockerfile.oracle-pack" '
+            '-t "$MCP_IMAGE" "$PROOF_DIR"',
+            'cp tests/integration/pack_loop/_local_as.py "$PROOF_DIR/_local_as.py"',
+            'docker_build_with_retry -f "$PROOF_DIR/Dockerfile.as" -t "$AS_IMAGE" "$PROOF_DIR"',
+            # cleanup trap removes ALL FOUR transient build-context copies
+            'rm -rf "$STAGING_DST" "$PROOF_APP_DST" "$AGENTOS_SRC_DST" "$PROOF_DIR/_local_as.py"',
+        ),
+    )
+
+
+def test_runner_seeds_through_scripts_and_never_inlines_derived_rows() -> None:
+    _assert_all(
+        RUNNER,
+        (
+            'NS="$NS" bash "$PROOF_DIR/seed-vault.sh"',
+            'NS="$NS" bash "$PROOF_DIR/seed-db.sh"',
+            'helm install rel "$CHART" -n "$NS" -f "$PROOF_DIR/proof-m5-values.yaml"',
+            'sed "s|__AGENTOS_IMAGE__|$IMAGE|" "$PROOF_DIR/migrate-job.yaml"',
+            'kubectl -n "$NS" apply -f "$PROOF_DIR/manifests/oracle-pack.yaml" '
+            '-f "$PROOF_DIR/manifests/auth-server.yaml"',
+        ),
+    )
+    # inherited M4 governance property: install MATERIALIZES the derived rows;
+    # the runner NEVER inlines the INSERTs.
+    assert "INSERT INTO mcp_server_url_override" not in RUNNER
+    assert "INSERT INTO mcp_internal_host_allowlist" not in RUNNER
+
+
+def test_runner_drives_the_m4_operator_lifecycle_for_the_v020_tool() -> None:
+    """The tool pack is operator-installed EXACTLY as proven in M4 (multi-actor
+    via X-Proof-Role); the manifest describes the v0.2.0 release incl. its
+    [data_governance].dlp_pre_hooks binding."""
+    _assert_all(
+        RUNNER,
+        (
+            "X-Proof-Role: $role",
+            "api author POST /api/v1/packs/drafts",
+            'api author POST "/api/v1/packs/drafts/$PACK_UUID/submit"',
+            "from cognic_agentos.core.canonical import canonical_bytes",
+            "signed_artefact_root",
+            'api reviewer POST "/api/v1/packs/$PACK_UUID/claim"',
+            'api reviewer POST "/api/v1/packs/$PACK_UUID/approve"',
+            '"override_reason": "prerelease_validation"',
+            'api operator POST "/api/v1/packs/$PACK_UUID/allow-list"',
+            'api operator PUT "/api/v1/packs/$PACK_UUID/runtime-config"',
+            '"oauth_credential_ref"',
+            '"as_allowlist_ref"',
+            'api operator POST "/api/v1/packs/$PACK_UUID/install"',
+            # the submitted manifest is the v0.2.0 DLP-governed release shape
+            '"version": "0.2.0"',
+            '"dlp_pre_hooks": ["refuse_forbidden_schema_arg", "explode_schema_guard"]',
+            'SIGNED_ARTEFACT_ROOT="/opt/cognic/pack-attestations/$PACK_ID/0.2.0"',
+            # materialization evidence (M4-inherited): events + derived rows
+            "mcp.override.set",
+            "mcp.allowlist.add",
+            "override|$TENANT|$PACK_ID|http://10.96.0.51:8765/mcp",
+            "allowlist|$TENANT|10.96.0.51|proof-m5-operator",
+        ),
+    )
+
+
+def test_runner_asserts_hook_pack_registry_admission_before_the_bars() -> None:
+    """The hook pack is trust-register + registry-admit ONLY (spec §6 decision B):
+    the runner probes GET /system/plugins for its registered candidate row
+    (status=registered, kind=hooks) AND greps the boot logs clean of hook-admission
+    / DLP-guard construction failures — before the lifecycle AND again on the cold
+    pod that serves the bars."""
+    _assert_all(
+        RUNNER,
+        (
+            "assert_hook_pack_registered() {",
+            "/api/v1/system/plugins?tenant_id=$TENANT",
+            'if row.get("status") != "registered" or row.get("kind") != "hooks":',
+            "dlp_guard_construction_failed",
+            "hook_pack_trust_root_invalid",
+            'assert_hook_pack_registered "hook-pack preflight (first boot)"',
+            'assert_hook_pack_registered "BAR 1 preflight (hook pack on the serving pod)"',
+        ),
+    )
+    # the hook pack must NEVER enter the operator lifecycle (no draft/install
+    # call carries the hook pack id)
+    assert '"pack_id": "cognic-hook-schema-guard"' not in RUNNER
+
+
+# ---------------------------------------------------------------------------
+# runner (Task 10) — the three DLP bars (argument is the only variable)
+# ---------------------------------------------------------------------------
+
+
+def test_runner_bar1_permitted_arg_executes_the_tool() -> None:
+    _assert_all(
+        RUNNER,
+        (
+            "/api/v1/mcp/servers/$PACK_ID/tools",
+            "/api/v1/mcp/servers/$PACK_ID/tools/call",
+            '\'{"tool_name":"describe_table","arguments":{"owner":"COGNIC","table":"EMPLOYEES"}}\'',
+            'grep -qF "FULL_NAME" <<<"$CALL1_RESP"',
+            '[ "$DS" = "auth_ready" ] || bar_fail "BAR 1',
+            # the success evidence row is the BAR 2/3 contrast baseline
+            '[ "$TOOL_INVOCATIONS_AFTER_BAR1" -ge 1 ]',
+            "PROOF M5 (BAR 1) PASS",
+        ),
+    )
+
+
+def test_runner_bar2_forbidden_arg_refused_before_the_tool_digest_only() -> None:
+    _assert_all(
+        RUNNER,
+        (
+            '\'{"tool_name":"describe_table","arguments":{"owner":"COGNIC","table":"__FORBIDDEN__"}}\'',
+            '[ "$HTTP_CODE" = "403" ] || bar_fail "BAR 2 expected HTTP 403 dlp_pre_refused',
+            '[ "$BAR2_REASON" = "dlp_pre_refused" ]',
+            '[ "$BAR2_POLICY_REASON" = "forbidden_schema_arg" ]',
+            # (a) refused BEFORE the tool: the success-row count is UNCHANGED
+            "SELECT count(*) FROM audit_event WHERE event_type='audit.tool_invocation';",
+            'TOOL_INVOCATIONS_BEFORE_BAR2="$(tool_invocation_count)"',
+            '[ "$TOOL_INVOCATIONS_AFTER_BAR2" = "$TOOL_INVOCATIONS_BEFORE_BAR2" ]',
+            # ...and the refusal row is the DLP one, attributed to the refusing hook
+            "event_type='audit.tool_invocation_refused'",
+            'reason == "dlp_pre_refused"',
+            'hook == "refuse_forbidden_schema_arg"',
+            # (b) digest-only: sha256 correlator present, plaintext literal ABSENT
+            "dlp_policy_input_digest",
+            're.fullmatch(r"[0-9a-f]{64}", digest)',
+            "evidence_rows_containing_literal '__FORBIDDEN__'",
+            '[ "$FORBIDDEN_LITERAL_ROWS" = "0" ]',
+            "PROOF M5 (BAR 2) PASS",
+        ),
+    )
+    # strpos, NOT LIKE — '_' is a LIKE single-char wildcard and the sentinel is
+    # underscore-heavy ('%__FORBIDDEN__%' would over/under-match).
+    assert "strpos(payload::text, '$literal') > 0" in RUNNER
+    assert "LIKE '%__FORBIDDEN__%'" not in RUNNER
+
+
+def test_runner_bar3_explode_arg_fails_closed() -> None:
+    _assert_all(
+        RUNNER,
+        (
+            '\'{"tool_name":"describe_table","arguments":{"owner":"COGNIC","table":"__EXPLODE__"}}\'',
+            '[ "$HTTP_CODE" = "409" ] || bar_fail "BAR 3 expected HTTP 409 dlp_pre_failed',
+            '[ "$BAR3_REASON" = "dlp_pre_failed" ]',
+            '[ "$TOOL_INVOCATIONS_AFTER_BAR3" = "$TOOL_INVOCATIONS_BEFORE_BAR3" ]',
+            'reason == "dlp_pre_failed"',
+            'hook == "explode_schema_guard"',
+            "evidence_rows_containing_literal '__EXPLODE__'",
+            '[ "$EXPLODE_LITERAL_ROWS" = "0" ]',
+            "PROOF M5 (BAR 3) PASS",
+            "PROOF M5 (ALL BARS) PASS",
+        ),
+    )
+
+
+def test_runner_bar_failures_capture_to_validation_results() -> None:
+    # the proof is NEVER redefined downward: any bar failure captures diagnostics
+    # (incl. the audit.tool_invocation* evidence tail + hook/DLP log markers) to
+    # docs/VALIDATION-RESULTS.md and exits non-zero.
+    _assert_all(
+        RUNNER,
+        (
+            "bar_fail() {",
+            "docs/VALIDATION-RESULTS.md",
+            "## Proof M5 — FAILURE",
+            "audit.tool_invocation%",
+            "exit 1",
+        ),
+    )
+
+
+def test_runner_api_command_substitution_reloads_http_code() -> None:
+    _assert_all(
+        RUNNER,
+        (
+            'HTTP_CODE_FILE="/tmp/proofm5-code"',
+            "load_http_code() {",
+        ),
+    )
+    captures = RUNNER.count('="$(api ')
+    # Every command-substitution capture runs api in a subshell, so the HTTP_CODE
+    # assignment inside api does not propagate. Each capture must reload from the
+    # status file before checking HTTP_CODE.
+    assert captures == RUNNER.count("load_http_code # after api command substitution")
+
+
+# ---------------------------------------------------------------------------
+# proof app (Task 10) — the M5 multi-actor factory the kernel image CMD boots
+# ---------------------------------------------------------------------------
+
+
+def test_proof_app_package_exists_with_create_proof_app() -> None:
+    # Dockerfile.agentos-proof CMD boots proof_m5.proof_app:create_proof_app from
+    # the vendored proof_m5/ package — both files must exist.
+    assert (_PROOF_APP_DIR / "__init__.py").exists()
+    assert (_PROOF_APP_DIR / "proof_app.py").exists()
+    assert "def create_proof_app() -> FastAPI:" in PROOF_APP
+
+
+def test_proof_app_is_the_m5_multi_actor_mirror() -> None:
+    _assert_all(
+        PROOF_APP,
+        (
+            'PROOF_TENANT: Final = "proof-m5"',
+            'PROOF_ROLE_HEADER: Final = "X-Proof-Role"',
+            "class MultiActorProofBinder:",
+            # the four role subjects (reviewer DIFFERS from author: role-separation;
+            # the operator subject is the derived allow-list row's set_by_actor the
+            # runner asserts)
+            'subject="proof-m5-author"',
+            'subject="proof-m5-reviewer"',
+            'subject="proof-m5-operator"',
+            'subject="proof-m5-mcp"',
+            # the mcp role holds the governed invoke scopes the three bars ride
+            '"mcp.tool.list"',
+            '"mcp.tool.invoke"',
+            # the reviewer holds the override scope (signature stays REAL)
+            '"pack.override.approval_gate"',
+            # the operator holds the human-actor-gated lifecycle scopes
+            '"pack.allow_list"',
+            '"pack.configure"',
+            '"pack.install"',
+            # eager-injection wiring (Key Decision A carried from M4)
+            "create_async_engine",
+            "RuntimeConfigMaterializer",
+            "class ProofStagedTrustRootResolver:",
+        ),
+    )
+    # no M4 identity leakage: the m5 app must never mint proof-m4-* subjects
+    # (module-path references to proof_m4 in prose are fine).
+    assert "proof-m4-" not in PROOF_APP
