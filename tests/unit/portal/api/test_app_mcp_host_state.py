@@ -63,3 +63,50 @@ async def test_mcp_host_constructed_when_sdk_present(memory_settings, memory_reg
         assert isinstance(app.state.mcp_host, MCPHost)
         assert app.state.mcp_host._approval_engine is app.state.runtime.approval_engine
     # lifespan exited clean (the lifespan-owned httpx client closed on shutdown).
+
+
+def test_dlp_guard_preseeded_none_before_lifespan(memory_settings, memory_registry, tmp_path):
+    # M5 (ADR-017): app.state.dlp_guard mirrors the mcp_host pre-seed pattern.
+    s = memory_settings.model_copy(
+        update={"litellm_config_path": _litellm_yaml(tmp_path), "cache_driver": "memory"}
+    )
+    app = create_app(s, adapter_registry=memory_registry)
+    assert app.state.dlp_guard is None
+
+
+async def test_dlp_guard_constructed_and_threaded_when_sdk_present(
+    memory_settings, memory_registry, tmp_path
+):
+    # M5 (ADR-017): the lifespan builds the DLPGuard over the SAME trusted
+    # registry and threads the SAME instance into the MCP host (identity).
+    s = memory_settings.model_copy(
+        update={"litellm_config_path": _litellm_yaml(tmp_path), "cache_driver": "memory"}
+    )
+    app = create_app(s, adapter_registry=memory_registry)
+    async with app.router.lifespan_context(app):
+        from cognic_agentos.packs.hooks.dlp_integration import DLPGuard
+
+        assert isinstance(app.state.dlp_guard, DLPGuard)
+        assert app.state.mcp_host._dlp_guard is app.state.dlp_guard
+
+
+async def test_dlp_guard_construction_failure_is_fail_soft(
+    memory_settings, memory_registry, tmp_path, monkeypatch
+):
+    # M5 (ADR-017): a guard-construction failure leaves dlp_guard None (ERROR
+    # log) and the host STILL builds — hooked packs then fail CLOSED per-call
+    # (dlp_pre_guard_unavailable) rather than the whole app failing to boot.
+    def _boom(**kw):
+        raise RuntimeError("guard construction failed")
+
+    monkeypatch.setattr("cognic_agentos.harness.hook_registry.build_dlp_guard", _boom)
+    s = memory_settings.model_copy(
+        update={"litellm_config_path": _litellm_yaml(tmp_path), "cache_driver": "memory"}
+    )
+    app = create_app(s, adapter_registry=memory_registry)
+    async with app.router.lifespan_context(app):
+        from cognic_agentos.protocol.mcp_host import MCPHost
+
+        assert app.state.dlp_guard is None
+        assert isinstance(app.state.mcp_host, MCPHost)
+        assert app.state.mcp_host._dlp_guard is None

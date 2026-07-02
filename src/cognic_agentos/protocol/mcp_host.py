@@ -110,7 +110,7 @@ import re
 import time
 import uuid
 from collections.abc import Mapping
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 import httpx
 
@@ -126,6 +126,7 @@ from cognic_agentos.core.canonical import canonical_bytes
 from cognic_agentos.core.config import Settings
 from cognic_agentos.core.decision_history import DecisionHistoryStore, DecisionRecord
 from cognic_agentos.core.mcp_config.storage import MCPServerUrlOverrideStore
+from cognic_agentos.packs.hooks.dlp_integration import DLPGuard, DLPRefusalReason
 from cognic_agentos.protocol import require_mcp
 from cognic_agentos.protocol.discovery_status import (
     DiscoveryStatus,
@@ -139,6 +140,7 @@ from cognic_agentos.protocol.mcp_transports import (
     MCPTransport,
     MCPTransportError,
 )
+from cognic_agentos.sdk.hook import HookContext
 
 _LOG = logging.getLogger("cognic_agentos.protocol.mcp_host")
 
@@ -265,6 +267,11 @@ class MCPServerEntry:
         carried at registration time (Sprint 13.5b2); feeds the
         value-free ApprovalEnvelope on the wired approval path. Empty
         default keeps pre-13.5b2 constructors green.
+      - ``dlp_pre_hooks`` — manifest ``[data_governance].dlp_pre_hooks``
+        (M5); declared dlp_pre hook ids the host scans before invocation.
+        Empty ⇒ no-op.
+      - ``manifest_purpose`` — manifest ``[data_governance].purpose``
+        (M5); threaded into the ``HookContext`` at scan time.
     """
 
     server_id: str
@@ -274,6 +281,15 @@ class MCPServerEntry:
     risk_tier: str
     pack_signature_digest: str
     data_classes: tuple[str, ...] = ()
+    dlp_pre_hooks: tuple[str, ...] = ()
+    """Manifest ``[data_governance].dlp_pre_hooks`` (M5, ADR-017): the
+    calling tool pack's declared dlp_pre hook ids the host scans before
+    invocation. Empty ⇒ no DLP scan (byte-identical no-op). Populated at
+    registration time by the off-gate ``harness/mcp_host.py`` mapper."""
+    manifest_purpose: str = ""
+    """Manifest ``[data_governance].purpose`` (M5); threaded verbatim into
+    the ``HookContext.manifest_purpose`` field at scan time. Empty default
+    keeps pre-M5 constructors green."""
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -597,9 +613,15 @@ def _approval_redacted_context(*, server_id: str, tool_name: str) -> str:
 #: Wire-protocol-public (AGENTS.md MCP-host stop rule). Sprint 5 shipped
 #: exactly one value (the ADR-014 transitional rule, kept as the
 #: engine-absent fallback); Sprint 13.5b2 extended it with the five
-#: approval-engine outcomes per ADR-014 + the 13.5b2 spec §4. Drift-pinned
-#: by ``test_mcp_approval_seam.py::
-#: test_tool_invocation_refusal_reason_has_exactly_six_values``.
+#: approval-engine outcomes per ADR-014 + the 13.5b2 spec §4; M5 (ADR-017)
+#: added the three DLP pre-invocation reasons — ``dlp_pre_refused`` (a hook
+#: policy-refused the call), ``dlp_pre_failed`` (a hook raised / timed out, or
+#: a declared hook did not resolve), ``dlp_pre_guard_unavailable``
+#: (``dlp_pre_hooks`` declared but no DLP guard wired — fail closed).
+#: Drift-pinned by ``test_mcp_approval_seam.py::
+#: test_tool_invocation_refusal_reason_has_exactly_nine_values`` +
+#: ``test_mcp_high_risk_tier_refused.py::
+#: TestRiskTierAllowListPinned::test_refusal_reason_closed_enum_pinned``.
 ToolInvocationRefusalReason = Literal[
     "tool_approval_engine_not_available",
     "tool_approval_pending",
@@ -607,6 +629,9 @@ ToolInvocationRefusalReason = Literal[
     "tool_approval_expired",
     "tool_approval_binding_mismatch",
     "tool_approval_request_not_found",
+    "dlp_pre_refused",
+    "dlp_pre_failed",
+    "dlp_pre_guard_unavailable",
 ]
 
 
@@ -673,6 +698,7 @@ class MCPHost:
         approval_engine: ApprovalEngine | None = None,
         discovery_status_recorder: DiscoveryStatusRecorder | None = None,
         override_store: MCPServerUrlOverrideStore | None = None,
+        dlp_guard: DLPGuard | None = None,
     ) -> None:
         # ``approval_engine`` (Sprint 13.5b2, ADR-014): None (default) keeps
         # the Sprint-5 transitional gate byte-for-byte (engine-absent
@@ -781,6 +807,14 @@ class MCPHost:
         # error fails SAFE to the signed manifest URL. The override is runtime
         # config ONLY — :class:`MCPServerEntry` / the manifest is NEVER mutated.
         self._override_store = override_store
+        # ``dlp_guard`` (M5, ADR-017): None (default) keeps the invoke path
+        # byte-for-byte (no dlp_pre scan). Wired, :meth:`call_tool` runs the
+        # calling pack's declared ``dlp_pre_hooks`` over the tool arguments
+        # BEFORE token / session / transport. A pack that declares
+        # ``dlp_pre_hooks`` while this stays None fails closed
+        # (``dlp_pre_guard_unavailable``) — never a silent skip. Built by the
+        # off-gate hook-registry loader (M5 Task 7).
+        self._dlp_guard = dlp_guard
         # R1 P2 #2: cache key includes tenant_id + scopes (NOT just
         # server_id). Cross-tenant cache leak would let tenant B
         # receive tenant A's already-cleared tool catalogue without
@@ -1323,6 +1357,121 @@ class MCPHost:
             extra_decision_payload=dict(extra),
         )
 
+    #: M5 (ADR-017) — DLP refusal reason → wire refusal reason.
+    #: ``dlp_hook_id_unresolved`` folds into ``dlp_pre_failed`` (DLP could
+    #: not produce a clean verdict → fail closed); only a hook's explicit
+    #: policy refusal surfaces as ``dlp_pre_refused``.
+    _DLP_REASON_TO_WIRE: ClassVar[dict[DLPRefusalReason, ToolInvocationRefusalReason]] = {
+        "dlp_dispatcher_refused": "dlp_pre_refused",
+        "dlp_dispatcher_failed": "dlp_pre_failed",
+        "dlp_hook_id_unresolved": "dlp_pre_failed",
+    }
+
+    async def _dlp_pre_scan(
+        self,
+        *,
+        entry: MCPServerEntry,
+        arguments: Mapping[str, Any],
+        request_id: str,
+        tenant_id: str,
+        declared_risk_tier: str,
+        tool_name: str,
+    ) -> None:
+        """M5 (ADR-017): run the calling pack's dlp_pre hooks over the
+        canonical-serialized tool arguments BEFORE token / session /
+        transport work.
+
+        Returns None on pass (dispatch proceeds with the ORIGINAL
+        arguments — redaction application is deferred per the M5 spec);
+        emits the digest-only refusal evidence rows then raises
+        :class:`MCPToolInvocationRefused` on refusal. Empty
+        ``dlp_pre_hooks`` is a legitimate "no DLP scan" declaration —
+        byte-identical no-op (no serialization, no guard call, no
+        evidence). ``dlp_pre_hooks`` declared but no guard wired fails
+        CLOSED (``dlp_pre_guard_unavailable``) per ADR-017 — a
+        deployment that promises DLP hooks must not silently skip them.
+
+        Evidence is digest-only: tool ``arguments`` NEVER appear in the
+        refusal rows (same discipline as :meth:`_emit_call_evidence`);
+        ``dlp_policy_input_digest`` (sha256 hex of the canonical
+        argument bytes) is the examiner correlator instead. The
+        :class:`HookContext` template constructs all 9 fields per the
+        M5 spec §4.1 — ``hook_id=""`` is the per-hook sentinel the
+        dispatcher fills; ``trace_id`` / ``parent_trace_id`` are
+        nullable and not threaded in Wave 1.
+        """
+        if not entry.dlp_pre_hooks:
+            return  # byte-identical no-op — no serialization, no guard call
+        payload_bytes = canonical_bytes(dict(arguments))
+        safe_tool_name = _sanitize_string_for_operator_surface(tool_name)
+        safe_server_id = _sanitize_string_for_operator_surface(entry.server_id)
+        if self._dlp_guard is None:
+            payload_digest = hashlib.sha256(payload_bytes).hexdigest()
+            await self._emit_call_evidence(
+                event_type="audit.tool_invocation_refused",
+                decision="refused",
+                decision_reason="dlp_pre_guard_unavailable",
+                entry=entry,
+                tool_name=tool_name,
+                request_id=request_id,
+                tenant_id=tenant_id,
+                declared_risk_tier=declared_risk_tier,
+                extra_audit_payload={
+                    "refusal_reason": "dlp_pre_guard_unavailable",
+                    "dlp_policy_input_digest": payload_digest,
+                    "declared_dlp_pre_hooks": list(entry.dlp_pre_hooks),
+                },
+                extra_decision_payload={"dlp_refusal": True},
+            )
+            raise MCPToolInvocationRefused(
+                "dlp_pre_guard_unavailable",
+                f"tool {safe_tool_name!r} on server {safe_server_id!r} "
+                f"declares dlp_pre_hooks but no DLP guard is wired; "
+                f"failing closed.",
+            )
+        template = HookContext(
+            hook_id="",
+            phase="dlp_pre",
+            pack_id=entry.server_id,
+            tenant_id=tenant_id,
+            request_id=request_id,
+            trace_id=None,
+            parent_trace_id=None,
+            manifest_data_classes=entry.data_classes,
+            manifest_purpose=entry.manifest_purpose,
+        )
+        outcome = await self._dlp_guard.scan_pre(
+            payload=payload_bytes,
+            declared_hook_ids=entry.dlp_pre_hooks,
+            context_template=template,
+        )
+        dlp_reason = outcome.refusal_reason
+        if dlp_reason is None:
+            return  # passed — proceed with the ORIGINAL arguments
+        wire = self._DLP_REASON_TO_WIRE[dlp_reason]
+        await self._emit_call_evidence(
+            event_type="audit.tool_invocation_refused",
+            decision="refused",
+            decision_reason=wire,
+            entry=entry,
+            tool_name=tool_name,
+            request_id=request_id,
+            tenant_id=tenant_id,
+            declared_risk_tier=declared_risk_tier,
+            extra_audit_payload={
+                "refusal_reason": wire,
+                "dlp_policy_input_digest": outcome.policy_input_digest,
+                "dlp_failed_hook_id": outcome.failed_hook_id,
+                "dlp_failed_pack_distribution_name": outcome.failed_pack_distribution_name,
+            },
+            extra_decision_payload={"dlp_refusal": True},
+        )
+        raise MCPToolInvocationRefused(
+            wire,
+            f"dlp_pre hook refused tool {safe_tool_name!r} on server {safe_server_id!r}",
+            policy_reason=outcome.underlying_policy_reason,
+        )
+
     async def call_tool(
         self,
         *,
@@ -1473,6 +1622,20 @@ class MCPHost:
                     approval_request_id=approval_request_id,
                     declared_risk_tier=declared_risk_tier,
                 )
+            # M5 (ADR-017): dlp_pre scan AFTER the approval gate, BEFORE
+            # token-acquire / session-open — a DLP-refused call never
+            # touches the AS or the MCP server. Runs INSIDE the
+            # evidence-emitting try; the except MCPToolInvocationRefused
+            # arm below guards double-emit (evidence was emitted at the
+            # refusal site, same pattern as _approval_gate).
+            await self._dlp_pre_scan(
+                entry=entry,
+                arguments=arguments,
+                request_id=request_id,
+                tenant_id=tenant_id,
+                declared_risk_tier=declared_risk_tier,
+                tool_name=tool_name,
+            )
             payload, session, used_token = await self._call_tool_inner(
                 entry=entry,
                 tool_name=tool_name,
@@ -1483,10 +1646,10 @@ class MCPHost:
             )
         except MCPToolInvocationRefused:
             # Spec §3.6 guard: refusal evidence was already emitted at the
-            # refusal site (_approval_gate). MCPToolInvocationRefused
-            # inherits RuntimeError (test-pinned), so without this bare
-            # re-raise the generic-Exception arm below would DOUBLE-EMIT an
-            # errored row on top of the refused row.
+            # refusal site (_approval_gate / _dlp_pre_scan).
+            # MCPToolInvocationRefused inherits RuntimeError (test-pinned),
+            # so without this bare re-raise the generic-Exception arm below
+            # would DOUBLE-EMIT an errored row on top of the refused row.
             raise
         except MCPAuthzError as exc:
             # Classification rules:

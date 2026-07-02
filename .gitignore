@@ -132,3 +132,10 @@ infra/proof-m4/proof-m4-staging/
 infra/proof-m4/proof_m4/
 infra/proof-m4/cognic_agentos/
 infra/proof-m4/_local_as.py
+
+# Proof M5 (DLP hook proof): same transient build-context copies the M5 runner
+# (infra/proof-m5/run-proof-m5.sh) materialises then removes on exit (trap).
+infra/proof-m5/proof-m5-staging/
+infra/proof-m5/proof_m5/
+infra/proof-m5/cognic_agentos/
+infra/proof-m5/_local_as.py

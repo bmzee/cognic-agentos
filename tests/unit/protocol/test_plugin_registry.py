@@ -212,7 +212,7 @@ def fake_entry_points(monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, lis
 
 
 class TestDiscovery:
-    def test_discover_walks_all_three_entry_point_groups(
+    def test_discover_walks_all_four_entry_point_groups(
         self, registry: PluginRegistry, fake_entry_points: dict[str, list[Any]]
     ) -> None:
         fake_entry_points["cognic.tools"] = [
@@ -236,14 +236,28 @@ class TestDiscovery:
                 dist=_FakeDistribution(name="cognic-agent-a1", version="2.5.1"),
             )
         ]
+        # M5 (ADR-002 amendment): hooks is the FOURTH pack kind — DLP hook
+        # packs are trust-registered first-class, same gate as the others.
+        fake_entry_points["cognic.hooks"] = [
+            _FakeEntryPoint(
+                name="h1",
+                value="m4:H",
+                dist=_FakeDistribution(name="cognic-hook-h1", version="0.1.0"),
+            )
+        ]
         packs = registry.discover()
         assert all(isinstance(p, DiscoveredPack) for p in packs)
         kinds = sorted(p.record.kind for p in packs)
-        assert kinds == ["agents", "skills", "tools"]
+        assert kinds == ["agents", "hooks", "skills", "tools"]
         # Distribution name + version flow into the record (for cosign-
         # signature pinning in T6 + T10).
         names = sorted(p.record.distribution_name for p in packs)
-        assert names == ["cognic-agent-a1", "cognic-skill-s1", "cognic-tool-t1"]
+        assert names == [
+            "cognic-agent-a1",
+            "cognic-hook-h1",
+            "cognic-skill-s1",
+            "cognic-tool-t1",
+        ]
         # Each pack carries the captured EntryPoint reference — the
         # caller never has to re-walk importlib metadata to load.
         assert all(p.entry_point is not None for p in packs)
@@ -251,7 +265,7 @@ class TestDiscovery:
     def test_discover_returns_empty_when_no_packs_installed(
         self, registry: PluginRegistry, fake_entry_points: dict[str, list[Any]]
     ) -> None:
-        # All three groups empty.
+        # All four groups empty.
         assert registry.discover() == []
 
     def test_discover_handles_missing_dist_metadata_gracefully(
@@ -689,6 +703,66 @@ class TestLoadAndKnownPacks:
         outcomes = registry.known_packs()
         assert [o.kind for o in outcomes] == ["tools", "skills", "agents"]
         assert [o.name for o in outcomes] == ["alpha", "bravo", "charlie"]
+
+
+# ---------------------------------------------------------------------------
+# TestHooksPackKind — M5 (ADR-002 amendment): hooks is the FOURTH pack kind.
+# ---------------------------------------------------------------------------
+
+
+class TestHooksPackKind:
+    """DLP hook packs (entry-point group ``cognic.hooks``) are discovered,
+    registered, and loaded through the SAME trust pipeline as the other
+    three kinds — first-class, no proof-only bypass (the M5 ruling). The
+    hook-registry boot loader (``harness/hook_registry.build_dlp_guard``)
+    consumes ``iter_registered_pack_candidates()``, so registrability of
+    the hooks kind is what makes the whole M5 DLP path reachable."""
+
+    def test_plugin_kind_vocabulary_is_exactly_four(self) -> None:
+        from typing import get_args
+
+        assert set(get_args(PluginKind)) == {"tools", "skills", "agents", "hooks"}
+
+    def test_entry_point_groups_map_all_four_kinds(self) -> None:
+        from cognic_agentos.protocol.plugin_registry import _ENTRY_POINT_GROUPS
+
+        assert _ENTRY_POINT_GROUPS == {
+            "tools": "cognic.tools",
+            "skills": "cognic.skills",
+            "agents": "cognic.agents",
+            "hooks": "cognic.hooks",
+        }
+
+    async def test_register_accepts_hooks_kind(self, registry: PluginRegistry) -> None:
+        # Pre-M5 this raised ValueError at the _validate_register_args kind
+        # gate — a hook pack was unregistrable and could never reach
+        # iter_registered_pack_candidates() (the DLPGuard boot loader's
+        # trusted-candidate source).
+        outcome = await registry.register(
+            _make_pack(
+                kind="hooks",
+                name="refuse_forbidden_schema_arg",
+                distribution_name="cognic-hook-schema-guard",
+                distribution_version="0.1.0",
+                entry_point_value="cognic_hook_schema_guard.hooks:RefuseForbiddenSchemaArg",
+            ),
+            attestation_grade="full",
+            signature_digest=_TEST_SIGNATURE_DIGEST,
+        )
+        assert outcome.status == "registered"
+        assert outcome.kind == "hooks"
+        assert outcome.pack_id == "cognic-hook-schema-guard"
+        candidates = list(registry.iter_registered_pack_candidates())
+        assert any(c.distribution_name == "cognic-hook-schema-guard" for c in candidates)
+
+    async def test_load_hooks_pack_after_registration(self, registry: PluginRegistry) -> None:
+        sentinel = object()
+        await registry.register(
+            _make_pack(kind="hooks", name="h1", load_returns=sentinel),
+            attestation_grade="full",
+            signature_digest=_TEST_SIGNATURE_DIGEST,
+        )
+        assert registry.load("hooks", "h1") is sentinel
 
 
 # ---------------------------------------------------------------------------

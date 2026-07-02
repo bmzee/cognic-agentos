@@ -1202,3 +1202,43 @@ The green M4 run followed a deliberately preserved failure trail in this file. T
 - "PASS" means the **operator-grade pack install flow** is proven on `kind`: no direct DB seed for pack lifecycle state or derived MCP carve-out rows, real operator API lifecycle, real runtime-config materialization, real disable/re-enable/revoke callability changes, and real negative gates.
 - OAuth material is still **operator-provisioned by reference** in Vault for M4; M4 validates and consumes those references, but does not introduce a secret-writing operator API.
 - This does **not** claim the production AKS platform (M15/M24), an end-to-end bank LLM-agent loop using tools/skills (M8), or every pack type (M5/M6/M7/M13). It proves the operator install governance spine for a released signed MCP tool pack.
+
+## M5 — Real hook pack proof — PASS
+
+**2026-07-02 — M5 proven: the released signed `cognic-hook-schema-guard@v0.1.0` hook pack was trust-registered + `HookRegistry`-admitted at boot in a deployed `kind` AgentOS, and its two arg-gated `dlp_pre` hooks enforced the MCP `call_tool` path — permitted arguments execute, a forbidden argument is refused before the tool runs, and a raising hook fails closed.**
+
+> M5 wires the previously DORMANT Sprint-7A2 hook subsystem (`packs/hooks/*`, never called in the deployed runtime) onto `MCPHost.call_tool`: at boot the kernel discovers the hook pack as the `cognic.hooks` pack kind, cosign-verifies it against its per-pack trust root, admits its `[hooks]` declarations into a `HookRegistry`, and builds the `DLPGuard` the MCP host consults. On every governed `call_tool`, `MCPHost._dlp_pre_scan` runs the calling pack's declared `dlp_pre_hooks` over the canonical-serialized arguments BEFORE any token / session / transport work.
+
+### Run metadata
+- **Date:** 2026-07-02T15:38:44Z (operator-run, env-gated)
+- **Command:** `COGNIC_RUN_PROOF_M5=1 ./infra/proof-m5/run-proof-m5.sh` -> **`runner_exit=0`**, **`PROOF M5 (ALL BARS) PASS`**
+- **Run log:** preserved locally at `scratchpad/proof-m5-PASS-run2.log`; the durable pass markers are recorded below.
+- **Released packs (released assets only, never built in the proof):**
+  - `cognic-hook-schema-guard@v0.1.0` — wheel sha256 `1cc4d8001571db22d3e8686a213b33a99a4f2fa79a14754ed7dc194077134432`, `cosign.pub` sha256 `e8a8fd3c046c0697e0470858f3033c9238a4228c4c519952b00d31aab8908e49`.
+  - `cognic-tool-oracle-schema@v0.2.0` — wheel sha256 `2961ce5d4aaf97425ab5851670f65e76c64164a5922b99d6f0e982a634be0439`, `cosign.pub` sha256 `43c33fbe7f4b16683d47886b81cb1b9684495cbb9a92989b10f5b8cd72ba2e78` (unchanged from v0.1.0). Both downloaded from their public GitHub Releases by `stage-packs.sh`; all four digests verified fail-closed before staging.
+- **Topology:** kind cluster `cognic-proofm5`, Helm overlay `infra/proof-m5/`, the bundled backends, in-cluster Oracle XE (`gvenzl/oracle-xe:21-slim`, `XEPDB1`, seeded `COGNIC.*` schema), the released oracle MCP pack at ClusterIP `10.96.0.51`, and the proof RS256/JWKS AS at `192.88.99.9`. Tenant `proof-m5`.
+- **Two-pack split (spec §6):** the `cognic-tool-oracle-schema@v0.2.0` TOOL is operator-installed through the full M4 lifecycle (submit -> distinct-reviewer claim/approve -> operator allow-list -> configure -> install -> materialize -> cold roll); the `cognic-hook-schema-guard@v0.1.0` HOOK pack is **trust-register + registry-admit ONLY** — baked into the kernel image, discovered + cosign-verified at boot, never through the portal pack-lifecycle API.
+
+### Hook-pack admission (asserted at both boots) — PASS
+- `GET /api/v1/system/plugins?tenant_id=proof-m5` reports `cognic-hook-schema-guard` as `kind=hooks status=registered` (attestation `grade=partial` — the proof-context supply-chain grade; the cosign signature is real-verified against the staged per-pack `hook-packs/cognic-hook-schema-guard/cosign.pub`). A negative sweep of the pod logs for hook-admission / DLP-guard failure markers is empty. This exercises the M5 kernel changes end-to-end: the `cognic.hooks` fourth pack kind (ADR-002 amendment) and the per-pack boot trust root (`harness/registry_boot._resolve_pack_trust_root`).
+
+### Bar 1 (permitted arg -> hook allows -> tool executes) — PASS
+- `call_tool(describe_table, owner=COGNIC, table=EMPLOYEES)` -> HTTP 200; the response carries `FULL_NAME` (the EMPLOYEES column metadata), an `audit.tool_invocation` success row is present, and `discovery_status=auth_ready`. The `dlp_pre` hook ran and ALLOWED, and the tool executed. -> **`PROOF M5 (BAR 1) PASS`**
+
+### Bar 2 (forbidden arg -> refused before the tool) — PASS
+- `call_tool(describe_table, owner=COGNIC, table=__FORBIDDEN__)` -> **HTTP 403**, `detail.reason=dlp_pre_refused`, `detail.policy_reason=forbidden_schema_arg`.
+- **Refused before the tool:** the `audit.tool_invocation` success-row count is unchanged by the call (no tool execution); the newest evidence row is `audit.tool_invocation_refused` with `refusal_reason=dlp_pre_refused`, attributed to `dlp_failed_hook_id=refuse_forbidden_schema_arg`, carrying `dlp_policy_input_digest=cc09ae4e06af...` (sha256).
+- **Digest-only:** a sweep of `audit_event` + `decision_history` for the literal `__FORBIDDEN__` returns zero rows — the argument plaintext never enters the evidence chain; only the digest correlates the call. -> **`PROOF M5 (BAR 2) PASS`**
+
+### Bar 3 (raising hook -> fail closed) — PASS
+- `call_tool(describe_table, owner=COGNIC, table=__EXPLODE__)` -> **HTTP 409**, `detail.reason=dlp_pre_failed`. The first hook passes; `explode_schema_guard` raises; the kernel fails CLOSED (a broken hook is a refusal, never a silent bypass — Wave-1). The `audit.tool_invocation` count is unchanged (no tool execution); the refusal row is `dlp_pre_failed` attributed to `dlp_failed_hook_id=explode_schema_guard`, digest `e32a369a736c...`; the `__EXPLODE__` literal is absent from all evidence rows. -> **`PROOF M5 (BAR 3) PASS`**
+
+### Live findings cleared
+- **Run 1 — transient astral.sh IPv6 blip (infra, not M5):** the first attempt failed at the deps-base image build on `ADD https://astral.sh/uv/0.5.29/install.sh` with `connect: no route to host` (an IPv6 route to Cloudflare), after the runner's own 3 retries. Two docker-build canaries diagnosed it as transient: PyPI was reachable (3.2s), and the identical astral.sh `ADD --no-cache` succeeded on retry minutes later. No code or environment change was made; run 2 built clean. Staging + all four release digests PASSED on both runs. This is a single transient network retry, not an M5 defect.
+- Zero deploy / harness findings past the build stage — the proof-m5 runner + `proof_m5` app were modeled faithfully on the M4 proof.
+
+### Honesty boundary
+- "PASS" means the **DLP hook enforcement path** is proven live on `kind`: a released signed hook pack is trust-registered as a first-class pack kind, cosign-verified against its own per-pack trust root, admitted into the runtime `HookRegistry`, wired into the `DLPGuard` the MCP host consults, and its `dlp_pre` hooks decide real `call_tool` invocations (allow / policy-refuse / fail-closed) with digest-only evidence and no tool execution on refusal.
+- The hook pack is **trust-register + registry-admit only**; an operator enable/disable lifecycle for hook packs (M4-style) is a documented follow-up (spec §8), not an M5 requirement.
+- Unlike M3/M4 (zero `src/cognic_agentos` change), M5 REQUIRED kernel changes — the dormant-hook wiring onto `call_tool`, the `cognic.hooks` pack kind, and the per-pack boot trust root — each landed under the critical-controls coverage gate with `protocol/mcp_authz.py` byte-identical throughout.
+- This does **not** claim the production AKS platform (M15/M24), an end-to-end bank LLM-agent loop (M8), or the executable-skill / workflow / agent pack types (M6/M7/M13).

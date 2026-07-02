@@ -53,10 +53,17 @@ def test_harness_dir_has_expected_sources() -> None:
     (the plugin-registry boot-builder — reviewed: module-level imports are only
     ``protocol/*`` (pack_attestation_resolver / plugin_registry / trust_gate),
     with core/db/protocol deps under TYPE_CHECKING; no Layer-C, no redis client,
-    no second engine, no Bucket-1 default, so the fences below hold)."""
+    no second engine, no Bucket-1 default, so the fences below hold). M5
+    (2026-07-02) added ``hook_registry.py`` (the hook-registry boot loader +
+    DLPGuard builder — reviewed: module-level imports are only ``packs.hooks.*``
+    (dispatcher / dlp_integration / registry) + ``protocol.mcp_manifest`` +
+    stdlib ``importlib.metadata``, with core/protocol deps under TYPE_CHECKING;
+    no Layer-C, no redis client, no second engine, no Bucket-1 default, so the
+    fences below hold)."""
     names = {p.name for p in _harness_sources()}
     assert names == {
         "__init__.py",
+        "hook_registry.py",
         "mcp_host.py",
         "memory_policy.py",
         "registry_boot.py",

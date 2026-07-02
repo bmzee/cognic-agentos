@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from cognic_agentos.core.config import Settings
     from cognic_agentos.db.adapters.protocols import SecretAdapter
     from cognic_agentos.harness.runtime import Runtime
+    from cognic_agentos.packs.hooks.dlp_integration import DLPGuard
     from cognic_agentos.protocol.discovery_status import DiscoveryStatusRecorder
     from cognic_agentos.protocol.plugin_registry import RegisteredPackCandidate
 
@@ -159,6 +160,32 @@ def _map_registered_packs_to_servers(registry: _RegistryCandidates) -> dict[str,
                 )
                 continue
             data_classes = tuple(raw_dc)
+        # M5 (ADR-017): dlp_pre_hooks gates the host's fail-closed dlp_pre scan —
+        # an explicit-but-malformed value warns+skips (mirror data_classes; a
+        # silent drop would silently disable the pack's declared DLP scan).
+        # absent is fine (empty ⇒ the host's no-op path).
+        dlp_pre_hooks: tuple[str, ...] = ()
+        if isinstance(dg, dict) and "dlp_pre_hooks" in dg:
+            raw_hooks = dg["dlp_pre_hooks"]
+            if not isinstance(raw_hooks, list) or not all(
+                isinstance(h, str) and h.strip() for h in raw_hooks
+            ):
+                logger.warning(
+                    "mcp.pack_mcp_block_malformed",
+                    extra={
+                        "distribution_name": cand.distribution_name,
+                        "reason": "malformed dlp_pre_hooks",
+                    },
+                )
+                continue
+            dlp_pre_hooks = tuple(raw_hooks)
+        # purpose is advisory HookContext material, not a gate — a non-string
+        # value degrades to "" (the pack still serves).
+        manifest_purpose = ""
+        if isinstance(dg, dict):
+            raw_purpose = dg.get("purpose")
+            if isinstance(raw_purpose, str):
+                manifest_purpose = raw_purpose
         entry = MCPServerEntry(
             server_id=cand.distribution_name,
             server_url=server_url,
@@ -167,6 +194,8 @@ def _map_registered_packs_to_servers(registry: _RegistryCandidates) -> dict[str,
             risk_tier=_read_risk_tier(manifest),
             pack_signature_digest=cand.signature_digest or "",
             data_classes=data_classes,
+            dlp_pre_hooks=dlp_pre_hooks,
+            manifest_purpose=manifest_purpose,
         )
         servers[entry.server_id] = entry
     return servers
@@ -180,6 +209,7 @@ def build_mcp_host(
     http_client: httpx.AsyncClient,
     vault_client: SecretAdapter,
     discovery_status_recorder: DiscoveryStatusRecorder | None = None,
+    dlp_guard: DLPGuard | None = None,
 ) -> MCPHost:
     """Assemble the production MCP host. ``require_mcp()`` fires inside the
     transport ctor — call ONLY on the SDK-present path (``is_mcp_available()``).
@@ -190,7 +220,12 @@ def build_mcp_host(
     per-(tenant, pack) invoke-time recorder the host writes to; the lifespan
     threads the SAME instance it attaches to ``app.state`` for the
     ``/api/v1/system/plugins`` read surface. ``None`` keeps the host's recording
-    a no-op."""
+    a no-op.
+
+    ``dlp_guard`` (M5, ADR-017) is the boot-constructed ``DLPGuard`` the host's
+    ``_dlp_pre_scan`` consults for packs declaring ``dlp_pre_hooks``. ``None``
+    keeps hook-less packs byte-identical; a pack that DECLARES hooks then fails
+    CLOSED per-call (``dlp_pre_guard_unavailable``)."""
     from cognic_agentos.protocol.mcp_authz import MCPAuthzClient
     from cognic_agentos.protocol.mcp_transports import StreamableHTTPTransport
 
@@ -216,6 +251,7 @@ def build_mcp_host(
         settings=settings,
         approval_engine=runtime.approval_engine,
         discovery_status_recorder=discovery_status_recorder,
+        dlp_guard=dlp_guard,
         # PR-2b-1 (ADR-002 amendment) — the operator server_url-override store the
         # host resolves per-use at the server_url read sites (incl. the list_tools
         # cache key); the SAME constructed store the portal operator override
