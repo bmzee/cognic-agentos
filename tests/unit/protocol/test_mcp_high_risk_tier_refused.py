@@ -546,10 +546,11 @@ class TestRiskTierAllowListPinned:
 
     def test_refusal_reason_closed_enum_pinned(self, host_module: Any) -> None:
         """Sprint 13.5b2 extended the Sprint-5 single-value enum with the
-        five approval-engine outcomes (ADR-014). The transitional
+        five approval-engine outcomes (ADR-014); M5 added the three DLP
+        pre-invocation reasons. The transitional
         ``tool_approval_engine_not_available`` value is KEPT as the
         engine-absent fallback this suite pins; anything outside the
-        6-value set is drift (mirror pin lives in
+        9-value set is drift (mirror pin lives in
         test_mcp_approval_seam.py)."""
         from typing import get_args
 
@@ -562,6 +563,9 @@ class TestRiskTierAllowListPinned:
                 "tool_approval_expired",
                 "tool_approval_binding_mismatch",
                 "tool_approval_request_not_found",
+                "dlp_pre_refused",
+                "dlp_pre_failed",
+                "dlp_pre_guard_unavailable",
             }
         )
 

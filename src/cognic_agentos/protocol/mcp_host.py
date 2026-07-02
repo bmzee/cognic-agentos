@@ -611,9 +611,15 @@ def _approval_redacted_context(*, server_id: str, tool_name: str) -> str:
 #: Wire-protocol-public (AGENTS.md MCP-host stop rule). Sprint 5 shipped
 #: exactly one value (the ADR-014 transitional rule, kept as the
 #: engine-absent fallback); Sprint 13.5b2 extended it with the five
-#: approval-engine outcomes per ADR-014 + the 13.5b2 spec §4. Drift-pinned
-#: by ``test_mcp_approval_seam.py::
-#: test_tool_invocation_refusal_reason_has_exactly_six_values``.
+#: approval-engine outcomes per ADR-014 + the 13.5b2 spec §4; M5 (ADR-017)
+#: added the three DLP pre-invocation reasons — ``dlp_pre_refused`` (a hook
+#: policy-refused the call), ``dlp_pre_failed`` (a hook raised / timed out, or
+#: a declared hook did not resolve), ``dlp_pre_guard_unavailable``
+#: (``dlp_pre_hooks`` declared but no DLP guard wired — fail closed).
+#: Drift-pinned by ``test_mcp_approval_seam.py::
+#: test_tool_invocation_refusal_reason_has_exactly_nine_values`` +
+#: ``test_mcp_high_risk_tier_refused.py::
+#: TestRiskTierAllowListPinned::test_refusal_reason_closed_enum_pinned``.
 ToolInvocationRefusalReason = Literal[
     "tool_approval_engine_not_available",
     "tool_approval_pending",
@@ -621,6 +627,9 @@ ToolInvocationRefusalReason = Literal[
     "tool_approval_expired",
     "tool_approval_binding_mismatch",
     "tool_approval_request_not_found",
+    "dlp_pre_refused",
+    "dlp_pre_failed",
+    "dlp_pre_guard_unavailable",
 ]
 
 

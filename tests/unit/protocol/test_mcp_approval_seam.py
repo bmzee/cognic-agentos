@@ -21,9 +21,10 @@ from cognic_agentos.core.decision_history import DecisionHistoryStore
 from cognic_agentos.protocol.mcp_authz import MCPAuthzClient, Token
 
 
-def test_tool_invocation_refusal_reason_has_exactly_six_values() -> None:
-    # Wire-protocol-public vocabulary (spec §4). Drift-pinned: adding or
-    # removing a value fails here until the spec/ADR amendment moves with it.
+def test_tool_invocation_refusal_reason_has_exactly_nine_values() -> None:
+    # Wire-protocol-public vocabulary (spec §4; M5 added the three DLP
+    # pre-invocation reasons). Drift-pinned: adding or removing a value
+    # fails here until the spec/ADR amendment moves with it.
     from cognic_agentos.protocol.mcp_host import ToolInvocationRefusalReason
 
     assert set(typing.get_args(ToolInvocationRefusalReason)) == {
@@ -33,6 +34,9 @@ def test_tool_invocation_refusal_reason_has_exactly_six_values() -> None:
         "tool_approval_expired",
         "tool_approval_binding_mismatch",
         "tool_approval_request_not_found",
+        "dlp_pre_refused",
+        "dlp_pre_failed",
+        "dlp_pre_guard_unavailable",
     }
 
 
