@@ -126,6 +126,7 @@ from cognic_agentos.core.canonical import canonical_bytes
 from cognic_agentos.core.config import Settings
 from cognic_agentos.core.decision_history import DecisionHistoryStore, DecisionRecord
 from cognic_agentos.core.mcp_config.storage import MCPServerUrlOverrideStore
+from cognic_agentos.packs.hooks.dlp_integration import DLPGuard
 from cognic_agentos.protocol import require_mcp
 from cognic_agentos.protocol.discovery_status import (
     DiscoveryStatus,
@@ -696,6 +697,7 @@ class MCPHost:
         approval_engine: ApprovalEngine | None = None,
         discovery_status_recorder: DiscoveryStatusRecorder | None = None,
         override_store: MCPServerUrlOverrideStore | None = None,
+        dlp_guard: DLPGuard | None = None,
     ) -> None:
         # ``approval_engine`` (Sprint 13.5b2, ADR-014): None (default) keeps
         # the Sprint-5 transitional gate byte-for-byte (engine-absent
@@ -804,6 +806,14 @@ class MCPHost:
         # error fails SAFE to the signed manifest URL. The override is runtime
         # config ONLY — :class:`MCPServerEntry` / the manifest is NEVER mutated.
         self._override_store = override_store
+        # ``dlp_guard`` (M5, ADR-017): None (default) keeps the invoke path
+        # byte-for-byte (no dlp_pre scan). Wired, :meth:`call_tool` runs the
+        # calling pack's declared ``dlp_pre_hooks`` over the tool arguments
+        # BEFORE token / session / transport. A pack that declares
+        # ``dlp_pre_hooks`` while this stays None fails closed
+        # (``dlp_pre_guard_unavailable``) — never a silent skip. Built by the
+        # off-gate hook-registry loader (M5 Task 7).
+        self._dlp_guard = dlp_guard
         # R1 P2 #2: cache key includes tenant_id + scopes (NOT just
         # server_id). Cross-tenant cache leak would let tenant B
         # receive tenant A's already-cleared tool catalogue without
