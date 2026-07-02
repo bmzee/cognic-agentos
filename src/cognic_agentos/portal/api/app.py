@@ -787,10 +787,23 @@ def create_app(
                 # a construction failure leaves app.state.mcp_host None + ERROR
                 # log + the app still boots. mcp_http_client is predeclared above.
                 if registry is not None and is_mcp_available():
+                    from cognic_agentos.harness.hook_registry import build_dlp_guard
                     from cognic_agentos.harness.mcp_host import build_mcp_host
 
                     mcp_http_client = httpx.AsyncClient()
                     try:
+                        # M5 (ADR-017): fail-soft DLPGuard construction over the
+                        # SAME trusted registry. A guard build failure leaves
+                        # dlp_guard None (ERROR log) and the host still builds —
+                        # packs declaring dlp_pre_hooks then fail CLOSED per-call
+                        # (dlp_pre_guard_unavailable) rather than the app
+                        # failing to boot.
+                        try:
+                            dlp_guard = build_dlp_guard(registry=registry, settings=settings)
+                        except Exception:
+                            logger.error("mcp.dlp_guard_construction_failed", exc_info=True)
+                            dlp_guard = None
+                        app.state.dlp_guard = dlp_guard
                         # Sprint 4: thread the SHARED registry (the same object
                         # the A2A endpoint receives below) — no per-surface empty
                         # PluginRegistry() fallback.
@@ -801,6 +814,7 @@ def create_app(
                             http_client=mcp_http_client,
                             vault_client=adapters.secret,
                             discovery_status_recorder=discovery_status_recorder,
+                            dlp_guard=dlp_guard,
                         )
                     except Exception:
                         logger.error("mcp.host_construction_failed", exc_info=True)
@@ -1174,6 +1188,10 @@ def create_app(
     # the lifespan populates it with the injected-or-discovered registry.
     app.state.plugin_registry = None
     app.state.mcp_host = None  # Sprint 13.8 (ADR-002) — SDK-gated; lifespan populates.
+    # M5 (ADR-017) — the boot-constructed DLPGuard the lifespan threads into the
+    # MCP host. Pre-seeded None (mirrors mcp_host); stays None when the SDK is
+    # absent or guard construction fail-softs.
+    app.state.dlp_guard = None
     # PR-1 Slice 2 (ADR-002) — OBSERVATIONAL discovery-status recorder. Pre-seeded
     # None so pre-startup / lifespan-skipping introspection sees a defined attribute;
     # the lifespan builds the real InMemoryDiscoveryStatusRecorder unconditionally.

@@ -208,6 +208,75 @@ def test_malformed_data_classes_warns_and_skips(monkeypatch, caplog, bad_dc):
     assert len(caplog.records) == 1
 
 
+def test_dlp_fields_extracted_from_data_governance(monkeypatch):
+    # M5 (ADR-017): [data_governance].dlp_pre_hooks + purpose flow onto the
+    # entry — the host's _dlp_pre_scan consumes both.
+    mcp = {"transport": "streamable-http", "server_url": "https://x/sse", "scopes": ["s"]}
+    monkeypatch.setattr(
+        "cognic_agentos.harness.mcp_host.extract_pack_manifest",
+        lambda **kw: {
+            "tool": {"cognic": {"mcp": mcp}},
+            "risk_tier": {"tier": "read_only"},
+            "data_governance": {
+                "data_classes": ["internal"],
+                "dlp_pre_hooks": ["refuse_forbidden_schema_arg", "explode_schema_guard"],
+                "purpose": "operational_telemetry",
+            },
+        },
+    )
+    servers = _map_registered_packs_to_servers(_StubRegistry([_cand()]))
+    e = servers["cognic-tool-foo"]
+    assert e.dlp_pre_hooks == ("refuse_forbidden_schema_arg", "explode_schema_guard")
+    assert e.manifest_purpose == "operational_telemetry"
+
+
+def test_dlp_fields_default_when_absent(monkeypatch):
+    # no dlp_pre_hooks / purpose keys → the M5 empty defaults (no-op scan).
+    monkeypatch.setattr(
+        "cognic_agentos.harness.mcp_host.extract_pack_manifest", lambda **kw: _GOOD_MANIFEST
+    )
+    servers = _map_registered_packs_to_servers(_StubRegistry([_cand()]))
+    e = servers["cognic-tool-foo"]
+    assert e.dlp_pre_hooks == ()
+    assert e.manifest_purpose == ""
+
+
+@pytest.mark.parametrize("bad_hooks", ["oops", [123], [""], ["ok", ""]])
+def test_malformed_dlp_pre_hooks_warns_and_skips(monkeypatch, caplog, bad_hooks):
+    # dlp_pre_hooks gates the host's fail-closed DLP scan — an explicit-but-
+    # malformed shape warns+skips (mirror data_classes; NOT silently dropped,
+    # which would silently disable the pack's declared DLP scan).
+    mcp = {"transport": "streamable-http", "server_url": "https://x/sse", "scopes": ["s"]}
+    monkeypatch.setattr(
+        "cognic_agentos.harness.mcp_host.extract_pack_manifest",
+        lambda **kw: {
+            "tool": {"cognic": {"mcp": mcp}},
+            "risk_tier": {"tier": "read_only"},
+            "data_governance": {"dlp_pre_hooks": bad_hooks},
+        },
+    )
+    with caplog.at_level(logging.WARNING):
+        servers = _map_registered_packs_to_servers(_StubRegistry([_cand()]))
+    assert servers == {}
+    assert len(caplog.records) == 1
+
+
+def test_non_string_purpose_defaults_empty_not_skipped(monkeypatch):
+    # purpose is advisory HookContext material, not a gate — a non-string value
+    # degrades to "" (the pack still serves) per the M5 plan's lenient shape.
+    mcp = {"transport": "streamable-http", "server_url": "https://x/sse", "scopes": ["s"]}
+    monkeypatch.setattr(
+        "cognic_agentos.harness.mcp_host.extract_pack_manifest",
+        lambda **kw: {
+            "tool": {"cognic": {"mcp": mcp}},
+            "risk_tier": {"tier": "read_only"},
+            "data_governance": {"purpose": 123},
+        },
+    )
+    servers = _map_registered_packs_to_servers(_StubRegistry([_cand()]))
+    assert servers["cognic-tool-foo"].manifest_purpose == ""
+
+
 def test_stdio_transport_not_served(monkeypatch):
     mcp = {"transport": "stdio", "server_url": "x", "scopes": ["s"]}
     monkeypatch.setattr(
@@ -294,6 +363,56 @@ async def test_build_mcp_host_wires_mcp_override_and_allowlist_stores(
         assert (
             host._authz._internal_host_allowlist_store is runtime.mcp_internal_host_allowlist_store
         )
+    finally:
+        await client.aclose()
+        await runtime.aclose()
+        await adapters.close_all()
+
+
+async def test_build_mcp_host_wires_dlp_guard(
+    memory_registry, memory_settings, tmp_path, monkeypatch
+):
+    # M5 (ADR-017): build_mcp_host threads the SAME guard instance into the
+    # host (identity, not just non-None); omitting the kwarg keeps None.
+    from cognic_agentos.packs.hooks.dispatcher import HookDispatcher
+    from cognic_agentos.packs.hooks.dlp_integration import DLPGuard
+    from cognic_agentos.packs.hooks.registry import HookRegistry
+
+    monkeypatch.setattr(
+        "cognic_agentos.harness.mcp_host.extract_pack_manifest", lambda **kw: _GOOD_MANIFEST
+    )
+    s = memory_settings.model_copy(
+        update={"litellm_config_path": _litellm_yaml(tmp_path), "cache_driver": "memory"}
+    )
+    adapters = build_adapters(s, registry=memory_registry)
+    await adapters.open_all()
+    runtime = await build_runtime(s, adapters)
+    guard = DLPGuard(
+        dispatcher=HookDispatcher(
+            registry=HookRegistry(max_timeout_seconds=30.0),
+            max_payload_bytes=1_000,
+            max_timeout_seconds_runtime=30.0,
+        )
+    )
+    client = httpx.AsyncClient()
+    try:
+        host = build_mcp_host(
+            registry=_StubRegistry([_cand()]),
+            runtime=runtime,
+            settings=s,
+            http_client=client,
+            vault_client=adapters.secret,
+            dlp_guard=guard,
+        )
+        assert host._dlp_guard is guard
+        default_host = build_mcp_host(
+            registry=_StubRegistry([_cand()]),
+            runtime=runtime,
+            settings=s,
+            http_client=client,
+            vault_client=adapters.secret,
+        )
+        assert default_host._dlp_guard is None
     finally:
         await client.aclose()
         await runtime.aclose()
