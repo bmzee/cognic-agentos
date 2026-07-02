@@ -278,3 +278,49 @@ def test_timeout_reasons_are_subset_of_live_enums() -> None:
 
     live = set(get_args(MCPTransportReason)) | set(get_args(AuthzReason))
     assert _TIMEOUT_REASONS.issubset(live)  # a renamed/removed timeout reason fails here
+
+
+def test_refusal_status_covers_every_reason() -> None:
+    # M5: the status map MUST cover the FULL closed enum — a reason added to
+    # ToolInvocationRefusalReason without a route mapping would KeyError into
+    # a leaked 500 at the except arm. This pin makes the drift a test failure.
+    from typing import get_args
+
+    from cognic_agentos.portal.api.mcp.routes import _REFUSAL_STATUS
+    from cognic_agentos.protocol.mcp_host import ToolInvocationRefusalReason
+
+    assert set(_REFUSAL_STATUS) == set(get_args(ToolInvocationRefusalReason))
+
+
+@pytest.mark.parametrize(
+    ("reason", "status"),
+    [
+        ("dlp_pre_refused", 403),
+        ("dlp_pre_failed", 409),
+        ("dlp_pre_guard_unavailable", 503),
+    ],
+)
+def test_dlp_refusals_map_to_status(
+    memory_settings: Any, memory_registry: Any, tmp_path: Any, reason: str, status: int
+) -> None:
+    # M5: the three dlp_pre refusal reasons map 403/409/503; policy_reason (the
+    # hook's closed-enum reason) surfaces in the detail ONLY for dlp_pre_refused
+    # — the stub passes it for all three so the absence assertions pin the
+    # route's conditional, not the stub's shape.
+    host = _StubHost(
+        raises=MCPToolInvocationRefused(reason, policy_reason="forbidden_schema_arg")  # type: ignore[arg-type]
+    )
+    r = _call(
+        memory_settings,
+        memory_registry,
+        tmp_path,
+        host=host,
+        json={"tool_name": "describe_table", "arguments": {"table": "EMPLOYEES"}},
+    )
+    assert r.status_code == status
+    detail = r.json()["detail"]
+    assert detail["reason"] == reason
+    if reason == "dlp_pre_refused":
+        assert detail["policy_reason"] == "forbidden_schema_arg"
+    else:
+        assert "policy_reason" not in detail

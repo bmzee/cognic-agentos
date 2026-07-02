@@ -30,10 +30,13 @@ from cognic_agentos.protocol.mcp_host import (
 )
 from cognic_agentos.protocol.mcp_transports import MCPTransportError
 
-#: ``MCPToolInvocationRefused.reason`` -> HTTP status. The 6-value enum is
-#: wire-public + drift-pinned at its definition; this map consumes it.
+#: ``MCPToolInvocationRefused.reason`` -> HTTP status. The 9-value enum is
+#: wire-public + drift-pinned at its definition; this map consumes it (and the
+#: route tests pin map == enum so a new reason cannot leak a 500 KeyError).
 #: 202 = approval pending (the body adds approval_request_id); 403 = terminal
-#: forbidden (denied / no-engine); 409 = re-request conflicts.
+#: forbidden (denied / no-engine / dlp hook policy-refused, the body adds
+#: policy_reason); 409 = re-request conflicts + dlp hook infra failure;
+#: 503 = dlp_pre_hooks declared but no guard wired (fail-closed, M5 ADR-017).
 _REFUSAL_STATUS: dict[str, int] = {
     "tool_approval_pending": 202,
     "tool_approval_denied": 403,
@@ -41,6 +44,9 @@ _REFUSAL_STATUS: dict[str, int] = {
     "tool_approval_expired": 409,
     "tool_approval_binding_mismatch": 409,
     "tool_approval_request_not_found": 409,
+    "dlp_pre_refused": 403,
+    "dlp_pre_failed": 409,
+    "dlp_pre_guard_unavailable": 503,
 }
 
 #: Transport/authz reasons that map to 504 (gateway timeout). EVERY OTHER
@@ -141,6 +147,8 @@ def build_mcp_routes() -> APIRouter:
             detail: dict[str, Any] = {"reason": exc.reason}
             if exc.reason == "tool_approval_pending":
                 detail["approval_request_id"] = exc.payload.get("approval_request_id")
+            if exc.reason == "dlp_pre_refused" and exc.payload.get("policy_reason"):
+                detail["policy_reason"] = exc.payload["policy_reason"]
             raise HTTPException(status_code=_REFUSAL_STATUS[exc.reason], detail=detail) from None
         except (MCPTransportError, MCPAuthzError) as exc:
             raise HTTPException(
