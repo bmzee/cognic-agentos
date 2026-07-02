@@ -52,6 +52,7 @@ from cognic_agentos.protocol.plugin_registry import (
     DiscoveredPack,
     MCPAdmissionDeps,
     PackAttestations,
+    PluginKind,
     PluginRecord,
     PluginRegistry,
 )
@@ -71,18 +72,20 @@ _BOOT_MODULE = "cognic_agentos.harness.registry_boot"
 # --------------------------------------------------------------------------- #
 
 
-def _make_discovered_pack(*, name: str, distribution_name: str) -> DiscoveredPack:
+def _make_discovered_pack(
+    *, name: str, distribution_name: str, kind: PluginKind = "tools"
+) -> DiscoveredPack:
     """A discovered pack with a real (never-loaded) EntryPoint. The builder
     never inspects ``entry_point``; the stubs differentiate packs by
     ``distribution_name``."""
     record = PluginRecord(
-        kind="tools",
+        kind=kind,
         name=name,
         distribution_name=distribution_name,
         distribution_version="1.0.0",
         entry_point_value=f"{name}:Plugin",
     )
-    entry_point = _im.EntryPoint(name=name, value=f"{name}:Plugin", group="cognic.tools")
+    entry_point = _im.EntryPoint(name=name, value=f"{name}:Plugin", group=f"cognic.{kind}")
     return DiscoveredPack(record=record, entry_point=entry_point)
 
 
@@ -867,3 +870,316 @@ async def test_mcp_intent_pack_refused_when_mcp_admission_omitted(
     assert outcome.pack_id == _MCP_PACK_DISTRIBUTION
     assert outcome.status == "refused_at_registration"
     assert outcome.refusal_reason == "mcp_admission_deps_required"
+
+
+# --------------------------------------------------------------------------- #
+# M5 T8.5b — per-pack trust root for HOOK packs (LOCKED staged layout:
+# <trust_root_prefix>/hook-packs/<pack_id>/cosign.pub, _default fallback;
+# present-but-invalid FAILS CLOSED per pack — never a silent downgrade to
+# the default root; tools/skills/agents behavior unchanged).
+# --------------------------------------------------------------------------- #
+
+
+def _write_hook_pack_pub(
+    trust_root_prefix: Path, distribution_name: str, content: str = "HOOK-KEY\n"
+) -> Path:
+    hook_dir = trust_root_prefix / "hook-packs" / distribution_name
+    hook_dir.mkdir(parents=True, exist_ok=True)
+    pub = hook_dir / "cosign.pub"
+    pub.write_text(content)
+    return pub
+
+
+async def _run_hook_root_boot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    audit_store: AuditStore,
+    supply_chain: SupplyChainPipeline,
+    object_store: LocalObjectStoreAdapter,
+    *,
+    packs: list[DiscoveredPack],
+    trust_root_prefix: Path,
+) -> tuple[list[tuple[str, Path]], AsyncMock]:
+    """Boot with stubbed collaborators over a PRE-STAGED trust-root prefix;
+    capture ``(distribution_name, cosign_trust_root)`` per resolve call."""
+    settings = _make_settings(
+        pack_attestation_root_path=str(tmp_path / "attestations"),
+        trust_root_prefix=trust_root_prefix,
+        plugin_allowlist_path=_REAL_ALLOWLIST,
+    )
+    register_spy = AsyncMock()
+    _install_registry_stubs(monkeypatch, discovered=packs, register_spy=register_spy)
+    captured: list[tuple[str, Path]] = []
+
+    def _resolve(
+        pack: DiscoveredPack, *, pack_attestation_root: Path, cosign_trust_root: Path
+    ) -> PackAttestations:
+        captured.append((pack.record.distribution_name, cosign_trust_root))
+        return _stub_attestations(cosign_trust_root)
+
+    monkeypatch.setattr(f"{_BOOT_MODULE}.resolve_pack_attestations", _resolve)
+    await build_and_populate_registry(
+        settings=settings,
+        audit_store=audit_store,
+        supply_chain=supply_chain,
+        object_store=object_store,
+    )
+    return captured, register_spy
+
+
+async def test_hook_pack_uses_per_pack_trust_root_when_present(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    audit_store: AuditStore,
+    supply_chain: SupplyChainPipeline,
+    object_store: LocalObjectStoreAdapter,
+) -> None:
+    trust_root_prefix = tmp_path / "trust-roots"
+    _write_cosign_pub(trust_root_prefix)
+    hook_pub = _write_hook_pack_pub(trust_root_prefix, "cognic-hook-schema-guard")
+    packs = [
+        _make_discovered_pack(
+            name="refuse_forbidden_schema_arg",
+            distribution_name="cognic-hook-schema-guard",
+            kind="hooks",
+        )
+    ]
+    captured, register_spy = await _run_hook_root_boot(
+        tmp_path,
+        monkeypatch,
+        audit_store,
+        supply_chain,
+        object_store,
+        packs=packs,
+        trust_root_prefix=trust_root_prefix,
+    )
+    assert len(captured) == 1
+    dist, root = captured[0]
+    assert dist == "cognic-hook-schema-guard"
+    assert root == hook_pub.resolve()
+    assert register_spy.call_count == 1
+
+
+async def test_hook_pack_falls_back_to_default_root_when_absent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    audit_store: AuditStore,
+    supply_chain: SupplyChainPipeline,
+    object_store: LocalObjectStoreAdapter,
+) -> None:
+    trust_root_prefix = tmp_path / "trust-roots"
+    default_pub = _write_cosign_pub(trust_root_prefix)
+    packs = [
+        _make_discovered_pack(name="h1", distribution_name="cognic-hook-schema-guard", kind="hooks")
+    ]
+    captured, register_spy = await _run_hook_root_boot(
+        tmp_path,
+        monkeypatch,
+        audit_store,
+        supply_chain,
+        object_store,
+        packs=packs,
+        trust_root_prefix=trust_root_prefix,
+    )
+    assert captured == [("cognic-hook-schema-guard", default_pub)]
+    assert register_spy.call_count == 1
+
+
+async def test_tool_pack_never_consults_per_pack_hook_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    audit_store: AuditStore,
+    supply_chain: SupplyChainPipeline,
+    object_store: LocalObjectStoreAdapter,
+) -> None:
+    # Existing default-root behavior for tools stays UNCHANGED even when a
+    # decoy per-pack key exists under hook-packs/<their-dist>/.
+    trust_root_prefix = tmp_path / "trust-roots"
+    default_pub = _write_cosign_pub(trust_root_prefix)
+    _write_hook_pack_pub(trust_root_prefix, "cognic-tool-oracle-schema", "DECOY\n")
+    packs = [
+        _make_discovered_pack(
+            name="oracle_schema", distribution_name="cognic-tool-oracle-schema", kind="tools"
+        )
+    ]
+    captured, register_spy = await _run_hook_root_boot(
+        tmp_path,
+        monkeypatch,
+        audit_store,
+        supply_chain,
+        object_store,
+        packs=packs,
+        trust_root_prefix=trust_root_prefix,
+    )
+    assert captured == [("cognic-tool-oracle-schema", default_pub)]
+    assert register_spy.call_count == 1
+
+
+async def test_hook_pack_empty_per_pack_root_fails_closed_no_downgrade(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    audit_store: AuditStore,
+    supply_chain: SupplyChainPipeline,
+    object_store: LocalObjectStoreAdapter,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Present-but-EMPTY per-pack key: the pack is SKIPPED (fail closed) —
+    # resolve/register never run for it, and it is NEVER silently downgraded
+    # to default-root verification (the corrupted-key demotion attack).
+    trust_root_prefix = tmp_path / "trust-roots"
+    _write_cosign_pub(trust_root_prefix)
+    _write_hook_pack_pub(trust_root_prefix, "cognic-hook-schema-guard", content="")
+    packs = [
+        _make_discovered_pack(name="h1", distribution_name="cognic-hook-schema-guard", kind="hooks")
+    ]
+    with caplog.at_level(logging.WARNING):
+        captured, register_spy = await _run_hook_root_boot(
+            tmp_path,
+            monkeypatch,
+            audit_store,
+            supply_chain,
+            object_store,
+            packs=packs,
+            trust_root_prefix=trust_root_prefix,
+        )
+    assert captured == []
+    assert register_spy.call_count == 0
+    assert "hook_pack_trust_root_invalid" in caplog.text
+    assert "hook_pack_trust_root_empty" in caplog.text
+
+
+async def test_hook_pack_dir_per_pack_root_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    audit_store: AuditStore,
+    supply_chain: SupplyChainPipeline,
+    object_store: LocalObjectStoreAdapter,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    trust_root_prefix = tmp_path / "trust-roots"
+    _write_cosign_pub(trust_root_prefix)
+    # cosign.pub as a DIRECTORY — present but not a regular file.
+    (trust_root_prefix / "hook-packs" / "cognic-hook-schema-guard" / "cosign.pub").mkdir(
+        parents=True
+    )
+    packs = [
+        _make_discovered_pack(name="h1", distribution_name="cognic-hook-schema-guard", kind="hooks")
+    ]
+    with caplog.at_level(logging.WARNING):
+        captured, register_spy = await _run_hook_root_boot(
+            tmp_path,
+            monkeypatch,
+            audit_store,
+            supply_chain,
+            object_store,
+            packs=packs,
+            trust_root_prefix=trust_root_prefix,
+        )
+    assert captured == []
+    assert register_spy.call_count == 0
+    assert "hook_pack_trust_root_not_a_file" in caplog.text
+
+
+async def test_hook_pack_traversal_distribution_name_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    audit_store: AuditStore,
+    supply_chain: SupplyChainPipeline,
+    object_store: LocalObjectStoreAdapter,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A hostile distribution name (from a malicious wheel's metadata) must
+    # refuse BEFORE any path is built — resolve-then-validate discipline.
+    trust_root_prefix = tmp_path / "trust-roots"
+    _write_cosign_pub(trust_root_prefix)
+    packs = [_make_discovered_pack(name="h1", distribution_name="../_default", kind="hooks")]
+    with caplog.at_level(logging.WARNING):
+        captured, register_spy = await _run_hook_root_boot(
+            tmp_path,
+            monkeypatch,
+            audit_store,
+            supply_chain,
+            object_store,
+            packs=packs,
+            trust_root_prefix=trust_root_prefix,
+        )
+    assert captured == []
+    assert register_spy.call_count == 0
+    assert "hook_pack_trust_root_name_invalid" in caplog.text
+
+
+async def test_invalid_hook_root_skips_only_that_pack(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    audit_store: AuditStore,
+    supply_chain: SupplyChainPipeline,
+    object_store: LocalObjectStoreAdapter,
+) -> None:
+    # Per-pack fail-soft preserved: the bad hook pack skips; the sibling tool
+    # pack still registers against the default root.
+    trust_root_prefix = tmp_path / "trust-roots"
+    default_pub = _write_cosign_pub(trust_root_prefix)
+    _write_hook_pack_pub(trust_root_prefix, "cognic-hook-schema-guard", content="")
+    packs = [
+        _make_discovered_pack(
+            name="h1", distribution_name="cognic-hook-schema-guard", kind="hooks"
+        ),
+        _make_discovered_pack(name="t1", distribution_name="cognic-tool-t1", kind="tools"),
+    ]
+    captured, register_spy = await _run_hook_root_boot(
+        tmp_path,
+        monkeypatch,
+        audit_store,
+        supply_chain,
+        object_store,
+        packs=packs,
+        trust_root_prefix=trust_root_prefix,
+    )
+    assert captured == [("cognic-tool-t1", default_pub)]
+    assert register_spy.call_count == 1
+
+
+async def test_hook_pack_symlink_escape_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    audit_store: AuditStore,
+    supply_chain: SupplyChainPipeline,
+    object_store: LocalObjectStoreAdapter,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The resolve-then-validate CONTAINMENT branch (distinct from the
+    # name-syntax gate): the distribution name is clean, the per-pack path
+    # EXISTS, but hook-packs/<pack_id> is a symlink whose target lives
+    # OUTSIDE trust_root_prefix — a planted key escaping the prefix must
+    # fail closed (hook_pack_trust_root_path_escape), never verify against
+    # out-of-prefix key material and never downgrade to the default root.
+    trust_root_prefix = tmp_path / "trust-roots"
+    default_pub = _write_cosign_pub(trust_root_prefix)
+    outside = tmp_path / "outside" / "cognic-hook-schema-guard"
+    outside.mkdir(parents=True)
+    (outside / "cosign.pub").write_text("PLANTED-OUT-OF-PREFIX-KEY\n")
+    hook_packs_dir = trust_root_prefix / "hook-packs"
+    hook_packs_dir.mkdir(parents=True)
+    (hook_packs_dir / "cognic-hook-schema-guard").symlink_to(outside)
+    packs = [
+        _make_discovered_pack(
+            name="h1", distribution_name="cognic-hook-schema-guard", kind="hooks"
+        ),
+        _make_discovered_pack(name="t1", distribution_name="cognic-tool-t1", kind="tools"),
+    ]
+    with caplog.at_level(logging.WARNING):
+        captured, register_spy = await _run_hook_root_boot(
+            tmp_path,
+            monkeypatch,
+            audit_store,
+            supply_chain,
+            object_store,
+            packs=packs,
+            trust_root_prefix=trust_root_prefix,
+        )
+    # the hook pack is SKIPPED (no resolve, no register) with the escape reason...
+    assert "hook_pack_trust_root_invalid" in caplog.text
+    assert "hook_pack_trust_root_path_escape" in caplog.text
+    # ...and the sibling tool pack still registers against the default root.
+    assert captured == [("cognic-tool-t1", default_pub)]
+    assert register_spy.call_count == 1
