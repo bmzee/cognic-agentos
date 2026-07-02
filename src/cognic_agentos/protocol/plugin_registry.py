@@ -7,8 +7,10 @@ discover → trust → supply-chain → policy → register pipeline.
 §1 of the Sprint-4 plan-of-record locks the discovery contract:
 
   * ``discover()`` walks ``importlib.metadata.entry_points(group=...)``
-    for the three pack-kind groups (``cognic.tools`` / ``cognic.skills``
-    / ``cognic.agents``). Each ``EntryPoint.load()`` is **deferred** to
+    for the four pack-kind groups (``cognic.tools`` / ``cognic.skills``
+    / ``cognic.agents`` / ``cognic.hooks`` — the fourth added at M5 per
+    the ADR-002 "hooks pack kind" amendment). Each ``EntryPoint.load()``
+    is **deferred** to
     ``PluginRegistry.load(kind, name)`` — eager loading would import
     every pack at startup, defeating the trust gate's pre-import
     verification (ADR-002 §"MCP STDIO threat model").
@@ -61,15 +63,24 @@ if TYPE_CHECKING:
 
 _LOG = logging.getLogger("cognic_agentos.protocol.plugin_registry")
 
-PluginKind = Literal["tools", "skills", "agents"]
+PluginKind = Literal["tools", "skills", "agents", "hooks"]
 
-#: Sprint-4 pack-kind → entry-point group mapping. The three groups are
-#: the ADR-002 contract — adding a fourth pack kind is a doctrine-level
-#: change (new ADR or ADR amendment), not a code-change.
+#: Pack-kind → entry-point group mapping. The FOUR groups are the ADR-002
+#: contract — adding a pack kind is a doctrine-level change (new ADR or
+#: ADR amendment), not a code-change. Sprint 4 shipped the first three;
+#: ``hooks`` landed at M5 per the ADR-002 "hooks pack kind" amendment
+#: (2026-07-02): DLP hook packs (Sprint-7A2 build-time first-class via
+#: ``cli/validators/hooks.py`` + the ``cognic.hooks`` → ``"hook"``
+#: wheel-integrity kind derivation) are trust-registered through the SAME
+#: discover → trust-gate → register pipeline as the other kinds — no
+#: proof-only bypass, no weakened gate. The hook-registry boot loader
+#: (``harness/hook_registry.build_dlp_guard``) consumes the registered
+#: candidates via ``iter_registered_pack_candidates()``.
 _ENTRY_POINT_GROUPS: dict[PluginKind, str] = {
     "tools": "cognic.tools",
     "skills": "cognic.skills",
     "agents": "cognic.agents",
+    "hooks": "cognic.hooks",
 }
 
 #: Closed enum of refusal classes. Adding a new value is a four-step
@@ -538,7 +549,7 @@ class PluginRegistry:
     # --- discovery --------------------------------------------------------
 
     def discover(self) -> list[DiscoveredPack]:
-        """Walk ``importlib.metadata.entry_points`` for the three pack
+        """Walk ``importlib.metadata.entry_points`` for the four pack
         groups; return ``DiscoveredPack`` (metadata + non-loaded
         EntryPoint) entries only.
 

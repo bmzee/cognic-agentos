@@ -443,6 +443,29 @@ claim — Proof 1b-2 is PR-2b-2.** Threat model: the merged spec
 `docs/superpowers/specs/2026-06-25-pr2b-mcp-internal-host-override-allowlist-design.md`; plan:
 `docs/superpowers/plans/2026-06-25-pr2b-1-mcp-override-allowlist.md`.
 
+## Hooks pack kind amendment (2026-07-02) — the fourth entry-point group (M5)
+
+`PluginKind` gains `"hooks"` and `_ENTRY_POINT_GROUPS` gains `"hooks" → "cognic.hooks"`
+(`protocol/plugin_registry.py`) — the doctrine-level change the in-code contract comment
+reserved for an ADR amendment. Rationale: Sprint 7A2 made hook packs first-class at
+BUILD time (`cli/validators/hooks.py` manifest validation; the `cognic.hooks` → `"hook"`
+wheel-integrity kind derivation in `cli/_wheel_integrity.py`; `agentos sign`/`verify`
+handle hook wheels end-to-end), but the RUNTIME registry only discovered/registered the
+original three kinds — so a released, signed DLP hook pack could never be
+trust-registered, and M5's dlp_pre enforcement path (ADR-017; the
+`harness/hook_registry.build_dlp_guard` boot loader consuming
+`iter_registered_pack_candidates()`) was unreachable. The M5 ruling (2026-07-02) rejected
+any proof-only bypass: hook packs flow through the SAME
+discover → trust-gate → supply-chain → policy → register pipeline as tools/skills/agents —
+no new refusal vocabulary, no weakened gate, deferred-load invariant unchanged (hook code
+is `EntryPoint.load()`ed only by the hook dispatcher at first dispatch). Registration
+evidence rows now legitimately carry `kind="hooks"` (additive). MCP admission is
+unaffected: hook packs may not declare `[mcp]`/`[a2a]` blocks
+(`hook_pack_kind_constraint_violated` at validate time), so the registration-time MCP
+admission tri-state walk silent-skips them. Boot-time per-pack trust-root resolution for
+hook packs is the companion change in `harness/registry_boot.py` (same M5 ruling, staged
+layout `trust-roots/hook-packs/<pack_id>/cosign.pub` with `_default/cosign.pub` fallback).
+
 ## References
 - [Model Context Protocol — 2026 roadmap](https://blog.modelcontextprotocol.io/posts/2026-mcp-roadmap/)
 - [MCP — Wikipedia](https://en.wikipedia.org/wiki/Model_Context_Protocol)
