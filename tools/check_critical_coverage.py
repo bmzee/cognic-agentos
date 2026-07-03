@@ -2300,6 +2300,17 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     # fresh full-suite --cov-branch coverage.json IN THE SAME COMMIT (NOT just the
     # count bump) per feedback_verify_promotion_meets_floor_at_promotion_time.
     ("src/cognic_agentos/core/skill/broker.py", 0.95, 0.90),
+    # M6 Task A5 (ADR-025) — the governed skill executor. Owns the one sandboxed
+    # governed run: --network none policy (egress_allow_list=(), invariant #9) +
+    # no ambient credentials (requires_credentials=(), invariant #10) + the broker
+    # 0700 socket mount + the runner exec + the finally-guarded broker/session
+    # teardown + the digest-only skill.invoked dual-layer evidence row. The broker
+    # (already on the gate) owns the load-bearing declared_tools refusal; the
+    # executor surfaces it verbatim (never re-implements it) + threads tenant/actor.
+    # Gate 142 -> 143. Verified against fresh full-suite --cov-branch coverage.json
+    # IN THE SAME COMMIT (NOT just the count bump) per
+    # feedback_verify_promotion_meets_floor_at_promotion_time.
+    ("src/cognic_agentos/core/skill/executor.py", 0.95, 0.90),
 )
 
 

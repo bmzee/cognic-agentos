@@ -144,8 +144,12 @@ _GATE_TOOL_PATH = _REPO_ROOT / "tools" / "check_critical_coverage.py"
 #: bounded framing + per-call declared_tools enforcement refused BEFORE
 #: ``MCPHost.call_tool`` — the new trust boundary between sandboxed skill
 #: actions and the governed MCP host) promoted to the gate = 142.
+#: +1 at M6 Task A5 (ADR-025) — ``core/skill/executor.py`` (the governed skill
+#: executor; the one sandboxed run: --network none + no ambient credentials + the
+#: broker 0700 socket mount + finally-guarded teardown + the digest-only
+#: skill.invoked dual-layer evidence row) promoted to the gate = 143.
 #: Bump this in lockstep with any deliberate ``_CRITICAL_FILES`` change.
-_EXPECTED_ENTRY_COUNT = 142
+_EXPECTED_ENTRY_COUNT = 143
 
 #: The 5 modules Sprint 7B.3 promoted to the durable gate, each by its
 #: own landing commit (T3-T6 panels + T7 composer). All ride the
