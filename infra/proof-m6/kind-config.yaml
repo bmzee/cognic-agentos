@@ -1,0 +1,33 @@
+# infra/proof-m6/kind-config.yaml — the M6 kind cluster topology.
+#
+# NEW vs proof-m5 (plain `kind create cluster`): the governed skill executor
+# runs the released action under the DockerSibling sandbox backend, which
+# creates SIBLING containers on the HOST docker daemon. Two host surfaces must
+# therefore reach the kernel pod (node extraMount -> pod hostPath, threaded by
+# agentos-sandbox-patch.yaml):
+#
+#   1. /var/run/docker.sock — the host docker socket (the "sibling" pattern:
+#      the kernel's aiodocker client drives the SAME daemon that runs the kind
+#      node; sandbox containers are host siblings, NOT in-cluster pods).
+#   2. /var/lib/cognic-proof-m6-broker — the broker socket share. The skill
+#      broker (core/skill/broker.py) creates a per-invocation 0700 dir +
+#      Unix socket under tempfile.gettempdir(); the sandbox backend bind-mounts
+#      that HOST path into the workload container. The path must resolve to
+#      the SAME absolute location in the kernel pod AND on the docker host, so
+#      it rides host -> node (this extraMount) -> pod (hostPath, same path),
+#      with TMPDIR pointed at it (the patch). It is DELIBERATELY a VM-local
+#      path (never a macOS-shared /tmp): Unix sockets do not cross the Docker
+#      Desktop host file share — broker + workload must share one kernel-local
+#      filesystem. Docker auto-creates the missing host dir on node create.
+#
+# AF_UNIX sun_path budget: /var/lib/cognic-proof-m6-broker/csk-<32hex>/broker.sock
+# = 79 bytes < the ~104-byte cap.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    extraMounts:
+      - hostPath: /var/run/docker.sock
+        containerPath: /var/run/docker.sock
+      - hostPath: /var/lib/cognic-proof-m6-broker
+        containerPath: /var/lib/cognic-proof-m6-broker

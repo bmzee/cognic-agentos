@@ -139,3 +139,12 @@ infra/proof-m5/proof-m5-staging/
 infra/proof-m5/proof_m5/
 infra/proof-m5/cognic_agentos/
 infra/proof-m5/_local_as.py
+
+# Proof M6 (governed agent skill): same transient build-context copies the M6
+# runner (infra/proof-m6/run-proof-m6.sh) materialises then removes on exit
+# (trap). NOTE: infra/proof-m6/proof_m6/ is TRACKED SOURCE (the in-context
+# proof app helper, unlike m4/m5's copied-in variants) — deliberately NOT
+# ignored here.
+infra/proof-m6/proof-m6-staging/
+infra/proof-m6/cognic_agentos/
+infra/proof-m6/_local_as.py

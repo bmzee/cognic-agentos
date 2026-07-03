@@ -1,0 +1,50 @@
+# Proof M6 (governed agent skill) overlay: real in-cluster backends, prod
+# profile, chart-created Secret. Mirrors the proof-m5 overlay; the M6 deltas:
+#   * image tag proofm6 (CMD -> proof_m6.proof_app:create_proof_app, the
+#     MULTI-ACTOR eager-injection factory with the skill.invoke scope);
+#   * cache.enabled=true + the in-cluster Redis (manifests/redis.yaml): the
+#     Sprint-13.7 scheduler is CACHE-CONDITIONAL, and the lifespan constructs
+#     the sandbox backend + skill executor ONLY when runtime.scheduler exists;
+#   * sandbox.runtimeEnabled=true — opens the managed DockerSibling sandbox
+#     runtime the governed skill action executes under. The digest-pinned
+#     canonical image refs (sandbox.canonicalRuntimeImage +
+#     sandbox.canonicalEgressProxyImage) are DELIBERATELY NOT set here: they
+#     are computed at RUN time (build -> push to the proof's local TLS
+#     registry -> cosign-sign under the proof canonical key) and injected via
+#     `helm install --set ...` by run-proof-m6.sh. A static ref here would be
+#     either a personal-registry ref (G7 refuses it in the prod profile) or a
+#     placeholder the boot would trust — both wrong;
+#   * podSecurityContext runs the kernel pod as uid/gid 65534 — the SAME
+#     identity the sandbox backend forces on the workload container
+#     (_NON_ROOT_USER = 65534:65534). The broker's per-invocation socket dir
+#     is 0700 and the socket 0600 (spec §5.4 invariants #1/#2), so the
+#     intended sandbox client can connect ONLY when the broker-side owner uid
+#     equals the workload uid. Single-uid alignment is the proof-grade
+#     realization; a cross-uid broker<->workload contract is a forward kernel
+#     item (see README "Proof-only wiring").
+# The Vault dev-root token (smoke-root-token) == the reused backends.yaml Vault.
+image:
+  repository: cognic-agentos        # loaded into kind via `kind load docker-image`
+  tag: "proofm6"
+  pullPolicy: IfNotPresent
+runtimeProfile: prod
+qdrant: { url: http://qdrant:6333 }
+vault: { addr: http://vault:8200 }
+embedding: { driver: ollama, baseUrl: http://ollama:11434, model: nomic-embed-text, dimensions: 768 }
+langfuse: { host: http://langfuse:3000 }
+litellm: { baseUrl: http://litellm:4000 }
+cache:
+  enabled: true                     # M6: the scheduler control plane (quota + kill-switch conformers)
+  url: "redis://redis:6379/0"       # manifests/redis.yaml Service
+sandbox:
+  runtimeEnabled: true              # M6: managed DockerSibling sandbox runtime (skill executor precondition)
+  # canonicalRuntimeImage / canonicalEgressProxyImage: injected via --set at
+  # install time (digest-pinned, proof-canonical-signed) — see the header note.
+migrations: { enabled: false }     # Gap 3: chart pre-install migration hook deadlocks (refs normal-resource SA/Secret); proof runs a non-hook Job post-install
+secrets:
+  create: true
+  databaseUrl: "postgresql+asyncpg://cognic:cognic@postgres:5432/cognic"
+  vaultToken: "smoke-root-token"        # == the reused backends.yaml Vault VAULT_DEV_ROOT_TOKEN_ID; must match seed-vault.sh (pinned by tests/unit/infra/test_proof_m6_structure.py)
+podSecurityContext:
+  runAsUser: 65534                  # M6: single-uid broker<->sandbox contract (see the header note)
+  fsGroup: 65534                    # emptyDirs writable for the same identity

@@ -1,0 +1,93 @@
+# infra/proof-m6/Dockerfile.skill-runtime — the immutable, cosign-verifiable
+# SANDBOX RUNTIME image the governed skill executor runs the released skill
+# action inside (M6 Task C1, ADR-025 + ADR-004).
+#
+# This is the image the executor's SandboxPolicy.runtime_image names: the
+# runner pushes it to the proof's local TLS registry, captures the digest-
+# pinned ref, cosign-signs it under the PROOF CANONICAL key, and threads the
+# ref into COGNIC_SANDBOX_CANONICAL_RUNTIME_PYTHON_IMAGE — so the REAL sandbox
+# admission gate (catalog membership + cosign verify, sandbox/catalog.py)
+# admits it un-bypassed. That is the documented bank re-home flow
+# (core/config.py "Bank deployments re-home to their own registry + re-sign
+# under their canonical trust root"), executed with a dev-grade proof key.
+#
+# Base: the SAME default-adapters kernel base as Dockerfile.agentos-proof
+# (cognic-agentos:proof1b2-base). This is DELIBERATE, not convenience:
+#
+#   * `python -m cognic_agentos.sdk.skill_runner` transitively imports the
+#     sdk package __init__ (Agent/Hook re-exports -> protocol.a2a_* ->
+#     pydantic/sqlalchemy/httpx/...), so the runner is NOT importable on a
+#     bare python-slim base with a --no-deps kernel install; the venv-resolved
+#     base is the repo's ONE way of baking an importable kernel SDK
+#     (infra/agentos/Dockerfile), and re-resolving that dependency set in a
+#     second Dockerfile would drift.
+#   * WIRE-PROTOCOL PARITY: the same branch-source overlay lands here AND in
+#     the kernel image, so the sandbox-side sdk/skill_transport.py is
+#     byte-identical to the kernel-side broker's framing.
+#
+# Two added layers only (per the M6 plan Task C1): (a) THIS branch's kernel
+# source overlay (the sdk runtime the runner needs), (b) the DOWNLOADED,
+# digest-verified released skill wheel (`pip install --no-deps`).
+#
+# Sandbox runtime-image contracts (mirrors infra/sandbox/runtime-python/
+# Dockerfile — the canonical workload-image shape):
+#
+#   1. EXEC-DRIVEN: the backend does NOT override the container command; the
+#      keep-alive CMD holds the container open and the executor drives the
+#      workload via session.exec:
+#          env K=V ... python -m cognic_agentos.sdk.skill_runner
+#      (`python` + `env` resolve via the base's PATH=/opt/venv/bin:...; the
+#      exec ENTRYPOINT of this image is that runner module — a literal
+#      Dockerfile ENTRYPOINT would start the runner WITHOUT its 5-env-var
+#      contract and crash the session before any exec).
+#   2. USER 65534:65534 — the Docker backend forces the workload to
+#      _NON_ROOT_USER = 65534:65534; the image USER matches so CMD + exec run
+#      under the same non-root identity.
+#   3. /workspace writable under ReadonlyRootfs=True via the anonymous-VOLUME
+#      mechanism (chmod 0777 sidesteps UID-matching for the forced user).
+#   4. NO SECRETS, NO NETWORK ASSUMPTIONS: the session is created with
+#      requires_credentials=() and egress_allow_list=() (--network none /
+#      internal-bridge-only) — this image bakes no credential material and
+#      nothing in it needs the network at run time. The broker socket
+#      (bind-mounted at /run/cognic-skill) is the action's ONLY channel out.
+ARG BASE_IMAGE=cognic-agentos:proof1b2-base
+FROM ${BASE_IMAGE}
+USER root
+
+# (a) THIS branch's kernel source overlay — same bytes as the kernel image's
+# overlay (the runner copies src/cognic_agentos into this build context), so
+# the in-sandbox runner + wire transport match the kernel-side broker exactly.
+RUN rm -rf /opt/venv/lib/python3.12/site-packages/cognic_agentos
+COPY cognic_agentos/ /opt/venv/lib/python3.12/site-packages/cognic_agentos/
+
+# (b) the RELEASED skill wheel (sha256-verified fail-closed by stage-packs.sh
+# before it enters this context) — --no-deps: the action is SDK-light by
+# contract (its only runtime import is cognic_agentos.sdk.*, already present).
+COPY proof-m6-staging/wheel/cognic_skill_schema_summary-0.1.0-py3-none-any.whl /tmp/wheel/
+RUN /opt/venv/bin/python -m ensurepip --upgrade \
+ && /opt/venv/bin/python -m pip install --no-deps --no-cache-dir /tmp/wheel/cognic_skill_schema_summary-0.1.0-py3-none-any.whl \
+ && rm -rf /tmp/wheel
+
+# Build-time import proof: the exec entrypoint chain
+# (python -m cognic_agentos.sdk.skill_runner) + the released action must
+# import INSIDE THIS IMAGE — a missing dependency fails the build here, not
+# BAR 1 mid-proof inside an opaque sandbox.
+RUN /opt/venv/bin/python -c "import cognic_agentos.sdk.skill_runner, cognic_skill_schema_summary.skill"
+
+# Contract #3: /workspace writable on the per-session ephemeral anonymous
+# volume regardless of the forced non-root UID.
+RUN mkdir -p /workspace && chmod 0777 /workspace \
+ && chmod -R a+rX /opt/venv/lib/python3.12/site-packages/cognic_agentos /opt/venv/lib/python3.12/site-packages/cognic_skill_schema_summary
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+VOLUME ["/workspace"]
+WORKDIR /workspace
+
+# Contract #2: GID 65534 MUST equal the backend-forced _NON_ROOT_USER GID.
+USER 65534:65534
+
+# Contract #1: keep-alive — the sandbox is exec-driven; the executor execs
+# `env ... python -m cognic_agentos.sdk.skill_runner` into this container.
+CMD ["sleep", "infinity"]

@@ -1,0 +1,31 @@
+# infra/proof-m6/manifests/auth-server.yaml — RS256 AS (M6). Mirrors
+# infra/proof-m5/manifests/auth-server.yaml at the same genuine-global externalIP,
+# with COGNIC_PROOF_AS_SIGNING_MODE=rs256 so the AS mints RS256-signed JWTs + serves
+# JWKS (the released oracle pack's real verifier needs them).
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: proof-as, labels: { app: proof-as } }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: proof-as } }
+  template:
+    metadata: { labels: { app: proof-as } }
+    spec:
+      containers:
+      - name: as
+        image: cognic-proof-as:m6
+        imagePullPolicy: IfNotPresent
+        ports: [{ containerPort: 9000 }]
+        env:
+        - { name: COGNIC_PROOF_AS_HOST, value: "0.0.0.0" }
+        - { name: COGNIC_PROOF_AS_ISSUER, value: "http://192.88.99.9:9000" }
+        - { name: COGNIC_PROOF_AS_PORT, value: "9000" }
+        - { name: COGNIC_PROOF_AS_SIGNING_MODE, value: "rs256" }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: proof-as }
+spec:
+  externalIPs: ["192.88.99.9"]   # genuine-global (RFC7526), guard-allowed, kube-proxy-intercepted (NO real egress)
+  selector: { app: proof-as }
+  ports: [{ port: 9000, targetPort: 9000 }]
