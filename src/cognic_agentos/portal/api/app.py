@@ -976,6 +976,35 @@ def create_app(
                         },
                     )
 
+                # M6 (ADR-025): governed skill executor. Needs BOTH the MCP host
+                # (the broker's call proxy routes to MCPHost.call_tool) AND the
+                # sandbox backend (the action runs fully sandboxed) — both are
+                # SDK-gated + populated above. Fail-soft: a construction failure
+                # leaves app.state.skill_executor None (the route 503s) + the app
+                # still boots. build_skill_executor is SDK-free-import (it reaches
+                # the host only through the injected call-proxy seam).
+                if (
+                    registry is not None
+                    and app.state.mcp_host is not None
+                    and app.state.sandbox_backend is not None
+                ):
+                    from cognic_agentos.harness.skill_host import build_skill_executor
+
+                    try:
+                        skill_executor, hosted_skills = build_skill_executor(
+                            registry=registry,
+                            runtime=runtime,
+                            settings=settings,
+                            mcp_host=app.state.mcp_host,
+                            sandbox_backend=app.state.sandbox_backend,
+                        )
+                        app.state.skill_executor = skill_executor
+                        app.state.hosted_skills = hosted_skills
+                    except Exception:
+                        logger.error("skill.executor_construction_failed", exc_info=True)
+                        app.state.skill_executor = None
+                        app.state.hosted_skills = []
+
                 # #489 — setting-driven reaper: build the CheckpointStore
                 # from the live adapter pool AFTER open_all() so the
                 # relational adapter's engine is connected. This build is
@@ -1199,6 +1228,8 @@ def create_app(
     app.state.a2a_endpoint = None  # Sprint 4 (ADR-003) — SDK-gated; lifespan populates.
     app.state.sandbox_backend = None  # Sprint 14A-A (ADR-004) — SDK-gated; lifespan populates.
     app.state.managed_run_executor = None  # Sprint 14A-A (ADR-022) — lifespan populates.
+    app.state.skill_executor = None  # M6 (ADR-025) — SDK-gated; lifespan populates.
+    app.state.hosted_skills = []  # M6 (ADR-025) — /system/plugins surface; lifespan populates.
     app.state.subagent_spawner = None  # 2026-06-20 sub-agent dispatch — lifespan populates.
     app.state.run_record_store = None  # 2026-06-20 (ADR-005) — lifespan publishes; route resolves.
 
@@ -1668,6 +1699,19 @@ def create_app(
         build_subagent_routes(),
         prefix="/api/v1/subagents",
         tags=["subagents"],
+    )
+
+    # Governed-skill invocation surface (ADR-025 — POST /api/v1/skills/{id}/invoke).
+    # Unconditional mount: the executor is populated by the lifespan only when the
+    # sandbox backend + MCP host are constructed (SDK-present path); the route's
+    # request-time dep returns 503 skill_executor_unavailable until then. Lazy import
+    # (the route module is SDK-free, so this is safe in the kernel image).
+    from cognic_agentos.portal.api.skills import build_skill_routes
+
+    app.include_router(
+        build_skill_routes(),
+        prefix="/api/v1/skills",
+        tags=["skills"],
     )
 
     # A2A inbound receiver surface (ADR-003 — POST /api/v1/a2a/{target_agent}).

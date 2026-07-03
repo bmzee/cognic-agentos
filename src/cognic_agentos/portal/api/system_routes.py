@@ -360,8 +360,20 @@ def build_system_router(settings: Settings) -> APIRouter:
         by_discovery_status: dict[str, int] = {s: 0 for s in get_args(DiscoveryStatus)}
         for plugin in plugins_list:
             by_discovery_status[plugin["discovery_status"]] += 1
+        # M6 (ADR-025): the instruction-layer hosting surface. Each row is a
+        # trust-registered, SKILL.md-validated skill the lifespan admitted (empty
+        # when the SDK-gated skill executor did not build). The registrable skill
+        # PACKS also appear in ``plugins`` above (kind == "skills"); this list adds
+        # the validated ``SKILL.md`` id + declared-tool identities per hosted skill.
+        hosted_skills: list[dict[str, Any]] = list(
+            getattr(request.app.state, "hosted_skills", []) or []
+        )
         return {
             "plugins": plugins_list,
+            # M6 (ADR-025): top-level (NOT in ``summary`` — the summary dict is a
+            # closed wire-shape with exact-equality snapshot tests). Empty list on
+            # the SDK-absent / skill-executor-not-built path.
+            "hosted_skills": hosted_skills,
             "summary": {
                 "total_discovered": len(outcomes),
                 "registered": registered_count,

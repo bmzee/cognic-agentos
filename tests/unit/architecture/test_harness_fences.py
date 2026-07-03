@@ -59,6 +59,12 @@ def test_harness_dir_has_expected_sources() -> None:
     (dispatcher / dlp_integration / registry) + ``protocol.mcp_manifest`` +
     stdlib ``importlib.metadata``, with core/protocol deps under TYPE_CHECKING;
     no Layer-C, no redis client, no second engine, no Bucket-1 default, so the
+    fences below hold). M6 (2026-07-02) added ``skill_host.py`` (the skill-pack
+    hosting loader + skill-executor builder + the ``_MCPHostCallProxy`` seam —
+    reviewed: module-level imports are only ``core.skill.*`` (executor / _types)
+    + ``protocol.mcp_manifest`` + ``protocol.skill_manifest`` + stdlib
+    ``importlib.metadata``, with config/runtime/registry deps under TYPE_CHECKING;
+    no Layer-C, no redis client, no second engine, no Bucket-1 default, so the
     fences below hold)."""
     names = {p.name for p in _harness_sources()}
     assert names == {
@@ -69,6 +75,7 @@ def test_harness_dir_has_expected_sources() -> None:
         "registry_boot.py",
         "runtime.py",
         "sandbox.py",
+        "skill_host.py",
     }, names
 
 
