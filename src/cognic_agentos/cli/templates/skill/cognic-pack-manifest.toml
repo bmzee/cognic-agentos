@@ -28,6 +28,16 @@ egress_allow_list = []  # AUTHOR-FILL
 # required by the declared data_classes.
 tier = "AUTHOR-FILL: e.g., read_only | internal_write | customer_data_read | customer_data_write | payment_action | regulator_communication | cross_tenant | high_risk_custom"
 
+# M6 (ADR-025) skill-pack-specific block. declared_tools lists every MCP
+# tool identity the sandboxed skill action may call through the
+# kernel-side broker, in "<server_id>/<tool_name>" form (server_id is the
+# registered tool pack's distribution name). The broker refuses any
+# undeclared identity at runtime; the SKILL.md at the pack root carries
+# the agentskills.io name / description / instructions body and MUST stay
+# in sync with the Skill subclass's declared_tools ClassVar.
+[skill]
+declared_tools = ["AUTHOR-FILL: e.g., cognic-tool-oracle-schema/describe_table"]
+
 [supply_chain]
 attestation_paths = [
     "attestations/cosign.sig",

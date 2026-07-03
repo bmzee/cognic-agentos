@@ -63,6 +63,7 @@ from cognic_agentos.cli.validators import (
     learning_surface,
     mcp,
     risk_tier,
+    skills,
     supply_chain,
 )
 
@@ -450,6 +451,13 @@ def run_validators(pack_path: Path) -> list[ValidatorFinding]:
     # Placed after hooks (independent concern; optional block). Silent
     # on packs that omit the [learning_surface] block entirely.
     findings.extend(learning_surface.validate(data, pack_path))
+    # M6 A9 (ADR-025) — governed-skill validator. Placed last
+    # (independent concern). Intent-gated: silent on packs with
+    # neither a [skill] block (either dual-path location) nor a
+    # pack-root SKILL.md — legacy Sprint-7A kind="skill" composition
+    # packs stay valid; the M6 executable-skill surface is opt-in by
+    # declaring the block.
+    findings.extend(skills.validate(data, pack_path))
     return findings
 
 

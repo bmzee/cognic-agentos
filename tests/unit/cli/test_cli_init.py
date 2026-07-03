@@ -125,6 +125,9 @@ def test_scaffold_creates_canonical_tree(kind: str, tmp_path: Path) -> None:
         expected_files.append(module_dir / f"{kind}.py")
     if kind == "agent":
         expected_files.append(module_dir / "agent_cards" / ".gitkeep")
+    if kind == "skill":
+        # M6 A9 (ADR-025): the agentskills.io SKILL.md at the pack root.
+        expected_files.append(pack_root / "SKILL.md")
 
     missing = [p for p in expected_files if not p.exists()]
     assert not missing, f"missing scaffold files: {missing}"
@@ -541,4 +544,138 @@ def test_filled_tool_scaffold_validates_clean(tmp_path: Path) -> None:
 
     pack_root = _scaffold("tool", "example", tmp_path)
     _fill_author_fields(pack_root)
+    assert_manifest_validates(pack_root)  # raises AssertionError on any refusal
+
+
+# ---------------------------------------------------------------------------
+# (l) M6 A9 (ADR-025) — governed-skill scaffold realignment
+# ---------------------------------------------------------------------------
+#
+# The ``skill`` scaffold ships the M6 executable-skill surface: an
+# agentskills.io ``SKILL.md`` at the pack root (valid frontmatter — the
+# name slug satisfies the protocol name regex; the description is an
+# AUTHOR-FILL placeholder the skills validator refuses until filled) +
+# a manifest ``[skill].declared_tools`` block + a ``declared_tools``
+# example in the ``<server_id>/<tool_name>`` MCP identity form.
+
+
+def test_skill_scaffold_emits_skill_md_at_pack_root(tmp_path: Path) -> None:
+    pack_root = _scaffold("skill", "example", tmp_path)
+    skill_md = pack_root / "SKILL.md"
+    assert skill_md.is_file()
+    assert skill_md.read_text().strip()
+
+
+def test_skill_scaffold_skill_md_frontmatter_parses_with_valid_name(tmp_path: Path) -> None:
+    """Jinja rendering must not mangle the ``---`` frontmatter fences, and
+    the rendered ``name`` slug must satisfy the agentskills.io name regex
+    (protocol/skill_manifest._NAME_RE) — pack names may carry underscores
+    (``_PACK_NAME_PATTERN``) which the template maps to hyphens."""
+    from cognic_agentos.protocol.skill_manifest import _NAME_RE, parse_skill_md
+
+    pack_root = _scaffold("skill", "under_scored", tmp_path)
+    frontmatter, body = parse_skill_md((pack_root / "SKILL.md").read_text())
+    assert _NAME_RE.fullmatch(frontmatter["name"]), frontmatter["name"]
+    assert frontmatter["name"] == "cognic-skill-under-scored"
+    assert isinstance(frontmatter["description"], str)
+    assert len(frontmatter["description"]) <= 1024
+    assert body.strip()
+
+
+def test_skill_scaffold_manifest_carries_skill_block(tmp_path: Path) -> None:
+    pack_root = _scaffold("skill", "example", tmp_path)
+    parsed = tomllib.loads((pack_root / "cognic-pack-manifest.toml").read_text())
+    block = parsed["skill"]
+    assert isinstance(block["declared_tools"], list)
+    assert block["declared_tools"], "declared_tools must ship a (placeholder) entry"
+
+
+def test_skill_scaffold_declared_tools_example_uses_mcp_identity_form(tmp_path: Path) -> None:
+    """The rendered skill.py declared_tools guidance uses the M6 A2
+    ``<server_id>/<tool_name>`` MCP identity form (not bare tool names)."""
+    pack_root = _scaffold("skill", "example", tmp_path)
+    skill_src = (pack_root / "src" / "cognic_skill_example" / "skill.py").read_text()
+    assert "<server_id>/<tool_name>" in skill_src
+
+
+def test_skill_scaffold_pyproject_ships_skill_md_as_package_data(tmp_path: Path) -> None:
+    """The runtime hosting layer reads ``<package>/SKILL.md`` from the
+    installed wheel WITHOUT importing pack code (protocol/skill_manifest.
+    extract_skill_md); the scaffold's force-include maps the pack-root
+    SKILL.md into the module directory at build time."""
+    pack_root = _scaffold("skill", "example", tmp_path)
+    parsed = tomllib.loads((pack_root / "pyproject.toml").read_text())
+    force_include = parsed["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
+    assert force_include["SKILL.md"] == "cognic_skill_example/SKILL.md"
+
+
+def test_fresh_skill_scaffold_validate_refuses_on_skill_arms(tmp_path: Path) -> None:
+    """A fresh skill scaffold must NOT validate clean, and the refusals must
+    include the M6 skill arms (the AUTHOR-FILL declared_tools entry + the
+    AUTHOR-FILL SKILL.md description) — not just the identity/governance
+    placeholders shared with every kind."""
+    from cognic_agentos.cli.validate import run_validators
+
+    pack_root = _scaffold("skill", "example", tmp_path)
+    findings = run_validators(pack_root)
+    reasons = {f.reason for f in findings if f.severity == "refusal"}
+    assert "skill_manifest_declared_tools_invalid" in reasons
+    assert "skill_manifest_skill_md_invalid" in reasons
+
+
+def _fill_skill_author_fields(pack_root: Path) -> None:
+    """Make a fresh skill scaffold validate clean (the skill mirror of
+    ``_fill_author_fields``): replace every AUTHOR-FILL manifest value
+    (keyed on the assignment LHS), fill the SKILL.md description, and
+    materialise the declared attestation files."""
+    manifest_path = pack_root / "cognic-pack-manifest.toml"
+    replacements: dict[str, str] = {
+        "agent_id = ": 'agent_id = "did:web:example.com:skills:example"',
+        "display_name = ": 'display_name = "Example Skill"',
+        "provider_organization = ": 'provider_organization = "Example Org"',
+        "provider_url = ": 'provider_url = "https://example.com"',
+        "data_classes = ": 'data_classes = ["internal"]',
+        "purpose = ": 'purpose = "operational_telemetry"',
+        "retention_policy = ": 'retention_policy = "none"',
+        "tier = ": 'tier = "read_only"',
+        "declared_tools = ": 'declared_tools = ["cognic-tool-oracle-schema/describe_table"]',
+    }
+    out_lines: list[str] = []
+    for line in manifest_path.read_text().splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("#"):
+            out_lines.append(line)  # never rewrite a comment line
+            continue
+        for key, repl in replacements.items():
+            if stripped.startswith(key) and "AUTHOR-FILL" in line:
+                out_lines.append(repl)
+                break
+        else:
+            out_lines.append(line)
+    manifest_path.write_text("\n".join(out_lines) + "\n")
+
+    # SKILL.md: replace the AUTHOR-FILL description with a real one.
+    skill_md_path = pack_root / "SKILL.md"
+    skill_md_lines = []
+    for line in skill_md_path.read_text().splitlines():
+        if line.startswith("description:") and "AUTHOR-FILL" in line:
+            skill_md_lines.append("description: Example governed skill for tests.")
+        else:
+            skill_md_lines.append(line)
+    skill_md_path.write_text("\n".join(skill_md_lines) + "\n")
+
+    # The supply-chain validator resolves every declared attestation path
+    # to an existing, non-empty regular file inside the pack root.
+    parsed = tomllib.loads(manifest_path.read_text())
+    for rel in parsed["supply_chain"]["attestation_paths"]:
+        attestation = pack_root / rel
+        attestation.parent.mkdir(parents=True, exist_ok=True)
+        attestation.write_text("dummy attestation content for tests\n")
+
+
+def test_filled_skill_scaffold_validates_clean(tmp_path: Path) -> None:
+    from cognic_agentos.sdk.testing import assert_manifest_validates
+
+    pack_root = _scaffold("skill", "example", tmp_path)
+    _fill_skill_author_fields(pack_root)
     assert_manifest_validates(pack_root)  # raises AssertionError on any refusal

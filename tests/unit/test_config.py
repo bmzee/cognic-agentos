@@ -1717,6 +1717,16 @@ class TestSprint7AClosedEnumVocabulary:
                 # Learning surface (Sprint 11.5c T1 — vocab seed;
                 # validator body lands at T2 per ADR-019 §52).
                 "learning_surface_violation",
+                # Governed skills (M6 A9 — cli/validators/skills.py per
+                # ADR-025). 5 closed-enum reasons covering the [skill]
+                # block shape + SKILL.md presence/validity +
+                # declared_tools shape + the cognic.skills entry-point
+                # cross-check; sub-cases ride payload.failure_mode.
+                "skill_manifest_block_shape_invalid",
+                "skill_manifest_skill_md_missing",
+                "skill_manifest_skill_md_invalid",
+                "skill_manifest_declared_tools_invalid",
+                "skill_manifest_entry_point_mismatch",
             }
         )
 
