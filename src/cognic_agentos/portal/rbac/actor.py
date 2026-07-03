@@ -47,6 +47,7 @@ from cognic_agentos.portal.rbac.scopes import (  # noqa: F401  (ScopeSet kept fo
     QuotaRBACScope,
     RunRBACScope,
     ScopeSet,
+    SkillRBACScope,
     SubAgentRBACScope,
     ToolApprovalRBACScope,
     UIRBACScope,
@@ -141,6 +142,11 @@ class Actor(pydantic.BaseModel):
     #: 2026-06-20 (ADR-005, Fork B) — further widened with ``SubAgentRBACScope``
     #: so a single Actor can carry a sub-agent-spawn grant.
     #:
+    #: M6 Task A6 (ADR-025) — further widened with ``SkillRBACScope`` so a
+    #: skill-invocation-capable actor carries ``skill.invoke`` for
+    #: ``POST /api/v1/skills/{skill_id}/invoke``. Additive — pre-M6 actors still
+    #: construct cleanly. Pinned by ``tests/unit/portal/rbac/test_skill_scopes.py``.
+    #:
     #: PR-2b-1 Task 5 (ADR-002, DD-3) — further widened with
     #: ``MCPInternalAccessRBACScope`` so an operator actor carries
     #: ``mcp.override.{read,write}`` / ``mcp.allowlist.{read,write}`` for the MCP
@@ -163,6 +169,7 @@ class Actor(pydantic.BaseModel):
         | MCPRBACScope
         | MCPInternalAccessRBACScope
         | SubAgentRBACScope
+        | SkillRBACScope
     ]
     actor_type: ActorType
 

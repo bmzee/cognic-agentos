@@ -49,6 +49,7 @@ from cognic_agentos.portal.rbac.scopes import (
     PackRBACScope,
     QuotaRBACScope,
     RunRBACScope,
+    SkillRBACScope,
     SubAgentRBACScope,
     ToolApprovalRBACScope,
     UIRBACScope,
@@ -262,7 +263,8 @@ def RequireScope(
     | RunRBACScope
     | MCPRBACScope
     | MCPInternalAccessRBACScope
-    | SubAgentRBACScope,
+    | SubAgentRBACScope
+    | SkillRBACScope,
 ) -> Callable[..., Awaitable[Actor]]:
     """FastAPI dependency factory — admit the request iff the bound
     :class:`Actor` holds ``scope``.
