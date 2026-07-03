@@ -1183,3 +1183,349 @@ async def test_hook_pack_symlink_escape_fails_closed(
     # ...and the sibling tool pack still registers against the default root.
     assert captured == [("cognic-tool-t1", default_pub)]
     assert register_spy.call_count == 1
+
+
+# --------------------------------------------------------------------------- #
+# M6 A8 (ADR-025) — per-pack trust root for SKILL packs (LOCKED staged layout:
+# <trust_root_prefix>/skill-packs/<pack_id>/cosign.pub, _default fallback;
+# present-but-invalid FAILS CLOSED per pack — never a silent downgrade to
+# the default root; tools/agents behavior unchanged; hook semantics
+# byte-stable). Mirrors the M5 hook suite above one-for-one.
+# --------------------------------------------------------------------------- #
+
+
+def _write_skill_pack_pub(
+    trust_root_prefix: Path, distribution_name: str, content: str = "SKILL-KEY\n"
+) -> Path:
+    skill_dir = trust_root_prefix / "skill-packs" / distribution_name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    pub = skill_dir / "cosign.pub"
+    pub.write_text(content)
+    return pub
+
+
+async def test_skill_pack_uses_per_pack_trust_root_when_present(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    audit_store: AuditStore,
+    supply_chain: SupplyChainPipeline,
+    object_store: LocalObjectStoreAdapter,
+) -> None:
+    trust_root_prefix = tmp_path / "trust-roots"
+    _write_cosign_pub(trust_root_prefix)
+    skill_pub = _write_skill_pack_pub(trust_root_prefix, "cognic-skill-schema-summary")
+    packs = [
+        _make_discovered_pack(
+            name="schema_summary",
+            distribution_name="cognic-skill-schema-summary",
+            kind="skills",
+        )
+    ]
+    captured, register_spy = await _run_hook_root_boot(
+        tmp_path,
+        monkeypatch,
+        audit_store,
+        supply_chain,
+        object_store,
+        packs=packs,
+        trust_root_prefix=trust_root_prefix,
+    )
+    assert len(captured) == 1
+    dist, root = captured[0]
+    assert dist == "cognic-skill-schema-summary"
+    assert root == skill_pub.resolve()
+    assert register_spy.call_count == 1
+
+
+async def test_skill_pack_falls_back_to_default_root_when_absent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    audit_store: AuditStore,
+    supply_chain: SupplyChainPipeline,
+    object_store: LocalObjectStoreAdapter,
+) -> None:
+    trust_root_prefix = tmp_path / "trust-roots"
+    default_pub = _write_cosign_pub(trust_root_prefix)
+    packs = [
+        _make_discovered_pack(
+            name="s1", distribution_name="cognic-skill-schema-summary", kind="skills"
+        )
+    ]
+    captured, register_spy = await _run_hook_root_boot(
+        tmp_path,
+        monkeypatch,
+        audit_store,
+        supply_chain,
+        object_store,
+        packs=packs,
+        trust_root_prefix=trust_root_prefix,
+    )
+    assert captured == [("cognic-skill-schema-summary", default_pub)]
+    assert register_spy.call_count == 1
+
+
+async def test_tool_pack_never_consults_per_pack_skill_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    audit_store: AuditStore,
+    supply_chain: SupplyChainPipeline,
+    object_store: LocalObjectStoreAdapter,
+) -> None:
+    # Existing default-root behavior for tools stays UNCHANGED even when a
+    # decoy per-pack key exists under skill-packs/<their-dist>/.
+    trust_root_prefix = tmp_path / "trust-roots"
+    default_pub = _write_cosign_pub(trust_root_prefix)
+    _write_skill_pack_pub(trust_root_prefix, "cognic-tool-oracle-schema", "DECOY\n")
+    packs = [
+        _make_discovered_pack(
+            name="oracle_schema", distribution_name="cognic-tool-oracle-schema", kind="tools"
+        )
+    ]
+    captured, register_spy = await _run_hook_root_boot(
+        tmp_path,
+        monkeypatch,
+        audit_store,
+        supply_chain,
+        object_store,
+        packs=packs,
+        trust_root_prefix=trust_root_prefix,
+    )
+    assert captured == [("cognic-tool-oracle-schema", default_pub)]
+    assert register_spy.call_count == 1
+
+
+async def test_agent_pack_never_consults_per_pack_skill_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    audit_store: AuditStore,
+    supply_chain: SupplyChainPipeline,
+    object_store: LocalObjectStoreAdapter,
+) -> None:
+    # Agents have NO per-pack staged layout: a decoy key under BOTH
+    # skill-packs/ AND hook-packs/ for an agents-kind pack never diverts
+    # it from the _default root.
+    trust_root_prefix = tmp_path / "trust-roots"
+    default_pub = _write_cosign_pub(trust_root_prefix)
+    _write_skill_pack_pub(trust_root_prefix, "cognic-agent-advisor", "DECOY\n")
+    _write_hook_pack_pub(trust_root_prefix, "cognic-agent-advisor", "DECOY\n")
+    packs = [
+        _make_discovered_pack(
+            name="advisor", distribution_name="cognic-agent-advisor", kind="agents"
+        )
+    ]
+    captured, register_spy = await _run_hook_root_boot(
+        tmp_path,
+        monkeypatch,
+        audit_store,
+        supply_chain,
+        object_store,
+        packs=packs,
+        trust_root_prefix=trust_root_prefix,
+    )
+    assert captured == [("cognic-agent-advisor", default_pub)]
+    assert register_spy.call_count == 1
+
+
+async def test_skill_pack_ignores_decoy_under_hook_packs_subdir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    audit_store: AuditStore,
+    supply_chain: SupplyChainPipeline,
+    object_store: LocalObjectStoreAdapter,
+) -> None:
+    # Cross-kind subdir separation: a skills-kind pack ONLY consults
+    # skill-packs/<dist>/; a key planted under hook-packs/<dist>/ must not
+    # divert it (absent at skill-packs -> the _default root).
+    trust_root_prefix = tmp_path / "trust-roots"
+    default_pub = _write_cosign_pub(trust_root_prefix)
+    _write_hook_pack_pub(trust_root_prefix, "cognic-skill-schema-summary", "DECOY\n")
+    packs = [
+        _make_discovered_pack(
+            name="s1", distribution_name="cognic-skill-schema-summary", kind="skills"
+        )
+    ]
+    captured, register_spy = await _run_hook_root_boot(
+        tmp_path,
+        monkeypatch,
+        audit_store,
+        supply_chain,
+        object_store,
+        packs=packs,
+        trust_root_prefix=trust_root_prefix,
+    )
+    assert captured == [("cognic-skill-schema-summary", default_pub)]
+    assert register_spy.call_count == 1
+
+
+async def test_skill_pack_empty_per_pack_root_fails_closed_no_downgrade(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    audit_store: AuditStore,
+    supply_chain: SupplyChainPipeline,
+    object_store: LocalObjectStoreAdapter,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Present-but-EMPTY per-pack key: the pack is SKIPPED (fail closed) —
+    # resolve/register never run for it, and it is NEVER silently downgraded
+    # to default-root verification (the corrupted-key demotion attack).
+    trust_root_prefix = tmp_path / "trust-roots"
+    _write_cosign_pub(trust_root_prefix)
+    _write_skill_pack_pub(trust_root_prefix, "cognic-skill-schema-summary", content="")
+    packs = [
+        _make_discovered_pack(
+            name="s1", distribution_name="cognic-skill-schema-summary", kind="skills"
+        )
+    ]
+    with caplog.at_level(logging.WARNING):
+        captured, register_spy = await _run_hook_root_boot(
+            tmp_path,
+            monkeypatch,
+            audit_store,
+            supply_chain,
+            object_store,
+            packs=packs,
+            trust_root_prefix=trust_root_prefix,
+        )
+    assert captured == []
+    assert register_spy.call_count == 0
+    assert "skill_pack_trust_root_invalid" in caplog.text
+    assert "skill_pack_trust_root_empty" in caplog.text
+
+
+async def test_skill_pack_dir_per_pack_root_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    audit_store: AuditStore,
+    supply_chain: SupplyChainPipeline,
+    object_store: LocalObjectStoreAdapter,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    trust_root_prefix = tmp_path / "trust-roots"
+    _write_cosign_pub(trust_root_prefix)
+    # cosign.pub as a DIRECTORY — present but not a regular file.
+    (trust_root_prefix / "skill-packs" / "cognic-skill-schema-summary" / "cosign.pub").mkdir(
+        parents=True
+    )
+    packs = [
+        _make_discovered_pack(
+            name="s1", distribution_name="cognic-skill-schema-summary", kind="skills"
+        )
+    ]
+    with caplog.at_level(logging.WARNING):
+        captured, register_spy = await _run_hook_root_boot(
+            tmp_path,
+            monkeypatch,
+            audit_store,
+            supply_chain,
+            object_store,
+            packs=packs,
+            trust_root_prefix=trust_root_prefix,
+        )
+    assert captured == []
+    assert register_spy.call_count == 0
+    assert "skill_pack_trust_root_not_a_file" in caplog.text
+
+
+async def test_skill_pack_traversal_distribution_name_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    audit_store: AuditStore,
+    supply_chain: SupplyChainPipeline,
+    object_store: LocalObjectStoreAdapter,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # A hostile distribution name (from a malicious wheel's metadata) must
+    # refuse BEFORE any path is built — resolve-then-validate discipline.
+    trust_root_prefix = tmp_path / "trust-roots"
+    _write_cosign_pub(trust_root_prefix)
+    packs = [_make_discovered_pack(name="s1", distribution_name="../_default", kind="skills")]
+    with caplog.at_level(logging.WARNING):
+        captured, register_spy = await _run_hook_root_boot(
+            tmp_path,
+            monkeypatch,
+            audit_store,
+            supply_chain,
+            object_store,
+            packs=packs,
+            trust_root_prefix=trust_root_prefix,
+        )
+    assert captured == []
+    assert register_spy.call_count == 0
+    assert "skill_pack_trust_root_name_invalid" in caplog.text
+
+
+async def test_invalid_skill_root_skips_only_that_pack(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    audit_store: AuditStore,
+    supply_chain: SupplyChainPipeline,
+    object_store: LocalObjectStoreAdapter,
+) -> None:
+    # Per-pack fail-soft preserved: the bad skill pack skips; the sibling tool
+    # pack still registers against the default root.
+    trust_root_prefix = tmp_path / "trust-roots"
+    default_pub = _write_cosign_pub(trust_root_prefix)
+    _write_skill_pack_pub(trust_root_prefix, "cognic-skill-schema-summary", content="")
+    packs = [
+        _make_discovered_pack(
+            name="s1", distribution_name="cognic-skill-schema-summary", kind="skills"
+        ),
+        _make_discovered_pack(name="t1", distribution_name="cognic-tool-t1", kind="tools"),
+    ]
+    captured, register_spy = await _run_hook_root_boot(
+        tmp_path,
+        monkeypatch,
+        audit_store,
+        supply_chain,
+        object_store,
+        packs=packs,
+        trust_root_prefix=trust_root_prefix,
+    )
+    assert captured == [("cognic-tool-t1", default_pub)]
+    assert register_spy.call_count == 1
+
+
+async def test_skill_pack_symlink_escape_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    audit_store: AuditStore,
+    supply_chain: SupplyChainPipeline,
+    object_store: LocalObjectStoreAdapter,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The resolve-then-validate CONTAINMENT branch (distinct from the
+    # name-syntax gate): the distribution name is clean, the per-pack path
+    # EXISTS, but skill-packs/<pack_id> is a symlink whose target lives
+    # OUTSIDE trust_root_prefix — a planted key escaping the prefix must
+    # fail closed (skill_pack_trust_root_path_escape), never verify against
+    # out-of-prefix key material and never downgrade to the default root.
+    trust_root_prefix = tmp_path / "trust-roots"
+    default_pub = _write_cosign_pub(trust_root_prefix)
+    outside = tmp_path / "outside" / "cognic-skill-schema-summary"
+    outside.mkdir(parents=True)
+    (outside / "cosign.pub").write_text("PLANTED-OUT-OF-PREFIX-KEY\n")
+    skill_packs_dir = trust_root_prefix / "skill-packs"
+    skill_packs_dir.mkdir(parents=True)
+    (skill_packs_dir / "cognic-skill-schema-summary").symlink_to(outside)
+    packs = [
+        _make_discovered_pack(
+            name="s1", distribution_name="cognic-skill-schema-summary", kind="skills"
+        ),
+        _make_discovered_pack(name="t1", distribution_name="cognic-tool-t1", kind="tools"),
+    ]
+    with caplog.at_level(logging.WARNING):
+        captured, register_spy = await _run_hook_root_boot(
+            tmp_path,
+            monkeypatch,
+            audit_store,
+            supply_chain,
+            object_store,
+            packs=packs,
+            trust_root_prefix=trust_root_prefix,
+        )
+    # the skill pack is SKIPPED (no resolve, no register) with the escape reason...
+    assert "skill_pack_trust_root_invalid" in caplog.text
+    assert "skill_pack_trust_root_path_escape" in caplog.text
+    # ...and the sibling tool pack still registers against the default root.
+    assert captured == [("cognic-tool-t1", default_pub)]
+    assert register_spy.call_count == 1
