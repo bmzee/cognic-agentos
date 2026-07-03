@@ -139,8 +139,13 @@ _GATE_TOOL_PATH = _REPO_ROOT / "tools" / "check_critical_coverage.py"
 #: the UNION of all active packs' desired IPs + validate-before-write +
 #: check-before-write idempotency — the substantive callability gate) promoted to
 #: the gate = 141.
+#: +1 at M6 Task A3 (ADR-025) — ``core/skill/broker.py`` (the skill-execution
+#: broker; per-invocation 0700 socket + crypto-random session id/token auth +
+#: bounded framing + per-call declared_tools enforcement refused BEFORE
+#: ``MCPHost.call_tool`` — the new trust boundary between sandboxed skill
+#: actions and the governed MCP host) promoted to the gate = 142.
 #: Bump this in lockstep with any deliberate ``_CRITICAL_FILES`` change.
-_EXPECTED_ENTRY_COUNT = 141
+_EXPECTED_ENTRY_COUNT = 142
 
 #: The 5 modules Sprint 7B.3 promoted to the durable gate, each by its
 #: own landing commit (T3-T6 panels + T7 composer). All ride the
