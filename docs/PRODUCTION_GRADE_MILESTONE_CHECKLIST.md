@@ -73,17 +73,27 @@ Studio/no-code authoring and Cognic Forge remain outside this v1 completion chec
   **Evidence:** the released signed `cognic-hook-schema-guard@v0.1.0` hook pack was trust-registered + `HookRegistry`-admitted at boot in a deployed `kind` AgentOS (discovered as the `cognic.hooks` pack kind, cosign-verified against its per-pack trust root), and its two arg-gated `dlp_pre` hooks enforced the MCP `call_tool` path against the operator-installed `cognic-tool-oracle-schema@v0.2.0` tool: permitted arg -> tool executes (200 + `FULL_NAME`); `__FORBIDDEN__` -> `403 dlp_pre_refused` (`policy_reason=forbidden_schema_arg`) refused before any tool execution, digest-only evidence; `__EXPLODE__` -> `409 dlp_pre_failed` fail-closed. Runner `infra/proof-m5/run-proof-m5.sh` (`runner_exit=0`, `PROOF M5 (ALL BARS) PASS`); `docs/VALIDATION-RESULTS.md` "M5 — Real hook pack proof — PASS" section.  
   **Production posture:** unlike M3/M4 (zero-kernel-change proofs), M5 required wiring the dormant Sprint-7A2 hook subsystem onto `MCPHost.call_tool` and making hook packs first-class in the runtime registry (the `cognic.hooks` pack kind + per-pack boot trust root, ADR-002 hooks amendment) — all under the critical-controls gate with `protocol/mcp_authz.py` byte-identical throughout. The hook pack is trust-register + registry-admit only; an operator enable/disable lifecycle for hook packs (M4-style) is a documented follow-up (spec §8), not an M5 requirement.
 
-- [ ] **M6 — Executable skill service proof.**  
-  **Goal:** ship a separate `cognic-skill-*` pack implementing deterministic `Skill.execute()` tool composition.  
-  **Production proof:** deployed AgentOS invokes the skill service, it uses only declared tools, and it emits audit/evidence.  
-  **Load-bearing proof:** undeclared tool use or missing required tool is refused.  
-  **Evidence required:** skill pack release + deployed proof.
+- [x] **M6 — Executable skill service proof.**
 
-- [ ] **M7 — Agent Skills `SKILL.md` hosting, ADR-025.**  
-  **Goal:** host/govern the open Agent Skills `SKILL.md` format without replacing it: ingest a `SKILL.md` folder, wrap it in AgentOS governance, and make it assignable to agents.  
-  **Production proof:** an agent receives the instruction skill through the governed assignment path and uses it during a deployed task.  
-  **Load-bearing proof:** unsigned/untrusted/malformed skill folder is refused; skill content cannot bypass pack governance.  
-  **Evidence required:** ADR-025, adapter implementation, proof run, docs.
+  **Goal:** ship a separate `cognic-skill-*` pack implementing deterministic `Skill.execute()` tool composition.
+
+  **Production proof:** deployed AgentOS invokes the skill service, it uses only declared tools, and it emits audit/evidence.
+
+  **Load-bearing proof:** undeclared tool use or missing required tool is refused.
+
+  **Evidence:** the released signed `cognic-skill-schema-summary@v0.1.0` pack's deterministic `Skill.execute()` action ran FULLY SANDBOXED (`--network none`, `requires_credentials=()`) in a deployed `kind` AgentOS, composing the operator-installed `cognic-tool-oracle-schema@v0.2.0` MCP tools exclusively through the per-invocation `0700` Unix-socket broker: BAR 1 — 200 + fixed summary + dual-layer evidence (`audit.tool_invocation` ok rows per governed call; digest-only `skill.invoked` completed row); BAR 2 — a REAL undeclared tool (`get_constraints`) → `403 skill_tool_not_declared` refused at the broker BEFORE `MCPHost.call_tool`, tool count unchanged; BAR 3 (mandatory isolation) — direct outbound egress from the action blocked fail-closed (`502 skill_runtime_error`, no success marker). The SDK also cross-checks declared tools at construction (`SkillUnregisteredToolError`, unit-pinned). Runner `infra/proof-m6/run-proof-m6.sh` — runs 21 + 22 both `runner_exit=0`, **`PROOF M6 (ALL BARS) PASS`** (run 22 = ratification against the final kernel state); `docs/VALIDATION-RESULTS.md` "M6 — Governed agent skill proof (M6+M7) — PASS".
+
+  **Production posture:** M6 required kernel changes — the skill-execution broker + governed executor (new CC trust boundary, `core/skill/`, the eleven §5.4 transport invariants TM-revert-pinned) plus five live-proof-driven CC slices (`3e942b2` license carve-out at the sidecar sites; `ab67a29` `writable_mounts` real enforcement, K8s fail-closed; `36e8798` + `2f36bfb` broker diagnosability + MCP result projection; `dc5dba5` sandbox HEALTHCHECK suppression) — all under the critical-controls gate (143 files) with `protocol/mcp_authz.py` byte-identical throughout.
+
+- [x] **M7 — Agent Skills `SKILL.md` hosting, ADR-025.**
+
+  **Goal:** host/govern the open Agent Skills `SKILL.md` format without replacing it: ingest a `SKILL.md` folder, wrap it in AgentOS governance, and make it assignable to agents.
+
+  **Production proof:** deployed AgentOS trust-registers the released `SKILL.md` pack, validates/hosts the `SKILL.md` layer, surfaces it as hosted/assignable metadata, and proves the governed executable action path. LLM-agent consumption of the hosted instruction layer is M8. *(Amended at the ADR-025 M6+M7 merge — the pre-merge line, "an agent receives the instruction skill through the governed assignment path and uses it during a deployed task", is the M8 production proof.)*
+
+  **Load-bearing proof:** unsigned/untrusted/malformed skill folder is refused; skill content cannot bypass pack governance.
+
+  **Evidence:** merged with M6 per ADR-025 (one milestone: "Governed Agent Skill proof"). The `SKILL.md` package standard is hosted, not replaced: the released pack's `SKILL.md` frontmatter is validated at boot, `[skill].declared_tools` is cross-checked against registered MCP servers, and the skill surfaces as discoverable/assignable on `/api/v1/system/plugins` `hosted_skills` (asserted at both boots of runs 21+22). Governance cannot be bypassed: the pack rides the SAME per-pack cosign boot trust gate proven live at M5 (unsigned/untrusted → refused at registration); a malformed `SKILL.md` warn-skips → not hosted → invoke 404s (unit-pinned at `tests/unit/harness/test_skill_host.py`); the executable surface is governed end-to-end (M6 bars). LLM-agent consumption of the hosted instruction layer is **M8** per the amended production proof above; arbitrary bundled `scripts/` execution is out of scope (the single governed executable surface is the signed `cognic.skills` Python action).
 
 ### C. Agent Loop And Runtime Capability
 

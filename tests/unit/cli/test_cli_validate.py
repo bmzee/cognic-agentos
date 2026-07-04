@@ -185,6 +185,11 @@ def test_run_validators_dispatches_to_every_validator(
     Sprint 11.5c T2 extended this dispatch list with the learning_surface
     validator (per ADR-019 §52). Placement is AFTER hooks (independent
     concern; [learning_surface] is an optional block).
+
+    M6 A9 (ADR-025) extended this dispatch list with the skills validator.
+    Placement is LAST (after learning_surface — independent concern;
+    intent-gated: silent on packs with neither a [skill] block nor a
+    pack-root SKILL.md).
     """
     from cognic_agentos.cli import validators
     from cognic_agentos.cli.validate import run_validators
@@ -210,6 +215,7 @@ def test_run_validators_dispatches_to_every_validator(
         "supply_chain",
         "hooks",
         "learning_surface",
+        "skills",
     ):
         monkeypatch.setattr(getattr(validators, name), "validate", _make_recorder(name))
 
@@ -225,6 +231,7 @@ def test_run_validators_dispatches_to_every_validator(
         "supply_chain",
         "hooks",
         "learning_surface",
+        "skills",
     ]
 
 

@@ -203,6 +203,21 @@ ValidatorReason = Literal[
     # payload.failure_mode at runtime. T1 seeds vocab only; the real
     # validator body lands at T2.
     "learning_surface_violation",
+    # Governed-skill manifest validation (M6 A9 —
+    # cli/validators/skills.py per ADR-025). 5 closed-enum reasons for
+    # the M6 executable-skill authoring surface: the [skill] block
+    # shape, the agentskills.io SKILL.md at the pack root (protocol
+    # SkillMdValidationReason values ride payload.failure_mode per the
+    # established disambiguation pattern), the [skill].declared_tools
+    # <server_id>/<tool_name> identity list, and the cognic.skills
+    # entry-point cross-check. Intent-gated: the validator is silent
+    # on packs with neither a [skill] block nor a pack-root SKILL.md
+    # (legacy kind="skill" composition packs stay valid).
+    "skill_manifest_block_shape_invalid",
+    "skill_manifest_skill_md_missing",
+    "skill_manifest_skill_md_invalid",
+    "skill_manifest_declared_tools_invalid",
+    "skill_manifest_entry_point_mismatch",
 ]
 
 
@@ -328,6 +343,12 @@ _VALIDATOR_REASON_OWNERSHIP: Final[dict[ValidatorReason, str]] = {
     "runtime_expected_workload_gid_without_credentials": "validators/credentials.py",
     # Learning surface (Sprint 11.5c T1 — T2 lands the real validator body).
     "learning_surface_violation": "validators/learning_surface.py",
+    # Governed skills (M6 A9 — cli/validators/skills.py per ADR-025).
+    "skill_manifest_block_shape_invalid": "validators/skills.py",
+    "skill_manifest_skill_md_missing": "validators/skills.py",
+    "skill_manifest_skill_md_invalid": "validators/skills.py",
+    "skill_manifest_declared_tools_invalid": "validators/skills.py",
+    "skill_manifest_entry_point_mismatch": "validators/skills.py",
 }
 
 

@@ -159,6 +159,13 @@ async def test_injected_proxy_image_digest_goes_through_k8s_catalog_gate(
 
     assert ("is_canonical", injected_digest) in spy.seen
     assert ("cosign", injected_digest) in spy.seen
-    assert ("sbom", injected_digest) in spy.seen
+    # ADR-016 2026-05-29 carve-out (implemented at the sidecar sites
+    # after M6 run 13): the license/SBOM policy call does NOT run on
+    # the canonical proxy — license acceptance is a release/signing
+    # decision attested by the cosign signature above. The AC10
+    # purpose (injected digest, never the placeholder) is carried by
+    # the is_canonical + cosign assertions; the carve-out itself is
+    # pinned at test_proxy_sidecar_license_carveout.py.
+    assert all(call != "sbom" for call, _ in spy.seen)
     # The canonical placeholder digest must NEVER reach the gate.
     assert all(digest != canonical_digest for _, digest in spy.seen)

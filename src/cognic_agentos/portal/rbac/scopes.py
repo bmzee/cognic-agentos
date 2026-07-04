@@ -423,6 +423,28 @@ MCP_INTERNAL_ACCESS_SCOPES: frozenset[MCPInternalAccessRBACScope] = frozenset(
 )
 
 
+#: M6 Task A6 (ADR-025) — governed-skill invocation RBAC family. 1 scope in the
+#: ``skill.*`` namespace:
+#:
+#:   - ``skill.invoke`` ← ``POST /api/v1/skills/{skill_id}/invoke`` — runs a
+#:     trust-registered skill's executable action fully sandboxed, broker-
+#:     mediated (declared_tools enforced per call).
+#:
+#: NOT a Human-only decision (the sandbox/MCP approval seam owns any per-tier
+#: human checkpoint downstream, so the skill route does NOT gate on
+#: :class:`RequireHumanActor`). Value-disjoint from every other family by the
+#: ``skill.*`` namespace. Wire-protocol-public — the 403 ``scope_not_held`` body
+#: carries it. Pinned by ``tests/unit/portal/rbac/test_skill_scopes.py``.
+#:
+#: Style note: plain ``= Literal[...]`` (no ``TypeAlias``) per the repo
+#: convention at ``packs/lifecycle.py:111`` + the families above.
+SkillRBACScope = Literal["skill.invoke"]
+
+#: The 1 skill scope as a frozenset (1:1 with :data:`SkillRBACScope`) for
+#: bank-overlay binders. Pinned by ``tests/unit/portal/rbac/test_skill_scopes.py``.
+SKILL_SCOPES: frozenset[SkillRBACScope] = frozenset({"skill.invoke"})
+
+
 #: Sub-agent portal-trigger scope (ADR-005, "Fork B" portal seam). Spawning is
 #: operational orchestration, not a Human-only decision; a high-risk child still
 #: pends for a human downstream at sandbox cold-create admission.

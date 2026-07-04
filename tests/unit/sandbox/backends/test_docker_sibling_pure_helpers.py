@@ -323,6 +323,80 @@ class TestContainerConfigsRunAsNonRoot:
             assert uid not in ("", "0") and gid not in ("", "0")
 
 
+class TestContainerConfigsSuppressImageHealthchecks:
+    """M6 finding #18 — image-declared Docker HEALTHCHECKs MUST be
+    suppressed on BOTH sandbox-created containers.
+
+    Docker healthcheck execs run with the CONTAINER's env — inside a
+    sandbox that includes the injected ``HTTP_PROXY`` — so an inherited
+    check's loopback GET is proxied to the egress sidecar, refused
+    against the allow-list, and the fail-closed egress audit converts
+    engine-generated plumbing traffic into a false policy violation
+    (live-reproduced M6 runs 19+20: a runtime image built on the kernel
+    base inherited the API-server healthcheck and every skill invoke
+    whose session outlived the first check fire died
+    ``egress_host_not_allow_listed`` on host ``127.0.0.1``).
+
+    The backend never consumes Docker health state (it owns lifecycle /
+    exec / readiness directly), so image healthchecks are pure noise +
+    evidence-integrity risk for this sandbox model. ``NO_PROXY`` remains
+    FORBIDDEN (the anti-bypass doctrine pinned by
+    ``test_no_proxy_env_unset``) — suppression happens at the container
+    config, never by exempting loopback from the proxy."""
+
+    _NET = "cognic-sb-internal-abcd1234-abcdef01"
+
+    def _sandbox_config(self) -> dict[str, Any]:
+        return _build_sandbox_container_config(
+            policy=_POLICY,
+            session_id="abcd" * 8,
+            internal_net_name=self._NET,
+        )
+
+    def _sidecar_config(self) -> dict[str, Any]:
+        return _build_proxy_sidecar_container_config(
+            policy=_POLICY,
+            session_id="abcd" * 8,
+            internal_net_name=self._NET,
+            proxy_image="cognic/sandbox-egress-proxy:v1@sha256:" + "d" * 64,
+        )
+
+    def test_sandbox_container_config_disables_inherited_healthcheck(self) -> None:
+        config = self._sandbox_config()
+        assert config["Healthcheck"] == {"Test": ["NONE"]}, (
+            "Sandbox container config MUST disable image-inherited "
+            "HEALTHCHECKs — a check inheriting the sandbox env (incl. "
+            "HTTP_PROXY) poisons the egress ledger with engine traffic "
+            "(finding #18)."
+        )
+
+    def test_proxy_sidecar_config_disables_inherited_healthcheck(self) -> None:
+        config = self._sidecar_config()
+        assert config["Healthcheck"] == {"Test": ["NONE"]}
+
+    def test_http_proxy_env_still_present_and_no_proxy_still_absent(self) -> None:
+        """The suppression must NOT come from (or be accompanied by)
+        proxy-env changes: HTTP_PROXY/HTTPS_PROXY stay injected and
+        NO_PROXY stays absent per the locked anti-bypass doctrine."""
+        env = self._sandbox_config()["Env"]
+        assert any(e.startswith("HTTP_PROXY=") for e in env)
+        assert any(e.startswith("HTTPS_PROXY=") for e in env)
+        assert not any(e.startswith(("NO_PROXY=", "no_proxy=")) for e in env)
+
+    def test_security_defaults_unchanged_by_healthcheck_suppression(self) -> None:
+        """The Healthcheck key is ADDITIVE — non-root identities, readonly
+        root, CapDrop and no-new-privileges stay exactly as pinned."""
+        sandbox = self._sandbox_config()
+        sidecar = self._sidecar_config()
+        assert sandbox["User"] == _NON_ROOT_USER
+        assert sidecar["User"] == _PROXY_NON_ROOT_USER
+        assert sandbox["HostConfig"]["CapDrop"] == ["ALL"]
+        assert sidecar["HostConfig"]["CapDrop"] == ["ALL"]
+        assert sandbox["HostConfig"]["SecurityOpt"] == ["no-new-privileges:true"]
+        assert sidecar["HostConfig"]["SecurityOpt"] == ["no-new-privileges:true"]
+        assert sidecar["HostConfig"]["ReadonlyRootfs"] is True
+
+
 class TestProxySidecarWritableConfigMount:
     """T30/T14.1 — the proxy sidecar needs a WRITABLE ``/etc/cognic-proxy``
     under ``ReadonlyRootfs=True``.

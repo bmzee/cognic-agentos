@@ -24,12 +24,14 @@ TRUST-CRITICAL WIRING (off-gate, but get these exactly right):
     regular file / empty. This is DISTINCT from the benign unset-root path
     (which returns an empty registry, never raises).
 
-  * **Per-pack HOOK trust roots (M5, ADR-002 hooks amendment).** A HOOK pack
-    may ship its own trust root at the LOCKED staged layout
-    ``<trust_root_prefix>/hook-packs/<pack_id>/cosign.pub``; absent → the
-    ``_default`` root. PRESENT-but-invalid fails CLOSED for that pack (skip +
-    warn — never a silent downgrade to the default root, never a boot abort).
-    Tools / skills / agents never consult the per-pack path.
+  * **Per-pack HOOK + SKILL trust roots (M5 hooks, ADR-002 hooks amendment;
+    M6 skills, ADR-025).** A HOOK pack may ship its own trust root at the
+    LOCKED staged layout ``<trust_root_prefix>/hook-packs/<pack_id>/cosign.pub``
+    and a SKILL pack at ``<trust_root_prefix>/skill-packs/<pack_id>/cosign.pub``;
+    absent → the ``_default`` root. PRESENT-but-invalid fails CLOSED for that
+    pack (skip + warn — never a silent downgrade to the default root, never a
+    boot abort). Tools / agents never consult either per-pack path, and the
+    two per-pack kinds never consult each other's subdir.
 
   * **Fail-closed allow-list.** The ``_default`` per-tenant plugin allow-list is
     loaded from ``plugin_allowlist_path`` fail-closed; a missing / malformed file
@@ -48,10 +50,11 @@ the on-gate ``protocol/trust_gate.py`` + ``protocol/supply_chain.py`` +
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Final, Literal
 
 from cognic_agentos.protocol.pack_attestation_resolver import (
     PackAttestationResolutionError,
@@ -83,8 +86,15 @@ _COSIGN_PUBLIC_KEY_BASENAME = "cosign.pub"
 #: is ABSENT falls back to the ``_default`` root; PRESENT-but-invalid FAILS
 #: CLOSED for that pack (never a silent downgrade to the default root — a
 #: corrupted per-pack key must not demote a hook pack to default-key
-#: verification). Tools / skills / agents NEVER consult this path.
+#: verification). Tools / agents / skills NEVER consult this path (skills have
+#: their OWN staged layout below).
 _HOOK_PACK_TRUST_ROOT_SUBDIR = "hook-packs"
+
+#: M6 A8 (ADR-025) — the LOCKED staged layout for per-pack SKILL trust roots:
+#: ``<trust_root_prefix>/skill-packs/<pack_id>/cosign.pub``. EXACTLY the hook
+#: semantics: ABSENT → the ``_default`` root; PRESENT-but-invalid FAILS CLOSED
+#: for that pack. Tools / agents / hooks NEVER consult this path.
+_SKILL_PACK_TRUST_ROOT_SUBDIR = "skill-packs"
 
 
 #: Closed-enum refusal vocabulary for :class:`RegistryBootError` — mirrors the
@@ -122,7 +132,9 @@ class RegistryBootError(Exception):
 #: Closed-enum vocabulary for the PER-PACK hook trust-root refusal log
 #: (``registry_boot.hook_pack_trust_root_invalid``). Distinct from
 #: :data:`RegistryBootRefusalReason` — these are per-pack SKIPS (fail-soft for
-#: the boot, fail-closed for the pack), never a whole-boot abort.
+#: the boot, fail-closed for the pack), never a whole-boot abort. The value
+#: strings are OPERATOR-FACING log vocabulary locked at M5 — unchanged by the
+#: M6 skills generalisation.
 HookPackTrustRootRefusalReason = Literal[
     "hook_pack_trust_root_name_invalid",
     "hook_pack_trust_root_path_escape",
@@ -130,21 +142,83 @@ HookPackTrustRootRefusalReason = Literal[
     "hook_pack_trust_root_empty",
 ]
 
+#: M6 A8 (ADR-025) — the kind-appropriate mirror vocabulary for the per-pack
+#: SKILL trust-root refusal log (``registry_boot.skill_pack_trust_root_invalid``).
+#: Same four failure classes as the hook vocabulary above.
+SkillPackTrustRootRefusalReason = Literal[
+    "skill_pack_trust_root_name_invalid",
+    "skill_pack_trust_root_path_escape",
+    "skill_pack_trust_root_not_a_file",
+    "skill_pack_trust_root_empty",
+]
 
-class _HookPackTrustRootInvalid(Exception):
+#: Union across the per-pack-trust-root kinds. The reason string carried by
+#: :class:`_PerPackTrustRootInvalid` is always drawn from the raising kind's
+#: vocabulary (hook packs raise ``hook_pack_*``; skill packs ``skill_pack_*``).
+PerPackTrustRootRefusalReason = HookPackTrustRootRefusalReason | SkillPackTrustRootRefusalReason
+
+
+class _PerPackTrustRootInvalid(Exception):
     """Per-pack fail-closed refusal from :func:`_resolve_pack_trust_root`.
 
     Module-private: caught by the boot loop (warn + skip THAT pack), never
     escapes :func:`build_and_populate_registry`. NOT :class:`RegistryBootError`
-    — that class aborts the whole boot; a single hook pack with a bad staged
-    key must not take the deployment down (the per-pack fail-soft posture).
+    — that class aborts the whole boot; a single hook/skill pack with a bad
+    staged key must not take the deployment down (the per-pack fail-soft
+    posture). M6 A8 generalised the M5 ``_HookPackTrustRootInvalid`` (no
+    external consumers pinned the old name) — ``log_event`` carries the
+    kind-appropriate operator log-event name so the boot loop's warn line
+    stays byte-stable for hooks (``hook_pack_trust_root_invalid``) while
+    skills log their own (``skill_pack_trust_root_invalid``).
     """
 
-    __slots__ = ("reason",)
+    __slots__ = ("log_event", "reason")
 
-    def __init__(self, reason: HookPackTrustRootRefusalReason, detail: str = "") -> None:
-        self.reason: HookPackTrustRootRefusalReason = reason
+    def __init__(
+        self, reason: PerPackTrustRootRefusalReason, detail: str = "", *, log_event: str
+    ) -> None:
+        self.reason: PerPackTrustRootRefusalReason = reason
+        self.log_event = log_event
         super().__init__(f"{reason}: {detail}" if detail else reason)
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class _PerPackTrustRootPolicy:
+    """Per-kind staged-layout policy: the subdir under the trust-root prefix,
+    the operator log-event name the boot loop emits on a fail-closed skip, and
+    the kind-appropriate closed-enum refusal vocabulary (one value per failure
+    class). Both per-pack kinds share ONE resolve-then-validate code path in
+    :func:`_resolve_pack_trust_root`; only this policy differs."""
+
+    subdir: str
+    log_event: str
+    name_invalid: PerPackTrustRootRefusalReason
+    path_escape: PerPackTrustRootRefusalReason
+    not_a_file: PerPackTrustRootRefusalReason
+    empty: PerPackTrustRootRefusalReason
+
+
+#: The per-pack trust-root kinds (M5 hooks + M6 skills). Kinds NOT in this map
+#: (tools / agents) resolve the ``_default`` root unconditionally — behavior
+#: unchanged since Sprint 3.
+_PER_PACK_TRUST_ROOT_POLICIES: Final[dict[str, _PerPackTrustRootPolicy]] = {
+    "hooks": _PerPackTrustRootPolicy(
+        subdir=_HOOK_PACK_TRUST_ROOT_SUBDIR,
+        log_event="hook_pack_trust_root_invalid",
+        name_invalid="hook_pack_trust_root_name_invalid",
+        path_escape="hook_pack_trust_root_path_escape",
+        not_a_file="hook_pack_trust_root_not_a_file",
+        empty="hook_pack_trust_root_empty",
+    ),
+    "skills": _PerPackTrustRootPolicy(
+        subdir=_SKILL_PACK_TRUST_ROOT_SUBDIR,
+        log_event="skill_pack_trust_root_invalid",
+        name_invalid="skill_pack_trust_root_name_invalid",
+        path_escape="skill_pack_trust_root_path_escape",
+        not_a_file="skill_pack_trust_root_not_a_file",
+        empty="skill_pack_trust_root_empty",
+    ),
+}
 
 
 async def build_and_populate_registry(
@@ -224,9 +298,10 @@ async def build_and_populate_registry(
     for pack in registry.discover():
         distribution_name = pack.record.distribution_name
         try:
-            # M5 (ADR-002 hooks amendment): HOOK packs may ship a per-pack
-            # trust root at the LOCKED staged layout; every other kind keeps
-            # the _default root unconditionally (behavior unchanged).
+            # M5 (ADR-002 hooks amendment) + M6 A8 (ADR-025): HOOK and SKILL
+            # packs may ship a per-pack trust root at their LOCKED staged
+            # layouts; every other kind keeps the _default root
+            # unconditionally (behavior unchanged).
             pack_trust_root = _resolve_pack_trust_root(
                 trust_root_prefix=Path(settings.trust_root_prefix),
                 kind=pack.record.kind,
@@ -248,13 +323,16 @@ async def build_and_populate_registry(
                 tenant_allowlist=tenant_allowlist,
                 mcp_admission=mcp_admission,
             )
-        except _HookPackTrustRootInvalid as exc:
+        except _PerPackTrustRootInvalid as exc:
             # Per-pack FAIL-CLOSED: a present-but-invalid per-pack key skips
             # THAT pack (warn) — never a silent downgrade to the _default
-            # root, never a boot abort.
+            # root, never a boot abort. ``exc.log_event`` is the
+            # kind-appropriate operator log-event name; the rendered line
+            # for hook packs is byte-identical to the M5 vintage
+            # (``registry_boot.hook_pack_trust_root_invalid: ...``).
             logger.warning(
-                "registry_boot.hook_pack_trust_root_invalid: skipping pack "
-                "distribution_name=%s reason=%s",
+                "registry_boot.%s: skipping pack distribution_name=%s reason=%s",
+                exc.log_event,
                 distribution_name,
                 exc.reason,
             )
@@ -293,17 +371,21 @@ def _resolve_pack_trust_root(
     distribution_name: str,
     default_root: Path,
 ) -> Path:
-    """Resolve the cosign trust root for ONE discovered pack (M5, ADR-002
-    hooks amendment).
+    """Resolve the cosign trust root for ONE discovered pack (M5 hooks per
+    the ADR-002 hooks amendment; M6 A8 skills per ADR-025).
 
-    Non-hook kinds → ``default_root`` unconditionally (unchanged behavior).
-    HOOK packs → the LOCKED staged layout
-    ``<trust_root_prefix>/hook-packs/<distribution_name>/cosign.pub``:
+    Kinds without a per-pack staged layout (tools / agents) →
+    ``default_root`` unconditionally (unchanged behavior). HOOK packs → the
+    LOCKED staged layout
+    ``<trust_root_prefix>/hook-packs/<distribution_name>/cosign.pub``; SKILL
+    packs → ``<trust_root_prefix>/skill-packs/<distribution_name>/cosign.pub``.
+    Both share ONE code path parameterised by
+    :data:`_PER_PACK_TRUST_ROOT_POLICIES`:
 
-      * ABSENT → ``default_root`` (a hook pack signed by the deployment's
+      * ABSENT → ``default_root`` (a pack signed by the deployment's
         default key is legitimate).
       * PRESENT but not a regular file / empty → raise
-        :class:`_HookPackTrustRootInvalid` (fail CLOSED for the pack — a
+        :class:`_PerPackTrustRootInvalid` (fail CLOSED for the pack — a
         corrupted per-pack key must never silently demote the pack to
         default-root verification).
 
@@ -312,7 +394,8 @@ def _resolve_pack_trust_root(
     path is built; (2) resolve; (3) require containment under the prefix —
     a symlink pointing outside the prefix fails closed.
     """
-    if kind != "hooks":
+    policy = _PER_PACK_TRUST_ROOT_POLICIES.get(kind)
+    if policy is None:
         return default_root
     if (
         not distribution_name
@@ -321,31 +404,32 @@ def _resolve_pack_trust_root(
         or "\\" in distribution_name
         or distribution_name.startswith(".")
     ):
-        raise _HookPackTrustRootInvalid("hook_pack_trust_root_name_invalid", distribution_name)
-    candidate = (
-        trust_root_prefix
-        / _HOOK_PACK_TRUST_ROOT_SUBDIR
-        / distribution_name
-        / _COSIGN_PUBLIC_KEY_BASENAME
-    )
+        raise _PerPackTrustRootInvalid(
+            policy.name_invalid, distribution_name, log_event=policy.log_event
+        )
+    candidate = trust_root_prefix / policy.subdir / distribution_name / _COSIGN_PUBLIC_KEY_BASENAME
     try:
         resolved_prefix = trust_root_prefix.resolve()
         resolved = candidate.resolve()
     except (OSError, RuntimeError) as exc:
         # Path resolution failure (e.g. a planted symlink loop) — fail closed.
-        raise _HookPackTrustRootInvalid("hook_pack_trust_root_path_escape", str(candidate)) from exc
+        raise _PerPackTrustRootInvalid(
+            policy.path_escape, str(candidate), log_event=policy.log_event
+        ) from exc
     try:
         resolved.relative_to(resolved_prefix)
     except ValueError:
-        raise _HookPackTrustRootInvalid(
-            "hook_pack_trust_root_path_escape", str(candidate)
+        raise _PerPackTrustRootInvalid(
+            policy.path_escape, str(candidate), log_event=policy.log_event
         ) from None
     if not resolved.exists():
         return default_root
     if not resolved.is_file():
-        raise _HookPackTrustRootInvalid("hook_pack_trust_root_not_a_file", str(candidate))
+        raise _PerPackTrustRootInvalid(
+            policy.not_a_file, str(candidate), log_event=policy.log_event
+        )
     if resolved.stat().st_size == 0:
-        raise _HookPackTrustRootInvalid("hook_pack_trust_root_empty", str(candidate))
+        raise _PerPackTrustRootInvalid(policy.empty, str(candidate), log_event=policy.log_event)
     return resolved
 
 
@@ -402,7 +486,9 @@ def _load_default_tenant_allowlist(path: Path) -> frozenset[str]:
 
 __all__ = [
     "HookPackTrustRootRefusalReason",
+    "PerPackTrustRootRefusalReason",
     "RegistryBootError",
     "RegistryBootRefusalReason",
+    "SkillPackTrustRootRefusalReason",
     "build_and_populate_registry",
 ]

@@ -113,7 +113,7 @@ from cognic_agentos.sandbox.checkpoint_store import (
     CheckpointStore,
     TombstoneCorruptError,
 )
-from cognic_agentos.sandbox.policy import PackAdmissionContext, SandboxPolicy
+from cognic_agentos.sandbox.policy import PackAdmissionContext, SandboxPolicy, WritableMount
 from cognic_agentos.sandbox.projection import (
     CredentialDecl,
     ProjectionPlan,
@@ -666,6 +666,18 @@ def _build_sandbox_container_config(
     return {
         "Image": policy.runtime_image,
         "Env": env_list,
+        # M6 finding #18 — suppress image-declared HEALTHCHECKs. Docker
+        # healthcheck execs inherit the CONTAINER env (incl. the injected
+        # HTTP_PROXY), so an inherited check's loopback GET is proxied to
+        # the egress sidecar + refused, turning engine-generated plumbing
+        # traffic into a false egress policy violation (live-reproduced:
+        # M6 runs 19+20). The backend owns lifecycle/exec/readiness
+        # directly and never reads Docker health state — an image
+        # healthcheck is pure noise + evidence-integrity risk here.
+        # NO_PROXY stays forbidden (the anti-bypass doctrine at
+        # _sandbox_container_env); suppression happens HERE, never by
+        # exempting loopback from the proxy.
+        "Healthcheck": {"Test": ["NONE"]},
         # Non-root per spec §7 + R1 P1.3 reviewer fix. Without User
         # set, Docker uses the image default user (commonly root)
         # which weakens the sandbox boundary even with CapDrop:[ALL].
@@ -710,6 +722,12 @@ def _build_proxy_sidecar_container_config(
     return {
         "Image": proxy_image,
         "Env": env_list,
+        # M6 finding #18 — suppress image-declared HEALTHCHECKs (same
+        # rationale as the sandbox config above; the sidecar's canonical
+        # image ships a benign socket-connect check today, but the
+        # suppression is symmetric so a future image revision cannot
+        # introduce probe traffic into the session's evidence surface).
+        "Healthcheck": {"Test": ["NONE"]},
         # T30/T14.1 — run as the canonical proxy image's purpose-built
         # cognicproxy identity (10002:10002), which OWNS /etc/cognic-proxy
         # + /var/log/cognic-proxy. NOT the workload's 65534 — that user
@@ -1264,6 +1282,10 @@ class DockerSiblingSandboxBackend:
                 session_id=session_id,
                 internal_net_name=internal_net_name,
                 extra_mounts=credential_extra_mounts,
+                # M6 run-14 amendment — thread the policy-declared mounts
+                # into the workload's real binds (audit-projection alone
+                # recorded mounts the container never received).
+                policy_mounts=policy.writable_mounts,
             )
 
             # 3c. Session construct + lifecycle.created emit per spec
@@ -2628,6 +2650,10 @@ class DockerSiblingSandboxBackend:
                 policy=metadata.policy,
                 session_id=session_id,
                 internal_net_name=internal_net_name,
+                # M6 run-14 amendment — the wake path rebuilds the workload
+                # from the CHECKPOINTED policy; leaving it unthreaded would
+                # recreate the run-14 bug class on resume.
+                policy_mounts=metadata.policy.writable_mounts,
             )
             # Restore the workspace tar into /workspace via docker exec.
             await self._restore_workspace_tar(
@@ -2793,7 +2819,27 @@ class DockerSiblingSandboxBackend:
                 ),
             )
         await self._catalog.verify_cosign_or_refuse(proxy_image_digest, tenant_id=tenant_id)
-        await self._catalog.verify_sbom_policy_or_refuse(proxy_image_digest, tenant_id=tenant_id)
+        # ADR-016 2026-05-29 amendment (canonical platform-image
+        # license-policy carve-out): the tenant/default license-DENY
+        # policy does NOT apply to canonical platform images —
+        # canonical-image license acceptance is an AgentOS
+        # release/signing decision attested by the canonical cosign
+        # signature verified above. The proxy is REQUIRED to be
+        # canonical (the membership refusal above), so NO
+        # verify_sbom_policy_or_refuse call runs here — mirroring
+        # admission step 8's `if not runtime_image_in_canonical_set`
+        # skip at admission.py:807-808. The sidecar sites predated the
+        # amendment (Sprint 8A T10c R1 P1.1) and were missed by T30;
+        # surfaced by M6 run 13 (2026-07-04), the FIRST live execution
+        # of this gate (the canonical Debian proxy refused with 666
+        # license violations the amendment's rationale predicted). If
+        # the membership gate above is ever relaxed to admit
+        # tenant-allow-listed proxies, the license/SBOM gate MUST be
+        # re-introduced for that NON-canonical class per ADR-016
+        # ("cannot loosen" stands for tenant/pack images). Pinned by
+        # tests/unit/sandbox/backends/test_proxy_sidecar_license_carveout.py
+        # (cross-backend lockstep + the real-catalog GPL/unlabeled
+        # TM-revert target).
 
         config = _build_proxy_sidecar_container_config(
             policy=policy,
@@ -2820,6 +2866,7 @@ class DockerSiblingSandboxBackend:
         session_id: str,
         internal_net_name: str,
         extra_mounts: Sequence[tuple[str, str]] = (),
+        policy_mounts: Sequence[WritableMount] = (),
     ) -> None:
         """Start the sandbox container on the internal network only.
 
@@ -2833,19 +2880,37 @@ class DockerSiblingSandboxBackend:
         seam — callers cannot request writable credential mounts).
         Each pair surfaces as a Docker bind mount in the container
         config's ``HostConfig.Binds`` list with the ``:ro`` flag.
+
+        M6 run-14 amendment (2026-07-04) — ``policy_mounts`` is the
+        SEPARATE channel for ``SandboxPolicy.writable_mounts``,
+        rendered ``:rw`` / ``:ro`` from each ``WritableMount.read_only``.
+        The field was declared (Sprint-8A spec §6) but never enforced —
+        both backends projected it into the audit payload ONLY, so the
+        chain evidence recorded mounts the workload never received; the
+        M6 skill broker-socket mount was silently dropped and the
+        in-sandbox runner crashed on its first governed tool call. Two
+        channels stay deliberately distinct: credential projections can
+        never be writable; policy mounts carry the caller's declared
+        read_only. Pinned by
+        ``tests/unit/sandbox/backends/test_policy_writable_mounts.py``
+        (the ``:rw`` bind pin is the TM-revert target).
         """
         config = _build_sandbox_container_config(
             policy=policy,
             session_id=session_id,
             internal_net_name=internal_net_name,
         )
-        if extra_mounts:
-            # Append read-only bind mounts for credential projection.
-            # ``HostConfig.Binds`` syntax: ``"<host>:<container>:ro"``.
+        if extra_mounts or policy_mounts:
+            # ``HostConfig.Binds`` syntax: ``"<host>:<container>:<mode>"``.
             host_config = config.setdefault("HostConfig", {})
             existing_binds = list(host_config.get("Binds", []))
+            # Credential projection binds — read-only by construction.
             for host_path, container_path in extra_mounts:
                 existing_binds.append(f"{host_path}:{container_path}:ro")
+            # Policy-declared mounts — mode from WritableMount.read_only.
+            for mount in policy_mounts:
+                mode = "ro" if mount.read_only else "rw"
+                existing_binds.append(f"{mount.host_path}:{mount.container_path}:{mode}")
             host_config["Binds"] = existing_binds
         container = await self._docker.containers.create_or_replace(
             name=session_id,
