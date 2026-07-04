@@ -781,6 +781,8 @@ async def test_runner_failure_warns_with_bounded_stderr(
     assert len(warnings) == 1
     record = warnings[0]
     assert record.exit_code == 1  # type: ignore[attr-defined]
+    # #17c — the correlator rides the collision-proof key (see the section below).
+    assert record.invoke_request_id.startswith("skill-")  # type: ignore[attr-defined]
     assert record.stderr_sha256 == hashlib.sha256(stderr).hexdigest()  # type: ignore[attr-defined]
     excerpt = record.stderr_excerpt  # type: ignore[attr-defined]
     assert len(excerpt) == 2048  # bounded — never the full multi-KB stream
@@ -809,3 +811,111 @@ async def test_runner_success_emits_no_runner_failed_warning(
         result = await ex.invoke(skill_id="schema-summary", arguments={}, actor=_actor())
     assert result.terminal_state == "completed"
     assert [r for r in caplog.records if r.message == "skill.invoke.runner_failed"] == []
+
+
+# ---------------------------------------------------------------------------
+# M6 finding #17c (executor half) — the per-invocation correlator rides
+# invoke_request_id, NOT request_id: the observability _ContextFilter on the
+# production root handler OWNS record.request_id/trace_id/span_id and stamps
+# the ambient portal context over same-named extras, silently replacing the
+# executor's minted skill-<hex> correlator on every failure WARNING. Mirror
+# of the broker's tool_request_id fix (2f36bfb). The skill.invoked CHAIN row
+# keeps request_id (the chain-side name is not a log extra and is untouched
+# by the filter); the LOG key is the collision-proof one — an operator joins
+# log.invoke_request_id == decision_history.request_id.
+# ---------------------------------------------------------------------------
+
+
+async def test_invoke_request_id_survives_production_context_filter(
+    db: AsyncEngine, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Deterministic #17c pin: install the real production _ContextFilter at
+    root-handler position 0 (ahead of caplog's capture handler, mirroring the
+    long-lived-production-handler-first ordering) and prove record.request_id
+    is clobbered by the (unbound) ambient context while invoke_request_id
+    carries the minted skill-<hex> correlator through intact."""
+    from cognic_agentos.observability.logging import _ContextFilter
+
+    class _FilterOnlyHandler(logging.Handler):
+        """No-op emit that still RUNS its filters — logging.NullHandler
+        overrides handle() to skip filtering entirely, so it cannot stand
+        in for the production handler here."""
+
+        def emit(self, record: logging.LogRecord) -> None:
+            return None
+
+    filter_handler = _FilterOnlyHandler()
+    filter_handler.addFilter(_ContextFilter())
+    root = logging.getLogger()
+    root.handlers.insert(0, filter_handler)
+    try:
+        proxy = _SpyProxy()
+        backend = _EchoBackend(exec_raises=RuntimeError("exec boom"))
+        loader = _StubLoader(_record(("oracle/list_tables",)))
+        ex = SkillExecutor(
+            sandbox_backend=backend,  # type: ignore[arg-type]
+            skill_loader=loader,
+            call_proxy=proxy,
+            decision_history_store=DecisionHistoryStore(db),
+            execution_timeout_s=5.0,
+        )
+        with caplog.at_level(logging.WARNING, logger="cognic_agentos.core.skill.executor"):
+            result = await ex.invoke(skill_id="schema-summary", arguments={}, actor=_actor())
+        assert result.refusal_reason == "skill_runtime_error"
+        warnings = [r for r in caplog.records if r.message == "skill.invoke.sandbox_failed"]
+        assert len(warnings) == 1
+        rec = warnings[0]
+        # The filter clobbered record.request_id with the (unbound) ambient
+        # context — proving a same-named extra would have been destroyed...
+        assert rec.request_id is None  # type: ignore[attr-defined]
+        # ...while the distinct key carries the correlator through intact.
+        assert rec.invoke_request_id.startswith("skill-")  # type: ignore[attr-defined]
+    finally:
+        root.removeHandler(filter_handler)
+
+
+async def test_all_failure_warnings_carry_the_same_invoke_request_id(
+    db: AsyncEngine, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Per-site coverage for the remaining WARNING sites in ONE invocation:
+    exec-raise (sandbox_failed) + broker-close raise (broker_close_failed) +
+    destroy raise (session_destroy_failed) all fire, each carrying the SAME
+    minted invoke_request_id — the property that makes the key a correlator
+    across a single invoke's failure cascade."""
+    from cognic_agentos.core.skill._types import _BrokerHandle
+
+    orig_close = _BrokerHandle.close
+
+    async def _close_then_raise(self: _BrokerHandle) -> None:
+        await orig_close(self)  # still clean up the real socket + 0700 dir
+        raise RuntimeError("broker close boom")
+
+    monkeypatch.setattr(_BrokerHandle, "close", _close_then_raise)
+    proxy = _SpyProxy()
+    backend = _EchoBackend(
+        exec_raises=RuntimeError("exec boom"),
+        destroy_raises=RuntimeError("destroy boom"),
+    )
+    loader = _StubLoader(_record(("oracle/list_tables",)))
+    ex = SkillExecutor(
+        sandbox_backend=backend,  # type: ignore[arg-type]
+        skill_loader=loader,
+        call_proxy=proxy,
+        decision_history_store=DecisionHistoryStore(db),
+        execution_timeout_s=5.0,
+    )
+    with caplog.at_level(logging.WARNING, logger="cognic_agentos.core.skill.executor"):
+        result = await ex.invoke(skill_id="schema-summary", arguments={}, actor=_actor())
+    assert result.refusal_reason == "skill_runtime_error"
+    by_message = {
+        m: [r for r in caplog.records if r.message == m]
+        for m in (
+            "skill.invoke.sandbox_failed",
+            "skill.broker_close_failed",
+            "skill.session_destroy_failed",
+        )
+    }
+    assert all(len(records) == 1 for records in by_message.values()), by_message
+    ids = {records[0].invoke_request_id for records in by_message.values()}  # type: ignore[attr-defined]
+    assert len(ids) == 1  # one invocation, one correlator across the cascade
+    assert next(iter(ids)).startswith("skill-")
