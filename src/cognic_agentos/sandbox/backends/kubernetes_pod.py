@@ -1191,7 +1191,23 @@ class KubernetesPodSandboxBackend:
                 ),
             )
         await self._catalog.verify_cosign_or_refuse(proxy_image_digest, tenant_id=tenant_id)
-        await self._catalog.verify_sbom_policy_or_refuse(proxy_image_digest, tenant_id=tenant_id)
+        # ADR-016 2026-05-29 amendment (canonical platform-image
+        # license-policy carve-out): the tenant/default license-DENY
+        # policy does NOT apply to canonical platform images —
+        # canonical-image license acceptance is an AgentOS
+        # release/signing decision attested by the canonical cosign
+        # signature verified above. The proxy is REQUIRED to be
+        # canonical (the membership refusal above), so NO
+        # verify_sbom_policy_or_refuse call runs here — mirroring
+        # admission step 8's skip at admission.py:807-808 AND the
+        # docker_sibling sidecar site (cross-backend parity). Missed
+        # by T30 (admission-only); surfaced by M6 run 13 (2026-07-04),
+        # the first live execution of this gate. If the membership
+        # gate above is ever relaxed to admit tenant-allow-listed
+        # proxies, the license/SBOM gate MUST be re-introduced for
+        # that NON-canonical class per ADR-016 ("cannot loosen" stands
+        # for tenant/pack images). Pinned by
+        # tests/unit/sandbox/backends/test_proxy_sidecar_license_carveout.py.
 
         # Sprint 10.6 T21 slice 5 — K8s substrate preflight when
         # credential_decls non-empty. Runs AFTER admission + proxy

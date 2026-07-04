@@ -2793,7 +2793,27 @@ class DockerSiblingSandboxBackend:
                 ),
             )
         await self._catalog.verify_cosign_or_refuse(proxy_image_digest, tenant_id=tenant_id)
-        await self._catalog.verify_sbom_policy_or_refuse(proxy_image_digest, tenant_id=tenant_id)
+        # ADR-016 2026-05-29 amendment (canonical platform-image
+        # license-policy carve-out): the tenant/default license-DENY
+        # policy does NOT apply to canonical platform images —
+        # canonical-image license acceptance is an AgentOS
+        # release/signing decision attested by the canonical cosign
+        # signature verified above. The proxy is REQUIRED to be
+        # canonical (the membership refusal above), so NO
+        # verify_sbom_policy_or_refuse call runs here — mirroring
+        # admission step 8's `if not runtime_image_in_canonical_set`
+        # skip at admission.py:807-808. The sidecar sites predated the
+        # amendment (Sprint 8A T10c R1 P1.1) and were missed by T30;
+        # surfaced by M6 run 13 (2026-07-04), the FIRST live execution
+        # of this gate (the canonical Debian proxy refused with 666
+        # license violations the amendment's rationale predicted). If
+        # the membership gate above is ever relaxed to admit
+        # tenant-allow-listed proxies, the license/SBOM gate MUST be
+        # re-introduced for that NON-canonical class per ADR-016
+        # ("cannot loosen" stands for tenant/pack images). Pinned by
+        # tests/unit/sandbox/backends/test_proxy_sidecar_license_carveout.py
+        # (cross-backend lockstep + the real-catalog GPL/unlabeled
+        # TM-revert target).
 
         config = _build_proxy_sidecar_container_config(
             policy=policy,
