@@ -674,6 +674,9 @@ async def test_downstream_known_mcp_refusal_warns_with_reason_and_policy_reason(
     assert rec.server_id == "oracle"  # type: ignore[attr-defined]
     assert rec.tenant_id == "tenant-1"  # type: ignore[attr-defined]
     assert rec.actor_subject == "actor-1"  # type: ignore[attr-defined]
+    # The per-call correlator rides tool_request_id (request_id is owned by
+    # the observability _ContextFilter — finding #17c).
+    assert rec.tool_request_id.startswith("skill-tool-")  # type: ignore[attr-defined]
     # Known exception -> bounded free-text detail present, NOT a hash.
     assert "dlp_pre_refused" in rec.detail  # type: ignore[attr-defined]
     assert not hasattr(rec, "detail_sha256")
@@ -743,6 +746,194 @@ async def test_downstream_green_path_emits_no_warning(
         )
     assert resp["ok"] is True
     assert [r for r in caplog.records if r.message == "skill.broker.tool_invocation_failed"] == []
+    await h.close()
+
+
+# ---------------------------------------------------------------------------
+# M6 run-16 finding #17b — result-not-frameable WARNING
+# (the arm that cost runs 15+16: the governed call SUCCEEDS downstream but
+# the result cannot be json-framed back to the sandbox; pre-#17b the broker
+# responded in-band with ZERO kernel-side log — the one dark arm left after
+# finding #16 instrumented the downstream-exception arm). Detail-safety: the
+# only exception types this arm catches are FrameTooLarge (our byte-count
+# message), json.dumps TypeError (type name only), and json.dumps ValueError
+# (fixed NaN/circular messages) — value-free by construction, so a bounded
+# free-text detail is safe; the result VALUE never reaches the record.
+# ---------------------------------------------------------------------------
+
+
+class _SecretRepr:
+    """Non-JSON-able result whose repr carries a secret — pins that the
+    WARNING's detail comes from the json TypeError (type name only), never
+    from repr(result)."""
+
+    def __repr__(self) -> str:  # pragma: no cover — must never be called
+        return "SECRET-REPR-token=abc123"
+
+
+async def test_unframeable_result_warns_result_not_frameable(
+    broker: SkillBroker,
+    spy_proxy: _SpyProxy,
+    serve_handles: list[_BrokerHandle],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A successful governed call whose result cannot be framed emits ONE
+    tool_result_not_frameable WARNING (exception_type + safe fields +
+    value-free detail) and ZERO tool_invocation_failed events — the two
+    failure arms stay distinguishable in operator logs."""
+    spy_proxy.result = {"payload": _SecretRepr()}
+    h = await broker.serve()
+    serve_handles.append(h)
+    with caplog.at_level("WARNING", logger="cognic_agentos.core.skill.broker"):
+        resp = await _rpc(
+            h.sock_path,
+            {
+                "session_token": h.session_token,
+                "tool_ref": "oracle/describe_table",
+                "arguments": {"owner": "COGNIC", "table": "EMPLOYEES"},
+            },
+        )
+    # Socket response unchanged (the pre-#17b wire arm).
+    assert resp["ok"] is False
+    assert resp["refused"] is False
+    assert resp["reason"] == "skill_tool_invocation_failed"
+    warnings = [r for r in caplog.records if r.message == "skill.broker.tool_result_not_frameable"]
+    assert len(warnings) == 1
+    rec = warnings[0]
+    assert rec.exception_type == "TypeError"  # type: ignore[attr-defined]
+    assert rec.server_id == "oracle"  # type: ignore[attr-defined]
+    assert rec.tool_name == "describe_table"  # type: ignore[attr-defined]
+    assert rec.tenant_id == "tenant-1"  # type: ignore[attr-defined]
+    assert rec.actor_subject == "actor-1"  # type: ignore[attr-defined]
+    # tool_request_id, NOT request_id: the observability _ContextFilter on
+    # the production root handler owns record.request_id and clobbers a
+    # same-named extra (finding #17c — surfaced by exactly this assert
+    # failing when a prior test installs the production handler). The
+    # distinct key survives the filter.
+    assert rec.tool_request_id.startswith("skill-tool-")  # type: ignore[attr-defined]
+    # Detail is the json TypeError message: type name only, value-free.
+    assert "_SecretRepr" in rec.detail  # type: ignore[attr-defined]
+    assert "SECRET-REPR" not in str(rec.__dict__)
+    assert "abc123" not in str(rec.__dict__)
+    # NEVER the tool arguments; and NOT the downstream-exception event.
+    assert "EMPLOYEES" not in str(rec.__dict__)
+    assert [r for r in caplog.records if r.message == "skill.broker.tool_invocation_failed"] == []
+    await h.close()
+
+
+async def test_oversized_result_warns_frame_too_large(
+    broker: SkillBroker,
+    spy_proxy: _SpyProxy,
+    serve_handles: list[_BrokerHandle],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A result whose encoding exceeds MAX_FRAME_BYTES surfaces as
+    FrameTooLarge on the same WARNING — byte counts in the detail, the
+    oversized body NOWHERE on the record."""
+    spy_proxy.result = {"blob": "x" * (MAX_FRAME_BYTES + 1)}
+    h = await broker.serve()
+    serve_handles.append(h)
+    with caplog.at_level("WARNING", logger="cognic_agentos.core.skill.broker"):
+        resp = await _rpc(
+            h.sock_path,
+            {
+                "session_token": h.session_token,
+                "tool_ref": "oracle/list_tables",
+                "arguments": {},
+            },
+        )
+    assert resp["reason"] == "skill_tool_invocation_failed"
+    warnings = [r for r in caplog.records if r.message == "skill.broker.tool_result_not_frameable"]
+    assert len(warnings) == 1
+    rec = warnings[0]
+    assert rec.exception_type == "FrameTooLarge"  # type: ignore[attr-defined]
+    assert "bounded maximum" in rec.detail  # type: ignore[attr-defined]
+    assert len(rec.detail) <= 512  # type: ignore[attr-defined]
+    await h.close()
+
+
+async def test_tool_request_id_survives_production_context_filter(
+    broker: SkillBroker,
+    spy_proxy: _SpyProxy,
+    serve_handles: list[_BrokerHandle],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Finding #17c (deterministic pin): the production root handler's
+    ``_ContextFilter`` OWNS ``record.request_id`` — it stamps the ambient
+    portal context onto every record, clobbering a same-named ``extra`` key
+    (surfaced order-dependently in the full suite once a prior test installs
+    the production handler). The broker's per-call correlator must ride the
+    distinct ``tool_request_id`` key and survive the filter. The filter
+    handler is INSERTED AT POSITION 0 (ahead of caplog's capture handler,
+    mirroring the production long-lived-handler-first ordering) so the
+    clobber is exercised in ANY test order."""
+    import logging
+
+    from cognic_agentos.observability.logging import _ContextFilter
+
+    class _FilterOnlyHandler(logging.Handler):
+        """No-op emit that still RUNS its filters — logging.NullHandler
+        overrides handle() to skip filtering entirely, so it cannot stand
+        in for the production handler here."""
+
+        def emit(self, record: logging.LogRecord) -> None:
+            return None
+
+    filter_handler = _FilterOnlyHandler()
+    filter_handler.addFilter(_ContextFilter())
+    root = logging.getLogger()
+    root.handlers.insert(0, filter_handler)
+    try:
+        spy_proxy.result = {"payload": _SecretRepr()}
+        h = await broker.serve()
+        serve_handles.append(h)
+        with caplog.at_level("WARNING", logger="cognic_agentos.core.skill.broker"):
+            await _rpc(
+                h.sock_path,
+                {
+                    "session_token": h.session_token,
+                    "tool_ref": "oracle/list_tables",
+                    "arguments": {},
+                },
+            )
+        warnings = [
+            r for r in caplog.records if r.message == "skill.broker.tool_result_not_frameable"
+        ]
+        assert len(warnings) == 1
+        rec = warnings[0]
+        # The filter clobbered record.request_id with the (unbound) ambient
+        # context — proving a same-named extra would have been destroyed...
+        assert rec.request_id is None  # type: ignore[attr-defined]
+        # ...while the distinct key carries the correlator through intact.
+        assert rec.tool_request_id.startswith("skill-tool-")  # type: ignore[attr-defined]
+        await h.close()
+    finally:
+        root.removeHandler(filter_handler)
+
+
+async def test_green_path_emits_no_result_not_frameable_warning(
+    broker: SkillBroker,
+    spy_proxy: _SpyProxy,
+    serve_handles: list[_BrokerHandle],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A frameable success emits ZERO tool_result_not_frameable warnings."""
+    spy_proxy.result = {"tables": ["EMPLOYEES"]}
+    h = await broker.serve()
+    serve_handles.append(h)
+    with caplog.at_level("WARNING", logger="cognic_agentos.core.skill.broker"):
+        resp = await _rpc(
+            h.sock_path,
+            {
+                "session_token": h.session_token,
+                "tool_ref": "oracle/list_tables",
+                "arguments": {},
+            },
+        )
+    assert resp["ok"] is True
+    assert [
+        r for r in caplog.records if r.message == "skill.broker.tool_result_not_frameable"
+    ] == []
     await h.close()
 
 

@@ -347,10 +347,17 @@ class SkillBroker:
             # exceptions (token/arg-free by contract) and hashed
             # otherwise.
             exception_type = type(exc).__name__
+            # ``tool_request_id`` (NOT ``request_id``): the observability
+            # ``_ContextFilter`` on the production root handler OWNS
+            # ``record.request_id`` / ``trace_id`` / ``span_id`` (stamps the
+            # ambient portal context, clobbering same-named ``extra`` keys —
+            # M6 run-16 finding #17c). The distinct key carries the per-call
+            # correlator (== the downstream audit row's ``request_id``)
+            # ALONGSIDE the ambient portal request id.
             log_extra: dict[str, Any] = {
                 "server_id": server_id,
                 "tool_name": tool_name,
-                "request_id": request_id,
+                "tool_request_id": request_id,
                 "tenant_id": self._tenant_id,
                 "actor_subject": self._actor_subject,
                 "exception_type": exception_type,
@@ -387,6 +394,30 @@ class SkillBroker:
         try:
             payload = encode_frame({"ok": True, "result": result})
         except (FrameTooLarge, TypeError, ValueError) as exc:
+            # M6 run-16 finding #17b — kernel-side diagnosability for the
+            # result-frame arm (the one dark arm left after finding #16
+            # instrumented the downstream-exception arm; it cost runs 15+16:
+            # the governed call SUCCEEDS downstream, the result cannot be
+            # json-framed, and pre-#17b NOTHING logged). Safe by
+            # construction: the three exception types this arm catches
+            # carry value-free messages (FrameTooLarge -> byte counts;
+            # json.dumps TypeError -> type name only; json.dumps ValueError
+            # -> fixed NaN/circular messages), so a bounded free-text
+            # detail is safe — the result VALUE never reaches the record.
+            _LOGGER.warning(
+                "skill.broker.tool_result_not_frameable",
+                extra={
+                    "server_id": server_id,
+                    "tool_name": tool_name,
+                    # tool_request_id, not request_id — the observability
+                    # _ContextFilter owns record.request_id (finding #17c).
+                    "tool_request_id": request_id,
+                    "tenant_id": self._tenant_id,
+                    "actor_subject": self._actor_subject,
+                    "exception_type": type(exc).__name__,
+                    "detail": str(exc)[:_BROKER_DETAIL_MAX_CHARS],
+                },
+            )
             await self._respond(
                 writer,
                 {

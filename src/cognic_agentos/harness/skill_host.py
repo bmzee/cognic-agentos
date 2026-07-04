@@ -23,6 +23,7 @@ ONLY through the injected seam).
 from __future__ import annotations
 
 import importlib.metadata as md
+import json
 import logging
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -264,13 +265,88 @@ class _RegistrySkillRecordLoader:
         return self._records.get(skill_id)
 
 
+class MCPToolResultError(Exception):
+    """Downstream MCP tool completed the wire call but flagged a tool-level
+    error (``CallToolResult.isError``) — M6 run-16 finding #17a, fail-closed.
+
+    Raised BEFORE projection so the failure surfaces through the broker's
+    downstream-failure arm (in-band ``skill_tool_invocation_failed`` + the
+    finding-#16 WARNING) instead of masquerading as a success result the
+    action's defensive extractors would quietly reduce to an empty summary.
+    The message NEVER carries the tool's content text (it may hold SQL
+    fragments / customer data — the broker hashes unknown-exception detail,
+    but the invariant holds at the raise site, not one layer up); ``reason``
+    is the short closed marker the broker WARNING surfaces as
+    ``downstream_reason``."""
+
+    reason = "mcp_tool_result_is_error"
+
+    def __init__(self) -> None:
+        super().__init__("downstream MCP tool result carries isError=true")
+
+
+def _project_tool_result(payload: Any) -> Any:
+    """Project an mcp SDK ``CallToolResult`` to the JSON-frameable tool-level
+    result the broker's wire contract requires (M6 run-16 finding #17a).
+
+    The broker frames the proxied result with stdlib ``json.dumps``
+    (``sdk/skill_transport.encode_frame``); an mcp SDK ``CallToolResult`` is
+    a pydantic model and not JSON-able, so returning it raw kills EVERY real
+    governed tool call in-band at the broker's result-frame arm. ADR-025's
+    contract ("returns only the tool result"; wire arm ``{"ok": true,
+    "result": { ... }}``) and the SDK ``ToolRegistry`` convention the pack
+    authors write against (``await tool.invoke(**kwargs) -> dict`` — the
+    handler's own dict) pin the projection target. Recovery order:
+
+    1. ``isError`` true -> raise :class:`MCPToolResultError` (fail-closed;
+       a tool-level error is not a result).
+    2. ``structuredContent`` dict -> return it (the authoritative, schema'd
+       realization of the handler dict).
+    3. exactly ONE text content block whose text parses to a JSON object ->
+       return that dict (the FastMCP bare ``-> dict`` realization: mcp
+       1.27.0 generates NO output schema for a bare ``dict`` annotation, so
+       the handler dict rides only as JSON text — the live oracle-pack
+       case).
+    4. otherwise the ``model_dump(mode="json", by_alias=True,
+       exclude_none=True)`` envelope — honest fallback, still frameable.
+    5. non-model payloads (no ``model_dump``) pass through unchanged (plain
+       JSON data from stub hosts / future hosts).
+
+    Duck-typed on purpose: this off-gate builder module must stay importable
+    without the optional ``mcp`` SDK extra (the tests drive REAL
+    ``mcp.types`` objects through it)."""
+    if getattr(payload, "isError", False) or getattr(payload, "is_error", False):
+        raise MCPToolResultError()
+    dump = getattr(payload, "model_dump", None)
+    if dump is None:
+        return payload
+    structured = getattr(payload, "structuredContent", None)
+    if structured is None:
+        structured = getattr(payload, "structured_content", None)
+    if isinstance(structured, dict):
+        return structured
+    content = getattr(payload, "content", None)
+    if isinstance(content, list) and len(content) == 1:
+        block = content[0]
+        text = getattr(block, "text", None)
+        if getattr(block, "type", None) == "text" and isinstance(text, str):
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, dict):
+                return parsed
+    return dump(mode="json", by_alias=True, exclude_none=True)
+
+
 class _MCPHostCallProxy:
     """``core/skill.SkillCallProxy`` conformer wrapping ``MCPHost.call_tool``.
 
     Threads the broker's bound tenant/actor + per-call ``request_id`` into the
     host so OAuth / approval / DLP / audit apply automatically downstream, and
-    returns the tool result ``payload`` (a JSON-able value the broker frames back
-    to the sandboxed action) — never the full ``CallResult`` envelope."""
+    returns the tool result projected to a JSON-able value the broker frames
+    back to the sandboxed action (:func:`_project_tool_result`) — never the
+    full ``CallResult`` envelope, never a raw mcp SDK pydantic model."""
 
     def __init__(self, mcp_host: Any) -> None:
         self._host = mcp_host
@@ -293,7 +369,7 @@ class _MCPHostCallProxy:
             tenant_id=tenant_id,
             originator_subject=originator_subject,
         )
-        return getattr(result, "payload", result)
+        return _project_tool_result(getattr(result, "payload", result))
 
 
 def build_skill_executor(

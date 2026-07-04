@@ -317,6 +317,205 @@ async def test_mcp_host_call_proxy_returns_payload() -> None:
     ]
 
 
+# ---------------------------------------------------------------------------
+# M6 run-16 finding #17a — CallToolResult -> JSON-frameable tool-result
+# projection. The broker frames the proxied result with stdlib json.dumps
+# (sdk/skill_transport.encode_frame); an mcp SDK ``CallToolResult`` is a
+# pydantic model and NOT json.dumps-able, so without projection EVERY real
+# governed tool call dies in-band at the broker's result-frame arm. Tests
+# use REAL ``mcp.types`` objects (the fixture-papers-over-production-gap
+# lesson: the plain-dict stub above is exactly how #17 survived Part A).
+# ---------------------------------------------------------------------------
+
+
+class _PayloadHost:
+    """Stub host returning a caller-supplied payload (a REAL mcp SDK object
+    in the tests below) inside the ``CallResult``-shaped envelope."""
+
+    def __init__(self, payload: Any) -> None:
+        self._payload = payload
+
+    async def call_tool(self, **_kwargs: Any) -> Any:
+        return SimpleNamespace(payload=self._payload)
+
+
+async def _project(payload: Any) -> Any:
+    proxy = skill_host._MCPHostCallProxy(_PayloadHost(payload))
+    return await proxy.call(
+        server_id="cognic-tool-oracle-schema",
+        tool_name="list_tables",
+        arguments={"owner": "COGNIC"},
+        request_id="skill-tool-1",
+        tenant_id="tenant-a",
+        originator_subject="agent-x",
+    )
+
+
+async def test_call_proxy_projects_structured_content() -> None:
+    """Arm 2: ``structuredContent`` (the schema'd realization) wins — the
+    action receives the tool handler's own dict, and it json-frames."""
+    import json
+
+    from mcp.types import CallToolResult, TextContent
+
+    payload = CallToolResult(
+        content=[TextContent(type="text", text='{"items": []}')],
+        structuredContent={"items": [{"table_name": "ACCOUNTS"}]},
+        isError=False,
+    )
+    out = await _project(payload)
+    assert out == {"items": [{"table_name": "ACCOUNTS"}]}
+    json.dumps({"ok": True, "result": out})  # the broker's frame contract
+
+
+async def test_call_proxy_parses_single_text_content_json_object() -> None:
+    """Arm 3 (the LIVE oracle case): FastMCP 1.27 bare ``-> dict`` handlers
+    produce NO structuredContent — the tool dict rides only as JSON text in
+    the single TextContent block. The projection recovers it."""
+    import json
+
+    from mcp.types import CallToolResult, TextContent
+
+    payload = CallToolResult(
+        content=[
+            TextContent(type="text", text='{"items": [{"table_name": "ACCOUNTS"}], "count": 1}')
+        ],
+        isError=False,
+    )
+    assert payload.structuredContent is None
+    out = await _project(payload)
+    assert out == {"items": [{"table_name": "ACCOUNTS"}], "count": 1}
+    json.dumps({"ok": True, "result": out})
+
+
+async def test_call_proxy_real_fastmcp_bare_dict_handler_end_to_end() -> None:
+    """Integration-grade: a REAL in-memory FastMCP server with an
+    oracle-shaped bare ``-> dict`` handler, driven through a REAL mcp
+    client session — the exact wire realization run 16 failed on."""
+    import json
+
+    from mcp.server.fastmcp import FastMCP
+    from mcp.shared.memory import create_connected_server_and_client_session
+
+    server = FastMCP("probe")
+
+    # The BARE ``dict`` annotation is the fixture: FastMCP 1.27 generates no
+    # output schema for it (structuredContent=None — the text-only realization
+    # this test exists to pin), while ``dict[str, Any]`` WOULD populate
+    # structuredContent and silently exercise arm 2 instead.
+    @server.tool(name="list_tables", description="probe")
+    async def list_tables(owner: str) -> dict:  # type: ignore[type-arg]
+        return {"items": [{"table_name": "ACCOUNTS"}], "owner": owner}
+
+    class _FastMCPBackedHost:
+        async def call_tool(self, *, tool_name: str, arguments: dict[str, Any], **_: Any) -> Any:
+            async with create_connected_server_and_client_session(server._mcp_server) as session:
+                result = await session.call_tool(name=tool_name, arguments=arguments)
+            # Realization guard: if a future mcp bump starts populating
+            # structuredContent for bare-dict handlers, this test would
+            # silently stop exercising the text-parse arm — fail loud instead.
+            assert result.structuredContent is None
+            return SimpleNamespace(payload=result)
+
+    proxy = skill_host._MCPHostCallProxy(_FastMCPBackedHost())
+    out = await proxy.call(
+        server_id="cognic-tool-oracle-schema",
+        tool_name="list_tables",
+        arguments={"owner": "COGNIC"},
+        request_id="skill-tool-1",
+        tenant_id="tenant-a",
+        originator_subject="agent-x",
+    )
+    assert out == {"items": [{"table_name": "ACCOUNTS"}], "owner": "COGNIC"}
+    json.dumps({"ok": True, "result": out})
+
+
+async def test_call_proxy_prose_text_falls_back_to_envelope() -> None:
+    """Arm 4: no structured output and the text is not a JSON object —
+    the JSON-mode model dump is the honest, still-frameable fallback."""
+    import json
+
+    from mcp.types import CallToolResult, TextContent
+
+    payload = CallToolResult(
+        content=[TextContent(type="text", text="plain prose, not JSON")],
+        isError=False,
+    )
+    out = await _project(payload)
+    assert isinstance(out, dict)
+    assert out["content"][0]["text"] == "plain prose, not JSON"
+    assert out["isError"] is False
+    json.dumps({"ok": True, "result": out})
+
+
+async def test_call_proxy_text_json_non_object_falls_back_to_envelope() -> None:
+    """Arm 4 boundary: text that parses to a JSON ARRAY (not an object)
+    must NOT be returned bare — the runner-side transport requires a
+    dict result (``MalformedFrame`` otherwise)."""
+    import json
+
+    from mcp.types import CallToolResult, TextContent
+
+    payload = CallToolResult(
+        content=[TextContent(type="text", text='["a", "b"]')],
+        isError=False,
+    )
+    out = await _project(payload)
+    assert isinstance(out, dict)
+    assert out["content"][0]["text"] == '["a", "b"]'
+    json.dumps({"ok": True, "result": out})
+
+
+async def test_call_proxy_multiple_text_blocks_fall_back_to_envelope() -> None:
+    """Arm 3 requires EXACTLY ONE text block — with two, there is no
+    single 'handler dict' to recover; the envelope preserves both."""
+    import json
+
+    from mcp.types import CallToolResult, TextContent
+
+    payload = CallToolResult(
+        content=[
+            TextContent(type="text", text='{"a": 1}'),
+            TextContent(type="text", text='{"b": 2}'),
+        ],
+        isError=False,
+    )
+    out = await _project(payload)
+    assert isinstance(out, dict)
+    assert len(out["content"]) == 2
+    json.dumps({"ok": True, "result": out})
+
+
+async def test_call_proxy_is_error_raises_safe_local_exception() -> None:
+    """Arm 1 (fail-closed): a tool-level MCP error must NOT masquerade as
+    a skill success result. The raise happens BEFORE projection, and the
+    exception message NEVER carries the tool's content text (may hold SQL
+    fragments / data) — the broker logs unknown-exception detail as a
+    sha256 only."""
+    from mcp.types import CallToolResult, TextContent
+
+    payload = CallToolResult(
+        content=[TextContent(type="text", text="ORA-00942: table or view SECRET_T does not exist")],
+        isError=True,
+    )
+    with pytest.raises(skill_host.MCPToolResultError) as excinfo:
+        await _project(payload)
+    assert "ORA-00942" not in str(excinfo.value)
+    assert "SECRET_T" not in str(excinfo.value)
+    # The short closed marker the broker WARNING surfaces as downstream_reason.
+    assert excinfo.value.reason == "mcp_tool_result_is_error"
+
+
+async def test_call_proxy_plain_payload_passes_through_unchanged() -> None:
+    """Arm 5: non-model payloads (no ``model_dump``) pass through — the
+    back-compat contract for stub hosts + any host returning plain data."""
+    import json
+
+    out = await _project({"rows": [["T1"]]})
+    assert out == {"rows": [["T1"]]}
+    json.dumps({"ok": True, "result": out})
+
+
 class _StubRuntime:
     def __init__(self) -> None:
         self.decision_history_store = object()
