@@ -242,6 +242,12 @@ The M6 governed-skill live proof (run 14) surfaced that `SandboxPolicy.writable_
 
 Cross-backend + rendering + threading + fail-closed + stderr pins live at `tests/unit/sandbox/backends/test_policy_writable_mounts.py` + `tests/unit/core/skill/test_executor.py`; the docker `:rw` bind pin is TM-revert-proven (unthreading `create()` fails it).
 
+## Amendment — 2026-07-04 (M6 runs 19+20 — Docker backend suppresses image-declared HEALTHCHECKs)
+
+The M6 live proof (runs 19+20) surfaced that a runtime image's Docker `HEALTHCHECK` executes **inside the sandbox container with the sandbox's env** — including the injected `HTTP_PROXY` — so an inherited check's loopback GET is proxied to the egress sidecar, refused against the allow-list, and the fail-closed egress audit converts engine-generated plumbing traffic into a false `egress_host_not_allow_listed` policy violation (a proof runtime image built on the kernel base inherited the API-server healthcheck; every skill invoke whose session outlived the first check fire died with a discarded exit-0 result, `proxy_log` recording `GET 127.0.0.1`).
+
+The **DockerSibling backend now sets `Healthcheck: {"Test": ["NONE"]}` on BOTH sandbox-created containers** (workload + egress-proxy sidecar, at the pure-functional config builders). Rationale: AgentOS owns sandbox lifecycle / exec / readiness directly and **never consumes Docker health state**; the egress ledger must record workload (and sidecar) behavior only, so image-declared healthchecks are pure noise plus an evidence-integrity risk — any tenant image built from a healthchecked base would otherwise reproduce the class. `NO_PROXY` remains **forbidden** (the anti-bypass doctrine at `_sandbox_container_env` stands; suppression happens at the container config, never by exempting loopback from the proxy). KubernetesPod is structurally unaffected — kubelet ignores Dockerfile `HEALTHCHECK`; probes are pod-spec-defined and the backend declares none on sandbox Pods. Pins (TM-revert-proven) at `tests/unit/sandbox/backends/test_docker_sibling_pure_helpers.py::TestContainerConfigsSuppressImageHealthchecks`, including the proxy-env-presence / `NO_PROXY`-absence and unchanged-security-defaults invariants.
+
 ## References
 - [Anthropic — Managed Agents: Decoupling brain from hands](https://www.anthropic.com/engineering/managed-agents)
 - [Local-First Agent Runtime](https://www.huuphan.com/2026/04/local-first-agent-runtime-guide.html)

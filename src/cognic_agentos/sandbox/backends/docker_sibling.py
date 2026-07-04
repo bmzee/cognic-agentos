@@ -666,6 +666,18 @@ def _build_sandbox_container_config(
     return {
         "Image": policy.runtime_image,
         "Env": env_list,
+        # M6 finding #18 — suppress image-declared HEALTHCHECKs. Docker
+        # healthcheck execs inherit the CONTAINER env (incl. the injected
+        # HTTP_PROXY), so an inherited check's loopback GET is proxied to
+        # the egress sidecar + refused, turning engine-generated plumbing
+        # traffic into a false egress policy violation (live-reproduced:
+        # M6 runs 19+20). The backend owns lifecycle/exec/readiness
+        # directly and never reads Docker health state — an image
+        # healthcheck is pure noise + evidence-integrity risk here.
+        # NO_PROXY stays forbidden (the anti-bypass doctrine at
+        # _sandbox_container_env); suppression happens HERE, never by
+        # exempting loopback from the proxy.
+        "Healthcheck": {"Test": ["NONE"]},
         # Non-root per spec §7 + R1 P1.3 reviewer fix. Without User
         # set, Docker uses the image default user (commonly root)
         # which weakens the sandbox boundary even with CapDrop:[ALL].
@@ -710,6 +722,12 @@ def _build_proxy_sidecar_container_config(
     return {
         "Image": proxy_image,
         "Env": env_list,
+        # M6 finding #18 — suppress image-declared HEALTHCHECKs (same
+        # rationale as the sandbox config above; the sidecar's canonical
+        # image ships a benign socket-connect check today, but the
+        # suppression is symmetric so a future image revision cannot
+        # introduce probe traffic into the session's evidence surface).
+        "Healthcheck": {"Test": ["NONE"]},
         # T30/T14.1 — run as the canonical proxy image's purpose-built
         # cognicproxy identity (10002:10002), which OWNS /etc/cognic-proxy
         # + /var/log/cognic-proxy. NOT the workload's 65534 — that user
