@@ -38,6 +38,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import functools
+import hashlib
 import logging
 import os
 import secrets
@@ -65,6 +66,53 @@ _LOGGER = logging.getLogger(__name__)
 #: ``tempfile.gettempdir()``.
 _SOCKET_NAME = "broker.sock"
 _DIR_PREFIX = "csk-"
+
+#: M6 run-15 finding #16 — kernel-side diagnosability for the broker's
+#: downstream-failure arm (``call_proxy.call`` raised). The real
+#: exception is shipped over the socket to the SANDBOXED runner (which
+#: discards the detail) + never reaches the chain, so a bank operator
+#: debugging a failed governed tool call had ZERO kernel-side signal
+#: (surfaced by M6 run 15 — the FIRST end-to-end governed call worked;
+#: the second's failure was opaque). Mirror of the executor's
+#: ``skill.invoke.runner_failed`` WARNING (finding #15).
+#:
+#: Detail-safety split: ``.reason`` + ``.payload["policy_reason"]`` are
+#: short closed-enum-ish tokens surfaced for ANY exception that carries
+#: them (duck-typed — no ``cognic_agentos.protocol`` import, the
+#: forbidden ``core -> protocol`` arrow; the host is reached ONLY
+#: through the injected ``SkillCallProxy`` seam). The free-text
+#: ``str(exc)`` message is surfaced bounded ONLY for the KNOWN AgentOS
+#: MCP exception types (token/arg-free by contract); an UNKNOWN
+#: exception's message could carry secrets, so it is hashed
+#: (``detail_sha256``), never logged raw.
+#:
+#: Detected by TYPE NAME (not isinstance) so the broker stays
+#: protocol-import-free; the name set is drift-pinned test-only against
+#: the real protocol classes at ``tests/unit/core/skill/test_broker.py``
+#: per the drift-detector-test-only-no-runtime-import doctrine.
+_KNOWN_MCP_EXCEPTION_TYPE_NAMES: frozenset[str] = frozenset(
+    {"MCPToolInvocationRefused", "MCPTransportError", "MCPAuthzError"}
+)
+#: Bound on the surfaced free-text detail (known-exception messages are
+#: short ``reason: message`` strings; the cap defends against a
+#: pathological message inflating the log record).
+_BROKER_DETAIL_MAX_CHARS = 512
+
+
+def _extract_downstream_policy_reason(exc: BaseException) -> str | None:
+    """The downstream refusal's ``policy_reason``, if any — from the
+    exception's ``.payload`` dict (the AgentOS MCP exception shape) OR a
+    direct ``.policy_reason`` attribute. String-only; never raises."""
+
+    payload = getattr(exc, "payload", None)
+    if isinstance(payload, dict):
+        value = payload.get("policy_reason")
+        if isinstance(value, str):
+            return value
+    direct = getattr(exc, "policy_reason", None)
+    if isinstance(direct, str):
+        return direct
+    return None
 
 
 class _ServeContext:
@@ -287,15 +335,51 @@ class SkillBroker:
                 originator_subject=self._actor_subject,
             )
         except Exception as exc:
+            # M6 run-15 finding #16 — kernel-side diagnosability. The
+            # exception the governed call raised is shipped over the
+            # socket to the sandboxed runner (which discards the detail)
+            # + never reaches the chain; without this WARNING an operator
+            # has no signal for WHY a governed tool call failed. Mirror
+            # of the executor's ``skill.invoke.runner_failed`` (finding
+            # #15). Safe-fields only — NEVER tool arguments, result
+            # payloads, tokens, or the full exception payload; the
+            # free-text message is bounded ONLY for known AgentOS MCP
+            # exceptions (token/arg-free by contract) and hashed
+            # otherwise.
+            exception_type = type(exc).__name__
+            log_extra: dict[str, Any] = {
+                "server_id": server_id,
+                "tool_name": tool_name,
+                "request_id": request_id,
+                "tenant_id": self._tenant_id,
+                "actor_subject": self._actor_subject,
+                "exception_type": exception_type,
+            }
+            downstream_reason = getattr(exc, "reason", None)
+            if isinstance(downstream_reason, str):
+                log_extra["downstream_reason"] = downstream_reason
+            downstream_policy_reason = _extract_downstream_policy_reason(exc)
+            if downstream_policy_reason is not None:
+                log_extra["downstream_policy_reason"] = downstream_policy_reason
+            if exception_type in _KNOWN_MCP_EXCEPTION_TYPE_NAMES:
+                log_extra["detail"] = str(exc)[:_BROKER_DETAIL_MAX_CHARS]
+            else:
+                log_extra["detail_sha256"] = hashlib.sha256(
+                    str(exc).encode("utf-8", errors="replace")
+                ).hexdigest()
+            _LOGGER.warning("skill.broker.tool_invocation_failed", extra=log_extra)
+
             # The downstream-failure arm: refused=false distinguishes
             # "the governed call failed" from a broker-side refusal.
+            # Socket response UNCHANGED (still carries the raw error to
+            # the runner — the wire protocol is not touched by #16).
             await self._respond(
                 writer,
                 {
                     "ok": False,
                     "refused": False,
                     "reason": "skill_tool_invocation_failed",
-                    "error": f"{type(exc).__name__}: {exc}",
+                    "error": f"{exception_type}: {exc}",
                 },
             )
             return

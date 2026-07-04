@@ -607,3 +607,203 @@ def test_timeout_s_must_be_positive(spy_proxy: _SpyProxy) -> None:
             call_proxy=spy_proxy,
             timeout_s=0.0,
         )
+
+
+# ---------------------------------------------------------------------------
+# M6 run-15 finding #16 — broker downstream-failure WARNING
+# (kernel-side diagnosability; mirror of the executor's runner_failed).
+# The socket response is UNCHANGED; the WARNING is the new, safe-fields
+# operator-log axis. Detail-safety: known AgentOS MCP exceptions surface
+# a bounded message; unknown exceptions surface only a sha256.
+# ---------------------------------------------------------------------------
+
+
+class _FakeMCPRefused(Exception):
+    """Structurally mirrors the AgentOS MCP exception shape (``.reason``
+    + ``.payload``) WITHOUT importing ``cognic_agentos.protocol`` — the
+    broker detects the known set by TYPE NAME, so a same-named local
+    class exercises the known-exception detail arm. The drift detector
+    below pins the name set against the real protocol classes."""
+
+    def __init__(self, reason: str, message: str = "", **payload: Any) -> None:
+        self.reason = reason
+        self.payload = payload
+        super().__init__(f"{reason}: {message}" if message else reason)
+
+
+# Set the class's ACTUAL ``__name__`` so ``type(exc).__name__`` matches
+# the broker's known-by-name set (a plain module rebind would not — the
+# class object keeps its defined ``__name__``).
+_FakeMCPRefused.__name__ = "MCPToolInvocationRefused"
+MCPToolInvocationRefused = _FakeMCPRefused
+
+
+async def test_downstream_known_mcp_refusal_warns_with_reason_and_policy_reason(
+    broker: SkillBroker,
+    spy_proxy: _SpyProxy,
+    serve_handles: list[_BrokerHandle],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A known AgentOS MCP refusal surfaces reason + policy_reason + a
+    bounded detail on the kernel WARNING (the run-15 opaque-failure
+    fix). This is exactly the signal that would have told us WHY
+    describe_table failed."""
+    spy_proxy.exc = MCPToolInvocationRefused(
+        "dlp_pre_refused", "blocked", policy_reason="forbidden_schema_arg"
+    )
+    h = await broker.serve()
+    serve_handles.append(h)
+    with caplog.at_level("WARNING", logger="cognic_agentos.core.skill.broker"):
+        resp = await _rpc(
+            h.sock_path,
+            {
+                "session_token": h.session_token,
+                "tool_ref": "oracle/describe_table",
+                "arguments": {"owner": "COGNIC", "table": "EMPLOYEES"},
+            },
+        )
+    # Socket response unchanged.
+    assert resp["reason"] == "skill_tool_invocation_failed"
+    warnings = [r for r in caplog.records if r.message == "skill.broker.tool_invocation_failed"]
+    assert len(warnings) == 1
+    rec = warnings[0]
+    assert rec.exception_type == "MCPToolInvocationRefused"  # type: ignore[attr-defined]
+    assert rec.downstream_reason == "dlp_pre_refused"  # type: ignore[attr-defined]
+    assert rec.downstream_policy_reason == "forbidden_schema_arg"  # type: ignore[attr-defined]
+    assert rec.tool_name == "describe_table"  # type: ignore[attr-defined]
+    assert rec.server_id == "oracle"  # type: ignore[attr-defined]
+    assert rec.tenant_id == "tenant-1"  # type: ignore[attr-defined]
+    assert rec.actor_subject == "actor-1"  # type: ignore[attr-defined]
+    # Known exception -> bounded free-text detail present, NOT a hash.
+    assert "dlp_pre_refused" in rec.detail  # type: ignore[attr-defined]
+    assert not hasattr(rec, "detail_sha256")
+    # NEVER the tool arguments.
+    assert "EMPLOYEES" not in str(rec.__dict__)
+    await h.close()
+
+
+async def test_downstream_unknown_exception_warns_with_sha256_not_raw_text(
+    broker: SkillBroker,
+    spy_proxy: _SpyProxy,
+    serve_handles: list[_BrokerHandle],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An UNKNOWN exception's message could carry secrets, so the
+    WARNING carries only its sha256 + type — never the raw text."""
+    import hashlib as _hashlib
+
+    secret = "secret-ish text token=abc123"
+    spy_proxy.exc = RuntimeError(secret)
+    h = await broker.serve()
+    serve_handles.append(h)
+    with caplog.at_level("WARNING", logger="cognic_agentos.core.skill.broker"):
+        await _rpc(
+            h.sock_path,
+            {
+                "session_token": h.session_token,
+                "tool_ref": "oracle/list_tables",
+                "arguments": {},
+            },
+        )
+    warnings = [r for r in caplog.records if r.message == "skill.broker.tool_invocation_failed"]
+    assert len(warnings) == 1
+    rec = warnings[0]
+    assert rec.exception_type == "RuntimeError"  # type: ignore[attr-defined]
+    # sha256 present; raw text NOWHERE on the record; no free-text detail.
+    expected = _hashlib.sha256(f"{secret}".encode()).hexdigest()
+    assert rec.detail_sha256 == expected  # type: ignore[attr-defined]
+    assert not hasattr(rec, "detail")
+    assert "secret-ish" not in str(rec.__dict__)
+    assert "abc123" not in str(rec.__dict__)
+    # Unknown exception has no .reason/.payload -> those fields omitted.
+    assert not hasattr(rec, "downstream_reason")
+    assert not hasattr(rec, "downstream_policy_reason")
+    await h.close()
+
+
+async def test_downstream_green_path_emits_no_warning(
+    broker: SkillBroker,
+    spy_proxy: _SpyProxy,
+    serve_handles: list[_BrokerHandle],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A successful governed call emits ZERO tool_invocation_failed
+    warnings (log-noise on success would poison operator alerting)."""
+    spy_proxy.result = {"tables": ["EMPLOYEES"]}
+    h = await broker.serve()
+    serve_handles.append(h)
+    with caplog.at_level("WARNING", logger="cognic_agentos.core.skill.broker"):
+        resp = await _rpc(
+            h.sock_path,
+            {
+                "session_token": h.session_token,
+                "tool_ref": "oracle/list_tables",
+                "arguments": {},
+            },
+        )
+    assert resp["ok"] is True
+    assert [r for r in caplog.records if r.message == "skill.broker.tool_invocation_failed"] == []
+    await h.close()
+
+
+def test_known_mcp_exception_name_set_matches_protocol_classes() -> None:
+    """Drift detector (test-only import; the runtime broker never
+    imports ``cognic_agentos.protocol`` — the forbidden ``core ->
+    protocol`` arrow). Pins the broker's by-name known set against the
+    ACTUAL protocol exception class names, so a rename there without a
+    matching broker update is caught here."""
+    from cognic_agentos.core.skill.broker import _KNOWN_MCP_EXCEPTION_TYPE_NAMES
+    from cognic_agentos.protocol.mcp_authz import MCPAuthzError
+    from cognic_agentos.protocol.mcp_host import MCPToolInvocationRefused as _RealRefused
+    from cognic_agentos.protocol.mcp_transports import MCPTransportError
+
+    assert {
+        _RealRefused.__name__,
+        MCPTransportError.__name__,
+        MCPAuthzError.__name__,
+    } == _KNOWN_MCP_EXCEPTION_TYPE_NAMES
+
+
+# ---------------------------------------------------------------------------
+# _extract_downstream_policy_reason — direct unit coverage of every arm
+# (the #16 helper; keeps the CC branch floor honest on the payload-vs-
+# direct-attr fall-throughs).
+# ---------------------------------------------------------------------------
+
+
+def test_extract_policy_reason_from_payload_dict() -> None:
+    from cognic_agentos.core.skill.broker import _extract_downstream_policy_reason
+
+    exc = _FakeMCPRefused("r", policy_reason="from_payload")
+    assert _extract_downstream_policy_reason(exc) == "from_payload"
+
+
+def test_extract_policy_reason_payload_dict_without_key_falls_through_to_none() -> None:
+    from cognic_agentos.core.skill.broker import _extract_downstream_policy_reason
+
+    # payload IS a dict but carries no policy_reason -> the isinstance-str
+    # arm falls through; no direct attr either -> None.
+    exc = _FakeMCPRefused("r", some_other="x")
+    assert _extract_downstream_policy_reason(exc) is None
+
+
+def test_extract_policy_reason_payload_non_str_value_falls_through_to_none() -> None:
+    from cognic_agentos.core.skill.broker import _extract_downstream_policy_reason
+
+    exc = _FakeMCPRefused("r", policy_reason=42)  # non-str -> ignored
+    assert _extract_downstream_policy_reason(exc) is None
+
+
+def test_extract_policy_reason_from_direct_attr_when_no_payload() -> None:
+    from cognic_agentos.core.skill.broker import _extract_downstream_policy_reason
+
+    class _DirectOnly(Exception):
+        policy_reason = "from_direct_attr"
+
+    assert _extract_downstream_policy_reason(_DirectOnly()) == "from_direct_attr"
+
+
+def test_extract_policy_reason_absent_everywhere_is_none() -> None:
+    from cognic_agentos.core.skill.broker import _extract_downstream_policy_reason
+
+    assert _extract_downstream_policy_reason(RuntimeError("no reason attrs")) is None
