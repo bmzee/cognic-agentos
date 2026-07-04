@@ -26,6 +26,33 @@ RUN /opt/venv/bin/python -m ensurepip --upgrade \
 # NOT the adapters extra the base was built with. Installed WITH deps (aiohttp).
 # Floor mirrors pyproject [project.optional-dependencies].sandbox-docker.
 RUN /opt/venv/bin/python -m pip install --no-cache-dir "aiodocker>=0.24"
+# syft — the sandbox admission SBOM gate (sandbox/catalog.py
+# verify_sbom_policy_or_refuse) shells out to `syft` at RUNTIME to inspect the
+# canonical images. **PRODUCT FINDING (run 11, 2026-07-04):** the
+# default-adapters BASE image ships cosign + opa but NOT syft, so a deployed
+# kernel with the sandbox backend enabled hits "failed to launch syft:
+# FileNotFoundError" at the sidecar admission. The proof installs it here
+# (pinned v1.44.0 linux_amd64 — matching the amd64 base + the host preflight
+# syft), mirroring the base's cosign install; the real fix is to add syft to
+# the base image when sandbox is deployable (flagged follow-up, NOT changed
+# mid-proof). amd64 to match the base's cosign-linux-amd64 / opa amd64 pins.
+# Fetch via busybox wget (run 12, 2026-07-04): curl exists ONLY in the base's
+# BUILDER stage (cosign + opa are downloaded there and COPY'd in); this
+# runtime stage is bare alpine+busybox. Bounded retry loop for transient
+# network failures; a download that never lands fails CLOSED at the sha256
+# gate (missing/partial file -> digest mismatch -> build error).
+RUN for attempt in 1 2 3 4 5; do \
+      wget -q -O /tmp/syft.tar.gz \
+        "https://github.com/anchore/syft/releases/download/v1.44.0/syft_1.44.0_linux_amd64.tar.gz" \
+      && break; \
+      echo "syft download failed (attempt ${attempt}/5); retrying in 3s" >&2; \
+      sleep 3; \
+    done \
+ && echo "0e91737aee2b5baf1d255b959630194a302335d848ff97bb07921eb6205b5f5a  /tmp/syft.tar.gz" | sha256sum -c - \
+ && tar -xzf /tmp/syft.tar.gz -C /tmp syft \
+ && install -m 0755 /tmp/syft /usr/local/bin/syft \
+ && rm -f /tmp/syft.tar.gz /tmp/syft \
+ && /usr/local/bin/syft version >/dev/null
 COPY proof-m6-staging/pack-attestations/ /opt/cognic/pack-attestations/
 COPY proof-m6-staging/trust-roots/ /opt/cognic/trust-roots/
 COPY proof-m6-staging/policies/ /opt/cognic/policies/
@@ -39,8 +66,15 @@ COPY proof-m6-staging/alembic.ini /app/alembic.ini
 # fixture flag. SSL_CERT_FILE must be a BUNDLE (system CAs + the registry CA)
 # so cosign trusts the proof registry while public TLS keeps verifying.
 COPY proof-m6-staging/canonical-trust/ /opt/cognic/canonical-trust/
-RUN cat /etc/ssl/certs/ca-certificates.crt /opt/cognic/canonical-trust/registry-ca.pem \
-      > /opt/cognic/canonical-trust/ca-bundle.pem
+# The registry CA must ALSO live in the SYSTEM trust store: the sandbox
+# admission gate's cosign runs as a subprocess with a FROZEN 2-key env
+# (sandbox/catalog.py `_SUBPROCESS_ENV` = PATH+HOME only, the trust-gate
+# doctrine), so the pod's SSL_CERT_FILE never reaches it and Go falls back to
+# /etc/ssl/certs/ca-certificates.crt — hit live 2026-07-04 ("certificate
+# signed by unknown authority" at in-pod verify). The env-var bundle is kept
+# for ordinary env-reading consumers.
+RUN cat /opt/cognic/canonical-trust/registry-ca.pem >> /etc/ssl/certs/ca-certificates.crt \
+ && cat /etc/ssl/certs/ca-certificates.crt > /opt/cognic/canonical-trust/ca-bundle.pem
 # Proof-only current-source overlay: cached base images may carry an older
 # cognic_agentos package, while the live proof must exercise THIS branch's M6
 # wiring (SkillExecutor + SkillBroker + skill hosting + the skills route). The

@@ -82,6 +82,19 @@ RUN mkdir -p /workspace && chmod 0777 /workspace \
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
+# M6 run-19/20 finding #18: the kernel base carries the API-server
+# HEALTHCHECK (urllib GET http://127.0.0.1:8000/api/v1/healthz). Docker
+# healthcheck execs inherit the CONTAINER env — in a sandbox that includes
+# the injected HTTP_PROXY — so the inherited check's loopback GET was
+# proxied to the egress sidecar, refused against the empty allow-list, and
+# the fail-closed egress audit killed every invoke whose session outlived
+# the first check fire. There is no API server inside the skill sandbox;
+# the inherited check is meaningless here and its probe traffic poisons
+# the workload-egress evidence. Drop it. (The canonical
+# sandbox-runtime-python image declares NO healthcheck — this restores
+# canonical-shape parity.)
+HEALTHCHECK NONE
+
 VOLUME ["/workspace"]
 WORKDIR /workspace
 

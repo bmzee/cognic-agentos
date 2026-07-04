@@ -82,7 +82,27 @@ PF=""
 # fixture flag, the full cosign verify runs. A local TLS registry on the kind
 # docker network holds the images + their cosign signatures.
 REGISTRY_NAME="cognic-proof-m6-registry"
-REGISTRY_REF_HOST="$REGISTRY_NAME:5000"             # the ref host both the pod (kind net) and the host resolve
+# Host port for the local TLS registry. 5000 collides with macOS AirPlay
+# Receiver (ControlCenter listens on *:5000 — hit live 2026-07-03), so default
+# to an uncommon port; override via COGNIC_PROOF_M6_REGISTRY_PORT. The
+# preflight fail-loud-probes it before any cluster work starts.
+REGISTRY_PORT="${COGNIC_PROOF_M6_REGISTRY_PORT:-5551}"
+# ONE ref string everywhere. Resolution per context (live-probed 2026-07-03):
+#   * host docker daemon (push + the DockerSibling workload pull) + host
+#     cosign: via the /etc/hosts loopback entry added at step 4 — the daemon
+#     CANNOT resolve docker-network aliases (probe: "lookup ...: no such
+#     host"); 127.0.0.1:$REGISTRY_PORT reaches the published port.
+#   * kind node containerd: docker-network DNS on the `kind` bridge.
+#   * kernel pod (in-pod cosign at sandbox admission): the deterministic
+#     hostAliases patch at step 8 (registry kind-net IP).
+REGISTRY_REF_HOST="$REGISTRY_NAME:$REGISTRY_PORT"
+# Persistent local-proof TLS material for the registry — minted ONCE at
+# preflight (no sudo; ~/.cognic mirrors the pack-signing key-custody
+# convention) and REUSED across runs so the one-time operator certs.d trust
+# stays valid. Each run COPIES it into the per-run $CANONICAL_DIR so every
+# downstream consumer (registry mount, SSL_CERT_FILE, the kernel-image trust
+# bundle) reads one location, unchanged.
+REGISTRY_TLS_DIR="${COGNIC_PROOF_M6_REGISTRY_TLS_DIR:-$HOME/.cognic/proof-m6/registry-tls}"
 # The PUBLISHED canonical egress-proxy image (Settings default; re-homed + re-signed
 # here). Pinned digest from core/config.py sandbox_canonical_egress_proxy_image.
 PUBLISHED_EGRESS_PROXY="ghcr.io/bmzee/cognic-agentos/sandbox-egress-proxy@sha256:eb4ea75b427d0bc42039c68039eec51d6b0d0789400ba5bfdbf470ebec9139aa"
@@ -108,7 +128,9 @@ _extra_images() {
 
 docker_pull_with_retry() {
   local img="$1"
-  local max=5
+  # 8 x 10s (~80s window): a transient resolver blip NXDOMAINed ghcr.io for
+  # longer than the old 5 x 3s window could ride out (run 8, 2026-07-04).
+  local max=8
   local attempt=1
   if [[ "${COGNIC_PROOF_M6_REUSE_IMAGES:-0}" == "1" ]] && docker image inspect "$img" >/dev/null 2>&1; then
     echo "  using cached image $img (COGNIC_PROOF_M6_REUSE_IMAGES=1)"
@@ -122,9 +144,9 @@ docker_pull_with_retry() {
       echo "docker pull failed after $attempt attempts: $img" >&2
       return 1
     fi
-    echo "docker pull failed for $img (attempt $attempt/$max); retrying in 3s" >&2
+    echo "docker pull failed for $img (attempt $attempt/$max); retrying in 10s" >&2
     attempt=$((attempt + 1))
-    sleep 3
+    sleep 10
   done
 }
 
@@ -368,13 +390,19 @@ PY
 bar_fail() {
   local where="$1"
   echo "FAIL: $where — capturing diagnostics to docs/VALIDATION-RESULTS.md" >&2
-  local logs ds skill_audit skill_dh reason
+  local logs ds skill_audit skill_dh sandbox_dh reason
   logs="$(kubectl -n "$NS" logs deploy/rel-agentos 2>&1 | tail -180 || true)"
   ds="$(curl -s "$BASE_URL/api/v1/system/plugins?tenant_id=$TENANT" 2>/dev/null || true)"
   skill_audit="$(kubectl -n "$NS" exec deploy/postgres -- psql -U cognic -d cognic -tA \
     -c "SELECT event_type, payload::text FROM audit_event WHERE event_type LIKE 'audit.tool_invocation%' ORDER BY sequence DESC LIMIT 12;" 2>/dev/null || true)"
   skill_dh="$(kubectl -n "$NS" exec deploy/postgres -- psql -U cognic -d cognic -tA \
     -c "SELECT event_type, payload::text FROM decision_history WHERE event_type='skill.invoked' ORDER BY sequence DESC LIMIT 8;" 2>/dev/null || true)"
+  # Run 19: the sandbox failed CLOSED on ONE refused egress attempt, and the
+  # refused HOST lives ONLY on the sandbox.policy.violated chain row's
+  # payload.proxy_log — which this capture did not read, so the fault host
+  # was lost with the cluster. Capture the sandbox decision rows too.
+  sandbox_dh="$(kubectl -n "$NS" exec deploy/postgres -- psql -U cognic -d cognic -tA \
+    -c "SELECT event_type, payload::text FROM decision_history WHERE event_type LIKE 'sandbox.%' ORDER BY sequence DESC LIMIT 8;" 2>/dev/null || true)"
   reason="$(grep -Eo 'skill_[a-z_]+|sandbox_[a-z_]+|dlp_[a-z_]+|skill\.executor_construction_failed|sandbox\.runtime_construction_failed|discovery_status=[a-z_]+' <<<"$logs" | sort -u || true)"
   {
     echo ""
@@ -397,6 +425,10 @@ bar_fail() {
     echo "- skill.invoked decision rows (tail 8 — the instruction-layer axis):"
     echo '```'
     echo "${skill_dh:-<none>}"
+    echo '```'
+    echo "- sandbox.% decision rows (tail 8 — lifecycle + policy.violated incl. proxy_log hosts):"
+    echo '```'
+    echo "${sandbox_dh:-<none>}"
     echo '```'
     echo "- /api/v1/system/plugins snapshot (plugins + hosted_skills):"
     echo '```json'
@@ -434,10 +466,29 @@ xe_fail() {
 backends_fail() {
   local where="$1"
   echo "FAIL: backends ($where) — capturing diagnostics to docs/VALIDATION-RESULTS.md" >&2
-  local wide ddeploy dpods
+  local wide ddeploy dpods notready_logs p
   wide="$(kubectl -n "$NS" get deploy,pods -o wide 2>&1 || true)"
   ddeploy="$(kubectl -n "$NS" describe deploy -l 'app notin (oracle-xe)' 2>&1 | tail -120 || true)"
   dpods="$(kubectl -n "$NS" describe pod -l 'app notin (oracle-xe)' 2>&1 | tail -150 || true)"
+  # Runs 4-5 captured describes but NO pod logs — the actual fault (why a
+  # container is Running-but-unready, or what it printed before its early
+  # crashes) lives in `logs` + `logs --previous`. Capture both for every
+  # not-ready backend pod.
+  # Run 18: the all-pods describe tail-150 truncated the ONE pod that
+  # mattered — a ContainerCreating pod has NO logs; its postStart/mount
+  # events live only in describe, and they were cut. Each not-ready pod
+  # gets its OWN describe tail below so the fault pod always survives
+  # truncation. Comment kept OUTSIDE the command substitution: macOS
+  # bash 3.2 mis-parses parens inside comments inside "$( ... )".
+  notready_logs="$(for p in $(kubectl -n "$NS" get pods -l 'app notin (oracle-xe)' \
+      -o jsonpath='{range .items[?(@.status.containerStatuses[0].ready==false)]}{.metadata.name}{"\n"}{end}' 2>/dev/null); do
+    echo "----- logs: $p (tail 80) -----"
+    kubectl -n "$NS" logs "$p" --tail=80 2>&1 || true
+    echo "----- previous-instance logs: $p (tail 40) -----"
+    kubectl -n "$NS" logs "$p" --tail=40 --previous 2>&1 || true
+    echo "----- describe: $p (tail 60) -----"
+    kubectl -n "$NS" describe pod "$p" 2>&1 | tail -60 || true
+  done)"
   {
     echo ""
     echo "## Proof M6 — backends readiness FAILURE ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
@@ -446,6 +497,7 @@ backends_fail() {
     echo "- deploy + pods (-o wide):"; echo '```'; echo "$wide"; echo '```'
     echo "- backend deploy describe (tail 120):"; echo '```'; echo "$ddeploy"; echo '```'
     echo "- backend pod describe (tail 150):"; echo '```'; echo "$dpods"; echo '```'
+    echo "- NOT-READY backend pod logs (current + previous instance):"; echo '```'; echo "${notready_logs:-<all backend pods ready at capture>}"; echo '```'
   } >> docs/VALIDATION-RESULTS.md
   exit 1
 }
@@ -509,6 +561,58 @@ echo "==> [1/11] tool preflight"
 for tool in docker kind kubectl helm uv cosign syft grype curl python3 gh openssl; do
   command -v "$tool" >/dev/null 2>&1 || die "required tool '$tool' not on PATH"
 done
+# Registry host-port preflight — fail LOUD with an actionable message here,
+# not mid-run at `docker run -p` (macOS ControlCenter/AirPlay owns *:5000 by
+# default, which is why the default moved to $REGISTRY_PORT).
+python3 - "$REGISTRY_PORT" <<'PY' || die "registry port $REGISTRY_PORT already in use (lsof -nP -iTCP:$REGISTRY_PORT -sTCP:LISTEN shows the holder); override via COGNIC_PROOF_M6_REGISTRY_PORT"
+import socket, sys
+
+s = socket.socket()
+try:
+    s.bind(("0.0.0.0", int(sys.argv[1])))
+finally:
+    s.close()
+PY
+
+# Persistent registry TLS CA — mint ONCE if absent (no sudo; reused across
+# runs so the one-time certs.d trust below keeps matching byte-for-byte).
+if [ ! -f "$REGISTRY_TLS_DIR/registry-ca.pem" ]; then
+  mkdir -p "$REGISTRY_TLS_DIR" && chmod 700 "$REGISTRY_TLS_DIR"
+  openssl req -x509 -newkey rsa:4096 -nodes \
+    -keyout "$REGISTRY_TLS_DIR/registry-key.pem" \
+    -out "$REGISTRY_TLS_DIR/registry-ca.pem" \
+    -days 3650 -subj "/CN=$REGISTRY_NAME" \
+    -addext "subjectAltName=DNS:$REGISTRY_NAME,DNS:localhost,IP:127.0.0.1"
+  echo "  minted the persistent proof-registry TLS CA at $REGISTRY_TLS_DIR"
+fi
+
+# The runner is deliberately SUDO-FREE: a backgrounded run has no TTY for a
+# password prompt (hit live 2026-07-03 — `sudo: a terminal is required`). The
+# TWO root-owned trust prerequisites are ONE-TIME operator steps, verified
+# fail-loud here with copy-paste instructions:
+_setup_help() {
+  cat >&2 <<EOF
+FAIL: one-time operator trust setup missing ($1).
+Run these once in a REAL terminal (sudo prompts for your password):
+  sudo sh -c 'echo "127.0.0.1 $REGISTRY_NAME" >> /etc/hosts'
+  sudo mkdir -p "/etc/docker/certs.d/$REGISTRY_REF_HOST"
+  sudo install -m 0644 "$REGISTRY_TLS_DIR/registry-ca.pem" "/etc/docker/certs.d/$REGISTRY_REF_HOST/ca.crt"
+Then re-run the proof. (Loopback-only + local-CA trust; removal:
+  sudo sed -i '' "/[[:space:]]$REGISTRY_NAME\$/d" /etc/hosts
+  sudo rm -rf "/etc/docker/certs.d/$REGISTRY_REF_HOST")
+EOF
+  exit 1
+}
+grep -qE "[[:space:]]$REGISTRY_NAME($|[[:space:]])" /etc/hosts \
+  || _setup_help "/etc/hosts loopback entry for $REGISTRY_NAME"
+# Readability first, with its own message: `sudo cp` of the 0600-mode CA
+# leaves a root-unreadable ca.crt (hit live 2026-07-03 — cmp reads as the
+# invoking user; docker itself reads as root and would NOT catch this), which
+# is why the instructions use `install -m 0644` (a CA cert is public bytes).
+[ -r "/etc/docker/certs.d/$REGISTRY_REF_HOST/ca.crt" ] \
+  || _setup_help "certs.d ca.crt absent or not world-readable (use install -m 0644, not cp)"
+cmp -s "$REGISTRY_TLS_DIR/registry-ca.pem" "/etc/docker/certs.d/$REGISTRY_REF_HOST/ca.crt" \
+  || _setup_help "docker certs.d trust of the persistent proof CA at /etc/docker/certs.d/$REGISTRY_REF_HOST/ca.crt"
 
 # --- 2. stage the THREE RELEASED packs (download + sha256-verify + arrange) ------
 echo "==> [2/11] stage the released packs via stage-packs.sh (download, not build)"
@@ -521,17 +625,17 @@ bash "$PROOF_DIR/stage-packs.sh" "$STAGING_DST"
 # Dockerfile.agentos-proof (canonical-trust/cosign.pub -> the admission trust root;
 # canonical-trust/registry-ca.pem -> the SSL_CERT_FILE bundle) so the in-pod cosign
 # verify trusts the proof registry's TLS + the proof canonical signatures.
-echo "==> [2/11] mint the proof canonical cosign keypair + the registry TLS cert"
+echo "==> [2/11] mint the proof canonical cosign keypair + stage the persistent registry TLS cert"
 mkdir -p "$CANONICAL_DIR"
 export COSIGN_PASSWORD=""   # dev-grade proof key; empty password (NEVER a production key — custody is a Human-only decision per build-and-sign.md)
 ( cd "$CANONICAL_DIR" && cosign generate-key-pair )   # -> cosign.key + cosign.pub in CANONICAL_DIR
-# self-signed CA/cert for the local TLS registry; SAN = the ref host so cosign +
-# docker verify TLS against the same name the pod + host resolve.
-openssl req -x509 -newkey rsa:4096 -nodes \
-  -keyout "$CANONICAL_DIR/registry-key.pem" \
-  -out "$CANONICAL_DIR/registry-ca.pem" \
-  -days 2 -subj "/CN=$REGISTRY_NAME" \
-  -addext "subjectAltName=DNS:$REGISTRY_NAME,DNS:localhost,IP:127.0.0.1"
+# The registry TLS CA/key are PERSISTENT (minted once at preflight, no sudo —
+# the one-time operator certs.d trust must keep matching byte-for-byte across
+# runs); COPY them into the per-run canonical dir so the registry mount, the
+# SSL_CERT_FILE consumers, and the kernel-image trust bundle all read one
+# location. SAN = the ref host + localhost so cosign + docker verify TLS
+# against the same name the pod + host resolve.
+cp "$REGISTRY_TLS_DIR/registry-ca.pem" "$REGISTRY_TLS_DIR/registry-key.pem" "$CANONICAL_DIR/"
 chmod -R a+rX "$CANONICAL_DIR"
 
 # --- 3. build the four images ---------------------------------------------------
@@ -590,21 +694,26 @@ done < <(_backend_images; _extra_images)
 # (kind net) AND the host resolve $REGISTRY_REF_HOST; trust its CA on the host
 # docker daemon. Real TLS (no insecure-registry bypass flag), NO fixture flag.
 #
-# C4 iteration point: pod->registry name resolution. The registry joins the `kind`
-# docker network (so the node resolves $REGISTRY_NAME); the kernel POD reaches it
-# via the node's egress. If in-pod cosign cannot resolve $REGISTRY_NAME at admission
-# time, the operator adds a hostAliases entry (registry kind-net IP) to the agentos
-# Deployment here — a real, reachable fix, discovered live.
+# Pod->registry name resolution is handled DETERMINISTICALLY at step 8: the
+# runner computes the registry's kind-net IP and patches a hostAliases entry
+# into the agentos Deployment (the kernel pod's in-pod cosign then resolves
+# $REGISTRY_NAME directly; reachable pod -> node -> docker bridge). This
+# replaced the earlier "operator adds if needed" fallback after the 2026-07-03
+# live run proved the host daemon cannot resolve docker-network aliases at all.
 echo "==> [4/11] start the local TLS registry:2 on the kind network + trust its CA on the host"
 docker run -d --restart=always --name "$REGISTRY_NAME" --network kind \
   -v "$(cd "$CANONICAL_DIR" && pwd):/certs:ro" \
-  -e REGISTRY_HTTP_ADDR=0.0.0.0:5000 \
+  -e "REGISTRY_HTTP_ADDR=0.0.0.0:$REGISTRY_PORT" \
   -e REGISTRY_HTTP_TLS_CERTIFICATE=/certs/registry-ca.pem \
   -e REGISTRY_HTTP_TLS_KEY=/certs/registry-key.pem \
-  -p 5000:5000 \
+  -p "$REGISTRY_PORT:$REGISTRY_PORT" \
   registry:2
-sudo mkdir -p "/etc/docker/certs.d/$REGISTRY_REF_HOST"
-sudo cp "$CANONICAL_DIR/registry-ca.pem" "/etc/docker/certs.d/$REGISTRY_REF_HOST/ca.crt"
+# The host docker daemon cannot resolve docker-network aliases (live probe:
+# `docker push $REGISTRY_NAME:PORT/...` -> "lookup ...: no such host"), so the
+# SINGLE ref string resolves host-side via the loopback /etc/hosts entry ->
+# the published port. That entry + the certs.d trust of the persistent CA are
+# ONE-TIME operator-owned trust config, already VERIFIED at preflight — the
+# runner itself is sudo-free (a backgrounded run has no TTY for a prompt).
 
 echo "==> [4/11] re-home + cosign-sign BOTH canonical sandbox images under the proof canonical key"
 # (1) the skill-runtime WORKLOAD image (built above, host-local)
@@ -612,14 +721,22 @@ docker tag "$SKILL_RUNTIME_LOCAL_TAG" "$REGISTRY_REF_HOST/sandbox-runtime-python
 docker push "$REGISTRY_REF_HOST/sandbox-runtime-python:proofm6"
 SKILL_RUNTIME_REF="$(docker inspect "$REGISTRY_REF_HOST/sandbox-runtime-python:proofm6" --format '{{index .RepoDigests 0}}')"
 [ -n "$SKILL_RUNTIME_REF" ] || die "could not capture the pushed sandbox-runtime-python RepoDigests ref"
-cosign sign --key "$CANONICAL_DIR/cosign.key" --yes "$SKILL_RUNTIME_REF"
+# --registry-cacert: host-side cosign dials the self-signed TLS registry. On
+# macOS, Go's platform verifier (Security.framework) ignores SSL_CERT_FILE and
+# enforces Apple's TLS policy (825-day cap + serverAuth EKU), which rejects
+# the persistent proof CA ("certificate is not standards compliant" — hit
+# live 2026-07-03). The explicit flag installs a PURE-GO custom root pool,
+# sidestepping the platform verifier; the SAN covers $REGISTRY_NAME.
+cosign sign --registry-cacert "$CANONICAL_DIR/registry-ca.pem" \
+  --key "$CANONICAL_DIR/cosign.key" --yes "$SKILL_RUNTIME_REF"
 # (2) the egress-proxy SIDECAR image (re-homed from the published canonical digest)
 docker_pull_with_retry "$PUBLISHED_EGRESS_PROXY"
 docker tag "$PUBLISHED_EGRESS_PROXY" "$REGISTRY_REF_HOST/sandbox-egress-proxy:proofm6"
 docker push "$REGISTRY_REF_HOST/sandbox-egress-proxy:proofm6"
 EGRESS_PROXY_REF="$(docker inspect "$REGISTRY_REF_HOST/sandbox-egress-proxy:proofm6" --format '{{index .RepoDigests 0}}')"
 [ -n "$EGRESS_PROXY_REF" ] || die "could not capture the pushed sandbox-egress-proxy RepoDigests ref"
-cosign sign --key "$CANONICAL_DIR/cosign.key" --yes "$EGRESS_PROXY_REF"
+cosign sign --registry-cacert "$CANONICAL_DIR/registry-ca.pem" \
+  --key "$CANONICAL_DIR/cosign.key" --yes "$EGRESS_PROXY_REF"
 echo "  canonical refs (digest-pinned, proof-signed): runtime=$SKILL_RUNTIME_REF proxy=$EGRESS_PROXY_REF"
 
 # --- 5. namespace + the six real backends + Redis, THEN the in-cluster Oracle XE --
@@ -627,8 +744,35 @@ echo "==> [5/11] bring up the six backends + Redis, then the seeded Oracle XE"
 kubectl create namespace "$NS"
 kubectl -n "$NS" apply -f "$CHART/ci/smoke/backends.yaml"
 kubectl -n "$NS" apply -f "$PROOF_DIR/manifests/redis.yaml"
-kubectl -n "$NS" wait --for=condition=available --timeout=300s deploy -l 'app notin (oracle-xe)' \
-  || backends_fail "the shared backends + Redis not Available within 300s before XE start"
+# M6 adds the redis Service (the scheduler control plane) to the shared-
+# backends namespace, and kubelet's service-link env injection then hands
+# EVERY pod REDIS_PORT=tcp://<clusterip>:6379 — which langfuse v2 validates
+# as ITS OWN numeric Redis config and hard-rejects ("Invalid environment
+# variables: { REDIS_PORT: ['Expected number, received nan'] }" — reproduced
+# byte-exact 2026-07-04; M5 passed because it had NO redis). Disable service
+# links on langfuse — the patch rolls a fresh clean-env ReplicaSet
+# deterministically. The shared ci/smoke/backends.yaml is deliberately
+# untouched mid-proof; fixing the fixture itself is a flagged follow-up.
+kubectl -n "$NS" patch deploy/langfuse --type=strategic \
+  -p '{"spec":{"template":{"spec":{"enableServiceLinks":false}}}}'
+# Per-deployment PARALLEL waits with individual 600s budgets: `kubectl wait`
+# on a label selector consumes its budget SEQUENTIALLY in alphabetical order,
+# so one slow deployment (langfuse — runs 4-5) burns the WHOLE budget alone
+# and the other six report "timed out" unexamined. Parallel waits give each
+# backend its own budget and name the ACTUAL laggards in the failure message.
+BACKEND_WAIT_FAILURES="$STAGING_DST/.backend-wait-failures"
+rm -f "$BACKEND_WAIT_FAILURES"
+for _d in $(kubectl -n "$NS" get deploy -l 'app notin (oracle-xe)' -o name); do
+  (
+    kubectl -n "$NS" wait --for=condition=available --timeout=600s "$_d" >/dev/null 2>&1 \
+      || echo "$_d" >> "$BACKEND_WAIT_FAILURES"
+  ) &
+done
+wait
+if [ -s "$BACKEND_WAIT_FAILURES" ]; then
+  backends_fail "not Available within 600s: $(tr '\n' ' ' < "$BACKEND_WAIT_FAILURES")"
+fi
+echo "  all backend deployments Available"
 kubectl -n "$NS" create configmap oracle-xe-seed \
   --from-file=seed_schema.sql="$PROOF_DIR/oracle-seed/seed_schema.sql" \
   --dry-run=client -o yaml | kubectl apply -n "$NS" -f -
@@ -664,6 +808,16 @@ echo "==> [8/11] patch the AgentOS Deployment with the sandbox topology (docker 
 # The chart ships no extraVolume/extraEnv hooks; these three surfaces are proof
 # TOPOLOGY (the DockerSibling sibling pattern + the broker's host-shared socket dir).
 kubectl -n "$NS" patch deploy/rel-agentos --patch-file "$PROOF_DIR/agentos-sandbox-patch.yaml"
+
+# Deterministic in-pod registry name resolution for the sandbox admission gate:
+# the kernel pod's cosign verify dials $REGISTRY_REF_HOST, and cluster DNS
+# knows no docker-network alias — patch a hostAliases entry with the
+# registry's kind-net IP (reachable pod -> node -> docker bridge). Replaces
+# the earlier "operator adds if needed" fallback with a deterministic step.
+REGISTRY_KIND_IP="$(docker inspect -f '{{.NetworkSettings.Networks.kind.IPAddress}}' "$REGISTRY_NAME")"
+[ -n "$REGISTRY_KIND_IP" ] || die "could not determine the registry's kind-network IP for the hostAliases patch"
+kubectl -n "$NS" patch deploy/rel-agentos --type=strategic \
+  -p "$(printf '{"spec":{"template":{"spec":{"hostAliases":[{"ip":"%s","hostnames":["%s"]}]}}}}' "$REGISTRY_KIND_IP" "$REGISTRY_NAME")"
 
 # --- 9. DB seed (NO override/allow-list INSERT — install materializes them, M4) --
 echo "==> [9/11] seed-db.sh (M6: NO derived-row INSERT — install materializes them)"

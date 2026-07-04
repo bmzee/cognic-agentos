@@ -279,6 +279,14 @@ def test_skill_runtime_dockerfile_honors_the_sandbox_runtime_contracts() -> None
     # requires_credentials=() and --network none
     assert "COGNIC_VAULT" not in DOCKER_SKILL_RUNTIME
     assert "SECRET" not in DOCKER_SKILL_RUNTIME.upper().replace("NO SECRETS", "")
+    # live-reproduced runs 19+20 (finding #18): the kernel base's API-server
+    # HEALTHCHECK is inherited by derived images, docker healthcheck execs
+    # inherit the container env (incl. the sandbox's HTTP_PROXY), and the
+    # check's loopback GET was proxied to the egress sidecar + refused —
+    # poisoning the workload-egress evidence and failing every invoke whose
+    # session outlived the first check. The canonical runtime image declares
+    # NO healthcheck; this image must explicitly drop the inherited one.
+    assert "HEALTHCHECK NONE" in DOCKER_SKILL_RUNTIME
 
 
 # ---------------------------------------------------------------------------
@@ -314,6 +322,25 @@ def test_kernel_dockerfile_adds_the_m6_sandbox_runtime_layers() -> None:
     )
     assert "SSL_CERT_FILE=/opt/cognic/canonical-trust/ca-bundle.pem" in DOCKER_AGENTOS
     assert "ca-certificates.crt" in DOCKER_AGENTOS  # bundle = system CAs + registry CA
+    # live 2026-07-04: the admission cosign subprocess runs with catalog.py's
+    # FROZEN 2-key env (PATH+HOME), so SSL_CERT_FILE never reaches it — the
+    # registry CA MUST be appended into the SYSTEM store cosign falls back to.
+    assert ">> /etc/ssl/certs/ca-certificates.crt" in DOCKER_AGENTOS
+    # run 11 (2026-07-04): the sandbox admission SBOM gate shells out to
+    # syft at runtime, but the default-adapters BASE ships only cosign+opa
+    # — the proof kernel image installs syft (pinned amd64, sha-verified),
+    # matching the base's cosign install. PRODUCT FINDING: base needs syft
+    # when the sandbox backend is deployable (flagged follow-up).
+    assert "releases/download/v1.44.0/syft_1.44.0_linux_amd64.tar.gz" in DOCKER_AGENTOS
+    assert "0e91737aee2b5baf1d255b959630194a302335d848ff97bb07921eb6205b5f5a" in DOCKER_AGENTOS
+    assert "install -m 0755 /tmp/syft /usr/local/bin/syft" in DOCKER_AGENTOS
+    # run 12 (2026-07-04): curl exists ONLY in the base's BUILDER stage (cosign
+    # + opa are downloaded there and COPY'd in); the runtime stage this
+    # Dockerfile extends is bare alpine+busybox — the syft fetch MUST use
+    # busybox wget (TLS via ssl_client + the stock alpine CA bundle). The
+    # sha256 gate stays the fail-closed integrity check either way.
+    assert "wget -q -O /tmp/syft.tar.gz" in DOCKER_AGENTOS
+    assert "RUN curl" not in DOCKER_AGENTOS  # no curl invocation survives in the runtime stage
 
 
 def test_kernel_dockerfile_keeps_the_m4_source_overlay_and_chmod_fix() -> None:
@@ -443,6 +470,14 @@ def test_sandbox_patch_threads_tmpdir_docker_sock_and_broker_share() -> None:
     init = next(c for c in spec["initContainers"] if c["name"] == "broker-share-perms")
     assert init["securityContext"] == {"runAsUser": 0, "runAsNonRoot": False}
     assert "chmod 1777 /var/lib/cognic-proof-m6-broker" in " ".join(init["command"])
+    # run 9 (2026-07-04): the uid/gid-65534 pod got aiodocker Permission
+    # denied on the root-owned node-mounted docker sock — the init grants
+    # the TIGHTEST workable access (group 65534 + 0660, never 0666), and
+    # must mount the sock to do so.
+    assert "chgrp 65534 /var/run/docker.sock" in " ".join(init["command"])
+    assert "chmod 0660 /var/run/docker.sock" in " ".join(init["command"])
+    init_mounts = {(m["name"], m["mountPath"]) for m in init["volumeMounts"]}
+    assert ("docker-sock", "/var/run/docker.sock") in init_mounts
 
 
 # ---------------------------------------------------------------------------
@@ -644,7 +679,8 @@ def test_runner_rehomes_and_signs_the_sandbox_images_no_bypass() -> None:
             "openssl req",
             "subjectAltName",
             "/etc/docker/certs.d",
-            "cosign sign --key",
+            'cosign sign --registry-cacert "$CANONICAL_DIR/registry-ca.pem"',
+            '--key "$CANONICAL_DIR/cosign.key"',
             "RepoDigests",
             "sandbox-egress-proxy",
             # the digest-pinned refs are injected at install time (G7: the
@@ -824,6 +860,11 @@ def test_runner_bar_failures_capture_to_validation_results() -> None:
             "## Proof M6 — FAILURE",
             "audit.tool_invocation%",
             "skill.invoked",
+            # live-reproduced run 19: the sandbox failed CLOSED on one
+            # refused egress attempt and the refused HOST lives only on the
+            # sandbox.policy.violated row's payload.proxy_log — without this
+            # capture the fault host is lost with the cluster teardown.
+            "LIKE 'sandbox.%'",
             "exit 1",
         ),
     )
@@ -902,4 +943,116 @@ def test_gitignore_covers_the_m6_transient_build_context_paths() -> None:
         assert entry in entries, f".gitignore missing the M6 transient entry {entry!r}"
     assert "infra/proof-m6/proof_m6/" not in entries, (
         "infra/proof-m6/proof_m6/ is TRACKED SOURCE and must not be gitignored"
+    )
+
+
+def test_runner_registry_port_is_parameterized_and_probed() -> None:
+    """The 2026-07-03 live run failed at `docker run -p 5000:5000` — macOS
+    ControlCenter (AirPlay Receiver) owns *:5000. The registry port must be
+    parameterized (uncommon default, env-overridable), preflight-probed
+    fail-loud BEFORE any cluster work, and the raw :5000 forms must not
+    reappear in the ref/run/publish flags."""
+    _assert_all(
+        RUNNER,
+        (
+            'REGISTRY_PORT="${COGNIC_PROOF_M6_REGISTRY_PORT:-5551}"',
+            'REGISTRY_REF_HOST="$REGISTRY_NAME:$REGISTRY_PORT"',
+            's.bind(("0.0.0.0", int(sys.argv[1])))',
+            '-p "$REGISTRY_PORT:$REGISTRY_PORT"',
+            '-e "REGISTRY_HTTP_ADDR=0.0.0.0:$REGISTRY_PORT"',
+        ),
+    )
+    assert "-p 5000:5000" not in RUNNER
+    assert 'REGISTRY_REF_HOST="$REGISTRY_NAME:5000"' not in RUNNER
+
+
+def test_runner_single_ref_resolves_in_all_three_contexts() -> None:
+    """One ref string ($REGISTRY_NAME:$REGISTRY_PORT) must resolve in all
+    three contexts: (a) the host docker daemon — which CANNOT resolve
+    docker-network aliases (live-probed 2026-07-03: "lookup ...: no such
+    host") — via the /etc/hosts loopback entry, a ONE-TIME operator step
+    VERIFIED at preflight; (b) host cosign — via ``--registry-cacert`` (a
+    pure-Go custom root pool: on macOS the platform verifier ignores
+    SSL_CERT_FILE and enforces Apple's 825-day/EKU TLS policy, which rejects
+    the persistent proof CA — hit live 2026-07-03, "certificate is not
+    standards compliant"); (c) the kernel pod's in-pod cosign at sandbox
+    admission — via the deterministic kind-net-IP hostAliases patch (no
+    longer an "operator adds if needed" fallback)."""
+    _assert_all(
+        RUNNER,
+        (
+            'grep -qE "[[:space:]]$REGISTRY_NAME($|[[:space:]])" /etc/hosts',
+            "sudo sh -c 'echo \"127.0.0.1 $REGISTRY_NAME\" >> /etc/hosts'",
+            'cosign sign --registry-cacert "$CANONICAL_DIR/registry-ca.pem"',
+            "REGISTRY_KIND_IP=",
+            '"hostAliases":[{"ip":"%s","hostnames":["%s"]}]',
+        ),
+    )
+    # the darwin platform verifier's failure mode must not come back: no
+    # SSL_CERT_FILE-prefixed cosign invocation anywhere in the runner
+    assert 'SSL_CERT_FILE="$CANONICAL_DIR/registry-ca.pem" \\\n  cosign' not in RUNNER
+
+
+def test_runner_is_sudo_free_with_persistent_registry_tls_ca() -> None:
+    """A backgrounded run has no TTY for a sudo password prompt (hit live
+    2026-07-03: `sudo: a terminal is required`). The runner therefore never
+    EXECUTES sudo — the two root-owned trust prerequisites (/etc/hosts entry
+    + certs.d CA) are one-time operator steps, VERIFIED fail-loud at
+    preflight with copy-paste instructions. The registry TLS CA is minted
+    once (no sudo) into a persistent dir and byte-compared against the
+    trusted certs.d copy so the one-time trust stays valid across runs."""
+    _assert_all(
+        RUNNER,
+        (
+            'REGISTRY_TLS_DIR="${COGNIC_PROOF_M6_REGISTRY_TLS_DIR:-$HOME/.cognic/proof-m6/registry-tls}"',
+            'if [ ! -f "$REGISTRY_TLS_DIR/registry-ca.pem" ]; then',
+            "-days 3650",
+            "_setup_help",
+            # live-discovered 2026-07-03: `sudo cp` of the 0600 CA leaves a
+            # root-unreadable ca.crt the user-context cmp cannot read — the
+            # instructions must set the mode explicitly + preflight must
+            # check readability with its own message before comparing.
+            "sudo install -m 0644",
+            '[ -r "/etc/docker/certs.d/$REGISTRY_REF_HOST/ca.crt" ]',
+            'cmp -s "$REGISTRY_TLS_DIR/registry-ca.pem" '
+            '"/etc/docker/certs.d/$REGISTRY_REF_HOST/ca.crt"',
+            'cp "$REGISTRY_TLS_DIR/registry-ca.pem" '
+            '"$REGISTRY_TLS_DIR/registry-key.pem" "$CANONICAL_DIR/"',
+        ),
+    )
+    # No EXECUTED sudo anywhere: the only `sudo` occurrences are the
+    # copy-paste instruction lines inside the _setup_help heredoc (indented)
+    # — a line-start `sudo ` would be an executed command and must not exist.
+    assert "\nsudo " not in RUNNER
+    assert "| sudo tee" not in RUNNER
+
+
+def test_runner_backend_waits_are_per_deployment_with_log_capture() -> None:
+    """`kubectl wait` on a label selector burns its budget SEQUENTIALLY in
+    alphabetical order — in live runs 4-5 langfuse alone consumed the whole
+    budget while six healthy backends reported "timed out" unexamined, and
+    the captured diagnostics had describes but NO pod logs. Pin the
+    per-deployment parallel waits (individual budgets, laggards named) + the
+    not-ready pod log capture including --previous (the early-crash
+    instances)."""
+    _assert_all(
+        RUNNER,
+        (
+            'for _d in $(kubectl -n "$NS" get deploy',
+            'wait --for=condition=available --timeout=600s "$_d"',
+            "BACKEND_WAIT_FAILURES",
+            "--previous",
+            # live-reproduced 2026-07-04: the M6 redis Service's kubelet
+            # service-link injection (REDIS_PORT=tcp://...) hard-crashes
+            # langfuse v2's env validation; the runner disables service
+            # links on langfuse (M5 had no redis — the fixture follow-up
+            # is flagged, the shared backends.yaml stays untouched here).
+            '{"spec":{"template":{"spec":{"enableServiceLinks":false}}}}',
+            # live-reproduced run 18: the all-pods describe tail-150
+            # truncated the ONE ContainerCreating pod (ollama, blocked in
+            # its postStart model pull) — a creating pod has NO logs, so
+            # its events were the only signal and they were cut. Each
+            # not-ready pod now gets its OWN describe tail in the loop.
+            'describe pod "$p"',
+        ),
     )
