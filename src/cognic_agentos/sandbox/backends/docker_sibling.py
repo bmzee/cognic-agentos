@@ -113,7 +113,7 @@ from cognic_agentos.sandbox.checkpoint_store import (
     CheckpointStore,
     TombstoneCorruptError,
 )
-from cognic_agentos.sandbox.policy import PackAdmissionContext, SandboxPolicy
+from cognic_agentos.sandbox.policy import PackAdmissionContext, SandboxPolicy, WritableMount
 from cognic_agentos.sandbox.projection import (
     CredentialDecl,
     ProjectionPlan,
@@ -1264,6 +1264,10 @@ class DockerSiblingSandboxBackend:
                 session_id=session_id,
                 internal_net_name=internal_net_name,
                 extra_mounts=credential_extra_mounts,
+                # M6 run-14 amendment — thread the policy-declared mounts
+                # into the workload's real binds (audit-projection alone
+                # recorded mounts the container never received).
+                policy_mounts=policy.writable_mounts,
             )
 
             # 3c. Session construct + lifecycle.created emit per spec
@@ -2628,6 +2632,10 @@ class DockerSiblingSandboxBackend:
                 policy=metadata.policy,
                 session_id=session_id,
                 internal_net_name=internal_net_name,
+                # M6 run-14 amendment — the wake path rebuilds the workload
+                # from the CHECKPOINTED policy; leaving it unthreaded would
+                # recreate the run-14 bug class on resume.
+                policy_mounts=metadata.policy.writable_mounts,
             )
             # Restore the workspace tar into /workspace via docker exec.
             await self._restore_workspace_tar(
@@ -2840,6 +2848,7 @@ class DockerSiblingSandboxBackend:
         session_id: str,
         internal_net_name: str,
         extra_mounts: Sequence[tuple[str, str]] = (),
+        policy_mounts: Sequence[WritableMount] = (),
     ) -> None:
         """Start the sandbox container on the internal network only.
 
@@ -2853,19 +2862,37 @@ class DockerSiblingSandboxBackend:
         seam — callers cannot request writable credential mounts).
         Each pair surfaces as a Docker bind mount in the container
         config's ``HostConfig.Binds`` list with the ``:ro`` flag.
+
+        M6 run-14 amendment (2026-07-04) — ``policy_mounts`` is the
+        SEPARATE channel for ``SandboxPolicy.writable_mounts``,
+        rendered ``:rw`` / ``:ro`` from each ``WritableMount.read_only``.
+        The field was declared (Sprint-8A spec §6) but never enforced —
+        both backends projected it into the audit payload ONLY, so the
+        chain evidence recorded mounts the workload never received; the
+        M6 skill broker-socket mount was silently dropped and the
+        in-sandbox runner crashed on its first governed tool call. Two
+        channels stay deliberately distinct: credential projections can
+        never be writable; policy mounts carry the caller's declared
+        read_only. Pinned by
+        ``tests/unit/sandbox/backends/test_policy_writable_mounts.py``
+        (the ``:rw`` bind pin is the TM-revert target).
         """
         config = _build_sandbox_container_config(
             policy=policy,
             session_id=session_id,
             internal_net_name=internal_net_name,
         )
-        if extra_mounts:
-            # Append read-only bind mounts for credential projection.
-            # ``HostConfig.Binds`` syntax: ``"<host>:<container>:ro"``.
+        if extra_mounts or policy_mounts:
+            # ``HostConfig.Binds`` syntax: ``"<host>:<container>:<mode>"``.
             host_config = config.setdefault("HostConfig", {})
             existing_binds = list(host_config.get("Binds", []))
+            # Credential projection binds — read-only by construction.
             for host_path, container_path in extra_mounts:
                 existing_binds.append(f"{host_path}:{container_path}:ro")
+            # Policy-declared mounts — mode from WritableMount.read_only.
+            for mount in policy_mounts:
+                mode = "ro" if mount.read_only else "rw"
+                existing_binds.append(f"{mount.host_path}:{mount.container_path}:{mode}")
             host_config["Binds"] = existing_binds
         container = await self._docker.containers.create_or_replace(
             name=session_id,

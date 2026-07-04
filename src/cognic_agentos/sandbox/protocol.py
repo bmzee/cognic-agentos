@@ -279,6 +279,19 @@ SandboxRefusalReason = Literal[
     "sandbox_approval_expired",
     "sandbox_approval_binding_mismatch",
     "sandbox_approval_request_not_found",
+    # M6 run-14 amendment (2026-07-04) — ``SandboxPolicy.writable_mounts``
+    # ENFORCEMENT. The field was declared (Sprint-8A spec §6) but never
+    # enforced by any backend (audit-projection-only), so chain evidence
+    # recorded mounts the workload never received. DockerSibling now
+    # renders policy mounts as real binds (create + wake); KubernetesPod
+    # FAIL-CLOSES with this reason on a non-empty ``writable_mounts``
+    # until the same-Pod-sidecar + emptyDir realization (M6 spec §5.5)
+    # lands — a silent audit-only deferral would recreate the exact bug
+    # class. Raised in ``KubernetesPodSandboxBackend.create`` AFTER the
+    # T21 credential pair guard (lock #1 keeps first claim on malformed
+    # input) and BEFORE any allocation/admission (pure shape check;
+    # zero allocated state when it fires).
+    "sandbox_writable_mounts_unsupported_on_backend",
 ]
 
 #: Sprint 14A-A3c — the wake refusal-collapse wrapper must let the approval

@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
+import logging
 import os
 import uuid
 from collections.abc import AsyncIterator
@@ -204,10 +206,14 @@ class _EchoSession:
         stdout: bytes,
         exec_raises: Exception | None,
         destroy_raises: Exception | None = None,
+        stderr: bytes = b"",
+        exit_code: int = 0,
     ) -> None:
         self.session_id = uuid.uuid4().hex
         self.policy = policy
         self._stdout = stdout
+        self._stderr = stderr
+        self._exit_code = exit_code
         self._exec_raises = exec_raises
         self._destroy_raises = destroy_raises
         self.destroy_calls = 0
@@ -217,7 +223,9 @@ class _EchoSession:
     ) -> SandboxExecResult:
         if self._exec_raises is not None:
             raise self._exec_raises
-        return SandboxExecResult(stdout=self._stdout, stderr=b"", exit_code=0)
+        return SandboxExecResult(
+            stdout=self._stdout, stderr=self._stderr, exit_code=self._exit_code
+        )
 
     async def destroy(self) -> None:
         self.destroy_calls += 1
@@ -233,8 +241,12 @@ class _EchoBackend:
         create_raises: Exception | None = None,
         exec_raises: Exception | None = None,
         destroy_raises: Exception | None = None,
+        stderr: bytes = b"",
+        exit_code: int = 0,
     ) -> None:
         self._stdout = stdout
+        self._stderr = stderr
+        self._exit_code = exit_code
         self._create_raises = create_raises
         self._exec_raises = exec_raises
         self._destroy_raises = destroy_raises
@@ -262,6 +274,8 @@ class _EchoBackend:
             stdout=self._stdout,
             exec_raises=self._exec_raises,
             destroy_raises=self._destroy_raises,
+            stderr=self._stderr,
+            exit_code=self._exit_code,
         )
         self.created.append(session)
         return session
@@ -727,3 +741,71 @@ async def test_zero_execution_timeout_rejected() -> None:
             decision_history_store=object(),  # type: ignore[arg-type]
             execution_timeout_s=0.0,
         )
+
+
+# ---------------------------------------------------------------------------
+# M6 run-14 finding #15 — bounded stderr WARNING on skill_runtime_error
+# ---------------------------------------------------------------------------
+
+
+async def test_runner_failure_warns_with_bounded_stderr(
+    db: AsyncEngine, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A runner crash (no parseable frame) MUST surface an
+    operator-actionable WARNING carrying exit_code + stderr_sha256 + a
+    BOUNDED replace-decoded stderr excerpt. Without it a deployed
+    skill runtime error is undiagnosable — the run-14 blocker was
+    root-caused only by code archaeology + a local repro because the
+    runner's traceback was captured then dropped. Evidence stays
+    digest-only (no schema change); the excerpt lives on the LOG axis
+    only."""
+
+    # 5000 bytes of traceback-ish stderr incl. one invalid-UTF8 byte —
+    # pins both the bound AND the replace-decode (a raw .decode() would
+    # raise UnicodeDecodeError past the taxonomy).
+    stderr = b"Traceback (most recent call last):\n" + b"\xff" + b"x" * 4964
+    proxy = _SpyProxy()
+    backend = _EchoBackend(stdout=b"", stderr=stderr, exit_code=1)
+    loader = _StubLoader(_record(("oracle/list_tables",)))
+    ex = SkillExecutor(
+        sandbox_backend=backend,  # type: ignore[arg-type]
+        skill_loader=loader,
+        call_proxy=proxy,
+        decision_history_store=DecisionHistoryStore(db),
+        execution_timeout_s=5.0,
+    )
+    with caplog.at_level(logging.WARNING, logger="cognic_agentos.core.skill.executor"):
+        result = await ex.invoke(skill_id="schema-summary", arguments={}, actor=_actor())
+    assert result.refusal_reason == "skill_runtime_error"
+    warnings = [r for r in caplog.records if r.message == "skill.invoke.runner_failed"]
+    assert len(warnings) == 1
+    record = warnings[0]
+    assert record.exit_code == 1  # type: ignore[attr-defined]
+    assert record.stderr_sha256 == hashlib.sha256(stderr).hexdigest()  # type: ignore[attr-defined]
+    excerpt = record.stderr_excerpt  # type: ignore[attr-defined]
+    assert len(excerpt) == 2048  # bounded — never the full multi-KB stream
+    assert excerpt.startswith("Traceback (most recent call last):")
+    assert "\ufffd" in excerpt  # replace-decoded, not raised
+
+
+async def test_runner_success_emits_no_runner_failed_warning(
+    db: AsyncEngine, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Mutually-exclusive emission: the green path emits ZERO
+    runner_failed warnings (log-noise on success would poison
+    operator alerting on the failure signal)."""
+
+    proxy = _SpyProxy()
+    backend = _EchoBackend(stdout=encode_frame({"ok": True, "result": {"k": "v"}}))
+    loader = _StubLoader(_record(("oracle/list_tables",)))
+    ex = SkillExecutor(
+        sandbox_backend=backend,  # type: ignore[arg-type]
+        skill_loader=loader,
+        call_proxy=proxy,
+        decision_history_store=DecisionHistoryStore(db),
+        execution_timeout_s=5.0,
+    )
+    with caplog.at_level(logging.WARNING, logger="cognic_agentos.core.skill.executor"):
+        result = await ex.invoke(skill_id="schema-summary", arguments={}, actor=_actor())
+    assert result.terminal_state == "completed"
+    assert [r for r in caplog.records if r.message == "skill.invoke.runner_failed"] == []

@@ -1113,6 +1113,34 @@ class KubernetesPodSandboxBackend:
             credential_decls=credential_decls,
         )
 
+        # M6 run-14 amendment (2026-07-04) — FAIL-CLOSED on policy-declared
+        # writable mounts. ``SandboxPolicy.writable_mounts`` was declared
+        # (Sprint-8A spec §6) but never enforced by any backend — this
+        # backend projected it into the audit payload ONLY, so the chain
+        # evidence recorded mounts the workload Pod never received.
+        # DockerSibling now enforces the field as real binds; the K8s
+        # realization (same-Pod sidecar + emptyDir per the M6 spec §5.5 —
+        # host-path mounts do not translate to multi-node Pods) has NOT
+        # landed, so a policy that declares mounts MUST refuse rather
+        # than silently run unmounted (a silent audit-only deferral would
+        # recreate the exact bug class). Pure shape check AFTER the T21
+        # pair guard (lock #1 keeps first claim on malformed input) and
+        # BEFORE any allocation/admission (warm pool / admit / mint) —
+        # zero allocated state when it fires. Ordering pinned by
+        # test_pair_guard_still_wins_over_writable_mounts_refusal at
+        # tests/unit/sandbox/backends/test_policy_writable_mounts.py.
+        if policy.writable_mounts:
+            raise SandboxLifecycleRefused(
+                "sandbox_writable_mounts_unsupported_on_backend",
+                detail=(
+                    f"policy declares {len(policy.writable_mounts)} writable_mounts "
+                    f"but KubernetesPodSandboxBackend does not enforce host-path "
+                    f"policy mounts (the same-Pod-sidecar + emptyDir realization "
+                    f"per the M6 spec §5.5 has not landed); refusing fail-closed "
+                    f"rather than running the workload without the declared mounts"
+                ),
+            )
+
         # 1. Warm-pool checkout (if wired + caller asked for it AND
         #    no credentials requested). Sprint 10 spec §4.2.1: warm
         #    members were pre-created without an actor context for

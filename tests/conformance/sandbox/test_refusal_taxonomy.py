@@ -85,7 +85,7 @@ class TestRefusalTaxonomyRegistrationCoverage:
             f"values to the production Literal at protocol.py:34-50."
         )
 
-    def test_refusal_reason_count_locked_at_forty_two(self) -> None:
+    def test_refusal_reason_count_locked_at_forty_three(self) -> None:
         """Crisp value-count guard — separate from the membership
         assertion so drift in size shows a clean diagnostic.
 
@@ -118,9 +118,14 @@ class TestRefusalTaxonomyRegistrationCoverage:
         ``admit_policy`` Step-4 consult; seam-unit-proven at
         ``tests/unit/sandbox/test_approval_seam.py`` per the ADR-023
         registration precedent; the pre-13.5 fallback value is KEPT).
-        If this fails because the count is no longer 42, update the
+        43 after the M6 run-14 writable_mounts-enforcement amendment
+        added ``sandbox_writable_mounts_unsupported_on_backend`` (K8s
+        fail-closed until the spec §5.5 sidecar realization lands;
+        behavior coverage at
+        ``tests/unit/sandbox/backends/test_policy_writable_mounts.py``).
+        If this fails because the count is no longer 43, update the
         constant here AND ensure ``TRIGGERS_BY_REASON`` has a matching
         entry for the new value. NEVER update this guard without also
         updating the dispatch.
         """
-        assert len(get_args(SandboxRefusalReason)) == 42
+        assert len(get_args(SandboxRefusalReason)) == 43

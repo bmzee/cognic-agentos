@@ -102,6 +102,23 @@ _SKILL_TOOL_REQUEST_ID_PREFIX: Final = "skill-tool-"
 _SKILL_CPU_CORES: Final = 1.0
 _SKILL_MEMORY_MB: Final = 256
 
+#: M6 run-14 amendment (2026-07-04) — bounded stderr excerpt surfaced on the
+#: ``skill_runtime_error`` WARNING log. The runner writes result frames to
+#: stdout, so a crash BEFORE any frame (env failure, socket unreachable,
+#: entry-point load error) leaves ONLY stderr as diagnostic signal — which was
+#: captured then dropped, making a deployed skill runtime error undiagnosable
+#: (run 14 was root-caused only via code archaeology + a local repro). The
+#: excerpt is LOG-axis only (evidence stays digest-only; nothing raw reaches
+#: the chain); replace-decoded + bounded per the operator-actionable-stderr
+#: doctrine at ``sandbox/catalog.py::_safe_decode_bounded``.
+_STDERR_EXCERPT_MAX_CHARS: Final = 2048
+
+
+def _bounded_stderr_excerpt(stderr: bytes) -> str:
+    """Replace-decode (never raises on non-UTF-8 runner output) + hard cap so
+    a multi-MB stderr stream cannot bloat the log record."""
+    return stderr.decode("utf-8", errors="replace")[:_STDERR_EXCERPT_MAX_CHARS]
+
 
 def _validate_skill_record(record: LoadedSkillRecord | None) -> SkillInvokeRefusalReason | None:
     """Two fail-closed pre-flight checks. Returns the closed refusal reason or
@@ -217,6 +234,23 @@ class SkillExecutor:
             terminal_state, result, reason = _interpret_frame(
                 _parse_runner_frame(exec_result.stdout)
             )
+            if reason == "skill_runtime_error":
+                # M6 run-14 amendment — the runner crashed before writing a
+                # result frame (or wrote an uninterpretable one); its stderr
+                # is the ONLY diagnostic signal. Surface it bounded on the
+                # LOG axis (digest for correlation + capped excerpt for the
+                # operator); the chain evidence stays digest-only.
+                logger.warning(
+                    "skill.invoke.runner_failed",
+                    extra={
+                        "request_id": request_id,
+                        "skill_id": skill_id,
+                        "exit_code": exec_result.exit_code,
+                        "stdout_bytes": len(exec_result.stdout),
+                        "stderr_sha256": hashlib.sha256(exec_result.stderr).hexdigest(),
+                        "stderr_excerpt": _bounded_stderr_excerpt(exec_result.stderr),
+                    },
+                )
             await self._emit_invoked(
                 skill_id=skill_id,
                 actor=actor,

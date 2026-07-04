@@ -845,6 +845,20 @@ async def _trigger_sandbox_approval_request_not_found(
     yield
 
 
+@asynccontextmanager
+async def _trigger_sandbox_writable_mounts_unsupported_on_backend(
+    backend: Any, ctx: Any
+) -> AsyncIterator[None]:
+    """M6 run-14 amendment — BACKEND-SPECIFIC (K8s-only): a policy
+    declaring ``writable_mounts`` refuses fail-closed at the top of
+    ``KubernetesPodSandboxBackend.create`` until the same-Pod-sidecar +
+    emptyDir realization (M6 spec §5.5) lands. DockerSibling ENFORCES
+    the mounts instead (never raises this value). Registration stub per
+    the T16/backend-specific precedent; behavior coverage at
+    ``tests/unit/sandbox/backends/test_policy_writable_mounts.py``."""
+    yield
+
+
 #: Public registry — maps every wire-public ``SandboxRefusalReason``
 #: value to a trigger factory. The membership pin at
 #: ``test_refusal_taxonomy.py`` asserts this dict's keyset equals
@@ -967,4 +981,10 @@ TRIGGERS_BY_REASON: dict[str, TriggerFactory] = {
     "sandbox_approval_expired": _trigger_sandbox_approval_expired,
     "sandbox_approval_binding_mismatch": _trigger_sandbox_approval_binding_mismatch,
     "sandbox_approval_request_not_found": _trigger_sandbox_approval_request_not_found,
+    # M6 run-14 — writable_mounts enforcement (K8s fail-closed arm;
+    # Docker enforces). Behavior coverage at
+    # tests/unit/sandbox/backends/test_policy_writable_mounts.py.
+    "sandbox_writable_mounts_unsupported_on_backend": (
+        _trigger_sandbox_writable_mounts_unsupported_on_backend
+    ),
 }
