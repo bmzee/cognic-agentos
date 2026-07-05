@@ -148,8 +148,18 @@ _GATE_TOOL_PATH = _REPO_ROOT / "tools" / "check_critical_coverage.py"
 #: executor; the one sandboxed run: --network none + no ambient credentials + the
 #: broker 0700 socket mount + finally-guarded teardown + the digest-only
 #: skill.invoked dual-layer evidence row) promoted to the gate = 143.
+#: +1 at M8 A3 (ADR-027) — ``core/entitlements/store.py`` (the tenant-scoped
+#: data-scope resolution boundary — the WHERE tenant_id IS the cross-tenant
+#: wall, resolve_scope collapsing absent + cross-tenant to the same None — plus
+#: the fail-closed malformed-objects evidence-boundary guard feeding the M8
+#: dispatch entitlement gate) promoted to the gate = 144.
+#: +1 at M8 A4 (ADR-027 / spec §3.1) — ``core/agent/assignments.py`` (the
+#: grant-not-requested ingestion invariant: operator/config drift can never
+#: grant beyond the persona's requested set; fail-closed, NO partial grant set;
+#: ``core/agent/_types.py`` stays off-gate per the scheduler/run precedent)
+#: promoted to the gate = 145.
 #: Bump this in lockstep with any deliberate ``_CRITICAL_FILES`` change.
-_EXPECTED_ENTRY_COUNT = 143
+_EXPECTED_ENTRY_COUNT = 145
 
 #: The 5 modules Sprint 7B.3 promoted to the durable gate, each by its
 #: own landing commit (T3-T6 panels + T7 composer). All ride the

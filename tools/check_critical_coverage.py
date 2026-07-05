@@ -2311,6 +2311,30 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     # IN THE SAME COMMIT (NOT just the count bump) per
     # feedback_verify_promotion_meets_floor_at_promotion_time.
     ("src/cognic_agentos/core/skill/executor.py", 0.95, 0.90),
+    # M8 Task A3 (ADR-027) — the data-scope entitlement store. The tenant-scoped
+    # data-scope resolution boundary feeding the M8 dispatch entitlement gate
+    # (gate 2): the WHERE tenant_id IS the cross-tenant wall (resolve_scope
+    # collapses absent + cross-tenant to the same None per the wire-collapse
+    # invisibility doctrine) + the fail-closed malformed-objects evidence-boundary
+    # guard — a malformed objects column must never become a permissive allow-set
+    # downstream (the resolved objects feed the signed query-context token's
+    # claims). Gate 143 -> 144. Verified against fresh full-suite --cov-branch
+    # coverage.json IN THE SAME COMMIT (NOT just the count bump) per
+    # feedback_verify_promotion_meets_floor_at_promotion_time.
+    ("src/cognic_agentos/core/entitlements/store.py", 0.95, 0.90),
+    # M8 Task A4 (ADR-027 / spec §3.1) — the granted-capability store. Owns THE
+    # INGESTION INVARIANT: a grant outside the persona's REQUESTED set is refused
+    # fail-closed at load (agent_grant_not_requested) — operator/config drift can
+    # never grant beyond the requested set, and NO partial grant set is ever
+    # returned (kind-partitioned: a skill ref granted as kind="tool" is equally
+    # out-of-request). Dispatch enforces the granted set only; prompt assembly
+    # shapes to it (defense in depth). (core/agent/_types.py stays off-gate —
+    # pure type module per the core/scheduler/_types.py / core/run/_types.py
+    # precedent; the dispatcher + loop land at A5+.) Gate 144 -> 145. Verified
+    # against fresh full-suite --cov-branch coverage.json IN THE SAME COMMIT
+    # (NOT just the count bump) per
+    # feedback_verify_promotion_meets_floor_at_promotion_time.
+    ("src/cognic_agentos/core/agent/assignments.py", 0.95, 0.90),
 )
 
 
