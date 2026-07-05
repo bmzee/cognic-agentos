@@ -92,6 +92,14 @@ _WALKED_PROJECTORS: frozenset[str] = frozenset(
         "_project_memory_forget",
         "_project_memory_regulator_erasure",
         "_project_memory_redact",
+        # M8 A12 (ADR-027 + ADR-020) — agent.run.* projectors wired to the
+        # typed dispatch table, plus the shared run_id-lift helper they call.
+        "_agent_run_payload_run_id",
+        "_project_agent_run_started",
+        "_project_agent_run_dispatch",
+        "_project_agent_run_completed",
+        "_project_agent_run_refused",
+        "_project_agent_run_failed",
         "_build_decision_audit_for_dh_snapshot",
     }
 )

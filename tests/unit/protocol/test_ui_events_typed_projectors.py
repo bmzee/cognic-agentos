@@ -116,16 +116,18 @@ class TestDecisionHistoryTypedRoutingCoversAll5DecisionTypes:
             assert evt.type == "rbac_denied"
 
     def test_table_keyset_pinned(self) -> None:
-        """Drift detector — the 12 exact-match keys are the only allowed
+        """Drift detector — the 17 exact-match keys are the only allowed
         Wave-1 vocabulary on the typed-dispatch table (4 frontend_action +
         policy.decision_evaluated + the 2 subagent entries wired in Sprint
         11b T9 + the 4 memory.* entries wired in Sprint 11.5c T6 + the 2
         emergency.kill_switch_* entries wired in Sprint 13.6 T3 per the
-        ADR-018 spec + plan of record). Adding a further entry requires a
-        deliberate plan-of-record amendment + the corresponding class added
-        to `_TYPED_PROJECTION_CLASSES`. Note: `rbac.*` (prefix) and the
-        subagent depth-cap (scoped `escalation.opened`) route via
-        CONDITIONAL branches, NOT this exact-match table."""
+        ADR-018 spec + plan of record + the 5 agent.run.* entries wired at
+        M8 A12 per ADR-027 + the ADR-020 phase table). Adding a further
+        entry requires a deliberate plan-of-record amendment + the
+        corresponding class added to `_TYPED_PROJECTION_CLASSES`. Note:
+        `rbac.*` (prefix) and the subagent depth-cap (scoped
+        `escalation.opened`) route via CONDITIONAL branches, NOT this
+        exact-match table."""
         assert set(_DECISION_HISTORY_TYPED_PROJECTORS.keys()) == {
             "frontend_action.submitted",
             "frontend_action.accepted",
@@ -141,6 +143,12 @@ class TestDecisionHistoryTypedRoutingCoversAll5DecisionTypes:
             # Sprint 13.6 T3 — emergency kill-switch flip/revert (ADR-018).
             "emergency.kill_switch_flipped",
             "emergency.kill_switch_reverted",
+            # M8 A12 (ADR-027 + ADR-020) — agent.run.* chain event projectors.
+            "agent.run.started",
+            "agent.run.dispatch",
+            "agent.run.completed",
+            "agent.run.refused",
+            "agent.run.failed",
         }
 
 
