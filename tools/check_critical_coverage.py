@@ -2358,6 +2358,21 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     # COMMIT (NOT just the count bump) per
     # feedback_verify_promotion_meets_floor_at_promotion_time.
     ("src/cognic_agentos/core/agent/query_context.py", 0.95, 0.90),
+    # M8 Task A10 (ADR-027) — the agent dispatch chokepoint. THE single seam
+    # every LLM-authored capability call passes through; owns ALL dispatch
+    # authority: gate 1 assignment (granted-set membership + the read_skill
+    # skill_id sub-gate refused BEFORE the reader is consulted), gate 2
+    # entitlement (entitled_scope_ids + resolve_scope, stamped tools only),
+    # gate 3 Rego policy (every deny -> agent_policy_denied; opa_unavailable
+    # fail-closed), the kernel-signed query-context stamp over the
+    # LLM-authored args digest, built-in routing (read_skill / remember), and
+    # the digest-only agent.run.dispatch evidence row (exactly ONE per
+    # dispatch, on EVERY arm). (core/agent/builtins.py stays off-gate —
+    # enforcement is upstream in dispatch + the governed MemoryAPI.) Gate
+    # 147 -> 148. Verified against fresh full-suite --cov-branch coverage.json
+    # IN THE SAME COMMIT (NOT just the count bump) per
+    # feedback_verify_promotion_meets_floor_at_promotion_time.
+    ("src/cognic_agentos/core/agent/dispatch.py", 0.95, 0.90),
 )
 
 

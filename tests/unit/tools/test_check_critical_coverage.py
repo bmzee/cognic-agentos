@@ -169,8 +169,15 @@ _GATE_TOOL_PATH = _REPO_ROOT / "tools" / "check_critical_coverage.py"
 #: deterministic signature→malformed→expired→audience precedence + the two-key
 #: rotation window; the token IS the tool-side authority the oracle pack
 #: enforces) promoted to the gate = 147.
+#: +1 at M8 A10 (ADR-027) — ``core/agent/dispatch.py`` (the agent dispatch
+#: chokepoint: assignment + entitlement + Rego policy gates, the read_skill
+#: skill_id sub-gate, the kernel-signed query-context stamp, built-in routing,
+#: and the digest-only ``agent.run.dispatch`` evidence row — every LLM-authored
+#: capability call passes through this single seam;
+#: ``core/agent/builtins.py`` stays off-gate — enforcement is upstream in
+#: dispatch + the governed MemoryAPI) promoted to the gate = 148.
 #: Bump this in lockstep with any deliberate ``_CRITICAL_FILES`` change.
-_EXPECTED_ENTRY_COUNT = 147
+_EXPECTED_ENTRY_COUNT = 148
 
 #: The 5 modules Sprint 7B.3 promoted to the durable gate, each by its
 #: own landing commit (T3-T6 panels + T7 composer). All ride the

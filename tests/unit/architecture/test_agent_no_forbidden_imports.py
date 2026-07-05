@@ -49,16 +49,19 @@ def _all_imports(path: pathlib.Path) -> set[str]:
 
 
 def test_agent_dir_has_expected_sources() -> None:
-    # Non-vacuous guard: a NEW core/agent module (A5+ adds policy.py,
-    # query_context.py, dispatch.py, loop.py, builtins.py) forces a deliberate
-    # fence review — extend this set AND keep the forbidden-roots sweep below
-    # covering it.
+    # Non-vacuous guard: a NEW core/agent module (A11+ adds loop.py) forces a
+    # deliberate fence review — extend this set AND keep the forbidden-roots
+    # sweep below covering it. dispatch.py + builtins.py joined at M8 A10
+    # (dispatch TYPE_CHECKING/function-locally imports llm.gateway — ``llm``
+    # is deliberately NOT a forbidden root on this fence).
     assert {p.name for p in _agent_sources()} == {
         "__init__.py",
         "_types.py",
         "assignments.py",
         "policy.py",
         "query_context.py",
+        "dispatch.py",
+        "builtins.py",
     }
 
 
