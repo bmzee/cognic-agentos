@@ -57,6 +57,8 @@ def test_agent_dir_has_expected_sources() -> None:
         "__init__.py",
         "_types.py",
         "assignments.py",
+        "policy.py",
+        "query_context.py",
     }
 
 

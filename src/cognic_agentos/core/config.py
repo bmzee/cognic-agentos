@@ -1322,6 +1322,57 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def _validate_agent_query_context_signing_key_path_prod_profile_guard(self) -> Settings:
+        """M8 A6 (ADR-027 §c) — prod-profile guard rejecting test-fixture-tree
+        query-context signing keys at startup.
+
+        SEPARATE parallel validator mirroring
+        ``_validate_signing_key_path_prod_profile_guard`` (Sprint-7A R9 P2
+        #1) in structure: prod-profile-only by design (dev / test profiles
+        MUST be able to wire test-fixture keys so the A6 mint/verify
+        lifecycle tests can run); URI-shaped values (``vault://``,
+        ``kms://``, ...) skip the fixture-tree check because they aren't
+        filesystem paths (the R11 P2 #1 URI-skip arm); filesystem paths
+        resolve to absolute form via ``Path.resolve()`` BEFORE the segment
+        match so relative spellings (``tests/fixtures/...``) cannot bypass
+        the guard (the R11 P2 #1 resolve-then-match arm).
+
+        Raises ``ValueError`` (which Pydantic wraps as ``ValidationError``)
+        with the closed-enum reason
+        ``agent_query_context_signing_key_path_under_test_fixture_tree_in_prod``
+        when the guard fires. Both rejected and allowed path shapes are
+        pinned by ``TestM8A5A6AgentSettings`` (mirroring the R10 P2 #2
+        pin discipline on the Sprint-7A guard).
+        """
+        if (
+            self.runtime_profile == "prod"
+            and self.agent_query_context_signing_key_path is not None
+            and "://" not in self.agent_query_context_signing_key_path
+        ):
+            # Filesystem path branch — URI-shaped values skip the
+            # fixture-tree check because they aren't filesystem paths.
+            # Resolve relative paths to absolute against the current
+            # working directory so the segment match below sees the same
+            # shape regardless of how the operator spelled the input.
+            from pathlib import Path as _Path
+
+            resolved = str(_Path(self.agent_query_context_signing_key_path).resolve())
+            for segment in ("/examples/", "/tests/fixtures/"):
+                if segment in resolved:
+                    raise ValueError(
+                        "agent_query_context_signing_key_path_under_test_fixture_tree_in_prod: "
+                        f"agent_query_context_signing_key_path="
+                        f"{self.agent_query_context_signing_key_path!r} "
+                        f"resolves to {resolved!r} which is under "
+                        f"{segment.strip('/')} — that tree is reserved "
+                        "for synthetic test-only keys (M8 A6, mirroring "
+                        "Sprint-7A R9 P2 #1). Production query-context "
+                        "signing keys MUST live outside the examples/ "
+                        "and tests/fixtures/ trees."
+                    )
+        return self
+
+    @model_validator(mode="after")
     def _resolve_local_object_store_root(self) -> Settings:
         """Resolve ``local_object_store_root`` per ``runtime_profile`` if unset.
 
@@ -1924,6 +1975,37 @@ class Settings(BaseSettings):
             "Sprint 13.7 (ADR-022 + ADR-015) — Rego bundle path for the "
             "scheduler admission decision point consumed by SchedulerPolicy "
             "at the composition root (build_runtime)."
+        ),
+    )
+    agents_policy_bundle: Path = Field(
+        default=Path("policies/_default/agents.rego"),
+        description=(
+            "M8 A5 (ADR-027 + ADR-015) — Rego bundle path for the agent "
+            "dispatch decision point consumed by AgentDispatchPolicy at the "
+            "composition root."
+        ),
+    )
+    agent_query_context_signing_key_path: str | None = Field(
+        default=None,
+        description=(
+            "M8 A6 (ADR-027 §c) — path or ``vault://`` URI to the RS256 "
+            "signing key the kernel uses to mint query-context tokens "
+            "(core/agent/query_context.py). None → the A10 dispatcher "
+            "fails loud at first mint; an unsigned query context is "
+            "forbidden. Prod profile rejects any path under ``examples/`` "
+            "or ``tests/fixtures/`` at startup so test-only synthetic "
+            "keys cannot leak into production deployments (mirrors the "
+            "Sprint-7A signing_key_path guard)."
+        ),
+    )
+    agent_query_context_ttl_s: float = Field(
+        default=120.0,
+        gt=0,
+        description=(
+            "M8 A6 (ADR-027 §c) — query-context token TTL (seconds): the "
+            "``exp - iat`` window the kernel mints. Short by design — the "
+            "token binds ONE dispatch call; the tool-side verifier "
+            "refuses at ``now >= exp``."
         ),
     )
     scheduler_class_sla_interactive_s: float = Field(

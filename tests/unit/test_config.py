@@ -1458,6 +1458,121 @@ class TestSprint7ASettings:
         assert "dev_mode_skip_cosign=True is forbidden in prod" in str(excinfo.value)
 
 
+class TestM8A5A6AgentSettings:
+    """M8 A5+A6 (ADR-027) settings contract — the agents dispatch bundle
+    path (A5) + the query-context signing-key path + TTL (A6), with the
+    NEW SEPARATE parallel prod-profile guard
+    ``_validate_agent_query_context_signing_key_path_prod_profile_guard``
+    mirroring the Sprint-7A ``signing_key_path`` guard structure. Both
+    rejected AND allowed path shapes are pinned (the R10 P2 #2 doctrine
+    the Sprint-7A guard pins ride on)."""
+
+    def test_agents_policy_bundle_default(self) -> None:
+        from cognic_agentos.core.config import build_settings_without_env_file
+
+        s = build_settings_without_env_file()
+        assert s.agents_policy_bundle == Path("policies/_default/agents.rego")
+
+    def test_agent_query_context_signing_key_path_default_none(self) -> None:
+        from cognic_agentos.core.config import build_settings_without_env_file
+
+        s = build_settings_without_env_file()
+        assert s.agent_query_context_signing_key_path is None
+
+    def test_agent_query_context_ttl_s_default(self) -> None:
+        from cognic_agentos.core.config import build_settings_without_env_file
+
+        s = build_settings_without_env_file()
+        assert s.agent_query_context_ttl_s == 120.0
+
+    def test_agent_query_context_key_relative_fixture_path_in_prod_rejected(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """prod + relative ``tests/fixtures/x.pem`` → ValidationError
+        carrying the NEW closed-enum reason. The resolve-then-segment-
+        match catches the relative spelling (the R11 P2 #1 doctrine the
+        mirrored guard structure carries over)."""
+        from pydantic import ValidationError
+
+        from cognic_agentos.core.config import Settings
+
+        (tmp_path / "tests" / "fixtures").mkdir(parents=True)
+        monkeypatch.chdir(tmp_path)
+
+        with pytest.raises(ValidationError) as excinfo:
+            Settings(
+                runtime_profile="prod",
+                agent_query_context_signing_key_path="tests/fixtures/x.pem",
+            )
+        assert "agent_query_context_signing_key_path_under_test_fixture_tree_in_prod" in str(
+            excinfo.value
+        )
+
+    def test_agent_query_context_key_under_examples_abs_in_prod_rejected(self) -> None:
+        from pydantic import ValidationError
+
+        from cognic_agentos.core.config import Settings
+
+        with pytest.raises(ValidationError) as excinfo:
+            Settings(
+                runtime_profile="prod",
+                agent_query_context_signing_key_path=(
+                    "/abs/path/to/examples/agent-pack/query_context.private.pem"
+                ),
+            )
+        assert "agent_query_context_signing_key_path_under_test_fixture_tree_in_prod" in str(
+            excinfo.value
+        )
+
+    def test_agent_query_context_key_vault_uri_in_prod_allowed(self) -> None:
+        """URI-shaped values skip the fixture-tree check (not filesystem
+        paths) — the mirrored guard keeps the Sprint-7A URI-skip arm."""
+        from cognic_agentos.core.config import Settings
+
+        s = Settings(
+            runtime_profile="prod",
+            agent_query_context_signing_key_path="vault://secret/cognic/agent-query-context/prod",
+            embedding_model=_PROD_EMBED_MODEL,
+            sandbox_canonical_runtime_python_image=_PROD_RUNTIME_IMAGE,
+            sandbox_canonical_egress_proxy_image=_PROD_PROXY_IMAGE,
+        )
+        assert (
+            s.agent_query_context_signing_key_path
+            == "vault://secret/cognic/agent-query-context/prod"
+        )
+
+    def test_agent_query_context_key_operator_path_in_prod_allowed(self) -> None:
+        """Prod + a real operator path OUTSIDE both fixture trees →
+        allowed. Pins the allowed shape alongside the rejected shapes so
+        the guard is enforced at the path-shape boundary, not by
+        accident."""
+        from cognic_agentos.core.config import Settings
+
+        s = Settings(
+            runtime_profile="prod",
+            agent_query_context_signing_key_path="/etc/cognic/agent-query-context/prod.pem",
+            embedding_model=_PROD_EMBED_MODEL,
+            sandbox_canonical_runtime_python_image=_PROD_RUNTIME_IMAGE,
+            sandbox_canonical_egress_proxy_image=_PROD_PROXY_IMAGE,
+        )
+        assert s.agent_query_context_signing_key_path == "/etc/cognic/agent-query-context/prod.pem"
+
+    def test_agent_query_context_key_fixture_path_in_dev_allowed(self) -> None:
+        """The guard is prod-profile-only by design — dev/test profiles
+        MUST be able to wire test-fixture keys so the A6 mint/verify
+        lifecycle tests can run."""
+        from cognic_agentos.core.config import Settings
+
+        s = Settings(
+            runtime_profile="dev",
+            agent_query_context_signing_key_path=(
+                "/abs/path/to/tests/fixtures/agent_query_context/test.private.pem"
+            ),
+        )
+        assert s.agent_query_context_signing_key_path is not None
+        assert "tests/fixtures" in s.agent_query_context_signing_key_path
+
+
 class TestSprint7AClosedEnumVocabulary:
     """Sprint-7A T1 closed-enum vocabulary per the plan-of-record.
 

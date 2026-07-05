@@ -158,8 +158,19 @@ _GATE_TOOL_PATH = _REPO_ROOT / "tools" / "check_critical_coverage.py"
 #: grant beyond the persona's requested set; fail-closed, NO partial grant set;
 #: ``core/agent/_types.py`` stays off-gate per the scheduler/run precedent)
 #: promoted to the gate = 145.
+#: +1 at M8 A5 (ADR-027 + ADR-015) — ``core/agent/policy.py`` (the agent-dispatch
+#: Rego decision seam: bool-only eval of data.cognic.agents.dispatch.allow +
+#: the fail-closed opa_unavailable envelope + the strict 11-key attestation-
+#: threading projection; every bundle deny maps to the wire
+#: ``agent_policy_denied`` at the A10 dispatcher) promoted to the gate = 146.
+#: +1 at M8 A6 (ADR-027 §c) — ``core/agent/query_context.py`` (the kernel-signed
+#: query-context trust seam: RS256 ATTACHED-compact mint/verify over
+#: canonical_bytes claims + the 4-value closed-enum refusal vocabulary +
+#: deterministic signature→malformed→expired→audience precedence + the two-key
+#: rotation window; the token IS the tool-side authority the oracle pack
+#: enforces) promoted to the gate = 147.
 #: Bump this in lockstep with any deliberate ``_CRITICAL_FILES`` change.
-_EXPECTED_ENTRY_COUNT = 145
+_EXPECTED_ENTRY_COUNT = 147
 
 #: The 5 modules Sprint 7B.3 promoted to the durable gate, each by its
 #: own landing commit (T3-T6 panels + T7 composer). All ride the

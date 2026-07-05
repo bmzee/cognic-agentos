@@ -2335,6 +2335,29 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     # (NOT just the count bump) per
     # feedback_verify_promotion_meets_floor_at_promotion_time.
     ("src/cognic_agentos/core/agent/assignments.py", 0.95, 0.90),
+    # M8 Task A5 (ADR-027 + ADR-015) — the agent-dispatch policy seam. The Rego
+    # decision seam for agent dispatch: bool-only eval of
+    # data.cognic.agents.dispatch.allow via OPAEngine + the fail-closed
+    # opa_unavailable envelope + the strict attestation-threading contract (the
+    # 11-key projection threads the PYTHON-GATE-OWNED assignment/entitlement
+    # attestations verbatim; the bundle requires each strictly == true so a
+    # bypassed Python gate still refuses — the sandbox.rego rule-4 defense-in-
+    # depth precedent). Every bundle deny maps to the wire agent_policy_denied
+    # at the A10 dispatcher. Gate 145 -> 146. Verified against fresh full-suite
+    # --cov-branch coverage.json IN THE SAME COMMIT (NOT just the count bump)
+    # per feedback_verify_promotion_meets_floor_at_promotion_time.
+    ("src/cognic_agentos/core/agent/policy.py", 0.95, 0.90),
+    # M8 Task A6 (ADR-027 §c) — the query-context trust seam. RS256
+    # ATTACHED-compact mint/verify over canonical_bytes claims + the 4-value
+    # closed-enum refusal vocabulary + the deterministic
+    # signature→malformed→expired→audience precedence + the two-key rotation
+    # window; the token IS the tool-side authority the oracle pack enforces
+    # (this kernel verify is the REFERENCE implementation the pack mirrors —
+    # a bug here is a cross-repo authority-boundary bug). Gate 146 -> 147.
+    # Verified against fresh full-suite --cov-branch coverage.json IN THE SAME
+    # COMMIT (NOT just the count bump) per
+    # feedback_verify_promotion_meets_floor_at_promotion_time.
+    ("src/cognic_agentos/core/agent/query_context.py", 0.95, 0.90),
 )
 
 
