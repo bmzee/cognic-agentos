@@ -148,6 +148,10 @@ The broker is a **new trust boundary** — it decides which tool calls a sandbox
 - **Marketplace / registry** distribution — packs are GitHub Releases (Model Y), as M3–M5.
 - **The 15A workflow engine** — a skill's executable action is a single deterministic composition, not a declarative DAG.
 
+## M8 amendment (2026-07-05) — instruction-only skill-pack mode joins the skill doctrine
+
+ADR-027 (governed agent loop, M8) extends the single `skill` pack kind with a first-class **instruction-only mode**: `[skill].mode = "instruction"` (absent → `"executable"`; every existing pack is unchanged). An instruction skill is a valid hosted `SKILL.md` with NO entry point, NO runtime image, and NO executable `declared_tools` — hosted / assignable / readable, **never executable** (`SkillExecutor.invoke` refuses an instruction record fail-closed; it can never reach the sandbox). This is a MODE of the one `skill` kind, not a new kind — the §"One `skill` pack kind" collapse stands. The M8 loop is the LLM consumer this ADR anticipated ("Until M8 there is no LLM consumer of the hosted instruction layer"): agents read *granted* skills' bodies via the kernel `read_skill` built-in, gated by ADR-027's assignment sub-gate. The optional `[skill].referenced_tools` list is **non-authoritative reviewer evidence** only — authority comes solely from agent assignment + dispatch.
+
 ## References
 
 - [Specification — Agent Skills (agentskills.io)](https://agentskills.io/specification) · [Agent Skills Overview](https://agentskills.io/home)
