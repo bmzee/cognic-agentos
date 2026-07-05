@@ -92,6 +92,11 @@ _WALKED_PROJECTORS: frozenset[str] = frozenset(
         "_project_memory_forget",
         "_project_memory_regulator_erasure",
         "_project_memory_redact",
+        # Sprint 13.6 T3 — kill-switch projectors (backfilled at the M8 Part-A
+        # closer: the 13.6 landing omitted them from this hand-list — the same
+        # gap class the maintainer caught for agent.run.* below).
+        "_project_kill_switch_flipped",
+        "_project_kill_switch_reverted",
         # M8 A12 (ADR-027 + ADR-020) — agent.run.* projectors wired to the
         # typed dispatch table, plus the shared run_id-lift helper they call.
         "_agent_run_payload_run_id",
