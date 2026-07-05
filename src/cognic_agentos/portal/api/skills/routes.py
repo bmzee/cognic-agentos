@@ -10,8 +10,9 @@ not populate ``app.state.skill_executor``.
 tenant-scoped INSIDE the executor via the loader); tenant + actor come from the
 bound :class:`Actor` ONLY. Status map (by exception-free result inspection):
 200 ``completed`` / 403 ``skill_tool_not_declared`` (THE load-bearing broker
-refusal) / 404 ``skill_not_found`` / 409 ``skill_not_registered`` / 502
-``skill_runtime_error``.
+refusal) / 404 ``skill_not_found`` / 409 ``skill_not_registered`` + 409
+``skill_not_executable`` (M8 A7 instruction-mode records — present but not
+invokable) / 502 ``skill_runtime_error``.
 
 ``from __future__ import annotations`` is INTENTIONALLY OMITTED so FastAPI can
 resolve the closure-local ``Depends(...)`` annotations eagerly
@@ -29,14 +30,16 @@ from cognic_agentos.portal.rbac.actor import Actor
 from cognic_agentos.portal.rbac.enforcement import RequireScope
 
 #: refusal-reason -> HTTP status. ``completed`` -> 200 (handled separately);
-#: ``skill_tool_not_declared`` is the load-bearing broker refusal (403); the two
-#: pre-flight refusals split 404 (absent) vs 409 (present-but-not-invokable);
+#: ``skill_tool_not_declared`` is the load-bearing broker refusal (403); the
+#: pre-flight refusals split 404 (absent) vs 409 (present-but-not-invokable:
+#: ``skill_not_registered`` + the M8 A7 instruction-mode ``skill_not_executable``);
 #: infra failure -> 502. An unmapped ``refused`` reason (a defensive broker
 #: passthrough) falls back to 403 — a governance refusal, never a 200/5xx leak.
 _STATUS_BY_REASON: dict[str, int] = {
     "skill_tool_not_declared": 403,
     "skill_not_found": 404,
     "skill_not_registered": 409,
+    "skill_not_executable": 409,
     "skill_runtime_error": 502,
 }
 _REFUSED_FALLBACK_STATUS = 403

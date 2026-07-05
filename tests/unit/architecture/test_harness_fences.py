@@ -65,10 +65,18 @@ def test_harness_dir_has_expected_sources() -> None:
     + ``protocol.mcp_manifest`` + ``protocol.skill_manifest`` + stdlib
     ``importlib.metadata``, with config/runtime/registry deps under TYPE_CHECKING;
     no Layer-C, no redis client, no second engine, no Bucket-1 default, so the
+    fences below hold). M8 A8 (2026-07-05) added ``agent_host.py`` (the
+    agent-pack hosting loader producing ``LoadedAgentRecord``s + the
+    ``hosted_agents`` operator-surface summary — reviewed: module-level
+    imports are only ``core.agent._types`` + ``protocol.agent_manifest`` +
+    ``protocol.mcp_manifest`` + stdlib ``hashlib`` / ``importlib.metadata`` /
+    ``logging``, with the registry-candidate dep under TYPE_CHECKING; no
+    Layer-C, no redis client, no second engine, no Bucket-1 default, so the
     fences below hold)."""
     names = {p.name for p in _harness_sources()}
     assert names == {
         "__init__.py",
+        "agent_host.py",
         "hook_registry.py",
         "mcp_host.py",
         "memory_policy.py",

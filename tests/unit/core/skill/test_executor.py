@@ -324,6 +324,7 @@ async def test_refusal_reason_closed_enum() -> None:
     assert set(get_args(SkillInvokeRefusalReason)) == {
         "skill_not_found",
         "skill_not_registered",
+        "skill_not_executable",
         "skill_runtime_error",
     }
 
@@ -540,6 +541,48 @@ async def test_skill_not_registered_when_record_not_registered(db: AsyncEngine) 
     assert result.terminal_state == "refused"
     assert result.refusal_reason == "skill_not_registered"
     assert backend.created == []
+
+
+async def test_instruction_record_refused_skill_not_executable(db: AsyncEngine) -> None:
+    """A7 (ADR-027): an instruction-mode record carries no executable action —
+    the fail-closed mode guard refuses it pre-flight with the closed-enum
+    ``skill_not_executable`` and it must NEVER reach ``backend.create``
+    (spy-pinned: zero sessions created)."""
+    proxy = _SpyProxy()
+    backend = _EchoBackend()
+    record = LoadedSkillRecord(
+        skill_id="schema-notes",
+        mode="instruction",
+        description="Explains how to reason about the schema.",
+        skill_md_body="Read the table list, then describe relationships.",
+    )
+    loader = _StubLoader(record)
+    ex = SkillExecutor(
+        sandbox_backend=backend,  # type: ignore[arg-type]
+        skill_loader=loader,
+        call_proxy=proxy,
+        decision_history_store=DecisionHistoryStore(db),
+        execution_timeout_s=5.0,
+    )
+    result = await ex.invoke(skill_id="schema-notes", arguments={}, actor=_actor())
+    assert result.terminal_state == "refused"
+    assert result.refusal_reason == "skill_not_executable"
+    assert result.result is None
+    # THE load-bearing assertion: no sandbox session was ever created.
+    assert backend.created == []
+    assert proxy.calls == []
+    payload = await _latest_payload(db, "skill.invoked")
+    assert payload["terminal_state"] == "refused"
+    assert payload["reason"] == "skill_not_executable"
+
+
+async def test_executable_mode_default_still_runs(db: AsyncEngine) -> None:
+    """The ABSENT-mode default is ``executable`` — every pre-A7 record shape
+    (no ``mode`` kwarg) still reaches the sandbox exactly as before."""
+    record = _record(("oracle/list_tables",))
+    assert record.mode == "executable"
+    assert record.skill_md_body is None
+    assert record.description == ""
 
 
 async def test_loader_receives_actor_tenant(db: AsyncEngine) -> None:

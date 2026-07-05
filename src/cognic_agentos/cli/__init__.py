@@ -218,6 +218,38 @@ ValidatorReason = Literal[
     "skill_manifest_skill_md_invalid",
     "skill_manifest_declared_tools_invalid",
     "skill_manifest_entry_point_mismatch",
+    # Instruction-only skill mode (M8 A7 — cli/validators/skills.py per
+    # ADR-027). ``[skill].mode = "instruction"`` packs host SKILL.md
+    # guidance with NO executable surface: declaring executable
+    # declared_tools / a cognic.skills entry point refuses; the optional
+    # ``[skill].referenced_tools`` reviewer-evidence list is shape-refused
+    # when malformed and WARNED (severity="warning"; exit 0) when its
+    # entries cannot be verified against a live registered-MCP set at
+    # build time (cross-pack resolution is a runtime concern — the boot
+    # loader warn-logs unregistered references per the same doctrine).
+    "skill_manifest_instruction_mode_declares_tools",
+    "skill_manifest_instruction_mode_has_entry_point",
+    "skill_manifest_referenced_tools_invalid",
+    "skill_manifest_referenced_tool_unverifiable",
+    # Governed-agent manifest validation (M8 A8 —
+    # cli/validators/agents.py per ADR-027). 5 closed-enum reasons for
+    # the [agent] block (MANDATORY on kind="agent" packs; dual-path
+    # [agent] / [tool.cognic.agent]): block presence, the persona_path
+    # resolve-then-validate + build-time AGENT.md parse (sub-cases ride
+    # payload.failure_mode: value_invalid / absolute_path_rejected /
+    # path_escape_rejected / file_not_found / not_valid_agent_md), the
+    # requested_skills skill_id-label list, the requested_tools
+    # <server_id>/<tool_name> list, and the optional max_steps 1..32
+    # bound. The 6th reason is orchestrator-owned (validate.py): [mcp]
+    # is forbidden on agent packs ([a2a] stays LEGAL — agent packs are
+    # A2A-speaking by design), mirroring the hook forbidden-block
+    # precedent with payload.failure_mode="mcp_block_forbidden".
+    "agent_manifest_block_missing",
+    "agent_manifest_persona_path_invalid",
+    "agent_manifest_requested_skills_invalid",
+    "agent_manifest_requested_tools_invalid",
+    "agent_manifest_max_steps_invalid",
+    "agent_pack_kind_constraint_violated",
 ]
 
 
@@ -229,6 +261,12 @@ ValidatorReason = Literal[
 _WARNING_REASONS: Final[frozenset[ValidatorReason]] = frozenset(
     {
         "identity_oasf_capability_set_missing",
+        # M8 A7 (ADR-027) — referenced_tools entries are non-authoritative
+        # reviewer evidence; build time cannot resolve them against a live
+        # registered-MCP set, so a shape-clean list surfaces as a warning
+        # (renders, never fails CI). The runtime boot loader warn-logs
+        # unregistered references per the same never-a-refusal doctrine.
+        "skill_manifest_referenced_tool_unverifiable",
     }
 )
 
@@ -349,6 +387,24 @@ _VALIDATOR_REASON_OWNERSHIP: Final[dict[ValidatorReason, str]] = {
     "skill_manifest_skill_md_invalid": "validators/skills.py",
     "skill_manifest_declared_tools_invalid": "validators/skills.py",
     "skill_manifest_entry_point_mismatch": "validators/skills.py",
+    # Instruction-only skill mode (M8 A7 — cli/validators/skills.py per
+    # ADR-027).
+    "skill_manifest_instruction_mode_declares_tools": "validators/skills.py",
+    "skill_manifest_instruction_mode_has_entry_point": "validators/skills.py",
+    "skill_manifest_referenced_tools_invalid": "validators/skills.py",
+    "skill_manifest_referenced_tool_unverifiable": "validators/skills.py",
+    # Governed agents (M8 A8 — cli/validators/agents.py per ADR-027).
+    # ``agent_pack_kind_constraint_violated`` is owned by ``validate.py``
+    # per the hook_pack_kind_constraint_violated precedent: the
+    # orchestrator-level forbidden-block check (refuse ``[mcp]`` for
+    # ``kind="agent"``; ``[a2a]`` stays legal) emits it BEFORE
+    # per-concern dispatch.
+    "agent_manifest_block_missing": "validators/agents.py",
+    "agent_manifest_persona_path_invalid": "validators/agents.py",
+    "agent_manifest_requested_skills_invalid": "validators/agents.py",
+    "agent_manifest_requested_tools_invalid": "validators/agents.py",
+    "agent_manifest_max_steps_invalid": "validators/agents.py",
+    "agent_pack_kind_constraint_violated": "validate.py",
 }
 
 

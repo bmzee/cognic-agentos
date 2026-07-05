@@ -367,6 +367,142 @@ def test_pyproject_malformed_refuses_unparseable(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# (f2) M8 A7 — instruction-only skill mode
+# ---------------------------------------------------------------------------
+
+_PYPROJECT_NO_EP = "[project]\nname = 'cognic-skill-x'\nversion = '0.1.0'\n".replace("'", '"')
+
+
+def test_explicit_executable_mode_validates_clean(tmp_path: Path) -> None:
+    """``mode = "executable"`` is byte-identical to the absent-mode default."""
+    _write_pack_files(tmp_path)
+    findings = skills.validate(
+        _data(block={"mode": "executable", "declared_tools": list(_VALID_TOOLS)}), tmp_path
+    )
+    assert findings == []
+
+
+def test_mode_invalid_value_refuses_block_shape(tmp_path: Path) -> None:
+    _write_pack_files(tmp_path)
+    findings = skills.validate(
+        _data(block={"mode": "interpretive-dance", "declared_tools": list(_VALID_TOOLS)}),
+        tmp_path,
+    )
+    assert "mode_invalid" in _modes(findings, "skill_manifest_block_shape_invalid")
+
+
+def test_valid_instruction_pack_validates_clean(tmp_path: Path) -> None:
+    """Instruction mode: no declared_tools requirement, no entry-point
+    requirement — a SKILL.md + a bare pyproject (no cognic.skills EP) is a
+    complete instruction skill pack."""
+    _write_pack_files(tmp_path, pyproject=_PYPROJECT_NO_EP)
+    findings = skills.validate(_data(block={"mode": "instruction"}), tmp_path)
+    assert findings == []
+
+
+def test_instruction_mode_with_declared_tools_refuses(tmp_path: Path) -> None:
+    _write_pack_files(tmp_path, pyproject=_PYPROJECT_NO_EP)
+    findings = skills.validate(
+        _data(block={"mode": "instruction", "declared_tools": list(_VALID_TOOLS)}), tmp_path
+    )
+    assert any(f.reason == "skill_manifest_instruction_mode_declares_tools" for f in findings)
+
+
+def test_instruction_mode_with_empty_declared_tools_clean(tmp_path: Path) -> None:
+    """``declared_tools = []`` is not an executable surface — partition-aligned
+    with the runtime loader's truthiness rule (build time never refuses what
+    the runtime would host)."""
+    _write_pack_files(tmp_path, pyproject=_PYPROJECT_NO_EP)
+    findings = skills.validate(_data(block={"mode": "instruction", "declared_tools": []}), tmp_path)
+    assert findings == []
+
+
+def test_instruction_mode_with_entry_point_refuses(tmp_path: Path) -> None:
+    """An instruction pack declaring a ``cognic.skills`` entry point is an
+    author error (the runtime loader would warn-skip it at boot)."""
+    _write_pack_files(tmp_path)  # _VALID_PYPROJECT declares one cognic.skills EP
+    findings = skills.validate(_data(block={"mode": "instruction"}), tmp_path)
+    assert any(f.reason == "skill_manifest_instruction_mode_has_entry_point" for f in findings)
+
+
+def test_instruction_mode_still_requires_skill_md(tmp_path: Path) -> None:
+    _write_pack_files(tmp_path, skill_md=None, pyproject=_PYPROJECT_NO_EP)
+    findings = skills.validate(_data(block={"mode": "instruction"}), tmp_path)
+    assert "file_absent" in _modes(findings, "skill_manifest_skill_md_missing")
+
+
+def test_instruction_mode_unreadable_pyproject_refuses(tmp_path: Path) -> None:
+    """Without a parseable pyproject the validator cannot verify the no-EP
+    invariant — fail closed with the shared pyproject_unparseable arm."""
+    _write_pack_files(tmp_path, pyproject=None)
+    findings = skills.validate(_data(block={"mode": "instruction"}), tmp_path)
+    assert "pyproject_unparseable" in _modes(findings, "skill_manifest_entry_point_mismatch")
+
+
+# ---------------------------------------------------------------------------
+# (f3) M8 A7 — referenced_tools (non-authoritative reviewer evidence)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("value", "mode_expected"),
+    [
+        ("a/b", "not_a_list"),
+        ([42], "entry_not_a_string"),
+        (["describe_table"], "entry_identity_malformed"),
+        (["a/b", "a/b"], "entry_duplicate"),
+        (["AUTHOR-FILL: e.g., cognic-tool-x/y"], "entry_author_fill"),
+    ],
+    ids=["not-a-list", "non-string", "malformed", "duplicate", "author-fill"],
+)
+def test_referenced_tools_shape_arms_refuse(tmp_path: Path, value: Any, mode_expected: str) -> None:
+    _write_pack_files(tmp_path, pyproject=_PYPROJECT_NO_EP)
+    findings = skills.validate(
+        _data(block={"mode": "instruction", "referenced_tools": value}), tmp_path
+    )
+    assert mode_expected in _modes(findings, "skill_manifest_referenced_tools_invalid")
+
+
+def test_referenced_tools_valid_emits_unverifiable_warning_only(tmp_path: Path) -> None:
+    """A shape-clean non-empty referenced_tools list emits ONE warning-severity
+    finding (the entries cannot be verified against a live registered-MCP set
+    at build time) and NO refusal — exit code stays 0."""
+    _write_pack_files(tmp_path, pyproject=_PYPROJECT_NO_EP)
+    findings = skills.validate(
+        _data(
+            block={
+                "mode": "instruction",
+                "referenced_tools": ["cognic-tool-oracle-schema/list_tables"],
+            }
+        ),
+        tmp_path,
+    )
+    warnings = [f for f in findings if f.reason == "skill_manifest_referenced_tool_unverifiable"]
+    assert len(warnings) == 1
+    assert warnings[0].severity == "warning"
+    assert warnings[0].affects_exit_code is False
+    assert [f for f in findings if f.severity == "refusal"] == []
+
+
+def test_referenced_tools_empty_list_is_silent(tmp_path: Path) -> None:
+    _write_pack_files(tmp_path, pyproject=_PYPROJECT_NO_EP)
+    findings = skills.validate(
+        _data(block={"mode": "instruction", "referenced_tools": []}), tmp_path
+    )
+    assert findings == []
+
+
+def test_referenced_tools_shape_validated_on_executable_blocks_too(tmp_path: Path) -> None:
+    """The field is shape-validated wherever present (either mode)."""
+    _write_pack_files(tmp_path)
+    findings = skills.validate(
+        _data(block={"declared_tools": list(_VALID_TOOLS), "referenced_tools": ["bad"]}),
+        tmp_path,
+    )
+    assert "entry_identity_malformed" in _modes(findings, "skill_manifest_referenced_tools_invalid")
+
+
+# ---------------------------------------------------------------------------
 # (g) Severity + closed-enum vocabulary
 # ---------------------------------------------------------------------------
 
@@ -385,6 +521,11 @@ _SKILL_MANIFEST_REASONS: tuple[str, ...] = (
     "skill_manifest_skill_md_invalid",
     "skill_manifest_declared_tools_invalid",
     "skill_manifest_entry_point_mismatch",
+    # M8 A7 (ADR-027) — instruction-only mode + referenced_tools evidence.
+    "skill_manifest_instruction_mode_declares_tools",
+    "skill_manifest_instruction_mode_has_entry_point",
+    "skill_manifest_referenced_tools_invalid",
+    "skill_manifest_referenced_tool_unverifiable",
 )
 
 
@@ -396,3 +537,16 @@ def test_skill_manifest_reason_in_validator_reason_literal(reason: str) -> None:
 @pytest.mark.parametrize("reason", _SKILL_MANIFEST_REASONS)
 def test_skill_manifest_reason_owned_by_skills_validator(reason: str) -> None:
     assert _VALIDATOR_REASON_OWNERSHIP[reason] == "validators/skills.py"  # type: ignore[index]
+
+
+def test_referenced_tool_unverifiable_is_warning_severity() -> None:
+    """The unverifiable-reference reason is the validator's ONLY warning —
+    it joins ``_WARNING_REASONS`` (severity partition) while the other three
+    A7 reasons stay refusals."""
+    from cognic_agentos.cli import _WARNING_REASONS, severity_for
+
+    assert "skill_manifest_referenced_tool_unverifiable" in _WARNING_REASONS
+    assert severity_for("skill_manifest_referenced_tool_unverifiable") == "warning"
+    assert severity_for("skill_manifest_instruction_mode_declares_tools") == "refusal"
+    assert severity_for("skill_manifest_instruction_mode_has_entry_point") == "refusal"
+    assert severity_for("skill_manifest_referenced_tools_invalid") == "refusal"

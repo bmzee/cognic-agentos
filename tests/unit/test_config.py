@@ -1842,6 +1842,30 @@ class TestSprint7AClosedEnumVocabulary:
                 "skill_manifest_skill_md_invalid",
                 "skill_manifest_declared_tools_invalid",
                 "skill_manifest_entry_point_mismatch",
+                # M8 A7 — instruction-only skill mode
+                # (cli/validators/skills.py per ADR-027): 3 refusal
+                # reasons. The 4th A7 reason
+                # (skill_manifest_referenced_tool_unverifiable) is
+                # WARNING-severity and lives in _WARNING_REASONS — the
+                # partition's other half — so it is deliberately NOT in
+                # this refusal seed.
+                "skill_manifest_instruction_mode_declares_tools",
+                "skill_manifest_instruction_mode_has_entry_point",
+                "skill_manifest_referenced_tools_invalid",
+                # M8 A8 — governed agents (cli/validators/agents.py per
+                # ADR-027): 5 [agent]-block reasons (block MANDATORY on
+                # kind="agent"; persona_path resolve-then-validate;
+                # requested lists; max_steps 1..32) + the orchestrator-
+                # owned agent_pack_kind_constraint_violated (validate.py
+                # refuses [mcp] on agent packs; [a2a] stays legal —
+                # mirrors the hook_pack_kind_constraint_violated
+                # precedent).
+                "agent_manifest_block_missing",
+                "agent_manifest_persona_path_invalid",
+                "agent_manifest_requested_skills_invalid",
+                "agent_manifest_requested_tools_invalid",
+                "agent_manifest_max_steps_invalid",
+                "agent_pack_kind_constraint_violated",
             }
         )
 

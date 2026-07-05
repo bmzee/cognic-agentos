@@ -16,3 +16,10 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/cognic_agent_example_minimal"]
+
+[tool.hatch.build.targets.wheel.force-include]
+# M8 A8 (ADR-027): ship the AGENT.md persona as package data so the AgentOS
+# hosting layer can read + validate it from the installed wheel WITHOUT
+# importing pack code (the ADR-002 gate-1 deferred-load discipline — mirrors
+# the M6 SKILL.md force-include in the skill scaffold).
+"AGENT.md" = "cognic_agent_example_minimal/AGENT.md"

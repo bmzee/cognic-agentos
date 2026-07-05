@@ -114,6 +114,22 @@ def test_skill_not_registered_returns_409() -> None:
     assert resp.json()["refusal_reason"] == "skill_not_registered"
 
 
+def test_skill_not_executable_returns_409_with_reason() -> None:
+    """A7 (ADR-027): an instruction-mode skill refused by the executor's mode
+    guard surfaces 409 with the closed-enum reason in the body — present but
+    not invokable, mirroring ``skill_not_registered``'s 409 semantics."""
+    ex = _StubExecutor(
+        SkillInvokeResult(
+            terminal_state="refused", result=None, refusal_reason="skill_not_executable"
+        )
+    )
+    resp = _post(_client(executor=ex))
+    assert resp.status_code == 409
+    body = resp.json()
+    assert body["refusal_reason"] == "skill_not_executable"
+    assert body["terminal_state"] == "refused"
+
+
 def test_runtime_error_returns_502() -> None:
     ex = _StubExecutor(
         SkillInvokeResult(
@@ -175,6 +191,7 @@ def test_arguments_defaults_to_empty_dict() -> None:
         ("skill_tool_not_declared", 403),
         ("skill_not_found", 404),
         ("skill_not_registered", 409),
+        ("skill_not_executable", 409),
     ],
 )
 def test_refused_status_map(reason: str, status: int) -> None:

@@ -14,6 +14,15 @@ missing entry-point / unregistered-tool reference warn-skips the pack (logged) �
 the boot still succeeds, the bad skill is simply not hosted (invoking it then
 404s ``skill_not_found``). Mirrors the M5 mapper doctrine.
 
+M8 A7 (ADR-027) — instruction-only mode: ``[skill].mode = "instruction"``
+(ABSENT → ``"executable"``, every pre-A7 pack byte-unchanged) hosts the
+SKILL.md guidance with NO executable surface — the instruction branch SKIPS
+the declared-tools gate, the entry-point gate, the MCP cross-check, and
+runtime-image resolution; it warn-skips a pack that declares an executable
+surface anyway (``skill.instruction_mode_declares_executable``); the optional
+``[skill].referenced_tools`` list is non-authoritative reviewer evidence
+(shape violations + unregistered references warn-log ONLY, never a refusal).
+
 This is also home to :class:`_MCPHostCallProxy` — the ``core/skill.SkillCallProxy``
 conformer wrapping ``MCPHost.call_tool`` — because ``core/skill`` cannot import
 ``protocol`` (the ``core -> protocol`` arrow is forbidden; the host is reached
@@ -25,7 +34,7 @@ from __future__ import annotations
 import importlib.metadata as md
 import json
 import logging
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from cognic_agentos.core.skill._types import LoadedSkillRecord
 from cognic_agentos.core.skill.executor import SkillExecutor
@@ -104,6 +113,64 @@ def _declared_tools(skill_block: dict[str, Any]) -> tuple[str, ...] | None:
     return tuple(out)
 
 
+def _skill_mode(skill_block: dict[str, Any]) -> Literal["executable", "instruction"] | None:
+    """``[skill].mode`` (M8 A7, ADR-027). ABSENT → ``"executable"`` — every
+    pre-A7 skill pack is byte-unchanged. An out-of-vocabulary value → ``None``
+    (the loader warn-skips: the pack's intent cannot be determined)."""
+    raw = skill_block.get("mode")
+    if raw is None:
+        return "executable"
+    if raw == "executable":
+        return "executable"
+    if raw == "instruction":
+        return "instruction"
+    return None
+
+
+def _referenced_tools(skill_block: dict[str, Any]) -> tuple[str, ...] | None:
+    """``[skill].referenced_tools`` (M8 A7 — instruction-mode NON-AUTHORITATIVE
+    reviewer evidence). ABSENT → ``()`` (nothing referenced); a well-formed list
+    of ``<server_id>/<tool_name>`` identities (empty allowed) → the tuple;
+    any shape violation → ``None`` (the loader warn-LOGS and hosts anyway —
+    the field grants no authority, so malformation is never a refusal)."""
+    raw = skill_block.get("referenced_tools")
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        return None
+    out: list[str] = []
+    for item in raw:
+        if not isinstance(item, str):
+            return None
+        server_id, _, tool_name = item.partition("/")
+        if not server_id or not tool_name:
+            return None
+        out.append(item)
+    return tuple(out)
+
+
+def _declares_skill_entry_point(distribution_name: str) -> bool:
+    """True iff the installed distribution declares ANY ``cognic.skills``
+    entry point (M8 A7 — instruction-mode packs must not declare one; unlike
+    :func:`_skill_entry_point_info`, an ambiguous 2+ mapping also counts).
+    A not-installed distribution declares none."""
+    try:
+        dist = md.distribution(distribution_name)
+    except md.PackageNotFoundError:
+        return False
+    return any(ep.group == "cognic.skills" for ep in dist.entry_points)
+
+
+def _distribution_version(distribution_name: str) -> str | None:
+    """The installed distribution's version; ``None`` when not visible
+    (instruction-mode packs have no entry point to ride the version lookup
+    in :func:`_skill_entry_point_info`, so they resolve it directly)."""
+    try:
+        return md.distribution(distribution_name).version
+    except md.PackageNotFoundError:
+        return None
+
+
 def _skill_entry_point_info(distribution_name: str) -> tuple[str | None, str | None]:
     """The distribution's single ``cognic.skills`` entry-point NAME + its version;
     ``(None, None)`` when the distribution is not visible OR does not declare
@@ -179,6 +246,101 @@ def _build_skill_records(
         block = _skill_block(manifest)
         if block is None:
             continue  # non-skill pack
+        mode = _skill_mode(block)
+        if mode is None:
+            logger.warning(
+                "skill.mode_invalid",
+                extra={
+                    "distribution_name": cand.distribution_name,
+                    "declared_mode": block.get("mode"),
+                },
+            )
+            continue
+        if mode == "instruction":
+            # M8 A7 (ADR-027) — instruction-only mode: host the SKILL.md
+            # guidance with NO executable surface. SKIPS the declared-tools
+            # gate, the entry-point gate, the MCP cross-check, and
+            # runtime-image resolution. A pack that declares an executable
+            # surface anyway is an author error → warn-skip (fail closed).
+            if block.get("declared_tools"):
+                logger.warning(
+                    "skill.instruction_mode_declares_executable",
+                    extra={
+                        "distribution_name": cand.distribution_name,
+                        "surface": "declared_tools",
+                    },
+                )
+                continue
+            if _declares_skill_entry_point(cand.distribution_name):
+                logger.warning(
+                    "skill.instruction_mode_declares_executable",
+                    extra={
+                        "distribution_name": cand.distribution_name,
+                        "surface": "entry_point",
+                    },
+                )
+                continue
+            try:
+                text = extract_skill_md(
+                    distribution_name=cand.distribution_name, package_name=cand.package_name
+                )
+            except SkillManifestNotFound:
+                logger.warning(
+                    "skill.skill_md_not_found",
+                    extra={"distribution_name": cand.distribution_name},
+                )
+                continue
+            try:
+                frontmatter, body = parse_skill_md(text)
+                validate_skill_md(frontmatter, body=body)
+            except SkillManifestInvalid as exc:
+                logger.warning(
+                    "skill.skill_md_invalid",
+                    extra={"distribution_name": cand.distribution_name, "reason": exc.reason},
+                )
+                continue
+            skill_id = frontmatter["name"]  # validated str
+            # referenced_tools is NON-AUTHORITATIVE reviewer evidence — shape
+            # violations + unregistered-server references warn-log ONLY (the
+            # field grants no authority; the broker never sees it).
+            referenced = _referenced_tools(block)
+            if referenced is None:
+                logger.warning(
+                    "skill.referenced_tools_malformed",
+                    extra={"distribution_name": cand.distribution_name},
+                )
+                referenced = ()
+            unresolved_refs = sorted(
+                {
+                    t.partition("/")[0]
+                    for t in referenced
+                    if t.partition("/")[0] not in registered_mcp_servers
+                }
+            )
+            if unresolved_refs:
+                logger.warning(
+                    "skill.referenced_tool_unregistered",
+                    extra={
+                        "distribution_name": cand.distribution_name,
+                        "servers": unresolved_refs,
+                    },
+                )
+            if skill_id in records:
+                logger.warning(
+                    "skill.duplicate_skill_id",
+                    extra={"distribution_name": cand.distribution_name, "skill_id": skill_id},
+                )
+                continue  # cross-pack skill_id conflict -> fail closed (keep the first)
+            records[skill_id] = LoadedSkillRecord(
+                skill_id=skill_id,
+                mode="instruction",
+                description=frontmatter["description"],
+                skill_md_body=body,
+                registered=True,
+                pack_version=_distribution_version(cand.distribution_name) or "",
+                signed_artefact_digest=_digest_bytes(cand.signature_digest),
+            )
+            continue
         declared = _declared_tools(block)
         if declared is None:
             logger.warning(
