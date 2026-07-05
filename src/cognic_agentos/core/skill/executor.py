@@ -210,9 +210,15 @@ class SkillExecutor:
                 )
                 exec_result = await session.exec(command, timeout_s=policy.walltime_s)
             except Exception:
+                # invoke_request_id (NOT request_id) on this + every failure
+                # WARNING below: the observability _ContextFilter owns
+                # record.request_id and stamps the ambient portal context over
+                # same-named extras (finding #17c, mirror of the broker's
+                # tool_request_id). The skill.invoked CHAIN row keeps
+                # request_id — log.invoke_request_id joins against it.
                 logger.warning(
                     "skill.invoke.sandbox_failed",
-                    extra={"request_id": request_id, "skill_id": skill_id},
+                    extra={"invoke_request_id": request_id, "skill_id": skill_id},
                     exc_info=True,
                 )
                 await self._emit_invoked(
@@ -243,7 +249,7 @@ class SkillExecutor:
                 logger.warning(
                     "skill.invoke.runner_failed",
                     extra={
-                        "request_id": request_id,
+                        "invoke_request_id": request_id,
                         "skill_id": skill_id,
                         "exit_code": exec_result.exit_code,
                         "stdout_bytes": len(exec_result.stdout),
@@ -277,7 +283,7 @@ class SkillExecutor:
             except Exception:  # a broker-close raise never skips session destroy.
                 logger.warning(
                     "skill.broker_close_failed",
-                    extra={"request_id": request_id},
+                    extra={"invoke_request_id": request_id},
                     exc_info=True,
                 )
             if session is not None:
@@ -287,7 +293,7 @@ class SkillExecutor:
                     logger.warning(
                         "skill.session_destroy_failed",
                         extra={
-                            "request_id": request_id,
+                            "invoke_request_id": request_id,
                             "session_id": getattr(session, "session_id", None),
                         },
                     )
