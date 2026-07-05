@@ -35,6 +35,7 @@ import pydantic
 from fastapi import Request
 
 from cognic_agentos.portal.rbac.scopes import (  # noqa: F401  (ScopeSet kept for legacy bank-overlay re-export)
+    AgentRBACScope,
     ComplianceRBACScope,
     ConfigOverlayRBACScope,
     EmergencyRBACScope,
@@ -154,6 +155,11 @@ class Actor(pydantic.BaseModel):
     #: value-disjoint despite the shared ``mcp.`` prefix. Additive — pre-PR-2b-1
     #: actors still construct cleanly. Pinned by
     #: ``tests/unit/portal/rbac/test_mcp_internal_access_scopes.py``.
+    #:
+    #: M8 Task A13 (ADR-027) — further widened with ``AgentRBACScope`` so an
+    #: agent-ask-capable actor carries ``agent.ask`` for
+    #: ``POST /api/v1/agents/{agent_id}/ask``. Additive — pre-M8 actors still
+    #: construct cleanly. Pinned by ``tests/unit/portal/rbac/test_agent_scopes.py``.
     scopes: frozenset[
         PackRBACScope
         | UIRBACScope
@@ -170,6 +176,7 @@ class Actor(pydantic.BaseModel):
         | MCPInternalAccessRBACScope
         | SubAgentRBACScope
         | SkillRBACScope
+        | AgentRBACScope
     ]
     actor_type: ActorType
 

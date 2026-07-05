@@ -17,8 +17,13 @@ hosted. Mirrors the M5 mapper doctrine. The risk-tier skip is deliberately
 fail-closed: a record without a tier cannot be dispatched (the A5+ loop
 admits by tier), so hosting it would defer the failure to run time.
 
-NO ``build_agent_loop`` here — the governed loop composition is A13; A8 ships
-the record loader + the ``hosted_agents`` operator-surface summary rows only.
+M8 A13 adds :func:`build_agent_loop` — the governed-loop composition seam the
+``create_app`` lifespan calls (the ``build_skill_executor`` mirror). It owns
+the 3-state dependency discipline per
+``feedback_conditional_router_mount_partial_config_warning`` (ALL gateable
+deps → loop; SOME missing → None + ONE warning naming them; ZERO → None,
+quiet) and assembles the A4 stores + the A5 Rego policy + the A10 dispatcher
++ the A11 loop over the boot-hosted agent + instruction-skill records.
 """
 
 from __future__ import annotations
@@ -26,9 +31,21 @@ from __future__ import annotations
 import hashlib
 import importlib.metadata as md
 import logging
-from typing import TYPE_CHECKING, Any, Protocol
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from cognic_agentos.core.agent._types import LoadedAgentRecord
+from cognic_agentos.core.agent.assignments import AssignmentStore
+from cognic_agentos.core.agent.dispatch import AgentDispatcher
+from cognic_agentos.core.agent.loop import AgentLoop
+from cognic_agentos.core.agent.policy import AgentDispatchPolicy
+from cognic_agentos.core.entitlements.store import EntitlementStore
+from cognic_agentos.core.policy.engine import OPAEngine
+from cognic_agentos.harness.skill_host import (
+    _build_skill_records,
+    _project_tool_result,
+    _registered_mcp_server_ids,
+)
 from cognic_agentos.protocol.agent_manifest import (
     AgentManifestNotFound,
     SkillManifestInvalid,
@@ -43,8 +60,12 @@ from cognic_agentos.protocol.mcp_manifest import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    import uuid
+    from collections.abc import Iterator, Mapping
 
+    from sqlalchemy.ext.asyncio import AsyncEngine
+
+    from cognic_agentos.core.skill._types import LoadedSkillRecord
     from cognic_agentos.protocol.plugin_registry import RegisteredPackCandidate
 
 logger = logging.getLogger(__name__)
@@ -276,4 +297,234 @@ def hosted_agents_summary(records: dict[str, LoadedAgentRecord]) -> list[dict[st
     ]
 
 
-__all__ = ["hosted_agents_summary"]
+# ---------------------------------------------------------------------------
+# M8 A13 (ADR-027) — governed-loop composition
+# ---------------------------------------------------------------------------
+
+
+class _AgentLoopRuntime(Protocol):
+    """Narrow seam — the four ``Runtime`` members the loop composition reads.
+    Declared as read-only properties so the real frozen-dataclass ``Runtime``
+    structurally conforms (the ``_SkillHostRuntime`` precedent)."""
+
+    @property
+    def llm_gateway(self) -> Any: ...
+
+    @property
+    def memory_api_factory(self) -> Any: ...
+
+    @property
+    def audit_store(self) -> Any: ...
+
+    @property
+    def decision_history_store(self) -> Any: ...
+
+
+class _AgentLoopSettings(Protocol):
+    """Narrow seam — the ``Settings`` fields the loop composition reads (the
+    real ``Settings`` conforms structurally; the skill-record walk inside
+    additionally needs the canonical runtime image field)."""
+
+    agents_policy_bundle: Path
+    agent_query_context_signing_key_path: str | None
+    agent_query_context_ttl_s: float
+    agent_max_steps: int
+    agent_run_token_budget: int
+    agent_run_wall_clock_s: float
+    opa_path: str | None
+    opa_eval_timeout_s: float
+    sandbox_canonical_runtime_python_image: str
+
+
+class _RegistryAgentRecordLoader:
+    """``core/agent.AgentRecordLoader`` conformer over the boot-built record
+    map. Hosted agents are PLATFORM-hosted (registry-global, trust-gated
+    upstream at registration) — tenant isolation rides the A4 tenant-scoped
+    assignment + entitlement stores downstream (an agent with no grants for a
+    tenant dispatches nothing), so ``tenant_id`` is accepted for the seam
+    contract but does not narrow the lookup (the
+    ``_RegistrySkillRecordLoader`` precedent)."""
+
+    def __init__(self, records: dict[str, LoadedAgentRecord]) -> None:
+        self._records = records
+
+    async def load_for_agent(self, *, agent_id: str, tenant_id: str) -> LoadedAgentRecord | None:
+        return self._records.get(agent_id)
+
+
+class _InstructionSkillBodyReader:
+    """``core/agent.SkillBodyReader`` conformer over the boot-hosted skill
+    records — INSTRUCTION-mode records only. An executable-mode record has no
+    in-prompt body surface (the M8 lane reads guidance; executing actions is
+    the M6 executor's lane), and an unknown id reads as absent — both return
+    ``None`` so the ``read_skill`` built-in surfaces a graceful miss."""
+
+    def __init__(self, records: dict[str, LoadedSkillRecord]) -> None:
+        self._records = records
+
+    def read(self, skill_id: str) -> tuple[str, str] | None:
+        record = self._records.get(skill_id)
+        if record is None or record.mode != "instruction" or record.skill_md_body is None:
+            return None
+        return record.description, record.skill_md_body
+
+
+class _MCPHostAgentToolProxy:
+    """``core/agent.AgentToolProxy`` conformer wrapping ``MCPHost.call_tool``
+    (the ``_MCPHostCallProxy`` mirror, including its result→dict projection —
+    OAuth / approval / DLP / audit apply automatically downstream in the
+    host). ``core/agent`` cannot import ``protocol``; the host is reached
+    ONLY through this injected seam."""
+
+    def __init__(self, mcp_host: Any) -> None:
+        self._host = mcp_host
+
+    async def call_tool(
+        self,
+        *,
+        server_id: str,
+        tool_name: str,
+        arguments: Mapping[str, Any],
+        request_id: str,
+        tenant_id: str,
+        originator_subject: str,
+        approval_request_id: uuid.UUID | None,
+    ) -> dict[str, Any]:
+        result = await self._host.call_tool(
+            server_id=server_id,
+            tool_name=tool_name,
+            arguments=arguments,
+            request_id=request_id,
+            tenant_id=tenant_id,
+            originator_subject=originator_subject,
+            approval_request_id=approval_request_id,
+        )
+        # The projection target is the handler's own dict for every real
+        # governed tool (structuredContent / single-JSON-text / model_dump
+        # envelope — see _project_tool_result); the cast keeps the seam's
+        # declared dict contract under strict mypy while the duck-typed
+        # stub-host passthrough arm stays possible (canonical_bytes at the
+        # dispatcher's evidence boundary handles either shape).
+        return cast("dict[str, Any]", _project_tool_result(getattr(result, "payload", result)))
+
+
+def _resolve_signing_key(path_value: str | None) -> tuple[bytes | None, list[str]]:
+    """Resolve ``Settings.agent_query_context_signing_key_path`` to PEM bytes.
+
+    ``None`` → ``(None, [])`` (no stamped tools deployable — the dispatcher
+    fails loud at first stamped mint per ADR-027 §c). A ``vault://`` URI →
+    ``(None, [warning])``: the builder's controller-authorized signature has
+    no secret-adapter seam, so vault-backed resolution is NOT wired at A13 —
+    the explicit warning names the consequence. A plain path →
+    ``(Path.read_bytes(), [])``; a read failure propagates to the lifespan's
+    fail-soft catch (the loop then stays None — an unreadable key is a
+    deployment error, not a silently-unsigned run)."""
+    if path_value is None:
+        return None, []
+    if path_value.startswith("vault://"):
+        return None, [
+            f"agent_query_context_signing_key_path={path_value!r}: vault:// "
+            "signing-key resolution not wired yet — stamped-tool dispatches "
+            "will fail loud at mint"
+        ]
+    return Path(path_value).read_bytes(), []
+
+
+async def build_agent_loop(
+    *,
+    runtime: _AgentLoopRuntime,
+    settings: _AgentLoopSettings,
+    registry: _RegistryCandidates | None,
+    mcp_host: Any,
+    engine: AsyncEngine,
+) -> tuple[AgentLoop | None, list[str], list[dict[str, Any]]]:
+    """Assemble the production governed agent loop (M8 A13) over the trusted
+    candidates + return ``(loop, warnings, hosted_agents)`` — the third
+    element is the :func:`hosted_agents_summary` operator-surface rows for
+    ``app.state.hosted_agents`` (read by ``/api/v1/system/plugins`` at
+    ``portal/api/system_routes.py``; the ``build_skill_executor`` →
+    ``hosted_skills`` mirror).
+
+    3-state dependency discipline per
+    ``feedback_conditional_router_mount_partial_config_warning`` over the four
+    gateable deps (``registry`` / ``mcp_host`` / ``runtime.llm_gateway`` /
+    ``runtime.memory_api_factory``):
+
+      * ALL present → ``(AgentLoop, [], hosted rows)`` (plus at most the
+        vault:// signing-key warning — see :func:`_resolve_signing_key`);
+      * SOME missing → ``(None, [ONE warning naming the missing deps], [])``;
+      * ZERO present → ``(None, [], [])`` — QUIET (nothing agent-shaped was
+        ever configured on this deployment; warning would be noise).
+
+    Hosted rows ride ONLY the built path: surfacing an agent as hosted while
+    the ask surface 503s would be an operator-facing overclaim (the M6
+    posture — ``hosted_skills`` rows and the executor land together).
+    """
+    missing = [
+        name
+        for name, present in (
+            ("registry", registry is not None),
+            ("mcp_host", mcp_host is not None),
+            ("llm_gateway", getattr(runtime, "llm_gateway", None) is not None),
+            ("memory_api_factory", getattr(runtime, "memory_api_factory", None) is not None),
+        )
+        if not present
+    ]
+    if len(missing) == 4:
+        return None, [], []  # zero gateable deps — stay quiet.
+    if missing:
+        return (
+            None,
+            ["agent loop not built — missing dependencies: " + ", ".join(sorted(missing))],
+            [],
+        )
+    assert registry is not None  # narrowed by the gate above
+
+    # Boot-hosted records: the A8 agent packs + the instruction-mode skill
+    # records the read_skill built-in serves bodies from.
+    agent_records = _build_agent_records(registry=registry, settings=settings)
+    skill_records = _build_skill_records(
+        registry=registry,
+        settings=settings,
+        registered_mcp_servers=_registered_mcp_server_ids(registry),
+    )
+
+    # A5 — the agents.rego dispatch bundle over a dedicated OPAEngine (the
+    # scheduler-OPA construction mirror at harness/runtime.py).
+    agents_opa = await OPAEngine.create(
+        bundle_path=settings.agents_policy_bundle,
+        audit_store=runtime.audit_store,
+        decision_history_store=runtime.decision_history_store,
+        opa_path=settings.opa_path,
+        eval_timeout_s=settings.opa_eval_timeout_s,
+    )
+
+    signing_key_pem, warnings = _resolve_signing_key(settings.agent_query_context_signing_key_path)
+    skill_reader = _InstructionSkillBodyReader(skill_records)
+    dispatcher = AgentDispatcher(
+        entitlements=EntitlementStore(engine),
+        policy=AgentDispatchPolicy(opa_engine=agents_opa),
+        tool_proxy=_MCPHostAgentToolProxy(mcp_host),
+        skill_reader=skill_reader,
+        memory_factory=runtime.memory_api_factory,
+        decision_history=runtime.decision_history_store,
+        query_context_signing_key_pem=signing_key_pem,
+        query_context_ttl_s=settings.agent_query_context_ttl_s,
+    )
+    loop = AgentLoop(
+        record_loader=_RegistryAgentRecordLoader(agent_records),
+        assignments=AssignmentStore(engine),
+        gateway=runtime.llm_gateway,
+        dispatcher=dispatcher,
+        skill_reader=skill_reader,
+        memory_factory=runtime.memory_api_factory,
+        decision_history=runtime.decision_history_store,
+        default_max_steps=settings.agent_max_steps,
+        run_token_budget=settings.agent_run_token_budget,
+        run_wall_clock_s=settings.agent_run_wall_clock_s,
+        tier="tier1",
+    )
+    return loop, warnings, hosted_agents_summary(agent_records)
+
+
+__all__ = ["build_agent_loop", "hosted_agents_summary"]
