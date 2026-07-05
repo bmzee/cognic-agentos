@@ -176,8 +176,18 @@ _GATE_TOOL_PATH = _REPO_ROOT / "tools" / "check_critical_coverage.py"
 #: capability call passes through this single seam;
 #: ``core/agent/builtins.py`` stays off-gate — enforcement is upstream in
 #: dispatch + the governed MemoryAPI) promoted to the gate = 148.
+#: +1 at M8 A11 (ADR-027) — ``core/agent/loop.py`` (the kernel-owned reasoning
+#: loop: the single-shot governed agent run — pre-flight fail-loud record +
+#: grant loading (NO run minted), the progressive-disclosure system prompt
+#: (descriptions only; bodies reach the model ONLY via read_skill), the
+#: round-top max_steps/token_budget/wall_clock bounds checked BEFORE every
+#: completion call, every LLM-authored call through the A10 dispatcher with
+#: refusals fed back as tool messages (never terminating the run), the
+#: digest-only ``agent.run.started/.completed/.refused/.failed`` evidence
+#: rows, and the best-effort task-tier memory digest) promoted to the
+#: gate = 149.
 #: Bump this in lockstep with any deliberate ``_CRITICAL_FILES`` change.
-_EXPECTED_ENTRY_COUNT = 148
+_EXPECTED_ENTRY_COUNT = 149
 
 #: The 5 modules Sprint 7B.3 promoted to the durable gate, each by its
 #: own landing commit (T3-T6 panels + T7 composer). All ride the

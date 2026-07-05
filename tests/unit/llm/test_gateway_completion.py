@@ -302,3 +302,102 @@ class TestPreDispatchDenialPath:
         assert rows[0].outcome == "ok"
         assert rows[0].provenance == "resolved"
         assert rows[0].external is True
+
+
+# ---------------------------------------------------------------------------
+# TestUsageSurface — M8 A11: the delivered wire body's usage dict surfaces on
+# GatewayResponse.usage (the A2 tool_calls additive-field precedent).
+# ---------------------------------------------------------------------------
+
+
+def _usage_litellm_response(usage: object, model: str = "ollama/qwen3:8b") -> httpx.Response:
+    """Delivered completion whose wire body carries a ``usage`` value."""
+    return httpx.Response(
+        200,
+        json={
+            "id": "resp-test",
+            "object": "chat.completion",
+            "model": model,
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "hello"},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": usage,
+        },
+    )
+
+
+class TestUsageSurface:
+    @respx.mock
+    async def test_delivered_usage_dict_surfaces_on_response(
+        self,
+        settings_for_gateway: Settings,
+        gateway_ledger: GatewayCallLedger,
+        audit_store: AuditStore,
+        rate_limiter: ProfileRateLimiter,
+        dev_resolver: PreflightResolver,
+        default_sla_policy: SLAPolicy,
+    ) -> None:
+        """A delivered completion whose wire body carries a usage dict
+        surfaces that dict on ``response.usage`` (the caller-visible token
+        accounting the A11 agent-loop token budget consumes)."""
+        respx.post("http://litellm.test:4000/chat/completions").mock(
+            return_value=_usage_litellm_response(
+                {"prompt_tokens": 21, "completion_tokens": 8, "total_tokens": 29}
+            )
+        )
+        gateway = _build_gateway(
+            settings=settings_for_gateway,
+            ledger=gateway_ledger,
+            audit_store=audit_store,
+            rate_limiter=rate_limiter,
+            preflight=dev_resolver,
+            sla_policy=default_sla_policy,
+        )
+        response = await gateway.completion(
+            tier="tier1",
+            messages=[{"role": "user", "content": "hi"}],
+            request_id="req-usage-1",
+        )
+        assert response.usage == {
+            "prompt_tokens": 21,
+            "completion_tokens": 8,
+            "total_tokens": 29,
+        }
+
+    @respx.mock
+    @pytest.mark.parametrize(
+        "wire_response",
+        [_ok_litellm_response(), _usage_litellm_response("not-a-dict")],
+        ids=["usage-absent", "usage-non-dict"],
+    )
+    async def test_absent_or_non_dict_usage_is_none(
+        self,
+        wire_response: httpx.Response,
+        settings_for_gateway: Settings,
+        gateway_ledger: GatewayCallLedger,
+        audit_store: AuditStore,
+        rate_limiter: ProfileRateLimiter,
+        dev_resolver: PreflightResolver,
+        default_sla_policy: SLAPolicy,
+    ) -> None:
+        """A body without usage — or with a non-dict usage — surfaces
+        ``response.usage is None`` (mirrors the trace-capture guard)."""
+        respx.post("http://litellm.test:4000/chat/completions").mock(return_value=wire_response)
+        gateway = _build_gateway(
+            settings=settings_for_gateway,
+            ledger=gateway_ledger,
+            audit_store=audit_store,
+            rate_limiter=rate_limiter,
+            preflight=dev_resolver,
+            sla_policy=default_sla_policy,
+        )
+        response = await gateway.completion(
+            tier="tier1",
+            messages=[{"role": "user", "content": "hi"}],
+            request_id="req-usage-2",
+        )
+        assert response.usage is None

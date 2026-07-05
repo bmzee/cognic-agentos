@@ -344,6 +344,10 @@ class GatewayResponse:
     # M8 A2 — ADDITIVE field at the END: every existing keyword
     # constructor stays valid; defaults to no tool calls.
     tool_calls: tuple[GatewayToolCall, ...] = ()
+    # M8 A11 — ADDITIVE field at the END: the delivered wire body's usage
+    # dict (the same trace-captured value the span + quota metering read;
+    # dict-shaped or None per the trace guard); defaults to no usage.
+    usage: dict[str, object] | None = None
 
 
 @_dataclasses.dataclass(slots=True)
@@ -978,6 +982,7 @@ class LLMGateway:
                         tier=tier,
                         latency_ms=latency_ms,
                         tool_calls=parsed_tool_calls,
+                        usage=trace.usage,
                     )
                 except (
                     CloudPolicyViolationError,

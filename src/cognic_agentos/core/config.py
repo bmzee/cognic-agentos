@@ -2008,6 +2008,39 @@ class Settings(BaseSettings):
             "refuses at ``now >= exp``."
         ),
     )
+    agent_max_steps: int = Field(
+        default=6,
+        gt=0,
+        le=32,
+        description=(
+            "M8 A11 (ADR-027) — default per-run reasoning-step ceiling for "
+            "the governed agent loop when the agent record declares none "
+            "(LoadedAgentRecord.max_steps is None); a record-declared value "
+            "takes precedence. Checked at every round top BEFORE the "
+            "completion call."
+        ),
+    )
+    agent_run_wall_clock_s: float = Field(
+        default=120.0,
+        gt=0,
+        description=(
+            "M8 A11 (ADR-027) — per-run wall-clock bound (seconds) for the "
+            "governed agent loop; checked at every round top BEFORE the "
+            "completion call. Exceeding it terminates the run refused "
+            "(agent_max_steps_exceeded, bound=wall_clock)."
+        ),
+    )
+    agent_run_token_budget: int = Field(
+        default=24_000,
+        gt=0,
+        description=(
+            "M8 A11 (ADR-027) — per-run cumulative prompt+completion token "
+            "budget for the governed agent loop, accumulated off delivered "
+            "GatewayResponse.usage; checked at every round top BEFORE the "
+            "completion call. Exceeding it terminates the run refused "
+            "(agent_max_steps_exceeded, bound=token_budget)."
+        ),
+    )
     scheduler_class_sla_interactive_s: float = Field(
         default=0.2,
         gt=0,

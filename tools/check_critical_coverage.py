@@ -2373,6 +2373,21 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     # IN THE SAME COMMIT (NOT just the count bump) per
     # feedback_verify_promotion_meets_floor_at_promotion_time.
     ("src/cognic_agentos/core/agent/dispatch.py", 0.95, 0.90),
+    # M8 Task A11 (ADR-027) — the kernel-owned agent reasoning loop. The
+    # single-shot governed run authority: pre-flight record + grant loading
+    # (fail-loud LookupError / AgentGrantNotRequested propagation — NO run
+    # minted, NO evidence), the progressive-disclosure system prompt (skill
+    # DESCRIPTIONS only — bodies reach the model ONLY via the read_skill
+    # built-in), the round-top run bounds (max_steps / token_budget /
+    # wall_clock, checked in that order BEFORE every completion call), every
+    # LLM-authored tool call through the A10 dispatcher chokepoint with
+    # refusals fed back as tool messages (never terminating the run), the
+    # digest-only agent.run.started/.completed/.refused/.failed evidence rows
+    # (question/answer plaintext in NO payload), and the best-effort
+    # task-tier memory digest. Gate 148 -> 149. Verified against fresh
+    # full-suite --cov-branch coverage.json IN THE SAME COMMIT (NOT just the
+    # count bump) per feedback_verify_promotion_meets_floor_at_promotion_time.
+    ("src/cognic_agentos/core/agent/loop.py", 0.95, 0.90),
 )
 
 
