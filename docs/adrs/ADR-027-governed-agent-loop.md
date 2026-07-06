@@ -150,6 +150,10 @@ Per AGENTS.md "Critical-controls rule": `core/agent/loop.py`, `core/agent/dispat
 10. **Sub-agent spawn from the loop** (ADR-005) — the M8 dispatch capability vocabulary (`skill` / `tool` / `builtin`) deliberately carries no spawn kind; wiring the dispatcher to the sub-agent spawn seam is a follow-up (recorded in the ADR-005 M8 amendment).
 11. **Kernel-side shared nonce store** (Redis-backed `jti` replay cache) — Wave-2 hardening per §"The query-context trust seam"; the cache-adapter-optional invariant holds in M8.
 
+## Instruction packs are content packs — manifest-walk boot discovery (amendment, 2026-07-06)
+
+Instruction-only skill packs (`[pack] kind="skill"` + `[skill] mode="instruction"`, the A7 mode) are **content packs**: SKILL.md + the signed manifest as package data, with **no executable marker of any kind — none exists and none is permitted** (the A7 validator refuses a `cognic.skills` entry point on an instruction manifest; the runtime loader warn-skips one). Boot discovery therefore rides the **manifest-walk arm** added to `PluginRegistry.discover()` by the ADR-002 "Instruction-skill manifest-walk discovery" amendment (2026-07-06): zero-cognic-entry-point distributions whose signed manifest declares instruction-skill are discovered as `DiscoveredPack(entry_point=None)`, trust-registered through the SAME cosign + allow-list + supply-chain pipeline, reach `iter_registered_pack_candidates()`, and are hosted by the skill host; `load()` refuses them with `ManifestOnlyPackNotLoadable`. This is DISTINCT from deferred item 4 above — **agent** packs keep the inert `cognic.agents` marker in M8; only no-executable instruction skills are manifest-walk-discovered.
+
 ## References
 
 - Design spec: `docs/superpowers/specs/2026-07-04-m8-governed-agent-loop-design.md` · Implementation plan: `docs/superpowers/plans/2026-07-05-m8-governed-agent-loop.md`

@@ -14,6 +14,15 @@ discover → trust → supply-chain → policy → register pipeline.
     ``PluginRegistry.load(kind, name)`` — eager loading would import
     every pack at startup, defeating the trust gate's pre-import
     verification (ADR-002 §"MCP STDIO threat model").
+  * M8 (ADR-002 "instruction-skill manifest-walk discovery" amendment,
+    2026-07-06): ``discover()`` runs a SECOND arm over
+    ``importlib.metadata.distributions()`` for installed distributions
+    with ZERO cognic.* entry points whose signed manifest declares
+    ``[pack].kind = "skill"`` + ``[skill].mode = "instruction"``
+    (ADR-027 instruction packs are CONTENT packs — no executable
+    surface). The arm reads the manifest file only (never imports pack
+    code) and mints ``DiscoveredPack(entry_point=None)``; ``load()``
+    refuses such packs with :class:`ManifestOnlyPackNotLoadable`.
   * ``load(kind, name)`` is **synchronous** (R2-#2 reviewer-fix). It is
     a thin wrapper over the stdlib ``EntryPoint.load()``; no audit
     emission, no I/O beyond the import. Registration is where the
@@ -375,6 +384,15 @@ class PluginRecord:
     distribution name + version are the cosign-signature identity — the
     trust gate (T6) verifies the signature over THIS metadata, not over
     code loaded into the interpreter.
+
+    ``entry_point_value`` carries the stdlib ``EntryPoint.value`` string
+    (``"module.sub:attr"``) for entry-point-discovered packs. For
+    MANIFEST-ONLY instruction packs (the M8 manifest-walk arm — ADR-027
+    packs with no entry point at all) it carries the bare importable
+    package directory name instead — a LOCKED convention: the
+    ``iter_registered_pack_candidates()`` / ``_mcp_admit`` derivation
+    ``entry_point_value.split(":", 1)[0].split(".", 1)[0]`` then yields
+    exactly the right ``package_name`` with zero downstream change.
     """
 
     kind: PluginKind
@@ -438,10 +456,19 @@ class DiscoveredPack:
     final. R2 reviewer-P2: previous shape returned only ``PluginRecord``
     and forced callers to manually re-supply the EntryPoint at
     register time, breaking the public discover→register→load flow.
+
+    ``entry_point`` is ``None`` for MANIFEST-ONLY discovery (M8 — the
+    ADR-027 instruction-skill manifest-walk arm): instruction packs are
+    content packs with no entry point of any kind, so there is nothing
+    to capture and nothing ``load()`` could ever import —
+    ``PluginRegistry.load`` refuses them with
+    :class:`ManifestOnlyPackNotLoadable`. The field stays REQUIRED (no
+    default): every construction site decides explicitly which
+    discovery arm the pack came from.
     """
 
     record: PluginRecord
-    entry_point: _im.EntryPoint
+    entry_point: _im.EntryPoint | None
 
 
 class PluginIdentityConflict(RuntimeError):
@@ -474,6 +501,30 @@ class RegistrationRefused(RuntimeError):
         self.kind = kind
         self.name = name
         self.refusal_reason = refusal_reason
+
+
+class ManifestOnlyPackNotLoadable(RuntimeError):
+    """Raised by ``PluginRegistry.load`` for a registered MANIFEST-ONLY
+    pack (``entry_point is None`` — the M8 manifest-walk discovery arm).
+
+    ADR-027 instruction skill packs host ``SKILL.md`` content with NO
+    executable surface: no entry point exists, so there is nothing to
+    ``load()``. Consume the pack via the skill host
+    (``harness/skill_host.py``) / the governed ``read_skill`` built-in
+    instead. Distinct from :class:`RegistrationRefused` (registration
+    SUCCEEDED — the pack is trusted; it just has no loadable code) and
+    from :class:`PluginNotRegistered` (the pack IS known)."""
+
+    def __init__(self, kind: PluginKind, name: str) -> None:
+        super().__init__(
+            f"pack {kind}/{name!r} was discovered via the manifest-walk arm "
+            f"(ADR-027 manifest-only instruction skill pack): it hosts "
+            f"SKILL.md content with NO executable surface, so there is "
+            f"nothing to load. Consume it via the skill host / the governed "
+            f"read_skill built-in."
+        )
+        self.kind = kind
+        self.name = name
 
 
 class PluginNotRegistered(LookupError):
@@ -515,13 +566,15 @@ class PackAttestations:
 class _RegistryEntry:
     """Internal: the pack metadata + its registration outcome + the
     captured EntryPoint reference for sync ``load()``. The EntryPoint
-    is mandatory because ``DiscoveredPack`` (the only public input to
-    ``register``) always carries one. Registry state mutates only via
-    ``_records[key] = entry`` swaps under the lock."""
+    mirrors ``DiscoveredPack.entry_point`` (the only public input to
+    ``register``) — ``None`` for manifest-only instruction packs (M8
+    manifest-walk arm), in which case ``load()`` refuses with
+    :class:`ManifestOnlyPackNotLoadable`. Registry state mutates only
+    via ``_records[key] = entry`` swaps under the lock."""
 
     record: PluginRecord
     outcome: RegistrationOutcome
-    entry_point: _im.EntryPoint
+    entry_point: _im.EntryPoint | None
 
 
 class PluginRegistry:
@@ -549,15 +602,31 @@ class PluginRegistry:
     # --- discovery --------------------------------------------------------
 
     def discover(self) -> list[DiscoveredPack]:
-        """Walk ``importlib.metadata.entry_points`` for the four pack
-        groups; return ``DiscoveredPack`` (metadata + non-loaded
-        EntryPoint) entries only.
+        """Walk ``importlib.metadata`` for installed cognic packs; return
+        ``DiscoveredPack`` (metadata + non-loaded EntryPoint) entries only.
 
-        **Does not call ``EntryPoint.load()``.** That is the §1
-        deferred-load invariant — eager loading would defeat the trust
-        gate's pre-import verification. The ``test_discover_does_not_
+        TWO arms:
+
+          1. **Entry-point arms** — ``importlib.metadata.entry_points``
+             for the four pack-kind groups. Owns every EXECUTABLE pack
+             kind (tools / executable skills / agents / hooks).
+          2. **Manifest-walk arm** (M8, ADR-002 "instruction-skill
+             manifest-walk discovery" amendment 2026-07-06) —
+             ``importlib.metadata.distributions()`` for installed
+             distributions with ZERO cognic.* entry points whose signed
+             manifest declares ``[pack].kind = "skill"`` +
+             ``[skill].mode = "instruction"`` (ADR-027 content packs).
+             Yields ``DiscoveredPack(entry_point=None)``.
+
+        **Does not call ``EntryPoint.load()`` and does not import pack
+        code.** That is the §1 deferred-load invariant — eager loading
+        would defeat the trust gate's pre-import verification (the
+        manifest arm reads the manifest FILE via the guarded
+        ``extract_pack_manifest`` only). The ``test_discover_does_not_
         eager_import_pack_modules`` regression in
-        ``test_plugin_registry.py`` pins this invariant.
+        ``test_plugin_registry.py`` + the manifest-arm mirror in
+        ``test_plugin_registry_manifest_discovery.py`` pin this
+        invariant.
 
         Re-discovery is idempotent: returning the same metadata list
         does not mutate any registry state. Registration is the only
@@ -585,6 +654,7 @@ class PluginRegistry:
                     entry_point_value=ep.value,
                 )
                 discovered.append(DiscoveredPack(record=record, entry_point=ep))
+        discovered.extend(_discover_manifest_only_instruction_skills())
         return discovered
 
     # --- registration -----------------------------------------------------
@@ -802,9 +872,12 @@ class PluginRegistry:
         """Sync wrapper over the stdlib ``EntryPoint.load()``.
 
         Refuses with ``RegistrationRefused`` if the pack was registered
-        with a refusal status, and ``PluginNotRegistered`` if no record
-        for ``(kind, name)`` exists. The actual ``EntryPoint.load()``
-        runs only here — never during ``discover()``.
+        with a refusal status, ``PluginNotRegistered`` if no record for
+        ``(kind, name)`` exists, and ``ManifestOnlyPackNotLoadable`` if
+        the pack was discovered via the manifest-walk arm (ADR-027
+        instruction packs have no executable surface — nothing to load).
+        The actual ``EntryPoint.load()`` runs only here — never during
+        ``discover()``.
         """
         entry = self._records.get((kind, name))
         if entry is None:
@@ -818,6 +891,8 @@ class PluginRegistry:
             # type-checkers without changing runtime behaviour.
             reason: RefusalReason = entry.outcome.refusal_reason or "not_in_tenant_allowlist"
             raise RegistrationRefused(kind, name, reason)
+        if entry.entry_point is None:
+            raise ManifestOnlyPackNotLoadable(kind, name)
         return entry.entry_point.load()
 
     # --- Sprint 5 T6: MCP admission steps -------------------------------
@@ -1351,6 +1426,202 @@ def _safe_walk_to_mcp(manifest: dict[str, Any]) -> dict[str, Any] | None | objec
     return mcp
 
 
+# --- M8 manifest-walk discovery (ADR-002 amendment 2026-07-06 + ADR-027) ----
+
+#: The signed pack-manifest basename the manifest-walk arm scans
+#: ``Distribution.files`` for (the same file ``extract_pack_manifest``
+#: reads at ``<package>/cognic-pack-manifest.toml`` per ADR-002 §gate 1).
+_MANIFEST_BASENAME = "cognic-pack-manifest.toml"
+
+
+def _manifest_pack_block(manifest: dict[str, Any]) -> dict[str, Any] | None:
+    """``[pack]`` (canonical) with the legacy ``[tool.cognic.pack]`` fallback
+    (dual-path doctrine); ``None`` when absent. Registry-LOCAL mirror of the
+    ``harness/skill_host.py::_skill_block`` shape — protocol must not import
+    harness (the lockstep drift test in
+    ``test_plugin_registry_manifest_discovery.py`` pins the agreement)."""
+    block = manifest.get("pack")
+    if isinstance(block, dict):
+        return block
+    tool = manifest.get("tool")
+    cognic = tool.get("cognic") if isinstance(tool, dict) else None
+    legacy = cognic.get("pack") if isinstance(cognic, dict) else None
+    return legacy if isinstance(legacy, dict) else None
+
+
+def _manifest_skill_block(manifest: dict[str, Any]) -> dict[str, Any] | None:
+    """``[skill]`` (canonical) with the legacy ``[tool.cognic.skill]``
+    fallback (dual-path doctrine); ``None`` when absent. Registry-LOCAL
+    mirror of ``harness/skill_host.py::_skill_block`` — same shape, no
+    runtime cross-import (test-only lockstep per the drift-detector
+    doctrine)."""
+    block = manifest.get("skill")
+    if isinstance(block, dict):
+        return block
+    tool = manifest.get("tool")
+    cognic = tool.get("cognic") if isinstance(tool, dict) else None
+    legacy = cognic.get("skill") if isinstance(cognic, dict) else None
+    return legacy if isinstance(legacy, dict) else None
+
+
+def _manifest_skill_mode(
+    skill_block: dict[str, Any],
+) -> Literal["executable", "instruction"] | None:
+    """``[skill].mode`` classification — registry-LOCAL mirror of
+    ``harness/skill_host.py::_skill_mode`` (ABSENT → ``"executable"``;
+    out-of-vocabulary → ``None``). The test-only lockstep drift test pins
+    the two classifications in agreement."""
+    raw = skill_block.get("mode")
+    if raw is None:
+        return "executable"
+    if raw == "executable":
+        return "executable"
+    if raw == "instruction":
+        return "instruction"
+    return None
+
+
+def _discover_manifest_only_instruction_skills() -> list[DiscoveredPack]:
+    """The M8 manifest-walk discovery arm (ADR-002 amendment 2026-07-06).
+
+    Walks ``importlib.metadata.distributions()`` and yields ONE
+    ``DiscoveredPack(entry_point=None)`` per installed distribution that:
+
+      1. carries a non-empty ``Name`` (first occurrence wins —
+         ``distributions()`` can yield duplicates across sys.path entries);
+      2. declares ZERO entry points in any cognic.* group (executable
+         packs are owned by the entry-point arms — this IS the
+         "manifest-only" rule, checked against ``dist.entry_points``
+         directly rather than arm-1 bookkeeping);
+      3. ships EXACTLY ONE 2-part ``<package>/cognic-pack-manifest.toml``
+         entry in ``dist.files`` (zero → not a cognic pack, silent skip;
+         two+ → ambiguous, fail-closed warn-skip);
+      4. whose manifest (read via the guarded ``extract_pack_manifest`` —
+         the deferred-load invariant: the FILE is read, pack code is never
+         imported) declares ``[pack].kind = "skill"`` AND
+         ``[skill].mode = "instruction"`` (dual-path per the repo
+         doctrine). A non-skill kind skips silently (tool/agent/hook
+         manifests ride their entry-point arms); a ``kind="skill"``
+         manifest WITHOUT instruction mode warn-skips — an
+         executable-mode skill with no entry point is undiscoverable any
+         other way, so operators need the signal.
+
+    Per-distribution fail-soft: any unexpected exception warn-skips THAT
+    distribution (mirrors ``harness/registry_boot.py``'s per-pack posture);
+    ``BaseException`` (CancelledError / KeyboardInterrupt) propagates.
+    Registration refusal vocabulary is NOT extended — every skip here is
+    discovery-time, before any refusal outcome could exist.
+    """
+    # Local import — keep the module-import-time graph minimal (same
+    # rationale as the _mcp_admit local imports above).
+    from cognic_agentos.protocol.mcp_manifest import (
+        PackManifestMalformedError,
+        PackManifestNotFoundError,
+        extract_pack_manifest,
+    )
+
+    cognic_groups = frozenset(_ENTRY_POINT_GROUPS.values())
+    discovered: list[DiscoveredPack] = []
+    seen_names: set[str] = set()
+    for dist in _im.distributions():
+        try:
+            name = dist.metadata["Name"]
+            if not name:
+                continue
+            if name in seen_names:
+                continue
+            seen_names.add(name)
+            # MANIFEST-ONLY rule: any cognic.* entry point means the
+            # entry-point arms own this distribution — never discover it
+            # twice.
+            if any(ep.group in cognic_groups for ep in dist.entry_points):
+                continue
+            files = dist.files
+            if files is None:
+                continue
+            manifest_packages = [
+                entry.parts[0]
+                for entry in files
+                if len(entry.parts) == 2 and entry.parts[1] == _MANIFEST_BASENAME
+            ]
+            if not manifest_packages:
+                continue  # not a cognic pack — silent skip
+            if len(manifest_packages) > 1:
+                _LOG.warning(
+                    "manifest-walk discovery: distribution %s ships %d "
+                    "%s package candidates (%s); ambiguous — fail-closed skip",
+                    name,
+                    len(manifest_packages),
+                    _MANIFEST_BASENAME,
+                    sorted(manifest_packages),
+                )
+                continue
+            package_name = manifest_packages[0]
+            try:
+                manifest = extract_pack_manifest(distribution_name=name, package_name=package_name)
+            except PackManifestNotFoundError:
+                # RECORD lists the file but it is absent / unreadable on
+                # disk (or the package name fails the identifier guard) —
+                # nothing identifiable to discover.
+                _LOG.debug(
+                    "manifest-walk discovery: distribution %s manifest not "
+                    "readable via extract_pack_manifest; skipping",
+                    name,
+                )
+                continue
+            except PackManifestMalformedError:
+                # We cannot register what we cannot identify — and no
+                # RefusalReason applies (this is discovery-time; the pack
+                # never reaches register()).
+                _LOG.warning(
+                    "manifest-walk discovery: distribution %s manifest is malformed; skipping",
+                    name,
+                )
+                continue
+            pack_block = _manifest_pack_block(manifest)
+            kind = pack_block.get("kind") if pack_block is not None else None
+            if kind != "skill":
+                # tool / agent / hook manifests ride their entry-point
+                # arms; unreadable kinds carry no instruction-skill claim.
+                continue
+            skill_block = _manifest_skill_block(manifest)
+            mode = _manifest_skill_mode(skill_block) if skill_block is not None else None
+            if mode != "instruction":
+                _LOG.warning(
+                    "manifest-walk discovery: distribution %s declares "
+                    "[pack].kind='skill' but [skill].mode is not "
+                    "'instruction' (mode=%r); an executable-mode skill "
+                    "without a cognic.* entry point is undiscoverable — "
+                    "skipping",
+                    name,
+                    (skill_block or {}).get("mode"),
+                )
+                continue
+            record = PluginRecord(
+                kind="skills",
+                name=name,
+                distribution_name=name,
+                distribution_version=(dist.version or "<unknown>"),
+                # LOCKED convention: the bare importable package dir (NOT a
+                # "module:attr" entry-point value). The candidate/_mcp_admit
+                # derivation ``split(":", 1)[0].split(".", 1)[0]`` then
+                # yields exactly this package_name with zero downstream
+                # change.
+                entry_point_value=package_name,
+            )
+            discovered.append(DiscoveredPack(record=record, entry_point=None))
+        except Exception as exc:
+            # Per-dist fail-soft: one broken installed distribution must
+            # never kill discovery. BaseException still propagates.
+            _LOG.warning(
+                "manifest-walk discovery: skipping a broken installed "
+                "distribution (error_class=%s)",
+                type(exc).__name__,
+            )
+            continue
+    return discovered
+
+
 async def _resolve_stdio_command_allowlist(
     *, tenant_id: str, deps: MCPAdmissionDeps
 ) -> frozenset[str]:
@@ -1501,6 +1772,7 @@ __all__ = (
     "AttestationGrade",
     "DiscoveredPack",
     "MCPAdmissionDeps",
+    "ManifestOnlyPackNotLoadable",
     "PackAttestations",
     "PluginIdentityConflict",
     "PluginKind",

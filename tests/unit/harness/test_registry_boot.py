@@ -1890,3 +1890,64 @@ def test_agent_pack_trust_root_refusal_reason_closed_enum() -> None:
         "agent_pack_trust_root_not_a_file",
         "agent_pack_trust_root_empty",
     }
+
+
+# --------------------------------------------------------------------------- #
+# M8 (ADR-002 manifest-walk amendment, 2026-07-06) — a manifest-only
+# instruction pack (``DiscoveredPack.entry_point is None``) rides the SAME
+# boot loop as entry-point packs.
+# --------------------------------------------------------------------------- #
+
+
+async def test_manifest_only_instruction_pack_flows_through_boot_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    audit_store: AuditStore,
+    supply_chain: SupplyChainPipeline,
+    object_store: LocalObjectStoreAdapter,
+) -> None:
+    """A manifest-only ``DiscoveredPack`` (``entry_point=None`` — the ADR-027
+    instruction-skill manifest-walk discovery arm) flows through
+    ``build_and_populate_registry``'s loop machinery without touching
+    ``.entry_point``: per-pack trust-root resolution (``kind="skills"``),
+    attestation resolution, and the register call all key on the record."""
+    trust_root_prefix = tmp_path / "trust-roots"
+    _write_cosign_pub(trust_root_prefix)
+    settings = _make_settings(
+        pack_attestation_root_path=str(tmp_path / "attestations"),
+        trust_root_prefix=trust_root_prefix,
+        plugin_allowlist_path=_REAL_ALLOWLIST,
+    )
+    record = PluginRecord(
+        kind="skills",
+        name="cognic-skill-notes",
+        distribution_name="cognic-skill-notes",
+        distribution_version="0.1.0",
+        # The LOCKED manifest-walk mint convention: the bare importable
+        # package dir (NOT "module:attr") so the candidate derivation
+        # yields the package name unchanged.
+        entry_point_value="cognic_skill_notes",
+    )
+    pack = DiscoveredPack(record=record, entry_point=None)
+    register_spy = AsyncMock()
+    _install_registry_stubs(monkeypatch, discovered=[pack], register_spy=register_spy)
+
+    def _resolve(
+        p: DiscoveredPack, *, pack_attestation_root: Path, cosign_trust_root: Path
+    ) -> PackAttestations:
+        return _stub_attestations(cosign_trust_root)
+
+    monkeypatch.setattr(f"{_BOOT_MODULE}.resolve_pack_attestations", _resolve)
+
+    registry = await build_and_populate_registry(
+        settings=settings,
+        audit_store=audit_store,
+        supply_chain=supply_chain,
+        object_store=object_store,
+    )
+
+    assert isinstance(registry, PluginRegistry)
+    assert register_spy.call_count == 1
+    registered_pack = register_spy.call_args.args[0]
+    assert registered_pack is pack
+    assert registered_pack.entry_point is None

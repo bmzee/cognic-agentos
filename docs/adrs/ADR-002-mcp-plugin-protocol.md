@@ -466,6 +466,38 @@ admission tri-state walk silent-skips them. Boot-time per-pack trust-root resolu
 hook packs is the companion change in `harness/registry_boot.py` (same M5 ruling, staged
 layout `trust-roots/hook-packs/<pack_id>/cosign.pub` with `_default/cosign.pub` fallback).
 
+## Instruction-skill manifest-walk discovery (M8, 2026-07-06)
+
+`PluginRegistry.discover()` gains a SECOND discovery arm (the maintainer ruling on M8
+finding #1, Option A): after the entry-point walk, it also walks
+`importlib.metadata.distributions()` and discovers installed distributions with **ZERO
+cognic.\* entry points** whose signed `cognic-pack-manifest.toml` declares
+`[pack].kind = "skill"` + `[skill].mode = "instruction"` (dual-path with the legacy
+`[tool.cognic.*]` blocks). Rationale: ADR-027 instruction-only skill packs are CONTENT
+packs — SKILL.md + the signed manifest as package data, no entry point of any kind (the
+A7 validator refuses a `cognic.skills` entry point on an instruction manifest) — so the
+entry-point-only walk could never discover them and they could never be trust-registered
+or hosted.
+
+Contract: the arm reads the manifest FILE only via the guarded `extract_pack_manifest`
+(`Distribution.locate_file`, never imports pack code — the §gate-1 deferred-load
+invariant is preserved); it filters STRICTLY to instruction skills (a `kind="skill"`
+manifest without instruction mode warn-skips — an executable-mode skill with no entry
+point is undiscoverable, operators need the signal; other kinds skip silently); a
+distribution shipping more than one `<pkg>/cognic-pack-manifest.toml` is ambiguous and
+fail-closed skipped; one broken distribution never kills discovery (per-dist fail-soft).
+Discovered records mint `DiscoveredPack(entry_point=None)` with `entry_point_value` set
+to the bare importable package directory (LOCKED convention — the existing
+`iter_registered_pack_candidates()` / `_mcp_admit` split-derivation then yields exactly
+the right `package_name` with zero downstream change). Manifest-only records register
+through the SAME trust pipeline as every other pack (cosign + per-tenant allow-list +
+supply chain + policy — no bypass, no new refusal vocabulary), and `load()` refuses them
+fail-clear with `ManifestOnlyPackNotLoadable` (nothing to load; consume via the skill
+host / the governed `read_skill` built-in). Entry-point groups remain the discovery
+contract for **every executable kind**; the manifest-walk arm exists ONLY for
+no-executable instruction skills — agents keep the ADR-027 inert-marker entry point,
+tools / hooks / executable skills keep theirs.
+
 ## References
 - [Model Context Protocol — 2026 roadmap](https://blog.modelcontextprotocol.io/posts/2026-mcp-roadmap/)
 - [MCP — Wikipedia](https://en.wikipedia.org/wiki/Model_Context_Protocol)
