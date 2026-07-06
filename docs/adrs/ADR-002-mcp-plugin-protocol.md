@@ -498,6 +498,27 @@ contract for **every executable kind**; the manifest-walk arm exists ONLY for
 no-executable instruction skills — agents keep the ADR-027 inert-marker entry point,
 tools / hooks / executable skills keep theirs.
 
+**Sign/verify wheel-integrity instruction arm (finding #3, 2026-07-06).** The
+sign/verify wheel-integrity path was entry-point-anchored: `cli/_wheel_integrity.py`
+hard-failed a wheel without `entry_points.txt` (`wheel_missing_entry_points_file` — the
+live failure on `agentos sign --bundle` over an instruction pack tree), and verify's
+Step 11 fail-closed on an empty validated entry-point tuple
+(`load_probe_no_validated_entry_points`). The fix mirrors this amendment's discovery
+rule at the wheel layer: absent `entry_points.txt` may pass ONLY when the wheel ships
+**exactly one** package-local `<pkg>/cognic-pack-manifest.toml` declaring
+`[pack].kind = "skill"` + `[skill].mode = "instruction"` (dual-path; local reader
+mirrors, lockstep drift-pinned test-only against the registry copies) AND the manifest
+package is importable in the wheel (`<pkg>/__init__.py` — anti-decoy: the validated
+package name threads through the helper's return so verify probes exactly the validated
+source). Verify's Step 11 then still runs a REAL final isolated probe — a dedicated
+module-import probe (`importlib.import_module` over the validated stub package via
+`cli/_load_probe.py::probe_module_importability`, sharing the entry-point probe's
+five-layer result-channel hardening) — **never a faked entry point, never skipped**.
+Sign consumes the derived kind and signs instruction packs as skill packs (full
+7-attestation bundle, NO AgentCard JWS — the `pack_kind == "agent"` JWS gate naturally
+excludes them). Every other zero-entry-point wheel fails exactly as before (byte-pinned),
+and entry-point wheels are byte/behavior unchanged.
+
 ## References
 - [Model Context Protocol — 2026 roadmap](https://blog.modelcontextprotocol.io/posts/2026-mcp-roadmap/)
 - [MCP — Wikipedia](https://en.wikipedia.org/wiki/Model_Context_Protocol)

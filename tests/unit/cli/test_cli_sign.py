@@ -4803,3 +4803,161 @@ def test_sign_bundle_manifest_write_failure_classifies_each_exception_type(
         f"{expected_error_type}; got {finding['payload']['failure_mode']!r}"
     )
     assert finding["payload"]["error_type"] == expected_error_type
+
+
+# =============================================================================
+# M8 finding #3 (2026-07-06) — sign --bundle for instruction-skill content
+# packs.
+# =============================================================================
+#
+# Instruction-only skill packs (``[pack] kind="skill"`` +
+# ``[skill] mode="instruction"``) are zero-entry-point CONTENT packs.
+# Pre-fix, the step-7b wheel-integrity check refused their wheels with
+# ``sign_subprocess_failed`` / ``wheel_missing_entry_points_file`` (the
+# maintainer-verified live failure on
+# ``cognic_skill_customer_data-0.1.0-py3-none-any.whl``). The instruction
+# arm at ``cli/_wheel_integrity.py`` derives kind="skill" from the
+# exactly-one in-wheel manifest, so sign renders the full 7-attestation
+# bundle with pack_kind="skill" and the AgentCard-JWS arm (gated on
+# ``pack_kind == "agent"``) is naturally excluded.
+
+
+def test_sign_bundle_for_instruction_skill_pack_signs_as_skill_without_jws(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The M8 finding #3 live-failure fix, sign side: a zero-entry-point
+    instruction pack tree signs end-to-end as a SKILL pack — 7
+    attestations produced, pack_kind="skill" in SLSA + in-toto, ZERO
+    AgentCard JWS files AND zero JWS-signing invocations (spy)."""
+    shims = _stage_full_shim_set(tmp_path)
+    import shutil as _shutil
+    import zipfile as _zipfile
+
+    pack = tmp_path / "instruction_pack"
+    _shutil.copytree(_SIGN_TARGET_PACK, pack)
+    manifest_path = pack / "cognic-pack-manifest.toml"
+    body = manifest_path.read_text()
+    body = body.replace('kind = "agent"', 'kind = "skill"')
+    body = body.replace(
+        'pack_id = "cognic-agent-sign-target"',
+        'pack_id = "cognic-skill-sign-target"',
+    )
+    # Strip agent-only [a2a] + [agent] blocks and agent_card_* fields;
+    # add the M8 A7 instruction-mode block.
+    new_lines: list[str] = []
+    in_skipped_block = False
+    for line in body.splitlines():
+        if line.startswith("[a2a]") or line.startswith("[agent]"):
+            in_skipped_block = True
+            continue
+        if in_skipped_block and line.startswith("["):
+            in_skipped_block = False
+        if in_skipped_block:
+            continue
+        if "agent_card_url" in line or "agent_card_jws_path" in line:
+            continue
+        new_lines.append(line)
+    new_lines.extend(["", "[skill]", 'mode = "instruction"'])
+    manifest_text = "\n".join(new_lines) + "\n"
+    manifest_path.write_text(manifest_text)
+    skill_md = (
+        "---\n"
+        "name: sign-target-skill\n"
+        "description: Teaches governed retail views for sign fixture runs.\n"
+        "---\n"
+        "\n"
+        "# Instructions\n"
+        "\n"
+        "Use the governed views only.\n"
+    )
+    (pack / "SKILL.md").write_text(skill_md)
+    pyproject_path = pack / "pyproject.toml"
+    pyproject_lines = [
+        line
+        for line in (
+            pyproject_path.read_text().replace(
+                'name = "cognic-agent-sign-target"',
+                'name = "cognic-skill-sign-target"',
+            )
+        ).splitlines()
+        if "cognic.agents" not in line and not line.startswith("sign_target = ")
+    ]
+    pyproject_path.write_text("\n".join(pyproject_lines) + "\n")
+
+    # The REAL PEP-427-complete zero-entry-point instruction wheel.
+    dist_dir = pack / "dist"
+    dist_dir.mkdir(exist_ok=True)
+    wheel = dist_dir / "cognic_skill_sign_target-0.1.0-py3-none-any.whl"
+    dist_info = "cognic_skill_sign_target-0.1.0.dist-info"
+    pkg = "cognic_skill_sign_target"
+    wheel_members: dict[str, str] = {
+        f"{pkg}/__init__.py": "",
+        f"{pkg}/cognic-pack-manifest.toml": manifest_text,
+        f"{pkg}/SKILL.md": skill_md,
+        f"{dist_info}/METADATA": (
+            "Metadata-Version: 2.1\nName: cognic_skill_sign_target\nVersion: 0.1.0\n"
+        ),
+        f"{dist_info}/WHEEL": (
+            "Wheel-Version: 1.0\n"
+            "Generator: agentos-test-fixture\n"
+            "Root-Is-Purelib: true\n"
+            "Tag: py3-none-any\n"
+        ),
+    }
+    record_lines = [f"{m},," for m in [*sorted(wheel_members), f"{dist_info}/RECORD"]]
+    wheel_members[f"{dist_info}/RECORD"] = "\n".join(record_lines) + "\n"
+    with _zipfile.ZipFile(wheel, "w", _zipfile.ZIP_DEFLATED) as zf:
+        for member_name, payload in wheel_members.items():
+            zf.writestr(member_name, payload)
+
+    _set_sign_bundle_settings(
+        monkeypatch,
+        cosign_path=shims["cosign"],
+        syft_path=shims["syft"],
+        grype_path=shims["grype"],
+        license_auditor_path=shims["license_auditor"],
+    )
+
+    # NO-JWS-invocation spy: the agent-only JWS arm must never fire for
+    # an instruction (skill-kind) pack.
+    import cognic_agentos.cli.sign as _sign_module
+
+    jws_calls: list[Any] = []
+    original_jws = _sign_module._sign_agent_card_jws_to_disk
+
+    def _jws_spy(*args: Any, **kwargs: Any) -> Any:
+        jws_calls.append((args, kwargs))
+        return original_jws(*args, **kwargs)
+
+    monkeypatch.setattr(_sign_module, "_sign_agent_card_jws_to_disk", _jws_spy)
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["sign", "--json", "--bundle", str(pack)])
+    assert result.exit_code == 0, (
+        "instruction-pack sign --bundle failed (the M8 finding #3 live "
+        f"failure): stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    assert jws_calls == [], "JWS signing MUST NOT be invoked for instruction packs"
+    assert not (pack / "agent_cards" / "agent-card.jws").exists(), (
+        "instruction pack must not produce an AgentCard JWS"
+    )
+    # All 7 non-JWS attestations produced.
+    for attestation in (
+        "cosign.sig",
+        "bundle.sigstore",
+        "sbom.cdx.json",
+        "vuln-scan.json",
+        "license-audit.json",
+        "slsa-provenance.intoto.json",
+        "intoto-layout.json",
+    ):
+        assert (pack / "attestations" / attestation).is_file(), attestation
+    # Provenance records the wheel-derived (instruction-arm) kind: skill.
+    slsa = json.loads((pack / "attestations" / "slsa-provenance.intoto.json").read_text())
+    assert slsa["predicate"]["buildDefinition"]["externalParameters"]["pack_kind"] == "skill"
+    intoto = json.loads((pack / "attestations" / "intoto-layout.json").read_text())
+    assert intoto["pack_kind"] == "skill"
+    report = json.loads(result.stdout)
+    assert report["overall_status"] == "pass"
+    assert "agent_card_jws" not in report.get("artifacts", {})

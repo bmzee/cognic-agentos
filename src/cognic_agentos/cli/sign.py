@@ -3008,19 +3008,34 @@ async def _run_sign_bundle_inner(
     # wheel). Mirror verify's ``wheel_kind_disagrees_with_manifest``
     # refusal before rendering provenance.
     assert _wheel_triple is not None
-    # R15 follow-up round 1 P2 #1/P2 #2: helper now returns a 4-tuple;
-    # the validated entry-point list is consumed only by verify
-    # step 11 (the FINAL gate of the trust pipeline post R15 follow-up
-    # round 2 P2 #1 ordering fix). Sign discards the trailing slot —
-    # wheel-integrity-anchored kind + name + version are the sign-side
-    # outputs.
+    # R15 follow-up round 1 P2 #1/P2 #2 (+ M8 finding #3): the helper
+    # returns a 5-tuple; the validated entry-point list is consumed
+    # only by verify step 11 (the FINAL gate of the trust pipeline
+    # post R15 follow-up round 2 P2 #1 ordering fix), and the
+    # instruction-package slot is verify-step-11's module-import probe
+    # target. Sign discards both trailing slots — wheel-integrity-
+    # anchored kind + name + version are the sign-side outputs.
+    #
+    # M8 finding #3 — instruction wheels: a zero-entry-point
+    # instruction-skill content wheel arrives here with derived kind
+    # "skill" + an EMPTY validated entry-point tuple + a non-None
+    # instruction package. Sign consumes the DERIVED KIND exactly like
+    # any skill pack: the kind cross-check below passes against the
+    # manifest's kind="skill", the full bundle (cosign sign-blob +
+    # SBOM + vuln + license + SLSA + in-toto) renders with
+    # pack_kind="skill", and the AgentCard-JWS arm (gated on
+    # ``pack_kind == "agent"`` at steps 3a-bis + 9-fork + 10) is
+    # naturally excluded — NO JWS for instruction packs. No sign-side
+    # code consumes the entry-point list, so the empty tuple needs no
+    # special-casing beyond this documented discard.
     (
         _wheel_metadata_name,
         _wheel_metadata_version,
         _wheel_derived_kind,
         _wheel_validated_entry_points,
+        _wheel_instruction_package,
     ) = _wheel_triple
-    del _wheel_validated_entry_points
+    del _wheel_validated_entry_points, _wheel_instruction_package
     if _wheel_derived_kind != pack_kind:
         findings.append(
             SignFinding(

@@ -1357,7 +1357,7 @@ def _read_signed_wheel_dist_info_metadata(
     expected_project_name: str,
     expected_version: str,
 ) -> tuple[
-    tuple[str, str, str, tuple[tuple[str, str], ...]] | None,
+    tuple[str, str, str, tuple[tuple[str, str], ...], str | None] | None,
     VerifyFinding | None,
 ]:
     """Verify-side adapter over :func:`cli._wheel_integrity.read_signed_wheel_dist_info_metadata`.
@@ -1378,12 +1378,19 @@ def _read_signed_wheel_dist_info_metadata(
     exactly the same source that the integrity helper validated, and
     probes each declared cognic entry point — never just the first
     one.
+
+    M8 finding #3: the helper's additive 5th slot carries the
+    validated instruction stub-package name for zero-entry-point
+    instruction-skill content wheels (derived kind ``"skill"`` + EMPTY
+    entry-point tuple) and ``None`` for every entry-point wheel. Step
+    11's instruction arm MUST use this returned name directly for the
+    module-import probe — same no-re-discovery doctrine.
     """
     from cognic_agentos.cli._wheel_integrity import (
         read_signed_wheel_dist_info_metadata as _shared_read,
     )
 
-    quadruple, failure = _shared_read(
+    quintuple, failure = _shared_read(
         wheel_path,
         expected_project_name=expected_project_name,
         expected_version=expected_version,
@@ -1396,7 +1403,7 @@ def _read_signed_wheel_dist_info_metadata(
             message=f"verify: {failure.message}",
             payload=payload,
         )
-    return quadruple, None
+    return quintuple, None
 
 
 def _check_sbom_digest_against_slsa(
@@ -2585,7 +2592,7 @@ async def _run_verify_inner(
     # R6 P2 #2: parse wheel METADATA Name + Version + cross-check
     #           against pyproject (the orchestrator additionally
     #           cross-checks against SLSA + in-toto in steps 7-8).
-    wheel_metadata_quadruple, wheel_kind_finding = _read_signed_wheel_dist_info_metadata(
+    wheel_metadata_quintuple, wheel_kind_finding = _read_signed_wheel_dist_info_metadata(
         wheel_path,
         expected_project_name=project_name,
         expected_version=project_version,
@@ -2598,13 +2605,19 @@ async def _run_verify_inner(
             overall_status="fail",
             findings=findings,
         )
-    assert wheel_metadata_quadruple is not None
+    assert wheel_metadata_quintuple is not None
+    # M8 finding #3: the 5th slot is the validated instruction stub-
+    # package name (non-None ONLY for zero-entry-point instruction-skill
+    # content wheels, which carry derived kind "skill" + an EMPTY
+    # validated entry-point tuple). The final-gate load probe's
+    # instruction arm consumes it for the module-import probe.
     (
         wheel_metadata_name,
         wheel_metadata_version,
         derived_pack_kind,
         validated_entry_points,
-    ) = wheel_metadata_quadruple
+        instruction_package_name,
+    ) = wheel_metadata_quintuple
     if derived_pack_kind != pack_kind:
         findings.append(
             VerifyFinding(
@@ -2801,34 +2814,77 @@ async def _run_verify_inner(
     # helper validated — instead of re-reading the wheel. Every
     # declared cognic entry point is probed; the first failure routes
     # to refusal.
-    from cognic_agentos.cli._load_probe import probe_entry_point_loadability
+    #
+    # M8 finding #3 — instruction arm: instruction-skill content wheels
+    # (derived kind "skill", zero entry points BY DESIGN) still get a
+    # REAL final isolated probe — the module-import probe over the
+    # validated stub package the integrity helper threaded through
+    # (never skipped; never a faked EntryPoint). The
+    # ``load_probe_no_validated_entry_points`` fail-closed branch
+    # REMAINS for every non-instruction empty-entry-point case.
+    from cognic_agentos.cli._load_probe import (
+        probe_entry_point_loadability,
+        probe_module_importability,
+    )
 
     if not validated_entry_points:
-        # Defense-in-depth fail-closed: ``wheel_empty_cognic_entry_point_group``
-        # would have fired upstream; if execution reaches step 11 with
-        # an empty entry-point tuple something is structurally wrong.
-        findings.append(
-            VerifyFinding(
-                severity="refusal",
-                reason="verify_entry_point_load_failed",
-                message=(
-                    "verify: wheel-integrity returned no validated entry "
-                    "points yet reached step 11 — cannot establish "
-                    "loadability. Refusing fail-closed."
-                ),
-                payload={
-                    "wheel_path": str(wheel_path),
-                    "failure_mode": "load_probe_no_validated_entry_points",
-                },
+        if instruction_package_name is not None:
+            # Instruction wheel — Step 11 runs the module-import probe
+            # against exactly the package the integrity helper
+            # validated (no re-discovery).
+            load_probe_failure = await probe_module_importability(
+                wheel_path,
+                module_path=instruction_package_name,
+                timeout_s=settings.load_probe_timeout_s,
             )
-        )
-        return VerifyReport(
-            operation="verify",
-            target_path=str(pack_path),
-            overall_status="fail",
-            findings=findings,
-            artifacts_verified=artifacts_verified,
-        )
+            if load_probe_failure is not None:
+                findings.append(
+                    VerifyFinding(
+                        severity="refusal",
+                        reason="verify_entry_point_load_failed",
+                        message=f"verify: {load_probe_failure.message}",
+                        payload={
+                            **load_probe_failure.payload,
+                            "failure_mode": load_probe_failure.failure_mode,
+                            "instruction_package": instruction_package_name,
+                        },
+                    )
+                )
+                return VerifyReport(
+                    operation="verify",
+                    target_path=str(pack_path),
+                    overall_status="fail",
+                    findings=findings,
+                    artifacts_verified=artifacts_verified,
+                )
+        else:
+            # Defense-in-depth fail-closed:
+            # ``wheel_empty_cognic_entry_point_group`` would have fired
+            # upstream; if execution reaches step 11 with an empty
+            # entry-point tuple AND no validated instruction package,
+            # something is structurally wrong.
+            findings.append(
+                VerifyFinding(
+                    severity="refusal",
+                    reason="verify_entry_point_load_failed",
+                    message=(
+                        "verify: wheel-integrity returned no validated entry "
+                        "points yet reached step 11 — cannot establish "
+                        "loadability. Refusing fail-closed."
+                    ),
+                    payload={
+                        "wheel_path": str(wheel_path),
+                        "failure_mode": "load_probe_no_validated_entry_points",
+                    },
+                )
+            )
+            return VerifyReport(
+                operation="verify",
+                target_path=str(pack_path),
+                overall_status="fail",
+                findings=findings,
+                artifacts_verified=artifacts_verified,
+            )
     for probe_module, probe_object in validated_entry_points:
         load_probe_failure = await probe_entry_point_loadability(
             wheel_path,

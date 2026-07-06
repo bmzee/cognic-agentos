@@ -16,6 +16,21 @@ Contract:
   sub-case + diagnostic payload. Callers wrap in their own top-level
   refusal reason (``verify_entry_point_load_failed``).
 
+  :func:`probe_module_importability` — M8 finding #3 (2026-07-06): the
+  NARROW instruction-wheel path. ADR-027 instruction-only skill packs
+  are zero-entry-point CONTENT packs, so there is no EntryPoint to
+  load and none is faked — the child action is
+  ``importlib.import_module(<validated stub package>)``, proving the
+  wheel installs/imports cleanly WITHOUT pretending the pack has
+  executable entry-point semantics. Same isolated-subprocess
+  mechanics, same result-channel hardening, same sys.path wheel
+  insertion (identical to how ``EntryPoint.load()`` resolves imports
+  today), shared private core (:func:`_execute_probe_subprocess`) —
+  an explicit ``probe_mode`` argv marker selects the child action
+  (never inferred from an empty object name). In module-import mode
+  there is no ``object_lookup`` phase: an ``AttributeError`` raised
+  inside the module body classifies as ``module_runtime``.
+
 Subprocess invariants (mirrors ``protocol/trust_gate.py``):
 
   - **Same interpreter**: ``sys.executable`` (NOT bare ``python``) so
@@ -146,14 +161,20 @@ _SUBPROCESS_ENV: Final[dict[str, str]] = {
 #:             via ``pass_fds=(fd,)`` from the parent — R15 follow-up
 #:             P2 #2 hardening)
 #:   argv[2] — wheel path (.whl ZIP; placed on sys.path)
-#:   argv[3] — module dotted path (e.g., ``pkg.subpkg.mod``)
-#:   argv[4] — object name (e.g., ``Cls``; single segment per R11 P2 #1)
+#:   argv[3] — module dotted path (e.g., ``pkg.subpkg.mod``; the
+#:             validated stub-package name in module-import mode)
+#:   argv[4] — object name (e.g., ``Cls``; single segment per R11 P2
+#:             #1; the empty string in module-import mode — unused
+#:             there, mode is NEVER inferred from it)
+#:   argv[5] — probe mode: ``"entry_point"`` (EntryPoint.load) or
+#:             ``"module_import"`` (importlib.import_module; the M8
+#:             finding #3 instruction-wheel arm — no faked EntryPoint)
 #:
 #: Per-invocation env:
 #:   COGNIC_PROBE_TOKEN — random 256-bit hex token. Probe pops the
 #:   env entry into a local variable BEFORE any imported-module code
 #:   runs; the token is written into the result JSON only by probe-
-#:   owned code AFTER ``ep.load()`` returns. (R15 follow-up P2 #2.)
+#:   owned code AFTER the load action returns. (R15 follow-up P2 #2.)
 #:
 #: Output schema (JSON):
 #:   {"ok": bool,
@@ -166,7 +187,9 @@ _SUBPROCESS_ENV: Final[dict[str, str]] = {
 #:   - ``module_import`` — ImportError / ModuleNotFoundError during
 #:     ``importlib.import_module``.
 #:   - ``object_lookup`` — AttributeError when ``EntryPoint.load`` does
-#:     ``getattr`` on the imported module.
+#:     ``getattr`` on the imported module (entry-point mode only —
+#:     module-import mode has no object lookup; an AttributeError
+#:     raised inside the module body classifies as ``module_runtime``).
 #:   - ``module_runtime`` — any other exception during load (NameError
 #:     on forward refs, top-level raise, decorator/default failure).
 #:
@@ -214,6 +237,7 @@ def _run_probe():
     wheel_path = sys.argv[2]
     module_path = sys.argv[3]
     object_path = sys.argv[4]
+    probe_mode = sys.argv[5]
     sys.argv = [sys.argv[0]]
 
     # Open the inherited fd via os.fdopen — closefd=True so the
@@ -247,36 +271,62 @@ def _run_probe():
              open(os.devnull, "w", encoding="utf-8") as _stderr_sink, \
              contextlib.redirect_stdout(_stdout_sink), \
              contextlib.redirect_stderr(_stderr_sink):
-            from importlib.metadata import EntryPoint
+            if probe_mode == "module_import":
+                # M8 finding #3 — instruction-wheel arm: the pack is a
+                # zero-entry-point CONTENT pack; the honest load action
+                # is a bare package import. NO EntryPoint is faked.
+                import importlib
 
-            ep = EntryPoint(
-                name="__cognic_load_probe__",
-                value=module_path + ":" + object_path,
-                group="__cognic_load_probe__",
-            )
-            try:
-                ep.load()
-            except (ImportError, ModuleNotFoundError) as exc:
-                result["phase"] = "module_import"
-                result["error_class"] = type(exc).__name__
-                result["error_message"] = str(exc)
-            except AttributeError as exc:
-                result["phase"] = "object_lookup"
-                result["error_class"] = type(exc).__name__
-                result["error_message"] = str(exc)
-            except BaseException as exc:
-                result["phase"] = "module_runtime"
-                result["error_class"] = type(exc).__name__
-                result["error_message"] = str(exc)
+                try:
+                    importlib.import_module(module_path)
+                except (ImportError, ModuleNotFoundError) as exc:
+                    result["phase"] = "module_import"
+                    result["error_class"] = type(exc).__name__
+                    result["error_message"] = str(exc)
+                except BaseException as exc:
+                    # No object_lookup phase in this mode — an
+                    # AttributeError inside the module body is a
+                    # runtime failure of the import, not a lookup.
+                    result["phase"] = "module_runtime"
+                    result["error_class"] = type(exc).__name__
+                    result["error_message"] = str(exc)
+                else:
+                    # Token written ONLY here, in probe-owned code,
+                    # AFTER import_module returns (same forge-and-exit
+                    # defense as the entry-point arm below).
+                    result["ok"] = True
+                    result["__cognic_probe_token__"] = success_token
             else:
-                # Token written ONLY here, in probe-owned code, AFTER
-                # ep.load() returns. A module that pre-emptively
-                # writes {"ok": true} to the inherited result fd and
-                # calls os._exit(0) cannot include this token without
-                # introspecting this frame's locals via
-                # sys._getframe / sys.modules['__main__']._run_probe.
-                result["ok"] = True
-                result["__cognic_probe_token__"] = success_token
+                from importlib.metadata import EntryPoint
+
+                ep = EntryPoint(
+                    name="__cognic_load_probe__",
+                    value=module_path + ":" + object_path,
+                    group="__cognic_load_probe__",
+                )
+                try:
+                    ep.load()
+                except (ImportError, ModuleNotFoundError) as exc:
+                    result["phase"] = "module_import"
+                    result["error_class"] = type(exc).__name__
+                    result["error_message"] = str(exc)
+                except AttributeError as exc:
+                    result["phase"] = "object_lookup"
+                    result["error_class"] = type(exc).__name__
+                    result["error_message"] = str(exc)
+                except BaseException as exc:
+                    result["phase"] = "module_runtime"
+                    result["error_class"] = type(exc).__name__
+                    result["error_message"] = str(exc)
+                else:
+                    # Token written ONLY here, in probe-owned code, AFTER
+                    # ep.load() returns. A module that pre-emptively
+                    # writes {"ok": true} to the inherited result fd and
+                    # calls os._exit(0) cannot include this token without
+                    # introspecting this frame's locals via
+                    # sys._getframe / sys.modules['__main__']._run_probe.
+                    result["ok"] = True
+                    result["__cognic_probe_token__"] = success_token
     finally:
         json.dump(result, result_handle)
         result_handle.close()
@@ -284,6 +334,14 @@ def _run_probe():
 
 _run_probe()
 """
+
+
+#: Explicit probe-mode markers (argv[5] of the embedded script). The mode
+#: is ALWAYS passed explicitly — never inferred from an empty object name —
+#: per the M8 finding #3 maintainer constraint ("don't fake an entry
+#: point"; the instruction arm is a dedicated module-import action).
+_PROBE_MODE_ENTRY_POINT: Final[str] = "entry_point"
+_PROBE_MODE_MODULE_IMPORT: Final[str] = "module_import"
 
 
 _FAILURE_MESSAGE_TEMPLATES: Final[dict[str, str]] = {
@@ -295,6 +353,23 @@ _FAILURE_MESSAGE_TEMPLATES: Final[dict[str, str]] = {
     "module_runtime": (
         "EntryPoint.load() failed with a runtime error during module "
         "execution: {error_class}: {error_message}"
+    ),
+}
+
+
+#: M8 finding #3 — module-import-mode message templates. Honest phrasing:
+#: the instruction probe runs ``importlib.import_module``, so its failure
+#: messages MUST NOT claim ``EntryPoint.load()`` semantics. No
+#: ``object_lookup`` key — that phase is unreachable in this mode (the
+#: child classifies an in-module AttributeError as ``module_runtime``);
+#: a forged result claiming it routes to ``load_probe_unparseable_output``.
+_MODULE_IMPORT_FAILURE_MESSAGE_TEMPLATES: Final[dict[str, str]] = {
+    "module_import": (
+        "importlib.import_module() failed at module import: {error_class}: {error_message}"
+    ),
+    "module_runtime": (
+        "importlib.import_module() failed with a runtime error during "
+        "module execution: {error_class}: {error_message}"
     ),
 }
 
@@ -346,6 +421,105 @@ async def probe_entry_point_loadability(
         with closed-enum failure mode
         ``load_probe_success_token_mismatch``.
     """
+    return await _execute_probe_subprocess(
+        wheel_path,
+        module_path=module_path,
+        object_path=object_path,
+        probe_mode=_PROBE_MODE_ENTRY_POINT,
+        timeout_s=timeout_s,
+        python_executable=python_executable,
+        # Byte/behavior-unchanged contract for entry-point wheels: the
+        # base payload carries exactly the pre-M8 key set.
+        base_payload={
+            "wheel_path": str(wheel_path),
+            "module_path": module_path,
+            "object_path": object_path,
+        },
+        message_templates=_FAILURE_MESSAGE_TEMPLATES,
+    )
+
+
+async def probe_module_importability(
+    wheel_path: Path,
+    *,
+    module_path: str,
+    timeout_s: float,
+    python_executable: str | None = None,
+) -> LoadProbeFailure | None:
+    """M8 finding #3 — run an ``importlib.import_module()`` probe against
+    an instruction wheel's validated stub package in an isolated
+    subprocess.
+
+    Returns ``None`` if the package imports cleanly; a
+    :class:`LoadProbeFailure` otherwise.
+
+    ADR-027 instruction-only skill packs are zero-entry-point CONTENT
+    packs — there is no EntryPoint to load and none is faked. The probe
+    proves the wheel installs/imports cleanly (SKILL.md + manifest as
+    package data inside one inert stub package) WITHOUT pretending the
+    pack has executable entry-point semantics:
+
+      - ``module_path`` — the validated instruction stub-package name
+        threaded out of ``cli/_wheel_integrity.py``'s instruction arm
+        (the SAME source the integrity helper validated; never
+        re-discovered).
+      - Child action: ``importlib.import_module(module_path)`` after
+        the identical ``sys.path.insert(0, wheel_path)`` used by the
+        entry-point probe (no new sys.path scheme).
+      - Everything else — ``sys.executable -I`` isolation, minimal
+        PATH+HOME env, per-invocation 256-bit success token popped to
+        a child local, fd-inherited result channel, asyncio timeout +
+        SIGKILL + reap, devnull-bounded stdout/stderr discard, token-
+        mismatch fail-closed — is the shared
+        :func:`_execute_probe_subprocess` core, mechanics-identical to
+        :func:`probe_entry_point_loadability`.
+
+    Failure modes reuse the existing closed enum (``load_probe_*``);
+    in this mode there is no ``object_lookup`` phase, and each failure
+    payload carries ``probe_mode="module_import"`` so verify findings
+    distinguish the instruction arm.
+    """
+    return await _execute_probe_subprocess(
+        wheel_path,
+        module_path=module_path,
+        # Unused by the child in module-import mode; the EXPLICIT
+        # probe_mode marker below selects the action (never inferred
+        # from this empty string).
+        object_path="",
+        probe_mode=_PROBE_MODE_MODULE_IMPORT,
+        timeout_s=timeout_s,
+        python_executable=python_executable,
+        base_payload={
+            "wheel_path": str(wheel_path),
+            "module_path": module_path,
+            "probe_mode": _PROBE_MODE_MODULE_IMPORT,
+        },
+        message_templates=_MODULE_IMPORT_FAILURE_MESSAGE_TEMPLATES,
+    )
+
+
+async def _execute_probe_subprocess(
+    wheel_path: Path,
+    *,
+    module_path: str,
+    object_path: str,
+    probe_mode: str,
+    timeout_s: float,
+    python_executable: str | None,
+    base_payload: dict[str, Any],
+    message_templates: dict[str, str],
+) -> LoadProbeFailure | None:
+    """Shared isolated-subprocess probe core (R15 mechanics; M8 finding
+    #3 extracted it so the module-import probe reuses the five-layer
+    result-channel hardening instead of duplicating it).
+
+    ``base_payload`` carries the caller-mode's diagnostic context and is
+    merged under every failure payload's arm-specific extras;
+    ``message_templates`` maps the mode's REACHABLE phases to operator
+    messages (a phase outside the mode's template set routes to
+    ``load_probe_unparseable_output`` — only producible by forged
+    output, since probe-owned code never emits an out-of-mode phase).
+    """
     interpreter = python_executable if python_executable is not None else sys.executable
 
     # R15 follow-up P2 #2: per-invocation success token. Rotates per
@@ -380,6 +554,7 @@ async def probe_entry_point_loadability(
                 str(wheel_path),
                 module_path,
                 object_path,
+                probe_mode,  # argv[5] — explicit action marker (M8 #3)
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
                 env=probe_env,
@@ -393,9 +568,7 @@ async def probe_entry_point_loadability(
                     f"({interpreter!r}): {type(exc).__name__}: {exc}"
                 ),
                 payload={
-                    "wheel_path": str(wheel_path),
-                    "module_path": module_path,
-                    "object_path": object_path,
+                    **base_payload,
                     "interpreter": interpreter,
                     "error_class": type(exc).__name__,
                     "error_message": str(exc),
@@ -421,9 +594,7 @@ async def probe_entry_point_loadability(
                     f"load-probe subprocess exceeded {timeout_s}s timeout (SIGKILLed + reaped)"
                 ),
                 payload={
-                    "wheel_path": str(wheel_path),
-                    "module_path": module_path,
-                    "object_path": object_path,
+                    **base_payload,
                     "timeout_s": timeout_s,
                 },
             )
@@ -445,9 +616,7 @@ async def probe_entry_point_loadability(
                     f"{type(exc).__name__}: {exc}"
                 ),
                 payload={
-                    "wheel_path": str(wheel_path),
-                    "module_path": module_path,
-                    "object_path": object_path,
+                    **base_payload,
                     "returncode": proc.returncode,
                     "error_class": type(exc).__name__,
                     "error_message": str(exc),
@@ -462,9 +631,7 @@ async def probe_entry_point_loadability(
                     f"{type(result).__name__}, expected JSON object"
                 ),
                 payload={
-                    "wheel_path": str(wheel_path),
-                    "module_path": module_path,
-                    "object_path": object_path,
+                    **base_payload,
                     "actual_type": type(result).__name__,
                 },
             )
@@ -487,9 +654,7 @@ async def probe_entry_point_loadability(
                         "Refusing fail-closed."
                     ),
                     payload={
-                        "wheel_path": str(wheel_path),
-                        "module_path": module_path,
-                        "object_path": object_path,
+                        **base_payload,
                         "returncode": proc.returncode,
                         "result_keys": sorted(result.keys()),
                     },
@@ -497,24 +662,27 @@ async def probe_entry_point_loadability(
             return None
 
         phase = result.get("phase")
-        if phase not in _FAILURE_MODE_BY_PHASE:
+        if phase not in _FAILURE_MODE_BY_PHASE or phase not in message_templates:
+            # A phase outside the closed set — or outside THIS mode's
+            # reachable set (e.g. ``object_lookup`` in module-import
+            # mode, only producible by forged output) — routes to the
+            # unparseable-output refusal, fail-closed.
+            valid_phases = sorted(p for p in _FAILURE_MODE_BY_PHASE if p in message_templates)
             return LoadProbeFailure(
                 failure_mode="load_probe_unparseable_output",
                 message=(
                     f"load-probe result has unexpected phase {phase!r}; "
-                    f"expected one of {sorted(_FAILURE_MODE_BY_PHASE)}"
+                    f"expected one of {valid_phases}"
                 ),
                 payload={
-                    "wheel_path": str(wheel_path),
-                    "module_path": module_path,
-                    "object_path": object_path,
+                    **base_payload,
                     "result": result,
                 },
             )
 
         error_class = result.get("error_class") or "?"
         error_message = result.get("error_message") or "?"
-        message = _FAILURE_MESSAGE_TEMPLATES[phase].format(
+        message = message_templates[phase].format(
             error_class=error_class,
             error_message=error_message,
         )
@@ -522,9 +690,7 @@ async def probe_entry_point_loadability(
             failure_mode=_FAILURE_MODE_BY_PHASE[phase],
             message=message,
             payload={
-                "wheel_path": str(wheel_path),
-                "module_path": module_path,
-                "object_path": object_path,
+                **base_payload,
                 "phase": phase,
                 "error_class": error_class,
                 "error_message": error_message,
@@ -544,4 +710,5 @@ async def probe_entry_point_loadability(
 __all__ = [
     "LoadProbeFailure",
     "probe_entry_point_loadability",
+    "probe_module_importability",
 ]

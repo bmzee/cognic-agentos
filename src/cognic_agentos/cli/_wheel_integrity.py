@@ -58,17 +58,58 @@ Anything beyond that — order-aware bound-name resolution, trusted
 imports, decorators, top-level Raise, import-time NameError — is the
 load probe's job.
 
+M8 finding #3 (2026-07-06) — instruction-wheel arm: M8 instruction-only
+skill packs (``[pack] kind="skill"`` + ``[skill] mode="instruction"``
+per ADR-027) are CONTENT packs — SKILL.md + the signed
+``cognic-pack-manifest.toml`` as package data inside one stub package,
+NO entry points of any kind (the A7 validator refuses a
+``cognic.skills`` entry point; the B2-pre manifest-walk discovery arm
+discovers them at boot). When the matched dist-info has NO
+``entry_points.txt``, the helper now runs a NARROW fallback mirroring
+the discovery arm (``protocol/plugin_registry.py::
+_discover_manifest_only_instruction_skills``) at the wheel layer:
+
+  1. Scan wheel members for exactly-one 2-part
+     ``<package>/cognic-pack-manifest.toml`` (zero matches → the EXACT
+     pre-existing ``wheel_missing_entry_points_file`` failure; more
+     than one → ``wheel_multiple_instruction_manifests``).
+  2. Bounded read (1 MiB cap) + TOML parse of that member
+     (``wheel_unparseable_instruction_manifest`` on failure).
+  3. STRICT filter: ``[pack].kind == "skill"`` AND ``[skill].mode ==
+     "instruction"`` — dual-path block reading (canonical top-level +
+     legacy ``[tool.cognic.*]``) via LOCAL mirrors of the registry
+     readers (test-only lockstep drift test; no runtime protocol
+     import from this stdlib-shaped module). Any mismatch refuses —
+     a ``kind="skill"`` zero-entry-point wheel WITHOUT instruction
+     mode is a broken executable pack, never an instruction pack.
+  4. Package-layout consistency (anti-decoy): the manifest package
+     must be a valid importable package in the wheel
+     (identifier-shaped name + ``<pkg>/__init__.py`` member) —
+     ``wheel_instruction_package_not_importable`` otherwise. The
+     validated package name is THREADED THROUGH the return value so
+     verify's Step 11 module-import probe operates on exactly the
+     source this helper validated (no re-discovery).
+
+Entry-point wheels are byte/behavior unchanged — the fallback fires
+ONLY when ``entry_points.txt`` is absent from the matched dist-info,
+and every other zero-entry-point wheel still fails exactly as before.
+
 Contract:
 
   :func:`read_signed_wheel_dist_info_metadata` — returns
-    ``((canonical_name, version, kind, entry_points), None)`` on
-    success or ``(None, WheelIntegrityFailure)`` on refusal. The 4th
-    tuple element is the tuple of validated ``(module_path,
-    object_path)`` pairs from the **selected dist-info**'s
-    entry_points.txt (added at R15 follow-up round 1 P2 #1 — verify
-    step 11 consumes this directly so callers never re-discover
-    entry points by suffix-matching wheel members). Callers wrap the
-    failure into their own ``VerifyFinding`` / ``SignFinding`` shape.
+    ``((canonical_name, version, kind, entry_points,
+    instruction_package), None)`` on success or ``(None,
+    WheelIntegrityFailure)`` on refusal. The 4th tuple element is the
+    tuple of validated ``(module_path, object_path)`` pairs from the
+    **selected dist-info**'s entry_points.txt (added at R15 follow-up
+    round 1 P2 #1 — verify step 11 consumes this directly so callers
+    never re-discover entry points by suffix-matching wheel members).
+    The 5th element (additive, M8 finding #3) is the validated
+    instruction stub-package name for instruction wheels and ``None``
+    for entry-point wheels — instruction wheels carry derived kind
+    ``"skill"`` + an EMPTY entry-point tuple + a non-None package
+    name. Callers wrap the failure into their own ``VerifyFinding`` /
+    ``SignFinding`` shape.
 
 Closed-enum failure modes (via ``failure_mode``; sign + verify wrap
 each with their own top-level reason):
@@ -108,6 +149,25 @@ each with their own top-level reason):
     declared as a top-level ClassDef / FunctionDef / Assign /
     AnnAssign target. Module bytes that fail to parse under the
     declared (PEP 263) or default UTF-8 encoding fire here too.
+  - ``wheel_multiple_instruction_manifests`` (M8 finding #3) — a
+    zero-entry-point wheel ships MORE THAN ONE 2-part
+    ``<package>/cognic-pack-manifest.toml`` member; ambiguous —
+    the exactly-one rule mirrors the B2-pre discovery arm.
+  - ``wheel_unparseable_instruction_manifest`` (M8 finding #3) —
+    the package-local manifest member is oversized (> 1 MiB bounded
+    read), not UTF-8, or not valid TOML.
+  - ``wheel_instruction_manifest_kind_not_skill`` (M8 finding #3) —
+    the manifest's dual-path ``[pack].kind`` is not ``"skill"``.
+  - ``wheel_instruction_manifest_mode_not_instruction`` (M8 finding
+    #3) — the manifest's dual-path ``[skill].mode`` is not
+    ``"instruction"`` (ABSENT defaults to ``"executable"`` per the
+    A7 / runtime classification; a zero-entry-point executable skill
+    is broken, not an instruction pack).
+  - ``wheel_instruction_package_not_importable`` (M8 finding #3) —
+    the manifest package name is not identifier-shaped OR the wheel
+    lacks ``<pkg>/__init__.py`` (zipimport has no namespace-package
+    support), so the Step-11 module-import probe could never operate
+    on the validated source.
 """
 
 from __future__ import annotations
@@ -117,9 +177,10 @@ import configparser
 import dataclasses
 import email.parser
 import re
+import tomllib
 import zipfile
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
@@ -149,20 +210,258 @@ class WheelIntegrityFailure:
     payload: dict[str, Any] = dataclasses.field(default_factory=dict)
 
 
+# ---------------------------------------------------------------------------
+# M8 finding #3 — instruction-wheel fallback (zero-entry-point content packs)
+# ---------------------------------------------------------------------------
+
+#: The signed pack-manifest basename the instruction fallback scans wheel
+#: members for. LOCAL mirror of ``protocol/plugin_registry._MANIFEST_BASENAME``
+#: (the B2-pre discovery arm's constant) — this stdlib-shaped module must not
+#: import the protocol registry at runtime; the test-only lockstep drift test
+#: at ``tests/unit/cli/test_wheel_integrity_instruction.py`` pins agreement
+#: per the drift-detector doctrine.
+_INSTRUCTION_MANIFEST_BASENAME: Final[str] = "cognic-pack-manifest.toml"
+
+#: Bounded-read cap for the in-wheel manifest member (1 MiB). A signed
+#: instruction manifest is a small TOML file; anything larger is refused
+#: BEFORE the bytes are read so a hostile wheel cannot balloon the parse.
+_INSTRUCTION_MANIFEST_MAX_BYTES: Final[int] = 1_048_576
+
+
+def _manifest_pack_block(manifest: dict[str, Any]) -> dict[str, Any] | None:
+    """``[pack]`` (canonical) with the legacy ``[tool.cognic.pack]`` fallback
+    (dual-path doctrine); ``None`` when absent. LOCAL mirror of
+    ``protocol/plugin_registry._manifest_pack_block`` — the lockstep drift
+    test pins the agreement (no runtime cross-import)."""
+    block = manifest.get("pack")
+    if isinstance(block, dict):
+        return block
+    tool = manifest.get("tool")
+    cognic = tool.get("cognic") if isinstance(tool, dict) else None
+    legacy = cognic.get("pack") if isinstance(cognic, dict) else None
+    return legacy if isinstance(legacy, dict) else None
+
+
+def _manifest_skill_block(manifest: dict[str, Any]) -> dict[str, Any] | None:
+    """``[skill]`` (canonical) with the legacy ``[tool.cognic.skill]``
+    fallback (dual-path doctrine); ``None`` when absent. LOCAL mirror of
+    ``protocol/plugin_registry._manifest_skill_block`` — lockstep pinned
+    test-only."""
+    block = manifest.get("skill")
+    if isinstance(block, dict):
+        return block
+    tool = manifest.get("tool")
+    cognic = tool.get("cognic") if isinstance(tool, dict) else None
+    legacy = cognic.get("skill") if isinstance(cognic, dict) else None
+    return legacy if isinstance(legacy, dict) else None
+
+
+def _manifest_skill_mode(
+    skill_block: dict[str, Any],
+) -> Literal["executable", "instruction"] | None:
+    """``[skill].mode`` classification — LOCAL mirror of
+    ``protocol/plugin_registry._manifest_skill_mode`` (ABSENT →
+    ``"executable"``; out-of-vocabulary → ``None``). The lockstep drift
+    test pins the two classifications in agreement."""
+    raw = skill_block.get("mode")
+    if raw is None:
+        return "executable"
+    if raw == "executable":
+        return "executable"
+    if raw == "instruction":
+        return "instruction"
+    return None
+
+
+def _read_instruction_wheel_fallback(
+    zf: zipfile.ZipFile,
+    *,
+    wheel_path: Path,
+    matched_dist_info: str,
+    all_names: list[str],
+) -> tuple[str | None, WheelIntegrityFailure | None]:
+    """The M8 finding #3 instruction-wheel fallback — runs ONLY when the
+    matched dist-info has no ``entry_points.txt``.
+
+    Returns ``(validated_package_name, None)`` when the wheel is a
+    well-formed instruction-skill content wheel, or ``(None, failure)``
+    otherwise. Zero manifest candidates reproduce the EXACT pre-existing
+    ``wheel_missing_entry_points_file`` failure (message + payload
+    byte-identical) so every non-instruction zero-entry-point wheel fails
+    exactly as before this arm landed.
+    """
+    # Step 1 — exactly-one 2-part ``<package>/cognic-pack-manifest.toml``
+    # member (the SAME rule the B2-pre discovery arm applies over
+    # ``dist.files``, here over the wheel members).
+    manifest_members = [
+        name
+        for name in all_names
+        if len(name.split("/")) == 2 and name.split("/")[1] == _INSTRUCTION_MANIFEST_BASENAME
+    ]
+    if not manifest_members:
+        return None, WheelIntegrityFailure(
+            failure_mode="wheel_missing_entry_points_file",
+            message=(
+                f"wheel {wheel_path} dist-info {matched_dist_info!r} "
+                "has no entry_points.txt; cannot derive an "
+                "integrity-anchored pack kind."
+            ),
+            payload={
+                "wheel_path": str(wheel_path),
+                "matched_dist_info": matched_dist_info,
+            },
+        )
+    if len(manifest_members) > 1:
+        return None, WheelIntegrityFailure(
+            failure_mode="wheel_multiple_instruction_manifests",
+            message=(
+                f"wheel {wheel_path} has no entry_points.txt and ships "
+                f"{len(manifest_members)} package-local "
+                f"{_INSTRUCTION_MANIFEST_BASENAME} members: "
+                f"{sorted(manifest_members)}. Refusing: an instruction-"
+                "skill wheel MUST ship exactly one "
+                f"<package>/{_INSTRUCTION_MANIFEST_BASENAME} (the same "
+                "exactly-one rule as the M8 manifest-walk discovery arm); "
+                "multiple is ambiguous (M8 finding #3)."
+            ),
+            payload={
+                "wheel_path": str(wheel_path),
+                "manifest_members": sorted(manifest_members),
+            },
+        )
+    manifest_member = manifest_members[0]
+
+    # Step 2 — bounded read + TOML parse.
+    try:
+        manifest_size = zf.getinfo(manifest_member).file_size
+    except KeyError:
+        # Directory-entry-only listings can't reach here (the 2-part scan
+        # matched a real member name), but a hostile/degenerate zip could;
+        # fail closed through the unparseable arm.
+        manifest_size = _INSTRUCTION_MANIFEST_MAX_BYTES + 1
+    if manifest_size > _INSTRUCTION_MANIFEST_MAX_BYTES:
+        return None, WheelIntegrityFailure(
+            failure_mode="wheel_unparseable_instruction_manifest",
+            message=(
+                f"wheel {wheel_path} member {manifest_member!r} is "
+                f"{manifest_size} bytes — larger than the "
+                f"{_INSTRUCTION_MANIFEST_MAX_BYTES}-byte (1 MiB) bounded-"
+                "read cap for a signed instruction manifest. Refusing "
+                "before reading the member (M8 finding #3)."
+            ),
+            payload={
+                "wheel_path": str(wheel_path),
+                "manifest_member": manifest_member,
+                "manifest_size": manifest_size,
+                "max_bytes": _INSTRUCTION_MANIFEST_MAX_BYTES,
+            },
+        )
+    try:
+        manifest_bytes = zf.read(manifest_member)
+        manifest = tomllib.loads(manifest_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError, zipfile.BadZipFile, OSError) as exc:
+        return None, WheelIntegrityFailure(
+            failure_mode="wheel_unparseable_instruction_manifest",
+            message=(
+                f"wheel {wheel_path} member {manifest_member!r} did not "
+                f"read + parse as UTF-8 TOML: {type(exc).__name__}: {exc}. "
+                "Cannot classify the zero-entry-point wheel as an "
+                "instruction-skill content pack (M8 finding #3)."
+            ),
+            payload={
+                "wheel_path": str(wheel_path),
+                "manifest_member": manifest_member,
+                "error_type": type(exc).__name__,
+            },
+        )
+
+    # Step 3 — STRICT filter: [pack].kind == "skill" AND [skill].mode ==
+    # "instruction" (dual-path). Any mismatch refuses — a zero-entry-point
+    # wheel of any OTHER kind/mode is a broken executable pack.
+    pack_block = _manifest_pack_block(manifest)
+    declared_kind = pack_block.get("kind") if pack_block is not None else None
+    if declared_kind != "skill":
+        return None, WheelIntegrityFailure(
+            failure_mode="wheel_instruction_manifest_kind_not_skill",
+            message=(
+                f"wheel {wheel_path} has no entry_points.txt and its "
+                f"package-local manifest {manifest_member!r} declares "
+                f"[pack].kind={declared_kind!r}; only kind='skill' + "
+                "[skill].mode='instruction' content packs may omit entry "
+                "points. Every other zero-entry-point wheel is refused "
+                "(M8 finding #3)."
+            ),
+            payload={
+                "wheel_path": str(wheel_path),
+                "manifest_member": manifest_member,
+                "declared_kind": declared_kind,
+            },
+        )
+    skill_block = _manifest_skill_block(manifest)
+    mode = _manifest_skill_mode(skill_block) if skill_block is not None else None
+    if mode != "instruction":
+        return None, WheelIntegrityFailure(
+            failure_mode="wheel_instruction_manifest_mode_not_instruction",
+            message=(
+                f"wheel {wheel_path} has no entry_points.txt and its "
+                f"package-local manifest {manifest_member!r} declares "
+                "[pack].kind='skill' but [skill].mode is not "
+                f"'instruction' (classified mode={mode!r}, declared "
+                f"{(skill_block or {}).get('mode')!r}); a zero-entry-"
+                "point executable-mode skill is a broken pack, not an "
+                "instruction content pack (M8 finding #3)."
+            ),
+            payload={
+                "wheel_path": str(wheel_path),
+                "manifest_member": manifest_member,
+                "declared_mode": (skill_block or {}).get("mode"),
+            },
+        )
+
+    # Step 4 — package-layout consistency (anti-decoy): the manifest
+    # package must be an importable package inside THIS wheel so verify's
+    # Step-11 module-import probe operates on exactly the validated
+    # source (identifier-shaped name + ``<pkg>/__init__.py``; zipimport
+    # has no namespace-package support).
+    package_name = manifest_member.split("/")[0]
+    candidate_init = f"{package_name}/__init__.py"
+    if not package_name.isidentifier() or candidate_init not in all_names:
+        return None, WheelIntegrityFailure(
+            failure_mode="wheel_instruction_package_not_importable",
+            message=(
+                f"wheel {wheel_path} instruction manifest at "
+                f"{manifest_member!r} names package {package_name!r}, "
+                "which is not an importable package in this wheel "
+                f"(identifier-shaped name + {candidate_init!r} member "
+                "required; zipimport does not support namespace "
+                "packages). The Step-11 module-import probe could never "
+                "operate on the validated source (M8 finding #3)."
+            ),
+            payload={
+                "wheel_path": str(wheel_path),
+                "manifest_member": manifest_member,
+                "package_name": package_name,
+                "candidate_init": candidate_init,
+            },
+        )
+    return package_name, None
+
+
 def read_signed_wheel_dist_info_metadata(
     wheel_path: Path,
     *,
     expected_project_name: str,
     expected_version: str,
 ) -> tuple[
-    tuple[str, str, str, tuple[tuple[str, str], ...]] | None,
+    tuple[str, str, str, tuple[tuple[str, str], ...], str | None] | None,
     WheelIntegrityFailure | None,
 ]:
     """Read the cosign-signed wheel's dist-info entries (entry_points.txt
     + METADATA) integrity-anchored to the wheel filename's name+version.
 
     Returns ``((metadata_canonical_name, metadata_version, kind,
-    entry_points), None)`` on success or ``(None, failure)`` on refusal.
+    entry_points, instruction_package), None)`` on success or
+    ``(None, failure)`` on refusal.
 
     ``entry_points`` is the tuple of ``(module_path, object_path)`` pairs
     parsed + validated from the **selected dist-info's** entry_points.txt
@@ -173,6 +472,14 @@ def read_signed_wheel_dist_info_metadata(
     sort earlier in the ZIP and result in load-probing a benign decoy
     while the real dist-info entry stays unloadable. Callers MUST use
     this returned tuple directly.
+
+    ``instruction_package`` (additive 5th slot, M8 finding #3) is the
+    validated instruction stub-package name when the wheel is a
+    zero-entry-point instruction-skill content wheel (derived kind
+    ``"skill"``, EMPTY ``entry_points``) and ``None`` for every
+    entry-point wheel. Verify's Step-11 module-import probe MUST use
+    this returned name directly (same anti-decoy doctrine as the
+    entry-point tuple — no re-discovery).
     """
     expected_canonical = canonicalize_name(expected_project_name)
     try:
@@ -271,19 +578,24 @@ def read_signed_wheel_dist_info_metadata(
 
         entry_points_member = f"{matched_dist_info}/entry_points.txt"
         metadata_member = f"{matched_dist_info}/METADATA"
+        instruction_package: str | None = None
         if entry_points_member not in all_names:
-            return None, WheelIntegrityFailure(
-                failure_mode="wheel_missing_entry_points_file",
-                message=(
-                    f"wheel {wheel_path} dist-info {matched_dist_info!r} "
-                    "has no entry_points.txt; cannot derive an "
-                    "integrity-anchored pack kind."
-                ),
-                payload={
-                    "wheel_path": str(wheel_path),
-                    "matched_dist_info": matched_dist_info,
-                },
+            # M8 finding #3 — instruction-wheel fallback. ADR-027
+            # instruction-only skill packs are zero-entry-point CONTENT
+            # packs; absent entry_points.txt may pass ONLY when the wheel
+            # ships exactly one package-local instruction manifest with
+            # kind="skill" + mode="instruction". Zero candidates
+            # reproduces the EXACT pre-existing
+            # ``wheel_missing_entry_points_file`` failure; any other
+            # mismatch refuses via the instruction closed-taxonomy modes.
+            instruction_package, instruction_failure = _read_instruction_wheel_fallback(
+                zf,
+                wheel_path=wheel_path,
+                matched_dist_info=matched_dist_info,
+                all_names=all_names,
             )
+            if instruction_failure is not None:
+                return None, instruction_failure
         if metadata_member not in all_names:
             return None, WheelIntegrityFailure(
                 failure_mode="wheel_missing_metadata_file",
@@ -297,7 +609,10 @@ def read_signed_wheel_dist_info_metadata(
                     "matched_dist_info": matched_dist_info,
                 },
             )
-        ep_bytes = zf.read(entry_points_member)
+        # ``entry_points_member`` is guaranteed present when
+        # ``instruction_package`` is None (the fallback either validated
+        # an instruction wheel or returned the refusal above).
+        ep_bytes = b"" if instruction_package is not None else zf.read(entry_points_member)
         metadata_bytes = zf.read(metadata_member)
         wheel_members: frozenset[str] = frozenset(all_names)
 
@@ -401,6 +716,22 @@ def read_signed_wheel_dist_info_metadata(
                 "expected_version_text": expected_version,
             },
         )
+
+    # M8 finding #3 — instruction wheels return here: METADATA name +
+    # version anchoring above is SHARED with the entry-point path; the
+    # fallback already validated the exactly-one manifest + strict
+    # kind/mode filter + package layout. Derived kind is "skill", the
+    # validated entry-point tuple is EMPTY (zero-executable by design —
+    # no faked entry point), and the validated stub-package name rides
+    # the additive 5th slot for verify's Step-11 module-import probe.
+    if instruction_package is not None:
+        return (
+            metadata_name_canonical,
+            metadata_version_stripped,
+            "skill",
+            (),
+            instruction_package,
+        ), None
 
     # R8 P2 #3: ``RawConfigParser`` (no interpolation). A wheel with
     # ``sign_target = pkg:%(missing)s`` would otherwise raise
@@ -669,6 +1000,10 @@ def read_signed_wheel_dist_info_metadata(
         metadata_version_stripped,
         kind,
         tuple(validated_entry_points),
+        # M8 finding #3 — additive instruction-package slot: ALWAYS None
+        # on the entry-point path (byte/behavior-unchanged contract for
+        # entry-point wheels).
+        None,
     ), None
 
 
