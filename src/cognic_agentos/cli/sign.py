@@ -76,8 +76,17 @@ reasons live in the matching ``cli/verify.py``):
     [project] reads; ``attestations_dir_*`` /
     ``agent_cards_dir_*`` (R8 P2 #3 + R9 P2 #2 output-dir
     create+resolve+escape); ``agent_card_jws_path_*`` (R8 P2 #1).
-  - ``sign_agent_card_jws_signing_failed`` — joserfc exception during
-    JWS production.
+  - ``sign_agent_card_jws_signing_failed`` — the AgentCard-JWS arm's
+    own closed-enum reason (M8 finding #4): joserfc exception during
+    JWS production; ``ImportError`` / ``ModuleNotFoundError`` at the
+    function-local joserfc import (finding #4b — payload carries
+    ``missing_module``); wrong key material (a sigstore-encrypted
+    cosign key or non-RSA PEM fed to the RS256 arm — JoseError
+    translated to ValueError); AND the JWS custody key's own
+    resolution failures (``Settings.agent_card_jws_signing_key_path``
+    unset / missing / vault-unresolvable — finding #4c: the JWS arm
+    NEVER falls back to ``signing_key_path``), plus the defensive
+    ``failure_mode=agent_card_jws_signing_key_not_resolved`` arm.
   - ``sign_provenance_template_render_failed`` /
     ``sign_intoto_layout_template_render_failed`` — template errors.
 
@@ -98,6 +107,17 @@ Production behaviour (Doctrine F):
     SLSA / in-toto / cosign-argv-byproduct record the auditable
     identity (vault URI when applicable), NOT the transient
     tempfile path (R3 P2 #3 + R4 P2 #1 invocation-plan shape).
+  - AgentCard-JWS key custody (M8 finding #4c, ADR-016 amendment
+    2026-07-06): agent packs sign the AgentCard JWS with the
+    SEPARATE ``Settings.agent_card_jws_signing_key_path``
+    (``COGNIC_AGENT_CARD_JWS_SIGNING_KEY_PATH``) — an UNENCRYPTED
+    RSA private PEM — resolved through the same shared
+    file-or-vault core; the cosign ``signing_key_path``
+    (sigstore-encrypted format) never reaches the JWS arm and the
+    JWS key never reaches cosign. The matching verify-side trust
+    root is ``Settings.agent_card_jws_trust_root_path`` /
+    ``--agent-card-trust-root`` / the tracked pack-root
+    ``agent-card.pub`` (see ``cli/verify.py``).
   - ``--dev-mode-skip-cosign`` is gated behind a flag that prints a
     security warning to stderr; the prod profile rejects the flag at
     Settings construction time (``core/config.py:1035``); the
@@ -327,13 +347,74 @@ async def _resolve_signing_key_path(
     *,
     secret_adapter: SecretAdapter | None = None,
 ) -> tuple[str | None, str | None, Path | None, SignFinding | None]:
-    """Resolve the signing key path from ``settings.signing_key_path``.
+    """Resolve the COSIGN signing key path from
+    ``settings.signing_key_path``. Thin custody wrapper over
+    :func:`_resolve_key_material_path`; per M8 finding #4c this key is
+    cosign-only — the AgentCard-JWS arm resolves its own key via
+    :func:`_resolve_agent_card_jws_signing_key_path` and NEVER reads
+    ``signing_key_path``.
+    """
+    return await _resolve_key_material_path(
+        settings.signing_key_path,
+        settings=settings,
+        secret_adapter=secret_adapter,
+        reason="sign_signing_key_unavailable",
+        setting_label="signing_key_path",
+    )
 
-    Returns ``(cosign_readable_path, auditable_identity,
+
+async def _resolve_agent_card_jws_signing_key_path(
+    settings: Settings,
+    *,
+    secret_adapter: SecretAdapter | None = None,
+) -> tuple[str | None, str | None, Path | None, SignFinding | None]:
+    """Resolve the AgentCard-JWS signing key path from
+    ``settings.agent_card_jws_signing_key_path`` (M8 finding #4c —
+    SEPARATE custody from the cosign signing key).
+
+    The JWS identity is an UNENCRYPTED RSA private PEM (RS256); the
+    cosign identity is a sigstore-encrypted key. No file satisfies
+    both formats, so this resolver NEVER falls back to
+    ``settings.signing_key_path`` — an unset value on an agent-pack
+    sign refuses with the JWS arm's own closed-enum reason
+    ``sign_agent_card_jws_signing_failed`` (pinned by the AST +
+    behavioral no-fallback regressions in
+    ``tests/unit/cli/test_agent_card_jws_custody.py``).
+    """
+    return await _resolve_key_material_path(
+        settings.agent_card_jws_signing_key_path,
+        settings=settings,
+        secret_adapter=secret_adapter,
+        reason="sign_agent_card_jws_signing_failed",
+        setting_label="agent_card_jws_signing_key_path",
+        extra_unset_hint=(
+            " The AgentCard-JWS arm signs with a SEPARATE unencrypted RSA "
+            "identity from the cosign signing key (Settings.signing_key_path) "
+            "— the two are different cryptographic identities and neither "
+            "file format satisfies the other (M8 finding #4)."
+        ),
+    )
+
+
+async def _resolve_key_material_path(
+    configured: str | None,
+    *,
+    settings: Settings,
+    secret_adapter: SecretAdapter | None,
+    reason: ValidatorReason,
+    setting_label: str,
+    extra_unset_hint: str = "",
+) -> tuple[str | None, str | None, Path | None, SignFinding | None]:
+    """Shared key-material resolution core (M8 finding #4c factored the
+    Sprint-7A cosign resolver into this parameterized form so the
+    AgentCard-JWS custody wrapper reuses the SAME vault:// + file
+    branches instead of forking them).
+
+    Returns ``(tool_readable_path, auditable_identity,
     tempfile_to_cleanup, finding)``:
-      - ``cosign_readable_path``: filesystem path cosign can read;
-        ``None`` on refusal. For ``vault://`` URIs this is a tempfile
-        path; for file paths it's the path itself.
+      - ``tool_readable_path``: filesystem path the consuming tool can
+        read; ``None`` on refusal. For ``vault://`` URIs this is a
+        tempfile path; for file paths it's the path itself.
       - ``auditable_identity``: the stable identifier recorded in
         SLSA / in-toto attestations + the cosign-argv byproduct
         (per R3 P2 #3 doctrine — vault:// URIs MUST be preserved as
@@ -345,17 +426,17 @@ async def _resolve_signing_key_path(
         orchestrator MUST unlink in its finally block when the
         resolution wrote bytes from a Vault payload to disk;
         ``None`` when no tempfile is involved.
-      - ``finding``: closed-enum refusal on any failure mode;
-        ``None`` on success.
+      - ``finding``: closed-enum refusal (``reason``) on any failure
+        mode; ``None`` on success.
 
     Per Doctrine F + R2 P2 #2 + R3 P2 #2 + R3 P2 #3 reviewer
     corrections: ``vault://`` URI-shaped paths resolve via the
     SecretAdapter; the resolver validates the payload's ``key``
     field is ``bytes`` (or coerces from ``str``), writes to a
-    tempfile cosign can sign-blob against, and returns the URI
+    tempfile the consuming tool can read, and returns the URI
     separately as the auditable identity.
     """
-    configured = settings.signing_key_path
+    env_label = f"COGNIC_{setting_label.upper()}"
     if configured is None:
         return (
             None,
@@ -363,12 +444,12 @@ async def _resolve_signing_key_path(
             None,
             SignFinding(
                 severity="refusal",
-                reason="sign_signing_key_unavailable",
+                reason=reason,
                 message=(
-                    "Settings.signing_key_path is unset. Set "
-                    "COGNIC_SIGNING_KEY_PATH to a local PEM path (dev / test "
+                    f"Settings.{setting_label} is unset. Set "
+                    f"{env_label} to a local PEM path (dev / test "
                     "profiles) or a vault:// URI (production — resolved via "
-                    "the SecretAdapter at sign-time)."
+                    f"the SecretAdapter at sign-time).{extra_unset_hint}"
                 ),
                 payload={"configured_path": None},
             ),
@@ -396,9 +477,9 @@ async def _resolve_signing_key_path(
                     None,
                     SignFinding(
                         severity="refusal",
-                        reason="sign_signing_key_unavailable",
+                        reason=reason,
                         message=(
-                            f"Settings.signing_key_path={configured!r} is a "
+                            f"Settings.{setting_label}={configured!r} is a "
                             f"vault:// URI but SecretAdapter construction "
                             f"failed: {type(exc).__name__}: {exc}. Common "
                             "production cause: VAULT_ADDR (or the matching "
@@ -424,10 +505,10 @@ async def _resolve_signing_key_path(
                 None,
                 SignFinding(
                     severity="refusal",
-                    reason="sign_signing_key_unavailable",
+                    reason=reason,
                     message=(
                         f"SecretAdapter has no secret at {secret_path!r} "
-                        "(resolved from Settings.signing_key_path="
+                        f"(resolved from Settings.{setting_label}="
                         f"{configured!r})."
                     ),
                     payload={
@@ -444,7 +525,7 @@ async def _resolve_signing_key_path(
                 None,
                 SignFinding(
                     severity="refusal",
-                    reason="sign_signing_key_unavailable",
+                    reason=reason,
                     message=(
                         f"SecretAdapter.read({secret_path!r}) raised {type(exc).__name__}: {exc}"
                     ),
@@ -463,7 +544,7 @@ async def _resolve_signing_key_path(
                 None,
                 SignFinding(
                     severity="refusal",
-                    reason="sign_signing_key_unavailable",
+                    reason=reason,
                     message=(
                         f"SecretAdapter payload at {secret_path!r} is not a "
                         "dict with a 'key' field; expected "
@@ -492,7 +573,7 @@ async def _resolve_signing_key_path(
                 None,
                 SignFinding(
                     severity="refusal",
-                    reason="sign_signing_key_unavailable",
+                    reason=reason,
                     message=(
                         f"SecretAdapter payload at {secret_path!r} carries a "
                         f"'key' field of type {type(key_bytes).__name__!r} (expected "
@@ -507,7 +588,7 @@ async def _resolve_signing_key_path(
                     },
                 ),
             )
-        # Write to a tempfile cosign can sign-blob against. Caller's
+        # Write to a tempfile the consuming tool can read. Caller's
         # finally block unlinks the path (mode 0600 on the tempfile).
         with tempfile.NamedTemporaryFile(
             prefix="cognic_signing_key_",
@@ -518,9 +599,9 @@ async def _resolve_signing_key_path(
         tempfile_path = Path(tempfile_handle.name)
         # Restrict perms — vault-resolved keys must NOT be world-readable.
         tempfile_path.chmod(0o600)
-        # R3 P2 #3: cosign reads the tempfile path; SLSA / in-toto /
-        # cosign-argv-byproduct record the stable vault URI as the
-        # auditable identity.
+        # R3 P2 #3: the consuming tool reads the tempfile path; SLSA /
+        # in-toto / cosign-argv-byproduct record the stable vault URI as
+        # the auditable identity.
         return str(tempfile_path), configured, tempfile_path, None
 
     # File-path branch.
@@ -532,9 +613,9 @@ async def _resolve_signing_key_path(
             None,
             SignFinding(
                 severity="refusal",
-                reason="sign_signing_key_unavailable",
+                reason=reason,
                 message=(
-                    f"Settings.signing_key_path={configured!r} does not resolve "
+                    f"Settings.{setting_label}={configured!r} does not resolve "
                     "to a file on disk. Verify the path; for synthetic test-only "
                     "keys, see tests/fixtures/cli_sign_target_pack/attestations/"
                     "test-signing/."
@@ -1760,22 +1841,35 @@ def _sign_agent_card_jws_bytes(
     pins the ``sign_agent_card_jws_signing_failed`` emit path.
     """
     from joserfc import jws as _jws_module
+    from joserfc.errors import JoseError
     from joserfc.jwk import RSAKey
 
-    key = RSAKey.import_key(private_pem_bytes)
-    # Detached compact form: header + signature, payload omitted from
-    # the wire form (verifier supplies the original payload at verify
-    # time). joserfc's `serialize_compact` returns the standard
-    # 3-segment form; we strip the middle segment to match Sprint-6's
-    # detached-payload contract.
-    # joserfc.jws.serialize_compact takes positional args:
-    # (protected_header, payload, key). Returns the standard
-    # 3-segment compact form.
-    standard = _jws_module.serialize_compact(
-        {"alg": "RS256"},
-        card_payload,
-        key,
-    )
+    try:
+        key = RSAKey.import_key(private_pem_bytes)
+        # Detached compact form: header + signature, payload omitted from
+        # the wire form (verifier supplies the original payload at verify
+        # time). joserfc's `serialize_compact` returns the standard
+        # 3-segment form; we strip the middle segment to match Sprint-6's
+        # detached-payload contract.
+        # joserfc.jws.serialize_compact takes positional args:
+        # (protected_header, payload, key). Returns the standard
+        # 3-segment compact form.
+        standard = _jws_module.serialize_compact(
+            {"alg": "RS256"},
+            card_payload,
+            key,
+        )
+    except JoseError as exc:
+        # M8 finding #4b hardening: joserfc's JoseError family does NOT
+        # subclass ValueError (e.g. an EC PEM fed to RSAKey.import_key
+        # raises InvalidKeyTypeError), so it would escape the wrapper's
+        # closed except tuple as a raw traceback. Translate to
+        # ValueError so every key-material failure stays a structured
+        # ``sign_agent_card_jws_signing_failed`` refusal. Mirrors the
+        # verify side, which already catches JoseError explicitly
+        # (it can import the class unconditionally — here the import
+        # itself may fail, which the wrapper's ImportError arm owns).
+        raise ValueError(f"{type(exc).__name__}: {exc}") from exc
     parts = standard.split(".")
     if len(parts) != 3:
         raise RuntimeError(f"unexpected JWS shape from joserfc: {len(parts)} segments")
@@ -1786,15 +1880,16 @@ def _sign_agent_card_jws_bytes(
 def _sign_agent_card_jws_to_disk(
     pack_path: Path,
     *,
-    signing_key_path: str,
+    agent_card_jws_signing_key_path: str,
     jws_output_path: Path,
 ) -> SignFinding | None:
     """Sign the AgentCard JSON at ``pack_path/agent_cards/agent-card.json``
-    using the RSA private key at ``signing_key_path``; write the
-    detached compact JWS to ``jws_output_path`` (per R8 P2 #1 the
-    output path comes from the manifest's
-    ``[identity].agent_card_jws_path`` field, not a hardcoded
-    default).
+    using the RSA private key at ``agent_card_jws_signing_key_path``
+    (M8 finding #4c: the SEPARATELY-resolved AgentCard-JWS custody key
+    — NEVER the cosign ``signing_key_path``); write the detached
+    compact JWS to ``jws_output_path`` (per R8 P2 #1 the output path
+    comes from the manifest's ``[identity].agent_card_jws_path``
+    field, not a hardcoded default).
 
     The JWS output's parent directory is created if absent (handles
     the manifest-declared-subdirectory case, e.g.,
@@ -1802,12 +1897,19 @@ def _sign_agent_card_jws_to_disk(
     path are NOT re-validated for symlink-escape — the caller
     pre-validates via ``_read_agent_card_jws_path_for_bundle``.
 
-    Wraps any exception into ``sign_agent_card_jws_signing_failed``.
+    Wraps any exception into ``sign_agent_card_jws_signing_failed``:
+    the except tuple includes ``ImportError`` /
+    ``ModuleNotFoundError`` (M8 finding #4b — pre-fix a missing
+    joserfc escaped as a raw traceback with no ``sign-bundle:``
+    verdict line), and :func:`_sign_agent_card_jws_bytes` translates
+    joserfc ``JoseError`` subclasses into ``ValueError`` so wrong
+    key material (e.g. a sigstore-encrypted cosign key or an EC PEM)
+    also refuses structurally.
     """
     card_path = pack_path / "agent_cards" / "agent-card.json"
     try:
         card_payload = card_path.read_bytes()
-        private_pem = Path(signing_key_path).read_bytes()
+        private_pem = Path(agent_card_jws_signing_key_path).read_bytes()
         jws_bytes = _sign_agent_card_jws_bytes(
             card_payload,
             private_pem_bytes=private_pem,
@@ -1817,16 +1919,34 @@ def _sign_agent_card_jws_to_disk(
         # in a fresh pack).
         jws_output_path.parent.mkdir(parents=True, exist_ok=True)
         jws_output_path.write_bytes(jws_bytes)
-    except (OSError, RuntimeError, ValueError, TypeError) as exc:
+    except (OSError, RuntimeError, ValueError, TypeError, ImportError) as exc:
+        payload: dict[str, Any] = {
+            "card_path": str(card_path),
+            "jws_output_path": str(jws_output_path),
+            "error_type": type(exc).__name__,
+        }
+        if isinstance(exc, ImportError):
+            # M8 finding #4b: name the missing module + the install
+            # remedy. joserfc rides the base [project] dependency set
+            # as of finding #4a, so an import failure means a broken /
+            # stale authoring environment — not a missing extra.
+            missing_module = exc.name or "joserfc"
+            payload["missing_module"] = missing_module
+            message = (
+                f"AgentCard JWS signing failed for {card_path}: "
+                f"{type(exc).__name__}: {exc}. The {missing_module!r} module "
+                "is required for AgentCard JWS signing and rides the base "
+                "cognic-agentos dependency set (M8 finding #4) — reinstall / "
+                "upgrade the authoring environment (`pip install --upgrade "
+                "cognic-agentos` or `uv sync`)."
+            )
+        else:
+            message = f"AgentCard JWS signing failed for {card_path}: {type(exc).__name__}: {exc}"
         return SignFinding(
             severity="refusal",
             reason="sign_agent_card_jws_signing_failed",
-            message=(f"AgentCard JWS signing failed for {card_path}: {type(exc).__name__}: {exc}"),
-            payload={
-                "card_path": str(card_path),
-                "jws_output_path": str(jws_output_path),
-                "error_type": type(exc).__name__,
-            },
+            message=message,
+            payload=payload,
         )
     return None
 
@@ -2383,6 +2503,13 @@ async def run_sign_bundle(
          authors fix all install gaps in a single iteration.
       2. Resolve signing key (file path or vault:// URI via
          SecretAdapter per R2 P2 #2 doctrine).
+      2b. (agent packs only, gated by a manifest-kind peek) Resolve
+         the SEPARATE AgentCard-JWS signing key from
+         ``Settings.agent_card_jws_signing_key_path`` (M8 finding
+         #4c custody split — closed-enum reason
+         ``sign_agent_card_jws_signing_failed`` on unset / missing /
+         vault-unresolvable; the JWS arm never reads
+         ``signing_key_path``).
       3. Read manifest [pack].kind to gate the AgentCard JWS step.
       4. Discover the wheel under ``<pack>/dist/*.whl``; missing →
          ``sign_subprocess_failed`` with payload ``failure_mode=
@@ -2396,9 +2523,11 @@ async def run_sign_bundle(
       9. Render in-toto layout template → ``attestations/
          intoto-layout.json`` (closed-enum reason
          ``sign_intoto_layout_template_render_failed``).
-      10. (agent packs only) Sign AgentCard JWS via joserfc →
+      10. (agent packs only) Sign AgentCard JWS via joserfc with the
+          step-2b JWS custody key →
           ``agent_cards/agent-card.jws``. Detached compact form;
           regenerated JWS verifies against the committed public PEM
+          (the tracked pack-root ``agent-card.pub`` convention)
           deterministically. Closed-enum reason
           ``sign_agent_card_jws_signing_failed``.
       11. Run cosign sign-blob over the wheel →
@@ -2476,6 +2605,43 @@ async def run_sign_bundle(
     assert key_path is not None
     assert signing_identity is not None
 
+    # Step 2b (M8 finding #4c): AgentCard-JWS signing key — SEPARATE
+    # custody from the cosign key (different cryptographic identity +
+    # different on-disk format; the JWS arm NEVER reads
+    # ``signing_key_path``). Only agent packs consume it, so peek the
+    # manifest kind with the SAME reader the inner step 3a uses — a
+    # non-agent pack never requires the setting. A peek FAILURE is
+    # deliberately ignored here (jws key stays unresolved): the inner
+    # step 3a re-reads the manifest and surfaces the structured
+    # refusal; the deterministic double-read cannot disagree.
+    jws_key_path: str | None = None
+    jws_key_tempfile: Path | None = None
+    _, peeked_kind, peek_finding = _read_pack_kind_for_bundle(pack_path)
+    if peek_finding is None and peeked_kind == "agent":
+        (
+            jws_key_path,
+            _jws_signing_identity,
+            jws_key_tempfile,
+            jws_key_finding,
+        ) = await _resolve_agent_card_jws_signing_key_path(
+            settings,
+            secret_adapter=secret_adapter,
+        )
+        if jws_key_finding is not None:
+            findings.append(jws_key_finding)
+            # The cosign-key tempfile (if any) was already written by
+            # step 2 — unlink it before the early refusal return (the
+            # try/finally below only wraps the inner orchestrator).
+            if key_tempfile is not None:
+                key_tempfile.unlink(missing_ok=True)
+            return SignReport(
+                operation="sign-bundle",
+                target_path=str(pack_path),
+                overall_status="fail",
+                findings=findings,
+            )
+        assert jws_key_path is not None
+
     try:
         return await _run_sign_bundle_inner(
             pack_path=pack_path,
@@ -2485,6 +2651,7 @@ async def run_sign_bundle(
             license_bin=license_bin,
             key_path=key_path,
             signing_identity=signing_identity,
+            jws_key_path=jws_key_path,
             findings=findings,
             dev_mode_skip_cosign=dev_mode_skip_cosign,
             bundle_root=bundle_root,
@@ -2492,6 +2659,8 @@ async def run_sign_bundle(
     finally:
         if key_tempfile is not None:
             key_tempfile.unlink(missing_ok=True)
+        if jws_key_tempfile is not None:
+            jws_key_tempfile.unlink(missing_ok=True)
 
 
 def _create_and_validate_output_dir(
@@ -2597,6 +2766,7 @@ async def _run_sign_bundle_inner(
     license_bin: str,
     key_path: str,
     signing_identity: str,
+    jws_key_path: str | None,
     findings: list[SignFinding],
     dev_mode_skip_cosign: bool,
     bundle_root: Path | None = None,
@@ -2604,7 +2774,12 @@ async def _run_sign_bundle_inner(
     """Inner sign-bundle body factored out so the caller can wrap the
     signing key tempfile cleanup in a single try/finally (per R2 P2 #2
     doctrine). All steps 3-12 happen here; the outer ``run_sign_bundle``
-    handles tool resolution + signing-key resolution + cleanup."""
+    handles tool resolution + signing-key resolution + cleanup.
+
+    ``jws_key_path`` is the SEPARATELY-resolved AgentCard-JWS custody
+    key (M8 finding #4c) — non-None iff the outer orchestrator's
+    manifest peek read ``kind == "agent"``. Step 10 consumes it; the
+    cosign ``key_path`` never reaches the JWS arm."""
     # Step 3a: manifest pack id + kind (gates JWS arm; closed-enum
     # validation per R4 P2 #3).
     pack_id, pack_kind, manifest_finding = _read_pack_kind_for_bundle(pack_path)
@@ -3172,12 +3347,47 @@ async def _run_sign_bundle_inner(
 
     # Step 10: AgentCard JWS (agent packs only).
     # R8 P2 #1: write to the manifest-declared path validated in
-    # step 3a-bis.
+    # step 3a-bis. M8 finding #4c: the arm signs with the
+    # SEPARATELY-resolved JWS custody key — never the cosign
+    # ``key_path``.
     if pack_kind == "agent":
         assert agent_card_jws_path is not None
+        if jws_key_path is None:
+            # Defensive fail-closed (M8 finding #4c): the outer
+            # orchestrator resolves the JWS key only when its manifest
+            # peek reads kind == "agent"; reaching step 10 as an agent
+            # pack WITHOUT a resolved key means the manifest changed
+            # between the peek and the inner step-3a read (or an
+            # internal caller skipped resolution). Refuse structurally
+            # rather than crash-signing with no key — crash-not-refusal
+            # is exactly the finding-#4b bug class.
+            findings.append(
+                SignFinding(
+                    severity="refusal",
+                    reason="sign_agent_card_jws_signing_failed",
+                    message=(
+                        "sign --bundle reached the AgentCard-JWS step for an "
+                        "agent pack without a resolved "
+                        "Settings.agent_card_jws_signing_key_path (the "
+                        "manifest kind changed between the orchestrator's "
+                        "key-resolution peek and the signing step). Re-run "
+                        "sign --bundle against a stable manifest."
+                    ),
+                    payload={
+                        "pack_path": str(pack_path),
+                        "failure_mode": "agent_card_jws_signing_key_not_resolved",
+                    },
+                )
+            )
+            return SignReport(
+                operation="sign-bundle",
+                target_path=str(pack_path),
+                overall_status="fail",
+                findings=findings,
+            )
         jws_finding = _sign_agent_card_jws_to_disk(
             pack_path,
-            signing_key_path=key_path,
+            agent_card_jws_signing_key_path=jws_key_path,
             jws_output_path=agent_card_jws_path,
         )
         if jws_finding is not None:

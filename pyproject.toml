@@ -94,6 +94,22 @@ dependencies = [
     # its presence at import time. <3.0.0 caps the upper bound at a major
     # version boundary per the repo convention.
     "sse-starlette>=2.1.0,<3.0.0",
+    # M8 finding #4a (2026-07-06, ADR-016 amendment) — joserfc moved from
+    # the [adapters] extra to base deps because TWO base-surface paths
+    # import it: (a) `agentos sign --bundle` / `agentos verify` sign +
+    # verify the AgentCard JWS for agent packs (the CLI is base install
+    # per the Typer doctrine above — a bare pack-authoring venv crashed
+    # ModuleNotFoundError on the first real agent-pack sign), and (b)
+    # core/agent/query_context.py (the M8 runtime RS256 query-context
+    # mint/verify) rides the kernel image, which installs no extras.
+    # Pure-Python; pinned exactly (JWS wire-format production is a
+    # contract surface); pulls `cryptography` transitively via joserfc's
+    # own dependency metadata (cryptography stays an explicit [adapters]
+    # entry for the driver stack). Selection rationale (over python-jose
+    # / jwcrypto) recorded at the original Sprint-6 adapters entry,
+    # carried forward: explicit RFC-7797 detached-JWS API; actively
+    # maintained by the authlib author.
+    "joserfc == 1.6.4",
 ]
 
 [project.optional-dependencies]
@@ -112,8 +128,9 @@ dev = [
     "respx>=0.22",
     # M3-E2c — the deployed-proof RS256 AS fixture (tests/integration/pack_loop/
     # _local_as.py, rs256 mode) signs JWTs + serves JWKS, and its unit test
-    # verifies them. PyJWT is undeclared today (cryptography + joserfc live under
-    # the [adapters] extra); declaring it here makes the test's `import jwt`
+    # verifies them. PyJWT is undeclared otherwise (cryptography lives under
+    # the [adapters] extra; joserfc moved to base deps at M8 finding #4a);
+    # declaring it here makes the test's `import jwt`
     # explicit, not a transitive accident. The AS *image* installs the same lib.
     "PyJWT[crypto]>=2.10,<3",
     # M3-E2c — the proof_1b_2c unit test drives the AS fixture's /token handler,
@@ -176,14 +193,12 @@ adapters = [
     # version drift is a wire-protocol contract change tied to the
     # schema-drift CI gate (T6).
     "a2a-sdk == 1.0.2",
-    # JWS verification for A2A Agent Card detached signatures (Sprint 6
-    # T7, per A2A-CONFORMANCE.md §"Card signatures (JWS)"). joserfc was
-    # picked (over python-jose, which is abandoned + lacks RFC-7797
-    # support, and over jwcrypto, which is older + uses a different
-    # crypto family) because (a) explicit RFC-7797 detached-JWS API
-    # surface; (b) actively maintained by the authlib author; (c)
-    # transitively reuses cryptography>=45 (already pinned for cosign).
-    "joserfc == 1.6.4",
+    # joserfc (JWS verification for A2A Agent Card detached signatures,
+    # Sprint 6 T7 per A2A-CONFORMANCE.md §"Card signatures (JWS)") lived
+    # here from Sprint 6 until M8 finding #4a (2026-07-06) moved it to
+    # base [project] dependencies — `agentos sign`/`verify` (base CLI
+    # surface) and core/agent/query_context.py (kernel image) both
+    # import it; see the base-deps entry for the full rationale.
 ]
 sandbox-docker = [
     # Sprint 8A T10 — DockerSiblingSandboxBackend uses aiodocker as the

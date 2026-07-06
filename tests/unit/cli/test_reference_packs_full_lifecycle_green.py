@@ -228,6 +228,13 @@ def _wire_sign_settings(
     monkeypatch.setenv("COGNIC_GRYPE_PATH", str(shims["grype"]))
     monkeypatch.setenv("COGNIC_LICENSE_AUDITOR_PATH", str(shims["license_auditor"]))
     monkeypatch.setenv("COGNIC_SIGNING_KEY_PATH", str(_AGENT_TEST_PRIVATE_PEM))
+    # M8 finding #4c: the agent reference pack's AgentCard-JWS arm
+    # signs with the SEPARATE JWS custody key (the reference pack's
+    # test-only RSA keypair serves both custody roles); verify Step 9
+    # then resolves the matching public key via the pack-root
+    # agent-card.pub the reference pack commits — exercising the
+    # tracked-convention fallback end-to-end.
+    monkeypatch.setenv("COGNIC_AGENT_CARD_JWS_SIGNING_KEY_PATH", str(_AGENT_TEST_PRIVATE_PEM))
 
 
 # Required attestation set produced by sign --bundle. Verify reads

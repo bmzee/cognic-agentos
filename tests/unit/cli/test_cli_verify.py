@@ -412,6 +412,13 @@ def _stage_signed_pack(
     monkeypatch.setenv("COGNIC_GRYPE_PATH", str(shims["grype"]))
     monkeypatch.setenv("COGNIC_LICENSE_AUDITOR_PATH", str(shims["license_auditor"]))
     monkeypatch.setenv("COGNIC_SIGNING_KEY_PATH", str(_TEST_PRIVATE_PEM))
+    # M8 finding #4c: the AgentCard-JWS arm signs with its OWN custody
+    # key (the fixture keypair serves both custody roles in the
+    # pre-#4-designed fixture; the custody-split suite at
+    # test_agent_card_jws_custody.py wires genuinely different keys).
+    # Verify-side Step 9 resolves the matching public key via the
+    # pack-root agent-card.pub the fixture pack commits.
+    monkeypatch.setenv("COGNIC_AGENT_CARD_JWS_SIGNING_KEY_PATH", str(_TEST_PRIVATE_PEM))
 
     runner = CliRunner()
     result = runner.invoke(app, ["sign", "--bundle", str(pack)])
@@ -1908,26 +1915,32 @@ def test_verify_with_jws_unimportable_trust_root_emits_jws_invalid(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Trust-root file is a real file but not a valid PEM →
+    """AgentCard trust-root file is a real file but not a valid PEM →
     joserfc's RSAKey.import_key raises during JWS verification →
-    closed-enum refusal ``verify_agent_card_jws_invalid``."""
+    closed-enum refusal ``verify_agent_card_jws_invalid``.
+
+    M8 finding #4c: the unimportable file now rides the SEPARATE
+    ``--agent-card-trust-root`` custody (Step 9 no longer reads the
+    cosign trust root, so poisoning --trust-root alone cannot reach
+    joserfc's import path any more)."""
     pack = _stage_signed_pack(tmp_path, monkeypatch)
     bad_pem = tmp_path / "bad_trust_root.pem"
     bad_pem.write_bytes(b"not a valid PEM")
 
     verify_shim = _make_cosign_shim(tmp_path, exit_code=0)
-    _wire_verify_settings(monkeypatch, cosign_path=verify_shim, trust_root=bad_pem)
+    _wire_verify_settings(monkeypatch, cosign_path=verify_shim, trust_root=_TEST_PUBLIC_PEM)
 
     runner = CliRunner()
-    result = runner.invoke(app, ["verify", str(pack)])
-    assert result.exit_code == 1
-    # Either the JWS step fires verify_agent_card_jws_invalid OR the
-    # trust-root file resolves but the subsequent JWS verification
-    # rejects it.
-    assert (
-        "verify_agent_card_jws_invalid" in result.stderr
-        or "verify_trust_root_path_unresolvable" in result.stderr
+    result = runner.invoke(
+        app, ["verify", "--agent-card-trust-root", str(bad_pem), "--json", str(pack)]
     )
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert any(
+        f["reason"] == "verify_agent_card_jws_invalid"
+        and f["payload"].get("failure_mode") == "jws_trust_root_import_error"
+        for f in payload["findings"]
+    ), payload["findings"]
 
 
 def test_verify_run_verify_called_directly_with_no_settings_returns_fail(
@@ -4444,6 +4457,7 @@ def test_sign_with_renamed_wheel_internal_metadata_mismatch_emits_subprocess_fai
     monkeypatch.setenv("COGNIC_GRYPE_PATH", str(shims["grype"]))
     monkeypatch.setenv("COGNIC_LICENSE_AUDITOR_PATH", str(shims["license_auditor"]))
     monkeypatch.setenv("COGNIC_SIGNING_KEY_PATH", str(_TEST_PRIVATE_PEM))
+    monkeypatch.setenv("COGNIC_AGENT_CARD_JWS_SIGNING_KEY_PATH", str(_TEST_PRIVATE_PEM))
 
     runner = CliRunner()
     result = runner.invoke(app, ["sign", "--bundle", "--json", str(pack)])
@@ -4486,6 +4500,7 @@ def test_sign_with_empty_cognic_section_emits_subprocess_failed(
     monkeypatch.setenv("COGNIC_GRYPE_PATH", str(shims["grype"]))
     monkeypatch.setenv("COGNIC_LICENSE_AUDITOR_PATH", str(shims["license_auditor"]))
     monkeypatch.setenv("COGNIC_SIGNING_KEY_PATH", str(_TEST_PRIVATE_PEM))
+    monkeypatch.setenv("COGNIC_AGENT_CARD_JWS_SIGNING_KEY_PATH", str(_TEST_PRIVATE_PEM))
 
     runner = CliRunner()
     result = runner.invoke(app, ["sign", "--bundle", "--json", str(pack)])
@@ -4533,6 +4548,7 @@ def test_sign_with_spoof_first_dist_info_emits_subprocess_failed(
     monkeypatch.setenv("COGNIC_GRYPE_PATH", str(shims["grype"]))
     monkeypatch.setenv("COGNIC_LICENSE_AUDITOR_PATH", str(shims["license_auditor"]))
     monkeypatch.setenv("COGNIC_SIGNING_KEY_PATH", str(_TEST_PRIVATE_PEM))
+    monkeypatch.setenv("COGNIC_AGENT_CARD_JWS_SIGNING_KEY_PATH", str(_TEST_PRIVATE_PEM))
 
     runner = CliRunner()
     result = runner.invoke(app, ["sign", "--bundle", "--json", str(pack)])
@@ -4587,6 +4603,7 @@ def test_sign_with_kind_mismatched_wheel_and_manifest_emits_subprocess_failed(
     monkeypatch.setenv("COGNIC_GRYPE_PATH", str(shims["grype"]))
     monkeypatch.setenv("COGNIC_LICENSE_AUDITOR_PATH", str(shims["license_auditor"]))
     monkeypatch.setenv("COGNIC_SIGNING_KEY_PATH", str(_TEST_PRIVATE_PEM))
+    monkeypatch.setenv("COGNIC_AGENT_CARD_JWS_SIGNING_KEY_PATH", str(_TEST_PRIVATE_PEM))
 
     runner = CliRunner()
     result = runner.invoke(app, ["sign", "--bundle", "--json", str(pack)])
@@ -5004,6 +5021,7 @@ def test_sign_with_pep440_equivalent_version_text_mismatch_emits_subprocess_fail
     monkeypatch.setenv("COGNIC_GRYPE_PATH", str(shims["grype"]))
     monkeypatch.setenv("COGNIC_LICENSE_AUDITOR_PATH", str(shims["license_auditor"]))
     monkeypatch.setenv("COGNIC_SIGNING_KEY_PATH", str(_TEST_PRIVATE_PEM))
+    monkeypatch.setenv("COGNIC_AGENT_CARD_JWS_SIGNING_KEY_PATH", str(_TEST_PRIVATE_PEM))
 
     runner = CliRunner()
     result = runner.invoke(app, ["sign", "--bundle", "--json", str(pack)])
@@ -5235,6 +5253,7 @@ def test_sign_with_filename_version_text_mismatch_emits_subprocess_failed(
     monkeypatch.setenv("COGNIC_GRYPE_PATH", str(shims["grype"]))
     monkeypatch.setenv("COGNIC_LICENSE_AUDITOR_PATH", str(shims["license_auditor"]))
     monkeypatch.setenv("COGNIC_SIGNING_KEY_PATH", str(_TEST_PRIVATE_PEM))
+    monkeypatch.setenv("COGNIC_AGENT_CARD_JWS_SIGNING_KEY_PATH", str(_TEST_PRIVATE_PEM))
 
     runner = CliRunner()
     result = runner.invoke(app, ["sign", "--bundle", "--json", str(pack)])

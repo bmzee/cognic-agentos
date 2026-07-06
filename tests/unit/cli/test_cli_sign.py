@@ -1074,10 +1074,19 @@ def _set_sign_bundle_settings(
     grype_path: Path,
     license_auditor_path: Path,
     signing_key_path: Path | str = _TEST_PRIVATE_PEM,
+    agent_card_jws_signing_key_path: Path | str | None = _TEST_PRIVATE_PEM,
 ) -> None:
     """Wire all four tool paths + signing key into Settings via env.
     ``signing_key_path`` accepts ``str`` for ``vault://...`` URIs
-    (Path() would collapse the double slash in the URI scheme)."""
+    (Path() would collapse the double slash in the URI scheme).
+
+    M8 finding #4c: the AgentCard-JWS arm resolves its OWN key from
+    ``COGNIC_AGENT_CARD_JWS_SIGNING_KEY_PATH`` (separate custody from
+    the cosign key). The default wires the fixture RSA PEM for both —
+    the pre-#4 fixture design deliberately used ONE test-only RSA
+    keypair; the custody-split tests in
+    ``test_agent_card_jws_custody.py`` wire genuinely different keys.
+    Pass ``None`` to leave the JWS custody env unset."""
     monkeypatch.setenv("COGNIC_COSIGN_PATH", str(cosign_path))
     monkeypatch.setenv("COGNIC_SYFT_PATH", str(syft_path))
     monkeypatch.setenv("COGNIC_GRYPE_PATH", str(grype_path))
@@ -1087,6 +1096,16 @@ def _set_sign_bundle_settings(
         monkeypatch.setenv("COGNIC_SIGNING_KEY_PATH", signing_key_path)
     else:
         monkeypatch.setenv("COGNIC_SIGNING_KEY_PATH", str(signing_key_path))
+    if agent_card_jws_signing_key_path is None:
+        monkeypatch.delenv("COGNIC_AGENT_CARD_JWS_SIGNING_KEY_PATH", raising=False)
+    elif isinstance(agent_card_jws_signing_key_path, str):
+        monkeypatch.setenv(
+            "COGNIC_AGENT_CARD_JWS_SIGNING_KEY_PATH", agent_card_jws_signing_key_path
+        )
+    else:
+        monkeypatch.setenv(
+            "COGNIC_AGENT_CARD_JWS_SIGNING_KEY_PATH", str(agent_card_jws_signing_key_path)
+        )
 
 
 def _stage_full_shim_set(tmp_path: Path) -> dict[str, Path]:
@@ -4228,6 +4247,8 @@ def test_sign_bundle_resolves_tools_via_host_path_fallback_when_overrides_unset(
     monkeypatch.delenv("COGNIC_GRYPE_PATH", raising=False)
     monkeypatch.delenv("COGNIC_LICENSE_AUDITOR_PATH", raising=False)
     monkeypatch.setenv("COGNIC_SIGNING_KEY_PATH", str(_TEST_PRIVATE_PEM))
+    # M8 finding #4c: the agent-fixture JWS arm needs its own custody key.
+    monkeypatch.setenv("COGNIC_AGENT_CARD_JWS_SIGNING_KEY_PATH", str(_TEST_PRIVATE_PEM))
 
     import shutil as real_shutil
 

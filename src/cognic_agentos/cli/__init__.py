@@ -986,9 +986,25 @@ def verify(
         None,
         "--trust-root",
         help=(
-            "Trust-root path (or ``vault://...`` URI resolved via the "
-            "SecretAdapter) the cosign + JWS verifications run against. "
-            "Overrides Settings.signing_trust_root_path."
+            "COSIGN trust-root path (or ``vault://...`` URI resolved via "
+            "the SecretAdapter) the cosign verify-blob runs against. "
+            "Overrides Settings.signing_trust_root_path. Cosign-only per "
+            "M8 finding #4c — the AgentCard JWS verifies against "
+            "--agent-card-trust-root / its own setting / the pack-root "
+            "agent-card.pub, never this root."
+        ),
+    ),
+    agent_card_trust_root: str | None = typer.Option(
+        None,
+        "--agent-card-trust-root",
+        help=(
+            "AgentCard-JWS trust-root path (RSA public PEM, or "
+            "``vault://...`` URI) verify Step 9 uses for agent packs. "
+            "Overrides Settings.agent_card_jws_trust_root_path "
+            "(COGNIC_AGENT_CARD_JWS_TRUST_ROOT_PATH); when neither is "
+            "set, verify falls back to the tracked pack-root "
+            "agent-card.pub convention. SEPARATE custody from "
+            "--trust-root (the cosign root) per M8 finding #4."
         ),
     ),
     json_output: bool = typer.Option(
@@ -1019,6 +1035,7 @@ def verify(
             pack_path=pack_path,
             settings=settings,
             trust_root=trust_root,
+            agent_card_trust_root=agent_card_trust_root,
         )
     )
     if json_output:

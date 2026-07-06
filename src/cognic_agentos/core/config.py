@@ -839,7 +839,43 @@ class Settings(BaseSettings):
             "in unit-lane testing this points at a committed test-only "
             "public PEM under ``examples/`` or ``tests/fixtures/``; in "
             "production this points at the per-tenant Vault trust-root path. "
-            "Sprint-7A T1."
+            "Sprint-7A T1. M8 finding #4 (ADR-016 amendment 2026-07-06): "
+            "this trust root is COSIGN-ONLY — AgentCard-JWS verification "
+            "resolves its own root via ``agent_card_jws_trust_root_path`` "
+            "below and NEVER reads this setting."
+        ),
+    )
+    agent_card_jws_signing_key_path: str | None = Field(
+        default=None,
+        description=(
+            "M8 finding #4 (ADR-016 amendment 2026-07-06) — path or "
+            "``vault://`` URI to the UNENCRYPTED RSA private PEM the "
+            "``agentos sign --bundle`` AgentCard-JWS arm signs with "
+            "(RS256 detached JWS; agent packs only). Env: "
+            "``COGNIC_AGENT_CARD_JWS_SIGNING_KEY_PATH``. SEPARATE "
+            "CRYPTOGRAPHIC IDENTITY from ``signing_key_path`` (the "
+            "sigstore-encrypted cosign key): no file satisfies both "
+            "formats, and the JWS arm NEVER falls back to the cosign "
+            "key. Unset on an agent-pack sign → closed-enum refusal "
+            "``sign_agent_card_jws_signing_failed``. Prod profile "
+            "rejects paths under ``examples/`` or ``tests/fixtures/`` "
+            "at startup (mirrors the Sprint-7A R9 P2 #1 guard)."
+        ),
+    )
+    agent_card_jws_trust_root_path: str | None = Field(
+        default=None,
+        description=(
+            "M8 finding #4 (ADR-016 amendment 2026-07-06) — path or "
+            "``vault://`` URI to the RSA PUBLIC PEM ``agentos verify`` "
+            "Step 9 verifies the AgentCard JWS against (agent packs "
+            "only). Env: ``COGNIC_AGENT_CARD_JWS_TRUST_ROOT_PATH``. "
+            "Resolution precedence: ``--agent-card-trust-root`` flag → "
+            "this setting → the tracked pack-root ``agent-card.pub`` "
+            "convention (mirrors ``cosign.pub``; committed in the agent "
+            "pack before tag/release + uploaded as a release asset). "
+            "DISTINCT from ``signing_trust_root_path`` (the cosign "
+            "trust root) — the JWS is NEVER verified against "
+            "``cosign.pub``."
         ),
     )
     dev_mode_skip_cosign: bool = Field(
@@ -1369,6 +1405,58 @@ class Settings(BaseSettings):
                         "Sprint-7A R9 P2 #1). Production query-context "
                         "signing keys MUST live outside the examples/ "
                         "and tests/fixtures/ trees."
+                    )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_agent_card_jws_signing_key_path_prod_profile_guard(self) -> Settings:
+        """M8 finding #4 (ADR-016 amendment 2026-07-06) — prod-profile guard
+        rejecting test-fixture-tree AgentCard-JWS signing keys at startup.
+
+        SEPARATE parallel validator mirroring
+        ``_validate_signing_key_path_prod_profile_guard`` (Sprint-7A R9 P2
+        #1) + ``_validate_agent_query_context_signing_key_path_prod_profile_guard``
+        (M8 A6) in structure: prod-profile-only by design (dev / test
+        profiles MUST be able to wire the committed test-only RSA keypair
+        so the sign/verify JWS-custody lifecycle tests can run);
+        URI-shaped values (``vault://``, ``kms://``, ...) skip the
+        fixture-tree check because they aren't filesystem paths (the R11
+        P2 #1 URI-skip arm); filesystem paths resolve to absolute form
+        via ``Path.resolve()`` BEFORE the segment match so relative
+        spellings cannot bypass the guard (the R11 P2 #1
+        resolve-then-match arm).
+
+        Raises ``ValueError`` (which Pydantic wraps as ``ValidationError``)
+        with the closed-enum reason
+        ``agent_card_jws_signing_key_path_under_test_fixture_tree_in_prod``
+        when the guard fires. Rejected and allowed path shapes are pinned
+        by ``tests/unit/cli/test_agent_card_jws_custody.py`` Section F.
+        """
+        if (
+            self.runtime_profile == "prod"
+            and self.agent_card_jws_signing_key_path is not None
+            and "://" not in self.agent_card_jws_signing_key_path
+        ):
+            # Filesystem path branch — URI-shaped values skip the
+            # fixture-tree check because they aren't filesystem paths.
+            # Resolve relative paths to absolute against the current
+            # working directory so the segment match below sees the same
+            # shape regardless of how the operator spelled the input.
+            from pathlib import Path as _Path
+
+            resolved = str(_Path(self.agent_card_jws_signing_key_path).resolve())
+            for segment in ("/examples/", "/tests/fixtures/"):
+                if segment in resolved:
+                    raise ValueError(
+                        "agent_card_jws_signing_key_path_under_test_fixture_tree_in_prod: "
+                        f"agent_card_jws_signing_key_path="
+                        f"{self.agent_card_jws_signing_key_path!r} "
+                        f"resolves to {resolved!r} which is under "
+                        f"{segment.strip('/')} — that tree is reserved "
+                        "for synthetic test-only keys (M8 finding #4, "
+                        "mirroring Sprint-7A R9 P2 #1). Production "
+                        "AgentCard-JWS signing keys MUST live outside "
+                        "the examples/ and tests/fixtures/ trees."
                     )
         return self
 
