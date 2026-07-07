@@ -1,8 +1,12 @@
-"""Structural pins for the ``infra/proof-m8/`` scaffolding + seeds (M8 Task C1).
+"""Structural pins for the ``infra/proof-m8/`` tree (M8 Tasks C1 + C2).
 
 Mirrors ``tests/unit/infra/test_proof_m6_structure.py`` for the M8 governed-
-agent-loop proof tree. C1 ships the scaffolding + seeds ONLY (the six-bar
-runner ``run-proof-m8.sh`` is Task C2 and extends this suite); the pins here:
+agent-loop proof tree. C1 shipped the scaffolding + seeds; Task C2 adds the
+six-bar runner ``run-proof-m8.sh`` + the k8s manifests + the kind topology +
+the deploy patch + the ``proof_m8/`` multi-actor app package and EXTENDS this
+suite with the runner pins (env gate + provider-key gate, no bypass flags,
+cleanup trap, query-context key custody, the six-bar strings/assertions, the
+Step-0 hosted/registered checks, failure-exits-non-zero). The C1 pins:
 
 * the SIX Part-B releases staged + sha256-pinned fail-closed (maintainer-
   locked C1 pin table) PLUS the reused M5 hook release (the oracle v0.3.0
@@ -41,21 +45,49 @@ _PROOF_DIR = _REPO_ROOT / "infra" / "proof-m8"
 
 DOCKER_AGENTOS = (_PROOF_DIR / "Dockerfile.agentos-proof").read_text()
 DOCKER_ORACLE = (_PROOF_DIR / "Dockerfile.oracle-pack").read_text()
+DOCKER_AS = (_PROOF_DIR / "Dockerfile.as").read_text()
 STAGE = (_PROOF_DIR / "stage-packs.sh").read_text()
 KERNEL_SEED = (_PROOF_DIR / "kernel-seed.sql").read_text()
 ORACLE_SEED = (_PROOF_DIR / "oracle-seed" / "seed_schema.sql").read_text()
 README = (_PROOF_DIR / "README.md").read_text()
 VALUES_RAW = (_PROOF_DIR / "proof-m8-values.yaml").read_text()
 VALUES = yaml.safe_load(VALUES_RAW)
+RUNNER = (_PROOF_DIR / "run-proof-m8.sh").read_text()
+SEED_DB = (_PROOF_DIR / "seed-db.sh").read_text()
+SEED_VAULT = (_PROOF_DIR / "seed-vault.sh").read_text()
+MIGRATE_RAW = (_PROOF_DIR / "migrate-job.yaml").read_text()
+KIND_CONFIG_RAW = (_PROOF_DIR / "kind-config.yaml").read_text()
+KIND_CONFIG = yaml.safe_load(KIND_CONFIG_RAW)
+SANDBOX_PATCH_RAW = (_PROOF_DIR / "agentos-sandbox-patch.yaml").read_text()
+SANDBOX_PATCH = yaml.safe_load(SANDBOX_PATCH_RAW)
+PROOF_APP = (_PROOF_DIR / "proof_m8" / "proof_app.py").read_text()
+MANIFEST_ORACLE_XE = (_PROOF_DIR / "manifests" / "oracle-xe.yaml").read_text()
+MANIFEST_ORACLE_PACK = (_PROOF_DIR / "manifests" / "oracle-pack.yaml").read_text()
+MANIFEST_AS = (_PROOF_DIR / "manifests" / "auth-server.yaml").read_text()
+MANIFEST_REDIS = (_PROOF_DIR / "manifests" / "redis.yaml").read_text()
+MANIFEST_OTEL = (_PROOF_DIR / "manifests" / "otel-collector.yaml").read_text()
 
 _ALL_TEXTS = {
     "Dockerfile.agentos-proof": DOCKER_AGENTOS,
     "Dockerfile.oracle-pack": DOCKER_ORACLE,
+    "Dockerfile.as": DOCKER_AS,
     "stage-packs.sh": STAGE,
     "kernel-seed.sql": KERNEL_SEED,
     "oracle-seed/seed_schema.sql": ORACLE_SEED,
     "README.md": README,
     "proof-m8-values.yaml": VALUES_RAW,
+    "run-proof-m8.sh": RUNNER,
+    "seed-db.sh": SEED_DB,
+    "seed-vault.sh": SEED_VAULT,
+    "migrate-job.yaml": MIGRATE_RAW,
+    "kind-config.yaml": KIND_CONFIG_RAW,
+    "agentos-sandbox-patch.yaml": SANDBOX_PATCH_RAW,
+    "proof_m8/proof_app.py": PROOF_APP,
+    "manifests/oracle-xe.yaml": MANIFEST_ORACLE_XE,
+    "manifests/oracle-pack.yaml": MANIFEST_ORACLE_PACK,
+    "manifests/auth-server.yaml": MANIFEST_AS,
+    "manifests/redis.yaml": MANIFEST_REDIS,
+    "manifests/otel-collector.yaml": MANIFEST_OTEL,
 }
 
 
@@ -110,8 +142,9 @@ _GOVERNED_VIEWS = (
 # ---------------------------------------------------------------------------
 
 
-def test_proof_dir_carries_the_c1_file_set() -> None:
+def test_proof_dir_carries_the_c1_and_c2_file_set() -> None:
     expected = {
+        # C1 scaffolding + seeds
         "Dockerfile.agentos-proof",
         "Dockerfile.oracle-pack",
         "README.md",
@@ -119,14 +152,44 @@ def test_proof_dir_carries_the_c1_file_set() -> None:
         "proof-m8-values.yaml",
         "stage-packs.sh",
         "oracle-seed",
+        # C2 runner + support
+        "run-proof-m8.sh",
+        "Dockerfile.as",
+        "kind-config.yaml",
+        "migrate-job.yaml",
+        "agentos-sandbox-patch.yaml",
+        "seed-db.sh",
+        "seed-vault.sh",
+        "manifests",
+        "proof_m8",
     }
     assert {p.name for p in _PROOF_DIR.iterdir()} >= expected
     assert (_PROOF_DIR / "oracle-seed" / "seed_schema.sql").is_file()
+    for manifest in (
+        "oracle-xe.yaml",
+        "oracle-pack.yaml",
+        "auth-server.yaml",
+        "redis.yaml",
+        "otel-collector.yaml",
+    ):
+        assert (_PROOF_DIR / "manifests" / manifest).is_file(), f"missing manifest {manifest}"
+    assert (_PROOF_DIR / "proof_m8" / "__init__.py").is_file()
+    assert (_PROOF_DIR / "proof_m8" / "proof_app.py").is_file()
+    # The M8 delta vs proof-m6: NO local sandbox-runtime image build (both
+    # canonical images re-home from their PUBLISHED digests — see the runner
+    # header + README "The sandbox machinery is KEPT").
+    assert not (_PROOF_DIR / "Dockerfile.skill-runtime").exists()
 
 
 def test_stage_packs_is_executable() -> None:
     mode = (_PROOF_DIR / "stage-packs.sh").stat().st_mode
     assert mode & stat.S_IXUSR, "stage-packs.sh must be executable"
+
+
+def test_runner_and_seed_scripts_are_executable() -> None:
+    for script in ("run-proof-m8.sh", "seed-db.sh", "seed-vault.sh"):
+        mode = (_PROOF_DIR / script).stat().st_mode
+        assert mode & stat.S_IXUSR, f"{script} must be executable"
 
 
 # ---------------------------------------------------------------------------
@@ -441,3 +504,767 @@ def test_readme_carries_all_six_bars_and_key_custody() -> None:
             "custody",
         ),
     )
+
+
+# ===========================================================================
+# Task C2 — the six-bar runner + support files
+# ===========================================================================
+
+
+# ---------------------------------------------------------------------------
+# Runner: env gate + provider-key gate + identity constants
+# ---------------------------------------------------------------------------
+
+
+def test_runner_env_gated_and_provider_key_gated() -> None:
+    _assert_all(
+        RUNNER,
+        (
+            'if [[ "${COGNIC_RUN_PROOF_M8:-}" != "1" ]]; then',
+            "skipped: set COGNIC_RUN_PROOF_M8=1",
+            # the provider key is REQUIRED once the run gate opens (fail loud,
+            # never a silent self-hosted fallback — BAR 5 asserts the external
+            # cloud-policy path)
+            'if [[ -z "${COGNIC_PROOF_M8_TIER1_API_KEY:-}" ]]; then',
+            'CLUSTER="${KIND_CLUSTER:-cognic-proofm8}"',
+            'NS="cognic-proofm8"',
+            'PROOF_DIR="infra/proof-m8"',
+            'AGENTOS_SRC_SRC="src/cognic_agentos"',
+            'AGENTOS_SRC_DST="$PROOF_DIR/cognic_agentos"',
+            'TENANT="proof-m8"',
+            'PACK_ID="cognic-tool-oracle-schema"',
+            'HOOK_PACK_ID="cognic-hook-schema-guard"',
+            'AGENT_PACK_ID="cognic-agent-bank-analyst"',
+            'AGENT_ID="bank-analyst"',
+            'PACK_WHEEL="cognic_tool_oracle_schema-0.3.0-py3-none-any.whl"',
+        ),
+    )
+    # the gate exits 0 on skip; the key gate exits 1 (fail loud)
+    skip_block = RUNNER.split('if [[ "${COGNIC_RUN_PROOF_M8:-}" != "1" ]]; then', 1)[1]
+    assert "exit 0" in skip_block.split("fi", 1)[0]
+    key_block = RUNNER.split('if [[ -z "${COGNIC_PROOF_M8_TIER1_API_KEY:-}" ]]; then', 1)[1]
+    assert "exit 1" in key_block.split("fi", 1)[0]
+    assert "cognic_tool_oracle_schema-0.2.0" not in RUNNER
+
+
+def test_runner_stages_via_stage_packs_sh_never_a_source_build() -> None:
+    _assert_all(
+        RUNNER,
+        (
+            'STAGING_DST="$PROOF_DIR/proof-m8-staging"',
+            'bash "$PROOF_DIR/stage-packs.sh" "$STAGING_DST"',
+            "download, not build",
+        ),
+    )
+    assert "uv build" not in RUNNER  # released pack artifacts only
+
+
+def test_runner_builds_the_three_m8_images_and_cleans_the_transient_copies() -> None:
+    _assert_all(
+        RUNNER,
+        (
+            "for tool in docker kind kubectl helm uv cosign syft grype curl python3 gh openssl",
+            'BASE_IMAGE="cognic-agentos:proof1b2-base"',
+            'IMAGE="cognic-agentos:proofm8"',
+            'MCP_IMAGE="cognic-proof-oracle-pack:m8"',
+            'AS_IMAGE="cognic-proof-as:m8"',
+            "docker_build_with_retry -f infra/agentos/Dockerfile --target default-adapters",
+            'PROOF_APP_SRC="$PROOF_DIR/proof_m8"',
+            'cp -r "$AGENTOS_SRC_SRC" "$AGENTOS_SRC_DST"',
+            # the agents.rego policy-bundle overlay rides the build context
+            'cp -r policies "$PROOF_DIR/policies"',
+            'docker_build_with_retry -f "$PROOF_DIR/Dockerfile.agentos-proof"',
+            'docker_build_with_retry -f "$PROOF_DIR/Dockerfile.oracle-pack" '
+            '-t "$MCP_IMAGE" "$PROOF_DIR"',
+            'cp tests/integration/pack_loop/_local_as.py "$PROOF_DIR/_local_as.py"',
+            'docker_build_with_retry -f "$PROOF_DIR/Dockerfile.as" -t "$AS_IMAGE" "$PROOF_DIR"',
+            'rm -rf "$STAGING_DST" "$AGENTOS_SRC_DST" "$PROOF_DIR/policies" '
+            '"$PROOF_DIR/_local_as.py"',
+        ),
+    )
+    # the M8 delta: no sandbox-runtime image build anywhere in the runner
+    assert "Dockerfile.skill-runtime" not in RUNNER
+
+
+def test_runner_cleanup_trap_tears_everything_down() -> None:
+    _assert_all(
+        RUNNER,
+        (
+            "cleanup() {",
+            "trap cleanup EXIT",
+            'kind delete cluster --name "$CLUSTER"',
+            'docker rm -f "$REGISTRY_NAME"',
+            "pf_stop",
+            # the per-run PRIVATE query-context key dir never outlives the run
+            '[ -n "${QC_TMP:-}" ] && rm -rf "$QC_TMP"',
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Runner: query-context key custody (ADR-027 §c — the C1 contract, honored)
+# ---------------------------------------------------------------------------
+
+
+def test_runner_query_context_key_custody() -> None:
+    """The keypair is minted per run: PUBLIC -> the staging build contexts;
+    PRIVATE -> a 0700 mktemp dir OUTSIDE the staging tree, shipped ONLY as the
+    proof-m8-query-context k8s Secret, removed by the trap. An in-run grep
+    guard additionally refuses any private key material under the staging
+    tree (belt-and-braces on top of this suite's tracked-file scan)."""
+    _assert_all(
+        RUNNER,
+        (
+            'QC_TMP="$(mktemp -d)"',
+            'chmod 700 "$QC_TMP"',
+            "openssl genpkey -algorithm RSA",
+            '-out "$QC_TMP/query-context-private.pem"',
+            'openssl pkey -in "$QC_TMP/query-context-private.pem" -pubout',
+            '-out "$STAGING_DST/query-context/query-context-public.pem"',
+            'grep -rl "BEGIN PRIVATE KEY" "$STAGING_DST"',
+            "custody violation",
+            'kubectl -n "$NS" create secret generic proof-m8-query-context',
+            '--from-file=query-context-private.pem="$QC_TMP/query-context-private.pem"',
+        ),
+    )
+    # The PRIVATE half must never be written under the staging tree (the
+    # docker build contexts) — every -out of the private PEM targets $QC_TMP.
+    for line in RUNNER.splitlines():
+        if "query-context-private.pem" in line and "-out" in line:
+            assert "$QC_TMP" in line, f"private key written outside QC_TMP: {line!r}"
+    assert '"$STAGING_DST/query-context/query-context-private' not in RUNNER
+
+
+def test_patch_mounts_the_query_context_secret_read_only() -> None:
+    _assert_all(
+        SANDBOX_PATCH_RAW,
+        (
+            "secretName: proof-m8-query-context",
+            "mountPath: /run/cognic/query-context",
+            "readOnly: true",
+        ),
+    )
+    # the mount path matches the image ENV's signing-key path prefix
+    signing_key_env = (
+        "COGNIC_AGENT_QUERY_CONTEXT_SIGNING_KEY_PATH="
+        "/run/cognic/query-context/query-context-private.pem"
+    )
+    assert signing_key_env in DOCKER_AGENTOS
+
+
+def test_runner_stages_the_provider_key_as_a_secret_only() -> None:
+    _assert_all(
+        RUNNER,
+        (
+            "create secret generic proof-m8-provider-key",
+            '--from-literal=COGNIC_PROOF_M8_TIER1_API_KEY="$COGNIC_PROOF_M8_TIER1_API_KEY"',
+            # consumed ONLY by the litellm router pod, via secretKeyRef
+            '"secretKeyRef": {"name": "proof-m8-provider-key"',
+        ),
+    )
+    # the key value never rides a manifest file
+    for name, text in _ALL_TEXTS.items():
+        if name == "run-proof-m8.sh":
+            continue
+        assert "COGNIC_PROOF_M8_TIER1_API_KEY" not in text or name in (
+            "README.md",
+            "proof-m8-values.yaml",  # the os.environ/ reference litellm expands
+        ), f"provider key env leaked into {name}"
+
+
+# ---------------------------------------------------------------------------
+# Runner: the KEPT sandbox machinery (re-home flow, published-digest variant)
+# ---------------------------------------------------------------------------
+
+
+def test_runner_documents_the_sandbox_keep_decision() -> None:
+    _assert_all(
+        RUNNER,
+        (
+            "SANDBOX-MACHINERY DECISION",
+            "hosted_skills",
+            "build_skill_executor",
+            "G7",
+        ),
+    )
+    _assert_all(README, ("The sandbox machinery is KEPT",))
+
+
+def test_runner_rehomes_and_signs_both_published_canonical_images_no_bypass() -> None:
+    """The M6 re-home flow carries forward UNCHANGED except that BOTH
+    canonical images re-home from their PUBLISHED digests (no skill wheel to
+    bake -> no local runtime-image build): pull -> re-tag -> push -> cosign
+    sign under the per-run proof canonical key in the local TLS registry."""
+    _assert_all(
+        RUNNER,
+        (
+            "cosign generate-key-pair",
+            "COSIGN_PASSWORD=",
+            'REGISTRY_NAME="cognic-proof-m8-registry"',
+            "registry:2",
+            "REGISTRY_HTTP_TLS_CERTIFICATE",
+            "openssl req",
+            "subjectAltName",
+            "/etc/docker/certs.d",
+            'PUBLISHED_RUNTIME_PYTHON="ghcr.io/bmzee/cognic-agentos/sandbox-runtime-python@sha256:',
+            'PUBLISHED_EGRESS_PROXY="ghcr.io/bmzee/cognic-agentos/sandbox-egress-proxy@sha256:',
+            'docker_pull_with_retry "$PUBLISHED_RUNTIME_PYTHON"',
+            'docker_pull_with_retry "$PUBLISHED_EGRESS_PROXY"',
+            'cosign sign --registry-cacert "$CANONICAL_DIR/registry-ca.pem"',
+            '--key "$CANONICAL_DIR/cosign.key"',
+            "RepoDigests",
+            # the digest-pinned refs are injected at install time (G7: the
+            # static overlay must never carry a personal-registry ref)
+            '--set sandbox.canonicalRuntimeImage="$RUNTIME_PYTHON_REF"',
+            '--set sandbox.canonicalEgressProxyImage="$EGRESS_PROXY_REF"',
+        ),
+    )
+    # no fixture/bypass flags — the REAL admission pipeline decides
+    assert "COGNIC_USE_LOCAL_FIXTURE" not in RUNNER
+    assert "--allow-insecure-registry" not in RUNNER
+
+
+def test_runner_registry_port_is_parameterized_and_probed() -> None:
+    _assert_all(
+        RUNNER,
+        (
+            'REGISTRY_PORT="${COGNIC_PROOF_M8_REGISTRY_PORT:-5551}"',
+            's.bind(("0.0.0.0", int(sys.argv[1])))',
+            'REGISTRY_TLS_DIR="${COGNIC_PROOF_M8_REGISTRY_TLS_DIR:-$HOME/.cognic/proof-m8/registry-tls}"',
+        ),
+    )
+
+
+def test_runner_is_sudo_free_with_one_time_trust_verification() -> None:
+    _assert_all(
+        RUNNER,
+        (
+            "_setup_help",
+            'grep -qE "[[:space:]]$REGISTRY_NAME($|[[:space:]])" /etc/hosts',
+            '[ -r "/etc/docker/certs.d/$REGISTRY_REF_HOST/ca.crt" ]',
+            "cmp -s",
+        ),
+    )
+    # The runner itself never EXECUTES sudo (a backgrounded run has no TTY for
+    # a prompt): every `sudo` occurrence lives inside the _setup_help heredoc
+    # (copy-paste operator instructions) or a comment line.
+    setup_help_body = RUNNER.split("_setup_help() {", 1)[1].split("\n}", 1)[0]
+    outside = RUNNER.replace(setup_help_body, "")
+    sudo_lines = [
+        ln for ln in outside.splitlines() if "sudo" in ln and not ln.lstrip().startswith("#")
+    ]
+    assert not sudo_lines, f"runner executes sudo outside the operator instructions: {sudo_lines}"
+
+
+def test_runner_provisions_kind_with_the_m8_topology() -> None:
+    _assert_all(
+        RUNNER,
+        (
+            'kind create cluster --name "$CLUSTER" --config "$PROOF_DIR/kind-config.yaml"',
+            'kubectl -n "$NS" patch deploy/rel-agentos --patch-file '
+            '"$PROOF_DIR/agentos-sandbox-patch.yaml"',
+            'kubectl -n "$NS" apply -f "$PROOF_DIR/manifests/redis.yaml"',
+            'kubectl -n "$NS" apply -f "$PROOF_DIR/manifests/otel-collector.yaml"',
+            "hostAliases",
+            "enableServiceLinks",
+        ),
+    )
+    mounts = KIND_CONFIG["nodes"][0]["extraMounts"]
+    paths = {m["hostPath"] for m in mounts}
+    assert "/var/run/docker.sock" in paths
+    assert "/var/lib/cognic-proof-m8-broker" in paths
+
+
+def test_runner_backend_waits_are_per_deployment_with_log_capture() -> None:
+    _assert_all(
+        RUNNER,
+        (
+            "BACKEND_WAIT_FAILURES",
+            "wait --for=condition=available --timeout=600s",
+            "backends_fail",
+            "previous-instance logs",
+        ),
+    )
+
+
+def test_runner_seeds_through_scripts_and_never_inlines_rows() -> None:
+    _assert_all(
+        RUNNER,
+        (
+            'NS="$NS" bash "$PROOF_DIR/seed-vault.sh"',
+            'NS="$NS" bash "$PROOF_DIR/seed-db.sh"',
+            'helm install rel "$CHART" -n "$NS" -f "$PROOF_DIR/proof-m8-values.yaml"',
+            'sed "s|__AGENTOS_IMAGE__|$IMAGE|" "$PROOF_DIR/migrate-job.yaml"',
+            'kubectl -n "$NS" apply -f "$PROOF_DIR/manifests/oracle-pack.yaml" '
+            '-f "$PROOF_DIR/manifests/auth-server.yaml"',
+        ),
+    )
+    # derived MCP carve-out rows are materialized by install, never seeded;
+    # the 0014 rows ride kernel-seed.sql through seed-db.sh, never inline SQL
+    assert "INSERT INTO mcp_server_url_override" not in RUNNER
+    assert "INSERT INTO mcp_internal_host_allowlist" not in RUNNER
+    assert "INSERT INTO data_scopes" not in RUNNER
+    assert "INSERT INTO entitlements" not in RUNNER
+    assert "INSERT INTO agent_assignments" not in RUNNER
+
+
+def test_seed_db_applies_kernel_seed_with_readback_and_no_carveout_rows() -> None:
+    _assert_all(
+        SEED_DB,
+        (
+            'NS="${NS:-cognic-proofm8}"; T="proof-m8"',
+            'PSQL < "$PROOF_DIR/kernel-seed.sql"',
+            "4|4|4|0",
+            "exit 1",
+        ),
+    )
+    assert "INSERT INTO mcp_server_url_override" not in SEED_DB
+    assert "INSERT INTO mcp_internal_host_allowlist" not in SEED_DB
+
+
+def test_seed_vault_targets_the_m8_tenant_by_reference() -> None:
+    _assert_all(
+        SEED_VAULT,
+        (
+            'NS="${NS:-cognic-proofm8}"; T="proof-m8"',
+            'VX kv put "secret/cognic/$T/mcp-as-allowlist" @/tmp/as-allowlist.json',
+            'VX kv put "secret/cognic/$T/mcp-oauth/$ASHOST"',
+            "servers",
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Runner: cloud-policy env + the ONE model_list (litellm re-point)
+# ---------------------------------------------------------------------------
+
+
+def test_runner_sets_cloud_policy_env_and_repoints_litellm() -> None:
+    _assert_all(
+        RUNNER,
+        (
+            'ALLOWED_PROVIDERS="${COGNIC_PROOF_M8_ALLOWED_PROVIDERS:-anthropic}"',
+            'POLICY_MODE="${COGNIC_PROOF_M8_POLICY_MODE:-cloud_anthropic}"',
+            'kubectl -n "$NS" set env deploy/rel-agentos',
+            "COGNIC_ALLOW_EXTERNAL_LLM=true",
+            'COGNIC_POLICY_MODE="$POLICY_MODE"',
+            'COGNIC_ALLOWED_PROVIDERS="$ALLOWED_PROVIDERS"',
+            "COGNIC_LITELLM_MASTER_KEY=dev-only-litellm",
+            "COGNIC_AGENT_RUN_TOKEN_BUDGET=60000",
+            "COGNIC_AGENT_RUN_WALL_CLOCK_S=300",
+            # ONE model_list: live routing + preflight provenance read the
+            # SAME chart-rendered ConfigMap
+            '"configMap": {"name": "rel-agentos-litellm"}',
+            "rollout status deploy/litellm",
+        ),
+    )
+
+
+def test_values_wire_the_otel_exporter_at_the_collector() -> None:
+    otel = VALUES["otel"]["exporter"]
+    assert otel["endpoint"] == "http://otel-collector:4317"
+    assert otel["protocol"] == "grpc"
+    assert otel["insecure"] is True
+
+
+def test_otel_collector_manifest_records_spans_via_the_debug_exporter() -> None:
+    _assert_all(
+        MANIFEST_OTEL,
+        (
+            "otel/opentelemetry-collector:0.111.0",
+            "0.0.0.0:4317",
+            "debug:",
+            "verbosity: detailed",
+            "receivers: [otlp]",
+            "exporters: [debug]",
+        ),
+    )
+    # documented honestly: langfuse v2 cannot ingest OTLP — the collector is
+    # the trace surface the deployment actually records
+    assert "langfuse/langfuse:2" in MANIFEST_OTEL
+    assert "v3.22" in MANIFEST_OTEL
+
+
+# ---------------------------------------------------------------------------
+# Runner: the M4 governed operator lifecycle for the v0.3.0 tool
+# ---------------------------------------------------------------------------
+
+
+def test_runner_drives_the_m4_operator_lifecycle_for_the_v030_tool() -> None:
+    _assert_all(
+        RUNNER,
+        (
+            "X-Proof-Role: $role",
+            "api author POST /api/v1/packs/drafts",
+            'api author POST "/api/v1/packs/drafts/$PACK_UUID/submit"',
+            "from cognic_agentos.core.canonical import canonical_bytes",
+            "signed_artefact_root",
+            'SIGNED_ARTEFACT_ROOT="/opt/cognic/pack-attestations/$PACK_ID/0.3.0"',
+            '"version": "0.3.0"',
+            'api reviewer POST "/api/v1/packs/$PACK_UUID/claim"',
+            'api reviewer POST "/api/v1/packs/$PACK_UUID/approve"',
+            'api operator POST "/api/v1/packs/$PACK_UUID/allow-list"',
+            'api operator PUT "/api/v1/packs/$PACK_UUID/runtime-config"',
+            'api operator POST "/api/v1/packs/$PACK_UUID/install"',
+            "mcp.override.set",
+            "mcp.allowlist.add",
+            "override|$TENANT|$PACK_ID|http://10.96.0.51:8765/mcp",
+            "allowlist|$TENANT|10.96.0.51|proof-m8-operator",
+            'dlp_pre_hooks": ["refuse_forbidden_schema_arg", "explode_schema_guard"]',
+        ),
+    )
+
+
+def test_runner_warms_the_mcp_carveout_and_asserts_auth_ready() -> None:
+    _assert_all(
+        RUNNER,
+        (
+            'api mcp GET "/api/v1/mcp/servers/$PACK_ID/tools"',
+            "discovery_status()",
+            'DS="$(discovery_status)"',
+            '[ "$DS" = "auth_ready" ]',
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Runner: STEP 0 — the maintainer-locked registered/hosted surface asserts
+# ---------------------------------------------------------------------------
+
+
+def test_runner_step0_asserts_all_registered_and_hosted_surfaces() -> None:
+    _assert_all(
+        RUNNER,
+        (
+            "assert_m8_surfaces",
+            'assert_m8_surfaces "STEP 0 (first boot)"',
+            'assert_hook_pack_registered "STEP 0 (first boot)"',
+            # the 7-pack registered matrix (kind per pack)
+            '"cognic-tool-oracle-schema": "tools"',
+            '"cognic-hook-schema-guard": "hooks"',
+            '"cognic-skill-customer-data": "skills"',
+            '"cognic-skill-financial-data": "skills"',
+            '"cognic-skill-cards-data": "skills"',
+            '"cognic-skill-atm-recon": "skills"',
+            '"cognic-agent-bank-analyst": "agents"',
+            # the 4 instruction skills hosted
+            'for skill_id in ("customer-data", "financial-data", "cards-data", "atm-recon"):',
+            "hosted_skills",
+            # bank-analyst hosted with EXACTLY the requested sets
+            "hosted_agents",
+            '{"customer-data", "financial-data", "cards-data"}',
+            '["cognic-tool-oracle-schema/run_readonly_query"]',
+            'agent.get("max_steps") != 6',
+            'agent.get("risk_tier") != "customer_data_read"',
+            # fail LOUD on fail-soft construction failures / ingest warn-skips
+            "agent.loop_construction_failed",
+            "agent.loop_composition_warning",
+            "skill.executor_construction_failed",
+            "sandbox.runtime_construction_failed",
+            "risk_tier_missing",
+            "instruction_mode_declares_executable",
+        ),
+    )
+    # re-asserted on the pod that serves the bars (per-pod boot-time hosting)
+    assert 'assert_m8_surfaces "BAR preflight (M8 surfaces on the serving pod)"' in RUNNER
+
+
+# ---------------------------------------------------------------------------
+# Runner: the six bars (strings + assertion mechanisms — never softened)
+# ---------------------------------------------------------------------------
+
+
+def test_runner_bar1_governed_loop_with_full_evidence_chain() -> None:
+    _assert_all(
+        RUNNER,
+        (
+            'ask amir "Who are the top 10 customers by total deposit balance this quarter?',
+            '[ "$BAR1_STATE" = "completed" ]',
+            # the seeded deterministic top-10 + the rank-11 negative
+            '"Ayesha Khan" "Bilal Sheikh" "Chandni Malik" "Daniyal Raza" "Erum Siddiqui"',
+            '"Farhan Qureshi" "Gul Nawaz" "Hina Aslam" "Imran Baig" "Javeria Tariq"',
+            'grep -qF "Kamran Zafar" <<<"$BAR1_ANSWER"',
+            # run rows + dispatch rows (read_skill ok; run_readonly_query ok
+            # with scope + 64-hex args_sha256) + dual identity
+            'run_event_count "$BAR1_RUN_ID" agent.run.started',
+            'run_event_count "$BAR1_RUN_ID" agent.run.completed',
+            "event_type='agent.run.dispatch'",
+            "payload->>'capability_ref'='read_skill'",
+            "payload->>'capability_ref'='$PACK_ID/run_readonly_query'",
+            "payload->>'scope_id'='retail_analytics'",
+            "payload->>'args_sha256' ~ '^[0-9a-f]{64}",
+            'run_dual_identity_violations "$BAR1_RUN_ID" analyst.amir',
+            "IS DISTINCT FROM",
+            # downstream execution + honesty ledger + task-tier memory
+            "tool_invocation_count_for run_readonly_query",
+            "event_type='audit.tool_invocation'",
+            "ledger_ok_external_count",
+            "external=true AND provenance='resolved' AND litellm_alias='cognic-tier1-proof-m8'",
+            "memory_task_rows_for_run",
+            "tier='task' AND key LIKE 'agent-note-$run_id-%'",
+            "memory_write_chain_count",
+            "event_type='memory.write'",
+            "PROOF M8 (BAR 1) PASS",
+        ),
+    )
+
+
+def test_runner_bar2_unassigned_probe_refused_with_zero_atm_invocations() -> None:
+    _assert_all(
+        RUNNER,
+        (
+            'ask amir "Use the atm-recon skill to reconcile yesterday',
+            "payload->>'refusal_reason'='agent_capability_not_assigned'",
+            "payload->>'scope_id'='atm_recon'",
+            '[ "$ATM_OK" = "0" ]',
+            # the scope-precise global negative: zero OK atm_recon-scoped
+            # dispatches across the WHOLE dispatch history
+            '[ "$ATM_OK_EVER" = "0" ]',
+            "PROOF M8 (BAR 2) PASS",
+        ),
+    )
+
+
+def test_runner_bar3_entitlement_split_both_directions() -> None:
+    _assert_all(
+        RUNNER,
+        (
+            # ONE question, two identities
+            'BAR3_CARDS_Q="Which customer had the highest total card spend in spend month 2026-06',
+            'ask amir "$BAR3_CARDS_Q"',
+            'ask sara "$BAR3_CARDS_Q"',
+            "payload->>'refusal_reason'='agent_scope_not_entitled'",
+            "payload->>'scope_id'='cards_analytics'",
+            # the gate fires BEFORE the tool on the amir leg (zero OK
+            # cards-scoped dispatches for amir's run)
+            '[ "$AMIR_CARDS_OK" = "0" ]',
+            "not (available|entitled|permitted|authoriz)",
+            '[ "$BAR3B_STATE" = "completed" ]',
+            # sara's shared-scope retail leg
+            'ask sara "Who are the top 3 customers by total deposit balance this quarter?',
+            "payload->>'scope_id'='retail_analytics'",
+            '[ "$BAR3C_STATE" = "completed" ]',
+            'for name in "Ayesha Khan" "Bilal Sheikh" "Chandni Malik"; do',
+            'run_dual_identity_violations "$BAR3B_RUN_ID" analyst.sara',
+            "PROOF M8 (BAR 3) PASS",
+        ),
+    )
+
+
+def test_runner_bar4_sql_escape_fails_closed_on_the_main_path() -> None:
+    _assert_all(
+        RUNNER,
+        (
+            "SELECT customer_name, internal_risk_note FROM RETAIL_ANALYTICS.CUSTOMERS_RAW",
+            'grep -qF "agent_sql_object_out_of_scope" <<<"$BAR4A_ANSWER"',
+            "DELETE FROM RETAIL_ANALYTICS.CUSTOMERS_RAW WHERE CUSTOMER_ID = 1013",
+            'grep -qF "sql_not_select_only" <<<"$BAR4B_ANSWER"',
+            # the compound pin: the refusal came from the TOOL envelope (an ok
+            # dispatch round-trip + an execution-layer increment this run)
+            "the refusal must come from the TOOL envelope",
+            # no stack traces / raw engine errors in analyst-visible answers
+            "assert_no_stack_trace",
+            'grep -qF "Traceback (most recent call last)"',
+            "ORA-[0-9]{5}",
+            # the DML target survives (XE admin count 13 before AND after)
+            'CUSTOMERS_RAW_BEFORE="$(xe_admin_scalar '
+            '"SELECT count(*) FROM retail_analytics.customers_raw;"',
+            '[ "$CUSTOMERS_RAW_AFTER" = "13" ]',
+            "PROOF M8 (BAR 4) PASS",
+        ),
+    )
+
+
+def test_runner_bar4b_db_backstop_probes_without_touching_the_parser() -> None:
+    _assert_all(
+        RUNNER,
+        (
+            "xe_proxy_sql",
+            'sqlplus -S -L "cognic[$identity]/cognic_dev_only@//localhost:1521/XEPDB1"',
+            'xe_proxy_sql an_amir "SELECT USER FROM dual;"',
+            'grep -q "AN_AMIR" <<<"$PROXY_WHOAMI"',
+            '[ "$AMIR_VIEW" = "17" ]',
+            'xe_proxy_sql an_amir "SELECT count(*) FROM retail_analytics.customers_raw;"',
+            'xe_proxy_sql an_amir "SELECT count(*) FROM cards.v_card_accounts;"',
+            'xe_proxy_sql an_amir "SELECT count(*) FROM cards.v_atm_settlements;"',
+            'xe_proxy_sql an_sara "SELECT count(*) FROM cards.v_atm_settlements;"',
+            '[ "$SARA_VIEW" = "6" ]',
+            # ORA-denial pins (raw + cross-scope + ATM for BOTH identities)
+            "ORA-00942",
+            # the main-path parser is never touched during 4b
+            '[ "$TOOL_INVOCATIONS_AFTER_BAR4DB" = "$TOOL_INVOCATIONS_BEFORE_BAR4DB" ]',
+            "PROOF M8 (BAR 4b) PASS",
+        ),
+    )
+    assert RUNNER.count("ORA-00942") >= 4
+
+
+def test_runner_bar5_provider_governance_on_the_bar1_run() -> None:
+    _assert_all(
+        RUNNER,
+        (
+            "cloud_policy_denied_count",
+            "event_type='gateway.cloud_policy_denied'",
+            '[ "$DENIED_ROWS" = "0" ]',
+            "ledger_non_cloud_count",
+            "outcome <> 'ok' OR external=false OR provenance <> 'resolved'",
+            '[ "$NON_CLOUD" = "0" ]',
+            'assert_workforce_span "$BAR1_RUN_ID"',
+            "llm.gateway.agent_workforce_id: Str({agent_id})",
+            "llm.gateway.external: Bool(true)",
+            "llm.gateway.request_id: Str({run_id}-s",
+            "PROOF M8 (BAR 5) PASS",
+            "PROOF M8 (ALL BARS) PASS",
+        ),
+    )
+    # ALL BARS PASS is PRINTED exactly once (one live echo — the header
+    # comment may DESCRIBE it), and only after the last bar's PASS print.
+    live_lines = [ln for ln in RUNNER.splitlines() if not ln.lstrip().startswith("#")]
+    all_bars_prints = [ln for ln in live_lines if "PROOF M8 (ALL BARS) PASS" in ln]
+    assert all_bars_prints == ['echo "PROOF M8 (ALL BARS) PASS"']
+    assert RUNNER.rindex("PROOF M8 (BAR 5) PASS") < RUNNER.rindex("PROOF M8 (ALL BARS) PASS")
+    # the six bars are mandatory and never redefined downward
+    assert "never redefined downward" in RUNNER
+
+
+def test_runner_bar_failures_capture_and_exit_non_zero() -> None:
+    _assert_all(
+        RUNNER,
+        (
+            "bar_fail() {",
+            "docs/VALIDATION-RESULTS.md",
+            "## Proof M8 — FAILURE",
+            "agent.run.dispatch",
+            "audit.tool_invocation%",
+            "gateway_call_ledger",
+            "memory.write",
+            "otel-collector",
+            "xe_fail() {",
+            "backends_fail() {",
+            "migrate_fail() {",
+            "agentos_fail() {",
+        ),
+    )
+    # every failure path exits non-zero (the capture blocks end in exit 1)
+    for fn in ("bar_fail", "xe_fail", "backends_fail", "migrate_fail", "agentos_fail"):
+        body = RUNNER.split(f"{fn}() {{", 1)[1]
+        # the function body up to its closing brace at column 0
+        body = body.split("\n}", 1)[0]
+        assert "exit 1" in body, f"{fn} does not exit non-zero"
+    assert "set -euo pipefail" in RUNNER
+
+
+def test_runner_api_command_substitution_reloads_http_code() -> None:
+    _assert_all(
+        RUNNER,
+        (
+            'HTTP_CODE_FILE="/tmp/proofm8-code"',
+            "load_http_code() {",
+        ),
+    )
+    captures = RUNNER.count('="$(api ') + RUNNER.count('="$(ask ')
+    assert captures == RUNNER.count("load_http_code # after api command substitution")
+
+
+# ---------------------------------------------------------------------------
+# Proof app — the M8 multi-actor factory the kernel image CMD boots
+# ---------------------------------------------------------------------------
+
+
+def test_proof_app_package_exists_with_create_proof_app() -> None:
+    assert (_PROOF_DIR / "proof_m8" / "__init__.py").exists()
+    assert "def create_proof_app() -> FastAPI:" in PROOF_APP
+    # the image CMD boots exactly this factory
+    assert "proof_m8.proof_app:create_proof_app" in DOCKER_AGENTOS
+
+
+def test_proof_app_is_the_m8_multi_actor_mirror_with_the_two_analysts() -> None:
+    _assert_all(
+        PROOF_APP,
+        (
+            'PROOF_TENANT: Final = "proof-m8"',
+            'PROOF_ROLE_HEADER: Final = "X-Proof-Role"',
+            "class MultiActorProofBinder:",
+            'subject="proof-m8-author"',
+            'subject="proof-m8-reviewer"',
+            'subject="proof-m8-operator"',
+            'subject="proof-m8-mcp"',
+            # the two ANALYST identities the entitlement matrix keys on
+            'subject="analyst.amir"',
+            'subject="analyst.sara"',
+            '"agent.ask"',
+            # analysts hold ONLY agent.ask (no pack lifecycle, no raw MCP)
+            "_ANALYST_SCOPES: Final[frozenset[AgentRBACScope]]",
+            # the operator lifecycle scopes carry forward
+            '"pack.override.approval_gate"',
+            '"pack.allow_list"',
+            '"pack.configure"',
+            '"pack.install"',
+            '"mcp.tool.list"',
+            '"mcp.tool.invoke"',
+            "create_async_engine",
+            "RuntimeConfigMaterializer",
+            "class ProofStagedTrustRootResolver:",
+        ),
+    )
+    # the M6 -> M8 delta: no executable-skill invoke scope, no M6 identity leakage
+    assert '"skill.invoke"' not in PROOF_APP
+    assert "proof-m6-" not in PROOF_APP
+
+
+# ---------------------------------------------------------------------------
+# Manifests — the M8 image tags + the single effective URL + the XE seed mount
+# ---------------------------------------------------------------------------
+
+
+def test_manifests_use_m8_image_tags_and_keep_the_single_effective_url() -> None:
+    assert "image: cognic-proof-oracle-pack:m8" in MANIFEST_ORACLE_PACK
+    assert "image: cognic-proof-as:m8" in MANIFEST_AS
+    assert MANIFEST_ORACLE_PACK.count("http://10.96.0.51:8765/mcp") >= 2  # server_url == audience
+    assert "clusterIP: 10.96.0.51" in MANIFEST_ORACLE_PACK
+    assert 'externalIPs: ["192.88.99.9"]' in MANIFEST_AS
+    assert 'COGNIC_AUTH_MODE, value: "jwt"' in MANIFEST_ORACLE_PACK
+    # the metadata tools' owner allow-list covers the three analytics schemas
+    assert "RETAIL_ANALYTICS,FIN,CARDS" in MANIFEST_ORACLE_PACK
+    # oracle-xe mounts the seed ConfigMap the runner creates from oracle-seed/
+    assert "configMap: { name: oracle-xe-seed }" in MANIFEST_ORACLE_XE
+    assert "gvenzl/oracle-xe:21-slim" in MANIFEST_ORACLE_XE
+    _assert_all(
+        RUNNER,
+        (
+            "create configmap oracle-xe-seed",
+            '--from-file=seed_schema.sql="$PROOF_DIR/oracle-seed/seed_schema.sql"',
+        ),
+    )
+
+
+def test_redis_manifest_backs_the_scheduler_control_plane() -> None:
+    assert "redis:7.4-alpine" in MANIFEST_REDIS
+    assert VALUES["cache"]["enabled"] is True
+    assert VALUES["cache"]["url"] == "redis://redis:6379/0"
+
+
+def test_migrate_job_is_non_hook_with_image_slot() -> None:
+    migrate = yaml.safe_load(MIGRATE_RAW)
+    assert migrate["kind"] == "Job"
+    assert "__AGENTOS_IMAGE__" in MIGRATE_RAW
+    assert "helm.sh/hook" not in MIGRATE_RAW  # the Gap-3 non-hook posture
+    assert "alembic upgrade head" in MIGRATE_RAW
+    assert "rev 0014" in MIGRATE_RAW
+
+
+def test_sandbox_patch_threads_the_m6_topology_plus_the_secret_mount() -> None:
+    _assert_all(
+        SANDBOX_PATCH_RAW,
+        (
+            "broker-share-perms",
+            "chmod 1777 /var/lib/cognic-proof-m8-broker",
+            "chgrp 65534 /var/run/docker.sock",
+            "name: TMPDIR",
+            "value: /var/lib/cognic-proof-m8-broker",
+            "path: /var/run/docker.sock",
+            "type: DirectoryOrCreate",
+        ),
+    )
+    volumes = {v["name"] for v in SANDBOX_PATCH["spec"]["template"]["spec"]["volumes"]}
+    assert volumes == {"docker-sock", "broker-share", "query-context"}

@@ -230,6 +230,131 @@ key — operator env at run time, never committed, never image-baked).
    lists the 4 instruction skills + `hosted_agents` lists `bank-analyst`,
    then drives the six bars.
 
+## Runner environment (operator-supplied at run time; never committed)
+
+| env | required | meaning |
+|---|---|---|
+| `COGNIC_RUN_PROOF_M8=1` | yes | the proof gate (unset → the runner exits 0 with a skip message; NO default-on CI behavior). |
+| `COGNIC_PROOF_M8_TIER1_API_KEY` | yes | the operator's CLOUD provider API key. Fail-loud at the gate; shipped ONLY as the `proof-m8-provider-key` k8s Secret consumed by the litellm router pod. |
+| `COGNIC_PROOF_M8_ALLOWED_PROVIDERS` | no (default `anthropic`) | the ADR-007 provider allow-list the runner sets on the kernel (`COGNIC_ALLOWED_PROVIDERS`). Part of the provider-swap one-values-diff. |
+| `COGNIC_PROOF_M8_POLICY_MODE` | no (default `cloud_anthropic`) | the kernel `COGNIC_POLICY_MODE` for the swap. |
+| `COGNIC_PROOF_M8_REGISTRY_PORT` / `COGNIC_PROOF_M8_REGISTRY_TLS_DIR` / `COGNIC_PROOF_M8_REUSE_IMAGES` | no | local TLS-registry knobs (the proof-m6 conventions, m8-named). |
+
+Deploy-time env the runner itself sets on the kernel Deployment (operator env,
+never image-baked): the three cloud-policy toggles above,
+`COGNIC_LITELLM_MASTER_KEY=dev-only-litellm` (the smoke backends' litellm dev
+master key — same committed dev-fixture class as the Vault `smoke-root-token`;
+the gateway must present it to the router), and the two OPERATIONAL run bounds
+`COGNIC_AGENT_RUN_TOKEN_BUDGET=60000` + `COGNIC_AGENT_RUN_WALL_CLOCK_S=300`
+(raised for a real cloud provider's latency + SKILL.md-sized prompts; no bar
+tests these bounds and no bar is redefined by raising them).
+
+## The sandbox machinery is KEPT (maintainer checkpoint, resolved by code reading)
+
+The M8 bars run **no sandbox session** — the four staged skills are
+instruction-mode content, the reasoning loop is kernel-side, and the tool is
+an MCP HTTP Service. The bring-up nevertheless KEEPS the proof-m6 sandbox
+runtime + canonical-image re-home/signing flow, because Step 0's
+maintainer-locked assert requires it in two independent ways:
+
+1. **`hosted_skills` (the surface listing the 4 instruction skills) exists
+   only on the sandbox-real path.** `create_app`'s lifespan calls
+   `build_skill_executor` — the sole writer of `app.state.hosted_skills` —
+   only when `registry` AND `mcp_host` AND `app.state.sandbox_backend` are
+   all real (`portal/api/app.py`), and the backend constructs only under
+   `is_sandbox_available` + `sandbox_runtime_enabled` +
+   `runtime.scheduler is not None`. Dropping the sandbox would silently drop
+   the Step-0 hosted-skills assert — the M6 executable-skill posture instead
+   deploys UNCHANGED.
+2. **G7 (core/config.py) refuses `ghcr.io/bmzee` canonical image refs in the
+   prod profile**, and a placeholder ref the boot would trust is forbidden by
+   the production-grade rule — so the canonical images must be REAL re-homed,
+   digest-pinned, proof-signed refs.
+
+The ONE M8 adaptation: with no executable skill wheel to bake, BOTH canonical
+images (`sandbox-runtime-python` + `sandbox-egress-proxy`) re-home from their
+PUBLISHED canonical digests (`core/config.py` defaults) — pull → re-tag →
+push → cosign-sign under the per-run proof canonical key, exactly the
+documented bank re-home flow. M6 built its runtime image locally only because
+the M6 skill wheel had to live inside it; every other hardening (local TLS
+registry, persistent CA + one-time certs.d trust, hostAliases, SSL bundle,
+no fixture flags) is byte-for-byte the M6 flow. There is no
+`Dockerfile.skill-runtime` in this proof.
+
+## BAR-5's trace surface (recorded honestly)
+
+The gateway emits ONE value-free `llm.gateway.completion` OTel span per
+completion carrying `llm.gateway.agent_workforce_id` (`llm/gateway.py`).
+Under the prod profile that span is exported only when
+`otel_exporter_endpoint` is set (`observability/otel.py` — otherwise spans
+are silently dropped), and the in-cluster Langfuse from the shared smoke
+backends is `langfuse/langfuse:2`, which **cannot ingest OTLP** (a Langfuse
+v3.22+ feature; the shared backends fixture is deliberately untouched
+mid-proof). So the deployment records the trace through the proof-local OTLP
+collector (`manifests/otel-collector.yaml`; `debug` exporter → pod log), the
+overlay points the chart's Z1b-c exporter values at it
+(`otel.exporter.endpoint: http://otel-collector:4317`), and the runner
+asserts with span-BLOCK-level correlation: the block carrying the BAR-1
+run's `llm.gateway.request_id` must also carry
+`llm.gateway.agent_workforce_id: Str(bank-analyst)` +
+`llm.gateway.external: Bool(true)`. Real pipeline end-to-end (gateway → OTel
+SDK → OTLP/gRPC → collector record → `kubectl logs` query) — never a stubbed
+pass. Langfuse keeps its M4–M6 role (the `/readyz` observability probe)
+unchanged.
+
+## Per-bar assertion mechanisms (Task C2 — the exact surfaces)
+
+* **Step 0** — `GET /api/v1/system/plugins?tenant_id=proof-m8`: all SEVEN
+  packs `status=registered` with their kinds (`tools`/`hooks`/4×`skills`/
+  `agents`); `hosted_skills` ⊇ the 4 instruction skill ids; `hosted_agents`
+  carries `bank-analyst` with EXACTLY the requested sets + `max_steps=6` +
+  `risk_tier=customer_data_read`; ZERO agent/skill/sandbox construction or
+  ingest-skip markers in the boot logs; `seed-db.sh` readback `4|4|4|0`
+  (scopes|entitlements|assignments|atm_recon-entitlements).
+* **BAR 1** — psql over `decision_history` (`agent.run.started` /
+  `agent.run.dispatch` [ok `read_skill`; ok `run_readonly_query` with
+  `scope_id=retail_analytics` + 64-hex `args_sha256`] /
+  `agent.run.completed`; dual identity = zero rows where
+  `payload->>'actor_id' ≠ analyst.amir` or `payload->>'agent_id' ≠
+  bank-analyst`), `audit_event` (`audit.tool_invocation` for
+  `run_readonly_query` increments), `gateway_call_ledger` (strict row:
+  `external=true`, `provenance='resolved'`, `outcome='ok'`,
+  `litellm_alias='cognic-tier1-proof-m8'`, `request_id LIKE '<run>-s%'`),
+  `memory_records` (tier=task row keyed `agent-note-<run>-%`) joined to its
+  `memory.write` chain row; the answer carries the ten seeded names and NOT
+  rank-11 (Kamran Zafar).
+* **BAR 2** — a dispatch row `refused`/`agent_capability_not_assigned` for
+  the run; ZERO ok dispatches with `scope_id=atm_recon` for the run AND
+  across the whole dispatch history (scope-precise — every governed tool
+  execution rides exactly one `agent.run.dispatch` row); graceful non-empty
+  answer; no stack traces.
+* **BAR 3** — amir: a dispatch row `refused`/`agent_scope_not_entitled`
+  (`scope_id=cards_analytics`) + ZERO ok `cards_analytics`-scoped dispatches
+  for the run (the gate fires BEFORE the tool) + a "not available"-style
+  answer; sara (SAME question): `completed` + an ok dispatch row
+  `scope_id=cards_analytics` + figures in the answer; sara retail:
+  `completed` + an ok dispatch row `scope_id=retail_analytics` + the seeded
+  top-3 names (the shared-scope leg).
+* **BAR 4** — the question steers the exact SQL and instructs the agent to
+  report the tool's refusal reason code verbatim; the COMPOUND assertion
+  pins the refusal to the tool envelope: [the closed-enum code
+  (`agent_sql_object_out_of_scope` / `sql_not_select_only`) appears in the
+  answer] AND [an ok `run_readonly_query` dispatch round-trip exists for the
+  run] AND [`audit.tool_invocation` incremented]. The DML leg additionally
+  proves the data intact (XE admin count of `customers_raw` = 13 before and
+  after). No `Traceback` / `ORA-` in any answer.
+* **BAR 4b** — `sqlplus` PROXY sessions inside the oracle-xe pod
+  (`cognic[an_amir]` / `cognic[an_sara]`): `SELECT USER FROM dual` =
+  `AN_AMIR`; governed view counts (17 deposit rows amir / 6 card accounts
+  sara); `ORA-00942` on raw table, cross-scope view, and the ATM views for
+  BOTH identities; the global `audit.tool_invocation` count UNCHANGED (the
+  main-path parser is never touched).
+* **BAR 5** — on the BAR-1 run: `gateway.cloud_policy_denied` audit rows =
+  0 for `request_id LIKE '<run>-s%'`; ≥1 strict external ledger row and
+  ZERO non-external/denied/unresolved ledger rows for the run; the
+  collector-recorded span block correlation above. The model-alias swap
+  stays this README's one-values-diff.
+
 ## ⚠ Proof-only wiring — production needs a real overlay
 
 The M4/M5/M6 caveats carry forward unchanged (header-driven multi-actor
@@ -258,9 +383,22 @@ proof canonical key is dev-grade and minted per run). M8 adds:
 | `Dockerfile.oracle-pack` | The released oracle-schema `v0.3.0` MCP tool Service image (built from the downloaded wheel + v0.3.0 runtime deps; carries `COGNIC_QUERY_CONTEXT_PUBLIC_KEYS`). |
 | `oracle-seed/seed_schema.sql` | First-boot Oracle seed: 3 schemas, raw base tables (never granted), the 8 governed views (exact SKILL.md contracts), deterministic fixtures (incl. the BAR-1 top-10), proxy users `AN_AMIR`/`AN_SARA` (`GRANT CONNECT THROUGH cognic`), the per-identity view-grant matrix. |
 | `kernel-seed.sql` | The migration-0014 rows: 4 data_scopes, the entitlement matrix (amir→retail+fin; sara→cards+retail; atm_recon entitled to NOBODY), agent assignments = exactly the requested set (never atm-recon). Idempotent. |
-| `proof-m8-values.yaml` | The Helm overlay: prod profile, proofm8 tag, cache+sandbox planes, the `litellm.config` cloud-tier wiring (`cognic-tier1-proof-m8`), NO bypass flags. |
-| `README.md` | This file — the six bars, custody, seeds, flow. |
+| `proof-m8-values.yaml` | The Helm overlay: prod profile, proofm8 tag, cache+sandbox planes, the `litellm.config` cloud-tier wiring (`cognic-tier1-proof-m8`), the `otel.exporter` BAR-5 trace-record wiring, NO bypass flags. |
+| `run-proof-m8.sh` | **Task C2** — the env-gated six-bar runner (Step 0 + SETUP M4 lifecycle + BARs 1/2/3/4/4b/5; proof-m6 hardening: retries, parallel backend waits, per-pod failure captures, cleanup trap; prints `PROOF M8 (ALL BARS) PASS` only after every assertion). |
+| `proof_m8/` | **Task C2** — the PROOF-ONLY multi-actor app package (`create_proof_app`; X-Proof-Role binder with author/reviewer/operator/mcp + the TWO analyst identities `analyst.amir`/`analyst.sara` carrying `agent.ask`). Tracked source, vendored into the kernel image. |
+| `manifests/oracle-xe.yaml` | In-cluster Oracle XE (gvenzl; first-boot seed via the oracle-xe-seed ConfigMap; also serves the BAR-4b sqlplus proxy probes). |
+| `manifests/oracle-pack.yaml` | The released v0.3.0 MCP tool Service at the static single effective URL `http://10.96.0.51:8765/mcp` (jwt/JWKS mode; owners allow-list = the three analytics schemas). |
+| `manifests/auth-server.yaml` | The RS256/JWKS emulated-external AS at the RFC7526 externalIP (`192.88.99.9`). |
+| `manifests/redis.yaml` | The scheduler control plane (cache-conditional scheduler → sandbox/skill-executor → hosted_skills; + the governed-memory runtime branch). |
+| `manifests/otel-collector.yaml` | **NEW at M8** — the BAR-5 trace-record surface (OTLP gRPC in, `debug`-exporter span log out; see "BAR-5's trace surface"). |
+| `kind-config.yaml` | The kind topology (docker sock + `/var/lib/cognic-proof-m8-broker` extraMounts — the M6 sandbox posture). |
+| `agentos-sandbox-patch.yaml` | The deploy patch: sandbox topology (docker sock, broker share, TMPDIR, perms init) + the M8 `proof-m8-query-context` Secret mount at `/run/cognic/query-context` (readOnly, 0440). |
+| `migrate-job.yaml` | The proof-owned NON-HOOK migration Job (schema → rev 0014; Gap-3 workaround, verbatim proof-m6 pattern). |
+| `seed-db.sh` | Applies `kernel-seed.sql` (the 0014 rows) + readback-asserts `4\|4\|4\|0`; NEVER seeds derived MCP carve-out rows (install materializes them — ADR-026 D7). |
+| `seed-vault.sh` | By-reference OAuth + AS-allowlist Vault seeds for tenant `proof-m8` (ADR-026 D5; trailing-slash issuer note carried forward). |
+| `Dockerfile.as` | The AS image (vendors the single `_local_as.py` fixture into the m8 context). |
+| `README.md` | This file — the six bars, custody, seeds, flow, the C2 assertion mechanisms. |
 
-Task C2 adds `run-proof-m8.sh` + the k8s manifests (`oracle-xe` /
-`oracle-pack` / `auth-server` / `redis`) + the kind config + the sandbox
-patch + the `proof_m8/` multi-actor app package, mirroring proof-m6.
+There is deliberately NO `Dockerfile.skill-runtime` (see "The sandbox
+machinery is KEPT" — both canonical images re-home from their published
+digests; no executable skill wheel exists to bake).

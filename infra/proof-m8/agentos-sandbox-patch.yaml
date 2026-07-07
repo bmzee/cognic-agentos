@@ -1,0 +1,78 @@
+# infra/proof-m8/agentos-sandbox-patch.yaml — strategic-merge patch applied by
+# run-proof-m8.sh to deploy/rel-agentos AFTER `helm install` (the chart ships no
+# extraVolumes/extraEnv hooks, and these surfaces are PROOF-TOPOLOGY, not chart
+# contract). Carries the proof-m6 sandbox topology UNCHANGED (the M6
+# executable-skill posture is a Step-0 precondition) PLUS the ONE M8 addition:
+#
+#   * docker-sock — the host docker socket hostPath (through the kind node's
+#     extraMount) so the DockerSibling backend's aiodocker client reaches the
+#     host daemon that runs the sandbox sibling containers.
+#   * broker-share + TMPDIR — the skill broker creates its per-invocation 0700
+#     socket dir under tempfile.gettempdir(); TMPDIR points it at the
+#     host-shared path so the SAME absolute path exists in the pod (where the
+#     broker binds) and on the docker host (where the backend bind-mounts it
+#     into the workload). PROOF-ONLY side effect: every kernel tempfile lands
+#     on this hostPath for the proof's lifetime.
+#   * broker-share-perms initContainer — the hostPath dir is root-owned 0755 at
+#     creation; chmod 1777 (sticky, world-writable — /tmp semantics) lets the
+#     uid-65534 kernel pod mkdir its 0700 per-invocation dirs while every dir
+#     stays owner-locked. It ALSO grants the pod the docker socket: the
+#     node-mounted sock is root-owned and the uid/gid-65534 kernel pod got
+#     "Permission denied" from aiodocker (hit live M6 run 9, 2026-07-04) —
+#     chgrp 65534 + 0660 is the TIGHTEST workable grant (group-scoped, NOT
+#     0666; reverts on Docker Desktop restart). Runs as root (the ONLY root
+#     step in the pod); PROOF-ONLY.
+#   * query-context (M8, ADR-027 §c) — the kernel's query-context SIGNING key
+#     as a RUNTIME Secret mount at /run/cognic/query-context (readOnly,
+#     0440). The runner mints the keypair per run and `kubectl create
+#     secret`s the PRIVATE PEM from a proof-local tmpdir — the key NEVER
+#     enters a build context, an image layer, or a tracked file (the C1
+#     custody contract). The image ENV
+#     COGNIC_AGENT_QUERY_CONTEXT_SIGNING_KEY_PATH points at exactly this
+#     mount; an unreadable/missing key fails the loop composition loud (the
+#     ask route 503s + Step 0's hosted_agents assert catches it).
+spec:
+  template:
+    spec:
+      initContainers:
+        - name: broker-share-perms
+          image: busybox:1.36
+          command:
+            [
+              "sh",
+              "-c",
+              "chmod 1777 /var/lib/cognic-proof-m8-broker && chgrp 65534 /var/run/docker.sock && chmod 0660 /var/run/docker.sock",
+            ]
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+          volumeMounts:
+            - name: broker-share
+              mountPath: /var/lib/cognic-proof-m8-broker
+            - name: docker-sock
+              mountPath: /var/run/docker.sock
+      containers:
+        - name: agentos
+          env:
+            - name: TMPDIR
+              value: /var/lib/cognic-proof-m8-broker
+          volumeMounts:
+            - name: docker-sock
+              mountPath: /var/run/docker.sock
+            - name: broker-share
+              mountPath: /var/lib/cognic-proof-m8-broker
+            - name: query-context
+              mountPath: /run/cognic/query-context
+              readOnly: true
+      volumes:
+        - name: docker-sock
+          hostPath:
+            path: /var/run/docker.sock
+        - name: broker-share
+          hostPath:
+            path: /var/lib/cognic-proof-m8-broker
+            type: DirectoryOrCreate
+        - name: query-context
+          secret:
+            secretName: proof-m8-query-context
+            defaultMode: 288   # 0440 — group-readable for the fsGroup-65534 pod

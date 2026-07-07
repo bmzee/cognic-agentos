@@ -77,6 +77,22 @@ sandbox:
   runtimeEnabled: true              # M6 executable-skill posture unchanged (hosted_skills precondition)
   # canonicalRuntimeImage / canonicalEgressProxyImage: injected via --set at
   # install time (digest-pinned, proof-canonical-signed) — see the header note.
+otel:
+  exporter:
+    # BAR 5's trace-record surface (Task C2). The gateway's value-free
+    # llm.gateway.completion span (carrying llm.gateway.agent_workforce_id)
+    # is EXPORTED only when this endpoint is set (observability/otel.py:
+    # prod profile + no endpoint -> spans silently dropped). The in-cluster
+    # Langfuse from the shared smoke backends is langfuse/langfuse:2 — v2
+    # CANNOT ingest OTLP (v3.22+ feature; the shared fixture is deliberately
+    # untouched mid-proof) — so the proof records the span through the
+    # proof-local OTLP collector (manifests/otel-collector.yaml, debug
+    # exporter -> pod log) and the runner asserts the span block for the
+    # BAR-1 run with REAL queries. gRPC + insecure=true is in-cluster
+    # plaintext to the collector Service only (no external egress).
+    endpoint: "http://otel-collector:4317"
+    protocol: grpc
+    insecure: true
 migrations: { enabled: false }     # Gap 3: chart pre-install migration hook deadlocks; proof runs a non-hook Job post-install
 secrets:
   create: true
