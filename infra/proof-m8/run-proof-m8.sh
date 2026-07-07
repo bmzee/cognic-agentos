@@ -1040,8 +1040,37 @@ kubectl -n "$NS" apply -f "$PROOF_DIR/manifests/oracle-xe.yaml"
 # database inside the readiness window; run-5 live finding — 1200s expired
 # mid-creation with the listener already up (the image itself is preloaded
 # into the node, so none of this window is pull time).
-kubectl -n "$NS" wait --for=condition=ready pod -l app=oracle-xe --timeout=2400s \
-  || xe_fail "oracle-xe pod not Ready within 2400s (qemu-emulated XE first boot under kind)"
+# Poll loop, NOT one long `kubectl wait` (run-7 live findings, both pinned):
+#   * `kubectl wait -l ...` resolves the selector ONCE at invocation and then
+#     waits on those pod OBJECTS — if the pod is recreated mid-wait, the wait
+#     sits on a deleted object until timeout even when the replacement goes
+#     Ready.
+#   * The qemu-emulated XE occasionally dies within seconds of its FIRST
+#     start (environmental; ORA-01081 on every restart after — stale
+#     instance state in the pod-scoped sandbox never self-heals). The ONLY
+#     recovery is recreating the POD (fresh sandbox). Auto-recreate on a
+#     detected crash loop, at most $_XE_MAX_RECREATES times, and keep
+#     polling the LABEL so the replacement is picked up.
+_XE_DEADLINE=$(( $(date +%s) + 2400 ))
+_XE_MAX_RECREATES=3
+_xe_recreates=0
+until kubectl -n "$NS" get pods -l app=oracle-xe 2>/dev/null | grep -qE "1/1\s+Running"; do
+  if [ "$(date +%s)" -ge "$_XE_DEADLINE" ]; then
+    xe_fail "oracle-xe pod not Ready within 2400s (qemu-emulated XE first boot under kind)"
+  fi
+  _xe_restarts="$(kubectl -n "$NS" get pods -l app=oracle-xe \
+    -o jsonpath='{.items[0].status.containerStatuses[0].restartCount}' 2>/dev/null || echo 0)"
+  if [ "${_xe_restarts:-0}" -ge 2 ]; then
+    if [ "$_xe_recreates" -ge "$_XE_MAX_RECREATES" ]; then
+      xe_fail "oracle-xe crash-looping after $_xe_recreates pod recreations (qemu emulation unstable — restart Docker Desktop / prune the VM and re-run)"
+    fi
+    _xe_recreates=$(( _xe_recreates + 1 ))
+    echo "  oracle-xe crash-looping (restarts=$_xe_restarts) — recreating the pod for a fresh sandbox ($_xe_recreates/$_XE_MAX_RECREATES)"
+    kubectl -n "$NS" delete pod -l app=oracle-xe --wait=false >/dev/null 2>&1 || true
+    sleep 20
+  fi
+  sleep 15
+done
 
 # --- 6. Vault init/seed (KV v1 + OAuth + AS-allowlist) ------------------------------
 echo "==> [6/11] seed Vault (KV v1 conversion + OAuth + AS allow-list — by reference, D5)"
@@ -1062,10 +1091,42 @@ sed "s|__AGENTOS_IMAGE__|$IMAGE|" "$PROOF_DIR/migrate-job.yaml" | kubectl apply 
 kubectl -n "$NS" wait --for=condition=complete job/agentos-migrate --timeout=300s \
   || migrate_fail "agentos-migrate did not complete within 300s"
 
+pack_fail() {
+  # Step-8 capture (run-7 live finding: the oracle-pack rollout timeout left
+  # NO diagnostics — the cluster was torn down before anything was captured).
+  # Mirrors the xe_fail/backends_fail shape; includes INIT-container logs
+  # (wait-for-xe) + previous-instance logs so a crash loop or a stuck init
+  # is diagnosable post-teardown.
+  local where="$1"
+  echo "FAIL: oracle-pack/AS ($where) — capturing diagnostics to docs/VALIDATION-RESULTS.md" >&2
+  local pods desc logs initlogs prevlogs aslogs
+  pods="$(kubectl -n "$NS" get deploy,pods -o wide 2>&1 || true)"
+  desc="$(kubectl -n "$NS" describe pod -l app=proof-oracle-pack 2>&1 | tail -100 || true)"
+  logs="$(kubectl -n "$NS" logs -l app=proof-oracle-pack --all-containers --tail=100 2>&1 || true)"
+  initlogs="$(kubectl -n "$NS" logs -l app=proof-oracle-pack -c wait-for-xe --tail=40 2>&1 || true)"
+  prevlogs="$(kubectl -n "$NS" logs -l app=proof-oracle-pack --previous --tail=60 2>&1 || true)"
+  aslogs="$(kubectl -n "$NS" logs -l app=proof-as --tail=60 2>&1 || true)"
+  {
+    echo ""
+    echo "## Proof M8 — oracle-pack/AS rollout FAILURE ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+    echo ""
+    echo "- Failed step: \`$where\`"
+    echo "- deploys/pods:"; echo '\`\`\`'; echo "$pods"; echo '\`\`\`'
+    echo "- oracle-pack describe (tail):"; echo '\`\`\`'; echo "$desc"; echo '\`\`\`'
+    echo "- oracle-pack logs (all containers, tail):"; echo '\`\`\`'; echo "$logs"; echo '\`\`\`'
+    echo "- wait-for-xe init logs (tail):"; echo '\`\`\`'; echo "$initlogs"; echo '\`\`\`'
+    echo "- oracle-pack previous-instance logs (tail):"; echo '\`\`\`'; echo "$prevlogs"; echo '\`\`\`'
+    echo "- proof-as logs (tail):"; echo '\`\`\`'; echo "$aslogs"; echo '\`\`\`'
+  } >> "$REPO_ROOT/docs/VALIDATION-RESULTS.md"
+  exit 1
+}
+
 echo "==> [8/11] apply the oracle-pack MCP tool Service + AS manifests; wait Ready"
 kubectl -n "$NS" apply -f "$PROOF_DIR/manifests/oracle-pack.yaml" -f "$PROOF_DIR/manifests/auth-server.yaml"
-kubectl -n "$NS" rollout status deploy/proof-oracle-pack --timeout=180s
-kubectl -n "$NS" rollout status deploy/proof-as --timeout=180s
+kubectl -n "$NS" rollout status deploy/proof-oracle-pack --timeout=300s \
+  || pack_fail "proof-oracle-pack rollout not available within 300s"
+kubectl -n "$NS" rollout status deploy/proof-as --timeout=180s \
+  || pack_fail "proof-as rollout not available within 180s"
 
 echo "==> [8/11] create the per-run Secrets (query-context PRIVATE key + provider API key)"
 # The PRIVATE query-context key ships ONLY as this Secret (mounted read-only at

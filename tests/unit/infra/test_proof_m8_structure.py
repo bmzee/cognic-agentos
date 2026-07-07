@@ -403,6 +403,49 @@ def test_oracle_seed_view_columns_match_the_skill_md_contracts() -> None:
         assert col in ORACLE_SEED
 
 
+def test_oracle_seed_every_insert_value_count_matches_its_table_columns() -> None:
+    """Run-8 live finding: a stray ``'PKR'`` value in the fin.branch_pnl_raw
+    inserts (8 values into a 7-column table) tripped ``ORA-00913: too many
+    values`` during gvenzl's first-boot init; the seed's
+    ``WHENEVER SQLERROR EXIT`` aborted the container, and every kubelet
+    restart then surfaced as an ``ORA-01081`` crash-loop that masked the
+    real cause. A structural parse of the seed pins every raw-table
+    INSERT's value count against its CREATE TABLE column count so a
+    column/value mismatch fails in CI WITHOUT a 10-minute emulated-XE
+    boot. Constraint-continuation lines (CONSTRAINT / FOREIGN / PRIMARY /
+    CHECK / REFERENCES) are excluded from the column count."""
+    import re
+    from collections import defaultdict
+
+    _skip = ("CONSTRAINT", "FOREIGN", "PRIMARY", "CHECK", "UNIQUE", "REFERENCES")
+    tables: dict[str, int] = {}
+    for m in re.finditer(r"CREATE TABLE (\w+\.\w+)\s*\((.*?)\n\);", ORACLE_SEED, re.S):
+        name, body = m.group(1).lower(), m.group(2)
+        cols = [
+            ln
+            for ln in body.split("\n")
+            if ln.strip()
+            and not ln.strip().upper().startswith(_skip)
+            and re.match(
+                r"^\w+\s+(VARCHAR2|NUMBER|CHAR|DATE|TIMESTAMP|CLOB|FLOAT)",
+                ln.strip(),
+                re.I,
+            )
+        ]
+        tables[name] = len(cols)
+    inserts: dict[str, set[int]] = defaultdict(set)
+    for m in re.finditer(r"INSERT INTO (\w+\.\w+)\s* VALUES\s*\((.*?)\);", ORACLE_SEED, re.S):
+        inserts[m.group(1).lower()].add(m.group(2).count(",") + 1)
+    assert tables, "no CREATE TABLE parsed from the seed"
+    for table, value_counts in inserts.items():
+        assert table in tables, f"INSERT into unknown table {table}"
+        assert value_counts == {tables[table]}, (
+            f"{table}: table has {tables[table]} columns but INSERTs supply "
+            f"{sorted(value_counts)} values (a stray/missing value → ORA-00913 "
+            f"at first-boot seed init)"
+        )
+
+
 def test_oracle_seed_provisions_proxy_users_with_connect_through() -> None:
     _assert_all(
         ORACLE_SEED,
