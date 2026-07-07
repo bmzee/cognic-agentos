@@ -779,6 +779,10 @@ cleanup() {
   # PEM must never outlive the run on the operator host.
   rm -rf "$STAGING_DST" "$AGENTOS_SRC_DST" "$PROOF_DIR/policies" "$PROOF_DIR/_local_as.py" 2>/dev/null || true
   [ -n "${QC_TMP:-}" ] && rm -rf "$QC_TMP" 2>/dev/null || true
+  # The per-run canonical SIGNING keypair dir (the run-2 custody fix): removed
+  # unconditionally like $QC_TMP — the dev-grade signing key never outlives
+  # the run on the operator host.
+  [ -n "${CANONICAL_KEY_TMP:-}" ] && rm -rf "$CANONICAL_KEY_TMP" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -852,10 +856,21 @@ bash "$PROOF_DIR/stage-packs.sh" "$STAGING_DST"
 # canonical-trust/registry-ca.pem -> the SSL_CERT_FILE bundle) so the in-pod cosign
 # verify trusts the proof registry's TLS + the proof canonical signatures.
 echo "==> [2/11] mint the proof canonical cosign keypair + stage the persistent registry TLS cert"
+# Custody split (the run-2 live finding — the in-run guard below caught the
+# original shape copying registry-key.pem AND minting cosign.key inside the
+# build context): ONLY PUBLIC material enters $CANONICAL_DIR (the docker build
+# context). The canonical SIGNING key lives in a 0700 mktemp OUTSIDE staging
+# (host-side `cosign sign` reads it at the re-home step; the image needs only
+# cosign.pub), and the registry TLS PRIVATE key never leaves $REGISTRY_TLS_DIR
+# (the registry container mounts it directly). proof-m6 carries the same
+# latent copy (run-proof-m6.sh:638) — reported as a follow-up finding.
 mkdir -p "$CANONICAL_DIR"
+CANONICAL_KEY_TMP="$(mktemp -d)"
+chmod 700 "$CANONICAL_KEY_TMP"
 export COSIGN_PASSWORD=""   # dev-grade proof key; empty password (NEVER a production key — custody is a Human-only decision per build-and-sign.md)
-( cd "$CANONICAL_DIR" && cosign generate-key-pair )   # -> cosign.key + cosign.pub in CANONICAL_DIR
-cp "$REGISTRY_TLS_DIR/registry-ca.pem" "$REGISTRY_TLS_DIR/registry-key.pem" "$CANONICAL_DIR/"
+( cd "$CANONICAL_KEY_TMP" && cosign generate-key-pair )   # -> cosign.key + cosign.pub OUTSIDE the build context
+cp "$CANONICAL_KEY_TMP/cosign.pub" "$CANONICAL_DIR/cosign.pub"
+cp "$REGISTRY_TLS_DIR/registry-ca.pem" "$CANONICAL_DIR/"
 chmod -R a+rX "$CANONICAL_DIR"
 
 # --- 2c. mint the per-run QUERY-CONTEXT keypair (ADR-027 §c key custody) -----------
@@ -881,7 +896,7 @@ openssl pkey -in "$QC_TMP/query-context-private.pem" -pubout \
 chmod a+r "$STAGING_DST/query-context/query-context-public.pem"
 # Guard the custody invariant in-run: no private key material below the staging
 # tree (the docker build contexts) — belt-and-braces on top of the structural test.
-if grep -rl "BEGIN PRIVATE KEY" "$STAGING_DST" >/dev/null 2>&1; then
+if grep -rlE "PRIVATE KEY-----" "$STAGING_DST" >/dev/null 2>&1; then
   die "custody violation: private key material found under $STAGING_DST (must never enter a build context)"
 fi
 
@@ -943,7 +958,7 @@ done < <(_backend_images; _extra_images)
 # (no insecure-registry bypass flag), NO fixture flag.
 echo "==> [4/11] start the local TLS registry:2 on the kind network + trust its CA on the host"
 docker run -d --restart=always --name "$REGISTRY_NAME" --network kind \
-  -v "$(cd "$CANONICAL_DIR" && pwd):/certs:ro" \
+  -v "$REGISTRY_TLS_DIR:/certs:ro" \
   -e "REGISTRY_HTTP_ADDR=0.0.0.0:$REGISTRY_PORT" \
   -e REGISTRY_HTTP_TLS_CERTIFICATE=/certs/registry-ca.pem \
   -e REGISTRY_HTTP_TLS_KEY=/certs/registry-key.pem \
@@ -958,8 +973,12 @@ echo "==> [4/11] re-home + cosign-sign BOTH canonical sandbox images under the p
 docker_pull_with_retry "$PUBLISHED_RUNTIME_PYTHON"
 docker tag "$PUBLISHED_RUNTIME_PYTHON" "$REGISTRY_REF_HOST/sandbox-runtime-python:proofm8"
 docker push "$REGISTRY_REF_HOST/sandbox-runtime-python:proofm8"
-RUNTIME_PYTHON_REF="$(docker inspect "$REGISTRY_REF_HOST/sandbox-runtime-python:proofm8" --format '{{index .RepoDigests 0}}')"
-[ -n "$RUNTIME_PYTHON_REF" ] || die "could not capture the pushed sandbox-runtime-python RepoDigests ref"
+# RepoDigests can carry STALE entries from earlier proofs on the same host
+# (run-4 live finding: the egress-proxy image still held a
+# cognic-proof-m6-registry digest from the July-4 M6 proof and `index 0`
+# picked it) — select the entry for THIS registry explicitly.
+RUNTIME_PYTHON_REF="$(docker inspect "$REGISTRY_REF_HOST/sandbox-runtime-python:proofm8" --format '{{range .RepoDigests}}{{println .}}{{end}}' | grep "^$REGISTRY_REF_HOST/sandbox-runtime-python@" | head -1)"
+[ -n "$RUNTIME_PYTHON_REF" ] || die "could not capture the pushed sandbox-runtime-python RepoDigests ref for $REGISTRY_REF_HOST"
 # --registry-cacert: host-side cosign dials the self-signed TLS registry. On
 # macOS, Go's platform verifier (Security.framework) ignores SSL_CERT_FILE and
 # enforces Apple's TLS policy (825-day cap + serverAuth EKU), which rejects
@@ -967,15 +986,17 @@ RUNTIME_PYTHON_REF="$(docker inspect "$REGISTRY_REF_HOST/sandbox-runtime-python:
 # live 2026-07-03). The explicit flag installs a PURE-GO custom root pool,
 # sidestepping the platform verifier; the SAN covers $REGISTRY_NAME.
 cosign sign --registry-cacert "$CANONICAL_DIR/registry-ca.pem" \
-  --key "$CANONICAL_DIR/cosign.key" --yes "$RUNTIME_PYTHON_REF"
+  --key "$CANONICAL_KEY_TMP/cosign.key" --tlog-upload=false --use-signing-config=false \
+  --yes "$RUNTIME_PYTHON_REF"
 # (2) the egress-proxy SIDECAR image (re-homed from the published canonical digest)
 docker_pull_with_retry "$PUBLISHED_EGRESS_PROXY"
 docker tag "$PUBLISHED_EGRESS_PROXY" "$REGISTRY_REF_HOST/sandbox-egress-proxy:proofm8"
 docker push "$REGISTRY_REF_HOST/sandbox-egress-proxy:proofm8"
-EGRESS_PROXY_REF="$(docker inspect "$REGISTRY_REF_HOST/sandbox-egress-proxy:proofm8" --format '{{index .RepoDigests 0}}')"
-[ -n "$EGRESS_PROXY_REF" ] || die "could not capture the pushed sandbox-egress-proxy RepoDigests ref"
+EGRESS_PROXY_REF="$(docker inspect "$REGISTRY_REF_HOST/sandbox-egress-proxy:proofm8" --format '{{range .RepoDigests}}{{println .}}{{end}}' | grep "^$REGISTRY_REF_HOST/sandbox-egress-proxy@" | head -1)"
+[ -n "$EGRESS_PROXY_REF" ] || die "could not capture the pushed sandbox-egress-proxy RepoDigests ref for $REGISTRY_REF_HOST"
 cosign sign --registry-cacert "$CANONICAL_DIR/registry-ca.pem" \
-  --key "$CANONICAL_DIR/cosign.key" --yes "$EGRESS_PROXY_REF"
+  --key "$CANONICAL_KEY_TMP/cosign.key" --tlog-upload=false --use-signing-config=false \
+  --yes "$EGRESS_PROXY_REF"
 echo "  canonical refs (digest-pinned, proof-signed): runtime=$RUNTIME_PYTHON_REF proxy=$EGRESS_PROXY_REF"
 
 # --- 5. namespace + the six real backends + Redis + OTLP collector, then Oracle XE --
@@ -1015,8 +1036,12 @@ kubectl -n "$NS" create configmap oracle-xe-seed \
   --from-file=seed_schema.sql="$PROOF_DIR/oracle-seed/seed_schema.sql" \
   --dry-run=client -o yaml | kubectl apply -n "$NS" -f -
 kubectl -n "$NS" apply -f "$PROOF_DIR/manifests/oracle-xe.yaml"
-kubectl -n "$NS" wait --for=condition=ready pod -l app=oracle-xe --timeout=1200s \
-  || xe_fail "oracle-xe pod not Ready within 1200s (qemu-emulated XE first boot under kind)"
+# 2400s: the qemu-emulated (amd64-on-arm64) XE first boot creates the whole
+# database inside the readiness window; run-5 live finding — 1200s expired
+# mid-creation with the listener already up (the image itself is preloaded
+# into the node, so none of this window is pull time).
+kubectl -n "$NS" wait --for=condition=ready pod -l app=oracle-xe --timeout=2400s \
+  || xe_fail "oracle-xe pod not Ready within 2400s (qemu-emulated XE first boot under kind)"
 
 # --- 6. Vault init/seed (KV v1 + OAuth + AS-allowlist) ------------------------------
 echo "==> [6/11] seed Vault (KV v1 conversion + OAuth + AS allow-list — by reference, D5)"

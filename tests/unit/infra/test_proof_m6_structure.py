@@ -680,7 +680,11 @@ def test_runner_rehomes_and_signs_the_sandbox_images_no_bypass() -> None:
             "subjectAltName",
             "/etc/docker/certs.d",
             'cosign sign --registry-cacert "$CANONICAL_DIR/registry-ca.pem"',
-            '--key "$CANONICAL_DIR/cosign.key"',
+            # M8 finding #5 back-port: the proof signs are private-
+            # infrastructure key signatures — no public Rekor upload, no
+            # TUF signing-config dependency (the kernel admission verify
+            # carries the matching --private-infrastructure=true).
+            '--key "$CANONICAL_DIR/cosign.key" --tlog-upload=false --use-signing-config=false',
             "RepoDigests",
             "sandbox-egress-proxy",
             # the digest-pinned refs are injected at install time (G7: the

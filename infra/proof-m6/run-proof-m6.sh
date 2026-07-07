@@ -728,7 +728,8 @@ SKILL_RUNTIME_REF="$(docker inspect "$REGISTRY_REF_HOST/sandbox-runtime-python:p
 # live 2026-07-03). The explicit flag installs a PURE-GO custom root pool,
 # sidestepping the platform verifier; the SAN covers $REGISTRY_NAME.
 cosign sign --registry-cacert "$CANONICAL_DIR/registry-ca.pem" \
-  --key "$CANONICAL_DIR/cosign.key" --yes "$SKILL_RUNTIME_REF"
+  --key "$CANONICAL_DIR/cosign.key" --tlog-upload=false --use-signing-config=false \
+  --yes "$SKILL_RUNTIME_REF"
 # (2) the egress-proxy SIDECAR image (re-homed from the published canonical digest)
 docker_pull_with_retry "$PUBLISHED_EGRESS_PROXY"
 docker tag "$PUBLISHED_EGRESS_PROXY" "$REGISTRY_REF_HOST/sandbox-egress-proxy:proofm6"
@@ -736,7 +737,8 @@ docker push "$REGISTRY_REF_HOST/sandbox-egress-proxy:proofm6"
 EGRESS_PROXY_REF="$(docker inspect "$REGISTRY_REF_HOST/sandbox-egress-proxy:proofm6" --format '{{index .RepoDigests 0}}')"
 [ -n "$EGRESS_PROXY_REF" ] || die "could not capture the pushed sandbox-egress-proxy RepoDigests ref"
 cosign sign --registry-cacert "$CANONICAL_DIR/registry-ca.pem" \
-  --key "$CANONICAL_DIR/cosign.key" --yes "$EGRESS_PROXY_REF"
+  --key "$CANONICAL_DIR/cosign.key" --tlog-upload=false --use-signing-config=false \
+  --yes "$EGRESS_PROXY_REF"
 echo "  canonical refs (digest-pinned, proof-signed): runtime=$SKILL_RUNTIME_REF proxy=$EGRESS_PROXY_REF"
 
 # --- 5. namespace + the six real backends + Redis, THEN the in-cluster Oracle XE --

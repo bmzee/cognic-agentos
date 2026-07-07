@@ -248,11 +248,27 @@ class TestRealSubprocessVerification:
         monkeypatch.setattr(asyncio, "create_subprocess_exec", fake)
         await catalog._run_cosign_verify(_DIGEST_PYTHON, tenant_id="t-1")
         argv = list(fake.call_args.args)
-        # Exact wire-contract with cosign — key-based verify, nothing else.
-        assert argv == ["cosign", "verify", "--key", str(trust_root), _CANONICAL_PYTHON]
+        # Exact wire-contract with cosign — key-based PRIVATE-INFRASTRUCTURE
+        # verify, nothing else. ``--private-infrastructure=true`` is the M8
+        # finding #5 fix (ADR-016/ADR-004 amendment): canonical image
+        # signatures are private-infrastructure key signatures — without the
+        # flag, cosign 3.x demands a PUBLIC Rekor transparency-log proof,
+        # which (a) an air-gapped bank can never satisfy and (b) made image
+        # admission silently dependent on public Sigstore reachability.
+        assert argv == [
+            "cosign",
+            "verify",
+            "--key",
+            str(trust_root),
+            "--private-infrastructure=true",
+            _CANONICAL_PYTHON,
+        ]
         # Explicit no-keyless-flag pins for a crisp failure message on regress.
         assert "--certificate-identity-regexp" not in argv
         assert "--certificate-identity" not in argv
+        # Explicit private-infrastructure pin (finding #5): a regression that
+        # drops the flag re-introduces the public-Rekor dependency.
+        assert "--private-infrastructure=true" in argv
 
     async def test_run_cosign_verify_returns_passed_on_subprocess_exit_zero(
         self, catalog: CanonicalImageCatalog, monkeypatch: pytest.MonkeyPatch
@@ -1424,7 +1440,14 @@ class TestCanonicalTrustRoot:
         assert result.passed is True
         assert "no trust root configured" not in result.detail
         argv = list(fake.call_args.args)
-        assert argv == ["cosign", "verify", "--key", str(canonical_root), _CANONICAL_PYTHON]
+        assert argv == [
+            "cosign",
+            "verify",
+            "--key",
+            str(canonical_root),
+            "--private-infrastructure=true",  # finding #5 — see the argv-shape pin
+            _CANONICAL_PYTHON,
+        ]
 
     async def test_canonical_root_does_not_leak_into_tenant_image_path(
         self, tmp_path: Path

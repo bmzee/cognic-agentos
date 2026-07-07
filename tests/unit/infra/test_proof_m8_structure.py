@@ -322,6 +322,58 @@ def test_no_tracked_private_key_material_anywhere_in_the_proof_tree() -> None:
             )
 
 
+def test_canonical_key_custody_stays_outside_the_build_context() -> None:
+    """The run-2 live finding: the ORIGINAL runner minted the canonical
+    cosign keypair inside ``$CANONICAL_DIR`` (== the staging build context)
+    and copied ``registry-key.pem`` beside it — the in-run custody guard
+    caught it. Pins: only PUBLIC material enters the build context; the
+    signing key mints in a 0700 mktemp OUTSIDE staging; the re-home sign
+    steps read the tmp-held key; the cleanup trap removes it; and the
+    guard pattern catches EVERY PEM private header (incl. the sigstore
+    envelope, which the original ``BEGIN PRIVATE KEY`` grep missed)."""
+    runner = (_PROOF_DIR / "run-proof-m8.sh").read_text()
+    # The registry TLS PRIVATE key is never staged (the registry container
+    # mounts it directly from $REGISTRY_TLS_DIR).
+    for line in runner.splitlines():
+        if "registry-key.pem" in line and "CANONICAL_DIR" in line:
+            raise AssertionError(f"registry-key.pem staged into the build context: {line!r}")
+    # The canonical keypair mints OUTSIDE staging; only the pub is copied in.
+    _assert_all(
+        runner,
+        (
+            'CANONICAL_KEY_TMP="$(mktemp -d)"',
+            'cd "$CANONICAL_KEY_TMP" && cosign generate-key-pair',
+            'cp "$CANONICAL_KEY_TMP/cosign.pub" "$CANONICAL_DIR/cosign.pub"',
+            '--key "$CANONICAL_KEY_TMP/cosign.key"',
+            'rm -rf "$CANONICAL_KEY_TMP"',
+        ),
+    )
+    assert 'cd "$CANONICAL_DIR" && cosign generate-key-pair' not in runner
+    # The hardened guard: every PEM private-key header form, not just PKCS8.
+    assert 'grep -rlE "PRIVATE KEY-----" "$STAGING_DST"' in runner
+    # The run-3 live finding (the fix's own regression): the TLS registry
+    # container consumes registry-key.pem via its /certs mount — that mount
+    # MUST come from the persistent $REGISTRY_TLS_DIR (outside the build
+    # context), never from $CANONICAL_DIR (which no longer carries the key).
+    assert '-v "$REGISTRY_TLS_DIR:/certs:ro"' in runner
+    assert 'CANONICAL_DIR" && pwd):/certs' not in runner
+    # The run-4 live finding: `{{index .RepoDigests 0}}` is nondeterministic
+    # when the local docker holds stale repo-digests from EARLIER proofs
+    # (the egress-proxy image still carried a cognic-proof-m6-registry
+    # digest) — the ref selection must be scoped to THIS registry.
+    assert "{{index .RepoDigests 0}}" not in runner
+    assert 'grep "^$REGISTRY_REF_HOST/sandbox-runtime-python@"' in runner
+    assert 'grep "^$REGISTRY_REF_HOST/sandbox-egress-proxy@"' in runner
+    # The run-6 live finding (#5): the proof signs are PRIVATE-INFRASTRUCTURE
+    # key signatures — --tlog-upload=false on BOTH canonical signs (no public
+    # Rekor upload) plus --use-signing-config=false (no TUF signing-config
+    # dependency); the kernel-side admission verify carries the matching
+    # --private-infrastructure=true, pinned at
+    # tests/unit/sandbox/test_image_catalog.py.
+    assert runner.count("--tlog-upload=false") == 2
+    assert runner.count("--use-signing-config=false") == 2
+
+
 def test_oracle_pack_image_wires_the_query_context_public_keys() -> None:
     _assert_all(
         DOCKER_ORACLE,
@@ -621,7 +673,7 @@ def test_runner_query_context_key_custody() -> None:
             '-out "$QC_TMP/query-context-private.pem"',
             'openssl pkey -in "$QC_TMP/query-context-private.pem" -pubout',
             '-out "$STAGING_DST/query-context/query-context-public.pem"',
-            'grep -rl "BEGIN PRIVATE KEY" "$STAGING_DST"',
+            'grep -rlE "PRIVATE KEY-----" "$STAGING_DST"',
             "custody violation",
             'kubectl -n "$NS" create secret generic proof-m8-query-context',
             '--from-file=query-context-private.pem="$QC_TMP/query-context-private.pem"',
@@ -711,7 +763,7 @@ def test_runner_rehomes_and_signs_both_published_canonical_images_no_bypass() ->
             'docker_pull_with_retry "$PUBLISHED_RUNTIME_PYTHON"',
             'docker_pull_with_retry "$PUBLISHED_EGRESS_PROXY"',
             'cosign sign --registry-cacert "$CANONICAL_DIR/registry-ca.pem"',
-            '--key "$CANONICAL_DIR/cosign.key"',
+            '--key "$CANONICAL_KEY_TMP/cosign.key"',
             "RepoDigests",
             # the digest-pinned refs are injected at install time (G7: the
             # static overlay must never carry a personal-registry ref)

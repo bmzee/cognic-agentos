@@ -219,6 +219,18 @@ full in-toto layout (steps / inspections / key-thresholds) and a cross-layer
 manifest pack_kind-flip comparison remain Wave-2. Surfaced + proven by Proof 1a
 Task 7 (the first real `agentos sign` → runtime registration exercise).
 
+## Amendment (2026-07-07) — canonical image signatures are private-infrastructure (M8 finding #5)
+
+The cosign-3.x bridge above made WHEEL signing air-gapped-correct (`--tlog-upload=false`
++ offline bundles), but canonical IMAGE signing/verification still rode the cosign 3.x
+public defaults: signers uploaded to the public Rekor log whenever the network allowed,
+and `sandbox/catalog.py`'s `cosign verify --key` demanded a public transparency-log
+proof. Ruling: canonical image signatures are PRIVATE-INFRASTRUCTURE key signatures —
+the admission verify carries `--private-infrastructure=true` (ADR-004 amendment
+2026-07-07) and every signer of canonical/proof images uses
+`--tlog-upload=false --use-signing-config=false`. No public Sigstore dependency
+remains on the image-admission path.
+
 ## Amendment (2026-07-06) — AgentCard JWS custody split (M8 finding #4)
 
 The first real agent-pack `agentos sign --bundle` (M8 B3, `cognic-agent-bank-analyst`)
