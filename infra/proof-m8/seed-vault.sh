@@ -34,3 +34,16 @@ VX kv put "secret/cognic/$T/mcp-as-allowlist" @/tmp/as-allowlist.json
 # readback assertion: servers must come back as a JSON ARRAY (KV v1 -> data.servers)
 VX kv get -format=json "secret/cognic/$T/mcp-as-allowlist" | python3 -c 'import json,sys; s=json.load(sys.stdin)["data"]["servers"]; assert isinstance(s,list), f"servers not a list: {type(s).__name__}"; print("as-allowlist OK:", s)'
 VX kv put "secret/cognic/$T/mcp-oauth/$ASHOST" client_id=proof-client client_secret=proof-secret auth_method=client_secret_post
+
+# M8 finding #6 (2026-07-07): the LiteLLM router (litellm pod) enforces its dev
+# master key; under the prod profile the kernel refuses a PLAINTEXT
+# litellm_master_key (config.py secret_plain_value_forbidden_in_strict_profile),
+# so the kernel resolves it by-reference: COGNIC_LITELLM_MASTER_KEY=vault://
+# secret/cognic/proof-m8/litellm (run-proof-m8.sh step 8). The field name MUST
+# be "key" — resolve_secret_field reads payload["key"] (db/adapters/
+# secret_resolution.py _SECRET_VALUE_KEY). The VALUE must equal the litellm
+# pod's own LITELLM_MASTER_KEY (dev-only-litellm) so the gateway authenticates.
+VX kv put "secret/cognic/$T/litellm" key=dev-only-litellm
+# readback assertion (KV v1 -> data.key): the kernel's build_runtime resolves
+# THIS at lifespan; a wrong field/path would fail the pod boot loud.
+VX kv get -format=json "secret/cognic/$T/litellm" | python3 -c 'import json,sys; k=json.load(sys.stdin)["data"]["key"]; assert k=="dev-only-litellm", f"litellm key mismatch: {k!r}"; print("litellm master key OK")'

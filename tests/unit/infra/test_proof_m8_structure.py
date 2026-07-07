@@ -585,6 +585,29 @@ def test_values_parse_and_wire_the_cloud_alias_without_bypass() -> None:
     )
 
 
+def test_kernel_litellm_master_key_is_vault_referenced_not_plaintext() -> None:
+    """Run-9 live finding (#6): the proof deploys the PROD profile, whose
+    secret-hygiene guard refuses a plaintext ``litellm_master_key`` (the
+    kernel crashed at Settings construction with
+    ``secret_plain_value_forbidden_in_strict_profile``). M8 is the first
+    proof to drive gateway->litellm, so the first to set the env. The
+    KERNEL env must be a ``vault://`` URI (build_runtime resolves it via
+    the SecretAdapter at lifespan); the plaintext form must be gone. The
+    litellm POD keeps its own ``LITELLM_MASTER_KEY`` env unchanged."""
+    # The kernel env is vault-shaped, and the plaintext literal is gone
+    # from the kernel `set env` (the runner must never re-introduce it).
+    assert "COGNIC_LITELLM_MASTER_KEY=vault://secret/cognic/proof-m8/litellm" in RUNNER
+    assert "COGNIC_LITELLM_MASTER_KEY=dev-only-litellm" not in RUNNER
+    # The vault seed exists, at the exact path the kernel resolves, with
+    # the ``key`` field (resolve_secret_field reads payload["key"]).
+    assert 'VX kv put "secret/cognic/$T/litellm" key=dev-only-litellm' in SEED_VAULT
+    # The litellm ROUTER still gets its master key (the router pod's own
+    # env / the chart-rendered config) — only the KERNEL env is by-ref.
+    assert "master_key: ${LITELLM_MASTER_KEY}" in VALUES_RAW
+    smoke_backends = (_REPO_ROOT / "infra/charts/agentos/ci/smoke/backends.yaml").read_text()
+    assert "{ name: LITELLM_MASTER_KEY, value: dev-only-litellm }" in smoke_backends
+
+
 def test_readme_carries_all_six_bars_and_key_custody() -> None:
     _assert_all(
         README,
@@ -944,7 +967,10 @@ def test_runner_sets_cloud_policy_env_and_repoints_litellm() -> None:
             "COGNIC_ALLOW_EXTERNAL_LLM=true",
             'COGNIC_POLICY_MODE="$POLICY_MODE"',
             'COGNIC_ALLOWED_PROVIDERS="$ALLOWED_PROVIDERS"',
-            "COGNIC_LITELLM_MASTER_KEY=dev-only-litellm",
+            # M8 finding #6: the kernel env is vault-referenced under the prod
+            # profile (was plaintext dev-only-litellm; see
+            # test_kernel_litellm_master_key_is_vault_referenced_not_plaintext).
+            "COGNIC_LITELLM_MASTER_KEY=vault://secret/cognic/proof-m8/litellm",
             "COGNIC_AGENT_RUN_TOKEN_BUDGET=60000",
             "COGNIC_AGENT_RUN_WALL_CLOCK_S=300",
             # ONE model_list: live routing + preflight provenance read the

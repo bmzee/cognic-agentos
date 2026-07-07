@@ -1157,9 +1157,15 @@ echo "==> [8/11] set the cloud-policy + run-bound env on the kernel Deployment (
 # COGNIC_ALLOW_EXTERNAL_LLM + COGNIC_POLICY_MODE + COGNIC_ALLOWED_PROVIDERS: the
 # ADR-007 posture BAR 5 asserts (values + images carry no cloud toggle).
 # COGNIC_LITELLM_MASTER_KEY: the smoke backends' litellm router enforces its
-# dev master key (backends.yaml LITELLM_MASTER_KEY=dev-only-litellm — the same
-# committed dev-fixture class as the Vault smoke-root-token); the gateway must
-# present it. COGNIC_AGENT_RUN_TOKEN_BUDGET / _WALL_CLOCK_S: OPERATIONAL run
+# dev master key (LITELLM_MASTER_KEY=dev-only-litellm on the litellm pod, its
+# own env UNCHANGED); the gateway must present it. Under the PROD profile the
+# kernel refuses a PLAINTEXT litellm_master_key (config.py
+# secret_plain_value_forbidden_in_strict_profile — M8 finding #6, the first
+# proof to drive gateway->litellm), so the kernel resolves it BY REFERENCE:
+# the vault:// URI passes the Settings guard and build_runtime
+# (harness/runtime.py) resolves it via adapters.secret at lifespan, reading
+# the field seeded by seed-vault.sh (secret/cognic/proof-m8/litellm key=...).
+# COGNIC_AGENT_RUN_TOKEN_BUDGET / _WALL_CLOCK_S: OPERATIONAL run
 # bounds raised for a real cloud provider's latency + SKILL.md-sized prompts
 # (defaults 24k/120s are sized for unit fixtures); NOT a bar surface — no bar
 # tests the bound, and no bar is redefined by raising it.
@@ -1167,7 +1173,7 @@ kubectl -n "$NS" set env deploy/rel-agentos \
   COGNIC_ALLOW_EXTERNAL_LLM=true \
   COGNIC_POLICY_MODE="$POLICY_MODE" \
   COGNIC_ALLOWED_PROVIDERS="$ALLOWED_PROVIDERS" \
-  COGNIC_LITELLM_MASTER_KEY=dev-only-litellm \
+  COGNIC_LITELLM_MASTER_KEY=vault://secret/cognic/proof-m8/litellm \
   COGNIC_AGENT_RUN_TOKEN_BUDGET=60000 \
   COGNIC_AGENT_RUN_WALL_CLOCK_S=300
 
