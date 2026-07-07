@@ -192,20 +192,25 @@ pass → `PROOF M8 (ALL BARS) PASS`.
 ## The model-alias swap (BAR 5's one-values-diff)
 
 The kernel only ever sees the tier alias (`cognic-tier1-proof-m8`, image ENV
-`COGNIC_TIER1_ALIAS`). Swapping the cloud provider is ONE diff in
-`proof-m8-values.yaml`:
+`COGNIC_TIER1_ALIAS`). The committed default provider is **OpenAI gpt-4o**
+(the proof is evidenced on OpenAI). Swapping to another cloud provider is a
+LOCKSTEP diff — the model line in `proof-m8-values.yaml` AND the runner's
+policy/provider defaults MUST move together, or a no-override run denies
+itself at BAR 5 (model=one provider, policy=another):
 
 ```yaml
       - model_name: cognic-tier1-proof-m8
         litellm_params:
-          model: anthropic/claude-sonnet-4-5            # <- swap this line
+          model: openai/gpt-4o                          # <- swap this line (e.g. anthropic/claude-sonnet-4-5)
           api_key: os.environ/COGNIC_PROOF_M8_TIER1_API_KEY  # (+ the env name if the provider differs)
 ```
 
-plus the matching runner env `COGNIC_ALLOWED_PROVIDERS=<provider>` (the
-ADR-007 allow-list; runner-supplied together with
-`COGNIC_ALLOW_EXTERNAL_LLM=true` + `COGNIC_POLICY_MODE` + the provider API
-key — operator env at run time, never committed, never image-baked).
+plus the matching runner defaults — `COGNIC_PROOF_M8_ALLOWED_PROVIDERS`
+(default `openai`) and `COGNIC_PROOF_M8_POLICY_MODE` (default `cloud_openai`)
+— which the runner threads into the kernel `COGNIC_ALLOWED_PROVIDERS` /
+`COGNIC_POLICY_MODE` (the ADR-007 allow-list, alongside
+`COGNIC_ALLOW_EXTERNAL_LLM=true` + the provider API key — operator env at run
+time, never committed, never image-baked).
 
 ## Stage → seed → run (operator-only, env-gated)
 
@@ -236,15 +241,19 @@ key — operator env at run time, never committed, never image-baked).
 |---|---|---|
 | `COGNIC_RUN_PROOF_M8=1` | yes | the proof gate (unset → the runner exits 0 with a skip message; NO default-on CI behavior). |
 | `COGNIC_PROOF_M8_TIER1_API_KEY` | yes | the operator's CLOUD provider API key. Fail-loud at the gate; shipped ONLY as the `proof-m8-provider-key` k8s Secret consumed by the litellm router pod. |
-| `COGNIC_PROOF_M8_ALLOWED_PROVIDERS` | no (default `anthropic`) | the ADR-007 provider allow-list the runner sets on the kernel (`COGNIC_ALLOWED_PROVIDERS`). Part of the provider-swap one-values-diff. |
-| `COGNIC_PROOF_M8_POLICY_MODE` | no (default `cloud_anthropic`) | the kernel `COGNIC_POLICY_MODE` for the swap. |
+| `COGNIC_PROOF_M8_ALLOWED_PROVIDERS` | no (default `openai`) | the ADR-007 provider allow-list the runner sets on the kernel (`COGNIC_ALLOWED_PROVIDERS`). Lockstep with the values model line for the provider swap. |
+| `COGNIC_PROOF_M8_POLICY_MODE` | no (default `cloud_openai`) | the kernel `COGNIC_POLICY_MODE`; lockstep with the values model line for the swap. |
 | `COGNIC_PROOF_M8_REGISTRY_PORT` / `COGNIC_PROOF_M8_REGISTRY_TLS_DIR` / `COGNIC_PROOF_M8_REUSE_IMAGES` | no | local TLS-registry knobs (the proof-m6 conventions, m8-named). |
 
 Deploy-time env the runner itself sets on the kernel Deployment (operator env,
 never image-baked): the three cloud-policy toggles above,
-`COGNIC_LITELLM_MASTER_KEY=dev-only-litellm` (the smoke backends' litellm dev
-master key — same committed dev-fixture class as the Vault `smoke-root-token`;
-the gateway must present it to the router), and the two OPERATIONAL run bounds
+`COGNIC_LITELLM_MASTER_KEY=vault://secret/cognic/proof-m8/litellm` (finding
+#6: under the prod profile the kernel refuses a plaintext master key, so the
+gateway presents a VAULT-RESOLVED key; the proof's litellm router runs
+WITHOUT `general_settings.master_key` per finding #7 — litellm main-stable
+would 400 "No connected db" with a master key and no DATABASE_URL — so the
+router IGNORES the presented key, and the vault path stays wired only to keep
+the prod secret-hygiene guard exercised), and the two OPERATIONAL run bounds
 `COGNIC_AGENT_RUN_TOKEN_BUDGET=60000` + `COGNIC_AGENT_RUN_WALL_CLOCK_S=300`
 (raised for a real cloud provider's latency + SKILL.md-sized prompts; no bar
 tests these bounds and no bar is redefined by raising them).

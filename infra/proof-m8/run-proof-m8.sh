@@ -132,8 +132,8 @@ QC_TMP=""                                           # per-run PRIVATE query-cont
 
 # Cloud-policy posture — operator env at deploy time (never committed, never
 # image-baked). Provider swap = the README's one-values-diff + these two envs.
-ALLOWED_PROVIDERS="${COGNIC_PROOF_M8_ALLOWED_PROVIDERS:-anthropic}"
-POLICY_MODE="${COGNIC_PROOF_M8_POLICY_MODE:-cloud_anthropic}"
+ALLOWED_PROVIDERS="${COGNIC_PROOF_M8_ALLOWED_PROVIDERS:-openai}"
+POLICY_MODE="${COGNIC_PROOF_M8_POLICY_MODE:-cloud_openai}"
 
 # ---- proof canonical-image re-home (the REAL sandbox admission trust posture) ----
 # The M6 executable-skill posture deploys UNCHANGED (hosted_skills precondition
@@ -606,8 +606,13 @@ PY
 bar_fail() {
   local where="$1"
   echo "FAIL: $where — capturing diagnostics to docs/VALIDATION-RESULTS.md" >&2
-  local logs ds run_rows dispatch_rows tool_audit ledger_rows memwrite otel_tail reason
+  local logs litellm_logs ds run_rows dispatch_rows tool_audit ledger_rows memwrite otel_tail reason
   logs="$(kubectl -n "$NS" logs deploy/rel-agentos 2>&1 | tail -180 || true)"
+  # M8 finding #7: on an upstream_error the litellm router's OWN logs carry
+  # the real reason (e.g. "No connected db", provider auth) the gateway's
+  # raise_for_status() drops — capture them so a gateway/bar failure is
+  # self-diagnosing without a local repro.
+  litellm_logs="$(kubectl -n "$NS" logs deploy/litellm 2>&1 | tail -120 || true)"
   ds="$(curl -s "$BASE_URL/api/v1/system/plugins?tenant_id=$TENANT" 2>/dev/null || true)"
   run_rows="$(kubectl -n "$NS" exec deploy/postgres -- psql -U cognic -d cognic -tA \
     -c "SELECT event_type, payload::text FROM decision_history WHERE event_type LIKE 'agent.run.%' AND event_type <> 'agent.run.dispatch' ORDER BY sequence DESC LIMIT 10;" 2>/dev/null || true)"
@@ -650,6 +655,10 @@ bar_fail() {
     echo "- gateway_call_ledger (tail 8 — the ADR-007 honesty axis):"
     echo '```'
     echo "${ledger_rows:-<none>}"
+    echo '```'
+    echo "- litellm router logs (tail 120 — finding #7 upstream-reason surface):"
+    echo '```'
+    echo "${litellm_logs:-<none>}"
     echo '```'
     echo "- memory.write rows (tail 4 — the task-tier digest axis):"
     echo '```'
@@ -1156,15 +1165,15 @@ kubectl -n "$NS" patch deploy/rel-agentos --type=strategic \
 echo "==> [8/11] set the cloud-policy + run-bound env on the kernel Deployment (operator env, never image-baked)"
 # COGNIC_ALLOW_EXTERNAL_LLM + COGNIC_POLICY_MODE + COGNIC_ALLOWED_PROVIDERS: the
 # ADR-007 posture BAR 5 asserts (values + images carry no cloud toggle).
-# COGNIC_LITELLM_MASTER_KEY: the smoke backends' litellm router enforces its
-# dev master key (LITELLM_MASTER_KEY=dev-only-litellm on the litellm pod, its
-# own env UNCHANGED); the gateway must present it. Under the PROD profile the
-# kernel refuses a PLAINTEXT litellm_master_key (config.py
-# secret_plain_value_forbidden_in_strict_profile — M8 finding #6, the first
-# proof to drive gateway->litellm), so the kernel resolves it BY REFERENCE:
-# the vault:// URI passes the Settings guard and build_runtime
-# (harness/runtime.py) resolves it via adapters.secret at lifespan, reading
-# the field seeded by seed-vault.sh (secret/cognic/proof-m8/litellm key=...).
+# COGNIC_LITELLM_MASTER_KEY: under the PROD profile the kernel refuses a
+# PLAINTEXT litellm_master_key (config.py
+# secret_plain_value_forbidden_in_strict_profile), so the gateway presents
+# a VAULT-RESOLVED key (finding #6; harness/runtime.py resolves it via
+# adapters.secret at lifespan, from the field seed-vault.sh seeds at
+# secret/cognic/proof-m8/litellm key=...). The proof's litellm router runs
+# WITHOUT general_settings.master_key (finding #7 — no DB dependency), so it
+# IGNORES the presented key; the vault path stays wired ONLY to keep the
+# prod secret-hygiene guard exercised.
 # COGNIC_AGENT_RUN_TOKEN_BUDGET / _WALL_CLOCK_S: OPERATIONAL run
 # bounds raised for a real cloud provider's latency + SKILL.md-sized prompts
 # (defaults 24k/120s are sized for unit fixtures); NOT a bar surface — no bar

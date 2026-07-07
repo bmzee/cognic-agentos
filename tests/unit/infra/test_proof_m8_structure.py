@@ -601,11 +601,39 @@ def test_kernel_litellm_master_key_is_vault_referenced_not_plaintext() -> None:
     # The vault seed exists, at the exact path the kernel resolves, with
     # the ``key`` field (resolve_secret_field reads payload["key"]).
     assert 'VX kv put "secret/cognic/$T/litellm" key=dev-only-litellm' in SEED_VAULT
-    # The litellm ROUTER still gets its master key (the router pod's own
-    # env / the chart-rendered config) — only the KERNEL env is by-ref.
-    assert "master_key: ${LITELLM_MASTER_KEY}" in VALUES_RAW
-    smoke_backends = (_REPO_ROOT / "infra/charts/agentos/ci/smoke/backends.yaml").read_text()
-    assert "{ name: LITELLM_MASTER_KEY, value: dev-only-litellm }" in smoke_backends
+
+
+def test_litellm_router_has_no_master_key_needs_no_db() -> None:
+    """Run-9 BAR-1 live finding (#7): litellm main-stable requires a
+    DATABASE_URL when ``general_settings.master_key`` is set (virtual-key
+    management) and 400s ``No connected db`` on every authenticated request
+    without one — which killed the first governed call. The proof's litellm
+    config must carry NO ``master_key`` (the ephemeral in-cluster router
+    needs no admin-key auth; it ignores the vault-resolved key the kernel
+    still presents per finding #6)."""
+    assert "master_key: ${LITELLM_MASTER_KEY}" not in VALUES_RAW, (
+        "litellm config must not set general_settings.master_key (finding #7: "
+        "main-stable 400s 'No connected db' without a DATABASE_URL)"
+    )
+    assert "general_settings:" not in VALUES_RAW, (
+        "the general_settings block (whose only key was master_key) must be gone"
+    )
+    # The gateway/bar failure capture must grab litellm's OWN logs — that gap
+    # is why run 9's 400 reason ('No connected db') needed a local repro.
+    assert 'kubectl -n "$NS" logs deploy/litellm' in RUNNER
+    assert "litellm router logs" in RUNNER
+
+
+def test_proof_defaults_to_openai_coherently_across_values_and_runner() -> None:
+    """The proof is evidenced on OpenAI; the values model line AND the runner
+    policy/provider defaults MUST agree, or a no-override run denies itself at
+    BAR 5 (model=one provider, cloud-policy=another). Pins the lockstep."""
+    assert "model: openai/gpt-4o" in VALUES_RAW
+    assert 'ALLOWED_PROVIDERS="${COGNIC_PROOF_M8_ALLOWED_PROVIDERS:-openai}"' in RUNNER
+    assert 'POLICY_MODE="${COGNIC_PROOF_M8_POLICY_MODE:-cloud_openai}"' in RUNNER
+    # The stale anthropic defaults must be gone from the runner.
+    assert "cloud_anthropic" not in RUNNER
+    assert ":-anthropic}" not in RUNNER
 
 
 def test_readme_carries_all_six_bars_and_key_custody() -> None:
@@ -961,8 +989,10 @@ def test_runner_sets_cloud_policy_env_and_repoints_litellm() -> None:
     _assert_all(
         RUNNER,
         (
-            'ALLOWED_PROVIDERS="${COGNIC_PROOF_M8_ALLOWED_PROVIDERS:-anthropic}"',
-            'POLICY_MODE="${COGNIC_PROOF_M8_POLICY_MODE:-cloud_anthropic}"',
+            # Finding #7 lockstep: the proof defaults to OpenAI across BOTH
+            # the values model line and these runner policy/provider defaults.
+            'ALLOWED_PROVIDERS="${COGNIC_PROOF_M8_ALLOWED_PROVIDERS:-openai}"',
+            'POLICY_MODE="${COGNIC_PROOF_M8_POLICY_MODE:-cloud_openai}"',
             'kubectl -n "$NS" set env deploy/rel-agentos',
             "COGNIC_ALLOW_EXTERNAL_LLM=true",
             'COGNIC_POLICY_MODE="$POLICY_MODE"',

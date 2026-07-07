@@ -53,14 +53,16 @@ litellm:
   # mounts it at /app/infra/litellm/config.yaml and the runner points the
   # in-cluster litellm Deployment at the SAME rendered ConfigMap so the
   # gateway's preflight provenance and the router's live routing read ONE
-  # model_list). Tier 1 = the operator's CLOUD provider (default shown:
-  # anthropic; THE swap is this one line + the api_key env name). Tier 2
-  # stays self-hosted ollama (no cloud dependency beyond tier 1).
+  # model_list). Tier 1 = the operator's CLOUD provider (default: OpenAI
+  # gpt-4o — the proof is evidenced on OpenAI; the swap to another provider
+  # is this one model line + the api_key env name + the runner's
+  # POLICY_MODE/ALLOWED_PROVIDERS defaults, kept in lockstep). Tier 2 stays
+  # self-hosted ollama (no cloud dependency beyond tier 1).
   config: |
     model_list:
       - model_name: cognic-tier1-proof-m8
         litellm_params:
-          model: anthropic/claude-sonnet-4-5
+          model: openai/gpt-4o
           api_key: os.environ/COGNIC_PROOF_M8_TIER1_API_KEY
       - model_name: cognic-tier2-proof-m8
         litellm_params:
@@ -68,8 +70,13 @@ litellm:
           api_base: ${OLLAMA_BASE_URL:-http://ollama:11434}
     litellm_settings:
       drop_params: true
-    general_settings:
-      master_key: ${LITELLM_MASTER_KEY}
+    # M8 finding #7 (2026-07-07): NO general_settings.master_key. litellm
+    # main-stable requires a DATABASE_URL when master_key is set (virtual-key
+    # management) and 400s "No connected db" on every authenticated request
+    # without one — the proof's litellm has no DB. This ephemeral in-cluster
+    # router needs no admin-key auth (private cluster; no bar tests it); it
+    # ignores the vault-resolved key the kernel still presents (finding #6,
+    # which keeps the prod-profile secret-hygiene path exercised).
 cache:
   enabled: true                     # M8: scheduler control plane + governed memory (the BAR-1 task-tier row)
   url: "redis://redis:6379/0"       # manifests/redis.yaml Service (lands with Task C2)
