@@ -323,7 +323,7 @@ ADR-027 governed agent loop — the M8 milestone hosting a declarative NLP agent
 - `core/memory/` (per ADR-019 — what an agent may remember/forget/export/redact/reuse across sessions)
 
 *LLM gateway:*
-- `llm/gateway.py` (cloud-policy enforcer; provider-honesty ledger feed)
+- `llm/gateway.py` (cloud-policy enforcer; provider-honesty ledger feed. **M8 finding #8 (ADR-007 amendment 2026-07-08) — LiteLLM proxy alias-echo provenance**: `_build_actual_resolved` accepts `actual_model_string == preflight_resolved.alias` (the real LiteLLM proxy echoes the requested deployment ALIAS as the response `model`, not the resolved provider model_string the unit fixtures assumed) as authoritative provenance via the forward preflight resolution — recording the REAL upstream (`openai/gpt-4o`, external, `resolved`), never the alias; the ONLY relaxation, every other provenance gap (different alias, unknown string, missing/non-string `model`, ambiguous reverse-lookup) stays fail-closed. TM-revert-proven at `tests/unit/llm/test_gateway_post_dispatch_strict_discipline.py::TestLiteLLMProxyAliasEchoProvenance`.)
 
 Use `core-controls-engineer` and `/critical-module-mode` when working on these.
 

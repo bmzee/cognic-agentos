@@ -36,6 +36,7 @@ from cognic_agentos.core.sla import SLAPolicy
 from cognic_agentos.llm.concurrency import ProfileRateLimiter
 from cognic_agentos.llm.gateway import LLMGateway
 from cognic_agentos.llm.ledger import GatewayCallLedger
+from cognic_agentos.llm.policy import CloudPolicyViolationError
 from cognic_agentos.llm.preflight import PreflightResolver
 
 
@@ -357,3 +358,124 @@ class TestPostDispatchAuditFailures:
         rows = await gateway_ledger.read_recent_calls(window_minutes=60)
         assert len(rows) == 1
         assert rows[0].outcome == "upstream_error"
+
+
+class TestLiteLLMProxyAliasEchoProvenance:
+    """Finding #8 (M8 run-11 live): the real LiteLLM PROXY echoes the
+    requested deployment ALIAS as the response ``model`` field (not the
+    resolved provider model_string the unit fixtures assume). The
+    post-response provenance recheck must accept ``actual_model_string ==
+    the alias this gateway dispatched`` as authoritative provenance — the
+    forward preflight resolution is then the truthful upstream identity —
+    while EVERY other provenance gap stays fail-closed."""
+
+    @respx.mock
+    async def test_alias_echo_resolves_via_forward_preflight(
+        self,
+        gateway_ledger: GatewayCallLedger,
+        audit_store: AuditStore,
+        rate_limiter: ProfileRateLimiter,
+        default_sla_policy: SLAPolicy,
+        make_settings: Callable[..., Settings],
+        make_resolver: Callable[[list[dict[str, Any]]], PreflightResolver],
+    ) -> None:
+        """Positive: cloud allowed, LiteLLM echoes the alias
+        ``cognic-tier1-proof-m8`` → success, ledger records the REAL
+        resolved upstream ``openai/gpt-4o``, provenance ``resolved``,
+        external true."""
+        resolver = make_resolver(
+            [
+                {
+                    "model_name": "cognic-tier1-proof-m8",
+                    "litellm_params": {"model": "openai/gpt-4o", "api_key": "sk"},
+                }
+            ]
+        )
+        settings = _settings(
+            make_settings,
+            tier1="cognic-tier1-proof-m8",
+            allow_external_llm=True,
+            policy_mode="cloud_openai",
+            allowed_providers=["openai"],
+        )
+        respx.post("http://litellm.test:4000/chat/completions").mock(
+            return_value=_resp("cognic-tier1-proof-m8")  # the ALIAS echo
+        )
+        gateway = LLMGateway(
+            settings=settings,
+            ledger=gateway_ledger,
+            audit_store=audit_store,
+            rate_limiter=rate_limiter,
+            preflight=resolver,
+            sla_policy=default_sla_policy,
+        )
+        response = await gateway.completion(
+            tier="tier1",
+            messages=[{"role": "user", "content": "hi"}],
+            request_id="req-alias-echo-ok",
+        )
+        assert response.content == "hi"
+        rows = await gateway_ledger.read_recent_calls(window_minutes=60)
+        assert len(rows) == 1
+        assert rows[0].outcome == "ok"
+        assert rows[0].provenance == "resolved"
+        assert rows[0].upstream_model == "openai/gpt-4o"  # the REAL upstream, not the alias
+        assert rows[0].external is True
+
+    @respx.mock
+    async def test_different_alias_echo_still_fails_closed(
+        self,
+        gateway_ledger: GatewayCallLedger,
+        audit_store: AuditStore,
+        rate_limiter: ProfileRateLimiter,
+        default_sla_policy: SLAPolicy,
+        make_settings: Callable[..., Settings],
+        make_resolver: Callable[[list[dict[str, Any]]], PreflightResolver],
+    ) -> None:
+        """Negative: LiteLLM echoes a DIFFERENT declared alias (not the
+        one this gateway dispatched) → still provenance ``unresolved``.
+        The alias-echo branch matches ONLY the exact alias sent; another
+        alias reverse-looks-up to nothing (aliases don't resolve to
+        aliases) and stays fail-closed."""
+        resolver = make_resolver(
+            [
+                {
+                    "model_name": "cognic-tier1-proof-m8",
+                    "litellm_params": {"model": "openai/gpt-4o", "api_key": "sk"},
+                },
+                {
+                    "model_name": "cognic-tier2-proof-m8",
+                    "litellm_params": {"model": "ollama/qwen3:32b"},
+                },
+            ]
+        )
+        settings = _settings(
+            make_settings,
+            tier1="cognic-tier1-proof-m8",
+            allow_external_llm=True,
+            policy_mode="cloud_openai",
+            allowed_providers=["openai"],
+        )
+        # Gateway dispatches tier1 (cognic-tier1-proof-m8); LiteLLM echoes
+        # the OTHER alias — a provenance gap, not the sent-alias case.
+        respx.post("http://litellm.test:4000/chat/completions").mock(
+            return_value=_resp("cognic-tier2-proof-m8")
+        )
+        gateway = LLMGateway(
+            settings=settings,
+            ledger=gateway_ledger,
+            audit_store=audit_store,
+            rate_limiter=rate_limiter,
+            preflight=resolver,
+            sla_policy=default_sla_policy,
+        )
+        with pytest.raises(CloudPolicyViolationError) as exc_info:
+            await gateway.completion(
+                tier="tier1",
+                messages=[{"role": "user", "content": "hi"}],
+                request_id="req-alias-echo-other",
+            )
+        assert exc_info.value.decision.resolved.provenance == "unresolved"
+        rows = await gateway_ledger.read_recent_calls(window_minutes=60)
+        assert len(rows) == 1
+        assert rows[0].provenance == "unresolved"

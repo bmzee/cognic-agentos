@@ -1062,7 +1062,25 @@ class LLMGateway:
           * N matches MIXED classification → fail-closed
             ``provenance="ambiguous"`` + ``api_base=None`` + emit
             ``gateway.upstream_classification_ambiguous``.
+
+        M8 finding #8 (ADR-007 amendment 2026-07-08) — LiteLLM PROXY
+        alias-echo. The real LiteLLM proxy returns the requested
+        deployment ``model_name`` (the ALIAS) as the response ``model``
+        field, NOT the resolved provider model_string. When
+        ``actual_model_string`` equals the EXACT alias this gateway
+        dispatched (``preflight_resolved.alias``), the forward preflight
+        resolution IS the truthful upstream identity — the gateway knows
+        it dispatched that alias, and LiteLLM confirmed it processed that
+        exact alias, which forward-resolves to one unambiguous upstream.
+        Return ``preflight_resolved`` (real model_string ``openai/gpt-4o``,
+        external + api_base + provenance="resolved") so the ledger/span
+        record the REAL upstream, never the alias. This is the ONLY
+        relaxation: a DIFFERENT alias, an unknown string, a missing/
+        non-string ``model`` (guarded at the caller), or an ambiguous
+        reverse-lookup all stay fail-closed below.
         """
+        if actual_model_string == preflight_resolved.alias:
+            return preflight_resolved, None
         matches = self._preflight.reverse_lookup(actual_model_string)
         if not matches:
             return self._build_unresolved_actual(
