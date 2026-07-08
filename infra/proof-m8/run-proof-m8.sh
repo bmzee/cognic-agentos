@@ -299,10 +299,15 @@ ask() {
   api "$role" POST "/api/v1/agents/$AGENT_ID/ask" "$body"
 }
 
-# json_field <JSON> <FIELD> — a top-level string/number field, or "" when absent.
+# json_field <FIELD> <JSON> — a top-level string/number field, or "" when absent.
+# Args are (field, json): the body reads json.loads(argv[2]).get(argv[1]), so the
+# JSON must land in argv[2] and the field name in argv[1] — pass "$1" "$2" in order.
+# (Swapping them makes json.loads() parse the bare field name, which raises and is
+# swallowed by the trailing `|| true`, silently yielding "" — the M8 run-12 BAR-1
+# false failure where terminal_state read '' though the body carried "completed".)
 json_field() {
   python3 -c 'import json,sys; v=json.loads(sys.argv[2]).get(sys.argv[1]); print("" if v is None else v)' \
-    "$2" "$1" 2>/dev/null || true
+    "$1" "$2" 2>/dev/null || true
 }
 
 # discovery_status of the TOOL pack row from GET /system/plugins?tenant_id=proof-m8.

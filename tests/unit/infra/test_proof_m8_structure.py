@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import re
 import stat
+import subprocess
 from pathlib import Path
 
 import yaml
@@ -1419,3 +1420,55 @@ def test_sandbox_patch_threads_the_m6_topology_plus_the_secret_mount() -> None:
     )
     volumes = {v["name"] for v in SANDBOX_PATCH["spec"]["template"]["spec"]["volumes"]}
     assert volumes == {"docker-sock", "broker-share", "query-context"}
+
+
+def _extract_bash_function(name: str, source: str) -> str:
+    """Return the ``<name>() { ... }`` bash function block verbatim from the runner.
+
+    Anchors the closing brace at column 0 (the runner's house style — every
+    function closes with a bare ``}`` on its own line); the ``json_field`` body
+    carries no column-0 ``}`` of its own, so the non-greedy match is exact.
+    """
+    m = re.search(
+        rf"^{re.escape(name)}\(\)\s*\{{.*?^\}}",
+        source,
+        re.MULTILINE | re.DOTALL,
+    )
+    assert m, f"{name}() not found in run-proof-m8.sh"
+    return m.group(0)
+
+
+def test_json_field_reads_a_top_level_field_from_a_realistic_ask_body() -> None:
+    """Behavioral pin (M8 run-12 harness finding): ``json_field`` is called
+    ``json_field <FIELD> <JSON>`` at all 17 sites, so BAR-1 read
+    ``terminal_state`` as '' though the /ask body carried "completed" — the
+    arg order was swapped and the JSONDecodeError was swallowed. Extract the
+    ACTUAL runner function and exercise it against a realistic body: RED on the
+    swap, GREEN once field=arg1 / json=arg2 line up. A structural grep cannot
+    catch this — only running the function does."""
+    fn = _extract_bash_function("json_field", RUNNER)
+    body = (
+        '{"run_id":"agent-run-abc","terminal_state":"completed",'
+        '"answer":"line1\\nline2","refusal_reason":null}'
+    )
+    out = subprocess.run(
+        ["bash", "-c", fn + f"\njson_field terminal_state '{body}'"],
+        capture_output=True,
+        text=True,
+    )
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == "completed", f"stdout={out.stdout!r} stderr={out.stderr!r}"
+
+
+def test_json_field_returns_empty_for_an_absent_field() -> None:
+    """The absent-field contract holds: a missing key yields '' (not a crash,
+    not a leaked JSONDecodeError) — the ``print("" if v is None else v)`` arm."""
+    fn = _extract_bash_function("json_field", RUNNER)
+    body = '{"terminal_state":"completed"}'
+    out = subprocess.run(
+        ["bash", "-c", fn + f"\njson_field refusal_reason '{body}'"],
+        capture_output=True,
+        text=True,
+    )
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == "", f"stdout={out.stdout!r}"
