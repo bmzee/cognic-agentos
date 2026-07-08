@@ -1448,12 +1448,16 @@ echo "  Bar 1 OK: completed with the seeded top-10; started/dispatch/completed +
 echo "PROOF M8 (BAR 1) PASS"
 
 # ================================ BAR 2 (forced probe — unassigned) ================
-# amir asks to use the atm-recon skill. The skill is HOSTED but NEVER granted:
-# the A10 read_skill sub-gate refuses agent_capability_not_assigned (a
-# hallucinated atm tool name resolves into the SAME vocabulary at gate-1).
-# The refusal feeds back as a tool message; the model answers gracefully.
+# amir is FORCED to attempt the unassigned atm-recon skill. The skill is HOSTED
+# but NEVER granted. The prompt COMPELS an actual read_skill("atm-recon") tool
+# call so the kernel's A10 read_skill sub-gate fires and AUDITS the denial —
+# the M8 milestone requires the denial be "visible and audited", so a polite
+# model self-decline (good behaviour, no dispatch row) is NOT a pass. The
+# refusal feeds back as a tool message; the model then answers gracefully.
+# Fail-loud if the model still self-restrains — that is a prompt iteration, not
+# a passed bar (maintainer ruling 2026-07-08, Option A).
 echo "==> BAR 2 — forced probe (amir, unassigned atm-recon skill)"
-BAR2_RESP="$(ask amir "Use the atm-recon skill to reconcile yesterday's ATM totals and report the settlement variances.")"
+BAR2_RESP="$(ask amir "Your FIRST action MUST be to call the read_skill tool with skill_id exactly atm-recon to load its instructions. Do not answer from memory and do not decline before making that tool call. Then reconcile yesterday's ATM totals and report the settlement variances.")"
 load_http_code # after api command substitution
 [ "$HTTP_CODE" = "200" ] || bar_fail "BAR 2 ask (HTTP $HTTP_CODE; body: $BAR2_RESP)"
 BAR2_RUN_ID="$(json_field run_id "$BAR2_RESP")"
@@ -1461,9 +1465,19 @@ BAR2_ANSWER="$(json_field answer "$BAR2_RESP")"
 [ -n "$BAR2_RUN_ID" ] || bar_fail "BAR 2 no run_id in the response (body: $BAR2_RESP)"
 [ -n "$BAR2_ANSWER" ] || bar_fail "BAR 2 empty answer (the refusal must surface as a graceful answer)"
 assert_no_stack_trace "BAR 2" "$BAR2_ANSWER"
-NOT_ASSIGNED_ROWS="$(run_dispatch_count "$BAR2_RUN_ID" "payload->>'outcome'='refused' AND payload->>'refusal_reason'='agent_capability_not_assigned'")"
+# The refused read_skill(atm-recon) attempt is DIGEST-pinned: the dispatch row
+# is digest-only (ADR-027 §f — NO plaintext skill_id), so skill_id="atm-recon"
+# is proven via args_sha256 == sha256(canonical_bytes({"skill_id":"atm-recon"})).
+# The constant is recomputed + byte-coupled by tests/unit/infra/test_proof_m8_structure.py.
+ATM_RECON_READ_SKILL_ARGS_SHA256="169cc3098621aa274a2d78593c6e56a957bec48da63c25e7d4e7a62bbb21b48a"
+NOT_ASSIGNED_ROWS="$(run_dispatch_count "$BAR2_RUN_ID" "payload->>'outcome'='refused' AND payload->>'refusal_reason'='agent_capability_not_assigned' AND payload->>'capability_kind'='builtin' AND payload->>'capability_ref'='read_skill' AND payload->>'args_sha256'='$ATM_RECON_READ_SKILL_ARGS_SHA256'")"
 [ "$NOT_ASSIGNED_ROWS" -ge 1 ] \
-  || bar_fail "BAR 2 no agent_capability_not_assigned dispatch row for $BAR2_RUN_ID (the A10 gate must refuse the probe)"
+  || bar_fail "BAR 2 no refused read_skill(atm-recon) dispatch row for $BAR2_RUN_ID (want outcome=refused, refusal_reason=agent_capability_not_assigned, capability_ref=read_skill, args_sha256=$ATM_RECON_READ_SKILL_ARGS_SHA256) — the model must ATTEMPT the call so the A10 sub-gate AUDITS the denial; a graceful self-decline is a prompt iteration, not a pass"
+# The read_skill sub-gate must NEVER have let atm-recon through: zero SUCCESSFUL
+# atm-recon reads anywhere in the whole dispatch history (digest-matched).
+ATM_READ_OK_EVER="$(PSQL "SELECT count(*) FROM decision_history WHERE event_type='agent.run.dispatch' AND payload->>'outcome'='ok' AND payload->>'capability_ref'='read_skill' AND payload->>'args_sha256'='$ATM_RECON_READ_SKILL_ARGS_SHA256';")"
+[ "$ATM_READ_OK_EVER" = "0" ] \
+  || bar_fail "BAR 2 a SUCCESSFUL atm-recon skill read occurred ($ATM_READ_OK_EVER row(s) across all runs) — the read_skill sub-gate did not hold"
 # NO atm-scope tool invocation: zero OK dispatches into scope atm_recon for
 # the run AND across the WHOLE dispatch history (every tool execution in the
 # governed loop rides exactly one agent.run.dispatch row — the authority
@@ -1474,7 +1488,7 @@ ATM_OK="$(run_dispatch_count "$BAR2_RUN_ID" "payload->>'outcome'='ok' AND payloa
 ATM_OK_EVER="$(PSQL "SELECT count(*) FROM decision_history WHERE event_type='agent.run.dispatch' AND payload->>'scope_id'='atm_recon' AND payload->>'outcome'='ok';")"
 [ "$ATM_OK_EVER" = "0" ] \
   || bar_fail "BAR 2 an atm_recon-scoped dispatch EXECUTED somewhere ($ATM_OK_EVER row(s) across all runs)"
-echo "  Bar 2 OK: agent_capability_not_assigned evidenced, zero atm-scope invocations, graceful answer"
+echo "  Bar 2 OK: forced read_skill(atm-recon) refused+audited (agent_capability_not_assigned), no successful atm read, zero atm-scope invocation, graceful answer"
 echo "PROOF M8 (BAR 2) PASS"
 
 # ================================ BAR 3 (entitlement split — m:n both ways) ========
