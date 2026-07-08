@@ -1207,12 +1207,12 @@ def test_runner_bar4_sql_escape_fails_closed_on_the_main_path() -> None:
     _assert_all(
         RUNNER,
         (
-            # leg 1: raw-table steering via the agent/tool path (a SELECT the
-            # persona permits authoring; the TOOL refuses the out-of-scope object)
+            # leg 1: raw-table SELECT payload (object-scope guard; proven
+            # deterministically via the direct MCP invoke in the dedicated test)
             "SELECT customer_name, internal_risk_note FROM RETAIL_ANALYTICS.CUSTOMERS_RAW",
-            'grep -qF "agent_sql_object_out_of_scope" <<<"$BAR4A_ANSWER"',
-            "the refusal must come from the TOOL envelope",
-            # leg 2: the exact DELETE payload (proven by part A + part B below)
+            'grep -qF "agent_sql_object_out_of_scope" <<<"$BAR4A_MCP_RESP"',
+            # leg 2: the exact DELETE payload (select-only guard; proven in the
+            # dedicated two-part test below)
             "DELETE FROM RETAIL_ANALYTICS.CUSTOMERS_RAW WHERE CUSTOMER_ID = 1013",
             # no stack traces / raw engine errors in analyst-visible answers
             "assert_no_stack_trace",
@@ -1560,5 +1560,33 @@ def test_bar4_leg2_two_part_deterministic_tool_guard() -> None:
             # part B — the tool refuses select-only, and NOT an earlier gate
             'grep -qF "sql_not_select_only" <<<"$BAR4B_MCP_RESP"',
             "query_context_missing_or_invalid query_context_replayed",
+        ),
+    )
+
+
+def test_bar4_leg1_deterministic_object_scope_guard() -> None:
+    """BAR 4 leg 1 (deterministic, symmetric with leg 2 — maintainer ruling
+    2026-07-08): escape probes that need GPT-4o to CHOOSE to author a raw-table
+    SELECT are unstable (it authored one run, declined the next). Part A is
+    tolerant (graceful handling, no leak — not required to hit the tool). Part B
+    proves the object-allow-set guard deterministically: a valid, args-bound
+    kernel query-context token authorizing ONLY the governed view carries the
+    raw-table SELECT straight into run_readonly_query, and the tool refuses
+    agent_sql_object_out_of_scope at the object check — NOT an earlier gate and
+    NOT select-only (it IS a valid SELECT)."""
+    _assert_all(
+        RUNNER,
+        (
+            # part A — tolerant agent-path check
+            'BAR4A_RAW_SQL="SELECT customer_name, internal_risk_note '
+            'FROM RETAIL_ANALYTICS.CUSTOMERS_RAW"',
+            "agent handled the raw-table steer gracefully",
+            # part B — mint a valid kernel query-context token in the kernel pod
+            'BAR4A_QC_TOKEN="$(kubectl -n "$NS" exec -i deploy/rel-agentos',
+            "mint_query_context",
+            'objects=("RETAIL_ANALYTICS.V_CUSTOMER_DEPOSITS",)',
+            # part B — direct MCP invoke; object-scope refusal, not an earlier gate
+            'grep -qF "agent_sql_object_out_of_scope" <<<"$BAR4A_MCP_RESP"',
+            "query_context_args_mismatch sql_not_select_only dlp_pre_refused",
         ),
     )
