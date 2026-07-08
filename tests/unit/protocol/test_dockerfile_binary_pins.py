@@ -84,7 +84,7 @@ class TestDockerfileBinaryPins:
     def test_kernel_runtime_does_not_carry_cosign_or_opa(self) -> None:
         """Trust gate + policy engine run in the default-adapters
         profile only. The kernel runtime stage MUST NOT carry the
-        cosign / opa binaries — that protects the ≤120 MiB kernel
+        cosign / opa binaries — that protects the ≤135 MiB kernel
         budget AND signals that ``create_app`` (kernel factory) does
         NOT call into either subsystem."""
         text = _DOCKERFILE.read_text(encoding="utf-8")

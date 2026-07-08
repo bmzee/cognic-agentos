@@ -88,7 +88,7 @@ jobs:
             **Review checklist before merging:**
 
             - [ ] `lint + test` job green on the new lock
-            - [ ] `image size budget` job green (kernel ≤120 / default-adapters ≤220 MiB)
+            - [ ] `image size budget` job green (kernel ≤135 / default-adapters ≤385 MiB)
             - [ ] `oracle integration` job green
             - [ ] No new transitive license issues / CVE alerts on the diff
             - [ ] Major-version bumps reviewed against the BUILD_PLAN
