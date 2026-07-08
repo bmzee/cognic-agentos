@@ -6,18 +6,30 @@ validates the SKILL.md shape, cross-checks declared tools against the registered
 MCP servers, and yields a :class:`LoadedSkillRecord` per admitted skill. A
 malformed SKILL.md / malformed declared_tools / unregistered-tool reference
 warn-skips the pack (never crashes the boot), mirroring the M5 mapper doctrine.
+
+M8 A7 (ADR-027) adds the instruction-only mode section at the foot: an
+``[skill].mode = "instruction"`` pack hosts its SKILL.md guidance with NO
+executable surface (no entry point, no declared tools, no runtime image).
 """
 
 from __future__ import annotations
 
+import datetime as _dt
+import importlib.metadata as _im
+import logging
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from sqlalchemy.ext.asyncio import create_async_engine
 
+from cognic_agentos.core.audit import AuditStore, _audit_event, _chain_heads
+from cognic_agentos.core.canonical import ZERO_HASH
 from cognic_agentos.core.skill._types import LoadedSkillRecord
 from cognic_agentos.harness import skill_host
 from cognic_agentos.protocol.mcp_manifest import PackManifestNotFoundError
+from cognic_agentos.protocol.plugin_registry import PluginRegistry
 from cognic_agentos.protocol.skill_manifest import SkillManifestNotFound
 
 _VALID_SKILL_MD = """---
@@ -516,6 +528,221 @@ async def test_call_proxy_plain_payload_passes_through_unchanged() -> None:
     json.dumps({"ok": True, "result": out})
 
 
+# ---------------------------------------------------------------------------
+# M8 A7 (ADR-027) — instruction-only skill mode. Absent mode -> "executable"
+# (every existing pack byte-unchanged; the whole suite above passes untouched);
+# instruction records SKIP the declared-tools gate, the entry-point gate, the
+# MCP cross-check, and runtime-image resolution; they REFUSE (warn-skip) a pack
+# that declares an executable surface anyway; referenced_tools is
+# non-authoritative reviewer evidence — warn ONLY, never a refusal.
+# ---------------------------------------------------------------------------
+
+_VALID_INSTRUCTION_SKILL_MD = """---
+name: schema-notes
+description: Explains how to reason about the schema.
+---
+Read the table list, then describe relationships deterministically.
+"""
+
+
+def _instruction_manifest(extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    block: dict[str, Any] = {"mode": "instruction"}
+    if extra:
+        block.update(extra)
+    return {"skill": block}
+
+
+def test_instruction_pack_hosted_without_executable_surface(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch(
+        monkeypatch,
+        manifests={"cognic-skill-notes": _instruction_manifest()},
+        skill_mds={"cognic-skill-notes": _VALID_INSTRUCTION_SKILL_MD},
+    )
+    reg = _Registry([_Cand("cognic-skill-notes")])
+    records = skill_host._build_skill_records(
+        registry=reg, settings=_Settings(), registered_mcp_servers=frozenset()
+    )
+    assert set(records) == {"schema-notes"}
+    rec = records["schema-notes"]
+    assert rec.mode == "instruction"
+    assert rec.entry_point_name is None
+    assert rec.declared_tools == ()
+    assert rec.runtime_image is None
+    assert rec.description == "Explains how to reason about the schema."
+    assert rec.skill_md_body is not None
+    assert "Read the table list" in rec.skill_md_body
+    assert rec.registered is True
+
+
+def test_executable_records_carry_executable_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Absent-mode default pinned: the pre-A7 manifest shape (no ``mode`` key)
+    yields an executable-mode record with no instruction-only payload."""
+    _patch(
+        monkeypatch,
+        manifests={
+            "cognic-tool-oracle-schema": _mcp_manifest(),
+            "cognic-skill-schema-summary": _skill_manifest(
+                ["cognic-tool-oracle-schema/list_tables"]
+            ),
+        },
+        skill_mds={"cognic-skill-schema-summary": _VALID_SKILL_MD},
+    )
+    reg = _Registry([_Cand("cognic-tool-oracle-schema"), _Cand("cognic-skill-schema-summary")])
+    servers = skill_host._registered_mcp_server_ids(reg)
+    records = skill_host._build_skill_records(
+        registry=reg, settings=_Settings(), registered_mcp_servers=servers
+    )
+    rec = records["schema-summary"]
+    assert rec.mode == "executable"
+    assert rec.skill_md_body is None
+    assert rec.description == ""
+
+
+def test_invalid_mode_value_warn_skips(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _patch(
+        monkeypatch,
+        manifests={"cognic-skill-weird": {"skill": {"mode": "interpretive-dance"}}},
+        skill_mds={"cognic-skill-weird": _VALID_INSTRUCTION_SKILL_MD},
+    )
+    reg = _Registry([_Cand("cognic-skill-weird")])
+    with caplog.at_level(logging.WARNING):
+        records = skill_host._build_skill_records(
+            registry=reg, settings=_Settings(), registered_mcp_servers=frozenset()
+        )
+    assert records == {}
+    assert "skill.mode_invalid" in caplog.text
+
+
+def test_instruction_pack_with_declared_tools_warn_skips(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _patch(
+        monkeypatch,
+        manifests={"cognic-skill-notes": _instruction_manifest({"declared_tools": ["srv/tool"]})},
+        skill_mds={"cognic-skill-notes": _VALID_INSTRUCTION_SKILL_MD},
+    )
+    reg = _Registry([_Cand("cognic-skill-notes")])
+    with caplog.at_level(logging.WARNING):
+        records = skill_host._build_skill_records(
+            registry=reg, settings=_Settings(), registered_mcp_servers=frozenset()
+        )
+    assert records == {}
+    assert "skill.instruction_mode_declares_executable" in caplog.text
+
+
+def test_instruction_pack_with_entry_point_warn_skips(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _patch(
+        monkeypatch,
+        manifests={"cognic-skill-notes": _instruction_manifest()},
+        skill_mds={"cognic-skill-notes": _VALID_INSTRUCTION_SKILL_MD},
+    )
+    monkeypatch.setattr(skill_host, "_declares_skill_entry_point", lambda d: True)
+    reg = _Registry([_Cand("cognic-skill-notes")])
+    with caplog.at_level(logging.WARNING):
+        records = skill_host._build_skill_records(
+            registry=reg, settings=_Settings(), registered_mcp_servers=frozenset()
+        )
+    assert records == {}
+    assert "skill.instruction_mode_declares_executable" in caplog.text
+
+
+def test_instruction_pack_empty_declared_tools_is_hosted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``declared_tools = []`` is NOT an executable surface (partition-aligned
+    with the runtime truthiness rule) — the instruction pack still hosts."""
+    _patch(
+        monkeypatch,
+        manifests={"cognic-skill-notes": _instruction_manifest({"declared_tools": []})},
+        skill_mds={"cognic-skill-notes": _VALID_INSTRUCTION_SKILL_MD},
+    )
+    reg = _Registry([_Cand("cognic-skill-notes")])
+    records = skill_host._build_skill_records(
+        registry=reg, settings=_Settings(), registered_mcp_servers=frozenset()
+    )
+    assert set(records) == {"schema-notes"}
+
+
+def test_instruction_referenced_tools_unregistered_warns_but_hosts(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Unresolved referenced_tools entries are reviewer evidence, not an
+    authority claim — warn log ONLY, the skill is still hosted."""
+    _patch(
+        monkeypatch,
+        manifests={
+            "cognic-skill-notes": _instruction_manifest(
+                {"referenced_tools": ["cognic-tool-ghost/list_tables"]}
+            )
+        },
+        skill_mds={"cognic-skill-notes": _VALID_INSTRUCTION_SKILL_MD},
+    )
+    reg = _Registry([_Cand("cognic-skill-notes")])
+    with caplog.at_level(logging.WARNING):
+        records = skill_host._build_skill_records(
+            registry=reg, settings=_Settings(), registered_mcp_servers=frozenset()
+        )
+    assert set(records) == {"schema-notes"}
+    assert "skill.referenced_tool_unregistered" in caplog.text
+
+
+def test_instruction_referenced_tools_malformed_warns_but_hosts(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _patch(
+        monkeypatch,
+        manifests={"cognic-skill-notes": _instruction_manifest({"referenced_tools": "not-a-list"})},
+        skill_mds={"cognic-skill-notes": _VALID_INSTRUCTION_SKILL_MD},
+    )
+    reg = _Registry([_Cand("cognic-skill-notes")])
+    with caplog.at_level(logging.WARNING):
+        records = skill_host._build_skill_records(
+            registry=reg, settings=_Settings(), registered_mcp_servers=frozenset()
+        )
+    assert set(records) == {"schema-notes"}
+    assert "skill.referenced_tools_malformed" in caplog.text
+
+
+def test_instruction_referenced_tools_registered_hosts_without_warning(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _patch(
+        monkeypatch,
+        manifests={
+            "cognic-tool-oracle-schema": _mcp_manifest(),
+            "cognic-skill-notes": _instruction_manifest(
+                {"referenced_tools": ["cognic-tool-oracle-schema/list_tables"]}
+            ),
+        },
+        skill_mds={"cognic-skill-notes": _VALID_INSTRUCTION_SKILL_MD},
+    )
+    reg = _Registry([_Cand("cognic-tool-oracle-schema"), _Cand("cognic-skill-notes")])
+    servers = skill_host._registered_mcp_server_ids(reg)
+    with caplog.at_level(logging.WARNING):
+        records = skill_host._build_skill_records(
+            registry=reg, settings=_Settings(), registered_mcp_servers=servers
+        )
+    assert set(records) == {"schema-notes"}
+    assert "skill.referenced_tool_unregistered" not in caplog.text
+
+
+def test_instruction_pack_missing_skill_md_warn_skips(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Instruction mode is SKILL.md-only hosting — a missing SKILL.md still
+    warn-skips exactly like the executable path (the body IS the skill)."""
+    _patch(monkeypatch, manifests={"cognic-skill-notes": _instruction_manifest()}, skill_mds={})
+    reg = _Registry([_Cand("cognic-skill-notes")])
+    records = skill_host._build_skill_records(
+        registry=reg, settings=_Settings(), registered_mcp_servers=frozenset()
+    )
+    assert records == {}
+
+
 class _StubRuntime:
     def __init__(self) -> None:
         self.decision_history_store = object()
@@ -546,3 +773,127 @@ def test_build_skill_executor_returns_executor_and_summary(monkeypatch: pytest.M
     assert len(hosted) == 1
     assert hosted[0]["skill_id"] == "schema-summary"
     assert hosted[0]["declared_tools"] == ["cognic-tool-oracle-schema/list_tables"]
+
+
+# ==================== M8 gap-closure e2e (manifest-walk arm) =================
+# ADR-002 manifest-walk amendment (2026-07-06): the PRODUCTION path from an
+# installed manifest-only instruction pack to a hosted skill — discover()
+# (manifest-walk arm) → register() → iter_registered_pack_candidates() →
+# _build_skill_records — over a REAL PluginRegistry with REAL extractors
+# reading tmp_path-backed files. This is the proof the A7 tests lacked:
+# they injected _Cand candidates directly, bypassing discovery entirely.
+
+
+_INSTRUCTION_PACK_TOML = """\
+[pack]
+pack_id = "cognic-skill-customer-data"
+kind = "skill"
+
+[skill]
+mode = "instruction"
+"""
+
+_INSTRUCTION_SKILL_MD = """---
+name: customer-data
+description: Customer, account and deposit questions over governed views.
+---
+Use scope_id retail_analytics; query the governed views only.
+"""
+
+
+class _ManifestOnlyDist:
+    """``importlib.metadata.Distribution``-shaped fake backed by REAL files
+    under tmp_path — exactly the surfaces the manifest-walk discovery arm +
+    the REAL ``extract_pack_manifest`` / ``extract_skill_md`` read."""
+
+    def __init__(self, *, name: str, version: str, root: Path, files: list[str]) -> None:
+        self._name = name
+        self.version = version
+        self._root = root
+        self._files = files
+        self.entry_points: tuple[Any, ...] = ()
+
+    @property
+    def metadata(self) -> dict[str, Any]:
+        return {"Name": self._name}
+
+    @property
+    def files(self) -> list[_im.PackagePath]:
+        return [_im.PackagePath(f) for f in self._files]
+
+    def locate_file(self, relative: Any) -> Path:
+        return self._root / str(relative)
+
+
+async def test_manifest_only_instruction_pack_hosted_end_to_end(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Production-path proof: a manifest-only instruction pack is DISCOVERED
+    (manifest-walk arm; ``entry_point is None``), trust-REGISTERED, reaches
+    ``iter_registered_pack_candidates()``, and ``_build_skill_records`` hosts
+    it in instruction mode — no ``_Cand`` injection anywhere."""
+    root = tmp_path / "cognic-skill-customer-data"
+    pkg = root / "cognic_skill_customer_data"
+    pkg.mkdir(parents=True)
+    (pkg / "cognic-pack-manifest.toml").write_text(_INSTRUCTION_PACK_TOML, encoding="utf-8")
+    (pkg / "SKILL.md").write_text(_INSTRUCTION_SKILL_MD, encoding="utf-8")
+    dist = _ManifestOnlyDist(
+        name="cognic-skill-customer-data",
+        version="0.1.0",
+        root=root,
+        files=[
+            "cognic_skill_customer_data/cognic-pack-manifest.toml",
+            "cognic_skill_customer_data/SKILL.md",
+        ],
+    )
+
+    def _distribution(name: str) -> Any:
+        if name == "cognic-skill-customer-data":
+            return dist
+        raise _im.PackageNotFoundError(name)
+
+    # ONE patch site covers plugin_registry._im + mcp_manifest._im +
+    # skill_manifest._im + skill_host's ``md`` alias — the same module object.
+    monkeypatch.setattr(_im, "distributions", lambda: iter([dist]))
+    monkeypatch.setattr(_im, "distribution", _distribution)
+    monkeypatch.setattr(_im, "entry_points", lambda *, group: [])
+
+    # REAL PluginRegistry over the sqlite audit substrate (the
+    # test_plugin_registry.py fixture pattern, inlined).
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'skill_host_e2e.db'}")
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(_audit_event.metadata.create_all)
+            await conn.execute(
+                _chain_heads.insert().values(
+                    chain_id="audit_event",
+                    latest_sequence=0,
+                    latest_hash=ZERO_HASH,
+                    updated_at=_dt.datetime.now(_dt.UTC),
+                )
+            )
+        registry = PluginRegistry(audit_store=AuditStore(engine))
+        packs = registry.discover()
+        assert [p.record.distribution_name for p in packs] == ["cognic-skill-customer-data"]
+        assert packs[0].entry_point is None
+        outcome = await registry.register(
+            packs[0],
+            attestation_grade="full",
+            signature_digest="sha256:" + "a" * 64,
+        )
+        assert outcome.status == "registered"
+
+        servers = skill_host._registered_mcp_server_ids(registry)
+        records = skill_host._build_skill_records(
+            registry=registry, settings=_Settings(), registered_mcp_servers=servers
+        )
+    finally:
+        await engine.dispose()
+
+    assert set(records) == {"customer-data"}
+    rec = records["customer-data"]
+    assert rec.mode == "instruction"
+    assert rec.registered is True
+    assert rec.pack_version == "0.1.0"
+    assert rec.skill_md_body is not None
+    assert "governed views" in rec.skill_md_body

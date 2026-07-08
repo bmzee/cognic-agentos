@@ -27,6 +27,7 @@ import json as _json
 import logging as _logging
 import time as _time
 import uuid as _uuid
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, Literal
 
 import httpx as _httpx
@@ -85,6 +86,7 @@ GatewayTraceOutcome = Literal[
     "strict_ledger_failure",
     "ok",
     "drift",
+    "malformed_tool_call",  # M8 A2 — malformed upstream tool_calls shape
 ]
 
 
@@ -221,6 +223,105 @@ class _MalformedResponseContent(RuntimeError):
     """
 
 
+class _MalformedToolCall(RuntimeError):
+    """Internal sentinel: upstream tool_calls shape is malformed (M8 A2).
+
+    Strict-ledgered inline as the ALLOWED ledger outcome
+    ``upstream_error`` with the span outcome ``malformed_tool_call``
+    (the deliberate ledger/span vocabulary divergence — see
+    :data:`GatewayTraceOutcome` vs the ledger ``_ALLOWED_OUTCOMES``),
+    then re-raised through the already-ledgered inner tuple so the
+    generic ``except Exception`` cannot double-ledger it.
+    """
+
+
+@_dataclasses.dataclass(frozen=True, slots=True)
+class GatewayToolSpec:
+    """A typed tool declaration the caller offers to the model (M8 A2).
+
+    Serialized onto the LiteLLM wire body via :func:`_serialize_tool_spec`
+    in the OpenAI function-calling shape. ``parameters`` is a JSON-schema
+    object dict — passed through verbatim.
+    """
+
+    name: str
+    description: str
+    parameters: dict[str, Any]
+
+
+@_dataclasses.dataclass(frozen=True, slots=True)
+class GatewayToolCall:
+    """A typed tool call parsed from the upstream response (M8 A2).
+
+    ``arguments`` is always a parsed dict — str-encoded JSON arguments
+    (openai family) are decoded by :func:`_parse_tool_calls`; dict
+    arguments (ollama family) pass through. A missing/invalid ``id``
+    is synthesized as ``call_<index>``.
+    """
+
+    id: str
+    name: str
+    arguments: dict[str, Any]
+
+
+def _serialize_tool_spec(spec: GatewayToolSpec) -> dict[str, Any]:
+    """Render a :class:`GatewayToolSpec` into the OpenAI function-calling
+    wire shape LiteLLM normalizes across provider families."""
+    return {
+        "type": "function",
+        "function": {
+            "name": spec.name,
+            "description": spec.description,
+            "parameters": spec.parameters,
+        },
+    }
+
+
+def _parse_tool_calls(raw: Any) -> tuple[GatewayToolCall, ...]:
+    """Parse LiteLLM-normalized ``choices[0].message.tool_calls`` into typed
+    calls (M8 A2). None → (); non-list → malformed. Each entry:
+    ``function.name`` must be a str; ``function.arguments`` a JSON-object
+    string OR a dict; missing/invalid ``id`` → synthesized ``call_<index>``.
+    Fail-closed: any shape violation raises :class:`_MalformedToolCall`.
+    """
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise _MalformedToolCall(f"tool_calls is not a list: got {type(raw).__name__}")
+    calls: list[GatewayToolCall] = []
+    for index, entry in enumerate(raw):
+        if not isinstance(entry, dict):
+            raise _MalformedToolCall(f"tool_calls[{index}] is not an object")
+        function = entry.get("function")
+        if not isinstance(function, dict):
+            raise _MalformedToolCall(f"tool_calls[{index}].function is not an object")
+        name = function.get("name")
+        if not isinstance(name, str):
+            raise _MalformedToolCall(f"tool_calls[{index}].function.name is not a str")
+        raw_args = function.get("arguments")
+        if isinstance(raw_args, dict):
+            arguments = raw_args
+        elif isinstance(raw_args, str):
+            try:
+                arguments = _json.loads(raw_args)
+            except _json.JSONDecodeError as exc:
+                raise _MalformedToolCall(
+                    f"tool_calls[{index}].function.arguments is not valid JSON"
+                ) from exc
+            if not isinstance(arguments, dict):
+                raise _MalformedToolCall(
+                    f"tool_calls[{index}].function.arguments JSON is not an object"
+                )
+        else:
+            raise _MalformedToolCall(
+                f"tool_calls[{index}].function.arguments is neither a dict nor a str"
+            )
+        entry_id = entry.get("id")
+        call_id = entry_id if isinstance(entry_id, str) and entry_id else f"call_{index}"
+        calls.append(GatewayToolCall(id=call_id, name=name, arguments=arguments))
+    return tuple(calls)
+
+
 @_dataclasses.dataclass(frozen=True, slots=True)
 class GatewayResponse:
     """What the caller gets back on a successful gateway dispatch.
@@ -240,6 +341,13 @@ class GatewayResponse:
     request_id: str
     tier: str
     latency_ms: int
+    # M8 A2 — ADDITIVE field at the END: every existing keyword
+    # constructor stays valid; defaults to no tool calls.
+    tool_calls: tuple[GatewayToolCall, ...] = ()
+    # M8 A11 — ADDITIVE field at the END: the delivered wire body's usage
+    # dict (the same trace-captured value the span + quota metering read;
+    # dict-shaped or None per the trace guard); defaults to no usage.
+    usage: dict[str, object] | None = None
 
 
 @_dataclasses.dataclass(slots=True)
@@ -357,10 +465,11 @@ class LLMGateway:
         self,
         *,
         tier: str,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         request_id: str,
         tenant_id: str | None = None,
         agent_workforce_id: str | None = None,
+        tools: Sequence[GatewayToolSpec] | None = None,
     ) -> GatewayResponse:
         """The full Plan Decision-Locking §3 flow, wrapped in a best-effort
         observability span (gateway-observability workstream). The span is
@@ -376,7 +485,7 @@ class LLMGateway:
             agent_workforce_id=agent_workforce_id,
         )
         try:
-            return await self._run_completion(trace=trace, messages=messages)
+            return await self._run_completion(trace=trace, messages=messages, tools=tools)
         except LedgerWriteFailed:
             trace.outcome = "strict_ledger_failure"
             raise
@@ -387,7 +496,8 @@ class LLMGateway:
         self,
         *,
         trace: _CompletionTrace,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
+        tools: Sequence[GatewayToolSpec] | None = None,
     ) -> GatewayResponse:
         """The Plan Decision-Locking §3 flow body. Reads the stable per-call
         values from ``trace`` and sets ``trace.outcome`` / ``.preflight`` /
@@ -426,7 +536,9 @@ class LLMGateway:
             preflight_resolved, scope
         )
         if run_input_guardrails:
-            joined = "\n".join(m.get("content", "") for m in messages)
+            # M8 A2: tolerate content=None (assistant tool_calls turns +
+            # tool-role results carry null content) — never TypeError the join.
+            joined = "\n".join(str(m.get("content") or "") for m in messages)
             ip_result: PipelineResult = await input_pipeline.check(  # type: ignore[union-attr]
                 joined,
                 direction=GuardrailDirection.INPUT,
@@ -566,10 +678,16 @@ class LLMGateway:
                 sla_start = _dt.datetime.now(_dt.UTC)
                 deadline = SLATimer.compute_deadline(start=sla_start, policy=self._sla_policy)
 
+                # M8 A2: the tools-absent body is BYTE-IDENTICAL to the
+                # pre-A2 wire shape — no "tools" key unless the caller
+                # passed typed specs.
+                _body: dict[str, Any] = {"model": litellm_alias, "messages": messages}
+                if tools is not None:
+                    _body["tools"] = [_serialize_tool_spec(t) for t in tools]
                 try:
                     resp = await self._http.post(
                         f"{self._settings.litellm_base_url}/chat/completions",
-                        json={"model": litellm_alias, "messages": messages},
+                        json=_body,
                         headers={"Authorization": (f"Bearer {self._litellm_master_key}")},
                     )
                 except (
@@ -750,12 +868,48 @@ class LLMGateway:
                         )
                         raise policy_err
 
-                    # --- 7a. Extract content (Round-7 reviewer-P1) ---------
+                    # --- 7a. Extract content + tool_calls (M8 A2) ----------
                     try:
-                        content = body["choices"][0]["message"]["content"]
+                        _message = body["choices"][0]["message"]
                     except (KeyError, IndexError, TypeError) as exc:
                         raise _MalformedResponseContent(str(exc)) from exc
-                    if not isinstance(content, str):
+                    if not isinstance(_message, dict):
+                        raise _MalformedResponseContent(
+                            f"choices[0].message is not an object: got {type(_message).__name__}"
+                        )
+                    content = _message.get("content")
+                    try:
+                        parsed_tool_calls = _parse_tool_calls(_message.get("tool_calls"))
+                    except _MalformedToolCall as exc:
+                        # Ledger vocabulary and span vocabulary DIVERGE here
+                        # (deliberate — see the _CompletionTrace docstring /
+                        # GatewayTraceOutcome vs the ledger _ALLOWED_OUTCOMES):
+                        # a malformed upstream tool-call response ledgers as
+                        # the existing allowed "upstream_error", but the span
+                        # records the precise "malformed_tool_call".
+                        outcome = "upstream_error"  # ledger vocab (allowed)
+                        trace.outcome = "malformed_tool_call"  # span vocab (NEW 14th)
+                        await self._strict_ledger_write_or_raise(
+                            request_id=request_id,
+                            tenant_id=tenant_id,
+                            tier=tier,
+                            litellm_alias=litellm_alias,
+                            resolved=actual_resolved,
+                            flow_start=flow_start,
+                            outcome=outcome,
+                            original_exc=exc,
+                        )
+                        raise
+                    # Null-content relaxation (spec delta b): null content is
+                    # accepted ONLY alongside tool_calls.
+                    if content is None:
+                        if parsed_tool_calls:
+                            content = ""  # accepted — null content + tool calls
+                        else:
+                            raise _MalformedResponseContent(
+                                "choices[0].message.content is null with no tool_calls"
+                            )
+                    elif not isinstance(content, str):
                         raise _MalformedResponseContent(
                             f"choices[0].message.content is not str: got {type(content).__name__}"
                         )
@@ -827,11 +981,14 @@ class LLMGateway:
                         request_id=request_id,
                         tier=tier,
                         latency_ms=latency_ms,
+                        tool_calls=parsed_tool_calls,
+                        usage=trace.usage,
                     )
                 except (
                     CloudPolicyViolationError,
                     GuardrailViolationError,
                     LedgerWriteFailed,
+                    _MalformedToolCall,
                     _httpx.HTTPStatusError,
                     _json.JSONDecodeError,
                 ):
@@ -905,7 +1062,25 @@ class LLMGateway:
           * N matches MIXED classification → fail-closed
             ``provenance="ambiguous"`` + ``api_base=None`` + emit
             ``gateway.upstream_classification_ambiguous``.
+
+        M8 finding #8 (ADR-007 amendment 2026-07-08) — LiteLLM PROXY
+        alias-echo. The real LiteLLM proxy returns the requested
+        deployment ``model_name`` (the ALIAS) as the response ``model``
+        field, NOT the resolved provider model_string. When
+        ``actual_model_string`` equals the EXACT alias this gateway
+        dispatched (``preflight_resolved.alias``), the forward preflight
+        resolution IS the truthful upstream identity — the gateway knows
+        it dispatched that alias, and LiteLLM confirmed it processed that
+        exact alias, which forward-resolves to one unambiguous upstream.
+        Return ``preflight_resolved`` (real model_string ``openai/gpt-4o``,
+        external + api_base + provenance="resolved") so the ledger/span
+        record the REAL upstream, never the alias. This is the ONLY
+        relaxation: a DIFFERENT alias, an unknown string, a missing/
+        non-string ``model`` (guarded at the caller), or an ambiguous
+        reverse-lookup all stay fail-closed below.
         """
+        if actual_model_string == preflight_resolved.alias:
+            return preflight_resolved, None
         matches = self._preflight.reverse_lookup(actual_model_string)
         if not matches:
             return self._build_unresolved_actual(
@@ -1157,6 +1332,8 @@ class LLMGateway:
 
 __all__ = (
     "GatewayResponse",
+    "GatewayToolCall",
+    "GatewayToolSpec",
     "GatewayTraceOutcome",
     "LLMGateway",
     "LedgerWriteFailed",

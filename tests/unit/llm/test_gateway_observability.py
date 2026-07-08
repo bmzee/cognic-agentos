@@ -100,11 +100,12 @@ def _preflight_upstream() -> ResolvedUpstream:
 
 
 class TestTraceOutcomeVocabularyClosed:
-    def test_trace_outcome_has_exactly_thirteen_values(self) -> None:
+    def test_trace_outcome_has_exactly_fourteen_values(self) -> None:
         # 11 from the gateway-observability workstream + kill_switch_active
         # (Sprint 13.6a, ADR-018 F4 kill-switch gate) + quota_exhausted
-        # (Sprint 13.6b, ADR-018 quota gate).
-        assert len(typing.get_args(GatewayTraceOutcome)) == 13
+        # (Sprint 13.6b, ADR-018 quota gate) + malformed_tool_call (M8 A2 —
+        # typed tool-calling).
+        assert len(typing.get_args(GatewayTraceOutcome)) == 14
 
     def test_trace_outcome_value_set_is_pinned(self) -> None:
         assert set(typing.get_args(GatewayTraceOutcome)) == {
@@ -121,6 +122,7 @@ class TestTraceOutcomeVocabularyClosed:
             "strict_ledger_failure",
             "ok",
             "drift",
+            "malformed_tool_call",  # M8 A2 — malformed tool-call span outcome
         }
 
 

@@ -97,11 +97,13 @@ Studio/no-code authoring and Cognic Forge remain outside this v1 completion chec
 
 ### C. Agent Loop And Runtime Capability
 
-- [ ] **M8 — First deployed bank LLM-agent loop using tools and skills.**
+- [x] **M8 — First deployed bank LLM-agent loop using tools and skills.**
   **Goal:** a separate bank-use-case `cognic-agent-*` pack acts as a human-role worker, receives assigned tools and skills, reasons over a realistic banking task, invokes those assigned capabilities, records memory/audit, and completes one governed task.
   **Production proof:** run on deployed AgentOS, not only in-process; first on `kind`, then AKS before final gate.  
   **Load-bearing proof:** agent cannot call unassigned tools/skills; policy/RBAC denial is visible and audited.  
   **Evidence required:** agent pack repo, deployed proof, validation results.
+
+  **Evidence (2026-07-08 — PASS, run 16 on `kind`):** the released `cognic-agent-bank-analyst@v0.1.0` (persona + *requested* capability sets, inert marker — no agent code) ran the kernel-owned single-shot loop against a REAL cloud model (LiteLLM → OpenAI `gpt-4o`), read a hosted `SKILL.md` skill, authored read-only SQL over its governed views, invoked the operator-installed `cognic-tool-oracle-schema@v0.3.0` tool under a kernel-signed query-context, and completed the task. **Load-bearing proof holds:** an unassigned skill (`read_skill(atm-recon)` → `agent_capability_not_assigned`, BAR 2) and an unentitled scope (`agent_scope_not_entitled`, BAR 3) are refused at the kernel chokepoint and **audited**. Scope note: "records memory/audit" = a **task-tier memory-digest write** (BAR 1's `memory.write` chain row) + the digest-only dispatch/audit chain; richer scratch/task/long-term memory governance is **M9**. BAR 4's SQL guards (`agent_sql_object_out_of_scope` / `sql_not_select_only`) are proven as **tool-layer defense-in-depth via deterministic minted-token probes**, not as agent-authored SQL escape. Five kernel critical-controls slices landed under the gate (149 files; `protocol/mcp_authz.py` byte-identical throughout). Full detail + honesty boundary: `docs/VALIDATION-RESULTS.md` — "M8 — Governed agent loop (ADR-027) — PASS".
 
 - [ ] **M9 — Governed memory used by a real deployed agent.**  
   **Goal:** the deployed agent uses scratch/task/long-term memory under ADR-019 controls.  

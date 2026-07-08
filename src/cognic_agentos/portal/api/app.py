@@ -1005,6 +1005,41 @@ def create_app(
                         app.state.skill_executor = None
                         app.state.hosted_skills = []
 
+                # M8 A13 (ADR-027): governed agent loop. build_agent_loop owns
+                # the 3-state dependency discipline (ALL of registry/mcp_host/
+                # gateway/memory-factory present → loop; SOME missing → None +
+                # a single warning naming them; ZERO → None, quiet), so the
+                # call is unconditional on this adapter path. Fail-soft: a
+                # construction failure leaves app.state.agent_loop None (the
+                # route 503s) + the app still boots (the skills posture above).
+                # hosted_agents rows land together with the loop (the M6
+                # hosted_skills posture) — /system/plugins reads them.
+                from cognic_agentos.harness.agent_host import build_agent_loop
+
+                try:
+                    (
+                        agent_loop,
+                        agent_loop_warnings,
+                        hosted_agents,
+                    ) = await build_agent_loop(
+                        runtime=runtime,
+                        settings=settings,
+                        registry=registry,
+                        mcp_host=app.state.mcp_host,
+                        engine=adapters.relational.engine,
+                    )
+                    for warning in agent_loop_warnings:
+                        logger.warning(
+                            "agent.loop_composition_warning",
+                            extra={"detail": warning},
+                        )
+                    app.state.agent_loop = agent_loop
+                    app.state.hosted_agents = hosted_agents
+                except Exception:
+                    logger.error("agent.loop_construction_failed", exc_info=True)
+                    app.state.agent_loop = None
+                    app.state.hosted_agents = []
+
                 # #489 — setting-driven reaper: build the CheckpointStore
                 # from the live adapter pool AFTER open_all() so the
                 # relational adapter's engine is connected. This build is
@@ -1230,6 +1265,8 @@ def create_app(
     app.state.managed_run_executor = None  # Sprint 14A-A (ADR-022) — lifespan populates.
     app.state.skill_executor = None  # M6 (ADR-025) — SDK-gated; lifespan populates.
     app.state.hosted_skills = []  # M6 (ADR-025) — /system/plugins surface; lifespan populates.
+    app.state.agent_loop = None  # M8 A13 (ADR-027) — lifespan populates via build_agent_loop.
+    app.state.hosted_agents = []  # M8 A13 (ADR-027) — /system/plugins surface; lifespan populates.
     app.state.subagent_spawner = None  # 2026-06-20 sub-agent dispatch — lifespan populates.
     app.state.run_record_store = None  # 2026-06-20 (ADR-005) — lifespan publishes; route resolves.
 
@@ -1712,6 +1749,20 @@ def create_app(
         build_skill_routes(),
         prefix="/api/v1/skills",
         tags=["skills"],
+    )
+
+    # Governed-agent ask surface (ADR-027 — POST /api/v1/agents/{agent_id}/ask).
+    # Unconditional mount: the loop is populated by the lifespan only when its
+    # dependency set (registry + MCP host + gateway + memory factory) is
+    # present; the route's request-time dep returns 503 agent_loop_unavailable
+    # until then. Lazy import (the route module is SDK-free, so this is safe in
+    # the kernel image).
+    from cognic_agentos.portal.api.agents import build_agent_routes
+
+    app.include_router(
+        build_agent_routes(),
+        prefix="/api/v1/agents",
+        tags=["agents"],
     )
 
     # A2A inbound receiver surface (ADR-003 — POST /api/v1/a2a/{target_agent}).

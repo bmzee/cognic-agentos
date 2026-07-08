@@ -201,13 +201,20 @@ class _FakeDistribution:
 def fake_entry_points(monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, list[Any]]]:
     """Inject fake entry points keyed by group. Tests populate the
     ``groups`` dict and the monkeypatch routes
-    ``importlib.metadata.entry_points(group=...)`` to the fake list."""
+    ``importlib.metadata.entry_points(group=...)`` to the fake list.
+
+    Also empties ``importlib.metadata.distributions`` so the M8
+    manifest-walk discovery arm (ADR-002 amendment 2026-07-06) sees no
+    installed distributions — every ``discover()`` test here stays
+    hermetic against the real environment. The manifest arm has its own
+    suite in ``test_plugin_registry_manifest_discovery.py``."""
     groups: dict[str, list[Any]] = {}
 
     def _fake(*, group: str) -> list[Any]:
         return groups.get(group, [])
 
     monkeypatch.setattr(_im, "entry_points", _fake)
+    monkeypatch.setattr(_im, "distributions", lambda: iter(()))
     yield groups
 
 

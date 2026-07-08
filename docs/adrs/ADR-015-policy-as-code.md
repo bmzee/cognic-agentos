@@ -113,6 +113,10 @@ Sprint 13.5a lands the first of the "Sprint 13.5 (full)" bundles ahead of the ho
 
 It is consumed by `core/approval/policy.py::ApprovalPolicy.classify` (`policy.py:51`) through the existing **Sprint-4 `OPAEngine`** — but because the seed `OPAEngine` only evaluates boolean decision points, `classify` fetches the string result via a direct subprocess string-fetch that **mirrors `core/scheduler/policy.py::SchedulerPolicy._fetch_refusal_reason`**, including the drift-pinned `_MINIMAL_SUBPROCESS_ENV` parity (`policy.py:32`). Any OPA error OR an out-of-enum value fails closed to `require_4_eyes` (`policy.py:38`). Per the AGENTS.md stop-rule policy-bundle convention, the tier→flow map is **bank-overlay-tightenable**; loosening the kernel defaults requires a coordinated kernel + ADR amendment (same precedent as `sampling.rego` / `supply_chain.rego` / `elicitation.rego` / `sandbox.rego` / `scheduler.rego`). The remaining 13.5 bundles + the hot-reload + decision-trail API remain as scheduled.
 
+## M8 amendment (2026-07-05) — `agents.rego` joins the default bundle family
+
+ADR-027 (governed agent loop, M8) adds **`policies/_default/agents.rego`** — the agent-dispatch decision point `data.cognic.agents.dispatch.allow` (**bool-only**, `default allow := false`), consulted by `core/agent/policy.py` mirroring the `core/scheduler/policy.py` pattern over the same Sprint-4 `OPAEngine` (fail-closed on any OPA error). The allow rule re-checks `input.assignment_verified` / `input.entitlement_verified` strict-`== true` as defense-in-depth (the `sandbox.rego` precedent: a Python-gate bypass still refuses in pure Rego). The bundle receives the same wire-protocol-public stop-rule treatment as every `policies/_default` bundle (`sampling` / `supply_chain` / `elicitation` / `sandbox` / `scheduler` / `tools`): bank overlays may tighten; loosening the kernel default-deny requires a coordinated kernel + ADR amendment.
+
 ## References
 - ADR-002 (trust gate becomes a Rego query)
 - ADR-004 (sandbox egress becomes a Rego query)

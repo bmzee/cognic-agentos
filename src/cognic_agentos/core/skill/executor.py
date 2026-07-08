@@ -11,8 +11,11 @@ passing the invocation parameters through env.
 
 The one governed run (spec §5.1):
 
-  0. Load + validate the trusted skill record (exists / registered) — refuse
-     ``skill_not_found`` / ``skill_not_registered`` otherwise.
+  0. Load + validate the trusted skill record (exists / registered /
+     executable-mode) — refuse ``skill_not_found`` / ``skill_not_registered`` /
+     ``skill_not_executable`` otherwise (the last is the M8 A7 instruction-only
+     gate per ADR-027: an instruction record carries no executable action and
+     must NEVER reach ``backend.create``).
   1. Serve a per-invocation :class:`SkillBroker` bound to the record's
      ``declared_tools`` + the actor's tenant/subject.
   2. ``create`` the sandbox session with a ``--network none`` policy
@@ -121,14 +124,19 @@ def _bounded_stderr_excerpt(stderr: bytes) -> str:
 
 
 def _validate_skill_record(record: LoadedSkillRecord | None) -> SkillInvokeRefusalReason | None:
-    """Two fail-closed pre-flight checks. Returns the closed refusal reason or
+    """Three fail-closed pre-flight checks. Returns the closed refusal reason or
     ``None`` when the record is invokable. The ``registered`` check is
     executor-side defence in depth over the loader's admission (mirrors
-    ``core/run``'s ``pack_record_not_installed``)."""
+    ``core/run``'s ``pack_record_not_installed``). The ``mode`` check (M8 A7,
+    ADR-027) is the instruction-only gate: an instruction record hosts SKILL.md
+    guidance with NO executable surface, so it must NEVER reach
+    ``backend.create`` — refused ``skill_not_executable`` (route → 409)."""
     if record is None:
         return "skill_not_found"
     if not record.registered:
         return "skill_not_registered"
+    if record.mode != "executable":
+        return "skill_not_executable"
     return None
 
 
@@ -323,6 +331,12 @@ class SkillExecutor:
         # Function-local import (kernel-boot-clean — see the module docstring).
         from cognic_agentos.sandbox.policy import SandboxPolicy, WritableMount
 
+        # Instruction-mode records are refused pre-flight (skill_not_executable
+        # — the A7 mode guard in _validate_skill_record); every record that
+        # reaches the sandbox is executable-mode, and the loader guarantees an
+        # executable record always carries a runtime image. The assert narrows
+        # ``str | None`` -> ``str`` for the SandboxPolicy field.
+        assert record.runtime_image is not None
         return SandboxPolicy(
             cpu_cores=_SKILL_CPU_CORES,
             cpu_time_budget_s=None,

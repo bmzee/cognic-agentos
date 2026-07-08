@@ -7,7 +7,7 @@
 
 AgentOS is already remarkably Kubernetes-friendly, but it had no packaging of the kernel itself. A read-only recon (2026-06-17) confirmed every prerequisite exists:
 
-- A real 3-stage production image at `infra/agentos/Dockerfile` (`kernel` ≤120 MiB; `default-adapters` ≤385 MiB), serving `create_prod_app` via `uvicorn …:create_prod_app --factory`. The image runs as `USER cognic` (UID 10001), `WORKDIR=/app`, and ships the OPA policy bundles in-image under `/app/policies/_default/`.
+- A real 3-stage production image at `infra/agentos/Dockerfile` (`kernel` ≤135 MiB — 120 at recon time, raised 2026-07-08 per the "Kernel image budget 120 → 135 MiB" amendment at the foot of this ADR; `default-adapters` ≤385 MiB), serving `create_prod_app` via `uvicorn …:create_prod_app --factory`. The image runs as `USER cognic` (UID 10001), `WORKDIR=/app`, and ships the OPA policy bundles in-image under `/app/policies/_default/`.
 - Liveness/readiness/version/metrics surfaces: `/api/v1/healthz`, `/api/v1/readyz`, `/version`, and a Prometheus `/metrics` endpoint; JSON stdout logging with trace/request correlation.
 - The G1–G10 deploy-safety guards (the prod profile refuses dev defaults), a CI boot-smoke, and image-size budgets on every PR.
 - Operator-run migrations: `alembic upgrade head` is deliberately **not** auto-run in the lifespan — the operator owns schema change-control.
@@ -336,3 +336,19 @@ The migration Job is a Helm **pre-install/pre-upgrade hook** that references **t
 
 ### Posture
 Packaging-only (image `COPY`s + one chart `envFrom` + the regenerated snapshots + a Dockerfile structural test + a Helm parse test). **No kernel code change, no new on-gate module, no migration — CC count stays 131.** The image-size budgets are unaffected (the `policies/` bundles + `alembic.ini` are a few KiB of text).
+
+## Kernel image budget 120 → 135 MiB (2026-07-08 — M8/ADR-027 kernel crypto)
+
+### What changed
+The kernel-image size budget enforced by the `image-size-budget` CI job (`.github/workflows/python.yml`) moves **120 → 135 MiB**. The default-adapters budget stays **385 MiB**.
+
+### Why — a responsibility change, not adapter leakage
+M8 finding #4a (the ADR-016 "AgentCard JWS custody split" amendment, 2026-07-06) moved `joserfc == 1.6.4` from the `[adapters]` extra into base `[project]` dependencies, because two **base** surfaces import it: (a) `core/agent/query_context.py` — the ADR-027 kernel-runtime RS256 query-context mint/verify — rides the kernel image, which installs no extras; and (b) `agentos sign` / `agentos verify` sign + verify the AgentCard JWS on the base CLI surface. joserfc transitively pulls `cryptography` (~13 MiB installed, per the measured Sprint-1C figures in the workflow comment), lifting the CI-measured kernel image to **132 MiB** — over the 120 MiB budget (first observed on PR #118; image builds run only in the PR lane, so the breach was latent from the #4a commit until the M8 PR opened).
+
+The budget moves because the **kernel's responsibility changed**: RS256/JWS crypto is now a governance-kernel primitive dependency per ADR-027 (query-context token custody), not an adapter concern. The CI job's error hint ("adapter Python packages must NOT be in `[project]` dependencies") remains the correct diagnosis for any *other* kernel-image growth — it just does not apply to this one. Reverting #4a instead was rejected: it would regress a landed, TM-revert-proven critical-controls posture (the kernel image would fail-loud at query-context stamping; bare authoring venvs would crash on agent-pack sign).
+
+### The new number
+135 MiB = 132 measured + ~2% headroom, deliberately tight (the maintainer rejected 140) so the gate keeps catching accidental growth early. Same-slice cleanup: the workflow's Sprint-1C comment and the `dep-upgrade.yml` review-checklist line still cited the stale `default-adapters ≤220 MiB` (live budget has been 385); both now state the live pair `kernel ≤135 / default-adapters ≤385`.
+
+### Posture
+CI-config + docs only (**no kernel code change, no CC-gate implication, no migration**). Budget changes are threshold changes — an AGENTS.md human-only decision; this bump was maintainer-ratified on PR #118 (2026-07-08).

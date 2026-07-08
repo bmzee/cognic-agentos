@@ -454,6 +454,31 @@ SubAgentRBACScope = Literal["subagent.spawn"]
 SUBAGENT_SCOPES: frozenset[SubAgentRBACScope] = frozenset({"subagent.spawn"})
 
 
+#: M8 Task A13 (ADR-027) — governed-agent ask RBAC family. 1 scope in the
+#: ``agent.*`` namespace:
+#:
+#:   - ``agent.ask`` ← ``POST /api/v1/agents/{agent_id}/ask`` — runs one
+#:     single-shot governed agent reasoning loop (the A11 ``AgentLoop.ask``:
+#:     assignment/entitlement/policy-gated dispatch, run-level bounds,
+#:     digest-only ``agent.run.*`` evidence rows).
+#:
+#: NOT a Human-only decision (dispatch authority is owned downstream by the
+#: A10 chokepoint's gates + the Rego bundle; a governed refusal is a governed
+#: answer). Value-disjoint from every other family by the ``agent.*``
+#: namespace — NOTE the deliberate contrast with ``subagent.spawn``:
+#: ``"subagent."`` is a DIFFERENT prefix, so the namespaces stay disjoint.
+#: Wire-protocol-public — the 403 ``scope_not_held`` body carries it. Pinned
+#: by ``tests/unit/portal/rbac/test_agent_scopes.py``.
+#:
+#: Style note: plain ``= Literal[...]`` (no ``TypeAlias``) per the repo
+#: convention at ``packs/lifecycle.py:111`` + the families above.
+AgentRBACScope = Literal["agent.ask"]
+
+#: The 1 agent scope as a frozenset (1:1 with :data:`AgentRBACScope`) for
+#: bank-overlay binders. Pinned by ``tests/unit/portal/rbac/test_agent_scopes.py``.
+AGENT_SCOPES: frozenset[AgentRBACScope] = frozenset({"agent.ask"})
+
+
 #: ADR-023 (Wave-2) — per-tenant config-overlay RBAC family. Two values in the
 #: ``config.tenant_overlay.*`` namespace, consumed by the operator-administered
 #: overlay endpoints (`portal/api/config_overlay/routes.py`):

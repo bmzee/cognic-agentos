@@ -412,6 +412,13 @@ def _stage_signed_pack(
     monkeypatch.setenv("COGNIC_GRYPE_PATH", str(shims["grype"]))
     monkeypatch.setenv("COGNIC_LICENSE_AUDITOR_PATH", str(shims["license_auditor"]))
     monkeypatch.setenv("COGNIC_SIGNING_KEY_PATH", str(_TEST_PRIVATE_PEM))
+    # M8 finding #4c: the AgentCard-JWS arm signs with its OWN custody
+    # key (the fixture keypair serves both custody roles in the
+    # pre-#4-designed fixture; the custody-split suite at
+    # test_agent_card_jws_custody.py wires genuinely different keys).
+    # Verify-side Step 9 resolves the matching public key via the
+    # pack-root agent-card.pub the fixture pack commits.
+    monkeypatch.setenv("COGNIC_AGENT_CARD_JWS_SIGNING_KEY_PATH", str(_TEST_PRIVATE_PEM))
 
     runner = CliRunner()
     result = runner.invoke(app, ["sign", "--bundle", str(pack)])
@@ -1908,26 +1915,32 @@ def test_verify_with_jws_unimportable_trust_root_emits_jws_invalid(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Trust-root file is a real file but not a valid PEM →
+    """AgentCard trust-root file is a real file but not a valid PEM →
     joserfc's RSAKey.import_key raises during JWS verification →
-    closed-enum refusal ``verify_agent_card_jws_invalid``."""
+    closed-enum refusal ``verify_agent_card_jws_invalid``.
+
+    M8 finding #4c: the unimportable file now rides the SEPARATE
+    ``--agent-card-trust-root`` custody (Step 9 no longer reads the
+    cosign trust root, so poisoning --trust-root alone cannot reach
+    joserfc's import path any more)."""
     pack = _stage_signed_pack(tmp_path, monkeypatch)
     bad_pem = tmp_path / "bad_trust_root.pem"
     bad_pem.write_bytes(b"not a valid PEM")
 
     verify_shim = _make_cosign_shim(tmp_path, exit_code=0)
-    _wire_verify_settings(monkeypatch, cosign_path=verify_shim, trust_root=bad_pem)
+    _wire_verify_settings(monkeypatch, cosign_path=verify_shim, trust_root=_TEST_PUBLIC_PEM)
 
     runner = CliRunner()
-    result = runner.invoke(app, ["verify", str(pack)])
-    assert result.exit_code == 1
-    # Either the JWS step fires verify_agent_card_jws_invalid OR the
-    # trust-root file resolves but the subsequent JWS verification
-    # rejects it.
-    assert (
-        "verify_agent_card_jws_invalid" in result.stderr
-        or "verify_trust_root_path_unresolvable" in result.stderr
+    result = runner.invoke(
+        app, ["verify", "--agent-card-trust-root", str(bad_pem), "--json", str(pack)]
     )
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert any(
+        f["reason"] == "verify_agent_card_jws_invalid"
+        and f["payload"].get("failure_mode") == "jws_trust_root_import_error"
+        for f in payload["findings"]
+    ), payload["findings"]
 
 
 def test_verify_run_verify_called_directly_with_no_settings_returns_fail(
@@ -4444,6 +4457,7 @@ def test_sign_with_renamed_wheel_internal_metadata_mismatch_emits_subprocess_fai
     monkeypatch.setenv("COGNIC_GRYPE_PATH", str(shims["grype"]))
     monkeypatch.setenv("COGNIC_LICENSE_AUDITOR_PATH", str(shims["license_auditor"]))
     monkeypatch.setenv("COGNIC_SIGNING_KEY_PATH", str(_TEST_PRIVATE_PEM))
+    monkeypatch.setenv("COGNIC_AGENT_CARD_JWS_SIGNING_KEY_PATH", str(_TEST_PRIVATE_PEM))
 
     runner = CliRunner()
     result = runner.invoke(app, ["sign", "--bundle", "--json", str(pack)])
@@ -4486,6 +4500,7 @@ def test_sign_with_empty_cognic_section_emits_subprocess_failed(
     monkeypatch.setenv("COGNIC_GRYPE_PATH", str(shims["grype"]))
     monkeypatch.setenv("COGNIC_LICENSE_AUDITOR_PATH", str(shims["license_auditor"]))
     monkeypatch.setenv("COGNIC_SIGNING_KEY_PATH", str(_TEST_PRIVATE_PEM))
+    monkeypatch.setenv("COGNIC_AGENT_CARD_JWS_SIGNING_KEY_PATH", str(_TEST_PRIVATE_PEM))
 
     runner = CliRunner()
     result = runner.invoke(app, ["sign", "--bundle", "--json", str(pack)])
@@ -4533,6 +4548,7 @@ def test_sign_with_spoof_first_dist_info_emits_subprocess_failed(
     monkeypatch.setenv("COGNIC_GRYPE_PATH", str(shims["grype"]))
     monkeypatch.setenv("COGNIC_LICENSE_AUDITOR_PATH", str(shims["license_auditor"]))
     monkeypatch.setenv("COGNIC_SIGNING_KEY_PATH", str(_TEST_PRIVATE_PEM))
+    monkeypatch.setenv("COGNIC_AGENT_CARD_JWS_SIGNING_KEY_PATH", str(_TEST_PRIVATE_PEM))
 
     runner = CliRunner()
     result = runner.invoke(app, ["sign", "--bundle", "--json", str(pack)])
@@ -4587,6 +4603,7 @@ def test_sign_with_kind_mismatched_wheel_and_manifest_emits_subprocess_failed(
     monkeypatch.setenv("COGNIC_GRYPE_PATH", str(shims["grype"]))
     monkeypatch.setenv("COGNIC_LICENSE_AUDITOR_PATH", str(shims["license_auditor"]))
     monkeypatch.setenv("COGNIC_SIGNING_KEY_PATH", str(_TEST_PRIVATE_PEM))
+    monkeypatch.setenv("COGNIC_AGENT_CARD_JWS_SIGNING_KEY_PATH", str(_TEST_PRIVATE_PEM))
 
     runner = CliRunner()
     result = runner.invoke(app, ["sign", "--bundle", "--json", str(pack)])
@@ -5004,6 +5021,7 @@ def test_sign_with_pep440_equivalent_version_text_mismatch_emits_subprocess_fail
     monkeypatch.setenv("COGNIC_GRYPE_PATH", str(shims["grype"]))
     monkeypatch.setenv("COGNIC_LICENSE_AUDITOR_PATH", str(shims["license_auditor"]))
     monkeypatch.setenv("COGNIC_SIGNING_KEY_PATH", str(_TEST_PRIVATE_PEM))
+    monkeypatch.setenv("COGNIC_AGENT_CARD_JWS_SIGNING_KEY_PATH", str(_TEST_PRIVATE_PEM))
 
     runner = CliRunner()
     result = runner.invoke(app, ["sign", "--bundle", "--json", str(pack)])
@@ -5235,6 +5253,7 @@ def test_sign_with_filename_version_text_mismatch_emits_subprocess_failed(
     monkeypatch.setenv("COGNIC_GRYPE_PATH", str(shims["grype"]))
     monkeypatch.setenv("COGNIC_LICENSE_AUDITOR_PATH", str(shims["license_auditor"]))
     monkeypatch.setenv("COGNIC_SIGNING_KEY_PATH", str(_TEST_PRIVATE_PEM))
+    monkeypatch.setenv("COGNIC_AGENT_CARD_JWS_SIGNING_KEY_PATH", str(_TEST_PRIVATE_PEM))
 
     runner = CliRunner()
     result = runner.invoke(app, ["sign", "--bundle", "--json", str(pack)])
@@ -6564,14 +6583,23 @@ def test_verify_empty_validated_entry_points_fail_closed(
     no validated entry points but execution reaches step 11 anyway.
     Should never happen in practice — ``wheel_empty_cognic_entry_point_group``
     fires upstream — but the defensive branch refuses with closed-enum
-    ``load_probe_no_validated_entry_points``. Covers verify.py:2800-2818."""
+    ``load_probe_no_validated_entry_points``.
+
+    M8 finding #3 TM-revert pin (probe-skip / fail-closed-branch
+    removal): the instruction arm carves out ONLY the
+    ``instruction_package_name is not None`` case; every NON-instruction
+    empty-entry-point result (5th slot None, as patched here) MUST still
+    hit this fail-closed branch. A change that drops the branch (or
+    routes non-instruction empty tuples into the instruction arm) fails
+    this test."""
     pack = _stage_signed_pack(tmp_path, monkeypatch)
     verify_shim = _make_cosign_shim(tmp_path, exit_code=0)
     _wire_verify_settings(monkeypatch, cosign_path=verify_shim, trust_root=_TEST_PUBLIC_PEM)
 
     # Monkeypatch the wheel-integrity helper to return an empty
-    # entry-points tuple. The earlier validate steps have already run
-    # by the time verify reaches this code path, so we patch at the
+    # entry-points tuple (and a None instruction-package slot — the
+    # non-instruction shape). The earlier validate steps have already
+    # run by the time verify reaches this code path, so we patch at the
     # source module — verify imports it lazily inside the orchestrator.
     import cognic_agentos.cli._wheel_integrity as _wheel_integrity_module
 
@@ -6581,9 +6609,10 @@ def test_verify_empty_validated_entry_points_fail_closed(
         result, failure = original(wheel_path, **kwargs)
         if result is None:
             return result, failure
-        # Replace the entry-points slot with an empty tuple.
-        name, version, kind, _ = result
-        return (name, version, kind, ()), None
+        # Replace the entry-points slot with an empty tuple; keep the
+        # instruction-package slot None (non-instruction case).
+        name, version, kind, _, _ = result
+        return (name, version, kind, (), None), None
 
     monkeypatch.setattr(
         _wheel_integrity_module,
@@ -6740,11 +6769,14 @@ class TestWheelIntegrityAcceptsHookSection:
         )
         assert failure is None, f"hook wheel refused: {failure!r}"
         assert result is not None
-        canonical_name, version, kind, entry_points = result
+        canonical_name, version, kind, entry_points, instruction_package = result
         assert canonical_name == "cognic-hook-sign-target"
         assert version == "0.1.0"
         assert kind == "hook", f"cognic.hooks → 'hook' kind derivation expected; got {kind!r}"
         assert entry_points == (("cognic_hook_sign_target.hook", "RedactPii"),)
+        # M8 finding #3: entry-point wheels carry None in the additive
+        # instruction-package slot.
+        assert instruction_package is None
 
     def test_cognic_hooks_with_other_cognic_group_refused_as_multiple(
         self,
@@ -6857,3 +6889,226 @@ def test_verify_bundle_for_hook_kind_pack_intoto_pack_kind_field_records_hook(
     payload = json.loads(result.stdout)
     reasons = [f["reason"] for f in payload["findings"]]
     assert "verify_intoto_layout_invalid" not in reasons, reasons
+
+
+# =============================================================================
+# M8 finding #3 (2026-07-06) — instruction-skill content packs through
+# sign --bundle + verify end-to-end.
+# =============================================================================
+#
+# Instruction-only skill packs (``[pack] kind="skill"`` +
+# ``[skill] mode="instruction"``) are zero-entry-point CONTENT packs.
+# Pre-fix, ``agentos sign --bundle`` refused their wheels with
+# ``wheel_missing_entry_points_file`` and verify Step 11 fail-closed with
+# ``load_probe_no_validated_entry_points``. The instruction arm at
+# ``cli/_wheel_integrity.py`` + the module-import probe at
+# ``cli/_load_probe.py`` + verify's Step-11 instruction arm make the full
+# bundle flow work — with a REAL final isolated probe, never a faked
+# entry point.
+
+
+def _stage_signed_instruction_pack(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    init_source: str = "",
+) -> Path:
+    """Stage a zero-entry-point INSTRUCTION-skill content pack (SKILL.md +
+    manifest as package data inside one stub package; NO entry points of
+    any kind) + run sign --bundle through shims.
+
+    The sign step itself pins the M8 finding #3 live-failure fix: pre-fix
+    ``agentos sign --bundle`` on an instruction pack tree refused with
+    ``sign_subprocess_failed`` / ``wheel_missing_entry_points_file``.
+    """
+    import shutil as _shutil
+    import zipfile as _zipfile
+
+    pack = tmp_path / "staged_instruction_pack"
+    _shutil.copytree(_SIGN_TARGET_PACK, pack)
+    manifest_path = pack / "cognic-pack-manifest.toml"
+    body = manifest_path.read_text()
+    body = body.replace('kind = "agent"', 'kind = "skill"')
+    body = body.replace(
+        'pack_id = "cognic-agent-sign-target"',
+        'pack_id = "cognic-skill-sign-target"',
+    )
+    # Strip the agent-only [a2a] + [agent] blocks and the agent_card_*
+    # identity fields (agent-only surface; instruction skills carry none).
+    new_lines: list[str] = []
+    in_skipped_block = False
+    for line in body.splitlines():
+        if line.startswith("[a2a]") or line.startswith("[agent]"):
+            in_skipped_block = True
+            continue
+        if in_skipped_block and line.startswith("["):
+            in_skipped_block = False
+        if in_skipped_block:
+            continue
+        if "agent_card_url" in line or "agent_card_jws_path" in line:
+            continue
+        new_lines.append(line)
+    # The M8 A7 instruction-mode block: no declared_tools (instruction
+    # skills have no broker-governed authority), no entry points.
+    new_lines.extend(["", "[skill]", 'mode = "instruction"'])
+    manifest_text = "\n".join(new_lines) + "\n"
+    manifest_path.write_text(manifest_text)
+
+    # Valid agentskills.io SKILL.md at the pack root (verify Step 10 runs
+    # the full validate pipeline; the A7 instruction arms require it).
+    skill_md = (
+        "---\n"
+        "name: sign-target-skill\n"
+        "description: Teaches governed retail views for verify fixture runs.\n"
+        "---\n"
+        "\n"
+        "# Instructions\n"
+        "\n"
+        "Use the governed views only.\n"
+    )
+    (pack / "SKILL.md").write_text(skill_md)
+
+    # pyproject: rename + REMOVE the cognic.agents entry point — an
+    # instruction pack declares no cognic.* entry point of any kind.
+    pyproject_path = pack / "pyproject.toml"
+    pyproject_lines = [
+        line
+        for line in (
+            pyproject_path.read_text().replace(
+                'name = "cognic-agent-sign-target"',
+                'name = "cognic-skill-sign-target"',
+            )
+        ).splitlines()
+        if "cognic.agents" not in line and not line.startswith("sign_target = ")
+    ]
+    pyproject_path.write_text("\n".join(pyproject_lines) + "\n")
+
+    # The REAL PEP-427-complete instruction wheel: stub package with
+    # __init__.py + manifest + SKILL.md as package data; dist-info has
+    # METADATA/WHEEL/RECORD and — by design — NO entry_points.txt.
+    dist_dir = pack / "dist"
+    dist_dir.mkdir(exist_ok=True)
+    wheel = dist_dir / "cognic_skill_sign_target-0.1.0-py3-none-any.whl"
+    dist_info = "cognic_skill_sign_target-0.1.0.dist-info"
+    pkg = "cognic_skill_sign_target"
+    wheel_members: dict[str, str] = {
+        f"{pkg}/__init__.py": init_source,
+        f"{pkg}/cognic-pack-manifest.toml": manifest_text,
+        f"{pkg}/SKILL.md": skill_md,
+        f"{dist_info}/METADATA": (
+            "Metadata-Version: 2.1\nName: cognic_skill_sign_target\nVersion: 0.1.0\n"
+        ),
+        f"{dist_info}/WHEEL": (
+            "Wheel-Version: 1.0\n"
+            "Generator: agentos-test-fixture\n"
+            "Root-Is-Purelib: true\n"
+            "Tag: py3-none-any\n"
+        ),
+    }
+    record_lines = [f"{m},," for m in [*sorted(wheel_members), f"{dist_info}/RECORD"]]
+    wheel_members[f"{dist_info}/RECORD"] = "\n".join(record_lines) + "\n"
+    with _zipfile.ZipFile(wheel, "w", _zipfile.ZIP_DEFLATED) as zf:
+        for member_name, payload in wheel_members.items():
+            zf.writestr(member_name, payload)
+
+    shims = _stage_full_shim_set(tmp_path)
+    monkeypatch.setenv("COGNIC_COSIGN_PATH", str(shims["cosign"]))
+    monkeypatch.setenv("COGNIC_SYFT_PATH", str(shims["syft"]))
+    monkeypatch.setenv("COGNIC_GRYPE_PATH", str(shims["grype"]))
+    monkeypatch.setenv("COGNIC_LICENSE_AUDITOR_PATH", str(shims["license_auditor"]))
+    monkeypatch.setenv("COGNIC_SIGNING_KEY_PATH", str(_TEST_PRIVATE_PEM))
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["sign", "--bundle", str(pack)])
+    assert result.exit_code == 0, (
+        "instruction-pack sign --bundle prep failed (the M8 finding #3 "
+        f"live failure): exit={result.exit_code} "
+        f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    return pack
+
+
+def test_verify_instruction_pack_full_happy_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M8 finding #3 end-to-end: an instruction-skill content pack signs
+    (``sign --bundle`` — the pre-fix live failure) and verifies clean:
+    derived kind "skill", no AgentCard JWS anywhere, Step 11 runs the
+    module-import probe over the inert stub package."""
+    pack = _stage_signed_instruction_pack(tmp_path, monkeypatch)
+    # sign produced no JWS for the skill-kind pack.
+    assert not (pack / "agent_cards" / "agent-card.jws").exists()
+
+    verify_shim = _make_cosign_shim(tmp_path, exit_code=0)
+    _wire_verify_settings(monkeypatch, cosign_path=verify_shim, trust_root=_TEST_PUBLIC_PEM)
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["verify", str(pack)])
+    assert result.exit_code == 0, (
+        f"instruction-pack verify failed: exit={result.exit_code} "
+        f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    assert "verify: PASS" in result.stdout
+
+
+def test_verify_instruction_pack_runs_module_import_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M8 finding #3 TM-revert pin (probe-skip, spy half): Step 11 for an
+    instruction wheel RUNS the module-import probe against exactly the
+    package the integrity helper validated — a change that skips the
+    final probe (proceeding to PASS without probing) fails this spy."""
+    pack = _stage_signed_instruction_pack(tmp_path, monkeypatch)
+    verify_shim = _make_cosign_shim(tmp_path, exit_code=0)
+    _wire_verify_settings(monkeypatch, cosign_path=verify_shim, trust_root=_TEST_PUBLIC_PEM)
+
+    import cognic_agentos.cli._load_probe as _probe_module
+
+    original = _probe_module.probe_module_importability
+    probe_calls: list[dict[str, Any]] = []
+
+    async def _spy(wheel_path: Path, **kwargs: Any) -> Any:
+        probe_calls.append({"wheel_path": wheel_path, **kwargs})
+        return await original(wheel_path, **kwargs)
+
+    monkeypatch.setattr(_probe_module, "probe_module_importability", _spy)
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["verify", "--json", str(pack)])
+    assert result.exit_code == 0, result.stdout
+    assert len(probe_calls) == 1, (
+        "verify MUST run the module-import probe exactly once for an "
+        f"instruction wheel; recorded calls: {probe_calls!r}"
+    )
+    assert probe_calls[0]["module_path"] == "cognic_skill_sign_target"
+
+
+def test_verify_instruction_pack_with_raising_init_fails_at_final_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M8 finding #3 TM-revert pin (probe-skip, behavioral half): the
+    Step-11 instruction probe is REAL — an instruction wheel whose stub
+    ``__init__`` raises is refused at the final gate with the closed-enum
+    ``load_probe_module_runtime_error``. Skipping the probe would let
+    this broken wheel verify PASS."""
+    pack = _stage_signed_instruction_pack(
+        tmp_path,
+        monkeypatch,
+        init_source="raise RuntimeError('instruction stub must be inert')\n",
+    )
+    verify_shim = _make_cosign_shim(tmp_path, exit_code=0)
+    _wire_verify_settings(monkeypatch, cosign_path=verify_shim, trust_root=_TEST_PUBLIC_PEM)
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["verify", "--json", str(pack)])
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    refusing = next(
+        f for f in payload["findings"] if f.get("reason") == "verify_entry_point_load_failed"
+    )
+    assert refusing["payload"]["failure_mode"] == "load_probe_module_runtime_error"
+    assert refusing["payload"]["instruction_package"] == "cognic_skill_sign_target"
+    assert refusing["payload"]["probe_mode"] == "module_import"

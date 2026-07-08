@@ -368,12 +368,21 @@ def build_system_router(settings: Settings) -> APIRouter:
         hosted_skills: list[dict[str, Any]] = list(
             getattr(request.app.state, "hosted_skills", []) or []
         )
+        # M8 A8 (ADR-027): the governed-agent hosting surface, mirroring
+        # ``hosted_skills``. Each row is a trust-registered, AGENT.md-validated
+        # agent record admitted by ``harness/agent_host._build_agent_records``
+        # (the A13 lifespan populates the slot; absent/empty-safe until then).
+        hosted_agents: list[dict[str, Any]] = list(
+            getattr(request.app.state, "hosted_agents", []) or []
+        )
         return {
             "plugins": plugins_list,
             # M6 (ADR-025): top-level (NOT in ``summary`` — the summary dict is a
             # closed wire-shape with exact-equality snapshot tests). Empty list on
             # the SDK-absent / skill-executor-not-built path.
             "hosted_skills": hosted_skills,
+            # M8 (ADR-027): same top-level posture as hosted_skills.
+            "hosted_agents": hosted_agents,
             "summary": {
                 "total_discovered": len(outcomes),
                 "registered": registered_count,

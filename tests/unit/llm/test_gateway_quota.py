@@ -402,4 +402,5 @@ class TestVocabulary:
     def test_trace_outcome_has_quota_exhausted(self) -> None:
         values = typing.get_args(GatewayTraceOutcome)
         assert "quota_exhausted" in values
-        assert len(values) == 13  # 12 (incl. kill_switch_active) + quota_exhausted
+        # 13 (incl. quota_exhausted) + malformed_tool_call (M8 A2).
+        assert len(values) == 14

@@ -53,9 +53,10 @@ import tomllib
 from pathlib import Path
 from typing import Final
 
-from cognic_agentos.cli import ValidatorFinding
+from cognic_agentos.cli import ValidatorFinding, ValidatorReason
 from cognic_agentos.cli.validators import (
     a2a,
+    agents,
     credentials,
     data_governance,
     hooks,
@@ -98,8 +99,17 @@ _REQUIRED_TOP_LEVEL_BLOCKS: tuple[str, ...] = (
 #: orchestrator refuses BEFORE the per-concern validators run (the
 #: a2a / mcp validators would otherwise emit unrelated refusals
 #: against fields hook packs aren't expected to populate). Closed
-#: enum: every entry routes through ``hook_pack_kind_constraint_violated``
-#: with ``payload.failure_mode`` distinguishing the offending block.
+#: enum: every entry routes through the kind-appropriate
+#: ``<kind>_pack_kind_constraint_violated`` reason (see
+#: ``_KIND_CONSTRAINT_REASONS``) with ``payload.failure_mode``
+#: distinguishing the offending block.
+#:
+#: M8 A8 (ADR-027): agent packs are NOT MCP-tool-shaped — declaring
+#: ``[mcp]`` on a ``kind="agent"`` manifest refuses with
+#: ``agent_pack_kind_constraint_violated`` +
+#: ``failure_mode="mcp_block_forbidden"``. ``[a2a]`` stays LEGAL for
+#: agent packs (they are A2A-speaking by design), so the agent set is
+#: {"mcp"} only.
 #:
 #: The check covers BOTH the canonical top-level shape AND the
 #: legacy ``[tool.cognic.<block>]`` shape per R23 dual-path doctrine
@@ -107,6 +117,22 @@ _REQUIRED_TOP_LEVEL_BLOCKS: tuple[str, ...] = (
 #: pack via either path.
 _FORBIDDEN_BLOCKS_BY_KIND: Final[dict[str, frozenset[str]]] = {
     "hook": frozenset({"a2a", "mcp"}),
+    "agent": frozenset({"mcp"}),
+}
+
+#: The kind-appropriate closed-enum reason for a forbidden-block refusal —
+#: 1:1 with ``_FORBIDDEN_BLOCKS_BY_KIND`` keys. Both reasons are owned by
+#: ``validate.py`` in ``_VALIDATOR_REASON_OWNERSHIP``.
+_KIND_CONSTRAINT_REASONS: Final[dict[str, ValidatorReason]] = {
+    "hook": "hook_pack_kind_constraint_violated",
+    "agent": "agent_pack_kind_constraint_violated",
+}
+
+#: What each forbidden block means per kind — rendered into the refusal
+#: message. The hook copy is byte-compatible with the pre-A8 rendering.
+_KIND_CONSTRAINT_BLOCK_TRAIT: Final[dict[str, str]] = {
+    "a2a": "A2A-speaking",
+    "mcp": "MCP-tool-shaped",
 }
 
 
@@ -114,16 +140,19 @@ def _check_pack_kind_constraints(
     data: dict[str, object],
     manifest_path: Path,
 ) -> list[ValidatorFinding]:
-    """Sprint-7A2 T4 — refuse pack-kind-incompatible top-level blocks.
+    """Sprint-7A2 T4 (+ M8 A8) — refuse pack-kind-incompatible top-level
+    blocks.
 
-    Wave-1 narrow: only ``kind="hook"`` packs have forbidden blocks
-    (``[a2a]`` + ``[mcp]``). The check fires AFTER the shape gate
+    ``kind="hook"`` packs forbid ``[a2a]`` + ``[mcp]``; ``kind="agent"``
+    packs forbid ``[mcp]`` only (``[a2a]`` stays legal — agent packs are
+    A2A-speaking by design). The check fires AFTER the shape gate
     (so a malformed [pack] block short-circuits earlier) but BEFORE
     per-concern dispatch (so unrelated validators don't emit noisy
-    refusals against fields the hook pack isn't expected to populate).
+    refusals against fields the pack isn't expected to populate).
 
-    Each forbidden block emits one finding with the closed-enum
-    reason ``hook_pack_kind_constraint_violated`` + a distinguishing
+    Each forbidden block emits one finding with the kind-appropriate
+    closed-enum reason (``hook_pack_kind_constraint_violated`` /
+    ``agent_pack_kind_constraint_violated``) + a distinguishing
     ``payload.failure_mode``. The check is idempotent — declaring
     BOTH ``[a2a]`` AND ``[mcp]`` on a hook pack produces two
     findings (one per offending block).
@@ -149,12 +178,12 @@ def _check_pack_kind_constraints(
         findings.append(
             ValidatorFinding(
                 severity="refusal",
-                reason="hook_pack_kind_constraint_violated",
+                reason=_KIND_CONSTRAINT_REASONS[pack_kind],
                 message=(
                     f"manifest at {manifest_path} declares "
                     f"[{block_path}] but pack kind is {pack_kind!r}; "
-                    f"hook packs are not "
-                    f"{'A2A-speaking' if block == 'a2a' else 'MCP-tool-shaped'} "
+                    f"{pack_kind} packs are not "
+                    f"{_KIND_CONSTRAINT_BLOCK_TRAIT[block]} "
                     f"and MUST NOT declare this block. Remove the "
                     f"[{block_path}] declaration from the manifest."
                 ),
@@ -458,6 +487,13 @@ def run_validators(pack_path: Path) -> list[ValidatorFinding]:
     # packs stay valid; the M6 executable-skill surface is opt-in by
     # declaring the block.
     findings.extend(skills.validate(data, pack_path))
+    # M8 A8 (ADR-027) — governed-agent validator, dispatched after
+    # skills per the positional-output contract. Kind-gated: the
+    # [agent] block is MANDATORY on kind="agent" packs; non-agent
+    # packs without one stay silent; non-agent packs WITH one are
+    # validated (block presence fires the arms for every kind,
+    # mirroring the skills validator).
+    findings.extend(agents.validate(data, pack_path))
     return findings
 
 

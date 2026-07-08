@@ -248,6 +248,24 @@ The M6 live proof (runs 19+20) surfaced that a runtime image's Docker `HEALTHCHE
 
 The **DockerSibling backend now sets `Healthcheck: {"Test": ["NONE"]}` on BOTH sandbox-created containers** (workload + egress-proxy sidecar, at the pure-functional config builders). Rationale: AgentOS owns sandbox lifecycle / exec / readiness directly and **never consumes Docker health state**; the egress ledger must record workload (and sidecar) behavior only, so image-declared healthchecks are pure noise plus an evidence-integrity risk — any tenant image built from a healthchecked base would otherwise reproduce the class. `NO_PROXY` remains **forbidden** (the anti-bypass doctrine at `_sandbox_container_env` stands; suppression happens at the container config, never by exempting loopback from the proxy). KubernetesPod is structurally unaffected — kubelet ignores Dockerfile `HEALTHCHECK`; probes are pod-spec-defined and the backend declares none on sandbox Pods. Pins (TM-revert-proven) at `tests/unit/sandbox/backends/test_docker_sibling_pure_helpers.py::TestContainerConfigsSuppressImageHealthchecks`, including the proxy-env-presence / `NO_PROXY`-absence and unchanged-security-defaults invariants.
 
+## Amendment — 2026-07-07 (M8 finding #5 — canonical image admission is private-infrastructure, never public-Rekor-dependent)
+
+The `sandbox/catalog.py` image-admission verify (`cosign verify --key <trust_root> <ref>`)
+implicitly required a PUBLIC Rekor transparency-log proof (the cosign 3.x default),
+which (a) an air-gapped bank deployment can never satisfy, and (b) made admission
+silently dependent on public Sigstore reachability — surfaced live at the M8 proof
+(run 6: the signer's TUF root fetch to `tuf-repo-cdn.sigstore.dev` timed out and
+cosign panicked; the M6 proof had passed only because the network held that day,
+quietly uploading per-run proof signatures to the public log). Fix: the verify argv
+carries `--private-infrastructure=true` — canonical image signatures are
+PRIVATE-INFRASTRUCTURE key signatures verified against the staged trust-root key
+alone; signature verification itself is unchanged. The proof runners sign with
+`--tlog-upload=false --use-signing-config=false` (no public upload, no TUF
+signing-config dependency), matching the wheel-signing path's air-gapped-correct
+posture per ADR-016's cosign-3.x bridge.
+Argv-shape pinned at `tests/unit/sandbox/test_image_catalog.py`; runner flags pinned
+by both proofs' structural suites.
+
 ## References
 - [Anthropic — Managed Agents: Decoupling brain from hands](https://www.anthropic.com/engineering/managed-agents)
 - [Local-First Agent Runtime](https://www.huuphan.com/2026/04/local-first-agent-runtime-guide.html)

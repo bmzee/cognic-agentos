@@ -33,12 +33,37 @@ class {{ class_name }}(Agent):
         return {...}
 ```
 
-## Agent cards
+## Agent cards + JWS key custody
 
 The `agent_cards/` directory holds your AGNTCY/OASF-formatted agent
-card + the JWS-signed envelope at the path declared in
+card (`agent-card.json`, tracked — it is the JWS payload) + the
+JWS-signed envelope at the path declared in
 `cognic-pack-manifest.toml`'s `identity.agent_card_jws_path`. Generate
 the JWS via `agentos sign --bundle .`.
+
+The AgentCard JWS signs with a SEPARATE cryptographic identity from
+the cosign wheel signature (M8 finding #4, ADR-016 amendment):
+
+  - `COGNIC_SIGNING_KEY_PATH` — the sigstore-encrypted cosign key
+    (wheel + attestations).
+  - `COGNIC_AGENT_CARD_JWS_SIGNING_KEY_PATH` — an UNENCRYPTED RSA
+    private PEM (RS256 detached JWS). Never the cosign key: neither
+    file format satisfies the other.
+
+Commit the matching RSA PUBLIC key as the tracked pack-root
+`agent-card.pub` (mirrors `cosign.pub`) BEFORE tag/release, and upload
+it as a release asset. `agentos verify` checks the JWS against
+`--agent-card-trust-root` / `COGNIC_AGENT_CARD_JWS_TRUST_ROOT_PATH` /
+the tracked `agent-card.pub` — never against `cosign.pub`.
+
+## Release assets
+
+Derive the release asset list from the actual `agentos sign --bundle .`
+output. For an agent pack that is: the wheel, the `attestations/`
+bundle (cosign.sig, bundle.sigstore, sbom.cdx.json,
+slsa-provenance.intoto.json, intoto-layout.json, vuln-scan.json,
+license-audit.json), `agent_cards/agent-card.jws`, plus the two
+tracked trust roots `cosign.pub` and `agent-card.pub`.
 
 ## Testing
 

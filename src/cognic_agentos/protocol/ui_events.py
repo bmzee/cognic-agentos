@@ -1216,6 +1216,143 @@ def _project_kill_switch_reverted(snapshot: AppendedDecisionSnapshot) -> KillSwi
     )
 
 
+# ---------------------------------------------------------------------------
+# M8 A12 (ADR-027 + ADR-020) — agent.run.* typed projectors
+# ---------------------------------------------------------------------------
+# Five chain decision_types (the A10 dispatch row + the four A11 run rows)
+# wire to four of the seven FROZEN agent_run model stubs:
+#   agent.run.started   → AgentRunStarted
+#   agent.run.dispatch  → AgentRunProgress   (the per-dispatch progress signal)
+#   agent.run.completed → AgentRunCompleted
+#   agent.run.refused   → AgentRunFailed     (see the projector docstring)
+#   agent.run.failed    → AgentRunFailed
+#
+# The rows are ALREADY digest-only per A10/A11 (ADR-027 §f — sha256 digests +
+# byte counts; question/answer/args plaintext never enters a payload), so the
+# projected ``data`` is a pure ``{**snapshot.payload}`` passthrough — no
+# filtering, no injection. ``run_id`` is lifted onto the declared
+# ``_BaseEvent.run_id`` field (isinstance-str guarded) so SSE subscribers can
+# filter agent runs by ``run_id`` like every other run-scoped family.
+
+
+def _agent_run_payload_run_id(snapshot: AppendedDecisionSnapshot) -> str | None:
+    """The payload's ``run_id`` for the ``_BaseEvent.run_id`` slot. Every
+    agent.run.* payload carries it (A10/A11 contract); the isinstance guard
+    is the evidence-boundary defence — a malformed value degrades to None."""
+    run_id = snapshot.payload.get("run_id")
+    return run_id if isinstance(run_id, str) else None
+
+
+def _project_agent_run_started(snapshot: AppendedDecisionSnapshot) -> AgentRunStarted:
+    """M8 A12 — agent.run.started → agent_run.started."""
+    return AgentRunStarted(
+        event_id=_chain_derived_event_id(
+            chain_id="decision_history",
+            sequence=snapshot.sequence,
+            ordinal=0,
+            family="agent_run",
+            type_="started",
+        ),
+        ts=snapshot.created_at,
+        tenant=snapshot.tenant_id,
+        run_id=_agent_run_payload_run_id(snapshot),
+        trace_id=snapshot.trace_id,
+        audit_chain_hash=_format_chain_hash(snapshot.new_hash),
+        data={**snapshot.payload},
+    )
+
+
+def _project_agent_run_dispatch(snapshot: AppendedDecisionSnapshot) -> AgentRunProgress:
+    """M8 A12 — agent.run.dispatch → agent_run.progress.
+
+    The A10 per-dispatch evidence row IS the run's progress signal (one row
+    per LLM-authored tool call, every arm — ok and refused alike); the
+    payload's ``outcome`` / ``refusal_reason`` / ``step_index`` keys ride
+    ``data`` untouched.
+    """
+    return AgentRunProgress(
+        event_id=_chain_derived_event_id(
+            chain_id="decision_history",
+            sequence=snapshot.sequence,
+            ordinal=0,
+            family="agent_run",
+            type_="progress",
+        ),
+        ts=snapshot.created_at,
+        tenant=snapshot.tenant_id,
+        run_id=_agent_run_payload_run_id(snapshot),
+        trace_id=snapshot.trace_id,
+        audit_chain_hash=_format_chain_hash(snapshot.new_hash),
+        data={**snapshot.payload},
+    )
+
+
+def _project_agent_run_completed(snapshot: AppendedDecisionSnapshot) -> AgentRunCompleted:
+    """M8 A12 — agent.run.completed → agent_run.completed."""
+    return AgentRunCompleted(
+        event_id=_chain_derived_event_id(
+            chain_id="decision_history",
+            sequence=snapshot.sequence,
+            ordinal=0,
+            family="agent_run",
+            type_="completed",
+        ),
+        ts=snapshot.created_at,
+        tenant=snapshot.tenant_id,
+        run_id=_agent_run_payload_run_id(snapshot),
+        trace_id=snapshot.trace_id,
+        audit_chain_hash=_format_chain_hash(snapshot.new_hash),
+        data={**snapshot.payload},
+    )
+
+
+def _project_agent_run_refused(snapshot: AppendedDecisionSnapshot) -> AgentRunFailed:
+    """M8 A12 — agent.run.refused → agent_run.failed.
+
+    The FROZEN agent_run family (ADR-020 backward-compat) has no "refused"
+    model, so a run-level bound refusal collapses onto :class:`AgentRunFailed`
+    (type="failed"). The payload's ``refusal_reason`` + ``bound`` keys (present
+    on refused rows, absent on failed rows, which carry ``error_class``
+    instead) distinguish the two on ``data`` — NOTHING is injected; the
+    projection is a pure payload passthrough.
+    """
+    return AgentRunFailed(
+        event_id=_chain_derived_event_id(
+            chain_id="decision_history",
+            sequence=snapshot.sequence,
+            ordinal=0,
+            family="agent_run",
+            type_="failed",
+        ),
+        ts=snapshot.created_at,
+        tenant=snapshot.tenant_id,
+        run_id=_agent_run_payload_run_id(snapshot),
+        trace_id=snapshot.trace_id,
+        audit_chain_hash=_format_chain_hash(snapshot.new_hash),
+        data={**snapshot.payload},
+    )
+
+
+def _project_agent_run_failed(snapshot: AppendedDecisionSnapshot) -> AgentRunFailed:
+    """M8 A12 — agent.run.failed → agent_run.failed (payload carries
+    ``error_class`` — the exception CLASS name, never str(exc))."""
+    return AgentRunFailed(
+        event_id=_chain_derived_event_id(
+            chain_id="decision_history",
+            sequence=snapshot.sequence,
+            ordinal=0,
+            family="agent_run",
+            type_="failed",
+        ),
+        ts=snapshot.created_at,
+        tenant=snapshot.tenant_id,
+        run_id=_agent_run_payload_run_id(snapshot),
+        trace_id=snapshot.trace_id,
+        audit_chain_hash=_format_chain_hash(snapshot.new_hash),
+        data={**snapshot.payload},
+    )
+
+
 #: Exact-match dispatch table from DH `decision_type` → typed projector.
 #: Prefix-matched `rbac.*` falls out of this map and into the dispatcher's
 #: prefix check below; `escalation.opened` falls out into the scoped subagent
@@ -1245,6 +1382,15 @@ _DECISION_HISTORY_TYPED_PROJECTORS: Final[
     # phase table).
     "emergency.kill_switch_flipped": _project_kill_switch_flipped,
     "emergency.kill_switch_reverted": _project_kill_switch_reverted,
+    # M8 A12 (ADR-027 + ADR-020) — agent.run.* chain event projectors.
+    # `agent.run.refused` and `agent.run.failed` both map to AgentRunFailed
+    # (the frozen family has no "refused" model); the payload's
+    # refusal_reason/bound vs error_class keys distinguish them on `data`.
+    "agent.run.started": _project_agent_run_started,
+    "agent.run.dispatch": _project_agent_run_dispatch,
+    "agent.run.completed": _project_agent_run_completed,
+    "agent.run.refused": _project_agent_run_refused,
+    "agent.run.failed": _project_agent_run_failed,
 }
 
 
@@ -1408,6 +1554,13 @@ _TYPED_PROJECTION_CLASSES: Final[frozenset[type]] = frozenset(
         # Sprint 13.6 T3 — kill_switch family wired (ADR-018).
         KillSwitchFlipped,
         KillSwitchReverted,
+        # M8 A12 (ADR-027 + ADR-020) — agent_run family wired classes.
+        # AgentRunCancelled / AgentRunPaused / AgentRunResumed stay schema-only
+        # stubs (no chain row projects them yet), so they are NOT members.
+        AgentRunStarted,
+        AgentRunProgress,
+        AgentRunCompleted,
+        AgentRunFailed,
     }
 )
 

@@ -19,6 +19,16 @@ jobs:
           python-version: "3.12"
       - run: pip install "cognic-agentos @ git+https://github.com/bmzee/cognic-agentos@v0.0.2"
       - run: agentos validate .
+      # AgentCard-JWS custody split (M8 finding #4): the cosign key and
+      # the RS256 AgentCard-JWS key are SEPARATE identities. Provide
+      # COGNIC_SIGNING_KEY_PATH (sigstore-encrypted cosign key) AND
+      # COGNIC_AGENT_CARD_JWS_SIGNING_KEY_PATH (unencrypted RSA PEM)
+      # as operator-custody secrets — never commit private keys.
       - run: agentos sign --bundle .
-      - run: agentos verify .
-      # AUTHOR-FILL: add a publishing step.
+      # Verify checks the wheel against cosign.pub and the AgentCard
+      # JWS against the tracked pack-root agent-card.pub (or pass
+      # --agent-card-trust-root explicitly).
+      - run: agentos verify --trust-root cosign.pub --agent-card-trust-root agent-card.pub .
+      # AUTHOR-FILL: add a publishing step. Agent-pack release assets:
+      # the wheel + the 7 attestations + agent_cards/agent-card.jws +
+      # the tracked trust roots cosign.pub AND agent-card.pub.

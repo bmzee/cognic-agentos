@@ -30,7 +30,7 @@ __all__ = [
 #: M6 Task A5 (ADR-025) — the executor-side pre-flight / infra refusal
 #: vocabulary. DISTINCT from the broker's ``SkillBrokerReason`` (which the
 #: executor surfaces as a PASSTHROUGH string, e.g. ``skill_tool_not_declared``):
-#: these three are the reasons the executor itself mints —
+#: these four are the reasons the executor itself mints —
 #:
 #:   * ``skill_not_found``       — the loader has no record for ``skill_id``
 #:     (absent / not hosted). Route → 404.
@@ -38,6 +38,10 @@ __all__ = [
 #:     registered state (executor-side defence in depth over the loader's
 #:     admission, mirroring ``core/run``'s ``pack_record_not_installed``).
 #:     Route → 409.
+#:   * ``skill_not_executable``  — the record is hosted in instruction mode
+#:     (M8 A7, ADR-027: SKILL.md guidance only — no entry point, no declared
+#:     tools, no runtime image) and therefore carries no executable action;
+#:     it must NEVER reach ``backend.create``. Route → 409.
 #:   * ``skill_runtime_error``   — the sandboxed runner crashed, timed out,
 #:     produced no parseable result frame, or ``create``/``exec`` raised.
 #:     Route → 502.
@@ -47,6 +51,7 @@ __all__ = [
 SkillInvokeRefusalReason = Literal[
     "skill_not_found",
     "skill_not_registered",
+    "skill_not_executable",
     "skill_runtime_error",
 ]
 
@@ -132,15 +137,27 @@ class LoadedSkillRecord:
     immutable, cosign-verified skill-runtime image the sandbox session runs;
     ``registered`` is the executor-side invokable-state gate (False → the
     executor refuses ``skill_not_registered``).
+
+    M8 A7 (ADR-027) — instruction-only mode: ``mode`` defaults to
+    ``"executable"`` (every pre-A7 record byte-unchanged). An instruction
+    record hosts SKILL.md guidance with NO executable surface — the loader
+    builds it with ``entry_point_name=None`` / ``declared_tools=()`` /
+    ``runtime_image=None``, and the executor's fail-closed mode guard refuses
+    it ``skill_not_executable`` before any sandbox work. ``skill_md_body`` is
+    carried ONLY for instruction records (the A10 ``read_skill`` source);
+    ``description`` is the validated SKILL.md frontmatter description.
     """
 
     skill_id: str
-    entry_point_name: str
-    declared_tools: tuple[str, ...]
-    runtime_image: str
+    entry_point_name: str | None = None
+    declared_tools: tuple[str, ...] = ()
+    runtime_image: str | None = None
     registered: bool = True
     pack_version: str = ""
     signed_artefact_digest: bytes = field(default=b"")
+    mode: Literal["executable", "instruction"] = "executable"
+    description: str = ""
+    skill_md_body: str | None = None
 
 
 @runtime_checkable

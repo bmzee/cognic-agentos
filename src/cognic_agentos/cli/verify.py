@@ -15,9 +15,20 @@ Shipped surface:
 
 The trust root supplied via ``--trust-root <path>`` (or
 ``vault://...`` URI resolved through the bundled SecretAdapter)
-is the single per-pack signer's public PEM. Wave-1 simplification
-per Doctrine F: single-signer Wave-1 (multi-signature attestations
-are out-of-scope).
+is the single per-pack signer's COSIGN public PEM. Wave-1
+simplification per Doctrine F: single-signer Wave-1
+(multi-signature attestations are out-of-scope).
+
+M8 finding #4c (ADR-016 amendment 2026-07-06) — AgentCard-JWS
+custody split: the AgentCard JWS (agent packs only) verifies
+against a SEPARATE RSA public key resolved at Step 9 with
+precedence ``--agent-card-trust-root`` flag →
+``Settings.agent_card_jws_trust_root_path``
+(``COGNIC_AGENT_CARD_JWS_TRUST_ROOT_PATH``) → the tracked
+pack-root ``agent-card.pub`` convention (mirrors ``cosign.pub``).
+The cosign trust root NEVER verifies the JWS — the two are
+different cryptographic identities (pre-fix one ``--trust-root``
+did impossible double duty).
 
 Per Doctrine Decision G this module is on the critical-controls
 floor (95% line / 90% branch). Halt-before-commit applies.
@@ -29,7 +40,12 @@ seeded in T1 + drift-detector pinned in
   - ``verify_trust_root_path_unresolvable`` — neither --trust-root
     flag nor ``Settings.signing_trust_root_path`` set; flag points
     at a non-existent file; ``vault://`` URI returns no payload /
-    malformed payload / SecretAdapter raises.
+    malformed payload / SecretAdapter raises. M8 finding #4c adds
+    the agent-card arm: ``failure_mode=agent_card_trust_root_unset``
+    when an agent pack has neither ``--agent-card-trust-root`` nor
+    ``Settings.agent_card_jws_trust_root_path`` nor a pack-root
+    ``agent-card.pub`` (the same vault/file failure modes apply to
+    the agent-card root once configured).
   - ``verify_cosign_signature_invalid`` — cosign verify-blob exits
     non-zero; cosign binary missing entirely (mapped here since
     "tool missing" is indistinguishable from "signature invalid"
@@ -53,7 +69,8 @@ seeded in T1 + drift-detector pinned in
     agent_card_jws_path.
   - ``verify_agent_card_jws_invalid`` — joserfc detached-payload
     deserialize_compact raises BadSignatureError / DecodeError /
-    ValueError on the JWS bytes against the trust-root public PEM.
+    ValueError on the JWS bytes against the AgentCard-JWS trust
+    root's RSA public PEM (M8 finding #4c: never the cosign root).
 
 Production behaviour (Doctrine F):
 
@@ -192,9 +209,13 @@ async def _resolve_trust_root(
     settings: Settings,
     secret_adapter: SecretAdapter | None = None,
 ) -> tuple[str | None, Path | None, VerifyFinding | None]:
-    """Resolve the trust-root path from the --trust-root flag (preferred)
-    or ``Settings.signing_trust_root_path``. Returns
+    """Resolve the COSIGN trust-root path from the --trust-root flag
+    (preferred) or ``Settings.signing_trust_root_path``. Returns
     ``(trust_root_path_for_cosign, tempfile_to_cleanup, finding)``.
+
+    M8 finding #4c: this root is cosign-only — AgentCard-JWS
+    verification (Step 9) resolves its OWN root via
+    :func:`_resolve_agent_card_trust_root` and never reads this one.
 
     Vault URIs are read via the SecretAdapter; payload shape is
     ``{"key": <pem-bytes>}`` mirroring the signing-key resolution at
@@ -218,7 +239,97 @@ async def _resolve_trust_root(
                 payload={"failure_mode": "trust_root_unset"},
             ),
         )
+    return await _resolve_trust_root_material(
+        configured,
+        settings=settings,
+        secret_adapter=secret_adapter,
+        flag_label="--trust-root",
+        setting_label="signing_trust_root_path",
+    )
 
+
+async def _resolve_agent_card_trust_root(
+    *,
+    cli_agent_card_trust_root: str | None,
+    settings: Settings,
+    pack_path: Path,
+    secret_adapter: SecretAdapter | None = None,
+) -> tuple[str | None, Path | None, VerifyFinding | None]:
+    """Resolve the AgentCard-JWS trust root (M8 finding #4c — SEPARATE
+    custody from the cosign trust root; the JWS is NEVER verified
+    against ``cosign.pub``). Returns
+    ``(agent_card_trust_root_path, tempfile_to_cleanup, finding)``.
+
+    Resolution precedence:
+      1. ``--agent-card-trust-root`` flag.
+      2. ``Settings.agent_card_jws_trust_root_path``
+         (``COGNIC_AGENT_CARD_JWS_TRUST_ROOT_PATH``).
+      3. The tracked pack-root ``<pack>/agent-card.pub`` convention
+         (mirrors ``cosign.pub``: committed in the agent pack before
+         tag/release + uploaded as a release asset).
+    All three unset/absent → closed-enum
+    ``verify_trust_root_path_unresolvable`` with
+    ``failure_mode=agent_card_trust_root_unset`` — never a silent
+    fall-back to the cosign trust root.
+    """
+    configured = (
+        cli_agent_card_trust_root
+        if cli_agent_card_trust_root is not None
+        else settings.agent_card_jws_trust_root_path
+    )
+    if configured is None:
+        pack_root_pub = pack_path / "agent-card.pub"
+        if pack_root_pub.is_file():
+            configured = str(pack_root_pub)
+        else:
+            return (
+                None,
+                None,
+                VerifyFinding(
+                    severity="refusal",
+                    reason="verify_trust_root_path_unresolvable",
+                    message=(
+                        "agent pack: neither --agent-card-trust-root flag nor "
+                        "COGNIC_AGENT_CARD_JWS_TRUST_ROOT_PATH env (or "
+                        "Settings.agent_card_jws_trust_root_path) is set, and "
+                        f"no tracked {pack_root_pub} exists. The AgentCard JWS "
+                        "verifies against its OWN RSA public key — commit the "
+                        "pack-root agent-card.pub (the cosign.pub-mirroring "
+                        "convention), or pass --agent-card-trust-root "
+                        "<path-to-rsa-public-pem>, or set the env var. The "
+                        "cosign trust root is a DIFFERENT cryptographic "
+                        "identity and is never used for the JWS (M8 finding #4)."
+                    ),
+                    payload={
+                        "failure_mode": "agent_card_trust_root_unset",
+                        "pack_root_candidate": str(pack_root_pub),
+                    },
+                ),
+            )
+    return await _resolve_trust_root_material(
+        configured,
+        settings=settings,
+        secret_adapter=secret_adapter,
+        flag_label="--agent-card-trust-root",
+        setting_label="agent_card_jws_trust_root_path",
+    )
+
+
+async def _resolve_trust_root_material(
+    configured: str,
+    *,
+    settings: Settings,
+    secret_adapter: SecretAdapter | None,
+    flag_label: str,
+    setting_label: str,
+) -> tuple[str | None, Path | None, VerifyFinding | None]:
+    """Shared trust-root material resolution (M8 finding #4c factored
+    the Sprint-7A cosign resolver's vault:// + file branches into this
+    parameterized core so the AgentCard-JWS custody wrapper reuses
+    them instead of forking). ``configured`` is non-None — the
+    per-custody unset refusals live in the wrappers (the agent-card
+    wrapper additionally owns the pack-root ``agent-card.pub``
+    fallback)."""
     if configured.startswith("vault://"):
         if secret_adapter is None:
             try:
@@ -231,7 +342,7 @@ async def _resolve_trust_root(
                         severity="refusal",
                         reason="verify_trust_root_path_unresolvable",
                         message=(
-                            f"Settings.signing_trust_root_path={configured!r} is a "
+                            f"Settings.{setting_label}={configured!r} is a "
                             f"vault:// URI but SecretAdapter construction "
                             f"failed: {type(exc).__name__}: {exc}."
                         ),
@@ -255,8 +366,8 @@ async def _resolve_trust_root(
                     reason="verify_trust_root_path_unresolvable",
                     message=(
                         f"SecretAdapter has no trust-root payload at "
-                        f"{secret_path!r} (resolved from --trust-root / "
-                        f"Settings.signing_trust_root_path={configured!r})."
+                        f"{secret_path!r} (resolved from {flag_label} / "
+                        f"Settings.{setting_label}={configured!r})."
                     ),
                     payload={
                         "configured_trust_root": configured,
@@ -349,7 +460,7 @@ async def _resolve_trust_root(
                 severity="refusal",
                 reason="verify_trust_root_path_unresolvable",
                 message=(
-                    f"--trust-root / Settings.signing_trust_root_path="
+                    f"{flag_label} / Settings.{setting_label}="
                     f"{configured!r} does not resolve to a file on disk."
                 ),
                 payload={
@@ -1357,7 +1468,7 @@ def _read_signed_wheel_dist_info_metadata(
     expected_project_name: str,
     expected_version: str,
 ) -> tuple[
-    tuple[str, str, str, tuple[tuple[str, str], ...]] | None,
+    tuple[str, str, str, tuple[tuple[str, str], ...], str | None] | None,
     VerifyFinding | None,
 ]:
     """Verify-side adapter over :func:`cli._wheel_integrity.read_signed_wheel_dist_info_metadata`.
@@ -1378,12 +1489,19 @@ def _read_signed_wheel_dist_info_metadata(
     exactly the same source that the integrity helper validated, and
     probes each declared cognic entry point — never just the first
     one.
+
+    M8 finding #3: the helper's additive 5th slot carries the
+    validated instruction stub-package name for zero-entry-point
+    instruction-skill content wheels (derived kind ``"skill"`` + EMPTY
+    entry-point tuple) and ``None`` for every entry-point wheel. Step
+    11's instruction arm MUST use this returned name directly for the
+    module-import probe — same no-re-discovery doctrine.
     """
     from cognic_agentos.cli._wheel_integrity import (
         read_signed_wheel_dist_info_metadata as _shared_read,
     )
 
-    quadruple, failure = _shared_read(
+    quintuple, failure = _shared_read(
         wheel_path,
         expected_project_name=expected_project_name,
         expected_version=expected_version,
@@ -1396,7 +1514,7 @@ def _read_signed_wheel_dist_info_metadata(
             message=f"verify: {failure.message}",
             payload=payload,
         )
-    return quadruple, None
+    return quintuple, None
 
 
 def _check_sbom_digest_against_slsa(
@@ -2081,13 +2199,16 @@ def _verify_agent_card_jws(
 ) -> VerifyFinding | None:
     """Cryptographically verify the detached JWS at ``jws_path``
     against the on-disk card payload at ``card_path`` using the
-    trust-root public PEM at ``trust_root_path``.
+    AgentCard-JWS trust root's RSA public PEM at ``trust_root_path``
+    (M8 finding #4c: the caller resolves this via
+    :func:`_resolve_agent_card_trust_root` — flag → setting →
+    pack-root ``agent-card.pub`` — never the cosign trust root).
 
     Mirrors ``protocol/trust_gate.verify_jws_blob``'s detached-payload
     verification path. Wave-1 simplification: single-signer Wave-1, no
     kid resolution against a per-tenant keyring (the Vault-keyring
-    path is the runtime trust gate's; verify --trust-root is a single
-    PEM).
+    path is the runtime trust gate's; the resolved agent-card trust
+    root is a single PEM).
     """
     from joserfc import jws as _jws_module
     from joserfc.errors import BadSignatureError, DecodeError, JoseError
@@ -2187,6 +2308,7 @@ async def run_verify(
     settings: Settings,
     *,
     trust_root: str | None = None,
+    agent_card_trust_root: str | None = None,
     secret_adapter: SecretAdapter | None = None,
 ) -> VerifyReport:
     """Build + return the :class:`VerifyReport` for the supplied
@@ -2203,7 +2325,12 @@ async def run_verify(
       7. SLSA provenance validity (envelope type + predicate type +
          subject digest matches on-disk wheel).
       8. in-toto layout validity (_type + artifact_paths).
-      9. AgentCard JWS verification (agent packs only).
+      9. AgentCard JWS verification (agent packs only) against the
+         SEPARATE AgentCard-JWS trust root (M8 finding #4c custody
+         split): ``--agent-card-trust-root`` flag →
+         ``Settings.agent_card_jws_trust_root_path`` → the tracked
+         pack-root ``agent-card.pub`` convention — NEVER the cosign
+         trust root from step 1.
      10. Manifest re-validation via the full validate pipeline; any
          refusal flows back as a VerifyFinding.
 
@@ -2234,6 +2361,8 @@ async def run_verify(
             pack_path=pack_path,
             settings=settings,
             trust_root_path=trust_root_path,
+            agent_card_trust_root=agent_card_trust_root,
+            secret_adapter=secret_adapter,
             findings=findings,
             artifacts_verified=artifacts_verified,
         )
@@ -2247,11 +2376,19 @@ async def _run_verify_inner(
     pack_path: Path,
     settings: Settings,
     trust_root_path: str,
+    agent_card_trust_root: str | None,
+    secret_adapter: SecretAdapter | None,
     findings: list[VerifyFinding],
     artifacts_verified: list[str],
 ) -> VerifyReport:
     """Inner verify body factored out so the caller can wrap the
-    trust-root tempfile cleanup in a single try/finally."""
+    trust-root tempfile cleanup in a single try/finally.
+
+    ``trust_root_path`` is the step-1-resolved COSIGN root;
+    ``agent_card_trust_root`` is the RAW ``--agent-card-trust-root``
+    flag value — Step 9 resolves the AgentCard-JWS root itself
+    (flag → setting → pack-root ``agent-card.pub``) because only the
+    agent-pack arm consumes it (M8 finding #4c)."""
     # Step 2: manifest pack kind.
     pack_id, pack_kind, manifest_finding = _read_pack_kind_for_verify(pack_path)
     if manifest_finding is not None:
@@ -2585,7 +2722,7 @@ async def _run_verify_inner(
     # R6 P2 #2: parse wheel METADATA Name + Version + cross-check
     #           against pyproject (the orchestrator additionally
     #           cross-checks against SLSA + in-toto in steps 7-8).
-    wheel_metadata_quadruple, wheel_kind_finding = _read_signed_wheel_dist_info_metadata(
+    wheel_metadata_quintuple, wheel_kind_finding = _read_signed_wheel_dist_info_metadata(
         wheel_path,
         expected_project_name=project_name,
         expected_version=project_version,
@@ -2598,13 +2735,19 @@ async def _run_verify_inner(
             overall_status="fail",
             findings=findings,
         )
-    assert wheel_metadata_quadruple is not None
+    assert wheel_metadata_quintuple is not None
+    # M8 finding #3: the 5th slot is the validated instruction stub-
+    # package name (non-None ONLY for zero-entry-point instruction-skill
+    # content wheels, which carry derived kind "skill" + an EMPTY
+    # validated entry-point tuple). The final-gate load probe's
+    # instruction arm consumes it for the module-import probe.
     (
         wheel_metadata_name,
         wheel_metadata_version,
         derived_pack_kind,
         validated_entry_points,
-    ) = wheel_metadata_quadruple
+        instruction_package_name,
+    ) = wheel_metadata_quintuple
     if derived_pack_kind != pack_kind:
         findings.append(
             VerifyFinding(
@@ -2729,14 +2872,44 @@ async def _run_verify_inner(
     artifacts_verified.append(str(attestations_dir / "license-audit.json"))
 
     # Step 9: AgentCard JWS verification (agent packs only).
+    # M8 finding #4c custody split: the JWS verifies against the
+    # SEPARATE AgentCard-JWS trust root (flag →
+    # Settings.agent_card_jws_trust_root_path → pack-root
+    # agent-card.pub) — NEVER the step-1 cosign trust root. The cosign
+    # public key and the RS256 AgentCard-JWS public key are different
+    # cryptographic identities; pre-fix one --trust-root did impossible
+    # double duty.
     if pack_kind == "agent":
         assert agent_card_jws_path is not None
         assert agent_card_path is not None
-        jws_verify_finding = _verify_agent_card_jws(
-            card_path=agent_card_path,
-            jws_path=agent_card_jws_path,
-            trust_root_path=trust_root_path,
+        (
+            agent_card_root_path,
+            agent_card_root_tempfile,
+            agent_card_root_finding,
+        ) = await _resolve_agent_card_trust_root(
+            cli_agent_card_trust_root=agent_card_trust_root,
+            settings=settings,
+            pack_path=pack_path,
+            secret_adapter=secret_adapter,
         )
+        if agent_card_root_finding is not None:
+            findings.append(agent_card_root_finding)
+            return VerifyReport(
+                operation="verify",
+                target_path=str(pack_path),
+                overall_status="fail",
+                findings=findings,
+            )
+        assert agent_card_root_path is not None
+        try:
+            jws_verify_finding = _verify_agent_card_jws(
+                card_path=agent_card_path,
+                jws_path=agent_card_jws_path,
+                trust_root_path=agent_card_root_path,
+            )
+        finally:
+            if agent_card_root_tempfile is not None:
+                agent_card_root_tempfile.unlink(missing_ok=True)
         if jws_verify_finding is not None:
             findings.append(jws_verify_finding)
             return VerifyReport(
@@ -2801,34 +2974,77 @@ async def _run_verify_inner(
     # helper validated — instead of re-reading the wheel. Every
     # declared cognic entry point is probed; the first failure routes
     # to refusal.
-    from cognic_agentos.cli._load_probe import probe_entry_point_loadability
+    #
+    # M8 finding #3 — instruction arm: instruction-skill content wheels
+    # (derived kind "skill", zero entry points BY DESIGN) still get a
+    # REAL final isolated probe — the module-import probe over the
+    # validated stub package the integrity helper threaded through
+    # (never skipped; never a faked EntryPoint). The
+    # ``load_probe_no_validated_entry_points`` fail-closed branch
+    # REMAINS for every non-instruction empty-entry-point case.
+    from cognic_agentos.cli._load_probe import (
+        probe_entry_point_loadability,
+        probe_module_importability,
+    )
 
     if not validated_entry_points:
-        # Defense-in-depth fail-closed: ``wheel_empty_cognic_entry_point_group``
-        # would have fired upstream; if execution reaches step 11 with
-        # an empty entry-point tuple something is structurally wrong.
-        findings.append(
-            VerifyFinding(
-                severity="refusal",
-                reason="verify_entry_point_load_failed",
-                message=(
-                    "verify: wheel-integrity returned no validated entry "
-                    "points yet reached step 11 — cannot establish "
-                    "loadability. Refusing fail-closed."
-                ),
-                payload={
-                    "wheel_path": str(wheel_path),
-                    "failure_mode": "load_probe_no_validated_entry_points",
-                },
+        if instruction_package_name is not None:
+            # Instruction wheel — Step 11 runs the module-import probe
+            # against exactly the package the integrity helper
+            # validated (no re-discovery).
+            load_probe_failure = await probe_module_importability(
+                wheel_path,
+                module_path=instruction_package_name,
+                timeout_s=settings.load_probe_timeout_s,
             )
-        )
-        return VerifyReport(
-            operation="verify",
-            target_path=str(pack_path),
-            overall_status="fail",
-            findings=findings,
-            artifacts_verified=artifacts_verified,
-        )
+            if load_probe_failure is not None:
+                findings.append(
+                    VerifyFinding(
+                        severity="refusal",
+                        reason="verify_entry_point_load_failed",
+                        message=f"verify: {load_probe_failure.message}",
+                        payload={
+                            **load_probe_failure.payload,
+                            "failure_mode": load_probe_failure.failure_mode,
+                            "instruction_package": instruction_package_name,
+                        },
+                    )
+                )
+                return VerifyReport(
+                    operation="verify",
+                    target_path=str(pack_path),
+                    overall_status="fail",
+                    findings=findings,
+                    artifacts_verified=artifacts_verified,
+                )
+        else:
+            # Defense-in-depth fail-closed:
+            # ``wheel_empty_cognic_entry_point_group`` would have fired
+            # upstream; if execution reaches step 11 with an empty
+            # entry-point tuple AND no validated instruction package,
+            # something is structurally wrong.
+            findings.append(
+                VerifyFinding(
+                    severity="refusal",
+                    reason="verify_entry_point_load_failed",
+                    message=(
+                        "verify: wheel-integrity returned no validated entry "
+                        "points yet reached step 11 — cannot establish "
+                        "loadability. Refusing fail-closed."
+                    ),
+                    payload={
+                        "wheel_path": str(wheel_path),
+                        "failure_mode": "load_probe_no_validated_entry_points",
+                    },
+                )
+            )
+            return VerifyReport(
+                operation="verify",
+                target_path=str(pack_path),
+                overall_status="fail",
+                findings=findings,
+                artifacts_verified=artifacts_verified,
+            )
     for probe_module, probe_object in validated_entry_points:
         load_probe_failure = await probe_entry_point_loadability(
             wheel_path,

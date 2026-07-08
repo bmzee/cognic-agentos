@@ -33,6 +33,19 @@ push_notification_config = false
 extended_agent_card = false
 artifacts_supported = false
 
+# M8 A8 (ADR-027): the [agent] block is MANDATORY on kind="agent" packs —
+# the governed agent loop resolves the AGENT.md persona + the requested
+# capability CEILINGS (the grant-not-requested ingestion invariant's upper
+# bound) through it. persona_path resolves against the pack root at build
+# time; the pyproject's force-include ships the same AGENT.md as package
+# data so the runtime hosting layer (protocol/agent_manifest.py) reads it
+# from the installed wheel WITHOUT importing pack code.
+[agent]
+persona_path = "AGENT.md"
+requested_skills = ["example-skill"]
+requested_tools = ["example-server/example_tool"]
+max_steps = 4
+
 [data_governance]
 data_classes = ["public", "internal"]
 purpose = "operational_telemetry"

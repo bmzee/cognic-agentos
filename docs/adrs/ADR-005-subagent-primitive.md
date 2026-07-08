@@ -130,6 +130,10 @@ The portal trigger (above) left a high-risk `pending_approval` child as a docume
 4. **The threading.** `approval_request_id` flows portal body (`uuid.UUID`) → `SubAgentSpawnRequest` (`str`) → `ChildRunContext` (`str`, built in `spawn.py`) → the runner parses `str → uuid.UUID` → `RunRequest.approval_request_id`. (The `spawn.py` `request → ChildRunContext` link was an integration gap the operator e2e surfaced + closed — the unit tests structurally missed it: T2 set the context directly, T5 stubbed the spawner.)
 5. **CC + scope.** Edits to already-on-gate modules (`subagent/audit.py`/`spawn.py`/`_types.py`/`managed_run_runner.py` + `protocol/ui_events.py`); **no new gate module**, every change backward-compatible-additive, **no migration**. `core-controls-engineer` + `/critical-module-mode`. **Deferred:** a dedicated subagent resume endpoint + same-spawn correlation/finalization; the in-workload channel (Fork A).
 
+## M8 amendment (2026-07-05) — ADR-027's kernel loop is the top-level agent runtime; spawn integration from the loop is deferred
+
+ADR-027 (governed agent loop, milestone M8) lands the kernel-owned **top-level agent runtime**: `core/agent/loop.py` frames the untrusted LLM and `core/agent/dispatch.py` owns every authority decision for a declarative agent pack — the "lead agent" this ADR's orchestrator-worker pattern presumes now exists as a production runtime. **Sub-agent spawn integration from that loop is deferred**: the M8 dispatch capability vocabulary (`skill` / `tool` / `builtin`) deliberately carries no spawn kind, and the loop makes no call into this ADR's spawn seam (`SubAgentSpawner` / `POST /api/v1/subagents`). Wiring the ADR-027 dispatcher to sub-agent spawn — with parent-budget narrowing via the landed `SchedulerTaskParentBudgetResolver` — is a follow-up milestone. Additive; no change to this ADR's existing decisions.
+
 ## References
 - [Anthropic — Sub-agents in Claude Code](https://docs.anthropic.com/en/docs/claude-code/sub-agents)
 - [The Architecture of Scale: Anthropic's Sub-Agents — Medium](https://medium.com/@jiten.p.oswal/the-architecture-of-scale-a-deep-dive-into-anthropics-sub-agents-6c4faae1abda)

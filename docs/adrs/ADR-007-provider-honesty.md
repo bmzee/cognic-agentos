@@ -67,6 +67,34 @@ The Master Strategy v5.0 mandates **"Self-Hosted-First posture"** as one of the 
 - Phase 2: Tech Console "Provider audit" tab
 - Phase 3: alert on drift (PROFILE flips from `self-hosted` to `self-hosted (DRIFT)`) — emits a SIEM event
 
+## Amendment (2026-07-08) — LiteLLM proxy alias-echo provenance (M8 finding #8)
+
+The post-response provenance recheck (`llm/gateway.py::_build_actual_resolved`)
+originally resolved the actual upstream ONLY by reverse-looking-up the LiteLLM
+response `model` field against the resolved provider model_strings in the config
+(`PreflightResolver.reverse_lookup`). The unit fixtures returned the resolved
+model_string in that field, so the design was never exercised against the real
+LiteLLM **proxy**, which echoes the requested deployment **alias** (e.g.
+`cognic-tier1-proof-m8`) as the response `model` — a third shape the code never
+modeled. Surfaced live at the M8 proof (run 11): the first governed cloud call
+succeeded, but the recheck found the alias in `reverse_lookup` (which matches
+only resolved model_strings) → 0 matches → provenance `unresolved` → the
+cloud-policy gate correctly refused ("cannot truthfully report which upstream
+LiteLLM dispatched against").
+
+Amendment: when the response `model` equals the EXACT alias this gateway
+dispatched (`actual_model_string == preflight_resolved.alias`), the **forward
+preflight resolution is authoritative provenance** — the gateway knows it
+dispatched that alias and LiteLLM confirmed it processed that exact alias, which
+forward-resolves to one unambiguous upstream. The ledger/span record the REAL
+resolved upstream (`openai/gpt-4o`, `external=true`, provenance `resolved`),
+never the alias. This is the ONLY relaxation: a DIFFERENT alias echoed, an
+unknown model string, a missing/non-string `model` field, and an ambiguous
+reverse-lookup all remain fail-closed. Pinned by
+`tests/unit/llm/test_gateway_post_dispatch_strict_discipline.py::TestLiteLLMProxyAliasEchoProvenance`
+(positive: alias-echo → resolved with the real upstream; negative: a different
+alias stays unresolved) + a TM-revert.
+
 ## References
 - Cognic Master Strategy v5.0 — Self-Hosted-First principle
 - Investigation log 2026-04-25 (cognic monorepo local-smoke) — discovered the gap

@@ -4,7 +4,7 @@
 # Two final stages (selected via `--target`):
 #
 #   1. runtime              — kernel image: server + observability only.
-#                             ≤120 MiB. Adapter Python packages NOT installed
+#                             ≤135 MiB. Adapter Python packages NOT installed
 #                             (operators run plugin-pack adapters here, or
 #                             prefer the slimmer kernel for a custom build).
 #                             Uvicorn factory: create_app (no adapter probing).
@@ -16,7 +16,7 @@
 #                             Dynatrace (Metric Ingest API) /
 #                             OpenAI-compat embedding (vLLM / SGLang /
 #                             OpenAI / Azure-via-shim).
-#                             ≤220 MiB. Built via `--extra adapters` so the
+#                             ≤385 MiB. Built via `--extra adapters` so the
 #                             [project.optional-dependencies] adapters group
 #                             lands in /opt/venv. Uvicorn factory:
 #                             create_prod_app (lifespan probes adapters).
@@ -37,10 +37,17 @@
 #                             Measured default-adapters reality: 356-
 #                             359 MiB, so the workflow budget was
 #                             revised in T13-followup from 220 → 370
-#                             MiB (measured + small buffer). Kernel
-#                             ≤120 MiB budget is unaffected — kernel
-#                             image explicitly does NOT carry either
-#                             binary.
+#                             MiB (measured + small buffer); Sprint-7A
+#                             T17-followup raised it again 370 → 385
+#                             MiB (joserfc + typer + click + jinja2 +
+#                             markupsafe for the `agentos` CLI; 374
+#                             MiB measured + ~11 MiB buffer). The
+#                             kernel budget was unchanged at those
+#                             times; the current live kernel budget is
+#                             ≤135 MiB (M8 2026-07-08, per the ADR-024
+#                             amendment "Kernel image budget 120 →
+#                             135 MiB"). Kernel image explicitly does
+#                             NOT carry either binary.
 #                             Sprint 5 T2 added the official `mcp` SDK
 #                             v1.27.0 to the adapters extras group
 #                             (NOT to base dependencies). Kernel image
@@ -188,8 +195,9 @@ WORKDIR /build
 # `default-adapters` image copies /opt/venv and never sees gcc.
 # binutils: provides `strip`. Source-built .so files retain debug
 # symbols by default; stripping oracledb's four compiled extensions
-# alone reclaims ~22 MiB and is what brings the image under the
-# 220 MiB ceiling.
+# alone reclaims ~22 MiB — at Sprint 1D this is what brought the image
+# under the then-live 220 MiB ceiling (the live budget has since been
+# raised to ≤385 MiB; see the stage-map header at the top of this file).
 RUN apk add --no-cache ca-certificates curl gcc musl-dev linux-headers binutils
 ADD https://astral.sh/uv/0.5.29/install.sh /uv-install.sh
 RUN sh /uv-install.sh && rm /uv-install.sh

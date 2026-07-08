@@ -31,6 +31,18 @@ push_notification_config = false
 extended_agent_card = false
 artifacts_supported = false
 
+# M8 A8 (ADR-027): the [agent] block is MANDATORY on kind="agent" packs —
+# the governed agent loop resolves the persona + requested capability sets
+# through it (cli/validators/agents.py refuses agent_manifest_block_missing
+# otherwise, and verify Step 10 re-runs the full validate pipeline). Minimal
+# well-formed shapes; AGENT.md ships at the pack root where the build-time
+# validator resolves persona_path against the pack directory.
+[agent]
+persona_path = "AGENT.md"
+requested_skills = ["example-skill"]
+requested_tools = ["example-server/example_tool"]
+max_steps = 4
+
 [data_governance]
 data_classes = ["public", "internal"]
 purpose = "operational_telemetry"

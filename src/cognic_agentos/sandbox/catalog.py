@@ -426,6 +426,18 @@ class CanonicalImageCatalog:
                 "verify",
                 "--key",
                 str(trust_root),
+                # M8 finding #5 (ADR-016/ADR-004 amendment, 2026-07-07):
+                # canonical image signatures are PRIVATE-INFRASTRUCTURE key
+                # signatures. Without this flag cosign 3.x demands a PUBLIC
+                # Rekor transparency-log proof, which (a) an air-gapped bank
+                # deployment can never satisfy and (b) made image admission
+                # silently dependent on public Sigstore reachability (the
+                # M6/M8 proof signers uploaded to the public log whenever
+                # the network allowed — the wheel-signing path was already
+                # air-gapped-correct via --tlog-upload=false + offline
+                # bundles; this brings image admission in line). Signature
+                # verification against the trust-root key is UNCHANGED.
+                "--private-infrastructure=true",
                 full_ref,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
