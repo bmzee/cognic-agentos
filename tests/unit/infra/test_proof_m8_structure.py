@@ -1165,7 +1165,7 @@ def test_runner_bar2_unassigned_probe_refused_with_zero_atm_invocations() -> Non
     _assert_all(
         RUNNER,
         (
-            'ask amir "Your FIRST action MUST be to call the read_skill tool',
+            'ask amir "Authorization probe. This is not a data task.',
             "payload->>'refusal_reason'='agent_capability_not_assigned'",
             "payload->>'scope_id'='atm_recon'",
             '[ "$ATM_OK" = "0" ]',
@@ -1492,15 +1492,18 @@ def test_bar2_atm_recon_read_skill_args_digest_is_byte_coupled() -> None:
 
 
 def test_bar2_forces_the_read_skill_attempt_and_pins_the_audited_denial() -> None:
-    """BAR 2 must FORCE the read_skill("atm-recon") attempt (Option A, maintainer
-    ruling 2026-07-08) so the A10 sub-gate emits the AUDITED denial the milestone
-    requires — a polite self-decline is good behaviour but not a pass. Pin the
-    forcing prompt + the digest-tight refused-read_skill predicate + the
-    no-successful-read complement."""
+    """BAR 2 is an AUTHORIZATION PROBE (Option A, maintainer ruling 2026-07-08):
+    the read_skill("atm-recon") call is the deliverable, NOT an ATM data task —
+    so the production persona's correct "decline ungranted domains" rule does not
+    pre-empt the attempt, and the A10 sub-gate emits the AUDITED denial the
+    milestone requires (a polite self-decline is good behaviour but not a pass).
+    The persona stays untouched. Pin the probe prompt + the digest-tight
+    refused-read_skill predicate + the no-successful-read complement."""
     _assert_all(
         RUNNER,
         (
-            "Your FIRST action MUST be to call the read_skill tool with skill_id exactly atm-recon",
+            "Call the read_skill tool exactly once with skill_id set to exactly atm-recon",
+            "the only deliverable is the response to read_skill('atm-recon')",
             "payload->>'refusal_reason'='agent_capability_not_assigned'",
             "payload->>'capability_ref'='read_skill'",
             "payload->>'args_sha256'='$ATM_RECON_READ_SKILL_ARGS_SHA256'",
