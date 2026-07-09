@@ -105,6 +105,80 @@ Studio/no-code authoring and Cognic Forge remain outside this v1 completion chec
 
   **Evidence (2026-07-08 — PASS, run 16 on `kind`):** the released `cognic-agent-bank-analyst@v0.1.0` (persona + *requested* capability sets, inert marker — no agent code) ran the kernel-owned single-shot loop against a REAL cloud model (LiteLLM → OpenAI `gpt-4o`), read a hosted `SKILL.md` skill, authored read-only SQL over its governed views, invoked the operator-installed `cognic-tool-oracle-schema@v0.3.0` tool under a kernel-signed query-context, and completed the task. **Load-bearing proof holds:** an unassigned skill (`read_skill(atm-recon)` → `agent_capability_not_assigned`, BAR 2) and an unentitled scope (`agent_scope_not_entitled`, BAR 3) are refused at the kernel chokepoint and **audited**. Scope note: "records memory/audit" = a **task-tier memory-digest write** (BAR 1's `memory.write` chain row) + the digest-only dispatch/audit chain; richer scratch/task/long-term memory governance is **M9**. BAR 4's SQL guards (`agent_sql_object_out_of_scope` / `sql_not_select_only`) are proven as **tool-layer defense-in-depth via deterministic minted-token probes**, not as agent-authored SQL escape. Five kernel critical-controls slices landed under the gate (149 files; `protocol/mcp_authz.py` byte-identical throughout). Full detail + honesty boundary: `docs/VALIDATION-RESULTS.md` — "M8 — Governed agent loop (ADR-027) — PASS".
 
+**M8.5 — Production conversational analytical agent program (ADR-028).** Six ordered milestones that carry AgentOS from the M8 single-shot loop to a pilot-ready conversational product. Design rationale + the named prerequisites HP-1…HP-3 live in `docs/superpowers/specs/2026-07-08-adr-028-conversational-sessions-design.md` §0; **this checklist owns the checkboxes and the evidence.** `M8.5-A` is a hard gate before any harness/agent/AKS spend; `M8.5-F` is a hard gate before any bank pilot.
+
+- [ ] **M8.5-A — Conversation substrate (hard gate).**
+
+  **Goal:** the kernel-owned conversation primitive — `conversations` + `conversation_turns` store, bounded-replay context assembly, and a turn loop wrapping the M8 `AgentLoop`. No harness, no new bank agent.
+
+  **Production proof:** BARs 1–3 on `kind`, reusing the M8 agent + oracle packs; the only new surface under test is `/api/v1/conversations`.
+
+  **Load-bearing proof:** BAR 2 — the API accepts no client-supplied history in any form; a crafted payload is refused by schema (`extra="forbid"`). BAR 3 — an entitlement removed *between* turns causes the next turn's affected dispatch to refuse `agent_scope_not_entitled`, audited: proof the envelope is re-evaluated per turn and never cached.
+
+  **Evidence required:** `kind` proof log + the three-hop chain join (`conversation → agent_run → dispatch`).
+
+  **Gate:** nothing downstream starts until this passes.
+
+- [ ] **M8.5-B — Harness enablement APIs.**
+
+  **Goal:** HP-1 — the transcript + `conversation → agent_run → dispatch` chain-join read API the evidence viewer renders. HP-2 (bank-overlay `ActorBinder`/SSO) is an **external overlay dependency**, tracked outside this checkbox: AgentOS ships `KernelDefaultActorBinder` fail-loud by design and bank OIDC is bank-overlay work. HP-3 (entitlement/data-scope admin API) is **out of v1** — the first agent's entitlements are operator-seeded via SQL / CLI / deployment overlay, as the M8 proof did.
+
+  **Production proof:** the read API serves a real conversation's transcript and chain join from a deployed kernel.
+
+  **Load-bearing proof:** cross-tenant and cross-actor reads collapse to a 404 byte-identical to a genuine not-found.
+
+  **Evidence required:** API contract tests + a deployed read against the M8.5-A conversation.
+
+  **Boundary:** HP-1 is the *read API*; `conversation.export` (M8.5-F) is the examiner *packaging* on top of it, and is what M17 consumes. Do not build them twice.
+
+- [ ] **M8.5-C — Basic bank harness.**
+
+  **Goal:** a separate web artifact with **exactly three screens — chat, approvals, evidence.** Client only; zero authoritative state; never a trust boundary. Chat is request/response; live progress arrives with the projectors at M8.5-F.
+
+  **Production proof:** a human converses with the deployed M8 agent through the harness; the approvals inbox drives the existing ADR-014 surface; the evidence viewer renders HP-1's chain join.
+
+  **Load-bearing proof:** the harness cannot bypass governance — a refused dispatch surfaces as a governed refusal in both the UI and the chain; no pack-builder and no data-scope admin surface exists (attaching packs, configuring data scopes, and pack-lifecycle approval are an **operator governance console**, a separate later artifact).
+
+  **Evidence required:** harness repo + deployed transcript + chain correlation.
+
+- [ ] **M8.5-D — First bank NL-query analytical agent.**
+
+  **Goal:** a real bank-facing `cognic-agent-*` pack, the required `cognic-tool-*` packs, and full agentskills.io `cognic-skill-*` packs.
+
+  **Production proof:** the agent is installed through the M4 operator flow with operator-seeded entitlements, and answers analytical questions over real bank views.
+
+  **Load-bearing proof:** the golden eval set is **release-gating** (pass-rate gates the pack release) and doubles as the SR 11-7 documented-validation artifact; an unassigned capability and an unentitled data scope are refused and audited.
+
+  **Evidence required:** agent + tool + skill pack repos, eval report, deployed proof.
+
+- [ ] **M8.5-E — Full-stack `kind` proof.**
+
+  **Goal:** harness + the first bank agent + its released packs + evidence, end to end.
+
+  **Production proof:** a user completes a multi-turn analytical task through the harness, with turn N depending on turn N−1's answer; the evidence viewer resolves the conversation → run → dispatch join.
+
+  **Load-bearing proof:** at least one governed refusal (unassigned capability or unentitled scope) is visible to the user *and* present in the chain.
+
+  **Evidence required:** `kind` run log + evidence export.
+
+  **Honesty boundary (mandatory in the proof README):** this proof runs **without the content-safety hook phases and without the erasure pathway** — both land at M8.5-F. It is an **internal product proof**. It **must not** be presented to a bank as pilot-ready.
+
+- [ ] **M8.5-F — Conversational governance completion (pilot gate).**
+
+  **Goal:** the erasure pathway (`conversation.export` / `conversation.redact` scopes, tombstones, the expiry reaper); the kernel-owned `conversation_input` / `conversation_output` hook phases plus a real `cognic-hook-*` content-safety pack; the `escalate_to_human` built-in with `conversation.escalated` and the closed 2-value `blocking` / `advisory` classes; ADR-020 conversation typed projectors + SSE; the `[conversation]` agent-manifest block with tenant tighten-only ceilings.
+
+  **Production proof:** BARs 4–7 on `kind`.
+
+  **Load-bearing proof:** BAR 4 — bounds exhaustion and the terminal-state `conversation_not_active` refusal fire with **zero `AgentLoop` invocation**. BAR 5 — after redact, plaintext is gone, tombstones remain, and the chain is intact and proves the erasure itself. BAR 6 — hostile input is refused fail-closed by the hook pack, and `escalate_to_human` produces an approval-surface request plus an audited block/resume. BAR 7 — an SSE drop and `Last-Event-ID` reconnect replays without gap or duplication.
+
+  **Adversarial:** the ADR-011 red-team is aimed at the **conversational** surface here — multi-turn injection and history-reference manipulation are new attack scope versus M8's single-shot. The live/pilot red-team proof carries into M15/M16.
+
+  **Evidence required:** BAR 4–7 logs + red-team report + erasure evidence rows.
+
+  **Gate:** **no bank pilot before this passes.**
+
+After M8.5-F, pilot readiness lands at **M15** (AKS deployed pack + agent proof) + **M16** (production ops) + **M17** (examiner-ready evidence export), with **M24** the final v1 AKS completion gate. **M9** (memory), **M12/M13** (ADK; **M23** if the no-code Studio is promoted, activating ADR-021), and **M14/ADR-029** (dynamic workflows) are demand-driven and are **not blockers** for the first NL-query agent — ADR-028's transcript erasure adopts ADR-019's verbs without requiring the M9 memory subsystem.
+
 - [ ] **M9 — Governed memory used by a real deployed agent.**  
   **Goal:** the deployed agent uses scratch/task/long-term memory under ADR-019 controls.  
   **Production proof:** remember/recall/forget/redact/export are exercised through the agent path where applicable.  
