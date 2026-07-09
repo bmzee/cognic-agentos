@@ -116,6 +116,40 @@ Sprint 7A2 (`feat/sprint-7a2-hook-packs-runtime`) added **first-class governance
 
 Hook packs follow the same trust model as the three pre-existing kinds: the ADR-002 trust gate verifies the cosigned wheel before the runtime registry admits the hook; the ADR-016 supply-chain bundle (cosign + SBOM + SLSA + in-toto + JWS Wave-1 agent-only) is unchanged for hook packs except that JWS-signing is conditioned on `kind == "agent"` (hooks are not A2A-speaking and ship no AgentCard).
 
+## Amendment — harness/ADK as the pack-authoring workbench; repositories as optional backends (2026-07-09)
+
+Records the authoring-direction doctrine ratified during the M8.5 phase-1 program review. **Descriptive of direction, not of shipped capability** — see the truth boundary at the foot of this amendment.
+
+### Doctrine
+
+The future harness/ADK (Phase B of this ADR; Sprint 15B; checklist M12–M13) is the **authoring and deployment workbench** for every AgentOS pack kind — agents, tools, skills (the **full agentskills.io folder** per ADR-025: required `SKILL.md` entrypoint plus optional `references/`, `assets/`, `scripts/`, supporting files), hooks, and the reserved future workflow pack kind. AgentOS remains the governed runtime/kernel. The binding wording:
+
+> **The harness/ADK authors draft pack workspaces; AgentOS's governed lifecycle (ADR-012) promotes them — validate → sign → submit into ADR-012 → review → allow-list → install, with trust registration at the runtime admission/install boundary — into signed governed packs, under human review gates the harness merely drives. Git repositories are one optional authoring and distribution backend; the product contract is the signed pack artifact (wheel + manifest + attestations), wherever it was authored. Authoring validates and constrains; dispatch remains the final authority (ADR-028 §1).**
+
+Signature *verification* and trust *registration* are distinct events and must not be collapsed. Cosign verification against the tenant trust root is **approval gate 1** of the ADR-012 `under_review → approved` transition — a pack is never approved on an unverified signature. Registration into the runtime plugin registry (`PluginRegistry.register_with_full_attestation_check`, driven at admission by `harness/registry_boot.py`, which builds its own trust gate rather than accepting one from a caller) happens later, at the runtime admission/install boundary. The authority chain is therefore: **authoring prepares → humans review and allow-list → the runtime trust gate admits.** No ordering in this amendment may be read as trust-registering a pack before human review.
+
+### No second promotion mechanism
+
+The harness/ADK **drives the existing ADR-012 lifecycle**; it does not invent one. The ADR-012 `draft` is a manifest-level kernel *record* (manifest + signed-artefact digest + SBOM + conformance report), not a file tree; a harness-side workspace is a client artifact that materialises into that record at submit. User-authored artifacts are never loose runtime files — they become governed packs before deployment, and the runtime grants **only** signed, trust-registered packs (ADR-002 / ADR-016), whatever surface authored them.
+
+### Repositories are backends, not the contract
+
+`agentos publish --registry ...` (Phase A) is already registry-plural (OCI / pip). A git repository — with its own CI, as the M3 / Proof-2 external packs demonstrated — is one supported authoring and distribution backend; a bank-internal registry, or a future harness/ADK workspace promoted through the ADR-012 pipeline, are others. The production-grade checklist's Non-Negotiable Rule 5 ("packs must be separately versioned repos for product-complete status") is an **evidence bar from the proof arc** — packs live outside the kernel repo and must prove independent versioning and CI — **not** a mandate that a pack *is* a git repository. That rule stands unedited.
+
+### Placement rule (do not conflate the planes)
+
+Pack authoring is **Plane-A tooling**, owned by this ADR and — for the harness/Studio trust model (instance-key signing, its separate trust root, its RBAC) — by the **reserved ADR-021** (Phase 5 entry; unchanged by this amendment). **ADR-029 remains reserved for Plane-B runtime compositions** (on-the-fly agents, dynamic workflows — governed kernel *records*, not signed artifacts, per ADR-028 §1). Recording pack authoring under ADR-029 would re-create precisely the Plane-A / Plane-B conflation ADR-028's PT-7 warns against.
+
+### Skill folders under authoring
+
+Templates and workspace scaffolds (M13) target the full agentskills.io directory. Any executable material inside a skill folder — `scripts/` above all — is **signed package data with no execution affordance**: v1's single governed execution surface remains the declared, sandboxed action (ADR-025 §"Security model"). Any future script execution lands as a declared, sandboxed, ADR-gated boundary — never ambient execution.
+
+### Truth boundary (today vs. future)
+
+**Shipped today:** the Phase-A CLI (`init-*` / `validate` / `sign` / `verify` / `test-harness` / `conformance`); the ADR-012 portal lifecycle (draft record → submit → review → approve → allow-list → install), RBAC-gated and audit-chained; the trust gate + plugin registry; `SKILL.md` hosting (**only `SKILL.md` is parsed** — `protocol/skill_manifest.py`; `references/` / `assets/` / `scripts/` ride the wheel as signed package data and scripts never execute); and the governed runtime (the M8 agent loop + dispatch chokepoint).
+
+**Not shipped — future work:** the harness/ADK workspace UX; the repo-optional promotion flow as a smooth authoring experience; instance-key signing and its trust root (ADR-021); workflow packs. These land with Sprint 15B / M12–M13 / Phase 5. **No document may cite this amendment as evidence that the workbench exists today.**
+
 ## References
 - ADR-001 (OS-only platform — defines what packs are)
 - ADR-002 (MCP plugin protocol — defines the contract Phase A SDK satisfies)
