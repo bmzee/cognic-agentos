@@ -82,6 +82,8 @@ def _instances() -> list[Any]:
             answer="42",
             steps_used=2,
             refusal_reason=None,
+            prompt_tokens=11,
+            completion_tokens=7,
         ),
         GrantedCapabilities(
             skills=frozenset({"customer-data"}),

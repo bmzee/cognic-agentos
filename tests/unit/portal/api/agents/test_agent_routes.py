@@ -71,6 +71,8 @@ def _completed(answer: str = "the schema has 3 tables") -> AgentAskResult:
         answer=answer,
         steps_used=2,
         refusal_reason=None,
+        prompt_tokens=11,
+        completion_tokens=7,
     )
 
 
@@ -113,6 +115,8 @@ def test_refused_returns_200_with_refusal_reason() -> None:
             answer="the agent run stopped before producing an answer",
             steps_used=6,
             refusal_reason="agent_max_steps_exceeded",
+            prompt_tokens=24,
+            completion_tokens=9,
         )
     )
     resp = _post(_client(loop=loop))
@@ -130,6 +134,8 @@ def test_failed_returns_502() -> None:
             answer="the agent run failed before producing an answer",
             steps_used=1,
             refusal_reason=None,
+            prompt_tokens=3,
+            completion_tokens=0,
         )
     )
     resp = _post(_client(loop=loop))

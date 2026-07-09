@@ -76,15 +76,37 @@ class CapabilityRef:
 
 
 @dataclass(frozen=True, slots=True)
+class PriorTurn:
+    """One replayed conversation turn handed to :meth:`AgentLoop.ask` as prior
+    context (ADR-028 M8.5-B).
+
+    The loop consumes THIS shape so ``core/agent`` never imports
+    ``core/conversation`` — the dependency arrow runs conversation → agent.
+    """
+
+    role: Literal["user", "assistant"]
+    content: str
+
+
+@dataclass(frozen=True, slots=True)
 class AgentAskResult:
     """Terminal result of one governed agent run — the ONLY surface carrying
-    the answer plaintext (chain rows are digest-only per ADR-027 §f)."""
+    the answer plaintext (chain rows are digest-only per ADR-027 §f).
+
+    ``prompt_tokens`` / ``completion_tokens`` are REQUIRED, never defaulted:
+    ADR-028's conversation-level cumulative budget is fed from them, and a
+    bound fed by zeros reads as ENFORCED in the evidence while counting
+    nothing. A caller must not be able to construct a zero-token result by
+    omission.
+    """
 
     run_id: str
     terminal_state: AgentRunTerminalState
     answer: str
     steps_used: int
     refusal_reason: AgentDispatchRefusalReason | None
+    prompt_tokens: int
+    completion_tokens: int
 
 
 @dataclass(frozen=True, slots=True)
