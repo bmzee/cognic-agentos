@@ -29,7 +29,7 @@ Two things blocked AgentOS from claiming this space before this decision:
 
 ### Vocabulary — `Skill` = a `SKILL.md` package (the public noun)
 
-- **Skill (public noun) = a `SKILL.md` package.** The agentskills.io-standard folder — `SKILL.md` with YAML frontmatter `name` + `description` and a Markdown instructions body, plus optional `references/` and `assets/` — shipped as a signed `cognic-skill-*` pack. This is what an agent (M8) discovers, is assigned, and reads.
+- **Skill (public noun) = a `SKILL.md` package.** The full agentskills.io-standard folder — a required `SKILL.md` entrypoint (YAML frontmatter `name` + `description`, a Markdown instructions body) plus optional `references/`, `assets/`, `scripts/`, and supporting files — shipped as a signed `cognic-skill-*` pack, the whole folder riding the wheel as signed package data. `SKILL.md` is the entrypoint, not the whole artifact. This is what an agent (M8) discovers, is assigned, and reads. Bundled `scripts/` are package data only — never ambiently executable; v1's single governed execution surface remains the declared action (see §"Security model"; corrected 2026-07-09, see §"Amendment — skill directory-format accuracy").
 - **Executable action = the governed runtime primitive inside a skill.** The repositioned `sdk/skill.py` composer (`Skill.execute()`) — deterministic, no-LLM tool composition with a `declared_tools` contract. It is *not* "the skill"; it is *one governed implementation* of a skill's runnable behavior — a **substrate**, not a competing "skill" noun. Public docs stop calling it "executable skill."
 - This resolves the collision: the industry has exactly one meaning of "skill," and AgentOS now matches it. The deterministic composer keeps its value (auditable, no LLM variance — ideal for banking) at its correct layer.
 
@@ -49,7 +49,7 @@ Three decisions were locked with the maintainer (2026-07-02):
 
 - **D1 — full sandbox from the start.** The executable action runs isolated in the ADR-004 sandbox with **no general network** and **no ambient credentials**. Its only tool access is a narrow AgentOS-mediated channel (the broker) that ultimately calls `MCPHost.call_tool`. Not "in-kernel first, harden later" — signed code is necessary but not sufficient for a bank-grade story.
 - **D2 — defer the real LLM agent to M8.** This milestone proves skill **hosting + governed executable action + declared-tool enforcement + dual-layer audit** by invoking the action through a governed endpoint (deterministic, no LLM variance). M8 proves an LLM agent reading `SKILL.md` and deciding to invoke it.
-- **D3 — one supply-chain system.** `cognic-skill-*` stays a signed pack/wheel containing `SKILL.md` + optional `references/`/`assets/` + the executable action code + a manifest with `declared_tools` + attestations + cosign signature. No new artifact type; reuse M5's sign/verify/trust-register machinery end to end, including a per-pack trust root at `trust-roots/skill-packs/<pack_id>/cosign.pub` mirroring the M5 hook-pack layout.
+- **D3 — one supply-chain system.** `cognic-skill-*` stays a signed pack/wheel containing `SKILL.md` + optional `references/`/`assets/`/`scripts/` and supporting files (all signed package data; `scripts/` carry **no execution affordance** — governed execution still requires the declared, sandboxed action boundary) + the executable action code + a manifest with `declared_tools` + attestations + cosign signature. No new artifact type; reuse M5's sign/verify/trust-register machinery end to end, including a per-pack trust root at `trust-roots/skill-packs/<pack_id>/cosign.pub` mirroring the M5 hook-pack layout.
 
 ### Security model — full sandbox, broker-only egress
 
@@ -151,6 +151,12 @@ The broker is a **new trust boundary** — it decides which tool calls a sandbox
 ## M8 amendment (2026-07-05) — instruction-only skill-pack mode joins the skill doctrine
 
 ADR-027 (governed agent loop, M8) extends the single `skill` pack kind with a first-class **instruction-only mode**: `[skill].mode = "instruction"` (absent → `"executable"`; every existing pack is unchanged). An instruction skill is a valid hosted `SKILL.md` with NO entry point, NO runtime image, and NO executable `declared_tools` — hosted / assignable / readable, **never executable** (`SkillExecutor.invoke` refuses an instruction record fail-closed; it can never reach the sandbox). This is a MODE of the one `skill` kind, not a new kind — the §"One `skill` pack kind" collapse stands. The M8 loop is the LLM consumer this ADR anticipated ("Until M8 there is no LLM consumer of the hosted instruction layer"): agents read *granted* skills' bodies via the kernel `read_skill` built-in, gated by ADR-027's assignment sub-gate. The optional `[skill].referenced_tools` list is **non-authoritative reviewer evidence** only — authority comes solely from agent assignment + dispatch.
+
+## Amendment — skill directory-format accuracy (2026-07-09)
+
+The Decision-level vocabulary bullet (§"Vocabulary") and D3 (§"one supply-chain system") originally named only `references/` + `assets/` — narrower than this ADR's own Context (which names `scripts/` in the format description) and §"Security model" (which records the hosted-not-executed boundary and the explicit `scripts/`-execution deferral). Readers citing the Decision line alone kept reproducing the narrowed format. Both bullets are corrected **in place** to the full agentskills.io folder shape: a required `SKILL.md` entrypoint plus optional `references/`, `assets/`, `scripts/`, and supporting files — signed package data end to end.
+
+**No behavior or scope change.** Only `SKILL.md` is parsed (`protocol/skill_manifest.py`); `references/`/`assets/`/`scripts/` ride the wheel unparsed; `scripts/` never execute in v1, and the §"Security model" deferral of general governed-script execution stands unchanged — when it lands it lands as a governed, sandboxed, declared boundary, never ambient execution. Companions: the ADR-008 amendment "harness/ADK as the pack-authoring workbench" (2026-07-09) + the `docs/source-of-truth/VOCABULARY.md` skill-row fix.
 
 ## Amendment — workflow-kind accuracy (2026-07-09)
 
