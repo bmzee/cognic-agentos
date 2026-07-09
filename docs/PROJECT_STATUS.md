@@ -75,18 +75,20 @@ A cross-check against the conceptual "Agent OS" model (the kernel = the six runt
 
 ---
 
-## Forward vocabulary lock — skills, workflows, agents
+## Vocabulary lock — skills, workflows, agents
 
-This section is a guardrail for future development vocabulary. Do **not** collapse these concepts into each other:
+> **Superseded 2026-07-09.** The canonical glossary is `docs/source-of-truth/VOCABULARY.md`, which reflects ADR-025. The bullets below are kept only as the short form; on any disagreement the annex and ADR-025 win.
+>
+> This section previously locked an "instruction skill" vs "executable skill service" split. **ADR-025 (2026-07-02) collapsed that split**: there is one `skill` noun. Do not reintroduce the two-species vocabulary.
 
 - **Tool pack** — a governed connector/action surface, usually MCP (`cognic-tool-*`): search, database access, case lookup, transaction review, payment action, etc.
-- **Instruction skill** — portable procedural knowledge, preferably the open Agent Skills `SKILL.md` shape: when to use a procedure, steps to follow, tools to call, edge cases, and output templates. This is agent-context knowledge, not a runtime engine.
-- **Executable skill service** — today's `cognic-skill-*` meaning: signed Python pack code that deterministically composes tools through `Skill.execute()` with declared-tool cross-checks and no LLM call in the skill code. It is a fixed composer, not a workflow engine.
-- **Workflow** — a future AgentOS kernel feature (Sprint 15A): declarative DAG/state-machine execution with branching, loops, durable cross-step state, pause/resume, approval gates, retries/compensation, sub-agent steps, and visible execution history. The substrate exists in pieces (scheduler, run executor, sub-agent spawn, A2A task lifecycle, UI events); the generic workflow engine does **not**.
-- **Agent pack** — a human-role worker (`cognic-agent-*`) that reasons and chooses among assigned tools, instruction skills, executable skill services, and eventually workflows under AgentOS governance.
+- **Skill pack** — a `SKILL.md` package (`cognic-skill-*`): portable procedural knowledge in the open Agent Skills shape — when to use a procedure, steps, tools to call, edge cases, output templates. A skill **may optionally carry one governed action**.
+- **Governed action** — the runtime primitive *inside* a skill (`mode="executable"`): signed pack code that deterministically composes tools through `Skill.execute()` with `declared_tools` cross-checks and no LLM call, sandboxed and broker-mediated. It is a fixed composer, **not** a workflow engine, and **not** a second kind of skill.
+- **Workflow** — a future AgentOS kernel feature (Sprint 15A / ADR-029): declarative DAG/state-machine execution with branching, loops, durable cross-step state, pause/resume, approval gates, retries/compensation, sub-agent steps, and visible execution history. The substrate exists in pieces (scheduler, run executor, sub-agent spawn, A2A task lifecycle, UI events); the generic workflow engine does **not**, and `workflow` is **not** a live `PackKind` value.
+- **Agent pack** — a human-role worker (`cognic-agent-*`) that reasons and chooses among assigned tools, skills, and eventually workflows under AgentOS governance.
 - **Hook pack** — deterministic governance extension (`cognic-hook-*`), such as DLP pre/post hooks; not a tool, skill, workflow, or agent.
 
-Forward order: **Proof 2** (first external `cognic-tool-*` repo with independent CI/sign/verify/release) → **ADR-025 Agent Skills hosting** (`SKILL.md` adapter + governance wrapper; host/govern, not replace) → first real **instruction skill** from a bank SOP → first deployed **agent** loop using assigned skills + allowed tools. Keep executable skill services and the Sprint 15A workflow engine as separate tracks; build them only when a concrete use case needs them.
+Skill hosting + governed-action execution shipped together as the merged M6+M7 milestone (ADR-025), and the agent loop that reads a skill and decides to invoke its action shipped as M8 (ADR-027). The Sprint 15A workflow engine remains a separate track; build it when a concrete use case needs it.
 
 ---
 

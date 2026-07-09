@@ -35,7 +35,7 @@ Two things blocked AgentOS from claiming this space before this decision:
 
 ### One `skill` pack kind — the instruction/executable split collapses
 
-The earlier pack-vocabulary split — "instruction skill" + "executable skill service" — **collapses into a single `skill` kind**: a `SKILL.md` package with an optional governed action. The pack kinds are: **tool, skill, workflow, agent, hook**. Workflow (the 15A engine) and agent packs stay distinct.
+The earlier pack-vocabulary split — "instruction skill" + "executable skill service" — **collapses into a single `skill` kind**: a `SKILL.md` package with an optional governed action. The **live** pack kinds are **tool, skill, agent, hook** (`PackKind` at `packs/lifecycle.py:111`); **`workflow` is reserved**, not yet a `PackKind` value — it lands, if ever, with the Sprint-15A engine under ADR-029/M14 (amended 2026-07-09; see §"Amendment — workflow-kind accuracy"). Workflow and agent packs stay distinct from skills.
 
 No new entry-point group is needed: skills are already the `cognic.skills` registrable kind in the plugin registry (per ADR-002's entry-point discovery; the ADR-002 hooks amendment added `cognic.hooks` as the fourth group). The pack manifest gains a `[skill]` block declaring `declared_tools = ["<server_id>/<tool_name>", ...]`; the CLI skill validator checks the `SKILL.md` frontmatter shape (name regex, description ≤1024) + the `declared_tools` shape + cross-checks the entry-point.
 
@@ -151,6 +151,12 @@ The broker is a **new trust boundary** — it decides which tool calls a sandbox
 ## M8 amendment (2026-07-05) — instruction-only skill-pack mode joins the skill doctrine
 
 ADR-027 (governed agent loop, M8) extends the single `skill` pack kind with a first-class **instruction-only mode**: `[skill].mode = "instruction"` (absent → `"executable"`; every existing pack is unchanged). An instruction skill is a valid hosted `SKILL.md` with NO entry point, NO runtime image, and NO executable `declared_tools` — hosted / assignable / readable, **never executable** (`SkillExecutor.invoke` refuses an instruction record fail-closed; it can never reach the sandbox). This is a MODE of the one `skill` kind, not a new kind — the §"One `skill` pack kind" collapse stands. The M8 loop is the LLM consumer this ADR anticipated ("Until M8 there is no LLM consumer of the hosted instruction layer"): agents read *granted* skills' bodies via the kernel `read_skill` built-in, gated by ADR-027's assignment sub-gate. The optional `[skill].referenced_tools` list is **non-authoritative reviewer evidence** only — authority comes solely from agent assignment + dispatch.
+
+## Amendment — workflow-kind accuracy (2026-07-09)
+
+The §"One `skill` pack kind" paragraph originally listed the pack kinds in the present tense as "**tool, skill, workflow, agent, hook**." That was inaccurate: `workflow` has never been a `PackKind` value. The live vocabulary is the four-value `PackKind = Literal["tool", "skill", "agent", "hook"]` (`packs/lifecycle.py:111`), matching the four entry-point groups (`protocol/plugin_registry.py:89-92`).
+
+`workflow` is **reserved** for the Sprint-15A orchestration engine under ADR-029/M14. Nothing else in this ADR changes: the single-`skill`-kind collapse, the "skill = `SKILL.md` package" public noun, and "executable action = a substrate inside a skill, not a competing noun" all stand. The canonical glossary derived from this ADR is `docs/source-of-truth/VOCABULARY.md`.
 
 ## References
 

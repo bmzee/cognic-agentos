@@ -5,7 +5,7 @@
 You are operating inside the **Cognic AgentOS** repo — the OS-only platform. Agents, tools, skills, and UI live elsewhere; do not add them here.
 
 ## Project truth hierarchy
-1. `docs/source-of-truth/ARCHITECTURE.md` (canonical architecture)
+1. `docs/source-of-truth/ARCHITECTURE.md` (canonical architecture), with `docs/source-of-truth/VOCABULARY.md` as its vocabulary annex — the annex is **derived from the ADRs**, so on any conflict **the ADR wins** and the annex is the bug
 2. ADRs in `docs/adrs/`
 3. `AGENTS.md` (operating model)
 4. Strategy docs from the parent cognic repo (carried forward where still relevant)
@@ -14,7 +14,7 @@ You are operating inside the **Cognic AgentOS** repo — the OS-only platform. A
 
 - AgentOS = governance kernel + runtime + protocol + harness. Nothing else.
 - Tools, skills, agents, UI → separate repos / packs. **Do not add them here.**
-- Three-pool architecture is enforced for **plugin packs** (when they ship): tools (no LLM), skills (no LLM), agents (LLM only). Inside this repo we have platform primitives, persistence adapters, portal surfaces, protocol layer, and compliance evidence.
+- Three-pool architecture is enforced for **plugin packs** (when they ship): tools (no LLM), skills (a `SKILL.md` package — its *optional governed action* runs no LLM; the instructions themselves exist to be read by one), agents (LLM only). Per ADR-025 there is one `skill` noun, not an "instruction skill" vs "executable skill" split — see `docs/source-of-truth/VOCABULARY.md`. Inside this repo we have platform primitives, persistence adapters, portal surfaces, protocol layer, and compliance evidence.
 - Build against the 20 approved ADRs in `docs/adrs/`:
   - ADR-001 OS-only platform (ACCEPTED)
   - ADR-002 MCP plugin protocol — Streamable HTTP first, STDIO restricted by 4-gate threat model + OAuth/PRM authorization + AGNTCY/OASF identity fields (APPROVED, amended)
