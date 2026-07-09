@@ -9,15 +9,47 @@
 
 ## 0. Program context — M8.5 Phase 1: production conversational analytical agent
 
-This spec is the first artifact of the **M8.5 Phase-1 program**: an internal-production, bank-grade **conversational** analytical agent on AgentOS. The ratified program shape (2026-07-08):
+This spec is the first artifact of the **M8.5 Phase-1 program**: an internal-production, bank-grade **conversational** analytical agent on AgentOS. The program shape, as amended 2026-07-09 (§0.1) to bring the harness forward:
 
-1. **ADR-028 conversational sessions** (this spec) — the one net-new kernel primitive.
-2. **Vertical slice gate before the full program:** conversation store + turn loop wrapping the M8 `AgentLoop` + proof BARs 1–3 on `kind`. Only after the slice passes does the AKS/hardening spend start.
-3. **Enterprise NL-query analytical agent pack** (separate repo) — **parallel track**, with a **release-gating golden eval set** from day one (ADR-010 harness; per-agent eval scorers ship in the agent pack per the plugin discipline). Eval pass-rate gates the pack release AND doubles as the SR 11-7 documented-validation artifact.
-4. **AKS deployed proof** with the real operator flow — Key Vault/ESO, workload identity, private networking.
-5. **Production trust posture** — real eval/adversarial/OWASP approval gates (no proof override except an explicit accepted-risk waiver), production signing story.
-6. **AI red-team against the agent** (ADR-011 harness aimed at the conversational surface — multi-turn injection and history-reference manipulation are new scope vs. M8's single-shot).
-7. **Ops drills** (backup/restore, rollback, secret rotation, kill-switch intervention, incident response) and **evidence export / model-risk dossier**.
+0. **ADR-028 vertical-slice gate.** Conversation store + turn loop wrapping the M8 `AgentLoop` + proof **BARs 1–3 on `kind`**. Reuses the M8 agent/tool packs; **no harness, no new bank agent**. Nothing downstream starts until this passes.
+1. **Harness-enablement kernel/API slice** — the harness cannot be built before it (§0.2, HP-1…HP-3).
+2. **Basic harness shell** (separate web artifact): **three screens only — chat, approvals, evidence.** Client only, zero authoritative state.
+3. **First bank NL-query analytical agent** — agent pack + tool packs + full agentskills.io skill packs, with the **release-gating golden eval set** from day one (ADR-010 harness; per-agent scorers ship in the agent pack per the plugin discipline). Eval pass-rate gates the pack release AND doubles as the SR 11-7 documented-validation artifact.
+4. **Full-stack `kind` proof** — harness + the new agent + its released packs + evidence. Distinct from the step-0 gate (see §0.1).
+5. **AKS / client-pilot hardening** — real operator flow (Key Vault/ESO, workload identity, private networking); production trust posture (real eval/adversarial/OWASP approval gates, no proof override except an explicit accepted-risk waiver); **AI red-team** against the conversational surface (ADR-011; multi-turn injection and history-reference manipulation are new scope vs. M8's single-shot); **ops drills** (backup/restore, rollback, secret rotation, kill-switch intervention, incident response); **evidence export / model-risk dossier**.
+6. **Later — ADK/Studio authoring workbench** (ADR-008 Phase B / the reserved ADR-021).
+7. **Later — dynamic workflows / on-the-fly agents** (ADR-029 / M14).
+
+### 0.1 Amendment (2026-07-09) — build the harness early, but do not dissolve the gate
+
+The original list ordered the agent pack and the AKS proof ahead of any harness. Product review ratified bringing a **basic harness** forward, so the first bank use case is visible far earlier. The correction that survives review: **an earlier harness must not consume the vertical-slice gate.**
+
+Two `kind` proofs now exist and must not be conflated:
+
+- **Step 0 — the gate.** Cheap, reuses the M8 agent + oracle packs + existing LiteLLM wiring; the only new surface under test is `/api/v1/conversations`. It needs **no harness and no new agent**. It exists so the conversation substrate is proven before any harness/agent/AKS spend.
+- **Step 4 — the full-stack proof.** Harness + the new bank agent + its packs + evidence. Richer, later, and *additive* — never a substitute for step 0.
+
+The line: **build the basic harness early, but after the conversation substrate gate and after the missing harness-facing read/evidence surfaces. Do not let "basic harness" become the ADK/Studio, or an operator governance console, by accretion.**
+
+### 0.2 Named prerequisites for the harness (HP-1 … HP-3)
+
+Recorded in the same register as PT-1 (§1), so the harness cannot be scheduled as though its kernel surfaces exist. **Two of the three phase-1 screens have no API today.**
+
+- **HP-1 — transcript + chain-join read API (BLOCKING for the evidence viewer).** The vertical slice ships exactly four conversation routes: create, read (state + `turn_count`), post-turn, close. There is **no transcript read and no `conversation → agent_run → dispatch` chain-join read**; `conversation.export` — which §7 designates the examiner view — is deferred to the erasure slice. Screen 3 has nothing to render until HP-1 lands. Kernel work, step 1.
+- **HP-2 — bank-overlay `ActorBinder` / SSO (BLOCKING for login).** `KernelDefaultActorBinder` (`portal/rbac/actor.py:223`) raises `NotImplementedError` **by design** — "no silent identity fallback." Bank OIDC/SSO is a **bank-overlay** concern per AGENTS.md, not kernel. The binder plus the harness's OIDC client are on the critical path for any bank-visible demo and are currently **unowned**. Overlay work, step 1.
+- **HP-3 — entitlement / data-scope admin API: NOT in v1 (ruled 2026-07-09).** `core/entitlements/store.py` is on the critical-controls gate (M8, migration `20260705_0014_agent_entitlements`), but **no module under `portal/` imports or uses `EntitlementStore`** — there is no admin surface of any kind. Creating a data-scope entitlement is a **grant** — governance authority — and must not sneak into a "basic harness." The first bank agent's entitlements are **seeded by operator SQL / CLI / deployment overlay, exactly as the M8 proof did.** HP-3 belongs to a later operator-console/kernel slice.
+
+Also deferred, and therefore absent from the harness at first cut: ADR-020 **conversation typed projectors + SSE** (BAR 7). Chat is **request/response with no live progress** until the projectors land; event-level progress arrives with them. (Version tokens are reserved for the §0.3 harness ladder — `v1`/`v2`/`v3` describe the *harness*, never a screen's maturity within it.)
+
+### 0.3 The harness ladder, and the operator console it is not
+
+- **v1 harness — client-facing runtime surface.** Use deployed agents: chat, approvals, evidence. Three screens. Holds zero authoritative state; it renders kernel records and drives the existing ADR-014 approval engine under the acting human's own RBAC.
+- **v2 harness/ADK — authoring workbench.** Create / edit / test / promote agents, tools, skills. ADR-008 Phase B + the reserved ADR-021 (Studio trust model, instance-key signing).
+- **v3 — runtime compositions.** Dynamic workflows and on-the-fly agents (ADR-029 / M14).
+
+**The operator governance console is a separate future surface — named here so it cannot creep into v1.** Attaching packs, configuring data scopes, driving pack-lifecycle approvals, and data-source administration are **operator** actions against the existing ADR-012 / ADR-014 portal APIs. Rendering them is *permitted* doctrine (a harness may drive human gates and invents no mechanism) but is **out of the v1 user harness**, whose three screens are fixed. The first bank agent needs none of it: its packs are installed through the M4 operator flow and its entitlements are operator-seeded (HP-3).
+
+**Companion doctrine (landed):** the pack-authoring doctrine — harness/ADK as the authoring workbench, repositories as optional distribution backends, the full agentskills.io skill folder — is recorded as amendments to **ADR-008** ("harness/ADK as the pack-authoring workbench; repositories as optional backends", 2026-07-09) and **ADR-025** ("skill directory-format accuracy", 2026-07-09), with the matching `docs/source-of-truth/VOCABULARY.md` skill-row correction. Merged to `main` via PR #122. Step 6 of the sequence above (the ADK/Studio workbench) is governed by ADR-008 Phase B and the reserved ADR-021; **neither is shipped today** — see the truth boundary at the foot of that ADR-008 amendment.
 
 **Ratified phase-1 posture decisions:**
 - **Model:** Azure OpenAI over private endpoint is the phase-1 default (via the existing LiteLLM-normalized gateway). Self-hosted vLLM is a later/alternate proof, documented but not phase-1-proven.
@@ -156,7 +188,9 @@ The `[conversation].context_strategy` manifest field ships in v1 (single-value c
 
 - **HTTP:** create / post-turn / read / close, plus compliance surfaces export / redact. Request DTOs `extra="forbid"`; tenant + subject come from the bound Actor only.
 - **Streaming:** ADR-020 SSE. Conversation lifecycle + turn events land as decision-history rows projected through **additive typed projectors** (the exact M8 `agent.run.*` mechanism on `protocol/ui_events.py`; wire-protocol stop-rule review applies; no breaking change to frozen families). Reconnect-safe by construction via the decision-history mirror — which is also what makes multi-replica AKS streaming work. v1 streams **event-level progress** (turn started, dispatch activity, turn completed); token-level answer streaming is a v1.1 gateway feature, deferred to keep the evidence path (answer digest at turn end) simple.
-- **Phase-1 harness cut (ratified):** web app served from the cluster behind bank SSO — NOT desktop-installed. Three screens: **chat** (conversation + event-level progress), **approvals inbox** (drives the existing ADR-014 surface), **evidence viewer** (conversation → run → dispatch join). Agent-builder and workflow-designer UX are deferred with ADR-029/M14. The harness holds zero authoritative state and is not a trust boundary.
+- **Phase-1 harness cut (ratified):** web app served from the cluster behind bank SSO — NOT desktop-installed. Three screens: **chat** (request/response at first cut; **event-level progress once the ADR-020 conversation projectors land** — they are deferred, see §0.2), **approvals inbox** (drives the existing ADR-014 surface), **evidence viewer** (conversation → run → dispatch join). Agent-builder and workflow-designer UX are deferred with ADR-029/M14. The harness holds zero authoritative state and is not a trust boundary.
+- **The three screens are a closed set (2026-07-09).** Attaching packs, configuring data scopes, driving pack-lifecycle approvals, and data-source administration are **operator governance console** surfaces — a separate, later artifact over the existing ADR-012 / ADR-014 portal APIs. A harness *may* render them (it drives human gates and invents no mechanism), but they are **not** the v1 user harness. See §0.3.
+- **Two of the three screens have no kernel API today** — the evidence viewer (HP-1) and login (HP-2). Do not schedule harness work as though these exist. See §0.2.
 
 ## 10. Proof bars — the first conversational production proof
 
