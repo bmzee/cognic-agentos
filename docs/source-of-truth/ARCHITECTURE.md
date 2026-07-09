@@ -5,6 +5,8 @@
 
 Cognic AgentOS is the hardened, governance-first agent operating system that banks deploy once and run forever. Its job is to host **trust-bearing controls** that plugin packs cannot bypass. Tools, skills, and agents install on top as separately-versioned packs.
 
+**Canonical vocabulary:** `VOCABULARY.md` is the normative annex to this document. It fixes what *pack*, *tool*, *skill*, *governed action*, *agent*, *hook*, and *workflow* mean, and is binding on prose, operator surfaces, and identifiers.
+
 ## 1. Reference architecture
 
 Inspired by Anthropic's Managed Agents pattern (April 2026) — three virtualised primitives + protocol layer + governance kernel + authoring platform (per ADR-008).
@@ -180,6 +182,14 @@ See ADR-009 §"Translation note vs Master Strategy v5.0 §4 line 725" for the Qd
 ### 8.3 `src/cognic/` source layout (multiple inherited docs)
 
 See the banner at the top of `Cognic_Development_Stack.md`. AgentOS uses `src/cognic_agentos/`; UI is a separate artefact; agents/tools/skills are external plugin packs.
+
+### 8.4 "Skill / Workflow Pool" (Master Strategy line 367)
+
+Master Strategy heads Layer B *"Skill / Workflow Pool (Temporal workflows, no LLM)"* — one pool holding two concepts. Read literally it makes "skill" and "workflow" synonyms, and makes a skill a piece of no-LLM code. **Both readings are retired.**
+
+Per ADR-025 a **skill** is a `SKILL.md` package (procedural knowledge, written to be read by an LLM), which may optionally carry one **governed action** — the deterministic no-LLM composer the inherited doc was really describing. A **workflow** is a separate future orchestration engine (Sprint 15A / ADR-029), and is not a live `PackKind` value.
+
+Where inherited docs say "skill" and mean no-LLM code, read **governed action**. Where they say "Skill / Workflow Pool," read two distinct things. See `VOCABULARY.md`.
 
 ## 9. What this repo deliberately omits
 
