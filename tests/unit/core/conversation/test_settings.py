@@ -29,6 +29,7 @@ def test_defaults_match_adr_028_section_5() -> None:
     assert s.conversation_replay_last_n == 10
     assert s.conversation_replay_token_ceiling == 8_000
     assert s.conversation_claim_ttl_s == 300.0
+    assert s.conversation_chain_candidate_limit == 10_000
 
 
 def test_default_claim_ttl_exceeds_default_agent_wall_clock() -> None:
@@ -53,6 +54,12 @@ def test_default_claim_ttl_exceeds_default_agent_wall_clock() -> None:
             1234,
         ),
         ("COGNIC_CONVERSATION_CLAIM_TTL_S", "600.5", "conversation_claim_ttl_s", 600.5),
+        (
+            "COGNIC_CONVERSATION_CHAIN_CANDIDATE_LIMIT",
+            "500",
+            "conversation_chain_candidate_limit",
+            500,
+        ),
     ],
 )
 def test_environment_override(
@@ -88,6 +95,12 @@ def test_replay_token_ceiling_must_be_positive(bad: int) -> None:
 def test_claim_ttl_must_be_positive(bad: float) -> None:
     with pytest.raises(ValidationError):
         _settings(conversation_claim_ttl_s=bad)
+
+
+@pytest.mark.parametrize("bad", [0, -1])
+def test_chain_candidate_limit_must_be_positive(bad: int) -> None:
+    with pytest.raises(ValidationError):
+        _settings(conversation_chain_candidate_limit=bad)
 
 
 # --- the startup relationship the executor enforces ----------------------------
