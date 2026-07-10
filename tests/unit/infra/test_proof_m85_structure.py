@@ -131,7 +131,6 @@ _PINS: dict[str, str] = {
 }
 
 #: main @ the M8.5 A/B/C1 squash-merge (PR #126).
-_KERNEL_ANCHOR = "235daede6d1b7a99846c6339f2e234c85e6bd0cc"
 
 #: Ruling 2026-07-10: BAR 2 probes ALL FIVE forged history fields, in order.
 _BAR2_FIELDS = ("messages", "history", "prior_context", "context", "transcript")
@@ -267,9 +266,32 @@ def test_trust_root_layout_covers_all_packs_including_the_agent_dual_root() -> N
 # ---------------------------------------------------------------------------
 
 
-def test_kernel_image_builds_from_the_m85_anchor() -> None:
-    assert f"ARG KERNEL_ANCHOR={_KERNEL_ANCHOR}" in DOCKER_AGENTOS
+def test_kernel_image_provenance_is_computed_verified_and_clean_tree() -> None:
+    """finding 2 (2026-07-10): the hardcoded anchor claimed main@235daede
+    while the runner overlaid THIS branch's changed kernel source — false
+    provenance. The ARG now has NO default (a stale sha cannot resurface);
+    the runner computes the revision from a CLEAN kernel-source tree, passes
+    it as the build arg, and reads the label back off the built artifact."""
+    assert "ARG KERNEL_GIT_SHA\n" in DOCKER_AGENTOS
+    assert "ARG KERNEL_GIT_SHA=" not in DOCKER_AGENTOS, "the anchor ARG must carry NO default"
+    assert "io.cognic.proof.kernel-anchor=$KERNEL_GIT_SHA" in DOCKER_AGENTOS
     assert 'io.cognic.proof.milestone="m8.5-conversational-slice"' in DOCKER_AGENTOS
+    assert "235daede" not in DOCKER_AGENTOS.replace("main@235daede", ""), (
+        "a hardcoded kernel sha resurfaced in the Dockerfile"
+    )
+    _assert_all(
+        RUNNER,
+        (
+            'KERNEL_GIT_SHA="$(git rev-parse HEAD)"',
+            "KERNEL_TREE_DIRTY=",
+            "kernel source tree is DIRTY",
+            '--build-arg KERNEL_GIT_SHA="$KERNEL_GIT_SHA"',
+            "docker inspect -f '{{ index .Config.Labels \"io.cognic.proof.kernel-anchor\" }}'",
+            '[ "$LABEL_SHA" = "$KERNEL_GIT_SHA" ]',
+        ),
+    )
+    # The clean-tree guard + revision resolution run BEFORE the source copy.
+    assert RUNNER.index("git rev-parse HEAD") < RUNNER.index('cp -r "$AGENTOS_SRC_SRC"')
 
 
 def test_query_context_private_key_is_a_runtime_mount_never_a_layer() -> None:
@@ -1102,9 +1124,28 @@ def test_runner_bar3_uses_financials_never_bar1s_retail() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_migrate_job_is_non_hook_with_image_slot_and_head_0015() -> None:
+def test_migrate_job_is_non_hook_with_image_slot_and_head_0016() -> None:
     assert "helm.sh/hook" not in MIGRATE_RAW
-    _assert_all(MIGRATE_RAW, ("__AGENTOS_IMAGE__", "alembic upgrade head", "rev 0015"))
+    _assert_all(MIGRATE_RAW, ("__AGENTOS_IMAGE__", "alembic upgrade head", "rev 0016"))
+    assert "rev 0015" not in MIGRATE_RAW, "the schema-head claim went stale again (finding 2)"
+
+
+def test_runner_reads_back_the_0016_schema_shape_after_migrate() -> None:
+    """finding 2 (2026-07-10): the proof previously CLAIMED head 0015 with no
+    readback. The M8.5-B read APIs hard-require the 0016 correlation column +
+    the two query indexes, so the runner proves the DEPLOYED shape live."""
+    _assert_all(
+        RUNNER,
+        (
+            "SELECT version_num FROM alembic_version;",
+            '[ "$SCHEMA_REV" = "0016" ]',
+            "column_name='turn_completed_request_id'",
+            "ix_decision_history_tenant_event_sequence",
+            "ix_conversations_tenant_creator_created",
+            '[ "$SHAPE_0016" = "1|2" ]',
+        ),
+    )
+    assert "rev 0015" not in RUNNER, "a stale 0015 schema claim survives in the runner"
 
 
 def test_manifests_use_m85_image_tags_and_keep_the_single_effective_url() -> None:
@@ -1368,9 +1409,21 @@ def test_runner_m85b_chain_pins_four_blocks_window_and_retail_dispatch() -> None
             'assert all(st["sequence"] < d["sequence"] < tm["sequence"] for d in dispatches)',
             'd["scope_id"] == "retail_analytics"',
             'assert st["prior_context_turns"] == 0',
-            'assert st["prior_context_turns"] == 1',
+            # finding 1 (2026-07-10): the kernel records len(prior_context)
+            # — PriorTurn MESSAGES, two per replayed turn — the same
+            # semantic BAR 1 pins live. An ==1 here guaranteed a
+            # post-spend live failure.
+            'assert st["prior_context_turns"] == 2',
             'assert tm["answer_sha256"] == tc["answer_sha256"]',
+            # finding 7: the started<->hop1 question-digest coupling + true
+            # 64-HEX digests (length alone accepted any 64-char string).
+            'assert st["question_sha256"] == tc["question_sha256"]',
+            'hex64 = re.compile(r"[0-9a-f]{64}")',
+            'assert all(hex64.fullmatch(d["args_sha256"]) for d in dispatches)',
         ),
+    )
+    assert 'assert st["prior_context_turns"] == 1' not in _m85b_section(), (
+        "the run-guaranteed-to-fail ==1 message-count confusion resurfaced (finding 1)"
     )
 
 
@@ -1446,6 +1499,15 @@ def test_runner_m85b_access_log_pins() -> None:
             'r.get("tenant_id") == "proof-foreign"',
             'r.get("actor_subject") == "analyst.zara"',
             'r.get("outcome") == "ok"',
+            # finding 7: the scan bans EVERY live transcript plaintext
+            # fragment (questions AND answers), derived from the READ-2
+            # response persisted under the private $QC_TMP — two static
+            # question fragments proved almost nothing.
+            '"$QC_TMP/conv-transcript.json"',
+            "for frag in text.splitlines():",
+            "if len(frag) >= 16:",
+            'assert fragments, "the live transcript carried no scannable plaintext fragments"',
+            "fragment redacted",
         ),
     )
     assert not re.search(r">>?\s*/tmp/", section), "the M8.5-B section writes into shared /tmp"

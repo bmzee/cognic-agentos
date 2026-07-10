@@ -20,8 +20,14 @@ exclusively from the kernel store, and the chain carries digest-only evidence
 (`conversation.created` / `conversation.turn_completed`) joining each turn to
 its `agent.run.%` rows.
 
-Kernel anchor: `main @ 235daede6d1b7a99846c6339f2e234c85e6bd0cc` (M8.5 A/B/C1,
-PR #126; pinned as an image label by `Dockerfile.agentos-proof`).
+Kernel anchor: computed at BUILD time — the runner resolves `git rev-parse
+HEAD` from a CLEAN kernel-source tree, passes it as the `KERNEL_GIT_SHA`
+build arg (the ARG carries NO default), and verifies the built image's
+`io.cognic.proof.kernel-anchor` label equals the computed revision before any
+deploy (review finding 2, 2026-07-10 — the earlier hardcoded anchor claimed
+`main @ 235daede` while the runner overlaid newer branch source). Run 6 was
+anchored at `main @ 235daede6d1b7a99846c6339f2e234c85e6bd0cc` (M8.5 A/B/C1,
+PR #126).
 
 **This is the VERTICAL-SLICE GATE, not the M8.5 production proof.** ADR-028
 BARs 4–7 (bounds/terminal refusal, erasure, safety hooks, SSE reconnect) are
@@ -43,10 +49,11 @@ custody, trust-root layout, the sandbox-machinery-kept rationale, and the
 model-alias swap all carry unchanged (m85-renamed env/paths).
 
 The conversation substrate adds **no pack, no seed rows, and no new trust
-material**: migration `0015` (created by the same non-hook migrate Job via
-`alembic upgrade head`) adds the `conversations` + `conversation_turns`
-tables, which start empty — conversations are runtime records created through
-the governed API.
+material**: migrations `0015` + `0016` (applied by the same non-hook migrate
+Job via `alembic upgrade head`) add the `conversations` +
+`conversation_turns` tables and the read-model correlation column + query
+indexes, all of which start empty — conversations are runtime records created
+through the governed API.
 
 ## The M8.5 deltas
 
@@ -146,7 +153,10 @@ sara and zara, and access-log trails carrying identifiers + outcome but never
 transcript plaintext. **The 2026-07-10 run-6 PASS above predates this section
 — the M8.5-B section has NOT yet executed on a cluster**; its verification so
 far is the structural test suite only (`tests/unit/infra/
-test_proof_m85_structure.py`).
+test_proof_m85_structure.py`). The remediation of review findings 1/2/7
+(2026-07-10) also changed the SETUP path since run 6 — the build-time kernel
+provenance guard + label readback and the post-migrate 0016 schema readback
+have likewise not yet executed live.
 
 ## Honesty boundary (read before citing this proof)
 
@@ -206,7 +216,9 @@ delta `COGNIC_CONVERSATION_CLAIM_TTL_S=600` (see "The M8.5 deltas").
    canonical-image trust material (the m6/m8 re-home flow; no fixture flags).
 3. **Seed** — Oracle XE first-boot runs `oracle-seed/seed_schema.sql`;
    `kernel-seed.sql` applies the 0014 rows after the migrate Job (which
-   brings the schema to rev 0015 — the conversation tables start empty).
+   brings the schema to rev 0016; the runner reads back `alembic_version`
+   plus the 0016 correlation-column/index shape — the conversation tables
+   start empty).
 4. **Run** — `COGNIC_RUN_PROOF_M85=1` + the provider key env →
    `./infra/proof-m85/run-proof-m85.sh`: kind + backends + M4 operator
    lifecycle for the tool + Step-0 surface asserts, then BARs 1–3.
@@ -217,5 +229,6 @@ Same layout as `infra/proof-m8/` (see its README's file table) with:
 `run-proof-m85.sh` (the three conversation bars + the tenant-scoped evidence
 helpers), `proof_m85/` (the conversation-scoped analyst actors),
 `proof-m85-values.yaml` / `Dockerfile.agentos-proof` (m85 names + the
-`main @ 235daede` anchor), `migrate-job.yaml` (head = rev 0015), and the
-structural suite at `tests/unit/infra/test_proof_m85_structure.py`.
+build-time `KERNEL_GIT_SHA` anchor label), `migrate-job.yaml` (head =
+rev 0016 with a live post-migrate readback), and the structural suite at
+`tests/unit/infra/test_proof_m85_structure.py`.

@@ -17,8 +17,9 @@ PROOF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 #    data_scopes / entitlements / agent_assignments ROWS (proof-side seed per
 #    the migration docstring; never kernel migration data). Idempotent
 #    (ON CONFLICT DO NOTHING) + tenant-scoped to proof-m85. Applied AFTER the
-#    migration Job brought the schema to HEAD (rev 0015 — the M8.5
-#    conversation tables it adds need NO seed); readback-asserted here so a
+#    migration Job brought the schema to HEAD (rev 0016 — the M8.5
+#    conversation tables + read-model shape it adds need NO seed);
+#    readback-asserted here so a
 #    silent partial apply can never reach the bars.
 #
 # Neither the HOOK pack nor the four INSTRUCTION SKILL packs nor the AGENT

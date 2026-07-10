@@ -6,11 +6,13 @@
 # migrations.enabled=false and runs this non-hook Job AFTER `helm install` (when the
 # Secret exists), using the always-present `default` ServiceAccount (no rel-agentos dep).
 # run-proof-m85.sh substitutes __AGENTOS_IMAGE__ with the proofm85 image.
-# `alembic upgrade head` brings the schema to rev 0015 (0014 agent_entitlements
-# + 0015 conversations/conversation_turns — the ADR-028 substrate). The 0014
+# `alembic upgrade head` brings the schema to rev 0016 (0014 agent_entitlements
+# + 0015 conversations/conversation_turns + 0016 conversation read-model
+# correlation column/backfill/query indexes — the ADR-028 substrate). The 0014
 # ROWS are proof-side seed applied AFTERWARDS by seed-db.sh (kernel-seed.sql),
-# never migration data; the 0015 tables need NO seed (conversations are
-# runtime records created through the governed API).
+# never migration data; the 0015/0016 tables need NO seed (conversations are
+# runtime records created through the governed API). The runner reads back
+# alembic_version == 0016 + the 0016 shape after the Job completes.
 apiVersion: batch/v1
 kind: Job
 metadata:

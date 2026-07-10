@@ -993,6 +993,18 @@ if grep -rlE "PRIVATE KEY-----" "$STAGING_DST" >/dev/null 2>&1; then
 fi
 
 # --- 3. build the three images ------------------------------------------------------
+echo "==> [3/11] resolve the kernel source revision (provenance — finding 2, 2026-07-10)"
+# The image label must name the EXACT revision of the kernel source the
+# overlay copies below — a hardcoded anchor goes stale the moment the branch
+# moves, and a dirty tree would label a revision the source does not match.
+KERNEL_GIT_SHA="$(git rev-parse HEAD)"
+KERNEL_TREE_DIRTY="$(git status --porcelain -- src alembic.ini pyproject.toml uv.lock policies)"
+if [ -n "$KERNEL_TREE_DIRTY" ]; then
+  die "kernel source tree is DIRTY — the kernel-anchor label would be false. Commit or stash first:
+$KERNEL_TREE_DIRTY"
+fi
+echo "    kernel revision: $KERNEL_GIT_SHA (kernel-source tree clean)"
+
 echo "==> [3/11] copy the current kernel source into the proof build context (the M8 wiring)"
 rm -rf "$AGENTOS_SRC_DST"
 cp -r "$AGENTOS_SRC_SRC" "$AGENTOS_SRC_DST"
@@ -1007,7 +1019,15 @@ echo "==> [3/11] build the default-adapters base image"
 docker_build_with_retry -f infra/agentos/Dockerfile --target default-adapters -t "$BASE_IMAGE" .
 
 echo "==> [3/11] build the proof AgentOS kernel image (create_proof_app + SEVEN released packs + trust + query-context public key)"
-docker_build_with_retry -f "$PROOF_DIR/Dockerfile.agentos-proof" --build-arg BASE_IMAGE="$BASE_IMAGE" -t "$IMAGE" "$PROOF_DIR"
+docker_build_with_retry -f "$PROOF_DIR/Dockerfile.agentos-proof" --build-arg BASE_IMAGE="$BASE_IMAGE" \
+  --build-arg KERNEL_GIT_SHA="$KERNEL_GIT_SHA" -t "$IMAGE" "$PROOF_DIR"
+# Verify the built image label equals the computed revision (finding 2): the
+# label IS the provenance the evidence cites, so it must be read back from
+# the artifact, never assumed from the build invocation.
+LABEL_SHA="$(docker inspect -f '{{ index .Config.Labels "io.cognic.proof.kernel-anchor" }}' "$IMAGE")"
+[ "$LABEL_SHA" = "$KERNEL_GIT_SHA" ] \
+  || die "image kernel-anchor label '$LABEL_SHA' != source revision '$KERNEL_GIT_SHA'"
+echo "    image kernel-anchor label verified: $LABEL_SHA"
 
 echo "==> [3/11] build the released oracle-pack MCP tool Service image (v0.3.0 + query-context public key)"
 docker_build_with_retry -f "$PROOF_DIR/Dockerfile.oracle-pack" -t "$MCP_IMAGE" "$PROOF_DIR"
@@ -1177,11 +1197,22 @@ helm install rel "$CHART" -n "$NS" -f "$PROOF_DIR/proof-m85-values.yaml" \
   --set sandbox.canonicalEgressProxyImage="$EGRESS_PROXY_REF"
 
 # --- 8. migrate Job + secrets + manifests + patches + env ---------------------------
-echo "==> [8/11] run the proof-owned (non-hook) migration Job (schema -> head, rev 0015)"
+echo "==> [8/11] run the proof-owned (non-hook) migration Job (schema -> head, rev 0016)"
 kubectl -n "$NS" delete job/agentos-migrate --ignore-not-found=true --wait=true
 sed "s|__AGENTOS_IMAGE__|$IMAGE|" "$PROOF_DIR/migrate-job.yaml" | kubectl apply -n "$NS" -f -
 kubectl -n "$NS" wait --for=condition=complete job/agentos-migrate --timeout=300s \
   || migrate_fail "agentos-migrate did not complete within 300s"
+
+# Live schema readback (finding 2, 2026-07-10: the proof previously CLAIMED
+# head 0015 with no readback — the M8.5-B read APIs hard-require the 0016
+# correlation column + query indexes, so prove the deployed schema shape).
+SCHEMA_REV="$(PSQL "SELECT version_num FROM alembic_version;")"
+[ "$SCHEMA_REV" = "0016" ] \
+  || migrate_fail "alembic_version reads '$SCHEMA_REV' after the migrate Job (expected 0016)"
+SHAPE_0016="$(PSQL "SELECT (SELECT count(*) FROM information_schema.columns WHERE table_name='conversation_turns' AND column_name='turn_completed_request_id') || '|' || (SELECT count(*) FROM pg_indexes WHERE indexname IN ('ix_decision_history_tenant_event_sequence','ix_conversations_tenant_creator_created'));")"
+[ "$SHAPE_0016" = "1|2" ] \
+  || migrate_fail "0016 schema shape readback '$SHAPE_0016' (expected '1|2': correlation column + the two read-model indexes)"
+echo "    schema readback OK: alembic head 0016; correlation column + both read-model indexes present"
 
 pack_fail() {
   # Step-8 capture (run-7 live finding: the oracle-pack rollout timeout left
@@ -1209,7 +1240,7 @@ pack_fail() {
     echo "- wait-for-xe init logs (tail):"; echo '\`\`\`'; echo "$initlogs"; echo '\`\`\`'
     echo "- oracle-pack previous-instance logs (tail):"; echo '\`\`\`'; echo "$prevlogs"; echo '\`\`\`'
     echo "- proof-as logs (tail):"; echo '\`\`\`'; echo "$aslogs"; echo '\`\`\`'
-  } >> "$REPO_ROOT/docs/VALIDATION-RESULTS.md"
+  } >> docs/VALIDATION-RESULTS.md
   exit 1
 }
 
@@ -1855,6 +1886,9 @@ assert turns[1]["agent_run_id"] == run2, (turns[1]["agent_run_id"], run2)
 assert doc["next_cursor"] is None, doc["next_cursor"]  # both turns fit one page
 print("ok")
 ' "$B_TRANS" "$BAR1_CID" "$BAR1_RUN1" "$BAR1_RUN2" "Who are the top 3 customers"
+# Persist the transcript for READ 6: its four plaintexts (both questions +
+# both answers) become the DYNAMIC banned markers of the access-log scan.
+printf '%s' "$B_TRANS" > "$QC_TMP/conv-transcript.json"
 echo "  M8.5-B READ 2 OK: both turns plaintext (non-null, erased_at null), ordered, token-attributed, runs match the wire"
 
 echo "==> M8.5-B READ 2b — transcript pagination (limit=1; frozen watermark on both pages)"
@@ -1882,18 +1916,29 @@ B_CHAIN1="$(api amir GET "/api/v1/conversations/$BAR1_CID/turns/1/chain")"
 load_http_code # after api command substitution
 [ "$HTTP_CODE" = "200" ] || bar_fail "M8.5-B READ 3 chain turn 1 (HTTP $HTTP_CODE; body: $B_CHAIN1)"
 json_assert "M8.5-B READ 3 chain turn 1 contents" '
-import json, sys
+import json, re, sys
 doc = json.loads(sys.argv[1])
 run1, agent, pack = sys.argv[2], sys.argv[3], sys.argv[4]
 assert set(doc) == {"turn_completed", "started", "terminal", "dispatches"}, sorted(doc)
 tc, st, tm = doc["turn_completed"], doc["started"], doc["terminal"]
 assert tc["seq"] == 1 and tc["agent_run_id"] == run1, tc
 assert tc["actor_id"] == "analyst.amir", tc
-assert len(tc["question_sha256"]) == 64 and len(tc["answer_sha256"]) == 64, tc
+hex64 = re.compile(r"[0-9a-f]{64}")
+for digest in (
+    tc["question_sha256"],
+    tc["answer_sha256"],
+    st["question_sha256"],
+    st["prior_context_sha256"],
+    tm["answer_sha256"],
+):
+    assert hex64.fullmatch(digest), digest  # 64-HEX, not merely 64 chars
 assert tc["prompt_tokens"] > 0 and tc["completion_tokens"] > 0, tc
 assert st["run_id"] == run1 and st["agent_id"] == agent, st
 assert st["originator_subject"] == "analyst.amir", st
+assert st["actor_id"] == "analyst.amir", st
 assert st["prior_context_turns"] == 0, st  # the grounding turn replays nothing
+# The started<->hop1 digest coupling: both digest the SAME user_message.
+assert st["question_sha256"] == tc["question_sha256"], (st["question_sha256"], tc["question_sha256"])
 assert tm["terminal_state"] == "completed", tm
 assert tm["answer_sha256"] == tc["answer_sha256"], (tm["answer_sha256"], tc["answer_sha256"])
 assert st["sequence"] < tm["sequence"] < tc["sequence"], (st["sequence"], tm["sequence"], tc["sequence"])
@@ -1908,7 +1953,7 @@ ok_retail = [
     and d["capability_ref"] == pack + "/run_readonly_query"
 ]
 assert ok_retail, dispatches
-assert all(len(d["args_sha256"]) == 64 for d in dispatches), dispatches
+assert all(hex64.fullmatch(d["args_sha256"]) for d in dispatches), dispatches
 print("ok")
 ' "$B_CHAIN1" "$BAR1_RUN1" "$AGENT_ID" "$PACK_ID"
 echo "  M8.5-B READ 3 OK: four blocks, started<terminal ordering, >=1 ok retail dispatch inside the window, digests only"
@@ -1924,7 +1969,11 @@ run2 = sys.argv[2]
 tc, st, tm = doc["turn_completed"], doc["started"], doc["terminal"]
 assert tc["seq"] == 2 and tc["agent_run_id"] == run2, tc
 assert st["run_id"] == run2, st
-assert st["prior_context_turns"] == 1, st  # turn 2 replayed exactly the grounding turn
+# One replayed turn = TWO messages (user + assistant): the kernel records
+# len(prior_context), which counts PriorTurn MESSAGES (loop.py), not stored
+# turns — the SAME semantic BAR 1 pins live (finding 1, 2026-07-10: an ==1
+# assertion here guaranteed a post-spend failure).
+assert st["prior_context_turns"] == 2, st
 assert tm["terminal_state"] == "completed", tm
 # The run-5 ruling: the turn-2 dispatch COUNT is deliberately unconstrained
 # (0 = context reuse; >=1 = re-verification). The pin is SHAPE: an array of
@@ -2013,7 +2062,7 @@ set -e
   || bar_fail "M8.5-B READ 6 no portal.conversations.* access-log lines (rc=$B_ACCESS_RC; kubectl stderr: $(cat "$QC_TMP/conv-access-err" 2>/dev/null || echo "<none>"))"
 json_assert "M8.5-B READ 6 access-log contents" '
 import json, sys
-path = sys.argv[1]
+path, transcript_path = sys.argv[1], sys.argv[2]
 recs, raw = [], []
 with open(path, encoding="utf-8", errors="replace") as fh:
     for line in fh:
@@ -2041,12 +2090,32 @@ foreign_list = [
     r for r in ok_lines("list") if r.get("tenant_id") == "proof-foreign" and r.get("actor_subject") == "analyst.zara"
 ]
 assert foreign_list, "no list access record for the foreign reader (the empty read must still leave a trail)"
-banned = ("top 3 customers", "general-ledger balance")
+# DYNAMIC banned markers (finding 7, 2026-07-10: two static question
+# fragments proved almost nothing): EVERY line-fragment (>=16 chars) of
+# EVERY live transcript plaintext — both questions AND both model answers —
+# plus the two static fragments (the BAR-3 plaintexts never rode a read
+# response, so they stay static).
+with open(transcript_path, encoding="utf-8") as fh:
+    tdoc = json.load(fh)
+fragments = []
+for turn in tdoc["turns"]:
+    for text in (turn.get("user_message"), turn.get("answer")):
+        if not isinstance(text, str):
+            continue
+        for frag in text.splitlines():
+            frag = frag.strip()
+            if len(frag) >= 16:
+                fragments.append(frag)
+assert fragments, "the live transcript carried no scannable plaintext fragments"
+banned = ["top 3 customers", "general-ledger balance"] + fragments
 for line in raw:
-    for marker in banned:
-        assert marker not in line, "transcript plaintext leaked into an access-log line: " + marker
+    for idx, marker in enumerate(banned):
+        assert marker not in line, (
+            "transcript plaintext leaked into an access-log line "
+            "(banned marker index %d; fragment redacted)" % idx
+        )
 print("ok")
-' "$QC_TMP/conv-access-lines"
+' "$QC_TMP/conv-access-lines" "$QC_TMP/conv-transcript.json"
 echo "  M8.5-B READ 6 OK: list/transcript/chain access trails with identifiers + outcome; zero plaintext in the access lines"
 
 echo "  M8.5-B OK: read APIs verified over the live bar record (no new model calls)"
