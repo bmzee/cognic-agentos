@@ -92,6 +92,51 @@ if [[ -z "${COGNIC_PROOF_M85_TIER1_API_KEY:-}" ]]; then
   exit 1
 fi
 
+# ZERO-SPEND provider-key VALIDITY probe (added after the 2026-07-10 run-2
+# finding: a rotated/invalid key surfaced only at BAR 1 — a 401 on the first
+# completion, ~25 minutes into a fully-green bring-up). GET /v1/models bills
+# nothing and proves the key BEFORE any cluster work starts. OpenAI-only: a
+# provider swap (the README one-values-diff) changes the auth endpoint, so
+# the probe SKIPS with a notice rather than false-failing a non-OpenAI key.
+# Hardened per review (2026-07-10): bounded timeouts (5s connect / 15s
+# total); the bearer header rides STDIN (-H @-), NEVER curl argv, so a `ps`
+# snapshot cannot expose the key; and the FOUR outcomes are diagnosed
+# SEPARATELY — a transport/DNS/timeout failure or an unexpected HTTP status
+# is "validity UNDETERMINED, fix connectivity", never "rotate the key".
+if [[ "${COGNIC_PROOF_M85_ALLOWED_PROVIDERS:-openai}" == "openai" ]]; then
+  set +e
+  KEY_PROBE_CODE="$(printf 'Authorization: Bearer %s\n' "$COGNIC_PROOF_M85_TIER1_API_KEY" \
+    | curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 15 \
+        -H @- https://api.openai.com/v1/models)"
+  KEY_PROBE_RC=$?
+  set -e
+  if [[ "$KEY_PROBE_RC" -ne 0 ]]; then
+    echo "FAIL: provider-key preflight could not REACH api.openai.com (curl exit" >&2
+    echo "      $KEY_PROBE_RC — transport/DNS/timeout; key validity UNDETERMINED)." >&2
+    echo "      Fix connectivity and re-run; do NOT rotate the key on this signal." >&2
+    exit 1
+  fi
+  case "$KEY_PROBE_CODE" in
+    200)
+      echo "provider-key preflight OK (zero-spend GET /v1/models: HTTP 200)"
+      ;;
+    401|403)
+      echo "FAIL: COGNIC_PROOF_M85_TIER1_API_KEY was REFUSED by api.openai.com (HTTP" >&2
+      echo "      $KEY_PROBE_CODE on the zero-spend GET /v1/models probe) — refusing" >&2
+      echo "      BEFORE any cluster work. Rotate/re-export the key and re-run." >&2
+      exit 1
+      ;;
+    *)
+      echo "FAIL: unexpected provider response on the key preflight (HTTP" >&2
+      echo "      $KEY_PROBE_CODE; key validity UNDETERMINED) — refusing BEFORE any" >&2
+      echo "      cluster work. Inspect provider status; do NOT assume a bad key." >&2
+      exit 1
+      ;;
+  esac
+else
+  echo "provider-key preflight SKIPPED (provider swap: ${COGNIC_PROOF_M85_ALLOWED_PROVIDERS} — no OpenAI probe)"
+fi
+
 CLUSTER="${KIND_CLUSTER:-cognic-proofm85}"
 NS="cognic-proofm85"
 CHART="infra/charts/agentos"

@@ -409,6 +409,98 @@ def test_runner_env_gated_and_provider_key_gated() -> None:
     )
 
 
+def _extract_key_probe_block() -> str:
+    """The complete provider-key probe block, anchored: from the column-0
+    provider-switch ``if`` to its column-0 ``fi`` (the nested RC ``if``/``fi``
+    and the ``case`` are indented, so the anchor cannot close early)."""
+    match = re.search(
+        r'^if \[\[ "\$\{COGNIC_PROOF_M85_ALLOWED_PROVIDERS:-openai\}" == "openai" \]\]; then\n'
+        r"(.*?)^fi$",
+        RUNNER,
+        re.DOTALL | re.MULTILINE,
+    )
+    assert match is not None, "the provider-key probe block is missing from the runner"
+    return match.group(0)
+
+
+def test_runner_probes_key_validity_before_any_cluster_work() -> None:
+    """Live run-2 finding (2026-07-10): a rotated key 401'd only at BAR 1,
+    ~25 minutes into a fully-green bring-up. The runner must probe the key
+    against the ZERO-SPEND GET /v1/models endpoint at the gate — refusing
+    BEFORE any cluster work — and must SKIP (not false-fail) on a provider
+    swap. The probe must sit before the config block (CLUSTER=...)."""
+    gate_region = RUNNER.split('CLUSTER="${KIND_CLUSTER:-cognic-proofm85}"')[0]
+    probe = _extract_key_probe_block()
+    assert probe in gate_region, "the probe block must precede the config block"
+    _assert_all(
+        probe,
+        (
+            "https://api.openai.com/v1/models",
+            "provider-key preflight SKIPPED (provider swap",
+            "refusing",
+            "BEFORE any cluster work",
+        ),
+    )
+    # No completion endpoint at the gate: the probe must stay zero-spend.
+    assert "chat/completions" not in gate_region
+
+
+def test_key_probe_is_bounded_by_connect_and_total_timeouts() -> None:
+    """Review finding #1 (2026-07-10): without --connect-timeout/--max-time,
+    "fails in seconds" is not guaranteed — a hung TCP connect could stall the
+    gate indefinitely. Mutation-tested: removing --max-time goes RED."""
+    probe = _extract_key_probe_block()
+    _assert_all(probe, ("--connect-timeout 5", "--max-time 15"))
+
+
+def test_key_probe_feeds_the_bearer_header_via_stdin_never_argv() -> None:
+    """Review finding #3 (2026-07-10): a bearer in curl argv is visible to
+    every local process via `ps`. The header must ride stdin (-H @-)."""
+    probe = _extract_key_probe_block()
+    _assert_all(
+        probe,
+        (
+            "printf 'Authorization: Bearer %s\\n' \"$COGNIC_PROOF_M85_TIER1_API_KEY\"",
+            "-H @-",
+        ),
+    )
+    # The argv-borne form must be gone from the ENTIRE runner: no curl line
+    # may carry the bearer as an argument.
+    for lineno, line in enumerate(RUNNER.splitlines(), start=1):
+        if "curl" in line and "Authorization" in line:
+            raise AssertionError(f"line {lineno}: bearer header on a curl argv line")
+
+
+def test_key_probe_diagnoses_transport_auth_and_unexpected_separately() -> None:
+    """Review finding #2 (2026-07-10): `|| true` collapsed transport failure,
+    DNS failure, timeout, and HTTP refusal into one false "rotate the key"
+    diagnosis. The four outcomes must be handled separately: curl nonzero ->
+    unreachable/UNDETERMINED; 401/403 -> key REFUSED; 200 -> pass; other ->
+    unexpected/UNDETERMINED."""
+    probe = _extract_key_probe_block()
+    assert "|| true" not in probe, "the probe must not swallow curl's exit status"
+    _assert_all(
+        probe,
+        (
+            "KEY_PROBE_RC=$?",
+            '[[ "$KEY_PROBE_RC" -ne 0 ]]',
+            "could not REACH",
+            "transport/DNS/timeout; key validity UNDETERMINED",
+            "do NOT rotate the key on this signal",
+            'case "$KEY_PROBE_CODE" in',
+            "200)",
+            "401|403)",
+            "REFUSED by api.openai.com",
+            "Rotate/re-export the key and re-run",
+            "*)",
+            "unexpected provider response",
+            "do NOT assume a bad key",
+        ),
+    )
+    # Each non-200 arm and the transport arm must fail loud.
+    assert probe.count("exit 1") >= 3
+
+
 def test_runner_sets_the_conversation_claim_ttl_above_the_wall_clock() -> None:
     """Recon finding R1 (ruled 2026-07-10): without this line the executor's
     claim_ttl_s > agent_run_wall_clock_s construction guard fails, the
