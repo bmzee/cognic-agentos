@@ -18,7 +18,11 @@ jobs:
   ci:
     name: lint + test
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 15 was <2 min of headroom on a GREEN run (13m17s, PR #124, 2026-07-09);
+    # the M8.5 suite (~13k tests) runs the whole budget. A timeout-cancelled
+    # run is `cancelled`, not `failed` — 25 keeps ours-budget reds out of the
+    # flake triage. Measured full-suite local wall: ~18 min.
+    timeout-minutes: 25
 
     steps:
       - name: Checkout
