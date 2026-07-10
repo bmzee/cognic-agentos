@@ -53,7 +53,10 @@ async def _migrated_engine(tmp_path: Any, name: str = "conv.db") -> Any:
 
     url = f"sqlite+aiosqlite:///{tmp_path / name}"
     cfg = make_alembic_config(url)
-    await asyncio.to_thread(command.upgrade, cfg, "head")
+    # Pin at REVISION 0015 — this suite pins the 0015 shape, not head. The
+    # M8.5-B migration 0016 adds turn_completed_request_id on top; its own
+    # suite (test_migration_20260710_0016.py) pins the head shape.
+    await asyncio.to_thread(command.upgrade, cfg, "0015")
     return create_async_engine(url)
 
 
@@ -171,13 +174,22 @@ async def test_tenant_creator_state_index_exists(tmp_path: Any) -> None:
 
 @pytest.mark.asyncio
 async def test_migration_tables_match_in_process_tables(tmp_path: Any) -> None:
-    """The migrated DDL and the in-process Tables must not drift."""
+    """The migrated DDL and the in-process Tables must not drift.
+
+    The in-process Tables track HEAD (0016 added
+    ``turn_completed_request_id``), so this drift pin migrates to head —
+    unlike the per-revision 0015 shape pins above."""
+    from alembic import command
+
     from cognic_agentos.core.conversation.storage import (
         _conversation_turns,
         _conversations,
     )
+    from cognic_agentos.db.migrations.alembic_config import make_alembic_config
 
-    eng = await _migrated_engine(tmp_path, "conv_drift.db")
+    url = f"sqlite+aiosqlite:///{tmp_path / 'conv_drift.db'}"
+    await asyncio.to_thread(command.upgrade, make_alembic_config(url), "head")
+    eng = create_async_engine(url)
     try:
         async with eng.connect() as c:
             conv = await c.run_sync(
