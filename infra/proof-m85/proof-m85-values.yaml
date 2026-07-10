@@ -1,0 +1,109 @@
+# Proof M8.5 SLICE (conversational substrate) overlay: real in-cluster
+# backends, prod profile, chart-created Secret. Mirrors the proof-m8 overlay
+# byte-for-byte apart from the m85 names; the deltas vs proof-m6 carry:
+#   * image tag proofm85 (CMD -> proof_m85.proof_app:create_proof_app, the
+#     MULTI-ACTOR eager-injection factory; the analyst.amir / analyst.sara
+#     actors carry the four conversation.* scopes and NO agent.ask);
+#   * litellm.config OVERRIDDEN (the chart renders it into the ConfigMap the
+#     kernel mounts at /app/infra/litellm/config.yaml — the gateway's
+#     PreflightResolver provenance source): cognic-tier1-proof-m85 is the
+#     CLOUD alias every conversation turn completes through (BARs 1 and 3
+#     are model-driven turns). The provider API key is env-referenced
+#     (os.environ/COGNIC_PROOF_M85_TIER1_API_KEY — operator-supplied at run
+#     time, never committed); THE MODEL-ALIAS SWAP IS THIS ONE VALUES DIFF:
+#     change the tier-1 litellm_params.model (+ its api_key env name if the
+#     provider differs) and the matching runner env COGNIC_ALLOWED_PROVIDERS
+#     — nothing else moves (the kernel only ever sees the alias). The
+#     matching kernel-side aliases (COGNIC_TIER1_ALIAS=cognic-tier1-proof-m85,
+#     COGNIC_TIER2_ALIAS=cognic-tier2-proof-m85) are image ENV
+#     (Dockerfile.agentos-proof) — NON-dev aliases because deploy-safety
+#     guard G6 refuses dev aliases once COGNIC_ALLOW_EXTERNAL_LLM=true;
+#   * cache.enabled=true + the in-cluster Redis: the Sprint-13.7 scheduler is
+#     CACHE-CONDITIONAL, the governed memory API (the BAR-1 task-tier memory
+#     row) is Redis-backed, and the lifespan constructs the sandbox backend +
+#     skill executor ONLY when runtime.scheduler exists;
+#   * sandbox.runtimeEnabled=true — the M6 executable-skill posture carries
+#     forward UNCHANGED (step 0 asserts hosted_skills lists the four
+#     instruction skills, and that surface + the skill executor construct
+#     only on the sandbox-real path). No skill EXECUTES in the M8.5 bars (all
+#     four staged skills are instruction-mode). The digest-pinned canonical
+#     image refs stay runner-injected via `helm install --set ...` (a static
+#     ref here would be a personal-registry ref G7 refuses in prod, or a
+#     placeholder the boot would trust — both wrong);
+#   * the query-context SIGNING key is NOT here and NOT in any image: the
+#     kernel reads it from COGNIC_AGENT_QUERY_CONTEXT_SIGNING_KEY_PATH
+#     (image ENV -> /run/cognic/query-context/query-context-private.pem), a
+#     RUNTIME mount the runner stages as a k8s Secret after generating the
+#     keypair. NO bypass flags anywhere: no dev_mode_skip_cosign, no
+#     fixture-mode toggles — the trust gate, DLP gate, dispatch gates and
+#     sandbox admission all run REAL.
+# The Vault dev-root token (smoke-root-token) == the reused backends.yaml Vault.
+image:
+  repository: cognic-agentos        # loaded into kind via `kind load docker-image`
+  tag: "proofm85"
+  pullPolicy: IfNotPresent
+runtimeProfile: prod
+qdrant: { url: http://qdrant:6333 }
+vault: { addr: http://vault:8200 }
+embedding: { driver: ollama, baseUrl: http://ollama:11434, model: nomic-embed-text, dimensions: 768 }
+langfuse: { host: http://langfuse:3000 }
+litellm:
+  baseUrl: http://litellm:4000
+  # The M8 router config (rendered into the chart ConfigMap; the kernel
+  # mounts it at /app/infra/litellm/config.yaml and the runner points the
+  # in-cluster litellm Deployment at the SAME rendered ConfigMap so the
+  # gateway's preflight provenance and the router's live routing read ONE
+  # model_list). Tier 1 = the operator's CLOUD provider (default: OpenAI
+  # gpt-4o — the proof is evidenced on OpenAI; the swap to another provider
+  # is this one model line + the api_key env name + the runner's
+  # POLICY_MODE/ALLOWED_PROVIDERS defaults, kept in lockstep). Tier 2 stays
+  # self-hosted ollama (no cloud dependency beyond tier 1).
+  config: |
+    model_list:
+      - model_name: cognic-tier1-proof-m85
+        litellm_params:
+          model: openai/gpt-4o
+          api_key: os.environ/COGNIC_PROOF_M85_TIER1_API_KEY
+      - model_name: cognic-tier2-proof-m85
+        litellm_params:
+          model: ollama/qwen3:32b
+          api_base: ${OLLAMA_BASE_URL:-http://ollama:11434}
+    litellm_settings:
+      drop_params: true
+    # M8 finding #7 (2026-07-07): NO general_settings.master_key. litellm
+    # main-stable requires a DATABASE_URL when master_key is set (virtual-key
+    # management) and 400s "No connected db" on every authenticated request
+    # without one — the proof's litellm has no DB. This ephemeral in-cluster
+    # router needs no admin-key auth (private cluster; no bar tests it); it
+    # ignores the vault-resolved key the kernel still presents (finding #6,
+    # which keeps the prod-profile secret-hygiene path exercised).
+cache:
+  enabled: true                     # M8: scheduler control plane + governed memory (the BAR-1 task-tier row)
+  url: "redis://redis:6379/0"       # manifests/redis.yaml Service (lands with Task C2)
+sandbox:
+  runtimeEnabled: true              # M6 executable-skill posture unchanged (hosted_skills precondition)
+  # canonicalRuntimeImage / canonicalEgressProxyImage: injected via --set at
+  # install time (digest-pinned, proof-canonical-signed) — see the header note.
+otel:
+  exporter:
+    # INHERITED DIAGNOSTICS ONLY (ruling R6, 2026-07-10): NO M8.5 bar
+    # depends on spans. The proof-m8 trace-record surface carries forward
+    # byte-for-byte so the deployment stays drift-free vs the proven m8
+    # bring-up: the gateway's value-free llm.gateway.completion span exports
+    # to the proof-local OTLP collector (manifests/otel-collector.yaml,
+    # debug exporter -> pod log; the shared-backends Langfuse is v2 and
+    # cannot ingest OTLP). The m85 runner never asserts on it — the
+    # collector log is captured as diagnostics on bar failure only. gRPC +
+    # insecure=true is in-cluster plaintext to the collector Service only
+    # (no external egress).
+    endpoint: "http://otel-collector:4317"
+    protocol: grpc
+    insecure: true
+migrations: { enabled: false }     # Gap 3: chart pre-install migration hook deadlocks; proof runs a non-hook Job post-install
+secrets:
+  create: true
+  databaseUrl: "postgresql+asyncpg://cognic:cognic@postgres:5432/cognic"
+  vaultToken: "smoke-root-token"        # == the reused backends.yaml Vault VAULT_DEV_ROOT_TOKEN_ID (pinned by tests/unit/infra/test_proof_m85_structure.py)
+podSecurityContext:
+  runAsUser: 65534                  # single-uid broker<->sandbox contract (the M6 posture, unchanged)
+  fsGroup: 65534                    # emptyDirs writable for the same identity
