@@ -12,6 +12,7 @@ defect classes the integrity doctrine refuses).
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
@@ -102,14 +103,18 @@ async def _new_conversation(
 
 
 def _started_payload(
-    run_id: str, *, creator: str = _CREATOR, agent: str = _AGENT
+    run_id: str,
+    *,
+    creator: str = _CREATOR,
+    agent: str = _AGENT,
+    question_sha256: str = "a" * 64,
 ) -> dict[str, Any]:
     return {
         "run_id": run_id,
         "agent_id": agent,
         "actor_id": creator,
         "originator_subject": creator,
-        "question_sha256": "a" * 64,
+        "question_sha256": question_sha256,
         "question_bytes": 10,
         "max_steps": 6,
         "token_budget": 60_000,
@@ -152,13 +157,14 @@ def _terminal_payload(
     state: str = "completed",
     creator: str = _CREATOR,
     agent: str = _AGENT,
+    answer_sha256: str = "e" * 64,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "run_id": run_id,
         "agent_id": agent,
         "actor_id": creator,
         "originator_subject": creator,
-        "answer_sha256": "e" * 64,
+        "answer_sha256": answer_sha256,
         "answer_bytes": 42,
         "steps_used": 1,
         "prompt_tokens_total": 100,
@@ -181,6 +187,8 @@ async def _append_run_rows(
     tenant: str = _TENANT,
     creator: str = _CREATOR,
     agent: str = _AGENT,
+    question_sha256: str = "a" * 64,
+    answer_sha256: str = "e" * 64,
 ) -> None:
     """Realistic agent.run.% evidence in chain order: started -> dispatches ->
     terminal (mirrors the loop's request-id + payload contracts)."""
@@ -188,7 +196,9 @@ async def _append_run_rows(
         DecisionRecord(
             decision_type="agent.run.started",
             request_id=f"{run_id}-started",
-            payload=_started_payload(run_id, creator=creator, agent=agent),
+            payload=_started_payload(
+                run_id, creator=creator, agent=agent, question_sha256=question_sha256
+            ),
             actor_id=creator,
             tenant_id=tenant,
             iso_controls=("A.6.2.4",),
@@ -209,7 +219,13 @@ async def _append_run_rows(
         DecisionRecord(
             decision_type=f"agent.run.{terminal_state}",
             request_id=f"{run_id}-terminal",
-            payload=_terminal_payload(run_id, state=terminal_state, creator=creator, agent=agent),
+            payload=_terminal_payload(
+                run_id,
+                state=terminal_state,
+                creator=creator,
+                agent=agent,
+                answer_sha256=answer_sha256,
+            ),
             actor_id=creator,
             tenant_id=tenant,
             iso_controls=("A.6.2.4",),
@@ -276,6 +292,10 @@ async def _drive_turn(
         tenant=tenant,
         creator=creator,
         agent=agent,
+        # The coupled writer contract: the started row digests the SAME
+        # question and the terminal row the SAME answer the turn row stores.
+        question_sha256=hashlib.sha256(f"question {seq}".encode()).hexdigest(),
+        answer_sha256=hashlib.sha256(f"answer {seq}".encode()).hexdigest(),
     )
     await _append_turn(store, cid, seq, run_id=run_id, tenant=tenant, creator=creator)
     return run_id
@@ -731,11 +751,16 @@ async def test_chain_excludes_interleaved_concurrent_runs(
     cid = await _new_conversation(store)
     run_id = f"agent-run-{uuid.uuid4().hex}"
     foreign_run = f"agent-run-{uuid.uuid4().hex}"
+    # Coupled digests for the manual seed: _append_turn(seq=1) below stores
+    # "question 1"/"answer 1", and the reader enforces started<->turn +
+    # terminal<->turn digest equality.
+    q_sha = hashlib.sha256(b"question 1").hexdigest()
+    a_sha = hashlib.sha256(b"answer 1").hexdigest()
     await history.append(
         DecisionRecord(
             decision_type="agent.run.started",
             request_id=f"{run_id}-started",
-            payload=_started_payload(run_id),
+            payload=_started_payload(run_id, question_sha256=q_sha),
             actor_id=_CREATOR,
             tenant_id=_TENANT,
             iso_controls=("A.6.2.4",),
@@ -766,7 +791,7 @@ async def test_chain_excludes_interleaved_concurrent_runs(
         DecisionRecord(
             decision_type="agent.run.completed",
             request_id=f"{run_id}-terminal",
-            payload=_terminal_payload(run_id),
+            payload=_terminal_payload(run_id, answer_sha256=a_sha),
             actor_id=_CREATOR,
             tenant_id=_TENANT,
             iso_controls=("A.6.2.4",),
@@ -1223,6 +1248,15 @@ async def test_hop1_validator_negative_arms(bare_reader: ConversationReadModel) 
     with pytest.raises(ConversationChainIntegrityError) as exc:
         hop1([_fake_chain("conversation.turn_completed", {**good, "actor_id": "someone.else"})])
     assert exc.value.internal_reason == "dual_identity_mismatch"
+    # finding 3 (2026-07-10): a str is not evidence — question_sha256="x"
+    # previously projected as a valid digest.
+    with pytest.raises(ConversationChainIntegrityError) as exc:
+        hop1([_fake_chain("conversation.turn_completed", {**good, "question_sha256": "x"})])
+    assert exc.value.internal_reason == "hop1_malformed"
+    # Uppercase 64-hex is NOT the canonical form the writers emit.
+    with pytest.raises(ConversationChainIntegrityError) as exc:
+        hop1([_fake_chain("conversation.turn_completed", {**good, "answer_sha256": "A" * 64})])
+    assert exc.value.internal_reason == "hop1_malformed"
 
 
 async def test_started_validator_negative_arms(bare_reader: ConversationReadModel) -> None:
@@ -1256,6 +1290,10 @@ async def test_started_validator_negative_arms(bare_reader: ConversationReadMode
     with pytest.raises(ConversationChainIntegrityError) as exc:
         started([_fake_chain("agent.run.started", {**good, "actor_id": "forged"})])
     assert exc.value.internal_reason == "dual_identity_mismatch"
+    # finding 3: prior_context_sha256="y" previously projected as evidence.
+    with pytest.raises(ConversationChainIntegrityError) as exc:
+        started([_fake_chain("agent.run.started", {**good, "prior_context_sha256": "y"})])
+    assert exc.value.internal_reason == "anchor_malformed"
     # wall_clock_s missing/non-numeric.
     with pytest.raises(ConversationChainIntegrityError) as exc:
         started([_fake_chain("agent.run.started", {**good, "wall_clock_s": None})])
@@ -1287,6 +1325,10 @@ async def test_terminal_validator_negative_arms(bare_reader: ConversationReadMod
     with pytest.raises(ConversationChainIntegrityError) as exc:
         terminal([_fake_chain("agent.run.completed", {**good, "actor_id": "forged"})])
     assert exc.value.internal_reason == "dual_identity_mismatch"
+    # finding 3: a malformed answer digest is corruption, not evidence.
+    with pytest.raises(ConversationChainIntegrityError) as exc:
+        terminal([_fake_chain("agent.run.completed", {**good, "answer_sha256": "zz"})])
+    assert exc.value.internal_reason == "anchor_malformed"
 
 
 async def test_dispatch_projection_negative_arms(bare_reader: ConversationReadModel) -> None:
@@ -1311,6 +1353,18 @@ async def test_dispatch_projection_negative_arms(bare_reader: ConversationReadMo
     with pytest.raises(ConversationChainIntegrityError) as exc:
         project([_fake_chain("agent.run.dispatch", {**good, "actor_id": "forged"})])
     assert exc.value.internal_reason == "dual_identity_mismatch"
+    # finding 3: args_sha256 is REQUIRED 64-hex; result_sha256 is 64-hex
+    # WHEN PRESENT (nullable by the writer contract), and a non-string
+    # result refuses through the same arm.
+    with pytest.raises(ConversationChainIntegrityError) as exc:
+        project([_fake_chain("agent.run.dispatch", {**good, "args_sha256": "not-a-digest"})])
+    assert exc.value.internal_reason == "anchor_malformed"
+    with pytest.raises(ConversationChainIntegrityError) as exc:
+        project([_fake_chain("agent.run.dispatch", {**good, "result_sha256": "not-a-digest"})])
+    assert exc.value.internal_reason == "anchor_malformed"
+    with pytest.raises(ConversationChainIntegrityError) as exc:
+        project([_fake_chain("agent.run.dispatch", {**good, "result_sha256": 42})])
+    assert exc.value.internal_reason == "anchor_malformed"
 
 
 async def test_cursor_payload_must_be_an_object(reader: ConversationReadModel) -> None:
@@ -1334,6 +1388,37 @@ async def test_transcript_cursor_non_string_cid_type(
         await reader.read_transcript(
             cid, tenant_id=_TENANT, creator_subject=_CREATOR, cursor=cursor
         )
+
+
+async def test_chain_cross_block_digest_coupling_is_enforced(
+    store: ConversationStore,
+    history: DecisionHistoryStore,
+    reader: ConversationReadModel,
+) -> None:
+    """finding 3 (2026-07-10): a joined chain whose anchors disagree on
+    content is corruption. A VALID-hex but WRONG started question digest —
+    and separately a wrong terminal answer digest — must refuse as
+    anchor_mismatch, never project."""
+    a_sha = hashlib.sha256(b"answer 1").hexdigest()
+    q_sha = hashlib.sha256(b"question 1").hexdigest()
+
+    cid = await _new_conversation(store)
+    run_id = f"agent-run-{uuid.uuid4().hex}"
+    await _append_run_rows(history, run_id, question_sha256="c" * 64, answer_sha256=a_sha)
+    await _append_turn(store, cid, 1, run_id=run_id)
+    with pytest.raises(ConversationChainIntegrityError) as exc:
+        await reader.read_turn_chain(cid, 1, tenant_id=_TENANT, creator_subject=_CREATOR)
+    assert exc.value.internal_reason == "anchor_mismatch"
+    assert "started question_sha256" in exc.value.detail
+
+    cid2 = await _new_conversation(store)
+    run_id2 = f"agent-run-{uuid.uuid4().hex}"
+    await _append_run_rows(history, run_id2, question_sha256=q_sha, answer_sha256="d" * 64)
+    await _append_turn(store, cid2, 1, run_id=run_id2)
+    with pytest.raises(ConversationChainIntegrityError) as exc:
+        await reader.read_turn_chain(cid2, 1, tenant_id=_TENANT, creator_subject=_CREATOR)
+    assert exc.value.internal_reason == "anchor_mismatch"
+    assert "terminal answer_sha256" in exc.value.detail
 
 
 async def test_chain_turn_row_missing_within_watermark_is_transcript_integrity(

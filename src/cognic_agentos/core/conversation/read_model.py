@@ -43,6 +43,7 @@ from __future__ import annotations
 import base64
 import binascii
 import json
+import re
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -93,9 +94,11 @@ class CursorInvalid(Exception):
 
 
 class TurnNotFound(Exception):
-    """The conversation IS owned but the seq is absent or beyond the
-    watermark. Owner-visible only — ownership failures collapse to the
-    byte-identical conversation 404 upstream of this."""
+    """The conversation IS owned but the seq lies beyond ``1..turn_count``.
+    Owner-visible only — ownership failures collapse to the byte-identical
+    conversation 404 upstream of this, and an ABSENT row INSIDE the
+    watermark is never this exception: the record claims that turn exists,
+    so it raises :class:`ConversationTranscriptIntegrityError` instead."""
 
 
 class ConversationTranscriptIntegrityError(Exception):
@@ -118,9 +121,11 @@ class ConversationChainIntegrityError(Exception):
 
 
 class ConversationChainProjectionLimit(Exception):
-    """The dispatch-window candidate fetch exceeded the configured cap —
-    operator remediation (or a higher ``conversation_chain_candidate_limit``),
-    DISTINCT from corruption and not automatically retryable."""
+    """The dispatch-window candidate fetch exceeded the configured cap.
+    OPERATIONAL, distinct from corruption: served as 503, and the SAME
+    request succeeds again once an operator raises
+    ``conversation_chain_candidate_limit`` — clients gain nothing by
+    retrying before that remediation."""
 
     def __init__(self, detail: str) -> None:
         super().__init__(detail)
@@ -452,6 +457,22 @@ def _payload_str(payload: dict[str, Any], key: str, *, where: str) -> str:
     return value
 
 
+_SHA256_HEX: Final = re.compile(r"[0-9a-f]{64}")
+
+
+def _payload_sha256(payload: dict[str, Any], key: str, *, where: str) -> str:
+    """A REQUIRED lowercase 64-hex SHA-256 payload field. ``str`` alone is
+    not evidence — a tampered ``question_sha256=\"x\"`` must refuse as
+    corruption, never project as a valid digest."""
+    value = _payload_str(payload, key, where=where)
+    if _SHA256_HEX.fullmatch(value) is None:
+        _integrity(
+            "anchor_malformed" if where != "hop1" else "hop1_malformed",
+            f"{where}: payload key {key!r} is not a lowercase 64-hex sha256",
+        )
+    return value
+
+
 def _payload_int(payload: dict[str, Any], key: str, *, where: str) -> int:
     value = payload.get(key)
     if not isinstance(value, int) or isinstance(value, bool):
@@ -719,6 +740,21 @@ class ConversationReadModel:
                     f"{terminal.sequence}, turn_completed seq {hop1.sequence}",
                 )
 
+            # Cross-block digest coupling: the started row digests the SAME
+            # question and the terminal row the SAME answer the turn row
+            # recorded — a joined chain whose anchors disagree on content is
+            # corruption, not evidence.
+            if started.question_sha256 != hop1.question_sha256:
+                _integrity(
+                    "anchor_mismatch",
+                    f"run {run_id}: started question_sha256 disagrees with the turn row",
+                )
+            if terminal.answer_sha256 != hop1.answer_sha256:
+                _integrity(
+                    "anchor_mismatch",
+                    f"run {run_id}: terminal answer_sha256 disagrees with the turn row",
+                )
+
             cap = self._chain_candidate_limit
             window = (
                 (
@@ -786,9 +822,9 @@ class ConversationReadModel:
             seq=turn["seq"],
             agent_run_id=run_id,
             actor_id=actor,
-            question_sha256=_payload_str(payload, "question_sha256", where="hop1"),
+            question_sha256=_payload_sha256(payload, "question_sha256", where="hop1"),
             question_bytes=_payload_int(payload, "question_bytes", where="hop1"),
-            answer_sha256=_payload_str(payload, "answer_sha256", where="hop1"),
+            answer_sha256=_payload_sha256(payload, "answer_sha256", where="hop1"),
             answer_bytes=_payload_int(payload, "answer_bytes", where="hop1"),
             prompt_tokens=_payload_int(payload, "prompt_tokens", where="hop1"),
             completion_tokens=_payload_int(payload, "completion_tokens", where="hop1"),
@@ -852,13 +888,13 @@ class ConversationReadModel:
             # substituted): _run_row_identity proved both == creator_subject.
             actor_id=_payload_str(payload, "actor_id", where="started"),
             originator_subject=_payload_str(payload, "originator_subject", where="started"),
-            question_sha256=_payload_str(payload, "question_sha256", where="started"),
+            question_sha256=_payload_sha256(payload, "question_sha256", where="started"),
             question_bytes=_payload_int(payload, "question_bytes", where="started"),
             max_steps=_payload_int(payload, "max_steps", where="started"),
             token_budget=token_budget,
             wall_clock_s=float(wall_clock),
             prior_context_turns=_payload_int(payload, "prior_context_turns", where="started"),
-            prior_context_sha256=_payload_str(payload, "prior_context_sha256", where="started"),
+            prior_context_sha256=_payload_sha256(payload, "prior_context_sha256", where="started"),
         )
 
     def _validate_terminal(
@@ -892,7 +928,7 @@ class ConversationReadModel:
             sequence=chain["sequence"],
             created_at=chain["created_at"],
             terminal_state=chain["event_type"].removeprefix("agent.run."),
-            answer_sha256=_payload_str(payload, "answer_sha256", where="terminal"),
+            answer_sha256=_payload_sha256(payload, "answer_sha256", where="terminal"),
             answer_bytes=_payload_int(payload, "answer_bytes", where="terminal"),
             steps_used=_payload_int(payload, "steps_used", where="terminal"),
             prompt_tokens_total=_payload_int(payload, "prompt_tokens_total", where="terminal"),
@@ -918,10 +954,18 @@ class ConversationReadModel:
             if payload.get("run_id") != run_id:
                 continue
             self._run_row_identity(payload, row=row, run_id=run_id, where="dispatch")
-            for name in ("args_sha256", "result_sha256", "refusal_reason", "scope_id"):
+            for name in ("refusal_reason", "scope_id"):
                 value = payload.get(name)
                 if value is not None and not isinstance(value, str):
                     _integrity("anchor_malformed", f"dispatch: {name} is non-string")
+            result_sha256 = payload.get("result_sha256")
+            if result_sha256 is not None and (
+                not isinstance(result_sha256, str) or _SHA256_HEX.fullmatch(result_sha256) is None
+            ):
+                _integrity(
+                    "anchor_malformed",
+                    "dispatch: result_sha256 is not a lowercase 64-hex sha256",
+                )
             result_bytes = payload.get("result_bytes")
             if result_bytes is not None and (
                 not isinstance(result_bytes, int) or isinstance(result_bytes, bool)
@@ -936,8 +980,8 @@ class ConversationReadModel:
                     scope_id=payload.get("scope_id"),
                     outcome=_payload_str(payload, "outcome", where="dispatch"),
                     refusal_reason=payload.get("refusal_reason"),
-                    args_sha256=payload.get("args_sha256"),
-                    result_sha256=payload.get("result_sha256"),
+                    args_sha256=_payload_sha256(payload, "args_sha256", where="dispatch"),
+                    result_sha256=result_sha256,
                     result_bytes=result_bytes,
                 )
             )
