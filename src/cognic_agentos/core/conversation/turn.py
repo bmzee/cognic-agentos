@@ -43,8 +43,8 @@ from cognic_agentos.core.agent._types import (
 )
 from cognic_agentos.core.conversation._context import assemble_prior_context
 from cognic_agentos.core.conversation._types import (
-    ConversationRecord,
     ConversationTurnRefused,
+    TurnClaim,
     TurnRecord,
 )
 
@@ -70,7 +70,7 @@ class _StoreLike(Protocol):
         creator_subject: str,
         now: datetime,
         claim_ttl_s: float,
-    ) -> ConversationRecord: ...
+    ) -> TurnClaim: ...
 
     async def load_replay_turns(
         self, conversation_id: uuid.UUID, *, tenant_id: str, last_n: int
@@ -89,9 +89,12 @@ class _StoreLike(Protocol):
         completion_tokens: int,
         actor_id: str,
         request_id: str,
+        claim_id: uuid.UUID,
     ) -> uuid.UUID: ...
 
-    async def release_claim(self, conversation_id: uuid.UUID, *, tenant_id: str) -> None: ...
+    async def release_claim(
+        self, conversation_id: uuid.UUID, *, tenant_id: str, claim_id: uuid.UUID
+    ) -> None: ...
 
 
 class _LoopLike(Protocol):
@@ -175,13 +178,14 @@ class ConversationTurnExecutor:
         #    ConversationTurnRefused (conversation_not_active /
         #    conversation_turn_in_progress) BEFORE any context assembly, any
         #    model call, or any gateway activity.
-        record = await self._store.claim_turn(
+        claim = await self._store.claim_turn(
             conversation_id,
             tenant_id=tenant_id,
             creator_subject=actor_subject,
             now=now,
             claim_ttl_s=self._claim_ttl_s,
         )
+        record = claim.record
         try:
             # 2. Conversation-level bounds. Still no loop invocation.
             if record.turn_count >= self._max_turns:
@@ -227,6 +231,7 @@ class ConversationTurnExecutor:
                 completion_tokens=result.completion_tokens,
                 actor_id=actor_subject,
                 request_id=f"{_TURN_REQUEST_ID_PREFIX}{uuid.uuid4().hex}",
+                claim_id=claim.claim_id,
             )
             return TurnResult(
                 turn_id=turn_id,
@@ -237,5 +242,10 @@ class ConversationTurnExecutor:
                 refusal_reason=result.refusal_reason,
             )
         finally:
-            # 6. Always release. A crashed turn must never wedge the conversation.
-            await self._store.release_claim(conversation_id, tenant_id=tenant_id)
+            # 6. Always release OUR OWN lease (fenced by claim_id): if the claim
+            #    was reclaimed after TTL while we ran, this is a no-op and the
+            #    new holder's lease survives. A crashed turn never wedges the
+            #    conversation -- its lease is reclaimable after TTL.
+            await self._store.release_claim(
+                conversation_id, tenant_id=tenant_id, claim_id=claim.claim_id
+            )

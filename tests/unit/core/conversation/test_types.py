@@ -34,12 +34,14 @@ def test_conversation_state_has_exactly_four_values() -> None:
     }
 
 
-def test_turn_refusal_reason_has_exactly_four_values() -> None:
+def test_turn_refusal_reason_has_exactly_five_values() -> None:
+    """conversation_turn_claim_stale is the P0 fencing refusal (2026-07-10)."""
     assert set(typing.get_args(ConversationTurnRefusalReason)) == {
         "conversation_not_active",
         "conversation_turn_in_progress",
         "conversation_max_turns_exceeded",
         "conversation_token_budget_exceeded",
+        "conversation_turn_claim_stale",
     }
 
 

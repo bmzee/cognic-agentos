@@ -33,6 +33,7 @@ from cognic_agentos.core.conversation._types import (
 from cognic_agentos.core.conversation.storage import (
     ConversationStore,
     _conversation_turns,
+    _conversations,
 )
 from cognic_agentos.core.decision_history import _decision_history
 
@@ -72,6 +73,50 @@ async def _new(store: ConversationStore, *, tenant: str = "t1", subject: str = "
         request_id="req-create",
     )
     return cid
+
+
+async def _claim(
+    store: ConversationStore, cid: uuid.UUID, *, tenant: str = "t1", subject: str = "s1"
+) -> Any:
+    return await store.claim_turn(
+        cid,
+        tenant_id=tenant,
+        creator_subject=subject,
+        now=datetime.now(UTC),
+        claim_ttl_s=300.0,
+    )
+
+
+async def _append(
+    store: ConversationStore,
+    cid: uuid.UUID,
+    seq: int,
+    *,
+    tenant: str = "t1",
+    subject: str = "s1",
+    q: str = "q",
+    a: str = "a",
+    run: str | None = None,
+    pt: int = 1,
+    ct: int = 1,
+) -> uuid.UUID:
+    """The honest flow: claim -> append(fenced) -> release(own claim)."""
+    claim = await _claim(store, cid, tenant=tenant, subject=subject)
+    turn_id = await store.append_turn(
+        conversation_id=cid,
+        tenant_id=tenant,
+        seq=seq,
+        user_message=q,
+        answer=a,
+        agent_run_id=run if run is not None else f"r{seq}",
+        prompt_tokens=pt,
+        completion_tokens=ct,
+        actor_id=subject,
+        request_id=f"req-{seq}",
+        claim_id=claim.claim_id,
+    )
+    await store.release_claim(cid, tenant_id=tenant, claim_id=claim.claim_id)
+    return turn_id
 
 
 async def _chain_rows(db: AsyncEngine) -> list[sa.Row[tuple[str, dict[str, Any]]]]:
@@ -119,8 +164,10 @@ async def test_claim_is_exclusive_second_claim_refuses(store: ConversationStore)
 async def test_release_allows_reclaim(store: ConversationStore) -> None:
     cid = await _new(store)
     now = datetime.now(UTC)
-    await store.claim_turn(cid, tenant_id="t1", creator_subject="s1", now=now, claim_ttl_s=300.0)
-    await store.release_claim(cid, tenant_id="t1")
+    claim = await store.claim_turn(
+        cid, tenant_id="t1", creator_subject="s1", now=now, claim_ttl_s=300.0
+    )
+    await store.release_claim(cid, tenant_id="t1", claim_id=claim.claim_id)
     await store.claim_turn(cid, tenant_id="t1", creator_subject="s1", now=now, claim_ttl_s=300.0)
 
 
@@ -202,18 +249,7 @@ async def test_append_turn_returns_the_id_it_actually_inserted(
     store: ConversationStore, db: AsyncEngine
 ) -> None:
     cid = await _new(store)
-    turn_id = await store.append_turn(
-        conversation_id=cid,
-        tenant_id="t1",
-        seq=1,
-        user_message="q",
-        answer="a",
-        agent_run_id="agent-run-1",
-        prompt_tokens=1,
-        completion_tokens=1,
-        actor_id="s1",
-        request_id="req-t",
-    )
+    turn_id = await _append(store, cid, 1, run="agent-run-1")
     async with db.connect() as conn:
         found = (
             await conn.execute(
@@ -229,17 +265,15 @@ async def test_turn_chain_row_carries_digests_never_plaintext(
     store: ConversationStore, db: AsyncEngine
 ) -> None:
     cid = await _new(store)
-    turn_id = await store.append_turn(
-        conversation_id=cid,
-        tenant_id="t1",
-        seq=1,
-        user_message="who is the top depositor",
-        answer="Acme Corp",
-        agent_run_id="agent-run-abc",
-        prompt_tokens=10,
-        completion_tokens=5,
-        actor_id="s1",
-        request_id="req-t2",
+    turn_id = await _append(
+        store,
+        cid,
+        1,
+        q="who is the top depositor",
+        a="Acme Corp",
+        run="agent-run-abc",
+        pt=10,
+        ct=5,
     )
     rows = [r for r in await _chain_rows(db) if r.event_type == "conversation.turn_completed"]
     assert len(rows) == 1
@@ -260,18 +294,7 @@ async def test_turn_chain_row_carries_digests_never_plaintext(
 
 async def test_append_turn_bumps_counters(store: ConversationStore) -> None:
     cid = await _new(store)
-    await store.append_turn(
-        conversation_id=cid,
-        tenant_id="t1",
-        seq=1,
-        user_message="q",
-        answer="a",
-        agent_run_id="r1",
-        prompt_tokens=7,
-        completion_tokens=3,
-        actor_id="s1",
-        request_id="req-t3",
-    )
+    await _append(store, cid, 1, pt=7, ct=3)
     rec = await store.load(cid, tenant_id="t1", creator_subject="s1")
     assert rec is not None
     assert rec.turn_count == 1
@@ -294,18 +317,7 @@ async def test_create_conversation_emits_created_chain_row(
 
 async def _seed_turns(store: ConversationStore, cid: uuid.UUID, n: int) -> None:
     for i in range(1, n + 1):
-        await store.append_turn(
-            conversation_id=cid,
-            tenant_id="t1",
-            seq=i,
-            user_message=f"q{i}",
-            answer=f"a{i}",
-            agent_run_id=f"r{i}",
-            prompt_tokens=1,
-            completion_tokens=1,
-            actor_id="s1",
-            request_id=f"req-{i}",
-        )
+        await _append(store, cid, i, q=f"q{i}", a=f"a{i}")
 
 
 async def test_replay_turns_returns_first_then_last_n_in_seq_order(
@@ -342,18 +354,7 @@ async def test_replay_turns_on_empty_conversation(store: ConversationStore) -> N
 
 async def test_replay_turns_is_tenant_scoped(store: ConversationStore) -> None:
     cid = await _new(store, tenant="tenant-a")
-    await store.append_turn(
-        conversation_id=cid,
-        tenant_id="tenant-a",
-        seq=1,
-        user_message="q",
-        answer="a",
-        agent_run_id="r1",
-        prompt_tokens=1,
-        completion_tokens=1,
-        actor_id="s1",
-        request_id="req-x",
-    )
+    await _append(store, cid, 1, tenant="tenant-a")
     assert await store.load_replay_turns(cid, tenant_id="tenant-b", last_n=5) == []
 
 
@@ -377,9 +378,20 @@ async def test_transition_records_the_locked_from_state(
     assert rows[0].payload["to_state"] == "closed"
 
 
-async def test_transition_updates_state_and_clears_claim(
-    store: ConversationStore,
+async def test_close_is_graceful_and_preserves_an_in_flight_claim(
+    store: ConversationStore, db: AsyncEngine
 ) -> None:
+    """GRACEFUL CLOSE (ruled 2026-07-09): closing blocks NEW turns but does not
+    cancel work already admitted.
+
+    ``close`` is NOT an emergency cancel. The in-flight executor keeps its claim
+    and releases it in its own ``finally``; clearing the claim inside
+    ``transition`` would let the store forget that a turn was still running.
+    """
+    import sqlalchemy as sa
+
+    from cognic_agentos.core.conversation.storage import _conversations
+
     cid = await _new(store)
     await store.claim_turn(
         cid,
@@ -397,6 +409,79 @@ async def test_transition_updates_state_and_clears_claim(
     )
     rec = await store.load(cid, tenant_id="t1", creator_subject="s1")
     assert rec is not None and rec.state == "closed"
+
+    async with db.connect() as conn:
+        row = (
+            (
+                await conn.execute(
+                    sa.select(
+                        _conversations.c.turn_in_progress,
+                        _conversations.c.turn_claimed_at,
+                        _conversations.c.turn_claim_id,
+                    ).where(_conversations.c.conversation_id == cid)
+                )
+            )
+            .mappings()
+            .first()
+        )
+    assert row is not None
+    assert row["turn_in_progress"] is True, "close must not cancel admitted work"
+    assert row["turn_claimed_at"] is not None
+    assert row["turn_claim_id"] is not None, "the fencing token survives close"
+
+
+async def test_admitted_turn_settles_after_close_then_new_turns_refuse(
+    store: ConversationStore,
+) -> None:
+    """The race ruling 1 pins: claim -> close -> the admitted turn still lands,
+    the executor releases, and only THEN does the conversation reject new work.
+    """
+    cid = await _new(store)
+    claim = await store.claim_turn(
+        cid,
+        tenant_id="t1",
+        creator_subject="s1",
+        now=datetime.now(UTC),
+        claim_ttl_s=300.0,
+    )
+    await store.transition(
+        conversation_id=cid,
+        tenant_id="t1",
+        to_state="closed",
+        actor_id="s1",
+        request_id="req-race",
+    )
+    # the in-flight turn settles: ``closed`` is a persistable state (the
+    # active|closed rule), and the write is FENCED by its own claim_id
+    turn_id = await store.append_turn(
+        conversation_id=cid,
+        tenant_id="t1",
+        seq=1,
+        user_message="in flight",
+        answer="settled",
+        agent_run_id="agent-run-race",
+        prompt_tokens=1,
+        completion_tokens=1,
+        actor_id="s1",
+        request_id="req-race-turn",
+        claim_id=claim.claim_id,
+    )
+    assert turn_id is not None
+    await store.release_claim(cid, tenant_id="t1", claim_id=claim.claim_id)
+
+    rec = await store.load(cid, tenant_id="t1", creator_subject="s1")
+    assert rec is not None and rec.turn_count == 1 and rec.state == "closed"
+
+    # a NEW turn is refused -- not because of the claim, but because it is closed
+    with pytest.raises(ConversationTurnRefused) as exc:
+        await store.claim_turn(
+            cid,
+            tenant_id="t1",
+            creator_subject="s1",
+            now=datetime.now(UTC),
+            claim_ttl_s=300.0,
+        )
+    assert exc.value.reason == "conversation_not_active"
 
 
 async def test_transition_on_missing_conversation_raises_not_found(
@@ -481,3 +566,228 @@ async def test_unknown_target_state_refuses_before_any_db_work(
         )
     assert exc.value.reason == "conversation_transition_invalid_state_pair"
     assert len(await _chain_rows(db)) == before
+
+
+# --- FENCING (P0, 2026-07-10): TTL expiry is liveness, not mutual exclusion -----
+
+
+async def test_stale_worker_append_is_fenced_out(store: ConversationStore, db: AsyncEngine) -> None:
+    """A claims -> stalls past TTL -> B steals the lease -> delayed A tries to
+    persist. A's token is stale: refused ``conversation_turn_claim_stale``,
+    transaction rolled back whole -- no turn row, no chain row, no counters."""
+    cid = await _new(store)
+    t0 = datetime.now(UTC)
+    claim_a = await store.claim_turn(
+        cid, tenant_id="t1", creator_subject="s1", now=t0, claim_ttl_s=60.0
+    )
+    # TTL expires; B reclaims (liveness) and mints a NEW token
+    claim_b = await store.claim_turn(
+        cid,
+        tenant_id="t1",
+        creator_subject="s1",
+        now=t0 + timedelta(seconds=61),
+        claim_ttl_s=60.0,
+    )
+    assert claim_a.claim_id != claim_b.claim_id
+
+    before = len(await _chain_rows(db))
+    with pytest.raises(ConversationTurnRefused) as exc:
+        await store.append_turn(
+            conversation_id=cid,
+            tenant_id="t1",
+            seq=1,
+            user_message="delayed A",
+            answer="must not land",
+            agent_run_id="agent-run-A",
+            prompt_tokens=1,
+            completion_tokens=1,
+            actor_id="s1",
+            request_id="req-stale-a",
+            claim_id=claim_a.claim_id,
+        )
+    assert exc.value.reason == "conversation_turn_claim_stale"
+    assert len(await _chain_rows(db)) == before  # rolled back: no chain row
+    rec = await store.load(cid, tenant_id="t1", creator_subject="s1")
+    assert rec is not None and rec.turn_count == 0 and rec.cumulative_tokens == 0
+
+    # B, holding the CURRENT token, persists fine
+    turn_id = await store.append_turn(
+        conversation_id=cid,
+        tenant_id="t1",
+        seq=1,
+        user_message="B's turn",
+        answer="lands",
+        agent_run_id="agent-run-B",
+        prompt_tokens=1,
+        completion_tokens=1,
+        actor_id="s1",
+        request_id="req-b",
+        claim_id=claim_b.claim_id,
+    )
+    assert turn_id is not None
+
+
+async def test_stale_worker_release_is_a_noop(store: ConversationStore, db: AsyncEngine) -> None:
+    """After B steals, delayed A's release must NOT unlock B's lease."""
+    cid = await _new(store)
+    t0 = datetime.now(UTC)
+    claim_a = await store.claim_turn(
+        cid, tenant_id="t1", creator_subject="s1", now=t0, claim_ttl_s=60.0
+    )
+    claim_b = await store.claim_turn(
+        cid,
+        tenant_id="t1",
+        creator_subject="s1",
+        now=t0 + timedelta(seconds=61),
+        claim_ttl_s=60.0,
+    )
+
+    await store.release_claim(cid, tenant_id="t1", claim_id=claim_a.claim_id)  # stale: no-op
+
+    async with db.connect() as conn:
+        row = (
+            (
+                await conn.execute(
+                    sa.select(
+                        _conversations.c.turn_in_progress,
+                        _conversations.c.turn_claim_id,
+                    ).where(_conversations.c.conversation_id == cid)
+                )
+            )
+            .mappings()
+            .first()
+        )
+    assert row is not None
+    assert row["turn_in_progress"] is True, "stale release must not unlock B"
+    assert row["turn_claim_id"] == claim_b.claim_id
+
+    # a third claim while B's lease is live still refuses
+    with pytest.raises(ConversationTurnRefused) as exc:
+        await store.claim_turn(
+            cid,
+            tenant_id="t1",
+            creator_subject="s1",
+            now=t0 + timedelta(seconds=62),
+            claim_ttl_s=60.0,
+        )
+    assert exc.value.reason == "conversation_turn_in_progress"
+
+    # B's OWN release works, and is idempotent
+    await store.release_claim(cid, tenant_id="t1", claim_id=claim_b.claim_id)
+    await store.release_claim(cid, tenant_id="t1", claim_id=claim_b.claim_id)
+    await store.claim_turn(
+        cid,
+        tenant_id="t1",
+        creator_subject="s1",
+        now=t0 + timedelta(seconds=63),
+        claim_ttl_s=60.0,
+    )
+
+
+async def test_fenced_append_on_a_vanished_conversation_raises_not_found(
+    store: ConversationStore,
+) -> None:
+    """The fence's defensive arm: the row is gone (or cross-tenant) at append
+    time. Rolled back whole; surfaces as the same absent signal as every other
+    cross-boundary read."""
+    with pytest.raises(ConversationNotFound):
+        await store.append_turn(
+            conversation_id=uuid.uuid4(),
+            tenant_id="t1",
+            seq=1,
+            user_message="q",
+            answer="a",
+            agent_run_id="r1",
+            prompt_tokens=1,
+            completion_tokens=1,
+            actor_id="s1",
+            request_id="req-vanished",
+            claim_id=uuid.uuid4(),
+        )
+
+
+# --- RESURRECTION PREVENTION (ruled 2026-07-10): active|closed persist only -----
+
+
+@pytest.mark.parametrize("terminal", ["expired", "erased"])
+async def test_valid_lease_cannot_write_into_expired_or_erased(
+    store: ConversationStore, db: AsyncEngine, terminal: str
+) -> None:
+    """A VALID claim does not override the lifecycle boundary: persisting
+    plaintext into an erased conversation would resurrect content after a
+    regulator erasure; an expired one is past its retention decision. Refused
+    at persist time, rolled back whole."""
+    cid = await _new(store)
+    claim = await _claim(store, cid)
+    # model the future reaper / erasure slices flipping the row mid-turn
+    # (no legal transition exists in this slice -- the rule must hold however
+    # the state got there)
+    async with db.begin() as conn:
+        await conn.execute(
+            sa.update(_conversations)
+            .where(_conversations.c.conversation_id == cid)
+            .values(state=terminal)
+        )
+    before = len(await _chain_rows(db))
+    with pytest.raises(ConversationTurnRefused) as exc:
+        await store.append_turn(
+            conversation_id=cid,
+            tenant_id="t1",
+            seq=1,
+            user_message="resurrected?",
+            answer="must not land",
+            agent_run_id="agent-run-res",
+            prompt_tokens=1,
+            completion_tokens=1,
+            actor_id="s1",
+            request_id=f"req-res-{terminal}",
+            claim_id=claim.claim_id,
+        )
+    assert exc.value.reason == "conversation_not_active"
+    assert exc.value.current_state == terminal
+    assert len(await _chain_rows(db)) == before  # rolled back: no chain row
+    async with db.connect() as conn:
+        n = (
+            await conn.execute(sa.select(sa.func.count()).select_from(_conversation_turns))
+        ).scalar_one()
+    assert n == 0  # no plaintext row resurrected
+
+
+async def test_stale_lease_on_an_erased_row_refuses_as_stale(
+    store: ConversationStore, db: AsyncEngine
+) -> None:
+    """Ownership precedes lifecycle: with NO valid lease the refusal is
+    conversation_turn_claim_stale even on an erased row."""
+    cid = await _new(store)
+    t0 = datetime.now(UTC)
+    claim_a = await store.claim_turn(
+        cid, tenant_id="t1", creator_subject="s1", now=t0, claim_ttl_s=60.0
+    )
+    await store.claim_turn(  # B steals after TTL
+        cid,
+        tenant_id="t1",
+        creator_subject="s1",
+        now=t0 + timedelta(seconds=61),
+        claim_ttl_s=60.0,
+    )
+    async with db.begin() as conn:
+        await conn.execute(
+            sa.update(_conversations)
+            .where(_conversations.c.conversation_id == cid)
+            .values(state="erased")
+        )
+    with pytest.raises(ConversationTurnRefused) as exc:
+        await store.append_turn(
+            conversation_id=cid,
+            tenant_id="t1",
+            seq=1,
+            user_message="x",
+            answer="y",
+            agent_run_id="r",
+            prompt_tokens=1,
+            completion_tokens=1,
+            actor_id="s1",
+            request_id="req-stale-erased",
+            claim_id=claim_a.claim_id,
+        )
+    assert exc.value.reason == "conversation_turn_claim_stale"

@@ -29,11 +29,16 @@ ConversationState = Literal["active", "closed", "expired", "erased"]
 
 #: Closed-enum refusal vocabulary for a turn POST. Wire-protocol-public: it is
 #: the ``reason`` field of the 409 response body (M8.5-C route surface).
+#: ``conversation_turn_claim_stale`` is the FENCING refusal (P0, 2026-07-10): a
+#: worker whose lease was reclaimed after TTL expiry may not persist its turn --
+#: TTL expiry is liveness recovery, not mutual exclusion, and only the fencing
+#: token makes the single-writer claim true.
 ConversationTurnRefusalReason = Literal[
     "conversation_not_active",
     "conversation_turn_in_progress",
     "conversation_max_turns_exceeded",
     "conversation_token_budget_exceeded",
+    "conversation_turn_claim_stale",
 ]
 
 #: M8.5-A legal-transition subset. EXPAND ONLY; never change the vocabulary.
@@ -64,10 +69,16 @@ class ConversationTransitionRefused(Exception):
 
 
 class ConversationTurnRefused(Exception):
-    """Governed turn refusal raised BEFORE the AgentLoop is invoked.
+    """Governed turn refusal.
 
-    Carries the conversation's current state so the route can surface it
-    alongside the closed-enum reason.
+    Most reasons fire at the lifecycle gate BEFORE the AgentLoop is invoked
+    (``conversation_not_active`` at claim, ``conversation_turn_in_progress``,
+    the two bounds). Two fire AT PERSIST TIME, after the loop has run:
+    ``conversation_turn_claim_stale`` (the fencing refusal -- the lease was
+    reclaimed while the turn ran) and ``conversation_not_active`` re-raised by
+    the ``_PERSISTABLE_STATES`` rule when the row moved to ``expired`` /
+    ``erased`` mid-turn. Carries the conversation's current state so the route
+    can surface it alongside the closed-enum reason.
     """
 
     def __init__(
@@ -122,3 +133,20 @@ class TurnRecord:
     prompt_tokens: int
     completion_tokens: int
     created_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class TurnClaim:
+    """The single-writer lease minted by ``ConversationStore.claim_turn``.
+
+    ``claim_id`` is a FENCING TOKEN (P0 correction, 2026-07-10): TTL expiry lets
+    a new worker reclaim a stalled conversation (liveness), but only the holder
+    of the CURRENT ``claim_id`` may persist a turn or release the claim
+    (mutual exclusion). A worker whose lease was reclaimed finds its token
+    stale: its ``append_turn`` refuses ``conversation_turn_claim_stale`` and its
+    ``release_claim`` is a no-op, so it can neither write over nor unlock the
+    new holder's lease.
+    """
+
+    record: ConversationRecord
+    claim_id: uuid.UUID

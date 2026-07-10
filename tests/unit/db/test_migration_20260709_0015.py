@@ -25,6 +25,7 @@ _CONVERSATION_COLUMNS = {
     "cumulative_tokens",
     "turn_in_progress",
     "turn_claimed_at",
+    "turn_claim_id",
     "retention_class",
     "created_at",
     "last_turn_at",

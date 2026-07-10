@@ -55,6 +55,7 @@ from cognic_agentos.core.conversation._types import (
     ConversationState,
     ConversationTransitionRefused,
     ConversationTurnRefused,
+    TurnClaim,
     TurnRecord,
     validate_transition,
 )
@@ -76,6 +77,14 @@ _STATE_TO_DECISION_TYPE: Final[dict[str, str]] = {
     "closed": "conversation.closed",
 }
 
+#: The PERSISTENCE RULE (ruled 2026-07-10): a fenced turn may settle while the
+#: conversation is ``active`` or gracefully ``closed`` -- and NEVER when it is
+#: ``expired`` or ``erased``. Writing plaintext into an erased conversation
+#: would RESURRECT content after a regulator erasure (ADR-028 §3); an expired
+#: conversation is past its retention decision. A valid lease does not override
+#: the lifecycle boundary.
+_PERSISTABLE_STATES: Final[frozenset[ConversationState]] = frozenset({"active", "closed"})
+
 _TS = TIMESTAMP(timezone=True)
 
 _conversations = Table(
@@ -90,6 +99,7 @@ _conversations = Table(
     Column("cumulative_tokens", Integer(), nullable=False, server_default="0"),
     Column("turn_in_progress", Boolean(), nullable=False, server_default=sa.false()),
     Column("turn_claimed_at", _TS, nullable=True),
+    Column("turn_claim_id", Uuid(), nullable=True),
     Column("retention_class", String(CONVERSATION_RETENTION_CLASS_MAX_LEN), nullable=True),
     Column("created_at", _TS, nullable=False),
     Column("last_turn_at", _TS, nullable=True),
@@ -266,19 +276,27 @@ class ConversationStore:
         creator_subject: str,
         now: datetime,
         claim_ttl_s: float,
-    ) -> ConversationRecord:
-        """Atomically claim the conversation for one turn.
+    ) -> TurnClaim:
+        """Atomically claim the conversation for one turn and mint its
+        FENCING TOKEN.
 
         A DB predicate, never an in-process lock -- turn POSTs may land on any
         replica. Stale-claim detection compares ``turn_claimed_at`` against
         ``now`` in Python under the row lock, which is portable across
         Postgres / Oracle / sqlite (do NOT reach for ``sa.func.make_interval``).
 
+        TTL expiry is LIVENESS recovery only: a reclaim mints a NEW
+        ``claim_id``, immediately fencing the previous holder out of
+        :meth:`append_turn` and :meth:`release_claim`. Without the token, a
+        stalled worker could persist over -- and then unlock -- the thief's
+        lease (the P0 lost-lease race, corrected 2026-07-10).
+
         Raises:
             ConversationNotFound: absent / cross-tenant / cross-actor.
             ConversationTurnRefused: ``conversation_not_active`` (carrying the
                 current state) or ``conversation_turn_in_progress``.
         """
+        claim_id = uuid.uuid4()
         async with self._engine.begin() as conn:
             row = (
                 (
@@ -313,20 +331,39 @@ class ConversationStore:
             await conn.execute(
                 update(_conversations)
                 .where(_conversations.c.conversation_id == conversation_id)
-                .values(turn_in_progress=True, turn_claimed_at=now)
+                .values(
+                    turn_in_progress=True,
+                    turn_claimed_at=now,
+                    turn_claim_id=claim_id,
+                )
             )
-        return _to_record(row)
+        return TurnClaim(record=_to_record(row), claim_id=claim_id)
 
-    async def release_claim(self, conversation_id: uuid.UUID, *, tenant_id: str) -> None:
-        """Idempotent. A crashed turn must never wedge the conversation."""
+    async def release_claim(
+        self, conversation_id: uuid.UUID, *, tenant_id: str, claim_id: uuid.UUID
+    ) -> None:
+        """Release ONLY the caller's own lease.
+
+        The ``turn_claim_id == claim_id`` predicate is the fencing half of
+        release: a stale worker's release is a silent no-op, so it can never
+        unlock the current holder's claim. Idempotent for the owner (a second
+        release finds ``turn_claim_id`` already ``NULL`` and matches nothing).
+        A crashed turn never wedges the conversation -- its lease is either
+        released here or reclaimed after TTL by the next :meth:`claim_turn`.
+        """
         async with self._engine.begin() as conn:
             await conn.execute(
                 update(_conversations)
                 .where(
                     _conversations.c.conversation_id == conversation_id,
                     _conversations.c.tenant_id == tenant_id,
+                    _conversations.c.turn_claim_id == claim_id,
                 )
-                .values(turn_in_progress=False, turn_claimed_at=None)
+                .values(
+                    turn_in_progress=False,
+                    turn_claimed_at=None,
+                    turn_claim_id=None,
+                )
             )
 
     # -- turn persistence (chain-atomic, digest-only) --------------------------
@@ -344,12 +381,29 @@ class ConversationStore:
         completion_tokens: int,
         actor_id: str,
         request_id: str,
+        claim_id: uuid.UUID,
     ) -> uuid.UUID:
         """Persist the turn + append ``conversation.turn_completed`` atomically.
 
         Returns the ``turn_id`` THIS METHOD minted and inserted. The caller
         surfaces that exact id on the wire -- minting a fresh uuid downstream
         would name a row that does not exist.
+
+        **Fenced.** ``claim_id`` must equal the conversation's CURRENT
+        ``turn_claim_id``, verified under the row lock inside the same
+        transaction as the insert. A worker whose lease was reclaimed after TTL
+        expiry refuses ``conversation_turn_claim_stale`` and the transaction
+        rolls back whole: no turn row, no chain row, no counter movement. TTL
+        expiry alone is not mutual exclusion; this check is.
+
+        **Graceful-close-aware, not state-agnostic.** A fenced turn settles
+        while the conversation is ``active`` or gracefully ``closed`` (an
+        already-admitted turn must land even if the conversation closed
+        mid-flight). It refuses ``conversation_not_active`` when the row is
+        ``expired`` or ``erased`` -- persisting plaintext there would resurrect
+        content after a retention/erasure decision, and a valid lease does not
+        override that lifecycle boundary (the ``_PERSISTABLE_STATES`` rule).
+        This refusal fires AT PERSIST TIME, after the AgentLoop has run.
         """
         now = datetime.now(UTC)
         turn_id = uuid.uuid4()
@@ -357,6 +411,26 @@ class ConversationStore:
         a_sha, a_bytes = _digest(answer)
 
         async def _precondition(conn: AsyncConnection, _seq: int, _hash: bytes) -> None:
+            fence = (
+                await conn.execute(
+                    select(_conversations.c.state, _conversations.c.turn_claim_id)
+                    .where(
+                        _conversations.c.conversation_id == conversation_id,
+                        _conversations.c.tenant_id == tenant_id,
+                    )
+                    .with_for_update()
+                )
+            ).first()
+            if fence is None:
+                raise ConversationNotFound(str(conversation_id))
+            # Ownership precedes lifecycle: a stale lease refuses as stale even
+            # on an erased row -- the caller holds no claim at all.
+            if fence[1] != claim_id:
+                raise ConversationTurnRefused(
+                    "conversation_turn_claim_stale", current_state=fence[0]
+                )
+            if fence[0] not in _PERSISTABLE_STATES:
+                raise ConversationTurnRefused("conversation_not_active", current_state=fence[0])
             await conn.execute(
                 sa.insert(_conversation_turns).values(
                     turn_id=turn_id,
@@ -429,6 +503,16 @@ class ConversationStore:
         precondition reads it under the row lock and PROJECTS it to the record
         builder, so the chain row records the locked truth and a caller's stale
         read can never enter evidence.
+
+        **Graceful close.** Closing blocks NEW turns but does NOT cancel work
+        already admitted: any in-flight claim is preserved, the running executor
+        settles its turn (``append_turn`` persists while the row is in
+        ``_PERSISTABLE_STATES`` -- ``active`` or ``closed``; ``expired`` /
+        ``erased`` refuse to prevent resurrection) and releases the claim in its
+        own ``finally``. ``close`` is not an emergency cancel. New turns are
+        then refused at :meth:`claim_turn` with ``conversation_not_active`` --
+        the state check precedes the claim check, so a preserved claim never
+        blocks the refusal.
         """
         if to_state not in _STATE_TO_DECISION_TYPE:
             raise ConversationTransitionRefused("conversation_transition_invalid_state_pair")
@@ -451,10 +535,17 @@ class ConversationStore:
                 raise ConversationNotFound(str(conversation_id))
             from_state: ConversationState = row[0]
             validate_transition(from_state=from_state, to_state=to_state)
+            # GRACEFUL CLOSE (ruled 2026-07-09): the claim is deliberately NOT
+            # cleared here. Closing blocks NEW turns; it does not cancel work
+            # already admitted. An in-flight executor keeps its claim and
+            # releases it in its own ``finally``. Clearing it here would make the
+            # store forget that a turn was still running -- and a subsequent
+            # crash would leave no trace of the in-flight work. ``close`` is NOT
+            # an emergency cancel; the M8.5-F kill path is a separate primitive.
             await conn.execute(
                 update(_conversations)
                 .where(_conversations.c.conversation_id == conversation_id)
-                .values(state=to_state, turn_in_progress=False, turn_claimed_at=None)
+                .values(state=to_state)
             )
             return from_state
 

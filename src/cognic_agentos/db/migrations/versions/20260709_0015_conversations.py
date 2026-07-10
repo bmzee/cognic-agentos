@@ -49,6 +49,7 @@ def upgrade() -> None:
         sa.Column("cumulative_tokens", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("turn_in_progress", sa.Boolean(), nullable=False, server_default=sa.false()),
         sa.Column("turn_claimed_at", _TS, nullable=True),
+        sa.Column("turn_claim_id", sa.Uuid(), nullable=True),
         sa.Column("retention_class", sa.String(length=64), nullable=True),
         sa.Column("created_at", _TS, nullable=False),
         sa.Column("last_turn_at", _TS, nullable=True),

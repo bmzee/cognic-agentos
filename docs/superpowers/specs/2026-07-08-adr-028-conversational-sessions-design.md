@@ -147,6 +147,16 @@ POST turn
 
 **Concurrency + multi-replica (PT-6, binding for AKS):** single-writer-per-conversation is enforced by an atomic DB claim (the 14A-A3b run-claim precedent), NOT in-process locks — turn POSTs may land on any replica. Conversation state is DB-backed; streaming continuity across replicas rides ADR-020's reconnect-safe decision-history replay (that mirror exists for exactly this reason). A second concurrent POST refuses 409 with a closed-enum reason; it does not queue in v1.
 
+### 4.1 Amendment (2026-07-10) — the claim is a FENCED lease, and the wire vocabulary is five values
+
+The M8.5-A implementation review found the original claim design unfenced: TTL expiry is **liveness recovery, not mutual exclusion**, and without an ownership token a stalled worker could persist over — and then unlock — the lease of the worker that legitimately reclaimed the conversation (the classic lost-lease race). The binding corrections:
+
+- **Fencing token.** `claim_turn` mints a per-lease `turn_claim_id` (persisted on the row; migration `0015`). `append_turn` verifies it under the row lock inside the same transaction as the insert — a stale token refuses `conversation_turn_claim_stale` and rolls back whole (no turn row, no chain row, no counter movement). `release_claim` conditions on the token, so a stale worker's release is a no-op and the current holder's lease survives.
+- **Refusal timing, stated honestly.** Most turn refusals fire at the lifecycle gate BEFORE the AgentLoop; `conversation_turn_claim_stale` (and the persistence-rule re-raise below) fire AT PERSIST TIME, after the loop has run. The turn's model work is discarded; nothing enters the store or the chain.
+- **The wire vocabulary is five values**, closed: `conversation_not_active`, `conversation_turn_in_progress`, `conversation_max_turns_exceeded`, `conversation_token_budget_exceeded`, `conversation_turn_claim_stale`.
+- **Graceful close + the persistence rule.** `close` blocks new turns but does not cancel admitted work: the in-flight lease survives closure and its turn settles (`close` is NOT an emergency cancel; the kill path is M8.5-F scope). A fenced turn may persist only while the conversation is **`active` or `closed`** — never `expired` or `erased`: writing plaintext into an erased conversation would resurrect content after a regulator erasure (§3), and a valid lease does not override that lifecycle boundary.
+- **Proof.** Unit pins cover the stale-append, stale-release, ordering (ownership precedes lifecycle), and resurrection-prevention cases; a live-Postgres concurrency canary (N-way claim race + the lost-lease race under real row locks) runs in the CI postgres lane (`tests/integration/conversation/test_claim_fencing_pg.py`).
+
 ## 5. Context assembly — v1 is bounded replay ONLY; summarization deferred
 
 **v1 `context_strategy` vocabulary has exactly one value: `bounded_replay`** — the first turn (grounding) + the last N turns, under a token ceiling. Assembly reads ONLY the kernel transcript store. Proposed kernel Settings defaults (plan-time tunable; tenant ceilings tighten-only): `max_turns` 20, replay window = first turn + last 10 turns, `idle_expiry_s` 86400, cumulative budget derived from the agent's per-turn budget × max_turns. Analytical conversations are short by nature; low defaults are the point.

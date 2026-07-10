@@ -76,11 +76,15 @@ class _OrderRecordingStore:
         self.order: list[str] = []
         self.claim_kwargs: list[dict[str, Any]] = []
         self.append_kwargs: list[dict[str, Any]] = []
+        self.release_kwargs: list[dict[str, Any]] = []
+        self.minted_claims: list[Any] = []
 
     async def claim_turn(self, conversation_id: uuid.UUID, **kw: Any) -> Any:
         self.order.append("claim_turn")
         self.claim_kwargs.append(kw)
-        return await self._inner.claim_turn(conversation_id, **kw)
+        claim = await self._inner.claim_turn(conversation_id, **kw)
+        self.minted_claims.append(claim)
+        return claim
 
     async def load_replay_turns(self, conversation_id: uuid.UUID, **kw: Any) -> Any:
         self.order.append("load_replay_turns")
@@ -93,6 +97,7 @@ class _OrderRecordingStore:
 
     async def release_claim(self, conversation_id: uuid.UUID, **kw: Any) -> None:
         self.order.append("release_claim")
+        self.release_kwargs.append(kw)
         await self._inner.release_claim(conversation_id, **kw)
 
     def __getattr__(self, name: str) -> Any:
@@ -410,3 +415,31 @@ async def test_loop_receives_the_conversation_agent_id_and_actor(db: AsyncEngine
     assert kw["agent_id"] == "analyst"
     assert kw["actor_tenant_id"] == _TENANT
     assert kw["actor_subject"] == _SUBJECT
+
+
+# --- FENCING (P0, 2026-07-10): the executor threads ITS OWN lease --------------
+
+
+async def test_executor_threads_the_minted_claim_id_to_append_and_release(
+    db: AsyncEngine,
+) -> None:
+    """The claim_id minted at claim_turn is the one append_turn verifies and
+    the one release_claim conditions on. Any break in this chain reopens the
+    lost-lease race."""
+    inner = ConversationStore(db)
+    cid = await _conversation(inner)
+    spy = _OrderRecordingStore(inner)
+    await _post(_executor(spy, _SpyLoop()), cid)
+
+    minted = spy.minted_claims[0].claim_id
+    assert spy.append_kwargs[0]["claim_id"] == minted
+    assert spy.release_kwargs[0]["claim_id"] == minted
+
+
+async def test_release_is_fenced_even_when_the_loop_raises(db: AsyncEngine) -> None:
+    inner = ConversationStore(db)
+    cid = await _conversation(inner)
+    spy = _OrderRecordingStore(inner)
+    with pytest.raises(RuntimeError):
+        await _post(_executor(spy, _RaisingLoop()), cid)
+    assert spy.release_kwargs[0]["claim_id"] == spy.minted_claims[0].claim_id
