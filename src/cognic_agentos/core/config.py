@@ -2129,6 +2129,46 @@ class Settings(BaseSettings):
             "(agent_max_steps_exceeded, bound=token_budget)."
         ),
     )
+    conversation_max_turns: int = Field(
+        default=20,
+        gt=0,
+        description=(
+            "M8.5-C (ADR-028 §5) — maximum turns per conversation before "
+            "conversation_max_turns_exceeded. Checked at the lifecycle gate, "
+            "BEFORE context assembly and BEFORE the AgentLoop is invoked. "
+            "Analytical conversations are short by nature; low defaults are "
+            "the point."
+        ),
+    )
+    conversation_replay_last_n: int = Field(
+        default=10,
+        ge=0,
+        description=(
+            "M8.5-C (ADR-028 §5) — bounded-replay window: the grounding turn "
+            "plus the last N turns. v1 context_strategy has exactly one value, "
+            "bounded_replay; summarization is deferred to v1.1."
+        ),
+    )
+    conversation_replay_token_ceiling: int = Field(
+        default=8_000,
+        gt=0,
+        description=(
+            "M8.5-C (ADR-028 §5) — estimated-token PRE-FILTER on the replayed "
+            "window. A coarse chars-per-token estimate, NOT accounting: the "
+            "binding bound remains agent_run_token_budget, which counts real "
+            "gateway usage at every round top."
+        ),
+    )
+    conversation_claim_ttl_s: float = Field(
+        default=300.0,
+        gt=0,
+        description=(
+            "M8.5-C (ADR-028 §4, PT-6) — a single-writer turn claim older than "
+            "this is reclaimable. MUST exceed agent_run_wall_clock_s, else a "
+            "slow turn has its claim stolen and can be double-run; "
+            "ConversationTurnExecutor refuses construction otherwise."
+        ),
+    )
     scheduler_class_sla_interactive_s: float = Field(
         default=0.2,
         gt=0,

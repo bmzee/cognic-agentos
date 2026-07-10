@@ -479,6 +479,32 @@ AgentRBACScope = Literal["agent.ask"]
 AGENT_SCOPES: frozenset[AgentRBACScope] = frozenset({"agent.ask"})
 
 
+#: ADR-028 M8.5-C — conversation RBAC family. Four values in the vertical
+#: slice; ``conversation.export`` / ``conversation.redact`` are compliance-role,
+#: human-actor-gated scopes that land with the M8.5-F erasure pathway (the
+#: ``RunRBACScope`` 1 -> 2 additive growth is the precedent). Namespace-disjoint
+#: from ``agent.*`` -- deliberately distinct, because conversing with an agent is
+#: not the same authority as invoking one. Pinned by
+#: ``tests/unit/portal/rbac/test_conversation_scopes.py``.
+ConversationRBACScope = Literal[
+    "conversation.create",
+    "conversation.read",
+    "conversation.post_turn",
+    "conversation.close",
+]
+
+#: The 4 conversation scopes as a frozenset (1:1 with
+#: :data:`ConversationRBACScope`) for bank-overlay binders.
+CONVERSATION_SCOPES: frozenset[ConversationRBACScope] = frozenset(
+    {
+        "conversation.create",
+        "conversation.read",
+        "conversation.post_turn",
+        "conversation.close",
+    }
+)
+
+
 #: ADR-023 (Wave-2) — per-tenant config-overlay RBAC family. Two values in the
 #: ``config.tenant_overlay.*`` namespace, consumed by the operator-administered
 #: overlay endpoints (`portal/api/config_overlay/routes.py`):

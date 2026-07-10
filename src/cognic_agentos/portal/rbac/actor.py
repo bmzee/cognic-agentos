@@ -38,6 +38,7 @@ from cognic_agentos.portal.rbac.scopes import (  # noqa: F401  (ScopeSet kept fo
     AgentRBACScope,
     ComplianceRBACScope,
     ConfigOverlayRBACScope,
+    ConversationRBACScope,
     EmergencyRBACScope,
     EvalRBACScope,
     MCPInternalAccessRBACScope,
@@ -177,6 +178,7 @@ class Actor(pydantic.BaseModel):
         | SubAgentRBACScope
         | SkillRBACScope
         | AgentRBACScope
+        | ConversationRBACScope
     ]
     actor_type: ActorType
 
