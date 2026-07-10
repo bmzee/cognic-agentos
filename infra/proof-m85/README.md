@@ -1,9 +1,15 @@
 # Proof M8.5 SLICE — Conversational Substrate (3-bar kind proof, BARs 1–3)
 
-> **STATUS: AUTHORED, NOT YET EXECUTED.** No live run has produced evidence
-> yet — this README describes the gate the runner enforces. A "deployed
-> proof" claim is earned only by a live `PROOF M8.5 SLICE (BARS 1-3) PASS`
-> run recorded in `docs/VALIDATION-RESULTS.md`.
+> **STATUS: PASSED LIVE — 2026-07-10, run 6, exit 0.**
+> `PROOF M8.5 SLICE (BARS 1-3) PASS` on `kind`; log 533 lines, SHA-256
+> `9c6f17b35efce426ec5194920da327a2257b82116807037cad656717d9f533f9`
+> (operator-held), recorded with the run ledger + honesty boundary in
+> `docs/VALIDATION-RESULTS.md` §"M8.5-A". The **kernel anchor**
+> `main @ 235daede` (the deployed kernel, the proof image label) is
+> DISTINCT from the **proof revision** `caab00bd` (the runner +
+> structural-suite tree that executed — four C2 commits after the anchor:
+> `7981da7c` authored the proof, three review-fix commits followed; zero
+> kernel changes).
 
 When run, this proof stands up a `kind` cluster and proves the **ADR-028
 conversation substrate** live against a deployed AgentOS kernel: a

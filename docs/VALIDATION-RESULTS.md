@@ -1351,3 +1351,55 @@ Eight findings resolved — five kernel critical-controls slices (each committed
 4. **Pack approval used the governed gate-override path for 4 of the 5 lifecycle gates** (cosign signature REAL-verified; evaluation / adversarial / owasp / reviewer-ack overridden — the proof generates no eval/adversarial evidence). Audited + the M4 posture, not an organic 5-gate pass.
 5. **BARs 1-3 are model-driven and inherently non-deterministic.** They have been stable across runs, but they depend on GPT-4o's behavior — exactly why BAR 4 was made deterministic. A future run could see model variance. Live-LLM proofs carry this property.
 - This does NOT claim the production AKS platform (M15/M24), long-term / cross-session agent memory (M9 — this proof writes only a **task-tier digest** to the governed memory API + its `memory.write` audit row; richer long-term memory is M9), multi-step or multi-agent orchestration beyond the single-shot loop, or A2A. The M8 kernel changes rode the critical-controls gate (149 files) with `protocol/mcp_authz.py` byte-identical throughout.
+
+## M8.5-A — Conversation substrate (ADR-028 vertical slice) — PASS
+
+**2026-07-10 — `PROOF M8.5 SLICE (BARS 1-3) PASS` live on `kind` (run 6, exit 0).**
+
+- **Kernel anchor:** `main @ 235daede6d1b7a99846c6339f2e234c85e6bd0cc` (M8.5 A/B/C1, PR #126) — the deployed kernel, pinned as the proof image label.
+- **Proof revision:** `feat/m85-c2-kind-proof @ caab00bd` — the runner + structural-suite tree that executed (four C2 commits after the anchor — `7981da7c` authored the proof, three review-fix commits followed; zero kernel changes: `git diff main -- src/` empty, `protocol/mcp_authz.py` byte-identical).
+- **Runner:** `infra/proof-m85/run-proof-m85.sh` — env-gated (`COGNIC_RUN_PROOF_M85=1`), provider key `COGNIC_PROOF_M85_TIER1_API_KEY` proven by the zero-spend `GET /v1/models` preflight (`HTTP 200`, log line 1) before any cluster work.
+- **Log:** 533 lines, SHA-256 `9c6f17b35efce426ec5194920da327a2257b82116807037cad656717d9f533f9` (operator-held; deliberately not committed).
+- **Deployment:** the proven proof-m8 bring-up verbatim, m85-named — the same SEVEN sha256-pinned signed releases, full M4 operator lifecycle for `cognic-tool-oracle-schema@v0.3.0`, Oracle XE + RS256/JWKS AS + Redis + LiteLLM → OpenAI `gpt-4o`, migrate to rev **0015**, the 0014 seed matrix (readback `4|4|4|0`), Step-0 hosted/registered surface asserts. The conversation substrate added no pack and no seed rows.
+- **Spend:** four governed model-driven turns (BAR 1 × 2, BAR 3 × 2; BAR 2 is deterministic — no model call). Exact completion-call and token totals were not retained: the cleanup trap removes the cluster and its DB, and the success path echoes no usage.
+
+### Bar evidence (log lines, verbatim)
+
+```
+  Bar 1 pin OK: prior_context_turns=2 + prior_context_sha256 recomputed from the kernel store
+  Bar 1 pin OK: context lineage (seq=2 -> run -> started/completed; dispatches unconstrained) + dispatch lineage (seq=1 -> run -> ok retail dispatch)
+  Bar 1 pin OK: question/answer sha256 digests on both turn rows equal the stored plaintext
+  Bar 1 OK: two governed turns, context replay pinned mechanically, three-hop join + digests + dual identity verified
+PROOF M8.5 SLICE (BAR 1) PASS
+  Bar 2 OK: five forged fields 422 extra_forbidden (messages/history/prior_context/context/transcript); zero-loop pin held
+PROOF M8.5 SLICE (BAR 2) PASS
+  Bar 3 leg 1 OK: financials dispatched ok while the entitlement was live
+  Bar 3 revocation OK: 1 -> 0 amir financials entitlement rows (mid-conversation)
+  Bar 3 leg 2 OK: post-revocation financials dispatch refused (agent_scope_not_entitled), zero ok financials dispatches
+  Bar 3 restore OK: amir financials entitlement back to exactly 1 row
+PROOF M8.5 SLICE (BAR 3) PASS
+PROOF M8.5 SLICE (BARS 1-3) PASS
+```
+
+### What each bar proved
+
+- **BAR 1 (governed multi-turn e2e).** `analyst.amir` created a conversation with `bank-analyst` and drove two governed turns. Turn 2 contained **no entity name** and was answered via the replayed turn-1 context. Invariant mechanical pins, all tenant-scoped: the turn-2 `agent.run.started` row carried `prior_context_turns=2` and a `prior_context_sha256` the runner **recomputed independently** from the `conversation_turns` plaintext with the loop's exact `user:<question>\nassistant:<answer>` framing — and it MATCHED; the **context lineage** (`turn_completed(seq=2)` → run → started/completed) and the **dispatch lineage** (`turn_completed(seq=1)` → run → started/completed → ≥1 ok retail-scoped `run_readonly_query` dispatch with a 64-hex args digest) both resolved; `question_sha256`/`answer_sha256` on BOTH digest-only `conversation.turn_completed` chain rows equalled sha256 of the stored plaintext; dual identity held on every `conversation.%` and `agent.run.%` row. The model-driven acceptance criteria (turn-1 top-3 seeded names; the turn-2 rank-2 name) passed.
+- **BAR 2 (record integrity — deterministic).** Five forged history fields (`messages` / `history` / `prior_context` / `context` / `transcript`) each returned **422 with a Pydantic `extra_forbidden` error naming the field** (invariant I-1: a client transcript is unrepresentable on the wire), and the zero-loop pin held — the `agent.run.%` count, the conversation's `turn_completed` count, and the wire `turn_count` were byte-identical across the probe block.
+- **BAR 3 (mid-conversation revocation — the I-2 pin).** In a fresh conversation on the `financials` scope: turn 1 (a GL question) completed with an ok financials dispatch; the runner proved **exactly one** amir financials entitlement row, DELETEd it (readback 0); turn 2 asked a **fresh** financials question (branch P&L — not answerable from the replayed context) and returned HTTP 200 with ≥1 dispatch row `refused` / `agent_scope_not_entitled` / `scope_id=financials` and **exactly 0** ok financials dispatches — the envelope was re-resolved against CURRENT entitlements on that turn, never cached; the entitlement was restored (readback 1).
+
+### Run ledger (five entries: four pre-pass events plus PASS; every CODE finding fixed, review-gated, and committed before the pass)
+
+1. **Run 1 — one-time operator trust gate** (an operator prerequisite by design — NOT a code finding, no commit): the m85-named local TLS registry needed its `/etc/hosts` loopback + docker `certs.d` CA trust; the sudo-free runner refused with instructions; the operator ran the three commands once. No spend, no cluster.
+2. **Run 2 — rotated provider key**: a stale `OPENAI_API_KEY` 401'd at BAR 1, ~25 minutes into a fully-green bring-up (zero token spend — the first completion refused at auth; the stack behaved correctly end-to-end: honest `upstream_error` ledger row, digest-only failed-turn evidence, closed-form 502). Fix (`3a8e569f`): the zero-spend key-validity preflight — bounded timeouts, bearer via stdin (never argv), four-way transport/auth/ok/unexpected diagnosis — refusing before any cluster work.
+3. **Run 3 — evidence-read SQL crash**: both BAR-1 turns SUCCEEDED live (turn 2 named the rank-2 depositor from replayed context), then the combined evidence read crashed — PostgreSQL gives `->>` and `||` equal precedence, and the raw psql error escaped `bar_fail` under `set -e` with no capture. Fixes (`a97849f3`): the parenthesized read (validated against a throwaway `postgres:16-alpine` with the defective form reproducing the exact error as negative control) + the fail-capturing `PSQL()` helper (stderr under the private `$QC_TMP`; SETUP-8 reads converted; structural bypass scans).
+4. **Run 5 — a false invariant in the bar itself**: turn 2 answered entirely from the replayed context with ZERO dispatches (`steps_used=1` — correct, desirable behaviour) and the old hop-3 pin wrongly required a turn-2 dispatch row. Fix (`caab00bd`, ruled): the two-lineage join above — the turn-2 dispatch count is deliberately unconstrained (0 = context reuse; ≥1 = legitimate re-verification); the dispatch join rides the turn that DID dispatch. The plan's Task 8 was amended to the ratified rulings in the same commit.
+5. **Run 6 — PASS** (this section). Runs 1–5 spent four model-driven turns in total across runs 3 and 5; runs 1–2 spent none.
+
+### Honesty boundary
+
+1. **This is the VERTICAL-SLICE GATE (M8.5-A), not the M8.5 production proof.** ADR-028 BARs 4–7 (bounds/terminal refusal, erasure, safety hooks, SSE reconnect) are NOT run here — they are later M8.5 slices. Do not present this as "conversational agent production-proven."
+2. **BARs 1 and 3 are model-driven at the answer level.** Their invariant evidence is the mechanical chain pins; the answer-content checks are mandatory functional acceptance criteria and the flake-prone half — a miss reads as model-behaviour failure, not governance failure.
+3. **The turn-2 dispatch count is unconstrained** (run-5 ruling): zero means context reuse, one-or-more means legitimate re-verification; neither fails the bar.
+4. **PT-3 posture on BAR 3:** revoking a scope mid-conversation does not un-disclose content already in the transcript (turn 1's answer stays in the replayed context by design; erasure is the M8.5-F pathway). The bar proves no FRESH data crosses the revoked scope.
+5. **OTEL is inherited diagnostics only** (ruling R6): no M8.5 bar depends on spans.
+6. **Proof-only wiring caveats carry from proof-m8 unchanged:** header-driven multi-actor binder, proof-staged trust roots, per-run query-context keypair, demo-grain scope→proxy identities, cloud toggles + provider key as operator env. The unit/CI layer separately covers the bounds + terminal-refusal + claim-fencing contracts (including the live-Postgres fencing canary in the CI postgres lane).
