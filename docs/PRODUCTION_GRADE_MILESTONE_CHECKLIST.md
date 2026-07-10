@@ -107,7 +107,7 @@ Studio/no-code authoring and Cognic Forge remain outside this v1 completion chec
 
 **M8.5 — Production conversational analytical agent program (ADR-028).** Six ordered milestones that carry AgentOS from the M8 single-shot loop to a pilot-ready conversational product. Design rationale + the named prerequisites HP-1…HP-3 live in `docs/superpowers/specs/2026-07-08-adr-028-conversational-sessions-design.md` §0; **this checklist owns the checkboxes and the evidence.** `M8.5-A` is a hard gate before any harness/agent/AKS spend; `M8.5-F` is a hard gate before any bank pilot.
 
-- [ ] **M8.5-A — Conversation substrate (hard gate).**
+- [x] **M8.5-A — Conversation substrate (hard gate).**
 
   **Goal:** the kernel-owned conversation primitive — `conversations` + `conversation_turns` store, bounded-replay context assembly, and a turn loop wrapping the M8 `AgentLoop`. No harness, no new bank agent.
 
@@ -118,6 +118,8 @@ Studio/no-code authoring and Cognic Forge remain outside this v1 completion chec
   **Evidence required:** `kind` proof log + the three-hop chain join (`conversation → agent_run → dispatch`).
 
   **Gate:** nothing downstream starts until this passes.
+
+  **Evidence (2026-07-10 — PASS, run 6 on `kind`):** `PROOF M8.5 SLICE (BARS 1-3) PASS`, exit 0, against kernel anchor `main @ 235daede` (PR #126: store + migration 0015 + fenced turn claim + turn loop + portal surface) with proof revision `caab00bd`. BAR 1: two governed turns as `analyst.amir`; the turn-2 run's `prior_context_sha256` was **independently recomputed** from the `conversation_turns` plaintext and matched the chain row (`prior_context_turns=2`); the chain join resolved as two lineages — context (`seq=2 → run → started/completed`; turn-2 dispatch count deliberately unconstrained per the run-5 ruling — run 6 neither constrains nor retains it) and dispatch (`seq=1 → run → ≥1 ok retail run_readonly_query dispatch`); question/answer digests on both digest-only `turn_completed` rows equalled SHA-256 of the stored plaintext. BAR 2: FIVE forged history fields each 422 `extra_forbidden` naming the field + the zero-loop pin. BAR 3: exactly-one entitlement proven → deleted mid-conversation (readback 0) → a FRESH financials question refused `agent_scope_not_entitled` with **zero** ok financials dispatches → restored (readback 1). Four governed model-driven turns; exact completion-call/token totals not retained (cluster torn down by the trap). Log SHA-256 `9c6f17b3…f533f9` (operator-held). Full detail, run ledger (five entries: four pre-pass events plus PASS; every code finding fixed + committed under review), and honesty boundary (BARs 4–7 NOT run — this is the vertical-slice gate, not pilot-ready): `docs/VALIDATION-RESULTS.md` — "M8.5-A — Conversation substrate (ADR-028 vertical slice) — PASS" + `infra/proof-m85/README.md`.
 
 - [ ] **M8.5-B — Harness enablement APIs.**
 

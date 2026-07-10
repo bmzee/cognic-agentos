@@ -2641,69 +2641,111 @@ feat(adr-028): conversation RBAC scopes + HTTP surface + lifespan wiring (CRITIC
 
 ## Task 8: Proof BARs 1–3 on `kind`
 
-**Files:**
-- Create: `infra/proof-m85/README.md`, `infra/proof-m85/run-proof-m85.sh`, `infra/proof-m85/kind-config.yaml`, `infra/proof-m85/seed-db.sh`, `infra/proof-m85/proof-m85-values.yaml`
-- Test: `tests/integration/conversation/test_conversation_e2e.py` (env-gated on `COGNIC_RUN_CONVERSATION_E2E=1`)
+**Files** *(AMENDED at C2 execution, rulings 2026-07-10)*:
+- Create: the full self-contained `infra/proof-m85/` mirror of `infra/proof-m8/` — 21 files, not the 5 originally listed here (the C2 recon found each proof dir is self-contained: Dockerfiles, manifests, seeds, stage-packs, sandbox patch, the `proof_m85/` multi-actor app, values, runner, README).
+- Test: `tests/unit/infra/test_proof_m85_structure.py` (the structural suite). **Ruling R4: the originally-planned `tests/integration/conversation/test_conversation_e2e.py` pytest twin is deliberately NOT authored** — one live authority exists (`run-proof-m85.sh`), backed by the structural suite; a pytest twin of the bash bars would be a second source of truth to drift.
 
 **Interfaces:**
 - Consumes: the full HTTP surface from Task 7.
 - Produces: the vertical-slice gate verdict.
 
-**Mirror `infra/proof-m8/` exactly** — same `kind-config.yaml`, `seed-db.sh`, `stage-packs.sh` shape, same numbered-BAR structure in `run-proof-m85.sh` (see `infra/proof-m8/run-proof-m8.sh:46-74`). Reuse the M8 agent pack, oracle pack, and LiteLLM/Azure-OpenAI wiring unchanged. The only new surface under test is `/api/v1/conversations`.
+**Mirror `infra/proof-m8/` exactly** — same `kind-config.yaml`, `seed-db.sh`, `stage-packs.sh` shape, same numbered-BAR structure in `run-proof-m85.sh` (see `infra/proof-m8/run-proof-m8.sh:46-74`). Reuse the M8 agent pack, oracle pack, and the LiteLLM → OpenAI `gpt-4o` wiring unchanged *(ruling R5 — the "Azure-OpenAI" wording originally here was stale: Azure is the phase-1 production posture, not the proof posture; the swap stays the README one-values-diff)*. The only new surface under test is `/api/v1/conversations`.
 
 **The three bars, stated so they cannot be redefined downward:**
 
-- [ ] **BAR 1 — governed multi-turn e2e.** Create a conversation. Turn 1: *"Who is our largest depositor?"* → answer names an entity. Turn 2: *"And what is their total balance?"* — **containing no entity name**, so a correct answer is only possible if turn 1's answer was replayed. Then assert the three-hop chain join:
+- [ ] **BAR 1 — governed multi-turn e2e.** Create a conversation. Turn 1: *"Who is our largest depositor?"* → answer names an entity. Turn 2: *"And what is their total balance?"* — **containing no entity name**, so a correct answer is only possible if turn 1's answer was replayed. Then assert TWO chain lineages:
+
+> **AMENDED at C2 execution (run-5 ruling, 2026-07-10).** The original
+> snippet here hardcoded a false invariant — hop 3 required ≥1 dispatch row
+> on the TURN-2 run, but a live run proved turn 2 can answer entirely from
+> the replayed context with ZERO dispatches (`steps_used=1` — correct,
+> desirable behaviour; a model-behaviour assumption must not live in a
+> mechanical pin). The dispatch join rides the turn that DID dispatch. The
+> original snippet also used a `decision_type=` column that does not exist —
+> the live `decision_history` column is `event_type` (review ruling R2).
 
 ```bash
-# hop 1: conversation.turn_completed -> agent_run_id
-AGENT_RUN_ID=$(psql -tAc "SELECT payload->>'agent_run_id' FROM decision_history
-  WHERE decision_type='conversation.turn_completed'
+# CONTEXT lineage — seq=2 -> the turn-2 run -> started/completed. The
+# turn-2 run's dispatch count is DELIBERATELY UNCONSTRAINED (0 = context
+# reuse; >=1 = legitimate re-verification; neither fails).
+RUN2=$(psql -tAc "SELECT payload->>'agent_run_id' FROM decision_history
+  WHERE event_type='conversation.turn_completed' AND tenant_id='$TENANT'
     AND payload->>'conversation_id'='$CONV_ID' AND payload->>'seq'='2'")
-# hop 2: agent_run_id -> the run's own evidence
 psql -tAc "SELECT 1 FROM decision_history
-  WHERE decision_type='agent.run.completed' AND payload->>'run_id'='$AGENT_RUN_ID'" | grep -q 1
-# hop 3: agent_run_id -> its dispatch rows
+  WHERE event_type='agent.run.completed' AND tenant_id='$TENANT'
+    AND payload->>'run_id'='$RUN2'" | grep -q 1
+# (plus prior_context_turns=2 + the independently recomputed context digest
+#  on the run's agent.run.started row — see the runner's mechanical pin 1)
+
+# DISPATCH lineage — the three-hop conversation -> run -> dispatch join
+# rides seq=1, the turn that DID dispatch (it must, to produce the seeded
+# figures at all); keep the STRONG predicate, not a bare count.
+RUN1=$(psql -tAc "SELECT payload->>'agent_run_id' FROM decision_history
+  WHERE event_type='conversation.turn_completed' AND tenant_id='$TENANT'
+    AND payload->>'conversation_id'='$CONV_ID' AND payload->>'seq'='1'")
 test "$(psql -tAc "SELECT count(*) FROM decision_history
-  WHERE decision_type='agent.run.dispatch' AND payload->>'run_id'='$AGENT_RUN_ID'")" -ge 1
+  WHERE event_type='agent.run.dispatch' AND tenant_id='$TENANT'
+    AND payload->>'run_id'='$RUN1' AND payload->>'outcome'='ok'
+    AND payload->>'scope_id'='retail_analytics'")" -ge 1
 ```
 Also assert **dual identity** on every turn row: `actor_id` is the originator subject and `payload->>'agent_id'` is the agent.
 
-**Honesty boundary to state in the README:** turn 2's context dependence is *model-driven*. Assert the mechanical facts (`prior_context_turns == 2` on the `agent.run.started` row for turn 2; the chain join resolves) as the load-bearing pins, and treat the natural-language answer as corroborating, not as the proof. The M8 proof learned this the hard way — model-driven escape probes were flaky and BAR 4 had to be made deterministic.
+**Honesty boundary to state in the README:** turn 2's context dependence is *model-driven*. Assert the mechanical facts (`prior_context_turns == 2` on the `agent.run.started` row for turn 2; both lineages resolve) as the load-bearing pins, and treat the natural-language answer as a mandatory model-driven functional acceptance criterion, distinct from the invariant evidence. The M8 proof learned this the hard way — model-driven escape probes were flaky and BAR 4 had to be made deterministic.
 
-- [ ] **BAR 2 — record integrity (deterministic).** No model call. Four probes, each must return **422**:
+- [ ] **BAR 2 — record integrity (deterministic).** No model call. *(AMENDED at C2 execution, ruling 2026-07-10: FIVE fields — the original four omitted `context` — and status alone is insufficient.)* Each probe must return **422** AND its body must carry a Pydantic `extra_forbidden` error whose `loc` names the submitted field:
 
 ```bash
-for FIELD in messages history prior_context transcript; do
-  CODE=$(curl -s -o /dev/null -w '%{http_code}' -X POST \
+for FIELD in messages history prior_context context transcript; do
+  BODY=$(curl -s -w '\n%{http_code}' -X POST \
     "$AS/api/v1/conversations/$CONV_ID/turns" -H "$AUTH" \
     -d "{\"user_message\":\"q\",\"$FIELD\":[{\"role\":\"user\",\"content\":\"forged\"}]}")
+  CODE=${BODY##*$'\n'}
   test "$CODE" = "422" || { echo "BAR2 FAIL: $FIELD accepted ($CODE)"; exit 1; }
+  # the 422 body must carry {"type": "extra_forbidden", "loc": [..., "$FIELD", ...]}
 done
 ```
-Then prove the positive half — the assembled context came from the store — by asserting the turn-2 `agent.run.started` row carries `prior_context_sha256` equal to the SHA-256 of the kernel-store-derived string, recomputed independently by the proof script from `conversation_turns`.
+Plus the **ZERO-LOOP pin**: the tenant-scoped `agent.run.%` row count, the conversation's `conversation.turn_completed` count, and the wire `turn_count` are byte-identical before/after the probe block — a rejected forgery must never reach the loop or the record. Then prove the positive half — the assembled context came from the store — by asserting the turn-2 `agent.run.started` row carries `prior_context_sha256` equal to the SHA-256 of the kernel-store-derived string, recomputed independently by the proof script from `conversation_turns`.
 
-- [ ] **BAR 3 — mid-conversation revocation (the I-2 pin).** Turn 1 succeeds using an entitled data scope. Between turns, `DELETE FROM entitlements WHERE subject=... AND scope_id=...`. Turn 2 asks the same question. Assert:
+- [ ] **BAR 3 — mid-conversation revocation (the I-2 pin).** *(AMENDED at C2 execution, ruling R3 2026-07-10: the original "turn 2 asks the same question" was the false-red trap — a re-asked question is answerable from the replayed transcript and may never dispatch, so no refusal row would exist. Turn 2 must need FRESH data in the revoked scope.)* Turn 1 (a general-ledger question) succeeds through the entitled `financials` scope with an ok dispatch row. Between turns, prove EXACTLY ONE entitlement row exists, `DELETE` it, and readback 0. Turn 2 asks a **fresh** financials question (branch P&L — not answerable from the replayed turn-1 context). Assert (tenant-scoped; the live column is `event_type` per ruling R2):
 
 ```bash
-psql -tAc "SELECT payload->>'refusal_reason' FROM decision_history
-  WHERE decision_type='agent.run.dispatch' AND payload->>'run_id'='$RUN_2'" \
-  | grep -q agent_scope_not_entitled
+test "$(psql -tAc "SELECT count(*) FROM decision_history
+  WHERE event_type='agent.run.dispatch' AND tenant_id='$TENANT'
+    AND payload->>'run_id'='$RUN_2' AND payload->>'outcome'='refused'
+    AND payload->>'refusal_reason'='agent_scope_not_entitled'
+    AND payload->>'scope_id'='financials'")" -ge 1
+test "$(psql -tAc "SELECT count(*) FROM decision_history
+  WHERE event_type='agent.run.dispatch' AND tenant_id='$TENANT'
+    AND payload->>'run_id'='$RUN_2' AND payload->>'outcome'='ok'
+    AND payload->>'scope_id'='financials'")" = 0
 ```
-The HTTP response is **200** — a dispatch refusal feeds back to the model as a tool message and does not terminate the run (`core/agent/_types.py:41`). BAR 3 asserts the **chain row**, never the status code. Also assert no `conversation.turn_completed` row for turn 2 carries any content from the now-unentitled scope.
+The HTTP response is **200** — a dispatch refusal feeds back to the model as a tool message and does not terminate the run (`core/agent/_types.py:41`). BAR 3 asserts **chain rows**, never the status code: ≥1 refused `agent_scope_not_entitled` financials dispatch AND exactly 0 ok financials dispatches for run 2 — the `turn_completed` chain rows are digest-only, so a "carries no content from the scope" claim is unassertable there (the original wording here was wrong); the zero-ok-dispatch pin is the honest form. Afterwards restore the entitlement (readback 1) so the seed matrix is left exactly as found.
 
-- [ ] **Step 1: Write the env-gated e2e first, run it red**
+- [ ] **Step 1: Author the runner + the structural suite** *(AMENDED — ruling R4)*
+
+`run-proof-m85.sh` is the SOLE live authority for the bars; `tests/unit/infra/test_proof_m85_structure.py` pins its structure (env/key gates, tenant-scoped evidence queries, the two-lineage BAR-1 join, the five-field BAR-2 probes, the BAR-3 exactly-one/delete/restore walk, key custody, no bypass flags). No pytest twin of the bash bars is authored.
 
 ```bash
-uv run pytest tests/integration/conversation/test_conversation_e2e.py -v
+uv run pytest tests/unit/infra/test_proof_m85_structure.py -q
 ```
-Expected: SKIP (no `COGNIC_RUN_CONVERSATION_E2E=1`). Then with the env var and a running stack: FAIL until the stack is seeded.
+Expected: all structural pins PASS before any live run.
 
-- [ ] **Step 2: Stand up `kind` and run the proof**
+- [ ] **Step 2: Run the proof** *(AMENDED at C2 execution, 2026-07-10 — the
+  original step manually ran `kind create cluster` AND invoked the runner
+  without its gate, so it exited 0 as a skip before doing anything)*
+
+The runner OWNS cluster creation and cleanup (its trap deletes the cluster,
+the local registry, and the per-run key material); no separate
+`kind create` command is permitted — a pre-created cluster would collide
+with the runner's own bring-up.
 
 ```bash
-kind create cluster --config infra/proof-m85/kind-config.yaml
-bash infra/proof-m85/run-proof-m85.sh 2>&1 | tee /tmp/proof-m85.log
+# COGNIC_PROOF_M85_TIER1_API_KEY must already be exported securely.
+(
+  set -o pipefail
+  COGNIC_RUN_PROOF_M85=1 bash infra/proof-m85/run-proof-m85.sh 2>&1 \
+    | tee /tmp/proof-m85.log
+)
 ```
 Expected final line: `PROOF M8.5 SLICE (BARS 1-3) PASS`
 
