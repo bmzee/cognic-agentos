@@ -23,15 +23,20 @@
 #     MECHANICAL pins (load-bearing): turn-2 agent.run.started carries
 #     prior_context_turns=2 + a prior_context_sha256 this runner RECOMPUTES
 #     independently from conversation_turns plaintext (framing
-#     "user:<question>\nassistant:<answer>"); the THREE-HOP chain join
-#     (conversation.turn_completed -> agent_run_id -> agent.run.completed +
-#     agent.run.dispatch rows, all tenant-scoped); question/answer digests on
-#     every turn_completed row equal sha256 of the stored plaintext; dual
-#     identity (actor_id=analyst.amir, payload agent_id=bank-analyst) on
-#     every conversation.% and agent.run.% row of the runs. The answer-content
-#     checks (turn-1 top-3 names; turn-2 rank-2 name) are model-driven
-#     FUNCTIONAL ACCEPTANCE CRITERIA — MANDATORY, a miss fails the bar — but
-#     distinct from the mechanical pins, which are the invariant evidence.
+#     "user:<question>\nassistant:<answer>"); TWO chain lineages, all
+#     tenant-scoped (run-5 ruling 2026-07-10): the CONTEXT lineage seq=2 ->
+#     run -> started/completed with the turn-2 dispatch count DELIBERATELY
+#     UNCONSTRAINED (0 = context reuse; >=1 = legitimate re-verification),
+#     and the DISPATCH lineage seq=1 -> run -> started/completed -> >=1 ok
+#     retail run_readonly_query dispatch (the three-hop conversation ->
+#     run -> dispatch join rides the turn that DID dispatch);
+#     question/answer digests on every turn_completed row equal sha256 of
+#     the stored plaintext; dual identity (actor_id=analyst.amir, payload
+#     agent_id=bank-analyst) on every conversation.% and agent.run.% row of
+#     the runs. The answer-content checks (turn-1 top-3 names; turn-2 rank-2
+#     name) are model-driven FUNCTIONAL ACCEPTANCE CRITERIA — MANDATORY, a
+#     miss fails the bar — but distinct from the mechanical pins, which are
+#     the invariant evidence.
 #   * BAR 2 (record integrity — DETERMINISTIC, no model call) — FIVE forged
 #     history fields (messages / history / prior_context / context /
 #     transcript) each 422 AND each error body identifies extra_forbidden for
@@ -1536,20 +1541,37 @@ PY
   || bar_fail "BAR 1 turn 2 prior_context_sha256 chain=$BAR1_T2_PCSHA recomputed=$RECOMPUTED_PCSHA — the assembled context is NOT the kernel-store turn-1 plaintext"
 echo "  Bar 1 pin OK: prior_context_turns=2 + prior_context_sha256 recomputed from the kernel store"
 
-# MECHANICAL PIN 2 — the THREE-HOP chain join (all tenant-scoped):
-# hop 1: conversation.turn_completed(seq=2) -> agent_run_id.
-HOP1_RUN="$(conv_turn_run_id "$BAR1_CID" 2)"
-[ "$HOP1_RUN" = "$BAR1_RUN2" ] \
-  || bar_fail "BAR 1 hop 1 — turn_completed(seq=2) agent_run_id='$HOP1_RUN' != wire agent_run_id='$BAR1_RUN2'"
-# hop 2: agent_run_id -> the run's own terminal evidence.
+# MECHANICAL PIN 2 — the chain join, re-anchored per the run-5 ruling
+# (2026-07-10): a live run proved turn 2 can answer ENTIRELY from the
+# replayed context with ZERO dispatches (steps_used=1 — correct, desirable
+# behaviour), so requiring a turn-2 dispatch row was a model-behaviour
+# assumption baked into a mechanical pin. Two lineages, all tenant-scoped:
+#
+# (a) TURN-2 CONTEXT lineage: seq=2 -> BAR1_RUN2 -> started/completed. The
+#     turn-2 run's dispatch count is DELIBERATELY UNCONSTRAINED — 0 means
+#     context reuse; >=1 means legitimate re-verification; neither fails.
+HOP1_T2_RUN="$(conv_turn_run_id "$BAR1_CID" 2)"
+[ "$HOP1_T2_RUN" = "$BAR1_RUN2" ] \
+  || bar_fail "BAR 1 context lineage — turn_completed(seq=2) agent_run_id='$HOP1_T2_RUN' != wire agent_run_id='$BAR1_RUN2'"
 [ "$(run_event_count "$BAR1_RUN2" agent.run.completed)" = "1" ] \
-  || bar_fail "BAR 1 hop 2 — no agent.run.completed row for $BAR1_RUN2"
+  || bar_fail "BAR 1 context lineage — no agent.run.completed row for $BAR1_RUN2"
 [ "$(run_event_count "$BAR1_RUN2" agent.run.started)" = "1" ] \
-  || bar_fail "BAR 1 hop 2 — no agent.run.started row for $BAR1_RUN2"
-# hop 3: agent_run_id -> its dispatch-chokepoint rows.
-[ "$(run_dispatch_count "$BAR1_RUN2")" -ge 1 ] \
-  || bar_fail "BAR 1 hop 3 — zero agent.run.dispatch rows for $BAR1_RUN2"
-echo "  Bar 1 pin OK: three-hop join conversation.turn_completed -> agent.run.completed -> dispatch rows"
+  || bar_fail "BAR 1 context lineage — no agent.run.started row for $BAR1_RUN2"
+# (b) CONVERSATION DISPATCH lineage — the three-hop join rides the turn
+#     that DID dispatch: seq=1 -> BAR1_RUN1 -> started/completed -> >=1
+#     dispatch (the STRONGER predicate: a successful run_readonly_query
+#     under scope retail_analytics with a well-formed args digest).
+HOP1_T1_RUN="$(conv_turn_run_id "$BAR1_CID" 1)"
+[ "$HOP1_T1_RUN" = "$BAR1_RUN1" ] \
+  || bar_fail "BAR 1 dispatch lineage — turn_completed(seq=1) agent_run_id='$HOP1_T1_RUN' != wire agent_run_id='$BAR1_RUN1'"
+[ "$(run_event_count "$BAR1_RUN1" agent.run.completed)" = "1" ] \
+  || bar_fail "BAR 1 dispatch lineage — no agent.run.completed row for $BAR1_RUN1"
+[ "$(run_event_count "$BAR1_RUN1" agent.run.started)" = "1" ] \
+  || bar_fail "BAR 1 dispatch lineage — no agent.run.started row for $BAR1_RUN1"
+HOP3_DISPATCH="$(run_dispatch_count "$BAR1_RUN1" "payload->>'outcome'='ok' AND payload->>'capability_ref'='$PACK_ID/run_readonly_query' AND payload->>'scope_id'='retail_analytics' AND payload->>'args_sha256' ~ '^[0-9a-f]{64}\$'")"
+[ "$HOP3_DISPATCH" -ge 1 ] \
+  || bar_fail "BAR 1 dispatch lineage — no ok retail run_readonly_query dispatch row for $BAR1_RUN1"
+echo "  Bar 1 pin OK: context lineage (seq=2 -> run -> started/completed; dispatches unconstrained) + dispatch lineage (seq=1 -> run -> ok retail dispatch)"
 
 # MECHANICAL PIN 3 — digest<->plaintext coupling on BOTH turn_completed rows.
 [ "$(conv_event_count "$BAR1_CID" conversation.turn_completed)" = "2" ] \

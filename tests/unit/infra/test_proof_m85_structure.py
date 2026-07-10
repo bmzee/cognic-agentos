@@ -881,14 +881,28 @@ def test_runner_bar1_pins_prior_context_mechanically() -> None:
     assert "prior_context_turns != 0" in RUNNER
 
 
-def test_runner_bar1_three_hop_join_and_digest_coupling() -> None:
+def test_runner_bar1_two_lineages_and_digest_coupling() -> None:
+    """Run-5 ruling (2026-07-10): the chain join is TWO lineages. Context
+    lineage: seq=2 -> BAR1_RUN2 -> started/completed. Dispatch lineage:
+    seq=1 -> BAR1_RUN1 -> started/completed -> >=1 ok retail
+    run_readonly_query dispatch (the three-hop join rides the turn that DID
+    dispatch)."""
     _assert_all(
         RUNNER,
         (
-            'HOP1_RUN="$(conv_turn_run_id "$BAR1_CID" 2)"',
-            '[ "$HOP1_RUN" = "$BAR1_RUN2" ]',
+            # context lineage (turn 2)
+            'HOP1_T2_RUN="$(conv_turn_run_id "$BAR1_CID" 2)"',
+            '[ "$HOP1_T2_RUN" = "$BAR1_RUN2" ]',
             'run_event_count "$BAR1_RUN2" agent.run.completed',
-            'run_dispatch_count "$BAR1_RUN2"',
+            'run_event_count "$BAR1_RUN2" agent.run.started',
+            # dispatch lineage (turn 1)
+            'HOP1_T1_RUN="$(conv_turn_run_id "$BAR1_CID" 1)"',
+            '[ "$HOP1_T1_RUN" = "$BAR1_RUN1" ]',
+            'run_event_count "$BAR1_RUN1" agent.run.completed',
+            'run_event_count "$BAR1_RUN1" agent.run.started',
+            'HOP3_DISPATCH="$(run_dispatch_count "$BAR1_RUN1"',
+            '[ "$HOP3_DISPATCH" -ge 1 ]',
+            # digest coupling + dual identity (both runs + the conversation)
             'assert_turn_digest_coupling "$BAR1_CID" 1',
             'assert_turn_digest_coupling "$BAR1_CID" 2',
             'run_dual_identity_violations "$BAR1_RUN1" analyst.amir',
@@ -896,6 +910,33 @@ def test_runner_bar1_three_hop_join_and_digest_coupling() -> None:
             'conv_dual_identity_violations "$BAR1_CID" analyst.amir',
         ),
     )
+    # The dispatch-lineage hop retains the STRONGER predicate: a successful
+    # retail-scoped run_readonly_query with a well-formed args digest.
+    hop3_line = next(ln for ln in RUNNER.splitlines() if 'HOP3_DISPATCH="$(' in ln)
+    _assert_all(
+        hop3_line,
+        (
+            '"$BAR1_RUN1"',
+            "payload->>'outcome'='ok'",
+            "run_readonly_query",
+            "payload->>'scope_id'='retail_analytics'",
+            "args_sha256",
+        ),
+    )
+
+
+def test_runner_bar1_never_constrains_the_turn2_dispatch_count() -> None:
+    """Run-5 live finding: turn 2 answered ENTIRELY from the replayed
+    context with ZERO dispatches (steps_used=1) — correct, desirable
+    behaviour that the old hop-3 pin wrongly failed. BAR 1 must never
+    query, let alone constrain, the turn-2 run's dispatch count: 0 means
+    context reuse; >=1 means legitimate re-verification; neither fails."""
+    assert 'run_dispatch_count "$BAR1_RUN2"' not in RUNNER, (
+        "BAR 1 re-grew a turn-2 dispatch-count constraint — the run-5 "
+        "false invariant (a model-behaviour assumption in a mechanical pin)"
+    )
+    # And the ruling is documented where the pins live.
+    _assert_all(RUNNER, ("DELIBERATELY UNCONSTRAINED",))
 
 
 def test_bar1_prior_context_recompute_is_byte_coupled_to_the_loop_framing() -> None:

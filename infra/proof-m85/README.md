@@ -77,10 +77,16 @@ the governed API.
     `prior_context_sha256` the runner **recomputes independently** from the
     `conversation_turns` plaintext with the loop's exact framing
     `user:<question>\nassistant:<answer>` (`core/agent/loop.py`);
-  * the **three-hop chain join**, all queries tenant-scoped
-    (`tenant_id='proof-m85'`): `conversation.turn_completed(seq=2)` →
-    `agent_run_id` → `agent.run.started`/`agent.run.completed` → ≥1
-    `agent.run.dispatch` row;
+  * **two chain lineages**, all queries tenant-scoped
+    (`tenant_id='proof-m85'`) — run-5 ruling, 2026-07-10: the **context
+    lineage** `conversation.turn_completed(seq=2)` → `agent_run_id` →
+    `agent.run.started`/`agent.run.completed`, with the turn-2 run's
+    dispatch count **deliberately unconstrained** (0 = context reuse; ≥1 =
+    legitimate re-verification; neither fails); and the **dispatch
+    lineage** `conversation.turn_completed(seq=1)` → `agent_run_id` →
+    `agent.run.started`/`agent.run.completed` → ≥1 ok retail-scoped
+    `run_readonly_query` dispatch row (the three-hop conversation → run →
+    dispatch join rides the turn that DID dispatch);
   * digest↔plaintext coupling: `question_sha256`/`answer_sha256` on BOTH
     `turn_completed` rows equal sha256 of the stored plaintext;
   * dual identity: zero `agent.run.%` or `conversation.%` rows for the runs /
@@ -128,6 +134,14 @@ all pass → `PROOF M8.5 SLICE (BARS 1-3) PASS`.
   fails the bar — but they are the flake-prone half, and a miss reads as a
   model-behaviour failure, not a governance-integrity failure. The M8 proof
   learned this the hard way (its BAR 4 moved to deterministic drivers).
+* **Turn-2 dispatch count is unconstrained (run-5 ruling).** A live run
+  proved turn 2 can answer entirely from the replayed context with ZERO
+  dispatches (`steps_used=1`) — correct, desirable behaviour. Zero means
+  context reuse; one or more means legitimate re-verification; neither is a
+  failure. Requiring a turn-2 dispatch was a model-behaviour assumption
+  baked into a mechanical pin — the same trap class ruling R3 removed from
+  BAR 3. The dispatch join therefore rides turn 1, which must dispatch to
+  produce the seeded figures at all.
 * **PT-3 posture on BAR 3.** Revoking a scope mid-conversation does NOT
   un-disclose content already in the transcript — turn 1's answer remains in
   the replayed context by design (the transcript is already-disclosed data;
