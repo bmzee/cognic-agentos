@@ -477,12 +477,14 @@ def test_key_probe_is_bounded_by_connect_and_total_timeouts() -> None:
 
 def test_key_probe_feeds_the_bearer_header_via_stdin_never_argv() -> None:
     """Review finding #3 (2026-07-10): a bearer in curl argv is visible to
-    every local process via `ps`. The header must ride stdin (-H @-)."""
+    every local process via `ps`. The header must ride stdin (-H @-) —
+    and reads the NON-exported local (round-3 finding 1: the exported
+    variable is dropped before curl runs)."""
     probe = _extract_key_probe_block()
     _assert_all(
         probe,
         (
-            "printf 'Authorization: Bearer %s\\n' \"$COGNIC_PROOF_M85_TIER1_API_KEY\"",
+            "printf 'Authorization: Bearer %s\\n' \"$_PROVIDER_KEY_LOCAL\"",
             "-H @-",
         ),
     )
@@ -1511,6 +1513,103 @@ def test_runner_m85b_access_log_pins() -> None:
         ),
     )
     assert not re.search(r">>?\s*/tmp/", section), "the M8.5-B section writes into shared /tmp"
+
+
+def test_provider_key_never_rides_argv_and_dies_with_the_run_dir() -> None:
+    """finding 1 (2026-07-10): --from-literal expanded the raw key into
+    kubectl's argv (ps-visible). The key now lands in a 0600 file under the
+    private $QC_TMP (printf is a bash builtin — no exec, no argv), the env
+    var is DROPPED immediately, and the Secret rides --from-file."""
+    assert "--from-literal=COGNIC_PROOF_M85_TIER1_API_KEY" not in RUNNER, (
+        "the provider key rides kubectl argv again (finding 1)"
+    )
+    _assert_all(
+        RUNNER,
+        (
+            '_PROVIDER_KEY_LOCAL="$COGNIC_PROOF_M85_TIER1_API_KEY"',
+            "unset COGNIC_PROOF_M85_TIER1_API_KEY",
+            'PROVIDER_KEY_FILE="$QC_TMP/tier1-api-key"',
+            '( umask 077; printf \'%s\' "$_PROVIDER_KEY_LOCAL" > "$PROVIDER_KEY_FILE" )',
+            "unset _PROVIDER_KEY_LOCAL",
+            '--from-file=COGNIC_PROOF_M85_TIER1_API_KEY="$PROVIDER_KEY_FILE"',
+        ),
+    )
+    # Round-3 finding 1 — the isolation window: capture into the
+    # NON-exported local, then DROP the exported variable BEFORE the first
+    # external process (the curl probe included) so no child ever inherits
+    # it; the probe + persistence consume the local; the local retires at
+    # persistence, before the Secret creation.
+    capture = RUNNER.index('_PROVIDER_KEY_LOCAL="$COGNIC_PROOF_M85_TIER1_API_KEY"')
+    unset_exported = RUNNER.index("unset COGNIC_PROOF_M85_TIER1_API_KEY")
+    assert capture < unset_exported
+    assert unset_exported < RUNNER.index("curl "), "a child ran while the key was exported"
+    assert unset_exported < RUNNER.index('bash "$PROOF_DIR/stage-packs.sh"')
+    assert "printf 'Authorization: Bearer %s\\n' \"$_PROVIDER_KEY_LOCAL\"" in RUNNER
+    assert RUNNER.index("unset _PROVIDER_KEY_LOCAL") < RUNNER.index(
+        "create secret generic proof-m85-provider-key"
+    )
+    # No VALUE reference to the exported name may survive past its unset
+    # (later occurrences are literals: error text + Secret key names).
+    assert RUNNER.rindex('"$COGNIC_PROOF_M85_TIER1_API_KEY"') < unset_exported
+    # The README carries the rotation directive for pre-fix keys.
+    assert "ROTATION REQUIRED" in README
+
+
+def test_no_shared_tmp_anywhere_in_the_runner() -> None:
+    """finding 2 (2026-07-10): every response/status artifact lives under
+    the private per-run $QC_TMP — the WHOLE-runner regression: no shared
+    /tmp path may appear anywhere, in any form (redirect, curl -o, cat,
+    or comment naming a live path)."""
+    assert "/tmp/" not in RUNNER, next(
+        ln.strip()[:120] for ln in RUNNER.splitlines() if "/tmp/" in ln
+    )
+    _assert_all(
+        RUNNER,
+        (
+            'HTTP_CODE_FILE="$QC_TMP/http-code"',
+            'API_RESP_FILE="$QC_TMP/api-resp"',
+            'die "api() called before QC_TMP was minted (programming error)"',
+            'cat "$API_RESP_FILE" 2>/dev/null || echo "<no response captured>"',
+        ),
+    )
+
+
+def test_proof_input_cleanliness_guard_runs_before_any_materialization() -> None:
+    """finding 5 (2026-07-10): the kernel-source guard covered only the
+    overlay; dirty proof code (runner / proof app / Dockerfiles / chart /
+    base Dockerfile / structural suite / the AS executable source copied
+    into the auth-server image) could still execute while the evidence
+    cited HEAD. The proof-input guard refuses BEFORE staging materializes
+    anything under infra/proof-m85."""
+    _assert_all(
+        RUNNER,
+        (
+            "PROOF_INPUT_DIRTY=",
+            "git status --porcelain -- infra/proof-m85 infra/charts/agentos "
+            "infra/agentos tests/unit/infra/test_proof_m85_structure.py "
+            "tests/integration/pack_loop/_local_as.py",
+            "proof inputs are DIRTY",
+        ),
+    )
+    assert RUNNER.index("PROOF_INPUT_DIRTY=") < RUNNER.index('bash "$PROOF_DIR/stage-packs.sh"'), (
+        "the proof-input guard must run before staging materializes"
+    )
+
+
+def test_runner_m85b_read3_validates_result_digests() -> None:
+    """finding 4 (2026-07-10): result_sha256 is surfaced by the API but was
+    unpinned. Every non-null result digest validates as 64-hex, and the ok
+    retail dispatch (which executed a real query) must carry one."""
+    section = _m85b_section()
+    _assert_all(
+        section,
+        (
+            'if d["result_sha256"] is not None:',
+            'assert hex64.fullmatch(d["result_sha256"]), d',
+            'd["result_sha256"] is not None and hex64.fullmatch(d["result_sha256"])',
+            "for d in ok_retail",
+        ),
+    )
 
 
 def test_proof_app_foreign_role_is_the_cross_tenant_reader() -> None:

@@ -97,6 +97,15 @@ if [[ -z "${COGNIC_PROOF_M85_TIER1_API_KEY:-}" ]]; then
   exit 1
 fi
 
+# Key-isolation window (review finding 1, 2026-07-10 round 3): copy the key
+# into a NON-exported shell variable and DROP the exported variable NOW —
+# before the FIRST external process — so no child (curl, stage-packs,
+# cosign, openssl, docker, kubectl, ...) ever inherits it. A plain
+# assignment to a NEW name carries no export attribute; under `set -u` any
+# straggler reference to the exported name fails loud.
+_PROVIDER_KEY_LOCAL="$COGNIC_PROOF_M85_TIER1_API_KEY"
+unset COGNIC_PROOF_M85_TIER1_API_KEY
+
 # ZERO-SPEND provider-key VALIDITY probe (added after the 2026-07-10 run-2
 # finding: a rotated/invalid key surfaced only at BAR 1 — a 401 on the first
 # completion, ~25 minutes into a fully-green bring-up). GET /v1/models bills
@@ -110,7 +119,7 @@ fi
 # is "validity UNDETERMINED, fix connectivity", never "rotate the key".
 if [[ "${COGNIC_PROOF_M85_ALLOWED_PROVIDERS:-openai}" == "openai" ]]; then
   set +e
-  KEY_PROBE_CODE="$(printf 'Authorization: Bearer %s\n' "$COGNIC_PROOF_M85_TIER1_API_KEY" \
+  KEY_PROBE_CODE="$(printf 'Authorization: Bearer %s\n' "$_PROVIDER_KEY_LOCAL" \
     | curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 15 \
         -H @- https://api.openai.com/v1/models)"
   KEY_PROBE_RC=$?
@@ -308,7 +317,11 @@ roll_and_wait() {
 # kernel-side entitlement matrix keys on their subjects (analyst.amir /
 # analyst.sara).
 HTTP_CODE=""
-HTTP_CODE_FILE="/tmp/proofm85-code"
+# Both paths are assigned under the private per-run $QC_TMP after it is
+# minted (finding 2, 2026-07-10 — never shared /tmp); api() refuses loud if
+# called earlier (mirrors the PSQL guard).
+HTTP_CODE_FILE=""
+API_RESP_FILE=""
 load_http_code() {
   HTTP_CODE="$(cat "$HTTP_CODE_FILE" 2>/dev/null || true)"
 }
@@ -316,17 +329,19 @@ load_http_code() {
 api() {
   local role="$1" method="$2" path="$3" body="${4:-}"
   local out
+  [ -n "$HTTP_CODE_FILE" ] && [ -n "$API_RESP_FILE" ] \
+    || die "api() called before QC_TMP was minted (programming error)"
   if [ -n "$body" ]; then
-    out="$(curl -s -o /tmp/proofm85-resp -w '%{http_code}' -X "$method" \
+    out="$(curl -s -o "$API_RESP_FILE" -w '%{http_code}' -X "$method" \
       -H "X-Proof-Role: $role" -H 'Content-Type: application/json' \
       -d "$body" "$BASE_URL$path")"
   else
-    out="$(curl -s -o /tmp/proofm85-resp -w '%{http_code}' -X "$method" \
+    out="$(curl -s -o "$API_RESP_FILE" -w '%{http_code}' -X "$method" \
       -H "X-Proof-Role: $role" "$BASE_URL$path")"
   fi
   HTTP_CODE="$out"
   printf '%s' "$out" > "$HTTP_CODE_FILE"
-  cat /tmp/proofm85-resp
+  cat "$API_RESP_FILE"
 }
 
 # ask <ROLE> <QUESTION> — one governed single-shot run via the A13 ask route.
@@ -708,7 +723,7 @@ bar_fail() {
     echo "- Failed step: \`$where\`"
     echo "- last API response (HTTP $HTTP_CODE):"
     echo '```json'
-    cat /tmp/proofm85-resp 2>/dev/null || echo "<no response captured>"
+    cat "$API_RESP_FILE" 2>/dev/null || echo "<no response captured>"
     echo ""
     echo '```'
     echo "- conversation.% chain rows (tail 10 — digest-only):"
@@ -936,6 +951,25 @@ grep -qE "[[:space:]]$REGISTRY_NAME($|[[:space:]])" /etc/hosts \
 cmp -s "$REGISTRY_TLS_DIR/registry-ca.pem" "/etc/docker/certs.d/$REGISTRY_REF_HOST/ca.crt" \
   || _setup_help "docker certs.d trust of the persistent proof CA at /etc/docker/certs.d/$REGISTRY_REF_HOST/ca.crt"
 
+# --- 1b. proof-input cleanliness (provenance — finding 5, 2026-07-10) ---------------
+# The kernel-source guard (section 3) covers the OVERLAY inputs; this one
+# covers the PROOF inputs the run executes — the runner itself, the proof
+# app, the Dockerfiles/manifests/values/seeds, the chart, the base-image
+# Dockerfile, the structural suite, and the AS executable source
+# (tests/integration/pack_loop/_local_as.py — copied into the proof
+# authentication-server image). Runs BEFORE anything materializes
+# (staging/copies land under infra/proof-m85 and are NOT gitignored), so a
+# dirty state here is genuinely operator-authored or stale residue from an
+# aborted run — either way the evidence would cite HEAD while different
+# proof code executed. docs/VALIDATION-RESULTS.md is deliberately excluded
+# (failure captures append to it).
+PROOF_INPUT_DIRTY="$(git status --porcelain -- infra/proof-m85 infra/charts/agentos infra/agentos tests/unit/infra/test_proof_m85_structure.py tests/integration/pack_loop/_local_as.py)"
+if [ -n "$PROOF_INPUT_DIRTY" ]; then
+  die "proof inputs are DIRTY — the evidence would cite HEAD while different proof code executes. Commit, stash, or clean first:
+$PROOF_INPUT_DIRTY"
+fi
+echo "==> [1/11] proof-input cleanliness OK (proof dir + chart + base Dockerfile + structural suite)"
+
 # --- 2. stage the SEVEN RELEASED packs (download + sha256-verify + arrange) --------
 echo "==> [2/11] stage the released packs via stage-packs.sh (download, not build)"
 rm -rf "$STAGING_DST"
@@ -991,6 +1025,23 @@ chmod a+r "$STAGING_DST/query-context/query-context-public.pem"
 if grep -rlE "PRIVATE KEY-----" "$STAGING_DST" >/dev/null 2>&1; then
   die "custody violation: private key material found under $STAGING_DST (must never enter a build context)"
 fi
+
+# Provider-key custody (finding 1, 2026-07-10): the key must NEVER ride a
+# process argument vector — `--from-literal=...="$KEY"` exposed it to any
+# local `ps` for the kubectl lifetime. The EXPORTED variable was already
+# dropped at the preflight (round-3 finding 1: no child inherits it); the
+# non-exported local persists to a 0600 file under the private per-run dir
+# (printf is a bash BUILTIN — no exec, no argv) and is retired here. The
+# Secret is created --from-file; the file dies with $QC_TMP (cleanup trap).
+PROVIDER_KEY_FILE="$QC_TMP/tier1-api-key"
+( umask 077; printf '%s' "$_PROVIDER_KEY_LOCAL" > "$PROVIDER_KEY_FILE" )
+unset _PROVIDER_KEY_LOCAL
+
+# The api() response/status files live under the SAME private dir (finding 2,
+# 2026-07-10: predictable mode-0644 shared-/tmp paths persisted transcript
+# plaintext past the run and permitted symlink/truncation attacks).
+HTTP_CODE_FILE="$QC_TMP/http-code"
+API_RESP_FILE="$QC_TMP/api-resp"
 
 # --- 3. build the three images ------------------------------------------------------
 echo "==> [3/11] resolve the kernel source revision (provenance — finding 2, 2026-07-10)"
@@ -1259,7 +1310,7 @@ echo "==> [8/11] create the per-run Secrets (query-context PRIVATE key + provide
 kubectl -n "$NS" create secret generic proof-m85-query-context \
   --from-file=query-context-private.pem="$QC_TMP/query-context-private.pem"
 kubectl -n "$NS" create secret generic proof-m85-provider-key \
-  --from-literal=COGNIC_PROOF_M85_TIER1_API_KEY="$COGNIC_PROOF_M85_TIER1_API_KEY"
+  --from-file=COGNIC_PROOF_M85_TIER1_API_KEY="$PROVIDER_KEY_FILE"
 
 echo "==> [8/11] patch the AgentOS Deployment (sandbox topology + query-context Secret mount)"
 # The chart ships no extraVolume/extraEnv hooks; these surfaces are proof
@@ -1954,6 +2005,16 @@ ok_retail = [
 ]
 assert ok_retail, dispatches
 assert all(hex64.fullmatch(d["args_sha256"]) for d in dispatches), dispatches
+# finding 4 (2026-07-10): result_sha256 is surfaced too — validate EVERY
+# non-null one as 64-hex (the kernel contract keeps it nullable), and the
+# ok retail dispatch executed a real query, so ITS result digest must be
+# present and valid.
+for d in dispatches:
+    if d["result_sha256"] is not None:
+        assert hex64.fullmatch(d["result_sha256"]), d
+assert all(
+    d["result_sha256"] is not None and hex64.fullmatch(d["result_sha256"]) for d in ok_retail
+), ok_retail
 print("ok")
 ' "$B_CHAIN1" "$BAR1_RUN1" "$AGENT_ID" "$PACK_ID"
 echo "  M8.5-B READ 3 OK: four blocks, started<terminal ordering, >=1 ok retail dispatch inside the window, digests only"

@@ -197,7 +197,7 @@ have likewise not yet executed live.
 | env | required | meaning |
 |---|---|---|
 | `COGNIC_RUN_PROOF_M85=1` | yes | the proof gate (unset → the runner exits 0 with a skip message; NO default-on CI behavior). |
-| `COGNIC_PROOF_M85_TIER1_API_KEY` | yes | the operator's CLOUD provider API key. Fail-loud at the gate; shipped ONLY as the `proof-m85-provider-key` k8s Secret consumed by the litellm router pod. |
+| `COGNIC_PROOF_M85_TIER1_API_KEY` | yes | the operator's CLOUD provider API key. Fail-loud at the gate; after the zero-spend preflight the runner persists it to a `0600` file under the private per-run dir, **unsets the environment variable**, and creates the `proof-m85-provider-key` k8s Secret `--from-file` — the key never rides a process argument vector (review finding 1, 2026-07-10). **ROTATION REQUIRED for keys used by pre-fix runners** (runs up to and including run 6): those created the Secret via `--from-literal`, exposing the key to local `ps` for the kubectl lifetime — treat them as locally exposed. |
 | `COGNIC_PROOF_M85_ALLOWED_PROVIDERS` | no (default `openai`) | the ADR-007 provider allow-list the runner sets on the kernel (`COGNIC_ALLOWED_PROVIDERS`). Lockstep with the values model line for the provider swap. |
 | `COGNIC_PROOF_M85_POLICY_MODE` | no (default `cloud_openai`) | the kernel `COGNIC_POLICY_MODE`; lockstep with the values model line for the swap. |
 | `COGNIC_PROOF_M85_REGISTRY_PORT` / `COGNIC_PROOF_M85_REGISTRY_TLS_DIR` / `COGNIC_PROOF_M85_REUSE_IMAGES` | no | local TLS-registry knobs (the proof-m6/m8 conventions, m85-named). |
