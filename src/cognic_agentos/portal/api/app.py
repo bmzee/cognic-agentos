@@ -1040,6 +1040,40 @@ def create_app(
                     app.state.agent_loop = None
                     app.state.hosted_agents = []
 
+                # ADR-028 M8.5-C — conversation substrate. State only; the router
+                # is mounted at construction. Read app.state.agent_loop, NOT the
+                # local `agent_loop`: if build_agent_loop() raised, the except arm
+                # above set only app.state, leaving the local unbound.
+                try:
+                    from cognic_agentos.core.conversation.storage import (
+                        ConversationStore,
+                    )
+                    from cognic_agentos.core.conversation.turn import (
+                        ConversationTurnExecutor,
+                    )
+
+                    conversation_store = ConversationStore(adapters.relational.engine)
+                    app.state.conversation_store = conversation_store
+
+                    built_agent_loop = getattr(app.state, "agent_loop", None)
+                    if built_agent_loop is not None:
+                        app.state.conversation_executor = ConversationTurnExecutor(
+                            store=conversation_store,
+                            loop=built_agent_loop,
+                            max_turns=settings.conversation_max_turns,
+                            cumulative_token_budget=(
+                                settings.agent_run_token_budget * settings.conversation_max_turns
+                            ),
+                            replay_last_n=settings.conversation_replay_last_n,
+                            replay_token_ceiling=settings.conversation_replay_token_ceiling,
+                            claim_ttl_s=settings.conversation_claim_ttl_s,
+                            agent_run_wall_clock_s=settings.agent_run_wall_clock_s,
+                        )
+                except Exception:
+                    logger.error("conversation.composition_failed", exc_info=True)
+                    app.state.conversation_store = None
+                    app.state.conversation_executor = None
+
                 # #489 — setting-driven reaper: build the CheckpointStore
                 # from the live adapter pool AFTER open_all() so the
                 # relational adapter's engine is connected. This build is
@@ -1716,6 +1750,22 @@ def create_app(
         build_eval_routes(eval_judge_tier=settings.eval_judge_tier),
         prefix="/api/v1/eval",
         tags=["eval"],
+    )
+
+    # ADR-028 M8.5-C conversation surface. Unconditional mount at CONSTRUCTION
+    # (include_router is never called from the lifespan); the request-time deps
+    # fail closed 503 until the lifespan populates app.state.conversation_store /
+    # .conversation_executor.
+    from cognic_agentos.portal.api.conversations.routes import (
+        build_conversation_routes,
+    )
+
+    app.state.conversation_store = None
+    app.state.conversation_executor = None
+    app.include_router(
+        build_conversation_routes(),
+        prefix="/api/v1/conversations",
+        tags=["conversations"],
     )
 
     # Managed-run surface (ADR-022 — POST /api/v1/runs). Unconditional mount: the

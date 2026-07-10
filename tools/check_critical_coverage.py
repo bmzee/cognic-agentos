@@ -2388,6 +2388,20 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     # full-suite --cov-branch coverage.json IN THE SAME COMMIT (NOT just the
     # count bump) per feedback_verify_promotion_meets_floor_at_promotion_time.
     ("src/cognic_agentos/core/agent/loop.py", 0.95, 0.90),
+    # ADR-028 M8.5-A (conversation substrate) — the conversation tenant+creator
+    # isolation boundary (a cross-tenant / cross-actor conversation_id reads as
+    # ABSENT) and the chain-atomic, digest-only write path. Gate 149 -> 150.
+    # Verified against fresh full-suite --cov-branch coverage.json IN THE SAME
+    # COMMIT (NOT just the count bump) per
+    # feedback_verify_promotion_meets_floor_at_promotion_time.
+    ("src/cognic_agentos/core/conversation/storage.py", 0.95, 0.90),
+    # ADR-028 M8.5-B (conversation turn loop) — the terminal-state refusal
+    # contract (a closed/expired/erased conversation NEVER reaches the
+    # AgentLoop) + the conversation-level bounds + the creator-scoped claim that
+    # must precede every append. Gate 150 -> 151. Verified against fresh
+    # full-suite --cov-branch coverage.json IN THE SAME COMMIT (NOT just the
+    # count bump) per feedback_verify_promotion_meets_floor_at_promotion_time.
+    ("src/cognic_agentos/core/conversation/turn.py", 0.95, 0.90),
 )
 
 

@@ -66,6 +66,7 @@ from cognic_agentos.core.agent._types import (
     AgentRunTerminalState,
     GrantedCapabilities,
     LoadedAgentRecord,
+    PriorTurn,
 )
 from cognic_agentos.core.agent.dispatch import AgentRunContext, build_llm_tool_specs
 from cognic_agentos.core.decision_history import DecisionHistoryStore, DecisionRecord
@@ -252,6 +253,7 @@ class AgentLoop:
         question: str,
         actor_tenant_id: str,
         actor_subject: str,
+        prior_context: tuple[PriorTurn, ...] = (),
     ) -> AgentAskResult:
         """One single-shot governed agent run (the module-docstring pipeline).
 
@@ -292,6 +294,12 @@ class AgentLoop:
         )
         question_encoded = question.encode("utf-8")
         question_sha256 = hashlib.sha256(question_encoded).hexdigest()
+        # ADR-028: the replayed context enters evidence as a DIGEST ONLY. The
+        # plaintext of prior turns lives solely in conversation_turns.
+        prior_context_encoded = "\n".join(f"{t.role}:{t.content}" for t in prior_context).encode(
+            "utf-8"
+        )
+        prior_context_sha256 = hashlib.sha256(prior_context_encoded).hexdigest()
         await self._decision_history.append(
             DecisionRecord(
                 decision_type="agent.run.started",
@@ -307,6 +315,8 @@ class AgentLoop:
                     "max_steps": effective_max_steps,
                     "token_budget": self._run_token_budget,
                     "wall_clock_s": self._run_wall_clock_s,
+                    "prior_context_turns": len(prior_context),
+                    "prior_context_sha256": prior_context_sha256,
                 },
                 actor_id=actor_subject,
                 tenant_id=actor_tenant_id,
@@ -316,6 +326,9 @@ class AgentLoop:
         start = self._clock()
 
         # --- 3. The conversation + the advertised capability surface.
+        # ADR-028: replayed prior turns sit BETWEEN the system prompt and the
+        # new question. They come ONLY from the kernel conversation store -- the
+        # turn API accepts no client-supplied history (invariant I-1).
         messages: list[dict[str, Any]] = [
             {
                 "role": "system",
@@ -323,6 +336,7 @@ class AgentLoop:
                     record=record, granted=granted, reader=self._skill_reader
                 ),
             },
+            *({"role": t.role, "content": t.content} for t in prior_context),
             {"role": "user", "content": question},
         ]
         specs = build_llm_tool_specs(run=run)
@@ -514,6 +528,8 @@ class AgentLoop:
             answer=answer,
             steps_used=steps_used,
             refusal_reason=refusal_reason,
+            prompt_tokens=prompt_tokens_total,
+            completion_tokens=completion_tokens_total,
         )
 
     async def _write_memory_digest_best_effort(

@@ -40,6 +40,7 @@ from cognic_agentos.core.agent._types import (
     AgentGrantNotRequested,
     GrantedCapabilities,
     LoadedAgentRecord,
+    PriorTurn,
 )
 from cognic_agentos.core.agent.dispatch import AgentDispatcher
 from cognic_agentos.core.agent.loop import (
@@ -1094,3 +1095,106 @@ class TestRecordLoaderProtocol:
         A13 harness conformer) satisfy it without inheritance."""
         loader: AgentRecordLoader = _StubRecordLoader({})
         assert loader is not None
+
+
+class TestPriorContextAdditive:
+    """ADR-028 M8.5-B (Sprint B, Task 4) — the additive ``prior_context`` input.
+
+    Pins the properties BAR 1 and BAR 2 depend on: replayed turns sit between
+    the system prompt and the new question, the default is empty (so every M8
+    call site is behaviour-unchanged), and the started chain row records the
+    prior context DIGEST-ONLY.
+    """
+
+    async def test_default_prior_context_is_empty_m8_shape_unchanged(self, db: AsyncEngine) -> None:
+        h = _harness(db, responses=[_resp("done")])
+        await _ask(h)
+        roles = [m["role"] for m in h.gateway.calls[0]["messages"]]
+        assert roles == ["system", "user"]
+
+    async def test_prior_turns_sit_between_system_and_new_question(self, db: AsyncEngine) -> None:
+        h = _harness(db, responses=[_resp("Beta Corp")])
+        await h.loop.ask(
+            agent_id=_AGENT_ID,
+            question="and the second largest?",
+            actor_tenant_id=_TENANT,
+            actor_subject=_ORIGINATOR,
+            prior_context=(
+                PriorTurn(role="user", content="who is the largest depositor?"),
+                PriorTurn(role="assistant", content="Acme Corp"),
+            ),
+        )
+        msgs = h.gateway.calls[0]["messages"]
+        assert [m["role"] for m in msgs] == ["system", "user", "assistant", "user"]
+        assert msgs[1]["content"] == "who is the largest depositor?"
+        assert msgs[2]["content"] == "Acme Corp"
+        assert msgs[3]["content"] == "and the second largest?"
+
+    async def test_started_row_records_prior_context_count_and_digest_only(
+        self, db: AsyncEngine
+    ) -> None:
+        h = _harness(db, responses=[_resp("ok")])
+        await h.loop.ask(
+            agent_id=_AGENT_ID,
+            question="q",
+            actor_tenant_id=_TENANT,
+            actor_subject=_ORIGINATOR,
+            prior_context=(PriorTurn(role="user", content="earlier secret"),),
+        )
+        rows = await _rows_of_type(db, "agent.run.started")
+        payload = rows[0].payload
+        assert payload["prior_context_turns"] == 1
+        assert len(payload["prior_context_sha256"]) == 64
+        assert "earlier secret" not in str(payload)
+
+    async def test_empty_prior_context_still_records_zero_and_a_digest(
+        self, db: AsyncEngine
+    ) -> None:
+        h = _harness(db, responses=[_resp("ok")])
+        await _ask(h)
+        payload = (await _rows_of_type(db, "agent.run.started"))[0].payload
+        assert payload["prior_context_turns"] == 0
+        assert len(payload["prior_context_sha256"]) == 64
+
+
+class TestRealTokenAccounting:
+    """Sprint B Task 4 — AgentAskResult surfaces REAL token counts.
+
+    Required fields, never defaulted: a cumulative budget fed by zeros reads as
+    ENFORCED in the evidence and is worse than no bound at all.
+    """
+
+    async def test_ask_result_surfaces_real_token_counts(self, db: AsyncEngine) -> None:
+        h = _harness(
+            db,
+            responses=[_resp("ok", usage={"prompt_tokens": 11, "completion_tokens": 7})],
+        )
+        result = await _ask(h)
+        assert result.prompt_tokens == 11
+        assert result.completion_tokens == 7
+
+    async def test_token_counts_accumulate_across_rounds(self, db: AsyncEngine) -> None:
+        h = _harness(
+            db,
+            responses=[
+                _resp(
+                    tool_calls=(_tc("read_skill", skill_id=_GRANTED_SKILL),),
+                    usage={"prompt_tokens": 5, "completion_tokens": 2},
+                ),
+                _resp("answer", usage={"prompt_tokens": 6, "completion_tokens": 3}),
+            ],
+        )
+        result = await _ask(h)
+        assert result.prompt_tokens == 11
+        assert result.completion_tokens == 5
+
+    async def test_token_fields_are_required_not_defaulted(self) -> None:
+        """A caller cannot silently construct a zero-token result."""
+        with pytest.raises(TypeError):
+            AgentAskResult(  # type: ignore[call-arg]
+                run_id="r",
+                terminal_state="completed",
+                answer="a",
+                steps_used=1,
+                refusal_reason=None,
+            )
