@@ -129,6 +129,25 @@ the governed API.
 Any bar failure → capture to `docs/VALIDATION-RESULTS.md` + exit non-zero;
 all pass → `PROOF M8.5 SLICE (BARS 1-3) PASS`.
 
+## M8.5-B (READ APIS) section — NOT YET RUN LIVE
+
+The runner now carries an M8.5-B section AFTER the bars (the BARS 1-3 PASS
+marker prints first; the run's last line becomes
+`PROOF M8.5-B (READ APIS) PASS`). It is deterministic and READ-ONLY — zero
+new model calls, zero record mutation, zero SQL: it drives the governed read
+surface (`GET /api/v1/conversations` list + cursor walk + three invalid-cursor
+probes, transcript plaintext/watermark pagination, the four-block turn-chain
+join with the turn-2 dispatch count deliberately unconstrained per the run-5
+ruling) over the SAME record BARs 1 and 3 produced, and proves isolation with
+a 7th proof role (`foreign` — `analyst.zara`, tenant `proof-foreign`, the
+same four `conversation.*` scopes): six-way byte-identical 404 across
+unknown-id / cross-actor / cross-tenant on transcript + chain, empty lists for
+sara and zara, and access-log trails carrying identifiers + outcome but never
+transcript plaintext. **The 2026-07-10 run-6 PASS above predates this section
+— the M8.5-B section has NOT yet executed on a cluster**; its verification so
+far is the structural test suite only (`tests/unit/infra/
+test_proof_m85_structure.py`).
+
 ## Honesty boundary (read before citing this proof)
 
 * **Model-driven vs deterministic.** BAR 2 is fully deterministic. BARs 1 and

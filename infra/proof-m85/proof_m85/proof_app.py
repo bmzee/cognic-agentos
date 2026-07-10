@@ -225,6 +225,20 @@ def _sara_actor() -> Actor:
     )
 
 
+def _foreign_actor() -> Actor:
+    # M8.5-B: the FOREIGN-TENANT reader. Same four conversation.* scopes as
+    # the analysts but tenant_id="proof-foreign" — the read-API bars prove
+    # that a fully-scoped reader in ANOTHER tenant sees an empty list and the
+    # byte-identical 404 on amir's conversation (tenant isolation is the
+    # storage WHERE clause, not the scope set).
+    return Actor(
+        subject="analyst.zara",
+        tenant_id="proof-foreign",
+        scopes=_ANALYST_SCOPES,
+        actor_type="human",
+    )
+
+
 class UnknownProofRole(Exception):
     """Raised by :meth:`MultiActorProofBinder.bind` when the ``X-Proof-Role``
     header is absent or names an unknown role — the request cannot be bound to
@@ -238,9 +252,9 @@ class MultiActorProofBinder:
     """Header-driven multi-actor binder. PROOF-ONLY.
 
     Reads the ``X-Proof-Role`` header and returns the matching role
-    :class:`Actor`. The 6 roles cover the full operator lifecycle plus the
+    :class:`Actor`. The 7 roles cover the full operator lifecycle plus the
     governed MCP warm-up plus the two analyst identities the three M8.5 bars
-    drive:
+    drive plus the M8.5-B foreign-tenant reader:
 
     - ``author``   — ``pack.submit`` (create + submit the draft);
     - ``reviewer`` — ``pack.review.{claim,approve,reject}`` +
@@ -251,14 +265,18 @@ class MultiActorProofBinder:
     - ``amir``     — the four ``conversation.*`` scopes as ``analyst.amir``
       (kernel-entitled to retail + fin data scopes; NO ``agent.ask``);
     - ``sara``     — the four ``conversation.*`` scopes as ``analyst.sara``
-      (kernel-entitled to cards + retail; NO ``agent.ask``).
+      (kernel-entitled to cards + retail; NO ``agent.ask``);
+    - ``foreign``  — the four ``conversation.*`` scopes as ``analyst.zara``
+      in tenant ``proof-foreign`` (M8.5-B: the fully-scoped foreign-tenant
+      reader the read-API isolation predicates drive — empty list +
+      byte-identical 404 on amir's conversation).
 
     An absent / unknown role raises :class:`UnknownProofRole` (fail-loud).
     This binder is PROOF-ONLY: production resolves identity from a real auth
     primitive, NEVER a client-supplied header.
     """
 
-    #: Role -> zero-arg Actor factory. Exactly 6 entries.
+    #: Role -> zero-arg Actor factory. Exactly 7 entries.
     _FACTORIES: Final = {
         "author": _author_actor,
         "reviewer": _reviewer_actor,
@@ -266,6 +284,7 @@ class MultiActorProofBinder:
         "mcp": _mcp_actor,
         "amir": _amir_actor,
         "sara": _sara_actor,
+        "foreign": _foreign_actor,
     }
 
     def bind(self, *, request: Request | None) -> Actor:  # matches the kernel ActorBinder Protocol
@@ -280,7 +299,7 @@ class MultiActorProofBinder:
 
     @classmethod
     def role_actors(cls) -> dict[str, Actor]:
-        """All 6 role actors (for the structural pins). PROOF-ONLY."""
+        """All 7 role actors (for the structural pins). PROOF-ONLY."""
         return {role: factory() for role, factory in cls._FACTORIES.items()}
 
 
