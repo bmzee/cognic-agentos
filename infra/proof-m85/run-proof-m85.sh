@@ -394,7 +394,33 @@ PY
 # (decision_history + audit_event carry the column directly;
 # conversation_turns has no tenant column, so its reads JOIN conversations
 # and scope on c.tenant_id).
-PSQL() { kubectl -n "$NS" exec -i deploy/postgres -- psql -U cognic -d cognic -tA -c "$1"; }
+#
+# PSQL is the SOLE load-bearing SQL path (run-3 finding, 2026-07-10: a raw
+# psql SQL error inside a command substitution aborted the runner under
+# `set -e` with NO failure capture). A nonzero psql routes through bar_fail
+# WITH the psql error text preserved: bar_fail runs inside the caller's
+# subshell — its capture side effects persist, its exit ends the subshell
+# nonzero, and the parent's `set -e` keeps the runner's exit nonzero.
+# Tolerant DIRECT psql is permitted ONLY inside bar_fail's own diagnostics
+# (structurally pinned) — everything load-bearing goes through here.
+PSQL() {
+  local sql="$1" out rc err_file
+  # The stderr capture lives under the per-run PRIVATE $QC_TMP (0700, minted
+  # by mktemp -d, removed by the cleanup trap) — review finding 2026-07-10:
+  # a predictable shared /tmp path is a symlink/truncation hazard AND leaks
+  # residue past the run. PSQL is only callable AFTER the key-mint step;
+  # calling it earlier is a programming error, refused loud.
+  [ -n "${QC_TMP:-}" ] || die "PSQL called before QC_TMP was minted (programming error)"
+  err_file="$QC_TMP/psql-err"
+  set +e
+  out="$(kubectl -n "$NS" exec -i deploy/postgres -- psql -U cognic -d cognic -tA -c "$sql" 2>"$err_file")"
+  rc=$?
+  set -e
+  if [ "$rc" -ne 0 ]; then
+    bar_fail "load-bearing SQL failed (psql rc=$rc; sql: $sql; psql: $(cat "$err_file" 2>/dev/null || echo '<no stderr captured>'))"
+  fi
+  printf '%s\n' "$out"
+}
 
 # Count of successful executions for ONE tool name (payload->>'tool_name') —
 # the "did a tool actually run?" downstream axis (BAR 1 raises it; BAR 2's
@@ -1391,10 +1417,8 @@ load_http_code # after api command substitution
 [ "$HTTP_CODE" = "200" ] || bar_fail "SETUP 7 install (HTTP $HTTP_CODE; body: $INSTALL_RESP)"
 
 echo "==> SETUP 8 — assert materialization (decision_history: mcp.override.set + mcp.allowlist.add)"
-MAT="$(kubectl -n "$NS" exec deploy/postgres -- psql -U cognic -d cognic -tA \
-  -c "SELECT event_type FROM decision_history WHERE event_type IN ('mcp.override.set','mcp.allowlist.add') AND tenant_id='$TENANT';")"
-DERIVED_ROWS="$(kubectl -n "$NS" exec deploy/postgres -- psql -U cognic -d cognic -tA \
-  -c "SELECT 'override|' || tenant_id || '|' || pack_id || '|' || server_url_override FROM mcp_server_url_override WHERE tenant_id='$TENANT' UNION ALL SELECT 'allowlist|' || tenant_id || '|' || ip || '|' || set_by_actor FROM mcp_internal_host_allowlist WHERE tenant_id='$TENANT' ORDER BY 1;")"
+MAT="$(PSQL "SELECT event_type FROM decision_history WHERE event_type IN ('mcp.override.set','mcp.allowlist.add') AND tenant_id='$TENANT';")"
+DERIVED_ROWS="$(PSQL "SELECT 'override|' || tenant_id || '|' || pack_id || '|' || server_url_override FROM mcp_server_url_override WHERE tenant_id='$TENANT' UNION ALL SELECT 'allowlist|' || tenant_id || '|' || ip || '|' || set_by_actor FROM mcp_internal_host_allowlist WHERE tenant_id='$TENANT' ORDER BY 1;")"
 grep -qF "mcp.override.set" <<<"$MAT" \
   || bar_fail "SETUP 8 no mcp.override.set materialization event (got: ${MAT:-<none>})"
 grep -qF "mcp.allowlist.add" <<<"$MAT" \
@@ -1494,7 +1518,7 @@ grep -qF "Bilal Sheikh" <<<"$BAR1_T2_ANSWER" \
 # prior_context_turns=2 AND prior_context_sha256 == sha256 over the loop's
 # framing "user:<question>\nassistant:<answer>" (loop.py:299), recomputed HERE
 # from the conversation_turns plaintext (base64-safe transport).
-BAR1_T2_STARTED="$(PSQL "SELECT payload->>'prior_context_turns' || '|' || payload->>'prior_context_sha256' FROM decision_history WHERE event_type='agent.run.started' AND tenant_id='$TENANT' AND payload->>'run_id'='$BAR1_RUN2';")"
+BAR1_T2_STARTED="$(PSQL "SELECT (payload->>'prior_context_turns') || '|' || (payload->>'prior_context_sha256') FROM decision_history WHERE event_type='agent.run.started' AND tenant_id='$TENANT' AND payload->>'run_id'='$BAR1_RUN2';")"
 BAR1_T2_PCT="${BAR1_T2_STARTED%%|*}"
 BAR1_T2_PCSHA="${BAR1_T2_STARTED##*|}"
 [ "$BAR1_T2_PCT" = "2" ] || bar_fail "BAR 1 turn 2 prior_context_turns='$BAR1_T2_PCT' (expected 2 — one replayed turn = user+assistant)"

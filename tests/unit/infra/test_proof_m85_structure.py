@@ -586,6 +586,159 @@ def test_runner_bar_failures_capture_and_exit_non_zero() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Load-bearing SQL: the fail-capturing PSQL helper + the run-3 findings
+# ---------------------------------------------------------------------------
+
+
+def _extract_function(name: str) -> str:
+    """A column-0 ``<name>() {`` ... column-0 ``}`` block, verbatim."""
+    match = re.search(rf"^{name}\(\) \{{\n.*?^\}}$", RUNNER, re.DOTALL | re.MULTILINE)
+    assert match is not None, f"{name}() is missing from the runner"
+    return match.group(0)
+
+
+def test_no_unparenthesized_json_extraction_concatenation() -> None:
+    """Live run-3 finding (2026-07-10): PostgreSQL gives ``->>`` and ``||``
+    EQUAL precedence (left-associative), so ``payload->>'a' || '|' ||
+    payload->>'b'`` parses as ``((payload->>'a' || '|') || payload) ->> 'b'``
+    -> ``operator does not exist: text ->> unknown``. Every extraction that
+    feeds a concatenation must be parenthesized. Mutation-tested: reverting
+    the BAR-1 query to the unparenthesized form goes RED."""
+    hazard = re.search(r"->>'[a-z_]+' \|\|", RUNNER)
+    assert hazard is None, (
+        f"unparenthesized JSON extraction feeding ||: {hazard.group(0)!r} — "
+        "wrap the extraction: (payload->>'field') || ..."
+    )
+    # The corrected BAR-1 query, pinned verbatim.
+    assert (
+        "(payload->>'prior_context_turns') || '|' || (payload->>'prior_context_sha256')" in RUNNER
+    )
+
+
+def test_psql_routes_failures_through_bar_fail_with_the_sql_error() -> None:
+    """Live run-3 finding: a raw psql error inside a command substitution
+    aborted the runner under ``set -e`` with NO failure capture. The PSQL
+    helper must capture rc + stderr itself and route nonzero through
+    bar_fail, preserving the psql error text."""
+    psql_fn = _extract_function("PSQL")
+    _assert_all(
+        psql_fn,
+        (
+            "set +e",
+            "rc=$?",
+            "set -e",
+            '[ "$rc" -ne 0 ]',
+            'bar_fail "load-bearing SQL failed',
+            # Review finding 2026-07-10: the stderr capture must live under
+            # the per-run PRIVATE $QC_TMP (0700, trap-removed) — a
+            # predictable shared /tmp path is a symlink/truncation hazard
+            # and leaks residue. Pre-mint calls refuse loud.
+            'err_file="$QC_TMP/psql-err"',
+            "PSQL called before QC_TMP was minted",
+        ),
+    )
+    assert "/tmp/proofm85-psql-err" not in RUNNER
+
+
+def test_load_bearing_sql_cannot_bypass_the_fail_capturing_helper() -> None:
+    """Direct ``psql -U cognic`` is permitted ONLY as the PSQL definition and
+    inside bar_fail's tolerant diagnostics. Everything load-bearing —
+    including SETUP-8's materialization reads (converted after run-3) — must
+    ride the helper."""
+    psql_fn = _extract_function("PSQL")
+    bar_fail_fn = _extract_function("bar_fail")
+    # Each permitted body must occur EXACTLY once before removal (review
+    # hardening 2026-07-10): a duplicated complete function body would
+    # otherwise be silently removed by replace() and escape the scan.
+    assert RUNNER.count(psql_fn) == 1, "PSQL() body duplicated in the runner"
+    assert RUNNER.count(bar_fail_fn) == 1, "bar_fail() body duplicated in the runner"
+    remainder = RUNNER.replace(psql_fn, "", 1).replace(bar_fail_fn, "", 1)
+    # Occurrence-counting (review finding 2026-07-10): the earlier line-set
+    # membership check let a COPIED identical psql line outside the permitted
+    # functions pass. With both permitted bodies removed, ZERO direct psql
+    # may remain anywhere.
+    assert "psql -U cognic" not in remainder, "direct psql outside PSQL()/bar_fail(): " + next(
+        ln.strip()[:120] for ln in remainder.splitlines() if "psql -U cognic" in ln
+    )
+    _assert_all(RUNNER, ('MAT="$(PSQL ', 'DERIVED_ROWS="$(PSQL '))
+
+
+def test_psql_failure_produces_the_m85_capture_and_a_nonzero_exit(tmp_path: Path) -> None:
+    """BEHAVIORAL: the extracted PSQL + bar_fail run VERBATIM in a sandbox
+    with a stubbed failing kubectl. A forced SQL error must (1) append the
+    '## Proof M8.5 slice — FAILURE' capture carrying the psql error text,
+    (2) never reach the statement after the failing substitution, and
+    (3) exit the script nonzero (set -e on the failed assignment)."""
+    stub_dir = tmp_path / "bin"
+    stub_dir.mkdir()
+    (stub_dir / "kubectl").write_text(
+        "#!/usr/bin/env bash\n"
+        'echo "ERROR:  operator does not exist: text ->> unknown" >&2\n'
+        "exit 1\n"
+    )
+    (stub_dir / "kubectl").chmod(0o755)
+    (tmp_path / "docs").mkdir()
+    qc_tmp = tmp_path / "qc-tmp"
+    qc_tmp.mkdir(mode=0o700)
+
+    script = (
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "NS=test-ns\n"
+        "TENANT=proof-m85\n"
+        "BASE_URL=http://127.0.0.1:1\n"
+        "HTTP_CODE=000\n"
+        f'QC_TMP="{qc_tmp}"\n'
+        'die() { echo "FAIL: $*" >&2; exit 1; }\n'
+        + _extract_function("bar_fail")
+        + "\n"
+        + _extract_function("PSQL")
+        + "\n"
+        'X="$(PSQL "SELECT broken")"\n'
+        'echo "UNREACHABLE"\n'
+    )
+    (tmp_path / "harness.sh").write_text(script)
+
+    import os
+
+    env = dict(os.environ)
+    env["PATH"] = f"{stub_dir}:{env['PATH']}"
+    result = subprocess.run(
+        ["bash", "harness.sh"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode != 0, "a failed load-bearing PSQL must exit the runner nonzero"
+    assert "UNREACHABLE" not in result.stdout
+    capture = (tmp_path / "docs" / "VALIDATION-RESULTS.md").read_text()
+    _assert_all(
+        capture,
+        (
+            "## Proof M8.5 slice — FAILURE",
+            "load-bearing SQL failed",
+            "operator does not exist: text ->> unknown",
+            "SELECT broken",
+        ),
+    )
+    # The forced error's stderr capture landed under the sandboxed QC_TMP.
+    assert (qc_tmp / "psql-err").exists()
+    # No ambient-host-state assertion (review hardening 2026-07-10: a
+    # developer's leftover residue from the OLD runner must not fail this
+    # suite). Instead, prove at the CODE level that the executed harness —
+    # the extracted PSQL + bar_fail included — writes nothing outside
+    # tmp_path: the old absolute path is gone from the runner, and no write
+    # redirect targets /tmp anywhere in the script (all writes are relative
+    # to the tmp_path cwd or $QC_TMP-rooted).
+    assert "/tmp/proofm85-psql-err" not in RUNNER
+    assert not re.search(r">>?\s*/tmp/", script), (
+        "the harness script carries a write redirect into shared /tmp"
+    )
+
+
+# ---------------------------------------------------------------------------
 # The conversation surface: analysts ride conversation.* ONLY (no agent.ask)
 # ---------------------------------------------------------------------------
 
@@ -718,7 +871,9 @@ def test_runner_bar1_pins_prior_context_mechanically() -> None:
         (
             "prior_context_turns' FROM decision_history",
             '[ "$BAR1_T2_PCT" = "2" ]',
-            "prior_context_sha256' FROM decision_history WHERE event_type='agent.run.started'",
+            # The parenthesized (run-3 precedence-fix) combined read.
+            "(payload->>'prior_context_turns') || '|' || (payload->>'prior_context_sha256')"
+            " FROM decision_history WHERE event_type='agent.run.started'",
             '[ "$BAR1_T2_PCSHA" = "$RECOMPUTED_PCSHA" ]',
         ),
     )
