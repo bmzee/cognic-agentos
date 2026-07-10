@@ -837,6 +837,27 @@ def test_chain_integrity_is_generic_500_with_operator_log(
     assert integrity_logs[0].internal_reason == "anchor_missing"
 
 
+def test_chain_absent_in_watermark_turn_is_generic_transcript_integrity_500(
+    memory_settings: Any, memory_registry: Any, tmp_path: Any
+) -> None:
+    """finding 4b (2026-07-10): a turn ROW missing inside 1..turn_count is
+    transcript-store corruption (the record claims the turn exists) — the
+    chain endpoint serves the SAME generic 500 the transcript endpoint does,
+    internals log-only; turn_not_found stays reserved for seq > turn_count."""
+    from cognic_agentos.core.conversation.read_model import (
+        ConversationTranscriptIntegrityError,
+    )
+
+    reader = _StubReader(
+        read_turn_chain=ConversationTranscriptIntegrityError("turn row seq 1 missing inside 1..2")
+    )
+    client, _ = _client(memory_settings, memory_registry, tmp_path, reader=reader)
+    r = client.get(f"/api/v1/conversations/{_CID}/turns/1/chain")
+    assert r.status_code == 500
+    assert r.json() == {"detail": {"reason": "conversation_transcript_integrity_failed"}}
+    assert "missing inside" not in r.text  # internals never reach the wire
+
+
 def test_chain_projection_limit_is_distinct_503(
     memory_settings: Any, memory_registry: Any, tmp_path: Any
 ) -> None:

@@ -185,7 +185,15 @@ _GATE_TOOL_PATH = _REPO_ROOT / "tools" / "check_critical_coverage.py"
 #: refusals fed back as tool messages (never terminating the run), the
 #: digest-only ``agent.run.started/.completed/.refused/.failed`` evidence
 #: rows, and the best-effort task-tier memory digest) promoted to the
-#: gate = 151 (ADR-028 M8.5-B promoted ``core/conversation/turn.py``).
+#: gate = 149.
+#: +2 at ADR-028 M8.5-A — ``core/conversation/storage.py`` (the chain-atomic
+#: conversation store: digest-only conversation.* rows + the erasable
+#: plaintext turn table) and ``core/conversation/turn.py`` (the governed turn
+#: executor: claim/replay/settle) promoted to the gate = 151.
+#: +1 at ADR-028 M8.5-B — ``core/conversation/read_model.py`` (the governed
+#: read surface: tenant+creator-isolated list/transcript/turn-chain reads,
+#: non-authoritative cursors, the bounded index-addressable chain join, and
+#: the corruption-vs-projection-limit taxonomy) promoted to the gate = 152.
 #: Bump this in lockstep with any deliberate ``_CRITICAL_FILES`` change.
 _EXPECTED_ENTRY_COUNT = 152
 

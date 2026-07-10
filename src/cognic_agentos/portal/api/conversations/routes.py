@@ -400,6 +400,31 @@ def build_conversation_routes() -> APIRouter:
                 seq=seq,
             )
             raise HTTPException(status_code=404, detail={"reason": "turn_not_found"}) from None
+        except ConversationTranscriptIntegrityError as exc:
+            # A turn ROW missing inside 1..turn_count: the record claims the
+            # turn exists, so this is transcript-store corruption — the same
+            # generic 500 the transcript endpoint serves, internals LOG-ONLY.
+            logger.error(
+                "portal.conversations.transcript_integrity_failed",
+                extra={
+                    "tenant_id": actor.tenant_id,
+                    "actor_subject": actor.subject,
+                    "conversation_id": str(conversation_id),
+                    "seq": seq,
+                    "detail": exc.detail,
+                },
+            )
+            _log_access(
+                "chain",
+                actor=actor,
+                outcome="integrity_failed",
+                conversation_id=conversation_id,
+                seq=seq,
+            )
+            raise HTTPException(
+                status_code=500,
+                detail={"reason": "conversation_transcript_integrity_failed"},
+            ) from None
         except ConversationChainIntegrityError as exc:
             logger.error(
                 "portal.conversations.chain_integrity_failed",

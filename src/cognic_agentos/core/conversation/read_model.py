@@ -46,7 +46,7 @@ import json
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Final, Literal, NoReturn
 
 import sqlalchemy as sa
@@ -143,13 +143,20 @@ def _encode_cursor(payload: dict[str, Any]) -> str:
 
 def _decode_cursor(cursor: str) -> dict[str, Any]:
     try:
-        decoded = json.loads(base64.urlsafe_b64decode(cursor.encode("ascii")))
+        # validate=True: STRICT alphabet — urlsafe_b64decode silently discards
+        # non-alphabet bytes, so a tampered cursor with trailing garbage would
+        # otherwise decode to the untampered payload.
+        raw = base64.b64decode(cursor.encode("ascii"), altchars=b"-_", validate=True)
+        decoded = json.loads(raw)
     except (ValueError, binascii.Error, UnicodeDecodeError) as exc:
         raise CursorInvalid("cursor is not base64url(JSON)") from exc
     if not isinstance(decoded, dict):
         raise CursorInvalid("cursor payload is not an object")
-    if decoded.get("v") != _CURSOR_VERSION:
-        raise CursorInvalid(f"unsupported cursor version {decoded.get('v')!r}")
+    version = decoded.get("v")
+    # bool-guarded exact int: JSON true == 1 in Python and would impersonate
+    # version 1.
+    if not isinstance(version, int) or isinstance(version, bool) or version != _CURSOR_VERSION:
+        raise CursorInvalid(f"unsupported cursor version {version!r}")
     return decoded
 
 
@@ -174,6 +181,10 @@ def _decode_list_cursor(cursor: str) -> _ListCursor:
         conversation_id = uuid.UUID(cid_raw)
     except ValueError as exc:
         raise CursorInvalid("list cursor carries an unparseable position") from exc
+    # tz-aware or refused: a naive timestamp compared against the tz-aware
+    # created_at column is a dialect-level error (a 500), not a keyset.
+    if created_at.tzinfo is None or created_at.tzinfo.utcoffset(created_at) is None:
+        raise CursorInvalid("list cursor timestamp must be timezone-aware")
     if state is not None and state not in _STATE_VOCAB:
         raise CursorInvalid(f"list cursor carries an unknown state filter {state!r}")
     return _ListCursor(created_at=created_at, conversation_id=conversation_id, state=state)
@@ -383,10 +394,17 @@ def _build_transcript_stmt(
 
 def _build_chain_row_stmt(*, request_id: str, tenant_id: str) -> sa.Select[Any]:
     """An exact-match anchor lookup — index-addressable via the 0001
-    ``ix_decision_history_request_id``; tenant-scoped besides."""
-    return sa.select(_decision_history).where(
-        _decision_history.c.request_id == request_id,
-        _decision_history.c.tenant_id == tenant_id,
+    ``ix_decision_history_request_id``; tenant-scoped besides. LIMIT 2:
+    ``request_id`` is non-unique, so a corrupt duplicate set must not be
+    able to consume unbounded memory before the duplicate check — two rows
+    are exactly enough to distinguish missing / unique / duplicated."""
+    return (
+        sa.select(_decision_history)
+        .where(
+            _decision_history.c.request_id == request_id,
+            _decision_history.c.tenant_id == tenant_id,
+        )
+        .limit(2)
     )
 
 
@@ -407,6 +425,15 @@ def _build_dispatch_window_stmt(
         .order_by(_decision_history.c.sequence.asc())
         .limit(limit_plus_one)
     )
+
+
+def _mint_aware_utc(value: datetime) -> datetime:
+    """The write path persists tz-aware UTC; drivers without tz storage
+    (sqlite) hand the same instant back naive — normalize at cursor-mint
+    time so the strict aware-required decode holds on every dialect."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value
 
 
 def _clamp_limit(limit: int | None) -> int:
@@ -507,7 +534,7 @@ class ConversationReadModel:
             next_cursor = _encode_cursor(
                 {
                     "v": _CURSOR_VERSION,
-                    "created_at": last["created_at"].isoformat(),
+                    "created_at": _mint_aware_utc(last["created_at"]).isoformat(),
                     "conversation_id": str(last["conversation_id"]),
                     "state": effective_state,
                 }
@@ -564,21 +591,25 @@ class ConversationReadModel:
         has_more = len(turn_rows) > page_size
         page = turn_rows[:page_size]
 
-        # Contiguity: the page must be exactly after_seq+1 .. after_seq+n, and
-        # when the probe row is absent the page must END at the watermark — a
-        # hole inside 1..watermark is corruption (single-writer contiguous
-        # seqs), never a shorter page.
+        # Contiguity over EVERY fetched row — the limit+1 probe row included:
+        # with stored seqs (1, 3) and limit=1 the gap is already visible in
+        # the probe, and paging past it would hand out a cursor into
+        # corruption. The rows must be exactly after_seq+1 .. after_seq+n,
+        # and when the probe row is absent the page must END at the
+        # watermark — a hole inside 1..watermark is corruption
+        # (single-writer contiguous seqs), never a shorter page.
         expected = after_seq
-        for turn_row in page:
+        for turn_row in turn_rows:
             expected += 1
             if turn_row["seq"] != expected:
                 raise ConversationTranscriptIntegrityError(
                     f"conversation {conversation_id}: expected seq {expected}, "
                     f"found {turn_row['seq']} (gap inside 1..{watermark})"
                 )
-        if not has_more and expected != watermark:
+        last_returned = after_seq + len(page)
+        if not has_more and last_returned != watermark:
             raise ConversationTranscriptIntegrityError(
-                f"conversation {conversation_id}: transcript ends at seq {expected}, "
+                f"conversation {conversation_id}: transcript ends at seq {last_returned}, "
                 f"watermark is {watermark} (missing tail)"
             )
 
@@ -602,7 +633,7 @@ class ConversationReadModel:
                     "v": _CURSOR_VERSION,
                     "conversation_id": str(conversation_id),
                     "watermark": watermark,
-                    "after_seq": expected,
+                    "after_seq": last_returned,
                 }
             )
             if has_more
@@ -636,7 +667,14 @@ class ConversationReadModel:
         async with self._engine.connect() as conn:
             turn = (await conn.execute(turn_stmt)).mappings().first()
             if turn is None:
-                raise TurnNotFound(f"seq {seq} has no turn row")
+                # seq passed the 1..turn_count guard above, so the record
+                # CLAIMS this turn exists — a missing row inside the
+                # watermark is a transcript-store gap (integrity 500),
+                # never the owner-visible turn_not_found 404.
+                raise ConversationTranscriptIntegrityError(
+                    f"conversation {conversation_id}: turn row seq {seq} missing "
+                    f"inside 1..{row['turn_count']}"
+                )
             hop1_rows = (
                 (
                     await conn.execute(
@@ -759,8 +797,10 @@ class ConversationReadModel:
     def _run_row_identity(
         self, payload: dict[str, Any], *, row: Any, run_id: str, where: str
     ) -> None:
-        """Run + dispatch rows validate run_id, agent_id and
-        originator_subject (precision lock: event-specific identity)."""
+        """Run + dispatch rows validate run_id, agent_id, originator_subject
+        AND the persisted ``actor_id`` (precision lock: event-specific
+        identity — ``actor_id == originator_subject == creator_subject``;
+        ``DecisionRecord.actor_id`` merges into the payload at append)."""
         if _payload_str(payload, "run_id", where=where) != run_id:
             _integrity("anchor_mismatch", f"{where}: payload run_id disagrees")
         agent_id = _payload_str(payload, "agent_id", where=where)
@@ -774,6 +814,12 @@ class ConversationReadModel:
             _integrity(
                 "dual_identity_mismatch",
                 f"{where}: originator {originator!r} != creator {row['creator_subject']!r}",
+            )
+        actor = _payload_str(payload, "actor_id", where=where)
+        if actor != row["creator_subject"]:
+            _integrity(
+                "dual_identity_mismatch",
+                f"{where}: actor_id {actor!r} != creator {row['creator_subject']!r}",
             )
 
     def _validate_started(
@@ -802,8 +848,10 @@ class ConversationReadModel:
             created_at=chain["created_at"],
             run_id=run_id,
             agent_id=row["agent_id"],
-            actor_id=row["creator_subject"],
-            originator_subject=row["creator_subject"],
+            # The persisted, validated values (never the conversation row
+            # substituted): _run_row_identity proved both == creator_subject.
+            actor_id=_payload_str(payload, "actor_id", where="started"),
+            originator_subject=_payload_str(payload, "originator_subject", where="started"),
             question_sha256=_payload_str(payload, "question_sha256", where="started"),
             question_bytes=_payload_int(payload, "question_bytes", where="started"),
             max_steps=_payload_int(payload, "max_steps", where="started"),

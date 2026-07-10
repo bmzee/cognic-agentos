@@ -107,6 +107,7 @@ def _started_payload(
     return {
         "run_id": run_id,
         "agent_id": agent,
+        "actor_id": creator,
         "originator_subject": creator,
         "question_sha256": "a" * 64,
         "question_bytes": 10,
@@ -155,6 +156,7 @@ def _terminal_payload(
     payload: dict[str, Any] = {
         "run_id": run_id,
         "agent_id": agent,
+        "actor_id": creator,
         "originator_subject": creator,
         "answer_sha256": "e" * 64,
         "answer_bytes": 42,
@@ -438,6 +440,66 @@ async def test_list_cursor_invalid_matrix(reader: ConversationReadModel, cursor:
         await reader.list_conversations(tenant_id=_TENANT, creator_subject=_CREATOR, cursor=cursor)
 
 
+async def test_list_cursor_rejects_trailing_garbage_on_a_valid_cursor(
+    store: ConversationStore, reader: ConversationReadModel
+) -> None:
+    """finding 5 (2026-07-10): ``urlsafe_b64decode`` silently DISCARDS
+    non-alphabet bytes, so ``<valid-cursor>!!!`` decoded to the untampered
+    payload and was accepted. Strict validation refuses it."""
+    await _new_conversation(store)
+    await _new_conversation(store)
+    page = await reader.list_conversations(tenant_id=_TENANT, creator_subject=_CREATOR, limit=1)
+    assert page.next_cursor is not None
+    with pytest.raises(CursorInvalid, match="base64url"):
+        await reader.list_conversations(
+            tenant_id=_TENANT, creator_subject=_CREATOR, cursor=page.next_cursor + "!!!"
+        )
+
+
+async def test_cursor_version_true_is_not_version_1(reader: ConversationReadModel) -> None:
+    """finding 5: JSON ``true == 1`` in Python — a bool must not impersonate
+    the integer cursor version."""
+    cursor = _encode_cursor(
+        {
+            "v": True,
+            "created_at": "2026-07-10T00:00:00+00:00",
+            "conversation_id": str(uuid.uuid4()),
+            "state": None,
+        }
+    )
+    with pytest.raises(CursorInvalid, match="version"):
+        await reader.list_conversations(tenant_id=_TENANT, creator_subject=_CREATOR, cursor=cursor)
+
+
+async def test_mint_aware_utc_normalizes_naive_and_passes_aware_through() -> None:
+    """Both arms of the mint normalization (the aware arm is unreachable on
+    sqlite, whose driver always returns naive): a naive instant gains UTC
+    unchanged; an aware instant passes through IDENTICALLY."""
+    from cognic_agentos.core.conversation.read_model import _mint_aware_utc
+
+    naive = datetime(2026, 7, 10, 12, 0, 0)
+    normalized = _mint_aware_utc(naive)
+    assert normalized.tzinfo is UTC
+    assert normalized.replace(tzinfo=None) == naive
+    aware = datetime(2026, 7, 10, 12, 0, 0, tzinfo=UTC)
+    assert _mint_aware_utc(aware) is aware
+
+
+async def test_list_cursor_naive_timestamp_refused(reader: ConversationReadModel) -> None:
+    """finding 5: a naive keyset timestamp compared against the tz-aware
+    column is a dialect-level 500, not a governed 422 — refuse at decode."""
+    cursor = _encode_cursor(
+        {
+            "v": 1,
+            "created_at": "2026-07-10T00:00:00",
+            "conversation_id": str(uuid.uuid4()),
+            "state": None,
+        }
+    )
+    with pytest.raises(CursorInvalid, match="timezone-aware"):
+        await reader.list_conversations(tenant_id=_TENANT, creator_subject=_CREATOR, cursor=cursor)
+
+
 # ---------------------------------------------------------------------------
 # Transcript: watermark snapshot, pagination, contiguity, erasure shape
 # ---------------------------------------------------------------------------
@@ -536,6 +598,30 @@ async def test_transcript_gap_is_integrity_failure(
         )
     with pytest.raises(ConversationTranscriptIntegrityError, match="gap inside"):
         await reader.read_transcript(cid, tenant_id=_TENANT, creator_subject=_CREATOR)
+
+
+async def test_transcript_gap_visible_in_the_probe_fails_immediately(
+    store: ConversationStore,
+    history: DecisionHistoryStore,
+    reader: ConversationReadModel,
+    db: AsyncEngine,
+) -> None:
+    """finding 4a (2026-07-10): stored seqs (1, 3) with limit=1 — the gap is
+    already visible in the limit+1 PROBE row, so page one must fail NOW
+    rather than hand out a cursor into corruption (the old check validated
+    only the returned page and deferred detection to page two)."""
+    cid = await _new_conversation(store)
+    for seq in (1, 2, 3):
+        await _drive_turn(store, history, cid, seq)
+    async with db.begin() as conn:
+        await conn.execute(
+            sa.delete(_conversation_turns).where(
+                _conversation_turns.c.conversation_id == cid,
+                _conversation_turns.c.seq == 2,
+            )
+        )
+    with pytest.raises(ConversationTranscriptIntegrityError, match="gap inside"):
+        await reader.read_transcript(cid, tenant_id=_TENANT, creator_subject=_CREATOR, limit=1)
 
 
 async def test_transcript_missing_tail_is_integrity_failure(
@@ -1040,6 +1126,10 @@ async def test_chain_row_stmt_is_an_exact_request_id_lookup() -> None:
     assert "decision_history.request_id =" in sql
     assert "decision_history.tenant_id =" in sql
     assert "LIKE" not in sql.upper().split("WHERE")[1]
+    # finding 6 (2026-07-10): request_id is NON-unique — without a LIMIT a
+    # corrupt duplicate set could consume unbounded memory before the
+    # duplicate check. Two rows distinguish missing / unique / duplicated.
+    assert "LIMIT" in sql.upper(), sql
 
 
 async def test_transcript_stmt_is_seq_bounded_and_ordered() -> None:
@@ -1160,6 +1250,12 @@ async def test_started_validator_negative_arms(bare_reader: ConversationReadMode
     with pytest.raises(ConversationChainIntegrityError) as exc:
         started([_fake_chain("agent.run.started", {**good, "originator_subject": "someone.else"})])
     assert exc.value.internal_reason == "dual_identity_mismatch"
+    # forged persisted actor_id (finding 3, 2026-07-10: originator alone was
+    # checked; a forged actor_id was accepted and the projection substituted
+    # the creator).
+    with pytest.raises(ConversationChainIntegrityError) as exc:
+        started([_fake_chain("agent.run.started", {**good, "actor_id": "forged"})])
+    assert exc.value.internal_reason == "dual_identity_mismatch"
     # wall_clock_s missing/non-numeric.
     with pytest.raises(ConversationChainIntegrityError) as exc:
         started([_fake_chain("agent.run.started", {**good, "wall_clock_s": None})])
@@ -1187,6 +1283,10 @@ async def test_terminal_validator_negative_arms(bare_reader: ConversationReadMod
     with pytest.raises(ConversationChainIntegrityError) as exc:
         terminal([_fake_chain("agent.run.completed", {**good, "refusal_reason": 123})])
     assert exc.value.internal_reason == "anchor_malformed"
+    # forged persisted actor_id (finding 3).
+    with pytest.raises(ConversationChainIntegrityError) as exc:
+        terminal([_fake_chain("agent.run.completed", {**good, "actor_id": "forged"})])
+    assert exc.value.internal_reason == "dual_identity_mismatch"
 
 
 async def test_dispatch_projection_negative_arms(bare_reader: ConversationReadModel) -> None:
@@ -1207,6 +1307,10 @@ async def test_dispatch_projection_negative_arms(bare_reader: ConversationReadMo
     with pytest.raises(ConversationChainIntegrityError) as exc:
         project([_fake_chain("agent.run.dispatch", {**good, "result_bytes": "many"})])
     assert exc.value.internal_reason == "anchor_malformed"
+    # forged persisted actor_id (finding 3) — dispatch rows validate it too.
+    with pytest.raises(ConversationChainIntegrityError) as exc:
+        project([_fake_chain("agent.run.dispatch", {**good, "actor_id": "forged"})])
+    assert exc.value.internal_reason == "dual_identity_mismatch"
 
 
 async def test_cursor_payload_must_be_an_object(reader: ConversationReadModel) -> None:
@@ -1232,20 +1336,25 @@ async def test_transcript_cursor_non_string_cid_type(
         )
 
 
-async def test_chain_turn_row_missing_within_watermark_is_turn_not_found(
+async def test_chain_turn_row_missing_within_watermark_is_transcript_integrity(
     store: ConversationStore,
     history: DecisionHistoryStore,
     reader: ConversationReadModel,
     db: AsyncEngine,
 ) -> None:
-    """turn_count admits the seq but the row is gone: the ruled mapping keeps
-    this TurnNotFound at the chain endpoint (the TRANSCRIPT owns gap
-    detection as integrity)."""
+    """turn_count admits the seq but the row is gone (finding 4b,
+    2026-07-10): the record CLAIMS the turn exists, so an absent row inside
+    1..watermark is transcript-store corruption — integrity 500, never the
+    owner-visible turn_not_found 404 (which stays reserved for
+    seq > turn_count)."""
     cid = await _new_conversation(store)
     await _drive_turn(store, history, cid, 1)
     async with db.begin() as conn:
         await conn.execute(
             sa.delete(_conversation_turns).where(_conversation_turns.c.conversation_id == cid)
         )
-    with pytest.raises(TurnNotFound):
+    with pytest.raises(ConversationTranscriptIntegrityError, match="missing"):
         await reader.read_turn_chain(cid, 1, tenant_id=_TENANT, creator_subject=_CREATOR)
+    # seq ABOVE the watermark stays the owner-visible 404.
+    with pytest.raises(TurnNotFound):
+        await reader.read_turn_chain(cid, 2, tenant_id=_TENANT, creator_subject=_CREATOR)
