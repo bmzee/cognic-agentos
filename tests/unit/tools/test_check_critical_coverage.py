@@ -187,7 +187,7 @@ _GATE_TOOL_PATH = _REPO_ROOT / "tools" / "check_critical_coverage.py"
 #: rows, and the best-effort task-tier memory digest) promoted to the
 #: gate = 151 (ADR-028 M8.5-B promoted ``core/conversation/turn.py``).
 #: Bump this in lockstep with any deliberate ``_CRITICAL_FILES`` change.
-_EXPECTED_ENTRY_COUNT = 151
+_EXPECTED_ENTRY_COUNT = 152
 
 #: The 5 modules Sprint 7B.3 promoted to the durable gate, each by its
 #: own landing commit (T3-T6 panels + T7 composer). All ride the
