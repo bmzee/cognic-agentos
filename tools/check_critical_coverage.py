@@ -2402,6 +2402,16 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     # full-suite --cov-branch coverage.json IN THE SAME COMMIT (NOT just the
     # count bump) per feedback_verify_promotion_meets_floor_at_promotion_time.
     ("src/cognic_agentos/core/conversation/turn.py", 0.95, 0.90),
+    # ADR-028 M8.5-B (conversation read model, HP-1) — the tenant+creator
+    # isolation gate for the list/transcript/chain reads (byte-identical 404
+    # collapse), the bounded index-addressable evidence queries (never an
+    # unbounded decision_history scan; payload verified INSIDE the window,
+    # never the access path), and the chain-integrity doctrine (defective
+    # anchors are corruption; the candidate cap is the DISTINCT operational
+    # limit). Gate 151 -> 152. Verified against fresh full-suite --cov-branch
+    # coverage.json IN THE SAME COMMIT (NOT just the count bump) per
+    # feedback_verify_promotion_meets_floor_at_promotion_time.
+    ("src/cognic_agentos/core/conversation/read_model.py", 0.95, 0.90),
 )
 
 

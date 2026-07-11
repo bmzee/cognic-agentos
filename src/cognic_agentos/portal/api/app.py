@@ -1045,6 +1045,9 @@ def create_app(
                 # local `agent_loop`: if build_agent_loop() raised, the except arm
                 # above set only app.state, leaving the local unbound.
                 try:
+                    from cognic_agentos.core.conversation.read_model import (
+                        ConversationReadModel,
+                    )
                     from cognic_agentos.core.conversation.storage import (
                         ConversationStore,
                     )
@@ -1054,6 +1057,13 @@ def create_app(
 
                     conversation_store = ConversationStore(adapters.relational.engine)
                     app.state.conversation_store = conversation_store
+                    # M8.5-B (HP-1): the read model needs only the relational
+                    # engine — it serves list/transcript/chain even when the
+                    # agent loop (and so the executor) is absent.
+                    app.state.conversation_read_model = ConversationReadModel(
+                        adapters.relational.engine,
+                        chain_candidate_limit=settings.conversation_chain_candidate_limit,
+                    )
 
                     built_agent_loop = getattr(app.state, "agent_loop", None)
                     if built_agent_loop is not None:
@@ -1073,6 +1083,7 @@ def create_app(
                     logger.error("conversation.composition_failed", exc_info=True)
                     app.state.conversation_store = None
                     app.state.conversation_executor = None
+                    app.state.conversation_read_model = None
 
                 # #489 — setting-driven reaper: build the CheckpointStore
                 # from the live adapter pool AFTER open_all() so the
@@ -1762,6 +1773,7 @@ def create_app(
 
     app.state.conversation_store = None
     app.state.conversation_executor = None
+    app.state.conversation_read_model = None
     app.include_router(
         build_conversation_routes(),
         prefix="/api/v1/conversations",

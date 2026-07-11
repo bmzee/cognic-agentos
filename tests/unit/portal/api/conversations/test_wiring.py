@@ -61,6 +61,25 @@ def test_store_is_built_from_the_relational_adapter_engine(
         assert store._engine is adapters.relational.engine
 
 
+def test_read_model_is_built_from_the_engine_with_the_ruled_candidate_cap(
+    memory_settings: Any, memory_registry: Any, tmp_path: Any
+) -> None:
+    """M8.5-B: the read model is built from ``adapters.relational.engine`` with
+    ``Settings.conversation_chain_candidate_limit`` threaded into the candidate
+    cap. (Its independence from the agent loop is pinned separately by
+    test_build_agent_loop_failure_is_contained, where the loop fails and the
+    read model still constructs.)"""
+    from cognic_agentos.core.conversation.read_model import ConversationReadModel
+
+    app = _app(memory_settings, memory_registry, tmp_path)
+    with TestClient(app):
+        rm = app.state.conversation_read_model
+        assert isinstance(rm, ConversationReadModel)
+        assert rm._engine is app.state.adapters.relational.engine
+        # The ruled Setting threads into the reader's candidate cap.
+        assert rm._chain_candidate_limit == memory_settings.conversation_chain_candidate_limit
+
+
 def test_executor_presence_tracks_agent_loop_presence(
     memory_settings: Any, memory_registry: Any, tmp_path: Any
 ) -> None:
@@ -101,6 +120,7 @@ def test_build_agent_loop_failure_is_contained(
         assert app.state.agent_loop is None
         assert isinstance(app.state.conversation_store, ConversationStore)
         assert app.state.conversation_executor is None
+        assert app.state.conversation_read_model is not None  # reads survive loop failure
         app.state.actor_binder = _Binder()
         r = client.post(
             "/api/v1/conversations/33333333-3333-3333-3333-333333333333/turns",
@@ -126,7 +146,11 @@ def test_invalid_executor_configuration_fails_the_surface_closed(
     with TestClient(app) as client:
         assert app.state.conversation_store is None
         assert app.state.conversation_executor is None
+        assert app.state.conversation_read_model is None  # fail-soft nulls ALL THREE
         app.state.actor_binder = _Binder()
         r = client.get("/api/v1/conversations/33333333-3333-3333-3333-333333333333")
         assert r.status_code == 503
         assert r.json()["detail"]["reason"] == "conversation_store_unavailable"
+        r = client.get("/api/v1/conversations")
+        assert r.status_code == 503
+        assert r.json()["detail"]["reason"] == "conversation_read_model_unavailable"

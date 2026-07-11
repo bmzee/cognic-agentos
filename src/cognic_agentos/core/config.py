@@ -2169,6 +2169,19 @@ class Settings(BaseSettings):
             "ConversationTurnExecutor refuses construction otherwise."
         ),
     )
+    conversation_chain_candidate_limit: int = Field(
+        default=10_000,
+        gt=0,
+        description=(
+            "M8.5-B (ADR-028 HP-1) — the chain-join dispatch-window candidate "
+            "cap: the read model fetches at most this many rows between a "
+            "run's started/terminal anchors before exact-filtering "
+            "payload.run_id in Python. Exceeding it returns 503 "
+            "conversation_chain_projection_limit (operator remediation or a "
+            "higher limit — an operational bound, distinct from chain "
+            "corruption and not automatically retryable)."
+        ),
+    )
     scheduler_class_sla_interactive_s: float = Field(
         default=0.2,
         gt=0,

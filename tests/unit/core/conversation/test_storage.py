@@ -791,3 +791,124 @@ async def test_stale_lease_on_an_erased_row_refuses_as_stale(
             claim_id=claim_a.claim_id,
         )
     assert exc.value.reason == "conversation_turn_claim_stale"
+
+
+# --- M8.5-B (migration 0016): the hop-1 correlation column ------------------------
+
+
+async def test_append_turn_persists_the_turn_completed_request_id(
+    store: ConversationStore, db: AsyncEngine
+) -> None:
+    """CORRELATION EQUALITY: the turn row carries the SAME caller-minted
+    request_id as its exactly-one conversation.turn_completed chain row — the
+    correlation the M8.5-B chain-join read resolves hop 1 through. (The
+    ATOMICITY of the pairing is proven by the rollback test below.)"""
+    cid = await _new(store)
+    claim = await _claim(store, cid)
+    rid = f"conv-turn-{uuid.uuid4().hex}"
+    await store.append_turn(
+        conversation_id=cid,
+        tenant_id="t1",
+        seq=1,
+        user_message="q",
+        answer="a",
+        agent_run_id="agent-run-corr",
+        prompt_tokens=1,
+        completion_tokens=1,
+        actor_id="s1",
+        request_id=rid,
+        claim_id=claim.claim_id,
+    )
+    async with db.connect() as conn:
+        stored = (
+            await conn.execute(
+                sa.select(_conversation_turns.c.turn_completed_request_id).where(
+                    _conversation_turns.c.conversation_id == cid
+                )
+            )
+        ).scalar_one()
+        chain_count = (
+            await conn.execute(
+                sa.select(sa.func.count())
+                .select_from(_decision_history)
+                .where(
+                    _decision_history.c.request_id == rid,
+                    _decision_history.c.event_type == "conversation.turn_completed",
+                )
+            )
+        ).scalar_one()
+    assert stored == rid  # the turn row carries the minted request id
+    assert chain_count == 1  # and exactly one chain row pairs with it
+
+
+async def test_duplicate_turn_completed_request_id_rolls_back_turn_and_chain(
+    store: ConversationStore, db: AsyncEngine
+) -> None:
+    """ROLLBACK ATOMICITY: a duplicate correlation id violates the named
+    unique constraint (in-process metadata parity with migration 0016) and the
+    single transaction rolls back BOTH the turn row AND the chain row — no
+    orphan on either side, counters untouched."""
+    from sqlalchemy.exc import IntegrityError
+
+    cid = await _new(store)
+    claim = await _claim(store, cid)
+    rid = f"conv-turn-{uuid.uuid4().hex}"
+    await store.append_turn(
+        conversation_id=cid,
+        tenant_id="t1",
+        seq=1,
+        user_message="q1",
+        answer="a1",
+        agent_run_id="agent-run-dup-a",
+        prompt_tokens=1,
+        completion_tokens=1,
+        actor_id="s1",
+        request_id=rid,
+        claim_id=claim.claim_id,
+    )
+    await store.release_claim(cid, tenant_id="t1", claim_id=claim.claim_id)
+
+    claim2 = await _claim(store, cid)
+    with pytest.raises(IntegrityError):
+        await store.append_turn(
+            conversation_id=cid,
+            tenant_id="t1",
+            seq=2,
+            user_message="q2",
+            answer="a2",
+            agent_run_id="agent-run-dup-b",
+            prompt_tokens=1,
+            completion_tokens=1,
+            actor_id="s1",
+            request_id=rid,  # DUPLICATE correlation id
+            claim_id=claim2.claim_id,
+        )
+
+    async with db.connect() as conn:
+        turn_rows = (
+            await conn.execute(
+                sa.select(sa.func.count())
+                .select_from(_conversation_turns)
+                .where(_conversation_turns.c.conversation_id == cid)
+            )
+        ).scalar_one()
+        chain_rows = (
+            await conn.execute(
+                sa.select(sa.func.count())
+                .select_from(_decision_history)
+                .where(
+                    _decision_history.c.request_id == rid,
+                    _decision_history.c.event_type == "conversation.turn_completed",
+                )
+            )
+        ).scalar_one()
+        counters = (
+            await conn.execute(
+                sa.select(_conversations.c.turn_count, _conversations.c.cumulative_tokens).where(
+                    _conversations.c.conversation_id == cid
+                )
+            )
+        ).one()
+    assert turn_rows == 1  # the second turn row rolled back
+    assert chain_rows == 1  # and so did its chain row — no orphan evidence
+    assert tuple(counters) == (1, 2)  # counters reflect ONLY the first turn

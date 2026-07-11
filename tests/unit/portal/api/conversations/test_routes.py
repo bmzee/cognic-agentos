@@ -11,6 +11,7 @@ FastAPI envelope is the wire contract.
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -127,6 +128,7 @@ def _client(
     *,
     store: Any = None,
     executor: Any = None,
+    reader: Any = None,
     actor: Actor | None = None,
     hosted: list[dict[str, Any]] | None = None,
 ) -> Any:
@@ -136,6 +138,7 @@ def _client(
     app.state.actor_binder = _StubBinder(actor if actor is not None else _actor())
     app.state.conversation_store = store
     app.state.conversation_executor = executor
+    app.state.conversation_read_model = reader
     app.state.hosted_agents = hosted if hosted is not None else [{"agent_id": _AGENT}]
     return client, app
 
@@ -490,3 +493,409 @@ def test_hosted_rows_without_agent_id_are_ignored(
     assert r.status_code == 404
     assert r.json()["detail"]["reason"] == "agent_not_found"
     assert store.created == []
+
+
+# --- M8.5-B: the read endpoints (list / transcript / chain) -----------------------
+
+
+class _StubReader:
+    """Programmable read-model stub: each method returns a canned value or
+    raises a canned exception."""
+
+    def __init__(self, **behaviors: Any) -> None:
+        self._behaviors = behaviors
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    def _resolve(self, name: str) -> Any:
+        value = self._behaviors.get(name)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    async def list_conversations(self, **kw: Any) -> Any:
+        self.calls.append(("list_conversations", kw))
+        return self._resolve("list_conversations")
+
+    async def read_transcript(self, *a: Any, **kw: Any) -> Any:
+        self.calls.append(("read_transcript", kw))
+        return self._resolve("read_transcript")
+
+    async def read_turn_chain(self, *a: Any, **kw: Any) -> Any:
+        self.calls.append(("read_turn_chain", kw))
+        return self._resolve("read_turn_chain")
+
+
+def _summary() -> Any:
+    from cognic_agentos.core.conversation.read_model import ConversationSummary
+
+    return ConversationSummary(
+        conversation_id=_CID,
+        agent_id=_AGENT,
+        state="active",
+        turn_count=2,
+        cumulative_tokens=120,
+        created_at=datetime(2026, 7, 10, tzinfo=UTC),
+        last_turn_at=None,
+    )
+
+
+def _transcript_page(*, user_message: str = "q1", answer: str = "a1") -> Any:
+    from cognic_agentos.core.conversation.read_model import TranscriptPage, TranscriptTurn
+
+    return TranscriptPage(
+        conversation=_summary(),
+        turns=(
+            TranscriptTurn(
+                turn_id=_TURN_ID,
+                seq=1,
+                user_message=user_message,
+                answer=answer,
+                agent_run_id="agent-run-1",
+                prompt_tokens=100,
+                completion_tokens=20,
+                created_at=datetime(2026, 7, 10, tzinfo=UTC),
+                erased_at=None,
+            ),
+        ),
+        watermark=2,
+        next_cursor="abc",
+    )
+
+
+def _chain_join() -> Any:
+    from cognic_agentos.core.conversation.read_model import (
+        DispatchProjection,
+        RunStartedProjection,
+        RunTerminalProjection,
+        TurnChainJoin,
+        TurnCompletedProjection,
+    )
+
+    when = datetime(2026, 7, 10, tzinfo=UTC)
+    return TurnChainJoin(
+        turn_completed=TurnCompletedProjection(
+            sequence=9,
+            created_at=when,
+            turn_id=_TURN_ID,
+            seq=1,
+            agent_run_id="agent-run-1",
+            actor_id="analyst.amir",
+            question_sha256="a" * 64,
+            question_bytes=2,
+            answer_sha256="b" * 64,
+            answer_bytes=2,
+            prompt_tokens=100,
+            completion_tokens=20,
+        ),
+        started=RunStartedProjection(
+            sequence=5,
+            created_at=when,
+            run_id="agent-run-1",
+            agent_id=_AGENT,
+            actor_id="analyst.amir",
+            originator_subject="analyst.amir",
+            question_sha256="a" * 64,
+            question_bytes=2,
+            max_steps=6,
+            token_budget=60_000,
+            wall_clock_s=300.0,
+            prior_context_turns=0,
+            prior_context_sha256="c" * 64,
+        ),
+        terminal=RunTerminalProjection(
+            sequence=8,
+            created_at=when,
+            terminal_state="completed",
+            answer_sha256="b" * 64,
+            answer_bytes=2,
+            steps_used=1,
+            prompt_tokens_total=100,
+            completion_tokens_total=20,
+            refusal_reason=None,
+            bound=None,
+            error_class=None,
+        ),
+        dispatches=(
+            DispatchProjection(
+                sequence=6,
+                step_index=0,
+                capability_kind="tool",
+                capability_ref="cognic-tool-oracle-schema/run_readonly_query",
+                scope_id="retail_analytics",
+                outcome="ok",
+                refusal_reason=None,
+                args_sha256="d" * 64,
+                result_sha256="e" * 64,
+                result_bytes=128,
+            ),
+        ),
+    )
+
+
+def test_read_endpoints_503_until_read_model_wired(
+    memory_settings: Any, memory_registry: Any, tmp_path: Any
+) -> None:
+    client, _ = _client(memory_settings, memory_registry, tmp_path)
+    for path in (
+        "/api/v1/conversations",
+        f"/api/v1/conversations/{_CID}/transcript",
+        f"/api/v1/conversations/{_CID}/turns/1/chain",
+    ):
+        r = client.get(path)
+        assert r.status_code == 503
+        assert r.json()["detail"]["reason"] == "conversation_read_model_unavailable"
+
+
+def test_read_endpoints_403_without_read_scope(
+    memory_settings: Any, memory_registry: Any, tmp_path: Any
+) -> None:
+    reader = _StubReader()
+    client, _ = _client(
+        memory_settings,
+        memory_registry,
+        tmp_path,
+        reader=reader,
+        actor=_actor(frozenset({"conversation.create"})),
+    )
+    for path in (
+        "/api/v1/conversations",
+        f"/api/v1/conversations/{_CID}/transcript",
+        f"/api/v1/conversations/{_CID}/turns/1/chain",
+    ):
+        assert client.get(path).status_code == 403
+    assert reader.calls == []  # the scope gate fires BEFORE any read
+
+
+def test_list_returns_items_and_cursor(
+    memory_settings: Any, memory_registry: Any, tmp_path: Any
+) -> None:
+    from cognic_agentos.core.conversation.read_model import ListPage
+
+    reader = _StubReader(list_conversations=ListPage(items=(_summary(),), next_cursor="next123"))
+    client, _ = _client(memory_settings, memory_registry, tmp_path, reader=reader)
+    r = client.get("/api/v1/conversations", params={"limit": 1, "state": "active"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["next_cursor"] == "next123"
+    assert body["items"][0]["conversation_id"] == str(_CID)
+    assert body["items"][0]["state"] == "active"
+    # The bound Actor is the ONLY identity source.
+    _, kw = reader.calls[0]
+    assert kw["tenant_id"] == "t1" and kw["creator_subject"] == "analyst.amir"
+
+
+def test_list_cursor_invalid_is_422(
+    memory_settings: Any, memory_registry: Any, tmp_path: Any
+) -> None:
+    from cognic_agentos.core.conversation.read_model import CursorInvalid
+
+    reader = _StubReader(list_conversations=CursorInvalid("bad"))
+    client, _ = _client(memory_settings, memory_registry, tmp_path, reader=reader)
+    r = client.get("/api/v1/conversations", params={"cursor": "zzz"})
+    assert r.status_code == 422
+    assert r.json()["detail"]["reason"] == "cursor_invalid"
+
+
+def test_list_limit_out_of_range_is_422_at_validation(
+    memory_settings: Any, memory_registry: Any, tmp_path: Any
+) -> None:
+    reader = _StubReader()
+    client, _ = _client(memory_settings, memory_registry, tmp_path, reader=reader)
+    assert client.get("/api/v1/conversations", params={"limit": 0}).status_code == 422
+    assert client.get("/api/v1/conversations", params={"limit": 201}).status_code == 422
+    assert reader.calls == []
+
+
+def test_transcript_ok_carries_plaintext_and_watermark(
+    memory_settings: Any, memory_registry: Any, tmp_path: Any
+) -> None:
+    reader = _StubReader(read_transcript=_transcript_page())
+    client, _ = _client(memory_settings, memory_registry, tmp_path, reader=reader)
+    r = client.get(f"/api/v1/conversations/{_CID}/transcript")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["watermark"] == 2
+    assert body["next_cursor"] == "abc"
+    assert body["turns"][0]["user_message"] == "q1"
+    assert body["turns"][0]["erased_at"] is None
+
+
+def test_transcript_and_chain_404_bodies_are_byte_identical_to_unknown(
+    memory_settings: Any, memory_registry: Any, tmp_path: Any
+) -> None:
+    """The route-level half of the byte-identity doctrine: the reader returns
+    None for absent AND cross-tenant AND cross-actor alike (pinned at the
+    read-model layer), and the route serialises ONE constant body."""
+    reader = _StubReader(read_transcript=None, read_turn_chain=None)
+    client, _ = _client(memory_settings, memory_registry, tmp_path, reader=reader)
+    t1 = client.get(f"/api/v1/conversations/{_CID}/transcript")
+    t2 = client.get(f"/api/v1/conversations/{uuid.uuid4()}/transcript")
+    assert t1.status_code == t2.status_code == 404
+    assert t1.content == t2.content
+    c1 = client.get(f"/api/v1/conversations/{_CID}/turns/1/chain")
+    c2 = client.get(f"/api/v1/conversations/{uuid.uuid4()}/turns/9/chain")
+    assert c1.status_code == c2.status_code == 404
+    assert c1.content == c2.content
+    assert t1.json()["detail"]["reason"] == "conversation_not_found"
+
+
+def test_transcript_integrity_is_generic_500(
+    memory_settings: Any, memory_registry: Any, tmp_path: Any
+) -> None:
+    from cognic_agentos.core.conversation.read_model import (
+        ConversationTranscriptIntegrityError,
+    )
+
+    reader = _StubReader(
+        read_transcript=ConversationTranscriptIntegrityError("gap at seq 2 detail")
+    )
+    client, _ = _client(memory_settings, memory_registry, tmp_path, reader=reader)
+    r = client.get(f"/api/v1/conversations/{_CID}/transcript")
+    assert r.status_code == 500
+    assert r.json() == {"detail": {"reason": "conversation_transcript_integrity_failed"}}
+    assert "gap at seq" not in r.text  # internals never reach the wire
+
+
+def test_chain_ok_projects_all_four_curated_blocks(
+    memory_settings: Any, memory_registry: Any, tmp_path: Any
+) -> None:
+    reader = _StubReader(read_turn_chain=_chain_join())
+    client, _ = _client(memory_settings, memory_registry, tmp_path, reader=reader)
+    r = client.get(f"/api/v1/conversations/{_CID}/turns/1/chain")
+    assert r.status_code == 200
+    body = r.json()
+    assert set(body.keys()) == {"turn_completed", "started", "terminal", "dispatches"}
+    # Curation pin: exactly the ruled keysets — no payload, no hashes.
+    assert set(body["terminal"].keys()) == {
+        "sequence",
+        "created_at",
+        "terminal_state",
+        "answer_sha256",
+        "answer_bytes",
+        "steps_used",
+        "prompt_tokens_total",
+        "completion_tokens_total",
+        "refusal_reason",
+        "bound",
+        "error_class",
+    }
+    assert set(body["started"].keys()) == {
+        "sequence",
+        "created_at",
+        "run_id",
+        "agent_id",
+        "actor_id",
+        "originator_subject",
+        "question_sha256",
+        "question_bytes",
+        "max_steps",
+        "token_budget",
+        "wall_clock_s",
+        "prior_context_turns",
+        "prior_context_sha256",
+    }
+    assert body["dispatches"][0]["scope_id"] == "retail_analytics"
+    assert "payload" not in r.text and 'hash"' not in r.text
+
+
+def test_chain_turn_not_found_is_owner_visible_404(
+    memory_settings: Any, memory_registry: Any, tmp_path: Any
+) -> None:
+    from cognic_agentos.core.conversation.read_model import TurnNotFound
+
+    reader = _StubReader(read_turn_chain=TurnNotFound("seq 9"))
+    client, _ = _client(memory_settings, memory_registry, tmp_path, reader=reader)
+    r = client.get(f"/api/v1/conversations/{_CID}/turns/9/chain")
+    assert r.status_code == 404
+    assert r.json()["detail"]["reason"] == "turn_not_found"
+
+
+def test_chain_integrity_is_generic_500_with_operator_log(
+    memory_settings: Any, memory_registry: Any, tmp_path: Any, caplog: Any
+) -> None:
+    from cognic_agentos.core.conversation.read_model import ConversationChainIntegrityError
+
+    reader = _StubReader(
+        read_turn_chain=ConversationChainIntegrityError(
+            "anchor_missing", "run agent-run-1: no terminal row"
+        )
+    )
+    client, _ = _client(memory_settings, memory_registry, tmp_path, reader=reader)
+    import logging
+
+    with caplog.at_level(logging.ERROR, logger="cognic_agentos.portal.api.conversations.routes"):
+        r = client.get(f"/api/v1/conversations/{_CID}/turns/1/chain")
+    assert r.status_code == 500
+    assert r.json() == {"detail": {"reason": "conversation_chain_integrity_failed"}}
+    assert "anchor_missing" not in r.text  # internal reason is LOG-ONLY
+    integrity_logs = [
+        rec
+        for rec in caplog.records
+        if rec.message == "portal.conversations.chain_integrity_failed"
+    ]
+    assert len(integrity_logs) == 1
+    assert integrity_logs[0].internal_reason == "anchor_missing"
+
+
+def test_chain_absent_in_watermark_turn_is_generic_transcript_integrity_500(
+    memory_settings: Any, memory_registry: Any, tmp_path: Any
+) -> None:
+    """finding 4b (2026-07-10): a turn ROW missing inside 1..turn_count is
+    transcript-store corruption (the record claims the turn exists) — the
+    chain endpoint serves the SAME generic 500 the transcript endpoint does,
+    internals log-only; turn_not_found stays reserved for seq > turn_count."""
+    from cognic_agentos.core.conversation.read_model import (
+        ConversationTranscriptIntegrityError,
+    )
+
+    reader = _StubReader(
+        read_turn_chain=ConversationTranscriptIntegrityError("turn row seq 1 missing inside 1..2")
+    )
+    client, _ = _client(memory_settings, memory_registry, tmp_path, reader=reader)
+    r = client.get(f"/api/v1/conversations/{_CID}/turns/1/chain")
+    assert r.status_code == 500
+    assert r.json() == {"detail": {"reason": "conversation_transcript_integrity_failed"}}
+    assert "missing inside" not in r.text  # internals never reach the wire
+
+
+def test_chain_projection_limit_is_distinct_503(
+    memory_settings: Any, memory_registry: Any, tmp_path: Any
+) -> None:
+    from cognic_agentos.core.conversation.read_model import ConversationChainProjectionLimit
+
+    reader = _StubReader(read_turn_chain=ConversationChainProjectionLimit("cap 10000"))
+    client, _ = _client(memory_settings, memory_registry, tmp_path, reader=reader)
+    r = client.get(f"/api/v1/conversations/{_CID}/turns/1/chain")
+    assert r.status_code == 503
+    assert r.json()["detail"]["reason"] == "conversation_chain_projection_limit"
+
+
+def test_access_logs_carry_identifiers_and_outcome_never_plaintext(
+    memory_settings: Any, memory_registry: Any, tmp_path: Any, caplog: Any
+) -> None:
+    import logging
+
+    # Collision-proof plaintext markers: two-char markers like "q1"/"a1" can
+    # appear inside the random hex trace/span ids the observability filter
+    # stamps onto every record in full-suite runs.
+    reader = _StubReader(
+        read_transcript=_transcript_page(
+            user_message="SECRET-QUESTION-PLAINTEXT", answer="SECRET-ANSWER-PLAINTEXT"
+        )
+    )
+    client, _ = _client(memory_settings, memory_registry, tmp_path, reader=reader)
+    with caplog.at_level(logging.INFO, logger="cognic_agentos.portal.api.conversations.routes"):
+        client.get(f"/api/v1/conversations/{_CID}/transcript")
+    access = [
+        rec for rec in caplog.records if rec.getMessage() == "portal.conversations.transcript"
+    ]
+    assert len(access) == 1
+    rec = access[0]
+    assert rec.tenant_id == "t1"
+    assert rec.actor_subject == "analyst.amir"
+    assert rec.conversation_id == str(_CID)
+    assert rec.outcome == "ok"
+    # NEVER transcript plaintext in the access log record.
+    record_repr = str(rec.__dict__)
+    assert "SECRET-QUESTION-PLAINTEXT" not in record_repr
+    assert "SECRET-ANSWER-PLAINTEXT" not in record_repr

@@ -1403,3 +1403,50 @@ PROOF M8.5 SLICE (BARS 1-3) PASS
 4. **PT-3 posture on BAR 3:** revoking a scope mid-conversation does not un-disclose content already in the transcript (turn 1's answer stays in the replayed context by design; erasure is the M8.5-F pathway). The bar proves no FRESH data crosses the revoked scope.
 5. **OTEL is inherited diagnostics only** (ruling R6): no M8.5 bar depends on spans.
 6. **Proof-only wiring caveats carry from proof-m8 unchanged:** header-driven multi-actor binder, proof-staged trust roots, per-run query-context keypair, demo-grain scope→proxy identities, cloud toggles + provider key as operator env. The unit/CI layer separately covers the bounds + terminal-refusal + claim-fencing contracts (including the live-Postgres fencing canary in the CI postgres lane).
+
+## M8.5-B — Harness enablement APIs (ADR-028 HP-1) — PASS
+
+**2026-07-11 — `PROOF M8.5-B (READ APIS) PASS` live on `kind` (run 7, exit 0 — the first M8.5-B execution; zero findings).**
+
+- **Kernel anchor = proof revision:** `feat/m85b-harness-enablement-apis @ 8e77ca16f267545ce2e2a808b684b11f1be33005` — a SINGLE revision for both (unlike M8.5-A's split anchor), and for the first time the image label was **verified live**: the runner computed the revision from a clean tree (both cleanliness guards — kernel-source AND proof-input — passed), passed it as the `KERNEL_GIT_SHA` build arg, and read the `io.cognic.proof.kernel-anchor` label back off the built artifact via `docker inspect` before deploy (log line 411).
+- **Runner:** `infra/proof-m85/run-proof-m85.sh` — env-gated; the **rotated** provider key (the pre-fix key was revoked per the review rotation directive) proven by the zero-spend `GET /v1/models` preflight (`HTTP 200`, log line 1). The hardened custody window ran live: the exported key variable was dropped before the first child process, the key rode stdin + a `0600` file under the private per-run dir only, the Secret was created `--from-file`, and zero shared-`/tmp` artifacts exist (the response/status files live under `$QC_TMP`, removed by the trap).
+- **Log:** 743 lines, SHA-256 `fb9e6536b2952dcac1303b82aead73c7a7984c67d7348958a76da71a711d18a1` (operator-held; deliberately not committed).
+- **Deployment:** the M8.5-A bring-up verbatim, plus migrate to rev **0016** with the live schema readback — `alembic_version = 0016` AND the `turn_completed_request_id` correlation column AND both read-model indexes present (`1|2`, log line 641). The M8.5-A BARs 1–3 re-executed and re-passed on this tree in the same run; the READ section then served THAT record.
+- **Spend:** four governed model-driven turns (the M8.5-A bars, unchanged). The M8.5-B READ section itself made **zero model calls** — it is deterministic and read-only over the record the bars produced.
+
+### READ evidence (log lines, verbatim)
+
+```
+  M8.5-B READ 1 OK: both bar conversations listed with turn_count=2
+  M8.5-B READ 1b OK: two limit=1 pages, disjoint, cover exactly the two bar conversations, walk terminates
+  M8.5-B READ 1c OK: all three cursor probes refused 422 cursor_invalid
+  M8.5-B READ 2 OK: both turns plaintext (non-null, erased_at null), ordered, token-attributed, runs match the wire
+  M8.5-B READ 2b OK: seq 1 then seq 2 across pages under the frozen watermark 2
+  M8.5-B READ 3 OK: four blocks, started<terminal ordering, >=1 ok retail dispatch inside the window, digests only
+  M8.5-B READ 3b OK: turn-2 chain joined; dispatches observed (unconstrained): 2
+  M8.5-B READ 4 OK: six-way byte-identical collapse; owner-visible turn_not_found stays distinct
+  M8.5-B READ 5 OK: fully-scoped sara (same tenant) and zara (foreign tenant) both list empty
+  M8.5-B READ 6 OK: list/transcript/chain access trails with identifiers + outcome; zero plaintext in the access lines
+PROOF M8.5-B (READ APIS) PASS
+```
+
+### What each READ proved
+
+- **READ 1/1b/1c (list + pagination + cursor hostility).** `analyst.amir`'s list carried exactly the BAR-1 and BAR-3 conversations (`turn_count=2` each); a `limit=1` cursor walk covered both in two disjoint pages and terminated; three hostile cursors — malformed base64url, wrong version (`{"v": 999}`), and a filter-mismatch replay (`state=closed` against a cursor minted unfiltered) — each refused `422 cursor_invalid`.
+- **READ 2/2b (transcript).** Both turns returned with non-null plaintext, `erased_at` null, ascending seq, positive token attribution, `agent_run_id`s matching the wire, and the BAR-1 question prefix verbatim; `limit=1` pagination held the frozen watermark 2 across both pages. The full transcript was then persisted under the private run dir and became the READ-6 banned-marker source.
+- **READ 3/3b (turn-chain join).** Turn 1 joined all four curated blocks with `started < terminal < turn_completed` ordering, every surfaced digest a true lowercase 64-hex, the started↔turn question-digest and terminal↔turn answer-digest couplings holding, ≥1 ok retail `run_readonly_query` dispatch inside the run window with valid args AND result digests. Turn 2 joined with `prior_context_turns=2` and its dispatch count deliberately unconstrained — **run 7 observed 2 (re-verification), where run 5 had observed 0 (context reuse): both legs of the run-5 ruling have now occurred live.**
+- **READ 4 (the load-bearing proof).** Six-way byte-identical 404 collapse: unknown-id / cross-actor (`analyst.sara`) / cross-tenant (`analyst.zara`, tenant `proof-foreign` — the 7th proof role, fully scoped) × transcript + chain all returned the SAME `conversation_not_found` body byte-for-byte, while an absent turn on an OWNED conversation stayed the distinct owner-visible `turn_not_found`.
+- **READ 5 (isolation on list).** Fully-scoped sara (same tenant, different creator) and zara (foreign tenant) both listed EMPTY — isolation is the storage WHERE clause, not the scope set.
+- **READ 6 (access trails, no plaintext).** `portal.conversations.{list,transcript,chain}` access records carried identifiers + outcome (including the foreign reader's empty-read trail), and NO access-log line contained any ≥16-char fragment of any live transcript plaintext — both questions and both model answers — nor the static BAR-3 fragments.
+
+### Run ledger (one entry)
+
+1. **Run 7 — PASS on the first M8.5-B execution.** The review findings — 14 across the first two rounds, plus two round-3 completeness corrections — were fixed, review-verified, and committed BEFORE the run — `68f8bd64` (read-model adversarial hardening), `ef442518` (proof provenance + claim strength), `3f5c5283` (digest validation + coupling, CC), `8e77ca16` (custody/provenance/assertions incl. the key-isolation window). No findings surfaced during or after the run.
+
+### Honesty boundary
+
+1. **M8.5-B is HP-1 only** — the read API. HP-2 (bank-overlay `ActorBinder`/SSO) is an external overlay dependency; HP-3 (entitlement/data-scope admin API) is out of v1 (operator-seeded), per the checklist boundary.
+2. **ADR-028 BARs 4–7 remain NOT run** (bounds/terminal refusal at the wire, erasure, safety hooks, SSE reconnect) — the M8.5-A vertical-slice posture carries; nothing here is pilot-ready.
+3. **The M8.5-A honesty boundaries carry unchanged** (model-driven bars, PT-3 revocation posture, OTEL as inherited diagnostics, proof-only wiring caveats).
+4. **The READ-6 plaintext scan is scoped to the `portal.conversations.*` access-log lines** — it proves the ACCESS LOG discipline, not a whole-pod-log guarantee (other log families are digest-only by their own reviewed contracts).
+5. **`erased_at` was null on every turn read** because no erasure pathway exists yet (M8.5-F); the transcript surfaces the erasure SHAPE (nullable plaintext + timestamp), proven at the unit layer.

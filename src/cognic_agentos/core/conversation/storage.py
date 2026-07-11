@@ -119,12 +119,25 @@ _conversation_turns = Table(
     Column("completion_tokens", Integer(), nullable=False, server_default="0"),
     Column("created_at", _TS, nullable=False),
     Column("erased_at", _TS, nullable=True),
+    # M8.5-B (migration 0016): the hop-1 correlation column — the SAME
+    # request_id the caller (ConversationTurnExecutor) minted for this turn's
+    # conversation.turn_completed chain row, persisted atomically with it.
+    # Makes the chain-join read addressable via the indexed
+    # decision_history.request_id instead of a JSON-payload predicate
+    # (Oracle CLOB — no portable index).
+    Column("turn_completed_request_id", String(64), nullable=False),
     ForeignKeyConstraint(
         ["conversation_id"],
         ["conversations.conversation_id"],
         name="fk_conversation_turns_conversation_id",
     ),
     UniqueConstraint("conversation_id", "seq", name="uq_conversation_turns_conversation_seq"),
+    # Parity with migration 0016: create_all databases (unit fixtures) must
+    # reject duplicate correlation ids exactly as migrated deployments do.
+    UniqueConstraint(
+        "turn_completed_request_id",
+        name="uq_conversation_turns_turn_completed_request_id",
+    ),
 )
 
 
@@ -442,6 +455,10 @@ class ConversationStore:
                     prompt_tokens=prompt_tokens,
                     completion_tokens=completion_tokens,
                     created_at=now,
+                    # Hop-1 correlation (0016): the chain row this transaction
+                    # appends carries this SAME caller-minted request_id — one
+                    # atomic commit; a duplicate rolls back turn AND chain row.
+                    turn_completed_request_id=request_id,
                 )
             )
             await conn.execute(

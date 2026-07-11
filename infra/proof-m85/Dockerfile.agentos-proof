@@ -1,11 +1,14 @@
 ARG BASE_IMAGE=cognic-agentos:proof1b2-base
 FROM ${BASE_IMAGE}
-# Kernel anchor — the main commit this proof deploys. The runner builds the
-# base + overlays THIS tree's source; the anchor label pins exactly which
-# kernel the evidence was produced against.
-#   main @ 235daede6d1b7a99846c6339f2e234c85e6bd0cc (M8.5 A/B/C1, PR #126)
-ARG KERNEL_ANCHOR=235daede6d1b7a99846c6339f2e234c85e6bd0cc
-LABEL io.cognic.proof.kernel-anchor=$KERNEL_ANCHOR \
+# Kernel anchor — the EXACT git revision of the kernel source this build
+# overlays. NO default (finding 2, 2026-07-10: a hardcoded anchor claimed
+# main@235daede while the runner overlaid this branch's changed source —
+# false provenance): the runner computes it from the CLEAN working tree
+# (refusing a dirty kernel-source tree), passes --build-arg KERNEL_GIT_SHA,
+# and verifies the built image's label equals the computed revision via
+# docker inspect BEFORE any deploy.
+ARG KERNEL_GIT_SHA
+LABEL io.cognic.proof.kernel-anchor=$KERNEL_GIT_SHA \
       io.cognic.proof.milestone="m8.5-conversational-slice"
 USER root
 # trust staging (same shape as proof-m6, now SEVEN released packs): wheel

@@ -131,7 +131,6 @@ _PINS: dict[str, str] = {
 }
 
 #: main @ the M8.5 A/B/C1 squash-merge (PR #126).
-_KERNEL_ANCHOR = "235daede6d1b7a99846c6339f2e234c85e6bd0cc"
 
 #: Ruling 2026-07-10: BAR 2 probes ALL FIVE forged history fields, in order.
 _BAR2_FIELDS = ("messages", "history", "prior_context", "context", "transcript")
@@ -267,9 +266,32 @@ def test_trust_root_layout_covers_all_packs_including_the_agent_dual_root() -> N
 # ---------------------------------------------------------------------------
 
 
-def test_kernel_image_builds_from_the_m85_anchor() -> None:
-    assert f"ARG KERNEL_ANCHOR={_KERNEL_ANCHOR}" in DOCKER_AGENTOS
+def test_kernel_image_provenance_is_computed_verified_and_clean_tree() -> None:
+    """finding 2 (2026-07-10): the hardcoded anchor claimed main@235daede
+    while the runner overlaid THIS branch's changed kernel source — false
+    provenance. The ARG now has NO default (a stale sha cannot resurface);
+    the runner computes the revision from a CLEAN kernel-source tree, passes
+    it as the build arg, and reads the label back off the built artifact."""
+    assert "ARG KERNEL_GIT_SHA\n" in DOCKER_AGENTOS
+    assert "ARG KERNEL_GIT_SHA=" not in DOCKER_AGENTOS, "the anchor ARG must carry NO default"
+    assert "io.cognic.proof.kernel-anchor=$KERNEL_GIT_SHA" in DOCKER_AGENTOS
     assert 'io.cognic.proof.milestone="m8.5-conversational-slice"' in DOCKER_AGENTOS
+    assert "235daede" not in DOCKER_AGENTOS.replace("main@235daede", ""), (
+        "a hardcoded kernel sha resurfaced in the Dockerfile"
+    )
+    _assert_all(
+        RUNNER,
+        (
+            'KERNEL_GIT_SHA="$(git rev-parse HEAD)"',
+            "KERNEL_TREE_DIRTY=",
+            "kernel source tree is DIRTY",
+            '--build-arg KERNEL_GIT_SHA="$KERNEL_GIT_SHA"',
+            "docker inspect -f '{{ index .Config.Labels \"io.cognic.proof.kernel-anchor\" }}'",
+            '[ "$LABEL_SHA" = "$KERNEL_GIT_SHA" ]',
+        ),
+    )
+    # The clean-tree guard + revision resolution run BEFORE the source copy.
+    assert RUNNER.index("git rev-parse HEAD") < RUNNER.index('cp -r "$AGENTOS_SRC_SRC"')
 
 
 def test_query_context_private_key_is_a_runtime_mount_never_a_layer() -> None:
@@ -455,12 +477,14 @@ def test_key_probe_is_bounded_by_connect_and_total_timeouts() -> None:
 
 def test_key_probe_feeds_the_bearer_header_via_stdin_never_argv() -> None:
     """Review finding #3 (2026-07-10): a bearer in curl argv is visible to
-    every local process via `ps`. The header must ride stdin (-H @-)."""
+    every local process via `ps`. The header must ride stdin (-H @-) —
+    and reads the NON-exported local (round-3 finding 1: the exported
+    variable is dropped before curl runs)."""
     probe = _extract_key_probe_block()
     _assert_all(
         probe,
         (
-            "printf 'Authorization: Bearer %s\\n' \"$COGNIC_PROOF_M85_TIER1_API_KEY\"",
+            "printf 'Authorization: Bearer %s\\n' \"$_PROVIDER_KEY_LOCAL\"",
             "-H @-",
         ),
     )
@@ -758,7 +782,7 @@ def test_proof_app_analysts_carry_the_four_conversation_scopes_only() -> None:
     EXACTLY the four conversation.* scopes; the other roles are unchanged."""
     module = _load_proof_app_module()
     actors = module.MultiActorProofBinder.role_actors()
-    assert set(actors) == {"author", "reviewer", "operator", "mcp", "amir", "sara"}
+    assert set(actors) == {"author", "reviewer", "operator", "mcp", "amir", "sara", "foreign"}
     for analyst in ("amir", "sara"):
         assert actors[analyst].scopes == _CONVERSATION_SCOPES, analyst
         assert "agent.ask" not in actors[analyst].scopes
@@ -1091,7 +1115,9 @@ def test_runner_bar3_turn2_is_a_fresh_question_not_the_turn1_question() -> None:
 
 
 def test_runner_bar3_uses_financials_never_bar1s_retail() -> None:
-    bar3 = RUNNER.split("BAR 3 — mid-conversation revocation")[1]
+    # Bounded at the M8.5-B marker: the read section AFTER the bars re-reads
+    # BAR 1's retail dispatches legitimately; BAR 3 itself must not.
+    bar3 = RUNNER.split("BAR 3 — mid-conversation revocation")[1].split("M8.5-B (READ APIS)")[0]
     assert "retail_analytics" not in bar3, "BAR 3 must not touch BAR 1's scope"
 
 
@@ -1100,9 +1126,28 @@ def test_runner_bar3_uses_financials_never_bar1s_retail() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_migrate_job_is_non_hook_with_image_slot_and_head_0015() -> None:
+def test_migrate_job_is_non_hook_with_image_slot_and_head_0016() -> None:
     assert "helm.sh/hook" not in MIGRATE_RAW
-    _assert_all(MIGRATE_RAW, ("__AGENTOS_IMAGE__", "alembic upgrade head", "rev 0015"))
+    _assert_all(MIGRATE_RAW, ("__AGENTOS_IMAGE__", "alembic upgrade head", "rev 0016"))
+    assert "rev 0015" not in MIGRATE_RAW, "the schema-head claim went stale again (finding 2)"
+
+
+def test_runner_reads_back_the_0016_schema_shape_after_migrate() -> None:
+    """finding 2 (2026-07-10): the proof previously CLAIMED head 0015 with no
+    readback. The M8.5-B read APIs hard-require the 0016 correlation column +
+    the two query indexes, so the runner proves the DEPLOYED shape live."""
+    _assert_all(
+        RUNNER,
+        (
+            "SELECT version_num FROM alembic_version;",
+            '[ "$SCHEMA_REV" = "0016" ]',
+            "column_name='turn_completed_request_id'",
+            "ix_decision_history_tenant_event_sequence",
+            "ix_conversations_tenant_creator_created",
+            '[ "$SHAPE_0016" = "1|2" ]',
+        ),
+    )
+    assert "rev 0015" not in RUNNER, "a stale 0015 schema claim survives in the runner"
 
 
 def test_manifests_use_m85_image_tags_and_keep_the_single_effective_url() -> None:
@@ -1176,3 +1221,408 @@ def test_json_field_reads_a_top_level_field_argument_order_pinned() -> None:
         check=True,
     )
     assert result.stdout.strip() == "completed"
+
+
+# ---------------------------------------------------------------------------
+# M8.5-B (READ APIS): the deterministic read-surface section
+# ---------------------------------------------------------------------------
+
+_M85B_MARKER = "# ================================ M8.5-B (READ APIS) "
+
+
+def _m85b_section() -> str:
+    parts = RUNNER.split(_M85B_MARKER)
+    assert len(parts) == 2, "the M8.5-B (READ APIS) section marker must appear exactly once"
+    return parts[1]
+
+
+def test_runner_m85b_section_follows_the_bars_and_owns_the_final_pass_line() -> None:
+    """The M8.5-A marker semantics stay untouched: BARS 1-3 PASS still prints
+    BEFORE the M8.5-B section, and the runner's LAST act is the M8.5-B PASS."""
+    before, _ = RUNNER.split(_M85B_MARKER)
+    assert 'echo "PROOF M8.5 SLICE (BARS 1-3) PASS"' in before
+    lines = [ln for ln in RUNNER.splitlines() if ln.strip()]
+    assert lines[-1] == 'echo "PROOF M8.5-B (READ APIS) PASS"'
+    section = _m85b_section()
+    steps = ("1 ", "1b ", "1c ", "2 ", "2b ", "3 ", "3b ", "4 ", "5 ", "6 ")
+    for step in steps:
+        assert f"M8.5-B READ {step}" in section, f"missing M8.5-B READ {step.strip()}"
+
+
+def test_runner_m85b_is_read_only_and_deterministic() -> None:
+    """The whole point of the section: it reads what BARs 1-3 already wrote.
+    ZERO new model calls (no conv_turn), zero record creation, zero
+    entitlement mutation, zero SQL, zero pod rolls after the marker."""
+    section = _m85b_section()
+    for forbidden in (
+        "conv_turn ",
+        "conv_create ",
+        "entitlement_delete",
+        "entitlement_restore",
+        "PSQL ",
+        'PSQL "',
+        "roll_and_wait",
+    ):
+        assert forbidden not in section, f"M8.5-B section must be read-only; found {forbidden!r}"
+    # Every HTTP call in the section is a GET.
+    for m in re.finditer(r"api (\w+) (\w+) ", section):
+        assert m.group(2) == "GET", f"non-GET call in the M8.5-B section: {m.group(0)!r}"
+
+
+def test_json_assert_is_fail_capturing_and_unique() -> None:
+    """json_assert mirrors the PSQL run-3 discipline: rc captured under
+    set +e, ANY nonzero exit OR non-ok output routes through bar_fail with
+    the captured detail — a raised predicate inside a bare command
+    substitution would abort under set -e with no capture."""
+    fn = _extract_function("json_assert")
+    assert RUNNER.count(fn) == 1, "json_assert() body duplicated in the runner"
+    _assert_all(
+        fn,
+        (
+            "set +e",
+            "rc=$?",
+            "set -e",
+            'out="$(python3 -c "$src" "$@" 2>&1)"',
+            '[ "$rc" -ne 0 ] || [ "$out" != "ok" ]',
+            'bar_fail "$label (rc=$rc): ${out:-<no output>}"',
+        ),
+    )
+    # Every predicate body in the runner ends by printing the ok sentinel.
+    assert RUNNER.count('json_assert "M8.5-B') == RUNNER.count('json_assert "')
+    section = _m85b_section()
+    assert section.count('json_assert "') == section.count('print("ok")')
+
+
+def test_json_assert_failure_produces_the_capture_and_a_nonzero_exit(tmp_path: Path) -> None:
+    """BEHAVIORAL (mirrors the PSQL sandbox test): the extracted json_assert +
+    bar_fail run VERBATIM. A failing predicate must (1) append the FAILURE
+    capture carrying the assertion detail, (2) never reach the next statement,
+    (3) exit nonzero. A passing predicate must continue."""
+    stub_dir = tmp_path / "bin"
+    stub_dir.mkdir()
+    (stub_dir / "kubectl").write_text("#!/usr/bin/env bash\nexit 0\n")
+    (stub_dir / "kubectl").chmod(0o755)
+    (tmp_path / "docs").mkdir()
+    qc_tmp = tmp_path / "qc-tmp"
+    qc_tmp.mkdir(mode=0o700)
+
+    preamble = (
+        "#!/usr/bin/env bash\n"
+        "set -euo pipefail\n"
+        "NS=test-ns\n"
+        "TENANT=proof-m85\n"
+        "BASE_URL=http://127.0.0.1:1\n"
+        "HTTP_CODE=000\n"
+        f'QC_TMP="{qc_tmp}"\n'
+        'die() { echo "FAIL: $*" >&2; exit 1; }\n'
+        + _extract_function("bar_fail")
+        + "\n"
+        + _extract_function("json_assert")
+        + "\n"
+    )
+    ok_predicate = 'import json, sys\nassert json.loads(sys.argv[1])["x"] == 1\nprint("ok")\n'
+    bad_predicate = (
+        'import json, sys\nassert json.loads(sys.argv[1])["x"] == 2, "x-must-be-two"\nprint("ok")\n'
+    )
+    import os
+
+    env = dict(os.environ)
+    env["PATH"] = f"{stub_dir}:{env['PATH']}"
+
+    green = preamble + (
+        f'json_assert "green predicate" \'{ok_predicate}\' \'{{"x": 1}}\'\necho "REACHED"\n'
+    )
+    (tmp_path / "green.sh").write_text(green)
+    result = subprocess.run(
+        ["bash", "green.sh"], cwd=tmp_path, env=env, capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stderr
+    assert "REACHED" in result.stdout
+
+    red = preamble + (
+        f'json_assert "red predicate" \'{bad_predicate}\' \'{{"x": 1}}\'\necho "UNREACHABLE"\n'
+    )
+    (tmp_path / "red.sh").write_text(red)
+    result = subprocess.run(
+        ["bash", "red.sh"], cwd=tmp_path, env=env, capture_output=True, text=True, check=False
+    )
+    assert result.returncode != 0, "a failing json_assert predicate must exit the runner nonzero"
+    assert "UNREACHABLE" not in result.stdout
+    capture = (tmp_path / "docs" / "VALIDATION-RESULTS.md").read_text()
+    _assert_all(capture, ("## Proof M8.5 slice — FAILURE", "red predicate", "x-must-be-two"))
+
+
+def test_runner_m85b_list_pins_thread_both_bar_conversations() -> None:
+    section = _m85b_section()
+    _assert_all(
+        section,
+        (
+            '"$B_LIST_RESP" "$BAR1_CID" "$BAR3_CID" "$AGENT_ID"',
+            'assert row["turn_count"] == 2',
+            "/api/v1/conversations?limit=1",
+            'assert page2["next_cursor"] is None',
+            "assert not set(ids1) & set(ids2)",
+        ),
+    )
+
+
+def test_runner_m85b_probes_malformed_wrong_version_and_filter_mismatch_cursors() -> None:
+    section = _m85b_section()
+    _assert_all(
+        section,
+        (
+            "cursor=@@not-base64url@@",
+            'json.dumps({"v": 999})',
+            "&state=closed",
+        ),
+    )
+    # Each probe asserts 422 + the closed-enum cursor_invalid reason.
+    assert section.count('"$HTTP_CODE" = "422"') >= 3
+    assert section.count('== "cursor_invalid"') == 3
+
+
+def test_runner_m85b_transcript_pins_the_ruled_precision_locks() -> None:
+    """Live-transcript precision locks (2026-07-10): non-null user_message +
+    answer, null erased_at, positive token attribution, the frozen watermark
+    on BOTH pages, and the plaintext prefix pin against the BAR-1 question."""
+    section = _m85b_section()
+    _assert_all(
+        section,
+        (
+            'assert isinstance(t["user_message"], str) and t["user_message"]',
+            'assert isinstance(t["answer"], str) and t["answer"]',
+            'assert t["erased_at"] is None',
+            'assert t["prompt_tokens"] > 0 and t["completion_tokens"] > 0',
+            '"Who are the top 3 customers"',
+            'assert page1["watermark"] == 2 and page2["watermark"] == 2',
+            'assert [t["seq"] for t in page1["turns"]] == [1]',
+            'assert [t["seq"] for t in page2["turns"]] == [2]',
+        ),
+    )
+
+
+def test_runner_m85b_chain_pins_four_blocks_window_and_retail_dispatch() -> None:
+    section = _m85b_section()
+    _assert_all(
+        section,
+        (
+            'assert set(doc) == {"turn_completed", "started", "terminal", "dispatches"}',
+            'assert st["sequence"] < tm["sequence"] < tc["sequence"]',
+            'assert all(st["sequence"] < d["sequence"] < tm["sequence"] for d in dispatches)',
+            'd["scope_id"] == "retail_analytics"',
+            'assert st["prior_context_turns"] == 0',
+            # finding 1 (2026-07-10): the kernel records len(prior_context)
+            # — PriorTurn MESSAGES, two per replayed turn — the same
+            # semantic BAR 1 pins live. An ==1 here guaranteed a
+            # post-spend live failure.
+            'assert st["prior_context_turns"] == 2',
+            'assert tm["answer_sha256"] == tc["answer_sha256"]',
+            # finding 7: the started<->hop1 question-digest coupling + true
+            # 64-HEX digests (length alone accepted any 64-char string).
+            'assert st["question_sha256"] == tc["question_sha256"]',
+            'hex64 = re.compile(r"[0-9a-f]{64}")',
+            'assert all(hex64.fullmatch(d["args_sha256"]) for d in dispatches)',
+        ),
+    )
+    assert 'assert st["prior_context_turns"] == 1' not in _m85b_section(), (
+        "the run-guaranteed-to-fail ==1 message-count confusion resurfaced (finding 1)"
+    )
+
+
+def test_runner_m85b_turn2_dispatch_count_stays_unconstrained() -> None:
+    """The run-5 ruling carried into the read surface: the turn-2 chain pin is
+    SHAPE (an array inside the run window), never a count constraint."""
+    section = _m85b_section()
+    read3b = section.split("==> M8.5-B READ 3b")[1].split("==> M8.5-B READ 4")[0]
+    assert "isinstance(dispatches, list)" in read3b
+    assert "len(dispatches) >= 1" not in read3b, (
+        "READ 3b re-grew a turn-2 dispatch-count constraint — the run-5 false invariant"
+    )
+    assert "UNCONSTRAINED" in read3b
+    # The turn-1 chain (READ 3) DOES require >=1 — the two predicates differ
+    # deliberately (turn 1 must have dispatched; turn 2 may have reused context).
+    read3 = section.split("==> M8.5-B READ 3 ")[1].split("==> M8.5-B READ 3b")[0]
+    assert "len(dispatches) >= 1" in read3
+
+
+def test_runner_m85b_six_way_byte_identical_404() -> None:
+    """unknown-id / cross-actor (sara) / cross-tenant (foreign) x transcript +
+    chain: all 404 AND the bodies compare byte-for-byte against the genuine
+    unknown-id body. The owner-visible absent turn stays DISTINCT
+    (turn_not_found) — the two-level 404 semantic."""
+    section = _m85b_section()
+    _assert_all(
+        section,
+        (
+            'api sara GET "/api/v1/conversations/$BAR1_CID/transcript"',
+            'api foreign GET "/api/v1/conversations/$BAR1_CID/transcript"',
+            'api sara GET "/api/v1/conversations/$BAR1_CID/turns/1/chain"',
+            'api foreign GET "/api/v1/conversations/$BAR1_CID/turns/1/chain"',
+            '[ "$B_404_T_SARA" = "$B_404_T_UNKNOWN" ]',
+            '[ "$B_404_T_FOREIGN" = "$B_404_T_UNKNOWN" ]',
+            '[ "$B_404_C_SARA" = "$B_404_C_UNKNOWN" ]',
+            '[ "$B_404_C_FOREIGN" = "$B_404_C_UNKNOWN" ]',
+            '== "conversation_not_found"',
+            "turns/99/chain",
+            '== "turn_not_found"',
+        ),
+    )
+    assert section.count('"$HTTP_CODE" = "404"') == 7  # six-way + the owner-visible turn probe
+
+
+def test_runner_m85b_isolation_lists_read_empty() -> None:
+    section = _m85b_section()
+    _assert_all(
+        section,
+        (
+            'api sara GET "/api/v1/conversations"',
+            'api foreign GET "/api/v1/conversations"',
+        ),
+    )
+    assert section.count('assert doc["items"] == [] and doc["next_cursor"] is None, doc') == 2
+
+
+def test_runner_m85b_access_log_pins() -> None:
+    """The access-trail predicate: ok list/transcript/chain records with
+    identifiers (incl. the foreign reader's trail — an EMPTY read still logs),
+    and ZERO transcript plaintext in any access line. The kubectl|grep runs
+    fail-captured (set +e / rc routed through bar_fail) and its artifacts live
+    under the private $QC_TMP, never shared /tmp."""
+    section = _m85b_section()
+    _assert_all(
+        section,
+        (
+            'grep -F "portal.conversations."',
+            '"$QC_TMP/conv-access-lines"',
+            '"$QC_TMP/conv-access-err"',
+            "B_ACCESS_RC=$?",
+            '"top 3 customers"',
+            '"general-ledger balance"',
+            'r.get("tenant_id") == "proof-foreign"',
+            'r.get("actor_subject") == "analyst.zara"',
+            'r.get("outcome") == "ok"',
+            # finding 7: the scan bans EVERY live transcript plaintext
+            # fragment (questions AND answers), derived from the READ-2
+            # response persisted under the private $QC_TMP — two static
+            # question fragments proved almost nothing.
+            '"$QC_TMP/conv-transcript.json"',
+            "for frag in text.splitlines():",
+            "if len(frag) >= 16:",
+            'assert fragments, "the live transcript carried no scannable plaintext fragments"',
+            "fragment redacted",
+        ),
+    )
+    assert not re.search(r">>?\s*/tmp/", section), "the M8.5-B section writes into shared /tmp"
+
+
+def test_provider_key_never_rides_argv_and_dies_with_the_run_dir() -> None:
+    """finding 1 (2026-07-10): --from-literal expanded the raw key into
+    kubectl's argv (ps-visible). The key now lands in a 0600 file under the
+    private $QC_TMP (printf is a bash builtin — no exec, no argv), the env
+    var is DROPPED immediately, and the Secret rides --from-file."""
+    assert "--from-literal=COGNIC_PROOF_M85_TIER1_API_KEY" not in RUNNER, (
+        "the provider key rides kubectl argv again (finding 1)"
+    )
+    _assert_all(
+        RUNNER,
+        (
+            '_PROVIDER_KEY_LOCAL="$COGNIC_PROOF_M85_TIER1_API_KEY"',
+            "unset COGNIC_PROOF_M85_TIER1_API_KEY",
+            'PROVIDER_KEY_FILE="$QC_TMP/tier1-api-key"',
+            '( umask 077; printf \'%s\' "$_PROVIDER_KEY_LOCAL" > "$PROVIDER_KEY_FILE" )',
+            "unset _PROVIDER_KEY_LOCAL",
+            '--from-file=COGNIC_PROOF_M85_TIER1_API_KEY="$PROVIDER_KEY_FILE"',
+        ),
+    )
+    # Round-3 finding 1 — the isolation window: capture into the
+    # NON-exported local, then DROP the exported variable BEFORE the first
+    # external process (the curl probe included) so no child ever inherits
+    # it; the probe + persistence consume the local; the local retires at
+    # persistence, before the Secret creation.
+    capture = RUNNER.index('_PROVIDER_KEY_LOCAL="$COGNIC_PROOF_M85_TIER1_API_KEY"')
+    unset_exported = RUNNER.index("unset COGNIC_PROOF_M85_TIER1_API_KEY")
+    assert capture < unset_exported
+    assert unset_exported < RUNNER.index("curl "), "a child ran while the key was exported"
+    assert unset_exported < RUNNER.index('bash "$PROOF_DIR/stage-packs.sh"')
+    assert "printf 'Authorization: Bearer %s\\n' \"$_PROVIDER_KEY_LOCAL\"" in RUNNER
+    assert RUNNER.index("unset _PROVIDER_KEY_LOCAL") < RUNNER.index(
+        "create secret generic proof-m85-provider-key"
+    )
+    # No VALUE reference to the exported name may survive past its unset
+    # (later occurrences are literals: error text + Secret key names).
+    assert RUNNER.rindex('"$COGNIC_PROOF_M85_TIER1_API_KEY"') < unset_exported
+    # The README carries the rotation directive for pre-fix keys.
+    assert "ROTATION REQUIRED" in README
+
+
+def test_no_shared_tmp_anywhere_in_the_runner() -> None:
+    """finding 2 (2026-07-10): every response/status artifact lives under
+    the private per-run $QC_TMP — the WHOLE-runner regression: no shared
+    /tmp path may appear anywhere, in any form (redirect, curl -o, cat,
+    or comment naming a live path)."""
+    assert "/tmp/" not in RUNNER, next(
+        ln.strip()[:120] for ln in RUNNER.splitlines() if "/tmp/" in ln
+    )
+    _assert_all(
+        RUNNER,
+        (
+            'HTTP_CODE_FILE="$QC_TMP/http-code"',
+            'API_RESP_FILE="$QC_TMP/api-resp"',
+            'die "api() called before QC_TMP was minted (programming error)"',
+            'cat "$API_RESP_FILE" 2>/dev/null || echo "<no response captured>"',
+        ),
+    )
+
+
+def test_proof_input_cleanliness_guard_runs_before_any_materialization() -> None:
+    """finding 5 (2026-07-10): the kernel-source guard covered only the
+    overlay; dirty proof code (runner / proof app / Dockerfiles / chart /
+    base Dockerfile / structural suite / the AS executable source copied
+    into the auth-server image) could still execute while the evidence
+    cited HEAD. The proof-input guard refuses BEFORE staging materializes
+    anything under infra/proof-m85."""
+    _assert_all(
+        RUNNER,
+        (
+            "PROOF_INPUT_DIRTY=",
+            "git status --porcelain -- infra/proof-m85 infra/charts/agentos "
+            "infra/agentos tests/unit/infra/test_proof_m85_structure.py "
+            "tests/integration/pack_loop/_local_as.py",
+            "proof inputs are DIRTY",
+        ),
+    )
+    assert RUNNER.index("PROOF_INPUT_DIRTY=") < RUNNER.index('bash "$PROOF_DIR/stage-packs.sh"'), (
+        "the proof-input guard must run before staging materializes"
+    )
+
+
+def test_runner_m85b_read3_validates_result_digests() -> None:
+    """finding 4 (2026-07-10): result_sha256 is surfaced by the API but was
+    unpinned. Every non-null result digest validates as 64-hex, and the ok
+    retail dispatch (which executed a real query) must carry one."""
+    section = _m85b_section()
+    _assert_all(
+        section,
+        (
+            'if d["result_sha256"] is not None:',
+            'assert hex64.fullmatch(d["result_sha256"]), d',
+            'd["result_sha256"] is not None and hex64.fullmatch(d["result_sha256"])',
+            "for d in ok_retail",
+        ),
+    )
+
+
+def test_proof_app_foreign_role_is_the_cross_tenant_reader() -> None:
+    """Imported-module pin: the 7th role binds analyst.zara in tenant
+    proof-foreign with EXACTLY the four conversation.* scopes — tenant
+    isolation is the storage WHERE clause, not the scope set, so the foreign
+    reader must be fully scoped."""
+    module = _load_proof_app_module()
+    actors = module.MultiActorProofBinder.role_actors()
+    foreign = actors["foreign"]
+    assert foreign.subject == "analyst.zara"
+    assert foreign.tenant_id == "proof-foreign"
+    assert foreign.tenant_id != module.PROOF_TENANT
+    assert foreign.scopes == _CONVERSATION_SCOPES
+    assert "agent.ask" not in foreign.scopes
+    assert foreign.actor_type == "human"

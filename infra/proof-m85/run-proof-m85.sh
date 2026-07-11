@@ -97,6 +97,15 @@ if [[ -z "${COGNIC_PROOF_M85_TIER1_API_KEY:-}" ]]; then
   exit 1
 fi
 
+# Key-isolation window (review finding 1, 2026-07-10 round 3): copy the key
+# into a NON-exported shell variable and DROP the exported variable NOW —
+# before the FIRST external process — so no child (curl, stage-packs,
+# cosign, openssl, docker, kubectl, ...) ever inherits it. A plain
+# assignment to a NEW name carries no export attribute; under `set -u` any
+# straggler reference to the exported name fails loud.
+_PROVIDER_KEY_LOCAL="$COGNIC_PROOF_M85_TIER1_API_KEY"
+unset COGNIC_PROOF_M85_TIER1_API_KEY
+
 # ZERO-SPEND provider-key VALIDITY probe (added after the 2026-07-10 run-2
 # finding: a rotated/invalid key surfaced only at BAR 1 — a 401 on the first
 # completion, ~25 minutes into a fully-green bring-up). GET /v1/models bills
@@ -110,7 +119,7 @@ fi
 # is "validity UNDETERMINED, fix connectivity", never "rotate the key".
 if [[ "${COGNIC_PROOF_M85_ALLOWED_PROVIDERS:-openai}" == "openai" ]]; then
   set +e
-  KEY_PROBE_CODE="$(printf 'Authorization: Bearer %s\n' "$COGNIC_PROOF_M85_TIER1_API_KEY" \
+  KEY_PROBE_CODE="$(printf 'Authorization: Bearer %s\n' "$_PROVIDER_KEY_LOCAL" \
     | curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 15 \
         -H @- https://api.openai.com/v1/models)"
   KEY_PROBE_RC=$?
@@ -308,7 +317,11 @@ roll_and_wait() {
 # kernel-side entitlement matrix keys on their subjects (analyst.amir /
 # analyst.sara).
 HTTP_CODE=""
-HTTP_CODE_FILE="/tmp/proofm85-code"
+# Both paths are assigned under the private per-run $QC_TMP after it is
+# minted (finding 2, 2026-07-10 — never shared /tmp); api() refuses loud if
+# called earlier (mirrors the PSQL guard).
+HTTP_CODE_FILE=""
+API_RESP_FILE=""
 load_http_code() {
   HTTP_CODE="$(cat "$HTTP_CODE_FILE" 2>/dev/null || true)"
 }
@@ -316,17 +329,19 @@ load_http_code() {
 api() {
   local role="$1" method="$2" path="$3" body="${4:-}"
   local out
+  [ -n "$HTTP_CODE_FILE" ] && [ -n "$API_RESP_FILE" ] \
+    || die "api() called before QC_TMP was minted (programming error)"
   if [ -n "$body" ]; then
-    out="$(curl -s -o /tmp/proofm85-resp -w '%{http_code}' -X "$method" \
+    out="$(curl -s -o "$API_RESP_FILE" -w '%{http_code}' -X "$method" \
       -H "X-Proof-Role: $role" -H 'Content-Type: application/json' \
       -d "$body" "$BASE_URL$path")"
   else
-    out="$(curl -s -o /tmp/proofm85-resp -w '%{http_code}' -X "$method" \
+    out="$(curl -s -o "$API_RESP_FILE" -w '%{http_code}' -X "$method" \
       -H "X-Proof-Role: $role" "$BASE_URL$path")"
   fi
   HTTP_CODE="$out"
   printf '%s' "$out" > "$HTTP_CODE_FILE"
-  cat /tmp/proofm85-resp
+  cat "$API_RESP_FILE"
 }
 
 # ask <ROLE> <QUESTION> — one governed single-shot run via the A13 ask route.
@@ -371,6 +386,25 @@ conv_get() {
 json_field() {
   python3 -c 'import json,sys; v=json.loads(sys.argv[2]).get(sys.argv[1]); print("" if v is None else v)' \
     "$1" "$2" 2>/dev/null || true
+}
+
+# json_assert <LABEL> <PY_SOURCE> [ARGS...] — an inline python3 predicate over
+# JSON args, fail-capturing (mirrors the PSQL discipline, run-3 finding): the
+# python body must print exactly "ok" on success; ANY nonzero exit, traceback,
+# or non-ok output routes through bar_fail WITH the captured detail preserved
+# (a raised assertion inside a bare command substitution would abort the
+# runner under `set -e` with no failure capture).
+json_assert() {
+  local label="$1" src="$2"
+  shift 2
+  local out rc
+  set +e
+  out="$(python3 -c "$src" "$@" 2>&1)"
+  rc=$?
+  set -e
+  if [ "$rc" -ne 0 ] || [ "$out" != "ok" ]; then
+    bar_fail "$label (rc=$rc): ${out:-<no output>}"
+  fi
 }
 
 # discovery_status of the TOOL pack row from GET /system/plugins?tenant_id=proof-m85.
@@ -689,7 +723,7 @@ bar_fail() {
     echo "- Failed step: \`$where\`"
     echo "- last API response (HTTP $HTTP_CODE):"
     echo '```json'
-    cat /tmp/proofm85-resp 2>/dev/null || echo "<no response captured>"
+    cat "$API_RESP_FILE" 2>/dev/null || echo "<no response captured>"
     echo ""
     echo '```'
     echo "- conversation.% chain rows (tail 10 — digest-only):"
@@ -917,6 +951,25 @@ grep -qE "[[:space:]]$REGISTRY_NAME($|[[:space:]])" /etc/hosts \
 cmp -s "$REGISTRY_TLS_DIR/registry-ca.pem" "/etc/docker/certs.d/$REGISTRY_REF_HOST/ca.crt" \
   || _setup_help "docker certs.d trust of the persistent proof CA at /etc/docker/certs.d/$REGISTRY_REF_HOST/ca.crt"
 
+# --- 1b. proof-input cleanliness (provenance — finding 5, 2026-07-10) ---------------
+# The kernel-source guard (section 3) covers the OVERLAY inputs; this one
+# covers the PROOF inputs the run executes — the runner itself, the proof
+# app, the Dockerfiles/manifests/values/seeds, the chart, the base-image
+# Dockerfile, the structural suite, and the AS executable source
+# (tests/integration/pack_loop/_local_as.py — copied into the proof
+# authentication-server image). Runs BEFORE anything materializes
+# (staging/copies land under infra/proof-m85 and are NOT gitignored), so a
+# dirty state here is genuinely operator-authored or stale residue from an
+# aborted run — either way the evidence would cite HEAD while different
+# proof code executed. docs/VALIDATION-RESULTS.md is deliberately excluded
+# (failure captures append to it).
+PROOF_INPUT_DIRTY="$(git status --porcelain -- infra/proof-m85 infra/charts/agentos infra/agentos tests/unit/infra/test_proof_m85_structure.py tests/integration/pack_loop/_local_as.py)"
+if [ -n "$PROOF_INPUT_DIRTY" ]; then
+  die "proof inputs are DIRTY — the evidence would cite HEAD while different proof code executes. Commit, stash, or clean first:
+$PROOF_INPUT_DIRTY"
+fi
+echo "==> [1/11] proof-input cleanliness OK (proof dir + chart + base Dockerfile + structural suite)"
+
 # --- 2. stage the SEVEN RELEASED packs (download + sha256-verify + arrange) --------
 echo "==> [2/11] stage the released packs via stage-packs.sh (download, not build)"
 rm -rf "$STAGING_DST"
@@ -973,7 +1026,36 @@ if grep -rlE "PRIVATE KEY-----" "$STAGING_DST" >/dev/null 2>&1; then
   die "custody violation: private key material found under $STAGING_DST (must never enter a build context)"
 fi
 
+# Provider-key custody (finding 1, 2026-07-10): the key must NEVER ride a
+# process argument vector — `--from-literal=...="$KEY"` exposed it to any
+# local `ps` for the kubectl lifetime. The EXPORTED variable was already
+# dropped at the preflight (round-3 finding 1: no child inherits it); the
+# non-exported local persists to a 0600 file under the private per-run dir
+# (printf is a bash BUILTIN — no exec, no argv) and is retired here. The
+# Secret is created --from-file; the file dies with $QC_TMP (cleanup trap).
+PROVIDER_KEY_FILE="$QC_TMP/tier1-api-key"
+( umask 077; printf '%s' "$_PROVIDER_KEY_LOCAL" > "$PROVIDER_KEY_FILE" )
+unset _PROVIDER_KEY_LOCAL
+
+# The api() response/status files live under the SAME private dir (finding 2,
+# 2026-07-10: predictable mode-0644 shared-/tmp paths persisted transcript
+# plaintext past the run and permitted symlink/truncation attacks).
+HTTP_CODE_FILE="$QC_TMP/http-code"
+API_RESP_FILE="$QC_TMP/api-resp"
+
 # --- 3. build the three images ------------------------------------------------------
+echo "==> [3/11] resolve the kernel source revision (provenance — finding 2, 2026-07-10)"
+# The image label must name the EXACT revision of the kernel source the
+# overlay copies below — a hardcoded anchor goes stale the moment the branch
+# moves, and a dirty tree would label a revision the source does not match.
+KERNEL_GIT_SHA="$(git rev-parse HEAD)"
+KERNEL_TREE_DIRTY="$(git status --porcelain -- src alembic.ini pyproject.toml uv.lock policies)"
+if [ -n "$KERNEL_TREE_DIRTY" ]; then
+  die "kernel source tree is DIRTY — the kernel-anchor label would be false. Commit or stash first:
+$KERNEL_TREE_DIRTY"
+fi
+echo "    kernel revision: $KERNEL_GIT_SHA (kernel-source tree clean)"
+
 echo "==> [3/11] copy the current kernel source into the proof build context (the M8 wiring)"
 rm -rf "$AGENTOS_SRC_DST"
 cp -r "$AGENTOS_SRC_SRC" "$AGENTOS_SRC_DST"
@@ -988,7 +1070,15 @@ echo "==> [3/11] build the default-adapters base image"
 docker_build_with_retry -f infra/agentos/Dockerfile --target default-adapters -t "$BASE_IMAGE" .
 
 echo "==> [3/11] build the proof AgentOS kernel image (create_proof_app + SEVEN released packs + trust + query-context public key)"
-docker_build_with_retry -f "$PROOF_DIR/Dockerfile.agentos-proof" --build-arg BASE_IMAGE="$BASE_IMAGE" -t "$IMAGE" "$PROOF_DIR"
+docker_build_with_retry -f "$PROOF_DIR/Dockerfile.agentos-proof" --build-arg BASE_IMAGE="$BASE_IMAGE" \
+  --build-arg KERNEL_GIT_SHA="$KERNEL_GIT_SHA" -t "$IMAGE" "$PROOF_DIR"
+# Verify the built image label equals the computed revision (finding 2): the
+# label IS the provenance the evidence cites, so it must be read back from
+# the artifact, never assumed from the build invocation.
+LABEL_SHA="$(docker inspect -f '{{ index .Config.Labels "io.cognic.proof.kernel-anchor" }}' "$IMAGE")"
+[ "$LABEL_SHA" = "$KERNEL_GIT_SHA" ] \
+  || die "image kernel-anchor label '$LABEL_SHA' != source revision '$KERNEL_GIT_SHA'"
+echo "    image kernel-anchor label verified: $LABEL_SHA"
 
 echo "==> [3/11] build the released oracle-pack MCP tool Service image (v0.3.0 + query-context public key)"
 docker_build_with_retry -f "$PROOF_DIR/Dockerfile.oracle-pack" -t "$MCP_IMAGE" "$PROOF_DIR"
@@ -1158,11 +1248,22 @@ helm install rel "$CHART" -n "$NS" -f "$PROOF_DIR/proof-m85-values.yaml" \
   --set sandbox.canonicalEgressProxyImage="$EGRESS_PROXY_REF"
 
 # --- 8. migrate Job + secrets + manifests + patches + env ---------------------------
-echo "==> [8/11] run the proof-owned (non-hook) migration Job (schema -> head, rev 0015)"
+echo "==> [8/11] run the proof-owned (non-hook) migration Job (schema -> head, rev 0016)"
 kubectl -n "$NS" delete job/agentos-migrate --ignore-not-found=true --wait=true
 sed "s|__AGENTOS_IMAGE__|$IMAGE|" "$PROOF_DIR/migrate-job.yaml" | kubectl apply -n "$NS" -f -
 kubectl -n "$NS" wait --for=condition=complete job/agentos-migrate --timeout=300s \
   || migrate_fail "agentos-migrate did not complete within 300s"
+
+# Live schema readback (finding 2, 2026-07-10: the proof previously CLAIMED
+# head 0015 with no readback — the M8.5-B read APIs hard-require the 0016
+# correlation column + query indexes, so prove the deployed schema shape).
+SCHEMA_REV="$(PSQL "SELECT version_num FROM alembic_version;")"
+[ "$SCHEMA_REV" = "0016" ] \
+  || migrate_fail "alembic_version reads '$SCHEMA_REV' after the migrate Job (expected 0016)"
+SHAPE_0016="$(PSQL "SELECT (SELECT count(*) FROM information_schema.columns WHERE table_name='conversation_turns' AND column_name='turn_completed_request_id') || '|' || (SELECT count(*) FROM pg_indexes WHERE indexname IN ('ix_decision_history_tenant_event_sequence','ix_conversations_tenant_creator_created'));")"
+[ "$SHAPE_0016" = "1|2" ] \
+  || migrate_fail "0016 schema shape readback '$SHAPE_0016' (expected '1|2': correlation column + the two read-model indexes)"
+echo "    schema readback OK: alembic head 0016; correlation column + both read-model indexes present"
 
 pack_fail() {
   # Step-8 capture (run-7 live finding: the oracle-pack rollout timeout left
@@ -1190,7 +1291,7 @@ pack_fail() {
     echo "- wait-for-xe init logs (tail):"; echo '\`\`\`'; echo "$initlogs"; echo '\`\`\`'
     echo "- oracle-pack previous-instance logs (tail):"; echo '\`\`\`'; echo "$prevlogs"; echo '\`\`\`'
     echo "- proof-as logs (tail):"; echo '\`\`\`'; echo "$aslogs"; echo '\`\`\`'
-  } >> "$REPO_ROOT/docs/VALIDATION-RESULTS.md"
+  } >> docs/VALIDATION-RESULTS.md
   exit 1
 }
 
@@ -1209,7 +1310,7 @@ echo "==> [8/11] create the per-run Secrets (query-context PRIVATE key + provide
 kubectl -n "$NS" create secret generic proof-m85-query-context \
   --from-file=query-context-private.pem="$QC_TMP/query-context-private.pem"
 kubectl -n "$NS" create secret generic proof-m85-provider-key \
-  --from-literal=COGNIC_PROOF_M85_TIER1_API_KEY="$COGNIC_PROOF_M85_TIER1_API_KEY"
+  --from-file=COGNIC_PROOF_M85_TIER1_API_KEY="$PROVIDER_KEY_FILE"
 
 echo "==> [8/11] patch the AgentOS Deployment (sandbox topology + query-context Secret mount)"
 # The chart ships no extraVolume/extraEnv hooks; these surfaces are proof
@@ -1722,3 +1823,361 @@ echo "  Bar 3 restore OK: amir financials entitlement back to exactly 1 row"
 echo "PROOF M8.5 SLICE (BAR 3) PASS"
 
 echo "PROOF M8.5 SLICE (BARS 1-3) PASS"
+
+# ================================ M8.5-B (READ APIS) ================================
+# The governed read surface (list / transcript / turn-chain) over the SAME
+# kernel record BARs 1-3 produced above — deterministic, ZERO new model calls:
+# every predicate reads what the bars already wrote. The foreign-tenant reader
+# (analyst.zara, tenant proof-foreign — the 7th proof role carrying the SAME
+# four conversation.* scopes as the analysts) proves tenant isolation is the
+# storage WHERE clause, not the scope set; sara (same tenant, different
+# creator) proves creator isolation the same way. Byte-identity doctrine: the
+# cross-actor and cross-tenant 404 bodies must equal the genuine unknown-id
+# 404 byte-for-byte, so a probe cannot distinguish "exists but not yours"
+# from "does not exist".
+
+echo "==> M8.5-B READ 1 — list (amir): finds the BAR 1 + BAR 3 conversations"
+B_LIST_RESP="$(api amir GET "/api/v1/conversations?limit=50")"
+load_http_code # after api command substitution
+[ "$HTTP_CODE" = "200" ] || bar_fail "M8.5-B READ 1 list (HTTP $HTTP_CODE; body: $B_LIST_RESP)"
+json_assert "M8.5-B READ 1 list contents" '
+import json, sys
+doc = json.loads(sys.argv[1])
+bar1, bar3, agent = sys.argv[2], sys.argv[3], sys.argv[4]
+items = {i["conversation_id"]: i for i in doc["items"]}
+assert bar1 in items, f"BAR 1 conversation {bar1} not in the list: {sorted(items)}"
+assert bar3 in items, f"BAR 3 conversation {bar3} not in the list: {sorted(items)}"
+for cid in (bar1, bar3):
+    row = items[cid]
+    assert row["turn_count"] == 2, row
+    assert row["agent_id"] == agent, row
+    assert row["state"] == "active", row
+    assert row["cumulative_tokens"] > 0, row
+print("ok")
+' "$B_LIST_RESP" "$BAR1_CID" "$BAR3_CID" "$AGENT_ID"
+echo "  M8.5-B READ 1 OK: both bar conversations listed with turn_count=2"
+
+echo "==> M8.5-B READ 1b — list pagination (limit=1 cursor walk covers both conversations)"
+B_PAGE1="$(api amir GET "/api/v1/conversations?limit=1")"
+load_http_code # after api command substitution
+[ "$HTTP_CODE" = "200" ] || bar_fail "M8.5-B READ 1b page 1 (HTTP $HTTP_CODE; body: $B_PAGE1)"
+B_CURSOR="$(json_field next_cursor "$B_PAGE1")"
+[ -n "$B_CURSOR" ] || bar_fail "M8.5-B READ 1b page 1 minted no next_cursor (body: $B_PAGE1)"
+B_PAGE2="$(api amir GET "/api/v1/conversations?limit=1&cursor=$B_CURSOR")"
+load_http_code # after api command substitution
+[ "$HTTP_CODE" = "200" ] || bar_fail "M8.5-B READ 1b page 2 (HTTP $HTTP_CODE; body: $B_PAGE2)"
+json_assert "M8.5-B READ 1b cursor walk" '
+import json, sys
+page1, page2 = json.loads(sys.argv[1]), json.loads(sys.argv[2])
+expected = {sys.argv[3], sys.argv[4]}
+ids1 = [i["conversation_id"] for i in page1["items"]]
+ids2 = [i["conversation_id"] for i in page2["items"]]
+assert len(ids1) == 1, page1
+assert len(ids2) == 1, page2
+assert set(ids1) | set(ids2) == expected, (ids1, ids2)
+assert not set(ids1) & set(ids2), (ids1, ids2)
+assert page2["next_cursor"] is None, page2  # exactly 2 owned -> the walk terminates
+print("ok")
+' "$B_PAGE1" "$B_PAGE2" "$BAR1_CID" "$BAR3_CID"
+echo "  M8.5-B READ 1b OK: two limit=1 pages, disjoint, cover exactly the two bar conversations, walk terminates"
+
+echo "==> M8.5-B READ 1c — cursor probes: malformed / wrong-version / filter-mismatch all 422 cursor_invalid"
+B_PROBE_MALFORMED="$(api amir GET "/api/v1/conversations?cursor=@@not-base64url@@")"
+load_http_code # after api command substitution
+[ "$HTTP_CODE" = "422" ] || bar_fail "M8.5-B READ 1c malformed cursor (HTTP $HTTP_CODE; body: $B_PROBE_MALFORMED)"
+json_assert "M8.5-B READ 1c malformed cursor reason" '
+import json, sys
+assert json.loads(sys.argv[1])["detail"]["reason"] == "cursor_invalid", sys.argv[1]
+print("ok")
+' "$B_PROBE_MALFORMED"
+B_WRONGV_CURSOR="$(python3 -c 'import base64, json; print(base64.urlsafe_b64encode(json.dumps({"v": 999}).encode()).decode())')"
+B_PROBE_WRONGV="$(api amir GET "/api/v1/conversations?cursor=$B_WRONGV_CURSOR")"
+load_http_code # after api command substitution
+[ "$HTTP_CODE" = "422" ] || bar_fail "M8.5-B READ 1c wrong-version cursor (HTTP $HTTP_CODE; body: $B_PROBE_WRONGV)"
+json_assert "M8.5-B READ 1c wrong-version cursor reason" '
+import json, sys
+assert json.loads(sys.argv[1])["detail"]["reason"] == "cursor_invalid", sys.argv[1]
+print("ok")
+' "$B_PROBE_WRONGV"
+# Filter-mismatch: B_CURSOR was minted with NO state filter; replaying it with
+# state=closed is a mismatched cursor, not a new query (the filter is BOUND
+# INTO the cursor).
+B_PROBE_MISMATCH="$(api amir GET "/api/v1/conversations?limit=1&cursor=$B_CURSOR&state=closed")"
+load_http_code # after api command substitution
+[ "$HTTP_CODE" = "422" ] || bar_fail "M8.5-B READ 1c filter-mismatch cursor (HTTP $HTTP_CODE; body: $B_PROBE_MISMATCH)"
+json_assert "M8.5-B READ 1c filter-mismatch cursor reason" '
+import json, sys
+assert json.loads(sys.argv[1])["detail"]["reason"] == "cursor_invalid", sys.argv[1]
+print("ok")
+' "$B_PROBE_MISMATCH"
+echo "  M8.5-B READ 1c OK: all three cursor probes refused 422 cursor_invalid"
+
+echo "==> M8.5-B READ 2 — transcript (amir, BAR 1): plaintext + ordering + tokens + watermark"
+B_TRANS="$(api amir GET "/api/v1/conversations/$BAR1_CID/transcript")"
+load_http_code # after api command substitution
+[ "$HTTP_CODE" = "200" ] || bar_fail "M8.5-B READ 2 transcript (HTTP $HTTP_CODE; body: $B_TRANS)"
+json_assert "M8.5-B READ 2 transcript contents" '
+import json, sys
+doc = json.loads(sys.argv[1])
+cid, run1, run2, q1_prefix = sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
+assert doc["conversation"]["conversation_id"] == cid, doc["conversation"]
+assert doc["conversation"]["turn_count"] == 2, doc["conversation"]
+assert doc["watermark"] == 2, doc["watermark"]
+turns = doc["turns"]
+assert [t["seq"] for t in turns] == [1, 2], [t["seq"] for t in turns]
+for t in turns:
+    assert isinstance(t["user_message"], str) and t["user_message"], t["seq"]
+    assert isinstance(t["answer"], str) and t["answer"], t["seq"]
+    assert t["erased_at"] is None, t["seq"]
+    assert t["prompt_tokens"] > 0 and t["completion_tokens"] > 0, t["seq"]
+    assert t["created_at"], t["seq"]
+assert turns[0]["user_message"].startswith(q1_prefix), turns[0]["user_message"][:80]
+assert turns[0]["agent_run_id"] == run1, (turns[0]["agent_run_id"], run1)
+assert turns[1]["agent_run_id"] == run2, (turns[1]["agent_run_id"], run2)
+assert doc["next_cursor"] is None, doc["next_cursor"]  # both turns fit one page
+print("ok")
+' "$B_TRANS" "$BAR1_CID" "$BAR1_RUN1" "$BAR1_RUN2" "Who are the top 3 customers"
+# Persist the transcript for READ 6: its four plaintexts (both questions +
+# both answers) become the DYNAMIC banned markers of the access-log scan.
+printf '%s' "$B_TRANS" > "$QC_TMP/conv-transcript.json"
+echo "  M8.5-B READ 2 OK: both turns plaintext (non-null, erased_at null), ordered, token-attributed, runs match the wire"
+
+echo "==> M8.5-B READ 2b — transcript pagination (limit=1; frozen watermark on both pages)"
+B_TP1="$(api amir GET "/api/v1/conversations/$BAR1_CID/transcript?limit=1")"
+load_http_code # after api command substitution
+[ "$HTTP_CODE" = "200" ] || bar_fail "M8.5-B READ 2b page 1 (HTTP $HTTP_CODE; body: $B_TP1)"
+B_TCURSOR="$(json_field next_cursor "$B_TP1")"
+[ -n "$B_TCURSOR" ] || bar_fail "M8.5-B READ 2b page 1 minted no next_cursor (body: $B_TP1)"
+B_TP2="$(api amir GET "/api/v1/conversations/$BAR1_CID/transcript?limit=1&cursor=$B_TCURSOR")"
+load_http_code # after api command substitution
+[ "$HTTP_CODE" = "200" ] || bar_fail "M8.5-B READ 2b page 2 (HTTP $HTTP_CODE; body: $B_TP2)"
+json_assert "M8.5-B READ 2b watermark pagination" '
+import json, sys
+page1, page2 = json.loads(sys.argv[1]), json.loads(sys.argv[2])
+assert [t["seq"] for t in page1["turns"]] == [1], page1["turns"]
+assert [t["seq"] for t in page2["turns"]] == [2], page2["turns"]
+assert page1["watermark"] == 2 and page2["watermark"] == 2, (page1["watermark"], page2["watermark"])
+assert page2["next_cursor"] is None, page2["next_cursor"]
+print("ok")
+' "$B_TP1" "$B_TP2"
+echo "  M8.5-B READ 2b OK: seq 1 then seq 2 across pages under the frozen watermark 2"
+
+echo "==> M8.5-B READ 3 — turn chain (amir, BAR 1 turn 1): four curated blocks + >=1 ok retail dispatch"
+B_CHAIN1="$(api amir GET "/api/v1/conversations/$BAR1_CID/turns/1/chain")"
+load_http_code # after api command substitution
+[ "$HTTP_CODE" = "200" ] || bar_fail "M8.5-B READ 3 chain turn 1 (HTTP $HTTP_CODE; body: $B_CHAIN1)"
+json_assert "M8.5-B READ 3 chain turn 1 contents" '
+import json, re, sys
+doc = json.loads(sys.argv[1])
+run1, agent, pack = sys.argv[2], sys.argv[3], sys.argv[4]
+assert set(doc) == {"turn_completed", "started", "terminal", "dispatches"}, sorted(doc)
+tc, st, tm = doc["turn_completed"], doc["started"], doc["terminal"]
+assert tc["seq"] == 1 and tc["agent_run_id"] == run1, tc
+assert tc["actor_id"] == "analyst.amir", tc
+hex64 = re.compile(r"[0-9a-f]{64}")
+for digest in (
+    tc["question_sha256"],
+    tc["answer_sha256"],
+    st["question_sha256"],
+    st["prior_context_sha256"],
+    tm["answer_sha256"],
+):
+    assert hex64.fullmatch(digest), digest  # 64-HEX, not merely 64 chars
+assert tc["prompt_tokens"] > 0 and tc["completion_tokens"] > 0, tc
+assert st["run_id"] == run1 and st["agent_id"] == agent, st
+assert st["originator_subject"] == "analyst.amir", st
+assert st["actor_id"] == "analyst.amir", st
+assert st["prior_context_turns"] == 0, st  # the grounding turn replays nothing
+# The started<->hop1 digest coupling: both digest the SAME user_message.
+assert st["question_sha256"] == tc["question_sha256"], (st["question_sha256"], tc["question_sha256"])
+assert tm["terminal_state"] == "completed", tm
+assert tm["answer_sha256"] == tc["answer_sha256"], (tm["answer_sha256"], tc["answer_sha256"])
+assert st["sequence"] < tm["sequence"] < tc["sequence"], (st["sequence"], tm["sequence"], tc["sequence"])
+dispatches = doc["dispatches"]
+assert isinstance(dispatches, list) and len(dispatches) >= 1, dispatches
+assert all(st["sequence"] < d["sequence"] < tm["sequence"] for d in dispatches), dispatches
+ok_retail = [
+    d
+    for d in dispatches
+    if d["outcome"] == "ok"
+    and d["scope_id"] == "retail_analytics"
+    and d["capability_ref"] == pack + "/run_readonly_query"
+]
+assert ok_retail, dispatches
+assert all(hex64.fullmatch(d["args_sha256"]) for d in dispatches), dispatches
+# finding 4 (2026-07-10): result_sha256 is surfaced too — validate EVERY
+# non-null one as 64-hex (the kernel contract keeps it nullable), and the
+# ok retail dispatch executed a real query, so ITS result digest must be
+# present and valid.
+for d in dispatches:
+    if d["result_sha256"] is not None:
+        assert hex64.fullmatch(d["result_sha256"]), d
+assert all(
+    d["result_sha256"] is not None and hex64.fullmatch(d["result_sha256"]) for d in ok_retail
+), ok_retail
+print("ok")
+' "$B_CHAIN1" "$BAR1_RUN1" "$AGENT_ID" "$PACK_ID"
+echo "  M8.5-B READ 3 OK: four blocks, started<terminal ordering, >=1 ok retail dispatch inside the window, digests only"
+
+echo "==> M8.5-B READ 3b — turn chain (BAR 1 turn 2): dispatches UNCONSTRAINED-as-array (run-5 ruling)"
+B_CHAIN2="$(api amir GET "/api/v1/conversations/$BAR1_CID/turns/2/chain")"
+load_http_code # after api command substitution
+[ "$HTTP_CODE" = "200" ] || bar_fail "M8.5-B READ 3b chain turn 2 (HTTP $HTTP_CODE; body: $B_CHAIN2)"
+json_assert "M8.5-B READ 3b chain turn 2 contents" '
+import json, sys
+doc = json.loads(sys.argv[1])
+run2 = sys.argv[2]
+tc, st, tm = doc["turn_completed"], doc["started"], doc["terminal"]
+assert tc["seq"] == 2 and tc["agent_run_id"] == run2, tc
+assert st["run_id"] == run2, st
+# One replayed turn = TWO messages (user + assistant): the kernel records
+# len(prior_context), which counts PriorTurn MESSAGES (loop.py), not stored
+# turns — the SAME semantic BAR 1 pins live (finding 1, 2026-07-10: an ==1
+# assertion here guaranteed a post-spend failure).
+assert st["prior_context_turns"] == 2, st
+assert tm["terminal_state"] == "completed", tm
+# The run-5 ruling: the turn-2 dispatch COUNT is deliberately unconstrained
+# (0 = context reuse; >=1 = re-verification). The pin is SHAPE: an array of
+# curated dispatch projections, every one inside the run window.
+dispatches = doc["dispatches"]
+assert isinstance(dispatches, list), type(dispatches).__name__
+assert all(st["sequence"] < d["sequence"] < tm["sequence"] for d in dispatches), dispatches
+print("ok")
+' "$B_CHAIN2" "$BAR1_RUN2"
+B_T2_DISPATCH_COUNT="$(python3 -c 'import json, sys; print(len(json.loads(sys.argv[1])["dispatches"]))' "$B_CHAIN2" 2>/dev/null || echo "?")"
+echo "  M8.5-B READ 3b OK: turn-2 chain joined; dispatches observed (unconstrained): $B_T2_DISPATCH_COUNT"
+
+echo "==> M8.5-B READ 4 — byte-identical 404: unknown-id / cross-actor / cross-tenant x transcript+chain"
+B_UNKNOWN_CID="9e9e9e9e-9e9e-4e9e-8e9e-9e9e9e9e9e9e"
+B_404_T_UNKNOWN="$(api amir GET "/api/v1/conversations/$B_UNKNOWN_CID/transcript")"
+load_http_code # after api command substitution
+[ "$HTTP_CODE" = "404" ] || bar_fail "M8.5-B READ 4 unknown-id transcript (HTTP $HTTP_CODE; body: $B_404_T_UNKNOWN)"
+B_404_T_SARA="$(api sara GET "/api/v1/conversations/$BAR1_CID/transcript")"
+load_http_code # after api command substitution
+[ "$HTTP_CODE" = "404" ] || bar_fail "M8.5-B READ 4 cross-actor transcript (HTTP $HTTP_CODE; body: $B_404_T_SARA)"
+B_404_T_FOREIGN="$(api foreign GET "/api/v1/conversations/$BAR1_CID/transcript")"
+load_http_code # after api command substitution
+[ "$HTTP_CODE" = "404" ] || bar_fail "M8.5-B READ 4 cross-tenant transcript (HTTP $HTTP_CODE; body: $B_404_T_FOREIGN)"
+[ "$B_404_T_SARA" = "$B_404_T_UNKNOWN" ] \
+  || bar_fail "M8.5-B READ 4 cross-actor transcript 404 body differs from the unknown-id body (sara: $B_404_T_SARA; unknown: $B_404_T_UNKNOWN)"
+[ "$B_404_T_FOREIGN" = "$B_404_T_UNKNOWN" ] \
+  || bar_fail "M8.5-B READ 4 cross-tenant transcript 404 body differs from the unknown-id body (foreign: $B_404_T_FOREIGN; unknown: $B_404_T_UNKNOWN)"
+B_404_C_UNKNOWN="$(api amir GET "/api/v1/conversations/$B_UNKNOWN_CID/turns/1/chain")"
+load_http_code # after api command substitution
+[ "$HTTP_CODE" = "404" ] || bar_fail "M8.5-B READ 4 unknown-id chain (HTTP $HTTP_CODE; body: $B_404_C_UNKNOWN)"
+B_404_C_SARA="$(api sara GET "/api/v1/conversations/$BAR1_CID/turns/1/chain")"
+load_http_code # after api command substitution
+[ "$HTTP_CODE" = "404" ] || bar_fail "M8.5-B READ 4 cross-actor chain (HTTP $HTTP_CODE; body: $B_404_C_SARA)"
+B_404_C_FOREIGN="$(api foreign GET "/api/v1/conversations/$BAR1_CID/turns/1/chain")"
+load_http_code # after api command substitution
+[ "$HTTP_CODE" = "404" ] || bar_fail "M8.5-B READ 4 cross-tenant chain (HTTP $HTTP_CODE; body: $B_404_C_FOREIGN)"
+[ "$B_404_C_SARA" = "$B_404_C_UNKNOWN" ] \
+  || bar_fail "M8.5-B READ 4 cross-actor chain 404 body differs from the unknown-id body (sara: $B_404_C_SARA; unknown: $B_404_C_UNKNOWN)"
+[ "$B_404_C_FOREIGN" = "$B_404_C_UNKNOWN" ] \
+  || bar_fail "M8.5-B READ 4 cross-tenant chain 404 body differs from the unknown-id body (foreign: $B_404_C_FOREIGN; unknown: $B_404_C_UNKNOWN)"
+json_assert "M8.5-B READ 4 collapse reason" '
+import json, sys
+assert json.loads(sys.argv[1])["detail"]["reason"] == "conversation_not_found", sys.argv[1]
+print("ok")
+' "$B_404_T_UNKNOWN"
+# Owner-visible distinctness: an absent TURN on a conversation amir DOES own
+# is the two-level 404 semantic — turn_not_found, never the collapse body.
+B_404_TURN="$(api amir GET "/api/v1/conversations/$BAR1_CID/turns/99/chain")"
+load_http_code # after api command substitution
+[ "$HTTP_CODE" = "404" ] || bar_fail "M8.5-B READ 4 owner-visible absent turn (HTTP $HTTP_CODE; body: $B_404_TURN)"
+json_assert "M8.5-B READ 4 owner-visible turn_not_found" '
+import json, sys
+assert json.loads(sys.argv[1])["detail"]["reason"] == "turn_not_found", sys.argv[1]
+print("ok")
+' "$B_404_TURN"
+echo "  M8.5-B READ 4 OK: six-way byte-identical collapse; owner-visible turn_not_found stays distinct"
+
+echo "==> M8.5-B READ 5 — creator + tenant isolation on list: sara and the foreign reader see EMPTY"
+B_LIST_SARA="$(api sara GET "/api/v1/conversations")"
+load_http_code # after api command substitution
+[ "$HTTP_CODE" = "200" ] || bar_fail "M8.5-B READ 5 sara list (HTTP $HTTP_CODE; body: $B_LIST_SARA)"
+json_assert "M8.5-B READ 5 sara list empty" '
+import json, sys
+doc = json.loads(sys.argv[1])
+assert doc["items"] == [] and doc["next_cursor"] is None, doc
+print("ok")
+' "$B_LIST_SARA"
+B_LIST_FOREIGN="$(api foreign GET "/api/v1/conversations")"
+load_http_code # after api command substitution
+[ "$HTTP_CODE" = "200" ] || bar_fail "M8.5-B READ 5 foreign list (HTTP $HTTP_CODE; body: $B_LIST_FOREIGN)"
+json_assert "M8.5-B READ 5 foreign list empty" '
+import json, sys
+doc = json.loads(sys.argv[1])
+assert doc["items"] == [] and doc["next_cursor"] is None, doc
+print("ok")
+' "$B_LIST_FOREIGN"
+echo "  M8.5-B READ 5 OK: fully-scoped sara (same tenant) and zara (foreign tenant) both list empty"
+
+echo "==> M8.5-B READ 6 — access logs: identifiers + outcome only, never transcript plaintext"
+set +e
+kubectl -n "$NS" logs -l app.kubernetes.io/name=agentos --all-containers=true --tail=8000 \
+  2>"$QC_TMP/conv-access-err" | grep -F "portal.conversations." > "$QC_TMP/conv-access-lines"
+B_ACCESS_RC=$?
+set -e
+[ "$B_ACCESS_RC" -eq 0 ] \
+  || bar_fail "M8.5-B READ 6 no portal.conversations.* access-log lines (rc=$B_ACCESS_RC; kubectl stderr: $(cat "$QC_TMP/conv-access-err" 2>/dev/null || echo "<none>"))"
+json_assert "M8.5-B READ 6 access-log contents" '
+import json, sys
+path, transcript_path = sys.argv[1], sys.argv[2]
+recs, raw = [], []
+with open(path, encoding="utf-8", errors="replace") as fh:
+    for line in fh:
+        raw.append(line)
+        try:
+            doc = json.loads(line)
+        except ValueError:
+            continue
+        msg = doc.get("message", "")
+        if isinstance(msg, str) and msg.startswith("portal.conversations."):
+            recs.append(doc)
+assert recs, "no parseable portal.conversations.* records"
+def ok_lines(suffix):
+    return [r for r in recs if r["message"] == "portal.conversations." + suffix and r.get("outcome") == "ok"]
+assert ok_lines("list"), "no ok list access record"
+assert ok_lines("transcript"), "no ok transcript access record"
+assert ok_lines("chain"), "no ok chain access record"
+amir_transcript = [
+    r
+    for r in ok_lines("transcript")
+    if r.get("tenant_id") == "proof-m85" and r.get("actor_subject") == "analyst.amir" and r.get("conversation_id")
+]
+assert amir_transcript, "no transcript access record carrying the amir identifiers"
+foreign_list = [
+    r for r in ok_lines("list") if r.get("tenant_id") == "proof-foreign" and r.get("actor_subject") == "analyst.zara"
+]
+assert foreign_list, "no list access record for the foreign reader (the empty read must still leave a trail)"
+# DYNAMIC banned markers (finding 7, 2026-07-10: two static question
+# fragments proved almost nothing): EVERY line-fragment (>=16 chars) of
+# EVERY live transcript plaintext — both questions AND both model answers —
+# plus the two static fragments (the BAR-3 plaintexts never rode a read
+# response, so they stay static).
+with open(transcript_path, encoding="utf-8") as fh:
+    tdoc = json.load(fh)
+fragments = []
+for turn in tdoc["turns"]:
+    for text in (turn.get("user_message"), turn.get("answer")):
+        if not isinstance(text, str):
+            continue
+        for frag in text.splitlines():
+            frag = frag.strip()
+            if len(frag) >= 16:
+                fragments.append(frag)
+assert fragments, "the live transcript carried no scannable plaintext fragments"
+banned = ["top 3 customers", "general-ledger balance"] + fragments
+for line in raw:
+    for idx, marker in enumerate(banned):
+        assert marker not in line, (
+            "transcript plaintext leaked into an access-log line "
+            "(banned marker index %d; fragment redacted)" % idx
+        )
+print("ok")
+' "$QC_TMP/conv-access-lines" "$QC_TMP/conv-transcript.json"
+echo "  M8.5-B READ 6 OK: list/transcript/chain access trails with identifiers + outcome; zero plaintext in the access lines"
+
+echo "  M8.5-B OK: read APIs verified over the live bar record (no new model calls)"
+echo "PROOF M8.5-B (READ APIS) PASS"

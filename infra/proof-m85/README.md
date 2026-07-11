@@ -1,15 +1,22 @@
 # Proof M8.5 SLICE — Conversational Substrate (3-bar kind proof, BARs 1–3)
 
-> **STATUS: PASSED LIVE — 2026-07-10, run 6, exit 0.**
-> `PROOF M8.5 SLICE (BARS 1-3) PASS` on `kind`; log 533 lines, SHA-256
+> **STATUS: PASSED LIVE — M8.5-A 2026-07-10 (run 6) AND M8.5-B 2026-07-11
+> (run 7), both exit 0.**
+> Run 7: `PROOF M8.5 SLICE (BARS 1-3) PASS` re-passed AND
+> `PROOF M8.5-B (READ APIS) PASS` on `kind`; log 743 lines, SHA-256
+> `fb9e6536b2952dcac1303b82aead73c7a7984c67d7348958a76da71a711d18a1`
+> (operator-held); kernel anchor = proof revision = `8e77ca16` (a single
+> revision — the image label was verified live via `docker inspect`), with
+> the 0016 schema readback and the hardened key-custody window exercised
+> live. Recorded in `docs/VALIDATION-RESULTS.md` §"M8.5-B".
+> Run 6 (M8.5-A): log 533 lines, SHA-256
 > `9c6f17b35efce426ec5194920da327a2257b82116807037cad656717d9f533f9`
-> (operator-held), recorded with the run ledger + honesty boundary in
-> `docs/VALIDATION-RESULTS.md` §"M8.5-A". The **kernel anchor**
-> `main @ 235daede` (the deployed kernel, the proof image label) is
-> DISTINCT from the **proof revision** `caab00bd` (the runner +
-> structural-suite tree that executed — four C2 commits after the anchor:
-> `7981da7c` authored the proof, three review-fix commits followed; zero
-> kernel changes).
+> (operator-held), run ledger + honesty boundary in
+> `docs/VALIDATION-RESULTS.md` §"M8.5-A". Its **kernel anchor**
+> `main @ 235daede` (the deployed kernel, the then-hardcoded image label)
+> was DISTINCT from its **proof revision** `caab00bd` (the runner +
+> structural-suite tree that executed — four C2 commits after the anchor;
+> zero kernel changes).
 
 When run, this proof stands up a `kind` cluster and proves the **ADR-028
 conversation substrate** live against a deployed AgentOS kernel: a
@@ -20,8 +27,14 @@ exclusively from the kernel store, and the chain carries digest-only evidence
 (`conversation.created` / `conversation.turn_completed`) joining each turn to
 its `agent.run.%` rows.
 
-Kernel anchor: `main @ 235daede6d1b7a99846c6339f2e234c85e6bd0cc` (M8.5 A/B/C1,
-PR #126; pinned as an image label by `Dockerfile.agentos-proof`).
+Kernel anchor: computed at BUILD time — the runner resolves `git rev-parse
+HEAD` from a CLEAN kernel-source tree, passes it as the `KERNEL_GIT_SHA`
+build arg (the ARG carries NO default), and verifies the built image's
+`io.cognic.proof.kernel-anchor` label equals the computed revision before any
+deploy (review finding 2, 2026-07-10 — the earlier hardcoded anchor claimed
+`main @ 235daede` while the runner overlaid newer branch source). Run 6 was
+anchored at `main @ 235daede6d1b7a99846c6339f2e234c85e6bd0cc` (M8.5 A/B/C1,
+PR #126).
 
 **This is the VERTICAL-SLICE GATE, not the M8.5 production proof.** ADR-028
 BARs 4–7 (bounds/terminal refusal, erasure, safety hooks, SSE reconnect) are
@@ -43,10 +56,11 @@ custody, trust-root layout, the sandbox-machinery-kept rationale, and the
 model-alias swap all carry unchanged (m85-renamed env/paths).
 
 The conversation substrate adds **no pack, no seed rows, and no new trust
-material**: migration `0015` (created by the same non-hook migrate Job via
-`alembic upgrade head`) adds the `conversations` + `conversation_turns`
-tables, which start empty — conversations are runtime records created through
-the governed API.
+material**: migrations `0015` + `0016` (applied by the same non-hook migrate
+Job via `alembic upgrade head`) add the `conversations` +
+`conversation_turns` tables and the read-model correlation column + query
+indexes, all of which start empty — conversations are runtime records created
+through the governed API.
 
 ## The M8.5 deltas
 
@@ -129,6 +143,31 @@ the governed API.
 Any bar failure → capture to `docs/VALIDATION-RESULTS.md` + exit non-zero;
 all pass → `PROOF M8.5 SLICE (BARS 1-3) PASS`.
 
+## M8.5-B (READ APIS) section — PASSED LIVE (run 7, 2026-07-11)
+
+The runner now carries an M8.5-B section AFTER the bars (the BARS 1-3 PASS
+marker prints first; the run's last line becomes
+`PROOF M8.5-B (READ APIS) PASS`). It is deterministic and READ-ONLY — zero
+new model calls, zero record mutation, zero SQL: it drives the governed read
+surface (`GET /api/v1/conversations` list + cursor walk + three invalid-cursor
+probes, transcript plaintext/watermark pagination, the four-block turn-chain
+join with the turn-2 dispatch count deliberately unconstrained per the run-5
+ruling) over the SAME record BARs 1 and 3 produced, and proves isolation with
+a 7th proof role (`foreign` — `analyst.zara`, tenant `proof-foreign`, the
+same four `conversation.*` scopes): six-way byte-identical 404 across
+unknown-id / cross-actor / cross-tenant on transcript + chain, empty lists for
+sara and zara, and access-log trails carrying identifiers + outcome but never
+transcript plaintext. **Run 7 (2026-07-11, exit 0) executed this
+section live**: all ten READ steps passed over the record BARs 1 and 3
+produced in the same run, and the remediated SETUP path ran live too — the
+proof-input cleanliness guard, the build-time kernel provenance guard with
+the `docker inspect` label readback (`8e77ca16`), the post-migrate 0016
+schema readback (`1|2`), and the key-isolation/custody window (exported
+variable dropped before the first child; stdin + 0600-file only; zero
+shared-/tmp artifacts). Run 7 observed the turn-2 dispatch count as 2
+(re-verification); run 5 had observed 0 (context reuse) — both legs of the
+run-5 unconstrained ruling have now occurred live.
+
 ## Honesty boundary (read before citing this proof)
 
 * **Model-driven vs deterministic.** BAR 2 is fully deterministic. BARs 1 and
@@ -168,7 +207,7 @@ all pass → `PROOF M8.5 SLICE (BARS 1-3) PASS`.
 | env | required | meaning |
 |---|---|---|
 | `COGNIC_RUN_PROOF_M85=1` | yes | the proof gate (unset → the runner exits 0 with a skip message; NO default-on CI behavior). |
-| `COGNIC_PROOF_M85_TIER1_API_KEY` | yes | the operator's CLOUD provider API key. Fail-loud at the gate; shipped ONLY as the `proof-m85-provider-key` k8s Secret consumed by the litellm router pod. |
+| `COGNIC_PROOF_M85_TIER1_API_KEY` | yes | the operator's CLOUD provider API key. Fail-loud at the gate; after the zero-spend preflight the runner persists it to a `0600` file under the private per-run dir, **unsets the environment variable**, and creates the `proof-m85-provider-key` k8s Secret `--from-file` — the key never rides a process argument vector (review finding 1, 2026-07-10). **ROTATION REQUIRED for keys used by pre-fix runners** (runs up to and including run 6): those created the Secret via `--from-literal`, exposing the key to local `ps` for the kubectl lifetime — treat them as locally exposed. |
 | `COGNIC_PROOF_M85_ALLOWED_PROVIDERS` | no (default `openai`) | the ADR-007 provider allow-list the runner sets on the kernel (`COGNIC_ALLOWED_PROVIDERS`). Lockstep with the values model line for the provider swap. |
 | `COGNIC_PROOF_M85_POLICY_MODE` | no (default `cloud_openai`) | the kernel `COGNIC_POLICY_MODE`; lockstep with the values model line for the swap. |
 | `COGNIC_PROOF_M85_REGISTRY_PORT` / `COGNIC_PROOF_M85_REGISTRY_TLS_DIR` / `COGNIC_PROOF_M85_REUSE_IMAGES` | no | local TLS-registry knobs (the proof-m6/m8 conventions, m85-named). |
@@ -187,7 +226,9 @@ delta `COGNIC_CONVERSATION_CLAIM_TTL_S=600` (see "The M8.5 deltas").
    canonical-image trust material (the m6/m8 re-home flow; no fixture flags).
 3. **Seed** — Oracle XE first-boot runs `oracle-seed/seed_schema.sql`;
    `kernel-seed.sql` applies the 0014 rows after the migrate Job (which
-   brings the schema to rev 0015 — the conversation tables start empty).
+   brings the schema to rev 0016; the runner reads back `alembic_version`
+   plus the 0016 correlation-column/index shape — the conversation tables
+   start empty).
 4. **Run** — `COGNIC_RUN_PROOF_M85=1` + the provider key env →
    `./infra/proof-m85/run-proof-m85.sh`: kind + backends + M4 operator
    lifecycle for the tool + Step-0 surface asserts, then BARs 1–3.
@@ -198,5 +239,6 @@ Same layout as `infra/proof-m8/` (see its README's file table) with:
 `run-proof-m85.sh` (the three conversation bars + the tenant-scoped evidence
 helpers), `proof_m85/` (the conversation-scoped analyst actors),
 `proof-m85-values.yaml` / `Dockerfile.agentos-proof` (m85 names + the
-`main @ 235daede` anchor), `migrate-job.yaml` (head = rev 0015), and the
-structural suite at `tests/unit/infra/test_proof_m85_structure.py`.
+build-time `KERNEL_GIT_SHA` anchor label), `migrate-job.yaml` (head =
+rev 0016 with a live post-migrate readback), and the structural suite at
+`tests/unit/infra/test_proof_m85_structure.py`.

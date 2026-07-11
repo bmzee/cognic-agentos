@@ -1,9 +1,9 @@
 -- proof-m85 — kernel-side seed: the migration-0014 rows (Postgres).
 --
 -- Applied by run-proof-m85.sh AFTER the alembic migration Job has brought
--- the schema to HEAD (rev 0015; the seeded authority tables below —
+-- the schema to HEAD (rev 0016; the seeded authority tables below —
 -- data_scopes / entitlements / agent_assignments — ORIGINATE from rev 0014,
--- and the 0015 conversation tables need no seed). These rows are PROOF-SIDE
+-- and the 0015/0016 conversation tables need no seed). These rows are PROOF-SIDE
 -- SEED per the 0014 migration docstring ("scope/entitlement/assignment ROWS are proof-side seed (spec §6),
 -- never kernel migration data").
 --
