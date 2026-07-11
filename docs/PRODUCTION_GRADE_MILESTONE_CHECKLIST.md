@@ -137,13 +137,15 @@ Studio/no-code authoring and Cognic Forge remain outside this v1 completion chec
 
 - [ ] **M8.5-C — Basic bank harness.**
 
-  **Goal:** a separate web artifact with **exactly three screens — chat, approvals, evidence.** Client only; zero authoritative state; never a trust boundary. Chat is request/response; live progress arrives with the projectors at M8.5-F.
+  **Goal:** a separate web artifact with **exactly three screens — chat, approvals, evidence.** A browser + same-origin BFF with no independent authorization or governance authority; zero authoritative domain/governance state (transient session/token state only); security-sensitive for the OIDC flow, session/token custody, CSRF protection, and request forwarding, but non-authoritative for identity and authorization. Chat is request/response; live progress arrives with the projectors at M8.5-F.
 
   **Production proof:** a human converses with the deployed M8 agent through the harness; the approvals inbox drives the existing ADR-014 surface; the evidence viewer renders HP-1's chain join.
 
   **Load-bearing proof:** the harness cannot bypass governance — a refused dispatch surfaces as a governed refusal in both the UI and the chain; no pack-builder and no data-scope admin surface exists (attaching packs, configuring data scopes, and pack-lifecycle approval are an **operator governance console**, a separate later artifact).
 
   **Evidence required:** harness repo + deployed transcript + chain correlation.
+
+  **Recon locks (ruled 2026-07-11; full text: ADR-028 spec §0.2 HP-4/HP-5 + §0.4):** repo = `cognic-harness` (the external product, distinct from the kernel-internal `src/cognic_agentos/harness/`). **Architecture:** browser + same-origin **BFF** with no independent authorization or governance authority — HttpOnly/Secure/SameSite session cookies browser-side; OAuth tokens BFF-side only (never browser JS/storage); the BFF is a confidential OIDC client (Authorization Code + PKCE S256; RFC 9700 baseline — full FAPI 2.0 is the bank-deployment target, spec §0.4 profile ladder); on every AgentOS call it presents a user-bound AgentOS-audience token (or standards-based exchanged derivative) that AgentOS validates itself — no actor headers, no shared-secret impersonation, proof-only binders absent from production bundles; it may implement OIDC mechanics but never derives authorization/tenant/scopes — `ActorBinder` binds identity, AgentOS is the sole authorization/governance authority; the BFF calls AgentOS server-to-server (no CORS cookies; a cross-origin bearer SPA is a bank-overlay exception needing its own threat model + DPoP). **Custody:** the harness never accepts/stores/displays/forwards DB passwords, wallets, connection strings, Vault tokens, or user-entered schema credentials — no DB client, credential form, data-scope admin, or secret handling in M8.5-C (credential brokerage is designed at M8.5-D, live-proven at M8.5-E; AgentOS stores only non-secret governance metadata). **HP-4 blocks this milestone's live proof** — paginated approval queue + actor-bound MCP grant replay are kernel work scheduled inside M8.5-C (actor-bound = the grant is usable only by the original requesting subject; the approver remains a distinct human for 4-eyes). **HP-5** (typed conversation `pending_approval` + kernel-owned resume) blocks M8.5-D/E high-risk chat claims, not this milestone. Approvals live proof rides a separately released high-risk MCP tool pack through the direct MCP call surface (202 → grant/deny incl. distinct-actor 4-eyes → exact re-call), never claimed as chat-originated — **an entitled read-only NL query does not require human approval** (assignment + entitlement + policy suffice; the high-risk pack exists solely to prove the approvals screen and is not a requirement of the first read-only analytical agent). Proof adjustments: 403 (not empty inbox) without `tool.approve.observe`; cross-tenant observer sees its own empty queue; correlation by exact ID/digest/sequence/refusal fields; the manipulated-UI test; structural pins incl. no proof-header code in the production bundle.
 
 - [ ] **M8.5-D — First bank NL-query analytical agent.**
 
@@ -155,6 +157,8 @@ Studio/no-code authoring and Cognic Forge remain outside this v1 completion chec
 
   **Evidence required:** agent + tool + skill pack repos, eval report, deployed proof.
 
+  **Data-access ownership (ruled 2026-07-11; ADR-028 spec §0.4):** M8.5-D owns the dedicated data-access identity + credential-brokerage **design** — connection-profile + CredentialBroker ownership decided after source recon; the query-context token treated per the ruled framing — a private AgentOS JWS profile, not claimed to be an RFC 9068 OAuth access token; M8.5-D evaluates RFC 8693 for issuance/exchange, RFC 9068 only if OAuth access-token semantics are adopted, and RFC 9396 for fine-grained authorization details, with retaining + explicitly versioning the private profile permitted (IETF Transaction Tokens stay draft, tracked non-binding); the workload-identity profile (SPIFFE X.509-SVID/mTLS or bank-cloud equivalent); the Oracle adapter implemented **without credentials in AgentOS or the pack manifest** (Oracle target profile: workload identity → Vault/PAM lease or rotated proxy credential → Oracle proxy session → governed views + VPD + DB audit).
+
 - [ ] **M8.5-E — Full-stack `kind` proof.**
 
   **Goal:** harness + the first bank agent + its released packs + evidence, end to end.
@@ -164,6 +168,8 @@ Studio/no-code authoring and Cognic Forge remain outside this v1 completion chec
   **Load-bearing proof:** at least one governed refusal (unassigned capability or unentitled scope) is visible to the user *and* present in the chain.
 
   **Evidence required:** `kind` run log + evidence export.
+
+  **Data-access live proof (ruled 2026-07-11; ADR-028 spec §0.4):** the M8.5-E proof must include the full brokered chain — entitlement → short-lived query authorization → workload-authenticated credential retrieval → Oracle proxy session → DB-native enforcement. Evidence records credential lease/reference identifiers and the DB session/proxy identity, **never credential material**; the proof demonstrates rotation/revocation or lease expiry plus zero secret leakage to logs, transcript, model context, or evidence.
 
   **Honesty boundary (mandatory in the proof README):** this proof runs **without the content-safety hook phases and without the erasure pathway** — both land at M8.5-F. It is an **internal product proof**. It **must not** be presented to a bank as pilot-ready.
 
