@@ -66,7 +66,7 @@ agent.execute(input):
 
 ```
 POST /api/v1/approvals                       # internal: harness creates
-GET  /api/v1/approvals?status=pending        # reviewer queue
+GET  /api/v1/approvals?limit=&cursor=        # reviewer queue (paginated; see the M8.5-C T1 amendment — ?status= retired)
 GET  /api/v1/approvals/{id}                  # detail (tool, args [PII redacted], tier, requester, expiry)
 POST /api/v1/approvals/{id}/grant            # RBAC-scoped per tier
 POST /api/v1/approvals/{id}/grant-second     # for 4-eyes (different user; checks distinctness)
@@ -308,3 +308,12 @@ ADR-027 (governed agent loop, M8) adds the kernel agent dispatcher (`core/agent/
 - ADR-022 (runtime scheduler — Sprint 10.5 mirrored the pre-13.5 high-risk-tier refusal in `scheduler.rego`)
 - [Anthropic — Managed Agents tool approval flows](https://www.anthropic.com/engineering/managed-agents)
 - [OpenAI Agents SDK — approval flows](https://openai.github.io/openai-agents-python/)
+
+## M8.5-C T1 amendment (2026-07-11) — HP-4: the paginated actionable queue + actor-bound grant replay
+
+Landed with the M8.5-C T1 kernel slice (spec `docs/superpowers/specs/2026-07-11-m85c-cognic-harness-v1-design.md` §2):
+
+1. **The reviewer queue is a fixed actionable projection over `pending | awaiting_second`.** The originally advertised `?status=` filter is RETIRED from the contract — terminal history belongs to evidence surfaces, never the live queue. `GET /api/v1/approvals/` gains `limit` (1..200, default 50; FastAPI-validated wire bounds) + `cursor` (opaque, versioned, strictly decoded — every decode failure is `422 {"detail": {"reason": "cursor_invalid"}}` with a 256-char pre-decode length cap). The response body stays `list[ApprovalSummaryResponse]`; pagination rides a **relative** `Link: </api/v1/approvals/?cursor=…&limit=…>; rel="next"` response header. Storage walks a `(created_at ASC, request_id ASC)` chronological keyset (Oracle-portable tuple expansion) backed by migration 0017's `ix_approval_requests_tenant_created_request (tenant_id, created_at, request_id)` index.
+2. **Actor-bound grant replay, engine-owned.** `ApprovalEngine.verify_grant_for_action` gains the REQUIRED `expected_originator_subject` parameter and runs the **corrected verification precedence**: tenant-scoped RAW load (absent/cross-tenant collapse; no mutation) → ORIGINATOR (`approval_originator_mismatch`, the 11th `ApprovalTransitionRefusedReason` value; portal 403) → **UNCONDITIONAL binding** (persisted `args_digest`/`tool_identity` are create-time constants — a wrong-shape replay of a *pending* request now refuses `approval_binding_mismatch`, never "pending") → lazy expiry + state projection (the ONLY mutating step; a wrong-originator caller causes zero expiry mutation and zero evidence). The grant is usable only by the **original requesting subject**; the approver remains a distinct human for four-eyes — two identities, two roles, one request. Refusals are value-free (request id + bounded reason; never a subject).
+3. **All four replay consumers map the new reason** into their closed vocabularies: MCP `tool_approval_originator_mismatch` (wire 10-value `ToolInvocationRefusalReason`; portal MCP route 403), sandbox `sandbox_approval_originator_mismatch` (see the ADR-004 amendment — incl. the wake-passthrough 5→6 expansion), scheduler `refused_approval_originator_mismatch` (ADR-022 amendment), memory `memory_approval_originator_mismatch` (ADR-019 amendment).
+4. **Four-eyes TTL note:** the M8.5-C live proof raises `approval_four_eyes_ttl_s` above its browser-bar worst case via configuration — the 60-second default is unchanged.

@@ -460,3 +460,7 @@ The Sprint-13.7 "Parent-budget = `_Null` sentinel (deferred to 14A)" note (§308
 - Sprint 10.5 closeout note: `docs/closeouts/2026-05-27-sprint-10.5-scheduler-primitive.md`
 - Sprint 10.6 spec: `docs/superpowers/specs/2026-05-26-sprint-10.6-workload-credential-projection-design.md`
 - Sprint 10.6 plan: `docs/superpowers/plans/2026-05-26-sprint-10.6-workload-credential-projection.md`
+
+## M8.5-C T1 amendment (2026-07-11) — HP-4: `refused_approval_originator_mismatch`
+
+Per the ADR-014 M8.5-C T1 amendment (actor-bound grant replay, engine-owned): the scheduler's approval consult (`core/scheduler/engine.py`) threads `expected_originator_subject=submit_input.actor.subject` into `verify_grant_for_action` and maps the engine's `approval_originator_mismatch` to the NEW value **`refused_approval_originator_mismatch`** on BOTH scheduler Literals (`SchedulerAdmissionOutcome` 12 → 13; the refusal vocabulary consumed by `record_admission_refused`'s runtime guard follows automatically via `typing.get_args`). Actor identity remains inside the scheduler's binding digest (the 13.5c2 refinement, defence-in-depth); the engine's originator check fires first, so a different same-tenant actor re-submitting a granted approval surfaces the uniform originator reason on the admission outcome. Proven through the FULL `submit()` path, never by invoking the core verifier directly.
