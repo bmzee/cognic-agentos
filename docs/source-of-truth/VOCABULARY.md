@@ -30,6 +30,13 @@ The controlling sources are:
 | **Hook** | A deterministic governance extension (`cognic-hook-*`): DLP pre/post, content safety, policy. Not a tool, skill, or agent. | yes |
 | **Workflow** | **Reserved.** The future durable orchestration primitive (declarative DAG / state machine, branching, durable cross-step state, pause/resume, approval gates, compensation). It does not exist today and is **not** what a governed action is. | reserved |
 
+## 1b. Harness — one word, two referents (ruled 2026-07-11)
+
+| Term | Meaning |
+|---|---|
+| **Cognic Harness** | The external client product (`cognic-harness` repo, retiring the `cognic-portal-ui` name): v1 = the three-screen runtime client (chat, approvals inbox, evidence viewer — ADR-028 spec §0.3), a **browser + same-origin BFF** (tokens BFF-side only; RFC 9700 baseline, full FAPI 2.0 as the bank-deployment target — spec §0.4 profile ladder); v2 = the ADK authoring workbench (ADR-008 Phase B). Zero authoritative domain/governance state (transient session/token state only); **no independent authorization or governance authority — security-sensitive for the OIDC flow, session/token custody, CSRF protection, and request forwarding, but non-authoritative for identity and authorization**. |
+| **Runtime harness (internal)** | `src/cognic_agentos/harness/` — the kernel's composition layer / governed execute loop (`harness/base_agent.py`, `harness/runtime.py`, the builders). Kernel code; unrelated to the product above beyond the shared word. |
+
 ## 2. Skill and its governed action
 
 ADR-025 (2026-07-02) resolved a collision between this repo's pre-existing `sdk/skill.py` composer and the industry's single meaning of "skill." The resolution:

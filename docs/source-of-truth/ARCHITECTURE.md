@@ -83,7 +83,7 @@ Inspired by Anthropic's Managed Agents pattern (April 2026) — three virtualise
 |---|---|---|
 | `cognic-agentos:1.x` | Slow — kernel changes only | this repo |
 | `cognic-tool-<name>:0.x`, `cognic-skill-<name>:0.x`, `cognic-agent-<name>:0.x` | Fast — independent per pack | one repo per pack |
-| `cognic-portal-ui:1.x` | Independent | parent cognic repo / future split |
+| `cognic-harness:0.x` | Independent | separate product repo (v1 = browser + same-origin BFF, three-screen runtime client → v2 ADK; ruled 2026-07-11, retiring the `cognic-portal-ui` name; repo to be created at M8.5-C). No independent authorization or governance authority — security-sensitive for the OIDC flow, session/token custody, CSRF, and request forwarding, non-authoritative for identity and authorization. Distinct from the kernel-internal `harness/` composition layer. |
 
 Adding a new agent, tool, or skill **does not require redeploying AgentOS**. The plugin registry discovers the new pack at next AgentOS restart (or hot-reloads it in Wave 2).
 
