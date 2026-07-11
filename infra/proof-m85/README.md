@@ -1,15 +1,22 @@
 # Proof M8.5 SLICE — Conversational Substrate (3-bar kind proof, BARs 1–3)
 
-> **STATUS: PASSED LIVE — 2026-07-10, run 6, exit 0.**
-> `PROOF M8.5 SLICE (BARS 1-3) PASS` on `kind`; log 533 lines, SHA-256
+> **STATUS: PASSED LIVE — M8.5-A 2026-07-10 (run 6) AND M8.5-B 2026-07-11
+> (run 7), both exit 0.**
+> Run 7: `PROOF M8.5 SLICE (BARS 1-3) PASS` re-passed AND
+> `PROOF M8.5-B (READ APIS) PASS` on `kind`; log 743 lines, SHA-256
+> `fb9e6536b2952dcac1303b82aead73c7a7984c67d7348958a76da71a711d18a1`
+> (operator-held); kernel anchor = proof revision = `8e77ca16` (a single
+> revision — the image label was verified live via `docker inspect`), with
+> the 0016 schema readback and the hardened key-custody window exercised
+> live. Recorded in `docs/VALIDATION-RESULTS.md` §"M8.5-B".
+> Run 6 (M8.5-A): log 533 lines, SHA-256
 > `9c6f17b35efce426ec5194920da327a2257b82116807037cad656717d9f533f9`
-> (operator-held), recorded with the run ledger + honesty boundary in
-> `docs/VALIDATION-RESULTS.md` §"M8.5-A". The **kernel anchor**
-> `main @ 235daede` (the deployed kernel, the proof image label) is
-> DISTINCT from the **proof revision** `caab00bd` (the runner +
-> structural-suite tree that executed — four C2 commits after the anchor:
-> `7981da7c` authored the proof, three review-fix commits followed; zero
-> kernel changes).
+> (operator-held), run ledger + honesty boundary in
+> `docs/VALIDATION-RESULTS.md` §"M8.5-A". Its **kernel anchor**
+> `main @ 235daede` (the deployed kernel, the then-hardcoded image label)
+> was DISTINCT from its **proof revision** `caab00bd` (the runner +
+> structural-suite tree that executed — four C2 commits after the anchor;
+> zero kernel changes).
 
 When run, this proof stands up a `kind` cluster and proves the **ADR-028
 conversation substrate** live against a deployed AgentOS kernel: a
@@ -136,7 +143,7 @@ through the governed API.
 Any bar failure → capture to `docs/VALIDATION-RESULTS.md` + exit non-zero;
 all pass → `PROOF M8.5 SLICE (BARS 1-3) PASS`.
 
-## M8.5-B (READ APIS) section — NOT YET RUN LIVE
+## M8.5-B (READ APIS) section — PASSED LIVE (run 7, 2026-07-11)
 
 The runner now carries an M8.5-B section AFTER the bars (the BARS 1-3 PASS
 marker prints first; the run's last line becomes
@@ -150,13 +157,16 @@ a 7th proof role (`foreign` — `analyst.zara`, tenant `proof-foreign`, the
 same four `conversation.*` scopes): six-way byte-identical 404 across
 unknown-id / cross-actor / cross-tenant on transcript + chain, empty lists for
 sara and zara, and access-log trails carrying identifiers + outcome but never
-transcript plaintext. **The 2026-07-10 run-6 PASS above predates this section
-— the M8.5-B section has NOT yet executed on a cluster**; its verification so
-far is the structural test suite only (`tests/unit/infra/
-test_proof_m85_structure.py`). The remediation of review findings 1/2/7
-(2026-07-10) also changed the SETUP path since run 6 — the build-time kernel
-provenance guard + label readback and the post-migrate 0016 schema readback
-have likewise not yet executed live.
+transcript plaintext. **Run 7 (2026-07-11, exit 0) executed this
+section live**: all ten READ steps passed over the record BARs 1 and 3
+produced in the same run, and the remediated SETUP path ran live too — the
+proof-input cleanliness guard, the build-time kernel provenance guard with
+the `docker inspect` label readback (`8e77ca16`), the post-migrate 0016
+schema readback (`1|2`), and the key-isolation/custody window (exported
+variable dropped before the first child; stdin + 0600-file only; zero
+shared-/tmp artifacts). Run 7 observed the turn-2 dispatch count as 2
+(re-verification); run 5 had observed 0 (context reuse) — both legs of the
+run-5 unconstrained ruling have now occurred live.
 
 ## Honesty boundary (read before citing this proof)
 
