@@ -278,6 +278,7 @@ SandboxRefusalReason = Literal[
     "sandbox_approval_denied",
     "sandbox_approval_expired",
     "sandbox_approval_binding_mismatch",
+    "sandbox_approval_originator_mismatch",
     "sandbox_approval_request_not_found",
     # M6 run-14 amendment (2026-07-04) — ``SandboxPolicy.writable_mounts``
     # ENFORCEMENT. The field was declared (Sprint-8A spec §6) but never
@@ -308,6 +309,9 @@ _APPROVAL_WAKE_PASSTHROUGH_REASONS: frozenset[str] = frozenset(
         "sandbox_approval_expired",
         "sandbox_approval_request_not_found",
         "sandbox_approval_binding_mismatch",
+        # HP-4 (M8.5-C T1): the originator mismatch passes the wake wrapper
+        # un-rewrapped like every other approval-family reason.
+        "sandbox_approval_originator_mismatch",
     }
 )
 

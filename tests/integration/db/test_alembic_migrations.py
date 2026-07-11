@@ -21,6 +21,7 @@ import os
 import subprocess
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 import sqlalchemy as sa
@@ -315,3 +316,75 @@ def test_postgres_seeded_0016_backfill() -> None:
 )
 def test_oracle_seeded_0016_backfill() -> None:
     _seeded_backfill_roundtrip(ORACLE_URL)
+
+
+# ---------------------------------------------------------------------------
+# 0017 (HP-4): the approval-queue index — live roundtrip + guard-skip rerun
+# ---------------------------------------------------------------------------
+
+_IDX_0017 = "ix_approval_requests_tenant_created_request"
+_IDX_0017_COLUMNS = ["tenant_id", "created_at", "request_id"]
+
+
+async def _approval_indexes(url: str) -> dict[str, dict[str, Any]]:
+    engine = create_async_engine(url)
+    try:
+        async with engine.connect() as conn:
+            rows = await conn.run_sync(lambda sc: sa.inspect(sc).get_indexes("approval_requests"))
+        return {str(i["name"]).lower(): dict(i) for i in rows}
+    finally:
+        await engine.dispose()
+
+
+async def _stamp_version(url: str, revision: str) -> None:
+    engine = create_async_engine(url)
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                sa.text("UPDATE alembic_version SET version_num = :rev"), {"rev": revision}
+            )
+    finally:
+        await engine.dispose()
+
+
+def _index_roundtrip_0017(url: str) -> None:
+    """head -> assert exact shape -> stamped fully-applied RERUN (the guard
+    must skip live, not raise) -> downgrade 0016 removes ONLY the index ->
+    head recreates it."""
+    _alembic(url, "upgrade", "head")
+    idx = asyncio.run(_approval_indexes(url))
+    assert _IDX_0017 in idx
+    assert [str(c).lower() for c in idx[_IDX_0017]["column_names"]] == _IDX_0017_COLUMNS
+    assert not idx[_IDX_0017]["unique"]
+
+    asyncio.run(_stamp_version(url, "0016"))
+    _alembic(url, "upgrade", "head")  # fully-applied rerun: guard-skip, no raise
+    assert _IDX_0017 in asyncio.run(_approval_indexes(url))
+
+    _alembic(url, "downgrade", "0016")
+    assert _IDX_0017 not in asyncio.run(_approval_indexes(url))
+    _alembic(url, "upgrade", "head")
+    assert _IDX_0017 in asyncio.run(_approval_indexes(url))
+
+
+@pytest.mark.postgres
+@pytest.mark.skipif(
+    not os.environ.get("COGNIC_RUN_POSTGRES_INTEGRATION"),
+    reason=(
+        "live Postgres integration; opt in via "
+        "COGNIC_RUN_POSTGRES_INTEGRATION=1 + compose up postgres"
+    ),
+)
+def test_postgres_0017_index_roundtrip() -> None:
+    _index_roundtrip_0017(POSTGRES_URL)
+
+
+@pytest.mark.oracle
+@pytest.mark.skipif(
+    not os.environ.get("COGNIC_RUN_ORACLE_INTEGRATION"),
+    reason=(
+        "live Oracle XE integration; opt in via COGNIC_RUN_ORACLE_INTEGRATION=1 + compose up oracle"
+    ),
+)
+def test_oracle_0017_index_roundtrip() -> None:
+    _index_roundtrip_0017(ORACLE_URL)

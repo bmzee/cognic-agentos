@@ -21,10 +21,11 @@ from cognic_agentos.core.decision_history import DecisionHistoryStore
 from cognic_agentos.protocol.mcp_authz import MCPAuthzClient, Token
 
 
-def test_tool_invocation_refusal_reason_has_exactly_nine_values() -> None:
+def test_tool_invocation_refusal_reason_has_exactly_ten_values() -> None:
     # Wire-protocol-public vocabulary (spec §4; M5 added the three DLP
-    # pre-invocation reasons). Drift-pinned: adding or removing a value
-    # fails here until the spec/ADR amendment moves with it.
+    # pre-invocation reasons; HP-4 added the originator mismatch).
+    # Drift-pinned: adding or removing a value fails here until the
+    # spec/ADR amendment moves with it.
     from cognic_agentos.protocol.mcp_host import ToolInvocationRefusalReason
 
     assert set(typing.get_args(ToolInvocationRefusalReason)) == {
@@ -33,6 +34,7 @@ def test_tool_invocation_refusal_reason_has_exactly_nine_values() -> None:
         "tool_approval_denied",
         "tool_approval_expired",
         "tool_approval_binding_mismatch",
+        "tool_approval_originator_mismatch",
         "tool_approval_request_not_found",
         "dlp_pre_refused",
         "dlp_pre_failed",
@@ -338,7 +340,7 @@ class TestWiredFirstCall:
             originator_subject="agent-1",
         )
         assert result.payload == {"content": "ok"}
-        assert await store.list_pending("t-1") == []  # no approval row created
+        assert (await store.list_pending("t-1")).items == ()  # no approval row created
 
     async def test_tightened_low_tier_requires_approval(
         self,
@@ -568,6 +570,124 @@ class TestWiredReCall:
         rows = [c.args[0] for c in audit_store.append.await_args_list]
         r10_rows = [e for e in rows if e.request_id == "r10"]
         assert [e.event_type for e in r10_rows] == ["audit.tool_invocation_refused"]
+
+    async def test_different_originator_recall_refuses_originator_mismatch(
+        self,
+        host_module: Any,
+        http_transport: MagicMock,
+        authz: MagicMock,
+        audit_store: MagicMock,
+        decision_history_store: MagicMock,
+        settings: Any,
+        tmp_path: Any,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # HP-4 (M8.5-C T1): the grant is usable ONLY by the original
+        # requesting subject — a DIFFERENT same-tenant subject replaying the
+        # EXACT granted shape refuses tool_approval_originator_mismatch
+        # (isolated from binding: args + tool identity are unchanged).
+        store = await _mk_approval_store(tmp_path)
+        engine = _mk_approval_engine(store, flow="require_single_approval")
+        entry = _entry(host_module)
+        host = _wired_host(
+            host_module,
+            entry,
+            engine,
+            http_transport=http_transport,
+            authz=authz,
+            audit_store=audit_store,
+            decision_history_store=decision_history_store,
+            settings=settings,
+        )
+        rid = await self._pending(host_module, host, entry)  # original: agent-1
+        await engine.grant(request_id=rid, tenant_id="t-1", approver=_approver())
+        import logging
+
+        with (
+            caplog.at_level(logging.DEBUG),
+            pytest.raises(host_module.MCPToolInvocationRefused) as exc_info,
+        ):
+            await host.call_tool(
+                server_id=entry.server_id,
+                tool_name="lookup",
+                arguments={"q": "x"},  # EXACT granted shape
+                request_id="r13",
+                tenant_id="t-1",
+                originator_subject="agent-2",  # different subject
+                approval_request_id=rid,
+            )
+        assert exc_info.value.reason == "tool_approval_originator_mismatch"
+        # Value-free: neither the original requester ("agent-1") nor the
+        # replaying subject ("agent-2") rides the wire detail, the refused
+        # evidence payload, OR any captured log record.
+        rendered = str(exc_info.value) + repr(exc_info.value.payload)
+        # Scope to cognic_agentos GOVERNANCE loggers: the evidence chain
+        # (decision_history) legitimately records the actor as evidence, and
+        # its sqlalchemy SQL-echo at DEBUG is not a governance-log leak.
+        # repr(vars(record)) covers message + args AND `extra=` fields (this
+        # repo commonly logs identity through extra, which lands in __dict__).
+        gov = [r for r in caplog.records if r.name.startswith("cognic_agentos")]
+        logged = " ".join(repr(vars(r)) for r in gov)
+        refused = [
+            c.args[0]
+            for c in audit_store.append.await_args_list
+            if c.args[0].event_type == "audit.tool_invocation_refused"
+            and c.args[0].request_id == "r13"
+        ]
+        assert len(refused) == 1
+        assert refused[0].payload["refusal_reason"] == "tool_approval_originator_mismatch"
+        refused_payload = repr(refused[0].payload)
+        for subject in ("agent-1", "agent-2"):
+            assert subject not in rendered, f"{subject!r} leaked into the wire detail"
+            assert subject not in refused_payload, f"{subject!r} leaked into the evidence row"
+            assert subject not in logged, f"{subject!r} leaked into a log record"
+
+    async def test_verify_receives_the_route_originator_exactly(
+        self,
+        host_module: Any,
+        http_transport: MagicMock,
+        authz: MagicMock,
+        audit_store: MagicMock,
+        decision_history_store: MagicMock,
+        settings: Any,
+        tmp_path: Any,
+    ) -> None:
+        # Exact actor-forwarding (HP-4 test class i): the consult passes the
+        # call's originator_subject — verbatim — as
+        # expected_originator_subject.
+        from unittest.mock import AsyncMock
+
+        from cognic_agentos.core.approval._types import ApprovalTransitionRefused
+
+        engine = MagicMock()
+        engine.verify_grant_for_action = AsyncMock(
+            side_effect=ApprovalTransitionRefused("approval_originator_mismatch")
+        )
+        entry = _entry(host_module)
+        host = _wired_host(
+            host_module,
+            entry,
+            engine,
+            http_transport=http_transport,
+            authz=authz,
+            audit_store=audit_store,
+            decision_history_store=decision_history_store,
+            settings=settings,
+        )
+        rid = uuid.uuid4()
+        with pytest.raises(host_module.MCPToolInvocationRefused) as exc_info:
+            await host.call_tool(
+                server_id=entry.server_id,
+                tool_name="lookup",
+                arguments={"q": "x"},
+                request_id="r14",
+                tenant_id="t-1",
+                originator_subject="analyst.exact-forwarding",
+                approval_request_id=rid,
+            )
+        assert exc_info.value.reason == "tool_approval_originator_mismatch"
+        kwargs = engine.verify_grant_for_action.await_args.kwargs
+        assert kwargs["expected_originator_subject"] == "analyst.exact-forwarding"
 
     async def test_changed_args_recall_refuses_binding_mismatch_without_flow(
         self,

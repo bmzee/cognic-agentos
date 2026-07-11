@@ -167,18 +167,39 @@ class ApprovalEngine:
         tenant_id: str,
         expected_args_digest: bytes,
         expected_tool_identity: str,
+        expected_originator_subject: str,
     ) -> ApprovalCheckResult:
-        """The seam REPLAY gate: lazy-expire, then if the request is ``granted`` but
-        its persisted ``args_digest`` / ``tool_identity`` do not match the
-        invocation, raise ``approval_binding_mismatch`` (a granted request_id cannot
-        be replayed against a different invocation shape). The seam proceeds ONLY on
-        a returned ``state == "granted"``."""
-        res = await self._lazy_expire_and_project(request_id=request_id, tenant_id=tenant_id)
-        if res.state == "granted" and (
-            res.args_digest != expected_args_digest or res.tool_identity != expected_tool_identity
+        """The seam REPLAY gate under the HP-4 corrected precedence:
+
+        (1) tenant-scoped RAW load — absent/cross-tenant collapse
+            (``ApprovalRequestNotFound``), NO mutation;
+        (2) ORIGINATOR — a grant is usable only by the original requesting
+            subject (the approver remains a distinct human for four-eyes;
+            two identities, two roles, one request); refuses before any
+            state is projected or mutated;
+        (3) BINDING, UNCONDITIONAL — the persisted ``args_digest`` /
+            ``tool_identity`` are create-time constants, so a wrong-shape
+            replay refuses regardless of state (a pending request's shape
+            mismatch is ``approval_binding_mismatch``, never "pending");
+        (4) lazy expiry + state projection — the ONLY step that may mutate
+            or emit evidence.
+
+        A wrong-originator caller therefore causes zero expiry mutation and
+        zero evidence emission. The seam proceeds ONLY on a returned
+        ``state == "granted"``. Refusals are value-free: request id + the
+        bounded reason, never a subject."""
+        row = await self._store.load(request_id=request_id, tenant_id=tenant_id)  # (1)
+        if row is None:
+            raise ApprovalRequestNotFound(str(request_id))
+        if row.originator_subject != expected_originator_subject:  # (2)
+            raise ApprovalTransitionRefused("approval_originator_mismatch")
+        if (  # (3)
+            row.args_digest != expected_args_digest or row.tool_identity != expected_tool_identity
         ):
             raise ApprovalTransitionRefused("approval_binding_mismatch")
-        return res
+        return await self._lazy_expire_and_project(
+            request_id=request_id, tenant_id=tenant_id
+        )  # (4)
 
     async def grant(
         self,

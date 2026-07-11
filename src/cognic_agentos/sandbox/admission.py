@@ -379,6 +379,7 @@ async def _consult_approval_engine(
                 tenant_id=tenant_id,
                 expected_args_digest=args_digest,
                 expected_tool_identity=tool_identity,
+                expected_originator_subject=actor.subject,
             )
         except ApprovalRequestNotFound:
             # Unknown OR cross-tenant — indistinguishable by construction
@@ -389,6 +390,18 @@ async def _consult_approval_engine(
                 approval_request_id=str(approval_request_id),
             ) from None
         except ApprovalTransitionRefused as exc:
+            if exc.reason == "approval_originator_mismatch":
+                # HP-4: the grant is usable ONLY by the original requesting
+                # subject. Value-free: no subject rides the refusal detail.
+                raise SandboxLifecycleRefused(
+                    "sandbox_approval_originator_mismatch",
+                    detail=(
+                        f"approval request {approval_request_id} belongs to a "
+                        f"different requesting subject; a grant authorises "
+                        f"exactly one requester"
+                    ),
+                    approval_request_id=str(approval_request_id),
+                ) from None
             if exc.reason != "approval_binding_mismatch":
                 raise  # defensive: unexpected verify-side refusal -> fail loud
             raise SandboxLifecycleRefused(

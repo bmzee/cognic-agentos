@@ -11,7 +11,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from typing import Annotated, cast
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 
 from cognic_agentos.core.approval._types import (
     ApprovalActor,
@@ -22,6 +22,7 @@ from cognic_agentos.core.approval._types import (
 )
 from cognic_agentos.core.approval.engine import ApprovalEngine
 from cognic_agentos.core.approval.storage import (
+    ApprovalCursorInvalid,
     ApprovalRequestDetail,
     ApprovalRequestStore,
     ApprovalRequestSummary,
@@ -43,9 +44,10 @@ from cognic_agentos.portal.rbac.human_actor import RequireHumanActor
 
 _LOG = logging.getLogger(__name__)
 
-#: Wire mapping for the 10-value ApprovalTransitionRefusedReason (_types.py:35).
-#: Pinned EXACTLY by test_every_transition_reason_has_a_status_mapping via
-#: typing.get_args — an 11th engine reason fails the test until mapped here.
+#: Wire mapping for the 11-value ApprovalTransitionRefusedReason (_types.py:35;
+#: HP-4 added approval_originator_mismatch -> 403). Pinned EXACTLY by
+#: test_every_transition_reason_has_a_status_mapping via typing.get_args — a
+#: 12th engine reason fails the test until mapped here.
 _REFUSAL_STATUS: dict[str, int] = {
     "approver_not_human": 403,
     "approver_scope_not_held": 403,
@@ -57,6 +59,7 @@ _REFUSAL_STATUS: dict[str, int] = {
     "deny_requires_non_terminal": 409,
     "auto_tier_no_approval_required": 409,
     "approval_binding_mismatch": 409,
+    "approval_originator_mismatch": 403,
 }
 
 
@@ -155,10 +158,32 @@ def build_approval_routes(*, store: ApprovalRequestStore, engine: ApprovalEngine
     _require_observe = RequireScope("tool.approve.observe")
     _require_human = RequireHumanActor()
 
-    @router.get("/", response_model=list[ApprovalSummaryResponse])
+    @router.get(
+        "/",
+        response_model=list[ApprovalSummaryResponse],
+        responses={
+            200: {
+                "headers": {
+                    "Link": {
+                        "description": (
+                            "Present when more actionable requests exist: a RELATIVE "
+                            "continuation `</api/v1/approvals/?cursor=<opaque>&limit=<n>>; "
+                            'rel="next"`. Clients extract only the opaque cursor and '
+                            "reconstruct the allow-listed request themselves."
+                        ),
+                        "schema": {"type": "string"},
+                    }
+                }
+            },
+            422: {"description": 'Invalid cursor: `{"detail": {"reason": "cursor_invalid"}}`.'},
+        },
+    )
     async def list_queue(
         request: Request,
+        response: Response,
         actor: Annotated[Actor, Depends(_require_observe)],
+        limit: Annotated[int, Query(ge=1, le=200)] = 50,
+        cursor: Annotated[str | None, Query()] = None,
     ) -> list[ApprovalSummaryResponse]:
         # bare-list preflight: no {request_id} path-param, so no tenant-ownership
         # dep can run; the only reachable falsy tenant_id under live Pydantic is "".
@@ -175,8 +200,17 @@ def build_approval_routes(*, store: ApprovalRequestStore, engine: ApprovalEngine
                 pack_id="<list>",  # sentinel — no {request_id} path-param
             )
             raise HTTPException(status_code=500, detail={"reason": "actor_tenant_id_missing"})
-        rows = await store.list_pending(actor.tenant_id)
-        return [_summary_dto(r) for r in rows]
+        # HP-4: the route owns the wire bounds (Query ge/le above); the body
+        # stays list[...] — pagination rides the RELATIVE Link header only.
+        try:
+            page = await store.list_pending(actor.tenant_id, limit=limit, cursor=cursor)
+        except ApprovalCursorInvalid:
+            raise HTTPException(status_code=422, detail={"reason": "cursor_invalid"}) from None
+        if page.next_cursor is not None:
+            response.headers["Link"] = (
+                f'</api/v1/approvals/?cursor={page.next_cursor}&limit={limit}>; rel="next"'
+            )
+        return [_summary_dto(r) for r in page.items]
 
     @router.get("/{request_id}", response_model=ApprovalDetailResponse)
     async def get_detail(

@@ -74,6 +74,7 @@ MemoryRefusalReason = Literal[
     "memory_approval_denied",
     "memory_approval_expired",
     "memory_approval_binding_mismatch",
+    "memory_approval_originator_mismatch",
     "memory_approval_request_not_found",
 ]
 

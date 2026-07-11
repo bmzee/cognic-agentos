@@ -21,9 +21,10 @@ from cognic_agentos.core.scheduler import (
 
 
 class TestSchedulerAdmissionOutcomeVocabulary:
-    def test_exactly_twelve_values(self):
-        # 7 at Sprint 10.5; 12 at Sprint 13.5c2 (+5 refused_approval_* per ADR-014).
-        assert len(get_args(SchedulerAdmissionOutcome)) == 12
+    def test_exactly_thirteen_values(self):
+        # 7 at Sprint 10.5; 12 at 13.5c2 (+5 refused_approval_* per ADR-014);
+        # 13 at HP-4 / M8.5-C T1 (+refused_approval_originator_mismatch).
+        assert len(get_args(SchedulerAdmissionOutcome)) == 13
 
     def test_accepted_values(self):
         accepted = {v for v in get_args(SchedulerAdmissionOutcome) if v.startswith("accepted_")}
@@ -42,6 +43,8 @@ class TestSchedulerAdmissionOutcomeVocabulary:
             "refused_approval_denied",
             "refused_approval_expired",
             "refused_approval_binding_mismatch",
+            # HP-4 (M8.5-C T1) — actor-bound replay
+            "refused_approval_originator_mismatch",
             "refused_approval_request_not_found",
         }
 

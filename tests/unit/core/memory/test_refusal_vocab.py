@@ -40,21 +40,23 @@ _EXPECTED = {
     "memory_approval_denied",
     "memory_approval_expired",
     "memory_approval_binding_mismatch",
+    "memory_approval_originator_mismatch",
     "memory_approval_request_not_found",
 }
 
 
-def test_refusal_vocab_is_exactly_the_23_wire_public_reasons():
+def test_refusal_vocab_is_exactly_the_24_wire_public_reasons():
     assert set(typing.get_args(MemoryRefusalReason)) == _EXPECTED
 
 
 def test_refusal_vocab_count_pinned():
-    # 18 at ADR-023; 23 at Sprint 13.5c3 (+5 approval-seam reasons, ADR-014).
-    assert len(typing.get_args(MemoryRefusalReason)) == 23
+    # 18 at ADR-023; 23 at 13.5c3 (+5 approval-seam, ADR-014); 24 at HP-4
+    # (M8.5-C T1: +memory_approval_originator_mismatch).
+    assert len(typing.get_args(MemoryRefusalReason)) == 24
 
 
-def test_refusal_taxonomy_has_twenty_three_values_after_13_5c3() -> None:
-    assert len(typing.get_args(MemoryRefusalReason)) == 23
+def test_refusal_taxonomy_has_twenty_four_values_after_hp4() -> None:
+    assert len(typing.get_args(MemoryRefusalReason)) == 24
 
 
 def test_vector_recall_unavailable_is_a_memory_refusal_reason() -> None:

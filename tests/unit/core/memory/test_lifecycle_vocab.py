@@ -19,10 +19,11 @@ _NEW_LIFECYCLE_REASONS = {
 }
 
 
-def test_memory_refusal_reason_is_23_values_closed_enum():
+def test_memory_refusal_reason_is_24_values_closed_enum():
     vals = set(typing.get_args(MemoryRefusalReason))
-    # 17 at Sprint-11.5c; 18 at ADR-023; 23 at Sprint-13.5c3 (+5 approval-seam).
-    assert len(vals) == 23
+    # 17 at Sprint-11.5c; 18 at ADR-023; 23 at Sprint-13.5c3 (+5 approval-seam);
+    # 24 at HP-4 / M8.5-C T1 (+memory_approval_originator_mismatch).
+    assert len(vals) == 24
     assert vals >= _NEW_LIFECYCLE_REASONS
     assert "memory_write_frozen" in vals and "memory_purpose_mismatch" in vals
 

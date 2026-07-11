@@ -8,8 +8,9 @@ import typing
 import pytest
 
 
-def test_refusal_vocabulary_carries_five_approval_values() -> None:
+def test_refusal_vocabulary_carries_six_approval_values() -> None:
     # Wire-protocol-public (spec §4); the engine-absent fallback value is KEPT.
+    # HP-4 (M8.5-C T1) added the originator mismatch.
     from cognic_agentos.core.memory.tiers import MemoryRefusalReason
 
     values = set(typing.get_args(MemoryRefusalReason))
@@ -18,10 +19,11 @@ def test_refusal_vocabulary_carries_five_approval_values() -> None:
         "memory_approval_denied",
         "memory_approval_expired",
         "memory_approval_binding_mismatch",
+        "memory_approval_originator_mismatch",
         "memory_approval_request_not_found",
     } <= values
     assert "memory_approval_engine_not_available" in values  # fallback kept
-    assert len(values) == 23  # 18 at 11.5/ADR-023; 23 at 13.5c3 (ADR-014)
+    assert len(values) == 24  # 23 at 13.5c3 (ADR-014); 24 at HP-4 (M8.5-C T1)
 
 
 def test_refused_carries_optional_approval_request_id() -> None:
@@ -275,7 +277,7 @@ async def _pending(db: object) -> list[object]:
     from cognic_agentos.core.approval.storage import ApprovalRequestStore
     from cognic_agentos.core.decision_history import DecisionHistoryStore
 
-    return list(await ApprovalRequestStore(DecisionHistoryStore(db)).list_pending("t1"))  # type: ignore[arg-type]
+    return list((await ApprovalRequestStore(DecisionHistoryStore(db)).list_pending("t1")).items)  # type: ignore[arg-type]
 
 
 _WRITE_KWARGS: dict[str, object] = dict(
@@ -486,19 +488,63 @@ class TestWiredReWrite:
         assert exc.value.reason == "memory_approval_binding_mismatch"
         assert exc.value.approval_request_id is None  # pending-only carrier
 
-    async def test_actor_swap_binding_mismatch(self, tmp_path: object) -> None:
-        # c2 refinement carried forward: actor_id is IN the binding digest.
+    async def test_actor_swap_originator_mismatch(
+        self, tmp_path: object, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # HP-4 (M8.5-C T1): the ENGINE-level originator check fires FIRST —
+        # actor_id remains in the binding digest (the 13.5c2 refinement), but
+        # a swapped actor now surfaces the UNIFORM originator reason before
+        # the digest ever compares. This is the memory consumer's
+        # mapped-refusal pin.
+        import logging
+
         from cognic_agentos.core.memory.tiers import MemoryOperationRefused
 
         db = await _mk_migrated_db(tmp_path)
         engine = _mk_approval_engine(db, flow="require_single_approval")
-        gate = _mk_gate(approval_engine=engine)
+        gate = _mk_gate(approval_engine=engine)  # original requester: actor_id="svc"
         rid = await self._pending_rid(gate)
         await engine.grant(request_id=rid, tenant_id="t1", approver=_approver())  # type: ignore[attr-defined]
         swapped = _mk_gate(context=_ctx(actor_id="svc-2"), approval_engine=engine)
-        with pytest.raises(MemoryOperationRefused) as exc:
+        with caplog.at_level(logging.DEBUG), pytest.raises(MemoryOperationRefused) as exc:
             await swapped.check_write(**_WRITE_KWARGS, approval_request_id=str(rid))  # type: ignore[attr-defined]
-        assert exc.value.reason == "memory_approval_binding_mismatch"
+        assert exc.value.reason == "memory_approval_originator_mismatch"
+        # Value-free: neither the original requester ("svc") nor the swapped
+        # caller ("svc-2") rides the refusal detail OR any captured log record.
+        rendered = repr(exc.value) + str(exc.value)
+        # Scope to cognic_agentos GOVERNANCE loggers: the evidence chain
+        # (decision_history) legitimately records the actor as evidence, and
+        # its sqlalchemy SQL-echo at DEBUG is not a governance-log leak.
+        # repr(vars(record)) covers message + args AND `extra=` fields (this
+        # repo commonly logs identity through extra, which lands in __dict__).
+        gov = [r for r in caplog.records if r.name.startswith("cognic_agentos")]
+        logged = " ".join(repr(vars(r)) for r in gov)
+        for subject in ("svc", "svc-2"):
+            assert subject not in rendered, f"{subject!r} leaked into the refusal detail"
+            assert subject not in logged, f"{subject!r} leaked into a log record"
+
+    async def test_verify_receives_ctx_actor_id_exactly(self, tmp_path: object) -> None:
+        # Exact actor-forwarding (HP-4 test class i): the gate passes
+        # ctx.actor_id — verbatim — as expected_originator_subject.
+        from unittest.mock import AsyncMock, MagicMock
+
+        from cognic_agentos.core.approval._types import ApprovalTransitionRefused
+        from cognic_agentos.core.memory.tiers import MemoryOperationRefused
+
+        approval = MagicMock()
+        approval.verify_grant_for_action = AsyncMock(
+            side_effect=ApprovalTransitionRefused("approval_originator_mismatch")
+        )
+        gate = _mk_gate(context=_ctx(actor_id="analyst.exact-forwarding"), approval_engine=approval)
+        import uuid as _uuid
+
+        with pytest.raises(MemoryOperationRefused) as exc:
+            await gate.check_write(  # type: ignore[attr-defined]
+                **_WRITE_KWARGS, approval_request_id=str(_uuid.uuid4())
+            )
+        assert exc.value.reason == "memory_approval_originator_mismatch"
+        sent = approval.verify_grant_for_action.await_args.kwargs
+        assert sent["expected_originator_subject"] == "analyst.exact-forwarding"
 
     async def test_consent_revalidated_not_bound(self, tmp_path: object) -> None:
         # Spec §3.1: Steps 0-6 RE-RUN on every attempt — consent is deliberately

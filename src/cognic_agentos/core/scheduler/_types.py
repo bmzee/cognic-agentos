@@ -22,7 +22,7 @@ SchedulerAdmissionOutcome = Literal[
     # accepted (2)
     "accepted_immediate",
     "accepted_queued",
-    # refused (10; wire-equal to SchedulerRefusalReason)
+    # refused (11; wire-equal to SchedulerRefusalReason; HP-4 +originator_mismatch)
     "refused_queue_full",
     "refused_quota_exhausted",
     "refused_policy_denied",
@@ -33,6 +33,7 @@ SchedulerAdmissionOutcome = Literal[
     "refused_approval_denied",
     "refused_approval_expired",
     "refused_approval_binding_mismatch",
+    "refused_approval_originator_mismatch",
     "refused_approval_request_not_found",
 ]
 
@@ -47,6 +48,7 @@ SchedulerRefusalReason = Literal[
     "refused_approval_denied",
     "refused_approval_expired",
     "refused_approval_binding_mismatch",
+    "refused_approval_originator_mismatch",
     "refused_approval_request_not_found",
 ]
 
