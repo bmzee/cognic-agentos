@@ -2341,6 +2341,7 @@ _resign_tools_pack() {
   local pack_id="$1" version="$2" wheel="$3"
   local att="$STAGING_DST/pack-attestations/$pack_id/$version"
   local release_pub="$STAGING_DST/release-pubs/$pack_id.pub"
+  local verify_detail verify_err="$QC_TMP/re-sign-$pack_id-verify.err"
   [ -f "$att/$wheel" ] || die "re-sign: staged wheel missing at $att/$wheel"
   [ -f "$att/cosign.sig" ] || die "re-sign: original cosign.sig missing at $att/cosign.sig"
   [ -f "$release_pub" ] || die "re-sign: released cosign.pub missing at $release_pub (stage-packs did not stage it)"
@@ -2349,8 +2350,16 @@ _resign_tools_pack() {
   # digest-pinned to the maintainer-locked SHA in stage-packs; this additionally
   # proves the release actually SIGNED those exact bytes, so the proof never
   # re-signs a wheel whose release signature was invalid or absent.
-  cosign verify-blob --key "$release_pub" --signature "$att/cosign.sig" "$att/$wheel" >/dev/null 2>&1 \
-    || die "re-sign: the ORIGINAL $pack_id/$version cosign.sig did NOT verify under its released cosign.pub — refusing to re-sign unauthenticated bytes"
+  # ADR-016 release signing deliberately uses --tlog-upload=false. The pinned
+  # release key + wheel digest are the offline trust anchors; asking Rekor for
+  # a deliberately absent entry is both incorrect and network-dependent.
+  if ! cosign verify-blob --insecure-ignore-tlog=true --key "$release_pub" \
+      --signature "$att/cosign.sig" "$att/$wheel" \
+      >/dev/null 2>"$verify_err"; then
+    verify_detail="$(head -c 500 "$verify_err")"
+    [ -n "$verify_detail" ] || verify_detail="no cosign diagnostic"
+    die "re-sign: could not cryptographically verify the ORIGINAL $pack_id/$version cosign.sig under its released cosign.pub — refusing to re-sign unauthenticated bytes; cosign: $verify_detail"
+  fi
   cosign sign-blob --key "$APPROVE_KEY_TMP/cosign.key" --tlog-upload=false \
     --yes --output-signature "$att/cosign.sig" "$att/$wheel" >/dev/null
   echo "  re-signed $pack_id/$version cosign.sig under the proof approve key (original verified under release key first)"

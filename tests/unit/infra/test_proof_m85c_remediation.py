@@ -406,11 +406,93 @@ def test_f10_harness_image_is_built_with_its_git_sha() -> None:
     assert '--build-arg BUILD_SHA="$HARNESS_GIT_SHA"' in _RUNNER_TEXT
 
 
-def test_f10_resign_verifies_the_release_signature_before_overwriting() -> None:
-    # The wheel bytes are already digest-pinned; this additionally proves the
-    # RELEASE actually signed them before the proof re-signs under its own key.
-    assert 'cosign verify-blob --key "$release_pub"' in _RUNNER_TEXT
+def _run_resign_probe(
+    tmp_path: Path, *, verify_failure: bool = False
+) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
+    """Execute the production re-sign function against a strict fake cosign."""
+    pack_id = "cognic-tool-oracle-schema"
+    version = "0.3.0"
+    wheel = "oracle.whl"
+    staging = tmp_path / "staging"
+    attestations = staging / "pack-attestations" / pack_id / version
+    release_pubs = staging / "release-pubs"
+    approve_key = tmp_path / "approve-key"
+    attestations.mkdir(parents=True)
+    release_pubs.mkdir(parents=True)
+    approve_key.mkdir()
+    (attestations / wheel).write_bytes(b"digest-pinned-wheel")
+    signature = attestations / "cosign.sig"
+    signature.write_text("release-signature")
+    (release_pubs / f"{pack_id}.pub").write_text("release-public-key")
+    (approve_key / "cosign.key").write_text("proof-private-key")
+    calls = tmp_path / "cosign-calls"
+    fail = "1" if verify_failure else "0"
+    preamble = f"""
+STAGING_DST={shlex.quote(str(staging))}
+APPROVE_KEY_TMP={shlex.quote(str(approve_key))}
+COSIGN_CALLS={shlex.quote(str(calls))}
+ORIGINAL_SIG={shlex.quote(str(signature))}
+FAKE_VERIFY_FAILURE={fail}
+cosign() {{
+  printf '%s\\n' "$*" >> "$COSIGN_CALLS"
+  case "$1" in
+    verify-blob)
+      case " $* " in
+        *" --insecure-ignore-tlog=true "*) ;;
+        *) echo "unexpected Rekor-dependent verification" >&2; return 42 ;;
+      esac
+      [ "$(cat "$ORIGINAL_SIG")" = "release-signature" ] || return 43
+      if [ "$FAKE_VERIFY_FAILURE" = "1" ]; then
+        echo "offline signature mismatch sentinel" >&2
+        return 44
+      fi
+      return 0
+      ;;
+    sign-blob)
+      while [ "$#" -gt 0 ]; do
+        if [ "$1" = "--output-signature" ]; then
+          shift
+          printf 'proof-signature' > "$1"
+          return 0
+        fi
+        shift
+      done
+      return 45
+      ;;
+    *) return 46 ;;
+  esac
+}}
+"""
+    result = _bash_probe(
+        functions=("_resign_tools_pack",),
+        call=f'_resign_tools_pack "{pack_id}" "{version}" "{wheel}"',
+        preamble=preamble,
+    )
+    return result, signature, calls
+
+
+def test_f10_resign_verifies_the_release_signature_offline_before_overwriting(
+    tmp_path: Path,
+) -> None:
+    # Releases are deliberately signed with --tlog-upload=false. This test goes RED
+    # if the runner regrows a Rekor lookup or signs before authenticating the bytes.
+    result, signature, calls = _run_resign_probe(tmp_path)
+    assert result.returncode == 0, result.stderr
+    assert signature.read_text() == "proof-signature"
+    call_lines = calls.read_text().splitlines()
+    assert call_lines[0].startswith("verify-blob --insecure-ignore-tlog=true --key ")
+    assert call_lines[1].startswith("sign-blob --key ")
     assert "release-pubs" in _STAGE_TEXT
+
+
+def test_f10_resign_failure_is_diagnostic_and_never_overwrites(
+    tmp_path: Path,
+) -> None:
+    result, signature, calls = _run_resign_probe(tmp_path, verify_failure=True)
+    assert result.returncode == 90
+    assert "offline signature mismatch sentinel" in result.stderr
+    assert signature.read_text() == "release-signature"
+    assert len(calls.read_text().splitlines()) == 1
 
 
 def test_f10_proof_build_context_has_a_dockerignore_excluding_pycache() -> None:

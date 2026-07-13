@@ -184,7 +184,10 @@ human-identity claim. Securing in-cluster MCP transport is a future slice.
   carry two release keys. So the runner mints one per-run approve-signing key,
   stages its public half as `trust-roots/_default/cosign.pub`, and **re-signs
   both tools-kind wheels' `cosign.sig` under it** (analogous to the
-  canonical-image re-home). This is the one M8.5-C change to a proven (M8)
+  canonical-image re-home). Before overwriting either signature, it verifies the
+  original signature offline against that release's digest-pinned public key and
+  wheel; ADR-016 releases deliberately use `--tlog-upload=false`, so this check
+  has no Rekor dependency. This is the one M8.5-C change to a proven (M8)
   trust-staging path; it is safe and localized (only the two tools-kind packs use
   `_default`; hook/skill/agent packs keep their own per-pack roots) but is
   **exercised only in the operator's live run** — it is not verified by the
