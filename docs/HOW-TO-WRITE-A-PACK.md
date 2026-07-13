@@ -70,8 +70,11 @@ JWS arm in `cli/sign.py` + `cli/verify.py` is gated on
 `pack_kind == "agent"`. Section 8 covers the hook-specific manifest
 shape + the runtime DLP enforcement boundary.
 
-**Canonical workflow order: `init → build wheel → sign --bundle →
-validate → test-harness → verify`.** The `agentos validate` step
+**Canonical workflow order: `init → lock → frozen sync → build wheel →
+sign --bundle → validate → test-harness → verify`.** Commit `uv.lock`:
+it is the dependency inventory that the SBOM, vulnerability scan, and
+license report attest. Signing never resolves or updates dependencies.
+The `agentos validate` step
 checks `supply_chain.attestation_paths` for non-empty + every declared
 file present on disk; the seven attestation files are produced by
 `sign --bundle`, so the realistic flow runs sign FIRST and then
@@ -81,18 +84,25 @@ shape, not a bug; it's a useful pre-sign **readiness check** for
 catching block-shape errors before you spend wall-clock time on the
 sign pipeline.
 
-**Build the wheel.**
+**Lock and reproduce the runtime environment, then build the wheel.**
 
 ```
-python -m build --wheel    # or `uv build`
+uv lock                    # resolve deliberately; review + commit uv.lock
+uv lock --check            # fail if pyproject.toml and uv.lock disagree
+uv sync --frozen --extra dev
+uv build --wheel
 ```
+
+Run the same `uv lock --check` + frozen sync spine in release CI. A
+missing/stale lock or an installed version that differs from the lock is a
+signing refusal, not permission to regenerate evidence from ambient state.
 
 **Sign + bundle.** Run the four supply-chain binaries (cosign / syft /
 grype / pip-licenses) + emit the SLSA + in-toto attestations + (agent
 packs) sign the AgentCard JWS:
 
 ```
-agentos sign --bundle .
+uv run agentos sign --bundle .
 ```
 
 This populates `attestations/` with the seven files the runtime trust
@@ -102,7 +112,7 @@ written.
 **Validate (now passes).**
 
 ```
-agentos validate .
+uv run agentos validate .
 ```
 
 The orchestrator runs six per-concern validators (identity, a2a, mcp,
@@ -143,7 +153,7 @@ end-to-end before publish:
   the conformance report per ADR-017 + Doctrine Lock E.
 
 ```
-agentos test-harness .
+uv run agentos test-harness .
 ```
 
 **Wave-1 narrow contract.** The harness does NOT install
@@ -164,7 +174,7 @@ the freshly signed bundle. Same 11-step pipeline the runtime
 plugin-registry runs at admission time, plus the load probe (Step 11):
 
 ```
-agentos verify .
+uv run agentos verify .
 ```
 
 **Reference packs.** Four minimal-but-valid packs at
@@ -328,7 +338,7 @@ any are missing) and a grace-period tier (registers with
 | File | What it proves | How to generate |
 |---|---|---|
 | `attestations/cosign.sig` | Identity of the publisher | `cosign sign-blob --bundle bundle.sigstore --output-signature cosign.sig <wheel>` |
-| `attestations/sbom.cdx.json` | Full transitive dependency inventory (CycloneDX 1.5) | `syft <wheel> -o cyclonedx-json > sbom.cdx.json` |
+| `attestations/sbom.cdx.json` | Exact lock-derived runtime inventory (CycloneDX 1.5) | `uv run agentos sign --bundle .` |
 | `attestations/bundle.sigstore` | Combined cosign + Rekor entry, offline re-verifiable | `cosign sign-blob --bundle bundle.sigstore <wheel>` |
 
 The trust gate refuses any pack missing one of these three regardless of
@@ -340,8 +350,8 @@ tenant policy.
 |---|---|---|
 | `attestations/slsa-provenance.intoto.json` | SLSA L3+ provenance | `slsa-github-generator` workflow OR equivalent |
 | `attestations/intoto-layout.json` | Build steps performed in declared order by declared parties | `in-toto-attest` with your build step list |
-| `attestations/vuln-scan.json` | CVE scan against your transitive deps | `grype <wheel> -o json > vuln-scan.json` |
-| `attestations/license-audit.json` | Transitive license list | `syft <wheel> -o syft-text \| your license-classifier > license-audit.json`, or Cognic's reference shape: `{"licenses": [...], "artifacts": [...]}` |
+| `attestations/vuln-scan.json` | Grype findings over the exact validated SBOM component set | `uv run agentos sign --bundle .` |
+| `attestations/license-audit.json` | Exact root-plus-runtime-dependency license inventory | `uv run agentos sign --bundle .` |
 
 Tenants that set `require_full: true` in their policy bundle (per ADR-015)
 will refuse `partial` packs. If your bank-tenant has set this — and most
@@ -362,62 +372,26 @@ reproducibility_manifest = "uv.lock"        # or package-lock.json / Cargo.lock 
 sigstore_bundle_path = "attestations/bundle.sigstore"
 ```
 
-### 4.4 Wave 1 escape hatch — generating the bundle by hand
+### 4.4 No hand-built evidence escape hatch
 
-`agentos sign --bundle` (Sprint 7A) will eventually wrap all of this in
-a single command. Until that ships, the reference recipe is:
-
-```bash
-# 1. Build the wheel
-uv build
-
-# 2. SBOM (mandatory)
-syft "dist/your_pack-0.1.0-py3-none-any.whl" \
-  -o cyclonedx-json > attestations/sbom.cdx.json
-
-# 3. cosign sign-blob with bundle (mandatory — produces cosign.sig + bundle.sigstore)
-COSIGN_EXPERIMENTAL=1 cosign sign-blob \
-  --output-signature attestations/cosign.sig \
-  --bundle attestations/bundle.sigstore \
-  --yes \
-  "dist/your_pack-0.1.0-py3-none-any.whl"
-
-# 4. SLSA provenance (grace-period — strongly recommended)
-#    Easiest path: slsa-github-generator workflow on GitHub Actions.
-#    Manual path: see https://slsa.dev/provenance/v1
-
-# 5. in-toto layout (grace-period)
-#    in-toto-attest --in-toto-layout layout.toml ... > attestations/intoto-layout.json
-
-# 6. Vuln scan (grace-period)
-grype "dist/your_pack-0.1.0-py3-none-any.whl" -o json > attestations/vuln-scan.json
-
-# 7. License audit (grace-period) — Cognic shape:
-#    {"licenses": ["MIT", "Apache-2.0"], "artifacts": [...]}
-#    Generate from `syft -o syft-text` and classify; or use a CI helper.
-```
-
-The fixture pack at `tests/fixtures/_signing_kit/build_test_attestations.sh`
-has a working reference: in `--regenerate` mode it does the cosign step
-end-to-end with an ephemeral keypair. Do not ship to production with an
-ephemeral keypair; use your bank-tenant's Vault-stored signing key.
+`uv run agentos sign --bundle .` is the supported Wave-1 producer for the
+seven-file evidence set. Do not substitute direct Syft/Grype/pip-licenses
+commands: valid JSON from a checkout, wheel, or auditor environment can look
+plausible while describing a different package universe. The signer derives
+one current-platform graph from committed `uv.lock`, checks the signing
+interpreter against it, and requires exact component equality from all three
+evidence tools. A custom release wrapper may call the CLI and inspect its
+outputs before upload; it may not bypass these gates.
 
 ---
 
 ## 5. Local verification before submission
 
-`agentos verify <pack-path>` (Sprint 7A) will run the same checks the
-trust gate runs at registration time, locally, before you submit to
-the bank-pack lifecycle. Until that ships, the Wave 1 recipe is to run
-the unit-test smoke against your pack:
-
-1. Install your pack: `uv pip install -e path/to/your_pack/`
-2. Run AgentOS's plugin registry test suite, scoped to admission:
-   `uv run pytest tests/unit/protocol/test_fixture_pack_admission.py -v`
-3. Adapt that test (it's ~290 LoC, well-commented) to point at your
-   pack's `DiscoveredPack` + `PackAttestations` instead of the fixture's,
-   then run again. If it admits at `attestation_grade: full`, the bank
-   reviewer will too.
+`uv run agentos verify <pack-path>` runs the same local trust checks used at
+registration before you submit to the bank-pack lifecycle. Run it against the
+freshly signed tree and intended public trust root. A clean result proves
+integrity and contract shape; inspect the generated attestations separately
+before upload for publication hygiene and release-specific policy.
 
 ---
 
@@ -483,11 +457,14 @@ Hook packs ride the same lifecycle as every other kind:
 agentos init-hook  redact-pii-pan
 cd cognic-hook-redact-pii-pan
 # fill the AUTHOR-FILL placeholders in cognic-pack-manifest.toml + pyproject.toml
-python -m build --wheel
-agentos sign --bundle .       # produces 7 attestations under attestations/
-agentos validate .            # passes once attestations exist on disk
-agentos test-harness .        # green path post Sprint-7B.1 T6b — Hook.invoke(context, payload) seam
-agentos verify .              # offline trust-gate dry run; 11-step pipeline
+uv lock                       # review + commit uv.lock
+uv lock --check
+uv sync --frozen --extra dev
+uv build --wheel
+uv run agentos sign --bundle .  # produces 7 attestations under attestations/
+uv run agentos validate .       # passes once attestations exist on disk
+uv run agentos test-harness .   # green path post Sprint-7B.1 T6b — Hook.invoke(context, payload) seam
+uv run agentos verify .         # offline trust-gate dry run; 11-step pipeline
 ```
 
 Two doctrine differences vs tool / skill / agent packs:

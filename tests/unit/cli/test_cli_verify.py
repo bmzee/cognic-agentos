@@ -94,6 +94,7 @@ import pytest
 from typer.testing import CliRunner
 
 from cognic_agentos.cli import app
+from tests.unit.cli import test_cli_sign as sign_helpers
 
 # ---------------------------------------------------------------------------
 # Fixture path — single-sourced to the T14 task-local fixture pack
@@ -175,6 +176,7 @@ def _make_tool_shim(
     tool_name: str,
     output_flag: str,
     output_payload: bytes,
+    cyclonedx_output_payload: bytes | None = None,
     exit_code: int = 0,
 ) -> Path:
     """Generic tool shim — mirrors test_cli_sign.py::_make_tool_shim.
@@ -207,9 +209,12 @@ def _make_tool_shim(
                 else:
                     out_path = next_arg
                 break
+        payload = {output_payload!r}
+        if "cyclonedx-json" in argv and {cyclonedx_output_payload!r} is not None:
+            payload = {cyclonedx_output_payload!r}
         if out_path is not None:
             with open(out_path, "wb") as out:
-                out.write({output_payload!r})
+                out.write(payload)
         sys.exit({exit_code!r})
         """
     ).strip()
@@ -218,7 +223,12 @@ def _make_tool_shim(
     return shim
 
 
-def _stage_full_shim_set(tmp_path: Path) -> dict[str, Path]:
+def _stage_full_shim_set(
+    tmp_path: Path,
+    *,
+    project_name: str = "cognic-agent-sign-target",
+    project_version: str = "0.1.0",
+) -> dict[str, Path]:
     """Build the four shims (cosign / syft / grype / license-auditor)
     used during sign --bundle to produce the attestation set verify
     will then verify."""
@@ -228,22 +238,28 @@ def _stage_full_shim_set(tmp_path: Path) -> dict[str, Path]:
             tmp_path,
             tool_name="syft",
             output_flag="-o",
-            output_payload=(
-                b'{"bomFormat": "CycloneDX", "specVersion": "1.5", '
-                b'"components": [], "metadata": {"timestamp": "2026-05-08T00:00:00Z"}}'
+            output_payload=sign_helpers._runtime_sbom_payload(
+                project_name,
+                project_version,
             ),
         ),
         "grype": _make_tool_shim(
             tmp_path,
             tool_name="grype",
             output_flag="--file",
-            output_payload=b'{"matches": [], "source": {"type": "file"}}',
+            output_payload=b'{"matches": [], "source": {"type": "sbom"}}',
+            cyclonedx_output_payload=sign_helpers._runtime_grype_proof_payload(
+                project_name,
+                project_version,
+            ),
         ),
         "license_auditor": _make_tool_shim(
             tmp_path,
             tool_name="license_auditor",
             output_flag="--output-file",
-            output_payload=b'[{"Name": "cognic-agent-sign-target", "License": "AUTHOR-FILL"}]',
+            output_payload=(
+                b'[{"Name":"cognic-agentos","Version":"0.0.1","License":"Proprietary"}]'
+            ),
         ),
     }
 
@@ -344,6 +360,10 @@ def _stage_signed_pack(
                 'sign_target = "cognic_hook_sign_target.hook:SignTargetHook"\n',
             )
         pyproject_path.write_text(pyproject_text)
+        sign_helpers._rewrite_fixture_lock_root(
+            pack,
+            project_name=f"cognic-{kind}-sign-target",
+        )
 
     dist_dir = pack / "dist"
     dist_dir.mkdir(exist_ok=True)
@@ -406,7 +426,10 @@ def _stage_signed_pack(
             ep_source = module_source_override
         zf.writestr(ep_module_file, ep_source)
 
-    shims = _stage_full_shim_set(tmp_path)
+    shim_project_name = (
+        f"cognic-{kind}-sign-target" if kind != "agent" else "cognic-agent-sign-target"
+    )
+    shims = _stage_full_shim_set(tmp_path, project_name=shim_project_name)
     monkeypatch.setenv("COGNIC_COSIGN_PATH", str(shims["cosign"]))
     monkeypatch.setenv("COGNIC_SYFT_PATH", str(shims["syft"]))
     monkeypatch.setenv("COGNIC_GRYPE_PATH", str(shims["grype"]))
@@ -4435,6 +4458,7 @@ def test_sign_with_renamed_wheel_internal_metadata_mismatch_emits_subprocess_fai
     pyproject_path.write_text(
         pyproject_path.read_text().replace('version = "0.1.0"', 'version = "9.9.9"')
     )
+    sign_helpers._rewrite_fixture_lock_root(pack, project_version="9.9.9")
     # Wheel filename also says 9.9.9, but the INTERNAL dist-info +
     # METADATA still say 0.1.0 (simulating a renamed-wheel attack).
     dist_dir = pack / "dist"
@@ -4451,7 +4475,7 @@ def test_sign_with_renamed_wheel_internal_metadata_mismatch_emits_subprocess_fai
             "Metadata-Version: 2.1\nName: cognic_agent_sign_target\nVersion: 0.1.0\n",
         )
 
-    shims = _stage_full_shim_set(tmp_path)
+    shims = _stage_full_shim_set(tmp_path, project_version="9.9.9")
     monkeypatch.setenv("COGNIC_COSIGN_PATH", str(shims["cosign"]))
     monkeypatch.setenv("COGNIC_SYFT_PATH", str(shims["syft"]))
     monkeypatch.setenv("COGNIC_GRYPE_PATH", str(shims["grype"]))
@@ -5000,6 +5024,7 @@ def test_sign_with_pep440_equivalent_version_text_mismatch_emits_subprocess_fail
     pyproject_path.write_text(
         pyproject_path.read_text().replace('version = "0.1.0"', 'version = "1.0"')
     )
+    sign_helpers._rewrite_fixture_lock_root(pack, project_version="1.0")
     dist_dir = pack / "dist"
     dist_dir.mkdir(exist_ok=True)
     wheel = dist_dir / "cognic_agent_sign_target-1.0-py3-none-any.whl"
@@ -5015,7 +5040,7 @@ def test_sign_with_pep440_equivalent_version_text_mismatch_emits_subprocess_fail
         )
         zf.writestr("cognic_agent_sign_target/agent.py", "class Cls:\n    pass\n")
 
-    shims = _stage_full_shim_set(tmp_path)
+    shims = _stage_full_shim_set(tmp_path, project_version="1.0")
     monkeypatch.setenv("COGNIC_COSIGN_PATH", str(shims["cosign"]))
     monkeypatch.setenv("COGNIC_SYFT_PATH", str(shims["syft"]))
     monkeypatch.setenv("COGNIC_GRYPE_PATH", str(shims["grype"]))
@@ -6982,6 +7007,10 @@ def _stage_signed_instruction_pack(
         if "cognic.agents" not in line and not line.startswith("sign_target = ")
     ]
     pyproject_path.write_text("\n".join(pyproject_lines) + "\n")
+    sign_helpers._rewrite_fixture_lock_root(
+        pack,
+        project_name="cognic-skill-sign-target",
+    )
 
     # The REAL PEP-427-complete instruction wheel: stub package with
     # __init__.py + manifest + SKILL.md as package data; dist-info has
@@ -7011,7 +7040,10 @@ def _stage_signed_instruction_pack(
         for member_name, payload in wheel_members.items():
             zf.writestr(member_name, payload)
 
-    shims = _stage_full_shim_set(tmp_path)
+    shims = _stage_full_shim_set(
+        tmp_path,
+        project_name="cognic-skill-sign-target",
+    )
     monkeypatch.setenv("COGNIC_COSIGN_PATH", str(shims["cosign"]))
     monkeypatch.setenv("COGNIC_SYFT_PATH", str(shims["syft"]))
     monkeypatch.setenv("COGNIC_GRYPE_PATH", str(shims["grype"]))

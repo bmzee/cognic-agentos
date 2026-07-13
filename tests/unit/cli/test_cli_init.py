@@ -133,6 +133,23 @@ def test_scaffold_creates_canonical_tree(kind: str, tmp_path: Path) -> None:
     assert not missing, f"missing scaffold files: {missing}"
 
 
+@pytest.mark.parametrize("kind", _KINDS)
+def test_scaffolded_release_workflow_uses_committed_lock(
+    kind: str,
+    tmp_path: Path,
+) -> None:
+    """The generated release path must reproduce the environment whose
+    dependency evidence is signed; it may not resolve a fresh graph in CI."""
+    pack_root = _scaffold(kind, "example", tmp_path)
+    workflow = (pack_root / ".github" / "workflows" / "sign-and-publish.yml").read_text()
+
+    lock_check = workflow.index("uv lock --check")
+    frozen_sync = workflow.index("uv sync --frozen --extra dev")
+    sign = workflow.index("uv run agentos sign --bundle .")
+    assert lock_check < frozen_sync < sign
+    assert 'pip install "cognic-agentos' not in workflow
+
+
 def test_tool_scaffold_has_no_agent_cards_dir(tmp_path: Path) -> None:
     """``agent_cards/`` is agent-only; the tool scaffold MUST NOT
     ship it."""
@@ -389,19 +406,18 @@ def test_tool_scaffold_pins_kernel_in_dev_extras_not_runtime(tmp_path: Path) -> 
 
 
 @pytest.mark.parametrize("kind", _KINDS)
-def test_scaffolded_ci_installs_kernel_from_git(kind: str, tmp_path: Path) -> None:
-    """The scaffold's sign-and-publish CI installs the AgentOS CLI from the
-    git-pinned tag. Positive: the git-pinned ``pip install`` is present.
-    Negative: the broken bare ``pip install cognic-agentos`` is absent."""
+def test_scaffolded_ci_installs_kernel_from_locked_project(
+    kind: str,
+    tmp_path: Path,
+) -> None:
+    """Release CI consumes the git-pinned AgentOS dependency through the
+    committed project lock, never through an ad-hoc install beside it."""
     pack_root = _scaffold(kind, "example", tmp_path)
     ci_text = (pack_root / ".github" / "workflows" / "sign-and-publish.yml").read_text()
-    assert f'pip install "{_PINNED_KERNEL_DEP}"' in ci_text, (
-        f"{kind} CI must git-install the kernel; expected "
-        f'pip install "{_PINNED_KERNEL_DEP}" in:\n{ci_text}'
-    )
-    assert "pip install cognic-agentos" not in ci_text, (
-        f"{kind} CI must NOT carry the broken bare `pip install cognic-agentos`:\n{ci_text}"
-    )
+    pyproject_text = (pack_root / "pyproject.toml").read_text()
+    assert _PINNED_KERNEL_DEP in pyproject_text
+    assert "uv sync --frozen --extra dev" in ci_text
+    assert "pip install" not in ci_text
 
 
 @pytest.mark.parametrize("kind", _KINDS)

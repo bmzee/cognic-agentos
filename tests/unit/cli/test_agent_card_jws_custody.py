@@ -483,7 +483,10 @@ def test_tool_pack_sign_does_not_require_jws_signing_key(
     setting entirely unset — the separate custody is agent-only."""
     import shutil as _shutil
 
-    shims = sign_helpers._stage_full_shim_set(tmp_path)
+    shims = sign_helpers._stage_full_shim_set(
+        tmp_path,
+        project_name="cognic-tool-sign-target",
+    )
     pack = tmp_path / "tool_pack"
     _shutil.copytree(_SIGN_TARGET_PACK, pack)
     manifest_path = pack / "cognic-pack-manifest.toml"
@@ -517,6 +520,7 @@ def test_tool_pack_sign_does_not_require_jws_signing_key(
             'name = "cognic-agent-sign-target"', 'name = "cognic-tool-sign-target"'
         )
     )
+    sign_helpers._rewrite_fixture_lock_root(pack, project_name="cognic-tool-sign-target")
     # A REAL PEP-427-complete TOOL wheel built in-test (the house
     # pattern — the fixture pack ships NO dist/ on disk): cognic.tools
     # entry point + METADATA Name matching the wheel filename so the
@@ -639,7 +643,7 @@ def test_run_sign_bundle_inner_agent_without_resolved_jws_key_refuses(
             grype_bin=str(shims["grype"]),
             license_bin=str(shims["license_auditor"]),
             key_path=str(_FIXTURE_PRIVATE_PEM),
-            signing_identity=str(_FIXTURE_PRIVATE_PEM),
+            signing_key_reference=str(_FIXTURE_PRIVATE_PEM),
             jws_key_path=None,
             findings=[],
             dev_mode_skip_cosign=False,

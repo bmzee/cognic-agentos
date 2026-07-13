@@ -10,17 +10,20 @@ entry point that AgentOS discovery resolves the distribution from. The pack has
 
 ## Quick start
 
-Install the pack plus the authoring CLI (the `dev` extra carries the kernel):
+Resolve and commit the runtime inventory, then reproduce it exactly (the
+`dev` extra carries the authoring CLI):
 
 ```sh
-uv pip install -e '.[dev]'
+uv lock
+uv lock --check
+uv sync --frozen --extra dev
 ```
 
 Edit `cognic-pack-manifest.toml` to replace every `AUTHOR-FILL:` placeholder,
 then surface any remaining gaps:
 
 ```sh
-agentos validate .
+uv run agentos validate .
 ```
 
 Iterate until exit 0.
@@ -66,16 +69,24 @@ signature / expiry / audience / scope) run with `COGNIC_AUTH_MODE=jwt`. Replace
 ## Testing locally
 
 ```sh
-uv pip install -e '.[dev]'
-pytest tests/
+uv sync --frozen --extra dev
+uv run pytest tests/
 ```
 
 ## Publishing
 
 ```sh
-agentos sign --bundle .
-agentos verify .
+uv lock --check
+uv sync --frozen --extra dev
+uv build --wheel
+uv run agentos sign --bundle .
+uv run agentos validate .
+uv run agentos verify .
 ```
+
+`uv.lock` is a committed release input: the signed SBOM, vulnerability scan,
+and license evidence must describe that exact graph. Never regenerate it in
+the signing step.
 
 The reference workflow at `.github/workflows/sign-and-publish.yml` wires this
 into CI on every push to main. AUTHOR-FILL: review + customize the workflow's

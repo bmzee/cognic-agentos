@@ -16,16 +16,19 @@ checks that every declared `supply_chain.attestation_paths` file
 exists on disk; sign produces them, then validate clears):
 
 ```
-python -m build --wheel        # or `uv build`
-agentos sign --bundle .         # produces the seven attestations
-agentos validate .              # passes once attestations exist
-agentos verify .                # offline trust-gate dry-run
+uv lock                        # review + commit uv.lock
+uv lock --check
+uv sync --frozen --extra dev
+uv build --wheel
+uv run agentos sign --bundle .  # produces the seven attestations
+uv run agentos validate .       # passes once attestations exist
+uv run agentos test-harness .   # Hook.invoke(context, payload) dry-run
+uv run agentos verify .         # offline trust-gate dry-run
 ```
 
-Hook packs do NOT participate in `agentos test-harness` Wave-1; the
-harness is narrowed to `kind = "tool"` (per T13/R31). Hook dispatch
-dry-runs land in a follow-up sprint alongside the skill + agent
-harness expansion.
+Hook packs participate in `agentos test-harness` through the public
+`Hook.invoke(context, payload)` seam; the SDK's context, payload, and result
+validation phases all run before the dry-run can pass.
 
 ## What this pack ships
 
@@ -57,10 +60,13 @@ harness expansion.
       `HookResult` decisions (pass / redact / mask / refuse).
 - [ ] Replace the skipped smoke test with real coverage of every
       decision branch.
-- [ ] Run `python -m build --wheel`.
-- [ ] Run `agentos sign --bundle .` → populates `attestations/`.
-- [ ] Run `agentos validate .` → expect green.
-- [ ] Run `agentos verify .` → expect exit 0.
+- [ ] Commit `uv.lock`; run `uv lock --check` +
+      `uv sync --frozen --extra dev`.
+- [ ] Run `uv build --wheel`.
+- [ ] Run `uv run agentos sign --bundle .` → populates `attestations/`.
+- [ ] Run `uv run agentos validate .` → expect green.
+- [ ] Run `uv run agentos test-harness .` → expect green.
+- [ ] Run `uv run agentos verify .` → expect exit 0.
 
 For the full author tutorial read `docs/HOW-TO-WRITE-A-PACK.md` in
 the cognic-agentos repo.

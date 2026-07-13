@@ -27,9 +27,12 @@ Shipped surface in this module:
     per R6 P2 #1); cross-checks the wheel filename's PEP 427 name
     + version against pyproject metadata; fails closed on multiple
     wheels in dist/. Validates output directories against symlink-
-    escape (R8 P2 #3 + R9 P2 #2). Records the auditable signing
-    identity (vault URI when applicable, NOT the transient tempfile
-    path) in SLSA + in-toto attestations (R6 P2 #3).
+    escape (R8 P2 #3 + R9 P2 #2). Public attestations redact the
+    private signing-key reference, use pack-relative artifact paths,
+    and refuse any absolute host path before completing. A mandatory
+    pack-local ``uv.lock`` supplies one current-platform runtime
+    inventory to Syft, Grype, and pip-licenses; each output must match
+    that exact non-empty package set before it can become evidence.
   - **``--dev-mode-skip-cosign``** — short-circuits cosign
     resolution + execution entirely in dev / test profiles
     (the prod settings profile rejects the flag at construction
@@ -104,9 +107,10 @@ Production behaviour (Doctrine F):
     R7 P2 #2), the resolved PEM bytes are written to a tempfile
     under the orchestrator's try/finally cleanup (R2 P2 #2 +
     R3 P2 #2 type-validation + R6 P2 #2 whitespace-strip).
-    SLSA / in-toto / cosign-argv-byproduct record the auditable
-    identity (vault URI when applicable), NOT the transient
-    tempfile path (R3 P2 #3 + R4 P2 #1 invocation-plan shape).
+    SLSA / in-toto / cosign-invocation-plan evidence records a
+    redacted key reference, never the file path, Vault URI, or
+    transient tempfile path. The verifier-supplied cosign trust root
+    remains the cryptographic identity authority.
   - AgentCard-JWS key custody (M8 finding #4c, ADR-016 amendment
     2026-07-06): agent packs sign the AgentCard JWS with the
     SEPARATE ``Settings.agent_card_jws_signing_key_path``
@@ -144,9 +148,12 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import hashlib
+import importlib.metadata
 import json
 import os
+import re
 import shutil
+import sys
 import tempfile
 import tomllib
 from collections.abc import Iterable
@@ -196,6 +203,13 @@ _SLSA_PROVENANCE_PREDICATE_TYPE: Final[str] = "https://slsa.dev/provenance/v1"
 #: out-of-scope notes). Fixed string, not a URL — pack admission
 #: doesn't dereference this; it's an opaque label.
 _AGENTOS_SIGN_BUNDLE_BUILD_TYPE: Final[str] = "agentos-sprint-7a-sign-bundle/wave-1-simplified"
+
+#: Public provenance identifies the builder independently of the private
+#: signing-key location. The cosign signature + verifier-supplied trust root
+#: bind the cryptographic identity; a local path or Vault URI is custody
+#: metadata and must not enter a publishable attestation.
+_AGENTOS_SIGN_BUNDLE_BUILDER_ID: Final[str] = "urn:cognic:agentos:builder:sign-bundle:wave-1"
+_REDACTED_COSIGN_KEY_REFERENCE: Final[str] = "redacted:verifier-supplied-cosign-trust-root"
 
 
 #: Closed-enum frozenset of valid pack kinds. Per R4 P2 #3 doctrine:
@@ -253,6 +267,46 @@ class SignReport:
     overall_status: Literal["pass", "fail"]
     findings: list[SignFinding]
     artifacts: dict[str, str] = dataclasses.field(default_factory=dict)
+
+
+@dataclasses.dataclass(frozen=True, slots=True, order=True)
+class _RuntimePackage:
+    """One exact package identity selected from the pack's ``uv.lock``."""
+
+    name: str
+    version: str
+
+
+@dataclasses.dataclass(frozen=True, slots=True, order=True)
+class _RuntimeVcsSource:
+    """Immutable VCS provenance for one lock-selected runtime package."""
+
+    package_name: str
+    repository: str
+    requested_revision: str
+    commit_id: str
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class _RuntimeInventory:
+    """The one runtime package set shared by SBOM, license, and CVE evidence."""
+
+    root: _RuntimePackage
+    dependencies: tuple[_RuntimePackage, ...]
+    direct_dependency_names: frozenset[str]
+    lock_digest_sha256: str
+    marker_environment: tuple[tuple[str, str], ...]
+    root_license: str
+    vcs_sources: tuple[_RuntimeVcsSource, ...] = ()
+
+    @property
+    def packages(self) -> tuple[_RuntimePackage, ...]:
+        return (self.root, *self.dependencies)
+
+    @property
+    def package_set_sha256(self) -> str:
+        framed = "\n".join(f"{package.name}=={package.version}" for package in self.packages)
+        return hashlib.sha256(framed.encode("utf-8")).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -410,18 +464,15 @@ async def _resolve_key_material_path(
     AgentCard-JWS custody wrapper reuses the SAME vault:// + file
     branches instead of forking them).
 
-    Returns ``(tool_readable_path, auditable_identity,
+    Returns ``(tool_readable_path, custody_reference,
     tempfile_to_cleanup, finding)``:
       - ``tool_readable_path``: filesystem path the consuming tool can
         read; ``None`` on refusal. For ``vault://`` URIs this is a
         tempfile path; for file paths it's the path itself.
-      - ``auditable_identity``: the stable identifier recorded in
-        SLSA / in-toto attestations + the cosign-argv byproduct
-        (per R3 P2 #3 doctrine — vault:// URIs MUST be preserved as
-        the auditable identity; recording the transient tempfile
-        path leaks local /tmp paths + loses production identity).
-        For ``vault://`` URIs this is the URI itself; for file
-        paths it's the resolved file path.
+      - ``custody_reference``: the stable file path or Vault URI used
+        during execution. It is never written to public attestations;
+        those carry a redacted marker and rely on the cosign trust root
+        for cryptographic identity.
       - ``tempfile_to_cleanup``: ``Path`` to a tempfile the
         orchestrator MUST unlink in its finally block when the
         resolution wrote bytes from a Vault payload to disk;
@@ -434,7 +485,7 @@ async def _resolve_key_material_path(
     SecretAdapter; the resolver validates the payload's ``key``
     field is ``bytes`` (or coerces from ``str``), writes to a
     tempfile the consuming tool can read, and returns the URI
-    separately as the auditable identity.
+    separately as execution-only custody metadata.
     """
     env_label = f"COGNIC_{setting_label.upper()}"
     if configured is None:
@@ -599,9 +650,8 @@ async def _resolve_key_material_path(
         tempfile_path = Path(tempfile_handle.name)
         # Restrict perms — vault-resolved keys must NOT be world-readable.
         tempfile_path.chmod(0o600)
-        # R3 P2 #3: the consuming tool reads the tempfile path; SLSA /
-        # in-toto / cosign-argv-byproduct record the stable vault URI as
-        # the auditable identity.
+        # The consuming tool reads the tempfile path. The stable Vault URI
+        # returns only as execution metadata and is redacted before evidence.
         return str(tempfile_path), configured, tempfile_path, None
 
     # File-path branch.
@@ -623,8 +673,7 @@ async def _resolve_key_material_path(
                 payload={"configured_path": configured},
             ),
         )
-    # File-path branch: cosign-readable + auditable identity are the
-    # same (the resolved file path).
+    # File-path branch: tool-readable path + custody reference are the same.
     resolved = str(key_path)
     return resolved, resolved, None, None
 
@@ -1577,11 +1626,700 @@ def _read_pack_metadata_from_pyproject(
     return name.strip(), version.strip(), None
 
 
+class _RuntimeInventoryError(ValueError):
+    """Internal value error carrying the stable operator-facing failure mode."""
+
+    def __init__(self, failure_mode: str, message: str) -> None:
+        super().__init__(message)
+        self.failure_mode = failure_mode
+
+
+def _runtime_inventory_refusal(
+    pack_path: Path,
+    *,
+    failure_mode: str,
+    message: str,
+    error_type: str | None = None,
+) -> SignFinding:
+    payload: dict[str, Any] = {
+        "pack_path": str(pack_path),
+        "failure_mode": failure_mode,
+    }
+    if error_type is not None:
+        payload["error_type"] = error_type
+    return SignFinding(
+        severity="refusal",
+        reason="sign_subprocess_failed",
+        message=message,
+        payload=payload,
+    )
+
+
+def _normalized_marker(value: object) -> str:
+    from packaging.markers import InvalidMarker, Marker
+
+    if value is None or value == "":
+        return ""
+    if not isinstance(value, str):
+        raise _RuntimeInventoryError(
+            "runtime_lock_marker_invalid",
+            "uv.lock carries a dependency marker that is not a string.",
+        )
+    try:
+        return str(Marker(value))
+    except InvalidMarker as exc:
+        raise _RuntimeInventoryError(
+            "runtime_lock_marker_invalid",
+            "uv.lock carries an invalid dependency marker.",
+        ) from exc
+
+
+def _edge_extras(edge: dict[str, Any]) -> tuple[str, ...]:
+    from packaging.utils import canonicalize_name
+
+    raw = edge.get("extra", [])
+    if not isinstance(raw, list) or not all(isinstance(item, str) and item for item in raw):
+        raise _RuntimeInventoryError(
+            "runtime_lock_dependency_shape_invalid",
+            "uv.lock dependency extras must be a list of non-empty strings.",
+        )
+    return tuple(sorted(canonicalize_name(item) for item in raw))
+
+
+def _edge_contract(edge: dict[str, Any]) -> tuple[str, tuple[str, ...], str]:
+    from packaging.utils import canonicalize_name
+
+    name = edge.get("name")
+    if not isinstance(name, str) or not name.strip():
+        raise _RuntimeInventoryError(
+            "runtime_lock_dependency_shape_invalid",
+            "uv.lock carries a dependency without a non-empty name.",
+        )
+    return canonicalize_name(name), _edge_extras(edge), _normalized_marker(edge.get("marker"))
+
+
+def _normalized_git_repository(
+    value: str,
+    *,
+    pep508: bool,
+) -> tuple[str, str, str | None]:
+    """Normalize one explicit HTTPS git reference.
+
+    Returns ``(repository, requested_revision, resolved_commit)``. PEP 508
+    inputs use ``git+https://...@REV`` and have no resolved commit; uv lock
+    inputs use ``https://...?rev=REV#COMMIT``.
+    """
+    from urllib.parse import parse_qs, unquote, urlsplit, urlunsplit
+
+    raw = value
+    if pep508:
+        if not raw.startswith("git+https://"):
+            raise _RuntimeInventoryError(
+                "runtime_pyproject_direct_url_unsupported",
+                "Runtime direct URLs must be revision-pinned git+https dependencies.",
+            )
+        raw = raw.removeprefix("git+")
+    parsed = urlsplit(raw)
+    if (
+        parsed.scheme.lower() != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        raise _RuntimeInventoryError(
+            "runtime_lock_git_source_invalid"
+            if not pep508
+            else "runtime_pyproject_direct_url_unsupported",
+            "Runtime git dependencies require credential-free HTTPS repository URLs.",
+        )
+
+    resolved_commit: str | None = None
+    if pep508:
+        if parsed.query or parsed.fragment:
+            raise _RuntimeInventoryError(
+                "runtime_pyproject_direct_url_unsupported",
+                "Runtime git dependencies do not support query, fragment, or subdirectory forms.",
+            )
+        repository_path, separator, requested_revision = parsed.path.rpartition("@")
+        if not separator or not repository_path or not requested_revision:
+            raise _RuntimeInventoryError(
+                "runtime_pyproject_direct_url_unpinned",
+                "Runtime git dependencies must carry an explicit revision after '@'.",
+            )
+    else:
+        try:
+            query = parse_qs(parsed.query, keep_blank_values=True, strict_parsing=True)
+        except ValueError as exc:
+            raise _RuntimeInventoryError(
+                "runtime_lock_git_source_invalid",
+                "uv.lock git sources carry a malformed revision selector.",
+            ) from exc
+        revisions = query.get("rev", [])
+        if set(query) != {"rev"} or len(revisions) != 1 or not revisions[0]:
+            raise _RuntimeInventoryError(
+                "runtime_lock_git_source_invalid",
+                "uv.lock git sources must carry exactly one non-empty rev selector.",
+            )
+        repository_path = parsed.path
+        requested_revision = revisions[0]
+        if parsed.fragment:
+            resolved_commit = parsed.fragment.lower()
+            if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", resolved_commit):
+                raise _RuntimeInventoryError(
+                    "runtime_lock_git_commit_invalid",
+                    "uv.lock git sources must resolve to an immutable 40- or 64-hex commit.",
+                )
+
+    normalized_path = unquote(repository_path).rstrip("/")
+    if normalized_path.endswith(".git"):
+        normalized_path = normalized_path[:-4]
+    if not normalized_path or normalized_path == "/":
+        raise _RuntimeInventoryError(
+            "runtime_lock_git_source_invalid"
+            if not pep508
+            else "runtime_pyproject_direct_url_unsupported",
+            "Runtime git dependencies require a non-empty repository path.",
+        )
+    repository = urlunsplit(("https", parsed.netloc.lower(), normalized_path, "", ""))
+    return repository, unquote(requested_revision), resolved_commit
+
+
+def _requirement_source_contract(requirement: Any) -> tuple[str, str, str] | None:
+    if requirement.url is None:
+        return None
+    repository, revision, _commit = _normalized_git_repository(requirement.url, pep508=True)
+    return "git", repository, revision
+
+
+def _locked_requirement_source_contract(raw: dict[str, Any]) -> tuple[str, str, str] | None:
+    source_keys = {key for key in ("git", "url", "path") if key in raw}
+    if not source_keys:
+        return None
+    if source_keys != {"git"} or not isinstance(raw.get("git"), str):
+        raise _RuntimeInventoryError(
+            "runtime_pyproject_direct_url_unsupported",
+            "Only revision-pinned git+https runtime direct URLs are supported.",
+        )
+    repository, revision, commit = _normalized_git_repository(raw["git"], pep508=False)
+    if commit is not None:
+        raise _RuntimeInventoryError(
+            "runtime_lock_git_source_invalid",
+            "uv.lock requirement metadata must name the requested revision, not a resolved commit.",
+        )
+    return "git", repository, revision
+
+
+def _locked_package_vcs_source(
+    package: dict[str, Any],
+    *,
+    package_name: str,
+) -> _RuntimeVcsSource | None:
+    source = package.get("source")
+    if not isinstance(source, dict):
+        raise _RuntimeInventoryError(
+            "runtime_lock_package_shape_invalid",
+            "Every uv.lock package needs a source table.",
+        )
+    if set(source) == {"registry"} and isinstance(source.get("registry"), str):
+        return None
+    if set(source) == {"git"} and isinstance(source.get("git"), str):
+        repository, revision, commit = _normalized_git_repository(source["git"], pep508=False)
+        if commit is None:
+            raise _RuntimeInventoryError(
+                "runtime_lock_git_commit_missing",
+                "uv.lock git packages must include the immutable resolved commit.",
+            )
+        return _RuntimeVcsSource(package_name, repository, revision, commit)
+    raise _RuntimeInventoryError(
+        "runtime_lock_nonreproducible_source",
+        "Runtime packages must come from a registry or an immutable HTTPS git commit.",
+    )
+
+
+def _pyproject_runtime_requirement_contracts(
+    project_block: dict[str, Any],
+) -> tuple[tuple[tuple[str, tuple[str, ...], str], Any], ...]:
+    from packaging.requirements import InvalidRequirement, Requirement
+    from packaging.utils import canonicalize_name
+
+    raw_dependencies = project_block.get("dependencies", [])
+    if not isinstance(raw_dependencies, list) or not all(
+        isinstance(item, str) for item in raw_dependencies
+    ):
+        raise _RuntimeInventoryError(
+            "runtime_pyproject_dependencies_invalid",
+            "[project].dependencies must be a list of PEP 508 strings.",
+        )
+    parsed: list[tuple[tuple[str, tuple[str, ...], str], Any]] = []
+    for raw in raw_dependencies:
+        try:
+            requirement = Requirement(raw)
+        except InvalidRequirement as exc:
+            raise _RuntimeInventoryError(
+                "runtime_pyproject_dependency_invalid",
+                "[project].dependencies contains an invalid PEP 508 requirement.",
+            ) from exc
+        _requirement_source_contract(requirement)
+        marker = str(requirement.marker) if requirement.marker is not None else ""
+        contract = (
+            canonicalize_name(requirement.name),
+            tuple(sorted(canonicalize_name(extra) for extra in requirement.extras)),
+            marker,
+        )
+        parsed.append((contract, requirement))
+    if len({contract for contract, _requirement in parsed}) != len(parsed):
+        raise _RuntimeInventoryError(
+            "runtime_pyproject_dependency_duplicate",
+            "[project].dependencies contains duplicate normalized requirements.",
+        )
+    return tuple(parsed)
+
+
+def _locked_requirement_contracts(root_package: dict[str, Any]) -> set[tuple[Any, ...]]:
+    from packaging.specifiers import InvalidSpecifier, SpecifierSet
+
+    metadata = root_package.get("metadata")
+    if not isinstance(metadata, dict):
+        raise _RuntimeInventoryError(
+            "runtime_lock_metadata_missing",
+            "uv.lock root package is missing [package.metadata].",
+        )
+    raw_requires = metadata.get("requires-dist")
+    if not isinstance(raw_requires, list):
+        raise _RuntimeInventoryError(
+            "runtime_lock_metadata_missing",
+            "uv.lock root package is missing package.metadata.requires-dist.",
+        )
+    contracts: set[tuple[Any, ...]] = set()
+    for raw in raw_requires:
+        if not isinstance(raw, dict):
+            raise _RuntimeInventoryError(
+                "runtime_lock_metadata_invalid",
+                "uv.lock package.metadata.requires-dist contains a non-table entry.",
+            )
+        marker = _normalized_marker(raw.get("marker"))
+        if "extra" in marker:
+            continue
+        name, extras, _edge_marker = _edge_contract(
+            {
+                "name": raw.get("name"),
+                "extra": raw.get("extras", []),
+                "marker": raw.get("marker"),
+            }
+        )
+        specifier_raw = raw.get("specifier", "")
+        if not isinstance(specifier_raw, str):
+            raise _RuntimeInventoryError(
+                "runtime_lock_metadata_invalid",
+                "uv.lock package.metadata.requires-dist has a non-string specifier.",
+            )
+        try:
+            specifier = str(SpecifierSet(specifier_raw))
+        except InvalidSpecifier as exc:
+            raise _RuntimeInventoryError(
+                "runtime_lock_metadata_invalid",
+                "uv.lock package.metadata.requires-dist has an invalid specifier.",
+            ) from exc
+        contracts.add(
+            (
+                name,
+                extras,
+                marker,
+                specifier,
+                _locked_requirement_source_contract(raw),
+            )
+        )
+    return contracts
+
+
+def _select_locked_package(
+    edge: dict[str, Any],
+    *,
+    packages_by_name: dict[str, list[dict[str, Any]]],
+) -> dict[str, Any]:
+    name, _extras, _marker = _edge_contract(edge)
+    candidates = list(packages_by_name.get(name, ()))
+    version = edge.get("version")
+    if version is not None:
+        if not isinstance(version, str):
+            raise _RuntimeInventoryError(
+                "runtime_lock_dependency_shape_invalid",
+                "uv.lock dependency version selectors must be strings.",
+            )
+        candidates = [candidate for candidate in candidates if candidate.get("version") == version]
+    source = edge.get("source")
+    if source is not None:
+        if not isinstance(source, dict):
+            raise _RuntimeInventoryError(
+                "runtime_lock_dependency_shape_invalid",
+                "uv.lock dependency source selectors must be tables.",
+            )
+        candidates = [candidate for candidate in candidates if candidate.get("source") == source]
+    if len(candidates) != 1:
+        raise _RuntimeInventoryError(
+            "runtime_lock_dependency_ambiguous",
+            "uv.lock dependency graph does not resolve one exact package identity.",
+        )
+    return candidates[0]
+
+
+def _marker_applies(marker: str, environment: Any) -> bool:
+    from packaging.markers import Marker
+
+    return not marker or Marker(marker).evaluate(environment=environment)
+
+
+def _read_runtime_inventory_from_uv_lock(
+    pack_path: Path,
+    *,
+    project_name: str,
+    project_version: str,
+) -> tuple[_RuntimeInventory | None, SignFinding | None]:
+    """Resolve the current-platform runtime graph from a pack-local ``uv.lock``.
+
+    The lock, not the signer's authoring environment, owns package selection.
+    The environment is checked separately before ``pip-licenses`` runs.
+    """
+    from packaging.markers import default_environment
+    from packaging.specifiers import SpecifierSet
+    from packaging.utils import canonicalize_name
+
+    lock_path = pack_path / "uv.lock"
+    try:
+        pack_root = pack_path.resolve()
+        lock_resolved = lock_path.resolve(strict=True)
+        if not lock_resolved.is_relative_to(pack_root) or not lock_resolved.is_file():
+            raise _RuntimeInventoryError(
+                "runtime_lock_outside_pack",
+                "uv.lock must resolve to a regular file inside the pack root.",
+            )
+        lock_bytes = lock_resolved.read_bytes()
+        lock_data = tomllib.loads(lock_bytes.decode("utf-8"))
+        pyproject_data = tomllib.loads((pack_path / "pyproject.toml").read_text(encoding="utf-8"))
+        project_block = pyproject_data.get("project")
+        if not isinstance(project_block, dict):
+            raise _RuntimeInventoryError(
+                "runtime_pyproject_dependencies_invalid",
+                "pyproject.toml is missing its [project] table.",
+            )
+
+        raw_packages = lock_data.get("package")
+        if not isinstance(raw_packages, list) or not raw_packages:
+            raise _RuntimeInventoryError(
+                "runtime_lock_packages_missing",
+                "uv.lock does not contain a non-empty [[package]] inventory.",
+            )
+        packages: list[dict[str, Any]] = []
+        for raw_package in raw_packages:
+            if not isinstance(raw_package, dict):
+                raise _RuntimeInventoryError(
+                    "runtime_lock_package_shape_invalid",
+                    "uv.lock contains a non-table package entry.",
+                )
+            name = raw_package.get("name")
+            version = raw_package.get("version")
+            source = raw_package.get("source")
+            if (
+                not isinstance(name, str)
+                or not name
+                or not isinstance(version, str)
+                or not version
+                or not isinstance(source, dict)
+            ):
+                raise _RuntimeInventoryError(
+                    "runtime_lock_package_shape_invalid",
+                    "Every uv.lock package needs non-empty name/version and a source table.",
+                )
+            packages.append(raw_package)
+
+        normalized_project_name = canonicalize_name(project_name)
+        root_candidates = [
+            package
+            for package in packages
+            if canonicalize_name(str(package["name"])) == normalized_project_name
+            and package["version"] == project_version
+            and (
+                package["source"].get("editable") == "." or package["source"].get("virtual") == "."
+            )
+        ]
+        if len(root_candidates) != 1:
+            raise _RuntimeInventoryError(
+                "runtime_lock_root_mismatch",
+                "uv.lock does not contain exactly one local root matching project name/version.",
+            )
+        root_package = root_candidates[0]
+
+        py_requirements = _pyproject_runtime_requirement_contracts(project_block)
+        root_dependencies = root_package.get("dependencies", [])
+        if not isinstance(root_dependencies, list) or not all(
+            isinstance(edge, dict) for edge in root_dependencies
+        ):
+            raise _RuntimeInventoryError(
+                "runtime_lock_dependency_shape_invalid",
+                "uv.lock root dependencies must be a list of dependency tables.",
+            )
+        root_contracts = {_edge_contract(edge) for edge in root_dependencies}
+        py_contracts = {contract for contract, _requirement in py_requirements}
+        if root_contracts != py_contracts:
+            raise _RuntimeInventoryError(
+                "runtime_lock_stale",
+                "uv.lock runtime dependencies disagree with [project].dependencies.",
+            )
+
+        metadata_contracts = _locked_requirement_contracts(root_package)
+        expected_metadata_contracts = {
+            (
+                contract[0],
+                contract[1],
+                contract[2],
+                str(requirement.specifier),
+                _requirement_source_contract(requirement),
+            )
+            for contract, requirement in py_requirements
+        }
+        if metadata_contracts != expected_metadata_contracts:
+            raise _RuntimeInventoryError(
+                "runtime_lock_stale",
+                "uv.lock requirement metadata disagrees with [project].dependencies.",
+            )
+
+        environment = default_environment()
+        packages_by_name: dict[str, list[dict[str, Any]]] = {}
+        for package in packages:
+            packages_by_name.setdefault(canonicalize_name(str(package["name"])), []).append(package)
+
+        pending = list(root_dependencies)
+        selected_by_name: dict[str, _RuntimePackage] = {}
+        vcs_by_name: dict[str, _RuntimeVcsSource] = {}
+        base_processed: set[tuple[str, str]] = set()
+        processed_extras: dict[tuple[str, str], set[str]] = {}
+        while pending:
+            edge = pending.pop()
+            name, extras, marker = _edge_contract(edge)
+            if not _marker_applies(marker, environment):
+                continue
+            package = _select_locked_package(edge, packages_by_name=packages_by_name)
+            locked = _RuntimePackage(name=name, version=str(package["version"]))
+            previous = selected_by_name.get(name)
+            if previous is not None and previous != locked:
+                raise _RuntimeInventoryError(
+                    "runtime_lock_platform_conflict",
+                    "uv.lock selects two versions of one package for the current platform.",
+                )
+            selected_by_name[name] = locked
+            vcs_source = _locked_package_vcs_source(package, package_name=name)
+            previous_vcs = vcs_by_name.get(name)
+            if previous_vcs is not None and previous_vcs != vcs_source:
+                raise _RuntimeInventoryError(
+                    "runtime_lock_platform_conflict",
+                    "uv.lock selects two source identities for one current-platform package.",
+                )
+            if vcs_source is not None:
+                vcs_by_name[name] = vcs_source
+            identity = (locked.name, locked.version)
+            already_processed = processed_extras.setdefault(identity, set())
+            if identity not in base_processed:
+                base_dependencies = package.get("dependencies", [])
+                if not isinstance(base_dependencies, list) or not all(
+                    isinstance(item, dict) for item in base_dependencies
+                ):
+                    raise _RuntimeInventoryError(
+                        "runtime_lock_dependency_shape_invalid",
+                        "uv.lock package dependencies must be dependency tables.",
+                    )
+                pending.extend(base_dependencies)
+                base_processed.add(identity)
+            optional = package.get("optional-dependencies", {})
+            if not isinstance(optional, dict):
+                raise _RuntimeInventoryError(
+                    "runtime_lock_dependency_shape_invalid",
+                    "uv.lock package optional-dependencies must be a table.",
+                )
+            for extra in set(extras) - already_processed:
+                optional_edges = optional.get(extra)
+                if not isinstance(optional_edges, list) or not all(
+                    isinstance(item, dict) for item in optional_edges
+                ):
+                    raise _RuntimeInventoryError(
+                        "runtime_lock_extra_missing",
+                        "uv.lock is missing a requested runtime extra dependency group.",
+                    )
+                pending.extend(optional_edges)
+            already_processed.update(extras)
+
+        direct_names: set[str] = set()
+        for contract, requirement in py_requirements:
+            if not _marker_applies(contract[2], environment):
+                continue
+            selected = selected_by_name[contract[0]]
+            expected_source = _requirement_source_contract(requirement)
+            selected_source = vcs_by_name.get(contract[0])
+            if expected_source is None and selected_source is not None:
+                raise _RuntimeInventoryError(
+                    "runtime_lock_source_mismatch",
+                    "uv.lock resolves a registry requirement from an undeclared VCS source.",
+                )
+            if expected_source is not None and (
+                selected_source is None
+                or expected_source[1] != selected_source.repository
+                or expected_source[2] != selected_source.requested_revision
+            ):
+                raise _RuntimeInventoryError(
+                    "runtime_lock_source_mismatch",
+                    "uv.lock git source disagrees with the direct runtime requirement.",
+                )
+            if requirement.specifier and not SpecifierSet(str(requirement.specifier)).contains(
+                selected.version,
+                prereleases=True,
+            ):
+                raise _RuntimeInventoryError(
+                    "runtime_lock_stale",
+                    "A locked direct dependency version violates pyproject.toml.",
+                )
+            direct_names.add(contract[0])
+
+        root_license_value = project_block.get("license", "UNKNOWN")
+        if isinstance(root_license_value, dict):
+            root_license_value = root_license_value.get("text", "UNKNOWN")
+        root_license = (
+            root_license_value.strip()
+            if isinstance(root_license_value, str) and root_license_value.strip()
+            else "UNKNOWN"
+        )
+        environment_values = dict(environment)
+        marker_environment = tuple(
+            sorted((key, str(value)) for key, value in environment_values.items())
+        )
+        return (
+            _RuntimeInventory(
+                root=_RuntimePackage(normalized_project_name, project_version),
+                dependencies=tuple(sorted(selected_by_name.values())),
+                direct_dependency_names=frozenset(direct_names),
+                lock_digest_sha256=hashlib.sha256(lock_bytes).hexdigest(),
+                marker_environment=marker_environment,
+                root_license=root_license,
+                vcs_sources=tuple(sorted(vcs_by_name.values())),
+            ),
+            None,
+        )
+    except FileNotFoundError:
+        return None, _runtime_inventory_refusal(
+            pack_path,
+            failure_mode="runtime_lock_missing",
+            message=(
+                "sign --bundle requires a pack-local uv.lock. Commit the lock so the "
+                "published release path resolves the same runtime evidence."
+            ),
+        )
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        return None, _runtime_inventory_refusal(
+            pack_path,
+            failure_mode="runtime_lock_unreadable",
+            message="sign --bundle could not read and parse the pack-local uv.lock.",
+            error_type=type(exc).__name__,
+        )
+    except _RuntimeInventoryError as exc:
+        return None, _runtime_inventory_refusal(
+            pack_path,
+            failure_mode=exc.failure_mode,
+            message=f"sign --bundle runtime inventory refused: {exc}",
+        )
+
+
+def _validate_runtime_environment(
+    pack_path: Path,
+    inventory: _RuntimeInventory,
+) -> SignFinding | None:
+    """Require the signing interpreter to contain every exact locked dependency."""
+    from packaging.utils import canonicalize_name
+    from packaging.version import InvalidVersion, Version
+
+    installed: dict[str, Any] = {}
+    for distribution in importlib.metadata.distributions():
+        distribution_name = distribution.metadata.get("Name")
+        if distribution_name:
+            installed[str(canonicalize_name(distribution_name))] = distribution
+    vcs_by_name = {source.package_name: source for source in inventory.vcs_sources}
+    for package in inventory.dependencies:
+        installed_distribution = installed.get(package.name)
+        if installed_distribution is None:
+            return _runtime_inventory_refusal(
+                pack_path,
+                failure_mode="runtime_environment_dependency_missing",
+                message=(
+                    "The signing interpreter is missing a locked runtime dependency; "
+                    "run the published repository's frozen sync before signing."
+                ),
+            )
+        installed_version = installed_distribution.version
+        try:
+            versions_match = Version(installed_version) == Version(package.version)
+        except InvalidVersion:
+            versions_match = installed_version == package.version
+        if not versions_match:
+            return _runtime_inventory_refusal(
+                pack_path,
+                failure_mode="runtime_environment_version_mismatch",
+                message=(
+                    "The signing interpreter disagrees with a locked runtime dependency "
+                    "version; run the published repository's frozen sync before signing."
+                ),
+            )
+        vcs_source = vcs_by_name.get(package.name)
+        if vcs_source is None:
+            continue
+        try:
+            direct_url_raw = installed_distribution.read_text("direct_url.json")
+            direct_url = json.loads(direct_url_raw) if direct_url_raw is not None else None
+            vcs_info = direct_url.get("vcs_info") if isinstance(direct_url, dict) else None
+            installed_repository = direct_url.get("url") if isinstance(direct_url, dict) else None
+            if (
+                not isinstance(vcs_info, dict)
+                or vcs_info.get("vcs") != "git"
+                or not isinstance(installed_repository, str)
+                or not isinstance(vcs_info.get("commit_id"), str)
+            ):
+                raise ValueError
+            repository, _revision, _commit = _normalized_git_repository(
+                f"{installed_repository}?rev={vcs_source.requested_revision}",
+                pep508=False,
+            )
+        except (
+            AttributeError,
+            json.JSONDecodeError,
+            TypeError,
+            ValueError,
+            _RuntimeInventoryError,
+        ):
+            return _runtime_inventory_refusal(
+                pack_path,
+                failure_mode="runtime_environment_vcs_provenance_missing",
+                message=(
+                    "The signing interpreter lacks valid PEP 610 provenance for a locked "
+                    "git runtime dependency; run the published repository's frozen sync."
+                ),
+            )
+        if (
+            repository != vcs_source.repository
+            or vcs_info["commit_id"].lower() != vcs_source.commit_id
+        ):
+            return _runtime_inventory_refusal(
+                pack_path,
+                failure_mode="runtime_environment_vcs_mismatch",
+                message=(
+                    "The signing interpreter's git dependency provenance disagrees with "
+                    "uv.lock; run the published repository's frozen sync before signing."
+                ),
+            )
+    return None
+
+
 async def _exec_tool_with_output_flag(
     tool_bin: str,
     *,
     argv: Iterable[str],
     tool_label: str,
+    cwd: Path | None = None,
 ) -> tuple[int, bytes, bytes]:
     """Run ``tool_bin`` via real ``asyncio.create_subprocess_exec``;
     inherit + overlay env (mirrors cosign env preservation).
@@ -1596,6 +2334,7 @@ async def _exec_tool_with_output_flag(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env={**os.environ},
+        cwd=cwd,
     )
     stdout, stderr = await proc.communicate()
     return proc.returncode or 0, stdout, stderr
@@ -1604,54 +2343,70 @@ async def _exec_tool_with_output_flag(
 async def _exec_syft(
     syft_bin: str,
     pack_path: Path,
+    inventory_input_path: Path,
     *,
     sbom_output_path: Path,
 ) -> tuple[int, bytes, bytes]:
-    """Run ``syft <pack-path> -o cyclonedx-json=<sbom-path>``.
+    """Run Syft against the exact lock-derived runtime requirements.
 
-    Wave-1 uses the equals-attached form which writes the CycloneDX
-    JSON SBOM directly to ``sbom_output_path``."""
+    The fixed basename ``requirements.txt`` activates Syft's Python package
+    cataloger. Relative argv + cwd keep the public source stable.
+    """
+    inventory_arg = _pack_relative_public_path(pack_path, inventory_input_path)
+    output_arg = _pack_relative_public_path(pack_path, sbom_output_path)
     return await _exec_tool_with_output_flag(
         syft_bin,
-        argv=[str(pack_path), "-o", f"cyclonedx-json={sbom_output_path}"],
+        argv=[f"file:{inventory_arg}", "-o", f"cyclonedx-json={output_arg}"],
         tool_label="syft",
+        cwd=pack_path.resolve(),
     )
 
 
 async def _exec_grype(
     grype_bin: str,
-    wheel_path: Path,
+    pack_path: Path,
+    sbom_path: Path,
     *,
-    vuln_output_path: Path,
+    output_path: Path,
+    output_format: Literal["json", "cyclonedx-json"] = "json",
 ) -> tuple[int, bytes, bytes]:
-    """Run ``grype <wheel> -o json --file <vuln-path>``."""
+    """Run Grype against the validated runtime SBOM, never the bare wheel."""
+    sbom_arg = _pack_relative_public_path(pack_path, sbom_path)
+    output_arg = _pack_relative_public_path(pack_path, output_path)
     return await _exec_tool_with_output_flag(
         grype_bin,
-        argv=[str(wheel_path), "-o", "json", "--file", str(vuln_output_path)],
+        argv=[f"sbom:{sbom_arg}", "-o", output_format, "--file", output_arg],
         tool_label="grype",
+        cwd=pack_path.resolve(),
     )
 
 
 async def _exec_license_auditor(
     license_bin: str,
+    pack_path: Path,
     *,
     license_output_path: Path,
+    inventory: _RuntimeInventory,
 ) -> tuple[int, bytes, bytes]:
-    """Run ``pip-licenses --with-system --format=json
-    --output-file=<license-path>``.
+    """Audit exactly the lock-selected packages in the signing interpreter.
 
-    Wave-1 uses pip-licenses; cyclonedx-py is an alternate auditor
-    pack authors can wire via Settings.license_auditor_path. The
-    output-file flag form is identical between the two.
+    ``pip-licenses`` otherwise audits the binary's own interpreter, which can
+    be unrelated to the pack. ``--python`` + ``--packages`` make the source
+    explicit; the postprocessor proves exact name/version equality.
     """
+    output_arg = _pack_relative_public_path(pack_path, license_output_path)
     return await _exec_tool_with_output_flag(
         license_bin,
         argv=[
-            "--with-system",
+            "--python",
+            sys.executable,
             "--format=json",
-            f"--output-file={license_output_path}",
+            f"--output-file={output_arg}",
+            "--packages",
+            *(package.name for package in inventory.dependencies),
         ],
         tool_label="pip-licenses",
+        cwd=pack_path.resolve(),
     )
 
 
@@ -1666,21 +2421,879 @@ def _compute_file_digest_sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+class _PackRelativePathRefused(RuntimeError):
+    def __init__(self, finding: SignFinding) -> None:
+        super().__init__(finding.message)
+        self.finding = finding
+
+
+def _pack_relative_public_path(pack_path: Path, target_path: Path) -> str:
+    """Return a stable pack-relative path or raise a structured refusal."""
+    try:
+        return target_path.resolve().relative_to(pack_path.resolve()).as_posix()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise _PackRelativePathRefused(
+            SignFinding(
+                severity="refusal",
+                reason="sign_subprocess_failed",
+                message=(
+                    "A public-attestation input/output path does not resolve inside "
+                    "the pack root; refusing before invoking an evidence tool."
+                ),
+                payload={
+                    "target_name": target_path.name,
+                    "error_type": type(exc).__name__,
+                    "failure_mode": "public_attestation_path_outside_pack",
+                },
+            )
+        ) from None
+
+
+_EMBEDDED_POSIX_PATH_RE: Final[re.Pattern[str]] = re.compile(r"(?:^|[\s\"'=:,(\[])/(?!/)[^\s\"']+")
+_EMBEDDED_FILE_URI_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?:^|[\s\"'=,(\[])file:/",
+    re.IGNORECASE,
+)
+_EMBEDDED_WINDOWS_PATH_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?:^|[\s\"'=:,(\[])[A-Za-z]:[\\/][^\s\"']+"
+)
+_EMBEDDED_UNC_BACKSLASH_PATH_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?:^|[\s\"'=:,(\[])\\\\[^\\/\s\"']+[\\/][^\s\"']+"
+)
+_EMBEDDED_UNC_FORWARD_PATH_RE: Final[re.Pattern[str]] = re.compile(
+    r"(?:^|[\s\"'=,(\[])//[^/\s\"']+/[^\s\"']+"
+)
+
+
+def _is_absolute_host_path(value: str) -> bool:
+    """Detect standalone and embedded POSIX, file-URI, drive, and UNC paths."""
+    return (
+        _EMBEDDED_FILE_URI_RE.search(value) is not None
+        or _EMBEDDED_POSIX_PATH_RE.search(value) is not None
+        or _EMBEDDED_WINDOWS_PATH_RE.search(value) is not None
+        or _EMBEDDED_UNC_BACKSLASH_PATH_RE.search(value) is not None
+        or _EMBEDDED_UNC_FORWARD_PATH_RE.search(value) is not None
+    )
+
+
+def _find_absolute_host_path(
+    value: object,
+    *,
+    location: tuple[str, ...] = (),
+) -> tuple[str, ...] | None:
+    if isinstance(value, str):
+        return location if _is_absolute_host_path(value) else None
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            if isinstance(key, str) and _is_absolute_host_path(key):
+                return (*location, "<object-key>")
+            found = _find_absolute_host_path(nested, location=(*location, str(key)))
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for index, nested in enumerate(value):
+            found = _find_absolute_host_path(nested, location=(*location, str(index)))
+            if found is not None:
+                return found
+    return None
+
+
+def _rewrite_pack_local_paths(value: object, *, pack_root: Path) -> object:
+    if isinstance(value, str):
+        candidate = value
+        if candidate.startswith("file://"):
+            candidate = candidate.removeprefix("file://")
+        candidate_path = Path(candidate)
+        if candidate_path.is_absolute():
+            try:
+                return candidate_path.relative_to(pack_root).as_posix()
+            except ValueError:
+                pseudo_relative = candidate_path.as_posix().lstrip("/")
+                if pseudo_relative and (pack_root / pseudo_relative).exists():
+                    return pseudo_relative
+        return value
+    if isinstance(value, dict):
+        return {
+            key: _rewrite_pack_local_paths(nested, pack_root=pack_root)
+            for key, nested in value.items()
+        }
+    if isinstance(value, list):
+        return [_rewrite_pack_local_paths(nested, pack_root=pack_root) for nested in value]
+    return value
+
+
+_SYFT_LOCATION_PROPERTY_RE: Final[re.Pattern[str]] = re.compile(r"syft:location:[0-9]+:path")
+
+
+def _normalize_syft_inventory_locations(payload: object) -> object:
+    """Replace Syft's synthetic requirements-file locator with ``uv.lock``.
+
+    Syft reports a requirements source as an absolute virtual
+    ``/requirements.txt`` location on every component. It is neither a host
+    path nor useful public provenance. Only Syft's explicitly named location
+    property is normalized; every unknown absolute-path field still reaches
+    the fail-closed disclosure gate.
+    """
+    if not isinstance(payload, dict):
+        return payload
+    components = payload.get("components")
+    if not isinstance(components, list):
+        return payload
+    for component in components:
+        if not isinstance(component, dict):
+            continue
+        properties = component.get("properties")
+        if not isinstance(properties, list):
+            continue
+        for property_value in properties:
+            if not isinstance(property_value, dict):
+                continue
+            name = property_value.get("name")
+            if (
+                isinstance(name, str)
+                and _SYFT_LOCATION_PROPERTY_RE.fullmatch(name)
+                and property_value.get("value") == "/requirements.txt"
+            ):
+                property_value["value"] = "uv.lock"
+    return payload
+
+
+def _public_attestation_json_finding(path: Path) -> SignFinding | None:
+    """Fail closed when publishable JSON is invalid or leaks a host path."""
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return SignFinding(
+            severity="refusal",
+            reason="sign_subprocess_failed",
+            message=(
+                f"Generated public attestation {path.name!r} is not valid JSON; "
+                "refusing to publish an unverifiable artifact."
+            ),
+            payload={
+                "artifact_name": path.name,
+                "error_type": type(exc).__name__,
+                "failure_mode": "public_attestation_json_invalid",
+            },
+        )
+    location = _find_absolute_host_path(payload)
+    if location is None:
+        return None
+    return SignFinding(
+        severity="refusal",
+        reason="sign_subprocess_failed",
+        message=(
+            f"Generated public attestation {path.name!r} contains an absolute "
+            "host path; refusing to disclose workstation or custody metadata."
+        ),
+        payload={
+            "artifact_name": path.name,
+            "json_location": ".".join(location),
+            "failure_mode": "public_attestation_host_path",
+        },
+    )
+
+
+def _write_public_attestation_json(path: Path, payload: object) -> SignFinding | None:
+    try:
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    except (OSError, TypeError, ValueError) as exc:
+        return SignFinding(
+            severity="refusal",
+            reason="sign_subprocess_failed",
+            message=(
+                f"Generated public attestation {path.name!r} could not be "
+                "rewritten safely; refusing to publish a partial artifact."
+            ),
+            payload={
+                "artifact_name": path.name,
+                "error_type": type(exc).__name__,
+                "failure_mode": "public_attestation_rewrite_failed",
+            },
+        )
+    return _public_attestation_json_finding(path)
+
+
+def _sanitize_grype_host_metadata(path: Path) -> SignFinding | None:
+    """Remove Grype's host cache locations, then apply the public JSON gate."""
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return _public_attestation_json_finding(path)
+    if isinstance(payload, dict):
+        descriptor = payload.get("descriptor")
+        if isinstance(descriptor, dict):
+            configuration = descriptor.get("configuration")
+            if isinstance(configuration, dict):
+                db_configuration = configuration.get("db")
+                if isinstance(db_configuration, dict):
+                    db_configuration.pop("cache-dir", None)
+            database = descriptor.get("db")
+            if isinstance(database, dict):
+                status = database.get("status")
+                if isinstance(status, dict):
+                    status.pop("path", None)
+        return _write_public_attestation_json(path, payload)
+    return _public_attestation_json_finding(path)
+
+
+def _sanitize_syft_host_metadata(path: Path, *, pack_path: Path) -> SignFinding | None:
+    """Rewrite Syft pack-local locations and reject every unknown host path."""
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return _public_attestation_json_finding(path)
+    sanitized = _rewrite_pack_local_paths(payload, pack_root=pack_path.resolve())
+    sanitized = _normalize_syft_inventory_locations(sanitized)
+    return _write_public_attestation_json(path, sanitized)
+
+
+def _evidence_quality_refusal(
+    *,
+    artifact_name: str,
+    failure_mode: str,
+    message: str,
+) -> SignFinding:
+    return SignFinding(
+        severity="refusal",
+        reason="sign_subprocess_failed",
+        message=message,
+        payload={
+            "artifact_name": artifact_name,
+            "failure_mode": failure_mode,
+        },
+    )
+
+
+def _evidence_tool_oserror_finding(
+    *,
+    tool: str,
+    artifact_name: str,
+    failure_mode: str,
+    exc: OSError,
+) -> SignFinding:
+    """Preserve the established per-tool OSError wire diagnostics."""
+    return SignFinding(
+        severity="refusal",
+        reason="sign_subprocess_failed",
+        message=f"{tool} subprocess raised {type(exc).__name__}.",
+        payload={
+            "tool": tool,
+            "artifact_name": artifact_name,
+            "error_type": type(exc).__name__,
+            "failure_mode": failure_mode,
+        },
+    )
+
+
+def _runtime_inventory_metadata(inventory: _RuntimeInventory) -> dict[str, Any]:
+    return {
+        "source": "uv.lock",
+        "lock_sha256": inventory.lock_digest_sha256,
+        "package_set_sha256": inventory.package_set_sha256,
+        "requirements_sha256": hashlib.sha256(
+            _runtime_requirements_text(inventory).encode("utf-8")
+        ).hexdigest(),
+        "component_count": len(inventory.packages),
+        "direct_dependencies": sorted(inventory.direct_dependency_names),
+        "marker_environment": dict(inventory.marker_environment),
+        "vcs_sources": [dataclasses.asdict(source) for source in inventory.vcs_sources],
+    }
+
+
+def _component_identity(component: object) -> _RuntimePackage | None:
+    from packaging.utils import canonicalize_name
+
+    if not isinstance(component, dict) or component.get("type") != "library":
+        return None
+    name = component.get("name")
+    version = component.get("version")
+    if not isinstance(name, str) or not name or not isinstance(version, str) or not version:
+        return None
+    return _RuntimePackage(canonicalize_name(name), version)
+
+
+_SYFT_INVENTORY_SOURCE_NAME_RE: Final[re.Pattern[str]] = re.compile(
+    r"attestations/\.agentos-runtime-inventory-[A-Za-z0-9_-]+/requirements\.txt\Z"
+)
+
+
+def _is_expected_syft_inventory_source_component(
+    component: object,
+    *,
+    inventory: _RuntimeInventory,
+) -> bool:
+    """Recognize Syft's deterministic, non-runtime source-file component.
+
+    CycloneDX output for a single requirements file includes that input file
+    as a ``type=file`` component. It is not an installed runtime package, but
+    silently discarding arbitrary non-library rows would make the exact-set
+    gate vacuous. Accept only Syft's private inventory path with a SHA-256
+    that independently matches the generated requirements bytes.
+    """
+    if not isinstance(component, dict):
+        return False
+    if set(component) - {"bom-ref", "hashes", "name", "type"}:
+        return False
+    name = component.get("name")
+    hashes = component.get("hashes")
+    if (
+        component.get("type") != "file"
+        or not isinstance(name, str)
+        or _SYFT_INVENTORY_SOURCE_NAME_RE.fullmatch(name) is None
+        or not isinstance(hashes, list)
+    ):
+        return False
+    expected = hashlib.sha256(_runtime_requirements_text(inventory).encode("utf-8")).hexdigest()
+    sha256_values: list[str] = []
+    for digest in hashes:
+        if not isinstance(digest, dict):
+            return False
+        algorithm = digest.get("alg")
+        content = digest.get("content")
+        if not isinstance(algorithm, str) or not isinstance(content, str):
+            return False
+        if algorithm == "SHA-256":
+            sha256_values.append(content)
+    return sha256_values == [expected]
+
+
+def _normalize_runtime_sbom(
+    path: Path,
+    *,
+    inventory: _RuntimeInventory,
+) -> SignFinding | None:
+    """Require Syft to inventory exactly the lock-derived package set."""
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return _public_attestation_json_finding(path)
+    if not isinstance(payload, dict) or not isinstance(payload.get("components"), list):
+        return _evidence_quality_refusal(
+            artifact_name=path.name,
+            failure_mode="runtime_sbom_shape_invalid",
+            message="Syft output is not a CycloneDX object with a components list.",
+        )
+    raw_components = payload["components"]
+    library_components: list[dict[str, Any]] = []
+    identities: list[_RuntimePackage] = []
+    inventory_source_seen = False
+    for raw in raw_components:
+        identity = _component_identity(raw)
+        if identity is None:
+            if not inventory_source_seen and _is_expected_syft_inventory_source_component(
+                raw, inventory=inventory
+            ):
+                inventory_source_seen = True
+                continue
+            return _evidence_quality_refusal(
+                artifact_name=path.name,
+                failure_mode="runtime_sbom_inventory_mismatch",
+                message=(
+                    "Syft emitted a component outside the exact lock-derived package set; "
+                    "refusing to discard unaccounted evidence rows."
+                ),
+            )
+        assert isinstance(raw, dict)
+        normalized = dict(raw)
+        normalized["name"] = identity.name
+        library_components.append(normalized)
+        identities.append(identity)
+    expected = set(inventory.packages)
+    actual = set(identities)
+    if len(identities) != len(actual) or actual != expected:
+        return _evidence_quality_refusal(
+            artifact_name=path.name,
+            failure_mode="runtime_sbom_inventory_mismatch",
+            message=(
+                "Syft did not inventory the exact non-empty lock-derived package set; "
+                "refusing a plausible-looking but incomplete SBOM."
+            ),
+        )
+    root_component = next(
+        component
+        for component in library_components
+        if _component_identity(component) == inventory.root
+    )
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+        payload["metadata"] = metadata
+    metadata["component"] = root_component
+    metadata["properties"] = [
+        {"name": f"cognic:runtime-inventory:{key}", "value": json.dumps(value, sort_keys=True)}
+        for key, value in _runtime_inventory_metadata(inventory).items()
+    ]
+    payload["components"] = sorted(
+        (
+            component
+            for component in library_components
+            if _component_identity(component) != inventory.root
+        ),
+        key=lambda component: (str(component.get("name")), str(component.get("version"))),
+    )
+    payload["dependencies"] = []
+    return _write_public_attestation_json(path, payload)
+
+
+def _cyclonedx_package_set(payload: object) -> tuple[list[_RuntimePackage], bool]:
+    if not isinstance(payload, dict):
+        return [], False
+    raw_components = payload.get("components")
+    if not isinstance(raw_components, list):
+        return [], False
+    identities: list[_RuntimePackage] = []
+    for raw in raw_components:
+        identity = _component_identity(raw)
+        if identity is None:
+            return identities, False
+        identities.append(identity)
+    metadata = payload.get("metadata")
+    if isinstance(metadata, dict):
+        raw_root = metadata.get("component")
+        if raw_root is not None:
+            root = _component_identity(raw_root)
+            if root is None:
+                return identities, False
+            if root not in identities:
+                identities.append(root)
+    return identities, True
+
+
+def _validate_grype_inventory_proof(
+    proof_path: Path,
+    *,
+    inventory: _RuntimeInventory,
+) -> SignFinding | None:
+    """Prove Grype parsed every package in the non-empty input SBOM."""
+    try:
+        payload = json.loads(proof_path.read_text())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return _evidence_quality_refusal(
+            artifact_name=proof_path.name,
+            failure_mode="grype_inventory_proof_invalid",
+            message="Grype's CycloneDX inventory proof is missing or malformed.",
+        )
+    identities, shaped = _cyclonedx_package_set(payload)
+    expected = set(inventory.packages)
+    if (
+        not shaped
+        or not identities
+        or len(identities) != len(set(identities))
+        or set(identities) != expected
+        or len(identities) != len(inventory.packages)
+    ):
+        return _evidence_quality_refusal(
+            artifact_name=proof_path.name,
+            failure_mode="grype_inventory_proof_mismatch",
+            message=(
+                "Grype did not preserve the exact non-empty SBOM component set; "
+                "zero findings cannot be interpreted as a successful scan."
+            ),
+        )
+    return None
+
+
+def _annotate_grype_report(
+    report_path: Path,
+    *,
+    inventory: _RuntimeInventory,
+) -> SignFinding | None:
+    sanitize_finding = _sanitize_grype_host_metadata(report_path)
+    if sanitize_finding is not None:
+        return sanitize_finding
+    try:
+        payload = json.loads(report_path.read_text())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return _public_attestation_json_finding(report_path)
+    if (
+        not isinstance(payload, dict)
+        or not isinstance(payload.get("matches"), list)
+        or not isinstance(payload.get("source"), dict)
+    ):
+        return _evidence_quality_refusal(
+            artifact_name=report_path.name,
+            failure_mode="grype_report_shape_invalid",
+            message="Grype JSON output lacks its matches list or source object.",
+        )
+    payload["cognic_runtime_inventory"] = {
+        **_runtime_inventory_metadata(inventory),
+        "scanner_input": "sbom:attestations/sbom.cdx.json",
+        "scanned_component_count": len(inventory.packages),
+    }
+    return _write_public_attestation_json(report_path, payload)
+
+
+def _normalize_license_values(value: object) -> list[str]:
+    if not isinstance(value, str):
+        return []
+    return sorted({part.strip() for part in value.split(";") if part.strip()})
+
+
+def _normalize_license_audit(
+    raw_path: Path,
+    output_path: Path,
+    *,
+    inventory: _RuntimeInventory,
+) -> tuple[dict[_RuntimePackage, list[str]] | None, SignFinding | None]:
+    """Normalize pip-licenses output and prove exact inventory equality."""
+    from packaging.utils import canonicalize_name
+    from packaging.version import InvalidVersion, Version
+
+    try:
+        raw = json.loads(raw_path.read_text())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None, _evidence_quality_refusal(
+            artifact_name=output_path.name,
+            failure_mode="license_audit_json_invalid",
+            message="pip-licenses output is missing or invalid JSON.",
+        )
+    if not isinstance(raw, list):
+        return None, _evidence_quality_refusal(
+            artifact_name=output_path.name,
+            failure_mode="license_audit_shape_invalid",
+            message="pip-licenses output is not its expected package-list shape.",
+        )
+    audited: dict[_RuntimePackage, list[str]] = {}
+    for entry in raw:
+        if not isinstance(entry, dict):
+            return None, _evidence_quality_refusal(
+                artifact_name=output_path.name,
+                failure_mode="license_audit_shape_invalid",
+                message="pip-licenses emitted a non-object package entry.",
+            )
+        name = entry.get("Name")
+        version = entry.get("Version")
+        if not isinstance(name, str) or not name or not isinstance(version, str) or not version:
+            return None, _evidence_quality_refusal(
+                artifact_name=output_path.name,
+                failure_mode="license_audit_shape_invalid",
+                message="pip-licenses emitted a package without an exact name/version.",
+            )
+        package = _RuntimePackage(canonicalize_name(name), version)
+        if package in audited:
+            return None, _evidence_quality_refusal(
+                artifact_name=output_path.name,
+                failure_mode="license_audit_duplicate_package",
+                message="pip-licenses emitted the same package identity more than once.",
+            )
+        audited[package] = _normalize_license_values(entry.get("License")) or ["UNKNOWN"]
+
+    expected = set(inventory.dependencies)
+    normalized_audited: dict[_RuntimePackage, list[str]] = {}
+    for package, licenses in audited.items():
+        match = next((item for item in expected if item.name == package.name), None)
+        if match is None:
+            return None, _evidence_quality_refusal(
+                artifact_name=output_path.name,
+                failure_mode="license_audit_inventory_mismatch",
+                message="pip-licenses audited a package outside the locked runtime inventory.",
+            )
+        try:
+            versions_match = Version(match.version) == Version(package.version)
+        except InvalidVersion:
+            versions_match = match.version == package.version
+        if not versions_match:
+            return None, _evidence_quality_refusal(
+                artifact_name=output_path.name,
+                failure_mode="license_audit_inventory_mismatch",
+                message="pip-licenses audited a version outside the locked runtime inventory.",
+            )
+        normalized_audited[match] = licenses
+    if set(normalized_audited) != expected:
+        return None, _evidence_quality_refusal(
+            artifact_name=output_path.name,
+            failure_mode="license_audit_inventory_mismatch",
+            message=(
+                "pip-licenses did not audit every exact locked runtime package, including "
+                "the declared direct dependencies."
+            ),
+        )
+    artifacts = [
+        {
+            "name": inventory.root.name,
+            "version": inventory.root.version,
+            "licenses": [inventory.root_license],
+        },
+        *(
+            {
+                "name": package.name,
+                "version": package.version,
+                "licenses": normalized_audited[package],
+            }
+            for package in inventory.dependencies
+        ),
+    ]
+    finding = _write_public_attestation_json(
+        output_path,
+        {
+            "inventory": _runtime_inventory_metadata(inventory),
+            "artifacts": artifacts,
+        },
+    )
+    return (normalized_audited if finding is None else None), finding
+
+
+def _enrich_sbom_licenses(
+    sbom_path: Path,
+    *,
+    inventory: _RuntimeInventory,
+    dependency_licenses: dict[_RuntimePackage, list[str]],
+) -> SignFinding | None:
+    try:
+        payload = json.loads(sbom_path.read_text())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return _public_attestation_json_finding(sbom_path)
+    if not isinstance(payload, dict):
+        return _evidence_quality_refusal(
+            artifact_name=sbom_path.name,
+            failure_mode="runtime_sbom_shape_invalid",
+            message="CycloneDX SBOM became malformed before license enrichment.",
+        )
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, dict) or not isinstance(metadata.get("component"), dict):
+        return _evidence_quality_refusal(
+            artifact_name=sbom_path.name,
+            failure_mode="runtime_sbom_root_component_missing",
+            message="CycloneDX SBOM root component is absent before license enrichment.",
+        )
+    root_component = metadata["component"]
+    root_component["licenses"] = [{"license": {"name": inventory.root_license}}]
+    components = payload.get("components")
+    if not isinstance(components, list):
+        return _evidence_quality_refusal(
+            artifact_name=sbom_path.name,
+            failure_mode="runtime_sbom_shape_invalid",
+            message="CycloneDX SBOM components are absent before license enrichment.",
+        )
+    for component in components:
+        identity = _component_identity(component)
+        if identity is None or identity not in dependency_licenses:
+            return _evidence_quality_refusal(
+                artifact_name=sbom_path.name,
+                failure_mode="runtime_sbom_inventory_mismatch",
+                message="CycloneDX SBOM drifted from the audited license package set.",
+            )
+        assert isinstance(component, dict)
+        component["licenses"] = [
+            {"license": {"name": license_name}} for license_name in dependency_licenses[identity]
+        ]
+    return _write_public_attestation_json(sbom_path, payload)
+
+
+def _runtime_requirements_text(inventory: _RuntimeInventory) -> str:
+    return "".join(f"{package.name}=={package.version}\n" for package in inventory.packages)
+
+
+def _write_runtime_requirements(path: Path, inventory: _RuntimeInventory) -> None:
+    path.write_text(_runtime_requirements_text(inventory), encoding="utf-8")
+
+
+async def _produce_runtime_evidence(
+    *,
+    pack_path: Path,
+    attestations_dir: Path,
+    inventory: _RuntimeInventory,
+    syft_bin: str,
+    grype_bin: str,
+    license_bin: str,
+    sbom_path: Path,
+    vuln_path: Path,
+    license_path: Path,
+) -> SignFinding | None:
+    """Produce the three reports from one exact runtime package set."""
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix=".agentos-runtime-inventory-",
+            dir=attestations_dir,
+        ) as temp_dir_raw:
+            temp_dir = Path(temp_dir_raw)
+            requirements_path = temp_dir / "requirements.txt"
+            grype_inventory_proof_path = temp_dir / "grype-inventory.cdx.json"
+            raw_license_path = temp_dir / "pip-licenses.raw.json"
+            _write_runtime_requirements(requirements_path, inventory)
+
+            try:
+                rc, stdout, stderr = await _exec_syft(
+                    syft_bin,
+                    pack_path,
+                    requirements_path,
+                    sbom_output_path=sbom_path,
+                )
+            except OSError as exc:
+                return _evidence_tool_oserror_finding(
+                    tool="syft",
+                    artifact_name=sbom_path.name,
+                    failure_mode="syft_exec_error",
+                    exc=exc,
+                )
+            if rc != 0:
+                return _exec_subprocess_failed_finding(
+                    tool="syft",
+                    returncode=rc,
+                    stdout=stdout,
+                    stderr=stderr,
+                    target="runtime inventory",
+                )
+            finding = _verify_tool_output_artifact(
+                sbom_path,
+                tool="syft",
+                failure_mode_missing="syft_sbom_output_missing",
+                failure_mode_empty="syft_sbom_output_empty",
+            )
+            if finding is not None:
+                return finding
+            finding = _sanitize_syft_host_metadata(sbom_path, pack_path=pack_path)
+            if finding is not None:
+                return finding
+            finding = _normalize_runtime_sbom(sbom_path, inventory=inventory)
+            if finding is not None:
+                return finding
+
+            try:
+                rc, stdout, stderr = await _exec_grype(
+                    grype_bin,
+                    pack_path,
+                    sbom_path,
+                    output_path=vuln_path,
+                )
+            except OSError as exc:
+                return _evidence_tool_oserror_finding(
+                    tool="grype",
+                    artifact_name=vuln_path.name,
+                    failure_mode="grype_exec_error",
+                    exc=exc,
+                )
+            if rc != 0:
+                return _exec_subprocess_failed_finding(
+                    tool="grype",
+                    returncode=rc,
+                    stdout=stdout,
+                    stderr=stderr,
+                    target="runtime SBOM",
+                )
+            finding = _verify_tool_output_artifact(
+                vuln_path,
+                tool="grype",
+                failure_mode_missing="grype_vuln_output_missing",
+                failure_mode_empty="grype_vuln_output_empty",
+            )
+            if finding is not None:
+                return finding
+
+            try:
+                rc, stdout, stderr = await _exec_grype(
+                    grype_bin,
+                    pack_path,
+                    sbom_path,
+                    output_path=grype_inventory_proof_path,
+                    output_format="cyclonedx-json",
+                )
+            except OSError as exc:
+                return _evidence_tool_oserror_finding(
+                    tool="grype",
+                    artifact_name=grype_inventory_proof_path.name,
+                    failure_mode="grype_inventory_proof_exec_error",
+                    exc=exc,
+                )
+            if rc != 0:
+                return _exec_subprocess_failed_finding(
+                    tool="grype",
+                    returncode=rc,
+                    stdout=stdout,
+                    stderr=stderr,
+                    target="runtime SBOM component proof",
+                )
+            finding = _verify_tool_output_artifact(
+                grype_inventory_proof_path,
+                tool="grype",
+                failure_mode_missing="grype_inventory_proof_output_missing",
+                failure_mode_empty="grype_inventory_proof_output_empty",
+            )
+            if finding is not None:
+                return finding
+            finding = _validate_grype_inventory_proof(
+                grype_inventory_proof_path,
+                inventory=inventory,
+            )
+            if finding is not None:
+                return finding
+            finding = _annotate_grype_report(vuln_path, inventory=inventory)
+            if finding is not None:
+                return finding
+
+            if inventory.dependencies:
+                try:
+                    rc, stdout, stderr = await _exec_license_auditor(
+                        license_bin,
+                        pack_path,
+                        license_output_path=raw_license_path,
+                        inventory=inventory,
+                    )
+                except OSError as exc:
+                    return _evidence_tool_oserror_finding(
+                        tool="license_auditor",
+                        artifact_name=license_path.name,
+                        failure_mode="license_auditor_exec_error",
+                        exc=exc,
+                    )
+                if rc != 0:
+                    return _exec_subprocess_failed_finding(
+                        tool="license_auditor",
+                        returncode=rc,
+                        stdout=stdout,
+                        stderr=stderr,
+                        target="locked runtime inventory",
+                    )
+            else:
+                raw_license_path.write_text("[]\n", encoding="utf-8")
+            finding = _verify_tool_output_artifact(
+                raw_license_path,
+                tool="license_auditor",
+                failure_mode_missing="license_audit_output_missing",
+                failure_mode_empty="license_audit_output_empty",
+            )
+            if finding is not None:
+                return finding
+            dependency_licenses, finding = _normalize_license_audit(
+                raw_license_path,
+                license_path,
+                inventory=inventory,
+            )
+            if finding is not None:
+                return finding
+            assert dependency_licenses is not None
+            return _enrich_sbom_licenses(
+                sbom_path,
+                inventory=inventory,
+                dependency_licenses=dependency_licenses,
+            )
+    except OSError as exc:
+        return _evidence_quality_refusal(
+            artifact_name="runtime-inventory",
+            failure_mode="runtime_inventory_workspace_error",
+            message=(
+                "Could not create or clean the private runtime-inventory "
+                f"workspace: {type(exc).__name__}."
+            ),
+        )
+
+
 def _build_slsa_provenance_dict(
     *,
     pack_id: str,
     pack_version: str,
     pack_kind: str,
     wheel_path: Path,
+    wheel_subject_name: str,
     sbom_digest: str,
-    signing_identity: str,
     cosign_invocation_plan: dict[str, Any],
 ) -> dict[str, Any]:
     """Wave-1 simplified SLSA provenance template (per ADR-016
     Wave-1 simplifications + Doctrine F's out-of-scope notes).
 
-    Records the planned cosign invocation + the SBOM digest + the
-    signing identity. The schema follows the in-toto Statement-v1
+    Records the planned cosign invocation + the SBOM digest + a
+    redacted signing-key reference. The schema follows the in-toto Statement-v1
     envelope + the SLSA Provenance v1 predicate; the Wave-1 narrow
     does NOT integrate with the slsa-generator GitHub Actions OIDC
     reusable workflow yet (that lands when the upstream matures per
@@ -1705,7 +3318,7 @@ def _build_slsa_provenance_dict(
         "predicateType": _SLSA_PROVENANCE_PREDICATE_TYPE,
         "subject": [
             {
-                "name": str(wheel_path),
+                "name": wheel_subject_name,
                 "digest": {"sha256": _compute_file_digest_sha256(wheel_path)},
             }
         ],
@@ -1729,7 +3342,7 @@ def _build_slsa_provenance_dict(
                 },
             },
             "runDetails": {
-                "builder": {"id": signing_identity},
+                "builder": {"id": _AGENTOS_SIGN_BUNDLE_BUILDER_ID},
                 "metadata": {
                     "invocationId": f"agentos-sign-bundle/{pack_id}@{pack_version}",
                     "startedOn": now,
@@ -2517,13 +4130,23 @@ async def run_sign_bundle(
          ``sign_agent_card_jws_signing_failed`` on unset / missing /
          vault-unresolvable; the JWS arm never reads
          ``signing_key_path``).
-      3. Read manifest [pack].kind to gate the AgentCard JWS step.
+      3. Read manifest identity + pyproject metadata, then resolve one
+         current-platform runtime package graph from the mandatory
+         pack-local ``uv.lock``. The lock must agree with pyproject,
+         and the signing interpreter must contain every selected
+         dependency at its exact version.
       4. Discover the wheel under ``<pack>/dist/*.whl``; missing →
          ``sign_subprocess_failed`` with payload ``failure_mode=
          wheel_not_found``.
-      5. Run syft → ``attestations/sbom.cdx.json``.
-      6. Run grype → ``attestations/vuln-scan.json``.
-      7. Run license-auditor → ``attestations/license-audit.json``.
+      5. Run Syft over the exact lock-derived package set →
+         ``attestations/sbom.cdx.json``; exact component equality is
+         mandatory.
+      6. Run Grype against that SBOM →
+         ``attestations/vuln-scan.json`` and independently require its
+         CycloneDX output to preserve the full non-empty input set.
+      7. Run pip-licenses against the exact selected dependencies →
+         normalized ``attestations/license-audit.json``; a root-only
+         pack emits an explicit root-only audit without an empty scan.
       8. Render SLSA provenance template → ``attestations/
          slsa-provenance.intoto.json`` (closed-enum reason
          ``sign_provenance_template_render_failed`` on failure).
@@ -2589,12 +4212,12 @@ async def run_sign_bundle(
     # the flag before reading it.
 
     # Step 2: signing key (file or vault:// URI per R2 P2 #2 + R3 P2
-    # #3 — separate cosign-readable path from auditable identity).
+    # #3 — separate cosign-readable path from custody reference).
     # Tempfile (when vault://-resolved) is unlinked in the finally
     # block at the end of the orchestrator.
     (
         key_path,
-        signing_identity,
+        signing_key_reference,
         key_tempfile,
         key_finding,
     ) = await _resolve_signing_key_path(
@@ -2610,7 +4233,7 @@ async def run_sign_bundle(
             findings=findings,
         )
     assert key_path is not None
-    assert signing_identity is not None
+    assert signing_key_reference is not None
 
     # Step 2b (M8 finding #4c): AgentCard-JWS signing key — SEPARATE
     # custody from the cosign key (different cryptographic identity +
@@ -2657,11 +4280,19 @@ async def run_sign_bundle(
             grype_bin=grype_bin,
             license_bin=license_bin,
             key_path=key_path,
-            signing_identity=signing_identity,
+            signing_key_reference=signing_key_reference,
             jws_key_path=jws_key_path,
             findings=findings,
             dev_mode_skip_cosign=dev_mode_skip_cosign,
             bundle_root=bundle_root,
+        )
+    except _PackRelativePathRefused as exc:
+        findings.append(exc.finding)
+        return SignReport(
+            operation="sign-bundle",
+            target_path=str(pack_path),
+            overall_status="fail",
+            findings=findings,
         )
     finally:
         if key_tempfile is not None:
@@ -2772,7 +4403,7 @@ async def _run_sign_bundle_inner(
     grype_bin: str,
     license_bin: str,
     key_path: str,
-    signing_identity: str,
+    signing_key_reference: str,
     jws_key_path: str | None,
     findings: list[SignFinding],
     dev_mode_skip_cosign: bool,
@@ -2865,6 +4496,33 @@ async def _run_sign_bundle_inner(
     project_name, pack_version, project_finding = _read_pack_metadata_from_pyproject(pack_path)
     if project_finding is not None:
         findings.append(project_finding)
+        return SignReport(
+            operation="sign-bundle",
+            target_path=str(pack_path),
+            overall_status="fail",
+            findings=findings,
+        )
+
+    # Step 3c: one reproducible runtime inventory for SBOM, license, and CVE
+    # evidence. A pack-local uv.lock is mandatory; its current-platform graph
+    # must agree with pyproject.toml and with the signing interpreter.
+    runtime_inventory, runtime_inventory_finding = _read_runtime_inventory_from_uv_lock(
+        pack_path,
+        project_name=project_name,
+        project_version=pack_version,
+    )
+    if runtime_inventory_finding is not None:
+        findings.append(runtime_inventory_finding)
+        return SignReport(
+            operation="sign-bundle",
+            target_path=str(pack_path),
+            overall_status="fail",
+            findings=findings,
+        )
+    assert runtime_inventory is not None
+    runtime_environment_finding = _validate_runtime_environment(pack_path, runtime_inventory)
+    if runtime_environment_finding is not None:
+        findings.append(runtime_environment_finding)
         return SignReport(
             operation="sign-bundle",
             target_path=str(pack_path),
@@ -3002,44 +4660,22 @@ async def _run_sign_bundle_inner(
 
     artifacts: dict[str, str] = {}
 
-    # Step 5: SBOM via syft.
-    try:
-        rc, stdout, stderr = await _exec_syft(syft_bin, pack_path, sbom_output_path=sbom_path)
-    except OSError as exc:
-        findings.append(
-            SignFinding(
-                severity="refusal",
-                reason="sign_subprocess_failed",
-                message=f"syft subprocess raised {type(exc).__name__}: {exc}",
-                payload={"tool": "syft", "error_type": type(exc).__name__},
-            )
-        )
-        return SignReport(
-            operation="sign-bundle",
-            target_path=str(pack_path),
-            overall_status="fail",
-            findings=findings,
-        )
-    if rc != 0:
-        findings.append(
-            _exec_subprocess_failed_finding(
-                tool="syft", returncode=rc, stdout=stdout, stderr=stderr, target=str(pack_path)
-            )
-        )
-        return SignReport(
-            operation="sign-bundle",
-            target_path=str(pack_path),
-            overall_status="fail",
-            findings=findings,
-        )
-    syft_artifact_finding = _verify_tool_output_artifact(
-        sbom_path,
-        tool="syft",
-        failure_mode_missing="syft_sbom_output_missing",
-        failure_mode_empty="syft_sbom_output_empty",
+    # Steps 5-7: one lock-derived inventory flows through Syft, Grype, and
+    # pip-licenses. Every tool's output is checked for exact package-set
+    # equality, so a valid-but-wrong environment cannot earn green evidence.
+    runtime_evidence_finding = await _produce_runtime_evidence(
+        pack_path=pack_path,
+        attestations_dir=attestations_dir,
+        inventory=runtime_inventory,
+        syft_bin=syft_bin,
+        grype_bin=grype_bin,
+        license_bin=license_bin,
+        sbom_path=sbom_path,
+        vuln_path=vuln_path,
+        license_path=license_path,
     )
-    if syft_artifact_finding is not None:
-        findings.append(syft_artifact_finding)
+    if runtime_evidence_finding is not None:
+        findings.append(runtime_evidence_finding)
         return SignReport(
             operation="sign-bundle",
             target_path=str(pack_path),
@@ -3047,103 +4683,7 @@ async def _run_sign_bundle_inner(
             findings=findings,
         )
     artifacts["sbom"] = str(sbom_path)
-
-    # Step 6: vuln scan via grype.
-    try:
-        rc, stdout, stderr = await _exec_grype(grype_bin, wheel_path, vuln_output_path=vuln_path)
-    except OSError as exc:
-        findings.append(
-            SignFinding(
-                severity="refusal",
-                reason="sign_subprocess_failed",
-                message=f"grype subprocess raised {type(exc).__name__}: {exc}",
-                payload={"tool": "grype", "error_type": type(exc).__name__},
-            )
-        )
-        return SignReport(
-            operation="sign-bundle",
-            target_path=str(pack_path),
-            overall_status="fail",
-            findings=findings,
-        )
-    if rc != 0:
-        findings.append(
-            _exec_subprocess_failed_finding(
-                tool="grype", returncode=rc, stdout=stdout, stderr=stderr, target=str(wheel_path)
-            )
-        )
-        return SignReport(
-            operation="sign-bundle",
-            target_path=str(pack_path),
-            overall_status="fail",
-            findings=findings,
-        )
-    grype_artifact_finding = _verify_tool_output_artifact(
-        vuln_path,
-        tool="grype",
-        failure_mode_missing="grype_vuln_output_missing",
-        failure_mode_empty="grype_vuln_output_empty",
-    )
-    if grype_artifact_finding is not None:
-        findings.append(grype_artifact_finding)
-        return SignReport(
-            operation="sign-bundle",
-            target_path=str(pack_path),
-            overall_status="fail",
-            findings=findings,
-        )
     artifacts["vuln_scan"] = str(vuln_path)
-
-    # Step 7: license audit.
-    try:
-        rc, stdout, stderr = await _exec_license_auditor(
-            license_bin, license_output_path=license_path
-        )
-    except OSError as exc:
-        findings.append(
-            SignFinding(
-                severity="refusal",
-                reason="sign_subprocess_failed",
-                message=f"license-auditor subprocess raised {type(exc).__name__}: {exc}",
-                payload={"tool": "license_auditor", "error_type": type(exc).__name__},
-            )
-        )
-        return SignReport(
-            operation="sign-bundle",
-            target_path=str(pack_path),
-            overall_status="fail",
-            findings=findings,
-        )
-    if rc != 0:
-        findings.append(
-            _exec_subprocess_failed_finding(
-                tool="license_auditor",
-                returncode=rc,
-                stdout=stdout,
-                stderr=stderr,
-                target=str(pack_path),
-            )
-        )
-        return SignReport(
-            operation="sign-bundle",
-            target_path=str(pack_path),
-            overall_status="fail",
-            findings=findings,
-        )
-    license_artifact_finding = _verify_tool_output_artifact(
-        license_path,
-        tool="license_auditor",
-        failure_mode_missing="license_audit_output_missing",
-        failure_mode_empty="license_audit_output_empty",
-    )
-    if license_artifact_finding is not None:
-        findings.append(license_artifact_finding)
-        return SignReport(
-            operation="sign-bundle",
-            target_path=str(pack_path),
-            overall_status="fail",
-            findings=findings,
-        )
     artifacts["license_audit"] = str(license_path)
 
     # Step 7b (R7 P2 #1): wheel-content integrity check BEFORE
@@ -3253,13 +4793,9 @@ async def _run_sign_bundle_inner(
     # ensures they agree with the signed wheel content).
     del _wheel_metadata_name, _wheel_metadata_version, _wheel_derived_kind
 
-    # Step 8: SLSA provenance template.
-    # R3 P2 #3: ``signing_identity`` (vault URI or file path) is
-    # recorded in attestations + cosign-argv byproduct. The
-    # ``--key`` arg in the byproduct also uses ``signing_identity``,
-    # NOT the transient tempfile path that gets unlinked at exit.
-    # cosign itself receives ``key_path`` (file path) at exec time;
-    # the ATTESTATION records the auditable identity.
+    # Step 8: SLSA provenance template. The private key reference is
+    # execution-only custody metadata. Public evidence records a redacted
+    # marker; cosign + the verifier-supplied trust root bind the real key.
     # R4 P2 #1 reviewer correction: the SLSA byproduct is renamed
     # ``cosign_invocation_plan`` (was ``cosign_argv``) + restructured
     # into a dict with an ``executed`` flag. Pre-fix: the byproduct
@@ -3270,20 +4806,25 @@ async def _run_sign_bundle_inner(
     # The new shape preserves the audit trail without false
     # execution evidence: ``executed: true`` for non-skip runs,
     # ``executed: false + skip_reason`` for dev-skip.
+    del signing_key_reference
+    attested_signing_identity = _REDACTED_COSIGN_KEY_REFERENCE
+    public_wheel_path = _pack_relative_public_path(pack_path, wheel_path)
+    public_sig_path = _pack_relative_public_path(pack_path, sig_path)
+    public_bundle_path = _pack_relative_public_path(pack_path, bundle_path)
     sbom_digest = _compute_file_digest_sha256(sbom_path)
     if dev_mode_skip_cosign:
         cosign_invocation_plan: dict[str, Any] = {
             "executed": False,
-            "key_identity": signing_identity,
+            "key_identity": attested_signing_identity,
             "skip_reason": "dev_mode_skip_cosign",
         }
     else:
         cosign_invocation_plan = {
             "executed": True,
-            "key_identity": signing_identity,
-            "wheel_path": str(wheel_path),
-            "sig_output_path": str(sig_path),
-            "bundle_output_path": str(bundle_path),
+            "key_identity": attested_signing_identity,
+            "wheel_path": public_wheel_path,
+            "sig_output_path": public_sig_path,
+            "bundle_output_path": public_bundle_path,
         }
     slsa_finding = _render_slsa_provenance_to_disk(
         slsa_path,
@@ -3291,12 +4832,21 @@ async def _run_sign_bundle_inner(
         pack_version=pack_version,
         pack_kind=pack_kind,
         wheel_path=wheel_path,
+        wheel_subject_name=public_wheel_path,
         sbom_digest=sbom_digest,
-        signing_identity=signing_identity,
         cosign_invocation_plan=cosign_invocation_plan,
     )
     if slsa_finding is not None:
         findings.append(slsa_finding)
+        return SignReport(
+            operation="sign-bundle",
+            target_path=str(pack_path),
+            overall_status="fail",
+            findings=findings,
+        )
+    slsa_public_finding = _public_attestation_json_finding(slsa_path)
+    if slsa_public_finding is not None:
+        findings.append(slsa_public_finding)
         return SignReport(
             operation="sign-bundle",
             target_path=str(pack_path),
@@ -3320,30 +4870,39 @@ async def _run_sign_bundle_inner(
     # happy path, leaving the bundle's own artifact-set attestation
     # incomplete.
     intoto_artifact_paths = [
-        str(sbom_path),
-        str(vuln_path),
-        str(license_path),
-        str(slsa_path),
+        _pack_relative_public_path(pack_path, sbom_path),
+        _pack_relative_public_path(pack_path, vuln_path),
+        _pack_relative_public_path(pack_path, license_path),
+        _pack_relative_public_path(pack_path, slsa_path),
     ]
     if not dev_mode_skip_cosign:
-        intoto_artifact_paths.extend([str(sig_path), str(bundle_path)])
+        intoto_artifact_paths.extend([public_sig_path, public_bundle_path])
     if pack_kind == "agent":
         # R8 P2 #1: use the manifest-declared JWS path, not a
         # hardcoded default. agent_card_jws_path is non-None at
         # this point because _read_agent_card_jws_path_for_bundle
         # ran in step 3a-bis for agent kind.
         assert agent_card_jws_path is not None
-        intoto_artifact_paths.append(str(agent_card_jws_path))
+        intoto_artifact_paths.append(_pack_relative_public_path(pack_path, agent_card_jws_path))
     intoto_finding = _render_intoto_layout_to_disk(
         intoto_path,
         pack_id=pack_id,
         pack_version=pack_version,
         pack_kind=pack_kind,
-        signing_identity=signing_identity,
+        signing_identity=attested_signing_identity,
         artifact_paths=intoto_artifact_paths,
     )
     if intoto_finding is not None:
         findings.append(intoto_finding)
+        return SignReport(
+            operation="sign-bundle",
+            target_path=str(pack_path),
+            overall_status="fail",
+            findings=findings,
+        )
+    intoto_public_finding = _public_attestation_json_finding(intoto_path)
+    if intoto_public_finding is not None:
+        findings.append(intoto_public_finding)
         return SignReport(
             operation="sign-bundle",
             target_path=str(pack_path),

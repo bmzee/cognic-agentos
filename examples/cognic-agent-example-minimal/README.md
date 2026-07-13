@@ -5,23 +5,26 @@ design. The pack demonstrates the per-kind Wave-1 author lifecycle
 for `kind = "agent"`:
 
 ```
-agentos sign --bundle .   # produces the seven attestations + AgentCard JWS
-agentos validate .        # passes once attestations exist on disk
-agentos test-harness .    # agents: refused with `harness_unsupported_pack_kind`
-agentos verify .
+uv lock                   # resolve, review, and commit in a copied repo
+uv sync --frozen
+uv run agentos sign --bundle .   # produces attestations + AgentCard JWS
+uv run agentos validate .
+uv run agentos test-harness .    # agents: PASS
+uv run agentos verify .
 ```
 
 The committed reference pack is **static-only** — it does NOT ship
-pre-generated attestations or `agent_cards/agent-card.jws`.
+pre-generated attestations, resolver output, or `agent_cards/agent-card.jws`.
+Its unit lifecycle injects a synthetic lock only into a temporary clone. A
+copied/released repository must resolve, review, and commit its own `uv.lock`;
+signing refuses without it.
 `agentos validate .` declares `supply_chain.attestation_paths` +
 `identity.agent_card_jws_path` and refuses on a clean checkout until
 `sign --bundle` populates them. Run sign first, then validate; this
 matches the realistic author flow + the lifecycle test.
 
-The harness refusal is intentional. `cli/test_harness.py` Wave-1
-narrows the dispatch table to `frozenset({"tool"})`; agent harness
-expansion lands in a follow-up Sprint-7B task. **Sign + verify are
-kind-aware** — the AgentCard JWS path is part of the agent-pack
+The harness dispatches through the public `Agent.handle()` seam. **Sign +
+verify are kind-aware** — the AgentCard JWS path is part of the agent-pack
 lifecycle and is fully exercised by `agentos sign --bundle` + the
 verify trust gate.
 

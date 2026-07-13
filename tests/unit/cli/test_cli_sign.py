@@ -56,6 +56,7 @@ the critical-controls floor at 95% line / 90% branch (currently at
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import stat
@@ -81,6 +82,66 @@ _SIGN_TARGET_WHEEL: Path = (
 _TEST_PRIVATE_PEM: Path = (
     _SIGN_TARGET_PACK / "attestations" / "test-signing" / "test_signing_key.private.pem"
 )
+
+_RUNTIME_GRYPE_REPORT_PAYLOAD = b'{"matches":[],"source":{"type":"sbom"}}'
+_RUNTIME_LICENSE_PAYLOAD = b'[{"Name":"cognic-agentos","Version":"0.0.1","License":"Proprietary"}]'
+
+
+def _runtime_sbom_payload(
+    project_name: str = "cognic-agent-sign-target",
+    project_version: str = "0.1.0",
+) -> bytes:
+    return json.dumps(
+        {
+            "bomFormat": "CycloneDX",
+            "specVersion": "1.5",
+            "components": [
+                {"type": "library", "name": project_name, "version": project_version},
+                {"type": "library", "name": "cognic-agentos", "version": "0.0.1"},
+            ],
+            "metadata": {"timestamp": "2026-05-08T00:00:00Z"},
+        }
+    ).encode()
+
+
+def _runtime_grype_proof_payload(
+    project_name: str = "cognic-agent-sign-target",
+    project_version: str = "0.1.0",
+) -> bytes:
+    return json.dumps(
+        {
+            "bomFormat": "CycloneDX",
+            "specVersion": "1.5",
+            "components": [
+                {"type": "library", "name": project_name, "version": project_version},
+                {"type": "library", "name": "cognic-agentos", "version": "0.0.1"},
+            ],
+        }
+    ).encode()
+
+
+_RUNTIME_SBOM_PAYLOAD = _runtime_sbom_payload()
+_RUNTIME_GRYPE_PROOF_PAYLOAD = _runtime_grype_proof_payload()
+
+
+def _rewrite_fixture_lock_root(
+    pack: Path,
+    *,
+    project_name: str | None = None,
+    project_version: str | None = None,
+) -> None:
+    """Keep a cloned fixture's committed lock aligned with identity edits."""
+    lock_path = pack / "uv.lock"
+    body = lock_path.read_text(encoding="utf-8")
+    if project_name is not None:
+        old = 'name = "cognic-agent-sign-target"'
+        assert body.count(old) == 1
+        body = body.replace(old, f'name = "{project_name}"', 1)
+    if project_version is not None:
+        old = 'version = "0.1.0"'
+        assert body.count(old) == 1
+        body = body.replace(old, f'version = "{project_version}"', 1)
+    lock_path.write_text(body, encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -276,7 +337,7 @@ def test_sign_blob_happy_path_emits_pass_summary_to_stdout(
 
     runner = CliRunner()
     result = runner.invoke(app, ["sign-blob", str(wheel)])
-    assert result.exit_code == 0
+    assert result.exit_code == 0, f"stdout={result.stdout!r} stderr={result.stderr!r}"
     assert "sign-blob: PASS" in result.stdout
 
 
@@ -901,18 +962,22 @@ def test_sign_blob_does_not_synthesize_cosign_password_when_absent(
 # Per Doctrine Decision F + ADR-016: ``agentos sign --bundle <pack-path>``
 # orchestrates the full Wave-1 attestation set:
 #
-#   1. SBOM via ``syft <pack-path> -o cyclonedx-json=<sbom-path>``
+#   1. Resolve the current-platform runtime graph from the pack's committed
+#      ``uv.lock`` and require exact agreement with pyproject + the signing
+#      interpreter.
+#   2. SBOM via Syft over a private exact-version requirements inventory
 #      → ``attestations/sbom.cdx.json``
-#   2. Vuln scan via ``grype <wheel> -o json --file <vuln-path>``
+#   3. Vuln scan via Grype's ``sbom:`` source, plus an exact-component
+#      CycloneDX preservation proof
 #      → ``attestations/vuln-scan.json``
-#   3. License audit via ``pip-licenses --with-system --format=json
-#      --output-file=<license-path>`` → ``attestations/license-audit.json``
-#   4. SLSA provenance template (Wave-1 simplified) →
+#   4. Exact-package license audit via ``pip-licenses --python ... --packages``
+#      → normalized ``attestations/license-audit.json``
+#   5. SLSA provenance template (Wave-1 simplified) →
 #      ``attestations/slsa-provenance.intoto.json``
-#   5. in-toto layout template → ``attestations/intoto-layout.json``
-#   6. AgentCard JWS via joserfc (agent packs only) →
+#   6. in-toto layout template → ``attestations/intoto-layout.json``
+#   7. AgentCard JWS via joserfc (agent packs only) →
 #      ``agent_cards/<card-name>.jws``
-#   7. Cosign sign-blob over the wheel →
+#   8. Cosign sign-blob over the wheel →
 #      ``attestations/cosign.sig`` + ``attestations/bundle.sigstore``
 #
 # Closed-enum sign reasons exercised here (T14.A pre-seeded all):
@@ -940,6 +1005,7 @@ def _make_tool_shim(
     tool_name: str,
     output_flag: str,
     output_payload: bytes,
+    cyclonedx_output_payload: bytes | None = None,
     exit_code: int = 0,
     response_stderr: str = "",
 ) -> Path:
@@ -991,9 +1057,12 @@ def _make_tool_shim(
                 else:
                     out_path = next_arg
                 break
+        output_payload = {output_payload!r}
+        if {cyclonedx_output_payload!r} is not None and "cyclonedx-json" in argv:
+            output_payload = {cyclonedx_output_payload!r}
         if out_path is not None:
             with open(out_path, "wb") as out:
-                out.write({output_payload!r})
+                out.write(output_payload)
         sys.stderr.write({response_stderr!r})
         sys.exit({exit_code!r})
         """
@@ -1132,7 +1201,12 @@ def _set_sign_bundle_settings(
         )
 
 
-def _stage_full_shim_set(tmp_path: Path) -> dict[str, Path]:
+def _stage_full_shim_set(
+    tmp_path: Path,
+    *,
+    project_name: str = "cognic-agent-sign-target",
+    project_version: str = "0.1.0",
+) -> dict[str, Path]:
     """Build the four shims (cosign / syft / grype / license-auditor)
     each producing minimal-but-valid canned output. Returns a dict
     {tool_name: shim_path}."""
@@ -1142,22 +1216,20 @@ def _stage_full_shim_set(tmp_path: Path) -> dict[str, Path]:
             tmp_path,
             tool_name="syft",
             output_flag="-o",
-            output_payload=(
-                b'{"bomFormat": "CycloneDX", "specVersion": "1.5", '
-                b'"components": [], "metadata": {"timestamp": "2026-05-08T00:00:00Z"}}'
-            ),
+            output_payload=_runtime_sbom_payload(project_name, project_version),
         ),
         "grype": _make_tool_shim(
             tmp_path,
             tool_name="grype",
             output_flag="--file",
-            output_payload=b'{"matches": [], "source": {"type": "file"}}',
+            output_payload=_RUNTIME_GRYPE_REPORT_PAYLOAD,
+            cyclonedx_output_payload=_runtime_grype_proof_payload(project_name, project_version),
         ),
         "license_auditor": _make_tool_shim(
             tmp_path,
             tool_name="license_auditor",
             output_flag="--output-file",
-            output_payload=b'[{"Name": "cognic-agent-sign-target", "License": "AUTHOR-FILL"}]',
+            output_payload=_RUNTIME_LICENSE_PAYLOAD,
         ),
     }
 
@@ -1430,7 +1502,7 @@ def test_sign_bundle_for_tool_kind_pack_skips_agent_card_jws(
     """Tool-kind packs do NOT carry an AgentCard, so the JWS-signing
     step is skipped. The other 6 attestation files (no JWS) are
     produced as normal."""
-    shims = _stage_full_shim_set(tmp_path)
+    shims = _stage_full_shim_set(tmp_path, project_name="cognic-tool-sign-target")
     # Clone the agent-fixture pack but flip kind to "tool" + drop
     # the agent_card_url / agent_card_jws_path fields so the manifest
     # is validate-clean as a tool pack.
@@ -1470,6 +1542,7 @@ def test_sign_bundle_for_tool_kind_pack_skips_agent_card_jws(
             'name = "cognic-tool-sign-target"',
         )
     )
+    _rewrite_fixture_lock_root(pack, project_name="cognic-tool-sign-target")
     # Stage the wheel.
     dist_dir = pack / "dist"
     dist_dir.mkdir(exist_ok=True)
@@ -1605,7 +1678,10 @@ def test_sign_bundle_with_grype_subprocess_failure_emits_subprocess_failed(
     ``payload.tool == "grype"``."""
     cosign = _make_cosign_shim(tmp_path)
     syft = _make_tool_shim(
-        tmp_path, tool_name="syft", output_flag="-o", output_payload=b'{"bomFormat": "CycloneDX"}'
+        tmp_path,
+        tool_name="syft",
+        output_flag="-o",
+        output_payload=_RUNTIME_SBOM_PAYLOAD,
     )
     grype_fail = _make_tool_shim(
         tmp_path,
@@ -1645,10 +1721,17 @@ def test_sign_bundle_with_license_auditor_subprocess_failure_emits_subprocess_fa
     with ``payload.tool == "license_auditor"``."""
     cosign = _make_cosign_shim(tmp_path)
     syft = _make_tool_shim(
-        tmp_path, tool_name="syft", output_flag="-o", output_payload=b'{"bomFormat": "CycloneDX"}'
+        tmp_path,
+        tool_name="syft",
+        output_flag="-o",
+        output_payload=_RUNTIME_SBOM_PAYLOAD,
     )
     grype = _make_tool_shim(
-        tmp_path, tool_name="grype", output_flag="--file", output_payload=b'{"matches": []}'
+        tmp_path,
+        tool_name="grype",
+        output_flag="--file",
+        output_payload=_RUNTIME_GRYPE_REPORT_PAYLOAD,
+        cyclonedx_output_payload=_RUNTIME_GRYPE_PROOF_PAYLOAD,
     )
     license_fail = _make_tool_shim(
         tmp_path,
@@ -2058,9 +2141,9 @@ def test_sign_bundle_with_post_exec_missing_non_cosign_artifact_emits_subprocess
     failing tool, instead of silently passing the report."""
     cosign = _make_cosign_shim(tmp_path)
     shim_specs = {
-        "syft": ("syft", "-o", b'{"bomFormat": "CycloneDX"}'),
-        "grype": ("grype", "--file", b'{"matches": []}'),
-        "license_auditor": ("license", "--output-file", b"[]"),
+        "syft": ("syft", "-o", _RUNTIME_SBOM_PAYLOAD),
+        "grype": ("grype", "--file", _RUNTIME_GRYPE_REPORT_PAYLOAD),
+        "license_auditor": ("license", "--output-file", _RUNTIME_LICENSE_PAYLOAD),
     }
     shims: dict[str, Path] = {}
     for tool_key, (label, output_flag, payload) in shim_specs.items():
@@ -2069,6 +2152,9 @@ def test_sign_bundle_with_post_exec_missing_non_cosign_artifact_emits_subprocess
             tool_name=label,
             output_flag=output_flag,
             output_payload=payload,
+            cyclonedx_output_payload=(
+                _RUNTIME_GRYPE_PROOF_PAYLOAD if tool_key == "grype" else None
+            ),
         )
     # Replace the target shim with a no-write variant (exits 0 + writes nothing).
     no_write_shim = tmp_path / f"{tool_label}_no_write_{os.urandom(4).hex()}.py"
@@ -2124,9 +2210,9 @@ def test_sign_bundle_with_post_exec_empty_non_cosign_artifact_emits_subprocess_f
         "license_auditor": ("license", "--output-file"),
     }
     payload_map = {
-        "syft": b'{"bomFormat": "CycloneDX"}',
-        "grype": b'{"matches": []}',
-        "license_auditor": b"[]",
+        "syft": _RUNTIME_SBOM_PAYLOAD,
+        "grype": _RUNTIME_GRYPE_REPORT_PAYLOAD,
+        "license_auditor": _RUNTIME_LICENSE_PAYLOAD,
     }
     shims: dict[str, Path] = {}
     for tool_key, (label, output_flag) in shim_specs.items():
@@ -2135,6 +2221,9 @@ def test_sign_bundle_with_post_exec_empty_non_cosign_artifact_emits_subprocess_f
             tool_name=label,
             output_flag=output_flag,
             output_payload=b"" if tool_key == tool_label else payload_map[tool_key],
+            cyclonedx_output_payload=(
+                _RUNTIME_GRYPE_PROOF_PAYLOAD if tool_key == "grype" else None
+            ),
         )
 
     pack = _stage_pack_with_wheel(tmp_path)
@@ -2501,16 +2590,11 @@ def test_sign_bundle_vault_signing_key_with_non_bytes_value_emits_unavailable(
     )
 
 
-def test_sign_bundle_vault_signing_key_records_stable_identity_in_attestations(
+def test_sign_bundle_vault_signing_key_redacts_custody_reference_in_attestations(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """R3 P2 #3: vault:// signing-key flow MUST record the stable
-    Vault URI as the signing identity in SLSA provenance + in-toto
-    layout, NOT the transient tempfile path that gets unlinked.
-    Pre-fix: SLSA ``builder.id`` + cosign-argv byproduct + in-toto
-    ``signing_identity`` all recorded the tempfile, leaking local
-    paths + losing production identity."""
+    """Public evidence must not disclose a Vault URI or tempfile path."""
     shims = _stage_full_shim_set(tmp_path)
     pack = _stage_pack_with_wheel(tmp_path)
 
@@ -2547,23 +2631,19 @@ def test_sign_bundle_vault_signing_key_records_stable_identity_in_attestations(
     slsa_path = pack / "attestations" / "slsa-provenance.intoto.json"
     slsa = json.loads(slsa_path.read_text())
     builder_id = slsa["predicate"]["runDetails"]["builder"]["id"]
-    assert builder_id == vault_uri, f"SLSA builder.id should be {vault_uri!r}; got {builder_id!r}"
+    assert builder_id == "urn:cognic:agentos:builder:sign-bundle:wave-1"
     byproducts = slsa["predicate"]["runDetails"]["byproducts"]
     plan_bp = next(b for b in byproducts if b["name"] == "cosign_invocation_plan")
     plan = plan_bp["value"]
-    # The auditable key identity is the vault URI, not the tempfile path.
-    assert plan["key_identity"] == vault_uri, (
-        f"cosign_invocation_plan byproduct recorded key_identity="
-        f"{plan['key_identity']!r}; expected {vault_uri!r}"
-    )
+    assert plan["key_identity"] == "redacted:verifier-supplied-cosign-trust-root"
     # In the non-dev-skip vault flow, cosign DID execute.
     assert plan["executed"] is True
 
     intoto_path = pack / "attestations" / "intoto-layout.json"
     intoto = json.loads(intoto_path.read_text())
-    assert intoto["signing_identity"] == vault_uri, (
-        f"in-toto signing_identity should be {vault_uri!r}; got {intoto['signing_identity']!r}"
-    )
+    assert intoto["signing_identity"] == "redacted:verifier-supplied-cosign-trust-root"
+    assert vault_uri not in slsa_path.read_text()
+    assert vault_uri not in intoto_path.read_text()
 
 
 # ===========================================================================
@@ -2609,8 +2689,8 @@ def test_sign_bundle_provenance_byproduct_named_invocation_plan_not_argv(
     )
     plan = next(b for b in byproducts if b["name"] == "cosign_invocation_plan")["value"]
     assert plan["executed"] is True
-    # key_identity uses the auditable form, not the tempfile path.
-    assert plan["key_identity"] == str(_TEST_PRIVATE_PEM)
+    assert plan["key_identity"] == "redacted:verifier-supplied-cosign-trust-root"
+    assert str(_TEST_PRIVATE_PEM) not in slsa_path.read_text()
 
 
 def test_sign_bundle_dev_skip_provenance_records_executed_false(
@@ -2653,7 +2733,7 @@ def test_sign_bundle_records_real_pack_version_from_pyproject(
     pack version from pyproject.toml, not a hardcoded ``0.1.0``.
     Pre-fix: any pack with a non-0.1.0 version got false provenance
     metadata + an incorrect invocation id."""
-    shims = _stage_full_shim_set(tmp_path)
+    shims = _stage_full_shim_set(tmp_path, project_version="2.5.0")
     import shutil as _shutil
 
     pack = tmp_path / "v2_5_0_pack"
@@ -2662,6 +2742,7 @@ def test_sign_bundle_records_real_pack_version_from_pyproject(
     pyproject_path = pack / "pyproject.toml"
     pyproject_text = pyproject_path.read_text().replace('version = "0.1.0"', 'version = "2.5.0"')
     pyproject_path.write_text(pyproject_text)
+    _rewrite_fixture_lock_root(pack, project_version="2.5.0")
     # Stage a wheel matching the new version.
     dist_dir = pack / "dist"
     dist_dir.mkdir(exist_ok=True)
@@ -3042,6 +3123,7 @@ def test_sign_bundle_with_stale_wheel_version_mismatch_emits_subprocess_failed(
     pyproject_path.write_text(
         pyproject_path.read_text().replace('version = "0.1.0"', 'version = "2.5.0"')
     )
+    _rewrite_fixture_lock_root(pack, project_version="2.5.0")
     dist = pack / "dist"
     dist.mkdir(exist_ok=True)
     (dist / "cognic_agent_sign_target-0.1.0-py3-none-any.whl").write_bytes(b"PK")
@@ -3257,6 +3339,7 @@ def test_sign_bundle_with_malformed_pep440_version_emits_wheel_version_mismatch(
     pyproject_path.write_text(
         pyproject_path.read_text().replace('version = "0.1.0"', 'version = "garbage"')
     )
+    _rewrite_fixture_lock_root(pack, project_version="garbage")
     dist = pack / "dist"
     dist.mkdir(exist_ok=True)
     (dist / "cognic_agent_sign_target-0.1.0-py3-none-any.whl").write_bytes(b"PK")
@@ -3356,7 +3439,7 @@ def test_sign_bundle_intoto_layout_omits_jws_for_tool_pack(
 ) -> None:
     """R7 P2 #1 companion: tool-pack in-toto layout MUST NOT include
     an agent-card.jws path (tool packs don't sign one)."""
-    shims = _stage_full_shim_set(tmp_path)
+    shims = _stage_full_shim_set(tmp_path, project_name="cognic-tool-sign-target")
     import shutil as _shutil
 
     pack = tmp_path / "tool_pack"
@@ -3389,6 +3472,7 @@ def test_sign_bundle_intoto_layout_omits_jws_for_tool_pack(
             'name = "cognic-tool-sign-target"',
         )
     )
+    _rewrite_fixture_lock_root(pack, project_name="cognic-tool-sign-target")
     dist_dir = pack / "dist"
     dist_dir.mkdir(exist_ok=True)
     import zipfile as _zipfile
@@ -4356,7 +4440,7 @@ def test_sign_bundle_for_hook_kind_pack_skips_agent_card_jws(
     declare an AgentCard). Mirrors
     ``test_sign_bundle_for_tool_kind_pack_skips_agent_card_jws`` for
     the hook kind."""
-    shims = _stage_full_shim_set(tmp_path)
+    shims = _stage_full_shim_set(tmp_path, project_name="cognic-hook-sign-target")
     # Clone the agent-fixture pack but flip kind to "hook" + drop
     # [a2a] block + agent_card fields + add a minimal [hooks] block.
     # Note: ``sign --bundle`` itself does NOT run the validator
@@ -4413,6 +4497,7 @@ def test_sign_bundle_for_hook_kind_pack_skips_agent_card_jws(
             'name = "cognic-hook-sign-target"',
         )
     )
+    _rewrite_fixture_lock_root(pack, project_name="cognic-hook-sign-target")
     # Stage the wheel with [cognic.hooks] entry-point group.
     dist_dir = pack / "dist"
     dist_dir.mkdir(exist_ok=True)
@@ -4491,7 +4576,7 @@ def test_sign_bundle_for_hook_kind_pack_records_kind_in_intoto_layout(
     # a module-private helper would be cleaner, but per-test isolation
     # + fresh tmp_path is preferred. Inline the staging since hook
     # packs are the only T9 lifecycle test.
-    shims = _stage_full_shim_set(tmp_path)
+    shims = _stage_full_shim_set(tmp_path, project_name="cognic-hook-sign-target")
     import shutil as _shutil
 
     pack = tmp_path / "hook_pack_intoto"
@@ -4535,6 +4620,7 @@ def test_sign_bundle_for_hook_kind_pack_records_kind_in_intoto_layout(
             'name = "cognic-hook-sign-target"',
         )
     )
+    _rewrite_fixture_lock_root(pack, project_name="cognic-hook-sign-target")
     dist_dir = pack / "dist"
     dist_dir.mkdir(exist_ok=True)
     import zipfile as _zipfile
@@ -4875,7 +4961,7 @@ def test_sign_bundle_for_instruction_skill_pack_signs_as_skill_without_jws(
     instruction pack tree signs end-to-end as a SKILL pack — 7
     attestations produced, pack_kind="skill" in SLSA + in-toto, ZERO
     AgentCard JWS files AND zero JWS-signing invocations (spy)."""
-    shims = _stage_full_shim_set(tmp_path)
+    shims = _stage_full_shim_set(tmp_path, project_name="cognic-skill-sign-target")
     import shutil as _shutil
     import zipfile as _zipfile
 
@@ -4929,6 +5015,7 @@ def test_sign_bundle_for_instruction_skill_pack_signs_as_skill_without_jws(
         if "cognic.agents" not in line and not line.startswith("sign_target = ")
     ]
     pyproject_path.write_text("\n".join(pyproject_lines) + "\n")
+    _rewrite_fixture_lock_root(pack, project_name="cognic-skill-sign-target")
 
     # The REAL PEP-427-complete zero-entry-point instruction wheel.
     dist_dir = pack / "dist"
@@ -5006,3 +5093,1679 @@ def test_sign_bundle_for_instruction_skill_pack_signs_as_skill_without_jws(
     report = json.loads(result.stdout)
     assert report["overall_status"] == "pass"
     assert "agent_card_jws" not in report.get("artifacts", {})
+
+
+# ===========================================================================
+# ADR-016 public-attestation disclosure hardening (2026-07-13)
+# ===========================================================================
+
+
+def test_sign_bundle_emits_pack_relative_public_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shims = _stage_full_shim_set(tmp_path)
+    pack = _stage_pack_with_wheel(tmp_path)
+    _set_sign_bundle_settings(
+        monkeypatch,
+        cosign_path=shims["cosign"],
+        syft_path=shims["syft"],
+        grype_path=shims["grype"],
+        license_auditor_path=shims["license_auditor"],
+    )
+
+    result = CliRunner().invoke(app, ["sign", "--bundle", str(pack.resolve())])
+    assert result.exit_code == 0, result.stdout
+
+    wheel_name = "dist/cognic_agent_sign_target-0.1.0-py3-none-any.whl"
+    syft_recording = _read_shim_recording(shims["syft"])
+    assert syft_recording["cwd"] == str(pack.resolve())
+    assert syft_recording["argv"][1].startswith("file:attestations/.agentos-runtime-inventory-")
+    assert syft_recording["argv"][1].endswith("/requirements.txt")
+    assert str(pack) not in syft_recording["argv"][1:]
+
+    grype_recording = _read_shim_recording(shims["grype"])
+    assert grype_recording["cwd"] == str(pack.resolve())
+    assert grype_recording["argv"][1] == "sbom:attestations/sbom.cdx.json"
+    assert "cyclonedx-json" in grype_recording["argv"]
+    assert str(pack) not in grype_recording["argv"][1:]
+
+    slsa_path = pack / "attestations" / "slsa-provenance.intoto.json"
+    intoto_path = pack / "attestations" / "intoto-layout.json"
+    slsa = json.loads(slsa_path.read_text())
+    intoto = json.loads(intoto_path.read_text())
+    assert slsa["subject"][0]["name"] == wheel_name
+    plan = slsa["predicate"]["runDetails"]["byproducts"][0]["value"]
+    assert plan["wheel_path"] == wheel_name
+    assert plan["sig_output_path"] == "attestations/cosign.sig"
+    assert plan["bundle_output_path"] == "attestations/bundle.sigstore"
+    assert all(not Path(path).is_absolute() for path in intoto["artifact_paths"])
+
+    public_json = "\n".join(
+        (pack / "attestations" / name).read_text()
+        for name in (
+            "sbom.cdx.json",
+            "vuln-scan.json",
+            "license-audit.json",
+            "slsa-provenance.intoto.json",
+            "intoto-layout.json",
+        )
+    )
+    assert str(tmp_path) not in public_json
+    assert str(_TEST_PRIVATE_PEM) not in public_json
+
+
+def test_sign_bundle_removes_grype_host_cache_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shims = _stage_full_shim_set(tmp_path)
+    shims["grype"] = _make_tool_shim(
+        tmp_path,
+        tool_name="grype_host_paths",
+        output_flag="--file",
+        output_payload=json.dumps(
+            {
+                "matches": [],
+                "source": {"type": "sbom"},
+                "descriptor": {
+                    "configuration": {"db": {"cache-dir": "/Users/reviewer/grype-db"}},
+                    "db": {
+                        "status": {
+                            "path": "/Users/reviewer/grype-db/vulnerability.db",
+                            "valid": True,
+                        }
+                    },
+                },
+            }
+        ).encode(),
+        cyclonedx_output_payload=_RUNTIME_GRYPE_PROOF_PAYLOAD,
+    )
+    pack = _stage_pack_with_wheel(tmp_path)
+    _set_sign_bundle_settings(
+        monkeypatch,
+        cosign_path=shims["cosign"],
+        syft_path=shims["syft"],
+        grype_path=shims["grype"],
+        license_auditor_path=shims["license_auditor"],
+    )
+
+    result = CliRunner().invoke(app, ["sign", "--bundle", str(pack)])
+    assert result.exit_code == 0, result.stdout
+    report = json.loads((pack / "attestations" / "vuln-scan.json").read_text())
+    assert "cache-dir" not in report["descriptor"]["configuration"]["db"]
+    assert "path" not in report["descriptor"]["db"]["status"]
+    assert report["descriptor"]["db"]["status"]["valid"] is True
+
+
+def test_sign_bundle_rewrites_syft_pack_local_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shims = _stage_full_shim_set(tmp_path)
+    pack = _stage_pack_with_wheel(tmp_path)
+    shims["syft"] = _make_tool_shim(
+        tmp_path,
+        tool_name="syft_pack_paths",
+        output_flag="-o",
+        output_payload=json.dumps(
+            {
+                "bomFormat": "CycloneDX",
+                "components": [
+                    {
+                        "type": "library",
+                        "name": "cognic-agent-sign-target",
+                        "version": "0.1.0",
+                        "properties": [
+                            {"name": "source", "value": str(pack / "pyproject.toml")},
+                            {"name": "syft:location:0:path", "value": "/requirements.txt"},
+                        ],
+                    },
+                    {
+                        "type": "library",
+                        "name": "cognic-agentos",
+                        "version": "0.0.1",
+                        "properties": [{"name": "source", "value": "/cognic-pack-manifest.toml"}],
+                    },
+                ],
+                "externalReferences": [{"url": f"file://{pack}"}],
+            }
+        ).encode(),
+    )
+    _set_sign_bundle_settings(
+        monkeypatch,
+        cosign_path=shims["cosign"],
+        syft_path=shims["syft"],
+        grype_path=shims["grype"],
+        license_auditor_path=shims["license_auditor"],
+    )
+
+    result = CliRunner().invoke(app, ["sign", "--bundle", str(pack)])
+    assert result.exit_code == 0, result.stdout
+    sbom = json.loads((pack / "attestations" / "sbom.cdx.json").read_text())
+    root_properties = sbom["metadata"]["component"]["properties"]
+    assert root_properties == [
+        {"name": "source", "value": "pyproject.toml"},
+        {"name": "syft:location:0:path", "value": "uv.lock"},
+    ]
+    assert sbom["components"][0]["properties"] == [
+        {"name": "source", "value": "cognic-pack-manifest.toml"}
+    ]
+    assert sbom["externalReferences"] == [{"url": "."}]
+
+
+def test_syft_location_normalizer_never_launders_an_unknown_absolute_path(
+    tmp_path: Path,
+) -> None:
+    from cognic_agentos.cli.sign import _sanitize_syft_host_metadata
+
+    report = tmp_path / "sbom.json"
+    report.write_text(
+        json.dumps(
+            {
+                "components": [
+                    {
+                        "properties": [
+                            {
+                                "name": "syft:location:0:path",
+                                "value": "/Users/reviewer/private/source.py",
+                            }
+                        ]
+                    }
+                ]
+            }
+        )
+    )
+    finding = _sanitize_syft_host_metadata(report, pack_path=tmp_path)
+    assert finding is not None
+    assert finding.payload["failure_mode"] == "public_attestation_host_path"
+
+
+def test_sign_bundle_refuses_unknown_absolute_path_without_echoing_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shims = _stage_full_shim_set(tmp_path)
+    leaked_path = "/Users/reviewer/private/source.py"
+    shims["syft"] = _make_tool_shim(
+        tmp_path,
+        tool_name="syft_host_path",
+        output_flag="-o",
+        output_payload=json.dumps(
+            {"bomFormat": "CycloneDX", "components": [{"name": leaked_path}]}
+        ).encode(),
+    )
+    pack = _stage_pack_with_wheel(tmp_path)
+    _set_sign_bundle_settings(
+        monkeypatch,
+        cosign_path=shims["cosign"],
+        syft_path=shims["syft"],
+        grype_path=shims["grype"],
+        license_auditor_path=shims["license_auditor"],
+    )
+
+    result = CliRunner().invoke(app, ["sign", "--bundle", str(pack), "--json"])
+    assert result.exit_code == 1
+    report = json.loads(result.stdout)
+    finding = next(
+        item
+        for item in report["findings"]
+        if item["payload"].get("failure_mode") == "public_attestation_host_path"
+    )
+    assert finding["payload"]["json_location"] == "components.0.name"
+    assert leaked_path not in result.stdout
+
+
+def test_sign_bundle_refuses_malformed_public_attestation_json(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shims = _stage_full_shim_set(tmp_path)
+    shims["syft"] = _make_tool_shim(
+        tmp_path,
+        tool_name="syft_invalid_json",
+        output_flag="-o",
+        output_payload=b"not-json",
+    )
+    pack = _stage_pack_with_wheel(tmp_path)
+    _set_sign_bundle_settings(
+        monkeypatch,
+        cosign_path=shims["cosign"],
+        syft_path=shims["syft"],
+        grype_path=shims["grype"],
+        license_auditor_path=shims["license_auditor"],
+    )
+
+    result = CliRunner().invoke(app, ["sign", "--bundle", str(pack), "--json"])
+    assert result.exit_code == 1
+    report = json.loads(result.stdout)
+    assert any(
+        item["payload"].get("failure_mode") == "public_attestation_json_invalid"
+        for item in report["findings"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("/home/reviewer/file", True),
+        ("file:///Users/reviewer/file", True),
+        (r"C:\\Users\\reviewer\\file", True),
+        ("attestations/sbom.cdx.json", False),
+        ("https://example.com/artifact", False),
+    ],
+)
+def test_public_attestation_host_path_classifier(value: str, expected: bool) -> None:
+    from cognic_agentos.cli.sign import _is_absolute_host_path
+
+    assert _is_absolute_host_path(value) is expected
+
+
+def test_grype_sanitizer_accepts_safe_non_object_json(tmp_path: Path) -> None:
+    from cognic_agentos.cli.sign import _sanitize_grype_host_metadata
+
+    report = tmp_path / "vuln.json"
+    report.write_text("[]")
+    assert _sanitize_grype_host_metadata(report) is None
+
+
+def test_public_attestation_gate_rejects_absolute_path_in_object_key(tmp_path: Path) -> None:
+    from cognic_agentos.cli.sign import _public_attestation_json_finding
+
+    report = tmp_path / "sbom.json"
+    report.write_text(json.dumps({"/Users/reviewer/private": "value"}))
+    finding = _public_attestation_json_finding(report)
+    assert finding is not None
+    assert finding.payload["failure_mode"] == "public_attestation_host_path"
+    assert finding.payload["json_location"] == "<object-key>"
+    assert "/Users/reviewer/private" not in finding.message
+    assert "/Users/reviewer/private" not in repr(finding.payload)
+
+
+def test_public_attestation_rewrite_failure_is_structured_and_value_free(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cognic_agentos.cli.sign import _write_public_attestation_json
+
+    report = tmp_path / "vuln.json"
+    report.write_text("{}")
+
+    def _refuse_write(self: Path, data: str, *args: Any, **kwargs: Any) -> int:
+        del self, data, args, kwargs
+        raise PermissionError("/Users/reviewer/private/output")
+
+    monkeypatch.setattr(Path, "write_text", _refuse_write)
+    finding = _write_public_attestation_json(report, {"safe": True})
+    assert finding is not None
+    assert finding.payload["failure_mode"] == "public_attestation_rewrite_failed"
+    assert finding.payload["error_type"] == "PermissionError"
+    assert "/Users/reviewer/private/output" not in finding.message
+    assert "/Users/reviewer/private/output" not in repr(finding.payload)
+
+
+# ===========================================================================
+# ADR-016 runtime-evidence quality (2026-07-13)
+# ===========================================================================
+
+
+def test_sign_bundle_requires_a_committed_pack_local_uv_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shims = _stage_full_shim_set(tmp_path)
+    pack = _stage_pack_with_wheel(tmp_path)
+    (pack / "uv.lock").unlink()
+    _set_sign_bundle_settings(
+        monkeypatch,
+        cosign_path=shims["cosign"],
+        syft_path=shims["syft"],
+        grype_path=shims["grype"],
+        license_auditor_path=shims["license_auditor"],
+    )
+
+    result = CliRunner().invoke(app, ["sign", "--bundle", str(pack), "--json"])
+    assert result.exit_code == 1
+    report = json.loads(result.stdout)
+    assert any(
+        finding["payload"].get("failure_mode") == "runtime_lock_missing"
+        for finding in report["findings"]
+    )
+
+
+def test_sign_bundle_refuses_a_valid_but_stale_runtime_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shims = _stage_full_shim_set(tmp_path)
+    pack = _stage_pack_with_wheel(tmp_path)
+    pyproject = pack / "pyproject.toml"
+    pyproject.write_text(
+        pyproject.read_text().replace(
+            'dependencies = ["cognic-agentos"]',
+            'dependencies = ["cognic-agentos", "mcp==1.27.0"]',
+        )
+    )
+    _set_sign_bundle_settings(
+        monkeypatch,
+        cosign_path=shims["cosign"],
+        syft_path=shims["syft"],
+        grype_path=shims["grype"],
+        license_auditor_path=shims["license_auditor"],
+    )
+
+    result = CliRunner().invoke(app, ["sign", "--bundle", str(pack), "--json"])
+    assert result.exit_code == 1
+    report = json.loads(result.stdout)
+    assert any(
+        finding["payload"].get("failure_mode") == "runtime_lock_stale"
+        for finding in report["findings"]
+    )
+
+
+def test_runtime_lock_derives_probe_direct_dependencies_without_a_name_allowlist(
+    tmp_path: Path,
+) -> None:
+    from cognic_agentos.cli.sign import _read_runtime_inventory_from_uv_lock
+
+    pack = tmp_path / "probe"
+    pack.mkdir()
+    (pack / "pyproject.toml").write_text(
+        """[project]
+name = "probe"
+version = "0.1.0"
+dependencies = [
+  "mcp==1.27.0",
+  "uvicorn[standard]>=0.35",
+  "PyJWT[crypto]>=2.10,<3",
+]
+"""
+    )
+    (pack / "uv.lock").write_text(
+        """version = 1
+requires-python = ">=3.12"
+
+[[package]]
+name = "probe"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+  { name = "mcp" },
+  { name = "uvicorn", extra = ["standard"] },
+  { name = "pyjwt", extra = ["crypto"] },
+]
+
+[package.metadata]
+requires-dist = [
+  { name = "mcp", specifier = "==1.27.0" },
+  { name = "uvicorn", extras = ["standard"], specifier = ">=0.35" },
+  { name = "pyjwt", extras = ["crypto"], specifier = ">=2.10,<3" },
+]
+
+[[package]]
+name = "mcp"
+version = "1.27.0"
+source = { registry = "https://pypi.org/simple" }
+
+[[package]]
+name = "uvicorn"
+version = "0.51.0"
+source = { registry = "https://pypi.org/simple" }
+
+[package.optional-dependencies]
+standard = []
+
+[[package]]
+name = "pyjwt"
+version = "2.13.0"
+source = { registry = "https://pypi.org/simple" }
+
+[package.optional-dependencies]
+crypto = []
+"""
+    )
+
+    inventory, finding = _read_runtime_inventory_from_uv_lock(
+        pack,
+        project_name="probe",
+        project_version="0.1.0",
+    )
+    assert finding is None
+    assert inventory is not None
+    assert inventory.direct_dependency_names == frozenset({"mcp", "pyjwt", "uvicorn"})
+    assert {package.name for package in inventory.dependencies} == {
+        "mcp",
+        "pyjwt",
+        "uvicorn",
+    }
+
+
+def test_runtime_lock_accepts_revision_pinned_git_dependency_and_records_commit(
+    tmp_path: Path,
+) -> None:
+    import cognic_agentos.cli.sign as sign_module
+
+    commit = "a" * 40
+    pack = tmp_path / "git-pack"
+    pack.mkdir()
+    (pack / "pyproject.toml").write_text(
+        """[project]
+name = "probe"
+version = "0.1.0"
+dependencies = [
+  "dep @ git+https://github.com/example/dep@v1.0.0",
+]
+"""
+    )
+    (pack / "uv.lock").write_text(
+        f"""version = 1
+[[package]]
+name = "probe"
+version = "0.1.0"
+source = {{ editable = "." }}
+dependencies = [{{ name = "dep" }}]
+[package.metadata]
+requires-dist = [
+  {{ name = "dep", git = "https://github.com/example/dep?rev=v1.0.0" }},
+]
+[[package]]
+name = "dep"
+version = "1.0.0"
+source = {{ git = "https://github.com/example/dep?rev=v1.0.0#{commit}" }}
+"""
+    )
+
+    inventory, finding = sign_module._read_runtime_inventory_from_uv_lock(
+        pack,
+        project_name="probe",
+        project_version="0.1.0",
+    )
+    assert finding is None
+    assert inventory is not None
+    assert inventory.vcs_sources == (
+        sign_module._RuntimeVcsSource(
+            "dep",
+            "https://github.com/example/dep",
+            "v1.0.0",
+            commit,
+        ),
+    )
+    assert sign_module._runtime_inventory_metadata(inventory)["vcs_sources"] == [
+        {
+            "package_name": "dep",
+            "repository": "https://github.com/example/dep",
+            "requested_revision": "v1.0.0",
+            "commit_id": commit,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("pyproject_url", "metadata_revision", "locked_source", "failure_mode"),
+    [
+        (
+            "git+http://github.com/example/dep@v1",
+            "v1",
+            f"https://github.com/example/dep?rev=v1#{'a' * 40}",
+            "runtime_pyproject_direct_url_unsupported",
+        ),
+        (
+            "git+https://github.com/example/dep",
+            "v1",
+            f"https://github.com/example/dep?rev=v1#{'a' * 40}",
+            "runtime_pyproject_direct_url_unpinned",
+        ),
+        (
+            "git+https://github.com/example/dep@v1",
+            "v1",
+            "https://github.com/example/dep?rev=v1",
+            "runtime_lock_git_commit_missing",
+        ),
+        (
+            "git+https://github.com/example/dep@v1",
+            "v1",
+            "https://github.com/example/dep?rev=v1#not-a-commit",
+            "runtime_lock_git_commit_invalid",
+        ),
+        (
+            "git+https://github.com/example/dep@v1",
+            "v1",
+            f"https://github.com/example/dep?rev=v2#{'a' * 40}",
+            "runtime_lock_source_mismatch",
+        ),
+    ],
+)
+def test_runtime_lock_rejects_nonreproducible_or_mismatched_git_sources(
+    tmp_path: Path,
+    pyproject_url: str,
+    metadata_revision: str,
+    locked_source: str,
+    failure_mode: str,
+) -> None:
+    from cognic_agentos.cli.sign import _read_runtime_inventory_from_uv_lock
+
+    pack = tmp_path / failure_mode
+    pack.mkdir()
+    (pack / "pyproject.toml").write_text(
+        f"""[project]
+name = "probe"
+version = "0.1.0"
+dependencies = ["dep @ {pyproject_url}"]
+"""
+    )
+    (pack / "uv.lock").write_text(
+        f"""version = 1
+[[package]]
+name = "probe"
+version = "0.1.0"
+source = {{ editable = "." }}
+dependencies = [{{ name = "dep" }}]
+[package.metadata]
+requires-dist = [
+  {{ name = "dep", git = "https://github.com/example/dep?rev={metadata_revision}" }},
+]
+[[package]]
+name = "dep"
+version = "1.0.0"
+source = {{ git = "{locked_source}" }}
+"""
+    )
+
+    inventory, finding = _read_runtime_inventory_from_uv_lock(
+        pack,
+        project_name="probe",
+        project_version="0.1.0",
+    )
+    assert inventory is None
+    assert finding is not None
+    assert finding.payload["failure_mode"] == failure_mode
+
+
+def test_sign_bundle_rejects_valid_sbom_from_the_wrong_inventory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shims = _stage_full_shim_set(tmp_path)
+    shims["syft"] = _make_tool_shim(
+        tmp_path,
+        tool_name="syft_wrong_inventory",
+        output_flag="-o",
+        output_payload=json.dumps(
+            {
+                "bomFormat": "CycloneDX",
+                "components": [
+                    {
+                        "type": "library",
+                        "name": "pip-licenses",
+                        "version": "5.5.0",
+                    },
+                    {"type": "library", "name": "prettytable", "version": "3.16.0"},
+                ],
+            }
+        ).encode(),
+    )
+    pack = _stage_pack_with_wheel(tmp_path)
+    _set_sign_bundle_settings(
+        monkeypatch,
+        cosign_path=shims["cosign"],
+        syft_path=shims["syft"],
+        grype_path=shims["grype"],
+        license_auditor_path=shims["license_auditor"],
+    )
+
+    result = CliRunner().invoke(app, ["sign", "--bundle", str(pack), "--json"])
+    assert result.exit_code == 1
+    report = json.loads(result.stdout)
+    assert any(
+        finding["payload"].get("failure_mode") == "runtime_sbom_inventory_mismatch"
+        for finding in report["findings"]
+    )
+
+
+def test_sign_bundle_rejects_license_audit_of_the_auditor_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shims = _stage_full_shim_set(tmp_path)
+    shims["license_auditor"] = _make_tool_shim(
+        tmp_path,
+        tool_name="license_wrong_environment",
+        output_flag="--output-file",
+        output_payload=json.dumps(
+            [
+                {"Name": "pip-licenses", "Version": "5.5.0", "License": "MIT"},
+                {"Name": "prettytable", "Version": "3.16.0", "License": "BSD"},
+                {"Name": "wcwidth", "Version": "0.2.13", "License": "MIT"},
+            ]
+        ).encode(),
+    )
+    pack = _stage_pack_with_wheel(tmp_path)
+    _set_sign_bundle_settings(
+        monkeypatch,
+        cosign_path=shims["cosign"],
+        syft_path=shims["syft"],
+        grype_path=shims["grype"],
+        license_auditor_path=shims["license_auditor"],
+    )
+
+    result = CliRunner().invoke(app, ["sign", "--bundle", str(pack), "--json"])
+    assert result.exit_code == 1
+    report = json.loads(result.stdout)
+    assert any(
+        finding["payload"].get("failure_mode") == "license_audit_inventory_mismatch"
+        for finding in report["findings"]
+    )
+
+
+@pytest.mark.parametrize(
+    "proof_payload",
+    [
+        {"bomFormat": "CycloneDX", "components": []},
+        {
+            "bomFormat": "CycloneDX",
+            "components": [
+                {"type": "library", "name": "pip-licenses", "version": "5.5.0"},
+                {"type": "library", "name": "prettytable", "version": "3.16.0"},
+            ],
+        },
+        {
+            "bomFormat": "CycloneDX",
+            "components": [
+                {
+                    "type": "library",
+                    "name": "cognic-agent-sign-target",
+                    "version": "0.1.0",
+                },
+                {"type": "library", "name": "cognic-agentos", "version": "0.0.1"},
+                {"type": "file", "name": "unaccounted", "version": "1"},
+            ],
+        },
+    ],
+)
+def test_sign_bundle_rejects_zero_or_wrong_grype_component_proof(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    proof_payload: dict[str, Any],
+) -> None:
+    shims = _stage_full_shim_set(tmp_path)
+    shims["grype"] = _make_tool_shim(
+        tmp_path,
+        tool_name="grype_vacuous_proof",
+        output_flag="--file",
+        output_payload=_RUNTIME_GRYPE_REPORT_PAYLOAD,
+        cyclonedx_output_payload=json.dumps(proof_payload).encode(),
+    )
+    pack = _stage_pack_with_wheel(tmp_path)
+    _set_sign_bundle_settings(
+        monkeypatch,
+        cosign_path=shims["cosign"],
+        syft_path=shims["syft"],
+        grype_path=shims["grype"],
+        license_auditor_path=shims["license_auditor"],
+    )
+
+    result = CliRunner().invoke(app, ["sign", "--bundle", str(pack), "--json"])
+    assert result.exit_code == 1
+    report = json.loads(result.stdout)
+    assert any(
+        finding["payload"].get("failure_mode") == "grype_inventory_proof_mismatch"
+        for finding in report["findings"]
+    )
+
+
+def test_sign_bundle_normalizes_license_evidence_for_the_runtime_verifier(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cognic_agentos.protocol.supply_chain import SupplyChainPipeline
+
+    shims = _stage_full_shim_set(tmp_path)
+    pack = _stage_pack_with_wheel(tmp_path)
+    _set_sign_bundle_settings(
+        monkeypatch,
+        cosign_path=shims["cosign"],
+        syft_path=shims["syft"],
+        grype_path=shims["grype"],
+        license_auditor_path=shims["license_auditor"],
+    )
+
+    result = CliRunner().invoke(app, ["sign", "--bundle", str(pack)])
+    assert result.exit_code == 0, f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    audit_path = pack / "attestations" / "license-audit.json"
+    audit = json.loads(audit_path.read_text())
+    assert audit["inventory"]["direct_dependencies"] == ["cognic-agentos"]
+    assert {(item["name"], item["version"]) for item in audit["artifacts"]} == {
+        ("cognic-agent-sign-target", "0.1.0"),
+        ("cognic-agentos", "0.0.1"),
+    }
+    verified = SupplyChainPipeline._verify_license_audit(
+        audit_path,
+        ("UNKNOWN", "Proprietary"),
+    )
+    assert verified.parse_failed is False
+    assert verified.disallowed == ()
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "tool failed while reading /Users/reviewer/private/source.py",
+        "tool failed:path:/private/tmp/cache.db",
+        r"tool failed while reading C:\Users\reviewer\private.key",
+        r"tool failed while reading \\server\share\private.key",
+        r"tool failed:path:\\server\share\private.key",
+        "tool failed while reading //server/share/private.key",
+    ],
+)
+def test_public_attestation_host_path_classifier_rejects_embedded_paths(value: str) -> None:
+    from cognic_agentos.cli.sign import _is_absolute_host_path
+
+    assert _is_absolute_host_path(value) is True
+
+
+def test_pack_relative_public_path_wraps_outside_pack_as_a_sign_finding(
+    tmp_path: Path,
+) -> None:
+    import cognic_agentos.cli.sign as sign_module
+
+    pack = tmp_path / "pack"
+    pack.mkdir()
+    outside = tmp_path / "outside.json"
+    outside.write_text("{}")
+
+    with pytest.raises(sign_module._PackRelativePathRefused) as excinfo:
+        sign_module._pack_relative_public_path(pack, outside)
+    finding = excinfo.value.finding
+    assert finding.reason == "sign_subprocess_failed"
+    assert finding.payload["failure_mode"] == "public_attestation_path_outside_pack"
+    assert str(outside) not in finding.message
+    assert str(outside) not in repr(finding.payload)
+
+
+@pytest.mark.parametrize(
+    ("case", "failure_mode"),
+    [
+        ("marker_type", "runtime_lock_marker_invalid"),
+        ("marker_syntax", "runtime_lock_marker_invalid"),
+        ("extras_shape", "runtime_lock_dependency_shape_invalid"),
+        ("edge_name", "runtime_lock_dependency_shape_invalid"),
+        ("pydeps_shape", "runtime_pyproject_dependencies_invalid"),
+        ("pydep_invalid", "runtime_pyproject_dependency_invalid"),
+        ("pydep_url", "runtime_pyproject_direct_url_unsupported"),
+        ("pydep_duplicate", "runtime_pyproject_dependency_duplicate"),
+        ("metadata_missing", "runtime_lock_metadata_missing"),
+        ("requires_missing", "runtime_lock_metadata_missing"),
+        ("requires_shape", "runtime_lock_metadata_invalid"),
+        ("specifier_shape", "runtime_lock_metadata_invalid"),
+        ("specifier_invalid", "runtime_lock_metadata_invalid"),
+        ("locked_url", "runtime_pyproject_direct_url_unsupported"),
+        ("selector_version", "runtime_lock_dependency_shape_invalid"),
+        ("selector_source", "runtime_lock_dependency_shape_invalid"),
+        ("selector_ambiguous", "runtime_lock_dependency_ambiguous"),
+    ],
+)
+def test_runtime_inventory_parser_shape_guards(case: str, failure_mode: str) -> None:
+    import cognic_agentos.cli.sign as sign_module
+
+    with pytest.raises(sign_module._RuntimeInventoryError) as excinfo:
+        if case == "marker_type":
+            sign_module._normalized_marker(1)
+        elif case == "marker_syntax":
+            sign_module._normalized_marker("python_version => '3.12'")
+        elif case == "extras_shape":
+            sign_module._edge_extras({"extra": "standard"})
+        elif case == "edge_name":
+            sign_module._edge_contract({"name": ""})
+        elif case == "pydeps_shape":
+            sign_module._pyproject_runtime_requirement_contracts({"dependencies": "mcp"})
+        elif case == "pydep_invalid":
+            sign_module._pyproject_runtime_requirement_contracts({"dependencies": ["not ???"]})
+        elif case == "pydep_url":
+            sign_module._pyproject_runtime_requirement_contracts(
+                {"dependencies": ["pkg @ https://example.com/pkg.whl"]}
+            )
+        elif case == "pydep_duplicate":
+            sign_module._pyproject_runtime_requirement_contracts(
+                {"dependencies": ["mcp>=1", "mcp<2"]}
+            )
+        elif case == "metadata_missing":
+            sign_module._locked_requirement_contracts({})
+        elif case == "requires_missing":
+            sign_module._locked_requirement_contracts({"metadata": {}})
+        elif case == "requires_shape":
+            sign_module._locked_requirement_contracts({"metadata": {"requires-dist": ["mcp"]}})
+        elif case == "specifier_shape":
+            sign_module._locked_requirement_contracts(
+                {"metadata": {"requires-dist": [{"name": "mcp", "specifier": 1}]}}
+            )
+        elif case == "specifier_invalid":
+            sign_module._locked_requirement_contracts(
+                {"metadata": {"requires-dist": [{"name": "mcp", "specifier": "=>1"}]}}
+            )
+        elif case == "locked_url":
+            sign_module._locked_requirement_contracts(
+                {
+                    "metadata": {
+                        "requires-dist": [{"name": "mcp", "url": "https://example.com/pkg.whl"}]
+                    }
+                }
+            )
+        elif case == "selector_version":
+            sign_module._select_locked_package(
+                {"name": "mcp", "version": 1},
+                packages_by_name={"mcp": []},
+            )
+        elif case == "selector_source":
+            sign_module._select_locked_package(
+                {"name": "mcp", "source": "registry"},
+                packages_by_name={"mcp": []},
+            )
+        else:
+            sign_module._select_locked_package(
+                {"name": "mcp"},
+                packages_by_name={
+                    "mcp": [
+                        {"name": "mcp", "version": "1", "source": {"registry": "a"}},
+                        {"name": "mcp", "version": "2", "source": {"registry": "b"}},
+                    ]
+                },
+            )
+    assert excinfo.value.failure_mode == failure_mode
+
+
+def test_runtime_inventory_parser_ignores_dev_extra_metadata_and_selects_exactly() -> None:
+    import cognic_agentos.cli.sign as sign_module
+
+    assert (
+        sign_module._locked_requirement_contracts(
+            {
+                "metadata": {
+                    "requires-dist": [
+                        {"name": "pytest", "marker": "extra == 'dev'", "specifier": ">=8"}
+                    ]
+                }
+            }
+        )
+        == set()
+    )
+    selected = sign_module._select_locked_package(
+        {"name": "mcp", "version": "2", "source": {"registry": "b"}},
+        packages_by_name={
+            "mcp": [
+                {"name": "mcp", "version": "1", "source": {"registry": "a"}},
+                {"name": "mcp", "version": "2", "source": {"registry": "b"}},
+            ]
+        },
+    )
+    assert selected["version"] == "2"
+
+
+@pytest.mark.parametrize(
+    ("lock_body", "failure_mode"),
+    [
+        ("not = [valid", "runtime_lock_unreadable"),
+        ("version = 1\n", "runtime_lock_packages_missing"),
+        ('version = 1\npackage = ["not-a-table"]\n', "runtime_lock_package_shape_invalid"),
+        (
+            """version = 1
+[[package]]
+name = 1
+version = "0.1.0"
+source = { editable = "." }
+""",
+            "runtime_lock_package_shape_invalid",
+        ),
+        (
+            """version = 1
+[[package]]
+name = "cognic-agent-sign-target"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = "not-a-list"
+[package.metadata]
+requires-dist = []
+""",
+            "runtime_lock_dependency_shape_invalid",
+        ),
+        (
+            """version = 1
+[[package]]
+name = "cognic-agent-sign-target"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [{ name = "cognic-agentos" }]
+[package.metadata]
+requires-dist = []
+[[package]]
+name = "cognic-agentos"
+version = "0.0.1"
+source = { registry = "https://pypi.org/simple" }
+""",
+            "runtime_lock_stale",
+        ),
+    ],
+)
+def test_runtime_inventory_rejects_invalid_lock_documents(
+    tmp_path: Path,
+    lock_body: str,
+    failure_mode: str,
+) -> None:
+    import shutil
+
+    from cognic_agentos.cli.sign import _read_runtime_inventory_from_uv_lock
+
+    pack = tmp_path / "pack"
+    shutil.copytree(_SIGN_TARGET_PACK, pack)
+    (pack / "uv.lock").write_text(lock_body)
+    inventory, finding = _read_runtime_inventory_from_uv_lock(
+        pack,
+        project_name="cognic-agent-sign-target",
+        project_version="0.1.0",
+    )
+    assert inventory is None
+    assert finding is not None
+    assert finding.payload["failure_mode"] == failure_mode
+    if failure_mode == "runtime_lock_unreadable":
+        assert finding.payload["error_type"] == "TOMLDecodeError"
+
+
+def test_runtime_inventory_refuses_a_lock_symlink_outside_the_pack(tmp_path: Path) -> None:
+    import shutil
+
+    from cognic_agentos.cli.sign import _read_runtime_inventory_from_uv_lock
+
+    pack = tmp_path / "pack"
+    shutil.copytree(_SIGN_TARGET_PACK, pack)
+    external_lock = tmp_path / "external.lock"
+    external_lock.write_bytes((pack / "uv.lock").read_bytes())
+    (pack / "uv.lock").unlink()
+    (pack / "uv.lock").symlink_to(external_lock)
+
+    inventory, finding = _read_runtime_inventory_from_uv_lock(
+        pack,
+        project_name="cognic-agent-sign-target",
+        project_version="0.1.0",
+    )
+    assert inventory is None
+    assert finding is not None
+    assert finding.payload["failure_mode"] == "runtime_lock_outside_pack"
+
+
+@pytest.mark.parametrize(
+    ("case", "failure_mode"),
+    [
+        ("transitive_shape", "runtime_lock_dependency_shape_invalid"),
+        ("optional_shape", "runtime_lock_dependency_shape_invalid"),
+        ("extra_missing", "runtime_lock_extra_missing"),
+        ("specifier_mismatch", "runtime_lock_stale"),
+        ("platform_conflict", "runtime_lock_platform_conflict"),
+    ],
+)
+def test_runtime_inventory_rejects_invalid_resolved_graphs(
+    tmp_path: Path,
+    case: str,
+    failure_mode: str,
+) -> None:
+    from cognic_agentos.cli.sign import _read_runtime_inventory_from_uv_lock
+
+    pack = tmp_path / case
+    pack.mkdir()
+    dependency = "dep"
+    requirement = "dep"
+    root_edges = '{ name = "dep" }'
+    metadata_entries = '{ name = "dep" }'
+    dependency_body = ""
+    if case == "transitive_shape":
+        dependency_body = 'dependencies = "not-a-list"\n'
+    elif case == "optional_shape":
+        dependency_body = 'optional-dependencies = "not-a-table"\n'
+    elif case == "extra_missing":
+        requirement = "dep[feature]"
+        root_edges = '{ name = "dep", extra = ["feature"] }'
+        metadata_entries = '{ name = "dep", extras = ["feature"] }'
+    elif case == "specifier_mismatch":
+        requirement = "dep>=2"
+        metadata_entries = '{ name = "dep", specifier = ">=2" }'
+    else:
+        dependency = "dep-conflict"
+        (pack / "pyproject.toml").write_text(
+            """[project]
+name = "probe"
+version = "0.1.0"
+dependencies = [
+  "dep==1; python_version >= '3'",
+  "dep==2; python_version < '4'",
+]
+"""
+        )
+        (pack / "uv.lock").write_text(
+            """version = 1
+[[package]]
+name = "probe"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+  { name = "dep", version = "1", marker = "python_version >= '3'" },
+  { name = "dep", version = "2", marker = "python_version < '4'" },
+]
+[package.metadata]
+requires-dist = [
+  { name = "dep", specifier = "==1", marker = "python_version >= '3'" },
+  { name = "dep", specifier = "==2", marker = "python_version < '4'" },
+]
+[[package]]
+name = "dep"
+version = "1"
+source = { registry = "https://pypi.org/simple" }
+[[package]]
+name = "dep"
+version = "2"
+source = { registry = "https://pypi.org/simple" }
+"""
+        )
+    if dependency == "dep":
+        (pack / "pyproject.toml").write_text(
+            f'''[project]
+name = "probe"
+version = "0.1.0"
+dependencies = ["{requirement}"]
+'''
+        )
+        (pack / "uv.lock").write_text(
+            f"""version = 1
+[[package]]
+name = "probe"
+version = "0.1.0"
+source = {{ editable = "." }}
+dependencies = [{root_edges}]
+[package.metadata]
+requires-dist = [{metadata_entries}]
+[[package]]
+name = "dep"
+version = "1"
+source = {{ registry = "https://pypi.org/simple" }}
+{dependency_body}"""
+        )
+
+    inventory, finding = _read_runtime_inventory_from_uv_lock(
+        pack,
+        project_name="probe",
+        project_version="0.1.0",
+    )
+    assert inventory is None
+    assert finding is not None
+    assert finding.payload["failure_mode"] == failure_mode
+
+
+def test_runtime_inventory_skips_false_markers_and_reads_root_license(tmp_path: Path) -> None:
+    from cognic_agentos.cli.sign import _read_runtime_inventory_from_uv_lock
+
+    pack = tmp_path / "marker-pack"
+    pack.mkdir()
+    (pack / "pyproject.toml").write_text(
+        """[project]
+name = "probe"
+version = "0.1.0"
+license = { text = "Apache-2.0" }
+dependencies = ["dep; python_version < '1'"]
+"""
+    )
+    (pack / "uv.lock").write_text(
+        """version = 1
+[[package]]
+name = "probe"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [{ name = "dep", marker = "python_version < '1'" }]
+[package.metadata]
+requires-dist = [{ name = "dep", marker = "python_version < '1'" }]
+[[package]]
+name = "dep"
+version = "1"
+source = { registry = "https://pypi.org/simple" }
+"""
+    )
+
+    inventory, finding = _read_runtime_inventory_from_uv_lock(
+        pack,
+        project_name="probe",
+        project_version="0.1.0",
+    )
+    assert finding is None
+    assert inventory is not None
+    assert inventory.dependencies == ()
+    assert inventory.direct_dependency_names == frozenset()
+    assert inventory.root_license == "Apache-2.0"
+
+
+@pytest.mark.parametrize(
+    ("installed_name", "installed_version", "locked_version", "failure_mode"),
+    [
+        (None, None, "1.0", "runtime_environment_dependency_missing"),
+        ("dep", "2.0", "1.0", "runtime_environment_version_mismatch"),
+        ("dep", "not-pep440", "other-invalid", "runtime_environment_version_mismatch"),
+    ],
+)
+def test_runtime_environment_must_match_every_locked_dependency(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    installed_name: str | None,
+    installed_version: str | None,
+    locked_version: str,
+    failure_mode: str,
+) -> None:
+    import importlib.metadata
+
+    import cognic_agentos.cli.sign as sign_module
+
+    class _Distribution:
+        metadata = {"Name": installed_name} if installed_name is not None else {}
+        version = installed_version or ""
+
+    monkeypatch.setattr(
+        importlib.metadata,
+        "distributions",
+        lambda: [_Distribution()],
+    )
+    inventory = sign_module._RuntimeInventory(
+        root=sign_module._RuntimePackage("probe", "0.1.0"),
+        dependencies=(sign_module._RuntimePackage("dep", locked_version),),
+        direct_dependency_names=frozenset({"dep"}),
+        lock_digest_sha256="0" * 64,
+        marker_environment=(),
+        root_license="Apache-2.0",
+    )
+    finding = sign_module._validate_runtime_environment(tmp_path, inventory)
+    assert finding is not None
+    assert finding.payload["failure_mode"] == failure_mode
+
+
+@pytest.mark.parametrize(
+    ("direct_url_payload", "expected_failure"),
+    [
+        (
+            {
+                "url": "https://github.com/example/dep.git",
+                "vcs_info": {
+                    "vcs": "git",
+                    "requested_revision": "v1",
+                    "commit_id": "a" * 40,
+                },
+            },
+            None,
+        ),
+        (None, "runtime_environment_vcs_provenance_missing"),
+        (
+            {
+                "url": "https://github.com/example/dep",
+                "vcs_info": {
+                    "vcs": "git",
+                    "requested_revision": "v1",
+                    "commit_id": "b" * 40,
+                },
+            },
+            "runtime_environment_vcs_mismatch",
+        ),
+    ],
+)
+def test_runtime_environment_verifies_locked_git_commit_via_pep610(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    direct_url_payload: dict[str, Any] | None,
+    expected_failure: str | None,
+) -> None:
+    import importlib.metadata
+
+    import cognic_agentos.cli.sign as sign_module
+
+    class _Distribution:
+        def __init__(self) -> None:
+            self.metadata = {"Name": "dep"}
+            self.version = "1.0.0"
+
+        @staticmethod
+        def read_text(filename: str) -> str | None:
+            assert filename == "direct_url.json"
+            return json.dumps(direct_url_payload) if direct_url_payload is not None else None
+
+    monkeypatch.setattr(importlib.metadata, "distributions", lambda: [_Distribution()])
+    inventory = sign_module._RuntimeInventory(
+        root=sign_module._RuntimePackage("probe", "0.1.0"),
+        dependencies=(sign_module._RuntimePackage("dep", "1.0.0"),),
+        direct_dependency_names=frozenset({"dep"}),
+        lock_digest_sha256="0" * 64,
+        marker_environment=(),
+        root_license="Apache-2.0",
+        vcs_sources=(
+            sign_module._RuntimeVcsSource(
+                "dep",
+                "https://github.com/example/dep",
+                "v1",
+                "a" * 40,
+            ),
+        ),
+    )
+
+    finding = sign_module._validate_runtime_environment(tmp_path, inventory)
+    if expected_failure is None:
+        assert finding is None
+    else:
+        assert finding is not None
+        assert finding.payload["failure_mode"] == expected_failure
+
+
+def _test_runtime_inventory() -> Any:
+    import cognic_agentos.cli.sign as sign_module
+
+    return sign_module._RuntimeInventory(
+        root=sign_module._RuntimePackage("probe", "0.1.0"),
+        dependencies=(sign_module._RuntimePackage("dep", "1.0"),),
+        direct_dependency_names=frozenset({"dep"}),
+        lock_digest_sha256="0" * 64,
+        marker_environment=(("python_version", "3.12"),),
+        root_license="Apache-2.0",
+    )
+
+
+@pytest.mark.parametrize(
+    ("raw_payload", "failure_mode"),
+    [
+        ("not-json", "license_audit_json_invalid"),
+        ({"artifacts": []}, "license_audit_shape_invalid"),
+        (["not-an-object"], "license_audit_shape_invalid"),
+        ([{"Name": "dep"}], "license_audit_shape_invalid"),
+        (
+            [
+                {"Name": "dep", "Version": "1.0", "License": "MIT"},
+                {"Name": "dep", "Version": "1.0", "License": "MIT"},
+            ],
+            "license_audit_duplicate_package",
+        ),
+        (
+            [{"Name": "other", "Version": "1.0", "License": "MIT"}],
+            "license_audit_inventory_mismatch",
+        ),
+        (
+            [{"Name": "dep", "Version": "2.0", "License": "MIT"}],
+            "license_audit_inventory_mismatch",
+        ),
+        ([], "license_audit_inventory_mismatch"),
+    ],
+)
+def test_license_normalizer_refuses_malformed_or_wrong_inventories(
+    tmp_path: Path,
+    raw_payload: object,
+    failure_mode: str,
+) -> None:
+    from cognic_agentos.cli.sign import _normalize_license_audit
+
+    raw_path = tmp_path / "raw.json"
+    if isinstance(raw_payload, str):
+        raw_path.write_text(raw_payload)
+    else:
+        raw_path.write_text(json.dumps(raw_payload))
+    normalized, finding = _normalize_license_audit(
+        raw_path,
+        tmp_path / "license.json",
+        inventory=_test_runtime_inventory(),
+    )
+    assert normalized is None
+    assert finding is not None
+    assert finding.payload["failure_mode"] == failure_mode
+
+
+def test_license_normalizer_splits_values_and_defaults_unknown(tmp_path: Path) -> None:
+    from cognic_agentos.cli.sign import _normalize_license_audit
+
+    raw_path = tmp_path / "raw.json"
+    raw_path.write_text(
+        json.dumps([{"Name": "dep", "Version": "1.0", "License": "MIT; Apache-2.0"}])
+    )
+    normalized, finding = _normalize_license_audit(
+        raw_path,
+        tmp_path / "license.json",
+        inventory=_test_runtime_inventory(),
+    )
+    assert finding is None
+    assert normalized is not None
+    assert next(iter(normalized.values())) == ["Apache-2.0", "MIT"]
+
+    raw_path.write_text(json.dumps([{"Name": "dep", "Version": "1.0", "License": None}]))
+    normalized, finding = _normalize_license_audit(
+        raw_path,
+        tmp_path / "license-unknown.json",
+        inventory=_test_runtime_inventory(),
+    )
+    assert finding is None
+    assert normalized is not None
+    assert next(iter(normalized.values())) == ["UNKNOWN"]
+
+
+def test_grype_inventory_proof_rejects_missing_or_malformed_output(tmp_path: Path) -> None:
+    from cognic_agentos.cli.sign import _validate_grype_inventory_proof
+
+    finding = _validate_grype_inventory_proof(
+        tmp_path / "missing.json",
+        inventory=_test_runtime_inventory(),
+    )
+    assert finding is not None
+    assert finding.payload["failure_mode"] == "grype_inventory_proof_invalid"
+
+
+def test_cyclonedx_package_set_rejects_unaccounted_components() -> None:
+    import cognic_agentos.cli.sign as sign_module
+
+    assert sign_module._cyclonedx_package_set([]) == ([], False)
+    assert sign_module._cyclonedx_package_set({}) == ([], False)
+    identities, shaped = sign_module._cyclonedx_package_set(
+        {
+            "components": [
+                {"type": "library", "name": "dep", "version": "1.0"},
+                {"type": "file", "name": "ignored", "version": "1"},
+            ],
+            "metadata": {"component": {"type": "library", "name": "probe", "version": "0.1.0"}},
+        }
+    )
+    assert shaped is False
+    assert identities == [sign_module._RuntimePackage("dep", "1.0")]
+
+
+def test_runtime_sbom_rejects_unaccounted_non_library_component(tmp_path: Path) -> None:
+    import cognic_agentos.cli.sign as sign_module
+
+    sbom = tmp_path / "sbom.json"
+    sbom.write_text(
+        json.dumps(
+            {
+                "components": [
+                    {"type": "library", "name": "probe", "version": "0.1.0"},
+                    {"type": "library", "name": "dep", "version": "1.0"},
+                    {"type": "file", "name": "unaccounted", "version": "1"},
+                ]
+            }
+        )
+    )
+    finding = sign_module._normalize_runtime_sbom(
+        sbom,
+        inventory=_test_runtime_inventory(),
+    )
+    assert finding is not None
+    assert finding.payload["failure_mode"] == "runtime_sbom_inventory_mismatch"
+
+
+def test_runtime_sbom_accounts_for_syft_synthetic_inventory_source(tmp_path: Path) -> None:
+    import cognic_agentos.cli.sign as sign_module
+
+    inventory = _test_runtime_inventory()
+    requirements = "probe==0.1.0\ndep==1.0\n"
+    source_component = {
+        "bom-ref": "source-ref",
+        "hashes": [
+            {"alg": "SHA-1", "content": hashlib.sha1(requirements.encode()).hexdigest()},
+            {"alg": "SHA-256", "content": hashlib.sha256(requirements.encode()).hexdigest()},
+        ],
+        "name": "attestations/.agentos-runtime-inventory-deadbeef/requirements.txt",
+        "type": "file",
+    }
+    sbom = tmp_path / "sbom.json"
+    sbom.write_text(
+        json.dumps(
+            {
+                "components": [
+                    {"type": "library", "name": "probe", "version": "0.1.0"},
+                    {"type": "library", "name": "dep", "version": "1.0"},
+                    source_component,
+                ]
+            }
+        )
+    )
+
+    finding = sign_module._normalize_runtime_sbom(sbom, inventory=inventory)
+
+    assert finding is None
+    normalized = json.loads(sbom.read_text())
+    assert normalized["components"] == [{"type": "library", "name": "dep", "version": "1.0"}]
+    properties = {
+        item["name"]: json.loads(item["value"]) for item in normalized["metadata"]["properties"]
+    }
+    assert (
+        properties["cognic:runtime-inventory:requirements_sha256"]
+        == hashlib.sha256(requirements.encode()).hexdigest()
+    )
+    assert ".agentos-runtime-inventory" not in sbom.read_text()
+
+
+@pytest.mark.parametrize("mutation", ["wrong_hash", "duplicate", "unexpected_field"])
+def test_runtime_sbom_rejects_untrusted_syft_source_component(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    import cognic_agentos.cli.sign as sign_module
+
+    requirements = "probe==0.1.0\ndep==1.0\n"
+    source_component: dict[str, Any] = {
+        "bom-ref": "source-ref",
+        "hashes": [
+            {
+                "alg": "SHA-256",
+                "content": hashlib.sha256(requirements.encode()).hexdigest(),
+            }
+        ],
+        "name": "attestations/.agentos-runtime-inventory-deadbeef/requirements.txt",
+        "type": "file",
+    }
+    if mutation == "wrong_hash":
+        source_component["hashes"][0]["content"] = "0" * 64
+    elif mutation == "unexpected_field":
+        source_component["publisher"] = "unaccounted"
+    components: list[dict[str, Any]] = [
+        {"type": "library", "name": "probe", "version": "0.1.0"},
+        {"type": "library", "name": "dep", "version": "1.0"},
+        source_component,
+    ]
+    if mutation == "duplicate":
+        components.append(dict(source_component))
+    sbom = tmp_path / "sbom.json"
+    sbom.write_text(json.dumps({"components": components}))
+
+    finding = sign_module._normalize_runtime_sbom(
+        sbom,
+        inventory=_test_runtime_inventory(),
+    )
+
+    assert finding is not None
+    assert finding.payload["failure_mode"] == "runtime_sbom_inventory_mismatch"
+
+
+@pytest.mark.parametrize(
+    "component",
+    [
+        None,
+        {
+            "type": "library",
+            "name": "attestations/.agentos-runtime-inventory-deadbeef/requirements.txt",
+            "hashes": [],
+        },
+        {"type": "file", "name": 1, "hashes": []},
+        {"type": "file", "name": "requirements.txt", "hashes": []},
+        {
+            "type": "file",
+            "name": "attestations/.agentos-runtime-inventory-deadbeef/requirements.txt",
+            "hashes": "not-a-list",
+        },
+        {
+            "type": "file",
+            "name": "attestations/.agentos-runtime-inventory-deadbeef/requirements.txt",
+            "hashes": [None],
+        },
+        {
+            "type": "file",
+            "name": "attestations/.agentos-runtime-inventory-deadbeef/requirements.txt",
+            "hashes": [{"alg": 1, "content": "0" * 64}],
+        },
+        {
+            "type": "file",
+            "name": "attestations/.agentos-runtime-inventory-deadbeef/requirements.txt",
+            "hashes": [{"alg": "SHA-1", "content": "0" * 40}],
+        },
+    ],
+)
+def test_syft_inventory_source_classifier_rejects_every_malformed_shape(
+    component: object,
+) -> None:
+    import cognic_agentos.cli.sign as sign_module
+
+    assert (
+        sign_module._is_expected_syft_inventory_source_component(
+            component,
+            inventory=_test_runtime_inventory(),
+        )
+        is False
+    )
+
+
+@pytest.mark.parametrize("body", ["not-json", "[]", '{"components":"bad"}'])
+def test_runtime_sbom_refuses_malformed_document(tmp_path: Path, body: str) -> None:
+    import cognic_agentos.cli.sign as sign_module
+
+    sbom = tmp_path / "sbom.json"
+    sbom.write_text(body)
+
+    finding = sign_module._normalize_runtime_sbom(
+        sbom,
+        inventory=_test_runtime_inventory(),
+    )
+
+    assert finding is not None
+    assert finding.payload["failure_mode"] in {
+        "public_attestation_json_invalid",
+        "runtime_sbom_shape_invalid",
+    }
+
+
+@pytest.mark.parametrize("payload", [[], {"matches": []}, {"source": {}}])
+def test_grype_report_requires_matches_and_source(
+    tmp_path: Path,
+    payload: object,
+) -> None:
+    from cognic_agentos.cli.sign import _annotate_grype_report
+
+    report = tmp_path / "grype.json"
+    report.write_text(json.dumps(payload))
+    finding = _annotate_grype_report(report, inventory=_test_runtime_inventory())
+    assert finding is not None
+    assert finding.payload["failure_mode"] == "grype_report_shape_invalid"
+
+
+@pytest.mark.parametrize(
+    ("payload", "failure_mode"),
+    [
+        ([], "runtime_sbom_shape_invalid"),
+        ({"components": []}, "runtime_sbom_root_component_missing"),
+        (
+            {"metadata": {"component": {}}, "components": "bad"},
+            "runtime_sbom_shape_invalid",
+        ),
+        (
+            {
+                "metadata": {"component": {"type": "library", "name": "probe", "version": "0.1.0"}},
+                "components": [{"type": "file", "name": "dep", "version": "1.0"}],
+            },
+            "runtime_sbom_inventory_mismatch",
+        ),
+    ],
+)
+def test_sbom_license_enrichment_refuses_drifted_shapes(
+    tmp_path: Path,
+    payload: object,
+    failure_mode: str,
+) -> None:
+    import cognic_agentos.cli.sign as sign_module
+
+    sbom = tmp_path / "sbom.json"
+    sbom.write_text(json.dumps(payload))
+    finding = sign_module._enrich_sbom_licenses(
+        sbom,
+        inventory=_test_runtime_inventory(),
+        dependency_licenses={sign_module._RuntimePackage("dep", "1.0"): ["MIT"]},
+    )
+    assert finding is not None
+    assert finding.payload["failure_mode"] == failure_mode
+
+
+@pytest.mark.asyncio
+async def test_zero_dependency_inventory_still_proves_a_nonempty_root_scan(
+    tmp_path: Path,
+) -> None:
+    import cognic_agentos.cli.sign as sign_module
+
+    pack = tmp_path / "pack"
+    attestations = pack / "attestations"
+    attestations.mkdir(parents=True)
+    inventory = sign_module._RuntimeInventory(
+        root=sign_module._RuntimePackage("root-only-pack", "0.1.0"),
+        dependencies=(),
+        direct_dependency_names=frozenset(),
+        lock_digest_sha256="1" * 64,
+        marker_environment=(("python_version", "3.12"),),
+        root_license="Apache-2.0",
+    )
+    syft = _make_tool_shim(
+        tmp_path,
+        tool_name="zero_dependency_syft",
+        output_flag="-o",
+        output_payload=_runtime_sbom_payload("root-only-pack", "0.1.0").replace(
+            b', {"type": "library", "name": "cognic-agentos", "version": "0.0.1"}',
+            b"",
+        ),
+    )
+    grype = _make_tool_shim(
+        tmp_path,
+        tool_name="zero_dependency_grype",
+        output_flag="--file",
+        output_payload=_RUNTIME_GRYPE_REPORT_PAYLOAD,
+        cyclonedx_output_payload=_runtime_grype_proof_payload("root-only-pack", "0.1.0").replace(
+            b', {"type": "library", "name": "cognic-agentos", "version": "0.0.1"}',
+            b"",
+        ),
+    )
+    license_auditor = _make_tool_shim(
+        tmp_path,
+        tool_name="zero_dependency_license_auditor",
+        output_flag="--output-file",
+        output_payload=b"not-used",
+        exit_code=99,
+    )
+    sbom = attestations / "sbom.cdx.json"
+    vuln = attestations / "vuln-scan.json"
+    licenses = attestations / "license-audit.json"
+
+    finding = await sign_module._produce_runtime_evidence(
+        pack_path=pack,
+        attestations_dir=attestations,
+        inventory=inventory,
+        syft_bin=str(syft),
+        grype_bin=str(grype),
+        license_bin=str(license_auditor),
+        sbom_path=sbom,
+        vuln_path=vuln,
+        license_path=licenses,
+    )
+
+    assert finding is None
+    license_recording = Path(f"{license_auditor}.recording_path").read_text()
+    assert not Path(license_recording).exists(), "an empty dependency audit must not run"
+    sbom_payload = json.loads(sbom.read_text())
+    assert sbom_payload["metadata"]["component"]["name"] == "root-only-pack"
+    assert sbom_payload["components"] == []
+    license_payload = json.loads(licenses.read_text())
+    assert license_payload["inventory"]["component_count"] == 1
+    assert license_payload["artifacts"] == [
+        {
+            "licenses": ["Apache-2.0"],
+            "name": "root-only-pack",
+            "version": "0.1.0",
+        }
+    ]
+    vuln_payload = json.loads(vuln.read_text())
+    assert vuln_payload["cognic_runtime_inventory"]["scanned_component_count"] == 1

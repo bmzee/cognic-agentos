@@ -104,6 +104,19 @@ def test_scaffold_creates_canonical_tree(tmp_path: Path) -> None:
     )
 
 
+def test_scaffolded_release_workflow_uses_committed_lock(tmp_path: Path) -> None:
+    """Hook releases use the same lock-backed evidence path as every
+    other pack kind."""
+    pack_root = _scaffold_hook("example", tmp_path)
+    workflow = (pack_root / ".github" / "workflows" / "sign-and-publish.yml").read_text()
+
+    lock_check = workflow.index("uv lock --check")
+    frozen_sync = workflow.index("uv sync --frozen --extra dev")
+    sign = workflow.index("uv run agentos sign --bundle .")
+    assert lock_check < frozen_sync < sign
+    assert 'pip install "cognic-agentos' not in workflow
+
+
 def test_hook_scaffold_has_no_agent_cards_dir(tmp_path: Path) -> None:
     """Hook packs do NOT ship an AgentCard JWS, so the scaffold MUST
     NOT create an ``agent_cards/`` directory (in contrast to agent
@@ -352,18 +365,15 @@ def test_scaffolded_pyproject_git_pins_kernel_dep(tmp_path: Path) -> None:
     )
 
 
-def test_scaffolded_ci_installs_kernel_from_git(tmp_path: Path) -> None:
-    """The hook scaffold's CI installs the AgentOS CLI from the git-pinned
-    tag (positive) and not via the broken bare install (negative)."""
+def test_scaffolded_ci_installs_kernel_from_locked_project(tmp_path: Path) -> None:
+    """Hook release CI consumes the git-pinned AgentOS dependency through
+    the committed project lock, never through an ad-hoc install beside it."""
     pack_root = _scaffold_hook("example", tmp_path)
     ci_text = (pack_root / ".github" / "workflows" / "sign-and-publish.yml").read_text()
-    assert f'pip install "{_PINNED_KERNEL_DEP}"' in ci_text, (
-        f"hook CI must git-install the kernel; expected "
-        f'pip install "{_PINNED_KERNEL_DEP}" in:\n{ci_text}'
-    )
-    assert "pip install cognic-agentos" not in ci_text, (
-        f"hook CI must NOT carry the broken bare `pip install cognic-agentos`:\n{ci_text}"
-    )
+    pyproject_text = (pack_root / "pyproject.toml").read_text()
+    assert _PINNED_KERNEL_DEP in pyproject_text
+    assert "uv sync --frozen --extra dev" in ci_text
+    assert "pip install" not in ci_text
 
 
 def test_scaffolded_pyproject_pins_requires_python(tmp_path: Path) -> None:

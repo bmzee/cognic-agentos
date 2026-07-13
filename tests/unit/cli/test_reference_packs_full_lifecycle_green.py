@@ -64,7 +64,10 @@ the explicitly-documented test-only agent keypair only. All
 sign/verify outputs (cosign.sig, bundle.sigstore, sbom.cdx.json,
 vuln-scan.json, license-audit.json, slsa-provenance.intoto.json,
 intoto-layout.json, agent-card.jws) are generated under ``tmp_path``
-during this lifecycle test and never reach disk in ``examples/``.
+during this lifecycle test and never reach disk in ``examples/``. The
+same staging helper injects the canonical synthetic two-package
+``uv.lock`` into the temporary clones only. A copied/published pack
+must resolve, review, and commit its real lock as the evidence source.
 """
 
 from __future__ import annotations
@@ -88,8 +91,12 @@ from tests.unit.cli.test_cli_verify import (
     _wire_verify_settings,
 )
 
-# Reference packs root.
-_EXAMPLES_ROOT = Path(__file__).resolve().parents[3] / "examples"
+# Reference packs root + the deterministic unit-lane lock fixture. The
+# committed examples stay static; release repositories generate and commit
+# their own resolver lock before signing.
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_EXAMPLES_ROOT = _REPO_ROOT / "examples"
+_SIGN_LOCK_FIXTURE = _REPO_ROOT / "tests" / "fixtures" / "cli_sign_target_pack" / "uv.lock"
 _TOOL_PACK = _EXAMPLES_ROOT / "cognic-tool-example-minimal"
 _SKILL_PACK = _EXAMPLES_ROOT / "cognic-skill-example-minimal"
 _AGENT_PACK = _EXAMPLES_ROOT / "cognic-agent-example-minimal"
@@ -122,9 +129,26 @@ _AGENT_TEST_PUBLIC_PEM = (
 def _stage_reference_pack_clone(source_pack: Path, tmp_path: Path) -> Path:
     """Copy a committed reference pack into tmp_path so sign --bundle
     can write generated attestations + a built wheel without polluting
-    the working tree. Returns the staged-clone path."""
+    the working tree. The static examples intentionally do not carry
+    resolver output, so this unit-only clone receives the canonical
+    synthetic two-package lock with its root identity rewritten to match
+    the reference pack. Returns the staged-clone path."""
     target = tmp_path / source_pack.name
     shutil.copytree(source_pack, target)
+
+    project = tomllib.loads((target / "pyproject.toml").read_text())
+    lock_body = _SIGN_LOCK_FIXTURE.read_text(encoding="utf-8")
+    old_name = 'name = "cognic-agent-sign-target"'
+    old_version = 'version = "0.1.0"'
+    assert lock_body.count(old_name) == 1
+    assert lock_body.count(old_version) == 1
+    lock_body = lock_body.replace(old_name, f'name = "{project["project"]["name"]}"', 1)
+    lock_body = lock_body.replace(
+        old_version,
+        f'version = "{project["project"]["version"]}"',
+        1,
+    )
+    (target / "uv.lock").write_text(lock_body, encoding="utf-8")
     return target
 
 
@@ -293,7 +317,12 @@ def _run_full_lifecycle(
     runner = CliRunner()
 
     # ---- sign --bundle ----
-    shims = _stage_full_shim_set(tmp_path)
+    project = tomllib.loads((pack / "pyproject.toml").read_text())
+    shims = _stage_full_shim_set(
+        tmp_path,
+        project_name=project["project"]["name"],
+        project_version=project["project"]["version"],
+    )
     _wire_sign_settings(monkeypatch, shims=shims)
     sign_result = runner.invoke(app, ["sign", "--bundle", str(pack)])
     assert sign_result.exit_code == 0, (

@@ -299,6 +299,89 @@ Ruling:
   a non-empty password; empty-password test fixtures alone are insufficient
   evidence for release-key custody.
 
+## Amendment (2026-07-13) — public attestation path hygiene
+
+The first manual inspection of the `cognic-tool-approval-probe` release bundle
+caught publishable attestations containing workstation paths. Syft recorded the
+absolute checkout and virtual-environment locations, Grype recorded its host
+database cache, and the simplified SLSA/in-toto documents used the private-key
+path as `builder.id` / `signing_identity`. Offline verification passed because
+those fields were structurally valid; verification alone was therefore not a
+publication-safety check.
+
+Ruling:
+
+- Syft and Grype execute from the pack root with pack-relative argv. Pack-local
+  locations are rewritten to relative POSIX paths before the SBOM digest enters
+  provenance. Grype's host-only database cache fields are removed; evidence
+  findings remain intact.
+- Public SLSA provenance uses a stable AgentOS builder URN. The invocation plan
+  and simplified in-toto layout carry a redacted cosign-key reference, never a
+  file path, Vault URI, or transient secret tempfile. The detached signature
+  plus verifier-supplied trust root remain the cryptographic identity authority.
+- Every JSON attestation passes a final fail-closed disclosure gate. Invalid JSON
+  or an unknown absolute host path refuses `sign --bundle` with a value-free
+  `sign_subprocess_failed` finding; the offending path is never echoed into CLI
+  output. Known pack-local Syft paths are normalized, not discarded.
+- Release wrappers must inspect generated attestations before upload. A green
+  `agentos verify` result proves integrity and contract shape, not absence of
+  operator-local metadata.
+
+## Amendment (2026-07-13) — reproducible, non-vacuous runtime evidence
+
+The same probe release review found that the previous evidence tools observed
+different and sometimes irrelevant universes: Syft inventoried the whole
+authoring checkout and `.venv`, pip-licenses reported the auditor tool's own
+environment, and Grype scanned only the pack wheel. Each output was valid JSON;
+none proved that the pack's runtime dependency set had actually been audited.
+A zero-finding Grype report could therefore describe a scan of zero applicable
+packages.
+
+Ruling:
+
+- Every releasable pack commits a pack-local `uv.lock`. `agentos sign --bundle`
+  resolves one exact current-platform runtime graph from that lock, verifies its
+  direct requirement contract against `pyproject.toml`, and requires the signing
+  interpreter to contain every selected dependency at the locked version. The
+  published release path must run `uv lock --check` and a frozen sync; evidence
+  generated from an unlocked or stale environment is refused.
+- Registry packages are selected by exact locked version. Runtime direct URLs
+  are limited to credential-free `git+https` requirements with an explicit
+  revision: the lock must retain the same repository/revision and resolve it to
+  an immutable 40- or 64-hex commit, while the signing interpreter's PEP 610
+  `direct_url.json` must prove that same repository + commit. Local paths,
+  mutable/unpinned git references, generic URLs, and same-version installs from
+  another commit are refused. This keeps the git-pinned AgentOS dependency in
+  the skill/agent/hook scaffolds releasable without weakening provenance.
+- Syft receives a private exact-version requirements inventory derived from that
+  graph. Its normalized CycloneDX output must contain exactly the root pack and
+  every selected runtime dependency, with no duplicates or omissions. The public
+  SBOM records the lock digest, package-set digest, generated-requirements digest,
+  direct dependency names, current marker environment, and component count.
+  Syft's synthetic requirements-input file row is accepted only at the private
+  inventory path and only when its SHA-256 equals independently regenerated
+  requirements bytes; it is then accounted for as source metadata rather than a
+  runtime component. Per-package synthetic `/requirements.txt` locators are
+  normalized to the stable source `uv.lock`; unknown rows or absolute-path fields
+  remain hard refusals.
+- Grype consumes the validated SBOM via its `sbom:` source. In addition to the
+  public findings report, the signer requires a CycloneDX round-trip from Grype
+  whose exact, non-empty component set equals the SBOM inventory. Zero findings
+  are evidence only after this preservation check succeeds.
+- pip-licenses runs under the signing interpreter against the exact selected
+  dependency names. The signer rejects missing, extra, duplicated, or
+  version-drifted rows and emits a normalized root-plus-dependency report that
+  the runtime `SupplyChainPipeline` consumes. A root-only pack emits an explicit
+  one-component license/SBOM/Grype proof; it never presents an empty scan as a
+  clean result.
+- The probe pack's release-policy tests affirmatively pin its direct runtime
+  roots (`mcp`, `PyJWT`, and `uvicorn`) in both `pyproject.toml` and the committed
+  lock. Count-only or parse-only evidence gates are insufficient and forbidden.
+- Public-path hygiene applies to embedded paths as well as string-initial paths,
+  including POSIX, Windows-drive, UNC, and `file:` forms. A tool input/output
+  outside the pack root becomes a structured `SignFinding`; no bare path-helper
+  exception may escape the signing report.
+
 ## References
 - ADR-002 (cosign signing — extended here)
 - ADR-009 (ObjectStoreAdapter — bundle retention)
