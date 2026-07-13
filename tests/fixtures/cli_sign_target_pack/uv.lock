@@ -1,0 +1,21 @@
+version = 1
+revision = 3
+requires-python = ">=3.12"
+
+[[package]]
+name = "cognic-agent-sign-target"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "cognic-agentos" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "cognic-agentos" },
+]
+
+[[package]]
+name = "cognic-agentos"
+version = "0.0.1"
+source = { registry = "https://pypi.org/simple" }

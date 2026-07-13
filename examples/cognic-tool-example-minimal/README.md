@@ -5,14 +5,19 @@ design. The pack demonstrates the per-kind Wave-1 author lifecycle
 for `kind = "tool"`:
 
 ```
-agentos sign --bundle .   # produces the seven attestations under attestations/
-agentos validate .        # passes once attestations exist on disk
-agentos test-harness .    # tools: PASS
-agentos verify .
+uv lock                   # resolve, review, and commit in a copied repo
+uv sync --frozen
+uv run agentos sign --bundle .   # produces the seven attestations
+uv run agentos validate .
+uv run agentos test-harness .    # tools: PASS
+uv run agentos verify .
 ```
 
 The committed reference pack is **static-only** — it does NOT ship
-pre-generated attestations. `agentos validate .` declares
+pre-generated attestations or resolver output. Its unit lifecycle injects a
+synthetic lock only into a temporary clone. A copied/released repository must
+resolve, review, and commit its own `uv.lock`; signing refuses without it.
+`agentos validate .` declares
 `supply_chain.attestation_paths` and refuses on a clean checkout
 until `sign --bundle` populates the attestation set. Run sign first,
 then validate; this matches the realistic author flow + the

@@ -5,7 +5,10 @@ AUTHOR-FILL: short description of what this {{ kind }} pack does.
 ## Quick start
 
 ```sh
-agentos validate .
+uv lock
+uv lock --check
+uv sync --frozen --extra dev
+uv run agentos validate .
 ```
 
 Replace every `AUTHOR-FILL:` placeholder + iterate until exit 0.
@@ -68,6 +71,10 @@ tracked trust roots `cosign.pub` and `agent-card.pub`.
 ## Testing
 
 ```sh
-pip install -e ".[dev]"
-pytest tests/
+uv sync --frozen --extra dev
+uv run pytest tests/
 ```
+
+Commit `uv.lock` before release. Run `uv lock --check` and a frozen sync
+before `uv build --wheel` + `uv run agentos sign --bundle .`; the lock is the
+runtime inventory attested by the SBOM, vulnerability scan, and license report.
