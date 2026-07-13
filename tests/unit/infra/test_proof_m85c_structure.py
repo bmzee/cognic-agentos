@@ -186,6 +186,58 @@ def test_realm_locks_the_grant_profile() -> None:
         assert agentos[flow] is False, f"the resource audience must not enable {flow}"
 
 
+def test_realm_materializes_every_referenced_default_client_scope() -> None:
+    """Full realm imports do not seed Keycloak's built-in scopes. Every name the
+    client references must therefore have a real representation in this document;
+    otherwise Keycloak warns, drops it, and mints an access token without ``sub``
+    or ``preferred_username``."""
+    realm = _generate_realm()
+    harness = next(c for c in realm["clients"] if c["clientId"] == "cognic-harness")
+    defined = {scope["name"]: scope for scope in realm["clientScopes"]}
+    assert set(harness["defaultClientScopes"]) <= set(defined)
+
+    basic_mappers = defined["basic"]["protocolMappers"]
+    sub = next(mapper for mapper in basic_mappers if mapper["name"] == "sub")
+    assert sub["protocolMapper"] == "oidc-sub-mapper"
+    assert sub["config"]["access.token.claim"] == "true"
+
+    profile_mappers = defined["profile"]["protocolMappers"]
+    username = next(mapper for mapper in profile_mappers if mapper["name"] == "username")
+    assert username["protocolMapper"] == "oidc-usermodel-attribute-mapper"
+    assert username["config"] == {
+        "user.attribute": "username",
+        "claim.name": "preferred_username",
+        "jsonType.label": "String",
+        "id.token.claim": "true",
+        "access.token.claim": "true",
+        "userinfo.token.claim": "true",
+        "introspection.token.claim": "true",
+    }
+
+
+def test_realm_users_are_profile_complete_and_have_no_required_actions() -> None:
+    """A missing first/last name makes Keycloak 26.2 redirect a successful login
+    to ``VERIFY_PROFILE`` instead of the registered callback. The proof driver
+    deliberately refuses required-action detours, so profile completeness is part
+    of the generated identity contract."""
+    realm = _generate_realm()
+    assert len(realm["users"]) == 8
+    for user in realm["users"]:
+        assert isinstance(user.get("firstName"), str) and user["firstName"]
+        assert isinstance(user.get("lastName"), str) and user["lastName"]
+        assert user["requiredActions"] == []
+
+
+def test_realm_id_token_carries_bff_identity_but_not_authorization_scopes() -> None:
+    realm = _generate_realm()
+    identity = next(scope for scope in realm["clientScopes"] if scope["name"] == "cognic-identity")
+    mappers = {mapper["name"]: mapper for mapper in identity["protocolMappers"]}
+    assert mappers["tenant_id"]["config"]["id.token.claim"] == "true"
+    assert mappers["tenant_id"]["config"]["access.token.claim"] == "true"
+    assert mappers["cognic_scopes"]["config"]["id.token.claim"] == "false"
+    assert mappers["cognic_scopes"]["config"]["access.token.claim"] == "true"
+
+
 def test_realm_pins_the_rfc9068_header_type_explicitly() -> None:
     realm = _generate_realm()
     harness = next(c for c in realm["clients"] if c["clientId"] == "cognic-harness")
@@ -407,7 +459,17 @@ _GOOD_CLAIMS = {
     "iat": 1.0,
 }
 _ID_HDR = {"alg": "RS256", "typ": "JWT", "kid": "k1"}
-_ID_CLAIMS = {"iss": _ISS, "aud": "cognic-harness", "azp": "cognic-harness", "sub": "uuid-1"}
+_ID_CLAIMS = {
+    "iss": _ISS,
+    "aud": "cognic-harness",
+    "azp": "cognic-harness",
+    "sub": "uuid-1",
+    "preferred_username": "analyst.amir",
+    "tenant_id": "proof-m85c",
+    "nonce": "nonce-1",
+    "exp": 9_000_000_000.0,
+    "iat": 1.0,
+}
 
 
 def test_claim_preflight_accepts_the_designed_contract() -> None:
@@ -432,6 +494,12 @@ def test_claim_preflight_accepts_the_designed_contract() -> None:
         # ID token structurally indistinguishable (Bar B substitution would be vacuous).
         ({}, {}, {"typ": "at+jwt"}, {}),
         ({}, {}, {}, {"aud": "cognic-agentos"}),
+        # BFF-facing identity/session claims must not be deferred to the browser bar.
+        ({}, {}, {}, {"sub": None}),
+        ({}, {}, {}, {"preferred_username": "some-other-user"}),
+        ({}, {}, {}, {"tenant_id": None}),
+        # Authorization scopes belong only in the access token.
+        ({}, {}, {}, {"cognic_scopes": ["conversation.read"]}),
     ],
 )
 def test_claim_preflight_catches_realm_regressions(

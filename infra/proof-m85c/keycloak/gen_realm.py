@@ -213,8 +213,10 @@ def env_var_suffix(username: str) -> str:
 
 
 #: Client scopes attached to ``cognic-harness`` as DEFAULT (always in the token).
-#: ``roles`` is DELIBERATELY ABSENT — see lever (b) in the module docstring. The
-#: built-ins kept here are the ones the binder depends on and none of them
+#: ``roles`` is DELIBERATELY ABSENT — see lever (b) in the module docstring. A
+#: full realm import does NOT materialize Keycloak's built-in scopes for us, so
+#: ``build_realm`` explicitly defines the four 26.2 scope representations below
+#: instead of merely referencing names that Keycloak would ignore. None of them
 #: contributes an audience:
 #:   basic       -> ``sub`` + ``auth_time``   (the binder requires a nonempty sub;
 #:                  the issuer-qualified sub IS the Actor subject)
@@ -336,6 +338,111 @@ def _client_scope(
     }
 
 
+def _keycloak_default_client_scopes() -> list[dict[str, Any]]:
+    """The Keycloak 26.2 default scopes this proof deliberately retains.
+
+    A full realm JSON import starts from the document, not from a newly-created
+    realm's default scope set. Referencing ``basic`` / ``profile`` /
+    ``web-origins`` / ``acr`` without defining them makes Keycloak warn and drop
+    every reference. In particular, the access token then carries no ``sub`` or
+    ``preferred_username``. Keep the required 26.2 mapper shapes explicit and
+    reviewable in the generated realm.
+    """
+    return [
+        _client_scope(
+            "basic",
+            [
+                {
+                    "name": "auth_time",
+                    "protocol": "openid-connect",
+                    "protocolMapper": "oidc-usersessionmodel-note-mapper",
+                    "config": {
+                        "user.session.note": "AUTH_TIME",
+                        "claim.name": "auth_time",
+                        "jsonType.label": "long",
+                        "id.token.claim": "true",
+                        "access.token.claim": "true",
+                        "introspection.token.claim": "true",
+                    },
+                },
+                {
+                    "name": "sub",
+                    "protocol": "openid-connect",
+                    "protocolMapper": "oidc-sub-mapper",
+                    "config": {
+                        "access.token.claim": "true",
+                        "introspection.token.claim": "true",
+                    },
+                },
+            ],
+            "Keycloak 26.2 basic scope: stable subject + authentication time.",
+        ),
+        _client_scope(
+            "profile",
+            [
+                {
+                    "name": "username",
+                    "protocol": "openid-connect",
+                    "protocolMapper": "oidc-usermodel-attribute-mapper",
+                    "config": {
+                        "user.attribute": "username",
+                        "claim.name": "preferred_username",
+                        "jsonType.label": "String",
+                        "id.token.claim": "true",
+                        "access.token.claim": "true",
+                        "userinfo.token.claim": "true",
+                        "introspection.token.claim": "true",
+                    },
+                },
+                {
+                    "name": "full name",
+                    "protocol": "openid-connect",
+                    "protocolMapper": "oidc-full-name-mapper",
+                    "config": {
+                        "id.token.claim": "true",
+                        "access.token.claim": "true",
+                        "userinfo.token.claim": "true",
+                        "introspection.token.claim": "true",
+                    },
+                },
+            ],
+            "Keycloak 26.2 profile scope: proof display name only; never authorization.",
+            include_in_token_scope=True,
+        ),
+        _client_scope(
+            "web-origins",
+            [
+                {
+                    "name": "allowed web origins",
+                    "protocol": "openid-connect",
+                    "protocolMapper": "oidc-allowed-origins-mapper",
+                    "config": {
+                        "access.token.claim": "true",
+                        "introspection.token.claim": "true",
+                    },
+                }
+            ],
+            "Keycloak 26.2 allowed-origins scope.",
+        ),
+        _client_scope(
+            "acr",
+            [
+                {
+                    "name": "acr loa level",
+                    "protocol": "openid-connect",
+                    "protocolMapper": "oidc-acr-mapper",
+                    "config": {
+                        "id.token.claim": "true",
+                        "access.token.claim": "true",
+                        "introspection.token.claim": "true",
+                    },
+                }
+            ],
+            "Keycloak 26.2 authentication-context scope.",
+        ),
+    ]
+
+
 def build_realm(
     *,
     bff_redirect_uri: str,
@@ -346,6 +453,7 @@ def build_realm(
     users = []
     for identity in IDENTITIES:
         username = str(identity["username"])
+        display_leaf = username.replace("-", ".").rsplit(".", 1)[-1].capitalize()
         users.append(
             {
                 # DETERMINISTIC, STABLE user id (property 4): realm import
@@ -358,6 +466,14 @@ def build_realm(
                 "enabled": True,
                 "emailVerified": True,
                 "email": f"{username}@bank.example",
+                # Keycloak 26.2's VERIFY_PROFILE required action fires after a
+                # successful password POST when these standard profile fields
+                # are absent. The scripted Authorization Code flow deliberately
+                # refuses required-action redirects, so every synthetic proof
+                # human is profile-complete at import time.
+                "firstName": display_leaf,
+                "lastName": "Proof",
+                "requiredActions": [],
                 "attributes": {
                     # Keycloak user attributes are Map<String, List<String>>. The
                     # tenant mapper reads the single value; the scopes mapper is
@@ -411,6 +527,7 @@ def build_realm(
         "adminEventsEnabled": False,
         "adminEventsDetailsEnabled": False,
         "clientScopes": [
+            *_keycloak_default_client_scopes(),
             _client_scope(
                 "cognic-agentos-audience",
                 [
@@ -442,7 +559,11 @@ def build_realm(
                             "claim.name": "tenant_id",
                             "jsonType.label": "String",
                             "multivalued": "false",
-                            "id.token.claim": "false",
+                            # The BFF validates tenant_id from the ID token when
+                            # establishing its server-side session. AgentOS
+                            # independently re-validates the SAME claim from the
+                            # access token before ActorBinder binds the request.
+                            "id.token.claim": "true",
                             "access.token.claim": "true",
                             "userinfo.token.claim": "false",
                             "introspection.token.claim": "true",

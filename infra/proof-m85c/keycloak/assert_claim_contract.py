@@ -21,8 +21,12 @@ each one vendor-default away from silently breaking:
     with no signal pointing at the realm.
   * ``cognic_scopes`` as a JSON **array** — a non-multivalued mapper emits a
     bare string, which the binder refuses as ``scopes_claim_malformed``.
+  * the BFF-facing ID-token contract — stable ``sub``, the expected mutable
+    display name, and ``tenant_id`` must be present there as well. The BFF uses
+    those claims to establish its server-side session; authorization scopes
+    remain access-token-only and must NOT enter the ID token.
 
-Without this preflight all three failure modes look the same from the outside:
+Without this preflight these failure modes look the same from the outside:
 "everything 403s". With it, the runner stops in the first minute and prints the
 OBSERVED header and claims next to the expected ones.
 
@@ -134,10 +138,12 @@ def check(
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             failures.append(f"{time_claim}={value!r} is not a number")
 
-    # --- the ID token must be STRUCTURALLY distinct -------------------------------
+    # --- the ID token: BFF session claims + structural distinction ----------------
     # Bar B substitutes the REAL id_token from this same login for the access token
     # and requires a refusal. That test is only meaningful if the two tokens really
-    # do differ on the two checks the binder rejects with — assert it here.
+    # do differ on the two checks the binder rejects with. The BFF also establishes
+    # its server-side session from this token, so assert the exact identity claims it
+    # consumes rather than deferring a malformed realm to the browser bar.
     id_header, id_claims = _split(tokens["id_token"])
     if id_header.get("typ") == EXPECTED_TYP:
         failures.append(
@@ -148,10 +154,37 @@ def check(
     id_audiences = (
         {id_aud} if isinstance(id_aud, str) else set(id_aud) if isinstance(id_aud, list) else set()
     )
-    if id_audiences == EXPECTED_AUDIENCE:
+    if id_audiences != {EXPECTED_AZP}:
         failures.append(
-            f"the ID token's aud is also {sorted(EXPECTED_AUDIENCE)!r} — an ID token must be "
-            "audienced to the harness client, not to AgentOS"
+            f"the ID token's aud is {sorted(id_audiences)!r} (expected EXACTLY "
+            f"{[EXPECTED_AZP]!r}) — an ID token must be audienced to the harness "
+            "client, not to AgentOS"
+        )
+    if id_claims.get("azp") != EXPECTED_AZP:
+        failures.append(f"the ID token's azp={id_claims.get('azp')!r} (expected {EXPECTED_AZP!r})")
+    if id_claims.get("iss") != issuer:
+        failures.append(f"the ID token's iss={id_claims.get('iss')!r} (expected {issuer!r})")
+    if not isinstance(id_claims.get("sub"), str) or not id_claims.get("sub"):
+        failures.append("the ID token's sub is absent or empty")
+    if id_claims.get("preferred_username") != username:
+        failures.append(
+            "the ID token's preferred_username="
+            f"{id_claims.get('preferred_username')!r} (expected {username!r})"
+        )
+    if id_claims.get("tenant_id") != tenant:
+        failures.append(
+            f"the ID token's tenant_id={id_claims.get('tenant_id')!r} (expected {tenant!r})"
+        )
+    if not isinstance(id_claims.get("nonce"), str) or not id_claims.get("nonce"):
+        failures.append("the ID token's nonce is absent or not a string")
+    for time_claim in ("exp", "iat"):
+        value = id_claims.get(time_claim)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            failures.append(f"the ID token's {time_claim}={value!r} is not a number")
+    if "cognic_scopes" in id_claims:
+        failures.append(
+            "the ID token carries cognic_scopes — portal authorization claims must remain "
+            "access-token-only"
         )
 
     if not failures:
