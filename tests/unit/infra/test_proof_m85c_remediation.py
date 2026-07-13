@@ -770,11 +770,23 @@ def test_r7_pagination_asserts_the_kernel_keyset_order() -> None:
 
 def test_r8_probe_digests_are_committed_literals_not_env_reads() -> None:
     """An env-supplied digest is not a pin: whoever runs the proof could swap the
-    release and export the matching value."""
+    release and export the matching value.
+
+    v0.1.0 released 2026-07-13 (tag at 03a7058): the FILL_AT_RELEASE sentinels
+    were replaced by the maintainer-committed digests of the published assets,
+    independently recomputed from fresh public downloads at review time. Pinning
+    the exact literals here makes this test a tamper-detector: a swapped release
+    cannot ride an unreviewed stage-packs.sh edit."""
     assert "COGNIC_PROOF_M85C_PROBE_WHEEL_SHA256" not in _STAGE_TEXT
     assert "COGNIC_PROOF_M85C_PROBE_PUB_SHA256" not in _STAGE_TEXT
-    assert 'PROBE_WHEEL_SHA256="FILL_AT_RELEASE"' in _STAGE_TEXT
-    assert 'PROBE_PUB_SHA256="FILL_AT_RELEASE"' in _STAGE_TEXT
+    assert (
+        'PROBE_WHEEL_SHA256="e670616ee6d89d70ef364c0b100c6f08d5af64fdd21faf0ea1551ba753946d26"'
+        in _STAGE_TEXT
+    )
+    assert (
+        'PROBE_PUB_SHA256="b1ab8c2fe3342004e79b04e9c0873334087e9cea8400ede86fd3bd2f4479154a"'
+        in _STAGE_TEXT
+    )
     # ... and the arm still refuses to run against an unreplaced sentinel.
     assert 'PROBE_WHEEL_SHA256" != "FILL_AT_RELEASE"' in _STAGE_TEXT
 

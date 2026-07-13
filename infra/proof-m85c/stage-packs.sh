@@ -171,8 +171,8 @@ PROBE_TAG="v0.1.0"
 PROBE_VERSION="0.1.0"
 PROBE_PACK_ID="cognic-tool-approval-probe"
 PROBE_WHEEL="cognic_tool_approval_probe-0.1.0-py3-none-any.whl"
-PROBE_WHEEL_SHA256="FILL_AT_RELEASE"
-PROBE_PUB_SHA256="FILL_AT_RELEASE"
+PROBE_WHEEL_SHA256="e670616ee6d89d70ef364c0b100c6f08d5af64fdd21faf0ea1551ba753946d26"
+PROBE_PUB_SHA256="b1ab8c2fe3342004e79b04e9c0873334087e9cea8400ede86fd3bd2f4479154a"
 
 # The 7-attestation released-bundle contract (identical to the M3..M6 shape).
 ATTESTATIONS=(
