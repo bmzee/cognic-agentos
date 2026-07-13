@@ -2341,6 +2341,8 @@ _resign_tools_pack() {
   local pack_id="$1" version="$2" wheel="$3"
   local att="$STAGING_DST/pack-attestations/$pack_id/$version"
   local release_pub="$STAGING_DST/release-pubs/$pack_id.pub"
+  local proof_sig="$att/.cosign.sig.proof.$$"
+  local sign_detail sign_err="$QC_TMP/re-sign-$pack_id-sign.err"
   local verify_detail verify_err="$QC_TMP/re-sign-$pack_id-verify.err"
   [ -f "$att/$wheel" ] || die "re-sign: staged wheel missing at $att/$wheel"
   [ -f "$att/cosign.sig" ] || die "re-sign: original cosign.sig missing at $att/cosign.sig"
@@ -2360,8 +2362,20 @@ _resign_tools_pack() {
     [ -n "$verify_detail" ] || verify_detail="no cosign diagnostic"
     die "re-sign: could not cryptographically verify the ORIGINAL $pack_id/$version cosign.sig under its released cosign.pub — refusing to re-sign unauthenticated bytes; cosign: $verify_detail"
   fi
-  cosign sign-blob --key "$APPROVE_KEY_TMP/cosign.key" --tlog-upload=false \
-    --yes --output-signature "$att/cosign.sig" "$att/$wheel" >/dev/null
+  # Cosign 3 defaults --use-signing-config=true, which conflicts with the
+  # air-gapped --tlog-upload=false posture. Keep the detached legacy signature
+  # the runtime trust gate consumes, matching the ADR-016 signing bridge.
+  if ! cosign sign-blob --key "$APPROVE_KEY_TMP/cosign.key" --tlog-upload=false \
+      --use-signing-config=false --new-bundle-format=false \
+      --yes --output-signature "$proof_sig" "$att/$wheel" \
+      >/dev/null 2>"$sign_err"; then
+    sign_detail="$(head -c 500 "$sign_err")"
+    [ -n "$sign_detail" ] || sign_detail="no cosign diagnostic"
+    die "re-sign: could not sign $pack_id/$version under the proof approve key; the authenticated release signature remains untouched; cosign: $sign_detail"
+  fi
+  [ -s "$proof_sig" ] \
+    || die "re-sign: cosign reported success for $pack_id/$version but emitted no detached signature"
+  mv "$proof_sig" "$att/cosign.sig"
   echo "  re-signed $pack_id/$version cosign.sig under the proof approve key (original verified under release key first)"
 }
 _resign_tools_pack "$PACK_ID" "0.3.0" "$PACK_WHEEL"

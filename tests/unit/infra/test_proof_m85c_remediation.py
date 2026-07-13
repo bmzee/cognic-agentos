@@ -407,7 +407,7 @@ def test_f10_harness_image_is_built_with_its_git_sha() -> None:
 
 
 def _run_resign_probe(
-    tmp_path: Path, *, verify_failure: bool = False
+    tmp_path: Path, *, sign_failure: bool = False, verify_failure: bool = False
 ) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
     """Execute the production re-sign function against a strict fake cosign."""
     pack_id = "cognic-tool-oracle-schema"
@@ -426,12 +426,14 @@ def _run_resign_probe(
     (release_pubs / f"{pack_id}.pub").write_text("release-public-key")
     (approve_key / "cosign.key").write_text("proof-private-key")
     calls = tmp_path / "cosign-calls"
+    fail_sign = "1" if sign_failure else "0"
     fail = "1" if verify_failure else "0"
     preamble = f"""
 STAGING_DST={shlex.quote(str(staging))}
 APPROVE_KEY_TMP={shlex.quote(str(approve_key))}
 COSIGN_CALLS={shlex.quote(str(calls))}
 ORIGINAL_SIG={shlex.quote(str(signature))}
+FAKE_SIGN_FAILURE={fail_sign}
 FAKE_VERIFY_FAILURE={fail}
 cosign() {{
   printf '%s\\n' "$*" >> "$COSIGN_CALLS"
@@ -449,6 +451,22 @@ cosign() {{
       return 0
       ;;
     sign-blob)
+      case " $* " in
+        *" --tlog-upload=false "*) ;;
+        *) echo "missing tlog-upload=false" >&2; return 45 ;;
+      esac
+      case " $* " in
+        *" --use-signing-config=false "*) ;;
+        *) echo "missing use-signing-config=false" >&2; return 46 ;;
+      esac
+      case " $* " in
+        *" --new-bundle-format=false "*) ;;
+        *) echo "missing new-bundle-format=false" >&2; return 47 ;;
+      esac
+      if [ "$FAKE_SIGN_FAILURE" = "1" ]; then
+        echo "cosign 3 signing failure sentinel" >&2
+        return 48
+      fi
       while [ "$#" -gt 0 ]; do
         if [ "$1" = "--output-signature" ]; then
           shift
@@ -457,9 +475,9 @@ cosign() {{
         fi
         shift
       done
-      return 45
+      return 49
       ;;
-    *) return 46 ;;
+    *) return 50 ;;
   esac
 }}
 """
@@ -482,6 +500,8 @@ def test_f10_resign_verifies_the_release_signature_offline_before_overwriting(
     call_lines = calls.read_text().splitlines()
     assert call_lines[0].startswith("verify-blob --insecure-ignore-tlog=true --key ")
     assert call_lines[1].startswith("sign-blob --key ")
+    assert "--use-signing-config=false" in call_lines[1]
+    assert "--new-bundle-format=false" in call_lines[1]
     assert "release-pubs" in _STAGE_TEXT
 
 
@@ -493,6 +513,16 @@ def test_f10_resign_failure_is_diagnostic_and_never_overwrites(
     assert "offline signature mismatch sentinel" in result.stderr
     assert signature.read_text() == "release-signature"
     assert len(calls.read_text().splitlines()) == 1
+
+
+def test_f10_resign_cosign3_failure_is_diagnostic_and_preserves_release_signature(
+    tmp_path: Path,
+) -> None:
+    result, signature, calls = _run_resign_probe(tmp_path, sign_failure=True)
+    assert result.returncode == 90
+    assert "cosign 3 signing failure sentinel" in result.stderr
+    assert signature.read_text() == "release-signature"
+    assert len(calls.read_text().splitlines()) == 2
 
 
 def test_f10_proof_build_context_has_a_dockerignore_excluding_pycache() -> None:
