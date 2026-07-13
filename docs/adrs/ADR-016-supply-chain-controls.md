@@ -299,6 +299,34 @@ Ruling:
   a non-empty password; empty-password test fixtures alone are insufficient
   evidence for release-key custody.
 
+## Amendment (2026-07-13) — public attestation path hygiene
+
+The first manual inspection of the `cognic-tool-approval-probe` release bundle
+caught publishable attestations containing workstation paths. Syft recorded the
+absolute checkout and virtual-environment locations, Grype recorded its host
+database cache, and the simplified SLSA/in-toto documents used the private-key
+path as `builder.id` / `signing_identity`. Offline verification passed because
+those fields were structurally valid; verification alone was therefore not a
+publication-safety check.
+
+Ruling:
+
+- Syft and Grype execute from the pack root with pack-relative argv. Syft keeps
+  the existing full dependency-tree inventory, but pack-local locations are
+  rewritten to relative POSIX paths before its digest enters provenance. Grype's
+  host-only database cache fields are removed; evidence findings remain intact.
+- Public SLSA provenance uses a stable AgentOS builder URN. The invocation plan
+  and simplified in-toto layout carry a redacted cosign-key reference, never a
+  file path, Vault URI, or transient secret tempfile. The detached signature
+  plus verifier-supplied trust root remain the cryptographic identity authority.
+- Every JSON attestation passes a final fail-closed disclosure gate. Invalid JSON
+  or an unknown absolute host path refuses `sign --bundle` with a value-free
+  `sign_subprocess_failed` finding; the offending path is never echoed into CLI
+  output. Known pack-local Syft paths are normalized, not discarded.
+- Release wrappers must inspect generated attestations before upload. A green
+  `agentos verify` result proves integrity and contract shape, not absence of
+  operator-local metadata.
+
 ## References
 - ADR-002 (cosign signing — extended here)
 - ADR-009 (ObjectStoreAdapter — bundle retention)

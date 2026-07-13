@@ -639,7 +639,7 @@ def test_run_sign_bundle_inner_agent_without_resolved_jws_key_refuses(
             grype_bin=str(shims["grype"]),
             license_bin=str(shims["license_auditor"]),
             key_path=str(_FIXTURE_PRIVATE_PEM),
-            signing_identity=str(_FIXTURE_PRIVATE_PEM),
+            signing_key_reference=str(_FIXTURE_PRIVATE_PEM),
             jws_key_path=None,
             findings=[],
             dev_mode_skip_cosign=False,

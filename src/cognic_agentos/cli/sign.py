@@ -27,9 +27,9 @@ Shipped surface in this module:
     per R6 P2 #1); cross-checks the wheel filename's PEP 427 name
     + version against pyproject metadata; fails closed on multiple
     wheels in dist/. Validates output directories against symlink-
-    escape (R8 P2 #3 + R9 P2 #2). Records the auditable signing
-    identity (vault URI when applicable, NOT the transient tempfile
-    path) in SLSA + in-toto attestations (R6 P2 #3).
+    escape (R8 P2 #3 + R9 P2 #2). Public attestations redact the
+    private signing-key reference, use pack-relative artifact paths,
+    and refuse any absolute host path before completing.
   - **``--dev-mode-skip-cosign``** — short-circuits cosign
     resolution + execution entirely in dev / test profiles
     (the prod settings profile rejects the flag at construction
@@ -104,9 +104,10 @@ Production behaviour (Doctrine F):
     R7 P2 #2), the resolved PEM bytes are written to a tempfile
     under the orchestrator's try/finally cleanup (R2 P2 #2 +
     R3 P2 #2 type-validation + R6 P2 #2 whitespace-strip).
-    SLSA / in-toto / cosign-argv-byproduct record the auditable
-    identity (vault URI when applicable), NOT the transient
-    tempfile path (R3 P2 #3 + R4 P2 #1 invocation-plan shape).
+    SLSA / in-toto / cosign-invocation-plan evidence records a
+    redacted key reference, never the file path, Vault URI, or
+    transient tempfile path. The verifier-supplied cosign trust root
+    remains the cryptographic identity authority.
   - AgentCard-JWS key custody (M8 finding #4c, ADR-016 amendment
     2026-07-06): agent packs sign the AgentCard JWS with the
     SEPARATE ``Settings.agent_card_jws_signing_key_path``
@@ -196,6 +197,13 @@ _SLSA_PROVENANCE_PREDICATE_TYPE: Final[str] = "https://slsa.dev/provenance/v1"
 #: out-of-scope notes). Fixed string, not a URL — pack admission
 #: doesn't dereference this; it's an opaque label.
 _AGENTOS_SIGN_BUNDLE_BUILD_TYPE: Final[str] = "agentos-sprint-7a-sign-bundle/wave-1-simplified"
+
+#: Public provenance identifies the builder independently of the private
+#: signing-key location. The cosign signature + verifier-supplied trust root
+#: bind the cryptographic identity; a local path or Vault URI is custody
+#: metadata and must not enter a publishable attestation.
+_AGENTOS_SIGN_BUNDLE_BUILDER_ID: Final[str] = "urn:cognic:agentos:builder:sign-bundle:wave-1"
+_REDACTED_COSIGN_KEY_REFERENCE: Final[str] = "redacted:verifier-supplied-cosign-trust-root"
 
 
 #: Closed-enum frozenset of valid pack kinds. Per R4 P2 #3 doctrine:
@@ -410,18 +418,15 @@ async def _resolve_key_material_path(
     AgentCard-JWS custody wrapper reuses the SAME vault:// + file
     branches instead of forking them).
 
-    Returns ``(tool_readable_path, auditable_identity,
+    Returns ``(tool_readable_path, custody_reference,
     tempfile_to_cleanup, finding)``:
       - ``tool_readable_path``: filesystem path the consuming tool can
         read; ``None`` on refusal. For ``vault://`` URIs this is a
         tempfile path; for file paths it's the path itself.
-      - ``auditable_identity``: the stable identifier recorded in
-        SLSA / in-toto attestations + the cosign-argv byproduct
-        (per R3 P2 #3 doctrine — vault:// URIs MUST be preserved as
-        the auditable identity; recording the transient tempfile
-        path leaks local /tmp paths + loses production identity).
-        For ``vault://`` URIs this is the URI itself; for file
-        paths it's the resolved file path.
+      - ``custody_reference``: the stable file path or Vault URI used
+        during execution. It is never written to public attestations;
+        those carry a redacted marker and rely on the cosign trust root
+        for cryptographic identity.
       - ``tempfile_to_cleanup``: ``Path`` to a tempfile the
         orchestrator MUST unlink in its finally block when the
         resolution wrote bytes from a Vault payload to disk;
@@ -434,7 +439,7 @@ async def _resolve_key_material_path(
     SecretAdapter; the resolver validates the payload's ``key``
     field is ``bytes`` (or coerces from ``str``), writes to a
     tempfile the consuming tool can read, and returns the URI
-    separately as the auditable identity.
+    separately as execution-only custody metadata.
     """
     env_label = f"COGNIC_{setting_label.upper()}"
     if configured is None:
@@ -599,9 +604,8 @@ async def _resolve_key_material_path(
         tempfile_path = Path(tempfile_handle.name)
         # Restrict perms — vault-resolved keys must NOT be world-readable.
         tempfile_path.chmod(0o600)
-        # R3 P2 #3: the consuming tool reads the tempfile path; SLSA /
-        # in-toto / cosign-argv-byproduct record the stable vault URI as
-        # the auditable identity.
+        # The consuming tool reads the tempfile path. The stable Vault URI
+        # returns only as execution metadata and is redacted before evidence.
         return str(tempfile_path), configured, tempfile_path, None
 
     # File-path branch.
@@ -623,8 +627,7 @@ async def _resolve_key_material_path(
                 payload={"configured_path": configured},
             ),
         )
-    # File-path branch: cosign-readable + auditable identity are the
-    # same (the resolved file path).
+    # File-path branch: tool-readable path + custody reference are the same.
     resolved = str(key_path)
     return resolved, resolved, None, None
 
@@ -1582,6 +1585,7 @@ async def _exec_tool_with_output_flag(
     *,
     argv: Iterable[str],
     tool_label: str,
+    cwd: Path | None = None,
 ) -> tuple[int, bytes, bytes]:
     """Run ``tool_bin`` via real ``asyncio.create_subprocess_exec``;
     inherit + overlay env (mirrors cosign env preservation).
@@ -1596,6 +1600,7 @@ async def _exec_tool_with_output_flag(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env={**os.environ},
+        cwd=cwd,
     )
     stdout, stderr = await proc.communicate()
     return proc.returncode or 0, stdout, stderr
@@ -1607,28 +1612,36 @@ async def _exec_syft(
     *,
     sbom_output_path: Path,
 ) -> tuple[int, bytes, bytes]:
-    """Run ``syft <pack-path> -o cyclonedx-json=<sbom-path>``.
+    """Run Syft against the pack dependency tree from the pack root.
 
-    Wave-1 uses the equals-attached form which writes the CycloneDX
-    JSON SBOM directly to ``sbom_output_path``."""
+    The SBOM remains the existing full dependency inventory rather than an
+    empty file-only wheel scan. Relative argv + cwd make its source stable;
+    the postprocessor below rewrites pack-local locations before publication.
+    """
+    output_arg = _pack_relative_public_path(pack_path, sbom_output_path)
     return await _exec_tool_with_output_flag(
         syft_bin,
-        argv=[str(pack_path), "-o", f"cyclonedx-json={sbom_output_path}"],
+        argv=["dir:.", "-o", f"cyclonedx-json={output_arg}"],
         tool_label="syft",
+        cwd=pack_path.resolve(),
     )
 
 
 async def _exec_grype(
     grype_bin: str,
+    pack_path: Path,
     wheel_path: Path,
     *,
     vuln_output_path: Path,
 ) -> tuple[int, bytes, bytes]:
-    """Run ``grype <wheel> -o json --file <vuln-path>``."""
+    """Run Grype against the release wheel with pack-relative argv."""
+    wheel_arg = _pack_relative_public_path(pack_path, wheel_path)
+    output_arg = _pack_relative_public_path(pack_path, vuln_output_path)
     return await _exec_tool_with_output_flag(
         grype_bin,
-        argv=[str(wheel_path), "-o", "json", "--file", str(vuln_output_path)],
+        argv=[wheel_arg, "-o", "json", "--file", output_arg],
         tool_label="grype",
+        cwd=pack_path.resolve(),
     )
 
 
@@ -1666,21 +1679,171 @@ def _compute_file_digest_sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+def _pack_relative_public_path(pack_path: Path, target_path: Path) -> str:
+    """Return a stable POSIX path rooted at the pack checkout."""
+    return target_path.resolve().relative_to(pack_path.resolve()).as_posix()
+
+
+def _is_absolute_host_path(value: str) -> bool:
+    candidate = value.lstrip()
+    return candidate.startswith(("/", "file:/")) or (
+        len(candidate) >= 3
+        and candidate[0].isalpha()
+        and candidate[1] == ":"
+        and candidate[2] in {"/", "\\"}
+    )
+
+
+def _find_absolute_host_path(
+    value: object,
+    *,
+    location: tuple[str, ...] = (),
+) -> tuple[str, ...] | None:
+    if isinstance(value, str):
+        return location if _is_absolute_host_path(value) else None
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            if isinstance(key, str) and _is_absolute_host_path(key):
+                return (*location, "<object-key>")
+            found = _find_absolute_host_path(nested, location=(*location, str(key)))
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for index, nested in enumerate(value):
+            found = _find_absolute_host_path(nested, location=(*location, str(index)))
+            if found is not None:
+                return found
+    return None
+
+
+def _rewrite_pack_local_paths(value: object, *, pack_root: Path) -> object:
+    if isinstance(value, str):
+        candidate = value
+        if candidate.startswith("file://"):
+            candidate = candidate.removeprefix("file://")
+        candidate_path = Path(candidate)
+        if candidate_path.is_absolute():
+            try:
+                return candidate_path.relative_to(pack_root).as_posix()
+            except ValueError:
+                pseudo_relative = candidate_path.as_posix().lstrip("/")
+                if pseudo_relative and (pack_root / pseudo_relative).exists():
+                    return pseudo_relative
+        return value
+    if isinstance(value, dict):
+        return {
+            key: _rewrite_pack_local_paths(nested, pack_root=pack_root)
+            for key, nested in value.items()
+        }
+    if isinstance(value, list):
+        return [_rewrite_pack_local_paths(nested, pack_root=pack_root) for nested in value]
+    return value
+
+
+def _public_attestation_json_finding(path: Path) -> SignFinding | None:
+    """Fail closed when publishable JSON is invalid or leaks a host path."""
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return SignFinding(
+            severity="refusal",
+            reason="sign_subprocess_failed",
+            message=(
+                f"Generated public attestation {path.name!r} is not valid JSON; "
+                "refusing to publish an unverifiable artifact."
+            ),
+            payload={
+                "artifact_name": path.name,
+                "error_type": type(exc).__name__,
+                "failure_mode": "public_attestation_json_invalid",
+            },
+        )
+    location = _find_absolute_host_path(payload)
+    if location is None:
+        return None
+    return SignFinding(
+        severity="refusal",
+        reason="sign_subprocess_failed",
+        message=(
+            f"Generated public attestation {path.name!r} contains an absolute "
+            "host path; refusing to disclose workstation or custody metadata."
+        ),
+        payload={
+            "artifact_name": path.name,
+            "json_location": ".".join(location),
+            "failure_mode": "public_attestation_host_path",
+        },
+    )
+
+
+def _write_public_attestation_json(path: Path, payload: object) -> SignFinding | None:
+    try:
+        path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+    except (OSError, TypeError, ValueError) as exc:
+        return SignFinding(
+            severity="refusal",
+            reason="sign_subprocess_failed",
+            message=(
+                f"Generated public attestation {path.name!r} could not be "
+                "rewritten safely; refusing to publish a partial artifact."
+            ),
+            payload={
+                "artifact_name": path.name,
+                "error_type": type(exc).__name__,
+                "failure_mode": "public_attestation_rewrite_failed",
+            },
+        )
+    return _public_attestation_json_finding(path)
+
+
+def _sanitize_grype_host_metadata(path: Path) -> SignFinding | None:
+    """Remove Grype's host cache locations, then apply the public JSON gate."""
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return _public_attestation_json_finding(path)
+    if isinstance(payload, dict):
+        descriptor = payload.get("descriptor")
+        if isinstance(descriptor, dict):
+            configuration = descriptor.get("configuration")
+            if isinstance(configuration, dict):
+                db_configuration = configuration.get("db")
+                if isinstance(db_configuration, dict):
+                    db_configuration.pop("cache-dir", None)
+            database = descriptor.get("db")
+            if isinstance(database, dict):
+                status = database.get("status")
+                if isinstance(status, dict):
+                    status.pop("path", None)
+        return _write_public_attestation_json(path, payload)
+    return _public_attestation_json_finding(path)
+
+
+def _sanitize_syft_host_metadata(path: Path, *, pack_path: Path) -> SignFinding | None:
+    """Rewrite Syft pack-local locations and reject every unknown host path."""
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return _public_attestation_json_finding(path)
+    sanitized = _rewrite_pack_local_paths(payload, pack_root=pack_path.resolve())
+    return _write_public_attestation_json(path, sanitized)
+
+
 def _build_slsa_provenance_dict(
     *,
     pack_id: str,
     pack_version: str,
     pack_kind: str,
     wheel_path: Path,
+    wheel_subject_name: str,
     sbom_digest: str,
-    signing_identity: str,
     cosign_invocation_plan: dict[str, Any],
 ) -> dict[str, Any]:
     """Wave-1 simplified SLSA provenance template (per ADR-016
     Wave-1 simplifications + Doctrine F's out-of-scope notes).
 
-    Records the planned cosign invocation + the SBOM digest + the
-    signing identity. The schema follows the in-toto Statement-v1
+    Records the planned cosign invocation + the SBOM digest + a
+    redacted signing-key reference. The schema follows the in-toto Statement-v1
     envelope + the SLSA Provenance v1 predicate; the Wave-1 narrow
     does NOT integrate with the slsa-generator GitHub Actions OIDC
     reusable workflow yet (that lands when the upstream matures per
@@ -1705,7 +1868,7 @@ def _build_slsa_provenance_dict(
         "predicateType": _SLSA_PROVENANCE_PREDICATE_TYPE,
         "subject": [
             {
-                "name": str(wheel_path),
+                "name": wheel_subject_name,
                 "digest": {"sha256": _compute_file_digest_sha256(wheel_path)},
             }
         ],
@@ -1729,7 +1892,7 @@ def _build_slsa_provenance_dict(
                 },
             },
             "runDetails": {
-                "builder": {"id": signing_identity},
+                "builder": {"id": _AGENTOS_SIGN_BUNDLE_BUILDER_ID},
                 "metadata": {
                     "invocationId": f"agentos-sign-bundle/{pack_id}@{pack_version}",
                     "startedOn": now,
@@ -2589,12 +2752,12 @@ async def run_sign_bundle(
     # the flag before reading it.
 
     # Step 2: signing key (file or vault:// URI per R2 P2 #2 + R3 P2
-    # #3 — separate cosign-readable path from auditable identity).
+    # #3 — separate cosign-readable path from custody reference).
     # Tempfile (when vault://-resolved) is unlinked in the finally
     # block at the end of the orchestrator.
     (
         key_path,
-        signing_identity,
+        signing_key_reference,
         key_tempfile,
         key_finding,
     ) = await _resolve_signing_key_path(
@@ -2610,7 +2773,7 @@ async def run_sign_bundle(
             findings=findings,
         )
     assert key_path is not None
-    assert signing_identity is not None
+    assert signing_key_reference is not None
 
     # Step 2b (M8 finding #4c): AgentCard-JWS signing key — SEPARATE
     # custody from the cosign key (different cryptographic identity +
@@ -2657,7 +2820,7 @@ async def run_sign_bundle(
             grype_bin=grype_bin,
             license_bin=license_bin,
             key_path=key_path,
-            signing_identity=signing_identity,
+            signing_key_reference=signing_key_reference,
             jws_key_path=jws_key_path,
             findings=findings,
             dev_mode_skip_cosign=dev_mode_skip_cosign,
@@ -2772,7 +2935,7 @@ async def _run_sign_bundle_inner(
     grype_bin: str,
     license_bin: str,
     key_path: str,
-    signing_identity: str,
+    signing_key_reference: str,
     jws_key_path: str | None,
     findings: list[SignFinding],
     dev_mode_skip_cosign: bool,
@@ -3002,9 +3165,13 @@ async def _run_sign_bundle_inner(
 
     artifacts: dict[str, str] = {}
 
-    # Step 5: SBOM via syft.
+    # Step 5: SBOM via syft over the pack dependency tree.
     try:
-        rc, stdout, stderr = await _exec_syft(syft_bin, pack_path, sbom_output_path=sbom_path)
+        rc, stdout, stderr = await _exec_syft(
+            syft_bin,
+            pack_path,
+            sbom_output_path=sbom_path,
+        )
     except OSError as exc:
         findings.append(
             SignFinding(
@@ -3046,11 +3213,25 @@ async def _run_sign_bundle_inner(
             overall_status="fail",
             findings=findings,
         )
+    sbom_public_finding = _sanitize_syft_host_metadata(sbom_path, pack_path=pack_path)
+    if sbom_public_finding is not None:
+        findings.append(sbom_public_finding)
+        return SignReport(
+            operation="sign-bundle",
+            target_path=str(pack_path),
+            overall_status="fail",
+            findings=findings,
+        )
     artifacts["sbom"] = str(sbom_path)
 
     # Step 6: vuln scan via grype.
     try:
-        rc, stdout, stderr = await _exec_grype(grype_bin, wheel_path, vuln_output_path=vuln_path)
+        rc, stdout, stderr = await _exec_grype(
+            grype_bin,
+            pack_path,
+            wheel_path,
+            vuln_output_path=vuln_path,
+        )
     except OSError as exc:
         findings.append(
             SignFinding(
@@ -3086,6 +3267,15 @@ async def _run_sign_bundle_inner(
     )
     if grype_artifact_finding is not None:
         findings.append(grype_artifact_finding)
+        return SignReport(
+            operation="sign-bundle",
+            target_path=str(pack_path),
+            overall_status="fail",
+            findings=findings,
+        )
+    grype_public_finding = _sanitize_grype_host_metadata(vuln_path)
+    if grype_public_finding is not None:
+        findings.append(grype_public_finding)
         return SignReport(
             operation="sign-bundle",
             target_path=str(pack_path),
@@ -3138,6 +3328,15 @@ async def _run_sign_bundle_inner(
     )
     if license_artifact_finding is not None:
         findings.append(license_artifact_finding)
+        return SignReport(
+            operation="sign-bundle",
+            target_path=str(pack_path),
+            overall_status="fail",
+            findings=findings,
+        )
+    license_public_finding = _public_attestation_json_finding(license_path)
+    if license_public_finding is not None:
+        findings.append(license_public_finding)
         return SignReport(
             operation="sign-bundle",
             target_path=str(pack_path),
@@ -3253,13 +3452,9 @@ async def _run_sign_bundle_inner(
     # ensures they agree with the signed wheel content).
     del _wheel_metadata_name, _wheel_metadata_version, _wheel_derived_kind
 
-    # Step 8: SLSA provenance template.
-    # R3 P2 #3: ``signing_identity`` (vault URI or file path) is
-    # recorded in attestations + cosign-argv byproduct. The
-    # ``--key`` arg in the byproduct also uses ``signing_identity``,
-    # NOT the transient tempfile path that gets unlinked at exit.
-    # cosign itself receives ``key_path`` (file path) at exec time;
-    # the ATTESTATION records the auditable identity.
+    # Step 8: SLSA provenance template. The private key reference is
+    # execution-only custody metadata. Public evidence records a redacted
+    # marker; cosign + the verifier-supplied trust root bind the real key.
     # R4 P2 #1 reviewer correction: the SLSA byproduct is renamed
     # ``cosign_invocation_plan`` (was ``cosign_argv``) + restructured
     # into a dict with an ``executed`` flag. Pre-fix: the byproduct
@@ -3270,20 +3465,25 @@ async def _run_sign_bundle_inner(
     # The new shape preserves the audit trail without false
     # execution evidence: ``executed: true`` for non-skip runs,
     # ``executed: false + skip_reason`` for dev-skip.
+    del signing_key_reference
+    attested_signing_identity = _REDACTED_COSIGN_KEY_REFERENCE
+    public_wheel_path = _pack_relative_public_path(pack_path, wheel_path)
+    public_sig_path = _pack_relative_public_path(pack_path, sig_path)
+    public_bundle_path = _pack_relative_public_path(pack_path, bundle_path)
     sbom_digest = _compute_file_digest_sha256(sbom_path)
     if dev_mode_skip_cosign:
         cosign_invocation_plan: dict[str, Any] = {
             "executed": False,
-            "key_identity": signing_identity,
+            "key_identity": attested_signing_identity,
             "skip_reason": "dev_mode_skip_cosign",
         }
     else:
         cosign_invocation_plan = {
             "executed": True,
-            "key_identity": signing_identity,
-            "wheel_path": str(wheel_path),
-            "sig_output_path": str(sig_path),
-            "bundle_output_path": str(bundle_path),
+            "key_identity": attested_signing_identity,
+            "wheel_path": public_wheel_path,
+            "sig_output_path": public_sig_path,
+            "bundle_output_path": public_bundle_path,
         }
     slsa_finding = _render_slsa_provenance_to_disk(
         slsa_path,
@@ -3291,12 +3491,21 @@ async def _run_sign_bundle_inner(
         pack_version=pack_version,
         pack_kind=pack_kind,
         wheel_path=wheel_path,
+        wheel_subject_name=public_wheel_path,
         sbom_digest=sbom_digest,
-        signing_identity=signing_identity,
         cosign_invocation_plan=cosign_invocation_plan,
     )
     if slsa_finding is not None:
         findings.append(slsa_finding)
+        return SignReport(
+            operation="sign-bundle",
+            target_path=str(pack_path),
+            overall_status="fail",
+            findings=findings,
+        )
+    slsa_public_finding = _public_attestation_json_finding(slsa_path)
+    if slsa_public_finding is not None:
+        findings.append(slsa_public_finding)
         return SignReport(
             operation="sign-bundle",
             target_path=str(pack_path),
@@ -3320,30 +3529,39 @@ async def _run_sign_bundle_inner(
     # happy path, leaving the bundle's own artifact-set attestation
     # incomplete.
     intoto_artifact_paths = [
-        str(sbom_path),
-        str(vuln_path),
-        str(license_path),
-        str(slsa_path),
+        _pack_relative_public_path(pack_path, sbom_path),
+        _pack_relative_public_path(pack_path, vuln_path),
+        _pack_relative_public_path(pack_path, license_path),
+        _pack_relative_public_path(pack_path, slsa_path),
     ]
     if not dev_mode_skip_cosign:
-        intoto_artifact_paths.extend([str(sig_path), str(bundle_path)])
+        intoto_artifact_paths.extend([public_sig_path, public_bundle_path])
     if pack_kind == "agent":
         # R8 P2 #1: use the manifest-declared JWS path, not a
         # hardcoded default. agent_card_jws_path is non-None at
         # this point because _read_agent_card_jws_path_for_bundle
         # ran in step 3a-bis for agent kind.
         assert agent_card_jws_path is not None
-        intoto_artifact_paths.append(str(agent_card_jws_path))
+        intoto_artifact_paths.append(_pack_relative_public_path(pack_path, agent_card_jws_path))
     intoto_finding = _render_intoto_layout_to_disk(
         intoto_path,
         pack_id=pack_id,
         pack_version=pack_version,
         pack_kind=pack_kind,
-        signing_identity=signing_identity,
+        signing_identity=attested_signing_identity,
         artifact_paths=intoto_artifact_paths,
     )
     if intoto_finding is not None:
         findings.append(intoto_finding)
+        return SignReport(
+            operation="sign-bundle",
+            target_path=str(pack_path),
+            overall_status="fail",
+            findings=findings,
+        )
+    intoto_public_finding = _public_attestation_json_finding(intoto_path)
+    if intoto_public_finding is not None:
+        findings.append(intoto_public_finding)
         return SignReport(
             operation="sign-bundle",
             target_path=str(pack_path),

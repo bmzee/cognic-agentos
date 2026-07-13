@@ -2501,16 +2501,11 @@ def test_sign_bundle_vault_signing_key_with_non_bytes_value_emits_unavailable(
     )
 
 
-def test_sign_bundle_vault_signing_key_records_stable_identity_in_attestations(
+def test_sign_bundle_vault_signing_key_redacts_custody_reference_in_attestations(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """R3 P2 #3: vault:// signing-key flow MUST record the stable
-    Vault URI as the signing identity in SLSA provenance + in-toto
-    layout, NOT the transient tempfile path that gets unlinked.
-    Pre-fix: SLSA ``builder.id`` + cosign-argv byproduct + in-toto
-    ``signing_identity`` all recorded the tempfile, leaking local
-    paths + losing production identity."""
+    """Public evidence must not disclose a Vault URI or tempfile path."""
     shims = _stage_full_shim_set(tmp_path)
     pack = _stage_pack_with_wheel(tmp_path)
 
@@ -2547,23 +2542,19 @@ def test_sign_bundle_vault_signing_key_records_stable_identity_in_attestations(
     slsa_path = pack / "attestations" / "slsa-provenance.intoto.json"
     slsa = json.loads(slsa_path.read_text())
     builder_id = slsa["predicate"]["runDetails"]["builder"]["id"]
-    assert builder_id == vault_uri, f"SLSA builder.id should be {vault_uri!r}; got {builder_id!r}"
+    assert builder_id == "urn:cognic:agentos:builder:sign-bundle:wave-1"
     byproducts = slsa["predicate"]["runDetails"]["byproducts"]
     plan_bp = next(b for b in byproducts if b["name"] == "cosign_invocation_plan")
     plan = plan_bp["value"]
-    # The auditable key identity is the vault URI, not the tempfile path.
-    assert plan["key_identity"] == vault_uri, (
-        f"cosign_invocation_plan byproduct recorded key_identity="
-        f"{plan['key_identity']!r}; expected {vault_uri!r}"
-    )
+    assert plan["key_identity"] == "redacted:verifier-supplied-cosign-trust-root"
     # In the non-dev-skip vault flow, cosign DID execute.
     assert plan["executed"] is True
 
     intoto_path = pack / "attestations" / "intoto-layout.json"
     intoto = json.loads(intoto_path.read_text())
-    assert intoto["signing_identity"] == vault_uri, (
-        f"in-toto signing_identity should be {vault_uri!r}; got {intoto['signing_identity']!r}"
-    )
+    assert intoto["signing_identity"] == "redacted:verifier-supplied-cosign-trust-root"
+    assert vault_uri not in slsa_path.read_text()
+    assert vault_uri not in intoto_path.read_text()
 
 
 # ===========================================================================
@@ -2609,8 +2600,8 @@ def test_sign_bundle_provenance_byproduct_named_invocation_plan_not_argv(
     )
     plan = next(b for b in byproducts if b["name"] == "cosign_invocation_plan")["value"]
     assert plan["executed"] is True
-    # key_identity uses the auditable form, not the tempfile path.
-    assert plan["key_identity"] == str(_TEST_PRIVATE_PEM)
+    assert plan["key_identity"] == "redacted:verifier-supplied-cosign-trust-root"
+    assert str(_TEST_PRIVATE_PEM) not in slsa_path.read_text()
 
 
 def test_sign_bundle_dev_skip_provenance_records_executed_false(
@@ -5006,3 +4997,264 @@ def test_sign_bundle_for_instruction_skill_pack_signs_as_skill_without_jws(
     report = json.loads(result.stdout)
     assert report["overall_status"] == "pass"
     assert "agent_card_jws" not in report.get("artifacts", {})
+
+
+# ===========================================================================
+# ADR-016 public-attestation disclosure hardening (2026-07-13)
+# ===========================================================================
+
+
+def test_sign_bundle_emits_pack_relative_public_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shims = _stage_full_shim_set(tmp_path)
+    pack = _stage_pack_with_wheel(tmp_path)
+    _set_sign_bundle_settings(
+        monkeypatch,
+        cosign_path=shims["cosign"],
+        syft_path=shims["syft"],
+        grype_path=shims["grype"],
+        license_auditor_path=shims["license_auditor"],
+    )
+
+    result = CliRunner().invoke(app, ["sign", "--bundle", str(pack.resolve())])
+    assert result.exit_code == 0, result.stdout
+
+    wheel_name = "dist/cognic_agent_sign_target-0.1.0-py3-none-any.whl"
+    syft_recording = _read_shim_recording(shims["syft"])
+    assert syft_recording["cwd"] == str(pack.resolve())
+    assert syft_recording["argv"][1] == "dir:."
+    assert str(pack) not in syft_recording["argv"][1:]
+
+    grype_recording = _read_shim_recording(shims["grype"])
+    assert grype_recording["cwd"] == str(pack.resolve())
+    assert grype_recording["argv"][1] == wheel_name
+    assert str(pack) not in grype_recording["argv"][1:]
+
+    slsa_path = pack / "attestations" / "slsa-provenance.intoto.json"
+    intoto_path = pack / "attestations" / "intoto-layout.json"
+    slsa = json.loads(slsa_path.read_text())
+    intoto = json.loads(intoto_path.read_text())
+    assert slsa["subject"][0]["name"] == wheel_name
+    plan = slsa["predicate"]["runDetails"]["byproducts"][0]["value"]
+    assert plan["wheel_path"] == wheel_name
+    assert plan["sig_output_path"] == "attestations/cosign.sig"
+    assert plan["bundle_output_path"] == "attestations/bundle.sigstore"
+    assert all(not Path(path).is_absolute() for path in intoto["artifact_paths"])
+
+    public_json = "\n".join(
+        (pack / "attestations" / name).read_text()
+        for name in (
+            "sbom.cdx.json",
+            "vuln-scan.json",
+            "license-audit.json",
+            "slsa-provenance.intoto.json",
+            "intoto-layout.json",
+        )
+    )
+    assert str(tmp_path) not in public_json
+    assert str(_TEST_PRIVATE_PEM) not in public_json
+
+
+def test_sign_bundle_removes_grype_host_cache_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shims = _stage_full_shim_set(tmp_path)
+    shims["grype"] = _make_tool_shim(
+        tmp_path,
+        tool_name="grype_host_paths",
+        output_flag="--file",
+        output_payload=json.dumps(
+            {
+                "matches": [],
+                "descriptor": {
+                    "configuration": {"db": {"cache-dir": "/Users/reviewer/grype-db"}},
+                    "db": {
+                        "status": {
+                            "path": "/Users/reviewer/grype-db/vulnerability.db",
+                            "valid": True,
+                        }
+                    },
+                },
+            }
+        ).encode(),
+    )
+    pack = _stage_pack_with_wheel(tmp_path)
+    _set_sign_bundle_settings(
+        monkeypatch,
+        cosign_path=shims["cosign"],
+        syft_path=shims["syft"],
+        grype_path=shims["grype"],
+        license_auditor_path=shims["license_auditor"],
+    )
+
+    result = CliRunner().invoke(app, ["sign", "--bundle", str(pack)])
+    assert result.exit_code == 0, result.stdout
+    report = json.loads((pack / "attestations" / "vuln-scan.json").read_text())
+    assert "cache-dir" not in report["descriptor"]["configuration"]["db"]
+    assert "path" not in report["descriptor"]["db"]["status"]
+    assert report["descriptor"]["db"]["status"]["valid"] is True
+
+
+def test_sign_bundle_rewrites_syft_pack_local_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shims = _stage_full_shim_set(tmp_path)
+    pack = _stage_pack_with_wheel(tmp_path)
+    shims["syft"] = _make_tool_shim(
+        tmp_path,
+        tool_name="syft_pack_paths",
+        output_flag="-o",
+        output_payload=json.dumps(
+            {
+                "bomFormat": "CycloneDX",
+                "components": [
+                    {"name": str(pack / ".venv" / "package.dist-info")},
+                    {"name": "/cognic-pack-manifest.toml"},
+                ],
+                "externalReferences": [{"url": f"file://{pack}"}],
+            }
+        ).encode(),
+    )
+    _set_sign_bundle_settings(
+        monkeypatch,
+        cosign_path=shims["cosign"],
+        syft_path=shims["syft"],
+        grype_path=shims["grype"],
+        license_auditor_path=shims["license_auditor"],
+    )
+
+    result = CliRunner().invoke(app, ["sign", "--bundle", str(pack)])
+    assert result.exit_code == 0, result.stdout
+    sbom = json.loads((pack / "attestations" / "sbom.cdx.json").read_text())
+    assert sbom["components"] == [
+        {"name": ".venv/package.dist-info"},
+        {"name": "cognic-pack-manifest.toml"},
+    ]
+    assert sbom["externalReferences"] == [{"url": "."}]
+
+
+def test_sign_bundle_refuses_unknown_absolute_path_without_echoing_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shims = _stage_full_shim_set(tmp_path)
+    leaked_path = "/Users/reviewer/private/source.py"
+    shims["syft"] = _make_tool_shim(
+        tmp_path,
+        tool_name="syft_host_path",
+        output_flag="-o",
+        output_payload=json.dumps(
+            {"bomFormat": "CycloneDX", "components": [{"name": leaked_path}]}
+        ).encode(),
+    )
+    pack = _stage_pack_with_wheel(tmp_path)
+    _set_sign_bundle_settings(
+        monkeypatch,
+        cosign_path=shims["cosign"],
+        syft_path=shims["syft"],
+        grype_path=shims["grype"],
+        license_auditor_path=shims["license_auditor"],
+    )
+
+    result = CliRunner().invoke(app, ["sign", "--bundle", str(pack), "--json"])
+    assert result.exit_code == 1
+    report = json.loads(result.stdout)
+    finding = next(
+        item
+        for item in report["findings"]
+        if item["payload"].get("failure_mode") == "public_attestation_host_path"
+    )
+    assert finding["payload"]["json_location"] == "components.0.name"
+    assert leaked_path not in result.stdout
+
+
+def test_sign_bundle_refuses_malformed_public_attestation_json(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shims = _stage_full_shim_set(tmp_path)
+    shims["syft"] = _make_tool_shim(
+        tmp_path,
+        tool_name="syft_invalid_json",
+        output_flag="-o",
+        output_payload=b"not-json",
+    )
+    pack = _stage_pack_with_wheel(tmp_path)
+    _set_sign_bundle_settings(
+        monkeypatch,
+        cosign_path=shims["cosign"],
+        syft_path=shims["syft"],
+        grype_path=shims["grype"],
+        license_auditor_path=shims["license_auditor"],
+    )
+
+    result = CliRunner().invoke(app, ["sign", "--bundle", str(pack), "--json"])
+    assert result.exit_code == 1
+    report = json.loads(result.stdout)
+    assert any(
+        item["payload"].get("failure_mode") == "public_attestation_json_invalid"
+        for item in report["findings"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("/home/reviewer/file", True),
+        ("file:///Users/reviewer/file", True),
+        (r"C:\\Users\\reviewer\\file", True),
+        ("attestations/sbom.cdx.json", False),
+        ("https://example.com/artifact", False),
+    ],
+)
+def test_public_attestation_host_path_classifier(value: str, expected: bool) -> None:
+    from cognic_agentos.cli.sign import _is_absolute_host_path
+
+    assert _is_absolute_host_path(value) is expected
+
+
+def test_grype_sanitizer_accepts_safe_non_object_json(tmp_path: Path) -> None:
+    from cognic_agentos.cli.sign import _sanitize_grype_host_metadata
+
+    report = tmp_path / "vuln.json"
+    report.write_text("[]")
+    assert _sanitize_grype_host_metadata(report) is None
+
+
+def test_public_attestation_gate_rejects_absolute_path_in_object_key(tmp_path: Path) -> None:
+    from cognic_agentos.cli.sign import _public_attestation_json_finding
+
+    report = tmp_path / "sbom.json"
+    report.write_text(json.dumps({"/Users/reviewer/private": "value"}))
+    finding = _public_attestation_json_finding(report)
+    assert finding is not None
+    assert finding.payload["failure_mode"] == "public_attestation_host_path"
+    assert finding.payload["json_location"] == "<object-key>"
+    assert "/Users/reviewer/private" not in finding.message
+    assert "/Users/reviewer/private" not in repr(finding.payload)
+
+
+def test_public_attestation_rewrite_failure_is_structured_and_value_free(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cognic_agentos.cli.sign import _write_public_attestation_json
+
+    report = tmp_path / "vuln.json"
+    report.write_text("{}")
+
+    def _refuse_write(self: Path, data: str, *args: Any, **kwargs: Any) -> int:
+        del self, data, args, kwargs
+        raise PermissionError("/Users/reviewer/private/output")
+
+    monkeypatch.setattr(Path, "write_text", _refuse_write)
+    finding = _write_public_attestation_json(report, {"safe": True})
+    assert finding is not None
+    assert finding.payload["failure_mode"] == "public_attestation_rewrite_failed"
+    assert finding.payload["error_type"] == "PermissionError"
+    assert "/Users/reviewer/private/output" not in finding.message
+    assert "/Users/reviewer/private/output" not in repr(finding.payload)
