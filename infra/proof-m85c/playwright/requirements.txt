@@ -1,0 +1,12 @@
+# Playwright browser driver for the Cognic AgentOS M8.5-C live proof.
+# Python 3.12. Install the browser after: `playwright install chromium`.
+#
+# Targeted versions (see README.md "Versions targeted"):
+#   playwright 1.49.1  → bundles a pinned Chromium build (installed via
+#                        `playwright install chromium`; the driver pins TLS via
+#                        Chromium's --ignore-certificate-errors-spki-list flag).
+#   cryptography       → in-process SPKI (SubjectPublicKeyInfo) pin computation;
+#                        the driver falls back to the `openssl` CLI, and then to
+#                        the disclosed `--tls-insecure` mode, if this is absent.
+playwright==1.49.1
+cryptography>=42,<45

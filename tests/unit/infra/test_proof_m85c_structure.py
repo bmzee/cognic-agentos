@@ -1,0 +1,602 @@
+"""Structural pins for the ``infra/proof-m85c/`` tree (M8.5-C live proof).
+
+M8.5-C carries the proven M8.5-A/B bring-up forward (the same seven signed
+packs, the same M4 operator lifecycle, the same seed matrix, the same
+conversation substrate) and adds the Cognic Harness v1 surface: a real OIDC
+identity path (Keycloak + the reference binder, replacing the retired
+``X-Proof-Role`` header binder), a TLS matrix, the paginated approvals surface,
+and the four-eyes approval probe.
+
+This suite pins the M8.5-C DELTAS — the places where a regression would either
+open a governance hole or make a bar pass vacuously. The carried-forward
+bring-up (pack staging, trust roots, Oracle/Vault/litellm) mirrors the proven
+``infra/proof-m85/`` tree; its invariants are pinned by that tree's suite and by
+the live run, and are not re-duplicated here.
+
+The load-bearing deltas, each with a test:
+
+* **No fallback (spec §4).** The ``X-Proof-Role`` binder is deleted, not gated —
+  no ``X-Proof-Role`` header, no ``MultiActorProofBinder``, no
+  ``PROOF_ROLE_HEADER`` anywhere in the proof code paths. Identity arrives ONLY
+  as a real Keycloak token verified by the reference binder.
+* **The locked grant profile + exact audience (spec §4).** The generated realm
+  disables the client-credentials and direct-access grants, sets the RFC 9068
+  ``at+jwt`` header type explicitly (off by default in Keycloak 26.2), and pins
+  the audience to EXACTLY ``{cognic-agentos}`` via four independent levers.
+* **The live session-case realm levers.** The harness client carries an
+  explicit per-client ``access.token.lifespan`` override home (committed EQUAL
+  to the realm default — a pure runtime toggle for the expired-token and
+  concurrent-refresh live cases), and the realm USER-event log is ON with both
+  ``REFRESH_TOKEN`` / ``REFRESH_TOKEN_ERROR`` types so Keycloak's own event
+  store can serve as the independent exactly-one-refresh observer.
+* **Realm ↔ runner ↔ kernel scope lockstep.** Every scope the realm mints exists
+  in the kernel's own exported vocabulary, and the runner's identity→scope map
+  matches the realm generator's — so a scope drift fails HERE, not 30 minutes
+  into a live bar.
+* **The claim-contract preflight bites.** The asserter that runs before any bar
+  catches the exact realm regressions (typ dropped, audience broadened, scope
+  shape) that would otherwise make every request 403 identically.
+* **The TLS matrix.** AgentOS terminates TLS; the CA is one per-run root; no
+  ``verify=False``/``-k`` on the identity path; the kernel image copies the
+  reference-binder overlay so the factory can import it.
+* **Key custody carries forward.** No private-key material and no bypass flags
+  anywhere in the tree; the realm (client secret + passwords) is a Secret, never
+  a ConfigMap or a committed file.
+* **The kernel is untouched.** ``protocol/mcp_authz.py`` is byte-identical to
+  ``main`` and the migration head is ``0017``.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import json
+import re
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+from types import ModuleType
+from typing import Any
+
+import pytest
+
+_REPO = Path(__file__).resolve().parents[3]
+_PROOF = _REPO / "infra" / "proof-m85c"
+_RUNNER = _PROOF / "run-proof-m85c.sh"
+_PROOF_APP = _PROOF / "proof_m85c" / "proof_app.py"
+_GEN_REALM = _PROOF / "keycloak" / "gen_realm.py"
+_PKCE = _PROOF / "keycloak" / "pkce_login.py"
+_ASSERT_CLAIM = _PROOF / "keycloak" / "assert_claim_contract.py"
+_MINT_PKI = _PROOF / "mint-pki.sh"
+_KEYCLOAK_YAML = _PROOF / "manifests" / "keycloak.yaml"
+
+
+def _load(path: Path, name: str) -> ModuleType:
+    """Import a proof-tree module by path (it is not on the package path). The
+    spec name must be registered in ``sys.modules`` BEFORE ``exec_module`` so
+    that ``from __future__ import annotations`` dataclass forward-refs resolve."""
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+# --- existence + shape -------------------------------------------------------------
+
+
+def test_proof_dir_carries_the_m85c_identity_file_set() -> None:
+    for rel in (
+        "run-proof-m85c.sh",
+        "mint-pki.sh",
+        "manifests/keycloak.yaml",
+        "keycloak/gen_realm.py",
+        "keycloak/pkce_login.py",
+        "keycloak/assert_claim_contract.py",
+        "proof_m85c/proof_app.py",
+        "overlay_reference/binder.py",
+        "overlay_reference/__init__.py",
+    ):
+        assert (_PROOF / rel).is_file(), f"missing proof asset {rel}"
+
+
+def test_identity_scripts_are_executable() -> None:
+    import os
+
+    for path in (_RUNNER, _MINT_PKI, _GEN_REALM, _PKCE, _ASSERT_CLAIM):
+        assert os.access(path, os.X_OK), f"{path.name} is not executable"
+
+
+# --- no fallback (spec §4) ---------------------------------------------------------
+
+
+def test_no_proof_role_header_binder_anywhere_in_the_proof_code() -> None:
+    """The X-Proof-Role binder is DELETED, not gated (spec §4). Prose in the
+    proof app + runner may EXPLAIN the deletion, but no code path may set the
+    header, and the header-binder class + constant must not exist at all."""
+    banned_symbols = ("MultiActorProofBinder", "PROOF_ROLE_HEADER", "UnknownProofRole")
+    for path in (_PROOF_APP, _PROOF / "overlay_reference" / "binder.py"):
+        text = path.read_text()
+        for symbol in banned_symbols:
+            assert symbol not in text, f"{path.name} still references {symbol}"
+
+    # The runner must never SEND an X-Proof-Role header (a comment mentioning the
+    # retired mechanism is fine; a curl -H line is not).
+    for line in _RUNNER.read_text().splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue
+        assert "X-Proof-Role" not in line, f"runner sends a proof-role header: {line!r}"
+
+
+def test_proof_app_builds_only_the_reference_oidc_binder() -> None:
+    text = _PROOF_APP.read_text()
+    assert "build_reference_binder" in text, "proof app does not build the reference binder"
+    assert "actor_binder=actor_binder" in text, (
+        "proof app does not inject the binder into create_app"
+    )
+    # It must also mount the approvals surface (the HP-4 queue the harness reads).
+    assert "approval_store=approval_store" in text and "approval_engine=approval_engine" in text, (
+        "proof app does not mount the approvals router"
+    )
+
+
+# --- the locked grant profile + exact audience (spec §4) ---------------------------
+
+
+def _generate_realm() -> dict[str, Any]:
+    """Run the realm generator into a temp dir and return the parsed realm."""
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(
+            [
+                sys.executable,
+                str(_GEN_REALM),
+                tmp,
+                "https://cognic-proof-harness:8443/auth/callback",
+                "http://127.0.0.1:47113/proof-driver-callback",
+            ],
+            check=True,
+            capture_output=True,
+        )
+        realm: dict[str, Any] = json.loads((Path(tmp) / "realm.json").read_text())
+        return realm
+
+
+def test_realm_locks_the_grant_profile() -> None:
+    realm = _generate_realm()
+    harness = next(c for c in realm["clients"] if c["clientId"] == "cognic-harness")
+    agentos = next(c for c in realm["clients"] if c["clientId"] == "cognic-agentos")
+    # The interactive flow is the ONLY way in.
+    assert harness["standardFlowEnabled"] is True
+    assert harness["directAccessGrantsEnabled"] is False, (
+        "resource-owner-password grant must be OFF"
+    )
+    assert harness["serviceAccountsEnabled"] is False, "client-credentials grant must be OFF"
+    assert harness["implicitFlowEnabled"] is False
+    assert harness["publicClient"] is False, "the BFF client must be confidential"
+    assert harness["attributes"]["pkce.code.challenge.method"] == "S256"
+    # The resource audience never performs a browser login.
+    for flow in (
+        "standardFlowEnabled",
+        "implicitFlowEnabled",
+        "directAccessGrantsEnabled",
+        "serviceAccountsEnabled",
+    ):
+        assert agentos[flow] is False, f"the resource audience must not enable {flow}"
+
+
+def test_realm_pins_the_rfc9068_header_type_explicitly() -> None:
+    realm = _generate_realm()
+    harness = next(c for c in realm["clients"] if c["clientId"] == "cognic-harness")
+    # Keycloak 26.2 defaults this OFF; the realm must set it ON explicitly.
+    assert harness["attributes"].get("access.token.header.type.rfc9068") == "true"
+
+
+def test_realm_forces_the_audience_to_exactly_cognic_agentos() -> None:
+    realm = _generate_realm()
+    harness = next(c for c in realm["clients"] if c["clientId"] == "cognic-harness")
+    # Lever (a): a hardcoded audience mapper.
+    has_hardcoded_audience = any(
+        m["protocolMapper"] == "oidc-audience-mapper"
+        and m["config"].get("included.client.audience") == "cognic-agentos"
+        for s in realm["clientScopes"]
+        for m in s["protocolMappers"]
+    )
+    assert has_hardcoded_audience, "no hardcoded cognic-agentos audience mapper"
+    # Lever (b): the built-in `roles` scope (which carries audience-resolve, the
+    # source of the stray `account` audience) is NOT a default client scope.
+    assert "roles" not in harness["defaultClientScopes"], "the `roles` scope must not be default"
+    # Lever (c): no user carries realm or client roles (audience-resolve resolves nothing).
+    for user in realm["users"]:
+        assert user["realmRoles"] == [], f"{user['username']} has realm roles"
+        assert user["clientRoles"] == {}, f"{user['username']} has client roles"
+    # Lever (d): the client cannot pull in a stray role.
+    assert harness["fullScopeAllowed"] is False
+
+
+def test_realm_emits_cognic_scopes_as_a_multivalued_array() -> None:
+    realm = _generate_realm()
+    multivalued = any(
+        m["config"].get("claim.name") == "cognic_scopes"
+        and m["config"].get("multivalued") == "true"
+        for s in realm["clientScopes"]
+        for m in s["protocolMappers"]
+    )
+    assert multivalued, (
+        "cognic_scopes must be a multivalued mapper (a JSON array, not a bare string)"
+    )
+
+
+# --- the live session-case realm levers (lifespan override + event log) ------------
+
+
+def test_realm_gives_the_harness_client_an_explicit_lifespan_override_home() -> None:
+    """The runner TEMPORARILY shrinks the cognic-harness access-token lifespan
+    at run time (Admin REST) for the expired-token and concurrent-refresh live
+    cases. The committed default must EQUAL the realm-wide lifespan — a pure
+    override home, no behavioural change — and adding it must not have
+    disturbed the neighbouring load-bearing client attributes."""
+    realm = _generate_realm()
+    harness = next(c for c in realm["clients"] if c["clientId"] == "cognic-harness")
+    attrs = harness["attributes"]
+    # Keycloak's per-client override attribute takes SECONDS AS A STRING.
+    assert attrs["access.token.lifespan"] == "900"
+    assert attrs["access.token.lifespan"] == str(realm["accessTokenLifespan"])
+    # Regression pin: the at+jwt header type (the floor the identity story
+    # rests on) and mandatory PKCE survived the attribute addition.
+    assert attrs["access.token.header.type.rfc9068"] == "true"
+    assert attrs["pkce.code.challenge.method"] == "S256"
+
+
+def test_realm_enables_the_user_event_log_as_the_refresh_observer() -> None:
+    """Keycloak's own event log is the INDEPENDENT observer for the BFF
+    concurrent-refresh single-flight case: exactly ONE REFRESH_TOKEN event
+    across two replicas (a stampede records N — plus REFRESH_TOKEN_ERRORs under
+    refresh-token rotation)."""
+    realm = _generate_realm()
+    assert realm["eventsEnabled"] is True
+    enabled = set(realm["enabledEventTypes"])
+    assert {"REFRESH_TOKEN", "REFRESH_TOKEN_ERROR"} <= enabled
+    # Stored events must comfortably outlive a ~40-minute proof run.
+    assert realm["eventsExpiration"] >= 3600
+    # Admin events are noise for this proof — pinned OFF.
+    assert realm["adminEventsEnabled"] is False
+    assert realm["adminEventsDetailsEnabled"] is False
+
+
+def test_realm_grant_profile_survives_the_lifespan_override_addition() -> None:
+    """Regression pin: the per-client attribute work must not have re-enabled
+    either DISABLED grant — the locked profile is what licenses the binder's
+    actor_type="human" derivation."""
+    realm = _generate_realm()
+    harness = next(c for c in realm["clients"] if c["clientId"] == "cognic-harness")
+    assert harness["directAccessGrantsEnabled"] is False, "direct-access grant must stay OFF"
+    assert harness["serviceAccountsEnabled"] is False, "client-credentials grant must stay OFF"
+
+
+# --- realm ↔ runner ↔ kernel scope lockstep ----------------------------------------
+
+
+def _runner_identity_scopes() -> dict[str, set[str]]:
+    """Parse the runner's IDENTITY_SCOPES associative-array block."""
+    text = _RUNNER.read_text()
+    block = re.search(r"declare -A IDENTITY_SCOPES=\((.*?)\)\n", text, re.DOTALL)
+    assert block, "IDENTITY_SCOPES block not found in the runner"
+    scopes: dict[str, set[str]] = {}
+    for match in re.finditer(r'\[(\w+)\]="([^"]*)"', block.group(1)):
+        scopes[match.group(1)] = {s for s in match.group(2).split(",") if s}
+    return scopes
+
+
+def test_every_realm_scope_exists_in_the_kernel_vocabulary() -> None:
+    binder = _load(_PROOF / "overlay_reference" / "binder.py", "overlay_reference.binder")
+    allowed = binder.kernel_scope_allow_list()
+    realm = _generate_realm()
+    for user in realm["users"]:
+        for scope in user["attributes"]["cognic_scopes"]:
+            assert scope in allowed, (
+                f"{user['username']} carries scope {scope!r} which is NOT in the kernel vocabulary "
+                "— the reference binder would refuse the token"
+            )
+
+
+def test_runner_identity_scopes_match_the_generated_realm() -> None:
+    """The runner's identity→scope map (used for the claim preflight) MUST match
+    the realm generator's, or the preflight would assert the wrong contract."""
+    gen = _load(_GEN_REALM, "gen_realm")
+    realm_scopes = {
+        str(identity["username"]): set(identity["scopes"]) for identity in gen.IDENTITIES
+    }
+    # Map the runner's role keys to the realm usernames via the runner's IDENTITY_USER.
+    text = _RUNNER.read_text()
+    user_block = re.search(r"declare -A IDENTITY_USER=\((.*?)\)\n", text, re.DOTALL)
+    assert user_block
+    role_to_user = dict(re.findall(r"\[(\w+)\]=(\S+)", user_block.group(1)))
+    runner_scopes = _runner_identity_scopes()
+    assert set(role_to_user) == set(runner_scopes), (
+        "IDENTITY_USER and IDENTITY_SCOPES role sets differ"
+    )
+    for role, username in role_to_user.items():
+        assert runner_scopes[role] == realm_scopes[username], (
+            f"scope drift for {role} ({username}): runner={sorted(runner_scopes[role])} "
+            f"realm={sorted(realm_scopes[username])}"
+        )
+
+
+def test_realm_carries_exactly_eight_identities_including_the_foreign_reader() -> None:
+    realm = _generate_realm()
+    usernames = {u["username"] for u in realm["users"]}
+    assert usernames == {
+        "proof-m85c-author",
+        "proof-m85c-reviewer",
+        "proof-m85c-operator",
+        "analyst.amir",
+        "analyst.sara",
+        "approver.dana",
+        "approver.erin",
+        "analyst.zara",
+    }
+    zara = next(u for u in realm["users"] if u["username"] == "analyst.zara")
+    assert zara["attributes"]["tenant_id"] == ["proof-foreign"], (
+        "the foreign reader must be off-tenant"
+    )
+
+
+def test_amir_and_sara_are_scope_and_tenant_identical() -> None:
+    """Bar D.6 (originator isolation) is only load-bearing if the two analysts
+    differ ONLY by subject — a scope or tenant difference would confound it."""
+    realm = _generate_realm()
+    amir = next(u for u in realm["users"] if u["username"] == "analyst.amir")
+    sara = next(u for u in realm["users"] if u["username"] == "analyst.sara")
+    assert set(amir["attributes"]["cognic_scopes"]) == set(sara["attributes"]["cognic_scopes"])
+    assert amir["attributes"]["tenant_id"] == sara["attributes"]["tenant_id"]
+    assert amir["username"] != sara["username"]
+
+
+# --- the claim-contract preflight bites --------------------------------------------
+
+
+def _seg(doc: dict[str, Any]) -> str:
+    import base64
+
+    return base64.urlsafe_b64encode(json.dumps(doc).encode()).decode().rstrip("=")
+
+
+def _token(header: dict[str, Any], claims: dict[str, Any]) -> str:
+    return f"{_seg(header)}.{_seg(claims)}.{_seg({'sig': 'x'})}"
+
+
+def _run_claim_assert(tokens: dict[str, Any], scopes: str) -> int:
+    issuer = "https://cognic-proof-keycloak:8443/realms/proof-m85c"
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+        json.dump(tokens, fh)
+        path = fh.name
+    try:
+        return subprocess.run(
+            [
+                sys.executable,
+                str(_ASSERT_CLAIM),
+                path,
+                issuer,
+                "analyst.amir",
+                "proof-m85c",
+                scopes,
+            ],
+            capture_output=True,
+        ).returncode
+    finally:
+        Path(path).unlink()
+
+
+_GOOD_HDR = {"alg": "RS256", "typ": "at+jwt", "kid": "k1"}
+_ISS = "https://cognic-proof-keycloak:8443/realms/proof-m85c"
+_SCOPES_CSV = (
+    "conversation.create,conversation.read,conversation.post_turn,"
+    "conversation.close,mcp.tool.list,mcp.tool.invoke"
+)
+_GOOD_CLAIMS = {
+    "iss": _ISS,
+    "aud": "cognic-agentos",
+    "azp": "cognic-harness",
+    "sub": "uuid-1",
+    "preferred_username": "analyst.amir",
+    "tenant_id": "proof-m85c",
+    "cognic_scopes": _SCOPES_CSV.split(","),
+    "exp": 9_000_000_000.0,
+    "iat": 1.0,
+}
+_ID_HDR = {"alg": "RS256", "typ": "JWT", "kid": "k1"}
+_ID_CLAIMS = {"iss": _ISS, "aud": "cognic-harness", "azp": "cognic-harness", "sub": "uuid-1"}
+
+
+def test_claim_preflight_accepts_the_designed_contract() -> None:
+    tokens = {
+        "access_token": _token(_GOOD_HDR, _GOOD_CLAIMS),
+        "id_token": _token(_ID_HDR, _ID_CLAIMS),
+    }
+    assert _run_claim_assert(tokens, _SCOPES_CSV) == 0
+
+
+@pytest.mark.parametrize(
+    "mutate_header,mutate_claims,mutate_id_header,mutate_id_claims",
+    [
+        # typ dropped (Keycloak 26.2 default) -> the binder would refuse every request.
+        ({"typ": "JWT"}, {}, {}, {}),
+        # audience broadened with `account` (the roles-scope regression).
+        ({}, {"aud": ["cognic-agentos", "account"]}, {}, {}),
+        # cognic_scopes a bare string (multivalued flag off).
+        ({}, {"cognic_scopes": "conversation.read"}, {}, {}),
+        # wrong azp.
+        ({}, {"azp": "some-other-client"}, {}, {}),
+        # ID token structurally indistinguishable (Bar B substitution would be vacuous).
+        ({}, {}, {"typ": "at+jwt"}, {}),
+        ({}, {}, {}, {"aud": "cognic-agentos"}),
+    ],
+)
+def test_claim_preflight_catches_realm_regressions(
+    mutate_header: dict[str, Any],
+    mutate_claims: dict[str, Any],
+    mutate_id_header: dict[str, Any],
+    mutate_id_claims: dict[str, Any],
+) -> None:
+    tokens = {
+        "access_token": _token({**_GOOD_HDR, **mutate_header}, {**_GOOD_CLAIMS, **mutate_claims}),
+        "id_token": _token({**_ID_HDR, **mutate_id_header}, {**_ID_CLAIMS, **mutate_id_claims}),
+    }
+    assert _run_claim_assert(tokens, _SCOPES_CSV) != 0, (
+        "a realm regression slipped past the preflight"
+    )
+
+
+# --- the TLS matrix ----------------------------------------------------------------
+
+
+def test_agentos_image_serves_tls_and_copies_the_binder_overlay() -> None:
+    dockerfile = (_PROOF / "Dockerfile.agentos-proof").read_text()
+    assert "--ssl-certfile" in dockerfile and "--ssl-keyfile" in dockerfile, (
+        "the kernel image CMD must run uvicorn with TLS"
+    )
+    assert "COPY overlay_reference/" in dockerfile, (
+        "the kernel image must copy the reference-binder overlay so the factory can import it"
+    )
+
+
+def test_runner_verifies_tls_and_never_bypasses_it() -> None:
+    text = _RUNNER.read_text()
+    assert "--cacert" in text, "the runner must verify AgentOS TLS against the proof CA"
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue
+        # No curl -k / TLS-verification bypass on the identity path. cosign's
+        # `--insecure-ignore-tlog` is a SIGSTORE TRANSPARENCY-LOG flag (required
+        # for keyed signing with --tlog-upload=false), NOT a TLS bypass — it is
+        # explicitly not in scope here.
+        assert not re.search(r"\bcurl\b.*\s-k\b", line), f"runner uses curl -k: {line!r}"
+        line_no_tlog = line.replace("--insecure-ignore-tlog", "")
+        assert "--insecure" not in line_no_tlog, f"runner uses a TLS-bypass --insecure: {line!r}"
+
+
+def test_runner_attaches_the_bearer_via_stdin_never_argv() -> None:
+    """The access token must never ride a process argument vector (a `ps`
+    snapshot would expose it) — it goes through curl's -K config on stdin."""
+    text = _RUNNER.read_text()
+    assert "curl -s -K -" in text, "api() must feed the Authorization header via curl -K -"
+    # And never as a -H argv on the same call surface.
+    assert '-H "Authorization: Bearer' not in text, "a Bearer token must not ride -H argv"
+
+
+def test_mint_pki_emits_a_ca_and_three_leaf_certs() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        subprocess.run(["bash", str(_MINT_PKI), tmp], check=True, capture_output=True)
+        out = Path(tmp)
+        for name in ("proof-ca.pem", "agentos.crt", "keycloak.crt", "harness.crt"):
+            assert (out / name).is_file(), f"mint-pki did not emit {name}"
+        # Each leaf chains to the CA.
+        for leaf in ("agentos", "keycloak", "harness"):
+            result = subprocess.run(
+                [
+                    "openssl",
+                    "verify",
+                    "-CAfile",
+                    str(out / "proof-ca.pem"),
+                    str(out / f"{leaf}.crt"),
+                ],
+                capture_output=True,
+            )
+            assert result.returncode == 0, f"{leaf}.crt does not chain to the proof CA"
+
+
+# --- Keycloak manifest custody -----------------------------------------------------
+
+
+def test_keycloak_is_pinned_by_digest_and_imports_the_realm_from_a_secret() -> None:
+    text = _KEYCLOAK_YAML.read_text()
+    assert "keycloak/keycloak:26.2@sha256:" in text, (
+        "Keycloak must be pinned by an immutable digest"
+    )
+    # The realm carries the client secret + every password -> it must be a Secret,
+    # never a ConfigMap.
+    assert "secretName: proof-m85c-keycloak-realm" in text
+    assert "configMap" not in text or "realm" not in text.split("configMap")[0][-200:], (
+        "the realm must not be a ConfigMap"
+    )
+    assert "KC_HTTP_ENABLED" in text and 'value: "false"' in text, "Keycloak must serve HTTPS only"
+
+
+# --- key custody + kernel-untouched (carried forward) ------------------------------
+
+
+def test_no_tracked_private_key_material_anywhere_in_the_proof_tree() -> None:
+    # The DANGER is real PEM armor (a `-----BEGIN ... PRIVATE KEY-----` block),
+    # not the bare string — the runner's own custody GUARD greps for
+    # "PRIVATE KEY-----" as a defence, and that pattern must not itself trip this.
+    armor = re.compile(r"-----BEGIN[^\n]*PRIVATE KEY-----")
+    for path in _PROOF.rglob("*"):
+        if not path.is_file() or "__pycache__" in path.parts or "proof-m85c-staging" in path.parts:
+            continue
+        text = path.read_text(errors="ignore")
+        assert not armor.search(text), f"private key material (PEM armor) tracked in {path}"
+
+
+def _verify_false_kwargs(source: str) -> list[int]:
+    """Line numbers of REAL ``verify=False`` (or ``verify=0``) keyword arguments,
+    via AST — so prose / docstrings / comments mentioning it never false-trip."""
+    import ast
+
+    hits: list[int] = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Call):
+            for kw in node.keywords:
+                if (
+                    kw.arg == "verify"
+                    and isinstance(kw.value, ast.Constant)
+                    and kw.value.value
+                    in (
+                        False,
+                        0,
+                    )
+                ):
+                    hits.append(node.lineno)
+    return hits
+
+
+def test_no_tls_bypass_kwargs_anywhere_in_the_proof_python() -> None:
+    for path in _PROOF.rglob("*.py"):
+        if "__pycache__" in path.parts:
+            continue
+        hits = _verify_false_kwargs(path.read_text())
+        assert not hits, f"real verify=False kwarg in {path} at line(s) {hits}"
+
+
+def test_no_insecure_tls_markers_in_the_proof_shell() -> None:
+    # For the shell surfaces, an executable (non-comment) line must never carry a
+    # TLS bypass. `-k`/`--insecure` are covered by the dedicated curl test; here
+    # we catch the openssl/cosign/wget style skips.
+    banned = ("--tls-skip-verify", "--no-check-certificate", "--allow-insecure")
+    for path in list(_PROOF.rglob("*.sh")):
+        for line in path.read_text().splitlines():
+            if line.strip().startswith("#"):
+                continue
+            for flag in banned:
+                assert flag not in line, f"TLS bypass {flag!r} in {path}: {line!r}"
+
+
+def test_migration_head_is_0017() -> None:
+    text = _RUNNER.read_text()
+    assert 'SCHEMA_REV" = "0017"' in text or '= "0017"' in text, (
+        "runner must assert alembic head 0017"
+    )
+
+
+def test_mcp_authz_is_byte_identical_to_main() -> None:
+    result = subprocess.run(
+        ["git", "-C", str(_REPO), "diff", "main", "--", "src/cognic_agentos/protocol/mcp_authz.py"],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert result.stdout == "", (
+        "protocol/mcp_authz.py has drifted from main (must stay byte-identical)"
+    )

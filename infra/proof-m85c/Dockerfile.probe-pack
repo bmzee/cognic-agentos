@@ -1,0 +1,29 @@
+# infra/proof-m85c/Dockerfile.probe-pack — the released approval-probe MCP tool
+# Service (M8.5-C, spec §6). ONE tool, `probe_write`: business-side-effect-free,
+# but appends a per-call nonce to a proof-local invocation ledger the runner
+# reads via `kubectl exec` — the independent observer that makes "zero execution"
+# provable across the four-eyes approval sequence (deny -> ledger 0; single grant
+# -> ledger 0; second grant + re-call -> ledger exactly 1).
+#
+# Its manifest declares risk_tier = high_risk_custom, which routes every
+# invocation through the ADR-014 four-eyes flow (tools.rego maps
+# high_risk_custom -> require_4_eyes; the approver scope is
+# tool.approve.high_risk_custom).
+#
+# Auth: the SAME OAuth-PRM RS256/JWKS verifier the oracle pack uses (the proof
+# AS at 192.88.99.9:9000, jwt mode, never dev_insecure). The probe does NOT
+# verify a kernel query-context token — it is invoked DIRECTLY via
+# POST /api/v1/mcp/servers/{id}/tools/call (MCPHost.call_tool), which is not the
+# agent-dispatch path and mints no query-context stamp; the oracle pack's own
+# metadata tools rely on the OAuth bearer alone for the same reason.
+#
+# Built from the DOWNLOADED v0.1.0 release wheel (released assets only) staged at
+# proof-m85c-staging/wheel/ by stage-packs.sh (sha256-pinned). Context =
+# infra/proof-m85c/.
+FROM python:3.12-slim
+WORKDIR /app
+RUN pip install --no-cache-dir \
+      "mcp==1.27.0" "uvicorn[standard]>=0.35" "PyJWT[crypto]>=2.10,<3" "cryptography>=45"
+COPY proof-m85c-staging/wheel/cognic_tool_approval_probe-0.1.0-py3-none-any.whl /tmp/
+RUN pip install --no-cache-dir --no-deps /tmp/cognic_tool_approval_probe-0.1.0-py3-none-any.whl
+CMD ["python", "-m", "cognic_tool_approval_probe.server"]
