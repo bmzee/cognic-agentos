@@ -275,6 +275,30 @@ Agent-pack release assets therefore include `agent_cards/agent-card.jws` (in the
 in-toto expected-artifact set) and the tracked `agent-card.pub` alongside
 `cosign.pub`; the `agentos init-agent` scaffold documents the split.
 
+## Amendment (2026-07-13) — encrypted cosign password custody
+
+The first `cognic-tool-approval-probe` release exposed that the pack signer
+silently replaced the operator-provided `COSIGN_PASSWORD` with an empty string
+when spawning `cosign`. Unit tests used an empty-password ephemeral key and had
+therefore blessed the defect. Any real encrypted file-backed signing key failed
+decryption, making the documented maintainer release path inoperable.
+
+Ruling:
+
+- `agentos sign-blob` and `agentos sign --bundle` preserve the parent process
+  environment into the `cosign` child unchanged. A present `COSIGN_PASSWORD`
+  reaches `cosign` byte-for-byte; an absent value remains absent. AgentOS does
+  not interpret, persist, log, attest, or place the password on argv.
+- Release wrappers for encrypted file-backed keys remain responsible for
+  obtaining the password from the operator's secret store and failing before
+  signing when it is unavailable. KMS/Vault-backed signers that do not use
+  `COSIGN_PASSWORD` remain supported; AgentOS must not synthesize an empty value
+  for them.
+- The unit gate uses a non-empty sentinel so restoring the empty override fails.
+  The env-gated real-cosign proof also signs with a genuinely encrypted key and
+  a non-empty password; empty-password test fixtures alone are insufficient
+  evidence for release-key custody.
+
 ## References
 - ADR-002 (cosign signing — extended here)
 - ADR-009 (ObjectStoreAdapter — bundle retention)
