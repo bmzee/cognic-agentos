@@ -93,6 +93,67 @@ def real_cosign(tmp_path: Path) -> dict[str, Any]:
     return {"cosign": cosign, "private": private, "public": public}
 
 
+@pytest.fixture
+def encrypted_cosign(tmp_path: Path) -> dict[str, Any]:
+    """Mint a real encrypted cosign key with a non-empty password.
+
+    This is the release-custody shape. The original real-cosign fixture uses
+    an empty-password ephemeral key and therefore could not detect the CLI
+    replacing a maintainer-provided ``COSIGN_PASSWORD`` with ``""``.
+    """
+    cosign = shutil.which("cosign")
+    assert cosign is not None, (
+        "cosign binary not found on PATH; opt-in env "
+        "COGNIC_RUN_COSIGN_INTEGRATION=1 implies cosign is available"
+    )
+    password = "integration-nonempty-cosign-password"
+    keys = tmp_path / "encrypted-keys"
+    keys.mkdir()
+    subprocess.run(
+        [cosign, "generate-key-pair"],
+        cwd=keys,
+        env={
+            "COSIGN_PASSWORD": password,
+            "PATH": os.environ.get("PATH", ""),
+            "HOME": str(tmp_path),
+        },
+        check=True,
+        capture_output=True,
+    )
+    private = keys / "cosign.key"
+    public = keys / "cosign.pub"
+    assert private.is_file() and public.is_file()
+    assert b"ENCRYPTED SIGSTORE PRIVATE KEY" in private.read_bytes()
+    return {
+        "cosign": cosign,
+        "private": private,
+        "public": public,
+        "password": password,
+    }
+
+
+def test_cli_sign_preserves_nonempty_password_to_real_cosign(
+    encrypted_cosign: dict[str, Any],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A real encrypted maintainer key signs only when the parent password
+    reaches cosign unchanged. This reproduces the M8.5-C release blocker."""
+    wheel = tmp_path / "encrypted_key_pack-1.0.0-py3-none-any.whl"
+    wheel.write_bytes(b"encrypted-key-release-proof")
+    monkeypatch.setenv("COGNIC_COSIGN_PATH", str(encrypted_cosign["cosign"]))
+    monkeypatch.setenv("COGNIC_SIGNING_KEY_PATH", str(encrypted_cosign["private"]))
+    monkeypatch.setenv("COSIGN_PASSWORD", str(encrypted_cosign["password"]))
+
+    result = CliRunner().invoke(app, ["sign-blob", str(wheel)])
+    assert result.exit_code == 0, (
+        f"agentos sign-blob rejected an encrypted key with its correct password: "
+        f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    assert (tmp_path / "cosign.sig").stat().st_size > 0
+    assert (tmp_path / "bundle.sigstore").stat().st_size > 0
+
+
 async def test_cli_sign_then_verify_offline_roundtrip_on_real_cosign(
     real_cosign: dict[str, Any],
     tmp_path: Path,
@@ -129,8 +190,8 @@ async def test_cli_sign_then_verify_offline_roundtrip_on_real_cosign(
     #    detached cosign.sig + the OFFLINE bundle on cosign 3.x. The command
     #    resolves cosign + the signing key from Settings (env aliases
     #    COGNIC_COSIGN_PATH / COGNIC_SIGNING_KEY_PATH, exactly as
-    #    test_cli_sign.py drives it); its cosign subprocess overlays
-    #    COSIGN_PASSWORD="" itself, so no parent-env password is needed.
+    #    test_cli_sign.py drives it). The empty password used to mint this
+    #    ephemeral key is explicitly inherited by the cosign subprocess.
     #
     #    The ``sign-blob`` command calls ``asyncio.run(run_sign_blob(...))``
     #    internally (cli/__init__.py:760); this test runs inside the
@@ -140,6 +201,7 @@ async def test_cli_sign_then_verify_offline_roundtrip_on_real_cosign(
     #    running event loop".
     monkeypatch.setenv("COGNIC_COSIGN_PATH", cosign)
     monkeypatch.setenv("COGNIC_SIGNING_KEY_PATH", str(private_key))
+    monkeypatch.setenv("COSIGN_PASSWORD", "")
     runner = CliRunner()
     result = await asyncio.to_thread(lambda: runner.invoke(app, ["sign-blob", str(wheel)]))
     assert result.exit_code == 0, (

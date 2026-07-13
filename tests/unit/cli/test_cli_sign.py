@@ -837,18 +837,21 @@ def test_sign_blob_preserves_host_env_into_cosign_subprocess(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The cosign subprocess MUST inherit ``os.environ`` (with
-    ``COSIGN_PASSWORD`` overlaid). Real cosign needs HOME / PATH /
+    """The cosign subprocess MUST inherit ``os.environ`` unchanged.
+    Real cosign needs HOME / PATH /
     HTTPS_PROXY / Sigstore-bundle Vault / KMS credentials to function
     in production; passing ``env={"COSIGN_PASSWORD": ""}`` alone
     wipes those out + breaks proxy + KMS + Vault flows.
 
     Pin a sentinel env var on the host process; assert the cosign
-    shim's recording.env contains it. Also assert COSIGN_PASSWORD is
-    overlaid (the shim records both)."""
+    shim's recording.env contains it. Also assert a NON-EMPTY
+    COSIGN_PASSWORD survives byte-for-byte: hardcoding an empty value
+    makes encrypted maintainer keys unusable while the synthetic shim
+    still exits green."""
     shim = _make_cosign_shim(tmp_path)
     _set_cosign_settings(monkeypatch, cosign_path=shim, signing_key_path=_TEST_PRIVATE_PEM)
     monkeypatch.setenv("COGNIC_T14_R1_HOST_SENTINEL", "host-env-survived-into-cosign")
+    monkeypatch.setenv("COSIGN_PASSWORD", "maintainer-password-survived-into-cosign")
     wheel = tmp_path / "example.whl"
     wheel.write_bytes(b".")
 
@@ -864,10 +867,31 @@ def test_sign_blob_preserves_host_env_into_cosign_subprocess(
         f"host env var did NOT survive into cosign subprocess; "
         f"env keys={sorted(env.keys())[:10]} (truncated)"
     )
-    # COSIGN_PASSWORD overlaid for the unencrypted test-only PEM.
-    assert env.get("COSIGN_PASSWORD") == "", (
-        f"COSIGN_PASSWORD overlay missing from cosign env; got {env.get('COSIGN_PASSWORD')!r}"
+    # The maintainer password survives; an empty overlay is the release-blocking defect.
+    assert env.get("COSIGN_PASSWORD") == "maintainer-password-survived-into-cosign", (
+        f"COSIGN_PASSWORD did not survive unchanged into cosign; got {env.get('COSIGN_PASSWORD')!r}"
     )
+
+
+def test_sign_blob_does_not_synthesize_cosign_password_when_absent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """KMS-backed signers may not use ``COSIGN_PASSWORD`` at all. The CLI
+    preserves a configured value but must not invent an empty one when the
+    operator did not provide it."""
+    shim = _make_cosign_shim(tmp_path)
+    _set_cosign_settings(monkeypatch, cosign_path=shim, signing_key_path=_TEST_PRIVATE_PEM)
+    monkeypatch.delenv("COSIGN_PASSWORD", raising=False)
+    wheel = tmp_path / "example.whl"
+    wheel.write_bytes(b".")
+
+    result = CliRunner().invoke(app, ["sign-blob", str(wheel)])
+    assert result.exit_code == 0, (
+        f"sign-blob unexpectedly failed: stdout={result.stdout!r} stderr={result.stderr!r}"
+    )
+    recording = _read_shim_recording(shim)
+    assert "COSIGN_PASSWORD" not in recording["env"]
 
 
 # ===========================================================================

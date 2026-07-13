@@ -646,17 +646,24 @@ async def _exec_cosign_sign_blob(
         --bundle <bundle> <wheel>
     """
     # R1 P2 #2 reviewer correction — preserve the host process env
-    # under cosign and ONLY overlay COSIGN_PASSWORD. An earlier draft
+    # under cosign. An earlier draft
     # passed ``env={"COSIGN_PASSWORD": ""}`` which wiped the entire
     # child environment + broke production cosign flows that depend on
     # HOME (XDG cache + ~/.docker/config.json), PATH (helper-binary
     # resolution), HTTPS_PROXY / NO_PROXY (corporate egress), AWS_*
     # / GOOGLE_APPLICATION_CREDENTIALS / VAULT_ADDR (KMS / Vault
     # signing-key resolution), SIGSTORE_* (Rekor + Fulcio endpoints),
-    # and TLS-trust-store overrides. Pinned by the
+    # and TLS-trust-store overrides. The M8.5-C approval-probe release
+    # exposed the remaining custody defect: overlaying an empty
+    # COSIGN_PASSWORD here silently replaced the maintainer-provided
+    # password and made every encrypted file-backed key unusable. The
+    # child now inherits the operator's value unchanged when present and
+    # does not synthesize one when absent. The password stays in the
+    # process environment; it is never added to argv or an attestation.
+    # Pinned by the
     # ``test_sign_blob_preserves_host_env_into_cosign_subprocess``
     # regression in test_cli_sign.py.
-    cosign_env = {**os.environ, "COSIGN_PASSWORD": ""}
+    cosign_env = {**os.environ}
     proc = await asyncio.create_subprocess_exec(
         cosign_bin,
         "sign-blob",
