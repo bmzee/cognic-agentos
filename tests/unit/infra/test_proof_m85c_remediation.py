@@ -2708,7 +2708,9 @@ def test_r5_f1_no_fail_open_boolean_assertion_survives_anywhere() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def _grant_probe(code: str, body: str, rc: str = "0") -> subprocess.CompletedProcess[str]:
+def _grant_probe(
+    code: str, body: str, rc: str = "0", expected_code: str = "400"
+) -> subprocess.CompletedProcess[str]:
     """Drive the REAL kc_token_probe + the REAL assert_grant_disabled against a fake
     Keycloak. Prints GRANT_ASSERT_PASSED only if the bar would award the leg."""
     tmp = Path(tempfile.mkdtemp())
@@ -2739,7 +2741,8 @@ def _grant_probe(code: str, body: str, rc: str = "0") -> subprocess.CompletedPro
                 '| kc_token_probe "$QC_TMP/body.json")"',
                 "RC=$?",
                 "set -e",
-                'assert_grant_disabled "probe grant" "$QC_TMP/body.json" "$RC" "$CODE"',
+                'assert_grant_disabled "probe grant" "$QC_TMP/body.json" "$RC" '
+                f'"$CODE" {shlex.quote(expected_code)}',
                 'echo "GRANT_ASSERT_PASSED code=$CODE error=$GRANT_OBSERVED_ERROR"',
             ]
         )
@@ -2810,7 +2813,12 @@ class TestRound5F2DisabledGrantNeedsAnObservedGrantTypeRefusal:
             ),
             ("400", "<html>oops</html>", "0", "a non-JSON body: the REASON was never observed"),
             ("400", "{}", "0", "a JSON body with no error field: the reason was never observed"),
-            ("401", '{"error":"unauthorized_client"}', "0", "not the 400 Keycloak documents"),
+            (
+                "401",
+                '{"error":"unauthorized_client"}',
+                "0",
+                "the direct-access leg must retain the pinned Keycloak 400 status",
+            ),
             (
                 "400",
                 '{"error":"unauthorized_client"}',
@@ -2832,11 +2840,35 @@ class TestRound5F2DisabledGrantNeedsAnObservedGrantTypeRefusal:
         )
         assert probe.returncode != 0, "the leg must ABORT the run"
 
-    def test_an_observed_unauthorized_client_refusal_passes(self) -> None:
-        """The ONE case that carries the claim."""
-        probe = _grant_probe("400", '{"error":"unauthorized_client"}')
+    def test_direct_access_observed_unauthorized_client_refusal_passes(self) -> None:
+        """The pinned image returns 400/unauthorized_client for direct access."""
+        probe = _grant_probe("400", '{"error":"unauthorized_client"}', expected_code="400")
         assert probe.returncode == 0, f"stdout={probe.stdout!r} stderr={probe.stderr!r}"
         assert "GRANT_ASSERT_PASSED code=400 error=unauthorized_client" in probe.stdout
+
+    def test_client_credentials_observed_unauthorized_client_refusal_passes(self) -> None:
+        """The pinned image returns 401/unauthorized_client for service accounts."""
+        probe = _grant_probe("401", '{"error":"unauthorized_client"}', expected_code="401")
+        assert probe.returncode == 0, f"stdout={probe.stdout!r} stderr={probe.stderr!r}"
+        assert "GRANT_ASSERT_PASSED code=401 error=unauthorized_client" in probe.stdout
+
+    def test_client_credentials_cross_leg_status_drift_fails(self) -> None:
+        probe = _grant_probe("400", '{"error":"unauthorized_client"}', expected_code="401")
+        assert probe.returncode != 0
+        assert "GRANT_ASSERT_PASSED" not in probe.stdout
+
+    def test_client_credentials_invalid_client_at_expected_status_fails(self) -> None:
+        """HTTP 401 alone is not evidence: a wrong secret also produces a 401 family refusal."""
+        probe = _grant_probe("401", '{"error":"invalid_client"}', expected_code="401")
+        assert probe.returncode != 0
+        assert "GRANT_ASSERT_PASSED" not in probe.stdout
+
+    def test_malformed_refusal_body_is_never_copied_into_evidence(self) -> None:
+        marker = "SECRET-RESPONSE-BODY-MUST-NOT-ENTER-EVIDENCE"
+        probe = _grant_probe("400", marker)
+        assert probe.returncode != 0
+        assert marker not in probe.stdout
+        assert marker not in probe.stderr
 
 
 def test_r5_f2_no_unguarded_negative_status_assertion_survives() -> None:
@@ -2887,8 +2919,17 @@ def test_r5_f2_the_grant_assertion_demands_the_rfc6749_grant_type_reason() -> No
         "the leg must demand RFC 6749 §5.2's unauthorized_client — the ONLY code that means "
         "'this client may not use this GRANT TYPE'"
     )
-    assert '[ "$code" = "400" ]' in body, "the leg must demand an OBSERVED refusal status"
+    assert '[ "$code" = "$expected_code" ]' in body, (
+        "each leg must demand the exact refusal status emitted by the pinned Keycloak image"
+    )
     assert '[ "$rc" -eq 0 ]' in body, "the leg must reject a transport failure explicitly"
+    assert '"$B_CC" "401"' in _RUNNER_TEXT, (
+        "the client-credentials leg must pin Keycloak 26.2.5's 401/unauthorized_client pair"
+    )
+    assert '"$B_DAG" "400"' in _RUNNER_TEXT, (
+        "the direct-access leg must pin Keycloak 26.2.5's 400/unauthorized_client pair"
+    )
+    assert "head -c" not in body, "an OAuth response body can contain untrusted material"
 
 
 # --------------------------------------------------------------------------- #

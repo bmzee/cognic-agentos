@@ -4427,10 +4427,13 @@ echo "  Bar B OK: the approver (dana) binds actor_type=human — a human-gated d
 #
 # THE CONTRACT. RFC 6749 §5.2 defines `unauthorized_client` as "the authenticated client
 # is not authorized to use this authorization grant type" — which is precisely and only
-# the claim. Keycloak returns it for BOTH legs here, because the client secret we send is
-# VALID: client authentication SUCCEEDS, and the GRANT-TYPE check is what fails. For the
-# password grant Keycloak refuses on the grant type BEFORE it ever looks at the password,
-# which is exactly what makes `unauthorized_client` the right discriminator.
+# the claim. The pinned Keycloak 26.2.5 image returns HTTP 401 for the disabled service-
+# account/client-credentials leg and HTTP 400 for the disabled direct-access/password
+# leg; BOTH carry `unauthorized_client`. The status split is provider behaviour, while
+# the error code is the semantic proof that client authentication succeeded and the
+# GRANT-TYPE check refused the request. For the password grant Keycloak refuses on the
+# grant type BEFORE it ever looks at the password, which is exactly what makes
+# `unauthorized_client` the right discriminator.
 
 # kc_token_probe <BODY_FILE> — POST the form body on STDIN to Keycloak's token endpoint.
 # Writes the RESPONSE BODY to <BODY_FILE>, PRINTS the HTTP status, and RETURNS curl's own
@@ -4469,28 +4472,34 @@ if not isinstance(err, str) or not err:
 print(err)
 '
 
-# assert_grant_disabled <LABEL> <BODY_FILE> <CURL_RC> <HTTP_STATUS> — pass ONLY on an
-# OBSERVED OAuth refusal that NAMES THE GRANT TYPE as the reason. Fails loud on a
-# transport failure, any 2xx, any 5xx, a 404, a non-JSON body, and a refusal for a
-# DIFFERENT reason. Sets GRANT_OBSERVED_ERROR to the observed code.
+# assert_grant_disabled <LABEL> <BODY_FILE> <CURL_RC> <HTTP_STATUS>
+#   <EXPECTED_HTTP_STATUS> — pass ONLY on the exact status emitted by the pinned
+# Keycloak image AND an OBSERVED OAuth refusal that NAMES THE GRANT TYPE as the reason.
+# Fails loud on a transport failure, cross-leg status drift, any 2xx/5xx/404, a non-JSON
+# body, and a refusal for a DIFFERENT reason. Sets GRANT_OBSERVED_ERROR to the observed
+# code. No failure path copies the untrusted response body into durable evidence.
 #
 # It must be called WITHOUT a command substitution — a bar_fail inside `$( … )` would be
 # swallowed by bash 3.2 — hence the global rather than a printed return value.
 GRANT_OBSERVED_ERROR=""
 assert_grant_disabled() {
-  local label="$1" body_file="$2" rc="$3" code="$4" err err_rc
+  local label="$1" body_file="$2" rc="$3" code="$4" expected_code="$5" err err_rc
   [ "$rc" -eq 0 ] \
     || bar_fail "BAR B $label — the token request never REACHED Keycloak (curl exit $rc, http_code '$code'). curl reports 000 when the connection never happened, and the pre-review assertion (status != 200) was TRUE for 000 — so an unreached server would have 'proven' the grant is disabled. A tool that could not run has observed nothing."
-  [ "$code" = "400" ] \
-    || bar_fail "BAR B $label — expected Keycloak's OAuth refusal status 400, got HTTP $code. A 2xx means the grant SUCCEEDED and the locked profile does NOT hold. A 404 means the token endpoint is wrong, so the probe observed nothing about the grant profile. A 5xx means Keycloak failed, which is not a refusal."
+  case "$expected_code" in
+    400 | 401) ;;
+    *) die "assert_grant_disabled: unsupported expected HTTP status '$expected_code' (programming error)" ;;
+  esac
   set +e
   err="$(python3 -c "$_OAUTH_ERROR_PY" < "$body_file")"
   err_rc=$?
   set -e
   [ "$err_rc" -eq 0 ] && [ -n "$err" ] \
-    || bar_fail "BAR B $label — the refusal body is not a JSON object carrying a string error field, so the REASON Keycloak refused was never observed. A refusal whose reason cannot be read is not evidence that the GRANT TYPE was refused. Body: $(head -c 200 "$body_file" 2>/dev/null)"
+    || bar_fail "BAR B $label — the refusal body is not a JSON object carrying a string error field, so the REASON Keycloak refused was never observed. A refusal whose reason cannot be read is not evidence that the GRANT TYPE was refused. The response body is withheld from durable evidence."
   [ "$err" = "unauthorized_client" ] \
-    || bar_fail "BAR B $label — Keycloak refused with error=$err, NOT unauthorized_client. Only unauthorized_client means 'the authenticated client is not authorized to use this authorization grant type' (RFC 6749 §5.2), which IS the claim. invalid_client = the client secret was wrong. invalid_grant = the credentials were wrong — a password grant that is ENABLED refuses a bad password in exactly this way, so accepting it would let the leg pass while direct access is live. invalid_request = the probe itself was malformed. None of those observe the grant profile."
+    || bar_fail "BAR B $label — Keycloak refused for an OAuth reason other than unauthorized_client (the untrusted value is withheld). Only unauthorized_client means 'the authenticated client is not authorized to use this authorization grant type' (RFC 6749 §5.2), which IS the claim. invalid_client = the client secret was wrong. invalid_grant = the credentials were wrong — a password grant that is ENABLED refuses a bad password in exactly this way, so accepting it would let the leg pass while direct access is live. invalid_request = the probe itself was malformed. None of those observe the grant profile."
+  [ "$code" = "$expected_code" ] \
+    || bar_fail "BAR B $label — the pinned Keycloak image returned unauthorized_client with unexpected HTTP $code (expected $expected_code for this grant). A 2xx means the grant SUCCEEDED; a 404 means the endpoint is wrong; a 5xx means Keycloak failed; and a cross-leg 400/401 swap is provider-contract drift."
   GRANT_OBSERVED_ERROR="$err"
 }
 
@@ -4499,7 +4508,7 @@ B_CC="$(printf 'grant_type=client_credentials&client_id=%s&client_secret=%s' \
   "$KC_CLIENT" "$KC_CLIENT_SECRET" | kc_token_probe "$QC_TMP/kc-cc-body.json")"
 B_CC_RC=$?
 set -e
-assert_grant_disabled "client-credentials grant" "$QC_TMP/kc-cc-body.json" "$B_CC_RC" "$B_CC"
+assert_grant_disabled "client-credentials grant" "$QC_TMP/kc-cc-body.json" "$B_CC_RC" "$B_CC" "401"
 B_CC_ERR="$GRANT_OBSERVED_ERROR"
 
 B_DANA_PW="$(grep '^KC_PW_APPROVER_DANA=' "$KC_CRED_TMP/realm-credentials.env" | cut -d= -f2-)"
@@ -4510,7 +4519,7 @@ B_DAG="$(printf 'grant_type=password&client_id=%s&client_secret=%s&username=appr
   "$KC_CLIENT" "$KC_CLIENT_SECRET" "$B_DANA_PW" | kc_token_probe "$QC_TMP/kc-dag-body.json")"
 B_DAG_RC=$?
 set -e
-assert_grant_disabled "direct-access (password) grant" "$QC_TMP/kc-dag-body.json" "$B_DAG_RC" "$B_DAG"
+assert_grant_disabled "direct-access (password) grant" "$QC_TMP/kc-dag-body.json" "$B_DAG_RC" "$B_DAG" "400"
 B_DAG_ERR="$GRANT_OBSERVED_ERROR"
 
 echo "  Bar B OK: client-credentials (HTTP $B_CC, error=$B_CC_ERR) + direct-access (HTTP $B_DAG, error=$B_DAG_ERR) — both refused BY GRANT TYPE against a VALID client secret, so the locked profile holds"
