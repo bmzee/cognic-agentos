@@ -26,14 +26,17 @@ The demo is not a feature tour. It is six moments, each of which proves a contro
 
 | # | Moment | Control proven |
 |---|---|---|
-| 1 | Analyst logs in with the bank's own identity provider, asks a question in plain English, gets a real answer from bank-shaped data. | OIDC identity; NL→SQL; governed views |
+| 1 | Analyst logs in with the bank's own identity provider, asks a question in plain English. The agent **chooses the right skill** out of several and answers from real data. | OIDC identity; capability routing; NL→SQL; governed views |
 | 2 | Asks for data they are **not entitled to** → **refused**, with the reason, and an audit row. | Per-human entitlement, enforced before execution |
-| 3 | An admin **revokes an entitlement mid-conversation** → the very next question is refused. Live, on stage. | Enforcement is real-time, not cached |
-| 4 | Analyst says **"apply my leave for next Monday"** → the agent does **not** act. It shows exactly what it *will* do and mints an approval request. | Human-in-the-loop on writes; no autonomous action |
-| 5 | **Two different humans** approve (the requester cannot self-approve). The action then executes **exactly once**. | Four-eyes / maker-checker; idempotency |
-| 6 | The whole thing — question, refusal, revocation, approval, write — is one **hash-chained evidence trail** an examiner can read. | ISO 42001 / EU AI Act Article 14 evidence |
+| 3 | **A second analyst asks the identical question and IS answered.** Same agent, same prompt, different human. | Authorization is per-human, not per-agent |
+| 4 | An admin **revokes an entitlement mid-conversation** → the very next question is refused. Live, on stage. | Enforcement is real-time, not cached |
+| 5 | The agent writes SQL crossing into a schema outside its scope → **Oracle itself refuses** (`ORA-00942`). | Engine-level backstop; the DB is the last line, not our code |
+| 6 | Analyst says **"apply my leave for next Monday"** → the agent does **not** act. It states exactly what it *will* do and mints an approval request. | Human-in-the-loop on writes; no autonomous action |
+| 7 | **Two different humans** approve (the requester cannot self-approve). The analyst says **"go ahead"** — the action executes **exactly once**. | Four-eyes / maker-checker; idempotency; conversational resume |
+| 8 | Ask the agent to **apply someone else's leave** → refused. It cannot act for a human other than the one it represents. | Subject binding (§7.3) |
+| 9 | All of it — routing, refusals, revocation, approval, the write — is one **hash-chained evidence trail** an examiner can read. | ISO 42001 / EU AI Act Article 14 evidence |
 
-Moments 1–3 and 6 work today. **Moments 4–5 are what this milestone builds.**
+Moments 1–5 and 9 work today (1, 3, and 5 need only the multi-scope dataset — §7.1). **Moments 6–8 are what this milestone builds.**
 
 ### 1.1 Why this matters commercially (do not skip this)
 
@@ -229,16 +232,30 @@ Commercially this is the stronger position: when a bank asks *"do we have to mov
 
 ## 7. D5 — the write pack + the Oracle HR sample schema
 
-### 7.1 The dataset (ruled 2026-07-14)
+### 7.1 The dataset — MULTIPLE schemas, MULTIPLE skills (ruled 2026-07-14)
 
-The write lands in **Oracle's own official HR sample schema** (`oracle-samples/db-sample-schemas`). Instantly recognisable to the Oracle DBA a bank will put in the room, and it gives the demo a clean **two-scope** story:
+The demo does **not** run on one schema. It runs on **five scopes, each with its own instruction skill and its own Oracle proxy identity** — because the point is to show the agent **choosing** the right skill and tool, and to show authorization holding across a heterogeneous surface.
 
-- **Read scope** → the banking data (retail deposits / financial / cards — the existing proof seed).
-- **Write scope** → HR (apply leave against real `EMPLOYEES` rows).
+| Scope | Schema | Source | Skill | Purpose in the demo |
+|---|---|---|---|---|
+| `retail` | `RETAIL_ANALYTICS` | ours (existing seed) | `customer-data` | bank-shaped read |
+| `financial` | `FIN` | ours (existing seed) | `financial-data` | bank-shaped read |
+| `cards` | `CARDS` | ours (existing seed) | `cards-data` | **the entitlement refusal** |
+| `hr` | `HR` | **Oracle sample v23.3** | `hr-data` **(new)** | read **+ the WRITE target** |
+| `orders` | `CO` (Customer Orders) | **Oracle sample v23.3** | `orders-data` **(new)** | a genuinely different domain (semi-structured/JSON) |
 
-Two scopes, two entitlements, one conversation — a far better proof of the entitlement model than doing both in one schema.
+`atm-recon` remains a **published skill that is deliberately not granted** — the standing negative proof of the two-key model (a pack may request; only an operator grants).
 
-**Verified facts (research, 2026-07-14):**
+**`SH` (Sales History) is deliberately excluded** — ~90 MB of CSV, a long install, and it adds no routing dimension the other five do not already provide. YAGNI on a demo substrate.
+
+**What the multi-scope surface buys us — four demo moments the single-schema version cannot produce:**
+
+1. **Skill routing.** The agent sees only skill *descriptions* (progressive disclosure), picks the right one, reads its body through the gated `read_skill` built-in, then queries. Ask about card disputes and it reaches for `cards-data`; ask about headcount and it reaches for `hr-data`. **Nobody wired a router — the agent chose, and every choice passed the assignment gate.**
+2. **Same question, two humans, two outcomes.** Amir is entitled to `{retail, financial, hr}`; Sara additionally to `{cards}`. Both ask *"show me the open card disputes."* **Amir is refused. Sara is answered.** Same agent, same question, same prompt — different humans. This proves per-human entitlement more convincingly than any slide.
+3. **The database refuses a cross-schema join — not our code.** Each scope has its own proxy identity (`AN_RETAIL`, `AN_HR`, …) whose grants cover **only** that scope's governed views. If the model writes SQL joining `HR` to `CARDS` while acting under the `hr` scope, the connection is `cognic[AN_HR]`, which has **no grant on CARDS** — Oracle kills it with `ORA-00942`. **The last line of defence is the engine, and we can show it firing.**
+4. **The write is one capability among many.** *"Apply my leave"* is not a special mode; it is the agent selecting an `action`-class capability from the same granted set — and that class is what triggers four-eyes.
+
+**Verified facts about the Oracle sample schemas (research, 2026-07-14):**
 - **Use release `v23.3`, not v21.1.** v23.3 installs each schema independently, needs no SQL*Loader, requires only a privileged user (not `SYS`), and is documented as "compatible with Oracle Database 19c and upwards". **v21.1 is a trap**: it needs `SYS`, uses server-side `bfilename()` + `sqlldr`, and its documented failure mode against the `gvenzl` container (`ORA-22288`) is exactly the one we would hit.
 - **License: MIT.** Use, modify, distribute, and demonstrate are all expressly granted; retain the copyright notice.
 - **HR is tiny** — 7 tables, 107 employees, ~216 rows total, ~72 KB of scripts. Seconds to install.
@@ -333,9 +350,10 @@ The current checklist defers pilot readiness to M15–M17 and marks M8.5-E "must
 | Sprint | Deliverable | Gate |
 |---|---|---|
 | **D-S1** | **Capability classes.** Manifest field + build-time validator + dispatch gate keyed on class + Rego input + fail-closed default. Deletes `_QUERY_CONTEXT_STAMPED_TOOLS`. | CC review; TM-revert pins that an absent/unknown class refuses and that `entitlement_verified` cannot be reached without an entitlement read. |
-| **D-S2** | **The write path (HP-5).** `pending_approval` terminal state; typed catch of the approval-pending refusal; action-context token (`args_sha256` + `idempotency_key`); conversation stores + resumes the grant; the `approval` UI-event family gets its emit hooks. | CC review on every module. The largest slice. |
-| **D-S3** | **`cognic-tool-hr-leave`** (external repo) + Oracle HR sample schema v23.3 + `LEAVE_REQUESTS` + the employee-identity rule (§7.3). Signed release, sha256-pinned. | Same trust pipeline as the approval probe. |
-| **D-S4** | **Write proof on `kind`** — new bars: propose → four-eyes → resume → exactly-once; replay refused; "apply Sara's leave" refused. | Live proof; VALIDATION-RESULTS. |
+| **D-S2** | **The write path (HP-5).** `pending_approval` terminal state; typed catch of the approval-pending refusal; action-context token (`args_sha256` + `idempotency_key`); conversation stores + resumes the grant on the next turn ("go ahead"); the `approval` UI-event family gets its emit hooks. | CC review on every module. The largest slice. |
+| **D-S3** | **The data layer.** Oracle sample schemas v23.3 (`HR` + `CO`) installed via the existing initdb hook; governed views + per-scope proxy identities (`AN_HR`, `AN_CO`, …) with grants covering **only** their own scope; the two new instruction-skill packs (`hr-data`, `orders-data`, signed + released); the five-scope `data_scopes` / `entitlements` seed (Amir ≠ Sara). | The cross-schema `ORA-00942` refusal (moment 5) is a **bar**, not a claim. |
+| **D-S4** | **`cognic-tool-hr-leave`** (external repo) — `LEAVE_REQUESTS` + the subject-binding rule (§7.3) + the persisted idempotency key. Signed release, sha256-pinned. | Same trust pipeline as the approval probe. |
+| **D-S5** | **Proof on `kind`** — the nine moments as bars: skill routing; entitlement refusal; **same question / two humans / two outcomes**; live revocation; cross-schema engine refusal; propose → four-eyes → "go ahead" → exactly-once; replay refused; someone-else's-leave refused. | Live proof; VALIDATION-RESULTS. |
 
 **M8.5-D2 — Bank demo on AKS. May overlap D-S1…D-S4 — the Azure clock is not our review loop.**
 
@@ -346,11 +364,13 @@ The current checklist defers pilot readiness to M15–M17 and marks M8.5-E "must
 
 ---
 
-## 10. Open questions for the maintainer
+## 10. Rulings (all open questions closed 2026-07-14)
 
-*(Q1 and Q2 were ruled on 2026-07-14 and are folded into §6.1 and §7.1. One remains.)*
+1. **Identity provider** → Entra ID for the demo; **Keycloak stays in CI** as the vendor-neutrality proof. The IdP is a configuration, not a dependency (§6.1).
+2. **Dataset** → **multiple** schemas: the existing banking seed + Oracle's official `HR` and `CO` (v23.3), five scopes, five skills, so the agent's **choice** is demonstrable (§7.1).
+3. **Resume affordance** → **none. Conversation only.** The analyst says *"go ahead"* and the governed action executes.
 
-1. **Does the harness need a "resume" affordance**, or is a natural-language *"go ahead"* in the next turn sufficient for the demo? (Recommendation: **natural language** — no new UI, and it is the better demo moment: the analyst simply says "go ahead" and the governed action executes.)
+> Ruling 3 is not merely a UI preference. **The conversation IS the durable checkpoint** (§4.2) — resuming *through* the conversation is the architecture speaking for itself. A button would be a second, redundant resume path with its own authorization surface to get wrong.
 
 ---
 
