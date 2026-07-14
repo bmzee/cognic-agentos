@@ -173,13 +173,123 @@ Accuracy is not authored. **It is iterated toward, with a number in front of you
 
 ---
 
-## 8. The bar (proposed — maintainer to rule)
+## 8. The ship bar (RULED 2026-07-14)
 
 Before a skill ships to a bank:
 
-- **Wrong-answer rate < 2%** on the full corpus (this is the number that matters; a wrong number is a liability).
-- **Hallucination rate = 0%** on unanswerable questions — *it must never invent an answer it cannot ground*. This is a hard gate, not a target.
-- **Every adversarial case passes**, or its failure is documented and accepted in writing.
-- **Refusal rate on answerable questions is reported**, not gated — refusing too much is a usability problem, not a safety one, and we would rather ship it than ship a guesser.
+| Metric | Bar | Gate? |
+|---|---|---|
+| **Wrong-answer rate** | **< 2%** | **hard** — a wrong number is a liability |
+| **Hallucination rate** (answered something unanswerable) | **0%** | **hard** — it must never invent what it cannot ground |
+| Every adversarial case | passes, or its failure is **accepted in writing** | hard |
+| **Over-clarification rate** (§9) | reported, trending down | soft — but it is what stops the system becoming a nag |
+| Refusal rate on answerable questions | reported | soft |
 
-**Open for ruling:** are those the right thresholds, and is *hallucination = 0* the right hard gate? My recommendation is yes — **it is the only number a bank's risk committee will actually care about**, and it is the one claim we can make that no competitor pointing an LLM at a database can match.
+**Hallucination = 0 is the line we hold.** It is the only number a bank's risk committee will actually care about, and it is the one claim nobody else pointing an LLM at a database can make.
+
+---
+
+## 9. Clarification — asking without nagging
+
+> **"It should question back when it doesn't fully understand — but it must not interrogate simple queries."** (maintainer, 2026-07-14)
+
+That is the central usability/safety tension, and a binary answer/refuse model cannot resolve it. **Ask too little → hallucination. Ask too much → the product is useless.** So the outcome space is **four**, not two:
+
+| Outcome | When | Example |
+|---|---|---|
+| **Answer** | Unambiguous. | *"How many employees are in Sales?"* |
+| **Answer + stated assumption** ← **the one that prevents nagging** | Under-specified, but exactly **one** sensible default exists. | *"Total sales in 2001?"* → **"£X — I read that as the calendar year; say 'fiscal' if you meant otherwise."** |
+| **Clarify** | Two or more readings give **materially different numbers**. | *"Show me revenue"* when the schema has both `amount_sold` and `net_revenue`. |
+| **Refuse** | Unanswerable from the schema, or not entitled. | *"What's the CEO's bonus?"* (no such data / no entitlement) |
+
+**"Answer with a stated assumption" is the mechanism that stops the interrogation.** Most under-specified questions have an obvious default. Taking it *and showing your work* costs the user nothing and is instantly correctable — a round-trip costs them a turn and their patience.
+
+### 9.1 The calibration lives in the SKILL, not in a global heuristic
+
+**Whether "revenue" is ambiguous is a fact about *this schema*, and only the skill author knows it.** So the skill declares it:
+
+```
+AMBIGUOUS — must clarify:
+  "revenue"  → amount_sold (gross) OR net_revenue (after returns). Different numbers. ASK.
+
+SAFE DEFAULTS — answer, but state the assumption:
+  period unspecified   → calendar year to date. Say so.
+  currency unspecified → GBP (the only currency in this schema). Say so.
+
+NEVER ASK — these are unambiguous here:
+  "customers"  → CUSTOMERS.cust_id, always.
+  "last month" → the previous complete calendar month.
+```
+
+A global "be cautious" instruction produces a system that either nags everywhere or nowhere. **Per-schema calibration is the only thing that works, and it is authored knowledge — exactly what a skill is for.**
+
+### 9.2 Over-clarification is a MEASURED FAILURE
+
+This is how we stop it drifting into a nag. The corpus's expected-outcome field carries all four values, and **asking when the corpus says "answer" is a FAIL**:
+
+| Corpus says | System does | Verdict |
+|---|---|---|
+| `answer` | answers correctly | ✅ |
+| `answer` | **asks a clarifying question** | ❌ **over-clarification — a scored failure** |
+| `clarify` | asks | ✅ |
+| `clarify` | **answers anyway** | ❌ **the dangerous one — it guessed between materially different readings** |
+| `refuse` | refuses | ✅ |
+| `refuse` | answers | ❌ hallucination |
+
+**A system that cannot be scored for nagging will nag.** Now it can be.
+
+---
+
+## 10. Learning — how the system improves without mutating a signed artifact
+
+> **"There should be a mechanism of learning too."** (maintainer, 2026-07-14)
+
+**The naive version is forbidden, and it is worth being explicit about why.** "The system learns from users and updates its own instructions" would mean:
+
+- a **skill mutating at runtime** — i.e. an **unsigned capability**, which the entire architecture exists to prevent;
+- an **unauditable change** — what changed, who approved it, against which evidence?
+- a **prompt-injection vector** — a hostile user *teaches* the system something false, and it persists.
+
+So the rule is:
+
+> **The system LEARNS. The skill does not MUTATE. Learning produces *proposals plus evidence*; a human authors and signs the change.**
+
+This preserves the security model *and* gives a genuine improvement loop — the two are not in tension once you separate **observation** from **authority**.
+
+### 10.1 Three levels, deliberately distinguished
+
+**Level A — Skill learning (durable, governed, signed).** *This is the real one.*
+
+```
+live question ──► failure or clarification captured ──► clustered by root cause
+                                                              │
+                              ┌───────────────────────────────┘
+                              ▼
+     system PROPOSES a skill amendment  ──►  HUMAN reviews, edits, authors
+                                                     │
+                    re-run the corpus  ◄─────────────┘
+                    (did it fix the cluster? did it break anything?)
+                                │
+                                ▼
+                    re-sign, re-release the skill pack
+```
+
+The system may write the *draft paragraph*. **It may never install it.** Every improvement arrives as a new signed skill version with its corpus delta as evidence — which is also exactly what you show a bank when they ask *"how do you know it got better?"*
+
+**Level B — Session memory (transient, free, already built).** Within a conversation, once the user clarifies *"by revenue I mean net"*, the agent must not ask again. This is the existing **task-tier** memory (`remember`, run-scoped; long-term writes are structurally denied at `core/agent/builtins.py`). **Clarify once per conversation, never once per question.**
+
+**Level C — Cross-conversation preference (governed, deferred).** *"Amir always means fiscal year."* That is **long-term memory about a person** — ADR-019 territory: default-deny, consent-gated, erasable. It is **not** free, it is **not** in this milestone, and it must never be smuggled in as "the system learned."
+
+### 10.2 Every clarification request is a skill defect report
+
+This is the inversion that makes the loop self-improving:
+
+> **If the skill were complete, the system would not have needed to ask.**
+
+A clarification means the skill failed to map a term, declare a default, or name an ambiguity. So **every clarification is logged as a candidate skill amendment**, and the **clarification rate is a skill-quality metric that must trend down across versions**. A skill that still asks the same question after three releases is a skill nobody is maintaining.
+
+This is what turns "the system asks when unsure" from a *permanent tax on the user* into a **temporary signal that funds its own removal.**
+
+### 10.3 Replay is the engine (ADR-010 ships the lane)
+
+Every live question is a corpus candidate; every live failure is a permanent regression case; every clarification is a proposed skill edit. **The system gets measurably more accurate the more it is used — and the evidence is durable, signed, and shippable to the bank as proof.**
