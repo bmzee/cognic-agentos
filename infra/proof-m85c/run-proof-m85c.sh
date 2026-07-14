@@ -3441,15 +3441,45 @@ assert_chat_turn_completed() {
 # four-eyes-execute / originator-isolation legs never exercised the HP-4 replay
 # path at all.
 mint_probe_request() {
-  local role="$1" nonce resp rid
+  local role="$1" nonce resp rid parse_out parse_rc
   nonce="probe-$(python3 -c 'import secrets; print(secrets.token_hex(8))')"
   local body
   body="$(python3 -c 'import json,sys; print(json.dumps({"tool_name":"probe_write","arguments":{"nonce":sys.argv[1]}}))' "$nonce")"
   resp="$(api "$role" POST "/api/v1/mcp/servers/$PROBE_PACK_ID/tools/call" "$body")"
   load_http_code
   [ "$HTTP_CODE" = "202" ] || bar_fail "mint_probe_request($role) expected 202 tool_approval_pending, got HTTP $HTTP_CODE (body: $resp)"
-  rid="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("approval_request_id",""))' <<<"$resp")"
-  [ -n "$rid" ] || bar_fail "mint_probe_request($role): the 202 carried no approval_request_id (body: $resp)"
+  # FastAPI wraps HTTPException detail under the top-level `detail` key. Parse the
+  # exact wire contract and fail through bar_fail: a bare command-substitution error
+  # under set -e would otherwise exit without the proof's diagnostic capture.
+  set +e
+  parse_out="$(printf '%s' "$resp" | python3 -c '
+import json, sys, uuid
+
+doc = json.load(sys.stdin)
+if not isinstance(doc, dict):
+    raise ValueError("response_not_object")
+detail = doc.get("detail")
+if not isinstance(detail, dict):
+    raise ValueError("detail_not_object")
+if detail.get("reason") != "tool_approval_pending":
+    raise ValueError("reason_not_tool_approval_pending")
+rid = detail.get("approval_request_id")
+if not isinstance(rid, str):
+    raise ValueError("approval_request_id_not_string")
+try:
+    parsed = uuid.UUID(rid)
+except ValueError:
+    raise ValueError("approval_request_id_not_uuid") from None
+if str(parsed) != rid:
+    raise ValueError("approval_request_id_not_canonical_uuid")
+print(rid)
+' 2>&1)"
+  parse_rc=$?
+  set -e
+  if [ "$parse_rc" -ne 0 ] || [ -z "$parse_out" ]; then
+    bar_fail "mint_probe_request($role): invalid 202 tool_approval_pending envelope (rc=$parse_rc): ${parse_out:-<no output>}"
+  fi
+  rid="$parse_out"
   printf '%s\t%s\n' "$rid" "$nonce"
 }
 

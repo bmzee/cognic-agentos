@@ -4282,3 +4282,82 @@ def test_attempt15_every_model_driven_ui_turn_proves_the_post_and_rendered_incre
     assert contract_node.value is not None
     contract = ast.literal_eval(contract_node.value)
     assert {"status", "turns_before", "turn_count", "answer_text"} <= set(contract["chat-turn"])
+
+
+# --------------------------------------------------------------------------- #
+# LIVE ATTEMPT 16 — the pending-request parser expected a non-wire envelope. #
+# --------------------------------------------------------------------------- #
+
+
+def _run_mint_probe_request(response: str) -> subprocess.CompletedProcess[str]:
+    """Execute the real mint helper against a controlled MCP response."""
+    script = "\n".join(
+        [
+            "set -euo pipefail",
+            f"FAKE_RESPONSE={shlex.quote(response)}",
+            'FAKE_HTTP_CODE="202"',
+            'PROBE_PACK_ID="cognic-tool-approval-probe"',
+            "api() { printf '%s' \"$FAKE_RESPONSE\"; }",
+            'load_http_code() { HTTP_CODE="$FAKE_HTTP_CODE"; }',
+            "bar_fail() { printf 'BAR_FAIL: %s\\n' \"$*\" >&2; exit 91; }",
+            _extract_shell_function("mint_probe_request"),
+            "mint_probe_request amir",
+        ]
+    )
+    return _run_bash(script)
+
+
+def test_attempt16_mint_probe_request_reads_the_fastapi_detail_envelope() -> None:
+    """The live MCP route nests both the reason and request id under detail."""
+    request_id = "7892230e-7b96-41e6-b14c-271a245b3936"
+    response = json.dumps(
+        {
+            "detail": {
+                "reason": "tool_approval_pending",
+                "approval_request_id": request_id,
+            }
+        }
+    )
+    probe = _run_mint_probe_request(response)
+    assert probe.returncode == 0, probe.stderr
+    parsed_id, nonce = probe.stdout.strip().split("\t")
+    assert parsed_id == request_id
+    assert re.fullmatch(r"probe-[0-9a-f]{16}", nonce)
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        # The pre-attempt-16 parser read this invented top-level field and would
+        # accept it even though the wire reason and id are a single detail envelope.
+        json.dumps(
+            {
+                "approval_request_id": "7892230e-7b96-41e6-b14c-271a245b3936",
+                "detail": {"reason": "tool_approval_pending"},
+            }
+        ),
+        json.dumps(
+            {
+                "detail": {
+                    "reason": "tool_approval_denied",
+                    "approval_request_id": "7892230e-7b96-41e6-b14c-271a245b3936",
+                }
+            }
+        ),
+        json.dumps(
+            {
+                "detail": {
+                    "reason": "tool_approval_pending",
+                    "approval_request_id": "not-a-uuid",
+                }
+            }
+        ),
+        json.dumps({"detail": {"reason": "tool_approval_pending"}}),
+        "not-json",
+    ],
+    ids=("top-level-id", "wrong-reason", "malformed-id", "missing-id", "malformed-json"),
+)
+def test_attempt16_mint_probe_request_rejects_noncontract_envelopes(response: str) -> None:
+    probe = _run_mint_probe_request(response)
+    assert probe.returncode == 91
+    assert "invalid 202 tool_approval_pending envelope" in probe.stderr
