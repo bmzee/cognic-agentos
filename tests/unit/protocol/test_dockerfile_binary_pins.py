@@ -1,7 +1,8 @@
 """Sprint 4 T13 — Dockerfile binary-pin regression test.
 
 Pins the cosign + OPA versions + SHA-256 sums baked into the
-``default-adapters-builder`` stage at ``infra/agentos/Dockerfile``.
+``default-adapters-builder`` stage at ``infra/agentos/Dockerfile`` and the
+OPA installer in ``.github/workflows/python.yml``.
 A drift here is a supply-chain event (the trust gate's verifier
 binary or the policy engine's enforcement binary changed without
 review), so it gets caught at unit-test time rather than at
@@ -23,7 +24,19 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-_DOCKERFILE = Path(__file__).resolve().parents[3] / "infra" / "agentos" / "Dockerfile"
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+_DOCKERFILE = _REPO_ROOT / "infra" / "agentos" / "Dockerfile"
+_PYTHON_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "python.yml"
+_OPA_ASSET_NAME = "opa_linux_amd64_static"
+_OPA_CANONICAL_URL = (
+    '"https://github.com/open-policy-agent/opa/releases/download/'
+    'v${OPA_VERSION}/opa_linux_amd64_static"'
+)
+_OPA_DOWNLOAD_SITE_ROOTS = (
+    _REPO_ROOT / ".github" / "workflows",
+    _REPO_ROOT / "infra",
+)
+_EXPECTED_OPA_DOWNLOAD_SITES = {_PYTHON_WORKFLOW, _DOCKERFILE}
 
 #: Pinned at T13 commit time; sources documented in the T13 commit
 #: message + the Sprint-4 plan §T13. Both are statically-linked Go
@@ -48,6 +61,22 @@ def _arg_value(dockerfile_text: str, name: str) -> str:
     return match.group(1)
 
 
+def _opa_download_sites() -> set[Path]:
+    """Inventory text sources that fetch the pinned OPA executable."""
+    sites: set[Path] = set()
+    for root in _OPA_DOWNLOAD_SITE_ROOTS:
+        for path in root.rglob("*"):
+            if not path.is_file() or path.stat().st_size > 1_000_000:
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                continue
+            if _OPA_ASSET_NAME in text:
+                sites.add(path)
+    return sites
+
+
 class TestDockerfileBinaryPins:
     def test_dockerfile_present(self) -> None:
         assert _DOCKERFILE.is_file(), f"Dockerfile missing at {_DOCKERFILE}"
@@ -68,20 +97,27 @@ class TestDockerfileBinaryPins:
         text = _DOCKERFILE.read_text(encoding="utf-8")
         assert _arg_value(text, "OPA_SHA256") == EXPECTED_OPA_SHA256
 
-    def test_opa_uses_canonical_github_release_url(self) -> None:
-        """Avoid the openpolicyagent.org redirect in reproducible builds.
+    def test_opa_download_inventory_is_closed_and_canonical(self) -> None:
+        """Every executable OPA fetch avoids the vanity redirect.
 
         The vanity endpoint adds a Netlify TLS/DNS hop before redirecting to
         this exact GitHub release. BuildKit failed repeatedly on that hop in
         the M8.5-C live proof, while the canonical release remained reachable.
-        The unchanged SHA-256 check below the URL still authenticates bytes.
+        The closed inventory prevents another installer from silently reviving
+        the same hazard elsewhere.
         """
-        text = _DOCKERFILE.read_text(encoding="utf-8")
-        assert (
-            '"https://github.com/open-policy-agent/opa/releases/download/'
-            'v${OPA_VERSION}/opa_linux_amd64_static"' in text
-        )
-        assert "openpolicyagent.org/downloads/" not in text
+        sites = _opa_download_sites()
+        assert sites == _EXPECTED_OPA_DOWNLOAD_SITES
+        for site in sites:
+            text = site.read_text(encoding="utf-8")
+            assert _OPA_CANONICAL_URL in text
+            assert "openpolicyagent.org/downloads/" not in text
+
+    def test_ci_opa_pin_matches_image_pin(self) -> None:
+        """CI and the runtime image authenticate the same OPA release."""
+        workflow = _PYTHON_WORKFLOW.read_text(encoding="utf-8")
+        assert f"OPA_VERSION={EXPECTED_OPA_VERSION}" in workflow
+        assert f"OPA_SHA256={EXPECTED_OPA_SHA256}" in workflow
 
     def test_binaries_copied_into_runtime(self) -> None:
         """The default-adapters runtime stage MUST COPY both binaries
