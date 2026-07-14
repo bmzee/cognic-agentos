@@ -2443,10 +2443,19 @@ rm -rf "$PROOF_DIR/policies"
 cp -r policies "$PROOF_DIR/policies"
 
 echo "==> [3/11] build the default-adapters base image"
-docker_build_with_retry -f infra/agentos/Dockerfile --target default-adapters -t "$BASE_IMAGE" .
+# Docker Desktop's bridge DNS can fail while the host resolver remains healthy
+# (attempt-6 live finding). These two networked builds use the host resolver; every
+# fetched dependency remains lock- or digest-pinned by its owning Dockerfile.
+docker_build_with_retry --network=host -f infra/agentos/Dockerfile \
+  --build-arg COGNIC_INCLUDE_SANDBOX_DOCKER=true \
+  --target default-adapters -t "$BASE_IMAGE" .
+docker run --rm --network=none "$BASE_IMAGE" \
+  /opt/venv/bin/python -c "import aiodocker, aiohttp" \
+  || die "locked sandbox-docker extra missing from the proof base image"
 
 echo "==> [3/11] build the proof AgentOS kernel image (create_proof_app + SEVEN released packs + trust + query-context public key)"
-docker_build_with_retry -f "$PROOF_DIR/Dockerfile.agentos-proof" --build-arg BASE_IMAGE="$BASE_IMAGE" \
+docker_build_with_retry --network=host -f "$PROOF_DIR/Dockerfile.agentos-proof" \
+  --build-arg BASE_IMAGE="$BASE_IMAGE" \
   --build-arg KERNEL_GIT_SHA="$KERNEL_GIT_SHA" -t "$IMAGE" "$PROOF_DIR"
 # Verify the built image label equals the computed revision (finding 2): the
 # label IS the provenance the evidence cites, so it must be read back from

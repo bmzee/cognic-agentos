@@ -33,14 +33,15 @@ COPY proof-m85c-staging/wheel/ /tmp/wheel/
 RUN /opt/venv/bin/python -m ensurepip --upgrade \
  && /opt/venv/bin/python -m pip install --no-deps --no-cache-dir /tmp/wheel/*.whl && rm -rf /tmp/wheel
 # aiodocker — is_sandbox_available() (harness/sandbox.py) requires it for the
-# DockerSibling managed sandbox runtime; it lives in the sandbox-docker extra,
-# NOT the adapters extra the base was built with. Installed WITH deps
-# (aiohttp). Floor mirrors pyproject [project.optional-dependencies].
+# DockerSibling managed sandbox runtime. The runner opts the base build into the
+# sandbox-docker extra, resolved by uv from the committed lock; importing both
+# packages here proves the proof base carries the complete dependency set without a
+# floating or networked pip install in this image.
 # M8 note: no skill EXECUTES in this proof (all four staged skills are
 # instruction-mode), but the M6 executable-skill posture stays deployed
 # unchanged — hosted_skills + the skill executor construct only when the
 # sandbox runtime is real, and step 0 asserts that surface.
-RUN /opt/venv/bin/python -m pip install --no-cache-dir "aiodocker>=0.24"
+RUN /opt/venv/bin/python -c "import aiodocker, aiohttp"
 # syft — the sandbox admission SBOM gate (sandbox/catalog.py) shells out to
 # `syft` at RUNTIME; the default-adapters BASE ships cosign + opa but NOT syft
 # (the M6 run-11 product finding; base follow-up flagged, NOT changed

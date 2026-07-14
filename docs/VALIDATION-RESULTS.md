@@ -2667,3 +2667,29 @@ Events:
 10m         Normal    SuccessfulDelete    replicaset/rel-agentos-bf64f5589             Deleted pod: rel-agentos-bf64f5589-fb9gx
 10m         Normal    ScalingReplicaSet   deployment/rel-agentos                       Scaled down replica set rel-agentos-bf64f5589 from 1 to 0
 ```
+
+## Proof M8.5-C attempt 6 — dependency-resolution FAILURE (2026-07-14T01:09:19Z)
+
+- **Result:** exit 1 before cluster creation, Step 0a, Bars A-F, or any model call.
+  The only provider request was the zero-spend `GET /v1/models` key preflight (HTTP
+  200).
+- **Passed before the halt:** proof-input cleanliness; all released-pack digests;
+  release-signature verification; proof-local cosign v3 re-signing; query-context,
+  TLS, Keycloak-realm, and approval-key generation; clean kernel provenance at
+  `6a762c2db5537276be369608da83a7d0a1961c07`.
+- **Failure:** all three bounded Docker build attempts failed while the proof image
+  executed `pip install "aiodocker>=0.24"`; Docker's bridge resolver could not resolve
+  `files.pythonhosted.org` although host networking could retrieve the exact locked
+  wheel.
+- **Finding:** the proof Dockerfile bypassed the committed `uv.lock` (which pins
+  `aiodocker==0.26.0`) and asked live PyPI to select a floating version (the failed
+  attempt selected 0.27.0). This was both an environmental failure surface and a
+  reproducibility defect.
+- **Remediation posture:** the proof base opts into the existing `sandbox-docker`
+  extra through a proof-only build argument; `uv sync --frozen` owns resolution, the
+  production default remains unchanged, and the derived proof image performs only an
+  import check. The two networked proof builds use host networking to avoid the
+  Docker Desktop bridge-DNS failure while retaining lock/digest verification.
+- **Operator log:** 378 lines, SHA-256
+  `183dabfb02413e9713fd19f1613817e6641fb9b63b3e62249ffa56679dcf0bfa`
+  (`/tmp/proof-m85c.log`, operator-held and not committed).

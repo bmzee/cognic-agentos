@@ -35,6 +35,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -48,6 +49,10 @@ _STAGE = _PROOF / "stage-packs.sh"
 _SEED = _PROOF / "seed-db.sh"
 _KERNEL_SEED = _PROOF / "kernel-seed.sql"
 _BFF_YAML = _PROOF / "manifests" / "bff.yaml"
+_BASE_DOCKERFILE = _REPO / "infra" / "agentos" / "Dockerfile"
+_PROOF_DOCKERFILE = _PROOF / "Dockerfile.agentos-proof"
+_PYPROJECT = _REPO / "pyproject.toml"
+_UV_LOCK = _REPO / "uv.lock"
 _DOCKERIGNORE = _PROOF / ".dockerignore"
 _PKCE = _PROOF / "keycloak" / "pkce_login.py"
 _BINDER = _PROOF / "overlay_reference" / "binder.py"
@@ -3613,3 +3618,62 @@ def test_attempt5_agentos_failure_snapshot_uses_a_selector_compatible_query() ->
     expected = 'kubectl -n "$NS" get deployment,pods -l app.kubernetes.io/name=agentos -o wide'
     assert expected in body
     assert "get deploy/rel-agentos,pod -l" not in body
+
+
+# --------------------------------------------------------------------------- #
+# LIVE ATTEMPT 6 — the proof bypassed uv.lock with a floating PyPI install.    #
+# --------------------------------------------------------------------------- #
+
+
+def test_attempt6_sandbox_docker_extra_is_locked_and_proof_only() -> None:
+    """Production keeps its Kubernetes-oriented default; this proof explicitly opts
+    into the existing lock-owned sandbox extra and refuses malformed build-arg values."""
+    base = _BASE_DOCKERFILE.read_text()
+    assert "ARG COGNIC_INCLUDE_SANDBOX_DOCKER=false" in base
+    assert (
+        "uv sync --frozen --no-dev --no-editable --extra adapters --extra sandbox-docker"
+    ) in base
+    assert 'elif [ "$COGNIC_INCLUDE_SANDBOX_DOCKER" = "false" ]' in base
+    assert "COGNIC_INCLUDE_SANDBOX_DOCKER must be true or false" in base
+    assert "exit 2" in base
+
+    base_build = _extract_runner_block(
+        'echo "==> [3/11] build the default-adapters base image"',
+        '|| die "locked sandbox-docker extra missing from the proof base image"',
+    )
+    assert "--build-arg COGNIC_INCLUDE_SANDBOX_DOCKER=true" in base_build
+    assert "--network=host -f infra/agentos/Dockerfile" in base_build
+    assert "docker run --rm --network=none" in base_build
+    assert 'python -c "import aiodocker, aiohttp"' in base_build
+
+    pyproject = tomllib.loads(_PYPROJECT.read_text())
+    sandbox_requirements = pyproject["project"]["optional-dependencies"]["sandbox-docker"]
+    assert sandbox_requirements.count("aiodocker>=0.24") == 1
+    lock = tomllib.loads(_UV_LOCK.read_text())
+    locked = [package for package in lock["package"] if package["name"] == "aiodocker"]
+    assert len(locked) == 1
+    assert locked[0]["version"]
+    assert locked[0]["wheels"]
+    assert all(wheel["hash"].startswith("sha256:") for wheel in locked[0]["wheels"])
+
+
+def test_attempt6_proof_image_never_resolves_aiodocker_outside_uv_lock() -> None:
+    """The failed line selected 0.27 from live PyPI while uv.lock pinned 0.26.
+    The derived image may verify imports, but it must never resolve aiodocker itself."""
+    dockerfile = _PROOF_DOCKERFILE.read_text()
+    active = "\n".join(
+        line for line in dockerfile.splitlines() if not line.lstrip().startswith("#")
+    )
+    logical_instructions = re.sub(r"\\\s*\n\s*", " ", active)
+    assert not re.search(
+        r"\b(?:pip|uv\s+pip|python[^\n]*-m\s+pip)\s+install\b[^\n]*\baiodocker\b",
+        logical_instructions,
+    )
+    assert "aiodocker>=0.24" not in logical_instructions
+    assert 'python -c "import aiodocker, aiohttp"' in dockerfile
+
+    proof_build = _extract_runner_block(
+        'echo "==> [3/11] build the proof AgentOS kernel image',
+        '-t "$IMAGE" "$PROOF_DIR"',
+    )
+    assert "docker_build_with_retry --network=host" in proof_build

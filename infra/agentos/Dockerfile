@@ -206,12 +206,26 @@ ENV PATH="/root/.local/bin:${PATH}"
 COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
 
+# Proof-only opt-in for the DockerSibling sandbox dependency set. Production
+# default-adapters builds keep the default false posture (Kubernetes deployments do
+# not need aiodocker); proof-m85c sets true so uv resolves sandbox-docker from the
+# committed lock instead of performing a floating pip install in a later image. Keep
+# this ARG immediately before the consuming layer so changing it does not invalidate
+# the APK/uv setup layers above.
+ARG COGNIC_INCLUDE_SANDBOX_DOCKER=false
 # --no-dev keeps test deps out; --extra adapters opts INTO the
 # optional-deps group so asyncpg/qdrant-client/hvac/langfuse/oracledb
 # etc. land in the venv. Without --extra adapters the default-adapters
 # image would be byte-identical to the kernel image and break the
 # runtime contract for default drivers.
-RUN uv sync --frozen --no-dev --no-editable --extra adapters \
+RUN if [ "$COGNIC_INCLUDE_SANDBOX_DOCKER" = "true" ]; then \
+      uv sync --frozen --no-dev --no-editable --extra adapters --extra sandbox-docker; \
+    elif [ "$COGNIC_INCLUDE_SANDBOX_DOCKER" = "false" ]; then \
+      uv sync --frozen --no-dev --no-editable --extra adapters; \
+    else \
+      echo "COGNIC_INCLUDE_SANDBOX_DOCKER must be true or false" >&2; \
+      exit 2; \
+    fi \
  && find /opt/venv -depth \( \
         -type d -name __pycache__ \
      -o -type d -name tests \
