@@ -46,6 +46,7 @@ _REPO = Path(__file__).resolve().parents[3]
 _PROOF = _REPO / "infra" / "proof-m85c"
 _RUNNER = _PROOF / "run-proof-m85c.sh"
 _DRIVER = _PROOF / "playwright" / "driver.py"
+_DRIVER_README = _PROOF / "playwright" / "README.md"
 _STAGE = _PROOF / "stage-packs.sh"
 _SEED = _PROOF / "seed-db.sh"
 _KERNEL_SEED = _PROOF / "kernel-seed.sql"
@@ -1081,7 +1082,7 @@ def test_f1_the_driver_reads_both_credentials_from_the_environment() -> None:
     # would inject a valueless cookie and make the replay probes vacuous)
     assert "cookie_value_empty" in _DRIVER_TEXT
     # the runner passes them ONLY through the child's environment
-    assert 'COGNIC_PROOF_COOKIE_VALUE="$value" uv run' in _RUNNER_TEXT
+    assert 'COGNIC_PROOF_COOKIE_VALUE="$value" "$DRIVER_PYTHON"' in _RUNNER_TEXT
     assert 'COGNIC_PROOF_CALLBACK_URL="$url" COGNIC_PROOF_COOKIE_VALUE="$cookie"' in _RUNNER_TEXT
 
 
@@ -2327,19 +2328,19 @@ def _run_bash(
 # F1 — S7 may be awarded ONLY by an observation of the BFF's own refusal.      #
 # --------------------------------------------------------------------------- #
 
-#: A stand-in for `uv run … python driver.py login …`, driven by FAKE_DRIVER_MODE. It
+#: A stand-in for the private driver venv's Python, driven by FAKE_DRIVER_MODE. It
 #: reproduces every way the real invocation can end: the driver CRASHES; it writes
 #: garbage; it writes a TRUNCATED document; it emits the pre-review fabricated shape; it
 #: reports an OBSERVED BFF refusal; it authenticates. Only ONE of those is evidence that
 #: the BFF refused, and this is what proves the runner can tell them apart.
-_FAKE_UV = """#!/bin/sh
+_FAKE_DRIVER_PYTHON = """#!/bin/sh
 out=""
 prev=""
 for a in "$@"; do
   if [ "$prev" = "--out" ]; then out="$a"; fi
   prev="$a"
 done
-[ -n "$out" ] || { echo "fake uv: no --out on the driver argv" >&2; exit 90; }
+[ -n "$out" ] || { echo "fake driver python: no --out on the driver argv" >&2; exit 90; }
 case "$FAKE_DRIVER_MODE" in
   crash)
     echo '{"error": "browser_launch_failed", "detail": "Chromium exited unexpectedly"}' >&2
@@ -2375,7 +2376,7 @@ case "$FAKE_DRIVER_MODE" in
   authenticated_but_exited_nonzero)
     printf '{"ok": true, "outcome": "authenticated", "http_status": 200}' > "$out"
     exit 3 ;;
-  *) echo "fake uv: unknown FAKE_DRIVER_MODE=$FAKE_DRIVER_MODE" >&2; exit 91 ;;
+  *) echo "fake driver python: unknown FAKE_DRIVER_MODE=$FAKE_DRIVER_MODE" >&2; exit 91 ;;
 esac
 """
 
@@ -2387,8 +2388,9 @@ def _s7_browser_probe(mode: str) -> subprocess.CompletedProcess[str]:
     try:
         bin_dir = tmp / "bin"
         bin_dir.mkdir()
-        (bin_dir / "uv").write_text(_FAKE_UV)
-        (bin_dir / "uv").chmod(0o755)
+        fake_python = bin_dir / "driver-python"
+        fake_python.write_text(_FAKE_DRIVER_PYTHON)
+        fake_python.chmod(0o755)
         (tmp / "qc").mkdir()
         (tmp / "driver").mkdir()
         (tmp / "creds").mkdir()
@@ -2410,8 +2412,8 @@ def _s7_browser_probe(mode: str) -> subprocess.CompletedProcess[str]:
         script = "\n".join(
             [
                 "set -euo pipefail",
-                f'export PATH="{bin_dir}:$PATH"',
                 f'export FAKE_DRIVER_MODE="{mode}"',
+                f'DRIVER_PYTHON="{fake_python}"',
                 f'QC_TMP="{tmp / "qc"}"',
                 f'DRIVER_DIR="{tmp / "driver"}"',
                 f'KC_CRED_TMP="{tmp / "creds"}"',
@@ -3457,8 +3459,9 @@ def test_r5_the_role_lookup_resolves_under_set_u_on_every_bash(fn: str) -> None:
     try:
         bin_dir = tmp / "bin"
         bin_dir.mkdir()
-        (bin_dir / "uv").write_text(_FAKE_UV)
-        (bin_dir / "uv").chmod(0o755)
+        fake_python = bin_dir / "driver-python"
+        fake_python.write_text(_FAKE_DRIVER_PYTHON)
+        fake_python.chmod(0o755)
         (tmp / "qc").mkdir()
         (tmp / "driver").mkdir()
         (tmp / "creds").mkdir()
@@ -3467,8 +3470,8 @@ def test_r5_the_role_lookup_resolves_under_set_u_on_every_bash(fn: str) -> None:
         script = "\n".join(
             [
                 "set -euo pipefail",
-                f'export PATH="{bin_dir}:$PATH"',
                 'export FAKE_DRIVER_MODE="authenticated"',
+                f'DRIVER_PYTHON="{fake_python}"',
                 f'QC_TMP="{tmp / "qc"}"',
                 f'DRIVER_DIR="{tmp / "driver"}"',
                 f'KC_CRED_TMP="{tmp / "creds"}"',
@@ -3785,3 +3788,131 @@ def test_attempt10_s8_executes_the_real_predicate_over_playwright_cookie_shape()
     assert refused.returncode != 0
     assert cookie_value not in refused.stdout
     assert cookie_value not in refused.stderr
+
+
+# --------------------------------------------------------------------------- #
+# LIVE ATTEMPT 11 — a live Bar A interaction re-entered the PyPI resolver.    #
+# --------------------------------------------------------------------------- #
+
+
+def test_attempt11_driver_runtime_is_materialized_once_before_cluster_work() -> None:
+    """The browser toolchain is a pre-cluster artifact, not a per-step dependency.
+
+    Attempt 11 completed several real browser interactions and then S3 failed because
+    a fresh ``uv run --with-requirements`` tried to revalidate cryptography while DNS
+    was unavailable. Pin the one-time private venv, its Python-3.12/no-download
+    posture, dependency installation, the Chromium installation, and unconditional
+    cleanup.
+    """
+    block = _extract_runner_block(
+        'echo "==> [1/11] materialize the browser-driver runtime',
+        'echo "  browser-driver runtime OK:',
+    )
+    assert 'DRIVER_VENV_TMP="$(mktemp -d)"' in block
+    assert 'chmod 700 "$DRIVER_VENV_TMP"' in block
+    assert 'uv venv --python 3.12 --no-python-downloads "$DRIVER_VENV_TMP/venv"' in block
+    assert 'DRIVER_PYTHON="$DRIVER_VENV_TMP/venv/bin/python"' in block
+    assert 'uv pip install --python "$DRIVER_PYTHON" --exact --strict' in block
+    assert '--requirements "$DRIVER_DIR/requirements.txt"' in block
+    assert '"$DRIVER_PYTHON" -m playwright install chromium' in block
+    assert "from playwright.sync_api import sync_playwright" in block
+
+    cleanliness = _RUNNER_TEXT.index('echo "==> [1/11] proof-input cleanliness OK')
+    materialize = _RUNNER_TEXT.index('echo "==> [1/11] materialize the browser-driver runtime')
+    cluster = _RUNNER_TEXT.index('kind create cluster --name "$CLUSTER"')
+    assert cleanliness < materialize < cluster
+
+    cleanup = _extract_shell_function("cleanup")
+    assert 'rm -rf "$DRIVER_VENV_TMP"' in cleanup
+
+
+def test_attempt11_live_driver_calls_are_resolver_free() -> None:
+    """Every live interaction uses the already-materialized interpreter directly.
+
+    This is intentionally runner-wide: fixing only S3 would leave the next browser
+    action free to rediscover the same DNS-dependent resolver path.
+    """
+    required_calls = {
+        "drive": '"$DRIVER_PYTHON" driver.py "$sub"',
+        "drive_replay_cookie": 'COGNIC_PROOF_COOKIE_VALUE="$value" "$DRIVER_PYTHON"',
+        "drive_replay_callback": '"$DRIVER_PYTHON" driver.py replay-callback',
+        "drive_login": 'HARNESS_USER_PASSWORD="$pw" "$DRIVER_PYTHON"',
+        "drive_login_capture": 'HARNESS_USER_PASSWORD="$pw" "$DRIVER_PYTHON"',
+    }
+    for function_name, direct_call in required_calls.items():
+        body = _extract_shell_function(function_name)
+        assert direct_call in body
+        assert "uv run" not in body
+        assert "--with-requirements" not in body
+
+    selftest = _extract_runner_block(
+        'echo "==> BAR preflight — browser driver selftest',
+        'echo "  driver selftest OK"',
+    )
+    assert '"$DRIVER_PYTHON" driver.py selftest' in selftest
+    assert "uv run" not in selftest
+
+    active_runner = "\n".join(
+        line for line in _RUNNER_TEXT.splitlines() if not line.lstrip().startswith("#")
+    )
+    assert "uv run --with-requirements" not in active_runner
+
+    readme = " ".join(_DRIVER_README.read_text().split())
+    assert "does **not** resolve that environment on every interaction" in readme
+    assert "invokes that venv's Python directly for every Bar A-F interaction" in readme
+
+
+@pytest.mark.parametrize("kind_rc", [0, 1])
+def test_attempt11_cleanup_enforces_no_residual_kind_nodes(kind_rc: int) -> None:
+    """Cleanup is judged by the Docker postcondition, not `kind delete`'s status.
+
+    Attempt 11 left a stopped control-plane container behind while the runner hid
+    every deletion diagnostic. Drive the real cleanup function against fake tools:
+    whether kind reports success or failure, an exact-cluster-labelled survivor must
+    be removed, without broad container matching.
+    """
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        log = tmp / "calls.log"
+        kind = bin_dir / "kind"
+        kind.write_text(
+            '#!/bin/sh\nprintf \'kind %s\\n\' "$*" >> "$FAKE_CALL_LOG"\nexit "$FAKE_KIND_RC"\n'
+        )
+        kind.chmod(0o755)
+        docker = bin_dir / "docker"
+        docker.write_text(
+            "#!/bin/sh\n"
+            'printf \'docker %s\\n\' "$*" >> "$FAKE_CALL_LOG"\n'
+            'if [ "$1" = "ps" ]; then printf \'stale-node-id\\n\'; fi\n'
+        )
+        docker.chmod(0o755)
+
+        script = "\n".join(
+            [
+                "set -euo pipefail",
+                f'export PATH="{bin_dir}:$PATH"',
+                f'export FAKE_CALL_LOG="{log}"',
+                f'export FAKE_KIND_RC="{kind_rc}"',
+                'CLUSTER="proof-cluster"',
+                'REGISTRY_NAME="proof-registry"',
+                'PF_KC=""; PF_BFF=""; PF_BFF_B=""',
+                'STAGING_DST=""; AGENTOS_SRC_DST=""; PROOF_DIR=""',
+                'QC_TMP=""; CANONICAL_KEY_TMP=""; APPROVE_KEY_TMP=""',
+                'PKI_TMP=""; KC_CRED_TMP=""; DRIVER_VENV_TMP=""',
+                "pf_stop() { :; }",
+                _extract_shell_function("cleanup"),
+                "cleanup",
+            ]
+        )
+        probe = _run_bash(script)
+        assert probe.returncode == 0, probe.stderr
+        calls = log.read_text()
+        assert "kind delete cluster --name proof-cluster" in calls
+        assert "docker ps -aq --filter label=io.x-k8s.kind.cluster=proof-cluster" in calls
+        assert "docker rm -f stale-node-id" in calls
+        assert "docker rm -f proof-registry" in calls
+        assert "removing residual kind node for cluster proof-cluster" in probe.stderr
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)

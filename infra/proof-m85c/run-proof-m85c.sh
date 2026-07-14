@@ -796,13 +796,15 @@ api() {
 # keycloak leaf certs the runner minted (the browser navigates to both origins);
 # the driver fails closed if no pins can be computed — never a blanket bypass.
 DRIVER_DIR="$PROOF_DIR/playwright"
+DRIVER_VENV_TMP=""                                    # one per-run driver runtime; removed by cleanup
+DRIVER_PYTHON=""                                      # direct interpreter; live bars never invoke uv
 drive() {
   local sub="$1"
   shift
   [ -n "${QC_TMP:-}" ] || die "drive() called before QC_TMP was minted (programming error)"
   local out_file="$QC_TMP/driver-out.json" err_file="$QC_TMP/driver-err" rc
   set +e
-  ( cd "$DRIVER_DIR" && uv run --with-requirements requirements.txt python driver.py "$sub" \
+  ( cd "$DRIVER_DIR" && "$DRIVER_PYTHON" driver.py "$sub" \
       --base-url "$HARNESS_BASE_URL" --ca "$PROOF_CA" \
       --leaf "$PKI_TMP/harness.crt" --leaf "$PKI_TMP/keycloak.crt" \
       --out "$out_file" --no-sandbox "$@" ) \
@@ -832,8 +834,8 @@ drive_replay_cookie() {
     || bar_fail "drive_replay_cookie: EMPTY cookie value — a valueless cookie would make the replay probe report authenticated=false for the wrong reason (a vacuous pass)"
   local out_file="$QC_TMP/driver-out.json" err_file="$QC_TMP/driver-err" rc
   set +e
-  ( cd "$DRIVER_DIR" && COGNIC_PROOF_COOKIE_VALUE="$value" uv run --with-requirements requirements.txt \
-      python driver.py replay-cookie \
+  ( cd "$DRIVER_DIR" && COGNIC_PROOF_COOKIE_VALUE="$value" "$DRIVER_PYTHON" \
+      driver.py replay-cookie \
       --base-url "$HARNESS_BASE_URL" --ca "$PROOF_CA" \
       --leaf "$PKI_TMP/harness.crt" --leaf "$PKI_TMP/keycloak.crt" \
       --out "$out_file" --no-sandbox ) \
@@ -868,8 +870,7 @@ drive_replay_callback() {
   set +e
   ( cd "$DRIVER_DIR" \
       && COGNIC_PROOF_CALLBACK_URL="$url" COGNIC_PROOF_COOKIE_VALUE="$cookie" \
-         uv run --with-requirements requirements.txt \
-         python driver.py replay-callback \
+         "$DRIVER_PYTHON" driver.py replay-callback \
          --base-url "$HARNESS_BASE_URL" --ca "$PROOF_CA" \
          --leaf "$PKI_TMP/harness.crt" --leaf "$PKI_TMP/keycloak.crt" \
          --out "$out_file" --no-sandbox ) \
@@ -904,8 +905,8 @@ drive_login() {
   local pw out_file="$QC_TMP/driver-out.json" err_file="$QC_TMP/driver-err" rc
   pw="$(grep "^$pw_var=" "$KC_CRED_TMP/realm-credentials.env" | cut -d= -f2-)"
   set +e
-  ( cd "$DRIVER_DIR" && HARNESS_USER_PASSWORD="$pw" uv run --with-requirements requirements.txt \
-      python driver.py login --username "$user" \
+  ( cd "$DRIVER_DIR" && HARNESS_USER_PASSWORD="$pw" "$DRIVER_PYTHON" \
+      driver.py login --username "$user" \
       --base-url "$HARNESS_BASE_URL" --ca "$PROOF_CA" \
       --leaf "$PKI_TMP/harness.crt" --leaf "$PKI_TMP/keycloak.crt" \
       --state-file "$QC_TMP/session-$role.json" --out "$out_file" --no-sandbox ) \
@@ -1014,8 +1015,8 @@ drive_login_capture() {
   : > "$out_file"
   : > "$err_file"
   set +e
-  ( cd "$DRIVER_DIR" && HARNESS_USER_PASSWORD="$pw" uv run --with-requirements requirements.txt \
-      python driver.py login --username "$user" \
+  ( cd "$DRIVER_DIR" && HARNESS_USER_PASSWORD="$pw" "$DRIVER_PYTHON" \
+      driver.py login --username "$user" \
       --base-url "$HARNESS_BASE_URL" --ca "$PROOF_CA" \
       --leaf "$PKI_TMP/harness.crt" --leaf "$PKI_TMP/keycloak.crt" \
       --state-file "$QC_TMP/session-$role.json" --out "$out_file" --no-sandbox ) \
@@ -2137,6 +2138,16 @@ cleanup() {
   # it dangling on 8445 and poison a subsequent run.
   [ -n "${PF_BFF_B:-}" ] && kill "$PF_BFF_B" 2>/dev/null || true
   kind delete cluster --name "$CLUSTER" >/dev/null 2>&1 || true
+  # Attempt 11 left an Exited(137) control-plane container behind even though
+  # cleanup ran. `kind delete` is best-effort here and its diagnostic used to be
+  # discarded, so enforce the actual postcondition: remove only node containers
+  # carrying this exact proof-cluster label. This also covers a kind command that
+  # returns success while a stopped node survives.
+  while IFS= read -r _kind_node_id; do
+    [ -n "$_kind_node_id" ] || continue
+    echo "WARN: cleanup: removing residual kind node for cluster $CLUSTER" >&2
+    docker rm -f "$_kind_node_id" >/dev/null 2>&1 || true
+  done < <(docker ps -aq --filter "label=io.x-k8s.kind.cluster=$CLUSTER" 2>/dev/null || true)
   docker rm -f "$REGISTRY_NAME" >/dev/null 2>&1 || true
   # remove the transient build-context copies (NOT the sources); proof_m85c/ +
   # overlay_reference/ + keycloak/ are tracked in-context sources, so they are
@@ -2156,6 +2167,9 @@ cleanup() {
   # run; removed unconditionally.
   [ -n "${PKI_TMP:-}" ] && rm -rf "$PKI_TMP" 2>/dev/null || true
   [ -n "${KC_CRED_TMP:-}" ] && rm -rf "$KC_CRED_TMP" 2>/dev/null || true
+  # Browser interactions must never resolve packages mid-bar. The driver gets one
+  # private runtime before cluster work; remove it with the rest of the run state.
+  [ -n "${DRIVER_VENV_TMP:-}" ] && rm -rf "$DRIVER_VENV_TMP" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -2258,6 +2272,26 @@ if [ -n "$PROOF_INPUT_DIRTY" ]; then
 $PROOF_INPUT_DIRTY"
 fi
 echo "==> [1/11] proof-input cleanliness OK (proof dir + chart + base Dockerfile + structural suite)"
+
+# --- 1c. materialize the browser-driver runtime ONCE, before cluster work ---------
+# Attempt 11 reached Bar A S3 after several successful browser interactions, then a
+# fresh `uv run --with-requirements` tried to revalidate cryptography against PyPI.
+# A transient DNS failure therefore turned an already-running live bar into a package-
+# resolver failure. Build one private Python 3.12 environment now, prove its Chromium
+# binary is installed now, and invoke its interpreter directly for every later drive.
+# Dependency or browser-download failures are still fail-loud, but happen before the
+# expensive cluster setup; no Bar A-F interaction has uv or network resolution in its
+# execution path.
+echo "==> [1/11] materialize the browser-driver runtime (one resolver pass, pre-cluster)"
+DRIVER_VENV_TMP="$(mktemp -d)"
+chmod 700 "$DRIVER_VENV_TMP"
+uv venv --python 3.12 --no-python-downloads "$DRIVER_VENV_TMP/venv"
+DRIVER_PYTHON="$DRIVER_VENV_TMP/venv/bin/python"
+uv pip install --python "$DRIVER_PYTHON" --exact --strict \
+  --requirements "$DRIVER_DIR/requirements.txt"
+"$DRIVER_PYTHON" -m playwright install chromium
+"$DRIVER_PYTHON" -c 'import cryptography; from playwright.sync_api import sync_playwright'
+echo "  browser-driver runtime OK: Python 3.12 + isolated requirements + Chromium"
 
 # --- 2. stage the SEVEN RELEASED packs (download + sha256-verify + arrange) --------
 echo "==> [2/11] stage the released packs via stage-packs.sh (download, not build)"
@@ -3253,7 +3287,7 @@ echo "  PROBE SETUP OK: probe Service deployed, carve-out warm"
 # without a browser BEFORE the first live bar (a driver bug must not masquerade
 # as a bar failure 30 minutes in).
 echo "==> BAR preflight — browser driver selftest (CLI surface + JSON shapes, no browser)"
-( cd "$DRIVER_DIR" && uv run --with-requirements requirements.txt python driver.py selftest ) \
+( cd "$DRIVER_DIR" && "$DRIVER_PYTHON" driver.py selftest ) \
   || bar_fail "browser driver selftest failed — fix the driver before the live bars"
 echo "  driver selftest OK"
 

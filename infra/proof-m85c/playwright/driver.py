@@ -46,14 +46,18 @@ bypass. The SPKI computation is proven byte-identical to the canonical
     ``NODE_EXTRA_CA_CERTS`` is pointed at ``--ca`` — that makes Node trust EXACTLY
     our CA (again, not a blanket bypass).
 
-Invocation (documented in README.md)
-------------------------------------
+Manual invocation (documented in README.md)
+-------------------------------------------
     uv run --with-requirements requirements.txt python driver.py <subcommand> \
         --base-url https://127.0.0.1:8444 --ca /run/proof/ca.pem \
         --state-file /run/proof/amir.state.json --out /run/proof/out.json [flags]
 
     # one-time, in the driver's environment:
     playwright install chromium
+
+The live runner performs that setup once in a private pre-cluster venv and then
+calls the venv's Python directly. It never puts ``uv`` or a package resolver in
+an individual Bar A-F interaction path.
 
 Credentials are NEVER read from argv — only from the environment. A process's
 argument vector is world-readable (``ps``); its environment is not. THREE values

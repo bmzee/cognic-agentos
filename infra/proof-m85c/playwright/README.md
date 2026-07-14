@@ -37,7 +37,7 @@ One-time (in the driver's environment): download the browser binary.
 # the driver's env — via uv (the repo toolchain):
 uv run --with-requirements requirements.txt playwright install chromium
 
-# each subcommand invocation (the runner does this):
+# manual subcommand invocation:
 uv run --with-requirements requirements.txt python driver.py <subcommand> \
     --base-url https://127.0.0.1:8444 \
     --ca        /run/proof/ca.pem \
@@ -46,11 +46,15 @@ uv run --with-requirements requirements.txt python driver.py <subcommand> \
     [subcommand flags]
 ```
 
-`--with-requirements` may be replaced by an explicit venv
-(`uv venv … && uv pip install -r requirements.txt && playwright install
-chromium`) — the runner may prefer a persistent venv so `playwright install`
-runs once. The `selftest` subcommand and `import driver` need **no** playwright installed
-(the playwright import is lazy, inside the browser functions).
+The live runner does **not** resolve that environment on every interaction. At
+its `[1/11]` preflight, before any cluster work, it creates a private temporary
+Python 3.12 venv, installs `requirements.txt` and its resolved dependencies into
+that otherwise-empty environment, installs the matching Chromium, and then
+invokes that venv's Python directly for every Bar A-F interaction. This keeps
+package-index/DNS availability out of the live-bar path; a dependency or
+browser-install failure refuses before the expensive kind bring-up. Cleanup
+removes the venv unconditionally. The `selftest` subcommand and `import driver`
+need **no** Playwright installed (the import is lazy, inside browser functions).
 
 **Versions targeted:** Playwright **1.49.1** (matches the harness's own
 `playwright>=1.49` pin), Chromium **build 1148** (the build Playwright 1.49.1
