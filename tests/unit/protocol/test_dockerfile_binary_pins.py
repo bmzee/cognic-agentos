@@ -27,8 +27,7 @@ _DOCKERFILE = Path(__file__).resolve().parents[3] / "infra" / "agentos" / "Docke
 
 #: Pinned at T13 commit time; sources documented in the T13 commit
 #: message + the Sprint-4 plan §T13. Both are statically-linked Go
-#: binaries published to GitHub releases (cosign) / openpolicyagent.org
-#: (OPA).
+#: binaries published to their canonical GitHub releases.
 EXPECTED_COSIGN_VERSION = "3.0.6"
 EXPECTED_COSIGN_SHA256 = "c956e5dfcac53d52bcf058360d579472f0c1d2d9b69f55209e256fe7783f4c74"
 EXPECTED_OPA_VERSION = "1.16.1"
@@ -68,6 +67,21 @@ class TestDockerfileBinaryPins:
     def test_opa_sha256_pinned(self) -> None:
         text = _DOCKERFILE.read_text(encoding="utf-8")
         assert _arg_value(text, "OPA_SHA256") == EXPECTED_OPA_SHA256
+
+    def test_opa_uses_canonical_github_release_url(self) -> None:
+        """Avoid the openpolicyagent.org redirect in reproducible builds.
+
+        The vanity endpoint adds a Netlify TLS/DNS hop before redirecting to
+        this exact GitHub release. BuildKit failed repeatedly on that hop in
+        the M8.5-C live proof, while the canonical release remained reachable.
+        The unchanged SHA-256 check below the URL still authenticates bytes.
+        """
+        text = _DOCKERFILE.read_text(encoding="utf-8")
+        assert (
+            '"https://github.com/open-policy-agent/opa/releases/download/'
+            'v${OPA_VERSION}/opa_linux_amd64_static"' in text
+        )
+        assert "openpolicyagent.org/downloads/" not in text
 
     def test_binaries_copied_into_runtime(self) -> None:
         """The default-adapters runtime stage MUST COPY both binaries

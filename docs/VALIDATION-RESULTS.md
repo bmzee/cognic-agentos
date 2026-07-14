@@ -2693,3 +2693,25 @@ Events:
 - **Operator log:** 378 lines, SHA-256
   `183dabfb02413e9713fd19f1613817e6641fb9b63b3e62249ffa56679dcf0bfa`
   (`/tmp/proof-m85c.log`, operator-held and not committed).
+
+## Proof M8.5-C attempt 7 — image-fetch FAILURE (2026-07-14)
+
+- **Result:** exit 1 before cluster creation, Step 0a, Bars A-F, or any model
+  call. The provider key passed only the zero-spend `GET /v1/models` preflight.
+- **Passed before the halt:** released-pack digest and signature verification,
+  proof-local cosign signing, per-run key/PKI/realm generation, and clean kernel
+  provenance at `0cc482e59b1303dee1473457e233c48517871573`.
+- **Failure:** Docker Desktop's resolver first failed registry/Astral lookups.
+  After the host environment was repaired, the exact final base build proved
+  the attempt-6 fix live (`aiodocker==0.26.0`, `aiohttp==3.13.5`, both from the
+  frozen lock) but BuildKit repeatedly received a TLS EOF from the
+  `openpolicyagent.org` vanity download hop. The same checksum-pinned asset was
+  reachable through its canonical GitHub release URL.
+- **Remediation posture:** retain the pinned OPA version and SHA-256, fetch the
+  artifact directly from the canonical GitHub release, and permanently forbid
+  the redirecting vanity URL in the binary-pin suite. No hostname/IP override
+  is embedded in source.
+- **Operator log:** 194 lines, SHA-256
+  `dab2e11191a868da0ddef281e1d59bccd3fecfc00f7e53561e1722a0ef3b2750`
+  (`/tmp/proof-m85c.log`, operator-held and not committed). The log captures
+  the runner's DNS abort; the exact-build OPA diagnosis followed interactively.

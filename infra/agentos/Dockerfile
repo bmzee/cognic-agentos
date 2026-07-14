@@ -274,7 +274,7 @@ RUN curl -sSL --fail --retry 5 --retry-delay 3 --retry-all-errors \
 
 RUN curl -sSL --fail --retry 5 --retry-delay 3 --retry-all-errors \
       -o /tmp/opa \
-      "https://openpolicyagent.org/downloads/v${OPA_VERSION}/opa_linux_amd64_static" \
+      "https://github.com/open-policy-agent/opa/releases/download/v${OPA_VERSION}/opa_linux_amd64_static" \
  && echo "${OPA_SHA256}  /tmp/opa" | sha256sum -c - \
  && install -m 0755 /tmp/opa /usr/local/bin/opa \
  && rm /tmp/opa \
