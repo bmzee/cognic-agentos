@@ -147,7 +147,7 @@ Extra diagnostic keys beyond the contract are emitted and are non-breaking.
 
 | Subcommand | Required flags | Contract JSON keys |
 |---|---|---|
-| `login` | `--username` (pw from `HARNESS_USER_PASSWORD`) | `ok, final_url, pre_auth_session_id, post_auth_session_id, cookie_names, served_by, callback_url` |
+| `login` | `--username` (pw from `HARNESS_USER_PASSWORD`), optional `--landing-path /\|/approvals` | `ok, final_url, pre_auth_session_id, post_auth_session_id, cookie_names, served_by, callback_url` |
 | `cookie-dump` | — | `cookies[] {name,value,secure,httpOnly,sameSite,path,domain}` |
 | `replay-cookie` | *(no flags)* — cookie from `COGNIC_PROOF_COOKIE_VALUE` | `status, authenticated` |
 | `replay-callback` | *(no flags)* — URL from `COGNIC_PROOF_CALLBACK_URL`, optional **pre-auth** cookie from `COGNIC_PROOF_COOKIE_VALUE` | `status, authenticated, cookie_injected` |
@@ -166,7 +166,10 @@ Notes on the observation semantics:
 
 - **`login`** drives the real OIDC flow: `GET /login` → Keycloak login form
   (`#username` / `#password` / `#kc-login`) → `/auth/callback` → the
-  authenticated BFF. `pre_auth_session_id` / `post_auth_session_id` are the
+  authenticated BFF. The default landing screen is chat (`/`); approval-only
+  identities use `--landing-path /approvals`, carried through the BFF's guarded
+  `next` parameter, so authentication does not require `conversation.read`.
+  `pre_auth_session_id` / `post_auth_session_id` are the
   `__Host-cognic_session` **cookie values** before and after login — the runner
   compares them for **S1** (login must rotate the session; the old cookie must be
   unusable via `replay-cookie`).

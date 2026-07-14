@@ -4068,3 +4068,105 @@ def test_attempt13_pod_resolution_excludes_terminating_and_unready_replicas(
     assert 'get("deletionTimestamp") is None' in resolver
     assert 'condition.get("type") == "Ready"' in resolver
     assert "if len(names) != 2" in resolver
+
+
+# --------------------------------------------------------------------------- #
+# LIVE ATTEMPT 14 — approvers landed on chat and needed an unrelated scope.  #
+# --------------------------------------------------------------------------- #
+
+
+def test_attempt14_approval_only_logins_land_on_the_approvals_screen() -> None:
+    """Pin the destination and the least-privilege boundary independently.
+
+    The OIDC exchange succeeded in attempt 14, but its default callback destination
+    was chat. Chat immediately reads conversations, so Dana's deliberately minimal
+    token was correctly refused for missing ``conversation.read`` before Bar B could
+    exercise approvals. The fix must route approvers to their own authorized screen;
+    granting them a conversation scope would weaken the identity fixture instead.
+    """
+    import ast
+    import urllib.parse
+
+    tree = ast.parse(_DRIVER_TEXT)
+    landing_paths_node = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "LOGIN_LANDING_PATHS"
+            for target in node.targets
+        )
+    )
+    assert isinstance(landing_paths_node.value, ast.Call)
+    assert isinstance(landing_paths_node.value.func, ast.Name)
+    assert landing_paths_node.value.func.id == "frozenset"
+    assert len(landing_paths_node.value.args) == 1
+    landing_paths = frozenset(ast.literal_eval(landing_paths_node.value.args[0]))
+    assert landing_paths == frozenset({"/", "/approvals"})
+
+    helper = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_login_entry_path"
+    )
+    namespace: dict[str, object] = {
+        "urllib": urllib,
+        "LOGIN_LANDING_PATHS": landing_paths,
+        "_fail": lambda reason, **_detail: ValueError(reason),
+    }
+    helper_module = ast.Module(body=[helper], type_ignores=[])
+    ast.fix_missing_locations(helper_module)
+    exec(compile(helper_module, str(_DRIVER), "exec"), namespace)
+    entry_path = namespace["_login_entry_path"]
+    assert callable(entry_path)
+    assert entry_path("/") == "/login?next=%2F"
+    assert entry_path("/approvals") == "/login?next=%2Fapprovals"
+    with pytest.raises(ValueError, match="login_landing_path_invalid"):
+        entry_path("https://attacker.invalid/")
+
+    cmd_login = next(
+        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "cmd_login"
+    )
+    goto_calls = [
+        node
+        for node in ast.walk(cmd_login)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_goto"
+    ]
+    assert len(goto_calls) == 1
+    path_arg = goto_calls[0].args[1]
+    assert isinstance(path_arg, ast.Call)
+    assert isinstance(path_arg.func, ast.Name)
+    assert path_arg.func.id == "_login_entry_path"
+    assert ast.unparse(path_arg.args[0]) == "args.landing_path"
+
+    drive_login = _extract_shell_function("drive_login")
+    assert 'landing_path="${2:-/}"' in drive_login
+    assert '--landing-path "$landing_path"' in drive_login
+
+    approver_calls = [
+        line.strip()
+        for line in _RUNNER_TEXT.splitlines()
+        if re.match(r"^\s*drive_login (?:dana|erin)(?:\s|$)", line)
+    ]
+    assert approver_calls == [
+        "drive_login dana /approvals >/dev/null",
+        "drive_login dana /approvals >/dev/null",
+        "drive_login erin /approvals >/dev/null",
+        "drive_login erin /approvals >/dev/null",
+    ]
+
+    realm_tree = ast.parse((_PROOF / "keycloak" / "gen_realm.py").read_text())
+    approver_scope_node = next(
+        node
+        for node in realm_tree.body
+        if isinstance(node, ast.AnnAssign)
+        and isinstance(node.target, ast.Name)
+        and node.target.id == "_APPROVER_SCOPES"
+    )
+    assert approver_scope_node.value is not None
+    assert ast.literal_eval(approver_scope_node.value) == [
+        "tool.approve.high_risk_custom",
+        "tool.approve.observe",
+    ]

@@ -272,6 +272,11 @@ LOGIN_OUTCOME_REFUSED = "refused"
 #: apart. The observation is written to ``--out`` BEFORE the process exits.
 LOGIN_REFUSED_EXIT = 5
 
+#: The two v1 screens a login may land on during the live proof. Keep this closed:
+#: analysts enter through chat, while approval-only humans must not need the unrelated
+#: ``conversation.read`` scope merely to finish authentication.
+LOGIN_LANDING_PATHS = frozenset({"/", "/approvals"})
+
 
 class ObservedRefusal(Exception):
     """THE BFF ITSELF REFUSED — a governed observation, not a harness failure.
@@ -976,6 +981,13 @@ def _is_authenticated(session: _Session) -> bool:
     return page.locator(SEL_ACTOR).count() > 0 and page.locator(SEL_LOGOUT_FORM).count() > 0
 
 
+def _login_entry_path(landing_path: str) -> str:
+    """Build the BFF login path with an explicit, closed post-login destination."""
+    if landing_path not in LOGIN_LANDING_PATHS:
+        raise _fail("login_landing_path_invalid", landing_path=landing_path)
+    return "/login?" + urllib.parse.urlencode({"next": landing_path})
+
+
 def _harvest_csrf(session: _Session) -> str:
     """Load an authenticated page and read a real hidden ``csrf_token`` field.
 
@@ -1059,7 +1071,7 @@ def cmd_login(args: argparse.Namespace) -> dict[str, Any]:
         # the way out to the runner: the observation (with its status) is written to
         # --out, and the process still exits non-zero so `drive_login` — which requires a
         # successful login — keeps failing loud.
-        login_response = _goto(session, "/login")
+        login_response = _goto(session, _login_entry_path(args.landing_path))
         login_status = login_response.status
         served_steps["login"] = list(session.served_by)
         if login_status >= 400:
@@ -1941,6 +1953,20 @@ def _selftest() -> int:
     # required-arg wiring: these must parse and reject missing required args.
     parse_cases: list[tuple[list[str], bool]] = [
         (["login", "--username", "u", "--base-url", "https://x", "--ca", "c"], True),
+        (
+            [
+                "login",
+                "--username",
+                "u",
+                "--landing-path",
+                "/approvals",
+                "--base-url",
+                "https://x",
+                "--ca",
+                "c",
+            ],
+            True,
+        ),
         (["login", "--base-url", "https://x", "--ca", "c"], False),  # missing --username
         # SECRET CUSTODY (the load-bearing pair). The value-bearing flags are DELETED:
         # a session cookie IS a bearer credential and a callback URL carries a
@@ -2286,6 +2312,11 @@ def _selftest() -> int:
     check("refusal_is_not_a_driver_failure", not issubclass(ObservedRefusal, DriverFailure))
     check("refusal_exit_is_non_zero", LOGIN_REFUSED_EXIT != 0)
     check("refusal_exit_is_distinct", LOGIN_REFUSED_EXIT not in (0, 3, 4))
+    check("login_chat_destination", _login_entry_path("/") == "/login?next=%2F")
+    check(
+        "login_approvals_destination",
+        _login_entry_path("/approvals") == "/login?next=%2Fapprovals",
+    )
     # The `login` contract carries the discriminator, and the success path SETS it —
     # re-derived from the handler's own source so a future edit that drops it fails here.
     login_src = inspect.getsource(cmd_login)
@@ -2499,6 +2530,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("login", help="drive a real OIDC browser login")
     p.add_argument("--username", required=True, help="Keycloak username (password from env)")
+    p.add_argument(
+        "--landing-path",
+        choices=sorted(LOGIN_LANDING_PATHS),
+        default="/",
+        help="closed same-origin screen rendered after the OIDC callback",
+    )
     _add_global_flags(p)
 
     p = sub.add_parser("cookie-dump", help="emit every cookie with flags (S8)")

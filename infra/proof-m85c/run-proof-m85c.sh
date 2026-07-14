@@ -907,10 +907,12 @@ drive_replay_callback() {
   cat "$out_file"
 }
 
-# drive_login <ROLE> — drive a REAL browser login for the role's Keycloak user,
+# drive_login <ROLE> [LANDING_PATH] — drive a REAL browser login for the role's Keycloak user,
 # reading the per-user password from the realm-credentials env (via the child's
 # env, never argv). Prints the login JSON; persists the session state-file per
-# role so later drive() calls reuse the authenticated context.
+# role so later drive() calls reuse the authenticated context. The destination
+# defaults to chat; approval-only humans explicitly land on /approvals so login
+# completion never requires the unrelated conversation.read scope.
 drive_login() {
   # TWO STATEMENTS, DELIBERATELY. Found while building the round-5 mutation tests, and it
   # is a LIVE-RUN-FATAL bug that had never fired only because the proof has never been run
@@ -922,7 +924,7 @@ drive_login() {
   # first call is `drive_login amir`, so the entire proof died on its first login, on
   # every bash version. (`ensure_token` is fine: its lookup is a separate statement, by
   # which time `role` really is bound.)
-  local role="$1" user
+  local role="$1" landing_path="${2:-/}" user
   user="${IDENTITY_USER[$role]:-}"
   [ -n "$user" ] || die "drive_login: unknown role '$role'"
   local pw_var="KC_PW_$(printf '%s' "$user" | tr '[:lower:].-' '[:upper:]__')"
@@ -931,6 +933,7 @@ drive_login() {
   set +e
   ( cd "$DRIVER_DIR" && HARNESS_USER_PASSWORD="$pw" "$DRIVER_PYTHON" \
       driver.py login --username "$user" \
+      --landing-path "$landing_path" \
       --base-url "$HARNESS_BASE_URL" --ca "$PROOF_CA" \
       --leaf "$PKI_TMP/harness.crt" --leaf "$PKI_TMP/keycloak.crt" \
       --state-file "$QC_TMP/session-$role.json" --out "$out_file" --no-sandbox ) \
@@ -4320,7 +4323,7 @@ assert_binder_refusal() {
 # request (deny is gated by RequireHumanActor at the kernel). ONE throwaway
 # request serves both this and the manipulated-RBAC probe; it ends DENIED
 # (terminal), so it never executes (ledger 0) and never enters Bar D.7's queue.
-drive_login dana >/dev/null
+drive_login dana /approvals >/dev/null
 drive_login amir >/dev/null   # amir was logged out by Bar A S3
 B_THROW="$(mint_probe_request amir | cut -f1)"
 [ -n "$B_THROW" ] || bar_fail "BAR B could not mint a throwaway approval request"
@@ -4642,8 +4645,8 @@ echo "PROOF M8.5-C (BAR C) PASS"
 echo "==> BAR D — approvals: four-eyes over the high-risk probe (ledger = the independent observer)"
 D_LEDGER0="$(probe_ledger_count)"
 [ "$D_LEDGER0" = "0" ] || bar_fail "BAR D the probe ledger was non-zero at the start ($D_LEDGER0) — a stale execution?"
-drive_login dana >/dev/null
-drive_login erin >/dev/null
+drive_login dana /approvals >/dev/null
+drive_login erin /approvals >/dev/null
 
 # D.1 — amir's initial probe call -> 202 pending, ledger 0; the inbox renders it.
 # mint_probe_request now returns "<request_id>\t<nonce>": the nonce is the BOUND
@@ -4708,7 +4711,7 @@ D_SELF2_STATUS="$(jq_get status "$D_SELF2")"
 [ "$D_SELF2_STATUS" = "403" ] || [ "$D_SELF2_STATUS" = "409" ] \
   || bar_fail "BAR D.4 dana's grant-second on her OWN grant was NOT refused (status $D_SELF2_STATUS)"
 # erin (distinct human) succeeds.
-drive_login erin >/dev/null
+drive_login erin /approvals >/dev/null
 drive approvals-act --request-id "$D_REQ2" --action grant-second --reason "second review" --state-file "$QC_TMP/session-erin.json" >/dev/null
 echo "  Bar D.4 OK: self grant-second refused ($D_SELF2_STATUS); a distinct approver (erin) completed four-eyes"
 # D.5 — amir's exact-shape re-call (same request-id + nonce) now executes -> ledger EXACTLY 1.
