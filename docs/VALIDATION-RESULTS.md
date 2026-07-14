@@ -1965,3 +1965,705 @@ INFO:     Uvicorn running on https://0.0.0.0:8443 (Press CTRL+C to quit)
 {"ts": "2026-07-13 16:50:33,689", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-a69cb2ab911f4485bab3c8da6a7d37ca", "trace_id": "3eee415e0ee5b31df8317d67eac5b114", "span_id": "504ba0719adc8779"}
 {"ts": "2026-07-13 16:50:33,690", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-a69cb2ab911f4485bab3c8da6a7d37ca", "trace_id": "3eee415e0ee5b31df8317d67eac5b114", "span_id": "504ba0719adc8779", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 24.477, "client_addr": "10.244.0.1"}
 ```
+
+## Proof M8.5 slice — AgentOS rollout FAILURE (2026-07-14T00:51:13Z)
+
+- Failed step: `rel-agentos pod did not become Ready within 600s`
+- rel-agentos deploy/pods (-o wide):
+```
+error: selectors and the all flag cannot be used when passing resource/name arguments
+```
+- rel-agentos deployment describe:
+```
+Name:                   rel-agentos
+Namespace:              cognic-proofm85c
+CreationTimestamp:      Tue, 14 Jul 2026 05:40:41 +0500
+Labels:                 app.kubernetes.io/instance=rel
+                        app.kubernetes.io/managed-by=Helm
+                        app.kubernetes.io/name=agentos
+                        app.kubernetes.io/part-of=cognic-agentos
+                        helm.sh/chart=agentos-0.1.0
+Annotations:            deployment.kubernetes.io/revision: 5
+                        meta.helm.sh/release-name: rel
+                        meta.helm.sh/release-namespace: cognic-proofm85c
+Selector:               app.kubernetes.io/instance=rel,app.kubernetes.io/name=agentos
+Replicas:               1 desired | 1 updated | 1 total | 1 available | 0 unavailable
+StrategyType:           RollingUpdate
+MinReadySeconds:        0
+RollingUpdateStrategy:  25% max unavailable, 25% max surge
+Pod Template:
+  Labels:           app.kubernetes.io/instance=rel
+                    app.kubernetes.io/name=agentos
+  Annotations:      kubectl.kubernetes.io/restartedAt: 2026-07-14T05:41:02+05:00
+  Service Account:  rel-agentos
+  Init Containers:
+   broker-share-perms:
+    Image:      busybox:1.36
+    Port:       <none>
+    Host Port:  <none>
+    Command:
+      sh
+      -c
+      chmod 1777 /var/lib/cognic-proof-m85c-broker && chgrp 65534 /var/run/docker.sock && chmod 0660 /var/run/docker.sock
+    Environment:
+      COGNIC_ALLOW_EXTERNAL_LLM:         true
+      COGNIC_POLICY_MODE:                cloud_openai
+      COGNIC_ALLOWED_PROVIDERS:          openai
+      COGNIC_LITELLM_MASTER_KEY:         vault://secret/cognic/proof-m85c/litellm
+      COGNIC_CONVERSATION_CLAIM_TTL_S:   600
+      COGNIC_AGENT_RUN_TOKEN_BUDGET:     60000
+      COGNIC_AGENT_RUN_WALL_CLOCK_S:     300
+      COGNIC_APPROVAL_FOUR_EYES_TTL_S:   1800
+      COGNIC_APPROVAL_SINGLE_TTL_S:      1800
+      COGNIC_PROOF_M85C_OIDC_ISSUER:     https://cognic-proof-keycloak:8443/realms/proof-m85c
+      COGNIC_PROOF_M85C_OIDC_CA_BUNDLE:  /etc/proof-ca/proof-ca.pem
+    Mounts:
+      /var/lib/cognic-proof-m85c-broker from broker-share (rw)
+      /var/run/docker.sock from docker-sock (rw)
+  Containers:
+   agentos:
+    Image:           cognic-agentos:proofm85c
+    Port:            8443/TCP
+    Host Port:       0/TCP
+    SeccompProfile:  RuntimeDefault
+    Limits:
+      cpu:     2
+      memory:  2Gi
+    Requests:
+      cpu:      250m
+      memory:   512Mi
+    Liveness:   http-get https://:http/api/v1/healthz delay=0s timeout=5s period=15s #success=1 #failure=3
+    Readiness:  http-get https://:http/api/v1/readyz delay=0s timeout=5s period=10s #success=1 #failure=3
+    Startup:    http-get https://:http/api/v1/healthz delay=0s timeout=1s period=5s #success=1 #failure=30
+    Environment Variables from:
+      rel-agentos-config  ConfigMap  Optional: false
+    Environment:
+      TMPDIR:                            /var/lib/cognic-proof-m85c-broker
+      COGNIC_PORT:                       8443
+      COGNIC_DATABASE_URL:               <set to the key 'COGNIC_DATABASE_URL' in secret 'rel-agentos-secrets'>  Optional: false
+      COGNIC_VAULT_TOKEN:                <set to the key 'COGNIC_VAULT_TOKEN' in secret 'rel-agentos-secrets'>   Optional: false
+      COGNIC_ALLOW_EXTERNAL_LLM:         true
+      COGNIC_POLICY_MODE:                cloud_openai
+      COGNIC_ALLOWED_PROVIDERS:          openai
+      COGNIC_LITELLM_MASTER_KEY:         vault://secret/cognic/proof-m85c/litellm
+      COGNIC_CONVERSATION_CLAIM_TTL_S:   600
+      COGNIC_AGENT_RUN_TOKEN_BUDGET:     60000
+      COGNIC_AGENT_RUN_WALL_CLOCK_S:     300
+      COGNIC_APPROVAL_FOUR_EYES_TTL_S:   1800
+      COGNIC_APPROVAL_SINGLE_TTL_S:      1800
+      COGNIC_PROOF_M85C_OIDC_ISSUER:     https://cognic-proof-keycloak:8443/realms/proof-m85c
+      COGNIC_PROOF_M85C_OIDC_CA_BUNDLE:  /etc/proof-ca/proof-ca.pem
+    Mounts:
+      /app/infra/litellm from litellm-config (ro)
+      /etc/agentos-tls from agentos-tls (ro)
+      /etc/proof-ca from proof-ca (ro)
+      /run/cognic/query-context from query-context (ro)
+      /tmp from tmp (rw)
+      /var/lib/cognic-agentos/object-store from object-store (rw)
+      /var/lib/cognic-proof-m85c-broker from broker-share (rw)
+      /var/lib/cognic/model-artifacts from model-artifacts (rw)
+      /var/run/docker.sock from docker-sock (rw)
+  Volumes:
+   docker-sock:
+    Type:          HostPath (bare host directory volume)
+    Path:          /var/run/docker.sock
+    HostPathType:
+   broker-share:
+    Type:          HostPath (bare host directory volume)
+    Path:          /var/lib/cognic-proof-m85c-broker
+    HostPathType:  DirectoryOrCreate
+   query-context:
+    Type:        Secret (a volume populated by a Secret)
+    SecretName:  proof-m85c-query-context
+    Optional:    false
+   agentos-tls:
+    Type:        Secret (a volume populated by a Secret)
+    SecretName:  proof-m85c-agentos-tls
+    Optional:    false
+   proof-ca:
+    Type:        Secret (a volume populated by a Secret)
+    SecretName:  proof-m85c-ca
+    Optional:    false
+   litellm-config:
+    Type:      ConfigMap (a volume populated by a ConfigMap)
+    Name:      rel-agentos-litellm
+    Optional:  false
+   tmp:
+    Type:       EmptyDir (a temporary directory that shares a pod's lifetime)
+    Medium:
+    SizeLimit:  256Mi
+   object-store:
+    Type:       EmptyDir (a temporary directory that shares a pod's lifetime)
+    Medium:
+    SizeLimit:  5Gi
+   model-artifacts:
+    Type:          EmptyDir (a temporary directory that shares a pod's lifetime)
+    Medium:
+    SizeLimit:     5Gi
+  Node-Selectors:  <none>
+  Tolerations:     <none>
+Conditions:
+  Type           Status  Reason
+  ----           ------  ------
+  Available      True    MinimumReplicasAvailable
+  Progressing    True    NewReplicaSetAvailable
+OldReplicaSets:  rel-agentos-577f67f98b (0/0 replicas created), rel-agentos-575dfb5f9f (0/0 replicas created), rel-agentos-5d59c8cfb8 (0/0 replicas created), rel-agentos-bf64f5589 (0/0 replicas created)
+NewReplicaSet:   rel-agentos-c796b8c9f (1/1 replicas created)
+Events:
+  Type    Reason             Age   From                   Message
+  ----    ------             ----  ----                   -------
+  Normal  ScalingReplicaSet  10m   deployment-controller  Scaled up replica set rel-agentos-577f67f98b from 0 to 1
+  Normal  ScalingReplicaSet  10m   deployment-controller  Scaled up replica set rel-agentos-bf64f5589 from 0 to 1
+  Normal  ScalingReplicaSet  10m   deployment-controller  Scaled down replica set rel-agentos-577f67f98b from 1 to 0
+  Normal  ScalingReplicaSet  10m   deployment-controller  Scaled up replica set rel-agentos-575dfb5f9f from 0 to 1
+  Normal  ScalingReplicaSet  10m   deployment-controller  Scaled down replica set rel-agentos-575dfb5f9f from 1 to 0
+  Normal  ScalingReplicaSet  10m   deployment-controller  Scaled up replica set rel-agentos-5d59c8cfb8 from 0 to 1
+  Normal  ScalingReplicaSet  10m   deployment-controller  Scaled down replica set rel-agentos-5d59c8cfb8 from 1 to 0
+  Normal  ScalingReplicaSet  10m   deployment-controller  Scaled up replica set rel-agentos-c796b8c9f from 0 to 1
+  Normal  ScalingReplicaSet  10m   deployment-controller  Scaled down replica set rel-agentos-bf64f5589 from 1 to 0
+```
+- rel-agentos pod describe:
+```
+Name:             rel-agentos-c796b8c9f-xg47s
+Namespace:        cognic-proofm85c
+Priority:         0
+Service Account:  rel-agentos
+Node:             cognic-proofm85c-control-plane/172.27.0.2
+Start Time:       Tue, 14 Jul 2026 05:41:02 +0500
+Labels:           app.kubernetes.io/instance=rel
+                  app.kubernetes.io/name=agentos
+                  pod-template-hash=c796b8c9f
+Annotations:      kubectl.kubernetes.io/restartedAt: 2026-07-14T05:41:02+05:00
+Status:           Running
+IP:               10.244.0.23
+IPs:
+  IP:           10.244.0.23
+Controlled By:  ReplicaSet/rel-agentos-c796b8c9f
+Init Containers:
+  broker-share-perms:
+    Container ID:  containerd://08ceb1273af31e0e9cf5d5712609efa2842dc5b1bbf06ad804e69aec61dc56f3
+    Image:         busybox:1.36
+    Image ID:      docker.io/library/import-2026-07-14@sha256:9e0210adc53886da123c7186c7cb2ec540965e535d7262a4f00ef8e7a1381a2a
+    Port:          <none>
+    Host Port:     <none>
+    Command:
+      sh
+      -c
+      chmod 1777 /var/lib/cognic-proof-m85c-broker && chgrp 65534 /var/run/docker.sock && chmod 0660 /var/run/docker.sock
+    State:          Terminated
+      Reason:       Completed
+      Exit Code:    0
+      Started:      Tue, 14 Jul 2026 05:41:02 +0500
+      Finished:     Tue, 14 Jul 2026 05:41:02 +0500
+    Ready:          True
+    Restart Count:  0
+    Environment:
+      COGNIC_ALLOW_EXTERNAL_LLM:         true
+      COGNIC_POLICY_MODE:                cloud_openai
+      COGNIC_ALLOWED_PROVIDERS:          openai
+      COGNIC_LITELLM_MASTER_KEY:         vault://secret/cognic/proof-m85c/litellm
+      COGNIC_CONVERSATION_CLAIM_TTL_S:   600
+      COGNIC_AGENT_RUN_TOKEN_BUDGET:     60000
+      COGNIC_AGENT_RUN_WALL_CLOCK_S:     300
+      COGNIC_APPROVAL_FOUR_EYES_TTL_S:   1800
+      COGNIC_APPROVAL_SINGLE_TTL_S:      1800
+      COGNIC_PROOF_M85C_OIDC_ISSUER:     https://cognic-proof-keycloak:8443/realms/proof-m85c
+      COGNIC_PROOF_M85C_OIDC_CA_BUNDLE:  /etc/proof-ca/proof-ca.pem
+    Mounts:
+      /var/lib/cognic-proof-m85c-broker from broker-share (rw)
+      /var/run/docker.sock from docker-sock (rw)
+Containers:
+  agentos:
+    Container ID:    containerd://62e90ba7a9ebea48ef08e25e840d5691bb6df10c42229e8e195ee0788814a2d8
+    Image:           cognic-agentos:proofm85c
+    Image ID:        sha256:29ce91fa33939c19e206b48dab14ad3eb1395c49c0bf16a423aaffff239de2d1
+    Port:            8443/TCP
+    Host Port:       0/TCP
+    SeccompProfile:  RuntimeDefault
+    State:           Running
+      Started:       Tue, 14 Jul 2026 05:41:03 +0500
+    Ready:           True
+    Restart Count:   0
+    Limits:
+      cpu:     2
+      memory:  2Gi
+    Requests:
+      cpu:      250m
+      memory:   512Mi
+    Liveness:   http-get https://:http/api/v1/healthz delay=0s timeout=5s period=15s #success=1 #failure=3
+    Readiness:  http-get https://:http/api/v1/readyz delay=0s timeout=5s period=10s #success=1 #failure=3
+    Startup:    http-get https://:http/api/v1/healthz delay=0s timeout=1s period=5s #success=1 #failure=30
+    Environment Variables from:
+      rel-agentos-config  ConfigMap  Optional: false
+    Environment:
+      TMPDIR:                            /var/lib/cognic-proof-m85c-broker
+      COGNIC_PORT:                       8443
+      COGNIC_DATABASE_URL:               <set to the key 'COGNIC_DATABASE_URL' in secret 'rel-agentos-secrets'>  Optional: false
+      COGNIC_VAULT_TOKEN:                <set to the key 'COGNIC_VAULT_TOKEN' in secret 'rel-agentos-secrets'>   Optional: false
+      COGNIC_ALLOW_EXTERNAL_LLM:         true
+      COGNIC_POLICY_MODE:                cloud_openai
+      COGNIC_ALLOWED_PROVIDERS:          openai
+      COGNIC_LITELLM_MASTER_KEY:         vault://secret/cognic/proof-m85c/litellm
+      COGNIC_CONVERSATION_CLAIM_TTL_S:   600
+      COGNIC_AGENT_RUN_TOKEN_BUDGET:     60000
+      COGNIC_AGENT_RUN_WALL_CLOCK_S:     300
+      COGNIC_APPROVAL_FOUR_EYES_TTL_S:   1800
+      COGNIC_APPROVAL_SINGLE_TTL_S:      1800
+      COGNIC_PROOF_M85C_OIDC_ISSUER:     https://cognic-proof-keycloak:8443/realms/proof-m85c
+      COGNIC_PROOF_M85C_OIDC_CA_BUNDLE:  /etc/proof-ca/proof-ca.pem
+    Mounts:
+      /app/infra/litellm from litellm-config (ro)
+      /etc/agentos-tls from agentos-tls (ro)
+      /etc/proof-ca from proof-ca (ro)
+      /run/cognic/query-context from query-context (ro)
+      /tmp from tmp (rw)
+      /var/lib/cognic-agentos/object-store from object-store (rw)
+      /var/lib/cognic-proof-m85c-broker from broker-share (rw)
+      /var/lib/cognic/model-artifacts from model-artifacts (rw)
+      /var/run/docker.sock from docker-sock (rw)
+Conditions:
+  Type                        Status
+  PodReadyToStartContainers   True
+  Initialized                 True
+  Ready                       True
+  ContainersReady             True
+  PodScheduled                True
+Volumes:
+  docker-sock:
+    Type:          HostPath (bare host directory volume)
+    Path:          /var/run/docker.sock
+    HostPathType:
+  broker-share:
+    Type:          HostPath (bare host directory volume)
+    Path:          /var/lib/cognic-proof-m85c-broker
+    HostPathType:  DirectoryOrCreate
+  query-context:
+    Type:        Secret (a volume populated by a Secret)
+    SecretName:  proof-m85c-query-context
+    Optional:    false
+  agentos-tls:
+    Type:        Secret (a volume populated by a Secret)
+    SecretName:  proof-m85c-agentos-tls
+    Optional:    false
+  proof-ca:
+    Type:        Secret (a volume populated by a Secret)
+    SecretName:  proof-m85c-ca
+    Optional:    false
+  litellm-config:
+    Type:      ConfigMap (a volume populated by a ConfigMap)
+    Name:      rel-agentos-litellm
+    Optional:  false
+  tmp:
+    Type:       EmptyDir (a temporary directory that shares a pod's lifetime)
+    Medium:
+    SizeLimit:  256Mi
+  object-store:
+    Type:       EmptyDir (a temporary directory that shares a pod's lifetime)
+    Medium:
+    SizeLimit:  5Gi
+  model-artifacts:
+    Type:        EmptyDir (a temporary directory that shares a pod's lifetime)
+    Medium:
+    SizeLimit:   5Gi
+QoS Class:       Burstable
+Node-Selectors:  <none>
+Tolerations:     node.kubernetes.io/not-ready:NoExecute op=Exists for 300s
+                 node.kubernetes.io/unreachable:NoExecute op=Exists for 300s
+Events:
+  Type     Reason     Age   From               Message
+  ----     ------     ----  ----               -------
+  Normal   Scheduled  10m   default-scheduler  Successfully assigned cognic-proofm85c/rel-agentos-c796b8c9f-xg47s to cognic-proofm85c-control-plane
+  Normal   Pulled     10m   kubelet            Container image "busybox:1.36" already present on machine and can be accessed by the pod
+  Normal   Created    10m   kubelet            Container created
+  Normal   Started    10m   kubelet            Container started
+  Normal   Pulled     10m   kubelet            Container image "cognic-agentos:proofm85c" already present on machine and can be accessed by the pod
+  Normal   Created    10m   kubelet            Container created
+  Normal   Started    10m   kubelet            Container started
+  Warning  Unhealthy  10m   kubelet            Startup probe failed: Get "https://10.244.0.23:8443/api/v1/healthz": dial tcp 10.244.0.23:8443: connect: connection refused
+```
+- rel-agentos logs (tail 220):
+```
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:43:22,969", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-b7835f6ed1e14e74b157e3a97d8109d6", "trace_id": "0091ea35644fd8592018176ef7eea995", "span_id": "af23f6f99fee1ec9", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 23.791, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:43:32,542", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-7981bd7c96ea47aab928f9dc502ee3c1", "trace_id": "4737748f87a8ec200f8c2252c0229852", "span_id": "82565f9cbac670f2", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.252, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:43:32,955", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-4e646d9ab4a14bb88a7a1b66afa29180", "trace_id": "3bdf8e56163b1bb69f49656d759f95e1", "span_id": "c8107146268a895d"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:43:32,966", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-4e646d9ab4a14bb88a7a1b66afa29180", "trace_id": "3bdf8e56163b1bb69f49656d759f95e1", "span_id": "c8107146268a895d"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:43:32,977", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-4e646d9ab4a14bb88a7a1b66afa29180", "trace_id": "3bdf8e56163b1bb69f49656d759f95e1", "span_id": "c8107146268a895d"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:43:32,977", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-4e646d9ab4a14bb88a7a1b66afa29180", "trace_id": "3bdf8e56163b1bb69f49656d759f95e1", "span_id": "c8107146268a895d", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 27.673, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:43:42,952", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-35d26898f74140d191410e15a0171575", "trace_id": "c3ac455a100b33a0e2a860120ed04c4c", "span_id": "3ce1e8da5bc72062"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:43:42,963", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-35d26898f74140d191410e15a0171575", "trace_id": "c3ac455a100b33a0e2a860120ed04c4c", "span_id": "3ce1e8da5bc72062"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:43:42,973", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-35d26898f74140d191410e15a0171575", "trace_id": "c3ac455a100b33a0e2a860120ed04c4c", "span_id": "3ce1e8da5bc72062"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:43:42,973", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-35d26898f74140d191410e15a0171575", "trace_id": "c3ac455a100b33a0e2a860120ed04c4c", "span_id": "3ce1e8da5bc72062", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 26.681, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:43:47,538", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-31b3dfd28a2e416ab09967017932c566", "trace_id": "6b9b955153648d4d1e251b6a5bdce98e", "span_id": "47e837585a2ef284", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.158, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:43:52,952", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-90ba8b13ce51499183fa2c2594665a59", "trace_id": "66eac0febe81705851133652a731c360", "span_id": "144e58383dc8de43"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:43:52,963", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-90ba8b13ce51499183fa2c2594665a59", "trace_id": "66eac0febe81705851133652a731c360", "span_id": "144e58383dc8de43"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:43:52,973", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-90ba8b13ce51499183fa2c2594665a59", "trace_id": "66eac0febe81705851133652a731c360", "span_id": "144e58383dc8de43"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:43:52,974", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-90ba8b13ce51499183fa2c2594665a59", "trace_id": "66eac0febe81705851133652a731c360", "span_id": "144e58383dc8de43", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 26.088, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:44:02,539", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-ec3f0cd90f704749bd28c55a7acd991d", "trace_id": "ff3022bd6d7bb0c8bb8a78e407279f56", "span_id": "bb369bf550ff36fe", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.227, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:44:02,951", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-bce64038bea2420f9f172f22d5c638d5", "trace_id": "191a5535e921b1d4a491d2cdfbba3842", "span_id": "abf92587148bf589"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:44:02,962", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-bce64038bea2420f9f172f22d5c638d5", "trace_id": "191a5535e921b1d4a491d2cdfbba3842", "span_id": "abf92587148bf589"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:44:02,972", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-bce64038bea2420f9f172f22d5c638d5", "trace_id": "191a5535e921b1d4a491d2cdfbba3842", "span_id": "abf92587148bf589"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:44:02,972", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-bce64038bea2420f9f172f22d5c638d5", "trace_id": "191a5535e921b1d4a491d2cdfbba3842", "span_id": "abf92587148bf589", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 25.621, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:44:12,954", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-fe25d709e0874cba8aa5648ac1469d6e", "trace_id": "dc2023475f79c35cc35f3fb3e4c0ab52", "span_id": "7ac7020ff05af18b"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:44:12,967", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-fe25d709e0874cba8aa5648ac1469d6e", "trace_id": "dc2023475f79c35cc35f3fb3e4c0ab52", "span_id": "7ac7020ff05af18b"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:44:12,978", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-fe25d709e0874cba8aa5648ac1469d6e", "trace_id": "dc2023475f79c35cc35f3fb3e4c0ab52", "span_id": "7ac7020ff05af18b"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:44:12,978", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-fe25d709e0874cba8aa5648ac1469d6e", "trace_id": "dc2023475f79c35cc35f3fb3e4c0ab52", "span_id": "7ac7020ff05af18b", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 29.042, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:44:17,536", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-4895a66fb6b448d5a6065dace322e53d", "trace_id": "c0791230022259be42d59670b320499d", "span_id": "9f445bf96196cb57", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.151, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:44:22,945", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-1853ef52f7064a78965aacda22128dd8", "trace_id": "355968ea17168d35a9a18c6454f5db8b", "span_id": "243207687096f18e"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:44:22,955", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-1853ef52f7064a78965aacda22128dd8", "trace_id": "355968ea17168d35a9a18c6454f5db8b", "span_id": "243207687096f18e"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:44:22,966", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-1853ef52f7064a78965aacda22128dd8", "trace_id": "355968ea17168d35a9a18c6454f5db8b", "span_id": "243207687096f18e"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:44:22,966", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-1853ef52f7064a78965aacda22128dd8", "trace_id": "355968ea17168d35a9a18c6454f5db8b", "span_id": "243207687096f18e", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 24.211, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:44:32,541", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-0f8754cf0f3e491999f2a9344d19c121", "trace_id": "aa4ddb9990b03e4795ff093ca937b3c4", "span_id": "ab23ff65702603ae", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.404, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:44:32,952", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-cef7ff67f02542369c1f4a77694ebe72", "trace_id": "53c8dc5477e1d6abc6d3859606ff9de4", "span_id": "26b292e209511624"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:44:32,964", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-cef7ff67f02542369c1f4a77694ebe72", "trace_id": "53c8dc5477e1d6abc6d3859606ff9de4", "span_id": "26b292e209511624"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:44:32,977", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-cef7ff67f02542369c1f4a77694ebe72", "trace_id": "53c8dc5477e1d6abc6d3859606ff9de4", "span_id": "26b292e209511624"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:44:32,977", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-cef7ff67f02542369c1f4a77694ebe72", "trace_id": "53c8dc5477e1d6abc6d3859606ff9de4", "span_id": "26b292e209511624", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 32.255, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:44:42,943", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-daee06d5a8eb4f779d62b6cb24343e13", "trace_id": "4e4503c7ed558989e1dfd5e3f6a72114", "span_id": "05c84bf86444e19b"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:44:42,953", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-daee06d5a8eb4f779d62b6cb24343e13", "trace_id": "4e4503c7ed558989e1dfd5e3f6a72114", "span_id": "05c84bf86444e19b"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:44:42,963", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-daee06d5a8eb4f779d62b6cb24343e13", "trace_id": "4e4503c7ed558989e1dfd5e3f6a72114", "span_id": "05c84bf86444e19b"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:44:42,963", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-daee06d5a8eb4f779d62b6cb24343e13", "trace_id": "4e4503c7ed558989e1dfd5e3f6a72114", "span_id": "05c84bf86444e19b", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 23.208, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:44:47,534", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-8dfdfbd9c83b49ca8119e8698b766d0c", "trace_id": "27d7fffaa72e57e11f8d9b1a38452788", "span_id": "2264043dd419c1c5", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.162, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:44:52,945", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-e9f19a7fb6984130a3c15e1fedfb48a0", "trace_id": "96909889133a29e73a53a45ef09676c6", "span_id": "4c0ad12eebce22c4"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:44:52,957", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-e9f19a7fb6984130a3c15e1fedfb48a0", "trace_id": "96909889133a29e73a53a45ef09676c6", "span_id": "4c0ad12eebce22c4"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:44:52,967", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-e9f19a7fb6984130a3c15e1fedfb48a0", "trace_id": "96909889133a29e73a53a45ef09676c6", "span_id": "4c0ad12eebce22c4"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:44:52,968", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-e9f19a7fb6984130a3c15e1fedfb48a0", "trace_id": "96909889133a29e73a53a45ef09676c6", "span_id": "4c0ad12eebce22c4", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 26.634, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:45:02,538", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-c756ebc7bd2f485ebcec4bfc286d7da0", "trace_id": "e7fe795ce89851801066c18cc51bb86f", "span_id": "e6f83482550ae3e3", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.409, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:45:02,952", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-5a93df710c49466cbd6604396f8eeef8", "trace_id": "842e4a034a29ca76dcb8e0764195f11f", "span_id": "9056d3fbdb2c3c2b"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:45:02,965", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-5a93df710c49466cbd6604396f8eeef8", "trace_id": "842e4a034a29ca76dcb8e0764195f11f", "span_id": "9056d3fbdb2c3c2b"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:45:02,977", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-5a93df710c49466cbd6604396f8eeef8", "trace_id": "842e4a034a29ca76dcb8e0764195f11f", "span_id": "9056d3fbdb2c3c2b"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:45:02,977", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-5a93df710c49466cbd6604396f8eeef8", "trace_id": "842e4a034a29ca76dcb8e0764195f11f", "span_id": "9056d3fbdb2c3c2b", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 33.177, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:45:12,942", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-2e9eb9018c504380af1472229f8b6dad", "trace_id": "42382e5926b743d408f9116edd379068", "span_id": "44002825e42964d4"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:45:12,953", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-2e9eb9018c504380af1472229f8b6dad", "trace_id": "42382e5926b743d408f9116edd379068", "span_id": "44002825e42964d4"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:45:12,963", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-2e9eb9018c504380af1472229f8b6dad", "trace_id": "42382e5926b743d408f9116edd379068", "span_id": "44002825e42964d4"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:45:12,964", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-2e9eb9018c504380af1472229f8b6dad", "trace_id": "42382e5926b743d408f9116edd379068", "span_id": "44002825e42964d4", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 25.073, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:45:17,535", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-f3c64c23bc2846c491ecf30b3f0d20e4", "trace_id": "08fea1a44e6a9a40acb7e48fe30f3199", "span_id": "47083209764e4c9b", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.237, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:45:22,944", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-d97b28c8454b4ae395b9f4df3e8d5bd5", "trace_id": "994a4e3be8848ccd96746bd920d3c1b9", "span_id": "9694ad33389792ef"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:45:22,957", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-d97b28c8454b4ae395b9f4df3e8d5bd5", "trace_id": "994a4e3be8848ccd96746bd920d3c1b9", "span_id": "9694ad33389792ef"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:45:22,968", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-d97b28c8454b4ae395b9f4df3e8d5bd5", "trace_id": "994a4e3be8848ccd96746bd920d3c1b9", "span_id": "9694ad33389792ef"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:45:22,969", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-d97b28c8454b4ae395b9f4df3e8d5bd5", "trace_id": "994a4e3be8848ccd96746bd920d3c1b9", "span_id": "9694ad33389792ef", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 29.378, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:45:32,535", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-a9882c5d169c4329b9ad95fa255f5e93", "trace_id": "a30070f748c03233ac8dd455dc3477c3", "span_id": "e40483ad56bb2aab", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.206, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:45:32,944", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-882738e894c74cd2bc0c51f146305206", "trace_id": "1761fb27274784eafdc49038f7d1bf14", "span_id": "72e8067bc21a2d55"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:45:32,956", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-882738e894c74cd2bc0c51f146305206", "trace_id": "1761fb27274784eafdc49038f7d1bf14", "span_id": "72e8067bc21a2d55"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:45:32,966", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-882738e894c74cd2bc0c51f146305206", "trace_id": "1761fb27274784eafdc49038f7d1bf14", "span_id": "72e8067bc21a2d55"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:45:32,967", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-882738e894c74cd2bc0c51f146305206", "trace_id": "1761fb27274784eafdc49038f7d1bf14", "span_id": "72e8067bc21a2d55", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 27.488, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:45:42,946", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-9147ab8f52ca4cac86dac5b954dd1af0", "trace_id": "84c5391ae1a99fc1b467ee483ef23916", "span_id": "e452b002b2baaf8a"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:45:42,958", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-9147ab8f52ca4cac86dac5b954dd1af0", "trace_id": "84c5391ae1a99fc1b467ee483ef23916", "span_id": "e452b002b2baaf8a"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:45:42,967", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-9147ab8f52ca4cac86dac5b954dd1af0", "trace_id": "84c5391ae1a99fc1b467ee483ef23916", "span_id": "e452b002b2baaf8a"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:45:42,968", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-9147ab8f52ca4cac86dac5b954dd1af0", "trace_id": "84c5391ae1a99fc1b467ee483ef23916", "span_id": "e452b002b2baaf8a", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 26.247, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:45:47,536", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-ab142bc36cac416a94bee020ae1fc901", "trace_id": "ed08981eda1b5e4c525e5112d8d12952", "span_id": "e19383ae1d1daaec", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.278, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:45:52,946", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-7e1420995e784c8d98cca7e1aaed3470", "trace_id": "02a8a816bff72b2c7fb4ad6b0e7e7cd4", "span_id": "7f59f199d99f27a7"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:45:52,957", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-7e1420995e784c8d98cca7e1aaed3470", "trace_id": "02a8a816bff72b2c7fb4ad6b0e7e7cd4", "span_id": "7f59f199d99f27a7"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:45:52,967", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-7e1420995e784c8d98cca7e1aaed3470", "trace_id": "02a8a816bff72b2c7fb4ad6b0e7e7cd4", "span_id": "7f59f199d99f27a7"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:45:52,968", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-7e1420995e784c8d98cca7e1aaed3470", "trace_id": "02a8a816bff72b2c7fb4ad6b0e7e7cd4", "span_id": "7f59f199d99f27a7", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 26.774, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:46:02,535", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-07212bd50f7f45daa497d085dd35f11c", "trace_id": "3fbee29ecd8284d1fc8f4cbc94e348de", "span_id": "d68abb8e67eed384", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.298, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:46:02,948", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-0b20cc132c8843b89d47ab1e5b54c5a1", "trace_id": "d743207dd7180909896a14438fc7c495", "span_id": "81717806c2a39c5c"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:46:02,960", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-0b20cc132c8843b89d47ab1e5b54c5a1", "trace_id": "d743207dd7180909896a14438fc7c495", "span_id": "81717806c2a39c5c"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:46:02,972", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-0b20cc132c8843b89d47ab1e5b54c5a1", "trace_id": "d743207dd7180909896a14438fc7c495", "span_id": "81717806c2a39c5c"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:46:02,973", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-0b20cc132c8843b89d47ab1e5b54c5a1", "trace_id": "d743207dd7180909896a14438fc7c495", "span_id": "81717806c2a39c5c", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 31.666, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:46:12,948", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-99316d229ed8436ba3344d4615ad6379", "trace_id": "05aa5ffbb87bbc294f91228a19164434", "span_id": "9ee60e6c2534c420"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:46:12,959", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-99316d229ed8436ba3344d4615ad6379", "trace_id": "05aa5ffbb87bbc294f91228a19164434", "span_id": "9ee60e6c2534c420"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:46:12,969", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-99316d229ed8436ba3344d4615ad6379", "trace_id": "05aa5ffbb87bbc294f91228a19164434", "span_id": "9ee60e6c2534c420"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:46:12,970", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-99316d229ed8436ba3344d4615ad6379", "trace_id": "05aa5ffbb87bbc294f91228a19164434", "span_id": "9ee60e6c2534c420", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 27.641, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:46:17,533", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-f52ae6fb5f624634a301e31c28b11ddd", "trace_id": "c03a10650dac944fd4ef0a05082eed77", "span_id": "61cd48d561cf10f4", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.341, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:46:22,938", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-c7079dc3f1344326a076962ed3039c79", "trace_id": "c3e28fe164212998614015dc0d0d7d66", "span_id": "224acdad90956653"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:46:22,950", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-c7079dc3f1344326a076962ed3039c79", "trace_id": "c3e28fe164212998614015dc0d0d7d66", "span_id": "224acdad90956653"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:46:22,961", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-c7079dc3f1344326a076962ed3039c79", "trace_id": "c3e28fe164212998614015dc0d0d7d66", "span_id": "224acdad90956653"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:46:22,962", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-c7079dc3f1344326a076962ed3039c79", "trace_id": "c3e28fe164212998614015dc0d0d7d66", "span_id": "224acdad90956653", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 26.783, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:46:32,529", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-8ad57f8e127e4f5cab15116453bdfc8b", "trace_id": "120185d83340bd6823dab99bd9b52cdb", "span_id": "de509ca69285bb5b", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.244, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:46:32,940", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-b877406ce97247e4bb66a2dbd58b25e3", "trace_id": "4cf3b05ad3d590b2c49f52ff013f19ba", "span_id": "1fd3624ecaf84fbd"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:46:32,952", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-b877406ce97247e4bb66a2dbd58b25e3", "trace_id": "4cf3b05ad3d590b2c49f52ff013f19ba", "span_id": "1fd3624ecaf84fbd"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:46:32,963", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-b877406ce97247e4bb66a2dbd58b25e3", "trace_id": "4cf3b05ad3d590b2c49f52ff013f19ba", "span_id": "1fd3624ecaf84fbd"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:46:32,963", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-b877406ce97247e4bb66a2dbd58b25e3", "trace_id": "4cf3b05ad3d590b2c49f52ff013f19ba", "span_id": "1fd3624ecaf84fbd", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 28.137, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:46:42,945", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-388df5d4be33479e957ad9bc56a2580e", "trace_id": "b82cf8b32301e34d95fc2fde09f9b596", "span_id": "243203dc52a4266a"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:46:42,956", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-388df5d4be33479e957ad9bc56a2580e", "trace_id": "b82cf8b32301e34d95fc2fde09f9b596", "span_id": "243203dc52a4266a"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:46:42,966", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-388df5d4be33479e957ad9bc56a2580e", "trace_id": "b82cf8b32301e34d95fc2fde09f9b596", "span_id": "243203dc52a4266a"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:46:42,967", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-388df5d4be33479e957ad9bc56a2580e", "trace_id": "b82cf8b32301e34d95fc2fde09f9b596", "span_id": "243203dc52a4266a", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 28.837, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:46:47,532", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-799978142bc54a3483406f0a7bfa0c18", "trace_id": "cd13170e69de026dbafb46eac4183c67", "span_id": "6b72fbfffdf4bf10", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.212, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:46:52,940", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-4c773269b44a40b3b23e7faf8337ac0a", "trace_id": "baa0e05fc30a798d114713febf27dbe3", "span_id": "eb7d211d1e6a82e5"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:46:52,952", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-4c773269b44a40b3b23e7faf8337ac0a", "trace_id": "baa0e05fc30a798d114713febf27dbe3", "span_id": "eb7d211d1e6a82e5"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:46:52,963", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-4c773269b44a40b3b23e7faf8337ac0a", "trace_id": "baa0e05fc30a798d114713febf27dbe3", "span_id": "eb7d211d1e6a82e5"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:46:52,963", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-4c773269b44a40b3b23e7faf8337ac0a", "trace_id": "baa0e05fc30a798d114713febf27dbe3", "span_id": "eb7d211d1e6a82e5", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 27.676, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:47:02,529", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-896e0d04f38943f7802d9ab01232737e", "trace_id": "bd78af8a5e6dd91f9877c8d9271cf055", "span_id": "12e22159194cc385", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.212, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:47:02,941", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-b410ae7f1a85408bb135ea7f519b6b5d", "trace_id": "3e5bc00c2c802cf613d1f153b7ebabb3", "span_id": "c699abc487155fc4"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:47:02,954", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-b410ae7f1a85408bb135ea7f519b6b5d", "trace_id": "3e5bc00c2c802cf613d1f153b7ebabb3", "span_id": "c699abc487155fc4"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:47:02,966", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-b410ae7f1a85408bb135ea7f519b6b5d", "trace_id": "3e5bc00c2c802cf613d1f153b7ebabb3", "span_id": "c699abc487155fc4"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:47:02,967", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-b410ae7f1a85408bb135ea7f519b6b5d", "trace_id": "3e5bc00c2c802cf613d1f153b7ebabb3", "span_id": "c699abc487155fc4", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 32.346, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:47:12,943", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-a3a7226b5df146a29445129161417af1", "trace_id": "8fc9d4c7a04290c5c939ea784aca6290", "span_id": "079f947eb74140cc"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:47:12,958", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-a3a7226b5df146a29445129161417af1", "trace_id": "8fc9d4c7a04290c5c939ea784aca6290", "span_id": "079f947eb74140cc"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:47:12,971", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-a3a7226b5df146a29445129161417af1", "trace_id": "8fc9d4c7a04290c5c939ea784aca6290", "span_id": "079f947eb74140cc"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:47:12,971", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-a3a7226b5df146a29445129161417af1", "trace_id": "8fc9d4c7a04290c5c939ea784aca6290", "span_id": "079f947eb74140cc", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 36.072, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:47:17,530", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-f3af73640c1b46baa78ac5ebcf61dbf2", "trace_id": "956614be76f1a9dda2b1dddb36a4f9a9", "span_id": "a02c8eb06dbe8f0a", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.302, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:47:22,934", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-1bd8c8dbfdfa4007b8a8d12591467ed4", "trace_id": "b2c102df0638aecd24ece76662d72eda", "span_id": "8e9967d5c3416114"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:47:22,945", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-1bd8c8dbfdfa4007b8a8d12591467ed4", "trace_id": "b2c102df0638aecd24ece76662d72eda", "span_id": "8e9967d5c3416114"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:47:22,955", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-1bd8c8dbfdfa4007b8a8d12591467ed4", "trace_id": "b2c102df0638aecd24ece76662d72eda", "span_id": "8e9967d5c3416114"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:47:22,955", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-1bd8c8dbfdfa4007b8a8d12591467ed4", "trace_id": "b2c102df0638aecd24ece76662d72eda", "span_id": "8e9967d5c3416114", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 23.818, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:47:32,526", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-4eb5f85228a243bd9daa83917103e811", "trace_id": "32428d255356510a2a189e9cda74ce88", "span_id": "a1650ab4e7a55453", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.199, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:47:32,936", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-5b917736f5b544f4b6217fdb31344d2d", "trace_id": "1017215f0e5b20822c597b0365fd729a", "span_id": "41ab9788234386b1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:47:32,947", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-5b917736f5b544f4b6217fdb31344d2d", "trace_id": "1017215f0e5b20822c597b0365fd729a", "span_id": "41ab9788234386b1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:47:32,958", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-5b917736f5b544f4b6217fdb31344d2d", "trace_id": "1017215f0e5b20822c597b0365fd729a", "span_id": "41ab9788234386b1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:47:32,958", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-5b917736f5b544f4b6217fdb31344d2d", "trace_id": "1017215f0e5b20822c597b0365fd729a", "span_id": "41ab9788234386b1", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 26.314, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:47:42,942", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-80b407d39572426d9d7dccfced6a8894", "trace_id": "ee5b299256b1356ccfe75d39a650a23b", "span_id": "cf7e070fcc6564ba"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:47:42,954", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-80b407d39572426d9d7dccfced6a8894", "trace_id": "ee5b299256b1356ccfe75d39a650a23b", "span_id": "cf7e070fcc6564ba"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:47:42,966", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-80b407d39572426d9d7dccfced6a8894", "trace_id": "ee5b299256b1356ccfe75d39a650a23b", "span_id": "cf7e070fcc6564ba"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:47:42,966", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-80b407d39572426d9d7dccfced6a8894", "trace_id": "ee5b299256b1356ccfe75d39a650a23b", "span_id": "cf7e070fcc6564ba", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 30.611, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:47:47,528", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-a779e3566a7948c8a733da575e06592e", "trace_id": "cbc97fc5707fcca0e7e6502365995b22", "span_id": "941483a1e6a427eb", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.252, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:47:52,936", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-89540fe2e0fa49a89a882a2f09d32272", "trace_id": "26698e2de38ebc293946adac35a430f0", "span_id": "4f3190c31c87ccd7"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:47:52,948", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-89540fe2e0fa49a89a882a2f09d32272", "trace_id": "26698e2de38ebc293946adac35a430f0", "span_id": "4f3190c31c87ccd7"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:47:52,958", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-89540fe2e0fa49a89a882a2f09d32272", "trace_id": "26698e2de38ebc293946adac35a430f0", "span_id": "4f3190c31c87ccd7"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:47:52,958", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-89540fe2e0fa49a89a882a2f09d32272", "trace_id": "26698e2de38ebc293946adac35a430f0", "span_id": "4f3190c31c87ccd7", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 26.441, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:48:02,523", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-8fef90ea262a400aabce46c0d66f9b57", "trace_id": "f3a536871ba5f03195e662f95c0e4855", "span_id": "3bed49e1677b8b65", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.426, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:48:02,936", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-f6dca74a7f6b42f5a7b574575ef9750b", "trace_id": "db54b5a1c8f82b1608306b45f899be1a", "span_id": "3a529e2cb9b8b633"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:48:02,947", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-f6dca74a7f6b42f5a7b574575ef9750b", "trace_id": "db54b5a1c8f82b1608306b45f899be1a", "span_id": "3a529e2cb9b8b633"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:48:02,958", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-f6dca74a7f6b42f5a7b574575ef9750b", "trace_id": "db54b5a1c8f82b1608306b45f899be1a", "span_id": "3a529e2cb9b8b633"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:48:02,958", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-f6dca74a7f6b42f5a7b574575ef9750b", "trace_id": "db54b5a1c8f82b1608306b45f899be1a", "span_id": "3a529e2cb9b8b633", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 27.316, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:48:12,936", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-b7712dd6f5e74c1aafc31367c19bfce8", "trace_id": "499765b50056078e5aa8d6cfd0793c6d", "span_id": "dcb2eb98c9b4e381"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:48:12,947", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-b7712dd6f5e74c1aafc31367c19bfce8", "trace_id": "499765b50056078e5aa8d6cfd0793c6d", "span_id": "dcb2eb98c9b4e381"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:48:12,958", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-b7712dd6f5e74c1aafc31367c19bfce8", "trace_id": "499765b50056078e5aa8d6cfd0793c6d", "span_id": "dcb2eb98c9b4e381"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:48:12,959", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-b7712dd6f5e74c1aafc31367c19bfce8", "trace_id": "499765b50056078e5aa8d6cfd0793c6d", "span_id": "dcb2eb98c9b4e381", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 28.278, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:48:17,523", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-21a79fa397174a8fb9d263eae88cc9eb", "trace_id": "41aa9461e9f2fc9af0ef5f500d653614", "span_id": "de53df2618fd5a88", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.212, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:48:22,931", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-4b039c0e67cb424fa8ac98a5be200f5a", "trace_id": "e5e26748b82dcb3e3376d388d925025e", "span_id": "430267232c96931d"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:48:22,942", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-4b039c0e67cb424fa8ac98a5be200f5a", "trace_id": "e5e26748b82dcb3e3376d388d925025e", "span_id": "430267232c96931d"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:48:22,952", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-4b039c0e67cb424fa8ac98a5be200f5a", "trace_id": "e5e26748b82dcb3e3376d388d925025e", "span_id": "430267232c96931d"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:48:22,952", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-4b039c0e67cb424fa8ac98a5be200f5a", "trace_id": "e5e26748b82dcb3e3376d388d925025e", "span_id": "430267232c96931d", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 24.336, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:48:32,522", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-e74f70b3193d46a599e97daee618687a", "trace_id": "464b46697850560bd5f19b88369f3fc8", "span_id": "f96c1edabc10b1ce", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.19, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:48:32,936", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-fb78ec0702c344fd9e0cc4967ce75f9a", "trace_id": "65957bbfe34a3f2241499eb3d16dbc07", "span_id": "f56295d8800da80b"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:48:32,949", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-fb78ec0702c344fd9e0cc4967ce75f9a", "trace_id": "65957bbfe34a3f2241499eb3d16dbc07", "span_id": "f56295d8800da80b"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:48:32,961", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-fb78ec0702c344fd9e0cc4967ce75f9a", "trace_id": "65957bbfe34a3f2241499eb3d16dbc07", "span_id": "f56295d8800da80b"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:48:32,962", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-fb78ec0702c344fd9e0cc4967ce75f9a", "trace_id": "65957bbfe34a3f2241499eb3d16dbc07", "span_id": "f56295d8800da80b", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 31.995, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:48:42,937", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-df7e94a650fb4cc0ab8b15505ff94fe2", "trace_id": "d4c27ff51b58c0bd04400f6f0619354a", "span_id": "a60ce8227f44747f"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:48:42,948", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-df7e94a650fb4cc0ab8b15505ff94fe2", "trace_id": "d4c27ff51b58c0bd04400f6f0619354a", "span_id": "a60ce8227f44747f"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:48:42,958", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-df7e94a650fb4cc0ab8b15505ff94fe2", "trace_id": "d4c27ff51b58c0bd04400f6f0619354a", "span_id": "a60ce8227f44747f"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:48:42,959", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-df7e94a650fb4cc0ab8b15505ff94fe2", "trace_id": "d4c27ff51b58c0bd04400f6f0619354a", "span_id": "a60ce8227f44747f", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 27.837, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:48:47,524", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-59cbeee1b8b042d8bd526def43ca80ad", "trace_id": "d6e2ed785c58c4b8b206339bb30942bb", "span_id": "15dddc72f725572a", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.248, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:48:52,933", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-2292b4116d7944a28034cf5044c6bbed", "trace_id": "03d48fe3f59acb2a9607cd1d6d05f5d9", "span_id": "d46b502afada9026"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:48:52,945", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-2292b4116d7944a28034cf5044c6bbed", "trace_id": "03d48fe3f59acb2a9607cd1d6d05f5d9", "span_id": "d46b502afada9026"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:48:52,955", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-2292b4116d7944a28034cf5044c6bbed", "trace_id": "03d48fe3f59acb2a9607cd1d6d05f5d9", "span_id": "d46b502afada9026"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:48:52,955", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-2292b4116d7944a28034cf5044c6bbed", "trace_id": "03d48fe3f59acb2a9607cd1d6d05f5d9", "span_id": "d46b502afada9026", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 26.52, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:49:02,521", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-3c1cfbcfe99c4377b5c1522efc72353e", "trace_id": "0a74fa1286ceb17b9fbafcbbba3e98d0", "span_id": "0b94ae03e9159bf6", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.202, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:49:02,934", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-4508e13fcae044d69f0b46a779f3d710", "trace_id": "89894ba65107ded691244f60eb7d7662", "span_id": "3f694acb94ed23be"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:49:02,945", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-4508e13fcae044d69f0b46a779f3d710", "trace_id": "89894ba65107ded691244f60eb7d7662", "span_id": "3f694acb94ed23be"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:49:02,956", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-4508e13fcae044d69f0b46a779f3d710", "trace_id": "89894ba65107ded691244f60eb7d7662", "span_id": "3f694acb94ed23be"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:49:02,957", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-4508e13fcae044d69f0b46a779f3d710", "trace_id": "89894ba65107ded691244f60eb7d7662", "span_id": "3f694acb94ed23be", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 26.162, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:49:12,932", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-7ad0149006454d42a87ee2736fe1b949", "trace_id": "7cf6df31c1e073679704f4a2efa5e41d", "span_id": "fb43e9b9531ba4e1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:49:12,944", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-7ad0149006454d42a87ee2736fe1b949", "trace_id": "7cf6df31c1e073679704f4a2efa5e41d", "span_id": "fb43e9b9531ba4e1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:49:12,955", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-7ad0149006454d42a87ee2736fe1b949", "trace_id": "7cf6df31c1e073679704f4a2efa5e41d", "span_id": "fb43e9b9531ba4e1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:49:12,956", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-7ad0149006454d42a87ee2736fe1b949", "trace_id": "7cf6df31c1e073679704f4a2efa5e41d", "span_id": "fb43e9b9531ba4e1", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 28.24, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:49:17,521", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-0d781b2ce5fd447b82cb41fddd3076ca", "trace_id": "42d4b1e4bc1f815880bf2fa2ec29a5aa", "span_id": "1b3b170b1be46c3f", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.19, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:49:22,928", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-ea36e1121ee0416fbae3b14d7928ef06", "trace_id": "6b1754f1e994557e2caa843477345765", "span_id": "3c8db0e865664d22"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:49:22,941", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-ea36e1121ee0416fbae3b14d7928ef06", "trace_id": "6b1754f1e994557e2caa843477345765", "span_id": "3c8db0e865664d22"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:49:22,951", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-ea36e1121ee0416fbae3b14d7928ef06", "trace_id": "6b1754f1e994557e2caa843477345765", "span_id": "3c8db0e865664d22"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:49:22,952", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-ea36e1121ee0416fbae3b14d7928ef06", "trace_id": "6b1754f1e994557e2caa843477345765", "span_id": "3c8db0e865664d22", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 26.923, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:49:32,524", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-74a990946fb3445996259d5803d13c62", "trace_id": "a074836513f56c79020297c67aa569d7", "span_id": "4aa5683f071bb030", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.201, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:49:32,934", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-799f3fc78404416fb28947dd6963d0d7", "trace_id": "6563a5a78fd2ee2e05a459d1d21e8841", "span_id": "c50af397ec73c4b7"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:49:32,945", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-799f3fc78404416fb28947dd6963d0d7", "trace_id": "6563a5a78fd2ee2e05a459d1d21e8841", "span_id": "c50af397ec73c4b7"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:49:32,956", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-799f3fc78404416fb28947dd6963d0d7", "trace_id": "6563a5a78fd2ee2e05a459d1d21e8841", "span_id": "c50af397ec73c4b7"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:49:32,956", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-799f3fc78404416fb28947dd6963d0d7", "trace_id": "6563a5a78fd2ee2e05a459d1d21e8841", "span_id": "c50af397ec73c4b7", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 28.84, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:49:42,926", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-c20117c5d9264d01b489da436d202824", "trace_id": "90cba92ac800127b7475f85741540a27", "span_id": "918e7d80a4142c37"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:49:42,936", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-c20117c5d9264d01b489da436d202824", "trace_id": "90cba92ac800127b7475f85741540a27", "span_id": "918e7d80a4142c37"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:49:42,946", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-c20117c5d9264d01b489da436d202824", "trace_id": "90cba92ac800127b7475f85741540a27", "span_id": "918e7d80a4142c37"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:49:42,946", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-c20117c5d9264d01b489da436d202824", "trace_id": "90cba92ac800127b7475f85741540a27", "span_id": "918e7d80a4142c37", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 23.57, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:49:47,520", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-58908094700040a19f382e6908605f88", "trace_id": "38bc86a8a05137398d8fe3893c58ab33", "span_id": "d75998710c144964", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.203, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:49:52,931", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-86d52a176f8f4460be54fcf626518312", "trace_id": "b0843716375d4f5bad1231f2a71928c5", "span_id": "ef69fa01d5fca2e9"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:49:52,941", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-86d52a176f8f4460be54fcf626518312", "trace_id": "b0843716375d4f5bad1231f2a71928c5", "span_id": "ef69fa01d5fca2e9"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:49:52,951", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-86d52a176f8f4460be54fcf626518312", "trace_id": "b0843716375d4f5bad1231f2a71928c5", "span_id": "ef69fa01d5fca2e9"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:49:52,952", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-86d52a176f8f4460be54fcf626518312", "trace_id": "b0843716375d4f5bad1231f2a71928c5", "span_id": "ef69fa01d5fca2e9", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 26.243, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:50:02,518", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-e9837aa709a24c1eb55277950746b508", "trace_id": "17e47705865e7824ba22d57ce06f5627", "span_id": "ef8194e657cc7f50", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.314, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:50:02,932", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-5d62ccd3543c4e5cbcd20d1db86fbfd4", "trace_id": "961300faeee47bbfe1594119b9ccdeba", "span_id": "e8363020eb0e8e61"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:50:02,945", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-5d62ccd3543c4e5cbcd20d1db86fbfd4", "trace_id": "961300faeee47bbfe1594119b9ccdeba", "span_id": "e8363020eb0e8e61"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:50:02,957", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-5d62ccd3543c4e5cbcd20d1db86fbfd4", "trace_id": "961300faeee47bbfe1594119b9ccdeba", "span_id": "e8363020eb0e8e61"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:50:02,958", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-5d62ccd3543c4e5cbcd20d1db86fbfd4", "trace_id": "961300faeee47bbfe1594119b9ccdeba", "span_id": "e8363020eb0e8e61", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 32.881, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:50:12,929", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-ef7d2a2cf4c646528f5406f9cc4a9305", "trace_id": "7ce0309fd9324f9f74dd8782b5debcdf", "span_id": "68c0ea5d1f20a4e4"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:50:12,941", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-ef7d2a2cf4c646528f5406f9cc4a9305", "trace_id": "7ce0309fd9324f9f74dd8782b5debcdf", "span_id": "68c0ea5d1f20a4e4"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:50:12,952", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-ef7d2a2cf4c646528f5406f9cc4a9305", "trace_id": "7ce0309fd9324f9f74dd8782b5debcdf", "span_id": "68c0ea5d1f20a4e4"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:50:12,952", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-ef7d2a2cf4c646528f5406f9cc4a9305", "trace_id": "7ce0309fd9324f9f74dd8782b5debcdf", "span_id": "68c0ea5d1f20a4e4", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 27.754, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:50:17,518", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-2fb959ed073f4205aa532e47466a6b54", "trace_id": "dd329204a6f0d741d13e0004a61ec97e", "span_id": "4905de1fbbe85b6e", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.219, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:50:22,925", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-45d8ba112f3c43159b9f7b30dd7997c0", "trace_id": "e06b7dbf4ea79bb03285ddc2551eb352", "span_id": "7e3975c4367758ce"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:50:22,938", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-45d8ba112f3c43159b9f7b30dd7997c0", "trace_id": "e06b7dbf4ea79bb03285ddc2551eb352", "span_id": "7e3975c4367758ce"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:50:22,950", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-45d8ba112f3c43159b9f7b30dd7997c0", "trace_id": "e06b7dbf4ea79bb03285ddc2551eb352", "span_id": "7e3975c4367758ce"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:50:22,951", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-45d8ba112f3c43159b9f7b30dd7997c0", "trace_id": "e06b7dbf4ea79bb03285ddc2551eb352", "span_id": "7e3975c4367758ce", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 29.458, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:50:32,519", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-d9c38e139205492496210f46ff502b22", "trace_id": "61252d8c73b9be701636e75931d00dc4", "span_id": "cf7eef642186e1c4", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.465, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:50:32,931", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-022124c41bb7477e945b9155b8c56062", "trace_id": "7cd58a7ee27aab6685945031c7690987", "span_id": "894bde6cbf118fae"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:50:32,942", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-022124c41bb7477e945b9155b8c56062", "trace_id": "7cd58a7ee27aab6685945031c7690987", "span_id": "894bde6cbf118fae"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:50:32,952", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-022124c41bb7477e945b9155b8c56062", "trace_id": "7cd58a7ee27aab6685945031c7690987", "span_id": "894bde6cbf118fae"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:50:32,953", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-022124c41bb7477e945b9155b8c56062", "trace_id": "7cd58a7ee27aab6685945031c7690987", "span_id": "894bde6cbf118fae", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 27.562, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:50:42,934", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-603bf1b5d22842f38115aeb5fbd21417", "trace_id": "f1eba85bd42dec106060fb772ea863c2", "span_id": "476899f7becc82e0"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:50:42,947", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-603bf1b5d22842f38115aeb5fbd21417", "trace_id": "f1eba85bd42dec106060fb772ea863c2", "span_id": "476899f7becc82e0"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:50:42,958", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-603bf1b5d22842f38115aeb5fbd21417", "trace_id": "f1eba85bd42dec106060fb772ea863c2", "span_id": "476899f7becc82e0"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:50:42,958", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-603bf1b5d22842f38115aeb5fbd21417", "trace_id": "f1eba85bd42dec106060fb772ea863c2", "span_id": "476899f7becc82e0", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 28.944, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:50:47,516", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-b23f9841497448038f33271820601b10", "trace_id": "9ea606599a334b25ad58a20ee34022e1", "span_id": "695151ee6035601d", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.228, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:50:52,926", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-64b20ecb1e66433a83244394a52b196b", "trace_id": "54e9bc1ba3d3a1e74b5219096e2d5536", "span_id": "cb927d990e52ae79"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:50:52,937", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-64b20ecb1e66433a83244394a52b196b", "trace_id": "54e9bc1ba3d3a1e74b5219096e2d5536", "span_id": "cb927d990e52ae79"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:50:52,947", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-64b20ecb1e66433a83244394a52b196b", "trace_id": "54e9bc1ba3d3a1e74b5219096e2d5536", "span_id": "cb927d990e52ae79"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:50:52,947", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-64b20ecb1e66433a83244394a52b196b", "trace_id": "54e9bc1ba3d3a1e74b5219096e2d5536", "span_id": "cb927d990e52ae79", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 26.263, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:51:02,513", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-7c252ecf9084479a992a85360f4a10e9", "trace_id": "99be6bb65a287be03ae840c8752dc0a9", "span_id": "68197ec0f972d628", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.204, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:51:02,919", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-d8b4d2a419ff43a1adaf59fd68dd38bd", "trace_id": "3cfb92b067b5a0bfaf202bb649186eaf", "span_id": "f0298c5ff813fac3"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:51:02,930", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-d8b4d2a419ff43a1adaf59fd68dd38bd", "trace_id": "3cfb92b067b5a0bfaf202bb649186eaf", "span_id": "f0298c5ff813fac3"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:51:02,940", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-d8b4d2a419ff43a1adaf59fd68dd38bd", "trace_id": "3cfb92b067b5a0bfaf202bb649186eaf", "span_id": "f0298c5ff813fac3"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:51:02,941", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-d8b4d2a419ff43a1adaf59fd68dd38bd", "trace_id": "3cfb92b067b5a0bfaf202bb649186eaf", "span_id": "f0298c5ff813fac3", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 25.016, "client_addr": "10.244.0.1"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:51:12,927", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-c10a2d8e13da40868bc7caf949130fde", "trace_id": "5963f128eba59140e05a81d1d00dc781", "span_id": "031e9609ca4ab808"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:51:12,939", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-c10a2d8e13da40868bc7caf949130fde", "trace_id": "5963f128eba59140e05a81d1d00dc781", "span_id": "031e9609ca4ab808"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:51:12,950", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-c10a2d8e13da40868bc7caf949130fde", "trace_id": "5963f128eba59140e05a81d1d00dc781", "span_id": "031e9609ca4ab808"}
+[pod/rel-agentos-c796b8c9f-xg47s/agentos] {"ts": "2026-07-14 00:51:12,950", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-c10a2d8e13da40868bc7caf949130fde", "trace_id": "5963f128eba59140e05a81d1d00dc781", "span_id": "031e9609ca4ab808", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 28.769, "client_addr": "10.244.0.1"}
+```
+- namespace events (tail 160):
+```
+12m         Normal    ScalingReplicaSet   deployment/redis                             Scaled up replica set redis-74c49dd754 from 0 to 1
+12m         Normal    SuccessfulCreate    replicaset/redis-74c49dd754                  Created pod: redis-74c49dd754-65sn7
+12m         Normal    Scheduled           pod/redis-74c49dd754-65sn7                   Successfully assigned cognic-proofm85c/redis-74c49dd754-65sn7 to cognic-proofm85c-control-plane
+12m         Normal    ScalingReplicaSet   deployment/qdrant                            Scaled up replica set qdrant-54644949b7 from 0 to 1
+12m         Normal    SuccessfulCreate    replicaset/qdrant-54644949b7                 Created pod: qdrant-54644949b7-xdnjg
+12m         Normal    Created             pod/qdrant-54644949b7-xdnjg                  Container created
+12m         Normal    Pulled              pod/qdrant-54644949b7-xdnjg                  Container image "qdrant/qdrant:v1.17.1" already present on machine and can be accessed by the pod
+12m         Normal    Scheduled           pod/qdrant-54644949b7-xdnjg                  Successfully assigned cognic-proofm85c/qdrant-54644949b7-xdnjg to cognic-proofm85c-control-plane
+12m         Normal    ScalingReplicaSet   deployment/postgres                          Scaled up replica set postgres-74b77c4f75 from 0 to 1
+12m         Normal    SuccessfulCreate    replicaset/postgres-74b77c4f75               Created pod: postgres-74b77c4f75-tfn6c
+12m         Normal    Created             pod/postgres-74b77c4f75-tfn6c                Container created
+12m         Normal    Pulled              pod/postgres-74b77c4f75-tfn6c                Container image "postgres:16-alpine" already present on machine and can be accessed by the pod
+12m         Normal    Scheduled           pod/langfuse-77458bd486-pttl4                Successfully assigned cognic-proofm85c/langfuse-77458bd486-pttl4 to cognic-proofm85c-control-plane
+12m         Normal    Scheduled           pod/postgres-74b77c4f75-tfn6c                Successfully assigned cognic-proofm85c/postgres-74b77c4f75-tfn6c to cognic-proofm85c-control-plane
+12m         Normal    ScalingReplicaSet   deployment/ollama                            Scaled up replica set ollama-84dd449db5 from 0 to 1
+12m         Normal    SuccessfulCreate    replicaset/ollama-84dd449db5                 Created pod: ollama-84dd449db5-b8j8j
+12m         Normal    Scheduled           pod/ollama-84dd449db5-b8j8j                  Successfully assigned cognic-proofm85c/ollama-84dd449db5-b8j8j to cognic-proofm85c-control-plane
+12m         Normal    ScalingReplicaSet   deployment/litellm                           Scaled up replica set litellm-854bfdcb5d from 0 to 1
+12m         Normal    SuccessfulCreate    replicaset/vault-564b656fbf                  Created pod: vault-564b656fbf-zgnht
+12m         Normal    SuccessfulCreate    replicaset/litellm-854bfdcb5d                Created pod: litellm-854bfdcb5d-rdv98
+12m         Normal    SuccessfulCreate    replicaset/langfuse-77458bd486               Created pod: langfuse-77458bd486-pttl4
+12m         Normal    ScalingReplicaSet   deployment/vault                             Scaled up replica set vault-564b656fbf from 0 to 1
+12m         Normal    Scheduled           pod/litellm-854bfdcb5d-rdv98                 Successfully assigned cognic-proofm85c/litellm-854bfdcb5d-rdv98 to cognic-proofm85c-control-plane
+12m         Normal    Started             pod/otel-collector-85ffcbbfcf-rpd24          Container started
+12m         Normal    SuccessfulCreate    replicaset/otel-collector-85ffcbbfcf         Created pod: otel-collector-85ffcbbfcf-rpd24
+12m         Normal    Started             pod/redis-74c49dd754-65sn7                   Container started
+12m         Warning   Unhealthy           pod/postgres-74b77c4f75-tfn6c                Readiness probe failed: /var/run/postgresql:5432 - no response
+12m         Normal    Scheduled           pod/cognic-proof-keycloak-555bf644d-wgds8    Successfully assigned cognic-proofm85c/cognic-proof-keycloak-555bf644d-wgds8 to cognic-proofm85c-control-plane
+12m         Normal    SuccessfulCreate    replicaset/langfuse-7f9f57b4b                Created pod: langfuse-7f9f57b4b-2nqzc
+12m         Normal    Started             pod/postgres-74b77c4f75-tfn6c                Container started
+12m         Normal    ScalingReplicaSet   deployment/langfuse                          Scaled up replica set langfuse-7f9f57b4b from 0 to 1
+12m         Normal    SuccessfulCreate    replicaset/cognic-proof-keycloak-555bf644d   Created pod: cognic-proof-keycloak-555bf644d-wgds8
+12m         Normal    Scheduled           pod/langfuse-7f9f57b4b-2nqzc                 Successfully assigned cognic-proofm85c/langfuse-7f9f57b4b-2nqzc to cognic-proofm85c-control-plane
+12m         Normal    Pulled              pod/litellm-854bfdcb5d-rdv98                 Container image "ghcr.io/berriai/litellm:main-stable" already present on machine and can be accessed by the pod
+12m         Normal    Created             pod/litellm-854bfdcb5d-rdv98                 Container created
+12m         Normal    Started             pod/litellm-854bfdcb5d-rdv98                 Container started
+12m         Normal    ScalingReplicaSet   deployment/cognic-proof-keycloak             Scaled up replica set cognic-proof-keycloak-555bf644d from 0 to 1
+12m         Normal    ScalingReplicaSet   deployment/otel-collector                    Scaled up replica set otel-collector-85ffcbbfcf from 0 to 1
+12m         Normal    Pulling             pod/cognic-proof-keycloak-555bf644d-wgds8    Pulling image "keycloak/keycloak:26.2@sha256:4883630ef9db14031cde3e60700c9a9a8eaf1b5c24db1589d6a2d43de38ba2a9"
+12m         Normal    Created             pod/redis-74c49dd754-65sn7                   Container created
+12m         Normal    Created             pod/otel-collector-85ffcbbfcf-rpd24          Container created
+12m         Normal    Pulled              pod/otel-collector-85ffcbbfcf-rpd24          Container image "otel/opentelemetry-collector:0.111.0" already present on machine and can be accessed by the pod
+12m         Normal    Started             pod/qdrant-54644949b7-xdnjg                  Container started
+12m         Normal    Pulled              pod/vault-564b656fbf-zgnht                   Container image "hashicorp/vault:1.18" already present on machine and can be accessed by the pod
+12m         Warning   Unhealthy           pod/vault-564b656fbf-zgnht                   Readiness probe failed: Get "http://10.244.0.11:8200/v1/sys/health": dial tcp 10.244.0.11:8200: connect: connection refused
+12m         Normal    Created             pod/vault-564b656fbf-zgnht                   Container created
+12m         Normal    Pulled              pod/redis-74c49dd754-65sn7                   Container image "redis:7.4-alpine" already present on machine and can be accessed by the pod
+12m         Warning   Unhealthy           pod/qdrant-54644949b7-xdnjg                  Readiness probe failed: Get "http://10.244.0.6:6333/readyz": dial tcp 10.244.0.6:6333: connect: connection refused
+12m         Normal    Started             pod/vault-564b656fbf-zgnht                   Container started
+12m         Normal    Scheduled           pod/otel-collector-85ffcbbfcf-rpd24          Successfully assigned cognic-proofm85c/otel-collector-85ffcbbfcf-rpd24 to cognic-proofm85c-control-plane
+12m         Normal    Pulled              pod/ollama-84dd449db5-b8j8j                  Container image "ollama/ollama:0.5.4" already present on machine and can be accessed by the pod
+12m         Normal    Created             pod/ollama-84dd449db5-b8j8j                  Container created
+12m         Normal    Started             pod/ollama-84dd449db5-b8j8j                  Container started
+12m         Warning   BackOff             pod/langfuse-77458bd486-pttl4                Back-off restarting failed container langfuse in pod langfuse-77458bd486-pttl4_cognic-proofm85c(1db0b189-f461-4660-aa1a-75641ffb8c37)
+12m         Warning   BackOff             pod/langfuse-7f9f57b4b-2nqzc                 Back-off restarting failed container langfuse in pod langfuse-7f9f57b4b-2nqzc_cognic-proofm85c(8da87cca-fd03-4464-874f-2ed17f2d993c)
+12m         Warning   Unhealthy           pod/litellm-854bfdcb5d-rdv98                 Readiness probe failed: Get "http://10.244.0.9:4000/health/liveliness": dial tcp 10.244.0.9:4000: connect: connection refused
+12m         Normal    Pulled              pod/langfuse-77458bd486-pttl4                Container image "langfuse/langfuse:2" already present on machine and can be accessed by the pod
+12m         Normal    Created             pod/langfuse-77458bd486-pttl4                Container created
+12m         Normal    Started             pod/langfuse-77458bd486-pttl4                Container started
+12m         Warning   Unhealthy           pod/langfuse-77458bd486-pttl4                Readiness probe failed: Get "http://10.244.0.8:3000/api/public/health": dial tcp 10.244.0.8:3000: connect: connection refused
+12m         Normal    Pulled              pod/langfuse-7f9f57b4b-2nqzc                 Container image "langfuse/langfuse:2" already present on machine and can be accessed by the pod
+12m         Normal    Created             pod/langfuse-7f9f57b4b-2nqzc                 Container created
+12m         Normal    Started             pod/langfuse-7f9f57b4b-2nqzc                 Container started
+12m         Warning   Unhealthy           pod/langfuse-7f9f57b4b-2nqzc                 Readiness probe failed: Get "http://10.244.0.14:3000/api/public/health": dial tcp 10.244.0.14:3000: connect: connection refused
+12m         Warning   Unhealthy           pod/langfuse-77458bd486-pttl4                Readiness probe failed: HTTP probe failed with statuscode: 500
+12m         Normal    Killing             pod/langfuse-77458bd486-pttl4                Stopping container langfuse
+12m         Normal    SuccessfulDelete    replicaset/langfuse-77458bd486               Deleted pod: langfuse-77458bd486-pttl4
+12m         Normal    ScalingReplicaSet   deployment/langfuse                          Scaled down replica set langfuse-77458bd486 from 1 to 0
+12m         Normal    Pulled              pod/cognic-proof-keycloak-555bf644d-wgds8    Successfully pulled image "keycloak/keycloak:26.2@sha256:4883630ef9db14031cde3e60700c9a9a8eaf1b5c24db1589d6a2d43de38ba2a9" in 41.484s (41.484s including waiting). Image size: 244434445 bytes.
+12m         Normal    Created             pod/cognic-proof-keycloak-555bf644d-wgds8    Container created
+12m         Normal    Started             pod/cognic-proof-keycloak-555bf644d-wgds8    Container started
+11m         Warning   Unhealthy           pod/cognic-proof-keycloak-555bf644d-wgds8    Readiness probe failed: dial tcp 10.244.0.13:8443: connect: connection refused
+11m         Normal    Scheduled           pod/oracle-xe-6fbd6d88cc-z5tnc               Successfully assigned cognic-proofm85c/oracle-xe-6fbd6d88cc-z5tnc to cognic-proofm85c-control-plane
+11m         Normal    ScalingReplicaSet   deployment/oracle-xe                         Scaled up replica set oracle-xe-6fbd6d88cc from 0 to 1
+11m         Normal    SuccessfulCreate    replicaset/oracle-xe-6fbd6d88cc              Created pod: oracle-xe-6fbd6d88cc-z5tnc
+11m         Normal    Pulled              pod/oracle-xe-6fbd6d88cc-z5tnc               Container image "gvenzl/oracle-xe:21-slim" already present on machine and can be accessed by the pod
+11m         Normal    Started             pod/oracle-xe-6fbd6d88cc-z5tnc               Container started
+11m         Normal    Created             pod/oracle-xe-6fbd6d88cc-z5tnc               Container created
+10m         Normal    Scheduled           pod/agentos-migrate-dbqzt                    Successfully assigned cognic-proofm85c/agentos-migrate-dbqzt to cognic-proofm85c-control-plane
+10m         Normal    Scheduled           pod/rel-agentos-577f67f98b-hdpz2             Successfully assigned cognic-proofm85c/rel-agentos-577f67f98b-hdpz2 to cognic-proofm85c-control-plane
+10m         Normal    SuccessfulCreate    replicaset/rel-agentos-577f67f98b            Created pod: rel-agentos-577f67f98b-hdpz2
+10m         Normal    ScalingReplicaSet   deployment/rel-agentos                       Scaled up replica set rel-agentos-577f67f98b from 0 to 1
+10m         Normal    SuccessfulCreate    job/agentos-migrate                          Created pod: agentos-migrate-dbqzt
+10m         Normal    Created             pod/agentos-migrate-dbqzt                    Container created
+10m         Normal    Started             pod/agentos-migrate-dbqzt                    Container started
+10m         Normal    Pulled              pod/agentos-migrate-dbqzt                    Container image "cognic-agentos:proofm85c" already present on machine and can be accessed by the pod
+10m         Normal    Created             pod/rel-agentos-577f67f98b-hdpz2             Container created
+10m         Normal    Started             pod/rel-agentos-577f67f98b-hdpz2             Container started
+10m         Normal    Pulled              pod/rel-agentos-577f67f98b-hdpz2             Container image "cognic-agentos:proofm85c" already present on machine and can be accessed by the pod
+10m         Warning   BackOff             pod/rel-agentos-577f67f98b-hdpz2             Back-off restarting failed container agentos in pod rel-agentos-577f67f98b-hdpz2_cognic-proofm85c(0289f616-b965-49c0-aa34-bff053404b60)
+10m         Normal    Completed           job/agentos-migrate                          Job completed
+10m         Normal    Created             pod/proof-as-668846b487-z22q7                Container created
+10m         Normal    Started             pod/proof-as-668846b487-z22q7                Container started
+10m         Normal    SuccessfulCreate    replicaset/proof-oracle-pack-8bdc7c4f6       Created pod: proof-oracle-pack-8bdc7c4f6-cc5mf
+10m         Normal    Started             pod/proof-oracle-pack-8bdc7c4f6-cc5mf        Container started
+10m         Normal    Created             pod/proof-oracle-pack-8bdc7c4f6-cc5mf        Container created
+10m         Normal    Pulled              pod/proof-oracle-pack-8bdc7c4f6-cc5mf        Container image "cognic-proof-oracle-pack:m85" already present on machine and can be accessed by the pod
+10m         Normal    Started             pod/proof-oracle-pack-8bdc7c4f6-cc5mf        Container started
+10m         Normal    Created             pod/proof-oracle-pack-8bdc7c4f6-cc5mf        Container created
+10m         Normal    Pulled              pod/proof-oracle-pack-8bdc7c4f6-cc5mf        Container image "busybox:1.36" already present on machine and can be accessed by the pod
+10m         Normal    Scheduled           pod/proof-oracle-pack-8bdc7c4f6-cc5mf        Successfully assigned cognic-proofm85c/proof-oracle-pack-8bdc7c4f6-cc5mf to cognic-proofm85c-control-plane
+10m         Normal    ScalingReplicaSet   deployment/proof-as                          Scaled up replica set proof-as-668846b487 from 0 to 1
+10m         Normal    ScalingReplicaSet   deployment/proof-oracle-pack                 Scaled up replica set proof-oracle-pack-8bdc7c4f6 from 0 to 1
+10m         Normal    Scheduled           pod/proof-as-668846b487-z22q7                Successfully assigned cognic-proofm85c/proof-as-668846b487-z22q7 to cognic-proofm85c-control-plane
+10m         Normal    Pulled              pod/proof-as-668846b487-z22q7                Container image "cognic-proof-as:m85" already present on machine and can be accessed by the pod
+10m         Normal    SuccessfulCreate    replicaset/proof-as-668846b487               Created pod: proof-as-668846b487-z22q7
+10m         Normal    ScalingReplicaSet   deployment/litellm                           Scaled up replica set litellm-c897555d from 0 to 1
+10m         Normal    Pulled              pod/litellm-c897555d-ldtpx                   Container image "ghcr.io/berriai/litellm:main-stable" already present on machine and can be accessed by the pod
+10m         Normal    SuccessfulCreate    replicaset/rel-agentos-575dfb5f9f            Created pod: rel-agentos-575dfb5f9f-v57n2
+10m         Normal    SuccessfulCreate    replicaset/rel-agentos-bf64f5589             Created pod: rel-agentos-bf64f5589-fb9gx
+10m         Normal    Scheduled           pod/rel-agentos-575dfb5f9f-v57n2             Successfully assigned cognic-proofm85c/rel-agentos-575dfb5f9f-v57n2 to cognic-proofm85c-control-plane
+10m         Normal    SuccessfulDelete    replicaset/rel-agentos-577f67f98b            Deleted pod: rel-agentos-577f67f98b-hdpz2
+10m         Normal    Scheduled           pod/rel-agentos-5d59c8cfb8-jpqdw             Successfully assigned cognic-proofm85c/rel-agentos-5d59c8cfb8-jpqdw to cognic-proofm85c-control-plane
+10m         Normal    Pulled              pod/rel-agentos-5d59c8cfb8-jpqdw             Container image "busybox:1.36" already present on machine and can be accessed by the pod
+10m         Normal    Created             pod/rel-agentos-5d59c8cfb8-jpqdw             Container created
+10m         Normal    Started             pod/rel-agentos-5d59c8cfb8-jpqdw             Container started
+10m         Normal    SuccessfulCreate    replicaset/litellm-c897555d                  Created pod: litellm-c897555d-ldtpx
+10m         Normal    Started             pod/litellm-c897555d-ldtpx                   Container started
+10m         Normal    Created             pod/litellm-c897555d-ldtpx                   Container created
+10m         Normal    SuccessfulDelete    replicaset/rel-agentos-575dfb5f9f            Deleted pod: rel-agentos-575dfb5f9f-v57n2
+10m         Normal    ScalingReplicaSet   deployment/rel-agentos                       Scaled up replica set rel-agentos-5d59c8cfb8 from 0 to 1
+10m         Normal    SuccessfulCreate    replicaset/rel-agentos-5d59c8cfb8            Created pod: rel-agentos-5d59c8cfb8-jpqdw
+10m         Normal    ScalingReplicaSet   deployment/rel-agentos                       Scaled down replica set rel-agentos-575dfb5f9f from 1 to 0
+10m         Normal    Scheduled           pod/rel-agentos-bf64f5589-fb9gx              Successfully assigned cognic-proofm85c/rel-agentos-bf64f5589-fb9gx to cognic-proofm85c-control-plane
+10m         Normal    Pulled              pod/rel-agentos-bf64f5589-fb9gx              Container image "busybox:1.36" already present on machine and can be accessed by the pod
+10m         Normal    Created             pod/rel-agentos-bf64f5589-fb9gx              Container created
+10m         Normal    Started             pod/rel-agentos-bf64f5589-fb9gx              Container started
+10m         Normal    ScalingReplicaSet   deployment/rel-agentos                       Scaled up replica set rel-agentos-575dfb5f9f from 0 to 1
+10m         Normal    ScalingReplicaSet   deployment/rel-agentos                       Scaled down replica set rel-agentos-577f67f98b from 1 to 0
+10m         Normal    ScalingReplicaSet   deployment/rel-agentos                       Scaled up replica set rel-agentos-bf64f5589 from 0 to 1
+10m         Normal    Scheduled           pod/litellm-c897555d-ldtpx                   Successfully assigned cognic-proofm85c/litellm-c897555d-ldtpx to cognic-proofm85c-control-plane
+10m         Normal    Started             pod/rel-agentos-5d59c8cfb8-jpqdw             Container started
+10m         Normal    Pulled              pod/rel-agentos-5d59c8cfb8-jpqdw             Container image "cognic-agentos:proofm85c" already present on machine and can be accessed by the pod
+10m         Normal    Created             pod/rel-agentos-5d59c8cfb8-jpqdw             Container created
+10m         Warning   Unhealthy           pod/litellm-c897555d-ldtpx                   Readiness probe failed: Get "http://10.244.0.22:4000/health/liveliness": dial tcp 10.244.0.22:4000: connect: connection refused
+10m         Warning   Unhealthy           pod/rel-agentos-bf64f5589-fb9gx              Startup probe failed: Get "https://10.244.0.20:8443/api/v1/healthz": dial tcp 10.244.0.20:8443: connect: connection refused
+10m         Warning   Unhealthy           pod/rel-agentos-5d59c8cfb8-jpqdw             Startup probe failed: Get "https://10.244.0.21:8443/api/v1/healthz": dial tcp 10.244.0.21:8443: connect: connection refused
+10m         Normal    Killing             pod/litellm-854bfdcb5d-rdv98                 Stopping container litellm
+10m         Normal    SuccessfulDelete    replicaset/litellm-854bfdcb5d                Deleted pod: litellm-854bfdcb5d-rdv98
+10m         Normal    ScalingReplicaSet   deployment/litellm                           Scaled down replica set litellm-854bfdcb5d from 1 to 0
+10m         Normal    Pulled              pod/rel-agentos-c796b8c9f-xg47s              Container image "cognic-agentos:proofm85c" already present on machine and can be accessed by the pod
+10m         Normal    ScalingReplicaSet   deployment/rel-agentos                       Scaled down replica set rel-agentos-5d59c8cfb8 from 1 to 0
+10m         Normal    Created             pod/rel-agentos-c796b8c9f-xg47s              Container created
+10m         Normal    SuccessfulCreate    replicaset/rel-agentos-c796b8c9f             Created pod: rel-agentos-c796b8c9f-xg47s
+10m         Normal    Created             pod/rel-agentos-c796b8c9f-xg47s              Container created
+10m         Normal    Started             pod/rel-agentos-c796b8c9f-xg47s              Container started
+10m         Normal    Scheduled           pod/rel-agentos-c796b8c9f-xg47s              Successfully assigned cognic-proofm85c/rel-agentos-c796b8c9f-xg47s to cognic-proofm85c-control-plane
+10m         Normal    ScalingReplicaSet   deployment/rel-agentos                       Scaled up replica set rel-agentos-c796b8c9f from 0 to 1
+10m         Normal    SuccessfulDelete    replicaset/rel-agentos-5d59c8cfb8            Deleted pod: rel-agentos-5d59c8cfb8-jpqdw
+10m         Normal    Killing             pod/rel-agentos-5d59c8cfb8-jpqdw             Stopping container agentos
+10m         Normal    Pulled              pod/rel-agentos-c796b8c9f-xg47s              Container image "busybox:1.36" already present on machine and can be accessed by the pod
+10m         Normal    Started             pod/rel-agentos-c796b8c9f-xg47s              Container started
+10m         Warning   BackOff             pod/rel-agentos-bf64f5589-fb9gx              Back-off restarting failed container agentos in pod rel-agentos-bf64f5589-fb9gx_cognic-proofm85c(3d9262f8-949a-480f-85e8-afc1125f9c20)
+10m         Warning   Unhealthy           pod/rel-agentos-c796b8c9f-xg47s              Startup probe failed: Get "https://10.244.0.23:8443/api/v1/healthz": dial tcp 10.244.0.23:8443: connect: connection refused
+10m         Normal    Pulled              pod/rel-agentos-bf64f5589-fb9gx              Container image "cognic-agentos:proofm85c" already present on machine and can be accessed by the pod
+10m         Normal    Created             pod/rel-agentos-bf64f5589-fb9gx              Container created
+10m         Normal    Started             pod/rel-agentos-bf64f5589-fb9gx              Container started
+10m         Normal    Killing             pod/rel-agentos-bf64f5589-fb9gx              Stopping container agentos
+10m         Normal    SuccessfulDelete    replicaset/rel-agentos-bf64f5589             Deleted pod: rel-agentos-bf64f5589-fb9gx
+10m         Normal    ScalingReplicaSet   deployment/rel-agentos                       Scaled down replica set rel-agentos-bf64f5589 from 1 to 0
+```

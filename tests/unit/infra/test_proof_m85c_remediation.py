@@ -3550,3 +3550,66 @@ def test_attempt4_bff_fail_captures_events_without_persisting_access_logs() -> N
     ):
         line = next(line for line in _RUNNER_TEXT.splitlines() if failure in line)
         assert "bff_fail" in line
+
+
+# --------------------------------------------------------------------------- #
+# LIVE ATTEMPT 5 — a selector wait held deleted rollout pods for ten minutes.  #
+# --------------------------------------------------------------------------- #
+
+
+def test_attempt5_roll_and_wait_uses_the_deployment_owned_readiness_gate(
+    tmp_path: Path,
+) -> None:
+    """Execute the real function against a kubectl that makes any pod wait fatal.
+
+    ``kubectl rollout status deployment`` already waits for the new replica to be
+    Available and the old replicas to be retired. The pre-fix selector-wide pod wait
+    captured a predecessor that the rollout then deleted, spent its whole 600-second
+    budget on that stale object, and never observed the healthy replacement.
+    """
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    call_log = tmp_path / "kubectl-calls"
+    fake_kubectl = bin_dir / "kubectl"
+    fake_kubectl.write_text(
+        """#!/bin/sh
+printf '%s\\n' "$*" >> "$KUBECTL_CALL_LOG"
+case "$*" in
+  *" wait "*) exit 99 ;;
+  *" rollout restart deploy/rel-agentos") exit 0 ;;
+  *" rollout status deploy/rel-agentos --timeout=600s") exit 0 ;;
+  *) exit 98 ;;
+esac
+"""
+    )
+    fake_kubectl.chmod(0o755)
+    script = "\n".join(
+        (
+            "set -euo pipefail",
+            f'export PATH="{bin_dir}:$PATH"',
+            f'export KUBECTL_CALL_LOG="{call_log}"',
+            'NS="proof-test"',
+            'agentos_fail() { echo "UNEXPECTED_FAIL: $*" >&2; exit 90; }',
+            _extract_shell_function("roll_and_wait"),
+            "roll_and_wait",
+        )
+    )
+
+    result = _run_bash(script)
+
+    assert result.returncode == 0, f"stdout={result.stdout!r} stderr={result.stderr!r}"
+    calls = call_log.read_text().splitlines()
+    assert calls == [
+        "-n proof-test rollout restart deploy/rel-agentos",
+        "-n proof-test rollout status deploy/rel-agentos --timeout=600s",
+    ]
+    assert all(" wait " not in f" {call} " for call in calls)
+
+
+def test_attempt5_agentos_failure_snapshot_uses_a_selector_compatible_query() -> None:
+    """A resource/name plus ``-l`` is invalid kubectl syntax and produced only a
+    usage error in attempt 5. The snapshot must query resource kinds under the label."""
+    body = _extract_shell_function("agentos_fail")
+    expected = 'kubectl -n "$NS" get deployment,pods -l app.kubernetes.io/name=agentos -o wide'
+    assert expected in body
+    assert "get deploy/rel-agentos,pod -l" not in body

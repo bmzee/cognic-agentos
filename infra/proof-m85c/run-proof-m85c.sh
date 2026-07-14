@@ -567,10 +567,13 @@ bff_pf_start() {
 # pod — and the agent's dispatched run_readonly_query rides that same MCPHost.
 roll_and_wait() {
   kubectl -n "$NS" rollout restart deploy/rel-agentos
+  # `rollout status` is the Deployment-owned readiness gate: it succeeds only after
+  # the updated replica is Available and the old replicas are retired. Never follow
+  # it with `kubectl wait pod -l ...`: selector waits bind the pod objects that exist
+  # at invocation, so a predecessor deleted during the rollout can consume the whole
+  # timeout even while the replacement pod is Ready (attempt-5 live finding).
   kubectl -n "$NS" rollout status deploy/rel-agentos --timeout=600s \
     || agentos_fail "rel-agentos rollout did not complete within 600s"
-  kubectl -n "$NS" wait --for=condition=ready pod -l app.kubernetes.io/name=agentos --timeout=600s \
-    || agentos_fail "rel-agentos pod did not become Ready within 600s"
 }
 
 # ---- Multi-actor API helpers (drive the REAL operator + agent API via OIDC tokens)
@@ -2106,7 +2109,7 @@ agentos_fail() {
   local where="$1"
   echo "FAIL: $where — capturing AgentOS rollout diagnostics to docs/VALIDATION-RESULTS.md" >&2
   local wide desc pods logs events
-  wide="$(kubectl -n "$NS" get deploy/rel-agentos,pod -l app.kubernetes.io/name=agentos -o wide 2>&1 || true)"
+  wide="$(kubectl -n "$NS" get deployment,pods -l app.kubernetes.io/name=agentos -o wide 2>&1 || true)"
   desc="$(kubectl -n "$NS" describe deploy/rel-agentos 2>&1 || true)"
   pods="$(kubectl -n "$NS" describe pod -l app.kubernetes.io/name=agentos 2>&1 || true)"
   logs="$(kubectl -n "$NS" logs -l app.kubernetes.io/name=agentos --all-containers=true --tail=220 --prefix 2>&1 || true)"
