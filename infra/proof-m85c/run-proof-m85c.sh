@@ -639,6 +639,51 @@ except Exception:
 ' "$2"
 }
 
+# The reference binder accepts a token until `now > exp + clock_skew_s`. This
+# constant is lockstep-pinned against ReferenceBinderConfig.clock_skew_s by the
+# remediation suite: the live expiry leg must cross the BINDER'S acceptance
+# deadline, not merely the JWT's nominal exp timestamp.
+_REFERENCE_BINDER_CLOCK_SKEW_S=30
+
+# token_past_binder_expiry <JWT> <CLOCK_SKEW_S> <POST_DEADLINE_MARGIN_S> —
+# true iff the token is beyond the exact deadline the reference binder enforces
+# (`now > exp + skew`) PLUS an explicit cross-process clock/scheduling margin.
+# DECODE-ONLY, like token_has_life; the binder remains the sole verifier. The JWT
+# rides STDIN, never argv.
+token_past_binder_expiry() {
+  printf '%s' "$1" | python3 -c '
+import base64, json, math, sys, time
+tok, skew, margin = sys.stdin.read(), float(sys.argv[1]), float(sys.argv[2])
+try:
+    payload = tok.split(".")[1]
+    claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+    exp = float(claims["exp"])
+    if (
+        not math.isfinite(exp)
+        or not math.isfinite(skew)
+        or not math.isfinite(margin)
+        or skew < 0
+        or margin < 0
+    ):
+        raise ValueError
+    sys.exit(0 if time.time() > exp + skew + margin else 1)
+except Exception:
+    sys.exit(1)
+' "$2" "$3"
+}
+
+# record_status_only_bearer_probe <HTTP_STATUS> — custom binder probes use
+# deliberately-crafted bearer tokens and intentionally discard response bodies.
+# Keep bar_fail's shared diagnostic files current anyway: a failed probe must not
+# inherit an unrelated body/status from the previous api() call.
+record_status_only_bearer_probe() {
+  [ -n "$HTTP_CODE_FILE" ] && [ -n "$API_RESP_FILE" ] \
+    || die "record_status_only_bearer_probe() called before QC_TMP was minted (programming error)"
+  HTTP_CODE="$1"
+  printf '%s' "$1" > "$HTTP_CODE_FILE"
+  printf '%s\n' '<body deliberately discarded by status-only bearer probe>' > "$API_RESP_FILE"
+}
+
 # ensure_token <ROLE> — lazily mint (and cache) the role's REAL access token via
 # the scripted Authorization Code + PKCE flow against the SAME cognic-harness
 # client (keycloak/pkce_login.py). This is the ordinary interactive flow with the
@@ -4535,12 +4580,14 @@ KC_USER_PASSWORD="$B_AMIR_PW" KC_CLIENT_SECRET="$KC_CLIENT_SECRET" \
 B_ID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["id_token"])' "$B_TOKENS")"
 B_TYP_PRE="$(binder_refusal_count typ_not_at_jwt)"
 B_ID_CODE="$(printf 'header = "Authorization: Bearer %s"\n' "$B_ID" | curl -s -o /dev/null -w '%{http_code}' -K - --cacert "$PROOF_CA" "$BASE_URL/api/v1/conversations")"
+record_status_only_bearer_probe "$B_ID_CODE"
 [ "$B_ID_CODE" = "403" ] || bar_fail "BAR B the ID token was ACCEPTED in place of the access token (HTTP $B_ID_CODE, expected 403)"
 assert_binder_refusal typ_not_at_jwt "$B_TYP_PRE"
 
 # malformed bearer -> token_malformed.
 B_MAL_PRE="$(binder_refusal_count token_malformed)"
 B_BAD_CODE="$(printf 'header = "Authorization: Bearer not.a.jwt"\n' | curl -s -o /dev/null -w '%{http_code}' -K - --cacert "$PROOF_CA" "$BASE_URL/api/v1/conversations")"
+record_status_only_bearer_probe "$B_BAD_CODE"
 [ "$B_BAD_CODE" = "403" ] || bar_fail "BAR B a malformed bearer was ACCEPTED (HTTP $B_BAD_CODE, expected 403)"
 assert_binder_refusal token_malformed "$B_MAL_PRE"
 
@@ -4558,6 +4605,7 @@ print(b64e(json.dumps(hdr, separators=(",", ":")).encode()) + "." + p + "." + s)
 ' "$B_TOKENS")"
 B_KID_PRE="$(binder_refusal_count kid_unknown)"
 B_UK_CODE="$(printf 'header = "Authorization: Bearer %s"\n' "$B_UK" | curl -s -o /dev/null -w '%{http_code}' -K - --cacert "$PROOF_CA" "$BASE_URL/api/v1/conversations")"
+record_status_only_bearer_probe "$B_UK_CODE"
 [ "$B_UK_CODE" = "403" ] || bar_fail "BAR B a token with an unknown kid was ACCEPTED (HTTP $B_UK_CODE)"
 assert_binder_refusal kid_unknown "$B_KID_PRE"
 
@@ -4571,6 +4619,7 @@ KC_USER_PASSWORD="$B_AMIR_PW" KC_CLIENT_SECRET="$KC_CLIENT_SECRET" \
 B_WA="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["access_token"])' "$B_WA_TOKENS")"
 B_AUD_PRE="$(binder_refusal_count audience_not_exact)"
 B_WA_CODE="$(printf 'header = "Authorization: Bearer %s"\n' "$B_WA" | curl -s -o /dev/null -w '%{http_code}' -K - --cacert "$PROOF_CA" "$BASE_URL/api/v1/conversations")"
+record_status_only_bearer_probe "$B_WA_CODE"
 [ "$B_WA_CODE" = "403" ] || bar_fail "BAR B a wrong-audience token was ACCEPTED (HTTP $B_WA_CODE) — the exact-audience gate did not fire"
 assert_binder_refusal audience_not_exact "$B_AUD_PRE"
 rm -f "$B_TOKENS" "$B_WA_TOKENS"
@@ -4585,7 +4634,9 @@ echo "  Bar B OK: id-token(typ_not_at_jwt) + malformed(token_malformed) + unknow
 # client, so `azp` stays `cognic-harness` and the binder walks its gates in exactly
 # the order it does for every other request — reaching the `exp` check (binder.py:274,
 # AFTER the azp check at :269) with a genuinely expired, genuinely signed token.
-# The lifespan is restored immediately afterwards.
+# The binder deliberately permits 30s of clock skew, so nominal `exp` is NOT the
+# acceptance deadline: the runner waits until `now > exp + skew`, proven from the
+# decoded token, before sending it. The lifespan is restored immediately afterwards.
 kc_set_access_token_lifespan 10
 B_EXP_TOKENS="$KC_CRED_TMP/bar-b-expired.json"
 KC_USER_PASSWORD="$B_AMIR_PW" KC_CLIENT_SECRET="$KC_CLIENT_SECRET" \
@@ -4594,13 +4645,31 @@ KC_USER_PASSWORD="$B_AMIR_PW" KC_CLIENT_SECRET="$KC_CLIENT_SECRET" \
 B_EXP="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["access_token"])' "$B_EXP_TOKENS")"
 # Prove the token is short-lived BEFORE spending the wait — otherwise a silently
 # ignored lifespan override would turn this into a vacuous 900s-token test.
-token_has_life "$B_EXP" 60 \
-  && { kc_set_access_token_lifespan 900; bar_fail "BAR B the expiry-test token still has >60s of life — the access.token.lifespan override did not take effect, so the leg would prove nothing"; }
-sleep 13                       # > the 10s lifespan: the token is now genuinely expired
-token_has_life "$B_EXP" 0 \
-  && { kc_set_access_token_lifespan 900; bar_fail "BAR B the expiry-test token has NOT expired after the wait"; }
+_B_EXP_MAX_INITIAL_LIFE_S=15
+_B_EXP_POST_DEADLINE_MARGIN_S=3
+_B_EXP_WAIT_BUDGET_S=55
+token_has_life "$B_EXP" "$_B_EXP_MAX_INITIAL_LIFE_S" \
+  && { kc_set_access_token_lifespan 900; bar_fail "BAR B the expiry-test token still has >${_B_EXP_MAX_INITIAL_LIFE_S}s of life — the access.token.lifespan override did not take effect, so the leg would prove nothing"; }
+# At the precondition above the token has at most 15s nominal life. The 55s
+# budget therefore exceeds remaining-life + 30s skew + the explicit 3s
+# post-deadline margin, with a further 7s loop/scheduling allowance.
+B_EXP_PAST_BINDER_DEADLINE=false
+for ((B_EXP_WAITED_S=0; B_EXP_WAITED_S<_B_EXP_WAIT_BUDGET_S; B_EXP_WAITED_S++)); do
+  if token_past_binder_expiry "$B_EXP" "$_REFERENCE_BINDER_CLOCK_SKEW_S" "$_B_EXP_POST_DEADLINE_MARGIN_S"; then
+    B_EXP_PAST_BINDER_DEADLINE=true
+    break
+  fi
+  sleep 1
+done
+[ "$B_EXP_PAST_BINDER_DEADLINE" = "true" ] \
+  || { kc_set_access_token_lifespan 900; bar_fail "BAR B the expiry-test token did not cross the binder deadline (exp + ${_REFERENCE_BINDER_CLOCK_SKEW_S}s clock skew + ${_B_EXP_POST_DEADLINE_MARGIN_S}s post-deadline margin) inside the ${_B_EXP_WAIT_BUDGET_S}s bounded wait"; }
+# Re-read immediately before the request: a successful wait-loop observation,
+# not elapsed time or a nominal-exp assumption, is what licenses the probe.
+token_past_binder_expiry "$B_EXP" "$_REFERENCE_BINDER_CLOCK_SKEW_S" "$_B_EXP_POST_DEADLINE_MARGIN_S" \
+  || { kc_set_access_token_lifespan 900; bar_fail "BAR B the expiry-test token is not beyond the binder's exp+skew deadline immediately before use"; }
 B_EXP_PRE="$(binder_refusal_count token_expired)"
 B_EXP_CODE="$(printf 'header = "Authorization: Bearer %s"\n' "$B_EXP" | curl -s -o /dev/null -w '%{http_code}' -K - --cacert "$PROOF_CA" "$BASE_URL/api/v1/conversations")"
+record_status_only_bearer_probe "$B_EXP_CODE"
 rm -f "$B_EXP_TOKENS"
 kc_set_access_token_lifespan 900
 [ "$B_EXP_CODE" = "403" ] || bar_fail "BAR B an EXPIRED token was ACCEPTED (HTTP $B_EXP_CODE, expected 403)"

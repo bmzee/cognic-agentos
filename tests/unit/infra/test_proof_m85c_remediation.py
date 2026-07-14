@@ -723,9 +723,11 @@ def test_r1_expired_token_is_proven_live_at_the_binder_exp_gate() -> None:
     assert "kc_set_access_token_lifespan 10" in _RUNNER_TEXT
     assert "assert_binder_refusal token_expired" in _RUNNER_TEXT
     # and the leg refuses to be vacuous: it proves the token really IS short-lived
-    # before spending the wait, and really HAS expired after it.
+    # before spending the wait, then crosses the binder's exp+skew acceptance
+    # deadline — nominal JWT expiry alone is insufficient.
     assert "the access.token.lifespan override did not take effect" in _RUNNER_TEXT
-    assert "has NOT expired after the wait" in _RUNNER_TEXT
+    assert "did not cross the binder deadline" in _RUNNER_TEXT
+    assert "not beyond the binder's exp+skew deadline immediately before use" in _RUNNER_TEXT
 
 
 def test_r1_realm_ships_the_two_levers_the_live_cases_need() -> None:
@@ -4402,3 +4404,143 @@ def test_attempt16_mint_probe_request_rejects_noncontract_envelopes(response: st
     probe = _run_mint_probe_request(response)
     assert probe.returncode == 91
     assert "invalid 202 tool_approval_pending envelope" in probe.stderr
+
+
+# --------------------------------------------------------------------------- #
+# LIVE ATTEMPT 18 — nominal JWT expiry is not the binder expiry deadline.    #
+# --------------------------------------------------------------------------- #
+
+
+def _run_token_past_binder_expiry(
+    token: str, skew_s: str, margin_s: str = "0"
+) -> subprocess.CompletedProcess[str]:
+    """Execute the runner's real decode-only deadline predicate."""
+    script = "\n".join(
+        [
+            "set -euo pipefail",
+            _extract_shell_function("token_past_binder_expiry"),
+            "token_past_binder_expiry "
+            f"{shlex.quote(token)} {shlex.quote(skew_s)} {shlex.quote(margin_s)}",
+        ]
+    )
+    return _run_bash(script)
+
+
+def _unsigned_exp_token(exp: float) -> str:
+    """Minimal decode-only JWT shape; no verifier consumes this test fixture."""
+    import base64
+
+    payload = base64.urlsafe_b64encode(json.dumps({"exp": exp}).encode()).rstrip(b"=")
+    return f"header.{payload.decode()}.signature"
+
+
+def test_attempt18_deadline_predicate_includes_the_binder_clock_skew() -> None:
+    now = time.time()
+    assert _run_token_past_binder_expiry(_unsigned_exp_token(now - 60), "30", "3").returncode == 0
+    assert _run_token_past_binder_expiry(_unsigned_exp_token(now - 31), "30", "3").returncode != 0
+    assert _run_token_past_binder_expiry(_unsigned_exp_token(now), "30", "3").returncode != 0
+    assert _run_token_past_binder_expiry("not.a.jwt", "30").returncode != 0
+    assert _run_token_past_binder_expiry(_unsigned_exp_token(now - 60), "-1").returncode != 0
+    assert _run_token_past_binder_expiry(_unsigned_exp_token(now - 60), "30", "-1").returncode != 0
+
+
+def test_attempt18_status_only_bearer_probes_replace_stale_diagnostics(tmp_path: Path) -> None:
+    code_file = tmp_path / "http-code"
+    response_file = tmp_path / "api-response"
+    code_file.write_text("202")
+    response_file.write_text('{"detail":{"reason":"unrelated_prior_response"}}')
+    script = "\n".join(
+        [
+            "set -euo pipefail",
+            _extract_shell_function("record_status_only_bearer_probe"),
+            f"HTTP_CODE_FILE={shlex.quote(str(code_file))}",
+            f"API_RESP_FILE={shlex.quote(str(response_file))}",
+            'record_status_only_bearer_probe "403"',
+        ]
+    )
+    probe = _run_bash(script)
+    assert probe.returncode == 0, probe.stderr
+    assert code_file.read_text() == "403"
+    assert response_file.read_text() == (
+        "<body deliberately discarded by status-only bearer probe>\n"
+    )
+
+    bar_b = _RUNNER_TEXT.split("# --- token-shape refusals at AgentOS", 1)[1].split(
+        'echo "PROOF M8.5-C (BAR B) PASS"', 1
+    )[0]
+    code_vars = ("B_ID_CODE", "B_BAD_CODE", "B_UK_CODE", "B_WA_CODE", "B_EXP_CODE")
+    assert bar_b.count("record_status_only_bearer_probe") == len(code_vars)
+    for code_var in code_vars:
+        assert bar_b.count(f'record_status_only_bearer_probe "${code_var}"') == 1
+
+
+def test_attempt18_runner_clock_skew_is_locked_to_the_reference_binder() -> None:
+    import ast
+
+    binder_tree = ast.parse(_BINDER.read_text())
+    config = next(
+        node
+        for node in binder_tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "ReferenceBinderConfig"
+    )
+    skew_node = next(
+        node
+        for node in config.body
+        if isinstance(node, ast.AnnAssign)
+        and isinstance(node.target, ast.Name)
+        and node.target.id == "clock_skew_s"
+    )
+    assert skew_node.value is not None
+    binder_skew_s = float(ast.literal_eval(skew_node.value))
+
+    builder = next(
+        node
+        for node in binder_tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == "build_reference_binder"
+    )
+    config_calls = [
+        node
+        for node in ast.walk(builder)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "ReferenceBinderConfig"
+    ]
+    assert len(config_calls) == 1
+    assert "clock_skew_s" not in {kw.arg for kw in config_calls[0].keywords}, (
+        "the live builder overrides the dataclass skew; the runner's pinned default no longer "
+        "describes the deployed binder"
+    )
+
+    runner_matches = re.findall(r"^_REFERENCE_BINDER_CLOCK_SKEW_S=(\d+)$", _RUNNER_TEXT, re.M)
+    assert runner_matches == ["30"], "the runner skew must have one authoritative assignment"
+    runner_skew_s = float(runner_matches[0])
+    assert runner_skew_s == binder_skew_s == 30.0
+
+
+def test_attempt18_expiry_wait_budget_crosses_exp_plus_skew() -> None:
+    def runner_int(name: str) -> int:
+        matches = re.findall(rf"^{re.escape(name)}=(\d+)$", _RUNNER_TEXT, re.M)
+        assert len(matches) == 1, f"runner constant {name} needs one authoritative assignment"
+        return int(matches[0])
+
+    max_initial_life_s = runner_int("_B_EXP_MAX_INITIAL_LIFE_S")
+    post_deadline_margin_s = runner_int("_B_EXP_POST_DEADLINE_MARGIN_S")
+    wait_budget_s = runner_int("_B_EXP_WAIT_BUDGET_S")
+    skew_s = runner_int("_REFERENCE_BINDER_CLOCK_SKEW_S")
+    assert wait_budget_s > max_initial_life_s + skew_s + post_deadline_margin_s
+
+    bar_b_expiry = _RUNNER_TEXT.split("# expired token:", 1)[1].split(
+        'echo "PROOF M8.5-C (BAR B) PASS"', 1
+    )[0]
+    assert "sleep 13" not in bar_b_expiry
+    assert _RUNNER_TEXT.count("token_past_binder_expiry() {") == 1
+    assert 'token_has_life "$B_EXP" "$_B_EXP_MAX_INITIAL_LIFE_S"' in bar_b_expiry
+    assert (
+        bar_b_expiry.count(
+            'token_past_binder_expiry "$B_EXP" "$_REFERENCE_BINDER_CLOCK_SKEW_S" '
+            '"$_B_EXP_POST_DEADLINE_MARGIN_S"'
+        )
+        >= 2
+    )
+    assert '[ "$B_EXP_PAST_BINDER_DEADLINE" = "true" ]' in bar_b_expiry
