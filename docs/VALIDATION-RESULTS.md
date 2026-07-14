@@ -2715,3 +2715,188 @@ Events:
   `dab2e11191a868da0ddef281e1d59bccd3fecfc00f7e53561e1722a0ef3b2750`
   (`/tmp/proof-m85c.log`, operator-held and not committed). The log captures
   the runner's DNS abort; the exact-build OPA diagnosis followed interactively.
+
+## Proof M8.5 slice — FAILURE (2026-07-14T02:37:04Z)
+
+- Failed step: `SETUP 8 no derived allow-list row (got: allowlist|proof-m85c|10.96.0.51|https://cognic-proof-keycloak:8443/realms/proof-m85c#13bbe635-24ef-5421-a15f-8f1bbc4607cf
+override|proof-m85c|cognic-tool-oracle-schema|http://10.96.0.51:8765/mcp)`
+- last API response (HTTP 200):
+```json
+{"id":"6a0d4269-3fb1-42ed-be5a-8d88fe168df0","kind":"tool","pack_id":"cognic-tool-oracle-schema","display_name":"Cognic Oracle Schema (proof-m85c)","state":"installed","tenant_id":"proof-m85c","created_by":"https://cognic-proof-keycloak:8443/realms/proof-m85c#4ef652ed-afff-514b-ab29-bda01f609ad5","last_actor":"https://cognic-proof-keycloak:8443/realms/proof-m85c#13bbe635-24ef-5421-a15f-8f1bbc4607cf","created_at":"2026-07-14T02:37:02.117791Z","updated_at":"2026-07-14T02:37:03.293117Z"}
+```
+- conversation.% chain rows (tail 10 — digest-only):
+```
+<none>
+```
+- conversations operational records (tail 6 — no plaintext):
+```
+<none>
+```
+- agent / dispatch / gateway reason markers:
+```
+<none captured>
+```
+- agent.run.% run rows (tail 10 — started/terminal, digest-only):
+```
+<none>
+```
+- agent.run.dispatch rows (tail 12 — the A10 chokepoint axis):
+```
+<none>
+```
+- audit.tool_invocation% + gateway.cloud_policy_denied (tail 12):
+```
+<none>
+```
+- gateway_call_ledger (tail 8 — the ADR-007 honesty axis):
+```
+<none>
+```
+- litellm router logs (tail 120 — finding #7 upstream-reason surface):
+```
+INFO:     Started server process [1]
+INFO:     Waiting for application startup.
+
+   ██╗     ██╗████████╗███████╗██╗     ██╗     ███╗   ███╗
+   ██║     ██║╚══██╔══╝██╔════╝██║     ██║     ████╗ ████║
+   ██║     ██║   ██║   █████╗  ██║     ██║     ██╔████╔██║
+   ██║     ██║   ██║   ██╔══╝  ██║     ██║     ██║╚██╔╝██║
+   ███████╗██║   ██║   ███████╗███████╗███████╗██║ ╚═╝ ██║
+   ╚══════╝╚═╝   ╚═╝   ╚══════╝╚══════╝╚══════╝╚═╝     ╚═╝
+
+[92m02:36:25 - LiteLLM:WARNING[0m: utils.py:2730 - register_model: model=28b6d2983a6f399677da597ca6fb94e53da2c35b3f6d0b03ddddeb24d8b9f6a8 not in built-in cost map and no prefix/region variant matched; cache cost fields will default to 0. To track cache cost, add cache_creation_input_token_cost and cache_read_input_token_cost to model_info
+[92m02:36:25 - LiteLLM:WARNING[0m: utils.py:2730 - register_model: model=c90f9f582b805612e00a15941fb336b8fd2f4ca2c308c949de41ac764c32e84a not in built-in cost map and no prefix/region variant matched; cache cost fields will default to 0. To track cache cost, add cache_creation_input_token_cost and cache_read_input_token_cost to model_info
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:4000 (Press CTRL+C to quit)
+
+[1;37m#------------------------------------------------------------#[0m
+[1;37m#                                                            #[0m
+[1;37m#               'A feature I really want is...'               #[0m
+[1;37m#        https://github.com/BerriAI/litellm/issues/new        #[0m
+[1;37m#                                                            #[0m
+[1;37m#------------------------------------------------------------#[0m
+
+ Thank you for using LiteLLM! - Krrish & Ishaan
+
+
+
+[1;31mGive Feedback / Get Help: https://github.com/BerriAI/litellm/issues/new[0m
+
+
+[32mLiteLLM: Proxy initialized with Config, Set models:[0m
+[32m    cognic-tier1-proof-m85c[0m
+[32m    cognic-tier2-proof-m85c[0m
+INFO:     10.244.0.1:41820 - "GET /health/liveliness HTTP/1.1" 200 OK
+INFO:     10.244.0.1:51180 - "GET /health/liveliness HTTP/1.1" 200 OK
+INFO:     10.244.0.1:36110 - "GET /health/liveliness HTTP/1.1" 200 OK
+INFO:     10.244.0.1:35582 - "GET /health/liveliness HTTP/1.1" 200 OK
+```
+- memory.write rows (tail 4 — the task-tier digest axis):
+```
+<none>
+```
+- /api/v1/system/plugins snapshot (plugins + hosted_skills + hosted_agents):
+```json
+{"plugins":[{"kind":"tools","name":"oracle_schema","pack_id":"cognic-tool-oracle-schema","version":"0.3.0","status":"registered","attestation_grade":"partial","signature_digest":"2372b5bfdf3e8455ea42f67f09b316153e7489a59a2ab35bba4087ee2f2cf8a3","refusal_reason":null,"registered_at":"2026-07-14T02:36:33.789839+00:00","discovery_status":"unprobed"},{"kind":"tools","name":"approval_probe","pack_id":"cognic-tool-approval-probe","version":"0.1.0","status":"registered","attestation_grade":"partial","signature_digest":"63ecc1eea2e23bee5256b159d9bb076faa90022b78013f937a36b2c6f0e1099f","refusal_reason":null,"registered_at":"2026-07-14T02:36:33.982452+00:00","discovery_status":"unprobed"},{"kind":"agents","name":"bank-analyst","pack_id":"cognic-agent-bank-analyst","version":"0.1.0","status":"registered","attestation_grade":"partial","signature_digest":"5b8573dbdcb0f1216779325ea514223a89862714a276f205df6c112d54565a9f","refusal_reason":null,"registered_at":"2026-07-14T02:36:34.179486+00:00","discovery_status":"unprobed"},{"kind":"hooks","name":"explode_schema_guard","pack_id":"cognic-hook-schema-guard","version":"0.1.0","status":"registered","attestation_grade":"partial","signature_digest":"76f272a908860edb5cc384445517387755b47b340ebae0e34912af16b6efbb78","refusal_reason":null,"registered_at":"2026-07-14T02:36:34.370555+00:00","discovery_status":"unprobed"},{"kind":"hooks","name":"refuse_forbidden_schema_arg","pack_id":"cognic-hook-schema-guard","version":"0.1.0","status":"registered","attestation_grade":"partial","signature_digest":"76f272a908860edb5cc384445517387755b47b340ebae0e34912af16b6efbb78","refusal_reason":null,"registered_at":"2026-07-14T02:36:34.571167+00:00","discovery_status":"unprobed"},{"kind":"skills","name":"cognic-skill-customer-data","pack_id":"cognic-skill-customer-data","version":"0.1.0","status":"registered","attestation_grade":"partial","signature_digest":"a7dbffca8df5535a8f59a6302dc4e666d4b332adea726a780f7d3d13e3a4d94a","refusal_reason":null,"registered_at":"2026-07-14T02:36:34.773648+00:00","discovery_status":"unprobed"},{"kind":"skills","name":"cognic-skill-atm-recon","pack_id":"cognic-skill-atm-recon","version":"0.1.0","status":"registered","attestation_grade":"partial","signature_digest":"cb77ad1af0b67440d053d8c670991c85371bad50ef6a3f037803848fcdb6534b","refusal_reason":null,"registered_at":"2026-07-14T02:36:34.971047+00:00","discovery_status":"unprobed"},{"kind":"skills","name":"cognic-skill-financial-data","pack_id":"cognic-skill-financial-data","version":"0.1.0","status":"registered","attestation_grade":"partial","signature_digest":"e62d610817955999f3924eb28a5da84c3a9b913698e09cf802318ce3645102f2","refusal_reason":null,"registered_at":"2026-07-14T02:36:35.168825+00:00","discovery_status":"unprobed"},{"kind":"skills","name":"cognic-skill-cards-data","pack_id":"cognic-skill-cards-data","version":"0.1.0","status":"registered","attestation_grade":"partial","signature_digest":"9d72f8048def867889d3014b28ca9142ee96098e36cd9bcf9a485fa58b1201b5","refusal_reason":null,"registered_at":"2026-07-14T02:36:35.366899+00:00","discovery_status":"unprobed"}],"hosted_skills":[{"skill_id":"customer-data","entry_point":null,"declared_tools":[],"runtime_image":null,"pack_version":"0.1.0"},{"skill_id":"atm-recon","entry_point":null,"declared_tools":[],"runtime_image":null,"pack_version":"0.1.0"},{"skill_id":"financial-data","entry_point":null,"declared_tools":[],"runtime_image":null,"pack_version":"0.1.0"},{"skill_id":"cards-data","entry_point":null,"declared_tools":[],"runtime_image":null,"pack_version":"0.1.0"}],"hosted_agents":[{"agent_id":"bank-analyst","requested_skills":["customer-data","financial-data","cards-data"],"requested_tools":["cognic-tool-oracle-schema/run_readonly_query"],"max_steps":6,"risk_tier":"customer_data_read","pack_version":"0.1.0"}],"summary":{"total_discovered":9,"registered":9,"refused_at_registration":0,"by_grade":{"full":0,"partial":9},"by_discovery_status":{"unprobed":9,"auth_ready":0,"refused":0,"unreachable":0}}}
+```
+- otel-collector log (tail 60 — inherited diagnostics; no M8.5 bar depends on spans):
+```
+    Parent ID      : 955693cf1ebcb538
+    ID             : 98f2b788f07d07a1
+    Name           : GET /api/v1/readyz http send
+    Kind           : Internal
+    Start time     : 2026-07-14 02:36:58.269885844 +0000 UTC
+    End time       : 2026-07-14 02:36:58.269916136 +0000 UTC
+    Status code    : Unset
+    Status message :
+Attributes:
+     -> asgi.event.type: Str(http.response.start)
+     -> http.status_code: Int(200)
+Span #5
+    Trace ID       : a500ffd65ce15910ce2496dc89875b1c
+    Parent ID      : 955693cf1ebcb538
+    ID             : 81e96ab7c0e1438b
+    Name           : GET /api/v1/readyz http send
+    Kind           : Internal
+    Start time     : 2026-07-14 02:36:58.270045136 +0000 UTC
+    End time       : 2026-07-14 02:36:58.270051261 +0000 UTC
+    Status code    : Unset
+    Status message :
+Attributes:
+     -> asgi.event.type: Str(http.response.body)
+Span #6
+    Trace ID       : a500ffd65ce15910ce2496dc89875b1c
+    Parent ID      : 955693cf1ebcb538
+    ID             : b80a39cab0551b8b
+    Name           : GET /api/v1/readyz http send
+    Kind           : Internal
+    Start time     : 2026-07-14 02:36:58.270077219 +0000 UTC
+    End time       : 2026-07-14 02:36:58.270082011 +0000 UTC
+    Status code    : Unset
+    Status message :
+Attributes:
+     -> asgi.event.type: Str(http.response.body)
+Span #7
+    Trace ID       : a500ffd65ce15910ce2496dc89875b1c
+    Parent ID      :
+    ID             : 955693cf1ebcb538
+    Name           : GET /api/v1/readyz
+    Kind           : Server
+    Start time     : 2026-07-14 02:36:58.248743594 +0000 UTC
+    End time       : 2026-07-14 02:36:58.270141386 +0000 UTC
+    Status code    : Unset
+    Status message :
+Attributes:
+     -> http.scheme: Str(https)
+     -> http.host: Str(10.244.0.23:8443)
+     -> net.host.port: Int(8443)
+     -> http.flavor: Str(1.1)
+     -> http.target: Str(/api/v1/readyz)
+     -> http.url: Str(https://10.244.0.23:8443/api/v1/readyz)
+     -> http.method: Str(GET)
+     -> http.server_name: Str(10.244.0.23:8443)
+     -> http.user_agent: Str(kube-probe/1.36)
+     -> net.peer.ip: Str(10.244.0.1)
+     -> net.peer.port: Int(54850)
+     -> http.route: Str(/api/v1/readyz)
+     -> http.status_code: Int(200)
+	{"kind": "exporter", "data_type": "traces", "name": "debug"}
+```
+- AgentOS pod logs (tail 180):
+```
+Defaulted container "agentos" out of: agentos, broker-share-perms (init)
+INFO:     Started server process [1]
+INFO:     Waiting for application startup.
+{"ts": "2026-07-14 02:36:33,078", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333 \"HTTP/1.1 200 OK\"", "request_id": null, "trace_id": null, "span_id": null}
+{"ts": "2026-07-14 02:36:35,835", "level": "INFO", "logger": "cognic_agentos.portal.api.app", "message": "sandbox.reaper.disabled", "request_id": null, "trace_id": null, "span_id": null, "remediation": "set sandbox_reaper_enabled=true on EXACTLY ONE instance to run the resumable-session retention sweep (single-instance posture per spec \u00a713; Sprint 10.5 adds leader election)"}
+INFO:     Application startup complete.
+INFO:     Uvicorn running on https://0.0.0.0:8443 (Press CTRL+C to quit)
+{"ts": "2026-07-14 02:36:37,780", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-1707f85676764cbb9bee08a43f5d4208", "trace_id": "fb70e7febfa017379a138313f4be573f", "span_id": "3cb16184c771ff48", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 1.585, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-14 02:36:38,248", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-412db11fe2cc4f49aafb49a49f427f3e", "trace_id": "ab5c7d490adc5a5121afdcd02bf3135e", "span_id": "c0c6e647b65af91d"}
+{"ts": "2026-07-14 02:36:38,258", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-412db11fe2cc4f49aafb49a49f427f3e", "trace_id": "ab5c7d490adc5a5121afdcd02bf3135e", "span_id": "c0c6e647b65af91d"}
+{"ts": "2026-07-14 02:36:38,266", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-412db11fe2cc4f49aafb49a49f427f3e", "trace_id": "ab5c7d490adc5a5121afdcd02bf3135e", "span_id": "c0c6e647b65af91d"}
+{"ts": "2026-07-14 02:36:38,266", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-412db11fe2cc4f49aafb49a49f427f3e", "trace_id": "ab5c7d490adc5a5121afdcd02bf3135e", "span_id": "c0c6e647b65af91d", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 22.579, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-14 02:36:39,353", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-df5a3ebacf12451bb8ba5b28c7a2ad85", "trace_id": "f23f753d61a1b64934e4420abff86ede", "span_id": "d27b3601ca9bcb73", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.109, "client_addr": "127.0.0.1"}
+{"ts": "2026-07-14 02:36:42,308", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-0869ded10df241ff8b29619deada5f4e", "trace_id": "c2a7408f4f91f937953103898e0998a4", "span_id": "bffc6ad6fa946829", "http_method": "GET", "http_path": "/api/v1/system/plugins", "http_has_query": true, "http_query_param_count": 1, "http_status_code": 200, "duration_ms": 0.841, "client_addr": "127.0.0.1"}
+{"ts": "2026-07-14 02:36:42,404", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-56879081601f4a6a84306c915ac8743f", "trace_id": "32ab469423427b29409a8d9287485d45", "span_id": "1267e57cae74187a", "http_method": "GET", "http_path": "/api/v1/system/plugins", "http_has_query": true, "http_query_param_count": 1, "http_status_code": 200, "duration_ms": 0.209, "client_addr": "127.0.0.1"}
+{"ts": "2026-07-14 02:36:42,769", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-cd1688aa6dc14fe18e321900edcf81ff", "trace_id": "ef230103d2c7e98dd86ec48259656c09", "span_id": "0a03cd8ee84dda99", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.098, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-14 02:36:48,247", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-0a8f1f93d17d4a34aff158865355211b", "trace_id": "a8c6273e4f46b901853a4d341e9eedb0", "span_id": "888b8b78034e027d"}
+{"ts": "2026-07-14 02:36:48,257", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-0a8f1f93d17d4a34aff158865355211b", "trace_id": "a8c6273e4f46b901853a4d341e9eedb0", "span_id": "888b8b78034e027d"}
+{"ts": "2026-07-14 02:36:48,267", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-0a8f1f93d17d4a34aff158865355211b", "trace_id": "a8c6273e4f46b901853a4d341e9eedb0", "span_id": "888b8b78034e027d"}
+{"ts": "2026-07-14 02:36:48,267", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-0a8f1f93d17d4a34aff158865355211b", "trace_id": "a8c6273e4f46b901853a4d341e9eedb0", "span_id": "888b8b78034e027d", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 23.249, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-14 02:36:57,773", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-85296f20f80b4315aa5628cec1f5f6c3", "trace_id": "c45726ce511fa27983e14ae5992853ba", "span_id": "c2c23c0c11456e82", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.222, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-14 02:36:58,251", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-b1a3c3ba98bd4f3699f2f3f5f738592b", "trace_id": "a500ffd65ce15910ce2496dc89875b1c", "span_id": "955693cf1ebcb538"}
+{"ts": "2026-07-14 02:36:58,260", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-b1a3c3ba98bd4f3699f2f3f5f738592b", "trace_id": "a500ffd65ce15910ce2496dc89875b1c", "span_id": "955693cf1ebcb538"}
+{"ts": "2026-07-14 02:36:58,269", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-b1a3c3ba98bd4f3699f2f3f5f738592b", "trace_id": "a500ffd65ce15910ce2496dc89875b1c", "span_id": "955693cf1ebcb538"}
+{"ts": "2026-07-14 02:36:58,269", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-b1a3c3ba98bd4f3699f2f3f5f738592b", "trace_id": "a500ffd65ce15910ce2496dc89875b1c", "span_id": "955693cf1ebcb538", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 20.619, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-14 02:37:02,139", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-df79e8c838244a18b38422030f53c70c", "trace_id": "dddcd5ec370e97fdfcbe32f34c9293b1", "span_id": "96f90f85c2bcf4df", "http_method": "POST", "http_path": "/api/v1/packs/drafts", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 201, "duration_ms": 25.467, "client_addr": "127.0.0.1"}
+{"ts": "2026-07-14 02:37:02,424", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-5ddae63e2af44dfdad566b6d4c1fa151", "trace_id": "d1194a577d70d0623136a88c4b0a2788", "span_id": "eaab237221d67acd", "http_method": "POST", "http_path": "/api/v1/packs/drafts/6a0d4269-3fb1-42ed-be5a-8d88fe168df0/submit", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 19.0, "client_addr": "127.0.0.1"}
+{"ts": "2026-07-14 02:37:02,651", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-cb2137f794084af4979038580b65b6bd", "trace_id": "bc4ea391f5ed7a1767764c683e986a8a", "span_id": "8116b2f2a3f91e81", "http_method": "POST", "http_path": "/api/v1/packs/6a0d4269-3fb1-42ed-be5a-8d88fe168df0/claim", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 6.225, "client_addr": "127.0.0.1"}
+{"ts": "2026-07-14 02:37:02,930", "level": "WARNING", "logger": "cognic_agentos.portal.api.packs.review_routes", "message": "portal.packs.approve_overridden", "request_id": "portal-req-6a4fd02b6dc44f039c98f1443fcc5758", "trace_id": "9b0f4bbbaacc16f83b213603f29b29d7", "span_id": "19c9dca57d5b161a", "actor_subject": "https://cognic-proof-keycloak:8443/realms/proof-m85c#53cf5f16-efd4-5ae5-ae59-850959b80542", "pack_id": "6a0d4269-3fb1-42ed-be5a-8d88fe168df0", "override_reason": "prerelease_validation", "override_event_id": "cd70ea1d-2bb5-4a48-a59d-4fab9f5fd234"}
+{"ts": "2026-07-14 02:37:02,931", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-6a4fd02b6dc44f039c98f1443fcc5758", "trace_id": "9b0f4bbbaacc16f83b213603f29b29d7", "span_id": "19c9dca57d5b161a", "http_method": "POST", "http_path": "/api/v1/packs/6a0d4269-3fb1-42ed-be5a-8d88fe168df0/approve", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 205.847, "client_addr": "127.0.0.1"}
+{"ts": "2026-07-14 02:37:03,153", "level": "WARNING", "logger": "cognic_agentos.portal.api.packs.operator_routes", "message": "portal.packs.allow_list", "request_id": "portal-req-91e1eaf0254247a0b036cc97c34c33a8", "trace_id": "171fe283f1fce5e6fb605720487b4a04", "span_id": "db8c1f59eeb58e34", "actor_subject": "https://cognic-proof-keycloak:8443/realms/proof-m85c#13bbe635-24ef-5421-a15f-8f1bbc4607cf", "actor_type": "human", "pack_id": "6a0d4269-3fb1-42ed-be5a-8d88fe168df0"}
+{"ts": "2026-07-14 02:37:03,154", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-91e1eaf0254247a0b036cc97c34c33a8", "trace_id": "171fe283f1fce5e6fb605720487b4a04", "span_id": "db8c1f59eeb58e34", "http_method": "POST", "http_path": "/api/v1/packs/6a0d4269-3fb1-42ed-be5a-8d88fe168df0/allow-list", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 7.124, "client_addr": "127.0.0.1"}
+{"ts": "2026-07-14 02:37:03,237", "level": "WARNING", "logger": "cognic_agentos.portal.api.packs.configure_routes", "message": "portal.packs.configure_set", "request_id": "portal-req-334421f2f5614953bbe07bbd74e928b1", "trace_id": "80087e4bc41af4f5fb1315fb4b1cfe96", "span_id": "918e6aea1e76849b", "tenant_id": "proof-m85c", "pack_id": "6a0d4269-3fb1-42ed-be5a-8d88fe168df0", "actor_subject": "https://cognic-proof-keycloak:8443/realms/proof-m85c#13bbe635-24ef-5421-a15f-8f1bbc4607cf", "actor_type": "human"}
+{"ts": "2026-07-14 02:37:03,238", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-334421f2f5614953bbe07bbd74e928b1", "trace_id": "80087e4bc41af4f5fb1315fb4b1cfe96", "span_id": "918e6aea1e76849b", "http_method": "PUT", "http_path": "/api/v1/packs/6a0d4269-3fb1-42ed-be5a-8d88fe168df0/runtime-config", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 9.803, "client_addr": "127.0.0.1"}
+{"ts": "2026-07-14 02:37:03,313", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-5f3f639f5de04729951839572e2a0afd", "trace_id": "f2b8697cafc02986b67ac46e631da148", "span_id": "136885683debe236", "http_method": "POST", "http_path": "/api/v1/packs/6a0d4269-3fb1-42ed-be5a-8d88fe168df0/install", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 24.047, "client_addr": "127.0.0.1"}
+```

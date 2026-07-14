@@ -3113,13 +3113,14 @@ load_http_code # after api command substitution
 echo "==> SETUP 8 — assert materialization (decision_history: mcp.override.set + mcp.allowlist.add)"
 MAT="$(PSQL "SELECT event_type FROM decision_history WHERE event_type IN ('mcp.override.set','mcp.allowlist.add') AND tenant_id='$TENANT';")"
 DERIVED_ROWS="$(PSQL "SELECT 'override|' || tenant_id || '|' || pack_id || '|' || server_url_override FROM mcp_server_url_override WHERE tenant_id='$TENANT' UNION ALL SELECT 'allowlist|' || tenant_id || '|' || ip || '|' || set_by_actor FROM mcp_internal_host_allowlist WHERE tenant_id='$TENANT' ORDER BY 1;")"
+SETUP_OPERATOR_SUBJECT="$(bound_subject "${IDENTITY_USER[operator]}")"
 grep -qF "mcp.override.set" <<<"$MAT" \
   || bar_fail "SETUP 8 no mcp.override.set materialization event (got: ${MAT:-<none>})"
 grep -qF "mcp.allowlist.add" <<<"$MAT" \
   || bar_fail "SETUP 8 no mcp.allowlist.add materialization event (got: ${MAT:-<none>})"
 grep -qF "override|$TENANT|$PACK_ID|http://10.96.0.51:8765/mcp" <<<"$DERIVED_ROWS" \
   || bar_fail "SETUP 8 no derived override row (got: ${DERIVED_ROWS:-<none>})"
-grep -qF "allowlist|$TENANT|10.96.0.51|proof-m85c-operator" <<<"$DERIVED_ROWS" \
+grep -qF "allowlist|$TENANT|10.96.0.51|$SETUP_OPERATOR_SUBJECT" <<<"$DERIVED_ROWS" \
   || bar_fail "SETUP 8 no derived allow-list row (got: ${DERIVED_ROWS:-<none>})"
 echo "  SETUP 8 OK: override + allow-list rows materialized by install (not seeded)"
 

@@ -3677,3 +3677,24 @@ def test_attempt6_proof_image_never_resolves_aiodocker_outside_uv_lock() -> None
         '-t "$IMAGE" "$PROOF_DIR"',
     )
     assert "docker_build_with_retry --network=host" in proof_build
+
+
+# --------------------------------------------------------------------------- #
+# LIVE ATTEMPT 8 — SETUP 8 compared a bound subject to a mutable login name.  #
+# --------------------------------------------------------------------------- #
+
+
+def test_attempt8_materialization_asserts_the_reference_binder_subject() -> None:
+    """The allow-list row stores Actor.subject, not preferred_username.
+
+    M8.5-C retired the proof-header binder, so every persisted actor is the
+    issuer-qualified Keycloak ``sub``. Resolve the expected operator through
+    the same realm-subjects authority used by seeding and revocation checks.
+    """
+    setup8 = _extract_runner_block(
+        'echo "==> SETUP 8 — assert materialization',
+        'echo "  SETUP 8 OK:',
+    )
+    assert 'SETUP_OPERATOR_SUBJECT="$(bound_subject "${IDENTITY_USER[operator]}")"' in setup8
+    assert "allowlist|$TENANT|10.96.0.51|$SETUP_OPERATOR_SUBJECT" in setup8
+    assert "allowlist|$TENANT|10.96.0.51|proof-m85c-operator" not in setup8
