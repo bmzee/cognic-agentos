@@ -242,11 +242,37 @@ The demo does **not** run on one schema. It runs on **five scopes, each with its
 | `financial` | `FIN` | ours (existing seed) | `financial-data` | bank-shaped read |
 | `cards` | `CARDS` | ours (existing seed) | `cards-data` | **the entitlement refusal** |
 | `hr` | `HR` | **Oracle sample v23.3** | `hr-data` **(new)** | read **+ the WRITE target** |
-| `orders` | `CO` (Customer Orders) | **Oracle sample v23.3** | `orders-data` **(new)** | a genuinely different domain (semi-structured/JSON) |
+| `orders` | `CO` (Customer Orders) | **Oracle sample v23.3** | `orders-data` **(new)** | a different modality (semi-structured / JSON) |
+| `warehouse` | `SH` (Sales History) | **Oracle sample v23.3** | `warehouse-data` **(new)** | **the ACCURACY proving ground** — see §7.1.1 |
 
 `atm-recon` remains a **published skill that is deliberately not granted** — the standing negative proof of the two-key model (a pack may request; only an operator grants).
 
-**`SH` (Sales History) is deliberately excluded** — ~90 MB of CSV, a long install, and it adds no routing dimension the other five do not already provide. YAGNI on a demo substrate.
+### 7.1.1 Why `SH` is in — accuracy, not routing (ruled 2026-07-14)
+
+An earlier draft cut `SH` as YAGNI. **That judgement was made on the wrong axis.** `SH` adds no new *routing* dimension — but routing is not the product.
+
+> **The kernel governs. The skill *knows*. Accuracy is the product.**
+
+Anyone can point an LLM at a database. Being **right** — correct join path, correct grain, no silent double-counting across a fan-out join, correct time-hierarchy semantics — lives entirely in the **skill**. That is the differentiator, and **you cannot hallucinate on relational data**: a wrong number is worse than a refusal, because it is *believed*.
+
+`SH` is the only schema in the set that can genuinely break us: a **partitioned star schema** — fact table, dimensions, a calendar hierarchy, promotions, channels, ~90 MB of real rows. It is the shape of every bank warehouse on earth. `HR` (107 employees) and `CO` cannot test accuracy at all; they can only test plumbing.
+
+Cost, stated honestly: ~90 MB of CSV and a longer database init (minutes, not seconds). Well inside XE 21c's limits (12 GB user data / 2 GB RAM). **We pay it, because the alternative is an accuracy claim with no evidence behind it.**
+
+### 7.1.2 Proving the accuracy claim — the golden-query evaluation (NEW)
+
+**"Pitch-perfect skills" is a claim. A claim without measurement is exactly the species of unfounded assertion this project refuses to ship** (cf. the license audit of the wrong environment, the SBOM of the dev tree, the VPD that never existed). If a bank asks *"how accurate is it?"*, **"very" is not an answer — a number is.**
+
+**We do not build this. The machinery already exists and is unused for this purpose:** `evaluation/` ships a corpus loader, a bulk runner, scorers, an LLM-judge, and replay (ADR-010), with portal routes at `/api/v1/eval/bulk-run`.
+
+**Therefore each skill ships with a golden query set** — natural-language question → expected result — and the accuracy number is produced by the **existing** bulk evaluation runner, not by an assertion in a slide.
+
+- **Scored on the RESULT, not the SQL string.** There are many correct spellings of one correct query; there is one correct answer. Comparing SQL text would reward mimicry and punish valid alternatives.
+- **The corpus lives WITH the skill**, in the skill pack, versioned and signed alongside it. A skill and its evidence of correctness are one artifact — if you change the skill, you re-run its evidence.
+- **Adversarial cases are mandatory, not optional.** The fan-out double-count, the wrong grain, the time-hierarchy trap, the ambiguous column name. A corpus of only easy questions measures nothing.
+- **The number is published in the demo.** *"On N golden questions across five schemas, accuracy is X%"* — with the failures shown, not hidden. A bank that is told 100% stops believing you; a bank that is shown the failure modes and the refusal behaviour starts trusting you.
+
+**This is a new deliverable and it earns its own sprint (D-S6).** It is also the strongest possible answer to *"but LLMs hallucinate"* — the objection every bank will raise before it raises any other.
 
 **What the multi-scope surface buys us — four demo moments the single-schema version cannot produce:**
 
@@ -351,9 +377,10 @@ The current checklist defers pilot readiness to M15–M17 and marks M8.5-E "must
 |---|---|---|
 | **D-S1** | **Capability classes.** Manifest field + build-time validator + dispatch gate keyed on class + Rego input + fail-closed default. Deletes `_QUERY_CONTEXT_STAMPED_TOOLS`. | CC review; TM-revert pins that an absent/unknown class refuses and that `entitlement_verified` cannot be reached without an entitlement read. |
 | **D-S2** | **The write path (HP-5).** `pending_approval` terminal state; typed catch of the approval-pending refusal; action-context token (`args_sha256` + `idempotency_key`); conversation stores + resumes the grant on the next turn ("go ahead"); the `approval` UI-event family gets its emit hooks. | CC review on every module. The largest slice. |
-| **D-S3** | **The data layer.** Oracle sample schemas v23.3 (`HR` + `CO`) installed via the existing initdb hook; governed views + per-scope proxy identities (`AN_HR`, `AN_CO`, …) with grants covering **only** their own scope; the two new instruction-skill packs (`hr-data`, `orders-data`, signed + released); the five-scope `data_scopes` / `entitlements` seed (Amir ≠ Sara). | The cross-schema `ORA-00942` refusal (moment 5) is a **bar**, not a claim. |
+| **D-S3** | **The data layer.** Oracle sample schemas v23.3 (`HR` + `CO` + `SH`) installed via the existing initdb hook; governed views + per-scope proxy identities (`AN_HR`, `AN_CO`, `AN_SH`, …) with grants covering **only** their own scope; the three new instruction-skill packs (`hr-data`, `orders-data`, `warehouse-data`, signed + released); the six-scope `data_scopes` / `entitlements` seed (Amir ≠ Sara). | The cross-schema `ORA-00942` refusal (moment 5) is a **bar**, not a claim. |
 | **D-S4** | **`cognic-tool-hr-leave`** (external repo) — `LEAVE_REQUESTS` + the subject-binding rule (§7.3) + the persisted idempotency key. Signed release, sha256-pinned. | Same trust pipeline as the approval probe. |
 | **D-S5** | **Proof on `kind`** — the nine moments as bars: skill routing; entitlement refusal; **same question / two humans / two outcomes**; live revocation; cross-schema engine refusal; propose → four-eyes → "go ahead" → exactly-once; replay refused; someone-else's-leave refused. | Live proof; VALIDATION-RESULTS. |
+| **D-S6** | **The accuracy evidence (§7.1.2).** A golden query corpus per skill — including adversarial cases (fan-out double-count, wrong grain, time-hierarchy trap) — run through the **existing** bulk evaluation harness. Result-scored, not SQL-string-scored. Corpus ships **inside** the skill pack, versioned and signed with it. | A published accuracy **number** with its failures shown. Not a claim. |
 
 **M8.5-D2 — Bank demo on AKS. May overlap D-S1…D-S4 — the Azure clock is not our review loop.**
 
