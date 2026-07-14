@@ -522,16 +522,39 @@ kc_pf_start() {
 # BFF_POD_2. MUST run after ANYTHING that replaces pods (the rollouts inside
 # bff_set_ttls, the deliberate pod kill in S9) — a stale name would make the
 # attribution below NAME A POD THAT NO LONGER EXISTS, and `kubectl port-forward`
-# would simply fail. Phase-filtered so a Terminating pod cannot be picked as the
-# forward target moments after a kill.
+# would simply fail. A terminating pod KEEPS phase=Running, so phase filtering alone
+# is insufficient: require no deletionTimestamp AND Ready=True, then require the
+# Deployment's exact two-replica postcondition before binding either name.
 bff_resolve_pods() {
-  local pods
-  pods="$(kubectl -n "$NS" get pods -l app=cognic-proof-harness \
-            --field-selector=status.phase=Running -o name 2>/dev/null || true)"
-  BFF_POD_1="$(printf '%s\n' "$pods" | sed -n 1p)"
-  BFF_POD_2="$(printf '%s\n' "$pods" | sed -n 2p)"
-  [ -n "$BFF_POD_1" ] \
-    || bar_fail "no Running BFF replica pod found (app=cognic-proof-harness) — the per-step replica attribution the spec's Bar A contract requires cannot be established"
+  local pods _i
+  BFF_POD_1=""
+  BFF_POD_2=""
+  for _i in $(seq 1 30); do
+    if pods="$(kubectl -n "$NS" get pods -l app=cognic-proof-harness -o json 2>/dev/null \
+      | python3 -c '
+import json, sys
+document = json.load(sys.stdin)
+names = sorted(
+    "pod/" + item["metadata"]["name"]
+    for item in document.get("items", [])
+    if item.get("metadata", {}).get("deletionTimestamp") is None
+    and item.get("status", {}).get("phase") == "Running"
+    and any(
+        condition.get("type") == "Ready" and condition.get("status") == "True"
+        for condition in item.get("status", {}).get("conditions", [])
+    )
+)
+if len(names) != 2:
+    raise SystemExit(2)
+print("\n".join(names))
+')"; then
+      BFF_POD_1="$(printf '%s\n' "$pods" | sed -n 1p)"
+      BFF_POD_2="$(printf '%s\n' "$pods" | sed -n 2p)"
+      return 0
+    fi
+    sleep 1
+  done
+  bar_fail "the BFF did not settle at exactly 2 Ready, non-Terminating replicas — per-step attribution cannot safely bind a pod"
 }
 
 # bff_served_by <STEP> [POD] — the value-free per-step attribution line (spec §5.2

@@ -3979,3 +3979,92 @@ def test_attempt12_admin_token_subject_matches_the_keycloak_manifest(tmp_path: P
     probe = _run_bash(script)
     assert probe.returncode == 0, probe.stderr
     assert probe.stdout.strip() == "admin-token"
+
+
+# --------------------------------------------------------------------------- #
+# LIVE ATTEMPT 13 — phase=Running admitted a terminating rollout predecessor. #
+# --------------------------------------------------------------------------- #
+
+
+def test_attempt13_pod_resolution_excludes_terminating_and_unready_replicas(
+    tmp_path: Path,
+) -> None:
+    """Execute the real resolver over the Kubernetes state that broke attempt 13.
+
+    A terminating pod retains ``phase=Running``. The old field-selector therefore
+    chose the rollout predecessor, whose port-forward could never become reachable.
+    The resolver must bind exactly the two Ready pods without deletion timestamps.
+    """
+    pods = {
+        "items": [
+            {
+                "metadata": {
+                    "name": "old-terminating",
+                    "deletionTimestamp": "2026-07-14T09:07:00Z",
+                },
+                "status": {
+                    "phase": "Running",
+                    "conditions": [{"type": "Ready", "status": "True"}],
+                },
+            },
+            {
+                "metadata": {"name": "replacement-b"},
+                "status": {
+                    "phase": "Running",
+                    "conditions": [{"type": "Ready", "status": "True"}],
+                },
+            },
+            {
+                "metadata": {"name": "replacement-unready"},
+                "status": {
+                    "phase": "Running",
+                    "conditions": [{"type": "Ready", "status": "False"}],
+                },
+            },
+            {
+                "metadata": {"name": "replacement-a"},
+                "status": {
+                    "phase": "Running",
+                    "conditions": [{"type": "Ready", "status": "True"}],
+                },
+            },
+        ]
+    }
+    fixture = tmp_path / "pods.json"
+    fixture.write_text(json.dumps(pods))
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    kubectl = bin_dir / "kubectl"
+    kubectl.write_text(
+        "#!/bin/sh\n"
+        'case " $* " in\n'
+        '  *" -o json "*) cat "$FAKE_PODS_JSON" ;;\n'
+        "  *\" -o name \"*) printf '%s\\n' pod/old-terminating "
+        "pod/replacement-a pod/replacement-b pod/replacement-unready ;;\n"
+        '  *) echo "unexpected kubectl invocation: $*" >&2; exit 90 ;;\n'
+        "esac\n"
+    )
+    kubectl.chmod(0o755)
+
+    resolver = _extract_shell_function("bff_resolve_pods")
+    script = "\n".join(
+        [
+            "set -euo pipefail",
+            f"PATH={shlex.quote(str(bin_dir))}:$PATH",
+            f"FAKE_PODS_JSON={shlex.quote(str(fixture))}",
+            "export PATH FAKE_PODS_JSON",
+            'NS="proof"',
+            'BFF_POD_1=""',
+            'BFF_POD_2=""',
+            "bar_fail() { printf 'FAIL: %s\\n' \"$1\" >&2; exit 1; }",
+            resolver,
+            "bff_resolve_pods",
+            'printf \'%s|%s\\n\' "$BFF_POD_1" "$BFF_POD_2"',
+        ]
+    )
+    probe = _run_bash(script)
+    assert probe.returncode == 0, probe.stderr
+    assert probe.stdout.strip() == "pod/replacement-a|pod/replacement-b"
+    assert 'get("deletionTimestamp") is None' in resolver
+    assert 'condition.get("type") == "Ready"' in resolver
+    assert "if len(names) != 2" in resolver
