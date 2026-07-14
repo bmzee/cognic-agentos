@@ -84,8 +84,12 @@ spec:
           volumeMounts:
             - { name: harness-tls, mountPath: /etc/harness-tls, readOnly: true }
             - { name: proof-ca, mountPath: /etc/proof-ca, readOnly: true }
+          # The v1 harness has no synthetic health route. Probe the real,
+          # unauthenticated sign-in page: it is registered by the shipped web
+          # artifact, returns 200 without creating a session, and only becomes
+          # reachable after the lifespan's OIDC discovery has completed.
           readinessProbe:
-            httpGet: { path: /healthz, port: 8443, scheme: HTTPS }
+            httpGet: { path: /signin, port: 8443, scheme: HTTPS }
             initialDelaySeconds: 5
             periodSeconds: 5
             failureThreshold: 30

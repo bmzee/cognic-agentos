@@ -38,6 +38,7 @@ import time
 from pathlib import Path
 
 import pytest
+import yaml
 
 _REPO = Path(__file__).resolve().parents[3]
 _PROOF = _REPO / "infra" / "proof-m85c"
@@ -3490,3 +3491,62 @@ def test_r5_the_role_lookup_resolves_under_set_u_on_every_bash(fn: str) -> None:
         assert '"outcome": "authenticated"' in probe.stdout
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------- #
+# LIVE ATTEMPT 4 — the BFF was serving, but its readiness path did not exist. #
+# --------------------------------------------------------------------------- #
+
+
+def test_attempt4_bff_manifest_probes_the_real_unauthenticated_route() -> None:
+    """The attempt-4 pods were Running but stayed 0/1 because `/healthz` returned
+    404 forever. The shipped v1 artifact's unauthenticated serving route is `/signin`;
+    pin the parsed manifest rather than merely finding the string in a comment."""
+    documents = [doc for doc in yaml.safe_load_all(_BFF_YAML.read_text()) if doc]
+    deployment = next(doc for doc in documents if doc["kind"] == "Deployment")
+    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    probe = container["readinessProbe"]["httpGet"]
+    assert probe == {"path": "/signin", "port": 8443, "scheme": "HTTPS"}
+
+
+def test_attempt4_runner_and_manifest_share_the_bff_serving_path() -> None:
+    """The per-pod forwards must test the same route Kubernetes gates. A drift on
+    either side can make rollout and the live session checks disagree."""
+    assert 'BFF_SERVING_PATH="/signin"' in _RUNNER_TEXT
+    for function_name in ("bff_pf_pod", "bff_pf_dual"):
+        body = _extract_shell_function(function_name)
+        assert "$BFF_SERVING_PATH" in body
+        assert "/healthz" not in body
+
+
+def test_attempt4_bff_serving_probes_fail_on_http_errors_and_are_bounded() -> None:
+    """Plain curl exits zero on 404 — exactly why the pre-fix host-side probes
+    blessed the nonexistent route. Both single- and dual-pod probes require `-f`
+    and a short deadline, so a 4xx/5xx or hung socket cannot look reachable."""
+    for function_name in ("bff_pf_pod", "bff_pf_dual"):
+        body = _extract_shell_function(function_name)
+        calls = [line for line in body.splitlines() if "curl -" in line]
+        assert calls, f"{function_name} no longer executes a curl serving probe"
+        assert all("-fsS" in line for line in calls)
+        assert body.count("--max-time 5") == len(calls)
+
+
+def test_attempt4_bff_fail_captures_events_without_persisting_access_logs() -> None:
+    """The failed rollout told the operator to inspect BFF logs but the cleanup trap
+    deleted them before the committed capture could retain the diagnosis. Preserve
+    pod state/events, never access logs (OIDC callback queries can carry code/state)."""
+    body = _extract_shell_function("bff_fail")
+    assert "get deployment,pods" in body
+    assert "describe pods -l app=cognic-proof-harness" in body
+    assert 'bar_fail "$where"' in body
+    assert 'kubectl -n "$NS" logs' not in body
+    assert "access logs deliberately excluded" in body
+
+    for failure in (
+        "the BFF (cognic-proof-harness) did not become ready within 300s",
+        "BAR A S4 the BFF did not roll out",
+        "BAR A S6 could not port-forward BOTH replicas",
+        "BAR A S9 the BFF did not recover 2 replicas",
+    ):
+        line = next(line for line in _RUNNER_TEXT.splitlines() if failure in line)
+        assert "bff_fail" in line

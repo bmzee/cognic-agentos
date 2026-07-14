@@ -273,6 +273,11 @@ HARNESS_IMAGE="cognic-harness:proofm85c"
 HARNESS_HOST="cognic-proof-harness"
 HARNESS_PORT=8443
 HARNESS_BASE_URL="https://127.0.0.1:8444"           # host port-forward -> the BFF Service
+# The v1 harness deliberately exposes no synthetic health route. `/signin` is
+# its unauthenticated, side-effect-free serving probe: a 200 proves the shipped
+# web route is live after the lifespan's OIDC discovery. Keep this in lockstep
+# with manifests/bff.yaml; the structural suite pins both sides.
+BFF_SERVING_PATH="/signin"
 # The proof driver reuses the SAME cognic-harness client through a loopback
 # redirect, so azp stays cognic-harness on every token the kernel sees. This URI
 # is registered in the realm as a second redirect; nothing ever listens on it —
@@ -1062,12 +1067,13 @@ bff_pf_pod() {
   kubectl -n "$NS" port-forward --address 127.0.0.1 "$pod" "8444:$HARNESS_PORT" >/dev/null 2>&1 &
   PF_BFF=$!
   for _i in $(seq 1 30); do
-    if curl -s -o /dev/null --cacert "$PROOF_CA" "$HARNESS_BASE_URL/healthz" 2>/dev/null; then
+    if curl -fsS -o /dev/null --max-time 5 --cacert "$PROOF_CA" \
+        "$HARNESS_BASE_URL$BFF_SERVING_PATH" 2>/dev/null; then
       return 0
     fi
     sleep 1
   done
-  bar_fail "per-pod port-forward to $pod did not become reachable"
+  bff_fail "per-pod port-forward to $pod did not become reachable"
 }
 
 # ---- BFF probes used by the live session cases (S4 / S6 / S7 / S10) --------------
@@ -1136,7 +1142,7 @@ bff_set_ttls() {
     "COGNIC_HARNESS_SESSION_IDLE_TTL_S=$1" "COGNIC_HARNESS_SESSION_ABSOLUTE_TTL_S=$2" >/dev/null \
     || bar_fail "BAR A S4 could not set the BFF session TTLs (idle=$1 absolute=$2)"
   kubectl -n "$NS" rollout status deploy/cognic-proof-harness --timeout=180s \
-    || bar_fail "BAR A S4 the BFF did not roll out with TTLs idle=$1 absolute=$2"
+    || bff_fail "BAR A S4 the BFF did not roll out with TTLs idle=$1 absolute=$2"
   BFF_CURRENT_POD=""            # the pods this named are GONE — re-resolve, never reuse
   bff_pf_start
 }
@@ -1158,13 +1164,15 @@ bff_pf_dual() {
   kubectl -n "$NS" port-forward --address 127.0.0.1 "$pod_b" "8445:$HARNESS_PORT" >/dev/null 2>&1 &
   PF_BFF_B=$!
   for _i in $(seq 1 30); do
-    if curl -s -o /dev/null --cacert "$PROOF_CA" "$BFF_POD_A_URL/healthz" 2>/dev/null \
-       && curl -s -o /dev/null --cacert "$PROOF_CA" "$BFF_POD_B_URL/healthz" 2>/dev/null; then
+    if curl -fsS -o /dev/null --max-time 5 --cacert "$PROOF_CA" \
+         "$BFF_POD_A_URL$BFF_SERVING_PATH" 2>/dev/null \
+       && curl -fsS -o /dev/null --max-time 5 --cacert "$PROOF_CA" \
+         "$BFF_POD_B_URL$BFF_SERVING_PATH" 2>/dev/null; then
       return 0
     fi
     sleep 1
   done
-  bar_fail "BAR A S6 could not port-forward BOTH replicas simultaneously ($pod_a, $pod_b)"
+  bff_fail "BAR A S6 could not port-forward BOTH replicas simultaneously ($pod_a, $pod_b)"
 }
 
 # bff_pf_dual_stop — drop the second forward and restore the single named-pod forward.
@@ -1990,6 +1998,33 @@ bar_fail() {
     echo '```'
   } >> docs/VALIDATION-RESULTS.md
   exit 1
+}
+
+# BFF readiness/reachability failures need BFF-owned diagnostics before the
+# generic evidence capture runs. Pod describe/events are deliberately captured
+# instead of access logs: an OIDC callback URL can contain a short-lived code +
+# state in its query string, and failure evidence must never persist either.
+bff_fail() {
+  local where="$1" bff_state bff_describe
+  bff_state="$(kubectl -n "$NS" get deployment,pods \
+    -l app=cognic-proof-harness -o wide 2>&1 || true)"
+  bff_describe="$(kubectl -n "$NS" describe pods -l app=cognic-proof-harness \
+    2>&1 | tail -180 || true)"
+  {
+    echo ""
+    echo "## Proof M8.5-C BFF readiness diagnostics ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+    echo ""
+    echo "- Failed step: \`$where\`"
+    echo "- BFF deployment + pods:"
+    echo '```'
+    echo "${bff_state:-<none>}"
+    echo '```'
+    echo "- BFF pod describe/events (tail 180; access logs deliberately excluded):"
+    echo '```'
+    echo "${bff_describe:-<none>}"
+    echo '```'
+  } >> docs/VALIDATION-RESULTS.md
+  bar_fail "$where"
 }
 
 # Step-5 XE-readiness failure path (mirrors proof-m6 xe_fail).
@@ -2913,7 +2948,7 @@ kubectl -n "$NS" create secret tls proof-m85c-harness-tls \
 echo "==> BFF 5 — deploy the two BFF replicas + port-forward"
 kubectl -n "$NS" apply -f "$PROOF_DIR/manifests/bff.yaml"
 kubectl -n "$NS" rollout status deploy/cognic-proof-harness --timeout=300s \
-  || bar_fail "the BFF (cognic-proof-harness) did not become ready within 300s — check the harness pod logs (Settings fail-closed? Redis TLS? OIDC discovery?)"
+  || bff_fail "the BFF (cognic-proof-harness) did not become ready within 300s"
 bff_pf_start
 echo "  BFF ready: 2 replicas behind svc/cognic-proof-harness; host port-forward at $HARNESS_BASE_URL"
 
@@ -3471,7 +3506,7 @@ A_POD_A_UID="$(kubectl -n "$NS" get "$A_POD_A" -o jsonpath='{.metadata.uid}')"
 kubectl -n "$NS" delete "$A_POD_A" --wait=true >/dev/null \
   || bar_fail "BAR A S9 the victim pod delete FAILED — no replica restarted, so the leg would prove nothing"
 kubectl -n "$NS" rollout status deploy/cognic-proof-harness --timeout=180s \
-  || bar_fail "BAR A S9 the BFF did not recover 2 replicas after a pod kill"
+  || bff_fail "BAR A S9 the BFF did not recover 2 replicas after a pod kill"
 A_UIDS_AFTER=" $(kubectl -n "$NS" get pods -l app=cognic-proof-harness -o jsonpath='{.items[*].metadata.uid}') "
 case "$A_UIDS_AFTER" in
   *" $A_POD_A_UID "*)

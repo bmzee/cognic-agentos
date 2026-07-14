@@ -1611,3 +1611,357 @@ INFO:     Uvicorn running on https://0.0.0.0:8443 (Press CTRL+C to quit)
 {"ts": "2026-07-13 15:50:21,676", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-be180ba7a81e49cbb0f3a0f8d93dd3bc", "trace_id": "4336fcfe4fcc2a9fcd523729f33c0c96", "span_id": "cc02a9e7e91a1e74", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 31.075, "client_addr": "10.244.0.1"}
 {"ts": "2026-07-13 15:50:23,017", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-59444b0a3ff0458592af3e09ca2a6026", "trace_id": "73957477a4c9e5969adfeb882395dca4", "span_id": "a6e29790e69120d4", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.113, "client_addr": "127.0.0.1"}
 ```
+
+## Proof M8.5 slice — FAILURE (2026-07-13T16:50:35Z)
+
+- Failed step: `the BFF (cognic-proof-harness) did not become ready within 300s — check the harness pod logs (Settings fail-closed? Redis TLS? OIDC discovery?)`
+- Attempt 4 exited 1 before Bars A-F and before any model call. The 795-line
+  operator-held log has SHA-256
+  `d799775970e7d7d22efe8eaef1b85e8aef225a3abb98abfd396916be0e326fc8`.
+- Operator diagnosis: both BFF pods reached `Running` and logged application
+  startup complete, but remained `0/1`; Kubernetes repeatedly requested the
+  manifest's `/healthz` readiness path and received `404 Not Found`. The v1
+  harness exposes no `/healthz` route. Step 0a had already passed the exact
+  live access-token/ID-token claim split, so this was a BFF readiness-contract
+  defect, not an OIDC realm regression.
+- last API response (HTTP ):
+```json
+<no response captured>
+
+```
+- conversation.% chain rows (tail 10 — digest-only):
+```
+<none>
+```
+- conversations operational records (tail 6 — no plaintext):
+```
+<none>
+```
+- agent / dispatch / gateway reason markers:
+```
+<none captured>
+```
+- agent.run.% run rows (tail 10 — started/terminal, digest-only):
+```
+<none>
+```
+- agent.run.dispatch rows (tail 12 — the A10 chokepoint axis):
+```
+<none>
+```
+- audit.tool_invocation% + gateway.cloud_policy_denied (tail 12):
+```
+<none>
+```
+- gateway_call_ledger (tail 8 — the ADR-007 honesty axis):
+```
+<none>
+```
+- litellm router logs (tail 120 — finding #7 upstream-reason surface):
+```
+INFO:     Started server process [1]
+INFO:     Waiting for application startup.
+
+   ██╗     ██╗████████╗███████╗██╗     ██╗     ███╗   ███╗
+   ██║     ██║╚══██╔══╝██╔════╝██║     ██║     ████╗ ████║
+   ██║     ██║   ██║   █████╗  ██║     ██║     ██╔████╔██║
+   ██║     ██║   ██║   ██╔══╝  ██║     ██║     ██║╚██╔╝██║
+   ███████╗██║   ██║   ███████╗███████╗███████╗██║ ╚═╝ ██║
+   ╚══════╝╚═╝   ╚═╝   ╚══════╝╚══════╝╚══════╝╚═╝     ╚═╝
+
+[92m16:45:01 - LiteLLM:WARNING[0m: utils.py:2730 - register_model: model=28b6d2983a6f399677da597ca6fb94e53da2c35b3f6d0b03ddddeb24d8b9f6a8 not in built-in cost map and no prefix/region variant matched; cache cost fields will default to 0. To track cache cost, add cache_creation_input_token_cost and cache_read_input_token_cost to model_info
+[92m16:45:01 - LiteLLM:WARNING[0m: utils.py:2730 - register_model: model=c90f9f582b805612e00a15941fb336b8fd2f4ca2c308c949de41ac764c32e84a not in built-in cost map and no prefix/region variant matched; cache cost fields will default to 0. To track cache cost, add cache_creation_input_token_cost and cache_read_input_token_cost to model_info
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:4000 (Press CTRL+C to quit)
+
+[1;37m#------------------------------------------------------------#[0m
+[1;37m#                                                            #[0m
+[1;37m#           'It would help me if you could add...'            #[0m
+[1;37m#        https://github.com/BerriAI/litellm/issues/new        #[0m
+[1;37m#                                                            #[0m
+[1;37m#------------------------------------------------------------#[0m
+
+ Thank you for using LiteLLM! - Krrish & Ishaan
+
+
+
+[1;31mGive Feedback / Get Help: https://github.com/BerriAI/litellm/issues/new[0m
+
+
+[32mLiteLLM: Proxy initialized with Config, Set models:[0m
+[32m    cognic-tier1-proof-m85c[0m
+[32m    cognic-tier2-proof-m85c[0m
+INFO:     10.244.0.1:43638 - "GET /health/liveliness HTTP/1.1" 200 OK
+INFO:     10.244.0.1:56582 - "GET /health/liveliness HTTP/1.1" 200 OK
+INFO:     10.244.0.1:39764 - "GET /health/liveliness HTTP/1.1" 200 OK
+INFO:     10.244.0.1:60168 - "GET /health/liveliness HTTP/1.1" 200 OK
+INFO:     10.244.0.1:52032 - "GET /health/liveliness HTTP/1.1" 200 OK
+INFO:     10.244.0.1:36342 - "GET /health/liveliness HTTP/1.1" 200 OK
+INFO:     10.244.0.1:37648 - "GET /health/liveliness HTTP/1.1" 200 OK
+INFO:     10.244.0.1:50416 - "GET /health/liveliness HTTP/1.1" 200 OK
+INFO:     10.244.0.1:33398 - "GET /health/liveliness HTTP/1.1" 200 OK
+INFO:     10.244.0.1:57548 - "GET /health/liveliness HTTP/1.1" 200 OK
+INFO:     10.244.0.1:58640 - "GET /health/liveliness HTTP/1.1" 200 OK
+INFO:     10.244.0.1:59794 - "GET /health/liveliness HTTP/1.1" 200 OK
+INFO:     10.244.0.1:36488 - "GET /health/liveliness HTTP/1.1" 200 OK
+INFO:     10.244.0.1:53876 - "GET /health/liveliness HTTP/1.1" 200 OK
+INFO:     10.244.0.1:45772 - "GET /health/liveliness HTTP/1.1" 200 OK
+INFO:     10.244.0.1:38776 - "GET /health/liveliness HTTP/1.1" 200 OK
+INFO:     10.244.0.1:39970 - "GET /health/liveliness HTTP/1.1" 200 OK
+INFO:     10.244.0.1:44064 - "GET /health/liveliness HTTP/1.1" 200 OK
+INFO:     10.244.0.1:47714 - "GET /health/liveliness HTTP/1.1" 200 OK
+INFO:     10.244.0.1:43216 - "GET /health/liveliness HTTP/1.1" 200 OK
+INFO:     10.244.0.1:37068 - "GET /health/liveliness HTTP/1.1" 200 OK
+INFO:     10.244.0.1:57140 - "GET /health/liveliness HTTP/1.1" 200 OK
+INFO:     10.244.0.1:47864 - "GET /health/liveliness HTTP/1.1" 200 OK
+INFO:     10.244.0.1:40874 - "GET /health/liveliness HTTP/1.1" 200 OK
+INFO:     10.244.0.1:54158 - "GET /health/liveliness HTTP/1.1" 200 OK
+INFO:     10.244.0.1:58696 - "GET /health/liveliness HTTP/1.1" 200 OK
+INFO:     10.244.0.1:55238 - "GET /health/liveliness HTTP/1.1" 200 OK
+INFO:     10.244.0.1:51162 - "GET /health/liveliness HTTP/1.1" 200 OK
+INFO:     10.244.0.1:49500 - "GET /health/liveliness HTTP/1.1" 200 OK
+INFO:     10.244.0.1:47462 - "GET /health/liveliness HTTP/1.1" 200 OK
+INFO:     10.244.0.1:35072 - "GET /health/liveliness HTTP/1.1" 200 OK
+INFO:     10.244.0.1:39550 - "GET /health/liveliness HTTP/1.1" 200 OK
+INFO:     10.244.0.1:46948 - "GET /health/liveliness HTTP/1.1" 200 OK
+INFO:     10.244.0.1:57394 - "GET /health/liveliness HTTP/1.1" 200 OK
+```
+- memory.write rows (tail 4 — the task-tier digest axis):
+```
+<none>
+```
+- /api/v1/system/plugins snapshot (plugins + hosted_skills + hosted_agents):
+```json
+{"plugins":[{"kind":"tools","name":"oracle_schema","pack_id":"cognic-tool-oracle-schema","version":"0.3.0","status":"registered","attestation_grade":"partial","signature_digest":"7bce4f1c456137c5793796472083e8e7bea1c8f9a7bd78754c6f24b45fc4a085","refusal_reason":null,"registered_at":"2026-07-13T16:45:10.324639+00:00","discovery_status":"unprobed"},{"kind":"tools","name":"approval_probe","pack_id":"cognic-tool-approval-probe","version":"0.1.0","status":"registered","attestation_grade":"partial","signature_digest":"9cbb2f14cbf5bf8acf459721edffde397b9bb267102a1104d77f9c9fcaf81dc4","refusal_reason":null,"registered_at":"2026-07-13T16:45:10.587390+00:00","discovery_status":"unprobed"},{"kind":"agents","name":"bank-analyst","pack_id":"cognic-agent-bank-analyst","version":"0.1.0","status":"registered","attestation_grade":"partial","signature_digest":"5b8573dbdcb0f1216779325ea514223a89862714a276f205df6c112d54565a9f","refusal_reason":null,"registered_at":"2026-07-13T16:45:10.844400+00:00","discovery_status":"unprobed"},{"kind":"hooks","name":"explode_schema_guard","pack_id":"cognic-hook-schema-guard","version":"0.1.0","status":"registered","attestation_grade":"partial","signature_digest":"76f272a908860edb5cc384445517387755b47b340ebae0e34912af16b6efbb78","refusal_reason":null,"registered_at":"2026-07-13T16:45:11.093635+00:00","discovery_status":"unprobed"},{"kind":"hooks","name":"refuse_forbidden_schema_arg","pack_id":"cognic-hook-schema-guard","version":"0.1.0","status":"registered","attestation_grade":"partial","signature_digest":"76f272a908860edb5cc384445517387755b47b340ebae0e34912af16b6efbb78","refusal_reason":null,"registered_at":"2026-07-13T16:45:11.355727+00:00","discovery_status":"unprobed"},{"kind":"skills","name":"cognic-skill-customer-data","pack_id":"cognic-skill-customer-data","version":"0.1.0","status":"registered","attestation_grade":"partial","signature_digest":"a7dbffca8df5535a8f59a6302dc4e666d4b332adea726a780f7d3d13e3a4d94a","refusal_reason":null,"registered_at":"2026-07-13T16:45:11.612066+00:00","discovery_status":"unprobed"},{"kind":"skills","name":"cognic-skill-atm-recon","pack_id":"cognic-skill-atm-recon","version":"0.1.0","status":"registered","attestation_grade":"partial","signature_digest":"cb77ad1af0b67440d053d8c670991c85371bad50ef6a3f037803848fcdb6534b","refusal_reason":null,"registered_at":"2026-07-13T16:45:11.871136+00:00","discovery_status":"unprobed"},{"kind":"skills","name":"cognic-skill-financial-data","pack_id":"cognic-skill-financial-data","version":"0.1.0","status":"registered","attestation_grade":"partial","signature_digest":"e62d610817955999f3924eb28a5da84c3a9b913698e09cf802318ce3645102f2","refusal_reason":null,"registered_at":"2026-07-13T16:45:12.116602+00:00","discovery_status":"unprobed"},{"kind":"skills","name":"cognic-skill-cards-data","pack_id":"cognic-skill-cards-data","version":"0.1.0","status":"registered","attestation_grade":"partial","signature_digest":"9d72f8048def867889d3014b28ca9142ee96098e36cd9bcf9a485fa58b1201b5","refusal_reason":null,"registered_at":"2026-07-13T16:45:12.366195+00:00","discovery_status":"unprobed"}],"hosted_skills":[{"skill_id":"customer-data","entry_point":null,"declared_tools":[],"runtime_image":null,"pack_version":"0.1.0"},{"skill_id":"atm-recon","entry_point":null,"declared_tools":[],"runtime_image":null,"pack_version":"0.1.0"},{"skill_id":"financial-data","entry_point":null,"declared_tools":[],"runtime_image":null,"pack_version":"0.1.0"},{"skill_id":"cards-data","entry_point":null,"declared_tools":[],"runtime_image":null,"pack_version":"0.1.0"}],"hosted_agents":[{"agent_id":"bank-analyst","requested_skills":["customer-data","financial-data","cards-data"],"requested_tools":["cognic-tool-oracle-schema/run_readonly_query"],"max_steps":6,"risk_tier":"customer_data_read","pack_version":"0.1.0"}],"summary":{"total_discovered":9,"registered":9,"refused_at_registration":0,"by_grade":{"full":0,"partial":9},"by_discovery_status":{"unprobed":9,"auth_ready":0,"refused":0,"unreachable":0}}}
+```
+- otel-collector log (tail 60 — inherited diagnostics; no M8.5 bar depends on spans):
+```
+    Parent ID      : 3d4c7144b2893c9d
+    ID             : f4c89e7c7f33b4ad
+    Name           : GET /api/v1/readyz http send
+    Kind           : Internal
+    Start time     : 2026-07-13 16:50:23.691626637 +0000 UTC
+    End time       : 2026-07-13 16:50:23.691654179 +0000 UTC
+    Status code    : Unset
+    Status message :
+Attributes:
+     -> asgi.event.type: Str(http.response.start)
+     -> http.status_code: Int(200)
+Span #1
+    Trace ID       : 6cc32c61303f752069c0f909c2e2be01
+    Parent ID      : 3d4c7144b2893c9d
+    ID             : 7ae25ff2cc80b417
+    Name           : GET /api/v1/readyz http send
+    Kind           : Internal
+    Start time     : 2026-07-13 16:50:23.691781012 +0000 UTC
+    End time       : 2026-07-13 16:50:23.691788762 +0000 UTC
+    Status code    : Unset
+    Status message :
+Attributes:
+     -> asgi.event.type: Str(http.response.body)
+Span #2
+    Trace ID       : 6cc32c61303f752069c0f909c2e2be01
+    Parent ID      : 3d4c7144b2893c9d
+    ID             : b58fb5fdd67bd650
+    Name           : GET /api/v1/readyz http send
+    Kind           : Internal
+    Start time     : 2026-07-13 16:50:23.691829679 +0000 UTC
+    End time       : 2026-07-13 16:50:23.691836804 +0000 UTC
+    Status code    : Unset
+    Status message :
+Attributes:
+     -> asgi.event.type: Str(http.response.body)
+Span #3
+    Trace ID       : 6cc32c61303f752069c0f909c2e2be01
+    Parent ID      :
+    ID             : 3d4c7144b2893c9d
+    Name           : GET /api/v1/readyz
+    Kind           : Server
+    Start time     : 2026-07-13 16:50:23.667844262 +0000 UTC
+    End time       : 2026-07-13 16:50:23.691889762 +0000 UTC
+    Status code    : Unset
+    Status message :
+Attributes:
+     -> http.scheme: Str(https)
+     -> http.host: Str(10.244.0.23:8443)
+     -> net.host.port: Int(8443)
+     -> http.flavor: Str(1.1)
+     -> http.target: Str(/api/v1/readyz)
+     -> http.url: Str(https://10.244.0.23:8443/api/v1/readyz)
+     -> http.method: Str(GET)
+     -> http.server_name: Str(10.244.0.23:8443)
+     -> http.user_agent: Str(kube-probe/1.36)
+     -> net.peer.ip: Str(10.244.0.1)
+     -> net.peer.port: Int(34696)
+     -> http.route: Str(/api/v1/readyz)
+     -> http.status_code: Int(200)
+	{"kind": "exporter", "data_type": "traces", "name": "debug"}
+```
+- AgentOS pod logs (tail 180):
+```
+Defaulted container "agentos" out of: agentos, broker-share-perms (init)
+INFO:     Started server process [1]
+INFO:     Waiting for application startup.
+{"ts": "2026-07-13 16:45:09,402", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333 \"HTTP/1.1 200 OK\"", "request_id": null, "trace_id": null, "span_id": null}
+{"ts": "2026-07-13 16:45:12,853", "level": "INFO", "logger": "cognic_agentos.portal.api.app", "message": "sandbox.reaper.disabled", "request_id": null, "trace_id": null, "span_id": null, "remediation": "set sandbox_reaper_enabled=true on EXACTLY ONE instance to run the resumable-session retention sweep (single-instance posture per spec \u00a713; Sprint 10.5 adds leader election)"}
+INFO:     Application startup complete.
+INFO:     Uvicorn running on https://0.0.0.0:8443 (Press CTRL+C to quit)
+{"ts": "2026-07-13 16:45:13,273", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-273045be73af451dafdc5071badd9bb1", "trace_id": "493200775015c8f1e1a8c55c7f5b7185", "span_id": "7197a6986c8e0f73", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 1.028, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:45:13,672", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-46d0877d8ce3427a80a723b29a324949", "trace_id": "3ed48a889a4477ee20f8d3df2e865603", "span_id": "4d41f29bbae4c461"}
+{"ts": "2026-07-13 16:45:13,686", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-46d0877d8ce3427a80a723b29a324949", "trace_id": "3ed48a889a4477ee20f8d3df2e865603", "span_id": "4d41f29bbae4c461"}
+{"ts": "2026-07-13 16:45:13,697", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-46d0877d8ce3427a80a723b29a324949", "trace_id": "3ed48a889a4477ee20f8d3df2e865603", "span_id": "4d41f29bbae4c461"}
+{"ts": "2026-07-13 16:45:13,698", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-46d0877d8ce3427a80a723b29a324949", "trace_id": "3ed48a889a4477ee20f8d3df2e865603", "span_id": "4d41f29bbae4c461", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 30.614, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:45:15,034", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-e6043187eefc4f83b672555873192d58", "trace_id": "0411a077fed5209db9f5e4f07a4e489a", "span_id": "4ce340193d05bead", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.124, "client_addr": "127.0.0.1"}
+{"ts": "2026-07-13 16:45:18,080", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-c22f754d294748109b223905d3881d88", "trace_id": "309d21158cdb050df0921518c7f4744d", "span_id": "14d48442efcf1a50", "http_method": "GET", "http_path": "/api/v1/system/plugins", "http_has_query": true, "http_query_param_count": 1, "http_status_code": 200, "duration_ms": 1.01, "client_addr": "127.0.0.1"}
+{"ts": "2026-07-13 16:45:18,191", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-f2c9abbc781f42aabca628ba6a7c549f", "trace_id": "78599a6d57bbeef090cf45aa3d74457a", "span_id": "4c6642476e15a9e7", "http_method": "GET", "http_path": "/api/v1/system/plugins", "http_has_query": true, "http_query_param_count": 1, "http_status_code": 200, "duration_ms": 0.216, "client_addr": "127.0.0.1"}
+{"ts": "2026-07-13 16:45:18,271", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-2cf803e1d6fb47d6b07db2ca4287275f", "trace_id": "fda1a9fdd40de0ee249c1093c5b07d75", "span_id": "974f72082963727a", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.124, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:45:23,661", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-c455557ba0e8475fb39c931e893e5a7e", "trace_id": "72002a93b70b3a25014c97bce727c422", "span_id": "6ce891dd2c434b3d"}
+{"ts": "2026-07-13 16:45:23,672", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-c455557ba0e8475fb39c931e893e5a7e", "trace_id": "72002a93b70b3a25014c97bce727c422", "span_id": "6ce891dd2c434b3d"}
+{"ts": "2026-07-13 16:45:23,683", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-c455557ba0e8475fb39c931e893e5a7e", "trace_id": "72002a93b70b3a25014c97bce727c422", "span_id": "6ce891dd2c434b3d"}
+{"ts": "2026-07-13 16:45:23,683", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-c455557ba0e8475fb39c931e893e5a7e", "trace_id": "72002a93b70b3a25014c97bce727c422", "span_id": "6ce891dd2c434b3d", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 25.911, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:45:33,270", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-03efb567c4394453bba8ca4764fe22e4", "trace_id": "c3c72cadda9135b08de26a2f8e984d5e", "span_id": "094d5dfe05682a29", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.107, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:45:33,665", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-2afcc6e4e08b4153b5a8fe7648179db0", "trace_id": "5581823c4b53ba44b9e3440033853faf", "span_id": "fcf9de0e7f648ea8"}
+{"ts": "2026-07-13 16:45:33,676", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-2afcc6e4e08b4153b5a8fe7648179db0", "trace_id": "5581823c4b53ba44b9e3440033853faf", "span_id": "fcf9de0e7f648ea8"}
+{"ts": "2026-07-13 16:45:33,686", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-2afcc6e4e08b4153b5a8fe7648179db0", "trace_id": "5581823c4b53ba44b9e3440033853faf", "span_id": "fcf9de0e7f648ea8"}
+{"ts": "2026-07-13 16:45:33,686", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-2afcc6e4e08b4153b5a8fe7648179db0", "trace_id": "5581823c4b53ba44b9e3440033853faf", "span_id": "fcf9de0e7f648ea8", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 26.231, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:45:43,662", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-9f0620b1bb2245b49e75675c555c339e", "trace_id": "7b583c0018bedc400774975574c7be0c", "span_id": "b4023cffe6b56c8e"}
+{"ts": "2026-07-13 16:45:43,673", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-9f0620b1bb2245b49e75675c555c339e", "trace_id": "7b583c0018bedc400774975574c7be0c", "span_id": "b4023cffe6b56c8e"}
+{"ts": "2026-07-13 16:45:43,684", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-9f0620b1bb2245b49e75675c555c339e", "trace_id": "7b583c0018bedc400774975574c7be0c", "span_id": "b4023cffe6b56c8e"}
+{"ts": "2026-07-13 16:45:43,684", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-9f0620b1bb2245b49e75675c555c339e", "trace_id": "7b583c0018bedc400774975574c7be0c", "span_id": "b4023cffe6b56c8e", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 26.106, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:45:48,277", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-6294ddb162b146919d719b44f63d5d17", "trace_id": "364b635e0a0b5471a70505d08f0499fa", "span_id": "b421a75103375756", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.324, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:45:53,669", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-844bacd17f604a2fa57325ba27831893", "trace_id": "af5676ecab5842704eba4cdd9c2843b5", "span_id": "8a338a36344e9d3c"}
+{"ts": "2026-07-13 16:45:53,680", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-844bacd17f604a2fa57325ba27831893", "trace_id": "af5676ecab5842704eba4cdd9c2843b5", "span_id": "8a338a36344e9d3c"}
+{"ts": "2026-07-13 16:45:53,690", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-844bacd17f604a2fa57325ba27831893", "trace_id": "af5676ecab5842704eba4cdd9c2843b5", "span_id": "8a338a36344e9d3c"}
+{"ts": "2026-07-13 16:45:53,690", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-844bacd17f604a2fa57325ba27831893", "trace_id": "af5676ecab5842704eba4cdd9c2843b5", "span_id": "8a338a36344e9d3c", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 26.049, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:46:03,272", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-2af61fb32df843a8ba104f8205cb3595", "trace_id": "54409506b503195220c9e43dfcd088be", "span_id": "f631890db9d5e7cc", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.104, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:46:03,666", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-5194579f2bcc42688970ec2f354d6f80", "trace_id": "bdd5f13ec60dc03f45457b8db506953d", "span_id": "2569d4e1e9d14d66"}
+{"ts": "2026-07-13 16:46:03,677", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-5194579f2bcc42688970ec2f354d6f80", "trace_id": "bdd5f13ec60dc03f45457b8db506953d", "span_id": "2569d4e1e9d14d66"}
+{"ts": "2026-07-13 16:46:03,688", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-5194579f2bcc42688970ec2f354d6f80", "trace_id": "bdd5f13ec60dc03f45457b8db506953d", "span_id": "2569d4e1e9d14d66"}
+{"ts": "2026-07-13 16:46:03,688", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-5194579f2bcc42688970ec2f354d6f80", "trace_id": "bdd5f13ec60dc03f45457b8db506953d", "span_id": "2569d4e1e9d14d66", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 26.728, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:46:13,673", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-9d711cbabc78459a8bc2252090bcd334", "trace_id": "ad51bcabcc1c541e9f6e3d9aeae2a726", "span_id": "85f25a174a3af276"}
+{"ts": "2026-07-13 16:46:13,683", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-9d711cbabc78459a8bc2252090bcd334", "trace_id": "ad51bcabcc1c541e9f6e3d9aeae2a726", "span_id": "85f25a174a3af276"}
+{"ts": "2026-07-13 16:46:13,693", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-9d711cbabc78459a8bc2252090bcd334", "trace_id": "ad51bcabcc1c541e9f6e3d9aeae2a726", "span_id": "85f25a174a3af276"}
+{"ts": "2026-07-13 16:46:13,694", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-9d711cbabc78459a8bc2252090bcd334", "trace_id": "ad51bcabcc1c541e9f6e3d9aeae2a726", "span_id": "85f25a174a3af276", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 24.866, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:46:18,276", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-e6a733a7d5464604b10f64c6452b920f", "trace_id": "824709e7a023b4603346b48d922211f6", "span_id": "6524fc3ce8ddfc3f", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.224, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:46:23,669", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-621b9fcc7d02439ca3ad0ff37ba44101", "trace_id": "bd2206875a21322c22e4567d74ff0dba", "span_id": "2eefac3d1572dc3d"}
+{"ts": "2026-07-13 16:46:23,681", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-621b9fcc7d02439ca3ad0ff37ba44101", "trace_id": "bd2206875a21322c22e4567d74ff0dba", "span_id": "2eefac3d1572dc3d"}
+{"ts": "2026-07-13 16:46:23,690", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-621b9fcc7d02439ca3ad0ff37ba44101", "trace_id": "bd2206875a21322c22e4567d74ff0dba", "span_id": "2eefac3d1572dc3d"}
+{"ts": "2026-07-13 16:46:23,691", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-621b9fcc7d02439ca3ad0ff37ba44101", "trace_id": "bd2206875a21322c22e4567d74ff0dba", "span_id": "2eefac3d1572dc3d", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 29.638, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:46:33,272", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-63b33d1fc81d48a9a779867f7b5c6c66", "trace_id": "29026915adfda2412bd5b7f60503ef97", "span_id": "a6bcb7b7cdae863d", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.116, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:46:33,666", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-321a691200b449a0bd904d78e021286e", "trace_id": "090d460aac5a01f366c68a3ffe7cbf1c", "span_id": "af3213ae1df555bf"}
+{"ts": "2026-07-13 16:46:33,676", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-321a691200b449a0bd904d78e021286e", "trace_id": "090d460aac5a01f366c68a3ffe7cbf1c", "span_id": "af3213ae1df555bf"}
+{"ts": "2026-07-13 16:46:33,687", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-321a691200b449a0bd904d78e021286e", "trace_id": "090d460aac5a01f366c68a3ffe7cbf1c", "span_id": "af3213ae1df555bf"}
+{"ts": "2026-07-13 16:46:33,687", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-321a691200b449a0bd904d78e021286e", "trace_id": "090d460aac5a01f366c68a3ffe7cbf1c", "span_id": "af3213ae1df555bf", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 25.062, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:46:43,665", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-34e367ae7e394aafbbe5593209e08ca0", "trace_id": "86fad5af4e17b05bc8ad07477cffb50c", "span_id": "73f0cdfc55118908"}
+{"ts": "2026-07-13 16:46:43,676", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-34e367ae7e394aafbbe5593209e08ca0", "trace_id": "86fad5af4e17b05bc8ad07477cffb50c", "span_id": "73f0cdfc55118908"}
+{"ts": "2026-07-13 16:46:43,686", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-34e367ae7e394aafbbe5593209e08ca0", "trace_id": "86fad5af4e17b05bc8ad07477cffb50c", "span_id": "73f0cdfc55118908"}
+{"ts": "2026-07-13 16:46:43,687", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-34e367ae7e394aafbbe5593209e08ca0", "trace_id": "86fad5af4e17b05bc8ad07477cffb50c", "span_id": "73f0cdfc55118908", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 25.873, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:46:48,277", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-c68506d7d03c4f0fbc44885183e4fd3a", "trace_id": "cb236563400fc6174a47bced081f36d9", "span_id": "bf6521e82e21db5e", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.216, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:46:53,666", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-2941a246a80140d386ca68dac1e7c81a", "trace_id": "4328a4b2eda3a4ff5564c6d1c414ee07", "span_id": "157289fd7dd62e30"}
+{"ts": "2026-07-13 16:46:53,677", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-2941a246a80140d386ca68dac1e7c81a", "trace_id": "4328a4b2eda3a4ff5564c6d1c414ee07", "span_id": "157289fd7dd62e30"}
+{"ts": "2026-07-13 16:46:53,686", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-2941a246a80140d386ca68dac1e7c81a", "trace_id": "4328a4b2eda3a4ff5564c6d1c414ee07", "span_id": "157289fd7dd62e30"}
+{"ts": "2026-07-13 16:46:53,686", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-2941a246a80140d386ca68dac1e7c81a", "trace_id": "4328a4b2eda3a4ff5564c6d1c414ee07", "span_id": "157289fd7dd62e30", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 25.399, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:47:03,274", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-8a32872db8b74f879cc18c691ecfc9c7", "trace_id": "72df257149a36354a4bbd84638de894e", "span_id": "d95f9cba9c80178e", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.116, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:47:03,675", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-4663d7facd334650aae5e9070431f74d", "trace_id": "95d1c5af57e9f34c14fbfe69dcd6c7ca", "span_id": "a19a9a724cfc4f4b"}
+{"ts": "2026-07-13 16:47:03,686", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-4663d7facd334650aae5e9070431f74d", "trace_id": "95d1c5af57e9f34c14fbfe69dcd6c7ca", "span_id": "a19a9a724cfc4f4b"}
+{"ts": "2026-07-13 16:47:03,695", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-4663d7facd334650aae5e9070431f74d", "trace_id": "95d1c5af57e9f34c14fbfe69dcd6c7ca", "span_id": "a19a9a724cfc4f4b"}
+{"ts": "2026-07-13 16:47:03,695", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-4663d7facd334650aae5e9070431f74d", "trace_id": "95d1c5af57e9f34c14fbfe69dcd6c7ca", "span_id": "a19a9a724cfc4f4b", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 30.164, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:47:13,667", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-94f613324b5a43e580c7165b226b8a74", "trace_id": "50dfb2ddefddcb5d73d5ff95839127d9", "span_id": "7fd28b49b9d497e6"}
+{"ts": "2026-07-13 16:47:13,678", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-94f613324b5a43e580c7165b226b8a74", "trace_id": "50dfb2ddefddcb5d73d5ff95839127d9", "span_id": "7fd28b49b9d497e6"}
+{"ts": "2026-07-13 16:47:13,688", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-94f613324b5a43e580c7165b226b8a74", "trace_id": "50dfb2ddefddcb5d73d5ff95839127d9", "span_id": "7fd28b49b9d497e6"}
+{"ts": "2026-07-13 16:47:13,688", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-94f613324b5a43e580c7165b226b8a74", "trace_id": "50dfb2ddefddcb5d73d5ff95839127d9", "span_id": "7fd28b49b9d497e6", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 25.436, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:47:18,279", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-7589105500b941e6ab4d3a85fb30d95b", "trace_id": "998ca9b7ab8b5c1479f1e13f8ae29818", "span_id": "9fdd42ae41c110bd", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.204, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:47:23,667", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-125e297d06ba4eab9e25438d55fd85bc", "trace_id": "6b90c2479236afb534973463a7264c71", "span_id": "b21bce8e1d01cce9"}
+{"ts": "2026-07-13 16:47:23,678", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-125e297d06ba4eab9e25438d55fd85bc", "trace_id": "6b90c2479236afb534973463a7264c71", "span_id": "b21bce8e1d01cce9"}
+{"ts": "2026-07-13 16:47:23,688", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-125e297d06ba4eab9e25438d55fd85bc", "trace_id": "6b90c2479236afb534973463a7264c71", "span_id": "b21bce8e1d01cce9"}
+{"ts": "2026-07-13 16:47:23,688", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-125e297d06ba4eab9e25438d55fd85bc", "trace_id": "6b90c2479236afb534973463a7264c71", "span_id": "b21bce8e1d01cce9", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 24.236, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:47:33,274", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-8bdb909bd35646d791962111e446c39b", "trace_id": "436da823a11f6d30d2787479e229e7fb", "span_id": "aaf53fe71b547d39", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.118, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:47:33,670", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-a71e61d0b6414c8b8aeefa44cc7c13a9", "trace_id": "b4cbe98d5d1b8cdfc4fc348e326796a4", "span_id": "5974987ae2a31608"}
+{"ts": "2026-07-13 16:47:33,682", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-a71e61d0b6414c8b8aeefa44cc7c13a9", "trace_id": "b4cbe98d5d1b8cdfc4fc348e326796a4", "span_id": "5974987ae2a31608"}
+{"ts": "2026-07-13 16:47:33,691", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-a71e61d0b6414c8b8aeefa44cc7c13a9", "trace_id": "b4cbe98d5d1b8cdfc4fc348e326796a4", "span_id": "5974987ae2a31608"}
+{"ts": "2026-07-13 16:47:33,692", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-a71e61d0b6414c8b8aeefa44cc7c13a9", "trace_id": "b4cbe98d5d1b8cdfc4fc348e326796a4", "span_id": "5974987ae2a31608", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 26.581, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:47:43,667", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-46a42bee1bd34a55bda65c91315531e0", "trace_id": "d156dfec05f29d0aa8224424f2131db2", "span_id": "66deae7ae47d6ebd"}
+{"ts": "2026-07-13 16:47:43,678", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-46a42bee1bd34a55bda65c91315531e0", "trace_id": "d156dfec05f29d0aa8224424f2131db2", "span_id": "66deae7ae47d6ebd"}
+{"ts": "2026-07-13 16:47:43,687", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-46a42bee1bd34a55bda65c91315531e0", "trace_id": "d156dfec05f29d0aa8224424f2131db2", "span_id": "66deae7ae47d6ebd"}
+{"ts": "2026-07-13 16:47:43,688", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-46a42bee1bd34a55bda65c91315531e0", "trace_id": "d156dfec05f29d0aa8224424f2131db2", "span_id": "66deae7ae47d6ebd", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 24.326, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:47:48,279", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-a299ed2f2a364d60a867522d57659b84", "trace_id": "e098a9f01ac81b4099ec2de5002911ca", "span_id": "b09370595af8e400", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.205, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:47:53,670", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-c064b55df9ac49728b6f4d441a2a733a", "trace_id": "f4a9b77cec71d8b4efc16ad6a9b33e55", "span_id": "248ca7dc8dab21d4"}
+{"ts": "2026-07-13 16:47:53,681", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-c064b55df9ac49728b6f4d441a2a733a", "trace_id": "f4a9b77cec71d8b4efc16ad6a9b33e55", "span_id": "248ca7dc8dab21d4"}
+{"ts": "2026-07-13 16:47:53,690", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-c064b55df9ac49728b6f4d441a2a733a", "trace_id": "f4a9b77cec71d8b4efc16ad6a9b33e55", "span_id": "248ca7dc8dab21d4"}
+{"ts": "2026-07-13 16:47:53,691", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-c064b55df9ac49728b6f4d441a2a733a", "trace_id": "f4a9b77cec71d8b4efc16ad6a9b33e55", "span_id": "248ca7dc8dab21d4", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 24.245, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:48:03,275", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-e392eb2145c5426690e3dbcfc31331c6", "trace_id": "38a396c1b865d42fef6f80b95def1ad9", "span_id": "cd9580c20ec08d77", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.113, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:48:03,665", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-e68a2c214bcd4211a3bce02bc685cda2", "trace_id": "89a1a9b76cb3cbfdc8a8f07d33ca88c3", "span_id": "1bc3592e78c75d95"}
+{"ts": "2026-07-13 16:48:03,675", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-e68a2c214bcd4211a3bce02bc685cda2", "trace_id": "89a1a9b76cb3cbfdc8a8f07d33ca88c3", "span_id": "1bc3592e78c75d95"}
+{"ts": "2026-07-13 16:48:03,685", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-e68a2c214bcd4211a3bce02bc685cda2", "trace_id": "89a1a9b76cb3cbfdc8a8f07d33ca88c3", "span_id": "1bc3592e78c75d95"}
+{"ts": "2026-07-13 16:48:03,686", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-e68a2c214bcd4211a3bce02bc685cda2", "trace_id": "89a1a9b76cb3cbfdc8a8f07d33ca88c3", "span_id": "1bc3592e78c75d95", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 23.347, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:48:13,666", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-16725cc6cbf24aee8dc7363f63b7fd09", "trace_id": "044d5d431feadc96c7983bc3071a01e2", "span_id": "16db109d1bd65e00"}
+{"ts": "2026-07-13 16:48:13,677", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-16725cc6cbf24aee8dc7363f63b7fd09", "trace_id": "044d5d431feadc96c7983bc3071a01e2", "span_id": "16db109d1bd65e00"}
+{"ts": "2026-07-13 16:48:13,687", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-16725cc6cbf24aee8dc7363f63b7fd09", "trace_id": "044d5d431feadc96c7983bc3071a01e2", "span_id": "16db109d1bd65e00"}
+{"ts": "2026-07-13 16:48:13,687", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-16725cc6cbf24aee8dc7363f63b7fd09", "trace_id": "044d5d431feadc96c7983bc3071a01e2", "span_id": "16db109d1bd65e00", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 24.701, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:48:18,280", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-92e2cfaeb411494dabc96b5d02e3f087", "trace_id": "3bb87c8a16eb6c7c8d9b6de55c7b2dff", "span_id": "61fe6d04404b5ede", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.248, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:48:23,663", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-906122cc3e824c54b1f1377e4a4909cd", "trace_id": "e7501fec1864048fb62eead243fb6378", "span_id": "8e759d48897934fb"}
+{"ts": "2026-07-13 16:48:23,674", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-906122cc3e824c54b1f1377e4a4909cd", "trace_id": "e7501fec1864048fb62eead243fb6378", "span_id": "8e759d48897934fb"}
+{"ts": "2026-07-13 16:48:23,685", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-906122cc3e824c54b1f1377e4a4909cd", "trace_id": "e7501fec1864048fb62eead243fb6378", "span_id": "8e759d48897934fb"}
+{"ts": "2026-07-13 16:48:23,686", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-906122cc3e824c54b1f1377e4a4909cd", "trace_id": "e7501fec1864048fb62eead243fb6378", "span_id": "8e759d48897934fb", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 25.332, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:48:33,270", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-fa66522e605f4e8d88d4658afd20b9a8", "trace_id": "9367a30b06758fa28cae8c576235c2c1", "span_id": "42f8a8e7daa9c04a", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.125, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:48:33,667", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-fde04c30e77c4b87b69d5d6086007740", "trace_id": "463421013e57c76c32cb1f7905519b86", "span_id": "4eaec0d8e6e570a0"}
+{"ts": "2026-07-13 16:48:33,678", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-fde04c30e77c4b87b69d5d6086007740", "trace_id": "463421013e57c76c32cb1f7905519b86", "span_id": "4eaec0d8e6e570a0"}
+{"ts": "2026-07-13 16:48:33,688", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-fde04c30e77c4b87b69d5d6086007740", "trace_id": "463421013e57c76c32cb1f7905519b86", "span_id": "4eaec0d8e6e570a0"}
+{"ts": "2026-07-13 16:48:33,688", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-fde04c30e77c4b87b69d5d6086007740", "trace_id": "463421013e57c76c32cb1f7905519b86", "span_id": "4eaec0d8e6e570a0", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 24.703, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:48:43,660", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-1e86da95e898456ab684c497ceab98ef", "trace_id": "c5266b6dd95da70f3ebd437450ca21cb", "span_id": "65e3e4052f4ecc60"}
+{"ts": "2026-07-13 16:48:43,671", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-1e86da95e898456ab684c497ceab98ef", "trace_id": "c5266b6dd95da70f3ebd437450ca21cb", "span_id": "65e3e4052f4ecc60"}
+{"ts": "2026-07-13 16:48:43,681", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-1e86da95e898456ab684c497ceab98ef", "trace_id": "c5266b6dd95da70f3ebd437450ca21cb", "span_id": "65e3e4052f4ecc60"}
+{"ts": "2026-07-13 16:48:43,682", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-1e86da95e898456ab684c497ceab98ef", "trace_id": "c5266b6dd95da70f3ebd437450ca21cb", "span_id": "65e3e4052f4ecc60", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 24.834, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:48:48,282", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-1fc33d6e537e419db36727fe1e854a55", "trace_id": "a730f921a58e37621f0e53f9b23bad1f", "span_id": "19244d833c67fa33", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.215, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:48:53,659", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-848c6de2d3a14d46b23eb82cb97eb5af", "trace_id": "fffa56fec965ec018cdbb2f6f8c25933", "span_id": "0dc71e864101584d"}
+{"ts": "2026-07-13 16:48:53,670", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-848c6de2d3a14d46b23eb82cb97eb5af", "trace_id": "fffa56fec965ec018cdbb2f6f8c25933", "span_id": "0dc71e864101584d"}
+{"ts": "2026-07-13 16:48:53,679", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-848c6de2d3a14d46b23eb82cb97eb5af", "trace_id": "fffa56fec965ec018cdbb2f6f8c25933", "span_id": "0dc71e864101584d"}
+{"ts": "2026-07-13 16:48:53,680", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-848c6de2d3a14d46b23eb82cb97eb5af", "trace_id": "fffa56fec965ec018cdbb2f6f8c25933", "span_id": "0dc71e864101584d", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 24.157, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:49:03,276", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-204287bd9e4e4a81b041063c557627f9", "trace_id": "4e20b2814a1f42acd345419f9e26903b", "span_id": "ec82a485cb41099c", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.109, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:49:03,665", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-02e98f178e5449bb9ae5a6bba43e6044", "trace_id": "12b667a549d1b04dea61a98ede1f83ff", "span_id": "cb17c891069625eb"}
+{"ts": "2026-07-13 16:49:03,676", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-02e98f178e5449bb9ae5a6bba43e6044", "trace_id": "12b667a549d1b04dea61a98ede1f83ff", "span_id": "cb17c891069625eb"}
+{"ts": "2026-07-13 16:49:03,686", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-02e98f178e5449bb9ae5a6bba43e6044", "trace_id": "12b667a549d1b04dea61a98ede1f83ff", "span_id": "cb17c891069625eb"}
+{"ts": "2026-07-13 16:49:03,687", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-02e98f178e5449bb9ae5a6bba43e6044", "trace_id": "12b667a549d1b04dea61a98ede1f83ff", "span_id": "cb17c891069625eb", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 25.036, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:49:13,665", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-3e7b702fdbe84f32800e39f08d88566d", "trace_id": "c8c2c0727f88f119271adb71bcd18f85", "span_id": "2df667f41a31a699"}
+{"ts": "2026-07-13 16:49:13,676", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-3e7b702fdbe84f32800e39f08d88566d", "trace_id": "c8c2c0727f88f119271adb71bcd18f85", "span_id": "2df667f41a31a699"}
+{"ts": "2026-07-13 16:49:13,686", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-3e7b702fdbe84f32800e39f08d88566d", "trace_id": "c8c2c0727f88f119271adb71bcd18f85", "span_id": "2df667f41a31a699"}
+{"ts": "2026-07-13 16:49:13,686", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-3e7b702fdbe84f32800e39f08d88566d", "trace_id": "c8c2c0727f88f119271adb71bcd18f85", "span_id": "2df667f41a31a699", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 24.447, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:49:18,280", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-838c10f8252e42a6b812acfe28ef8fdd", "trace_id": "5ceb0d5bf2c54ac01ca7882cc7b1f5f6", "span_id": "80b551f3c82187d4", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.204, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:49:23,667", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-f4b96e1f93f147adae5cf2de44a75288", "trace_id": "7b0b2922ba1b86c68a40919d4f02a315", "span_id": "f5629a3ef55d91e5"}
+{"ts": "2026-07-13 16:49:23,677", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-f4b96e1f93f147adae5cf2de44a75288", "trace_id": "7b0b2922ba1b86c68a40919d4f02a315", "span_id": "f5629a3ef55d91e5"}
+{"ts": "2026-07-13 16:49:23,687", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-f4b96e1f93f147adae5cf2de44a75288", "trace_id": "7b0b2922ba1b86c68a40919d4f02a315", "span_id": "f5629a3ef55d91e5"}
+{"ts": "2026-07-13 16:49:23,687", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-f4b96e1f93f147adae5cf2de44a75288", "trace_id": "7b0b2922ba1b86c68a40919d4f02a315", "span_id": "f5629a3ef55d91e5", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 23.347, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:49:33,278", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-e7e6c8dcb0b54249ac844c2d4872ada8", "trace_id": "324e1c115ff34fa2a4d2c01e5155901a", "span_id": "6a65d84640888f7a", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.127, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:49:33,666", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-3be40f659e6d420da16b9c4d26cc1158", "trace_id": "f1795244c86d6f863443c94ccb6584c9", "span_id": "21ab0234b71c8704"}
+{"ts": "2026-07-13 16:49:33,676", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-3be40f659e6d420da16b9c4d26cc1158", "trace_id": "f1795244c86d6f863443c94ccb6584c9", "span_id": "21ab0234b71c8704"}
+{"ts": "2026-07-13 16:49:33,687", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-3be40f659e6d420da16b9c4d26cc1158", "trace_id": "f1795244c86d6f863443c94ccb6584c9", "span_id": "21ab0234b71c8704"}
+{"ts": "2026-07-13 16:49:33,688", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-3be40f659e6d420da16b9c4d26cc1158", "trace_id": "f1795244c86d6f863443c94ccb6584c9", "span_id": "21ab0234b71c8704", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 25.615, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:49:43,665", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-022b649436c746bda7f8df6091e6e0f0", "trace_id": "2fa710dbbabe10366a15b51c68d06e7c", "span_id": "b56eee049a6d0be9"}
+{"ts": "2026-07-13 16:49:43,676", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-022b649436c746bda7f8df6091e6e0f0", "trace_id": "2fa710dbbabe10366a15b51c68d06e7c", "span_id": "b56eee049a6d0be9"}
+{"ts": "2026-07-13 16:49:43,686", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-022b649436c746bda7f8df6091e6e0f0", "trace_id": "2fa710dbbabe10366a15b51c68d06e7c", "span_id": "b56eee049a6d0be9"}
+{"ts": "2026-07-13 16:49:43,687", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-022b649436c746bda7f8df6091e6e0f0", "trace_id": "2fa710dbbabe10366a15b51c68d06e7c", "span_id": "b56eee049a6d0be9", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 24.03, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:49:48,285", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-9b96047de0784570a33a14a2a4efd9c9", "trace_id": "b7d9355c471cbc4db6bf81671ccd08c6", "span_id": "634ffd3d957c5cab", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.256, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:49:53,667", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-abe880254fa8494a9ea267dadb5aaa33", "trace_id": "6533cf02b5fc56780142b0981020ae4a", "span_id": "af7bb6a47a72de28"}
+{"ts": "2026-07-13 16:49:53,679", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-abe880254fa8494a9ea267dadb5aaa33", "trace_id": "6533cf02b5fc56780142b0981020ae4a", "span_id": "af7bb6a47a72de28"}
+{"ts": "2026-07-13 16:49:53,689", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-abe880254fa8494a9ea267dadb5aaa33", "trace_id": "6533cf02b5fc56780142b0981020ae4a", "span_id": "af7bb6a47a72de28"}
+{"ts": "2026-07-13 16:49:53,690", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-abe880254fa8494a9ea267dadb5aaa33", "trace_id": "6533cf02b5fc56780142b0981020ae4a", "span_id": "af7bb6a47a72de28", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 27.15, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:50:03,278", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-4d579220fd9d4a7e839e565632880174", "trace_id": "05045ccdd0734f574eb610063f9c2be2", "span_id": "8c73bfbcca10782d", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.173, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:50:03,671", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-d78f8c7a91b2442bbbf6bff9af7e5f3e", "trace_id": "2f35c71dab1a594878859032a8f615a8", "span_id": "ba0ece61bfb44faa"}
+{"ts": "2026-07-13 16:50:03,681", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-d78f8c7a91b2442bbbf6bff9af7e5f3e", "trace_id": "2f35c71dab1a594878859032a8f615a8", "span_id": "ba0ece61bfb44faa"}
+{"ts": "2026-07-13 16:50:03,691", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-d78f8c7a91b2442bbbf6bff9af7e5f3e", "trace_id": "2f35c71dab1a594878859032a8f615a8", "span_id": "ba0ece61bfb44faa"}
+{"ts": "2026-07-13 16:50:03,692", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-d78f8c7a91b2442bbbf6bff9af7e5f3e", "trace_id": "2f35c71dab1a594878859032a8f615a8", "span_id": "ba0ece61bfb44faa", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 24.4, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:50:13,672", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-1fa207bbd0b44633962f29c0bbe1d42d", "trace_id": "14473f62e35b33821c83a972447abb9b", "span_id": "20f1cf82e30f8c68"}
+{"ts": "2026-07-13 16:50:13,682", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-1fa207bbd0b44633962f29c0bbe1d42d", "trace_id": "14473f62e35b33821c83a972447abb9b", "span_id": "20f1cf82e30f8c68"}
+{"ts": "2026-07-13 16:50:13,692", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-1fa207bbd0b44633962f29c0bbe1d42d", "trace_id": "14473f62e35b33821c83a972447abb9b", "span_id": "20f1cf82e30f8c68"}
+{"ts": "2026-07-13 16:50:13,692", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-1fa207bbd0b44633962f29c0bbe1d42d", "trace_id": "14473f62e35b33821c83a972447abb9b", "span_id": "20f1cf82e30f8c68", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 23.278, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:50:18,285", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-7a7149c4c45b4532915e1a32e994a1f2", "trace_id": "69e90187ebcf139b05ddbc3c58775d93", "span_id": "1d4a8a483d628cf6", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.236, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:50:23,671", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-ab6c44607319497fac5d13aabfbcae5f", "trace_id": "6cc32c61303f752069c0f909c2e2be01", "span_id": "3d4c7144b2893c9d"}
+{"ts": "2026-07-13 16:50:23,681", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-ab6c44607319497fac5d13aabfbcae5f", "trace_id": "6cc32c61303f752069c0f909c2e2be01", "span_id": "3d4c7144b2893c9d"}
+{"ts": "2026-07-13 16:50:23,691", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-ab6c44607319497fac5d13aabfbcae5f", "trace_id": "6cc32c61303f752069c0f909c2e2be01", "span_id": "3d4c7144b2893c9d"}
+{"ts": "2026-07-13 16:50:23,691", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-ab6c44607319497fac5d13aabfbcae5f", "trace_id": "6cc32c61303f752069c0f909c2e2be01", "span_id": "3d4c7144b2893c9d", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 23.42, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:50:33,283", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-1ccbaba746da4511b0d93d7ae7e8199b", "trace_id": "7f8ee26b68e1e4be3a4075df90ba563f", "span_id": "56c88938016af94d", "http_method": "GET", "http_path": "/api/v1/healthz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 0.286, "client_addr": "10.244.0.1"}
+{"ts": "2026-07-13 16:50:33,669", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://qdrant:6333/collections \"HTTP/1.1 200 OK\"", "request_id": "portal-req-a69cb2ab911f4485bab3c8da6a7d37ca", "trace_id": "3eee415e0ee5b31df8317d67eac5b114", "span_id": "504ba0719adc8779"}
+{"ts": "2026-07-13 16:50:33,679", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://ollama:11434/api/tags \"HTTP/1.1 200 OK\"", "request_id": "portal-req-a69cb2ab911f4485bab3c8da6a7d37ca", "trace_id": "3eee415e0ee5b31df8317d67eac5b114", "span_id": "504ba0719adc8779"}
+{"ts": "2026-07-13 16:50:33,689", "level": "INFO", "logger": "httpx", "message": "HTTP Request: GET http://langfuse:3000/api/public/health \"HTTP/1.1 200 OK\"", "request_id": "portal-req-a69cb2ab911f4485bab3c8da6a7d37ca", "trace_id": "3eee415e0ee5b31df8317d67eac5b114", "span_id": "504ba0719adc8779"}
+{"ts": "2026-07-13 16:50:33,690", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-a69cb2ab911f4485bab3c8da6a7d37ca", "trace_id": "3eee415e0ee5b31df8317d67eac5b114", "span_id": "504ba0719adc8779", "http_method": "GET", "http_path": "/api/v1/readyz", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 24.477, "client_addr": "10.244.0.1"}
+```
