@@ -4170,3 +4170,115 @@ def test_attempt14_approval_only_logins_land_on_the_approvals_screen() -> None:
         "tool.approve.high_risk_custom",
         "tool.approve.observe",
     ]
+
+
+# --------------------------------------------------------------------------- #
+# LIVE ATTEMPT 15 — the BFF abandoned a valid model turn after ten seconds.  #
+# --------------------------------------------------------------------------- #
+
+
+def test_attempt15_bff_turn_timeout_exceeds_the_kernel_wall_clock() -> None:
+    """The BFF's generic 10s transport budget is correct for ordinary calls but
+    cannot bound a model-driven turn whose kernel wall clock is 300s. Pin the
+    deployment values from their independent manifests: the dedicated response-read
+    budget must leave positive room for the kernel to finish and serialize its reply.
+    """
+    documents = [doc for doc in yaml.safe_load_all(_BFF_YAML.read_text()) if doc]
+    deployment = next(doc for doc in documents if doc["kind"] == "Deployment")
+    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    env = {entry["name"]: entry for entry in container["env"]}
+    timeout_entry = env["COGNIC_HARNESS_AGENTOS_TURN_TIMEOUT_S"]
+    assert set(timeout_entry) == {"name", "value"}
+    bff_turn_timeout_s = float(timeout_entry["value"])
+
+    wall_clock_match = re.search(r"\bCOGNIC_AGENT_RUN_WALL_CLOCK_S=(\d+(?:\.\d+)?)\b", _RUNNER_TEXT)
+    assert wall_clock_match is not None
+    kernel_wall_clock_s = float(wall_clock_match.group(1))
+    assert bff_turn_timeout_s == 330
+    assert kernel_wall_clock_s == 300
+    assert bff_turn_timeout_s > kernel_wall_clock_s
+
+    import ast
+
+    driver_tree = ast.parse(_DRIVER_TEXT)
+    driver_timeout_node = next(
+        node
+        for node in driver_tree.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "CHAT_TIMEOUT_MS"
+            for target in node.targets
+        )
+    )
+    driver_timeout_ms = ast.literal_eval(driver_timeout_node.value)
+    assert driver_timeout_ms == 360_000
+    assert driver_timeout_ms > bff_turn_timeout_s * 1000
+
+
+def test_attempt15_every_model_driven_ui_turn_proves_the_post_and_rendered_increment() -> None:
+    """Attempt 15's POST timed out at the BFF while AgentOS was still running.
+
+    That transport-timeout path maps to HTTP 502 with turn_count unchanged, but the
+    runner ignored both fields and later blamed XSS for the empty transcript. Exercise
+    the real runner helper over success and both failure dimensions, then pin every
+    live model-driven chat call through it.
+    """
+    helper = _extract_shell_function("assert_chat_turn_completed")
+
+    def run(document: dict[str, object]) -> subprocess.CompletedProcess[str]:
+        script = "\n".join(
+            [
+                "set -euo pipefail",
+                'bar_fail() { echo "BAR_FAIL: $*" >&2; exit 91; }',
+                "jq_get() { printf '%s' \"${2:-}\" | python3 -c '",
+                "import json, sys",
+                "doc = json.load(sys.stdin)",
+                "value = doc.get(sys.argv[1])",
+                "if value is None:",
+                '    print("")',
+                "elif isinstance(value, bool):",
+                "    print(str(value).lower())",
+                "else:",
+                "    print(value)",
+                '\' "$1"; }',
+                helper,
+                f"assert_chat_turn_completed 'probe' {shlex.quote(json.dumps(document))}",
+            ]
+        )
+        return _run_bash(script)
+
+    completed = {
+        "status": 303,
+        "turns_before": 0,
+        "turn_count": 1,
+        "answer_text": "four",
+    }
+    assert run(completed).returncode == 0
+
+    timed_out = {**completed, "status": 502, "turn_count": 0, "answer_text": ""}
+    timeout_probe = run(timed_out)
+    assert timeout_probe.returncode == 91
+    assert "did not complete its governed redirect" in timeout_probe.stderr
+
+    no_increment = {**completed, "turn_count": 0}
+    increment_probe = run(no_increment)
+    assert increment_probe.returncode == 91
+    assert "did not advance by exactly one turn" in increment_probe.stderr
+
+    assert _RUNNER_TEXT.count('assert_chat_turn_completed "') == 3
+    for label in ("BAR A XSS", "BAR C turn 1", "BAR C turn 2"):
+        assert f'assert_chat_turn_completed "{label}"' in _RUNNER_TEXT
+
+    import ast
+
+    tree = ast.parse(_DRIVER_TEXT)
+    contract_node = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.AnnAssign)
+        and isinstance(node.target, ast.Name)
+        and node.target.id == "SUBCOMMAND_CONTRACT"
+    )
+    assert contract_node.value is not None
+    contract = ast.literal_eval(contract_node.value)
+    assert {"status", "turns_before", "turn_count", "answer_text"} <= set(contract["chat-turn"])

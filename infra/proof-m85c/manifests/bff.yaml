@@ -63,6 +63,10 @@ spec:
             # --- AgentOS client (HTTPS + the proof CA) ---
             - { name: COGNIC_HARNESS_AGENTOS_BASE_URL, value: "https://rel-agentos:8443" }
             - { name: COGNIC_HARNESS_AGENTOS_CA_BUNDLE, value: "/etc/proof-ca/proof-ca.pem" }
+            # Governed turns may run to the kernel's 300s wall-clock budget. This
+            # widens only the BFF client's response-read phase; connect/write/pool
+            # retain the harness's 10s transport bound.
+            - { name: COGNIC_HARNESS_AGENTOS_TURN_TIMEOUT_S, value: "330" }
             # --- OIDC (the reference IdP; HTTPS + the proof CA) ---
             - { name: COGNIC_HARNESS_OIDC_ISSUER, value: "https://cognic-proof-keycloak:8443/realms/proof-m85c" }
             - { name: COGNIC_HARNESS_OIDC_CLIENT_ID, value: "cognic-harness" }

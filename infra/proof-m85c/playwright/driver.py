@@ -238,7 +238,7 @@ REPLICA_HEADER_CANDIDATES = (
 DEFAULT_TIMEOUT_MS = 30_000
 # A chat turn drives a real server-side LLM call; give it a wide budget so a
 # slow turn never times out mid live-run.
-CHAT_TIMEOUT_MS = 180_000
+CHAT_TIMEOUT_MS = 360_000
 # Hard cap so a broken pagination cursor cannot spin forever.
 MAX_PAGES = 500
 
@@ -1894,7 +1894,14 @@ SUBCOMMAND_CONTRACT: dict[str, list[str]] = {
     "cookie-dump": ["cookies"],
     "replay-cookie": ["status", "authenticated"],
     "replay-callback": ["status", "authenticated", "final_url", "cookie_injected"],
-    "chat-turn": ["conversation_id", "answer_text", "turn_count", "served_by"],
+    "chat-turn": [
+        "conversation_id",
+        "answer_text",
+        "turn_count",
+        "served_by",
+        "status",
+        "turns_before",
+    ],
     "approvals-list": ["status", "rows"],
     "approvals-paginate": ["pages", "request_ids"],
     "approvals-act": ["status", "resulting_state", "refusal_reason"],

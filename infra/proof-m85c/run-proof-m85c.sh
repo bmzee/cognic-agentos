@@ -3401,6 +3401,34 @@ jq_get() {
   printf '%s' "${2:-}" | python3 -c "$_JSON_GET_PY" "$1" 2>/dev/null || true
 }
 
+# assert_chat_turn_completed <WHERE> <DRIVER_JSON> — a model-driven UI turn is
+# not evidence merely because the browser interaction returned JSON. The BFF POST
+# itself must have completed its 303 flow and the rendered transcript must gain
+# exactly one turn. This catches upstream transport timeouts before a later XSS or
+# chain assertion mislabels the resulting empty/in-progress conversation.
+assert_chat_turn_completed() {
+  local where="$1" doc="$2" status before after answer expected
+  status="$(jq_get status "$doc")"
+  before="$(jq_get turns_before "$doc")"
+  after="$(jq_get turn_count "$doc")"
+  answer="$(jq_get answer_text "$doc")"
+  [ "$status" = "303" ] \
+    || bar_fail "$where — the BFF turn POST did not complete its governed redirect (HTTP $status, expected 303)"
+  case "$before" in
+    ''|*[!0-9]*)
+      bar_fail "$where — the browser returned a non-numeric prior turn count ('$before')" ;;
+  esac
+  case "$after" in
+    ''|*[!0-9]*)
+      bar_fail "$where — the browser returned a non-numeric resulting turn count ('$after')" ;;
+  esac
+  expected=$((before + 1))
+  [ "$after" -eq "$expected" ] \
+    || bar_fail "$where — the rendered transcript did not advance by exactly one turn (before=$before, after=$after)"
+  [ -n "$answer" ] \
+    || bar_fail "$where — the completed rendered turn carried no governed answer"
+}
+
 # mint_probe_request <ROLE> — mint ONE four-eyes approval request through the REAL
 # MCP invoke path (spec §5.1: the direct MCP surface, outside the BFF). The role's
 # PKCE token invokes probe_write; a high_risk_custom tool returns 202 +
@@ -3628,6 +3656,7 @@ echo "  Bar A CSRF OK: an unsafe request without a valid CSRF token is refused 4
 bff_served_by "A.XSS"
 A_XSS_MSG='<script>window.__XSS_FIRED=true</script><img src=x onerror="window.__XSS_FIRED=true"> — also, in one sentence, what is 2+2?'
 A_XSS_TURN="$(drive chat-turn --create --agent-id "$AGENT_ID" --message "$A_XSS_MSG" --state-file "$QC_TMP/session-amir.json")"
+assert_chat_turn_completed "BAR A XSS" "$A_XSS_TURN"
 A_XSS_CID="$(jq_get conversation_id "$A_XSS_TURN")"
 [ -n "$A_XSS_CID" ] || bar_fail "BAR A XSS could not create a conversation carrying the hostile message (body: $A_XSS_TURN)"
 A_XSS="$(drive xss-probe --conversation-id "$A_XSS_CID" --state-file "$QC_TMP/session-amir.json")"
@@ -4546,6 +4575,7 @@ echo "PROOF M8.5-C (BAR B) PASS"
 # id / digest / sequence / refusal fields (the DB side is the runner's PSQL).
 echo "==> BAR C — governed chat through the BFF UI + a revoked-turn refusal"
 C_T1="$(drive chat-turn --message "Who are the top 3 customers by total deposit balance this quarter? Name each and the balance." --state-file "$QC_TMP/session-amir.json")"
+assert_chat_turn_completed "BAR C turn 1" "$C_T1"
 C_CID="$(jq_get conversation_id "$C_T1")"
 [ -n "$C_CID" ] || bar_fail "BAR C turn 1 rendered no conversation id (body: $C_T1)"
 C_ANSWER1="$(jq_get answer_text "$C_T1")"
@@ -4572,6 +4602,7 @@ C_ENT_BEFORE="$(entitlement_count "$C_AMIR_SUB" financials)"
 [ "$C_ENT_BEFORE" = "1" ] || bar_fail "BAR C expected exactly 1 amir financials entitlement before revocation (got $C_ENT_BEFORE for subject $C_AMIR_SUB)"
 entitlement_delete "$C_AMIR_SUB" financials >/dev/null
 C_T2="$(drive chat-turn --message "Which branch had the highest profit-and-loss last quarter, and what was the figure? If you cannot access that data, say so." --conversation-id "$C_CID" --state-file "$QC_TMP/session-amir.json")"
+assert_chat_turn_completed "BAR C turn 2" "$C_T2"
 C_ANSWER2="$(jq_get answer_text "$C_T2")"
 [ -n "$C_ANSWER2" ] || bar_fail "BAR C turn 2 rendered no answer (the refusal must surface as a governed answer)"
 assert_no_stack_trace "BAR C (turn 2)" "$C_ANSWER2"
