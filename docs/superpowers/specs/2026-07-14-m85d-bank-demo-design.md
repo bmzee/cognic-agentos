@@ -204,7 +204,7 @@ The pack's pod carries a **workload identity** (Kubernetes ServiceAccount → Az
 
 ---
 
-## 6. D4 — AKS deployment
+## 6. D4 — AKS deployment, and the identity provider
 
 Not a build; a deployment exercise. The substrate exists (14B):
 
@@ -215,20 +215,56 @@ Not a build; a deployment exercise. The substrate exists (14B):
 
 **In-cluster for the demo:** Oracle XE (our data, not the bank's), Postgres, Redis, the LLM gateway, the harness BFF, the agent + tool packs.
 
-**Open question for the maintainer (§10):** identity provider — **Microsoft Entra ID** (far more credible to a bank on Azure; proves "your IdP works") versus **Keycloak** (already proven in M8.5-C; zero risk). Recommendation: **Entra ID, with Keycloak as the fallback if app-registration lead time bites.**
+### 6.1 The identity provider is a CONFIGURATION, not a dependency (ruled 2026-07-14)
+
+The harness is a standard OIDC confidential client and identity binding already runs through a swappable seam (`ActorBinder`; M8.5-C ships a *reference* OIDC binder). Therefore:
+
+> **Any OIDC-compliant IdP works. We demo on Microsoft Entra ID because it is credible on Azure. Keycloak stays in CI as the vendor-neutral proof that nothing Microsoft-specific leaked into the product.**
+
+This is a **hard invariant, not a preference**: no Entra-specific claim name, endpoint, SDK, or assumption may enter the harness or the kernel. Pinned by a structural test (the Keycloak lane must keep passing unchanged) — a bank running Ping, ForgeRock, or Okta must be a *config* change, and we must be able to prove it rather than assert it.
+
+Commercially this is the stronger position: when a bank asks *"do we have to move to Entra?"*, the answer is **no — and here is the CI lane that proves it.**
 
 ---
 
-## 7. D5 — `cognic-tool-hr-leave` (the write pack)
+## 7. D5 — the write pack + the Oracle HR sample schema
+
+### 7.1 The dataset (ruled 2026-07-14)
+
+The write lands in **Oracle's own official HR sample schema** (`oracle-samples/db-sample-schemas`). Instantly recognisable to the Oracle DBA a bank will put in the room, and it gives the demo a clean **two-scope** story:
+
+- **Read scope** → the banking data (retail deposits / financial / cards — the existing proof seed).
+- **Write scope** → HR (apply leave against real `EMPLOYEES` rows).
+
+Two scopes, two entitlements, one conversation — a far better proof of the entitlement model than doing both in one schema.
+
+**Verified facts (research, 2026-07-14):**
+- **Use release `v23.3`, not v21.1.** v23.3 installs each schema independently, needs no SQL*Loader, requires only a privileged user (not `SYS`), and is documented as "compatible with Oracle Database 19c and upwards". **v21.1 is a trap**: it needs `SYS`, uses server-side `bfilename()` + `sqlldr`, and its documented failure mode against the `gvenzl` container (`ORA-22288`) is exactly the one we would hit.
+- **License: MIT.** Use, modify, distribute, and demonstrate are all expressly granted; retain the copyright notice.
+- **HR is tiny** — 7 tables, 107 employees, ~216 rows total, ~72 KB of scripts. Seconds to install.
+- **Not pre-installed** in `gvenzl/oracle-xe:21-slim` (since 21c the sample schemas no longer ship with the database). We install it via the `/container-entrypoint-initdb.d` hook the proof **already uses** for its seed. HR needs neither Spatial nor Text, so `21-slim` is fine (only `OE` would break on slim — we do not install it).
+- **HR contains no leave/absence table** — confirmed. The 7 tables are `REGIONS`, `COUNTRIES`, `LOCATIONS`, `DEPARTMENTS`, `JOBS`, `EMPLOYEES`, `JOB_HISTORY`.
+
+**Therefore we add `LEAVE_REQUESTS`** — our table, referencing Oracle's `HR.EMPLOYEES`. Oracle's sample data is **never mutated**, so the demo is repeatable and the sample schema stays pristine.
+
+### 7.2 `cognic-tool-hr-leave` (the write pack)
 
 A new signed MCP pack, released exactly as `cognic-tool-approval-probe` was (cosign + SBOM + SLSA + in-toto; sha256-pinned in the proof).
 
 - **Capability class:** `action`. **Risk tier:** `high_risk_custom` ⇒ four-eyes (ADR-014 `tools.rego`).
-- **One atomic operation:** `apply_leave(start_date, end_date, leave_type, reason)` → one `INSERT` into `HR.LEAVE_REQUESTS` in the demo Oracle.
+- **One atomic operation:** `apply_leave(start_date, end_date, leave_type, reason)` → one `INSERT` into `LEAVE_REQUESTS`.
 - **Verifies the action-context token** (signature, expiry, audience, `jti` replay, `args_sha256` recompute) exactly as the oracle pack verifies the query-context token.
 - **Enforces exactly-once** via a persisted `idempotency_key` (unique constraint; a replay returns the original row, never a second insert).
 - **Writes as the human's DB identity** via proxy session + `CLIENT_IDENTIFIER`, so the leave row's DB audit trail names the actual analyst.
 - **Never handles credentials** — reads the injected path (§5).
+
+### 7.3 The employee-identity rule — *whose* leave? (LOAD-BEARING)
+
+> **`employee_id` is derived from the authenticated subject in the action-context token (`sub`). It is NEVER an argument the model may supply.**
+
+The `apply_leave` tool schema advertised to the LLM **has no employee field** — exactly as `run_readonly_query`'s schema excludes the query-context token (`dispatch.py:672-678` pins this today). The tool resolves `sub` → `HR.EMPLOYEES.EMPLOYEE_ID` server-side and **refuses any employee identifier appearing in the arguments**.
+
+Without this rule, *"apply leave for Sara"* would work. With it, an agent structurally **cannot act for a human other than the one it is acting on behalf of** — and that is a demo moment in its own right: ask the agent to apply someone else's leave and watch it refuse.
 
 The approval-probe pack we just released is the *rehearsal* for this: same trust pipeline, same four-eyes tier, same ledger-proven exactly-once property. **The difference is that this one performs a real business write.**
 
@@ -288,22 +324,33 @@ The current checklist defers pilot readiness to M15–M17 and marks M8.5-E "must
 
 **For the demo, we turn the gap into a strength:** revoke an entitlement live and let the agent refuse the next question. That proves the enforcement is real and instantaneous — then say plainly, *"the admin console is the next milestone; the enforcement you just watched is already built."* Banks trust that far more than a polished console over machinery that doesn't work.
 
-### Sequencing (after M8.5-C closes)
+### 9.1 Sprint-sized slices (the unit of delivery is ONE Codex sprint)
 
-1. **D1** capability classes (prerequisite for everything) — CC review.
-2. **D2** the write path (HP-5) — the largest slice; CC review on every module.
-3. **D5** the HR-leave pack (parallel with D2; it is an external repo).
-4. **D3** credential brokerage — mostly wiring existing 14B machinery.
-5. **D4** AKS deploy + **D6** dataset + demo rehearsal.
-6. **Live proof on AKS** — the demo *is* the proof, with a browser in front of it.
+**Maintainer rule (2026-07-14): a split is whatever one worker can complete in a single sprint, with its own gate.** The milestone therefore decomposes into six sprints, each a coherent deliverable that is reviewed and committed on its own.
+
+**M8.5-D — Governed write (kernel). Proven on `kind`: fast, free, no cloud.**
+
+| Sprint | Deliverable | Gate |
+|---|---|---|
+| **D-S1** | **Capability classes.** Manifest field + build-time validator + dispatch gate keyed on class + Rego input + fail-closed default. Deletes `_QUERY_CONTEXT_STAMPED_TOOLS`. | CC review; TM-revert pins that an absent/unknown class refuses and that `entitlement_verified` cannot be reached without an entitlement read. |
+| **D-S2** | **The write path (HP-5).** `pending_approval` terminal state; typed catch of the approval-pending refusal; action-context token (`args_sha256` + `idempotency_key`); conversation stores + resumes the grant; the `approval` UI-event family gets its emit hooks. | CC review on every module. The largest slice. |
+| **D-S3** | **`cognic-tool-hr-leave`** (external repo) + Oracle HR sample schema v23.3 + `LEAVE_REQUESTS` + the employee-identity rule (§7.3). Signed release, sha256-pinned. | Same trust pipeline as the approval probe. |
+| **D-S4** | **Write proof on `kind`** — new bars: propose → four-eyes → resume → exactly-once; replay refused; "apply Sara's leave" refused. | Live proof; VALIDATION-RESULTS. |
+
+**M8.5-D2 — Bank demo on AKS. May overlap D-S1…D-S4 — the Azure clock is not our review loop.**
+
+| Sprint | Deliverable | Gate |
+|---|---|---|
+| **D2-S1** | **Credentials + IdP pluggability.** Azure Key Vault + ESO injection (kills the plaintext password); Entra ID *and* Keycloak both working, with the vendor-neutrality invariant pinned (§6.1). | Structural test: the Keycloak lane still passes unchanged. |
+| **D2-S2** | **AKS deploy + dataset + demo rehearsal.** The full stack on Azure; the six moments walked end to end. | The demo *is* the proof, with a browser in front of it. |
 
 ---
 
 ## 10. Open questions for the maintainer
 
-1. **Identity provider for the demo — Entra ID or Keycloak?** (Recommendation: Entra ID; Keycloak as fallback.)
-2. **The leave-application backend** — a demo `HR.LEAVE_REQUESTS` table in our Oracle (recommended, zero dependencies), or an integration with something the bank recognizes?
-3. **Does the harness need a "resume" affordance**, or is a natural-language *"go ahead"* in the next turn sufficient for the demo? (Recommendation: natural language — it is the more impressive moment, and it needs no new UI.)
+*(Q1 and Q2 were ruled on 2026-07-14 and are folded into §6.1 and §7.1. One remains.)*
+
+1. **Does the harness need a "resume" affordance**, or is a natural-language *"go ahead"* in the next turn sufficient for the demo? (Recommendation: **natural language** — no new UI, and it is the better demo moment: the analyst simply says "go ahead" and the governed action executes.)
 
 ---
 
