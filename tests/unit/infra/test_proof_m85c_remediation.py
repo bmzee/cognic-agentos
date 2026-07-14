@@ -49,6 +49,7 @@ _STAGE = _PROOF / "stage-packs.sh"
 _SEED = _PROOF / "seed-db.sh"
 _KERNEL_SEED = _PROOF / "kernel-seed.sql"
 _BFF_YAML = _PROOF / "manifests" / "bff.yaml"
+_PROBE_YAML = _PROOF / "manifests" / "probe-pack.yaml"
 _BASE_DOCKERFILE = _REPO / "infra" / "agentos" / "Dockerfile"
 _PROOF_DOCKERFILE = _PROOF / "Dockerfile.agentos-proof"
 _PYPROJECT = _REPO / "pyproject.toml"
@@ -3698,3 +3699,26 @@ def test_attempt8_materialization_asserts_the_reference_binder_subject() -> None
     assert 'SETUP_OPERATOR_SUBJECT="$(bound_subject "${IDENTITY_USER[operator]}")"' in setup8
     assert "allowlist|$TENANT|10.96.0.51|$SETUP_OPERATOR_SUBJECT" in setup8
     assert "allowlist|$TENANT|10.96.0.51|proof-m85c-operator" not in setup8
+
+
+# --------------------------------------------------------------------------- #
+# LIVE ATTEMPT 9 — the probe advertised its localhost AS default.             #
+# --------------------------------------------------------------------------- #
+
+
+def test_attempt9_probe_prm_and_jwt_issuers_stay_in_lockstep() -> None:
+    """FastMCP's PRM issuer and the probe's JWT-verification issuer are two
+    independent environment contracts. Both must name the allow-listed proof
+    AS; setting only the verifier leaves PRM advertising the localhost default
+    and AgentOS correctly refuses it as ``mcp_as_not_allowlisted``.
+    """
+    documents = [doc for doc in yaml.safe_load_all(_PROBE_YAML.read_text()) if doc]
+    deployment = next(doc for doc in documents if doc["kind"] == "Deployment")
+    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    env = {entry["name"]: entry["value"] for entry in container["env"]}
+
+    expected_issuer = "http://192.88.99.9:9000"
+    assert env["COGNIC_AUTH_MODE"] == "jwt"
+    assert env["COGNIC_MCP_AS_ISSUER"] == expected_issuer
+    assert env["COGNIC_OAUTH_ISSUER"] == expected_issuer
+    assert env["COGNIC_OAUTH_JWKS_URI"] == f"{expected_issuer}/.well-known/jwks.json"

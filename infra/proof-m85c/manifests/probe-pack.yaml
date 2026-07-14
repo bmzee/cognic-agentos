@@ -36,6 +36,10 @@ spec:
         - { name: COGNIC_MCP_PORT, value: "8766" }
         - { name: COGNIC_MCP_SERVER_URL, value: "http://10.96.0.52:8766/mcp" }
         - { name: COGNIC_AUTH_MODE, value: "jwt" }
+        # FastMCP advertises this issuer in Protected Resource Metadata; the
+        # verifier independently consumes COGNIC_OAUTH_ISSUER below. They must
+        # stay byte-identical or AgentOS correctly refuses the advertised AS.
+        - { name: COGNIC_MCP_AS_ISSUER, value: "http://192.88.99.9:9000" }
         - { name: COGNIC_OAUTH_ISSUER, value: "http://192.88.99.9:9000" }
         - { name: COGNIC_OAUTH_JWKS_URI, value: "http://192.88.99.9:9000/.well-known/jwks.json" }
         - { name: COGNIC_OAUTH_AUDIENCE, value: "http://10.96.0.52:8766/mcp" }
