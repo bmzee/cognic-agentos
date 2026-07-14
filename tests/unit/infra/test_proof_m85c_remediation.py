@@ -28,6 +28,7 @@ regression from reaching the live run. They complement (never replace) the
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shlex
@@ -1543,7 +1544,9 @@ def test_r4_f1_the_s8_predicate_never_prints_a_cookie_value() -> None:
     assert 'assert sess["path"] == "/" and not sess.get("domain"), sess' not in block
     # the value is INSPECTED but only the NAME is ever reported
     assert 'f"__Host-cognic_session flags wrong' in block
-    assert 'c[\\"name\\"]' in block
+    assert 'name = c["name"]' in block
+    assert 'f"cookie {name}' in block
+    assert 'c[\\"name\\"]' not in block
 
 
 def test_r4_f1_the_login_json_and_session_ids_are_never_printed() -> None:
@@ -3722,3 +3725,63 @@ def test_attempt9_probe_prm_and_jwt_issuers_stay_in_lockstep() -> None:
     assert env["COGNIC_MCP_AS_ISSUER"] == expected_issuer
     assert env["COGNIC_OAUTH_ISSUER"] == expected_issuer
     assert env["COGNIC_OAUTH_JWKS_URI"] == f"{expected_issuer}/.well-known/jwks.json"
+
+
+# --------------------------------------------------------------------------- #
+# LIVE ATTEMPT 10 — S8's embedded Python had never been parsed or executed.   #
+# --------------------------------------------------------------------------- #
+
+
+def _s8_cookie_predicate() -> str:
+    marker = 'json_assert "BAR A S8 cookie content" \'\n'
+    end = '\n\' "$A_COOKIES"'
+    assert _RUNNER_TEXT.count(marker) == 1
+    tail = _RUNNER_TEXT.split(marker, 1)[1]
+    assert tail.count(end) == 1
+    return tail.split(end, 1)[0]
+
+
+def test_attempt10_s8_executes_the_real_predicate_over_playwright_cookie_shape() -> None:
+    """Run the runner's exact embedded program, not a retyped imitation.
+
+    Playwright reports an effective ``domain`` even for a host-only cookie; a
+    Chromium probe against ``https://127.0.0.1`` established the fixture shape.
+    The value is deliberately secret-like and must never appear on failure.
+    """
+    cookie_value = "opaque-session-handle"
+    document = {
+        "cookies": [
+            {
+                "name": "__Host-cognic_session",
+                "value": cookie_value,
+                "secure": True,
+                "httpOnly": True,
+                "sameSite": "Lax",
+                "path": "/",
+                "domain": "127.0.0.1",
+            }
+        ]
+    }
+    predicate = _s8_cookie_predicate()
+
+    accepted = subprocess.run(
+        ["python3", "-c", predicate],
+        input=json.dumps(document),
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert accepted.returncode == 0, accepted.stderr
+    assert accepted.stdout.strip() == "ok"
+
+    document["cookies"][0]["domain"] = "example.invalid"
+    refused = subprocess.run(
+        ["python3", "-c", predicate],
+        input=json.dumps(document),
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert refused.returncode != 0
+    assert cookie_value not in refused.stdout
+    assert cookie_value not in refused.stderr

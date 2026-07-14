@@ -3461,20 +3461,28 @@ doc = json.loads(sys.stdin.read())
 names = {c["name"] for c in doc["cookies"]}
 assert "__Host-cognic_session" in names, f"no __Host- session cookie: {sorted(names)}"
 sess = next(c for c in doc["cookies"] if c["name"] == "__Host-cognic_session")
-assert sess["secure"] and sess["httpOnly"], (
-    f"__Host-cognic_session flags wrong: secure={sess[\"secure\"]!r} httpOnly={sess[\"httpOnly\"]!r}"
+secure = sess["secure"]
+http_only = sess["httpOnly"]
+assert secure and http_only, (
+    f"__Host-cognic_session flags wrong: secure={secure!r} httpOnly={http_only!r}"
 )
-assert sess["path"] == "/" and not sess.get("domain"), (
-    f"__Host-cognic_session is not __Host--shaped: path={sess[\"path\"]!r} "
-    f"domain={sess.get(\"domain\")!r}"
+# Playwright projects the EFFECTIVE host into `domain` even when Set-Cookie had
+# no Domain attribute. Chromium accepting the __Host- prefix plus Secure + `/`
+# is the no-Domain proof; the projected value must equal this proof origin.
+path = sess["path"]
+effective_domain = sess.get("domain")
+assert path == "/" and effective_domain == "127.0.0.1", (
+    f"__Host-cognic_session is not __Host--shaped: path={path!r} "
+    f"effective_domain={effective_domain!r}"
 )
 # No cookie value may contain OAuth material — a JWT is dot-delimited base64url,
 # an access/refresh token is long+opaque; the session id is a short opaque handle.
 # The value is INSPECTED but never REPORTED: the message names the cookie only.
 for c in doc["cookies"]:
     v = c["value"]
-    assert v.count(".") < 2, f"cookie {c[\"name\"]} looks like a JWT (dot-delimited)"
-    assert "eyJ" not in v, f"cookie {c[\"name\"]} contains a base64url JWT header"
+    name = c["name"]
+    assert v.count(".") < 2, f"cookie {name} looks like a JWT (dot-delimited)"
+    assert "eyJ" not in v, f"cookie {name} contains a base64url JWT header"
 print("ok")
 ' "$A_COOKIES"
 echo "  Bar A S8 OK: the cookie carries only the opaque __Host- session id — no OAuth material"
