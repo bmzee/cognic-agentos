@@ -64,8 +64,9 @@ spec:
           imagePullPolicy: IfNotPresent
           args: ["start-dev", "--import-realm"]
           env:
-            # The bootstrap admin exists only so the container starts; the proof
-            # never uses the admin API — the realm arrives entirely by import.
+            # The realm arrives by import. The bootstrap admin is retained only
+            # for the proof's deterministic client-lifespan lever and independent
+            # refresh-event observation; its credential never leaves the runner.
             - name: KC_BOOTSTRAP_ADMIN_USERNAME
               value: "proof-admin"
             - name: KC_BOOTSTRAP_ADMIN_PASSWORD

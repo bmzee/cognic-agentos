@@ -52,6 +52,7 @@ _SEED = _PROOF / "seed-db.sh"
 _KERNEL_SEED = _PROOF / "kernel-seed.sql"
 _BFF_YAML = _PROOF / "manifests" / "bff.yaml"
 _PROBE_YAML = _PROOF / "manifests" / "probe-pack.yaml"
+_KEYCLOAK_YAML = _PROOF / "manifests" / "keycloak.yaml"
 _BASE_DOCKERFILE = _REPO / "infra" / "agentos" / "Dockerfile"
 _PROOF_DOCKERFILE = _PROOF / "Dockerfile.agentos-proof"
 _PYPROJECT = _REPO / "pyproject.toml"
@@ -1001,7 +1002,8 @@ def test_round2_keycloak_admin_secrets_never_ride_argv() -> None:
     assert '-H "Authorization: Bearer' not in _RUNNER_TEXT  # the standing pin
     assert "kc_admin_get()" in _RUNNER_TEXT  # bearer via curl -K - on stdin
     assert '--data-urlencode "password=' not in _RUNNER_TEXT
-    assert "grant_type=password&client_id=admin-cli&username=admin&password=%s" in _RUNNER_TEXT
+    assert "grant_type=password&client_id=admin-cli&username=%s&password=%s" in _RUNNER_TEXT
+    assert '"$KC_ADMIN_USERNAME" "$(cat "$KC_CRED_TMP/kc-admin-password")"' in (_RUNNER_TEXT)
 
 
 # =========================================================================== #
@@ -3916,3 +3918,64 @@ def test_attempt11_cleanup_enforces_no_residual_kind_nodes(kind_rc: int) -> None
         assert "removing residual kind node for cluster proof-cluster" in probe.stderr
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+# --------------------------------------------------------------------------- #
+# LIVE ATTEMPT 12 — the admin-token helper used the wrong bootstrap subject.  #
+# --------------------------------------------------------------------------- #
+
+
+def test_attempt12_admin_token_subject_matches_the_keycloak_manifest(tmp_path: Path) -> None:
+    """Execute the real helper against the manifest-declared bootstrap subject.
+
+    The Keycloak Deployment creates ``proof-admin``. The stale helper submitted
+    ``admin`` and therefore could never obtain the token needed for S6's independent
+    refresh observer or the short-lifetime token cases. This behavioral pin fails if
+    either the runner constant or the helper's form body drifts from the manifest.
+    """
+    documents = [doc for doc in yaml.safe_load_all(_KEYCLOAK_YAML.read_text()) if doc]
+    deployment = next(doc for doc in documents if doc["kind"] == "Deployment")
+    container = deployment["spec"]["template"]["spec"]["containers"][0]
+    env = {entry["name"]: entry for entry in container["env"]}
+    manifest_username = env["KC_BOOTSTRAP_ADMIN_USERNAME"]["value"]
+    assert manifest_username == "proof-admin"
+
+    runner_match = re.search(r'^KC_ADMIN_USERNAME="([^"]+)"$', _RUNNER_TEXT, re.MULTILINE)
+    assert runner_match is not None
+    runner_username = runner_match.group(1)
+    assert runner_username == manifest_username
+
+    password = "0123456789abcdef0123456789abcdef"
+    credentials = tmp_path / "credentials"
+    credentials.mkdir()
+    (credentials / "kc-admin-password").write_text(password)
+
+    script = "\n".join(
+        [
+            "set -euo pipefail",
+            f"KC_CRED_TMP={shlex.quote(str(credentials))}",
+            f"KC_ADMIN_USERNAME={shlex.quote(runner_username)}",
+            'PROOF_CA="unused-by-the-fake-curl"',
+            'KC_ADMIN_BASE="https://keycloak.invalid"',
+            f"EXPECTED_ADMIN_USERNAME={shlex.quote(manifest_username)}",
+            f"EXPECTED_ADMIN_PASSWORD={shlex.quote(password)}",
+            "curl() {",
+            "  local body",
+            '  body="$(cat)"',
+            (
+                '  if [ "$body" = "grant_type=password&client_id=admin-cli'
+                "&username=$EXPECTED_ADMIN_USERNAME"
+                '&password=$EXPECTED_ADMIN_PASSWORD" ]; then'
+            ),
+            "    printf '%s' '{\"access_token\":\"admin-token\"}'",
+            "  else",
+            "    printf '%s' '{\"error\":\"invalid_grant\"}'",
+            "  fi",
+            "}",
+            _extract_shell_function("kc_admin_token"),
+            "kc_admin_token",
+        ]
+    )
+    probe = _run_bash(script)
+    assert probe.returncode == 0, probe.stderr
+    assert probe.stdout.strip() == "admin-token"

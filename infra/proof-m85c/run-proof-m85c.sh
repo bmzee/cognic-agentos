@@ -678,6 +678,7 @@ ensure_token() {
 # carry-over into the following bars.
 KC_ADMIN_BASE="https://$KC_HOST:$KC_PORT"
 KC_ADMIN_REALM="proof-m85c"
+KC_ADMIN_USERNAME="proof-admin"
 
 # SECRET CUSTODY (the same rule the rest of the runner obeys, and a structural
 # test pins it): NEITHER the admin password NOR the admin bearer may ride a
@@ -691,8 +692,8 @@ KC_ADMIN_REALM="proof-m85c"
 # different realm and a different client from the locked `cognic-harness` profile
 # Bar B pins — enabling it here does not weaken that proof.
 kc_admin_token() {
-  printf 'grant_type=password&client_id=admin-cli&username=admin&password=%s' \
-    "$(cat "$KC_CRED_TMP/kc-admin-password")" \
+  printf 'grant_type=password&client_id=admin-cli&username=%s&password=%s' \
+    "$KC_ADMIN_USERNAME" "$(cat "$KC_CRED_TMP/kc-admin-password")" \
     | curl -s --cacert "$PROOF_CA" -d @- \
         "$KC_ADMIN_BASE/realms/master/protocol/openid-connect/token" \
     | python3 -c 'import json,sys; print(json.load(sys.stdin).get("access_token",""))' 2>/dev/null
