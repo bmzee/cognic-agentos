@@ -1,16 +1,17 @@
 # Proof M8.5-C — Cognic Harness v1 (basic bank harness) live proof
 
-> **STATUS: NOT YET RUN LIVE.** The proof tree (runner, reference binder,
-> Keycloak realm, BFF deploy, Playwright driver, structural suite) is complete
-> and every buildable-inline gate is green (the structural suite, the realm
-> grant-profile + claim-contract gates, the PKI mint, `mypy`/`ruff`), but the
-> end-to-end `kind` run (Bars A–F) is **operator-gated** — it needs
-> `COGNIC_RUN_PROOF_M85C=1`, the operator's cloud provider key, the released
-> approval-probe pack, and a local Docker/kind host. Until that run passes and
-> is recorded here + in `docs/VALIDATION-RESULTS.md`, **do not read this as
-> M8.5-C proven.** The milestone checklist stays unchecked until it passes.
+> **STATUS: PASSED LIVE.** Run 20 completed on `kind` on 2026-07-14 with exit
+> 0 and printed `PROOF M8.5-C (BARS A-F) PASS`. AgentOS anchor = proof
+> revision `926b11884647ac3ea4045c5c3988020a99874c35`; the separately built,
+> signed, and verified Cognic Harness revision was
+> `4dc64cccb5c3a591f1a4e40885e2f58ad37f075c`. The operator-held 926-line log
+> has SHA-256
+> `233787cf37263ae1fdc2c513298106bc4bad006f8514bb31d08d91d6b9ecf593` and is
+> deliberately not committed. Full bar evidence, the 20-attempt live-run
+> ledger, and the honesty boundary are in `docs/VALIDATION-RESULTS.md` under
+> "M8.5-C — Basic bank harness (ADR-028) — PASS".
 
-## What this proves (when it passes)
+## What the passing run proved
 
 M8.5-C stands up the **Cognic Harness v1** — a same-origin BFF (`cognic-harness`
 repo) with three governed screens (chat, approvals inbox, evidence) — in front
@@ -354,7 +355,7 @@ observation.**
   outage check reads `[ "$A_OUTAGE_OK" != "true" ]`, and `"True" != "true"` is **true** —
   so the assertion that the BFF must **not** fall back to memory with its session store
   destroyed could never have fired, *even if it did*. It had never fired because the
-  proof has not yet been run end to end.
+  proof had not yet been run end to end at that review checkpoint.
 - **Found while verifying.** That same assertion was the runner's only **fail-open**
   boolean: `!= "true"` passes on anything that is not that exact string, including an
   unreadable outcome and a `"false"` *manufactured* out of a read failure by an
@@ -424,7 +425,7 @@ one, so the bug was invisible on a green run and would have surfaced only as a f
   argument is the outer, **unset** one. Under this script's `set -u` that is a hard
   `role: unbound variable` abort — reproduced on bash 3.2.57, 4.4 **and** 5.2. Bar A's very
   first action is `drive_login amir`, so **the entire proof died on its first login, on every
-  bash version.** It had never fired because the proof has not yet been run end to end; it
+  bash version.** It had never fired because the proof had not yet been run end to end at that review checkpoint; it
   surfaced only because the round-5 regressions execute the runner's *real* function text
   rather than a re-typed copy of it.
 
@@ -435,11 +436,12 @@ Two of the new pins were themselves caught vacuous that way and rewritten: one m
 walk), and two were being satisfied by a neighbouring assertion rather than the one they
 claimed to pin (they are now isolated).
 
-**Still unproven.** These are structural and behavioural pins over the proof *scripts*; they
-are not the live run. The bars themselves remain the behavioural proof, and the proof has
-**still not been executed end to end** — which is precisely why bugs of this class keep
-surviving into review. Nothing in this section should be read as a claim that the live run
-passes.
+**Pre-live boundary at that review checkpoint.** These were structural and
+behavioural pins over the proof *scripts*, not the live run. That distinction
+remains important historically: the subsequent attempt sequence found live-only
+defects that reading and unit gates could not expose. Run 20 later executed the
+whole stack and Bars A–F end to end; its PASS evidence and the complete attempt
+ledger are recorded in `docs/VALIDATION-RESULTS.md`.
 
 ## Reproduce
 

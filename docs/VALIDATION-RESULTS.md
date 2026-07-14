@@ -6326,3 +6326,86 @@ Attributes:
 {"ts": "2026-07-14 16:52:56,817", "level": "INFO", "logger": "cognic_agentos.portal.api.conversations.routes", "message": "portal.conversations.chain", "request_id": "portal-req-9f838219955d4758b46dd64eabe582eb", "trace_id": "b461f970905cee3888f23488c04b89ce", "span_id": "572fb53bdab8b984", "tenant_id": "proof-m85c", "actor_subject": "https://cognic-proof-keycloak:8443/realms/proof-m85c#a0a8afbd-da88-58b8-b8b9-0d1c21734660", "conversation_id": "ef490c28-2239-46b5-978f-82c18fc25dca", "seq": 2, "outcome": "ok"}
 {"ts": "2026-07-14 16:52:56,817", "level": "INFO", "logger": "cognic_agentos.access", "message": "http_request", "request_id": "portal-req-9f838219955d4758b46dd64eabe582eb", "trace_id": "b461f970905cee3888f23488c04b89ce", "span_id": "572fb53bdab8b984", "http_method": "GET", "http_path": "/api/v1/conversations/ef490c28-2239-46b5-978f-82c18fc25dca/turns/2/chain", "http_has_query": false, "http_query_param_count": 0, "http_status_code": 200, "duration_ms": 8.919, "client_addr": "10.244.0.35"}
 ```
+
+## M8.5-C — Basic bank harness (ADR-028) — PASS
+
+**2026-07-14 — `PROOF M8.5-C (BARS A-F) PASS` live on `kind` (run 20, exit 0).**
+
+- **AgentOS anchor = proof revision:** `feat/m85c-basic-bank-harness @ 926b11884647ac3ea4045c5c3988020a99874c35`. Both proof-input cleanliness guards passed, the built image carried that exact anchor, and no uncommitted proof/kernel input entered the run.
+- **Harness revision:** `cognic-harness @ 4dc64cccb5c3a591f1a4e40885e2f58ad37f075c` from a clean tree. The runner built the production image, pushed it to the proof TLS registry, signed it, verified the signature, and only then loaded it into `kind`.
+- **Runner:** `infra/proof-m85c/run-proof-m85c.sh`, env-gated by `COGNIC_RUN_PROOF_M85C=1`. The provider key passed the bounded, zero-spend `GET /v1/models` preflight before cluster work; it never rode argv or entered the durable log.
+- **Log:** 926 lines, SHA-256 `233787cf37263ae1fdc2c513298106bc4bad006f8514bb31d08d91d6b9ecf593` (operator-held; deliberately not committed). It contains all six bar PASS banners plus the aggregate PASS and no swallowed failure. Credential scan: zero OpenAI-key, JWT, bearer-value, or private-key matches. The three named per-run temp roots were removed by the cleanup trap.
+- **Deployment:** migrate/readback at Alembic rev **0017** (including the HP-4 approval-queue keyset index); real Keycloak 26.2 OIDC with the reference `ActorBinder`; two Cognic Harness BFF replicas; dedicated TLS Redis; the governed oracle pack; and the separately released + digest-pinned `cognic-tool-approval-probe@v0.1.0`. The token-bearing human path used TLS throughout. The one disclosed proof-internal kernel-to-MCP transport exception remained plaintext, as in prior proofs.
+- **Spend:** three model-driven governed turns (Bar A hostile-output turn + Bar C's two turns). The success path did not retain completion-call or token totals; cleanup removed the cluster and database. No total is reconstructed or estimated here.
+- **Cleanup:** no kind cluster, transient registry, proof/port-forward process, or per-run credential directory remained. The temporary host/Docker DNS overrides were restored to their pre-proof settings; Docker returned healthy and the pre-existing `cognic-harness-redis` container was restarted.
+
+### Bar evidence (selected log lines, verbatim)
+
+```
+  Bar A S4/S6/S10 OK: all three proven LIVE on kind (no conformance-suite delegation)
+PROOF M8.5-C (BAR A) PASS
+  Bar B OK: a manipulated grant by an under-scoped actor is refused by AgentOS RBAC (403)
+  Bar B OK: id-token(typ_not_at_jwt) + malformed(token_malformed) + unknown-key(kid_unknown) + wrong-audience(audience_not_exact) each refused at its EXACT binder gate
+  Bar B OK: an expired (but otherwise perfect, really-signed, same-azp) token is refused LIVE at the binder's exp gate (token_expired)
+PROOF M8.5-C (BAR B) PASS
+  Bar C leg 1 OK: a governed UI turn, chain-joined, digests coupled to the stored plaintext
+  Bar C leg 2 OK: the refusal RENDERS (outcome=refused / agent_scope_not_entitled / scope=financials), no OK financials row, and the screen correlates to the chain by run-id + sequence + both digests
+PROOF M8.5-C (BAR C) PASS
+  Bar D.1 OK: pending request rendered in the inbox; ledger 0
+  Bar D.2 OK: denied -> exact-shape replay refused tool_approval_denied; ledger stays 0
+  Bar D.4 OK: self grant-second refused (409); a distinct approver (erin) completed four-eyes
+  Bar D.5 OK: four-eyes complete -> exact-shape re-call executed -> ledger EXACTLY 1
+  Bar D.6 OK: originator isolation — sara's exact-shape replay refused tool_approval_originator_mismatch; ledger stays 1
+  Bar D.7 OK: Link pagination — EXACT 51-id set, no dupes/omissions, the walk reproduces the kernel keyset ORDER exactly, Link on page 1 and none on the last
+  Bar D.8 OK: non-observer rendered 403; foreign observer sees an empty own-queue
+PROOF M8.5-C (BAR D) PASS
+  Bar E: all 2 rendered transcript turns re-hash to their kernel chain rows
+  Bar E OK: evidence screens rendered; run id AND question/answer digests reconcile to the kernel chain row (PSQL-verified)
+PROOF M8.5-C (BAR E) PASS
+  Bar F OK: zero DB modules; exactly the 3 screens (+auth); no actor-header path; 8 shipped templates ALL parsed with the image's own jinja2 and NONE carries an autoescape bypass (no safe filter in any spelling, no filter-safe block, no autoescape node); htmx absent (no un-pinned asset); CSP + no-store present
+PROOF M8.5-C (BAR F) PASS
+PROOF M8.5-C (BARS A-F) PASS
+```
+
+### What each bar proved
+
+- **Bar A — session and token custody.** All S1-S10 cases plus CSRF and XSS ran live, not delegated to a conformance suite: login rotation; one-time state/nonce; opaque `__Host-` cookie with no OAuth material; the same Redis-backed session across both named replicas; pod-kill survival; logout revocation across both replicas; Redis-outage 503 with no memory fallback; eight-request cross-replica refresh with exactly one Keycloak refresh and zero reuse errors; independently bounded idle and absolute TTL deaths; and an otherwise byte-identical session record with only its schema version changed refusing closed. The hostile model output rendered as escaped inert text.
+- **Bar B — identity negative space.** Real Keycloak Authorization Code + PKCE login produced a human-bound actor. Client credentials and direct-access grants were disabled by grant type; ID-token substitution, malformed bearer, unknown key, wrong exact audience, and a genuinely signed token beyond the binder's expiry-plus-skew deadline each refused at the named binder gate. A manipulated under-scoped approval action remained a kernel 403: hiding or exposing a button changed no authority.
+- **Bar C — governed chat.** A human drove the deployed M8 agent through the BFF. The first UI turn completed and joined to its run with question/answer digest coupling. After the `financials` entitlement was removed, the fresh second question rendered `outcome=refused`, `agent_scope_not_entitled`, `scope=financials`; the chain carried the same run ID, sequence, and digests, and contained zero ok financials dispatches. The entitlement was restored in-run.
+- **Bar D — four-eyes and HP-4 actor binding (load-bearing).** The proof pack's fsync-before-success ledger independently counted executions: pending = 0; denied exact-shape replay = 0; only one grant = 0; the same approver attempting the second grant was refused 409; distinct human Erin completed four-eyes; the exact re-call executed and moved the ledger to exactly 1; Sara then replayed Amir's approved shape and was refused `tool_approval_originator_mismatch`, leaving the ledger at 1. The queue's real 51-request `Link` walk exactly matched the kernel keyset order with no duplicate or omission; an actor lacking observe rendered 403, while a foreign-tenant observer saw only an empty queue of their own.
+- **Bar E — examiner-facing correlation.** Playwright extracted the two plaintext transcript turns and curated chain fields from the evidence screen. The runner's PSQL helper independently proved rendered order, run IDs, and SHA-256 question/answer digests against Postgres. The BFF had no DB driver, DSN, or database path; it could not manufacture the database comparison.
+- **Bar F — deployed artifact boundary.** Inspection of the running BFF image found zero DB modules, exactly the three product screens plus auth, no operator/pack-builder/data-scope-admin route, no actor-header path, and no htmx asset. All eight shipped templates were parsed with the image's own Jinja2 and had no `safe` filter/block or autoescape node; CSP and `Cache-Control: no-store` were present.
+
+### Live-run ledger (20 attempts; every code/proof finding reviewed and committed before the next run)
+
+1. **Attempt 1:** real release-signature verification exposed a cosign-v3 offline-flag incompatibility; `b75e7441` fixed and pinned the released-artifact preflight before spend.
+2. **Attempt 2:** proof-local pack re-signing used an incompatible cosign invocation and could overwrite an authenticated signature on failure; `75df1af8` moved output to a temporary sibling, required non-empty output, and atomically replaced only on success.
+3. **Attempt 3:** the generated Keycloak realm was not import/PKCE-complete; `8fded696` fixed the realm and strengthened the access-token versus ID-token claim-contract preflight.
+4. **Attempt 4:** Kubernetes probed a nonexistent BFF `/healthz`, while the runner's waits accepted non-2xx responses; `824ab992` locked readiness to `/signin` and made every wait HTTP-fail-loud.
+5. **Attempt 5:** a selector-based `kubectl wait` remained bound to a terminating pod rather than the Deployment's replacement; `6a762c2d` made rollout status the deployment-owned gate.
+6. **Attempt 6:** the proof image installed floating `aiodocker>=0.24` instead of the lock's 0.26.0; `0cc482e5` resolved the proof dependency from `uv.lock` while leaving the production default path unchanged.
+7. **Attempt 7:** the proof build depended on an unreachable OPA vanity redirect; `5b2a28ca` moved to the canonical digest-verified GitHub release, and `1e0d7080` closed the same class across Dockerfile + CI with a complete-site inventory and lockstep version/digest pins.
+8. **Attempt 8:** SETUP asserted a Keycloak-bound actor using the login name rather than the realm's subject; `7d1a242a` derived the independent expected value from `realm-subjects.env` without weakening the actor predicate.
+9. **Attempt 9:** the probe's PRM issuer advertised localhost and the live MCP authorization-server allow-list correctly refused it; `c1b8c650` aligned the deployment manifest to the allow-listed proof AS.
+10. **Attempt 10:** Chromium's host-only `__Host-` cookie shape differed from the proof's domain assumption, and an embedded S8 predicate had never been parsed; `f11e1cd7` asserted the real host-only shape and executed the extracted predicate in regression tests.
+11. **Attempt 11:** per-action ephemeral dependency resolution made an otherwise-green browser bar depend on live PyPI DNS; `6f6d9a57` materialized one pre-cluster driver venv and used its interpreter directly for every bar action.
+12. **Attempt 12:** the Keycloak admin helper used a stale hard-coded username; `dab9b44a` bound it to the manifest's bootstrap-admin value with bidirectional drift pins.
+13. **Attempt 13:** `status.phase=Running` selected a terminating pod (Kubernetes has no Terminating phase); `29fdecc1` required no deletion timestamp plus Running plus Ready and the exact two-replica postcondition.
+14. **Attempt 14:** the proof sent approval-only Dana to chat, where least-privilege RBAC correctly refused her; `583a6904` added a closed-set `/approvals` landing path without widening approver scopes.
+15. **Attempt 15:** the real BFF's generic 10-second timeout cut off governed LLM turns, and the proof asserted consequences before proving the POST succeeded. Harness `4dc64cc` gave only the response-read phase a 330-second budget (kernel 300 < BFF 330 < browser 360); AgentOS proof commit `8aeb55e8` made every action postcondition fail at the action that failed.
+16. **Attempt 16:** the approval request was minted correctly, but the proof parsed FastAPI's nested `detail` envelope as a flat body; `109ac32e` strictly required the exact pending reason and a canonical UUID.
+17. **Attempt 17:** the two disabled OAuth grants correctly returned different HTTP statuses (401 and 400), while both carried `unauthorized_client`; `b4e820d0` pinned each observed status and the grant-type discriminator instead of accepting generic non-200.
+18. **Attempt 18:** the expiry proof ignored the binder's 30-second clock skew and five status probes could retain stale bodies; `7c15550a` AST-locked the skew deadline, wall-clock-checked it, and refreshed every diagnostic file.
+19. **Attempt 19:** Bar C's embedded f-string predicate contained an escaped-quote syntax error, with the same latent class in Bar D; failure assertions could also place whole response documents in durable evidence. `926b1188` precompiled the closed inventory of all nine real predicates and made non-S8 failure text static/value-free.
+20. **Attempt 20 — PASS:** all preflights, deployment, Bars A-F, cleanup, and host-override restoration completed with exit 0. No new finding surfaced.
+
+### Honesty boundary
+
+1. **NOT PILOT-READY.** M8.5-C proves the harness boundary and approvals surface only. HP-5 conversational approval/resume, erasure, content-safety/escalation hooks, data-access brokerage (M8.5-D/E), full FAPI 2.0 or a formally accepted bank-equivalent posture, and single-use grant consumption for real high-risk actions remain mandatory later gates.
+2. **Grants are not single-use in ADR-014.** The same original requester may replay the same actor/tenant/tool/args-bound grant until expiry. Bar D proves actor binding and exact-shape enforcement, not exactly-once authorization. The ledger's `1` proves what this sequence executed; it does not change the general grant contract.
+3. **The approvals proof is direct MCP, not conversational approval.** The released `high_risk_custom` probe exists solely to exercise the approvals screen. Chat remains auto-tier, HP-5 is untouched, and an entitled read-only analytical query does not require human approval.
+4. **HP-2 remains open per bank.** The reference Keycloak binder is a worked, live-proven implementation of the identity rule, not a shipped bank overlay or a claim that a bank's issuer/claims/assurance mapping is complete.
+5. **The proof wiring is not the bank deployment.** It uses a throwaway kind cluster, per-run CA/realm/credentials, locally built and proof-signed BFF/probe images from clean pinned revisions, and a side-effect-free approval probe. Harness PR-CI's kernel fake is not milestone evidence; only this real-kernel run is.
+6. **One internal plaintext transport exception remains disclosed:** kernel-to-MCP-pack traffic inside the throwaway cluster carries the MCP service token without TLS, matching the prior proof posture. It is not part of the human/session-token TLS claim and must be secured in a later production slice.
+7. **This is RFC 9700-baseline proof, not FAPI conformance.** Full FAPI 2.0 is the bank-deployment target. The realm's `at+jwt` header pin does not by itself establish the full RFC 9068 access-token profile.
+8. **Three turns were model-driven.** Their answer text is non-deterministic; the governance claims rest on mechanical status, ledger, chain, digest, and database predicates. Exact completion-call and token totals for the passing run are unrecoverable because the success path did not persist them.
