@@ -274,6 +274,8 @@ Cost, stated honestly: ~90 MB of CSV and a longer database init (minutes, not se
 
 **This is a new deliverable and it earns its own sprint (D-S6).** It is also the strongest possible answer to *"but LLMs hallucinate"* — the objection every bank will raise before it raises any other.
 
+> **The full discipline — skill anatomy, ground truth via reference SQL, variation generation at scale, refusal-as-a-correct-outcome scoring, failure clustering, and the ship bar — is specified separately in `docs/superpowers/specs/2026-07-14-skill-engineering-and-accuracy-design.md`.** It is durable doctrine, not a milestone artifact: **skill engineering is the bank-onboarding motion**, repeated at every customer. D-S6 is its first application.
+
 **What the multi-scope surface buys us — four demo moments the single-schema version cannot produce:**
 
 1. **Skill routing.** The agent sees only skill *descriptions* (progressive disclosure), picks the right one, reads its body through the gated `read_skill` built-in, then queries. Ask about card disputes and it reaches for `cards-data`; ask about headcount and it reaches for `hr-data`. **Nobody wired a router — the agent chose, and every choice passed the assignment gate.**
