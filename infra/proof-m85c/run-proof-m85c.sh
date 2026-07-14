@@ -4750,7 +4750,7 @@ chain = doc["chain"]
 tc = chain["turn_completed"]
 cols = chain["dispatch_columns"]
 # The scope column MUST be rendered, or the refusal is not attributable to a scope.
-assert "scope_id" in cols, f"the evidence screen renders no scope column (columns={cols}) — the refused dispatch cannot be attributed to a scope"
+assert "scope_id" in cols, "the evidence screen renders no scope column"
 rows = chain["dispatches"]
 refused = [
     d for d in rows
@@ -4758,19 +4758,19 @@ refused = [
     and d.get("refusal_reason") == "agent_scope_not_entitled"
     and d.get("scope_id") == "financials"
 ]
-assert refused, f"no RENDERED dispatch shows the financials refusal (rows={rows})"
+assert refused, "no rendered dispatch shows the financials refusal"
 leaked = [d for d in rows if d.get("outcome") == "ok" and d.get("scope_id") == "financials"]
-assert not leaked, f"the evidence screen renders an OK financials dispatch after revocation: {leaked}"
-# exact ID + sequence + digests, all against the kernel'\''s own chain row
-assert tc["agent_run_id"] == run_id, (tc["agent_run_id"], run_id)
-assert str(tc["sequence"]) == str(db_seq), (tc["sequence"], db_seq)
+assert not leaked, "the evidence screen renders an OK financials dispatch after revocation"
+# exact ID + sequence + digests, all against the kernel chain row
+assert tc["agent_run_id"] == run_id, "rendered agent_run_id does not match the kernel chain row"
+assert str(tc["sequence"]) == str(db_seq), "rendered sequence does not match the kernel chain row"
 # digest coupling for TURN 2 (the pre-review bar coupled turn 1 only)
 turns = {int(t["sequence"]): t for t in doc["transcript_turns"]}
-assert 2 in turns, f"the transcript screen does not render turn 2 (turns={sorted(turns)})"
+assert 2 in turns, "the transcript screen does not render turn 2"
 q = hashlib.sha256(turns[2]["question_text"].encode()).hexdigest()
 a = hashlib.sha256(turns[2]["answer_text"].encode()).hexdigest()
-assert q == tc["question_sha256"], f"turn-2 rendered question re-hashes to {q}, chain says {tc[\"question_sha256\"]}"
-assert a == tc["answer_sha256"], f"turn-2 rendered answer re-hashes to {a}, chain says {tc[\"answer_sha256\"]}"
+assert q == tc["question_sha256"], "turn-2 rendered question digest does not match the chain row"
+assert a == tc["answer_sha256"], "turn-2 rendered answer digest does not match the chain row"
 print("ok")
 ' "$C_EVID2" "$C_RUN2" "$C_DB_SEQ2"
 echo "  Bar C leg 2 OK: the refusal RENDERS (outcome=refused / agent_scope_not_entitled / scope=financials), no OK financials row, and the screen correlates to the chain by run-id + sequence + both digests"
@@ -4799,8 +4799,8 @@ D_INBOX="$(drive approvals-list --state-file "$QC_TMP/session-dana.json")"
 json_assert "BAR D.1 inbox renders the pending request" '
 import json, sys
 doc = json.loads(sys.stdin.read()); rid = sys.argv[1]
-assert doc["status"] == 200, doc
-assert any(r.get("request_id") == rid for r in doc["rows"]), (rid, [r.get("request_id") for r in doc["rows"]])
+assert doc["status"] == 200, "the rendered approval inbox did not return HTTP 200"
+assert any(r.get("request_id") == rid for r in doc["rows"]), "the minted request is absent from the rendered approval inbox"
 print("ok")
 ' "$D_INBOX" "$D_REQ1"
 echo "  Bar D.1 OK: pending request rendered in the inbox; ledger 0"
@@ -4819,7 +4819,7 @@ json_assert "BAR D.2 denied reason" '
 import json, sys
 doc = json.loads(sys.stdin.read())
 reason = (doc.get("detail") or {}).get("reason") if isinstance(doc.get("detail"), dict) else doc.get("reason")
-assert reason == "tool_approval_denied", doc
+assert reason == "tool_approval_denied", "the denied replay did not surface tool_approval_denied"
 print("ok")
 ' "$D_RECALL_DENIED"
 [ "$(probe_ledger_count)" = "0" ] || bar_fail "BAR D.2 the ledger moved after a DENY (must stay 0)"
@@ -4840,7 +4840,7 @@ json_assert "BAR D.3 still-pending reason" '
 import json, sys
 doc = json.loads(sys.stdin.read())
 reason = (doc.get("detail") or {}).get("reason") if isinstance(doc.get("detail"), dict) else doc.get("reason")
-assert reason == "tool_approval_pending", doc
+assert reason == "tool_approval_pending", "the one-grant replay did not remain tool_approval_pending"
 print("ok")
 ' "$D_RECALL_PENDING"
 [ "$(probe_ledger_count)" = "0" ] || bar_fail "BAR D.3 the ledger moved after ONE grant (four-eyes needs two; must stay 0)"
@@ -4875,7 +4875,7 @@ json_assert "BAR D.6 originator mismatch reason" '
 import json, sys
 doc = json.loads(sys.stdin.read())
 reason = (doc.get("detail") or {}).get("reason") if isinstance(doc.get("detail"), dict) else doc.get("reason")
-assert reason == "tool_approval_originator_mismatch", doc
+assert reason == "tool_approval_originator_mismatch", "the cross-subject replay did not surface tool_approval_originator_mismatch"
 print("ok")
 ' "$D_SARA_RECALL"
 [ "$(probe_ledger_count)" = "1" ] || bar_fail "BAR D.6 the ledger moved on sara's replay (must stay 1)"
@@ -4908,23 +4908,16 @@ doc = json.loads(sys.stdin.read())
 minted = [l.strip().lower() for l in open(sys.argv[1]) if l.strip()]
 expected = [l.strip().lower() for l in open(sys.argv[2]) if l.strip()]
 ids = [str(i).lower() for i in doc["request_ids"]]
-assert len(minted) == 51, f"expected 51 minted request ids, captured {len(minted)}"
-assert doc["pages"] >= 2, f"expected >=2 pages, got {doc[\"pages\"]}"
+assert len(minted) == 51, "the runner did not capture exactly 51 minted request ids"
+assert doc["pages"] >= 2, "the 51-request walk did not span at least two pages"
 assert len(ids) == len(set(ids)), "duplicate request ids across pages"
-only_p = sorted(set(ids) - set(minted))[:3]
-only_m = sorted(set(minted) - set(ids))[:3]
-assert set(ids) == set(minted), f"paginated set != minted set (only_paginated={only_p} only_minted={only_m})"
+assert set(ids) == set(minted), "the paginated request-id set does not equal the minted set"
 # The DB-derived actionable queue must itself BE the 51 (every earlier request is
 # terminal) — otherwise the order comparison below would be against the wrong set.
-assert set(expected) == set(minted), f"the DB actionable queue is not the 51 minted requests (db={len(expected)})"
+assert set(expected) == set(minted), "the DB actionable queue does not equal the 51 minted requests"
 # ORDER, not just membership: the paginated walk must reproduce the kernel keyset
 # (created_at ASC, request_id ASC) exactly, element by element.
-if ids != expected:
-    first = next((n for n, (a, b) in enumerate(zip(ids, expected)) if a != b), min(len(ids), len(expected)))
-    raise AssertionError(
-        f"paginated ORDER != the kernel keyset order (created_at ASC, request_id ASC); "
-        f"first divergence at index {first}: paginated={ids[first:first+3]} expected={expected[first:first+3]}"
-    )
+assert ids == expected, "paginated ORDER != the kernel keyset order"
 assert doc["link_on_first_page"] is True, "no Link continuation on page 1"
 assert doc["link_on_last_page"] is False, "a Link continuation is present on the LAST page"
 print("ok")
@@ -4946,8 +4939,8 @@ D_FOREIGN="$(drive approvals-list --state-file "$QC_TMP/session-zara.json")"
 json_assert "BAR D.8 foreign observer sees an empty own-queue" '
 import json, sys
 doc = json.loads(sys.stdin.read())
-assert doc["status"] == 200, doc
-assert doc["rows"] == [], doc  # the foreign tenant has none of proof-m85c'\''s requests
+assert doc["status"] == 200, "the foreign observer queue did not return HTTP 200"
+assert doc["rows"] == [], "the foreign observer queue is not empty"
 print("ok")
 ' "$D_FOREIGN"
 echo "  Bar D.8 OK: non-observer rendered 403; foreign observer sees an empty own-queue"
@@ -4964,7 +4957,7 @@ json_assert "BAR E rendered chain shape" '
 import json, sys
 doc = json.loads(sys.stdin.read())
 chain = doc["chain"]
-assert set(chain) >= {"turn_completed", "started", "terminal", "dispatches"}, sorted(chain)
+assert set(chain) >= {"turn_completed", "started", "terminal", "dispatches"}, "the rendered chain is missing a required block"
 assert doc["transcript_turns"], "no transcript turns rendered"
 print("ok")
 ' "$E_EVID"

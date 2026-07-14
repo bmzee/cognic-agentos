@@ -28,6 +28,7 @@ regression from reaching the live run. They complement (never replace) the
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -4544,3 +4545,115 @@ def test_attempt18_expiry_wait_budget_crosses_exp_plus_skew() -> None:
         >= 2
     )
     assert '[ "$B_EXP_PAST_BINDER_DEADLINE" = "true" ]' in bar_b_expiry
+
+
+# --------------------------------------------------------------------------- #
+# LIVE ATTEMPT 19 — every embedded json_assert program must parse pre-run.     #
+# --------------------------------------------------------------------------- #
+
+
+def _json_assert_predicates() -> dict[str, str]:
+    """Extract the exact shell-embedded Python programs from every json_assert call."""
+    lines = _RUNNER_TEXT.splitlines()
+    predicates: dict[str, str] = {}
+    start_pattern = re.compile(r'^json_assert "([^"]+)" \'$')
+    end_pattern = re.compile(r'^\' "\$')
+    for index, line in enumerate(lines):
+        match = start_pattern.match(line)
+        if match is None:
+            continue
+        end = next(
+            (
+                candidate
+                for candidate in range(index + 1, len(lines))
+                if end_pattern.match(lines[candidate])
+            ),
+            None,
+        )
+        assert end is not None, f"json_assert predicate {match.group(1)!r} has no shell terminator"
+        source = "\n".join(lines[index + 1 : end]).replace("'\\''", "'")
+        assert match.group(1) not in predicates, f"duplicate json_assert label {match.group(1)!r}"
+        predicates[match.group(1)] = source
+    return predicates
+
+
+def test_attempt19_every_json_assert_predicate_compiles_and_has_value_free_messages() -> None:
+    import ast
+
+    predicates = _json_assert_predicates()
+    assert set(predicates) == {
+        "BAR A S8 cookie content",
+        "BAR C turn 2 renders the refusal and correlates to the chain row",
+        "BAR D.1 inbox renders the pending request",
+        "BAR D.2 denied reason",
+        "BAR D.3 still-pending reason",
+        "BAR D.6 originator mismatch reason",
+        "BAR D.7 pagination integrity (exact id-set AND exact keyset order)",
+        "BAR D.8 foreign observer sees an empty own-queue",
+        "BAR E rendered chain shape",
+    }
+    for label, source in predicates.items():
+        tree = ast.parse(source, filename=f"json_assert:{label}", mode="exec")
+        if label == "BAR A S8 cookie content":
+            # S8's long-standing, separately mutation-tested policy permits only
+            # cookie names and shape facts in messages, never cookie values. AST
+            # cannot distinguish those safe projections from a secret-bearing
+            # f-string; its dedicated tests below own that stronger semantic check.
+            continue
+        assert not any(isinstance(node, ast.JoinedStr) for node in ast.walk(tree)), (
+            f"{label}: f-strings can copy live document values into durable failure evidence"
+        )
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Assert):
+                continue
+            assert isinstance(node.msg, ast.Constant) and isinstance(node.msg.value, str), (
+                f"{label}: assertion messages must be static, value-free strings"
+            )
+
+
+def test_attempt19_bar_c_executes_the_exact_refusal_correlation_predicate() -> None:
+    question = "fresh financials question"
+    answer = "governed refusal answer"
+    document = {
+        "transcript_turns": [{"sequence": 2, "question_text": question, "answer_text": answer}],
+        "chain": {
+            "turn_completed": {
+                "agent_run_id": "run-2",
+                "sequence": 42,
+                "question_sha256": hashlib.sha256(question.encode()).hexdigest(),
+                "answer_sha256": hashlib.sha256(answer.encode()).hexdigest(),
+            },
+            "dispatch_columns": ["outcome", "refusal_reason", "scope_id"],
+            "dispatches": [
+                {
+                    "outcome": "refused",
+                    "refusal_reason": "agent_scope_not_entitled",
+                    "scope_id": "financials",
+                }
+            ],
+        },
+    }
+    source = _json_assert_predicates()[
+        "BAR C turn 2 renders the refusal and correlates to the chain row"
+    ]
+    probe = subprocess.run(
+        ["python3", "-c", source, "run-2", "42"],
+        input=json.dumps(document),
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert probe.returncode == 0, probe.stderr
+    assert probe.stdout == "ok\n"
+
+    secret_marker = "VALUE-THAT-MUST-NOT-ENTER-DURABLE-DIAGNOSTICS"
+    document["chain"]["turn_completed"]["question_sha256"] = secret_marker  # type: ignore[index]
+    refused = subprocess.run(
+        ["python3", "-c", source, "run-2", "42"],
+        input=json.dumps(document),
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert refused.returncode != 0
+    assert secret_marker not in refused.stdout + refused.stderr
