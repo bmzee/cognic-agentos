@@ -23,3 +23,14 @@ def test_learning_surface_violation_owned_by_learning_surface_validator() -> Non
         _VALIDATOR_REASON_OWNERSHIP["learning_surface_violation"]
         == "validators/learning_surface.py"
     )
+
+
+def test_capability_class_reasons_are_in_the_closed_vocabulary() -> None:
+    args = typing.get_args(ValidatorReason)
+    assert "mcp_tool_capability_class_invalid" in args
+    assert "mcp_action_tool_in_auto_run_pack" in args
+
+
+def test_capability_class_reasons_are_owned_by_the_mcp_validator() -> None:
+    assert _VALIDATOR_REASON_OWNERSHIP["mcp_tool_capability_class_invalid"] == "validators/mcp.py"
+    assert _VALIDATOR_REASON_OWNERSHIP["mcp_action_tool_in_auto_run_pack"] == "validators/mcp.py"
