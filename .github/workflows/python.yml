@@ -72,7 +72,7 @@ jobs:
           OPA_SHA256=dc00b1c32c52f1557f7f127940bc3f1de6c507fdfbe0446f19d3b19ca5786494
           curl --fail --location --silent --show-error \
             -o /tmp/opa \
-            "https://openpolicyagent.org/downloads/v${OPA_VERSION}/opa_linux_amd64_static"
+            "https://github.com/open-policy-agent/opa/releases/download/v${OPA_VERSION}/opa_linux_amd64_static"
           echo "${OPA_SHA256}  /tmp/opa" | sha256sum -c -
           sudo install -m 0755 /tmp/opa /usr/local/bin/opa
           rm /tmp/opa
@@ -437,7 +437,7 @@ jobs:
             tests/integration/db/test_gateway_call_ledger.py \
             tests/integration/db/test_sprint_2_5_chain_integration.py
 
-      - name: Run @pytest.mark.oracle tests (alembic round-trip last)
+      - name: Run @pytest.mark.oracle tests (alembic round-trip + HP-4 keyset canary)
         env:
           COGNIC_RUN_ORACLE_INTEGRATION: "1"
           COGNIC_DB_DRIVER: oracle
@@ -445,7 +445,8 @@ jobs:
           COGNIC_DATABASE_URL_ORACLE_TEST: oracle+oracledb://cognic:cognic_dev_only@localhost:1521/?service_name=XEPDB1
         run: |
           uv run pytest -m oracle -v \
-            tests/integration/db/test_alembic_migrations.py
+            tests/integration/db/test_alembic_migrations.py \
+            tests/integration/approval/test_queue_keyset_live.py
 
       - name: Tear down overlay
         if: always()
@@ -559,7 +560,7 @@ jobs:
             tests/integration/db/test_sprint_2_5_chain_integration.py \
             tests/integration/conversation/test_claim_fencing_pg.py
 
-      - name: Run @pytest.mark.postgres tests (alembic round-trip last)
+      - name: Run @pytest.mark.postgres tests (alembic round-trip + HP-4 keyset canary)
         # Alembic round-trip drops + recreates tables; ordering here
         # ensures the GRANTs the canary depends on aren't disturbed
         # before the canary asserts on them.
@@ -570,7 +571,8 @@ jobs:
           COGNIC_DATABASE_URL_POSTGRES_TEST: postgresql+asyncpg://cognic:cognic_dev_only@localhost:5432/cognic_agentos
         run: |
           uv run pytest -m postgres -v \
-            tests/integration/db/test_alembic_migrations.py
+            tests/integration/db/test_alembic_migrations.py \
+            tests/integration/approval/test_queue_keyset_live.py
 
       - name: Tear down compose service
         if: always()

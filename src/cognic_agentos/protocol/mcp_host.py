@@ -619,7 +619,7 @@ def _approval_redacted_context(*, server_id: str, tool_name: str) -> str:
 #: a declared hook did not resolve), ``dlp_pre_guard_unavailable``
 #: (``dlp_pre_hooks`` declared but no DLP guard wired — fail closed).
 #: Drift-pinned by ``test_mcp_approval_seam.py::
-#: test_tool_invocation_refusal_reason_has_exactly_nine_values`` +
+#: test_tool_invocation_refusal_reason_has_exactly_ten_values`` +
 #: ``test_mcp_high_risk_tier_refused.py::
 #: TestRiskTierAllowListPinned::test_refusal_reason_closed_enum_pinned``.
 ToolInvocationRefusalReason = Literal[
@@ -628,6 +628,7 @@ ToolInvocationRefusalReason = Literal[
     "tool_approval_denied",
     "tool_approval_expired",
     "tool_approval_binding_mismatch",
+    "tool_approval_originator_mismatch",
     "tool_approval_request_not_found",
     "dlp_pre_refused",
     "dlp_pre_failed",
@@ -1197,6 +1198,7 @@ class MCPHost:
                     tenant_id=tenant_id,
                     expected_args_digest=args_digest,
                     expected_tool_identity=tool_identity,
+                    expected_originator_subject=originator_subject,
                 )
             except ApprovalRequestNotFound:
                 # Unknown OR cross-tenant — indistinguishable by construction
@@ -1219,12 +1221,28 @@ class MCPHost:
                     approval_request_id=str(approval_request_id),
                 ) from None
             except ApprovalTransitionRefused as exc:
-                if exc.reason != "approval_binding_mismatch":
+                if exc.reason == "approval_binding_mismatch":
+                    wire_reason: ToolInvocationRefusalReason = "tool_approval_binding_mismatch"
+                    wire_detail = (
+                        f"approval request {approval_request_id} was granted for a "
+                        f"DIFFERENT invocation shape (args or tool identity changed); "
+                        f"a grant authorises exactly one action."
+                    )
+                elif exc.reason == "approval_originator_mismatch":
+                    # HP-4: the grant is usable ONLY by the original requesting
+                    # subject. Value-free: no subject rides the wire or the row.
+                    wire_reason = "tool_approval_originator_mismatch"
+                    wire_detail = (
+                        f"approval request {approval_request_id} belongs to a "
+                        f"different requesting subject; a grant authorises exactly "
+                        f"one requester."
+                    )
+                else:
                     raise  # defensive: unexpected verify-side refusal -> errored arm
                 # flow OMITTED: verify raised without returning the result and
                 # the seam does NOT issue an extra store read (spec §4).
                 await self._emit_approval_refused(
-                    reason="tool_approval_binding_mismatch",
+                    reason=wire_reason,
                     entry=entry,
                     tool_name=tool_name,
                     request_id=request_id,
@@ -1233,10 +1251,8 @@ class MCPHost:
                     approval_request_id=str(approval_request_id),
                 )
                 raise MCPToolInvocationRefused(
-                    "tool_approval_binding_mismatch",
-                    f"approval request {approval_request_id} was granted for a "
-                    f"DIFFERENT invocation shape (args or tool identity changed); "
-                    f"a grant authorises exactly one action.",
+                    wire_reason,
+                    wire_detail,
                     server_id=entry.server_id,
                     tool_name=tool_name,
                     declared_risk_tier=declared_risk_tier,

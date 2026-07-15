@@ -1,0 +1,115 @@
+# infra/proof-m85c/manifests/bff.yaml — the Cognic Harness BFF (the product under
+# test), spec §3 + §5.1. TWO replicas behind one Service so Bar A exercises the
+# session store's cross-replica contract for real (not merely "deployed twice"):
+# a login on one replica must be usable on the other, a logout must invalidate on
+# both, and killing one pod must not lose the session — all of which are only
+# meaningful because the tokens live in the shared TLS Redis, never in a replica.
+#
+# The image ships from the cognic-harness repo as a cosign-signed, digest-pinned
+# artifact; the runner verifies the signature before `kind load` (spec §5.1). The
+# env below is the harness's own Settings contract (bootstrap/settings.py):
+#   * prod REQUIRES the redis backend, a >=32-char HMAC secret, a `rediss://`
+#     URL, an OIDC client secret, and https:// for AgentOS / issuer / redirect —
+#     the Settings __post_init__ fails closed otherwise, which is the posture we
+#     want a live proof to exercise.
+#   * TLS: the browser->BFF leg is HTTPS (required for the `__Host-` cookie). The
+#     cert is the per-run harness leaf, mounted from a kubernetes.io/tls Secret at
+#     the exact paths the image's COGNIC_HARNESS_TLS_* env names.
+#   * CA custody: the BFF verifies AgentOS, the IdP, and its Redis against the ONE
+#     per-run proof CA. AgentOS + OIDC take explicit per-leg CA bundles
+#     (COGNIC_HARNESS_{AGENTOS,OIDC}_CA_BUNDLE); the Redis leg takes
+#     COGNIC_HARNESS_REDIS_CA_BUNDLE. All three point at the same mounted CA.
+#
+# Non-secret env is inline; every SECRET (the OIDC client secret, the session
+# HMAC secret, the redis URL with its ACL password) rides a Secret the runner
+# mints per run — none is committed or image-baked.
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: cognic-proof-harness, labels: { app: cognic-proof-harness } }
+spec:
+  # TWO replicas — Bar A's cross-replica session contract depends on it.
+  replicas: 2
+  selector: { matchLabels: { app: cognic-proof-harness } }
+  template:
+    metadata: { labels: { app: cognic-proof-harness } }
+    spec:
+      # The image runs as uid/gid 10001 (Dockerfile: `adduser -S -u 10001 -G harness`
+      # + `USER harness`). A kubernetes.io/tls Secret volume is mounted root-owned,
+      # so a 0440 (group-only) defaultMode is UNREADABLE by uid 10001 unless the
+      # kubelet also chowns the volume to a group the process belongs to. `fsGroup`
+      # is what does that: the volume becomes root:10001 and the 0440 group bit is
+      # what the BFF reads its private key through. WITHOUT fsGroup the pod cannot
+      # read its own tls.key and never serves — so this block is load-bearing, not
+      # decoration. `_assert_bff_key_readable` in the runner pins the effective
+      # ownership + mode from inside the running container.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: harness
+          image: cognic-harness:proofm85c
+          imagePullPolicy: IfNotPresent
+          ports: [{ containerPort: 8443 }]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          env:
+            - { name: COGNIC_HARNESS_ENV, value: "prod" }
+            - { name: COGNIC_HARNESS_HOST, value: "0.0.0.0" }
+            - { name: COGNIC_HARNESS_PORT, value: "8443" }
+            # --- AgentOS client (HTTPS + the proof CA) ---
+            - { name: COGNIC_HARNESS_AGENTOS_BASE_URL, value: "https://rel-agentos:8443" }
+            - { name: COGNIC_HARNESS_AGENTOS_CA_BUNDLE, value: "/etc/proof-ca/proof-ca.pem" }
+            # Governed turns may run to the kernel's 300s wall-clock budget. This
+            # widens only the BFF client's response-read phase; connect/write/pool
+            # retain the harness's 10s transport bound.
+            - { name: COGNIC_HARNESS_AGENTOS_TURN_TIMEOUT_S, value: "330" }
+            # --- OIDC (the reference IdP; HTTPS + the proof CA) ---
+            - { name: COGNIC_HARNESS_OIDC_ISSUER, value: "https://cognic-proof-keycloak:8443/realms/proof-m85c" }
+            - { name: COGNIC_HARNESS_OIDC_CLIENT_ID, value: "cognic-harness" }
+            - { name: COGNIC_HARNESS_OIDC_REDIRECT_URI, value: "https://127.0.0.1:8444/auth/callback" }
+            - { name: COGNIC_HARNESS_OIDC_TENANT_CLAIM, value: "tenant_id" }
+            - { name: COGNIC_HARNESS_OIDC_CA_BUNDLE, value: "/etc/proof-ca/proof-ca.pem" }
+            # --- sessions (Redis, TLS) ---
+            - { name: COGNIC_HARNESS_SESSION_BACKEND, value: "redis" }
+            - { name: COGNIC_HARNESS_REDIS_CA_BUNDLE, value: "/etc/proof-ca/proof-ca.pem" }
+            - { name: COGNIC_HARNESS_SESSION_IDLE_TTL_S, value: "900" }
+            - { name: COGNIC_HARNESS_SESSION_ABSOLUTE_TTL_S, value: "28800" }
+            # --- secrets (per-run Secret; never inline) ---
+            - name: COGNIC_HARNESS_OIDC_CLIENT_SECRET
+              valueFrom: { secretKeyRef: { name: proof-m85c-harness-secrets, key: oidc-client-secret } }
+            - name: COGNIC_HARNESS_SESSION_HMAC_SECRET
+              valueFrom: { secretKeyRef: { name: proof-m85c-harness-secrets, key: session-hmac-secret } }
+            - name: COGNIC_HARNESS_REDIS_URL
+              valueFrom: { secretKeyRef: { name: proof-m85c-harness-secrets, key: redis-url } }
+          volumeMounts:
+            - { name: harness-tls, mountPath: /etc/harness-tls, readOnly: true }
+            - { name: proof-ca, mountPath: /etc/proof-ca, readOnly: true }
+          # The v1 harness has no synthetic health route. Probe the real,
+          # unauthenticated sign-in page: it is registered by the shipped web
+          # artifact, returns 200 without creating a session, and only becomes
+          # reachable after the lifespan's OIDC discovery has completed.
+          readinessProbe:
+            httpGet: { path: /signin, port: 8443, scheme: HTTPS }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 30
+      volumes:
+        - name: harness-tls
+          secret:
+            secretName: proof-m85c-harness-tls
+            defaultMode: 288   # 0440 — the private key stays group-only
+        - name: proof-ca
+          secret:
+            secretName: proof-m85c-ca
+            defaultMode: 292   # 0444 — a CA certificate is public bytes
+---
+apiVersion: v1
+kind: Service
+metadata: { name: cognic-proof-harness }
+spec:
+  selector: { app: cognic-proof-harness }
+  ports: [{ port: 8443, targetPort: 8443 }]

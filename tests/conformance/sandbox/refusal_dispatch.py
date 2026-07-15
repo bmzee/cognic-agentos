@@ -834,6 +834,19 @@ async def _trigger_sandbox_approval_binding_mismatch(backend: Any, ctx: Any) -> 
 
 
 @asynccontextmanager
+async def _trigger_sandbox_approval_originator_mismatch(
+    backend: Any, ctx: Any
+) -> AsyncIterator[None]:
+    """HP-4 / M8.5-C T1 (ADR-014) — re-admission by a DIFFERENT requesting
+    subject than the one the grant was minted for (a grant authorises exactly
+    one requester). Engine-owned originator check; seam-unit-proven per the
+    ADR-023 precedent; behaviour coverage at
+    ``tests/unit/sandbox/test_approval_seam.py::TestWiredReAdmission::
+    test_actor_swap_refuses_originator_mismatch``."""
+    yield
+
+
+@asynccontextmanager
 async def _trigger_sandbox_approval_request_not_found(
     backend: Any, ctx: Any
 ) -> AsyncIterator[None]:
@@ -980,6 +993,8 @@ TRIGGERS_BY_REASON: dict[str, TriggerFactory] = {
     "sandbox_approval_denied": _trigger_sandbox_approval_denied,
     "sandbox_approval_expired": _trigger_sandbox_approval_expired,
     "sandbox_approval_binding_mismatch": _trigger_sandbox_approval_binding_mismatch,
+    # HP-4 / M8.5-C T1 (ADR-014) — actor-bound grant replay.
+    "sandbox_approval_originator_mismatch": _trigger_sandbox_approval_originator_mismatch,
     "sandbox_approval_request_not_found": _trigger_sandbox_approval_request_not_found,
     # M6 run-14 — writable_mounts enforcement (K8s fail-closed arm;
     # Docker enforces). Behavior coverage at

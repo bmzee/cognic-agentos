@@ -239,6 +239,7 @@ class _PendingThenGrantApprovalEngine:
         tenant_id: str,
         expected_args_digest: bytes,
         expected_tool_identity: str,
+        expected_originator_subject: str,
     ) -> _ConformerGrantResult:
         # Arm B: granted after the flip, pending before. Echo the expected
         # digest/identity (the recomputed admission shape) so a granted result is

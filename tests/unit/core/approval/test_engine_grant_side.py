@@ -284,6 +284,7 @@ async def test_replay_binding_gate(tmp_path: Any) -> None:
             tenant_id="t1",
             expected_args_digest=b"\x09" * 32,
             expected_tool_identity="cognic-tool-x",
+            expected_originator_subject="agent-1",
         )
     assert ei.value.reason == "approval_binding_mismatch"
     # mismatched tool_identity -> refused
@@ -293,12 +294,169 @@ async def test_replay_binding_gate(tmp_path: Any) -> None:
             tenant_id="t1",
             expected_args_digest=b"\x02" * 32,
             expected_tool_identity="other-tool",
+            expected_originator_subject="agent-1",
         )
-    # matched binding -> granted
+    # matched binding + originator -> granted
     res = await eng.verify_grant_for_action(
         request_id=req.request_id,
         tenant_id="t1",
         expected_args_digest=b"\x02" * 32,
         expected_tool_identity="cognic-tool-x",
+        expected_originator_subject="agent-1",
     )
     assert res.state == "granted"
+    assert res.originator_subject == "agent-1"
+
+
+# ---------------------------------------------------------------------------
+# HP-4 (M8.5-C T1): actor-bound replay under the corrected precedence
+#   raw load -> ORIGINATOR -> UNCONDITIONAL binding -> lazy expiry/state
+# ---------------------------------------------------------------------------
+
+
+async def _db_facts(tmp_path: Any, request_id: Any) -> tuple[str, int]:
+    """(persisted state, count of approval.expired chain rows) read directly
+    off the SAME sqlite file the engine harness uses — the zero-mutation /
+    zero-evidence oracle."""
+    import sqlalchemy as sa
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    url = f"sqlite+aiosqlite:///{tmp_path / 'grant.db'}"
+    engine = create_async_engine(url)
+    try:
+        async with engine.connect() as conn:
+            state = (
+                await conn.execute(
+                    sa.text("SELECT state FROM approval_requests WHERE request_id = :r"),
+                    {"r": request_id.hex},
+                )
+            ).scalar_one()
+            expired_rows = (
+                await conn.execute(
+                    sa.text(
+                        "SELECT count(*) FROM decision_history "
+                        "WHERE event_type = 'approval.expired'"
+                    )
+                )
+            ).scalar_one()
+        return str(state), int(expired_rows)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_wrong_originator_on_granted_is_originator_mismatch(tmp_path: Any) -> None:
+    eng = await _engine(tmp_path, flow="require_single_approval", clock=_Clock(_t0()))
+    req = await eng.create_request(envelope=_env("customer_data_read"))
+    await eng.grant(
+        request_id=req.request_id,
+        tenant_id="t1",
+        approver=_actor("rev", scope="tool.approve.customer_data"),
+    )
+    with pytest.raises(ApprovalTransitionRefused) as ei:
+        await eng.verify_grant_for_action(
+            request_id=req.request_id,
+            tenant_id="t1",
+            expected_args_digest=b"\x02" * 32,
+            expected_tool_identity="cognic-tool-x",
+            expected_originator_subject="sara.other",
+        )
+    assert ei.value.reason == "approval_originator_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_wrong_originator_on_pending_never_projects_state(tmp_path: Any) -> None:
+    # TM-revert pin A: under the OLD order (project first) this returned the
+    # pending state; the corrected precedence refuses originator FIRST.
+    eng = await _engine(tmp_path, flow="require_single_approval", clock=_Clock(_t0()))
+    req = await eng.create_request(envelope=_env("customer_data_read"))
+    with pytest.raises(ApprovalTransitionRefused) as ei:
+        await eng.verify_grant_for_action(
+            request_id=req.request_id,
+            tenant_id="t1",
+            expected_args_digest=b"\x02" * 32,
+            expected_tool_identity="cognic-tool-x",
+            expected_originator_subject="sara.other",
+        )
+    assert ei.value.reason == "approval_originator_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_originator_precedes_binding(tmp_path: Any) -> None:
+    # TM-revert pin B: wrong originator AND wrong shape -> the ORIGINATOR
+    # reason wins (the precedence order, not an accident of evaluation).
+    eng = await _engine(tmp_path, flow="require_single_approval", clock=_Clock(_t0()))
+    req = await eng.create_request(envelope=_env("customer_data_read"))
+    with pytest.raises(ApprovalTransitionRefused) as ei:
+        await eng.verify_grant_for_action(
+            request_id=req.request_id,
+            tenant_id="t1",
+            expected_args_digest=b"\x09" * 32,
+            expected_tool_identity="other-tool",
+            expected_originator_subject="sara.other",
+        )
+    assert ei.value.reason == "approval_originator_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_wrong_originator_on_time_expired_request_mutates_nothing(tmp_path: Any) -> None:
+    # The corrected precedence's teeth: a wrong-originator caller on a
+    # TIME-EXPIRED (but not yet projected) request refuses with ZERO expiry
+    # mutation and ZERO evidence — the persisted state is byte-unchanged and
+    # no approval.expired chain row exists.
+    clock = _Clock(_t0())
+    eng = await _engine(tmp_path, flow="require_single_approval", clock=clock)
+    req = await eng.create_request(envelope=_env("customer_data_read"))
+    clock.t = datetime(2026, 6, 10, 13, 0, tzinfo=UTC)  # far past the TTL
+    with pytest.raises(ApprovalTransitionRefused) as ei:
+        await eng.verify_grant_for_action(
+            request_id=req.request_id,
+            tenant_id="t1",
+            expected_args_digest=b"\x02" * 32,
+            expected_tool_identity="cognic-tool-x",
+            expected_originator_subject="sara.other",
+        )
+    assert ei.value.reason == "approval_originator_mismatch"
+    state, expired_rows = await _db_facts(tmp_path, req.request_id)
+    assert state == "pending", "the expiry mutation must NOT fire for a wrong-originator caller"
+    assert expired_rows == 0, "no approval.expired evidence may be emitted"
+
+
+@pytest.mark.asyncio
+async def test_legitimate_caller_on_time_expired_request_still_lazy_expires(
+    tmp_path: Any,
+) -> None:
+    # The mutation moved to the FINAL stage — it did not vanish.
+    clock = _Clock(_t0())
+    eng = await _engine(tmp_path, flow="require_single_approval", clock=clock)
+    req = await eng.create_request(envelope=_env("customer_data_read"))
+    clock.t = datetime(2026, 6, 10, 13, 0, tzinfo=UTC)
+    res = await eng.verify_grant_for_action(
+        request_id=req.request_id,
+        tenant_id="t1",
+        expected_args_digest=b"\x02" * 32,
+        expected_tool_identity="cognic-tool-x",
+        expected_originator_subject="agent-1",
+    )
+    assert res.state == "expired"
+    state, expired_rows = await _db_facts(tmp_path, req.request_id)
+    assert state == "expired"
+    assert expired_rows == 1
+
+
+@pytest.mark.asyncio
+async def test_originator_refusal_is_value_free(tmp_path: Any) -> None:
+    # Neither the requester's nor the caller's subject may ride the refusal.
+    eng = await _engine(tmp_path, flow="require_single_approval", clock=_Clock(_t0()))
+    req = await eng.create_request(envelope=_env("customer_data_read"))
+    with pytest.raises(ApprovalTransitionRefused) as ei:
+        await eng.verify_grant_for_action(
+            request_id=req.request_id,
+            tenant_id="t1",
+            expected_args_digest=b"\x02" * 32,
+            expected_tool_identity="cognic-tool-x",
+            expected_originator_subject="sara.other",
+        )
+    rendered = repr(ei.value) + str(ei.value)
+    assert "agent-1" not in rendered
+    assert "sara.other" not in rendered

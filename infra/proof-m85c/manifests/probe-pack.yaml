@@ -1,0 +1,62 @@
+# infra/proof-m85c/manifests/probe-pack.yaml — the released approval-probe MCP
+# tool Service (M8.5-C, spec §6). The high-risk pack Bar D drives: a four-eyes
+# grant sequence whose "zero execution until the second grant" property is proven
+# by an INDEPENDENT observer — the proof-local invocation ledger.
+#
+# Static private ClusterIP 10.96.0.52 (distinct from the oracle pack's .51) so
+# the operator-install flow materializes the override + allow-list rows for this
+# exact IP. jwt mode = the REAL RS256/JWKS verifier against the same proof AS.
+# Single-effective-URL invariant (mirrors the oracle pack):
+#   COGNIC_MCP_SERVER_URL == COGNIC_OAUTH_AUDIENCE == the materialized override
+#   server_url == the RFC-8707 resource == the token aud == this URL.
+#
+# THE LEDGER (the load-bearing evidence surface): probe_write appends one line
+# per successful invocation to COGNIC_PROBE_LEDGER_PATH. It lives on an emptyDir
+# so the runner can `kubectl exec` in and read it (the independent observer);
+# nothing outside this pod ever mounts it. It is NOT persistent — the ledger is
+# proof instrumentation for one run, not a business record. `probe_write` is
+# business-side-effect-free: the ledger append is the ONLY thing it writes, and
+# it writes nothing on any refusal.
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: proof-probe-pack, labels: { app: proof-probe-pack } }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: proof-probe-pack } }
+  template:
+    metadata: { labels: { app: proof-probe-pack } }
+    spec:
+      containers:
+      - name: probe-pack
+        image: cognic-proof-probe-pack:m85c
+        imagePullPolicy: IfNotPresent
+        ports: [{ containerPort: 8766 }]
+        env:
+        - { name: COGNIC_MCP_HOST, value: "0.0.0.0" }
+        - { name: COGNIC_MCP_PORT, value: "8766" }
+        - { name: COGNIC_MCP_SERVER_URL, value: "http://10.96.0.52:8766/mcp" }
+        - { name: COGNIC_AUTH_MODE, value: "jwt" }
+        # FastMCP advertises this issuer in Protected Resource Metadata; the
+        # verifier independently consumes COGNIC_OAUTH_ISSUER below. They must
+        # stay byte-identical or AgentOS correctly refuses the advertised AS.
+        - { name: COGNIC_MCP_AS_ISSUER, value: "http://192.88.99.9:9000" }
+        - { name: COGNIC_OAUTH_ISSUER, value: "http://192.88.99.9:9000" }
+        - { name: COGNIC_OAUTH_JWKS_URI, value: "http://192.88.99.9:9000/.well-known/jwks.json" }
+        - { name: COGNIC_OAUTH_AUDIENCE, value: "http://10.96.0.52:8766/mcp" }
+        - { name: COGNIC_REQUIRED_SCOPES, value: "approval_probe.write" }
+        - { name: COGNIC_PROBE_LEDGER_PATH, value: "/var/probe/ledger" }
+        volumeMounts:
+        - { name: probe-ledger, mountPath: /var/probe }
+      volumes:
+      # emptyDir: the runner reads the ledger via `kubectl exec`, and it is
+      # deliberately non-persistent (one run's evidence, torn down with the pod).
+      - name: probe-ledger
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata: { name: proof-probe-pack }
+spec:
+  clusterIP: 10.96.0.52
+  selector: { app: proof-probe-pack }
+  ports: [{ port: 8766, targetPort: 8766 }]

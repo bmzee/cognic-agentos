@@ -446,11 +446,16 @@ class MemoryGate:
                     tenant_id=ctx.tenant_id,
                     expected_args_digest=args_digest,
                     expected_tool_identity=tool_identity,
+                    expected_originator_subject=ctx.actor_id,
                 )
             except ApprovalRequestNotFound:
                 # Cross-tenant == unknown BY CONSTRUCTION (tenant-scoped load).
                 raise MemoryOperationRefused("memory_approval_request_not_found") from None
             except ApprovalTransitionRefused as exc:
+                if exc.reason == "approval_originator_mismatch":
+                    # HP-4: the grant is usable ONLY by the original
+                    # requesting subject (value-free: reason only).
+                    raise MemoryOperationRefused("memory_approval_originator_mismatch") from None
                 if exc.reason != "approval_binding_mismatch":
                     raise  # fail-loud; nothing else reachable from verify
                 # A grant authorises exactly one write shape (incl. content).

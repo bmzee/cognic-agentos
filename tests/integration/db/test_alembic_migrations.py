@@ -17,10 +17,12 @@ compose service is up.
 from __future__ import annotations
 
 import asyncio
+import importlib
 import os
 import subprocess
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 import sqlalchemy as sa
@@ -315,3 +317,147 @@ def test_postgres_seeded_0016_backfill() -> None:
 )
 def test_oracle_seeded_0016_backfill() -> None:
     _seeded_backfill_roundtrip(ORACLE_URL)
+
+
+# ---------------------------------------------------------------------------
+# 0017 (HP-4): the approval-queue index — live roundtrip + guard-skip rerun
+# ---------------------------------------------------------------------------
+
+_IDX_0017 = "ix_approval_requests_tenant_created_request"
+_IDX_0017_COLUMNS = ["tenant_id", "created_at", "request_id"]
+
+# The 0017 migration owns the dialect-portable index-column resolver: Oracle
+# reflects the TIMESTAMP WITH TIME ZONE column as a SYS_EXTRACT_UTC("COL")
+# function-based index (column_names[i]=None), while Postgres reports the plain
+# name. Reuse the SAME resolver the migration's shape-guard uses so this live
+# assertion is correct on both dialects; its correctness against the observed
+# Oracle shape is pinned in tests/unit/db/test_migration_20260711_0017.py.
+_migration_0017 = importlib.import_module(
+    "cognic_agentos.db.migrations.versions.20260711_0017_approval_queue_index"
+)
+
+# 0016's ix_conversations_tenant_creator_created ALSO covers created_at (a TSTZ
+# column) — same Oracle SYS_EXTRACT_UTC function-based reflection, same guard.
+# The rerun test below closes the detection gap that let the identical 0016 guard
+# bug hide: NO test exercised its guard-on-existing-index path (only the generic
+# roundtrip, which recreates from base and never validates a pre-existing index).
+_IX_CONV = "ix_conversations_tenant_creator_created"
+_IX_CONV_COLUMNS = ["tenant_id", "creator_subject", "created_at", "conversation_id"]
+_migration_0016 = importlib.import_module(
+    "cognic_agentos.db.migrations.versions.20260710_0016_conversation_read_model"
+)
+
+
+async def _approval_indexes(url: str) -> dict[str, dict[str, Any]]:
+    engine = create_async_engine(url)
+    try:
+        async with engine.connect() as conn:
+            rows = await conn.run_sync(lambda sc: sa.inspect(sc).get_indexes("approval_requests"))
+        return {str(i["name"]).lower(): dict(i) for i in rows}
+    finally:
+        await engine.dispose()
+
+
+async def _conversation_indexes(url: str) -> dict[str, dict[str, Any]]:
+    engine = create_async_engine(url)
+    try:
+        async with engine.connect() as conn:
+            rows = await conn.run_sync(lambda sc: sa.inspect(sc).get_indexes("conversations"))
+        return {str(i["name"]).lower(): dict(i) for i in rows}
+    finally:
+        await engine.dispose()
+
+
+async def _stamp_version(url: str, revision: str) -> None:
+    engine = create_async_engine(url)
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                sa.text("UPDATE alembic_version SET version_num = :rev"), {"rev": revision}
+            )
+    finally:
+        await engine.dispose()
+
+
+def _index_roundtrip_0017(url: str) -> None:
+    """head -> assert exact shape -> stamped fully-applied RERUN (the guard
+    must skip live, not raise) -> downgrade 0016 removes ONLY the index ->
+    head recreates it."""
+    _alembic(url, "upgrade", "head")
+    idx = asyncio.run(_approval_indexes(url))
+    assert _IDX_0017 in idx
+    assert _migration_0017._resolved_columns(idx[_IDX_0017]) == _IDX_0017_COLUMNS
+    assert not idx[_IDX_0017]["unique"]
+
+    asyncio.run(_stamp_version(url, "0016"))
+    _alembic(url, "upgrade", "head")  # fully-applied rerun: guard-skip, no raise
+    assert _IDX_0017 in asyncio.run(_approval_indexes(url))
+
+    _alembic(url, "downgrade", "0016")
+    assert _IDX_0017 not in asyncio.run(_approval_indexes(url))
+    _alembic(url, "upgrade", "head")
+    assert _IDX_0017 in asyncio.run(_approval_indexes(url))
+
+
+@pytest.mark.postgres
+@pytest.mark.skipif(
+    not os.environ.get("COGNIC_RUN_POSTGRES_INTEGRATION"),
+    reason=(
+        "live Postgres integration; opt in via "
+        "COGNIC_RUN_POSTGRES_INTEGRATION=1 + compose up postgres"
+    ),
+)
+def test_postgres_0017_index_roundtrip() -> None:
+    _index_roundtrip_0017(POSTGRES_URL)
+
+
+@pytest.mark.oracle
+@pytest.mark.skipif(
+    not os.environ.get("COGNIC_RUN_ORACLE_INTEGRATION"),
+    reason=(
+        "live Oracle XE integration; opt in via COGNIC_RUN_ORACLE_INTEGRATION=1 + compose up oracle"
+    ),
+)
+def test_oracle_0017_index_roundtrip() -> None:
+    _index_roundtrip_0017(ORACLE_URL)
+
+
+def _conv_index_rerun_0016(url: str) -> None:
+    """0016's ``ix_conversations_tenant_creator_created`` covers ``created_at`` (a
+    TSTZ column). On Oracle that reflects as a ``SYS_EXTRACT_UTC`` function-based
+    index, so the shape guard MUST resolve it and SKIP on a fully-applied rerun,
+    not raise. This exercises 0016's guard-on-existing-index — the path no test
+    covered, which is why the identical guard bug hid until the 0017 sibling
+    surfaced it in CI (2026-07-14)."""
+    _alembic(url, "upgrade", "head")
+    idx = asyncio.run(_conversation_indexes(url))
+    assert _IX_CONV in idx
+    assert _migration_0016._resolved_columns(idx[_IX_CONV]) == _IX_CONV_COLUMNS
+    assert not idx[_IX_CONV]["unique"]
+
+    asyncio.run(_stamp_version(url, "0015"))
+    _alembic(url, "upgrade", "head")  # fully-applied rerun: 0016 guard must skip, not raise
+    assert _IX_CONV in asyncio.run(_conversation_indexes(url))
+
+
+@pytest.mark.postgres
+@pytest.mark.skipif(
+    not os.environ.get("COGNIC_RUN_POSTGRES_INTEGRATION"),
+    reason=(
+        "live Postgres integration; opt in via "
+        "COGNIC_RUN_POSTGRES_INTEGRATION=1 + compose up postgres"
+    ),
+)
+def test_postgres_0016_conv_index_rerun() -> None:
+    _conv_index_rerun_0016(POSTGRES_URL)
+
+
+@pytest.mark.oracle
+@pytest.mark.skipif(
+    not os.environ.get("COGNIC_RUN_ORACLE_INTEGRATION"),
+    reason=(
+        "live Oracle XE integration; opt in via COGNIC_RUN_ORACLE_INTEGRATION=1 + compose up oracle"
+    ),
+)
+def test_oracle_0016_conv_index_rerun() -> None:
+    _conv_index_rerun_0016(ORACLE_URL)

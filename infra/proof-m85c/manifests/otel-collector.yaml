@@ -1,0 +1,67 @@
+# infra/proof-m85c/manifests/otel-collector.yaml — the gateway trace-record
+# surface (inherited from proof-m8; ruling R6 — NO M8.5 bar depends on spans).
+#
+# WHY THIS EXISTS (documented honestly): the gateway emits ONE value-free
+# OpenTelemetry span per completion (`llm.gateway.completion`,
+# llm/gateway.py::_emit_completion_trace_best_effort) carrying the
+# `llm.gateway.agent_workforce_id` attribute — the ADR-007/ADR-027 trace
+# surface. Under the prod profile that span is EXPORTED only when
+# `otel_exporter_endpoint` is set (observability/otel.py: no exporter -> spans
+# silently dropped), and the in-cluster Langfuse from the shared smoke
+# backends is `langfuse/langfuse:2` — a v2 deployment CANNOT ingest OTLP
+# (OTLP ingestion is Langfuse v3.22+; the shared backends fixture is
+# deliberately untouched mid-proof). So the deployment records the trace
+# through THIS collector: proof-m85c-values.yaml points the chart's Z1b-c OTLP
+# exporter values at otel-collector:4317 (gRPC), and the collector's `debug`
+# exporter (verbosity: detailed) writes every span + its attributes to the
+# pod log — a REAL recorded surface. In THIS proof it is INHERITED
+# DIAGNOSTICS ONLY (ruling R6): no M8.5 bar queries it; bar_fail captures the
+# log tail on failure. (In proof-m8, BAR 5 asserted span blocks here —
+# request_id + agent_workforce_id correlation; the m85 runner carries no such
+# assert.) Langfuse itself keeps its M4-M6 role (the /readyz observability
+# health probe) unchanged.
+apiVersion: v1
+kind: ConfigMap
+metadata: { name: otel-collector-config }
+data:
+  config.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+    exporters:
+      debug:
+        verbosity: detailed
+    service:
+      pipelines:
+        traces:
+          receivers: [otlp]
+          exporters: [debug]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: otel-collector, labels: { app: otel-collector } }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: otel-collector } }
+  template:
+    metadata: { labels: { app: otel-collector } }
+    spec:
+      containers:
+        - name: otel-collector
+          image: otel/opentelemetry-collector:0.111.0
+          imagePullPolicy: IfNotPresent
+          args: ["--config", "/etc/otelcol/config.yaml"]
+          ports: [{ containerPort: 4317 }]
+          volumeMounts:
+            - { name: cfg, mountPath: /etc/otelcol }
+      volumes:
+        - { name: cfg, configMap: { name: otel-collector-config } }
+---
+apiVersion: v1
+kind: Service
+metadata: { name: otel-collector }
+spec:
+  selector: { app: otel-collector }
+  ports: [{ port: 4317, targetPort: 4317 }]

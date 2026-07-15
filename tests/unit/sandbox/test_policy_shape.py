@@ -29,7 +29,7 @@ from cognic_agentos.sandbox import (
 class TestClosedEnumPartitionInvariants:
     """Pin the wire-protocol-public closed-enum values + counts."""
 
-    def test_sandbox_refusal_reason_has_exactly_43_values(self) -> None:
+    def test_sandbox_refusal_reason_has_exactly_44_values(self) -> None:
         # Sprint 8.5 T1 extended 15 → 21 (6 new wake-time arms per spec §3.3).
         # Sprint 10 T7 extended 21 → 22 (1 kernel-boundary cross-tenant guard
         # per Sprint-10 spec §4.1 — `sandbox_credential_request_tenant_mismatch`).
@@ -59,8 +59,8 @@ class TestClosedEnumPartitionInvariants:
         # fail-closed until the M6 spec §5.5 sidecar realization lands;
         # Docker enforces the mounts as real binds instead).
         values = typing.get_args(SandboxRefusalReason)
-        assert len(values) == 43, (
-            f"SandboxRefusalReason must have 43 values per spec §4.1 + "
+        assert len(values) == 44, (
+            f"SandboxRefusalReason must have 44 values per spec §4.1 + "
             f"8.5 §3.3 + 10 §4.1 + 10 §6.1 + 10.1 ADR-004 §25 amendment + "
             f"10.6 §5.1 (9 credential-projection values) + ADR-023 "
             f"(sandbox_tenant_config_overlay_invalid) + 13.5c1 spec §4 "
@@ -214,6 +214,9 @@ class TestClosedEnumPartitionInvariants:
             "sandbox_approval_denied",
             "sandbox_approval_expired",
             "sandbox_approval_binding_mismatch",
+            # HP-4 (M8.5-C T1) — actor-bound replay: the grant is usable
+            # only by the original requesting subject.
+            "sandbox_approval_originator_mismatch",
             "sandbox_approval_request_not_found",
             # M6 run-14 — writable_mounts ENFORCEMENT (K8s fail-closed
             # arm until the M6 spec §5.5 same-Pod-sidecar + emptyDir
@@ -322,7 +325,7 @@ class TestSprint106CredentialProjectionRefusalReasons:
         # (ADR-014); 43 after the M6 run-14 writable_mounts-enforcement
         # amendment added ``sandbox_writable_mounts_unsupported_on_backend``
         # (K8s fail-closed until the spec §5.5 sidecar realization lands).
-        assert len(typing.get_args(SandboxRefusalReason)) == 43
+        assert len(typing.get_args(SandboxRefusalReason)) == 44
 
     def test_all_nine_credential_projection_values_present(self) -> None:
         values = set(typing.get_args(SandboxRefusalReason))

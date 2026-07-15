@@ -175,7 +175,7 @@ async def test_real_tools_rego_classifies_read_only_auto_run(
         originator_subject="agent-1",
     )
     assert result.payload == {"content": "ok"}
-    assert await store.list_pending("t-1") == []
+    assert (await store.list_pending("t-1")).items == ()
 
 
 async def test_pending_http_grant_recall_dispatches(host_module: Any, tmp_path: Any) -> None:

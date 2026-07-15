@@ -1,0 +1,125 @@
+# M8.5-C — the reference proof IdP (design spec §4 + §5.1).
+#
+# PINNED VERSION + IMMUTABLE DIGEST, both recorded here as the spec requires.
+# 26.2 is the FLOOR: it is the release that added the client attribute
+# `access.token.header.type.rfc9068`, which is what makes Keycloak mint access
+# tokens whose header `typ` is `at+jwt`. That attribute is OFF by default, so
+# the realm sets it explicitly (keycloak/gen_realm.py) and the runner PROVES the
+# emitted header against a real token before any bar runs
+# (keycloak/assert_claim_contract.py). Pinning the header type is NOT a claim
+# that the full RFC 9068 claim profile is implemented — nothing here claims that.
+#
+# NAME: the Service is `cognic-proof-keycloak` so ONE hostname resolves
+# identically everywhere — in-cluster pods reach it by the namespace search
+# domain, and the operator host reaches it through a `127.0.0.1` /etc/hosts entry
+# plus a port-forward. One hostname => ONE issuer string in every token, which is
+# what lets the reference binder compare `iss` with a single exact value
+# regardless of who fetched the token.
+#
+# TLS: HTTPS only (`KC_HTTP_ENABLED=false`). The certificate is minted per-run
+# under the proof CA with SANs covering both resolution paths. Every client — the
+# BFF, the kernel's JWKS cache, and the proof driver — verifies against that CA.
+# `verify=False` appears nowhere in this proof's human-identity path.
+#
+# DEV MODE, DISCLOSED: `start-dev` runs with an in-memory H2 database. The realm
+# is imported fresh each run and nothing is persisted, so there is nothing to
+# lose; the surfaces actually under test (the locked grant profile, the claim
+# contract, the TLS legs, PKCE) are all real and are all exercised. This is a
+# proof-topology choice and is listed in the README's honesty boundaries.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cognic-proof-keycloak
+  labels:
+    app: cognic-proof-keycloak
+spec:
+  selector:
+    app: cognic-proof-keycloak
+  ports:
+    - name: https
+      port: 8443
+      targetPort: 8443
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cognic-proof-keycloak
+  labels:
+    app: cognic-proof-keycloak
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cognic-proof-keycloak
+  template:
+    metadata:
+      labels:
+        app: cognic-proof-keycloak
+    spec:
+      containers:
+        - name: keycloak
+          # Keycloak 26.2 — pinned by immutable digest (spec §4).
+          image: keycloak/keycloak:26.2@sha256:4883630ef9db14031cde3e60700c9a9a8eaf1b5c24db1589d6a2d43de38ba2a9
+          imagePullPolicy: IfNotPresent
+          args: ["start-dev", "--import-realm"]
+          env:
+            # The realm arrives by import. The bootstrap admin is retained only
+            # for the proof's deterministic client-lifespan lever and independent
+            # refresh-event observation; its credential never leaves the runner.
+            - name: KC_BOOTSTRAP_ADMIN_USERNAME
+              value: "proof-admin"
+            - name: KC_BOOTSTRAP_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: proof-m85c-keycloak-admin
+                  key: password
+            # ONE hostname => ONE issuer, in every token, from every caller.
+            - name: KC_HOSTNAME
+              value: "https://cognic-proof-keycloak:8443"
+            - name: KC_HTTP_ENABLED
+              value: "false"
+            - name: KC_HTTPS_CERTIFICATE_FILE
+              value: /etc/keycloak-tls/tls.crt
+            - name: KC_HTTPS_CERTIFICATE_KEY_FILE
+              value: /etc/keycloak-tls/tls.key
+            - name: KC_HTTPS_PORT
+              value: "8443"
+          ports:
+            - name: https
+              containerPort: 8443
+          volumeMounts:
+            # The realm is a SECRET, not a ConfigMap: it carries the confidential
+            # client's secret and every generated user password. It is minted per
+            # run into the private per-run directory and removed by the cleanup
+            # trap; nothing here is ever committed.
+            - name: realm
+              mountPath: /opt/keycloak/data/import
+              readOnly: true
+            - name: tls
+              mountPath: /etc/keycloak-tls
+              readOnly: true
+          # Pod-level readiness is a TCP check because the Keycloak image ships
+          # no HTTP client to probe with. The REAL readiness gate is the runner's:
+          # it polls the realm's discovery document over HTTPS and then asserts the
+          # emitted claim contract — "the realm is imported and minting correct
+          # tokens" is the only readiness that matters to a bar.
+          readinessProbe:
+            tcpSocket:
+              port: 8443
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 60
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              memory: 1536Mi
+      volumes:
+        - name: realm
+          secret:
+            secretName: proof-m85c-keycloak-realm
+        - name: tls
+          secret:
+            secretName: proof-m85c-keycloak-tls

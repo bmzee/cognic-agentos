@@ -358,7 +358,7 @@ class TestWiredFirstAdmission:
             **kwargs,  # type: ignore[arg-type]
             approval_engine=engine,  # type: ignore[arg-type]
         )
-        assert await store.list_pending("t-1") == []  # type: ignore[attr-defined]
+        assert (await store.list_pending("t-1")).items == ()  # type: ignore[attr-defined]
         # ...and approval_verified stays False on the auto path:
         sent = kwargs["rego_engine"].evaluate.await_args.kwargs["input"]  # type: ignore[attr-defined]
         assert sent["approval_verified"] is False
@@ -566,6 +566,78 @@ class TestWiredReAdmission:
                 approval_request_id=rid,  # type: ignore[arg-type]
             )
         assert exc.value.reason == "sandbox_approval_denied"
+
+    async def test_actor_swap_refuses_originator_mismatch(
+        self, tmp_path: object, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # HP-4 (M8.5-C T1): a DIFFERENT same-tenant actor re-admitting the
+        # EXACT granted shape refuses sandbox_approval_originator_mismatch —
+        # the grant is usable only by the original requesting subject. The
+        # admission shape (policy + pack identity) is UNCHANGED, isolating
+        # the originator check from the binding digest.
+        import logging
+        from unittest.mock import MagicMock
+
+        from cognic_agentos.sandbox.admission import admit_policy
+        from cognic_agentos.sandbox.protocol import SandboxLifecycleRefused
+
+        store = await _mk_approval_store(tmp_path)
+        engine = _mk_approval_engine(store, flow="require_single_approval")
+        kwargs = _admit_kwargs()  # original requester: actor.subject="agent-1"
+        rid = await self._pending(store, engine, kwargs)
+        await engine.grant(request_id=rid, tenant_id="t-1", approver=_approver())  # type: ignore[attr-defined]
+        swapped = {**kwargs, "actor": MagicMock(subject="agent-2")}
+        with (
+            caplog.at_level(logging.DEBUG),
+            pytest.raises(SandboxLifecycleRefused) as exc,
+        ):
+            await admit_policy(
+                _valid_policy(),  # type: ignore[arg-type]
+                **swapped,  # type: ignore[arg-type]
+                approval_engine=engine,  # type: ignore[arg-type]
+                approval_request_id=rid,  # type: ignore[arg-type]
+            )
+        assert exc.value.reason == "sandbox_approval_originator_mismatch"
+        # Value-free: neither the original requester ("agent-1") nor the
+        # swapped caller ("agent-2") rides the refusal detail OR any log record.
+        rendered = str(exc.value.detail) + repr(exc.value)
+        # Scope to cognic_agentos GOVERNANCE loggers: the evidence chain
+        # (decision_history) legitimately records the actor as evidence, and
+        # its sqlalchemy SQL-echo at DEBUG is not a governance-log leak.
+        # repr(vars(record)) covers message + args AND `extra=` fields (this
+        # repo commonly logs identity through extra, which lands in __dict__).
+        gov = [r for r in caplog.records if r.name.startswith("cognic_agentos")]
+        logged = " ".join(repr(vars(r)) for r in gov)
+        for subject in ("agent-1", "agent-2"):
+            assert subject not in rendered, f"{subject!r} leaked into the refusal detail"
+            assert subject not in logged, f"{subject!r} leaked into a log record"
+
+    async def test_verify_receives_actor_subject_exactly(self, tmp_path: object) -> None:
+        # Exact actor-forwarding (HP-4 test class i): admit_policy passes
+        # actor.subject — verbatim — as expected_originator_subject.
+        from unittest.mock import AsyncMock, MagicMock
+
+        from cognic_agentos.core.approval._types import ApprovalTransitionRefused
+        from cognic_agentos.sandbox.admission import admit_policy
+        from cognic_agentos.sandbox.protocol import SandboxLifecycleRefused
+
+        engine = MagicMock()
+        engine.verify_grant_for_action = AsyncMock(
+            side_effect=ApprovalTransitionRefused("approval_originator_mismatch")
+        )
+        import uuid as _uuid
+
+        kwargs = _admit_kwargs(actor=MagicMock(subject="analyst.exact-forwarding"))
+        with pytest.raises(SandboxLifecycleRefused) as exc:
+            await admit_policy(
+                _valid_policy(),  # type: ignore[arg-type]
+                **kwargs,  # type: ignore[arg-type]
+                approval_engine=engine,
+                approval_request_id=_uuid.uuid4(),
+            )
+        assert exc.value.reason == "sandbox_approval_originator_mismatch"
+        sent = engine.verify_grant_for_action.await_args.kwargs
+        assert sent["expected_originator_subject"] == "analyst.exact-forwarding"
 
     async def test_expired_readmission_refuses_expired(self, tmp_path: object) -> None:
         from datetime import timedelta

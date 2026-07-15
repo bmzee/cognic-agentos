@@ -13,7 +13,10 @@ no raw tool args ever — only the caller's ``args_digest`` + the engine's
 
 from __future__ import annotations
 
+import base64
+import binascii
 import dataclasses
+import json
 import uuid
 from datetime import UTC, datetime
 from typing import Any, Final
@@ -29,7 +32,9 @@ from sqlalchemy import (
     Table,
     Text,
     Uuid,
+    and_,
     insert,
+    or_,
     select,
     update,
 )
@@ -101,6 +106,9 @@ _approval_requests = Table(
         name="ck_approval_requests_state",
     ),
     Index("ix_approval_requests_tenant_state", "tenant_id", "state"),
+    # Migration 0017 (HP-4): the reviewer queue's tenant-leading chronological
+    # index — (created_at, request_id) is the keyset list_pending walks.
+    Index("ix_approval_requests_tenant_created_request", "tenant_id", "created_at", "request_id"),
 )
 
 
@@ -223,28 +231,138 @@ def _value_free_payload(
 #: (granted / denied / expired) are excluded from ``list_pending``.
 _ACTIONABLE_STATES: Final[tuple[str, ...]] = ("pending", "awaiting_second")
 
+#: HP-4 (M8.5-C T1): the queue cursor's wire ceiling — enforced BEFORE any
+#: decode work so an oversized input never reaches base64/json.
+APPROVAL_CURSOR_MAX_ENCODED_LEN: Final[int] = 256
+
+_CURSOR_VERSION: Final[int] = 1
+
+#: The exact key set a version-1 cursor payload carries — extra or missing
+#: keys refuse (a malformed cursor is refused whole, never partially honoured).
+_CURSOR_KEYS: Final[frozenset[str]] = frozenset({"v", "created_at", "request_id"})
+
+
+class ApprovalCursorInvalid(Exception):
+    """Malformed / wrong-version / invalid-type / over-length queue cursor.
+    The route maps this to ``422 {"detail": {"reason": "cursor_invalid"}}``.
+
+    Cursor doctrine: the cursor is an UNSIGNED, NON-AUTHORITATIVE presentation
+    position (the last returned row's ``(created_at, request_id)`` keyset), NOT
+    a security token. The actual authorization boundary is the tenant-scoped
+    WHERE clause on every query — a caller cannot widen their view by forging a
+    cursor. Strict decoding therefore exists to reject MALFORMED / AMBIGUOUS
+    input (so a bad cursor is a clean 422, never a silent wrong-page or a
+    dialect-level 500), not to detect tampering."""
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class ApprovalQueueCursor:
+    """The typed keyset position: the last returned row's chronological pair."""
+
+    created_at: datetime
+    request_id: uuid.UUID
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class ListPendingPage:
+    """One reviewer-queue page. ``items`` is a tuple (a frozen page never
+    carries a mutable list); ``next_cursor`` is None on the final page."""
+
+    items: tuple[ApprovalRequestSummary, ...]
+    next_cursor: str | None
+
+
+def _mint_aware_utc(value: datetime) -> datetime:
+    """The write path persists tz-aware UTC; drivers without tz storage
+    (sqlite) hand the same instant back naive — normalize at cursor-mint time
+    so the strict aware-required decode holds on every dialect. LOCAL copy of
+    the read-model helper (drift-pinned test-only; no runtime cross-import)."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value
+
+
+def encode_queue_cursor(cursor: ApprovalQueueCursor) -> str:
+    raw = json.dumps(
+        {
+            "v": _CURSOR_VERSION,
+            "created_at": _mint_aware_utc(cursor.created_at).isoformat(),
+            "request_id": str(cursor.request_id),
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii")
+
+
+def decode_queue_cursor(raw: str) -> ApprovalQueueCursor:
+    if len(raw) > APPROVAL_CURSOR_MAX_ENCODED_LEN:
+        raise ApprovalCursorInvalid("cursor exceeds the maximum encoded length")
+    try:
+        # validate=True: STRICT alphabet — urlsafe_b64decode silently discards
+        # non-alphabet bytes, so a cursor with trailing garbage would otherwise
+        # decode to a DIFFERENT position than it presents. Refuse it cleanly as
+        # 422 rather than serve an ambiguous page (the cursor is a
+        # non-authoritative position, not a security token — see the
+        # ApprovalCursorInvalid doctrine note).
+        decoded = json.loads(base64.b64decode(raw.encode("ascii"), altchars=b"-_", validate=True))
+    except (ValueError, binascii.Error, UnicodeDecodeError) as exc:
+        raise ApprovalCursorInvalid("cursor is not base64url(JSON)") from exc
+    if not isinstance(decoded, dict) or set(decoded) != _CURSOR_KEYS:
+        raise ApprovalCursorInvalid("cursor payload has an invalid key set")
+    version = decoded["v"]
+    # bool-guarded exact int: JSON true == 1 in Python and would impersonate
+    # version 1.
+    if not isinstance(version, int) or isinstance(version, bool) or version != _CURSOR_VERSION:
+        raise ApprovalCursorInvalid(f"unsupported cursor version {version!r}")
+    created_raw, rid_raw = decoded["created_at"], decoded["request_id"]
+    if not isinstance(created_raw, str) or not isinstance(rid_raw, str):
+        raise ApprovalCursorInvalid("cursor fields have invalid types")
+    try:
+        created_at = datetime.fromisoformat(created_raw)
+        request_id = uuid.UUID(rid_raw)
+    except ValueError as exc:
+        raise ApprovalCursorInvalid("cursor carries an unparseable position") from exc
+    # tz-aware or refused: a naive keyset timestamp compared against the
+    # tz-aware column is a dialect-level error (a 500), not a governed 422.
+    if created_at.tzinfo is None or created_at.tzinfo.utcoffset(created_at) is None:
+        raise ApprovalCursorInvalid("cursor timestamp must be timezone-aware")
+    return ApprovalQueueCursor(created_at=created_at, request_id=request_id)
+
 
 def _build_list_pending_stmt(
-    tenant_id: str, *, limit: int, cursor: uuid.UUID | None
+    tenant_id: str, *, limit_plus_one: int, after: ApprovalQueueCursor | None
 ) -> Select[Any]:
     """SOLE query-construction path for :meth:`ApprovalRequestStore.list_pending`.
     The SQL-shape regression imports this SAME builder (no vacuous duplicate
     select). WHERE: ``tenant_id == :tenant_id`` (ALWAYS — the server-side tenant
-    boundary) AND ``state IN ('pending','awaiting_second')`` (ALWAYS) AND
-    ``request_id > :cursor`` (when cursor non-None). Ordered by ``request_id``;
-    the ``ix_approval_requests_tenant_state`` composite index backs the lead
-    columns."""
+    boundary) AND ``state IN ('pending','awaiting_second')`` (ALWAYS) AND the
+    HP-4 chronological keyset ``(created_at, request_id) > cursor`` via the
+    Oracle-portable tuple expansion (when a cursor is present). Ordered by
+    ``(created_at ASC, request_id ASC)``; the 0017
+    ``ix_approval_requests_tenant_created_request`` index backs the WHERE +
+    ORDER BY."""
     stmt = (
         select(_approval_requests)
         .where(
             _approval_requests.c.tenant_id == tenant_id,
             _approval_requests.c.state.in_(_ACTIONABLE_STATES),
         )
-        .order_by(_approval_requests.c.request_id)
+        .order_by(_approval_requests.c.created_at.asc(), _approval_requests.c.request_id.asc())
+        .limit(limit_plus_one)
     )
-    if cursor is not None:
-        stmt = stmt.where(_approval_requests.c.request_id > cursor)
-    return stmt.limit(limit)
+    if after is not None:
+        # Portable keyset (Oracle lacks general row-value comparison).
+        stmt = stmt.where(
+            or_(
+                _approval_requests.c.created_at > after.created_at,
+                and_(
+                    _approval_requests.c.created_at == after.created_at,
+                    _approval_requests.c.request_id > after.request_id,
+                ),
+            )
+        )
+    return stmt
 
 
 class ApprovalRequestStore:
@@ -488,16 +606,23 @@ class ApprovalRequestStore:
         return row[0] if row is not None else None
 
     async def list_pending(
-        self, tenant_id: str, *, limit: int = 50, cursor: uuid.UUID | None = None
-    ) -> list[ApprovalRequestSummary]:
-        """The reviewer queue: actionable (``pending`` + ``awaiting_second``)
-        requests for ``tenant_id``, keyset-paginated by ``request_id``. Tenant
-        scoping is the WHERE clause (no in-handler filter can leak cross-tenant
-        rows)."""
-        stmt = _build_list_pending_stmt(tenant_id, limit=limit, cursor=cursor)
+        self, tenant_id: str, *, limit: int = 50, cursor: str | None = None
+    ) -> ListPendingPage:
+        """The reviewer queue (HP-4): actionable (``pending`` +
+        ``awaiting_second``) requests for ``tenant_id``, chronologically
+        keyset-paginated by ``(created_at, request_id)`` via the typed opaque
+        cursor. Tenant scoping is the WHERE clause (no in-handler filter can
+        leak cross-tenant rows). ``limit`` is clamped defensively to 1..200 —
+        the route owns the wire 422. Raises :class:`ApprovalCursorInvalid` on
+        any cursor decode failure."""
+        page_size = max(1, min(limit, 200))
+        after = decode_queue_cursor(cursor) if cursor is not None else None
+        stmt = _build_list_pending_stmt(tenant_id, limit_plus_one=page_size + 1, after=after)
         async with self._engine.connect() as conn:
             rows = (await conn.execute(stmt)).all()
-        return [
+        has_more = len(rows) > page_size
+        page = rows[:page_size]
+        items = tuple(
             ApprovalRequestSummary(
                 request_id=r.request_id,
                 tenant_id=r.tenant_id,
@@ -510,8 +635,15 @@ class ApprovalRequestStore:
                 created_at=r.created_at.replace(tzinfo=r.created_at.tzinfo or UTC),
                 expires_at=r.expires_at.replace(tzinfo=r.expires_at.tzinfo or UTC),
             )
-            for r in rows
-        ]
+            for r in page
+        )
+        next_cursor: str | None = None
+        if has_more and page:
+            last = page[-1]
+            next_cursor = encode_queue_cursor(
+                ApprovalQueueCursor(created_at=last.created_at, request_id=last.request_id)
+            )
+        return ListPendingPage(items=items, next_cursor=next_cursor)
 
     async def load_detail(
         self, *, request_id: uuid.UUID, tenant_id: str

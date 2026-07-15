@@ -11,6 +11,7 @@ completes cleanly (the Oracle DDL-autocommit posture).
 
 from __future__ import annotations
 
+import importlib
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -599,3 +600,56 @@ def test_uq_shape_guard_rejects_wrong_columns() -> None:
     # Wrong columns under the right name: fail loud.
     with pytest.raises(RuntimeError, match="0016 ddl: existing object shape mismatch"):
         module._validate_uq_shape({_UQ: {"column_names": ["seq"]}})
+
+
+# ---------------------------------------------------------------------------
+# Oracle function-based-index reflection (the SYS_EXTRACT_UTC shape)
+# ---------------------------------------------------------------------------
+# ``ix_conversations_tenant_creator_created`` covers ``created_at`` (a ``TIMESTAMP
+# WITH TIME ZONE`` column); Oracle indexes it as a function-based index on
+# ``SYS_EXTRACT_UTC("COL")`` (column_names[i]=None + the expression under
+# expressions[i]). These pins run WITHOUT a live database — the fixture IS the
+# shape OBSERVED against live Oracle XE 21 + SQLAlchemy 2.0.49 (byte-coupled to
+# reality). The guard-on-existing-index integration on the real Oracle reflection
+# is closed by tests/integration/db/test_alembic_migrations.py
+# ::test_oracle_0016_conv_index_rerun (0016's guard takes a live Inspector). The
+# sibling 0017 pins live in tests/unit/db/test_migration_20260711_0017.py.
+_MIGRATION_0016 = "cognic_agentos.db.migrations.versions.20260710_0016_conversation_read_model"
+_IX_CONV_COLUMNS = ["tenant_id", "creator_subject", "created_at", "conversation_id"]
+_ORACLE_IX_CONV_REFLECTION: dict[str, Any] = {
+    "name": _IX_CONV,
+    "column_names": ["tenant_id", "creator_subject", None, "conversation_id"],
+    "expressions": [
+        "tenant_id",
+        "creator_subject",
+        'SYS_EXTRACT_UTC("CREATED_AT")',
+        "conversation_id",
+    ],
+    "unique": False,
+}
+
+
+def test_resolved_columns_maps_oracle_conv_index_to_plain_columns() -> None:
+    # The observed Oracle reflection of the TSTZ-bearing index resolves back to
+    # the plain column identity the guard compares against.
+    mod = importlib.import_module(_MIGRATION_0016)
+    assert mod._resolved_columns(_ORACLE_IX_CONV_REFLECTION) == _IX_CONV_COLUMNS
+
+
+def test_resolved_columns_is_identity_on_plain_conv_names() -> None:
+    # Postgres / SQLite path: column_names fully populated, expressions unused.
+    mod = importlib.import_module(_MIGRATION_0016)
+    plain = {"name": _IX_CONV, "column_names": list(_IX_CONV_COLUMNS), "expressions": None}
+    assert mod._resolved_columns(plain) == _IX_CONV_COLUMNS
+
+
+def test_resolved_columns_fails_loud_on_conv_non_normalization_expression() -> None:
+    # A None-position expression that is NOT the expected SYS_EXTRACT_UTC(col)
+    # normalisation must fail loud, not be silently accepted as its column.
+    mod = importlib.import_module(_MIGRATION_0016)
+    weird = {
+        **_ORACLE_IX_CONV_REFLECTION,
+        "expressions": ["tenant_id", "creator_subject", 'LOWER("CREATED_AT")', "conversation_id"],
+    }
+    with pytest.raises(RuntimeError, match="0016 ddl: existing object shape mismatch"):
+        mod._resolved_columns(weird)

@@ -148,16 +148,17 @@ async def test_create_threads_approval_into_cold_admit_policy(
 # then patch the module-level ``admit_policy`` to record-and-raise (threading
 # test) or raise a refusal (passthrough / collapse tests).
 
-# The five approval-family reasons that MUST pass through the wake wrapper
-# un-rewrapped (mirror of the protocol.py single-source constant). Typed as the
-# closed Literal so the SandboxLifecycleRefused(reason, ...) call site is
-# type-clean under mypy.
+# The six approval-family reasons that MUST pass through the wake wrapper
+# un-rewrapped (mirror of the protocol.py single-source constant; HP-4 added
+# the originator mismatch). Typed as the closed Literal so the
+# SandboxLifecycleRefused(reason, ...) call site is type-clean under mypy.
 _APPROVAL_REASONS: list[SandboxRefusalReason] = [
     "sandbox_approval_pending",
     "sandbox_approval_denied",
     "sandbox_approval_expired",
     "sandbox_approval_request_not_found",
     "sandbox_approval_binding_mismatch",
+    "sandbox_approval_originator_mismatch",
 ]
 
 
@@ -310,5 +311,6 @@ async def test_both_backends_import_the_same_passthrough_constant() -> None:
     kp_const = _kp._APPROVAL_WAKE_PASSTHROUGH_REASONS  # type: ignore[attr-defined]
     assert ds_const is _APPROVAL_WAKE_PASSTHROUGH_REASONS
     assert kp_const is _APPROVAL_WAKE_PASSTHROUGH_REASONS
-    # The constant is exactly the five approval-family reasons.
+    # The constant is exactly the six approval-family reasons (HP-4 added
+    # sandbox_approval_originator_mismatch).
     assert frozenset(_APPROVAL_REASONS) == _APPROVAL_WAKE_PASSTHROUGH_REASONS

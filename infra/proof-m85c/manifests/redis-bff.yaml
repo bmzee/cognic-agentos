@@ -1,0 +1,95 @@
+# infra/proof-m85c/manifests/redis-bff.yaml — the BFF's dedicated session-store
+# Redis (spec §3.3, verbatim: "TLS, BFF-only ACLs, short TTLs, ... persistence
+# disabled for the proof (losing the cache logs users out rather than weakening
+# authorization)").
+#
+# This is a SEPARATE instance from the kernel's control-plane Redis
+# (manifests/redis.yaml, plaintext, in-cluster only). The session store holds the
+# OAuth tokens the browser never sees, so it gets the stricter posture:
+#   * TLS — the server presents the per-run redis-bff leaf cert; the BFF verifies
+#     it against the proof CA. The BFF's redis_url is `rediss://`.
+#   * BFF-only ACL — the default user is disabled; a dedicated `bff` user with a
+#     per-run password is the only principal that can connect. Nothing else in
+#     the cluster has the credential.
+#   * persistence OFF — `save ""` + `appendonly no`. A restart / eviction logs
+#     users out (they re-authenticate); it never leaves tokens on disk and never
+#     lets a stale cache weaken an authorization decision.
+#
+# The ACL password + the TLS cert are per-run Secrets minted by the runner; the
+# redis.conf is a ConfigMap (no secrets in it — the password rides an ACL file
+# Secret referenced by `aclfile`). Nothing here is committed.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-bff-conf
+data:
+  redis.conf: |
+    # TLS only — the plaintext port is disabled entirely.
+    port 0
+    tls-port 6380
+    tls-cert-file /etc/redis-tls/tls.crt
+    tls-key-file /etc/redis-tls/tls.key
+    # The BFF authenticates with a password over TLS; Redis does not require
+    # client certs (the BFF is the only principal with the ACL credential, and
+    # the network path is in-cluster TLS). mTLS is a future hardening.
+    tls-auth-clients no
+    # BFF-only access: the default user is locked out; the real user is defined
+    # in the ACL file Secret (so the password never lands in this ConfigMap).
+    aclfile /etc/redis-acl/users.acl
+    # No persistence — the session cache is deliberately volatile.
+    save ""
+    appendonly no
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: redis-bff, labels: { app: redis-bff } }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: redis-bff } }
+  template:
+    metadata: { labels: { app: redis-bff } }
+    spec:
+      containers:
+        - name: redis
+          image: redis:7.4-alpine
+          imagePullPolicy: IfNotPresent
+          command: ["redis-server", "/etc/redis-conf/redis.conf"]
+          ports: [{ containerPort: 6380 }]
+          readinessProbe:
+            # A TLS handshake + AUTH is the real readiness signal; a plain
+            # redis-cli ping would fail against the TLS-only port. The BFF's
+            # own fail-closed connect is the authoritative gate.
+            tcpSocket: { port: 6380 }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          volumeMounts:
+            - { name: conf, mountPath: /etc/redis-conf, readOnly: true }
+            - { name: acl, mountPath: /etc/redis-acl, readOnly: true }
+            - { name: tls, mountPath: /etc/redis-tls, readOnly: true }
+            - { name: proof-ca, mountPath: /etc/proof-ca, readOnly: true }
+      volumes:
+        - name: conf
+          configMap: { name: redis-bff-conf }
+        - name: acl
+          secret: { secretName: proof-m85c-redis-bff-acl }
+        - name: tls
+          secret: { secretName: proof-m85c-redis-bff-tls }
+        # The proof CA, so the runner's OBSERVER `redis-cli` (kubectl exec, S10)
+        # can verify this server's TLS leaf exactly as the BFF does — no
+        # --insecure, no plaintext fallback (the plaintext port is disabled).
+        # S10 ("an unknown session-record schema version REFUSES") is a live
+        # single-variable experiment: read the real record, change ONLY its `v`
+        # field, prove the very same cookie stops authenticating. That needs a
+        # verified TLS client inside the pod. The CA is public bytes (0444).
+        - name: proof-ca
+          secret:
+            secretName: proof-m85c-ca
+            defaultMode: 292   # 0444 — a CA certificate is public bytes
+---
+apiVersion: v1
+kind: Service
+metadata: { name: redis-bff }
+spec:
+  selector: { app: redis-bff }
+  ports: [{ port: 6380, targetPort: 6380 }]

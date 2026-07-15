@@ -33,7 +33,8 @@ def test_storage_closed_enum_guard_includes_approval_reasons() -> None:
     from cognic_agentos.core.scheduler.storage import _VALID_REFUSAL_REASONS
 
     assert "refused_approval_pending" in _VALID_REFUSAL_REASONS
-    assert len(_VALID_REFUSAL_REASONS) == 10
+    assert "refused_approval_originator_mismatch" in _VALID_REFUSAL_REASONS
+    assert len(_VALID_REFUSAL_REASONS) == 11
 
 
 def test_admission_decision_approval_request_id_defaults_none() -> None:
@@ -434,7 +435,9 @@ class TestWiredFirstAdmission:
         from cognic_agentos.core.approval.storage import ApprovalRequestStore
         from cognic_agentos.core.decision_history import DecisionHistoryStore
 
-        assert await ApprovalRequestStore(DecisionHistoryStore(db)).list_pending("t-1") == []  # type: ignore[arg-type]
+        assert (
+            await ApprovalRequestStore(DecisionHistoryStore(db)).list_pending("t-1")  # type: ignore[arg-type]
+        ).items == ()
 
     async def test_tightened_safe_tier_requires_approval(self, tmp_path: object) -> None:
         db = await _mk_migrated_db(tmp_path)
@@ -550,25 +553,76 @@ class TestWiredReSubmission:
         assert decision.outcome == "accepted_immediate"
         assert policy.seen[-1].approval_verified is True  # type: ignore[attr-defined]
 
-    async def test_actor_swap_binding_mismatch(self, tmp_path: object) -> None:
-        # The c2 refinement pin: a DIFFERENT same-tenant actor cannot ride a
-        # granted approval (actor identity is IN the binding digest).
+    async def test_actor_swap_originator_mismatch(
+        self, tmp_path: object, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # HP-4 (M8.5-C T1): the scheduler-specific mapping proven through the
+        # FULL submit path (never by invoking the core verifier directly) — a
+        # DIFFERENT same-tenant actor re-submitting a granted approval now
+        # surfaces the UNIFORM originator reason on the admission outcome.
+        # Actor identity remains in the binding digest (the c2 refinement,
+        # defence-in-depth); the engine checks originator FIRST, so the
+        # originator reason wins even though the digest also differs.
+        import logging
+
         from cognic_agentos.core.scheduler._types import TaskActor
 
         db = await _mk_migrated_db(tmp_path)
         approval = _mk_approval_engine(db, flow="require_single_approval")
         engine = _mk_scheduler_engine(db, approval_engine=approval, policy=_CapturingPolicy())
-        rid = await self._pending_request(engine)
+        rid = await self._pending_request(engine)  # original requester: agent-1
         await approval.grant(request_id=rid, tenant_id="t-1", approver=_approver())  # type: ignore[attr-defined]
+        with caplog.at_level(logging.DEBUG):
+            decision = await engine.submit(  # type: ignore[attr-defined]
+                submit_input=_seam_submit_input(
+                    actor=TaskActor(subject="agent-2", tenant_id="t-1", actor_type="service"),
+                    approval_request_id=str(rid),
+                ),
+                request_id="req-2",
+            )
+        assert decision.outcome == "refused_approval_originator_mismatch"
+        assert decision.approval_request_id is None  # pending-only carrier
+        # Value-free: neither the original requester ("agent-1") nor the
+        # swapped submitter ("agent-2") rides any captured log record.
+        # Scope to cognic_agentos GOVERNANCE loggers: the evidence chain
+        # (decision_history) legitimately records the actor as evidence, and
+        # its sqlalchemy SQL-echo at DEBUG is not a governance-log leak.
+        # repr(vars(record)) covers message + args AND `extra=` fields (this
+        # repo commonly logs identity through extra, which lands in __dict__).
+        gov = [r for r in caplog.records if r.name.startswith("cognic_agentos")]
+        logged = " ".join(repr(vars(r)) for r in gov)
+        for subject in ("agent-1", "agent-2"):
+            assert subject not in logged, f"{subject!r} leaked into a log record"
+
+    async def test_verify_receives_submit_actor_subject_exactly(self, tmp_path: object) -> None:
+        # Exact actor-forwarding (HP-4 test class i): the consult passes
+        # submit_input.actor.subject — verbatim — as
+        # expected_originator_subject.
+        from unittest.mock import AsyncMock, MagicMock
+
+        from cognic_agentos.core.approval._types import ApprovalTransitionRefused
+        from cognic_agentos.core.scheduler._types import TaskActor
+
+        db = await _mk_migrated_db(tmp_path)
+        approval = MagicMock()
+        approval.verify_grant_for_action = AsyncMock(
+            side_effect=ApprovalTransitionRefused("approval_originator_mismatch")
+        )
+        engine = _mk_scheduler_engine(db, approval_engine=approval, policy=_CapturingPolicy())
+        import uuid as _uuid
+
         decision = await engine.submit(  # type: ignore[attr-defined]
             submit_input=_seam_submit_input(
-                actor=TaskActor(subject="agent-2", tenant_id="t-1", actor_type="service"),
-                approval_request_id=str(rid),
+                actor=TaskActor(
+                    subject="analyst.exact-forwarding", tenant_id="t-1", actor_type="service"
+                ),
+                approval_request_id=str(_uuid.uuid4()),
             ),
-            request_id="req-2",
+            request_id="req-fw",
         )
-        assert decision.outcome == "refused_approval_binding_mismatch"
-        assert decision.approval_request_id is None  # pending-only carrier
+        assert decision.outcome == "refused_approval_originator_mismatch"
+        sent = approval.verify_grant_for_action.await_args.kwargs
+        assert sent["expected_originator_subject"] == "analyst.exact-forwarding"
 
     async def test_token_change_binding_mismatch(self, tmp_path: object) -> None:
         db = await _mk_migrated_db(tmp_path)
@@ -709,7 +763,9 @@ class TestWiredReSubmission:
         )
         decision = await engine.submit(submit_input=_seam_submit_input(), request_id="req-1")  # type: ignore[attr-defined]
         assert decision.outcome == "refused_kill_switch_active"
-        assert await ApprovalRequestStore(DecisionHistoryStore(db)).list_pending("t-1") == []  # type: ignore[arg-type]
+        assert (
+            await ApprovalRequestStore(DecisionHistoryStore(db)).list_pending("t-1")  # type: ignore[arg-type]
+        ).items == ()
 
 
 # ---------------------------------------------------------------------------
@@ -902,7 +958,9 @@ class TestA4aDelegationSkipsConsult:
         )
         assert decision.outcome == "accepted_immediate"
         # NO scheduler approval request minted (the consult was skipped):
-        assert await ApprovalRequestStore(DecisionHistoryStore(db)).list_pending("t-1") == []  # type: ignore[arg-type]
+        assert (
+            await ApprovalRequestStore(DecisionHistoryStore(db)).list_pending("t-1")  # type: ignore[arg-type]
+        ).items == ()
         # The policy saw approval_verified False AND the delegate signal:
         seen = policy.seen[0]
         assert seen.approval_verified is False  # type: ignore[attr-defined]

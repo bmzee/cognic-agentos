@@ -270,3 +270,7 @@ by both proofs' structural suites.
 - [Anthropic — Managed Agents: Decoupling brain from hands](https://www.anthropic.com/engineering/managed-agents)
 - [Local-First Agent Runtime](https://www.huuphan.com/2026/04/local-first-agent-runtime-guide.html)
 - [Self-hosted AI sandboxes — Northflank](https://northflank.com/blog/self-hosted-ai-sandboxes)
+
+## M8.5-C T1 amendment (2026-07-11) — HP-4: `sandbox_approval_originator_mismatch` + the wake-passthrough 5→6 expansion
+
+Per the ADR-014 M8.5-C T1 amendment (actor-bound grant replay, engine-owned): `sandbox/admission.py`'s approval consult now threads `expected_originator_subject=actor.subject` into `verify_grant_for_action` and maps the engine's `approval_originator_mismatch` to the NEW wire-public `SandboxRefusalReason` value **`sandbox_approval_originator_mismatch`** (a grant authorises exactly one requester; the refusal detail is value-free — request id only, never a subject). `sandbox/protocol.py`'s `_APPROVAL_WAKE_PASSTHROUGH_REASONS` closed set expands **5 → 6** to carry the new value, so the wake wrapper re-raises it un-rewrapped like every other approval-family reason (otherwise it would collapse to `sandbox_wake_policy_revalidation_failed`); Docker + Kubernetes stay lockstep via the shared constant, pinned by `tests/unit/sandbox/backends/test_approval_threading.py`.

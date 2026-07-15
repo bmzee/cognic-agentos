@@ -1,0 +1,28 @@
+# Build-context exclusions for the proof images built FROM this directory
+# (Dockerfile.oracle-pack / Dockerfile.probe-pack / Dockerfile.as /
+# Dockerfile.agentos-proof all take $PROOF_DIR as their context).
+#
+# Without this file the interpreter caches below are COPY'd into the proof
+# images — stale bytecode compiled from a DIFFERENT source revision than the
+# one the image's provenance label names. That is a provenance defect, not a
+# size one: an image labelled with commit X must not carry .pyc compiled from
+# commit W. Python is told not to write bytecode at runtime
+# (PYTHONDONTWRITEBYTECODE), so nothing in the image needs these.
+__pycache__/
+*.py[cod]
+
+# Never let a per-run private artefact reach a build context. These are minted
+# into a mktemp dir, not here, so this is belt-and-braces against a future
+# change that stages them in-tree: keys, certs, realm credentials, tokens.
+*.key
+*.pem
+*.p12
+realm-credentials.env
+realm-subjects.env
+*-tokens.json
+
+# Local tool caches / editor droppings.
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/

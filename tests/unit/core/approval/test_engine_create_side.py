@@ -284,19 +284,35 @@ async def test_check_cross_tenant_not_found(tmp_path: Any) -> None:
 
 
 @pytest.mark.asyncio
-async def test_verify_grant_for_action_not_granted_returns_state(tmp_path: Any) -> None:
-    # Not granted yet -> binding NOT enforced; the seam refuses on state, not here.
+async def test_verify_grant_for_action_pending_wrong_shape_is_binding_mismatch(
+    tmp_path: Any,
+) -> None:
+    # HP-4 corrected precedence: binding is UNCONDITIONAL before state — a
+    # wrong-shape replay of a PENDING request refuses approval_binding_mismatch,
+    # never "pending" (TM-revert pin C: the old granted-only guard returned the
+    # pending state here).
     eng = await _engine(
         tmp_path,
         flow="require_single_approval",
         clock=_Clock(datetime(2026, 6, 10, 12, 0, tzinfo=UTC)),
     )
     req = await eng.create_request(envelope=_env("customer_data_read"))
+    with pytest.raises(ApprovalTransitionRefused) as ei:
+        await eng.verify_grant_for_action(
+            request_id=req.request_id,
+            tenant_id="t1",
+            expected_args_digest=b"\x09" * 32,
+            expected_tool_identity="other",
+            expected_originator_subject="agent-1",
+        )
+    assert ei.value.reason == "approval_binding_mismatch"
+    # A CORRECT-shape verify of the pending request still projects the state.
     res = await eng.verify_grant_for_action(
         request_id=req.request_id,
         tenant_id="t1",
-        expected_args_digest=b"\x09" * 32,
-        expected_tool_identity="other",
+        expected_args_digest=b"\x02" * 32,
+        expected_tool_identity="cognic-tool-x",
+        expected_originator_subject="agent-1",
     )
     assert res.state == "pending"
 

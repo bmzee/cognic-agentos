@@ -695,6 +695,7 @@ class SchedulerEngine:
                     tenant_id=original_submit_input.tenant_id,
                     expected_args_digest=args_digest,
                     expected_tool_identity=tool_identity,
+                    expected_originator_subject=original_submit_input.actor.subject,
                 )
             except ApprovalRequestNotFound:
                 # Cross-tenant == unknown BY CONSTRUCTION (tenant-scoped load).
@@ -704,6 +705,14 @@ class SchedulerEngine:
                     approval_request_id=str(approval_request_uuid),
                 )
             except ApprovalTransitionRefused as exc:
+                if exc.reason == "approval_originator_mismatch":
+                    # HP-4: the grant is usable ONLY by the original
+                    # requesting subject (value-free: id + reason only).
+                    return _ApprovalConsultResult(
+                        verified=False,
+                        refusal_reason="refused_approval_originator_mismatch",
+                        approval_request_id=str(approval_request_uuid),
+                    )
                 if exc.reason != "approval_binding_mismatch":
                     raise  # nothing else is reachable from verify; fail-loud
                 # A grant authorises exactly one submission shape.
