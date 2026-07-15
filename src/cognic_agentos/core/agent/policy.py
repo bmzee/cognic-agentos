@@ -9,10 +9,11 @@ This module bridges the Wave-1 ``policies/_default/agents.rego`` bundle
 ``core/scheduler/policy.py``. It is the single Python boundary that:
 
   1. Projects an :class:`AgentPolicyInput` into the Rego input dict shape
-     (11 keys: ``tenant_id`` / ``agent_id`` / ``originator_subject`` /
-     ``capability_kind`` / ``capability_ref`` / ``scope_id`` (nullable) /
-     ``pack_risk_tier`` / ``step_index`` / ``max_steps`` /
-     ``assignment_verified`` / ``entitlement_verified``). Field names are
+     (12 keys: ``tenant_id`` / ``agent_id`` / ``originator_subject`` /
+     ``capability_kind`` / ``capability_class`` / ``capability_ref`` /
+     ``scope_id`` (nullable) / ``pack_risk_tier`` / ``step_index`` /
+     ``max_steps`` / ``assignment_verified`` / ``entitlement_verified``).
+     Field names are
      IDENTICAL to the Rego input keys — no key translations (unlike the
      scheduler's ``class_``/``actor_subject``). Drift between this
      projection and the bundle's ``input.<key>`` reads = silent policy
@@ -44,13 +45,15 @@ This module bridges the Wave-1 ``policies/_default/agents.rego`` bundle
      the public ``agent_policy_denied`` refusal. Mirrors the scheduler
      plan-§1181 fail-closed pattern.
 
-**Attestation-threading contract (defense in depth per the sandbox.rego
-rule-4 precedent)**: ``assignment_verified`` / ``entitlement_verified``
-are PYTHON-GATE-OWNED attestations — the A10 dispatcher sets them ONLY
-after the assignment gate (gate 1) and the entitlement gate (gate 2)
-verified; this module threads them verbatim, and the bundle requires
-each STRICTLY ``== true`` so a bypassed Python gate (or a truthy
-non-true value) still refuses at the policy layer.
+**Defense-in-depth contract (per the sandbox.rego rule-4 precedent)**:
+``assignment_verified`` / ``entitlement_verified`` are PYTHON-GATE-OWNED
+attestations — the A10 dispatcher sets them ONLY after the assignment gate
+(gate 1) and the entitlement gate (gate 2) verified. ``capability_class``
+is the signed-manifest-derived class selected by the Task-5 dispatcher gate
+(``unscoped`` for kernel-owned built-ins/skills). This module threads all
+three verbatim; the bundle independently requires strict true attestations
+and a class in its closed set, so an unknown or reserved non-empty class
+still refuses if the Python class gate is bypassed.
 
 **DELIBERATE plan deviation (controller-authorized)**: NO
 ``_MINIMAL_SUBPROCESS_ENV`` constant in this module. The scheduler copy
@@ -89,7 +92,7 @@ _AGENTS_ALLOW_DECISION_POINT: Final[str] = "data.cognic.agents.dispatch.allow"
 class AgentPolicyInput:
     """Frozen input of one ``AgentDispatchPolicy.evaluate()`` call.
 
-    The 11 fields ARE the Rego input key set (no translations) — the
+    The 12 fields ARE the Rego input key set (no translations) — the
     field-name/key-set identity is pinned by
     ``test_agent_policy_input_field_names_match_rego_key_set``.
 
@@ -105,6 +108,7 @@ class AgentPolicyInput:
     agent_id: str
     originator_subject: str
     capability_kind: str
+    capability_class: str
     capability_ref: str
     scope_id: str | None
     pack_risk_tier: str
@@ -137,7 +141,7 @@ class AgentDispatchPolicy:
         """Evaluate the Wave-1 agent-dispatch policy.
 
         Pipeline per the module docstring above:
-          1. Project AgentPolicyInput → the 11-key Rego input dict.
+          1. Project AgentPolicyInput → the 12-key Rego input dict.
           2. ``opa_engine.evaluate(...allow)`` → bool allow + audit emit.
           3. allow=True → ``PolicyDecision(allow=True, policy_reason=None)``.
           4. Deny → ``PolicyDecision(allow=False, policy_reason=None)`` —
@@ -165,12 +169,12 @@ class AgentDispatchPolicy:
     def _build_rego_input(policy_input: AgentPolicyInput) -> dict[str, Any]:
         """Project an AgentPolicyInput into the bundle's input shape.
 
-        11-key contract pinned by
+        12-key contract pinned by
         ``test_build_rego_input_includes_exactly_the_documented_keys``:
         ``tenant_id`` / ``agent_id`` / ``originator_subject`` /
-        ``capability_kind`` / ``capability_ref`` / ``scope_id`` /
-        ``pack_risk_tier`` / ``step_index`` / ``max_steps`` /
-        ``assignment_verified`` / ``entitlement_verified``.
+        ``capability_kind`` / ``capability_class`` / ``capability_ref`` /
+        ``scope_id`` / ``pack_risk_tier`` / ``step_index`` /
+        ``max_steps`` / ``assignment_verified`` / ``entitlement_verified``.
 
         NO key translations — every Rego input key name is IDENTICAL to
         the AgentPolicyInput field name (unlike the scheduler
@@ -184,6 +188,7 @@ class AgentDispatchPolicy:
             "agent_id": policy_input.agent_id,
             "originator_subject": policy_input.originator_subject,
             "capability_kind": policy_input.capability_kind,
+            "capability_class": policy_input.capability_class,
             "capability_ref": policy_input.capability_ref,
             "scope_id": policy_input.scope_id,
             "pack_risk_tier": policy_input.pack_risk_tier,

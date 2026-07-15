@@ -785,7 +785,7 @@ class TestPolicyGate:
     async def test_policy_input_carries_computed_attestations_and_context(
         self, keypair: tuple[bytes, bytes]
     ) -> None:
-        """The 11-key AgentPolicyInput is built AFTER gates 1+2 with the
+        """The 12-key AgentPolicyInput is built AFTER gates 1+2 with the
         literally-computed attestations + the resolved scope id."""
         private_pem, _ = keypair
         h = _harness(signing_key_pem=private_pem)
@@ -800,6 +800,7 @@ class TestPolicyGate:
                 "agent_id": _AGENT_ID,
                 "originator_subject": _ORIGINATOR,
                 "capability_kind": "tool",
+                "capability_class": "data_query",
                 "capability_ref": _ORACLE_REF,
                 "scope_id": _SCOPE_ID,
                 "pack_risk_tier": "customer_data_read",
@@ -815,6 +816,21 @@ class TestPolicyGate:
         await h.dispatcher.dispatch(call=_call("other_tool"), step_index=0, run=_run())
         assert h.opa.seen_inputs[0]["scope_id"] is None
         assert h.opa.seen_inputs[0]["entitlement_verified"] is True
+        assert h.opa.seen_inputs[0]["capability_class"] == "unscoped"
+
+    async def test_policy_input_builtins_use_the_unscoped_class(self) -> None:
+        """Kernel-owned built-ins have no manifest class and ride as unscoped."""
+        h = _harness()
+
+        outcome = await h.dispatcher.dispatch(
+            call=_call("remember", note="retain this"),
+            step_index=0,
+            run=_run(),
+        )
+
+        assert outcome.refused is False
+        assert h.opa.seen_inputs[0]["capability_kind"] == "builtin"
+        assert h.opa.seen_inputs[0]["capability_class"] == "unscoped"
 
 
 # --- Pin 5 + 9 — the query-context stamp ---------------------------------------------

@@ -27,7 +27,7 @@ authority for the governed agent loop:
      real :class:`DataScope` — any miss refuses ``agent_scope_not_entitled``.
      Calls whose declared class requires no entitlement skip gate 2; the
      policy attestation is computed from the class + resolved scope.
-  4. **Gate 3 — policy**: :class:`AgentDispatchPolicy` over the 11-key
+  4. **Gate 3 — policy**: :class:`AgentDispatchPolicy` over the 12-key
      :class:`AgentPolicyInput` (the attestations are LITERALLY computed —
      gates 1-2 passed to reach here). EVERY deny — including the fail-closed
      ``opa_unavailable`` envelope — refuses ``agent_policy_denied``.
@@ -471,6 +471,7 @@ class AgentDispatcher:
                 agent_id=run.agent_id,
                 originator_subject=run.originator_subject,
                 capability_kind=resolved.kind,
+                capability_class=capability_class or "unscoped",
                 capability_ref=resolved.ref,
                 scope_id=scope_id,
                 pack_risk_tier=run.record.risk_tier,
