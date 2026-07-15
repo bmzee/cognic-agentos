@@ -215,3 +215,66 @@ def test_runtime_table_parity(tmp_path: Any) -> None:
     assert INDEX in runtime, "the runtime Table must declare the 0017 index"
     missing = {n for n in runtime if isinstance(n, str)} - reflected
     assert not missing, f"runtime Table declares indexes the migrated DB lacks: {missing}"
+
+
+# ---------------------------------------------------------------------------
+# Oracle function-based-index reflection (the SYS_EXTRACT_UTC shape)
+# ---------------------------------------------------------------------------
+# ``created_at`` is ``TIMESTAMP WITH TIME ZONE``; Oracle indexes such a column
+# as a function-based index on ``SYS_EXTRACT_UTC("COL")`` (UTC-normalised for
+# correct global ordering). Its reflection reports ``column_names[i] is None``
+# with the real column under ``expressions[i]``; Postgres / SQLite report the
+# plain name. These pins run WITHOUT a live database — the fixture IS the shape
+# OBSERVED against live Oracle XE 21 + SQLAlchemy 2.0.49 (byte-coupled to
+# reality per [[feedback_test_fixture_byte_coupling_for_crypto_claims]]), so the
+# resolver + guard are proven correct on the Oracle path the SQLite unit tests
+# above cannot reach.
+_ORACLE_0017_REFLECTION: dict[str, Any] = {
+    "name": INDEX,
+    "column_names": ["tenant_id", None, "request_id"],
+    "expressions": ["tenant_id", 'SYS_EXTRACT_UTC("CREATED_AT")', "request_id"],
+    "unique": False,
+    "dialect_options": {},
+}
+
+
+def _migration() -> Any:
+    return importlib.import_module(MIGRATION)
+
+
+def test_resolved_columns_maps_oracle_function_based_index_to_plain_columns() -> None:
+    # The observed Oracle reflection resolves back to the plain column identity.
+    assert _migration()._resolved_columns(_ORACLE_0017_REFLECTION) == COLUMNS
+
+
+def test_resolved_columns_is_identity_on_plain_column_names() -> None:
+    # Postgres / SQLite path: column_names fully populated, expressions unused.
+    plain = {"name": INDEX, "column_names": list(COLUMNS), "expressions": None}
+    assert _migration()._resolved_columns(plain) == COLUMNS
+
+
+def test_guard_accepts_oracle_function_based_reflection() -> None:
+    # The idempotent-rerun path on Oracle: the correctly-created index reflects
+    # via SYS_EXTRACT_UTC and MUST validate (skip), not fail loud.
+    _migration()._validate_index_shape(_ORACLE_0017_REFLECTION)  # must not raise
+
+
+def test_guard_fails_loud_on_oracle_wrong_expression_column() -> None:
+    # A SYS_EXTRACT_UTC on the WRONG column is a genuine shape mismatch.
+    wrong = {
+        **_ORACLE_0017_REFLECTION,
+        "expressions": ["tenant_id", 'SYS_EXTRACT_UTC("UPDATED_AT")', "request_id"],
+    }
+    with pytest.raises(RuntimeError, match="0017 ddl: existing object shape mismatch"):
+        _migration()._validate_index_shape(wrong)
+
+
+def test_guard_fails_loud_on_oracle_non_normalization_expression() -> None:
+    # A None-position expression that is NOT the expected SYS_EXTRACT_UTC(col)
+    # normalisation must fail loud, not be silently accepted.
+    weird = {
+        **_ORACLE_0017_REFLECTION,
+        "expressions": ["tenant_id", 'LOWER("CREATED_AT")', "request_id"],
+    }
+    with pytest.raises(RuntimeError, match="0017 ddl: existing object shape mismatch"):
+        _migration()._validate_index_shape(weird)

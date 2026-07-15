@@ -47,7 +47,9 @@ Revises: 0015
 from __future__ import annotations
 
 import json
+import re
 import uuid
+from collections.abc import Mapping
 from typing import Any, NoReturn
 
 import sqlalchemy as sa
@@ -241,11 +243,48 @@ def _validate_uq_shape(uqs: dict[str | None, Any]) -> None:
         )
 
 
+# ``ix_conversations_tenant_creator_created`` covers ``created_at`` (a ``TIMESTAMP
+# WITH TIME ZONE`` column). Oracle indexes such a column as a function-based index
+# on ``SYS_EXTRACT_UTC("COL")`` (UTC-normalised for correct global ordering), so
+# its reflection reports ``column_names[i] is None`` with the real column under
+# ``expressions[i]``; Postgres / SQLite report the plain name. The shape guard
+# MUST resolve that form back to the plain column or it fails loud on a VALID
+# index on Oracle re-apply. Matches ONLY that normalisation — any other
+# None-position expression is a genuinely different index and fails loud below.
+_ORACLE_TSTZ_INDEX_EXPR = re.compile(
+    r'^SYS_EXTRACT_UTC\(\s*"?([A-Za-z_][A-Za-z0-9_$#]*)"?\s*\)$',
+    re.IGNORECASE,
+)
+
+
+def _resolved_columns(index: Mapping[str, Any]) -> list[str]:
+    """The lower-cased underlying column identity per index position — dialect-portable.
+
+    Plain reflected names pass through; a ``None`` entry (Oracle's function-based
+    reflection of a ``TIMESTAMP WITH TIME ZONE`` column) is resolved from its
+    ``SYS_EXTRACT_UTC("COL")`` expression. An unrecognised None-position
+    expression fails loud rather than being silently accepted as its column.
+    """
+    names = list(index.get("column_names") or [])
+    exprs = list(index.get("expressions") or [])
+    resolved: list[str] = []
+    for i, name in enumerate(names):
+        if name is not None:
+            resolved.append(str(name).lower())
+            continue
+        expr = str(exprs[i]).strip() if i < len(exprs) else ""
+        match = _ORACLE_TSTZ_INDEX_EXPR.match(expr)
+        if match is None:
+            _fail_ddl(f"index column {i} is an unresolved expression {expr!r}")
+        resolved.append(match.group(1).lower())
+    return resolved
+
+
 def _validate_index_shape(insp: sa.Inspector, table: str, name: str, columns: list[str]) -> None:
     """A pre-existing index with the right NAME but the wrong shape is a
     partial-state hazard, not a no-op (review finding, 2026-07-10)."""
     index = next(i for i in insp.get_indexes(table) if i["name"] == name)
-    if list(index["column_names"]) != columns:
+    if _resolved_columns(index) != columns:
         _fail_ddl(f"index {name} has columns {index['column_names']}, expected {columns}")
     if bool(index.get("unique")):
         _fail_ddl(f"index {name} is UNIQUE; expected a non-unique query index")
