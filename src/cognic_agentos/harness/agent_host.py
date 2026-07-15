@@ -24,6 +24,10 @@ the 3-state dependency discipline per
 deps → loop; SOME missing → None + ONE warning naming them; ZERO → None,
 quiet) and assembles the A4 stores + the A5 Rego policy + the A10 dispatcher
 + the A11 loop over the boot-hosted agent + instruction-skill records.
+
+M8.5-D S1 adds :func:`build_tool_capability_classes`, a signed-manifest
+projection keyed by the dispatcher's full ``server_id/tool_name`` identity.
+The map is surfaced here before Task 5 threads it into the dispatcher.
 """
 
 from __future__ import annotations
@@ -82,6 +86,48 @@ class _RegistryCandidates(Protocol):
     (the real ``PluginRegistry`` or a test stub)."""
 
     def iter_registered_pack_candidates(self) -> Iterator[RegisteredPackCandidate]: ...
+
+
+def build_tool_capability_classes(
+    registry: _RegistryCandidates,
+) -> dict[str, str]:
+    """Project full tool references to classes from signed pack manifests.
+
+    A pack without ``[[tool.cognic.tools]]`` contributes nothing. Its tools
+    therefore remain absent from this map and hit the dispatcher's fail-closed
+    missing-declaration path once Task 5 consumes it. Pack code is never
+    imported; only the already-registered candidate's manifest file is read.
+    """
+    classes: dict[str, str] = {}
+    for candidate in registry.iter_registered_pack_candidates():
+        try:
+            manifest = extract_pack_manifest(
+                distribution_name=candidate.distribution_name,
+                package_name=candidate.package_name,
+            )
+        except (PackManifestNotFoundError, PackManifestMalformedError):
+            continue
+
+        tool_block = manifest.get("tool")
+        cognic_block = tool_block.get("cognic") if isinstance(tool_block, dict) else None
+        tools = cognic_block.get("tools") if isinstance(cognic_block, dict) else None
+        if not isinstance(tools, list):
+            continue
+
+        for entry in tools:
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("name")
+            capability_class = entry.get("capability_class")
+            if (
+                isinstance(name, str)
+                and name
+                and isinstance(capability_class, str)
+                and capability_class
+            ):
+                classes[f"{candidate.distribution_name}/{name}"] = capability_class
+
+    return classes
 
 
 def _agent_block(manifest: dict[str, Any]) -> dict[str, Any] | None:
@@ -527,4 +573,8 @@ async def build_agent_loop(
     return loop, warnings, hosted_agents_summary(agent_records)
 
 
-__all__ = ["build_agent_loop", "hosted_agents_summary"]
+__all__ = [
+    "build_agent_loop",
+    "build_tool_capability_classes",
+    "hosted_agents_summary",
+]
