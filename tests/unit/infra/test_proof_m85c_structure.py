@@ -48,6 +48,7 @@ The load-bearing deltas, each with a test:
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import re
@@ -64,6 +65,10 @@ _REPO = Path(__file__).resolve().parents[3]
 _PROOF = _REPO / "infra" / "proof-m85c"
 _RUNNER = _PROOF / "run-proof-m85c.sh"
 _PROOF_APP = _PROOF / "proof_m85c" / "proof_app.py"
+
+# AGENTS.md-locked digest of protocol/mcp_authz.py (the M4/M5 standing byte-lock).
+_MCP_AUTHZ_PATH = _REPO / "src" / "cognic_agentos" / "protocol" / "mcp_authz.py"
+_MCP_AUTHZ_LOCKED_SHA256 = "3a9724d3891f11b539f141d888bb8e8318f25b73cd7820ea5b11830b364ffaac"
 _GEN_REALM = _PROOF / "keycloak" / "gen_realm.py"
 _PKCE = _PROOF / "keycloak" / "pkce_login.py"
 _ASSERT_CLAIM = _PROOF / "keycloak" / "assert_claim_contract.py"
@@ -659,12 +664,15 @@ def test_migration_head_is_0017() -> None:
 
 
 def test_mcp_authz_is_byte_identical_to_main() -> None:
-    result = subprocess.run(
-        ["git", "-C", str(_REPO), "diff", "main", "--", "src/cognic_agentos/protocol/mcp_authz.py"],
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0
-    assert result.stdout == "", (
-        "protocol/mcp_authz.py has drifted from main (must stay byte-identical)"
+    # Assert the AGENTS.md-locked sha256 directly. A ``git diff main`` is NOT
+    # portable: CI's shallow PR checkout has no local ``main`` ref (it resolves
+    # ``origin/<base>`` instead), so the ref form fails with "bad revision".
+    # The digest is self-contained and cannot break on checkout topology; the
+    # dynamic base-ref byte-compare lives in
+    # tests/unit/architecture/test_mcp_authz_untouched.py.
+    digest = hashlib.sha256(_MCP_AUTHZ_PATH.read_bytes()).hexdigest()
+    assert digest == _MCP_AUTHZ_LOCKED_SHA256, (
+        "protocol/mcp_authz.py has drifted from the AGENTS.md-locked digest "
+        "(must stay byte-identical to main); a deliberate, separately-reviewed "
+        "change must update the lock in AGENTS.md and this constant together."
     )
