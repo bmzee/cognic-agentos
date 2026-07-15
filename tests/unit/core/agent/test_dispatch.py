@@ -18,9 +18,11 @@ hardcoded) + the REAL ``verify_query_context``.
 
 from __future__ import annotations
 
+import ast
 import dataclasses
 import hashlib
 import json
+import pathlib
 import time
 import uuid
 from collections.abc import Mapping
@@ -39,7 +41,6 @@ from cognic_agentos.core.agent._types import (
 from cognic_agentos.core.agent.dispatch import (
     _BUILTIN_NAMES,
     _QUERY_CONTEXT_ARG,
-    _QUERY_CONTEXT_STAMPED_TOOLS,
     AgentDispatcher,
     AgentRunContext,
     AgentToolProxy,
@@ -64,6 +65,10 @@ _ORIGINATOR = "human:analyst@bank"
 _AGENT_ID = "bank-analyst"
 _ORACLE_REF = "cognic-tool-oracle-schema/run_readonly_query"
 _OTHER_REF = "srv-b/other_tool"
+_TOOL_CAPABILITY_CLASSES = {
+    _ORACLE_REF: "data_query",
+    _OTHER_REF: "unscoped",
+}
 _GRANTED_SKILL = "schema-summary"
 _SCOPE_ID = "customer-data"
 _SCOPE = DataScope(
@@ -311,6 +316,7 @@ def _harness(
     bodies: dict[str, tuple[str, str]] | None = None,
     signing_key_pem: bytes | None = None,
     ttl_s: float = 300.0,
+    tool_capability_classes: Mapping[str, str] | None = None,
 ) -> _Harness:
     entitlements = _StubEntitlements(
         entitled=entitled,
@@ -335,6 +341,11 @@ def _harness(
         decision_history=dh,  # type: ignore[arg-type]
         query_context_signing_key_pem=signing_key_pem,
         query_context_ttl_s=ttl_s,
+        tool_capability_classes=(
+            tool_capability_classes
+            if tool_capability_classes is not None
+            else _TOOL_CAPABILITY_CLASSES
+        ),
     )
     return _Harness(
         dispatcher=dispatcher,
@@ -358,10 +369,6 @@ def _only_row(harness: _Harness) -> DecisionRecord:
 class TestModuleConstants:
     def test_builtin_names_closed_set(self) -> None:
         assert frozenset({"read_skill", "remember"}) == _BUILTIN_NAMES
-
-    def test_stamped_tools_closed_set(self) -> None:
-        """The M8 Wave-1 stamped set (tool_name segment)."""
-        assert frozenset({"run_readonly_query"}) == _QUERY_CONTEXT_STAMPED_TOOLS
 
     def test_query_context_arg_name(self) -> None:
         assert _QUERY_CONTEXT_ARG == "_cognic_query_context"
@@ -532,6 +539,128 @@ class TestAssignmentGate:
         assert _validated_read_skill_id({"skill_id": "atm-recon"}, granted) is None
         assert _validated_read_skill_id({}, granted) is None
         assert _validated_read_skill_id({"skill_id": 7}, granted) is None
+
+
+# --- D-S1 — signed capability-class gate -------------------------------------------
+
+
+class TestCapabilityClassGate:
+    async def test_undeclared_tool_refuses(self) -> None:
+        """An absent declaration is never treated as implicitly unscoped."""
+        h = _harness(tool_capability_classes={})
+
+        outcome = await h.dispatcher.dispatch(call=_call("other_tool"), step_index=0, run=_run())
+
+        assert outcome.reason == "agent_capability_class_invalid"
+        assert h.entitlements.entitled_calls == []
+        assert h.opa.seen_inputs == []
+        assert h.proxy.calls == []
+        assert _only_row(h).payload["refusal_reason"] == ("agent_capability_class_invalid")
+
+    async def test_unknown_class_refuses(self) -> None:
+        h = _harness(tool_capability_classes={_OTHER_REF: "nonsense"})
+
+        outcome = await h.dispatcher.dispatch(call=_call("other_tool"), step_index=0, run=_run())
+
+        assert outcome.reason == "agent_capability_class_invalid"
+        assert h.proxy.calls == []
+
+    async def test_reserved_retrieval_class_refuses(self) -> None:
+        h = _harness(tool_capability_classes={_OTHER_REF: "retrieval"})
+
+        outcome = await h.dispatcher.dispatch(call=_call("other_tool"), step_index=0, run=_run())
+
+        assert outcome.reason == "agent_capability_class_invalid"
+        assert h.proxy.calls == []
+
+    async def test_entitlement_verified_cannot_be_true_without_a_store_read(
+        self,
+    ) -> None:
+        """A data-query attestation is derived from gate 2, never asserted."""
+        h = _harness(allow=False)
+
+        outcome = await h.dispatcher.dispatch(
+            call=_call("run_readonly_query", scope_id=_SCOPE_ID, sql="SELECT 1"),
+            step_index=0,
+            run=_run(),
+        )
+
+        assert outcome.reason == "agent_policy_denied"
+        assert len(h.entitlements.entitled_calls) == 1
+        assert len(h.entitlements.resolve_calls) == 1
+        assert h.opa.seen_inputs[0]["entitlement_verified"] is True
+
+        source = pathlib.Path(dispatch_module.__file__).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        policy_inputs = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "AgentPolicyInput"
+        ]
+        assert len(policy_inputs) == 1
+        keyword = next(
+            item for item in policy_inputs[0].keywords if item.arg == "entitlement_verified"
+        )
+        assert isinstance(keyword.value, ast.IfExp)
+        expression_names = {
+            node.id for node in ast.walk(keyword.value) if isinstance(node, ast.Name)
+        }
+        assert {
+            "scope_id",
+            "capability_class",
+            "_ENTITLEMENT_REQUIRED_CLASSES",
+        } <= expression_names
+
+    async def test_unscoped_class_dispatches_without_an_entitlement_read(
+        self,
+    ) -> None:
+        h = _harness(tool_capability_classes={_OTHER_REF: "unscoped"})
+
+        outcome = await h.dispatcher.dispatch(call=_call("other_tool"), step_index=0, run=_run())
+
+        assert outcome.reason is None
+        assert h.entitlements.entitled_calls == []
+        assert h.entitlements.resolve_calls == []
+
+    async def test_action_class_refuses_until_ds2(self) -> None:
+        h = _harness(tool_capability_classes={_OTHER_REF: "action"})
+
+        outcome = await h.dispatcher.dispatch(call=_call("other_tool"), step_index=0, run=_run())
+
+        assert outcome.reason == "agent_scope_not_entitled"
+        assert h.entitlements.entitled_calls == []
+        assert h.opa.seen_inputs == []
+        assert h.proxy.calls == []
+
+    async def test_action_refuses_even_with_an_entitled_scope_id(
+        self, keypair: tuple[bytes, bytes]
+    ) -> None:
+        """An entitled data scope cannot authorize a write-class tool."""
+        private_pem, _ = keypair
+        h = _harness(
+            tool_capability_classes={_OTHER_REF: "action"},
+            signing_key_pem=private_pem,
+        )
+
+        outcome = await h.dispatcher.dispatch(
+            call=_call("other_tool", scope_id=_SCOPE_ID),
+            step_index=0,
+            run=_run(),
+        )
+
+        assert outcome.reason == "agent_scope_not_entitled"
+        assert h.entitlements.entitled_calls == []
+        assert h.entitlements.resolve_calls == []
+        assert h.opa.seen_inputs == []
+        assert h.proxy.calls == []
+
+
+def test_the_hardcoded_stamped_tool_list_is_gone() -> None:
+    """Tool authority comes from signed manifests, never a kernel name list."""
+    source = pathlib.Path(dispatch_module.__file__).read_text(encoding="utf-8")
+    assert "_QUERY_CONTEXT_STAMPED_TOOLS" not in source
 
 
 # --- Pin 3 — gate 2 (entitlement) ----------------------------------------------------
@@ -771,7 +900,7 @@ class TestQueryContextStamp:
 
 class TestBuildLlmToolSpecs:
     def test_run_readonly_query_schema_is_exactly_the_three_fields(self) -> None:
-        specs = build_llm_tool_specs(run=_run())
+        specs = build_llm_tool_specs(run=_run(), capability_classes=_TOOL_CAPABILITY_CLASSES)
         by_name = {spec.name: spec for spec in specs}
         query_spec = by_name["run_readonly_query"]
         assert set(query_spec.parameters["properties"].keys()) == {"scope_id", "sql", "max_rows"}
@@ -784,7 +913,7 @@ class TestBuildLlmToolSpecs:
         """THE schema-exclusion pin: the stamp key is kernel-owned — it must
         never be advertised to (or authorable by) the LLM. Ditto identity /
         tenant fields on the stamped tool."""
-        specs = build_llm_tool_specs(run=_run())
+        specs = build_llm_tool_specs(run=_run(), capability_classes=_TOOL_CAPABILITY_CLASSES)
         assert specs, "granted run must produce specs"
         for spec in specs:
             assert _QUERY_CONTEXT_ARG not in json.dumps(spec.parameters)
@@ -795,14 +924,19 @@ class TestBuildLlmToolSpecs:
         )
 
     def test_builtin_specs_present(self) -> None:
-        specs = build_llm_tool_specs(run=_run())
+        specs = build_llm_tool_specs(run=_run(), capability_classes=_TOOL_CAPABILITY_CLASSES)
         by_name = {spec.name: spec for spec in specs}
         assert {"read_skill", "remember"} <= set(by_name)
         assert set(by_name["read_skill"].parameters["properties"].keys()) == {"skill_id"}
         assert set(by_name["remember"].parameters["properties"].keys()) == {"note"}
 
     def test_spec_names_are_tool_segments(self) -> None:
-        names = {spec.name for spec in build_llm_tool_specs(run=_run())}
+        names = {
+            spec.name
+            for spec in build_llm_tool_specs(
+                run=_run(), capability_classes=_TOOL_CAPABILITY_CLASSES
+            )
+        }
         assert "other_tool" in names
         assert _OTHER_REF not in names
 
@@ -815,8 +949,39 @@ class TestBuildLlmToolSpecs:
                 tools=frozenset({"srv-a/query", "srv-b/query", "noslash"}),
             )
         )
-        names = {spec.name for spec in build_llm_tool_specs(run=run)}
+        names = {
+            spec.name
+            for spec in build_llm_tool_specs(run=run, capability_classes=_TOOL_CAPABILITY_CLASSES)
+        }
         assert names == {"read_skill", "remember"}
+
+    def test_schema_selection_uses_full_ref_capability_class(self) -> None:
+        run = _run(
+            granted=GrantedCapabilities(
+                skills=frozenset(),
+                tools=frozenset({_ORACLE_REF, "srv-c/custom_query"}),
+            )
+        )
+        specs = build_llm_tool_specs(
+            run=run,
+            capability_classes={
+                _ORACLE_REF: "unscoped",
+                "srv-c/custom_query": "data_query",
+            },
+        )
+        by_name = {spec.name: spec for spec in specs}
+
+        assert by_name["run_readonly_query"].parameters == {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": True,
+        }
+        assert set(by_name["custom_query"].parameters["properties"]) == {
+            "scope_id",
+            "sql",
+            "max_rows",
+        }
+        assert by_name["custom_query"].parameters["additionalProperties"] is False
 
 
 # --- Pin 7 — backend failure (safe message) -------------------------------------------
@@ -865,6 +1030,7 @@ class TestDispatchFailure:
             decision_history=h.dh,  # type: ignore[arg-type]
             query_context_signing_key_pem=None,
             query_context_ttl_s=300.0,
+            tool_capability_classes=_TOOL_CAPABILITY_CLASSES,
         )
         out = await h_dispatcher.dispatch(
             call=_call("remember", note="n"), step_index=0, run=_run()
@@ -972,6 +1138,7 @@ class TestDispatchEvidence:
         "arm",
         [
             "unassigned",
+            "class_invalid",
             "read_skill_subgate",
             "unentitled",
             "policy_denied",
@@ -986,6 +1153,9 @@ class TestDispatchEvidence:
         if arm == "unassigned":
             h = _harness()
             call = _call("made_up_tool")
+        elif arm == "class_invalid":
+            h = _harness(tool_capability_classes={})
+            call = _call("other_tool")
         elif arm == "read_skill_subgate":
             h = _harness()
             call = _call("read_skill", skill_id="atm-recon")

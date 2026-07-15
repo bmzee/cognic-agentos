@@ -527,7 +527,10 @@ async def build_agent_loop(
     assert registry is not None  # narrowed by the gate above
 
     # Boot-hosted records: the A8 agent packs + the instruction-mode skill
-    # records the read_skill built-in serves bodies from.
+    # records the read_skill built-in serves bodies from. The signed per-tool
+    # class map is one immutable-at-construction snapshot consumed by both the
+    # dispatcher gate and the LLM schema builder in the loop.
+    tool_capability_classes = build_tool_capability_classes(registry)
     agent_records = _build_agent_records(registry=registry, settings=settings)
     skill_records = _build_skill_records(
         registry=registry,
@@ -556,12 +559,14 @@ async def build_agent_loop(
         decision_history=runtime.decision_history_store,
         query_context_signing_key_pem=signing_key_pem,
         query_context_ttl_s=settings.agent_query_context_ttl_s,
+        tool_capability_classes=tool_capability_classes,
     )
     loop = AgentLoop(
         record_loader=_RegistryAgentRecordLoader(agent_records),
         assignments=AssignmentStore(engine),
         gateway=runtime.llm_gateway,
         dispatcher=dispatcher,
+        tool_capability_classes=tool_capability_classes,
         skill_reader=skill_reader,
         memory_factory=runtime.memory_api_factory,
         decision_history=runtime.decision_history_store,

@@ -494,6 +494,31 @@ async def test_build_agent_loop_all_deps_builds_loop_no_warnings() -> None:
     assert hosted == []  # empty registry — no hosted rows
 
 
+async def test_build_agent_loop_threads_signed_tool_capability_classes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capability_classes = {
+        "cognic-tool-oracle-schema/run_readonly_query": "data_query",
+        "srv/metadata": "unscoped",
+    }
+    calls: list[Any] = []
+
+    def _build(registry: Any) -> dict[str, str]:
+        calls.append(registry)
+        return capability_classes
+
+    monkeypatch.setattr(agent_host, "build_tool_capability_classes", _build)
+    registry = _Registry([])
+
+    loop, warnings, _hosted = await _build_loop(registry=registry)
+
+    assert loop is not None
+    assert warnings == []
+    assert calls == [registry]
+    assert loop._tool_capability_classes == capability_classes
+    assert loop._dispatcher._tool_capability_classes == capability_classes
+
+
 async def test_build_agent_loop_some_missing_returns_none_plus_single_warning() -> None:
     loop, warnings, hosted = await _build_loop(mcp_host=None)
     assert loop is None

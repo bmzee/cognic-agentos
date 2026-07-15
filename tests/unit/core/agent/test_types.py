@@ -47,11 +47,12 @@ def _record(**overrides: Any) -> LoadedAgentRecord:
 # --------------------------------------------------------------------------- #
 
 
-def test_agent_dispatch_refusal_reason_has_exactly_seven_values() -> None:
+def test_agent_dispatch_refusal_reason_has_exactly_eight_values() -> None:
     values = get_args(AgentDispatchRefusalReason)
-    assert len(values) == 7
+    assert len(values) == 8
     assert set(values) == {
         "agent_capability_not_assigned",
+        "agent_capability_class_invalid",
         "agent_scope_not_entitled",
         "agent_sql_object_out_of_scope",
         "agent_max_steps_exceeded",

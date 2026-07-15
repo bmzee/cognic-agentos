@@ -68,6 +68,10 @@ _ORIGINATOR = "human:analyst@bank"
 _AGENT_ID = "bank-analyst"
 _ORACLE_REF = "cognic-tool-oracle-schema/run_readonly_query"
 _OTHER_REF = "srv-b/other_tool"
+_TOOL_CAPABILITY_CLASSES = {
+    _ORACLE_REF: "data_query",
+    _OTHER_REF: "unscoped",
+}
 _GRANTED_SKILL = "schema-summary"
 _UNHOSTED_SKILL = "unhosted-skill"
 _UNASSIGNED_SKILL = "atm-recon"
@@ -406,6 +410,7 @@ def _harness(
     run_token_budget: int = _TOKEN_BUDGET,
     run_wall_clock_s: float = _WALL_CLOCK_S,
     clock: Callable[[], float] | None = None,
+    tool_capability_classes: Mapping[str, str] | None = None,
 ) -> _Harness:
     rec = record if record is not None else _record()
     loader = _StubRecordLoader({(_TENANT, _AGENT_ID): rec} if agent_known else {})
@@ -422,6 +427,9 @@ def _harness(
     )
     memory = memory_factory if memory_factory is not None else _SpyMemoryFactory()
     dh = DecisionHistoryStore(db)
+    capability_classes = (
+        tool_capability_classes if tool_capability_classes is not None else _TOOL_CAPABILITY_CLASSES
+    )
     dispatcher = AgentDispatcher(
         entitlements=entitlements,  # type: ignore[arg-type]
         policy=AgentDispatchPolicy(opa_engine=opa),  # type: ignore[arg-type]
@@ -431,6 +439,7 @@ def _harness(
         decision_history=dh,
         query_context_signing_key_pem=signing_key_pem,
         query_context_ttl_s=300.0,
+        tool_capability_classes=capability_classes,
     )
     gateway = _FakeGateway(responses, exc=gateway_exc)
     kwargs: dict[str, Any] = {}
@@ -441,6 +450,7 @@ def _harness(
         assignments=assignments,  # type: ignore[arg-type]
         gateway=gateway,  # type: ignore[arg-type]
         dispatcher=dispatcher,
+        tool_capability_classes=capability_classes,
         skill_reader=reader,
         memory_factory=memory,
         decision_history=dh,
