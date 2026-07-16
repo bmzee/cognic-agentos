@@ -160,6 +160,15 @@ def test_call_originator_mismatch_returns_403_with_wire_reason(
     assert r.json()["detail"]["reason"] == "tool_approval_originator_mismatch"
 
 
+def test_call_consumed_returns_409_with_wire_reason(
+    memory_settings: Any, memory_registry: Any, tmp_path: Any
+) -> None:
+    host = _StubHost(raises=MCPToolInvocationRefused("tool_approval_consumed"))
+    r = _call(memory_settings, memory_registry, tmp_path, host=host, json={"tool_name": "pay"})
+    assert r.status_code == 409
+    assert r.json()["detail"]["reason"] == "tool_approval_consumed"
+
+
 def test_call_recall_threads_approval_request_id(
     memory_settings: Any, memory_registry: Any, tmp_path: Any
 ) -> None:
@@ -186,6 +195,7 @@ def test_call_recall_threads_approval_request_id(
         (MCPToolInvocationRefused("tool_approval_engine_not_available"), 403),
         (MCPToolInvocationRefused("tool_approval_expired"), 409),
         (MCPToolInvocationRefused("tool_approval_binding_mismatch"), 409),
+        (MCPToolInvocationRefused("tool_approval_consumed"), 409),
         # HP-4 (M8.5-C T1): actor-bound replay is an authorization failure -> 403.
         (MCPToolInvocationRefused("tool_approval_originator_mismatch"), 403),
         (MCPToolInvocationRefused("tool_approval_request_not_found"), 409),

@@ -2,12 +2,14 @@
 approval decision core. ``core/`` stop-rule + critical-controls.
 
 Designed as the generic Sprint-14 human-checkpoint primitive: ``classify`` /
-``create_request`` / ``check`` / ``verify_grant_for_action`` / ``grant`` /
-``grant_second`` / ``deny`` — NEVER a wait loop. Value-free: the engine computes
-``envelope_digest`` and never sees raw tool args (the caller supplies a redacted
-envelope + ``args_digest``). This module ships the create-side surface
-(classify/create/check/verify + envelope validation + lazy expiry); the grant-side
-(``grant``/``grant_second``/``deny``) is appended at Sprint 13.5a T6.
+``create_request`` / ``check`` / ``verify_grant_for_action`` /
+``consume_grant_for_action`` / ``grant`` / ``grant_second`` / ``deny`` — NEVER a
+wait loop. Value-free: the engine computes
+``envelope_digest``; the approval envelope carries only a redacted context and
+``args_digest``. D2 separately threads opaque canonical replay bytes to the
+value store without inspecting them here. This module ships the create/check /
+verify/consume surfaces plus envelope validation, lazy expiry, and the grant-side
+(``grant``/``grant_second``/``deny``).
 """
 
 from __future__ import annotations
@@ -228,6 +230,37 @@ class ApprovalEngine:
         return await self._lazy_expire_and_project(
             request_id=request_id, tenant_id=tenant_id
         )  # (4)
+
+    async def consume_grant_for_action(
+        self,
+        *,
+        request_id: uuid.UUID,
+        tenant_id: str,
+        expected_args_digest: bytes,
+        expected_tool_identity: str,
+        expected_originator_subject: str,
+        consumed_by: str,
+    ) -> ApprovalCheckResult:
+        """Run the existing replay verification precedence, then claim once."""
+        result = await self.verify_grant_for_action(
+            request_id=request_id,
+            tenant_id=tenant_id,
+            expected_args_digest=expected_args_digest,
+            expected_tool_identity=expected_tool_identity,
+            expected_originator_subject=expected_originator_subject,
+        )
+        if result.state != "granted":
+            return result
+        outcome = await self._store.claim_consumption(
+            request_id=request_id,
+            tenant_id=tenant_id,
+            consumed_by=consumed_by,
+        )
+        if outcome == "first_claim":
+            return result
+        if outcome == "already_consumed":
+            raise ApprovalTransitionRefused("approval_consumed")
+        raise RuntimeError("granted approval became non-granted during consumption")
 
     async def grant(
         self,

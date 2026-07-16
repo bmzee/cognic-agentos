@@ -30,8 +30,9 @@ from cognic_agentos.protocol.mcp_host import (
 )
 from cognic_agentos.protocol.mcp_transports import MCPTransportError
 
-#: ``MCPToolInvocationRefused.reason`` -> HTTP status. The 10-value enum
-#: (HP-4 added tool_approval_originator_mismatch -> 403) is wire-public +
+#: ``MCPToolInvocationRefused.reason`` -> HTTP status. The 11-value enum
+#: (HP-4 added tool_approval_originator_mismatch -> 403; D2 phase B added
+#: tool_approval_consumed -> 409) is wire-public +
 #: drift-pinned at its definition; this map consumes it (and the route tests
 #: pin map == enum so a new reason cannot leak a 500 KeyError).
 #: 202 = approval pending (the body adds approval_request_id); 403 = terminal
@@ -44,6 +45,7 @@ _REFUSAL_STATUS: dict[str, int] = {
     "tool_approval_engine_not_available": 403,
     "tool_approval_expired": 409,
     "tool_approval_binding_mismatch": 409,
+    "tool_approval_consumed": 409,
     "tool_approval_originator_mismatch": 403,
     "tool_approval_request_not_found": 409,
     "dlp_pre_refused": 403,

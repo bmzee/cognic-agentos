@@ -589,8 +589,8 @@ def _canonical_tool_identity(*, server_id: str, tool_name: str) -> str:
     separator characters in either field cannot collide (raw
     f"{server_id}:{tool_name}" rejected at the 13.5b2 reconciliation). The
     human-readable pair lives in the envelope's redacted_context instead.
-    SAME function serves create_request AND verify_grant_for_action — drift
-    between the two would make every grant unverifiable.
+    SAME function serves create_request AND consume_grant_for_action — drift
+    between the two would make every grant unclaimable.
     """
     digest = hashlib.sha256(
         canonical_bytes({"server_id": server_id, "tool_name": tool_name})
@@ -618,8 +618,10 @@ def _approval_redacted_context(*, server_id: str, tool_name: str) -> str:
 #: policy-refused the call), ``dlp_pre_failed`` (a hook raised / timed out, or
 #: a declared hook did not resolve), ``dlp_pre_guard_unavailable``
 #: (``dlp_pre_hooks`` declared but no DLP guard wired — fail closed).
+#: M8.5-D D2 phase B adds ``tool_approval_consumed`` for a second use of a
+#: single-claim grant.
 #: Drift-pinned by ``test_mcp_approval_seam.py::
-#: test_tool_invocation_refusal_reason_has_exactly_ten_values`` +
+#: test_tool_invocation_refusal_reason_has_exactly_eleven_values`` +
 #: ``test_mcp_high_risk_tier_refused.py::
 #: TestRiskTierAllowListPinned::test_refusal_reason_closed_enum_pinned``.
 ToolInvocationRefusalReason = Literal[
@@ -628,6 +630,7 @@ ToolInvocationRefusalReason = Literal[
     "tool_approval_denied",
     "tool_approval_expired",
     "tool_approval_binding_mismatch",
+    "tool_approval_consumed",
     "tool_approval_originator_mismatch",
     "tool_approval_request_not_found",
     "dlp_pre_refused",
@@ -1181,7 +1184,7 @@ class MCPHost:
         """ADR-014 engine-authoritative approval consult (13.5b2 spec §3).
 
         Returns None to proceed to dispatch (auto_run classification or a
-        verified grant); raises MCPToolInvocationRefused (after emitting the
+        verified first-claimed grant); raises MCPToolInvocationRefused (after emitting the
         refused evidence row) otherwise. ApprovalEnvelopeInvalid deliberately
         propagates to the outer generic-Exception arm (spec §3.5 — system
         error, not a policy refusal). Runs INSIDE the evidence-emitting try
@@ -1194,12 +1197,13 @@ class MCPHost:
         tool_identity = _canonical_tool_identity(server_id=entry.server_id, tool_name=tool_name)
         if approval_request_id is not None:
             try:
-                res = await engine.verify_grant_for_action(
+                res = await engine.consume_grant_for_action(
                     request_id=approval_request_id,
                     tenant_id=tenant_id,
                     expected_args_digest=args_digest,
                     expected_tool_identity=tool_identity,
                     expected_originator_subject=originator_subject,
+                    consumed_by=request_id,
                 )
             except ApprovalRequestNotFound:
                 # Unknown OR cross-tenant — indistinguishable by construction
@@ -1238,9 +1242,15 @@ class MCPHost:
                         f"different requesting subject; a grant authorises exactly "
                         f"one requester."
                     )
+                elif exc.reason == "approval_consumed":
+                    wire_reason = "tool_approval_consumed"
+                    wire_detail = (
+                        f"approval request {approval_request_id} has already been "
+                        f"consumed; a grant authorises exactly one dispatch."
+                    )
                 else:
-                    raise  # defensive: unexpected verify-side refusal -> errored arm
-                # flow OMITTED: verify raised without returning the result and
+                    raise  # defensive: unexpected consume-side refusal -> errored arm
+                # flow OMITTED: consume raised without returning the result and
                 # the seam does NOT issue an extra store read (spec §4).
                 await self._emit_approval_refused(
                     reason=wire_reason,
@@ -1260,7 +1270,7 @@ class MCPHost:
                     approval_request_id=str(approval_request_id),
                 ) from None
             if res.state == "granted":
-                return  # verified grant -> dispatch
+                return  # verified + first-claimed grant -> dispatch
             state_to_reason: dict[str, ToolInvocationRefusalReason] = {
                 "pending": "tool_approval_pending",
                 "awaiting_second": "tool_approval_pending",

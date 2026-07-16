@@ -24,9 +24,10 @@ from cognic_agentos.core.decision_history import DecisionHistoryStore
 from cognic_agentos.protocol.mcp_authz import MCPAuthzClient, Token
 
 
-def test_tool_invocation_refusal_reason_has_exactly_ten_values() -> None:
+def test_tool_invocation_refusal_reason_has_exactly_eleven_values() -> None:
     # Wire-protocol-public vocabulary (spec §4; M5 added the three DLP
-    # pre-invocation reasons; HP-4 added the originator mismatch).
+    # pre-invocation reasons; HP-4 added the originator mismatch; D2 phase B
+    # adds the single-use consumed conflict).
     # Drift-pinned: adding or removing a value fails here until the
     # spec/ADR amendment moves with it.
     from cognic_agentos.protocol.mcp_host import ToolInvocationRefusalReason
@@ -37,6 +38,7 @@ def test_tool_invocation_refusal_reason_has_exactly_ten_values() -> None:
         "tool_approval_denied",
         "tool_approval_expired",
         "tool_approval_binding_mismatch",
+        "tool_approval_consumed",
         "tool_approval_originator_mismatch",
         "tool_approval_request_not_found",
         "dlp_pre_refused",
@@ -513,13 +515,17 @@ class TestWiredFirstCall:
 # ---------------------------------------------------------------------------
 
 
-def _approver(subject: str = "rev@bank.example") -> Any:
+def _approver(
+    subject: str = "rev@bank.example",
+    *,
+    scope: str = "tool.approve.customer_data",
+) -> Any:
     from cognic_agentos.core.approval._types import ApprovalActor
 
     return ApprovalActor(
         subject=subject,
         tenant_id="t-1",
-        scopes=frozenset({"tool.approve.customer_data"}),
+        scopes=frozenset({scope}),
         actor_type="human",
     )
 
@@ -571,10 +577,22 @@ class TestWiredReCall:
             originator_subject="agent-1",
             approval_request_id=rid,
         )
-        # Same-function identity pin (behavioural): create + verify both used
+        # Same-function identity pin (behavioural): create + consume both used
         # _canonical_tool_identity — a divergent recompute would have refused
         # tool_approval_binding_mismatch here instead of dispatching.
         assert result.payload == {"content": "ok"}
+        with pytest.raises(host_module.MCPToolInvocationRefused) as consumed:
+            await host.call_tool(
+                server_id=entry.server_id,
+                tool_name="lookup",
+                arguments={"q": "x"},
+                request_id="r12",
+                tenant_id="t-1",
+                originator_subject="agent-1",
+                approval_request_id=rid,
+            )
+        assert consumed.value.reason == "tool_approval_consumed"
+        assert http_transport.send.await_count == 1
         # No-double-emission pin (spec §3.6 guard arm): the FIRST call emitted
         # exactly one refused row + zero errored rows for its request_id.
         # NOTE: request_id is an AuditEvent ATTRIBUTE (mcp_host.py:1712), not a
@@ -654,7 +672,7 @@ class TestWiredReCall:
             assert subject not in refused_payload, f"{subject!r} leaked into the evidence row"
             assert subject not in logged, f"{subject!r} leaked into a log record"
 
-    async def test_verify_receives_the_route_originator_exactly(
+    async def test_consume_receives_route_originator_and_request_id_exactly(
         self,
         host_module: Any,
         http_transport: MagicMock,
@@ -672,7 +690,7 @@ class TestWiredReCall:
         from cognic_agentos.core.approval._types import ApprovalTransitionRefused
 
         engine = MagicMock()
-        engine.verify_grant_for_action = AsyncMock(
+        engine.consume_grant_for_action = AsyncMock(
             side_effect=ApprovalTransitionRefused("approval_originator_mismatch")
         )
         entry = _entry(host_module)
@@ -698,8 +716,67 @@ class TestWiredReCall:
                 approval_request_id=rid,
             )
         assert exc_info.value.reason == "tool_approval_originator_mismatch"
-        kwargs = engine.verify_grant_for_action.await_args.kwargs
+        kwargs = engine.consume_grant_for_action.await_args.kwargs
         assert kwargs["expected_originator_subject"] == "analyst.exact-forwarding"
+        assert kwargs["consumed_by"] == "r14"
+
+    async def test_bar_d_four_eyes_walk_dispatches_exactly_once(
+        self,
+        host_module: Any,
+        http_transport: MagicMock,
+        authz: MagicMock,
+        audit_store: MagicMock,
+        decision_history_store: MagicMock,
+        settings: Any,
+        tmp_path: Any,
+    ) -> None:
+        store = await _mk_approval_store(tmp_path)
+        engine = _mk_approval_engine(store, flow="require_4_eyes")
+        entry = _entry(host_module, risk_tier="payment_action")
+        host = _wired_host(
+            host_module,
+            entry,
+            engine,
+            http_transport=http_transport,
+            authz=authz,
+            audit_store=audit_store,
+            decision_history_store=decision_history_store,
+            settings=settings,
+        )
+        rid = await self._pending(host_module, host, entry)
+        payment_scope = "tool.approve.payment"
+        await engine.grant(
+            request_id=rid,
+            tenant_id="t-1",
+            approver=_approver("approver.dana", scope=payment_scope),
+        )
+        with pytest.raises(host_module.MCPToolInvocationRefused) as pending:
+            await host.call_tool(
+                server_id=entry.server_id,
+                tool_name="lookup",
+                arguments={"q": "x"},
+                request_id="bar-d-first-recall",
+                tenant_id="t-1",
+                originator_subject="agent-1",
+                approval_request_id=rid,
+            )
+        assert pending.value.reason == "tool_approval_pending"
+        await engine.grant_second(
+            request_id=rid,
+            tenant_id="t-1",
+            approver=_approver("approver.erin", scope=payment_scope),
+        )
+        result = await host.call_tool(
+            server_id=entry.server_id,
+            tool_name="lookup",
+            arguments={"q": "x"},
+            request_id="bar-d-dispatch",
+            tenant_id="t-1",
+            originator_subject="agent-1",
+            approval_request_id=rid,
+        )
+        assert result.payload == {"content": "ok"}
+        assert http_transport.send.await_count == 1
 
     async def test_changed_args_recall_refuses_binding_mismatch_without_flow(
         self,
@@ -831,7 +908,7 @@ class TestWiredReCall:
         tmp_path: Any,
     ) -> None:
         # Spec §3.2/§8: lazy expiry surfaces through the re-call mapping as
-        # tool_approval_expired. flow IS included — verify_grant_for_action
+        # tool_approval_expired. flow IS included — consume_grant_for_action
         # RETURNS an ApprovalCheckResult for the expired state (spec §4).
         store = await _mk_approval_store(tmp_path)
         clock = _MutableClock()

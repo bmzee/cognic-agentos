@@ -315,7 +315,7 @@ Landed with the M8.5-C T1 kernel slice (spec `docs/superpowers/specs/2026-07-11-
 
 1. **The reviewer queue is a fixed actionable projection over `pending | awaiting_second`.** The originally advertised `?status=` filter is RETIRED from the contract — terminal history belongs to evidence surfaces, never the live queue. `GET /api/v1/approvals/` gains `limit` (1..200, default 50; FastAPI-validated wire bounds) + `cursor` (opaque, versioned, strictly decoded — every decode failure is `422 {"detail": {"reason": "cursor_invalid"}}` with a 256-char pre-decode length cap). The response body stays `list[ApprovalSummaryResponse]`; pagination rides a **relative** `Link: </api/v1/approvals/?cursor=…&limit=…>; rel="next"` response header. Storage walks a `(created_at ASC, request_id ASC)` chronological keyset (Oracle-portable tuple expansion) backed by migration 0017's `ix_approval_requests_tenant_created_request (tenant_id, created_at, request_id)` index.
 2. **Actor-bound grant replay, engine-owned.** `ApprovalEngine.verify_grant_for_action` gains the REQUIRED `expected_originator_subject` parameter and runs the **corrected verification precedence**: tenant-scoped RAW load (absent/cross-tenant collapse; no mutation) → ORIGINATOR (`approval_originator_mismatch`, the 11th `ApprovalTransitionRefusedReason` value; portal 403) → **UNCONDITIONAL binding** (persisted `args_digest`/`tool_identity` are create-time constants — a wrong-shape replay of a *pending* request now refuses `approval_binding_mismatch`, never "pending") → lazy expiry + state projection (the ONLY mutating step; a wrong-originator caller causes zero expiry mutation and zero evidence). The grant is usable only by the **original requesting subject**; the approver remains a distinct human for four-eyes — two identities, two roles, one request. Refusals are value-free (request id + bounded reason; never a subject).
-3. **All four replay consumers map the new reason** into their closed vocabularies: MCP `tool_approval_originator_mismatch` (wire 10-value `ToolInvocationRefusalReason`; portal MCP route 403), sandbox `sandbox_approval_originator_mismatch` (see the ADR-004 amendment — incl. the wake-passthrough 5→6 expansion), scheduler `refused_approval_originator_mismatch` (ADR-022 amendment), memory `memory_approval_originator_mismatch` (ADR-019 amendment).
+3. **All four replay consumers map the new reason** into their closed vocabularies: MCP `tool_approval_originator_mismatch` (the then-10-value `ToolInvocationRefusalReason`; portal MCP route 403), sandbox `sandbox_approval_originator_mismatch` (see the ADR-004 amendment — incl. the wake-passthrough 5→6 expansion), scheduler `refused_approval_originator_mismatch` (ADR-022 amendment), memory `memory_approval_originator_mismatch` (ADR-019 amendment).
 4. **Four-eyes TTL note:** the M8.5-C live proof raises `approval_four_eyes_ttl_s` above its browser-bar worst case via configuration — the 60-second default is unchanged.
 
 ## Maker-checker amendment (2026-07-16) — originator exclusion at every grant index
@@ -377,3 +377,25 @@ Regulator erasure nulls `canonical_args` and `result_canonical` while retaining
 the replay row, both digests, and the erasure timestamp. The replay table emits
 no chain rows: the approval request's existing value-free chain evidence owns
 the argument digest, while this table is erasable retrieval material.
+
+## M8.5-D D2 phase-B single-use amendment (2026-07-16)
+
+An approval grant is actor-bound and single-use. `granted` remains the terminal
+wire state; execution ownership is represented by the nullable `consumed_at`
+and `consumed_by` columns rather than a new state. The store claims those
+columns atomically with `UPDATE ... WHERE state='granted' AND consumed_at IS
+NULL`; exactly one caller receives `first_claim`, while later callers receive
+`already_consumed` and non-granted requests receive `not_granted`.
+
+The winning claim and its value-free `approval.consumed` decision-history row
+commit in one transaction. The row carries only the approval request id, the
+invocation request-id correlator in `consumed_by`, and the immutable tool
+identity. The direct-MCP lane maps a repeated use to the additive
+`tool_approval_consumed` conflict and never dispatches it. Its established
+Bar-D-shaped flow remains compatible: the first exact-shape re-call after the
+final distinct grant claims and dispatches once.
+
+Stored-result replay is deliberately not part of the direct-MCP lane. It is
+owned by the later kernel execution service, which combines this claim with
+tool-side idempotency for at-least-once recovery; this amendment does not imply
+that a second human POST can execute or retrieve a result.

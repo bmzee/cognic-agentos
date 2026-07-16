@@ -3,9 +3,10 @@ N-way decision ledger, and value-free ``approval.*`` chain events. CC.
 
 Mirrors ``core/scheduler/storage.py`` for the atomic-transition machinery:
 ``create_request_row`` is the genesis write (INSERT pending + ``approval.requested``
-in one transaction) and ``transition`` is the state-machine write (SELECT ... FOR
+in one transaction), ``transition`` is the state-machine write (SELECT ... FOR
 UPDATE -> ``validate_transition`` under the lock -> UPDATE state + approver column
--> the matching ``approval.<event>`` chain row), both via
+-> the matching ``approval.<event>`` chain row), and ``claim_consumption`` owns
+the single-use execution claim. All three use
 ``DecisionHistoryStore.append_with_precondition`` (Doctrine Lock D). Value-free:
 no raw tool args ever — only the caller's ``args_digest`` + the engine's
 ``envelope_digest``.
@@ -47,6 +48,7 @@ from cognic_agentos.core.approval._types import (
     ApprovalRequestNotFound,
     ApprovalState,
     ApprovalTransitionRefused,
+    ClaimOutcome,
     validate_transition,
 )
 from cognic_agentos.core.approval.replay import _build_persist_statement
@@ -232,6 +234,22 @@ class _LockedSnapshot:
     denier: str | None
     decision_index: int | None = None
     required_count: int | None = None
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class _ConsumptionSnapshot:
+    """Value-free facts captured by the winning consume claim."""
+
+    tool_identity: str
+    consumed_by: str
+
+
+class _ConsumptionNotClaimed(Exception):
+    """Internal rollback signal for a claim that must emit no chain row."""
+
+    def __init__(self, outcome: ClaimOutcome) -> None:
+        super().__init__(outcome)
+        self.outcome = outcome
 
 
 def _value_free_payload(
@@ -691,6 +709,103 @@ class ApprovalRequestStore:
                 raise ApprovalTransitionRefused("approver_not_distinct") from None
             raise
         return captured[0]
+
+    async def claim_consumption(
+        self,
+        *,
+        request_id: uuid.UUID,
+        tenant_id: str,
+        consumed_by: str,
+    ) -> ClaimOutcome:
+        """Atomically claim one granted request for execution.
+
+        The request's public state remains ``granted``. A conditional update
+        of the nullable consumption columns is the claim authority; only its
+        winner appends ``approval.consumed`` under the same chain-locked
+        transaction. Losing and non-granted attempts roll back without an
+        evidence row and return their typed outcome.
+        """
+        now = datetime.now(UTC)
+
+        async def _precondition(
+            conn: AsyncConnection,
+            _seq: int,
+            _hash: bytes,
+        ) -> _ConsumptionSnapshot:
+            # Real databases serialize on this request row. The conditional
+            # UPDATE remains the final authority (and is atomic on SQLite,
+            # where SELECT FOR UPDATE is intentionally ignored).
+            await conn.execute(
+                select(_approval_requests.c.request_id)
+                .where(
+                    _approval_requests.c.request_id == request_id,
+                    _approval_requests.c.tenant_id == tenant_id,
+                )
+                .with_for_update()
+            )
+            claimed = await conn.execute(
+                update(_approval_requests)
+                .where(
+                    _approval_requests.c.request_id == request_id,
+                    _approval_requests.c.tenant_id == tenant_id,
+                    _approval_requests.c.state == "granted",
+                    _approval_requests.c.consumed_at.is_(None),
+                )
+                .values(consumed_at=now, consumed_by=consumed_by)
+            )
+            if claimed.rowcount != 1:
+                row = (
+                    await conn.execute(
+                        select(
+                            _approval_requests.c.state,
+                            _approval_requests.c.consumed_at,
+                        ).where(
+                            _approval_requests.c.request_id == request_id,
+                            _approval_requests.c.tenant_id == tenant_id,
+                        )
+                    )
+                ).first()
+                outcome: ClaimOutcome = (
+                    "already_consumed"
+                    if row is not None and row.state == "granted" and row.consumed_at is not None
+                    else "not_granted"
+                )
+                raise _ConsumptionNotClaimed(outcome)
+            tool_identity = (
+                await conn.execute(
+                    select(_approval_requests.c.tool_identity).where(
+                        _approval_requests.c.request_id == request_id,
+                        _approval_requests.c.tenant_id == tenant_id,
+                    )
+                )
+            ).scalar_one()
+            return _ConsumptionSnapshot(
+                tool_identity=str(tool_identity),
+                consumed_by=consumed_by,
+            )
+
+        def _build_record(snap: _ConsumptionSnapshot) -> DecisionRecord:
+            return DecisionRecord(
+                decision_type="approval.consumed",
+                request_id=snap.consumed_by,
+                payload={
+                    "request_id": str(request_id),
+                    "consumed_by": snap.consumed_by,
+                    "tool_identity": snap.tool_identity,
+                },
+                actor_id=None,
+                tenant_id=tenant_id,
+                iso_controls=_APPROVAL_ISO_CONTROLS,
+            )
+
+        try:
+            await self._history.append_with_precondition(
+                record_builder=_build_record,
+                precondition=_precondition,
+            )
+        except _ConsumptionNotClaimed as exc:
+            return exc.outcome
+        return "first_claim"
 
     async def load(self, *, request_id: uuid.UUID, tenant_id: str) -> ApprovalRequestRow | None:
         """Tenant-scoped read; cross-tenant / unknown -> ``None``."""

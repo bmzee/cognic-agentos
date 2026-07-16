@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import typing
 
 import pytest
@@ -12,6 +13,7 @@ from cognic_agentos.core.approval._types import (
     ApprovalState,
     ApprovalTransitionRefused,
     ApprovalTransitionRefusedReason,
+    ClaimOutcome,
     validate_transition,
 )
 
@@ -42,8 +44,24 @@ def test_envelope_invalid_reason_count() -> None:
 def test_transition_refused_reason_count() -> None:
     # HP-4 (M8.5-C T1): +approval_originator_mismatch; maker-checker hotfix:
     # +originator_cannot_approve. D2 phase A adds the assignment-membership
-    # and N-way distinctness refusals.
-    assert len(typing.get_args(ApprovalTransitionRefusedReason)) == 14
+    # and N-way distinctness refusals. D2 phase B adds approval_consumed.
+    assert len(typing.get_args(ApprovalTransitionRefusedReason)) == 15
+
+
+def test_transition_progress_inputs_are_required_keyword_only() -> None:
+    signature = inspect.signature(validate_transition)
+    for name in ("decisions_recorded", "required_count"):
+        parameter = signature.parameters[name]
+        assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+        assert parameter.default is inspect.Parameter.empty
+
+
+def test_claim_outcome_closed_set() -> None:
+    assert set(typing.get_args(ClaimOutcome)) == {
+        "first_claim",
+        "already_consumed",
+        "not_granted",
+    }
 
 
 @pytest.mark.parametrize(

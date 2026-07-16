@@ -52,7 +52,12 @@ ApprovalTransitionRefusedReason = Literal[
     "originator_cannot_approve",
     "approver_not_assigned",
     "approver_not_distinct",
+    "approval_consumed",
 ]
+
+#: Atomic consume-claim outcome. ``granted`` remains the terminal wire state;
+#: these values describe only the internal claim attempt.
+ClaimOutcome = Literal["first_claim", "already_consumed", "not_granted"]
 
 #: The mutation actions the state machine accepts.
 ApprovalAction = Literal["grant_first", "grant_second", "deny", "expire"]
