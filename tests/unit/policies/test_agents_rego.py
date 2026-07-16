@@ -2,7 +2,7 @@
 ``policies/_default/agents.rego``.
 
 Validates the Wave-1 agent-dispatch bundle's BOOL-ONLY ``allow`` rule at
-``data.cognic.agents.dispatch.allow`` against the 11-key input shape the
+``data.cognic.agents.dispatch.allow`` against the 12-key input shape the
 ``AgentDispatchPolicy`` (same batch) assembles. Skipped on systems without
 OPA installed (CI runs OPA-bearing lanes by ensuring ``opa`` is on PATH);
 without it the bundle goes untested end-to-end.
@@ -17,7 +17,8 @@ Decision matrix covered:
 
 * default-deny baseline (empty input → ``allow=false`` per ADR-015)
 * allow: both attestations strictly ``true`` + each capability_kind in
-  ``{skill, tool, builtin}`` + ``step_index < max_steps``
+  ``{skill, tool, builtin}`` + each capability_class in
+  ``{data_query, action, unscoped}`` + ``step_index < max_steps``
 * defense-in-depth (the sandbox.rego rule-4 precedent): EACH attestation
   refuses independently — ``assignment_verified=false`` denies even with
   ``entitlement_verified=true`` and vice versa, so a bypassed Python gate
@@ -27,6 +28,7 @@ Decision matrix covered:
 * step bounds: ``step_index == max_steps`` and ``step_index > max_steps``
   both deny; ``step_index == max_steps - 1`` allows
 * unknown capability kind (``"hook"``, ``"builtin_x"``) denies
+* unknown capability class denies independently of the Python gate
 * missing-keys shape-mismatch denies via the default
 """
 
@@ -60,6 +62,10 @@ AGENTS_BUNDLE_PATH = Path("policies/_default/agents.rego")
 #: The closed capability-kind vocabulary the bundle's allow rule admits.
 #: Mirrors ``CapabilityRef.kind`` at ``core/agent/_types.py``.
 _CAPABILITY_KINDS = ("skill", "tool", "builtin")
+
+#: The closed capability-class vocabulary the bundle's allow rule admits.
+#: ``retrieval`` remains reserved and unimplemented in D-S1.
+_CAPABILITY_CLASSES = ("data_query", "action", "unscoped")
 
 
 @pytest.fixture
@@ -95,7 +101,7 @@ async def engine(tmp_path: Path) -> AsyncGenerator[OPAEngine, None]:
 
 
 def _dispatch_input(**overrides: Any) -> dict[str, Any]:
-    """Construct a happy-path dispatch input dict per the 11-key contract
+    """Construct a happy-path dispatch input dict per the 12-key contract
     the ``AgentDispatchPolicy._build_rego_input`` projection threads. Each
     test arm overrides one field to exercise its refusal path. Field names
     are IDENTICAL to the ``AgentPolicyInput`` field names (no key
@@ -105,6 +111,7 @@ def _dispatch_input(**overrides: Any) -> dict[str, Any]:
         "agent_id": "bank-analyst",
         "originator_subject": "human:analyst@bank",
         "capability_kind": "skill",
+        "capability_class": "unscoped",
         "capability_ref": "cognic-skill-schema-summary",
         "scope_id": None,
         "pack_risk_tier": "customer_data_read",
@@ -134,8 +141,8 @@ class TestAgentsRegoDefaultDeny:
 
 @opa_required
 class TestAgentsRegoAllowMatrix:
-    """The single allow rule: both attestations strictly true + kind in
-    the 3-value vocabulary + step_index < max_steps."""
+    """The single allow rule: attestations true, kind/class admitted,
+    and ``step_index < max_steps``."""
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("kind", _CAPABILITY_KINDS)
@@ -145,6 +152,33 @@ class TestAgentsRegoAllowMatrix:
         d = await engine.evaluate(
             decision_point=AGENTS_DECISION_POINT_ALLOW,
             input=_dispatch_input(capability_kind=kind),
+        )
+        assert d.allow is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("capability_class", _CAPABILITY_CLASSES)
+    async def test_allow_each_capability_class_when_fully_attested(
+        self, engine: OPAEngine, capability_class: str
+    ) -> None:
+        d = await engine.evaluate(
+            decision_point=AGENTS_DECISION_POINT_ALLOW,
+            input=_dispatch_input(
+                capability_kind="tool",
+                capability_class=capability_class,
+            ),
+        )
+        assert d.allow is True
+
+    @pytest.mark.asyncio
+    async def test_builtins_carry_the_unscoped_class_and_are_allowed(
+        self, engine: OPAEngine
+    ) -> None:
+        d = await engine.evaluate(
+            decision_point=AGENTS_DECISION_POINT_ALLOW,
+            input=_dispatch_input(
+                capability_kind="builtin",
+                capability_class="unscoped",
+            ),
         )
         assert d.allow is True
 
@@ -254,6 +288,25 @@ class TestAgentsRegoUnknownKind:
 
 
 @opa_required
+class TestAgentsRegoUnknownClass:
+    """Class validation is independent defense in depth."""
+
+    @pytest.mark.asyncio
+    async def test_an_unknown_capability_class_is_denied_by_the_bundle(
+        self, engine: OPAEngine
+    ) -> None:
+        d = await engine.evaluate(
+            decision_point=AGENTS_DECISION_POINT_ALLOW,
+            input=_dispatch_input(
+                assignment_verified=True,
+                entitlement_verified=True,
+                capability_class="nonsense",
+            ),
+        )
+        assert d.allow is False
+
+
+@opa_required
 class TestAgentsRegoShapeMismatch:
     """Missing-key inputs fall through to the default deny — every
     conjunct reads ``input.<key>`` strictly, so an absent key leaves the
@@ -266,6 +319,7 @@ class TestAgentsRegoShapeMismatch:
             "assignment_verified",
             "entitlement_verified",
             "capability_kind",
+            "capability_class",
             "step_index",
             "max_steps",
         ],

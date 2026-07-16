@@ -72,6 +72,8 @@ ValidatorReason = Literal[
     "mcp_wave2_feature_in_wave1_manifest",
     "mcp_caching_restricted_data_class",
     "mcp_elicitation_form_restricted_data_class",
+    "mcp_tool_capability_class_invalid",
+    "mcp_action_tool_in_auto_run_pack",
     # Data governance (T10) — refusals
     "data_governance_contract_missing",
     "data_governance_contract_inconsistent_with_risk_tier",
@@ -297,6 +299,8 @@ _VALIDATOR_REASON_OWNERSHIP: Final[dict[ValidatorReason, str]] = {
     "mcp_wave2_feature_in_wave1_manifest": "validators/mcp.py",
     "mcp_caching_restricted_data_class": "validators/mcp.py",
     "mcp_elicitation_form_restricted_data_class": "validators/mcp.py",
+    "mcp_tool_capability_class_invalid": "validators/mcp.py",
+    "mcp_action_tool_in_auto_run_pack": "validators/mcp.py",
     # Data governance (T10)
     "data_governance_contract_missing": "validators/data_governance.py",
     "data_governance_contract_inconsistent_with_risk_tier": "validators/data_governance.py",

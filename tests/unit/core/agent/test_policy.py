@@ -11,7 +11,7 @@ Validates ``AgentDispatchPolicy.evaluate()`` against the real Wave-1
 * Fail-closed envelope: OpaNotInstalledError / RegoEvaluationError in
   OPAEngine surfaces as ``PolicyDecision(allow=False,
   policy_reason="opa_unavailable")``.
-* Input-threading drift detector: the 11-key exact set the bundle reads,
+* Input-threading drift detector: the 12-key exact set the bundle reads,
   each threaded verbatim (field names identical — no key translations,
   unlike the scheduler's ``class_``/``actor_subject``).
 * Canonical-owner pin: ``PolicyDecision`` is IMPORTED from
@@ -61,7 +61,7 @@ opa_required = pytest.mark.skipif(
 
 AGENTS_BUNDLE_PATH = Path("policies/_default/agents.rego")
 
-#: The 11-key Rego input contract the bundle reads off ``input.<key>``.
+#: The 12-key Rego input contract the bundle reads off ``input.<key>``.
 #: Drift between this set and ``_build_rego_input`` = silent policy
 #: regression (Rego sees undefined values + the allow rule fails by
 #: default-deny).
@@ -70,6 +70,7 @@ _EXPECTED_REGO_INPUT_KEYS = {
     "agent_id",
     "originator_subject",
     "capability_kind",
+    "capability_class",
     "capability_ref",
     "scope_id",
     "pack_risk_tier",
@@ -86,6 +87,7 @@ def _policy_input(**overrides: Any) -> AgentPolicyInput:
         "agent_id": "bank-analyst",
         "originator_subject": "human:analyst@bank",
         "capability_kind": "skill",
+        "capability_class": "unscoped",
         "capability_ref": "cognic-skill-schema-summary",
         "scope_id": None,
         "pack_risk_tier": "customer_data_read",
@@ -163,7 +165,7 @@ class TestAgentPolicyModuleContract:
 
 
 class TestAgentDispatchPolicyInputThreading:
-    """Pins the 11-key input contract. INTENTIONALLY NOT behind
+    """Pins the 12-key input contract. INTENTIONALLY NOT behind
     ``@opa_required`` — every test calls the pure-Python static method
     ``AgentDispatchPolicy._build_rego_input`` which has no OPA
     dependency (the scheduler R1 P2 precedent: gating would skip the
@@ -182,6 +184,7 @@ class TestAgentDispatchPolicyInputThreading:
             agent_id="ops-agent",
             originator_subject="svc:portal",
             capability_kind="tool",
+            capability_class="data_query",
             capability_ref="cognic-tool-oracle-schema/run_readonly_query",
             scope_id="customer-data",
             pack_risk_tier="customer_data_read",
@@ -196,6 +199,7 @@ class TestAgentDispatchPolicyInputThreading:
             "agent_id": "ops-agent",
             "originator_subject": "svc:portal",
             "capability_kind": "tool",
+            "capability_class": "data_query",
             "capability_ref": "cognic-tool-oracle-schema/run_readonly_query",
             "scope_id": "customer-data",
             "pack_risk_tier": "customer_data_read",
@@ -258,7 +262,7 @@ class TestAgentDispatchPolicyDecisionMapping:
     @pytest.mark.asyncio
     async def test_evaluate_queries_the_agents_dispatch_decision_point(self) -> None:
         """The decision point is the compile-time constant
-        ``data.cognic.agents.dispatch.allow`` and the projected 11-key
+        ``data.cognic.agents.dispatch.allow`` and the projected 12-key
         input is what reaches the engine."""
         stub = _FixedDecisionStubOPAEngine(allow=True)
         policy = AgentDispatchPolicy(opa_engine=stub)  # type: ignore[arg-type]
@@ -307,7 +311,7 @@ class TestAgentDispatchPolicyFailClosed:
 
 @opa_required
 class TestAgentDispatchPolicyEndToEnd:
-    """Full pipeline: AgentPolicyInput → 11-key Rego input → real OPA
+    """Full pipeline: AgentPolicyInput → 12-key Rego input → real OPA
     subprocess over the real agents.rego bundle → PolicyDecision."""
 
     @pytest.mark.asyncio

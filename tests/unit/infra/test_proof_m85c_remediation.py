@@ -422,7 +422,7 @@ def _run_resign_probe(
 ) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
     """Execute the production re-sign function against a strict fake cosign."""
     pack_id = "cognic-tool-oracle-schema"
-    version = "0.3.0"
+    version = "0.4.0"
     wheel = "oracle.whl"
     staging = tmp_path / "staging"
     attestations = staging / "pack-attestations" / pack_id / version
@@ -890,30 +890,64 @@ def test_r7_pagination_asserts_the_kernel_keyset_order() -> None:
     assert "paginated ORDER != the kernel keyset order" in _RUNNER_TEXT
 
 
-# --- R8: the probe's trust pins are maintainer-locked, not operator-supplied - #
+# --- R8: release trust pins are maintainer-locked, not operator-supplied ---- #
 
 
-def test_r8_probe_digests_are_committed_literals_not_env_reads() -> None:
+def test_r8_release_digests_are_committed_literals_not_env_reads() -> None:
     """An env-supplied digest is not a pin: whoever runs the proof could swap the
     release and export the matching value.
 
-    v0.1.0 released 2026-07-13 (tag at 03a7058): the FILL_AT_RELEASE sentinels
-    were replaced by the maintainer-committed digests of the published assets,
-    independently recomputed from fresh public downloads at review time. Pinning
-    the exact literals here makes this test a tamper-detector: a swapped release
-    cannot ride an unreviewed stage-packs.sh edit."""
+    Oracle v0.4.0 and probe v0.2.0 were released under GitHub Actions custody.
+    Both trust roots rotated, so the wheels and public keys are exact reviewed
+    literals. Pinning all four makes this test a tamper-detector: a swapped
+    release cannot ride an unreviewed stage-packs.sh edit."""
     assert "COGNIC_PROOF_M85C_PROBE_WHEEL_SHA256" not in _STAGE_TEXT
     assert "COGNIC_PROOF_M85C_PROBE_PUB_SHA256" not in _STAGE_TEXT
     assert (
-        'PROBE_WHEEL_SHA256="e670616ee6d89d70ef364c0b100c6f08d5af64fdd21faf0ea1551ba753946d26"'
+        'ORACLE_WHEEL_SHA256="503495439ec4ee3c713f51f2f2cedc198407f4dd62a64b2a8daa6468a1b37e69"'
         in _STAGE_TEXT
     )
     assert (
-        'PROBE_PUB_SHA256="b1ab8c2fe3342004e79b04e9c0873334087e9cea8400ede86fd3bd2f4479154a"'
+        'ORACLE_PUB_SHA256="a26ac3906064461bc2222a56fd386a5c71477a995bec01c197028b1bbe2a7a7d"'
+        in _STAGE_TEXT
+    )
+    assert (
+        'PROBE_WHEEL_SHA256="a0f1ad4350f5e88a8ff193b125411a58c6e89a208e9f9f3483db0c67fad52865"'
+        in _STAGE_TEXT
+    )
+    assert (
+        'PROBE_PUB_SHA256="786fad6702860ffbe411a5745ac7b4121729f59ce8457f2b441b506e99f2d7ac"'
         in _STAGE_TEXT
     )
     # ... and the arm still refuses to run against an unreplaced sentinel.
     assert 'PROBE_WHEEL_SHA256" != "FILL_AT_RELEASE"' in _STAGE_TEXT
+
+
+def test_task7_release_versions_drive_every_functional_pin_site() -> None:
+    oracle_wheel = "cognic_tool_oracle_schema-0.4.0-py3-none-any.whl"
+    probe_wheel = "cognic_tool_approval_probe-0.2.0-py3-none-any.whl"
+    oracle_dockerfile = (_PROOF / "Dockerfile.oracle-pack").read_text()
+    probe_dockerfile = (_PROOF / "Dockerfile.probe-pack").read_text()
+
+    assert 'ORACLE_TAG="v0.4.0"' in _STAGE_TEXT
+    assert 'ORACLE_VERSION="0.4.0"' in _STAGE_TEXT
+    assert f'ORACLE_WHEEL="{oracle_wheel}"' in _STAGE_TEXT
+    assert 'PROBE_TAG="v0.2.0"' in _STAGE_TEXT
+    assert 'PROBE_VERSION="0.2.0"' in _STAGE_TEXT
+    assert f'PROBE_WHEEL="{probe_wheel}"' in _STAGE_TEXT
+
+    assert 'PACK_VERSION="0.4.0"' in _RUNNER_TEXT
+    assert f'PACK_WHEEL="{oracle_wheel}"' in _RUNNER_TEXT
+    assert 'PROBE_PACK_VERSION="0.2.0"' in _RUNNER_TEXT
+    assert f'PROBE_WHEEL="{probe_wheel}"' in _RUNNER_TEXT
+    assert '_resign_tools_pack "$PACK_ID" "$PACK_VERSION" "$PACK_WHEEL"' in _RUNNER_TEXT
+    assert '"$PACK_ID" "$PACK_WHEEL" "$PACK_VERSION"' in _RUNNER_TEXT
+    assert '"$PROBE_PACK_ID" "$PROBE_PACK_VERSION" "$PROBE_WHEEL"' in _RUNNER_TEXT
+
+    assert f"COPY proof-m85c-staging/wheel/{oracle_wheel} /tmp/" in oracle_dockerfile
+    assert f"RUN pip install --no-cache-dir --no-deps /tmp/{oracle_wheel}" in oracle_dockerfile
+    assert f"COPY proof-m85c-staging/wheel/{probe_wheel} /tmp/" in probe_dockerfile
+    assert f"RUN pip install --no-cache-dir --no-deps /tmp/{probe_wheel}" in probe_dockerfile
 
 
 # --------------------------------------------------------------------------- #

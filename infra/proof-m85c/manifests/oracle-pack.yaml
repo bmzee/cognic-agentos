@@ -1,5 +1,5 @@
 # infra/proof-m85c/manifests/oracle-pack.yaml — the released oracle-schema MCP
-# tool Service (M8: v0.3.0 — the governed `run_readonly_query` release the
+# tool Service (v0.4.0 — the governed `run_readonly_query` release the
 # agent's granted tool ref resolves to; the six metadata tools unchanged).
 # Static private ClusterIP 10.96.0.51 (the operator-install flow materializes
 # the override + allow-list rows for this exact IP). jwt mode = the REAL

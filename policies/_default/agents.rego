@@ -6,19 +6,20 @@
 #   data.cognic.agents.dispatch.allow → bool
 #
 # BOOL-ONLY by design — deliberately NO string refusal_reason document.
-# The Python dispatcher owns the refusal vocabulary (the closed 7-value
+# The Python dispatcher owns the refusal vocabulary (the closed 8-value
 # AgentDispatchRefusalReason at core/agent/_types.py); a bundle deny
 # surfaces on the wire as ``agent_policy_denied`` mapped by the A10
 # dispatcher. Adding a reason document here would fork the refusal
 # vocabulary across two owners.
 #
-# Input contract (11 keys, threaded by
+# Input contract (12 keys, threaded by
 # core/agent/policy.py::AgentDispatchPolicy._build_rego_input — field
 # names identical to AgentPolicyInput, no key translations):
 #   tenant_id            string  — deploying tenant
 #   agent_id             string  — the dispatching agent identity
 #   originator_subject   string  — the human/service originator subject
 #   capability_kind      string  — {"skill", "tool", "builtin"}
+#   capability_class     string  — {"data_query", "action", "unscoped"}
 #   capability_ref       string  — the targeted capability reference
 #   scope_id             string|null — data scope (null when none)
 #   pack_risk_tier       string  — the agent pack's manifest risk tier
@@ -32,11 +33,10 @@
 #                                  entitlement (gate 2)
 #
 # Defense-in-depth rationale (the sandbox.rego rule-4 precedent): the
-# attestation conjuncts are read with STRICT ``== true`` — even if the
-# Python assignment/entitlement gates are bypassed (refactor, direct OPA
-# eval, a fresh dispatch path), an unattested or truthy-non-true input
-# ("true", 1) refuses. Each attestation refuses INDEPENDENTLY, so a
-# bypassed gate cannot admit through the other gate's attestation.
+# attestation conjuncts are read with STRICT ``== true`` and the capability
+# class must belong to the closed set — even if the Python gates are bypassed
+# (refactor, direct OPA eval, a fresh dispatch path), an unattested,
+# truthy-non-true, absent-class, or unknown-class input refuses.
 #
 # Wire-protocol-public policy bundle. Enrolled in the AGENTS.md
 # stop-rule policy-bundle precedent alongside elicitation.rego /
@@ -64,14 +64,20 @@ default allow := false
 # bundle: policy is the LAST gate on every dispatch, builtin or not.
 _capability_kinds := {"skill", "tool", "builtin"}
 
-# The single allow rule — ALL four conjuncts must hold:
+# The closed capability-class vocabulary. ``retrieval`` is deliberately absent:
+# it is reserved and unimplemented, so it remains fail-closed.
+_capability_classes := {"data_query", "action", "unscoped"}
+
+# The single allow rule — ALL five conjuncts must hold:
 #   1. assignment_verified STRICTLY true (Python gate 1 attestation)
 #   2. entitlement_verified STRICTLY true (Python gate 2 attestation)
 #   3. capability_kind in the closed 3-value vocabulary
-#   4. step_index < max_steps (the run's step ceiling)
+#   4. capability_class in the closed 3-value vocabulary
+#   5. step_index < max_steps (the run's step ceiling)
 allow if {
 	input.assignment_verified == true
 	input.entitlement_verified == true
 	input.capability_kind in _capability_kinds
+	input.capability_class in _capability_classes
 	input.step_index < input.max_steps
 }

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # infra/proof-m85c/stage-packs.sh — stage the released, signed packs for the
-# M8.5 SLICE proof (same SEVEN M8 releases — the conversation substrate adds no pack). RELEASED ASSETS ONLY (never a source rebuild):
+# M8.5 SLICE proof (seven inherited releases plus the M8.5-C approval probe).
+# RELEASED ASSETS ONLY (never a source rebuild):
 #
 #   THE SIX PART-B RELEASES (maintainer-locked digest pins):
-#   * cognic-tool-oracle-schema@v0.3.0    — the governed run_readonly_query tool
+#   * cognic-tool-oracle-schema@v0.4.0    — the governed run_readonly_query tool
 #     (M8 B1). Operator-installed via the M4 lifecycle flow by the runner; the
 #     agent's granted tool ref resolves to THIS deployed server. Verifies the
 #     kernel-minted query-context token before honoring any stamped fact.
@@ -26,7 +27,7 @@
 #
 #   PLUS ONE REUSED M5 RELEASE (dependency, byte-identical M5/M6 pins):
 #   * cognic-hook-schema-guard@v0.1.0     — the M5 signed hook pack. REQUIRED
-#     even though M8 adds no hook bar: the oracle v0.3.0 wheel's baked manifest
+#     even though M8 adds no hook bar: the oracle v0.4.0 wheel's baked manifest
 #     declares [data_governance].dlp_pre_hooks = ["refuse_forbidden_schema_arg",
 #     "explode_schema_guard"] — with the hook pack absent, EVERY governed call
 #     to the tool fail-closes at the DLP gate (MCPHost: dlp_pre_hooks declared
@@ -83,14 +84,15 @@
 set -euo pipefail
 
 ORACLE_REPO="bmzee/cognic-tool-oracle-schema"
-ORACLE_TAG="v0.3.0"
-ORACLE_VERSION="0.3.0"
+ORACLE_TAG="v0.4.0"
+ORACLE_VERSION="0.4.0"
 ORACLE_PACK_ID="cognic-tool-oracle-schema"
-ORACLE_WHEEL="cognic_tool_oracle_schema-0.3.0-py3-none-any.whl"
+ORACLE_WHEEL="cognic_tool_oracle_schema-0.4.0-py3-none-any.whl"
 # Release-asset digests — maintainer-locked C1 pins. A mismatch means the
 # release moved under us: FAIL CLOSED, never re-pin silently.
-ORACLE_WHEEL_SHA256="a520e4374408513033d589e68cfff2011cbc129575de82147a40427ee3e4a4ed"
-ORACLE_PUB_SHA256="43c33fbe7f4b16683d47886b81cb1b9684495cbb9a92989b10f5b8cd72ba2e78"  # unchanged since v0.1.0
+ORACLE_WHEEL_SHA256="503495439ec4ee3c713f51f2f2cedc198407f4dd62a64b2a8daa6468a1b37e69"
+# The trust root rotated at v0.4.0; this is the released cosign.pub digest.
+ORACLE_PUB_SHA256="a26ac3906064461bc2222a56fd386a5c71477a995bec01c197028b1bbe2a7a7d"
 
 CUSTOMER_REPO="bmzee/cognic-skill-customer-data"
 CUSTOMER_TAG="v0.1.0"
@@ -147,32 +149,26 @@ HOOK_WHEEL="cognic_hook_schema_guard-0.1.0-py3-none-any.whl"
 HOOK_WHEEL_SHA256="1cc4d8001571db22d3e8686a213b33a99a4f2fa79a14754ed7dc194077134432"
 HOOK_PUB_SHA256="e8a8fd3c046c0697e0470858f3033c9238a4228c4c519952b00d31aab8908e49"
 
-# The M8.5-C ADDITION — the four-eyes approval probe (spec §6). Separately
-# released + cosign-signed like every proof pack. Bar D drives it; its
-# high_risk_custom tier routes probe_write through the ADR-014 four-eyes flow.
+# The M8.5-C ADDITION — the four-eyes approval probe (spec §6), released and
+# cosign-signed like every proof pack. Bar D drives it; its high_risk_custom
+# tier routes probe_write through the ADR-014 four-eyes flow. v0.2.0 carries
+# the per-tool capability declaration required by the D-S1 fail-closed gate.
+# Both release bytes and the rotated v0.2.0 trust root are pinned below.
 #
-# ===> MAINTAINER FILL AT RELEASE <===  The probe repo is built + committed at
-# /Users/.../cognic-tool-approval-probe (release.sh prints these two digests).
-# Until the probe is released via `gh release create v0.1.0`, these pins are
-# placeholders and the probe arm below is SKIPPED unless COGNIC_PROOF_M85C_PROBE_RELEASED=1
-# — so the seven-pack proof still stages cleanly pre-release. The live M8.5-C run
-# REQUIRES the probe release (the same prerequisite as the other seven packs).
-#
-# The two digests are MAINTAINER-LOCKED literals, exactly like the other seven
-# packs' above — deliberately NOT read from the environment (Codex round-2 P2).
+# The two digests are MAINTAINER-LOCKED literals, exactly like the other packs'
+# above — deliberately NOT read from the environment (Codex round-2 P2).
 # An env-supplied trust pin is not a pin: whoever runs the proof could swap the
 # release AND export the matching digest, and the "verification" would pass. A pin
 # only means anything when it is COMMITTED in the tree that the proof-input
-# cleanliness guard checks BEFORE the run. So the live-run prerequisite is a
-# MAINTAINER COMMIT of these two values (from the probe's release.sh output), not
-# an operator export; the probe arm below refuses to run while they are sentinels.
+# cleanliness guard checks BEFORE the run. The sentinel checks remain as
+# fail-closed regressions; this tree carries the reviewed release literals.
 PROBE_REPO="bmzee/cognic-tool-approval-probe"
-PROBE_TAG="v0.1.0"
-PROBE_VERSION="0.1.0"
+PROBE_TAG="v0.2.0"
+PROBE_VERSION="0.2.0"
 PROBE_PACK_ID="cognic-tool-approval-probe"
-PROBE_WHEEL="cognic_tool_approval_probe-0.1.0-py3-none-any.whl"
-PROBE_WHEEL_SHA256="e670616ee6d89d70ef364c0b100c6f08d5af64fdd21faf0ea1551ba753946d26"
-PROBE_PUB_SHA256="b1ab8c2fe3342004e79b04e9c0873334087e9cea8400ede86fd3bd2f4479154a"
+PROBE_WHEEL="cognic_tool_approval_probe-0.2.0-py3-none-any.whl"
+PROBE_WHEEL_SHA256="a0f1ad4350f5e88a8ff193b125411a58c6e89a208e9f9f3483db0c67fad52865"
+PROBE_PUB_SHA256="786fad6702860ffbe411a5745ac7b4121729f59ce8457f2b441b506e99f2d7ac"
 
 # The 7-attestation released-bundle contract (identical to the M3..M6 shape).
 ATTESTATIONS=(

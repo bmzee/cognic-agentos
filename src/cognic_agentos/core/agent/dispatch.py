@@ -21,17 +21,17 @@ authority for the governed agent loop:
      ``read_skill`` carries THE SUB-GATE: its LLM-authored ``skill_id``
      argument is itself a capability selection and must clear
      ``run.granted.skills`` BEFORE the reader is consulted.
-  3. **Gate 2 — entitlement** (stamped tools only): the LLM-authored
+  3. **Gate 2 — entitlement** (``data_query`` tools only): the LLM-authored
      ``scope_id`` argument must be a non-empty str, inside
      ``EntitlementStore.entitled_scope_ids``, and must ``resolve_scope`` to a
      real :class:`DataScope` — any miss refuses ``agent_scope_not_entitled``.
-     Non-stamped calls skip gate 2 (``entitlement_verified=True`` per the
-     None-scope rule).
-  4. **Gate 3 — policy**: :class:`AgentDispatchPolicy` over the 11-key
+     Calls whose declared class requires no entitlement skip gate 2; the
+     policy attestation is computed from the class + resolved scope.
+  4. **Gate 3 — policy**: :class:`AgentDispatchPolicy` over the 12-key
      :class:`AgentPolicyInput` (the attestations are LITERALLY computed —
      gates 1-2 passed to reach here). EVERY deny — including the fail-closed
      ``opa_unavailable`` envelope — refuses ``agent_policy_denied``.
-  5. **Stamp** (stamped tools only): mint the kernel-signed query-context
+  5. **Stamp** (``data_query`` tools only): mint the kernel-signed query-context
      token binding this dispatch to its resolved scope + the sha256 of the
      LLM-AUTHORED args (PRE-stamp — the tool-side recompute strips the token
      key), and thread it on a COPY of the arguments (the caller's dict is
@@ -97,11 +97,15 @@ logger = logging.getLogger(__name__)
 #: LLM-authored ``skill_id`` argument still clears the granted-skills sub-gate.
 _BUILTIN_NAMES: Final[frozenset[str]] = frozenset({"read_skill", "remember"})
 
-#: The M8 Wave-1 stamped tool set, keyed by the tool_name SEGMENT of a granted
-#: ``server_id/tool_name`` ref. Dispatches to these tools run gate 2
-#: (entitlement) and carry the kernel-signed query-context token; every other
-#: tool skips both (``entitlement_verified=True`` per the None-scope rule).
-_QUERY_CONTEXT_STAMPED_TOOLS: Final[frozenset[str]] = frozenset({"run_readonly_query"})
+#: Classes the kernel can dispatch today. ``retrieval`` is deliberately absent:
+#: it is reserved and unimplemented, so it refuses instead of degrading to an
+#: unscoped call. A missing class is the same fail-closed refusal.
+_DISPATCHABLE_CLASSES: Final[frozenset[str]] = frozenset({"data_query", "action", "unscoped"})
+
+#: Classes requiring a per-originator data-scope entitlement read at gate 2.
+#: ``action`` is deliberately absent in D-S1: it refuses earlier because no
+#: action-entitlement store exists until D-S2.
+_ENTITLEMENT_REQUIRED_CLASSES: Final[frozenset[str]] = frozenset({"data_query"})
 
 #: The reserved argument key the signed query-context token rides on. Kernel-
 #: owned: NEVER advertised in :func:`build_llm_tool_specs` output (the
@@ -273,11 +277,6 @@ def _validated_read_skill_id(
     return None
 
 
-def _tool_name_segment(ref: str) -> str:
-    """The tool_name segment of a ``server_id/tool_name`` ref."""
-    return ref.partition("/")[2]
-
-
 class AgentDispatcher:
     """The single dispatch authority of the governed agent loop (ADR-027).
 
@@ -299,6 +298,7 @@ class AgentDispatcher:
         decision_history: DecisionHistoryStore,
         query_context_signing_key_pem: bytes | None,
         query_context_ttl_s: float,
+        tool_capability_classes: Mapping[str, str],
     ) -> None:
         self._entitlements = entitlements
         self._policy = policy
@@ -308,6 +308,7 @@ class AgentDispatcher:
         self._decision_history = decision_history
         self._signing_key_pem = query_context_signing_key_pem
         self._ttl_s = query_context_ttl_s
+        self._tool_capability_classes = dict(tool_capability_classes)
 
     async def dispatch(
         self, *, call: GatewayToolCall, step_index: int, run: AgentRunContext
@@ -373,11 +374,45 @@ class AgentDispatcher:
                     scope_id=None,
                 )
 
-        # --- 3. Gate 2 — entitlement (stamped tools only).
-        stamped = (
-            resolved.kind == "tool"
-            and _tool_name_segment(resolved.ref) in _QUERY_CONTEXT_STAMPED_TOOLS
-        )
+        # The signed manifest's per-tool class is the authority. Missing,
+        # unknown, and reserved classes all refuse before entitlement/policy.
+        capability_class: str | None = None
+        if resolved.kind == "tool":
+            capability_class = self._tool_capability_classes.get(resolved.ref)
+            if capability_class not in _DISPATCHABLE_CLASSES:
+                return await self._refuse(
+                    run=run,
+                    step_index=step_index,
+                    args_sha256=args_sha256,
+                    reason="agent_capability_class_invalid",
+                    message=(
+                        "the tool's signed manifest declares no dispatchable "
+                        "capability_class; a tool the manifest does not classify "
+                        "is not dispatchable"
+                    ),
+                    capability_kind=resolved.kind,
+                    capability_ref=resolved.ref,
+                    scope_id=None,
+                )
+            if capability_class == "action":
+                # D-S1 has no action-entitlement store. Refuse unconditionally
+                # before the data-scope gate: an entitled scope_id must never
+                # authorize a write-class tool by accident.
+                return await self._refuse(
+                    run=run,
+                    step_index=step_index,
+                    args_sha256=args_sha256,
+                    reason="agent_scope_not_entitled",
+                    message=(
+                        "action-class tools require an action entitlement, which "
+                        "is not available until D-S2; this write is not dispatchable"
+                    ),
+                    capability_kind=resolved.kind,
+                    capability_ref=resolved.ref,
+                    scope_id=None,
+                )
+        # --- 3. Gate 2 — entitlement (data-query tools only).
+        stamped = capability_class == "data_query"
         scope_id: str | None = None
         resolved_scope: DataScope | None = None
         if stamped:
@@ -436,13 +471,18 @@ class AgentDispatcher:
                 agent_id=run.agent_id,
                 originator_subject=run.originator_subject,
                 capability_kind=resolved.kind,
+                capability_class=capability_class or "unscoped",
                 capability_ref=resolved.ref,
                 scope_id=scope_id,
                 pack_risk_tier=run.record.risk_tier,
                 step_index=step_index,
                 max_steps=run.max_steps,
                 assignment_verified=True,
-                entitlement_verified=True,
+                # Computed, never asserted: an entitlement-required class can
+                # reach here only after gate 2 resolved a real scope.
+                entitlement_verified=(scope_id is not None)
+                if capability_class in _ENTITLEMENT_REQUIRED_CLASSES
+                else True,
             )
         )
         if not decision.allow:
@@ -661,13 +701,18 @@ class AgentDispatcher:
         )
 
 
-def build_llm_tool_specs(*, run: AgentRunContext) -> tuple[GatewayToolSpec, ...]:
+def build_llm_tool_specs(
+    *,
+    run: AgentRunContext,
+    capability_classes: Mapping[str, str],
+) -> tuple[GatewayToolSpec, ...]:
     """The LLM-facing capability surface — kernel-curated for the M8 lane.
 
     One spec per RESOLVABLE granted tool (name = the tool_name segment, off
-    the SAME name map dispatch resolves against, so the advertised surface and
-    the dispatchable surface can never diverge — duplicates/malformed refs are
-    advertised to the LLM as nothing at all) + the two built-ins.
+    the SAME name map dispatch resolves against; duplicates/malformed refs are
+    advertised to the LLM as nothing at all) + the two built-ins. The signed
+    class map selects the strict data-query schema. Dispatch independently
+    refuses any granted tool whose class is absent, unknown, or reserved.
 
     THE SCHEMA-EXCLUSION PIN: the ``run_readonly_query`` parameters are
     EXACTLY ``{scope_id (required), sql (required), max_rows (optional)}`` —
@@ -682,7 +727,8 @@ def build_llm_tool_specs(*, run: AgentRunContext) -> tuple[GatewayToolSpec, ...]
     specs: list[GatewayToolSpec] = []
     name_map = _granted_tool_name_map(run.granted.tools)
     for tool_name in sorted(name_map):
-        if tool_name in _QUERY_CONTEXT_STAMPED_TOOLS:
+        full_ref = name_map[tool_name]
+        if capability_classes.get(full_ref) == "data_query":
             parameters: dict[str, Any] = {
                 "type": "object",
                 "properties": {
@@ -704,7 +750,7 @@ def build_llm_tool_specs(*, run: AgentRunContext) -> tuple[GatewayToolSpec, ...]
             }
             description = "Run a governed read-only SQL query inside an entitled data scope."
         else:
-            # The kernel does not curate non-stamped tool schemas in the M8
+            # The kernel does not curate non-data-query tool schemas in this
             # lane — a permissive object schema; governance is dispatch-side.
             parameters = {"type": "object", "properties": {}, "additionalProperties": True}
             description = f"Invoke the governed tool '{tool_name}'."

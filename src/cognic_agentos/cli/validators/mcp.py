@@ -49,12 +49,17 @@ delegation. Plan-of-record marks T9 as "expected promotion to
 critical-controls gate at T16". Halt-before-commit applies per
 the user's "strict review even off-gate" override on
 conformance-validator work.
+
+D-S1 extends this validator with build-time checks for declared
+``[[tool.cognic.tools]]`` capability classes and refuses action
+tools in auto-run packs. Runtime dispatch remains the fail-closed
+authority for tools absent from the declaration.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 from cognic_agentos.cli import ValidatorFinding
 from cognic_agentos.cli._governance_vocab import (
@@ -96,6 +101,17 @@ _DATA_GOVERNANCE_LOCATIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("tool.cognic.data_governance", ("tool", "cognic", "data_governance")),
 )
 
+#: Closed capability-class vocabulary for ``[[tool.cognic.tools]]``.
+_CAPABILITY_CLASSES: Final[frozenset[str]] = frozenset({"data_query", "action", "unscoped"})
+
+#: Reserved for a later milestone; accepting it now would silently downgrade
+#: a declared-but-unimplemented authority class.
+_RESERVED_CAPABILITY_CLASSES: Final[frozenset[str]] = frozenset({"retrieval"})
+
+#: Pack tiers that do not require human approval. An action-class tool cannot
+#: inherit either tier without opening a build-time governance hole.
+_AUTO_RUN_TIERS: Final[frozenset[str]] = frozenset({"read_only", "internal_write"})
+
 
 def _resolve_path(data: dict[str, Any], path: tuple[str, ...]) -> dict[str, Any] | None:
     """Walk ``path`` through ``data``; return the leaf dict or
@@ -106,6 +122,123 @@ def _resolve_path(data: dict[str, Any], path: tuple[str, ...]) -> dict[str, Any]
             return None
         cursor = cursor.get(segment)
     return cursor if isinstance(cursor, dict) else None
+
+
+def validate_tool_capability_classes(
+    data: dict[str, Any],
+) -> list[ValidatorFinding]:
+    """Validate declared per-tool capability classes without importing pack code.
+
+    Absence remains legal for pre-S1 packs. The runtime dispatcher separately
+    refuses tools that lack a declaration, preserving deferred pack loading at
+    build time while keeping dispatch fail-closed.
+    """
+    tool_cognic = _resolve_path(data, ("tool", "cognic"))
+    if tool_cognic is None or "tools" not in tool_cognic:
+        return []
+
+    tools = tool_cognic["tools"]
+    if not isinstance(tools, list):
+        return [
+            ValidatorFinding(
+                severity="refusal",
+                reason="mcp_tool_capability_class_invalid",
+                message="tool.cognic.tools must be an array of tables.",
+                payload={"failure_mode": "tools_not_array"},
+            )
+        ]
+
+    risk_tier = _resolve_path(data, ("risk_tier",))
+    pack_tier = risk_tier.get("tier") if risk_tier is not None else None
+    seen: set[str] = set()
+
+    for entry in tools:
+        if not isinstance(entry, dict):
+            return [
+                ValidatorFinding(
+                    severity="refusal",
+                    reason="mcp_tool_capability_class_invalid",
+                    message="[[tool.cognic.tools]] entries must be tables.",
+                    payload={"failure_mode": "tool_entry_not_table"},
+                )
+            ]
+
+        name = entry.get("name")
+        if not isinstance(name, str) or not name:
+            return [
+                ValidatorFinding(
+                    severity="refusal",
+                    reason="mcp_tool_capability_class_invalid",
+                    message=("every [[tool.cognic.tools]] entry needs a non-empty string name."),
+                    payload={"failure_mode": "tool_name_missing"},
+                )
+            ]
+
+        if name in seen:
+            return [
+                ValidatorFinding(
+                    severity="refusal",
+                    reason="mcp_tool_capability_class_invalid",
+                    message=f"tool {name!r} is declared more than once.",
+                    payload={
+                        "failure_mode": "tool_name_duplicate",
+                        "tool_name": name,
+                    },
+                )
+            ]
+        seen.add(name)
+
+        capability_class = entry.get("capability_class")
+        if capability_class is None:
+            failure_mode = "capability_class_missing"
+        elif not isinstance(capability_class, str):
+            failure_mode = "capability_class_not_string"
+        elif capability_class in _RESERVED_CAPABILITY_CLASSES:
+            failure_mode = "capability_class_reserved"
+        elif capability_class not in _CAPABILITY_CLASSES:
+            failure_mode = "capability_class_unknown"
+        else:
+            failure_mode = ""
+
+        if failure_mode:
+            return [
+                ValidatorFinding(
+                    severity="refusal",
+                    reason="mcp_tool_capability_class_invalid",
+                    message=(
+                        f"tool {name!r}: capability_class must be one of "
+                        f"{sorted(_CAPABILITY_CLASSES)}."
+                    ),
+                    payload={
+                        "failure_mode": failure_mode,
+                        "tool_name": name,
+                    },
+                )
+            ]
+
+        if (
+            capability_class == "action"
+            and isinstance(pack_tier, str)
+            and pack_tier in _AUTO_RUN_TIERS
+        ):
+            return [
+                ValidatorFinding(
+                    severity="refusal",
+                    reason="mcp_action_tool_in_auto_run_pack",
+                    message=(
+                        f"tool {name!r} is capability_class=action but pack tier "
+                        f"{pack_tier!r} does not require human approval. Raise "
+                        "the pack tier or move the tool to a separate pack."
+                    ),
+                    payload={
+                        "failure_mode": "action_tool_in_auto_run_pack",
+                        "tool_name": name,
+                        "pack_risk_tier": pack_tier,
+                    },
+                )
+            ]
+
+    return []
 
 
 def _declared_data_classes(data: dict[str, Any]) -> set[str]:
@@ -178,7 +311,7 @@ def validate(data: dict[str, Any], pack_path: Path) -> list[ValidatorFinding]:
     findings here.
     """
     del pack_path  # T9 reads only the parsed manifest dict
-    findings: list[ValidatorFinding] = []
+    findings = validate_tool_capability_classes(data)
 
     declared_classes = _declared_data_classes(data)
     restricted_intersect = sorted(declared_classes & _RESTRICTED_DATA_CLASSES)
@@ -239,4 +372,4 @@ def validate(data: dict[str, Any], pack_path: Path) -> list[ValidatorFinding]:
     return findings
 
 
-__all__ = ["validate"]
+__all__ = ["validate", "validate_tool_capability_classes"]

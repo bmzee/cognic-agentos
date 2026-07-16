@@ -20,15 +20,16 @@ from typing import Literal
 
 # --- Closed-enum vocabularies (ADR-027 §e) ----------------------------------
 
-#: The closed dispatch/run refusal vocabulary (7 values). Gate refusals
-#: (``agent_capability_not_assigned`` / ``agent_scope_not_entitled`` /
-#: ``agent_policy_denied``), the tool-side SQL-scope refusal
+#: The closed dispatch/run refusal vocabulary (8 values). Gate refusals
+#: (``agent_capability_not_assigned`` / ``agent_capability_class_invalid`` /
+#: ``agent_scope_not_entitled`` / ``agent_policy_denied``), the tool-side SQL-scope refusal
 #: (``agent_sql_object_out_of_scope``), run-level bounds
 #: (``agent_max_steps_exceeded``), backend failure
 #: (``agent_tool_dispatch_failed``), and the ingestion invariant
 #: (``agent_grant_not_requested``).
 AgentDispatchRefusalReason = Literal[
     "agent_capability_not_assigned",
+    "agent_capability_class_invalid",
     "agent_scope_not_entitled",
     "agent_sql_object_out_of_scope",
     "agent_max_steps_exceeded",

@@ -19,7 +19,8 @@ Every edit is halt-before-commit per [[feedback_strict_review_off_gate]].
      "Assigned skills" index carrying DESCRIPTIONS only — skill BODIES reach
      the model ONLY via the dispatch-gated ``read_skill`` built-in — + the
      kernel-owned tool-use contract. Tools = the A10
-     :func:`build_llm_tool_specs` surface (advertised == dispatchable).
+     :func:`build_llm_tool_specs` surface, shaped by the signed per-tool
+     capability-class map; dispatch remains the final fail-closed authority.
   4. **Iterate rounds**: round-top bound checks in this exact order BEFORE
      the completion call — max_steps, then cumulative prompt+completion
      tokens, then wall clock — each terminating ``refused`` /
@@ -72,7 +73,7 @@ from cognic_agentos.core.agent.dispatch import AgentRunContext, build_llm_tool_s
 from cognic_agentos.core.decision_history import DecisionHistoryStore, DecisionRecord
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
     from cognic_agentos.core.agent.assignments import AssignmentStore
     from cognic_agentos.core.agent.dispatch import (
@@ -224,6 +225,7 @@ class AgentLoop:
         assignments: AssignmentStore,
         gateway: LLMGateway,
         dispatcher: AgentDispatcher,
+        tool_capability_classes: Mapping[str, str],
         skill_reader: SkillBodyReader,
         memory_factory: MemoryApiFactory,
         decision_history: DecisionHistoryStore,
@@ -237,6 +239,7 @@ class AgentLoop:
         self._assignments = assignments
         self._gateway = gateway
         self._dispatcher = dispatcher
+        self._tool_capability_classes = dict(tool_capability_classes)
         self._skill_reader = skill_reader
         self._memory_factory = memory_factory
         self._decision_history = decision_history
@@ -339,7 +342,10 @@ class AgentLoop:
             *({"role": t.role, "content": t.content} for t in prior_context),
             {"role": "user", "content": question},
         ]
-        specs = build_llm_tool_specs(run=run)
+        specs = build_llm_tool_specs(
+            run=run,
+            capability_classes=self._tool_capability_classes,
+        )
 
         prompt_tokens_total = 0
         completion_tokens_total = 0
