@@ -39,8 +39,9 @@ def test_envelope_invalid_reason_count() -> None:
 
 
 def test_transition_refused_reason_count() -> None:
-    # HP-4 (M8.5-C T1): +approval_originator_mismatch.
-    assert len(typing.get_args(ApprovalTransitionRefusedReason)) == 11
+    # HP-4 (M8.5-C T1): +approval_originator_mismatch; maker-checker hotfix:
+    # +originator_cannot_approve.
+    assert len(typing.get_args(ApprovalTransitionRefusedReason)) == 12
 
 
 @pytest.mark.parametrize(

@@ -294,12 +294,16 @@ class ApprovalEngine:
             and not reason
         ):
             raise ApprovalTransitionRefused("grant_reason_required")
-        # 4. 4-eyes distinctness (grant_second only): second != first != originator.
+        # 4. Maker-checker segregation at the first (or sole) grant. The
+        #    originator may withdraw via deny, but cannot approve their own request.
+        if action == "grant_first" and approver.subject == res.originator_subject:
+            raise ApprovalTransitionRefused("originator_cannot_approve")
+        # 5. 4-eyes distinctness (grant_second only): second != first != originator.
         if action == "grant_second":
             first = await self._store.first_approver(request_id=request_id, tenant_id=tenant_id)
             if approver.subject in (first, res.originator_subject):
                 raise ApprovalTransitionRefused("four_eyes_approver_not_distinct")
-        # 5. Atomic transition (validate_transition against the row-locked flow; no
+        # 6. Atomic transition (validate_transition against the row-locked flow; no
         #    caller-supplied flow per the T4 P1 fix).
         return await self._store.transition(
             request_id=request_id,
