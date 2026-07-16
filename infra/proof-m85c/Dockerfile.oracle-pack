@@ -1,5 +1,5 @@
 # infra/proof-m85c/Dockerfile.oracle-pack — the released oracle-schema MCP tool
-# Service, M8: v0.3.0 adds the governed `run_readonly_query` (the agent-loop
+# Service, M8: v0.4.0 carries the governed `run_readonly_query` (the agent-loop
 # SQL leg, ADR-027 §c): plain-SELECT-only sqlglot parse gates + the object
 # allow-set from the KERNEL-SIGNED query-context token + Oracle proxy
 # authentication as the token's `proxy_db_identity`. The token verifier reads
@@ -9,10 +9,10 @@
 # The PRIVATE key never exists in this image — the kernel mints, this pack
 # only verifies; a call without a valid kernel-minted token refuses
 # query_context_missing_or_invalid (agent-path-only by construction).
-# Built from the DOWNLOADED v0.3.0 release wheel (released assets only) staged
+# Built from the DOWNLOADED v0.4.0 release wheel (released assets only) staged
 # at proof-m85c-staging/wheel/ by stage-packs.sh (sha256-pinned), with the
 # pack's full runtime deps (pyproject [project].dependencies — incl. the
-# v0.3.0 additions: joserfc + cryptography mirror the kernel's query-context
+# query-context dependencies: joserfc + cryptography mirror the kernel's
 # pins; sqlglot==30.12.0 is the exact M8 B1 parser pin, pure-Python, NO
 # sqlglotrs). Context = infra/proof-m85c/.
 FROM python:3.12-slim
@@ -20,8 +20,8 @@ WORKDIR /app
 RUN pip install --no-cache-dir \
       "mcp==1.27.0" "uvicorn[standard]>=0.35" "oracledb>=2.5" "PyJWT[crypto]>=2.10,<3" \
       "joserfc>=1.6.4,<2" "cryptography>=45" "sqlglot==30.12.0"
-COPY proof-m85c-staging/wheel/cognic_tool_oracle_schema-0.3.0-py3-none-any.whl /tmp/
-RUN pip install --no-cache-dir --no-deps /tmp/cognic_tool_oracle_schema-0.3.0-py3-none-any.whl
+COPY proof-m85c-staging/wheel/cognic_tool_oracle_schema-0.4.0-py3-none-any.whl /tmp/
+RUN pip install --no-cache-dir --no-deps /tmp/cognic_tool_oracle_schema-0.4.0-py3-none-any.whl
 # The query-context PUBLIC key (generated per proof run by the runner AFTER
 # stage-packs; the staging subdir carries ONLY public material).
 COPY proof-m85c-staging/query-context/ /opt/cognic/query-context/

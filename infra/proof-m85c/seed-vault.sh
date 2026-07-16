@@ -4,7 +4,7 @@ NS="${NS:-cognic-proofm85c}"; T="proof-m85c"; ASHOST="192.88.99.9_9000"; AS="htt
 # KEPT from proof-m4/m5/m6 (ADR-026 D5 — OAuth material provisioned BY REFERENCE):
 # the operator pre-provisions the OAuth client + AS allow-list in Vault; the
 # M4-flow `configure` step then records those Vault PATHS (oauth_credential_ref /
-# as_allowlist_ref) on the desired runtime-config record for the v0.3.0 tool pack,
+# as_allowlist_ref) on the desired runtime-config record for the v0.4.0 tool pack,
 # and `install`'s materializer VALIDATES they resolve + are well-shaped BEFORE it
 # projects the derived carve-out rows. There is NO secret-write API — the operator
 # seeds Vault out of band (this script). Neither the hook pack nor the four

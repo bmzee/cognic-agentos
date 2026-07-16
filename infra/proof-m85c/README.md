@@ -135,20 +135,20 @@ human-identity claim. Securing in-cluster MCP transport is a future slice.
    cluster work and fails with the installed version.
 2. `COGNIC_RUN_PROOF_M85C=1` + the operator's cloud provider key
    (`COGNIC_PROOF_M85C_TIER1_API_KEY`).
-3. **The approval-probe pack released — and its digests COMMITTED by a
-   MAINTAINER.** `cognic-tool-approval-probe` must be released (`release.sh` →
-   `gh release create v0.1.0`), and the two `sha256` values `release.sh` prints
-   must then be **committed into `stage-packs.sh`** (`PROBE_WHEEL_SHA256` /
-   `PROBE_PUB_SHA256`, currently the `FILL_AT_RELEASE` sentinels) — the same
-   prerequisite, and the same custody, as the other seven packs.
+3. **The D-S1 pack releases and rotated trust roots are COMMITTED pins.**
+   `cognic-tool-oracle-schema@v0.4.0` and
+   `cognic-tool-approval-probe@v0.2.0` carry the per-tool capability
+   declarations required by the fail-closed dispatcher. Their wheel and
+   `cosign.pub` digests are MAINTAINER-committed literals in `stage-packs.sh`;
+   both public-key pins changed with these releases.
 
    This is deliberately **not** an operator-exported environment variable. *A pin
    the person running the proof supplies at run time is not a pin*: they could swap
    the release and export a digest that matches the swap. It only means something
    when it is committed in the tree that the proof-input cleanliness guard checks
    **before** the run. The runner reads the committed literals at preflight and
-   fails loud in the first seconds — not 25 minutes in at Bar D — while either is
-   still a sentinel.
+   fails loud in the first seconds — not 25 minutes in at Bar D — if a probe pin
+   is ever reverted to its sentinel.
 4. Two one-time operator `/etc/hosts` loopback entries (`cognic-proof-keycloak`
    + `cognic-proof-harness`) + the registry trust setup — the runner prints
    copy-paste instructions.

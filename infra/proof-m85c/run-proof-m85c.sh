@@ -184,7 +184,8 @@ AGENT_PACK_ID="cognic-agent-bank-analyst"
 AGENT_ID="bank-analyst"                             # the AGENT.md frontmatter name (the ask path segment)
 SKILL_IDS=("customer-data" "financial-data" "cards-data" "atm-recon")
 SKILL_PACK_IDS=("cognic-skill-customer-data" "cognic-skill-financial-data" "cognic-skill-cards-data" "cognic-skill-atm-recon")
-PACK_WHEEL="cognic_tool_oracle_schema-0.3.0-py3-none-any.whl"
+PACK_VERSION="0.4.0"
+PACK_WHEEL="cognic_tool_oracle_schema-0.4.0-py3-none-any.whl"
 
 # ---- The approval-probe pack's trust pins (Bar D drives the probe) ----------------
 # THE PIN IS A MAINTAINER COMMIT, NOT AN OPERATOR EXPORT (review 2026-07-12, F4).
@@ -223,7 +224,7 @@ for _pin_pair in "PROBE_WHEEL_SHA256:$PROBE_WHEEL_PIN" "PROBE_PUB_SHA256:$PROBE_
     echo "" >&2
     echo "      The live-run prerequisite is a MAINTAINER COMMIT of the two released" >&2
     echo "      digests, NOT an operator export: release the probe" >&2
-    echo "      (cognic-tool-approval-probe: release.sh -> gh release create v0.1.0)," >&2
+    echo "      (cognic-tool-approval-probe: release.sh -> gh release create v0.2.0)," >&2
     echo "      then COMMIT the two sha256 values release.sh prints into stage-packs.sh" >&2
     echo "      (PROBE_WHEEL_SHA256 / PROBE_PUB_SHA256)." >&2
     echo "" >&2
@@ -289,8 +290,8 @@ BFF_REDIRECT_URI="$HARNESS_BASE_URL/auth/callback"
 # MCP tool whose single tool `probe_write` appends a nonce to a proof-local ledger.
 # Its manifest tier is high_risk_custom -> the ADR-014 four-eyes flow.
 PROBE_PACK_ID="cognic-tool-approval-probe"
-PROBE_PACK_VERSION="0.1.0"
-PROBE_WHEEL="cognic_tool_approval_probe-0.1.0-py3-none-any.whl"
+PROBE_PACK_VERSION="0.2.0"
+PROBE_WHEEL="cognic_tool_approval_probe-0.2.0-py3-none-any.whl"
 PROBE_IMAGE="cognic-proof-probe-pack:m85c"
 PROBE_TOOL="probe_write"
 PROBE_LEDGER_PATH="/var/probe/ledger"               # readable only by the runner via kubectl exec
@@ -1949,7 +1950,7 @@ PY
 }
 
 # ---- Hook-pack registry-admission preflight (M5/M6-inherited) ---------------------
-# The oracle v0.3.0 manifest binds dlp_pre hooks; the hook pack must be admitted
+# The oracle v0.4.0 manifest binds dlp_pre hooks; the hook pack must be admitted
 # at boot or every governed tool call (incl. the agent's run_readonly_query)
 # fail-closes at the DLP gate.
 assert_hook_pack_registered() {
@@ -2522,7 +2523,7 @@ _resign_tools_pack() {
   mv "$proof_sig" "$att/cosign.sig"
   echo "  re-signed $pack_id/$version cosign.sig under the proof approve key (original verified under release key first)"
 }
-_resign_tools_pack "$PACK_ID" "0.3.0" "$PACK_WHEEL"
+_resign_tools_pack "$PACK_ID" "$PACK_VERSION" "$PACK_WHEEL"
 _resign_tools_pack "$PROBE_PACK_ID" "$PROBE_PACK_VERSION" "$PROBE_WHEEL"
 
 # --- 3. build the three images ------------------------------------------------------
@@ -2571,10 +2572,10 @@ LABEL_SHA="$(docker inspect -f '{{ index .Config.Labels "io.cognic.proof.kernel-
   || die "image kernel-anchor label '$LABEL_SHA' != source revision '$KERNEL_GIT_SHA'"
 echo "    image kernel-anchor label verified: $LABEL_SHA"
 
-echo "==> [3/11] build the released oracle-pack MCP tool Service image (v0.3.0 + query-context public key)"
+echo "==> [3/11] build the released oracle-pack MCP tool Service image (v$PACK_VERSION + query-context public key)"
 docker_build_with_retry -f "$PROOF_DIR/Dockerfile.oracle-pack" -t "$MCP_IMAGE" "$PROOF_DIR"
 
-echo "==> [3/11] build the released approval-probe MCP tool Service image (v0.1.0, high_risk_custom)"
+echo "==> [3/11] build the released approval-probe MCP tool Service image (v$PROBE_PACK_VERSION, high_risk_custom)"
 docker_build_with_retry -f "$PROOF_DIR/Dockerfile.probe-pack" -t "$PROBE_IMAGE" "$PROOF_DIR"
 
 echo "==> [3/11] build the emulated-external AS image (RS256 mode)"
@@ -3086,19 +3087,19 @@ kubectl -n "$NS" exec "$_BFF_POD0" -- sh -c 'test -r /etc/harness-tls/tls.key' \
 echo "  BFF custody OK: runs as uid 10001 and can read its own TLS private key (fsGroup honoured)"
 
 # ============================ SETUP (M4 governed install) ==========================
-# Operator-install the DLP-governed ORACLE tool v0.3.0 EXACTLY as proven in
+# Operator-install the DLP-governed ORACLE tool v0.4.0 through the lifecycle
 # M4/M5/M6: the full governed lifecycle via the REAL API. Identity is now REAL
 # OIDC — the author/reviewer/operator steps each ride that user's Keycloak access
 # token (api() mints it via the scripted PKCE flow), verified by the reference
 # binder. The HOOK + SKILL + AGENT packs deliberately take NO part in this flow
 # (trust-register + hosting only).
-echo "==> [11/11] SETUP — governed operator lifecycle for the oracle v0.3.0 tool (submit -> claim -> approve -> allow-list -> configure -> install)"
+echo "==> [11/11] SETUP — governed operator lifecycle for the oracle v$PACK_VERSION tool (submit -> claim -> approve -> allow-list -> configure -> install)"
 
-MANIFEST_JSON="$(uv run python - "$PACK_ID" "$PACK_WHEEL" <<'PY'
+MANIFEST_JSON="$(uv run python - "$PACK_ID" "$PACK_WHEEL" "$PACK_VERSION" <<'PY'
 import json, sys
-pack_id, wheel = sys.argv[1], sys.argv[2]
+pack_id, wheel, version = sys.argv[1:4]
 manifest = {
-    "pack": {"kind": "tool", "name": pack_id, "version": "0.3.0"},
+    "pack": {"kind": "tool", "name": pack_id, "version": version},
     "identity": {
         "agent_id": pack_id,
         "display_name": "Cognic Oracle Schema (proof-m85c)",
@@ -3159,7 +3160,7 @@ PACK_UUID="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])' <<<
 echo "  draft created: pack_uuid=$PACK_UUID"
 
 echo "==> SETUP 2 — submit draft (author)"
-SIGNED_ARTEFACT_ROOT="/opt/cognic/pack-attestations/$PACK_ID/0.3.0"
+SIGNED_ARTEFACT_ROOT="/opt/cognic/pack-attestations/$PACK_ID/$PACK_VERSION"
 SUBMIT_BODY="$(python3 - "$SIGNED_ARTEFACT_ROOT" <<PY
 import json, sys
 root = sys.argv[1]
@@ -3264,9 +3265,9 @@ DS="$(discovery_status)"
 # flow. The probe image was built + kind-loaded at step 3/4; here we run the
 # lifecycle + deploy the Service + roll cold so the carve-out is live.
 echo "==> PROBE SETUP — governed operator lifecycle for the approval-probe pack (high_risk_custom)"
-PROBE_MANIFEST_JSON="$(uv run python - "$PROBE_PACK_ID" "$PROBE_PACK_VERSION" <<'PY'
+PROBE_MANIFEST_JSON="$(uv run python - "$PROBE_PACK_ID" "$PROBE_PACK_VERSION" "$PROBE_WHEEL" <<'PY'
 import json, sys
-pack_id, version = sys.argv[1], sys.argv[2]
+pack_id, version, wheel = sys.argv[1:4]
 manifest = {
     "pack": {"kind": "tool", "name": pack_id, "version": version},
     "identity": {
@@ -3289,7 +3290,7 @@ manifest = {
             "slsa-provenance.intoto.json", "intoto-layout.json",
             "vuln-scan.json", "license-audit.json",
         ],
-        "blob_path": "cognic_tool_approval_probe-0.1.0-py3-none-any.whl",
+        "blob_path": wheel,
     },
 }
 print(json.dumps(manifest))
