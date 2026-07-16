@@ -2153,6 +2153,10 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     ("src/cognic_agentos/core/approval/engine.py", 0.95, 0.90),
     ("src/cognic_agentos/core/approval/storage.py", 0.95, 0.90),
     ("src/cognic_agentos/core/approval/policy.py", 0.95, 0.90),
+    # M8.5-D D2 phase A — bank-owned approval assignments. The tenant-scoped
+    # lookup selects the eligibility/count authority; every human-only change
+    # is atomic with an approval.assignment_changed decision-history row.
+    ("src/cognic_agentos/core/approval/assignments.py", 0.95, 0.90),
     # Sprint 14A-A (ADR-022 + ADR-004) — the managed-run executor: the first
     # EXERCISED managed-run authority. Loads + validates the trusted pack record
     # (four fail-closed pre-submit checks), admits through the scheduler, owns

@@ -36,6 +36,7 @@ def test_approval_dir_has_expected_sources() -> None:
     assert {p.name for p in sorted(_APPROVAL_DIR.glob("*.py"))} == {
         "__init__.py",
         "_types.py",
+        "assignments.py",
         "policy.py",
         "storage.py",
         "engine.py",
