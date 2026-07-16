@@ -92,6 +92,34 @@ async def test_single_grant_happy_path(tmp_path: Any) -> None:
 
 
 @pytest.mark.asyncio
+async def test_originator_cannot_take_single_approval_grant(tmp_path: Any) -> None:
+    eng = await _engine(tmp_path, flow="require_single_approval", clock=_Clock(_t0()))
+    req = await eng.create_request(envelope=_env("customer_data_read"))
+    with pytest.raises(ApprovalTransitionRefused) as ei:
+        await eng.grant(
+            request_id=req.request_id,
+            tenant_id="t1",
+            approver=_actor("agent-1", scope="tool.approve.customer_data"),
+        )
+    assert ei.value.reason == "originator_cannot_approve"
+    assert (await eng.check(request_id=req.request_id, tenant_id="t1")).state == "pending"
+
+
+@pytest.mark.asyncio
+async def test_originator_cannot_take_first_four_eyes_grant(tmp_path: Any) -> None:
+    eng = await _engine(tmp_path, flow="require_4_eyes", clock=_Clock(_t0()))
+    req = await eng.create_request(envelope=_env("payment_action"))
+    with pytest.raises(ApprovalTransitionRefused) as ei:
+        await eng.grant(
+            request_id=req.request_id,
+            tenant_id="t1",
+            approver=_actor("agent-1", scope="tool.approve.payment"),
+        )
+    assert ei.value.reason == "originator_cannot_approve"
+    assert (await eng.check(request_id=req.request_id, tenant_id="t1")).state == "pending"
+
+
+@pytest.mark.asyncio
 async def test_four_eyes_grant_then_second(tmp_path: Any) -> None:
     eng = await _engine(tmp_path, flow="require_4_eyes", clock=_Clock(_t0()))
     req = await eng.create_request(envelope=_env("payment_action"))
@@ -144,6 +172,8 @@ async def test_four_eyes_second_must_differ_from_originator(tmp_path: Any) -> No
             tenant_id="t1",
             approver=_actor("agent-1", scope="tool.approve.payment"),  # == originator
         )
+    # Wire-precedence pin: grant_second keeps its established reason instead of
+    # being captured by the grant_first-only maker-checker refusal.
     assert ei.value.reason == "four_eyes_approver_not_distinct"
 
 
@@ -263,6 +293,19 @@ async def test_deny_happy_path(tmp_path: Any) -> None:
         tenant_id="t1",
         approver=_actor("rev", scope="tool.approve.customer_data"),
         reason="not allowed",
+    )
+    assert state == "denied"
+
+
+@pytest.mark.asyncio
+async def test_originator_can_deny_own_request(tmp_path: Any) -> None:
+    eng = await _engine(tmp_path, flow="require_single_approval", clock=_Clock(_t0()))
+    req = await eng.create_request(envelope=_env("customer_data_read"))
+    state = await eng.deny(
+        request_id=req.request_id,
+        tenant_id="t1",
+        approver=_actor("agent-1", scope="tool.approve.customer_data"),
+        reason="withdrawn by requester",
     )
     assert state == "denied"
 

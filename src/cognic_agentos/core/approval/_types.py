@@ -44,6 +44,7 @@ ApprovalTransitionRefusedReason = Literal[
     "grant_reason_required",
     "approval_binding_mismatch",
     "approval_originator_mismatch",
+    "originator_cannot_approve",
 ]
 
 #: The mutation actions the state machine accepts.

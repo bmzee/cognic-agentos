@@ -317,3 +317,13 @@ Landed with the M8.5-C T1 kernel slice (spec `docs/superpowers/specs/2026-07-11-
 2. **Actor-bound grant replay, engine-owned.** `ApprovalEngine.verify_grant_for_action` gains the REQUIRED `expected_originator_subject` parameter and runs the **corrected verification precedence**: tenant-scoped RAW load (absent/cross-tenant collapse; no mutation) → ORIGINATOR (`approval_originator_mismatch`, the 11th `ApprovalTransitionRefusedReason` value; portal 403) → **UNCONDITIONAL binding** (persisted `args_digest`/`tool_identity` are create-time constants — a wrong-shape replay of a *pending* request now refuses `approval_binding_mismatch`, never "pending") → lazy expiry + state projection (the ONLY mutating step; a wrong-originator caller causes zero expiry mutation and zero evidence). The grant is usable only by the **original requesting subject**; the approver remains a distinct human for four-eyes — two identities, two roles, one request. Refusals are value-free (request id + bounded reason; never a subject).
 3. **All four replay consumers map the new reason** into their closed vocabularies: MCP `tool_approval_originator_mismatch` (wire 10-value `ToolInvocationRefusalReason`; portal MCP route 403), sandbox `sandbox_approval_originator_mismatch` (see the ADR-004 amendment — incl. the wake-passthrough 5→6 expansion), scheduler `refused_approval_originator_mismatch` (ADR-022 amendment), memory `memory_approval_originator_mismatch` (ADR-019 amendment).
 4. **Four-eyes TTL note:** the M8.5-C live proof raises `approval_four_eyes_ttl_s` above its browser-bar worst case via configuration — the 60-second default is unchanged.
+
+## Maker-checker amendment (2026-07-16) — originator exclusion at every grant index
+
+Segregation of duties is enforced in `core/approval/engine.py`, not inferred from
+scope hygiene: the request originator cannot take `grant_first`, whether that is
+the sole grant or the first leg of four-eyes approval. The additive refusal
+`originator_cannot_approve` maps to HTTP 409. Existing `grant_second`
+distinctness and its `four_eyes_approver_not_distinct` precedence remain
+unchanged; the originator may still `deny` their own request as a legitimate
+self-cancel. This is the code-level maker-checker control for NIST AC-5.

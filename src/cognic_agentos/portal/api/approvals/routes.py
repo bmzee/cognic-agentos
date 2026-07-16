@@ -44,10 +44,11 @@ from cognic_agentos.portal.rbac.human_actor import RequireHumanActor
 
 _LOG = logging.getLogger(__name__)
 
-#: Wire mapping for the 11-value ApprovalTransitionRefusedReason (_types.py:35;
-#: HP-4 added approval_originator_mismatch -> 403). Pinned EXACTLY by
+#: Wire mapping for the 12-value ApprovalTransitionRefusedReason (_types.py:35;
+#: HP-4 added approval_originator_mismatch -> 403; the 2026-07-16 maker-checker
+#: amendment added originator_cannot_approve -> 409). Pinned EXACTLY by
 #: test_every_transition_reason_has_a_status_mapping via typing.get_args — a
-#: 12th engine reason fails the test until mapped here.
+#: 13th engine reason fails the test until mapped here.
 _REFUSAL_STATUS: dict[str, int] = {
     "approver_not_human": 403,
     "approver_scope_not_held": 403,
@@ -60,6 +61,7 @@ _REFUSAL_STATUS: dict[str, int] = {
     "auto_tier_no_approval_required": 409,
     "approval_binding_mismatch": 409,
     "approval_originator_mismatch": 403,
+    "originator_cannot_approve": 409,
 }
 
 

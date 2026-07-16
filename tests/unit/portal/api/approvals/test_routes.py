@@ -170,7 +170,7 @@ async def test_list_actor_tenant_id_missing_returns_500(tmp_path: Any) -> None:
 
 
 def test_every_transition_reason_has_a_status_mapping() -> None:
-    # USER PIN: adding an 11th engine reason FAILS here until the wire
+    # USER PIN: adding a 13th engine reason FAILS here until the wire
     # mapping is updated. Drives from typing.get_args of the engine enum.
     assert set(_REFUSAL_STATUS) == set(typing.get_args(ApprovalTransitionRefusedReason))
     assert all(v in (400, 403, 409) for v in _REFUSAL_STATUS.values())
@@ -182,6 +182,10 @@ def test_originator_mismatch_maps_exactly_403() -> None:
     # explicitly so a regression to 409 cannot hide behind the 400/403/409
     # membership guard above.
     assert _REFUSAL_STATUS["approval_originator_mismatch"] == 403
+
+
+def test_originator_cannot_approve_maps_exactly_409() -> None:
+    assert _REFUSAL_STATUS["originator_cannot_approve"] == 409
 
 
 @pytest.mark.asyncio
@@ -198,6 +202,21 @@ async def test_grant_happy_path_emits_exactly_one_green_log(tmp_path: Any, caplo
     names = [r.getMessage() for r in caplog.records]
     assert names.count("portal.approvals.grant") == 1
     assert "portal.approvals.grant_refused" not in names
+
+
+@pytest.mark.asyncio
+async def test_originator_grant_refused_409_and_request_stays_pending(tmp_path: Any) -> None:
+    store = await _mk_store(tmp_path)
+    rid = uuid.uuid4()
+    await _seed(store, request_id=rid)
+    originator = _make_actor(subject="agent-1", scopes=frozenset({"tool.approve.customer_data"}))
+    async with _client(originator, store, _mk_engine(store)) as client:
+        resp = await client.post(f"/api/v1/approvals/{rid}/grant", json={})
+    assert resp.status_code == 409
+    assert resp.json()["detail"] == {"reason": "originator_cannot_approve"}
+    row = await store.load(request_id=rid, tenant_id="t1")
+    assert row is not None
+    assert row.state == "pending"
 
 
 @pytest.mark.asyncio
