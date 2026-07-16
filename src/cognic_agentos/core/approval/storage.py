@@ -49,6 +49,7 @@ from cognic_agentos.core.approval._types import (
     ApprovalTransitionRefused,
     validate_transition,
 )
+from cognic_agentos.core.approval.replay import _build_persist_statement
 from cognic_agentos.core.audit import _metadata
 from cognic_agentos.core.decision_history import DecisionHistoryStore, DecisionRecord
 from cognic_agentos.db.types import GovernanceJSON
@@ -457,6 +458,7 @@ class ApprovalRequestStore:
         expires_at: datetime,
         required_count: int | None = None,
         eligible_approvers: list[str] | None = None,
+        replay_payload: bytes | None = None,
     ) -> tuple[uuid.UUID, bytes]:
         """Genesis write: INSERT a ``pending`` row + append ``approval.requested``
         atomically. Returns the ``(chain_record_id, chain_hash)`` pair."""
@@ -505,6 +507,16 @@ class ApprovalRequestStore:
                     updated_at=created_at,
                 )
             )
+            if replay_payload is not None:
+                await conn.execute(
+                    _build_persist_statement(
+                        request_id=request_id,
+                        tenant_id=tenant_id,
+                        canonical_args=replay_payload,
+                        args_digest=args_digest,
+                        created_at=created_at,
+                    )
+                )
 
         def _build_record(_: None) -> DecisionRecord:
             return DecisionRecord(

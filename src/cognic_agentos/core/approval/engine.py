@@ -119,7 +119,12 @@ class ApprovalEngine:
         """tools.rego tier->flow consult (the seam branches auto-vs-approval)."""
         return cast(ApprovalFlow, await self._policy.classify(risk_tier=risk_tier))
 
-    async def create_request(self, *, envelope: ApprovalEnvelope) -> ApprovalRequest:
+    async def create_request(
+        self,
+        *,
+        envelope: ApprovalEnvelope,
+        replay_payload: bytes | None = None,
+    ) -> ApprovalRequest:
         """Validate the envelope (§7, pre-persist), classify the flow, and persist
         a ``pending`` request + emit ``approval.requested``. Refuses an ``auto_run``
         tier (the seam handles auto tiers without a record)."""
@@ -164,6 +169,7 @@ class ApprovalEngine:
             expires_at=now + timedelta(seconds=ttl_s),
             required_count=required_count,
             eligible_approvers=eligible_approvers,
+            replay_payload=replay_payload,
         )
         return ApprovalRequest(
             request_id=request_id,

@@ -356,3 +356,24 @@ at every grant index; index 1 preserves the existing
 repeat decisions use the additive assignment/N-way refusal vocabulary. An
 engine built without an assignment store retains the M8.5-C tier-only four-eyes
 sequence unchanged.
+
+## M8.5-D D2 phase-B replay-custody amendment (2026-07-16)
+
+The approval envelope and every `approval.*` decision-history row remain
+value-free. Exact approved argument bytes instead live in the separate
+`approval_replay_payloads` table as `canonical_bytes()` output, bound to the
+request's existing `args_digest`. The MCP mint path computes those bytes once
+and uses the same value for both the digest and replay persistence; no model,
+user, or approver can re-author them after the request is minted.
+
+Replay custody verifies derived facts at both boundaries: persistence
+recomputes SHA-256 before writing, and every load recomputes it again before
+returning bytes. Terminal result bytes receive the same retained-digest
+contract. Tenant-scoped absence collapses to `replay_not_persisted`; erased
+material returns `replay_erased`; any stored-byte drift returns
+`replay_digest_mismatch`.
+
+Regulator erasure nulls `canonical_args` and `result_canonical` while retaining
+the replay row, both digests, and the erasure timestamp. The replay table emits
+no chain rows: the approval request's existing value-free chain evidence owns
+the argument digest, while this table is erasable retrieval material.

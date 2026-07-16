@@ -2157,6 +2157,11 @@ _CRITICAL_FILES: tuple[tuple[str, float, float], ...] = (
     # lookup selects the eligibility/count authority; every human-only change
     # is atomic with an approval.assignment_changed decision-history row.
     ("src/cognic_agentos/core/approval/assignments.py", 0.95, 0.90),
+    # M8.5-D D2 phase B — the tenant-scoped, erasable value-bearing replay
+    # store. Canonical arguments and terminal results are digest-verified at
+    # every write/read custody edge; erasure retains the row + digests while
+    # nulling both values. Gate 153 -> 154.
+    ("src/cognic_agentos/core/approval/replay.py", 0.95, 0.90),
     # Sprint 14A-A (ADR-022 + ADR-004) — the managed-run executor: the first
     # EXERCISED managed-run authority. Loads + validates the trusted pack record
     # (four fail-closed pre-submit checks), admits through the scheduler, owns

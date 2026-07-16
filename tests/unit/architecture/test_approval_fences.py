@@ -37,6 +37,7 @@ def test_approval_dir_has_expected_sources() -> None:
         "__init__.py",
         "_types.py",
         "assignments.py",
+        "replay.py",
         "policy.py",
         "storage.py",
         "engine.py",

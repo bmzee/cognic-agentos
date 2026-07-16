@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import time
 import typing
 import uuid
@@ -14,8 +15,10 @@ import pytest
 
 from cognic_agentos.core.approval._types import APPROVAL_REDACTED_CONTEXT_MAX_LEN
 from cognic_agentos.core.approval.engine import ApprovalEngine
+from cognic_agentos.core.approval.replay import ApprovalReplayStore
 from cognic_agentos.core.approval.storage import ApprovalRequestStore
 from cognic_agentos.core.audit import AuditStore
+from cognic_agentos.core.canonical import canonical_bytes
 from cognic_agentos.core.config import build_settings_without_env_file
 from cognic_agentos.core.decision_history import DecisionHistoryStore
 from cognic_agentos.protocol.mcp_authz import MCPAuthzClient, Token
@@ -283,6 +286,15 @@ class TestWiredFirstCall:
         # the pending request actually persisted (engine path, not a stub)
         detail = await store.load_detail(request_id=rid, tenant_id="t-1")
         assert detail is not None and detail.state == "pending"
+        approved_bytes = canonical_bytes({"q": "x"})
+        assert detail.args_digest == hashlib.sha256(approved_bytes).digest()
+        assert (
+            await ApprovalReplayStore(store._engine).load(
+                request_id=rid,
+                tenant_id="t-1",
+            )
+            == approved_bytes
+        )
         # Envelope-sourcing pin (spec §3.3): the persisted detail carries the
         # sanitized human-readable pair in redacted_context (what the 13.5b1
         # portal reviewer panel shows), bounded by the cap, while

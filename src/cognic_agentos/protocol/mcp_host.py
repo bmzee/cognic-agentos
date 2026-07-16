@@ -1189,7 +1189,8 @@ class MCPHost:
         """
         engine = self._approval_engine
         assert engine is not None  # call site is gated on wiredness
-        args_digest = hashlib.sha256(canonical_bytes(dict(arguments))).digest()
+        canonical_args = canonical_bytes(dict(arguments))
+        args_digest = hashlib.sha256(canonical_args).digest()
         tool_identity = _canonical_tool_identity(server_id=entry.server_id, tool_name=tool_name)
         if approval_request_id is not None:
             try:
@@ -1305,7 +1306,10 @@ class MCPHost:
             required_refs=required_refs,
         )
         try:
-            request = await engine.create_request(envelope=envelope)
+            request = await engine.create_request(
+                envelope=envelope,
+                replay_payload=canonical_args,
+            )
         except ApprovalTransitionRefused as exc:
             if exc.reason == "auto_tier_no_approval_required":
                 return  # tools.rego classified auto_run -> dispatch
