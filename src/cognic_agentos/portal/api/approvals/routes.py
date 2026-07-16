@@ -20,6 +20,11 @@ from cognic_agentos.core.approval._types import (
     ApprovalState,
     ApprovalTransitionRefused,
 )
+from cognic_agentos.core.approval.assignments import (
+    ApprovalAssignment,
+    ApprovalAssignmentInvalid,
+    ApprovalAssignmentStore,
+)
 from cognic_agentos.core.approval.engine import ApprovalEngine
 from cognic_agentos.core.approval.storage import (
     ApprovalCursorInvalid,
@@ -31,6 +36,8 @@ from cognic_agentos.portal.api.approvals.dto import (
     ApprovalActionResponse,
     ApprovalDetailResponse,
     ApprovalSummaryResponse,
+    AssignmentRequest,
+    AssignmentResponse,
     DenyRequest,
     GrantRequest,
 )
@@ -157,9 +164,25 @@ def _detail_dto(d: ApprovalRequestDetail) -> ApprovalDetailResponse:
     )
 
 
-def build_approval_routes(*, store: ApprovalRequestStore, engine: ApprovalEngine) -> APIRouter:
+def _assignment_dto(assignment: ApprovalAssignment) -> AssignmentResponse:
+    return AssignmentResponse(
+        tool_identity=assignment.tool_identity,
+        approver_subjects=assignment.approver_subjects,
+        required_count=assignment.required_count,
+        updated_by=assignment.updated_by,
+        updated_at=assignment.updated_at.isoformat(),
+    )
+
+
+def build_approval_routes(
+    *,
+    store: ApprovalRequestStore,
+    engine: ApprovalEngine,
+    assignments: ApprovalAssignmentStore | None = None,
+) -> APIRouter:
     router = APIRouter(prefix="/api/v1/approvals", tags=["approvals"])
     _require_observe = RequireScope("tool.approve.observe")
+    _require_assign = RequireScope("tool.approve.assign")
     _require_human = RequireHumanActor()
 
     @router.get(
@@ -215,6 +238,109 @@ def build_approval_routes(*, store: ApprovalRequestStore, engine: ApprovalEngine
                 f'</api/v1/approvals/?cursor={page.next_cursor}&limit={limit}>; rel="next"'
             )
         return [_summary_dto(r) for r in page.items]
+
+    if assignments is not None:
+
+        @router.put(
+            "/assignments/{tool_identity:path}",
+            response_model=AssignmentResponse,
+        )
+        async def put_assignment(
+            tool_identity: str,
+            body: AssignmentRequest,
+            request: Request,
+            actor: Annotated[Actor, Depends(_require_assign)],
+            _human: Annotated[Actor, Depends(_require_human)],
+        ) -> AssignmentResponse:
+            try:
+                assignment = await assignments.assign_record(
+                    tenant_id=actor.tenant_id,
+                    tool_identity=tool_identity,
+                    approver_subjects=tuple(body.approver_subjects),
+                    actor=_to_approval_actor(actor),
+                    request_request_id=_resolve_request_id(request),
+                )
+            except ApprovalAssignmentInvalid as exc:
+                _LOG.warning(
+                    "portal.approvals.assignment_change_refused",
+                    extra={
+                        "reason": exc.reason,
+                        "actor_subject": actor.subject,
+                        "tool_identity": tool_identity,
+                    },
+                )
+                raise HTTPException(status_code=422, detail={"reason": exc.reason}) from None
+            _LOG.info(
+                "portal.approvals.assignment_changed",
+                extra={
+                    "action": "assign",
+                    "actor_subject": actor.subject,
+                    "tool_identity": tool_identity,
+                    "required_count": assignment.required_count,
+                },
+            )
+            return _assignment_dto(assignment)
+
+        @router.get(
+            "/assignments/{tool_identity:path}",
+            response_model=AssignmentResponse,
+        )
+        async def get_assignment(
+            tool_identity: str,
+            actor: Annotated[Actor, Depends(_require_observe)],
+        ) -> AssignmentResponse:
+            assignment = await assignments.load(
+                tenant_id=actor.tenant_id, tool_identity=tool_identity
+            )
+            if assignment is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail={"reason": "approval_assignment_not_found"},
+                )
+            return _assignment_dto(assignment)
+
+        @router.delete(
+            "/assignments/{tool_identity:path}",
+            status_code=204,
+        )
+        async def delete_assignment(
+            tool_identity: str,
+            request: Request,
+            actor: Annotated[Actor, Depends(_require_assign)],
+            _human: Annotated[Actor, Depends(_require_human)],
+        ) -> Response:
+            try:
+                deleted = await assignments.unassign(
+                    tenant_id=actor.tenant_id,
+                    tool_identity=tool_identity,
+                    actor=_to_approval_actor(actor),
+                    request_request_id=_resolve_request_id(request),
+                )
+            except ApprovalAssignmentInvalid as exc:
+                _LOG.warning(
+                    "portal.approvals.assignment_change_refused",
+                    extra={
+                        "reason": exc.reason,
+                        "actor_subject": actor.subject,
+                        "tool_identity": tool_identity,
+                    },
+                )
+                raise HTTPException(status_code=422, detail={"reason": exc.reason}) from None
+            if not deleted:
+                raise HTTPException(
+                    status_code=404,
+                    detail={"reason": "approval_assignment_not_found"},
+                )
+            _LOG.info(
+                "portal.approvals.assignment_changed",
+                extra={
+                    "action": "unassign",
+                    "actor_subject": actor.subject,
+                    "tool_identity": tool_identity,
+                    "required_count": 0,
+                },
+            )
+            return Response(status_code=204)
 
     @router.get("/{request_id}", response_model=ApprovalDetailResponse)
     async def get_detail(

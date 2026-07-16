@@ -50,6 +50,15 @@ class ApprovalEligibility:
     required_count: int
 
 
+@dataclasses.dataclass(frozen=True, slots=True)
+class ApprovalAssignment:
+    tool_identity: str
+    approver_subjects: tuple[str, ...]
+    required_count: int
+    updated_by: str
+    updated_at: datetime
+
+
 class ApprovalAssignmentInvalid(Exception):
     def __init__(self, reason: ApprovalAssignmentInvalidReason) -> None:
         super().__init__(reason)
@@ -80,22 +89,48 @@ class ApprovalAssignmentStore:
         self._history = history
         self._engine: AsyncEngine = history._engine
 
-    async def resolve(self, *, tenant_id: str, tool_identity: str) -> ApprovalEligibility | None:
+    async def load(self, *, tenant_id: str, tool_identity: str) -> ApprovalAssignment | None:
         async with self._engine.connect() as conn:
             row = (
-                await conn.execute(
-                    select(_approval_assignments.c.approver_subjects).where(
-                        _approval_assignments.c.tenant_id == tenant_id,
-                        _approval_assignments.c.tool_identity == tool_identity,
+                (
+                    await conn.execute(
+                        select(
+                            _approval_assignments.c.tool_identity,
+                            _approval_assignments.c.approver_subjects,
+                            _approval_assignments.c.updated_by,
+                            _approval_assignments.c.updated_at,
+                        ).where(
+                            _approval_assignments.c.tenant_id == tenant_id,
+                            _approval_assignments.c.tool_identity == tool_identity,
+                        )
                     )
                 )
-            ).first()
+                .mappings()
+                .first()
+            )
         if row is None:
             return None
-        subjects = frozenset(str(subject) for subject in row.approver_subjects)
-        return ApprovalEligibility(
-            eligible_approvers=subjects,
+        subjects = tuple(sorted(str(subject) for subject in row["approver_subjects"]))
+        updated_at = row["updated_at"]
+        if updated_at.tzinfo is None:
+            updated_at = updated_at.replace(tzinfo=UTC)
+        else:
+            updated_at = updated_at.astimezone(UTC)
+        return ApprovalAssignment(
+            tool_identity=str(row["tool_identity"]),
+            approver_subjects=subjects,
             required_count=len(subjects),
+            updated_by=str(row["updated_by"]),
+            updated_at=updated_at,
+        )
+
+    async def resolve(self, *, tenant_id: str, tool_identity: str) -> ApprovalEligibility | None:
+        assignment = await self.load(tenant_id=tenant_id, tool_identity=tool_identity)
+        if assignment is None:
+            return None
+        return ApprovalEligibility(
+            eligible_approvers=frozenset(assignment.approver_subjects),
+            required_count=assignment.required_count,
         )
 
     async def assign(
@@ -107,6 +142,27 @@ class ApprovalAssignmentStore:
         actor: ApprovalActor,
         request_request_id: str,
     ) -> ApprovalEligibility:
+        assignment = await self.assign_record(
+            tenant_id=tenant_id,
+            tool_identity=tool_identity,
+            approver_subjects=approver_subjects,
+            actor=actor,
+            request_request_id=request_request_id,
+        )
+        return ApprovalEligibility(
+            eligible_approvers=frozenset(assignment.approver_subjects),
+            required_count=assignment.required_count,
+        )
+
+    async def assign_record(
+        self,
+        *,
+        tenant_id: str,
+        tool_identity: str,
+        approver_subjects: tuple[str, ...],
+        actor: ApprovalActor,
+        request_request_id: str,
+    ) -> ApprovalAssignment:
         _require_human(actor)
         subjects = _normalise_subjects(approver_subjects)
         now = datetime.now(UTC)
@@ -168,9 +224,12 @@ class ApprovalAssignmentStore:
             record_builder=_build,
             precondition=_precondition,
         )
-        return ApprovalEligibility(
-            eligible_approvers=frozenset(subjects),
+        return ApprovalAssignment(
+            tool_identity=tool_identity,
+            approver_subjects=subjects,
             required_count=len(subjects),
+            updated_by=actor.subject,
+            updated_at=now,
         )
 
     async def unassign(
@@ -253,6 +312,7 @@ class ApprovalAssignmentStore:
 
 
 __all__ = (
+    "ApprovalAssignment",
     "ApprovalAssignmentInvalid",
     "ApprovalAssignmentInvalidReason",
     "ApprovalAssignmentStore",

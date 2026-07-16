@@ -109,6 +109,7 @@ if TYPE_CHECKING:
     # kwargs (mirrors the config-overlay pattern below — the route factory
     # ``build_approval_routes`` is imported at runtime; the store + engine are
     # supplied PRE-CONSTRUCTED by build_runtime / the deploy entrypoint).
+    from cognic_agentos.core.approval.assignments import ApprovalAssignmentStore
     from cognic_agentos.core.approval.engine import ApprovalEngine
     from cognic_agentos.core.approval.storage import ApprovalRequestStore
 
@@ -336,12 +337,15 @@ def create_app(
     runtime_config_materializer: RuntimeConfigMaterializer | None = None,
     # ADR-014 (Sprint 13.5b1): optional approval-router deps. When BOTH are
     # wired, create_app mounts the approval router (queue/detail/grant/
-    # grant-second/deny) + sets app.state.approval_router_mounted. Same opt-in
-    # None-default pattern as config_overlay_store/_resolver — build_runtime
-    # constructs the pair; the deploy entrypoint threads them here. The SAME
-    # engine instance is reused by 13.5b2's MCP-host seam.
+    # grant-second/deny) + sets app.state.approval_router_mounted. The optional
+    # assignment store adds the D2-A PUT/GET/DELETE admin surface without
+    # changing the legacy two-dependency mount. Same opt-in None-default pattern
+    # as config_overlay_store/_resolver — the deploy entrypoint threads the
+    # constructed instances here. The SAME engine instance is reused by
+    # 13.5b2's MCP-host seam.
     approval_store: ApprovalRequestStore | None = None,
     approval_engine: ApprovalEngine | None = None,
+    approval_assignment_store: ApprovalAssignmentStore | None = None,
     # ADR-018 (Sprint 13.6a): optional emergency kill-switch engine. When wired
     # ALONGSIDE decision_history_store, create_app mounts the emergency router
     # (kill-switches list/flip/revert + audit) + sets
@@ -1546,10 +1550,11 @@ def create_app(
     # ──────────────────────────────────────────────────────────────────
     # Sprint 13.5b1 — approval router mount (ADR-014).
     #
-    # Mirrors the config-overlay 3-state mount above: BOTH deps -> mount
+    # Mirrors the config-overlay 3-state mount above: BOTH base deps -> mount
     # under /api/v1/approvals (the router carries its own prefix) + set
-    # the introspection flag; partial config -> a single structured
-    # fail-loud warning; neither -> no mount (opt-in surface). No
+    # the introspection flag; the optional assignment store enables its admin
+    # routes. Partial config -> a single structured fail-loud warning; neither
+    # -> no mount (opt-in surface). No
     # actor_binder gate at the mount boundary for the same reason as the
     # overlay block: the routes read the binder from app.state at
     # REQUEST time and fail loud there. The ENGINE stays authoritative
@@ -1557,9 +1562,19 @@ def create_app(
     # ──────────────────────────────────────────────────────────────────
     app.state.approval_router_mounted = False
     if approval_store is not None and approval_engine is not None:
-        app.include_router(build_approval_routes(store=approval_store, engine=approval_engine))
+        app.include_router(
+            build_approval_routes(
+                store=approval_store,
+                engine=approval_engine,
+                assignments=approval_assignment_store,
+            )
+        )
         app.state.approval_router_mounted = True
-    elif approval_store is not None or approval_engine is not None:
+    elif (
+        approval_store is not None
+        or approval_engine is not None
+        or approval_assignment_store is not None
+    ):
         logger.warning(
             "portal.approval_router_unmounted_partial_config",
             extra={

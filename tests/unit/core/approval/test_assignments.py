@@ -81,6 +81,29 @@ async def test_assign_then_resolve_returns_set_and_count(tmp_path: Any) -> None:
 
 
 @pytest.mark.asyncio
+async def test_load_returns_metadata_and_collapses_cross_tenant(tmp_path: Any) -> None:
+    store, engine = await _store(tmp_path)
+    try:
+        await store.assign(
+            tenant_id="t1",
+            tool_identity="s/probe_write",
+            approver_subjects=("zara", "dana"),
+            actor=_actor("operator.olivia"),
+            request_request_id="appr-assign-load",
+        )
+        assignment = await store.load(tenant_id="t1", tool_identity="s/probe_write")
+        assert assignment is not None
+        assert assignment.tool_identity == "s/probe_write"
+        assert assignment.approver_subjects == ("dana", "zara")
+        assert assignment.required_count == 2
+        assert assignment.updated_by == "operator.olivia"
+        assert assignment.updated_at.tzinfo is not None
+        assert await store.load(tenant_id="t2", tool_identity="s/probe_write") is None
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_assign_empty_refuses_without_evidence(tmp_path: Any) -> None:
     store, engine = await _store(tmp_path)
     try:

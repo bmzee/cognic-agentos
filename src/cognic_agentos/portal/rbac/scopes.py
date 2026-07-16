@@ -1,14 +1,17 @@
 """Sprint 7B.2 T2 — closed-enum RBAC scope vocabulary for the bank-pack lifecycle.
 
 Per ADR-012 §39 + BUILD_PLAN §622-625 + ADR-012 §107-110 + ADR-026 D4 the
-lifecycle portal API ships with **14** scopes, partitioned across five groups:
+pack-lifecycle portal API ships with **14** scopes. M8.5-D D2-A adds the
+namespace-disjoint approval-assignment scope to the operator role without
+widening :data:`PackRBACScope`. The owned scopes partition across five groups:
 
 - Author surface (BUILD_PLAN §622): ``pack.submit``, ``pack.withdraw``
 - Reviewer surface (BUILD_PLAN §623): ``pack.review.claim``,
   ``pack.review.approve``, ``pack.review.reject``
-- Operator surface (BUILD_PLAN §624 + ADR-026 D4): ``pack.allow_list``,
+- Operator surface (BUILD_PLAN §624 + ADR-026 D4 + ADR-014 D2-A): ``pack.allow_list``,
   ``pack.configure`` (the M4 runtime-config configure step, human-actor-gated),
-  ``pack.install``, ``pack.disable``, ``pack.revoke``, ``pack.uninstall``
+  ``pack.install``, ``pack.disable``, ``pack.revoke``, ``pack.uninstall``, plus
+  the namespace-disjoint ``tool.approve.assign`` approval-assignment scope
 - Examiner / inspection surface (BUILD_PLAN §625 + ADR-012 §75):
   ``pack.audit.read``, ``pack.invocation.read``
 - Override surface (ADR-012 §107-110): ``pack.override.approval_gate`` —
@@ -293,7 +296,8 @@ EVAL_SCOPES: frozenset[EvalRBACScope] = frozenset(
 )
 
 
-#: ADR-014 Sprint-13.5a — runtime tool-approval RBAC family. The 6 grant scopes
+#: ADR-014 Sprint-13.5a + M8.5-D D2-A — runtime tool-approval RBAC family.
+#: The 6 grant scopes
 #: map 1:1 to the high-risk tiers (the approval engine enforces scope-per-tier);
 #: ``tool.approve.observe`` is read-only approval-queue access (examiner) and
 #: grants nothing. Value-disjoint from every other family by the
@@ -308,9 +312,10 @@ ToolApprovalRBACScope = Literal[
     "tool.approve.cross_tenant",
     "tool.approve.high_risk_custom",
     "tool.approve.observe",
+    "tool.approve.assign",
 ]
 
-#: All 7 tool-approval scopes as a frozenset (1:1 with ToolApprovalRBACScope).
+#: All 8 tool-approval scopes as a frozenset (1:1 with ToolApprovalRBACScope).
 TOOL_APPROVAL_SCOPES: frozenset[ToolApprovalRBACScope] = frozenset(
     {
         "tool.approve.customer_data",
@@ -320,6 +325,7 @@ TOOL_APPROVAL_SCOPES: frozenset[ToolApprovalRBACScope] = frozenset(
         "tool.approve.cross_tenant",
         "tool.approve.high_risk_custom",
         "tool.approve.observe",
+        "tool.approve.assign",
     }
 )
 
@@ -618,12 +624,14 @@ REVIEWER_SCOPES: frozenset[PackRBACScope] = frozenset(
     }
 )
 
-#: BUILD_PLAN §624 + ADR-026 D4 — operator-surface scopes (6 values). T6 + the
-#: M4 configure endpoint depend on these. ``pack.allow_list`` and the M4
+#: BUILD_PLAN §624 + ADR-026 D4 + ADR-014 D2-A — operator-surface scopes.
+#: Six pack lifecycle values plus the namespace-disjoint approval-assignment
+#: admin value. T6 + the M4 configure endpoint depend on the pack values;
+#: ``pack.allow_list`` and the M4
 #: ``pack.configure`` runtime-config step additionally require
 #: :class:`RequireHumanActor` (ADR-012 §"Per-tenant allow-list change is
 #: human-only" + ADR-026 D4 — configure is a human-actor-gated operator step).
-OPERATOR_SCOPES: frozenset[PackRBACScope] = frozenset(
+OPERATOR_SCOPES: frozenset[PackRBACScope | ToolApprovalRBACScope] = frozenset(
     {
         "pack.allow_list",
         "pack.configure",
@@ -631,6 +639,7 @@ OPERATOR_SCOPES: frozenset[PackRBACScope] = frozenset(
         "pack.disable",
         "pack.revoke",
         "pack.uninstall",
+        "tool.approve.assign",
     }
 )
 

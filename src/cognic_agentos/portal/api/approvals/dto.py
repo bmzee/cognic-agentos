@@ -61,3 +61,15 @@ class DenyRequest(_ApprovalBaseModel):
 class ApprovalActionResponse(_ApprovalBaseModel):
     request_id: uuid.UUID
     state: ApprovalState
+
+
+class AssignmentRequest(_ApprovalBaseModel):
+    approver_subjects: list[str]
+
+
+class AssignmentResponse(_ApprovalResponseModel):
+    tool_identity: str
+    approver_subjects: tuple[str, ...]
+    required_count: int
+    updated_by: str
+    updated_at: str
