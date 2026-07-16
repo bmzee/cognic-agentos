@@ -6409,3 +6409,67 @@ PROOF M8.5-C (BARS A-F) PASS
 6. **One internal plaintext transport exception remains disclosed:** kernel-to-MCP-pack traffic inside the throwaway cluster carries the MCP service token without TLS, matching the prior proof posture. It is not part of the human/session-token TLS claim and must be secured in a later production slice.
 7. **This is RFC 9700-baseline proof, not FAPI conformance.** Full FAPI 2.0 is the bank-deployment target. The realm's `at+jwt` header pin does not by itself establish the full RFC 9068 access-token profile.
 8. **Three turns were model-driven.** Their answer text is non-deterministic; the governance claims rest on mechanical status, ledger, chain, digest, and database predicates. Exact completion-call and token totals for the passing run are unrecoverable because the success path did not persist them.
+
+## M8.5-D D-S1 gate — M8.5-C proof re-run on the capability-class kernel — PASS (2026-07-16T07:23:15Z)
+
+This section is the **D-S1 sprint-gate evidence**, not a milestone record: the
+M8.5-C proof above re-run end-to-end on the D-S1 kernel with the re-pinned pack
+releases. The historical M8.5-C record above is untouched.
+
+- **Kernel:** `feat/m85d-s1-capability-classes` @ `5f6475ec33d95d77e6dae2b37e7adcdd5338eb64`
+  (5 commits over `main`: `1458bc5b` build-time per-tool `capability_class`
+  validation; `efa43179` composition-time class map; `fbea1ecb` fail-closed
+  dispatcher gate, CRITICAL CONTROLS; `8b80d181` Rego class conjunct, STOP RULE;
+  `5f6475ec` proof re-pin). The runner recorded `kernel revision: 5f6475ec…
+  (kernel-source tree clean)` and re-verified the same revision on the image
+  kernel-anchor label.
+- **Packs:** `cognic-tool-oracle-schema@v0.4.0` + `cognic-tool-approval-probe@v0.2.0`
+  — the first releases signed under GitHub Actions custody (protected `release`
+  environment; runs 29473071501 / 29473111175) and the first carrying the signed
+  `[[tool.cognic.tools]]` capability-class blocks. Both rotated trust roots
+  (`a26ac390…a7a7d`, `786fad67…2d7ac`) verified at staging; each wheel verified
+  under its RELEASE key first, then re-signed under the per-run proof key
+  (log line 70).
+- **Verdict:** `PROOF M8.5-C (BARS A-F) PASS`, exit 0 — all six bars, 59 bar-OK
+  lines, zero FAIL lines, and the aggregate verdict is the final line (1083 of
+  1083).
+- **Log:** 1083 lines, SHA-256
+  `b902a36110430cd4a42ce3cd9a0fc56b4b57c4adacfcaf4d2517c55e0dd09056`
+  (operator-held at `scratchpad/proof-m85c-ds1-run1.log`; deliberately not
+  committed). Credential scan: zero OpenAI-key, JWT, bearer-value, or
+  private-key matches.
+- **Deployment shape:** unchanged from the M8.5-C record above (kind; Keycloak
+  26.2 OIDC; two BFF replicas; TLS Redis; proof-owned migration Job at Alembic
+  rev **0017**). Runner cleaned up fully: no cluster, staging, or proof process
+  remained; the pre-existing `cognic-harness-redis` container was restored.
+
+### What this run proved that T3-I could not
+
+1. **The fail-closed capability-class gate live in the dispatch path.** Every
+   conversation-lane dispatch of `run_readonly_query` traversed the D-S1 gate:
+   had the composition-time class map not resolved the released manifest's
+   declarations under the real registry join key
+   (`cognic-tool-oracle-schema/run_readonly_query`), the gate refuses
+   fail-closed and Bars C/E could not have passed. They passed.
+2. **The signed per-tool manifest block through the full trust pipeline live**:
+   `agentos validate` (the D-S1 validator) → release-trust-root verification →
+   per-run re-sign → registry admission → the M4 operator lifecycle install →
+   MCP serving — for both new releases.
+3. **The re-pinned proof harness** (Task 7): version/digest pins, rotated
+   roots, and the derived-variable lifecycle manifests all consumed live.
+
+### Honesty boundary (deltas against the M8.5-C boundary above, which stands)
+
+1. **The `action`-class refusal was not live-driven.** No action-class tool is
+   granted to the agent in this proof; the probe rides the direct MCP four-eyes
+   lane (Bar D), not the agent dispatch lane. The unconditional `action`
+   refusal and the undeclared/unknown-class refusals are unit-pinned
+   (TM-revert-proven) but have no live bar until D2 ships a governed write.
+2. **Bar D.4/D.5 nuance:** `self grant-second refused (409)` + a distinct
+   approver completing four-eyes + `exact-shape re-call executed -> ledger
+   EXACTLY 1` re-proved actor binding and second-approver distinctness live.
+   Item 2 of the M8.5-C boundary (grants are NOT single-use; the originator
+   may take the first/sole grant) still stands and is now also mapped, with
+   engine file:line grounding, in the D2 recon memo
+   (`docs/superpowers/recon/2026-07-16-d2-governed-write-recon.md`, docs
+   worktree) — D2 owns closing both.
