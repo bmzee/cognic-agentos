@@ -1,5 +1,5 @@
-"""Sprint 13.5a (ADR-014) — ApprovalRequestStore: relational approval-request
-row + the 5 value-free ``approval.*`` chain events. ``core/`` stop-rule + CC.
+"""Sprint 13.5a + M8.5-D phase A (ADR-014) — relational approval requests,
+N-way decision ledger, and value-free ``approval.*`` chain events. CC.
 
 Mirrors ``core/scheduler/storage.py`` for the atomic-transition machinery:
 ``create_request_row`` is the genesis write (INSERT pending + ``approval.requested``
@@ -26,11 +26,13 @@ from sqlalchemy import (
     CheckConstraint,
     Column,
     Index,
+    Integer,
     LargeBinary,
     Select,
     String,
     Table,
     Text,
+    UniqueConstraint,
     Uuid,
     and_,
     insert,
@@ -38,11 +40,13 @@ from sqlalchemy import (
     select,
     update,
 )
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from cognic_agentos.core.approval._types import (
     ApprovalRequestNotFound,
     ApprovalState,
+    ApprovalTransitionRefused,
     validate_transition,
 )
 from cognic_agentos.core.audit import _metadata
@@ -58,7 +62,8 @@ _APPROVAL_ISO_CONTROLS: Final[tuple[str, ...]] = (
     "ISO42001.A.10.2",
 )
 
-#: ``action`` -> the value-free chain event emitted by ``transition``.
+#: ``action`` -> the legacy value-free chain event emitted at indices 0/1.
+#: N-way decision indices >= 2 emit ``approval.grant_recorded`` dynamically.
 _ACTION_TO_DECISION_TYPE: Final[dict[str, str]] = {
     "grant_first": "approval.granted_first",
     "grant_second": "approval.granted_second",
@@ -74,12 +79,13 @@ _ACTION_TO_APPROVER_COL: Final[dict[str, str | None]] = {
     "expire": None,
 }
 
+_DECISION_UNIQUE_NAME: Final[str] = "uq_approval_decisions_request_approver"
+
 _TS = TIMESTAMP(timezone=True)
 
 #: In-process Table — registered against the shared ``core.audit._metadata`` so
 #: ``_metadata.create_all`` (tests) + ``alembic upgrade head`` (migration 0009)
-#: both build it. MUST agree column-for-column with
-#: ``20260610_0009_approval_requests.py``.
+#: both build it. MUST agree with migrations 0009 through 0018.
 _approval_requests = Table(
     "approval_requests",
     _metadata,
@@ -98,6 +104,11 @@ _approval_requests = Table(
     Column("redacted_context", Text(), nullable=False),
     Column("data_classes", GovernanceJSON(), nullable=False),
     Column("required_refs", GovernanceJSON(), nullable=False),
+    Column("required_count", Integer(), nullable=True),
+    Column("eligible_approvers", GovernanceJSON(), nullable=True),
+    Column("decisions_recorded", Integer(), nullable=False, server_default="0"),
+    Column("consumed_at", _TS, nullable=True),
+    Column("consumed_by", String(64), nullable=True),
     Column("created_at", _TS, nullable=False),
     Column("expires_at", _TS, nullable=False),
     Column("updated_at", _TS, nullable=False),
@@ -109,6 +120,22 @@ _approval_requests = Table(
     # Migration 0017 (HP-4): the reviewer queue's tenant-leading chronological
     # index — (created_at, request_id) is the keyset list_pending walks.
     Index("ix_approval_requests_tenant_created_request", "tenant_id", "created_at", "request_id"),
+)
+
+_approval_decisions = Table(
+    "approval_decisions",
+    _metadata,
+    Column("request_id", Uuid(), primary_key=True),
+    Column("decision_index", Integer(), primary_key=True),
+    Column("tenant_id", String(128), nullable=False),
+    Column("approver_subject", String(256), nullable=False),
+    Column("reason", Text(), nullable=True),
+    Column("decided_at", _TS, nullable=False),
+    UniqueConstraint(
+        "request_id",
+        "approver_subject",
+        name="uq_approval_decisions_request_approver",
+    ),
 )
 
 
@@ -132,6 +159,9 @@ class ApprovalRequestRow:
     second_approver: str | None
     denier: str | None
     expires_at: datetime
+    required_count: int
+    eligible_approvers: tuple[str, ...] | None
+    decisions_recorded: int
     # Sprint 13.5c3 (ADR-014) — projected for the verify-time evidence echo
     # (spec §3.2); defaulted so existing construction sites stay green.
     required_refs: dict[str, str] = dataclasses.field(default_factory=dict)
@@ -199,6 +229,8 @@ class _LockedSnapshot:
     first_approver: str | None
     second_approver: str | None
     denier: str | None
+    decision_index: int | None = None
+    required_count: int | None = None
 
 
 def _value_free_payload(
@@ -225,6 +257,39 @@ def _value_free_payload(
         "second_approver": snap.second_approver,
         "denier": snap.denier,
     }
+
+
+def _required_count(*, flow: str, stored: int | None) -> int:
+    """Return the persisted N-way threshold, with the 0018 legacy fallback.
+
+    Migration 0018 backfills every existing row. The fallback keeps an
+    unstamped/partially-applied legacy row fail-safe while the guarded
+    migration is converging; an assigned row without a threshold is corrupt.
+    """
+    if stored is not None:
+        count = int(stored)
+        if count <= 0:
+            raise RuntimeError("approval request required_count must be positive")
+        return count
+    if flow == "require_single_approval":
+        return 1
+    if flow == "require_4_eyes":
+        return 2
+    raise RuntimeError(f"approval request flow {flow!r} has no required_count")
+
+
+def _is_duplicate_decider(exc: IntegrityError) -> bool:
+    """Recognise the named decision-ledger uniqueness violation portably."""
+    original = exc.orig
+    diagnostic = getattr(original, "diag", None)
+    constraint_name = getattr(diagnostic, "constraint_name", None)
+    if str(constraint_name or "").lower() == _DECISION_UNIQUE_NAME:
+        return True
+    rendered = str(original).lower()
+    return _DECISION_UNIQUE_NAME in rendered or (
+        "approval_decisions.request_id" in rendered
+        and "approval_decisions.approver_subject" in rendered
+    )
 
 
 #: The actionable states a reviewer can act on (the queue). Terminal states
@@ -390,9 +455,13 @@ class ApprovalRequestStore:
         request_request_id: str,
         created_at: datetime,
         expires_at: datetime,
+        required_count: int | None = None,
+        eligible_approvers: list[str] | None = None,
     ) -> tuple[uuid.UUID, bytes]:
         """Genesis write: INSERT a ``pending`` row + append ``approval.requested``
         atomically. Returns the ``(chain_record_id, chain_hash)`` pair."""
+        persisted_required_count = _required_count(flow=flow, stored=required_count)
+        persisted_eligible = list(eligible_approvers) if eligible_approvers is not None else None
         snap = _LockedSnapshot(
             state="pending",
             flow=flow,
@@ -426,6 +495,11 @@ class ApprovalRequestStore:
                     redacted_context=redacted_context,
                     data_classes=list(data_classes),
                     required_refs=dict(required_refs),
+                    required_count=persisted_required_count,
+                    eligible_approvers=persisted_eligible,
+                    decisions_recorded=0,
+                    consumed_at=None,
+                    consumed_by=None,
                     created_at=created_at,
                     expires_at=expires_at,
                     updated_at=created_at,
@@ -472,8 +546,10 @@ class ApprovalRequestStore:
         (illegal state pair) from inside the precondition (transaction rolls back).
         """
         # Preflight: out-of-vocabulary action -> fail loud BEFORE any DB work.
-        decision_type = _ACTION_TO_DECISION_TYPE[action]
-        approver_col = _ACTION_TO_APPROVER_COL[action]
+        base_decision_type = _ACTION_TO_DECISION_TYPE[action]
+        static_approver_col = _ACTION_TO_APPROVER_COL[action]
+        if action in ("grant_first", "grant_second") and actor_subject is None:
+            raise ValueError("grant transitions require actor_subject")
         now = datetime.now(UTC)
         captured: list[ApprovalState] = []
 
@@ -493,6 +569,9 @@ class ApprovalRequestStore:
                         _approval_requests.c.first_approver,
                         _approval_requests.c.second_approver,
                         _approval_requests.c.denier,
+                        _approval_requests.c.required_count,
+                        _approval_requests.c.eligible_approvers,
+                        _approval_requests.c.decisions_recorded,
                     )
                     .where(
                         _approval_requests.c.request_id == request_id,
@@ -506,10 +585,42 @@ class ApprovalRequestStore:
 
             # P1: the row-locked persisted ``row.flow`` is AUTHORITATIVE — the
             # store never trusts a caller-supplied flow (there is no such arg).
-            to_state = validate_transition(from_state=row.state, action=action, flow=row.flow)
+            required_count = _required_count(flow=row.flow, stored=row.required_count)
+            decisions_recorded = int(row.decisions_recorded)
+            to_state = validate_transition(
+                from_state=row.state,
+                action=action,
+                flow=row.flow,
+                decisions_recorded=decisions_recorded,
+                required_count=required_count,
+            )
 
             update_values: dict[str, Any] = {"state": to_state, "updated_at": now}
             new_first, new_second, new_denier = row.first_approver, row.second_approver, row.denier
+            decision_index: int | None = None
+            approver_col = static_approver_col
+            if action in ("grant_first", "grant_second"):
+                decision_index = decisions_recorded
+                await conn.execute(
+                    insert(_approval_decisions).values(
+                        request_id=request_id,
+                        decision_index=decision_index,
+                        tenant_id=tenant_id,
+                        approver_subject=actor_subject,
+                        reason=reason,
+                        decided_at=now,
+                    )
+                )
+                update_values["decisions_recorded"] = decision_index + 1
+                # Keep the legacy evidence columns stable for indices 0/1;
+                # later N-way decisions live only in the normalized ledger.
+                approver_col = (
+                    "first_approver"
+                    if decision_index == 0
+                    else "second_approver"
+                    if decision_index == 1
+                    else None
+                )
             if approver_col is not None and actor_subject is not None:
                 update_values[approver_col] = actor_subject
                 if approver_col == "first_approver":
@@ -537,12 +648,19 @@ class ApprovalRequestStore:
                 first_approver=new_first,
                 second_approver=new_second,
                 denier=new_denier,
+                decision_index=decision_index,
+                required_count=required_count,
             )
 
         def _build_record(snap: _LockedSnapshot) -> DecisionRecord:
             payload = _value_free_payload(request_id=request_id, tenant_id=tenant_id, snap=snap)
             if reason is not None:
                 payload["reason"] = reason
+            decision_type = base_decision_type
+            if snap.decision_index is not None and snap.decision_index >= 2:
+                decision_type = "approval.grant_recorded"
+                payload["decision_index"] = snap.decision_index
+                payload["required_count"] = snap.required_count
             return DecisionRecord(
                 decision_type=decision_type,
                 request_id=request_request_id,
@@ -552,9 +670,14 @@ class ApprovalRequestStore:
                 iso_controls=_APPROVAL_ISO_CONTROLS,
             )
 
-        await self._history.append_with_precondition(
-            record_builder=_build_record, precondition=_precondition
-        )
+        try:
+            await self._history.append_with_precondition(
+                record_builder=_build_record, precondition=_precondition
+            )
+        except IntegrityError as exc:
+            if action in ("grant_first", "grant_second") and _is_duplicate_decider(exc):
+                raise ApprovalTransitionRefused("approver_not_distinct") from None
+            raise
         return captured[0]
 
     async def load(self, *, request_id: uuid.UUID, tenant_id: str) -> ApprovalRequestRow | None:
@@ -583,6 +706,13 @@ class ApprovalRequestStore:
             first_approver=row.first_approver,
             second_approver=row.second_approver,
             denier=row.denier,
+            required_count=_required_count(flow=row.flow, stored=row.required_count),
+            eligible_approvers=(
+                tuple(str(subject) for subject in row.eligible_approvers)
+                if row.eligible_approvers is not None
+                else None
+            ),
+            decisions_recorded=int(row.decisions_recorded),
             # tz-normalise: SQLite returns naive datetimes for TIMESTAMP(tz)
             # (PG/Oracle return aware); expires_at was written UTC-aware, so a
             # naive read is re-stamped UTC. Branchless so both arms are covered.
@@ -604,6 +734,53 @@ class ApprovalRequestStore:
                 )
             ).first()
         return row[0] if row is not None else None
+
+    async def eligible_approvers(self, *, request_id: uuid.UUID, tenant_id: str) -> frozenset[str]:
+        """Return the request-frozen assignment set, tenant scoped."""
+        async with self._engine.connect() as conn:
+            row = (
+                await conn.execute(
+                    select(_approval_requests.c.eligible_approvers).where(
+                        _approval_requests.c.request_id == request_id,
+                        _approval_requests.c.tenant_id == tenant_id,
+                    )
+                )
+            ).first()
+        if row is None:
+            raise ApprovalRequestNotFound(str(request_id))
+        return frozenset(str(subject) for subject in (row.eligible_approvers or ()))
+
+    async def prior_deciders(self, *, request_id: uuid.UUID, tenant_id: str) -> tuple[str, ...]:
+        """Return decision-ledger subjects in index order.
+
+        A pre-0018 row has no normalized ledger, so its stamped first
+        approver remains the compatibility fallback for four-eyes
+        distinctness.
+        """
+        async with self._engine.connect() as conn:
+            rows = (
+                await conn.execute(
+                    select(_approval_decisions.c.approver_subject)
+                    .where(
+                        _approval_decisions.c.request_id == request_id,
+                        _approval_decisions.c.tenant_id == tenant_id,
+                    )
+                    .order_by(_approval_decisions.c.decision_index.asc())
+                )
+            ).all()
+            if rows:
+                return tuple(str(row.approver_subject) for row in rows)
+            legacy = (
+                await conn.execute(
+                    select(_approval_requests.c.first_approver).where(
+                        _approval_requests.c.request_id == request_id,
+                        _approval_requests.c.tenant_id == tenant_id,
+                    )
+                )
+            ).first()
+        if legacy is None:
+            raise ApprovalRequestNotFound(str(request_id))
+        return (str(legacy.first_approver),) if legacy.first_approver is not None else ()
 
     async def list_pending(
         self, tenant_id: str, *, limit: int = 50, cursor: str | None = None

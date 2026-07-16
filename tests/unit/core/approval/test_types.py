@@ -31,6 +31,7 @@ def test_approval_flow_closed_set() -> None:
         "auto_run",
         "require_single_approval",
         "require_4_eyes",
+        "require_assigned",
     }
 
 
@@ -40,26 +41,43 @@ def test_envelope_invalid_reason_count() -> None:
 
 def test_transition_refused_reason_count() -> None:
     # HP-4 (M8.5-C T1): +approval_originator_mismatch; maker-checker hotfix:
-    # +originator_cannot_approve.
-    assert len(typing.get_args(ApprovalTransitionRefusedReason)) == 12
+    # +originator_cannot_approve. D2 phase A adds the assignment-membership
+    # and N-way distinctness refusals.
+    assert len(typing.get_args(ApprovalTransitionRefusedReason)) == 14
 
 
 @pytest.mark.parametrize(
-    "from_state,action,flow,expected",
+    "from_state,action,flow,decisions_recorded,required_count,expected",
     [
-        ("pending", "grant_first", "require_single_approval", "granted"),
-        ("pending", "grant_first", "require_4_eyes", "awaiting_second"),
-        ("awaiting_second", "grant_second", "require_4_eyes", "granted"),
-        ("pending", "deny", "require_single_approval", "denied"),
-        ("awaiting_second", "deny", "require_4_eyes", "denied"),
-        ("pending", "expire", "require_single_approval", "expired"),
-        ("awaiting_second", "expire", "require_4_eyes", "expired"),
+        ("pending", "grant_first", "require_single_approval", 0, 1, "granted"),
+        ("pending", "grant_first", "require_4_eyes", 0, 2, "awaiting_second"),
+        ("awaiting_second", "grant_second", "require_4_eyes", 1, 2, "granted"),
+        ("awaiting_second", "grant_second", "require_assigned", 1, 4, "awaiting_second"),
+        ("awaiting_second", "grant_second", "require_assigned", 3, 4, "granted"),
+        ("pending", "deny", "require_single_approval", 0, 1, "denied"),
+        ("awaiting_second", "deny", "require_4_eyes", 1, 2, "denied"),
+        ("pending", "expire", "require_single_approval", 0, 1, "expired"),
+        ("awaiting_second", "expire", "require_4_eyes", 1, 2, "expired"),
     ],
 )
 def test_validate_transition_legal_pairs(
-    from_state: str, action: str, flow: str, expected: str
+    from_state: str,
+    action: str,
+    flow: str,
+    decisions_recorded: int,
+    required_count: int,
+    expected: str,
 ) -> None:
-    assert validate_transition(from_state=from_state, action=action, flow=flow) == expected
+    assert (
+        validate_transition(
+            from_state=from_state,
+            action=action,
+            flow=flow,
+            decisions_recorded=decisions_recorded,
+            required_count=required_count,
+        )
+        == expected
+    )
 
 
 @pytest.mark.parametrize(
@@ -73,7 +91,13 @@ def test_validate_transition_legal_pairs(
 )
 def test_validate_transition_refusals(from_state: str, action: str, flow: str, reason: str) -> None:
     with pytest.raises(ApprovalTransitionRefused) as ei:
-        validate_transition(from_state=from_state, action=action, flow=flow)
+        validate_transition(
+            from_state=from_state,
+            action=action,
+            flow=flow,
+            decisions_recorded=0,
+            required_count=2,
+        )
     assert ei.value.reason == reason
 
 

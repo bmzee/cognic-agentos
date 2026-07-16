@@ -52,6 +52,7 @@ def test_flow_vocab_pinned() -> None:
         "auto_run",
         "require_single_approval",
         "require_4_eyes",
+        "require_assigned",
     }
 
 
@@ -59,7 +60,8 @@ def test_flow_vocab_pinned() -> None:
 def test_emitted_flows_are_closed_vocab() -> None:
     # Doctrine pin (scheduler.rego precedent): the bundle NEVER emits a value
     # outside ApprovalFlow — every known tier plus several unknowns/edge inputs
-    # stay within the 3-value closed enum.
+    # stay within the engine's closed enum. ``require_assigned`` is deliberately
+    # store-owned and MUST never be emitted by the tier-policy bundle.
     from cognic_agentos.core.approval._types import ApprovalFlow
 
     emitted = {
@@ -79,3 +81,4 @@ def test_emitted_flows_are_closed_vocab() -> None:
         )
     }
     assert emitted <= set(typing.get_args(ApprovalFlow))
+    assert "require_assigned" not in emitted

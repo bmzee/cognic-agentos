@@ -16,8 +16,13 @@ from typing import Literal
 #: The 5 approval-request states (spec §2). ``check()`` returns one of these.
 ApprovalState = Literal["pending", "awaiting_second", "granted", "denied", "expired"]
 
-#: The 3-value tier->flow classification from ``tools.rego`` (spec §5).
-ApprovalFlow = Literal["auto_run", "require_single_approval", "require_4_eyes"]
+#: Tier policy flows plus the bank-owned assignment flow (ADR-014 phase A).
+ApprovalFlow = Literal[
+    "auto_run",
+    "require_single_approval",
+    "require_4_eyes",
+    "require_assigned",
+]
 
 #: Envelope validation refusals (raised BEFORE classify/persist; spec §7/§10).
 ApprovalEnvelopeInvalidReason = Literal[
@@ -45,6 +50,8 @@ ApprovalTransitionRefusedReason = Literal[
     "approval_binding_mismatch",
     "approval_originator_mismatch",
     "originator_cannot_approve",
+    "approver_not_assigned",
+    "approver_not_distinct",
 ]
 
 #: The mutation actions the state machine accepts.
@@ -161,13 +168,22 @@ class ApprovalCheckResult:
     args_digest: bytes
     envelope_digest: bytes
     originator_subject: str
+    decisions_recorded: int = 0
+    required_count: int = 1
     # Sprint 13.5c3 (ADR-014) — verify-time evidence echo (spec §3.2): the
     # persisted required_refs, projected so seams can persist forward edges
     # (e.g. memory's approval_audit_record_ref) WITHOUT trusting caller input.
     required_refs: dict[str, str] = dataclasses.field(default_factory=dict)
 
 
-def validate_transition(*, from_state: str, action: str, flow: str) -> ApprovalState:
+def validate_transition(
+    *,
+    from_state: str,
+    action: str,
+    flow: str,
+    decisions_recorded: int,
+    required_count: int,
+) -> ApprovalState:
     """Pure state-machine validator (spec §2). Returns the resulting
     :data:`ApprovalState`; raises :class:`ApprovalTransitionRefused` on an
     illegal pair. ``storage.transition`` calls this under the row lock.
@@ -178,14 +194,14 @@ def validate_transition(*, from_state: str, action: str, flow: str) -> ApprovalS
         if action == "deny":
             raise ApprovalTransitionRefused("deny_requires_non_terminal")
         raise ApprovalTransitionRefused("approval_already_finalized")
-    if action == "grant_first":
-        if from_state != "pending":
+    if action in ("grant_first", "grant_second"):
+        # The legacy action names remain the wire/event tokens for decision
+        # indices 0 and 1. The state machine itself is count-generic.
+        if action == "grant_first" and from_state != "pending":
             raise ApprovalTransitionRefused("approval_already_finalized")
-        return "awaiting_second" if flow == "require_4_eyes" else "granted"
-    if action == "grant_second":
-        if from_state != "awaiting_second":
+        if action == "grant_second" and from_state != "awaiting_second":
             raise ApprovalTransitionRefused("grant_second_requires_awaiting_second")
-        return "granted"
+        return "granted" if decisions_recorded + 1 >= required_count else "awaiting_second"
     if action == "deny":
         return "denied"  # from pending or awaiting_second
     if action == "expire":

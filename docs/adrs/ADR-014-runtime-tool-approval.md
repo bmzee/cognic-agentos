@@ -327,3 +327,32 @@ the sole grant or the first leg of four-eyes approval. The additive refusal
 distinctness and its `four_eyes_approver_not_distinct` precedence remain
 unchanged; the originator may still `deny` their own request as a legitimate
 self-cancel. This is the code-level maker-checker control for NIST AC-5.
+
+## M8.5-D D2 phase-A amendment (2026-07-16) — approvals as bank-owned assignment
+
+Phase A adds an assignment-governed flow without weakening the existing tier
+policy. A current `(tenant_id, tool_identity)` assignment wins and may tighten
+an otherwise auto-run tier; an absent assignment follows the tier flow exactly
+as before. Empty assignments are unrepresentable, so assignment data cannot
+turn an approval-mandating tier into auto-run. The new flow value is
+`require_assigned`, with an independently configurable positive
+`approval_assigned_ttl_s` (default 60 seconds).
+
+The bank owns the threshold: `required_count` is the size of the persisted,
+request-frozen eligible subject set. Each grant appends one normalized
+`approval_decisions` row at the next zero-based index in the same transaction
+that advances `decisions_recorded` and appends decision-history evidence. A
+named unique constraint on `(request_id, approver_subject)` is the authoritative
+race guard; the engine's prior-decider read is advisory. The first two decisions
+retain the established `approval.granted_first` / `approval.granted_second`
+events and payload shapes. Index 2 and later emit `approval.grant_recorded` with
+only `decision_index` and `required_count` added to the value-free payload.
+
+The decision authority chain remains human -> tenant -> expiry -> tier scope ->
+reason policy, then adds request-frozen assignment membership and N-way
+distinctness before the row-locked transition. The requester remains excluded
+at every grant index; index 1 preserves the existing
+`four_eyes_approver_not_distinct` wire precedence, while later requester or
+repeat decisions use the additive assignment/N-way refusal vocabulary. An
+engine built without an assignment store retains the M8.5-C tier-only four-eyes
+sequence unchanged.

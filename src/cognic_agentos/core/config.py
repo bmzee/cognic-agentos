@@ -2006,6 +2006,15 @@ class Settings(BaseSettings):
             "(payments) per ADR-014 §34. Applies to require_4_eyes requests."
         ),
     )
+    approval_assigned_ttl_s: int = Field(
+        default=60,
+        gt=0,
+        description=(
+            "M8.5-D D2 phase A (ADR-014) — expiry for bank-assigned N-way "
+            "approval requests. Defaults to the four-eyes TTL; banks may "
+            "tighten this value through deployment configuration."
+        ),
+    )
     scheduler_per_tenant_interactive: int = Field(
         default=32,
         gt=0,

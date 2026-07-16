@@ -170,7 +170,7 @@ async def test_list_actor_tenant_id_missing_returns_500(tmp_path: Any) -> None:
 
 
 def test_every_transition_reason_has_a_status_mapping() -> None:
-    # USER PIN: adding a 13th engine reason FAILS here until the wire
+    # USER PIN: adding a 15th engine reason FAILS here until the wire
     # mapping is updated. Drives from typing.get_args of the engine enum.
     assert set(_REFUSAL_STATUS) == set(typing.get_args(ApprovalTransitionRefusedReason))
     assert all(v in (400, 403, 409) for v in _REFUSAL_STATUS.values())
@@ -186,6 +186,11 @@ def test_originator_mismatch_maps_exactly_403() -> None:
 
 def test_originator_cannot_approve_maps_exactly_409() -> None:
     assert _REFUSAL_STATUS["originator_cannot_approve"] == 409
+
+
+@pytest.mark.parametrize("reason", ["approver_not_assigned", "approver_not_distinct"])
+def test_assignment_refusals_map_exactly_409(reason: str) -> None:
+    assert _REFUSAL_STATUS[reason] == 409
 
 
 @pytest.mark.asyncio
