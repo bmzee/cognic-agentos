@@ -165,11 +165,19 @@ def _call(name: str, **arguments: Any) -> GatewayToolCall:
 class _StubEntitlements:
     """Spy conformer for the two EntitlementStore reads gate 2 makes."""
 
-    def __init__(self, *, entitled: frozenset[str], scopes: dict[str, DataScope]) -> None:
+    def __init__(
+        self,
+        *,
+        entitled: frozenset[str],
+        scopes: dict[str, DataScope],
+        action_entitled: bool,
+    ) -> None:
         self._entitled = entitled
         self._scopes = scopes
+        self._action_entitled = action_entitled
         self.entitled_calls: list[dict[str, str]] = []
         self.resolve_calls: list[dict[str, str]] = []
+        self.action_calls: list[dict[str, str]] = []
 
     async def entitled_scope_ids(self, *, tenant_id: str, subject: str) -> frozenset[str]:
         self.entitled_calls.append({"tenant_id": tenant_id, "subject": subject})
@@ -178,6 +186,22 @@ class _StubEntitlements:
     async def resolve_scope(self, *, tenant_id: str, scope_id: str) -> DataScope | None:
         self.resolve_calls.append({"tenant_id": tenant_id, "scope_id": scope_id})
         return self._scopes.get(scope_id)
+
+    async def entitled_action(
+        self,
+        *,
+        tenant_id: str,
+        subject: str,
+        tool_identity: str,
+    ) -> bool:
+        self.action_calls.append(
+            {
+                "tenant_id": tenant_id,
+                "subject": subject,
+                "tool_identity": tool_identity,
+            }
+        )
+        return self._action_entitled
 
 
 class _StubOPAEngine:
@@ -317,10 +341,12 @@ def _harness(
     signing_key_pem: bytes | None = None,
     ttl_s: float = 300.0,
     tool_capability_classes: Mapping[str, str] | None = None,
+    action_entitled: bool = False,
 ) -> _Harness:
     entitlements = _StubEntitlements(
         entitled=entitled,
         scopes=scopes if scopes is not None else {_SCOPE_ID: _SCOPE},
+        action_entitled=action_entitled,
     )
     opa = _StubOPAEngine(allow=allow, exc=opa_exc)
     policy = AgentDispatchPolicy(opa_engine=opa)  # type: ignore[arg-type]
@@ -624,24 +650,28 @@ class TestCapabilityClassGate:
         assert h.entitlements.entitled_calls == []
         assert h.entitlements.resolve_calls == []
 
-    async def test_action_class_refuses_until_ds2(self) -> None:
+    async def test_unentitled_action_refuses_before_policy_or_proxy(self) -> None:
         h = _harness(tool_capability_classes={_OTHER_REF: "action"})
 
         outcome = await h.dispatcher.dispatch(call=_call("other_tool"), step_index=0, run=_run())
 
         assert outcome.reason == "agent_scope_not_entitled"
+        assert h.entitlements.action_calls == [
+            {
+                "tenant_id": _TENANT,
+                "subject": _ORIGINATOR,
+                "tool_identity": _OTHER_REF,
+            }
+        ]
         assert h.entitlements.entitled_calls == []
         assert h.opa.seen_inputs == []
         assert h.proxy.calls == []
 
-    async def test_action_refuses_even_with_an_entitled_scope_id(
-        self, keypair: tuple[bytes, bytes]
-    ) -> None:
-        """An entitled data scope cannot authorize a write-class tool."""
-        private_pem, _ = keypair
+    async def test_entitled_action_dispatches_without_data_scope_authority(self) -> None:
+        """Action authority comes from the exact tool entitlement, never scope_id."""
         h = _harness(
             tool_capability_classes={_OTHER_REF: "action"},
-            signing_key_pem=private_pem,
+            action_entitled=True,
         )
 
         outcome = await h.dispatcher.dispatch(
@@ -650,11 +680,44 @@ class TestCapabilityClassGate:
             run=_run(),
         )
 
-        assert outcome.reason == "agent_scope_not_entitled"
+        assert outcome.reason is None
+        assert outcome.result == {"rows": []}
+        assert h.entitlements.action_calls[0]["tool_identity"] == _OTHER_REF
         assert h.entitlements.entitled_calls == []
         assert h.entitlements.resolve_calls == []
-        assert h.opa.seen_inputs == []
-        assert h.proxy.calls == []
+        assert h.opa.seen_inputs[0]["entitlement_verified"] is True
+        assert len(h.proxy.calls) == 1
+
+    async def test_entitled_action_pending_is_typed_and_evidenced(self) -> None:
+        pending_id = str(uuid.uuid4())
+        pending = dispatch_module.AgentToolApprovalPending(
+            approval_request_id=pending_id,
+            flow="require_assigned",
+        )
+        h = _harness(
+            tool_capability_classes={_OTHER_REF: "action"},
+            action_entitled=True,
+            proxy_exc=pending,
+        )
+
+        outcome = await h.dispatcher.dispatch(
+            call=_call("other_tool", amount=10),
+            step_index=0,
+            run=_run(),
+        )
+
+        assert outcome == DispatchOutcome(
+            refused=False,
+            reason=None,
+            message=None,
+            result=None,
+            pending=True,
+            approval_request_id=pending_id,
+        )
+        row = _only_row(h)
+        assert row.payload["outcome"] == "pending_approval"
+        assert row.payload["approval_request_id"] == pending_id
+        assert row.payload["refusal_reason"] is None
 
 
 def test_the_hardcoded_stamped_tool_list_is_gone() -> None:

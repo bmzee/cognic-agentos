@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import uuid
 from typing import Any, ClassVar
 
 import pytest
@@ -675,3 +676,32 @@ async def test_mcp_host_agent_tool_proxy_threads_and_projects() -> None:
     assert call["tenant_id"] == "tenant-a"
     assert call["originator_subject"] == "analyst@bank"
     assert call["approval_request_id"] is None
+
+
+async def test_mcp_host_agent_tool_proxy_translates_pending_approval() -> None:
+    import cognic_agentos.core.agent.dispatch as agent_dispatch
+    from cognic_agentos.protocol.mcp_host import MCPToolInvocationRefused
+
+    approval_request_id = str(uuid.uuid4())
+
+    class _StubHost:
+        async def call_tool(self, **_kwargs: Any) -> Any:
+            raise MCPToolInvocationRefused(
+                "tool_approval_pending",
+                approval_request_id=approval_request_id,
+                flow="require_assigned",
+            )
+
+    proxy = agent_host._MCPHostAgentToolProxy(_StubHost())
+    with pytest.raises(agent_dispatch.AgentToolApprovalPending) as exc_info:
+        await proxy.call_tool(
+            server_id="probe",
+            tool_name="probe_write",
+            arguments={"amount": 10},
+            request_id="agent-tool-pending",
+            tenant_id="tenant-a",
+            originator_subject="analyst.amir",
+            approval_request_id=None,
+        )
+    assert exc_info.value.approval_request_id == approval_request_id
+    assert exc_info.value.flow == "require_assigned"

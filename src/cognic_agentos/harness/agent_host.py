@@ -40,7 +40,7 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from cognic_agentos.core.agent._types import LoadedAgentRecord
 from cognic_agentos.core.agent.assignments import AssignmentStore
-from cognic_agentos.core.agent.dispatch import AgentDispatcher
+from cognic_agentos.core.agent.dispatch import AgentDispatcher, AgentToolApprovalPending
 from cognic_agentos.core.agent.loop import AgentLoop
 from cognic_agentos.core.agent.policy import AgentDispatchPolicy
 from cognic_agentos.core.entitlements.store import EntitlementStore
@@ -57,6 +57,7 @@ from cognic_agentos.protocol.agent_manifest import (
     parse_skill_md,
     validate_skill_md,
 )
+from cognic_agentos.protocol.mcp_host import MCPToolInvocationRefused
 from cognic_agentos.protocol.mcp_manifest import (
     PackManifestMalformedError,
     PackManifestNotFoundError,
@@ -436,15 +437,29 @@ class _MCPHostAgentToolProxy:
         originator_subject: str,
         approval_request_id: uuid.UUID | None,
     ) -> dict[str, Any]:
-        result = await self._host.call_tool(
-            server_id=server_id,
-            tool_name=tool_name,
-            arguments=arguments,
-            request_id=request_id,
-            tenant_id=tenant_id,
-            originator_subject=originator_subject,
-            approval_request_id=approval_request_id,
-        )
+        try:
+            result = await self._host.call_tool(
+                server_id=server_id,
+                tool_name=tool_name,
+                arguments=arguments,
+                request_id=request_id,
+                tenant_id=tenant_id,
+                originator_subject=originator_subject,
+                approval_request_id=approval_request_id,
+            )
+        except MCPToolInvocationRefused as exc:
+            if exc.reason != "tool_approval_pending":
+                raise
+            pending_id = exc.payload.get("approval_request_id")
+            flow = exc.payload.get("flow")
+            if not isinstance(pending_id, str) or not pending_id:
+                raise RuntimeError("MCP pending approval omitted approval_request_id") from None
+            if flow is not None and not isinstance(flow, str):
+                raise RuntimeError("MCP pending approval carried a malformed flow") from None
+            raise AgentToolApprovalPending(
+                approval_request_id=pending_id,
+                flow=flow,
+            ) from None
         # The projection target is the handler's own dict for every real
         # governed tool (structuredContent / single-JSON-text / model_dump
         # envelope — see _project_tool_result); the cast keeps the seam's
