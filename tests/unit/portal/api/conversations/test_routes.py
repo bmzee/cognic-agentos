@@ -572,6 +572,7 @@ def _transcript_page(
     user_message: str = "q1",
     answer: str = "a1",
     approval_request_id: str | None = None,
+    turn_kind: str = "exchange",
 ) -> Any:
     from cognic_agentos.core.conversation.read_model import TranscriptPage, TranscriptTurn
 
@@ -589,6 +590,7 @@ def _transcript_page(
                 created_at=datetime(2026, 7, 10, tzinfo=UTC),
                 erased_at=None,
                 approval_request_id=approval_request_id,
+                turn_kind=turn_kind,  # type: ignore[arg-type]
             ),
         ),
         watermark=2,
@@ -766,6 +768,25 @@ def test_transcript_surfaces_pending_approval_request_id(
 
     assert response.status_code == 200
     assert response.json()["turns"][0]["approval_request_id"] == approval_id
+
+
+def test_transcript_surfaces_system_turn_kind(
+    memory_settings: Any,
+    memory_registry: Any,
+    tmp_path: Any,
+) -> None:
+    reader = _StubReader(
+        read_transcript=_transcript_page(
+            user_message="",
+            answer="Approved action completed.",
+            turn_kind="system",
+        )
+    )
+    client, _ = _client(memory_settings, memory_registry, tmp_path, reader=reader)
+    response = client.get(f"/api/v1/conversations/{_CID}/transcript")
+
+    assert response.status_code == 200
+    assert response.json()["turns"][0]["turn_kind"] == "system"
 
 
 def test_transcript_and_chain_404_bodies_are_byte_identical_to_unknown(

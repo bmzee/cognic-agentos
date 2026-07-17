@@ -76,6 +76,23 @@ class _StoreLike(Protocol):
         self, conversation_id: uuid.UUID, *, tenant_id: str, last_n: int
     ) -> list[TurnRecord]: ...
 
+    async def claim_system_turn(
+        self,
+        conversation_id: uuid.UUID,
+        *,
+        tenant_id: str,
+        now: datetime,
+        claim_ttl_s: float,
+    ) -> TurnClaim: ...
+
+    async def next_turn_seq(
+        self,
+        conversation_id: uuid.UUID,
+        *,
+        tenant_id: str,
+        claim_id: uuid.UUID,
+    ) -> int: ...
+
     async def append_turn(
         self,
         *,
@@ -92,6 +109,18 @@ class _StoreLike(Protocol):
         claim_id: uuid.UUID,
         approval_request_id: str | None = None,
         turn_kind: Literal["exchange", "system"] = "exchange",
+    ) -> uuid.UUID: ...
+
+    async def append_system_turn(
+        self,
+        *,
+        conversation_id: uuid.UUID,
+        tenant_id: str,
+        text: str,
+        approval_request_id: str,
+        actor_id: str,
+        request_id: str,
+        claim_id: uuid.UUID,
     ) -> uuid.UUID: ...
 
     async def release_claim(
@@ -222,7 +251,11 @@ class ConversationTurnExecutor:
 
             # 5. Persist + chain row (digest-only). append_turn returns the
             #    turn_id it actually inserted -- surface THAT, never a fresh uuid.
-            seq = record.turn_count + 1
+            seq = await self._store.next_turn_seq(
+                conversation_id,
+                tenant_id=tenant_id,
+                claim_id=claim.claim_id,
+            )
             turn_id = await self._store.append_turn(
                 conversation_id=conversation_id,
                 tenant_id=tenant_id,
@@ -254,4 +287,42 @@ class ConversationTurnExecutor:
             #    conversation -- its lease is reclaimable after TTL.
             await self._store.release_claim(
                 conversation_id, tenant_id=tenant_id, claim_id=claim.claim_id
+            )
+
+    async def post_system_turn(
+        self,
+        *,
+        conversation_id: uuid.UUID,
+        tenant_id: str,
+        text: str,
+        approval_request_id: str,
+        actor_id: str = "system:approval-executor",
+        request_id: str,
+    ) -> uuid.UUID:
+        """Append an approval outcome without consuming model-turn budgets.
+
+        The system writer uses the same database-backed claim and fencing token
+        as a user turn, so it cannot interleave with an in-flight model call.
+        """
+        claim = await self._store.claim_system_turn(
+            conversation_id,
+            tenant_id=tenant_id,
+            now=self._clock(),
+            claim_ttl_s=self._claim_ttl_s,
+        )
+        try:
+            return await self._store.append_system_turn(
+                conversation_id=conversation_id,
+                tenant_id=tenant_id,
+                text=text,
+                approval_request_id=approval_request_id,
+                actor_id=actor_id,
+                request_id=request_id,
+                claim_id=claim.claim_id,
+            )
+        finally:
+            await self._store.release_claim(
+                conversation_id,
+                tenant_id=tenant_id,
+                claim_id=claim.claim_id,
             )

@@ -370,6 +370,7 @@ def build_conversation_routes() -> APIRouter:
                     created_at=turn.created_at,
                     erased_at=turn.erased_at,
                     approval_request_id=turn.approval_request_id,
+                    turn_kind=turn.turn_kind,
                 )
                 for turn in page.turns
             ],

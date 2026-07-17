@@ -16,7 +16,13 @@ from cognic_agentos.core.conversation._context import assemble_prior_context
 from cognic_agentos.core.conversation._types import TurnRecord
 
 
-def _turn(seq: int, q: str = "q", a: str = "a") -> TurnRecord:
+def _turn(
+    seq: int,
+    q: str = "q",
+    a: str = "a",
+    *,
+    turn_kind: str = "exchange",
+) -> TurnRecord:
     return TurnRecord(
         turn_id=uuid.uuid4(),
         seq=seq,
@@ -26,6 +32,7 @@ def _turn(seq: int, q: str = "q", a: str = "a") -> TurnRecord:
         prompt_tokens=1,
         completion_tokens=1,
         created_at=datetime.now(UTC),
+        turn_kind=turn_kind,  # type: ignore[arg-type]
     )
 
 
@@ -92,6 +99,20 @@ def test_half_erased_turn_is_dropped() -> None:
     )
     out = assemble_prior_context([_turn(1), half], replay_last_n=10, token_ceiling=1000)
     assert len(out) == 2
+
+
+def test_system_turn_is_never_replayed_even_when_both_text_fields_are_present() -> None:
+    """DD5 is keyed by kind, not accidentally by the current NULL-user shape."""
+    out = assemble_prior_context(
+        [
+            _turn(1, "q1", "a1"),
+            _turn(2, "synthetic user", "approval executed", turn_kind="system"),
+            _turn(3, "q2", "a2"),
+        ],
+        replay_last_n=10,
+        token_ceiling=1000,
+    )
+    assert [message.content for message in out] == ["q1", "a1", "q2", "a2"]
 
 
 def test_replay_window_keeps_grounding_plus_last_n() -> None:

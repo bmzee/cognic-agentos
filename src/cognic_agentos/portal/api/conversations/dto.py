@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -107,6 +108,7 @@ class TranscriptTurnResponse(BaseModel):
     created_at: datetime
     erased_at: datetime | None
     approval_request_id: str | None = None
+    turn_kind: Literal["exchange", "system"] = "exchange"
 
 
 class TranscriptResponse(BaseModel):

@@ -13,6 +13,7 @@ The load-bearing pins:
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
@@ -270,6 +271,148 @@ async def test_real_token_counts_accumulate_into_the_conversation(db: AsyncEngin
     await _post(_executor(store, _SpyLoop(prompt_tokens=3, completion_tokens=2)), cid)
     rec = await store.load(cid, tenant_id=_TENANT, creator_subject=_SUBJECT)
     assert rec is not None and rec.cumulative_tokens == 5
+
+
+# --- D2-C T9: system-authored completion turns ---------------------------------
+
+
+async def test_system_turn_is_physical_but_does_not_consume_user_budget(
+    db: AsyncEngine,
+) -> None:
+    import sqlalchemy as sa
+
+    from cognic_agentos.core.conversation.storage import _conversation_turns
+    from cognic_agentos.core.decision_history import _decision_history
+
+    approval_id = "a1b2c3d4-1111-4222-8333-444455556666"
+    text = "Approved action completed."
+    store = ConversationStore(db)
+    cid = await _conversation(store)
+    ex = _executor(store, _SpyLoop(prompt_tokens=3, completion_tokens=2), max_turns=1)
+    exchange = await _post(ex, cid, "please act")
+
+    system_id = await ex.post_system_turn(
+        conversation_id=cid,
+        tenant_id=_TENANT,
+        text=text,
+        approval_request_id=approval_id,
+        request_id="req-system-complete",
+    )
+
+    rec = await store.load(cid, tenant_id=_TENANT, creator_subject=_SUBJECT)
+    assert rec is not None
+    assert rec.turn_count == 1
+    assert rec.cumulative_tokens == 5
+    async with db.connect() as conn:
+        rows = (
+            (
+                await conn.execute(
+                    sa.select(_conversation_turns)
+                    .where(_conversation_turns.c.conversation_id == cid)
+                    .order_by(_conversation_turns.c.seq)
+                )
+            )
+            .mappings()
+            .all()
+        )
+        chain = (
+            await conn.execute(
+                sa.select(_decision_history.c.payload).where(
+                    _decision_history.c.request_id == "req-system-complete",
+                    _decision_history.c.event_type == "conversation.system_turn_appended",
+                )
+            )
+        ).one()
+    assert [row["turn_id"] for row in rows] == [exchange.turn_id, system_id]
+    system = rows[1]
+    assert system["seq"] == 2
+    assert system["turn_kind"] == "system"
+    assert system["user_message"] is None
+    assert system["answer"] == text
+    assert system["agent_run_id"] == f"system-{approval_id}"
+    assert system["approval_request_id"] == approval_id
+    assert (system["prompt_tokens"], system["completion_tokens"]) == (0, 0)
+    assert chain.payload["actor_id"] == "system:approval-executor"
+    assert chain.payload["answer_sha256"] == hashlib.sha256(text.encode()).hexdigest()
+    assert chain.payload["answer_bytes"] == len(text.encode())
+    assert text not in str(chain.payload)
+
+    with pytest.raises(ConversationTurnRefused) as exc:
+        await _post(ex, cid, "another user turn")
+    assert exc.value.reason == "conversation_max_turns_exceeded"
+
+
+async def test_exchange_after_system_turn_uses_the_next_physical_sequence(
+    db: AsyncEngine,
+) -> None:
+    import sqlalchemy as sa
+
+    from cognic_agentos.core.conversation.storage import _conversation_turns
+
+    store = ConversationStore(db)
+    cid = await _conversation(store)
+    ex = _executor(store, _SpyLoop())
+    assert (await _post(ex, cid, "q1")).seq == 1
+    await ex.post_system_turn(
+        conversation_id=cid,
+        tenant_id=_TENANT,
+        text="done",
+        approval_request_id="a1b2c3d4-1111-4222-8333-444455556666",
+        request_id="req-system-seq",
+    )
+    second = await _post(ex, cid, "q2")
+
+    assert second.seq == 3
+    rec = await store.load(cid, tenant_id=_TENANT, creator_subject=_SUBJECT)
+    assert rec is not None and rec.turn_count == 2
+    async with db.connect() as conn:
+        seqs = (
+            (
+                await conn.execute(
+                    sa.select(_conversation_turns.c.seq)
+                    .where(_conversation_turns.c.conversation_id == cid)
+                    .order_by(_conversation_turns.c.seq)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    assert list(seqs) == [1, 2, 3]
+
+
+async def test_system_turn_refuses_when_a_user_claim_is_live(db: AsyncEngine) -> None:
+    import sqlalchemy as sa
+
+    from cognic_agentos.core.conversation.storage import _conversation_turns
+
+    store = ConversationStore(db)
+    cid = await _conversation(store)
+    claim = await store.claim_turn(
+        cid,
+        tenant_id=_TENANT,
+        creator_subject=_SUBJECT,
+        now=datetime.now(UTC),
+        claim_ttl_s=300.0,
+    )
+    with pytest.raises(ConversationTurnRefused) as exc:
+        await _executor(store, _SpyLoop()).post_system_turn(
+            conversation_id=cid,
+            tenant_id=_TENANT,
+            text="must not interleave",
+            approval_request_id="a1b2c3d4-1111-4222-8333-444455556666",
+            request_id="req-system-collision",
+        )
+    assert exc.value.reason == "conversation_turn_in_progress"
+    async with db.connect() as conn:
+        count = (
+            await conn.execute(
+                sa.select(sa.func.count())
+                .select_from(_conversation_turns)
+                .where(_conversation_turns.c.conversation_id == cid)
+            )
+        ).scalar_one()
+    assert count == 0
+    await store.release_claim(cid, tenant_id=_TENANT, claim_id=claim.claim_id)
 
 
 # --- ORDERING PIN: claim_turn (creator-scoped) precedes append_turn -------------

@@ -60,7 +60,7 @@ def assemble_prior_context(
     surviving = [
         t
         for t in sorted(turns, key=lambda t: t.seq)
-        if t.user_message is not None and t.answer is not None
+        if t.turn_kind == "exchange" and t.user_message is not None and t.answer is not None
     ]
     if not surviving:
         return ()

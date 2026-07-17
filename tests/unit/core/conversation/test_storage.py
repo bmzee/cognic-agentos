@@ -242,6 +242,17 @@ async def test_claim_cross_tenant_raises_not_found(store: ConversationStore) -> 
         )
 
 
+async def test_system_claim_cross_tenant_raises_not_found(store: ConversationStore) -> None:
+    cid = await _new(store, tenant="tenant-a")
+    with pytest.raises(ConversationNotFound):
+        await store.claim_system_turn(
+            cid,
+            tenant_id="tenant-b",
+            now=datetime.now(UTC),
+            claim_ttl_s=300.0,
+        )
+
+
 # --- turn persistence: chain-atomic, digest-only -------------------------------
 
 
@@ -336,6 +347,36 @@ async def test_replay_turns_dedupes_when_window_covers_first(
     await _seed_turns(store, cid, 3)
     turns = await store.load_replay_turns(cid, tenant_id="t1", last_n=10)
     assert [t.seq for t in turns] == [1, 2, 3]
+
+
+async def test_replay_source_excludes_system_turns_before_windowing(
+    store: ConversationStore,
+) -> None:
+    cid = await _new(store)
+    await _append(store, cid, 1, q="q1", a="a1")
+    claim = await store.claim_system_turn(
+        cid,
+        tenant_id="t1",
+        now=datetime.now(UTC),
+        claim_ttl_s=300.0,
+    )
+    await store.append_system_turn(
+        conversation_id=cid,
+        tenant_id="t1",
+        text="approved",
+        approval_request_id="a1b2c3d4-1111-4222-8333-444455556666",
+        actor_id="system:approval-executor",
+        request_id="req-system",
+        claim_id=claim.claim_id,
+    )
+    await store.release_claim(cid, tenant_id="t1", claim_id=claim.claim_id)
+    await _append(store, cid, 3, q="q2", a="a2")
+
+    turns = await store.load_replay_turns(cid, tenant_id="t1", last_n=10)
+    assert [(turn.seq, turn.turn_kind) for turn in turns] == [
+        (1, "exchange"),
+        (3, "exchange"),
+    ]
 
 
 async def test_replay_turns_last_n_zero_yields_only_the_grounding_turn(

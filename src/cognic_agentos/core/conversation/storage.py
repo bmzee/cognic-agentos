@@ -162,6 +162,38 @@ def _to_record(row: Any) -> ConversationRecord:
     )
 
 
+async def _require_persistable_claim(
+    conn: AsyncConnection,
+    *,
+    conversation_id: uuid.UUID,
+    tenant_id: str,
+    claim_id: uuid.UUID,
+) -> ConversationState:
+    """Lock and verify the shared user/system turn fence.
+
+    Ownership deliberately precedes lifecycle: a stale holder has no claim,
+    even when the conversation was erased after its lease was reclaimed.
+    """
+    fence = (
+        await conn.execute(
+            select(_conversations.c.state, _conversations.c.turn_claim_id)
+            .where(
+                _conversations.c.conversation_id == conversation_id,
+                _conversations.c.tenant_id == tenant_id,
+            )
+            .with_for_update()
+        )
+    ).first()
+    if fence is None:
+        raise ConversationNotFound(str(conversation_id))
+    state: ConversationState = fence[0]
+    if fence[1] != claim_id:
+        raise ConversationTurnRefused("conversation_turn_claim_stale", current_state=state)
+    if state not in _PERSISTABLE_STATES:
+        raise ConversationTurnRefused("conversation_not_active", current_state=state)
+    return state
+
+
 class ConversationStore:
     """Async; raises on every refusal/failure (no silent-skip)."""
 
@@ -254,6 +286,7 @@ class ConversationStore:
             .where(
                 _conversation_turns.c.conversation_id == conversation_id,
                 _conversations.c.tenant_id == tenant_id,
+                _conversation_turns.c.turn_kind == "exchange",
             )
         )
         first_stmt = base.order_by(_conversation_turns.c.seq.asc()).limit(1)
@@ -282,6 +315,36 @@ class ConversationStore:
             )
             for _, r in sorted(by_seq.items())
         ]
+
+    async def claim_system_turn(
+        self,
+        conversation_id: uuid.UUID,
+        *,
+        tenant_id: str,
+        now: datetime,
+        claim_ttl_s: float,
+    ) -> TurnClaim:
+        """Claim for a kernel-authored turn without weakening tenant scope.
+
+        ``creator_subject`` is immutable conversation metadata. Resolve it by
+        tenant, then enter the exact creator-scoped claim path used by user
+        turns; the second step still owns lifecycle, TTL and collision checks.
+        """
+        stmt = select(_conversations.c.creator_subject).where(
+            _conversations.c.conversation_id == conversation_id,
+            _conversations.c.tenant_id == tenant_id,
+        )
+        async with self._engine.connect() as conn:
+            creator_subject = (await conn.execute(stmt)).scalar_one_or_none()
+        if creator_subject is None:
+            raise ConversationNotFound(str(conversation_id))
+        return await self.claim_turn(
+            conversation_id,
+            tenant_id=tenant_id,
+            creator_subject=creator_subject,
+            now=now,
+            claim_ttl_s=claim_ttl_s,
+        )
 
     # -- the atomic single-writer claim (ADR-028 §4, PT-6) ---------------------
 
@@ -383,6 +446,30 @@ class ConversationStore:
                 )
             )
 
+    async def next_turn_seq(
+        self,
+        conversation_id: uuid.UUID,
+        *,
+        tenant_id: str,
+        claim_id: uuid.UUID,
+    ) -> int:
+        """Return the next PHYSICAL sequence under the caller's live fence."""
+        async with self._engine.begin() as conn:
+            await _require_persistable_claim(
+                conn,
+                conversation_id=conversation_id,
+                tenant_id=tenant_id,
+                claim_id=claim_id,
+            )
+            latest = (
+                await conn.execute(
+                    select(sa.func.max(_conversation_turns.c.seq)).where(
+                        _conversation_turns.c.conversation_id == conversation_id
+                    )
+                )
+            ).scalar_one()
+            return int(latest or 0) + 1
+
     # -- turn persistence (chain-atomic, digest-only) --------------------------
 
     async def append_turn(
@@ -430,26 +517,12 @@ class ConversationStore:
         a_sha, a_bytes = _digest(answer)
 
         async def _precondition(conn: AsyncConnection, _seq: int, _hash: bytes) -> None:
-            fence = (
-                await conn.execute(
-                    select(_conversations.c.state, _conversations.c.turn_claim_id)
-                    .where(
-                        _conversations.c.conversation_id == conversation_id,
-                        _conversations.c.tenant_id == tenant_id,
-                    )
-                    .with_for_update()
-                )
-            ).first()
-            if fence is None:
-                raise ConversationNotFound(str(conversation_id))
-            # Ownership precedes lifecycle: a stale lease refuses as stale even
-            # on an erased row -- the caller holds no claim at all.
-            if fence[1] != claim_id:
-                raise ConversationTurnRefused(
-                    "conversation_turn_claim_stale", current_state=fence[0]
-                )
-            if fence[0] not in _PERSISTABLE_STATES:
-                raise ConversationTurnRefused("conversation_not_active", current_state=fence[0])
+            await _require_persistable_claim(
+                conn,
+                conversation_id=conversation_id,
+                tenant_id=tenant_id,
+                claim_id=claim_id,
+            )
             await conn.execute(
                 sa.insert(_conversation_turns).values(
                     turn_id=turn_id,
@@ -507,6 +580,91 @@ class ConversationStore:
 
         await self._history.append_with_precondition(
             record_builder=_build, precondition=_precondition
+        )
+        return turn_id
+
+    async def append_system_turn(
+        self,
+        *,
+        conversation_id: uuid.UUID,
+        tenant_id: str,
+        text: str,
+        approval_request_id: str,
+        actor_id: str,
+        request_id: str,
+        claim_id: uuid.UUID,
+    ) -> uuid.UUID:
+        """Persist a replay-excluded completion row + digest-only evidence.
+
+        The row consumes a physical ``seq`` but changes neither ``turn_count``
+        nor ``cumulative_tokens``; those are user/model budget counters.
+        """
+        now = datetime.now(UTC)
+        turn_id = uuid.uuid4()
+        answer_sha, answer_bytes = _digest(text)
+
+        async def _precondition(conn: AsyncConnection, _seq: int, _hash: bytes) -> int:
+            await _require_persistable_claim(
+                conn,
+                conversation_id=conversation_id,
+                tenant_id=tenant_id,
+                claim_id=claim_id,
+            )
+            latest = (
+                await conn.execute(
+                    select(sa.func.max(_conversation_turns.c.seq)).where(
+                        _conversation_turns.c.conversation_id == conversation_id
+                    )
+                )
+            ).scalar_one()
+            physical_seq = int(latest or 0) + 1
+            await conn.execute(
+                sa.insert(_conversation_turns).values(
+                    turn_id=turn_id,
+                    conversation_id=conversation_id,
+                    seq=physical_seq,
+                    user_message=None,
+                    answer=text,
+                    agent_run_id=f"system-{approval_request_id}",
+                    prompt_tokens=0,
+                    completion_tokens=0,
+                    created_at=now,
+                    approval_request_id=approval_request_id,
+                    turn_kind="system",
+                    turn_completed_request_id=request_id,
+                )
+            )
+            await conn.execute(
+                update(_conversations)
+                .where(
+                    _conversations.c.conversation_id == conversation_id,
+                    _conversations.c.tenant_id == tenant_id,
+                )
+                .values(last_turn_at=now)
+            )
+            return physical_seq
+
+        def _build(physical_seq: int) -> DecisionRecord:
+            return DecisionRecord(
+                decision_type="conversation.system_turn_appended",
+                request_id=request_id,
+                payload={
+                    "conversation_id": str(conversation_id),
+                    "turn_id": str(turn_id),
+                    "seq": physical_seq,
+                    "agent_run_id": f"system-{approval_request_id}",
+                    "approval_request_id": approval_request_id,
+                    "answer_sha256": answer_sha,
+                    "answer_bytes": answer_bytes,
+                },
+                actor_id=actor_id,
+                tenant_id=tenant_id,
+                iso_controls=CONVERSATION_ISO_CONTROLS,
+            )
+
+        await self._history.append_with_precondition(
+            record_builder=_build,
+            precondition=_precondition,
         )
         return turn_id
 
