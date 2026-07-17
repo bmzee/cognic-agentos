@@ -6510,3 +6510,195 @@ exits zero.
   not prove conversation-correlated auto-execution or the appended system turn;
   those require D5's externally authored action agent and released write pack.
   No A-G log, digest, spend total, or live verdict exists at this checkpoint.
+
+## Proof M8.5 slice — migration Job FAILURE (2026-07-17T13:11:18Z)
+
+- Failed step: `alembic_version reads '0021' after the migrate Job (expected 0017)`
+- migrate job + pod (-o wide):
+```
+error: selectors and the all flag cannot be used when passing resource/name arguments
+```
+- migrate job describe:
+```
+Name:                        agentos-migrate
+Namespace:                   cognic-proofm85c
+Selector:                    batch.kubernetes.io/controller-uid=f6de1603-25e4-4f77-b432-9f85c93ae8bc
+Labels:                      batch.kubernetes.io/controller-uid=f6de1603-25e4-4f77-b432-9f85c93ae8bc
+                             batch.kubernetes.io/job-name=agentos-migrate
+                             controller-uid=f6de1603-25e4-4f77-b432-9f85c93ae8bc
+                             job-name=agentos-migrate
+Annotations:                 <none>
+Parallelism:                 1
+Completions:                 1
+Completion Mode:             NonIndexed
+Suspend:                     false
+Backoff Limit:               1
+TTL Seconds After Finished:  600
+Start Time:                  Fri, 17 Jul 2026 18:11:13 +0500
+Completed At:                Fri, 17 Jul 2026 18:11:18 +0500
+Duration:                    5s
+Pods Statuses:               0 Active (0 Ready) / 1 Succeeded / 0 Failed
+Pod Template:
+  Labels:  batch.kubernetes.io/controller-uid=f6de1603-25e4-4f77-b432-9f85c93ae8bc
+           batch.kubernetes.io/job-name=agentos-migrate
+           controller-uid=f6de1603-25e4-4f77-b432-9f85c93ae8bc
+           job-name=agentos-migrate
+  Containers:
+   migrate:
+    Image:           cognic-agentos:proofm85c
+    Port:            <none>
+    Host Port:       <none>
+    SeccompProfile:  RuntimeDefault
+    Command:
+      sh
+      -c
+    Args:
+      set -eu
+      if [ -z "${COGNIC_DATABASE_URL:-}" ]; then
+        echo "FATAL: COGNIC_DATABASE_URL is unset — refusing to run migrations" >&2
+        exit 1
+      fi
+      exec alembic upgrade head
+
+    Environment Variables from:
+      rel-agentos-config  ConfigMap  Optional: false
+    Environment:
+      COGNIC_DATABASE_URL:  <set to the key 'COGNIC_DATABASE_URL' in secret 'rel-agentos-secrets'>  Optional: false
+    Mounts:
+      /tmp from tmp (rw)
+  Volumes:
+   tmp:
+    Type:          EmptyDir (a temporary directory that shares a pod's lifetime)
+    Medium:
+    SizeLimit:     <unset>
+  Node-Selectors:  <none>
+  Tolerations:     <none>
+Events:
+  Type    Reason            Age   From            Message
+  ----    ------            ----  ----            -------
+  Normal  SuccessfulCreate  5s    job-controller  Created pod: agentos-migrate-d6wdh
+  Normal  Completed         0s    job-controller  Job completed
+```
+- migrate logs (tail 180):
+```
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+INFO  [alembic.runtime.migration] Running upgrade  -> 0001, initial governance schema (audit_event + decision_history + chain_heads)
+INFO  [alembic.runtime.migration] Running upgrade 0001 -> 0002, gateway_call_ledger — Sprint 3 operational ledger per ADR-007.
+INFO  [alembic.runtime.migration] Running upgrade 0002 -> 0003, packs lifecycle table — Sprint 7B.1 T4 per ADR-012.
+INFO  [alembic.runtime.migration] Running upgrade 0003 -> 0004, model registry table + gateway-ledger model_id index — Sprint 9.5 per ADR-013.
+INFO  [alembic.runtime.migration] Running upgrade 0004 -> 0005, scheduler_tasks table — Sprint 10.5a per ADR-022.
+INFO  [alembic.runtime.migration] Running upgrade 0005 -> 0006, memory_records table — Sprint 11.5a per ADR-019.
+INFO  [alembic.runtime.migration] Running upgrade 0006 -> 0007, tenant_config_overlay — per-tenant tighten-only config overrides (ADR-023).
+INFO  [alembic.runtime.migration] Running upgrade 0007 -> 0008, eval_runs + eval_case_results — Sprint 12 evaluation harness (ADR-010).
+INFO  [alembic.runtime.migration] Running upgrade 0008 -> 0009, approval_requests table — Sprint 13.5a per ADR-014.
+INFO  [alembic.runtime.migration] Running upgrade 0009 -> 0010, gateway_call_ledger token/cost evidence columns — Sprint 13.6b per ADR-018 F6.
+INFO  [alembic.runtime.migration] Running upgrade 0010 -> 0011, runs — Sprint 14A-A3a run-persistence foundation (ADR-022 + ADR-004).
+INFO  [alembic.runtime.migration] Running upgrade 0011 -> 0012, mcp server_url override + internal-host allow-list (PR-2b-1).
+INFO  [alembic.runtime.migration] Running upgrade 0012 -> 0013, pack_runtime_config — M4 operator-grade pack install (ADR-026).
+INFO  [alembic.runtime.migration] Running upgrade 0013 -> 0014, agent_entitlements — M8 governed agent loop substrate (ADR-027).
+INFO  [alembic.runtime.migration] Running upgrade 0014 -> 0015, conversations + conversation_turns — ADR-028 M8.5-A conversation substrate.
+INFO  [alembic.runtime.migration] Running upgrade 0015 -> 0016, conversation read-model enablement — ADR-028 M8.5-B (HP-1).
+INFO  [alembic.runtime.migration] Running upgrade 0016 -> 0017, approval queue index — HP-4 (ADR-014 amendment; M8.5-C spec §2.1 as corrected).
+INFO  [alembic.runtime.migration] Running upgrade 0017 -> 0018, Approval assignment + N-way decision ledger (M8.5-D D2 phase A).
+INFO  [alembic.runtime.migration] Running upgrade 0018 -> 0019, Approval replay-payload custody (M8.5-D D2 phase B).
+INFO  [alembic.runtime.migration] Running upgrade 0019 -> 0020, Action entitlements for governed-write dispatch (M8.5-D D2 phase C).
+INFO  [alembic.runtime.migration] Running upgrade 0020 -> 0021, Conversation pending-approval correlation and typed turns (M8.5-D D2).
+```
+- namespace events (tail 120):
+```
+LAST SEEN   TYPE      REASON              OBJECT                                       MESSAGE
+2m52s       Normal    Scheduled           pod/postgres-74b77c4f75-zz9vg                Successfully assigned cognic-proofm85c/postgres-74b77c4f75-zz9vg to cognic-proofm85c-control-plane
+2m52s       Normal    ScalingReplicaSet   deployment/vault                             Scaled up replica set vault-564b656fbf from 0 to 1
+2m52s       Normal    SuccessfulCreate    replicaset/vault-564b656fbf                  Created pod: vault-564b656fbf-w9nbb
+2m52s       Normal    Scheduled           pod/vault-564b656fbf-w9nbb                   Successfully assigned cognic-proofm85c/vault-564b656fbf-w9nbb to cognic-proofm85c-control-plane
+2m52s       Normal    ScalingReplicaSet   deployment/qdrant                            Scaled up replica set qdrant-54644949b7 from 0 to 1
+2m52s       Normal    SuccessfulCreate    replicaset/qdrant-54644949b7                 Created pod: qdrant-54644949b7-hct6v
+2m52s       Normal    Scheduled           pod/qdrant-54644949b7-hct6v                  Successfully assigned cognic-proofm85c/qdrant-54644949b7-hct6v to cognic-proofm85c-control-plane
+2m52s       Normal    ScalingReplicaSet   deployment/postgres                          Scaled up replica set postgres-74b77c4f75 from 0 to 1
+2m52s       Normal    SuccessfulCreate    replicaset/postgres-74b77c4f75               Created pod: postgres-74b77c4f75-zz9vg
+2m51s       Normal    ScalingReplicaSet   deployment/ollama                            Scaled up replica set ollama-84dd449db5 from 0 to 1
+2m51s       Warning   Unhealthy           pod/litellm-854bfdcb5d-trrp9                 Readiness probe failed: Get "http://10.244.0.10:4000/health/liveliness": dial tcp 10.244.0.10:4000: connect: connection refused
+2m51s       Warning   Unhealthy           pod/vault-564b656fbf-w9nbb                   Readiness probe failed: Get "http://10.244.0.7:8200/v1/sys/health": dial tcp 10.244.0.7:8200: connect: connection refused
+2m51s       Normal    SuccessfulCreate    replicaset/cognic-proof-keycloak-555bf644d   Created pod: cognic-proof-keycloak-555bf644d-gzjpp
+2m51s       Normal    ScalingReplicaSet   deployment/cognic-proof-keycloak             Scaled up replica set cognic-proof-keycloak-555bf644d from 0 to 1
+2m51s       Normal    Scheduled           pod/langfuse-77458bd486-8rbg2                Successfully assigned cognic-proofm85c/langfuse-77458bd486-8rbg2 to cognic-proofm85c-control-plane
+2m51s       Normal    Started             pod/vault-564b656fbf-w9nbb                   Container started
+2m51s       Normal    Created             pod/vault-564b656fbf-w9nbb                   Container created
+2m51s       Normal    Pulled              pod/vault-564b656fbf-w9nbb                   Container image "hashicorp/vault:1.18" already present on machine and can be accessed by the pod
+2m51s       Normal    ScalingReplicaSet   deployment/redis                             Scaled up replica set redis-74c49dd754 from 0 to 1
+2m51s       Normal    SuccessfulCreate    replicaset/redis-74c49dd754                  Created pod: redis-74c49dd754-tw6z2
+2m51s       Normal    Started             pod/redis-74c49dd754-tw6z2                   Container started
+2m51s       Normal    Pulled              pod/redis-74c49dd754-tw6z2                   Container image "redis:7.4-alpine" already present on machine and can be accessed by the pod
+2m51s       Normal    SuccessfulCreate    replicaset/langfuse-77458bd486               Created pod: langfuse-77458bd486-8rbg2
+2m51s       Normal    Scheduled           pod/redis-74c49dd754-tw6z2                   Successfully assigned cognic-proofm85c/redis-74c49dd754-tw6z2 to cognic-proofm85c-control-plane
+2m51s       Normal    Scheduled           pod/langfuse-7f9f57b4b-j87qt                 Successfully assigned cognic-proofm85c/langfuse-7f9f57b4b-j87qt to cognic-proofm85c-control-plane
+2m51s       Warning   Unhealthy           pod/qdrant-54644949b7-hct6v                  Readiness probe failed: Get "http://10.244.0.6:6333/readyz": dial tcp 10.244.0.6:6333: connect: connection refused
+2m51s       Normal    Started             pod/qdrant-54644949b7-hct6v                  Container started
+2m51s       Normal    Created             pod/qdrant-54644949b7-hct6v                  Container created
+2m51s       Normal    Pulled              pod/qdrant-54644949b7-hct6v                  Container image "qdrant/qdrant:v1.17.1" already present on machine and can be accessed by the pod
+2m51s       Normal    Scheduled           pod/cognic-proof-keycloak-555bf644d-gzjpp    Successfully assigned cognic-proofm85c/cognic-proof-keycloak-555bf644d-gzjpp to cognic-proofm85c-control-plane
+2m51s       Normal    SuccessfulCreate    replicaset/langfuse-7f9f57b4b                Created pod: langfuse-7f9f57b4b-j87qt
+2m51s       Normal    ScalingReplicaSet   deployment/langfuse                          Scaled up replica set langfuse-77458bd486 from 0 to 1
+2m51s       Warning   Unhealthy           pod/postgres-74b77c4f75-zz9vg                Readiness probe failed: /var/run/postgresql:5432 - no response
+2m51s       Normal    Started             pod/postgres-74b77c4f75-zz9vg                Container started
+2m51s       Normal    Scheduled           pod/litellm-854bfdcb5d-trrp9                 Successfully assigned cognic-proofm85c/litellm-854bfdcb5d-trrp9 to cognic-proofm85c-control-plane
+2m51s       Normal    Pulled              pod/litellm-854bfdcb5d-trrp9                 Container image "ghcr.io/berriai/litellm:main-stable" already present on machine and can be accessed by the pod
+2m51s       Normal    Created             pod/litellm-854bfdcb5d-trrp9                 Container created
+2m51s       Normal    Started             pod/litellm-854bfdcb5d-trrp9                 Container started
+2m51s       Normal    Created             pod/postgres-74b77c4f75-zz9vg                Container created
+2m51s       Normal    SuccessfulCreate    replicaset/litellm-854bfdcb5d                Created pod: litellm-854bfdcb5d-trrp9
+2m51s       Normal    ScalingReplicaSet   deployment/litellm                           Scaled up replica set litellm-854bfdcb5d from 0 to 1
+2m51s       Normal    Scheduled           pod/ollama-84dd449db5-ln5j2                  Successfully assigned cognic-proofm85c/ollama-84dd449db5-ln5j2 to cognic-proofm85c-control-plane
+2m51s       Normal    Pulled              pod/ollama-84dd449db5-ln5j2                  Container image "ollama/ollama:0.5.4" already present on machine and can be accessed by the pod
+2m51s       Normal    Created             pod/ollama-84dd449db5-ln5j2                  Container created
+2m51s       Normal    Started             pod/ollama-84dd449db5-ln5j2                  Container started
+2m51s       Normal    SuccessfulCreate    replicaset/ollama-84dd449db5                 Created pod: ollama-84dd449db5-ln5j2
+2m51s       Normal    Pulled              pod/postgres-74b77c4f75-zz9vg                Container image "postgres:16-alpine" already present on machine and can be accessed by the pod
+2m51s       Normal    ScalingReplicaSet   deployment/otel-collector                    Scaled up replica set otel-collector-85ffcbbfcf from 0 to 1
+2m51s       Normal    SuccessfulCreate    replicaset/otel-collector-85ffcbbfcf         Created pod: otel-collector-85ffcbbfcf-rwt96
+2m51s       Normal    ScalingReplicaSet   deployment/langfuse                          Scaled up replica set langfuse-7f9f57b4b from 0 to 1
+2m51s       Normal    Started             pod/otel-collector-85ffcbbfcf-rwt96          Container started
+2m51s       Normal    Created             pod/redis-74c49dd754-tw6z2                   Container created
+2m51s       Normal    Created             pod/otel-collector-85ffcbbfcf-rwt96          Container created
+2m51s       Normal    Scheduled           pod/otel-collector-85ffcbbfcf-rwt96          Successfully assigned cognic-proofm85c/otel-collector-85ffcbbfcf-rwt96 to cognic-proofm85c-control-plane
+2m51s       Normal    Pulled              pod/otel-collector-85ffcbbfcf-rwt96          Container image "otel/opentelemetry-collector:0.111.0" already present on machine and can be accessed by the pod
+2m50s       Normal    Pulling             pod/cognic-proof-keycloak-555bf644d-gzjpp    Pulling image "keycloak/keycloak:26.2@sha256:4883630ef9db14031cde3e60700c9a9a8eaf1b5c24db1589d6a2d43de38ba2a9"
+2m48s       Warning   BackOff             pod/langfuse-77458bd486-8rbg2                Back-off restarting failed container langfuse in pod langfuse-77458bd486-8rbg2_cognic-proofm85c(68b57950-3d84-4599-9230-c8964047ae96)
+2m47s       Warning   BackOff             pod/langfuse-7f9f57b4b-j87qt                 Back-off restarting failed container langfuse in pod langfuse-7f9f57b4b-j87qt_cognic-proofm85c(83790b70-eb74-451a-ac18-cb4d47e9bb09)
+2m36s       Normal    Pulled              pod/langfuse-77458bd486-8rbg2                Container image "langfuse/langfuse:2" already present on machine and can be accessed by the pod
+2m36s       Normal    Created             pod/langfuse-77458bd486-8rbg2                Container created
+2m36s       Warning   Unhealthy           pod/langfuse-77458bd486-8rbg2                Readiness probe failed: Get "http://10.244.0.9:3000/api/public/health": dial tcp 10.244.0.9:3000: connect: connection refused
+2m36s       Normal    Started             pod/langfuse-77458bd486-8rbg2                Container started
+2m35s       Normal    Pulled              pod/langfuse-7f9f57b4b-j87qt                 Container image "langfuse/langfuse:2" already present on machine and can be accessed by the pod
+2m35s       Normal    Created             pod/langfuse-7f9f57b4b-j87qt                 Container created
+2m35s       Normal    Started             pod/langfuse-7f9f57b4b-j87qt                 Container started
+2m35s       Warning   Unhealthy           pod/langfuse-7f9f57b4b-j87qt                 Readiness probe failed: Get "http://10.244.0.14:3000/api/public/health": dial tcp 10.244.0.14:3000: connect: connection refused
+2m24s       Normal    SuccessfulDelete    replicaset/langfuse-77458bd486               Deleted pod: langfuse-77458bd486-8rbg2
+2m24s       Normal    Killing             pod/langfuse-77458bd486-8rbg2                Stopping container langfuse
+2m24s       Normal    ScalingReplicaSet   deployment/langfuse                          Scaled down replica set langfuse-77458bd486 from 1 to 0
+2m24s       Warning   Unhealthy           pod/langfuse-77458bd486-8rbg2                Readiness probe failed: HTTP probe failed with statuscode: 500
+98s         Normal    Pulled              pod/cognic-proof-keycloak-555bf644d-gzjpp    Successfully pulled image "keycloak/keycloak:26.2@sha256:4883630ef9db14031cde3e60700c9a9a8eaf1b5c24db1589d6a2d43de38ba2a9" in 1m12.881s (1m12.881s including waiting). Image size: 244434445 bytes.
+98s         Normal    Created             pod/cognic-proof-keycloak-555bf644d-gzjpp    Container created
+97s         Normal    Started             pod/cognic-proof-keycloak-555bf644d-gzjpp    Container started
+87s         Warning   Unhealthy           pod/cognic-proof-keycloak-555bf644d-gzjpp    Readiness probe failed: dial tcp 10.244.0.13:8443: connect: connection refused
+82s         Normal    Scheduled           pod/oracle-xe-6fbd6d88cc-fwblq               Successfully assigned cognic-proofm85c/oracle-xe-6fbd6d88cc-fwblq to cognic-proofm85c-control-plane
+82s         Normal    ScalingReplicaSet   deployment/oracle-xe                         Scaled up replica set oracle-xe-6fbd6d88cc from 0 to 1
+82s         Normal    Created             pod/oracle-xe-6fbd6d88cc-fwblq               Container created
+82s         Normal    SuccessfulCreate    replicaset/oracle-xe-6fbd6d88cc              Created pod: oracle-xe-6fbd6d88cc-fwblq
+82s         Normal    Started             pod/oracle-xe-6fbd6d88cc-fwblq               Container started
+82s         Normal    Pulled              pod/oracle-xe-6fbd6d88cc-fwblq               Container image "gvenzl/oracle-xe:21-slim" already present on machine and can be accessed by the pod
+5s          Normal    Started             pod/agentos-migrate-d6wdh                    Container started
+5s          Normal    SuccessfulCreate    replicaset/rel-agentos-577f67f98b            Created pod: rel-agentos-577f67f98b-nhnhw
+5s          Normal    ScalingReplicaSet   deployment/rel-agentos                       Scaled up replica set rel-agentos-577f67f98b from 0 to 1
+5s          Normal    Scheduled           pod/rel-agentos-577f67f98b-nhnhw             Successfully assigned cognic-proofm85c/rel-agentos-577f67f98b-nhnhw to cognic-proofm85c-control-plane
+5s          Normal    Scheduled           pod/agentos-migrate-d6wdh                    Successfully assigned cognic-proofm85c/agentos-migrate-d6wdh to cognic-proofm85c-control-plane
+5s          Normal    Created             pod/agentos-migrate-d6wdh                    Container created
+5s          Normal    SuccessfulCreate    job/agentos-migrate                          Created pod: agentos-migrate-d6wdh
+5s          Normal    Pulled              pod/agentos-migrate-d6wdh                    Container image "cognic-agentos:proofm85c" already present on machine and can be accessed by the pod
+4s          Normal    Created             pod/rel-agentos-577f67f98b-nhnhw             Container created
+4s          Normal    Started             pod/rel-agentos-577f67f98b-nhnhw             Container started
+4s          Normal    Pulled              pod/rel-agentos-577f67f98b-nhnhw             Container image "cognic-agentos:proofm85c" already present on machine and can be accessed by the pod
+0s          Warning   BackOff             pod/rel-agentos-577f67f98b-nhnhw             Back-off restarting failed container agentos in pod rel-agentos-577f67f98b-nhnhw_cognic-proofm85c(8499414d-2120-46bf-acc6-0047c18ee59c)
+0s          Normal    Completed           job/agentos-migrate                          Job completed
+```

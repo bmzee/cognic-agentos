@@ -2322,7 +2322,7 @@ migrate_fail() {
   local where="$1"
   echo "FAIL: migrate ($where) — capturing diagnostics to docs/VALIDATION-RESULTS.md" >&2
   local wide desc logs events
-  wide="$(kubectl -n "$NS" get job/agentos-migrate,pod -l job-name=agentos-migrate -o wide 2>&1 || true)"
+  wide="$(kubectl -n "$NS" get job,pod -l job-name=agentos-migrate -o wide 2>&1 || true)"
   desc="$(kubectl -n "$NS" describe job/agentos-migrate 2>&1 || true)"
   logs="$(kubectl -n "$NS" logs job/agentos-migrate --all-containers=true --tail=180 2>&1 || true)"
   events="$(kubectl -n "$NS" get events --sort-by=.lastTimestamp 2>&1 | tail -120 || true)"
@@ -2934,25 +2934,30 @@ helm install rel "$CHART" -n "$NS" -f "$PROOF_DIR/proof-m85c-values.yaml" \
   --set sandbox.canonicalEgressProxyImage="$EGRESS_PROXY_REF"
 
 # --- 8. migrate Job + secrets + manifests + patches + env ---------------------------
-echo "==> [8/11] run the proof-owned (non-hook) migration Job (schema -> head, rev 0017)"
+echo "==> [8/11] run the proof-owned (non-hook) migration Job (schema -> head, rev 0021)"
 kubectl -n "$NS" delete job/agentos-migrate --ignore-not-found=true --wait=true
 sed "s|__AGENTOS_IMAGE__|$IMAGE|" "$PROOF_DIR/migrate-job.yaml" | kubectl apply -n "$NS" -f -
 kubectl -n "$NS" wait --for=condition=complete job/agentos-migrate --timeout=300s \
   || migrate_fail "agentos-migrate did not complete within 300s"
 
 # Live schema readback (finding-2 lineage, 2026-07-10: never CLAIM a head
-# revision without reading it back). M8.5-C head is 0017 — the HP-4 approval
-# queue keyset index (T1) on top of the 0016 read-model shape; both proven.
+# revision without reading it back). The D2 A-minus branch head is 0021: the
+# 0018 assignment/decision ledger and consume columns, 0019 replay custody,
+# 0020 action entitlements, and 0021 conversation-turn approval correlation,
+# on top of the already-live 0016 read model and 0017 HP-4 keyset index.
 SCHEMA_REV="$(PSQL "SELECT version_num FROM alembic_version;")"
-[ "$SCHEMA_REV" = "0017" ] \
-  || migrate_fail "alembic_version reads '$SCHEMA_REV' after the migrate Job (expected 0017)"
+[ "$SCHEMA_REV" = "0021" ] \
+  || migrate_fail "alembic_version reads '$SCHEMA_REV' after the migrate Job (expected 0021)"
 SHAPE_0016="$(PSQL "SELECT (SELECT count(*) FROM information_schema.columns WHERE table_name='conversation_turns' AND column_name='turn_completed_request_id') || '|' || (SELECT count(*) FROM pg_indexes WHERE indexname IN ('ix_decision_history_tenant_event_sequence','ix_conversations_tenant_creator_created'));")"
 [ "$SHAPE_0016" = "1|2" ] \
   || migrate_fail "0016 schema shape readback '$SHAPE_0016' (expected '1|2': correlation column + the two read-model indexes)"
 SHAPE_0017="$(PSQL "SELECT count(*) FROM pg_indexes WHERE indexname='ix_approval_requests_tenant_created_request';")"
 [ "$SHAPE_0017" = "1" ] \
   || migrate_fail "0017 schema shape readback '$SHAPE_0017' (expected '1': the HP-4 approval-queue keyset index)"
-echo "    schema readback OK: alembic head 0017; 0016 read-model shape + the HP-4 keyset index present"
+SHAPE_D2="$(PSQL "SELECT (SELECT count(*) FROM information_schema.tables WHERE table_schema=current_schema() AND table_name IN ('approval_assignments','approval_decisions','approval_replay_payloads','action_entitlements')) || '|' || (SELECT count(*) FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='approval_requests' AND column_name IN ('required_count','eligible_approvers','decisions_recorded','consumed_at','consumed_by')) || '|' || (SELECT count(*) FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='conversation_turns' AND column_name IN ('approval_request_id','turn_kind')) || '|' || (SELECT count(*) FROM pg_indexes WHERE schemaname=current_schema() AND indexname='ix_action_entitlements_tenant_subject');")"
+[ "$SHAPE_D2" = "4|5|2|1" ] \
+  || migrate_fail "D2 schema shape readback '$SHAPE_D2' (expected '4|5|2|1': four tables, five request columns, two turn columns, one entitlement index)"
+echo "    schema readback OK: alembic head 0021; 0016/0017 foundations + D2 shape 4|5|2|1 present"
 
 pack_fail() {
   # Step-8 capture (run-7 live finding: the oracle-pack rollout timeout left

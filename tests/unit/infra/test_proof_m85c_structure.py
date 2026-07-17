@@ -676,11 +676,21 @@ def test_no_insecure_tls_markers_in_the_proof_shell() -> None:
                 assert flag not in line, f"TLS bypass {flag!r} in {path}: {line!r}"
 
 
-def test_migration_head_is_0017() -> None:
+def test_migration_head_and_d2_shapes_are_0021() -> None:
     text = _RUNNER.read_text()
-    assert 'SCHEMA_REV" = "0017"' in text or '= "0017"' in text, (
-        "runner must assert alembic head 0017"
+    assert 'SCHEMA_REV" = "0021"' in text or '= "0021"' in text, (
+        "runner must assert alembic head 0021"
     )
+    assert 'SHAPE_D2" = "4|5|2|1"' in text, (
+        "runner must read back the D2 assignment, replay, entitlement, and "
+        "conversation-turn schema shapes"
+    )
+
+
+def test_migrate_failure_capture_uses_selector_only_for_job_and_pod() -> None:
+    text = _RUNNER.read_text()
+    assert "get job,pod -l job-name=agentos-migrate -o wide" in text
+    assert "get job/agentos-migrate,pod -l" not in text
 
 
 def test_mcp_authz_is_byte_identical_to_main() -> None:
