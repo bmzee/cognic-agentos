@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import httpx as _httpx
 
+from cognic_agentos.core.approval.assignments import ApprovalAssignmentStore
 from cognic_agentos.core.approval.engine import ApprovalEngine
 from cognic_agentos.core.approval.policy import ApprovalPolicy
 from cognic_agentos.core.approval.storage import ApprovalRequestStore
@@ -108,10 +109,12 @@ class Runtime:
     # KeyError->None shim around ``adapters.secret`` (validate-refs-by-reference).
     runtime_config_store: PackRuntimeConfigStore
     runtime_config_materializer: RuntimeConfigMaterializer
-    # ADR-014 (Sprint 13.5b1) — built unconditionally (mirrors the config-overlay
-    # posture; approval needs only the relational engine). The portal approval
-    # router consumes both; 13.5b2's MCP-host seam reuses the SAME engine instance.
+    # ADR-014 (Sprint 13.5b1 + M8.5-D D2) — built unconditionally (mirrors the
+    # config-overlay posture; approval needs only the relational engine). The
+    # assignment store is shared with the mint engine so bank-owned N-way flows
+    # are reachable outside test-only composition.
     approval_store: ApprovalRequestStore
+    approval_assignment_store: ApprovalAssignmentStore
     approval_engine: ApprovalEngine
     # ADR-018 (Sprint 13.6) — the full kill-switch matrix engine. Built ONLY
     # when a cache adapter is present (needs the Redis control plane); None on
@@ -198,6 +201,7 @@ async def build_runtime(settings: Settings, adapters: Adapters) -> Runtime:
     # before http_client" zone. The SINGLE engine instance is shared: the portal
     # approval router (create_app kwargs) + 13.5b2's MCP-host seam both reuse it.
     approval_store = ApprovalRequestStore(decision_history_store)
+    approval_assignment_store = ApprovalAssignmentStore(decision_history_store)
     approval_opa = await OPAEngine.create(
         bundle_path=settings.tools_policy_bundle,
         audit_store=audit_store,
@@ -208,6 +212,7 @@ async def build_runtime(settings: Settings, adapters: Adapters) -> Runtime:
     approval_engine = ApprovalEngine(
         policy=ApprovalPolicy(opa_engine=approval_opa),
         store=approval_store,
+        assignments=approval_assignment_store,
         settings=settings,
         clock=lambda: datetime.now(UTC),
     )
@@ -465,6 +470,7 @@ async def build_runtime(settings: Settings, adapters: Adapters) -> Runtime:
         runtime_config_store=runtime_config_store,
         runtime_config_materializer=runtime_config_materializer,
         approval_store=approval_store,
+        approval_assignment_store=approval_assignment_store,
         approval_engine=approval_engine,
         kill_switch_engine=kill_switch_engine,
         quota_engine=quota_engine,
