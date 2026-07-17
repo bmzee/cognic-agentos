@@ -168,6 +168,31 @@ A new backward-compatible `SubagentPending` event (`type="pending"`) is added to
 - **Wave-1 family count stays at 11** — `pending` is a new event TYPE within the existing `subagent` family, NOT a 12th family. The `_WAVE_1_FAMILIES` Final is untouched.
 - **Backward-compatible-additive** per the stop-rule: a new `$defs.SubagentPending` + a new `discriminator.mapping.pending` + an appended `oneOf` arm in `.well-known/cognic-ui-events.json` (the snapshot diff is purely these 3 additive entries); existing entries unchanged. The replay-snapshot drift test stays green (the projector always returns a typed event). `SubagentPending` is registered in `_TYPED_PROJECTION_CLASSES` + `__all__` (mirroring its siblings).
 
+## M8.5-D D2 approval-family live amendment (2026-07-17)
+
+The existing Wave-1 `approval` family is now live through the shared
+decision-history projector table. Its five frozen event models remain unchanged:
+`ApprovalPending`, `ApprovalGranted`, `ApprovalGrantedSecond`, `ApprovalDenied`,
+and `ApprovalExpired`. D2 adds exactly two backward-compatible models:
+`ApprovalGrantRecorded` (`type="grant_recorded"`) for N-way decisions after the
+second grant, and `ApprovalExecuted` (`type="executed"`) for the user-visible
+execution result.
+
+Seven value-free decision rows project into that family:
+`approval.requested`, `approval.granted_first`, `approval.granted_second`,
+`approval.grant_recorded`, `approval.denied`, `approval.expired`, and
+`approval.executed`. The same `_DECISION_HISTORY_TYPED_PROJECTORS` table drives
+both live broker emission and reconnect replay, so a `grant_recorded` payload's
+`decision_index` / `required_count` data is byte-identical on both paths.
+`approval.consumed` is deliberately absent: consumption is internal atomic-claim
+machinery, while the user-visible terminal result is `approval.executed`.
+
+No family count or transport changes: `approval` was already one of the eleven
+Wave-1 families and remains in `_SSE_WAVE_1_STREAMED_FAMILIES`. The portable
+well-known schema change is additive only: two definitions and the corresponding
+approval-union discriminator arms; every pre-existing family schema remains
+unchanged.
+
 ## References
 - ADR-001 (UI is external — this contract is the interface)
 - ADR-003 (A2A artifacts → mirror to artifact events on the UI stream)

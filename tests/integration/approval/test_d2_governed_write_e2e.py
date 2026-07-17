@@ -45,9 +45,18 @@ from cognic_agentos.core.policy.engine import Decision
 from cognic_agentos.harness.agent_host import _MCPHostAgentToolProxy
 from cognic_agentos.llm.gateway import GatewayResponse, GatewayToolCall
 from cognic_agentos.portal.api.app import create_app
+from cognic_agentos.portal.api.ui.stream_routes import _replay_from_decision_history
 from cognic_agentos.portal.rbac.actor import Actor
 from cognic_agentos.protocol.mcp_authz import MCPAuthzClient, Token
 from cognic_agentos.protocol.mcp_transports import MCPSession, MCPToolCallRequest
+from cognic_agentos.protocol.ui_events import (
+    ApprovalExecuted,
+    ApprovalGrantRecorded,
+    ApprovalPending,
+    UIEventBroker,
+    UIEventEmitter,
+    _decode_chain_cursor,
+)
 
 _TENANT = "tenant-a"
 _AGENT = "bank-agent"
@@ -146,7 +155,7 @@ class _HeaderActorBinder:
                 }
             )
         elif subject in _APPROVERS:
-            scopes = frozenset({"tool.approve.high_risk_custom"})
+            scopes = frozenset({"tool.approve.high_risk_custom", "tool.approve.observe"})
         elif subject == _ASSIGNMENT_ADMIN:
             scopes = frozenset({"tool.approve.assign"})
         else:  # pragma: no cover - test setup guard
@@ -242,6 +251,8 @@ async def test_governed_write_pending_grant_execute_and_replay(
         await _seed_authority(engine)
         settings = build_settings_without_env_file()
         history = DecisionHistoryStore(engine)
+        audit = AuditStore(engine)
+        ui_emitter = UIEventEmitter(audit_store=audit, decision_history_store=history)
         approval_store = ApprovalRequestStore(history)
         approval_assignments = ApprovalAssignmentStore(history)
         approval_engine = ApprovalEngine(
@@ -277,7 +288,7 @@ async def test_governed_write_pending_grant_execute_and_replay(
             servers={_SERVER: entry},
             transports={"http": cast(Any, transport)},
             authz=authz,
-            audit_store=AuditStore(engine),
+            audit_store=audit,
             decision_history_store=history,
             settings=settings,
             approval_engine=approval_engine,
@@ -341,6 +352,9 @@ async def test_governed_write_pending_grant_execute_and_replay(
             approval_engine=approval_engine,
             approval_assignment_store=approval_assignments,
             approval_executor=approval_executor,
+            decision_history_store=history,
+            audit_store=audit,
+            ui_event_emitter=ui_emitter,
         )
         app.state.conversation_store = conversation_store
         app.state.conversation_executor = conversation_executor
@@ -350,6 +364,12 @@ async def test_governed_write_pending_grant_execute_and_replay(
             chain_candidate_limit=100,
         )
         app.state.hosted_agents = [{"agent_id": _AGENT}]
+        assert isinstance(app.state.ui_event_broker, UIEventBroker)
+        broker = app.state.ui_event_broker
+        live_approval_subscriber = broker.register_subscriber(
+            tenant_id=_TENANT,
+            family_filter=frozenset({"approval"}),
+        )
 
         async with AsyncClient(
             transport=ASGITransport(app=app),
@@ -406,6 +426,17 @@ async def test_governed_write_pending_grant_execute_and_replay(
                 "state": "awaiting_second",
             }
             assert transport.requests == []
+            first_progress = await client.get(
+                "/api/v1/approvals/",
+                headers={"x-test-subject": _APPROVERS[0]},
+            )
+            assert first_progress.status_code == 200
+            first_item = next(
+                row
+                for row in first_progress.json()
+                if row["request_id"] == str(approval_request_id)
+            )
+            assert (first_item["decisions_recorded"], first_item["required_count"]) == (1, 3)
 
             originator_later = await client.post(
                 f"/api/v1/approvals/{approval_request_id}/grant",
@@ -426,6 +457,17 @@ async def test_governed_write_pending_grant_execute_and_replay(
                 "state": "awaiting_second",
             }
             assert transport.requests == []
+            second_progress = await client.get(
+                "/api/v1/approvals/",
+                headers={"x-test-subject": _APPROVERS[1]},
+            )
+            assert second_progress.status_code == 200
+            second_item = next(
+                row
+                for row in second_progress.json()
+                if row["request_id"] == str(approval_request_id)
+            )
+            assert (second_item["decisions_recorded"], second_item["required_count"]) == (2, 3)
 
             granted = await client.post(
                 f"/api/v1/approvals/{approval_request_id}/grant",
@@ -488,6 +530,48 @@ async def test_governed_write_pending_grant_execute_and_replay(
             assert consumed.status_code == 409
             assert consumed.json()["detail"]["reason"] == "tool_approval_consumed"
             assert len(transport.requests) == 1
+
+        live_approval_events: list[Any] = []
+        while not live_approval_subscriber.queue.empty():
+            live_approval_events.append(live_approval_subscriber.queue.get_nowait())
+        assert [event.type for event in live_approval_events] == [
+            "pending",
+            "granted",
+            "granted_second",
+            "grant_recorded",
+            "executed",
+        ]
+        assert isinstance(live_approval_events[0], ApprovalPending)
+        live_grant_recorded = live_approval_events[3]
+        assert isinstance(live_grant_recorded, ApprovalGrantRecorded)
+        assert live_grant_recorded.data["decision_index"] == 2
+        assert live_grant_recorded.data["required_count"] == 3
+        assert isinstance(live_approval_events[4], ApprovalExecuted)
+        assert live_approval_events[4].data["execution"] == "executed"
+
+        replay_subscriber = broker.register_subscriber(
+            tenant_id=_TENANT,
+            family_filter=frozenset({"approval"}),
+        )
+        replayed_approval_events = [
+            event
+            async for event in _replay_from_decision_history(
+                store=history,
+                cursor=_decode_chain_cursor(live_approval_events[0].event_id),
+                subscriber=replay_subscriber,
+            )
+        ]
+        assert [event.type for event in replayed_approval_events] == [
+            "granted",
+            "granted_second",
+            "grant_recorded",
+            "executed",
+        ]
+        assert isinstance(replayed_approval_events[2], ApprovalGrantRecorded)
+        assert replayed_approval_events[2].data == live_grant_recorded.data
+        assert isinstance(replayed_approval_events[3], ApprovalExecuted)
+        broker.unregister_subscriber(live_approval_subscriber)
+        broker.unregister_subscriber(replay_subscriber)
 
         replayed = await conversation_store.load_replay_turns(
             conversation_id,

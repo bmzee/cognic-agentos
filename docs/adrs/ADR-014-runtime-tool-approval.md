@@ -434,3 +434,38 @@ When a call does reach the tool, the tool must deduplicate the stable
 and return its original result. Closing the consumed-without-result recovery
 window needs a separately reviewed durable delivery claim; scheduler-lane
 execution also remains deferred.
+
+## M8.5-D D2 phase-D closeout (2026-07-17)
+
+The governed-write arc is now one kernel-owned path: a bank-owned assignment
+freezes the eligible approvers and required count onto the request; N-way
+maker-checker decisions advance under the approval row lock; exact canonical
+arguments remain in the erasable replay store; the final grant is claimed once;
+and the conversation executor replays those bytes through the existing MCP
+authorization, DLP, audit, and decision-history path. Queue summaries and detail
+responses surface `decisions_recorded` / `required_count`, and the approval UI
+event family carries the user-visible request, grant, denial, expiry, and
+execution transitions. `approval.consumed` remains internal claim machinery.
+
+The originator-refusal vocabulary is deliberately index-sensitive. At decision
+index 0, an originator grant refuses `originator_cannot_approve`. At index 1,
+the established four-eyes contract remains byte-stable as
+`four_eyes_approver_not_distinct`; the D2 end-to-end test pins both indices. At
+N-way indices 2 and later, an originator grant again refuses
+`originator_cannot_approve`. This preserves the released four-eyes reason without
+making later N-way decisions pretend to be the second four-eyes leg.
+
+Two operational limits remain explicit. First, retrying a consumed grant whose
+result was never stored posts another "could not proceed" system turn on each
+attempt. That duplicate is known evidence noise, not another tool execution, and
+is subsumed by the future durable-delivery work. Second, multiple replicas may
+run the startup sweep over the same candidate, but the atomic consume claim
+makes that race benign: at most one replica can dispatch. Wave 1 remains a
+single-replica executor posture; scheduler-lane integration must revisit the
+delivery and coordination model.
+
+Per-tool risk-tier overrides remain deferred and were not built in D2. The next
+owned slices are scheduler-lane executor integration; pack-side action-context
+verification plus idempotency persistence in D5; assignment pools whose required
+count is independent of set size; notification push; durable delivery across the
+consumed-without-result window; and the separately operated arc-end live proof.
